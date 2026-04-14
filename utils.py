@@ -1,3 +1,14 @@
+from datetime import date
+from io import BytesIO
+from pathlib import Path   # ← 這行一定要有
+import json
+from difflib import SequenceMatcher
+
+import pandas as pd
+import requests
+import urllib3
+
+
 WATCHLIST_FILE = Path("watchlist.json")
 
 DEFAULT_WATCHLIST = {
