@@ -3,226 +3,212 @@ import pandas as pd
 import streamlit as st
 
 from utils import (
-    get_all_code_name_map,
-    search_stocks,
-    get_history_data,
-    format_number,
     load_watchlist,
-    save_watchlist,
+    get_all_code_name_map,
+    get_history_data,
+    apply_font_scale,
+    get_font_scale,
+    format_number,
 )
 
-st.set_page_config(page_title="行情查詢", page_icon="💹", layout="wide")
-st.title("💹 行情查詢")
-st.caption("可先搜尋並加入分組自選股，再從群組中選擇股票查詢。")
+st.set_page_config(page_title="行情查詢", page_icon="📌", layout="wide")
+
+if "font_scale" not in st.session_state:
+    st.session_state.font_scale = get_font_scale()
+
+with st.sidebar:
+    st.markdown("## 顯示設定")
+    st.session_state.font_scale = st.slider("字體大小 (%)", 100, 220, st.session_state.font_scale, 10)
+
+apply_font_scale(st.session_state.font_scale)
+
+st.title("📌 行情查詢")
+st.caption("可從自選股群組選擇股票，或直接輸入股票代號查詢最新行情")
+
+watchlist_dict = load_watchlist()
 
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
 all_code_name_df = get_all_code_name_map(lookup_date)
 
 if all_code_name_df.empty:
-    st.error("無法取得股票清單。")
+    st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
+
+FALLBACK_NAME_MAP = {
+    "2330": "台積電",
+    "2454": "聯發科",
+    "3711": "日月光投控",
+    "2317": "鴻海",
+    "2382": "廣達",
+    "0050": "元大台灣50",
+    "0056": "元大高股息",
+    "2881": "富邦金",
+    "2882": "國泰金"
+}
+
+
+def guess_market_type(code: str) -> str:
+    code = str(code).strip()
+    if code.startswith("00"):
+        return "上市"
+    if code in ["3711"]:
+        return "上市"
+    return "上市"
+
+
+def get_stock_name_and_market(code: str):
+    code = str(code).strip()
+
+    if not all_code_name_df.empty:
+        match = all_code_name_df[all_code_name_df["證券代號"] == code]
+        if not match.empty:
+            row = match.iloc[0]
+            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
+
+    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
+
+
+def get_group_stock_options():
+    result = {}
+    for group_name, codes in watchlist_dict.items():
+        options = []
+        for code in codes:
+            stock_name, market_type = get_stock_name_and_market(code)
+            options.append({
+                "label": f"{stock_name} ({code}) [{market_type}]",
+                "code": str(code).strip(),
+                "name": stock_name,
+                "market": market_type
+            })
+        result[group_name] = options
+    return result
+
+
+group_stock_map = get_group_stock_options()
+group_names = list(group_stock_map.keys())
+
+tab1, tab2 = st.tabs(["從自選股選擇", "直接輸入代號"])
+
+selected_code = None
+selected_name = None
+selected_market = None
+
+with tab1:
+    if not group_names:
+        st.warning("目前沒有自選股群組，請先到自選股中心建立。")
+    else:
+        c1, c2 = st.columns(2)
+
+        with c1:
+            selected_group = st.selectbox("選擇群組", group_names, index=0)
+
+        stock_options = group_stock_map.get(selected_group, [])
+
+        with c2:
+            if stock_options:
+                selected_label = st.selectbox(
+                    "選擇股票",
+                    [x["label"] for x in stock_options],
+                    index=0
+                )
+                selected_item = next(x for x in stock_options if x["label"] == selected_label)
+                selected_code = selected_item["code"]
+                selected_name = selected_item["name"]
+                selected_market = selected_item["market"]
+            else:
+                st.warning("此群組目前沒有股票。")
+
+with tab2:
+    manual_code = st.text_input("輸入股票代號", placeholder="例如：2330")
+    if manual_code.strip():
+        code = manual_code.strip()
+        name, market = get_stock_name_and_market(code)
+        selected_code = code
+        selected_name = name
+        selected_market = market
+
+st.markdown("---")
+
+if not selected_code:
+    st.info("請先選擇股票或輸入股票代號。")
     st.stop()
 
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = load_watchlist()
+st.subheader(f"{selected_name} ({selected_code})")
+st.caption(f"市場別：{selected_market}")
 
-all_code_name_df["顯示"] = (
-    all_code_name_df["證券名稱"] +
-    " (" +
-    all_code_name_df["證券代號"] +
-    ") [" +
-    all_code_name_df["市場別"] +
-    "]"
-)
+with st.spinner("正在抓取行情資料..."):
+    start_dt = today_dt - timedelta(days=40)
+    end_dt = today_dt
 
-st.markdown("### 搜尋並加入分組自選股")
-
-top_left, top_mid, top_right = st.columns([2, 1, 1])
-
-with top_left:
-    search_text = st.text_input("搜尋股票（代號或名稱）", value="")
-    filtered_df = search_stocks(all_code_name_df, search_text, top_n=50)
-
-    selected_to_add = st.multiselect(
-        "搜尋結果",
-        options=filtered_df["顯示"].tolist() if not filtered_df.empty else []
+    hist_df = get_history_data(
+        stock_no=selected_code,
+        stock_name=selected_name,
+        market_type=selected_market,
+        start_dt=start_dt,
+        end_dt=end_dt
     )
 
-with top_mid:
-    existing_groups = list(st.session_state.watchlist.keys())
-    selected_group = st.selectbox("加入到群組", options=existing_groups)
-
-with top_right:
-    new_group_name = st.text_input("新增群組名稱", value="")
-    if st.button("建立新群組", use_container_width=True):
-        new_group_name = new_group_name.strip()
-        if not new_group_name:
-            st.warning("請輸入群組名稱。")
-        elif new_group_name in st.session_state.watchlist:
-            st.warning("這個群組已存在。")
-        else:
-            st.session_state.watchlist[new_group_name] = []
-            save_watchlist(st.session_state.watchlist)
-            st.success(f"已建立群組：{new_group_name}")
-            st.rerun()
-
-if st.button("加入自選股"):
-    add_codes = []
-    for item in selected_to_add:
-        code = item.split("(")[-1].split(")")[0].strip()
-        add_codes.append(code)
-
-    group_codes = st.session_state.watchlist.get(selected_group, [])
-    merged = list(dict.fromkeys(group_codes + add_codes))
-    st.session_state.watchlist[selected_group] = merged
-    save_watchlist(st.session_state.watchlist)
-    st.success(f"已加入群組：{selected_group}")
-    st.rerun()
-
-st.markdown("### 從分組自選股查詢")
-
-group_names = list(st.session_state.watchlist.keys())
-if not group_names:
-    st.warning("目前沒有任何自選股群組。")
+if hist_df.empty:
+    st.warning("查無行情資料。可能是資料來源暫時無回應，或此股票目前不支援此抓取方式。")
     st.stop()
 
-left, right = st.columns([2, 1])
+hist_df = hist_df.sort_values("日期").reset_index(drop=True)
+latest = hist_df.iloc[-1]
 
-with left:
-    query_group = st.selectbox("選擇群組", options=group_names)
+prev_close = None
+if len(hist_df) >= 2:
+    prev_close = hist_df.iloc[-2].get("收盤價")
 
-group_codes = st.session_state.watchlist.get(query_group, [])
+latest_close = latest.get("收盤價")
+price_change = None
+pct_change = None
 
-group_watchlist_df = all_code_name_df[
-    all_code_name_df["證券代號"].isin(group_codes)
-].copy()
+if prev_close is not None and latest_close is not None:
+    price_change = latest_close - prev_close
+    if prev_close != 0:
+        pct_change = (price_change / prev_close) * 100
 
-if group_watchlist_df.empty:
-    st.warning(f"群組「{query_group}」目前沒有股票。")
-    st.stop()
+delta_text = ""
+if price_change is not None and pct_change is not None:
+    sign = "+" if price_change >= 0 else ""
+    delta_text = f"{sign}{price_change:.2f} ({sign}{pct_change:.2f}%)"
 
-group_watchlist_df["顯示"] = (
-    group_watchlist_df["證券名稱"] +
-    " (" +
-    group_watchlist_df["證券代號"] +
-    ") [" +
-    group_watchlist_df["市場別"] +
-    "]"
-)
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.metric("最新價", format_number(latest.get("收盤價")), delta=delta_text)
+with m2:
+    st.metric("開盤價", format_number(latest.get("開盤價")))
+with m3:
+    st.metric("最高價", format_number(latest.get("最高價")))
+with m4:
+    st.metric("最低價", format_number(latest.get("最低價")))
 
-with left:
-    selected = st.selectbox(
-        "選擇股票（僅顯示該群組）",
-        options=group_watchlist_df["顯示"].tolist()
-    )
+m5, m6, m7 = st.columns(3)
+with m5:
+    st.metric("成交股數", format_number(latest.get("成交股數"), 0))
+with m6:
+    st.metric("成交金額", format_number(latest.get("成交金額"), 0))
+with m7:
+    st.metric("成交筆數", format_number(latest.get("成交筆數"), 0))
 
-with right:
-    auto_refresh = st.toggle("自動刷新", value=False)
-    refresh_seconds = st.selectbox("刷新秒數", options=[10, 15, 30, 60], index=2)
+st.markdown("---")
 
-if not selected:
-    st.stop()
+chart_df = hist_df.dropna(subset=["日期", "收盤價"]).copy()
+if not chart_df.empty:
+    chart_df = chart_df.sort_values("日期").set_index("日期")
+    st.subheader("近 30 天收盤走勢")
+    st.line_chart(chart_df["收盤價"], use_container_width=True)
 
-stock_code = selected.split("(")[-1].split(")")[0].strip()
-stock_row = group_watchlist_df[group_watchlist_df["證券代號"] == stock_code].iloc[0]
-stock_name = stock_row["證券名稱"]
-market_type = stock_row["市場別"]
+st.markdown("---")
 
+show_df = hist_df.copy()
+if "日期" in show_df.columns:
+    show_df["日期"] = pd.to_datetime(show_df["日期"]).dt.strftime("%Y-%m-%d")
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_latest_quote_snapshot(stock_code: str, stock_name: str, market_type: str) -> tuple[pd.DataFrame, dict]:
-    end_dt = date.today()
-    start_dt = end_dt - timedelta(days=40)
+for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"]:
+    if col in show_df.columns:
+        digits = 0 if col in ["成交股數", "成交金額", "成交筆數"] else 2
+        show_df[col] = show_df[col].apply(lambda x: format_number(x, digits) if pd.notna(x) else "")
 
-    hist_df = get_history_data(stock_code, stock_name, market_type, start_dt, end_dt)
-
-    if hist_df.empty:
-        return pd.DataFrame(), {}
-
-    hist_df = hist_df.sort_values("日期").reset_index(drop=True)
-    latest = hist_df.iloc[-1].to_dict()
-
-    prev_close = None
-    if len(hist_df) >= 2:
-        prev_close = hist_df.iloc[-2].get("收盤價")
-
-    latest_close = latest.get("收盤價")
-    price_change = None
-    pct_change = None
-
-    if prev_close is not None and latest_close is not None:
-        price_change = latest_close - prev_close
-        if prev_close != 0:
-            pct_change = (price_change / prev_close) * 100
-
-    snapshot = {
-        "股票代號": stock_code,
-        "股票名稱": stock_name,
-        "市場別": market_type,
-        "日期": latest.get("日期"),
-        "開盤價": latest.get("開盤價"),
-        "最高價": latest.get("最高價"),
-        "最低價": latest.get("最低價"),
-        "最新價": latest_close,
-        "成交股數": latest.get("成交股數"),
-        "成交金額": latest.get("成交金額"),
-        "成交筆數": latest.get("成交筆數"),
-        "漲跌": price_change,
-        "漲跌幅%": pct_change,
-    }
-
-    return hist_df, snapshot
-
-
-def render_quote(snapshot: dict, hist_df: pd.DataFrame):
-    if not snapshot:
-        st.warning("查無資料。")
-        return
-
-    latest_price = snapshot.get("最新價")
-    change = snapshot.get("漲跌")
-    pct = snapshot.get("漲跌幅%")
-
-    delta_text = None
-    if change is not None and pct is not None:
-        sign = "+" if change >= 0 else ""
-        delta_text = f"{sign}{change:,.2f} ({sign}{pct:,.2f}%)"
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("股票", f"{snapshot['股票代號']} {snapshot['股票名稱']}")
-    with c2:
-        st.metric("最新價", format_number(latest_price), delta=delta_text)
-    with c3:
-        st.metric("最高價", format_number(snapshot.get("最高價")))
-    with c4:
-        st.metric("最低價", format_number(snapshot.get("最低價")))
-
-    c5, c6, c7, c8 = st.columns(4)
-    with c5:
-        st.metric("開盤價", format_number(snapshot.get("開盤價")))
-    with c6:
-        st.metric("成交股數", format_number(snapshot.get("成交股數"), 0))
-    with c7:
-        st.metric("成交金額", format_number(snapshot.get("成交金額"), 0))
-    with c8:
-        st.metric("成交筆數", format_number(snapshot.get("成交筆數"), 0))
-
-    st.markdown("### 最近資料")
-    show_df = hist_df.copy()
-
-    if "日期" in show_df.columns:
-        show_df["日期"] = pd.to_datetime(show_df["日期"]).dt.strftime("%Y-%m-%d")
-
-    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"]:
-        if col in show_df.columns:
-            show_df[col] = show_df[col].apply(format_number)
-
-    st.dataframe(show_df.tail(10), use_container_width=True, hide_index=True)
-
-
-if auto_refresh:
-    st.info("目前為延遲/近即時模式。切換自動刷新後會週期更新頁面。")
-
-hist_df, snapshot = get_latest_quote_snapshot(stock_code, stock_name, market_type)
-render_quote(snapshot, hist_df)
+st.subheader("歷史明細")
+st.dataframe(show_df, use_container_width=True, hide_index=True)
