@@ -1,8 +1,13 @@
 from datetime import date, timedelta
-import ast
 import streamlit as st
 
-from utils import load_watchlist, apply_font_scale, get_font_scale, get_all_code_name_map
+from utils import (
+    get_normalized_watchlist,
+    apply_font_scale,
+    get_font_scale,
+    get_all_code_name_map,
+    get_stock_name_and_market,
+)
 
 st.set_page_config(page_title="股市專家系統", page_icon="📈", layout="wide")
 
@@ -21,90 +26,11 @@ st.caption("專業版多頁系統首頁")
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
 
-raw_watchlist = load_watchlist()
+watchlist_dict = get_normalized_watchlist()
 all_code_name_df = get_all_code_name_map(lookup_date)
 
 if all_code_name_df.empty:
     st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
-
-FALLBACK_NAME_MAP = {
-    "2330": "台積電",
-    "2454": "聯發科",
-    "3711": "日月光投控",
-    "2317": "鴻海",
-    "2382": "廣達",
-    "0050": "元大台灣50",
-    "0056": "元大高股息",
-    "2881": "富邦金",
-    "2882": "國泰金",
-    "6271": "同欣電"
-}
-
-
-def normalize_watchlist(data):
-    result = {}
-
-    def parse_item(item):
-        if isinstance(item, dict):
-            code = item.get("code", "")
-            name = item.get("name", "")
-
-            if isinstance(code, str):
-                try:
-                    parsed_code = ast.literal_eval(code.strip())
-                    if isinstance(parsed_code, dict):
-                        code = parsed_code.get("code", "")
-                        if not name:
-                            name = parsed_code.get("name", "")
-                except Exception:
-                    pass
-
-            return {"code": str(code).strip(), "name": str(name).strip()}
-
-        if isinstance(item, str):
-            text = item.strip()
-            if not text:
-                return None
-
-            if text.isdigit():
-                return {"code": text, "name": ""}
-
-            try:
-                parsed = ast.literal_eval(text)
-                if isinstance(parsed, dict):
-                    return {
-                        "code": str(parsed.get("code", "")).strip(),
-                        "name": str(parsed.get("name", "")).strip()
-                    }
-            except Exception:
-                pass
-
-            return {"code": text, "name": ""}
-
-        return None
-
-    for group_name, items in data.items():
-        clean_items = []
-
-        if isinstance(items, list):
-            for item in items:
-                parsed_item = parse_item(item)
-                if parsed_item and parsed_item["code"]:
-                    clean_items.append(parsed_item)
-
-        dedup = []
-        seen = set()
-        for item in clean_items:
-            if item["code"] not in seen:
-                dedup.append(item)
-                seen.add(item["code"])
-
-        result[str(group_name).strip()] = dedup
-
-    return result
-
-
-watchlist_dict = normalize_watchlist(raw_watchlist)
 
 group_count = len(watchlist_dict)
 stock_count = sum(len(v) for v in watchlist_dict.values())
@@ -120,32 +46,6 @@ with c3:
 st.markdown("---")
 st.subheader("快速查詢入口")
 st.caption("可在首頁快速選擇群組、股票與日期區間，再切換到『歷史K線分析』頁面使用")
-
-
-def guess_market_type(code: str) -> str:
-    code = str(code).strip()
-    if code.startswith("00"):
-        return "上市"
-    if code in ["3711"]:
-        return "上市"
-    return "上市"
-
-
-def get_stock_name_and_market(code: str, manual_name: str = ""):
-    code = str(code).strip()
-    manual_name = str(manual_name).strip()
-
-    if manual_name:
-        return manual_name, guess_market_type(code)
-
-    if not all_code_name_df.empty:
-        match = all_code_name_df[all_code_name_df["證券代號"] == code]
-        if not match.empty:
-            row = match.iloc[0]
-            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
-
-    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
-
 
 group_names = list(watchlist_dict.keys())
 
@@ -165,7 +65,7 @@ if group_names:
         if not code:
             continue
 
-        stock_name, market_type = get_stock_name_and_market(code, manual_name)
+        stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
         stock_options.append({
             "label": f"{stock_name} ({code}) [{market_type}]",
             "code": code,
@@ -218,7 +118,6 @@ if group_names:
 日期區間：{quick_start} ~ {quick_end}
 """
             )
-
             st.info("首頁提供快速選擇；實際查詢請切換到左側『歷史K線分析』頁面。")
 else:
     st.warning("目前沒有自選股群組，請先到『自選股中心』建立群組與股票。")
