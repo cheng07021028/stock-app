@@ -1,13 +1,14 @@
-import ast
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from utils import (
-    load_watchlist,
+    get_normalized_watchlist,
     save_watchlist,
     get_all_code_name_map,
     apply_font_scale,
     get_font_scale,
+    get_stock_name,
+    get_stock_name_and_market,
 )
 
 st.set_page_config(page_title="自選股中心", page_icon="⭐", layout="wide")
@@ -24,7 +25,7 @@ apply_font_scale(st.session_state.font_scale)
 st.title("⭐ 自選股中心")
 st.caption("可管理自選股群組、手動新增股票代號與名稱、刪除股票與群組")
 
-raw_watchlist = load_watchlist()
+watchlist_dict = get_normalized_watchlist()
 
 lookup_df = get_all_code_name_map(pd.Timestamp.today().strftime("%Y%m%d"))
 api_ok = not lookup_df.empty
@@ -32,146 +33,11 @@ api_ok = not lookup_df.empty
 if not api_ok:
     st.info("目前使用手動名稱 / 備援模式，仍可新增與管理自選股。")
 
-FALLBACK_NAME_MAP = {
-    "2330": "台積電",
-    "2454": "聯發科",
-    "3711": "日月光投控",
-    "2317": "鴻海",
-    "2382": "廣達",
-    "0050": "元大台灣50",
-    "0056": "元大高股息",
-    "2881": "富邦金",
-    "2882": "國泰金",
-    "2303": "聯電",
-    "2308": "台達電",
-    "2603": "長榮",
-    "3037": "欣興",
-    "3008": "大立光",
-    "6505": "台塑化",
-    "1301": "台塑",
-    "1303": "南亞",
-    "2002": "中鋼",
-    "2891": "中信金",
-    "2892": "第一金",
-    "6271": "同欣電"
-}
-
-
-def normalize_watchlist(data):
-    result = {}
-
-    def parse_item(item):
-        if isinstance(item, dict):
-            code = item.get("code", "")
-            name = item.get("name", "")
-
-            if isinstance(code, str):
-                code_text = code.strip()
-                try:
-                    parsed_code = ast.literal_eval(code_text)
-                    if isinstance(parsed_code, dict):
-                        code = parsed_code.get("code", "")
-                        if not name:
-                            name = parsed_code.get("name", "")
-                except Exception:
-                    pass
-
-            return {
-                "code": str(code).strip(),
-                "name": str(name).strip()
-            }
-
-        if isinstance(item, str):
-            text = item.strip()
-            if not text:
-                return None
-
-            if text.isdigit():
-                return {"code": text, "name": ""}
-
-            try:
-                parsed = ast.literal_eval(text)
-                if isinstance(parsed, dict):
-                    code = parsed.get("code", "")
-                    name = parsed.get("name", "")
-
-                    if isinstance(code, str):
-                        code_text = code.strip()
-                        try:
-                            parsed_code = ast.literal_eval(code_text)
-                            if isinstance(parsed_code, dict):
-                                code = parsed_code.get("code", "")
-                                if not name:
-                                    name = parsed_code.get("name", "")
-                        except Exception:
-                            pass
-
-                    return {
-                        "code": str(code).strip(),
-                        "name": str(name).strip()
-                    }
-            except Exception:
-                pass
-
-            return {"code": text, "name": ""}
-
-        return None
-
-    for group_name, items in data.items():
-        group_name = str(group_name).strip()
-        if not group_name:
-            continue
-
-        result[group_name] = []
-
-        if isinstance(items, list):
-            for item in items:
-                parsed_item = parse_item(item)
-                if parsed_item and parsed_item["code"]:
-                    result[group_name].append(parsed_item)
-
-        dedup = []
-        seen = set()
-        for item in result[group_name]:
-            code = item["code"]
-            if code not in seen:
-                dedup.append(item)
-                seen.add(code)
-
-        result[group_name] = dedup
-
-    return result
-
-
-watchlist_dict = normalize_watchlist(raw_watchlist)
-
-
-def get_stock_name(code: str, manual_name: str = "") -> str:
-    code = str(code).strip()
-    manual_name = str(manual_name).strip()
-
-    if manual_name:
-        return manual_name
-
-    if api_ok:
-        match = lookup_df[lookup_df["證券代號"] == code]
-        if not match.empty:
-            return str(match.iloc[0]["證券名稱"]).strip()
-
-    return FALLBACK_NAME_MAP.get(code, f"股票{code}")
-
 
 def get_market_type(code: str) -> str:
     code = str(code).strip()
-
-    if api_ok:
-        match = lookup_df[lookup_df["證券代號"] == code]
-        if not match.empty:
-            return str(match.iloc[0]["市場別"]).strip()
-
-    if code.startswith("00"):
-        return "上市"
-    return "上市"
+    _, market = get_stock_name_and_market(code, lookup_df, "")
+    return market
 
 
 st.markdown("---")
@@ -223,7 +89,7 @@ if st.button("加入自選股", use_container_width=True):
         if code in current_codes:
             st.warning(f"{code} 已存在於群組「{selected_group}」")
         else:
-            final_name = get_stock_name(code, manual_name)
+            final_name = get_stock_name(code, lookup_df, manual_name)
             current_items.append({
                 "code": code,
                 "name": manual_name if manual_name else final_name
@@ -250,7 +116,7 @@ for group_name, items in watchlist_dict.items():
     for item in items:
         code = str(item.get("code", "")).strip()
         manual_name = str(item.get("name", "")).strip()
-        display_name = get_stock_name(code, manual_name)
+        display_name = get_stock_name(code, lookup_df, manual_name)
 
         all_rows.append({
             "群組": group_name,
@@ -274,7 +140,7 @@ with d1:
 
 delete_items = watchlist_dict.get(delete_group, [])
 delete_labels = [
-    f"{get_stock_name(item.get('code', ''), item.get('name', ''))} ({item.get('code', '')})"
+    f"{get_stock_name(str(item.get('code', '')).strip(), lookup_df, str(item.get('name', '')).strip())} ({str(item.get('code', '')).strip()})"
     for item in delete_items
 ]
 
