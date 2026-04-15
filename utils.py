@@ -181,13 +181,7 @@ def load_watchlist():
             return {"我的觀察名單": [str(x).strip() for x in data if str(x).strip()]}
 
         if isinstance(data, dict):
-            clean_data = {}
-            for group_name, codes in data.items():
-                if not isinstance(codes, list):
-                    continue
-                clean_group = [str(x).strip() for x in codes if str(x).strip()]
-                clean_data[str(group_name).strip()] = list(dict.fromkeys(clean_group))
-            return clean_data if clean_data else DEFAULT_WATCHLIST.copy()
+            return data
 
         return DEFAULT_WATCHLIST.copy()
     except Exception:
@@ -195,17 +189,8 @@ def load_watchlist():
 
 
 def save_watchlist(watchlist_dict):
-    clean_dict = {}
-    for group_name, codes in watchlist_dict.items():
-        group_name = str(group_name).strip()
-        if not group_name:
-            continue
-
-        clean_codes = [str(x).strip() for x in codes if str(x).strip()]
-        clean_dict[group_name] = list(dict.fromkeys(clean_codes))
-
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(clean_dict, f, ensure_ascii=False, indent=2)
+        json.dump(watchlist_dict, f, ensure_ascii=False, indent=2)
 
 
 def flatten_watchlist_groups(watchlist_dict):
@@ -235,92 +220,66 @@ def build_watchlist_df(all_code_name_df, watchlist_dict):
 
 
 # =========================
-# 股票清單：上市 / 上櫃
+# 股票清單：上市 / 上櫃（官方 CSV）
 # =========================
-def get_twse_code_name_map(query_date: str) -> pd.DataFrame:
-    url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={query_date}&type=ALL"
+TWSE_LISTED_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
+TPEX_OTC_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv"
+
+
+def _read_official_company_csv(url: str, market_name: str) -> pd.DataFrame:
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json,text/plain,*/*"
-    }
-
-    try:
-        r = requests.get(url, headers=headers, timeout=30, verify=False)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
-
-    tables = data.get("tables", [])
-    all_rows = []
-
-    for table in tables:
-        fields = table.get("fields", [])
-        rows = table.get("data", [])
-
-        if "證券代號" in fields and "證券名稱" in fields:
-            for row in rows:
-                if len(row) != len(fields):
-                    continue
-                record = dict(zip(fields, row))
-                stock_no = str(record.get("證券代號", "")).strip()
-                stock_name = str(record.get("證券名稱", "")).strip()
-                if stock_no and stock_name:
-                    all_rows.append({
-                        "證券代號": stock_no,
-                        "證券名稱": stock_name,
-                        "市場別": "上市"
-                    })
-
-    if not all_rows:
-        return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
-
-    return pd.DataFrame(all_rows).drop_duplicates(subset=["證券代號"]).reset_index(drop=True)
-
-
-def get_tpex_code_name_map() -> pd.DataFrame:
-    url = "https://www.tpex.org.tw/openapi/v1/mkt/sii_and_otc_company_info"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json,text/plain,*/*"
+        "Accept": "text/csv,application/csv,text/plain,*/*"
     }
 
     try:
         r = requests.get(url, headers=headers, timeout=30, verify=False)
         r.raise_for_status()
 
-        if not r.text or not r.text.strip():
+        content = r.content
+        if not content:
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
-        data = r.json()
-        if not data:
+        df = None
+        for enc in ["utf-8-sig", "utf-8", "cp950", "big5"]:
+            try:
+                text = content.decode(enc, errors="strict")
+                df = pd.read_csv(BytesIO(text.encode("utf-8")))
+                break
+            except Exception:
+                df = None
+
+        if df is None or df.empty:
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
-        df = pd.DataFrame(data)
-        if df.empty:
-            return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
+        df.columns = [str(c).strip() for c in df.columns]
 
         code_col = None
         name_col = None
 
         for c in df.columns:
-            cs = str(c).strip()
-            if cs in ["SecuritiesCompanyCode", "公司代號", "股票代號", "代號"]:
+            if c in ["公司代號", "公司代碼", "股票代號", "證券代號"]:
                 code_col = c
-            elif cs in ["CompanyName", "公司名稱", "股票名稱", "名稱"]:
-                name_col = c
+            elif c in ["公司簡稱", "公司名稱", "股票名稱", "證券名稱"]:
+                if name_col is None:
+                    name_col = c
 
         if code_col is None:
             for c in df.columns:
-                if "代號" in str(c):
+                if "代號" in c:
                     code_col = c
                     break
 
         if name_col is None:
-            for c in df.columns:
-                if "名稱" in str(c):
-                    name_col = c
-                    break
+            if "公司簡稱" in df.columns:
+                name_col = "公司簡稱"
+            elif "公司名稱" in df.columns:
+                name_col = "公司名稱"
+            else:
+                for c in df.columns:
+                    if "名稱" in c or "簡稱" in c:
+                        name_col = c
+                        break
 
         if code_col is None or name_col is None:
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
@@ -328,7 +287,7 @@ def get_tpex_code_name_map() -> pd.DataFrame:
         result = pd.DataFrame()
         result["證券代號"] = df[code_col].astype(str).str.strip()
         result["證券名稱"] = df[name_col].astype(str).str.strip()
-        result["市場別"] = "上櫃"
+        result["市場別"] = market_name
 
         result = result[
             (result["證券代號"] != "") &
@@ -341,7 +300,15 @@ def get_tpex_code_name_map() -> pd.DataFrame:
         return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
 
-def get_all_code_name_map(query_date: str) -> pd.DataFrame:
+def get_twse_code_name_map(query_date: str = "") -> pd.DataFrame:
+    return _read_official_company_csv(TWSE_LISTED_CSV_URL, "上市")
+
+
+def get_tpex_code_name_map() -> pd.DataFrame:
+    return _read_official_company_csv(TPEX_OTC_CSV_URL, "上櫃")
+
+
+def get_all_code_name_map(query_date: str = "") -> pd.DataFrame:
     twse_df = get_twse_code_name_map(query_date)
     tpex_df = get_tpex_code_name_map()
     all_df = pd.concat([twse_df, tpex_df], ignore_index=True)
