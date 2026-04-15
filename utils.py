@@ -11,7 +11,8 @@ import streamlit as st
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-WATCHLIST_FILE = Path("watchlist.json")
+BASE_DIR = Path(__file__).resolve().parent
+WATCHLIST_FILE = BASE_DIR / "watchlist.json"
 
 DEFAULT_WATCHLIST = {
     "半導體": ["2330", "2454", "3711"],
@@ -101,7 +102,7 @@ def apply_font_scale(scale_percent: int = 100):
     st.markdown(
         f"""
         <style>
-        html, body, [class*="css"]  {{
+        html, body, [class*="css"] {{
             font-size: {16 * base}px;
         }}
         .stMetricValue {{
@@ -140,12 +141,15 @@ def load_watchlist():
         if isinstance(data, dict):
             clean_data = {}
             for group_name, codes in data.items():
+                if not isinstance(codes, list):
+                    continue
                 clean_group = [str(x).strip() for x in codes if str(x).strip()]
                 clean_data[str(group_name).strip()] = list(dict.fromkeys(clean_group))
-            return clean_data
+            return clean_data if clean_data else DEFAULT_WATCHLIST.copy()
 
         return DEFAULT_WATCHLIST.copy()
-    except Exception:
+    except Exception as e:
+        st.warning(f"讀取 watchlist.json 失敗：{e}")
         return DEFAULT_WATCHLIST.copy()
 
 
@@ -203,7 +207,8 @@ def get_twse_code_name_map(query_date: str) -> pd.DataFrame:
         r = requests.get(url, headers=headers, timeout=30, verify=False)
         r.raise_for_status()
         data = r.json()
-    except Exception:
+    except Exception as e:
+        st.warning(f"上市清單抓取失敗：{e}")
         return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
     tables = data.get("tables", [])
@@ -228,6 +233,7 @@ def get_twse_code_name_map(query_date: str) -> pd.DataFrame:
                     })
 
     if not all_rows:
+        st.warning("上市清單有回應，但未解析到資料")
         return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
     return pd.DataFrame(all_rows).drop_duplicates(subset=["證券代號"]).reset_index(drop=True)
@@ -245,18 +251,17 @@ def get_tpex_code_name_map() -> pd.DataFrame:
         r.raise_for_status()
 
         if not r.text or not r.text.strip():
+            st.warning("上櫃清單回傳空白內容")
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
-        try:
-            data = r.json()
-        except Exception:
-            return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
-
+        data = r.json()
         if not data:
+            st.warning("上櫃清單 JSON 為空")
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
         df = pd.DataFrame(data)
         if df.empty:
+            st.warning("上櫃清單 DataFrame 為空")
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
         code_col = None
@@ -282,6 +287,7 @@ def get_tpex_code_name_map() -> pd.DataFrame:
                     break
 
         if code_col is None or name_col is None:
+            st.warning(f"上櫃清單欄位辨識失敗，目前欄位：{list(df.columns)}")
             return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
         result = pd.DataFrame()
@@ -296,7 +302,8 @@ def get_tpex_code_name_map() -> pd.DataFrame:
 
         return result
 
-    except Exception:
+    except Exception as e:
+        st.warning(f"上櫃清單抓取失敗：{e}")
         return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
 
@@ -374,7 +381,8 @@ def get_month_stock_data_twse(stock_no: str, yyyy_mm: str) -> pd.DataFrame:
         r = requests.get(url, headers=headers, timeout=30, verify=False)
         r.raise_for_status()
         data = r.json()
-    except Exception:
+    except Exception as e:
+        st.warning(f"{stock_no} 歷史資料抓取失敗：{e}")
         return pd.DataFrame()
 
     if data.get("stat") != "OK":
