@@ -13,9 +13,12 @@ from utils import (
 
 st.set_page_config(page_title="儀表板", page_icon="📊", layout="wide")
 
+if "font_scale" not in st.session_state:
+    st.session_state.font_scale = get_font_scale()
+
 with st.sidebar:
     st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider("字體大小 (%)", 80, 160, get_font_scale(), 5)
+    st.session_state.font_scale = st.slider("字體大小 (%)", 80, 160, st.session_state.font_scale, 5)
 
 apply_font_scale(st.session_state.font_scale)
 
@@ -24,27 +27,63 @@ st.caption("依自選股群組顯示最新行情摘要")
 
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
-all_code_name_df = get_all_code_name_map(lookup_date)
-
-if all_code_name_df.empty:
-    st.error("無法取得股票清單")
-    st.stop()
 
 watchlist_dict = load_watchlist()
-
 if not watchlist_dict:
     st.warning("目前沒有自選股群組")
     st.stop()
 
+all_code_name_df = get_all_code_name_map(lookup_date)
+
+if all_code_name_df.empty:
+    st.warning("目前無法從交易所取得完整股票清單，改用自選股代號模式顯示。")
+
+
+def build_fallback_info_df(watchlist_dict: dict) -> pd.DataFrame:
+    rows = []
+    all_codes = []
+    for _, codes in watchlist_dict.items():
+        all_codes.extend(codes)
+
+    unique_codes = list(dict.fromkeys([str(x).strip() for x in all_codes if str(x).strip()]))
+
+    for code in unique_codes:
+        if code.startswith("00"):
+            market_type = "上市"
+        elif code.startswith("3") or code.startswith("4") or code.startswith("5") or code.startswith("6") or code.startswith("7") or code.startswith("8") or code.startswith("9"):
+            market_type = "上櫃"
+        else:
+            market_type = "上市"
+
+        rows.append({
+            "證券代號": code,
+            "證券名稱": f"股票{code}",
+            "市場別": market_type
+        })
+
+    return pd.DataFrame(rows)
+
+
+if all_code_name_df.empty:
+    all_code_name_df = build_fallback_info_df(watchlist_dict)
+
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_group_dashboard_data(group_name: str, codes: list[str]) -> pd.DataFrame:
+def get_group_dashboard_data(group_name: str, codes: list[str], info_source_df: pd.DataFrame) -> pd.DataFrame:
     if not codes:
         return pd.DataFrame()
 
-    info_df = all_code_name_df[all_code_name_df["證券代號"].isin(codes)].copy()
+    info_df = info_source_df[info_source_df["證券代號"].isin(codes)].copy()
+
     if info_df.empty:
-        return pd.DataFrame()
+        fallback_rows = []
+        for code in codes:
+            fallback_rows.append({
+                "證券代號": code,
+                "證券名稱": f"股票{code}",
+                "市場別": "上市"
+            })
+        info_df = pd.DataFrame(fallback_rows)
 
     rows = []
     end_dt = date.today()
@@ -57,6 +96,22 @@ def get_group_dashboard_data(group_name: str, codes: list[str]) -> pd.DataFrame:
 
         hist_df = get_history_data(stock_no, stock_name, market_type, start_dt, end_dt)
         if hist_df.empty:
+            rows.append({
+                "群組": group_name,
+                "證券代號": stock_no,
+                "證券名稱": stock_name,
+                "市場別": market_type,
+                "日期": None,
+                "最新價": None,
+                "漲跌": None,
+                "漲跌幅%": None,
+                "開盤價": None,
+                "最高價": None,
+                "最低價": None,
+                "成交股數": None,
+                "成交金額": None,
+                "成交筆數": None,
+            })
             continue
 
         hist_df = hist_df.sort_values("日期").reset_index(drop=True)
@@ -140,7 +195,7 @@ for group_name, codes in watchlist_dict.items():
         continue
 
     with st.spinner(f"正在整理群組：{group_name}"):
-        group_df = get_group_dashboard_data(group_name, codes)
+        group_df = get_group_dashboard_data(group_name, codes, all_code_name_df)
 
     if group_df.empty:
         st.warning(f"群組「{group_name}」查無資料")
