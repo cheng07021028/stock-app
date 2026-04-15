@@ -1,3 +1,4 @@
+import ast
 import streamlit as st
 import pandas as pd
 
@@ -51,12 +52,76 @@ FALLBACK_NAME_MAP = {
     "1303": "南亞",
     "2002": "中鋼",
     "2891": "中信金",
-    "2892": "第一金"
+    "2892": "第一金",
+    "6270": "倍微"
 }
 
 
 def normalize_watchlist(data):
     result = {}
+
+    def parse_item(item):
+        if isinstance(item, dict):
+            code = item.get("code", "")
+            name = item.get("name", "")
+
+            # 若 code 被包成 dict 或奇怪字串，再拆一次
+            if isinstance(code, dict):
+                code = code.get("code", "")
+                if not name:
+                    name = code.get("name", "") if isinstance(code, dict) else name
+
+            if isinstance(code, str):
+                code_text = code.strip()
+                try:
+                    parsed_code = ast.literal_eval(code_text)
+                    if isinstance(parsed_code, dict):
+                        code = parsed_code.get("code", "")
+                        if not name:
+                            name = parsed_code.get("name", "")
+                except Exception:
+                    pass
+
+            return {
+                "code": str(code).strip(),
+                "name": str(name).strip()
+            }
+
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+
+            if text.isdigit():
+                return {"code": text, "name": ""}
+
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, dict):
+                    code = parsed.get("code", "")
+                    name = parsed.get("name", "")
+
+                    if isinstance(code, str):
+                        code_text = code.strip()
+                        try:
+                            parsed_code = ast.literal_eval(code_text)
+                            if isinstance(parsed_code, dict):
+                                code = parsed_code.get("code", "")
+                                if not name:
+                                    name = parsed_code.get("name", "")
+                        except Exception:
+                            pass
+
+                    return {
+                        "code": str(code).strip(),
+                        "name": str(name).strip()
+                    }
+            except Exception:
+                pass
+
+            return {"code": text, "name": ""}
+
+        return None
 
     for group_name, items in data.items():
         group_name = str(group_name).strip()
@@ -67,15 +132,9 @@ def normalize_watchlist(data):
 
         if isinstance(items, list):
             for item in items:
-                if isinstance(item, dict):
-                    code = str(item.get("code", "")).strip()
-                    name = str(item.get("name", "")).strip()
-                    if code:
-                        result[group_name].append({"code": code, "name": name})
-                else:
-                    code = str(item).strip()
-                    if code:
-                        result[group_name].append({"code": code, "name": ""})
+                parsed_item = parse_item(item)
+                if parsed_item and parsed_item["code"]:
+                    result[group_name].append(parsed_item)
 
         dedup = []
         seen = set()
@@ -165,7 +224,7 @@ if st.button("加入自選股", use_container_width=True):
         st.warning("請輸入股票代號")
     else:
         current_items = watchlist_dict.get(selected_group, [])
-        current_codes = [x["code"] for x in current_items]
+        current_codes = [str(x.get("code", "")).strip() for x in current_items]
 
         if code in current_codes:
             st.warning(f"{code} 已存在於群組「{selected_group}」")
@@ -173,9 +232,8 @@ if st.button("加入自選股", use_container_width=True):
             final_name = get_stock_name(code, manual_name)
             current_items.append({
                 "code": code,
-                "name": final_name if manual_name else manual_name
+                "name": manual_name if manual_name else final_name
             })
-
             watchlist_dict[selected_group] = current_items
             save_watchlist(watchlist_dict)
             st.success(f"已加入 {final_name} ({code}) 到群組「{selected_group}」")
@@ -196,8 +254,8 @@ for group_name, items in watchlist_dict.items():
         continue
 
     for item in items:
-        code = item["code"]
-        manual_name = item.get("name", "")
+        code = str(item.get("code", "")).strip()
+        manual_name = str(item.get("name", "")).strip()
         display_name = get_stock_name(code, manual_name)
 
         all_rows.append({
@@ -222,7 +280,7 @@ with d1:
 
 delete_items = watchlist_dict.get(delete_group, [])
 delete_labels = [
-    f"{get_stock_name(item['code'], item.get('name', ''))} ({item['code']})"
+    f"{get_stock_name(item.get('code', ''), item.get('name', ''))} ({item.get('code', '')})"
     for item in delete_items
 ]
 
@@ -238,7 +296,10 @@ if st.button("刪除選定股票", use_container_width=True):
         st.warning("此群組沒有可刪除的股票")
     else:
         delete_code = delete_stock_label.split("(")[-1].replace(")", "").strip()
-        watchlist_dict[delete_group] = [x for x in watchlist_dict[delete_group] if str(x["code"]).strip() != delete_code]
+        watchlist_dict[delete_group] = [
+            x for x in watchlist_dict[delete_group]
+            if str(x.get("code", "")).strip() != delete_code
+        ]
         save_watchlist(watchlist_dict)
         st.success(f"已刪除 {delete_stock_label}")
         st.rerun()
