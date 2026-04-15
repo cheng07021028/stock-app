@@ -1,8 +1,5 @@
 from datetime import date, timedelta
-from urllib.parse import quote
 import ast
-
-import pandas as pd
 import streamlit as st
 
 from utils import load_watchlist, apply_font_scale, get_font_scale, get_all_code_name_map
@@ -188,11 +185,25 @@ if group_names:
             quick_stock = None
             st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0)
 
+    if "home_start" not in st.session_state:
+        st.session_state.home_start = today_dt - timedelta(days=90)
+
+    if "home_end" not in st.session_state:
+        st.session_state.home_end = today_dt
+
     d1, d2 = st.columns(2)
     with d1:
-        quick_start = st.date_input("開始日期", today_dt - timedelta(days=90), key="home_start")
+        quick_start = st.date_input(
+            "開始日期",
+            value=st.session_state.home_start,
+            key="home_start"
+        )
     with d2:
-        quick_end = st.date_input("結束日期", today_dt, key="home_end")
+        quick_end = st.date_input(
+            "結束日期",
+            value=st.session_state.home_end,
+            key="home_end"
+        )
 
     if quick_start > quick_end:
         st.error("開始日期不能大於結束日期")
