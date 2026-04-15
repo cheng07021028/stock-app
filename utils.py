@@ -15,17 +15,27 @@ BASE_DIR = Path(__file__).resolve().parent
 WATCHLIST_FILE = BASE_DIR / "watchlist.json"
 
 DEFAULT_WATCHLIST = {
-    "半導體": ["2330", "2454", "3711"],
-    "AI": ["2317", "2382"],
-    "ETF": ["0050", "0056"],
-    "金融": ["2881", "2882"],
+    "半導體": [
+        {"code": "2330", "name": "台積電"},
+        {"code": "2454", "name": "聯發科"},
+        {"code": "3711", "name": "日月光投控"}
+    ],
+    "AI": [
+        {"code": "2317", "name": "鴻海"},
+        {"code": "2382", "name": "廣達"}
+    ],
+    "ETF": [
+        {"code": "0050", "name": "元大台灣50"},
+        {"code": "0056", "name": "元大高股息"}
+    ],
+    "金融": [
+        {"code": "2881", "name": "富邦金"},
+        {"code": "2882", "name": "國泰金"}
+    ],
     "我的觀察名單": []
 }
 
 
-# =========================
-# 基本工具
-# =========================
 def to_number(value):
     if value is None:
         return None
@@ -88,9 +98,6 @@ def to_excel_bytes(df_dict):
     return output.getvalue()
 
 
-# =========================
-# 字體設定
-# =========================
 def get_font_scale():
     if "font_scale" not in st.session_state:
         st.session_state.font_scale = 110
@@ -165,9 +172,6 @@ def apply_font_scale(scale_percent: int = 100):
     )
 
 
-# =========================
-# 自選股
-# =========================
 def load_watchlist():
     if not WATCHLIST_FILE.exists():
         save_watchlist(DEFAULT_WATCHLIST)
@@ -178,7 +182,7 @@ def load_watchlist():
             data = json.load(f)
 
         if isinstance(data, list):
-            return {"我的觀察名單": [str(x).strip() for x in data if str(x).strip()]}
+            return {"我的觀察名單": [{"code": str(x).strip(), "name": ""} for x in data if str(x).strip()]}
 
         if isinstance(data, dict):
             return data
@@ -193,35 +197,6 @@ def save_watchlist(watchlist_dict):
         json.dump(watchlist_dict, f, ensure_ascii=False, indent=2)
 
 
-def flatten_watchlist_groups(watchlist_dict):
-    all_codes = []
-    for _, codes in watchlist_dict.items():
-        all_codes.extend(codes)
-    return list(dict.fromkeys(all_codes))
-
-
-def build_watchlist_df(all_code_name_df, watchlist_dict):
-    rows = []
-    for group_name, codes in watchlist_dict.items():
-        for code in codes:
-            match = all_code_name_df[all_code_name_df["證券代號"] == code]
-            if not match.empty:
-                row = match.iloc[0]
-                rows.append({
-                    "群組": group_name,
-                    "證券代號": row["證券代號"],
-                    "證券名稱": row["證券名稱"],
-                    "市場別": row["市場別"],
-                    "顯示": f"{row['證券名稱']} ({row['證券代號']}) [{row['市場別']}]"
-                })
-    if not rows:
-        return pd.DataFrame(columns=["群組", "證券代號", "證券名稱", "市場別", "顯示"])
-    return pd.DataFrame(rows).drop_duplicates(subset=["群組", "證券代號"]).reset_index(drop=True)
-
-
-# =========================
-# 股票清單：上市 / 上櫃（官方 CSV）
-# =========================
 TWSE_LISTED_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
 TPEX_OTC_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv"
 
@@ -319,9 +294,6 @@ def get_all_code_name_map(query_date: str = "") -> pd.DataFrame:
     return all_df.drop_duplicates(subset=["證券代號"]).reset_index(drop=True)
 
 
-# =========================
-# 搜尋
-# =========================
 def fuzzy_score(keyword: str, target: str) -> float:
     keyword = str(keyword).strip().lower()
     target = str(target).strip().lower()
@@ -368,9 +340,6 @@ def search_stocks(df: pd.DataFrame, keyword: str, top_n: int = 50) -> pd.DataFra
     return filtered.head(top_n).copy()
 
 
-# =========================
-# 歷史資料（目前上市較完整）
-# =========================
 def get_month_stock_data_twse(stock_no: str, yyyy_mm: str) -> pd.DataFrame:
     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={yyyy_mm}01&stockNo={stock_no}"
     headers = {
