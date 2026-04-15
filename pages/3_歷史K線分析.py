@@ -48,7 +48,7 @@ FALLBACK_NAME_MAP = {
     "0056": "元大高股息",
     "2881": "富邦金",
     "2882": "國泰金",
-    "6270": "倍微"
+    "6271": "同欣電"
 }
 
 
@@ -180,13 +180,27 @@ with c2:
 
 selected_stock = next(x for x in stock_options if x["label"] == selected_label)
 
+if "history_start_dt" not in st.session_state:
+    st.session_state.history_start_dt = today_dt - timedelta(days=90)
+
+if "history_end_dt" not in st.session_state:
+    st.session_state.history_end_dt = today_dt
+
 d1, d2, d3 = st.columns([1, 1, 1])
 
 with d1:
-    start_dt = st.date_input("開始日期", today_dt - timedelta(days=90))
+    start_dt = st.date_input(
+        "開始日期",
+        value=st.session_state.history_start_dt,
+        key="history_start_dt"
+    )
 
 with d2:
-    end_dt = st.date_input("結束日期", today_dt)
+    end_dt = st.date_input(
+        "結束日期",
+        value=st.session_state.history_end_dt,
+        key="history_end_dt"
+    )
 
 with d3:
     st.markdown("<br>", unsafe_allow_html=True)
