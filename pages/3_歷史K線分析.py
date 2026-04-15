@@ -1,16 +1,18 @@
+from datetime import date, timedelta
 import ast
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from utils import (
     load_watchlist,
-    save_watchlist,
     get_all_code_name_map,
+    get_history_data,
     apply_font_scale,
     get_font_scale,
+    format_number,
 )
 
-st.set_page_config(page_title="自選股中心", page_icon="⭐", layout="wide")
+st.set_page_config(page_title="歷史K線分析", page_icon="📈", layout="wide")
 
 if "font_scale" not in st.session_state:
     st.session_state.font_scale = get_font_scale()
@@ -21,16 +23,20 @@ with st.sidebar:
 
 apply_font_scale(st.session_state.font_scale)
 
-st.title("⭐ 自選股中心")
-st.caption("可管理自選股群組、手動新增股票代號與名稱、刪除股票與群組")
+st.title("📈 歷史K線分析")
+st.caption("可依自選股群組選擇股票與日期區間查詢歷史資料")
+
+today_dt = date.today()
+lookup_date = today_dt.strftime("%Y%m%d")
 
 raw_watchlist = load_watchlist()
+if not raw_watchlist:
+    st.warning("目前沒有自選股群組，請先到自選股中心建立清單。")
+    st.stop()
 
-lookup_df = get_all_code_name_map(pd.Timestamp.today().strftime("%Y%m%d"))
-api_ok = not lookup_df.empty
-
-if not api_ok:
-    st.info("目前使用手動名稱 / 備援模式，仍可新增與管理自選股。")
+all_code_name_df = get_all_code_name_map(lookup_date)
+if all_code_name_df.empty:
+    st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
 
 FALLBACK_NAME_MAP = {
     "2330": "台積電",
@@ -42,17 +48,6 @@ FALLBACK_NAME_MAP = {
     "0056": "元大高股息",
     "2881": "富邦金",
     "2882": "國泰金",
-    "2303": "聯電",
-    "2308": "台達電",
-    "2603": "長榮",
-    "3037": "欣興",
-    "3008": "大立光",
-    "6505": "台塑化",
-    "1301": "台塑",
-    "1303": "南亞",
-    "2002": "中鋼",
-    "2891": "中信金",
-    "2892": "第一金",
     "6271": "同欣電"
 }
 
@@ -66,9 +61,8 @@ def normalize_watchlist(data):
             name = item.get("name", "")
 
             if isinstance(code, str):
-                code_text = code.strip()
                 try:
-                    parsed_code = ast.literal_eval(code_text)
+                    parsed_code = ast.literal_eval(code.strip())
                     if isinstance(parsed_code, dict):
                         code = parsed_code.get("code", "")
                         if not name:
@@ -76,69 +70,43 @@ def normalize_watchlist(data):
                 except Exception:
                     pass
 
-            return {
-                "code": str(code).strip(),
-                "name": str(name).strip()
-            }
+            return {"code": str(code).strip(), "name": str(name).strip()}
 
         if isinstance(item, str):
             text = item.strip()
             if not text:
                 return None
-
             if text.isdigit():
                 return {"code": text, "name": ""}
-
             try:
                 parsed = ast.literal_eval(text)
                 if isinstance(parsed, dict):
-                    code = parsed.get("code", "")
-                    name = parsed.get("name", "")
-
-                    if isinstance(code, str):
-                        code_text = code.strip()
-                        try:
-                            parsed_code = ast.literal_eval(code_text)
-                            if isinstance(parsed_code, dict):
-                                code = parsed_code.get("code", "")
-                                if not name:
-                                    name = parsed_code.get("name", "")
-                        except Exception:
-                            pass
-
                     return {
-                        "code": str(code).strip(),
-                        "name": str(name).strip()
+                        "code": str(parsed.get("code", "")).strip(),
+                        "name": str(parsed.get("name", "")).strip()
                     }
             except Exception:
                 pass
-
             return {"code": text, "name": ""}
 
         return None
 
     for group_name, items in data.items():
-        group_name = str(group_name).strip()
-        if not group_name:
-            continue
-
-        result[group_name] = []
-
+        clean_items = []
         if isinstance(items, list):
             for item in items:
                 parsed_item = parse_item(item)
                 if parsed_item and parsed_item["code"]:
-                    result[group_name].append(parsed_item)
+                    clean_items.append(parsed_item)
 
         dedup = []
         seen = set()
-        for item in result[group_name]:
-            code = item["code"]
-            if code not in seen:
+        for item in clean_items:
+            if item["code"] not in seen:
                 dedup.append(item)
-                seen.add(code)
+                seen.add(item["code"])
 
-        result[group_name] = dedup
+        result[str(group_name).strip()] = dedup
 
     return result
 
@@ -146,169 +114,151 @@ def normalize_watchlist(data):
 watchlist_dict = normalize_watchlist(raw_watchlist)
 
 
-def get_stock_name(code: str, manual_name: str = "") -> str:
+def guess_market_type(code: str) -> str:
     code = str(code).strip()
-    manual_name = str(manual_name).strip()
-
-    if manual_name:
-        return manual_name
-
-    if api_ok:
-        match = lookup_df[lookup_df["證券代號"] == code]
-        if not match.empty:
-            return str(match.iloc[0]["證券名稱"]).strip()
-
-    return FALLBACK_NAME_MAP.get(code, f"股票{code}")
-
-
-def get_market_type(code: str) -> str:
-    code = str(code).strip()
-
-    if api_ok:
-        match = lookup_df[lookup_df["證券代號"] == code]
-        if not match.empty:
-            return str(match.iloc[0]["市場別"]).strip()
-
     if code.startswith("00"):
+        return "上市"
+    if code in ["3711"]:
         return "上市"
     return "上市"
 
 
-st.markdown("---")
-st.subheader("新增群組")
+def get_stock_name_and_market(code: str, manual_name: str = ""):
+    code = str(code).strip()
+    manual_name = str(manual_name).strip()
 
-c1, c2 = st.columns([3, 1])
-with c1:
-    new_group_name = st.text_input("新群組名稱", placeholder="例如：AI概念股")
-with c2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("新增群組", use_container_width=True):
-        group_name = new_group_name.strip()
-        if not group_name:
-            st.warning("請輸入群組名稱")
-        elif group_name in watchlist_dict:
-            st.warning("群組已存在")
-        else:
-            watchlist_dict[group_name] = []
-            save_watchlist(watchlist_dict)
-            st.success(f"已新增群組：{group_name}")
-            st.rerun()
+    if manual_name:
+        return manual_name, guess_market_type(code)
 
-st.markdown("---")
-st.subheader("新增股票")
+    if not all_code_name_df.empty:
+        match = all_code_name_df[all_code_name_df["證券代號"] == code]
+        if not match.empty:
+            row = match.iloc[0]
+            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
 
-group_names = list(watchlist_dict.keys())
-if not group_names:
-    st.warning("目前沒有群組，請先新增群組。")
-    st.stop()
+    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
 
-a1, a2, a3 = st.columns(3)
-with a1:
-    selected_group = st.selectbox("選擇群組", group_names, index=0)
-with a2:
-    stock_code_input = st.text_input("股票代號", placeholder="例如：2330")
-with a3:
-    stock_name_input = st.text_input("股票名稱（可選填）", placeholder="例如：台積電")
 
-if st.button("加入自選股", use_container_width=True):
-    code = stock_code_input.strip()
-    manual_name = stock_name_input.strip()
-
-    if not code:
-        st.warning("請輸入股票代號")
-    else:
-        current_items = watchlist_dict.get(selected_group, [])
-        current_codes = [str(x.get("code", "")).strip() for x in current_items]
-
-        if code in current_codes:
-            st.warning(f"{code} 已存在於群組「{selected_group}」")
-        else:
-            final_name = get_stock_name(code, manual_name)
-            current_items.append({
-                "code": code,
-                "name": manual_name if manual_name else final_name
-            })
-            watchlist_dict[selected_group] = current_items
-            save_watchlist(watchlist_dict)
-            st.success(f"已加入 {final_name} ({code}) 到群組「{selected_group}」")
-            st.rerun()
-
-st.markdown("---")
-st.subheader("目前自選股清單")
-
-all_rows = []
-for group_name, items in watchlist_dict.items():
-    if not items:
-        all_rows.append({
-            "群組": group_name,
-            "證券代號": "",
-            "證券名稱": "",
-            "市場別": ""
-        })
-        continue
+def get_stock_display_options(group_name: str):
+    items = watchlist_dict.get(group_name, [])
+    options = []
 
     for item in items:
         code = str(item.get("code", "")).strip()
         manual_name = str(item.get("name", "")).strip()
-        display_name = get_stock_name(code, manual_name)
+        stock_name, market_type = get_stock_name_and_market(code, manual_name)
 
-        all_rows.append({
-            "群組": group_name,
-            "證券代號": code,
-            "證券名稱": display_name,
-            "市場別": get_market_type(code)
+        options.append({
+            "label": f"{stock_name} ({code}) [{market_type}]",
+            "code": code,
+            "name": stock_name,
+            "market": market_type
         })
 
-if all_rows:
-    df = pd.DataFrame(all_rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-else:
-    st.info("目前沒有任何自選股資料。")
+    return options
 
-st.markdown("---")
-st.subheader("刪除股票")
 
-d1, d2 = st.columns(2)
+group_names = list(watchlist_dict.keys())
+
+c1, c2 = st.columns(2)
+
+with c1:
+    selected_group = st.selectbox("選擇群組", group_names, index=0)
+
+stock_options = get_stock_display_options(selected_group)
+
+if not stock_options:
+    st.warning("此群組目前沒有股票。")
+    st.stop()
+
+with c2:
+    selected_label = st.selectbox(
+        "選擇股票",
+        [x["label"] for x in stock_options],
+        index=0
+    )
+
+selected_stock = next(x for x in stock_options if x["label"] == selected_label)
+
+if "history_start_dt" not in st.session_state:
+    st.session_state.history_start_dt = today_dt - timedelta(days=90)
+
+if "history_end_dt" not in st.session_state:
+    st.session_state.history_end_dt = today_dt
+
+d1, d2, d3 = st.columns([1, 1, 1])
+
 with d1:
-    delete_group = st.selectbox("選擇要刪除股票的群組", group_names, index=0, key="delete_group")
-
-delete_items = watchlist_dict.get(delete_group, [])
-delete_labels = [
-    f"{get_stock_name(item.get('code', ''), item.get('name', ''))} ({item.get('code', '')})"
-    for item in delete_items
-]
+    start_dt = st.date_input(
+        "開始日期",
+        value=st.session_state.history_start_dt,
+        key="history_start_dt"
+    )
 
 with d2:
-    if delete_labels:
-        delete_stock_label = st.selectbox("選擇股票", delete_labels, index=0, key="delete_stock")
-    else:
-        delete_stock_label = None
-        st.selectbox("選擇股票", ["此群組無股票"], index=0, key="delete_stock_empty")
+    end_dt = st.date_input(
+        "結束日期",
+        value=st.session_state.history_end_dt,
+        key="history_end_dt"
+    )
 
-if st.button("刪除選定股票", use_container_width=True):
-    if not delete_items:
-        st.warning("此群組沒有可刪除的股票")
-    else:
-        delete_code = delete_stock_label.split("(")[-1].replace(")", "").strip()
-        watchlist_dict[delete_group] = [
-            x for x in watchlist_dict[delete_group]
-            if str(x.get("code", "")).strip() != delete_code
-        ]
-        save_watchlist(watchlist_dict)
-        st.success(f"已刪除 {delete_stock_label}")
-        st.rerun()
+with d3:
+    st.markdown("<br>", unsafe_allow_html=True)
+    query_btn = st.button("開始查詢", use_container_width=True)
+
+if start_dt > end_dt:
+    st.error("開始日期不能大於結束日期")
+    st.stop()
 
 st.markdown("---")
-st.subheader("刪除群組")
+st.write(f"**目前選擇：** {selected_stock['name']}（{selected_stock['code']}） / {selected_stock['market']}")
+st.write(f"**查詢區間：** {start_dt} ~ {end_dt}")
 
-g1, g2 = st.columns([3, 1])
-with g1:
-    delete_group_name = st.selectbox("選擇要刪除的群組", group_names, index=0, key="drop_group")
-with g2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("刪除群組", use_container_width=True):
-        if delete_group_name in watchlist_dict:
-            del watchlist_dict[delete_group_name]
-            save_watchlist(watchlist_dict)
-            st.success(f"已刪除群組：{delete_group_name}")
-            st.rerun()
+if query_btn:
+    with st.spinner("正在抓取歷史資料..."):
+        hist_df = get_history_data(
+            stock_no=selected_stock["code"],
+            stock_name=selected_stock["name"],
+            market_type=selected_stock["market"],
+            start_dt=start_dt,
+            end_dt=end_dt
+        )
+
+    if hist_df.empty:
+        st.warning("查無歷史資料。可能是資料來源暫時無回應，或該股票目前不支援此抓取方式。")
+        st.stop()
+
+    show_df = hist_df.copy()
+
+    if "日期" in show_df.columns:
+        show_df["日期"] = pd.to_datetime(show_df["日期"]).dt.strftime("%Y-%m-%d")
+
+    numeric_cols = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"]
+    for col in numeric_cols:
+        if col in show_df.columns:
+            digits = 0 if col in ["成交股數", "成交金額", "成交筆數"] else 2
+            show_df[col] = show_df[col].apply(lambda x: format_number(x, digits) if pd.notna(x) else "")
+
+    st.subheader("歷史資料明細")
+    st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+    chart_df = hist_df.copy()
+    chart_df = chart_df.dropna(subset=["日期", "收盤價"])
+
+    if not chart_df.empty:
+        chart_df = chart_df.sort_values("日期")
+        chart_df = chart_df.set_index("日期")
+
+        st.subheader("收盤價走勢")
+        st.line_chart(chart_df["收盤價"], use_container_width=True)
+
+        latest_row = hist_df.sort_values("日期").iloc[-1]
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1:
+            st.metric("最新收盤價", format_number(latest_row.get("收盤價")))
+        with mc2:
+            st.metric("最高價", format_number(latest_row.get("最高價")))
+        with mc3:
+            st.metric("最低價", format_number(latest_row.get("最低價")))
+        with mc4:
+            st.metric("成交股數", format_number(latest_row.get("成交股數"), 0))
