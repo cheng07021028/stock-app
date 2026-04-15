@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import ast
 import pandas as pd
 import streamlit as st
 
@@ -53,20 +54,60 @@ FALLBACK_NAME_MAP = {
 
 def normalize_watchlist(data):
     result = {}
+
+    def parse_item(item):
+        if isinstance(item, dict):
+            code = item.get("code", "")
+            name = item.get("name", "")
+
+            if isinstance(code, str):
+                code_text = code.strip()
+                try:
+                    parsed_code = ast.literal_eval(code_text)
+                    if isinstance(parsed_code, dict):
+                        code = parsed_code.get("code", "")
+                        if not name:
+                            name = parsed_code.get("name", "")
+                except Exception:
+                    pass
+
+            return {
+                "code": str(code).strip(),
+                "name": str(name).strip()
+            }
+
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+
+            if text.isdigit():
+                return {"code": text, "name": ""}
+
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, dict):
+                    code = parsed.get("code", "")
+                    name = parsed.get("name", "")
+                    return {
+                        "code": str(code).strip(),
+                        "name": str(name).strip()
+                    }
+            except Exception:
+                pass
+
+            return {"code": text, "name": ""}
+
+        return None
+
     for group_name, items in data.items():
         clean_items = []
 
         if isinstance(items, list):
             for item in items:
-                if isinstance(item, dict):
-                    code = str(item.get("code", "")).strip()
-                    name = str(item.get("name", "")).strip()
-                    if code:
-                        clean_items.append({"code": code, "name": name})
-                else:
-                    code = str(item).strip()
-                    if code:
-                        clean_items.append({"code": code, "name": ""})
+                parsed_item = parse_item(item)
+                if parsed_item and parsed_item["code"]:
+                    clean_items.append(parsed_item)
 
         dedup = []
         seen = set()
