@@ -2,6 +2,7 @@ from datetime import date
 from io import BytesIO
 from pathlib import Path
 from difflib import SequenceMatcher
+import ast
 import json
 
 import pandas as pd
@@ -34,6 +35,33 @@ DEFAULT_WATCHLIST = {
     ],
     "我的觀察名單": []
 }
+
+FALLBACK_NAME_MAP = {
+    "2330": "台積電",
+    "2454": "聯發科",
+    "3711": "日月光投控",
+    "2317": "鴻海",
+    "2382": "廣達",
+    "0050": "元大台灣50",
+    "0056": "元大高股息",
+    "2881": "富邦金",
+    "2882": "國泰金",
+    "2303": "聯電",
+    "2308": "台達電",
+    "2603": "長榮",
+    "3037": "欣興",
+    "3008": "大立光",
+    "6505": "台塑化",
+    "1301": "台塑",
+    "1303": "南亞",
+    "2002": "中鋼",
+    "2891": "中信金",
+    "2892": "第一金",
+    "6271": "同欣電"
+}
+
+TWSE_LISTED_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
+TPEX_OTC_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv"
 
 
 def to_number(value):
@@ -172,9 +200,11 @@ def apply_font_scale(scale_percent: int = 100):
     )
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def load_watchlist():
     if not WATCHLIST_FILE.exists():
-        save_watchlist(DEFAULT_WATCHLIST)
+        with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_WATCHLIST, f, ensure_ascii=False, indent=2)
         return DEFAULT_WATCHLIST.copy()
 
     try:
@@ -196,11 +226,109 @@ def save_watchlist(watchlist_dict):
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
         json.dump(watchlist_dict, f, ensure_ascii=False, indent=2)
 
+    load_watchlist.clear()
+    get_normalized_watchlist.clear()
 
-TWSE_LISTED_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
-TPEX_OTC_CSV_URL = "https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv"
+
+def normalize_watchlist(data):
+    result = {}
+
+    def parse_item(item):
+        if isinstance(item, dict):
+            code = item.get("code", "")
+            name = item.get("name", "")
+
+            if isinstance(code, str):
+                try:
+                    parsed_code = ast.literal_eval(code.strip())
+                    if isinstance(parsed_code, dict):
+                        code = parsed_code.get("code", "")
+                        if not name:
+                            name = parsed_code.get("name", "")
+                except Exception:
+                    pass
+
+            return {"code": str(code).strip(), "name": str(name).strip()}
+
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+
+            if text.isdigit():
+                return {"code": text, "name": ""}
+
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, dict):
+                    return {
+                        "code": str(parsed.get("code", "")).strip(),
+                        "name": str(parsed.get("name", "")).strip()
+                    }
+            except Exception:
+                pass
+
+            return {"code": text, "name": ""}
+
+        return None
+
+    for group_name, items in data.items():
+        clean_items = []
+
+        if isinstance(items, list):
+            for item in items:
+                parsed_item = parse_item(item)
+                if parsed_item and parsed_item["code"]:
+                    clean_items.append(parsed_item)
+
+        dedup = []
+        seen = set()
+        for item in clean_items:
+            if item["code"] not in seen:
+                dedup.append(item)
+                seen.add(item["code"])
+
+        result[str(group_name).strip()] = dedup
+
+    return result
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_normalized_watchlist():
+    return normalize_watchlist(load_watchlist())
+
+
+def guess_market_type(code: str) -> str:
+    code = str(code).strip()
+    if code.startswith("00"):
+        return "上市"
+    if code in ["3711"]:
+        return "上市"
+    return "上市"
+
+
+def get_stock_name_and_market(code: str, all_code_name_df: pd.DataFrame, manual_name: str = ""):
+    code = str(code).strip()
+    manual_name = str(manual_name).strip()
+
+    if manual_name:
+        return manual_name, guess_market_type(code)
+
+    if all_code_name_df is not None and not all_code_name_df.empty:
+        match = all_code_name_df[all_code_name_df["證券代號"] == code]
+        if not match.empty:
+            row = match.iloc[0]
+            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
+
+    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
+
+
+def get_stock_name(code: str, all_code_name_df: pd.DataFrame, manual_name: str = "") -> str:
+    name, _ = get_stock_name_and_market(code, all_code_name_df, manual_name)
+    return name
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
 def _read_official_company_csv(url: str, market_name: str) -> pd.DataFrame:
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -275,14 +403,17 @@ def _read_official_company_csv(url: str, market_name: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_twse_code_name_map(query_date: str = "") -> pd.DataFrame:
     return _read_official_company_csv(TWSE_LISTED_CSV_URL, "上市")
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_tpex_code_name_map() -> pd.DataFrame:
     return _read_official_company_csv(TPEX_OTC_CSV_URL, "上櫃")
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
 def get_all_code_name_map(query_date: str = "") -> pd.DataFrame:
     twse_df = get_twse_code_name_map(query_date)
     tpex_df = get_tpex_code_name_map()
@@ -340,6 +471,7 @@ def search_stocks(df: pd.DataFrame, keyword: str, top_n: int = 50) -> pd.DataFra
     return filtered.head(top_n).copy()
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_month_stock_data_twse(stock_no: str, yyyy_mm: str) -> pd.DataFrame:
     url = f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={yyyy_mm}01&stockNo={stock_no}"
     headers = {
@@ -379,6 +511,7 @@ def get_month_stock_data_twse(stock_no: str, yyyy_mm: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_history_data(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date) -> pd.DataFrame:
     months = month_range(start_dt, end_dt)
     all_df = []
@@ -390,6 +523,7 @@ def get_history_data(stock_no: str, stock_name: str, market_type: str, start_dt:
             df = pd.DataFrame()
 
         if not df.empty:
+            df = df.copy()
             df["證券代號"] = stock_no
             df["證券名稱"] = stock_name
             df["市場別"] = market_type
