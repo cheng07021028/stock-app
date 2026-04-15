@@ -53,7 +53,7 @@ FALLBACK_NAME_MAP = {
     "2002": "中鋼",
     "2891": "中信金",
     "2892": "第一金",
-    "6270": "倍微"
+    "6271": "同欣電"
 }
 
 
@@ -64,12 +64,6 @@ def normalize_watchlist(data):
         if isinstance(item, dict):
             code = item.get("code", "")
             name = item.get("name", "")
-
-            # 若 code 被包成 dict 或奇怪字串，再拆一次
-            if isinstance(code, dict):
-                code = code.get("code", "")
-                if not name:
-                    name = code.get("name", "") if isinstance(code, dict) else name
 
             if isinstance(code, str):
                 code_text = code.strip()
