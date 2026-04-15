@@ -18,7 +18,7 @@ if "font_scale" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider("字體大小 (%)", 80, 160, st.session_state.font_scale, 5)
+    st.session_state.font_scale = st.slider("字體大小 (%)", 100, 220, st.session_state.font_scale, 10)
 
 apply_font_scale(st.session_state.font_scale)
 
@@ -36,7 +36,28 @@ if not watchlist_dict:
 all_code_name_df = get_all_code_name_map(lookup_date)
 
 if all_code_name_df.empty:
-    st.warning("目前無法從交易所取得完整股票清單，改用自選股代號模式顯示。")
+    st.info("目前使用備援模式顯示，部分股票名稱與行情可能不完整。")
+
+FALLBACK_NAME_MAP = {
+    "2330": "台積電",
+    "2454": "聯發科",
+    "3711": "日月光投控",
+    "2317": "鴻海",
+    "2382": "廣達",
+    "0050": "元大台灣50",
+    "0056": "元大高股息",
+    "2881": "富邦金",
+    "2882": "國泰金"
+}
+
+
+def guess_market_type(code: str) -> str:
+    code = str(code).strip()
+    if code.startswith("00"):
+        return "上市"
+    if code in ["3711"]:
+        return "上市"
+    return "上市"
 
 
 def build_fallback_info_df(watchlist_dict: dict) -> pd.DataFrame:
@@ -48,17 +69,10 @@ def build_fallback_info_df(watchlist_dict: dict) -> pd.DataFrame:
     unique_codes = list(dict.fromkeys([str(x).strip() for x in all_codes if str(x).strip()]))
 
     for code in unique_codes:
-        if code.startswith("00"):
-            market_type = "上市"
-        elif code.startswith("3") or code.startswith("4") or code.startswith("5") or code.startswith("6") or code.startswith("7") or code.startswith("8") or code.startswith("9"):
-            market_type = "上櫃"
-        else:
-            market_type = "上市"
-
         rows.append({
             "證券代號": code,
-            "證券名稱": f"股票{code}",
-            "市場別": market_type
+            "證券名稱": FALLBACK_NAME_MAP.get(code, f"股票{code}"),
+            "市場別": guess_market_type(code)
         })
 
     return pd.DataFrame(rows)
@@ -80,8 +94,8 @@ def get_group_dashboard_data(group_name: str, codes: list[str], info_source_df: 
         for code in codes:
             fallback_rows.append({
                 "證券代號": code,
-                "證券名稱": f"股票{code}",
-                "市場別": "上市"
+                "證券名稱": FALLBACK_NAME_MAP.get(code, f"股票{code}"),
+                "市場別": guess_market_type(code)
             })
         info_df = pd.DataFrame(fallback_rows)
 
