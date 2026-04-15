@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import ast
 import pandas as pd
 import streamlit as st
 
@@ -25,14 +26,17 @@ apply_font_scale(st.session_state.font_scale)
 st.title("📈 歷史K線分析")
 st.caption("可依自選股群組選擇股票與日期區間查詢歷史資料")
 
-watchlist_dict = load_watchlist()
-if not watchlist_dict:
+today_dt = date.today()
+lookup_date = today_dt.strftime("%Y%m%d")
+
+raw_watchlist = load_watchlist()
+if not raw_watchlist:
     st.warning("目前沒有自選股群組，請先到自選股中心建立清單。")
     st.stop()
 
-today_dt = date.today()
-lookup_date = today_dt.strftime("%Y%m%d")
 all_code_name_df = get_all_code_name_map(lookup_date)
+if all_code_name_df.empty:
+    st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
 
 FALLBACK_NAME_MAP = {
     "2330": "台積電",
@@ -43,8 +47,71 @@ FALLBACK_NAME_MAP = {
     "0050": "元大台灣50",
     "0056": "元大高股息",
     "2881": "富邦金",
-    "2882": "國泰金"
+    "2882": "國泰金",
+    "6270": "倍微"
 }
+
+
+def normalize_watchlist(data):
+    result = {}
+
+    def parse_item(item):
+        if isinstance(item, dict):
+            code = item.get("code", "")
+            name = item.get("name", "")
+
+            if isinstance(code, str):
+                try:
+                    parsed_code = ast.literal_eval(code.strip())
+                    if isinstance(parsed_code, dict):
+                        code = parsed_code.get("code", "")
+                        if not name:
+                            name = parsed_code.get("name", "")
+                except Exception:
+                    pass
+
+            return {"code": str(code).strip(), "name": str(name).strip()}
+
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return {"code": text, "name": ""}
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, dict):
+                    return {
+                        "code": str(parsed.get("code", "")).strip(),
+                        "name": str(parsed.get("name", "")).strip()
+                    }
+            except Exception:
+                pass
+            return {"code": text, "name": ""}
+
+        return None
+
+    for group_name, items in data.items():
+        clean_items = []
+        if isinstance(items, list):
+            for item in items:
+                parsed_item = parse_item(item)
+                if parsed_item and parsed_item["code"]:
+                    clean_items.append(parsed_item)
+
+        dedup = []
+        seen = set()
+        for item in clean_items:
+            if item["code"] not in seen:
+                dedup.append(item)
+                seen.add(item["code"])
+
+        result[str(group_name).strip()] = dedup
+
+    return result
+
+
+watchlist_dict = normalize_watchlist(raw_watchlist)
 
 
 def guess_market_type(code: str) -> str:
@@ -56,24 +123,30 @@ def guess_market_type(code: str) -> str:
     return "上市"
 
 
-def get_stock_display_options(group_name: str):
-    codes = watchlist_dict.get(group_name, [])
-    options = []
+def get_stock_name_and_market(code: str, manual_name: str = ""):
+    code = str(code).strip()
+    manual_name = str(manual_name).strip()
 
-    for code in codes:
-        code = str(code).strip()
-        match = pd.DataFrame()
+    if manual_name:
+        return manual_name, guess_market_type(code)
 
-        if not all_code_name_df.empty:
-            match = all_code_name_df[all_code_name_df["證券代號"] == code]
-
+    if not all_code_name_df.empty:
+        match = all_code_name_df[all_code_name_df["證券代號"] == code]
         if not match.empty:
             row = match.iloc[0]
-            stock_name = row["證券名稱"]
-            market_type = row["市場別"]
-        else:
-            stock_name = FALLBACK_NAME_MAP.get(code, f"股票{code}")
-            market_type = guess_market_type(code)
+            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
+
+    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
+
+
+def get_stock_display_options(group_name: str):
+    items = watchlist_dict.get(group_name, [])
+    options = []
+
+    for item in items:
+        code = str(item.get("code", "")).strip()
+        manual_name = str(item.get("name", "")).strip()
+        stock_name, market_type = get_stock_name_and_market(code, manual_name)
 
         options.append({
             "label": f"{stock_name} ({code}) [{market_type}]",
@@ -124,7 +197,6 @@ if start_dt > end_dt:
     st.stop()
 
 st.markdown("---")
-
 st.write(f"**目前選擇：** {selected_stock['name']}（{selected_stock['code']}） / {selected_stock['market']}")
 st.write(f"**查詢區間：** {start_dt} ~ {end_dt}")
 
