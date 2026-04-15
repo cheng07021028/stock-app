@@ -28,13 +28,12 @@ st.caption("依自選股群組顯示最新行情摘要")
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
 
-watchlist_dict = load_watchlist()
-if not watchlist_dict:
+raw_watchlist = load_watchlist()
+if not raw_watchlist:
     st.warning("目前沒有自選股群組")
     st.stop()
 
 all_code_name_df = get_all_code_name_map(lookup_date)
-
 if all_code_name_df.empty:
     st.info("目前使用備援模式顯示，部分股票名稱與行情可能不完整。")
 
@@ -47,8 +46,41 @@ FALLBACK_NAME_MAP = {
     "0050": "元大台灣50",
     "0056": "元大高股息",
     "2881": "富邦金",
-    "2882": "國泰金"
+    "2882": "國泰金",
+    "6270": "倍微"
 }
+
+
+def normalize_watchlist(data):
+    result = {}
+    for group_name, items in data.items():
+        clean_items = []
+
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    code = str(item.get("code", "")).strip()
+                    name = str(item.get("name", "")).strip()
+                    if code:
+                        clean_items.append({"code": code, "name": name})
+                else:
+                    code = str(item).strip()
+                    if code:
+                        clean_items.append({"code": code, "name": ""})
+
+        dedup = []
+        seen = set()
+        for item in clean_items:
+            if item["code"] not in seen:
+                dedup.append(item)
+                seen.add(item["code"])
+
+        result[str(group_name).strip()] = dedup
+
+    return result
+
+
+watchlist_dict = normalize_watchlist(raw_watchlist)
 
 
 def guess_market_type(code: str) -> str:
@@ -60,53 +92,39 @@ def guess_market_type(code: str) -> str:
     return "上市"
 
 
-def build_fallback_info_df(watchlist_dict: dict) -> pd.DataFrame:
-    rows = []
-    all_codes = []
-    for _, codes in watchlist_dict.items():
-        all_codes.extend(codes)
+def get_stock_name_and_market(code: str, manual_name: str = ""):
+    code = str(code).strip()
+    manual_name = str(manual_name).strip()
 
-    unique_codes = list(dict.fromkeys([str(x).strip() for x in all_codes if str(x).strip()]))
+    if manual_name:
+        return manual_name, guess_market_type(code)
 
-    for code in unique_codes:
-        rows.append({
-            "證券代號": code,
-            "證券名稱": FALLBACK_NAME_MAP.get(code, f"股票{code}"),
-            "市場別": guess_market_type(code)
-        })
+    if not all_code_name_df.empty:
+        match = all_code_name_df[all_code_name_df["證券代號"] == code]
+        if not match.empty:
+            row = match.iloc[0]
+            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
 
-    return pd.DataFrame(rows)
-
-
-if all_code_name_df.empty:
-    all_code_name_df = build_fallback_info_df(watchlist_dict)
+    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_group_dashboard_data(group_name: str, codes: list[str], info_source_df: pd.DataFrame) -> pd.DataFrame:
-    if not codes:
+def get_group_dashboard_data(group_name: str, items: list[dict]) -> pd.DataFrame:
+    if not items:
         return pd.DataFrame()
-
-    info_df = info_source_df[info_source_df["證券代號"].isin(codes)].copy()
-
-    if info_df.empty:
-        fallback_rows = []
-        for code in codes:
-            fallback_rows.append({
-                "證券代號": code,
-                "證券名稱": FALLBACK_NAME_MAP.get(code, f"股票{code}"),
-                "市場別": guess_market_type(code)
-            })
-        info_df = pd.DataFrame(fallback_rows)
 
     rows = []
     end_dt = date.today()
     start_dt = end_dt - timedelta(days=40)
 
-    for _, row in info_df.iterrows():
-        stock_no = row["證券代號"]
-        stock_name = row["證券名稱"]
-        market_type = row["市場別"]
+    for item in items:
+        stock_no = str(item.get("code", "")).strip()
+        manual_name = str(item.get("name", "")).strip()
+
+        if not stock_no:
+            continue
+
+        stock_name, market_type = get_stock_name_and_market(stock_no, manual_name)
 
         hist_df = get_history_data(stock_no, stock_name, market_type, start_dt, end_dt)
         if hist_df.empty:
@@ -201,15 +219,15 @@ with m3:
 
 st.markdown("---")
 
-for group_name, codes in watchlist_dict.items():
+for group_name, items in watchlist_dict.items():
     st.markdown(f"## {group_name}")
 
-    if not codes:
+    if not items:
         st.info(f"群組「{group_name}」目前沒有股票")
         continue
 
     with st.spinner(f"正在整理群組：{group_name}"):
-        group_df = get_group_dashboard_data(group_name, codes, all_code_name_df)
+        group_df = get_group_dashboard_data(group_name, items)
 
     if group_df.empty:
         st.warning(f"群組「{group_name}」查無資料")
