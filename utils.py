@@ -403,3 +403,22 @@ def get_history_data(stock_no: str, stock_name: str, market_type: str, start_dt:
     result = result[(result["日期"].dt.date >= start_dt) & (result["日期"].dt.date <= end_dt)]
     result = result.sort_values("日期").reset_index(drop=True)
     return result
+@st.cache_data(ttl=300, show_spinner=False)
+def load_watchlist():
+    if not WATCHLIST_FILE.exists():
+        save_watchlist(DEFAULT_WATCHLIST)
+        return DEFAULT_WATCHLIST.copy()
+
+    try:
+        with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            return {"我的觀察名單": [{"code": str(x).strip(), "name": ""} for x in data if str(x).strip()]}
+
+        if isinstance(data, dict):
+            return data
+
+        return DEFAULT_WATCHLIST.copy()
+    except Exception:
+        return DEFAULT_WATCHLIST.copy()
