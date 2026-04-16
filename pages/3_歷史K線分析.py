@@ -34,9 +34,9 @@ PAGE_TITLE = "歷史K線分析"
 STATE_PREFIX = "hist_"
 
 
-# =========================
+# =========================================================
 # Session State
-# =========================
+# =========================================================
 def _k(key: str) -> str:
     return f"{STATE_PREFIX}{key}"
 
@@ -49,14 +49,17 @@ def _set_ss(key: str, value: Any):
     st.session_state[_k(key)] = value
 
 
-# =========================
+# =========================================================
 # 基礎工具
-# =========================
+# =========================================================
 def _safe_str(v: Any) -> str:
     if v is None:
         return ""
-    if isinstance(v, float) and pd.isna(v):
-        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
     return str(v).strip()
 
 
@@ -70,21 +73,17 @@ def _split_code_name(text: str) -> tuple[str, str]:
     if not raw:
         return "", ""
 
-    # 台積電(2330)
     if "(" in raw and ")" in raw:
         left = raw.split("(")[0].strip()
         mid = raw.split("(")[1].split(")")[0].strip()
         if _is_stock_code(mid):
             return mid, left
 
-    # 2330 台積電 / 2330-台積電 / 2330_台積電 / 2330/台積電
     for sep in [" ", "-", "_", "/"]:
         if sep in raw:
             parts = [p.strip() for p in raw.split(sep) if p.strip()]
             if parts and _is_stock_code(parts[0]):
-                code = parts[0]
-                name = " ".join(parts[1:]).strip()
-                return code, name
+                return parts[0], " ".join(parts[1:]).strip()
 
     if _is_stock_code(raw):
         return raw, ""
@@ -102,22 +101,102 @@ def _display_stock(code: str, name: str) -> str:
 
 def _first_existing(d: dict, keys: list[str], default: Any = None):
     for k in keys:
-        if k in d and pd.notna(d[k]):
-            return d[k]
+        if k in d:
+            val = d[k]
+            try:
+                if pd.notna(val):
+                    return val
+            except Exception:
+                if val is not None:
+                    return val
     return default
 
 
-# =========================
-# 強化版資料兼容
-# =========================
+def _safe_parse_date(v: Any, fallback: date) -> date:
+    try:
+        x = parse_date_safe(v)
+        if x:
+            return x
+    except Exception:
+        pass
+
+    if isinstance(v, date):
+        return v
+
+    try:
+        return pd.to_datetime(v).date()
+    except Exception:
+        return fallback
+
+
+# =========================================================
+# 安全包裝：utils 回傳一律先正規化
+# =========================================================
+def _safe_load_last_query_state(page_key: str) -> dict[str, Any]:
+    try:
+        raw = load_last_query_state(page_key)
+    except Exception:
+        return {}
+
+    if raw is None:
+        return {}
+
+    if isinstance(raw, dict):
+        return raw
+
+    if isinstance(raw, pd.Series):
+        try:
+            return raw.to_dict()
+        except Exception:
+            return {}
+
+    if isinstance(raw, pd.DataFrame):
+        try:
+            if raw.empty:
+                return {}
+            if len(raw) == 1:
+                return raw.iloc[0].to_dict()
+            return {}
+        except Exception:
+            return {}
+
+    if isinstance(raw, (list, tuple)):
+        if len(raw) == 1 and isinstance(raw[0], dict):
+            return raw[0]
+        return {}
+
+    return {}
+
+
+def _safe_save_last_query_state(page_key: str, payload: dict[str, Any]) -> None:
+    try:
+        if not isinstance(payload, dict):
+            return
+        save_last_query_state(page_key, payload)
+    except Exception:
+        pass
+
+
+def _safe_score_to_badge(score: Any) -> str:
+    try:
+        return str(score_to_badge(score))
+    except Exception:
+        try:
+            s = float(score)
+            if s >= 80:
+                return "A"
+            if s >= 60:
+                return "B"
+            if s >= 40:
+                return "C"
+            if s >= 20:
+                return "D"
+            return "E"
+        except Exception:
+            return "-"
+
+
 def _safe_get_code_name_map() -> dict[str, str]:
-    """
-    兼容 get_all_code_name_map() 回傳：
-    - dict
-    - DataFrame
-    - list[dict]
-    - list[tuple]
-    """
     try:
         raw = get_all_code_name_map()
     except Exception:
@@ -126,7 +205,6 @@ def _safe_get_code_name_map() -> dict[str, str]:
     if raw is None:
         return {}
 
-    # dict
     if isinstance(raw, dict):
         out = {}
         for k, v in raw.items():
@@ -136,14 +214,19 @@ def _safe_get_code_name_map() -> dict[str, str]:
                 out[code] = name
         return out
 
-    # DataFrame
-    if isinstance(raw, pd.DataFrame):
-        df = raw.copy()
-        if df.empty:
+    if isinstance(raw, pd.Series):
+        try:
+            raw = raw.to_dict()
+            return { _safe_str(k): _safe_str(v) for k, v in raw.items() if _safe_str(k) }
+        except Exception:
             return {}
 
-        cols = {str(c).lower(): c for c in df.columns}
+    if isinstance(raw, pd.DataFrame):
+        if raw.empty:
+            return {}
 
+        df = raw.copy()
+        cols = {str(c).lower(): c for c in df.columns}
         code_col = None
         name_col = None
 
@@ -157,7 +240,6 @@ def _safe_get_code_name_map() -> dict[str, str]:
                 name_col = cols[c]
                 break
 
-        # 若只有一欄可能是 code/name 混合格式
         if code_col is None and len(df.columns) >= 1:
             code_col = df.columns[0]
         if name_col is None and len(df.columns) >= 2:
@@ -169,7 +251,8 @@ def _safe_get_code_name_map() -> dict[str, str]:
             name = _safe_str(row.get(name_col)) if name_col is not None else ""
 
             if not code:
-                code2, name2 = _split_code_name(_safe_str(row.iloc[0]) if len(row) > 0 else "")
+                first_val = _safe_str(row.iloc[0]) if len(row) > 0 else ""
+                code2, name2 = _split_code_name(first_val)
                 code = code2
                 name = name or name2
 
@@ -177,17 +260,12 @@ def _safe_get_code_name_map() -> dict[str, str]:
                 out[code] = name
         return out
 
-    # list / tuple
     if isinstance(raw, (list, tuple)):
         out = {}
         for item in raw:
             if isinstance(item, dict):
-                code = _safe_str(
-                    _first_existing(item, ["code", "stock_code", "symbol", "ticker", "id"], "")
-                )
-                name = _safe_str(
-                    _first_existing(item, ["name", "stock_name", "company", "label", "title"], "")
-                )
+                code = _safe_str(_first_existing(item, ["code", "stock_code", "symbol", "ticker", "id"], ""))
+                name = _safe_str(_first_existing(item, ["name", "stock_name", "company", "label", "title"], ""))
                 if not code:
                     code, parsed_name = _split_code_name(_safe_str(item))
                     name = name or parsed_name
@@ -214,9 +292,9 @@ def _safe_get_watchlist() -> Any:
         return None
 
 
-# =========================
-# 歷史資料格式化
-# =========================
+# =========================================================
+# 歷史資料整理
+# =========================================================
 def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
@@ -234,8 +312,7 @@ def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
             df.index = pd.to_datetime(df.index, errors="coerce")
         df = df[~df.index.isna()]
 
-    df = df.sort_index()
-    return df
+    return df.sort_index()
 
 
 def _find_col(df: pd.DataFrame, names: list[str]) -> str | None:
@@ -270,7 +347,7 @@ def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if col_volume is not None:
         out["Volume"] = pd.to_numeric(df[col_volume], errors="coerce").fillna(0)
 
-    out = out.dropna(subset=["Close"], how="any")
+    out = out.dropna(subset=["Close"])
 
     if "Open" not in out.columns:
         out["Open"] = out["Close"]
@@ -284,12 +361,15 @@ def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# =========================
-# 自選股 / 群組解析
-# =========================
+# =========================================================
+# 群組 / 股票
+# =========================================================
 def _normalize_stock_item(item: Any, code_name_map: dict[str, str]) -> tuple[str, str] | None:
     if item is None:
         return None
+
+    if isinstance(item, pd.Series):
+        item = item.to_dict()
 
     if isinstance(item, dict):
         code = _safe_str(_first_existing(item, ["code", "stock_code", "symbol", "ticker", "id"], ""))
@@ -337,7 +417,6 @@ def _normalize_stock_item(item: Any, code_name_map: dict[str, str]) -> tuple[str
 def _build_group_stock_map() -> dict[str, list[str]]:
     code_name_map = _safe_get_code_name_map()
     watchlist = _safe_get_watchlist()
-
     group_map: dict[str, list[str]] = {}
 
     def add_item(group_name: str, item: Any):
@@ -361,20 +440,20 @@ def _build_group_stock_map() -> dict[str, list[str]]:
                     add_item(group_name, row.to_dict())
 
             elif isinstance(items, dict):
-                if "stocks" in items and isinstance(items["stocks"], (list, tuple, pd.DataFrame)):
+                if "stocks" in items:
                     stocks = items["stocks"]
                     if isinstance(stocks, pd.DataFrame):
                         for _, row in stocks.iterrows():
                             add_item(group_name, row.to_dict())
-                    else:
+                    elif isinstance(stocks, (list, tuple)):
                         for item in stocks:
                             add_item(group_name, item)
-                elif "items" in items and isinstance(items["items"], (list, tuple, pd.DataFrame)):
+                elif "items" in items:
                     stocks = items["items"]
                     if isinstance(stocks, pd.DataFrame):
                         for _, row in stocks.iterrows():
                             add_item(group_name, row.to_dict())
-                    else:
+                    elif isinstance(stocks, (list, tuple)):
                         for item in stocks:
                             add_item(group_name, item)
                 else:
@@ -389,10 +468,6 @@ def _build_group_stock_map() -> dict[str, list[str]]:
                         else:
                             add_item(group_name, v)
 
-            elif isinstance(items, pd.DataFrame):
-                for _, row in items.iterrows():
-                    add_item(group_name, row.to_dict())
-
             elif isinstance(items, (list, tuple)):
                 for item in items:
                     add_item(group_name, item)
@@ -403,27 +478,20 @@ def _build_group_stock_map() -> dict[str, list[str]]:
     elif isinstance(watchlist, pd.DataFrame):
         for _, row in watchlist.iterrows():
             row_dict = row.to_dict()
-            group_name = _safe_str(
-                _first_existing(row_dict, ["group", "category", "sector", "group_name"], "未分組")
-            )
+            group_name = _safe_str(_first_existing(row_dict, ["group", "category", "sector", "group_name"], "未分組"))
             add_item(group_name, row_dict)
 
     elif isinstance(watchlist, (list, tuple)):
         for row in watchlist:
             group_name = "未分組"
             if isinstance(row, dict):
-                group_name = _safe_str(
-                    _first_existing(row, ["group", "category", "sector", "group_name"], "未分組")
-                )
+                group_name = _safe_str(_first_existing(row, ["group", "category", "sector", "group_name"], "未分組"))
             add_item(group_name, row)
 
-    # fallback
     if not group_map:
         fallback_codes = list(code_name_map.keys())[:100]
         if fallback_codes:
-            group_map["全部股票"] = []
-            for code in fallback_codes:
-                group_map["全部股票"].append(_display_stock(code, code_name_map.get(code, "")))
+            group_map["全部股票"] = [_display_stock(code, code_name_map.get(code, "")) for code in fallback_codes]
 
     for g in list(group_map.keys()):
         group_map[g] = sorted(set(group_map[g]), key=lambda x: (_split_code_name(x)[0], x))
@@ -465,10 +533,7 @@ def _find_search_target(keyword: str, stock_rows: list[dict[str, str]]) -> dict[
         if q == row["name"].lower():
             return row
 
-    prefix_hits = [
-        row for row in stock_rows
-        if row["code"].lower().startswith(q) or row["name"].lower().startswith(q)
-    ]
+    prefix_hits = [row for row in stock_rows if row["code"].lower().startswith(q) or row["name"].lower().startswith(q)]
     if prefix_hits:
         return prefix_hits[0]
 
@@ -479,9 +544,9 @@ def _find_search_target(keyword: str, stock_rows: list[dict[str, str]]) -> dict[
     return None
 
 
-# =========================
+# =========================================================
 # 技術分析
-# =========================
+# =========================================================
 def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if df.empty:
@@ -546,7 +611,6 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級"])
 
     events: list[dict[str, Any]] = []
-
     peaks, troughs = _detect_pivots(df, window=3)
     peak_set = set(peaks)
     trough_set = set(troughs)
@@ -558,47 +622,30 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
 
         if "MA20" in df.columns and "MA60" in df.columns:
             if _cross_up(prev["MA20"], cur["MA20"], prev["MA60"], cur["MA60"]):
-                events.append(
-                    {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 黃金交叉 MA60", "說明": "中期均線向上突破，偏多。", "等級": "強多"}
-                )
+                events.append({"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 黃金交叉 MA60", "說明": "中期均線向上突破，偏多。", "等級": "強多"})
             elif _cross_down(prev["MA20"], cur["MA20"], prev["MA60"], cur["MA60"]):
-                events.append(
-                    {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 死亡交叉 MA60", "說明": "中期均線向下跌破，偏空。", "等級": "強空"}
-                )
+                events.append({"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 死亡交叉 MA60", "說明": "中期均線向下跌破，偏空。", "等級": "強空"})
 
         if _cross_up(prev["K"], cur["K"], prev["D"], cur["D"]):
-            events.append(
-                {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 黃金交叉", "說明": "短線動能轉強。", "等級": "偏多"}
-            )
+            events.append({"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 黃金交叉", "說明": "短線動能轉強。", "等級": "偏多"})
         elif _cross_down(prev["K"], cur["K"], prev["D"], cur["D"]):
-            events.append(
-                {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 死亡交叉", "說明": "短線動能轉弱。", "等級": "偏空"}
-            )
+            events.append({"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 死亡交叉", "說明": "短線動能轉弱。", "等級": "偏空"})
 
         if _cross_up(prev["DIF"], cur["DIF"], prev["MACD"], cur["MACD"]):
-            events.append(
-                {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 黃金交叉", "說明": "波段趨勢有轉強跡象。", "等級": "偏多"}
-            )
+            events.append({"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 黃金交叉", "說明": "波段趨勢有轉強跡象。", "等級": "偏多"})
         elif _cross_down(prev["DIF"], cur["DIF"], prev["MACD"], cur["MACD"]):
-            events.append(
-                {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 死亡交叉", "說明": "波段趨勢有轉弱跡象。", "等級": "偏空"}
-            )
+            events.append({"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 死亡交叉", "說明": "波段趨勢有轉弱跡象。", "等級": "偏空"})
 
         if dt in trough_set:
-            events.append(
-                {"日期": dt, "事件類型": "轉折點", "事件名稱": "起漲點", "說明": "局部低點轉折，後續留意量價配合。", "等級": "觀察"}
-            )
+            events.append({"日期": dt, "事件類型": "轉折點", "事件名稱": "起漲點", "說明": "局部低點轉折，後續留意量價配合。", "等級": "觀察"})
         if dt in peak_set:
-            events.append(
-                {"日期": dt, "事件類型": "轉折點", "事件名稱": "起跌點", "說明": "局部高點轉折，後續留意回檔風險。", "等級": "觀察"}
-            )
+            events.append({"日期": dt, "事件類型": "轉折點", "事件名稱": "起跌點", "說明": "局部高點轉折，後續留意回檔風險。", "等級": "觀察"})
 
     ev = pd.DataFrame(events)
     if ev.empty:
         return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級"])
 
-    ev = ev.sort_values("日期", ascending=False).reset_index(drop=True)
-    return ev
+    return ev.sort_values("日期", ascending=False).reset_index(drop=True)
 
 
 def _build_signal_summary(df: pd.DataFrame) -> dict[str, Any]:
@@ -668,7 +715,6 @@ def _safe_compute_radar_scores(df: pd.DataFrame) -> dict[str, float]:
 
     last = df.iloc[-1]
     price = float(last["Close"])
-
     trend = 80 if pd.notna(last.get("MA60", np.nan)) and price > last.get("MA60", np.nan) else 40
     momentum = 80 if last.get("DIF", 0) > last.get("MACD", 0) else 40
     volume = 60
@@ -714,9 +760,9 @@ def _safe_compute_signal_snapshot(df: pd.DataFrame) -> dict[str, Any]:
     return _build_signal_summary(df)
 
 
-# =========================
+# =========================================================
 # 圖表
-# =========================
+# =========================================================
 def _plot_candlestick(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig = make_subplots(
         rows=3,
@@ -743,17 +789,9 @@ def _plot_candlestick(df: pd.DataFrame, stock_label: str) -> go.Figure:
     for ma in [5, 10, 20, 60, 120, 240]:
         col = f"MA{ma}"
         if col in df.columns:
-            fig.add_trace(
-                go.Scatter(x=df.index, y=df[col], mode="lines", name=col),
-                row=1,
-                col=1,
-            )
+            fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines", name=col), row=1, col=1)
 
-    fig.add_trace(
-        go.Bar(x=df.index, y=df["Volume"], name="成交量"),
-        row=2,
-        col=1,
-    )
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="成交量"), row=2, col=1)
 
     fig.add_trace(go.Scatter(x=df.index, y=df["K"], mode="lines", name="K"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["D"], mode="lines", name="D"), row=3, col=1)
@@ -779,14 +817,7 @@ def _plot_radar(radar_scores: dict[str, float], stock_label: str) -> go.Figure:
         values = values + [values[0]]
 
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatterpolar(
-            r=values,
-            theta=labels,
-            fill="toself",
-            name=stock_label,
-        )
-    )
+    fig.add_trace(go.Scatterpolar(r=values, theta=labels, fill="toself", name=stock_label))
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
         showlegend=False,
@@ -796,13 +827,13 @@ def _plot_radar(radar_scores: dict[str, float], stock_label: str) -> go.Figure:
     return fig
 
 
-# =========================
+# =========================================================
 # State 同步核心
-# =========================
+# =========================================================
 def _repair_group_stock_state(group_map: dict[str, list[str]]):
     groups = list(group_map.keys())
-
     current_group = _ss("group", "")
+
     if current_group not in group_map:
         current_group = groups[0] if groups else ""
         _set_ss("group", current_group)
@@ -814,32 +845,35 @@ def _repair_group_stock_state(group_map: dict[str, list[str]]):
 
 
 def _init_state(group_map: dict[str, list[str]]):
+    groups = list(group_map.keys())
+
     if _ss("group") is None:
-        groups = list(group_map.keys())
         _set_ss("group", groups[0] if groups else "")
 
     if _ss("stock") is None:
-        stocks = group_map.get(_ss("group"), [])
-        _set_ss("stock", stocks[0] if stocks else "")
+        _set_ss("stock", group_map.get(_ss("group"), [""])[0] if group_map.get(_ss("group")) else "")
 
     if _ss("search_input") is None:
         _set_ss("search_input", "")
 
-    if _ss("start_date") is None or _ss("end_date") is None:
-        saved = load_last_query_state("history_kline_page") or {}
-        start_saved = parse_date_safe(saved.get("start_date"))
-        end_saved = parse_date_safe(saved.get("end_date"))
-        today = date.today()
-        _set_ss("start_date", start_saved or (today - timedelta(days=365)))
-        _set_ss("end_date", end_saved or today)
+    today = date.today()
+    default_start = today - timedelta(days=365)
+    default_end = today
 
-        saved_group = _safe_str(saved.get("group"))
-        saved_stock = _safe_str(saved.get("stock"))
+    saved = _safe_load_last_query_state("history_kline_page")
 
-        if saved_group in group_map:
-            _set_ss("group", saved_group)
-            if saved_stock in group_map.get(saved_group, []):
-                _set_ss("stock", saved_stock)
+    if _ss("start_date") is None:
+        _set_ss("start_date", _safe_parse_date(saved.get("start_date"), default_start))
+    if _ss("end_date") is None:
+        _set_ss("end_date", _safe_parse_date(saved.get("end_date"), default_end))
+
+    saved_group = _safe_str(saved.get("group"))
+    saved_stock = _safe_str(saved.get("stock"))
+
+    if saved_group in group_map:
+        _set_ss("group", saved_group)
+        if saved_stock in group_map.get(saved_group, []):
+            _set_ss("stock", saved_stock)
 
     _repair_group_stock_state(group_map)
 
@@ -852,7 +886,6 @@ def _apply_search_sync(keyword: str, group_map: dict[str, list[str]], stock_rows
     _set_ss("group", target["group"])
     _set_ss("stock", target["stock"])
     _set_ss("search_input", target["stock"])
-
     _repair_group_stock_state(group_map)
     return True
 
@@ -865,9 +898,9 @@ def _on_group_change(group_map: dict[str, list[str]]):
         _set_ss("stock", stock_options[0] if stock_options else "")
 
 
-# =========================
+# =========================================================
 # 主頁
-# =========================
+# =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
@@ -878,13 +911,12 @@ def main():
 
     render_pro_hero(
         title="歷史K線分析",
-        subtitle="K線・MA・KD・MACD・雷達評分・支撐壓力・起漲起跌點・交叉事件。",
+        subtitle="K線・MA・KD・MACD・雷達評分・支撐壓力・起漲起跌點・交叉事件",
     )
 
-    # ========= 快速搜尋 =========
     render_pro_section("快速搜尋股票")
-
     s1, s2 = st.columns([5, 1])
+
     with s1:
         st.text_input(
             "輸入股票代碼或名稱",
@@ -892,6 +924,7 @@ def main():
             placeholder="例如：2330、台積電、2454 聯發科",
             label_visibility="collapsed",
         )
+
     with s2:
         search_clicked = st.button("帶入", use_container_width=True, type="primary")
 
@@ -902,12 +935,10 @@ def main():
         else:
             st.warning("找不到對應股票，請重新輸入代碼或名稱。")
 
-    # ========= 查詢條件 =========
     render_pro_section("查詢條件")
-
-    groups = list(group_map.keys())
     _repair_group_stock_state(group_map)
 
+    groups = list(group_map.keys())
     c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
 
     with c1:
@@ -921,8 +952,7 @@ def main():
 
     current_group = _ss("group", "")
     stock_options = group_map.get(current_group, [])
-    current_stock = _ss("stock", "")
-    if current_stock not in stock_options:
+    if _ss("stock", "") not in stock_options:
         _set_ss("stock", stock_options[0] if stock_options else "")
 
     with c2:
@@ -938,7 +968,6 @@ def main():
     with c4:
         st.date_input("結束日期", key=_k("end_date"))
 
-    # 只吃 session_state 真值
     selected_group = _ss("group", "")
     selected_stock = _ss("stock", "")
     start_date = _ss("start_date")
@@ -959,20 +988,16 @@ def main():
         st.error("開始日期不可大於結束日期。")
         st.stop()
 
-    try:
-        save_last_query_state(
-            "history_kline_page",
-            {
-                "group": selected_group,
-                "stock": selected_stock,
-                "start_date": str(start_date),
-                "end_date": str(end_date),
-            },
-        )
-    except Exception:
-        pass
+    _safe_save_last_query_state(
+        "history_kline_page",
+        {
+            "group": selected_group,
+            "stock": selected_stock,
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+        },
+    )
 
-    # ========= 取歷史資料 =========
     with st.spinner("讀取歷史資料中..."):
         raw_df = get_history_data(code, start_date, end_date)
 
@@ -998,11 +1023,9 @@ def main():
     sr_snapshot = _safe_compute_support_resistance(hist_df)
     event_df = _build_event_log(hist_df)
 
-    # ========= KPI =========
     last = hist_df.iloc[-1]
     prev_close = hist_df["Close"].iloc[-2] if len(hist_df) >= 2 else last["Close"]
     pct = ((last["Close"] / prev_close) - 1) * 100 if prev_close else 0
-
     radar_avg = float(np.mean(list(radar_scores.values()))) if radar_scores else 0
     signal_score = float(signal_snapshot.get("signal_score", 0))
     signal_level = _safe_str(signal_snapshot.get("signal_level", "中性"))
@@ -1022,27 +1045,15 @@ def main():
 
     info_cols = st.columns(3)
     with info_cols[0]:
-        render_pro_info_card(
-            "支撐區",
-            f"{sr1:.2f}" if isinstance(sr1, (int, float)) and not math.isnan(sr1) else "—",
-            "近60日推估",
-        )
+        render_pro_info_card("支撐區", f"{sr1:.2f}" if isinstance(sr1, (int, float)) and not math.isnan(sr1) else "—", "近60日推估")
     with info_cols[1]:
-        render_pro_info_card(
-            "壓力區",
-            f"{rr1:.2f}" if isinstance(rr1, (int, float)) and not math.isnan(rr1) else "—",
-            "近60日推估",
-        )
+        render_pro_info_card("壓力區", f"{rr1:.2f}" if isinstance(rr1, (int, float)) and not math.isnan(rr1) else "—", "近60日推估")
     with info_cols[2]:
-        badge_text = score_to_badge(radar_avg) if callable(score_to_badge) else f"{radar_avg:.1f}"
-        render_pro_info_card("評級", badge_text, market or "台股")
+        render_pro_info_card("評級", _safe_score_to_badge(radar_avg), market or "台股")
 
-    # ========= K線圖 =========
     render_pro_section("K線 / 均線 / 成交量 / KD / MACD")
-    fig = _plot_candlestick(hist_df, stock_label)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(_plot_candlestick(hist_df, stock_label), use_container_width=True)
 
-    # ========= 最近事件摘要 =========
     render_pro_section("最近事件摘要")
     summary_cols = st.columns(4)
     recent_events = event_df.head(6).copy()
@@ -1051,29 +1062,20 @@ def main():
     with summary_cols[0]:
         latest_event = recent_events["事件名稱"].iloc[0] if not recent_events.empty else "無"
         render_pro_info_card("最新事件", latest_event, "最近觸發")
-
     with summary_cols[1]:
         render_pro_info_card("交叉訊號", "、".join(cross_tags) if cross_tags else "無", "當前偵測")
-
     with summary_cols[2]:
         trend_text = "站上 MA60" if pd.notna(last["MA60"]) and last["Close"] > last["MA60"] else "跌破 MA60"
         render_pro_info_card("波段趨勢", trend_text, "以 MA60 觀察")
-
     with summary_cols[3]:
-        kd_text = f"K={last['K']:.1f} / D={last['D']:.1f}"
-        render_pro_info_card("KD 狀態", kd_text, "短線動能")
+        render_pro_info_card("KD 狀態", f"K={last['K']:.1f} / D={last['D']:.1f}", "短線動能")
 
-    # ========= 雷達 / 支撐壓力 =========
     left, right = st.columns([1, 1])
 
     with left:
         render_pro_section("雷達評分")
-        radar_fig = _plot_radar(radar_scores, stock_label)
-        st.plotly_chart(radar_fig, use_container_width=True)
-
-        radar_df = pd.DataFrame(
-            {"指標": list(radar_scores.keys()), "分數": [round(float(v), 2) for v in radar_scores.values()]}
-        )
+        st.plotly_chart(_plot_radar(radar_scores, stock_label), use_container_width=True)
+        radar_df = pd.DataFrame({"指標": list(radar_scores.keys()), "分數": [round(float(v), 2) for v in radar_scores.values()]})
         st.dataframe(radar_df, use_container_width=True, hide_index=True)
 
     with right:
@@ -1087,16 +1089,13 @@ def main():
         else:
             st.info("目前無支撐壓力資料。")
 
-    # ========= 事件說明 / 篩選 =========
     render_pro_section("事件說明與篩選")
-
     event_types = ["全部"] + sorted(event_df["事件類型"].dropna().unique().tolist()) if not event_df.empty else ["全部"]
-    filter_cols = st.columns([2, 5])
 
-    with filter_cols[0]:
+    f1, f2 = st.columns([2, 5])
+    with f1:
         st.selectbox("事件篩選", options=event_types, key=_k("event_type_filter"))
-
-    with filter_cols[1]:
+    with f2:
         st.markdown(
             """
             <div style="padding-top: 28px;">
@@ -1117,7 +1116,6 @@ def main():
     else:
         st.info("目前沒有符合條件的事件。")
 
-    # ========= 技術指標明細 =========
     render_pro_section("技術指標明細")
     detail_cols = [
         "Open", "High", "Low", "Close", "Volume",
@@ -1125,7 +1123,9 @@ def main():
         "K", "D", "J", "DIF", "MACD", "OSC", "PctChg"
     ]
     detail_df = hist_df[detail_cols].tail(120).copy()
-    detail_df = detail_df.reset_index().rename(columns={detail_df.reset_index().columns[0]: "Date"})
+    detail_df = detail_df.reset_index()
+    first_col = detail_df.columns[0]
+    detail_df = detail_df.rename(columns={first_col: "Date"})
     detail_df["Date"] = pd.to_datetime(detail_df["Date"]).dt.strftime("%Y-%m-%d")
     st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
