@@ -20,7 +20,10 @@ from utils import (
     render_pro_hero,
     render_pro_section,
     render_pro_info_card,
+    render_pro_kpi_row,
     format_number,
+    compute_signal_snapshot,
+    score_to_badge,
 )
 
 
@@ -97,7 +100,33 @@ def add_indicators(df: pd.DataFrame, selected_indicators: list):
     return df
 
 
-def render_pro_summary_card(stock_info, start_date, end_date, selected_indicators, df: pd.DataFrame, realtime_info: dict):
+def render_signal_board(signal: dict):
+    score = signal.get("score", 0)
+    badge_text, badge_class = score_to_badge(score)
+
+    render_pro_kpi_row([
+        {"label": "訊號分數", "value": f"{score:+d}", "delta": f"綜合評級：{badge_text}", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "均線結構", "value": signal["ma_trend"][0], "delta": "MA Structure", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "動能訊號", "value": signal["macd_trend"][0], "delta": "MACD Momentum", "delta_class": "pro-kpi-delta-flat"},
+    ])
+
+    render_pro_info_card(
+        "訊號燈號面板",
+        [
+            ("均線排列", signal["ma_trend"][0], signal["ma_trend"][1]),
+            ("KD交叉", signal["kd_cross"][0], signal["kd_cross"][1]),
+            ("MACD狀態", signal["macd_trend"][0], signal["macd_trend"][1]),
+            ("價格相對MA20", signal["price_vs_ma20"][0], signal["price_vs_ma20"][1]),
+            ("20日突破狀態", signal["breakout_20d"][0], signal["breakout_20d"][1]),
+            ("量能狀態", signal["volume_state"][0], signal["volume_state"][1]),
+            ("綜合評級", badge_text, badge_class),
+            ("盤勢評語", signal["comment"], ""),
+        ],
+        chips=["訊號燈號", "規則引擎", "多空判讀"]
+    )
+
+
+def render_summary_card(stock_info, start_date, end_date, selected_indicators, df: pd.DataFrame, realtime_info: dict):
     latest_close = df["收盤價"].iloc[-1] if "收盤價" in df.columns and not df.empty else None
     first_close = df["收盤價"].iloc[0] if "收盤價" in df.columns and not df.empty else None
 
@@ -118,10 +147,10 @@ def render_pro_summary_card(stock_info, start_date, end_date, selected_indicator
             ("技術指標", "、".join(selected_indicators) if selected_indicators else "無", ""),
             ("最新收盤", format_number(latest_close, 2), ""),
             ("區間漲跌", change_text, change_class),
-            ("即時現價", format_number(realtime_info.get("price"), 2), ""),
+            ("即時現價", format_number(realtime_info.get('price'), 2), ""),
             ("即時更新", realtime_info.get("update_time", "—"), ""),
         ],
-        chips=["K線分析", "多指標", "專業盤面"]
+        chips=["K線分析", "即時同步", "規則判讀"]
     )
 
 
@@ -133,7 +162,6 @@ def render_table(df: pd.DataFrame):
     base_cols = ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"]
     indicator_cols = ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "K", "D", "DIF", "DEA", "MACD_HIST"]
     show_cols = [c for c in base_cols + indicator_cols if c in df.columns]
-
     display_df = df[show_cols].copy()
 
     if "日期" in display_df.columns:
@@ -162,10 +190,10 @@ def render_table(df: pd.DataFrame):
         except Exception:
             return ""
         if v > 0:
-            return "color: #dc2626; font-weight: 700;"
+            return "color: #dc2626; font-weight: 800;"
         elif v < 0:
-            return "color: #059669; font-weight: 700;"
-        return "color: #64748b;"
+            return "color: #059669; font-weight: 800;"
+        return "color: #64748b; font-weight: 700;"
 
     styler = display_df.style.format(format_dict, na_rep="—")
     if "漲跌" in display_df.columns:
@@ -178,97 +206,89 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
     if df.empty:
         return
 
-    need_price_cols = all(col in df.columns for col in ["日期", "開盤價", "最高價", "最低價", "收盤價"])
     has_volume = "成交股數" in df.columns
 
-    bg_color = "#ffffff"
-    up_color = "#e53935"
-    down_color = "#26a69a"
+    render_pro_section("K線主圖", "以 K 棒、均線與成交量為主，搭配訊號燈號做趨勢判讀")
 
-    if need_price_cols:
-        render_pro_section("K線主圖", "主圖整合 K 棒、均線與成交量，適合做趨勢與節奏判讀")
-
-        if has_volume:
-            fig = make_subplots(
-                rows=2,
-                cols=1,
-                shared_xaxes=True,
-                vertical_spacing=0.04,
-                row_heights=[0.72, 0.28]
-            )
-        else:
-            fig = make_subplots(rows=1, cols=1)
-
-        fig.add_trace(
-            go.Candlestick(
-                x=df["日期"],
-                open=df["開盤價"],
-                high=df["最高價"],
-                low=df["最低價"],
-                close=df["收盤價"],
-                name="K線",
-                increasing_line_color=up_color,
-                decreasing_line_color=down_color,
-            ),
-            row=1,
-            col=1
+    if has_volume:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=[0.72, 0.28]
         )
+    else:
+        fig = make_subplots(rows=1, cols=1)
 
-        ma_colors = {
-            "MA5": "#3b82f6",
-            "MA10": "#ef4444",
-            "MA20": "#f59e0b",
-            "MA60": "#8b5cf6",
-            "MA120": "#64748b",
-            "MA240": "#0f172a",
-        }
+    fig.add_trace(
+        go.Candlestick(
+            x=df["日期"],
+            open=df["開盤價"],
+            high=df["最高價"],
+            low=df["最低價"],
+            close=df["收盤價"],
+            name="K線",
+            increasing_line_color="#e53935",
+            decreasing_line_color="#26a69a",
+        ),
+        row=1,
+        col=1
+    )
 
-        for ma_name, color in ma_colors.items():
-            if ma_name in selected_indicators and ma_name in df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df["日期"],
-                        y=df[ma_name],
-                        mode="lines",
-                        name=ma_name,
-                        line=dict(width=2.2, color=color),
-                    ),
-                    row=1,
-                    col=1
-                )
+    ma_colors = {
+        "MA5": "#3b82f6",
+        "MA10": "#ef4444",
+        "MA20": "#f59e0b",
+        "MA60": "#8b5cf6",
+        "MA120": "#64748b",
+        "MA240": "#0f172a",
+    }
 
-        if has_volume:
-            volume_colors = []
-            for _, row_data in df.iterrows():
-                open_p = row_data.get("開盤價")
-                close_p = row_data.get("收盤價")
-                if pd.notna(close_p) and pd.notna(open_p) and close_p >= open_p:
-                    volume_colors.append("rgba(229,57,53,0.6)")
-                else:
-                    volume_colors.append("rgba(38,166,154,0.6)")
-
+    for ma_name, color in ma_colors.items():
+        if ma_name in selected_indicators and ma_name in df.columns:
             fig.add_trace(
-                go.Bar(
+                go.Scatter(
                     x=df["日期"],
-                    y=df["成交股數"],
-                    name="成交量",
-                    marker_color=volume_colors,
+                    y=df[ma_name],
+                    mode="lines",
+                    name=ma_name,
+                    line=dict(width=2.2, color=color),
                 ),
-                row=2,
+                row=1,
                 col=1
             )
 
-        fig.update_layout(
-            height=820 if has_volume else 560,
-            xaxis_rangeslider_visible=False,
-            hovermode="x unified",
-            plot_bgcolor=bg_color,
-            paper_bgcolor=bg_color,
-            margin=dict(l=20, r=20, t=20, b=20),
-            legend=dict(orientation="h", y=1.02, x=0),
+    if has_volume:
+        volume_colors = []
+        for _, row_data in df.iterrows():
+            if row_data["收盤價"] >= row_data["開盤價"]:
+                volume_colors.append("rgba(229,57,53,0.6)")
+            else:
+                volume_colors.append("rgba(38,166,154,0.6)")
+
+        fig.add_trace(
+            go.Bar(
+                x=df["日期"],
+                y=df["成交股數"],
+                name="成交量",
+                marker_color=volume_colors,
+            ),
+            row=2,
+            col=1
         )
 
-        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    fig.update_layout(
+        height=820 if has_volume else 560,
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        margin=dict(l=20, r=20, t=20, b=20),
+        legend=dict(orientation="h", y=1.02, x=0),
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
     if "KD" in selected_indicators and all(col in df.columns for col in ["日期", "K", "D"]):
         with st.expander("查看 KD 指標", expanded=False):
@@ -300,8 +320,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析",
-    "專業盤面版｜整合即時資訊、歷史K線、均線、KD、MACD 與匯出能力"
+    "歷史K線分析｜訊號燈號版",
+    "多空燈號、規則引擎、K線盤面與技術指標整合，讓你不是只看圖，而是能快速判斷方向。"
 )
 
 if not group_names:
@@ -392,15 +412,10 @@ if query_btn or selected_stock:
         st.stop()
 
     df = add_indicators(df, selected_indicators)
+    signal = compute_signal_snapshot(df)
 
-    render_pro_summary_card(
-        selected_stock,
-        start_date,
-        end_date,
-        selected_indicators,
-        df,
-        realtime_info
-    )
+    render_summary_card(selected_stock, start_date, end_date, selected_indicators, df, realtime_info)
+    render_signal_board(signal)
 
     download_df = df.copy()
     if "日期" in download_df.columns:
@@ -419,7 +434,7 @@ if query_btn or selected_stock:
         )
 
     render_chart(df, selected_indicators)
-    render_pro_section("歷史資料表", "表格保留技術指標欄位，方便人工核對與匯出")
+    render_pro_section("歷史資料表", "燈號判讀完成後，可回到原始數值表進行二次驗證")
     render_table(df)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
