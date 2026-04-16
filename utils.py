@@ -1,10 +1,38 @@
+import io
+import json
+import os
 import time
-import requests
-import urllib3
+from datetime import date, datetime, timedelta
+
 import pandas as pd
+import requests
 import streamlit as st
+import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def to_number(value):
+    if value is None:
+        return None
+    text = str(value).replace(",", "").strip()
+    if text in ["", "-", "--", "—", "None", "null"]:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def format_number(value, digits=2):
+    if value is None:
+        return "—"
+    try:
+        if digits == 0:
+            return f"{float(value):,.0f}"
+        return f"{float(value):,.{digits}f}"
+    except Exception:
+        return "—"
+
+
 def _safe_text(value):
     if value is None:
         return ""
@@ -206,19 +234,19 @@ def render_realtime_info_card(info: dict, title: str = "即時資訊"):
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("現價", format_number(price, 2) if price is not None else "—", delta=delta_text)
+        st.metric("現價", format_number(price, 2), delta=delta_text)
     with c2:
-        st.metric("開盤", format_number(open_price, 2) if open_price is not None else "—")
+        st.metric("開盤", format_number(open_price, 2))
     with c3:
-        st.metric("最高", format_number(high_price, 2) if high_price is not None else "—")
+        st.metric("最高", format_number(high_price, 2))
     with c4:
-        st.metric("最低", format_number(low_price, 2) if low_price is not None else "—")
+        st.metric("最低", format_number(low_price, 2))
 
     c5, c6 = st.columns(2)
     with c5:
-        st.metric("總量", format_number(total_volume, 0) if total_volume is not None else "—")
+        st.metric("總量", format_number(total_volume, 0))
     with c6:
-        st.metric("昨收", format_number(prev_close, 2) if prev_close is not None else "—")
+        st.metric("昨收", format_number(prev_close, 2))
 
 
 def render_realtime_table(df: pd.DataFrame, height: int = 520):
