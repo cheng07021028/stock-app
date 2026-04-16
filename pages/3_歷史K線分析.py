@@ -509,13 +509,13 @@ def render_table(df: pd.DataFrame):
     st.dataframe(styler, use_container_width=True, hide_index=True, height=760)
 
 
-def render_chart(df: pd.DataFrame, selected_indicators: list):
+def render_chart(df: pd.DataFrame, selected_indicators: list, selected_events: list):
     if df.empty:
         return
 
     has_volume = "成交股數" in df.columns
 
-    render_pro_section("K線主圖", "主圖直接標出起漲點、起跌點與交叉點，不再只是單純看K棒")
+    render_pro_section("K線主圖", "可自行選擇圖上顯示哪些事件，避免標記太滿")
 
     if has_volume:
         fig = make_subplots(
@@ -566,7 +566,9 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 col=1
             )
 
-    def add_marker(flag_col, y_col, name, symbol, color):
+    def add_marker(flag_col, y_col, name, symbol, color, event_key):
+        if event_key not in selected_events:
+            return
         if flag_col in df.columns and y_col in df.columns:
             sub = df[df[flag_col] == True].copy()
             if not sub.empty:
@@ -582,10 +584,10 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                     col=1
                 )
 
-    add_marker("起漲點", "最低價", "起漲點", "triangle-up", "#16a34a")
-    add_marker("起跌點", "最高價", "起跌點", "triangle-down", "#dc2626")
-    add_marker("MA黃金交叉", "收盤價", "MA黃金交叉", "star", "#2563eb")
-    add_marker("MA死亡交叉", "收盤價", "MA死亡交叉", "x", "#7c2d12")
+    add_marker("起漲點", "最低價", "起漲點", "triangle-up", "#16a34a", "起漲點")
+    add_marker("起跌點", "最高價", "起跌點", "triangle-down", "#dc2626", "起跌點")
+    add_marker("MA黃金交叉", "收盤價", "MA黃金交叉", "star", "#2563eb", "MA交叉")
+    add_marker("MA死亡交叉", "收盤價", "MA死亡交叉", "x", "#7c2d12", "MA交叉")
 
     if has_volume:
         volume_colors = []
@@ -624,19 +626,20 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
             kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K", line=dict(width=2.5)))
             kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D", line=dict(width=2.5)))
 
-            add_kd_g = df[df["KD黃金交叉"] == True] if "KD黃金交叉" in df.columns else pd.DataFrame()
-            add_kd_d = df[df["KD死亡交叉"] == True] if "KD死亡交叉" in df.columns else pd.DataFrame()
+            if "KD交叉" in selected_events:
+                add_kd_g = df[df["KD黃金交叉"] == True] if "KD黃金交叉" in df.columns else pd.DataFrame()
+                add_kd_d = df[df["KD死亡交叉"] == True] if "KD死亡交叉" in df.columns else pd.DataFrame()
 
-            if not add_kd_g.empty:
-                kd_fig.add_trace(go.Scatter(
-                    x=add_kd_g["日期"], y=add_kd_g["K"], mode="markers", name="KD黃金交叉",
-                    marker=dict(symbol="triangle-up", size=11, color="#16a34a")
-                ))
-            if not add_kd_d.empty:
-                kd_fig.add_trace(go.Scatter(
-                    x=add_kd_d["日期"], y=add_kd_d["K"], mode="markers", name="KD死亡交叉",
-                    marker=dict(symbol="triangle-down", size=11, color="#dc2626")
-                ))
+                if not add_kd_g.empty:
+                    kd_fig.add_trace(go.Scatter(
+                        x=add_kd_g["日期"], y=add_kd_g["K"], mode="markers", name="KD黃金交叉",
+                        marker=dict(symbol="triangle-up", size=11, color="#16a34a")
+                    ))
+                if not add_kd_d.empty:
+                    kd_fig.add_trace(go.Scatter(
+                        x=add_kd_d["日期"], y=add_kd_d["K"], mode="markers", name="KD死亡交叉",
+                        marker=dict(symbol="triangle-down", size=11, color="#dc2626")
+                    ))
 
             kd_fig.update_layout(height=340, hovermode="x unified")
             st.plotly_chart(kd_fig, use_container_width=True, config={"displaylogo": False})
@@ -648,19 +651,20 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
             macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF", line=dict(width=2.5)))
             macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA", line=dict(width=2.5)))
 
-            add_macd_g = df[df["MACD黃金交叉"] == True] if "MACD黃金交叉" in df.columns else pd.DataFrame()
-            add_macd_d = df[df["MACD死亡交叉"] == True] if "MACD死亡交叉" in df.columns else pd.DataFrame()
+            if "MACD交叉" in selected_events:
+                add_macd_g = df[df["MACD黃金交叉"] == True] if "MACD黃金交叉" in df.columns else pd.DataFrame()
+                add_macd_d = df[df["MACD死亡交叉"] == True] if "MACD死亡交叉" in df.columns else pd.DataFrame()
 
-            if not add_macd_g.empty:
-                macd_fig.add_trace(go.Scatter(
-                    x=add_macd_g["日期"], y=add_macd_g["DIF"], mode="markers", name="MACD黃金交叉",
-                    marker=dict(symbol="triangle-up", size=11, color="#16a34a")
-                ))
-            if not add_macd_d.empty:
-                macd_fig.add_trace(go.Scatter(
-                    x=add_macd_d["日期"], y=add_macd_d["DIF"], mode="markers", name="MACD死亡交叉",
-                    marker=dict(symbol="triangle-down", size=11, color="#dc2626")
-                ))
+                if not add_macd_g.empty:
+                    macd_fig.add_trace(go.Scatter(
+                        x=add_macd_g["日期"], y=add_macd_g["DIF"], mode="markers", name="MACD黃金交叉",
+                        marker=dict(symbol="triangle-up", size=11, color="#16a34a")
+                    ))
+                if not add_macd_d.empty:
+                    macd_fig.add_trace(go.Scatter(
+                        x=add_macd_d["日期"], y=add_macd_d["DIF"], mode="markers", name="MACD死亡交叉",
+                        marker=dict(symbol="triangle-down", size=11, color="#dc2626")
+                    ))
 
             macd_fig.update_layout(height=360, hovermode="x unified")
             st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
@@ -678,8 +682,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜事件說明版",
-    "補上最近事件的文字摘要與清單，讓你不只看到標記，也能快速讀懂最近節奏。"
+    "歷史K線分析｜事件篩選版",
+    "可自行控制要顯示哪些事件標記，盤面更乾淨，事件判讀更聚焦。"
 )
 
 if not group_names:
@@ -755,6 +759,12 @@ with st.form("history_query_form", clear_on_submit=False):
         default=["MA5", "MA10", "MA20", "KD", "MACD"]
     )
 
+    selected_events = st.multiselect(
+        "事件篩選",
+        ["起漲點", "起跌點", "MA交叉", "KD交叉", "MACD交叉"],
+        default=["起漲點", "起跌點", "MA交叉", "KD交叉", "MACD交叉"]
+    )
+
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
 selected_stock = searched_stock if searched_stock is not None else group_stock
@@ -824,7 +834,7 @@ if query_btn or selected_stock:
             use_container_width=True
         )
 
-    render_chart(df, selected_indicators)
+    render_chart(df, selected_indicators, selected_events)
     render_pro_section("歷史資料表", "事件點、燈號、支撐壓力與原始數值整合檢視")
     render_table(df)
 
