@@ -8,6 +8,7 @@ from utils import (
     get_font_scale,
     search_stock_candidates,
     build_stock_candidate_labels,
+    validate_stock_input,
 )
 
 from watchlist_ui_state import (
@@ -126,7 +127,7 @@ else:
             selected_code = str(selected_row["證券代號"]).strip()
             selected_name = str(selected_row["證券名稱"]).strip()
         elif stock_keyword.strip():
-            st.info("查無符合股票，仍可手動輸入代號與名稱新增。")
+            st.info("查無符合股票，仍可手動輸入代號與名稱，但系統會在加入前驗證。")
 
         d1, d2 = st.columns(2)
 
@@ -158,30 +159,45 @@ else:
         stock_code = str(stock_code).strip()
         stock_name = str(stock_name).strip()
 
-        if not stock_code:
-            st.warning("請輸入或選擇股票。")
+        if not stock_code and not stock_name:
+            st.warning("請輸入股票名稱或代號。")
         else:
-            current_items = watchlist_dict.get(selected_group, [])
-            exists = any(str(item.get("code", "")).strip() == stock_code for item in current_items)
+            validate_result = validate_stock_input(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                query_date=lookup_date
+            )
 
-            if exists:
-                st.warning(f"{stock_code} 已存在於群組「{selected_group}」。")
+            if not validate_result["is_valid"]:
+                st.error(validate_result["message"])
             else:
-                current_items.append({
-                    "code": stock_code,
-                    "name": stock_name
-                })
-                watchlist_dict[selected_group] = current_items
-                save_watchlist(watchlist_dict)
+                final_code = validate_result["code"]
+                final_name = validate_result["name"]
 
-                st.session_state.wl_selected_group = selected_group
-                st.session_state.wl_stock_keyword = stock_keyword
-                st.session_state.wl_selected_candidate_label = selected_candidate_label
-                st.session_state.wl_manual_code = stock_code
-                st.session_state.wl_manual_name = stock_name
+                current_items = watchlist_dict.get(selected_group, [])
+                exists = any(str(item.get("code", "")).strip() == final_code for item in current_items)
 
-                st.success(f"已加入 {stock_name or stock_code} 到群組「{selected_group}」")
-                st.rerun()
+                if exists:
+                    st.warning(f"{final_name}（{final_code}）已存在於群組「{selected_group}」。")
+                else:
+                    current_items.append({
+                        "code": final_code,
+                        "name": final_name
+                    })
+                    watchlist_dict[selected_group] = current_items
+                    save_watchlist(watchlist_dict)
+
+                    st.session_state.wl_selected_group = selected_group
+                    st.session_state.wl_stock_keyword = stock_keyword
+                    st.session_state.wl_selected_candidate_label = selected_candidate_label
+                    st.session_state.wl_manual_code = final_code
+                    st.session_state.wl_manual_name = final_name
+
+                    if validate_result["message"]:
+                        st.info(validate_result["message"])
+
+                    st.success(f"已加入 {final_name}（{final_code}）到群組「{selected_group}」")
+                    st.rerun()
 
 # =========================
 # 群組內容管理
