@@ -319,15 +319,19 @@ def _find_stock_by_code_or_name(keyword: str) -> tuple[str, str, str]:
     return "", "", ""
 
 
-def _ensure_group(group_name: str):
+def _create_group(group_name: str) -> tuple[bool, str]:
     g = _safe_str(group_name)
     if not g:
-        return
+        return False, "請輸入群組名稱。"
+
     watchlist = st.session_state[_k("watchlist")]
-    if g not in watchlist:
-        watchlist[g] = []
+    if g in watchlist:
+        return False, f"群組已存在：{g}"
+
+    watchlist[g] = []
     st.session_state[_k("watchlist")] = watchlist
     st.session_state[_k("selected_group")] = g
+    return True, f"已新增群組：{g}"
 
 
 def _add_stock(group_name: str, code: str, name: str = "", market: str = "") -> tuple[bool, str]:
@@ -400,12 +404,17 @@ def _delete_group(group_name: str) -> tuple[bool, str]:
     g = _safe_str(group_name)
     watchlist = st.session_state[_k("watchlist")]
 
-    if not g or g not in watchlist:
+    if not g:
+        return False, "請先選擇群組。"
+    if g not in watchlist:
         return False, "群組不存在。"
 
     del watchlist[g]
     st.session_state[_k("watchlist")] = watchlist
-    _repair_selected_group()
+
+    groups = list(watchlist.keys())
+    st.session_state[_k("selected_group")] = groups[0] if groups else ""
+
     return True, f"已刪除群組：{g}"
 
 
@@ -561,8 +570,8 @@ def main():
     c1, c2, c3 = st.columns([3, 2, 2])
 
     with c1:
-        group_options = list(watchlist.keys()) if watchlist else []
-        st.selectbox("目前群組", options=group_options if group_options else [""], key=_k("selected_group"))
+        group_options = list(watchlist.keys()) if watchlist else [""]
+        st.selectbox("目前群組", options=group_options, key=_k("selected_group"))
 
     with c2:
         st.text_input("新增群組名稱", key=_k("new_group_name"), placeholder="例如：AI / 半導體 / 高股息")
@@ -570,28 +579,23 @@ def main():
     with c3:
         if st.button("新增群組", use_container_width=True, type="primary"):
             new_group = _safe_str(st.session_state.get(_k("new_group_name"), ""))
-            if not new_group:
-                _set_status("請輸入群組名稱。", "warning")
-            elif new_group in watchlist:
-                _set_status(f"群組已存在：{new_group}", "warning")
-            else:
-                _ensure_group(new_group)
-                _persist_watchlist(f"已新增群組：{new_group}")
+            ok, msg = _create_group(new_group)
+            if ok:
+                _persist_watchlist(msg)
                 st.session_state[_k("new_group_name")] = ""
-                st.rerun()
+            else:
+                _set_status(msg, "warning")
+            st.rerun()
 
     d1, d2 = st.columns([2, 2])
     with d1:
         if st.button("刪除目前群組", use_container_width=True):
-            if not selected_group:
-                _set_status("目前沒有可刪除的群組。", "warning")
+            ok, msg = _delete_group(_safe_str(st.session_state.get(_k("selected_group"), "")))
+            if ok:
+                _persist_watchlist(msg)
             else:
-                ok, msg = _delete_group(selected_group)
-                if ok:
-                    _persist_watchlist(msg)
-                else:
-                    _set_status(msg, "warning")
-                st.rerun()
+                _set_status(msg, "warning")
+            st.rerun()
 
     with d2:
         if st.button("手動儲存自選股", use_container_width=True):
@@ -600,10 +604,14 @@ def main():
 
     render_pro_section("單筆新增股票")
 
+    add_group_options = list(st.session_state[_k("watchlist")].keys()) if st.session_state[_k("watchlist")] else [""]
+    if _safe_str(st.session_state.get(_k("add_group_select"), "")) not in add_group_options:
+        st.session_state[_k("add_group_select")] = add_group_options[0] if add_group_options else ""
+
     a1, a2, a3, a4 = st.columns([2, 2, 2, 2])
 
     with a1:
-        add_group = st.selectbox("加入到群組", options=list(watchlist.keys()) if watchlist else [""], key=_k("add_group_select"))
+        add_group = st.selectbox("加入到群組", options=add_group_options, key=_k("add_group_select"))
 
     with a2:
         st.text_input("股票代碼（可直接打名稱）", key=_k("add_code"), placeholder="例如：2330 或 台積電")
@@ -662,12 +670,16 @@ def main():
         placeholder="2330,台積電,上市\n2454,聯發科\n3017",
     )
 
+    bulk_group_options = list(st.session_state[_k("watchlist")].keys()) if st.session_state[_k("watchlist")] else [""]
+    if _safe_str(st.session_state.get(_k("bulk_group_select"), "")) not in bulk_group_options:
+        st.session_state[_k("bulk_group_select")] = bulk_group_options[0] if bulk_group_options else ""
+
     e1, e2 = st.columns([2, 2])
     with e1:
-        bulk_group = st.selectbox("批次加入到群組", options=list(watchlist.keys()) if watchlist else [""], key=_k("bulk_group_select"))
+        bulk_group = st.selectbox("批次加入到群組", options=bulk_group_options, key=_k("bulk_group_select"))
     with e2:
         if st.button("批次加入", use_container_width=True, type="primary"):
-            ok_count, messages = _apply_bulk_add(bulk_group, st.session_state.get(_k("bulk_text"), ""))
+            ok_count, _ = _apply_bulk_add(bulk_group, st.session_state.get(_k("bulk_text"), ""))
             if ok_count > 0:
                 _persist_watchlist(f"批次加入完成：成功 {ok_count} 筆")
                 st.session_state[_k("bulk_text_next")] = ""
@@ -689,7 +701,7 @@ def main():
             [
                 ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json 與 data/watchlist.json。", ""),
                 ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
-                ("建議作法", "先建立群組，再用單筆或批次方式加入股票。", ""),
+                ("刪除群組", "會立即寫回檔案，並自動切到下一個有效群組。", ""),
                 ("批次格式", "每行：代碼,名稱,市場別；名稱與市場別可省略。", ""),
             ],
         )
@@ -707,11 +719,13 @@ def main():
 
     render_pro_section("目前群組明細")
 
-    current_items = watchlist.get(selected_group, []) if selected_group else []
+    current_items = st.session_state[_k("watchlist")].get(_safe_str(st.session_state.get(_k("selected_group"), "")), [])
+    current_group_name = _safe_str(st.session_state.get(_k("selected_group"), ""))
+
     current_df = pd.DataFrame(
         [
             {
-                "群組": selected_group,
+                "群組": current_group_name,
                 "股票代號": _normalize_code(x.get("code")),
                 "股票名稱": _safe_str(x.get("name")),
                 "市場別": _safe_str(x.get("market")) or "上市",
@@ -734,7 +748,7 @@ def main():
         )
 
         if st.button("刪除這檔股票", use_container_width=True):
-            ok, msg = _delete_stock(selected_group, remove_code)
+            ok, msg = _delete_stock(current_group_name, remove_code)
             if ok:
                 _persist_watchlist(msg)
             else:
@@ -742,10 +756,11 @@ def main():
             st.rerun()
 
     render_pro_section("全部自選股總覽")
-    if overview_df.empty:
+    final_overview_df = _build_overview_df(st.session_state[_k("watchlist")])
+    if final_overview_df.empty:
         st.info("目前沒有任何自選股。")
     else:
-        st.dataframe(overview_df, use_container_width=True, hide_index=True)
+        st.dataframe(final_overview_df, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
