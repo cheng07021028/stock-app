@@ -1,56 +1,11 @@
-import json
-import os
 import streamlit as st
 
-st.set_page_config(page_title="自選股中心", page_icon="⭐", layout="wide")
-
-WATCHLIST_PATH = "watchlist.json"
-
-
-def load_watchlist():
-    if not os.path.exists(WATCHLIST_PATH):
-        return {}
-
-    try:
-        with open(WATCHLIST_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not isinstance(data, dict):
-            return {}
-
-        normalized = {}
-        for group_name, items in data.items():
-            group_name = str(group_name).strip()
-            if not group_name:
-                continue
-
-            normalized[group_name] = []
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        code = str(item.get("code", "")).strip()
-                        name = str(item.get("name", "")).strip()
-                        market = str(item.get("market", "")).strip() or "上市"
-
-                        if code:
-                            normalized[group_name].append({
-                                "code": code,
-                                "name": name if name else code,
-                                "market": market,
-                            })
-
-        return normalized
-    except Exception:
-        return {}
-
-
-def save_watchlist(data: dict):
-    try:
-        with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
+from utils import (
+    get_normalized_watchlist,
+    save_watchlist,
+    apply_font_scale,
+    get_font_scale,
+)
 
 
 def dedup_group_items(items):
@@ -75,10 +30,17 @@ def dedup_group_items(items):
     return result
 
 
-st.title("⭐ 自選股中心")
-st.caption("救援版｜管理群組與自選股票")
+st.set_page_config(page_title="自選股中心", page_icon="⭐", layout="wide")
 
-watchlist_dict = load_watchlist()
+if "font_scale" not in st.session_state:
+    st.session_state.font_scale = get_font_scale()
+
+apply_font_scale(st.session_state.font_scale)
+
+st.title("⭐ 自選股中心")
+st.caption("正式整合版｜管理群組與自選股票")
+
+watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 st.markdown("---")
@@ -150,7 +112,7 @@ else:
 st.markdown("---")
 st.subheader("目前自選股清單")
 
-watchlist_dict = load_watchlist()
+watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 if not group_names:
