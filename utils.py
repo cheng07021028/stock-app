@@ -18,6 +18,8 @@ WATCHLIST_CANDIDATES = [
     "data/watchlists.json",
 ]
 
+STATE_FILE = "last_query_state.json"
+
 
 def to_number(value):
     if value is None:
@@ -76,20 +78,63 @@ def _safe_num(value):
     return to_number(text)
 
 
-def _load_json_file(path):
+def parse_date_safe(value, fallback):
+    if not value:
+        return fallback
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
     except Exception:
-        return None
+        return fallback
+
+
+def load_last_query_state():
+    default_state = {
+        "quick_group": "",
+        "quick_stock_code": "",
+        "home_start": "",
+        "home_end": "",
+    }
+
+    if not os.path.exists(STATE_FILE):
+        return default_state
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for k, v in default_state.items():
+            if k not in data:
+                data[k] = v
+        return data
+    except Exception:
+        return default_state
+
+
+def save_last_query_state(quick_group="", quick_stock_code="", home_start=None, home_end=None):
+    data = {
+        "quick_group": quick_group or "",
+        "quick_stock_code": quick_stock_code or "",
+        "home_start": str(home_start) if home_start else "",
+        "home_end": str(home_end) if home_end else "",
+    }
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
 
 
 def load_watchlist_raw():
     for path in WATCHLIST_CANDIDATES:
         if os.path.exists(path):
-            data = _load_json_file(path)
-            if isinstance(data, dict):
-                return data
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
     return {}
 
 
@@ -133,7 +178,6 @@ def save_watchlist(data: dict, filepath: str = "watchlist.json"):
 def get_all_code_name_map(lookup_date: str = "") -> pd.DataFrame:
     rows = []
 
-    # TWSE 上市
     try:
         url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
         r = requests.get(url, timeout=30, verify=False)
@@ -162,7 +206,6 @@ def get_all_code_name_map(lookup_date: str = "") -> pd.DataFrame:
     except Exception:
         pass
 
-    # TPEx 上櫃
     try:
         url = "https://www.tpex.org.tw/openapi/v1/mkt/sm_mainboard"
         r = requests.get(url, timeout=30, verify=False)
@@ -173,9 +216,9 @@ def get_all_code_name_map(lookup_date: str = "") -> pd.DataFrame:
         code_col = None
         name_col = None
         for c in df.columns:
-            if "SecuritiesCompanyCode" in c or "股票代號" in c or "代號" == c:
+            if "SecuritiesCompanyCode" in c or "股票代號" in c or c == "代號":
                 code_col = c
-            if "CompanyName" in c or "股票名稱" in c or "名稱" == c:
+            if "CompanyName" in c or "股票名稱" in c or c == "名稱":
                 name_col = c
 
         if code_col and name_col:
@@ -194,8 +237,7 @@ def get_all_code_name_map(lookup_date: str = "") -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["code", "name", "market"])
 
-    df_all = pd.DataFrame(rows).drop_duplicates(subset=["code", "market"]).reset_index(drop=True)
-    return df_all
+    return pd.DataFrame(rows).drop_duplicates(subset=["code", "market"]).reset_index(drop=True)
 
 
 def get_stock_name_and_market(code: str, all_code_name_df: pd.DataFrame, manual_name: str = ""):
@@ -322,51 +364,6 @@ def get_realtime_stock_info(stock_no: str, stock_name: str = "", market_type: st
     }
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_realtime_watchlist_df(watchlist_dict: dict, query_date: str = "") -> pd.DataFrame:
-    all_code_name_df = get_all_code_name_map(query_date)
-    rows = []
-
-    for group_name, items in watchlist_dict.items():
-        for item in items:
-            code = str(item.get("code", "")).strip()
-            manual_name = str(item.get("name", "")).strip()
-
-            if not code:
-                continue
-
-            stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
-            info = get_realtime_stock_info(code, stock_name, market_type)
-
-            rows.append({
-                "群組": group_name,
-                "股票代號": code,
-                "股票名稱": stock_name,
-                "市場別": market_type,
-                "現價": info.get("price"),
-                "昨收": info.get("prev_close"),
-                "開盤": info.get("open"),
-                "最高": info.get("high"),
-                "最低": info.get("low"),
-                "漲跌": info.get("change"),
-                "漲跌幅(%)": info.get("change_pct"),
-                "總量": info.get("total_volume"),
-                "單量": info.get("trade_volume"),
-                "更新時間": info.get("update_time"),
-                "是否成功": info.get("ok", False),
-                "訊息": info.get("message", ""),
-            })
-
-    df = pd.DataFrame(rows)
-
-    if not df.empty:
-        for col in ["現價", "昨收", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)", "總量", "單量"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df
-
-
 def render_realtime_info_card(info: dict, title: str = "即時資訊"):
     if not info:
         st.info("目前沒有即時資訊。")
@@ -414,6 +411,51 @@ def render_realtime_info_card(info: dict, title: str = "即時資訊"):
         st.metric("總量", format_number(total_volume, 0))
     with c6:
         st.metric("昨收", format_number(prev_close, 2))
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_realtime_watchlist_df(watchlist_dict: dict, query_date: str = "") -> pd.DataFrame:
+    all_code_name_df = get_all_code_name_map(query_date)
+    rows = []
+
+    for group_name, items in watchlist_dict.items():
+        for item in items:
+            code = str(item.get("code", "")).strip()
+            manual_name = str(item.get("name", "")).strip()
+
+            if not code:
+                continue
+
+            stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
+            info = get_realtime_stock_info(code, stock_name, market_type)
+
+            rows.append({
+                "群組": group_name,
+                "股票代號": code,
+                "股票名稱": stock_name,
+                "市場別": market_type,
+                "現價": info.get("price"),
+                "昨收": info.get("prev_close"),
+                "開盤": info.get("open"),
+                "最高": info.get("high"),
+                "最低": info.get("low"),
+                "漲跌": info.get("change"),
+                "漲跌幅(%)": info.get("change_pct"),
+                "總量": info.get("total_volume"),
+                "單量": info.get("trade_volume"),
+                "更新時間": info.get("update_time"),
+                "是否成功": info.get("ok", False),
+                "訊息": info.get("message", ""),
+            })
+
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        for col in ["現價", "昨收", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)", "總量", "單量"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
 
 
 def render_realtime_table(df: pd.DataFrame, height: int = 520):
@@ -484,47 +526,29 @@ def get_history_data(stock_no: str, stock_name: str = "", market_type: str = "�
     for dt in month_starts:
         month_str = dt.strftime("%Y%m01")
 
-        if market_type == "上櫃":
-            try:
-                url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
-                params = {
-                    "date": dt.strftime("%Y/%m"),
-                    "id": stock_no,
-                    "response": "json",
-                }
-                r = requests.get(url, params=params, timeout=30, verify=False)
-                r.raise_for_status()
-                data = r.json()
+        try:
+            url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+            params = {
+                "response": "json",
+                "date": month_str,
+                "stockNo": stock_no,
+            }
+            r = requests.get(url, params=params, timeout=30, verify=False)
+            r.raise_for_status()
+            data = r.json()
 
-                aa_data = data.get("tables", [])
-                if not aa_data:
-                    continue
-            except Exception:
+            if data.get("stat") != "OK":
                 continue
-        else:
-            try:
-                url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-                params = {
-                    "response": "json",
-                    "date": month_str,
-                    "stockNo": stock_no,
-                }
-                r = requests.get(url, params=params, timeout=30, verify=False)
-                r.raise_for_status()
-                data = r.json()
 
-                if data.get("stat") != "OK":
-                    continue
-
-                rows = data.get("data", [])
-                cols = data.get("fields", [])
-                if not rows or not cols:
-                    continue
-
-                df_month = pd.DataFrame(rows, columns=cols)
-                frames.append(df_month)
-            except Exception:
+            rows = data.get("data", [])
+            cols = data.get("fields", [])
+            if not rows or not cols:
                 continue
+
+            df_month = pd.DataFrame(rows, columns=cols)
+            frames.append(df_month)
+        except Exception:
+            continue
 
     if not frames:
         return pd.DataFrame()
