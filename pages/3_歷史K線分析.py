@@ -39,6 +39,155 @@ def build_stock_options(items, lookup_date):
     return stock_options
 
 
+def inject_overview_card_css():
+    st.markdown(
+        """
+        <style>
+        .overview-card-wrap {
+            background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+            border: 1px solid #e6ebf2;
+            border-left: 6px solid #4a90e2;
+            border-radius: 16px;
+            padding: 18px 20px 18px 20px;
+            margin: 10px 0 18px 0;
+            box-shadow: 0 4px 14px rgba(31, 41, 55, 0.05);
+        }
+
+        .overview-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 14px;
+        }
+
+        .overview-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(160px, 1fr));
+            gap: 12px 14px;
+        }
+
+        .overview-item {
+            background: #f8fbff;
+            border: 1px solid #edf2f7;
+            border-radius: 12px;
+            padding: 12px 14px;
+            min-height: 72px;
+        }
+
+        .overview-item-wide {
+            grid-column: span 2;
+        }
+
+        .overview-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-bottom: 6px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+        }
+
+        .overview-value {
+            font-size: 17px;
+            color: #111827;
+            font-weight: 700;
+            line-height: 1.4;
+            word-break: break-word;
+        }
+
+        .overview-value-small {
+            font-size: 15px;
+            color: #111827;
+            font-weight: 600;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+
+        .value-up {
+            color: #d32f2f;
+            font-weight: 700;
+        }
+
+        .value-down {
+            color: #00897b;
+            font-weight: 700;
+        }
+
+        .value-flat {
+            color: #666;
+            font-weight: 700;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #eef6ff;
+            color: #1d4ed8;
+            border: 1px solid #dbeafe;
+            border-radius: 999px;
+            padding: 4px 10px;
+            margin: 3px 6px 3px 0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .signal-positive {
+            display: inline-block;
+            background: #eefaf0;
+            color: #2e7d32;
+            border: 1px solid #c8e6c9;
+            border-radius: 999px;
+            padding: 4px 10px;
+            margin: 3px 6px 3px 0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .signal-negative {
+            display: inline-block;
+            background: #fff1f0;
+            color: #c62828;
+            border: 1px solid #ffcdd2;
+            border-radius: 999px;
+            padding: 4px 10px;
+            margin: 3px 6px 3px 0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .signal-neutral {
+            display: inline-block;
+            background: #f3f4f6;
+            color: #6b7280;
+            border: 1px solid #e5e7eb;
+            border-radius: 999px;
+            padding: 4px 10px;
+            margin: 3px 6px 3px 0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        @media (max-width: 1200px) {
+            .overview-grid {
+                grid-template-columns: repeat(2, minmax(160px, 1fr));
+            }
+            .overview-item-wide {
+                grid-column: span 2;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .overview-grid {
+                grid-template-columns: 1fr;
+            }
+            .overview-item-wide {
+                grid-column: span 1;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def add_moving_averages(df: pd.DataFrame, selected_indicators: list) -> pd.DataFrame:
     if df.empty or "收盤價" not in df.columns:
         return df
@@ -136,75 +285,245 @@ def prepare_display_df(df: pd.DataFrame, selected_indicators: list) -> pd.DataFr
     return df
 
 
-def render_summary_metrics(df: pd.DataFrame):
-    if df.empty or "收盤價" not in df.columns:
-        return
+def get_recent_signal_text(df: pd.DataFrame, signal_name: str, signal_col: str):
+    if df.empty or signal_col not in df.columns or "日期" not in df.columns:
+        return '<span class="signal-neutral">無</span>'
 
-    latest_close = df["收盤價"].iloc[-1]
-    first_close = df["收盤價"].iloc[0]
-    price_change = latest_close - first_close
-    price_change_pct = (price_change / first_close * 100) if first_close not in [0, None] else 0
+    signal_df = df[df[signal_col] == True]
+    if signal_df.empty:
+        return '<span class="signal-neutral">無</span>'
 
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        st.metric("最新收盤價", f"{latest_close:,.2f}")
-    with m2:
-        st.metric("區間漲跌", f"{price_change:,.2f}")
-    with m3:
-        st.metric("區間漲跌幅", f"{price_change_pct:,.2f}%")
+    last_row = signal_df.iloc[-1]
+    signal_date = pd.to_datetime(last_row["日期"], errors="coerce")
+    date_text = "" if pd.isna(signal_date) else signal_date.strftime("%Y-%m-%d")
+
+    if "黃金交叉" in signal_name or "買點" in signal_name:
+        return f'<span class="signal-positive">{signal_name}：{date_text}</span>'
+    elif "死亡交叉" in signal_name or "賣點" in signal_name:
+        return f'<span class="signal-negative">{signal_name}：{date_text}</span>'
+    return f'<span class="signal-neutral">{signal_name}：{date_text}</span>'
 
 
-def render_signal_summary(df: pd.DataFrame, selected_indicators: list):
-    if df.empty or "日期" not in df.columns:
-        return
+def render_overview_card(group_name, stock_info, start_date, end_date, selected_indicators, df: pd.DataFrame):
+    stock_text = "尚未匹配"
+    market_text = "—"
 
-    signals = []
+    if stock_info is not None:
+        stock_text = f"{stock_info['name']}（{stock_info['code']}）"
+        market_text = stock_info.get("market", "—")
 
-    if "KD" in selected_indicators:
-        if "KD_GOLDEN" in df.columns:
-            kd_golden = df[df["KD_GOLDEN"]]
-            if not kd_golden.empty:
-                last_row = kd_golden.iloc[-1]
-                signals.append(f"KD 黃金交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+    indicator_html = "".join([f'<span class="badge">{x}</span>' for x in selected_indicators]) if selected_indicators else '<span class="badge">無</span>'
 
-        if "KD_DEATH" in df.columns:
-            kd_death = df[df["KD_DEATH"]]
-            if not kd_death.empty:
-                last_row = kd_death.iloc[-1]
-                signals.append(f"KD 死亡交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+    latest_close_text = "—"
+    price_change_text = "—"
+    price_change_pct_text = "—"
+    price_change_class = "value-flat"
 
-    if "MACD" in selected_indicators:
-        if "MACD_GOLDEN" in df.columns:
-            macd_golden = df[df["MACD_GOLDEN"]]
-            if not macd_golden.empty:
-                last_row = macd_golden.iloc[-1]
-                signals.append(f"MACD 黃金交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+    kd_signal_html = '<span class="signal-neutral">未啟用</span>'
+    macd_signal_html = '<span class="signal-neutral">未啟用</span>'
 
-        if "MACD_DEATH" in df.columns:
-            macd_death = df[df["MACD_DEATH"]]
-            if not macd_death.empty:
-                last_row = macd_death.iloc[-1]
-                signals.append(f"MACD 死亡交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+    if df is not None and not df.empty and "收盤價" in df.columns:
+        latest_close = df["收盤價"].iloc[-1]
+        first_close = df["收盤價"].iloc[0]
+        latest_close_text = f"{latest_close:,.2f}"
 
-    if signals:
-        st.markdown("### 訊號摘要")
-        for text in signals:
-            st.write(f"- {text}")
+        if pd.notna(first_close) and first_close != 0:
+            price_change = latest_close - first_close
+            price_change_pct = price_change / first_close * 100
+
+            if price_change > 0:
+                price_change_text = f"+{price_change:,.2f}"
+                price_change_pct_text = f"+{price_change_pct:,.2f}%"
+                price_change_class = "value-up"
+            elif price_change < 0:
+                price_change_text = f"{price_change:,.2f}"
+                price_change_pct_text = f"{price_change_pct:,.2f}%"
+                price_change_class = "value-down"
+            else:
+                price_change_text = f"{price_change:,.2f}"
+                price_change_pct_text = f"{price_change_pct:,.2f}%"
+                price_change_class = "value-flat"
+
+        if "KD" in selected_indicators:
+            kd_parts = []
+            if "KD_GOLDEN" in df.columns:
+                kd_parts.append(get_recent_signal_text(df, "KD黃金交叉", "KD_GOLDEN"))
+            if "KD_DEATH" in df.columns:
+                kd_parts.append(get_recent_signal_text(df, "KD死亡交叉", "KD_DEATH"))
+            kd_signal_html = "".join(kd_parts) if kd_parts else '<span class="signal-neutral">無</span>'
+
+        if "MACD" in selected_indicators:
+            macd_parts = []
+            if "MACD_GOLDEN" in df.columns:
+                macd_parts.append(get_recent_signal_text(df, "MACD黃金交叉", "MACD_GOLDEN"))
+            if "MACD_DEATH" in df.columns:
+                macd_parts.append(get_recent_signal_text(df, "MACD死亡交叉", "MACD_DEATH"))
+            macd_signal_html = "".join(macd_parts) if macd_parts else '<span class="signal-neutral">無</span>'
+
+    st.markdown(
+        f"""
+        <div class="overview-card-wrap">
+            <div class="overview-title">查詢總覽</div>
+            <div class="overview-grid">
+                <div class="overview-item">
+                    <div class="overview-label">群組</div>
+                    <div class="overview-value">{group_name if group_name else "—"}</div>
+                </div>
+
+                <div class="overview-item overview-item-wide">
+                    <div class="overview-label">股票</div>
+                    <div class="overview-value">{stock_text}</div>
+                </div>
+
+                <div class="overview-item">
+                    <div class="overview-label">市場別</div>
+                    <div class="overview-value">{market_text}</div>
+                </div>
+
+                <div class="overview-item overview-item-wide">
+                    <div class="overview-label">日期區間</div>
+                    <div class="overview-value-small">{start_date} ~ {end_date}</div>
+                </div>
+
+                <div class="overview-item">
+                    <div class="overview-label">最新收盤價</div>
+                    <div class="overview-value">{latest_close_text}</div>
+                </div>
+
+                <div class="overview-item">
+                    <div class="overview-label">區間漲跌</div>
+                    <div class="overview-value {price_change_class}">{price_change_text}</div>
+                </div>
+
+                <div class="overview-item">
+                    <div class="overview-label">區間漲跌幅</div>
+                    <div class="overview-value {price_change_class}">{price_change_pct_text}</div>
+                </div>
+
+                <div class="overview-item overview-item-wide">
+                    <div class="overview-label">技術指標</div>
+                    <div class="overview-value-small">{indicator_html}</div>
+                </div>
+
+                <div class="overview-item overview-item-wide">
+                    <div class="overview-label">最近 KD 訊號</div>
+                    <div class="overview-value-small">{kd_signal_html}</div>
+                </div>
+
+                <div class="overview-item overview-item-wide">
+                    <div class="overview-label">最近 MACD 訊號</div>
+                    <div class="overview-value-small">{macd_signal_html}</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_table(df: pd.DataFrame):
+    if df.empty:
+        st.info("目前沒有可顯示的資料。")
+        return
+
     base_cols = ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"]
-    ordered_indicator_cols = [
+    indicator_cols = [
         "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
         "K", "D", "DIF", "DEA", "MACD_HIST"
     ]
 
-    show_cols = [c for c in base_cols + ordered_indicator_cols if c in df.columns]
+    show_cols = [c for c in base_cols + indicator_cols if c in df.columns]
+    display_df = df[show_cols].copy() if show_cols else df.copy()
 
-    if show_cols:
-        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    if "日期" in display_df.columns:
+        display_df["日期"] = pd.to_datetime(display_df["日期"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    if "收盤價" in display_df.columns:
+        display_df["漲跌"] = display_df["收盤價"].diff()
+        cols = list(display_df.columns)
+        insert_at = cols.index("收盤價") + 1
+        ordered_cols = cols[:insert_at] + ["漲跌"] + [c for c in cols[insert_at:] if c != "漲跌"]
+        display_df = display_df[ordered_cols]
+
+    price_cols = [
+        "開盤價", "最高價", "最低價", "收盤價", "漲跌",
+        "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
+        "K", "D", "DIF", "DEA", "MACD_HIST"
+    ]
+    int_cols = ["成交股數", "成交金額", "成交筆數"]
+
+    format_dict = {}
+    for col in price_cols:
+        if col in display_df.columns:
+            format_dict[col] = "{:,.2f}"
+    for col in int_cols:
+        if col in display_df.columns:
+            format_dict[col] = "{:,.0f}"
+
+    def color_price_change(val):
+        if pd.isna(val):
+            return ""
+        try:
+            v = float(val)
+        except Exception:
+            return ""
+        if v > 0:
+            return "color: #d32f2f; font-weight: 600;"
+        elif v < 0:
+            return "color: #00897b; font-weight: 600;"
+        return "color: #666;"
+
+    styler = (
+        display_df.style
+        .format(format_dict, na_rep="—")
+        .applymap(color_price_change, subset=["漲跌"] if "漲跌" in display_df.columns else [])
+        .set_properties(**{
+            "text-align": "center",
+            "white-space": "nowrap"
+        })
+        .set_table_styles([
+            {
+                "selector": "thead th",
+                "props": [
+                    ("background-color", "#f7f9fc"),
+                    ("color", "#1f2937"),
+                    ("font-weight", "700"),
+                    ("font-size", "13px"),
+                    ("border-bottom", "1px solid #dbe2ea"),
+                    ("text-align", "center"),
+                    ("padding", "10px 8px"),
+                ],
+            },
+            {
+                "selector": "tbody td",
+                "props": [
+                    ("font-size", "13px"),
+                    ("padding", "8px 10px"),
+                    ("border-bottom", "1px solid #eef2f7"),
+                ],
+            },
+            {
+                "selector": "tbody tr:hover",
+                "props": [
+                    ("background-color", "#f8fbff"),
+                ],
+            },
+            {
+                "selector": "table",
+                "props": [
+                    ("border-collapse", "collapse"),
+                    ("width", "100%"),
+                ],
+            },
+        ])
+    )
+
+    st.dataframe(
+        styler,
+        use_container_width=True,
+        hide_index=True,
+        height=min(720, 80 + len(display_df) * 35)
+    )
 
 
 def render_chart(df: pd.DataFrame, selected_indicators: list):
@@ -214,6 +533,21 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
     need_price_cols = all(col in df.columns for col in ["日期", "開盤價", "最高價", "最低價", "收盤價"])
     has_volume = "成交股數" in df.columns
 
+    bg_color = "#ffffff"
+    grid_color = "rgba(180, 180, 180, 0.25)"
+    axis_color = "#444"
+    up_color = "#e53935"
+    down_color = "#26a69a"
+
+    ma_colors = {
+        "MA5": "#4A90E2",
+        "MA10": "#F44336",
+        "MA20": "#F5A623",
+        "MA60": "#8E44AD",
+        "MA120": "#7F8C8D",
+        "MA240": "#2C3E50",
+    }
+
     if need_price_cols:
         st.subheader("K線趨勢圖")
 
@@ -222,7 +556,7 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 rows=2,
                 cols=1,
                 shared_xaxes=True,
-                vertical_spacing=0.06,
+                vertical_spacing=0.04,
                 row_heights=[0.72, 0.28]
             )
         else:
@@ -236,12 +570,17 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 low=df["最低價"],
                 close=df["收盤價"],
                 name="K線",
+                increasing_line_color=up_color,
+                increasing_fillcolor="rgba(229, 57, 53, 0.85)",
+                decreasing_line_color=down_color,
+                decreasing_fillcolor="rgba(38, 166, 154, 0.85)",
+                whiskerwidth=0.5,
                 hovertemplate=(
-                    "日期: %{x|%Y-%m-%d}<br>"
-                    "開盤: %{open:.2f}<br>"
-                    "最高: %{high:.2f}<br>"
-                    "最低: %{low:.2f}<br>"
-                    "收盤: %{close:.2f}<extra></extra>"
+                    "日期：%{x|%Y-%m-%d}<br>"
+                    "開盤：%{open:.2f}<br>"
+                    "最高：%{high:.2f}<br>"
+                    "最低：%{low:.2f}<br>"
+                    "收盤：%{close:.2f}<extra></extra>"
                 )
             ),
             row=1,
@@ -257,8 +596,11 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                         y=df[ma_name],
                         mode="lines",
                         name=ma_name,
-                        line=dict(width=2),
-                        hovertemplate=f"日期: %{{x|%Y-%m-%d}}<br>{ma_name}: %{{y:.2f}}<extra></extra>"
+                        line=dict(
+                            width=2.3 if ma_name in ["MA5", "MA10", "MA20"] else 2,
+                            color=ma_colors.get(ma_name, "#666")
+                        ),
+                        hovertemplate=f"日期：%{{x|%Y-%m-%d}}<br>{ma_name}：%{{y:.2f}}<extra></extra>"
                     ),
                     row=1,
                     col=1
@@ -271,11 +613,11 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                     fig.add_trace(
                         go.Scatter(
                             x=kd_buy_df["日期"],
-                            y=kd_buy_df["收盤價"],
+                            y=kd_buy_df["收盤價"] * 0.985,
                             mode="markers",
                             name="KD買點",
-                            marker=dict(size=10, symbol="triangle-up", color="green"),
-                            hovertemplate="日期: %{x|%Y-%m-%d}<br>KD買點: %{y:.2f}<extra></extra>"
+                            marker=dict(size=12, symbol="triangle-up", color="#2E7D32", line=dict(color="white", width=1)),
+                            hovertemplate="日期：%{x|%Y-%m-%d}<br>KD買點：%{y:.2f}<extra></extra>"
                         ),
                         row=1,
                         col=1
@@ -287,11 +629,11 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                     fig.add_trace(
                         go.Scatter(
                             x=kd_sell_df["日期"],
-                            y=kd_sell_df["收盤價"],
+                            y=kd_sell_df["收盤價"] * 1.015,
                             mode="markers",
                             name="KD賣點",
-                            marker=dict(size=10, symbol="triangle-down", color="red"),
-                            hovertemplate="日期: %{x|%Y-%m-%d}<br>KD賣點: %{y:.2f}<extra></extra>"
+                            marker=dict(size=12, symbol="triangle-down", color="#C62828", line=dict(color="white", width=1)),
+                            hovertemplate="日期：%{x|%Y-%m-%d}<br>KD賣點：%{y:.2f}<extra></extra>"
                         ),
                         row=1,
                         col=1
@@ -304,11 +646,11 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                     fig.add_trace(
                         go.Scatter(
                             x=macd_buy_df["日期"],
-                            y=macd_buy_df["收盤價"],
+                            y=macd_buy_df["收盤價"] * 0.97,
                             mode="markers",
                             name="MACD買點",
-                            marker=dict(size=11, symbol="star", color="blue"),
-                            hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD買點: %{y:.2f}<extra></extra>"
+                            marker=dict(size=13, symbol="star", color="#1565C0", line=dict(color="white", width=1)),
+                            hovertemplate="日期：%{x|%Y-%m-%d}<br>MACD買點：%{y:.2f}<extra></extra>"
                         ),
                         row=1,
                         col=1
@@ -320,15 +662,27 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                     fig.add_trace(
                         go.Scatter(
                             x=macd_sell_df["日期"],
-                            y=macd_sell_df["收盤價"],
+                            y=macd_sell_df["收盤價"] * 1.03,
                             mode="markers",
                             name="MACD賣點",
-                            marker=dict(size=11, symbol="x", color="black"),
-                            hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD賣點: %{y:.2f}<extra></extra>"
+                            marker=dict(size=13, symbol="x", color="#111111", line=dict(color="white", width=1)),
+                            hovertemplate="日期：%{x|%Y-%m-%d}<br>MACD賣點：%{y:.2f}<extra></extra>"
                         ),
                         row=1,
                         col=1
                     )
+
+        latest_close = df["收盤價"].iloc[-1]
+        fig.add_hline(
+            y=latest_close,
+            line_width=1,
+            line_dash="dot",
+            line_color="rgba(80, 80, 80, 0.5)",
+            annotation_text=f"最新收盤 {latest_close:.2f}",
+            annotation_position="top right",
+            row=1,
+            col=1
+        )
 
         if has_volume:
             volume_colors = []
@@ -336,9 +690,9 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 open_p = row_data.get("開盤價")
                 close_p = row_data.get("收盤價")
                 if pd.notna(close_p) and pd.notna(open_p) and close_p >= open_p:
-                    volume_colors.append("#ef5350")
+                    volume_colors.append("rgba(229, 57, 53, 0.65)")
                 else:
-                    volume_colors.append("#26a69a")
+                    volume_colors.append("rgba(38, 166, 154, 0.65)")
 
             fig.add_trace(
                 go.Bar(
@@ -346,29 +700,66 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                     y=df["成交股數"],
                     name="成交量",
                     marker_color=volume_colors,
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>成交量: %{y:,.0f}<extra></extra>"
+                    hovertemplate="日期：%{x|%Y-%m-%d}<br>成交量：%{y:,.0f}<extra></extra>"
                 ),
                 row=2,
                 col=1
             )
 
         fig.update_layout(
-            height=760 if has_volume else 540,
+            height=780 if has_volume else 560,
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
+            plot_bgcolor=bg_color,
+            paper_bgcolor=bg_color,
+            margin=dict(l=20, r=20, t=20, b=20),
+            font=dict(size=13, color=axis_color),
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
                 y=1.02,
                 xanchor="left",
-                x=0
-            ),
-            margin=dict(l=20, r=20, t=20, b=20)
+                x=0,
+                bgcolor="rgba(255,255,255,0.85)",
+                bordercolor="rgba(0,0,0,0.08)",
+                borderwidth=1,
+                font=dict(size=12)
+            )
         )
 
-        fig.update_yaxes(title_text="股價", row=1, col=1)
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor=grid_color,
+            linecolor="rgba(0,0,0,0.15)",
+            tickfont=dict(size=12, color=axis_color),
+            showspikes=True,
+            spikemode="across",
+            spikecolor="rgba(100,100,100,0.4)",
+            spikethickness=1
+        )
+
+        fig.update_yaxes(
+            title_text="股價",
+            showgrid=True,
+            gridcolor=grid_color,
+            linecolor="rgba(0,0,0,0.15)",
+            tickfont=dict(size=12, color=axis_color),
+            title_font=dict(size=14, color=axis_color),
+            row=1,
+            col=1
+        )
+
         if has_volume:
-            fig.update_yaxes(title_text="成交量", row=2, col=1)
+            fig.update_yaxes(
+                title_text="成交量",
+                showgrid=True,
+                gridcolor=grid_color,
+                linecolor="rgba(0,0,0,0.15)",
+                tickfont=dict(size=12, color=axis_color),
+                title_font=dict(size=14, color=axis_color),
+                row=2,
+                col=1
+            )
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
@@ -382,7 +773,8 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 y=df["K"],
                 mode="lines",
                 name="K",
-                hovertemplate="日期: %{x|%Y-%m-%d}<br>K: %{y:.2f}<extra></extra>"
+                line=dict(color="#1E88E5", width=2.5),
+                hovertemplate="日期：%{x|%Y-%m-%d}<br>K：%{y:.2f}<extra></extra>"
             )
         )
         kd_fig.add_trace(
@@ -391,9 +783,12 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 y=df["D"],
                 mode="lines",
                 name="D",
-                hovertemplate="日期: %{x|%Y-%m-%d}<br>D: %{y:.2f}<extra></extra>"
+                line=dict(color="#FB8C00", width=2.5),
+                hovertemplate="日期：%{x|%Y-%m-%d}<br>D：%{y:.2f}<extra></extra>"
             )
         )
+        kd_fig.add_hline(y=80, line_dash="dot", line_color="rgba(200,0,0,0.4)", annotation_text="超買 80")
+        kd_fig.add_hline(y=20, line_dash="dot", line_color="rgba(0,150,0,0.4)", annotation_text="超賣 20")
 
         if "KD_GOLDEN" in df.columns:
             kd_buy_df = df[df["KD_GOLDEN"]]
@@ -404,8 +799,8 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                         y=kd_buy_df["K"],
                         mode="markers",
                         name="KD黃金交叉",
-                        marker=dict(size=10, symbol="triangle-up", color="green"),
-                        hovertemplate="日期: %{x|%Y-%m-%d}<br>KD黃金交叉: %{y:.2f}<extra></extra>"
+                        marker=dict(size=11, symbol="triangle-up", color="#2E7D32", line=dict(color="white", width=1)),
+                        hovertemplate="日期：%{x|%Y-%m-%d}<br>KD黃金交叉：%{y:.2f}<extra></extra>"
                     )
                 )
 
@@ -418,20 +813,36 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                         y=kd_sell_df["K"],
                         mode="markers",
                         name="KD死亡交叉",
-                        marker=dict(size=10, symbol="triangle-down", color="red"),
-                        hovertemplate="日期: %{x|%Y-%m-%d}<br>KD死亡交叉: %{y:.2f}<extra></extra>"
+                        marker=dict(size=11, symbol="triangle-down", color="#C62828", line=dict(color="white", width=1)),
+                        hovertemplate="日期：%{x|%Y-%m-%d}<br>KD死亡交叉：%{y:.2f}<extra></extra>"
                     )
                 )
 
         kd_fig.update_layout(
-            height=320,
+            height=340,
             hovermode="x unified",
-            margin=dict(l=20, r=20, t=20, b=20)
+            plot_bgcolor=bg_color,
+            paper_bgcolor=bg_color,
+            margin=dict(l=20, r=20, t=20, b=20),
+            font=dict(size=13, color=axis_color),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                bgcolor="rgba(255,255,255,0.85)"
+            )
         )
+        kd_fig.update_xaxes(showgrid=True, gridcolor=grid_color)
+        kd_fig.update_yaxes(showgrid=True, gridcolor=grid_color, range=[0, 100])
+
         st.plotly_chart(kd_fig, use_container_width=True, config={"displaylogo": False})
 
     if "MACD" in selected_indicators and all(col in df.columns for col in ["日期", "DIF", "DEA", "MACD_HIST"]):
         st.subheader("MACD 指標")
+
+        macd_colors = ["rgba(229, 57, 53, 0.65)" if v >= 0 else "rgba(38, 166, 154, 0.65)" for v in df["MACD_HIST"]]
 
         macd_fig = go.Figure()
         macd_fig.add_trace(
@@ -439,7 +850,8 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 x=df["日期"],
                 y=df["MACD_HIST"],
                 name="MACD柱",
-                hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD柱: %{y:.2f}<extra></extra>"
+                marker_color=macd_colors,
+                hovertemplate="日期：%{x|%Y-%m-%d}<br>MACD柱：%{y:.2f}<extra></extra>"
             )
         )
         macd_fig.add_trace(
@@ -448,7 +860,8 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 y=df["DIF"],
                 mode="lines",
                 name="DIF",
-                hovertemplate="日期: %{x|%Y-%m-%d}<br>DIF: %{y:.2f}<extra></extra>"
+                line=dict(color="#1565C0", width=2.5),
+                hovertemplate="日期：%{x|%Y-%m-%d}<br>DIF：%{y:.2f}<extra></extra>"
             )
         )
         macd_fig.add_trace(
@@ -457,7 +870,8 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 y=df["DEA"],
                 mode="lines",
                 name="DEA",
-                hovertemplate="日期: %{x|%Y-%m-%d}<br>DEA: %{y:.2f}<extra></extra>"
+                line=dict(color="#E53935", width=2.5),
+                hovertemplate="日期：%{x|%Y-%m-%d}<br>DEA：%{y:.2f}<extra></extra>"
             )
         )
 
@@ -470,8 +884,8 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                         y=macd_buy_df["DIF"],
                         mode="markers",
                         name="MACD黃金交叉",
-                        marker=dict(size=10, symbol="triangle-up", color="blue"),
-                        hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD黃金交叉: %{y:.2f}<extra></extra>"
+                        marker=dict(size=11, symbol="triangle-up", color="#2E7D32", line=dict(color="white", width=1)),
+                        hovertemplate="日期：%{x|%Y-%m-%d}<br>MACD黃金交叉：%{y:.2f}<extra></extra>"
                     )
                 )
 
@@ -484,16 +898,31 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                         y=macd_sell_df["DIF"],
                         mode="markers",
                         name="MACD死亡交叉",
-                        marker=dict(size=10, symbol="triangle-down", color="black"),
-                        hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD死亡交叉: %{y:.2f}<extra></extra>"
+                        marker=dict(size=11, symbol="triangle-down", color="#C62828", line=dict(color="white", width=1)),
+                        hovertemplate="日期：%{x|%Y-%m-%d}<br>MACD死亡交叉：%{y:.2f}<extra></extra>"
                     )
                 )
 
+        macd_fig.add_hline(y=0, line_dash="dot", line_color="rgba(80,80,80,0.4)")
         macd_fig.update_layout(
             height=360,
             hovermode="x unified",
-            margin=dict(l=20, r=20, t=20, b=20)
+            plot_bgcolor=bg_color,
+            paper_bgcolor=bg_color,
+            margin=dict(l=20, r=20, t=20, b=20),
+            font=dict(size=13, color=axis_color),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0,
+                bgcolor="rgba(255,255,255,0.85)"
+            )
         )
+        macd_fig.update_xaxes(showgrid=True, gridcolor=grid_color)
+        macd_fig.update_yaxes(showgrid=True, gridcolor=grid_color)
+
         st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
 
 
@@ -530,6 +959,7 @@ if "font_scale" not in st.session_state:
     st.session_state.font_scale = get_font_scale()
 
 apply_font_scale(st.session_state.font_scale)
+inject_overview_card_css()
 
 last_state = load_last_query_state()
 today_dt = date.today()
@@ -549,7 +979,6 @@ if "kline_start" not in st.session_state:
     st.session_state.kline_start = home_start
 if "kline_end" not in st.session_state:
     st.session_state.kline_end = home_end
-
 if "kline_result_df" not in st.session_state:
     st.session_state.kline_result_df = None
 if "kline_selected_stock" not in st.session_state:
@@ -561,7 +990,6 @@ if "kline_indicators" not in st.session_state:
 if "last_home_signature_applied" not in st.session_state:
     st.session_state.last_home_signature_applied = ""
 
-# 首頁條件同步
 st.session_state.kline_group = home_group
 st.session_state.kline_stock_code = home_stock_code
 st.session_state.kline_start = home_start
@@ -632,7 +1060,6 @@ with st.form("kline_query_form", clear_on_submit=False):
 
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
-# 自動查詢：首頁條件變動時觸發一次
 auto_query_needed = False
 auto_selected_stock = None
 
@@ -681,22 +1108,20 @@ result_group = st.session_state.get("kline_selected_group", None)
 selected_indicators = st.session_state.get("kline_indicators", ["MA5", "MA10", "MA20"])
 
 if result_df is not None and result_stock is not None:
-    st.markdown(
-        f"""
-**目前查詢條件：**  
-群組：{result_group}  
-股票：{result_stock['name']}（{result_stock['code']}）  
-市場別：{result_stock['market']}  
-日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}  
-技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
-"""
-    )
-
     df = prepare_display_df(result_df, selected_indicators)
 
     if df.empty:
         st.warning("查無歷史資料。")
         st.stop()
+
+    render_overview_card(
+        group_name=result_group,
+        stock_info=result_stock,
+        start_date=st.session_state.kline_start,
+        end_date=st.session_state.kline_end,
+        selected_indicators=selected_indicators,
+        df=df
+    )
 
     if "MA10" in selected_indicators and len(df) < 10:
         st.info("目前資料筆數不足 10 筆，MA10 以現有資料平均顯示。")
@@ -709,9 +1134,6 @@ if result_df is not None and result_stock is not None:
     if "MA240" in selected_indicators and len(df) < 240:
         st.info("目前資料筆數不足 240 筆，MA240 以現有資料平均顯示。")
 
-    render_summary_metrics(df)
-    render_signal_summary(df, selected_indicators)
-
     st.markdown("---")
     st.subheader("歷史資料")
     render_table(df)
@@ -719,4 +1141,20 @@ if result_df is not None and result_stock is not None:
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
 else:
-    st.info("請先在首頁套用條件，或直接在本頁查詢。")
+    preview_group = st.session_state.get("kline_group", "")
+    preview_stock_code = st.session_state.get("kline_stock_code", "")
+    preview_items = build_stock_options(watchlist_dict.get(preview_group, []), lookup_date)
+    preview_stock = next((x for x in preview_items if x["code"] == preview_stock_code), None)
+
+    if preview_group:
+        render_overview_card(
+            group_name=preview_group,
+            stock_info=preview_stock,
+            start_date=st.session_state.kline_start,
+            end_date=st.session_state.kline_end,
+            selected_indicators=selected_indicators,
+            df=pd.DataFrame()
+        )
+        st.info("首頁條件已帶入；正在等待自動查詢或可直接手動查詢。")
+    else:
+        st.info("請先在首頁套用條件，或直接在本頁查詢。")
