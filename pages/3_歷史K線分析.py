@@ -12,11 +12,15 @@ from utils import (
     get_stock_name_and_market,
     get_history_data,
     get_realtime_stock_info,
-    render_realtime_info_card,
     to_excel_bytes,
     load_last_query_state,
     save_last_query_state,
     parse_date_safe,
+    inject_pro_theme,
+    render_pro_hero,
+    render_pro_section,
+    render_pro_info_card,
+    format_number,
 )
 
 
@@ -93,6 +97,34 @@ def add_indicators(df: pd.DataFrame, selected_indicators: list):
     return df
 
 
+def render_pro_summary_card(stock_info, start_date, end_date, selected_indicators, df: pd.DataFrame, realtime_info: dict):
+    latest_close = df["收盤價"].iloc[-1] if "收盤價" in df.columns and not df.empty else None
+    first_close = df["收盤價"].iloc[0] if "收盤價" in df.columns and not df.empty else None
+
+    change_text = "—"
+    change_class = ""
+    if latest_close is not None and first_close not in [None, 0]:
+        chg = latest_close - first_close
+        pct = chg / first_close * 100
+        change_text = f"{chg:+.2f} / {pct:+.2f}%"
+        change_class = "pro-up" if chg > 0 else "pro-down" if chg < 0 else "pro-flat"
+
+    render_pro_info_card(
+        "查詢總覽",
+        [
+            ("股票", f"{stock_info['name']}（{stock_info['code']}）", ""),
+            ("市場別", stock_info["market"], ""),
+            ("日期區間", f"{start_date} ~ {end_date}", ""),
+            ("技術指標", "、".join(selected_indicators) if selected_indicators else "無", ""),
+            ("最新收盤", format_number(latest_close, 2), ""),
+            ("區間漲跌", change_text, change_class),
+            ("即時現價", format_number(realtime_info.get("price"), 2), ""),
+            ("即時更新", realtime_info.get("update_time", "—"), ""),
+        ],
+        chips=["K線分析", "多指標", "專業盤面"]
+    )
+
+
 def render_table(df: pd.DataFrame):
     if df.empty:
         st.info("目前沒有可顯示的資料。")
@@ -130,16 +162,16 @@ def render_table(df: pd.DataFrame):
         except Exception:
             return ""
         if v > 0:
-            return "color: #d32f2f; font-weight: 700;"
+            return "color: #dc2626; font-weight: 700;"
         elif v < 0:
-            return "color: #00897b; font-weight: 700;"
-        return "color: #666;"
+            return "color: #059669; font-weight: 700;"
+        return "color: #64748b;"
 
     styler = display_df.style.format(format_dict, na_rep="—")
     if "漲跌" in display_df.columns:
         styler = styler.map(color_change, subset=["漲跌"])
 
-    st.dataframe(styler, use_container_width=True, hide_index=True, height=680)
+    st.dataframe(styler, use_container_width=True, hide_index=True, height=700)
 
 
 def render_chart(df: pd.DataFrame, selected_indicators: list):
@@ -149,8 +181,12 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
     need_price_cols = all(col in df.columns for col in ["日期", "開盤價", "最高價", "最低價", "收盤價"])
     has_volume = "成交股數" in df.columns
 
+    bg_color = "#ffffff"
+    up_color = "#e53935"
+    down_color = "#26a69a"
+
     if need_price_cols:
-        st.subheader("K線趨勢圖")
+        render_pro_section("K線主圖", "主圖整合 K 棒、均線與成交量，適合做趨勢與節奏判讀")
 
         if has_volume:
             fig = make_subplots(
@@ -171,18 +207,20 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 low=df["最低價"],
                 close=df["收盤價"],
                 name="K線",
+                increasing_line_color=up_color,
+                decreasing_line_color=down_color,
             ),
             row=1,
             col=1
         )
 
         ma_colors = {
-            "MA5": "#4A90E2",
-            "MA10": "#F44336",
-            "MA20": "#F5A623",
-            "MA60": "#8E44AD",
-            "MA120": "#7F8C8D",
-            "MA240": "#2C3E50",
+            "MA5": "#3b82f6",
+            "MA10": "#ef4444",
+            "MA20": "#f59e0b",
+            "MA60": "#8b5cf6",
+            "MA120": "#64748b",
+            "MA240": "#0f172a",
         }
 
         for ma_name, color in ma_colors.items():
@@ -200,20 +238,34 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 )
 
         if has_volume:
+            volume_colors = []
+            for _, row_data in df.iterrows():
+                open_p = row_data.get("開盤價")
+                close_p = row_data.get("收盤價")
+                if pd.notna(close_p) and pd.notna(open_p) and close_p >= open_p:
+                    volume_colors.append("rgba(229,57,53,0.6)")
+                else:
+                    volume_colors.append("rgba(38,166,154,0.6)")
+
             fig.add_trace(
                 go.Bar(
                     x=df["日期"],
                     y=df["成交股數"],
                     name="成交量",
+                    marker_color=volume_colors,
                 ),
                 row=2,
                 col=1
             )
 
         fig.update_layout(
-            height=780 if has_volume else 560,
+            height=820 if has_volume else 560,
             xaxis_rangeslider_visible=False,
             hovermode="x unified",
+            plot_bgcolor=bg_color,
+            paper_bgcolor=bg_color,
+            margin=dict(l=20, r=20, t=20, b=20),
+            legend=dict(orientation="h", y=1.02, x=0),
         )
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
@@ -221,17 +273,17 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
     if "KD" in selected_indicators and all(col in df.columns for col in ["日期", "K", "D"]):
         with st.expander("查看 KD 指標", expanded=False):
             kd_fig = go.Figure()
-            kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K"))
-            kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D"))
-            kd_fig.update_layout(height=320, hovermode="x unified")
+            kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K", line=dict(width=2.5)))
+            kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D", line=dict(width=2.5)))
+            kd_fig.update_layout(height=340, hovermode="x unified")
             st.plotly_chart(kd_fig, use_container_width=True, config={"displaylogo": False})
 
     if "MACD" in selected_indicators and all(col in df.columns for col in ["日期", "DIF", "DEA", "MACD_HIST"]):
         with st.expander("查看 MACD 指標", expanded=False):
             macd_fig = go.Figure()
             macd_fig.add_trace(go.Bar(x=df["日期"], y=df["MACD_HIST"], name="MACD柱"))
-            macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF"))
-            macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA"))
+            macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF", line=dict(width=2.5)))
+            macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA", line=dict(width=2.5)))
             macd_fig.update_layout(height=360, hovermode="x unified")
             st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
 
@@ -242,12 +294,15 @@ if "font_scale" not in st.session_state:
     st.session_state.font_scale = get_font_scale()
 
 apply_font_scale(st.session_state.font_scale)
+inject_pro_theme()
 
 watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
-st.title("📊 歷史K線分析")
-st.caption("正式整合版｜查詢歷史資料與技術指標")
+render_pro_hero(
+    "歷史K線分析",
+    "專業盤面版｜整合即時資訊、歷史K線、均線、KD、MACD 與匯出能力"
+)
 
 if not group_names:
     st.warning("目前沒有自選股群組，請先到「自選股中心」建立群組與股票。")
@@ -296,7 +351,7 @@ with st.form("history_query_form", clear_on_submit=False):
     selected_indicators = st.multiselect(
         "技術指標",
         ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "KD", "MACD"],
-        default=["MA5", "MA10", "MA20"]
+        default=["MA5", "MA10", "MA20", "KD", "MACD"]
     )
 
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
@@ -322,7 +377,6 @@ if query_btn or selected_stock:
         selected_stock["name"],
         selected_stock["market"]
     )
-    render_realtime_info_card(realtime_info, title="今日即時資訊")
 
     with st.spinner("正在查詢歷史資料..."):
         df = get_history_data(
@@ -339,15 +393,13 @@ if query_btn or selected_stock:
 
     df = add_indicators(df, selected_indicators)
 
-    st.markdown(
-        f"""
-**目前查詢條件：**  
-群組：{selected_group}  
-股票：{selected_stock['name']}（{selected_stock['code']}）  
-市場別：{selected_stock['market']}  
-日期區間：{start_date} ~ {end_date}  
-技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
-"""
+    render_pro_summary_card(
+        selected_stock,
+        start_date,
+        end_date,
+        selected_indicators,
+        df,
+        realtime_info
     )
 
     download_df = df.copy()
@@ -356,8 +408,8 @@ if query_btn or selected_stock:
 
     excel_bytes = to_excel_bytes({"歷史K線資料": download_df})
 
-    d1, d2 = st.columns([1, 5])
-    with d1:
+    c1, c2 = st.columns([1, 4])
+    with c1:
         st.download_button(
             label="下載 Excel",
             data=excel_bytes,
@@ -366,9 +418,8 @@ if query_btn or selected_stock:
             use_container_width=True
         )
 
-    st.markdown("---")
-    st.subheader("歷史資料")
-    render_table(df)
     render_chart(df, selected_indicators)
+    render_pro_section("歷史資料表", "表格保留技術指標欄位，方便人工核對與匯出")
+    render_table(df)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
