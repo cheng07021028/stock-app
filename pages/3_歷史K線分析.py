@@ -30,7 +30,37 @@ from utils import (
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def build_stock_options(items, lookup_date):
+def build_all_stock_options(watchlist_dict, lookup_date):
+    all_code_name_df = get_all_code_name_map(lookup_date)
+    result = []
+    seen = set()
+
+    for group_name, items in watchlist_dict.items():
+        for item in items:
+            code = str(item.get("code", "")).strip()
+            manual_name = str(item.get("name", "")).strip()
+            if not code:
+                continue
+
+            stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
+            key = (group_name, code, market_type)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            result.append({
+                "group": group_name,
+                "label": f"{stock_name} ({code}) [{market_type}]｜{group_name}",
+                "code": code,
+                "name": stock_name,
+                "market": market_type,
+            })
+
+    return result
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def build_group_stock_options(items, lookup_date):
     all_code_name_df = get_all_code_name_map(lookup_date)
     stock_options = []
 
@@ -49,6 +79,27 @@ def build_stock_options(items, lookup_date):
         })
 
     return stock_options
+
+
+def filter_stock_options(all_options, keyword):
+    keyword = str(keyword).strip().lower()
+    if not keyword:
+        return all_options[:30]
+
+    matched = []
+    for item in all_options:
+        text_pool = " ".join([
+            str(item.get("name", "")),
+            str(item.get("code", "")),
+            str(item.get("market", "")),
+            str(item.get("group", "")),
+            str(item.get("label", "")),
+        ]).lower()
+
+        if keyword in text_pool:
+            matched.append(item)
+
+    return matched[:50]
 
 
 def add_indicators(df: pd.DataFrame, selected_indicators: list):
@@ -113,7 +164,6 @@ def add_event_points(df: pd.DataFrame):
     df["MACD黃金交叉"] = False
     df["MACD死亡交叉"] = False
 
-    # 1) 起漲點 / 起跌點：簡化為局部波段低點/高點 + 隔日確認
     if all(col in df.columns for col in ["最低價", "最高價", "收盤價"]) and len(df) >= 5:
         for i in range(2, len(df) - 2):
             low_now = df.iloc[i]["最低價"]
@@ -135,7 +185,6 @@ def add_event_points(df: pd.DataFrame):
                     if df.iloc[i + 1]["收盤價"] < df.iloc[i]["收盤價"]:
                         df.at[df.index[i], "起跌點"] = True
 
-    # 2) MA 交叉：MA5 vs MA10
     if all(col in df.columns for col in ["MA5", "MA10"]) and len(df) >= 2:
         for i in range(1, len(df)):
             prev_ma5, prev_ma10 = df.iloc[i - 1]["MA5"], df.iloc[i - 1]["MA10"]
@@ -147,7 +196,6 @@ def add_event_points(df: pd.DataFrame):
                 elif prev_ma5 >= prev_ma10 and now_ma5 < now_ma10:
                     df.at[df.index[i], "MA死亡交叉"] = True
 
-    # 3) KD 交叉
     if all(col in df.columns for col in ["K", "D"]) and len(df) >= 2:
         for i in range(1, len(df)):
             prev_k, prev_d = df.iloc[i - 1]["K"], df.iloc[i - 1]["D"]
@@ -159,7 +207,6 @@ def add_event_points(df: pd.DataFrame):
                 elif prev_k >= prev_d and now_k < now_d:
                     df.at[df.index[i], "KD死亡交叉"] = True
 
-    # 4) MACD 交叉：DIF vs DEA
     if all(col in df.columns for col in ["DIF", "DEA"]) and len(df) >= 2:
         for i in range(1, len(df)):
             prev_dif, prev_dea = df.iloc[i - 1]["DIF"], df.iloc[i - 1]["DEA"]
@@ -291,7 +338,7 @@ def render_event_board(df: pd.DataFrame):
     count_macd_g = int(df["MACD黃金交叉"].sum()) if "MACD黃金交叉" in df.columns else 0
     count_macd_d = int(df["MACD死亡交叉"].sum()) if "MACD死亡交叉" in df.columns else 0
 
-    render_pro_section("事件標記面板", "還原你原本要的起漲點、起跌點、交叉點，直接在盤面中做事件判讀")
+    render_pro_section("事件標記面板", "還原起漲點、起跌點、交叉點，直接在盤面中做事件判讀")
 
     render_pro_info_card(
         "事件統計",
@@ -451,8 +498,7 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 col=1
             )
 
-    # 事件標記
-    def add_marker(flag_col, y_col, name, symbol, color, row=1):
+    def add_marker(flag_col, y_col, name, symbol, color):
         if flag_col in df.columns and y_col in df.columns:
             sub = df[df[flag_col] == True].copy()
             if not sub.empty:
@@ -464,14 +510,14 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                         name=name,
                         marker=dict(symbol=symbol, size=12, color=color, line=dict(width=1, color="#111827")),
                     ),
-                    row=row,
+                    row=1,
                     col=1
                 )
 
-    add_marker("起漲點", "最低價", "起漲點", "triangle-up", "#16a34a", 1)
-    add_marker("起跌點", "最高價", "起跌點", "triangle-down", "#dc2626", 1)
-    add_marker("MA黃金交叉", "收盤價", "MA黃金交叉", "star", "#2563eb", 1)
-    add_marker("MA死亡交叉", "收盤價", "MA死亡交叉", "x", "#7c2d12", 1)
+    add_marker("起漲點", "最低價", "起漲點", "triangle-up", "#16a34a")
+    add_marker("起跌點", "最高價", "起跌點", "triangle-down", "#dc2626")
+    add_marker("MA黃金交叉", "收盤價", "MA黃金交叉", "star", "#2563eb")
+    add_marker("MA死亡交叉", "收盤價", "MA死亡交叉", "x", "#7c2d12")
 
     if has_volume:
         volume_colors = []
@@ -564,8 +610,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜事件標記版",
-    "補回起漲點、起跌點、MA/KD/MACD交叉點，讓盤面回到真正可讀盤狀態。"
+    "歷史K線分析｜股票名稱搜尋版",
+    "支援股票名稱/代號模糊搜尋，結合事件標記、雷達評分、支撐壓力與完整K線盤面。"
 )
 
 if not group_names:
@@ -583,6 +629,29 @@ default_end = parse_date_safe(last_state.get("home_end", ""), today_dt)
 group_index = group_names.index(default_group) if default_group in group_names else 0
 lookup_date = today_dt.strftime("%Y%m%d")
 
+all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
+
+st.markdown("### 快速搜尋股票")
+search_keyword = st.text_input(
+    "輸入股票名稱或代號",
+    placeholder="例如：台積電 / 2330 / 鴻海 / 聯發科",
+    key="history_search_keyword"
+)
+
+matched_options = filter_stock_options(all_stock_options, search_keyword)
+searched_stock = None
+
+if matched_options:
+    quick_pick = st.selectbox(
+        "搜尋結果",
+        [x["label"] for x in matched_options],
+        index=0,
+        key="history_search_result"
+    )
+    searched_stock = next(x for x in matched_options if x["label"] == quick_pick)
+else:
+    st.info("找不到符合的股票，請改用下方群組選擇。")
+
 with st.form("history_query_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
 
@@ -590,21 +659,21 @@ with st.form("history_query_form", clear_on_submit=False):
         selected_group = st.selectbox("選擇群組", group_names, index=group_index)
 
     items = watchlist_dict.get(selected_group, [])
-    stock_options = build_stock_options(items, lookup_date)
+    group_stock_options = build_group_stock_options(items, lookup_date)
 
     with c2:
-        if stock_options:
-            code_list = [x["code"] for x in stock_options]
+        if group_stock_options:
+            code_list = [x["code"] for x in group_stock_options]
             stock_index = code_list.index(default_code) if default_code in code_list else 0
             selected_stock_label = st.selectbox(
-                "選擇股票",
-                [x["label"] for x in stock_options],
+                "群組股票",
+                [x["label"] for x in group_stock_options],
                 index=stock_index
             )
-            selected_stock = next(x for x in stock_options if x["label"] == selected_stock_label)
+            group_stock = next(x for x in group_stock_options if x["label"] == selected_stock_label)
         else:
-            selected_stock = None
-            st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0)
+            group_stock = None
+            st.selectbox("群組股票", ["此群組目前沒有股票"], index=0)
 
     d1, d2 = st.columns(2)
     with d1:
@@ -620,8 +689,10 @@ with st.form("history_query_form", clear_on_submit=False):
 
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
+selected_stock = searched_stock if searched_stock is not None else group_stock
+
 if not selected_stock:
-    st.warning("此群組目前沒有可查詢股票。")
+    st.warning("目前沒有可查詢股票。")
     st.stop()
 
 if start_date > end_date:
@@ -630,7 +701,7 @@ if start_date > end_date:
 
 if query_btn or selected_stock:
     save_last_query_state(
-        quick_group=selected_group,
+        quick_group=selected_stock.get("group", selected_group),
         quick_stock_code=selected_stock["code"],
         home_start=start_date,
         home_end=end_date
@@ -685,7 +756,7 @@ if query_btn or selected_stock:
         )
 
     render_chart(df, selected_indicators)
-    render_pro_section("歷史資料表", "事件點、燈號、支撐壓力與原始數值整合檢視")
+    render_pro_section("歷史資料表", "股票名稱搜尋、事件標記、雷達評分與原始數值整合檢視")
     render_table(df)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
