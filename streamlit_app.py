@@ -7,11 +7,26 @@ from utils import (
     get_font_scale,
     get_all_code_name_map,
     get_stock_name_and_market,
-    get_realtime_stock_info,
-    render_realtime_info_card,
 )
 
 from query_state import load_last_query_state, save_last_query_state, parse_date_safe
+
+# ===== 即時資訊：安全匯入，不讓首頁因 utils 缺函式而壞掉 =====
+HAS_REALTIME = True
+
+try:
+    from utils import get_realtime_stock_info, render_realtime_info_card
+except Exception:
+    HAS_REALTIME = False
+
+    def get_realtime_stock_info(*args, **kwargs):
+        return {
+            "ok": False,
+            "message": "即時資訊功能尚未完成或 utils.py 尚未補齊。",
+        }
+
+    def render_realtime_info_card(info: dict, title: str = "即時資訊"):
+        st.info(info.get("message", "目前沒有即時資訊。"))
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -187,12 +202,15 @@ if group_names:
         st.error("開始日期不能大於結束日期")
     else:
         if current_stock is not None:
-            realtime_info = get_realtime_stock_info(
-                current_stock["code"],
-                current_stock["name"],
-                current_stock["market"]
-            )
-            render_realtime_info_card(realtime_info, title="今日即時資訊")
+            if HAS_REALTIME:
+                realtime_info = get_realtime_stock_info(
+                    current_stock["code"],
+                    current_stock["name"],
+                    current_stock["market"]
+                )
+                render_realtime_info_card(realtime_info, title="今日即時資訊")
+            else:
+                st.info("即時資訊功能尚未啟用，但首頁與查詢條件可正常使用。")
 
             st.markdown(
                 f"""
