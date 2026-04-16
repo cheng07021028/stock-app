@@ -16,7 +16,6 @@ from utils import (
 from query_state import load_last_query_state, save_last_query_state, parse_date_safe
 
 
-# ========= 快取：股票選單 =========
 @st.cache_data(ttl=600, show_spinner=False)
 def build_stock_options(items, lookup_date):
     all_code_name_df = get_all_code_name_map(lookup_date)
@@ -40,7 +39,6 @@ def build_stock_options(items, lookup_date):
     return stock_options
 
 
-# ========= 指標計算 =========
 def add_moving_averages(df: pd.DataFrame, selected_indicators: list) -> pd.DataFrame:
     if df.empty or "收盤價" not in df.columns:
         return df
@@ -138,7 +136,6 @@ def prepare_display_df(df: pd.DataFrame, selected_indicators: list) -> pd.DataFr
     return df
 
 
-# ========= 畫面元件 =========
 def render_summary_metrics(df: pd.DataFrame):
     if df.empty or "收盤價" not in df.columns:
         return
@@ -375,48 +372,6 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
-    elif "收盤價" in df.columns and "日期" in df.columns:
-        st.subheader("收盤價趨勢圖")
-
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=df["日期"],
-                y=df["收盤價"],
-                mode="lines+markers",
-                name="收盤價",
-                hovertemplate="日期: %{x|%Y-%m-%d}<br>收盤價: %{y:.2f}<extra></extra>"
-            )
-        )
-
-        ma_lines = ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240"]
-        for ma_name in ma_lines:
-            if ma_name in selected_indicators and ma_name in df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df["日期"],
-                        y=df[ma_name],
-                        mode="lines",
-                        name=ma_name,
-                        hovertemplate=f"日期: %{{x|%Y-%m-%d}}<br>{ma_name}: %{{y:.2f}}<extra></extra>"
-                    )
-                )
-
-        fig.update_layout(
-            height=520,
-            hovermode="x unified",
-            margin=dict(l=20, r=20, t=20, b=20),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="left",
-                x=0
-            )
-        )
-
-        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
-
     if "KD" in selected_indicators and all(col in df.columns for col in ["日期", "K", "D"]):
         st.subheader("KD 指標")
 
@@ -542,7 +497,6 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
         st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
 
 
-# ========= 頁面初始化 =========
 st.set_page_config(page_title="歷史K線分析", page_icon="📊", layout="wide")
 
 if "font_scale" not in st.session_state:
@@ -550,40 +504,50 @@ if "font_scale" not in st.session_state:
 
 apply_font_scale(st.session_state.font_scale)
 
-if "kline_state_loaded" not in st.session_state:
-    last_state = load_last_query_state()
-    today_dt = date.today()
+# 每次進頁都先讀首頁最新條件
+last_state = load_last_query_state()
+today_dt = date.today()
 
-    st.session_state.kline_group = last_state.get("quick_group", "")
-    st.session_state.kline_stock_code = last_state.get("quick_stock_code", "")
-    st.session_state.kline_start = parse_date_safe(
-        last_state.get("home_start", ""),
-        today_dt - timedelta(days=90)
-    )
-    st.session_state.kline_end = parse_date_safe(
-        last_state.get("home_end", ""),
-        today_dt
-    )
-    st.session_state.kline_state_loaded = True
+home_group = last_state.get("quick_group", "")
+home_stock_code = last_state.get("quick_stock_code", "")
+home_start = parse_date_safe(
+    last_state.get("home_start", ""),
+    today_dt - timedelta(days=90)
+)
+home_end = parse_date_safe(
+    last_state.get("home_end", ""),
+    today_dt
+)
+
+# 初始化
+if "kline_group" not in st.session_state:
+    st.session_state.kline_group = home_group
+if "kline_stock_code" not in st.session_state:
+    st.session_state.kline_stock_code = home_stock_code
+if "kline_start" not in st.session_state:
+    st.session_state.kline_start = home_start
+if "kline_end" not in st.session_state:
+    st.session_state.kline_end = home_end
+
+# 同步首頁最新條件到歷史頁
+st.session_state.kline_group = home_group
+st.session_state.kline_stock_code = home_stock_code
+st.session_state.kline_start = home_start
+st.session_state.kline_end = home_end
 
 if "kline_result_df" not in st.session_state:
     st.session_state.kline_result_df = None
-
 if "kline_selected_stock" not in st.session_state:
     st.session_state.kline_selected_stock = None
-
 if "kline_selected_group" not in st.session_state:
     st.session_state.kline_selected_group = None
-
 if "kline_indicators" not in st.session_state:
     st.session_state.kline_indicators = ["MA5", "MA10", "MA20"]
 
 st.title("📊 歷史K線分析")
 st.caption("依群組、股票、日期區間查詢歷史K線資料，並可選擇技術指標")
 
-today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
-
 watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
@@ -594,8 +558,6 @@ if not group_names:
 saved_group = st.session_state.get("kline_group", "")
 group_index = group_names.index(saved_group) if saved_group in group_names else 0
 
-
-# ========= 查詢表單：只有按下查詢才執行 =========
 with st.form("kline_query_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
 
@@ -647,8 +609,6 @@ with st.form("kline_query_form", clear_on_submit=False):
 
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
-
-# ========= 執行查詢 =========
 if query_btn:
     if start_date > end_date:
         st.error("開始日期不能大於結束日期")
@@ -684,12 +644,37 @@ if query_btn:
     st.session_state.kline_selected_stock = selected_stock
     st.session_state.kline_selected_group = selected_group
 
-
-# ========= 顯示查詢結果 =========
 result_df = st.session_state.get("kline_result_df", None)
 result_stock = st.session_state.get("kline_selected_stock", None)
 result_group = st.session_state.get("kline_selected_group", None)
 selected_indicators = st.session_state.get("kline_indicators", ["MA5", "MA10", "MA20"])
+
+# 如果還沒查詢過，但首頁已經有套用條件，就先顯示目前條件
+if result_stock is None:
+    preview_group = st.session_state.get("kline_group", "")
+    preview_stock_code = st.session_state.get("kline_stock_code", "")
+    preview_items = build_stock_options(watchlist_dict.get(preview_group, []), lookup_date)
+    preview_stock = next((x for x in preview_items if x["code"] == preview_stock_code), None)
+
+    if preview_group:
+        st.markdown(
+            f"""
+**目前查詢條件：**  
+群組：{preview_group}  
+股票：{preview_stock['name']}（{preview_stock['code']}）  \n市場別：{preview_stock['market']}  
+日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}  
+技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
+"""
+            if preview_stock else
+            f"""
+**目前查詢條件：**  
+群組：{preview_group}  
+股票：尚未匹配  
+日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}  
+技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
+"""
+        )
+        st.info("首頁條件已帶入；按「開始查詢」即可載入歷史資料。")
 
 if result_df is not None and result_stock is not None:
     st.markdown(
@@ -730,4 +715,5 @@ if result_df is not None and result_stock is not None:
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
 else:
-    st.info("請先選擇條件後按「開始查詢」。")
+    if not st.session_state.get("kline_group", ""):
+        st.info("請先選擇條件後按「開始查詢」。")
