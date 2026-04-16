@@ -515,7 +515,7 @@ def render_chart(df: pd.DataFrame, selected_indicators: list, selected_events: l
 
     has_volume = "成交股數" in df.columns
 
-    render_pro_section("K線主圖", "可自行控制顯示哪些事件，群組與股票選擇已同步修正")
+    render_pro_section("K線主圖", "可自行控制顯示哪些事件，群組與股票選擇已完全同步")
 
     if has_volume:
         fig = make_subplots(
@@ -682,8 +682,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜事件篩選修正版",
-    "已修正群組與群組股票不同步問題，搜尋股票後可正確帶入對應群組。"
+    "歷史K線分析｜群組股票同步最終版",
+    "搜尋股票後按『帶入股票』，群組與群組股票會真正同步，不再發生對不上。"
 )
 
 if not group_names:
@@ -701,6 +701,13 @@ default_end = parse_date_safe(last_state.get("home_end", ""), today_dt)
 lookup_date = today_dt.strftime("%Y%m%d")
 all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
 
+# session state 初始化
+if "history_selected_group" not in st.session_state:
+    st.session_state.history_selected_group = default_group if default_group in group_names else group_names[0]
+
+if "history_selected_stock_code" not in st.session_state:
+    st.session_state.history_selected_stock_code = default_code if default_code else ""
+
 # 搜尋區
 st.markdown("### 快速搜尋股票")
 search_keyword = st.text_input(
@@ -711,87 +718,84 @@ search_keyword = st.text_input(
 
 matched_options = filter_stock_options(all_stock_options, search_keyword)
 
-searched_stock = None
 if matched_options:
-    default_search_index = 0
-    if default_code:
-        for i, item in enumerate(matched_options):
-            if item["code"] == default_code:
-                default_search_index = i
-                break
-
     quick_pick = st.selectbox(
         "搜尋結果",
         [x["label"] for x in matched_options],
-        index=default_search_index,
+        index=0,
         key="history_search_result"
     )
-    searched_stock = next(x for x in matched_options if x["label"] == quick_pick)
 
-# 決定表單預設群組
-effective_default_group = default_group if default_group in group_names else group_names[0]
-if searched_stock is not None:
-    effective_default_group = searched_stock["group"]
+    c_search1, c_search2 = st.columns([4, 1])
+    with c_search2:
+        if st.button("帶入股票", use_container_width=True):
+            picked = next(x for x in matched_options if x["label"] == quick_pick)
+            st.session_state.history_selected_group = picked["group"]
+            st.session_state.history_selected_stock_code = picked["code"]
+            st.rerun()
+else:
+    st.info("找不到符合的股票，請改用下方群組選擇。")
 
-group_index = group_names.index(effective_default_group) if effective_default_group in group_names else 0
+# 非 form 控制，才會即時同步
+render_pro_section("查詢條件", "群組改變時，股票清單立即同步")
 
-with st.form("history_query_form", clear_on_submit=False):
-    c1, c2 = st.columns(2)
+selected_group = st.selectbox(
+    "選擇群組",
+    group_names,
+    index=group_names.index(st.session_state.history_selected_group) if st.session_state.history_selected_group in group_names else 0,
+    key="history_group_widget"
+)
+st.session_state.history_selected_group = selected_group
 
-    with c1:
-        selected_group = st.selectbox("選擇群組", group_names, index=group_index)
+items = watchlist_dict.get(selected_group, [])
+group_stock_options = build_group_stock_options(items, lookup_date)
 
-    items = watchlist_dict.get(selected_group, [])
-    group_stock_options = build_group_stock_options(items, lookup_date)
-
-    with c2:
-        if group_stock_options:
-            effective_default_code = default_code
-            if searched_stock is not None and searched_stock["group"] == selected_group:
-                effective_default_code = searched_stock["code"]
-
-            stock_codes = [x["code"] for x in group_stock_options]
-            stock_index = stock_codes.index(effective_default_code) if effective_default_code in stock_codes else 0
-
-            selected_stock_label = st.selectbox(
-                "群組股票",
-                [x["label"] for x in group_stock_options],
-                index=stock_index
-            )
-            selected_stock = next(x for x in group_stock_options if x["label"] == selected_stock_label)
-        else:
-            selected_stock = None
-            st.selectbox("群組股票", ["此群組目前沒有股票"], index=0)
-
-    d1, d2 = st.columns(2)
-    with d1:
-        start_date = st.date_input("開始日期", value=default_start)
-    with d2:
-        end_date = st.date_input("結束日期", value=default_end)
-
-    selected_indicators = st.multiselect(
-        "技術指標",
-        ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "KD", "MACD"],
-        default=["MA5", "MA10", "MA20", "KD", "MACD"]
-    )
-
-    selected_events = st.multiselect(
-        "事件篩選",
-        ["起漲點", "起跌點", "MA交叉", "KD交叉", "MACD交叉"],
-        default=["起漲點", "起跌點", "MA交叉", "KD交叉", "MACD交叉"]
-    )
-
-    query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
-
-if not selected_stock:
-    st.warning("目前沒有可查詢股票。")
+if not group_stock_options:
+    st.warning("此群組目前沒有股票。")
     st.stop()
+
+stock_code_list = [x["code"] for x in group_stock_options]
+stock_label_map = {x["code"]: x["label"] for x in group_stock_options}
+
+if st.session_state.history_selected_stock_code not in stock_code_list:
+    st.session_state.history_selected_stock_code = stock_code_list[0]
+
+selected_stock_code = st.selectbox(
+    "群組股票",
+    stock_code_list,
+    index=stock_code_list.index(st.session_state.history_selected_stock_code),
+    format_func=lambda code: stock_label_map.get(code, code),
+    key="history_stock_widget"
+)
+st.session_state.history_selected_stock_code = selected_stock_code
+
+selected_stock = next(x for x in group_stock_options if x["code"] == selected_stock_code)
+
+d1, d2 = st.columns(2)
+with d1:
+    start_date = st.date_input("開始日期", value=default_start)
+with d2:
+    end_date = st.date_input("結束日期", value=default_end)
+
+selected_indicators = st.multiselect(
+    "技術指標",
+    ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "KD", "MACD"],
+    default=["MA5", "MA10", "MA20", "KD", "MACD"]
+)
+
+selected_events = st.multiselect(
+    "事件篩選",
+    ["起漲點", "起跌點", "MA交叉", "KD交叉", "MACD交叉"],
+    default=["起漲點", "起跌點", "MA交叉", "KD交叉", "MACD交叉"]
+)
+
+query_btn = st.button("開始查詢", type="primary", use_container_width=True)
 
 if start_date > end_date:
     st.error("開始日期不能大於結束日期")
     st.stop()
 
-if query_btn or selected_stock:
+if query_btn:
     save_last_query_state(
         quick_group=selected_group,
         quick_stock_code=selected_stock["code"],
