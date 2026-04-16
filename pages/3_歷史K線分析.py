@@ -846,15 +846,6 @@ def _repair_group_stock_state(group_map: dict[str, list[str]]):
         _set_ss("stock", stock_options[0] if stock_options else "")
 
 
-def _sanitize_date_state():
-    today = date.today()
-    default_start = today - timedelta(days=365)
-    default_end = today
-
-    _set_ss("start_date", _to_pydate(_ss("start_date"), default_start))
-    _set_ss("end_date", _to_pydate(_ss("end_date"), default_end))
-
-
 def _init_state(group_map: dict[str, list[str]]):
     groups = list(group_map.keys())
 
@@ -874,10 +865,15 @@ def _init_state(group_map: dict[str, list[str]]):
 
     saved = _safe_load_last_query_state("history_kline_page")
 
-    if _ss("start_date") is None:
-        _set_ss("start_date", _to_pydate(saved.get("start_date"), default_start))
-    if _ss("end_date") is None:
-        _set_ss("end_date", _to_pydate(saved.get("end_date"), default_end))
+    if _ss("start_date_input") is None:
+        _set_ss("start_date_input", _to_pydate(saved.get("start_date"), default_start))
+    else:
+        _set_ss("start_date_input", _to_pydate(_ss("start_date_input"), default_start))
+
+    if _ss("end_date_input") is None:
+        _set_ss("end_date_input", _to_pydate(saved.get("end_date"), default_end))
+    else:
+        _set_ss("end_date_input", _to_pydate(_ss("end_date_input"), default_end))
 
     saved_group = _safe_str(saved.get("group"))
     saved_stock = _safe_str(saved.get("stock"))
@@ -888,7 +884,6 @@ def _init_state(group_map: dict[str, list[str]]):
             _set_ss("stock", saved_stock)
 
     _repair_group_stock_state(group_map)
-    _sanitize_date_state()
 
 
 def _apply_search_sync(keyword: str, group_map: dict[str, list[str]], stock_rows: list[dict[str, str]]) -> bool:
@@ -950,7 +945,6 @@ def main():
 
     render_pro_section("查詢條件")
     _repair_group_stock_state(group_map)
-    _sanitize_date_state()
 
     groups = list(group_map.keys())
     c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
@@ -976,22 +970,16 @@ def main():
             key=_k("stock"),
         )
 
-    # 這裡先把 state 強制洗成 py date，再丟給 date_input
-    _sanitize_date_state()
-
     with c3:
-        st.date_input("開始日期", key=_k("start_date"))
+        st.date_input("開始日期", key=_k("start_date_input"))
 
     with c4:
-        st.date_input("結束日期", key=_k("end_date"))
-
-    # 再洗一次，避免使用者操作後回來是奇怪型別
-    _sanitize_date_state()
+        st.date_input("結束日期", key=_k("end_date_input"))
 
     selected_group = _ss("group", "")
     selected_stock = _ss("stock", "")
-    start_date = _to_pydate(_ss("start_date"), date.today() - timedelta(days=365))
-    end_date = _to_pydate(_ss("end_date"), date.today())
+    start_date = _to_pydate(_ss("start_date_input"), date.today() - timedelta(days=365))
+    end_date = _to_pydate(_ss("end_date_input"), date.today())
 
     st.caption(f"目前實際查詢值：群組【{selected_group}】 / 股票【{selected_stock}】")
 
