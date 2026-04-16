@@ -242,6 +242,9 @@ def _init_state():
     if _k("selected_group_next") in st.session_state:
         st.session_state[_k("selected_group")] = st.session_state.pop(_k("selected_group_next"))
 
+    if _k("new_group_name_next") in st.session_state:
+        st.session_state[_k("new_group_name")] = st.session_state.pop(_k("new_group_name_next"))
+
     _repair_selected_group()
 
 
@@ -585,7 +588,7 @@ def main():
             ok, msg = _create_group(new_group)
             if ok:
                 _persist_watchlist(msg)
-                st.session_state[_k("new_group_name")] = ""
+                st.session_state[_k("new_group_name_next")] = ""
             else:
                 _set_status(msg, "warning")
             st.rerun()
@@ -704,8 +707,8 @@ def main():
             [
                 ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json 與 data/watchlist.json。", ""),
                 ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
+                ("新增群組", "新增成功後會在下一輪自動切換到新群組。", ""),
                 ("刪除群組", "刪除後會在下一輪自動切到下一個有效群組。", ""),
-                ("批次格式", "每行：代碼,名稱,市場別；名稱與市場別可省略。", ""),
             ],
         )
 
