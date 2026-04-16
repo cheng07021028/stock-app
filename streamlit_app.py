@@ -1,4 +1,6 @@
-from datetime import date, timedelta
+import os
+import json
+from datetime import date, timedelta, datetime
 import streamlit as st
 
 from utils import (
@@ -11,8 +13,74 @@ from utils import (
 
 st.set_page_config(page_title="股市專家系統", page_icon="📈", layout="wide")
 
+STATE_FILE = "last_query_state.json"
+
+
+def load_last_query_state():
+    today_dt = date.today()
+    default_state = {
+        "quick_group": "",
+        "quick_stock_code": "",
+        "home_start": (today_dt - timedelta(days=90)).isoformat(),
+        "home_end": today_dt.isoformat(),
+    }
+
+    if not os.path.exists(STATE_FILE):
+        return default_state
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for k, v in default_state.items():
+            if k not in data:
+                data[k] = v
+
+        return data
+    except Exception:
+        return default_state
+
+
+def save_last_query_state(quick_group, quick_stock_code, home_start, home_end):
+    data = {
+        "quick_group": quick_group if quick_group is not None else "",
+        "quick_stock_code": quick_stock_code if quick_stock_code is not None else "",
+        "home_start": home_start.isoformat() if hasattr(home_start, "isoformat") else str(home_start),
+        "home_end": home_end.isoformat() if hasattr(home_end, "isoformat") else str(home_end),
+    }
+
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"儲存上次查詢條件失敗：{e}")
+
+
+def parse_date_safe(date_str, default_value):
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        return default_value
+
+
 if "font_scale" not in st.session_state:
     st.session_state.font_scale = get_font_scale()
+
+if "last_query_loaded" not in st.session_state:
+    last_state = load_last_query_state()
+    today_dt = date.today()
+
+    st.session_state.last_quick_group = last_state.get("quick_group", "")
+    st.session_state.last_quick_stock_code = last_state.get("quick_stock_code", "")
+    st.session_state.home_start = parse_date_safe(
+        last_state.get("home_start", ""),
+        today_dt - timedelta(days=90)
+    )
+    st.session_state.home_end = parse_date_safe(
+        last_state.get("home_end", ""),
+        today_dt
+    )
+    st.session_state.last_query_loaded = True
 
 with st.sidebar:
     st.markdown("## 顯示設定")
@@ -50,10 +118,18 @@ st.caption("可在首頁快速選擇群組、股票與日期區間，再切換�
 group_names = list(watchlist_dict.keys())
 
 if group_names:
+    saved_group = st.session_state.get("last_quick_group", "")
+    group_index = group_names.index(saved_group) if saved_group in group_names else 0
+
     q1, q2 = st.columns(2)
 
     with q1:
-        quick_group = st.selectbox("選擇群組", group_names, index=0)
+        quick_group = st.selectbox(
+            "選擇群組",
+            group_names,
+            index=group_index,
+            key="quick_group_selectbox"
+        )
 
     items = watchlist_dict.get(quick_group, [])
     stock_options = []
@@ -75,21 +151,20 @@ if group_names:
 
     with q2:
         if stock_options:
+            saved_stock_code = st.session_state.get("last_quick_stock_code", "")
+            stock_codes = [x["code"] for x in stock_options]
+            stock_index = stock_codes.index(saved_stock_code) if saved_stock_code in stock_codes else 0
+
             quick_stock_label = st.selectbox(
                 "選擇股票",
                 [x["label"] for x in stock_options],
-                index=0
+                index=stock_index,
+                key="quick_stock_selectbox"
             )
             quick_stock = next(x for x in stock_options if x["label"] == quick_stock_label)
         else:
             quick_stock = None
-            st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0)
-
-    if "home_start" not in st.session_state:
-        st.session_state.home_start = today_dt - timedelta(days=90)
-
-    if "home_end" not in st.session_state:
-        st.session_state.home_end = today_dt
+            st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0, key="quick_stock_empty")
 
     d1, d2 = st.columns(2)
     with d1:
@@ -104,6 +179,18 @@ if group_names:
             value=st.session_state.home_end,
             key="home_end"
         )
+
+    st.session_state.last_quick_group = quick_group
+    st.session_state.last_quick_stock_code = quick_stock["code"] if quick_stock is not None else ""
+    st.session_state.home_start = quick_start
+    st.session_state.home_end = quick_end
+
+    save_last_query_state(
+        quick_group=quick_group,
+        quick_stock_code=quick_stock["code"] if quick_stock is not None else "",
+        home_start=quick_start,
+        home_end=quick_end
+    )
 
     if quick_start > quick_end:
         st.error("開始日期不能大於結束日期")
