@@ -497,6 +497,33 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
         st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
 
 
+def run_query(selected_group, selected_stock, start_date, end_date, selected_indicators):
+    st.session_state.kline_group = selected_group
+    st.session_state.kline_stock_code = selected_stock["code"]
+    st.session_state.kline_start = start_date
+    st.session_state.kline_end = end_date
+    st.session_state.kline_indicators = selected_indicators
+
+    save_last_query_state(
+        quick_group=selected_group,
+        quick_stock_code=selected_stock["code"],
+        home_start=start_date,
+        home_end=end_date
+    )
+
+    df = get_history_data(
+        selected_stock["code"],
+        selected_stock["name"],
+        selected_stock["market"],
+        start_date,
+        end_date
+    )
+
+    st.session_state.kline_result_df = df
+    st.session_state.kline_selected_stock = selected_stock
+    st.session_state.kline_selected_group = selected_group
+
+
 st.set_page_config(page_title="歷史K線分析", page_icon="📊", layout="wide")
 
 if "font_scale" not in st.session_state:
@@ -504,22 +531,16 @@ if "font_scale" not in st.session_state:
 
 apply_font_scale(st.session_state.font_scale)
 
-# 每次進頁都先讀首頁最新條件
 last_state = load_last_query_state()
 today_dt = date.today()
 
 home_group = last_state.get("quick_group", "")
 home_stock_code = last_state.get("quick_stock_code", "")
-home_start = parse_date_safe(
-    last_state.get("home_start", ""),
-    today_dt - timedelta(days=90)
-)
-home_end = parse_date_safe(
-    last_state.get("home_end", ""),
-    today_dt
-)
+home_start = parse_date_safe(last_state.get("home_start", ""), today_dt - timedelta(days=90))
+home_end = parse_date_safe(last_state.get("home_end", ""), today_dt)
 
-# 初始化
+home_signature = f"{home_group}|{home_stock_code}|{home_start}|{home_end}"
+
 if "kline_group" not in st.session_state:
     st.session_state.kline_group = home_group
 if "kline_stock_code" not in st.session_state:
@@ -529,12 +550,6 @@ if "kline_start" not in st.session_state:
 if "kline_end" not in st.session_state:
     st.session_state.kline_end = home_end
 
-# 同步首頁最新條件到歷史頁
-st.session_state.kline_group = home_group
-st.session_state.kline_stock_code = home_stock_code
-st.session_state.kline_start = home_start
-st.session_state.kline_end = home_end
-
 if "kline_result_df" not in st.session_state:
     st.session_state.kline_result_df = None
 if "kline_selected_stock" not in st.session_state:
@@ -543,6 +558,14 @@ if "kline_selected_group" not in st.session_state:
     st.session_state.kline_selected_group = None
 if "kline_indicators" not in st.session_state:
     st.session_state.kline_indicators = ["MA5", "MA10", "MA20"]
+if "last_home_signature_applied" not in st.session_state:
+    st.session_state.last_home_signature_applied = ""
+
+# 首頁條件同步
+st.session_state.kline_group = home_group
+st.session_state.kline_stock_code = home_stock_code
+st.session_state.kline_start = home_start
+st.session_state.kline_end = home_end
 
 st.title("📊 歷史K線分析")
 st.caption("依群組、股票、日期區間查詢歷史K線資料，並可選擇技術指標")
@@ -609,6 +632,29 @@ with st.form("kline_query_form", clear_on_submit=False):
 
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
+# 自動查詢：首頁條件變動時觸發一次
+auto_query_needed = False
+auto_selected_stock = None
+
+if home_signature != st.session_state.get("last_home_signature_applied", ""):
+    auto_items = watchlist_dict.get(home_group, [])
+    auto_stock_options = build_stock_options(auto_items, lookup_date)
+    auto_selected_stock = next((x for x in auto_stock_options if x["code"] == home_stock_code), None)
+
+    if home_group and auto_selected_stock is not None and home_start <= home_end:
+        auto_query_needed = True
+
+if auto_query_needed:
+    with st.spinner("已套用首頁條件，正在自動查詢歷史資料..."):
+        run_query(
+            selected_group=home_group,
+            selected_stock=auto_selected_stock,
+            start_date=home_start,
+            end_date=home_end,
+            selected_indicators=st.session_state.get("kline_indicators", ["MA5", "MA10", "MA20"])
+        )
+    st.session_state.last_home_signature_applied = home_signature
+
 if query_btn:
     if start_date > end_date:
         st.error("開始日期不能大於結束日期")
@@ -618,63 +664,21 @@ if query_btn:
         st.warning("此群組目前沒有可查詢股票。")
         st.stop()
 
-    st.session_state.kline_group = selected_group
-    st.session_state.kline_stock_code = selected_stock["code"]
-    st.session_state.kline_start = start_date
-    st.session_state.kline_end = end_date
-    st.session_state.kline_indicators = selected_indicators
-
-    save_last_query_state(
-        quick_group=selected_group,
-        quick_stock_code=selected_stock["code"],
-        home_start=start_date,
-        home_end=end_date
-    )
-
     with st.spinner("正在查詢歷史資料..."):
-        df = get_history_data(
-            selected_stock["code"],
-            selected_stock["name"],
-            selected_stock["market"],
-            start_date,
-            end_date
+        run_query(
+            selected_group=selected_group,
+            selected_stock=selected_stock,
+            start_date=start_date,
+            end_date=end_date,
+            selected_indicators=selected_indicators
         )
 
-    st.session_state.kline_result_df = df
-    st.session_state.kline_selected_stock = selected_stock
-    st.session_state.kline_selected_group = selected_group
+    st.session_state.last_home_signature_applied = f"{selected_group}|{selected_stock['code']}|{start_date}|{end_date}"
 
 result_df = st.session_state.get("kline_result_df", None)
 result_stock = st.session_state.get("kline_selected_stock", None)
 result_group = st.session_state.get("kline_selected_group", None)
 selected_indicators = st.session_state.get("kline_indicators", ["MA5", "MA10", "MA20"])
-
-# 如果還沒查詢過，但首頁已經有套用條件，就先顯示目前條件
-if result_stock is None:
-    preview_group = st.session_state.get("kline_group", "")
-    preview_stock_code = st.session_state.get("kline_stock_code", "")
-    preview_items = build_stock_options(watchlist_dict.get(preview_group, []), lookup_date)
-    preview_stock = next((x for x in preview_items if x["code"] == preview_stock_code), None)
-
-    if preview_group:
-        st.markdown(
-            f"""
-**目前查詢條件：**  
-群組：{preview_group}  
-股票：{preview_stock['name']}（{preview_stock['code']}）  \n市場別：{preview_stock['market']}  
-日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}  
-技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
-"""
-            if preview_stock else
-            f"""
-**目前查詢條件：**  
-群組：{preview_group}  
-股票：尚未匹配  
-日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}  
-技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
-"""
-        )
-        st.info("首頁條件已帶入；按「開始查詢」即可載入歷史資料。")
 
 if result_df is not None and result_stock is not None:
     st.markdown(
@@ -715,5 +719,4 @@ if result_df is not None and result_stock is not None:
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
 else:
-    if not st.session_state.get("kline_group", ""):
-        st.info("請先選擇條件後按「開始查詢」。")
+    st.info("請先在首頁套用條件，或直接在本頁查詢。")
