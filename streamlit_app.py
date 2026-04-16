@@ -1,6 +1,4 @@
-import os
-import json
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 import streamlit as st
 
 from utils import (
@@ -11,62 +9,43 @@ from utils import (
     get_stock_name_and_market,
 )
 
+from query_state import load_last_query_state, save_last_query_state, parse_date_safe
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def build_group_stock_options(watchlist_dict, lookup_date):
+    all_code_name_df = get_all_code_name_map(lookup_date)
+    result = {}
+
+    for group_name, items in watchlist_dict.items():
+        stock_options = []
+
+        for item in items:
+            code = str(item.get("code", "")).strip()
+            manual_name = str(item.get("name", "")).strip()
+
+            if not code:
+                continue
+
+            stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
+            stock_options.append({
+                "label": f"{stock_name} ({code}) [{market_type}]",
+                "code": code,
+                "name": stock_name,
+                "market": market_type,
+            })
+
+        result[group_name] = stock_options
+
+    return result
+
+
 st.set_page_config(page_title="股市專家系統", page_icon="📈", layout="wide")
-
-STATE_FILE = "last_query_state.json"
-
-
-def load_last_query_state():
-    today_dt = date.today()
-    default_state = {
-        "quick_group": "",
-        "quick_stock_code": "",
-        "home_start": (today_dt - timedelta(days=90)).isoformat(),
-        "home_end": today_dt.isoformat(),
-    }
-
-    if not os.path.exists(STATE_FILE):
-        return default_state
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        for k, v in default_state.items():
-            if k not in data:
-                data[k] = v
-
-        return data
-    except Exception:
-        return default_state
-
-
-def save_last_query_state(quick_group, quick_stock_code, home_start, home_end):
-    data = {
-        "quick_group": quick_group if quick_group is not None else "",
-        "quick_stock_code": quick_stock_code if quick_stock_code is not None else "",
-        "home_start": home_start.isoformat() if hasattr(home_start, "isoformat") else str(home_start),
-        "home_end": home_end.isoformat() if hasattr(home_end, "isoformat") else str(home_end),
-    }
-
-    try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        st.warning(f"儲存上次查詢條件失敗：{e}")
-
-
-def parse_date_safe(date_str, default_value):
-    try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date()
-    except Exception:
-        return default_value
-
 
 if "font_scale" not in st.session_state:
     st.session_state.font_scale = get_font_scale()
 
-if "last_query_loaded" not in st.session_state:
+if "home_state_loaded" not in st.session_state:
     last_state = load_last_query_state()
     today_dt = date.today()
 
@@ -80,11 +59,17 @@ if "last_query_loaded" not in st.session_state:
         last_state.get("home_end", ""),
         today_dt
     )
-    st.session_state.last_query_loaded = True
+    st.session_state.home_state_loaded = True
 
 with st.sidebar:
     st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider("字體大小 (%)", 100, 220, st.session_state.font_scale, 10)
+    st.session_state.font_scale = st.slider(
+        "字體大小 (%)",
+        100,
+        220,
+        st.session_state.font_scale,
+        10
+    )
 
 apply_font_scale(st.session_state.font_scale)
 
@@ -95,8 +80,9 @@ today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
 
 watchlist_dict = get_normalized_watchlist()
-all_code_name_df = get_all_code_name_map(lookup_date)
+group_stock_options = build_group_stock_options(watchlist_dict, lookup_date)
 
+all_code_name_df = get_all_code_name_map(lookup_date)
 if all_code_name_df.empty:
     st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
 
@@ -121,89 +107,104 @@ if group_names:
     saved_group = st.session_state.get("last_quick_group", "")
     group_index = group_names.index(saved_group) if saved_group in group_names else 0
 
-    q1, q2 = st.columns(2)
+    with st.form("home_quick_query_form", clear_on_submit=False):
+        q1, q2 = st.columns(2)
 
-    with q1:
-        quick_group = st.selectbox(
-            "選擇群組",
-            group_names,
-            index=group_index,
-            key="quick_group_selectbox"
-        )
-
-    items = watchlist_dict.get(quick_group, [])
-    stock_options = []
-
-    for item in items:
-        code = str(item.get("code", "")).strip()
-        manual_name = str(item.get("name", "")).strip()
-
-        if not code:
-            continue
-
-        stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
-        stock_options.append({
-            "label": f"{stock_name} ({code}) [{market_type}]",
-            "code": code,
-            "name": stock_name,
-            "market": market_type,
-        })
-
-    with q2:
-        if stock_options:
-            saved_stock_code = st.session_state.get("last_quick_stock_code", "")
-            stock_codes = [x["code"] for x in stock_options]
-            stock_index = stock_codes.index(saved_stock_code) if saved_stock_code in stock_codes else 0
-
-            quick_stock_label = st.selectbox(
-                "選擇股票",
-                [x["label"] for x in stock_options],
-                index=stock_index,
-                key="quick_stock_selectbox"
+        with q1:
+            quick_group = st.selectbox(
+                "選擇群組",
+                group_names,
+                index=group_index
             )
-            quick_stock = next(x for x in stock_options if x["label"] == quick_stock_label)
-        else:
-            quick_stock = None
-            st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0, key="quick_stock_empty")
 
-    d1, d2 = st.columns(2)
-    with d1:
-        quick_start = st.date_input(
-            "開始日期",
-            value=st.session_state.home_start,
-            key="home_start"
+        stock_options = group_stock_options.get(quick_group, [])
+
+        with q2:
+            if stock_options:
+                saved_stock_code = st.session_state.get("last_quick_stock_code", "")
+                stock_codes = [x["code"] for x in stock_options]
+                stock_index = stock_codes.index(saved_stock_code) if saved_stock_code in stock_codes else 0
+
+                quick_stock_label = st.selectbox(
+                    "選擇股票",
+                    [x["label"] for x in stock_options],
+                    index=stock_index
+                )
+                quick_stock = next(x for x in stock_options if x["label"] == quick_stock_label)
+            else:
+                quick_stock = None
+                st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0)
+
+        d1, d2 = st.columns(2)
+        with d1:
+            quick_start = st.date_input(
+                "開始日期",
+                value=st.session_state.get("home_start", today_dt - timedelta(days=90))
+            )
+        with d2:
+            quick_end = st.date_input(
+                "結束日期",
+                value=st.session_state.get("home_end", today_dt)
+            )
+
+        save_btn = st.form_submit_button("套用查詢條件", type="primary", use_container_width=True)
+
+    if save_btn:
+        if quick_start > quick_end:
+            st.error("開始日期不能大於結束日期")
+            st.stop()
+
+        st.session_state.last_quick_group = quick_group
+        st.session_state.last_quick_stock_code = quick_stock["code"] if quick_stock is not None else ""
+        st.session_state.home_start = quick_start
+        st.session_state.home_end = quick_end
+
+        save_last_query_state(
+            quick_group=quick_group,
+            quick_stock_code=quick_stock["code"] if quick_stock is not None else "",
+            home_start=quick_start,
+            home_end=quick_end
         )
-    with d2:
-        quick_end = st.date_input(
-            "結束日期",
-            value=st.session_state.home_end,
-            key="home_end"
-        )
 
-    st.session_state.last_quick_group = quick_group
-    st.session_state.last_quick_stock_code = quick_stock["code"] if quick_stock is not None else ""
+        st.success("查詢條件已更新，切換到左側『歷史K線分析』頁面即可直接使用。")
 
-    save_last_query_state(
-        quick_group=quick_group,
-        quick_stock_code=quick_stock["code"] if quick_stock is not None else "",
-        home_start=quick_start,
-        home_end=quick_end
-    )
+    current_group = st.session_state.get("last_quick_group", group_names[0])
+    current_start = st.session_state.get("home_start", today_dt - timedelta(days=90))
+    current_end = st.session_state.get("home_end", today_dt)
 
-    if quick_start > quick_end:
+    current_stock_code = st.session_state.get("last_quick_stock_code", "")
+    current_stock = None
+
+    current_group_options = group_stock_options.get(current_group, [])
+    for item in current_group_options:
+        if item["code"] == current_stock_code:
+            current_stock = item
+            break
+
+    if current_start > current_end:
         st.error("開始日期不能大於結束日期")
     else:
-        if quick_stock is not None:
+        if current_stock is not None:
             st.markdown(
                 f"""
 **目前快速查詢條件：**  
-群組：{quick_group}  
-股票：{quick_stock['name']}（{quick_stock['code']}）  
-市場別：{quick_stock['market']}  
-日期區間：{quick_start} ~ {quick_end}
+群組：{current_group}  
+股票：{current_stock['name']}（{current_stock['code']}）  
+市場別：{current_stock['market']}  
+日期區間：{current_start} ~ {current_end}
 """
             )
-            st.info("首頁提供快速選擇；實際查詢請切換到左側『歷史K線分析』頁面。")
+        else:
+            st.markdown(
+                f"""
+**目前快速查詢條件：**  
+群組：{current_group}  
+股票：尚未選定  
+日期區間：{current_start} ~ {current_end}
+"""
+            )
+
+        st.info("首頁提供快速選擇；實際查詢請切換到左側『歷史K線分析』頁面。")
 else:
     st.warning("目前沒有自選股群組，請先到『自選股中心』建立群組與股票。")
 
