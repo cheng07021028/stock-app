@@ -22,6 +22,7 @@ from utils import (
     format_number,
     compute_signal_snapshot,
     score_to_badge,
+    compute_support_resistance_snapshot,
 )
 
 
@@ -125,8 +126,9 @@ def add_home_indicators(df: pd.DataFrame):
 def build_home_market_snapshot(watchlist_dict, query_date):
     realtime_df = get_realtime_watchlist_df(watchlist_dict, query_date)
     if realtime_df is None or realtime_df.empty:
-        return realtime_df, None, None, 0, 0
+        return realtime_df, None, None, 0, 0, pd.DataFrame()
 
+    rows = []
     strong_count = 0
     weak_count = 0
 
@@ -134,31 +136,137 @@ def build_home_market_snapshot(watchlist_dict, query_date):
         code = str(row.get("股票代號", "")).strip()
         name = str(row.get("股票名稱", "")).strip()
         market = str(row.get("市場別", "")).strip() or "上市"
+        group = str(row.get("群組", "")).strip()
 
         hist = get_history_data(
             code,
             name,
             market,
-            date.today() - timedelta(days=90),
+            date.today() - timedelta(days=120),
             date.today()
         )
 
         if hist is None or hist.empty:
+            rows.append({
+                "群組": group,
+                "股票代號": code,
+                "股票名稱": name,
+                "市場別": market,
+                "現價": row.get("現價"),
+                "漲跌": row.get("漲跌"),
+                "漲跌幅(%)": row.get("漲跌幅(%)"),
+                "總量": row.get("總量"),
+                "更新時間": row.get("更新時間"),
+                "綜合評級": "無資料",
+                "訊號分數": None,
+                "均線結構": "無資料",
+                "突破狀態": "無資料",
+                "20日壓力": None,
+                "20日支撐": None,
+                "距20壓力(%)": None,
+                "距20支撐(%)": None,
+                "推薦類型": "",
+                "推薦原因": "",
+            })
             continue
 
         hist = add_home_indicators(hist)
         signal = compute_signal_snapshot(hist)
+        sr = compute_support_resistance_snapshot(hist)
         badge_text, _ = score_to_badge(signal.get("score", 0))
+
         if badge_text == "強多":
             strong_count += 1
         elif badge_text == "強空":
             weak_count += 1
 
+        change_pct = row.get("漲跌幅(%)")
+        signal_score = signal.get("score", 0)
+        dist_res_20 = sr.get("dist_res_20_pct")
+        dist_sup_20 = sr.get("dist_sup_20_pct")
+        breakout = signal.get("breakout_20d", ("", ""))[0]
+
+        rec_type = ""
+        rec_reason = ""
+
+        if signal_score >= 3 and change_pct is not None and pd.notna(change_pct) and change_pct > 0:
+            rec_type = "今日優先觀察"
+            rec_reason = f"訊號分數 {signal_score:+d}，且即時漲跌幅 {change_pct:+.2f}%"
+            if "突破20日高" in breakout:
+                rec_reason += "，並出現 20 日突破"
+
+        if dist_sup_20 is not None and 0 <= dist_sup_20 <= 2.0:
+            if not rec_type:
+                rec_type = "接近支撐可觀察"
+                rec_reason = f"距 20 日支撐僅 {dist_sup_20:.2f}%"
+
+        if dist_res_20 is not None and 0 <= dist_res_20 <= 2.0:
+            if not rec_type:
+                rec_type = "接近壓力要小心"
+                rec_reason = f"距 20 日壓力僅 {dist_res_20:.2f}%"
+
+        if signal_score <= -3:
+            rec_type = "今日偏弱避開"
+            rec_reason = f"訊號分數 {signal_score:+d}，偏弱訊號明顯"
+
+        rows.append({
+            "群組": group,
+            "股票代號": code,
+            "股票名稱": name,
+            "市場別": market,
+            "現價": row.get("現價"),
+            "漲跌": row.get("漲跌"),
+            "漲跌幅(%)": row.get("漲跌幅(%)"),
+            "總量": row.get("總量"),
+            "更新時間": row.get("更新時間"),
+            "綜合評級": badge_text,
+            "訊號分數": signal_score,
+            "均線結構": signal["ma_trend"][0],
+            "突破狀態": breakout,
+            "20日壓力": sr.get("res_20"),
+            "20日支撐": sr.get("sup_20"),
+            "距20壓力(%)": dist_res_20,
+            "距20支撐(%)": dist_sup_20,
+            "推薦類型": rec_type,
+            "推薦原因": rec_reason,
+        })
+
+    analysis_df = pd.DataFrame(rows)
+
     ranked = realtime_df.sort_values(by="漲跌幅(%)", ascending=False, na_position="last").reset_index(drop=True)
     top_gainer = ranked.iloc[0].to_dict() if not ranked.empty else None
     top_loser = ranked.sort_values(by="漲跌幅(%)", ascending=True, na_position="last").iloc[0].to_dict() if not ranked.empty else None
 
-    return realtime_df, top_gainer, top_loser, strong_count, weak_count
+    return realtime_df, top_gainer, top_loser, strong_count, weak_count, analysis_df
+
+
+def render_recommendation_block(df: pd.DataFrame, rec_type: str, title: str, chip: str):
+    sub = df[df["推薦類型"] == rec_type].copy() if df is not None and not df.empty else pd.DataFrame()
+
+    render_pro_section(title, "由訊號分數、支撐壓力距離與突破狀態自動整理")
+
+    if sub.empty:
+        render_pro_info_card(
+            title,
+            [("結果", "目前沒有符合條件的標的", "")],
+            chips=[chip]
+        )
+        return
+
+    sub = sub.sort_values(by=["訊號分數", "漲跌幅(%)"], ascending=[False, False], na_position="last").head(3)
+
+    info_pairs = []
+    for _, row in sub.iterrows():
+        name = f"{row['股票名稱']}（{row['股票代號']}）"
+        reason = row.get("推薦原因", "—")
+        extra = f"現價 {format_number(row.get('現價'), 2)}｜評級 {row.get('綜合評級', '—')}"
+        info_pairs.append((name, f"{reason}｜{extra}", ""))
+
+    render_pro_info_card(
+        title,
+        info_pairs,
+        chips=[chip]
+    )
 
 
 st.set_page_config(page_title="股市專家系統", page_icon="📈", layout="wide")
@@ -197,14 +305,14 @@ group_stock_options = build_group_stock_options(watchlist_dict, lookup_date)
 all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
 
 render_pro_hero(
-    "股市專家系統｜首頁升級版",
-    "整合即時盤面、今日強弱股、強多/強空分布、快速搜尋與歷史分析入口。"
+    "股市專家系統｜自動推薦版",
+    "整合盤面快照、今日強弱、自動推薦、快速搜尋與歷史分析入口。"
 )
 
 group_count = len(watchlist_dict)
 stock_count = sum(len(v) for v in watchlist_dict.values())
 
-realtime_df, top_gainer, top_loser, strong_count, weak_count = build_home_market_snapshot(watchlist_dict, lookup_date)
+realtime_df, top_gainer, top_loser, strong_count, weak_count, analysis_df = build_home_market_snapshot(watchlist_dict, lookup_date)
 
 avg_change_pct = None
 if realtime_df is not None and not realtime_df.empty and "漲跌幅(%)" in realtime_df.columns:
@@ -219,7 +327,7 @@ render_pro_kpi_row([
     {"label": "強多 / 強空", "value": f"{strong_count} / {weak_count}", "delta": today_dt.strftime("%Y-%m-%d"), "delta_class": "pro-kpi-delta-flat"},
 ])
 
-render_pro_section("今日焦點", "先看最強與最弱，再決定要往哪一檔深入分析")
+render_pro_section("今日焦點", "先看今日最強與最弱，再決定要往哪一檔深入分析")
 
 gainer_text = "—"
 gainer_class = ""
@@ -247,6 +355,11 @@ render_pro_info_card(
     ],
     chips=["Top Gainer", "Top Loser", "Breadth"]
 )
+
+render_recommendation_block(analysis_df, "今日優先觀察", "今日優先觀察", "Watch First")
+render_recommendation_block(analysis_df, "接近支撐可觀察", "接近支撐可觀察", "Near Support")
+render_recommendation_block(analysis_df, "接近壓力要小心", "接近壓力要小心", "Near Resistance")
+render_recommendation_block(analysis_df, "今日偏弱避開", "今日偏弱避開", "Weak Today")
 
 render_pro_section("快速搜尋股票", "可直接輸入股票名稱或代號，再自動帶入首頁快速查詢條件")
 search_keyword = st.text_input(
@@ -383,7 +496,7 @@ if group_names:
 else:
     st.warning("目前沒有自選股群組，請先到『自選股中心』建立群組與股票。")
 
-render_pro_section("系統功能", "目前首頁已整合強弱掃描與搜尋入口，後續可再擴充跳轉與自動推薦")
+render_pro_section("系統功能", "首頁已整合自動推薦、快速搜尋與盤面概況，後續可再擴充自動跳轉與提醒")
 st.markdown("""
 - 儀表板：查看各群組最新行情摘要  
 - 行情查詢：單支股票最新行情、訊號、支撐壓力與最近事件  
