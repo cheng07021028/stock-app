@@ -239,6 +239,9 @@ def _init_state():
     if _k("bulk_text_next") in st.session_state:
         st.session_state[_k("bulk_text")] = st.session_state.pop(_k("bulk_text_next"))
 
+    if _k("selected_group_next") in st.session_state:
+        st.session_state[_k("selected_group")] = st.session_state.pop(_k("selected_group_next"))
+
     _repair_selected_group()
 
 
@@ -330,7 +333,7 @@ def _create_group(group_name: str) -> tuple[bool, str]:
 
     watchlist[g] = []
     st.session_state[_k("watchlist")] = watchlist
-    st.session_state[_k("selected_group")] = g
+    st.session_state[_k("selected_group_next")] = g
     return True, f"已新增群組：{g}"
 
 
@@ -413,7 +416,7 @@ def _delete_group(group_name: str) -> tuple[bool, str]:
     st.session_state[_k("watchlist")] = watchlist
 
     groups = list(watchlist.keys())
-    st.session_state[_k("selected_group")] = groups[0] if groups else ""
+    st.session_state[_k("selected_group_next")] = groups[0] if groups else ""
 
     return True, f"已刪除群組：{g}"
 
@@ -701,7 +704,7 @@ def main():
             [
                 ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json 與 data/watchlist.json。", ""),
                 ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
-                ("刪除群組", "會立即寫回檔案，並自動切到下一個有效群組。", ""),
+                ("刪除群組", "刪除後會在下一輪自動切到下一個有效群組。", ""),
                 ("批次格式", "每行：代碼,名稱,市場別；名稱與市場別可省略。", ""),
             ],
         )
