@@ -142,3 +142,125 @@ def score_to_badge(score: int):
     if score <= -2:
         return "偏空", "pro-down"
     return "整理", "pro-flat"
+def compute_support_resistance_snapshot(df: pd.DataFrame) -> dict:
+    result = {
+        "res_20": None,
+        "sup_20": None,
+        "res_60": None,
+        "sup_60": None,
+        "dist_res_20_pct": None,
+        "dist_sup_20_pct": None,
+        "dist_res_60_pct": None,
+        "dist_sup_60_pct": None,
+        "pressure_signal": ("中性", "pro-flat"),
+        "support_signal": ("中性", "pro-flat"),
+        "break_signal": ("區間內", "pro-flat"),
+        "comment_trend": "資料不足",
+        "comment_risk": "資料不足",
+        "comment_focus": "資料不足",
+        "comment_action": "資料不足",
+    }
+
+    if df is None or df.empty or "收盤價" not in df.columns:
+        return result
+
+    last = df.iloc[-1]
+    close_price = last["收盤價"]
+
+    if pd.isna(close_price):
+        return result
+
+    if len(df) >= 20 and all(col in df.columns for col in ["最高價", "最低價"]):
+        df20 = df.tail(20)
+        res_20 = df20["最高價"].max()
+        sup_20 = df20["最低價"].min()
+        result["res_20"] = res_20
+        result["sup_20"] = sup_20
+
+        if pd.notna(res_20) and res_20 != 0:
+            result["dist_res_20_pct"] = (res_20 - close_price) / res_20 * 100
+        if pd.notna(sup_20) and sup_20 != 0:
+            result["dist_sup_20_pct"] = (close_price - sup_20) / sup_20 * 100
+
+    if len(df) >= 60 and all(col in df.columns for col in ["最高價", "最低價"]):
+        df60 = df.tail(60)
+        res_60 = df60["最高價"].max()
+        sup_60 = df60["最低價"].min()
+        result["res_60"] = res_60
+        result["sup_60"] = sup_60
+
+        if pd.notna(res_60) and res_60 != 0:
+            result["dist_res_60_pct"] = (res_60 - close_price) / res_60 * 100
+        if pd.notna(sup_60) and sup_60 != 0:
+            result["dist_sup_60_pct"] = (close_price - sup_60) / sup_60 * 100
+
+    # 接近壓力 / 支撐
+    dist_res_20_pct = result["dist_res_20_pct"]
+    dist_sup_20_pct = result["dist_sup_20_pct"]
+
+    if dist_res_20_pct is not None:
+        if dist_res_20_pct < 1.5 and dist_res_20_pct >= 0:
+            result["pressure_signal"] = ("接近20日壓力", "pro-down")
+        elif dist_res_20_pct < 0:
+            result["pressure_signal"] = ("突破20日壓力", "pro-up")
+        else:
+            result["pressure_signal"] = ("壓力尚遠", "pro-flat")
+
+    if dist_sup_20_pct is not None:
+        if dist_sup_20_pct < 1.5 and dist_sup_20_pct >= 0:
+            result["support_signal"] = ("接近20日支撐", "pro-up")
+        elif dist_sup_20_pct < 0:
+            result["support_signal"] = ("跌破20日支撐", "pro-down")
+        else:
+            result["support_signal"] = ("支撐尚遠", "pro-flat")
+
+    # 突破 / 跌破判定
+    if result["res_20"] is not None and close_price > result["res_20"]:
+        result["break_signal"] = ("有效突破20日壓力", "pro-up")
+    elif result["sup_20"] is not None and close_price < result["sup_20"]:
+        result["break_signal"] = ("跌破20日支撐", "pro-down")
+    else:
+        result["break_signal"] = ("區間內整理", "pro-flat")
+
+    # 評語
+    pressure_text = result["pressure_signal"][0]
+    support_text = result["support_signal"][0]
+    break_text = result["break_signal"][0]
+
+    if "突破" in break_text:
+        result["comment_trend"] = "股價已進入突破型態，短線趨勢偏強。"
+    elif "跌破" in break_text:
+        result["comment_trend"] = "股價已跌破重要區間，短線結構轉弱。"
+    else:
+        result["comment_trend"] = "目前仍在區間結構內，趨勢等待進一步表態。"
+
+    if "接近20日壓力" in pressure_text:
+        result["comment_risk"] = "現價接近短壓區，追價風險升高。"
+    elif "接近20日支撐" in support_text:
+        result["comment_risk"] = "現價接近短撐區，需觀察是否有防守買盤。"
+    elif "跌破20日支撐" in support_text:
+        result["comment_risk"] = "支撐失守，若無量價回穩，弱勢可能延續。"
+    else:
+        result["comment_risk"] = "目前壓力與支撐距離適中，風險屬中性。"
+
+    if result["dist_res_20_pct"] is not None and result["dist_sup_20_pct"] is not None:
+        result["comment_focus"] = (
+            f"短壓約在 {format_number(result['res_20'], 2)}，"
+            f"短撐約在 {format_number(result['sup_20'], 2)}，"
+            "建議觀察價格是否帶量突破壓力，或回測支撐是否止穩。"
+        )
+    else:
+        result["comment_focus"] = "觀察近期高低點位置與量能是否同步放大。"
+
+    if "有效突破" in break_text:
+        result["comment_action"] = "可偏多思考，但應防假突破，宜搭配量能確認。"
+    elif "跌破20日支撐" in break_text:
+        result["comment_action"] = "宜保守應對，等待止跌訊號或重新站回支撐區。"
+    elif "接近20日支撐" in support_text:
+        result["comment_action"] = "可觀察支撐區反應，不宜在未止穩前過度預設反彈。"
+    elif "接近20日壓力" in pressure_text:
+        result["comment_action"] = "若無法放量突破壓力，短線宜防拉回。"
+    else:
+        result["comment_action"] = "可先觀察，等待價格脫離區間後再提高部位判斷。"
+
+    return result
