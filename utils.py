@@ -1145,3 +1145,131 @@ def compute_support_resistance_snapshot(df):
         result["comment_action"] = "可先觀察，等待價格脫離區間後再提高部位判斷。"
 
     return result
+def compute_radar_scores(df: pd.DataFrame) -> dict:
+    result = {
+        "trend": 50,
+        "momentum": 50,
+        "volume": 50,
+        "position": 50,
+        "structure": 50,
+        "summary": "資料不足，暫以中性評估。"
+    }
+
+    if df is None or df.empty or "收盤價" not in df.columns:
+        return result
+
+    last = df.iloc[-1]
+
+    # 1. 趨勢 Trend
+    trend_score = 50
+    if all(col in df.columns for col in ["MA5", "MA10", "MA20"]):
+        ma5 = last.get("MA5")
+        ma10 = last.get("MA10")
+        ma20 = last.get("MA20")
+        close_price = last.get("收盤價")
+
+        if pd.notna(ma5) and pd.notna(ma10) and pd.notna(ma20) and pd.notna(close_price):
+            if ma5 > ma10 > ma20 and close_price > ma20:
+                trend_score = 90
+            elif ma5 > ma10 and close_price > ma20:
+                trend_score = 75
+            elif ma5 < ma10 < ma20 and close_price < ma20:
+                trend_score = 20
+            elif close_price < ma20:
+                trend_score = 35
+            else:
+                trend_score = 55
+
+    # 2. 動能 Momentum
+    momentum_score = 50
+    if all(col in df.columns for col in ["K", "D", "DIF", "DEA"]):
+        k = last.get("K")
+        d = last.get("D")
+        dif = last.get("DIF")
+        dea = last.get("DEA")
+
+        if pd.notna(k) and pd.notna(d) and pd.notna(dif) and pd.notna(dea):
+            if k > d and dif > dea:
+                momentum_score = 85
+            elif k > d or dif > dea:
+                momentum_score = 68
+            elif k < d and dif < dea:
+                momentum_score = 25
+            else:
+                momentum_score = 45
+
+    # 3. 量能 Volume
+    volume_score = 50
+    if "成交股數" in df.columns and len(df) >= 5:
+        last_vol = last.get("成交股數")
+        avg5 = df["成交股數"].tail(5).mean()
+
+        if pd.notna(last_vol) and pd.notna(avg5) and avg5 > 0:
+            ratio = last_vol / avg5
+            if ratio >= 1.8:
+                volume_score = 90
+            elif ratio >= 1.3:
+                volume_score = 75
+            elif ratio >= 0.9:
+                volume_score = 55
+            elif ratio >= 0.7:
+                volume_score = 40
+            else:
+                volume_score = 25
+
+    # 4. 位置 Position
+    position_score = 50
+    if len(df) >= 20 and all(col in df.columns for col in ["最高價", "最低價", "收盤價"]):
+        recent = df.tail(20)
+        recent_high = recent["最高價"].max()
+        recent_low = recent["最低價"].min()
+        close_price = last.get("收盤價")
+
+        if pd.notna(recent_high) and pd.notna(recent_low) and pd.notna(close_price) and recent_high > recent_low:
+            pos = (close_price - recent_low) / (recent_high - recent_low)
+            if pos >= 0.85:
+                position_score = 85
+            elif pos >= 0.65:
+                position_score = 70
+            elif pos >= 0.35:
+                position_score = 50
+            elif pos >= 0.15:
+                position_score = 35
+            else:
+                position_score = 20
+
+    # 5. 結構 Structure
+    structure_score = 50
+    if len(df) >= 20:
+        close_price = last.get("收盤價")
+        recent_high = df["最高價"].tail(20).max() if "最高價" in df.columns else None
+        recent_low = df["最低價"].tail(20).min() if "最低價" in df.columns else None
+
+        if pd.notna(close_price):
+            if recent_high is not None and pd.notna(recent_high) and close_price >= recent_high:
+                structure_score = 88
+            elif recent_low is not None and pd.notna(recent_low) and close_price <= recent_low:
+                structure_score = 18
+            else:
+                structure_score = 55
+
+    result["trend"] = int(round(trend_score))
+    result["momentum"] = int(round(momentum_score))
+    result["volume"] = int(round(volume_score))
+    result["position"] = int(round(position_score))
+    result["structure"] = int(round(structure_score))
+
+    avg_score = (result["trend"] + result["momentum"] + result["volume"] + result["position"] + result["structure"]) / 5
+
+    if avg_score >= 80:
+        result["summary"] = "整體評分強勢，趨勢、動能與位置多數站在多方。"
+    elif avg_score >= 65:
+        result["summary"] = "整體評分偏強，可優先列入觀察名單。"
+    elif avg_score >= 45:
+        result["summary"] = "整體評分中性，偏向整理或等待方向確認。"
+    elif avg_score >= 30:
+        result["summary"] = "整體評分偏弱，短線保守為宜。"
+    else:
+        result["summary"] = "整體評分明顯偏弱，宜先以風險控管為主。"
+
+    return result
