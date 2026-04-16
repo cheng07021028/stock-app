@@ -1,6 +1,6 @@
 from datetime import date, timedelta
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from utils import (
     get_normalized_watchlist,
@@ -8,6 +8,8 @@ from utils import (
     get_font_scale,
     get_all_code_name_map,
     get_stock_name_and_market,
+    # 把下面這個改成你專案裡真正抓歷史資料的函式名稱
+    get_stock_history_df,
 )
 
 from query_state import load_last_query_state, save_last_query_state, parse_date_safe
@@ -36,6 +38,7 @@ if "kline_state_loaded" not in st.session_state:
     st.session_state.kline_state_loaded = True
 
 st.title("📊 歷史K線分析")
+st.caption("依群組、股票與日期區間查詢歷史K線資料")
 
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
@@ -52,9 +55,9 @@ if not group_names:
 saved_group = st.session_state.get("kline_group", "")
 group_index = group_names.index(saved_group) if saved_group in group_names else 0
 
-col1, col2 = st.columns(2)
+c1, c2 = st.columns(2)
 
-with col1:
+with c1:
     selected_group = st.selectbox(
         "選擇群組",
         group_names,
@@ -80,7 +83,7 @@ for item in items:
         "market": market_type,
     })
 
-with col2:
+with c2:
     if stock_options:
         saved_stock_code = st.session_state.get("kline_stock_code", "")
         stock_codes = [x["code"] for x in stock_options]
@@ -113,11 +116,9 @@ with d2:
         key="kline_end"
     )
 
-# 只更新非 widget-key 的 session_state
 st.session_state.kline_group = selected_group
 st.session_state.kline_stock_code = selected_stock["code"] if selected_stock is not None else ""
 
-# 反寫到首頁共用狀態檔
 save_last_query_state(
     quick_group=selected_group,
     quick_stock_code=selected_stock["code"] if selected_stock is not None else "",
@@ -129,25 +130,101 @@ if start_date > end_date:
     st.error("開始日期不能大於結束日期")
     st.stop()
 
-if selected_stock is not None:
-    st.markdown(
-        f"""
+if selected_stock is None:
+    st.warning("此群組目前沒有可查詢股票。")
+    st.stop()
+
+st.markdown(
+    f"""
 **目前查詢條件：**  
 群組：{selected_group}  
 股票：{selected_stock['name']}（{selected_stock['code']}）  
 市場別：{selected_stock['market']}  
 日期區間：{start_date} ~ {end_date}
 """
-    )
+)
 
-    # ===== 你原本的歷史K線查詢程式，接在這裡 =====
-    # 範例：
-    # df = get_stock_history(selected_stock["code"], start_date, end_date)
-    #
-    # if df.empty:
-    #     st.warning("查無資料")
-    # else:
-    #     st.dataframe(df, use_container_width=True)
-    #     st.line_chart(df.set_index("日期")["收盤價"])
+query_btn = st.button("開始查詢", type="primary", use_container_width=True)
 
-    st.info("把你原本的歷史K線抓資料與圖表程式接到這裡即可。")
+if query_btn:
+    with st.spinner("正在查詢歷史資料..."):
+        try:
+            df = get_stock_history_df(
+                selected_stock["code"],
+                start_date,
+                end_date
+            )
+        except Exception as e:
+            st.error(f"歷史資料查詢失敗：{e}")
+            st.stop()
+
+    if df is None or len(df) == 0:
+        st.warning("查無歷史資料。")
+        st.stop()
+
+    df = pd.DataFrame(df).copy()
+
+    rename_map = {}
+    cols = list(df.columns)
+
+    if "date" in cols and "日期" not in cols:
+        rename_map["date"] = "日期"
+    if "Date" in cols and "日期" not in cols:
+        rename_map["Date"] = "日期"
+
+    if "open" in cols and "開盤價" not in cols:
+        rename_map["open"] = "開盤價"
+    if "Open" in cols and "開盤價" not in cols:
+        rename_map["Open"] = "開盤價"
+
+    if "high" in cols and "最高價" not in cols:
+        rename_map["high"] = "最高價"
+    if "High" in cols and "最高價" not in cols:
+        rename_map["High"] = "最高價"
+
+    if "low" in cols and "最低價" not in cols:
+        rename_map["low"] = "最低價"
+    if "Low" in cols and "最低價" not in cols:
+        rename_map["Low"] = "最低價"
+
+    if "close" in cols and "收盤價" not in cols:
+        rename_map["close"] = "收盤價"
+    if "Close" in cols and "收盤價" not in cols:
+        rename_map["Close"] = "收盤價"
+    if "adj_close" in cols and "收盤價" not in cols:
+        rename_map["adj_close"] = "收盤價"
+    if "Adj Close" in cols and "收盤價" not in cols:
+        rename_map["Adj Close"] = "收盤價"
+
+    if "volume" in cols and "成交量" not in cols:
+        rename_map["volume"] = "成交量"
+    if "Volume" in cols and "成交量" not in cols:
+        rename_map["Volume"] = "成交量"
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    if "日期" in df.columns:
+        df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+        df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+
+    st.markdown("---")
+    st.subheader("歷史資料")
+
+    show_cols = [c for c in ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交量"] if c in df.columns]
+    if show_cols:
+        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if "收盤價" in df.columns and "日期" in df.columns:
+        chart_df = df[["日期", "收盤價"]].copy().set_index("日期")
+        st.subheader("收盤價走勢圖")
+        st.line_chart(chart_df, use_container_width=True)
+
+    if "成交量" in df.columns and "日期" in df.columns:
+        vol_df = df[["日期", "成交量"]].copy().set_index("日期")
+        st.subheader("成交量走勢圖")
+        st.bar_chart(vol_df, use_container_width=True)
+
+    st.success(f"查詢完成，共 {len(df)} 筆資料。")
