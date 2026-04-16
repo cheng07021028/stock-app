@@ -182,8 +182,6 @@ if group_names:
 
     st.session_state.last_quick_group = quick_group
     st.session_state.last_quick_stock_code = quick_stock["code"] if quick_stock is not None else ""
-    st.session_state.home_start = quick_start
-    st.session_state.home_end = quick_end
 
     save_last_query_state(
         quick_group=quick_group,
