@@ -16,6 +16,7 @@ from utils import (
 from query_state import load_last_query_state, save_last_query_state, parse_date_safe
 
 
+# ========= 快取：股票選單 =========
 @st.cache_data(ttl=600, show_spinner=False)
 def build_stock_options(items, lookup_date):
     all_code_name_df = get_all_code_name_map(lookup_date)
@@ -39,8 +40,89 @@ def build_stock_options(items, lookup_date):
     return stock_options
 
 
-def prepare_display_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+# ========= 指標計算 =========
+def add_moving_averages(df: pd.DataFrame, selected_indicators: list) -> pd.DataFrame:
+    if df.empty or "收盤價" not in df.columns:
+        return df
+
+    ma_map = {
+        "MA5": 5,
+        "MA10": 10,
+        "MA20": 20,
+        "MA60": 60,
+        "MA120": 120,
+        "MA240": 240,
+    }
+
+    for ma_name, window in ma_map.items():
+        if ma_name in selected_indicators:
+            df[ma_name] = df["收盤價"].rolling(window=window, min_periods=1).mean()
+
+    return df
+
+
+def add_kd_macd(df: pd.DataFrame, selected_indicators: list) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    need_kd = "KD" in selected_indicators
+    need_macd = "MACD" in selected_indicators
+
+    if need_kd and all(col in df.columns for col in ["最高價", "最低價", "收盤價"]):
+        low_n = df["最低價"].rolling(window=9, min_periods=1).min()
+        high_n = df["最高價"].rolling(window=9, min_periods=1).max()
+
+        denom = (high_n - low_n).replace(0, pd.NA)
+        rsv = ((df["收盤價"] - low_n) / denom * 100).fillna(0)
+
+        k_values = []
+        d_values = []
+        k_prev = 50.0
+        d_prev = 50.0
+
+        for val in rsv:
+            val = float(val)
+            k_now = (2 / 3) * k_prev + (1 / 3) * val
+            d_now = (2 / 3) * d_prev + (1 / 3) * k_now
+            k_values.append(k_now)
+            d_values.append(d_now)
+            k_prev = k_now
+            d_prev = d_now
+
+        df["K"] = k_values
+        df["D"] = d_values
+
+    if need_macd and "收盤價" in df.columns:
+        ema12 = df["收盤價"].ewm(span=12, adjust=False).mean()
+        ema26 = df["收盤價"].ewm(span=26, adjust=False).mean()
+        dif = ema12 - ema26
+        dea = dif.ewm(span=9, adjust=False).mean()
+        macd_hist = dif - dea
+
+        df["DIF"] = dif
+        df["DEA"] = dea
+        df["MACD_HIST"] = macd_hist
+
+    return df
+
+
+def add_signal_flags(df: pd.DataFrame, selected_indicators: list) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    if "KD" in selected_indicators and all(col in df.columns for col in ["K", "D"]):
+        df["KD_GOLDEN"] = (df["K"] > df["D"]) & (df["K"].shift(1) <= df["D"].shift(1))
+        df["KD_DEATH"] = (df["K"] < df["D"]) & (df["K"].shift(1) >= df["D"].shift(1))
+
+    if "MACD" in selected_indicators and all(col in df.columns for col in ["DIF", "DEA"]):
+        df["MACD_GOLDEN"] = (df["DIF"] > df["DEA"]) & (df["DIF"].shift(1) <= df["DEA"].shift(1))
+        df["MACD_DEATH"] = (df["DIF"] < df["DEA"]) & (df["DIF"].shift(1) >= df["DEA"].shift(1))
+
+    return df
+
+
+def prepare_display_df(df: pd.DataFrame, selected_indicators: list) -> pd.DataFrame:
+    if df is None or len(df) == 0:
         return pd.DataFrame()
 
     df = pd.DataFrame(df).copy()
@@ -49,14 +131,14 @@ def prepare_display_df(df: pd.DataFrame) -> pd.DataFrame:
         df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
         df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
-    if "收盤價" in df.columns:
-        df["MA5"] = df["收盤價"].rolling(window=5, min_periods=1).mean()
-        df["MA10"] = df["收盤價"].rolling(window=10, min_periods=1).mean()
-        df["MA20"] = df["收盤價"].rolling(window=20, min_periods=1).mean()
+    df = add_moving_averages(df, selected_indicators)
+    df = add_kd_macd(df, selected_indicators)
+    df = add_signal_flags(df, selected_indicators)
 
     return df
 
 
+# ========= 畫面元件 =========
 def render_summary_metrics(df: pd.DataFrame):
     if df.empty or "收盤價" not in df.columns:
         return
@@ -75,13 +157,52 @@ def render_summary_metrics(df: pd.DataFrame):
         st.metric("區間漲跌幅", f"{price_change_pct:,.2f}%")
 
 
+def render_signal_summary(df: pd.DataFrame, selected_indicators: list):
+    if df.empty or "日期" not in df.columns:
+        return
+
+    signals = []
+
+    if "KD" in selected_indicators:
+        if "KD_GOLDEN" in df.columns:
+            kd_golden = df[df["KD_GOLDEN"]]
+            if not kd_golden.empty:
+                last_row = kd_golden.iloc[-1]
+                signals.append(f"KD 黃金交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+
+        if "KD_DEATH" in df.columns:
+            kd_death = df[df["KD_DEATH"]]
+            if not kd_death.empty:
+                last_row = kd_death.iloc[-1]
+                signals.append(f"KD 死亡交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+
+    if "MACD" in selected_indicators:
+        if "MACD_GOLDEN" in df.columns:
+            macd_golden = df[df["MACD_GOLDEN"]]
+            if not macd_golden.empty:
+                last_row = macd_golden.iloc[-1]
+                signals.append(f"MACD 黃金交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+
+        if "MACD_DEATH" in df.columns:
+            macd_death = df[df["MACD_DEATH"]]
+            if not macd_death.empty:
+                last_row = macd_death.iloc[-1]
+                signals.append(f"MACD 死亡交叉：{last_row['日期'].strftime('%Y-%m-%d')}")
+
+    if signals:
+        st.markdown("### 訊號摘要")
+        for text in signals:
+            st.write(f"- {text}")
+
+
 def render_table(df: pd.DataFrame):
-    show_cols = [
-        c for c in [
-            "日期", "開盤價", "最高價", "最低價", "收盤價",
-            "MA5", "MA10", "MA20", "成交股數", "成交金額", "成交筆數"
-        ] if c in df.columns
+    base_cols = ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"]
+    ordered_indicator_cols = [
+        "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
+        "K", "D", "DIF", "DEA", "MACD_HIST"
     ]
+
+    show_cols = [c for c in base_cols + ordered_indicator_cols if c in df.columns]
 
     if show_cols:
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
@@ -89,7 +210,7 @@ def render_table(df: pd.DataFrame):
         st.dataframe(df, use_container_width=True, hide_index=True)
 
 
-def render_chart(df: pd.DataFrame):
+def render_chart(df: pd.DataFrame, selected_indicators: list):
     if df.empty:
         return
 
@@ -130,47 +251,87 @@ def render_chart(df: pd.DataFrame):
             col=1
         )
 
-        if "MA5" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["日期"],
-                    y=df["MA5"],
-                    mode="lines",
-                    name="MA5",
-                    line=dict(width=1.8),
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA5: %{y:.2f}<extra></extra>"
-                ),
-                row=1,
-                col=1
-            )
+        ma_lines = ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240"]
+        for ma_name in ma_lines:
+            if ma_name in selected_indicators and ma_name in df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df["日期"],
+                        y=df[ma_name],
+                        mode="lines",
+                        name=ma_name,
+                        line=dict(width=2),
+                        hovertemplate=f"日期: %{{x|%Y-%m-%d}}<br>{ma_name}: %{{y:.2f}}<extra></extra>"
+                    ),
+                    row=1,
+                    col=1
+                )
 
-        if "MA10" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["日期"],
-                    y=df["MA10"],
-                    mode="lines",
-                    name="MA10",
-                    line=dict(width=2.2),
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA10: %{y:.2f}<extra></extra>"
-                ),
-                row=1,
-                col=1
-            )
+        if "KD" in selected_indicators and "收盤價" in df.columns:
+            if "KD_GOLDEN" in df.columns:
+                kd_buy_df = df[df["KD_GOLDEN"]]
+                if not kd_buy_df.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=kd_buy_df["日期"],
+                            y=kd_buy_df["收盤價"],
+                            mode="markers",
+                            name="KD買點",
+                            marker=dict(size=10, symbol="triangle-up", color="green"),
+                            hovertemplate="日期: %{x|%Y-%m-%d}<br>KD買點: %{y:.2f}<extra></extra>"
+                        ),
+                        row=1,
+                        col=1
+                    )
 
-        if "MA20" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["日期"],
-                    y=df["MA20"],
-                    mode="lines",
-                    name="MA20",
-                    line=dict(width=2.2),
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA20: %{y:.2f}<extra></extra>"
-                ),
-                row=1,
-                col=1
-            )
+            if "KD_DEATH" in df.columns:
+                kd_sell_df = df[df["KD_DEATH"]]
+                if not kd_sell_df.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=kd_sell_df["日期"],
+                            y=kd_sell_df["收盤價"],
+                            mode="markers",
+                            name="KD賣點",
+                            marker=dict(size=10, symbol="triangle-down", color="red"),
+                            hovertemplate="日期: %{x|%Y-%m-%d}<br>KD賣點: %{y:.2f}<extra></extra>"
+                        ),
+                        row=1,
+                        col=1
+                    )
+
+        if "MACD" in selected_indicators and "收盤價" in df.columns:
+            if "MACD_GOLDEN" in df.columns:
+                macd_buy_df = df[df["MACD_GOLDEN"]]
+                if not macd_buy_df.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=macd_buy_df["日期"],
+                            y=macd_buy_df["收盤價"],
+                            mode="markers",
+                            name="MACD買點",
+                            marker=dict(size=11, symbol="star", color="blue"),
+                            hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD買點: %{y:.2f}<extra></extra>"
+                        ),
+                        row=1,
+                        col=1
+                    )
+
+            if "MACD_DEATH" in df.columns:
+                macd_sell_df = df[df["MACD_DEATH"]]
+                if not macd_sell_df.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=macd_sell_df["日期"],
+                            y=macd_sell_df["收盤價"],
+                            mode="markers",
+                            name="MACD賣點",
+                            marker=dict(size=11, symbol="x", color="black"),
+                            hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD賣點: %{y:.2f}<extra></extra>"
+                        ),
+                        row=1,
+                        col=1
+                    )
 
         if has_volume:
             volume_colors = []
@@ -213,9 +374,8 @@ def render_chart(df: pd.DataFrame):
             fig.update_yaxes(title_text="成交量", row=2, col=1)
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
-        return
 
-    if "收盤價" in df.columns and "日期" in df.columns:
+    elif "收盤價" in df.columns and "日期" in df.columns:
         st.subheader("收盤價趨勢圖")
 
         fig = go.Figure()
@@ -229,38 +389,18 @@ def render_chart(df: pd.DataFrame):
             )
         )
 
-        if "MA5" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["日期"],
-                    y=df["MA5"],
-                    mode="lines",
-                    name="MA5",
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA5: %{y:.2f}<extra></extra>"
+        ma_lines = ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240"]
+        for ma_name in ma_lines:
+            if ma_name in selected_indicators and ma_name in df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df["日期"],
+                        y=df[ma_name],
+                        mode="lines",
+                        name=ma_name,
+                        hovertemplate=f"日期: %{{x|%Y-%m-%d}}<br>{ma_name}: %{{y:.2f}}<extra></extra>"
+                    )
                 )
-            )
-
-        if "MA10" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["日期"],
-                    y=df["MA10"],
-                    mode="lines",
-                    name="MA10",
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA10: %{y:.2f}<extra></extra>"
-                )
-            )
-
-        if "MA20" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["日期"],
-                    y=df["MA20"],
-                    mode="lines",
-                    name="MA20",
-                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA20: %{y:.2f}<extra></extra>"
-                )
-            )
 
         fig.update_layout(
             height=520,
@@ -277,7 +417,132 @@ def render_chart(df: pd.DataFrame):
 
         st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
+    if "KD" in selected_indicators and all(col in df.columns for col in ["日期", "K", "D"]):
+        st.subheader("KD 指標")
 
+        kd_fig = go.Figure()
+        kd_fig.add_trace(
+            go.Scatter(
+                x=df["日期"],
+                y=df["K"],
+                mode="lines",
+                name="K",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>K: %{y:.2f}<extra></extra>"
+            )
+        )
+        kd_fig.add_trace(
+            go.Scatter(
+                x=df["日期"],
+                y=df["D"],
+                mode="lines",
+                name="D",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>D: %{y:.2f}<extra></extra>"
+            )
+        )
+
+        if "KD_GOLDEN" in df.columns:
+            kd_buy_df = df[df["KD_GOLDEN"]]
+            if not kd_buy_df.empty:
+                kd_fig.add_trace(
+                    go.Scatter(
+                        x=kd_buy_df["日期"],
+                        y=kd_buy_df["K"],
+                        mode="markers",
+                        name="KD黃金交叉",
+                        marker=dict(size=10, symbol="triangle-up", color="green"),
+                        hovertemplate="日期: %{x|%Y-%m-%d}<br>KD黃金交叉: %{y:.2f}<extra></extra>"
+                    )
+                )
+
+        if "KD_DEATH" in df.columns:
+            kd_sell_df = df[df["KD_DEATH"]]
+            if not kd_sell_df.empty:
+                kd_fig.add_trace(
+                    go.Scatter(
+                        x=kd_sell_df["日期"],
+                        y=kd_sell_df["K"],
+                        mode="markers",
+                        name="KD死亡交叉",
+                        marker=dict(size=10, symbol="triangle-down", color="red"),
+                        hovertemplate="日期: %{x|%Y-%m-%d}<br>KD死亡交叉: %{y:.2f}<extra></extra>"
+                    )
+                )
+
+        kd_fig.update_layout(
+            height=320,
+            hovermode="x unified",
+            margin=dict(l=20, r=20, t=20, b=20)
+        )
+        st.plotly_chart(kd_fig, use_container_width=True, config={"displaylogo": False})
+
+    if "MACD" in selected_indicators and all(col in df.columns for col in ["日期", "DIF", "DEA", "MACD_HIST"]):
+        st.subheader("MACD 指標")
+
+        macd_fig = go.Figure()
+        macd_fig.add_trace(
+            go.Bar(
+                x=df["日期"],
+                y=df["MACD_HIST"],
+                name="MACD柱",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD柱: %{y:.2f}<extra></extra>"
+            )
+        )
+        macd_fig.add_trace(
+            go.Scatter(
+                x=df["日期"],
+                y=df["DIF"],
+                mode="lines",
+                name="DIF",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>DIF: %{y:.2f}<extra></extra>"
+            )
+        )
+        macd_fig.add_trace(
+            go.Scatter(
+                x=df["日期"],
+                y=df["DEA"],
+                mode="lines",
+                name="DEA",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>DEA: %{y:.2f}<extra></extra>"
+            )
+        )
+
+        if "MACD_GOLDEN" in df.columns:
+            macd_buy_df = df[df["MACD_GOLDEN"]]
+            if not macd_buy_df.empty:
+                macd_fig.add_trace(
+                    go.Scatter(
+                        x=macd_buy_df["日期"],
+                        y=macd_buy_df["DIF"],
+                        mode="markers",
+                        name="MACD黃金交叉",
+                        marker=dict(size=10, symbol="triangle-up", color="blue"),
+                        hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD黃金交叉: %{y:.2f}<extra></extra>"
+                    )
+                )
+
+        if "MACD_DEATH" in df.columns:
+            macd_sell_df = df[df["MACD_DEATH"]]
+            if not macd_sell_df.empty:
+                macd_fig.add_trace(
+                    go.Scatter(
+                        x=macd_sell_df["日期"],
+                        y=macd_sell_df["DIF"],
+                        mode="markers",
+                        name="MACD死亡交叉",
+                        marker=dict(size=10, symbol="triangle-down", color="black"),
+                        hovertemplate="日期: %{x|%Y-%m-%d}<br>MACD死亡交叉: %{y:.2f}<extra></extra>"
+                    )
+                )
+
+        macd_fig.update_layout(
+            height=360,
+            hovermode="x unified",
+            margin=dict(l=20, r=20, t=20, b=20)
+        )
+        st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
+
+
+# ========= 頁面初始化 =========
 st.set_page_config(page_title="歷史K線分析", page_icon="📊", layout="wide")
 
 if "font_scale" not in st.session_state:
@@ -310,8 +575,11 @@ if "kline_selected_stock" not in st.session_state:
 if "kline_selected_group" not in st.session_state:
     st.session_state.kline_selected_group = None
 
+if "kline_indicators" not in st.session_state:
+    st.session_state.kline_indicators = ["MA5", "MA10", "MA20"]
+
 st.title("📊 歷史K線分析")
-st.caption("依群組、股票與日期區間查詢歷史K線資料")
+st.caption("依群組、股票、日期區間查詢歷史K線資料，並可選擇技術指標")
 
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
@@ -326,6 +594,8 @@ if not group_names:
 saved_group = st.session_state.get("kline_group", "")
 group_index = group_names.index(saved_group) if saved_group in group_names else 0
 
+
+# ========= 查詢表單：只有按下查詢才執行 =========
 with st.form("kline_query_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
 
@@ -369,8 +639,16 @@ with st.form("kline_query_form", clear_on_submit=False):
             value=st.session_state.get("kline_end", today_dt)
         )
 
+    selected_indicators = st.multiselect(
+        "技術指標",
+        ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "KD", "MACD"],
+        default=st.session_state.get("kline_indicators", ["MA5", "MA10", "MA20"])
+    )
+
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
+
+# ========= 執行查詢 =========
 if query_btn:
     if start_date > end_date:
         st.error("開始日期不能大於結束日期")
@@ -384,6 +662,7 @@ if query_btn:
     st.session_state.kline_stock_code = selected_stock["code"]
     st.session_state.kline_start = start_date
     st.session_state.kline_end = end_date
+    st.session_state.kline_indicators = selected_indicators
 
     save_last_query_state(
         quick_group=selected_group,
@@ -405,9 +684,12 @@ if query_btn:
     st.session_state.kline_selected_stock = selected_stock
     st.session_state.kline_selected_group = selected_group
 
+
+# ========= 顯示查詢結果 =========
 result_df = st.session_state.get("kline_result_df", None)
 result_stock = st.session_state.get("kline_selected_stock", None)
 result_group = st.session_state.get("kline_selected_group", None)
+selected_indicators = st.session_state.get("kline_indicators", ["MA5", "MA10", "MA20"])
 
 if result_df is not None and result_stock is not None:
     st.markdown(
@@ -416,27 +698,35 @@ if result_df is not None and result_stock is not None:
 群組：{result_group}  
 股票：{result_stock['name']}（{result_stock['code']}）  
 市場別：{result_stock['market']}  
-日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}
+日期區間：{st.session_state.kline_start} ~ {st.session_state.kline_end}  
+技術指標：{", ".join(selected_indicators) if selected_indicators else "無"}
 """
     )
 
-    df = prepare_display_df(result_df)
+    df = prepare_display_df(result_df, selected_indicators)
 
     if df.empty:
         st.warning("查無歷史資料。")
         st.stop()
 
-    if len(df) < 10:
+    if "MA10" in selected_indicators and len(df) < 10:
         st.info("目前資料筆數不足 10 筆，MA10 以現有資料平均顯示。")
-    if len(df) < 20:
+    if "MA20" in selected_indicators and len(df) < 20:
         st.info("目前資料筆數不足 20 筆，MA20 以現有資料平均顯示。")
+    if "MA60" in selected_indicators and len(df) < 60:
+        st.info("目前資料筆數不足 60 筆，MA60 以現有資料平均顯示。")
+    if "MA120" in selected_indicators and len(df) < 120:
+        st.info("目前資料筆數不足 120 筆，MA120 以現有資料平均顯示。")
+    if "MA240" in selected_indicators and len(df) < 240:
+        st.info("目前資料筆數不足 240 筆，MA240 以現有資料平均顯示。")
 
     render_summary_metrics(df)
+    render_signal_summary(df, selected_indicators)
 
     st.markdown("---")
     st.subheader("歷史資料")
     render_table(df)
-    render_chart(df)
+    render_chart(df, selected_indicators)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
 else:
