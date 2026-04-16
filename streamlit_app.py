@@ -1,578 +1,357 @@
-from datetime import date, timedelta
+# streamlit_app.py
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from typing import Any
+
 import pandas as pd
 import streamlit as st
 
 from utils import (
-    get_normalized_watchlist,
-    apply_font_scale,
-    get_font_scale,
-    get_all_code_name_map,
-    get_stock_name_and_market,
-    get_realtime_stock_info,
-    get_realtime_watchlist_df,
-    get_history_data,
-    load_last_query_state,
-    save_last_query_state,
-    parse_date_safe,
-    inject_pro_theme,
-    render_pro_hero,
-    render_pro_section,
-    render_pro_kpi_row,
-    render_pro_info_card,
     format_number,
-    compute_signal_snapshot,
-    score_to_badge,
-    compute_support_resistance_snapshot,
+    get_all_code_name_map,
+    get_normalized_watchlist,
+    inject_pro_theme,
+    load_last_query_state,
+    parse_date_safe,
+    render_pro_hero,
+    render_pro_info_card,
+    render_pro_kpi_row,
+    render_pro_section,
+    save_last_query_state,
 )
 
+PAGE_TITLE = "股票分析系統首頁"
+PFX = "home_"
 
-@st.cache_data(ttl=600, show_spinner=False)
-def build_group_stock_options(watchlist_dict, lookup_date):
-    all_code_name_df = get_all_code_name_map(lookup_date)
-    result = {}
 
-    for group_name, items in watchlist_dict.items():
-        stock_options = []
+# =========================================================
+# 基礎工具
+# =========================================================
+def _k(key: str) -> str:
+    return f"{PFX}{key}"
 
-        for item in items:
-            code = str(item.get("code", "")).strip()
-            manual_name = str(item.get("name", "")).strip()
-            if not code:
-                continue
 
-            stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
-            stock_options.append({
-                "group": group_name,
-                "label": f"{stock_name} ({code}) [{market_type}]",
-                "code": code,
-                "name": stock_name,
-                "market": market_type,
-            })
+def _safe_str(v: Any) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
 
-        result[group_name] = stock_options
+
+def _to_pydate(v: Any, fallback: date) -> date:
+    if v is None:
+        return fallback
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, pd.Timestamp):
+        if pd.isna(v):
+            return fallback
+        return v.date()
+    try:
+        x = pd.to_datetime(v, errors="coerce")
+        if pd.notna(x):
+            return x.date()
+    except Exception:
+        pass
+    return fallback
+
+
+def _fmt_num(v: Any, digits: int = 2) -> str:
+    return format_number(v, digits)
+
+
+# =========================================================
+# 自選股資料
+# =========================================================
+def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
+    raw = get_normalized_watchlist()
+    result: dict[str, list[dict[str, str]]] = {}
+
+    if isinstance(raw, dict):
+        for group_name, items in raw.items():
+            g = _safe_str(group_name) or "未分組"
+            result[g] = []
+
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    code = _safe_str(item.get("code"))
+                    name = _safe_str(item.get("name")) or code
+                    market = _safe_str(item.get("market")) or "上市"
+                    if code:
+                        result[g].append(
+                            {
+                                "code": code,
+                                "name": name,
+                                "market": market,
+                                "label": f"{code} {name}",
+                            }
+                        )
+
+    if not result:
+        all_df = get_all_code_name_map("")
+        if isinstance(all_df, pd.DataFrame) and not all_df.empty:
+            rows = []
+            for _, row in all_df.head(20).iterrows():
+                code = _safe_str(row.get("code"))
+                name = _safe_str(row.get("name")) or code
+                market = _safe_str(row.get("market")) or "上市"
+                if code:
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                            "label": f"{code} {name}",
+                        }
+                    )
+            if rows:
+                result["全部股票"] = rows
 
     return result
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def build_all_stock_options(watchlist_dict, lookup_date):
-    grouped = build_group_stock_options(watchlist_dict, lookup_date)
-    all_options = []
-    for group_name, items in grouped.items():
-        for item in items:
-            all_options.append({
-                **item,
-                "search_label": f"{item['name']} ({item['code']}) [{item['market']}]｜{group_name}"
-            })
-    return all_options
-
-
-def filter_stock_options(all_options, keyword):
-    keyword = str(keyword).strip().lower()
-    if not keyword:
-        return all_options[:30]
-
-    matched = []
-    for item in all_options:
-        pool = " ".join([
-            str(item.get("name", "")),
-            str(item.get("code", "")),
-            str(item.get("market", "")),
-            str(item.get("group", "")),
-            str(item.get("search_label", "")),
-        ]).lower()
-        if keyword in pool:
-            matched.append(item)
-    return matched[:50]
-
-
-def add_home_indicators(df: pd.DataFrame):
-    if df is None or df.empty or "收盤價" not in df.columns:
-        return df
-
-    df = df.copy()
-    df["MA5"] = df["收盤價"].rolling(window=5, min_periods=1).mean()
-    df["MA10"] = df["收盤價"].rolling(window=10, min_periods=1).mean()
-    df["MA20"] = df["收盤價"].rolling(window=20, min_periods=1).mean()
-
-    if all(col in df.columns for col in ["最高價", "最低價", "收盤價"]):
-        low_n = df["最低價"].rolling(window=9, min_periods=1).min()
-        high_n = df["最高價"].rolling(window=9, min_periods=1).max()
-        denom = (high_n - low_n).replace(0, pd.NA)
-        rsv = ((df["收盤價"] - low_n) / denom * 100).fillna(0)
-
-        k_values, d_values = [], []
-        k_prev, d_prev = 50.0, 50.0
-        for val in rsv:
-            val = float(val)
-            k_now = (2 / 3) * k_prev + (1 / 3) * val
-            d_now = (2 / 3) * d_prev + (1 / 3) * k_now
-            k_values.append(k_now)
-            d_values.append(d_now)
-            k_prev, d_prev = k_now, d_now
-
-        df["K"] = k_values
-        df["D"] = d_values
-
-    ema12 = df["收盤價"].ewm(span=12, adjust=False).mean()
-    ema26 = df["收盤價"].ewm(span=26, adjust=False).mean()
-    df["DIF"] = ema12 - ema26
-    df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
-    df["MACD_HIST"] = df["DIF"] - df["DEA"]
-    return df
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def build_home_market_snapshot(watchlist_dict, query_date):
-    realtime_df = get_realtime_watchlist_df(watchlist_dict, query_date)
-    if realtime_df is None or realtime_df.empty:
-        return realtime_df, None, None, 0, 0, pd.DataFrame()
-
+def _build_overview_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
     rows = []
-    strong_count = 0
-    weak_count = 0
+    for group_name, items in watchlist.items():
+        for item in items:
+            rows.append(
+                {
+                    "群組": group_name,
+                    "股票代號": _safe_str(item.get("code")),
+                    "股票名稱": _safe_str(item.get("name")),
+                    "市場別": _safe_str(item.get("market")) or "上市",
+                    "股票": _safe_str(item.get("label")),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "股票"])
+    return pd.DataFrame(rows).sort_values(["群組", "股票代號"]).reset_index(drop=True)
 
-    for _, row in realtime_df.iterrows():
-        code = str(row.get("股票代號", "")).strip()
-        name = str(row.get("股票名稱", "")).strip()
-        market = str(row.get("市場別", "")).strip() or "上市"
-        group = str(row.get("群組", "")).strip()
 
-        hist = get_history_data(
-            code,
-            name,
-            market,
-            date.today() - timedelta(days=120),
-            date.today()
+def _build_group_summary_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
+    rows = []
+    for group_name, items in watchlist.items():
+        rows.append(
+            {
+                "群組": group_name,
+                "股票數": len(items),
+                "市場別組成": " / ".join(sorted(set([_safe_str(x.get("market")) or "上市" for x in items]))) if items else "—",
+            }
         )
-
-        if hist is None or hist.empty:
-            rows.append({
-                "群組": group,
-                "股票代號": code,
-                "股票名稱": name,
-                "市場別": market,
-                "現價": row.get("現價"),
-                "漲跌": row.get("漲跌"),
-                "漲跌幅(%)": row.get("漲跌幅(%)"),
-                "總量": row.get("總量"),
-                "更新時間": row.get("更新時間"),
-                "綜合評級": "無資料",
-                "訊號分數": None,
-                "均線結構": "無資料",
-                "突破狀態": "無資料",
-                "20日壓力": None,
-                "20日支撐": None,
-                "距20壓力(%)": None,
-                "距20支撐(%)": None,
-                "提醒類型": "",
-                "提醒原因": "",
-                "提醒優先序": 999,
-            })
-            continue
-
-        hist = add_home_indicators(hist)
-        signal = compute_signal_snapshot(hist)
-        sr = compute_support_resistance_snapshot(hist)
-        badge_text, _ = score_to_badge(signal.get("score", 0))
-
-        if badge_text == "強多":
-            strong_count += 1
-        elif badge_text == "強空":
-            weak_count += 1
-
-        change_pct = row.get("漲跌幅(%)")
-        signal_score = signal.get("score", 0)
-        dist_res_20 = sr.get("dist_res_20_pct")
-        dist_sup_20 = sr.get("dist_sup_20_pct")
-        breakout = signal.get("breakout_20d", ("", ""))[0]
-
-        alert_type = ""
-        alert_reason = ""
-        alert_priority = 999
-
-        if signal_score >= 4 and change_pct is not None and pd.notna(change_pct) and change_pct > 0:
-            alert_type = "偏強追蹤"
-            alert_reason = f"訊號分數 {signal_score:+d}，即時漲跌幅 {change_pct:+.2f}%"
-            alert_priority = 1
-
-        if "突破20日高" in breakout:
-            alert_type = "突破注意"
-            alert_reason = "股價已突破 20 日高點，觀察是否帶量延續"
-            alert_priority = min(alert_priority, 1)
-
-        if dist_sup_20 is not None and 0 <= dist_sup_20 <= 2.0:
-            if alert_priority > 2:
-                alert_type = "支撐觀察"
-                alert_reason = f"距 20 日支撐僅 {dist_sup_20:.2f}%"
-                alert_priority = 2
-
-        if dist_res_20 is not None and 0 <= dist_res_20 <= 2.0:
-            if alert_priority > 3:
-                alert_type = "壓力警戒"
-                alert_reason = f"距 20 日壓力僅 {dist_res_20:.2f}%"
-                alert_priority = 3
-
-        if signal_score <= -3:
-            alert_type = "偏弱警戒"
-            alert_reason = f"訊號分數 {signal_score:+d}，偏弱結構明顯"
-            alert_priority = 1
-
-        rows.append({
-            "群組": group,
-            "股票代號": code,
-            "股票名稱": name,
-            "市場別": market,
-            "現價": row.get("現價"),
-            "漲跌": row.get("漲跌"),
-            "漲跌幅(%)": row.get("漲跌幅(%)"),
-            "總量": row.get("總量"),
-            "更新時間": row.get("更新時間"),
-            "綜合評級": badge_text,
-            "訊號分數": signal_score,
-            "均線結構": signal["ma_trend"][0],
-            "突破狀態": breakout,
-            "20日壓力": sr.get("res_20"),
-            "20日支撐": sr.get("sup_20"),
-            "距20壓力(%)": dist_res_20,
-            "距20支撐(%)": dist_sup_20,
-            "提醒類型": alert_type,
-            "提醒原因": alert_reason,
-            "提醒優先序": alert_priority,
-        })
-
-    analysis_df = pd.DataFrame(rows)
-
-    ranked = realtime_df.sort_values(by="漲跌幅(%)", ascending=False, na_position="last").reset_index(drop=True)
-    top_gainer = ranked.iloc[0].to_dict() if not ranked.empty else None
-    top_loser = ranked.sort_values(by="漲跌幅(%)", ascending=True, na_position="last").iloc[0].to_dict() if not ranked.empty else None
-
-    return realtime_df, top_gainer, top_loser, strong_count, weak_count, analysis_df
+    if not rows:
+        return pd.DataFrame(columns=["群組", "股票數", "市場別組成"])
+    return pd.DataFrame(rows).sort_values(["股票數", "群組"], ascending=[False, True]).reset_index(drop=True)
 
 
-def render_recommendation_block(df: pd.DataFrame, rec_type: str, title: str, chip: str):
-    sub = df[df["提醒類型"] == rec_type].copy() if df is not None and not df.empty else pd.DataFrame()
-
-    render_pro_section(title, "由訊號分數、支撐壓力距離與突破狀態自動整理")
-
-    if sub.empty:
-        render_pro_info_card(
-            title,
-            [("結果", "目前沒有符合條件的標的", "")],
-            chips=[chip]
-        )
-        return
-
-    sub = sub.sort_values(by=["提醒優先序", "訊號分數", "漲跌幅(%)"], ascending=[True, False, False], na_position="last").head(3)
-
-    info_pairs = []
-    for _, row in sub.iterrows():
-        name = f"{row['股票名稱']}（{row['股票代號']}）"
-        reason = row.get("提醒原因", "—")
-        extra = f"現價 {format_number(row.get('現價'), 2)}｜評級 {row.get('綜合評級', '—')}"
-        info_pairs.append((name, f"{reason}｜{extra}", ""))
-
-    render_pro_info_card(title, info_pairs, chips=[chip])
+def _build_search_rows(watchlist: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for group_name, items in watchlist.items():
+        for item in items:
+            rows.append(
+                {
+                    "group": group_name,
+                    "code": _safe_str(item.get("code")),
+                    "name": _safe_str(item.get("name")),
+                    "market": _safe_str(item.get("market")),
+                    "label": _safe_str(item.get("label")),
+                    "blob": f"{group_name} {item.get('code','')} {item.get('name','')} {item.get('label','')}".lower(),
+                }
+            )
+    return rows
 
 
-def render_alert_list(df: pd.DataFrame):
-    render_pro_section("提醒清單", "把今天需要優先注意的股票整理成一張表，方便快速掃描")
+def _find_search_target(keyword: str, rows: list[dict[str, str]]) -> dict[str, str] | None:
+    q = _safe_str(keyword).lower()
+    if not q:
+        return None
 
-    if df is None or df.empty:
-        st.info("目前沒有提醒資料。")
-        return
+    for row in rows:
+        if q == row["code"].lower():
+            return row
+    for row in rows:
+        if q == row["name"].lower():
+            return row
+    for row in rows:
+        if q == row["label"].lower():
+            return row
 
-    sub = df[df["提醒類型"] != ""].copy()
-    if sub.empty:
-        st.info("目前沒有符合提醒條件的股票。")
-        return
+    prefix_hits = [r for r in rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
+    if prefix_hits:
+        return prefix_hits[0]
 
-    sub = sub.sort_values(by=["提醒優先序", "訊號分數", "漲跌幅(%)"], ascending=[True, False, False], na_position="last")
+    contain_hits = [r for r in rows if q in r["blob"]]
+    if contain_hits:
+        return contain_hits[0]
 
-    show_cols = [
-        "提醒類型", "群組", "股票代號", "股票名稱", "市場別",
-        "現價", "漲跌幅(%)", "綜合評級", "訊號分數",
-        "均線結構", "突破狀態", "距20壓力(%)", "距20支撐(%)", "提醒原因"
-    ]
-    show_cols = [c for c in show_cols if c in sub.columns]
-    view_df = sub[show_cols].copy()
-
-    format_dict = {
-        "現價": "{:,.2f}",
-        "漲跌幅(%)": "{:,.2f}",
-        "訊號分數": "{:,.0f}",
-        "距20壓力(%)": "{:,.2f}",
-        "距20支撐(%)": "{:,.2f}",
-    }
-
-    def color_pct(val):
-        if pd.isna(val):
-            return ""
-        try:
-            v = float(val)
-        except Exception:
-            return ""
-        if v > 0:
-            return "color: #dc2626; font-weight: 800;"
-        if v < 0:
-            return "color: #059669; font-weight: 800;"
-        return "color: #64748b; font-weight: 700;"
-
-    def color_alert(val):
-        text = str(val)
-        if text in ["偏強追蹤", "突破注意", "支撐觀察"]:
-            return "color: #dc2626; font-weight: 800;"
-        if text in ["偏弱警戒", "壓力警戒"]:
-            return "color: #b45309; font-weight: 800;"
-        return ""
-
-    styler = view_df.style.format(format_dict, na_rep="—")
-    if "漲跌幅(%)" in view_df.columns:
-        styler = styler.map(color_pct, subset=["漲跌幅(%)"])
-    if "訊號分數" in view_df.columns:
-        styler = styler.map(color_pct, subset=["訊號分數"])
-    if "提醒類型" in view_df.columns:
-        styler = styler.map(color_alert, subset=["提醒類型"])
-
-    st.dataframe(styler, use_container_width=True, hide_index=True, height=420)
+    return None
 
 
-st.set_page_config(page_title="股市專家系統", page_icon="📈", layout="wide")
+# =========================================================
+# Session State
+# =========================================================
+def _init_state():
+    saved = load_last_query_state()
+    today = date.today()
+    default_start = today - timedelta(days=180)
+    default_end = today
 
-if "font_scale" not in st.session_state:
-    st.session_state.font_scale = get_font_scale()
+    if _k("search_input") not in st.session_state:
+        st.session_state[_k("search_input")] = ""
 
-if "home_state_loaded" not in st.session_state:
-    last_state = load_last_query_state()
-    today_dt = date.today()
+    if _k("start_date") not in st.session_state:
+        st.session_state[_k("start_date")] = parse_date_safe(saved.get("home_start"), default_start)
 
-    st.session_state.last_quick_group = last_state.get("quick_group", "")
-    st.session_state.last_quick_stock_code = last_state.get("quick_stock_code", "")
-    st.session_state.home_start = parse_date_safe(last_state.get("home_start", ""), today_dt - timedelta(days=90))
-    st.session_state.home_end = parse_date_safe(last_state.get("home_end", ""), today_dt)
-    st.session_state.home_state_loaded = True
+    if _k("end_date") not in st.session_state:
+        st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
 
-with st.sidebar:
-    st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider(
-        "字體大小 (%)",
-        100,
-        220,
-        st.session_state.font_scale,
-        10
+    st.session_state[_k("start_date")] = _to_pydate(st.session_state.get(_k("start_date")), default_start)
+    st.session_state[_k("end_date")] = _to_pydate(st.session_state.get(_k("end_date")), default_end)
+
+
+# =========================================================
+# 主頁
+# =========================================================
+def main():
+    st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    inject_pro_theme()
+    _init_state()
+
+    watchlist = _load_watchlist_data()
+    overview_df = _build_overview_df(watchlist)
+    group_summary_df = _build_group_summary_df(watchlist)
+    search_rows = _build_search_rows(watchlist)
+
+    total_groups = len(watchlist)
+    total_stocks = len(overview_df)
+    listed_count = int((overview_df["市場別"] == "上市").sum()) if not overview_df.empty else 0
+    otc_count = int((overview_df["市場別"] == "上櫃").sum()) if not overview_df.empty else 0
+
+    render_pro_hero(
+        title="台股分析系統｜股神版首頁",
+        subtitle="首頁會直接讀取最新自選股清單，新增刪除後重新整理即可同步。",
     )
 
-apply_font_scale(st.session_state.font_scale)
-inject_pro_theme()
-
-today_dt = date.today()
-lookup_date = today_dt.strftime("%Y%m%d")
-
-watchlist_dict = get_normalized_watchlist()
-group_stock_options = build_group_stock_options(watchlist_dict, lookup_date)
-all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
-
-render_pro_hero(
-    "股市專家系統｜頁面內提醒清單版",
-    "把今日該注意的股票直接整理在首頁，先掃描，再進單股頁與K線頁深看。"
-)
-
-group_count = len(watchlist_dict)
-stock_count = sum(len(v) for v in watchlist_dict.values())
-
-realtime_df, top_gainer, top_loser, strong_count, weak_count, analysis_df = build_home_market_snapshot(watchlist_dict, lookup_date)
-
-avg_change_pct = None
-if realtime_df is not None and not realtime_df.empty and "漲跌幅(%)" in realtime_df.columns:
-    avg_change_pct = realtime_df["漲跌幅(%)"].mean()
-
-avg_text = f"{avg_change_pct:+.2f}%" if avg_change_pct is not None and pd.notna(avg_change_pct) else "—"
-
-render_pro_kpi_row([
-    {"label": "群組數量", "value": f"{group_count:,}", "delta": "Watchlist Groups", "delta_class": "pro-kpi-delta-flat"},
-    {"label": "自選股總數", "value": f"{stock_count:,}", "delta": "Tracked Symbols", "delta_class": "pro-kpi-delta-flat"},
-    {"label": "平均漲跌幅", "value": avg_text, "delta": "Market Breadth", "delta_class": "pro-kpi-delta-flat"},
-    {"label": "強多 / 強空", "value": f"{strong_count} / {weak_count}", "delta": today_dt.strftime("%Y-%m-%d"), "delta_class": "pro-kpi-delta-flat"},
-])
-
-render_pro_section("今日焦點", "先看今日最強與最弱，再決定要往哪一檔深入分析")
-
-gainer_text = "—"
-gainer_class = ""
-if top_gainer is not None:
-    pct = top_gainer.get("漲跌幅(%)")
-    if pct is not None and pd.notna(pct):
-        gainer_text = f"{top_gainer.get('股票名稱', '—')}（{top_gainer.get('股票代號', '—')}） / {pct:+.2f}%"
-        gainer_class = "pro-up"
-
-loser_text = "—"
-loser_class = ""
-if top_loser is not None:
-    pct = top_loser.get("漲跌幅(%)")
-    if pct is not None and pd.notna(pct):
-        loser_text = f"{top_loser.get('股票名稱', '—')}（{top_loser.get('股票代號', '—')}） / {pct:+.2f}%"
-        loser_class = "pro-down"
-
-render_pro_info_card(
-    "今日最強 / 最弱",
-    [
-        ("今日最強股", gainer_text, gainer_class),
-        ("今日最弱股", loser_text, loser_class),
-        ("盤面平均", avg_text, "pro-up" if avg_change_pct and avg_change_pct > 0 else "pro-down" if avg_change_pct and avg_change_pct < 0 else ""),
-        ("資料筆數", str(len(realtime_df)) if realtime_df is not None else "0", ""),
-    ],
-    chips=["Top Gainer", "Top Loser", "Breadth"]
-)
-
-render_recommendation_block(analysis_df, "偏強追蹤", "今日優先觀察", "Watch First")
-render_recommendation_block(analysis_df, "支撐觀察", "接近支撐可觀察", "Near Support")
-render_recommendation_block(analysis_df, "壓力警戒", "接近壓力要小心", "Near Resistance")
-render_recommendation_block(analysis_df, "偏弱警戒", "今日偏弱避開", "Weak Today")
-render_recommendation_block(analysis_df, "突破注意", "突破注意", "Breakout")
-
-render_alert_list(analysis_df)
-
-render_pro_section("快速搜尋股票", "可直接輸入股票名稱或代號，再自動帶入首頁快速查詢條件")
-search_keyword = st.text_input(
-    "輸入股票名稱或代號",
-    placeholder="例如：台積電 / 2330 / 鴻海 / 聯發科",
-    key="home_search_keyword"
-)
-
-matched_options = filter_stock_options(all_stock_options, search_keyword)
-searched_stock = None
-
-if matched_options:
-    quick_pick = st.selectbox(
-        "搜尋結果",
-        [x["search_label"] for x in matched_options],
-        index=0,
-        key="home_search_result"
+    render_pro_kpi_row(
+        [
+            {"label": "自選股群組", "value": total_groups, "delta": "最新 watchlist", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "自選股總數", "value": total_stocks, "delta": "最新 watchlist", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "上市檔數", "value": listed_count, "delta": "市場別統計", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "上櫃檔數", "value": otc_count, "delta": "市場別統計", "delta_class": "pro-kpi-delta-flat"},
+        ]
     )
-    searched_stock = next(x for x in matched_options if x["search_label"] == quick_pick)
-else:
-    st.info("找不到符合的股票，請改用下方群組與股票選單。")
 
-render_pro_section("快速查詢入口", "先在首頁選條件，再切換到『歷史K線分析』頁面使用")
+    render_pro_section("快速搜尋股票")
 
-group_names = list(watchlist_dict.keys())
-
-if group_names:
-    default_group = st.session_state.get("last_quick_group", group_names[0])
-    group_index = group_names.index(default_group) if default_group in group_names else 0
-
-    with st.form("home_quick_query_form", clear_on_submit=False):
-        q1, q2 = st.columns(2)
-
-        with q1:
-            quick_group = st.selectbox("選擇群組", group_names, index=group_index)
-
-        stock_options = group_stock_options.get(quick_group, [])
-
-        with q2:
-            if stock_options:
-                saved_code = st.session_state.get("last_quick_stock_code", "")
-                stock_codes = [x["code"] for x in stock_options]
-                stock_index = stock_codes.index(saved_code) if saved_code in stock_codes else 0
-
-                quick_stock_label = st.selectbox(
-                    "選擇股票",
-                    [x["label"] for x in stock_options],
-                    index=stock_index
-                )
-                quick_stock = next(x for x in stock_options if x["label"] == quick_stock_label)
-            else:
-                quick_stock = None
-                st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0)
-
-        if searched_stock is not None:
-            quick_group = searched_stock["group"]
-            quick_stock = searched_stock
-
-        d1, d2 = st.columns(2)
-        with d1:
-            quick_start = st.date_input(
-                "開始日期",
-                value=st.session_state.get("home_start", today_dt - timedelta(days=90))
-            )
-        with d2:
-            quick_end = st.date_input(
-                "結束日期",
-                value=st.session_state.get("home_end", today_dt)
-            )
-
-        save_btn = st.form_submit_button("套用查詢條件", type="primary", use_container_width=True)
-
-    if save_btn:
-        if quick_start > quick_end:
-            st.error("開始日期不能大於結束日期")
-            st.stop()
-
-        st.session_state.last_quick_group = quick_group
-        st.session_state.last_quick_stock_code = quick_stock["code"] if quick_stock is not None else ""
-        st.session_state.home_start = quick_start
-        st.session_state.home_end = quick_end
-
-        save_last_query_state(
-            quick_group=quick_group,
-            quick_stock_code=quick_stock["code"] if quick_stock is not None else "",
-            home_start=quick_start,
-            home_end=quick_end
+    s1, s2 = st.columns([5, 1])
+    with s1:
+        st.text_input(
+            "輸入股票代碼或名稱",
+            key=_k("search_input"),
+            placeholder="例如：2330、台積電、2454 聯發科",
+            label_visibility="collapsed",
         )
+    with s2:
+        search_clicked = st.button("帶入", use_container_width=True, type="primary")
 
-        st.success("查詢條件已更新，切換到左側『歷史K線分析』頁面即可直接使用。")
+    if search_clicked:
+        target = _find_search_target(st.session_state.get(_k("search_input"), ""), search_rows)
+        if target:
+            save_last_query_state(
+                quick_group=target["group"],
+                quick_stock_code=target["code"],
+                home_start=st.session_state.get(_k("start_date")),
+                home_end=st.session_state.get(_k("end_date")),
+            )
+            st.success(f"已記錄：{target['group']} / {target['label']}。可直接進入其他頁面查詢。")
+        else:
+            st.warning("找不到對應股票。")
 
-    current_group = st.session_state.get("last_quick_group", group_names[0])
-    current_start = st.session_state.get("home_start", today_dt - timedelta(days=90))
-    current_end = st.session_state.get("home_end", today_dt)
-    current_stock_code = st.session_state.get("last_quick_stock_code", "")
+    render_pro_section("快速入口")
 
-    current_stock = None
-    for item in all_stock_options:
-        if item["code"] == current_stock_code and item["group"] == current_group:
-            current_stock = item
-            break
-
-    if current_stock is not None:
-        info = get_realtime_stock_info(
-            current_stock["code"],
-            current_stock["name"],
-            current_stock["market"]
-        )
-
-        price = info.get("price")
-        change = info.get("change")
-        change_pct = info.get("change_pct")
-
-        delta_text = "—"
-        delta_class = ""
-        if change is not None and change_pct is not None:
-            delta_text = f"{change:+.2f} / {change_pct:+.2f}%"
-            delta_class = "pro-up" if change > 0 else "pro-down" if change < 0 else "pro-flat"
-
+    q1, q2, q3, q4 = st.columns(4)
+    with q1:
         render_pro_info_card(
-            "目前快速查詢條件",
+            "行情查詢",
             [
-                ("群組", current_group, ""),
-                ("股票", f"{current_stock['name']}（{current_stock['code']}）", ""),
-                ("市場別", current_stock["market"], ""),
-                ("日期區間", f"{current_start} ~ {current_end}", ""),
-                ("即時現價", format_number(price, 2), ""),
-                ("漲跌 / 幅度", delta_text, delta_class),
-                ("更新時間", info.get("update_time", "—"), ""),
-                ("使用說明", "切到『歷史K線分析』頁可直接延續這組條件", ""),
+                ("用途", "看單股即時資訊、訊號燈號、支撐壓力。", ""),
             ],
-            chips=["Home Query", "Realtime Snapshot", "Analysis Entry"]
+            chips=["pages/2_行情查詢.py"],
         )
-else:
-    st.warning("目前沒有自選股群組，請先到『自選股中心』建立群組與股票。")
+    with q2:
+        render_pro_info_card(
+            "歷史K線分析",
+            [
+                ("用途", "看 K 線、MA、KD、MACD、事件與策略。", ""),
+            ],
+            chips=["pages/3_歷史K線分析.py"],
+        )
+    with q3:
+        render_pro_info_card(
+            "自選股中心",
+            [
+                ("用途", "新增 / 刪除 / 批次管理自選股。", ""),
+            ],
+            chips=["pages/4_自選股中心.py"],
+        )
+    with q4:
+        render_pro_info_card(
+            "多股比較 / 排行榜",
+            [
+                ("用途", "做多檔比較、群組排行、找強弱股。", ""),
+            ],
+            chips=["pages/5_排行榜.py", "pages/6_多股比較.py"],
+        )
 
-render_pro_section("系統功能", "首頁已整合提醒清單、快速搜尋與盤面概況，後續可再擴充自動通知")
-st.markdown("""
-- 儀表板：查看各群組最新行情摘要  
-- 行情查詢：單支股票最新行情、訊號、支撐壓力與最近事件  
-- 歷史K線分析：完整K線、事件標記、雷達評分與支撐壓力  
-- 自選股中心：建立群組、新增與刪除股票  
-- 排行榜：用綜合評級、雷達分數與漲跌做掃盤排行  
-- 多股比較：同時比較 2 到 4 檔股票的強弱輪廓  
-""")
+    left, right = st.columns([1, 1])
+
+    with left:
+        render_pro_section("群組總覽")
+        if group_summary_df.empty:
+            st.info("目前沒有任何自選股群組。")
+        else:
+            st.dataframe(group_summary_df, use_container_width=True, hide_index=True)
+
+        render_pro_info_card(
+            "首頁提醒",
+            [
+                ("同步邏輯", "首頁每次重新整理都會重新讀取最新 watchlist.json。", ""),
+                ("使用方式", "先在自選股中心新增 / 刪除，再回首頁重新整理即可。", ""),
+                ("快速搜尋", "搜尋後會把群組與股票記錄到共用查詢狀態。", ""),
+            ],
+        )
+
+    with right:
+        render_pro_section("最新自選股清單")
+        if overview_df.empty:
+            st.info("目前沒有任何自選股。")
+        else:
+            st.dataframe(overview_df.head(30), use_container_width=True, hide_index=True)
+
+    render_pro_section("最近常用查詢日期")
+    d1, d2 = st.columns([2, 2])
+    with d1:
+        st.date_input("開始日期", key=_k("start_date"))
+    with d2:
+        st.date_input("結束日期", key=_k("end_date"))
+
+    if st.button("記錄日期區間", use_container_width=True):
+        save_last_query_state(
+            quick_group="",
+            quick_stock_code="",
+            home_start=st.session_state.get(_k("start_date")),
+            home_end=st.session_state.get(_k("end_date")),
+        )
+        st.success("已記錄首頁日期區間。")
+
+
+if __name__ == "__main__":
+    main()
