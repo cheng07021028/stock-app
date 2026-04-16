@@ -180,6 +180,19 @@ def _init_state():
     if _k("status_type") not in st.session_state:
         st.session_state[_k("status_type")] = "info"
 
+    # 延後清空 widget 值，避免同輪直接改 widget key 炸掉
+    if _k("add_code_next") in st.session_state:
+        st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
+
+    if _k("add_name_next") in st.session_state:
+        st.session_state[_k("add_name")] = st.session_state.pop(_k("add_name_next"))
+
+    if _k("add_market_next") in st.session_state:
+        st.session_state[_k("add_market")] = st.session_state.pop(_k("add_market_next"))
+
+    if _k("bulk_text_next") in st.session_state:
+        st.session_state[_k("bulk_text")] = st.session_state.pop(_k("bulk_text_next"))
+
     _repair_selected_group()
 
 
@@ -215,13 +228,6 @@ def _find_stock_name_market(code: str) -> tuple[str, str]:
 
 
 def _find_stock_by_code_or_name(keyword: str) -> tuple[str, str, str]:
-    """
-    回傳: (code, name, market)
-    支援:
-    - 2330
-    - 台積電
-    - 2330 台積電
-    """
     text = _safe_str(keyword)
     if not text:
         return "", "", ""
@@ -287,14 +293,12 @@ def _add_stock(group_name: str, code: str, name: str = "", market: str = "") -> 
     if not g:
         return False, "請先選擇群組。"
 
-    # 名稱欄直接輸入股票名稱
     if not code and name:
         found_code, found_name, found_market = _find_stock_by_code_or_name(name)
         code = found_code
         name = found_name or name
         market = found_market or market
 
-    # 代碼欄其實輸入了股票名稱
     if code and not code.isdigit():
         found_code, found_name, found_market = _find_stock_by_code_or_name(code)
         code = found_code
@@ -575,9 +579,12 @@ def main():
                 st.session_state.get(_k("add_market"), "上市"),
             )
             _set_status(msg, "success" if ok else "warning")
+
             if ok:
-                st.session_state[_k("add_code")] = ""
-                st.session_state[_k("add_name")] = ""
+                st.session_state[_k("add_code_next")] = ""
+                st.session_state[_k("add_name_next")] = ""
+                st.session_state[_k("add_market_next")] = "上市"
+
             st.rerun()
 
     with b2:
@@ -593,11 +600,11 @@ def main():
                 if not code:
                     _set_status("找不到對應股票，請確認名稱或代碼。", "warning")
                 else:
-                    st.session_state[_k("add_code")] = code
-                    st.session_state[_k("add_name")] = name
-                    st.session_state[_k("add_market")] = market
+                    st.session_state[_k("add_code_next")] = code
+                    st.session_state[_k("add_name_next")] = name
+                    st.session_state[_k("add_market_next")] = market
                     _set_status(f"已帶入：{code} {name} / {market}", "success")
-                    st.rerun()
+                st.rerun()
 
     render_pro_section("批次新增")
 
@@ -616,7 +623,7 @@ def main():
             ok_count, messages = _apply_bulk_add(bulk_group, st.session_state.get(_k("bulk_text"), ""))
             if ok_count > 0:
                 _set_status(f"批次加入完成：成功 {ok_count} 筆。", "success")
-                st.session_state[_k("bulk_text")] = ""
+                st.session_state[_k("bulk_text_next")] = ""
             else:
                 _set_status("批次加入失敗，請確認格式或避免重複股票。", "warning")
             st.rerun()
