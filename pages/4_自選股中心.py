@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+import json
+import os
 
 import pandas as pd
 import streamlit as st
@@ -127,10 +129,38 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
 
 def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
     payload = _normalize_watchlist_payload(data)
-    ok = bool(save_watchlist(payload, filepath="watchlist.json"))
-    if ok:
+
+    candidate_paths = [
+        "watchlist.json",
+        "data/watchlist.json",
+    ]
+
+    success_count = 0
+
+    for path in candidate_paths:
+        try:
+            folder = os.path.dirname(path)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            success_count += 1
+        except Exception:
+            pass
+
+    try:
+        if save_watchlist(payload, filepath="watchlist.json"):
+            success_count = max(success_count, 1)
+    except Exception:
+        pass
+
+    if success_count > 0:
         st.session_state[_k("watchlist")] = payload
-    return ok
+        return True
+
+    return False
 
 
 def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢查檔案權限。") -> bool:
@@ -197,7 +227,6 @@ def _init_state():
     if _k("status_type") not in st.session_state:
         st.session_state[_k("status_type")] = "info"
 
-    # 延後清空 widget 值，避免同輪直接改 widget key
     if _k("add_code_next") in st.session_state:
         st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
 
@@ -658,7 +687,7 @@ def main():
         render_pro_info_card(
             "管理提醒",
             [
-                ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json。", ""),
+                ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json 與 data/watchlist.json。", ""),
                 ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
                 ("建議作法", "先建立群組，再用單筆或批次方式加入股票。", ""),
                 ("批次格式", "每行：代碼,名稱,市場別；名稱與市場別可省略。", ""),
