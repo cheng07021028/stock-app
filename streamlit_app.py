@@ -165,8 +165,9 @@ def build_home_market_snapshot(watchlist_dict, query_date):
                 "20日支撐": None,
                 "距20壓力(%)": None,
                 "距20支撐(%)": None,
-                "推薦類型": "",
-                "推薦原因": "",
+                "提醒類型": "",
+                "提醒原因": "",
+                "提醒優先序": 999,
             })
             continue
 
@@ -186,28 +187,36 @@ def build_home_market_snapshot(watchlist_dict, query_date):
         dist_sup_20 = sr.get("dist_sup_20_pct")
         breakout = signal.get("breakout_20d", ("", ""))[0]
 
-        rec_type = ""
-        rec_reason = ""
+        alert_type = ""
+        alert_reason = ""
+        alert_priority = 999
 
-        if signal_score >= 3 and change_pct is not None and pd.notna(change_pct) and change_pct > 0:
-            rec_type = "今日優先觀察"
-            rec_reason = f"訊號分數 {signal_score:+d}，且即時漲跌幅 {change_pct:+.2f}%"
-            if "突破20日高" in breakout:
-                rec_reason += "，並出現 20 日突破"
+        if signal_score >= 4 and change_pct is not None and pd.notna(change_pct) and change_pct > 0:
+            alert_type = "偏強追蹤"
+            alert_reason = f"訊號分數 {signal_score:+d}，即時漲跌幅 {change_pct:+.2f}%"
+            alert_priority = 1
+
+        if "突破20日高" in breakout:
+            alert_type = "突破注意"
+            alert_reason = "股價已突破 20 日高點，觀察是否帶量延續"
+            alert_priority = min(alert_priority, 1)
 
         if dist_sup_20 is not None and 0 <= dist_sup_20 <= 2.0:
-            if not rec_type:
-                rec_type = "接近支撐可觀察"
-                rec_reason = f"距 20 日支撐僅 {dist_sup_20:.2f}%"
+            if alert_priority > 2:
+                alert_type = "支撐觀察"
+                alert_reason = f"距 20 日支撐僅 {dist_sup_20:.2f}%"
+                alert_priority = 2
 
         if dist_res_20 is not None and 0 <= dist_res_20 <= 2.0:
-            if not rec_type:
-                rec_type = "接近壓力要小心"
-                rec_reason = f"距 20 日壓力僅 {dist_res_20:.2f}%"
+            if alert_priority > 3:
+                alert_type = "壓力警戒"
+                alert_reason = f"距 20 日壓力僅 {dist_res_20:.2f}%"
+                alert_priority = 3
 
         if signal_score <= -3:
-            rec_type = "今日偏弱避開"
-            rec_reason = f"訊號分數 {signal_score:+d}，偏弱訊號明顯"
+            alert_type = "偏弱警戒"
+            alert_reason = f"訊號分數 {signal_score:+d}，偏弱結構明顯"
+            alert_priority = 1
 
         rows.append({
             "群組": group,
@@ -227,8 +236,9 @@ def build_home_market_snapshot(watchlist_dict, query_date):
             "20日支撐": sr.get("sup_20"),
             "距20壓力(%)": dist_res_20,
             "距20支撐(%)": dist_sup_20,
-            "推薦類型": rec_type,
-            "推薦原因": rec_reason,
+            "提醒類型": alert_type,
+            "提醒原因": alert_reason,
+            "提醒優先序": alert_priority,
         })
 
     analysis_df = pd.DataFrame(rows)
@@ -241,7 +251,7 @@ def build_home_market_snapshot(watchlist_dict, query_date):
 
 
 def render_recommendation_block(df: pd.DataFrame, rec_type: str, title: str, chip: str):
-    sub = df[df["推薦類型"] == rec_type].copy() if df is not None and not df.empty else pd.DataFrame()
+    sub = df[df["提醒類型"] == rec_type].copy() if df is not None and not df.empty else pd.DataFrame()
 
     render_pro_section(title, "由訊號分數、支撐壓力距離與突破狀態自動整理")
 
@@ -253,20 +263,78 @@ def render_recommendation_block(df: pd.DataFrame, rec_type: str, title: str, chi
         )
         return
 
-    sub = sub.sort_values(by=["訊號分數", "漲跌幅(%)"], ascending=[False, False], na_position="last").head(3)
+    sub = sub.sort_values(by=["提醒優先序", "訊號分數", "漲跌幅(%)"], ascending=[True, False, False], na_position="last").head(3)
 
     info_pairs = []
     for _, row in sub.iterrows():
         name = f"{row['股票名稱']}（{row['股票代號']}）"
-        reason = row.get("推薦原因", "—")
+        reason = row.get("提醒原因", "—")
         extra = f"現價 {format_number(row.get('現價'), 2)}｜評級 {row.get('綜合評級', '—')}"
         info_pairs.append((name, f"{reason}｜{extra}", ""))
 
-    render_pro_info_card(
-        title,
-        info_pairs,
-        chips=[chip]
-    )
+    render_pro_info_card(title, info_pairs, chips=[chip])
+
+
+def render_alert_list(df: pd.DataFrame):
+    render_pro_section("提醒清單", "把今天需要優先注意的股票整理成一張表，方便快速掃描")
+
+    if df is None or df.empty:
+        st.info("目前沒有提醒資料。")
+        return
+
+    sub = df[df["提醒類型"] != ""].copy()
+    if sub.empty:
+        st.info("目前沒有符合提醒條件的股票。")
+        return
+
+    sub = sub.sort_values(by=["提醒優先序", "訊號分數", "漲跌幅(%)"], ascending=[True, False, False], na_position="last")
+
+    show_cols = [
+        "提醒類型", "群組", "股票代號", "股票名稱", "市場別",
+        "現價", "漲跌幅(%)", "綜合評級", "訊號分數",
+        "均線結構", "突破狀態", "距20壓力(%)", "距20支撐(%)", "提醒原因"
+    ]
+    show_cols = [c for c in show_cols if c in sub.columns]
+    view_df = sub[show_cols].copy()
+
+    format_dict = {
+        "現價": "{:,.2f}",
+        "漲跌幅(%)": "{:,.2f}",
+        "訊號分數": "{:,.0f}",
+        "距20壓力(%)": "{:,.2f}",
+        "距20支撐(%)": "{:,.2f}",
+    }
+
+    def color_pct(val):
+        if pd.isna(val):
+            return ""
+        try:
+            v = float(val)
+        except Exception:
+            return ""
+        if v > 0:
+            return "color: #dc2626; font-weight: 800;"
+        if v < 0:
+            return "color: #059669; font-weight: 800;"
+        return "color: #64748b; font-weight: 700;"
+
+    def color_alert(val):
+        text = str(val)
+        if text in ["偏強追蹤", "突破注意", "支撐觀察"]:
+            return "color: #dc2626; font-weight: 800;"
+        if text in ["偏弱警戒", "壓力警戒"]:
+            return "color: #b45309; font-weight: 800;"
+        return ""
+
+    styler = view_df.style.format(format_dict, na_rep="—")
+    if "漲跌幅(%)" in view_df.columns:
+        styler = styler.map(color_pct, subset=["漲跌幅(%)"])
+    if "訊號分數" in view_df.columns:
+        styler = styler.map(color_pct, subset=["訊號分數"])
+    if "提醒類型" in view_df.columns:
+        styler = styler.map(color_alert, subset=["提醒類型"])
+
+    st.dataframe(styler, use_container_width=True, hide_index=True, height=420)
 
 
 st.set_page_config(page_title="股市專家系統", page_icon="📈", layout="wide")
@@ -305,8 +373,8 @@ group_stock_options = build_group_stock_options(watchlist_dict, lookup_date)
 all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
 
 render_pro_hero(
-    "股市專家系統｜自動推薦版",
-    "整合盤面快照、今日強弱、自動推薦、快速搜尋與歷史分析入口。"
+    "股市專家系統｜頁面內提醒清單版",
+    "把今日該注意的股票直接整理在首頁，先掃描，再進單股頁與K線頁深看。"
 )
 
 group_count = len(watchlist_dict)
@@ -356,10 +424,13 @@ render_pro_info_card(
     chips=["Top Gainer", "Top Loser", "Breadth"]
 )
 
-render_recommendation_block(analysis_df, "今日優先觀察", "今日優先觀察", "Watch First")
-render_recommendation_block(analysis_df, "接近支撐可觀察", "接近支撐可觀察", "Near Support")
-render_recommendation_block(analysis_df, "接近壓力要小心", "接近壓力要小心", "Near Resistance")
-render_recommendation_block(analysis_df, "今日偏弱避開", "今日偏弱避開", "Weak Today")
+render_recommendation_block(analysis_df, "偏強追蹤", "今日優先觀察", "Watch First")
+render_recommendation_block(analysis_df, "支撐觀察", "接近支撐可觀察", "Near Support")
+render_recommendation_block(analysis_df, "壓力警戒", "接近壓力要小心", "Near Resistance")
+render_recommendation_block(analysis_df, "偏弱警戒", "今日偏弱避開", "Weak Today")
+render_recommendation_block(analysis_df, "突破注意", "突破注意", "Breakout")
+
+render_alert_list(analysis_df)
 
 render_pro_section("快速搜尋股票", "可直接輸入股票名稱或代號，再自動帶入首頁快速查詢條件")
 search_keyword = st.text_input(
@@ -496,7 +567,7 @@ if group_names:
 else:
     st.warning("目前沒有自選股群組，請先到『自選股中心』建立群組與股票。")
 
-render_pro_section("系統功能", "首頁已整合自動推薦、快速搜尋與盤面概況，後續可再擴充自動跳轉與提醒")
+render_pro_section("系統功能", "首頁已整合提醒清單、快速搜尋與盤面概況，後續可再擴充自動通知")
 st.markdown("""
 - 儀表板：查看各群組最新行情摘要  
 - 行情查詢：單支股票最新行情、訊號、支撐壓力與最近事件  
