@@ -515,7 +515,7 @@ def render_chart(df: pd.DataFrame, selected_indicators: list, selected_events: l
 
     has_volume = "成交股數" in df.columns
 
-    render_pro_section("K線主圖", "可自行選擇圖上顯示哪些事件，避免標記太滿")
+    render_pro_section("K線主圖", "可自行控制顯示哪些事件，群組與股票選擇已同步修正")
 
     if has_volume:
         fig = make_subplots(
@@ -682,8 +682,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜事件篩選版",
-    "可自行控制要顯示哪些事件標記，盤面更乾淨，事件判讀更聚焦。"
+    "歷史K線分析｜事件篩選修正版",
+    "已修正群組與群組股票不同步問題，搜尋股票後可正確帶入對應群組。"
 )
 
 if not group_names:
@@ -698,11 +698,10 @@ default_code = last_state.get("quick_stock_code", "")
 default_start = parse_date_safe(last_state.get("home_start", ""), today_dt - timedelta(days=90))
 default_end = parse_date_safe(last_state.get("home_end", ""), today_dt)
 
-group_index = group_names.index(default_group) if default_group in group_names else 0
 lookup_date = today_dt.strftime("%Y%m%d")
-
 all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
 
+# 搜尋區
 st.markdown("### 快速搜尋股票")
 search_keyword = st.text_input(
     "輸入股票名稱或代號",
@@ -711,18 +710,30 @@ search_keyword = st.text_input(
 )
 
 matched_options = filter_stock_options(all_stock_options, search_keyword)
-searched_stock = None
 
+searched_stock = None
 if matched_options:
+    default_search_index = 0
+    if default_code:
+        for i, item in enumerate(matched_options):
+            if item["code"] == default_code:
+                default_search_index = i
+                break
+
     quick_pick = st.selectbox(
         "搜尋結果",
         [x["label"] for x in matched_options],
-        index=0,
+        index=default_search_index,
         key="history_search_result"
     )
     searched_stock = next(x for x in matched_options if x["label"] == quick_pick)
-else:
-    st.info("找不到符合的股票，請改用下方群組選擇。")
+
+# 決定表單預設群組
+effective_default_group = default_group if default_group in group_names else group_names[0]
+if searched_stock is not None:
+    effective_default_group = searched_stock["group"]
+
+group_index = group_names.index(effective_default_group) if effective_default_group in group_names else 0
 
 with st.form("history_query_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
@@ -735,16 +746,21 @@ with st.form("history_query_form", clear_on_submit=False):
 
     with c2:
         if group_stock_options:
-            code_list = [x["code"] for x in group_stock_options]
-            stock_index = code_list.index(default_code) if default_code in code_list else 0
+            effective_default_code = default_code
+            if searched_stock is not None and searched_stock["group"] == selected_group:
+                effective_default_code = searched_stock["code"]
+
+            stock_codes = [x["code"] for x in group_stock_options]
+            stock_index = stock_codes.index(effective_default_code) if effective_default_code in stock_codes else 0
+
             selected_stock_label = st.selectbox(
                 "群組股票",
                 [x["label"] for x in group_stock_options],
                 index=stock_index
             )
-            group_stock = next(x for x in group_stock_options if x["label"] == selected_stock_label)
+            selected_stock = next(x for x in group_stock_options if x["label"] == selected_stock_label)
         else:
-            group_stock = None
+            selected_stock = None
             st.selectbox("群組股票", ["此群組目前沒有股票"], index=0)
 
     d1, d2 = st.columns(2)
@@ -767,8 +783,6 @@ with st.form("history_query_form", clear_on_submit=False):
 
     query_btn = st.form_submit_button("開始查詢", type="primary", use_container_width=True)
 
-selected_stock = searched_stock if searched_stock is not None else group_stock
-
 if not selected_stock:
     st.warning("目前沒有可查詢股票。")
     st.stop()
@@ -779,7 +793,7 @@ if start_date > end_date:
 
 if query_btn or selected_stock:
     save_last_query_state(
-        quick_group=selected_stock.get("group", selected_group),
+        quick_group=selected_group,
         quick_stock_code=selected_stock["code"],
         home_start=start_date,
         home_end=end_date
