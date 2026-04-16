@@ -307,7 +307,7 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD_HIST"] = df["DIF"] - df["DEA"]
 
     df["漲跌幅(%)"] = close.pct_change() * 100
-    df["ATR14"] = (df["最高價"] - df["最低價"]).rolling(14).mean()
+    df["ATR14"] = pd.to_numeric((df["最高價"] - df["最低價"]).rolling(14).mean(), errors="coerce")
 
     return df
 
@@ -321,36 +321,57 @@ def _cross_down(a1, a2, b1, b2) -> bool:
 
 
 def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6, atr_ratio: float = 0.8) -> tuple[list[int], list[int]]:
-    if df.empty or len(df) < window * 2 + 1:
+    if df is None or df.empty or len(df) < window * 2 + 1:
         return [], []
 
-    highs = df["最高價"].values
-    lows = df["最低價"].values
-    atr = df["ATR14"].fillna(method="bfill").fillna(method="ffill").fillna(0).values
+    work = df.copy()
 
-    raw_peak = []
-    raw_trough = []
+    for col in ["最高價", "最低價", "ATR14"]:
+        if col not in work.columns:
+            return [], []
+        work[col] = pd.to_numeric(work[col], errors="coerce")
 
-    for i in range(window, len(df) - window):
+    work["ATR14"] = work["ATR14"].bfill().ffill().fillna(0)
+
+    highs = work["最高價"].to_numpy(dtype=float)
+    lows = work["最低價"].to_numpy(dtype=float)
+    atr = work["ATR14"].to_numpy(dtype=float)
+
+    raw_peak: list[int] = []
+    raw_trough: list[int] = []
+
+    for i in range(window, len(work) - window):
         h = highs[i]
         l = lows[i]
 
-        if np.isfinite(h) and h == np.max(highs[i - window:i + window + 1]):
-            local_low = np.min(lows[i - window:i + window + 1])
-            if (h - local_low) >= max(atr[i] * atr_ratio, 0):
+        if not np.isfinite(h) or not np.isfinite(l):
+            continue
+
+        high_slice = highs[i - window:i + window + 1]
+        low_slice = lows[i - window:i + window + 1]
+
+        local_max = np.nanmax(high_slice)
+        local_min = np.nanmin(low_slice)
+
+        atr_threshold = max(float(atr[i]) * atr_ratio, 0)
+
+        if h == local_max:
+            if (h - local_min) >= atr_threshold:
                 raw_peak.append(i)
 
-        if np.isfinite(l) and l == np.min(lows[i - window:i + window + 1]):
-            local_high = np.max(highs[i - window:i + window + 1])
-            if (local_high - l) >= max(atr[i] * atr_ratio, 0):
+        if l == local_min:
+            if (local_max - l) >= atr_threshold:
                 raw_trough.append(i)
 
     def compress_points(idxs: list[int], values: np.ndarray, mode: str) -> list[int]:
         if not idxs:
             return []
+
         result = [idxs[0]]
+
         for idx in idxs[1:]:
             last_idx = result[-1]
+
             if idx - last_idx < min_gap:
                 if mode == "peak":
                     if values[idx] >= values[last_idx]:
@@ -360,6 +381,7 @@ def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6, at
                         result[-1] = idx
             else:
                 result.append(idx)
+
         return result
 
     peaks = compress_points(raw_peak, highs, "peak")
