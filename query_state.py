@@ -38,8 +38,11 @@ def save_last_query_state(quick_group, quick_stock_code, home_start, home_end):
         "home_end": home_end.isoformat() if hasattr(home_end, "isoformat") else str(home_end),
     }
 
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 def parse_date_safe(date_str, default_value):
