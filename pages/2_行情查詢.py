@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 import streamlit as st
 
 from utils import (
@@ -13,7 +13,10 @@ from utils import (
     render_pro_hero,
     render_pro_info_card,
     render_pro_section,
+    render_pro_kpi_row,
     format_number,
+    compute_signal_snapshot,
+    score_to_badge,
 )
 
 
@@ -40,39 +43,70 @@ def build_stock_options(items, lookup_date):
     return stock_options
 
 
-def render_quote_summary(stock_info: dict, history_df):
-    price = stock_info.get("price")
-    prev_close = stock_info.get("prev_close")
-    change = stock_info.get("change")
-    change_pct = stock_info.get("change_pct")
+def add_basic_indicators(df):
+    if df.empty or "收盤價" not in df.columns:
+        return df
 
-    change_text = "—"
-    change_class = ""
-    if change is not None and change_pct is not None:
-        change_text = f"{change:+.2f} / {change_pct:+.2f}%"
-        change_class = "pro-up" if change > 0 else "pro-down" if change < 0 else "pro-flat"
+    df["MA5"] = df["收盤價"].rolling(window=5, min_periods=1).mean()
+    df["MA10"] = df["收盤價"].rolling(window=10, min_periods=1).mean()
+    df["MA20"] = df["收盤價"].rolling(window=20, min_periods=1).mean()
 
-    latest_close = history_df["收盤價"].iloc[-1] if history_df is not None and not history_df.empty and "收盤價" in history_df.columns else None
-    high_30 = history_df["最高價"].max() if history_df is not None and not history_df.empty and "最高價" in history_df.columns else None
-    low_30 = history_df["最低價"].min() if history_df is not None and not history_df.empty and "最低價" in history_df.columns else None
+    if all(col in df.columns for col in ["最高價", "最低價", "收盤價"]):
+        low_n = df["最低價"].rolling(window=9, min_periods=1).min()
+        high_n = df["最高價"].rolling(window=9, min_periods=1).max()
+        denom = (high_n - low_n).replace(0, None)
+        rsv = ((df["收盤價"] - low_n) / denom * 100).fillna(0)
+
+        k_values = []
+        d_values = []
+        k_prev = 50.0
+        d_prev = 50.0
+
+        for val in rsv:
+            val = float(val)
+            k_now = (2 / 3) * k_prev + (1 / 3) * val
+            d_now = (2 / 3) * d_prev + (1 / 3) * k_now
+            k_values.append(k_now)
+            d_values.append(d_now)
+            k_prev = k_now
+            d_prev = d_now
+
+        df["K"] = k_values
+        df["D"] = d_values
+
+    ema12 = df["收盤價"].ewm(span=12, adjust=False).mean()
+    ema26 = df["收盤價"].ewm(span=26, adjust=False).mean()
+    df["DIF"] = ema12 - ema26
+    df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
+    df["MACD_HIST"] = df["DIF"] - df["DEA"]
+
+    return df
+
+
+def render_signal_summary(info, signal):
+    score = signal.get("score", 0)
+    badge_text, _ = score_to_badge(score)
+
+    render_pro_kpi_row([
+        {"label": "現價", "value": format_number(info.get("price"), 2), "delta": info.get("update_time", "—"), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "即時漲跌", "value": f"{info.get('change', 0):+.2f}" if info.get("change") is not None else "—", "delta": f"{info.get('change_pct', 0):+.2f}%" if info.get("change_pct") is not None else "—", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "綜合評級", "value": badge_text, "delta": f"訊號分數 {score:+d}", "delta_class": "pro-kpi-delta-flat"},
+    ])
 
     render_pro_info_card(
-        "單股即時總覽",
+        "單股訊號面板",
         [
-            ("股票", f"{stock_info.get('name', '—')}（{stock_info.get('code', '—')}）", ""),
-            ("市場別", stock_info.get("market", "—"), ""),
-            ("現價", format_number(price, 2), ""),
-            ("昨收", format_number(prev_close, 2), ""),
-            ("即時漲跌", change_text, change_class),
-            ("開盤", format_number(stock_info.get("open"), 2), ""),
-            ("最高", format_number(stock_info.get("high"), 2), ""),
-            ("最低", format_number(stock_info.get("low"), 2), ""),
-            ("總量", format_number(stock_info.get("total_volume"), 0), ""),
-            ("近30日最高", format_number(high_30, 2), ""),
-            ("近30日最低", format_number(low_30, 2), ""),
-            ("更新時間", stock_info.get("update_time", "—"), ""),
+            ("股票", f"{info.get('name', '—')}（{info.get('code', '—')}）", ""),
+            ("市場別", info.get("market", "—"), ""),
+            ("均線排列", signal["ma_trend"][0], signal["ma_trend"][1]),
+            ("KD交叉", signal["kd_cross"][0], signal["kd_cross"][1]),
+            ("MACD狀態", signal["macd_trend"][0], signal["macd_trend"][1]),
+            ("價格 vs MA20", signal["price_vs_ma20"][0], signal["price_vs_ma20"][1]),
+            ("20日突破", signal["breakout_20d"][0], signal["breakout_20d"][1]),
+            ("量能", signal["volume_state"][0], signal["volume_state"][1]),
+            ("盤勢評語", signal["comment"], ""),
         ],
-        chips=["即時行情", "單股監控", "短週期檢視"]
+        chips=["單股訊號", "短線判讀", "規則引擎"]
     )
 
 
@@ -85,8 +119,8 @@ apply_font_scale(st.session_state.font_scale)
 inject_pro_theme()
 
 render_pro_hero(
-    "行情查詢",
-    "單股工作站｜聚焦單一股票的即時狀態、短週期高低點與盤中位置"
+    "行情查詢｜訊號版",
+    "單股工作站進階版｜即時資訊 + 訊號燈號 + 規則評語，一眼判斷偏多偏空。"
 )
 
 today_dt = date.today()
@@ -130,11 +164,20 @@ with st.spinner("正在查詢即時資訊..."):
         selected_stock["market"]
     )
 
-with st.spinner("正在讀取近 30 日資料..."):
+with st.spinner("正在讀取近 60 日資料..."):
     history_df = get_history_data(
         selected_stock["code"],
         selected_stock["name"],
         selected_stock["market"],
-        today_dt - st.timedelta(days=30) if False else (today_dt.replace(day=today_dt.day) - __import__("datetime").timedelta(days=30)),
+        today_dt - timedelta(days=60),
         today_dt
     )
+
+if history_df is None or history_df.empty:
+    st.info("目前沒有足夠的歷史資料可產生訊號。")
+else:
+    history_df = add_basic_indicators(history_df)
+    signal = compute_signal_snapshot(history_df)
+    render_signal_summary(info, signal)
+
+render_pro_section("觀察建議", "這一頁適合做快速單股判讀；若要深入看 K 線結構，請切到歷史K線分析頁")
