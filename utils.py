@@ -537,3 +537,32 @@ def get_history_data(stock_no: str, stock_name: str, market_type: str, start_dt:
     result = result[(result["日期"].dt.date >= start_dt) & (result["日期"].dt.date <= end_dt)]
     result = result.sort_values("日期").reset_index(drop=True)
     return result
+@st.cache_data(ttl=600, show_spinner=False)
+def search_stock_candidates(keyword: str, query_date: str = "", top_n: int = 20) -> pd.DataFrame:
+    keyword = str(keyword).strip()
+    all_df = get_all_code_name_map(query_date)
+
+    if all_df.empty:
+        return pd.DataFrame(columns=["證券代號", "證券名稱", "市場別"])
+
+    result = search_stocks(all_df, keyword, top_n=top_n).copy()
+
+    keep_cols = [c for c in ["證券代號", "證券名稱", "市場別"] if c in result.columns]
+    if keep_cols:
+        result = result[keep_cols].copy()
+
+    return result.reset_index(drop=True)
+
+
+def build_stock_candidate_labels(candidate_df: pd.DataFrame) -> list:
+    if candidate_df is None or candidate_df.empty:
+        return []
+
+    labels = []
+    for _, row in candidate_df.iterrows():
+        code = str(row.get("證券代號", "")).strip()
+        name = str(row.get("證券名稱", "")).strip()
+        market = str(row.get("市場別", "")).strip()
+        labels.append(f"{name} ({code}) [{market}]")
+
+    return labels
