@@ -1,175 +1,250 @@
-from datetime import date, timedelta
-import pandas as pd
-import streamlit as st
+from datetime import date
+import json
+import os
+import time
 
-from utils import (
-    get_normalized_watchlist,
-    get_all_code_name_map,
-    get_history_data,
-    apply_font_scale,
-    get_font_scale,
-    format_number,
-    get_stock_name_and_market,
-)
+import pandas as pd
+import requests
+import streamlit as st
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="排行榜", page_icon="🏆", layout="wide")
 
-if "font_scale" not in st.session_state:
-    st.session_state.font_scale = get_font_scale()
-
-with st.sidebar:
-    st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider("字體大小 (%)", 100, 220, st.session_state.font_scale, 10)
-
-apply_font_scale(st.session_state.font_scale)
-
-st.title("🏆 排行榜")
-st.caption("依自選股群組顯示漲跌幅、成交金額、成交股數排行")
-
-today_dt = date.today()
-lookup_date = today_dt.strftime("%Y%m%d")
-
-watchlist_dict = get_normalized_watchlist()
-if not watchlist_dict:
-    st.warning("目前沒有自選股群組，請先到自選股中心建立清單。")
-    st.stop()
-
-all_code_name_df = get_all_code_name_map(lookup_date)
-if all_code_name_df.empty:
-    st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
-
-group_names = list(watchlist_dict.keys())
-selected_group = st.selectbox("選擇群組", group_names, index=0)
-
-items = watchlist_dict.get(selected_group, [])
-if not items:
-    st.warning("此群組目前沒有股票。")
-    st.stop()
+WATCHLIST_CANDIDATES = [
+    "watchlist.json",
+    "watchlists.json",
+    "data/watchlist.json",
+    "data/watchlists.json",
+]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def build_rank_df(items: list[dict], start_dt: date, end_dt: date, lookup_df: pd.DataFrame) -> pd.DataFrame:
+def load_watchlist():
+    for path in WATCHLIST_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if isinstance(data, dict):
+                    normalized = {}
+                    for group_name, items in data.items():
+                        group_name = str(group_name).strip()
+                        if not group_name:
+                            continue
+
+                        normalized[group_name] = []
+                        if isinstance(items, list):
+                            for item in items:
+                                if isinstance(item, dict):
+                                    code = str(item.get("code", "")).strip()
+                                    name = str(item.get("name", "")).strip()
+                                    market = str(item.get("market", "")).strip() or "上市"
+                                    if code:
+                                        normalized[group_name].append({
+                                            "code": code,
+                                            "name": name if name else code,
+                                            "market": market,
+                                        })
+                    return normalized
+            except Exception:
+                pass
+    return {}
+
+
+def safe_text(v):
+    if v is None:
+        return ""
+    t = str(v).strip()
+    if t in ["", "-", "--", "—", "null", "None"]:
+        return ""
+    return t
+
+
+def safe_num(v):
+    t = safe_text(v).replace(",", "")
+    if not t:
+        return None
+    try:
+        return float(t)
+    except Exception:
+        return None
+
+
+def market_prefix(market_type: str):
+    return "otc" if str(market_type).strip() == "上櫃" else "tse"
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_realtime_stock_info(stock_no: str, stock_name: str = "", market_type: str = "上市") -> dict:
+    stock_no = str(stock_no).strip()
+    stock_name = str(stock_name).strip()
+    market_type = str(market_type).strip() or "上市"
+
+    if not stock_no:
+        return {"ok": False, "message": "股票代號為空白"}
+
+    ex_ch = f"{market_prefix(market_type)}_{stock_no}.tw"
+    url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://mis.twse.com.tw/stock/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    params = {
+        "ex_ch": ex_ch,
+        "json": "1",
+        "delay": "0",
+        "_": str(int(time.time() * 1000)),
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=20, verify=False)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return {"ok": False, "message": f"即時資料取得失敗：{e}"}
+
+    msg_array = data.get("msgArray", [])
+    if not msg_array:
+        return {"ok": False, "message": "查無即時資料"}
+
+    raw = msg_array[0]
+
+    prev_close = safe_num(raw.get("y"))
+    price = safe_num(raw.get("z"))
+    if price is None:
+        price = prev_close
+
+    change = None
+    change_pct = None
+    if price is not None and prev_close not in [None, 0]:
+        change = price - prev_close
+        change_pct = change / prev_close * 100
+
+    return {
+        "ok": True,
+        "price": price,
+        "prev_close": prev_close,
+        "open": safe_num(raw.get("o")),
+        "high": safe_num(raw.get("h")),
+        "low": safe_num(raw.get("l")),
+        "change": change,
+        "change_pct": change_pct,
+        "total_volume": safe_num(raw.get("v")),
+        "update_time": f"{safe_text(raw.get('d'))} {safe_text(raw.get('t'))}".strip(),
+    }
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def build_rank_df(watchlist_dict: dict) -> pd.DataFrame:
     rows = []
 
-    for item in items:
-        code = str(item.get("code", "")).strip()
-        manual_name = str(item.get("name", "")).strip()
-        stock_name, market_type = get_stock_name_and_market(code, lookup_df, manual_name)
+    for group_name, items in watchlist_dict.items():
+        for item in items:
+            code = str(item.get("code", "")).strip()
+            name = str(item.get("name", "")).strip() or code
+            market = str(item.get("market", "")).strip() or "上市"
 
-        hist_df = get_history_data(
-            stock_no=code,
-            stock_name=stock_name,
-            market_type=market_type,
-            start_dt=start_dt,
-            end_dt=end_dt
-        )
+            if not code:
+                continue
 
-        if hist_df.empty:
+            info = get_realtime_stock_info(code, name, market)
             rows.append({
-                "證券代號": code,
-                "證券名稱": stock_name,
-                "市場別": market_type,
-                "日期": None,
-                "最新價": None,
-                "漲跌": None,
-                "漲跌幅%": None,
-                "成交股數": None,
-                "成交金額": None,
-                "成交筆數": None,
+                "群組": group_name,
+                "股票代號": code,
+                "股票名稱": name,
+                "市場別": market,
+                "現價": info.get("price"),
+                "漲跌": info.get("change"),
+                "漲跌幅(%)": info.get("change_pct"),
+                "開盤": info.get("open"),
+                "最高": info.get("high"),
+                "最低": info.get("low"),
+                "總量": info.get("total_volume"),
+                "更新時間": info.get("update_time"),
             })
-            continue
 
-        hist_df = hist_df.sort_values("日期").reset_index(drop=True)
-        latest = hist_df.iloc[-1]
+    df = pd.DataFrame(rows)
 
-        prev_close = None
-        if len(hist_df) >= 2:
-            prev_close = hist_df.iloc[-2].get("收盤價")
+    if not df.empty:
+        for col in ["現價", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低", "總量"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        latest_close = latest.get("收盤價")
-        price_change = None
-        pct_change = None
-
-        if prev_close is not None and latest_close is not None:
-            price_change = latest_close - prev_close
-            if prev_close != 0:
-                pct_change = (price_change / prev_close) * 100
-
-        rows.append({
-            "證券代號": code,
-            "證券名稱": stock_name,
-            "市場別": market_type,
-            "日期": latest.get("日期"),
-            "最新價": latest_close,
-            "漲跌": price_change,
-            "漲跌幅%": pct_change,
-            "成交股數": latest.get("成交股數"),
-            "成交金額": latest.get("成交金額"),
-            "成交筆數": latest.get("成交筆數"),
-        })
-
-    return pd.DataFrame(rows)
+    return df
 
 
-start_dt = today_dt - timedelta(days=40)
-end_dt = today_dt
+def render_rank_table(df: pd.DataFrame, height: int = 680):
+    if df is None or df.empty:
+        st.info("目前沒有資料。")
+        return
 
-with st.spinner("正在整理排行榜資料..."):
-    rank_df = build_rank_df(items, start_dt, end_dt, all_code_name_df)
+    show_cols = [
+        "群組", "股票代號", "股票名稱", "市場別",
+        "現價", "漲跌", "漲跌幅(%)",
+        "開盤", "最高", "最低", "總量", "更新時間"
+    ]
+    show_cols = [c for c in show_cols if c in df.columns]
+    display_df = df[show_cols].copy()
 
-if rank_df.empty:
-    st.warning("查無排行資料。")
+    format_dict = {}
+    for col in ["現價", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低"]:
+        if col in display_df.columns:
+            format_dict[col] = "{:,.2f}"
+    if "總量" in display_df.columns:
+        format_dict["總量"] = "{:,.0f}"
+
+    def color_change(val):
+        if pd.isna(val):
+            return ""
+        try:
+            v = float(val)
+        except Exception:
+            return ""
+        if v > 0:
+            return "color: #d32f2f; font-weight: 700;"
+        elif v < 0:
+            return "color: #00897b; font-weight: 700;"
+        return "color: #666;"
+
+    styler = display_df.style.format(format_dict, na_rep="—")
+    if "漲跌" in display_df.columns:
+        styler = styler.map(color_change, subset=["漲跌"])
+    if "漲跌幅(%)" in display_df.columns:
+        styler = styler.map(color_change, subset=["漲跌幅(%)"])
+
+    st.dataframe(styler, use_container_width=True, hide_index=True, height=height)
+
+
+st.title("🏆 排行榜")
+st.caption("救援版｜依即時數據排序")
+
+watchlist_dict = load_watchlist()
+
+if not watchlist_dict:
+    st.warning("目前沒有讀到自選股清單。請確認 watchlist.json 是否存在。")
     st.stop()
 
-summary1, summary2, summary3, summary4 = st.columns(4)
-with summary1:
-    st.metric("群組股票數", len(rank_df))
-with summary2:
-    valid_up = rank_df["漲跌幅%"].dropna()
-    st.metric("可比較漲跌股票數", len(valid_up))
-with summary3:
-    st.metric("有成交金額資料", int(rank_df["成交金額"].notna().sum()))
-with summary4:
-    st.metric("有成交股數資料", int(rank_df["成交股數"].notna().sum()))
+sort_col = st.selectbox(
+    "排序方式",
+    ["漲跌幅(%)", "漲跌", "總量", "現價"],
+    index=0
+)
 
-st.markdown("---")
+ascending = st.toggle("升冪排序", value=False)
 
-tab1, tab2, tab3, tab4 = st.tabs(["漲幅排行", "跌幅排行", "成交金額排行", "成交股數排行"])
+if st.button("更新排行榜", type="primary", use_container_width=True):
+    build_rank_df.clear()
+    get_realtime_stock_info.clear()
 
+with st.spinner("正在讀取排行榜資料..."):
+    rank_df = build_rank_df(watchlist_dict)
 
-def format_rank_df(df: pd.DataFrame) -> pd.DataFrame:
-    show_df = df.copy()
-
-    if "日期" in show_df.columns:
-        show_df["日期"] = pd.to_datetime(show_df["日期"]).dt.strftime("%Y-%m-%d")
-
-    for col in ["最新價", "漲跌", "成交股數", "成交金額", "成交筆數"]:
-        if col in show_df.columns:
-            digits = 0 if col in ["成交股數", "成交金額", "成交筆數"] else 2
-            show_df[col] = show_df[col].apply(lambda x: format_number(x, digits) if pd.notna(x) else "")
-
-    if "漲跌幅%" in show_df.columns:
-        show_df["漲跌幅%"] = show_df["漲跌幅%"].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
-
-    return show_df
-
-
-with tab1:
-    up_df = rank_df.dropna(subset=["漲跌幅%"]).sort_values("漲跌幅%", ascending=False).reset_index(drop=True)
-    st.subheader("漲幅排行")
-    st.dataframe(format_rank_df(up_df), use_container_width=True, hide_index=True)
-
-with tab2:
-    down_df = rank_df.dropna(subset=["漲跌幅%"]).sort_values("漲跌幅%", ascending=True).reset_index(drop=True)
-    st.subheader("跌幅排行")
-    st.dataframe(format_rank_df(down_df), use_container_width=True, hide_index=True)
-
-with tab3:
-    amount_df = rank_df.dropna(subset=["成交金額"]).sort_values("成交金額", ascending=False).reset_index(drop=True)
-    st.subheader("成交金額排行")
-    st.dataframe(format_rank_df(amount_df), use_container_width=True, hide_index=True)
-
-with tab4:
-    volume_df = rank_df.dropna(subset=["成交股數"]).sort_values("成交股數", ascending=False).reset_index(drop=True)
-    st.subheader("成交股數排行")
-    st.dataframe(format_rank_df(volume_df), use_container_width=True, hide_index=True)
+if rank_df.empty:
+    st.info("目前沒有資料。")
+else:
+    if sort_col in rank_df.columns:
+        rank_df = rank_df.sort_values(by=sort_col, ascending=ascending, na_position="last").reset_index(drop=True)
+    render_rank_table(rank_df, height=700)
