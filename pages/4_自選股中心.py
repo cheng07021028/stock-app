@@ -1,8 +1,7 @@
 # pages/4_自選股中心.py
 from __future__ import annotations
 
-
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -215,6 +214,59 @@ def _find_stock_name_market(code: str) -> tuple[str, str]:
     return code, "上市"
 
 
+def _find_stock_by_code_or_name(keyword: str) -> tuple[str, str, str]:
+    """
+    回傳: (code, name, market)
+    支援:
+    - 2330
+    - 台積電
+    - 2330 台積電
+    """
+    text = _safe_str(keyword)
+    if not text:
+        return "", "", ""
+
+    master_df = st.session_state[_k("master_df")]
+    if not isinstance(master_df, pd.DataFrame) or master_df.empty:
+        return "", "", ""
+
+    parts = text.replace("，", " ").replace(",", " ").split()
+    first = _normalize_code(parts[0]) if parts else ""
+
+    if first and first.isdigit():
+        matched = master_df[master_df["code"].astype(str) == first]
+        if not matched.empty:
+            row = matched.iloc[0]
+            return (
+                _normalize_code(row.get("code")),
+                _safe_str(row.get("name")) or first,
+                _safe_str(row.get("market")) or "上市",
+            )
+
+    matched = master_df[master_df["name"].astype(str).str.strip() == text]
+    if not matched.empty:
+        row = matched.iloc[0]
+        return (
+            _normalize_code(row.get("code")),
+            _safe_str(row.get("name")) or text,
+            _safe_str(row.get("market")) or "上市",
+        )
+
+    matched = master_df[
+        master_df["name"].astype(str).str.contains(text, case=False, na=False)
+        | master_df["code"].astype(str).str.contains(text, case=False, na=False)
+    ]
+    if not matched.empty:
+        row = matched.iloc[0]
+        return (
+            _normalize_code(row.get("code")),
+            _safe_str(row.get("name")) or text,
+            _safe_str(row.get("market")) or "上市",
+        )
+
+    return "", "", ""
+
+
 def _ensure_group(group_name: str):
     g = _safe_str(group_name)
     if not g:
@@ -234,8 +286,23 @@ def _add_stock(group_name: str, code: str, name: str = "", market: str = "") -> 
 
     if not g:
         return False, "請先選擇群組。"
+
+    # 名稱欄直接輸入股票名稱
+    if not code and name:
+        found_code, found_name, found_market = _find_stock_by_code_or_name(name)
+        code = found_code
+        name = found_name or name
+        market = found_market or market
+
+    # 代碼欄其實輸入了股票名稱
+    if code and not code.isdigit():
+        found_code, found_name, found_market = _find_stock_by_code_or_name(code)
+        code = found_code
+        name = name or found_name
+        market = found_market or market
+
     if not code:
-        return False, "請輸入股票代碼。"
+        return False, "請輸入股票代碼或股票名稱。"
 
     if not name:
         name, market_from_master = _find_stock_name_market(code)
@@ -407,7 +474,7 @@ def main():
 
     render_pro_hero(
         title="自選股中心｜股神版",
-        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、清單總覽，一頁搞定自選股維護。",
+        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、直接輸入股票名稱新增，一頁搞定自選股維護。",
     )
 
     overview_df = _build_overview_df(watchlist)
@@ -490,10 +557,10 @@ def main():
         add_group = st.selectbox("加入到群組", options=list(watchlist.keys()) if watchlist else [""], key=_k("add_group_select"))
 
     with a2:
-        st.text_input("股票代碼", key=_k("add_code"), placeholder="例如：2330")
+        st.text_input("股票代碼（可直接打名稱）", key=_k("add_code"), placeholder="例如：2330 或 台積電")
 
     with a3:
-        st.text_input("股票名稱（可空白）", key=_k("add_name"), placeholder="例如：台積電")
+        st.text_input("股票名稱（也可直接打名稱新增）", key=_k("add_name"), placeholder="例如：台積電")
 
     with a4:
         st.selectbox("市場別", ["上市", "上櫃"], key=_k("add_market"))
@@ -514,16 +581,23 @@ def main():
             st.rerun()
 
     with b2:
-        if st.button("用代碼自動帶名稱", use_container_width=True):
-            code = _normalize_code(st.session_state.get(_k("add_code"), ""))
-            if not code:
-                _set_status("請先輸入股票代碼。", "warning")
+        if st.button("自動帶入資料", use_container_width=True):
+            raw_code = _safe_str(st.session_state.get(_k("add_code"), ""))
+            raw_name = _safe_str(st.session_state.get(_k("add_name"), ""))
+
+            keyword = raw_code or raw_name
+            if not keyword:
+                _set_status("請先輸入股票代碼或股票名稱。", "warning")
             else:
-                name, market = _find_stock_name_market(code)
-                st.session_state[_k("add_name")] = name
-                st.session_state[_k("add_market")] = market
-                _set_status(f"已帶入：{code} {name} / {market}", "success")
-                st.rerun()
+                code, name, market = _find_stock_by_code_or_name(keyword)
+                if not code:
+                    _set_status("找不到對應股票，請確認名稱或代碼。", "warning")
+                else:
+                    st.session_state[_k("add_code")] = code
+                    st.session_state[_k("add_name")] = name
+                    st.session_state[_k("add_market")] = market
+                    _set_status(f"已帶入：{code} {name} / {market}", "success")
+                    st.rerun()
 
     render_pro_section("批次新增")
 
@@ -559,6 +633,7 @@ def main():
         render_pro_info_card(
             "管理提醒",
             [
+                ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
                 ("建議作法", "先建立群組，再用單筆或批次方式加入股票。", ""),
                 ("批次格式", "每行：代碼,名稱,市場別；名稱與市場別可省略。", ""),
                 ("儲存方式", "修改後請按「儲存自選股」，寫回 watchlist.json。", ""),
@@ -572,9 +647,9 @@ def main():
         if search_df.empty:
             st.info("查無符合資料。")
         else:
-            display_df = search_df.rename(columns={"code": "股票代碼", "name": "股票名稱", "market": "市場別"})
-            display_df["股票"] = display_df["股票代碼"].astype(str) + " " + display_df["股票名稱"].astype(str)
-            st.dataframe(display_df[["股票代碼", "股票名稱", "市場別", "股票"]], use_container_width=True, hide_index=True)
+            display_df = search_df.rename(columns={"code": "股票代號", "name": "股票名稱", "market": "市場別"})
+            display_df["股票"] = display_df["股票代號"].astype(str) + " " + display_df["股票名稱"].astype(str)
+            st.dataframe(display_df[["股票代號", "股票名稱", "市場別", "股票"]], use_container_width=True, hide_index=True)
 
     render_pro_section("目前群組明細")
 
@@ -614,24 +689,6 @@ def main():
         st.info("目前沒有任何自選股。")
     else:
         st.dataframe(overview_df, use_container_width=True, hide_index=True)
-
-   
-
-
-def _ensure_group(group_name: str):
-    g = _safe_str(group_name)
-    if not g:
-        return
-    watchlist = st.session_state[_k("watchlist")]
-    if g not in watchlist:
-        watchlist[g] = []
-    st.session_state[_k("watchlist")] = watchlist
-    st.session_state[_k("selected_group")] = g
-
-
-def _set_status(msg: str, level: str = "info"):
-    st.session_state[_k("status_msg")] = msg
-    st.session_state[_k("status_type")] = level
 
 
 if __name__ == "__main__":
