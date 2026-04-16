@@ -87,7 +87,7 @@ def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
     return result
 
 
-def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
+def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
     payload: dict[str, list[dict[str, str]]] = {}
 
     for group_name, items in data.items():
@@ -122,7 +122,24 @@ def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
                 }
             )
 
-    return bool(save_watchlist(payload, filepath="watchlist.json"))
+    return payload
+
+
+def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
+    payload = _normalize_watchlist_payload(data)
+    ok = bool(save_watchlist(payload, filepath="watchlist.json"))
+    if ok:
+        st.session_state[_k("watchlist")] = payload
+    return ok
+
+
+def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢查檔案權限。") -> bool:
+    ok = _save_watchlist_data(st.session_state[_k("watchlist")])
+    _set_status(
+        f"{success_msg}｜{_now_text()}" if ok else fail_msg,
+        "success" if ok else "error",
+    )
+    return ok
 
 
 def _load_stock_master() -> pd.DataFrame:
@@ -180,7 +197,7 @@ def _init_state():
     if _k("status_type") not in st.session_state:
         st.session_state[_k("status_type")] = "info"
 
-    # 延後清空 widget 值，避免同輪直接改 widget key 炸掉
+    # 延後清空 widget 值，避免同輪直接改 widget key
     if _k("add_code_next") in st.session_state:
         st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
 
@@ -478,7 +495,7 @@ def main():
 
     render_pro_hero(
         title="自選股中心｜股神版",
-        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、直接輸入股票名稱新增，一頁搞定自選股維護。",
+        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、直接輸入股票名稱新增，且每次新增刪除都自動記錄。",
     )
 
     overview_df = _build_overview_df(watchlist)
@@ -530,7 +547,7 @@ def main():
                 _set_status(f"群組已存在：{new_group}", "warning")
             else:
                 _ensure_group(new_group)
-                _set_status(f"已新增群組：{new_group}", "success")
+                _persist_watchlist(f"已新增群組：{new_group}")
                 st.session_state[_k("new_group_name")] = ""
                 st.rerun()
 
@@ -541,16 +558,15 @@ def main():
                 _set_status("目前沒有可刪除的群組。", "warning")
             else:
                 ok, msg = _delete_group(selected_group)
-                _set_status(msg, "success" if ok else "warning")
+                if ok:
+                    _persist_watchlist(msg)
+                else:
+                    _set_status(msg, "warning")
                 st.rerun()
 
     with d2:
-        if st.button("儲存自選股", use_container_width=True):
-            ok = _save_watchlist_data(st.session_state[_k("watchlist")])
-            _set_status(
-                f"已儲存 watchlist.json｜{_now_text()}" if ok else "儲存失敗，請檢查檔案權限。",
-                "success" if ok else "error",
-            )
+        if st.button("手動儲存自選股", use_container_width=True):
+            _persist_watchlist("已手動儲存 watchlist.json")
             st.rerun()
 
     render_pro_section("單筆新增股票")
@@ -578,12 +594,14 @@ def main():
                 st.session_state.get(_k("add_name"), ""),
                 st.session_state.get(_k("add_market"), "上市"),
             )
-            _set_status(msg, "success" if ok else "warning")
 
             if ok:
+                _persist_watchlist(msg)
                 st.session_state[_k("add_code_next")] = ""
                 st.session_state[_k("add_name_next")] = ""
                 st.session_state[_k("add_market_next")] = "上市"
+            else:
+                _set_status(msg, "warning")
 
             st.rerun()
 
@@ -622,7 +640,7 @@ def main():
         if st.button("批次加入", use_container_width=True, type="primary"):
             ok_count, messages = _apply_bulk_add(bulk_group, st.session_state.get(_k("bulk_text"), ""))
             if ok_count > 0:
-                _set_status(f"批次加入完成：成功 {ok_count} 筆。", "success")
+                _persist_watchlist(f"批次加入完成：成功 {ok_count} 筆")
                 st.session_state[_k("bulk_text_next")] = ""
             else:
                 _set_status("批次加入失敗，請確認格式或避免重複股票。", "warning")
@@ -640,10 +658,10 @@ def main():
         render_pro_info_card(
             "管理提醒",
             [
+                ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json。", ""),
                 ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
                 ("建議作法", "先建立群組，再用單筆或批次方式加入股票。", ""),
                 ("批次格式", "每行：代碼,名稱,市場別；名稱與市場別可省略。", ""),
-                ("儲存方式", "修改後請按「儲存自選股」，寫回 watchlist.json。", ""),
             ],
         )
 
@@ -688,7 +706,10 @@ def main():
 
         if st.button("刪除這檔股票", use_container_width=True):
             ok, msg = _delete_stock(selected_group, remove_code)
-            _set_status(msg, "success" if ok else "warning")
+            if ok:
+                _persist_watchlist(msg)
+            else:
+                _set_status(msg, "warning")
             st.rerun()
 
     render_pro_section("全部自選股總覽")
