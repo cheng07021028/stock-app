@@ -616,3 +616,264 @@ def to_excel_bytes(df_dict):
             pd.DataFrame(df).to_excel(writer, index=False, sheet_name=safe_sheet_name)
     output.seek(0)
     return output.getvalue()
+def inject_pro_theme():
+    st.markdown(
+        """
+        <style>
+        .main > div {
+            padding-top: 1.2rem;
+        }
+
+        .block-container {
+            padding-top: 1.2rem;
+            padding-bottom: 2rem;
+        }
+
+        .pro-hero {
+            background: linear-gradient(135deg, #0f172a 0%, #162033 45%, #1e293b 100%);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 22px;
+            padding: 24px 26px;
+            margin: 0 0 18px 0;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+        }
+
+        .pro-hero-title {
+            color: #f8fafc;
+            font-size: 28px;
+            font-weight: 800;
+            line-height: 1.25;
+            margin-bottom: 6px;
+            letter-spacing: 0.2px;
+        }
+
+        .pro-hero-subtitle {
+            color: #cbd5e1;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .pro-section-title {
+            font-size: 20px;
+            font-weight: 800;
+            color: #0f172a;
+            margin: 10px 0 2px 0;
+            letter-spacing: 0.2px;
+        }
+
+        .pro-section-subtitle {
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 10px;
+        }
+
+        .pro-card {
+            background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+            border: 1px solid #e2e8f0;
+            border-radius: 18px;
+            padding: 18px 18px 16px 18px;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+            margin-bottom: 14px;
+        }
+
+        .pro-card-title {
+            font-size: 15px;
+            font-weight: 800;
+            color: #0f172a;
+            margin-bottom: 10px;
+        }
+
+        .pro-chip {
+            display: inline-block;
+            background: #eff6ff;
+            color: #1d4ed8;
+            border: 1px solid #dbeafe;
+            border-radius: 999px;
+            padding: 4px 10px;
+            margin: 2px 6px 2px 0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .pro-kpi-card {
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            border: 1px solid #e2e8f0;
+            border-radius: 18px;
+            padding: 16px 18px;
+            box-shadow: 0 5px 14px rgba(15, 23, 42, 0.05);
+            min-height: 112px;
+        }
+
+        .pro-kpi-label {
+            font-size: 12px;
+            color: #64748b;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: 0.3px;
+        }
+
+        .pro-kpi-value {
+            font-size: 28px;
+            color: #0f172a;
+            font-weight: 800;
+            line-height: 1.2;
+        }
+
+        .pro-kpi-delta-up {
+            font-size: 13px;
+            font-weight: 700;
+            color: #dc2626;
+            margin-top: 6px;
+        }
+
+        .pro-kpi-delta-down {
+            font-size: 13px;
+            font-weight: 700;
+            color: #059669;
+            margin-top: 6px;
+        }
+
+        .pro-kpi-delta-flat {
+            font-size: 13px;
+            font-weight: 700;
+            color: #64748b;
+            margin-top: 6px;
+        }
+
+        .pro-info-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(160px, 1fr));
+            gap: 12px;
+        }
+
+        .pro-info-item {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            padding: 12px 14px;
+        }
+
+        .pro-info-label {
+            font-size: 12px;
+            color: #64748b;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+
+        .pro-info-value {
+            font-size: 16px;
+            color: #0f172a;
+            font-weight: 800;
+            line-height: 1.35;
+        }
+
+        .pro-up {
+            color: #dc2626 !important;
+            font-weight: 800 !important;
+        }
+
+        .pro-down {
+            color: #059669 !important;
+            font-weight: 800 !important;
+        }
+
+        .pro-flat {
+            color: #64748b !important;
+            font-weight: 800 !important;
+        }
+
+        @media (max-width: 1100px) {
+            .pro-info-grid {
+                grid-template-columns: repeat(2, minmax(160px, 1fr));
+            }
+        }
+
+        @media (max-width: 768px) {
+            .pro-info-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .pro-hero-title {
+                font-size: 22px;
+            }
+
+            .pro-kpi-value {
+                font-size: 24px;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_pro_hero(title: str, subtitle: str = ""):
+    st.markdown(
+        f"""
+        <div class="pro-hero">
+            <div class="pro-hero-title">{title}</div>
+            <div class="pro-hero-subtitle">{subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_pro_section(title: str, subtitle: str = ""):
+    st.markdown(
+        f"""
+        <div class="pro-section-title">{title}</div>
+        <div class="pro-section-subtitle">{subtitle}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_pro_kpi_row(items: list):
+    cols = st.columns(len(items))
+    for idx, item in enumerate(items):
+        label = item.get("label", "—")
+        value = item.get("value", "—")
+        delta = item.get("delta", "")
+        delta_class = item.get("delta_class", "pro-kpi-delta-flat")
+
+        with cols[idx]:
+            st.markdown(
+                f"""
+                <div class="pro-kpi-card">
+                    <div class="pro-kpi-label">{label}</div>
+                    <div class="pro-kpi-value">{value}</div>
+                    <div class="{delta_class}">{delta}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_pro_info_card(title: str, info_pairs: list, chips: list | None = None):
+    chips_html = ""
+    if chips:
+        chips_html = "".join([f'<span class="pro-chip">{x}</span>' for x in chips])
+
+    items_html = ""
+    for label, value, css_class in info_pairs:
+        css = css_class if css_class else ""
+        items_html += f'''
+        <div class="pro-info-item">
+            <div class="pro-info-label">{label}</div>
+            <div class="pro-info-value {css}">{value}</div>
+        </div>
+        '''
+
+    st.markdown(
+        f"""
+        <div class="pro-card">
+            <div class="pro-card-title">{title}</div>
+            <div style="margin-bottom:10px;">{chips_html}</div>
+            <div class="pro-info-grid">
+                {items_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
