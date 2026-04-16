@@ -25,6 +25,7 @@ from utils import (
     compute_signal_snapshot,
     score_to_badge,
     compute_support_resistance_snapshot,
+    compute_radar_scores,
 )
 
 
@@ -36,7 +37,6 @@ def build_stock_options(items, lookup_date):
     for item in items:
         code = str(item.get("code", "")).strip()
         manual_name = str(item.get("name", "")).strip()
-
         if not code:
             continue
 
@@ -74,10 +74,8 @@ def add_indicators(df: pd.DataFrame, selected_indicators: list):
         denom = (high_n - low_n).replace(0, pd.NA)
         rsv = ((df["收盤價"] - low_n) / denom * 100).fillna(0)
 
-        k_values = []
-        d_values = []
-        k_prev = 50.0
-        d_prev = 50.0
+        k_values, d_values = [], []
+        k_prev, d_prev = 50.0, 50.0
 
         for val in rsv:
             val = float(val)
@@ -85,8 +83,7 @@ def add_indicators(df: pd.DataFrame, selected_indicators: list):
             d_now = (2 / 3) * d_prev + (1 / 3) * k_now
             k_values.append(k_now)
             d_values.append(d_now)
-            k_prev = k_now
-            d_prev = d_now
+            k_prev, d_prev = k_now, d_now
 
         df["K"] = k_values
         df["D"] = d_values
@@ -128,8 +125,6 @@ def render_signal_board(signal: dict):
 
 
 def render_sr_board(sr: dict):
-    render_pro_section("支撐壓力面板", "用近 20 日 / 60 日高低點做壓力與支撐定位，搭配距離百分比快速判讀")
-
     dist_res_20 = f"{sr.get('dist_res_20_pct'):.2f}%" if sr.get("dist_res_20_pct") is not None else "—"
     dist_sup_20 = f"{sr.get('dist_sup_20_pct'):.2f}%" if sr.get("dist_sup_20_pct") is not None else "—"
     dist_res_60 = f"{sr.get('dist_res_60_pct'):.2f}%" if sr.get("dist_res_60_pct") is not None else "—"
@@ -162,6 +157,53 @@ def render_sr_board(sr: dict):
             ("操作建議", sr["comment_action"], ""),
         ],
         chips=["專業評語", "風險", "操作重點"]
+    )
+
+
+def render_radar_board(radar: dict):
+    render_pro_section("雷達評分", "將趨勢、動能、量能、位置、結構轉成五維評分，快速看出強弱輪廓")
+
+    categories = ["趨勢", "動能", "量能", "位置", "結構"]
+    values = [
+        radar["trend"],
+        radar["momentum"],
+        radar["volume"],
+        radar["position"],
+        radar["structure"],
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=values + [values[0]],
+        theta=categories + [categories[0]],
+        fill="toself",
+        name="評分",
+        line=dict(width=3),
+    ))
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100])
+        ),
+        showlegend=False,
+        height=430,
+        margin=dict(l=20, r=20, t=20, b=20),
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+    avg_score = round(sum(values) / len(values), 1)
+
+    render_pro_info_card(
+        "雷達評語",
+        [
+            ("趨勢", f"{radar['trend']} / 100", ""),
+            ("動能", f"{radar['momentum']} / 100", ""),
+            ("量能", f"{radar['volume']} / 100", ""),
+            ("位置", f"{radar['position']} / 100", ""),
+            ("結構", f"{radar['structure']} / 100", ""),
+            ("平均分數", f"{avg_score} / 100", ""),
+            ("整體評語", radar["summary"], ""),
+        ],
+        chips=["Radar", "Multi-Factor", "Strength Profile"]
     )
 
 
@@ -359,8 +401,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜支撐壓力版",
-    "多空燈號 + 支撐壓力 + 盤勢評語整合，讓你從看圖升級成讀盤。"
+    "歷史K線分析｜雷達評分版",
+    "多空燈號、支撐壓力、雷達評分整合，從看圖進一步升級到多因子結構判讀。"
 )
 
 if not group_names:
@@ -453,10 +495,12 @@ if query_btn or selected_stock:
     df = add_indicators(df, selected_indicators)
     signal = compute_signal_snapshot(df)
     sr = compute_support_resistance_snapshot(df)
+    radar = compute_radar_scores(df)
 
     render_summary_card(selected_stock, start_date, end_date, selected_indicators, df, realtime_info)
     render_signal_board(signal)
     render_sr_board(sr)
+    render_radar_board(radar)
 
     download_df = df.copy()
     if "日期" in download_df.columns:
@@ -475,7 +519,7 @@ if query_btn or selected_stock:
         )
 
     render_chart(df, selected_indicators)
-    render_pro_section("歷史資料表", "支撐壓力與燈號判讀後，可回到原始數值表做二次驗證")
+    render_pro_section("歷史資料表", "雷達評分、燈號與支撐壓力判讀後，可回到原始數值做二次驗證")
     render_table(df)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
