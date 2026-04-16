@@ -8,8 +8,7 @@ from utils import (
     get_font_scale,
     get_all_code_name_map,
     get_stock_name_and_market,
-    # 把下面這個改成你專案裡真正抓歷史資料的函式名稱
-    get_stock_history_df,
+    get_history_data,
 )
 
 from query_state import load_last_query_state, save_last_query_state, parse_date_safe
@@ -149,8 +148,10 @@ query_btn = st.button("開始查詢", type="primary", use_container_width=True)
 if query_btn:
     with st.spinner("正在查詢歷史資料..."):
         try:
-            df = get_stock_history_df(
+            df = get_history_data(
                 selected_stock["code"],
+                selected_stock["name"],
+                selected_stock["market"],
                 start_date,
                 end_date
             )
@@ -164,54 +165,10 @@ if query_btn:
 
     df = pd.DataFrame(df).copy()
 
-    rename_map = {}
-    cols = list(df.columns)
-
-    if "date" in cols and "日期" not in cols:
-        rename_map["date"] = "日期"
-    if "Date" in cols and "日期" not in cols:
-        rename_map["Date"] = "日期"
-
-    if "open" in cols and "開盤價" not in cols:
-        rename_map["open"] = "開盤價"
-    if "Open" in cols and "開盤價" not in cols:
-        rename_map["Open"] = "開盤價"
-
-    if "high" in cols and "最高價" not in cols:
-        rename_map["high"] = "最高價"
-    if "High" in cols and "最高價" not in cols:
-        rename_map["High"] = "最高價"
-
-    if "low" in cols and "最低價" not in cols:
-        rename_map["low"] = "最低價"
-    if "Low" in cols and "最低價" not in cols:
-        rename_map["Low"] = "最低價"
-
-    if "close" in cols and "收盤價" not in cols:
-        rename_map["close"] = "收盤價"
-    if "Close" in cols and "收盤價" not in cols:
-        rename_map["Close"] = "收盤價"
-    if "adj_close" in cols and "收盤價" not in cols:
-        rename_map["adj_close"] = "收盤價"
-    if "Adj Close" in cols and "收盤價" not in cols:
-        rename_map["Adj Close"] = "收盤價"
-
-    if "volume" in cols and "成交量" not in cols:
-        rename_map["volume"] = "成交量"
-    if "Volume" in cols and "成交量" not in cols:
-        rename_map["Volume"] = "成交量"
-
-    if rename_map:
-        df = df.rename(columns=rename_map)
-
-    if "日期" in df.columns:
-        df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-        df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
-
     st.markdown("---")
     st.subheader("歷史資料")
 
-    show_cols = [c for c in ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交量"] if c in df.columns]
+    show_cols = [c for c in ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"] if c in df.columns]
     if show_cols:
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
     else:
@@ -222,8 +179,8 @@ if query_btn:
         st.subheader("收盤價走勢圖")
         st.line_chart(chart_df, use_container_width=True)
 
-    if "成交量" in df.columns and "日期" in df.columns:
-        vol_df = df[["日期", "成交量"]].copy().set_index("日期")
+    if "成交股數" in df.columns and "日期" in df.columns:
+        vol_df = df[["日期", "成交股數"]].copy().set_index("日期")
         st.subheader("成交量走勢圖")
         st.bar_chart(vol_df, use_container_width=True)
 
