@@ -187,6 +187,13 @@ if group_names:
         st.error("開始日期不能大於結束日期")
     else:
         if current_stock is not None:
+            realtime_info = get_realtime_stock_info(
+                current_stock["code"],
+                current_stock["name"],
+                current_stock["market"]
+            )
+            render_realtime_info_card(realtime_info, title="今日即時資訊")
+
             st.markdown(
                 f"""
 **目前快速查詢條件：**  
@@ -215,7 +222,7 @@ st.subheader("系統功能")
 
 st.markdown("""
 - 儀表板：查看各群組最新行情摘要
-- 行情查詢：單支股票最新行情與近 30 天走勢
+- 行情查詢：單支股票最新行情與近況查詢
 - 歷史K線分析：依股票與日期區間查詢歷史資料
 - 自選股中心：建立群組、新增與刪除股票
 - 排行榜：查看股票排行資訊
