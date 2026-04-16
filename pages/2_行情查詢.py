@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 import streamlit as st
 
 from utils import (
@@ -52,9 +52,9 @@ def render_quote_summary(stock_info: dict, history_df):
         change_text = f"{change:+.2f} / {change_pct:+.2f}%"
         change_class = "pro-up" if change > 0 else "pro-down" if change < 0 else "pro-flat"
 
-    latest_close = history_df["收盤價"].iloc[-1] if history_df is not None and not history_df.empty and "收盤價" in history_df.columns else None
     high_30 = history_df["最高價"].max() if history_df is not None and not history_df.empty and "最高價" in history_df.columns else None
     low_30 = history_df["最低價"].min() if history_df is not None and not history_df.empty and "最低價" in history_df.columns else None
+    avg_30 = history_df["收盤價"].mean() if history_df is not None and not history_df.empty and "收盤價" in history_df.columns else None
 
     render_pro_info_card(
         "單股即時總覽",
@@ -70,6 +70,7 @@ def render_quote_summary(stock_info: dict, history_df):
             ("總量", format_number(stock_info.get("total_volume"), 0), ""),
             ("近30日最高", format_number(high_30, 2), ""),
             ("近30日最低", format_number(low_30, 2), ""),
+            ("近30日均價", format_number(avg_30, 2), ""),
             ("更新時間", stock_info.get("update_time", "—"), ""),
         ],
         chips=["即時行情", "單股監控", "短週期檢視"]
@@ -135,6 +136,17 @@ with st.spinner("正在讀取近 30 日資料..."):
         selected_stock["code"],
         selected_stock["name"],
         selected_stock["market"],
-        today_dt - st.timedelta(days=30) if False else (today_dt.replace(day=today_dt.day) - __import__("datetime").timedelta(days=30)),
+        today_dt - timedelta(days=30),
         today_dt
     )
+
+render_quote_summary(info, history_df)
+
+render_pro_section("盤中觀察提示", "這一頁重點是快速判讀單一標的的當下位置，不取代完整 K 線分析頁")
+
+st.markdown("""
+- 看 **現價 vs 昨收**：先判斷方向  
+- 看 **開高走低 / 開低走高**：觀察盤中強弱  
+- 看 **近 30 日最高 / 最低**：判斷是否接近區間邊界  
+- 看 **總量**：確認波動是否有量能支持  
+""")
