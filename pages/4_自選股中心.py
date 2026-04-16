@@ -1,14 +1,18 @@
-import pandas as pd
+from datetime import date
 import streamlit as st
 
 from utils import (
     get_normalized_watchlist,
     save_watchlist,
-    get_all_code_name_map,
     apply_font_scale,
     get_font_scale,
-    get_stock_name,
-    get_stock_name_and_market,
+    search_stock_candidates,
+    build_stock_candidate_labels,
+)
+
+from watchlist_ui_state import (
+    load_watchlist_ui_state,
+    save_watchlist_ui_state,
 )
 
 st.set_page_config(page_title="自選股中心", page_icon="⭐", layout="wide")
@@ -16,165 +20,233 @@ st.set_page_config(page_title="自選股中心", page_icon="⭐", layout="wide")
 if "font_scale" not in st.session_state:
     st.session_state.font_scale = get_font_scale()
 
-with st.sidebar:
-    st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider("字體大小 (%)", 100, 220, st.session_state.font_scale, 10)
-
 apply_font_scale(st.session_state.font_scale)
+
+if "watchlist_ui_loaded" not in st.session_state:
+    ui_state = load_watchlist_ui_state()
+    st.session_state.wl_selected_group = ui_state.get("selected_group", "")
+    st.session_state.wl_stock_keyword = ui_state.get("stock_keyword", "")
+    st.session_state.wl_selected_candidate_label = ui_state.get("selected_candidate_label", "")
+    st.session_state.wl_manual_code = ui_state.get("manual_code", "")
+    st.session_state.wl_manual_name = ui_state.get("manual_name", "")
+    st.session_state.watchlist_ui_loaded = True
 
 st.title("⭐ 自選股中心")
 st.caption("可管理自選股群組、手動新增股票代號與名稱、刪除股票與群組")
 
 watchlist_dict = get_normalized_watchlist()
 
-lookup_df = get_all_code_name_map(pd.Timestamp.today().strftime("%Y%m%d"))
-api_ok = not lookup_df.empty
-
-if not api_ok:
-    st.info("目前使用手動名稱 / 備援模式，仍可新增與管理自選股。")
-
-
-def get_market_type(code: str) -> str:
-    code = str(code).strip()
-    _, market = get_stock_name_and_market(code, lookup_df, "")
-    return market
-
-
+# =========================
+# 新增群組
+# =========================
 st.markdown("---")
 st.subheader("新增群組")
 
-c1, c2 = st.columns([3, 1])
-with c1:
-    new_group_name = st.text_input("新群組名稱", placeholder="例如：AI概念股")
-with c2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("新增群組", use_container_width=True):
-        group_name = new_group_name.strip()
-        if not group_name:
-            st.warning("請輸入群組名稱")
-        elif group_name in watchlist_dict:
-            st.warning("群組已存在")
-        else:
-            watchlist_dict[group_name] = []
-            save_watchlist(watchlist_dict)
-            st.success(f"已新增群組：{group_name}")
-            st.rerun()
+with st.form("add_group_form", clear_on_submit=False):
+    c1, c2 = st.columns([3, 1])
 
+    with c1:
+        new_group_name = st.text_input(
+            "新群組名稱",
+            placeholder="例如：AI概念股"
+        )
+
+    with c2:
+        st.write("")
+        st.write("")
+        add_group_btn = st.form_submit_button("新增群組", use_container_width=True)
+
+if add_group_btn:
+    group_name = str(new_group_name).strip()
+
+    if not group_name:
+        st.warning("請輸入群組名稱。")
+    elif group_name in watchlist_dict:
+        st.warning(f"群組「{group_name}」已存在。")
+    else:
+        watchlist_dict[group_name] = []
+        save_watchlist(watchlist_dict)
+        st.session_state.wl_selected_group = group_name
+        st.success(f"已新增群組：{group_name}")
+        st.rerun()
+
+# =========================
+# 新增股票
+# =========================
 st.markdown("---")
 st.subheader("新增股票")
 
+watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
+
 if not group_names:
-    st.warning("目前沒有群組，請先新增群組。")
-    st.stop()
-
-a1, a2, a3 = st.columns(3)
-with a1:
-    selected_group = st.selectbox("選擇群組", group_names, index=0)
-with a2:
-    stock_code_input = st.text_input("股票代號", placeholder="例如：2330")
-with a3:
-    stock_name_input = st.text_input("股票名稱（可選填）", placeholder="例如：台積電")
-
-if st.button("加入自選股", use_container_width=True):
-    code = stock_code_input.strip()
-    manual_name = stock_name_input.strip()
-
-    if not code:
-        st.warning("請輸入股票代號")
-    else:
-        current_items = watchlist_dict.get(selected_group, [])
-        current_codes = [str(x.get("code", "")).strip() for x in current_items]
-
-        if code in current_codes:
-            st.warning(f"{code} 已存在於群組「{selected_group}」")
-        else:
-            final_name = get_stock_name(code, lookup_df, manual_name)
-            current_items.append({
-                "code": code,
-                "name": manual_name if manual_name else final_name
-            })
-            watchlist_dict[selected_group] = current_items
-            save_watchlist(watchlist_dict)
-            st.success(f"已加入 {final_name} ({code}) 到群組「{selected_group}」")
-            st.rerun()
-
-st.markdown("---")
-st.subheader("目前自選股清單")
-
-all_rows = []
-for group_name, items in watchlist_dict.items():
-    if not items:
-        all_rows.append({
-            "群組": group_name,
-            "證券代號": "",
-            "證券名稱": "",
-            "市場別": ""
-        })
-        continue
-
-    for item in items:
-        code = str(item.get("code", "")).strip()
-        manual_name = str(item.get("name", "")).strip()
-        display_name = get_stock_name(code, lookup_df, manual_name)
-
-        all_rows.append({
-            "群組": group_name,
-            "證券代號": code,
-            "證券名稱": display_name,
-            "市場別": get_market_type(code)
-        })
-
-if all_rows:
-    df = pd.DataFrame(all_rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.warning("請先建立群組。")
 else:
-    st.info("目前沒有任何自選股資料。")
+    today_dt = date.today()
+    lookup_date = today_dt.strftime("%Y%m%d")
 
+    saved_group = st.session_state.get("wl_selected_group", "")
+    group_index = group_names.index(saved_group) if saved_group in group_names else 0
+
+    with st.form("watchlist_add_stock_form", clear_on_submit=False):
+        c1, c2 = st.columns(2)
+
+        with c1:
+            selected_group = st.selectbox(
+                "選擇群組",
+                group_names,
+                index=group_index
+            )
+
+        with c2:
+            stock_keyword = st.text_input(
+                "輸入股票名稱或代號",
+                value=st.session_state.get("wl_stock_keyword", ""),
+                placeholder="例如：台積電 / 東元 / 2330 / 1504"
+            )
+
+        candidate_df = search_stock_candidates(stock_keyword, lookup_date, top_n=20) if stock_keyword.strip() else None
+        candidate_labels = build_stock_candidate_labels(candidate_df) if candidate_df is not None else []
+
+        selected_candidate_label = ""
+        selected_code = ""
+        selected_name = ""
+
+        if candidate_labels:
+            saved_candidate = st.session_state.get("wl_selected_candidate_label", "")
+            candidate_index = candidate_labels.index(saved_candidate) if saved_candidate in candidate_labels else 0
+
+            selected_candidate_label = st.selectbox(
+                "查詢結果",
+                candidate_labels,
+                index=candidate_index
+            )
+
+            selected_row = candidate_df.iloc[candidate_labels.index(selected_candidate_label)]
+            selected_code = str(selected_row["證券代號"]).strip()
+            selected_name = str(selected_row["證券名稱"]).strip()
+        elif stock_keyword.strip():
+            st.info("查無符合股票，仍可手動輸入代號與名稱新增。")
+
+        d1, d2 = st.columns(2)
+
+        with d1:
+            stock_code = st.text_input(
+                "股票代號",
+                value=selected_code if selected_code else st.session_state.get("wl_manual_code", ""),
+                placeholder="例如：2330"
+            )
+
+        with d2:
+            stock_name = st.text_input(
+                "股票名稱",
+                value=selected_name if selected_name else st.session_state.get("wl_manual_name", ""),
+                placeholder="例如：台積電"
+            )
+
+        add_stock_btn = st.form_submit_button("加入自選股", type="primary", use_container_width=True)
+
+    save_watchlist_ui_state(
+        selected_group=selected_group,
+        stock_keyword=stock_keyword,
+        selected_candidate_label=selected_candidate_label,
+        manual_code=stock_code,
+        manual_name=stock_name,
+    )
+
+    if add_stock_btn:
+        stock_code = str(stock_code).strip()
+        stock_name = str(stock_name).strip()
+
+        if not stock_code:
+            st.warning("請輸入或選擇股票。")
+        else:
+            current_items = watchlist_dict.get(selected_group, [])
+            exists = any(str(item.get("code", "")).strip() == stock_code for item in current_items)
+
+            if exists:
+                st.warning(f"{stock_code} 已存在於群組「{selected_group}」。")
+            else:
+                current_items.append({
+                    "code": stock_code,
+                    "name": stock_name
+                })
+                watchlist_dict[selected_group] = current_items
+                save_watchlist(watchlist_dict)
+
+                st.session_state.wl_selected_group = selected_group
+                st.session_state.wl_stock_keyword = stock_keyword
+                st.session_state.wl_selected_candidate_label = selected_candidate_label
+                st.session_state.wl_manual_code = stock_code
+                st.session_state.wl_manual_name = stock_name
+
+                st.success(f"已加入 {stock_name or stock_code} 到群組「{selected_group}」")
+                st.rerun()
+
+# =========================
+# 群組內容管理
+# =========================
 st.markdown("---")
-st.subheader("刪除股票")
+st.subheader("群組內容管理")
 
-d1, d2 = st.columns(2)
-with d1:
-    delete_group = st.selectbox("選擇要刪除股票的群組", group_names, index=0, key="delete_group")
+watchlist_dict = get_normalized_watchlist()
+group_names = list(watchlist_dict.keys())
 
-delete_items = watchlist_dict.get(delete_group, [])
-delete_labels = [
-    f"{get_stock_name(str(item.get('code', '')).strip(), lookup_df, str(item.get('name', '')).strip())} ({str(item.get('code', '')).strip()})"
-    for item in delete_items
-]
+if not group_names:
+    st.info("目前沒有群組。")
+else:
+    manage_group = st.selectbox("查看群組", group_names, key="manage_group_selectbox")
+    group_items = watchlist_dict.get(manage_group, [])
 
-with d2:
-    if delete_labels:
-        delete_stock_label = st.selectbox("選擇股票", delete_labels, index=0, key="delete_stock")
+    if not group_items:
+        st.info(f"群組「{manage_group}」目前沒有股票。")
     else:
-        delete_stock_label = None
-        st.selectbox("選擇股票", ["此群組無股票"], index=0, key="delete_stock_empty")
+        st.markdown(f"### 群組：{manage_group}")
 
-if st.button("刪除選定股票", use_container_width=True):
-    if not delete_items:
-        st.warning("此群組沒有可刪除的股票")
-    else:
-        delete_code = delete_stock_label.split("(")[-1].replace(")", "").strip()
-        watchlist_dict[delete_group] = [
-            x for x in watchlist_dict[delete_group]
-            if str(x.get("code", "")).strip() != delete_code
-        ]
-        save_watchlist(watchlist_dict)
-        st.success(f"已刪除 {delete_stock_label}")
-        st.rerun()
+        for idx, item in enumerate(group_items):
+            code = str(item.get("code", "")).strip()
+            name = str(item.get("name", "")).strip()
 
+            c1, c2, c3 = st.columns([2, 3, 1])
+            with c1:
+                st.write(code)
+            with c2:
+                st.write(name if name else "—")
+            with c3:
+                if st.button("刪除", key=f"delete_stock_{manage_group}_{idx}", use_container_width=True):
+                    group_items.pop(idx)
+                    watchlist_dict[manage_group] = group_items
+                    save_watchlist(watchlist_dict)
+                    st.success(f"已刪除 {code}")
+                    st.rerun()
+
+# =========================
+# 刪除群組
+# =========================
 st.markdown("---")
 st.subheader("刪除群組")
 
-g1, g2 = st.columns([3, 1])
-with g1:
-    delete_group_name = st.selectbox("選擇要刪除的群組", group_names, index=0, key="drop_group")
-with g2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("刪除群組", use_container_width=True):
-        if delete_group_name in watchlist_dict:
-            del watchlist_dict[delete_group_name]
-            save_watchlist(watchlist_dict)
-            st.success(f"已刪除群組：{delete_group_name}")
-            st.rerun()
+watchlist_dict = get_normalized_watchlist()
+group_names = list(watchlist_dict.keys())
+
+if not group_names:
+    st.info("目前沒有可刪除群組。")
+else:
+    with st.form("delete_group_form", clear_on_submit=False):
+        delete_group_name = st.selectbox("選擇要刪除的群組", group_names)
+        confirm_delete = st.checkbox("我確認要刪除此群組（包含群組內所有股票）")
+        delete_group_btn = st.form_submit_button("刪除群組", use_container_width=True)
+
+    if delete_group_btn:
+        if not confirm_delete:
+            st.warning("請先勾選確認刪除。")
+        else:
+            if delete_group_name in watchlist_dict:
+                del watchlist_dict[delete_group_name]
+                save_watchlist(watchlist_dict)
+
+                if st.session_state.get("wl_selected_group", "") == delete_group_name:
+                    st.session_state.wl_selected_group = ""
+
+                st.success(f"已刪除群組：{delete_group_name}")
+                st.rerun()
