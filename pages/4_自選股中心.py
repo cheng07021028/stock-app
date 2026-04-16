@@ -1,7 +1,7 @@
 # pages/4_自選股中心.py
 from __future__ import annotations
 
-import json
+
 from datetime import date, datetime
 from typing import Any
 
@@ -615,11 +615,7 @@ def main():
     else:
         st.dataframe(overview_df, use_container_width=True, hide_index=True)
 
-    render_pro_section("JSON 預覽")
-    st.code(
-        json.dumps(st.session_state[_k("watchlist")], ensure_ascii=False, indent=2),
-        language="json",
-    )
+   
 
 
 def _ensure_group(group_name: str):
