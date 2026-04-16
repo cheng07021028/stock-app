@@ -8,10 +8,15 @@ from utils import (
     get_all_code_name_map,
     get_stock_name_and_market,
     get_realtime_stock_info,
-    render_realtime_info_card,
     load_last_query_state,
     save_last_query_state,
     parse_date_safe,
+    inject_pro_theme,
+    render_pro_hero,
+    render_pro_section,
+    render_pro_kpi_row,
+    render_pro_info_card,
+    format_number,
 )
 
 
@@ -75,34 +80,30 @@ with st.sidebar:
     )
 
 apply_font_scale(st.session_state.font_scale)
-
-st.title("📈 股市專家系統")
-st.caption("正式整合版首頁")
+inject_pro_theme()
 
 today_dt = date.today()
 lookup_date = today_dt.strftime("%Y%m%d")
 
 watchlist_dict = get_normalized_watchlist()
 group_stock_options = build_group_stock_options(watchlist_dict, lookup_date)
-
 all_code_name_df = get_all_code_name_map(lookup_date)
-if all_code_name_df.empty:
-    st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
+
+render_pro_hero(
+    "股市專家系統",
+    "專業盤面首頁｜整合自選股、即時資訊、查詢條件與歷史分析入口"
+)
 
 group_count = len(watchlist_dict)
 stock_count = sum(len(v) for v in watchlist_dict.values())
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("群組數量", group_count)
-with c2:
-    st.metric("自選股總數", stock_count)
-with c3:
-    st.metric("今日日期", today_dt.strftime("%Y-%m-%d"))
+render_pro_kpi_row([
+    {"label": "群組數量", "value": f"{group_count:,}", "delta": "Watchlist Groups", "delta_class": "pro-kpi-delta-flat"},
+    {"label": "自選股總數", "value": f"{stock_count:,}", "delta": "Tracked Symbols", "delta_class": "pro-kpi-delta-flat"},
+    {"label": "今日日期", "value": today_dt.strftime("%Y-%m-%d"), "delta": "Trading Dashboard", "delta_class": "pro-kpi-delta-flat"},
+])
 
-st.markdown("---")
-st.subheader("快速查詢入口")
-st.caption("可在首頁快速選擇群組、股票與日期區間，再切換到『歷史K線分析』頁面使用")
+render_pro_section("快速查詢入口", "先在首頁選條件，再切換到歷史K線分析頁直接使用")
 
 group_names = list(watchlist_dict.keys())
 
@@ -188,44 +189,48 @@ if group_names:
         st.error("開始日期不能大於結束日期")
     else:
         if current_stock is not None:
-            realtime_info = get_realtime_stock_info(
+            info = get_realtime_stock_info(
                 current_stock["code"],
                 current_stock["name"],
                 current_stock["market"]
             )
-            render_realtime_info_card(realtime_info, title="今日即時資訊")
 
-            st.markdown(
-                f"""
-**目前快速查詢條件：**  
-群組：{current_group}  
-股票：{current_stock['name']}（{current_stock['code']}）  
-市場別：{current_stock['market']}  
-日期區間：{current_start} ~ {current_end}
-"""
-            )
-        else:
-            st.markdown(
-                f"""
-**目前快速查詢條件：**  
-群組：{current_group}  
-股票：尚未選定  
-日期區間：{current_start} ~ {current_end}
-"""
+            price = info.get("price")
+            change = info.get("change")
+            change_pct = info.get("change_pct")
+
+            if change is not None and change_pct is not None:
+                delta_text = f"{change:+.2f} / {change_pct:+.2f}%"
+                delta_class = "pro-up" if change > 0 else "pro-down" if change < 0 else "pro-flat"
+            else:
+                delta_text = "Real-time Snapshot"
+                delta_class = "pro-flat"
+
+            render_pro_info_card(
+                "今日即時總覽",
+                [
+                    ("群組", current_group, ""),
+                    ("股票", f"{current_stock['name']}（{current_stock['code']}）", ""),
+                    ("市場別", current_stock["market"], ""),
+                    ("日期區間", f"{current_start} ~ {current_end}", ""),
+                    ("現價", format_number(price, 2), ""),
+                    ("漲跌 / 幅度", delta_text, delta_class),
+                    ("更新時間", info.get("update_time", "—"), ""),
+                    ("資料狀態", "即時連線成功" if info.get("ok") else "即時資料異常", ""),
+                ],
+                chips=["首頁條件", "即時資訊", "歷史分析入口"]
             )
 
         st.info("首頁提供快速選擇；實際查詢請切換到左側『歷史K線分析』頁面。")
 else:
     st.warning("目前沒有自選股群組，請先到『自選股中心』建立群組與股票。")
 
-st.markdown("---")
-st.subheader("系統功能")
-st.markdown("""
-- 儀表板：查看各群組最新行情摘要
-- 行情查詢：單支股票最新行情與近況查詢
-- 歷史K線分析：依股票與日期區間查詢歷史資料
-- 自選股中心：建立群組、新增與刪除股票
-- 排行榜：查看股票排行資訊
-""")
+render_pro_section("系統功能", "目前已完成共用版整合，接下來可進一步做更高階盤面與分析功能")
 
-st.info("建議流程：自選股中心 → 儀表板 → 行情查詢 → 歷史K線分析")
+st.markdown("""
+- 儀表板：查看各群組最新行情摘要  
+- 行情查詢：單支股票最新行情與近況查詢  
+- 歷史K線分析：依股票與日期區間查詢歷史資料  
+- 自選股中心：建立群組、新增與刪除股票  
+- 排行榜：查看股票排行資訊  
+""")
