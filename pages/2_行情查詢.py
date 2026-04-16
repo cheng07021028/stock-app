@@ -23,14 +23,43 @@ from utils import (
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def build_stock_options(items, lookup_date):
+def build_all_stock_options(watchlist_dict, lookup_date):
+    all_code_name_df = get_all_code_name_map(lookup_date)
+    result = []
+    seen = set()
+
+    for group_name, items in watchlist_dict.items():
+        for item in items:
+            code = str(item.get("code", "")).strip()
+            manual_name = str(item.get("name", "")).strip()
+            if not code:
+                continue
+
+            stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
+            key = (group_name, code, market_type)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            result.append({
+                "group": group_name,
+                "label": f"{stock_name} ({code}) [{market_type}]｜{group_name}",
+                "code": code,
+                "name": stock_name,
+                "market": market_type,
+            })
+
+    return result
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def build_group_stock_options(items, lookup_date):
     all_code_name_df = get_all_code_name_map(lookup_date)
     stock_options = []
 
     for item in items:
         code = str(item.get("code", "")).strip()
         manual_name = str(item.get("name", "")).strip()
-
         if not code:
             continue
 
@@ -43,6 +72,27 @@ def build_stock_options(items, lookup_date):
         })
 
     return stock_options
+
+
+def filter_stock_options(all_options, keyword):
+    keyword = str(keyword).strip().lower()
+    if not keyword:
+        return all_options[:30]
+
+    matched = []
+    for item in all_options:
+        text_pool = " ".join([
+            str(item.get("name", "")),
+            str(item.get("code", "")),
+            str(item.get("market", "")),
+            str(item.get("group", "")),
+            str(item.get("label", "")),
+        ]).lower()
+
+        if keyword in text_pool:
+            matched.append(item)
+
+    return matched[:50]
 
 
 def add_basic_indicators(df: pd.DataFrame):
@@ -247,8 +297,8 @@ apply_font_scale(st.session_state.font_scale)
 inject_pro_theme()
 
 render_pro_hero(
-    "行情查詢｜事件摘要版",
-    "單股工作站進階版｜即時資訊 + 訊號燈號 + 支撐壓力 + 最近事件摘要。"
+    "行情查詢｜股票名稱搜尋版",
+    "單股工作站進階版｜支援股票名稱/代號模糊搜尋，搭配訊號、支撐壓力與最近事件摘要。"
 )
 
 today_dt = date.today()
@@ -261,28 +311,56 @@ if not group_names:
     st.warning("目前沒有自選股群組，請先到「自選股中心」建立群組與股票。")
     st.stop()
 
+all_stock_options = build_all_stock_options(watchlist_dict, lookup_date)
+
+st.markdown("### 快速搜尋股票")
+search_keyword = st.text_input(
+    "輸入股票名稱或代號",
+    placeholder="例如：台積電 / 2330 / 鴻海 / 聯發科",
+    key="quote_search_keyword"
+)
+
+matched_options = filter_stock_options(all_stock_options, search_keyword)
+
+selected_stock = None
+
+if matched_options:
+    quick_pick = st.selectbox(
+        "搜尋結果",
+        [x["label"] for x in matched_options],
+        index=0,
+        key="quote_search_result"
+    )
+    selected_stock = next(x for x in matched_options if x["label"] == quick_pick)
+else:
+    st.info("找不到符合的股票，請改用群組下拉選擇。")
+
+st.markdown("---")
 c1, c2 = st.columns(2)
 
 with c1:
     selected_group = st.selectbox("選擇群組", group_names, index=0)
 
 items = watchlist_dict.get(selected_group, [])
-stock_options = build_stock_options(items, lookup_date)
+group_stock_options = build_group_stock_options(items, lookup_date)
 
 with c2:
-    if stock_options:
-        selected_stock_label = st.selectbox(
-            "選擇股票",
-            [x["label"] for x in stock_options],
+    if group_stock_options:
+        group_stock_label = st.selectbox(
+            "群組股票",
+            [x["label"] for x in group_stock_options],
             index=0
         )
-        selected_stock = next(x for x in stock_options if x["label"] == selected_stock_label)
+        group_stock = next(x for x in group_stock_options if x["label"] == group_stock_label)
     else:
-        selected_stock = None
-        st.selectbox("選擇股票", ["此群組目前沒有股票"], index=0)
+        group_stock = None
+        st.selectbox("群組股票", ["此群組目前沒有股票"], index=0)
 
 if selected_stock is None:
-    st.warning("此群組目前沒有可查詢股票。")
+    selected_stock = group_stock
+
+if selected_stock is None:
+    st.warning("目前沒有可查詢股票。")
     st.stop()
 
 with st.spinner("正在查詢即時資訊..."):
@@ -313,4 +391,4 @@ else:
     render_signal_summary(info, signal, sr)
     render_recent_events(history_df)
 
-render_pro_section("觀察建議", "這一頁適合快速單股判讀；若要深入看完整圖上事件標記，請切到歷史K線分析頁")
+render_pro_section("觀察建議", "可直接打股票名稱快速找標的；若要深入看圖上事件標記，請切到歷史K線分析頁")
