@@ -35,18 +35,27 @@ STATE_PREFIX = "hist_"
 
 
 # =========================
-# 基礎工具
+# Session State
 # =========================
+def _k(key: str) -> str:
+    return f"{STATE_PREFIX}{key}"
+
+
 def _ss(key: str, default: Any = None):
-    return st.session_state.get(f"{STATE_PREFIX}{key}", default)
+    return st.session_state.get(_k(key), default)
 
 
 def _set_ss(key: str, value: Any):
-    st.session_state[f"{STATE_PREFIX}{key}"] = value
+    st.session_state[_k(key)] = value
 
 
+# =========================
+# 基礎工具
+# =========================
 def _safe_str(v: Any) -> str:
     if v is None:
+        return ""
+    if isinstance(v, float) and pd.isna(v):
         return ""
     return str(v).strip()
 
@@ -57,31 +66,25 @@ def _is_stock_code(text: str) -> bool:
 
 
 def _split_code_name(text: str) -> tuple[str, str]:
-    """
-    支援格式：
-    - 2330
-    - 2330 台積電
-    - 2330-台積電
-    - 台積電(2330)
-    """
     raw = _safe_str(text)
     if not raw:
         return "", ""
 
+    # 台積電(2330)
     if "(" in raw and ")" in raw:
         left = raw.split("(")[0].strip()
         mid = raw.split("(")[1].split(")")[0].strip()
         if _is_stock_code(mid):
             return mid, left
 
+    # 2330 台積電 / 2330-台積電 / 2330_台積電 / 2330/台積電
     for sep in [" ", "-", "_", "/"]:
         if sep in raw:
             parts = [p.strip() for p in raw.split(sep) if p.strip()]
-            if parts:
-                if _is_stock_code(parts[0]):
-                    code = parts[0]
-                    name = " ".join(parts[1:]).strip()
-                    return code, name
+            if parts and _is_stock_code(parts[0]):
+                code = parts[0]
+                name = " ".join(parts[1:]).strip()
+                return code, name
 
     if _is_stock_code(raw):
         return raw, ""
@@ -97,8 +100,125 @@ def _display_stock(code: str, name: str) -> str:
     return code or name or ""
 
 
+def _first_existing(d: dict, keys: list[str], default: Any = None):
+    for k in keys:
+        if k in d and pd.notna(d[k]):
+            return d[k]
+    return default
+
+
+# =========================
+# 強化版資料兼容
+# =========================
+def _safe_get_code_name_map() -> dict[str, str]:
+    """
+    兼容 get_all_code_name_map() 回傳：
+    - dict
+    - DataFrame
+    - list[dict]
+    - list[tuple]
+    """
+    try:
+        raw = get_all_code_name_map()
+    except Exception:
+        return {}
+
+    if raw is None:
+        return {}
+
+    # dict
+    if isinstance(raw, dict):
+        out = {}
+        for k, v in raw.items():
+            code = _safe_str(k)
+            name = _safe_str(v)
+            if code:
+                out[code] = name
+        return out
+
+    # DataFrame
+    if isinstance(raw, pd.DataFrame):
+        df = raw.copy()
+        if df.empty:
+            return {}
+
+        cols = {str(c).lower(): c for c in df.columns}
+
+        code_col = None
+        name_col = None
+
+        for c in ["code", "stock_code", "symbol", "ticker", "id"]:
+            if c in cols:
+                code_col = cols[c]
+                break
+
+        for c in ["name", "stock_name", "company", "label", "title"]:
+            if c in cols:
+                name_col = cols[c]
+                break
+
+        # 若只有一欄可能是 code/name 混合格式
+        if code_col is None and len(df.columns) >= 1:
+            code_col = df.columns[0]
+        if name_col is None and len(df.columns) >= 2:
+            name_col = df.columns[1]
+
+        out = {}
+        for _, row in df.iterrows():
+            code = _safe_str(row.get(code_col)) if code_col is not None else ""
+            name = _safe_str(row.get(name_col)) if name_col is not None else ""
+
+            if not code:
+                code2, name2 = _split_code_name(_safe_str(row.iloc[0]) if len(row) > 0 else "")
+                code = code2
+                name = name or name2
+
+            if code:
+                out[code] = name
+        return out
+
+    # list / tuple
+    if isinstance(raw, (list, tuple)):
+        out = {}
+        for item in raw:
+            if isinstance(item, dict):
+                code = _safe_str(
+                    _first_existing(item, ["code", "stock_code", "symbol", "ticker", "id"], "")
+                )
+                name = _safe_str(
+                    _first_existing(item, ["name", "stock_name", "company", "label", "title"], "")
+                )
+                if not code:
+                    code, parsed_name = _split_code_name(_safe_str(item))
+                    name = name or parsed_name
+                if code:
+                    out[code] = name
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                code = _safe_str(item[0])
+                name = _safe_str(item[1])
+                if code:
+                    out[code] = name
+            else:
+                code, name = _split_code_name(_safe_str(item))
+                if code:
+                    out[code] = name
+        return out
+
+    return {}
+
+
+def _safe_get_watchlist() -> Any:
+    try:
+        return get_normalized_watchlist()
+    except Exception:
+        return None
+
+
+# =========================
+# 歷史資料格式化
+# =========================
 def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
@@ -172,9 +292,9 @@ def _normalize_stock_item(item: Any, code_name_map: dict[str, str]) -> tuple[str
         return None
 
     if isinstance(item, dict):
-        code = _safe_str(item.get("code") or item.get("stock_code") or item.get("symbol") or item.get("id"))
-        name = _safe_str(item.get("name") or item.get("stock_name") or item.get("label") or item.get("title"))
-        display = _safe_str(item.get("display") or item.get("text"))
+        code = _safe_str(_first_existing(item, ["code", "stock_code", "symbol", "ticker", "id"], ""))
+        name = _safe_str(_first_existing(item, ["name", "stock_name", "company", "label", "title"], ""))
+        display = _safe_str(_first_existing(item, ["display", "text"], ""))
 
         if not code and display:
             code, parsed_name = _split_code_name(display)
@@ -207,8 +327,7 @@ def _normalize_stock_item(item: Any, code_name_map: dict[str, str]) -> tuple[str
             name = _safe_str(code_name_map.get(code))
         return code, name
 
-    # 只有名字時，反查 code
-    reverse_map = {v: k for k, v in code_name_map.items()}
+    reverse_map = {v: k for k, v in code_name_map.items() if _safe_str(v)}
     if raw in reverse_map:
         return reverse_map[raw], raw
 
@@ -216,15 +335,8 @@ def _normalize_stock_item(item: Any, code_name_map: dict[str, str]) -> tuple[str
 
 
 def _build_group_stock_map() -> dict[str, list[str]]:
-    """
-    嘗試兼容多種 watchlist 結構，輸出：
-    {
-        "半導體": ["2330 台積電", "2303 聯電"],
-        "AI": ["2454 聯發科"]
-    }
-    """
-    code_name_map = get_all_code_name_map() or {}
-    watchlist = get_normalized_watchlist()
+    code_name_map = _safe_get_code_name_map()
+    watchlist = _safe_get_watchlist()
 
     group_map: dict[str, list[str]] = {}
 
@@ -244,15 +356,28 @@ def _build_group_stock_map() -> dict[str, list[str]]:
         for group, items in watchlist.items():
             group_name = _safe_str(group) or "未分組"
 
-            if isinstance(items, dict):
-                if "stocks" in items:
-                    for item in items.get("stocks", []):
-                        add_item(group_name, item)
-                elif "items" in items:
-                    for item in items.get("items", []):
-                        add_item(group_name, item)
+            if isinstance(items, pd.DataFrame):
+                for _, row in items.iterrows():
+                    add_item(group_name, row.to_dict())
+
+            elif isinstance(items, dict):
+                if "stocks" in items and isinstance(items["stocks"], (list, tuple, pd.DataFrame)):
+                    stocks = items["stocks"]
+                    if isinstance(stocks, pd.DataFrame):
+                        for _, row in stocks.iterrows():
+                            add_item(group_name, row.to_dict())
+                    else:
+                        for item in stocks:
+                            add_item(group_name, item)
+                elif "items" in items and isinstance(items["items"], (list, tuple, pd.DataFrame)):
+                    stocks = items["items"]
+                    if isinstance(stocks, pd.DataFrame):
+                        for _, row in stocks.iterrows():
+                            add_item(group_name, row.to_dict())
+                    else:
+                        for item in stocks:
+                            add_item(group_name, item)
                 else:
-                    # dict 內可能直接是 code -> name
                     for k, v in items.items():
                         if isinstance(v, (str, int, float)):
                             code = _safe_str(k)
@@ -263,39 +388,45 @@ def _build_group_stock_map() -> dict[str, list[str]]:
                                 add_item(group_name, v)
                         else:
                             add_item(group_name, v)
-            elif isinstance(items, list):
+
+            elif isinstance(items, pd.DataFrame):
+                for _, row in items.iterrows():
+                    add_item(group_name, row.to_dict())
+
+            elif isinstance(items, (list, tuple)):
                 for item in items:
                     add_item(group_name, item)
+
             else:
                 add_item(group_name, items)
-
-    elif isinstance(watchlist, list):
-        # list 形式：可能每筆含 group / code / name
-        for row in watchlist:
-            group_name = "未分組"
-            if isinstance(row, dict):
-                group_name = _safe_str(row.get("group") or row.get("category") or row.get("sector") or "未分組")
-            add_item(group_name, row)
 
     elif isinstance(watchlist, pd.DataFrame):
         for _, row in watchlist.iterrows():
             row_dict = row.to_dict()
             group_name = _safe_str(
-                row_dict.get("group") or row_dict.get("category") or row_dict.get("sector") or "未分組"
+                _first_existing(row_dict, ["group", "category", "sector", "group_name"], "未分組")
             )
             add_item(group_name, row_dict)
 
-    # 若自選股空的，至少用 code_name_map 兜底幾檔，避免頁面炸掉
-    if not group_map:
-        fallback_codes = list((get_all_code_name_map() or {}).keys())[:50]
-        group_map["全部股票"] = []
-        for code in fallback_codes:
-            group_map["全部股票"].append(_display_stock(code, code_name_map.get(code, "")))
+    elif isinstance(watchlist, (list, tuple)):
+        for row in watchlist:
+            group_name = "未分組"
+            if isinstance(row, dict):
+                group_name = _safe_str(
+                    _first_existing(row, ["group", "category", "sector", "group_name"], "未分組")
+                )
+            add_item(group_name, row)
 
-    # 排序
+    # fallback
+    if not group_map:
+        fallback_codes = list(code_name_map.keys())[:100]
+        if fallback_codes:
+            group_map["全部股票"] = []
+            for code in fallback_codes:
+                group_map["全部股票"].append(_display_stock(code, code_name_map.get(code, "")))
+
     for g in list(group_map.keys()):
-        unique_items = sorted(set(group_map[g]), key=lambda x: (_split_code_name(x)[0], x))
-        group_map[g] = unique_items
+        group_map[g] = sorted(set(group_map[g]), key=lambda x: (_split_code_name(x)[0], x))
 
     return group_map
 
@@ -322,22 +453,18 @@ def _find_search_target(keyword: str, stock_rows: list[dict[str, str]]) -> dict[
     if not q:
         return None
 
-    # 1) 完全 code
     for row in stock_rows:
         if q == row["code"].lower():
             return row
 
-    # 2) 完全 stock 顯示值
     for row in stock_rows:
         if q == row["stock"].lower():
             return row
 
-    # 3) 完全 name
     for row in stock_rows:
         if q == row["name"].lower():
             return row
 
-    # 4) 開頭匹配 code/name
     prefix_hits = [
         row for row in stock_rows
         if row["code"].lower().startswith(q) or row["name"].lower().startswith(q)
@@ -345,7 +472,6 @@ def _find_search_target(keyword: str, stock_rows: list[dict[str, str]]) -> dict[
     if prefix_hits:
         return prefix_hits[0]
 
-    # 5) 包含匹配
     contain_hits = [row for row in stock_rows if q in row["search_blob"]]
     if contain_hits:
         return contain_hits[0]
@@ -368,7 +494,6 @@ def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     for n in [5, 10, 20, 60, 120, 240]:
         df[f"MA{n}"] = close.rolling(n).mean()
 
-    # KD
     low_n = low.rolling(9).min()
     high_n = high.rolling(9).max()
     rsv = (close - low_n) / (high_n - low_n).replace(0, np.nan) * 100
@@ -376,16 +501,13 @@ def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["D"] = df["K"].ewm(alpha=1 / 3, adjust=False).mean()
     df["J"] = 3 * df["K"] - 2 * df["D"]
 
-    # MACD
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     df["DIF"] = ema12 - ema26
     df["MACD"] = df["DIF"].ewm(span=9, adjust=False).mean()
     df["OSC"] = df["DIF"] - df["MACD"]
 
-    # 漲跌幅
     df["PctChg"] = close.pct_change() * 100
-
     return df
 
 
@@ -434,7 +556,6 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
         cur = df.iloc[i]
         dt = df.index[i]
 
-        # MA 交叉
         if "MA20" in df.columns and "MA60" in df.columns:
             if _cross_up(prev["MA20"], cur["MA20"], prev["MA60"], cur["MA60"]):
                 events.append(
@@ -445,7 +566,6 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
                     {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 死亡交叉 MA60", "說明": "中期均線向下跌破，偏空。", "等級": "強空"}
                 )
 
-        # KD 交叉
         if _cross_up(prev["K"], cur["K"], prev["D"], cur["D"]):
             events.append(
                 {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 黃金交叉", "說明": "短線動能轉強。", "等級": "偏多"}
@@ -455,7 +575,6 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
                 {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 死亡交叉", "說明": "短線動能轉弱。", "等級": "偏空"}
             )
 
-        # MACD 交叉
         if _cross_up(prev["DIF"], cur["DIF"], prev["MACD"], cur["MACD"]):
             events.append(
                 {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 黃金交叉", "說明": "波段趨勢有轉強跡象。", "等級": "偏多"}
@@ -465,7 +584,6 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
                 {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 死亡交叉", "說明": "波段趨勢有轉弱跡象。", "等級": "偏空"}
             )
 
-        # 起漲 / 起跌
         if dt in trough_set:
             events.append(
                 {"日期": dt, "事件類型": "轉折點", "事件名稱": "起漲點", "說明": "局部低點轉折，後續留意量價配合。", "等級": "觀察"}
@@ -551,10 +669,10 @@ def _safe_compute_radar_scores(df: pd.DataFrame) -> dict[str, float]:
     last = df.iloc[-1]
     price = float(last["Close"])
 
-    trend = 80 if price > last.get("MA60", np.nan) else 40
+    trend = 80 if pd.notna(last.get("MA60", np.nan)) and price > last.get("MA60", np.nan) else 40
     momentum = 80 if last.get("DIF", 0) > last.get("MACD", 0) else 40
     volume = 60
-    risk = 80 if price > last.get("MA20", np.nan) else 40
+    risk = 80 if pd.notna(last.get("MA20", np.nan)) and price > last.get("MA20", np.nan) else 40
     pos = 70
 
     return {
@@ -679,12 +797,27 @@ def _plot_radar(radar_scores: dict[str, float], stock_label: str) -> go.Figure:
 
 
 # =========================
-# Session State 同步核心
+# State 同步核心
 # =========================
+def _repair_group_stock_state(group_map: dict[str, list[str]]):
+    groups = list(group_map.keys())
+
+    current_group = _ss("group", "")
+    if current_group not in group_map:
+        current_group = groups[0] if groups else ""
+        _set_ss("group", current_group)
+
+    stock_options = group_map.get(current_group, [])
+    current_stock = _ss("stock", "")
+    if current_stock not in stock_options:
+        _set_ss("stock", stock_options[0] if stock_options else "")
+
+
 def _init_state(group_map: dict[str, list[str]]):
     if _ss("group") is None:
         groups = list(group_map.keys())
         _set_ss("group", groups[0] if groups else "")
+
     if _ss("stock") is None:
         stocks = group_map.get(_ss("group"), [])
         _set_ss("stock", stocks[0] if stocks else "")
@@ -702,6 +835,7 @@ def _init_state(group_map: dict[str, list[str]]):
 
         saved_group = _safe_str(saved.get("group"))
         saved_stock = _safe_str(saved.get("stock"))
+
         if saved_group in group_map:
             _set_ss("group", saved_group)
             if saved_stock in group_map.get(saved_group, []):
@@ -710,30 +844,15 @@ def _init_state(group_map: dict[str, list[str]]):
     _repair_group_stock_state(group_map)
 
 
-def _repair_group_stock_state(group_map: dict[str, list[str]]):
-    groups = list(group_map.keys())
-    current_group = _ss("group", "")
-    if current_group not in group_map:
-        current_group = groups[0] if groups else ""
-        _set_ss("group", current_group)
-
-    current_stock = _ss("stock", "")
-    stock_options = group_map.get(current_group, [])
-    if current_stock not in stock_options:
-        _set_ss("stock", stock_options[0] if stock_options else "")
-
-
 def _apply_search_sync(keyword: str, group_map: dict[str, list[str]], stock_rows: list[dict[str, str]]) -> bool:
     target = _find_search_target(keyword, stock_rows)
     if not target:
         return False
 
-    target_group = target["group"]
-    target_stock = target["stock"]
+    _set_ss("group", target["group"])
+    _set_ss("stock", target["stock"])
+    _set_ss("search_input", target["stock"])
 
-    _set_ss("group", target_group)
-    _set_ss("stock", target_stock)
-    _set_ss("search_input", target_stock)
     _repair_group_stock_state(group_map)
     return True
 
@@ -742,13 +861,12 @@ def _on_group_change(group_map: dict[str, list[str]]):
     current_group = _ss("group", "")
     stock_options = group_map.get(current_group, [])
     current_stock = _ss("stock", "")
-
     if current_stock not in stock_options:
         _set_ss("stock", stock_options[0] if stock_options else "")
 
 
 # =========================
-# 頁面
+# 主頁
 # =========================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
@@ -760,21 +878,20 @@ def main():
 
     render_pro_hero(
         title="歷史K線分析",
-        subtitle="K線・MA・KD・MACD・雷達評分・支撐壓力・轉折事件，一頁完整看懂。",
+        subtitle="K線・MA・KD・MACD・雷達評分・支撐壓力・起漲起跌點・交叉事件。",
     )
 
-    # ===== 搜尋區：先處理 session_state，再渲染下面 widgets =====
+    # ========= 快速搜尋 =========
     render_pro_section("快速搜尋股票")
-    s1, s2 = st.columns([5, 1])
 
+    s1, s2 = st.columns([5, 1])
     with s1:
         st.text_input(
             "輸入股票代碼或名稱",
-            key=f"{STATE_PREFIX}search_input",
+            key=_k("search_input"),
             placeholder="例如：2330、台積電、2454 聯發科",
             label_visibility="collapsed",
         )
-
     with s2:
         search_clicked = st.button("帶入", use_container_width=True, type="primary")
 
@@ -785,7 +902,7 @@ def main():
         else:
             st.warning("找不到對應股票，請重新輸入代碼或名稱。")
 
-    # ===== 選單區：group 改變時，stock 真正更新 =====
+    # ========= 查詢條件 =========
     render_pro_section("查詢條件")
 
     groups = list(group_map.keys())
@@ -797,44 +914,49 @@ def main():
         st.selectbox(
             "選擇群組",
             options=groups,
-            key=f"{STATE_PREFIX}group",
+            key=_k("group"),
             on_change=_on_group_change,
             args=(group_map,),
         )
 
     current_group = _ss("group", "")
-    current_stock_options = group_map.get(current_group, [])
+    stock_options = group_map.get(current_group, [])
     current_stock = _ss("stock", "")
-    if current_stock not in current_stock_options:
-        _set_ss("stock", current_stock_options[0] if current_stock_options else "")
+    if current_stock not in stock_options:
+        _set_ss("stock", stock_options[0] if stock_options else "")
 
     with c2:
         st.selectbox(
             "群組股票",
-            options=current_stock_options,
-            key=f"{STATE_PREFIX}stock",
+            options=stock_options,
+            key=_k("stock"),
         )
 
     with c3:
-        st.date_input("開始日期", key=f"{STATE_PREFIX}start_date")
+        st.date_input("開始日期", key=_k("start_date"))
 
     with c4:
-        st.date_input("結束日期", key=f"{STATE_PREFIX}end_date")
+        st.date_input("結束日期", key=_k("end_date"))
 
+    # 只吃 session_state 真值
     selected_group = _ss("group", "")
     selected_stock = _ss("stock", "")
     start_date = _ss("start_date")
     end_date = _ss("end_date")
 
-    # ===== 這裡開始，後續所有查詢只吃 session_state 真實值 =====
     st.caption(f"目前實際查詢值：群組【{selected_group}】 / 股票【{selected_stock}】")
 
-    code, name = _split_code_name(selected_stock)
-    if code and not name:
-        name = _safe_str((get_all_code_name_map() or {}).get(code, ""))
+    if not selected_stock:
+        st.error("目前沒有可查詢股票。")
+        st.stop()
 
+    code, name = _split_code_name(selected_stock)
     if not code:
-        st.error("目前沒有可查詢的股票，請先確認自選股清單。")
+        st.error("股票代碼解析失敗，請重新選擇。")
+        st.stop()
+
+    if start_date > end_date:
+        st.error("開始日期不可大於結束日期。")
         st.stop()
 
     try:
@@ -850,11 +972,7 @@ def main():
     except Exception:
         pass
 
-    if start_date > end_date:
-        st.error("開始日期不可大於結束日期。")
-        st.stop()
-
-    # ===== 取資料 =====
+    # ========= 取歷史資料 =========
     with st.spinner("讀取歷史資料中..."):
         raw_df = get_history_data(code, start_date, end_date)
 
@@ -865,21 +983,22 @@ def main():
 
     hist_df = _compute_indicators(hist_df)
 
-    # 補名稱
+    market = ""
     try:
         real_name, market = get_stock_name_and_market(code)
         if real_name:
             name = real_name
     except Exception:
-        market = ""
+        pass
 
     stock_label = _display_stock(code, name)
+
     signal_snapshot = _safe_compute_signal_snapshot(hist_df)
     radar_scores = _safe_compute_radar_scores(hist_df)
     sr_snapshot = _safe_compute_support_resistance(hist_df)
     event_df = _build_event_log(hist_df)
 
-    # ===== KPI =====
+    # ========= KPI =========
     last = hist_df.iloc[-1]
     prev_close = hist_df["Close"].iloc[-2] if len(hist_df) >= 2 else last["Close"]
     pct = ((last["Close"] / prev_close) - 1) * 100 if prev_close else 0
@@ -915,21 +1034,17 @@ def main():
             "近60日推估",
         )
     with info_cols[2]:
-        render_pro_info_card(
-            "評級",
-            score_to_badge(radar_avg) if callable(score_to_badge) else f"{radar_avg:.1f}",
-            market or "台股",
-        )
+        badge_text = score_to_badge(radar_avg) if callable(score_to_badge) else f"{radar_avg:.1f}"
+        render_pro_info_card("評級", badge_text, market or "台股")
 
-    # ===== 圖表 =====
+    # ========= K線圖 =========
     render_pro_section("K線 / 均線 / 成交量 / KD / MACD")
     fig = _plot_candlestick(hist_df, stock_label)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ===== 最近事件摘要 =====
+    # ========= 最近事件摘要 =========
     render_pro_section("最近事件摘要")
     summary_cols = st.columns(4)
-
     recent_events = event_df.head(6).copy()
     cross_tags = signal_snapshot.get("cross_tags", []) if isinstance(signal_snapshot, dict) else []
 
@@ -948,7 +1063,7 @@ def main():
         kd_text = f"K={last['K']:.1f} / D={last['D']:.1f}"
         render_pro_info_card("KD 狀態", kd_text, "短線動能")
 
-    # ===== 雷達 / 支撐壓力 =====
+    # ========= 雷達 / 支撐壓力 =========
     left, right = st.columns([1, 1])
 
     with left:
@@ -972,14 +1087,14 @@ def main():
         else:
             st.info("目前無支撐壓力資料。")
 
-    # ===== 事件說明 / 篩選 =====
+    # ========= 事件說明 / 篩選 =========
     render_pro_section("事件說明與篩選")
 
     event_types = ["全部"] + sorted(event_df["事件類型"].dropna().unique().tolist()) if not event_df.empty else ["全部"]
     filter_cols = st.columns([2, 5])
 
     with filter_cols[0]:
-        event_type_selected = st.selectbox("事件篩選", options=event_types, key=f"{STATE_PREFIX}event_type_filter")
+        st.selectbox("事件篩選", options=event_types, key=_k("event_type_filter"))
 
     with filter_cols[1]:
         st.markdown(
@@ -992,6 +1107,7 @@ def main():
         )
 
     show_event_df = event_df.copy()
+    event_type_selected = _ss("event_type_filter", "全部")
     if event_type_selected != "全部" and not show_event_df.empty:
         show_event_df = show_event_df[show_event_df["事件類型"] == event_type_selected].copy()
 
@@ -1001,7 +1117,7 @@ def main():
     else:
         st.info("目前沒有符合條件的事件。")
 
-    # ===== 明細資料 =====
+    # ========= 技術指標明細 =========
     render_pro_section("技術指標明細")
     detail_cols = [
         "Open", "High", "Low", "Close", "Volume",
