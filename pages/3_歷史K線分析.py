@@ -88,7 +88,7 @@ def filter_stock_options(all_options, keyword):
 
     matched = []
     for item in all_options:
-        text_pool = " ".join([
+        pool = " ".join([
             str(item.get("name", "")),
             str(item.get("code", "")),
             str(item.get("market", "")),
@@ -96,7 +96,7 @@ def filter_stock_options(all_options, keyword):
             str(item.get("label", "")),
         ]).lower()
 
-        if keyword in text_pool:
+        if keyword in pool:
             matched.append(item)
 
     return matched[:50]
@@ -105,6 +105,8 @@ def filter_stock_options(all_options, keyword):
 def add_indicators(df: pd.DataFrame, selected_indicators: list):
     if df.empty or "收盤價" not in df.columns:
         return df
+
+    df = df.copy()
 
     ma_map = {
         "MA5": 5,
@@ -219,6 +221,28 @@ def add_event_points(df: pd.DataFrame):
                     df.at[df.index[i], "MACD死亡交叉"] = True
 
     return df
+
+
+def get_recent_events(df: pd.DataFrame, flag_col: str, event_name: str, price_col: str = "收盤價", tail_n: int = 3):
+    if df is None or df.empty or flag_col not in df.columns or "日期" not in df.columns:
+        return []
+
+    sub = df[df[flag_col] == True].copy()
+    if sub.empty:
+        return []
+
+    sub["日期"] = pd.to_datetime(sub["日期"], errors="coerce")
+    sub = sub.dropna(subset=["日期"]).sort_values("日期", ascending=False).head(tail_n)
+
+    events = []
+    for _, row in sub.iterrows():
+        price_val = row.get(price_col)
+        events.append({
+            "事件": event_name,
+            "日期": row["日期"].strftime("%Y-%m-%d"),
+            "價格": format_number(price_val, 2),
+        })
+    return events
 
 
 def render_signal_board(signal: dict):
@@ -354,6 +378,50 @@ def render_event_board(df: pd.DataFrame):
         ],
         chips=["起漲點", "起跌點", "Cross Signals"]
     )
+
+
+def render_recent_event_summary(df: pd.DataFrame):
+    recent_events = []
+    recent_events += get_recent_events(df, "起漲點", "起漲點", "最低價", 3)
+    recent_events += get_recent_events(df, "起跌點", "起跌點", "最高價", 3)
+    recent_events += get_recent_events(df, "MA黃金交叉", "MA黃金交叉", "收盤價", 3)
+    recent_events += get_recent_events(df, "MA死亡交叉", "MA死亡交叉", "收盤價", 3)
+    recent_events += get_recent_events(df, "KD黃金交叉", "KD黃金交叉", "K", 3)
+    recent_events += get_recent_events(df, "KD死亡交叉", "KD死亡交叉", "K", 3)
+    recent_events += get_recent_events(df, "MACD黃金交叉", "MACD黃金交叉", "DIF", 3)
+    recent_events += get_recent_events(df, "MACD死亡交叉", "MACD死亡交叉", "DIF", 3)
+
+    if not recent_events:
+        render_pro_section("最近事件說明", "近三次事件與文字摘要")
+        render_pro_info_card(
+            "最近事件",
+            [("結果", "目前查詢區間內沒有可列示的事件", "")],
+            chips=["Recent Events"]
+        )
+        return
+
+    event_df = pd.DataFrame(recent_events)
+    event_df["日期_dt"] = pd.to_datetime(event_df["日期"], errors="coerce")
+    event_df = event_df.sort_values("日期_dt", ascending=False).drop(columns=["日期_dt"]).reset_index(drop=True)
+
+    top3 = event_df.head(3)
+    summary_lines = []
+    for _, row in top3.iterrows():
+        summary_lines.append(f"{row['日期']}：{row['事件']}（價格/指標 {row['價格']}）")
+
+    render_pro_section("最近事件說明", "把最近 3 次重要事件轉成可讀文字，不只看點位，還能快速回顧節奏")
+
+    render_pro_info_card(
+        "事件文字摘要",
+        [
+            ("最近事件 1", summary_lines[0] if len(summary_lines) >= 1 else "—", ""),
+            ("最近事件 2", summary_lines[1] if len(summary_lines) >= 2 else "—", ""),
+            ("最近事件 3", summary_lines[2] if len(summary_lines) >= 3 else "—", ""),
+        ],
+        chips=["Recent Summary", "Turning Rhythm"]
+    )
+
+    st.dataframe(event_df.head(12), use_container_width=True, hide_index=True, height=320)
 
 
 def render_summary_card(stock_info, start_date, end_date, selected_indicators, df: pd.DataFrame, realtime_info: dict):
@@ -610,8 +678,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜股票名稱搜尋版",
-    "支援股票名稱/代號模糊搜尋，結合事件標記、雷達評分、支撐壓力與完整K線盤面。"
+    "歷史K線分析｜事件說明版",
+    "補上最近事件的文字摘要與清單，讓你不只看到標記，也能快速讀懂最近節奏。"
 )
 
 if not group_names:
@@ -738,6 +806,7 @@ if query_btn or selected_stock:
     render_sr_board(sr)
     render_radar_board(radar)
     render_event_board(df)
+    render_recent_event_summary(df)
 
     download_df = df.copy()
     if "日期" in download_df.columns:
@@ -756,7 +825,7 @@ if query_btn or selected_stock:
         )
 
     render_chart(df, selected_indicators)
-    render_pro_section("歷史資料表", "股票名稱搜尋、事件標記、雷達評分與原始數值整合檢視")
+    render_pro_section("歷史資料表", "事件點、燈號、支撐壓力與原始數值整合檢視")
     render_table(df)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
