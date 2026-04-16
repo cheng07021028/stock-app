@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from utils import (
     get_normalized_watchlist,
@@ -9,6 +11,7 @@ from utils import (
     get_all_code_name_map,
     get_stock_name_and_market,
     get_history_data,
+    format_number,
 )
 
 from query_state import load_last_query_state, save_last_query_state, parse_date_safe
@@ -115,9 +118,11 @@ with d2:
         key="kline_end"
     )
 
+# 更新非 widget 的 session_state
 st.session_state.kline_group = selected_group
 st.session_state.kline_stock_code = selected_stock["code"] if selected_stock is not None else ""
 
+# 反寫回首頁共用條件
 save_last_query_state(
     quick_group=selected_group,
     quick_stock_code=selected_stock["code"] if selected_stock is not None else "",
@@ -165,23 +170,231 @@ if query_btn:
 
     df = pd.DataFrame(df).copy()
 
+    if "日期" in df.columns:
+        df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+        df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+
+    # 補均線
+    if "收盤價" in df.columns:
+        df["MA5"] = df["收盤價"].rolling(5).mean()
+        df["MA10"] = df["收盤價"].rolling(10).mean()
+        df["MA20"] = df["收盤價"].rolling(20).mean()
+
+    # 區間摘要
+    if len(df) > 0 and "收盤價" in df.columns:
+        latest_close = df["收盤價"].iloc[-1]
+        first_close = df["收盤價"].iloc[0]
+        price_change = latest_close - first_close
+        price_change_pct = (price_change / first_close * 100) if first_close not in [0, None] else 0
+
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.metric("最新收盤價", f"{latest_close:,.2f}")
+        with m2:
+            st.metric("區間漲跌", f"{price_change:,.2f}")
+        with m3:
+            st.metric("區間漲跌幅", f"{price_change_pct:,.2f}%")
+
     st.markdown("---")
     st.subheader("歷史資料")
 
-    show_cols = [c for c in ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"] if c in df.columns]
+    show_cols = [
+        c for c in [
+            "日期", "開盤價", "最高價", "最低價", "收盤價",
+            "MA5", "MA10", "MA20", "成交股數", "成交金額", "成交筆數"
+        ] if c in df.columns
+    ]
+
     if show_cols:
-        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+        display_df = df[show_cols].copy()
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    if "收盤價" in df.columns and "日期" in df.columns:
-        chart_df = df[["日期", "收盤價"]].copy().set_index("日期")
-        st.subheader("收盤價走勢圖")
-        st.line_chart(chart_df, use_container_width=True)
+    # ===== K 線 + 均線 + 成交量 =====
+    need_price_cols = all(col in df.columns for col in ["日期", "開盤價", "最高價", "最低價", "收盤價"])
+    has_volume = "成交股數" in df.columns
 
-    if "成交股數" in df.columns and "日期" in df.columns:
-        vol_df = df[["日期", "成交股數"]].copy().set_index("日期")
-        st.subheader("成交量走勢圖")
-        st.bar_chart(vol_df, use_container_width=True)
+    if need_price_cols:
+        st.subheader("K線趨勢圖")
+
+        if has_volume:
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.06,
+                row_heights=[0.72, 0.28]
+            )
+        else:
+            fig = make_subplots(rows=1, cols=1)
+
+        # K 線
+        fig.add_trace(
+            go.Candlestick(
+                x=df["日期"],
+                open=df["開盤價"],
+                high=df["最高價"],
+                low=df["最低價"],
+                close=df["收盤價"],
+                name="K線",
+                hovertemplate=(
+                    "日期: %{x|%Y-%m-%d}<br>"
+                    "開盤: %{open:.2f}<br>"
+                    "最高: %{high:.2f}<br>"
+                    "最低: %{low:.2f}<br>"
+                    "收盤: %{close:.2f}<extra></extra>"
+                )
+            ),
+            row=1,
+            col=1
+        )
+
+        # 均線
+        if "MA5" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["日期"],
+                    y=df["MA5"],
+                    mode="lines",
+                    name="MA5",
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA5: %{y:.2f}<extra></extra>"
+                ),
+                row=1,
+                col=1
+            )
+
+        if "MA10" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["日期"],
+                    y=df["MA10"],
+                    mode="lines",
+                    name="MA10",
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA10: %{y:.2f}<extra></extra>"
+                ),
+                row=1,
+                col=1
+            )
+
+        if "MA20" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["日期"],
+                    y=df["MA20"],
+                    mode="lines",
+                    name="MA20",
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA20: %{y:.2f}<extra></extra>"
+                ),
+                row=1,
+                col=1
+            )
+
+        # 成交量
+        if has_volume:
+            volume_colors = []
+            for _, row_data in df.iterrows():
+                open_p = row_data.get("開盤價")
+                close_p = row_data.get("收盤價")
+                if pd.notna(close_p) and pd.notna(open_p) and close_p >= open_p:
+                    volume_colors.append("#ef5350")
+                else:
+                    volume_colors.append("#26a69a")
+
+            fig.add_trace(
+                go.Bar(
+                    x=df["日期"],
+                    y=df["成交股數"],
+                    name="成交量",
+                    marker_color=volume_colors,
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>成交量: %{y:,.0f}<extra></extra>"
+                ),
+                row=2,
+                col=1
+            )
+
+        fig.update_layout(
+            height=780 if has_volume else 560,
+            xaxis_rangeslider_visible=False,
+            hovermode="x unified",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0
+            ),
+            margin=dict(l=20, r=20, t=20, b=20)
+        )
+
+        fig.update_yaxes(title_text="股價", row=1, col=1)
+
+        if has_volume:
+            fig.update_yaxes(title_text="成交量", row=2, col=1)
+
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+    elif "收盤價" in df.columns and "日期" in df.columns:
+        st.subheader("收盤價趨勢圖")
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Scatter(
+                x=df["日期"],
+                y=df["收盤價"],
+                mode="lines+markers",
+                name="收盤價",
+                hovertemplate="日期: %{x|%Y-%m-%d}<br>收盤價: %{y:.2f}<extra></extra>"
+            )
+        )
+
+        if "MA5" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["日期"],
+                    y=df["MA5"],
+                    mode="lines",
+                    name="MA5",
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA5: %{y:.2f}<extra></extra>"
+                )
+            )
+
+        if "MA10" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["日期"],
+                    y=df["MA10"],
+                    mode="lines",
+                    name="MA10",
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA10: %{y:.2f}<extra></extra>"
+                )
+            )
+
+        if "MA20" in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df["日期"],
+                    y=df["MA20"],
+                    mode="lines",
+                    name="MA20",
+                    hovertemplate="日期: %{x|%Y-%m-%d}<br>MA20: %{y:.2f}<extra></extra>"
+                )
+            )
+
+        fig.update_layout(
+            height=520,
+            hovermode="x unified",
+            margin=dict(l=20, r=20, t=20, b=20),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0
+            )
+        )
+
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
