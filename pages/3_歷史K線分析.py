@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -35,7 +35,7 @@ STATE_PREFIX = "hist_"
 
 
 # =========================================================
-# Session State
+# session state
 # =========================================================
 def _k(key: str) -> str:
     return f"{STATE_PREFIX}{key}"
@@ -112,25 +112,55 @@ def _first_existing(d: dict, keys: list[str], default: Any = None):
     return default
 
 
-def _safe_parse_date(v: Any, fallback: date) -> date:
+def _to_pydate(v: Any, fallback: date) -> date:
+    if v is None:
+        return fallback
+
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+
+    if isinstance(v, datetime):
+        return v.date()
+
+    if isinstance(v, pd.Timestamp):
+        if pd.isna(v):
+            return fallback
+        return v.date()
+
+    if isinstance(v, np.datetime64):
+        try:
+            return pd.Timestamp(v).date()
+        except Exception:
+            return fallback
+
+    if isinstance(v, (list, tuple)):
+        if len(v) >= 1:
+            return _to_pydate(v[0], fallback)
+        return fallback
+
     try:
         x = parse_date_safe(v)
-        if x:
+        if isinstance(x, date):
             return x
+        if isinstance(x, datetime):
+            return x.date()
+        if isinstance(x, pd.Timestamp) and not pd.isna(x):
+            return x.date()
     except Exception:
         pass
 
-    if isinstance(v, date):
-        return v
-
     try:
-        return pd.to_datetime(v).date()
+        x = pd.to_datetime(v, errors="coerce")
+        if pd.notna(x):
+            return x.date()
     except Exception:
-        return fallback
+        pass
+
+    return fallback
 
 
 # =========================================================
-# 安全包裝：utils 回傳一律先正規化
+# utils 安全包裝
 # =========================================================
 def _safe_load_last_query_state(page_key: str) -> dict[str, Any]:
     try:
@@ -154,25 +184,21 @@ def _safe_load_last_query_state(page_key: str) -> dict[str, Any]:
         try:
             if raw.empty:
                 return {}
-            if len(raw) == 1:
-                return raw.iloc[0].to_dict()
-            return {}
+            return raw.iloc[0].to_dict()
         except Exception:
             return {}
 
     if isinstance(raw, (list, tuple)):
         if len(raw) == 1 and isinstance(raw[0], dict):
             return raw[0]
-        return {}
 
     return {}
 
 
 def _safe_save_last_query_state(page_key: str, payload: dict[str, Any]) -> None:
     try:
-        if not isinstance(payload, dict):
-            return
-        save_last_query_state(page_key, payload)
+        if isinstance(payload, dict):
+            save_last_query_state(page_key, payload)
     except Exception:
         pass
 
@@ -206,18 +232,12 @@ def _safe_get_code_name_map() -> dict[str, str]:
         return {}
 
     if isinstance(raw, dict):
-        out = {}
-        for k, v in raw.items():
-            code = _safe_str(k)
-            name = _safe_str(v)
-            if code:
-                out[code] = name
-        return out
+        return {_safe_str(k): _safe_str(v) for k, v in raw.items() if _safe_str(k)}
 
     if isinstance(raw, pd.Series):
         try:
             raw = raw.to_dict()
-            return { _safe_str(k): _safe_str(v) for k, v in raw.items() if _safe_str(k) }
+            return {_safe_str(k): _safe_str(v) for k, v in raw.items() if _safe_str(k)}
         except Exception:
             return {}
 
@@ -227,6 +247,7 @@ def _safe_get_code_name_map() -> dict[str, str]:
 
         df = raw.copy()
         cols = {str(c).lower(): c for c in df.columns}
+
         code_col = None
         name_col = None
 
@@ -249,13 +270,10 @@ def _safe_get_code_name_map() -> dict[str, str]:
         for _, row in df.iterrows():
             code = _safe_str(row.get(code_col)) if code_col is not None else ""
             name = _safe_str(row.get(name_col)) if name_col is not None else ""
-
             if not code:
-                first_val = _safe_str(row.iloc[0]) if len(row) > 0 else ""
-                code2, name2 = _split_code_name(first_val)
+                code2, name2 = _split_code_name(_safe_str(row.iloc[0]) if len(row) > 0 else "")
                 code = code2
                 name = name or name2
-
             if code:
                 out[code] = name
         return out
@@ -440,22 +458,18 @@ def _build_group_stock_map() -> dict[str, list[str]]:
                     add_item(group_name, row.to_dict())
 
             elif isinstance(items, dict):
-                if "stocks" in items:
-                    stocks = items["stocks"]
-                    if isinstance(stocks, pd.DataFrame):
-                        for _, row in stocks.iterrows():
-                            add_item(group_name, row.to_dict())
-                    elif isinstance(stocks, (list, tuple)):
-                        for item in stocks:
-                            add_item(group_name, item)
-                elif "items" in items:
-                    stocks = items["items"]
-                    if isinstance(stocks, pd.DataFrame):
-                        for _, row in stocks.iterrows():
-                            add_item(group_name, row.to_dict())
-                    elif isinstance(stocks, (list, tuple)):
-                        for item in stocks:
-                            add_item(group_name, item)
+                for bucket in ["stocks", "items"]:
+                    if bucket in items:
+                        stocks = items[bucket]
+                        if isinstance(stocks, pd.DataFrame):
+                            for _, row in stocks.iterrows():
+                                add_item(group_name, row.to_dict())
+                        elif isinstance(stocks, (list, tuple)):
+                            for item in stocks:
+                                add_item(group_name, item)
+                        else:
+                            add_item(group_name, stocks)
+                        break
                 else:
                     for k, v in items.items():
                         if isinstance(v, (str, int, float)):
@@ -489,9 +503,10 @@ def _build_group_stock_map() -> dict[str, list[str]]:
             add_item(group_name, row)
 
     if not group_map:
-        fallback_codes = list(code_name_map.keys())[:100]
-        if fallback_codes:
-            group_map["全部股票"] = [_display_stock(code, code_name_map.get(code, "")) for code in fallback_codes]
+        fallback = _safe_get_code_name_map()
+        codes = list(fallback.keys())[:100]
+        if codes:
+            group_map["全部股票"] = [_display_stock(code, fallback.get(code, "")) for code in codes]
 
     for g in list(group_map.keys()):
         group_map[g] = sorted(set(group_map[g]), key=lambda x: (_split_code_name(x)[0], x))
@@ -524,28 +539,26 @@ def _find_search_target(keyword: str, stock_rows: list[dict[str, str]]) -> dict[
     for row in stock_rows:
         if q == row["code"].lower():
             return row
-
     for row in stock_rows:
         if q == row["stock"].lower():
             return row
-
     for row in stock_rows:
         if q == row["name"].lower():
             return row
 
-    prefix_hits = [row for row in stock_rows if row["code"].lower().startswith(q) or row["name"].lower().startswith(q)]
-    if prefix_hits:
-        return prefix_hits[0]
+    hits = [row for row in stock_rows if row["code"].lower().startswith(q) or row["name"].lower().startswith(q)]
+    if hits:
+        return hits[0]
 
-    contain_hits = [row for row in stock_rows if q in row["search_blob"]]
-    if contain_hits:
-        return contain_hits[0]
+    hits = [row for row in stock_rows if q in row["search_blob"]]
+    if hits:
+        return hits[0]
 
     return None
 
 
 # =========================================================
-# 技術分析
+# 指標 / 事件
 # =========================================================
 def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -585,7 +598,7 @@ def _cross_down(a_prev, a_now, b_prev, b_now) -> bool:
 
 
 def _detect_pivots(df: pd.DataFrame, window: int = 3) -> tuple[list[pd.Timestamp], list[pd.Timestamp]]:
-    if df.empty or len(df) < (window * 2 + 1):
+    if df.empty or len(df) < window * 2 + 1:
         return [], []
 
     highs = df["High"].values
@@ -644,7 +657,6 @@ def _build_event_log(df: pd.DataFrame) -> pd.DataFrame:
     ev = pd.DataFrame(events)
     if ev.empty:
         return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級"])
-
     return ev.sort_values("日期", ascending=False).reset_index(drop=True)
 
 
@@ -659,47 +671,53 @@ def _build_signal_summary(df: pd.DataFrame) -> dict[str, Any]:
     ma20 = float(last["MA20"]) if pd.notna(last["MA20"]) else np.nan
     ma60 = float(last["MA60"]) if pd.notna(last["MA60"]) else np.nan
 
-    trend_score = 0
+    score = 0
     if pd.notna(ma20) and price > ma20:
-        trend_score += 20
+        score += 20
     if pd.notna(ma60) and price > ma60:
-        trend_score += 20
+        score += 20
     if pd.notna(ma20) and pd.notna(ma60) and ma20 > ma60:
-        trend_score += 20
+        score += 20
     if pd.notna(last["K"]) and pd.notna(last["D"]) and last["K"] > last["D"]:
-        trend_score += 20
+        score += 20
     if pd.notna(last["DIF"]) and pd.notna(last["MACD"]) and last["DIF"] > last["MACD"]:
-        trend_score += 20
+        score += 20
 
-    signal_level = "中性"
-    if trend_score >= 80:
-        signal_level = "強多"
-    elif trend_score >= 60:
-        signal_level = "偏多"
-    elif trend_score <= 20:
-        signal_level = "強空"
-    elif trend_score <= 40:
-        signal_level = "偏空"
+    level = "中性"
+    if score >= 80:
+        level = "強多"
+    elif score >= 60:
+        level = "偏多"
+    elif score <= 20:
+        level = "強空"
+    elif score <= 40:
+        level = "偏空"
 
-    cross_tags = []
+    tags = []
     if _cross_up(prev["K"], last["K"], prev["D"], last["D"]):
-        cross_tags.append("KD黃金交叉")
+        tags.append("KD黃金交叉")
     if _cross_down(prev["K"], last["K"], prev["D"], last["D"]):
-        cross_tags.append("KD死亡交叉")
+        tags.append("KD死亡交叉")
     if _cross_up(prev["DIF"], last["DIF"], prev["MACD"], last["MACD"]):
-        cross_tags.append("MACD黃金交叉")
+        tags.append("MACD黃金交叉")
     if _cross_down(prev["DIF"], last["DIF"], prev["MACD"], last["MACD"]):
-        cross_tags.append("MACD死亡交叉")
+        tags.append("MACD死亡交叉")
     if _cross_up(prev["MA20"], last["MA20"], prev["MA60"], last["MA60"]):
-        cross_tags.append("MA黃金交叉")
+        tags.append("MA黃金交叉")
     if _cross_down(prev["MA20"], last["MA20"], prev["MA60"], last["MA60"]):
-        cross_tags.append("MA死亡交叉")
+        tags.append("MA死亡交叉")
 
-    return {
-        "signal_score": int(round(trend_score)),
-        "signal_level": signal_level,
-        "cross_tags": cross_tags,
-    }
+    return {"signal_score": int(round(score)), "signal_level": level, "cross_tags": tags}
+
+
+def _safe_compute_signal_snapshot(df: pd.DataFrame) -> dict[str, Any]:
+    try:
+        snap = compute_signal_snapshot(df)
+        if isinstance(snap, dict):
+            return snap
+    except Exception:
+        pass
+    return _build_signal_summary(df)
 
 
 def _safe_compute_radar_scores(df: pd.DataFrame) -> dict[str, float]:
@@ -715,19 +733,14 @@ def _safe_compute_radar_scores(df: pd.DataFrame) -> dict[str, float]:
 
     last = df.iloc[-1]
     price = float(last["Close"])
+
     trend = 80 if pd.notna(last.get("MA60", np.nan)) and price > last.get("MA60", np.nan) else 40
     momentum = 80 if last.get("DIF", 0) > last.get("MACD", 0) else 40
     volume = 60
     risk = 80 if pd.notna(last.get("MA20", np.nan)) and price > last.get("MA20", np.nan) else 40
     pos = 70
 
-    return {
-        "趨勢": float(trend),
-        "動能": float(momentum),
-        "量價": float(volume),
-        "風險": float(risk),
-        "位置": float(pos),
-    }
+    return {"趨勢": float(trend), "動能": float(momentum), "量價": float(volume), "風險": float(risk), "位置": float(pos)}
 
 
 def _safe_compute_support_resistance(df: pd.DataFrame) -> dict[str, Any]:
@@ -748,16 +761,6 @@ def _safe_compute_support_resistance(df: pd.DataFrame) -> dict[str, Any]:
         "resistance_1": float(recent["High"].quantile(0.8)),
         "resistance_2": float(recent["High"].quantile(0.9)),
     }
-
-
-def _safe_compute_signal_snapshot(df: pd.DataFrame) -> dict[str, Any]:
-    try:
-        snap = compute_signal_snapshot(df)
-        if isinstance(snap, dict):
-            return snap
-    except Exception:
-        pass
-    return _build_signal_summary(df)
 
 
 # =========================================================
@@ -792,7 +795,6 @@ def _plot_candlestick(df: pd.DataFrame, stock_label: str) -> go.Figure:
             fig.add_trace(go.Scatter(x=df.index, y=df[col], mode="lines", name=col), row=1, col=1)
 
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="成交量"), row=2, col=1)
-
     fig.add_trace(go.Scatter(x=df.index, y=df["K"], mode="lines", name="K"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["D"], mode="lines", name="D"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["DIF"], mode="lines", name="DIF"), row=3, col=1)
@@ -828,7 +830,7 @@ def _plot_radar(radar_scores: dict[str, float], stock_label: str) -> go.Figure:
 
 
 # =========================================================
-# State 同步核心
+# 狀態同步
 # =========================================================
 def _repair_group_stock_state(group_map: dict[str, list[str]]):
     groups = list(group_map.keys())
@@ -844,6 +846,15 @@ def _repair_group_stock_state(group_map: dict[str, list[str]]):
         _set_ss("stock", stock_options[0] if stock_options else "")
 
 
+def _sanitize_date_state():
+    today = date.today()
+    default_start = today - timedelta(days=365)
+    default_end = today
+
+    _set_ss("start_date", _to_pydate(_ss("start_date"), default_start))
+    _set_ss("end_date", _to_pydate(_ss("end_date"), default_end))
+
+
 def _init_state(group_map: dict[str, list[str]]):
     groups = list(group_map.keys())
 
@@ -851,7 +862,8 @@ def _init_state(group_map: dict[str, list[str]]):
         _set_ss("group", groups[0] if groups else "")
 
     if _ss("stock") is None:
-        _set_ss("stock", group_map.get(_ss("group"), [""])[0] if group_map.get(_ss("group")) else "")
+        default_stocks = group_map.get(_ss("group"), [])
+        _set_ss("stock", default_stocks[0] if default_stocks else "")
 
     if _ss("search_input") is None:
         _set_ss("search_input", "")
@@ -863,9 +875,9 @@ def _init_state(group_map: dict[str, list[str]]):
     saved = _safe_load_last_query_state("history_kline_page")
 
     if _ss("start_date") is None:
-        _set_ss("start_date", _safe_parse_date(saved.get("start_date"), default_start))
+        _set_ss("start_date", _to_pydate(saved.get("start_date"), default_start))
     if _ss("end_date") is None:
-        _set_ss("end_date", _safe_parse_date(saved.get("end_date"), default_end))
+        _set_ss("end_date", _to_pydate(saved.get("end_date"), default_end))
 
     saved_group = _safe_str(saved.get("group"))
     saved_stock = _safe_str(saved.get("stock"))
@@ -876,6 +888,7 @@ def _init_state(group_map: dict[str, list[str]]):
             _set_ss("stock", saved_stock)
 
     _repair_group_stock_state(group_map)
+    _sanitize_date_state()
 
 
 def _apply_search_sync(keyword: str, group_map: dict[str, list[str]], stock_rows: list[dict[str, str]]) -> bool:
@@ -937,6 +950,7 @@ def main():
 
     render_pro_section("查詢條件")
     _repair_group_stock_state(group_map)
+    _sanitize_date_state()
 
     groups = list(group_map.keys())
     c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
@@ -962,16 +976,22 @@ def main():
             key=_k("stock"),
         )
 
+    # 這裡先把 state 強制洗成 py date，再丟給 date_input
+    _sanitize_date_state()
+
     with c3:
         st.date_input("開始日期", key=_k("start_date"))
 
     with c4:
         st.date_input("結束日期", key=_k("end_date"))
 
+    # 再洗一次，避免使用者操作後回來是奇怪型別
+    _sanitize_date_state()
+
     selected_group = _ss("group", "")
     selected_stock = _ss("stock", "")
-    start_date = _ss("start_date")
-    end_date = _ss("end_date")
+    start_date = _to_pydate(_ss("start_date"), date.today() - timedelta(days=365))
+    end_date = _to_pydate(_ss("end_date"), date.today())
 
     st.caption(f"目前實際查詢值：群組【{selected_group}】 / 股票【{selected_stock}】")
 
@@ -1017,7 +1037,6 @@ def main():
         pass
 
     stock_label = _display_stock(code, name)
-
     signal_snapshot = _safe_compute_signal_snapshot(hist_df)
     radar_scores = _safe_compute_radar_scores(hist_df)
     sr_snapshot = _safe_compute_support_resistance(hist_df)
@@ -1045,9 +1064,17 @@ def main():
 
     info_cols = st.columns(3)
     with info_cols[0]:
-        render_pro_info_card("支撐區", f"{sr1:.2f}" if isinstance(sr1, (int, float)) and not math.isnan(sr1) else "—", "近60日推估")
+        render_pro_info_card(
+            "支撐區",
+            f"{sr1:.2f}" if isinstance(sr1, (int, float)) and not math.isnan(sr1) else "—",
+            "近60日推估",
+        )
     with info_cols[1]:
-        render_pro_info_card("壓力區", f"{rr1:.2f}" if isinstance(rr1, (int, float)) and not math.isnan(rr1) else "—", "近60日推估")
+        render_pro_info_card(
+            "壓力區",
+            f"{rr1:.2f}" if isinstance(rr1, (int, float)) and not math.isnan(rr1) else "—",
+            "近60日推估",
+        )
     with info_cols[2]:
         render_pro_info_card("評級", _safe_score_to_badge(radar_avg), market or "台股")
 
@@ -1124,8 +1151,7 @@ def main():
     ]
     detail_df = hist_df[detail_cols].tail(120).copy()
     detail_df = detail_df.reset_index()
-    first_col = detail_df.columns[0]
-    detail_df = detail_df.rename(columns={first_col: "Date"})
+    detail_df = detail_df.rename(columns={detail_df.columns[0]: "Date"})
     detail_df["Date"] = pd.to_datetime(detail_df["Date"]).dt.strftime("%Y-%m-%d")
     st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
