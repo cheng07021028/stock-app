@@ -1,6 +1,10 @@
 import time
+import requests
+import urllib3
+import pandas as pd
+import streamlit as st
 
-
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def _safe_text(value):
     if value is None:
         return ""
@@ -80,7 +84,6 @@ def get_realtime_stock_info(stock_no: str, stock_name: str = "", market_type: st
 
     prev_close = _safe_num(raw.get("y"))
     current_price = _safe_num(raw.get("z"))
-
     if current_price is None:
         current_price = prev_close
 
@@ -174,6 +177,8 @@ def render_realtime_info_card(info: dict, title: str = "即時資訊"):
         st.info("目前沒有即時資訊。")
         return
 
+    st.markdown(f"### {title}")
+
     if not info.get("ok"):
         st.warning(info.get("message", "查無即時資訊"))
         return
@@ -188,12 +193,10 @@ def render_realtime_info_card(info: dict, title: str = "即時資訊"):
     change = info.get("change")
     change_pct = info.get("change_pct")
     total_volume = info.get("total_volume")
+    prev_close = info.get("prev_close")
     update_time = info.get("update_time", "")
 
-    st.markdown(f"### {title}")
     st.caption(f"{name}（{code}）｜{market}｜更新時間：{update_time or '—'}")
-
-    c1, c2, c3, c4 = st.columns(4)
 
     delta_text = None
     if change is not None and change_pct is not None:
@@ -201,6 +204,7 @@ def render_realtime_info_card(info: dict, title: str = "即時資訊"):
     elif change is not None:
         delta_text = f"{change:+.2f}"
 
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("現價", format_number(price, 2) if price is not None else "—", delta=delta_text)
     with c2:
@@ -214,7 +218,7 @@ def render_realtime_info_card(info: dict, title: str = "即時資訊"):
     with c5:
         st.metric("總量", format_number(total_volume, 0) if total_volume is not None else "—")
     with c6:
-        st.metric("昨收", format_number(info.get("prev_close"), 2) if info.get("prev_close") is not None else "—")
+        st.metric("昨收", format_number(prev_close, 2) if prev_close is not None else "—")
 
 
 def render_realtime_table(df: pd.DataFrame, height: int = 520):
