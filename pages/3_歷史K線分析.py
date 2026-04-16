@@ -315,7 +315,7 @@ def render_overview_card(group_name, stock_info, start_date, end_date, selected_
 
     if selected_indicators:
         indicator_html = "".join(
-            [f'<span class="badge">{x}</span>' for x in selected_indicators]
+            f'<span class="badge">{x}</span>' for x in selected_indicators
         )
     else:
         indicator_html = '<span class="badge">無</span>'
@@ -366,63 +366,60 @@ def render_overview_card(group_name, stock_info, start_date, end_date, selected_
                 macd_parts.append(get_recent_signal_text(df, "MACD死亡交叉", "MACD_DEATH"))
             macd_signal_html = "".join(macd_parts) if macd_parts else '<span class="signal-neutral">無</span>'
 
-    html = f"""
-    <div class="overview-card-wrap">
-        <div class="overview-title">查詢總覽</div>
+    html = f"""<div class="overview-card-wrap">
+<div class="overview-title">查詢總覽</div>
+<div class="overview-grid">
+<div class="overview-item">
+<div class="overview-label">群組</div>
+<div class="overview-value">{group_name if group_name else "—"}</div>
+</div>
 
-        <div class="overview-grid">
-            <div class="overview-item">
-                <div class="overview-label">群組</div>
-                <div class="overview-value">{group_name if group_name else "—"}</div>
-            </div>
+<div class="overview-item overview-item-wide">
+<div class="overview-label">股票</div>
+<div class="overview-value">{stock_text}</div>
+</div>
 
-            <div class="overview-item overview-item-wide">
-                <div class="overview-label">股票</div>
-                <div class="overview-value">{stock_text}</div>
-            </div>
+<div class="overview-item">
+<div class="overview-label">市場別</div>
+<div class="overview-value">{market_text}</div>
+</div>
 
-            <div class="overview-item">
-                <div class="overview-label">市場別</div>
-                <div class="overview-value">{market_text}</div>
-            </div>
+<div class="overview-item overview-item-wide">
+<div class="overview-label">日期區間</div>
+<div class="overview-value-small">{start_date} ~ {end_date}</div>
+</div>
 
-            <div class="overview-item overview-item-wide">
-                <div class="overview-label">日期區間</div>
-                <div class="overview-value-small">{start_date} ~ {end_date}</div>
-            </div>
+<div class="overview-item">
+<div class="overview-label">最新收盤價</div>
+<div class="overview-value">{latest_close_text}</div>
+</div>
 
-            <div class="overview-item">
-                <div class="overview-label">最新收盤價</div>
-                <div class="overview-value">{latest_close_text}</div>
-            </div>
+<div class="overview-item">
+<div class="overview-label">區間漲跌</div>
+<div class="overview-value {price_change_class}">{price_change_text}</div>
+</div>
 
-            <div class="overview-item">
-                <div class="overview-label">區間漲跌</div>
-                <div class="overview-value {price_change_class}">{price_change_text}</div>
-            </div>
+<div class="overview-item">
+<div class="overview-label">區間漲跌幅</div>
+<div class="overview-value {price_change_class}">{price_change_pct_text}</div>
+</div>
 
-            <div class="overview-item">
-                <div class="overview-label">區間漲跌幅</div>
-                <div class="overview-value {price_change_class}">{price_change_pct_text}</div>
-            </div>
+<div class="overview-item overview-item-wide">
+<div class="overview-label">技術指標</div>
+<div class="overview-value-small">{indicator_html}</div>
+</div>
 
-            <div class="overview-item overview-item-wide">
-                <div class="overview-label">技術指標</div>
-                <div class="overview-value-small">{indicator_html}</div>
-            </div>
+<div class="overview-item overview-item-wide">
+<div class="overview-label">最近 KD 訊號</div>
+<div class="overview-value-small">{kd_signal_html}</div>
+</div>
 
-            <div class="overview-item overview-item-wide">
-                <div class="overview-label">最近 KD 訊號</div>
-                <div class="overview-value-small">{kd_signal_html}</div>
-            </div>
-
-            <div class="overview-item overview-item-wide">
-                <div class="overview-label">最近 MACD 訊號</div>
-                <div class="overview-value-small">{macd_signal_html}</div>
-            </div>
-        </div>
-    </div>
-    """
+<div class="overview-item overview-item-wide">
+<div class="overview-label">最近 MACD 訊號</div>
+<div class="overview-value-small">{macd_signal_html}</div>
+</div>
+</div>
+</div>"""
 
     st.markdown(html, unsafe_allow_html=True)
 
