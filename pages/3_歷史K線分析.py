@@ -98,6 +98,82 @@ def add_indicators(df: pd.DataFrame, selected_indicators: list):
     return df
 
 
+def add_event_points(df: pd.DataFrame):
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    df["起漲點"] = False
+    df["起跌點"] = False
+    df["MA黃金交叉"] = False
+    df["MA死亡交叉"] = False
+    df["KD黃金交叉"] = False
+    df["KD死亡交叉"] = False
+    df["MACD黃金交叉"] = False
+    df["MACD死亡交叉"] = False
+
+    # 1) 起漲點 / 起跌點：簡化為局部波段低點/高點 + 隔日確認
+    if all(col in df.columns for col in ["最低價", "最高價", "收盤價"]) and len(df) >= 5:
+        for i in range(2, len(df) - 2):
+            low_now = df.iloc[i]["最低價"]
+            high_now = df.iloc[i]["最高價"]
+
+            prev_lows = [df.iloc[i - 2]["最低價"], df.iloc[i - 1]["最低價"]]
+            next_lows = [df.iloc[i + 1]["最低價"], df.iloc[i + 2]["最低價"]]
+
+            prev_highs = [df.iloc[i - 2]["最高價"], df.iloc[i - 1]["最高價"]]
+            next_highs = [df.iloc[i + 1]["最高價"], df.iloc[i + 2]["最高價"]]
+
+            if pd.notna(low_now) and all(pd.notna(x) for x in prev_lows + next_lows):
+                if low_now <= min(prev_lows + next_lows):
+                    if df.iloc[i + 1]["收盤價"] > df.iloc[i]["收盤價"]:
+                        df.at[df.index[i], "起漲點"] = True
+
+            if pd.notna(high_now) and all(pd.notna(x) for x in prev_highs + next_highs):
+                if high_now >= max(prev_highs + next_highs):
+                    if df.iloc[i + 1]["收盤價"] < df.iloc[i]["收盤價"]:
+                        df.at[df.index[i], "起跌點"] = True
+
+    # 2) MA 交叉：MA5 vs MA10
+    if all(col in df.columns for col in ["MA5", "MA10"]) and len(df) >= 2:
+        for i in range(1, len(df)):
+            prev_ma5, prev_ma10 = df.iloc[i - 1]["MA5"], df.iloc[i - 1]["MA10"]
+            now_ma5, now_ma10 = df.iloc[i]["MA5"], df.iloc[i]["MA10"]
+
+            if all(pd.notna(x) for x in [prev_ma5, prev_ma10, now_ma5, now_ma10]):
+                if prev_ma5 <= prev_ma10 and now_ma5 > now_ma10:
+                    df.at[df.index[i], "MA黃金交叉"] = True
+                elif prev_ma5 >= prev_ma10 and now_ma5 < now_ma10:
+                    df.at[df.index[i], "MA死亡交叉"] = True
+
+    # 3) KD 交叉
+    if all(col in df.columns for col in ["K", "D"]) and len(df) >= 2:
+        for i in range(1, len(df)):
+            prev_k, prev_d = df.iloc[i - 1]["K"], df.iloc[i - 1]["D"]
+            now_k, now_d = df.iloc[i]["K"], df.iloc[i]["D"]
+
+            if all(pd.notna(x) for x in [prev_k, prev_d, now_k, now_d]):
+                if prev_k <= prev_d and now_k > now_d:
+                    df.at[df.index[i], "KD黃金交叉"] = True
+                elif prev_k >= prev_d and now_k < now_d:
+                    df.at[df.index[i], "KD死亡交叉"] = True
+
+    # 4) MACD 交叉：DIF vs DEA
+    if all(col in df.columns for col in ["DIF", "DEA"]) and len(df) >= 2:
+        for i in range(1, len(df)):
+            prev_dif, prev_dea = df.iloc[i - 1]["DIF"], df.iloc[i - 1]["DEA"]
+            now_dif, now_dea = df.iloc[i]["DIF"], df.iloc[i]["DEA"]
+
+            if all(pd.notna(x) for x in [prev_dif, prev_dea, now_dif, now_dea]):
+                if prev_dif <= prev_dea and now_dif > now_dea:
+                    df.at[df.index[i], "MACD黃金交叉"] = True
+                elif prev_dif >= prev_dea and now_dif < now_dea:
+                    df.at[df.index[i], "MACD死亡交叉"] = True
+
+    return df
+
+
 def render_signal_board(signal: dict):
     score = signal.get("score", 0)
     badge_text, badge_class = score_to_badge(score)
@@ -181,9 +257,7 @@ def render_radar_board(radar: dict):
         line=dict(width=3),
     ))
     fig.update_layout(
-        polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100])
-        ),
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
         showlegend=False,
         height=430,
         margin=dict(l=20, r=20, t=20, b=20),
@@ -204,6 +278,34 @@ def render_radar_board(radar: dict):
             ("整體評語", radar["summary"], ""),
         ],
         chips=["Radar", "Multi-Factor", "Strength Profile"]
+    )
+
+
+def render_event_board(df: pd.DataFrame):
+    count_up = int(df["起漲點"].sum()) if "起漲點" in df.columns else 0
+    count_down = int(df["起跌點"].sum()) if "起跌點" in df.columns else 0
+    count_ma_g = int(df["MA黃金交叉"].sum()) if "MA黃金交叉" in df.columns else 0
+    count_ma_d = int(df["MA死亡交叉"].sum()) if "MA死亡交叉" in df.columns else 0
+    count_kd_g = int(df["KD黃金交叉"].sum()) if "KD黃金交叉" in df.columns else 0
+    count_kd_d = int(df["KD死亡交叉"].sum()) if "KD死亡交叉" in df.columns else 0
+    count_macd_g = int(df["MACD黃金交叉"].sum()) if "MACD黃金交叉" in df.columns else 0
+    count_macd_d = int(df["MACD死亡交叉"].sum()) if "MACD死亡交叉" in df.columns else 0
+
+    render_pro_section("事件標記面板", "還原你原本要的起漲點、起跌點、交叉點，直接在盤面中做事件判讀")
+
+    render_pro_info_card(
+        "事件統計",
+        [
+            ("起漲點數", str(count_up), "pro-up" if count_up > 0 else ""),
+            ("起跌點數", str(count_down), "pro-down" if count_down > 0 else ""),
+            ("MA黃金交叉", str(count_ma_g), "pro-up" if count_ma_g > 0 else ""),
+            ("MA死亡交叉", str(count_ma_d), "pro-down" if count_ma_d > 0 else ""),
+            ("KD黃金交叉", str(count_kd_g), "pro-up" if count_kd_g > 0 else ""),
+            ("KD死亡交叉", str(count_kd_d), "pro-down" if count_kd_d > 0 else ""),
+            ("MACD黃金交叉", str(count_macd_g), "pro-up" if count_macd_g > 0 else ""),
+            ("MACD死亡交叉", str(count_macd_d), "pro-down" if count_macd_d > 0 else ""),
+        ],
+        chips=["起漲點", "起跌點", "Cross Signals"]
     )
 
 
@@ -241,7 +343,11 @@ def render_table(df: pd.DataFrame):
         return
 
     base_cols = ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"]
-    indicator_cols = ["MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "K", "D", "DIF", "DEA", "MACD_HIST"]
+    indicator_cols = [
+        "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
+        "K", "D", "DIF", "DEA", "MACD_HIST",
+        "起漲點", "起跌點", "MA黃金交叉", "MA死亡交叉", "KD黃金交叉", "KD死亡交叉", "MACD黃金交叉", "MACD死亡交叉"
+    ]
     show_cols = [c for c in base_cols + indicator_cols if c in df.columns]
     display_df = df[show_cols].copy()
 
@@ -254,6 +360,11 @@ def render_table(df: pd.DataFrame):
         insert_at = cols.index("收盤價") + 1
         ordered_cols = cols[:insert_at] + ["漲跌"] + [c for c in cols[insert_at:] if c != "漲跌"]
         display_df = display_df[ordered_cols]
+
+    bool_cols = ["起漲點", "起跌點", "MA黃金交叉", "MA死亡交叉", "KD黃金交叉", "KD死亡交叉", "MACD黃金交叉", "MACD死亡交叉"]
+    for col in bool_cols:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: "●" if bool(x) else "")
 
     format_dict = {}
     for col in ["開盤價", "最高價", "最低價", "收盤價", "漲跌", "MA5", "MA10", "MA20", "MA60", "MA120", "MA240", "K", "D", "DIF", "DEA", "MACD_HIST"]:
@@ -280,7 +391,7 @@ def render_table(df: pd.DataFrame):
     if "漲跌" in display_df.columns:
         styler = styler.map(color_change, subset=["漲跌"])
 
-    st.dataframe(styler, use_container_width=True, hide_index=True, height=700)
+    st.dataframe(styler, use_container_width=True, hide_index=True, height=760)
 
 
 def render_chart(df: pd.DataFrame, selected_indicators: list):
@@ -289,7 +400,7 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
 
     has_volume = "成交股數" in df.columns
 
-    render_pro_section("K線主圖", "以 K 棒、均線與成交量為主，搭配訊號燈號與支撐壓力做趨勢判讀")
+    render_pro_section("K線主圖", "主圖直接標出起漲點、起跌點與交叉點，不再只是單純看K棒")
 
     if has_volume:
         fig = make_subplots(
@@ -340,6 +451,28 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
                 col=1
             )
 
+    # 事件標記
+    def add_marker(flag_col, y_col, name, symbol, color, row=1):
+        if flag_col in df.columns and y_col in df.columns:
+            sub = df[df[flag_col] == True].copy()
+            if not sub.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=sub["日期"],
+                        y=sub[y_col],
+                        mode="markers",
+                        name=name,
+                        marker=dict(symbol=symbol, size=12, color=color, line=dict(width=1, color="#111827")),
+                    ),
+                    row=row,
+                    col=1
+                )
+
+    add_marker("起漲點", "最低價", "起漲點", "triangle-up", "#16a34a", 1)
+    add_marker("起跌點", "最高價", "起跌點", "triangle-down", "#dc2626", 1)
+    add_marker("MA黃金交叉", "收盤價", "MA黃金交叉", "star", "#2563eb", 1)
+    add_marker("MA死亡交叉", "收盤價", "MA死亡交叉", "x", "#7c2d12", 1)
+
     if has_volume:
         volume_colors = []
         for _, row_data in df.iterrows():
@@ -360,7 +493,7 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
         )
 
     fig.update_layout(
-        height=820 if has_volume else 560,
+        height=840 if has_volume else 580,
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         plot_bgcolor="#ffffff",
@@ -376,6 +509,21 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
             kd_fig = go.Figure()
             kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K", line=dict(width=2.5)))
             kd_fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D", line=dict(width=2.5)))
+
+            add_kd_g = df[df["KD黃金交叉"] == True] if "KD黃金交叉" in df.columns else pd.DataFrame()
+            add_kd_d = df[df["KD死亡交叉"] == True] if "KD死亡交叉" in df.columns else pd.DataFrame()
+
+            if not add_kd_g.empty:
+                kd_fig.add_trace(go.Scatter(
+                    x=add_kd_g["日期"], y=add_kd_g["K"], mode="markers", name="KD黃金交叉",
+                    marker=dict(symbol="triangle-up", size=11, color="#16a34a")
+                ))
+            if not add_kd_d.empty:
+                kd_fig.add_trace(go.Scatter(
+                    x=add_kd_d["日期"], y=add_kd_d["K"], mode="markers", name="KD死亡交叉",
+                    marker=dict(symbol="triangle-down", size=11, color="#dc2626")
+                ))
+
             kd_fig.update_layout(height=340, hovermode="x unified")
             st.plotly_chart(kd_fig, use_container_width=True, config={"displaylogo": False})
 
@@ -385,6 +533,21 @@ def render_chart(df: pd.DataFrame, selected_indicators: list):
             macd_fig.add_trace(go.Bar(x=df["日期"], y=df["MACD_HIST"], name="MACD柱"))
             macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF", line=dict(width=2.5)))
             macd_fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA", line=dict(width=2.5)))
+
+            add_macd_g = df[df["MACD黃金交叉"] == True] if "MACD黃金交叉" in df.columns else pd.DataFrame()
+            add_macd_d = df[df["MACD死亡交叉"] == True] if "MACD死亡交叉" in df.columns else pd.DataFrame()
+
+            if not add_macd_g.empty:
+                macd_fig.add_trace(go.Scatter(
+                    x=add_macd_g["日期"], y=add_macd_g["DIF"], mode="markers", name="MACD黃金交叉",
+                    marker=dict(symbol="triangle-up", size=11, color="#16a34a")
+                ))
+            if not add_macd_d.empty:
+                macd_fig.add_trace(go.Scatter(
+                    x=add_macd_d["日期"], y=add_macd_d["DIF"], mode="markers", name="MACD死亡交叉",
+                    marker=dict(symbol="triangle-down", size=11, color="#dc2626")
+                ))
+
             macd_fig.update_layout(height=360, hovermode="x unified")
             st.plotly_chart(macd_fig, use_container_width=True, config={"displaylogo": False})
 
@@ -401,8 +564,8 @@ watchlist_dict = get_normalized_watchlist()
 group_names = list(watchlist_dict.keys())
 
 render_pro_hero(
-    "歷史K線分析｜雷達評分版",
-    "多空燈號、支撐壓力、雷達評分整合，從看圖進一步升級到多因子結構判讀。"
+    "歷史K線分析｜事件標記版",
+    "補回起漲點、起跌點、MA/KD/MACD交叉點，讓盤面回到真正可讀盤狀態。"
 )
 
 if not group_names:
@@ -493,6 +656,8 @@ if query_btn or selected_stock:
         st.stop()
 
     df = add_indicators(df, selected_indicators)
+    df = add_event_points(df)
+
     signal = compute_signal_snapshot(df)
     sr = compute_support_resistance_snapshot(df)
     radar = compute_radar_scores(df)
@@ -501,6 +666,7 @@ if query_btn or selected_stock:
     render_signal_board(signal)
     render_sr_board(sr)
     render_radar_board(radar)
+    render_event_board(df)
 
     download_df = df.copy()
     if "日期" in download_df.columns:
@@ -519,7 +685,7 @@ if query_btn or selected_stock:
         )
 
     render_chart(df, selected_indicators)
-    render_pro_section("歷史資料表", "雷達評分、燈號與支撐壓力判讀後，可回到原始數值做二次驗證")
+    render_pro_section("歷史資料表", "事件點、燈號、支撐壓力與原始數值整合檢視")
     render_table(df)
 
     st.success(f"查詢完成，共 {len(df)} 筆資料。")
