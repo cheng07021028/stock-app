@@ -211,19 +211,28 @@ def render_signal_summary(info, signal, sr):
 
 
 def render_recent_events(df: pd.DataFrame):
+    up_dt = get_latest_event_date(df, "起漲點")
+    down_dt = get_latest_event_date(df, "起跌點")
+    ma_g_dt = get_latest_event_date(df, "MA黃金交叉")
+    ma_d_dt = get_latest_event_date(df, "MA死亡交叉")
+    kd_g_dt = get_latest_event_date(df, "KD黃金交叉")
+    kd_d_dt = get_latest_event_date(df, "KD死亡交叉")
+    macd_g_dt = get_latest_event_date(df, "MACD黃金交叉")
+    macd_d_dt = get_latest_event_date(df, "MACD死亡交叉")
+
     render_pro_section("最近事件摘要", "快速查看最近一次起漲點、起跌點與各類交叉點，不用切到完整K線頁也能先判讀")
 
     render_pro_info_card(
         "最近事件",
         [
-            ("最近起漲點", get_latest_event_date(df, "起漲點"), "pro-up" if get_latest_event_date(df, "起漲點") != "—" else ""),
-            ("最近起跌點", get_latest_event_date(df, "起跌點"), "pro-down" if get_latest_event_date(df, "起跌點") != "—" else ""),
-            ("最近 MA 黃金交叉", get_latest_event_date(df, "MA黃金交叉"), "pro-up" if get_latest_event_date(df, "MA黃金交叉") != "—" else ""),
-            ("最近 MA 死亡交叉", get_latest_event_date(df, "MA死亡交叉"), "pro-down" if get_latest_event_date(df, "MA死亡交叉") != "—" else ""),
-            ("最近 KD 黃金交叉", get_latest_event_date(df, "KD黃金交叉"), "pro-up" if get_latest_event_date(df, "KD黃金交叉") != "—" else ""),
-            ("最近 KD 死亡交叉", get_latest_event_date(df, "KD死亡交叉"), "pro-down" if get_latest_event_date(df, "KD死亡交叉") != "—" else "),
-            ("最近 MACD 黃金交叉", get_latest_event_date(df, "MACD黃金交叉"), "pro-up" if get_latest_event_date(df, "MACD黃金交叉") != "—" else ""),
-            ("最近 MACD 死亡交叉", get_latest_event_date(df, "MACD死亡交叉"), "pro-down" if get_latest_event_date(df, "MACD死亡交叉") != "—" else ""),
+            ("最近起漲點", up_dt, "pro-up" if up_dt != "—" else ""),
+            ("最近起跌點", down_dt, "pro-down" if down_dt != "—" else ""),
+            ("最近 MA 黃金交叉", ma_g_dt, "pro-up" if ma_g_dt != "—" else ""),
+            ("最近 MA 死亡交叉", ma_d_dt, "pro-down" if ma_d_dt != "—" else ""),
+            ("最近 KD 黃金交叉", kd_g_dt, "pro-up" if kd_g_dt != "—" else ""),
+            ("最近 KD 死亡交叉", kd_d_dt, "pro-down" if kd_d_dt != "—" else ""),
+            ("最近 MACD 黃金交叉", macd_g_dt, "pro-up" if macd_g_dt != "—" else ""),
+            ("最近 MACD 死亡交叉", macd_d_dt, "pro-down" if macd_d_dt != "—" else ""),
         ],
         chips=["Recent Events", "Turning Points", "Cross Signals"]
     )
