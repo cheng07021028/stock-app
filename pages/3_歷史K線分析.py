@@ -100,17 +100,16 @@ def _css_by_value(v: Any) -> str:
     return "pro-flat"
 
 
-def _css_by_diff(a: Any, b: Any) -> str:
+def _safe_float(v: Any, default: float = np.nan) -> float:
     try:
-        if pd.isna(a) or pd.isna(b):
-            return "pro-flat"
+        if pd.isna(v):
+            return default
     except Exception:
         pass
     try:
-        d = float(a) - float(b)
+        return float(v)
     except Exception:
-        return "pro-flat"
-    return _css_by_value(d)
+        return default
 
 
 # =========================================================
@@ -308,6 +307,8 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD_HIST"] = df["DIF"] - df["DEA"]
 
     df["漲跌幅(%)"] = close.pct_change() * 100
+    df["ATR14"] = (df["最高價"] - df["最低價"]).rolling(14).mean()
+
     return df
 
 
@@ -319,33 +320,59 @@ def _cross_down(a1, a2, b1, b2) -> bool:
     return pd.notna(a1) and pd.notna(a2) and pd.notna(b1) and pd.notna(b2) and a1 >= b1 and a2 < b2
 
 
-def _detect_pivots(df: pd.DataFrame, window: int = 3) -> tuple[list[int], list[int]]:
+def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6, atr_ratio: float = 0.8) -> tuple[list[int], list[int]]:
     if df.empty or len(df) < window * 2 + 1:
         return [], []
 
     highs = df["最高價"].values
     lows = df["最低價"].values
+    atr = df["ATR14"].fillna(method="bfill").fillna(method="ffill").fillna(0).values
 
-    peaks_idx = []
-    troughs_idx = []
+    raw_peak = []
+    raw_trough = []
 
     for i in range(window, len(df) - window):
         h = highs[i]
         l = lows[i]
-        if np.isfinite(h) and h == np.max(highs[i - window:i + window + 1]):
-            peaks_idx.append(i)
-        if np.isfinite(l) and l == np.min(lows[i - window:i + window + 1]):
-            troughs_idx.append(i)
 
-    return peaks_idx, troughs_idx
+        if np.isfinite(h) and h == np.max(highs[i - window:i + window + 1]):
+            local_low = np.min(lows[i - window:i + window + 1])
+            if (h - local_low) >= max(atr[i] * atr_ratio, 0):
+                raw_peak.append(i)
+
+        if np.isfinite(l) and l == np.min(lows[i - window:i + window + 1]):
+            local_high = np.max(highs[i - window:i + window + 1])
+            if (local_high - l) >= max(atr[i] * atr_ratio, 0):
+                raw_trough.append(i)
+
+    def compress_points(idxs: list[int], values: np.ndarray, mode: str) -> list[int]:
+        if not idxs:
+            return []
+        result = [idxs[0]]
+        for idx in idxs[1:]:
+            last_idx = result[-1]
+            if idx - last_idx < min_gap:
+                if mode == "peak":
+                    if values[idx] >= values[last_idx]:
+                        result[-1] = idx
+                else:
+                    if values[idx] <= values[last_idx]:
+                        result[-1] = idx
+            else:
+                result.append(idx)
+        return result
+
+    peaks = compress_points(raw_peak, highs, "peak")
+    troughs = compress_points(raw_trough, lows, "trough")
+    return peaks, troughs
 
 
 def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or len(df) < 3:
-        return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級", "idx"])
+        return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級", "idx", "score"])
 
     events = []
-    peak_idx, trough_idx = _detect_pivots(df, window=3)
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6, atr_ratio=0.8)
     peak_set = set(peak_idx)
     trough_set = set(trough_idx)
 
@@ -356,50 +383,148 @@ def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
 
         if _cross_up(prev["MA20"], cur["MA20"], prev["MA60"], cur["MA60"]):
             events.append(
-                {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 黃金交叉 MA60", "說明": "中期均線轉強。", "等級": "強多", "idx": i}
+                {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 黃金交叉 MA60", "說明": "中期均線轉強。", "等級": "強多", "idx": i, "score": 4}
             )
         elif _cross_down(prev["MA20"], cur["MA20"], prev["MA60"], cur["MA60"]):
             events.append(
-                {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 死亡交叉 MA60", "說明": "中期均線轉弱。", "等級": "強空", "idx": i}
+                {"日期": dt, "事件類型": "MA交叉", "事件名稱": "MA20 死亡交叉 MA60", "說明": "中期均線轉弱。", "等級": "強空", "idx": i, "score": -4}
             )
 
         if _cross_up(prev["K"], cur["K"], prev["D"], cur["D"]):
             events.append(
-                {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 黃金交叉", "說明": "短線動能轉強。", "等級": "偏多", "idx": i}
+                {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 黃金交叉", "說明": "短線動能轉強。", "等級": "偏多", "idx": i, "score": 2}
             )
         elif _cross_down(prev["K"], cur["K"], prev["D"], cur["D"]):
             events.append(
-                {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 死亡交叉", "說明": "短線動能轉弱。", "等級": "偏空", "idx": i}
+                {"日期": dt, "事件類型": "KD交叉", "事件名稱": "KD 死亡交叉", "說明": "短線動能轉弱。", "等級": "偏空", "idx": i, "score": -2}
             )
 
         if _cross_up(prev["DIF"], cur["DIF"], prev["DEA"], cur["DEA"]):
             events.append(
-                {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 黃金交叉", "說明": "波段趨勢轉強。", "等級": "偏多", "idx": i}
+                {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 黃金交叉", "說明": "波段趨勢轉強。", "等級": "偏多", "idx": i, "score": 3}
             )
         elif _cross_down(prev["DIF"], cur["DIF"], prev["DEA"], cur["DEA"]):
             events.append(
-                {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 死亡交叉", "說明": "波段趨勢轉弱。", "等級": "偏空", "idx": i}
+                {"日期": dt, "事件類型": "MACD交叉", "事件名稱": "MACD 死亡交叉", "說明": "波段趨勢轉弱。", "等級": "偏空", "idx": i, "score": -3}
             )
 
         if i in trough_set:
             events.append(
-                {"日期": dt, "事件類型": "轉折點", "事件名稱": "起漲點", "說明": "局部低點轉折。", "等級": "觀察", "idx": i}
+                {"日期": dt, "事件類型": "轉折點", "事件名稱": "起漲點", "說明": "過濾後局部低點轉折。", "等級": "觀察", "idx": i, "score": 1}
             )
         if i in peak_set:
             events.append(
-                {"日期": dt, "事件類型": "轉折點", "事件名稱": "起跌點", "說明": "局部高點轉折。", "等級": "觀察", "idx": i}
+                {"日期": dt, "事件類型": "轉折點", "事件名稱": "起跌點", "說明": "過濾後局部高點轉折。", "等級": "觀察", "idx": i, "score": -1}
             )
 
     ev = pd.DataFrame(events)
     if ev.empty:
-        return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級", "idx"])
+        return pd.DataFrame(columns=["日期", "事件類型", "事件名稱", "說明", "等級", "idx", "score"])
     return ev.sort_values("日期", ascending=False).reset_index(drop=True)
+
+
+def _build_strategy_summary(df: pd.DataFrame, signal: dict, sr: dict, radar: dict, events: pd.DataFrame) -> dict[str, str]:
+    if df.empty:
+        return {
+            "定位": "資料不足",
+            "趨勢": "資料不足",
+            "壓力支撐": "資料不足",
+            "策略": "資料不足",
+        }
+
+    last = df.iloc[-1]
+    price = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    ma120 = _safe_float(last.get("MA120"))
+    radar_avg = np.mean([
+        radar.get("trend", 50),
+        radar.get("momentum", 50),
+        radar.get("volume", 50),
+        radar.get("position", 50),
+        radar.get("structure", 50),
+    ])
+
+    recent = events.head(5) if events is not None else pd.DataFrame()
+    event_names = recent["事件名稱"].tolist() if not recent.empty else []
+
+    # 定位
+    if pd.notna(price) and pd.notna(ma20) and pd.notna(ma60) and pd.notna(ma120):
+        if price > ma20 > ma60 > ma120:
+            pos_text = "多頭趨勢完整，股價站穩短中長期均線之上。"
+        elif price > ma20 and price > ma60:
+            pos_text = "偏多架構，至少維持在中期均線上方。"
+        elif price < ma20 < ma60:
+            pos_text = "偏弱整理，股價位於中短期均線下方。"
+        else:
+            pos_text = "多空混合，仍屬整理結構。"
+    else:
+        pos_text = "均線資料不足，暫以價格區間觀察。"
+
+    # 趨勢
+    badge_text, _ = score_to_badge(signal.get("score", 0))
+    trend_text = f"目前燈號屬於【{badge_text}】；"
+    if event_names:
+        trend_text += "最近關鍵事件：" + "、".join(event_names[:3]) + "。"
+    else:
+        trend_text += "近期未出現明確交叉事件。"
+
+    # 壓力支撐
+    res20 = sr.get("res_20")
+    sup20 = sr.get("sup_20")
+    res60 = sr.get("res_60")
+    sup60 = sr.get("sup_60")
+    sr_text = (
+        f"短壓約 {_fmt_num(res20, 2)}、短撐約 {_fmt_num(sup20, 2)}；"
+        f"波段壓力約 {_fmt_num(res60, 2)}、波段支撐約 {_fmt_num(sup60, 2)}。"
+    )
+
+    # 策略
+    if radar_avg >= 75 and signal.get("score", 0) >= 3:
+        action_text = "策略偏多，可優先觀察拉回不破 MA20 或支撐區後的續強機會。"
+    elif radar_avg >= 60 and signal.get("score", 0) >= 1:
+        action_text = "策略中偏多，宜等待量能配合或壓力突破確認。"
+    elif radar_avg <= 35 or signal.get("score", 0) <= -3:
+        action_text = "策略保守，未止跌前不宜過早承接，先看支撐區是否有效。"
+    else:
+        action_text = "策略中性，先等價格脫離整理區帶再提高勝率。"
+
+    return {
+        "定位": pos_text,
+        "趨勢": trend_text,
+        "壓力支撐": sr_text,
+        "策略": action_text,
+    }
+
+
+def _build_zone_lines(df: pd.DataFrame, sr: dict) -> dict[str, float]:
+    if df.empty:
+        return {}
+
+    recent20 = df.tail(20)
+    recent60 = df.tail(60) if len(df) >= 60 else df
+
+    zone = {
+        "res20_top": _safe_float(recent20["最高價"].quantile(0.95)) if not recent20.empty else np.nan,
+        "res20_bot": _safe_float(recent20["最高價"].quantile(0.80)) if not recent20.empty else np.nan,
+        "sup20_top": _safe_float(recent20["最低價"].quantile(0.20)) if not recent20.empty else np.nan,
+        "sup20_bot": _safe_float(recent20["最低價"].quantile(0.05)) if not recent20.empty else np.nan,
+        "res60_top": _safe_float(recent60["最高價"].quantile(0.95)) if not recent60.empty else np.nan,
+        "res60_bot": _safe_float(recent60["最高價"].quantile(0.80)) if not recent60.empty else np.nan,
+        "sup60_top": _safe_float(recent60["最低價"].quantile(0.20)) if not recent60.empty else np.nan,
+        "sup60_bot": _safe_float(recent60["最低價"].quantile(0.05)) if not recent60.empty else np.nan,
+    }
+
+    for k, v in sr.items():
+        if k not in zone and isinstance(v, (int, float)):
+            zone[k] = float(v)
+    return zone
 
 
 # =========================================================
 # 圖表
 # =========================================================
-def _plot_kline(df: pd.DataFrame, stock_label: str, events: pd.DataFrame) -> go.Figure:
+def _plot_kline(df: pd.DataFrame, stock_label: str, events: pd.DataFrame, zone: dict[str, float]) -> go.Figure:
     x = pd.to_datetime(df["日期"])
 
     fig = make_subplots(
@@ -432,7 +557,27 @@ def _plot_kline(df: pd.DataFrame, stock_label: str, events: pd.DataFrame) -> go.
                 col=1,
             )
 
-    peak_idx, trough_idx = _detect_pivots(df, window=3)
+    # 支撐壓力區帶
+    def add_zone(y0: float, y1: float, label: str):
+        if pd.notna(y0) and pd.notna(y1):
+            fig.add_hrect(
+                y0=min(y0, y1),
+                y1=max(y0, y1),
+                line_width=0,
+                opacity=0.10,
+                annotation_text=label,
+                annotation_position="right",
+                row=1,
+                col=1,
+            )
+
+    add_zone(zone.get("res20_bot", np.nan), zone.get("res20_top", np.nan), "20日壓力區")
+    add_zone(zone.get("sup20_bot", np.nan), zone.get("sup20_top", np.nan), "20日支撐區")
+    add_zone(zone.get("res60_bot", np.nan), zone.get("res60_top", np.nan), "60日壓力區")
+    add_zone(zone.get("sup60_bot", np.nan), zone.get("sup60_top", np.nan), "60日支撐區")
+
+    # 起漲 / 起跌點
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6, atr_ratio=0.8)
     if trough_idx:
         fig.add_trace(
             go.Scatter(
@@ -462,32 +607,40 @@ def _plot_kline(df: pd.DataFrame, stock_label: str, events: pd.DataFrame) -> go.
             col=1,
         )
 
+    # 交叉事件分級
     if events is not None and not events.empty:
         plot_events = events[events["事件類型"].isin(["MA交叉", "KD交叉", "MACD交叉"])].copy()
         if not plot_events.empty:
-            mark_x = []
-            mark_y = []
-            mark_text = []
-            for _, row in plot_events.iterrows():
-                idx = int(row["idx"])
-                if 0 <= idx < len(df):
-                    mark_x.append(df.iloc[idx]["日期"])
-                    mark_y.append(df.iloc[idx]["收盤價"])
-                    mark_text.append(row["事件名稱"])
-            if mark_x:
-                fig.add_trace(
-                    go.Scatter(
-                        x=mark_x,
-                        y=mark_y,
-                        mode="markers",
-                        name="交叉事件",
-                        marker=dict(symbol="diamond", size=8),
-                        text=mark_text,
-                        hovertemplate="%{x}<br>%{text}<extra></extra>",
-                    ),
-                    row=1,
-                    col=1,
-                )
+            strong = plot_events[plot_events["score"].abs() >= 3].copy()
+            normal = plot_events[(plot_events["score"].abs() < 3)].copy()
+
+            def _add_event_trace(ev_df: pd.DataFrame, name: str, symbol: str, size: int):
+                if ev_df.empty:
+                    return
+                mark_x, mark_y, mark_text = [], [], []
+                for _, row in ev_df.iterrows():
+                    idx = int(row["idx"])
+                    if 0 <= idx < len(df):
+                        mark_x.append(df.iloc[idx]["日期"])
+                        mark_y.append(df.iloc[idx]["收盤價"])
+                        mark_text.append(f"{row['事件名稱']}｜{row['等級']}")
+                if mark_x:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=mark_x,
+                            y=mark_y,
+                            mode="markers",
+                            name=name,
+                            marker=dict(symbol=symbol, size=size),
+                            text=mark_text,
+                            hovertemplate="%{x}<br>%{text}<extra></extra>",
+                        ),
+                        row=1,
+                        col=1,
+                    )
+
+            _add_event_trace(strong, "強交叉事件", "diamond", 9)
+            _add_event_trace(normal, "一般交叉事件", "circle", 7)
 
     fig.add_trace(go.Bar(x=x, y=df["成交股數"], name="成交股數"), row=2, col=1)
     fig.add_trace(go.Scatter(x=x, y=df["K"], mode="lines", name="K"), row=3, col=1)
@@ -499,7 +652,7 @@ def _plot_kline(df: pd.DataFrame, stock_label: str, events: pd.DataFrame) -> go.
     fig.update_layout(
         title=f"{stock_label}｜歷史K線分析",
         xaxis_rangeslider_visible=False,
-        height=1040,
+        height=1080,
         margin=dict(l=20, r=20, t=60, b=20),
         legend=dict(orientation="h", y=1.03, x=0),
     )
@@ -544,11 +697,10 @@ def main():
     _init_state(group_map)
 
     render_pro_hero(
-        title="歷史K線分析",
-        subtitle="K線・MA・KD・MACD・雷達評分・支撐壓力・起漲起跌點・交叉事件・事件篩選",
+        title="歷史K線分析｜股神版",
+        subtitle="強化轉折過濾、支撐壓力區帶、事件分級、策略摘要，維持你現有 utils.py 架構。",
     )
 
-    # 快速搜尋
     render_pro_section("快速搜尋股票")
 
     s1, s2 = st.columns([5, 1])
@@ -569,7 +721,6 @@ def main():
             else:
                 st.warning("找不到對應股票。")
 
-    # 查詢條件
     render_pro_section("查詢條件")
     _repair_state(group_map)
 
@@ -656,6 +807,8 @@ def main():
     sr = compute_support_resistance_snapshot(df)
     radar = compute_radar_scores(df)
     events = _build_event_df(df)
+    zone = _build_zone_lines(df, sr)
+    strategy = _build_strategy_summary(df, signal, sr, radar, events)
 
     last = df.iloc[-1]
     prev_close = df["收盤價"].iloc[-2] if len(df) >= 2 else last["收盤價"]
@@ -673,7 +826,6 @@ def main():
         ]
     )
 
-    # KPI
     render_pro_kpi_row(
         [
             {"label": "股票", "value": stock_label, "delta": market_type, "delta_class": "pro-kpi-delta-flat"},
@@ -688,16 +840,15 @@ def main():
         ]
     )
 
-    # 摘要卡
     info1, info2 = st.columns(2)
     with info1:
         render_pro_info_card(
-            "支撐 / 壓力",
+            "支撐 / 壓力區帶",
             [
-                ("20日壓力", _fmt_num(sr.get("res_20"), 2), "pro-down"),
-                ("20日支撐", _fmt_num(sr.get("sup_20"), 2), "pro-up"),
-                ("60日壓力", _fmt_num(sr.get("res_60"), 2), "pro-down"),
-                ("60日支撐", _fmt_num(sr.get("sup_60"), 2), "pro-up"),
+                ("20日壓力區", f"{_fmt_num(zone.get('res20_bot'), 2)} ~ {_fmt_num(zone.get('res20_top'), 2)}", "pro-down"),
+                ("20日支撐區", f"{_fmt_num(zone.get('sup20_bot'), 2)} ~ {_fmt_num(zone.get('sup20_top'), 2)}", "pro-up"),
+                ("60日壓力區", f"{_fmt_num(zone.get('res60_bot'), 2)} ~ {_fmt_num(zone.get('res60_top'), 2)}", "pro-down"),
+                ("60日支撐區", f"{_fmt_num(zone.get('sup60_bot'), 2)} ~ {_fmt_num(zone.get('sup60_top'), 2)}", "pro-up"),
             ],
             chips=[
                 sr.get("pressure_signal", ("中性", ""))[0],
@@ -718,13 +869,29 @@ def main():
             chips=[badge_text, f"雷達均分 {radar_avg:.1f}"],
         )
 
-    # K線圖
     render_pro_section("K線 / 均線 / 成交量 / KD / MACD")
-    st.plotly_chart(_plot_kline(df, stock_label, events), use_container_width=True)
+    st.plotly_chart(_plot_kline(df, stock_label, events, zone), use_container_width=True)
 
-    # 事件摘要
+    render_pro_section("策略報告")
+    report_cols = st.columns(2)
+    with report_cols[0]:
+        render_pro_info_card(
+            "結構定位",
+            [
+                ("目前定位", strategy["定位"], ""),
+                ("趨勢摘要", strategy["趨勢"], ""),
+            ],
+        )
+    with report_cols[1]:
+        render_pro_info_card(
+            "操作策略",
+            [
+                ("壓力支撐", strategy["壓力支撐"], ""),
+                ("策略建議", strategy["策略"], ""),
+            ],
+        )
+
     recent_events = events.head(8).copy()
-    cross_events = recent_events[recent_events["事件類型"].isin(["MA交叉", "KD交叉", "MACD交叉"])].copy()
 
     s1, s2, s3, s4 = st.columns(4)
     with s1:
@@ -737,7 +904,6 @@ def main():
     with s4:
         render_pro_info_card("操作提醒", [(sr.get("break_signal", ("區間內", ""))[0], sr.get("comment_action", "—"), "")])
 
-    # 雷達 / 事件說明
     left, right = st.columns([1, 1])
 
     with left:
@@ -769,9 +935,7 @@ def main():
             ],
         )
 
-    # 事件篩選
     render_pro_section("事件說明與篩選", "可依事件類型查看起漲點 / 起跌點 / MA交叉 / KD交叉 / MACD交叉")
-
     event_type_options = ["全部"]
     if not events.empty:
         event_type_options += sorted(events["事件類型"].dropna().unique().tolist())
@@ -783,7 +947,7 @@ def main():
         st.markdown(
             """
             <div style="padding-top: 28px;">
-            起漲點 / 起跌點：局部轉折。MA / KD / MACD 交叉：用來觀察短中期方向與動能切換。
+            起漲點 / 起跌點已加過濾，降低雜訊；MA / KD / MACD 交叉用來觀察短中期方向與動能切換。
             </div>
             """,
             unsafe_allow_html=True,
@@ -796,9 +960,12 @@ def main():
         if selected_event_type != "全部":
             show_events = show_events[show_events["事件類型"] == selected_event_type].copy()
         show_events["日期"] = pd.to_datetime(show_events["日期"]).dt.strftime("%Y-%m-%d")
-        st.dataframe(show_events[["日期", "事件類型", "事件名稱", "說明", "等級"]], use_container_width=True, hide_index=True)
+        st.dataframe(
+            show_events[["日期", "事件類型", "事件名稱", "說明", "等級"]],
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    # 最近事件摘要表
     render_pro_section("最近事件摘要")
     if recent_events.empty:
         st.info("目前沒有最近事件。")
@@ -807,7 +974,6 @@ def main():
         temp["日期"] = pd.to_datetime(temp["日期"]).dt.strftime("%Y-%m-%d")
         st.dataframe(temp[["日期", "事件類型", "事件名稱", "說明", "等級"]], use_container_width=True, hide_index=True)
 
-    # 技術指標明細
     render_pro_section("技術指標明細")
     detail_cols = [
         "日期",
