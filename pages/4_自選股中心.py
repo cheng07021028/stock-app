@@ -224,7 +224,6 @@ def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
     st.session_state[_k("version")] = version
     st.session_state[_k("payload_hash")] = payload_md5
 
-    # 跨頁真同步：其他頁可直接讀這些 shared state
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
     st.session_state["watchlist_version"] = version
     st.session_state["watchlist_last_saved_at"] = saved_at
@@ -345,6 +344,13 @@ def _init_state():
 
     if _k("clear_group_confirm") not in st.session_state:
         st.session_state[_k("clear_group_confirm")] = False
+
+    # 下一輪套用，避免 StreamlitAPIException
+    if _k("batch_delete_codes_next") in st.session_state:
+        st.session_state[_k("batch_delete_codes")] = st.session_state.pop(_k("batch_delete_codes_next"))
+
+    if _k("clear_group_confirm_next") in st.session_state:
+        st.session_state[_k("clear_group_confirm")] = st.session_state.pop(_k("clear_group_confirm_next"))
 
     if _k("add_code_next") in st.session_state:
         st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
@@ -580,6 +586,8 @@ def _delete_group(group_name: str) -> tuple[bool, str]:
     groups = list(watchlist.keys())
     st.session_state[_k("selected_group_next")] = groups[0] if groups else ""
     st.session_state[_k("rename_group_name_next")] = groups[0] if groups else ""
+    st.session_state[_k("batch_delete_codes_next")] = []
+    st.session_state[_k("clear_group_confirm_next")] = False
 
     return True, f"已刪除群組：{g}"
 
@@ -604,7 +612,7 @@ def _delete_multiple_stocks(group_name: str, codes: list[str]) -> tuple[int, str
     removed = before - len(watchlist[g])
 
     st.session_state[_k("watchlist")] = watchlist
-    st.session_state[_k("batch_delete_codes")] = []
+    st.session_state[_k("batch_delete_codes_next")] = []
 
     if removed <= 0:
         return 0, "沒有可刪除的股票。"
@@ -623,7 +631,8 @@ def _clear_group(group_name: str) -> tuple[int, str]:
     removed = len(watchlist[g])
     watchlist[g] = []
     st.session_state[_k("watchlist")] = watchlist
-    st.session_state[_k("batch_delete_codes")] = []
+    st.session_state[_k("batch_delete_codes_next")] = []
+    st.session_state[_k("clear_group_confirm_next")] = False
 
     return removed, f"已清空群組：{g}（{removed} 檔）"
 
@@ -1014,6 +1023,7 @@ def main():
                 ok, msg = _delete_stock(current_group_name, remove_code)
                 if ok:
                     _persist_watchlist(msg)
+                    st.session_state[_k("batch_delete_codes_next")] = []
                 else:
                     _set_status(msg, "warning")
                 st.rerun()
@@ -1045,7 +1055,7 @@ def main():
 
             with x2:
                 if st.button("全選目前群組", use_container_width=True):
-                    st.session_state[_k("batch_delete_codes")] = all_codes
+                    st.session_state[_k("batch_delete_codes_next")] = all_codes
                     _set_status(f"已全選 {len(all_codes)} 檔，可直接批次刪除。", "info")
                     st.rerun()
 
@@ -1060,7 +1070,6 @@ def main():
             else:
                 removed, msg = _clear_group(current_group_name)
                 _persist_watchlist(msg if removed >= 0 else "已清空群組")
-                st.session_state[_k("clear_group_confirm")] = False
             st.rerun()
 
     render_pro_section("全部自選股總覽")
