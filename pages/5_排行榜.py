@@ -1,4 +1,4 @@
-# pages/5_排行榜.py
+# pages/2_行情查詢.py
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -9,13 +9,14 @@ import requests
 import streamlit as st
 
 from utils import (
-    compute_radar_scores,
     compute_signal_snapshot,
     compute_support_resistance_snapshot,
     format_number,
     get_all_code_name_map,
     get_history_data,
     get_normalized_watchlist,
+    get_realtime_stock_info,
+    get_stock_name_and_market,
     inject_pro_theme,
     load_last_query_state,
     parse_date_safe,
@@ -27,8 +28,8 @@ from utils import (
     score_to_badge,
 )
 
-PAGE_TITLE = "排行榜"
-PFX = "rank_"
+PAGE_TITLE = "行情查詢"
+PFX = "rt_"
 
 
 # =========================================================
@@ -77,8 +78,12 @@ def _to_date(v: Any, fallback: date) -> date:
     return fallback
 
 
+def _html(s: str):
+    st.markdown(s, unsafe_allow_html=True)
+
+
 # =========================================================
-# 群組
+# 群組 / 搜尋
 # =========================================================
 def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
     watchlist = get_normalized_watchlist()
@@ -88,7 +93,6 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
         for group_name, items in watchlist.items():
             g = _safe_str(group_name) or "未分組"
             group_map[g] = []
-
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
@@ -111,7 +115,7 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
             all_df = get_all_code_name_map("")
             if isinstance(all_df, pd.DataFrame) and not all_df.empty:
                 rows = []
-                for _, row in all_df.head(100).iterrows():
+                for _, row in all_df.head(150).iterrows():
                     code = _safe_str(row.get("code"))
                     name = _safe_str(row.get("name")) or code
                     market = _safe_str(row.get("market")) or "上市"
@@ -132,38 +136,76 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
     return group_map
 
 
+def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
+    rows = []
+    for group_name, items in group_map.items():
+        for item in items:
+            rows.append(
+                {
+                    "group": group_name,
+                    "code": _safe_str(item.get("code")),
+                    "name": _safe_str(item.get("name")),
+                    "market": _safe_str(item.get("market")),
+                    "label": _safe_str(item.get("label")),
+                }
+            )
+    return rows
+
+
+def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[str, str] | None:
+    q = _safe_str(keyword).lower()
+    if not q:
+        return None
+
+    for row in flat_rows:
+        if q == row["code"].lower():
+            return row
+    for row in flat_rows:
+        if q == row["name"].lower():
+            return row
+    for row in flat_rows:
+        if q == row["label"].lower():
+            return row
+
+    prefix_hits = [r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
+    if prefix_hits:
+        return prefix_hits[0]
+
+    contain_hits = [
+        r for r in flat_rows
+        if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()
+    ]
+    if contain_hits:
+        return contain_hits[0]
+
+    return None
+
+
 # =========================================================
 # State
 # =========================================================
 def _init_state(group_map: dict[str, list[dict[str, str]]]):
     saved = load_last_query_state()
+    groups = list(group_map.keys())
     today = date.today()
     default_start = today - timedelta(days=180)
     default_end = today
 
-    groups = list(group_map.keys())
-
     if _k("group") not in st.session_state:
         saved_group = _safe_str(saved.get("quick_group", ""))
         st.session_state[_k("group")] = saved_group if saved_group in groups else (groups[0] if groups else "")
+
+    if _k("stock_code") not in st.session_state:
+        st.session_state[_k("stock_code")] = _safe_str(saved.get("quick_stock_code", ""))
+
+    if _k("search_input") not in st.session_state:
+        st.session_state[_k("search_input")] = ""
 
     if _k("start_date") not in st.session_state:
         st.session_state[_k("start_date")] = parse_date_safe(saved.get("home_start"), default_start)
 
     if _k("end_date") not in st.session_state:
         st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
-
-    if _k("sort_by") not in st.session_state:
-        st.session_state[_k("sort_by")] = "綜合評級"
-
-    if _k("ascending") not in st.session_state:
-        st.session_state[_k("ascending")] = False
-
-    if _k("top_n") not in st.session_state:
-        st.session_state[_k("top_n")] = 30
-
-    st.session_state[_k("start_date")] = _to_date(st.session_state.get(_k("start_date")), default_start)
-    st.session_state[_k("end_date")] = _to_date(st.session_state.get(_k("end_date")), default_end)
 
     _repair_state(group_map)
 
@@ -174,10 +216,27 @@ def _repair_state(group_map: dict[str, list[dict[str, str]]]):
 
     if current_group not in group_map:
         st.session_state[_k("group")] = groups[0] if groups else ""
+        current_group = st.session_state[_k("group")]
+
+    items = group_map.get(current_group, [])
+    valid_codes = [x["code"] for x in items]
+    current_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
+
+    if valid_codes:
+        if current_code not in valid_codes:
+            st.session_state[_k("stock_code")] = valid_codes[0]
+    else:
+        st.session_state[_k("stock_code")] = ""
+
+
+def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+    items = group_map.get(current_group, [])
+    st.session_state[_k("stock_code")] = items[0]["code"] if items else ""
 
 
 # =========================================================
-# 歷史資料 smart fallback
+# 歷史資料 + fallback
 # =========================================================
 def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -222,7 +281,6 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
     df["MACD_HIST"] = df["DIF"] - df["DEA"]
 
-    df["漲跌幅(%)"] = close.pct_change() * 100
     return df
 
 
@@ -243,9 +301,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
 
     for dt in month_starts:
         roc_year = dt.year - 1911
-        month = dt.month
-        roc_date = f"{roc_year}/{month:02d}"
-
+        roc_date = f"{roc_year}/{dt.month:02d}"
         try:
             r = requests.get(
                 "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
@@ -256,12 +312,10 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
             )
             r.raise_for_status()
             data = r.json()
-
             aa_data = data.get("aaData", [])
             fields = data.get("fields", [])
             if not aa_data:
                 continue
-
             temp = pd.DataFrame(aa_data, columns=fields if fields and len(fields) == len(aa_data[0]) else None)
             frames.append(temp)
         except Exception:
@@ -291,7 +345,6 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
             rename_map[col] = "收盤價"
         elif "成交筆數" in c:
             rename_map[col] = "成交筆數"
-
     df = df.rename(columns=rename_map)
 
     if "日期" not in df.columns:
@@ -305,10 +358,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
             parts = x.split("/")
             if len(parts) == 3:
                 try:
-                    year = int(parts[0]) + 1911
-                    month = int(parts[1])
-                    day = int(parts[2])
-                    return pd.Timestamp(year=year, month=month, day=day)
+                    return pd.Timestamp(year=int(parts[0]) + 1911, month=int(parts[1]), day=int(parts[2]))
                 except Exception:
                     return pd.NaT
         try:
@@ -343,7 +393,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
     return df
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
     df = get_history_data(
         stock_no=stock_no,
@@ -366,135 +416,134 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
 
 
 # =========================================================
-# 排行榜計算
+# 事件摘要
 # =========================================================
-@st.cache_data(ttl=900, show_spinner=False)
-def _calc_one_rank_row(code: str, name: str, market: str, start_date: date, end_date: date) -> dict[str, Any]:
-    df = _get_history_data_smart(
-        stock_no=code,
-        stock_name=name,
-        market_type=market,
-        start_date=start_date,
-        end_date=end_date,
-    )
+def _build_recent_event_summary(df: pd.DataFrame) -> list[tuple[str, str, str]]:
+    if df is None or df.empty or len(df) < 3:
+        return [("最近事件", "資料不足", "")]
 
-    if df.empty or len(df) < 2:
-        return {
-            "股票代號": code,
-            "股票名稱": name,
-            "市場別": market,
-            "股票": f"{code} {name}",
-            "資料筆數": 0,
-            "綜合評級": None,
-            "燈號": "查無資料",
-            "訊號分數": None,
-            "雷達均分": None,
-            "趨勢": None,
-            "動能": None,
-            "量能": None,
-            "位置": None,
-            "結構": None,
-            "20日壓力": None,
-            "20日支撐": None,
-            "60日壓力": None,
-            "60日支撐": None,
-            "壓力訊號": "—",
-            "支撐訊號": "—",
-            "區間訊號": "—",
-            "區間漲跌幅(%)": None,
-            "最新收盤": None,
-        }
+    rows: list[tuple[str, str, str]] = []
 
-    signal = compute_signal_snapshot(df)
-    sr = compute_support_resistance_snapshot(df)
-    radar = compute_radar_scores(df)
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
 
-    last = df.iloc[-1]
-    first = df.iloc[0]
+        date_text = pd.to_datetime(last["日期"]).strftime("%Y-%m-%d")
 
-    close_now = _safe_float(last.get("收盤價"))
-    close_first = _safe_float(first.get("收盤價"))
-    interval_pct = ((close_now / close_first) - 1) * 100 if close_first not in [None, 0] else None
+        ma5 = _safe_float(last.get("MA5"))
+        ma10 = _safe_float(last.get("MA10"))
+        ma20 = _safe_float(last.get("MA20"))
+        prev_ma5 = _safe_float(prev.get("MA5"))
+        prev_ma10 = _safe_float(prev.get("MA10"))
 
-    radar_avg = None
-    radar_values = [
-        _safe_float(radar.get("trend")),
-        _safe_float(radar.get("momentum")),
-        _safe_float(radar.get("volume")),
-        _safe_float(radar.get("position")),
-        _safe_float(radar.get("structure")),
-    ]
-    radar_values = [x for x in radar_values if x is not None]
-    if radar_values:
-        radar_avg = sum(radar_values) / len(radar_values)
+        if ma5 is not None and ma10 is not None and prev_ma5 is not None and prev_ma10 is not None:
+            if prev_ma5 <= prev_ma10 and ma5 > ma10:
+                rows.append((date_text, "MA黃金交叉", ""))
+            elif prev_ma5 >= prev_ma10 and ma5 < ma10:
+                rows.append((date_text, "MA死亡交叉", ""))
 
-    signal_score = _safe_float(signal.get("score"), 0)
-    total_score = None
-    if radar_avg is not None:
-        total_score = round(signal_score * 10 + radar_avg, 2)
+        k = _safe_float(last.get("K"))
+        d = _safe_float(last.get("D"))
+        prev_k = _safe_float(prev.get("K"))
+        prev_d = _safe_float(prev.get("D"))
+        if k is not None and d is not None and prev_k is not None and prev_d is not None:
+            if prev_k <= prev_d and k > d:
+                rows.append((date_text, "KD黃金交叉", ""))
+            elif prev_k >= prev_d and k < d:
+                rows.append((date_text, "KD死亡交叉", ""))
 
-    badge_text, _ = score_to_badge(signal.get("score", 0))
+        dif = _safe_float(last.get("DIF"))
+        dea = _safe_float(last.get("DEA"))
+        prev_dif = _safe_float(prev.get("DIF"))
+        prev_dea = _safe_float(prev.get("DEA"))
+        if dif is not None and dea is not None and prev_dif is not None and prev_dea is not None:
+            if prev_dif <= prev_dea and dif > dea:
+                rows.append((date_text, "MACD黃金交叉", ""))
+            elif prev_dif >= prev_dea and dif < dea:
+                rows.append((date_text, "MACD死亡交叉", ""))
 
-    return {
-        "股票代號": code,
-        "股票名稱": name,
-        "市場別": market,
-        "股票": f"{code} {name}",
-        "資料筆數": len(df),
-        "綜合評級": total_score,
-        "燈號": badge_text,
-        "訊號分數": signal_score,
-        "雷達均分": radar_avg,
-        "趨勢": radar.get("trend"),
-        "動能": radar.get("momentum"),
-        "量能": radar.get("volume"),
-        "位置": radar.get("position"),
-        "結構": radar.get("structure"),
-        "20日壓力": sr.get("res_20"),
-        "20日支撐": sr.get("sup_20"),
-        "60日壓力": sr.get("res_60"),
-        "60日支撐": sr.get("sup_60"),
-        "壓力訊號": sr.get("pressure_signal", ("—", ""))[0],
-        "支撐訊號": sr.get("support_signal", ("—", ""))[0],
-        "區間訊號": sr.get("break_signal", ("—", ""))[0],
-        "區間漲跌幅(%)": interval_pct,
-        "最新收盤": close_now,
-    }
+        if len(df) >= 20 and all(c in df.columns for c in ["最高價", "最低價", "收盤價"]):
+            df20 = df.tail(20)
+            high20 = _safe_float(df20["最高價"].max())
+            low20 = _safe_float(df20["最低價"].min())
+            close_price = _safe_float(last.get("收盤價"))
+            if close_price is not None and high20 is not None and close_price >= high20:
+                rows.append((date_text, "突破20日高", ""))
+            if close_price is not None and low20 is not None and close_price <= low20:
+                rows.append((date_text, "跌破20日低", ""))
 
-
-def _build_rank_df(group_map: dict[str, list[dict[str, str]]], selected_group: str, start_date: date, end_date: date) -> pd.DataFrame:
-    items = group_map.get(selected_group, [])
-    rows = []
-
-    for item in items:
-        code = _safe_str(item.get("code"))
-        name = _safe_str(item.get("name"))
-        market = _safe_str(item.get("market")) or "上市"
-        if not code:
-            continue
-        rows.append(_calc_one_rank_row(code, name, market, start_date, end_date))
+        if ma20 is not None:
+            close_price = _safe_float(last.get("收盤價"))
+            if close_price is not None:
+                if close_price > ma20:
+                    rows.append((date_text, "站上MA20", ""))
+                else:
+                    rows.append((date_text, "跌落MA20下", ""))
+    except Exception:
+        pass
 
     if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-    return df
+        return [("最近事件", "目前無明確新事件", "")]
+    return rows[:6]
 
 
-def _format_rank_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
+# =========================================================
+# 即時卡片
+# =========================================================
+def _render_realtime_hero(info: dict[str, Any], stock_label: str, market_type: str):
+    price = _safe_float(info.get("price"))
+    prev_close = _safe_float(info.get("prev_close"))
+    open_price = _safe_float(info.get("open"))
+    high_price = _safe_float(info.get("high"))
+    low_price = _safe_float(info.get("low"))
+    change = _safe_float(info.get("change"))
+    change_pct = _safe_float(info.get("change_pct"))
+    total_volume = _safe_float(info.get("total_volume"))
+    update_time = _safe_str(info.get("update_time"))
 
-    out = df.copy()
-    numeric_cols = [
-        "綜合評級", "訊號分數", "雷達均分", "趨勢", "動能", "量能", "位置", "結構",
-        "20日壓力", "20日支撐", "60日壓力", "60日支撐", "區間漲跌幅(%)", "最新收盤"
-    ]
-    for col in numeric_cols:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+    delta_text = "—"
+    if change is not None and change_pct is not None:
+        delta_text = f"{change:+.2f} ({change_pct:+.2f}%)"
+    elif change is not None:
+        delta_text = f"{change:+.2f}"
 
-    return out
+    render_pro_kpi_row(
+        [
+            {
+                "label": "現價",
+                "value": format_number(price, 2),
+                "delta": delta_text,
+                "delta_class": "pro-kpi-delta-up" if (change or 0) > 0 else ("pro-kpi-delta-down" if (change or 0) < 0 else "pro-kpi-delta-flat"),
+            },
+            {
+                "label": "開盤",
+                "value": format_number(open_price, 2),
+                "delta": market_type,
+                "delta_class": "pro-kpi-delta-flat",
+            },
+            {
+                "label": "最高 / 最低",
+                "value": f"{format_number(high_price, 2)} / {format_number(low_price, 2)}",
+                "delta": f"昨收 {format_number(prev_close, 2)}",
+                "delta_class": "pro-kpi-delta-flat",
+            },
+            {
+                "label": "總量",
+                "value": format_number(total_volume, 0),
+                "delta": update_time or "—",
+                "delta_class": "pro-kpi-delta-flat",
+            },
+        ]
+    )
+
+    _html(
+        f"""
+        <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-radius:18px;padding:14px 16px;margin-bottom:14px;">
+            <div style="font-size:22px;font-weight:900;color:#f8fafc;">{stock_label}</div>
+            <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">市場：{market_type}｜更新時間：{update_time or '—'}</div>
+        </div>
+        """
+    )
 
 
 # =========================================================
@@ -505,190 +554,181 @@ def main():
     inject_pro_theme()
 
     group_map = _build_group_stock_map()
+    flat_rows = _flatten_group_map(group_map)
     _init_state(group_map)
-    _repair_state(group_map)
 
     render_pro_hero(
-        title="排行榜｜股神版",
-        subtitle="綜合評級、訊號分數、雷達分數、支撐壓力、區間漲跌幅，可排序，支援上櫃 smart history。",
+        title="行情查詢｜股神版",
+        subtitle="單股即時資訊、訊號燈號、支撐壓力、最近事件摘要，一頁快速看懂。",
     )
 
-    groups = list(group_map.keys())
-    selected_group = _safe_str(st.session_state.get(_k("group"), ""))
-    start_date = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=180))
-    end_date = _to_date(st.session_state.get(_k("end_date")), date.today())
+    render_pro_section("快速搜尋股票")
+    s1, s2 = st.columns([5, 1])
+
+    with s1:
+        st.text_input(
+            "輸入股票代碼或名稱",
+            key=_k("search_input"),
+            placeholder="例如：2330、台積電、3548 兆利",
+            label_visibility="collapsed",
+        )
+
+    with s2:
+        if st.button("帶入", use_container_width=True, type="primary"):
+            target = _find_search_target(st.session_state.get(_k("search_input"), ""), flat_rows)
+            if target:
+                st.session_state[_k("group")] = target["group"]
+                st.session_state[_k("stock_code")] = target["code"]
+                save_last_query_state(
+                    quick_group=target["group"],
+                    quick_stock_code=target["code"],
+                    home_start=st.session_state.get(_k("start_date")),
+                    home_end=st.session_state.get(_k("end_date")),
+                )
+                st.rerun()
+            else:
+                st.warning("找不到對應股票。")
 
     render_pro_section("查詢條件")
+    _repair_state(group_map)
 
-    c1, c2, c3, c4, c5 = st.columns([2, 2, 2, 2, 2])
+    groups = list(group_map.keys())
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+    items = group_map.get(current_group, [])
+    code_to_item = {x["code"]: x for x in items}
+    code_options = [x["code"] for x in items]
 
+    c1, c2 = st.columns([2, 3])
     with c1:
-        st.selectbox("群組", options=groups if groups else [""], key=_k("group"))
-
+        st.selectbox("選擇群組", options=groups, key=_k("group"), on_change=_on_group_change, args=(group_map,))
     with c2:
-        st.date_input("開始日期", key=_k("start_date"))
-
-    with c3:
-        st.date_input("結束日期", key=_k("end_date"))
-
-    with c4:
         st.selectbox(
-            "排序欄位",
-            options=["綜合評級", "訊號分數", "雷達均分", "區間漲跌幅(%)", "最新收盤"],
-            key=_k("sort_by"),
+            "群組股票",
+            options=code_options if code_options else [""],
+            key=_k("stock_code"),
+            format_func=lambda code: code_to_item.get(code, {}).get("label", code),
         )
 
-    with c5:
-        st.selectbox(
-            "排序方向",
-            options=["由高到低", "由低到高"],
-            index=0 if not st.session_state.get(_k("ascending"), False) else 1,
-            key=_k("sort_order_text"),
-        )
-        st.session_state[_k("ascending")] = st.session_state.get(_k("sort_order_text")) == "由低到高"
+    selected_group = _safe_str(st.session_state.get(_k("group"), ""))
+    selected_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
 
-    d1, d2 = st.columns([2, 2])
-    with d1:
-        st.slider("顯示筆數", min_value=5, max_value=100, value=st.session_state.get(_k("top_n"), 30), step=5, key=_k("top_n"))
-    with d2:
-        st.caption(f"目前群組：{selected_group}")
-
-    if start_date > end_date:
-        st.error("開始日期不可大於結束日期。")
+    if not selected_code or selected_code not in code_to_item:
+        st.warning("請先選擇股票。")
         st.stop()
+
+    selected_item = code_to_item[selected_code]
+    stock_name = _safe_str(selected_item.get("name"))
+    market_type = _safe_str(selected_item.get("market")) or "上市"
+    stock_label = f"{selected_code} {stock_name}"
 
     save_last_query_state(
         quick_group=selected_group,
-        quick_stock_code="",
-        home_start=start_date,
-        home_end=end_date,
+        quick_stock_code=selected_code,
+        home_start=st.session_state.get(_k("start_date")),
+        home_end=st.session_state.get(_k("end_date")),
     )
 
-    with st.spinner("計算排行榜中..."):
-        rank_df = _build_rank_df(group_map, selected_group, start_date, end_date)
-        rank_df = _format_rank_df(rank_df)
+    with st.spinner("載入即時資料中..."):
+        all_code_name_df = get_all_code_name_map("")
+        stock_name2, market_type2 = get_stock_name_and_market(selected_code, all_code_name_df, stock_name)
+        info = get_realtime_stock_info(selected_code, stock_name2 or stock_name, market_type2 or market_type)
 
-    if rank_df.empty:
-        st.error("查無排行榜資料。")
-        st.stop()
+    start_date = date.today() - timedelta(days=180)
+    end_date = date.today()
 
-    sort_by = _safe_str(st.session_state.get(_k("sort_by"), "綜合評級"))
-    ascending = bool(st.session_state.get(_k("ascending"), False))
-    top_n = int(st.session_state.get(_k("top_n"), 30))
-
-    if sort_by in rank_df.columns:
-        rank_df = rank_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
-
-    show_df = rank_df.head(top_n).copy()
-
-    valid_rating_df = rank_df.dropna(subset=["綜合評級"])
-    best_row = valid_rating_df.iloc[0] if not valid_rating_df.empty else None
-    worst_row = valid_rating_df.iloc[-1] if not valid_rating_df.empty else None
-
-    strong_bull_count = int((rank_df["燈號"] == "強多").sum()) if "燈號" in rank_df.columns else 0
-    strong_bear_count = int((rank_df["燈號"] == "強空").sum()) if "燈號" in rank_df.columns else 0
-
-    render_pro_kpi_row(
-        [
-            {
-                "label": "群組股票數",
-                "value": len(rank_df),
-                "delta": selected_group,
-                "delta_class": "pro-kpi-delta-flat",
-            },
-            {
-                "label": "最強股",
-                "value": _safe_str(best_row["股票"]) if best_row is not None else "—",
-                "delta": format_number(best_row["綜合評級"], 2) if best_row is not None else "—",
-                "delta_class": "pro-kpi-delta-flat",
-            },
-            {
-                "label": "最弱股",
-                "value": _safe_str(worst_row["股票"]) if worst_row is not None else "—",
-                "delta": format_number(worst_row["綜合評級"], 2) if worst_row is not None else "—",
-                "delta_class": "pro-kpi-delta-flat",
-            },
-            {
-                "label": "強多 / 強空",
-                "value": f"{strong_bull_count} / {strong_bear_count}",
-                "delta": "燈號統計",
-                "delta_class": "pro-kpi-delta-flat",
-            },
-        ]
+    history_df = _get_history_data_smart(
+        stock_no=selected_code,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_date=start_date,
+        end_date=end_date,
     )
 
-    left, right = st.columns([1, 1])
+    signal_snapshot = compute_signal_snapshot(history_df) if not history_df.empty else {}
+    sr_snapshot = compute_support_resistance_snapshot(history_df) if not history_df.empty else {}
+    badge_text, _ = score_to_badge(signal_snapshot.get("score", 0)) if signal_snapshot else ("整理", "pro-flat")
+    recent_events = _build_recent_event_summary(history_df)
+
+    _render_realtime_hero(info, stock_label, market_type)
+
+    left, right = st.columns([1.15, 1.85])
 
     with left:
-        if best_row is not None:
-            render_pro_info_card(
-                "最強股摘要",
-                [
-                    ("股票", _safe_str(best_row["股票"]), ""),
-                    ("綜合評級", format_number(best_row["綜合評級"], 2), ""),
-                    ("燈號", _safe_str(best_row["燈號"]), ""),
-                    ("訊號分數", format_number(best_row["訊號分數"], 2), ""),
-                    ("雷達均分", format_number(best_row["雷達均分"], 2), ""),
-                    ("區間漲跌幅", format_number(best_row["區間漲跌幅(%)"], 2) + "%", ""),
-                ],
-            )
+        render_pro_info_card(
+            "訊號燈號",
+            [
+                ("燈號", badge_text, ""),
+                ("均線趨勢", _safe_str(signal_snapshot.get("ma_trend", ("—", ""))[0]), ""),
+                ("KD交叉", _safe_str(signal_snapshot.get("kd_cross", ("—", ""))[0]), ""),
+                ("MACD趨勢", _safe_str(signal_snapshot.get("macd_trend", ("—", ""))[0]), ""),
+                ("價位狀態", _safe_str(signal_snapshot.get("price_vs_ma20", ("—", ""))[0]), ""),
+                ("量能狀態", _safe_str(signal_snapshot.get("volume_state", ("—", ""))[0]), ""),
+            ],
+            chips=[badge_text],
+        )
+
+        render_pro_info_card(
+            "最近事件摘要",
+            recent_events,
+            chips=[market_type],
+        )
 
     with right:
         render_pro_info_card(
-            "排行榜說明",
+            "支撐壓力",
             [
-                ("綜合評級", "訊號分數 × 10 + 雷達均分。", ""),
-                ("排序", "可切換依綜合評級、訊號、雷達、漲跌幅排序。", ""),
-                ("資料來源", "先走既有 history，再對上櫃走 fallback。", ""),
-                ("用途", "先抓最強最弱，再往下看支撐壓力與區間訊號。", ""),
+                ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
+                ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
+                ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
+                ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
+                ("壓力訊號", _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0]), ""),
+                ("支撐訊號", _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0]), ""),
+                ("區間判斷", _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0]), ""),
             ],
+            chips=["結構位階"],
         )
 
-    render_pro_section("排行榜明細")
+        render_pro_info_card(
+            "股神快速判讀",
+            [
+                ("目前結論", _safe_str(signal_snapshot.get("comment", "資料不足")), ""),
+                ("趨勢觀察", _safe_str(sr_snapshot.get("comment_trend", "資料不足")), ""),
+                ("風險提醒", _safe_str(sr_snapshot.get("comment_risk", "資料不足")), ""),
+                ("焦點重點", _safe_str(sr_snapshot.get("comment_focus", "資料不足")), ""),
+                ("操作提醒", _safe_str(sr_snapshot.get("comment_action", "資料不足")), ""),
+            ],
+            chips=[badge_text, market_type],
+        )
 
-    display_cols = [
-        "股票",
-        "市場別",
-        "綜合評級",
-        "燈號",
-        "訊號分數",
-        "雷達均分",
-        "趨勢",
-        "動能",
-        "量能",
-        "位置",
-        "結構",
-        "最新收盤",
-        "區間漲跌幅(%)",
-        "20日壓力",
-        "20日支撐",
-        "60日壓力",
-        "60日支撐",
-        "壓力訊號",
-        "支撐訊號",
-        "區間訊號",
-        "資料筆數",
-    ]
-    display_cols = [c for c in display_cols if c in show_df.columns]
-    st.dataframe(show_df[display_cols], use_container_width=True, hide_index=True)
-
-    render_pro_section("強弱摘要")
-
-    if not valid_rating_df.empty:
-        top5 = valid_rating_df.head(5)[["股票", "綜合評級", "燈號", "區間漲跌幅(%)"]].copy()
-        bottom5 = valid_rating_df.tail(5)[["股票", "綜合評級", "燈號", "區間漲跌幅(%)"]].copy()
-
-        g1, g2 = st.columns(2)
-        with g1:
-            st.markdown("#### 前 5 強")
-            st.dataframe(top5, use_container_width=True, hide_index=True)
-        with g2:
-            st.markdown("#### 後 5 弱")
-            st.dataframe(bottom5, use_container_width=True, hide_index=True)
+    with st.expander("原始即時資料"):
+        raw_df = pd.DataFrame(
+            [
+                {
+                    "股票代號": selected_code,
+                    "股票名稱": stock_name,
+                    "市場別": market_type,
+                    "現價": info.get("price"),
+                    "昨收": info.get("prev_close"),
+                    "開盤": info.get("open"),
+                    "最高": info.get("high"),
+                    "最低": info.get("low"),
+                    "漲跌": info.get("change"),
+                    "漲跌幅(%)": info.get("change_pct"),
+                    "總量": info.get("total_volume"),
+                    "單量": info.get("trade_volume"),
+                    "更新時間": info.get("update_time"),
+                    "是否成功": info.get("ok"),
+                    "訊息": info.get("message"),
+                }
+            ]
+        )
+        st.dataframe(raw_df, use_container_width=True, hide_index=True)
 
     with st.expander("效能說明"):
-        st.write("這版已做 cache，並對上櫃 / 興櫃補 smart history fallback。")
-        st.write("如果你還要更快，下一步我建議把首頁也接排行榜摘要快取。")
+        st.write("1. 即時資料與歷史資料分開處理。")
+        st.write("2. 歷史資料用 cache，避免每次重抓。")
+        st.write("3. 上櫃股票會自動嘗試 fallback。")
+        st.write("4. 群組與股票選擇以 session_state 真同步。")
 
 
 if __name__ == "__main__":
