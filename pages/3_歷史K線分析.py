@@ -75,6 +75,10 @@ def _to_date(v: Any, fallback: date) -> date:
     return fallback
 
 
+def _html(text: str):
+    st.markdown(text, unsafe_allow_html=True)
+
+
 # =========================================================
 # 群組 / 搜尋
 # =========================================================
@@ -596,6 +600,375 @@ def _slice_by_focus(df: pd.DataFrame, event_df: pd.DataFrame, focus_event_idx: i
 
 
 # =========================================================
+# 樣式
+# =========================================================
+def _event_style(event_type: str) -> dict[str, str]:
+    mapping = {
+        "起漲點": {"bg": "#ecfdf5", "border": "#10b981", "tag": "#047857", "text": "#065f46"},
+        "起跌點": {"bg": "#fef2f2", "border": "#ef4444", "tag": "#b91c1c", "text": "#7f1d1d"},
+        "MA": {"bg": "#eff6ff", "border": "#3b82f6", "tag": "#1d4ed8", "text": "#1e3a8a"},
+        "KD": {"bg": "#faf5ff", "border": "#a855f7", "tag": "#7e22ce", "text": "#581c87"},
+        "MACD": {"bg": "#fff7ed", "border": "#f97316", "tag": "#c2410c", "text": "#9a3412"},
+        "突破": {"bg": "#f0fdfa", "border": "#14b8a6", "tag": "#0f766e", "text": "#134e4a"},
+        "跌破": {"bg": "#f8fafc", "border": "#334155", "tag": "#0f172a", "text": "#334155"},
+    }
+    return mapping.get(event_type, {"bg": "#f8fafc", "border": "#94a3b8", "tag": "#475569", "text": "#334155"})
+
+
+def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
+    name = _safe_str(event_name)
+    typ = _safe_str(event_type)
+
+    if typ in ["起漲點", "突破"]:
+        return {"arrow": "↑", "label": "偏多", "bg": "#dcfce7", "color": "#166534"}
+    if typ in ["起跌點", "跌破"]:
+        return {"arrow": "↓", "label": "偏空", "bg": "#fee2e2", "color": "#991b1b"}
+    if "黃金交叉" in name:
+        return {"arrow": "↑", "label": "轉強", "bg": "#dbeafe", "color": "#1d4ed8"}
+    if "死亡交叉" in name:
+        return {"arrow": "↓", "label": "轉弱", "bg": "#fee2e2", "color": "#b91c1c"}
+    return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
+
+
+# =========================================================
+# 股神觀點
+# =========================================================
+def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict, event_df: pd.DataFrame):
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    k_val = _safe_float(last.get("K"))
+    d_val = _safe_float(last.get("D"))
+    dif = _safe_float(last.get("DIF"))
+    dea = _safe_float(last.get("DEA"))
+
+    views = []
+
+    if close_now is not None and ma20 is not None and ma60 is not None:
+        if close_now > ma20 and close_now > ma60:
+            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之上，中期結構偏多。", ""))
+        elif close_now < ma20 and close_now < ma60:
+            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之下，中期結構偏弱。", ""))
+        else:
+            views.append(("趨勢觀點", "股價位在中期均線交界區，屬整理與等待方向選擇。", ""))
+
+    if k_val is not None and d_val is not None and dif is not None and dea is not None:
+        if k_val > d_val and dif > dea:
+            views.append(("動能觀點", "KD 與 MACD 同步偏多，短線攻擊動能較佳。", ""))
+        elif k_val < d_val and dif < dea:
+            views.append(("動能觀點", "KD 與 MACD 同步偏弱，反彈宜防再轉弱。", ""))
+        else:
+            views.append(("動能觀點", "擺盪動能與趨勢動能未完全共振，走勢容易反覆。", ""))
+
+    pressure_text = _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0])
+    support_text = _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0])
+    break_text = _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0])
+
+    if "突破" in break_text:
+        views.append(("結構觀點", "目前屬突破結構，關鍵在突破後是否守住，不是只看站上那一刻。", ""))
+    elif "跌破" in break_text:
+        views.append(("結構觀點", "目前屬跌破結構，若無法快速站回，弱勢延續機率較高。", ""))
+    else:
+        if "接近20日壓力" in pressure_text:
+            views.append(("結構觀點", "股價逼近短壓，沒有量就容易變成假突破或震盪。", ""))
+        elif "接近20日支撐" in support_text:
+            views.append(("結構觀點", "股價接近短撐，重點看是否出現防守量與止跌K棒。", ""))
+        else:
+            views.append(("結構觀點", "目前位於區間內部，較適合等待明確突破或跌破再提高把握度。", ""))
+
+    radar_avg = round(sum([
+        _safe_float(radar.get("trend"), 50),
+        _safe_float(radar.get("momentum"), 50),
+        _safe_float(radar.get("volume"), 50),
+        _safe_float(radar.get("position"), 50),
+        _safe_float(radar.get("structure"), 50),
+    ]) / 5, 1)
+    views.append(("雷達總評", f"五維均分約 {radar_avg}，{_safe_str(radar.get('summary', '—'))}", ""))
+
+    if event_df is not None and not event_df.empty:
+        last_event = event_df.iloc[0]
+        views.append(("最近關鍵事件", f"{_safe_str(last_event.get('事件'))}：{_safe_str(last_event.get('說明'))}", ""))
+
+    score = _safe_float(signal_snapshot.get("score"), 0)
+    if score >= 4:
+        action_text = "偏多架構，但在壓力區不建議無量追價，較佳節奏是等拉回不破或突破後續強。"
+    elif score >= 2:
+        action_text = "偏多但未到全面強攻，宜觀察回測支撐是否守穩。"
+    elif score <= -4:
+        action_text = "偏空結構明確，風險控管應優先於抄底預設。"
+    elif score <= -2:
+        action_text = "弱勢整理機率高，除非出現止跌與量能改善，否則先保守。"
+    else:
+        action_text = "多空混合，最佳策略通常不是猜，而是等關鍵位表態後再跟。"
+    views.append(("股神操作觀點", action_text, ""))
+
+    return views
+
+
+# =========================================================
+# 摘要條
+# =========================================================
+def _render_focus_summary_bar(filtered_event_df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, badge_text: str):
+    focus_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+
+    if focus_idx >= 0 and filtered_event_df is not None and not filtered_event_df.empty and focus_idx < len(filtered_event_df):
+        row = filtered_event_df.iloc[focus_idx]
+        event_type = _safe_str(row["事件分類"])
+        event_name = _safe_str(row["事件"])
+        event_desc = _safe_str(row["說明"])
+        try:
+            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
+        except Exception:
+            d = _safe_str(row["日期"])
+
+        style = _event_style(event_type)
+        direction = _event_direction_meta(event_name, event_type)
+
+        _html(f"""
+        <div style="
+            background: linear-gradient(135deg, {style['bg']} 0%, #ffffff 100%);
+            border: 2px solid {style['border']};
+            border-radius: 18px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            box-shadow: 0 8px 20px rgba(15,23,42,0.06);
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <span style="font-size:12px; font-weight:800; color:white; background:{style['tag']}; padding:4px 10px; border-radius:999px;">
+                        {event_type}
+                    </span>
+                    <span style="font-size:12px; font-weight:800; color:{direction['color']}; background:{direction['bg']}; padding:4px 10px; border-radius:999px;">
+                        {direction['arrow']} {direction['label']}
+                    </span>
+                    <span style="font-size:12px; font-weight:700; color:#475569;">
+                        {d}
+                    </span>
+                </div>
+                <div style="font-size:12px; font-weight:800; color:#1e293b;">
+                    目前焦點事件
+                </div>
+            </div>
+
+            <div style="font-size:20px; font-weight:900; color:{style['text']}; margin-top:10px; margin-bottom:6px;">
+                {event_name}
+            </div>
+            <div style="font-size:13px; color:#475569; line-height:1.7;">
+                {event_desc}
+            </div>
+        </div>
+        """)
+    else:
+        trend_text = _safe_str(signal_snapshot.get("ma_trend", ("整理", ""))[0])
+        kd_text = _safe_str(signal_snapshot.get("kd_cross", ("無新交叉", ""))[0])
+        macd_text = _safe_str(signal_snapshot.get("macd_trend", ("整理", ""))[0])
+        break_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+
+        _html(f"""
+        <div style="
+            background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
+            border: 2px solid #bfdbfe;
+            border-radius: 18px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            box-shadow: 0 8px 20px rgba(15,23,42,0.06);
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <span style="font-size:12px; font-weight:800; color:white; background:#1d4ed8; padding:4px 10px; border-radius:999px;">
+                        全區間摘要
+                    </span>
+                    <span style="font-size:12px; font-weight:800; color:#1e3a8a; background:#dbeafe; padding:4px 10px; border-radius:999px;">
+                        燈號 {badge_text}
+                    </span>
+                </div>
+                <div style="font-size:12px; font-weight:800; color:#1e293b;">
+                    目前全區間狀態
+                </div>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+                <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">均線：{trend_text}</span>
+                <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">KD：{kd_text}</span>
+                <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">MACD：{macd_text}</span>
+                <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">結構：{break_text}</span>
+            </div>
+        </div>
+        """)
+
+
+def _render_key_price_bar(df: pd.DataFrame, sr_snapshot: dict):
+    if df is None or df.empty:
+        return
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    res60 = _safe_float(sr_snapshot.get("res_60"))
+    sup60 = _safe_float(sr_snapshot.get("sup_60"))
+
+    def dist_to_pressure(target, price):
+        if target in [None, 0] or price is None:
+            return "—"
+        pct = ((target - price) / target) * 100
+        return f"{pct:+.2f}%"
+
+    def dist_to_support(target, price):
+        if target in [None, 0] or price is None:
+            return "—"
+        pct = ((price - target) / target) * 100
+        return f"{pct:+.2f}%"
+
+    pressure_dist = dist_to_pressure(res20, close_now)
+    support_dist = dist_to_support(sup20, close_now)
+    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+
+    _html(f"""
+    <div style="
+        background: linear-gradient(135deg, #0f172a 0%, #162033 45%, #1e293b 100%);
+        border: 1px solid rgba(148,163,184,0.2);
+        border-radius: 18px;
+        padding: 14px 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 10px 26px rgba(15,23,42,0.18);
+    ">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+            <div style="font-size:13px; font-weight:800; color:#e2e8f0;">
+                關鍵價位摘要條
+            </div>
+            <div style="font-size:12px; font-weight:800; color:#cbd5e1;">
+                結構：{structure_text}
+            </div>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <span style="font-size:12px; font-weight:900; color:#f8fafc; background:rgba(255,255,255,0.08); padding:6px 10px; border-radius:999px;">現價：{format_number(close_now, 2)}</span>
+            <span style="font-size:12px; font-weight:800; color:#fecaca; background:rgba(239,68,68,0.15); padding:6px 10px; border-radius:999px;">20日壓力：{format_number(res20, 2)}</span>
+            <span style="font-size:12px; font-weight:800; color:#bbf7d0; background:rgba(16,185,129,0.15); padding:6px 10px; border-radius:999px;">20日支撐：{format_number(sup20, 2)}</span>
+            <span style="font-size:12px; font-weight:800; color:#fecaca; background:rgba(244,63,94,0.12); padding:6px 10px; border-radius:999px;">60日壓力：{format_number(res60, 2)}</span>
+            <span style="font-size:12px; font-weight:800; color:#bbf7d0; background:rgba(34,197,94,0.12); padding:6px 10px; border-radius:999px;">60日支撐：{format_number(sup60, 2)}</span>
+            <span style="font-size:12px; font-weight:800; color:#e0f2fe; background:rgba(14,165,233,0.14); padding:6px 10px; border-radius:999px;">距20壓力：{pressure_dist}</span>
+            <span style="font-size:12px; font-weight:800; color:#e0f2fe; background:rgba(14,165,233,0.14); padding:6px 10px; border-radius:999px;">距20支撐：{support_dist}</span>
+        </div>
+    </div>
+    """)
+
+
+# =========================================================
+# 左側事件面板
+# =========================================================
+def _render_left_event_panel(filtered_event_df: pd.DataFrame):
+    st.markdown("### 事件面板")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("上一事件", key=_k("prev_event"), use_container_width=True):
+            if filtered_event_df is not None and not filtered_event_df.empty:
+                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+                valid = filtered_event_df.index.tolist()
+                if cur_idx in valid:
+                    pos = valid.index(cur_idx)
+                    st.session_state[_k("focus_event_idx")] = valid[max(0, pos - 1)]
+                else:
+                    st.session_state[_k("focus_event_idx")] = valid[0]
+                st.rerun()
+
+    with c2:
+        if st.button("下一事件", key=_k("next_event"), use_container_width=True):
+            if filtered_event_df is not None and not filtered_event_df.empty:
+                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+                valid = filtered_event_df.index.tolist()
+                if cur_idx in valid:
+                    pos = valid.index(cur_idx)
+                    st.session_state[_k("focus_event_idx")] = valid[min(len(valid) - 1, pos + 1)]
+                else:
+                    st.session_state[_k("focus_event_idx")] = valid[0]
+                st.rerun()
+
+    with c3:
+        if st.button("全區間", key=_k("back_all"), use_container_width=True):
+            st.session_state[_k("focus_event_idx")] = -1
+            st.rerun()
+
+    limit = int(st.session_state.get(_k("left_panel_limit"), 12))
+    panel_df = filtered_event_df.head(limit) if filtered_event_df is not None else pd.DataFrame()
+
+    if panel_df is None or panel_df.empty:
+        st.info("目前沒有可切換事件。")
+        return
+
+    for idx, row in panel_df.iterrows():
+        try:
+            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
+        except Exception:
+            d = _safe_str(row["日期"])
+
+        current_focus = int(st.session_state.get(_k("focus_event_idx"), -1))
+        event_type = _safe_str(row["事件分類"])
+        event_name = _safe_str(row["事件"])
+        subtitle = _safe_str(row["說明"])
+
+        style = _event_style(event_type)
+        direction = _event_direction_meta(event_name, event_type)
+
+        is_active = idx == current_focus
+        active_shadow = "0 0 0 3px rgba(29,78,216,0.18)" if is_active else "none"
+        active_border = "#1d4ed8" if is_active else style["border"]
+
+        _html(f"""
+        <div style="
+            border:2px solid {active_border};
+            background:{style['bg']};
+            border-radius:16px;
+            padding:12px 12px 10px 12px;
+            margin-bottom:10px;
+            box-shadow:{active_shadow};
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
+                <div style="font-size:12px; color:#475569; font-weight:700;">{d}</div>
+                <div style="
+                    font-size:11px;
+                    font-weight:800;
+                    color:white;
+                    background:{style['tag']};
+                    padding:4px 8px;
+                    border-radius:999px;
+                ">{event_type}</div>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
+                <div style="font-size:15px; font-weight:900; color:{style['text']};">
+                    {event_name}
+                </div>
+                <div style="
+                    min-width:64px;
+                    text-align:center;
+                    font-size:12px;
+                    font-weight:900;
+                    color:{direction['color']};
+                    background:{direction['bg']};
+                    padding:4px 8px;
+                    border-radius:999px;
+                    border:1px solid rgba(15,23,42,0.08);
+                ">
+                    {direction['arrow']} {direction['label']}
+                </div>
+            </div>
+
+            <div style="font-size:12px; color:#475569; line-height:1.55;">
+                {subtitle}
+            </div>
+        </div>
+        """)
+
+        if st.button(f"切到這個事件 {idx + 1}", key=_k(f"focus_btn_{idx}"), use_container_width=True):
+            st.session_state[_k("focus_event_idx")] = idx
+            st.rerun()
+
+
+# =========================================================
 # 圖表
 # =========================================================
 def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: list[int], trough_idx: list[int]) -> go.Figure:
@@ -616,14 +989,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         for n in [5, 10, 20, 60, 120, 240]:
             col = f"MA{n}"
             if col in df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df["日期"],
-                        y=df[col],
-                        mode="lines",
-                        name=col,
-                    )
-                )
+                fig.add_trace(go.Scatter(x=df["日期"], y=df[col], mode="lines", name=col))
 
     if show_pivots:
         if trough_idx:
@@ -685,385 +1051,6 @@ def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
 
 
 # =========================================================
-# 股神觀點
-# =========================================================
-def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict, event_df: pd.DataFrame):
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"))
-    ma20 = _safe_float(last.get("MA20"))
-    ma60 = _safe_float(last.get("MA60"))
-    k_val = _safe_float(last.get("K"))
-    d_val = _safe_float(last.get("D"))
-    dif = _safe_float(last.get("DIF"))
-    dea = _safe_float(last.get("DEA"))
-
-    views = []
-
-    if close_now is not None and ma20 is not None and ma60 is not None:
-        if close_now > ma20 and close_now > ma60:
-            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之上，中期結構偏多。", ""))
-        elif close_now < ma20 and close_now < ma60:
-            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之下，中期結構偏弱。", ""))
-        else:
-            views.append(("趨勢觀點", "股價位在中期均線交界區，屬整理與等待方向選擇。", ""))
-
-    if k_val is not None and d_val is not None and dif is not None and dea is not None:
-        if k_val > d_val and dif > dea:
-            views.append(("動能觀點", "KD 與 MACD 同步偏多，短線攻擊動能較佳。", ""))
-        elif k_val < d_val and dif < dea:
-            views.append(("動能觀點", "KD 與 MACD 同步偏弱，反彈宜防再轉弱。", ""))
-        else:
-            views.append(("動能觀點", "擺盪動能與趨勢動能未完全共振，走勢容易反覆。", ""))
-
-    pressure_text = sr_snapshot.get("pressure_signal", ("—", ""))[0]
-    support_text = sr_snapshot.get("support_signal", ("—", ""))[0]
-    break_text = sr_snapshot.get("break_signal", ("—", ""))[0]
-
-    if "突破" in break_text:
-        views.append(("結構觀點", "目前屬突破結構，關鍵在突破後是否守住，不是只看站上那一刻。", ""))
-    elif "跌破" in break_text:
-        views.append(("結構觀點", "目前屬跌破結構，若無法快速站回，弱勢延續機率較高。", ""))
-    else:
-        if "接近20日壓力" in pressure_text:
-            views.append(("結構觀點", "股價逼近短壓，沒有量就容易變成假突破或震盪。", ""))
-        elif "接近20日支撐" in support_text:
-            views.append(("結構觀點", "股價接近短撐，重點看是否出現防守量與止跌K棒。", ""))
-        else:
-            views.append(("結構觀點", "目前位於區間內部，較適合等待明確突破或跌破再提高把握度。", ""))
-
-    radar_avg = round(sum([
-        _safe_float(radar.get("trend"), 50),
-        _safe_float(radar.get("momentum"), 50),
-        _safe_float(radar.get("volume"), 50),
-        _safe_float(radar.get("position"), 50),
-        _safe_float(radar.get("structure"), 50),
-    ]) / 5, 1)
-    views.append(("雷達總評", f"五維均分約 {radar_avg}，{radar.get('summary', '—')}", ""))
-
-    if event_df is not None and not event_df.empty:
-        last_event = event_df.iloc[0]
-        views.append(("最近關鍵事件", f"{_safe_str(last_event.get('事件'))}：{_safe_str(last_event.get('說明'))}", ""))
-
-    score = _safe_float(signal_snapshot.get("score"), 0)
-    if score >= 4:
-        action_text = "偏多架構，但在壓力區不建議無量追價，較佳節奏是等拉回不破或突破後續強。"
-    elif score >= 2:
-        action_text = "偏多但未到全面強攻，宜觀察回測支撐是否守穩。"
-    elif score <= -4:
-        action_text = "偏空結構明確，風險控管應優先於抄底預設。"
-    elif score <= -2:
-        action_text = "弱勢整理機率高，除非出現止跌與量能改善，否則先保守。"
-    else:
-        action_text = "多空混合，最佳策略通常不是猜，而是等關鍵位表態後再跟。"
-    views.append(("股神操作觀點", action_text, ""))
-
-    return views
-
-
-# =========================================================
-# 彩色事件樣式 + 箭頭
-# =========================================================
-def _event_style(event_type: str) -> dict[str, str]:
-    mapping = {
-        "起漲點": {"bg": "#ecfdf5", "border": "#10b981", "tag": "#047857", "text": "#065f46"},
-        "起跌點": {"bg": "#fef2f2", "border": "#ef4444", "tag": "#b91c1c", "text": "#7f1d1d"},
-        "MA": {"bg": "#eff6ff", "border": "#3b82f6", "tag": "#1d4ed8", "text": "#1e3a8a"},
-        "KD": {"bg": "#faf5ff", "border": "#a855f7", "tag": "#7e22ce", "text": "#581c87"},
-        "MACD": {"bg": "#fff7ed", "border": "#f97316", "tag": "#c2410c", "text": "#9a3412"},
-        "突破": {"bg": "#f0fdfa", "border": "#14b8a6", "tag": "#0f766e", "text": "#134e4a"},
-        "跌破": {"bg": "#f8fafc", "border": "#334155", "tag": "#0f172a", "text": "#334155"},
-    }
-    return mapping.get(event_type, {"bg": "#f8fafc", "border": "#94a3b8", "tag": "#475569", "text": "#334155"})
-
-
-def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
-    name = _safe_str(event_name)
-    typ = _safe_str(event_type)
-
-    if typ in ["起漲點", "突破"]:
-        return {"arrow": "↑", "label": "偏多", "bg": "#dcfce7", "color": "#166534"}
-    if typ in ["起跌點", "跌破"]:
-        return {"arrow": "↓", "label": "偏空", "bg": "#fee2e2", "color": "#991b1b"}
-    if "黃金交叉" in name:
-        return {"arrow": "↑", "label": "轉強", "bg": "#dbeafe", "color": "#1d4ed8"}
-    if "死亡交叉" in name:
-        return {"arrow": "↓", "label": "轉弱", "bg": "#fee2e2", "color": "#b91c1c"}
-    return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
-
-
-# =========================================================
-# 焦點摘要條
-# =========================================================
-def _render_focus_summary_bar(filtered_event_df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, badge_text: str):
-    focus_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
-
-    if focus_idx >= 0 and filtered_event_df is not None and not filtered_event_df.empty and focus_idx < len(filtered_event_df):
-        row = filtered_event_df.iloc[focus_idx]
-        event_type = _safe_str(row["事件分類"])
-        event_name = _safe_str(row["事件"])
-        event_desc = _safe_str(row["說明"])
-        try:
-            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
-        except Exception:
-            d = _safe_str(row["日期"])
-
-        style = _event_style(event_type)
-        direction = _event_direction_meta(event_name, event_type)
-
-        st.markdown(
-            f"""
-            <div style="
-                background: linear-gradient(135deg, {style['bg']} 0%, #ffffff 100%);
-                border: 2px solid {style['border']};
-                border-radius: 18px;
-                padding: 14px 16px;
-                margin-bottom: 12px;
-                box-shadow: 0 8px 20px rgba(15,23,42,0.06);
-            ">
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                        <span style="font-size:12px; font-weight:800; color:white; background:{style['tag']}; padding:4px 10px; border-radius:999px;">
-                            {event_type}
-                        </span>
-                        <span style="font-size:12px; font-weight:800; color:{direction['color']}; background:{direction['bg']}; padding:4px 10px; border-radius:999px;">
-                            {direction['arrow']} {direction['label']}
-                        </span>
-                        <span style="font-size:12px; font-weight:700; color:#475569;">
-                            {d}
-                        </span>
-                    </div>
-                    <div style="font-size:12px; font-weight:800; color:#1e293b;">
-                        目前焦點事件
-                    </div>
-                </div>
-
-                <div style="font-size:20px; font-weight:900; color:{style['text']}; margin-top:10px; margin-bottom:6px;">
-                    {event_name}
-                </div>
-                <div style="font-size:13px; color:#475569; line-height:1.7;">
-                    {event_desc}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        trend_text = _safe_str(signal_snapshot.get("ma_trend", ("整理", ""))[0])
-        kd_text = _safe_str(signal_snapshot.get("kd_cross", ("無新交叉", ""))[0])
-        macd_text = _safe_str(signal_snapshot.get("macd_trend", ("整理", ""))[0])
-        break_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
-
-        st.markdown(
-            f"""
-            <div style="
-                background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
-                border: 2px solid #bfdbfe;
-                border-radius: 18px;
-                padding: 14px 16px;
-                margin-bottom: 12px;
-                box-shadow: 0 8px 20px rgba(15,23,42,0.06);
-            ">
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                        <span style="font-size:12px; font-weight:800; color:white; background:#1d4ed8; padding:4px 10px; border-radius:999px;">
-                            全區間摘要
-                        </span>
-                        <span style="font-size:12px; font-weight:800; color:#1e3a8a; background:#dbeafe; padding:4px 10px; border-radius:999px;">
-                            燈號 {badge_text}
-                        </span>
-                    </div>
-                    <div style="font-size:12px; font-weight:800; color:#1e293b;">
-                        目前全區間狀態
-                    </div>
-                </div>
-
-                <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
-                    <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">均線：{trend_text}</span>
-                    <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">KD：{kd_text}</span>
-                    <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">MACD：{macd_text}</span>
-                    <span style="font-size:12px; font-weight:800; color:#334155; background:#f8fafc; border:1px solid #e2e8f0; padding:5px 10px; border-radius:999px;">結構：{break_text}</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def _render_key_price_bar(df: pd.DataFrame, sr_snapshot: dict):
-    if df is None or df.empty:
-        return
-
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"))
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-    res60 = _safe_float(sr_snapshot.get("res_60"))
-    sup60 = _safe_float(sr_snapshot.get("sup_60"))
-
-    def dist_text(target, base, label):
-        if target in [None, 0] or base is None:
-            return f"{label}：—"
-        pct = ((target - base) / target) * 100
-        return f"{label}：{pct:+.2f}%"
-
-    pressure_dist = dist_text(res20, close_now, "距20壓力")
-    support_dist = "距20支撐：—"
-    if sup20 not in [None, 0] and close_now is not None:
-        pct = ((close_now - sup20) / sup20) * 100
-        support_dist = f"距20支撐：{pct:+.2f}%"
-
-    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
-
-    st.markdown(
-        f"""
-        <div style="
-            background: linear-gradient(135deg, #0f172a 0%, #162033 45%, #1e293b 100%);
-            border: 1px solid rgba(148,163,184,0.2);
-            border-radius: 18px;
-            padding: 14px 16px;
-            margin-bottom: 12px;
-            box-shadow: 0 10px 26px rgba(15,23,42,0.18);
-        ">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
-                <div style="font-size:13px; font-weight:800; color:#e2e8f0;">
-                    關鍵價位摘要條
-                </div>
-                <div style="font-size:12px; font-weight:800; color:#cbd5e1;">
-                    結構：{structure_text}
-                </div>
-            </div>
-
-            <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                <span style="font-size:12px; font-weight:900; color:#f8fafc; background:rgba(255,255,255,0.08); padding:6px 10px; border-radius:999px;">現價：{format_number(close_now, 2)}</span>
-                <span style="font-size:12px; font-weight:800; color:#fecaca; background:rgba(239,68,68,0.15); padding:6px 10px; border-radius:999px;">20日壓力：{format_number(res20, 2)}</span>
-                <span style="font-size:12px; font-weight:800; color:#bbf7d0; background:rgba(16,185,129,0.15); padding:6px 10px; border-radius:999px;">20日支撐：{format_number(sup20, 2)}</span>
-                <span style="font-size:12px; font-weight:800; color:#fecaca; background:rgba(244,63,94,0.12); padding:6px 10px; border-radius:999px;">60日壓力：{format_number(res60, 2)}</span>
-                <span style="font-size:12px; font-weight:800; color:#bbf7d0; background:rgba(34,197,94,0.12); padding:6px 10px; border-radius:999px;">60日支撐：{format_number(sup60, 2)}</span>
-                <span style="font-size:12px; font-weight:800; color:#e0f2fe; background:rgba(14,165,233,0.14); padding:6px 10px; border-radius:999px;">{pressure_dist}</span>
-                <span style="font-size:12px; font-weight:800; color:#e0f2fe; background:rgba(14,165,233,0.14); padding:6px 10px; border-radius:999px;">{support_dist}</span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# =========================================================
-# 左側事件面板（彩色箭頭版）
-# =========================================================
-def _render_left_event_panel(filtered_event_df: pd.DataFrame):
-    st.markdown("### 事件面板")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if st.button("上一事件", key=_k("prev_event"), use_container_width=True):
-            if filtered_event_df is not None and not filtered_event_df.empty:
-                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
-                valid = filtered_event_df.index.tolist()
-                if cur_idx in valid:
-                    pos = valid.index(cur_idx)
-                    st.session_state[_k("focus_event_idx")] = valid[max(0, pos - 1)]
-                else:
-                    st.session_state[_k("focus_event_idx")] = valid[0]
-                st.rerun()
-
-    with c2:
-        if st.button("下一事件", key=_k("next_event"), use_container_width=True):
-            if filtered_event_df is not None and not filtered_event_df.empty:
-                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
-                valid = filtered_event_df.index.tolist()
-                if cur_idx in valid:
-                    pos = valid.index(cur_idx)
-                    st.session_state[_k("focus_event_idx")] = valid[min(len(valid) - 1, pos + 1)]
-                else:
-                    st.session_state[_k("focus_event_idx")] = valid[0]
-                st.rerun()
-
-    with c3:
-        if st.button("全區間", key=_k("back_all"), use_container_width=True):
-            st.session_state[_k("focus_event_idx")] = -1
-            st.rerun()
-
-    limit = int(st.session_state.get(_k("left_panel_limit"), 12))
-    panel_df = filtered_event_df.head(limit) if filtered_event_df is not None else pd.DataFrame()
-
-    if panel_df is None or panel_df.empty:
-        st.info("目前沒有可切換事件。")
-        return
-
-    for idx, row in panel_df.iterrows():
-        try:
-            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
-        except Exception:
-            d = _safe_str(row["日期"])
-
-        current_focus = int(st.session_state.get(_k("focus_event_idx"), -1))
-        event_type = _safe_str(row["事件分類"])
-        event_name = _safe_str(row["事件"])
-        subtitle = _safe_str(row["說明"])
-
-        style = _event_style(event_type)
-        direction = _event_direction_meta(event_name, event_type)
-
-        is_active = idx == current_focus
-        active_shadow = "0 0 0 3px rgba(29,78,216,0.18)" if is_active else "none"
-        active_border = "#1d4ed8" if is_active else style["border"]
-
-        st.markdown(
-            f"""
-            <div style="
-                border:2px solid {active_border};
-                background:{style['bg']};
-                border-radius:16px;
-                padding:12px 12px 10px 12px;
-                margin-bottom:10px;
-                box-shadow:{active_shadow};
-            ">
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
-                    <div style="font-size:12px; color:#475569; font-weight:700;">{d}</div>
-                    <div style="
-                        font-size:11px;
-                        font-weight:800;
-                        color:white;
-                        background:{style['tag']};
-                        padding:4px 8px;
-                        border-radius:999px;
-                    ">{event_type}</div>
-                </div>
-
-                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
-                    <div style="font-size:15px; font-weight:900; color:{style['text']};">
-                        {event_name}
-                    </div>
-                    <div style="
-                        min-width:64px;
-                        text-align:center;
-                        font-size:12px;
-                        font-weight:900;
-                        color:{direction['color']};
-                        background:{direction['bg']};
-                        padding:4px 8px;
-                        border-radius:999px;
-                        border:1px solid rgba(15,23,42,0.08);
-                    ">
-                        {direction['arrow']} {direction['label']}
-                    </div>
-                </div>
-
-                <div style="font-size:12px; color:#475569; line-height:1.55;">
-                    {subtitle}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        if st.button(f"切到這個事件 {idx + 1}", key=_k(f"focus_btn_{idx}"), use_container_width=True):
-            st.session_state[_k("focus_event_idx")] = idx
-            st.rerun()
-
-
-# =========================================================
 # 主頁
 # =========================================================
 def main():
@@ -1075,8 +1062,8 @@ def main():
     _init_state(group_map)
 
     render_pro_hero(
-        title="歷史K線分析｜股神事件箭頭版",
-        subtitle="左側彩色事件卡片 + 多空箭頭徽章，右側主圖上方加入焦點事件摘要條與關鍵價位摘要條。",
+        title="歷史K線分析｜股神修正版",
+        subtitle="修正 HTML 原文顯示與 NameError，保留彩色事件卡、焦點摘要條、關鍵價位摘要條與完整分析功能。",
     )
 
     render_pro_section("快速搜尋股票")
@@ -1286,19 +1273,19 @@ def main():
                     ("量能", radar.get("volume", 50), ""),
                     ("位置", radar.get("position", 50), ""),
                     ("結構", radar.get("structure", 50), ""),
-                    ("摘要", radar.get("summary", "—"), ""),
+                    ("摘要", _safe_str(radar.get("summary", "—")), ""),
                 ],
                 chips=[badge_text],
             )
             render_pro_info_card(
                 "訊號燈號",
                 [
-                    ("均線趨勢", signal_snapshot.get("ma_trend", ("—", ""))[0], signal_snapshot.get("ma_trend", ("", "pro-flat"))[1]),
-                    ("KD交叉", signal_snapshot.get("kd_cross", ("—", ""))[0], signal_snapshot.get("kd_cross", ("", "pro-flat"))[1]),
-                    ("MACD趨勢", signal_snapshot.get("macd_trend", ("—", ""))[0], signal_snapshot.get("macd_trend", ("", "pro-flat"))[1]),
-                    ("價位狀態", signal_snapshot.get("price_vs_ma20", ("—", ""))[0], signal_snapshot.get("price_vs_ma20", ("", "pro-flat"))[1]),
-                    ("突破狀態", signal_snapshot.get("breakout_20d", ("—", ""))[0], signal_snapshot.get("breakout_20d", ("", "pro-flat"))[1]),
-                    ("量能狀態", signal_snapshot.get("volume_state", ("—", ""))[0], signal_snapshot.get("volume_state", ("", "pro-flat"))[1]),
+                    ("均線趨勢", _safe_str(signal_snapshot.get("ma_trend", ("—", ""))[0]), ""),
+                    ("KD交叉", _safe_str(signal_snapshot.get("kd_cross", ("—", ""))[0]), ""),
+                    ("MACD趨勢", _safe_str(signal_snapshot.get("macd_trend", ("—", ""))[0]), ""),
+                    ("價位狀態", _safe_str(signal_snapshot.get("price_vs_ma20", ("—", ""))[0]), ""),
+                    ("突破狀態", _safe_str(signal_snapshot.get("breakout_20d", ("—", ""))[0]), ""),
+                    ("量能狀態", _safe_str(signal_snapshot.get("volume_state", ("—", ""))[0]), ""),
                 ],
             )
         with r2:
@@ -1309,9 +1296,9 @@ def main():
                     ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
                     ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
                     ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
-                    ("壓力訊號", sr_snapshot.get("pressure_signal", ("—", ""))[0], sr_snapshot.get("pressure_signal", ("", "pro-flat"))[1]),
-                    ("支撐訊號", sr_snapshot.get("support_signal", ("—", ""))[0], sr_snapshot.get("support_signal", ("", "pro-flat"))[1]),
-                    ("區間判斷", sr_snapshot.get("break_signal", ("—", ""))[0], sr_snapshot.get("break_signal", ("", "pro-flat"))[1]),
+                    ("壓力訊號", _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0]), ""),
+                    ("支撐訊號", _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0]), ""),
+                    ("區間判斷", _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0]), ""),
                 ],
             )
             render_pro_info_card(
@@ -1336,8 +1323,8 @@ def main():
         st.dataframe(df[raw_cols].sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
 
     with st.expander("效能說明"):
-        st.write("這版已做 cache、搜尋同步修正、上櫃 smart history fallback。")
-        st.write("右側主圖上方已加入焦點事件摘要條與關鍵價位摘要條。")
+        st.write("這版修掉 HTML 原文顯示與 _build_master_commentary NameError。")
+        st.write("保留彩色事件卡、箭頭、焦點摘要條、關鍵價位摘要條、K線/KD/MACD/雷達/訊號/支撐壓力。")
 
 
 if __name__ == "__main__":
