@@ -173,19 +173,39 @@ def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢�
 
 
 def _load_stock_master() -> pd.DataFrame:
-    df = get_all_code_name_map("")
-    if not isinstance(df, pd.DataFrame) or df.empty:
+    dfs = []
+
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+
+                for col in ["code", "name", "market"]:
+                    if col not in temp.columns:
+                        temp[col] = ""
+
+                temp["code"] = temp["code"].map(_normalize_code)
+                temp["name"] = temp["name"].map(_safe_str)
+                temp["market"] = temp["market"].map(_safe_str)
+
+                if market_arg in ["上市", "上櫃", "興櫃"]:
+                    temp["market"] = temp["market"].replace("", market_arg)
+
+                dfs.append(temp[["code", "name", "market"]])
+        except Exception:
+            pass
+
+    if not dfs:
         return pd.DataFrame(columns=["code", "name", "market"])
 
-    out = df.copy()
-    for col in ["code", "name", "market"]:
-        if col not in out.columns:
-            out[col] = ""
-
+    out = pd.concat(dfs, ignore_index=True)
     out["code"] = out["code"].map(_normalize_code)
     out["name"] = out["name"].map(_safe_str)
     out["market"] = out["market"].map(_safe_str).replace("", "上市")
-    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+
+    out = out[out["code"] != ""]
+    out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
     return out
 
 
@@ -510,18 +530,39 @@ def _build_group_summary_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.Da
 
 def _filter_master_df(df: pd.DataFrame, keyword: str) -> pd.DataFrame:
     q = _safe_str(keyword).lower()
+
     if df is None or df.empty:
         return pd.DataFrame(columns=["code", "name", "market"])
 
-    if not q:
-        return df.head(100).copy()
+    work = df.copy()
+    work["code"] = work["code"].astype(str)
+    work["name"] = work["name"].astype(str)
+    work["market"] = work["market"].astype(str)
 
-    mask = (
-        df["code"].astype(str).str.lower().str.contains(q, na=False)
-        | df["name"].astype(str).str.lower().str.contains(q, na=False)
-        | df["market"].astype(str).str.lower().str.contains(q, na=False)
-    )
-    return df[mask].head(100).copy()
+    if not q:
+        return work.head(100).copy()
+
+    exact = work[
+        (work["code"].str.lower() == q)
+        | (work["name"].str.lower() == q)
+    ].copy()
+    if not exact.empty:
+        return exact.head(100).copy()
+
+    prefix = work[
+        work["code"].str.lower().str.startswith(q, na=False)
+        | work["name"].str.lower().str.startswith(q, na=False)
+    ].copy()
+    if not prefix.empty:
+        return prefix.head(100).copy()
+
+    contain = work[
+        work["code"].str.lower().str.contains(q, na=False)
+        | work["name"].str.lower().str.contains(q, na=False)
+        | work["market"].str.lower().str.contains(q, na=False)
+    ].copy()
+
+    return contain.head(100).copy()
 
 
 # =========================================================
@@ -673,7 +714,7 @@ def main():
         "每行一筆：股票代碼,股票名稱,市場別。股票名稱 / 市場別可省略。",
         key=_k("bulk_text"),
         height=160,
-        placeholder="2330,台積電,上市\n2454,聯發科\n3017",
+        placeholder="2330,台積電,上市\n2454,聯發科\n3548,兆利,上櫃",
     )
 
     bulk_group_options = list(st.session_state[_k("watchlist")].keys()) if st.session_state[_k("watchlist")] else [""]
@@ -707,14 +748,14 @@ def main():
             [
                 ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json 與 data/watchlist.json。", ""),
                 ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
-                ("新增群組", "新增成功後會在下一輪自動切換到新群組。", ""),
-                ("刪除群組", "刪除後會在下一輪自動切到下一個有效群組。", ""),
+                ("搜尋邏輯", "空白只顯示前 100 筆；輸入關鍵字會從完整主檔搜尋。", ""),
+                ("範例", "可搜尋 3548、兆利、台積電、上櫃。", ""),
             ],
         )
 
     with right:
         render_pro_section("股票資料庫搜尋")
-        st.text_input("搜尋股票代碼 / 名稱 / 市場別", key=_k("search_text"), placeholder="例如：2330 / 台積電 / 上櫃")
+        st.text_input("搜尋股票代碼 / 名稱 / 市場別", key=_k("search_text"), placeholder="例如：2330 / 台積電 / 3548 / 兆利 / 上櫃")
         search_df = _filter_master_df(master_df, st.session_state.get(_k("search_text"), ""))
         if search_df.empty:
             st.info("查無符合資料。")
