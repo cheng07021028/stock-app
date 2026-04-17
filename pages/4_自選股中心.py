@@ -1,10 +1,10 @@
-# pages/4_自選股中心.py
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+import copy
 import json
-import os
 
 import pandas as pd
 import streamlit as st
@@ -56,6 +56,47 @@ def _normalize_code(code: Any) -> str:
     if 4 <= len(digits) <= 6:
         return digits
     return text
+
+
+def _project_root() -> Path:
+    current = Path(__file__).resolve()
+    parent = current.parent
+    if parent.name.lower() == "pages":
+        return parent.parent
+    return parent
+
+
+def _atomic_write_json(path: Path, payload: dict[str, list[dict[str, str]]]) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(path)
+        return True
+    except Exception:
+        return False
+
+
+def _get_watchlist_candidate_paths() -> list[Path]:
+    root = _project_root()
+    cwd = Path.cwd().resolve()
+
+    candidates = [
+        root / "watchlist.json",
+        root / "data" / "watchlist.json",
+        cwd / "watchlist.json",
+        cwd / "data" / "watchlist.json",
+    ]
+
+    seen = set()
+    output = []
+    for p in candidates:
+        rp = p.resolve()
+        if str(rp) not in seen:
+            seen.add(str(rp))
+            output.append(rp)
+    return output
 
 
 # =========================================================
@@ -124,51 +165,62 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
                 }
             )
 
+        payload[g] = sorted(
+            payload[g],
+            key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name")))
+        )
+
     return payload
 
 
 def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
     payload = _normalize_watchlist_payload(data)
 
-    candidate_paths = [
-        "watchlist.json",
-        "data/watchlist.json",
-    ]
+    success_paths = []
+    failed_paths = []
 
-    success_count = 0
-
-    for path in candidate_paths:
-        try:
-            folder = os.path.dirname(path)
-            if folder:
-                os.makedirs(folder, exist_ok=True)
-
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-
-            success_count += 1
-        except Exception:
-            pass
+    for path in _get_watchlist_candidate_paths():
+        ok = _atomic_write_json(path, payload)
+        if ok:
+            success_paths.append(str(path))
+        else:
+            failed_paths.append(str(path))
 
     try:
-        if save_watchlist(payload, filepath="watchlist.json"):
-            success_count = max(success_count, 1)
+        util_ok = save_watchlist(payload, filepath=str(_project_root() / "watchlist.json"))
+        if util_ok:
+            if str((_project_root() / "watchlist.json").resolve()) not in success_paths:
+                success_paths.append(str((_project_root() / "watchlist.json").resolve()))
     except Exception:
         pass
 
-    if success_count > 0:
-        st.session_state[_k("watchlist")] = payload
-        return True
+    try:
+        util_ok2 = save_watchlist(payload, filepath="watchlist.json")
+        if util_ok2:
+            rp = str((Path.cwd() / "watchlist.json").resolve())
+            if rp not in success_paths:
+                success_paths.append(rp)
+    except Exception:
+        pass
 
-    return False
+    st.session_state[_k("watchlist")] = copy.deepcopy(payload)
+    st.session_state[_k("last_saved_paths")] = success_paths
+    st.session_state[_k("last_failed_paths")] = failed_paths
+    st.session_state[_k("last_saved_at")] = _now_text()
+
+    return len(success_paths) > 0
 
 
 def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢查檔案權限。") -> bool:
     ok = _save_watchlist_data(st.session_state[_k("watchlist")])
-    _set_status(
-        f"{success_msg}｜{_now_text()}" if ok else fail_msg,
-        "success" if ok else "error",
-    )
+    if ok:
+        saved_paths = st.session_state.get(_k("last_saved_paths"), [])
+        path_text = "；".join(saved_paths[:2]) if saved_paths else "watchlist.json"
+        _set_status(f"{success_msg}｜已回寫：{path_text}｜{_now_text()}", "success")
+    else:
+        failed_paths = st.session_state.get(_k("last_failed_paths"), [])
+        fail_text = "；".join(failed_paths[:2]) if failed_paths else ""
+        _set_status(f"{fail_msg}{'｜' + fail_text if fail_text else ''}", "error")
     return ok
 
 
@@ -246,6 +298,15 @@ def _init_state():
 
     if _k("status_type") not in st.session_state:
         st.session_state[_k("status_type")] = "info"
+
+    if _k("last_saved_paths") not in st.session_state:
+        st.session_state[_k("last_saved_paths")] = []
+
+    if _k("last_failed_paths") not in st.session_state:
+        st.session_state[_k("last_failed_paths")] = []
+
+    if _k("last_saved_at") not in st.session_state:
+        st.session_state[_k("last_saved_at")] = ""
 
     if _k("add_code_next") in st.session_state:
         st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
@@ -350,7 +411,7 @@ def _create_group(group_name: str) -> tuple[bool, str]:
     if not g:
         return False, "請輸入群組名稱。"
 
-    watchlist = st.session_state[_k("watchlist")]
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
     if g in watchlist:
         return False, f"群組已存在：{g}"
 
@@ -388,7 +449,7 @@ def _add_stock(group_name: str, code: str, name: str = "", market: str = "") -> 
         name, market_from_master = _find_stock_name_market(code)
         market = market or market_from_master
 
-    watchlist = st.session_state[_k("watchlist")]
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
     if g not in watchlist:
         watchlist[g] = []
 
@@ -411,7 +472,7 @@ def _add_stock(group_name: str, code: str, name: str = "", market: str = "") -> 
 def _delete_stock(group_name: str, code: str) -> tuple[bool, str]:
     g = _safe_str(group_name)
     code = _normalize_code(code)
-    watchlist = st.session_state[_k("watchlist")]
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
 
     if g not in watchlist:
         return False, "群組不存在。"
@@ -428,7 +489,7 @@ def _delete_stock(group_name: str, code: str) -> tuple[bool, str]:
 
 def _delete_group(group_name: str) -> tuple[bool, str]:
     g = _safe_str(group_name)
-    watchlist = st.session_state[_k("watchlist")]
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
 
     if not g:
         return False, "請先選擇群組。"
@@ -576,11 +637,10 @@ def main():
     watchlist = st.session_state[_k("watchlist")]
     master_df = st.session_state[_k("master_df")]
     _repair_selected_group()
-    selected_group = _safe_str(st.session_state.get(_k("selected_group"), ""))
 
     render_pro_hero(
         title="自選股中心｜股神版",
-        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、直接輸入股票名稱新增，且每次新增刪除都自動記錄。",
+        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、直接輸入股票名稱新增，並在每次異動後立即回寫 watchlist.json。",
     )
 
     overview_df = _build_overview_df(watchlist)
@@ -743,13 +803,17 @@ def main():
         else:
             st.dataframe(group_summary_df, use_container_width=True, hide_index=True)
 
+        last_saved_at = _safe_str(st.session_state.get(_k("last_saved_at"), ""))
+        last_saved_paths = st.session_state.get(_k("last_saved_paths"), [])
+        saved_path_text = " / ".join(last_saved_paths[:2]) if last_saved_paths else "尚未儲存"
+
         render_pro_info_card(
             "管理提醒",
             [
-                ("自動記錄", "新增 / 刪除 / 批次加入 / 群組異動後會立即寫回 watchlist.json 與 data/watchlist.json。", ""),
-                ("直接新增", "股票代碼欄可直接輸入 2330 或 台積電。", ""),
+                ("自動回寫", "新增 / 刪除 / 批次加入 / 群組異動後立即寫回 JSON。", ""),
+                ("實際路徑", saved_path_text, ""),
+                ("最後儲存", last_saved_at or "—", ""),
                 ("搜尋邏輯", "空白只顯示前 100 筆；輸入關鍵字會從完整主檔搜尋。", ""),
-                ("範例", "可搜尋 3548、兆利、台積電、上櫃。", ""),
             ],
         )
 
