@@ -310,12 +310,12 @@ def render_pro_info_card(title, info_pairs, chips=None):
     items_html = ""
     for label, value, css_class in info_pairs:
         css = css_class if css_class else ""
-        items_html += f'''
+        items_html += f"""
         <div class="pro-info-item">
             <div class="pro-info-label">{label}</div>
             <div class="pro-info-value {css}">{value}</div>
         </div>
-        '''
+        """
 
     st.markdown(
         f"""
