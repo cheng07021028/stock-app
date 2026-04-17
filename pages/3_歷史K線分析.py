@@ -761,7 +761,7 @@ def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapsho
 
 
 # =========================================================
-# 彩色事件樣式
+# 彩色事件樣式 + 箭頭
 # =========================================================
 def _event_style(event_type: str) -> dict[str, str]:
     mapping = {
@@ -776,8 +776,23 @@ def _event_style(event_type: str) -> dict[str, str]:
     return mapping.get(event_type, {"bg": "#f8fafc", "border": "#94a3b8", "tag": "#475569", "text": "#334155"})
 
 
+def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
+    name = _safe_str(event_name)
+    typ = _safe_str(event_type)
+
+    if typ in ["起漲點", "突破"]:
+        return {"arrow": "↑", "label": "偏多", "bg": "#dcfce7", "color": "#166534"}
+    if typ in ["起跌點", "跌破"]:
+        return {"arrow": "↓", "label": "偏空", "bg": "#fee2e2", "color": "#991b1b"}
+    if "黃金交叉" in name:
+        return {"arrow": "↑", "label": "轉強", "bg": "#dbeafe", "color": "#1d4ed8"}
+    if "死亡交叉" in name:
+        return {"arrow": "↓", "label": "轉弱", "bg": "#fee2e2", "color": "#b91c1c"}
+    return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
+
+
 # =========================================================
-# 左側事件面板（彩色版）
+# 左側事件面板（彩色箭頭版）
 # =========================================================
 def _render_left_event_panel(filtered_event_df: pd.DataFrame):
     st.markdown("### 事件面板")
@@ -829,9 +844,11 @@ def _render_left_event_panel(filtered_event_df: pd.DataFrame):
         event_type = _safe_str(row["事件分類"])
         event_name = _safe_str(row["事件"])
         subtitle = _safe_str(row["說明"])
-        style = _event_style(event_type)
-        is_active = idx == current_focus
 
+        style = _event_style(event_type)
+        direction = _event_direction_meta(event_name, event_type)
+
+        is_active = idx == current_focus
         active_shadow = "0 0 0 3px rgba(29,78,216,0.18)" if is_active else "none"
         active_border = "#1d4ed8" if is_active else style["border"]
 
@@ -856,9 +873,26 @@ def _render_left_event_panel(filtered_event_df: pd.DataFrame):
                         border-radius:999px;
                     ">{event_type}</div>
                 </div>
-                <div style="font-size:15px; font-weight:900; color:{style['text']}; margin-bottom:5px;">
-                    {event_name}
+
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
+                    <div style="font-size:15px; font-weight:900; color:{style['text']};">
+                        {event_name}
+                    </div>
+                    <div style="
+                        min-width:64px;
+                        text-align:center;
+                        font-size:12px;
+                        font-weight:900;
+                        color:{direction['color']};
+                        background:{direction['bg']};
+                        padding:4px 8px;
+                        border-radius:999px;
+                        border:1px solid rgba(15,23,42,0.08);
+                    ">
+                        {direction['arrow']} {direction['label']}
+                    </div>
                 </div>
+
                 <div style="font-size:12px; color:#475569; line-height:1.55;">
                     {subtitle}
                 </div>
@@ -884,8 +918,8 @@ def main():
     _init_state(group_map)
 
     render_pro_hero(
-        title="歷史K線分析｜股神事件面板彩色版",
-        subtitle="左側彩色事件卡片，右側主圖，支援事件切換、上一筆 / 下一筆、回到全區間。",
+        title="歷史K線分析｜股神事件箭頭版",
+        subtitle="左側彩色事件卡片 + 多空箭頭圖示，右側主圖保留完整專業分析。",
     )
 
     render_pro_section("快速搜尋股票")
@@ -1143,7 +1177,7 @@ def main():
 
     with st.expander("效能說明"):
         st.write("這版已做 cache、搜尋同步修正、上櫃 smart history fallback。")
-        st.write("左側事件面板已升級為彩色分類卡片，便於快速識別不同事件類型。")
+        st.write("左側事件面板已升級為彩色分類卡片 + 多空箭頭徽章。")
 
 
 if __name__ == "__main__":
