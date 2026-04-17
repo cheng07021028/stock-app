@@ -685,6 +685,82 @@ def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
 
 
 # =========================================================
+# 股神觀點
+# =========================================================
+def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict, event_df: pd.DataFrame):
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    k_val = _safe_float(last.get("K"))
+    d_val = _safe_float(last.get("D"))
+    dif = _safe_float(last.get("DIF"))
+    dea = _safe_float(last.get("DEA"))
+
+    views = []
+
+    if close_now is not None and ma20 is not None and ma60 is not None:
+        if close_now > ma20 and close_now > ma60:
+            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之上，中期結構偏多。", ""))
+        elif close_now < ma20 and close_now < ma60:
+            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之下，中期結構偏弱。", ""))
+        else:
+            views.append(("趨勢觀點", "股價位在中期均線交界區，屬整理與等待方向選擇。", ""))
+
+    if k_val is not None and d_val is not None and dif is not None and dea is not None:
+        if k_val > d_val and dif > dea:
+            views.append(("動能觀點", "KD 與 MACD 同步偏多，短線攻擊動能較佳。", ""))
+        elif k_val < d_val and dif < dea:
+            views.append(("動能觀點", "KD 與 MACD 同步偏弱，反彈宜防再轉弱。", ""))
+        else:
+            views.append(("動能觀點", "擺盪動能與趨勢動能未完全共振，走勢容易反覆。", ""))
+
+    pressure_text = sr_snapshot.get("pressure_signal", ("—", ""))[0]
+    support_text = sr_snapshot.get("support_signal", ("—", ""))[0]
+    break_text = sr_snapshot.get("break_signal", ("—", ""))[0]
+
+    if "突破" in break_text:
+        views.append(("結構觀點", "目前屬突破結構，關鍵在突破後是否守住，不是只看站上那一刻。", ""))
+    elif "跌破" in break_text:
+        views.append(("結構觀點", "目前屬跌破結構，若無法快速站回，弱勢延續機率較高。", ""))
+    else:
+        if "接近20日壓力" in pressure_text:
+            views.append(("結構觀點", "股價逼近短壓，沒有量就容易變成假突破或震盪。", ""))
+        elif "接近20日支撐" in support_text:
+            views.append(("結構觀點", "股價接近短撐，重點看是否出現防守量與止跌K棒。", ""))
+        else:
+            views.append(("結構觀點", "目前位於區間內部，較適合等待明確突破或跌破再提高把握度。", ""))
+
+    radar_avg = round(sum([
+        _safe_float(radar.get("trend"), 50),
+        _safe_float(radar.get("momentum"), 50),
+        _safe_float(radar.get("volume"), 50),
+        _safe_float(radar.get("position"), 50),
+        _safe_float(radar.get("structure"), 50),
+    ]) / 5, 1)
+    views.append(("雷達總評", f"五維均分約 {radar_avg}，{radar.get('summary', '—')}", ""))
+
+    if event_df is not None and not event_df.empty:
+        last_event = event_df.iloc[0]
+        views.append(("最近關鍵事件", f"{_safe_str(last_event.get('事件'))}：{_safe_str(last_event.get('說明'))}", ""))
+
+    score = _safe_float(signal_snapshot.get("score"), 0)
+    if score >= 4:
+        action_text = "偏多架構，但在壓力區不建議無量追價，較佳節奏是等拉回不破或突破後續強。"
+    elif score >= 2:
+        action_text = "偏多但未到全面強攻，宜觀察回測支撐是否守穩。"
+    elif score <= -4:
+        action_text = "偏空結構明確，風險控管應優先於抄底預設。"
+    elif score <= -2:
+        action_text = "弱勢整理機率高，除非出現止跌與量能改善，否則先保守。"
+    else:
+        action_text = "多空混合，最佳策略通常不是猜，而是等關鍵位表態後再跟。"
+    views.append(("股神操作觀點", action_text, ""))
+
+    return views
+
+
+# =========================================================
 # 彩色事件樣式 + 箭頭
 # =========================================================
 def _event_style(event_type: str) -> dict[str, str]:
@@ -811,6 +887,65 @@ def _render_focus_summary_bar(filtered_event_df: pd.DataFrame, signal_snapshot: 
             """,
             unsafe_allow_html=True,
         )
+
+
+def _render_key_price_bar(df: pd.DataFrame, sr_snapshot: dict):
+    if df is None or df.empty:
+        return
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    res60 = _safe_float(sr_snapshot.get("res_60"))
+    sup60 = _safe_float(sr_snapshot.get("sup_60"))
+
+    def dist_text(target, base, label):
+        if target in [None, 0] or base is None:
+            return f"{label}：—"
+        pct = ((target - base) / target) * 100
+        return f"{label}：{pct:+.2f}%"
+
+    pressure_dist = dist_text(res20, close_now, "距20壓力")
+    support_dist = "距20支撐：—"
+    if sup20 not in [None, 0] and close_now is not None:
+        pct = ((close_now - sup20) / sup20) * 100
+        support_dist = f"距20支撐：{pct:+.2f}%"
+
+    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+
+    st.markdown(
+        f"""
+        <div style="
+            background: linear-gradient(135deg, #0f172a 0%, #162033 45%, #1e293b 100%);
+            border: 1px solid rgba(148,163,184,0.2);
+            border-radius: 18px;
+            padding: 14px 16px;
+            margin-bottom: 12px;
+            box-shadow: 0 10px 26px rgba(15,23,42,0.18);
+        ">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+                <div style="font-size:13px; font-weight:800; color:#e2e8f0;">
+                    關鍵價位摘要條
+                </div>
+                <div style="font-size:12px; font-weight:800; color:#cbd5e1;">
+                    結構：{structure_text}
+                </div>
+            </div>
+
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <span style="font-size:12px; font-weight:900; color:#f8fafc; background:rgba(255,255,255,0.08); padding:6px 10px; border-radius:999px;">現價：{format_number(close_now, 2)}</span>
+                <span style="font-size:12px; font-weight:800; color:#fecaca; background:rgba(239,68,68,0.15); padding:6px 10px; border-radius:999px;">20日壓力：{format_number(res20, 2)}</span>
+                <span style="font-size:12px; font-weight:800; color:#bbf7d0; background:rgba(16,185,129,0.15); padding:6px 10px; border-radius:999px;">20日支撐：{format_number(sup20, 2)}</span>
+                <span style="font-size:12px; font-weight:800; color:#fecaca; background:rgba(244,63,94,0.12); padding:6px 10px; border-radius:999px;">60日壓力：{format_number(res60, 2)}</span>
+                <span style="font-size:12px; font-weight:800; color:#bbf7d0; background:rgba(34,197,94,0.12); padding:6px 10px; border-radius:999px;">60日支撐：{format_number(sup60, 2)}</span>
+                <span style="font-size:12px; font-weight:800; color:#e0f2fe; background:rgba(14,165,233,0.14); padding:6px 10px; border-radius:999px;">{pressure_dist}</span>
+                <span style="font-size:12px; font-weight:800; color:#e0f2fe; background:rgba(14,165,233,0.14); padding:6px 10px; border-radius:999px;">{support_dist}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
@@ -941,7 +1076,7 @@ def main():
 
     render_pro_hero(
         title="歷史K線分析｜股神事件箭頭版",
-        subtitle="左側彩色事件卡片 + 多空箭頭徽章，右側主圖上方加入焦點事件摘要條。",
+        subtitle="左側彩色事件卡片 + 多空箭頭徽章，右側主圖上方加入焦點事件摘要條與關鍵價位摘要條。",
     )
 
     render_pro_section("快速搜尋股票")
@@ -1117,6 +1252,7 @@ def main():
 
     with right:
         _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
+        _render_key_price_bar(df, sr_snapshot)
 
         st.plotly_chart(
             _build_candlestick_chart(
@@ -1201,7 +1337,7 @@ def main():
 
     with st.expander("效能說明"):
         st.write("這版已做 cache、搜尋同步修正、上櫃 smart history fallback。")
-        st.write("右側主圖上方已加入焦點事件摘要條，未選事件時顯示全區間摘要。")
+        st.write("右側主圖上方已加入焦點事件摘要條與關鍵價位摘要條。")
 
 
 if __name__ == "__main__":
