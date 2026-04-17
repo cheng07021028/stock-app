@@ -761,7 +761,23 @@ def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapsho
 
 
 # =========================================================
-# 左側事件面板
+# 彩色事件樣式
+# =========================================================
+def _event_style(event_type: str) -> dict[str, str]:
+    mapping = {
+        "起漲點": {"bg": "#ecfdf5", "border": "#10b981", "tag": "#047857", "text": "#065f46"},
+        "起跌點": {"bg": "#fef2f2", "border": "#ef4444", "tag": "#b91c1c", "text": "#7f1d1d"},
+        "MA": {"bg": "#eff6ff", "border": "#3b82f6", "tag": "#1d4ed8", "text": "#1e3a8a"},
+        "KD": {"bg": "#faf5ff", "border": "#a855f7", "tag": "#7e22ce", "text": "#581c87"},
+        "MACD": {"bg": "#fff7ed", "border": "#f97316", "tag": "#c2410c", "text": "#9a3412"},
+        "突破": {"bg": "#f0fdfa", "border": "#14b8a6", "tag": "#0f766e", "text": "#134e4a"},
+        "跌破": {"bg": "#f8fafc", "border": "#334155", "tag": "#0f172a", "text": "#334155"},
+    }
+    return mapping.get(event_type, {"bg": "#f8fafc", "border": "#94a3b8", "tag": "#475569", "text": "#334155"})
+
+
+# =========================================================
+# 左側事件面板（彩色版）
 # =========================================================
 def _render_left_event_panel(filtered_event_df: pd.DataFrame):
     st.markdown("### 事件面板")
@@ -810,26 +826,48 @@ def _render_left_event_panel(filtered_event_df: pd.DataFrame):
             d = _safe_str(row["日期"])
 
         current_focus = int(st.session_state.get(_k("focus_event_idx"), -1))
-        title = f"{d}｜{_safe_str(row['事件'])}"
+        event_type = _safe_str(row["事件分類"])
+        event_name = _safe_str(row["事件"])
         subtitle = _safe_str(row["說明"])
+        style = _event_style(event_type)
         is_active = idx == current_focus
+
+        active_shadow = "0 0 0 3px rgba(29,78,216,0.18)" if is_active else "none"
+        active_border = "#1d4ed8" if is_active else style["border"]
 
         st.markdown(
             f"""
             <div style="
-                border:1px solid {'#1d4ed8' if is_active else '#e2e8f0'};
-                background:{'#eff6ff' if is_active else '#ffffff'};
-                border-radius:14px;
-                padding:10px 12px;
-                margin-bottom:8px;">
-                <div style="font-weight:800; color:#0f172a; font-size:14px;">{title}</div>
-                <div style="font-size:12px; color:#64748b; margin-top:4px;">{subtitle}</div>
+                border:2px solid {active_border};
+                background:{style['bg']};
+                border-radius:16px;
+                padding:12px 12px 10px 12px;
+                margin-bottom:10px;
+                box-shadow:{active_shadow};
+            ">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;">
+                    <div style="font-size:12px; color:#475569; font-weight:700;">{d}</div>
+                    <div style="
+                        font-size:11px;
+                        font-weight:800;
+                        color:white;
+                        background:{style['tag']};
+                        padding:4px 8px;
+                        border-radius:999px;
+                    ">{event_type}</div>
+                </div>
+                <div style="font-size:15px; font-weight:900; color:{style['text']}; margin-bottom:5px;">
+                    {event_name}
+                </div>
+                <div style="font-size:12px; color:#475569; line-height:1.55;">
+                    {subtitle}
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        if st.button(f"切到這個事件 {idx+1}", key=_k(f"focus_btn_{idx}"), use_container_width=True):
+        if st.button(f"切到這個事件 {idx + 1}", key=_k(f"focus_btn_{idx}"), use_container_width=True):
             st.session_state[_k("focus_event_idx")] = idx
             st.rerun()
 
@@ -846,8 +884,8 @@ def main():
     _init_state(group_map)
 
     render_pro_hero(
-        title="歷史K線分析｜股神左面板互動版",
-        subtitle="左側事件面板、右側主圖，支援事件切換、上一筆 / 下一筆、回到全區間。",
+        title="歷史K線分析｜股神事件面板彩色版",
+        subtitle="左側彩色事件卡片，右側主圖，支援事件切換、上一筆 / 下一筆、回到全區間。",
     )
 
     render_pro_section("快速搜尋股票")
@@ -1105,7 +1143,7 @@ def main():
 
     with st.expander("效能說明"):
         st.write("這版已做 cache、搜尋同步修正、上櫃 smart history fallback。")
-        st.write("左側事件面板可快速切圖，右側主圖維持專業分析畫面。")
+        st.write("左側事件面板已升級為彩色分類卡片，便於快速識別不同事件類型。")
 
 
 if __name__ == "__main__":
