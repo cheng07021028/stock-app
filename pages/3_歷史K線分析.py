@@ -471,25 +471,117 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
-    df = get_history_data(
-        stock_no=stock_no,
-        stock_name=stock_name,
-        market_type=market_type,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    df = _prepare_history_df(df)
-    if not df.empty:
-        return df
+def _load_master_stock_df() -> pd.DataFrame:
+    dfs = []
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                for col in ["code", "name", "market"]:
+                    if col not in temp.columns:
+                        temp[col] = ""
+                temp["code"] = temp["code"].astype(str).str.strip()
+                temp["name"] = temp["name"].astype(str).str.strip()
+                temp["market"] = temp["market"].astype(str).str.strip()
+                if market_arg in ["上市", "上櫃", "興櫃"]:
+                    temp["market"] = temp["market"].replace("", market_arg)
+                dfs.append(temp[["code", "name", "market"]])
+        except Exception:
+            pass
 
-    if _safe_str(market_type) in ["上櫃", "興櫃"]:
+    if not dfs:
+        return pd.DataFrame(columns=["code", "name", "market"])
+
+    out = pd.concat(dfs, ignore_index=True)
+    out["code"] = out["code"].astype(str).str.strip()
+    out["name"] = out["name"].astype(str).str.strip()
+    out["market"] = out["market"].astype(str).str.strip().replace("", "上市")
+    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return out
+
+
+def _resolve_market_from_master(stock_no: str, stock_name: str, market_type: str) -> tuple[str, str]:
+    stock_no = _safe_str(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type)
+
+    master = _load_master_stock_df()
+    if not master.empty:
+        matched = master[master["code"].astype(str) == stock_no]
+        if not matched.empty:
+            row = matched.iloc[0]
+            real_name = _safe_str(row.get("name")) or stock_name or stock_no
+            real_market = _safe_str(row.get("market")) or market_type or "上市"
+            return real_name, real_market
+
+        matched2 = master[master["name"].astype(str) == stock_name]
+        if not matched2.empty:
+            row = matched2.iloc[0]
+            real_name = _safe_str(row.get("name")) or stock_name or stock_no
+            real_market = _safe_str(row.get("market")) or market_type or "上市"
+            return real_name, real_market
+
+    return stock_name or stock_no, market_type or "上市"
+
+
+def _market_candidates(stock_no: str, stock_name: str, market_type: str) -> list[tuple[str, str]]:
+    real_name, real_market = _resolve_market_from_master(stock_no, stock_name, market_type)
+
+    candidates = []
+    raw = [
+        (real_name, real_market),
+        (stock_name or real_name, market_type),
+        (real_name, "上市"),
+        (real_name, "上櫃"),
+        (real_name, "興櫃"),
+        (real_name, ""),
+        (stock_name or real_name, ""),
+    ]
+
+    seen = set()
+    for nm, mk in raw:
+        key = (_safe_str(nm), _safe_str(mk))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(key)
+
+    return candidates
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, str]:
+    stock_no = _safe_str(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type)
+
+    # 1. 先輪詢 utils 的主要資料源
+    for try_name, try_market in _market_candidates(stock_no, stock_name, market_type):
+        try:
+            df = get_history_data(
+                stock_no=stock_no,
+                stock_name=try_name,
+                market_type=try_market,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            df = _prepare_history_df(df)
+            if not df.empty:
+                return df, (_safe_str(try_market) or "未標示"), "utils"
+        except Exception:
+            pass
+
+    # 2. 再直接跑上櫃來源 fallback，不再受 market_type 限制
+    try:
         df2 = _get_tpex_history_data(stock_no, start_date, end_date)
         df2 = _prepare_history_df(df2)
         if not df2.empty:
-            return df2
+            return df2, "上櫃", "tpex"
+    except Exception:
+        pass
 
-    return pd.DataFrame()
+    return pd.DataFrame(), (_safe_str(market_type) or "未知"), "none"
 
 
 def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
@@ -1198,8 +1290,6 @@ def main():
     market_type = _safe_str(selected_item.get("market")) or "上市"
     stock_label = f"{selected_code} {stock_name}"
 
-    st.caption(f"目前實際查詢值：群組【{selected_group}】 / 股票【{stock_label}】 / 市場【{market_type}】")
-
     save_last_query_state(
         quick_group=selected_group,
         quick_stock_code=selected_code,
@@ -1208,7 +1298,7 @@ def main():
     )
 
     with st.spinner("載入股神資料中..."):
-        df = _get_history_data_smart(
+        df, actual_market, data_source = _get_history_data_smart(
             stock_no=selected_code,
             stock_name=stock_name,
             market_type=market_type,
@@ -1216,8 +1306,12 @@ def main():
             end_date=end_date,
         )
 
+    st.caption(
+        f"目前實際查詢值：群組【{selected_group}】 / 股票【{stock_label}】 / 自選市場【{market_type}】 / 實際市場【{actual_market}】 / 資料源【{data_source}】"
+    )
+
     if df.empty:
-        st.error("查無歷史資料，請更換股票或日期區間。")
+        st.error("查無歷史資料，已自動嘗試上市 / 上櫃 / 興櫃與 fallback 來源，仍無資料。請更換股票或日期區間。")
         st.stop()
 
     bundle = _compute_analysis_bundle(df)
@@ -1279,7 +1373,7 @@ def main():
             {
                 "label": "資料筆數",
                 "value": len(df),
-                "delta": market_type,
+                "delta": f"{actual_market} / {data_source}",
                 "delta_class": "pro-kpi-delta-flat",
             },
             {
@@ -1296,7 +1390,7 @@ def main():
     with left:
         _render_left_event_panel(filtered_event_df)
         recent_pairs = [(pd.to_datetime(r["日期"]).strftime("%Y-%m-%d"), _safe_str(r["事件"]), "") for _, r in filtered_event_df.head(6).iterrows()] if not filtered_event_df.empty else [("最近事件", "無明確新事件", "")]
-        render_pro_info_card("最近事件摘要", recent_pairs, chips=[badge_text, market_type])
+        render_pro_info_card("最近事件摘要", recent_pairs, chips=[badge_text, actual_market])
 
     with right:
         _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
@@ -1365,7 +1459,7 @@ def main():
             render_pro_info_card(
                 "股神分析觀點",
                 _build_master_commentary(df, signal_snapshot, sr_snapshot, radar, filtered_event_df if not filtered_event_df.empty else event_df),
-                chips=[market_type, badge_text],
+                chips=[actual_market, badge_text],
             )
 
     with tabs[2]:
@@ -1402,7 +1496,8 @@ def main():
         st.write("2. 訊號 / 雷達 / 支撐壓力 / 事件偵測集中到 analysis bundle，只算一次。")
         st.write("3. 焦點事件切換只切 focus_df，不重抓歷史資料。")
         st.write("4. 已補上 watchlist 真同步，群組與股票失效時會自動修正。")
-        st.write("5. 保留全部功能，不用刪功能換速度。")
+        st.write("5. 已補上市場自動 fallback，減少因市場別不一致造成的查無資料。")
+        st.write("6. 保留全部功能，不用刪功能換速度。")
 
 
 if __name__ == "__main__":
