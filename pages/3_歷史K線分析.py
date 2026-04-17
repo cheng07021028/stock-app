@@ -1,4 +1,3 @@
-# pages/3_歷史K線分析.py
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -79,8 +78,34 @@ def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
 
 
+# =========================================================
+# watchlist 真同步
+# =========================================================
+def _get_watchlist_source() -> dict:
+    shared = st.session_state.get("watchlist_data")
+    if isinstance(shared, dict) and shared:
+        return shared
+
+    raw = get_normalized_watchlist()
+    if isinstance(raw, dict):
+        return raw
+
+    return {}
+
+
+def _sync_watchlist_meta():
+    if _k("watchlist_version_seen") not in st.session_state:
+        st.session_state[_k("watchlist_version_seen")] = st.session_state.get("watchlist_version", 0)
+
+    if _k("watchlist_saved_at_seen") not in st.session_state:
+        st.session_state[_k("watchlist_saved_at_seen")] = st.session_state.get("watchlist_last_saved_at", "")
+
+    if _k("watchlist_hash_seen") not in st.session_state:
+        st.session_state[_k("watchlist_hash_seen")] = st.session_state.get("watchlist_last_saved_hash", "")
+
+
 def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
-    watchlist = get_normalized_watchlist()
+    watchlist = _get_watchlist_source()
     group_map: dict[str, list[dict[str, str]]] = {}
 
     if isinstance(watchlist, dict):
@@ -176,6 +201,8 @@ def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[s
 
 
 def _init_state(group_map: dict[str, list[dict[str, str]]]):
+    _sync_watchlist_meta()
+
     saved = load_last_query_state()
     today = date.today()
     default_start = today - timedelta(days=365)
@@ -239,6 +266,31 @@ def _repair_state(group_map: dict[str, list[dict[str, str]]]):
             st.session_state[_k("stock_code")] = valid_codes[0]
     else:
         st.session_state[_k("stock_code")] = ""
+
+
+def _apply_watchlist_sync_if_needed(group_map: dict[str, list[dict[str, str]]]) -> bool:
+    current_version = st.session_state.get("watchlist_version", 0)
+    current_saved_at = st.session_state.get("watchlist_last_saved_at", "")
+    current_hash = st.session_state.get("watchlist_last_saved_hash", "")
+
+    old_version = st.session_state.get(_k("watchlist_version_seen"), 0)
+    old_saved_at = st.session_state.get(_k("watchlist_saved_at_seen"), "")
+    old_hash = st.session_state.get(_k("watchlist_hash_seen"), "")
+
+    changed = (
+        current_version != old_version
+        or current_saved_at != old_saved_at
+        or current_hash != old_hash
+    )
+
+    if changed:
+        st.session_state[_k("watchlist_version_seen")] = current_version
+        st.session_state[_k("watchlist_saved_at_seen")] = current_saved_at
+        st.session_state[_k("watchlist_hash_seen")] = current_hash
+        _repair_state(group_map)
+        return True
+
+    return False
 
 
 def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
@@ -338,7 +390,10 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
             fields = data.get("fields", [])
             if not aa_data:
                 continue
-            temp = pd.DataFrame(aaData, columns=fields if fields and len(fields) == len(aa_data[0]) else None)
+            temp = pd.DataFrame(
+                aa_data,
+                columns=fields if fields and len(fields) == len(aa_data[0]) else None,
+            )
             frames.append(temp)
         except Exception:
             continue
@@ -1051,10 +1106,23 @@ def main():
     flat_rows = _flatten_group_map(group_map)
     _init_state(group_map)
 
+    if _apply_watchlist_sync_if_needed(group_map):
+        group_map = _build_group_stock_map()
+        flat_rows = _flatten_group_map(group_map)
+        _repair_state(group_map)
+
     render_pro_hero(
         title="歷史K線分析｜策略區可執行版 + 效能優化版",
-        subtitle="保留完整功能，補上偏多/偏空進場位、失效位、目標位與風險報酬概念。",
+        subtitle="保留完整功能，補上自選股真同步、偏多/偏空進場位、失效位、目標位與風險報酬概念。",
     )
+
+    watchlist_version = st.session_state.get("watchlist_version", 0)
+    watchlist_saved_at = _safe_str(st.session_state.get("watchlist_last_saved_at", ""))
+    if watchlist_version or watchlist_saved_at:
+        st.caption(
+            f"自選股同步狀態：watchlist_version = {watchlist_version}"
+            + (f" / 最後更新：{watchlist_saved_at}" if watchlist_saved_at else "")
+        )
 
     render_pro_section("快速搜尋股票")
     s1, s2 = st.columns([5, 1])
@@ -1333,7 +1401,8 @@ def main():
         st.write("1. 歷史資料與上櫃 fallback 皆有 cache。")
         st.write("2. 訊號 / 雷達 / 支撐壓力 / 事件偵測集中到 analysis bundle，只算一次。")
         st.write("3. 焦點事件切換只切 focus_df，不重抓歷史資料。")
-        st.write("4. 保留全部功能，不用刪功能換速度。")
+        st.write("4. 已補上 watchlist 真同步，群組與股票失效時會自動修正。")
+        st.write("5. 保留全部功能，不用刪功能換速度。")
 
 
 if __name__ == "__main__":
