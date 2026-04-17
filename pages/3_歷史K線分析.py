@@ -112,7 +112,7 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
             all_df = get_all_code_name_map("")
             if isinstance(all_df, pd.DataFrame) and not all_df.empty:
                 rows = []
-                for _, row in all_df.head(120).iterrows():
+                for _, row in all_df.head(150).iterrows():
                     code = _safe_str(row.get("code"))
                     name = _safe_str(row.get("name")) or code
                     market = _safe_str(row.get("market")) or "上市"
@@ -452,7 +452,7 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
 # =========================================================
 # 事件偵測
 # =========================================================
-def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6, atr_ratio: float = 0.8):
+def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
     if df is None or df.empty or len(df) < window * 2 + 3:
         return [], []
 
@@ -500,7 +500,7 @@ def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty or len(df) < 3:
         return pd.DataFrame(columns=["日期", "事件分類", "事件", "說明"])
 
-    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6, atr_ratio=0.8)
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
 
     for i in trough_idx:
         r = df.iloc[i]
@@ -628,8 +628,9 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
 
     if show_pivots:
         if trough_idx:
-            trough_df = df.iloc[[i for i in trough_idx if 0 <= i < len(df)]].copy()
-            if not trough_df.empty:
+            idxs = [i for i in trough_idx if 0 <= i < len(df)]
+            if idxs:
+                trough_df = df.iloc[idxs].copy()
                 fig.add_trace(
                     go.Scatter(
                         x=trough_df["日期"],
@@ -641,8 +642,9 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                 )
 
         if peak_idx:
-            peak_df = df.iloc[[i for i in peak_idx if 0 <= i < len(df)]].copy()
-            if not peak_df.empty:
+            idxs = [i for i in peak_idx if 0 <= i < len(df)]
+            if idxs:
+                peak_df = df.iloc[idxs].copy()
                 fig.add_trace(
                     go.Scatter(
                         x=peak_df["日期"],
@@ -655,7 +657,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
 
     fig.update_layout(
         title=f"{stock_label}｜歷史K線分析",
-        height=680,
+        height=700,
         margin=dict(l=20, r=20, t=50, b=20),
         xaxis_title="日期",
         yaxis_title="價格",
@@ -670,11 +672,7 @@ def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D"))
     fig.add_trace(go.Scatter(x=df["日期"], y=[80] * len(df), mode="lines", name="80", line=dict(dash="dot")))
     fig.add_trace(go.Scatter(x=df["日期"], y=[20] * len(df), mode="lines", name="20", line=dict(dash="dot")))
-    fig.update_layout(
-        title=f"{stock_label}｜KD",
-        height=320,
-        margin=dict(l=20, r=20, t=50, b=20),
-    )
+    fig.update_layout(title=f"{stock_label}｜KD", height=320, margin=dict(l=20, r=20, t=50, b=20))
     return fig
 
 
@@ -683,11 +681,7 @@ def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF"))
     fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA"))
     fig.add_trace(go.Bar(x=df["日期"], y=df["MACD_HIST"], name="MACD柱"))
-    fig.update_layout(
-        title=f"{stock_label}｜MACD",
-        height=340,
-        margin=dict(l=20, r=20, t=50, b=20),
-    )
+    fig.update_layout(title=f"{stock_label}｜MACD", height=340, margin=dict(l=20, r=20, t=50, b=20))
     return fig
 
 
@@ -767,18 +761,63 @@ def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapsho
     return views
 
 
-def _build_recent_event_summary(event_df: pd.DataFrame):
-    if event_df is None or event_df.empty:
-        return [("最近事件", "無明確新事件", "")]
+# =========================================================
+# 互動按鈕
+# =========================================================
+def _event_button_bar(filtered_event_df: pd.DataFrame):
+    if filtered_event_df is None or filtered_event_df.empty:
+        st.info("目前沒有可定位的事件。")
+        return
 
-    out = []
-    for _, row in event_df.head(8).iterrows():
-        try:
-            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
-        except Exception:
-            d = _safe_str(row["日期"])
-        out.append((d, _safe_str(row["事件"]), ""))
-    return out
+    st.markdown("#### 事件快捷按鈕")
+    top_events = filtered_event_df.head(8).copy()
+
+    cols = st.columns(min(4, len(top_events)))
+    col_count = len(cols)
+
+    for idx, (_, row) in enumerate(top_events.iterrows()):
+        c = cols[idx % col_count]
+        with c:
+            try:
+                d = pd.to_datetime(row["日期"]).strftime("%m-%d")
+            except Exception:
+                d = _safe_str(row["日期"])
+            btn_label = f"{d}｜{_safe_str(row['事件'])}"
+            if st.button(btn_label, key=_k(f"event_btn_{idx}"), use_container_width=True):
+                st.session_state[_k("focus_event_idx")] = int(row.name)
+
+
+def _prev_next_bar(filtered_event_df: pd.DataFrame):
+    c1, c2, c3 = st.columns([1, 1, 2])
+
+    with c1:
+        if st.button("上一事件", key=_k("prev_event"), use_container_width=True):
+            if filtered_event_df is not None and not filtered_event_df.empty:
+                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+                valid_idxs = filtered_event_df.index.tolist()
+                if cur_idx in valid_idxs:
+                    pos = valid_idxs.index(cur_idx)
+                    new_pos = max(0, pos - 1)
+                    st.session_state[_k("focus_event_idx")] = valid_idxs[new_pos]
+                else:
+                    st.session_state[_k("focus_event_idx")] = valid_idxs[0]
+
+    with c2:
+        if st.button("下一事件", key=_k("next_event"), use_container_width=True):
+            if filtered_event_df is not None and not filtered_event_df.empty:
+                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+                valid_idxs = filtered_event_df.index.tolist()
+                if cur_idx in valid_idxs:
+                    pos = valid_idxs.index(cur_idx)
+                    new_pos = min(len(valid_idxs) - 1, pos + 1)
+                    st.session_state[_k("focus_event_idx")] = valid_idxs[new_pos]
+                else:
+                    st.session_state[_k("focus_event_idx")] = valid_idxs[0]
+
+    with c3:
+        if st.button("回到全區間", key=_k("back_all"), use_container_width=True):
+            st.session_state[_k("focus_event_idx")] = -1
+            st.session_state[_k("focus_window")] = "全部"
 
 
 # =========================================================
@@ -793,13 +832,13 @@ def main():
     _init_state(group_map)
 
     render_pro_hero(
-        title="歷史K線分析｜股神互動版",
-        subtitle="可點選事件、可切換焦點區間、可定位事件日期、保留完整專業分析功能。",
+        title="歷史K線分析｜股神按鈕互動版",
+        subtitle="可用按鈕快速切換事件、上一筆 / 下一筆、回到全區間，保留完整專業分析。",
     )
 
     render_pro_section("快速搜尋股票")
-
     s1, s2 = st.columns([5, 1])
+
     with s1:
         st.text_input(
             "輸入股票代碼或名稱",
@@ -807,6 +846,7 @@ def main():
             placeholder="例如：2330、台積電、3548 兆利",
             label_visibility="collapsed",
         )
+
     with s2:
         if st.button("帶入", use_container_width=True, type="primary"):
             target = _find_search_target(st.session_state.get(_k("search_input"), ""), flat_rows)
@@ -901,11 +941,10 @@ def main():
     signal_snapshot = compute_signal_snapshot(df)
     sr_snapshot = compute_support_resistance_snapshot(df)
     radar = compute_radar_scores(df)
-    badge_text, badge_class = score_to_badge(signal_snapshot.get("score", 0))
+    badge_text, _ = score_to_badge(signal_snapshot.get("score", 0))
     event_df = _build_event_df(df)
-    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6, atr_ratio=0.8)
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
 
-    # 可點選互動區
     render_pro_section("互動控制")
     i1, i2, i3, i4 = st.columns([2, 2, 2, 2])
 
@@ -925,30 +964,14 @@ def main():
     if not filtered_event_df.empty and st.session_state.get(_k("event_filter")) != "全部":
         filtered_event_df = filtered_event_df[
             filtered_event_df["事件分類"] == st.session_state.get(_k("event_filter"))
-        ].reset_index(drop=True)
+        ].reset_index(drop=False)
 
-    event_options = ["不指定事件"]
-    if not filtered_event_df.empty:
-        for idx, row in filtered_event_df.iterrows():
-            try:
-                d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
-            except Exception:
-                d = _safe_str(row["日期"])
-            event_options.append(f"{idx}｜{d}｜{_safe_str(row['事件'])}")
-
-    selected_event_text = st.selectbox("點選事件定位", options=event_options, key=_k("event_select_text"))
-    if selected_event_text == "不指定事件":
-        st.session_state[_k("focus_event_idx")] = -1
-    else:
-        try:
-            event_idx = int(selected_event_text.split("｜")[0])
-            st.session_state[_k("focus_event_idx")] = event_idx
-        except Exception:
-            st.session_state[_k("focus_event_idx")] = -1
+    _prev_next_bar(filtered_event_df)
+    _event_button_bar(filtered_event_df)
 
     focus_df = _slice_by_focus(
         df=df,
-        event_df=filtered_event_df,
+        event_df=filtered_event_df if not filtered_event_df.empty else event_df,
         focus_event_idx=st.session_state.get(_k("focus_event_idx"), -1),
         focus_window=st.session_state.get(_k("focus_window"), "全部"),
     )
@@ -956,7 +979,7 @@ def main():
     if focus_df.empty:
         focus_df = df.copy()
 
-    focus_peak_idx, focus_trough_idx = _detect_pivots_smart(focus_df, window=3, min_gap=4, atr_ratio=0.5)
+    focus_peak_idx, focus_trough_idx = _detect_pivots_smart(focus_df, window=3, min_gap=4)
 
     last = df.iloc[-1]
     first = df.iloc[0]
@@ -1008,11 +1031,25 @@ def main():
             use_container_width=True,
         )
 
-        render_pro_info_card(
-            "最近事件摘要",
-            _build_recent_event_summary(filtered_event_df if not filtered_event_df.empty else event_df),
-            chips=[badge_text, market_type],
-        )
+        if st.session_state.get(_k("focus_event_idx"), -1) >= 0 and filtered_event_df is not None and not filtered_event_df.empty:
+            focus_row = filtered_event_df[filtered_event_df["index"] == st.session_state.get(_k("focus_event_idx"), -1)]
+            if not focus_row.empty:
+                r = focus_row.iloc[0]
+                render_pro_info_card(
+                    "目前焦點事件",
+                    [
+                        ("日期", pd.to_datetime(r["日期"]).strftime("%Y-%m-%d"), ""),
+                        ("事件", _safe_str(r["事件"]), ""),
+                        ("說明", _safe_str(r["說明"]), ""),
+                    ],
+                    chips=[_safe_str(r["事件分類"])],
+                )
+        else:
+            render_pro_info_card(
+                "最近事件摘要",
+                [(pd.to_datetime(r["日期"]).strftime("%Y-%m-%d"), _safe_str(r["事件"]), "") for _, r in event_df.head(6).iterrows()] if not event_df.empty else [("最近事件", "無明確新事件", "")],
+                chips=[badge_text, market_type],
+            )
 
     with tabs[1]:
         c_kd, c_macd = st.columns(2)
@@ -1074,7 +1111,8 @@ def main():
         if filtered_event_df.empty:
             st.info("目前沒有符合條件的事件。")
         else:
-            st.dataframe(filtered_event_df, use_container_width=True, hide_index=True)
+            show_df = filtered_event_df[["日期", "事件分類", "事件", "說明"]].copy()
+            st.dataframe(show_df, use_container_width=True, hide_index=True)
 
     with tabs[4]:
         raw_cols = [
@@ -1087,7 +1125,7 @@ def main():
 
     with st.expander("效能說明"):
         st.write("這版已做 cache、搜尋同步修正、上櫃 smart history fallback。")
-        st.write("互動點選包含：事件定位、區間切換、均線顯示、起漲起跌點顯示。")
+        st.write("互動包含：事件快捷按鈕、上一事件、下一事件、回到全區間。")
 
 
 if __name__ == "__main__":
