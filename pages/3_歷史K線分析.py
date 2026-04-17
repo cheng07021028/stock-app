@@ -1,1566 +1,1340 @@
 # pages/3_歷史K線分析.py
-import math
-import traceback
-from datetime import date, datetime, timedelta
+from __future__ import annotations
 
-import numpy as np
+from datetime import date, datetime, timedelta
+from typing import Any
+
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
-from plotly.subplots import make_subplots
 
 from utils import (
-    inject_pro_theme,
-    render_pro_hero,
-    render_pro_section,
-    render_pro_info_card,
-    render_pro_kpi_row,
-    format_number,
-    get_normalized_watchlist,
-    get_all_code_name_map,
-    get_history_data,
+    compute_radar_scores,
     compute_signal_snapshot,
     compute_support_resistance_snapshot,
-    compute_radar_scores,
+    format_number,
+    get_all_code_name_map,
+    get_history_data,
+    get_normalized_watchlist,
+    inject_pro_theme,
+    load_last_query_state,
+    parse_date_safe,
+    render_pro_hero,
+    render_pro_info_card,
+    render_pro_kpi_row,
+    render_pro_section,
+    save_last_query_state,
+    score_to_badge,
 )
 
-# =========================
-# 頁面設定
-# =========================
-st.set_page_config(page_title="歷史K線分析", page_icon="📈", layout="wide")
-inject_pro_theme()
-
-# =========================
-# 安全樣式補強
-# =========================
-st.markdown(
-    """
-    <style>
-    .hist-top-bar{
-        padding:10px 14px;
-        border-radius:14px;
-        background:linear-gradient(135deg, rgba(20,24,38,.96), rgba(12,17,29,.92));
-        border:1px solid rgba(255,255,255,.08);
-        margin-bottom:10px;
-        box-shadow:0 10px 24px rgba(0,0,0,.22);
-    }
-    .hist-top-title{
-        font-size:12px;
-        color:#9fb0d1;
-        margin-bottom:4px;
-        letter-spacing:.5px;
-    }
-    .hist-top-value{
-        font-size:15px;
-        color:#eef4ff;
-        font-weight:700;
-        line-height:1.45;
-    }
-    .hist-chip{
-        display:inline-block;
-        padding:4px 10px;
-        margin:2px 6px 2px 0;
-        border-radius:999px;
-        font-size:12px;
-        background:rgba(255,255,255,.06);
-        border:1px solid rgba(255,255,255,.08);
-        color:#dce7ff;
-    }
-    .event-card{
-        border:1px solid rgba(255,255,255,.08);
-        background:linear-gradient(135deg, rgba(17,22,34,.96), rgba(14,18,28,.94));
-        border-radius:14px;
-        padding:10px 12px;
-        margin-bottom:8px;
-    }
-    .event-date{
-        font-size:12px;
-        color:#9fb0d1;
-        margin-bottom:3px;
-    }
-    .event-title{
-        font-size:13px;
-        color:#f1f5ff;
-        font-weight:700;
-        margin-bottom:4px;
-    }
-    .event-desc{
-        font-size:12px;
-        color:#c8d3ea;
-        line-height:1.5;
-    }
-    .strategy-box{
-        border:1px solid rgba(255,255,255,.08);
-        background:linear-gradient(135deg, rgba(17,22,34,.96), rgba(14,18,28,.94));
-        border-radius:16px;
-        padding:14px;
-        height:100%;
-    }
-    .strategy-title{
-        font-size:15px;
-        font-weight:800;
-        color:#eff5ff;
-        margin-bottom:8px;
-    }
-    .strategy-line{
-        font-size:13px;
-        color:#d5e0f8;
-        margin:5px 0;
-        line-height:1.55;
-    }
-    .mini-muted{
-        font-size:12px;
-        color:#94a6c9;
-    }
-    .state-good{color:#3ddc97;font-weight:700;}
-    .state-warn{color:#ffd166;font-weight:700;}
-    .state-bad{color:#ff6b6b;font-weight:700;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# =========================
-# 基本常數
-# =========================
-DEFAULT_LOOKBACK_DAYS = 365
-DEFAULT_END = date.today()
-DEFAULT_START = DEFAULT_END - timedelta(days=DEFAULT_LOOKBACK_DAYS)
-
-SS_GROUP_KEY = "hist_selected_group"
-SS_STOCK_KEY = "hist_selected_stock"
-SS_SEARCH_KEY = "hist_search_keyword"
-SS_CODE_KEY = "hist_selected_code"
-SS_START_KEY = "hist_date_start"
-SS_END_KEY = "hist_date_end"
-SS_LAST_SEARCH_HIT_KEY = "hist_last_search_hit"
+PAGE_TITLE = "歷史K線分析"
+PFX = "hk_"
 
 
-# =========================
-# 基礎工具
-# =========================
-def _safe_text(v, default=""):
+def _k(key: str) -> str:
+    return f"{PFX}{key}"
+
+
+def _safe_str(v: Any) -> str:
     if v is None:
-        return default
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
+
+
+def _safe_float(v: Any, default=None):
     try:
         if pd.isna(v):
             return default
     except Exception:
         pass
-    s = str(v).strip()
-    return s if s else default
-
-
-def _to_float(v, default=np.nan):
     try:
-        if v is None or v == "":
-            return default
         return float(v)
     except Exception:
         return default
 
 
-def _ensure_ss_defaults():
-    if SS_GROUP_KEY not in st.session_state:
-        st.session_state[SS_GROUP_KEY] = "全部股票"
-    if SS_STOCK_KEY not in st.session_state:
-        st.session_state[SS_STOCK_KEY] = ""
-    if SS_SEARCH_KEY not in st.session_state:
-        st.session_state[SS_SEARCH_KEY] = ""
-    if SS_CODE_KEY not in st.session_state:
-        st.session_state[SS_CODE_KEY] = ""
-    if SS_START_KEY not in st.session_state:
-        st.session_state[SS_START_KEY] = DEFAULT_START
-    if SS_END_KEY not in st.session_state:
-        st.session_state[SS_END_KEY] = DEFAULT_END
-    if SS_LAST_SEARCH_HIT_KEY not in st.session_state:
-        st.session_state[SS_LAST_SEARCH_HIT_KEY] = ""
-
-
-def _normalize_code(code: str) -> str:
-    code = _safe_text(code)
-    if "." in code:
-        code = code.split(".")[0]
-    return code.strip()
-
-
-def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or len(df) == 0:
-        return pd.DataFrame()
-
-    x = df.copy()
-
-    # 常見欄位對應
-    rename_map = {}
-    for c in x.columns:
-        lc = str(c).strip().lower()
-        if lc in ["date", "日期", "time", "datetime"]:
-            rename_map[c] = "Date"
-        elif lc in ["open", "開盤", "開盤價"]:
-            rename_map[c] = "Open"
-        elif lc in ["high", "最高", "最高價"]:
-            rename_map[c] = "High"
-        elif lc in ["low", "最低", "最低價"]:
-            rename_map[c] = "Low"
-        elif lc in ["close", "收盤", "收盤價", "adj close", "adj_close"]:
-            rename_map[c] = "Close"
-        elif lc in ["volume", "成交量"]:
-            rename_map[c] = "Volume"
-
-    x = x.rename(columns=rename_map)
-
-    required = ["Date", "Open", "High", "Low", "Close"]
-    for col in required:
-        if col not in x.columns:
-            return pd.DataFrame()
-
-    if "Volume" not in x.columns:
-        x["Volume"] = np.nan
-
-    x["Date"] = pd.to_datetime(x["Date"], errors="coerce")
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        x[col] = pd.to_numeric(x[col], errors="coerce")
-
-    x = x.dropna(subset=["Date", "Open", "High", "Low", "Close"]).sort_values("Date").reset_index(drop=True)
-
-    if len(x) == 0:
-        return pd.DataFrame()
-
-    return x
-
-
-@st.cache_data(show_spinner=False, ttl=300)
-def _load_code_name_map_cached():
+def _to_date(v: Any, fallback: date) -> date:
+    if v is None:
+        return fallback
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
     try:
-        m = get_all_code_name_map()
-        if isinstance(m, dict):
-            return {str(k): str(v) for k, v in m.items()}
-        return {}
+        x = pd.to_datetime(v, errors="coerce")
+        if pd.notna(x):
+            return x.date()
     except Exception:
-        return {}
+        pass
+    return fallback
 
 
-def _extract_group_map_from_watchlist():
-    """
-    盡量兼容目前專案各種 watchlist 結構
-    輸出:
-    {
-        "全部股票": [{"code":"2330","name":"台積電"}, ...],
-        "自選股": [...],
-        "半導體": [...]
-    }
-    """
-    code_name_map = _load_code_name_map_cached()
-    raw = None
+def _html(s: str):
+    st.markdown(s, unsafe_allow_html=True)
 
-    try:
-        raw = get_normalized_watchlist()
-    except Exception:
-        raw = None
 
-    group_map = {"全部股票": []}
-    all_seen = {}
+def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
+    watchlist = get_normalized_watchlist()
+    group_map: dict[str, list[dict[str, str]]] = {}
 
-    def add_item(group, code, name=""):
-        code = _normalize_code(code)
-        if not code:
-            return
-        name = _safe_text(name) or code_name_map.get(code, "")
-        item = {"code": code, "name": name}
-        if group not in group_map:
-            group_map[group] = []
-        if code not in {i["code"] for i in group_map[group]}:
-            group_map[group].append(item)
-        if code not in all_seen:
-            all_seen[code] = item
+    if isinstance(watchlist, dict):
+        for group_name, items in watchlist.items():
+            g = _safe_str(group_name) or "未分組"
+            group_map[g] = []
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    code = _safe_str(item.get("code"))
+                    name = _safe_str(item.get("name")) or code
+                    market = _safe_str(item.get("market")) or "上市"
+                    if code:
+                        group_map[g].append(
+                            {
+                                "code": code,
+                                "name": name,
+                                "market": market,
+                                "label": f"{code} {name}",
+                            }
+                        )
 
-    # 情況1: dict[group] = list
-    if isinstance(raw, dict):
-        for group, arr in raw.items():
-            group_name = _safe_text(group, "未分類")
-            if isinstance(arr, list):
-                for v in arr:
-                    if isinstance(v, dict):
-                        add_item(group_name, v.get("code") or v.get("symbol") or v.get("股票代號"), v.get("name") or v.get("股票名稱"))
-                    else:
-                        code = _normalize_code(v)
-                        add_item(group_name, code, code_name_map.get(code, ""))
-            elif isinstance(arr, dict):
-                for code, name in arr.items():
-                    add_item(group_name, code, name)
-
-    # 情況2: list
-    elif isinstance(raw, list):
-        for v in raw:
-            if isinstance(v, dict):
-                group_name = _safe_text(v.get("group") or v.get("分類") or v.get("群組"), "自選股")
-                add_item(group_name, v.get("code") or v.get("symbol") or v.get("股票代號"), v.get("name") or v.get("股票名稱"))
-            else:
-                code = _normalize_code(v)
-                add_item("自選股", code, code_name_map.get(code, ""))
-
-    # 情況3: session_state 補抓
-    for ss_key in ["watchlist_groups", "watchlist", "normalized_watchlist", "favorite_groups"]:
-        raw_ss = st.session_state.get(ss_key)
-        if isinstance(raw_ss, dict):
-            for group, arr in raw_ss.items():
-                group_name = _safe_text(group, "未分類")
-                if isinstance(arr, list):
-                    for v in arr:
-                        if isinstance(v, dict):
-                            add_item(group_name, v.get("code") or v.get("symbol") or v.get("股票代號"), v.get("name") or v.get("股票名稱"))
-                        else:
-                            code = _normalize_code(v)
-                            add_item(group_name, code, code_name_map.get(code, ""))
-        elif isinstance(raw_ss, list):
-            for v in raw_ss:
-                if isinstance(v, dict):
-                    group_name = _safe_text(v.get("group") or v.get("分類") or v.get("群組"), "自選股")
-                    add_item(group_name, v.get("code") or v.get("symbol") or v.get("股票代號"), v.get("name") or v.get("股票名稱"))
-                else:
-                    code = _normalize_code(v)
-                    add_item("自選股", code, code_name_map.get(code, ""))
-
-    # 若自選股空，至少帶入 code_name_map 前幾筆，避免頁面空掉
-    if len(all_seen) == 0 and code_name_map:
-        fallback_codes = list(code_name_map.keys())[:300]
-        for code in fallback_codes:
-            add_item("全部股票", code, code_name_map.get(code, ""))
-
-    # 組裝全部股票
-    all_items = list(all_seen.values())
-    all_items = sorted(all_items, key=lambda x: (x["code"]))
-    group_map["全部股票"] = all_items
-
-    # 其他群組排序
-    for g in list(group_map.keys()):
-        group_map[g] = sorted(group_map[g], key=lambda x: (x["code"]))
+    if not group_map:
+        try:
+            all_df = get_all_code_name_map("")
+            if isinstance(all_df, pd.DataFrame) and not all_df.empty:
+                rows = []
+                for _, row in all_df.head(150).iterrows():
+                    code = _safe_str(row.get("code"))
+                    name = _safe_str(row.get("name")) or code
+                    market = _safe_str(row.get("market")) or "上市"
+                    if code:
+                        rows.append(
+                            {
+                                "code": code,
+                                "name": name,
+                                "market": market,
+                                "label": f"{code} {name}",
+                            }
+                        )
+                if rows:
+                    group_map["全部股票"] = rows
+        except Exception:
+            pass
 
     return group_map
 
 
-def _build_search_records(group_map):
-    records = []
-    code_name_map = _load_code_name_map_cached()
-
-    for code, name in code_name_map.items():
-        records.append(
-            {
-                "code": _normalize_code(code),
-                "name": _safe_text(name),
-                "group": None,
-                "label": f"{_normalize_code(code)} {_safe_text(name)}".strip(),
-            }
-        )
-
-    # 讓群組關聯優先
-    code_to_group = {}
-    for g, arr in group_map.items():
-        if g == "全部股票":
-            continue
-        for item in arr:
-            code_to_group.setdefault(item["code"], g)
-
-    dedup = {}
-    for r in records:
-        code = r["code"]
-        if code not in dedup:
-            r["group"] = code_to_group.get(code)
-            dedup[code] = r
-
-    # 補上 watchlist 裡但 map 可能沒有的
-    for g, arr in group_map.items():
-        for item in arr:
-            code = item["code"]
-            if code not in dedup:
-                dedup[code] = {
-                    "code": code,
-                    "name": item.get("name", ""),
-                    "group": None if g == "全部股票" else g,
-                    "label": f'{code} {_safe_text(item.get("name",""))}'.strip(),
+def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
+    rows = []
+    for group_name, items in group_map.items():
+        for item in items:
+            rows.append(
+                {
+                    "group": group_name,
+                    "code": _safe_str(item.get("code")),
+                    "name": _safe_str(item.get("name")),
+                    "market": _safe_str(item.get("market")),
+                    "label": _safe_str(item.get("label")),
                 }
-
-    results = list(dedup.values())
-    results = sorted(results, key=lambda x: x["code"])
-    return results
+            )
+    return rows
 
 
-def _search_stock_records(search_records, keyword: str, limit=30):
-    keyword = _safe_text(keyword).lower()
-    if not keyword:
-        return search_records[:limit]
+def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[str, str] | None:
+    q = _safe_str(keyword).lower()
+    if not q:
+        return None
 
-    out = []
-    for r in search_records:
-        code = _safe_text(r["code"]).lower()
-        name = _safe_text(r["name"]).lower()
-        group = _safe_text(r.get("group")).lower()
+    for row in flat_rows:
+        if q == row["code"].lower():
+            return row
+    for row in flat_rows:
+        if q == row["name"].lower():
+            return row
+    for row in flat_rows:
+        if q == row["label"].lower():
+            return row
 
-        score = None
-        if keyword == code:
-            score = 100
-        elif code.startswith(keyword):
-            score = 90
-        elif keyword in code:
-            score = 80
-        elif keyword in name:
-            score = 70
-        elif keyword in group:
-            score = 60
+    prefix_hits = [r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
+    if prefix_hits:
+        return prefix_hits[0]
 
-        if score is not None:
-            out.append((score, r))
+    contain_hits = [
+        r for r in flat_rows
+        if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()
+    ]
+    if contain_hits:
+        return contain_hits[0]
 
-    out = sorted(out, key=lambda x: (-x[0], x[1]["code"]))
-    return [x[1] for x in out[:limit]]
+    return None
 
 
-def _sync_search_group_stock(group_map, search_records):
-    """
-    真同步規則：
-    1. 搜尋選到股票 -> 自動同步群組 + 群組股票
-    2. 改群組 -> 股票清單同步
-    3. 改股票 -> 搜尋框同步
-    """
+def _init_state(group_map: dict[str, list[dict[str, str]]]):
+    saved = load_last_query_state()
+    today = date.today()
+    default_start = today - timedelta(days=365)
+    default_end = today
     groups = list(group_map.keys())
-    current_group = st.session_state.get(SS_GROUP_KEY, "全部股票")
-    if current_group not in groups:
-        current_group = "全部股票"
-        st.session_state[SS_GROUP_KEY] = current_group
 
-    search_kw = _safe_text(st.session_state.get(SS_SEARCH_KEY, ""))
-    stock_options = group_map.get(current_group, [])
+    if _k("group") not in st.session_state:
+        saved_group = _safe_str(saved.get("quick_group", ""))
+        st.session_state[_k("group")] = saved_group if saved_group in groups else (groups[0] if groups else "")
 
-    # 搜尋命中
-    matches = _search_stock_records(search_records, search_kw, limit=20)
+    if _k("stock_code") not in st.session_state:
+        st.session_state[_k("stock_code")] = _safe_str(saved.get("quick_stock_code", ""))
 
-    # 搜尋精準命中時，自動同步
-    exact_hit = None
-    if search_kw:
-        for m in matches:
-            if search_kw == m["code"] or search_kw == f'{m["code"]} {_safe_text(m["name"])}'.lower():
-                exact_hit = m
-                break
-        if exact_hit is None and len(matches) == 1:
-            exact_hit = matches[0]
+    if _k("search_input") not in st.session_state:
+        st.session_state[_k("search_input")] = ""
 
-    if exact_hit:
-        hit_group = exact_hit.get("group")
-        if hit_group and hit_group in group_map:
-            st.session_state[SS_GROUP_KEY] = hit_group
-            current_group = hit_group
-            stock_options = group_map.get(current_group, [])
-        st.session_state[SS_CODE_KEY] = exact_hit["code"]
-        st.session_state[SS_STOCK_KEY] = f'{exact_hit["code"]} {_safe_text(exact_hit["name"])}'.strip()
-        st.session_state[SS_LAST_SEARCH_HIT_KEY] = exact_hit["code"]
+    if _k("start_date") not in st.session_state:
+        st.session_state[_k("start_date")] = parse_date_safe(saved.get("home_start"), default_start)
 
-    # 若目前股票不在當前群組，優先用 code 對應
-    current_stock_label = _safe_text(st.session_state.get(SS_STOCK_KEY, ""))
-    current_code = _normalize_code(st.session_state.get(SS_CODE_KEY, ""))
+    if _k("end_date") not in st.session_state:
+        st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
 
-    valid_labels = [f'{x["code"]} {_safe_text(x["name"])}'.strip() for x in stock_options]
-    valid_codes = [x["code"] for x in stock_options]
+    if _k("event_filter") not in st.session_state:
+        st.session_state[_k("event_filter")] = "全部"
 
-    if current_code and current_code in valid_codes:
-        idx = valid_codes.index(current_code)
-        st.session_state[SS_STOCK_KEY] = valid_labels[idx]
-    elif current_stock_label not in valid_labels:
-        if stock_options:
-            first_item = stock_options[0]
-            st.session_state[SS_CODE_KEY] = first_item["code"]
-            st.session_state[SS_STOCK_KEY] = f'{first_item["code"]} {_safe_text(first_item["name"])}'.strip()
-        else:
-            st.session_state[SS_CODE_KEY] = ""
-            st.session_state[SS_STOCK_KEY] = ""
+    if _k("focus_event_idx") not in st.session_state:
+        st.session_state[_k("focus_event_idx")] = -1
 
-    # 股票 -> 搜尋同步
-    if st.session_state.get(SS_STOCK_KEY):
-        st.session_state[SS_SEARCH_KEY] = st.session_state[SS_STOCK_KEY]
+    if _k("focus_window") not in st.session_state:
+        st.session_state[_k("focus_window")] = "全部"
+
+    if _k("show_ma") not in st.session_state:
+        st.session_state[_k("show_ma")] = True
+
+    if _k("show_pivots") not in st.session_state:
+        st.session_state[_k("show_pivots")] = True
+
+    if _k("left_panel_limit") not in st.session_state:
+        st.session_state[_k("left_panel_limit")] = 12
+
+    st.session_state[_k("start_date")] = _to_date(st.session_state.get(_k("start_date")), default_start)
+    st.session_state[_k("end_date")] = _to_date(st.session_state.get(_k("end_date")), default_end)
+
+    _repair_state(group_map)
 
 
-def _on_group_change(group_map):
-    group = st.session_state.get(SS_GROUP_KEY, "全部股票")
-    options = group_map.get(group, [])
-    if options:
-        cur_code = _normalize_code(st.session_state.get(SS_CODE_KEY, ""))
-        if cur_code in [o["code"] for o in options]:
-            found = next((o for o in options if o["code"] == cur_code), options[0])
-        else:
-            found = options[0]
-        st.session_state[SS_CODE_KEY] = found["code"]
-        st.session_state[SS_STOCK_KEY] = f'{found["code"]} {_safe_text(found["name"])}'.strip()
-        st.session_state[SS_SEARCH_KEY] = st.session_state[SS_STOCK_KEY]
+def _repair_state(group_map: dict[str, list[dict[str, str]]]):
+    groups = list(group_map.keys())
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+
+    if current_group not in group_map:
+        st.session_state[_k("group")] = groups[0] if groups else ""
+        current_group = st.session_state[_k("group")]
+
+    items = group_map.get(current_group, [])
+    valid_codes = [x["code"] for x in items]
+    current_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
+
+    if valid_codes:
+        if current_code not in valid_codes:
+            st.session_state[_k("stock_code")] = valid_codes[0]
     else:
-        st.session_state[SS_CODE_KEY] = ""
-        st.session_state[SS_STOCK_KEY] = ""
-        st.session_state[SS_SEARCH_KEY] = ""
+        st.session_state[_k("stock_code")] = ""
 
 
-def _on_stock_change():
-    stock_label = _safe_text(st.session_state.get(SS_STOCK_KEY, ""))
-    if stock_label:
-        code = _normalize_code(stock_label.split(" ")[0])
-        st.session_state[SS_CODE_KEY] = code
-        st.session_state[SS_SEARCH_KEY] = stock_label
+def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+    items = group_map.get(current_group, [])
+    st.session_state[_k("stock_code")] = items[0]["code"] if items else ""
+    st.session_state[_k("focus_event_idx")] = -1
 
 
-def _pick_code_name():
-    code = _normalize_code(st.session_state.get(SS_CODE_KEY, ""))
-    label = _safe_text(st.session_state.get(SS_STOCK_KEY, ""))
-    name = ""
-    if label and " " in label:
-        name = label.split(" ", 1)[1].strip()
-    if not name:
-        name = _load_code_name_map_cached().get(code, "")
-    return code, name
-
-
-# =========================
-# 技術分析
-# =========================
-@st.cache_data(show_spinner=False, ttl=300)
-def _prepare_tech_df(hist_df: pd.DataFrame) -> pd.DataFrame:
-    df = _normalize_history_df(hist_df)
-    if len(df) == 0:
-        return df
+def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
 
     df = df.copy()
-    close = df["Close"]
+    if "日期" not in df.columns:
+        return pd.DataFrame()
 
-    # 均線
-    for n in [5, 10, 20, 60, 120]:
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+
+    numeric_cols = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "收盤價" not in df.columns:
+        return pd.DataFrame()
+
+    df = df.dropna(subset=["收盤價"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    close = df["收盤價"]
+    high = df["最高價"] if "最高價" in df.columns else close
+    low = df["最低價"] if "最低價" in df.columns else close
+    volume = pd.to_numeric(df["成交股數"], errors="coerce") if "成交股數" in df.columns else pd.Series(index=df.index, dtype=float)
+
+    for n in [5, 10, 20, 60, 120, 240]:
         df[f"MA{n}"] = close.rolling(n).mean()
 
-    # KD
-    low9 = df["Low"].rolling(9).min()
-    high9 = df["High"].rolling(9).max()
-    rsv = (close - low9) / (high9 - low9).replace(0, np.nan) * 100
-    df["K"] = rsv.ewm(com=2, adjust=False).mean()
-    df["D"] = df["K"].ewm(com=2, adjust=False).mean()
+    low_9 = low.rolling(9).min()
+    high_9 = high.rolling(9).max()
+    rsv = (close - low_9) / (high_9 - low_9).replace(0, pd.NA) * 100
+    df["K"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    df["D"] = df["K"].ewm(alpha=1 / 3, adjust=False).mean()
     df["J"] = 3 * df["K"] - 2 * df["D"]
 
-    # MACD
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     df["DIF"] = ema12 - ema26
-    df["MACD"] = df["DIF"].ewm(span=9, adjust=False).mean()
-    df["OSC"] = df["DIF"] - df["MACD"]
+    df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
+    df["MACD_HIST"] = df["DIF"] - df["DEA"]
 
-    # 報酬 / 波動
-    df["Ret1"] = close.pct_change()
-    df["Ret5"] = close.pct_change(5)
-    df["Ret20"] = close.pct_change(20)
-    df["Volatility20"] = df["Ret1"].rolling(20).std() * np.sqrt(252)
+    df["漲跌幅(%)"] = close.pct_change() * 100
+    df["VOL5"] = volume.rolling(5).mean()
+    df["VOL20"] = volume.rolling(20).mean()
 
-    # 量能
-    df["VolMA5"] = df["Volume"].rolling(5).mean()
-    df["VolMA20"] = df["Volume"].rolling(20).mean()
-
-    # 事件點
-    df["GoldenCross_5_20"] = (df["MA5"] > df["MA20"]) & (df["MA5"].shift(1) <= df["MA20"].shift(1))
-    df["DeathCross_5_20"] = (df["MA5"] < df["MA20"]) & (df["MA5"].shift(1) >= df["MA20"].shift(1))
-    df["KD_Golden"] = (df["K"] > df["D"]) & (df["K"].shift(1) <= df["D"].shift(1))
-    df["KD_Death"] = (df["K"] < df["D"]) & (df["K"].shift(1) >= df["D"].shift(1))
-    df["MACD_Golden"] = (df["DIF"] > df["MACD"]) & (df["DIF"].shift(1) <= df["MACD"].shift(1))
-    df["MACD_Death"] = (df["DIF"] < df["MACD"]) & (df["DIF"].shift(1) >= df["MACD"].shift(1))
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["ATR14"] = tr.rolling(14).mean()
 
     return df
 
 
-def _fallback_signal_snapshot(df: pd.DataFrame) -> dict:
-    if len(df) == 0:
-        return {}
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
-
-    close = _to_float(last["Close"])
-    ma5 = _to_float(last.get("MA5"))
-    ma20 = _to_float(last.get("MA20"))
-    ma60 = _to_float(last.get("MA60"))
-    k = _to_float(last.get("K"))
-    d = _to_float(last.get("D"))
-    dif = _to_float(last.get("DIF"))
-    macd = _to_float(last.get("MACD"))
-    vol = _to_float(last.get("Volume"))
-    vol20 = _to_float(last.get("VolMA20"))
-
-    trend_score = 0
-    if not np.isnan(close) and not np.isnan(ma5) and close > ma5:
-        trend_score += 1
-    if not np.isnan(ma5) and not np.isnan(ma20) and ma5 > ma20:
-        trend_score += 1
-    if not np.isnan(ma20) and not np.isnan(ma60) and ma20 > ma60:
-        trend_score += 1
-
-    momentum_score = 0
-    if not np.isnan(k) and not np.isnan(d) and k > d:
-        momentum_score += 1
-    if not np.isnan(dif) and not np.isnan(macd) and dif > macd:
-        momentum_score += 1
-    if _to_float(last.get("Ret5"), 0) > 0:
-        momentum_score += 1
-
-    volume_score = 0
-    if not np.isnan(vol) and not np.isnan(vol20) and vol > vol20:
-        volume_score += 1
-    if not np.isnan(vol) and not np.isnan(_to_float(prev.get("Volume"))) and vol > _to_float(prev.get("Volume")):
-        volume_score += 1
-
-    score = trend_score + momentum_score + volume_score
-    if score >= 6:
-        stance = "偏多"
-    elif score >= 3:
-        stance = "中性偏多"
-    elif score >= 1:
-        stance = "中性"
-    else:
-        stance = "偏弱"
-
-    return {
-        "stance": stance,
-        "score": score,
-        "trend_score": trend_score,
-        "momentum_score": momentum_score,
-        "volume_score": volume_score,
-        "close_above_ma20": bool(close > ma20) if not np.isnan(close) and not np.isnan(ma20) else None,
-        "kd_golden": bool(last.get("KD_Golden", False)),
-        "macd_golden": bool(last.get("MACD_Golden", False)),
-    }
-
-
-def _fallback_sr_snapshot(df: pd.DataFrame) -> dict:
-    if len(df) == 0:
-        return {}
-
-    last = df.iloc[-1]
-    latest_close = _to_float(last["Close"])
-
-    recent20_high = _to_float(df["High"].tail(20).max())
-    recent20_low = _to_float(df["Low"].tail(20).min())
-    recent60_high = _to_float(df["High"].tail(60).max())
-    recent60_low = _to_float(df["Low"].tail(60).min())
-    ma20 = _to_float(last.get("MA20"))
-    ma60 = _to_float(last.get("MA60"))
-
-    support_candidates = [x for x in [recent20_low, recent60_low, ma20, ma60] if not np.isnan(x)]
-    resistance_candidates = [x for x in [recent20_high, recent60_high, ma20, ma60] if not np.isnan(x)]
-
-    supports = sorted(set(round(x, 2) for x in support_candidates if x <= latest_close + 999999), reverse=True)
-    resistances = sorted(set(round(x, 2) for x in resistance_candidates if x >= 0))
-
-    near_support = None
-    near_resistance = None
-    if supports:
-        below = [x for x in supports if x <= latest_close]
-        near_support = max(below) if below else min(supports)
-    if resistances:
-        above = [x for x in resistances if x >= latest_close]
-        near_resistance = min(above) if above else max(resistances)
-
-    return {
-        "latest_close": latest_close,
-        "near_support": near_support,
-        "near_resistance": near_resistance,
-        "supports": supports[:4],
-        "resistances": resistances[:4],
-    }
-
-
-def _fallback_radar_scores(df: pd.DataFrame) -> dict:
-    if len(df) == 0:
-        return {}
-
-    last = df.iloc[-1]
-    close = _to_float(last["Close"])
-    ma20 = _to_float(last.get("MA20"))
-    ma60 = _to_float(last.get("MA60"))
-    k = _to_float(last.get("K"))
-    d = _to_float(last.get("D"))
-    ret20 = _to_float(last.get("Ret20"), 0)
-    vol = _to_float(last.get("Volume"))
-    vol20 = _to_float(last.get("VolMA20"))
-    vol20v = _to_float(last.get("Volatility20"))
-
-    trend = 50
-    if not np.isnan(ma20) and not np.isnan(ma60):
-        trend = min(max(50 + (1 if ma20 > ma60 else -1) * 20 + (1 if close > ma20 else -1) * 15, 5), 95)
-
-    momentum = min(max(50 + (k - d if not np.isnan(k) and not np.isnan(d) else 0), 5), 95)
-    strength = min(max(50 + ret20 * 250, 5), 95)
-    volume_score = 50 if np.isnan(vol) or np.isnan(vol20) or vol20 == 0 else min(max(50 + (vol / vol20 - 1) * 40, 5), 95)
-    risk = 50 if np.isnan(vol20v) else min(max(90 - vol20v * 100, 5), 95)
-
-    return {
-        "趨勢": round(trend, 1),
-        "動能": round(momentum, 1),
-        "強度": round(strength, 1),
-        "量能": round(volume_score, 1),
-        "風險控管": round(risk, 1),
-    }
-
-
-def _get_signal_snapshot(df: pd.DataFrame) -> dict:
-    try:
-        result = compute_signal_snapshot(df.copy())
-        if isinstance(result, dict) and result:
-            return result
-    except Exception:
-        pass
-    return _fallback_signal_snapshot(df)
-
-
-def _get_sr_snapshot(df: pd.DataFrame) -> dict:
-    try:
-        result = compute_support_resistance_snapshot(df.copy())
-        if isinstance(result, dict) and result:
-            return result
-    except Exception:
-        pass
-    return _fallback_sr_snapshot(df)
-
-
-def _get_radar_scores(df: pd.DataFrame) -> dict:
-    try:
-        result = compute_radar_scores(df.copy())
-        if isinstance(result, dict) and result:
-            return result
-    except Exception:
-        pass
-    return _fallback_radar_scores(df)
-
-
-# =========================
-# 事件偵測
-# =========================
-@st.cache_data(show_spinner=False, ttl=300)
-def _build_event_panel(df: pd.DataFrame) -> list:
-    if len(df) == 0:
-        return []
-
-    events = []
-
-    for _, row in df.tail(120).iterrows():
-        dt = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
-        close = _to_float(row["Close"])
-
-        if bool(row.get("GoldenCross_5_20", False)):
-            events.append(
-                {
-                    "date": dt,
-                    "title": "短中期黃金交叉",
-                    "desc": f"MA5 上穿 MA20，短線趨勢轉強訊號。收盤 {close:.2f}",
-                    "tag": "trend_up",
-                    "priority": 92,
-                }
-            )
-        if bool(row.get("DeathCross_5_20", False)):
-            events.append(
-                {
-                    "date": dt,
-                    "title": "短中期死亡交叉",
-                    "desc": f"MA5 下穿 MA20，短線趨勢轉弱訊號。收盤 {close:.2f}",
-                    "tag": "trend_down",
-                    "priority": 90,
-                }
-            )
-        if bool(row.get("KD_Golden", False)):
-            events.append(
-                {
-                    "date": dt,
-                    "title": "KD 黃金交叉",
-                    "desc": f"K 值上穿 D 值，短波段動能改善。",
-                    "tag": "kd_up",
-                    "priority": 80,
-                }
-            )
-        if bool(row.get("KD_Death", False)):
-            events.append(
-                {
-                    "date": dt,
-                    "title": "KD 死亡交叉",
-                    "desc": f"K 值下穿 D 值，短波段動能轉弱。",
-                    "tag": "kd_down",
-                    "priority": 79,
-                }
-            )
-        if bool(row.get("MACD_Golden", False)):
-            events.append(
-                {
-                    "date": dt,
-                    "title": "MACD 黃金交叉",
-                    "desc": "DIF 上穿 MACD，波段動能偏多。",
-                    "tag": "macd_up",
-                    "priority": 86,
-                }
-            )
-        if bool(row.get("MACD_Death", False)):
-            events.append(
-                {
-                    "date": dt,
-                    "title": "MACD 死亡交叉",
-                    "desc": "DIF 下穿 MACD，波段動能偏空。",
-                    "tag": "macd_down",
-                    "priority": 85,
-                }
-            )
-
-    # 突破 / 跌破
-    for i in range(20, len(df)):
-        row = df.iloc[i]
-        prev20 = df.iloc[max(0, i - 20):i]
-        dt = pd.to_datetime(row["Date"]).strftime("%Y-%m-%d")
-
-        prev_high = _to_float(prev20["High"].max())
-        prev_low = _to_float(prev20["Low"].min())
-        close = _to_float(row["Close"])
-        vol = _to_float(row["Volume"])
-        vol20 = _to_float(row.get("VolMA20"))
-
-        if not np.isnan(close) and not np.isnan(prev_high) and close > prev_high:
-            extra = "，且量能放大" if (not np.isnan(vol) and not np.isnan(vol20) and vol > vol20) else ""
-            events.append(
-                {
-                    "date": dt,
-                    "title": "20日高點突破",
-                    "desc": f"收盤突破前 20 日高點 {prev_high:.2f}{extra}。",
-                    "tag": "breakout",
-                    "priority": 95,
-                }
-            )
-        if not np.isnan(close) and not np.isnan(prev_low) and close < prev_low:
-            events.append(
-                {
-                    "date": dt,
-                    "title": "20日低點跌破",
-                    "desc": f"收盤跌破前 20 日低點 {prev_low:.2f}。",
-                    "tag": "breakdown",
-                    "priority": 94,
-                }
-            )
-
-    # 去重保留重要事件
-    uniq = {}
-    for e in events:
-        key = (e["date"], e["title"])
-        if key not in uniq or e["priority"] > uniq[key]["priority"]:
-            uniq[key] = e
-
-    out = list(uniq.values())
-    out = sorted(out, key=lambda x: (x["date"], x["priority"]), reverse=True)
-    return out[:24]
-
-
-def _build_focus_summary(df: pd.DataFrame, events: list, signal: dict, sr: dict) -> str:
-    if len(df) == 0:
-        return "目前無資料"
-
-    last = df.iloc[-1]
-    close = _to_float(last["Close"])
-    ret1 = _to_float(last.get("Ret1"), 0) * 100
-    ma20 = _to_float(last.get("MA20"))
-    k = _to_float(last.get("K"))
-    d = _to_float(last.get("D"))
-    dif = _to_float(last.get("DIF"))
-    macd = _to_float(last.get("MACD"))
-    stance = _safe_text(signal.get("stance"), "中性")
-
-    bits = [f"最新收盤 {close:.2f}", f"單日 {ret1:+.2f}%", f"技術面判斷：{stance}"]
-
-    if not np.isnan(ma20):
-        bits.append("站上 MA20" if close > ma20 else "跌落 MA20 下方")
-    if not np.isnan(k) and not np.isnan(d):
-        bits.append(f"KD {k:.1f}/{d:.1f}")
-    if not np.isnan(dif) and not np.isnan(macd):
-        bits.append("MACD 偏多" if dif > macd else "MACD 偏弱")
-
-    if events:
-        bits.append(f"最近事件：{events[0]['date']} {events[0]['title']}")
-
-    ns = sr.get("near_support")
-    nr = sr.get("near_resistance")
-    if ns is not None and nr is not None:
-        bits.append(f"近支撐 {ns:.2f} / 近壓力 {nr:.2f}")
-
-    return "｜".join(bits)
-
-
-def _build_price_summary(sr: dict) -> str:
-    if not sr:
-        return "關鍵價位不足"
-
-    latest_close = sr.get("latest_close")
-    near_support = sr.get("near_support")
-    near_resistance = sr.get("near_resistance")
-    supports = sr.get("supports", [])
-    resistances = sr.get("resistances", [])
-
-    bits = []
-    if latest_close is not None:
-        bits.append(f"現價 {latest_close:.2f}")
-    if near_support is not None:
-        bits.append(f"近支撐 {near_support:.2f}")
-    if near_resistance is not None:
-        bits.append(f"近壓力 {near_resistance:.2f}")
-    if supports:
-        bits.append("支撐帶 " + " / ".join(f"{x:.2f}" for x in supports[:3]))
-    if resistances:
-        bits.append("壓力帶 " + " / ".join(f"{x:.2f}" for x in resistances[:3]))
-    return "｜".join(bits)
-
-
-# =========================
-# 策略
-# =========================
-def _build_strategy_plan(df: pd.DataFrame, signal: dict, sr: dict) -> dict:
-    if len(df) == 0:
-        return {}
-
-    last = df.iloc[-1]
-    close = _to_float(last["Close"])
-    ma20 = _to_float(last.get("MA20"))
-    ma60 = _to_float(last.get("MA60"))
-    k = _to_float(last.get("K"))
-    d = _to_float(last.get("D"))
-    dif = _to_float(last.get("DIF"))
-    macd = _to_float(last.get("MACD"))
-    vol = _to_float(last.get("Volume"))
-    vol20 = _to_float(last.get("VolMA20"))
-    stance = _safe_text(signal.get("stance"), "中性")
-
-    near_support = sr.get("near_support")
-    near_resistance = sr.get("near_resistance")
-
-    trend_ok = (not np.isnan(close) and not np.isnan(ma20) and close > ma20) and (
-        np.isnan(ma60) or close > ma60
-    )
-    momentum_ok = (not np.isnan(k) and not np.isnan(d) and k > d) and (
-        not np.isnan(dif) and not np.isnan(macd) and dif >= macd
-    )
-    volume_ok = np.isnan(vol) or np.isnan(vol20) or vol >= vol20
-
-    strategy = "觀望"
-    reason = []
-    action = []
-    risk = []
-
-    if trend_ok and momentum_ok and volume_ok:
-        strategy = "偏多順勢"
-        reason.append("股價站穩中期均線，趨勢結構完整")
-        reason.append("KD / MACD 同步偏多")
-        if near_resistance is not None:
-            action.append(f"若有效突破 {near_resistance:.2f} 並帶量，可考慮順勢追蹤")
-        if near_support is not None:
-            action.append(f"回測 {near_support:.2f} 附近不破，可分批布局")
-        if near_support is not None:
-            risk.append(f"跌破 {near_support:.2f} 應保守處理")
-    elif stance in ["中性偏多", "偏多"]:
-        strategy = "區間偏多"
-        reason.append("整體技術面尚可，但未完全共振")
-        if near_support is not None:
-            action.append(f"靠近 {near_support:.2f} 留意承接")
-        if near_resistance is not None:
-            action.append(f"接近 {near_resistance:.2f} 留意壓力與量價是否續強")
-        if near_support is not None:
-            risk.append(f"失守 {near_support:.2f} 轉弱")
-    else:
-        strategy = "保守觀望"
-        reason.append("趨勢或動能未明顯站回優勢")
-        if near_resistance is not None:
-            action.append(f"需先觀察是否站上 {near_resistance:.2f} 後再評估")
-        if near_support is not None:
-            risk.append(f"若跌破 {near_support:.2f}，下行風險增加")
-
-    return {
-        "strategy": strategy,
-        "reason": reason,
-        "action": action,
-        "risk": risk,
-    }
-
-
-def _build_executable_plan(df: pd.DataFrame, signal: dict, sr: dict) -> dict:
-    if len(df) == 0:
-        return {}
-
-    last = df.iloc[-1]
-    close = _to_float(last["Close"])
-    near_support = sr.get("near_support")
-    near_resistance = sr.get("near_resistance")
-
-    buy_zone = None
-    chase_zone = None
-    stop_loss = None
-    take_profit_1 = None
-    take_profit_2 = None
-
-    if near_support is not None:
-        buy_zone = (near_support * 0.995, near_support * 1.015)
-        stop_loss = near_support * 0.97
-
-    if near_resistance is not None:
-        chase_zone = (near_resistance * 1.003, near_resistance * 1.02)
-        take_profit_1 = near_resistance * 1.05
-        take_profit_2 = near_resistance * 1.10
-
-    return {
-        "current_price": close,
-        "buy_zone": buy_zone,
-        "chase_zone": chase_zone,
-        "stop_loss": stop_loss,
-        "tp1": take_profit_1,
-        "tp2": take_profit_2,
-    }
-
-
-# =========================
-# 圖表
-# =========================
-def _make_main_chart(df: pd.DataFrame, code: str, name: str):
-    fig = make_subplots(
-        rows=4,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.56, 0.14, 0.14, 0.16],
-        specs=[[{"secondary_y": False}], [{}], [{}], [{}]],
-    )
-
-    up_mask = df["Close"] >= df["Open"]
-    down_mask = ~up_mask
-
-    # K線
-    fig.add_trace(
-        go.Candlestick(
-            x=df["Date"],
-            open=df["Open"],
-            high=df["High"],
-            low=df["Low"],
-            close=df["Close"],
-            name="K線",
-        ),
-        row=1,
-        col=1,
-    )
-
-    # 均線
-    for ma in ["MA5", "MA10", "MA20", "MA60", "MA120"]:
-        if ma in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df["Date"],
-                    y=df[ma],
-                    mode="lines",
-                    name=ma,
-                    line=dict(width=1.6),
-                ),
-                row=1,
-                col=1,
-            )
-
-    # 量能
-    fig.add_trace(
-        go.Bar(
-            x=df.loc[up_mask, "Date"],
-            y=df.loc[up_mask, "Volume"],
-            name="量能↑",
-            opacity=0.65,
-        ),
-        row=2,
-        col=1,
-    )
-    fig.add_trace(
-        go.Bar(
-            x=df.loc[down_mask, "Date"],
-            y=df.loc[down_mask, "Volume"],
-            name="量能↓",
-            opacity=0.45,
-        ),
-        row=2,
-        col=1,
-    )
-    if "VolMA5" in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df["Date"],
-                y=df["VolMA5"],
-                mode="lines",
-                name="VolMA5",
-                line=dict(width=1.2),
-            ),
-            row=2,
-            col=1,
-        )
-    if "VolMA20" in df.columns:
-        fig.add_trace(
-            go.Scatter(
-                x=df["Date"],
-                y=df["VolMA20"],
-                mode="lines",
-                name="VolMA20",
-                line=dict(width=1.2),
-            ),
-            row=2,
-            col=1,
-        )
-
-    # KD
-    fig.add_trace(
-        go.Scatter(x=df["Date"], y=df["K"], mode="lines", name="K", line=dict(width=1.8)),
-        row=3,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=df["Date"], y=df["D"], mode="lines", name="D", line=dict(width=1.8)),
-        row=3,
-        col=1,
-    )
-    fig.add_hline(y=80, line_width=1, line_dash="dot", row=3, col=1)
-    fig.add_hline(y=20, line_width=1, line_dash="dot", row=3, col=1)
-
-    # MACD
-    fig.add_trace(
-        go.Bar(x=df["Date"], y=df["OSC"], name="OSC", opacity=0.6),
-        row=4,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=df["Date"], y=df["DIF"], mode="lines", name="DIF", line=dict(width=1.8)),
-        row=4,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(x=df["Date"], y=df["MACD"], mode="lines", name="MACD", line=dict(width=1.8)),
-        row=4,
-        col=1,
-    )
-
-    fig.update_layout(
-        title=f"{code} {name}｜歷史K線分析",
-        template="plotly_dark",
-        height=980,
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=18, r=18, t=50, b=18),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
-        hovermode="x unified",
-        barmode="overlay",
-    )
-    fig.update_yaxes(title_text="價格", row=1, col=1)
-    fig.update_yaxes(title_text="成交量", row=2, col=1)
-    fig.update_yaxes(title_text="KD", row=3, col=1)
-    fig.update_yaxes(title_text="MACD", row=4, col=1)
-    return fig
-
-
-def _make_radar_chart(radar_scores: dict):
-    if not radar_scores:
-        return None
-    labels = list(radar_scores.keys())
-    values = list(radar_scores.values())
-    labels_closed = labels + [labels[0]]
-    values_closed = values + [values[0]]
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatterpolar(
-            r=values_closed,
-            theta=labels_closed,
-            fill="toself",
-            name="雷達評分",
-        )
-    )
-    fig.update_layout(
-        template="plotly_dark",
-        height=430,
-        margin=dict(l=20, r=20, t=30, b=20),
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-        showlegend=False,
-    )
-    return fig
-
-
-# =========================
-# 資料抓取
-# =========================
-@st.cache_data(show_spinner=False, ttl=300)
-def _fetch_history_with_fallback(code: str, start_date: date, end_date: date) -> pd.DataFrame:
-    """
-    先用現有 utils.get_history_data
-    若失敗，補做 .TWO / .TW fallback 邏輯
-    """
-    candidates = []
-    code = _normalize_code(code)
-
-    if not code:
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> pd.DataFrame:
+    stock_no = _safe_str(stock_no)
+    if not stock_no:
         return pd.DataFrame()
 
-    # 原始代號優先
-    candidates.append(code)
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+    if end_ts < start_ts:
+        return pd.DataFrame()
 
-    # 台股常見 fallback
-    if not code.endswith(".TW") and not code.endswith(".TWO"):
-        candidates.append(f"{code}.TW")
-        candidates.append(f"{code}.TWO")
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    frames = []
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.tpex.org.tw/"}
 
-    tried = []
-    for c in candidates:
-        tried.append(c)
+    for dt in month_starts:
+        roc_year = dt.year - 1911
+        roc_date = f"{roc_year}/{dt.month:02d}"
         try:
-            df = get_history_data(c, start_date, end_date)
-            df = _normalize_history_df(df)
-            if len(df) > 0:
-                return df
+            r = requests.get(
+                "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
+                params={"l": "zh-tw", "d": roc_date, "stkno": stock_no},
+                headers=headers,
+                timeout=20,
+                verify=False,
+            )
+            r.raise_for_status()
+            data = r.json()
+            aa_data = data.get("aaData", [])
+            fields = data.get("fields", [])
+            if not aa_data:
+                continue
+            temp = pd.DataFrame(aaData, columns=fields if fields and len(fields) == len(aa_data[0]) else None)
+            frames.append(temp)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+
+    rename_map = {}
+    for col in df.columns:
+        c = _safe_str(col)
+        if c in ["日期", "日 期"]:
+            rename_map[col] = "日期"
+        elif "成交仟股" in c or "成交股數" in c:
+            rename_map[col] = "成交股數"
+        elif "成交仟元" in c or "成交金額" in c:
+            rename_map[col] = "成交金額"
+        elif "開盤" in c:
+            rename_map[col] = "開盤價"
+        elif "最高" in c:
+            rename_map[col] = "最高價"
+        elif "最低" in c:
+            rename_map[col] = "最低價"
+        elif "收盤" in c:
+            rename_map[col] = "收盤價"
+        elif "成交筆數" in c:
+            rename_map[col] = "成交筆數"
+    df = df.rename(columns=rename_map)
+
+    if "日期" not in df.columns:
+        return pd.DataFrame()
+
+    def convert_roc_date(x):
+        x = _safe_str(x)
+        if not x:
+            return pd.NaT
+        if "/" in x:
+            parts = x.split("/")
+            if len(parts) == 3:
+                try:
+                    return pd.Timestamp(year=int(parts[0]) + 1911, month=int(parts[1]), day=int(parts[2]))
+                except Exception:
+                    return pd.NaT
+        try:
+            return pd.to_datetime(x)
+        except Exception:
+            return pd.NaT
+
+    df["日期"] = df["日期"].apply(convert_roc_date)
+    df = df.dropna(subset=["日期"])
+
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .replace(["--", "---", "", "----"], pd.NA)
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "成交股數" in df.columns:
+        try:
+            med = df["成交股數"].dropna().median()
+            if pd.notna(med) and med < 100000:
+                df["成交股數"] = df["成交股數"] * 1000
         except Exception:
             pass
+
+    df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+    df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+    return df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
+    df = get_history_data(
+        stock_no=stock_no,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    df = _prepare_history_df(df)
+    if not df.empty:
+        return df
+
+    if _safe_str(market_type) in ["上櫃", "興櫃"]:
+        df2 = _get_tpex_history_data(stock_no, start_date, end_date)
+        df2 = _prepare_history_df(df2)
+        if not df2.empty:
+            return df2
 
     return pd.DataFrame()
 
 
-# =========================
-# 主畫面
-# =========================
-def main():
-    _ensure_ss_defaults()
+def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
+    if df is None or df.empty or len(df) < window * 2 + 3:
+        return [], []
 
-    render_pro_hero(
-        "歷史K線分析",
-        "股神版技術分析終端｜搜尋同步群組｜事件面板｜焦點摘要｜K線/KD/MACD｜雷達/訊號/支撐壓力｜策略執行區"
+    highs = df["最高價"].tolist()
+    lows = df["最低價"].tolist()
+    peak_idx = []
+    trough_idx = []
+
+    for i in range(window, len(df) - window):
+        cur_high = highs[i]
+        cur_low = lows[i]
+        if pd.isna(cur_high) or pd.isna(cur_low):
+            continue
+
+        left_high = highs[i - window:i]
+        right_high = highs[i + 1:i + 1 + window]
+        left_low = lows[i - window:i]
+        right_low = lows[i + 1:i + 1 + window]
+
+        is_peak = all(cur_high >= x for x in left_high + right_high if pd.notna(x))
+        is_trough = all(cur_low <= x for x in left_low + right_low if pd.notna(x))
+
+        if is_peak:
+            if not peak_idx or (i - peak_idx[-1] >= min_gap):
+                peak_idx.append(i)
+            elif cur_high > highs[peak_idx[-1]]:
+                peak_idx[-1] = i
+
+        if is_trough:
+            if not trough_idx or (i - trough_idx[-1] >= min_gap):
+                trough_idx.append(i)
+            elif cur_low < lows[trough_idx[-1]]:
+                trough_idx[-1] = i
+
+    return peak_idx, trough_idx
+
+
+def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    if df is None or df.empty or len(df) < 3:
+        return pd.DataFrame(columns=["日期", "事件分類", "事件", "說明"])
+
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
+
+    for i in trough_idx:
+        r = df.iloc[i]
+        rows.append({"日期": r["日期"], "事件分類": "起漲點", "事件": "起漲點", "說明": f"局部低點形成，低點約 {format_number(r.get('最低價'), 2)}。"})
+    for i in peak_idx:
+        r = df.iloc[i]
+        rows.append({"日期": r["日期"], "事件分類": "起跌點", "事件": "起跌點", "說明": f"局部高點形成，高點約 {format_number(r.get('最高價'), 2)}。"})
+
+    for i in range(1, len(df)):
+        prev = df.iloc[i - 1]
+        cur = df.iloc[i]
+        d = cur["日期"]
+
+        if all(c in df.columns for c in ["MA5", "MA10"]):
+            if pd.notna(prev["MA5"]) and pd.notna(prev["MA10"]) and pd.notna(cur["MA5"]) and pd.notna(cur["MA10"]):
+                if prev["MA5"] <= prev["MA10"] and cur["MA5"] > cur["MA10"]:
+                    rows.append({"日期": d, "事件分類": "MA", "事件": "MA黃金交叉", "說明": "MA5 上穿 MA10，短線偏強。"})
+                elif prev["MA5"] >= prev["MA10"] and cur["MA5"] < cur["MA10"]:
+                    rows.append({"日期": d, "事件分類": "MA", "事件": "MA死亡交叉", "說明": "MA5 下破 MA10，短線偏弱。"})
+
+        if all(c in df.columns for c in ["K", "D"]):
+            if pd.notna(prev["K"]) and pd.notna(prev["D"]) and pd.notna(cur["K"]) and pd.notna(cur["D"]):
+                if prev["K"] <= prev["D"] and cur["K"] > cur["D"]:
+                    rows.append({"日期": d, "事件分類": "KD", "事件": "KD黃金交叉", "說明": "KD 轉強。"})
+                elif prev["K"] >= prev["D"] and cur["K"] < cur["D"]:
+                    rows.append({"日期": d, "事件分類": "KD", "事件": "KD死亡交叉", "說明": "KD 轉弱。"})
+
+        if all(c in df.columns for c in ["DIF", "DEA"]):
+            if pd.notna(prev["DIF"]) and pd.notna(prev["DEA"]) and pd.notna(cur["DIF"]) and pd.notna(cur["DEA"]):
+                if prev["DIF"] <= prev["DEA"] and cur["DIF"] > cur["DEA"]:
+                    rows.append({"日期": d, "事件分類": "MACD", "事件": "MACD黃金交叉", "說明": "DIF 上穿 DEA，動能轉強。"})
+                elif prev["DIF"] >= prev["DEA"] and cur["DIF"] < cur["DEA"]:
+                    rows.append({"日期": d, "事件分類": "MACD", "事件": "MACD死亡交叉", "說明": "DIF 下破 DEA，動能轉弱。"})
+
+        if i >= 19 and all(c in df.columns for c in ["最高價", "最低價", "收盤價"]):
+            recent = df.iloc[max(0, i - 19): i + 1]
+            high20 = recent["最高價"].max()
+            low20 = recent["最低價"].min()
+            close_price = cur["收盤價"]
+
+            if pd.notna(close_price) and pd.notna(high20) and close_price >= high20:
+                rows.append({"日期": d, "事件分類": "突破", "事件": "突破20日高", "說明": "股價創 20 日新高。"})
+            if pd.notna(close_price) and pd.notna(low20) and close_price <= low20:
+                rows.append({"日期": d, "事件分類": "跌破", "事件": "跌破20日低", "說明": "股價創 20 日新低。"})
+
+    if not rows:
+        return pd.DataFrame(columns=["日期", "事件分類", "事件", "說明"])
+
+    return pd.DataFrame(rows).drop_duplicates(subset=["日期", "事件", "說明"]).sort_values("日期", ascending=False).reset_index(drop=True)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _compute_analysis_bundle(df: pd.DataFrame) -> dict[str, Any]:
+    signal_snapshot = compute_signal_snapshot(df)
+    sr_snapshot = compute_support_resistance_snapshot(df)
+    radar = compute_radar_scores(df)
+    badge_text, _ = score_to_badge(signal_snapshot.get("score", 0))
+    event_df = _build_event_df(df)
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
+
+    return {
+        "signal_snapshot": signal_snapshot,
+        "sr_snapshot": sr_snapshot,
+        "radar": radar,
+        "badge_text": badge_text,
+        "event_df": event_df,
+        "peak_idx": peak_idx,
+        "trough_idx": trough_idx,
+    }
+
+
+def _slice_by_focus(df: pd.DataFrame, event_df: pd.DataFrame, focus_event_idx: int, focus_window: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    if focus_event_idx is not None and focus_event_idx >= 0 and event_df is not None and not event_df.empty and focus_event_idx < len(event_df):
+        event_date = pd.to_datetime(event_df.iloc[focus_event_idx]["日期"], errors="coerce")
+        if pd.notna(event_date):
+            around = 30
+            mask = (df["日期"] >= event_date - pd.Timedelta(days=around)) & (df["日期"] <= event_date + pd.Timedelta(days=around))
+            focus_df = df.loc[mask].copy()
+            if not focus_df.empty:
+                return focus_df.reset_index(drop=True)
+
+    if focus_window == "30":
+        return df.tail(30).reset_index(drop=True)
+    if focus_window == "60":
+        return df.tail(60).reset_index(drop=True)
+    if focus_window == "120":
+        return df.tail(120).reset_index(drop=True)
+    if focus_window == "240":
+        return df.tail(240).reset_index(drop=True)
+
+    return df.reset_index(drop=True)
+
+
+def _event_style(event_type: str) -> dict[str, str]:
+    mapping = {
+        "起漲點": {"bg": "#ecfdf5", "border": "#10b981", "tag": "#047857", "text": "#065f46"},
+        "起跌點": {"bg": "#fef2f2", "border": "#ef4444", "tag": "#b91c1c", "text": "#7f1d1d"},
+        "MA": {"bg": "#eff6ff", "border": "#3b82f6", "tag": "#1d4ed8", "text": "#1e3a8a"},
+        "KD": {"bg": "#faf5ff", "border": "#a855f7", "tag": "#7e22ce", "text": "#581c87"},
+        "MACD": {"bg": "#fff7ed", "border": "#f97316", "tag": "#c2410c", "text": "#9a3412"},
+        "突破": {"bg": "#f0fdfa", "border": "#14b8a6", "tag": "#0f766e", "text": "#134e4a"},
+        "跌破": {"bg": "#f8fafc", "border": "#334155", "tag": "#0f172a", "text": "#334155"},
+    }
+    return mapping.get(event_type, {"bg": "#f8fafc", "border": "#94a3b8", "tag": "#475569", "text": "#334155"})
+
+
+def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
+    name = _safe_str(event_name)
+    typ = _safe_str(event_type)
+
+    if typ in ["起漲點", "突破"]:
+        return {"arrow": "↑", "label": "偏多", "bg": "#dcfce7", "color": "#166534"}
+    if typ in ["起跌點", "跌破"]:
+        return {"arrow": "↓", "label": "偏空", "bg": "#fee2e2", "color": "#991b1b"}
+    if "黃金交叉" in name:
+        return {"arrow": "↑", "label": "轉強", "bg": "#dbeafe", "color": "#1d4ed8"}
+    if "死亡交叉" in name:
+        return {"arrow": "↓", "label": "轉弱", "bg": "#fee2e2", "color": "#b91c1c"}
+    return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
+
+
+def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: list[int], trough_idx: list[int]) -> go.Figure:
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Candlestick(
+            x=df["日期"],
+            open=df["開盤價"],
+            high=df["最高價"],
+            low=df["最低價"],
+            close=df["收盤價"],
+            name="K線",
+        )
     )
 
-    group_map = _extract_group_map_from_watchlist()
-    search_records = _build_search_records(group_map)
-    _sync_search_group_stock(group_map, search_records)
+    if show_ma:
+        for n in [5, 10, 20, 60, 120, 240]:
+            col = f"MA{n}"
+            if col in df.columns:
+                fig.add_trace(go.Scatter(x=df["日期"], y=df[col], mode="lines", name=col))
 
-    code, name = _pick_code_name()
+    if show_pivots:
+        if trough_idx:
+            idxs = [i for i in trough_idx if 0 <= i < len(df)]
+            if idxs:
+                sub = df.iloc[idxs].copy()
+                fig.add_trace(go.Scatter(x=sub["日期"], y=sub["最低價"], mode="markers", name="起漲點", marker=dict(size=10, symbol="triangle-up")))
+        if peak_idx:
+            idxs = [i for i in peak_idx if 0 <= i < len(df)]
+            if idxs:
+                sub = df.iloc[idxs].copy()
+                fig.add_trace(go.Scatter(x=sub["日期"], y=sub["最高價"], mode="markers", name="起跌點", marker=dict(size=10, symbol="triangle-down")))
 
-    # -------------------------
-    # 控制列
-    # -------------------------
-    render_pro_section("條件設定")
+    fig.update_layout(
+        title=f"{stock_label}｜歷史K線分析",
+        height=760,
+        margin=dict(l=20, r=20, t=50, b=20),
+        xaxis_title="日期",
+        yaxis_title="價格",
+        xaxis_rangeslider_visible=False,
+    )
+    return fig
 
-    c1, c2, c3, c4 = st.columns([1.25, 1.1, 1.25, 1.3])
 
-    with c1:
-        st.text_input(
-            "快速搜尋股票",
-            key=SS_SEARCH_KEY,
-            placeholder="輸入代號或名稱，例如 2330 / 台積電",
-            help="搜尋命中後，會自動同步群組與群組股票",
+def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K"))
+    fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D"))
+    fig.add_trace(go.Scatter(x=df["日期"], y=[80] * len(df), mode="lines", name="80", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=df["日期"], y=[20] * len(df), mode="lines", name="20", line=dict(dash="dot")))
+    fig.update_layout(title=f"{stock_label}｜KD", height=320, margin=dict(l=20, r=20, t=50, b=20))
+    return fig
+
+
+def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF"))
+    fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA"))
+    fig.add_trace(go.Bar(x=df["日期"], y=df["MACD_HIST"], name="MACD柱"))
+    fig.update_layout(title=f"{stock_label}｜MACD", height=340, margin=dict(l=20, r=20, t=50, b=20))
+    return fig
+
+
+def _render_focus_summary_bar(filtered_event_df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, badge_text: str):
+    focus_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+
+    if focus_idx >= 0 and filtered_event_df is not None and not filtered_event_df.empty and focus_idx < len(filtered_event_df):
+        row = filtered_event_df.iloc[focus_idx]
+        event_type = _safe_str(row["事件分類"])
+        event_name = _safe_str(row["事件"])
+        event_desc = _safe_str(row["說明"])
+        try:
+            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
+        except Exception:
+            d = _safe_str(row["日期"])
+
+        style = _event_style(event_type)
+        direction = _event_direction_meta(event_name, event_type)
+
+        html = (
+            f'<div style="background:linear-gradient(135deg,{style["bg"]} 0%,#ffffff 100%);border:2px solid {style["border"]};border-radius:18px;padding:14px 16px;margin-bottom:12px;box-shadow:0 8px 20px rgba(15,23,42,0.06);">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">'
+            f'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+            f'<span style="font-size:12px;font-weight:800;color:white;background:{style["tag"]};padding:4px 10px;border-radius:999px;">{event_type}</span>'
+            f'<span style="font-size:12px;font-weight:800;color:{direction["color"]};background:{direction["bg"]};padding:4px 10px;border-radius:999px;">{direction["arrow"]} {direction["label"]}</span>'
+            f'<span style="font-size:12px;font-weight:700;color:#475569;">{d}</span>'
+            f"</div>"
+            f'<div style="font-size:12px;font-weight:800;color:#1e293b;">目前焦點事件</div>'
+            f"</div>"
+            f'<div style="font-size:20px;font-weight:900;color:{style["text"]};margin-top:10px;margin-bottom:6px;">{event_name}</div>'
+            f'<div style="font-size:13px;color:#475569;line-height:1.7;">{event_desc}</div>'
+            f"</div>"
         )
+        _html(html)
+    else:
+        trend_text = _safe_str(signal_snapshot.get("ma_trend", ("整理", ""))[0])
+        kd_text = _safe_str(signal_snapshot.get("kd_cross", ("無新交叉", ""))[0])
+        macd_text = _safe_str(signal_snapshot.get("macd_trend", ("整理", ""))[0])
+        break_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+
+        html = (
+            '<div style="background:linear-gradient(135deg,#eff6ff 0%,#ffffff 100%);border:2px solid #bfdbfe;border-radius:18px;padding:14px 16px;margin-bottom:12px;box-shadow:0 8px 20px rgba(15,23,42,0.06);">'
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">'
+            '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'
+            '<span style="font-size:12px;font-weight:800;color:white;background:#1d4ed8;padding:4px 10px;border-radius:999px;">全區間摘要</span>'
+            f'<span style="font-size:12px;font-weight:800;color:#1e3a8a;background:#dbeafe;padding:4px 10px;border-radius:999px;">燈號 {badge_text}</span>'
+            "</div>"
+            '<div style="font-size:12px;font-weight:800;color:#1e293b;">目前全區間狀態</div>'
+            "</div>"
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">'
+            f'<span style="font-size:12px;font-weight:800;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;padding:5px 10px;border-radius:999px;">均線：{trend_text}</span>'
+            f'<span style="font-size:12px;font-weight:800;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;padding:5px 10px;border-radius:999px;">KD：{kd_text}</span>'
+            f'<span style="font-size:12px;font-weight:800;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;padding:5px 10px;border-radius:999px;">MACD：{macd_text}</span>'
+            f'<span style="font-size:12px;font-weight:800;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;padding:5px 10px;border-radius:999px;">結構：{break_text}</span>'
+            "</div>"
+            "</div>"
+        )
+        _html(html)
+
+
+def _render_key_price_bar(df: pd.DataFrame, sr_snapshot: dict):
+    if df is None or df.empty:
+        return
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    res60 = _safe_float(sr_snapshot.get("res_60"))
+    sup60 = _safe_float(sr_snapshot.get("sup_60"))
+
+    def dist_to_pressure(target, price):
+        if target in [None, 0] or price is None:
+            return "—"
+        pct = ((target - price) / target) * 100
+        return f"{pct:+.2f}%"
+
+    def dist_to_support(target, price):
+        if target in [None, 0] or price is None:
+            return "—"
+        pct = ((price - target) / target) * 100
+        return f"{pct:+.2f}%"
+
+    pressure_dist = dist_to_pressure(res20, close_now)
+    support_dist = dist_to_support(sup20, close_now)
+    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+
+    html = (
+        '<div style="background:linear-gradient(135deg,#0f172a 0%,#162033 45%,#1e293b 100%);border:1px solid rgba(148,163,184,0.2);border-radius:18px;padding:14px 16px;margin-bottom:12px;box-shadow:0 10px 26px rgba(15,23,42,0.18);">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'
+        '<div style="font-size:13px;font-weight:800;color:#e2e8f0;">關鍵價位摘要條</div>'
+        f'<div style="font-size:12px;font-weight:800;color:#cbd5e1;">結構：{structure_text}</div>'
+        "</div>"
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+        f'<span style="font-size:12px;font-weight:900;color:#f8fafc;background:rgba(255,255,255,0.08);padding:6px 10px;border-radius:999px;">現價：{format_number(close_now, 2)}</span>'
+        f'<span style="font-size:12px;font-weight:800;color:#fecaca;background:rgba(239,68,68,0.15);padding:6px 10px;border-radius:999px;">20日壓力：{format_number(res20, 2)}</span>'
+        f'<span style="font-size:12px;font-weight:800;color:#bbf7d0;background:rgba(16,185,129,0.15);padding:6px 10px;border-radius:999px;">20日支撐：{format_number(sup20, 2)}</span>'
+        f'<span style="font-size:12px;font-weight:800;color:#fecaca;background:rgba(244,63,94,0.12);padding:6px 10px;border-radius:999px;">60日壓力：{format_number(res60, 2)}</span>'
+        f'<span style="font-size:12px;font-weight:800;color:#bbf7d0;background:rgba(34,197,94,0.12);padding:6px 10px;border-radius:999px;">60日支撐：{format_number(sup60, 2)}</span>'
+        f'<span style="font-size:12px;font-weight:800;color:#e0f2fe;background:rgba(14,165,233,0.14);padding:6px 10px;border-radius:999px;">距20壓力：{pressure_dist}</span>'
+        f'<span style="font-size:12px;font-weight:800;color:#e0f2fe;background:rgba(14,165,233,0.14);padding:6px 10px;border-radius:999px;">距20支撐：{support_dist}</span>'
+        "</div>"
+        "</div>"
+    )
+    _html(html)
+
+
+def _render_left_event_panel(filtered_event_df: pd.DataFrame):
+    st.markdown("### 事件面板")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("上一事件", key=_k("prev_event"), use_container_width=True):
+            if filtered_event_df is not None and not filtered_event_df.empty:
+                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+                valid = filtered_event_df.index.tolist()
+                if cur_idx in valid:
+                    pos = valid.index(cur_idx)
+                    st.session_state[_k("focus_event_idx")] = valid[max(0, pos - 1)]
+                else:
+                    st.session_state[_k("focus_event_idx")] = valid[0]
+                st.rerun()
 
     with c2:
-        groups = list(group_map.keys())
-        if st.session_state[SS_GROUP_KEY] not in groups:
-            st.session_state[SS_GROUP_KEY] = groups[0] if groups else "全部股票"
-
-        st.selectbox(
-            "群組",
-            options=groups,
-            key=SS_GROUP_KEY,
-            on_change=_on_group_change,
-            args=(group_map,),
-        )
+        if st.button("下一事件", key=_k("next_event"), use_container_width=True):
+            if filtered_event_df is not None and not filtered_event_df.empty:
+                cur_idx = int(st.session_state.get(_k("focus_event_idx"), -1))
+                valid = filtered_event_df.index.tolist()
+                if cur_idx in valid:
+                    pos = valid.index(cur_idx)
+                    st.session_state[_k("focus_event_idx")] = valid[min(len(valid) - 1, pos + 1)]
+                else:
+                    st.session_state[_k("focus_event_idx")] = valid[0]
+                st.rerun()
 
     with c3:
-        current_group = st.session_state.get(SS_GROUP_KEY, "全部股票")
-        stock_items = group_map.get(current_group, [])
-        stock_labels = [f'{x["code"]} {_safe_text(x["name"])}'.strip() for x in stock_items]
+        if st.button("全區間", key=_k("back_all"), use_container_width=True):
+            st.session_state[_k("focus_event_idx")] = -1
+            st.rerun()
 
-        if st.session_state.get(SS_STOCK_KEY, "") not in stock_labels:
-            if stock_labels:
-                st.session_state[SS_STOCK_KEY] = stock_labels[0]
-                st.session_state[SS_CODE_KEY] = stock_items[0]["code"]
+    limit = int(st.session_state.get(_k("left_panel_limit"), 12))
+    panel_df = filtered_event_df.head(limit) if filtered_event_df is not None else pd.DataFrame()
 
-        st.selectbox(
-            "群組股票",
-            options=stock_labels if stock_labels else [""],
-            key=SS_STOCK_KEY,
-            on_change=_on_stock_change,
+    if panel_df is None or panel_df.empty:
+        st.info("目前沒有可切換事件。")
+        return
+
+    for idx, row in panel_df.iterrows():
+        try:
+            d = pd.to_datetime(row["日期"]).strftime("%Y-%m-%d")
+        except Exception:
+            d = _safe_str(row["日期"])
+
+        current_focus = int(st.session_state.get(_k("focus_event_idx"), -1))
+        event_type = _safe_str(row["事件分類"])
+        event_name = _safe_str(row["事件"])
+        subtitle = _safe_str(row["說明"])
+
+        style = _event_style(event_type)
+        direction = _event_direction_meta(event_name, event_type)
+        is_active = idx == current_focus
+        active_shadow = "0 0 0 3px rgba(29,78,216,0.18)" if is_active else "none"
+        active_border = "#1d4ed8" if is_active else style["border"]
+
+        html = (
+            f'<div style="border:2px solid {active_border};background:{style["bg"]};border-radius:16px;padding:12px 12px 10px 12px;margin-bottom:10px;box-shadow:{active_shadow};">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">'
+            f'<div style="font-size:12px;color:#475569;font-weight:700;">{d}</div>'
+            f'<div style="font-size:11px;font-weight:800;color:white;background:{style["tag"]};padding:4px 8px;border-radius:999px;">{event_type}</div>'
+            "</div>"
+            f'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">'
+            f'<div style="font-size:15px;font-weight:900;color:{style["text"]};">{event_name}</div>'
+            f'<div style="min-width:64px;text-align:center;font-size:12px;font-weight:900;color:{direction["color"]};background:{direction["bg"]};padding:4px 8px;border-radius:999px;border:1px solid rgba(15,23,42,0.08);">{direction["arrow"]} {direction["label"]}</div>'
+            "</div>"
+            f'<div style="font-size:12px;color:#475569;line-height:1.55;">{subtitle}</div>'
+            "</div>"
         )
+        _html(html)
 
-    with c4:
-        d1, d2 = st.columns(2)
-        with d1:
-            st.date_input("開始日期", key=SS_START_KEY)
-        with d2:
-            st.date_input("結束日期", key=SS_END_KEY)
+        if st.button(f"切到這個事件 {idx + 1}", key=_k(f"focus_btn_{idx}"), use_container_width=True):
+            st.session_state[_k("focus_event_idx")] = idx
+            st.rerun()
 
-    # 搜尋結果快捷區
-    search_kw = _safe_text(st.session_state.get(SS_SEARCH_KEY, ""))
-    matches = _search_stock_records(search_records, search_kw, limit=10) if search_kw else []
 
-    if search_kw and matches:
-        st.markdown("##### 搜尋快捷選單")
-        mcols = st.columns(min(5, len(matches)))
-        for i, m in enumerate(matches[:5]):
-            with mcols[i]:
-                if st.button(
-                    f'{m["code"]} {_safe_text(m["name"])}',
-                    key=f"search_hit_{m['code']}",
-                    use_container_width=True,
-                ):
-                    hit_group = m.get("group") if m.get("group") in group_map else "全部股票"
-                    st.session_state[SS_GROUP_KEY] = hit_group
-                    st.session_state[SS_CODE_KEY] = m["code"]
-                    st.session_state[SS_STOCK_KEY] = f'{m["code"]} {_safe_text(m["name"])}'.strip()
-                    st.session_state[SS_SEARCH_KEY] = st.session_state[SS_STOCK_KEY]
-                    st.rerun()
-
-    code, name = _pick_code_name()
-
-    if not code:
-        st.warning("目前沒有可分析的股票，請先確認自選股或群組資料。")
-        return
-
-    start_date = st.session_state.get(SS_START_KEY, DEFAULT_START)
-    end_date = st.session_state.get(SS_END_KEY, DEFAULT_END)
-
-    if start_date > end_date:
-        st.error("開始日期不可大於結束日期。")
-        return
-
-    # -------------------------
-    # 抓資料
-    # -------------------------
-    with st.spinner(f"讀取 {code} {name} 歷史資料中..."):
-        hist_df_raw = _fetch_history_with_fallback(code, start_date, end_date)
-
-    if hist_df_raw is None or len(hist_df_raw) == 0:
-        st.error(f"查無 {code} {name} 的歷史資料。已嘗試上市 / 上櫃 fallback。")
-        return
-
-    df = _prepare_tech_df(hist_df_raw)
-    if len(df) == 0:
-        st.error("歷史資料格式異常，無法完成技術分析。")
-        return
-
-    signal = _get_signal_snapshot(df)
-    sr = _get_sr_snapshot(df)
-    radar_scores = _get_radar_scores(df)
-    events = _build_event_panel(df)
-    focus_summary = _build_focus_summary(df, events, signal, sr)
-    price_summary = _build_price_summary(sr)
-    strategy_plan = _build_strategy_plan(df, signal, sr)
-    exec_plan = _build_executable_plan(df, signal, sr)
-
-    # -------------------------
-    # 基本KPI
-    # -------------------------
+def _build_strategy_cards(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict):
     last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    score = int(_safe_float(signal_snapshot.get("score"), 0) or 0)
+    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+    radar_summary = _safe_str(radar.get("summary", "—"))
 
-    last_close = _to_float(last["Close"])
-    prev_close = _to_float(prev["Close"])
-    chg = last_close - prev_close if not np.isnan(last_close) and not np.isnan(prev_close) else np.nan
-    chg_pct = (chg / prev_close * 100) if prev_close not in [0, np.nan] and not np.isnan(prev_close) else np.nan
-    day_high = _to_float(last["High"])
-    day_low = _to_float(last["Low"])
-    volume = _to_float(last["Volume"])
+    bullish_trigger = "站穩 20 日壓力並延續量能"
+    if res20 is not None:
+        bullish_trigger = f"有效站穩 {format_number(res20,2)} 上方"
 
-    render_pro_kpi_row(
-        [
-            ("股票", f"{code} {name}"),
-            ("收盤", f"{last_close:.2f}" if not np.isnan(last_close) else "—"),
-            ("漲跌", f"{chg:+.2f}" if not np.isnan(chg) else "—"),
-            ("漲跌幅", f"{chg_pct:+.2f}%" if not np.isnan(chg_pct) else "—"),
-            ("區間高低", f"{day_low:.2f} ~ {day_high:.2f}" if not np.isnan(day_low) and not np.isnan(day_high) else "—"),
-            ("成交量", format_number(volume) if not np.isnan(volume) else "—"),
-        ]
+    bearish_trigger = "跌破 20 日支撐且無法快速收復"
+    if sup20 is not None:
+        bearish_trigger = f"跌破 {format_number(sup20,2)} 且隔日無法站回"
+
+    observe_text = "目前屬等待表態區，先看支撐壓力哪一側先被有效突破。"
+    if score >= 3:
+        observe_text = "雖偏多，但若接近壓力區，最好等拉回不破或突破確認再加碼。"
+    elif score <= -3:
+        observe_text = "雖偏弱，但若接近支撐區，先看是否有止跌反應，不宜追空過深。"
+
+    fail_text = "若進場後關鍵位失守，代表原本劇本失效，應先做風險控管。"
+
+    bullish = [
+        ("偏多劇本", f"條件：{bullish_trigger}", ""),
+        ("進場觀察", "突破後不回落、量能不失速、短均線維持上彎。", ""),
+        ("優勢訊號", f"燈號分數 {score}；{radar_summary}", ""),
+        ("失效條件", "突破後立刻跌回區間內，或量縮轉弱。", ""),
+    ]
+    bearish = [
+        ("偏空劇本", f"條件：{bearish_trigger}", ""),
+        ("進場觀察", "跌破後無法快速站回，MACD / KD 不同步轉強。", ""),
+        ("風險訊號", f"結構判斷：{structure_text}", ""),
+        ("失效條件", "跌破後隔日強勢收復，形成假跌破。", ""),
+    ]
+    observe = [
+        ("觀察劇本", observe_text, ""),
+        ("優先監看", f"現價 {format_number(close_now,2)} / MA20 {format_number(ma20,2)} / MA60 {format_number(ma60,2)}", ""),
+        ("短線關鍵", f"20日壓力 {format_number(res20,2)}；20日支撐 {format_number(sup20,2)}", ""),
+        ("策略重點", "不要預設方向，等市場先表態。", ""),
+    ]
+    fail = [
+        ("失敗劇本", fail_text, ""),
+        ("多單失敗", "跌破回測低點或跌回重要均線下方。", ""),
+        ("空單失敗", "站回跌破點之上並伴隨明顯買盤。", ""),
+        ("執行原則", "劇本失效先處理風險，再評估新劇本。", ""),
+    ]
+
+    return bullish, bearish, observe, fail
+
+
+def _build_execution_plan(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict) -> dict[str, list[tuple[str, str, str]]]:
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    atr14 = _safe_float(last.get("ATR14"), 0) or 0
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    res60 = _safe_float(sr_snapshot.get("res_60"))
+    sup60 = _safe_float(sr_snapshot.get("sup_60"))
+    score = _safe_float(signal_snapshot.get("score"), 0) or 0
+
+    if close_now is None:
+        close_now = 0.0
+
+    if atr14 <= 0:
+        atr14 = max(close_now * 0.03, 1.0)
+
+    long_entry = res20 if res20 is not None else close_now
+    long_stop = sup20 if sup20 is not None else max(close_now - atr14, 0)
+    long_target = res60 if res60 is not None and (res60 > long_entry) else long_entry + atr14 * 2
+
+    short_entry = sup20 if sup20 is not None else close_now
+    short_stop = res20 if res20 is not None else close_now + atr14
+    short_target = sup60 if sup60 is not None and (sup60 < short_entry) else max(short_entry - atr14 * 2, 0)
+
+    def rr(entry: float | None, stop: float | None, target: float | None, side: str) -> str:
+        if entry is None or stop is None or target is None:
+            return "—"
+        if side == "long":
+            risk = entry - stop
+            reward = target - entry
+        else:
+            risk = stop - entry
+            reward = entry - target
+        if risk <= 0:
+            return "—"
+        return f"約 1 : {reward / risk:.2f}"
+
+    long_rr = rr(long_entry, long_stop, long_target, "long")
+    short_rr = rr(short_entry, short_stop, short_target, "short")
+
+    stance = "偏多優先" if score >= 2 else ("偏空優先" if score <= -2 else "等待表態")
+    size_hint = "可分批" if abs(score) >= 3 else "宜輕倉"
+
+    long_plan = [
+        ("偏多進場位", format_number(long_entry, 2), ""),
+        ("偏多失效位", format_number(long_stop, 2), ""),
+        ("偏多目標位", format_number(long_target, 2), ""),
+        ("風險報酬", long_rr, ""),
+        ("執行提醒", f"{stance} / {size_hint}", ""),
+    ]
+    short_plan = [
+        ("偏空進場位", format_number(short_entry, 2), ""),
+        ("偏空失效位", format_number(short_stop, 2), ""),
+        ("偏空目標位", format_number(short_target, 2), ""),
+        ("風險報酬", short_rr, ""),
+        ("執行提醒", f"{stance} / {size_hint}", ""),
+    ]
+    notes = [
+        ("規劃基準", "以 20 / 60 日支撐壓力與 ATR14 估算。", ""),
+        ("多方前提", "突破後不回落、量能不失速。", ""),
+        ("空方前提", "跌破後無法站回、反彈量縮。", ""),
+        ("風控原則", "先看失效位，再決定是否進場。", ""),
+    ]
+
+    return {"long": long_plan, "short": short_plan, "notes": notes}
+
+
+def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict, event_df: pd.DataFrame):
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    k_val = _safe_float(last.get("K"))
+    d_val = _safe_float(last.get("D"))
+    dif = _safe_float(last.get("DIF"))
+    dea = _safe_float(last.get("DEA"))
+
+    views = []
+
+    if close_now is not None and ma20 is not None and ma60 is not None:
+        if close_now > ma20 and close_now > ma60:
+            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之上，中期結構偏多。", ""))
+        elif close_now < ma20 and close_now < ma60:
+            views.append(("趨勢觀點", "股價位於 MA20 與 MA60 之下，中期結構偏弱。", ""))
+        else:
+            views.append(("趨勢觀點", "股價位在中期均線交界區，屬整理與等待方向選擇。", ""))
+
+    if k_val is not None and d_val is not None and dif is not None and dea is not None:
+        if k_val > d_val and dif > dea:
+            views.append(("動能觀點", "KD 與 MACD 同步偏多，短線攻擊動能較佳。", ""))
+        elif k_val < d_val and dif < dea:
+            views.append(("動能觀點", "KD 與 MACD 同步偏弱，反彈宜防再轉弱。", ""))
+        else:
+            views.append(("動能觀點", "擺盪動能與趨勢動能未完全共振，走勢容易反覆。", ""))
+
+    pressure_text = _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0])
+    support_text = _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0])
+    break_text = _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0])
+
+    if "突破" in break_text:
+        views.append(("結構觀點", "目前屬突破結構，關鍵在突破後是否守住，不是只看站上那一刻。", ""))
+    elif "跌破" in break_text:
+        views.append(("結構觀點", "目前屬跌破結構，若無法快速站回，弱勢延續機率較高。", ""))
+    else:
+        if "接近20日壓力" in pressure_text:
+            views.append(("結構觀點", "股價逼近短壓，沒有量就容易變成假突破或震盪。", ""))
+        elif "接近20日支撐" in support_text:
+            views.append(("結構觀點", "股價接近短撐，重點看是否出現防守量與止跌K棒。", ""))
+        else:
+            views.append(("結構觀點", "目前位於區間內部，較適合等待明確突破或跌破再提高把握度。", ""))
+
+    radar_avg = round(sum([
+        _safe_float(radar.get("trend"), 50),
+        _safe_float(radar.get("momentum"), 50),
+        _safe_float(radar.get("volume"), 50),
+        _safe_float(radar.get("position"), 50),
+        _safe_float(radar.get("structure"), 50),
+    ]) / 5, 1)
+    views.append(("雷達總評", f"五維均分約 {radar_avg}，{_safe_str(radar.get('summary', '—'))}", ""))
+
+    if event_df is not None and not event_df.empty:
+        last_event = event_df.iloc[0]
+        views.append(("最近關鍵事件", f"{_safe_str(last_event.get('事件'))}：{_safe_str(last_event.get('說明'))}", ""))
+
+    score = _safe_float(signal_snapshot.get("score"), 0)
+    if score >= 4:
+        action_text = "偏多架構，但在壓力區不建議無量追價，較佳節奏是等拉回不破或突破後續強。"
+    elif score >= 2:
+        action_text = "偏多但未到全面強攻，宜觀察回測支撐是否守穩。"
+    elif score <= -4:
+        action_text = "偏空結構明確，風險控管應優先於抄底預設。"
+    elif score <= -2:
+        action_text = "弱勢整理機率高，除非出現止跌與量能改善，否則先保守。"
+    else:
+        action_text = "多空混合，最佳策略通常不是猜，而是等關鍵位表態後再跟。"
+    views.append(("股神操作觀點", action_text, ""))
+
+    return views
+
+
+def main():
+    st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    inject_pro_theme()
+
+    group_map = _build_group_stock_map()
+    flat_rows = _flatten_group_map(group_map)
+    _init_state(group_map)
+
+    render_pro_hero(
+        title="歷史K線分析｜策略區可執行版 + 效能優化版",
+        subtitle="保留完整功能，補上偏多/偏空進場位、失效位、目標位與風險報酬概念。",
     )
 
-    # -------------------------
-    # 摘要條
-    # -------------------------
-    csum1, csum2 = st.columns(2)
-
-    with csum1:
-        st.markdown(
-            f"""
-            <div class="hist-top-bar">
-                <div class="hist-top-title">目前焦點事件摘要條</div>
-                <div class="hist-top-value">{focus_summary}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with csum2:
-        st.markdown(
-            f"""
-            <div class="hist-top-bar">
-                <div class="hist-top-title">關鍵價位摘要條</div>
-                <div class="hist-top-value">{price_summary}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # -------------------------
-    # 左事件 / 右主圖
-    # -------------------------
-    left, right = st.columns([0.95, 2.7], gap="large")
-
-    with left:
-        render_pro_section("左側事件面板")
-
-        if events:
-            for e in events[:12]:
-                st.markdown(
-                    f"""
-                    <div class="event-card">
-                        <div class="event-date">{e['date']}</div>
-                        <div class="event-title">{e['title']}</div>
-                        <div class="event-desc">{e['desc']}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-        else:
-            render_pro_info_card("近期事件", "目前未偵測到關鍵事件。")
-
-    with right:
-        render_pro_section("K線 / KD / MACD")
-        main_fig = _make_main_chart(df, code, name)
-        st.plotly_chart(main_fig, use_container_width=True, config={"displaylogo": False})
-
-    # -------------------------
-    # 雷達 / 訊號 / 支撐壓力
-    # -------------------------
-    c_radar, c_signal, c_sr = st.columns([1.15, 1, 1], gap="large")
-
-    with c_radar:
-        render_pro_section("雷達評分")
-        radar_fig = _make_radar_chart(radar_scores)
-        if radar_fig is not None:
-            st.plotly_chart(radar_fig, use_container_width=True, config={"displaylogo": False})
-        else:
-            render_pro_info_card("雷達評分", "目前無法產出雷達資料。")
-
-    with c_signal:
-        render_pro_section("訊號快照")
-        stance = _safe_text(signal.get("stance"), "中性")
-        score = signal.get("score", "—")
-
-        stance_cls = "state-good" if "多" in stance else ("state-bad" if "弱" in stance else "state-warn")
-        st.markdown(
-            f"""
-            <div class="strategy-box">
-                <div class="strategy-title">技術面判斷</div>
-                <div class="strategy-line">整體立場：<span class="{stance_cls}">{stance}</span></div>
-                <div class="strategy-line">綜合分數：{score}</div>
-                <div class="strategy-line">趨勢分數：{signal.get("trend_score", "—")}</div>
-                <div class="strategy-line">動能分數：{signal.get("momentum_score", "—")}</div>
-                <div class="strategy-line">量能分數：{signal.get("volume_score", "—")}</div>
-                <div class="strategy-line">MA20 狀態：{"站上" if signal.get("close_above_ma20") else "未站上"}</div>
-                <div class="strategy-line">KD 黃金交叉：{"是" if signal.get("kd_golden") else "否"}</div>
-                <div class="strategy-line">MACD 黃金交叉：{"是" if signal.get("macd_golden") else "否"}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with c_sr:
-        render_pro_section("支撐 / 壓力")
-        supports = sr.get("supports", [])
-        resistances = sr.get("resistances", [])
-        near_support = sr.get("near_support")
-        near_resistance = sr.get("near_resistance")
-
-        st.markdown(
-            f"""
-            <div class="strategy-box">
-                <div class="strategy-title">關鍵價位</div>
-                <div class="strategy-line">近支撐：{f"{near_support:.2f}" if near_support is not None else "—"}</div>
-                <div class="strategy-line">近壓力：{f"{near_resistance:.2f}" if near_resistance is not None else "—"}</div>
-                <div class="strategy-line">支撐帶：{" / ".join(f"{x:.2f}" for x in supports[:4]) if supports else "—"}</div>
-                <div class="strategy-line">壓力帶：{" / ".join(f"{x:.2f}" for x in resistances[:4]) if resistances else "—"}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # -------------------------
-    # 策略區
-    # -------------------------
-    render_pro_section("策略區")
-    s1, s2 = st.columns(2, gap="large")
+    render_pro_section("快速搜尋股票")
+    s1, s2 = st.columns([5, 1])
 
     with s1:
-        strategy = strategy_plan.get("strategy", "觀望")
-        reasons = strategy_plan.get("reason", [])
-        actions = strategy_plan.get("action", [])
-        risks = strategy_plan.get("risk", [])
-
-        reason_html = "".join([f'<div class="strategy-line">• {x}</div>' for x in reasons]) or '<div class="strategy-line">• 無</div>'
-        action_html = "".join([f'<div class="strategy-line">• {x}</div>' for x in actions]) or '<div class="strategy-line">• 無</div>'
-        risk_html = "".join([f'<div class="strategy-line">• {x}</div>' for x in risks]) or '<div class="strategy-line">• 無</div>'
-
-        st.markdown(
-            f"""
-            <div class="strategy-box">
-                <div class="strategy-title">策略判讀：{strategy}</div>
-                <div class="mini-muted">為技術面推演，不代表投資建議</div>
-                <div class="strategy-line" style="margin-top:10px;font-weight:700;">判讀依據</div>
-                {reason_html}
-                <div class="strategy-line" style="margin-top:10px;font-weight:700;">操作重點</div>
-                {action_html}
-                <div class="strategy-line" style="margin-top:10px;font-weight:700;">風險提醒</div>
-                {risk_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
+        st.text_input(
+            "輸入股票代碼或名稱",
+            key=_k("search_input"),
+            placeholder="例如：2330、台積電、3548 兆利",
+            label_visibility="collapsed",
         )
 
     with s2:
-        buy_zone = exec_plan.get("buy_zone")
-        chase_zone = exec_plan.get("chase_zone")
-        stop_loss = exec_plan.get("stop_loss")
-        tp1 = exec_plan.get("tp1")
-        tp2 = exec_plan.get("tp2")
-        current_price = exec_plan.get("current_price")
+        if st.button("帶入", use_container_width=True, type="primary"):
+            target = _find_search_target(st.session_state.get(_k("search_input"), ""), flat_rows)
+            if target:
+                st.session_state[_k("group")] = target["group"]
+                st.session_state[_k("stock_code")] = target["code"]
+                st.session_state[_k("focus_event_idx")] = -1
+                save_last_query_state(
+                    quick_group=target["group"],
+                    quick_stock_code=target["code"],
+                    home_start=st.session_state.get(_k("start_date")),
+                    home_end=st.session_state.get(_k("end_date")),
+                )
+                st.rerun()
+            else:
+                st.warning("找不到對應股票。")
 
-        st.markdown(
-            f"""
-            <div class="strategy-box">
-                <div class="strategy-title">可執行策略區</div>
-                <div class="mini-muted">給你直接看的執行區間，不改原功能，只做強化</div>
-                <div class="strategy-line">目前價格：{f"{current_price:.2f}" if current_price is not None else "—"}</div>
-                <div class="strategy-line">承接區：{f"{buy_zone[0]:.2f} ~ {buy_zone[1]:.2f}" if buy_zone else "—"}</div>
-                <div class="strategy-line">突破追價區：{f"{chase_zone[0]:.2f} ~ {chase_zone[1]:.2f}" if chase_zone else "—"}</div>
-                <div class="strategy-line">防守點：{f"{stop_loss:.2f}" if stop_loss is not None else "—"}</div>
-                <div class="strategy-line">第一目標：{f"{tp1:.2f}" if tp1 is not None else "—"}</div>
-                <div class="strategy-line">第二目標：{f"{tp2:.2f}" if tp2 is not None else "—"}</div>
-                <div class="strategy-line" style="margin-top:10px;">執行原則：</div>
-                <div class="strategy-line">• 靠近支撐優先看承接是否有效</div>
-                <div class="strategy-line">• 突破壓力需搭配量能確認，不帶量不追</div>
-                <div class="strategy-line">• 進場前先看風險報酬比，再看趨勢是否延續</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    render_pro_section("查詢條件")
+    _repair_state(group_map)
+
+    groups = list(group_map.keys())
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+    items = group_map.get(current_group, [])
+    code_to_item = {x["code"]: x for x in items}
+    code_options = [x["code"] for x in items]
+
+    c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
+
+    with c1:
+        st.selectbox("選擇群組", options=groups, key=_k("group"), on_change=_on_group_change, args=(group_map,))
+
+    with c2:
+        st.selectbox(
+            "群組股票",
+            options=code_options if code_options else [""],
+            key=_k("stock_code"),
+            format_func=lambda code: code_to_item.get(code, {}).get("label", code),
         )
 
-    # -------------------------
-    # 原始資料表
-    # -------------------------
-    with st.expander("檢視技術分析明細資料", expanded=False):
-        show_cols = [
-            "Date", "Open", "High", "Low", "Close", "Volume",
-            "MA5", "MA10", "MA20", "MA60", "MA120",
-            "K", "D", "J", "DIF", "MACD", "OSC",
-            "Ret1", "Ret5", "Ret20", "Volatility20",
+    with c3:
+        st.date_input("開始日期", key=_k("start_date"))
+
+    with c4:
+        st.date_input("結束日期", key=_k("end_date"))
+
+    selected_group = _safe_str(st.session_state.get(_k("group"), ""))
+    selected_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
+    start_date = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365))
+    end_date = _to_date(st.session_state.get(_k("end_date")), date.today())
+
+    if start_date > end_date:
+        st.error("開始日期不可大於結束日期。")
+        st.stop()
+
+    if not selected_code or selected_code not in code_to_item:
+        st.warning("請先選擇股票。")
+        st.stop()
+
+    selected_item = code_to_item[selected_code]
+    stock_name = _safe_str(selected_item.get("name"))
+    market_type = _safe_str(selected_item.get("market")) or "上市"
+    stock_label = f"{selected_code} {stock_name}"
+
+    st.caption(f"目前實際查詢值：群組【{selected_group}】 / 股票【{stock_label}】 / 市場【{market_type}】")
+
+    save_last_query_state(
+        quick_group=selected_group,
+        quick_stock_code=selected_code,
+        home_start=start_date,
+        home_end=end_date,
+    )
+
+    with st.spinner("載入股神資料中..."):
+        df = _get_history_data_smart(
+            stock_no=selected_code,
+            stock_name=stock_name,
+            market_type=market_type,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    if df.empty:
+        st.error("查無歷史資料，請更換股票或日期區間。")
+        st.stop()
+
+    bundle = _compute_analysis_bundle(df)
+    signal_snapshot = bundle["signal_snapshot"]
+    sr_snapshot = bundle["sr_snapshot"]
+    radar = bundle["radar"]
+    badge_text = bundle["badge_text"]
+    event_df = bundle["event_df"]
+    peak_idx = bundle["peak_idx"]
+    trough_idx = bundle["trough_idx"]
+
+    render_pro_section("互動控制")
+    i1, i2, i3, i4 = st.columns([2, 2, 2, 2])
+
+    with i1:
+        st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter"))
+    with i2:
+        st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], key=_k("focus_window"))
+    with i3:
+        st.checkbox("顯示均線", key=_k("show_ma"))
+    with i4:
+        st.checkbox("顯示起漲起跌點", key=_k("show_pivots"))
+
+    filtered_event_df = event_df.copy()
+    if not filtered_event_df.empty and st.session_state.get(_k("event_filter")) != "全部":
+        filtered_event_df = filtered_event_df[filtered_event_df["事件分類"] == st.session_state.get(_k("event_filter"))].reset_index(drop=True)
+
+    focus_df = _slice_by_focus(
+        df=df,
+        event_df=filtered_event_df if not filtered_event_df.empty else event_df,
+        focus_event_idx=int(st.session_state.get(_k("focus_event_idx"), -1)),
+        focus_window=_safe_str(st.session_state.get(_k("focus_window"), "全部")),
+    )
+    if focus_df.empty:
+        focus_df = df.copy()
+
+    focus_peak_idx, focus_trough_idx = _detect_pivots_smart(focus_df, window=3, min_gap=4)
+
+    last = df.iloc[-1]
+    first = df.iloc[0]
+    close_now = _safe_float(last.get("收盤價"))
+    close_first = _safe_float(first.get("收盤價"))
+    interval_pct = ((close_now / close_first) - 1) * 100 if close_first not in [None, 0] else None
+
+    render_pro_kpi_row(
+        [
+            {
+                "label": "最新收盤",
+                "value": format_number(close_now, 2),
+                "delta": format_number(interval_pct, 2) + "%",
+                "delta_class": "pro-kpi-delta-up" if _safe_float(interval_pct, 0) > 0 else ("pro-kpi-delta-down" if _safe_float(interval_pct, 0) < 0 else "pro-kpi-delta-flat"),
+            },
+            {
+                "label": "訊號燈號",
+                "value": badge_text,
+                "delta": f"分數 {signal_snapshot.get('score', 0)}",
+                "delta_class": "pro-kpi-delta-flat",
+            },
+            {
+                "label": "資料筆數",
+                "value": len(df),
+                "delta": market_type,
+                "delta_class": "pro-kpi-delta-flat",
+            },
+            {
+                "label": "起漲 / 起跌",
+                "value": f"{len(trough_idx)} / {len(peak_idx)}",
+                "delta": "局部轉折點",
+                "delta_class": "pro-kpi-delta-flat",
+            },
         ]
-        show_cols = [c for c in show_cols if c in df.columns]
-        preview = df[show_cols].tail(120).copy()
-        st.dataframe(preview, use_container_width=True, height=420)
+    )
 
-    st.caption("已優化：搜尋/群組/股票同步、session_state 控制、上櫃 fallback、技術分析快取、事件面板與策略執行區保留並強化。")
+    left, right = st.columns([1.15, 2.85])
+
+    with left:
+        _render_left_event_panel(filtered_event_df)
+        recent_pairs = [(pd.to_datetime(r["日期"]).strftime("%Y-%m-%d"), _safe_str(r["事件"]), "") for _, r in filtered_event_df.head(6).iterrows()] if not filtered_event_df.empty else [("最近事件", "無明確新事件", "")]
+        render_pro_info_card("最近事件摘要", recent_pairs, chips=[badge_text, market_type])
+
+    with right:
+        _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
+        _render_key_price_bar(df, sr_snapshot)
+
+        st.plotly_chart(
+            _build_candlestick_chart(
+                focus_df,
+                stock_label,
+                show_ma=bool(st.session_state.get(_k("show_ma"), True)),
+                show_pivots=bool(st.session_state.get(_k("show_pivots"), True)),
+                peak_idx=focus_peak_idx,
+                trough_idx=focus_trough_idx,
+            ),
+            use_container_width=True,
+        )
+
+    tabs = st.tabs(["KD / MACD", "雷達 / 訊號", "策略區", "最近事件", "原始資料"])
+
+    with tabs[0]:
+        c_kd, c_macd = st.columns(2)
+        with c_kd:
+            st.plotly_chart(_build_kd_chart(focus_df, stock_label), use_container_width=True)
+        with c_macd:
+            st.plotly_chart(_build_macd_chart(focus_df, stock_label), use_container_width=True)
+
+    with tabs[1]:
+        l2, r2 = st.columns(2)
+        with l2:
+            render_pro_info_card(
+                "股神雷達評分",
+                [
+                    ("趨勢", radar.get("trend", 50), ""),
+                    ("動能", radar.get("momentum", 50), ""),
+                    ("量能", radar.get("volume", 50), ""),
+                    ("位置", radar.get("position", 50), ""),
+                    ("結構", radar.get("structure", 50), ""),
+                    ("摘要", _safe_str(radar.get("summary", "—")), ""),
+                ],
+                chips=[badge_text],
+            )
+            render_pro_info_card(
+                "訊號燈號",
+                [
+                    ("均線趨勢", _safe_str(signal_snapshot.get("ma_trend", ("—", ""))[0]), ""),
+                    ("KD交叉", _safe_str(signal_snapshot.get("kd_cross", ("—", ""))[0]), ""),
+                    ("MACD趨勢", _safe_str(signal_snapshot.get("macd_trend", ("—", ""))[0]), ""),
+                    ("價位狀態", _safe_str(signal_snapshot.get("price_vs_ma20", ("—", ""))[0]), ""),
+                    ("突破狀態", _safe_str(signal_snapshot.get("breakout_20d", ("—", ""))[0]), ""),
+                    ("量能狀態", _safe_str(signal_snapshot.get("volume_state", ("—", ""))[0]), ""),
+                ],
+            )
+        with r2:
+            render_pro_info_card(
+                "支撐壓力",
+                [
+                    ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
+                    ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
+                    ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
+                    ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
+                    ("壓力訊號", _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0]), ""),
+                    ("支撐訊號", _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0]), ""),
+                    ("區間判斷", _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0]), ""),
+                ],
+            )
+            render_pro_info_card(
+                "股神分析觀點",
+                _build_master_commentary(df, signal_snapshot, sr_snapshot, radar, filtered_event_df if not filtered_event_df.empty else event_df),
+                chips=[market_type, badge_text],
+            )
+
+    with tabs[2]:
+        bullish, bearish, observe, fail = _build_strategy_cards(df, signal_snapshot, sr_snapshot, radar)
+        exec_plan = _build_execution_plan(df, signal_snapshot, sr_snapshot)
+        s1, s2 = st.columns(2)
+        with s1:
+            render_pro_info_card("偏多劇本", bullish, chips=["順勢攻擊"])
+            render_pro_info_card("觀察劇本", observe, chips=["等待表態"])
+            render_pro_info_card("偏多可執行區", exec_plan["long"], chips=["進場/失效/目標"])
+        with s2:
+            render_pro_info_card("偏空劇本", bearish, chips=["弱勢延續"])
+            render_pro_info_card("失敗劇本", fail, chips=["風險控管"])
+            render_pro_info_card("偏空可執行區", exec_plan["short"], chips=["進場/失效/目標"])
+        render_pro_info_card("執行說明", exec_plan["notes"], chips=["風控優先"])
+
+    with tabs[3]:
+        if filtered_event_df.empty:
+            st.info("目前沒有符合條件的事件。")
+        else:
+            st.dataframe(filtered_event_df, use_container_width=True, hide_index=True)
+
+    with tabs[4]:
+        raw_cols = [
+            "日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數",
+            "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
+            "K", "D", "J", "DIF", "DEA", "MACD_HIST", "ATR14"
+        ]
+        raw_cols = [c for c in raw_cols if c in df.columns]
+        st.dataframe(df[raw_cols].sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
+
+    with st.expander("效能說明"):
+        st.write("1. 歷史資料與上櫃 fallback 皆有 cache。")
+        st.write("2. 訊號 / 雷達 / 支撐壓力 / 事件偵測集中到 analysis bundle，只算一次。")
+        st.write("3. 焦點事件切換只切 focus_df，不重抓歷史資料。")
+        st.write("4. 保留全部功能，不用刪功能換速度。")
 
 
-# =========================
-# 執行
-# =========================
-try:
+if __name__ == "__main__":
     main()
-except Exception as e:
-    st.error("歷史K線分析頁面執行失敗")
-    st.code(traceback.format_exc())
