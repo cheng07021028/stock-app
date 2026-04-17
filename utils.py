@@ -443,70 +443,123 @@ def save_watchlist(data, filepath="watchlist.json"):
         return False
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_all_code_name_map(lookup_date=""):
     rows = []
 
-    try:
-        url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
-        r = requests.get(url, timeout=30, verify=False)
-        r.raise_for_status()
-        data = r.json()
-        df = pd.DataFrame(data)
+    def _pick_col(df, candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
 
-        code_col = None
-        name_col = None
-        for c in df.columns:
-            if "公司代號" in c or "證券代號" in c:
-                code_col = c
-            if "公司簡稱" in c or "證券名稱" in c:
-                name_col = c
+    def _append_rows(df, code_candidates, name_candidates, fallback_market=""):
+        nonlocal rows
 
-        if code_col and name_col:
-            for _, row in df.iterrows():
-                code = str(row.get(code_col, "")).strip()
-                name = str(row.get(name_col, "")).strip()
-                if code:
-                    rows.append({
-                        "code": code,
-                        "name": name if name else code,
-                        "market": "上市",
-                    })
-    except Exception:
-        pass
+        if df is None or df.empty:
+            return
 
-    try:
-        url = "https://www.tpex.org.tw/openapi/v1/mkt/sm_mainboard"
-        r = requests.get(url, timeout=30, verify=False)
-        r.raise_for_status()
-        data = r.json()
-        df = pd.DataFrame(data)
+        df = df.copy()
+        df.columns = [str(c).strip() for c in df.columns]
 
-        code_col = None
-        name_col = None
-        for c in df.columns:
-            if "SecuritiesCompanyCode" in c or "股票代號" in c or c == "代號":
-                code_col = c
-            if "CompanyName" in c or "股票名稱" in c or c == "名稱":
-                name_col = c
+        code_col = _pick_col(df, code_candidates)
+        name_col = _pick_col(df, name_candidates)
+        market_col = _pick_col(df, ["市場別", "market", "Market", "交易市場", "上市櫃"])
 
-        if code_col and name_col:
-            for _, row in df.iterrows():
-                code = str(row.get(code_col, "")).strip()
-                name = str(row.get(name_col, "")).strip()
-                if code:
-                    rows.append({
-                        "code": code,
-                        "name": name if name else code,
-                        "market": "上櫃",
-                    })
-    except Exception:
-        pass
+        if not code_col or not name_col:
+            return
+
+        for _, row in df.iterrows():
+            code = str(row.get(code_col, "")).strip()
+            name = str(row.get(name_col, "")).strip()
+            market = str(row.get(market_col, "")).strip() if market_col else ""
+
+            digits = "".join(ch for ch in code if ch.isdigit())
+            if 4 <= len(digits) <= 6:
+                code = digits
+
+            if not code:
+                continue
+
+            if not name:
+                name = code
+
+            if not market:
+                market = fallback_market or "上市"
+
+            rows.append({
+                "code": code,
+                "name": name,
+                "market": market,
+            })
+
+    # TWSE 上市
+    twse_urls = [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_O",
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_P",
+    ]
+
+    for url in twse_urls:
+        try:
+            r = requests.get(url, timeout=30, verify=False)
+            r.raise_for_status()
+            data = r.json()
+            df = pd.DataFrame(data)
+            _append_rows(
+                df,
+                ["公司代號", "證券代號", "Code", "code", "股票代號", "代號"],
+                ["公司簡稱", "證券名稱", "Name", "name", "股票名稱", "名稱"],
+                fallback_market="上市",
+            )
+        except Exception:
+            pass
+
+    # TPEx 上櫃 / 興櫃
+    tpex_urls = [
+        ("https://www.tpex.org.tw/openapi/v1/mkt/sm_mainboard", "上櫃"),
+        ("https://www.tpex.org.tw/openapi/v1/mkt/sm_esb", "興櫃"),
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", "上櫃"),
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R", "上櫃"),
+    ]
+
+    for url, fallback_market in tpex_urls:
+        try:
+            r = requests.get(url, timeout=30, verify=False)
+            r.raise_for_status()
+            data = r.json()
+            df = pd.DataFrame(data)
+            _append_rows(
+                df,
+                [
+                    "SecuritiesCompanyCode", "股票代號", "Code", "code",
+                    "代號", "公司代號", "證券代號"
+                ],
+                [
+                    "CompanyName", "股票名稱", "Name", "name",
+                    "名稱", "公司簡稱", "證券名稱"
+                ],
+                fallback_market=fallback_market,
+            )
+        except Exception:
+            pass
 
     if not rows:
         return pd.DataFrame(columns=["code", "name", "market"])
 
-    return pd.DataFrame(rows).drop_duplicates(subset=["code", "market"]).reset_index(drop=True)
+    df_all = pd.DataFrame(rows)
+
+    df_all["code"] = df_all["code"].astype(str).str.strip()
+    df_all["name"] = df_all["name"].astype(str).str.strip()
+    df_all["market"] = df_all["market"].astype(str).str.strip().replace("", "上市")
+
+    df_all = df_all[(df_all["code"] != "") & (df_all["name"] != "")]
+    df_all = df_all.drop_duplicates(subset=["code", "market"]).reset_index(drop=True)
+
+    if lookup_date in ["上市", "上櫃", "興櫃"]:
+        df_all = df_all[df_all["market"] == lookup_date].reset_index(drop=True)
+
+    return df_all
 
 
 def get_stock_name_and_market(code, all_code_name_df, manual_name=""):
@@ -1145,6 +1198,8 @@ def compute_support_resistance_snapshot(df):
         result["comment_action"] = "可先觀察，等待價格脫離區間後再提高部位判斷。"
 
     return result
+
+
 def compute_radar_scores(df: pd.DataFrame) -> dict:
     result = {
         "trend": 50,
@@ -1160,7 +1215,6 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
 
     last = df.iloc[-1]
 
-    # 1. 趨勢 Trend
     trend_score = 50
     if all(col in df.columns for col in ["MA5", "MA10", "MA20"]):
         ma5 = last.get("MA5")
@@ -1180,7 +1234,6 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
             else:
                 trend_score = 55
 
-    # 2. 動能 Momentum
     momentum_score = 50
     if all(col in df.columns for col in ["K", "D", "DIF", "DEA"]):
         k = last.get("K")
@@ -1198,7 +1251,6 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
             else:
                 momentum_score = 45
 
-    # 3. 量能 Volume
     volume_score = 50
     if "成交股數" in df.columns and len(df) >= 5:
         last_vol = last.get("成交股數")
@@ -1217,7 +1269,6 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
             else:
                 volume_score = 25
 
-    # 4. 位置 Position
     position_score = 50
     if len(df) >= 20 and all(col in df.columns for col in ["最高價", "最低價", "收盤價"]):
         recent = df.tail(20)
@@ -1238,7 +1289,6 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
             else:
                 position_score = 20
 
-    # 5. 結構 Structure
     structure_score = 50
     if len(df) >= 20:
         close_price = last.get("收盤價")
