@@ -572,9 +572,10 @@ def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
     _init_state()
+st.session_state[_k("master_df")] = _load_stock_master()
 
-    watchlist = st.session_state[_k("watchlist")]
-    master_df = st.session_state[_k("master_df")]
+watchlist = st.session_state[_k("watchlist")]
+master_df = st.session_state[_k("master_df")]
     _repair_selected_group()
     selected_group = _safe_str(st.session_state.get(_k("selected_group"), ""))
 
