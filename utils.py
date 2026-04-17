@@ -310,12 +310,12 @@ def render_pro_info_card(title, info_pairs, chips=None):
     items_html = ""
     for label, value, css_class in info_pairs:
         css = css_class if css_class else ""
-        items_html += f'''
+        items_html += f"""
         <div class="pro-info-item">
             <div class="pro-info-label">{label}</div>
             <div class="pro-info-value {css}">{value}</div>
         </div>
-        '''
+        """
 
     st.markdown(
         f"""
@@ -493,7 +493,6 @@ def get_all_code_name_map(lookup_date=""):
                 "market": market,
             })
 
-    # TWSE 上市
     twse_urls = [
         "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
         "https://openapi.twse.com.tw/v1/opendata/t187ap03_O",
@@ -515,7 +514,6 @@ def get_all_code_name_map(lookup_date=""):
         except Exception:
             pass
 
-    # TPEx 上櫃 / 興櫃
     tpex_urls = [
         ("https://www.tpex.org.tw/openapi/v1/mkt/sm_mainboard", "上櫃"),
         ("https://www.tpex.org.tw/openapi/v1/mkt/sm_esb", "興櫃"),
