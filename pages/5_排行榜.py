@@ -1,276 +1,494 @@
+from __future__ import annotations
+
 from datetime import date, timedelta
-import ast
+from typing import Any
+
 import pandas as pd
 import streamlit as st
 
 from utils import (
-    load_watchlist,
+    compute_radar_scores,
+    compute_signal_snapshot,
+    compute_support_resistance_snapshot,
+    format_number,
     get_all_code_name_map,
     get_history_data,
-    apply_font_scale,
-    get_font_scale,
-    format_number,
+    get_normalized_watchlist,
+    inject_pro_theme,
+    render_pro_hero,
+    render_pro_info_card,
+    render_pro_kpi_row,
+    render_pro_section,
 )
 
-st.set_page_config(page_title="排行榜", page_icon="🏆", layout="wide")
-
-if "font_scale" not in st.session_state:
-    st.session_state.font_scale = get_font_scale()
-
-with st.sidebar:
-    st.markdown("## 顯示設定")
-    st.session_state.font_scale = st.slider("字體大小 (%)", 100, 220, st.session_state.font_scale, 10)
-
-apply_font_scale(st.session_state.font_scale)
-
-st.title("🏆 排行榜")
-st.caption("依自選股群組顯示漲跌幅、成交金額、成交股數排行")
-
-today_dt = date.today()
-lookup_date = today_dt.strftime("%Y%m%d")
-
-raw_watchlist = load_watchlist()
-if not raw_watchlist:
-    st.warning("目前沒有自選股群組，請先到自選股中心建立清單。")
-    st.stop()
-
-all_code_name_df = get_all_code_name_map(lookup_date)
-if all_code_name_df.empty:
-    st.info("目前使用備援模式，部分股票名稱可能以內建對照或代號顯示。")
-
-FALLBACK_NAME_MAP = {
-    "2330": "台積電",
-    "2454": "聯發科",
-    "3711": "日月光投控",
-    "2317": "鴻海",
-    "2382": "廣達",
-    "0050": "元大台灣50",
-    "0056": "元大高股息",
-    "2881": "富邦金",
-    "2882": "國泰金",
-    "6271": "同欣電"
-}
+PAGE_TITLE = "排行榜"
+PFX = "rank_"
 
 
-def normalize_watchlist(data):
-    result = {}
+# =========================================================
+# 基礎工具
+# =========================================================
+def _k(key: str) -> str:
+    return f"{PFX}{key}"
 
-    def parse_item(item):
-        if isinstance(item, dict):
-            code = item.get("code", "")
-            name = item.get("name", "")
 
-            if isinstance(code, str):
-                try:
-                    parsed_code = ast.literal_eval(code.strip())
-                    if isinstance(parsed_code, dict):
-                        code = parsed_code.get("code", "")
-                        if not name:
-                            name = parsed_code.get("name", "")
-                except Exception:
-                    pass
+def _safe_str(v: Any) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
 
-            return {"code": str(code).strip(), "name": str(name).strip()}
 
-        if isinstance(item, str):
-            text = item.strip()
-            if not text:
-                return None
-            if text.isdigit():
-                return {"code": text, "name": ""}
-            try:
-                parsed = ast.literal_eval(text)
-                if isinstance(parsed, dict):
-                    return {
-                        "code": str(parsed.get("code", "")).strip(),
-                        "name": str(parsed.get("name", "")).strip()
-                    }
-            except Exception:
-                pass
-            return {"code": text, "name": ""}
+def _safe_float(v: Any, default=None):
+    try:
+        if pd.isna(v):
+            return default
+    except Exception:
+        pass
+    try:
+        return float(v)
+    except Exception:
+        return default
 
-        return None
 
-    for group_name, items in data.items():
-        clean_items = []
-        if isinstance(items, list):
-            for item in items:
-                parsed_item = parse_item(item)
-                if parsed_item and parsed_item["code"]:
-                    clean_items.append(parsed_item)
+def _normalize_code(v: Any) -> str:
+    text = _safe_str(v)
+    if not text:
+        return ""
+    if text.isdigit():
+        return text
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if 4 <= len(digits) <= 6:
+        return digits
+    return text
 
-        dedup = []
-        seen = set()
-        for item in clean_items:
-            if item["code"] not in seen:
-                dedup.append(item)
-                seen.add(item["code"])
 
-        result[str(group_name).strip()] = dedup
+# =========================================================
+# watchlist / 主檔
+# =========================================================
+def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        raw = get_normalized_watchlist()
+
+    result: dict[str, list[dict[str, str]]] = {}
+
+    if isinstance(raw, dict):
+        for group_name, items in raw.items():
+            g = _safe_str(group_name)
+            if not g:
+                continue
+
+            rows = []
+            seen = set()
+
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    code = _normalize_code(item.get("code"))
+                    name = _safe_str(item.get("name")) or code
+                    market = _safe_str(item.get("market")) or "上市"
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                            "label": f"{code} {name}",
+                        }
+                    )
+
+            result[g] = rows
 
     return result
 
 
-watchlist_dict = normalize_watchlist(raw_watchlist)
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_master_df() -> pd.DataFrame:
+    dfs = []
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                mapping = {
+                    "證券代號": "code",
+                    "證券名稱": "name",
+                    "市場別": "market",
+                    "code": "code",
+                    "name": "name",
+                    "market": "market",
+                }
+                temp = temp.rename(columns=mapping)
+
+                for col in ["code", "name", "market"]:
+                    if col not in temp.columns:
+                        temp[col] = ""
+
+                temp["code"] = temp["code"].map(_normalize_code)
+                temp["name"] = temp["name"].map(_safe_str)
+                temp["market"] = temp["market"].map(_safe_str)
+                if market_arg in ["上市", "上櫃", "興櫃"]:
+                    temp["market"] = temp["market"].replace("", market_arg)
+
+                dfs.append(temp[["code", "name", "market"]])
+        except Exception:
+            pass
+
+    if not dfs:
+        return pd.DataFrame(columns=["code", "name", "market"])
+
+    out = pd.concat(dfs, ignore_index=True)
+    out["code"] = out["code"].map(_normalize_code)
+    out["name"] = out["name"].map(_safe_str)
+    out["market"] = out["market"].map(_safe_str).replace("", "上市")
+    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return out
 
 
-def guess_market_type(code: str) -> str:
-    code = str(code).strip()
-    if code.startswith("00"):
-        return "上市"
-    if code in ["3711"]:
-        return "上市"
-    return "上市"
+def _find_name_market(code: str, manual_name: str, manual_market: str, master_df: pd.DataFrame) -> tuple[str, str]:
+    code = _normalize_code(code)
+    manual_name = _safe_str(manual_name)
+    manual_market = _safe_str(manual_market)
+
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        matched = master_df[master_df["code"].astype(str) == code]
+        if not matched.empty:
+            row = matched.iloc[0]
+            return (
+                _safe_str(row.get("name")) or manual_name or code,
+                _safe_str(row.get("market")) or manual_market or "上市",
+            )
+
+    return manual_name or code, manual_market or "上市"
 
 
-def get_stock_name_and_market(code: str, manual_name: str = ""):
-    code = str(code).strip()
-    manual_name = str(manual_name).strip()
+# =========================================================
+# 歷史資料抓取
+# =========================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+    candidates = []
+    for mk in [market_type, "上市", "上櫃", "興櫃", ""]:
+        mk = _safe_str(mk)
+        if mk not in candidates:
+            candidates.append(mk)
 
-    if manual_name:
-        return manual_name, guess_market_type(code)
+    for mk in candidates:
+        try:
+            df = get_history_data(
+                stock_no=stock_no,
+                stock_name=stock_name,
+                market_type=mk,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except TypeError:
+            try:
+                df = get_history_data(
+                    stock_no=stock_no,
+                    stock_name=stock_name,
+                    market_type=mk,
+                    start_dt=start_date,
+                    end_dt=end_date,
+                )
+            except Exception:
+                df = pd.DataFrame()
+        except Exception:
+            df = pd.DataFrame()
 
-    if not all_code_name_df.empty:
-        match = all_code_name_df[all_code_name_df["證券代號"] == code]
-        if not match.empty:
-            row = match.iloc[0]
-            return str(row["證券名稱"]).strip(), str(row["市場別"]).strip()
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            work = df.copy()
+            if "日期" in work.columns:
+                work["日期"] = pd.to_datetime(work["日期"], errors="coerce")
+                work = work.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+            return work, (mk or market_type or "未知")
 
-    return FALLBACK_NAME_MAP.get(code, f"股票{code}"), guess_market_type(code)
-
-
-group_names = list(watchlist_dict.keys())
-selected_group = st.selectbox("選擇群組", group_names, index=0)
-
-items = watchlist_dict.get(selected_group, [])
-if not items:
-    st.warning("此群組目前沒有股票。")
-    st.stop()
+    return pd.DataFrame(), (_safe_str(market_type) or "未知")
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def build_rank_df(items: list[dict], start_dt: date, end_dt: date) -> pd.DataFrame:
+# =========================================================
+# 排行資料
+# =========================================================
+def _init_state(group_map: dict[str, list[dict[str, str]]]):
+    groups = list(group_map.keys())
+    if _k("group") not in st.session_state:
+        st.session_state[_k("group")] = groups[0] if groups else ""
+
+    if _k("days") not in st.session_state:
+        st.session_state[_k("days")] = 40
+
+    if _k("top_n") not in st.session_state:
+        st.session_state[_k("top_n")] = 20
+
+    if _k("sort_metric") not in st.session_state:
+        st.session_state[_k("sort_metric")] = "訊號分數"
+
+    if _k("group") in st.session_state and st.session_state[_k("group")] not in groups:
+        st.session_state[_k("group")] = groups[0] if groups else ""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _build_rank_df(items: list[dict[str, str]], master_df: pd.DataFrame, start_dt: date, end_dt: date) -> pd.DataFrame:
     rows = []
 
     for item in items:
-        code = str(item.get("code", "")).strip()
-        manual_name = str(item.get("name", "")).strip()
-        stock_name, market_type = get_stock_name_and_market(code, manual_name)
+        code = _normalize_code(item.get("code"))
+        manual_name = _safe_str(item.get("name"))
+        manual_market = _safe_str(item.get("market"))
 
-        hist_df = get_history_data(
+        if not code:
+            continue
+
+        stock_name, market_type = _find_name_market(code, manual_name, manual_market, master_df)
+        hist_df, used_market = _get_history_smart(
             stock_no=code,
             stock_name=stock_name,
             market_type=market_type,
-            start_dt=start_dt,
-            end_dt=end_dt
+            start_date=start_dt,
+            end_date=end_dt,
         )
 
         if hist_df.empty:
-            rows.append({
-                "證券代號": code,
-                "證券名稱": stock_name,
-                "市場別": market_type,
-                "日期": None,
-                "最新價": None,
-                "漲跌": None,
-                "漲跌幅%": None,
-                "成交股數": None,
-                "成交金額": None,
-                "成交筆數": None,
-            })
+            rows.append(
+                {
+                    "股票代號": code,
+                    "股票名稱": stock_name,
+                    "市場別": used_market,
+                    "日期": None,
+                    "最新價": None,
+                    "漲跌": None,
+                    "漲跌幅%": None,
+                    "成交股數": None,
+                    "成交金額": None,
+                    "成交筆數": None,
+                    "訊號分數": None,
+                    "20日壓力距離%": None,
+                    "20日支撐距離%": None,
+                    "雷達摘要": "無資料",
+                }
+            )
             continue
 
-        hist_df = hist_df.sort_values("日期").reset_index(drop=True)
         latest = hist_df.iloc[-1]
-
-        prev_close = None
-        if len(hist_df) >= 2:
-            prev_close = hist_df.iloc[-2].get("收盤價")
-
+        prev_close = hist_df.iloc[-2]["收盤價"] if len(hist_df) >= 2 and "收盤價" in hist_df.columns else None
         latest_close = latest.get("收盤價")
+
         price_change = None
         pct_change = None
-
-        if prev_close is not None and latest_close is not None:
+        if prev_close is not None and latest_close is not None and prev_close != 0:
             price_change = latest_close - prev_close
-            if prev_close != 0:
-                pct_change = (price_change / prev_close) * 100
+            pct_change = (price_change / prev_close) * 100
 
-        rows.append({
-            "證券代號": code,
-            "證券名稱": stock_name,
-            "市場別": market_type,
-            "日期": latest.get("日期"),
-            "最新價": latest_close,
-            "漲跌": price_change,
-            "漲跌幅%": pct_change,
-            "成交股數": latest.get("成交股數"),
-            "成交金額": latest.get("成交金額"),
-            "成交筆數": latest.get("成交筆數"),
-        })
+        signal = compute_signal_snapshot(hist_df)
+        sr = compute_support_resistance_snapshot(hist_df)
+        radar = compute_radar_scores(hist_df)
+
+        res20 = _safe_float(sr.get("res_20"))
+        sup20 = _safe_float(sr.get("sup_20"))
+        close_now = _safe_float(latest_close)
+
+        pressure_dist = None
+        support_dist = None
+        if close_now is not None and res20 not in [None, 0]:
+            pressure_dist = ((res20 - close_now) / res20) * 100
+        if close_now is not None and sup20 not in [None, 0]:
+            support_dist = ((close_now - sup20) / sup20) * 100
+
+        rows.append(
+            {
+                "股票代號": code,
+                "股票名稱": stock_name,
+                "市場別": used_market,
+                "日期": latest.get("日期"),
+                "最新價": latest_close,
+                "漲跌": price_change,
+                "漲跌幅%": pct_change,
+                "成交股數": latest.get("成交股數"),
+                "成交金額": latest.get("成交金額"),
+                "成交筆數": latest.get("成交筆數"),
+                "訊號分數": signal.get("score"),
+                "20日壓力距離%": pressure_dist,
+                "20日支撐距離%": support_dist,
+                "雷達摘要": _safe_str(radar.get("summary")) or "—",
+            }
+        )
 
     return pd.DataFrame(rows)
 
 
-start_dt = today_dt - timedelta(days=40)
-end_dt = today_dt
-
-with st.spinner("正在整理排行榜資料..."):
-    rank_df = build_rank_df(items, start_dt, end_dt)
-
-if rank_df.empty:
-    st.warning("查無排行資料。")
-    st.stop()
-
-summary1, summary2, summary3, summary4 = st.columns(4)
-with summary1:
-    st.metric("群組股票數", len(rank_df))
-with summary2:
-    valid_up = rank_df["漲跌幅%"].dropna()
-    st.metric("可比較漲跌股票數", len(valid_up))
-with summary3:
-    st.metric("有成交金額資料", int(rank_df["成交金額"].notna().sum()))
-with summary4:
-    st.metric("有成交股數資料", int(rank_df["成交股數"].notna().sum()))
-
-st.markdown("---")
-
-tab1, tab2, tab3, tab4 = st.tabs(["漲幅排行", "跌幅排行", "成交金額排行", "成交股數排行"])
-
-
-def format_rank_df(df: pd.DataFrame) -> pd.DataFrame:
+def _format_table(df: pd.DataFrame) -> pd.DataFrame:
     show_df = df.copy()
 
     if "日期" in show_df.columns:
-        show_df["日期"] = pd.to_datetime(show_df["日期"]).dt.strftime("%Y-%m-%d")
+        show_df["日期"] = pd.to_datetime(show_df["日期"], errors="coerce").dt.strftime("%Y-%m-%d")
 
-    for col in ["最新價", "漲跌", "成交股數", "成交金額", "成交筆數"]:
+    for col in ["最新價", "漲跌"]:
         if col in show_df.columns:
-            digits = 0 if col in ["成交股數", "成交金額", "成交筆數"] else 2
-            show_df[col] = show_df[col].apply(lambda x: format_number(x, digits) if pd.notna(x) else "")
+            show_df[col] = show_df[col].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
 
-    if "漲跌幅%" in show_df.columns:
-        show_df["漲跌幅%"] = show_df["漲跌幅%"].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
+    for col in ["成交股數", "成交金額", "成交筆數", "訊號分數"]:
+        if col in show_df.columns:
+            show_df[col] = show_df[col].apply(lambda x: format_number(x, 0) if pd.notna(x) else "")
+
+    for col in ["漲跌幅%", "20日壓力距離%", "20日支撐距離%"]:
+        if col in show_df.columns:
+            show_df[col] = show_df[col].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
 
     return show_df
 
 
-with tab1:
-    up_df = rank_df.dropna(subset=["漲跌幅%"]).sort_values("漲跌幅%", ascending=False).reset_index(drop=True)
-    st.subheader("漲幅排行")
-    st.dataframe(format_rank_df(up_df), use_container_width=True, hide_index=True)
+def _top_table(df: pd.DataFrame, metric: str, ascending: bool, top_n: int) -> pd.DataFrame:
+    if metric not in df.columns:
+        return pd.DataFrame()
+    work = df.dropna(subset=[metric]).sort_values(metric, ascending=ascending).reset_index(drop=True)
+    return work.head(top_n).copy()
 
-with tab2:
-    down_df = rank_df.dropna(subset=["漲跌幅%"]).sort_values("漲跌幅%", ascending=True).reset_index(drop=True)
-    st.subheader("跌幅排行")
-    st.dataframe(format_rank_df(down_df), use_container_width=True, hide_index=True)
 
-with tab3:
-    amount_df = rank_df.dropna(subset=["成交金額"]).sort_values("成交金額", ascending=False).reset_index(drop=True)
-    st.subheader("成交金額排行")
-    st.dataframe(format_rank_df(amount_df), use_container_width=True, hide_index=True)
+# =========================================================
+# 主畫面
+# =========================================================
+def main():
+    st.set_page_config(page_title=PAGE_TITLE, page_icon="🏆", layout="wide")
+    inject_pro_theme()
 
-with tab4:
-    volume_df = rank_df.dropna(subset=["成交股數"]).sort_values("成交股數", ascending=False).reset_index(drop=True)
-    st.subheader("成交股數排行")
-    st.dataframe(format_rank_df(volume_df), use_container_width=True, hide_index=True)
+    group_map = _load_watchlist_map()
+    if not group_map:
+        st.warning("目前沒有自選股群組，請先到自選股中心建立清單。")
+        st.stop()
+
+    _init_state(group_map)
+    master_df = _load_master_df()
+
+    render_pro_hero(
+        title="排行榜｜股神版",
+        subtitle="依自選股群組做排行，支援漲跌幅、成交金額、成交股數、訊號分數與支撐壓力距離。",
+    )
+
+    if st.session_state.get("watchlist_version"):
+        st.caption(
+            f"自選股同步狀態：watchlist_version = {st.session_state.get('watchlist_version', 0)}"
+            + (
+                f" / 最後更新：{_safe_str(st.session_state.get('watchlist_last_saved_at', ''))}"
+                if _safe_str(st.session_state.get("watchlist_last_saved_at", ""))
+                else ""
+            )
+        )
+
+    render_pro_section("查詢條件")
+
+    groups = list(group_map.keys())
+    c1, c2, c3 = st.columns([2, 2, 2])
+
+    with c1:
+        st.selectbox("選擇群組", groups, key=_k("group"))
+
+    with c2:
+        st.selectbox("排行指標", ["訊號分數", "漲跌幅%", "成交金額", "成交股數", "20日壓力距離%", "20日支撐距離%"], key=_k("sort_metric"))
+
+    with c3:
+        st.selectbox("區間天數", [20, 40, 60, 90, 120], key=_k("days"))
+
+    d1, d2 = st.columns([2, 2])
+    with d1:
+        st.selectbox("Top N", [10, 20, 30, 50], key=_k("top_n"))
+    with d2:
+        selected_group = _safe_str(st.session_state.get(_k("group"), ""))
+        items = group_map.get(selected_group, [])
+        st.caption(f"目前群組：{selected_group} / 股票數：{len(items)}")
+
+    items = group_map.get(_safe_str(st.session_state.get(_k("group"), "")), [])
+    if not items:
+        st.warning("此群組目前沒有股票。")
+        st.stop()
+
+    today_dt = date.today()
+    start_dt = today_dt - timedelta(days=int(st.session_state.get(_k("days"), 40)))
+    end_dt = today_dt
+
+    with st.spinner("正在整理排行榜資料..."):
+        rank_df = _build_rank_df(items, master_df, start_dt, end_dt)
+
+    if rank_df.empty:
+        st.warning("查無排行資料。")
+        st.stop()
+
+    total_count = len(rank_df)
+    valid_up = int(rank_df["漲跌幅%"].notna().sum()) if "漲跌幅%" in rank_df.columns else 0
+    valid_amount = int(rank_df["成交金額"].notna().sum()) if "成交金額" in rank_df.columns else 0
+    valid_signal = int(rank_df["訊號分數"].notna().sum()) if "訊號分數" in rank_df.columns else 0
+
+    render_pro_kpi_row(
+        [
+            {"label": "群組股票數", "value": total_count, "delta": _safe_str(st.session_state.get(_k("group"), "")), "delta_class": "pro-kpi-delta-flat"},
+            {"label": "可比較漲跌", "value": valid_up, "delta": "有漲跌幅資料", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "有成交金額", "value": valid_amount, "delta": "量價排行", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "有訊號分數", "value": valid_signal, "delta": "股神燈號", "delta_class": "pro-kpi-delta-flat"},
+        ]
+    )
+
+    metric = _safe_str(st.session_state.get(_k("sort_metric"), "訊號分數"))
+    top_n = int(st.session_state.get(_k("top_n"), 20))
+
+    render_pro_section("重點排行")
+    t1, t2 = st.columns(2)
+
+    with t1:
+        if metric in ["20日壓力距離%"]:
+            top_df = _top_table(rank_df, metric, True, top_n)
+        else:
+            top_df = _top_table(rank_df, metric, False, top_n)
+        st.dataframe(_format_table(top_df), use_container_width=True, hide_index=True)
+
+    with t2:
+        weak_metric = "漲跌幅%"
+        weak_df = _top_table(rank_df, weak_metric, True, top_n)
+        st.dataframe(_format_table(weak_df), use_container_width=True, hide_index=True)
+
+    tabs = st.tabs(["漲幅排行", "跌幅排行", "成交金額排行", "成交股數排行", "訊號分數排行", "完整排行表"])
+
+    with tabs[0]:
+        up_df = _top_table(rank_df, "漲跌幅%", False, top_n)
+        st.dataframe(_format_table(up_df), use_container_width=True, hide_index=True)
+
+    with tabs[1]:
+        down_df = _top_table(rank_df, "漲跌幅%", True, top_n)
+        st.dataframe(_format_table(down_df), use_container_width=True, hide_index=True)
+
+    with tabs[2]:
+        amount_df = _top_table(rank_df, "成交金額", False, top_n)
+        st.dataframe(_format_table(amount_df), use_container_width=True, hide_index=True)
+
+    with tabs[3]:
+        volume_df = _top_table(rank_df, "成交股數", False, top_n)
+        st.dataframe(_format_table(volume_df), use_container_width=True, hide_index=True)
+
+    with tabs[4]:
+        signal_df = _top_table(rank_df, "訊號分數", False, top_n)
+        st.dataframe(_format_table(signal_df), use_container_width=True, hide_index=True)
+
+    with tabs[5]:
+        st.dataframe(_format_table(rank_df), use_container_width=True, hide_index=True)
+
+    render_pro_section("排行榜說明")
+    render_pro_info_card(
+        "股神版排行規則",
+        [
+            ("資料來源", "以自選股群組為主，逐檔抓取歷史資料後計算。", ""),
+            ("排行指標", "支援漲跌幅、成交金額、成交股數、訊號分數、20日壓力/支撐距離。", ""),
+            ("市場 fallback", "個股市場別會以主檔優先，不完全相信自選股內手填市場。", ""),
+            ("同步設計", "若自選股中心已更新，這頁會優先吃 session_state 內的最新 watchlist。", ""),
+        ],
+        chips=["排行榜", "自選群組", "股神版"],
+    )
+
+
+if __name__ == "__main__":
+    main()
