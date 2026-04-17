@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import copy
+import hashlib
 import json
 
 import pandas as pd
@@ -76,6 +77,14 @@ def _atomic_write_json(path: Path, payload: dict[str, list[dict[str, str]]]) -> 
         return True
     except Exception:
         return False
+
+
+def _payload_hash(payload: dict[str, list[dict[str, str]]]) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.md5(text.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
 
 def _get_watchlist_candidate_paths() -> list[Path]:
@@ -189,24 +198,37 @@ def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
     try:
         util_ok = save_watchlist(payload, filepath=str(_project_root() / "watchlist.json"))
         if util_ok:
-            if str((_project_root() / "watchlist.json").resolve()) not in success_paths:
-                success_paths.append(str((_project_root() / "watchlist.json").resolve()))
+            p = str((_project_root() / "watchlist.json").resolve())
+            if p not in success_paths:
+                success_paths.append(p)
     except Exception:
         pass
 
     try:
         util_ok2 = save_watchlist(payload, filepath="watchlist.json")
         if util_ok2:
-            rp = str((Path.cwd() / "watchlist.json").resolve())
-            if rp not in success_paths:
-                success_paths.append(rp)
+            p = str((Path.cwd() / "watchlist.json").resolve())
+            if p not in success_paths:
+                success_paths.append(p)
     except Exception:
         pass
+
+    version = int(st.session_state.get(_k("version"), 0)) + 1
+    payload_md5 = _payload_hash(payload)
+    saved_at = _now_text()
 
     st.session_state[_k("watchlist")] = copy.deepcopy(payload)
     st.session_state[_k("last_saved_paths")] = success_paths
     st.session_state[_k("last_failed_paths")] = failed_paths
-    st.session_state[_k("last_saved_at")] = _now_text()
+    st.session_state[_k("last_saved_at")] = saved_at
+    st.session_state[_k("version")] = version
+    st.session_state[_k("payload_hash")] = payload_md5
+
+    # 跨頁真同步：其他頁可直接讀這些 shared state
+    st.session_state["watchlist_data"] = copy.deepcopy(payload)
+    st.session_state["watchlist_version"] = version
+    st.session_state["watchlist_last_saved_at"] = saved_at
+    st.session_state["watchlist_last_saved_hash"] = payload_md5
 
     return len(success_paths) > 0
 
@@ -216,7 +238,8 @@ def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢�
     if ok:
         saved_paths = st.session_state.get(_k("last_saved_paths"), [])
         path_text = "；".join(saved_paths[:2]) if saved_paths else "watchlist.json"
-        _set_status(f"{success_msg}｜已回寫：{path_text}｜{_now_text()}", "success")
+        version = st.session_state.get(_k("version"), 0)
+        _set_status(f"{success_msg}｜已回寫：{path_text}｜版本 v{version}｜{_now_text()}", "success")
     else:
         failed_paths = st.session_state.get(_k("last_failed_paths"), [])
         fail_text = "；".join(failed_paths[:2]) if failed_paths else ""
@@ -278,6 +301,9 @@ def _init_state():
     if _k("new_group_name") not in st.session_state:
         st.session_state[_k("new_group_name")] = ""
 
+    if _k("rename_group_name") not in st.session_state:
+        st.session_state[_k("rename_group_name")] = ""
+
     if _k("add_code") not in st.session_state:
         st.session_state[_k("add_code")] = ""
 
@@ -308,6 +334,18 @@ def _init_state():
     if _k("last_saved_at") not in st.session_state:
         st.session_state[_k("last_saved_at")] = ""
 
+    if _k("version") not in st.session_state:
+        st.session_state[_k("version")] = int(st.session_state.get("watchlist_version", 0) or 0)
+
+    if _k("payload_hash") not in st.session_state:
+        st.session_state[_k("payload_hash")] = _payload_hash(st.session_state[_k("watchlist")])
+
+    if _k("batch_delete_codes") not in st.session_state:
+        st.session_state[_k("batch_delete_codes")] = []
+
+    if _k("clear_group_confirm") not in st.session_state:
+        st.session_state[_k("clear_group_confirm")] = False
+
     if _k("add_code_next") in st.session_state:
         st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
 
@@ -326,7 +364,15 @@ def _init_state():
     if _k("new_group_name_next") in st.session_state:
         st.session_state[_k("new_group_name")] = st.session_state.pop(_k("new_group_name_next"))
 
+    if _k("rename_group_name_next") in st.session_state:
+        st.session_state[_k("rename_group_name")] = st.session_state.pop(_k("rename_group_name_next"))
+
     _repair_selected_group()
+
+    st.session_state["watchlist_data"] = copy.deepcopy(st.session_state[_k("watchlist")])
+    st.session_state["watchlist_version"] = st.session_state.get(_k("version"), 0)
+    st.session_state["watchlist_last_saved_at"] = st.session_state.get(_k("last_saved_at"), "")
+    st.session_state["watchlist_last_saved_hash"] = st.session_state.get(_k("payload_hash"), "")
 
 
 def _repair_selected_group():
@@ -418,7 +464,39 @@ def _create_group(group_name: str) -> tuple[bool, str]:
     watchlist[g] = []
     st.session_state[_k("watchlist")] = watchlist
     st.session_state[_k("selected_group_next")] = g
+    st.session_state[_k("rename_group_name_next")] = g
     return True, f"已新增群組：{g}"
+
+
+def _rename_group(old_name: str, new_name: str) -> tuple[bool, str]:
+    old_g = _safe_str(old_name)
+    new_g = _safe_str(new_name)
+
+    if not old_g:
+        return False, "請先選擇群組。"
+    if not new_g:
+        return False, "請輸入新的群組名稱。"
+    if old_g == new_g:
+        return False, "新舊群組名稱相同，無需修改。"
+
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
+
+    if old_g not in watchlist:
+        return False, "原群組不存在。"
+    if new_g in watchlist:
+        return False, f"新群組名稱已存在：{new_g}"
+
+    ordered = {}
+    for g, items in watchlist.items():
+        if g == old_g:
+            ordered[new_g] = items
+        else:
+            ordered[g] = items
+
+    st.session_state[_k("watchlist")] = ordered
+    st.session_state[_k("selected_group_next")] = new_g
+    st.session_state[_k("rename_group_name_next")] = new_g
+    return True, f"已將群組 {old_g} 更名為 {new_g}"
 
 
 def _add_stock(group_name: str, code: str, name: str = "", market: str = "") -> tuple[bool, str]:
@@ -501,8 +579,53 @@ def _delete_group(group_name: str) -> tuple[bool, str]:
 
     groups = list(watchlist.keys())
     st.session_state[_k("selected_group_next")] = groups[0] if groups else ""
+    st.session_state[_k("rename_group_name_next")] = groups[0] if groups else ""
 
     return True, f"已刪除群組：{g}"
+
+
+def _delete_multiple_stocks(group_name: str, codes: list[str]) -> tuple[int, str]:
+    g = _safe_str(group_name)
+    clean_codes = [_normalize_code(x) for x in codes if _normalize_code(x)]
+
+    if not g:
+        return 0, "請先選擇群組。"
+    if not clean_codes:
+        return 0, "請先勾選要刪除的股票。"
+
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
+
+    if g not in watchlist:
+        return 0, "群組不存在。"
+
+    code_set = set(clean_codes)
+    before = len(watchlist[g])
+    watchlist[g] = [x for x in watchlist[g] if _normalize_code(x.get("code")) not in code_set]
+    removed = before - len(watchlist[g])
+
+    st.session_state[_k("watchlist")] = watchlist
+    st.session_state[_k("batch_delete_codes")] = []
+
+    if removed <= 0:
+        return 0, "沒有可刪除的股票。"
+    return removed, f"已批次刪除 {g}：{removed} 檔"
+
+
+def _clear_group(group_name: str) -> tuple[int, str]:
+    g = _safe_str(group_name)
+    watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
+
+    if not g:
+        return 0, "請先選擇群組。"
+    if g not in watchlist:
+        return 0, "群組不存在。"
+
+    removed = len(watchlist[g])
+    watchlist[g] = []
+    st.session_state[_k("watchlist")] = watchlist
+    st.session_state[_k("batch_delete_codes")] = []
+
+    return removed, f"已清空群組：{g}（{removed} 檔）"
 
 
 def _parse_bulk_lines(text: str) -> list[dict[str, str]]:
@@ -638,9 +761,13 @@ def main():
     master_df = st.session_state[_k("master_df")]
     _repair_selected_group()
 
+    current_group = _safe_str(st.session_state.get(_k("selected_group"), ""))
+    if not _safe_str(st.session_state.get(_k("rename_group_name"), "")) and current_group:
+        st.session_state[_k("rename_group_name")] = current_group
+
     render_pro_hero(
         title="自選股中心｜股神版",
-        subtitle="群組管理、單筆新增、批次貼上、快速搜尋、直接輸入股票名稱新增，並在每次異動後立即回寫 watchlist.json。",
+        subtitle="群組管理、群組改名、單筆新增、批次貼上、批次刪除、真同步回寫 watchlist.json。",
     )
 
     overview_df = _build_overview_df(watchlist)
@@ -655,8 +782,8 @@ def main():
         [
             {"label": "群組數", "value": total_groups, "delta": "自選股群組", "delta_class": "pro-kpi-delta-flat"},
             {"label": "股票總數", "value": total_stocks, "delta": "自選股總計", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "上市檔數", "value": listed_count, "delta": "市場別統計", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "上櫃檔數", "value": otc_count, "delta": "市場別統計", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "同步版本", "value": st.session_state.get(_k("version"), 0), "delta": "watchlist_version", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "最後儲存", "value": st.session_state.get(_k("last_saved_at"), "—") or "—", "delta": "自動回寫", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -694,8 +821,24 @@ def main():
                 _set_status(msg, "warning")
             st.rerun()
 
-    d1, d2 = st.columns([2, 2])
-    with d1:
+    r1, r2, r3 = st.columns([3, 2, 2])
+
+    with r1:
+        st.text_input("目前群組改名為", key=_k("rename_group_name"), placeholder="輸入新的群組名稱")
+
+    with r2:
+        if st.button("套用群組改名", use_container_width=True):
+            ok, msg = _rename_group(
+                _safe_str(st.session_state.get(_k("selected_group"), "")),
+                _safe_str(st.session_state.get(_k("rename_group_name"), "")),
+            )
+            if ok:
+                _persist_watchlist(msg)
+            else:
+                _set_status(msg, "warning")
+            st.rerun()
+
+    with r3:
         if st.button("刪除目前群組", use_container_width=True):
             ok, msg = _delete_group(_safe_str(st.session_state.get(_k("selected_group"), "")))
             if ok:
@@ -704,9 +847,15 @@ def main():
                 _set_status(msg, "warning")
             st.rerun()
 
-    with d2:
+    d1, d2 = st.columns([2, 2])
+    with d1:
         if st.button("手動儲存自選股", use_container_width=True):
             _persist_watchlist("已手動儲存 watchlist.json")
+            st.rerun()
+
+    with d2:
+        if st.button("同步版本 +1 並強制回寫", use_container_width=True):
+            _persist_watchlist("已強制同步自選股版本")
             st.rerun()
 
     render_pro_section("單筆新增股票")
@@ -810,10 +959,10 @@ def main():
         render_pro_info_card(
             "管理提醒",
             [
-                ("自動回寫", "新增 / 刪除 / 批次加入 / 群組異動後立即寫回 JSON。", ""),
+                ("自動回寫", "新增 / 刪除 / 批次加入 / 群組改名 / 清空群組後立即寫回 JSON。", ""),
                 ("實際路徑", saved_path_text, ""),
+                ("同步版本", f"v{st.session_state.get(_k('version'), 0)}", ""),
                 ("最後儲存", last_saved_at or "—", ""),
-                ("搜尋邏輯", "空白只顯示前 100 筆；輸入關鍵字會從完整主檔搜尋。", ""),
             ],
         )
 
@@ -851,19 +1000,67 @@ def main():
     else:
         st.dataframe(current_df, use_container_width=True, hide_index=True)
 
-        remove_code = st.selectbox(
-            "刪除目前群組中的股票",
-            options=current_df["股票代號"].astype(str).tolist(),
-            format_func=lambda code: current_df[current_df["股票代號"].astype(str) == str(code)]["股票"].iloc[0],
-            key=_k("remove_code_select"),
+        m1, m2 = st.columns([2, 2])
+
+        with m1:
+            remove_code = st.selectbox(
+                "單筆刪除目前群組中的股票",
+                options=current_df["股票代號"].astype(str).tolist(),
+                format_func=lambda code: current_df[current_df["股票代號"].astype(str) == str(code)]["股票"].iloc[0],
+                key=_k("remove_code_select"),
+            )
+
+            if st.button("刪除這檔股票", use_container_width=True):
+                ok, msg = _delete_stock(current_group_name, remove_code)
+                if ok:
+                    _persist_watchlist(msg)
+                else:
+                    _set_status(msg, "warning")
+                st.rerun()
+
+        with m2:
+            code_to_label = {str(r["股票代號"]): str(r["股票"]) for _, r in current_df.iterrows()}
+            all_codes = current_df["股票代號"].astype(str).tolist()
+
+            st.multiselect(
+                "批次刪除勾選股票",
+                options=all_codes,
+                default=st.session_state.get(_k("batch_delete_codes"), []),
+                format_func=lambda x: code_to_label.get(str(x), str(x)),
+                key=_k("batch_delete_codes"),
+            )
+
+            x1, x2 = st.columns([1, 1])
+            with x1:
+                if st.button("批次刪除勾選", use_container_width=True):
+                    removed, msg = _delete_multiple_stocks(
+                        current_group_name,
+                        st.session_state.get(_k("batch_delete_codes"), []),
+                    )
+                    if removed > 0:
+                        _persist_watchlist(msg)
+                    else:
+                        _set_status(msg, "warning")
+                    st.rerun()
+
+            with x2:
+                if st.button("全選目前群組", use_container_width=True):
+                    st.session_state[_k("batch_delete_codes")] = all_codes
+                    _set_status(f"已全選 {len(all_codes)} 檔，可直接批次刪除。", "info")
+                    st.rerun()
+
+        st.checkbox(
+            "確認清空目前群組全部股票",
+            key=_k("clear_group_confirm"),
         )
 
-        if st.button("刪除這檔股票", use_container_width=True):
-            ok, msg = _delete_stock(current_group_name, remove_code)
-            if ok:
-                _persist_watchlist(msg)
+        if st.button("清空目前群組", use_container_width=True):
+            if not st.session_state.get(_k("clear_group_confirm"), False):
+                _set_status("請先勾選確認清空。", "warning")
             else:
-                _set_status(msg, "warning")
+                removed, msg = _clear_group(current_group_name)
+                _persist_watchlist(msg if removed >= 0 else "已清空群組")
+                st.session_state[_k("clear_group_confirm")] = False
             st.rerun()
 
     render_pro_section("全部自選股總覽")
