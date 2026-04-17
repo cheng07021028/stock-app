@@ -17,7 +17,6 @@ from utils import (
     get_all_code_name_map,
     get_history_data,
     get_normalized_watchlist,
-    get_stock_name_and_market,
     inject_pro_theme,
     load_last_query_state,
     parse_date_safe,
@@ -113,7 +112,7 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
             all_df = get_all_code_name_map("")
             if isinstance(all_df, pd.DataFrame) and not all_df.empty:
                 rows = []
-                for _, row in all_df.head(100).iterrows():
+                for _, row in all_df.head(120).iterrows():
                     code = _safe_str(row.get("code"))
                     name = _safe_str(row.get("name")) or code
                     market = _safe_str(row.get("market")) or "上市"
@@ -241,7 +240,7 @@ def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
 
 
 # =========================================================
-# 歷史資料處理
+# 歷史資料 smart fallback
 # =========================================================
 def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -287,6 +286,15 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD_HIST"] = df["DIF"] - df["DEA"]
 
     df["漲跌幅(%)"] = close.pct_change() * 100
+
+    # ATR14
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["ATR14"] = tr.rolling(14).mean()
+
     return df
 
 
@@ -430,35 +438,130 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
 
 
 # =========================================================
-# 事件
+# 專業事件判斷
 # =========================================================
+def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6, atr_ratio: float = 0.8):
+    if df is None or df.empty or len(df) < window * 2 + 3:
+        return [], []
+
+    highs = df["最高價"].tolist()
+    lows = df["最低價"].tolist()
+    atr = df["ATR14"] if "ATR14" in df.columns else pd.Series([None] * len(df))
+
+    peak_idx = []
+    trough_idx = []
+
+    for i in range(window, len(df) - window):
+        cur_high = highs[i]
+        cur_low = lows[i]
+        if pd.isna(cur_high) or pd.isna(cur_low):
+            continue
+
+        left_high = highs[i - window:i]
+        right_high = highs[i + 1:i + 1 + window]
+        left_low = lows[i - window:i]
+        right_low = lows[i + 1:i + 1 + window]
+
+        is_peak = all(cur_high >= x for x in left_high + right_high if pd.notna(x))
+        is_trough = all(cur_low <= x for x in left_low + right_low if pd.notna(x))
+
+        cur_atr = _safe_float(atr.iloc[i], 0)
+
+        if is_peak:
+            if not peak_idx or (i - peak_idx[-1] >= min_gap):
+                peak_idx.append(i)
+            else:
+                old_i = peak_idx[-1]
+                if cur_high > highs[old_i]:
+                    peak_idx[-1] = i
+
+        if is_trough:
+            if not trough_idx or (i - trough_idx[-1] >= min_gap):
+                trough_idx.append(i)
+            else:
+                old_i = trough_idx[-1]
+                if cur_low < lows[old_i]:
+                    trough_idx[-1] = i
+
+    # 再用 ATR 過濾太小的波動
+    filtered_peak = []
+    filtered_trough = []
+
+    for i in peak_idx:
+        if not filtered_peak:
+            filtered_peak.append(i)
+            continue
+        prev_i = filtered_peak[-1]
+        move = abs(highs[i] - highs[prev_i])
+        atr_ref = max(_safe_float(df.iloc[i].get("ATR14"), 0), _safe_float(df.iloc[prev_i].get("ATR14"), 0))
+        if atr_ref == 0 or move >= atr_ref * atr_ratio:
+            filtered_peak.append(i)
+
+    for i in trough_idx:
+        if not filtered_trough:
+            filtered_trough.append(i)
+            continue
+        prev_i = filtered_trough[-1]
+        move = abs(lows[i] - lows[prev_i])
+        atr_ref = max(_safe_float(df.iloc[i].get("ATR14"), 0), _safe_float(df.iloc[prev_i].get("ATR14"), 0))
+        if atr_ref == 0 or move >= atr_ref * atr_ratio:
+            filtered_trough.append(i)
+
+    return filtered_peak, filtered_trough
+
+
 def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     if df is None or df.empty or len(df) < 3:
         return pd.DataFrame(columns=["日期", "事件分類", "事件", "說明"])
+
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6, atr_ratio=0.8)
+
+    for i in trough_idx:
+        if 0 <= i < len(df):
+            r = df.iloc[i]
+            rows.append({
+                "日期": r["日期"],
+                "事件分類": "起漲點",
+                "事件": "起漲點",
+                "說明": f"局部低點形成，低點約 {format_number(r.get('最低價'), 2)}。",
+            })
+
+    for i in peak_idx:
+        if 0 <= i < len(df):
+            r = df.iloc[i]
+            rows.append({
+                "日期": r["日期"],
+                "事件分類": "起跌點",
+                "事件": "起跌點",
+                "說明": f"局部高點形成，高點約 {format_number(r.get('最高價'), 2)}。",
+            })
 
     for i in range(1, len(df)):
         prev = df.iloc[i - 1]
         cur = df.iloc[i]
         d = cur["日期"]
 
-        if all(c in df.columns for c in ["MA5", "MA10"]) and pd.notna(prev["MA5"]) and pd.notna(prev["MA10"]) and pd.notna(cur["MA5"]) and pd.notna(cur["MA10"]):
-            if prev["MA5"] <= prev["MA10"] and cur["MA5"] > cur["MA10"]:
-                rows.append({"日期": d, "事件分類": "MA", "事件": "MA黃金交叉", "說明": "MA5 上穿 MA10。"})
-            elif prev["MA5"] >= prev["MA10"] and cur["MA5"] < cur["MA10"]:
-                rows.append({"日期": d, "事件分類": "MA", "事件": "MA死亡交叉", "說明": "MA5 下破 MA10。"})
+        if all(c in df.columns for c in ["MA5", "MA10"]):
+            if pd.notna(prev["MA5"]) and pd.notna(prev["MA10"]) and pd.notna(cur["MA5"]) and pd.notna(cur["MA10"]):
+                if prev["MA5"] <= prev["MA10"] and cur["MA5"] > cur["MA10"]:
+                    rows.append({"日期": d, "事件分類": "MA", "事件": "MA黃金交叉", "說明": "MA5 上穿 MA10，短線偏強。"})
+                elif prev["MA5"] >= prev["MA10"] and cur["MA5"] < cur["MA10"]:
+                    rows.append({"日期": d, "事件分類": "MA", "事件": "MA死亡交叉", "說明": "MA5 下破 MA10，短線偏弱。"})
 
-        if all(c in df.columns for c in ["K", "D"]) and pd.notna(prev["K"]) and pd.notna(prev["D"]) and pd.notna(cur["K"]) and pd.notna(cur["D"]):
-            if prev["K"] <= prev["D"] and cur["K"] > cur["D"]:
-                rows.append({"日期": d, "事件分類": "KD", "事件": "KD黃金交叉", "說明": "KD 轉強。"})
-            elif prev["K"] >= prev["D"] and cur["K"] < cur["D"]:
-                rows.append({"日期": d, "事件分類": "KD", "事件": "KD死亡交叉", "說明": "KD 轉弱。"})
+        if all(c in df.columns for c in ["K", "D"]):
+            if pd.notna(prev["K"]) and pd.notna(prev["D"]) and pd.notna(cur["K"]) and pd.notna(cur["D"]):
+                if prev["K"] <= prev["D"] and cur["K"] > cur["D"]:
+                    rows.append({"日期": d, "事件分類": "KD", "事件": "KD黃金交叉", "說明": "KD 轉強。"})
+                elif prev["K"] >= prev["D"] and cur["K"] < cur["D"]:
+                    rows.append({"日期": d, "事件分類": "KD", "事件": "KD死亡交叉", "說明": "KD 轉弱。"})
 
-        if all(c in df.columns for c in ["DIF", "DEA"]) and pd.notna(prev["DIF"]) and pd.notna(prev["DEA"]) and pd.notna(cur["DIF"]) and pd.notna(cur["DEA"]):
-            if prev["DIF"] <= prev["DEA"] and cur["DIF"] > cur["DEA"]:
-                rows.append({"日期": d, "事件分類": "MACD", "事件": "MACD黃金交叉", "說明": "DIF 上穿 DEA。"})
-            elif prev["DIF"] >= prev["DEA"] and cur["DIF"] < cur["DEA"]:
-                rows.append({"日期": d, "事件分類": "MACD", "事件": "MACD死亡交叉", "說明": "DIF 下破 DEA。"})
+        if all(c in df.columns for c in ["DIF", "DEA"]):
+            if pd.notna(prev["DIF"]) and pd.notna(prev["DEA"]) and pd.notna(cur["DIF"]) and pd.notna(cur["DEA"]):
+                if prev["DIF"] <= prev["DEA"] and cur["DIF"] > cur["DEA"]:
+                    rows.append({"日期": d, "事件分類": "MACD", "事件": "MACD黃金交叉", "說明": "DIF 上穿 DEA，動能轉強。"})
+                elif prev["DIF"] >= prev["DEA"] and cur["DIF"] < cur["DEA"]:
+                    rows.append({"日期": d, "事件分類": "MACD", "事件": "MACD死亡交叉", "說明": "DIF 下破 DEA，動能轉弱。"})
 
         if i >= 19 and all(c in df.columns for c in ["最高價", "最低價", "收盤價"]):
             recent = df.iloc[max(0, i - 19): i + 1]
@@ -474,14 +577,31 @@ def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["日期", "事件分類", "事件", "說明"])
 
-    event_df = pd.DataFrame(rows).sort_values("日期", ascending=False).reset_index(drop=True)
+    event_df = pd.DataFrame(rows).drop_duplicates(subset=["日期", "事件", "說明"])
+    event_df = event_df.sort_values("日期", ascending=False).reset_index(drop=True)
     return event_df
+
+
+def _build_recent_event_summary(event_df: pd.DataFrame) -> list[tuple[str, str, str]]:
+    if event_df is None or event_df.empty:
+        return [("最近事件", "無明確新事件", "")]
+
+    summary_rows = []
+    for _, row in event_df.head(8).iterrows():
+        event_date = row["日期"]
+        try:
+            event_date = pd.to_datetime(event_date).strftime("%Y-%m-%d")
+        except Exception:
+            event_date = _safe_str(event_date)
+        summary_rows.append((f"{event_date}", _safe_str(row["事件"]), ""))
+
+    return summary_rows
 
 
 # =========================================================
 # 圖表
 # =========================================================
-def _build_candlestick_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
+def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, peak_idx: list[int], trough_idx: list[int]) -> go.Figure:
     fig = go.Figure()
 
     fig.add_trace(
@@ -507,9 +627,33 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
                 )
             )
 
+    if trough_idx:
+        trough_df = df.iloc[trough_idx].copy()
+        fig.add_trace(
+            go.Scatter(
+                x=trough_df["日期"],
+                y=trough_df["最低價"],
+                mode="markers",
+                name="起漲點",
+                marker=dict(size=10, symbol="triangle-up"),
+            )
+        )
+
+    if peak_idx:
+        peak_df = df.iloc[peak_idx].copy()
+        fig.add_trace(
+            go.Scatter(
+                x=peak_df["日期"],
+                y=peak_df["最高價"],
+                mode="markers",
+                name="起跌點",
+                marker=dict(size=10, symbol="triangle-down"),
+            )
+        )
+
     fig.update_layout(
-        title=f"{stock_label}｜歷史K線",
-        height=620,
+        title=f"{stock_label}｜歷史K線分析",
+        height=660,
         margin=dict(l=20, r=20, t=50, b=20),
         xaxis_title="日期",
         yaxis_title="價格",
@@ -522,9 +666,11 @@ def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K"))
     fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D"))
+    fig.add_trace(go.Scatter(x=df["日期"], y=[80] * len(df), mode="lines", name="80", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=df["日期"], y=[20] * len(df), mode="lines", name="20", line=dict(dash="dot")))
     fig.update_layout(
         title=f"{stock_label}｜KD",
-        height=300,
+        height=320,
         margin=dict(l=20, r=20, t=50, b=20),
     )
     return fig
@@ -537,10 +683,94 @@ def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig.add_trace(go.Bar(x=df["日期"], y=df["MACD_HIST"], name="MACD柱"))
     fig.update_layout(
         title=f"{stock_label}｜MACD",
-        height=320,
+        height=340,
         margin=dict(l=20, r=20, t=50, b=20),
     )
     return fig
+
+
+# =========================================================
+# 股神觀點
+# =========================================================
+def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict, event_df: pd.DataFrame) -> list[tuple[str, str, str]]:
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    k_val = _safe_float(last.get("K"))
+    d_val = _safe_float(last.get("D"))
+    dif = _safe_float(last.get("DIF"))
+    dea = _safe_float(last.get("DEA"))
+
+    views = []
+
+    # 趨勢
+    if close_now is not None and ma20 is not None and ma60 is not None:
+        if close_now > ma20 and (ma60 is None or close_now > ma60):
+            trend_text = "股價位於中期均線之上，趨勢結構偏多。"
+        elif close_now < ma20 and (ma60 is None or close_now < ma60):
+            trend_text = "股價位於中期均線之下，趨勢結構偏弱。"
+        else:
+            trend_text = "股價落在中期均線附近，屬整理與等待表態階段。"
+        views.append(("趨勢觀點", trend_text, ""))
+
+    # 動能
+    if k_val is not None and d_val is not None and dif is not None and dea is not None:
+        if k_val > d_val and dif > dea:
+            momentum_text = "KD 與 MACD 同步偏多，短線動能有利多方延續。"
+        elif k_val < d_val and dif < dea:
+            momentum_text = "KD 與 MACD 同步偏弱，短線反彈宜防再轉弱。"
+        else:
+            momentum_text = "擺盪指標與趨勢指標未完全共振，短線容易反覆。"
+        views.append(("動能觀點", momentum_text, ""))
+
+    # 壓力支撐
+    pressure_text = sr_snapshot.get("pressure_signal", ("—", ""))[0]
+    support_text = sr_snapshot.get("support_signal", ("—", ""))[0]
+    break_text = sr_snapshot.get("break_signal", ("—", ""))[0]
+
+    if "突破" in break_text:
+        views.append(("結構觀點", "目前屬突破結構，重點改看突破後是否守得住。", ""))
+    elif "跌破" in break_text:
+        views.append(("結構觀點", "目前屬跌破結構，若無法快速收復，弱勢延續機率較高。", ""))
+    else:
+        if "接近20日壓力" in pressure_text:
+            views.append(("結構觀點", "股價逼近短壓區，續攻需要放量，否則容易震盪拉回。", ""))
+        elif "接近20日支撐" in support_text:
+            views.append(("結構觀點", "股價接近短撐區，觀察防守買盤與止跌K棒是否出現。", ""))
+        else:
+            views.append(("結構觀點", "目前位於區間中段，較適合等待方向明確再加大判斷。", ""))
+
+    # 雷達
+    radar_avg = round(sum([
+        _safe_float(radar.get("trend"), 50),
+        _safe_float(radar.get("momentum"), 50),
+        _safe_float(radar.get("volume"), 50),
+        _safe_float(radar.get("position"), 50),
+        _safe_float(radar.get("structure"), 50),
+    ]) / 5, 1)
+    views.append(("雷達總評", f"五維均分約 {radar_avg}，{radar.get('summary', '—')}", ""))
+
+    # 最近事件
+    if event_df is not None and not event_df.empty:
+        last_event = event_df.iloc[0]
+        views.append(("最近關鍵事件", f"{_safe_str(last_event.get('事件'))}：{_safe_str(last_event.get('說明'))}", ""))
+
+    # 操作角度
+    score = _safe_float(signal_snapshot.get("score"), 0)
+    if score >= 4:
+        action_text = "偏多看待，但不宜在壓力區無量追價，較佳節奏是等拉回不破支撐或突破後續強。"
+    elif score >= 2:
+        action_text = "屬偏多但未到強攻，適合觀察回測支撐是否守穩，再評估續強機率。"
+    elif score <= -4:
+        action_text = "偏空架構明確，先把風險控管放前面，不建議預設快速V轉。"
+    elif score <= -2:
+        action_text = "弱勢整理機率高，除非出現明確止跌與量能轉強，否則先保守。"
+    else:
+        action_text = "多空混合，最好的策略不是猜方向，而是等突破或跌破後再跟。"
+    views.append(("股神操作觀點", action_text, ""))
+
+    return views
 
 
 # =========================================================
@@ -556,7 +786,7 @@ def main():
 
     render_pro_hero(
         title="歷史K線分析｜股神版",
-        subtitle="K線、MA、KD、MACD、雷達評分、支撐壓力、起漲起跌事件、最近事件摘要。",
+        subtitle="完整K線、均線結構、KD、MACD、雷達評分、支撐壓力、起漲起跌點、最近事件、股神觀點摘要。",
     )
 
     render_pro_section("快速搜尋股票")
@@ -664,6 +894,7 @@ def main():
     radar = compute_radar_scores(df)
     badge_text, badge_class = score_to_badge(signal_snapshot.get("score", 0))
     event_df = _build_event_df(df)
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6, atr_ratio=0.8)
 
     last = df.iloc[-1]
     first = df.iloc[0]
@@ -692,100 +923,116 @@ def main():
                 "delta_class": "pro-kpi-delta-flat",
             },
             {
-                "label": "區間",
-                "value": f"{start_date} ~ {end_date}",
-                "delta": stock_label,
+                "label": "起漲 / 起跌",
+                "value": f"{len(trough_idx)} / {len(peak_idx)}",
+                "delta": "局部轉折點",
                 "delta_class": "pro-kpi-delta-flat",
             },
         ]
     )
 
-    render_pro_section("歷史K線")
-    st.plotly_chart(_build_candlestick_chart(df, stock_label), use_container_width=True)
+    tabs = st.tabs(["K線主圖", "KD / MACD", "雷達 / 訊號", "最近事件", "原始資料"])
 
-    g1, g2 = st.columns(2)
-    with g1:
-        st.plotly_chart(_build_kd_chart(df, stock_label), use_container_width=True)
-    with g2:
-        st.plotly_chart(_build_macd_chart(df, stock_label), use_container_width=True)
-
-    render_pro_section("雷達評分 / 訊號 / 支撐壓力")
-
-    left, right = st.columns([1, 1])
-
-    with left:
-        render_pro_info_card(
-            "股神雷達評分",
-            [
-                ("趨勢", radar.get("trend", 50), ""),
-                ("動能", radar.get("momentum", 50), ""),
-                ("量能", radar.get("volume", 50), ""),
-                ("位置", radar.get("position", 50), ""),
-                ("結構", radar.get("structure", 50), ""),
-                ("摘要", radar.get("summary", "—"), ""),
-            ],
-            chips=[badge_text],
+    with tabs[0]:
+        st.plotly_chart(
+            _build_candlestick_chart(df, stock_label, peak_idx, trough_idx),
+            use_container_width=True,
         )
 
+        recent_summary = _build_recent_event_summary(event_df)
         render_pro_info_card(
-            "訊號燈號",
-            [
-                ("均線趨勢", signal_snapshot.get("ma_trend", ("—", ""))[0], signal_snapshot.get("ma_trend", ("", "pro-flat"))[1]),
-                ("KD交叉", signal_snapshot.get("kd_cross", ("—", ""))[0], signal_snapshot.get("kd_cross", ("", "pro-flat"))[1]),
-                ("MACD趨勢", signal_snapshot.get("macd_trend", ("—", ""))[0], signal_snapshot.get("macd_trend", ("", "pro-flat"))[1]),
-                ("價位狀態", signal_snapshot.get("price_vs_ma20", ("—", ""))[0], signal_snapshot.get("price_vs_ma20", ("", "pro-flat"))[1]),
-                ("突破狀態", signal_snapshot.get("breakout_20d", ("—", ""))[0], signal_snapshot.get("breakout_20d", ("", "pro-flat"))[1]),
-                ("量能狀態", signal_snapshot.get("volume_state", ("—", ""))[0], signal_snapshot.get("volume_state", ("", "pro-flat"))[1]),
-            ],
+            "最近事件摘要",
+            recent_summary,
+            chips=[badge_text, market_type],
         )
 
-    with right:
-        render_pro_info_card(
-            "支撐壓力",
-            [
-                ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
-                ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
-                ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
-                ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
-                ("壓力訊號", sr_snapshot.get("pressure_signal", ("—", ""))[0], sr_snapshot.get("pressure_signal", ("", "pro-flat"))[1]),
-                ("支撐訊號", sr_snapshot.get("support_signal", ("—", ""))[0], sr_snapshot.get("support_signal", ("", "pro-flat"))[1]),
-                ("區間判斷", sr_snapshot.get("break_signal", ("—", ""))[0], sr_snapshot.get("break_signal", ("", "pro-flat"))[1]),
-            ],
-        )
+    with tabs[1]:
+        c_kd, c_macd = st.columns(2)
+        with c_kd:
+            st.plotly_chart(_build_kd_chart(df, stock_label), use_container_width=True)
+        with c_macd:
+            st.plotly_chart(_build_macd_chart(df, stock_label), use_container_width=True)
 
-        render_pro_info_card(
-            "策略摘要",
-            [
-                ("多空評語", signal_snapshot.get("comment", "—"), ""),
-                ("趨勢解讀", sr_snapshot.get("comment_trend", "—"), ""),
-                ("風險提醒", sr_snapshot.get("comment_risk", "—"), ""),
-                ("觀察重點", sr_snapshot.get("comment_focus", "—"), ""),
-                ("操作建議", sr_snapshot.get("comment_action", "—"), ""),
-            ],
-            chips=[market_type, badge_text],
-        )
+    with tabs[2]:
+        left, right = st.columns([1, 1])
 
-    render_pro_section("最近事件")
+        with left:
+            render_pro_info_card(
+                "股神雷達評分",
+                [
+                    ("趨勢", radar.get("trend", 50), ""),
+                    ("動能", radar.get("momentum", 50), ""),
+                    ("量能", radar.get("volume", 50), ""),
+                    ("位置", radar.get("position", 50), ""),
+                    ("結構", radar.get("structure", 50), ""),
+                    ("摘要", radar.get("summary", "—"), ""),
+                ],
+                chips=[badge_text],
+            )
 
-    event_options = ["全部", "MA", "KD", "MACD", "突破", "跌破"]
-    cur_filter = _safe_str(st.session_state.get(_k("event_filter"), "全部"))
-    if cur_filter not in event_options:
-        st.session_state[_k("event_filter")] = "全部"
+            render_pro_info_card(
+                "訊號燈號",
+                [
+                    ("均線趨勢", signal_snapshot.get("ma_trend", ("—", ""))[0], signal_snapshot.get("ma_trend", ("", "pro-flat"))[1]),
+                    ("KD交叉", signal_snapshot.get("kd_cross", ("—", ""))[0], signal_snapshot.get("kd_cross", ("", "pro-flat"))[1]),
+                    ("MACD趨勢", signal_snapshot.get("macd_trend", ("—", ""))[0], signal_snapshot.get("macd_trend", ("", "pro-flat"))[1]),
+                    ("價位狀態", signal_snapshot.get("price_vs_ma20", ("—", ""))[0], signal_snapshot.get("price_vs_ma20", ("", "pro-flat"))[1]),
+                    ("突破狀態", signal_snapshot.get("breakout_20d", ("—", ""))[0], signal_snapshot.get("breakout_20d", ("", "pro-flat"))[1]),
+                    ("量能狀態", signal_snapshot.get("volume_state", ("—", ""))[0], signal_snapshot.get("volume_state", ("", "pro-flat"))[1]),
+                ],
+            )
 
-    st.selectbox("事件篩選", options=event_options, key=_k("event_filter"))
+        with right:
+            render_pro_info_card(
+                "支撐壓力",
+                [
+                    ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
+                    ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
+                    ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
+                    ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
+                    ("壓力訊號", sr_snapshot.get("pressure_signal", ("—", ""))[0], sr_snapshot.get("pressure_signal", ("", "pro-flat"))[1]),
+                    ("支撐訊號", sr_snapshot.get("support_signal", ("—", ""))[0], sr_snapshot.get("support_signal", ("", "pro-flat"))[1]),
+                    ("區間判斷", sr_snapshot.get("break_signal", ("—", ""))[0], sr_snapshot.get("break_signal", ("", "pro-flat"))[1]),
+                ],
+            )
 
-    filtered_event_df = event_df.copy()
-    if not filtered_event_df.empty and st.session_state.get(_k("event_filter")) != "全部":
-        filtered_event_df = filtered_event_df[filtered_event_df["事件分類"] == st.session_state.get(_k("event_filter"))].reset_index(drop=True)
+            render_pro_info_card(
+                "股神分析觀點",
+                _build_master_commentary(df, signal_snapshot, sr_snapshot, radar, event_df),
+                chips=[market_type, badge_text],
+            )
 
-    if filtered_event_df.empty:
-        st.info("目前沒有符合條件的事件。")
-    else:
-        st.dataframe(filtered_event_df, use_container_width=True, hide_index=True)
+    with tabs[3]:
+        event_options = ["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"]
+        cur_filter = _safe_str(st.session_state.get(_k("event_filter"), "全部"))
+        if cur_filter not in event_options:
+            st.session_state[_k("event_filter")] = "全部"
+
+        st.selectbox("事件篩選", options=event_options, key=_k("event_filter"))
+
+        filtered_event_df = event_df.copy()
+        if not filtered_event_df.empty and st.session_state.get(_k("event_filter")) != "全部":
+            filtered_event_df = filtered_event_df[
+                filtered_event_df["事件分類"] == st.session_state.get(_k("event_filter"))
+            ].reset_index(drop=True)
+
+        if filtered_event_df.empty:
+            st.info("目前沒有符合條件的事件。")
+        else:
+            st.dataframe(filtered_event_df, use_container_width=True, hide_index=True)
+
+    with tabs[4]:
+        raw_cols = [
+            "日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數",
+            "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
+            "K", "D", "J", "DIF", "DEA", "MACD_HIST", "ATR14"
+        ]
+        raw_cols = [c for c in raw_cols if c in df.columns]
+        st.dataframe(df[raw_cols].sort_values("日期", ascending=False), use_container_width=True, hide_index=True)
 
     with st.expander("效能說明"):
-        st.write("這版已做 cache、群組同步修正、上櫃歷史 fallback。")
-        st.write("如果你還要更快，下一步我建議把排行榜與多股比較也共用這套 smart history。")
+        st.write("這版已做 cache、搜尋同步修正、上櫃 smart history fallback。")
+        st.write("保留專業分析頁需要的完整觀點與事件，不走過度簡化版本。")
 
 
 if __name__ == "__main__":
