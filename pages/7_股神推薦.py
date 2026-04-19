@@ -95,7 +95,7 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
 
 
 # =========================================================
-# 讀取自選股 / 主檔
+# watchlist / 主檔
 # =========================================================
 def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
     raw = st.session_state.get("watchlist_data")
@@ -131,7 +131,6 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                             "label": f"{code} {name}",
                         }
                     )
-
             result[g] = rows
 
     return result
@@ -203,14 +202,14 @@ def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, st
 
     raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
     for raw in raw_lines:
-        text = _safe_str(raw)
-        code = _normalize_code(text)
+        txt = _safe_str(raw)
+        code = _normalize_code(txt)
         name = ""
         market = "上市"
 
         if not code:
             if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-                matched = master_df[master_df["name"].astype(str).str.contains(text, case=False, na=False)]
+                matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
                 if not matched.empty:
                     row = matched.iloc[0]
                     code = _normalize_code(row.get("code"))
@@ -230,15 +229,42 @@ def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, st
                     "label": f"{code} {name or code}",
                 }
             )
+    return rows
 
+
+def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit_count: int) -> list[dict[str, str]]:
+    if master_df is None or master_df.empty:
+        return []
+
+    work = master_df.copy()
+    market_mode = _safe_str(market_mode)
+
+    if market_mode == "上市":
+        work = work[work["market"].astype(str) == "上市"].copy()
+    elif market_mode == "上櫃":
+        work = work[work["market"].astype(str) == "上櫃"].copy()
+
+    work = work.head(limit_count).copy()
+
+    rows = []
+    for _, row in work.iterrows():
+        code = _normalize_code(row.get("code"))
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        if code:
+            rows.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                    "label": f"{code} {name}",
+                }
+            )
     return rows
 
 
 # =========================================================
 # 因子資料
-# 可上傳 CSV，欄位可包含：
-# code,name,eps,pred_revenue_yoy,revenue_yoy,profit_yoy,major_holder_ratio,
-# inst_buy_days,foreign_buy_days,trust_buy_days,dealer_buy_days
 # =========================================================
 def _normalize_factor_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -454,6 +480,12 @@ def _factor_score_from_row(row: pd.Series) -> dict[str, float | str]:
         "major_score": major_score if major_score is not None else 0.0,
         "inst_score": inst_score if inst_score is not None else 0.0,
         "factor_summary": " / ".join(summary_bits) if summary_bits else "未提供基本面因子",
+        "eps": eps,
+        "pred_revenue_yoy": pred_revenue_yoy,
+        "revenue_yoy": revenue_yoy,
+        "profit_yoy": profit_yoy,
+        "major_holder_ratio": major_holder_ratio,
+        "inst_buy_days": inst_buy_days,
     }
 
 
@@ -514,6 +546,11 @@ def _build_recommend_df(
     master_df: pd.DataFrame,
     start_dt: date,
     end_dt: date,
+    min_eps: float,
+    min_pred_rev_yoy: float,
+    min_profit_yoy: float,
+    min_major_holder_ratio: float,
+    min_inst_buy_days: float,
 ) -> pd.DataFrame:
     factor_map = {}
     if isinstance(factor_df, pd.DataFrame) and not factor_df.empty:
@@ -529,6 +566,27 @@ def _build_recommend_df(
             continue
 
         stock_name, market_type = _find_name_market(code, manual_name, manual_market, master_df)
+
+        factor_row = factor_map.get(code)
+        factor_scores = _factor_score_from_row(factor_row) if factor_row is not None else _factor_score_from_row(pd.Series(dtype=object))
+
+        eps_val = factor_scores["eps"]
+        pred_rev_val = factor_scores["pred_revenue_yoy"]
+        profit_val = factor_scores["profit_yoy"]
+        major_val = factor_scores["major_holder_ratio"]
+        inst_val = factor_scores["inst_buy_days"]
+
+        if eps_val is not None and eps_val < min_eps:
+            continue
+        if pred_rev_val is not None and pred_rev_val < min_pred_rev_yoy:
+            continue
+        if profit_val is not None and profit_val < min_profit_yoy:
+            continue
+        if major_val is not None and major_val < min_major_holder_ratio:
+            continue
+        if inst_val is not None and inst_val < min_inst_buy_days:
+            continue
+
         hist_df, used_market = _get_history_smart(
             stock_no=code,
             stock_name=stock_name,
@@ -536,13 +594,13 @@ def _build_recommend_df(
             start_date=start_dt,
             end_date=end_dt,
         )
-
         if hist_df.empty:
             continue
 
         signal_snapshot = compute_signal_snapshot(hist_df)
         sr_snapshot = compute_support_resistance_snapshot(hist_df)
         radar = compute_radar_scores(hist_df)
+
         last = hist_df.iloc[-1]
         first = hist_df.iloc[0]
 
@@ -572,8 +630,6 @@ def _build_recommend_df(
             50.0,
         )
 
-        factor_row = factor_map.get(code)
-        factor_scores = _factor_score_from_row(factor_row) if factor_row is not None else _factor_score_from_row(pd.Series(dtype=object))
         trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
 
         technical_score = _score_clip((_safe_float(signal_snapshot.get("score"), 0) or 0) * 12 + radar_avg * 0.45)
@@ -629,6 +685,11 @@ def _build_recommend_df(
                 "風險報酬_突破": trade_plan["rr2"],
                 "基本面摘要": factor_scores["factor_summary"],
                 "雷達摘要": _safe_str(radar.get("summary")) or "—",
+                "EPS": eps_val,
+                "預估營收YoY": pred_rev_val,
+                "獲利YoY": profit_val,
+                "大戶持股比": major_val,
+                "法人連買天數": inst_val,
             }
         )
 
@@ -638,8 +699,8 @@ def _build_recommend_df(
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
-    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%"]
-    score_cols = ["訊號分數", "雷達均分", "基本面分數", "EPS分數", "營收分數", "獲利分數", "大戶分數", "法人分數", "推薦總分"]
+    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "預估營收YoY", "獲利YoY", "大戶持股比"]
+    score_cols = ["訊號分數", "雷達均分", "基本面分數", "EPS分數", "營收分數", "獲利分數", "大戶分數", "法人分數", "推薦總分", "EPS", "法人連買天數"]
 
     for c in price_cols:
         if c in show.columns:
@@ -665,6 +726,7 @@ def main():
     master_df = _load_master_df()
 
     today = date.today()
+
     if _k("universe_mode") not in st.session_state:
         st.session_state[_k("universe_mode")] = "自選群組"
     if _k("group") not in st.session_state:
@@ -676,9 +738,21 @@ def main():
         st.session_state[_k("top_n")] = 20
     if _k("manual_codes") not in st.session_state:
         st.session_state[_k("manual_codes")] = ""
+    if _k("scan_limit") not in st.session_state:
+        st.session_state[_k("scan_limit")] = 200
+    if _k("min_eps") not in st.session_state:
+        st.session_state[_k("min_eps")] = 0.0
+    if _k("min_pred_rev_yoy") not in st.session_state:
+        st.session_state[_k("min_pred_rev_yoy")] = 0.0
+    if _k("min_profit_yoy") not in st.session_state:
+        st.session_state[_k("min_profit_yoy")] = 0.0
+    if _k("min_major_holder_ratio") not in st.session_state:
+        st.session_state[_k("min_major_holder_ratio")] = 0.0
+    if _k("min_inst_buy_days") not in st.session_state:
+        st.session_state[_k("min_inst_buy_days")] = 0.0
 
     render_pro_hero(
-        title="股神推薦｜精華選股模組",
+        title="股神推薦｜全市場掃描版",
         subtitle="以技術面 + 基本面 + 法人 / 大戶因子做綜合評分，輸出起漲判斷、推薦買點、停損與賣出目標。",
     )
 
@@ -696,7 +770,7 @@ def main():
 
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
     with c1:
-        st.selectbox("掃描範圍", ["自選群組", "手動輸入"], key=_k("universe_mode"))
+        st.selectbox("掃描範圍", ["自選群組", "手動輸入", "全市場", "上市", "上櫃"], key=_k("universe_mode"))
     with c2:
         group_options = list(watchlist_map.keys()) if watchlist_map else [""]
         if st.session_state.get(_k("group"), "") not in group_options:
@@ -707,12 +781,16 @@ def main():
     with c4:
         st.selectbox("輸出 Top N", [10, 20, 30, 50], key=_k("top_n"))
 
-    st.text_area(
-        "手動輸入股票（可代碼 / 名稱，一行一檔）",
-        key=_k("manual_codes"),
-        height=110,
-        placeholder="2330\n2454\n3548\n台積電",
-    )
+    d1, d2 = st.columns([2, 2])
+    with d1:
+        st.selectbox("掃描上限筆數", [100, 200, 300, 500], key=_k("scan_limit"))
+    with d2:
+        st.text_area(
+            "手動輸入股票（可代碼 / 名稱，一行一檔）",
+            key=_k("manual_codes"),
+            height=110,
+            placeholder="2330\n2454\n3548\n台積電",
+        )
 
     render_pro_section("因子資料匯入")
     uploaded = st.file_uploader(
@@ -721,6 +799,19 @@ def main():
         key=_k("factor_upload"),
     )
     factor_df = _get_factor_df(uploaded)
+
+    render_pro_section("推薦條件門檻")
+    f1, f2, f3, f4, f5 = st.columns(5)
+    with f1:
+        st.number_input("EPS 下限", key=_k("min_eps"), step=0.5)
+    with f2:
+        st.number_input("預估營收YoY下限", key=_k("min_pred_rev_yoy"), step=1.0)
+    with f3:
+        st.number_input("獲利YoY下限", key=_k("min_profit_yoy"), step=1.0)
+    with f4:
+        st.number_input("大戶持股比下限", key=_k("min_major_holder_ratio"), step=1.0)
+    with f5:
+        st.number_input("法人連買天數下限", key=_k("min_inst_buy_days"), step=1.0)
 
     render_pro_info_card(
         "建議因子欄位",
@@ -733,13 +824,20 @@ def main():
             ("大戶持股比", "major_holder_ratio", ""),
             ("法人連買天數", "inst_buy_days", ""),
         ],
-        chips=["CSV可選", "未提供則自動降級為技術推薦"],
+        chips=["CSV可選", "未提供則降級為技術推薦"],
     )
 
-    if st.session_state.get(_k("universe_mode")) == "自選群組":
+    universe_mode = _safe_str(st.session_state.get(_k("universe_mode"), ""))
+    if universe_mode == "自選群組":
         universe_items = watchlist_map.get(_safe_str(st.session_state.get(_k("group"), "")), [])
-    else:
+    elif universe_mode == "手動輸入":
         universe_items = _parse_manual_codes(st.session_state.get(_k("manual_codes"), ""), master_df)
+    else:
+        universe_items = _build_universe_from_market(
+            master_df=master_df,
+            market_mode=universe_mode,
+            limit_count=int(st.session_state.get(_k("scan_limit"), 200)),
+        )
 
     if not universe_items:
         st.warning("目前掃描池沒有股票。")
@@ -755,10 +853,15 @@ def main():
             master_df=master_df,
             start_dt=start_dt,
             end_dt=end_dt,
+            min_eps=float(st.session_state.get(_k("min_eps"), 0.0)),
+            min_pred_rev_yoy=float(st.session_state.get(_k("min_pred_rev_yoy"), 0.0)),
+            min_profit_yoy=float(st.session_state.get(_k("min_profit_yoy"), 0.0)),
+            min_major_holder_ratio=float(st.session_state.get(_k("min_major_holder_ratio"), 0.0)),
+            min_inst_buy_days=float(st.session_state.get(_k("min_inst_buy_days"), 0.0)),
         )
 
     if rec_df.empty:
-        st.error("掃描完成，但沒有可用資料。")
+        st.error("掃描完成，但沒有符合條件的股票。")
         st.stop()
 
     rec_df = rec_df.sort_values(["推薦總分", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False]).reset_index(drop=True)
@@ -773,7 +876,7 @@ def main():
 
     render_pro_kpi_row(
         [
-            {"label": "掃描股票數", "value": len(rec_df), "delta": _safe_str(st.session_state.get(_k("universe_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
+            {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
             {"label": "優先觀察", "value": good_count, "delta": "次高等級", "delta_class": "pro-kpi-delta-flat"},
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": f"含因子 {with_factor_count} 檔", "delta_class": "pro-kpi-delta-flat"},
@@ -862,6 +965,9 @@ def main():
                         "EPS分數",
                         "營收分數",
                         "獲利分數",
+                        "EPS",
+                        "預估營收YoY",
+                        "獲利YoY",
                         "基本面摘要",
                     ]
                 ].head(top_n)
@@ -880,6 +986,8 @@ def main():
                         "股票名稱",
                         "大戶分數",
                         "法人分數",
+                        "大戶持股比",
+                        "法人連買天數",
                         "推薦總分",
                         "推薦等級",
                         "基本面摘要",
@@ -898,9 +1006,10 @@ def main():
                 ("起漲判斷", "依訊號分數、雷達均分、支撐壓力位置與結構狀態綜合判定。", ""),
                 ("推薦買點", "同時提供拉回買點與突破買點，不強迫單一劇本。", ""),
                 ("停損 / 賣點", "用 20 日支撐、20 / 60 日壓力與 ATR 推估。", ""),
-                ("速度考量", "全市場全掃會很重，這版先鎖自選群組 / 手動池，穩定優先。", ""),
+                ("全市場模式", "為了速度，先用主檔前 N 檔掃描，再做技術與因子評分。", ""),
+                ("門檻條件", "若你有上傳因子資料，會先套門檻再排序，結果更精準。", ""),
             ],
-            chips=["股神版", "推薦模組", "穩定優先"],
+            chips=["股神版", "全市場掃描", "穩定優先"],
         )
 
 
