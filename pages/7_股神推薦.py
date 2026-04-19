@@ -67,20 +67,11 @@ def _normalize_code(v: Any) -> str:
     return text
 
 
-def _to_date(v: Any, fallback: date) -> date:
-    if v is None:
-        return fallback
-    if isinstance(v, date) and not isinstance(v, datetime):
-        return v
-    if isinstance(v, datetime):
-        return v.date()
-    try:
-        x = pd.to_datetime(v, errors="coerce")
-        if pd.notna(x):
-            return x.date()
-    except Exception:
-        pass
-    return fallback
+def _normalize_category(v: Any) -> str:
+    text = _safe_str(v)
+    if not text:
+        return ""
+    return text.replace("　", " ").strip()
 
 
 def _score_clip(v: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -92,13 +83,6 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
     if not clean:
         return default
     return sum(clean) / len(clean)
-
-
-def _normalize_category(v: Any) -> str:
-    text = _safe_str(v)
-    if not text:
-        return ""
-    return text.replace("　", " ").strip()
 
 
 # =========================================================
@@ -313,116 +297,11 @@ def _build_universe_from_market(
     return rows
 
 
-# =========================================================
-# 因子資料
-# =========================================================
-def _normalize_factor_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    temp = df.copy()
-    temp.columns = [str(c).strip().lower() for c in temp.columns]
-
-    rename_map = {
-        "stock_no": "code",
-        "stock_code": "code",
-        "證券代號": "code",
-        "股票代號": "code",
-        "symbol": "code",
-        "ticker": "code",
-        "證券名稱": "name",
-        "股票名稱": "name",
-        "stock_name": "name",
-        "eps(元)": "eps",
-        "eps_ttm": "eps",
-        "預估營收yoy": "pred_revenue_yoy",
-        "forecast_revenue_yoy": "pred_revenue_yoy",
-        "預測營收yoy": "pred_revenue_yoy",
-        "營收yoy": "revenue_yoy",
-        "revenue_growth": "revenue_yoy",
-        "獲利yoy": "profit_yoy",
-        "profit_growth": "profit_yoy",
-        "大戶持股比": "major_holder_ratio",
-        "major_holder": "major_holder_ratio",
-        "大戶鎖碼": "major_holder_ratio",
-        "法人連買天數": "inst_buy_days",
-        "inst_buy_days": "inst_buy_days",
-        "外資連買天數": "foreign_buy_days",
-        "foreign_buy_days": "foreign_buy_days",
-        "投信連買天數": "trust_buy_days",
-        "trust_buy_days": "trust_buy_days",
-        "自營商連買天數": "dealer_buy_days",
-        "dealer_buy_days": "dealer_buy_days",
-        "industry": "category",
-        "sector": "category",
-        "theme": "category",
-        "類別": "category",
-        "產業別": "category",
-        "產業": "category",
-        "主題": "category",
-    }
-
-    real_map = {}
-    for c in temp.columns:
-        real_map[c] = rename_map.get(c, c)
-    temp = temp.rename(columns=real_map)
-
-    if "code" not in temp.columns:
-        return pd.DataFrame()
-
-    temp["code"] = temp["code"].map(_normalize_code)
-    if "name" not in temp.columns:
-        temp["name"] = ""
-    if "category" not in temp.columns:
-        temp["category"] = ""
-
-    numeric_cols = [
-        "eps",
-        "pred_revenue_yoy",
-        "revenue_yoy",
-        "profit_yoy",
-        "major_holder_ratio",
-        "inst_buy_days",
-        "foreign_buy_days",
-        "trust_buy_days",
-        "dealer_buy_days",
-    ]
-    for col in numeric_cols:
-        if col not in temp.columns:
-            temp[col] = None
-        temp[col] = pd.to_numeric(temp[col], errors="coerce")
-
-    temp["name"] = temp["name"].map(_safe_str)
-    temp["category"] = temp["category"].map(_normalize_category)
-    temp = temp[temp["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return temp
-
-
-def _get_factor_df(uploaded_file) -> pd.DataFrame:
-    if uploaded_file is None:
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(uploaded_file)
-        return _normalize_factor_df(df)
-    except Exception:
-        try:
-            df = pd.read_excel(uploaded_file)
-            return _normalize_factor_df(df)
-        except Exception:
-            return pd.DataFrame()
-
-
-def _collect_all_categories(master_df: pd.DataFrame, factor_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
+def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
     cats = set()
 
     if isinstance(master_df, pd.DataFrame) and not master_df.empty and "category" in master_df.columns:
         for v in master_df["category"].dropna().tolist():
-            text = _normalize_category(v)
-            if text:
-                cats.add(text)
-
-    if isinstance(factor_df, pd.DataFrame) and not factor_df.empty and "category" in factor_df.columns:
-        for v in factor_df["category"].dropna().tolist():
             text = _normalize_category(v)
             if text:
                 cats.add(text)
@@ -480,6 +359,13 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     temp["VOL5"] = vol.rolling(5).mean()
     temp["VOL20"] = vol.rolling(20).mean()
 
+    temp["RET5"] = close.pct_change(5) * 100
+    temp["RET20"] = close.pct_change(20) * 100
+    temp["RET60"] = close.pct_change(60) * 100
+
+    temp["UP_DAY"] = (close > close.shift(1)).astype(float)
+    temp["DOWN_DAY"] = (close < close.shift(1)).astype(float)
+
     return temp
 
 
@@ -522,55 +408,132 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# 推薦邏輯
+# 自動因子：不需手輸
 # =========================================================
-def _factor_score_from_row(row: pd.Series) -> dict[str, float | str]:
-    eps = _safe_float(row.get("eps"))
-    pred_revenue_yoy = _safe_float(row.get("pred_revenue_yoy"))
-    revenue_yoy = _safe_float(row.get("revenue_yoy"))
-    profit_yoy = _safe_float(row.get("profit_yoy"))
-    major_holder_ratio = _safe_float(row.get("major_holder_ratio"))
-    inst_buy_days = _safe_float(row.get("inst_buy_days"))
-    foreign_buy_days = _safe_float(row.get("foreign_buy_days"))
-    trust_buy_days = _safe_float(row.get("trust_buy_days"))
-    dealer_buy_days = _safe_float(row.get("dealer_buy_days"))
+def _build_auto_factor_scores(
+    df: pd.DataFrame,
+    signal_snapshot: dict,
+    sr_snapshot: dict,
+    radar: dict,
+) -> dict[str, Any]:
+    last = df.iloc[-1]
 
-    eps_score = None if eps is None else _score_clip(eps * 8)
-    rev_score = None if pred_revenue_yoy is None and revenue_yoy is None else _score_clip(_avg_safe([pred_revenue_yoy, revenue_yoy], 0) * 2)
-    profit_score = None if profit_yoy is None else _score_clip(profit_yoy * 2)
-    major_score = None if major_holder_ratio is None else _score_clip((major_holder_ratio - 40) * 2.2)
-    inst_score = _score_clip(_avg_safe([inst_buy_days, foreign_buy_days, trust_buy_days, dealer_buy_days], 0) * 8)
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    ma120 = _safe_float(last.get("MA120"))
+    atr14 = _safe_float(last.get("ATR14"))
+    vol5 = _safe_float(last.get("VOL5"))
+    vol20 = _safe_float(last.get("VOL20"))
+    ret20 = _safe_float(last.get("RET20"))
+    ret60 = _safe_float(last.get("RET60"))
 
-    total = _avg_safe([eps_score, rev_score, profit_score, major_score, inst_score], 0)
+    signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
+    radar_trend = _safe_float(radar.get("trend"), 50) or 50
+    radar_momentum = _safe_float(radar.get("momentum"), 50) or 50
+    radar_volume = _safe_float(radar.get("volume"), 50) or 50
+    radar_structure = _safe_float(radar.get("structure"), 50) or 50
 
-    summary_bits = []
-    if eps is not None:
-        summary_bits.append(f"EPS {format_number(eps, 2)}")
-    if pred_revenue_yoy is not None:
-        summary_bits.append(f"預估營收YoY {format_number(pred_revenue_yoy, 1)}%")
-    elif revenue_yoy is not None:
-        summary_bits.append(f"營收YoY {format_number(revenue_yoy, 1)}%")
-    if profit_yoy is not None:
-        summary_bits.append(f"獲利YoY {format_number(profit_yoy, 1)}%")
-    if major_holder_ratio is not None:
-        summary_bits.append(f"大戶持股 {format_number(major_holder_ratio, 1)}%")
-    if inst_buy_days is not None:
-        summary_bits.append(f"法人連買 {format_number(inst_buy_days, 0)}天")
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+
+    # EPS代理：長期趨勢穩定 + 結構強 + 波動可控
+    eps_proxy = 50.0
+    if close_now not in [None, 0]:
+        trend_bonus = 0.0
+        if ma120 is not None and close_now > ma120:
+            trend_bonus += 18
+        if ma60 is not None and close_now > ma60:
+            trend_bonus += 12
+        if ma20 is not None and close_now > ma20:
+            trend_bonus += 8
+
+        vol_penalty = 0.0
+        if atr14 is not None:
+            atr_pct = atr14 / close_now * 100
+            if atr_pct <= 2.5:
+                vol_penalty = 0
+            elif atr_pct <= 5:
+                vol_penalty = 6
+            else:
+                vol_penalty = 12
+
+        eps_proxy = _score_clip(30 + trend_bonus + radar_structure * 0.25 + radar_trend * 0.20 - vol_penalty)
+
+    # 營收動能代理：中短期報酬 + 量能加溫 + 動能
+    revenue_proxy = _score_clip(
+        25
+        + (_safe_float(ret20, 0) or 0) * 0.9
+        + (_safe_float(ret60, 0) or 0) * 0.35
+        + radar_momentum * 0.30
+        + radar_volume * 0.20
+    )
+
+    # 獲利代理：趨勢/結構/報酬綜合
+    profit_proxy = _score_clip(
+        30
+        + signal_score * 6
+        + radar_trend * 0.28
+        + radar_structure * 0.22
+        + (_safe_float(ret60, 0) or 0) * 0.35
+    )
+
+    # 大戶鎖碼代理：量縮守價、波動收斂、貼近均線上方不破
+    lock_proxy = 45.0
+    if close_now not in [None, 0]:
+        vol_ratio = None
+        if vol5 not in [None, 0] and vol20 not in [None, 0]:
+            vol_ratio = vol5 / vol20
+
+        atr_pct = None
+        if atr14 is not None:
+            atr_pct = atr14 / close_now * 100
+
+        lock_bonus = 0.0
+        if ma20 is not None and close_now >= ma20:
+            lock_bonus += 12
+        if sup20 is not None and close_now >= sup20:
+            lock_bonus += 10
+        if vol_ratio is not None:
+            if 0.7 <= vol_ratio <= 1.15:
+                lock_bonus += 12
+            elif vol_ratio < 0.7:
+                lock_bonus += 8
+        if atr_pct is not None:
+            if atr_pct <= 2.5:
+                lock_bonus += 14
+            elif atr_pct <= 4:
+                lock_bonus += 8
+
+        lock_proxy = _score_clip(20 + lock_bonus + radar_structure * 0.24)
+
+    # 法人連買代理：連續上漲日、帶量、動能
+    recent = df.tail(5).copy()
+    up_days_5 = int(recent["UP_DAY"].sum()) if "UP_DAY" in recent.columns else 0
+    inst_proxy = _score_clip(
+        20
+        + up_days_5 * 10
+        + signal_score * 5
+        + radar_momentum * 0.25
+        + radar_volume * 0.20
+    )
+
+    factor_summary = (
+        f"EPS代理 {format_number(eps_proxy,1)} / "
+        f"營收動能代理 {format_number(revenue_proxy,1)} / "
+        f"獲利代理 {format_number(profit_proxy,1)} / "
+        f"大戶鎖碼代理 {format_number(lock_proxy,1)} / "
+        f"法人連買代理 {format_number(inst_proxy,1)}"
+    )
 
     return {
-        "fundamental_score": total,
-        "eps_score": eps_score if eps_score is not None else 0.0,
-        "rev_score": rev_score if rev_score is not None else 0.0,
-        "profit_score": profit_score if profit_score is not None else 0.0,
-        "major_score": major_score if major_score is not None else 0.0,
-        "inst_score": inst_score if inst_score is not None else 0.0,
-        "factor_summary": " / ".join(summary_bits) if summary_bits else "未提供基本面因子",
-        "eps": eps,
-        "pred_revenue_yoy": pred_revenue_yoy,
-        "revenue_yoy": revenue_yoy,
-        "profit_yoy": profit_yoy,
-        "major_holder_ratio": major_holder_ratio,
-        "inst_buy_days": inst_buy_days,
+        "eps_proxy": eps_proxy,
+        "revenue_proxy": revenue_proxy,
+        "profit_proxy": profit_proxy,
+        "lock_proxy": lock_proxy,
+        "inst_proxy": inst_proxy,
+        "fundamental_score": _avg_safe([eps_proxy, revenue_proxy, profit_proxy, lock_proxy, inst_proxy], 0),
+        "factor_summary": factor_summary,
     }
 
 
@@ -624,23 +587,14 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
 @st.cache_data(ttl=300, show_spinner=False)
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
-    factor_df: pd.DataFrame,
     master_df: pd.DataFrame,
     start_dt: date,
     end_dt: date,
-    min_eps: float,
-    min_pred_rev_yoy: float,
-    min_profit_yoy: float,
-    min_major_holder_ratio: float,
-    min_inst_buy_days: float,
+    min_total_score: float,
+    min_signal_score: float,
     selected_categories: list[str],
 ) -> pd.DataFrame:
-    factor_map = {}
-    if isinstance(factor_df, pd.DataFrame) and not factor_df.empty:
-        factor_map = {str(row["code"]): row for _, row in factor_df.iterrows()}
-
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-
     rows = []
 
     for item in universe_items:
@@ -655,32 +609,7 @@ def _build_recommend_df(
             code, manual_name, manual_market, manual_category, master_df
         )
 
-        factor_row = factor_map.get(code)
-        if factor_row is not None:
-            factor_category = _normalize_category(factor_row.get("category"))
-            if factor_category:
-                category = factor_category
-
         if clean_categories and category not in clean_categories:
-            continue
-
-        factor_scores = _factor_score_from_row(factor_row) if factor_row is not None else _factor_score_from_row(pd.Series(dtype=object))
-
-        eps_val = factor_scores["eps"]
-        pred_rev_val = factor_scores["pred_revenue_yoy"]
-        profit_val = factor_scores["profit_yoy"]
-        major_val = factor_scores["major_holder_ratio"]
-        inst_val = factor_scores["inst_buy_days"]
-
-        if eps_val is not None and eps_val < min_eps:
-            continue
-        if pred_rev_val is not None and pred_rev_val < min_pred_rev_yoy:
-            continue
-        if profit_val is not None and profit_val < min_profit_yoy:
-            continue
-        if major_val is not None and major_val < min_major_holder_ratio:
-            continue
-        if inst_val is not None and inst_val < min_inst_buy_days:
             continue
 
         hist_df, used_market = _get_history_smart(
@@ -696,6 +625,10 @@ def _build_recommend_df(
         signal_snapshot = compute_signal_snapshot(hist_df)
         sr_snapshot = compute_support_resistance_snapshot(hist_df)
         radar = compute_radar_scores(hist_df)
+
+        signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
+        if signal_score < min_signal_score:
+            continue
 
         last = hist_df.iloc[-1]
         first = hist_df.iloc[0]
@@ -726,9 +659,11 @@ def _build_recommend_df(
             50.0,
         )
 
+        auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
         trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
 
-        technical_score = _score_clip((_safe_float(signal_snapshot.get("score"), 0) or 0) * 12 + radar_avg * 0.45)
+        technical_score = _score_clip(signal_score * 12 + radar_avg * 0.45)
+
         position_bonus = 0.0
         if pressure_dist is not None and 0 <= pressure_dist <= 8:
             position_bonus += 8.0
@@ -736,20 +671,22 @@ def _build_recommend_df(
             position_bonus += 6.0
 
         composite = (
-            technical_score * 0.42
-            + factor_scores["fundamental_score"] * 0.38
+            technical_score * 0.44
+            + auto_factor["fundamental_score"] * 0.40
             + position_bonus
-            + (_safe_float(factor_scores["inst_score"], 0) * 0.10)
-            + (_safe_float(period_pct, 0) * 0.08 if period_pct is not None else 0)
+            + (_safe_float(period_pct, 0) * 0.10 if period_pct is not None else 0)
         )
         composite = _score_clip(composite)
 
+        if composite < min_total_score:
+            continue
+
         recommendation = "觀察"
-        if composite >= 80:
+        if composite >= 82:
             recommendation = "強烈關注"
-        elif composite >= 68:
+        elif composite >= 70:
             recommendation = "優先觀察"
-        elif composite >= 55:
+        elif composite >= 58:
             recommendation = "可列追蹤"
 
         rows.append(
@@ -760,14 +697,14 @@ def _build_recommend_df(
                 "類別": category or "未分類",
                 "最新價": close_now,
                 "區間漲跌幅%": period_pct,
-                "訊號分數": _safe_float(signal_snapshot.get("score"), 0),
+                "訊號分數": signal_score,
                 "雷達均分": radar_avg,
-                "基本面分數": factor_scores["fundamental_score"],
-                "EPS分數": factor_scores["eps_score"],
-                "營收分數": factor_scores["rev_score"],
-                "獲利分數": factor_scores["profit_score"],
-                "大戶分數": factor_scores["major_score"],
-                "法人分數": factor_scores["inst_score"],
+                "自動因子總分": auto_factor["fundamental_score"],
+                "EPS代理分數": auto_factor["eps_proxy"],
+                "營收動能代理分數": auto_factor["revenue_proxy"],
+                "獲利代理分數": auto_factor["profit_proxy"],
+                "大戶鎖碼代理分數": auto_factor["lock_proxy"],
+                "法人連買代理分數": auto_factor["inst_proxy"],
                 "20日壓力距離%": pressure_dist,
                 "20日支撐距離%": support_dist,
                 "推薦總分": composite,
@@ -780,13 +717,8 @@ def _build_recommend_df(
                 "賣出目標2": trade_plan["sell_target_2"],
                 "風險報酬_拉回": trade_plan["rr1"],
                 "風險報酬_突破": trade_plan["rr2"],
-                "基本面摘要": factor_scores["factor_summary"],
+                "自動因子摘要": auto_factor["factor_summary"],
                 "雷達摘要": _safe_str(radar.get("summary")) or "—",
-                "EPS": eps_val,
-                "預估營收YoY": pred_rev_val,
-                "獲利YoY": profit_val,
-                "大戶持股比": major_val,
-                "法人連買天數": inst_val,
             }
         )
 
@@ -796,8 +728,12 @@ def _build_recommend_df(
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
-    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "預估營收YoY", "獲利YoY", "大戶持股比"]
-    score_cols = ["訊號分數", "雷達均分", "基本面分數", "EPS分數", "營收分數", "獲利分數", "大戶分數", "法人分數", "推薦總分", "EPS", "法人連買天數"]
+    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%"]
+    score_cols = [
+        "訊號分數", "雷達均分", "自動因子總分",
+        "EPS代理分數", "營收動能代理分數", "獲利代理分數",
+        "大戶鎖碼代理分數", "法人連買代理分數", "推薦總分"
+    ]
 
     for c in price_cols:
         if c in show.columns:
@@ -821,7 +757,6 @@ def main():
 
     watchlist_map = _load_watchlist_map()
     master_df = _load_master_df()
-
     today = date.today()
 
     if _k("universe_mode") not in st.session_state:
@@ -837,22 +772,16 @@ def main():
         st.session_state[_k("manual_codes")] = ""
     if _k("scan_limit") not in st.session_state:
         st.session_state[_k("scan_limit")] = 200
-    if _k("min_eps") not in st.session_state:
-        st.session_state[_k("min_eps")] = 0.0
-    if _k("min_pred_rev_yoy") not in st.session_state:
-        st.session_state[_k("min_pred_rev_yoy")] = 0.0
-    if _k("min_profit_yoy") not in st.session_state:
-        st.session_state[_k("min_profit_yoy")] = 0.0
-    if _k("min_major_holder_ratio") not in st.session_state:
-        st.session_state[_k("min_major_holder_ratio")] = 0.0
-    if _k("min_inst_buy_days") not in st.session_state:
-        st.session_state[_k("min_inst_buy_days")] = 0.0
     if _k("selected_categories") not in st.session_state:
         st.session_state[_k("selected_categories")] = ["全部"]
+    if _k("min_total_score") not in st.session_state:
+        st.session_state[_k("min_total_score")] = 55.0
+    if _k("min_signal_score") not in st.session_state:
+        st.session_state[_k("min_signal_score")] = -2.0
 
     render_pro_hero(
-        title="股神推薦｜全市場掃描版",
-        subtitle="以技術面 + 基本面 + 法人 / 大戶因子做綜合評分，現在支援所有可辨識類別自由選擇。",
+        title="股神推薦｜全自動因子版",
+        subtitle="不用你手輸因子，系統自動從價量、結構、趨勢、支撐壓力推估 EPS / 營收 / 獲利 / 鎖碼 / 法人代理因子。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -891,15 +820,7 @@ def main():
             placeholder="2330\n2454\n3548\n台積電",
         )
 
-    render_pro_section("因子資料匯入")
-    uploaded = st.file_uploader(
-        "上傳基本面 / 法人 / 大戶因子 CSV 或 Excel（可選）",
-        type=["csv", "xlsx", "xls"],
-        key=_k("factor_upload"),
-    )
-    factor_df = _get_factor_df(uploaded)
-
-    all_categories = _collect_all_categories(master_df, factor_df, watchlist_map)
+    all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
     if any(x not in category_options for x in st.session_state.get(_k("selected_categories"), [])):
@@ -910,39 +831,31 @@ def main():
         "選擇類別（可多選）",
         options=category_options,
         key=_k("selected_categories"),
-        help="若選擇『全部』或未選，則不限制類別；若有主檔或因子檔提供類別，這裡會自動展開所有類別。",
+        help="若選擇『全部』或未選，則不限制類別。",
     )
 
-    render_pro_section("推薦條件門檻")
-    f1, f2, f3, f4, f5 = st.columns(5)
+    render_pro_section("推薦門檻")
+    f1, f2 = st.columns(2)
     with f1:
-        st.number_input("EPS 下限", key=_k("min_eps"), step=0.5)
+        st.number_input("推薦總分下限", key=_k("min_total_score"), step=1.0)
     with f2:
-        st.number_input("預估營收YoY下限", key=_k("min_pred_rev_yoy"), step=1.0)
-    with f3:
-        st.number_input("獲利YoY下限", key=_k("min_profit_yoy"), step=1.0)
-    with f4:
-        st.number_input("大戶持股比下限", key=_k("min_major_holder_ratio"), step=1.0)
-    with f5:
-        st.number_input("法人連買天數下限", key=_k("min_inst_buy_days"), step=1.0)
+        st.number_input("訊號分數下限", key=_k("min_signal_score"), step=1.0)
 
     render_pro_info_card(
-        "建議因子欄位",
+        "自動因子說明",
         [
-            ("股票代號", "code", ""),
-            ("EPS", "eps", ""),
-            ("預測營收YoY", "pred_revenue_yoy", ""),
-            ("獲利YoY", "profit_yoy", ""),
-            ("大戶持股比", "major_holder_ratio", ""),
-            ("法人連買天數", "inst_buy_days", ""),
-            ("類別", "category / industry / sector / 類別 / 產業別", ""),
+            ("EPS代理分數", "以長期均線結構、波動穩定度、趨勢延續性推估。", ""),
+            ("營收動能代理分數", "以 20/60 日漲幅、量能、動能強弱推估。", ""),
+            ("獲利代理分數", "以波段報酬、趨勢、結構強度綜合推估。", ""),
+            ("大戶鎖碼代理分數", "以量縮守價、波動收斂、支撐不破推估。", ""),
+            ("法人連買代理分數", "以連續上漲日、動能、量價共振推估。", ""),
         ],
-        chips=["CSV可選", "所有類別可選"],
+        chips=["全自動", "不用手輸", "代理因子"],
     )
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
-
     universe_mode = _safe_str(st.session_state.get(_k("universe_mode"), ""))
+
     if universe_mode == "自選群組":
         universe_items = watchlist_map.get(_safe_str(st.session_state.get(_k("group"), "")), [])
     elif universe_mode == "手動輸入":
@@ -965,15 +878,11 @@ def main():
     with st.spinner("股神推薦計算中..."):
         rec_df = _build_recommend_df(
             universe_items=universe_items,
-            factor_df=factor_df,
             master_df=master_df,
             start_dt=start_dt,
             end_dt=end_dt,
-            min_eps=float(st.session_state.get(_k("min_eps"), 0.0)),
-            min_pred_rev_yoy=float(st.session_state.get(_k("min_pred_rev_yoy"), 0.0)),
-            min_profit_yoy=float(st.session_state.get(_k("min_profit_yoy"), 0.0)),
-            min_major_holder_ratio=float(st.session_state.get(_k("min_major_holder_ratio"), 0.0)),
-            min_inst_buy_days=float(st.session_state.get(_k("min_inst_buy_days"), 0.0)),
+            min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+            min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
             selected_categories=selected_categories,
         )
 
@@ -982,13 +891,11 @@ def main():
         st.stop()
 
     rec_df = rec_df.sort_values(["推薦總分", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False]).reset_index(drop=True)
-
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.head(top_n).copy()
 
     strong_count = int((rec_df["推薦等級"] == "強烈關注").sum())
     good_count = int((rec_df["推薦等級"] == "優先觀察").sum())
-    with_factor_count = int((rec_df["基本面摘要"] != "未提供基本面因子").sum())
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
 
     render_pro_kpi_row(
@@ -996,7 +903,7 @@ def main():
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
             {"label": "優先觀察", "value": good_count, "delta": "次高等級", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": f"含因子 {with_factor_count} 檔", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "全自動因子", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -1020,7 +927,7 @@ def main():
                     "賣出目標2",
                     "風險報酬_拉回",
                     "風險報酬_突破",
-                    "基本面摘要",
+                    "自動因子摘要",
                     "雷達摘要",
                 ]
             ]
@@ -1057,7 +964,7 @@ def main():
                 ("賣出目標2", format_number(focus_row.get("賣出目標2"), 2), ""),
                 ("風險報酬（拉回）", _safe_str(focus_row.get("風險報酬_拉回")), ""),
                 ("風險報酬（突破）", _safe_str(focus_row.get("風險報酬_突破")), ""),
-                ("基本面摘要", _safe_str(focus_row.get("基本面摘要")), ""),
+                ("自動因子摘要", _safe_str(focus_row.get("自動因子摘要")), ""),
                 ("雷達摘要", _safe_str(focus_row.get("雷達摘要")), ""),
             ],
             chips=[
@@ -1068,28 +975,28 @@ def main():
             ],
         )
 
-    tabs = st.tabs(["完整推薦表", "基本面分數榜", "法人 / 大戶榜", "類別分布", "操作說明"])
+    tabs = st.tabs(["完整推薦表", "自動因子榜", "鎖碼 / 法人代理榜", "類別分布", "操作說明"])
 
     with tabs[0]:
         st.dataframe(_format_df(rec_df), use_container_width=True, hide_index=True)
 
     with tabs[1]:
-        fundamental_rank = rec_df.sort_values(["基本面分數", "EPS分數", "營收分數", "獲利分數"], ascending=[False, False, False, False]).reset_index(drop=True)
+        factor_rank = rec_df.sort_values(
+            ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
+            ascending=[False, False, False, False]
+        ).reset_index(drop=True)
         st.dataframe(
             _format_df(
-                fundamental_rank[
+                factor_rank[
                     [
                         "股票代號",
                         "股票名稱",
                         "類別",
-                        "基本面分數",
-                        "EPS分數",
-                        "營收分數",
-                        "獲利分數",
-                        "EPS",
-                        "預估營收YoY",
-                        "獲利YoY",
-                        "基本面摘要",
+                        "自動因子總分",
+                        "EPS代理分數",
+                        "營收動能代理分數",
+                        "獲利代理分數",
+                        "自動因子摘要",
                     ]
                 ].head(top_n)
             ),
@@ -1098,7 +1005,10 @@ def main():
         )
 
     with tabs[2]:
-        money_rank = rec_df.sort_values(["大戶分數", "法人分數", "推薦總分"], ascending=[False, False, False]).reset_index(drop=True)
+        money_rank = rec_df.sort_values(
+            ["大戶鎖碼代理分數", "法人連買代理分數", "推薦總分"],
+            ascending=[False, False, False]
+        ).reset_index(drop=True)
         st.dataframe(
             _format_df(
                 money_rank[
@@ -1106,13 +1016,11 @@ def main():
                         "股票代號",
                         "股票名稱",
                         "類別",
-                        "大戶分數",
-                        "法人分數",
-                        "大戶持股比",
-                        "法人連買天數",
+                        "大戶鎖碼代理分數",
+                        "法人連買代理分數",
                         "推薦總分",
                         "推薦等級",
-                        "基本面摘要",
+                        "自動因子摘要",
                     ]
                 ].head(top_n)
             ),
@@ -1134,14 +1042,14 @@ def main():
         render_pro_info_card(
             "模組邏輯",
             [
-                ("核心精神", "技術面先選強，再用 EPS / 營收 / 獲利 / 大戶 / 法人因子強化排序。", ""),
-                ("類別模式", "不再固定半導體 / AI / 電子 / 金融，改為所有可辨識類別都可自由選。", ""),
-                ("類別來源", "優先讀 factor 檔的 category / industry / sector / 類別 / 產業別，其次讀主檔 category。", ""),
-                ("推薦買點", "同時提供拉回買點與突破買點，不強迫單一劇本。", ""),
-                ("停損 / 賣點", "用 20 日支撐、20 / 60 日壓力與 ATR 推估。", ""),
-                ("全市場模式", "為了速度，仍以掃描上限筆數控制全市場運算量。", ""),
+                ("自動化方向", "不再依賴你手動輸入 EPS、營收、獲利、籌碼資料。", ""),
+                ("核心方法", "直接用價量、均線、ATR、結構、支撐壓力，推估五大代理因子。", ""),
+                ("起漲判斷", "由訊號分數、雷達均分、位置與結構綜合決定。", ""),
+                ("推薦買點", "同時提供拉回買點與突破買點。", ""),
+                ("停損 / 賣點", "依 20 日支撐、20 / 60 日壓力與 ATR 推估。", ""),
+                ("後續升級", "未來可再把真實財報與法人資料接進來，取代代理因子。", ""),
             ],
-            chips=["股神版", "全類別可選", "穩定優先"],
+            chips=["全自動因子", "不用手輸", "股神版"],
         )
 
 
