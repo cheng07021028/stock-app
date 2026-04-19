@@ -85,6 +85,39 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
     return sum(clean) / len(clean)
 
 
+def _infer_category_from_name(name: str) -> str:
+    n = _safe_str(name)
+    if not n:
+        return "其他"
+
+    rules = [
+        ("半導體", ["台積", "聯電", "世界", "創意", "世芯", "力旺", "晶心科", "智原", "矽力", "日月光", "采鈺", "京元電", "頎邦", "南亞科", "華邦電", "旺宏", "群聯", "聯發科", "瑞昱", "聯詠", "敦泰", "力積電", "穩懋", "環球晶", "中美晶", "IC", "晶圓", "封測", "半導體"]),
+        ("AI", ["AI", "人工智慧", "伺服器", "Server", "GPU", "ASIC", "CPO", "光通訊", "散熱", "機殼", "高速傳輸", "交換器"]),
+        ("電子", ["電子", "電腦", "主機板", "顯卡", "NB", "網通", "通訊", "電源", "零組件", "光電", "面板", "組裝", "模組"]),
+        ("金融", ["金控", "銀行", "證券", "保險"]),
+        ("航運", ["航運", "海運", "貨櫃", "航空"]),
+        ("鋼鐵", ["鋼", "鋼鐵"]),
+        ("塑化", ["塑膠", "塑化", "化工"]),
+        ("生技醫療", ["生技", "醫療", "藥", "製藥", "檢測", "疫苗"]),
+        ("汽車", ["車電", "汽車", "車用", "電動車"]),
+        ("綠能", ["太陽能", "風電", "儲能", "綠能", "能源"]),
+        ("營建", ["營建", "建設"]),
+        ("食品", ["食品", "餐飲"]),
+        ("觀光", ["觀光", "旅遊", "飯店"]),
+        ("紡織", ["紡織", "成衣"]),
+        ("通信網路", ["網路", "網通", "通訊", "電信"]),
+        ("電機機械", ["機電", "機械", "自動化", "工具機"]),
+    ]
+
+    lower_n = n.lower()
+    for category, keywords in rules:
+        for kw in keywords:
+            if kw.lower() in lower_n:
+                return category
+
+    return "其他"
+
+
 # =========================================================
 # watchlist / 主檔
 # =========================================================
@@ -108,13 +141,18 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
+
                     code = _normalize_code(item.get("code"))
                     name = _safe_str(item.get("name")) or code
                     market = _safe_str(item.get("market")) or "上市"
                     category = _normalize_category(item.get("category"))
+                    if not category:
+                        category = _infer_category_from_name(name)
+
                     if not code or code in seen:
                         continue
                     seen.add(code)
+
                     rows.append(
                         {
                             "code": code,
@@ -124,6 +162,7 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                             "label": f"{code} {name}",
                         }
                     )
+
             result[g] = rows
 
     return result
@@ -175,6 +214,11 @@ def _load_master_df() -> pd.DataFrame:
                 if market_arg in ["上市", "上櫃", "興櫃"]:
                     temp["market"] = temp["market"].replace("", market_arg)
 
+                temp["category"] = temp.apply(
+                    lambda r: _normalize_category(r.get("category")) or _infer_category_from_name(r.get("name")),
+                    axis=1,
+                )
+
                 dfs.append(temp[["code", "name", "market", "category"]])
         except Exception:
             pass
@@ -207,13 +251,17 @@ def _find_name_market_category(
         matched = master_df[master_df["code"].astype(str) == code]
         if not matched.empty:
             row = matched.iloc[0]
-            return (
-                _safe_str(row.get("name")) or manual_name or code,
-                _safe_str(row.get("market")) or manual_market or "上市",
-                _normalize_category(row.get("category")) or manual_category,
-            )
+            final_name = _safe_str(row.get("name")) or manual_name or code
+            final_market = _safe_str(row.get("market")) or manual_market or "上市"
+            final_category = _normalize_category(row.get("category")) or manual_category
+            if not final_category:
+                final_category = _infer_category_from_name(final_name)
+            return final_name, final_market, final_category
 
-    return manual_name or code, manual_market or "上市", manual_category
+    final_name = manual_name or code
+    final_market = manual_market or "上市"
+    final_category = manual_category or _infer_category_from_name(final_name)
+    return final_name, final_market, final_category
 
 
 def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
@@ -283,7 +331,7 @@ def _build_universe_from_market(
         code = _normalize_code(row.get("code"))
         name = _safe_str(row.get("name")) or code
         market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category"))
+        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
         if code:
             rows.append(
                 {
@@ -300,18 +348,20 @@ def _build_universe_from_market(
 def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
     cats = set()
 
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty and "category" in master_df.columns:
-        for v in master_df["category"].dropna().tolist():
-            text = _normalize_category(v)
-            if text:
-                cats.add(text)
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        for _, row in master_df.iterrows():
+            name = _safe_str(row.get("name"))
+            cat = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+            if cat:
+                cats.add(cat)
 
     if isinstance(watchlist_map, dict):
         for _, items in watchlist_map.items():
             for item in items:
-                text = _normalize_category(item.get("category"))
-                if text:
-                    cats.add(text)
+                name = _safe_str(item.get("name"))
+                cat = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                if cat:
+                    cats.add(cat)
 
     return sorted(list(cats))
 
@@ -407,7 +457,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# 分析 bundle：每檔只算一次
+# 分析 bundle
 # =========================================================
 def _build_auto_factor_scores(
     df: pd.DataFrame,
@@ -625,7 +675,6 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
     )
 
     return {
-        "hist_df": hist_df,
         "used_market": used_market,
         "signal_snapshot": signal_snapshot,
         "sr_snapshot": sr_snapshot,
@@ -715,7 +764,7 @@ def _build_recommend_df(
                 "股票代號": code,
                 "股票名稱": stock_name,
                 "市場別": bundle["used_market"],
-                "類別": category or "未分類",
+                "類別": category or _infer_category_from_name(stock_name),
                 "最新價": bundle["close_now"],
                 "區間漲跌幅%": bundle["period_pct"],
                 "訊號分數": signal_score,
@@ -802,7 +851,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜全自動因子版",
-        subtitle="功能不變，改做速度優化。保留起漲判斷、買點、停損、目標價與全自動因子。",
+        subtitle="已補每支股票類別，現在可直接用類別做推薦判斷與篩選。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -863,14 +912,13 @@ def main():
         st.number_input("訊號分數下限", key=_k("min_signal_score"), step=1.0)
 
     render_pro_info_card(
-        "效能優化重點",
+        "類別邏輯",
         [
-            ("先縮池再分析", "先依市場 / 類別 / 群組縮小範圍，再逐檔分析。", ""),
-            ("每檔一次 bundle", "signal / radar / support-resistance / 自動因子 / 交易計畫只算一次。", ""),
-            ("歷史資料快取", "同股票同區間不重抓、不重算。", ""),
-            ("顯示延後格式化", "先排序數值、最後才轉字串，減少大量格式化成本。", ""),
+            ("優先順序", "主檔類別 → 自選股類別 → 名稱關鍵字推論 → 其他。", ""),
+            ("篩選用途", "類別可直接納入掃描池與推薦結果判斷。", ""),
+            ("後續升級", "下一步可加類股強度與類股輪動分數。", ""),
         ],
-        chips=["功能不變", "只加速", "股神版"],
+        chips=["類別已補齊", "可多選", "股神版"],
     )
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
@@ -923,7 +971,7 @@ def main():
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
             {"label": "優先觀察", "value": good_count, "delta": "次高等級", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "效能優化版", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "含類別判斷", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -1062,13 +1110,11 @@ def main():
         render_pro_info_card(
             "模組邏輯",
             [
-                ("功能不變", "保留全自動因子、起漲判斷、推薦買點、停損、目標價。", ""),
-                ("速度優化", "每檔只跑一次完整分析 bundle，避免重複運算。", ""),
-                ("全市場模式", "先依市場 / 類別 / 掃描上限縮池，再分析。", ""),
-                ("顯示優化", "排序先用原始數值，最後輸出時再格式化。", ""),
-                ("快取策略", "主檔、歷史資料、單股 bundle、完整推薦表都已 cache。", ""),
+                ("類別已補齊", "每支股票都會盡量補到類別，不再只剩未分類。", ""),
+                ("推薦核心", "保留全自動因子、起漲判斷、推薦買點、停損、目標價。", ""),
+                ("下一步", "可再加類股強度、類股熱度、同類股領先分數。", ""),
             ],
-            chips=["功能不變", "只加速", "股神版"],
+            chips=["類別可篩選", "股神版", "可持續升級"],
         )
 
 
