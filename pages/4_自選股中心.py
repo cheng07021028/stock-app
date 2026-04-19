@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 import copy
 import hashlib
 import json
+import base64
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from utils import (
@@ -58,14 +59,6 @@ def _normalize_code(code: Any) -> str:
     return text
 
 
-def _project_root() -> Path:
-    current = Path(__file__).resolve()
-    parent = current.parent
-    if parent.name.lower() == "pages":
-        return parent.parent
-    return parent
-
-
 def _payload_hash(payload: dict[str, list[dict[str, str]]]) -> str:
     try:
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -74,37 +67,104 @@ def _payload_hash(payload: dict[str, list[dict[str, str]]]) -> str:
         return ""
 
 
-def _atomic_write_json(path: Path, payload: dict[str, list[dict[str, str]]]) -> bool:
+def _set_status(msg: str, level: str = "info"):
+    st.session_state[_k("status_msg")] = msg
+    st.session_state[_k("status_type")] = level
+
+
+# =========================================================
+# GitHub API 設定
+# =========================================================
+def _github_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("WATCHLIST_GITHUB_PATH", "watchlist.json")) or "watchlist.json",
+    }
+
+
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_contents_url(owner: str, repo: str, path: str) -> str:
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+
+def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
+    token = cfg["token"]
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    branch = cfg["branch"]
+    path = cfg["path"]
+
+    if not token:
+        return "", "缺少 GITHUB_TOKEN"
+
+    url = _github_contents_url(owner, repo, path)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        tmp_path.replace(path)
-        return True
-    except Exception:
-        return False
+        resp = requests.get(
+            url,
+            headers=_github_headers(token),
+            params={"ref": branch},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return _safe_str(data.get("sha")), ""
+        if resp.status_code == 404:
+            return "", ""
+        return "", f"讀取 GitHub 檔案失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return "", f"讀取 GitHub 檔案例外：{e}"
 
 
-def _get_watchlist_file_paths() -> list[Path]:
-    root = _project_root()
-    cwd = Path.cwd().resolve()
+def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    cfg = _github_config()
+    token = cfg["token"]
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    branch = cfg["branch"]
+    path = cfg["path"]
 
-    candidates = [
-        root / "watchlist.json",
-        root / "data" / "watchlist.json",
-        cwd / "watchlist.json",
-        cwd / "data" / "watchlist.json",
-    ]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN，無法回寫 GitHub。"
 
-    final_paths = []
-    seen = set()
-    for p in candidates:
-        rp = p.resolve()
-        if str(rp) not in seen:
-            seen.add(str(rp))
-            final_paths.append(rp)
-    return final_paths
+    sha, sha_err = _get_repo_watchlist_sha(cfg)
+    if sha_err:
+        return False, sha_err
+
+    content_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+
+    body: dict[str, Any] = {
+        "message": f"Update {path} from Streamlit @ {_now_text()}",
+        "content": encoded_content,
+        "branch": branch,
+    }
+    if sha:
+        body["sha"] = sha
+
+    url = _github_contents_url(owner, repo, path)
+
+    try:
+        resp = requests.put(
+            url,
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫 GitHub：{owner}/{repo}@{branch}:{path}"
+        return False, f"GitHub API 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"GitHub API 寫入例外：{e}"
 
 
 # =========================================================
@@ -180,66 +240,38 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
     return payload
 
 
-def _force_write_watchlist_json(data: dict[str, list[dict[str, str]]]) -> bool:
-    """
-    這裡就是你要的『強制寫回』核心。
-    只要有任何新增/刪除/修改，就一定呼叫這支。
-    """
+def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool:
     payload = _normalize_watchlist_payload(data)
-    paths = _get_watchlist_file_paths()
-
-    success_paths = []
-    failed_paths = []
-
-    for p in paths:
-        ok = _atomic_write_json(p, payload)
-        if ok:
-            success_paths.append(str(p))
-        else:
-            failed_paths.append(str(p))
-
-    # 至少主路徑一定再補寫一次
-    main_path = (_project_root() / "watchlist.json").resolve()
-    if str(main_path) not in success_paths:
-        ok = _atomic_write_json(main_path, payload)
-        if ok:
-            success_paths.append(str(main_path))
-        else:
-            failed_paths.append(str(main_path))
-
-    ok_any = len(success_paths) > 0
+    ok, msg = _push_watchlist_to_github(payload)
 
     version = int(st.session_state.get(_k("version"), 0)) + 1
     saved_at = _now_text()
     payload_md5 = _payload_hash(payload)
 
-    # 強制同步所有 session_state
     st.session_state[_k("watchlist")] = copy.deepcopy(payload)
     st.session_state[_k("version")] = version
     st.session_state[_k("last_saved_at")] = saved_at
-    st.session_state[_k("last_saved_paths")] = success_paths
-    st.session_state[_k("last_failed_paths")] = failed_paths
     st.session_state[_k("payload_hash")] = payload_md5
+    st.session_state[_k("last_github_msg")] = msg
 
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
     st.session_state["watchlist_version"] = version
     st.session_state["watchlist_last_saved_at"] = saved_at
     st.session_state["watchlist_last_saved_hash"] = payload_md5
 
-    return ok_any
-
-
-def _persist_watchlist(success_msg: str, fail_msg: str = "watchlist.json 寫回失敗，請檢查檔案權限。") -> bool:
-    ok = _force_write_watchlist_json(st.session_state[_k("watchlist")])
     if ok:
-        saved_paths = st.session_state.get(_k("last_saved_paths"), [])
-        path_text = "；".join(saved_paths[:2]) if saved_paths else "watchlist.json"
-        version = st.session_state.get(_k("version"), 0)
-        _set_status(f"{success_msg}｜已強制寫回：{path_text}｜版本 v{version}｜{_now_text()}", "success")
+        _set_status(f"{msg}｜版本 v{version}｜{saved_at}", "success")
     else:
-        failed_paths = st.session_state.get(_k("last_failed_paths"), [])
-        fail_text = "；".join(failed_paths[:2]) if failed_paths else ""
-        _set_status(f"{fail_msg}{'｜' + fail_text if fail_text else ''}", "error")
+        _set_status(msg, "error")
+
+    return ok
+
+
+def _persist_watchlist(success_msg: str) -> bool:
+    ok = _force_write_watchlist_github(st.session_state[_k("watchlist")])
+    if ok:
+        base_msg = _safe_str(st.session_state.get(_k("last_github_msg"), ""))
+        _set_status(f"{success_msg}｜{base_msg}", "success")
     return ok
 
 
@@ -293,55 +325,27 @@ def _init_state():
         groups = list(st.session_state[_k("watchlist")].keys())
         st.session_state[_k("selected_group")] = groups[0] if groups else ""
 
-    if _k("new_group_name") not in st.session_state:
-        st.session_state[_k("new_group_name")] = ""
+    defaults = {
+        "new_group_name": "",
+        "rename_group_name": "",
+        "add_code": "",
+        "add_name": "",
+        "add_market": "上市",
+        "bulk_text": "",
+        "search_text": "",
+        "status_msg": "",
+        "status_type": "info",
+        "last_saved_at": "",
+        "last_github_msg": "",
+        "version": int(st.session_state.get("watchlist_version", 0) or 0),
+        "payload_hash": "",
+        "batch_delete_codes": [],
+        "clear_group_confirm": False,
+    }
+    for k, v in defaults.items():
+        if _k(k) not in st.session_state:
+            st.session_state[_k(k)] = v
 
-    if _k("rename_group_name") not in st.session_state:
-        st.session_state[_k("rename_group_name")] = ""
-
-    if _k("add_code") not in st.session_state:
-        st.session_state[_k("add_code")] = ""
-
-    if _k("add_name") not in st.session_state:
-        st.session_state[_k("add_name")] = ""
-
-    if _k("add_market") not in st.session_state:
-        st.session_state[_k("add_market")] = "上市"
-
-    if _k("bulk_text") not in st.session_state:
-        st.session_state[_k("bulk_text")] = ""
-
-    if _k("search_text") not in st.session_state:
-        st.session_state[_k("search_text")] = ""
-
-    if _k("status_msg") not in st.session_state:
-        st.session_state[_k("status_msg")] = ""
-
-    if _k("status_type") not in st.session_state:
-        st.session_state[_k("status_type")] = "info"
-
-    if _k("last_saved_paths") not in st.session_state:
-        st.session_state[_k("last_saved_paths")] = []
-
-    if _k("last_failed_paths") not in st.session_state:
-        st.session_state[_k("last_failed_paths")] = []
-
-    if _k("last_saved_at") not in st.session_state:
-        st.session_state[_k("last_saved_at")] = ""
-
-    if _k("version") not in st.session_state:
-        st.session_state[_k("version")] = int(st.session_state.get("watchlist_version", 0) or 0)
-
-    if _k("payload_hash") not in st.session_state:
-        st.session_state[_k("payload_hash")] = _payload_hash(st.session_state[_k("watchlist")])
-
-    if _k("batch_delete_codes") not in st.session_state:
-        st.session_state[_k("batch_delete_codes")] = []
-
-    if _k("clear_group_confirm") not in st.session_state:
-        st.session_state[_k("clear_group_confirm")] = False
-
-    # 延後套用，避免 widget key 衝突
     for name in [
         "batch_delete_codes",
         "clear_group_confirm",
@@ -376,11 +380,6 @@ def _repair_selected_group():
             st.session_state[_k("selected_group")] = groups[0]
     else:
         st.session_state[_k("selected_group")] = ""
-
-
-def _set_status(msg: str, level: str = "info"):
-    st.session_state[_k("status_msg")] = msg
-    st.session_state[_k("status_type")] = level
 
 
 # =========================================================
@@ -756,19 +755,20 @@ def main():
         st.session_state[_k("rename_group_name")] = current_group
 
     render_pro_hero(
-        title="自選股中心｜股神版",
-        subtitle="新增、刪除、改名、批次加入、批次刪除、清空群組後，都會強制寫回 watchlist.json。",
+        title="自選股中心｜GitHub API 強制回寫版",
+        subtitle="只要新增、刪除、改名、批次操作，都直接 commit 回 GitHub repo 的 watchlist.json。",
     )
 
     overview_df = _build_overview_df(watchlist)
     group_summary_df = _build_group_summary_df(watchlist)
+    github_cfg = _github_config()
 
     render_pro_kpi_row(
         [
             {"label": "群組數", "value": len(watchlist), "delta": "自選股群組", "delta_class": "pro-kpi-delta-flat"},
             {"label": "股票總數", "value": len(overview_df), "delta": "自選股總計", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "同步版本", "value": st.session_state.get(_k("version"), 0), "delta": "強制寫回", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "最後儲存", "value": st.session_state.get(_k("last_saved_at"), "—") or "—", "delta": "watchlist.json", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "同步版本", "value": st.session_state.get(_k("version"), 0), "delta": "GitHub commit", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "最後儲存", "value": st.session_state.get(_k("last_saved_at"), "—") or "—", "delta": github_cfg["path"], "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -783,6 +783,18 @@ def main():
             st.error(status_msg)
         else:
             st.info(status_msg)
+
+    render_pro_section("GitHub 回寫設定")
+    render_pro_info_card(
+        "目前目標",
+        [
+            ("Owner", github_cfg["owner"], ""),
+            ("Repo", github_cfg["repo"], ""),
+            ("Branch", github_cfg["branch"], ""),
+            ("Path", github_cfg["path"], ""),
+            ("Token 狀態", "已設定" if github_cfg["token"] else "未設定", ""),
+        ],
+    )
 
     render_pro_section("群組管理")
 
@@ -916,17 +928,13 @@ def main():
         else:
             st.dataframe(group_summary_df, use_container_width=True, hide_index=True)
 
-        last_saved_at = _safe_str(st.session_state.get(_k("last_saved_at"), ""))
-        last_saved_paths = st.session_state.get(_k("last_saved_paths"), [])
-        saved_path_text = " / ".join(last_saved_paths[:2]) if last_saved_paths else "尚未儲存"
-
         render_pro_info_card(
-            "寫回狀態",
+            "回寫狀態",
             [
-                ("強制寫回", "新增 / 刪除 / 改名 / 批次加入 / 批次刪除 / 清空群組，都會立即落地。", ""),
-                ("實際路徑", saved_path_text, ""),
-                ("同步版本", f"v{st.session_state.get(_k('version'), 0)}", ""),
-                ("最後儲存", last_saved_at or "—", ""),
+                ("模式", "GitHub API 強制回寫", ""),
+                ("版本", f"v{st.session_state.get(_k('version'), 0)}", ""),
+                ("最後儲存", st.session_state.get(_k("last_saved_at"), "—") or "—", ""),
+                ("最後訊息", st.session_state.get(_k("last_github_msg"), "—") or "—", ""),
             ],
         )
 
