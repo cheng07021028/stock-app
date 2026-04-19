@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
@@ -85,35 +85,65 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
     return sum(clean) / len(clean)
 
 
+def _fmt_num(v: Any, d: int = 2) -> str:
+    return format_number(v, d) if pd.notna(v) else ""
+
+
+# =========================================================
+# 類型推論：更細分
+# =========================================================
 def _infer_category_from_name(name: str) -> str:
     n = _safe_str(name)
     if not n:
         return "其他"
 
-    rules = [
-        ("半導體", ["台積", "聯電", "世界", "創意", "世芯", "力旺", "晶心科", "智原", "矽力", "日月光", "采鈺", "京元電", "頎邦", "南亞科", "華邦電", "旺宏", "群聯", "聯發科", "瑞昱", "聯詠", "敦泰", "力積電", "穩懋", "環球晶", "中美晶", "IC", "晶圓", "封測", "半導體"]),
-        ("AI", ["AI", "人工智慧", "伺服器", "Server", "GPU", "ASIC", "CPO", "光通訊", "散熱", "機殼", "高速傳輸", "交換器"]),
-        ("電子", ["電子", "電腦", "主機板", "顯卡", "NB", "網通", "通訊", "電源", "零組件", "光電", "面板", "組裝", "模組"]),
-        ("金融", ["金控", "銀行", "證券", "保險"]),
-        ("航運", ["航運", "海運", "貨櫃", "航空"]),
-        ("鋼鐵", ["鋼", "鋼鐵"]),
-        ("塑化", ["塑膠", "塑化", "化工"]),
-        ("生技醫療", ["生技", "醫療", "藥", "製藥", "檢測", "疫苗"]),
-        ("汽車", ["車電", "汽車", "車用", "電動車"]),
-        ("綠能", ["太陽能", "風電", "儲能", "綠能", "能源"]),
-        ("營建", ["營建", "建設"]),
-        ("食品", ["食品", "餐飲"]),
-        ("觀光", ["觀光", "旅遊", "飯店"]),
-        ("紡織", ["紡織", "成衣"]),
-        ("通信網路", ["網路", "網通", "通訊", "電信"]),
-        ("電機機械", ["機電", "機械", "自動化", "工具機"]),
+    s = n.lower()
+
+    category_rules = [
+        ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "世界", "umc", "tsmc"]),
+        ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺"]),
+        ("封測", ["日月光", "矽品", "京元電", "頎邦", "封測", "測試"]),
+        ("記憶體", ["南亞科", "華邦電", "旺宏", "記憶體", "dram", "nand"]),
+        ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓"]),
+        ("半導體設備材料", ["帆宣", "漢唐", "家登", "辛耘", "中砂", "崇越", "設備", "材料"]),
+        ("IP矽智財", ["力旺", "晶心科", "智原", "創意", "世芯", "ip", "矽智財"]),
+        ("AI伺服器", ["伺服器", "server", "緯穎", "廣達", "英業達", "緯創", "鴻海", "技嘉"]),
+        ("散熱", ["雙鴻", "奇鋐", "散熱", "風扇", "熱導管"]),
+        ("機殼", ["勤誠", "晟銘電", "機殼"]),
+        ("電源供應", ["台達電", "光寶科", "群電", "電源", "供應器"]),
+        ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "usb4", "pcie"]),
+        ("網通交換器", ["智邦", "明泰", "中磊", "網通", "交換器", "switch"]),
+        ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "cpo"]),
+        ("PCB載板", ["欣興", "南電", "景碩", "金像電", "載板", "pcb"]),
+        ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
+        ("消費電子", ["大立光", "玉晶光", "耳機", "鏡頭", "聲學", "消費電子"]),
+        ("面板", ["友達", "群創", "彩晶", "面板"]),
+        ("光學鏡頭", ["大立光", "玉晶光", "亞光", "鏡頭", "光學"]),
+        ("被動元件", ["國巨", "華新科", "禾伸堂", "被動元件", "電容", "電阻"]),
+        ("連接器", ["貿聯", "嘉澤", "連接器", "端子"]),
+        ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "材料"]),
+        ("金控", ["金控"]),
+        ("銀行", ["銀行"]),
+        ("保險", ["保險"]),
+        ("證券", ["證券"]),
+        ("航運", ["長榮", "陽明", "萬海", "航運", "海運", "貨櫃"]),
+        ("航空觀光", ["華航", "長榮航", "航空", "觀光", "旅遊", "飯店"]),
+        ("鋼鐵", ["中鋼", "大成鋼", "鋼", "鋼鐵"]),
+        ("塑化", ["台塑", "南亞", "台化", "台塑化", "塑化", "化工"]),
+        ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥"]),
+        ("車用電子", ["和大", "貿聯", "車用", "車電", "汽車"]),
+        ("綠能儲能", ["中興電", "華城", "儲能", "綠能", "太陽能", "風電"]),
+        ("營建資產", ["營建", "建設", "資產"]),
+        ("食品民生", ["統一", "食品", "餐飲"]),
+        ("紡織製鞋", ["紡織", "成衣", "製鞋"]),
+        ("電機機械", ["上銀", "亞德客", "機械", "工具機", "自動化"]),
+        ("其他電子", ["電子", "電腦", "光電"]),
     ]
 
-    lower_n = n.lower()
-    for category, keywords in rules:
+    for cat, keywords in category_rules:
         for kw in keywords:
-            if kw.lower() in lower_n:
-                return category
+            if kw.lower() in s:
+                return cat
 
     return "其他"
 
@@ -145,9 +175,7 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                     code = _normalize_code(item.get("code"))
                     name = _safe_str(item.get("name")) or code
                     market = _safe_str(item.get("market")) or "上市"
-                    category = _normalize_category(item.get("category"))
-                    if not category:
-                        category = _infer_category_from_name(name)
+                    category = _normalize_category(item.get("category")) or _infer_category_from_name(name)
 
                     if not code or code in seen:
                         continue
@@ -162,7 +190,6 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                             "label": f"{code} {name}",
                         }
                     )
-
             result[g] = rows
 
     return result
@@ -181,7 +208,6 @@ def _load_master_df() -> pd.DataFrame:
             df = get_all_code_name_map(market_arg)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 temp = df.copy()
-
                 mapping = {
                     "證券代號": "code",
                     "證券名稱": "name",
@@ -253,9 +279,7 @@ def _find_name_market_category(
             row = matched.iloc[0]
             final_name = _safe_str(row.get("name")) or manual_name or code
             final_market = _safe_str(row.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(row.get("category")) or manual_category
-            if not final_category:
-                final_category = _infer_category_from_name(final_name)
+            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_name(final_name)
             return final_name, final_market, final_category
 
     final_name = manual_name or code
@@ -267,8 +291,8 @@ def _find_name_market_category(
 def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
     rows = []
     seen = set()
-
     raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
+
     for raw in raw_lines:
         txt = _safe_str(raw)
         code = _normalize_code(txt)
@@ -276,15 +300,14 @@ def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, st
         market = "上市"
         category = ""
 
-        if not code:
-            if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-                matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
-                if not matched.empty:
-                    row = matched.iloc[0]
-                    code = _normalize_code(row.get("code"))
-                    name = _safe_str(row.get("name"))
-                    market = _safe_str(row.get("market")) or "上市"
-                    category = _normalize_category(row.get("category"))
+        if not code and isinstance(master_df, pd.DataFrame) and not master_df.empty:
+            matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
+            if not matched.empty:
+                row = matched.iloc[0]
+                code = _normalize_code(row.get("code"))
+                name = _safe_str(row.get("name"))
+                market = _safe_str(row.get("market")) or "上市"
+                category = _normalize_category(row.get("category"))
 
         if code and not name:
             name, market, category = _find_name_market_category(code, "", market, category, master_df)
@@ -303,12 +326,7 @@ def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, st
     return rows
 
 
-def _build_universe_from_market(
-    master_df: pd.DataFrame,
-    market_mode: str,
-    limit_count: int,
-    selected_categories: list[str],
-) -> list[dict[str, str]]:
+def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit_count: int, selected_categories: list[str]) -> list[dict[str, str]]:
     if master_df is None or master_df.empty:
         return []
 
@@ -457,14 +475,9 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# 分析 bundle
+# 單股分析 bundle
 # =========================================================
-def _build_auto_factor_scores(
-    df: pd.DataFrame,
-    signal_snapshot: dict,
-    sr_snapshot: dict,
-    radar: dict,
-) -> dict[str, Any]:
+def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     last = df.iloc[-1]
 
     close_now = _safe_float(last.get("收盤價"))
@@ -482,7 +495,6 @@ def _build_auto_factor_scores(
     radar_momentum = _safe_float(radar.get("momentum"), 50) or 50
     radar_volume = _safe_float(radar.get("volume"), 50) or 50
     radar_structure = _safe_float(radar.get("structure"), 50) or 50
-
     sup20 = _safe_float(sr_snapshot.get("sup_20"))
 
     eps_proxy = 50.0
@@ -689,6 +701,41 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
     }
 
 
+# =========================================================
+# 類股強度
+# =========================================================
+def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
+    if base_df is None or base_df.empty:
+        return pd.DataFrame(columns=["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數"])
+
+    grp = (
+        base_df.groupby("類別", dropna=False)
+        .agg(
+            股票數=("股票代號", "count"),
+            類股平均總分=("個股原始總分", "mean"),
+            類股平均訊號=("訊號分數", "mean"),
+            類股平均漲幅=("區間漲跌幅%", "mean"),
+            類股平均雷達=("雷達均分", "mean"),
+            類股平均自動因子=("自動因子總分", "mean"),
+        )
+        .reset_index()
+    )
+
+    grp["類股熱度分數"] = (
+        grp["類股平均總分"] * 0.38
+        + grp["類股平均訊號"] * 6.5
+        + grp["類股平均漲幅"].fillna(0) * 0.45
+        + grp["類股平均雷達"] * 0.22
+        + grp["類股平均自動因子"] * 0.15
+    ).apply(lambda x: _score_clip(x))
+
+    grp = grp.sort_values(["類股熱度分數", "類股平均總分"], ascending=[False, False]).reset_index(drop=True)
+    return grp
+
+
+# =========================================================
+# 推薦表
+# =========================================================
 @st.cache_data(ttl=300, show_spinner=False)
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
@@ -698,9 +745,9 @@ def _build_recommend_df(
     min_total_score: float,
     min_signal_score: float,
     selected_categories: list[str],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    rows = []
+    base_rows = []
 
     for item in universe_items:
         code = _normalize_code(item.get("code"))
@@ -740,26 +787,15 @@ def _build_recommend_df(
         if bundle["support_dist"] is not None and 0 <= bundle["support_dist"] <= 6:
             position_bonus += 6.0
 
-        composite = (
+        base_composite = (
             technical_score * 0.44
             + auto_factor_total * 0.40
             + position_bonus
             + (_safe_float(bundle["period_pct"], 0) * 0.10 if bundle["period_pct"] is not None else 0)
         )
-        composite = _score_clip(composite)
+        base_composite = _score_clip(base_composite)
 
-        if composite < min_total_score:
-            continue
-
-        recommendation = "觀察"
-        if composite >= 82:
-            recommendation = "強烈關注"
-        elif composite >= 70:
-            recommendation = "優先觀察"
-        elif composite >= 58:
-            recommendation = "可列追蹤"
-
-        rows.append(
+        base_rows.append(
             {
                 "股票代號": code,
                 "股票名稱": stock_name,
@@ -777,8 +813,7 @@ def _build_recommend_df(
                 "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
                 "20日壓力距離%": bundle["pressure_dist"],
                 "20日支撐距離%": bundle["support_dist"],
-                "推薦總分": composite,
-                "推薦等級": recommendation,
+                "個股原始總分": base_composite,
                 "起漲判斷": bundle["trade_plan"]["launch_tag"],
                 "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
                 "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
@@ -792,17 +827,68 @@ def _build_recommend_df(
             }
         )
 
-    return pd.DataFrame(rows)
+    base_df = pd.DataFrame(base_rows)
+    if base_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    category_strength_df = _compute_category_strength(base_df)
+    if category_strength_df.empty:
+        base_df["類股平均總分"] = None
+        base_df["類股平均訊號"] = None
+        base_df["類股平均漲幅"] = None
+        base_df["類股熱度分數"] = None
+    else:
+        base_df = base_df.merge(
+            category_strength_df[["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數"]],
+            on="類別",
+            how="left",
+        )
+
+    base_df["是否領先同類股"] = (
+        base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)
+    ).map({True: "是", False: "否"})
+
+    base_df["推薦總分"] = (
+        base_df["個股原始總分"] * 0.78
+        + base_df["類股熱度分數"].fillna(0) * 0.22
+    ).apply(lambda x: _score_clip(x))
+
+    def _recommend(score: float) -> str:
+        if score >= 84:
+            return "強烈關注"
+        if score >= 72:
+            return "優先觀察"
+        if score >= 60:
+            return "可列追蹤"
+        return "觀察"
+
+    base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
+
+    base_df["推薦理由摘要"] = base_df.apply(
+        lambda r: (
+            f"{_safe_str(r['類別'])}熱度 {_fmt_num(r['類股熱度分數'],1)}，"
+            f"個股分數 {_fmt_num(r['個股原始總分'],1)}，"
+            f"{'領先同類股' if _safe_str(r['是否領先同類股']) == '是' else '未明顯領先同類股'}，"
+            f"{_safe_str(r['起漲判斷'])}"
+        ),
+        axis=1,
+    )
+
+    final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
+    final_df = final_df.sort_values(["推薦總分", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False]).reset_index(drop=True)
+
+    return final_df, category_strength_df
 
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
-    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%"]
+    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅"]
     score_cols = [
         "訊號分數", "雷達均分", "自動因子總分",
         "EPS代理分數", "營收動能代理分數", "獲利代理分數",
-        "大戶鎖碼代理分數", "法人連買代理分數", "推薦總分"
+        "大戶鎖碼代理分數", "法人連買代理分數",
+        "個股原始總分", "類股平均總分", "類股平均訊號", "類股熱度分數", "推薦總分"
     ]
 
     for c in price_cols:
@@ -850,8 +936,8 @@ def main():
         st.session_state[_k("min_signal_score")] = -2.0
 
     render_pro_hero(
-        title="股神推薦｜全自動因子版",
-        subtitle="已補每支股票類別，現在可直接用類別做推薦判斷與篩選。",
+        title="股神推薦｜類股強度版",
+        subtitle="類型已細分，並把類股熱度、同類股領先度一起納入推薦分數。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -896,12 +982,12 @@ def main():
     if any(x not in category_options for x in st.session_state.get(_k("selected_categories"), [])):
         st.session_state[_k("selected_categories")] = ["全部"]
 
-    render_pro_section("類別篩選")
+    render_pro_section("類型篩選")
     st.multiselect(
-        "選擇類別（可多選）",
+        "選擇類型（可多選）",
         options=category_options,
         key=_k("selected_categories"),
-        help="若選擇『全部』或未選，則不限制類別。",
+        help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
     )
 
     render_pro_section("推薦門檻")
@@ -912,13 +998,14 @@ def main():
         st.number_input("訊號分數下限", key=_k("min_signal_score"), step=1.0)
 
     render_pro_info_card(
-        "類別邏輯",
+        "類股強度邏輯",
         [
-            ("優先順序", "主檔類別 → 自選股類別 → 名稱關鍵字推論 → 其他。", ""),
-            ("篩選用途", "類別可直接納入掃描池與推薦結果判斷。", ""),
-            ("後續升級", "下一步可加類股強度與類股輪動分數。", ""),
+            ("類型細分", "半導體 / AI / 電子 / 金融已再細分成更小分類。", ""),
+            ("類股熱度", "用同類股平均總分、平均訊號、平均漲幅計算。", ""),
+            ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
+            ("最終推薦", "個股原始總分 + 類股熱度分數一起決定。", ""),
         ],
-        chips=["類別已補齊", "可多選", "股神版"],
+        chips=["類型更細", "類股強度", "股神版"],
     )
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
@@ -944,7 +1031,7 @@ def main():
     end_dt = today
 
     with st.spinner("股神推薦計算中..."):
-        rec_df = _build_recommend_df(
+        rec_df, category_strength_df = _build_recommend_df(
             universe_items=universe_items,
             master_df=master_df,
             start_dt=start_dt,
@@ -958,20 +1045,20 @@ def main():
         st.error("掃描完成，但沒有符合條件的股票。")
         st.stop()
 
-    rec_df = rec_df.sort_values(["推薦總分", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False]).reset_index(drop=True)
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.head(top_n).copy()
 
     strong_count = int((rec_df["推薦等級"] == "強烈關注").sum())
     good_count = int((rec_df["推薦等級"] == "優先觀察").sum())
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
+    leader_count = int((rec_df["是否領先同類股"] == "是").sum())
 
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "優先觀察", "value": good_count, "delta": "次高等級", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "含類別判斷", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "含類股熱度", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -986,6 +1073,8 @@ def main():
                     "類別",
                     "推薦等級",
                     "推薦總分",
+                    "類股熱度分數",
+                    "是否領先同類股",
                     "起漲判斷",
                     "最新價",
                     "推薦買點_拉回",
@@ -993,10 +1082,7 @@ def main():
                     "停損價",
                     "賣出目標1",
                     "賣出目標2",
-                    "風險報酬_拉回",
-                    "風險報酬_突破",
-                    "自動因子摘要",
-                    "雷達摘要",
+                    "推薦理由摘要",
                 ]
             ]
         ),
@@ -1024,6 +1110,8 @@ def main():
                 ("類別", _safe_str(focus_row.get("類別")), ""),
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
+                ("類股熱度分數", format_number(focus_row.get("類股熱度分數"), 1), ""),
+                ("是否領先同類股", _safe_str(focus_row.get("是否領先同類股")), ""),
                 ("起漲判斷", _safe_str(focus_row.get("起漲判斷")), ""),
                 ("推薦買點（拉回）", format_number(focus_row.get("推薦買點_拉回"), 2), ""),
                 ("推薦買點（突破）", format_number(focus_row.get("推薦買點_突破"), 2), ""),
@@ -1032,23 +1120,53 @@ def main():
                 ("賣出目標2", format_number(focus_row.get("賣出目標2"), 2), ""),
                 ("風險報酬（拉回）", _safe_str(focus_row.get("風險報酬_拉回")), ""),
                 ("風險報酬（突破）", _safe_str(focus_row.get("風險報酬_突破")), ""),
-                ("自動因子摘要", _safe_str(focus_row.get("自動因子摘要")), ""),
-                ("雷達摘要", _safe_str(focus_row.get("雷達摘要")), ""),
+                ("推薦理由摘要", _safe_str(focus_row.get("推薦理由摘要")), ""),
             ],
             chips=[
                 _safe_str(focus_row.get("推薦等級")),
-                _safe_str(focus_row.get("起漲判斷")),
-                _safe_str(focus_row.get("市場別")),
                 _safe_str(focus_row.get("類別")),
+                _safe_str(focus_row.get("是否領先同類股")),
             ],
         )
 
-    tabs = st.tabs(["完整推薦表", "自動因子榜", "鎖碼 / 法人代理榜", "類別分布", "操作說明"])
+    tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "操作說明"])
 
     with tabs[0]:
         st.dataframe(_format_df(rec_df), use_container_width=True, hide_index=True)
 
     with tabs[1]:
+        category_show = category_strength_df.copy()
+        for c in ["類股平均總分", "類股平均訊號", "類股平均漲幅", "類股平均雷達", "類股平均自動因子", "類股熱度分數"]:
+            if c in category_show.columns:
+                if c == "類股平均漲幅":
+                    category_show[c] = category_show[c].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
+                else:
+                    category_show[c] = category_show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
+        st.dataframe(category_show, use_container_width=True, hide_index=True)
+
+    with tabs[2]:
+        leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).copy()
+        st.dataframe(
+            _format_df(
+                leader_df[
+                    [
+                        "股票代號",
+                        "股票名稱",
+                        "類別",
+                        "是否領先同類股",
+                        "個股原始總分",
+                        "類股平均總分",
+                        "類股熱度分數",
+                        "推薦總分",
+                        "推薦理由摘要",
+                    ]
+                ].head(top_n)
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabs[3]:
         factor_rank = rec_df.sort_values(
             ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
             ascending=[False, False, False, False]
@@ -1064,30 +1182,8 @@ def main():
                         "EPS代理分數",
                         "營收動能代理分數",
                         "獲利代理分數",
-                        "自動因子摘要",
-                    ]
-                ].head(top_n)
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with tabs[2]:
-        money_rank = rec_df.sort_values(
-            ["大戶鎖碼代理分數", "法人連買代理分數", "推薦總分"],
-            ascending=[False, False, False]
-        ).reset_index(drop=True)
-        st.dataframe(
-            _format_df(
-                money_rank[
-                    [
-                        "股票代號",
-                        "股票名稱",
-                        "類別",
                         "大戶鎖碼代理分數",
                         "法人連買代理分數",
-                        "推薦總分",
-                        "推薦等級",
                         "自動因子摘要",
                     ]
                 ].head(top_n)
@@ -1095,26 +1191,18 @@ def main():
             use_container_width=True,
             hide_index=True,
         )
-
-    with tabs[3]:
-        category_df = (
-            rec_df.groupby("類別", dropna=False)
-            .agg(股票數=("股票代號", "count"), 平均總分=("推薦總分", "mean"))
-            .reset_index()
-            .sort_values(["股票數", "平均總分"], ascending=[False, False])
-        )
-        category_df["平均總分"] = category_df["平均總分"].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
-        st.dataframe(category_df, use_container_width=True, hide_index=True)
 
     with tabs[4]:
         render_pro_info_card(
             "模組邏輯",
             [
-                ("類別已補齊", "每支股票都會盡量補到類別，不再只剩未分類。", ""),
-                ("推薦核心", "保留全自動因子、起漲判斷、推薦買點、停損、目標價。", ""),
-                ("下一步", "可再加類股強度、類股熱度、同類股領先分數。", ""),
+                ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
+                ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅與類股熱度分數。", ""),
+                ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
+                ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
+                ("實戰方向", "這樣能避免只看到單一個股強，卻忽略整個類股其實不強。", ""),
             ],
-            chips=["類別可篩選", "股神版", "可持續升級"],
+            chips=["類股強度版", "更細分類型", "股神版"],
         )
 
 
