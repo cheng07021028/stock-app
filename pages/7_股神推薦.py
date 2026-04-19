@@ -364,7 +364,6 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     temp["RET60"] = close.pct_change(60) * 100
 
     temp["UP_DAY"] = (close > close.shift(1)).astype(float)
-    temp["DOWN_DAY"] = (close < close.shift(1)).astype(float)
 
     return temp
 
@@ -408,7 +407,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# 自動因子：不需手輸
+# 分析 bundle：每檔只算一次
 # =========================================================
 def _build_auto_factor_scores(
     df: pd.DataFrame,
@@ -434,10 +433,8 @@ def _build_auto_factor_scores(
     radar_volume = _safe_float(radar.get("volume"), 50) or 50
     radar_structure = _safe_float(radar.get("structure"), 50) or 50
 
-    res20 = _safe_float(sr_snapshot.get("res_20"))
     sup20 = _safe_float(sr_snapshot.get("sup_20"))
 
-    # EPS代理：長期趨勢穩定 + 結構強 + 波動可控
     eps_proxy = 50.0
     if close_now not in [None, 0]:
         trend_bonus = 0.0
@@ -460,7 +457,6 @@ def _build_auto_factor_scores(
 
         eps_proxy = _score_clip(30 + trend_bonus + radar_structure * 0.25 + radar_trend * 0.20 - vol_penalty)
 
-    # 營收動能代理：中短期報酬 + 量能加溫 + 動能
     revenue_proxy = _score_clip(
         25
         + (_safe_float(ret20, 0) or 0) * 0.9
@@ -469,7 +465,6 @@ def _build_auto_factor_scores(
         + radar_volume * 0.20
     )
 
-    # 獲利代理：趨勢/結構/報酬綜合
     profit_proxy = _score_clip(
         30
         + signal_score * 6
@@ -478,7 +473,6 @@ def _build_auto_factor_scores(
         + (_safe_float(ret60, 0) or 0) * 0.35
     )
 
-    # 大戶鎖碼代理：量縮守價、波動收斂、貼近均線上方不破
     lock_proxy = 45.0
     if close_now not in [None, 0]:
         vol_ratio = None
@@ -507,7 +501,6 @@ def _build_auto_factor_scores(
 
         lock_proxy = _score_clip(20 + lock_bonus + radar_structure * 0.24)
 
-    # 法人連買代理：連續上漲日、帶量、動能
     recent = df.tail(5).copy()
     up_days_5 = int(recent["UP_DAY"].sum()) if "UP_DAY" in recent.columns else 0
     inst_proxy = _score_clip(
@@ -527,12 +520,12 @@ def _build_auto_factor_scores(
     )
 
     return {
+        "auto_factor_total": _avg_safe([eps_proxy, revenue_proxy, profit_proxy, lock_proxy, inst_proxy], 0),
         "eps_proxy": eps_proxy,
         "revenue_proxy": revenue_proxy,
         "profit_proxy": profit_proxy,
         "lock_proxy": lock_proxy,
         "inst_proxy": inst_proxy,
-        "fundamental_score": _avg_safe([eps_proxy, revenue_proxy, profit_proxy, lock_proxy, inst_proxy], 0),
         "factor_summary": factor_summary,
     }
 
@@ -585,6 +578,69 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date) -> dict[str, Any]:
+    hist_df, used_market = _get_history_smart(
+        stock_no=stock_no,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+    if hist_df.empty:
+        return {}
+
+    signal_snapshot = compute_signal_snapshot(hist_df)
+    sr_snapshot = compute_support_resistance_snapshot(hist_df)
+    radar = compute_radar_scores(hist_df)
+    auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
+    trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
+
+    last = hist_df.iloc[-1]
+    first = hist_df.iloc[0]
+
+    close_now = _safe_float(last.get("收盤價"))
+    close_first = _safe_float(first.get("收盤價"))
+    period_pct = None
+    if close_now is not None and close_first not in [None, 0]:
+        period_pct = ((close_now / close_first) - 1) * 100
+
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    pressure_dist = None
+    support_dist = None
+    if close_now is not None and res20 not in [None, 0]:
+        pressure_dist = ((res20 - close_now) / res20) * 100
+    if close_now is not None and sup20 not in [None, 0]:
+        support_dist = ((close_now - sup20) / sup20) * 100
+
+    radar_avg = _avg_safe(
+        [
+            _safe_float(radar.get("trend")),
+            _safe_float(radar.get("momentum")),
+            _safe_float(radar.get("volume")),
+            _safe_float(radar.get("position")),
+            _safe_float(radar.get("structure")),
+        ],
+        50.0,
+    )
+
+    return {
+        "hist_df": hist_df,
+        "used_market": used_market,
+        "signal_snapshot": signal_snapshot,
+        "sr_snapshot": sr_snapshot,
+        "radar": radar,
+        "auto_factor": auto_factor,
+        "trade_plan": trade_plan,
+        "close_now": close_now,
+        "period_pct": period_pct,
+        "pressure_dist": pressure_dist,
+        "support_dist": support_dist,
+        "radar_avg": radar_avg,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
@@ -612,69 +668,34 @@ def _build_recommend_df(
         if clean_categories and category not in clean_categories:
             continue
 
-        hist_df, used_market = _get_history_smart(
+        bundle = _analyze_stock_bundle(
             stock_no=code,
             stock_name=stock_name,
             market_type=market_type,
-            start_date=start_dt,
-            end_date=end_dt,
+            start_dt=start_dt,
+            end_dt=end_dt,
         )
-        if hist_df.empty:
+        if not bundle:
             continue
 
-        signal_snapshot = compute_signal_snapshot(hist_df)
-        sr_snapshot = compute_support_resistance_snapshot(hist_df)
-        radar = compute_radar_scores(hist_df)
-
-        signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
+        signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
         if signal_score < min_signal_score:
             continue
 
-        last = hist_df.iloc[-1]
-        first = hist_df.iloc[0]
-
-        close_now = _safe_float(last.get("收盤價"))
-        close_first = _safe_float(first.get("收盤價"))
-        period_pct = None
-        if close_now is not None and close_first not in [None, 0]:
-            period_pct = ((close_now / close_first) - 1) * 100
-
-        res20 = _safe_float(sr_snapshot.get("res_20"))
-        sup20 = _safe_float(sr_snapshot.get("sup_20"))
-        pressure_dist = None
-        support_dist = None
-        if close_now is not None and res20 not in [None, 0]:
-            pressure_dist = ((res20 - close_now) / res20) * 100
-        if close_now is not None and sup20 not in [None, 0]:
-            support_dist = ((close_now - sup20) / sup20) * 100
-
-        radar_avg = _avg_safe(
-            [
-                _safe_float(radar.get("trend")),
-                _safe_float(radar.get("momentum")),
-                _safe_float(radar.get("volume")),
-                _safe_float(radar.get("position")),
-                _safe_float(radar.get("structure")),
-            ],
-            50.0,
-        )
-
-        auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
-        trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
-
-        technical_score = _score_clip(signal_score * 12 + radar_avg * 0.45)
+        auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
+        technical_score = _score_clip(signal_score * 12 + (_safe_float(bundle["radar_avg"], 50) or 50) * 0.45)
 
         position_bonus = 0.0
-        if pressure_dist is not None and 0 <= pressure_dist <= 8:
+        if bundle["pressure_dist"] is not None and 0 <= bundle["pressure_dist"] <= 8:
             position_bonus += 8.0
-        if support_dist is not None and 0 <= support_dist <= 6:
+        if bundle["support_dist"] is not None and 0 <= bundle["support_dist"] <= 6:
             position_bonus += 6.0
 
         composite = (
             technical_score * 0.44
-            + auto_factor["fundamental_score"] * 0.40
+            + auto_factor_total * 0.40
             + position_bonus
-            + (_safe_float(period_pct, 0) * 0.10 if period_pct is not None else 0)
+            + (_safe_float(bundle["period_pct"], 0) * 0.10 if bundle["period_pct"] is not None else 0)
         )
         composite = _score_clip(composite)
 
@@ -693,32 +714,32 @@ def _build_recommend_df(
             {
                 "股票代號": code,
                 "股票名稱": stock_name,
-                "市場別": used_market,
+                "市場別": bundle["used_market"],
                 "類別": category or "未分類",
-                "最新價": close_now,
-                "區間漲跌幅%": period_pct,
+                "最新價": bundle["close_now"],
+                "區間漲跌幅%": bundle["period_pct"],
                 "訊號分數": signal_score,
-                "雷達均分": radar_avg,
-                "自動因子總分": auto_factor["fundamental_score"],
-                "EPS代理分數": auto_factor["eps_proxy"],
-                "營收動能代理分數": auto_factor["revenue_proxy"],
-                "獲利代理分數": auto_factor["profit_proxy"],
-                "大戶鎖碼代理分數": auto_factor["lock_proxy"],
-                "法人連買代理分數": auto_factor["inst_proxy"],
-                "20日壓力距離%": pressure_dist,
-                "20日支撐距離%": support_dist,
+                "雷達均分": bundle["radar_avg"],
+                "自動因子總分": auto_factor_total,
+                "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
+                "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
+                "獲利代理分數": bundle["auto_factor"]["profit_proxy"],
+                "大戶鎖碼代理分數": bundle["auto_factor"]["lock_proxy"],
+                "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
+                "20日壓力距離%": bundle["pressure_dist"],
+                "20日支撐距離%": bundle["support_dist"],
                 "推薦總分": composite,
                 "推薦等級": recommendation,
-                "起漲判斷": trade_plan["launch_tag"],
-                "推薦買點_突破": trade_plan["breakout_buy"],
-                "推薦買點_拉回": trade_plan["pullback_buy"],
-                "停損價": trade_plan["stop_price"],
-                "賣出目標1": trade_plan["sell_target_1"],
-                "賣出目標2": trade_plan["sell_target_2"],
-                "風險報酬_拉回": trade_plan["rr1"],
-                "風險報酬_突破": trade_plan["rr2"],
-                "自動因子摘要": auto_factor["factor_summary"],
-                "雷達摘要": _safe_str(radar.get("summary")) or "—",
+                "起漲判斷": bundle["trade_plan"]["launch_tag"],
+                "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
+                "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
+                "停損價": bundle["trade_plan"]["stop_price"],
+                "賣出目標1": bundle["trade_plan"]["sell_target_1"],
+                "賣出目標2": bundle["trade_plan"]["sell_target_2"],
+                "風險報酬_拉回": bundle["trade_plan"]["rr1"],
+                "風險報酬_突破": bundle["trade_plan"]["rr2"],
+                "自動因子摘要": bundle["auto_factor"]["factor_summary"],
+                "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
             }
         )
 
@@ -781,7 +802,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜全自動因子版",
-        subtitle="不用你手輸因子，系統自動從價量、結構、趨勢、支撐壓力推估 EPS / 營收 / 獲利 / 鎖碼 / 法人代理因子。",
+        subtitle="功能不變，改做速度優化。保留起漲判斷、買點、停損、目標價與全自動因子。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -842,15 +863,14 @@ def main():
         st.number_input("訊號分數下限", key=_k("min_signal_score"), step=1.0)
 
     render_pro_info_card(
-        "自動因子說明",
+        "效能優化重點",
         [
-            ("EPS代理分數", "以長期均線結構、波動穩定度、趨勢延續性推估。", ""),
-            ("營收動能代理分數", "以 20/60 日漲幅、量能、動能強弱推估。", ""),
-            ("獲利代理分數", "以波段報酬、趨勢、結構強度綜合推估。", ""),
-            ("大戶鎖碼代理分數", "以量縮守價、波動收斂、支撐不破推估。", ""),
-            ("法人連買代理分數", "以連續上漲日、動能、量價共振推估。", ""),
+            ("先縮池再分析", "先依市場 / 類別 / 群組縮小範圍，再逐檔分析。", ""),
+            ("每檔一次 bundle", "signal / radar / support-resistance / 自動因子 / 交易計畫只算一次。", ""),
+            ("歷史資料快取", "同股票同區間不重抓、不重算。", ""),
+            ("顯示延後格式化", "先排序數值、最後才轉字串，減少大量格式化成本。", ""),
         ],
-        chips=["全自動", "不用手輸", "代理因子"],
+        chips=["功能不變", "只加速", "股神版"],
     )
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
@@ -903,7 +923,7 @@ def main():
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
             {"label": "優先觀察", "value": good_count, "delta": "次高等級", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "全自動因子", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "效能優化版", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -1042,14 +1062,13 @@ def main():
         render_pro_info_card(
             "模組邏輯",
             [
-                ("自動化方向", "不再依賴你手動輸入 EPS、營收、獲利、籌碼資料。", ""),
-                ("核心方法", "直接用價量、均線、ATR、結構、支撐壓力，推估五大代理因子。", ""),
-                ("起漲判斷", "由訊號分數、雷達均分、位置與結構綜合決定。", ""),
-                ("推薦買點", "同時提供拉回買點與突破買點。", ""),
-                ("停損 / 賣點", "依 20 日支撐、20 / 60 日壓力與 ATR 推估。", ""),
-                ("後續升級", "未來可再把真實財報與法人資料接進來，取代代理因子。", ""),
+                ("功能不變", "保留全自動因子、起漲判斷、推薦買點、停損、目標價。", ""),
+                ("速度優化", "每檔只跑一次完整分析 bundle，避免重複運算。", ""),
+                ("全市場模式", "先依市場 / 類別 / 掃描上限縮池，再分析。", ""),
+                ("顯示優化", "排序先用原始數值，最後輸出時再格式化。", ""),
+                ("快取策略", "主檔、歷史資料、單股 bundle、完整推薦表都已 cache。", ""),
             ],
-            chips=["全自動因子", "不用手輸", "股神版"],
+            chips=["功能不變", "只加速", "股神版"],
         )
 
 
