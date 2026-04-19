@@ -18,7 +18,6 @@ from utils import (
     render_pro_info_card,
     render_pro_kpi_row,
     render_pro_section,
-    save_watchlist,
 )
 
 PAGE_TITLE = "自選股中心"
@@ -67,6 +66,14 @@ def _project_root() -> Path:
     return parent
 
 
+def _payload_hash(payload: dict[str, list[dict[str, str]]]) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.md5(text.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+
 def _atomic_write_json(path: Path, payload: dict[str, list[dict[str, str]]]) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,15 +86,7 @@ def _atomic_write_json(path: Path, payload: dict[str, list[dict[str, str]]]) -> 
         return False
 
 
-def _payload_hash(payload: dict[str, list[dict[str, str]]]) -> str:
-    try:
-        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
-    except Exception:
-        return ""
-
-
-def _get_watchlist_candidate_paths() -> list[Path]:
+def _get_watchlist_file_paths() -> list[Path]:
     root = _project_root()
     cwd = Path.cwd().resolve()
 
@@ -98,14 +97,14 @@ def _get_watchlist_candidate_paths() -> list[Path]:
         cwd / "data" / "watchlist.json",
     ]
 
+    final_paths = []
     seen = set()
-    output = []
     for p in candidates:
         rp = p.resolve()
         if str(rp) not in seen:
             seen.add(str(rp))
-            output.append(rp)
-    return output
+            final_paths.append(rp)
+    return final_paths
 
 
 # =========================================================
@@ -135,7 +134,6 @@ def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
                                 "market": market,
                             }
                         )
-
     return result
 
 
@@ -147,8 +145,8 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
         if not g:
             continue
 
-        payload[g] = []
         seen = set()
+        normalized_items = []
 
         for item in items:
             if not isinstance(item, dict):
@@ -166,7 +164,7 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
                 continue
             seen.add(key)
 
-            payload[g].append(
+            normalized_items.append(
                 {
                     "code": code,
                     "name": name,
@@ -175,53 +173,52 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
             )
 
         payload[g] = sorted(
-            payload[g],
-            key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name")))
+            normalized_items,
+            key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))),
         )
 
     return payload
 
 
-def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
+def _force_write_watchlist_json(data: dict[str, list[dict[str, str]]]) -> bool:
+    """
+    這裡就是你要的『強制寫回』核心。
+    只要有任何新增/刪除/修改，就一定呼叫這支。
+    """
     payload = _normalize_watchlist_payload(data)
+    paths = _get_watchlist_file_paths()
 
     success_paths = []
     failed_paths = []
 
-    for path in _get_watchlist_candidate_paths():
-        ok = _atomic_write_json(path, payload)
+    for p in paths:
+        ok = _atomic_write_json(p, payload)
         if ok:
-            success_paths.append(str(path))
+            success_paths.append(str(p))
         else:
-            failed_paths.append(str(path))
+            failed_paths.append(str(p))
 
-    try:
-        util_ok = save_watchlist(payload, filepath=str(_project_root() / "watchlist.json"))
-        if util_ok:
-            p = str((_project_root() / "watchlist.json").resolve())
-            if p not in success_paths:
-                success_paths.append(p)
-    except Exception:
-        pass
+    # 至少主路徑一定再補寫一次
+    main_path = (_project_root() / "watchlist.json").resolve()
+    if str(main_path) not in success_paths:
+        ok = _atomic_write_json(main_path, payload)
+        if ok:
+            success_paths.append(str(main_path))
+        else:
+            failed_paths.append(str(main_path))
 
-    try:
-        util_ok2 = save_watchlist(payload, filepath="watchlist.json")
-        if util_ok2:
-            p = str((Path.cwd() / "watchlist.json").resolve())
-            if p not in success_paths:
-                success_paths.append(p)
-    except Exception:
-        pass
+    ok_any = len(success_paths) > 0
 
     version = int(st.session_state.get(_k("version"), 0)) + 1
-    payload_md5 = _payload_hash(payload)
     saved_at = _now_text()
+    payload_md5 = _payload_hash(payload)
 
+    # 強制同步所有 session_state
     st.session_state[_k("watchlist")] = copy.deepcopy(payload)
+    st.session_state[_k("version")] = version
+    st.session_state[_k("last_saved_at")] = saved_at
     st.session_state[_k("last_saved_paths")] = success_paths
     st.session_state[_k("last_failed_paths")] = failed_paths
-    st.session_state[_k("last_saved_at")] = saved_at
-    st.session_state[_k("version")] = version
     st.session_state[_k("payload_hash")] = payload_md5
 
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
@@ -229,16 +226,16 @@ def _save_watchlist_data(data: dict[str, list[dict[str, str]]]) -> bool:
     st.session_state["watchlist_last_saved_at"] = saved_at
     st.session_state["watchlist_last_saved_hash"] = payload_md5
 
-    return len(success_paths) > 0
+    return ok_any
 
 
-def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢查檔案權限。") -> bool:
-    ok = _save_watchlist_data(st.session_state[_k("watchlist")])
+def _persist_watchlist(success_msg: str, fail_msg: str = "watchlist.json 寫回失敗，請檢查檔案權限。") -> bool:
+    ok = _force_write_watchlist_json(st.session_state[_k("watchlist")])
     if ok:
         saved_paths = st.session_state.get(_k("last_saved_paths"), [])
         path_text = "；".join(saved_paths[:2]) if saved_paths else "watchlist.json"
         version = st.session_state.get(_k("version"), 0)
-        _set_status(f"{success_msg}｜已回寫：{path_text}｜版本 v{version}｜{_now_text()}", "success")
+        _set_status(f"{success_msg}｜已強制寫回：{path_text}｜版本 v{version}｜{_now_text()}", "success")
     else:
         failed_paths = st.session_state.get(_k("last_failed_paths"), [])
         fail_text = "；".join(failed_paths[:2]) if failed_paths else ""
@@ -246,6 +243,7 @@ def _persist_watchlist(success_msg: str, fail_msg: str = "儲存失敗，請檢�
     return ok
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def _load_stock_master() -> pd.DataFrame:
     dfs = []
 
@@ -277,9 +275,7 @@ def _load_stock_master() -> pd.DataFrame:
     out["code"] = out["code"].map(_normalize_code)
     out["name"] = out["name"].map(_safe_str)
     out["market"] = out["market"].map(_safe_str).replace("", "上市")
-
-    out = out[out["code"] != ""]
-    out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
     return out
 
 
@@ -345,33 +341,22 @@ def _init_state():
     if _k("clear_group_confirm") not in st.session_state:
         st.session_state[_k("clear_group_confirm")] = False
 
-    # 下一輪套用，避免 StreamlitAPIException
-    if _k("batch_delete_codes_next") in st.session_state:
-        st.session_state[_k("batch_delete_codes")] = st.session_state.pop(_k("batch_delete_codes_next"))
-
-    if _k("clear_group_confirm_next") in st.session_state:
-        st.session_state[_k("clear_group_confirm")] = st.session_state.pop(_k("clear_group_confirm_next"))
-
-    if _k("add_code_next") in st.session_state:
-        st.session_state[_k("add_code")] = st.session_state.pop(_k("add_code_next"))
-
-    if _k("add_name_next") in st.session_state:
-        st.session_state[_k("add_name")] = st.session_state.pop(_k("add_name_next"))
-
-    if _k("add_market_next") in st.session_state:
-        st.session_state[_k("add_market")] = st.session_state.pop(_k("add_market_next"))
-
-    if _k("bulk_text_next") in st.session_state:
-        st.session_state[_k("bulk_text")] = st.session_state.pop(_k("bulk_text_next"))
-
-    if _k("selected_group_next") in st.session_state:
-        st.session_state[_k("selected_group")] = st.session_state.pop(_k("selected_group_next"))
-
-    if _k("new_group_name_next") in st.session_state:
-        st.session_state[_k("new_group_name")] = st.session_state.pop(_k("new_group_name_next"))
-
-    if _k("rename_group_name_next") in st.session_state:
-        st.session_state[_k("rename_group_name")] = st.session_state.pop(_k("rename_group_name_next"))
+    # 延後套用，避免 widget key 衝突
+    for name in [
+        "batch_delete_codes",
+        "clear_group_confirm",
+        "add_code",
+        "add_name",
+        "add_market",
+        "bulk_text",
+        "selected_group",
+        "new_group_name",
+        "rename_group_name",
+    ]:
+        next_key = _k(f"{name}_next")
+        real_key = _k(name)
+        if next_key in st.session_state:
+            st.session_state[real_key] = st.session_state.pop(next_key)
 
     _repair_selected_group()
 
@@ -483,7 +468,7 @@ def _rename_group(old_name: str, new_name: str) -> tuple[bool, str]:
     if not new_g:
         return False, "請輸入新的群組名稱。"
     if old_g == new_g:
-        return False, "新舊群組名稱相同，無需修改。"
+        return False, "新舊群組名稱相同。"
 
     watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
 
@@ -602,7 +587,6 @@ def _delete_multiple_stocks(group_name: str, codes: list[str]) -> tuple[int, str
         return 0, "請先勾選要刪除的股票。"
 
     watchlist = copy.deepcopy(st.session_state[_k("watchlist")])
-
     if g not in watchlist:
         return 0, "群組不存在。"
 
@@ -735,10 +719,7 @@ def _filter_master_df(df: pd.DataFrame, keyword: str) -> pd.DataFrame:
     if not q:
         return work.head(100).copy()
 
-    exact = work[
-        (work["code"].str.lower() == q)
-        | (work["name"].str.lower() == q)
-    ].copy()
+    exact = work[(work["code"].str.lower() == q) | (work["name"].str.lower() == q)].copy()
     if not exact.empty:
         return exact.head(100).copy()
 
@@ -776,23 +757,18 @@ def main():
 
     render_pro_hero(
         title="自選股中心｜股神版",
-        subtitle="群組管理、群組改名、單筆新增、批次貼上、批次刪除、真同步回寫 watchlist.json。",
+        subtitle="新增、刪除、改名、批次加入、批次刪除、清空群組後，都會強制寫回 watchlist.json。",
     )
 
     overview_df = _build_overview_df(watchlist)
     group_summary_df = _build_group_summary_df(watchlist)
 
-    total_groups = len(watchlist)
-    total_stocks = len(overview_df)
-    listed_count = int((overview_df["市場別"] == "上市").sum()) if not overview_df.empty else 0
-    otc_count = int((overview_df["市場別"] == "上櫃").sum()) if not overview_df.empty else 0
-
     render_pro_kpi_row(
         [
-            {"label": "群組數", "value": total_groups, "delta": "自選股群組", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "股票總數", "value": total_stocks, "delta": "自選股總計", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "同步版本", "value": st.session_state.get(_k("version"), 0), "delta": "watchlist_version", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "最後儲存", "value": st.session_state.get(_k("last_saved_at"), "—") or "—", "delta": "自動回寫", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "群組數", "value": len(watchlist), "delta": "自選股群組", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "股票總數", "value": len(overview_df), "delta": "自選股總計", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "同步版本", "value": st.session_state.get(_k("version"), 0), "delta": "強制寫回", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "最後儲存", "value": st.session_state.get(_k("last_saved_at"), "—") or "—", "delta": "watchlist.json", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -817,12 +793,11 @@ def main():
         st.selectbox("目前群組", options=group_options, key=_k("selected_group"))
 
     with c2:
-        st.text_input("新增群組名稱", key=_k("new_group_name"), placeholder="例如：AI / 半導體 / 高股息")
+        st.text_input("新增群組名稱", key=_k("new_group_name"))
 
     with c3:
         if st.button("新增群組", use_container_width=True, type="primary"):
-            new_group = _safe_str(st.session_state.get(_k("new_group_name"), ""))
-            ok, msg = _create_group(new_group)
+            ok, msg = _create_group(_safe_str(st.session_state.get(_k("new_group_name"), "")))
             if ok:
                 _persist_watchlist(msg)
                 st.session_state[_k("new_group_name_next")] = ""
@@ -833,7 +808,7 @@ def main():
     r1, r2, r3 = st.columns([3, 2, 2])
 
     with r1:
-        st.text_input("目前群組改名為", key=_k("rename_group_name"), placeholder="輸入新的群組名稱")
+        st.text_input("目前群組改名為", key=_k("rename_group_name"))
 
     with r2:
         if st.button("套用群組改名", use_container_width=True):
@@ -856,38 +831,23 @@ def main():
                 _set_status(msg, "warning")
             st.rerun()
 
-    d1, d2 = st.columns([2, 2])
-    with d1:
-        if st.button("手動儲存自選股", use_container_width=True):
-            _persist_watchlist("已手動儲存 watchlist.json")
-            st.rerun()
-
-    with d2:
-        if st.button("同步版本 +1 並強制回寫", use_container_width=True):
-            _persist_watchlist("已強制同步自選股版本")
-            st.rerun()
-
     render_pro_section("單筆新增股票")
 
     add_group_options = list(st.session_state[_k("watchlist")].keys()) if st.session_state[_k("watchlist")] else [""]
     if _safe_str(st.session_state.get(_k("add_group_select"), "")) not in add_group_options:
         st.session_state[_k("add_group_select")] = add_group_options[0] if add_group_options else ""
 
-    a1, a2, a3, a4 = st.columns([2, 2, 2, 2])
-
+    a1, a2, a3, a4 = st.columns(4)
     with a1:
         add_group = st.selectbox("加入到群組", options=add_group_options, key=_k("add_group_select"))
-
     with a2:
-        st.text_input("股票代碼（可直接打名稱）", key=_k("add_code"), placeholder="例如：2330 或 台積電")
-
+        st.text_input("股票代碼（可直接打名稱）", key=_k("add_code"))
     with a3:
-        st.text_input("股票名稱（也可直接打名稱新增）", key=_k("add_name"), placeholder="例如：台積電")
-
+        st.text_input("股票名稱", key=_k("add_name"))
     with a4:
         st.selectbox("市場別", ["上市", "上櫃"], key=_k("add_market"))
 
-    b1, b2 = st.columns([2, 2])
+    b1, b2 = st.columns(2)
     with b1:
         if st.button("新增這檔股票", use_container_width=True, type="primary"):
             ok, msg = _add_stock(
@@ -896,7 +856,6 @@ def main():
                 st.session_state.get(_k("add_name"), ""),
                 st.session_state.get(_k("add_market"), "上市"),
             )
-
             if ok:
                 _persist_watchlist(msg)
                 st.session_state[_k("add_code_next")] = ""
@@ -904,21 +863,17 @@ def main():
                 st.session_state[_k("add_market_next")] = "上市"
             else:
                 _set_status(msg, "warning")
-
             st.rerun()
 
     with b2:
         if st.button("自動帶入資料", use_container_width=True):
-            raw_code = _safe_str(st.session_state.get(_k("add_code"), ""))
-            raw_name = _safe_str(st.session_state.get(_k("add_name"), ""))
-
-            keyword = raw_code or raw_name
+            keyword = _safe_str(st.session_state.get(_k("add_code"), "")) or _safe_str(st.session_state.get(_k("add_name"), ""))
             if not keyword:
                 _set_status("請先輸入股票代碼或股票名稱。", "warning")
             else:
                 code, name, market = _find_stock_by_code_or_name(keyword)
                 if not code:
-                    _set_status("找不到對應股票，請確認名稱或代碼。", "warning")
+                    _set_status("找不到對應股票。", "warning")
                 else:
                     st.session_state[_k("add_code_next")] = code
                     st.session_state[_k("add_name_next")] = name
@@ -931,7 +886,7 @@ def main():
     st.text_area(
         "每行一筆：股票代碼,股票名稱,市場別。股票名稱 / 市場別可省略。",
         key=_k("bulk_text"),
-        height=160,
+        height=150,
         placeholder="2330,台積電,上市\n2454,聯發科\n3548,兆利,上櫃",
     )
 
@@ -939,7 +894,7 @@ def main():
     if _safe_str(st.session_state.get(_k("bulk_group_select"), "")) not in bulk_group_options:
         st.session_state[_k("bulk_group_select")] = bulk_group_options[0] if bulk_group_options else ""
 
-    e1, e2 = st.columns([2, 2])
+    e1, e2 = st.columns(2)
     with e1:
         bulk_group = st.selectbox("批次加入到群組", options=bulk_group_options, key=_k("bulk_group_select"))
     with e2:
@@ -949,10 +904,10 @@ def main():
                 _persist_watchlist(f"批次加入完成：成功 {ok_count} 筆")
                 st.session_state[_k("bulk_text_next")] = ""
             else:
-                _set_status("批次加入失敗，請確認格式或避免重複股票。", "warning")
+                _set_status("批次加入失敗，請確認格式或避免重複。", "warning")
             st.rerun()
 
-    left, right = st.columns([1, 1])
+    left, right = st.columns(2)
 
     with left:
         render_pro_section("群組總覽")
@@ -966,9 +921,9 @@ def main():
         saved_path_text = " / ".join(last_saved_paths[:2]) if last_saved_paths else "尚未儲存"
 
         render_pro_info_card(
-            "管理提醒",
+            "寫回狀態",
             [
-                ("自動回寫", "新增 / 刪除 / 批次加入 / 群組改名 / 清空群組後立即寫回 JSON。", ""),
+                ("強制寫回", "新增 / 刪除 / 改名 / 批次加入 / 批次刪除 / 清空群組，都會立即落地。", ""),
                 ("實際路徑", saved_path_text, ""),
                 ("同步版本", f"v{st.session_state.get(_k('version'), 0)}", ""),
                 ("最後儲存", last_saved_at or "—", ""),
@@ -977,7 +932,7 @@ def main():
 
     with right:
         render_pro_section("股票資料庫搜尋")
-        st.text_input("搜尋股票代碼 / 名稱 / 市場別", key=_k("search_text"), placeholder="例如：2330 / 台積電 / 3548 / 兆利 / 上櫃")
+        st.text_input("搜尋股票代碼 / 名稱 / 市場別", key=_k("search_text"))
         search_df = _filter_master_df(master_df, st.session_state.get(_k("search_text"), ""))
         if search_df.empty:
             st.info("查無符合資料。")
@@ -988,8 +943,8 @@ def main():
 
     render_pro_section("目前群組明細")
 
-    current_items = st.session_state[_k("watchlist")].get(_safe_str(st.session_state.get(_k("selected_group"), "")), [])
     current_group_name = _safe_str(st.session_state.get(_k("selected_group"), ""))
+    current_items = st.session_state[_k("watchlist")].get(current_group_name, [])
 
     current_df = pd.DataFrame(
         [
@@ -1009,7 +964,7 @@ def main():
     else:
         st.dataframe(current_df, use_container_width=True, hide_index=True)
 
-        m1, m2 = st.columns([2, 2])
+        m1, m2 = st.columns(2)
 
         with m1:
             remove_code = st.selectbox(
@@ -1040,7 +995,7 @@ def main():
                 key=_k("batch_delete_codes"),
             )
 
-            x1, x2 = st.columns([1, 1])
+            x1, x2 = st.columns(2)
             with x1:
                 if st.button("批次刪除勾選", use_container_width=True):
                     removed, msg = _delete_multiple_stocks(
@@ -1059,17 +1014,15 @@ def main():
                     _set_status(f"已全選 {len(all_codes)} 檔，可直接批次刪除。", "info")
                     st.rerun()
 
-        st.checkbox(
-            "確認清空目前群組全部股票",
-            key=_k("clear_group_confirm"),
-        )
+        st.checkbox("確認清空目前群組全部股票", key=_k("clear_group_confirm"))
 
         if st.button("清空目前群組", use_container_width=True):
             if not st.session_state.get(_k("clear_group_confirm"), False):
                 _set_status("請先勾選確認清空。", "warning")
             else:
                 removed, msg = _clear_group(current_group_name)
-                _persist_watchlist(msg if removed >= 0 else "已清空群組")
+                if removed >= 0:
+                    _persist_watchlist(msg)
             st.rerun()
 
     render_pro_section("全部自選股總覽")
