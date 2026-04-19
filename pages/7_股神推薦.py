@@ -905,7 +905,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# 主畫面
+# Main：按鈕觸發版
 # =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
@@ -915,29 +915,26 @@ def main():
     master_df = _load_master_df()
     today = date.today()
 
-    if _k("universe_mode") not in st.session_state:
-        st.session_state[_k("universe_mode")] = "自選群組"
-    if _k("group") not in st.session_state:
-        groups = list(watchlist_map.keys())
-        st.session_state[_k("group")] = groups[0] if groups else ""
-    if _k("days") not in st.session_state:
-        st.session_state[_k("days")] = 120
-    if _k("top_n") not in st.session_state:
-        st.session_state[_k("top_n")] = 20
-    if _k("manual_codes") not in st.session_state:
-        st.session_state[_k("manual_codes")] = ""
-    if _k("scan_limit") not in st.session_state:
-        st.session_state[_k("scan_limit")] = 200
-    if _k("selected_categories") not in st.session_state:
-        st.session_state[_k("selected_categories")] = ["全部"]
-    if _k("min_total_score") not in st.session_state:
-        st.session_state[_k("min_total_score")] = 55.0
-    if _k("min_signal_score") not in st.session_state:
-        st.session_state[_k("min_signal_score")] = -2.0
+    defaults = {
+        "universe_mode": "自選群組",
+        "group": list(watchlist_map.keys())[0] if watchlist_map else "",
+        "days": 120,
+        "top_n": 20,
+        "manual_codes": "",
+        "scan_limit": 200,
+        "selected_categories": ["全部"],
+        "min_total_score": 55.0,
+        "min_signal_score": -2.0,
+        "submitted_once": False,
+        "focus_code": "",
+    }
+    for name, value in defaults.items():
+        if _k(name) not in st.session_state:
+            st.session_state[_k(name)] = value
 
     render_pro_hero(
         title="股神推薦｜類股強度版",
-        subtitle="類型已細分，並把類股熱度、同類股領先度一起納入推薦分數。",
+        subtitle="改成按下按鈕才開始推薦，其他功能維持不變。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -950,52 +947,126 @@ def main():
             )
         )
 
-    render_pro_section("掃描設定")
-
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-    with c1:
-        st.selectbox("掃描範圍", ["自選群組", "手動輸入", "全市場", "上市", "上櫃"], key=_k("universe_mode"))
-    with c2:
-        group_options = list(watchlist_map.keys()) if watchlist_map else [""]
-        if st.session_state.get(_k("group"), "") not in group_options:
-            st.session_state[_k("group")] = group_options[0] if group_options else ""
-        st.selectbox("自選群組", group_options, key=_k("group"))
-    with c3:
-        st.selectbox("觀察天數", [60, 90, 120, 180, 240], key=_k("days"))
-    with c4:
-        st.selectbox("輸出 Top N", [10, 20, 30, 50], key=_k("top_n"))
-
-    d1, d2 = st.columns([2, 2])
-    with d1:
-        st.selectbox("掃描上限筆數", [100, 200, 300, 500], key=_k("scan_limit"))
-    with d2:
-        st.text_area(
-            "手動輸入股票（可代碼 / 名稱，一行一檔）",
-            key=_k("manual_codes"),
-            height=110,
-            placeholder="2330\n2454\n3548\n台積電",
-        )
-
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
-    if any(x not in category_options for x in st.session_state.get(_k("selected_categories"), [])):
+    saved_categories = st.session_state.get(_k("selected_categories"), ["全部"])
+    saved_categories = [x for x in saved_categories if x in category_options] or ["全部"]
+
+    render_pro_section("掃描設定")
+
+    with st.form(key=_k("recommend_form"), clear_on_submit=False):
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+
+        with c1:
+            universe_options = ["自選群組", "手動輸入", "全市場", "上市", "上櫃"]
+            saved_universe = st.session_state.get(_k("universe_mode"), "自選群組")
+            if saved_universe not in universe_options:
+                saved_universe = "自選群組"
+            form_universe_mode = st.selectbox(
+                "掃描範圍",
+                universe_options,
+                index=universe_options.index(saved_universe),
+            )
+
+        with c2:
+            group_options = list(watchlist_map.keys()) if watchlist_map else [""]
+            saved_group = st.session_state.get(_k("group"), "")
+            if saved_group not in group_options:
+                saved_group = group_options[0] if group_options else ""
+            form_group = st.selectbox(
+                "自選群組",
+                group_options,
+                index=group_options.index(saved_group) if saved_group in group_options else 0,
+            )
+
+        with c3:
+            day_options = [60, 90, 120, 180, 240]
+            saved_days = int(st.session_state.get(_k("days"), 120))
+            if saved_days not in day_options:
+                saved_days = 120
+            form_days = st.selectbox("觀察天數", day_options, index=day_options.index(saved_days))
+
+        with c4:
+            topn_options = [10, 20, 30, 50]
+            saved_topn = int(st.session_state.get(_k("top_n"), 20))
+            if saved_topn not in topn_options:
+                saved_topn = 20
+            form_top_n = st.selectbox("輸出 Top N", topn_options, index=topn_options.index(saved_topn))
+
+        d1, d2 = st.columns([2, 2])
+
+        with d1:
+            limit_options = [100, 200, 300, 500]
+            saved_limit = int(st.session_state.get(_k("scan_limit"), 200))
+            if saved_limit not in limit_options:
+                saved_limit = 200
+            form_scan_limit = st.selectbox("掃描上限筆數", limit_options, index=limit_options.index(saved_limit))
+
+        with d2:
+            form_manual_codes = st.text_area(
+                "手動輸入股票（可代碼 / 名稱，一行一檔）",
+                value=st.session_state.get(_k("manual_codes"), ""),
+                height=110,
+                placeholder="2330\n2454\n3548\n台積電",
+            )
+
+        render_pro_section("類型篩選")
+        form_selected_categories = st.multiselect(
+            "選擇類型（可多選）",
+            options=category_options,
+            default=saved_categories,
+            help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
+        )
+
+        render_pro_section("推薦門檻")
+        f1, f2 = st.columns(2)
+        with f1:
+            form_min_total_score = st.number_input(
+                "推薦總分下限",
+                value=float(st.session_state.get(_k("min_total_score"), 55.0)),
+                step=1.0,
+            )
+        with f2:
+            form_min_signal_score = st.number_input(
+                "訊號分數下限",
+                value=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+                step=1.0,
+            )
+
+        btn1, btn2, btn3 = st.columns([2, 2, 2])
+        with btn1:
+            submit_recommend = st.form_submit_button("開始推薦", use_container_width=True, type="primary")
+        with btn2:
+            submit_refresh = st.form_submit_button("重新推薦", use_container_width=True)
+        with btn3:
+            submit_clear = st.form_submit_button("清空條件", use_container_width=True)
+
+    if submit_clear:
+        st.session_state[_k("universe_mode")] = "自選群組"
+        st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
+        st.session_state[_k("days")] = 120
+        st.session_state[_k("top_n")] = 20
+        st.session_state[_k("manual_codes")] = ""
+        st.session_state[_k("scan_limit")] = 200
         st.session_state[_k("selected_categories")] = ["全部"]
+        st.session_state[_k("min_total_score")] = 55.0
+        st.session_state[_k("min_signal_score")] = -2.0
+        st.session_state[_k("submitted_once")] = False
+        st.session_state[_k("focus_code")] = ""
+        st.rerun()
 
-    render_pro_section("類型篩選")
-    st.multiselect(
-        "選擇類型（可多選）",
-        options=category_options,
-        key=_k("selected_categories"),
-        help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
-    )
-
-    render_pro_section("推薦門檻")
-    f1, f2 = st.columns(2)
-    with f1:
-        st.number_input("推薦總分下限", key=_k("min_total_score"), step=1.0)
-    with f2:
-        st.number_input("訊號分數下限", key=_k("min_signal_score"), step=1.0)
+    if submit_recommend or submit_refresh:
+        st.session_state[_k("universe_mode")] = form_universe_mode
+        st.session_state[_k("group")] = form_group
+        st.session_state[_k("days")] = form_days
+        st.session_state[_k("top_n")] = form_top_n
+        st.session_state[_k("manual_codes")] = form_manual_codes
+        st.session_state[_k("scan_limit")] = form_scan_limit
+        st.session_state[_k("selected_categories")] = form_selected_categories if form_selected_categories else ["全部"]
+        st.session_state[_k("min_total_score")] = float(form_min_total_score)
+        st.session_state[_k("min_signal_score")] = float(form_min_signal_score)
+        st.session_state[_k("submitted_once")] = True
 
     render_pro_info_card(
         "類股強度邏輯",
@@ -1007,6 +1078,10 @@ def main():
         ],
         chips=["類型更細", "類股強度", "股神版"],
     )
+
+    if not st.session_state.get(_k("submitted_once"), False):
+        st.info("請先設定條件，再按「開始推薦」。")
+        return
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
     universe_mode = _safe_str(st.session_state.get(_k("universe_mode"), ""))
@@ -1025,7 +1100,7 @@ def main():
 
     if not universe_items:
         st.warning("目前掃描池沒有股票。")
-        st.stop()
+        return
 
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
@@ -1043,7 +1118,7 @@ def main():
 
     if rec_df.empty:
         st.error("掃描完成，但沒有符合條件的股票。")
-        st.stop()
+        return
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.head(top_n).copy()
@@ -1091,6 +1166,9 @@ def main():
     )
 
     pick_options = top_df["股票代號"].astype(str).tolist()
+    if pick_options and st.session_state.get(_k("focus_code"), "") not in pick_options:
+        st.session_state[_k("focus_code")] = pick_options[0]
+
     code_to_row = {str(r["股票代號"]): r for _, r in rec_df.iterrows()}
 
     render_pro_section("單股股神劇本")
@@ -1196,13 +1274,13 @@ def main():
         render_pro_info_card(
             "模組邏輯",
             [
+                ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑。", ""),
                 ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
                 ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅與類股熱度分數。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
                 ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
-                ("實戰方向", "這樣能避免只看到單一個股強，卻忽略整個類股其實不強。", ""),
             ],
-            chips=["類股強度版", "更細分類型", "股神版"],
+            chips=["按鈕觸發", "類股強度版", "股神版"],
         )
 
 
