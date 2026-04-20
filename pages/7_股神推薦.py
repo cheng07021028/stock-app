@@ -261,6 +261,144 @@ def _load_master_df() -> pd.DataFrame:
     return out
 
 
+# =========================================================
+# 股票主檔搜尋 / 更新中心（進階版）
+# =========================================================
+def _search_master_df(
+    master_df: pd.DataFrame,
+    keyword: str,
+    market_filter: str = "全部",
+    category_filter: str = "全部",
+    limit: int = 100,
+) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return pd.DataFrame(columns=["code", "name", "market", "category"])
+
+    kw = _safe_str(keyword)
+    work = master_df.copy()
+
+    for c in ["code", "name", "market", "category"]:
+        if c not in work.columns:
+            work[c] = ""
+        work[c] = work[c].astype(str)
+
+    if _safe_str(market_filter) not in ["", "全部"]:
+        work = work[work["market"] == _safe_str(market_filter)].copy()
+
+    if _safe_str(category_filter) not in ["", "全部"]:
+        work = work[work["category"] == _safe_str(category_filter)].copy()
+
+    if not kw:
+        return work.head(limit).reset_index(drop=True)
+
+    exact_code = work[work["code"] == kw].copy()
+    exact_name = work[work["name"] == kw].copy()
+
+    fuzzy = work[
+        work["code"].str.contains(kw, case=False, na=False)
+        | work["name"].str.contains(kw, case=False, na=False)
+        | work["category"].str.contains(kw, case=False, na=False)
+        | work["market"].str.contains(kw, case=False, na=False)
+    ].copy()
+
+    if not fuzzy.empty:
+        fuzzy["sort_score"] = 0
+        fuzzy.loc[fuzzy["code"] == kw, "sort_score"] += 100
+        fuzzy.loc[fuzzy["name"] == kw, "sort_score"] += 90
+        fuzzy.loc[fuzzy["code"].str.startswith(kw, na=False), "sort_score"] += 50
+        fuzzy.loc[fuzzy["name"].str.startswith(kw, na=False), "sort_score"] += 40
+        fuzzy.loc[fuzzy["category"].str.contains(kw, case=False, na=False), "sort_score"] += 15
+        fuzzy = fuzzy.sort_values(["sort_score", "code"], ascending=[False, True])
+
+    out = pd.concat([exact_code, exact_name, fuzzy], ignore_index=True)
+    out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+
+    return out[["code", "name", "market", "category"]].head(limit)
+
+
+def _refresh_master_df_now() -> pd.DataFrame:
+    try:
+        _load_master_df.clear()
+    except Exception:
+        pass
+    return _load_master_df()
+
+
+def _append_stock_to_watchlist(
+    group_name: str,
+    code: str,
+    name: str,
+    market: str,
+    category: str,
+):
+    group_name = _safe_str(group_name)
+    code = _normalize_code(code)
+    name = _safe_str(name) or code
+    market = _safe_str(market) or "上市"
+    category = _normalize_category(category) or _infer_category_from_name(name)
+
+    if not group_name:
+        return False, "群組不可空白"
+    if not code:
+        return False, "股票代號不可空白"
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        raw = get_normalized_watchlist()
+
+    if group_name not in raw or not isinstance(raw[group_name], list):
+        raw[group_name] = []
+
+    for item in raw[group_name]:
+        if _normalize_code(item.get("code")) == code:
+            return False, f"{code} 已存在於 {group_name}"
+
+    raw[group_name].append(
+        {
+            "code": code,
+            "name": name,
+            "market": market,
+            "category": category,
+        }
+    )
+
+    st.session_state["watchlist_data"] = raw
+    st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
+    st.session_state["watchlist_last_saved_at"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return True, f"已加入 {group_name}：{code} {name}"
+
+
+def _update_master_category_in_memory(master_df: pd.DataFrame, code: str, new_category: str) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return master_df
+
+    code = _normalize_code(code)
+    new_category = _normalize_category(new_category)
+    if not code or not new_category:
+        return master_df
+
+    temp = master_df.copy()
+    mask = temp["code"].astype(str) == code
+    if mask.any():
+        temp.loc[mask, "category"] = new_category
+    return temp
+
+
+def _market_options_from_master(master_df: pd.DataFrame) -> list[str]:
+    if master_df is None or master_df.empty:
+        return ["全部", "上市", "上櫃", "興櫃"]
+    vals = ["全部"] + sorted([x for x in master_df["market"].dropna().astype(str).unique().tolist() if x.strip()])
+    return vals
+
+
+def _category_options_from_master(master_df: pd.DataFrame) -> list[str]:
+    if master_df is None or master_df.empty:
+        return ["全部"]
+    vals = ["全部"] + sorted([x for x in master_df["category"].dropna().astype(str).unique().tolist() if x.strip()])
+    return vals
+
+
 def _find_name_market_category(
     code: str,
     manual_name: str,
@@ -934,7 +1072,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜類股強度版",
-        subtitle="改成按下按鈕才開始推薦，其他功能維持不變。",
+        subtitle="按下按鈕才開始推薦，保留原功能，升級股票搜尋 / 更新中心。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -946,6 +1084,181 @@ def main():
                 else ""
             )
         )
+
+    # =========================================================
+    # 股票主檔搜尋 / 更新中心（進階版，不影響原功能）
+    # =========================================================
+    if _k("master_search_keyword") not in st.session_state:
+        st.session_state[_k("master_search_keyword")] = ""
+    if _k("master_search_market") not in st.session_state:
+        st.session_state[_k("master_search_market")] = "全部"
+    if _k("master_search_category") not in st.session_state:
+        st.session_state[_k("master_search_category")] = "全部"
+    if _k("master_search_result") not in st.session_state:
+        st.session_state[_k("master_search_result")] = pd.DataFrame()
+    if _k("master_selected_code") not in st.session_state:
+        st.session_state[_k("master_selected_code")] = ""
+    if _k("master_manual_category") not in st.session_state:
+        st.session_state[_k("master_manual_category")] = ""
+
+    with st.expander("股票主檔搜尋 / 更新中心", expanded=False):
+        render_pro_info_card(
+            "功能說明",
+            [
+                ("搜尋股票", "可用代號、名稱、分類搜尋。", ""),
+                ("主檔更新", "可強制重新抓最新股票主檔。", ""),
+                ("快速加入", "找到股票後可直接加入自選群組。", ""),
+                ("分類修正", "可手動修正單檔分類，供本次頁面使用。", ""),
+            ],
+            chips=["功能不變", "進階版", "搜尋更新"],
+        )
+
+        s1, s2, s3, s4 = st.columns([2, 1, 1, 1])
+
+        market_opts = _market_options_from_master(master_df)
+        category_opts = _category_options_from_master(master_df)
+
+        with s1:
+            search_kw = st.text_input(
+                "搜尋股票 / 類別",
+                value=st.session_state.get(_k("master_search_keyword"), ""),
+                placeholder="例如：2330、台積電、AI伺服器、IC設計",
+                key=_k("master_search_keyword_input"),
+            )
+        with s2:
+            saved_market = st.session_state.get(_k("master_search_market"), "全部")
+            search_market = st.selectbox(
+                "市場篩選",
+                market_opts,
+                index=market_opts.index(saved_market) if saved_market in market_opts else 0,
+                key=_k("master_search_market_input"),
+            )
+        with s3:
+            saved_category = st.session_state.get(_k("master_search_category"), "全部")
+            search_category = st.selectbox(
+                "分類篩選",
+                category_opts,
+                index=category_opts.index(saved_category) if saved_category in category_opts else 0,
+                key=_k("master_search_category_input"),
+            )
+        with s4:
+            st.write("")
+            st.write("")
+            do_refresh_master = st.button("更新股票主檔", use_container_width=True, key=_k("refresh_master_btn"))
+
+        if do_refresh_master:
+            master_df = _refresh_master_df_now()
+            st.success(f"股票主檔已重新更新，共 {len(master_df):,} 筆。")
+
+        b1, b2 = st.columns([1, 1])
+        with b1:
+            do_search_master = st.button("搜尋股票", use_container_width=True, key=_k("search_master_btn"))
+        with b2:
+            do_clear_master = st.button("清空搜尋", use_container_width=True, key=_k("clear_master_btn"))
+
+        if do_clear_master:
+            st.session_state[_k("master_search_keyword")] = ""
+            st.session_state[_k("master_search_market")] = "全部"
+            st.session_state[_k("master_search_category")] = "全部"
+            st.session_state[_k("master_search_result")] = pd.DataFrame()
+            st.session_state[_k("master_selected_code")] = ""
+            st.session_state[_k("master_manual_category")] = ""
+            st.rerun()
+
+        if do_search_master:
+            st.session_state[_k("master_search_keyword")] = search_kw
+            st.session_state[_k("master_search_market")] = search_market
+            st.session_state[_k("master_search_category")] = search_category
+
+            result_df = _search_master_df(
+                master_df=master_df,
+                keyword=search_kw,
+                market_filter=search_market,
+                category_filter=search_category,
+                limit=100,
+            )
+            st.session_state[_k("master_search_result")] = result_df
+
+        result_df = st.session_state.get(_k("master_search_result"), pd.DataFrame())
+
+        if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+            st.dataframe(
+                result_df.rename(
+                    columns={
+                        "code": "股票代號",
+                        "name": "股票名稱",
+                        "market": "市場別",
+                        "category": "分類",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            code_options = result_df["code"].astype(str).tolist()
+            if code_options and st.session_state.get(_k("master_selected_code"), "") not in code_options:
+                st.session_state[_k("master_selected_code")] = code_options[0]
+
+            c1, c2, c3 = st.columns([2, 2, 2])
+
+            with c1:
+                selected_code = st.selectbox(
+                    "選擇股票",
+                    code_options,
+                    format_func=lambda x: (
+                        f"{x} "
+                        f"{result_df[result_df['code'].astype(str) == str(x)]['name'].iloc[0]}"
+                    ),
+                    key=_k("master_selected_code"),
+                )
+
+            selected_row = result_df[result_df["code"].astype(str) == str(selected_code)].iloc[0]
+
+            with c2:
+                watchlist_groups = list(watchlist_map.keys()) if watchlist_map else []
+                add_group = st.selectbox(
+                    "加入自選群組",
+                    watchlist_groups if watchlist_groups else [""],
+                    key=_k("master_add_group"),
+                )
+
+            with c3:
+                st.write("")
+                st.write("")
+                add_to_watchlist = st.button("加入自選股", use_container_width=True, key=_k("add_watchlist_btn"))
+
+            if add_to_watchlist:
+                ok, msg = _append_stock_to_watchlist(
+                    group_name=add_group,
+                    code=selected_row["code"],
+                    name=selected_row["name"],
+                    market=selected_row["market"],
+                    category=selected_row["category"],
+                )
+                if ok:
+                    st.success(msg)
+                    watchlist_map = _load_watchlist_map()
+                else:
+                    st.warning(msg)
+
+            d1, d2 = st.columns([2, 1])
+            with d1:
+                manual_category = st.text_input(
+                    "手動修正分類（本次執行立即生效）",
+                    value=selected_row["category"],
+                    key=_k("master_manual_category"),
+                )
+            with d2:
+                st.write("")
+                st.write("")
+                save_manual_category = st.button("套用分類修正", use_container_width=True, key=_k("save_manual_category_btn"))
+
+            if save_manual_category:
+                master_df = _update_master_category_in_memory(master_df, selected_row["code"], manual_category)
+                st.success(f"{selected_row['code']} {selected_row['name']} 分類已改為：{manual_category}")
+
+        else:
+            st.caption("尚未搜尋，或目前沒有符合的股票。")
 
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
@@ -1124,7 +1437,6 @@ def main():
     top_df = rec_df.head(top_n).copy()
 
     strong_count = int((rec_df["推薦等級"] == "強烈關注").sum())
-    good_count = int((rec_df["推薦等級"] == "優先觀察").sum())
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
     leader_count = int((rec_df["是否領先同類股"] == "是").sum())
 
@@ -1279,8 +1591,9 @@ def main():
                 ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅與類股熱度分數。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
                 ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
+                ("股票搜尋更新中心", "新增搜尋主檔、更新主檔、加入自選股、分類修正。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版"],
+            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新"],
         )
 
 
