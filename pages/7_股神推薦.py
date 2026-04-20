@@ -257,8 +257,9 @@ def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple
     content_text = json.dumps(payload, ensure_ascii=False, indent=2)
     encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
 
+    # commit message 保持純英文 ASCII，避免 latin-1 編碼錯誤
     body: dict[str, Any] = {
-        "message": f"Update {path} from Streamlit @ {_now_text()}",
+        "message": f"update watchlist from streamlit at {_now_text()}",
         "content": encoded_content,
         "branch": branch,
     }
@@ -292,6 +293,19 @@ def _firebase_config() -> dict[str, str]:
     }
 
 
+def _clean_private_key(raw_key: str) -> str:
+    private_key = _safe_str(raw_key)
+
+    # 常見格式修正
+    private_key = private_key.replace("\\n", "\n").strip()
+
+    # 去 BOM
+    if private_key.startswith("\ufeff"):
+        private_key = private_key.lstrip("\ufeff")
+
+    return private_key
+
+
 def _init_firebase_app():
     try:
         return firebase_admin.get_app()
@@ -299,12 +313,19 @@ def _init_firebase_app():
         pass
 
     cfg = _firebase_config()
-    project_id = cfg["project_id"]
-    client_email = cfg["client_email"]
-    private_key = cfg["private_key"].replace("\\n", "\n")
+    project_id = _safe_str(cfg["project_id"]).strip()
+    client_email = _safe_str(cfg["client_email"]).strip()
+    private_key = _clean_private_key(cfg["private_key"])
 
-    if not project_id or not client_email or not private_key:
-        raise ValueError("Firebase secrets 未設定完整，請確認 FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY")
+    if not project_id:
+        raise ValueError("缺少 FIREBASE_PROJECT_ID")
+    if not client_email:
+        raise ValueError("缺少 FIREBASE_CLIENT_EMAIL")
+    if not private_key:
+        raise ValueError("缺少 FIREBASE_PRIVATE_KEY")
+
+    if "BEGIN PRIVATE KEY" not in private_key or "END PRIVATE KEY" not in private_key:
+        raise ValueError("FIREBASE_PRIVATE_KEY 不是有效的 PEM 私鑰格式")
 
     cred_dict = {
         "type": "service_account",
@@ -324,6 +345,8 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
     - system/watchlist_summary
     - watchlists/{group_name}
     - watchlists/{group_name}/stocks/{code}
+
+    會同步刪除群組中已不存在的舊 stocks 文件。
     """
     try:
         _init_firebase_app()
@@ -360,11 +383,14 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
                 merge=True,
             )
 
+            new_codes = set()
+
             for item in items:
                 code = _normalize_code(item.get("code"))
                 if not code:
                     continue
 
+                new_codes.add(code)
                 stock_ref = group_ref.collection("stocks").document(code)
                 batch.set(
                     stock_ref,
@@ -378,6 +404,12 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
                     },
                     merge=True,
                 )
+
+            # 清掉舊 stocks 文件
+            existing_docs = list(group_ref.collection("stocks").stream())
+            for doc in existing_docs:
+                if doc.id not in new_codes:
+                    batch.delete(doc.reference)
 
         batch.commit()
         return True, "已同步寫入 Firestore"
@@ -445,6 +477,12 @@ def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
     st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
     st.session_state["watchlist_last_saved_at"] = saved_at
 
+    detail_lines = [
+        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
+        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
+    ]
+    st.session_state[_k("last_dual_write_detail")] = detail_lines
+
     if ok_github and ok_firestore:
         _set_status(f"GitHub + Firestore 同步成功｜{saved_at}", "success")
         return True
@@ -457,7 +495,7 @@ def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
         _set_status(f"Firestore 成功，但 GitHub 失敗｜{msg_github}", "warning")
         return True
 
-    _set_status(f"GitHub / Firestore 都失敗｜{msg_github}｜{msg_firestore}", "error")
+    _set_status("GitHub / Firestore 都失敗", "error")
     return False
 
 
@@ -2084,6 +2122,12 @@ def main():
                     for msg in messages:
                         st.write(f"- {msg}")
 
+    detail_lines = st.session_state.get(_k("last_dual_write_detail"), [])
+    if detail_lines:
+        with st.expander("雙寫狀態明細", expanded=False):
+            for line in detail_lines:
+                st.write(f"- {line}")
+
     render_pro_section("本輪精華推薦")
     st.dataframe(
         _format_df(
@@ -2230,10 +2274,12 @@ def main():
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
                 ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
                 ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
+                ("GitHub 修正", "commit message 改純英文 ASCII，避免 latin-1 錯誤。", ""),
+                ("Firestore 修正", "私鑰增加 BOM/換行清理與 PEM 格式檢查。", ""),
                 ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "GitHub+Firestore雙寫", "全部掃描"],
+            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "GitHub+Firestore雙寫", "PEM修正", "全部掃描"],
         )
 
 
