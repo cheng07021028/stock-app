@@ -5,7 +5,6 @@ from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import copy
-import hashlib
 import json
 import base64
 
@@ -709,7 +708,7 @@ def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, st
     return rows
 
 
-def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit_count: int, selected_categories: list[str]) -> list[dict[str, str]]:
+def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit_count: Any, selected_categories: list[str]) -> list[dict[str, str]]:
     if master_df is None or master_df.empty:
         return []
 
@@ -720,12 +719,21 @@ def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit
         work = work[work["market"].astype(str) == "上市"].copy()
     elif market_mode == "上櫃":
         work = work[work["market"].astype(str) == "上櫃"].copy()
+    elif market_mode == "興櫃":
+        work = work[work["market"].astype(str) == "興櫃"].copy()
+    # 全市場 = 不過濾市場別
 
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if clean_categories:
         work = work[work["category"].astype(str).isin(clean_categories)].copy()
 
-    work = work.head(limit_count).copy()
+    if _safe_str(limit_count) != "全部":
+        try:
+            limit_n = int(limit_count)
+            if limit_n > 0:
+                work = work.head(limit_n).copy()
+        except Exception:
+            pass
 
     rows = []
     for _, row in work.iterrows():
@@ -1398,7 +1406,7 @@ def main():
         "days": 120,
         "top_n": 20,
         "manual_codes": "",
-        "scan_limit": 200,
+        "scan_limit": 1000,
         "selected_categories": ["全部"],
         "min_total_score": 55.0,
         "min_signal_score": -2.0,
@@ -1413,6 +1421,11 @@ def main():
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
             st.session_state[_k(name)] = value
+
+    next_pick_key = _k("rec_pick_codes_next")
+    real_pick_key = _k("rec_pick_codes")
+    if next_pick_key in st.session_state:
+        st.session_state[real_pick_key] = st.session_state.pop(next_pick_key)
 
     render_pro_hero(
         title="股神推薦｜類股強度版",
@@ -1624,7 +1637,7 @@ def main():
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
 
         with c1:
-            universe_options = ["自選群組", "手動輸入", "全市場", "上市", "上櫃"]
+            universe_options = ["自選群組", "手動輸入", "全市場", "上市", "上櫃", "興櫃"]
             saved_universe = st.session_state.get(_k("universe_mode"), "自選群組")
             if saved_universe not in universe_options:
                 saved_universe = "自選群組"
@@ -1662,11 +1675,17 @@ def main():
         d1, d2 = st.columns([2, 2])
 
         with d1:
-            limit_options = [100, 200, 300, 500]
-            saved_limit = int(st.session_state.get(_k("scan_limit"), 200))
+            limit_options = [100, 200, 300, 500, 1000, 1500, 2000, "全部"]
+            saved_limit = st.session_state.get(_k("scan_limit"), 1000)
             if saved_limit not in limit_options:
-                saved_limit = 200
-            form_scan_limit = st.selectbox("掃描上限筆數", limit_options, index=limit_options.index(saved_limit))
+                saved_limit = 1000
+
+            form_scan_limit = st.selectbox(
+                "掃描上限筆數",
+                limit_options,
+                index=limit_options.index(saved_limit),
+                help="選『全部』時，會把目前市場範圍內的股票全部納入掃描，不做截斷。",
+            )
 
         with d2:
             form_manual_codes = st.text_area(
@@ -1734,7 +1753,7 @@ def main():
         st.session_state[_k("days")] = 120
         st.session_state[_k("top_n")] = 20
         st.session_state[_k("manual_codes")] = ""
-        st.session_state[_k("scan_limit")] = 200
+        st.session_state[_k("scan_limit")] = 1000
         st.session_state[_k("selected_categories")] = ["全部"]
         st.session_state[_k("min_total_score")] = 55.0
         st.session_state[_k("min_signal_score")] = -2.0
@@ -1742,7 +1761,7 @@ def main():
         st.session_state[_k("focus_code")] = ""
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
         st.session_state[_k("category_strength_store")] = pd.DataFrame()
-        st.session_state[_k("rec_pick_codes")] = []
+        st.session_state[_k("rec_pick_codes_next")] = []
         st.rerun()
 
     if submit_recommend or submit_refresh:
@@ -1783,7 +1802,7 @@ def main():
         universe_items = _build_universe_from_market(
             master_df=master_df,
             market_mode=universe_mode,
-            limit_count=int(st.session_state.get(_k("scan_limit"), 200)),
+            limit_count=st.session_state.get(_k("scan_limit"), 1000),
             selected_categories=selected_categories,
         )
 
@@ -1837,6 +1856,7 @@ def main():
 
     render_pro_section("推薦股票加入自選股中心")
 
+    watchlist_map = _load_watchlist_map()
     rec_group_options = list(watchlist_map.keys()) if watchlist_map else [""]
     saved_pick_group = st.session_state.get(_k("rec_pick_group"), "")
     if saved_pick_group not in rec_group_options:
@@ -1858,10 +1878,15 @@ def main():
             key=_k("rec_pick_group"),
         )
     with p2:
+        current_pick_codes = [
+            x for x in st.session_state.get(_k("rec_pick_codes"), [])
+            if x in rec_all_codes
+        ]
+
         st.multiselect(
             "勾選推薦股",
             options=rec_all_codes,
-            default=[x for x in st.session_state.get(_k("rec_pick_codes"), []) if x in rec_all_codes],
+            default=current_pick_codes,
             format_func=lambda x: rec_code_to_label.get(str(x), str(x)),
             key=_k("rec_pick_codes"),
         )
@@ -1873,11 +1898,12 @@ def main():
     q1, q2 = st.columns([1, 1])
     with q1:
         if st.button("全選本輪推薦", use_container_width=True):
-            st.session_state[_k("rec_pick_codes")] = rec_all_codes
+            st.session_state[_k("rec_pick_codes_next")] = rec_all_codes
             st.rerun()
+
     with q2:
         if st.button("清空勾選", use_container_width=True):
-            st.session_state[_k("rec_pick_codes")] = []
+            st.session_state[_k("rec_pick_codes_next")] = []
             st.rerun()
 
     if add_selected_btn:
@@ -2055,8 +2081,9 @@ def main():
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
                 ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組，且寫回 GitHub watchlist.json。", ""),
                 ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
+                ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "勾選加入自選股"],
+            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "勾選加入自選股", "全部掃描"],
         )
 
 
