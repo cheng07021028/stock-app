@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 import pandas as pd
 import streamlit as st
@@ -87,6 +89,23 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
 
 def _fmt_num(v: Any, d: int = 2) -> str:
     return format_number(v, d) if pd.notna(v) else ""
+
+
+def _fmt_seconds(sec: float) -> str:
+    try:
+        sec = max(0, int(sec))
+    except Exception:
+        sec = 0
+
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
+
+    if h > 0:
+        return f"{h}小時 {m}分 {s}秒"
+    if m > 0:
+        return f"{m}分 {s}秒"
+    return f"{s}秒"
 
 
 # =========================================================
@@ -574,11 +593,22 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     return temp
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+    primary = _safe_str(market_type)
     tried = []
-    for mk in [market_type, "上市", "上櫃", "興櫃", ""]:
-        mk = _safe_str(mk)
+
+    if primary:
+        tried.append(primary)
+
+    fallback_map = {
+        "上市": ["上櫃", "興櫃", ""],
+        "上櫃": ["上市", "興櫃", ""],
+        "興櫃": ["上市", "上櫃", ""],
+        "": ["上市", "上櫃", "興櫃"],
+    }
+
+    for mk in fallback_map.get(primary, ["上市", "上櫃", "興櫃", ""]):
         if mk not in tried:
             tried.append(mk)
 
@@ -777,7 +807,7 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date) -> dict[str, Any]:
     hist_df, used_market = _get_history_smart(
         stock_no=stock_no,
@@ -839,6 +869,91 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
     }
 
 
+def _analyze_one_stock_for_recommend(
+    item: dict[str, str],
+    master_df: pd.DataFrame,
+    start_dt: date,
+    end_dt: date,
+    min_signal_score: float,
+    clean_categories: list[str],
+):
+    code = _normalize_code(item.get("code"))
+    manual_name = _safe_str(item.get("name"))
+    manual_market = _safe_str(item.get("market"))
+    manual_category = _normalize_category(item.get("category"))
+
+    if not code:
+        return None
+
+    stock_name, market_type, category = _find_name_market_category(
+        code, manual_name, manual_market, manual_category, master_df
+    )
+
+    if clean_categories and category not in clean_categories:
+        return None
+
+    bundle = _analyze_stock_bundle(
+        stock_no=code,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    if not bundle:
+        return None
+
+    signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
+    if signal_score < min_signal_score:
+        return None
+
+    auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
+    technical_score = _score_clip(signal_score * 12 + (_safe_float(bundle["radar_avg"], 50) or 50) * 0.45)
+
+    position_bonus = 0.0
+    if bundle["pressure_dist"] is not None and 0 <= bundle["pressure_dist"] <= 8:
+        position_bonus += 8.0
+    if bundle["support_dist"] is not None and 0 <= bundle["support_dist"] <= 6:
+        position_bonus += 6.0
+
+    base_composite = (
+        technical_score * 0.44
+        + auto_factor_total * 0.40
+        + position_bonus
+        + (_safe_float(bundle["period_pct"], 0) * 0.10 if bundle["period_pct"] is not None else 0)
+    )
+    base_composite = _score_clip(base_composite)
+
+    return {
+        "股票代號": code,
+        "股票名稱": stock_name,
+        "市場別": bundle["used_market"],
+        "類別": category or _infer_category_from_name(stock_name),
+        "最新價": bundle["close_now"],
+        "區間漲跌幅%": bundle["period_pct"],
+        "訊號分數": signal_score,
+        "雷達均分": bundle["radar_avg"],
+        "自動因子總分": auto_factor_total,
+        "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
+        "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
+        "獲利代理分數": bundle["auto_factor"]["profit_proxy"],
+        "大戶鎖碼代理分數": bundle["auto_factor"]["lock_proxy"],
+        "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
+        "20日壓力距離%": bundle["pressure_dist"],
+        "20日支撐距離%": bundle["support_dist"],
+        "個股原始總分": base_composite,
+        "起漲判斷": bundle["trade_plan"]["launch_tag"],
+        "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
+        "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
+        "停損價": bundle["trade_plan"]["stop_price"],
+        "賣出目標1": bundle["trade_plan"]["sell_target_1"],
+        "賣出目標2": bundle["trade_plan"]["sell_target_2"],
+        "風險報酬_拉回": bundle["trade_plan"]["rr1"],
+        "風險報酬_突破": bundle["trade_plan"]["rr2"],
+        "自動因子摘要": bundle["auto_factor"]["factor_summary"],
+        "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
+    }
+
+
 # =========================================================
 # 類股強度
 # =========================================================
@@ -872,9 +987,8 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# 推薦表
+# 推薦表（加速 + ETA）
 # =========================================================
-@st.cache_data(ttl=300, show_spinner=False)
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
@@ -885,85 +999,65 @@ def _build_recommend_df(
     selected_categories: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
+
+    if not universe_items:
+        return pd.DataFrame(), pd.DataFrame()
+
+    total_count = len(universe_items)
+    worker_count = min(12, max(4, total_count // 8 if total_count >= 8 else 4))
+
+    progress_wrap = st.container()
+    progress_bar = progress_wrap.progress(0, text="準備開始推薦...")
+    progress_text = progress_wrap.empty()
+
+    start_ts = time.time()
+    done_count = 0
     base_rows = []
 
-    for item in universe_items:
-        code = _normalize_code(item.get("code"))
-        manual_name = _safe_str(item.get("name"))
-        manual_market = _safe_str(item.get("market"))
-        manual_category = _normalize_category(item.get("category"))
-        if not code:
-            continue
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _analyze_one_stock_for_recommend,
+                item,
+                master_df,
+                start_dt,
+                end_dt,
+                min_signal_score,
+                clean_categories,
+            )
+            for item in universe_items
+        ]
 
-        stock_name, market_type, category = _find_name_market_category(
-            code, manual_name, manual_market, manual_category, master_df
-        )
+        for future in as_completed(futures):
+            done_count += 1
 
-        if clean_categories and category not in clean_categories:
-            continue
+            try:
+                row = future.result()
+                if row:
+                    base_rows.append(row)
+            except Exception:
+                pass
 
-        bundle = _analyze_stock_bundle(
-            stock_no=code,
-            stock_name=stock_name,
-            market_type=market_type,
-            start_dt=start_dt,
-            end_dt=end_dt,
-        )
-        if not bundle:
-            continue
+            elapsed = time.time() - start_ts
+            avg_per_stock = elapsed / done_count if done_count > 0 else 0
+            remain_count = max(total_count - done_count, 0)
+            eta_sec = avg_per_stock * remain_count
+            ratio = done_count / total_count if total_count > 0 else 0
 
-        signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
-        if signal_score < min_signal_score:
-            continue
+            progress_bar.progress(
+                min(max(ratio, 0.0), 1.0),
+                text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)"
+            )
+            progress_text.caption(
+                f"已完成 {done_count}/{total_count}｜"
+                f"已花時間：{_fmt_seconds(elapsed)}｜"
+                f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
+                f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
+            )
 
-        auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
-        technical_score = _score_clip(signal_score * 12 + (_safe_float(bundle["radar_avg"], 50) or 50) * 0.45)
-
-        position_bonus = 0.0
-        if bundle["pressure_dist"] is not None and 0 <= bundle["pressure_dist"] <= 8:
-            position_bonus += 8.0
-        if bundle["support_dist"] is not None and 0 <= bundle["support_dist"] <= 6:
-            position_bonus += 6.0
-
-        base_composite = (
-            technical_score * 0.44
-            + auto_factor_total * 0.40
-            + position_bonus
-            + (_safe_float(bundle["period_pct"], 0) * 0.10 if bundle["period_pct"] is not None else 0)
-        )
-        base_composite = _score_clip(base_composite)
-
-        base_rows.append(
-            {
-                "股票代號": code,
-                "股票名稱": stock_name,
-                "市場別": bundle["used_market"],
-                "類別": category or _infer_category_from_name(stock_name),
-                "最新價": bundle["close_now"],
-                "區間漲跌幅%": bundle["period_pct"],
-                "訊號分數": signal_score,
-                "雷達均分": bundle["radar_avg"],
-                "自動因子總分": auto_factor_total,
-                "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
-                "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
-                "獲利代理分數": bundle["auto_factor"]["profit_proxy"],
-                "大戶鎖碼代理分數": bundle["auto_factor"]["lock_proxy"],
-                "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
-                "20日壓力距離%": bundle["pressure_dist"],
-                "20日支撐距離%": bundle["support_dist"],
-                "個股原始總分": base_composite,
-                "起漲判斷": bundle["trade_plan"]["launch_tag"],
-                "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
-                "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
-                "停損價": bundle["trade_plan"]["stop_price"],
-                "賣出目標1": bundle["trade_plan"]["sell_target_1"],
-                "賣出目標2": bundle["trade_plan"]["sell_target_2"],
-                "風險報酬_拉回": bundle["trade_plan"]["rr1"],
-                "風險報酬_突破": bundle["trade_plan"]["rr2"],
-                "自動因子摘要": bundle["auto_factor"]["factor_summary"],
-                "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
-            }
-        )
+    progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
+    total_elapsed = time.time() - start_ts
+    progress_text.caption(f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}")
 
     base_df = pd.DataFrame(base_rows)
     if base_df.empty:
@@ -1013,7 +1107,10 @@ def _build_recommend_df(
     )
 
     final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
-    final_df = final_df.sort_values(["推薦總分", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False]).reset_index(drop=True)
+    final_df = final_df.sort_values(
+        ["推薦總分", "訊號分數", "區間漲跌幅%"],
+        ascending=[False, False, False]
+    ).reset_index(drop=True)
 
     return final_df, category_strength_df
 
@@ -1072,7 +1169,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜類股強度版",
-        subtitle="按下按鈕才開始推薦，保留原功能，升級股票搜尋 / 更新中心。",
+        subtitle="按下按鈕才開始推薦，保留原功能，升級股票搜尋 / 更新中心 + 加速 + ETA。",
     )
 
     if st.session_state.get("watchlist_version"):
@@ -1085,9 +1182,7 @@ def main():
             )
         )
 
-    # =========================================================
-    # 股票主檔搜尋 / 更新中心（進階版，不影響原功能）
-    # =========================================================
+    # 股票主檔搜尋 / 更新中心
     if _k("master_search_keyword") not in st.session_state:
         st.session_state[_k("master_search_keyword")] = ""
     if _k("master_search_market") not in st.session_state:
@@ -1256,7 +1351,6 @@ def main():
             if save_manual_category:
                 master_df = _update_master_category_in_memory(master_df, selected_row["code"], manual_category)
                 st.success(f"{selected_row['code']} {selected_row['name']} 分類已改為：{manual_category}")
-
         else:
             st.caption("尚未搜尋，或目前沒有符合的股票。")
 
@@ -1355,6 +1449,27 @@ def main():
         with btn3:
             submit_clear = st.form_submit_button("清空條件", use_container_width=True)
 
+    ccache1, ccache2 = st.columns([1, 1])
+    with ccache1:
+        clear_cache_btn = st.button("清除推薦快取", use_container_width=True)
+    with ccache2:
+        st.caption("資料異常或想強制重算時再按")
+
+    if clear_cache_btn:
+        try:
+            _get_history_smart.clear()
+        except Exception:
+            pass
+        try:
+            _analyze_stock_bundle.clear()
+        except Exception:
+            pass
+        try:
+            _load_master_df.clear()
+        except Exception:
+            pass
+        st.success("推薦快取已清除")
+
     if submit_clear:
         st.session_state[_k("universe_mode")] = "自選群組"
         st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
@@ -1418,16 +1533,15 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
-    with st.spinner("股神推薦計算中..."):
-        rec_df, category_strength_df = _build_recommend_df(
-            universe_items=universe_items,
-            master_df=master_df,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-            min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-            selected_categories=selected_categories,
-        )
+    rec_df, category_strength_df = _build_recommend_df(
+        universe_items=universe_items,
+        master_df=master_df,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+        min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+        selected_categories=selected_categories,
+    )
 
     if rec_df.empty:
         st.error("掃描完成，但沒有符合條件的股票。")
@@ -1592,8 +1706,9 @@ def main():
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
                 ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
                 ("股票搜尋更新中心", "新增搜尋主檔、更新主檔、加入自選股、分類修正。", ""),
+                ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新"],
+            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA"],
         )
 
 
