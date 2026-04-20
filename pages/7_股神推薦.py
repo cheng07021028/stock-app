@@ -11,6 +11,8 @@ import base64
 import pandas as pd
 import requests
 import streamlit as st
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 from utils import (
     compute_radar_scores,
@@ -181,7 +183,7 @@ def _infer_category_from_name(name: str) -> str:
 
 
 # =========================================================
-# GitHub API（與自選股中心相容）
+# GitHub API
 # =========================================================
 def _github_config() -> dict[str, str]:
     return {
@@ -216,6 +218,7 @@ def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
         return "", "缺少 GITHUB_TOKEN"
 
     url = _github_contents_url(owner, repo, path)
+
     try:
         resp = requests.get(
             url,
@@ -223,11 +226,14 @@ def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
             params={"ref": branch},
             timeout=20,
         )
+
         if resp.status_code == 200:
             data = resp.json()
             return _safe_str(data.get("sha")), ""
+
         if resp.status_code == 404:
             return "", ""
+
         return "", f"讀取 GitHub 檔案失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
         return "", f"讀取 GitHub 檔案例外：{e}"
@@ -275,6 +281,113 @@ def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple
         return False, f"GitHub API 寫入例外：{e}"
 
 
+# =========================================================
+# Firestore
+# =========================================================
+def _firebase_config() -> dict[str, str]:
+    return {
+        "project_id": _safe_str(st.secrets.get("FIREBASE_PROJECT_ID", "")),
+        "client_email": _safe_str(st.secrets.get("FIREBASE_CLIENT_EMAIL", "")),
+        "private_key": _safe_str(st.secrets.get("FIREBASE_PRIVATE_KEY", "")),
+    }
+
+
+def _init_firebase_app():
+    try:
+        return firebase_admin.get_app()
+    except ValueError:
+        pass
+
+    cfg = _firebase_config()
+    project_id = cfg["project_id"]
+    client_email = cfg["client_email"]
+    private_key = cfg["private_key"].replace("\\n", "\n")
+
+    if not project_id or not client_email or not private_key:
+        raise ValueError("Firebase secrets 未設定完整，請確認 FIREBASE_PROJECT_ID / FIREBASE_CLIENT_EMAIL / FIREBASE_PRIVATE_KEY")
+
+    cred_dict = {
+        "type": "service_account",
+        "project_id": project_id,
+        "private_key": private_key,
+        "client_email": client_email,
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+
+    cred = credentials.Certificate(cred_dict)
+    return firebase_admin.initialize_app(cred, {"projectId": project_id})
+
+
+def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    """
+    Firestore 結構：
+    - system/watchlist_summary
+    - watchlists/{group_name}
+    - watchlists/{group_name}/stocks/{code}
+    """
+    try:
+        _init_firebase_app()
+        db = firestore.client()
+        batch = db.batch()
+        now = firestore.SERVER_TIMESTAMP
+
+        summary_ref = db.collection("system").document("watchlist_summary")
+        batch.set(
+            summary_ref,
+            {
+                "group_count": len(payload),
+                "updated_at": now,
+                "source": "streamlit_dual_write",
+            },
+            merge=True,
+        )
+
+        for group_name, items in payload.items():
+            group_name = _safe_str(group_name)
+            if not group_name:
+                continue
+
+            group_ref = db.collection("watchlists").document(group_name)
+            batch.set(
+                group_ref,
+                {
+                    "group_name": group_name,
+                    "count": len(items),
+                    "items": items,
+                    "updated_at": now,
+                    "source": "streamlit_dual_write",
+                },
+                merge=True,
+            )
+
+            for item in items:
+                code = _normalize_code(item.get("code"))
+                if not code:
+                    continue
+
+                stock_ref = group_ref.collection("stocks").document(code)
+                batch.set(
+                    stock_ref,
+                    {
+                        "code": code,
+                        "name": _safe_str(item.get("name")) or code,
+                        "market": _safe_str(item.get("market")) or "上市",
+                        "category": _normalize_category(item.get("category")),
+                        "group_name": group_name,
+                        "updated_at": now,
+                    },
+                    merge=True,
+                )
+
+        batch.commit()
+        return True, "已同步寫入 Firestore"
+    except Exception as e:
+        return False, f"Firestore 寫入失敗：{e}"
+
+
+# =========================================================
+# watchlist payload / 雙寫
+# =========================================================
 def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
     payload: dict[str, list[dict[str, str]]] = {}
 
@@ -321,21 +434,31 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
     return payload
 
 
-def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool:
+def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
     payload = _normalize_watchlist_payload(data)
-    ok, msg = _push_watchlist_to_github(payload)
+
+    ok_github, msg_github = _push_watchlist_to_github(payload)
+    ok_firestore, msg_firestore = _push_watchlist_to_firestore(payload)
 
     saved_at = _now_text()
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
     st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
     st.session_state["watchlist_last_saved_at"] = saved_at
 
-    if ok:
-        _set_status(f"{msg}｜{saved_at}", "success")
-    else:
-        _set_status(msg, "error")
+    if ok_github and ok_firestore:
+        _set_status(f"GitHub + Firestore 同步成功｜{saved_at}", "success")
+        return True
 
-    return ok
+    if ok_github and not ok_firestore:
+        _set_status(f"GitHub 成功，但 Firestore 失敗｜{msg_firestore}", "warning")
+        return True
+
+    if (not ok_github) and ok_firestore:
+        _set_status(f"Firestore 成功，但 GitHub 失敗｜{msg_github}", "warning")
+        return True
+
+    _set_status(f"GitHub / Firestore 都失敗｜{msg_github}｜{msg_firestore}", "error")
+    return False
 
 
 # =========================================================
@@ -453,7 +576,7 @@ def _load_master_df() -> pd.DataFrame:
 
 
 # =========================================================
-# 股票主檔搜尋 / 更新中心（進階版）
+# 股票主檔搜尋 / 更新中心
 # =========================================================
 def _search_master_df(
     master_df: pd.DataFrame,
@@ -503,7 +626,6 @@ def _search_master_df(
 
     out = pd.concat([exact_code, exact_name, fuzzy], ignore_index=True)
     out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-
     return out[["code", "name", "market", "category"]].head(limit)
 
 
@@ -513,6 +635,36 @@ def _refresh_master_df_now() -> pd.DataFrame:
     except Exception:
         pass
     return _load_master_df()
+
+
+def _update_master_category_in_memory(master_df: pd.DataFrame, code: str, new_category: str) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return master_df
+
+    code = _normalize_code(code)
+    new_category = _normalize_category(new_category)
+    if not code or not new_category:
+        return master_df
+
+    temp = master_df.copy()
+    mask = temp["code"].astype(str) == code
+    if mask.any():
+        temp.loc[mask, "category"] = new_category
+    return temp
+
+
+def _market_options_from_master(master_df: pd.DataFrame) -> list[str]:
+    if master_df is None or master_df.empty:
+        return ["全部", "上市", "上櫃", "興櫃"]
+    vals = ["全部"] + sorted([x for x in master_df["market"].dropna().astype(str).unique().tolist() if x.strip()])
+    return vals
+
+
+def _category_options_from_master(master_df: pd.DataFrame) -> list[str]:
+    if master_df is None or master_df.empty:
+        return ["全部"]
+    vals = ["全部"] + sorted([x for x in master_df["category"].dropna().astype(str).unique().tolist() if x.strip()])
+    return vals
 
 
 def _append_stock_to_watchlist(
@@ -554,7 +706,7 @@ def _append_stock_to_watchlist(
 
     raw[group_name].append(row)
 
-    ok = _force_write_watchlist_github(raw)
+    ok = _force_write_watchlist_dual(raw)
     if ok:
         return True, f"已加入 {group_name}：{code} {name}"
     return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
@@ -606,43 +758,40 @@ def _append_multiple_stocks_to_watchlist(
         messages.append(f"已加入 {group_name}：{code} {name}")
 
     if added > 0:
-        ok = _force_write_watchlist_github(raw)
+        ok = _force_write_watchlist_dual(raw)
         if not ok:
-            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub 寫入失敗"))]
+            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
 
     return added, messages
 
 
-def _update_master_category_in_memory(master_df: pd.DataFrame, code: str, new_category: str) -> pd.DataFrame:
-    if master_df is None or master_df.empty:
-        return master_df
-
+def _remove_stock_from_watchlist(group_name: str, code: str) -> tuple[bool, str]:
+    group_name = _safe_str(group_name)
     code = _normalize_code(code)
-    new_category = _normalize_category(new_category)
-    if not code or not new_category:
-        return master_df
 
-    temp = master_df.copy()
-    mask = temp["code"].astype(str) == code
-    if mask.any():
-        temp.loc[mask, "category"] = new_category
-    return temp
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        raw = get_normalized_watchlist()
 
+    if group_name not in raw:
+        return False, f"找不到群組：{group_name}"
 
-def _market_options_from_master(master_df: pd.DataFrame) -> list[str]:
-    if master_df is None or master_df.empty:
-        return ["全部", "上市", "上櫃", "興櫃"]
-    vals = ["全部"] + sorted([x for x in master_df["market"].dropna().astype(str).unique().tolist() if x.strip()])
-    return vals
+    before_count = len(raw[group_name])
+    raw[group_name] = [x for x in raw[group_name] if _normalize_code(x.get("code")) != code]
+    after_count = len(raw[group_name])
 
+    if before_count == after_count:
+        return False, f"{code} 不在 {group_name}"
 
-def _category_options_from_master(master_df: pd.DataFrame) -> list[str]:
-    if master_df is None or master_df.empty:
-        return ["全部"]
-    vals = ["全部"] + sorted([x for x in master_df["category"].dropna().astype(str).unique().tolist() if x.strip()])
-    return vals
+    ok = _force_write_watchlist_dual(raw)
+    if ok:
+        return True, f"已從 {group_name} 刪除 {code}"
+    return False, _safe_str(st.session_state.get(_k("status_msg"), "刪除同步失敗"))
 
 
+# =========================================================
+# 股票資訊查找
+# =========================================================
 def _find_name_market_category(
     code: str,
     manual_name: str,
@@ -721,7 +870,6 @@ def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit
         work = work[work["market"].astype(str) == "上櫃"].copy()
     elif market_mode == "興櫃":
         work = work[work["market"].astype(str) == "興櫃"].copy()
-    # 全市場 = 不過濾市場別
 
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if clean_categories:
@@ -877,7 +1025,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# 單股分析 bundle
+# 單股分析
 # =========================================================
 def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     last = df.iloc[-1]
@@ -1221,7 +1369,7 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# 推薦表（加速 + ETA）
+# 推薦表
 # =========================================================
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
@@ -1390,7 +1538,7 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 # =========================================================
-# Main：按鈕觸發版
+# Main
 # =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
@@ -1429,7 +1577,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜類股強度版",
-        subtitle="按下按鈕才開始推薦，保留原功能，升級股票搜尋 / 更新中心 + 加速 + ETA + 勾選加入自選股。",
+        subtitle="按下按鈕才開始推薦，支援 GitHub + Firestore 雙寫、自選股同步、主檔搜尋更新、加速與 ETA。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -1475,8 +1623,9 @@ def main():
                 ("主檔更新", "可強制重新抓最新股票主檔。", ""),
                 ("快速加入", "找到股票後可直接加入自選群組。", ""),
                 ("分類修正", "可手動修正單檔分類，供本次頁面使用。", ""),
+                ("雙寫同步", "新增/刪除/批次加入時，同步寫 GitHub + Firestore。", ""),
             ],
-            chips=["功能不變", "進階版", "搜尋更新"],
+            chips=["功能不變", "進階版", "搜尋更新", "雙寫同步"],
         )
 
         s1, s2, s3, s4 = st.columns([2, 1, 1, 1])
@@ -2079,11 +2228,12 @@ def main():
                 ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
                 ("股票搜尋更新中心", "新增搜尋主檔、更新主檔、加入自選股、分類修正。", ""),
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
-                ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組，且寫回 GitHub watchlist.json。", ""),
+                ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
+                ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
                 ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "勾選加入自選股", "全部掃描"],
+            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "GitHub+Firestore雙寫", "全部掃描"],
         )
 
 
