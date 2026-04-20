@@ -1,4 +1,3 @@
-# streamlit_app.py
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -7,12 +6,6 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from firebase_auth import (
-    get_current_user,
-    is_logged_in,
-    login_user,
-    logout_user,
-)
 from utils import (
     format_number,
     get_all_code_name_map,
@@ -221,125 +214,14 @@ def _init_state():
     if _k("end_date") not in st.session_state:
         st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
 
-    if "auth_user" not in st.session_state:
-        st.session_state["auth_user"] = None
-
-    if "login_error" not in st.session_state:
-        st.session_state["login_error"] = ""
-
-    if "login_email" not in st.session_state:
-        st.session_state["login_email"] = ""
-
     st.session_state[_k("start_date")] = _to_pydate(st.session_state.get(_k("start_date")), default_start)
     st.session_state[_k("end_date")] = _to_pydate(st.session_state.get(_k("end_date")), default_end)
 
 
 # =========================================================
-# 登入工具
-# =========================================================
-def _safe_get_name(user: dict[str, Any] | None) -> str:
-    if not user:
-        return ""
-    return str(user.get("name") or user.get("email") or "").strip()
-
-
-def _safe_get_role(user: dict[str, Any] | None) -> str:
-    if not user:
-        return ""
-    return str(user.get("role") or "").strip()
-
-
-def _do_login(email: str, password: str):
-    try:
-        login_user(email=email, password=password)
-        st.session_state["login_error"] = ""
-        st.session_state["login_email"] = email
-        st.success("登入成功")
-        st.rerun()
-    except Exception as e:
-        st.session_state["login_error"] = str(e)
-
-
-def _render_sidebar_user_block():
-    st.sidebar.markdown("### 👤 帳號中心")
-
-    user = get_current_user()
-    if user:
-        name = _safe_get_name(user)
-        role = _safe_get_role(user)
-        email = str(user.get("email", "")).strip()
-
-        st.sidebar.success("已登入")
-        st.sidebar.write(f"**使用者：** {name}")
-        st.sidebar.write(f"**帳號：** {email}")
-        st.sidebar.write(f"**角色：** {role}")
-
-        if st.sidebar.button("登出", use_container_width=True):
-            logout_user()
-            st.rerun()
-    else:
-        st.sidebar.info("尚未登入")
-
-
-def _render_login_page():
-    _render_sidebar_user_block()
-
-    render_pro_hero(
-        title="台股分析系統｜股神版首頁",
-        subtitle="Firebase 登入版｜請先登入再進入首頁與各分析頁面",
-    )
-
-    c1, c2, c3 = st.columns([1.2, 1.6, 1.2])
-
-    with c2:
-        st.markdown("## 🔐 系統登入")
-
-        login_email = st.text_input(
-            "Email",
-            value=st.session_state.get("login_email", ""),
-            placeholder="請輸入 Email",
-        )
-        login_password = st.text_input(
-            "Password",
-            type="password",
-            placeholder="請輸入密碼",
-        )
-
-        err = st.session_state.get("login_error", "")
-        if err:
-            st.error(err)
-            try:
-                api_key = str(st.secrets.get("FIREBASE_API_KEY", ""))
-                st.caption(f"DEBUG API KEY 前8碼：{api_key[:8]} | 長度：{len(api_key)}")
-            except Exception as e:
-                st.caption(f"DEBUG 讀取 API KEY 失敗：{e}")
-
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            if st.button("登入系統", use_container_width=True, type="primary"):
-                if not login_email.strip() or not login_password.strip():
-                    st.warning("請輸入帳號與密碼")
-                else:
-                    _do_login(login_email.strip(), login_password)
-
-        with col_b:
-            if st.button("清除", use_container_width=True):
-                st.session_state["login_error"] = ""
-                st.session_state["login_email"] = ""
-                st.rerun()
-
-        st.markdown("---")
-        st.caption("登入成功後才會載入首頁內容與自選股總覽。")
-        st.caption("首次登入成功後，若 users/{uid} 不存在，系統會自動建立預設資料。")
-
-
-# =========================================================
-# 原首頁內容
+# 原首頁內容（免登入版）
 # =========================================================
 def _render_home_page():
-    _render_sidebar_user_block()
-
     watchlist = _load_watchlist_data()
     overview_df = _build_overview_df(watchlist)
     group_summary_df = _build_group_summary_df(watchlist)
@@ -350,13 +232,13 @@ def _render_home_page():
     listed_count = int((overview_df["市場別"] == "上市").sum()) if not overview_df.empty else 0
     otc_count = int((overview_df["市場別"] == "上櫃").sum()) if not overview_df.empty else 0
 
-    user = get_current_user() or {}
-    user_name = _safe_get_name(user)
-    role = _safe_get_role(user)
+    st.sidebar.markdown("### 📌 系統狀態")
+    st.sidebar.success("免登入模式")
+    st.sidebar.caption("已取消帳號密碼登入，開啟即直接使用。")
 
     render_pro_hero(
         title="台股分析系統｜股神版首頁",
-        subtitle=f"首頁會直接讀取最新自選股清單，新增刪除後重新整理即可同步。｜目前登入：{user_name} / {role}",
+        subtitle="免登入版本｜首頁會直接讀取最新自選股清單，新增刪除後重新整理即可同步。",
     )
 
     render_pro_kpi_row(
@@ -471,11 +353,7 @@ def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
     _init_state()
-
-    if not is_logged_in():
-        _render_login_page()
-    else:
-        _render_home_page()
+    _render_home_page()
 
 
 if __name__ == "__main__":
