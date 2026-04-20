@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
+import copy
+import hashlib
+import json
+import base64
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from utils import (
@@ -108,6 +113,15 @@ def _fmt_seconds(sec: float) -> str:
     return f"{s}秒"
 
 
+def _now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _set_status(msg: str, level: str = "info"):
+    st.session_state[_k("status_msg")] = msg
+    st.session_state[_k("status_type")] = level
+
+
 # =========================================================
 # 類型推論：更細分
 # =========================================================
@@ -165,6 +179,164 @@ def _infer_category_from_name(name: str) -> str:
                 return cat
 
     return "其他"
+
+
+# =========================================================
+# GitHub API（與自選股中心相容）
+# =========================================================
+def _github_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("WATCHLIST_GITHUB_PATH", "watchlist.json")) or "watchlist.json",
+    }
+
+
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_contents_url(owner: str, repo: str, path: str) -> str:
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+
+def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
+    token = cfg["token"]
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    branch = cfg["branch"]
+    path = cfg["path"]
+
+    if not token:
+        return "", "缺少 GITHUB_TOKEN"
+
+    url = _github_contents_url(owner, repo, path)
+    try:
+        resp = requests.get(
+            url,
+            headers=_github_headers(token),
+            params={"ref": branch},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return _safe_str(data.get("sha")), ""
+        if resp.status_code == 404:
+            return "", ""
+        return "", f"讀取 GitHub 檔案失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return "", f"讀取 GitHub 檔案例外：{e}"
+
+
+def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    cfg = _github_config()
+    token = cfg["token"]
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    branch = cfg["branch"]
+    path = cfg["path"]
+
+    if not token:
+        return False, "未設定 GITHUB_TOKEN，無法回寫 GitHub。"
+
+    sha, sha_err = _get_repo_watchlist_sha(cfg)
+    if sha_err:
+        return False, sha_err
+
+    content_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+
+    body: dict[str, Any] = {
+        "message": f"Update {path} from Streamlit @ {_now_text()}",
+        "content": encoded_content,
+        "branch": branch,
+    }
+    if sha:
+        body["sha"] = sha
+
+    url = _github_contents_url(owner, repo, path)
+
+    try:
+        resp = requests.put(
+            url,
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫 GitHub：{owner}/{repo}@{branch}:{path}"
+        return False, f"GitHub API 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"GitHub API 寫入例外：{e}"
+
+
+def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
+    payload: dict[str, list[dict[str, str]]] = {}
+
+    for group_name, items in data.items():
+        g = _safe_str(group_name)
+        if not g:
+            continue
+
+        seen = set()
+        normalized_items = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            code = _normalize_code(item.get("code"))
+            name = _safe_str(item.get("name")) or code
+            market = _safe_str(item.get("market")) or "上市"
+            category = _normalize_category(item.get("category"))
+
+            if not code:
+                continue
+
+            key = (g, code)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            row = {
+                "code": code,
+                "name": name,
+                "market": market,
+            }
+            if category:
+                row["category"] = category
+
+            normalized_items.append(row)
+
+        payload[g] = sorted(
+            normalized_items,
+            key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))),
+        )
+
+    return payload
+
+
+def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool:
+    payload = _normalize_watchlist_payload(data)
+    ok, msg = _push_watchlist_to_github(payload)
+
+    saved_at = _now_text()
+    st.session_state["watchlist_data"] = copy.deepcopy(payload)
+    st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
+    st.session_state["watchlist_last_saved_at"] = saved_at
+
+    if ok:
+        _set_status(f"{msg}｜{saved_at}", "success")
+    else:
+        _set_status(msg, "error")
+
+    return ok
 
 
 # =========================================================
@@ -227,6 +399,7 @@ def _load_master_df() -> pd.DataFrame:
             df = get_all_code_name_map(market_arg)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 temp = df.copy()
+
                 mapping = {
                     "證券代號": "code",
                     "證券名稱": "name",
@@ -372,20 +545,73 @@ def _append_stock_to_watchlist(
         if _normalize_code(item.get("code")) == code:
             return False, f"{code} 已存在於 {group_name}"
 
-    raw[group_name].append(
-        {
+    row = {
+        "code": code,
+        "name": name,
+        "market": market,
+    }
+    if category:
+        row["category"] = category
+
+    raw[group_name].append(row)
+
+    ok = _force_write_watchlist_github(raw)
+    if ok:
+        return True, f"已加入 {group_name}：{code} {name}"
+    return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
+
+
+def _append_multiple_stocks_to_watchlist(
+    group_name: str,
+    rows: list[dict[str, str]],
+) -> tuple[int, list[str]]:
+    group_name = _safe_str(group_name)
+    if not group_name:
+        return 0, ["請先選擇群組。"]
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        raw = get_normalized_watchlist()
+
+    if group_name not in raw or not isinstance(raw[group_name], list):
+        raw[group_name] = []
+
+    existing_codes = {_normalize_code(x.get("code")) for x in raw[group_name] if isinstance(x, dict)}
+    added = 0
+    messages = []
+
+    for row in rows:
+        code = _normalize_code(row.get("code"))
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+
+        if not code:
+            continue
+
+        if code in existing_codes:
+            messages.append(f"{code} 已存在於 {group_name}")
+            continue
+
+        item = {
             "code": code,
             "name": name,
             "market": market,
-            "category": category,
         }
-    )
+        if category:
+            item["category"] = category
 
-    st.session_state["watchlist_data"] = raw
-    st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
-    st.session_state["watchlist_last_saved_at"] = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        raw[group_name].append(item)
+        existing_codes.add(code)
+        added += 1
+        messages.append(f"已加入 {group_name}：{code} {name}")
 
-    return True, f"已加入 {group_name}：{code} {name}"
+    if added > 0:
+        ok = _force_write_watchlist_github(raw)
+        if not ok:
+            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub 寫入失敗"))]
+
+    return added, messages
 
 
 def _update_master_category_in_memory(master_df: pd.DataFrame, code: str, new_category: str) -> pd.DataFrame:
@@ -1139,6 +1365,22 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     return show
 
 
+def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame):
+    st.session_state[_k("rec_df_store")] = rec_df.copy()
+    st.session_state[_k("category_strength_store")] = category_strength_df.copy()
+    st.session_state[_k("result_saved_at")] = _now_text()
+
+
+def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame]:
+    rec_df = st.session_state.get(_k("rec_df_store"))
+    cat_df = st.session_state.get(_k("category_strength_store"))
+
+    if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame):
+        return rec_df.copy(), cat_df.copy()
+
+    return pd.DataFrame(), pd.DataFrame()
+
+
 # =========================================================
 # Main：按鈕觸發版
 # =========================================================
@@ -1162,6 +1404,11 @@ def main():
         "min_signal_score": -2.0,
         "submitted_once": False,
         "focus_code": "",
+        "status_msg": "",
+        "status_type": "info",
+        "rec_pick_group": list(watchlist_map.keys())[0] if watchlist_map else "",
+        "rec_pick_codes": [],
+        "result_saved_at": "",
     }
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
@@ -1169,8 +1416,20 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜類股強度版",
-        subtitle="按下按鈕才開始推薦，保留原功能，升級股票搜尋 / 更新中心 + 加速 + ETA。",
+        subtitle="按下按鈕才開始推薦，保留原功能，升級股票搜尋 / 更新中心 + 加速 + ETA + 勾選加入自選股。",
     )
+
+    status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
+    status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
+    if status_msg:
+        if status_type == "success":
+            st.success(status_msg)
+        elif status_type == "warning":
+            st.warning(status_msg)
+        elif status_type == "error":
+            st.error(status_msg)
+        else:
+            st.info(status_msg)
 
     if st.session_state.get("watchlist_version"):
         st.caption(
@@ -1182,7 +1441,6 @@ def main():
             )
         )
 
-    # 股票主檔搜尋 / 更新中心
     if _k("master_search_keyword") not in st.session_state:
         st.session_state[_k("master_search_keyword")] = ""
     if _k("master_search_market") not in st.session_state:
@@ -1482,6 +1740,9 @@ def main():
         st.session_state[_k("min_signal_score")] = -2.0
         st.session_state[_k("submitted_once")] = False
         st.session_state[_k("focus_code")] = ""
+        st.session_state[_k("rec_df_store")] = pd.DataFrame()
+        st.session_state[_k("category_strength_store")] = pd.DataFrame()
+        st.session_state[_k("rec_pick_codes")] = []
         st.rerun()
 
     if submit_recommend or submit_refresh:
@@ -1533,19 +1794,30 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
-    rec_df, category_strength_df = _build_recommend_df(
-        universe_items=universe_items,
-        master_df=master_df,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-        min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-        selected_categories=selected_categories,
-    )
+    rec_df = pd.DataFrame()
+    category_strength_df = pd.DataFrame()
+
+    if submit_recommend or submit_refresh:
+        rec_df, category_strength_df = _build_recommend_df(
+            universe_items=universe_items,
+            master_df=master_df,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+            min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+            selected_categories=selected_categories,
+        )
+        _save_recommend_result_to_state(rec_df, category_strength_df)
+    else:
+        rec_df, category_strength_df = _load_recommend_result_from_state()
 
     if rec_df.empty:
-        st.error("掃描完成，但沒有符合條件的股票。")
+        st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
         return
+
+    saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
+    if saved_at:
+        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}")
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.head(top_n).copy()
@@ -1562,6 +1834,80 @@ def main():
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "含類股熱度", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
+
+    render_pro_section("推薦股票加入自選股中心")
+
+    rec_group_options = list(watchlist_map.keys()) if watchlist_map else [""]
+    saved_pick_group = st.session_state.get(_k("rec_pick_group"), "")
+    if saved_pick_group not in rec_group_options:
+        saved_pick_group = rec_group_options[0] if rec_group_options else ""
+        st.session_state[_k("rec_pick_group")] = saved_pick_group
+
+    rec_code_to_label = {
+        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
+        for _, r in rec_df.iterrows()
+    }
+    rec_all_codes = rec_df["股票代號"].astype(str).tolist()
+
+    p1, p2, p3 = st.columns([2, 4, 2])
+    with p1:
+        pick_group = st.selectbox(
+            "加入群組",
+            options=rec_group_options,
+            index=rec_group_options.index(saved_pick_group) if saved_pick_group in rec_group_options else 0,
+            key=_k("rec_pick_group"),
+        )
+    with p2:
+        st.multiselect(
+            "勾選推薦股",
+            options=rec_all_codes,
+            default=[x for x in st.session_state.get(_k("rec_pick_codes"), []) if x in rec_all_codes],
+            format_func=lambda x: rec_code_to_label.get(str(x), str(x)),
+            key=_k("rec_pick_codes"),
+        )
+    with p3:
+        st.write("")
+        st.write("")
+        add_selected_btn = st.button("加入勾選股票到自選股中心", use_container_width=True, type="primary")
+
+    q1, q2 = st.columns([1, 1])
+    with q1:
+        if st.button("全選本輪推薦", use_container_width=True):
+            st.session_state[_k("rec_pick_codes")] = rec_all_codes
+            st.rerun()
+    with q2:
+        if st.button("清空勾選", use_container_width=True):
+            st.session_state[_k("rec_pick_codes")] = []
+            st.rerun()
+
+    if add_selected_btn:
+        selected_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
+        if not selected_codes:
+            st.warning("請先勾選推薦股票。")
+        else:
+            picked_rows = []
+            work = rec_df[rec_df["股票代號"].astype(str).isin(selected_codes)].copy()
+            for _, r in work.iterrows():
+                picked_rows.append(
+                    {
+                        "code": _normalize_code(r.get("股票代號")),
+                        "name": _safe_str(r.get("股票名稱")),
+                        "market": _safe_str(r.get("市場別")) or "上市",
+                        "category": _normalize_category(r.get("類別")),
+                    }
+                )
+
+            added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
+            if added > 0:
+                st.success(f"已加入 {added} 檔到 {pick_group}")
+                watchlist_map = _load_watchlist_map()
+            else:
+                st.warning("沒有新增成功。")
+
+            if messages:
+                with st.expander("加入結果明細", expanded=False):
+                    for msg in messages:
+                        st.write(f"- {msg}")
 
     render_pro_section("本輪精華推薦")
     st.dataframe(
@@ -1707,8 +2053,10 @@ def main():
                 ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
                 ("股票搜尋更新中心", "新增搜尋主檔、更新主檔、加入自選股、分類修正。", ""),
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
+                ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組，且寫回 GitHub watchlist.json。", ""),
+                ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA"],
+            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "勾選加入自選股"],
         )
 
 
