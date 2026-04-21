@@ -70,44 +70,67 @@ def _normalize_code(v: Any) -> str:
 # =========================================================
 # watchlist / 主檔
 # =========================================================
+@st.cache_data(ttl=120, show_spinner=False)
+def _build_watchlist_map_cached(raw_items: tuple) -> dict[str, list[dict[str, str]]]:
+    result: dict[str, list[dict[str, str]]] = {}
+
+    for group_name, items in raw_items:
+        g = _safe_str(group_name)
+        if not g:
+            continue
+
+        rows = []
+        seen = set()
+
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+
+            code = _normalize_code(item[0])
+            name = _safe_str(item[1]) or code
+            market = _safe_str(item[2]) or "上市"
+
+            if not code or code in seen:
+                continue
+
+            seen.add(code)
+            rows.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                    "label": f"{code} {name}",
+                }
+            )
+
+        result[g] = rows
+
+    return result
+
+
 def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
         raw = get_normalized_watchlist()
 
-    result: dict[str, list[dict[str, str]]] = {}
-
+    packed = []
     if isinstance(raw, dict):
         for group_name, items in raw.items():
-            g = _safe_str(group_name)
-            if not g:
-                continue
-
-            rows = []
-            seen = set()
-
+            temp = []
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    code = _normalize_code(item.get("code"))
-                    name = _safe_str(item.get("name")) or code
-                    market = _safe_str(item.get("market")) or "上市"
-                    if not code or code in seen:
-                        continue
-                    seen.add(code)
-                    rows.append(
-                        {
-                            "code": code,
-                            "name": name,
-                            "market": market,
-                            "label": f"{code} {name}",
-                        }
+                    temp.append(
+                        (
+                            _safe_str(item.get("code")),
+                            _safe_str(item.get("name")),
+                            _safe_str(item.get("market")),
+                        )
                     )
+            packed.append((group_name, tuple(temp)))
 
-            result[g] = rows
-
-    return result
+    return _build_watchlist_map_cached(tuple(packed))
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -214,6 +237,83 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
     return pd.DataFrame(), (_safe_str(market_type) or "未知")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _analyze_stock_row(
+    code: str,
+    stock_name: str,
+    market_type: str,
+    start_dt: date,
+    end_dt: date,
+) -> dict[str, Any]:
+    hist_df, used_market = _get_history_smart(
+        stock_no=code,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+
+    if hist_df.empty:
+        return {
+            "股票代號": code,
+            "股票名稱": stock_name,
+            "市場別": used_market,
+            "日期": None,
+            "最新價": None,
+            "漲跌": None,
+            "漲跌幅%": None,
+            "成交股數": None,
+            "成交金額": None,
+            "成交筆數": None,
+            "訊號分數": None,
+            "20日壓力距離%": None,
+            "20日支撐距離%": None,
+            "雷達摘要": "無資料",
+        }
+
+    latest = hist_df.iloc[-1]
+    prev_close = hist_df.iloc[-2]["收盤價"] if len(hist_df) >= 2 and "收盤價" in hist_df.columns else None
+    latest_close = latest.get("收盤價")
+
+    price_change = None
+    pct_change = None
+    if prev_close is not None and latest_close is not None and prev_close != 0:
+        price_change = latest_close - prev_close
+        pct_change = (price_change / prev_close) * 100
+
+    signal = compute_signal_snapshot(hist_df)
+    sr = compute_support_resistance_snapshot(hist_df)
+    radar = compute_radar_scores(hist_df)
+
+    res20 = _safe_float(sr.get("res_20"))
+    sup20 = _safe_float(sr.get("sup_20"))
+    close_now = _safe_float(latest_close)
+
+    pressure_dist = None
+    support_dist = None
+    if close_now is not None and res20 not in [None, 0]:
+        pressure_dist = ((res20 - close_now) / res20) * 100
+    if close_now is not None and sup20 not in [None, 0]:
+        support_dist = ((close_now - sup20) / sup20) * 100
+
+    return {
+        "股票代號": code,
+        "股票名稱": stock_name,
+        "市場別": used_market,
+        "日期": latest.get("日期"),
+        "最新價": latest_close,
+        "漲跌": price_change,
+        "漲跌幅%": pct_change,
+        "成交股數": latest.get("成交股數"),
+        "成交金額": latest.get("成交金額"),
+        "成交筆數": latest.get("成交筆數"),
+        "訊號分數": signal.get("score"),
+        "20日壓力距離%": pressure_dist,
+        "20日支撐距離%": support_dist,
+        "雷達摘要": _safe_str(radar.get("summary")) or "—",
+    }
+
+
 # =========================================================
 # 排行資料
 # =========================================================
@@ -236,95 +336,36 @@ def _init_state(group_map: dict[str, list[dict[str, str]]]):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _build_rank_df(items: list[dict[str, str]], master_df: pd.DataFrame, start_dt: date, end_dt: date) -> pd.DataFrame:
+def _build_rank_df(items_payload: tuple, master_rows_payload: tuple, start_dt: date, end_dt: date) -> pd.DataFrame:
+    master_df = pd.DataFrame(master_rows_payload, columns=["code", "name", "market"]) if master_rows_payload else pd.DataFrame(columns=["code", "name", "market"])
     rows = []
 
-    for item in items:
-        code = _normalize_code(item.get("code"))
-        manual_name = _safe_str(item.get("name"))
-        manual_market = _safe_str(item.get("market"))
+    for item in items_payload:
+        if not isinstance(item, tuple) or len(item) < 3:
+            continue
+
+        code = _normalize_code(item[0])
+        manual_name = _safe_str(item[1])
+        manual_market = _safe_str(item[2])
 
         if not code:
             continue
 
         stock_name, market_type = _find_name_market(code, manual_name, manual_market, master_df)
-        hist_df, used_market = _get_history_smart(
-            stock_no=code,
+        row = _analyze_stock_row(
+            code=code,
             stock_name=stock_name,
             market_type=market_type,
-            start_date=start_dt,
-            end_date=end_dt,
+            start_dt=start_dt,
+            end_dt=end_dt,
         )
-
-        if hist_df.empty:
-            rows.append(
-                {
-                    "股票代號": code,
-                    "股票名稱": stock_name,
-                    "市場別": used_market,
-                    "日期": None,
-                    "最新價": None,
-                    "漲跌": None,
-                    "漲跌幅%": None,
-                    "成交股數": None,
-                    "成交金額": None,
-                    "成交筆數": None,
-                    "訊號分數": None,
-                    "20日壓力距離%": None,
-                    "20日支撐距離%": None,
-                    "雷達摘要": "無資料",
-                }
-            )
-            continue
-
-        latest = hist_df.iloc[-1]
-        prev_close = hist_df.iloc[-2]["收盤價"] if len(hist_df) >= 2 and "收盤價" in hist_df.columns else None
-        latest_close = latest.get("收盤價")
-
-        price_change = None
-        pct_change = None
-        if prev_close is not None and latest_close is not None and prev_close != 0:
-            price_change = latest_close - prev_close
-            pct_change = (price_change / prev_close) * 100
-
-        signal = compute_signal_snapshot(hist_df)
-        sr = compute_support_resistance_snapshot(hist_df)
-        radar = compute_radar_scores(hist_df)
-
-        res20 = _safe_float(sr.get("res_20"))
-        sup20 = _safe_float(sr.get("sup_20"))
-        close_now = _safe_float(latest_close)
-
-        pressure_dist = None
-        support_dist = None
-        if close_now is not None and res20 not in [None, 0]:
-            pressure_dist = ((res20 - close_now) / res20) * 100
-        if close_now is not None and sup20 not in [None, 0]:
-            support_dist = ((close_now - sup20) / sup20) * 100
-
-        rows.append(
-            {
-                "股票代號": code,
-                "股票名稱": stock_name,
-                "市場別": used_market,
-                "日期": latest.get("日期"),
-                "最新價": latest_close,
-                "漲跌": price_change,
-                "漲跌幅%": pct_change,
-                "成交股數": latest.get("成交股數"),
-                "成交金額": latest.get("成交金額"),
-                "成交筆數": latest.get("成交筆數"),
-                "訊號分數": signal.get("score"),
-                "20日壓力距離%": pressure_dist,
-                "20日支撐距離%": support_dist,
-                "雷達摘要": _safe_str(radar.get("summary")) or "—",
-            }
-        )
+        rows.append(row)
 
     return pd.DataFrame(rows)
 
 
-def _format_table(df: pd.DataFrame) -> pd.DataFrame:
+@st.cache_data(ttl=120, show_spinner=False)
+def _format_table_cached(df: pd.DataFrame) -> pd.DataFrame:
     show_df = df.copy()
 
     if "日期" in show_df.columns:
@@ -343,6 +384,10 @@ def _format_table(df: pd.DataFrame) -> pd.DataFrame:
             show_df[col] = show_df[col].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
 
     return show_df
+
+
+def _format_table(df: pd.DataFrame) -> pd.DataFrame:
+    return _format_table_cached(df)
 
 
 def _top_table(df: pd.DataFrame, metric: str, ascending: bool, top_n: int) -> pd.DataFrame:
@@ -413,8 +458,21 @@ def main():
     start_dt = today_dt - timedelta(days=int(st.session_state.get(_k("days"), 40)))
     end_dt = today_dt
 
+    items_payload = tuple(
+        (
+            _normalize_code(x.get("code")),
+            _safe_str(x.get("name")),
+            _safe_str(x.get("market")),
+        )
+        for x in items
+    )
+    master_rows_payload = tuple(
+        (_safe_str(r["code"]), _safe_str(r["name"]), _safe_str(r["market"]))
+        for _, r in master_df.iterrows()
+    )
+
     with st.spinner("正在整理排行榜資料..."):
-        rank_df = _build_rank_df(items, master_df, start_dt, end_dt)
+        rank_df = _build_rank_df(items_payload, master_rows_payload, start_dt, end_dt)
 
     if rank_df.empty:
         st.warning("查無排行資料。")
