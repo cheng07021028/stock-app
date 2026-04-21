@@ -290,6 +290,40 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
     return _ensure_godpick_record_columns(merged.drop(columns=["_biz_key", "_upd"], errors="ignore"))
 
 
+def _delete_records_by_ids(df: pd.DataFrame, record_ids: list[str]) -> pd.DataFrame:
+    df = _ensure_godpick_record_columns(df)
+    ids = {_safe_str(x) for x in (record_ids or []) if _safe_str(x)}
+    if df.empty or not ids:
+        return df.copy()
+    out = df[~df["record_id"].astype(str).isin(ids)].copy()
+    out["更新時間"] = _now_text()
+    return _ensure_godpick_record_columns(out)
+
+
+def _clear_filtered_records(df: pd.DataFrame, filtered_df: pd.DataFrame) -> pd.DataFrame:
+    df = _ensure_godpick_record_columns(df)
+    filtered_df = _ensure_godpick_record_columns(filtered_df)
+    if df.empty or filtered_df.empty:
+        return df.copy()
+
+    ids = {_safe_str(x) for x in filtered_df["record_id"].astype(str).tolist() if _safe_str(x)}
+    if ids:
+        out = df[~df["record_id"].astype(str).isin(ids)].copy()
+    else:
+        drop_keys = {
+            f"{_safe_str(r.get('股票代號'))}|{_safe_str(r.get('推薦日期'))}|{_safe_str(r.get('推薦時間'))}|{_safe_str(r.get('推薦模式'))}"
+            for _, r in filtered_df.iterrows()
+        }
+        keep_mask = []
+        for _, r in df.iterrows():
+            key = f"{_safe_str(r.get('股票代號'))}|{_safe_str(r.get('推薦日期'))}|{_safe_str(r.get('推薦時間'))}|{_safe_str(r.get('推薦模式'))}"
+            keep_mask.append(key not in drop_keys)
+        out = df[pd.Series(keep_mask, index=df.index)].copy()
+
+    out["更新時間"] = _now_text()
+    return _ensure_godpick_record_columns(out)
+
+
 def _read_records_from_github() -> tuple[pd.DataFrame, str]:
     cfg = _github_config()
     token = cfg["token"]
