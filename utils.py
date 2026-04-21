@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 import streamlit as st
 import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -19,6 +21,74 @@ WATCHLIST_CANDIDATES = [
 ]
 
 STATE_FILE = "last_query_state.json"
+
+REQUEST_TIMEOUT_FAST = 8
+REQUEST_TIMEOUT_NORMAL = 15
+REALTIME_BATCH_SIZE = 20
+
+
+@st.cache_resource(show_spinner=False)
+def get_requests_session():
+    session = requests.Session()
+
+    retry = Retry(
+        total=2,
+        read=2,
+        connect=2,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=30, pool_maxsize=30)
+
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    })
+    return session
+
+
+def _json_get(url, params=None, timeout=REQUEST_TIMEOUT_NORMAL, headers=None):
+    session = get_requests_session()
+    req_headers = {}
+    if headers:
+        req_headers.update(headers)
+
+    r = session.get(url, params=params, timeout=timeout, verify=False, headers=req_headers)
+    r.raise_for_status()
+    return r.json()
+
+
+def _find_existing_watchlist_path():
+    for path in WATCHLIST_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
+@st.cache_data(show_spinner=False)
+def _load_watchlist_raw_cached(filepath, mtime):
+    if not filepath or not os.path.exists(filepath):
+        return {}
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _chunk_list(items, size):
+    if size <= 0:
+        size = 1
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 def to_number(value):
@@ -395,41 +465,58 @@ def save_last_query_state(quick_group="", quick_stock_code="", home_start=None, 
 
 
 def load_watchlist_raw():
-    for path in WATCHLIST_CANDIDATES:
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-    return {}
+    filepath = _find_existing_watchlist_path()
+    if not filepath:
+        return {}
+
+    try:
+        mtime = os.path.getmtime(filepath)
+    except Exception:
+        mtime = 0
+
+    return _load_watchlist_raw_cached(filepath, mtime)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_normalized_watchlist():
     data = load_watchlist_raw()
     normalized = {}
+
+    if not isinstance(data, dict):
+        return normalized
 
     for group_name, items in data.items():
         group_name = str(group_name).strip()
         if not group_name:
             continue
 
-        normalized[group_name] = []
+        normalized_items = []
+        seen = set()
+
         if isinstance(items, list):
             for item in items:
-                if isinstance(item, dict):
-                    code = str(item.get("code", "")).strip()
-                    name = str(item.get("name", "")).strip()
-                    market = str(item.get("market", "")).strip() or "上市"
+                if not isinstance(item, dict):
+                    continue
 
-                    if code:
-                        normalized[group_name].append({
-                            "code": code,
-                            "name": name if name else code,
-                            "market": market,
-                        })
+                code = str(item.get("code", "")).strip()
+                name = str(item.get("name", "")).strip()
+                market = str(item.get("market", "")).strip() or "上市"
+
+                if not code:
+                    continue
+
+                key = (code, market)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                normalized_items.append({
+                    "code": code,
+                    "name": name if name else code,
+                    "market": market,
+                })
+
+        normalized[group_name] = normalized_items
 
     return normalized
 
@@ -438,6 +525,8 @@ def save_watchlist(data, filepath="watchlist.json"):
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        _load_watchlist_raw_cached.clear()
+        get_normalized_watchlist.clear()
         return True
     except Exception:
         return False
@@ -452,6 +541,13 @@ def get_all_code_name_map(lookup_date=""):
             if c in df.columns:
                 return c
         return None
+
+    def _normalize_code_text(x):
+        x = str(x).strip()
+        digits = "".join(ch for ch in x if ch.isdigit())
+        if 4 <= len(digits) <= 6:
+            return digits
+        return x
 
     def _append_rows(df, code_candidates, name_candidates, fallback_market=""):
         nonlocal rows
@@ -469,29 +565,20 @@ def get_all_code_name_map(lookup_date=""):
         if not code_col or not name_col:
             return
 
-        for _, row in df.iterrows():
-            code = str(row.get(code_col, "")).strip()
-            name = str(row.get(name_col, "")).strip()
-            market = str(row.get(market_col, "")).strip() if market_col else ""
+        temp = pd.DataFrame()
+        temp["code"] = df[code_col].astype(str).str.strip().map(_normalize_code_text)
+        temp["name"] = df[name_col].astype(str).str.strip()
+        if market_col:
+            temp["market"] = df[market_col].astype(str).str.strip()
+        else:
+            temp["market"] = fallback_market or "上市"
 
-            digits = "".join(ch for ch in code if ch.isdigit())
-            if 4 <= len(digits) <= 6:
-                code = digits
+        temp["name"] = temp["name"].replace("", pd.NA).fillna(temp["code"])
+        temp["market"] = temp["market"].replace("", fallback_market or "上市")
 
-            if not code:
-                continue
-
-            if not name:
-                name = code
-
-            if not market:
-                market = fallback_market or "上市"
-
-            rows.append({
-                "code": code,
-                "name": name,
-                "market": market,
-            })
+        temp = temp[(temp["code"] != "") & (temp["name"] != "")]
+        if not temp.empty:
+            rows.extend(temp.to_dict("records"))
 
     twse_urls = [
         "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
@@ -501,9 +588,7 @@ def get_all_code_name_map(lookup_date=""):
 
     for url in twse_urls:
         try:
-            r = requests.get(url, timeout=30, verify=False)
-            r.raise_for_status()
-            data = r.json()
+            data = _json_get(url, timeout=REQUEST_TIMEOUT_NORMAL)
             df = pd.DataFrame(data)
             _append_rows(
                 df,
@@ -523,20 +608,12 @@ def get_all_code_name_map(lookup_date=""):
 
     for url, fallback_market in tpex_urls:
         try:
-            r = requests.get(url, timeout=30, verify=False)
-            r.raise_for_status()
-            data = r.json()
+            data = _json_get(url, timeout=REQUEST_TIMEOUT_NORMAL)
             df = pd.DataFrame(data)
             _append_rows(
                 df,
-                [
-                    "SecuritiesCompanyCode", "股票代號", "Code", "code",
-                    "代號", "公司代號", "證券代號"
-                ],
-                [
-                    "CompanyName", "股票名稱", "Name", "name",
-                    "名稱", "公司簡稱", "證券名稱"
-                ],
+                ["SecuritiesCompanyCode", "股票代號", "Code", "code", "代號", "公司代號", "證券代號"],
+                ["CompanyName", "股票名稱", "Name", "name", "名稱", "公司簡稱", "證券名稱"],
                 fallback_market=fallback_market,
             )
         except Exception:
@@ -546,7 +623,6 @@ def get_all_code_name_map(lookup_date=""):
         return pd.DataFrame(columns=["code", "name", "market"])
 
     df_all = pd.DataFrame(rows)
-
     df_all["code"] = df_all["code"].astype(str).str.strip()
     df_all["name"] = df_all["name"].astype(str).str.strip()
     df_all["market"] = df_all["market"].astype(str).str.strip().replace("", "上市")
@@ -582,62 +658,9 @@ def _market_prefix(market_type):
     return "otc" if str(market_type).strip() == "上櫃" else "tse"
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_realtime_stock_info(stock_no, stock_name="", market_type="上市"):
-    stock_no = str(stock_no).strip()
-    stock_name = str(stock_name).strip()
-    market_type = str(market_type).strip() or "上市"
-
-    if not stock_no:
-        return {
-            "ok": False,
-            "code": "",
-            "name": stock_name,
-            "market": market_type,
-            "message": "股票代號為空白",
-        }
-
-    ex_ch = f"{_market_prefix(market_type)}_{stock_no}.tw"
-    url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://mis.twse.com.tw/stock/",
-        "Accept": "application/json,text/plain,*/*",
-    }
-    params = {
-        "ex_ch": ex_ch,
-        "json": "1",
-        "delay": "0",
-        "_": str(int(time.time() * 1000)),
-    }
-
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=20, verify=False)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        return {
-            "ok": False,
-            "code": stock_no,
-            "name": stock_name,
-            "market": market_type,
-            "message": f"即時資料取得失敗：{e}",
-        }
-
-    msg_array = data.get("msgArray", [])
-    if not msg_array:
-        return {
-            "ok": False,
-            "code": stock_no,
-            "name": stock_name,
-            "market": market_type,
-            "message": "查無即時資料",
-        }
-
-    raw = msg_array[0]
-
-    code = _safe_text(raw.get("c")) or stock_no
-    name = _safe_text(raw.get("n")) or stock_name or f"股票{stock_no}"
+def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_market="上市"):
+    code = _safe_text(raw.get("c")) or fallback_code
+    name = _safe_text(raw.get("n")) or fallback_name or f"股票{fallback_code}"
 
     prev_close = _safe_num(raw.get("y"))
     current_price = _safe_num(raw.get("z"))
@@ -668,7 +691,7 @@ def get_realtime_stock_info(stock_no, stock_name="", market_type="上市"):
         "ok": True,
         "code": code,
         "name": name,
-        "market": market_type,
+        "market": fallback_market,
         "price": current_price,
         "prev_close": prev_close,
         "open": open_price,
@@ -682,6 +705,141 @@ def get_realtime_stock_info(stock_no, stock_name="", market_type="上市"):
         "raw": raw,
         "message": "",
     }
+
+
+def _empty_realtime_result(stock_no, stock_name="", market_type="上市", message="查無即時資料"):
+    return {
+        "ok": False,
+        "code": stock_no,
+        "name": stock_name,
+        "market": market_type,
+        "message": message,
+    }
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_realtime_stock_info_batch(stock_items):
+    if not stock_items:
+        return {}
+
+    headers = {
+        "Referer": "https://mis.twse.com.tw/stock/",
+    }
+    url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+    result_map = {}
+
+    normalized_items = []
+    ex_to_meta = {}
+
+    for item in stock_items:
+        code = str(item.get("code", "")).strip()
+        name = str(item.get("name", "")).strip()
+        market = str(item.get("market", "")).strip() or "上市"
+        if not code:
+            continue
+
+        ex_ch = f"{_market_prefix(market)}_{code}.tw"
+        normalized_items.append({
+            "code": code,
+            "name": name,
+            "market": market,
+            "ex_ch": ex_ch,
+        })
+        ex_to_meta[ex_ch] = {
+            "code": code,
+            "name": name,
+            "market": market,
+        }
+
+    if not normalized_items:
+        return {}
+
+    for chunk in _chunk_list(normalized_items, REALTIME_BATCH_SIZE):
+        ex_ch_list = [x["ex_ch"] for x in chunk]
+        params = {
+            "ex_ch": "|".join(ex_ch_list),
+            "json": "1",
+            "delay": "0",
+            "_": str(int(time.time() * 1000)),
+        }
+
+        try:
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST, headers=headers)
+            msg_array = data.get("msgArray", []) or []
+        except Exception as e:
+            for x in chunk:
+                result_map[x["code"]] = _empty_realtime_result(
+                    x["code"],
+                    x["name"],
+                    x["market"],
+                    f"即時資料取得失敗：{e}",
+                )
+            continue
+
+        seen_codes = set()
+
+        for raw in msg_array:
+            code = _safe_text(raw.get("c"))
+            ex = _safe_text(raw.get("ex"))
+            meta = ex_to_meta.get(ex, {})
+
+            fallback_code = meta.get("code", code)
+            fallback_name = meta.get("name", "")
+            fallback_market = meta.get("market", "上市")
+
+            if fallback_code:
+                result_map[fallback_code] = _build_realtime_result(
+                    raw,
+                    fallback_code=fallback_code,
+                    fallback_name=fallback_name,
+                    fallback_market=fallback_market,
+                )
+                seen_codes.add(fallback_code)
+
+        for x in chunk:
+            if x["code"] not in seen_codes and x["code"] not in result_map:
+                result_map[x["code"]] = _empty_realtime_result(
+                    x["code"],
+                    x["name"],
+                    x["market"],
+                    "查無即時資料",
+                )
+
+    return result_map
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_realtime_stock_info(stock_no, stock_name="", market_type="上市"):
+    stock_no = str(stock_no).strip()
+    stock_name = str(stock_name).strip()
+    market_type = str(market_type).strip() or "上市"
+
+    if not stock_no:
+        return {
+            "ok": False,
+            "code": "",
+            "name": stock_name,
+            "market": market_type,
+            "message": "股票代號為空白",
+        }
+
+    result_map = get_realtime_stock_info_batch([
+        {
+            "code": stock_no,
+            "name": stock_name,
+            "market": market_type,
+        }
+    ])
+    return result_map.get(
+        stock_no,
+        {
+            "ok": False,
+            "code": stock_no,
+            "name": stock_name,
+            "market": market_type,
+            "message": "查無即時資料",
+        },
+    )
 
 
 def render_realtime_info_card(info, title="即時資訊"):
@@ -736,6 +894,7 @@ def render_realtime_info_card(info, title="即時資訊"):
 @st.cache_data(ttl=15, show_spinner=False)
 def get_realtime_watchlist_df(watchlist_dict, query_date=""):
     all_code_name_df = get_all_code_name_map(query_date)
+    prepared_items = []
     rows = []
 
     for group_name, items in watchlist_dict.items():
@@ -747,33 +906,57 @@ def get_realtime_watchlist_df(watchlist_dict, query_date=""):
                 continue
 
             stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
-            info = get_realtime_stock_info(code, stock_name, market_type)
-
-            rows.append({
-                "群組": group_name,
-                "股票代號": code,
-                "股票名稱": stock_name,
-                "市場別": market_type,
-                "現價": info.get("price"),
-                "昨收": info.get("prev_close"),
-                "開盤": info.get("open"),
-                "最高": info.get("high"),
-                "最低": info.get("low"),
-                "漲跌": info.get("change"),
-                "漲跌幅(%)": info.get("change_pct"),
-                "總量": info.get("total_volume"),
-                "單量": info.get("trade_volume"),
-                "更新時間": info.get("update_time"),
-                "是否成功": info.get("ok", False),
-                "訊息": info.get("message", ""),
+            prepared_items.append({
+                "group": group_name,
+                "code": code,
+                "name": stock_name,
+                "market": market_type,
             })
+
+    if not prepared_items:
+        return pd.DataFrame()
+
+    batch_result = get_realtime_stock_info_batch([
+        {
+            "code": x["code"],
+            "name": x["name"],
+            "market": x["market"],
+        }
+        for x in prepared_items
+    ])
+
+    for item in prepared_items:
+        info = batch_result.get(
+            item["code"],
+            _empty_realtime_result(item["code"], item["name"], item["market"], "查無即時資料")
+        )
+
+        rows.append({
+            "群組": item["group"],
+            "股票代號": item["code"],
+            "股票名稱": item["name"],
+            "市場別": item["market"],
+            "現價": info.get("price"),
+            "昨收": info.get("prev_close"),
+            "開盤": info.get("open"),
+            "最高": info.get("high"),
+            "最低": info.get("low"),
+            "漲跌": info.get("change"),
+            "漲跌幅(%)": info.get("change_pct"),
+            "總量": info.get("total_volume"),
+            "單量": info.get("trade_volume"),
+            "更新時間": info.get("update_time"),
+            "是否成功": info.get("ok", False),
+            "訊息": info.get("message", ""),
+        })
 
     df = pd.DataFrame(rows)
 
     if not df.empty:
-        for col in ["現價", "昨收", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)", "總量", "單量"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+        numeric_cols = ["現價", "昨收", "開盤", "最高", "最低", "漲跌", "漲跌幅(%)", "總量", "單量"]
+        existing_numeric_cols = [c for c in numeric_cols if c in df.columns]
+        if existing_numeric_cols:
+            df[existing_numeric_cols] = df[existing_numeric_cols].apply(pd.to_numeric, errors="coerce")
 
     return df
 
@@ -853,9 +1036,7 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
                 "date": month_str,
                 "stockNo": stock_no,
             }
-            r = requests.get(url, params=params, timeout=30, verify=False)
-            r.raise_for_status()
-            data = r.json()
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
 
             if data.get("stat") != "OK":
                 continue
