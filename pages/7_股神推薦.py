@@ -337,14 +337,30 @@ def _infer_category_from_name(name: str) -> str:
                 return cat
     return "其他"
 
+def _normalize_official_industry(v: Any) -> str:
+    text = _normalize_category(v)
+    if not text:
+        return ""
+    alias = {
+        "半導體業": "半導體業",
+        "電腦及週邊設備業": "電腦及週邊設備業",
+        "電子零組件業": "電子零組件業",
+        "光電業": "光電業",
+        "通信網路業": "通信網路業",
+        "金融保險業": "金融保險業",
+        "航運業": "航運業",
+        "鋼鐵工業": "鋼鐵工業",
+        "生技醫療業": "生技醫療業",
+        "建材營造業": "建材營造業",
+        "電機機械": "電機機械",
+    }
+    return alias.get(text, text)
+
+
 def _infer_category_from_record(name: str, raw_category: Any) -> str:
     raw_cat = _canonical_category(raw_category)
+    raw_cat = _normalize_official_industry(raw_cat)
     if raw_cat:
-        if raw_cat in {x[0] for x in CATEGORY_KEYWORD_RULES}:
-            return raw_cat
-        by_name = _infer_category_from_name(raw_cat)
-        if by_name != "其他":
-            return by_name
         return raw_cat
     return _infer_category_from_name(name)
 
@@ -1117,7 +1133,7 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
 
     fresh_df = _load_master_df()
     if fresh_df.empty:
-        return fresh_df, ["主檔更新失敗：get_all_code_name_map 未取回資料"]
+        return fresh_df, ["主檔更新失敗：證交所 / 櫃買中心主檔未取回資料，且 fallback 也失敗"]
 
     ok, msg = _save_master_cache_to_repo(fresh_df)
     logs.append(msg)
@@ -1183,7 +1199,7 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
                         st.caption(line)
 
         found_df = _search_master_df(master_df, master_kw, master_market, master_cat)
-        st.caption(f"主檔筆數：{len(master_df):,}｜目前篩選結果：{len(found_df):,}")
+        st.caption(f"主檔筆數：{len(master_df):,}｜目前篩選結果：{len(found_df):,}｜類別優先來源：證交所 / 櫃買中心正式產業別")
 
         show_df = found_df.rename(columns={"code": "股票代號", "name": "股票名稱", "market": "市場別", "category": "類別"}).copy()
         st.dataframe(show_df.head(300), use_container_width=True, hide_index=True)
@@ -1249,6 +1265,105 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
 # =========================================================
 # 主檔 / universe helpers
 # =========================================================
+
+
+def _first_existing_col(df: pd.DataFrame, candidates: list[str]) -> str:
+    cols = {str(c).strip(): c for c in df.columns}
+    lowered = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        if cand in cols:
+            return cols[cand]
+        if cand.lower() in lowered:
+            return lowered[cand.lower()]
+    return ""
+
+
+def _normalize_master_schema(df: pd.DataFrame, default_market: str = "") -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["code", "name", "market", "category", "industry", "source"])
+
+    work = df.copy()
+    code_col = _first_existing_col(work, ["code", "股票代號", "公司代號", "有價證券代號", "證券代號", "SecuritiesCompanyCode", "股票代碼"])
+    name_col = _first_existing_col(work, ["name", "股票名稱", "公司簡稱", "公司名稱", "有價證券名稱", "證券名稱", "CompanyName", "Name"])
+    market_col = _first_existing_col(work, ["market", "市場別", "Market", "市場"])
+    industry_col = _first_existing_col(work, ["category", "industry", "industry_name", "產業別", "產業類別", "產業名稱", "Industry", "IndustryName"])
+
+    if not code_col or not name_col:
+        return pd.DataFrame(columns=["code", "name", "market", "category", "industry", "source"])
+
+    out = pd.DataFrame({
+        "code": work[code_col],
+        "name": work[name_col],
+        "market": work[market_col] if market_col else default_market,
+        "industry": work[industry_col] if industry_col else "",
+    })
+    out["code"] = out["code"].map(_normalize_code)
+    out["name"] = out["name"].map(_safe_str)
+    out["market"] = out["market"].map(_safe_str).replace("", default_market or "上市")
+    out["industry"] = out["industry"].map(_normalize_official_industry)
+    out["category"] = out.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("industry")), axis=1)
+    out["source"] = "official"
+    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return out[["code", "name", "market", "category", "industry", "source"]].copy()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_twse_official_master() -> pd.DataFrame:
+    urls = [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+        "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL",
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            if isinstance(payload, list) and payload:
+                return _normalize_master_schema(pd.DataFrame(payload), default_market="上市")
+        except Exception:
+            continue
+    return pd.DataFrame(columns=["code", "name", "market", "category", "industry", "source"])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_tpex_official_master() -> pd.DataFrame:
+    urls = [
+        "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O",
+        "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R",
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            if isinstance(payload, list) and payload:
+                market = "上櫃" if url.endswith("_O") else "興櫃"
+                return _normalize_master_schema(pd.DataFrame(payload), default_market=market)
+        except Exception:
+            continue
+    return pd.DataFrame(columns=["code", "name", "market", "category", "industry", "source"])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_utils_master_fallback() -> pd.DataFrame:
+    dfs = []
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = _normalize_master_schema(df, default_market=market_arg or "上市")
+                if not temp.empty:
+                    temp["source"] = "utils_fallback"
+                    dfs.append(temp)
+        except Exception:
+            pass
+    if not dfs:
+        return pd.DataFrame(columns=["code", "name", "market", "category", "industry", "source"])
+    out = pd.concat(dfs, ignore_index=True)
+    out = out.sort_values(["code"]).drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return out
 def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
@@ -1299,57 +1414,23 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_master_df() -> pd.DataFrame:
-    dfs = []
-    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題", "industry_name"]
+    twse_df = _fetch_twse_official_master()
+    tpex_df = _fetch_tpex_official_master()
+    fallback_df = _fetch_utils_master_fallback()
 
-    for market_arg in ["", "上市", "上櫃", "興櫃"]:
-        try:
-            df = get_all_code_name_map(market_arg)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                temp = df.copy()
-                mapping = {
-                    "證券代號": "code",
-                    "證券名稱": "name",
-                    "市場別": "market",
-                    "code": "code",
-                    "name": "name",
-                    "market": "market",
-                }
-                temp = temp.rename(columns=mapping)
-
-                found_category_col = None
-                for col in temp.columns:
-                    if str(col).strip() in category_candidates:
-                        found_category_col = col
-                        break
-                if found_category_col:
-                    temp = temp.rename(columns={found_category_col: "category"})
-
-                for col in ["code", "name", "market"]:
-                    if col not in temp.columns:
-                        temp[col] = ""
-                if "category" not in temp.columns:
-                    temp["category"] = ""
-
-                temp["code"] = temp["code"].map(_normalize_code)
-                temp["name"] = temp["name"].map(_safe_str)
-                temp["market"] = temp["market"].map(_safe_str)
-                if market_arg in ["上市", "上櫃", "興櫃"]:
-                    temp["market"] = temp["market"].replace("", market_arg)
-                temp["category"] = temp.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
-                dfs.append(temp[["code", "name", "market", "category"]])
-        except Exception:
-            pass
-
+    dfs = [df for df in [twse_df, tpex_df, fallback_df] if isinstance(df, pd.DataFrame) and not df.empty]
     if not dfs:
-        base = pd.DataFrame(columns=["code", "name", "market", "category"])
+        base = pd.DataFrame(columns=["code", "name", "market", "category", "industry", "source"])
     else:
         base = pd.concat(dfs, ignore_index=True)
-        base["code"] = base["code"].map(_normalize_code)
-        base["name"] = base["name"].map(_safe_str)
-        base["market"] = base["market"].map(_safe_str).replace("", "上市")
-        base["category"] = base.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
-        base = base[base["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+        if "source_rank" not in base.columns:
+            base["source_rank"] = base["source"].map({"official": 0, "utils_fallback": 1}).fillna(9)
+        base = base.sort_values(["code", "source_rank"]).drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+        base["category"] = base.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("industry") or r.get("category")), axis=1)
+        for c in ["code", "name", "market", "category"]:
+            if c not in base.columns:
+                base[c] = ""
+        base = base[["code", "name", "market", "category"]].copy()
 
     return _apply_master_overrides(base)
 
