@@ -2310,7 +2310,303 @@ def _render_selected_export_block():
         use_container_width=True,
     )
 
+# =========================================================
+# watchlist / universe helpers
+# =========================================================
+def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
 
+    result: dict[str, list[dict[str, str]]] = {}
+
+    if isinstance(raw, dict):
+        for group_name, items in raw.items():
+            g = _safe_str(group_name)
+            if not g:
+                continue
+
+            rows = []
+            seen = set()
+
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        code = _normalize_code(item.get("code"))
+                        name = _safe_str(item.get("name")) or code
+                        market = _safe_str(item.get("market")) or "上市"
+                        category = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                    else:
+                        code = _normalize_code(item)
+                        name = code
+                        market = "上市"
+                        category = ""
+
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                            "category": category,
+                            "label": f"{code} {name}",
+                        }
+                    )
+
+            result[g] = rows
+
+    return result
+
+
+def _find_name_market_category(
+    code: str,
+    manual_name: str,
+    manual_market: str,
+    manual_category: str,
+    master_df: pd.DataFrame,
+) -> tuple[str, str, str]:
+    code = _normalize_code(code)
+    manual_name = _safe_str(manual_name)
+    manual_market = _safe_str(manual_market)
+    manual_category = _normalize_category(manual_category)
+
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        matched = master_df[master_df["code"].astype(str) == code]
+        if not matched.empty:
+            row = matched.iloc[0]
+            final_name = _safe_str(row.get("name")) or manual_name or code
+            final_market = _safe_str(row.get("market")) or manual_market or "上市"
+            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_name(final_name)
+            return final_name, final_market, final_category
+
+    final_name = manual_name or code
+    final_market = manual_market or "上市"
+    final_category = manual_category or _infer_category_from_name(final_name)
+    return final_name, final_market, final_category
+
+
+def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
+    rows = []
+    seen = set()
+    raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
+
+    for raw in raw_lines:
+        txt = _safe_str(raw)
+        code = _normalize_code(txt)
+        name = ""
+        market = "上市"
+        category = ""
+
+        if not code and isinstance(master_df, pd.DataFrame) and not master_df.empty:
+            matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
+            if not matched.empty:
+                row = matched.iloc[0]
+                code = _normalize_code(row.get("code"))
+                name = _safe_str(row.get("name"))
+                market = _safe_str(row.get("market")) or "上市"
+                category = _normalize_category(row.get("category"))
+
+        if code and not name:
+            name, market, category = _find_name_market_category(code, "", market, category, master_df)
+
+        if code and code not in seen:
+            seen.add(code)
+            rows.append(
+                {
+                    "code": code,
+                    "name": name or code,
+                    "market": market or "上市",
+                    "category": category,
+                    "label": f"{code} {name or code}",
+                }
+            )
+    return rows
+
+
+def _build_universe_from_market(
+    master_df: pd.DataFrame,
+    market_mode: str,
+    limit_count: Any,
+    selected_categories: list[str],
+) -> list[dict[str, str]]:
+    if master_df is None or master_df.empty:
+        return []
+
+    work = master_df.copy()
+    market_mode = _safe_str(market_mode)
+
+    if market_mode == "上市":
+        work = work[work["market"].astype(str) == "上市"].copy()
+    elif market_mode == "上櫃":
+        work = work[work["market"].astype(str) == "上櫃"].copy()
+    elif market_mode == "興櫃":
+        work = work[work["market"].astype(str) == "興櫃"].copy()
+
+    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
+    if clean_categories:
+        work = work[work["category"].astype(str).isin(clean_categories)].copy()
+
+    if _safe_str(limit_count) != "全部":
+        try:
+            limit_n = int(limit_count)
+            if limit_n > 0:
+                work = work.head(limit_n).copy()
+        except Exception:
+            pass
+
+    rows = []
+    for _, row in work.iterrows():
+        code = _normalize_code(row.get("code"))
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+        if code:
+            rows.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                    "category": category,
+                    "label": f"{code} {name}",
+                }
+            )
+    return rows
+
+
+def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
+    cats = set()
+
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        for _, row in master_df.iterrows():
+            name = _safe_str(row.get("name"))
+            cat = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+            if cat:
+                cats.add(cat)
+
+    if isinstance(watchlist_map, dict):
+        for _, items in watchlist_map.items():
+            for item in items:
+                name = _safe_str(item.get("name"))
+                cat = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                if cat:
+                    cats.add(cat)
+
+    return sorted(list(cats))
+
+
+def _append_stock_to_watchlist(
+    group_name: str,
+    code: str,
+    name: str,
+    market: str,
+    category: str,
+):
+    group_name = _safe_str(group_name)
+    code = _normalize_code(code)
+    name = _safe_str(name) or code
+    market = _safe_str(market) or "上市"
+    category = _normalize_category(category) or _infer_category_from_name(name)
+
+    if not group_name:
+        return False, "群組不可空白"
+    if not code:
+        return False, "股票代號不可空白"
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    if group_name not in raw or not isinstance(raw[group_name], list):
+        raw[group_name] = []
+
+    for item in raw[group_name]:
+        if isinstance(item, dict) and _normalize_code(item.get("code")) == code:
+            return False, f"{code} 已存在於 {group_name}"
+
+    row = {
+        "code": code,
+        "name": name,
+        "market": market,
+    }
+    if category:
+        row["category"] = category
+
+    raw[group_name].append(row)
+
+    ok = _force_write_watchlist_dual(raw)
+    if ok:
+        return True, f"已加入 {group_name}：{code} {name}"
+    return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
+
+
+def _append_multiple_stocks_to_watchlist(
+    group_name: str,
+    rows: list[dict[str, str]],
+) -> tuple[int, list[str]]:
+    group_name = _safe_str(group_name)
+    if not group_name:
+        return 0, ["請先選擇群組。"]
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    if group_name not in raw or not isinstance(raw[group_name], list):
+        raw[group_name] = []
+
+    existing_codes = {
+        _normalize_code(x.get("code"))
+        for x in raw[group_name]
+        if isinstance(x, dict)
+    }
+
+    added = 0
+    messages = []
+
+    for row in rows:
+        code = _normalize_code(row.get("code"))
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+
+        if not code:
+            continue
+
+        if code in existing_codes:
+            messages.append(f"{code} 已存在於 {group_name}")
+            continue
+
+        item = {
+            "code": code,
+            "name": name,
+            "market": market,
+        }
+        if category:
+            item["category"] = category
+
+        raw[group_name].append(item)
+        existing_codes.add(code)
+        added += 1
+        messages.append(f"已加入 {group_name}：{code} {name}")
+
+    if added > 0:
+        ok = _force_write_watchlist_dual(raw)
+        if not ok:
+            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
+
+    return added, messages
 # =========================================================
 # Main
 # =========================================================
