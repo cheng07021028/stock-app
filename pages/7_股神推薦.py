@@ -151,6 +151,7 @@ SCAN_SIZES = {
     "全部": 999999,
 }
 
+# 7 -> 8 必要欄位對齊
 RECORD_COLUMNS = [
     "股票代號",
     "股票名稱",
@@ -171,6 +172,17 @@ RECORD_COLUMNS = [
     "停損價",
     "賣出目標1",
     "賣出目標2",
+    "推薦日期",
+    "推薦時間",
+    "目前狀態",
+    "是否已實際買進",
+    "實際買進價",
+    "實際賣出價",
+    "實際報酬%",
+    "備註",
+    "是否達停損",
+    "是否達目標1",
+    "是否達目標2",
 ]
 
 # =========================================================
@@ -209,6 +221,16 @@ def clamp(v, low=0.0, high=100.0):
     except Exception:
         return low
 
+def safe_bool_str(v, default="否"):
+    s = safe_str(v, default)
+    if s in {"True", "true", "1", "Y", "Yes", "yes"}:
+        return "是"
+    if s in {"False", "false", "0", "N", "No", "no"}:
+        return "否"
+    if s in {"是", "否"}:
+        return s
+    return default
+
 def github_enabled() -> bool:
     return all([GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME])
 
@@ -217,6 +239,17 @@ def github_headers():
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
     }
+
+def build_record_key_from_row(row: Dict[str, Any]) -> str:
+    return (
+        safe_str(row.get("股票代號"))
+        + "|"
+        + safe_str(row.get("推薦日期"))
+        + "|"
+        + safe_str(row.get("推薦時間"))
+        + "|"
+        + safe_str(row.get("推薦模式"))
+    )
 
 # =========================================================
 # Firestore
@@ -294,7 +327,12 @@ def write_github_json(path: str, data: Any, commit_message: str):
 
         put_r = requests.put(url, headers=github_headers(), json=payload, timeout=30)
         if put_r.status_code not in (200, 201):
-            return {"ok": False, "msg": f"GitHub 寫入失敗：{put_r.status_code}"}
+            msg = ""
+            try:
+                msg = put_r.json().get("message", "")
+            except Exception:
+                msg = put_r.text[:200]
+            return {"ok": False, "msg": f"GitHub 寫入失敗：{put_r.status_code} {msg}"}
         return {"ok": True, "msg": "GitHub 寫入成功"}
     except Exception as e:
         return {"ok": False, "msg": f"GitHub 寫入失敗：{e}"}
@@ -363,7 +401,6 @@ def normalize_watchlist_obj(obj: Any) -> Dict[str, List[str]]:
     return out
 
 def load_watchlist_all() -> Dict[str, List[str]]:
-    # 優先讀現有 utils 結果
     try:
         wl = get_normalized_watchlist()
         if isinstance(wl, dict) and wl:
@@ -419,7 +456,11 @@ def save_watchlist_all(watchlist_obj: Dict[str, List[str]]) -> Dict[str, Any]:
             key_field="doc_id",
         )
 
-    return {"ok": gh_result.get("ok", False) or fs_result.get("ok", False), "github": gh_result, "firestore": fs_result}
+    return {
+        "ok": gh_result.get("ok", False) or fs_result.get("ok", False),
+        "github": gh_result,
+        "firestore": fs_result
+    }
 
 # =========================================================
 # 推薦紀錄雙寫
@@ -427,10 +468,86 @@ def save_watchlist_all(watchlist_obj: Dict[str, List[str]]) -> Dict[str, Any]:
 def ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=RECORD_COLUMNS)
+
+    x = df.copy()
     for c in RECORD_COLUMNS:
-        if c not in df.columns:
-            df[c] = np.nan
-    return df[RECORD_COLUMNS].copy()
+        if c not in x.columns:
+            x[c] = np.nan
+
+    x["是否領先同類股"] = x["是否領先同類股"].apply(
+        lambda v: True if str(v).strip() in {"True", "true", "1", "是"} else False
+    )
+    x["是否已實際買進"] = x["是否已實際買進"].apply(lambda v: safe_bool_str(v, "否"))
+    x["是否達停損"] = x["是否達停損"].apply(lambda v: safe_bool_str(v, "否"))
+    x["是否達目標1"] = x["是否達目標1"].apply(lambda v: safe_bool_str(v, "否"))
+    x["是否達目標2"] = x["是否達目標2"].apply(lambda v: safe_bool_str(v, "否"))
+
+    for c in [
+        "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+        "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+        "實際買進價", "實際賣出價", "實際報酬%"
+    ]:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    x["推薦日期"] = x["推薦日期"].fillna("").astype(str)
+    x["推薦時間"] = x["推薦時間"].fillna("").astype(str)
+    x["目前狀態"] = x["目前狀態"].replace("", np.nan).fillna("觀察").astype(str)
+    x["備註"] = x["備註"].fillna("").astype(str)
+
+    return x[RECORD_COLUMNS].copy()
+
+def prepare_records_from_selection(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=RECORD_COLUMNS)
+
+    x = df.copy()
+
+    if "推薦日期" not in x.columns:
+        x["推薦日期"] = now_date()
+    else:
+        x["推薦日期"] = x["推薦日期"].replace("", np.nan).fillna(now_date())
+
+    if "推薦時間" not in x.columns:
+        x["推薦時間"] = now_time()
+    else:
+        x["推薦時間"] = x["推薦時間"].replace("", np.nan).fillna(now_time())
+
+    if "目前狀態" not in x.columns:
+        x["目前狀態"] = "觀察"
+    else:
+        x["目前狀態"] = x["目前狀態"].replace("", np.nan).fillna("觀察")
+
+    if "是否已實際買進" not in x.columns:
+        x["是否已實際買進"] = "否"
+    else:
+        x["是否已實際買進"] = x["是否已實際買進"].replace("", np.nan).fillna("否")
+
+    for c, default_val in {
+        "實際買進價": np.nan,
+        "實際賣出價": np.nan,
+        "實際報酬%": np.nan,
+        "備註": "",
+        "是否達停損": "否",
+        "是否達目標1": "否",
+        "是否達目標2": "否",
+    }.items():
+        if c not in x.columns:
+            x[c] = default_val
+        else:
+            if pd.isna(default_val):
+                x[c] = pd.to_numeric(x[c], errors="coerce")
+            else:
+                x[c] = x[c].replace("", np.nan).fillna(default_val)
+
+    return ensure_record_columns(x)
+
+def dedupe_records(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=RECORD_COLUMNS)
+    x = ensure_record_columns(df.copy())
+    x["_key"] = x.apply(lambda r: build_record_key_from_row(r.to_dict()), axis=1)
+    x = x.drop_duplicates("_key", keep="last").drop(columns=["_key"], errors="ignore")
+    return ensure_record_columns(x)
 
 def load_godpick_records() -> pd.DataFrame:
     rows = []
@@ -448,22 +565,11 @@ def load_godpick_records() -> pd.DataFrame:
     if not rows:
         return ensure_record_columns(pd.DataFrame())
 
-    df = ensure_record_columns(pd.DataFrame(rows))
-    if "推薦日期" in df.columns and "推薦時間" in df.columns:
-        df["_key"] = (
-            df["股票代號"].fillna("").astype(str)
-            + "|"
-            + df["推薦日期"].fillna("").astype(str)
-            + "|"
-            + df["推薦時間"].fillna("").astype(str)
-            + "|"
-            + df["推薦模式"].fillna("").astype(str)
-        )
-        df = df.drop_duplicates("_key", keep="last").drop(columns=["_key"], errors="ignore")
-    return ensure_record_columns(df)
+    df = pd.DataFrame(rows)
+    return dedupe_records(df)
 
 def save_godpick_records(df: pd.DataFrame) -> Dict[str, Any]:
-    df2 = ensure_record_columns(df.copy())
+    df2 = dedupe_records(df.copy())
     rows = df2.replace({np.nan: None}).to_dict(orient="records")
 
     gh_result = {"ok": False, "msg": "GitHub 略過"}
@@ -498,7 +604,11 @@ def save_godpick_records(df: pd.DataFrame) -> Dict[str, Any]:
             key_field="doc_id",
         )
 
-    return {"ok": gh_result.get("ok", False) or fs_result.get("ok", False), "github": gh_result, "firestore": fs_result}
+    return {
+        "ok": gh_result.get("ok", False) or fs_result.get("ok", False),
+        "github": gh_result,
+        "firestore": fs_result
+    }
 
 # =========================================================
 # 股票池 / 歷史資料
@@ -522,7 +632,6 @@ def build_universe_df() -> pd.DataFrame:
         elif len(code) == 4 and code[0] in {"3", "4", "5", "6"}:
             market = "上櫃"
 
-        # 類別先用名稱/代號粗分，之後你可以再換成你原本更細的類股映射
         category = "其他"
         if any(k in name for k in ["半導體", "晶圓", "封測", "IC"]):
             category = "半導體"
@@ -836,27 +945,32 @@ def score_by_mode(row: Dict[str, Any], mode: str) -> float:
     leader = to_float(row.get("同類股領先幅度"))
 
     if mode == "飆股模式":
-        return round(np.nanmean([pre * 0.45, tech * 0.20, trade * 0.15, heat * 0.10, leader * 0.10]) * (100 / 20), 2)
+        return round((pre * 0.45) + (tech * 0.20) + (trade * 0.15) + (heat * 0.10) + (leader * 0.10), 2)
     if mode == "波段模式":
-        return round(np.nanmean([tech * 0.35, trade * 0.30, pre * 0.20, heat * 0.10, leader * 0.05]) * (100 / 20), 2)
+        return round((tech * 0.35) + (trade * 0.30) + (pre * 0.20) + (heat * 0.10) + (leader * 0.05), 2)
     if mode == "領頭羊模式":
-        return round(np.nanmean([heat * 0.30, leader * 0.25, pre * 0.20, tech * 0.15, trade * 0.10]) * (100 / 20), 2)
+        return round((heat * 0.30) + (leader * 0.25) + (pre * 0.20) + (tech * 0.15) + (trade * 0.10), 2)
     return round(np.nanmean([tech, pre, trade, heat, leader]), 2)
 
 def build_recommendation_fields(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     x = df.copy()
 
-    # 類股熱度
-    cat_grp = x.groupby("類別", dropna=False)["20日漲幅%"].mean().reset_index().rename(columns={"20日漲幅%": "_cat_avg_ret20"})
+    cat_grp = (
+        x.groupby("類別", dropna=False)["20日漲幅%"]
+        .mean()
+        .reset_index()
+        .rename(columns={"20日漲幅%": "_cat_avg_ret20"})
+    )
     x = x.merge(cat_grp, on="類別", how="left")
     x["類股熱度分數"] = x["_cat_avg_ret20"].apply(lambda v: clamp((to_float(v) + 5) * 6, 0, 100))
 
-    # 同類股領先幅度
-    x["同類股領先幅度"] = (pd.to_numeric(x["20日漲幅%"], errors="coerce") - pd.to_numeric(x["_cat_avg_ret20"], errors="coerce")).round(2)
+    x["同類股領先幅度"] = (
+        pd.to_numeric(x["20日漲幅%"], errors="coerce")
+        - pd.to_numeric(x["_cat_avg_ret20"], errors="coerce")
+    ).round(2)
     x["是否領先同類股"] = x["同類股領先幅度"] > 0
     x["_leader_score"] = x["同類股領先幅度"].apply(lambda v: clamp(to_float(v) * 8 + 50, 0, 100))
 
-    # 最終總分
     x["推薦總分"] = x.apply(
         lambda r: score_by_mode({
             "技術結構分數": r["技術結構分數"],
@@ -881,19 +995,11 @@ def build_recommendation_fields(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     x["推薦等級"] = x["推薦總分"].apply(grade_fn)
     x["推薦模式"] = mode
 
-    # 推薦價 / 停損 / 目標
-    x["推薦價格"] = x["收盤價"].round(2)
-    x["停損價"] = (
-        pd.to_numeric(x["收盤價"], errors="coerce") * 0.94
-    ).round(2)
-    x["賣出目標1"] = (
-        pd.to_numeric(x["收盤價"], errors="coerce") * 1.08
-    ).round(2)
-    x["賣出目標2"] = (
-        pd.to_numeric(x["收盤價"], errors="coerce") * 1.15
-    ).round(2)
+    x["推薦價格"] = pd.to_numeric(x["收盤價"], errors="coerce").round(2)
+    x["停損價"] = (pd.to_numeric(x["收盤價"], errors="coerce") * 0.94).round(2)
+    x["賣出目標1"] = (pd.to_numeric(x["收盤價"], errors="coerce") * 1.08).round(2)
+    x["賣出目標2"] = (pd.to_numeric(x["收盤價"], errors="coerce") * 1.15).round(2)
 
-    # 標籤 / 理由
     def tags_fn(r):
         tags = []
         if to_float(r["起漲前兆分數"]) >= 75:
@@ -904,7 +1010,8 @@ def build_recommendation_fields(df: pd.DataFrame, mode: str) -> pd.DataFrame:
             tags.append("類股熱")
         if bool(r["是否領先同類股"]):
             tags.append("同類股領先")
-        if to_float(r["20日漲幅%"]) >= 0 and to_float(r["20日漲幅%"]) <= 12:
+        ret20 = to_float(r["20日漲幅%"])
+        if pd.notna(ret20) and 0 <= ret20 <= 12:
             tags.append("未過熱")
         return " / ".join(tags[:4])
 
@@ -959,8 +1066,7 @@ def scan_recommendations_cached(
     start_date = (datetime.now() - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d")
 
     rows = []
-    total = len(universe)
-    for i, row in enumerate(universe.itertuples(index=False), start=1):
+    for row in universe.itertuples(index=False):
         rec = compute_single_stock_features(
             code=row.股票代號,
             name=row.股票名稱,
@@ -977,7 +1083,7 @@ def scan_recommendations_cached(
             if px < min_price or px > max_price:
                 continue
 
-        ok, reason = apply_risk_filter(rec, risk_filter)
+        ok, _reason = apply_risk_filter(rec, risk_filter)
         if not ok:
             continue
 
@@ -1001,10 +1107,15 @@ def scan_recommendations_cached(
         類股平均起漲前兆=("起漲前兆分數", "mean"),
         類股平均交易可行=("交易可行分數", "mean"),
         類股平均20日漲幅=("20日漲幅%", "mean"),
-    ).reset_index().sort_values(["類股平均總分", "類股平均20日漲幅"], ascending=[False, False], na_position="last")
+    ).reset_index().sort_values(
+        ["類股平均總分", "類股平均20日漲幅"],
+        ascending=[False, False],
+        na_position="last"
+    )
 
     factor_rank_df = rec_df[[
-        "股票代號", "股票名稱", "類別", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "推薦總分"
+        "股票代號", "股票名稱", "類別", "技術結構分數", "起漲前兆分數",
+        "交易可行分數", "類股熱度分數", "推薦總分"
     ]].copy().sort_values("推薦總分", ascending=False, na_position="last")
 
     return rec_df, category_strength_df, factor_rank_df
@@ -1025,7 +1136,10 @@ if "godpick_scan_meta" not in st.session_state:
     st.session_state["godpick_scan_meta"] = {}
 
 if "godpick_selected_to_records" not in st.session_state:
-    st.session_state["godpick_selected_to_records"] = pd.DataFrame()
+    st.session_state["godpick_selected_to_records"] = pd.DataFrame(columns=RECORD_COLUMNS)
+
+if "godpick_records_pending_import" not in st.session_state:
+    st.session_state["godpick_records_pending_import"] = pd.DataFrame(columns=RECORD_COLUMNS)
 
 # =========================================================
 # 控制區
@@ -1071,7 +1185,8 @@ with btn_cols[3]:
         st.session_state["godpick_rec_df"] = pd.DataFrame()
         st.session_state["godpick_category_strength_df"] = pd.DataFrame()
         st.session_state["godpick_factor_rank_df"] = pd.DataFrame()
-        st.session_state["godpick_selected_to_records"] = pd.DataFrame()
+        st.session_state["godpick_selected_to_records"] = pd.DataFrame(columns=RECORD_COLUMNS)
+        st.session_state["godpick_records_pending_import"] = pd.DataFrame(columns=RECORD_COLUMNS)
         st.success("已清空結果")
         st.rerun()
 
@@ -1117,7 +1232,6 @@ if rec_df.empty:
     st.info("目前尚無推薦結果，請先按「開始推薦」。")
     st.stop()
 
-# KPI
 top_n = min(10, len(rec_df))
 avg_score = rec_df["推薦總分"].dropna().mean()
 avg_pre = rec_df["起漲前兆分數"].dropna().mean()
@@ -1148,10 +1262,11 @@ tabs = st.tabs([
 # Tab 1 推薦總表
 # =========================================================
 with tabs[0]:
-    safe_render_pro_section("推薦總表", "勾選後可直接寫入 推薦紀錄或加入自選股。")
+    safe_render_pro_section("推薦總表", "勾選後可直接寫入 8 頁或加入自選股。")
 
     view_df = rec_df.copy()
-    view_df.insert(0, "勾選", False)
+    if "勾選" not in view_df.columns:
+        view_df.insert(0, "勾選", False)
 
     show_cols = [
         "勾選",
@@ -1207,8 +1322,7 @@ with tabs[0]:
     if "勾選" in selected_df.columns:
         selected_df = selected_df.drop(columns=["勾選"], errors="ignore")
 
-    st.session_state["godpick_selected_to_records"] = ensure_record_columns(selected_df.copy())
-
+    st.session_state["godpick_selected_to_records"] = prepare_records_from_selection(selected_df.copy())
     st.caption(f"已勾選 {len(selected_df)} 筆")
 
 # =========================================================
@@ -1220,7 +1334,11 @@ with tabs[1]:
         st.info("目前沒有類股強度資料")
     else:
         st.dataframe(
-            category_strength_df.sort_values(["類股平均總分", "類股平均20日漲幅"], ascending=[False, False], na_position="last"),
+            category_strength_df.sort_values(
+                ["類股平均總分", "類股平均20日漲幅"],
+                ascending=[False, False],
+                na_position="last"
+            ),
             use_container_width=True,
             hide_index=True,
         )
@@ -1243,7 +1361,7 @@ with tabs[2]:
 # Tab 4 勾選動作
 # =========================================================
 with tabs[3]:
-    safe_render_pro_section("勾選動作", "可直接寫入 推薦紀錄、雲端同步、加入自選股。")
+    safe_render_pro_section("勾選動作", "可直接寫入 8 頁、雲端同步、加入自選股。")
 
     action_cols = st.columns([1.2, 1.2, 1.4, 2.2])
 
@@ -1254,77 +1372,83 @@ with tabs[3]:
         st.metric("已勾選筆數", len(st.session_state["godpick_selected_to_records"]))
 
     with action_cols[2]:
-        direct_sync_records = st.toggle("寫入 推薦紀錄時同步雲端", value=True)
+        direct_sync_records = st.toggle("寫入 8 頁時同步雲端", value=True)
 
     with action_cols[3]:
-        st.caption("建議流程：勾選 → 寫入 推薦紀錄 / 加入自選股 → 到 推薦紀錄追蹤績效")
+        st.caption("建議流程：勾選 → 寫入 8 頁 / 加入自選股 → 到 8 頁追蹤績效")
 
     btn_cols2 = st.columns([1.3, 1.3, 1.3, 2.1])
 
     with btn_cols2[0]:
-        if st.button("📥 寫入 推薦紀錄", use_container_width=True):
-            selected = ensure_record_columns(st.session_state["godpick_selected_to_records"].copy())
+        if st.button("📥 寫入 8 頁", use_container_width=True):
+            selected = prepare_records_from_selection(st.session_state["godpick_selected_to_records"].copy())
             if selected.empty:
                 st.warning("請先勾選推薦股票")
             else:
-                # session_state 交給 推薦紀錄接收
                 st.session_state["godpick_records_pending_import"] = selected.copy()
 
                 if direct_sync_records:
                     old_records = load_godpick_records()
                     merged = pd.concat([old_records, selected], ignore_index=True) if not old_records.empty else selected.copy()
-                    merged["_k"] = (
-                        merged["股票代號"].fillna("").astype(str)
-                        + "|"
-                        + merged["推薦日期"].fillna(now_date()).astype(str)
-                        + "|"
-                        + merged["推薦時間"].fillna(now_time()).astype(str)
-                        + "|"
-                        + merged["推薦模式"].fillna("").astype(str)
-                    )
-                    merged = merged.drop_duplicates("_k", keep="last").drop(columns=["_k"], errors="ignore")
+                    merged = dedupe_records(merged)
                     result = save_godpick_records(merged)
                     if result["ok"]:
-                        st.success("已寫入 推薦紀錄待匯入資料，且已同步 GitHub / Firestore")
+                        st.success("已寫入 8 頁待匯入資料，且已同步 GitHub / Firestore")
                     else:
-                        st.warning("已寫入 推薦紀錄待匯入資料，但雲端同步失敗")
+                        st.warning("已寫入 8 頁待匯入資料，但雲端同步失敗")
                 else:
-                    st.success("已寫入 推薦紀錄待匯入資料，切到 推薦紀錄按『匯入 推薦 頁推薦結果』即可")
+                    st.success("已寫入 8 頁待匯入資料，切到 8 頁按『匯入 7 頁推薦結果』即可")
 
     with btn_cols2[1]:
         if st.button("⭐ 加入自選股", use_container_width=True):
-            selected = ensure_record_columns(st.session_state["godpick_selected_to_records"].copy())
+            selected = prepare_records_from_selection(st.session_state["godpick_selected_to_records"].copy())
             if selected.empty:
                 st.warning("請先勾選推薦股票")
             else:
+                group_name = target_group.strip() or "股神推薦"
                 watchlist = load_watchlist_all()
-                watchlist.setdefault(target_group.strip() or "股神推薦", [])
+                watchlist.setdefault(group_name, [])
                 for code in selected["股票代號"].fillna("").astype(str).tolist():
-                    if code and code not in watchlist[target_group.strip() or "股神推薦"]:
-                        watchlist[target_group.strip() or "股神推薦"].append(code)
+                    if code and code not in watchlist[group_name]:
+                        watchlist[group_name].append(code)
 
-                watchlist[target_group.strip() or "股神推薦"] = sorted(list(dict.fromkeys(watchlist[target_group.strip() or "股神推薦"])))
+                watchlist[group_name] = sorted(list(dict.fromkeys(watchlist[group_name])))
                 result = save_watchlist_all(watchlist)
                 if result["ok"]:
-                    st.success(f"已加入自選股群組：{target_group.strip() or '股神推薦'}")
+                    st.success(f"已加入自選股群組：{group_name}")
                 else:
                     st.warning("已更新本地結構，但雲端同步失敗")
 
     with btn_cols2[2]:
-        if st.button("🧾 寫入 推薦紀錄且清空勾選", use_container_width=True):
-            selected = ensure_record_columns(st.session_state["godpick_selected_to_records"].copy())
+        if st.button("🧾 寫入 8 頁且清空勾選", use_container_width=True):
+            selected = prepare_records_from_selection(st.session_state["godpick_selected_to_records"].copy())
             if selected.empty:
                 st.warning("請先勾選推薦股票")
             else:
                 st.session_state["godpick_records_pending_import"] = selected.copy()
                 st.session_state["godpick_selected_to_records"] = pd.DataFrame(columns=RECORD_COLUMNS)
-                st.success("已寫入 推薦紀錄待匯入資料，並清空本頁暫存勾選")
+                st.success("已寫入 8 頁待匯入資料，並清空本頁暫存勾選")
 
     with btn_cols2[3]:
         st.code(
-            "推薦紀錄接收 key：\n"
+            "8 頁接收 key：\n"
             "st.session_state['godpick_selected_to_records']\n"
             "st.session_state['godpick_records_pending_import']"
+        )
+
+    pending_preview = st.session_state["godpick_records_pending_import"].copy()
+    if not pending_preview.empty:
+        st.markdown("##### 待匯入 8 頁預覽")
+        st.dataframe(
+            pending_preview[
+                [c for c in [
+                    "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
+                    "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+                    "推薦日期", "推薦時間", "目前狀態", "是否已實際買進"
+                ] if c in pending_preview.columns]
+            ],
+            use_container_width=True,
+            hide_index=True,
         )
 
 # =========================================================
@@ -1348,7 +1472,11 @@ with tabs[4]:
             factor_local.to_excel(writer, sheet_name="自動因子榜", index=False)
 
             lead_cols = [c for c in ["股票代號", "股票名稱", "類別", "同類股領先幅度", "推薦總分"] if c in rec_local.columns]
-            lead_df = rec_local[lead_cols].sort_values(["同類股領先幅度", "推薦總分"], ascending=[False, False], na_position="last")
+            lead_df = rec_local[lead_cols].sort_values(
+                ["同類股領先幅度", "推薦總分"],
+                ascending=[False, False],
+                na_position="last"
+            )
             lead_df.to_excel(writer, sheet_name="同類股領先榜", index=False)
 
             for sheet_name, sheet_df in {
