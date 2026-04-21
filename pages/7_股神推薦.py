@@ -383,20 +383,27 @@ def _normalize_official_industry(v: Any) -> str:
     }
     return alias.get(text, text)
 
-def _infer_theme_category(name: str, official_industry: Any = "", raw_category: Any = "") -> str:
+def _infer_theme_category(code: Any = "", name: str = "", official_industry: Any = "", raw_category: Any = "") -> str:
+    code = _normalize_code(code)
+    if code and code in BUILTIN_TOPIC_CODE_MAP:
+        return BUILTIN_TOPIC_CODE_MAP[code]
+
     official = _normalize_official_industry(official_industry)
     raw_cat = _canonical_category(raw_category)
-    if raw_cat and raw_cat != official and raw_cat != "其他":
+    if raw_cat and raw_cat != official and raw_cat not in {"其他", "其他_官方未知", "其他_主題未映射"}:
         return raw_cat
+
     name_guess = _infer_category_from_name(name)
     if name_guess != "其他":
         return name_guess
+
     for official_list, theme in OFFICIAL_TO_THEME_RULES:
         if official in official_list:
             return theme
+
     if official:
-        return official
-    return "其他"
+        return "其他_主題未映射"
+    return "其他_官方未知"
 
 def _infer_category_from_record(name: str, raw_category: Any, official_industry: Any = "") -> str:
     return _infer_theme_category(name, official_industry=official_industry or raw_category, raw_category=raw_category)
