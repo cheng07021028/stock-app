@@ -1262,6 +1262,68 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
 
     return master_df
 
+def _append_godpick_records(record_rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
+    if not record_rows:
+        return 0, ["沒有可寫入的推薦紀錄。"]
+
+    normalized_rows = [_normalize_godpick_record(r) for r in record_rows if isinstance(r, dict)]
+    if not normalized_rows:
+        return 0, ["沒有可寫入的推薦紀錄。"]
+
+    existing_records, read_err = _read_godpick_records_from_github()
+    base_df = _ensure_godpick_record_columns(pd.DataFrame(existing_records))
+    new_df = _ensure_godpick_record_columns(pd.DataFrame(normalized_rows))
+
+    merged_df = _append_records_dedup_by_business_key(base_df, new_df)
+
+    before_keys = set()
+    if not base_df.empty:
+        before_keys = set(
+            (
+                base_df["股票代號"].fillna("").astype(str) + "|"
+                + base_df["推薦日期"].fillna("").astype(str) + "|"
+                + base_df["推薦時間"].fillna("").astype(str) + "|"
+                + base_df["推薦模式"].fillna("").astype(str)
+            ).tolist()
+        )
+
+    after_keys = set(
+        (
+            merged_df["股票代號"].fillna("").astype(str) + "|"
+            + merged_df["推薦日期"].fillna("").astype(str) + "|"
+            + merged_df["推薦時間"].fillna("").astype(str) + "|"
+            + merged_df["推薦模式"].fillna("").astype(str)
+        ).tolist()
+    ) if not merged_df.empty else set()
+
+    added_count = max(len(after_keys - before_keys), 0)
+
+    records_payload = merged_df.to_dict(orient="records")
+    ok_github, msg_github = _write_godpick_records_to_github(records_payload)
+    ok_firestore, msg_firestore = _write_godpick_records_to_firestore(records_payload)
+
+    st.session_state[_k("last_record_write_detail")] = [
+        f"讀取既有紀錄：{'成功' if not read_err else '失敗'}" + (f" | {read_err}" if read_err else ""),
+        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
+        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
+        f"新增筆數：{added_count}",
+        f"合併後總筆數：{len(merged_df)}",
+    ]
+
+    if ok_github or ok_firestore:
+        _set_status(f"已寫入推薦紀錄 {added_count} 筆", "success" if (ok_github and ok_firestore) else "warning")
+    else:
+        _set_status("推薦紀錄寫入失敗", "error")
+
+    messages = []
+    if read_err:
+        messages.append(f"讀取既有紀錄時發生問題：{read_err}")
+    messages.append(msg_github)
+    messages.append(msg_firestore)
+
+    return added_count, [m for m in messages if _safe_str(m)]
+
+
 # =========================================================
 # 主檔 / universe helpers
 # =========================================================
