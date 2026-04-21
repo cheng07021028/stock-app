@@ -10,7 +10,6 @@ import copy
 import json
 import base64
 import io
-import uuid
 import hashlib
 
 import pandas as pd
@@ -140,20 +139,14 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
     return sum(clean) / len(clean)
 
 
-def _fmt_num(v: Any, d: int = 2) -> str:
-    return format_number(v, d) if pd.notna(v) else ""
-
-
 def _fmt_seconds(sec: float) -> str:
     try:
         sec = max(0, int(sec))
     except Exception:
         sec = 0
-
     h = sec // 3600
     m = (sec % 3600) // 60
     s = sec % 60
-
     if h > 0:
         return f"{h}小時 {m}分 {s}秒"
     if m > 0:
@@ -163,10 +156,6 @@ def _fmt_seconds(sec: float) -> str:
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _today_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
 
 
 def _now_date_text() -> str:
@@ -180,6 +169,11 @@ def _now_time_text() -> str:
 def _create_record_id(code: str, rec_date: str, rec_time: str, mode: str) -> str:
     raw = f"{_safe_str(code)}|{_safe_str(rec_date)}|{_safe_str(rec_time)}|{_safe_str(mode)}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _set_status(msg: str, level: str = "info"):
+    st.session_state[_k("status_msg")] = msg
+    st.session_state[_k("status_type")] = level
 
 
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -239,7 +233,6 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
         return base_df.copy()
 
     merged = pd.concat([base_df, new_df], ignore_index=True)
-
     merged["_biz_key"] = (
         merged["股票代號"].fillna("").astype(str) + "|"
         + merged["推薦日期"].fillna("").astype(str) + "|"
@@ -249,17 +242,11 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
     merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
     merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
     merged = merged.drop_duplicates(subset=["_biz_key"], keep="first")
-
     return _ensure_godpick_record_columns(merged.drop(columns=["_biz_key", "_upd"], errors="ignore"))
 
 
-def _set_status(msg: str, level: str = "info"):
-    st.session_state[_k("status_msg")] = msg
-    st.session_state[_k("status_type")] = level
-
-
 # =========================================================
-# 類型推論：更細分
+# 類別推論
 # =========================================================
 def _infer_category_from_name(name: str) -> str:
     n = _safe_str(name)
@@ -267,9 +254,8 @@ def _infer_category_from_name(name: str) -> str:
         return "其他"
 
     s = n.lower()
-
     category_rules = [
-        ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "世界", "umc", "tsmc"]),
+        ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc"]),
         ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺"]),
         ("封測", ["日月光", "矽品", "京元電", "頎邦", "封測", "測試"]),
         ("記憶體", ["南亞科", "華邦電", "旺宏", "記憶體", "dram", "nand"]),
@@ -285,7 +271,7 @@ def _infer_category_from_name(name: str) -> str:
         ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "cpo"]),
         ("PCB載板", ["欣興", "南電", "景碩", "金像電", "載板", "pcb"]),
         ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
-        ("消費電子", ["大立光", "玉晶光", "耳機", "鏡頭", "聲學", "消費電子"]),
+        ("消費電子", ["大立光", "玉晶光", "耳機", "鏡頭", "聲學"]),
         ("面板", ["友達", "群創", "彩晶", "面板"]),
         ("光學鏡頭", ["大立光", "玉晶光", "亞光", "鏡頭", "光學"]),
         ("被動元件", ["國巨", "華新科", "禾伸堂", "被動元件", "電容", "電阻"]),
@@ -313,12 +299,11 @@ def _infer_category_from_name(name: str) -> str:
         for kw in keywords:
             if kw.lower() in s:
                 return cat
-
     return "其他"
 
 
 # =========================================================
-# GitHub API
+# GitHub / Firestore
 # =========================================================
 def _github_config() -> dict[str, str]:
     return {
@@ -344,36 +329,20 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
 
 def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
     token = cfg["token"]
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    branch = cfg["branch"]
-    path = cfg["path"]
-
     if not token:
         return "", "缺少 GITHUB_TOKEN"
 
-    url = _github_contents_url(owner, repo, path)
-
     try:
         resp = requests.get(
-            url,
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_github_headers(token),
-            params={"ref": branch},
+            params={"ref": cfg["branch"]},
             timeout=20,
         )
-
         if resp.status_code == 200:
-            data = resp.json()
-            return _safe_str(data.get("sha")), ""
-
+            return _safe_str(resp.json().get("sha")), ""
         if resp.status_code == 404:
             return "", ""
-
-        if resp.status_code == 401:
-            return "", "GitHub 驗證失敗（401）"
-        if resp.status_code == 403:
-            return "", "GitHub 權限不足（403）"
-
         return "", f"讀取 GitHub 檔案失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
         return "", f"讀取 GitHub 檔案例外：{e}"
@@ -382,17 +351,12 @@ def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
 def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
     cfg = _github_config()
     token = cfg["token"]
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    branch = cfg["branch"]
-    path = cfg["path"]
-
     if not token:
-        return False, "未設定 GITHUB_TOKEN，無法回寫 GitHub。"
+        return False, "未設定 GITHUB_TOKEN"
 
-    sha, sha_err = _get_repo_watchlist_sha(cfg)
-    if sha_err:
-        return False, sha_err
+    sha, err = _get_repo_watchlist_sha(cfg)
+    if err:
+        return False, err
 
     content_text = json.dumps(payload, ensure_ascii=False, indent=2)
     encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
@@ -400,30 +364,25 @@ def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple
     body: dict[str, Any] = {
         "message": f"update watchlist from streamlit at {_now_text()}",
         "content": encoded_content,
-        "branch": branch,
+        "branch": cfg["branch"],
     }
     if sha:
         body["sha"] = sha
 
-    url = _github_contents_url(owner, repo, path)
-
     try:
         resp = requests.put(
-            url,
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_github_headers(token),
             json=body,
             timeout=30,
         )
         if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{owner}/{repo}@{branch}:{path}"
+            return True, f"已回寫 GitHub：{cfg['path']}"
         return False, f"GitHub API 寫入失敗：{resp.status_code} / {resp.text[:500]}"
     except Exception as e:
         return False, f"GitHub API 寫入例外：{e}"
 
 
-# =========================================================
-# Firestore
-# =========================================================
 def _firebase_config() -> dict[str, str]:
     return {
         "project_id": _safe_str(st.secrets.get("FIREBASE_PROJECT_ID", "")),
@@ -458,7 +417,7 @@ def _init_firebase_app():
     if not private_key:
         raise ValueError("缺少 FIREBASE_PRIVATE_KEY")
     if "BEGIN PRIVATE KEY" not in private_key or "END PRIVATE KEY" not in private_key:
-        raise ValueError("FIREBASE_PRIVATE_KEY 不是有效的 PEM 私鑰格式")
+        raise ValueError("FIREBASE_PRIVATE_KEY 不是有效 PEM 格式")
 
     cred_dict = {
         "type": "service_account",
@@ -482,11 +441,7 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
         summary_ref = db.collection("system").document("watchlist_summary")
         batch.set(
             summary_ref,
-            {
-                "group_count": len(payload),
-                "updated_at": now,
-                "source": "streamlit_dual_write",
-            },
+            {"group_count": len(payload), "updated_at": now, "source": "streamlit_dual_write"},
             merge=True,
         )
 
@@ -509,12 +464,10 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
             )
 
             new_codes = set()
-
             for item in items:
                 code = _normalize_code(item.get("code"))
                 if not code:
                     continue
-
                 new_codes.add(code)
                 stock_ref = group_ref.collection("stocks").document(code)
                 batch.set(
@@ -541,20 +494,14 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
         return False, f"Firestore 寫入失敗：{e}"
 
 
-# =========================================================
-# watchlist payload / 雙寫
-# =========================================================
 def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
     payload: dict[str, list[dict[str, str]]] = {}
-
     for group_name, items in data.items():
         g = _safe_str(group_name)
         if not g:
             continue
-
         seen = set()
         normalized_items = []
-
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -566,65 +513,46 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
 
             if not code:
                 continue
-
             key = (g, code)
             if key in seen:
                 continue
             seen.add(key)
 
-            row = {
-                "code": code,
-                "name": name,
-                "market": market,
-            }
+            row = {"code": code, "name": name, "market": market}
             if category:
                 row["category"] = category
-
             normalized_items.append(row)
 
-        payload[g] = sorted(
-            normalized_items,
-            key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))),
-        )
-
+        payload[g] = sorted(normalized_items, key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
     return payload
 
 
 def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
     payload = _normalize_watchlist_payload(data)
-
     ok_github, msg_github = _push_watchlist_to_github(payload)
     ok_firestore, msg_firestore = _push_watchlist_to_firestore(payload)
 
-    saved_at = _now_text()
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
     st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
-    st.session_state["watchlist_last_saved_at"] = saved_at
+    st.session_state["watchlist_last_saved_at"] = _now_text()
 
-    detail_lines = [
+    st.session_state[_k("last_dual_write_detail")] = [
         f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
         f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
     ]
-    st.session_state[_k("last_dual_write_detail")] = detail_lines
 
     if ok_github and ok_firestore:
-        _set_status(f"GitHub + Firestore 同步成功｜{saved_at}", "success")
+        _set_status("GitHub + Firestore 同步成功", "success")
         return True
-
-    if ok_github and not ok_firestore:
-        _set_status(f"GitHub 成功，但 Firestore 失敗｜{msg_firestore}", "warning")
+    if ok_github or ok_firestore:
+        _set_status("部分同步成功", "warning")
         return True
-
-    if (not ok_github) and ok_firestore:
-        _set_status(f"Firestore 成功，但 GitHub 失敗｜{msg_github}", "warning")
-        return True
-
     _set_status("GitHub / Firestore 都失敗", "error")
     return False
 
 
 # =========================================================
-# 8_股神推薦紀錄：GitHub / Firestore 寫入
+# 8 頁推薦紀錄 寫入
 # =========================================================
 def _godpick_records_config() -> dict[str, str]:
     return {
@@ -649,10 +577,8 @@ def _read_godpick_records_from_github() -> tuple[list[dict[str, Any]], str]:
             params={"ref": cfg["branch"]},
             timeout=20,
         )
-
         if resp.status_code == 404:
             return [], ""
-
         if resp.status_code != 200:
             return [], f"讀取推薦紀錄失敗：{resp.status_code} / {resp.text[:300]}"
 
@@ -663,7 +589,6 @@ def _read_godpick_records_from_github() -> tuple[list[dict[str, Any]], str]:
 
         decoded = base64.b64decode(content).decode("utf-8")
         payload = json.loads(decoded)
-
         if isinstance(payload, list):
             return payload, ""
         return [], ""
@@ -684,13 +609,10 @@ def _get_godpick_records_sha() -> tuple[str, str]:
             params={"ref": cfg["branch"]},
             timeout=20,
         )
-
         if resp.status_code == 200:
             return _safe_str(resp.json().get("sha")), ""
-
         if resp.status_code == 404:
             return "", ""
-
         return "", f"讀取推薦紀錄 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
         return "", f"讀取推薦紀錄 SHA 例外：{e}"
@@ -739,15 +661,7 @@ def _write_godpick_records_to_firestore(records: list[dict[str, Any]]) -> tuple[
         now = firestore.SERVER_TIMESTAMP
 
         summary_ref = db.collection("system").document("godpick_records_summary")
-        batch.set(
-            summary_ref,
-            {
-                "count": len(records),
-                "updated_at": now,
-                "source": "streamlit_godpick_records",
-            },
-            merge=True,
-        )
+        batch.set(summary_ref, {"count": len(records), "updated_at": now, "source": "streamlit_godpick_records"}, merge=True)
 
         records_ref = db.collection("godpick_records")
         existing_docs = list(records_ref.stream())
@@ -811,10 +725,7 @@ def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
 
     norm = {
         "record_id": _safe_str(row.get("record_id")) or _safe_str(row.get("rec_id")) or _create_record_id(
-            _normalize_code(row.get("股票代號")),
-            rec_date,
-            rec_time,
-            mode,
+            _normalize_code(row.get("股票代號")), rec_date, rec_time, mode
         ),
         "股票代號": _normalize_code(row.get("股票代號")),
         "股票名稱": _safe_str(row.get("股票名稱")),
@@ -858,67 +769,6 @@ def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
     return _ensure_godpick_record_columns(pd.DataFrame([norm])).iloc[0].to_dict()
 
 
-def _append_godpick_records(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
-    existing_records, read_err = _read_godpick_records_from_github()
-    if read_err:
-        return 0, [read_err]
-
-    normalized_existing = []
-    for row in existing_records:
-        if isinstance(row, dict):
-            normalized_existing.append(_normalize_godpick_record(row))
-
-    old_df = _ensure_godpick_record_columns(pd.DataFrame(normalized_existing))
-    new_df = _ensure_godpick_record_columns(pd.DataFrame([_normalize_godpick_record(x) for x in rows if isinstance(x, dict)]))
-
-    if new_df.empty:
-        return 0, ["沒有可寫入的推薦紀錄"]
-
-    before_keys = set(
-        old_df["股票代號"].fillna("").astype(str) + "|"
-        + old_df["推薦日期"].fillna("").astype(str) + "|"
-        + old_df["推薦時間"].fillna("").astype(str) + "|"
-        + old_df["推薦模式"].fillna("").astype(str)
-    )
-
-    merged_df = _append_records_dedup_by_business_key(old_df, new_df)
-
-    after_df = merged_df.copy()
-    after_keys = set(
-        after_df["股票代號"].fillna("").astype(str) + "|"
-        + after_df["推薦日期"].fillna("").astype(str) + "|"
-        + after_df["推薦時間"].fillna("").astype(str) + "|"
-        + after_df["推薦模式"].fillna("").astype(str)
-    )
-
-    added_count = max(len(after_keys) - len(before_keys), 0)
-
-    ok_github, msg_github = _write_godpick_records_to_github(
-        merged_df.replace({pd.NA: None}).where(pd.notnull(merged_df), None).to_dict(orient="records")
-    )
-    ok_firestore, msg_firestore = _write_godpick_records_to_firestore(
-        merged_df.replace({pd.NA: None}).where(pd.notnull(merged_df), None).to_dict(orient="records")
-    )
-
-    st.session_state[_k("last_record_write_detail")] = [
-        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
-        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
-    ]
-
-    if ok_github and ok_firestore:
-        _set_status(f"已成功寫入 {added_count} 筆到 8_股神推薦紀錄", "success")
-    elif ok_github or ok_firestore:
-        _set_status(f"已部分寫入 {added_count} 筆到 8_股神推薦紀錄", "warning")
-    else:
-        return 0, [msg_github, msg_firestore]
-
-    messages = []
-    for _, r in new_df.iterrows():
-        messages.append(f"已記錄：{r['股票代號']} {r['股票名稱']}")
-
-    return added_count, messages
-
-
 def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[str]) -> list[dict[str, Any]]:
     if rec_df is None or rec_df.empty:
         return []
@@ -933,7 +783,6 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     for _, r in work.iterrows():
         code = _normalize_code(r.get("股票代號"))
         mode = _safe_str(r.get("推薦模式"))
-
         rows.append(
             {
                 "record_id": _create_record_id(code, rec_date, rec_time, mode),
@@ -977,42 +826,107 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "備註": "",
             }
         )
-
     return rows
 
 
 # =========================================================
-# 股票資訊主檔
+# 主檔 / universe helpers
 # =========================================================
+def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    result: dict[str, list[dict[str, str]]] = {}
+    if isinstance(raw, dict):
+        for group_name, items in raw.items():
+            g = _safe_str(group_name)
+            if not g:
+                continue
+
+            rows = []
+            seen = set()
+
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        code = _normalize_code(item.get("code"))
+                        name = _safe_str(item.get("name")) or code
+                        market = _safe_str(item.get("market")) or "上市"
+                        category = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                    else:
+                        code = _normalize_code(item)
+                        name = code
+                        market = "上市"
+                        category = ""
+
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                            "category": category,
+                            "label": f"{code} {name}",
+                        }
+                    )
+            result[g] = rows
+    return result
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def _load_code_name_map_df() -> pd.DataFrame:
+def _load_master_df() -> pd.DataFrame:
     dfs = []
+    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題"]
+
     for market_arg in ["", "上市", "上櫃", "興櫃"]:
         try:
             df = get_all_code_name_map(market_arg)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 temp = df.copy()
-                temp = temp.rename(columns={
+                mapping = {
                     "證券代號": "code",
                     "證券名稱": "name",
                     "市場別": "market",
-                })
+                    "code": "code",
+                    "name": "name",
+                    "market": "market",
+                }
+                temp = temp.rename(columns=mapping)
+
+                found_category_col = None
+                for col in temp.columns:
+                    if str(col).strip() in category_candidates:
+                        found_category_col = col
+                        break
+                if found_category_col:
+                    temp = temp.rename(columns={found_category_col: "category"})
+
                 for col in ["code", "name", "market"]:
                     if col not in temp.columns:
                         temp[col] = ""
                 if "category" not in temp.columns:
                     temp["category"] = ""
+
                 temp["code"] = temp["code"].map(_normalize_code)
                 temp["name"] = temp["name"].map(_safe_str)
                 temp["market"] = temp["market"].map(_safe_str)
                 temp["category"] = temp["category"].map(_normalize_category)
+
                 if market_arg in ["上市", "上櫃", "興櫃"]:
                     temp["market"] = temp["market"].replace("", market_arg)
-                temp["category"] = temp["category"].replace("", None)
+
                 temp["category"] = temp.apply(
                     lambda r: _normalize_category(r.get("category")) or _infer_category_from_name(r.get("name")),
                     axis=1,
                 )
+
                 dfs.append(temp[["code", "name", "market", "category"]])
         except Exception:
             pass
@@ -1021,25 +935,253 @@ def _load_code_name_map_df() -> pd.DataFrame:
         return pd.DataFrame(columns=["code", "name", "market", "category"])
 
     out = pd.concat(dfs, ignore_index=True)
-    out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    out["code"] = out["code"].map(_normalize_code)
+    out["name"] = out["name"].map(_safe_str)
+    out["market"] = out["market"].map(_safe_str).replace("", "上市")
+    out["category"] = out["category"].map(_normalize_category)
+    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
     return out
 
 
+def _find_name_market_category(
+    code: str,
+    manual_name: str,
+    manual_market: str,
+    manual_category: str,
+    master_df: pd.DataFrame,
+) -> tuple[str, str, str]:
+    code = _normalize_code(code)
+    manual_name = _safe_str(manual_name)
+    manual_market = _safe_str(manual_market)
+    manual_category = _normalize_category(manual_category)
+
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        matched = master_df[master_df["code"].astype(str) == code]
+        if not matched.empty:
+            row = matched.iloc[0]
+            final_name = _safe_str(row.get("name")) or manual_name or code
+            final_market = _safe_str(row.get("market")) or manual_market or "上市"
+            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_name(final_name)
+            return final_name, final_market, final_category
+
+    final_name = manual_name or code
+    final_market = manual_market or "上市"
+    final_category = manual_category or _infer_category_from_name(final_name)
+    return final_name, final_market, final_category
+
+
+def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
+    rows = []
+    seen = set()
+    raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
+
+    for raw in raw_lines:
+        txt = _safe_str(raw)
+        code = _normalize_code(txt)
+        name = ""
+        market = "上市"
+        category = ""
+
+        if not code and isinstance(master_df, pd.DataFrame) and not master_df.empty:
+            matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
+            if not matched.empty:
+                row = matched.iloc[0]
+                code = _normalize_code(row.get("code"))
+                name = _safe_str(row.get("name"))
+                market = _safe_str(row.get("market")) or "上市"
+                category = _normalize_category(row.get("category"))
+
+        if code and not name:
+            name, market, category = _find_name_market_category(code, "", market, category, master_df)
+
+        if code and code not in seen:
+            seen.add(code)
+            rows.append(
+                {
+                    "code": code,
+                    "name": name or code,
+                    "market": market or "上市",
+                    "category": category,
+                    "label": f"{code} {name or code}",
+                }
+            )
+    return rows
+
+
+def _build_universe_from_market(
+    master_df: pd.DataFrame,
+    market_mode: str,
+    limit_count: Any,
+    selected_categories: list[str],
+) -> list[dict[str, str]]:
+    if master_df is None or master_df.empty:
+        return []
+
+    work = master_df.copy()
+    market_mode = _safe_str(market_mode)
+
+    if market_mode == "上市":
+        work = work[work["market"].astype(str) == "上市"].copy()
+    elif market_mode == "上櫃":
+        work = work[work["market"].astype(str) == "上櫃"].copy()
+    elif market_mode == "興櫃":
+        work = work[work["market"].astype(str) == "興櫃"].copy()
+
+    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
+    if clean_categories:
+        work = work[work["category"].astype(str).isin(clean_categories)].copy()
+
+    if _safe_str(limit_count) != "全部":
+        try:
+            limit_n = int(limit_count)
+            if limit_n > 0:
+                work = work.head(limit_n).copy()
+        except Exception:
+            pass
+
+    rows = []
+    for _, row in work.iterrows():
+        code = _normalize_code(row.get("code"))
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+        if code:
+            rows.append(
+                {
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                    "category": category,
+                    "label": f"{code} {name}",
+                }
+            )
+    return rows
+
+
+def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
+    cats = set()
+
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        for _, row in master_df.iterrows():
+            name = _safe_str(row.get("name"))
+            cat = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+            if cat:
+                cats.add(cat)
+
+    if isinstance(watchlist_map, dict):
+        for _, items in watchlist_map.items():
+            for item in items:
+                name = _safe_str(item.get("name"))
+                cat = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                if cat:
+                    cats.add(cat)
+
+    return sorted(list(cats))
+
+
+def _append_stock_to_watchlist(group_name: str, code: str, name: str, market: str, category: str):
+    group_name = _safe_str(group_name)
+    code = _normalize_code(code)
+    name = _safe_str(name) or code
+    market = _safe_str(market) or "上市"
+    category = _normalize_category(category) or _infer_category_from_name(name)
+
+    if not group_name:
+        return False, "群組不可空白"
+    if not code:
+        return False, "股票代號不可空白"
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    if group_name not in raw or not isinstance(raw[group_name], list):
+        raw[group_name] = []
+
+    for item in raw[group_name]:
+        if isinstance(item, dict) and _normalize_code(item.get("code")) == code:
+            return False, f"{code} 已存在於 {group_name}"
+
+    row = {"code": code, "name": name, "market": market}
+    if category:
+        row["category"] = category
+
+    raw[group_name].append(row)
+    ok = _force_write_watchlist_dual(raw)
+    if ok:
+        return True, f"已加入 {group_name}：{code} {name}"
+    return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
+
+
+def _append_multiple_stocks_to_watchlist(group_name: str, rows: list[dict[str, str]]) -> tuple[int, list[str]]:
+    group_name = _safe_str(group_name)
+    if not group_name:
+        return 0, ["請先選擇群組。"]
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    if group_name not in raw or not isinstance(raw[group_name], list):
+        raw[group_name] = []
+
+    existing_codes = {_normalize_code(x.get("code")) for x in raw[group_name] if isinstance(x, dict)}
+    added = 0
+    messages = []
+
+    for row in rows:
+        code = _normalize_code(row.get("code"))
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
+
+        if not code:
+            continue
+
+        if code in existing_codes:
+            messages.append(f"{code} 已存在於 {group_name}")
+            continue
+
+        item = {"code": code, "name": name, "market": market}
+        if category:
+            item["category"] = category
+
+        raw[group_name].append(item)
+        existing_codes.add(code)
+        added += 1
+        messages.append(f"已加入 {group_name}：{code} {name}")
+
+    if added > 0:
+        ok = _force_write_watchlist_dual(raw)
+        if not ok:
+            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
+
+    return added, messages
+
+
 # =========================================================
-# 歷史資料與指標
+# 歷史資料 / 指標
 # =========================================================
 def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
     temp = df.copy()
-
-    possible_date_cols = [c for c in temp.columns if str(c).lower() in {"date", "日期"}]
     if "日期" not in temp.columns:
-        if possible_date_cols:
-            temp = temp.rename(columns={possible_date_cols[0]: "日期"})
+        possible_date = [c for c in temp.columns if str(c).lower() in {"date", "日期"}]
+        if possible_date:
+            temp = temp.rename(columns={possible_date[0]: "日期"})
         else:
             return pd.DataFrame()
+
+    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+    temp = temp.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
     rename_map = {}
     for c in temp.columns:
@@ -1055,9 +1197,6 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
         elif cs == "volume":
             rename_map[c] = "成交股數"
     temp = temp.rename(columns=rename_map)
-
-    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
-    temp = temp.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
     for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
         if col in temp.columns:
@@ -1100,14 +1239,10 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
 
     temp["VOL5"] = vol.rolling(5).mean()
     temp["VOL20"] = vol.rolling(20).mean()
-
-    temp["RET3"] = close.pct_change(3) * 100
     temp["RET5"] = close.pct_change(5) * 100
-    temp["RET10"] = close.pct_change(10) * 100
     temp["RET20"] = close.pct_change(20) * 100
     temp["RET60"] = close.pct_change(60) * 100
     temp["RET120"] = close.pct_change(120) * 100
-
     temp["UP_DAY"] = (close > close.shift(1)).astype(float)
     temp["MA20_SLOPE"] = temp["MA20"].diff(3)
     temp["MA60_SLOPE"] = temp["MA60"].diff(3)
@@ -1119,7 +1254,6 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
 def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
     primary = _safe_str(market_type)
     tried = []
-
     if primary:
         tried.append(primary)
 
@@ -1154,11 +1288,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
                 )
             except Exception:
                 try:
-                    df = get_history_data(
-                        code=stock_no,
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
+                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
                 except Exception:
                     df = pd.DataFrame()
         except Exception:
@@ -1172,7 +1302,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# 計分邏輯
+# 計分
 # =========================================================
 def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     if df is None or df.empty:
@@ -1232,7 +1362,7 @@ def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot
             volume_score = 25
 
     breakout_score = 0.0
-    if close_now not in [None] and res20 not in [None, 0]:
+    if close_now is not None and res20 not in [None, 0]:
         dist = ((res20 - close_now) / res20) * 100
         if 0 <= dist <= 2:
             breakout_score = 90
@@ -1251,19 +1381,17 @@ def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot
             momentum_score += 45
         elif k_now > d_now:
             momentum_score += 28
-
     if hist_now is not None:
         if hist_prev is not None and hist_prev <= 0 < hist_now:
             momentum_score += 35
         elif hist_now > 0:
             momentum_score += 20
-
     radar_m = _safe_float(radar.get("momentum"), 50) or 50
     momentum_score += radar_m * 0.2
     momentum_score = _score_clip(momentum_score)
 
     support_score = 0.0
-    if close_now not in [None] and sup20 not in [None, 0]:
+    if close_now is not None and sup20 not in [None, 0]:
         dist_sup = ((close_now - sup20) / sup20) * 100
         if 0 <= dist_sup <= 2:
             support_score = 85
@@ -1282,7 +1410,6 @@ def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot
         breakout_score -= 25
 
     total = _avg_safe([trend_score, volume_score, breakout_score, momentum_score, support_score], 0)
-
     return {
         "起漲前兆分數": _score_clip(total),
         "均線轉強分": _score_clip(trend_score),
@@ -1295,11 +1422,7 @@ def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot
 
 def _build_risk_filter(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, strictness: str) -> dict[str, Any]:
     if df is None or df.empty:
-        return {
-            "是否通過風險過濾": False,
-            "風險分數": 0.0,
-            "淘汰原因": "無歷史資料",
-        }
+        return {"是否通過風險過濾": False, "風險分數": 0.0, "淘汰原因": "無歷史資料"}
 
     last = df.iloc[-1]
     close_now = _safe_float(last.get("收盤價"))
@@ -1314,24 +1437,9 @@ def _build_risk_filter(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dic
         pressure_dist = ((res20 - close_now) / res20) * 100
 
     rules = {
-        "寬鬆": {
-            "min_days": 60,
-            "min_vol20": 300000,
-            "max_atr_pct": 11.0,
-            "max_ret20": 35.0,
-        },
-        "標準": {
-            "min_days": 90,
-            "min_vol20": 800000,
-            "max_atr_pct": 8.5,
-            "max_ret20": 28.0,
-        },
-        "嚴格": {
-            "min_days": 120,
-            "min_vol20": 1200000,
-            "max_atr_pct": 6.5,
-            "max_ret20": 22.0,
-        },
+        "寬鬆": {"min_days": 60, "min_vol20": 300000, "max_atr_pct": 11.0, "max_ret20": 35.0},
+        "標準": {"min_days": 90, "min_vol20": 800000, "max_atr_pct": 8.5, "max_ret20": 28.0},
+        "嚴格": {"min_days": 120, "min_vol20": 1200000, "max_atr_pct": 6.5, "max_ret20": 22.0},
     }
     cfg = rules.get(_safe_str(strictness), rules["標準"])
 
@@ -1341,22 +1449,18 @@ def _build_risk_filter(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dic
     if len(df) < cfg["min_days"]:
         reasons.append(f"歷史資料不足{cfg['min_days']}天")
         risk_score -= 30
-
     if vol20 not in [None] and vol20 < cfg["min_vol20"]:
         reasons.append("量能不足")
         risk_score -= 22
-
     if close_now not in [None] and atr14 not in [None]:
         atr_pct = atr14 / close_now * 100 if close_now != 0 else 999
         if atr_pct > cfg["max_atr_pct"]:
             reasons.append("波動過大")
             risk_score -= 18
-
     if close_now not in [None] and ma20 not in [None] and ma60 not in [None]:
         if close_now < ma20 and close_now < ma60:
             reasons.append("中期結構偏弱")
             risk_score -= 20
-
     if ret20 > cfg["max_ret20"]:
         reasons.append("近20日漲幅過大")
         risk_score -= 16
@@ -1371,7 +1475,6 @@ def _build_risk_filter(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dic
     risk_score = _score_clip(risk_score)
 
     passed = len(reasons) == 0 or risk_score >= 55
-
     return {
         "是否通過風險過濾": passed,
         "風險分數": risk_score,
@@ -1429,12 +1532,7 @@ def _build_trade_feasibility(df: pd.DataFrame, sr_snapshot: dict, signal_snapsho
 
     signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
     feasibility = _avg_safe(
-        [
-            _score_clip(pullback_score),
-            _score_clip(breakout_score),
-            _score_clip(100 - chase_risk),
-            50 + signal_score * 5,
-        ],
+        [_score_clip(pullback_score), _score_clip(breakout_score), _score_clip(100 - chase_risk), 50 + signal_score * 5],
         0,
     )
 
@@ -1468,51 +1566,23 @@ def _build_mode_score(
     mode = _safe_str(mode)
 
     if mode == "飆股模式":
-        total = (
-            prelaunch_score * 0.35
-            + technical_score * 0.25
-            + category_heat_score * 0.20
-            + factor_score * 0.10
-            + trade_score * 0.10
-        )
+        total = prelaunch_score * 0.35 + technical_score * 0.25 + category_heat_score * 0.20 + factor_score * 0.10 + trade_score * 0.10
         tag = "突破前夜 / 起漲優先"
     elif mode == "波段模式":
-        total = (
-            technical_score * 0.30
-            + category_heat_score * 0.25
-            + factor_score * 0.20
-            + trade_score * 0.15
-            + prelaunch_score * 0.10
-        )
+        total = technical_score * 0.30 + category_heat_score * 0.25 + factor_score * 0.20 + trade_score * 0.15 + prelaunch_score * 0.10
         tag = "趨勢延續 / 波段優先"
     elif mode == "領頭羊模式":
-        total = (
-            leader_advantage * 0.30
-            + category_heat_score * 0.25
-            + technical_score * 0.20
-            + prelaunch_score * 0.15
-            + factor_score * 0.10
-        )
+        total = leader_advantage * 0.30 + category_heat_score * 0.25 + technical_score * 0.20 + prelaunch_score * 0.15 + factor_score * 0.10
         tag = "類股領先 / 龍頭優先"
     else:
-        total = (
-            technical_score * 0.30
-            + prelaunch_score * 0.20
-            + category_heat_score * 0.20
-            + factor_score * 0.15
-            + trade_score * 0.15
-        )
+        total = technical_score * 0.30 + prelaunch_score * 0.20 + category_heat_score * 0.20 + factor_score * 0.15 + trade_score * 0.15
         tag = "綜合推薦"
 
     return _score_clip(total), tag
 
 
-# =========================================================
-# 單股分析
-# =========================================================
 def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     last = df.iloc[-1]
-
     close_now = _safe_float(last.get("收盤價"))
     ma20 = _safe_float(last.get("MA20"))
     ma60 = _safe_float(last.get("MA60"))
@@ -1552,21 +1622,8 @@ def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapsh
 
         eps_proxy = _score_clip(30 + trend_bonus + radar_structure * 0.25 + radar_trend * 0.20 - vol_penalty)
 
-    revenue_proxy = _score_clip(
-        25
-        + (_safe_float(ret20, 0) or 0) * 0.9
-        + (_safe_float(ret60, 0) or 0) * 0.35
-        + radar_momentum * 0.30
-        + radar_volume * 0.20
-    )
-
-    profit_proxy = _score_clip(
-        30
-        + signal_score * 6
-        + radar_trend * 0.28
-        + radar_structure * 0.22
-        + (_safe_float(ret60, 0) or 0) * 0.35
-    )
+    revenue_proxy = _score_clip(25 + (_safe_float(ret20, 0) or 0) * 0.9 + (_safe_float(ret60, 0) or 0) * 0.35 + radar_momentum * 0.30 + radar_volume * 0.20)
+    profit_proxy = _score_clip(30 + signal_score * 6 + radar_trend * 0.28 + radar_structure * 0.22 + (_safe_float(ret60, 0) or 0) * 0.35)
 
     lock_proxy = 45.0
     if close_now not in [None, 0]:
@@ -1598,13 +1655,7 @@ def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapsh
 
     recent = df.tail(5).copy()
     up_days_5 = int(recent["UP_DAY"].sum()) if "UP_DAY" in recent.columns else 0
-    inst_proxy = _score_clip(
-        20
-        + up_days_5 * 10
-        + signal_score * 5
-        + radar_momentum * 0.25
-        + radar_volume * 0.20
-    )
+    inst_proxy = _score_clip(20 + up_days_5 * 10 + signal_score * 5 + radar_momentum * 0.25 + radar_volume * 0.20)
 
     factor_summary = (
         f"EPS代理 {format_number(eps_proxy,1)} / "
@@ -1744,7 +1795,6 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         "support_dist": support_dist,
         "radar_avg": radar_avg,
         "technical_score": technical_score,
-        "hist_df": hist_df,
     }
 
 
@@ -1768,9 +1818,7 @@ def _analyze_one_stock_for_recommend(
     if not code:
         return None
 
-    stock_name, market_type, category = _find_name_market_category(
-        code, manual_name, manual_market, manual_category, master_df
-    )
+    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_df)
 
     if clean_categories and category not in clean_categories:
         return None
@@ -1805,18 +1853,7 @@ def _analyze_one_stock_for_recommend(
     auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
     technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
 
-    base_composite = _score_clip(
-        technical_score * 0.40
-        + auto_factor_total * 0.32
-        + prelaunch_score * 0.18
-        + trade_score * 0.10
-    )
-
-    hist_df = bundle.get("hist_df", pd.DataFrame())
-    ret3 = _safe_float(hist_df.iloc[-1].get("RET3")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
-    ret5 = _safe_float(hist_df.iloc[-1].get("RET5")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
-    ret10 = _safe_float(hist_df.iloc[-1].get("RET10")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
-    ret20 = _safe_float(hist_df.iloc[-1].get("RET20")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
+    base_composite = _score_clip(technical_score * 0.40 + auto_factor_total * 0.32 + prelaunch_score * 0.18 + trade_score * 0.10)
 
     return {
         "股票代號": code,
@@ -1861,16 +1898,9 @@ def _analyze_one_stock_for_recommend(
         "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
         "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
         "推薦模式": mode,
-        "3日績效%": ret3,
-        "5日績效%": ret5,
-        "10日績效%": ret10,
-        "20日績效%": ret20,
     }
 
 
-# =========================================================
-# 類股強度
-# =========================================================
 def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
     if base_df is None or base_df.empty:
         return pd.DataFrame(columns=["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數"])
@@ -1911,9 +1941,6 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
     return grp
 
 
-# =========================================================
-# 推薦表
-# =========================================================
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
@@ -1928,7 +1955,6 @@ def _build_recommend_df(
     min_trade_score: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-
     if not universe_items:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -1963,7 +1989,6 @@ def _build_recommend_df(
 
         for future in as_completed(futures):
             done_count += 1
-
             try:
                 row = future.result()
                 if row:
@@ -1977,10 +2002,7 @@ def _build_recommend_df(
             eta_sec = avg_per_stock * remain_count
             ratio = done_count / total_count if total_count > 0 else 0
 
-            progress_bar.progress(
-                min(max(ratio, 0.0), 1.0),
-                text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)"
-            )
+            progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
             progress_text.caption(
                 f"已完成 {done_count}/{total_count}｜"
                 f"已花時間：{_fmt_seconds(elapsed)}｜"
@@ -2007,25 +2029,15 @@ def _build_recommend_df(
     else:
         base_df = base_df.merge(
             category_strength_df[
-                [
-                    "類別", "類股平均總分", "類股平均訊號", "類股平均漲幅",
-                    "類股熱度分數", "類股熱度排名", "類股加速度"
-                ]
+                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度"]
             ],
             on="類別",
             how="left",
         )
 
     base_df["同類股領先幅度"] = (base_df["個股原始總分"] - base_df["類股平均總分"].fillna(0)).apply(lambda x: _score_clip(50 + x))
-    base_df["是否領先同類股"] = (
-        base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)
-    ).map({True: "是", False: "否"})
-
-    base_df["類股內排名"] = (
-        base_df.groupby("類別")["個股原始總分"]
-        .rank(method="dense", ascending=False)
-        .astype(int)
-    )
+    base_df["是否領先同類股"] = (base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)).map({True: "是", False: "否"})
+    base_df["類股內排名"] = base_df.groupby("類別")["個股原始總分"].rank(method="dense", ascending=False).astype(int)
     base_df["類股前3強"] = base_df["類股內排名"].apply(lambda x: "是" if pd.notna(x) and int(x) <= 3 else "否")
 
     mode_scores = base_df.apply(
@@ -2058,7 +2070,6 @@ def _build_recommend_df(
 
     def _reason_builder(r):
         reason_parts = []
-
         if _safe_float(r.get("均線轉強分"), 0) >= 70:
             reason_parts.append("均線結構轉強")
         if _safe_float(r.get("量能啟動分"), 0) >= 65:
@@ -2077,10 +2088,8 @@ def _build_recommend_df(
             reason_parts.append("所屬類股熱度高")
         if _safe_float(r.get("交易可行分數"), 0) >= 70:
             reason_parts.append("風險報酬佳")
-
         if not reason_parts:
             reason_parts.append("結構偏多，列入觀察")
-
         return "、".join(reason_parts[:6])
 
     base_df["推薦理由摘要"] = base_df.apply(_reason_builder, axis=1)
@@ -2090,10 +2099,7 @@ def _build_recommend_df(
             base_df[c] = pd.NA
 
     final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
-    final_df = final_df.sort_values(
-        ["推薦總分", "起漲前兆分數", "訊號分數", "區間漲跌幅%"],
-        ascending=[False, False, False, False]
-    ).reset_index(drop=True)
+    final_df = final_df.sort_values(["推薦總分", "起漲前兆分數", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False, False]).reset_index(drop=True)
 
     if "勾選" not in final_df.columns:
         final_df.insert(0, "勾選", False)
@@ -2140,7 +2146,6 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame):
         return rec_df.copy(), cat_df.copy()
-
     return pd.DataFrame(), pd.DataFrame()
 
 
@@ -2154,49 +2159,16 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
         return empty, empty, empty, empty
 
     rec_export = rec_df.copy()
-
-    leader_df = rec_df.sort_values(
-        ["是否領先同類股", "推薦總分", "類股熱度分數"],
-        ascending=[False, False, False]
-    ).reset_index(drop=True)
-
-    factor_rank = rec_df.sort_values(
-        ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
-        ascending=[False, False, False, False]
-    ).reset_index(drop=True)
-
+    leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
+    factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
     cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
 
     leader_export = leader_df[
-        [
-            "股票代號",
-            "股票名稱",
-            "類別",
-            "類股內排名",
-            "類股前3強",
-            "是否領先同類股",
-            "同類股領先幅度",
-            "個股原始總分",
-            "類股平均總分",
-            "類股熱度分數",
-            "推薦總分",
-            "推薦理由摘要",
-        ]
+        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
     ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
 
     factor_export = factor_rank[
-        [
-            "股票代號",
-            "股票名稱",
-            "類別",
-            "自動因子總分",
-            "EPS代理分數",
-            "營收動能代理分數",
-            "獲利代理分數",
-            "大戶鎖碼代理分數",
-            "法人連買代理分數",
-            "自動因子摘要",
-        ]
+        ["股票代號", "股票名稱", "類別", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
     ].head(top_n).copy() if not factor_rank.empty else pd.DataFrame()
 
     return rec_export, cat_export, leader_export, factor_export
@@ -2210,7 +2182,6 @@ def _build_excel_bytes(
     factor_export: pd.DataFrame,
 ) -> bytes:
     output = io.BytesIO()
-
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         if rec_export is not None:
             rec_export.to_excel(writer, sheet_name="完整推薦表", index=False)
@@ -2243,25 +2214,14 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
     if rec_df is None or rec_df.empty:
         return
 
-    rec_export, cat_export, leader_export, factor_export = _build_export_views(
-        rec_df=rec_df,
-        category_strength_df=category_strength_df,
-        top_n=top_n,
-    )
-
-    excel_bytes = _build_excel_bytes(
-        rec_export=rec_export,
-        cat_export=cat_export,
-        leader_export=leader_export,
-        factor_export=factor_export,
-    )
+    rec_export, cat_export, leader_export, factor_export = _build_export_views(rec_df, category_strength_df, top_n)
+    excel_bytes = _build_excel_bytes(rec_export, cat_export, leader_export, factor_export)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"股神推薦_V2_{ts}.xlsx"
 
     render_pro_section("Excel 匯出")
     c1, c2 = st.columns([2, 4])
-
     with c1:
         st.download_button(
             label="匯出推薦結果 Excel",
@@ -2270,7 +2230,6 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
     with c2:
         st.caption("匯出內容：完整推薦表、類股強度榜、同類股領先榜、自動因子榜。")
 
@@ -2310,303 +2269,7 @@ def _render_selected_export_block():
         use_container_width=True,
     )
 
-# =========================================================
-# watchlist / universe helpers
-# =========================================================
-def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
 
-    result: dict[str, list[dict[str, str]]] = {}
-
-    if isinstance(raw, dict):
-        for group_name, items in raw.items():
-            g = _safe_str(group_name)
-            if not g:
-                continue
-
-            rows = []
-            seen = set()
-
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        code = _normalize_code(item.get("code"))
-                        name = _safe_str(item.get("name")) or code
-                        market = _safe_str(item.get("market")) or "上市"
-                        category = _normalize_category(item.get("category")) or _infer_category_from_name(name)
-                    else:
-                        code = _normalize_code(item)
-                        name = code
-                        market = "上市"
-                        category = ""
-
-                    if not code or code in seen:
-                        continue
-                    seen.add(code)
-
-                    rows.append(
-                        {
-                            "code": code,
-                            "name": name,
-                            "market": market,
-                            "category": category,
-                            "label": f"{code} {name}",
-                        }
-                    )
-
-            result[g] = rows
-
-    return result
-
-
-def _find_name_market_category(
-    code: str,
-    manual_name: str,
-    manual_market: str,
-    manual_category: str,
-    master_df: pd.DataFrame,
-) -> tuple[str, str, str]:
-    code = _normalize_code(code)
-    manual_name = _safe_str(manual_name)
-    manual_market = _safe_str(manual_market)
-    manual_category = _normalize_category(manual_category)
-
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-        matched = master_df[master_df["code"].astype(str) == code]
-        if not matched.empty:
-            row = matched.iloc[0]
-            final_name = _safe_str(row.get("name")) or manual_name or code
-            final_market = _safe_str(row.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_name(final_name)
-            return final_name, final_market, final_category
-
-    final_name = manual_name or code
-    final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_name(final_name)
-    return final_name, final_market, final_category
-
-
-def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
-    rows = []
-    seen = set()
-    raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
-
-    for raw in raw_lines:
-        txt = _safe_str(raw)
-        code = _normalize_code(txt)
-        name = ""
-        market = "上市"
-        category = ""
-
-        if not code and isinstance(master_df, pd.DataFrame) and not master_df.empty:
-            matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
-            if not matched.empty:
-                row = matched.iloc[0]
-                code = _normalize_code(row.get("code"))
-                name = _safe_str(row.get("name"))
-                market = _safe_str(row.get("market")) or "上市"
-                category = _normalize_category(row.get("category"))
-
-        if code and not name:
-            name, market, category = _find_name_market_category(code, "", market, category, master_df)
-
-        if code and code not in seen:
-            seen.add(code)
-            rows.append(
-                {
-                    "code": code,
-                    "name": name or code,
-                    "market": market or "上市",
-                    "category": category,
-                    "label": f"{code} {name or code}",
-                }
-            )
-    return rows
-
-
-def _build_universe_from_market(
-    master_df: pd.DataFrame,
-    market_mode: str,
-    limit_count: Any,
-    selected_categories: list[str],
-) -> list[dict[str, str]]:
-    if master_df is None or master_df.empty:
-        return []
-
-    work = master_df.copy()
-    market_mode = _safe_str(market_mode)
-
-    if market_mode == "上市":
-        work = work[work["market"].astype(str) == "上市"].copy()
-    elif market_mode == "上櫃":
-        work = work[work["market"].astype(str) == "上櫃"].copy()
-    elif market_mode == "興櫃":
-        work = work[work["market"].astype(str) == "興櫃"].copy()
-
-    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    if clean_categories:
-        work = work[work["category"].astype(str).isin(clean_categories)].copy()
-
-    if _safe_str(limit_count) != "全部":
-        try:
-            limit_n = int(limit_count)
-            if limit_n > 0:
-                work = work.head(limit_n).copy()
-        except Exception:
-            pass
-
-    rows = []
-    for _, row in work.iterrows():
-        code = _normalize_code(row.get("code"))
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-        if code:
-            rows.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "market": market,
-                    "category": category,
-                    "label": f"{code} {name}",
-                }
-            )
-    return rows
-
-
-def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
-    cats = set()
-
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-        for _, row in master_df.iterrows():
-            name = _safe_str(row.get("name"))
-            cat = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-            if cat:
-                cats.add(cat)
-
-    if isinstance(watchlist_map, dict):
-        for _, items in watchlist_map.items():
-            for item in items:
-                name = _safe_str(item.get("name"))
-                cat = _normalize_category(item.get("category")) or _infer_category_from_name(name)
-                if cat:
-                    cats.add(cat)
-
-    return sorted(list(cats))
-
-
-def _append_stock_to_watchlist(
-    group_name: str,
-    code: str,
-    name: str,
-    market: str,
-    category: str,
-):
-    group_name = _safe_str(group_name)
-    code = _normalize_code(code)
-    name = _safe_str(name) or code
-    market = _safe_str(market) or "上市"
-    category = _normalize_category(category) or _infer_category_from_name(name)
-
-    if not group_name:
-        return False, "群組不可空白"
-    if not code:
-        return False, "股票代號不可空白"
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    if group_name not in raw or not isinstance(raw[group_name], list):
-        raw[group_name] = []
-
-    for item in raw[group_name]:
-        if isinstance(item, dict) and _normalize_code(item.get("code")) == code:
-            return False, f"{code} 已存在於 {group_name}"
-
-    row = {
-        "code": code,
-        "name": name,
-        "market": market,
-    }
-    if category:
-        row["category"] = category
-
-    raw[group_name].append(row)
-
-    ok = _force_write_watchlist_dual(raw)
-    if ok:
-        return True, f"已加入 {group_name}：{code} {name}"
-    return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
-
-
-def _append_multiple_stocks_to_watchlist(
-    group_name: str,
-    rows: list[dict[str, str]],
-) -> tuple[int, list[str]]:
-    group_name = _safe_str(group_name)
-    if not group_name:
-        return 0, ["請先選擇群組。"]
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    if group_name not in raw or not isinstance(raw[group_name], list):
-        raw[group_name] = []
-
-    existing_codes = {
-        _normalize_code(x.get("code"))
-        for x in raw[group_name]
-        if isinstance(x, dict)
-    }
-
-    added = 0
-    messages = []
-
-    for row in rows:
-        code = _normalize_code(row.get("code"))
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-
-        if not code:
-            continue
-
-        if code in existing_codes:
-            messages.append(f"{code} 已存在於 {group_name}")
-            continue
-
-        item = {
-            "code": code,
-            "name": name,
-            "market": market,
-        }
-        if category:
-            item["category"] = category
-
-        raw[group_name].append(item)
-        existing_codes.add(code)
-        added += 1
-        messages.append(f"已加入 {group_name}：{code} {name}")
-
-    if added > 0:
-        ok = _force_write_watchlist_dual(raw)
-        if not ok:
-            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
-
-    return added, messages
 # =========================================================
 # Main
 # =========================================================
@@ -2615,7 +2278,7 @@ def main():
     inject_pro_theme()
 
     watchlist_map = _load_watchlist_map()
-    master_df = _load_code_name_map_df()
+    master_df = _load_master_df()
     today = date.today()
 
     defaults = {
@@ -2652,6 +2315,11 @@ def main():
     real_pick_key = _k("rec_pick_codes")
     if next_pick_key in st.session_state:
         st.session_state[real_pick_key] = st.session_state.pop(next_pick_key)
+
+    next_record_key = _k("rec_record_codes_next")
+    real_record_key = _k("rec_record_codes")
+    if next_record_key in st.session_state:
+        st.session_state[real_record_key] = st.session_state.pop(next_record_key)
 
     render_pro_hero(
         title="股神推薦｜V2 升級版",
@@ -2696,22 +2364,14 @@ def main():
             saved_universe = st.session_state.get(_k("universe_mode"), "自選群組")
             if saved_universe not in universe_options:
                 saved_universe = "自選群組"
-            form_universe_mode = st.selectbox(
-                "掃描範圍",
-                universe_options,
-                index=universe_options.index(saved_universe),
-            )
+            form_universe_mode = st.selectbox("掃描範圍", universe_options, index=universe_options.index(saved_universe))
 
         with c2:
             group_options = list(watchlist_map.keys()) if watchlist_map else [""]
             saved_group = st.session_state.get(_k("group"), "")
             if saved_group not in group_options:
                 saved_group = group_options[0] if group_options else ""
-            form_group = st.selectbox(
-                "自選群組",
-                group_options,
-                index=group_options.index(saved_group) if saved_group in group_options else 0,
-            )
+            form_group = st.selectbox("自選群組", group_options, index=group_options.index(saved_group) if saved_group in group_options else 0)
 
         with c3:
             day_options = [60, 90, 120, 180, 240]
@@ -2733,7 +2393,6 @@ def main():
             saved_limit = st.session_state.get(_k("scan_limit"), 1000)
             if saved_limit not in limit_options:
                 saved_limit = 1000
-
             form_scan_limit = st.selectbox(
                 "掃描上限筆數",
                 limit_options,
@@ -2755,17 +2414,13 @@ def main():
             form_recommend_mode = st.selectbox(
                 "推薦模式",
                 ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"],
-                index=["飆股模式", "波段模式", "領頭羊模式", "綜合模式"].index(
-                    st.session_state.get(_k("recommend_mode"), "飆股模式")
-                ),
+                index=["飆股模式", "波段模式", "領頭羊模式", "綜合模式"].index(st.session_state.get(_k("recommend_mode"), "飆股模式")),
             )
         with m2:
             form_risk_strictness = st.selectbox(
                 "風險過濾強度",
                 ["寬鬆", "標準", "嚴格"],
-                index=["寬鬆", "標準", "嚴格"].index(
-                    st.session_state.get(_k("risk_strictness"), "標準")
-                ),
+                index=["寬鬆", "標準", "嚴格"].index(st.session_state.get(_k("risk_strictness"), "標準")),
             )
 
         form_selected_categories = st.multiselect(
@@ -2778,29 +2433,13 @@ def main():
         render_pro_section("推薦門檻")
         f1, f2, f3, f4 = st.columns(4)
         with f1:
-            form_min_total_score = st.number_input(
-                "推薦總分下限",
-                value=float(st.session_state.get(_k("min_total_score"), 55.0)),
-                step=1.0,
-            )
+            form_min_total_score = st.number_input("推薦總分下限", value=float(st.session_state.get(_k("min_total_score"), 55.0)), step=1.0)
         with f2:
-            form_min_signal_score = st.number_input(
-                "訊號分數下限",
-                value=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-                step=1.0,
-            )
+            form_min_signal_score = st.number_input("訊號分數下限", value=float(st.session_state.get(_k("min_signal_score"), -2.0)), step=1.0)
         with f3:
-            form_min_prelaunch_score = st.number_input(
-                "起漲前兆分數下限",
-                value=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-                step=1.0,
-            )
+            form_min_prelaunch_score = st.number_input("起漲前兆分數下限", value=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)), step=1.0)
         with f4:
-            form_min_trade_score = st.number_input(
-                "交易可行分數下限",
-                value=float(st.session_state.get(_k("min_trade_score"), 45.0)),
-                step=1.0,
-            )
+            form_min_trade_score = st.number_input("交易可行分數下限", value=float(st.session_state.get(_k("min_trade_score"), 45.0)), step=1.0)
 
         btn1, btn2, btn3 = st.columns([2, 2, 2])
         with btn1:
@@ -2826,7 +2465,7 @@ def main():
         except Exception:
             pass
         try:
-            _load_code_name_map_df.clear()
+            _load_master_df.clear()
         except Exception:
             pass
         try:
@@ -2963,7 +2602,6 @@ def main():
     )
 
     render_pro_section("推薦股票加入自選股中心")
-
     watchlist_map = _load_watchlist_map()
     rec_group_options = list(watchlist_map.keys()) if watchlist_map else [""]
     saved_pick_group = st.session_state.get(_k("rec_pick_group"), "")
@@ -2986,11 +2624,7 @@ def main():
             key=_k("rec_pick_group"),
         )
     with p2:
-        current_pick_codes = [
-            x for x in st.session_state.get(_k("rec_pick_codes"), [])
-            if x in rec_all_codes
-        ]
-
+        current_pick_codes = [x for x in st.session_state.get(_k("rec_pick_codes"), []) if x in rec_all_codes]
         st.multiselect(
             "勾選推薦股",
             options=rec_all_codes,
@@ -3008,7 +2642,6 @@ def main():
         if st.button("全選本輪推薦", use_container_width=True):
             st.session_state[_k("rec_pick_codes_next")] = rec_all_codes
             st.rerun()
-
     with q2:
         if st.button("清空勾選", use_container_width=True):
             st.session_state[_k("rec_pick_codes_next")] = []
@@ -3050,7 +2683,6 @@ def main():
                 st.write(f"- {line}")
 
     render_pro_section("寫入 8_股神推薦紀錄")
-
     record_code_to_label = {
         str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
         for _, r in rec_df.iterrows()
@@ -3059,11 +2691,7 @@ def main():
 
     rr1, rr2 = st.columns([4, 2])
     with rr1:
-        current_record_codes = [
-            x for x in st.session_state.get(_k("rec_record_codes"), [])
-            if x in record_all_codes
-        ]
-
+        current_record_codes = [x for x in st.session_state.get(_k("rec_record_codes"), []) if x in record_all_codes]
         st.multiselect(
             "勾選要記錄到 8_股神推薦紀錄 的股票",
             options=record_all_codes,
@@ -3080,40 +2708,30 @@ def main():
     rr3, rr4 = st.columns([1, 1])
     with rr3:
         if st.button("全選本輪推薦做紀錄", use_container_width=True):
-            st.session_state[_k("rec_record_codes")] = record_all_codes
+            st.session_state[_k("rec_record_codes_next")] = record_all_codes
             st.rerun()
-
     with rr4:
         if st.button("清空紀錄勾選", use_container_width=True):
-            st.session_state[_k("rec_record_codes")] = []
+            st.session_state[_k("rec_record_codes_next")] = []
             st.rerun()
 
     selected_snapshot_df = rec_df[
-        rec_df["股票代號"].astype(str).isin(
-            [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
-        )
+        rec_df["股票代號"].astype(str).isin([_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)])
     ].copy()
     st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_df
     st.session_state["godpick_rec_selected_df"] = selected_snapshot_df
 
     if record_to_log_btn:
-        selected_record_codes = [
-            _normalize_code(x)
-            for x in st.session_state.get(_k("rec_record_codes"), [])
-            if _normalize_code(x)
-        ]
-
+        selected_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
         if not selected_record_codes:
             st.warning("請先勾選要記錄的推薦股票。")
         else:
             record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
             added_count, record_msgs = _append_godpick_records(record_rows)
-
             if added_count > 0:
                 st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
             else:
                 st.warning("沒有新增任何推薦紀錄。")
-
             if record_msgs:
                 with st.expander("推薦紀錄寫入明細", expanded=False):
                     for msg in record_msgs:
@@ -3125,11 +2743,7 @@ def main():
             for line in record_detail_lines:
                 st.write(f"- {line}")
 
-    _render_export_block(
-        rec_df=rec_df,
-        category_strength_df=category_strength_df,
-        top_n=top_n,
-    )
+    _render_export_block(rec_df=rec_df, category_strength_df=category_strength_df, top_n=top_n)
     _render_selected_export_block()
 
     render_pro_section("本輪精華推薦")
@@ -3175,16 +2789,26 @@ def main():
 
     picked_codes_from_top = []
     for _, row in edited_top_df.iterrows():
-        if str(row.get("勾選", "")).strip().lower() in {"true", "1"}:
-            picked_codes_from_top.append(_normalize_code(row.get("股票代號")))
+        picked_val = row.get("勾選", False)
+        if isinstance(picked_val, bool):
+            is_checked = picked_val
+        else:
+            is_checked = str(picked_val).strip().lower() in {"true", "1", "yes", "y", "是"}
 
-    if picked_codes_from_top:
-        st.session_state[_k("rec_pick_codes")] = picked_codes_from_top
-        st.session_state[_k("rec_record_codes")] = picked_codes_from_top
+        if is_checked:
+            code = _normalize_code(row.get("股票代號"))
+            if code:
+                picked_codes_from_top.append(code)
 
-    selected_snapshot_top = rec_df[
-        rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])
-    ].copy()
+    current_pick_codes = st.session_state.get(_k("rec_pick_codes"), [])
+    current_record_codes = st.session_state.get(_k("rec_record_codes"), [])
+
+    if picked_codes_from_top != current_pick_codes:
+        st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
+    if picked_codes_from_top != current_record_codes:
+        st.session_state[_k("rec_record_codes_next")] = picked_codes_from_top
+
+    selected_snapshot_top = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
     st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_top
     st.session_state["godpick_rec_selected_df"] = selected_snapshot_top
 
@@ -3228,22 +2852,11 @@ def main():
                 ("風險報酬（突破）", _safe_str(focus_row.get("風險報酬_突破")), ""),
                 ("推薦理由摘要", _safe_str(focus_row.get("推薦理由摘要")), ""),
             ],
-            chips=[
-                _safe_str(focus_row.get("推薦等級")),
-                _safe_str(focus_row.get("類別")),
-                _safe_str(focus_row.get("推薦標籤")),
-            ],
+            chips=[_safe_str(focus_row.get("推薦等級")), _safe_str(focus_row.get("類別")), _safe_str(focus_row.get("推薦標籤"))],
         )
 
-    leader_df = rec_df.sort_values(
-        ["是否領先同類股", "推薦總分", "類股熱度分數"],
-        ascending=[False, False, False]
-    ).reset_index(drop=True)
-
-    factor_rank = rec_df.sort_values(
-        ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
-        ascending=[False, False, False, False]
-    ).reset_index(drop=True)
+    leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
+    factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
 
     tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "操作說明"])
 
@@ -3265,18 +2878,9 @@ def main():
             _format_df(
                 leader_df[
                     [
-                        "股票代號",
-                        "股票名稱",
-                        "類別",
-                        "類股內排名",
-                        "類股前3強",
-                        "是否領先同類股",
-                        "同類股領先幅度",
-                        "個股原始總分",
-                        "類股平均總分",
-                        "類股熱度分數",
-                        "推薦總分",
-                        "推薦理由摘要",
+                        "股票代號", "股票名稱", "類別", "類股內排名", "類股前3強",
+                        "是否領先同類股", "同類股領先幅度", "個股原始總分",
+                        "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要",
                     ]
                 ].head(top_n)
             ),
@@ -3289,16 +2893,9 @@ def main():
             _format_df(
                 factor_rank[
                     [
-                        "股票代號",
-                        "股票名稱",
-                        "類別",
-                        "自動因子總分",
-                        "EPS代理分數",
-                        "營收動能代理分數",
-                        "獲利代理分數",
-                        "大戶鎖碼代理分數",
-                        "法人連買代理分數",
-                        "自動因子摘要",
+                        "股票代號", "股票名稱", "類別", "自動因子總分", "EPS代理分數",
+                        "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數",
+                        "法人連買代理分數", "自動因子摘要",
                     ]
                 ].head(top_n)
             ),
