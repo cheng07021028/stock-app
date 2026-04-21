@@ -318,6 +318,25 @@ OFFICIAL_TO_THEME_RULES: list[tuple[list[str], str]] = [
     (["塑膠工業", "化學工業", "油電燃氣業"], "塑化"),
 ]
 
+
+
+BUILTIN_TOPIC_CODE_MAP: dict[str, str] = {
+    "2330": "晶圓代工", "2303": "晶圓代工", "5347": "晶圓代工", "6770": "晶圓代工",
+    "2454": "IC設計", "2379": "IC設計", "3034": "IC設計", "3443": "IC設計", "3661": "IC設計",
+    "5274": "IC設計", "6531": "IC設計", "3035": "IC設計", "6415": "IC設計",
+    "3711": "IC設計", "3529": "封測", "2449": "封測",
+    "8299": "半導體設備材料", "6187": "半導體設備材料", "8028": "半導體設備材料",
+    "6669": "AI伺服器", "3231": "AI伺服器", "2382": "AI伺服器", "2356": "AI伺服器",
+    "3017": "AI伺服器", "3706": "AI伺服器", "8210": "機殼", "3017": "AI伺服器",
+    "3324": "散熱", "3017": "AI伺服器", "3653": "高速傳輸", "5269": "高速傳輸",
+    "3413": "光通訊", "4908": "光通訊", "3081": "光通訊", "6136": "光通訊", "6861": "光通訊",
+    "2345": "網通交換器", "2344": "網通交換器", "3596": "網通交換器",
+    "2383": "電源供應", "2308": "電源供應", "6414": "電源供應",
+    "3017": "AI伺服器", "3036": "機殼", "2460": "機殼",
+    "8046": "PCB載板", "3189": "PCB載板", "3037": "高速傳輸",
+}
+
+
 CANONICAL_CATEGORY_ALIAS = {
     "半導體": "半導體", "半導體設備": "半導體設備材料", "設備材料": "半導體設備材料",
     "半導體材料": "半導體設備材料", "伺服器": "AI伺服器", "server": "AI伺服器",
@@ -922,6 +941,7 @@ def _stock_master_config() -> dict[str, str]:
         "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
         "master_path": _safe_str(st.secrets.get("STOCK_MASTER_GITHUB_PATH", "stock_master_cache.json")) or "stock_master_cache.json",
         "override_path": _safe_str(st.secrets.get("STOCK_CATEGORY_OVERRIDE_GITHUB_PATH", "stock_category_overrides.json")) or "stock_category_overrides.json",
+        "whitelist_path": _safe_str(st.secrets.get("STOCK_TOPIC_WHITELIST_GITHUB_PATH", "stock_topic_whitelist.json")) or "stock_topic_whitelist.json",
     }
 
 def _read_json_from_github(path: str) -> tuple[Any, str]:
@@ -1014,7 +1034,7 @@ def _load_stock_master_cache_from_repo() -> pd.DataFrame:
         df["code"] = df["code"].map(_normalize_code)
         df["name"] = df["name"].map(_safe_str)
         df["market"] = df["market"].map(_safe_str)
-        df["category"] = df.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
+        df["category"] = df.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category"), r.get("official_industry"), r.get("code")), axis=1)
         df = df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
         return df[[c for c in ["code", "name", "market", "official_industry", "theme_category", "category"] if c in df.columns]].copy()
     return pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "category"])
@@ -1048,6 +1068,29 @@ def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
         return out
     return {}
 
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_topic_code_whitelist_map() -> dict[str, str]:
+    cfg = _stock_master_config()
+    payload, _ = _read_json_from_github(cfg["whitelist_path"])
+    out: dict[str, str] = {}
+    for code, topic in BUILTIN_TOPIC_CODE_MAP.items():
+        norm_code = _normalize_code(code)
+        if norm_code and _safe_str(topic):
+            out[norm_code] = _canonical_category(topic)
+    if isinstance(payload, dict):
+        for code, item in payload.items():
+            norm_code = _normalize_code(code)
+            if not norm_code:
+                continue
+            if isinstance(item, dict):
+                topic = _safe_str(item.get("topic") or item.get("category") or item.get("theme_category"))
+            else:
+                topic = _safe_str(item)
+            if topic:
+                out[norm_code] = _canonical_category(topic)
+    return out
+
 def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
     if master_df is None or master_df.empty:
         master_df = pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "category"])
@@ -1061,7 +1104,7 @@ def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
     work["name"] = work["name"].map(_safe_str)
     work["market"] = work["market"].map(_safe_str).replace("", "上市")
     work["official_industry"] = work["official_industry"].map(_normalize_official_industry)
-    work["theme_category"] = work.apply(lambda r: _infer_theme_category(r.get("name"), r.get("official_industry"), r.get("theme_category") or r.get("category")), axis=1)
+    work["theme_category"] = work.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
     work["category"] = work["theme_category"]
 
     repo_df = _load_stock_master_cache_from_repo()
@@ -1072,7 +1115,7 @@ def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
                 repo_df[c] = ""
         repo_df["code"] = repo_df["code"].map(_normalize_code)
         repo_df["official_industry"] = repo_df["official_industry"].map(_normalize_official_industry)
-        repo_df["theme_category"] = repo_df.apply(lambda r: _infer_theme_category(r.get("name"), r.get("official_industry"), r.get("theme_category") or r.get("category")), axis=1)
+        repo_df["theme_category"] = repo_df.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
         repo_df["category"] = repo_df["theme_category"]
         work = pd.concat([work, repo_df], ignore_index=True)
         work["source_rank"] = work.get("source_rank", pd.Series([9]*len(work))).fillna(9)
@@ -1093,7 +1136,7 @@ def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
                     work.at[idx, "category"] = _canonical_category(item.get("category"))
             else:
                 nm = _safe_str(item.get("name")) or code
-                th = _canonical_category(item.get("category")) or _infer_theme_category(nm)
+                th = _canonical_category(item.get("category")) or _infer_theme_category(code=code, name=nm)
                 work = pd.concat([
                     work,
                     pd.DataFrame([{
@@ -1103,7 +1146,7 @@ def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
                 ], ignore_index=True)
 
     work["official_industry"] = work["official_industry"].map(_normalize_official_industry)
-    work["theme_category"] = work.apply(lambda r: _infer_theme_category(r.get("name"), r.get("official_industry"), r.get("theme_category") or r.get("category")), axis=1)
+    work["theme_category"] = work.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
     work["category"] = work["theme_category"]
     work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
     return work[["code", "name", "market", "official_industry", "theme_category", "category"]].copy()
@@ -1120,7 +1163,7 @@ def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
     work["name"] = work["name"].map(_safe_str)
     work["market"] = work["market"].map(_safe_str).replace("", "上市")
     work["official_industry"] = work["official_industry"].map(_normalize_official_industry)
-    work["theme_category"] = work.apply(lambda r: _infer_theme_category(r.get("name"), r.get("official_industry"), r.get("theme_category") or r.get("category")), axis=1)
+    work["theme_category"] = work.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
     work["category"] = work["theme_category"]
     work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").sort_values(["code"]).reset_index(drop=True)
     payload = work[["code", "name", "market", "official_industry", "theme_category", "category"]].to_dict(orient="records")
@@ -1140,7 +1183,7 @@ def _save_category_override(code: str, name: str, market: str, category: str) ->
         "code": code,
         "name": _safe_str(name),
         "market": _safe_str(market) or "上市",
-        "category": _canonical_category(category) or _infer_theme_category(_safe_str(name)),
+        "category": _canonical_category(category) or _infer_theme_category(code=code, name=_safe_str(name)),
         "updated_at": _now_text(),
     }
     ok, msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
@@ -1196,7 +1239,27 @@ def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str,
     work = work.sort_values(["market", "category", "code"]).reset_index(drop=True)
     return work
 
-def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str]) -> pd.DataFrame:
+
+def _build_category_repair_df(master_df: pd.DataFrame, rec_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "repair_reason", "推薦總分"])
+    work = master_df.copy()
+    for c in ["code", "name", "market", "official_industry", "theme_category", "category"]:
+        if c not in work.columns:
+            work[c] = ""
+    work["repair_reason"] = ""
+    work.loc[work["official_industry"].astype(str).str.strip() == "", "repair_reason"] = "官方主檔未知"
+    unmapped_mask = work["theme_category"].astype(str).isin(["其他", "其他_官方未知", "其他_主題未映射"])
+    work.loc[unmapped_mask & (work["repair_reason"] == ""), "repair_reason"] = "主題未映射"
+    pending = work[work["repair_reason"] != ""].copy()
+    pending["推薦總分"] = pd.NA
+    if isinstance(rec_df, pd.DataFrame) and not rec_df.empty and "股票代號" in rec_df.columns:
+        score_map = rec_df.set_index(rec_df["股票代號"].astype(str))["推薦總分"].to_dict()
+        pending["推薦總分"] = pending["code"].astype(str).map(score_map)
+    pending = pending.sort_values(["推薦總分", "market", "code"], ascending=[False, True, True], na_position="last").reset_index(drop=True)
+    return pending[["code", "name", "market", "official_industry", "theme_category", "repair_reason", "推薦總分"]]
+
+def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str], rec_df: pd.DataFrame | None = None) -> pd.DataFrame:
     render_pro_section("股票主檔搜尋 / 更新中心")
 
     with st.expander("展開股票主檔搜尋 / 更新中心", expanded=False):
@@ -1226,19 +1289,30 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
                         st.caption(line)
 
         found_df = _search_master_df(master_df, master_kw, master_market, master_cat)
-        st.caption(f"主檔筆數：{len(master_df):,}｜目前篩選結果：{len(found_df):,}｜類別優先來源：正式產業別 → 操作主題類別 → fallback")
+        st.caption(f"主檔筆數：{len(master_df):,}｜目前篩選結果：{len(found_df):,}｜分類順序：override → 代號白名單 → 正式產業別 → 名稱/規則 fallback")
+        pending_df = _build_category_repair_df(master_df, rec_df)
+        if not pending_df.empty:
+            with st.expander(f"分類待修清單（{len(pending_df):,} 檔）", expanded=False):
+                pending_show = pending_df.rename(columns={
+                    "code": "股票代號", "name": "股票名稱", "market": "市場別",
+                    "official_industry": "正式產業別", "theme_category": "操作主題類別", "repair_reason": "待修原因"
+                }).copy()
+                st.dataframe(_format_df(pending_show.head(300)), use_container_width=True, hide_index=True)
+                st.caption("建議優先修正：推薦總分高、仍落在 其他_官方未知 / 其他_主題未映射 的股票。")
 
-        show_df = found_df.rename(columns={"code": "股票代號", "name": "股票名稱", "market": "市場別", "category": "類別"}).copy()
+        show_df = found_df.rename(columns={"code": "股票代號", "name": "股票名稱", "market": "市場別", "official_industry": "正式產業別", "theme_category": "操作主題類別", "category": "類別"}).copy()
         st.dataframe(show_df.head(300), use_container_width=True, hide_index=True)
 
         if found_df.empty:
             return master_df
 
-        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}" for _, r in found_df.head(300).iterrows()]
-        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}": r.to_dict() for _, r in found_df.head(300).iterrows()}
+        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r.get('theme_category', r.get('category', ''))}" for _, r in found_df.head(300).iterrows()]
+        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r.get('theme_category', r.get('category', ''))}": r.to_dict() for _, r in found_df.head(300).iterrows()}
 
         picked_label = st.selectbox("選擇股票進行修正 / 加入自選股", labels, key=_k("master_pick_label"))
         picked = label_map.get(picked_label, {})
+
+        st.caption(f"目前正式產業別：{_safe_str(picked.get('official_industry')) or '(空白)'}｜目前操作主題類別：{_safe_str(picked.get('theme_category') or picked.get('category')) or '(空白)'}")
 
         e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
         with e1:
@@ -1250,7 +1324,7 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
         with e4:
             edit_category = st.selectbox(
                 "修正類別",
-                list(all_categories) if all_categories else [picked.get("category") or "其他"],
+                list(dict.fromkeys((list(all_categories) if all_categories else []) + ["其他_官方未知", "其他_主題未映射", "其他"])) if all_categories else [picked.get("category") or "其他_主題未映射"],
                 index=(list(all_categories).index(_safe_str(picked.get("category"))) if _safe_str(picked.get("category")) in all_categories else 0),
                 key=_k("master_edit_category"),
             )
@@ -1522,7 +1596,7 @@ def _load_master_df() -> pd.DataFrame:
             else:
                 base["official_industry"] = ""
         base["official_industry"] = base["official_industry"].map(_normalize_official_industry)
-        base["theme_category"] = base.apply(lambda r: _infer_theme_category(r.get("name"), r.get("official_industry"), r.get("theme_category") or r.get("category")), axis=1)
+        base["theme_category"] = base.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
         base["category"] = base["theme_category"]
         for c in ["code", "name", "market", "official_industry", "theme_category", "category"]:
             if c not in base.columns:
@@ -1549,12 +1623,12 @@ def _find_name_market_category(
             row = matched.iloc[0]
             final_name = _safe_str(row.get("name")) or manual_name or code
             final_market = _safe_str(row.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
+            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category, "", code)
             return final_name, final_market, final_category
 
     final_name = manual_name or code
     final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_record(final_name, manual_category)
+    final_category = manual_category or _infer_category_from_record(final_name, manual_category, "", code)
     return final_name, final_market, final_category
 
 
@@ -2959,7 +3033,7 @@ def main():
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
-    master_df = _render_stock_master_center(master_df, watchlist_map, all_categories)
+    master_df = _render_stock_master_center(master_df, watchlist_map, all_categories, rec_df if 'rec_df' in locals() else pd.DataFrame())
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
