@@ -752,12 +752,154 @@ def _build_category_stats(df: pd.DataFrame) -> pd.DataFrame:
     return grp
 
 
-def _build_export_bytes(df: pd.DataFrame, mode_df: pd.DataFrame, cat_df: pd.DataFrame) -> bytes:
+def _win_rate(series) -> float:
+    s = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
+    return float((s > 0).mean() * 100) if len(s) else 0.0
+
+
+def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    local_df = _ensure_godpick_record_columns(df.copy())
+    if local_df.empty:
+        return {
+            "mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均系統報酬", "系統勝率", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "達目標1比率", "停損率", "平均推薦總分"]),
+            "category": pd.DataFrame(columns=["類別", "筆數", "平均系統報酬", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "系統勝率", "達目標1比率", "停損率"]),
+            "grade": pd.DataFrame(columns=["推薦等級", "筆數", "平均系統報酬", "系統勝率", "達目標1比率", "停損率"]),
+            "trade_mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"]),
+            "best_mode": pd.DataFrame(),
+            "best_category": pd.DataFrame(),
+        }
+
+    x = local_df.copy()
+    x["系統報酬基準"] = pd.to_numeric(x["損益幅%"], errors="coerce")
+    x["實際交易基準"] = pd.to_numeric(x["實際報酬%"], errors="coerce")
+
+    mode_df = x.groupby("推薦模式", dropna=False).agg(
+        筆數=("record_id", "count"),
+        平均系統報酬=("系統報酬基準", "mean"),
+        系統勝率=("系統報酬基準", _win_rate),
+        平均3日績效=("3日績效%", "mean"),
+        平均5日績效=("5日績效%", "mean"),
+        平均10日績效=("10日績效%", "mean"),
+        平均20日績效=("20日績效%", "mean"),
+        **{
+            "3日勝率": ("3日績效%", _win_rate),
+            "5日勝率": ("5日績效%", _win_rate),
+            "10日勝率": ("10日績效%", _win_rate),
+            "20日勝率": ("20日績效%", _win_rate),
+        },
+        達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        平均推薦總分=("推薦總分", "mean"),
+    ).reset_index()
+
+    category_df = x.groupby("類別", dropna=False).agg(
+        筆數=("record_id", "count"),
+        平均系統報酬=("系統報酬基準", "mean"),
+        平均3日績效=("3日績效%", "mean"),
+        平均5日績效=("5日績效%", "mean"),
+        平均10日績效=("10日績效%", "mean"),
+        平均20日績效=("20日績效%", "mean"),
+        **{
+            "3日勝率": ("3日績效%", _win_rate),
+            "5日勝率": ("5日績效%", _win_rate),
+            "10日勝率": ("10日績效%", _win_rate),
+            "20日勝率": ("20日績效%", _win_rate),
+        },
+        系統勝率=("系統報酬基準", _win_rate),
+        達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+    ).reset_index()
+
+    grade_df = x.groupby("推薦等級", dropna=False).agg(
+        筆數=("record_id", "count"),
+        平均系統報酬=("系統報酬基準", "mean"),
+        系統勝率=("系統報酬基準", _win_rate),
+        達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+    ).reset_index()
+
+    trade_df = x[x["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
+    if trade_df.empty:
+        trade_mode_df = pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"])
+    else:
+        trade_mode_df = trade_df.groupby("推薦模式", dropna=False).agg(
+            筆數=("record_id", "count"),
+            平均實際報酬=("實際交易基準", "mean"),
+            實際勝率=("實際交易基準", _win_rate),
+        ).reset_index()
+
+    best_mode_df = mode_df.copy()
+    if not best_mode_df.empty:
+        best_mode_df["綜合模式分數"] = (
+            best_mode_df["平均20日績效"].fillna(0) * 0.50
+            + best_mode_df["20日勝率"].fillna(0) * 0.35
+            + best_mode_df["平均推薦總分"].fillna(0) * 0.15
+        )
+        best_mode_df = best_mode_df.sort_values(["綜合模式分數", "平均20日績效", "20日勝率"], ascending=[False, False, False]).reset_index(drop=True)
+
+    best_category_df = category_df.copy()
+    if not best_category_df.empty:
+        best_category_df["綜合類別分數"] = (
+            best_category_df["平均20日績效"].fillna(0) * 0.55
+            + best_category_df["20日勝率"].fillna(0) * 0.35
+            + best_category_df["系統勝率"].fillna(0) * 0.10
+        )
+        best_category_df = best_category_df.sort_values(["綜合類別分數", "平均20日績效", "20日勝率"], ascending=[False, False, False]).reset_index(drop=True)
+
+    return {
+        "mode": mode_df,
+        "category": category_df,
+        "grade": grade_df,
+        "trade_mode": trade_mode_df,
+        "best_mode": best_mode_df,
+        "best_category": best_category_df,
+    }
+
+
+def _build_mode_performance_label(row: pd.Series | dict[str, Any], mode_stats_df: pd.DataFrame) -> str:
+    src = dict(row)
+    mode = _safe_str(src.get("推薦模式"))
+    if mode_stats_df is None or mode_stats_df.empty or not mode:
+        return _safe_str(src.get("模式績效標籤"))
+    hit = mode_stats_df[mode_stats_df["推薦模式"].astype(str) == mode]
+    if hit.empty:
+        return _safe_str(src.get("模式績效標籤"))
+    r = hit.iloc[0]
+    avg_20 = _safe_float(r.get("平均20日績效"))
+    win20 = _safe_float(r.get("20日勝率"))
+    sample_n = int(_safe_float(r.get("筆數"), 0) or 0)
+    if sample_n < 3:
+        return "樣本不足"
+    if avg_20 is not None and win20 is not None:
+        if avg_20 >= 8 and win20 >= 65:
+            return "強勢模式"
+        if avg_20 >= 3 and win20 >= 55:
+            return "穩健模式"
+        if avg_20 < 0 and win20 < 45:
+            return "偏弱模式"
+        return "一般模式"
+    return _safe_str(src.get("模式績效標籤"))
+
+
+def _apply_mode_labels(df: pd.DataFrame) -> pd.DataFrame:
+    x = _ensure_godpick_record_columns(df.copy())
+    ana = _build_analysis_tables(x)
+    x["模式績效標籤"] = x.apply(lambda r: _build_mode_performance_label(r, ana["mode"]), axis=1)
+    return _ensure_godpick_record_columns(x)
+
+
+def _build_export_bytes(df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         _ensure_godpick_record_columns(df).to_excel(writer, sheet_name="推薦紀錄", index=False)
-        mode_df.to_excel(writer, sheet_name="模式統計", index=False)
-        cat_df.to_excel(writer, sheet_name="類別統計", index=False)
+        tables["mode"].to_excel(writer, sheet_name="模式分析", index=False)
+        tables["category"].to_excel(writer, sheet_name="類別分析", index=False)
+        tables["grade"].to_excel(writer, sheet_name="等級分析", index=False)
+        tables["trade_mode"].to_excel(writer, sheet_name="實際交易分析", index=False)
+        if not tables["best_mode"].empty:
+            tables["best_mode"].to_excel(writer, sheet_name="最強模式", index=False)
+        if not tables["best_category"].empty:
+            tables["best_category"].to_excel(writer, sheet_name="最強類別", index=False)
         try:
             for ws in writer.book.worksheets:
                 ws.freeze_panes = "A2"
@@ -784,7 +926,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦紀錄",
-        subtitle="承接 7_股神推薦 寫入結果，支援狀態維護、最新價更新、3/5/10/20日績效回填、模式/類別勝率統計。",
+        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -799,37 +941,45 @@ def main():
         else:
             st.info(status_msg)
 
-    toolbar1, toolbar2, toolbar3, toolbar4 = st.columns(4)
-    with toolbar1:
-        if st.button("重新載入紀錄", use_container_width=True, type="primary"):
+    top_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.2, 1.4, 2.0])
+    with top_cols[0]:
+        if st.button("🔄 重新載入", use_container_width=True):
             df = _load_records()
             _save_state_df(df)
             _set_status("推薦紀錄已重新載入", "success")
             st.rerun()
-    with toolbar2:
-        if st.button("更新最新價 / 損益", use_container_width=True):
+    with top_cols[1]:
+        if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
             df = _refresh_latest_prices(df)
+            df = _apply_mode_labels(df)
             _save_state_df(df)
-            ok = _save_records_dual(df)
+            st.success("已更新最新價，尚未同步")
+    with top_cols[2]:
+        if st.button("💾 儲存同步", use_container_width=True):
+            latest_df = _apply_mode_labels(_get_state_df())
+            _save_state_df(latest_df)
+            ok = _save_records_dual(latest_df)
             if ok:
                 st.rerun()
-    with toolbar3:
-        if st.button("回填 3/5/10/20 日績效", use_container_width=True):
-            df = _get_state_df()
-            df = _backfill_perf_columns(df)
-            _save_state_df(df)
-            ok = _save_records_dual(df)
-            if ok:
-                st.rerun()
-    with toolbar4:
-        if st.button("清除快取", use_container_width=True):
+    with top_cols[3]:
+        if st.button("🧹 清除快取", use_container_width=True):
             try:
                 _get_latest_close.clear()
                 _get_forward_return.clear()
             except Exception:
                 pass
             st.success("快取已清除")
+    with top_cols[4]:
+        if st.button("🧮 更新前推績效", use_container_width=True):
+            updated = _backfill_perf_columns(_get_state_df())
+            updated = _apply_mode_labels(updated)
+            _save_state_df(updated)
+            st.success("已更新 3/5/10/20 日績效與模式績效標籤，尚未同步")
+    with top_cols[5]:
+        st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
+    with top_cols[6]:
+        st.caption(f"GitHub：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ Firestore：{'✅' if _safe_str(_firebase_config().get('project_id')) else '❌'}")
 
     df = _get_state_df()
     if df.empty:
@@ -848,214 +998,330 @@ def main():
             for line in sync_detail:
                 st.write(f"- {line}")
 
-    summary = _build_summary(df)
+    live_df = _ensure_godpick_record_columns(_get_state_df().copy())
+    ana_tables = _build_analysis_tables(live_df)
+    summary = _build_summary(live_df)
+    avg_20 = pd.to_numeric(live_df["20日績效%"], errors="coerce").dropna().mean() if not live_df.empty else None
+    avg_real = pd.to_numeric(live_df.loc[live_df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if not live_df.empty else None
+
     render_pro_kpi_row([
-        {"label": "推薦紀錄數", "value": summary["count"], "delta": "總筆數", "delta_class": "pro-kpi-delta-flat"},
-        {"label": "已實際買進", "value": summary["buy_count"], "delta": "執行數", "delta_class": "pro-kpi-delta-flat"},
-        {"label": "已結案", "value": summary["sold_count"], "delta": "賣出/停損/達標", "delta_class": "pro-kpi-delta-flat"},
-        {"label": "平均報酬", "value": f"{summary['avg_ret']:.2f}%", "delta": f"勝率 {summary['win_rate']:.1f}%", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "總筆數", "value": summary["count"], "delta": "推薦紀錄", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "持有中", "value": int((live_df["目前狀態"] == "持有").sum()) if not live_df.empty else 0, "delta": "狀態追蹤", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "平均系統報酬%", "value": f"{summary['avg_ret']:.2f}%", "delta": f"勝率 {summary['win_rate']:.1f}%", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
     ])
 
-    mode_options = ["全部"] + sorted([x for x in df["推薦模式"].dropna().astype(str).unique().tolist() if x])
-    category_options = ["全部"] + sorted([x for x in df["類別"].dropna().astype(str).unique().tolist() if x])
-    status_options = ["全部"] + STATUS_OPTIONS
+    tabs = st.tabs(["📋 總表管理", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
-    render_pro_section("篩選 / 查詢")
-    f1, f2, f3, f4 = st.columns([2, 2, 2, 3])
-    with f1:
-        mode_filter = st.selectbox("推薦模式", mode_options, index=0)
-    with f2:
-        category_filter = st.selectbox("類別", category_options, index=0)
-    with f3:
-        status_filter = st.selectbox("目前狀態", status_options, index=0)
-    with f4:
-        keyword = st.text_input("關鍵字（代號 / 名稱 / 標籤 / 理由）", value="")
+    with tabs[0]:
+        render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。")
+        filter_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 1.0, 1.0, 1.0])
+        with filter_cols[0]:
+            keyword = st.text_input("搜尋代號 / 名稱 / 理由", value="", key=_k("kw"))
+        with filter_cols[1]:
+            mode_filter = st.selectbox("推薦模式", ["全部"] + sorted([x for x in live_df["推薦模式"].dropna().astype(str).unique().tolist() if x]), index=0, key=_k("mode_filter"))
+        with filter_cols[2]:
+            category_filter = st.selectbox("類別", ["全部"] + sorted([x for x in live_df["類別"].dropna().astype(str).unique().tolist() if x]), index=0, key=_k("cat_filter"))
+        with filter_cols[3]:
+            status_filter = st.selectbox("狀態", ["全部"] + STATUS_OPTIONS, index=0, key=_k("status_filter"))
+        with filter_cols[4]:
+            bought_filter = st.selectbox("是否已買進", ["全部", "是", "否"], index=0, key=_k("buy_filter"))
+        with filter_cols[5]:
+            sort_by = st.selectbox("排序", ["推薦日期", "推薦總分", "20日績效%", "損益幅%", "實際報酬%", "持有天數"], index=0, key=_k("sort_by"))
+        with filter_cols[6]:
+            sort_asc = st.toggle("升冪", value=False, key=_k("sort_asc"))
+        with filter_cols[7]:
+            show_cols_mode = st.selectbox("顯示模式", ["標準", "進階"], index=0, key=_k("show_cols_mode"))
 
-    show_df = df.copy()
-    if mode_filter != "全部":
-        show_df = show_df[show_df["推薦模式"].astype(str) == mode_filter].copy()
-    if category_filter != "全部":
-        show_df = show_df[show_df["類別"].astype(str) == category_filter].copy()
-    if status_filter != "全部":
-        show_df = show_df[show_df["目前狀態"].astype(str) == status_filter].copy()
-    if _safe_str(keyword):
-        kw = _safe_str(keyword)
-        mask = (
-            show_df["股票代號"].astype(str).str.contains(kw, case=False, na=False)
-            | show_df["股票名稱"].astype(str).str.contains(kw, case=False, na=False)
-            | show_df["推薦標籤"].astype(str).str.contains(kw, case=False, na=False)
-            | show_df["推薦理由摘要"].astype(str).str.contains(kw, case=False, na=False)
+        view_df = live_df.copy()
+        if keyword:
+            mask = (
+                view_df["股票代號"].astype(str).str.contains(keyword, case=False, na=False)
+                | view_df["股票名稱"].astype(str).str.contains(keyword, case=False, na=False)
+                | view_df["推薦理由摘要"].astype(str).str.contains(keyword, case=False, na=False)
+            )
+            view_df = view_df[mask].copy()
+        if mode_filter != "全部":
+            view_df = view_df[view_df["推薦模式"].astype(str) == mode_filter].copy()
+        if category_filter != "全部":
+            view_df = view_df[view_df["類別"].astype(str) == category_filter].copy()
+        if status_filter != "全部":
+            view_df = view_df[view_df["目前狀態"].astype(str) == status_filter].copy()
+        if bought_filter != "全部":
+            target_bool = bought_filter == "是"
+            view_df = view_df[view_df["是否已實際買進"].fillna(False).map(_normalize_bool) == target_bool].copy()
+        if sort_by in view_df.columns:
+            view_df = view_df.sort_values(sort_by, ascending=sort_asc, na_position="last").reset_index(drop=True)
+
+        st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
+
+        standard_cols = [
+            "record_id", "股票代號", "股票名稱", "市場別", "類別",
+            "推薦模式", "推薦等級", "推薦總分",
+            "推薦價格", "最新價", "損益幅%",
+            "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+            "目前狀態", "是否已實際買進",
+            "實際買進價", "實際賣出價", "實際報酬%",
+            "推薦日期", "推薦時間", "模式績效標籤", "備註"
+        ]
+        advanced_cols = [
+            "record_id", "股票代號", "股票名稱", "市場別", "類別",
+            "推薦模式", "推薦等級", "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+            "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+            "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+            "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%",
+            "是否達停損", "是否達目標1", "是否達目標2",
+            "持有天數", "推薦日期", "推薦時間", "模式績效標籤", "推薦理由摘要", "備註"
+        ]
+        use_cols = advanced_cols if show_cols_mode == "進階" else standard_cols
+        editor_df = view_df[[c for c in use_cols if c in view_df.columns]].copy()
+        editor_df.insert(0, "刪除", False)
+
+        edited_df = st.data_editor(
+            editor_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=_k("record_editor"),
+            column_config={
+                "刪除": st.column_config.CheckboxColumn("刪除"),
+                "record_id": st.column_config.TextColumn("record_id", disabled=True),
+                "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
+                "股票名稱": st.column_config.TextColumn("股票名稱", disabled=True),
+                "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
+                "推薦等級": st.column_config.TextColumn("推薦等級", disabled=True),
+                "推薦總分": st.column_config.NumberColumn("推薦總分", format="%.2f", disabled=True),
+                "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
+                "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
+                "交易可行分數": st.column_config.NumberColumn("交易可行分數", format="%.2f", disabled=True),
+                "類股熱度分數": st.column_config.NumberColumn("類股熱度分數", format="%.2f", disabled=True),
+                "最新價": st.column_config.NumberColumn("最新價", format="%.2f", disabled=True),
+                "損益幅%": st.column_config.NumberColumn("損益幅%", format="%.2f", disabled=True),
+                "3日績效%": st.column_config.NumberColumn("3日績效%", format="%.2f", disabled=True),
+                "5日績效%": st.column_config.NumberColumn("5日績效%", format="%.2f", disabled=True),
+                "10日績效%": st.column_config.NumberColumn("10日績效%", format="%.2f", disabled=True),
+                "20日績效%": st.column_config.NumberColumn("20日績效%", format="%.2f", disabled=True),
+                "目前狀態": st.column_config.SelectboxColumn("目前狀態", options=STATUS_OPTIONS),
+                "是否已實際買進": st.column_config.CheckboxColumn("是否已實際買進"),
+                "實際買進價": st.column_config.NumberColumn("實際買進價", format="%.2f"),
+                "實際賣出價": st.column_config.NumberColumn("實際賣出價", format="%.2f"),
+                "實際報酬%": st.column_config.NumberColumn("實際報酬%", format="%.2f", disabled=True),
+                "是否達停損": st.column_config.CheckboxColumn("是否達停損"),
+                "是否達目標1": st.column_config.CheckboxColumn("是否達目標1"),
+                "是否達目標2": st.column_config.CheckboxColumn("是否達目標2"),
+                "持有天數": st.column_config.NumberColumn("持有天數", format="%d", disabled=True),
+                "推薦日期": st.column_config.TextColumn("推薦日期", disabled=True),
+                "推薦時間": st.column_config.TextColumn("推薦時間", disabled=True),
+                "模式績效標籤": st.column_config.TextColumn("模式績效標籤", disabled=True),
+                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large", disabled=True),
+                "備註": st.column_config.TextColumn("備註", width="large"),
+            },
         )
-        show_df = show_df[mask].copy()
 
-    render_pro_section("批次狀態更新")
-    select_options = show_df["record_id"].astype(str).tolist()
-    label_map = {str(r["record_id"]): f"{r['股票代號']} {r['股票名稱']}｜{r['目前狀態']}｜{_safe_str(r['推薦模式'])}" for _, r in show_df.iterrows()}
+        action_cols = st.columns([1.2, 1.2, 1.2, 1.2, 3.2])
+        with action_cols[0]:
+            if st.button("✅ 套用編輯", use_container_width=True):
+                master = live_df.copy()
+                edit_map = {str(r["record_id"]): dict(r) for _, r in edited_df.iterrows()}
+                for idx in master.index:
+                    rec_id = _safe_str(master.at[idx, "record_id"])
+                    if rec_id not in edit_map:
+                        continue
+                    src = edit_map[rec_id]
+                    for c in [c for c in master.columns if c in src]:
+                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
+                            continue
+                        master.at[idx, c] = src.get(c)
+                    recalc = _recalc_row(master.loc[idx].to_dict())
+                    for k2, v2 in recalc.items():
+                        if k2 in master.columns:
+                            master.at[idx, k2] = v2
+                master = _apply_mode_labels(master)
+                _save_state_df(master)
+                st.success("已套用，尚未同步")
+        with action_cols[1]:
+            if st.button("🗑️ 刪除勾選", use_container_width=True):
+                delete_ids = edited_df.loc[edited_df["刪除"] == True, "record_id"].astype(str).tolist()
+                if not delete_ids:
+                    st.warning("請先勾選要刪除的紀錄。")
+                else:
+                    new_df = _delete_records_by_ids(live_df, delete_ids)
+                    _save_state_df(new_df)
+                    st.success(f"已刪除 {len(delete_ids)} 筆，尚未同步")
+        with action_cols[2]:
+            if st.button("🧼 清空目前篩選", use_container_width=True):
+                if view_df.empty:
+                    st.warning("目前篩選結果沒有資料可清空。")
+                else:
+                    new_df = _clear_filtered_records(live_df, view_df)
+                    _save_state_df(new_df)
+                    st.success(f"已清空 {len(view_df)} 筆，尚未同步")
+        with action_cols[3]:
+            if st.button("🧮 更新績效", use_container_width=True):
+                updated = _backfill_perf_columns(_get_state_df())
+                updated = _apply_mode_labels(updated)
+                _save_state_df(updated)
+                st.success("已更新 3/5/10/20 日績效，尚未同步")
+        with action_cols[4]:
+            st.caption("流程：篩選 → 編輯 → 套用 / 刪除 / 清空 → 更新價格 / 更新績效 → 儲存同步")
 
-    b1, b2, b3, b4 = st.columns([4, 2, 2, 2])
-    with b1:
-        selected_ids = st.multiselect(
-            "勾選要更新的紀錄",
-            options=select_options,
-            format_func=lambda x: label_map.get(str(x), str(x)),
-            key=_k("selected_ids"),
-        )
-    with b2:
-        new_status = st.selectbox("更新狀態", STATUS_OPTIONS, index=0, key=_k("batch_status"))
-    with b3:
-        perf_label = st.selectbox("模式績效標籤", PERF_LABEL_OPTIONS, index=0, key=_k("batch_perf_label"))
-    with b4:
-        mark_buy = st.selectbox("是否已實際買進", ["不變", "是", "否"], index=0, key=_k("batch_buy_flag"))
+    with tabs[1]:
+        render_pro_section("手動新增推薦紀錄")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            manual_code = st.text_input("股票代號", value="", key=_k("manual_code"))
+        with c2:
+            manual_name = st.text_input("股票名稱", value="", key=_k("manual_name"))
+        with c3:
+            manual_market = st.selectbox("市場別", ["上市", "上櫃", "興櫃"], index=0, key=_k("manual_market"))
+        with c4:
+            manual_category = st.text_input("類別", value="", key=_k("manual_category"))
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            manual_mode = st.text_input("推薦模式", value="手動新增", key=_k("manual_mode"))
+        with c6:
+            manual_grade = st.selectbox("推薦等級", ["", "S", "A", "B", "C", "股神級", "強烈關注", "優先觀察", "可列追蹤", "觀察"], index=1, key=_k("manual_grade"))
+        with c7:
+            manual_total = st.number_input("推薦總分", min_value=0.0, max_value=1000.0, value=85.0, step=0.1, key=_k("manual_total"))
+        with c8:
+            manual_price = st.number_input("推薦價格", min_value=0.0, value=0.0, step=0.01, key=_k("manual_price"))
+        c9, c10, c11, c12 = st.columns(4)
+        with c9:
+            manual_stop = st.number_input("停損價", min_value=0.0, value=0.0, step=0.01, key=_k("manual_stop"))
+        with c10:
+            manual_t1 = st.number_input("賣出目標1", min_value=0.0, value=0.0, step=0.01, key=_k("manual_t1"))
+        with c11:
+            manual_t2 = st.number_input("賣出目標2", min_value=0.0, value=0.0, step=0.01, key=_k("manual_t2"))
+        with c12:
+            manual_status = st.selectbox("目前狀態", STATUS_OPTIONS, index=0, key=_k("manual_status"))
+        manual_reason = st.text_area("推薦理由摘要", value="", height=90, key=_k("manual_reason"))
+        manual_tag = st.text_input("推薦標籤", value="", key=_k("manual_tag"))
+        if st.button("➕ 新增並同步", use_container_width=True, type="primary"):
+            if not _normalize_code(manual_code):
+                st.warning("請輸入股票代號")
+            else:
+                rec_date = _now_date_text()
+                rec_time = _now_time_text()
+                row = {
+                    "record_id": _create_record_id(_normalize_code(manual_code), rec_date, rec_time, manual_mode),
+                    "股票代號": _normalize_code(manual_code),
+                    "股票名稱": _safe_str(manual_name) or _normalize_code(manual_code),
+                    "市場別": manual_market,
+                    "類別": manual_category,
+                    "推薦模式": manual_mode,
+                    "推薦等級": manual_grade,
+                    "推薦總分": manual_total,
+                    "推薦價格": manual_price if manual_price > 0 else None,
+                    "停損價": manual_stop if manual_stop > 0 else None,
+                    "賣出目標1": manual_t1 if manual_t1 > 0 else None,
+                    "賣出目標2": manual_t2 if manual_t2 > 0 else None,
+                    "推薦日期": rec_date,
+                    "推薦時間": rec_time,
+                    "建立時間": _now_text(),
+                    "更新時間": _now_text(),
+                    "目前狀態": manual_status,
+                    "推薦標籤": manual_tag,
+                    "推薦理由摘要": manual_reason,
+                }
+                new_df = _append_records_dedup_by_business_key(_get_state_df(), pd.DataFrame([row]))
+                new_df = _backfill_perf_columns(new_df)
+                new_df = _apply_mode_labels(new_df)
+                _save_state_df(new_df)
+                ok = _save_records_dual(new_df)
+                if ok:
+                    st.success("已加入並同步成功")
+                    st.rerun()
 
-    u1, u2, u3 = st.columns([2, 2, 4])
-    with u1:
-        buy_price_input = st.number_input("實際買進價（0=不變）", min_value=0.0, value=0.0, step=0.01, key=_k("batch_buy_price"))
-    with u2:
-        sell_price_input = st.number_input("實際賣出價（0=不變）", min_value=0.0, value=0.0, step=0.01, key=_k("batch_sell_price"))
-    with u3:
-        note_input = st.text_input("備註（批次追加）", value="", key=_k("batch_note"))
+    with tabs[2]:
+        render_pro_section("系統推薦績效分析", "以推薦價格對照最新價與前推 3/5/10/20 日績效")
+        valid_sys = pd.to_numeric(live_df["損益幅%"], errors="coerce").dropna()
+        win_rate_sys = float((valid_sys > 0).mean() * 100) if not valid_sys.empty else 0.0
+        avg_sys_ret = float(valid_sys.mean()) if not valid_sys.empty else 0.0
+        valid_20 = pd.to_numeric(live_df["20日績效%"], errors="coerce").dropna()
+        avg_20_v = float(valid_20.mean()) if not valid_20.empty else 0.0
+        win_20 = float((valid_20 > 0).mean() * 100) if not valid_20.empty else 0.0
+        target_rate = float(live_df["是否達目標1"].fillna(False).map(_normalize_bool).mean() * 100) if len(live_df) else 0.0
+        stop_rate = float(live_df["是否達停損"].fillna(False).map(_normalize_bool).mean() * 100) if len(live_df) else 0.0
 
-    if st.button("套用批次更新", use_container_width=True):
-        if not selected_ids:
-            st.warning("請先勾選要更新的紀錄。")
+        render_pro_kpi_row([
+            {"label": "系統樣本數", "value": format_number(len(live_df)), "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "系統勝率", "value": f"{win_rate_sys:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均系統報酬%", "value": f"{avg_sys_ret:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "20日勝率", "value": f"{win_20:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均20日績效%", "value": f"{avg_20_v:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "達目標1比率", "value": f"{target_rate:.2f}%", "delta": f"停損率 {stop_rate:.2f}%", "delta_class": "pro-kpi-delta-flat"},
+        ])
+        best_cols = st.columns(2)
+        with best_cols[0]:
+            if not ana_tables["best_mode"].empty:
+                top_mode = ana_tables["best_mode"].iloc[0]
+                st.info(f"最強模式：{_safe_str(top_mode.get('推薦模式'))} ｜ 平均20日績效 {(_safe_float(top_mode.get('平均20日績效'), 0) or 0):.2f}% ｜ 20日勝率 {(_safe_float(top_mode.get('20日勝率'), 0) or 0):.2f}%")
+            else:
+                st.info("最強模式：暫無資料")
+        with best_cols[1]:
+            if not ana_tables["best_category"].empty:
+                top_cat = ana_tables["best_category"].iloc[0]
+                st.info(f"最強類別：{_safe_str(top_cat.get('類別'))} ｜ 平均20日績效 {(_safe_float(top_cat.get('平均20日績效'), 0) or 0):.2f}% ｜ 20日勝率 {(_safe_float(top_cat.get('20日勝率'), 0) or 0):.2f}%")
+            else:
+                st.info("最強類別：暫無資料")
+        sub_tabs = st.tabs(["模式分析", "類別分析", "等級分析", "明細表"])
+        with sub_tabs[0]:
+            st.dataframe(ana_tables["mode"], use_container_width=True, hide_index=True)
+        with sub_tabs[1]:
+            st.dataframe(ana_tables["category"], use_container_width=True, hide_index=True)
+        with sub_tabs[2]:
+            st.dataframe(ana_tables["grade"], use_container_width=True, hide_index=True)
+        with sub_tabs[3]:
+            detail_cols = [c for c in [
+                "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
+                "推薦價格", "最新價", "損益金額", "損益幅%",
+                "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+                "是否達停損", "是否達目標1", "是否達目標2",
+                "推薦日期", "持有天數", "推薦理由摘要"
+            ] if c in live_df.columns]
+            st.dataframe(_format_df(live_df[detail_cols]), use_container_width=True, hide_index=True)
+
+    with tabs[3]:
+        render_pro_section("實際交易分析", "只統計有實際買進資料的紀錄")
+        trade_df = live_df[live_df["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
+        if trade_df.empty:
+            st.info("目前沒有實際交易資料。")
         else:
-            work = df.copy()
-            selected_set = set(selected_ids)
-            for idx in work.index:
-                rec_id = _safe_str(work.at[idx, "record_id"])
-                if rec_id not in selected_set:
-                    continue
-                work.at[idx, "目前狀態"] = new_status
-                if perf_label:
-                    work.at[idx, "模式績效標籤"] = perf_label
-                if mark_buy == "是":
-                    work.at[idx, "是否已實際買進"] = True
-                elif mark_buy == "否":
-                    work.at[idx, "是否已實際買進"] = False
-                if buy_price_input > 0:
-                    work.at[idx, "實際買進價"] = buy_price_input
-                if sell_price_input > 0:
-                    work.at[idx, "實際賣出價"] = sell_price_input
-                if _safe_str(note_input):
-                    old_note = _safe_str(work.at[idx, "備註"])
-                    work.at[idx, "備註"] = f"{old_note}｜{note_input}" if old_note else note_input
-                recalc = _recalc_row(work.loc[idx].to_dict())
-                for k2, v2 in recalc.items():
-                    if k2 in work.columns:
-                        work.at[idx, k2] = v2
-            _save_state_df(work)
-            ok = _save_records_dual(work)
-            if ok:
-                st.rerun()
+            valid_real = pd.to_numeric(trade_df["實際報酬%"], errors="coerce").dropna()
+            real_win = float((valid_real > 0).mean() * 100) if not valid_real.empty else 0.0
+            real_avg = float(valid_real.mean()) if not valid_real.empty else 0.0
+            render_pro_kpi_row([
+                {"label": "實際交易筆數", "value": len(trade_df), "delta": "", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "實際勝率", "value": f"{real_win:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "平均實際報酬%", "value": f"{real_avg:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            ])
+            st.dataframe(trade_df[[c for c in ["股票代號", "股票名稱", "推薦模式", "推薦價格", "實際買進價", "實際賣出價", "實際報酬%", "目前狀態", "備註"] if c in trade_df.columns]], use_container_width=True, hide_index=True)
+            st.dataframe(ana_tables["trade_mode"], use_container_width=True, hide_index=True)
 
-    render_pro_section("推薦紀錄總表")
-    editable_df = show_df[[
-        "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-        "推薦價格", "停損價", "賣出目標1", "賣出目標2", "目前狀態", "是否已實際買進",
-        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
-        "是否達停損", "是否達目標1", "是否達目標2", "持有天數", "模式績效標籤", "備註",
-        "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間",
-        "推薦標籤", "推薦理由摘要",
-    ]].copy()
-
-    edited = st.data_editor(
-        editable_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        key=_k("record_editor"),
-        column_config={
-            "record_id": st.column_config.TextColumn("record_id", disabled=True, width="medium"),
-            "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
-            "股票名稱": st.column_config.TextColumn("股票名稱", disabled=True),
-            "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
-            "推薦日期": st.column_config.TextColumn("推薦日期", disabled=True),
-            "推薦時間": st.column_config.TextColumn("推薦時間", disabled=True),
-            "目前狀態": st.column_config.SelectboxColumn("目前狀態", options=STATUS_OPTIONS),
-            "是否已實際買進": st.column_config.CheckboxColumn("是否已實際買進"),
-            "是否達停損": st.column_config.CheckboxColumn("是否達停損"),
-            "是否達目標1": st.column_config.CheckboxColumn("是否達目標1"),
-            "是否達目標2": st.column_config.CheckboxColumn("是否達目標2"),
-            "模式績效標籤": st.column_config.SelectboxColumn("模式績效標籤", options=PERF_LABEL_OPTIONS),
-            "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large", disabled=True),
-            "備註": st.column_config.TextColumn("備註", width="large"),
-        },
-    )
-
-    s1, s2 = st.columns([2, 2])
-    with s1:
-        if st.button("儲存表格修改", use_container_width=True, type="primary"):
-            work = df.copy()
-            edit_map = {str(r["record_id"]): dict(r) for _, r in edited.iterrows()}
-            for idx in work.index:
-                rec_id = _safe_str(work.at[idx, "record_id"])
-                if rec_id not in edit_map:
-                    continue
-                src = edit_map[rec_id]
-                for c in [
-                    "市場別", "類別", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價",
-                    "是否達停損", "是否達目標1", "是否達目標2", "模式績效標籤", "備註"
-                ]:
-                    work.at[idx, c] = src.get(c)
-                recalc = _recalc_row(work.loc[idx].to_dict())
-                for k2, v2 in recalc.items():
-                    if k2 in work.columns:
-                        work.at[idx, k2] = v2
-            _save_state_df(work)
-            ok = _save_records_dual(work)
-            if ok:
-                st.rerun()
-    with s2:
-        mode_df = _build_mode_stats(show_df)
-        cat_df = _build_category_stats(show_df)
-        excel_bytes = _build_export_bytes(show_df, mode_df, cat_df)
+    with tabs[4]:
+        render_pro_section("Excel 匯出")
+        excel_bytes = _build_export_bytes(live_df, ana_tables)
         st.download_button(
-            label="匯出推薦紀錄 Excel",
+            "📥 下載 Excel（推薦紀錄 / 模式分析 / 類別分析 / 等級分析 / 實際交易分析 / 最強模式 / 最強類別）",
             data=excel_bytes,
             file_name=f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
 
-    tabs = st.tabs(["完整紀錄", "模式統計", "類別統計", "欄位對齊說明"])
-
-    with tabs[0]:
-        st.dataframe(_format_df(show_df), use_container_width=True, hide_index=True)
-
-    with tabs[1]:
-        mode_df = _build_mode_stats(show_df)
-        if mode_df.empty:
-            st.info("目前沒有可統計資料。")
-        else:
-            mode_show = mode_df.copy()
-            for c in ["平均報酬", "勝率"]:
-                mode_show[c] = mode_show[c].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "")
-            st.dataframe(mode_show, use_container_width=True, hide_index=True)
-
-    with tabs[2]:
-        cat_df = _build_category_stats(show_df)
-        if cat_df.empty:
-            st.info("目前沒有可統計資料。")
-        else:
-            cat_show = cat_df.copy()
-            for c in ["平均報酬", "勝率"]:
-                cat_show[c] = cat_show[c].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "")
-            st.dataframe(cat_show, use_container_width=True, hide_index=True)
-
-    with tabs[3]:
+    with tabs[5]:
         render_pro_info_card(
-            "7 / 8 欄位對齊",
+            "同步 / 欄位完整性",
             [
-                ("主鍵", "record_id", "已對齊"),
-                ("推薦時間資訊", "推薦日期 / 推薦時間", "已對齊"),
-                ("價格欄位", "推薦價格 / 停損價 / 賣出目標1 / 賣出目標2", "已對齊"),
-                ("評分欄位", "技術結構分數 / 起漲前兆分數 / 交易可行分數 / 類股熱度分數", "已對齊"),
-                ("相對強弱", "同類股領先幅度 / 是否領先同類股", "已對齊"),
-                ("描述欄位", "推薦標籤 / 推薦理由摘要", "已對齊"),
-                ("績效預留", "3/5/10/20 日績效%", "已補上"),
-                ("手動維護", "已買進 / 已賣出 / 停損 / 達標 / 備註 / 績效標籤", "可直接編輯"),
+                ("主要來源", "godpick_records.json + Firestore", "雙寫"),
+                ("刪除 / 清空", "支援", "總表管理內"),
+                ("批次更新", "支援表格編輯 / 刪除 / 清空 / 更新", "已保留"),
+                ("前推績效", "3/5/10/20 日績效%", "已整合"),
+                ("模式績效標籤", "依模式歷史表現自動標記", "已整合"),
+                ("最強模式 / 類別", "依20日績效 + 勝率綜合排序", "已整合"),
+                ("Excel 匯出", "推薦紀錄 / 分析表 / 最強榜", "已整合"),
             ],
-            chips=["完整可貼上", "欄位對齊", "可編輯", "雙寫同步", "績效回填"],
+            chips=["完整版", "不可缺功能", "雙寫同步", "前推績效", "最強模式", "最強類別"],
         )
 
 
