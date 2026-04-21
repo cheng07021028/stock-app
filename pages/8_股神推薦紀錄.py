@@ -1310,31 +1310,28 @@ with tabs[3]:
 # =========================================================
 # Tab 5
 # =========================================================
+# =========================================================
+# Tab 5
+# =========================================================
 with tabs[4]:
     safe_render_pro_section("Excel 匯出", "直接用目前資料匯出，不重算")
 
     @st.cache_data(show_spinner=False, ttl=60)
     def build_excel_bytes(df_json: str) -> bytes:
+        from openpyxl.utils import get_column_letter
+
         local_df = ensure_core_columns(pd.DataFrame(json.loads(df_json)))
         tables = build_analysis_tables(df_json)
 
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+
+        # 改用 openpyxl，避免 xlsxwriter 未安裝錯誤
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
             local_df.to_excel(writer, sheet_name="推薦紀錄", index=False)
             tables["mode"].to_excel(writer, sheet_name="模式分析", index=False)
             tables["category"].to_excel(writer, sheet_name="類別分析", index=False)
             tables["grade"].to_excel(writer, sheet_name="等級分析", index=False)
             tables["trade_mode"].to_excel(writer, sheet_name="實際交易分析", index=False)
-
-            workbook = writer.book
-            header_fmt = workbook.add_format({
-                "bold": True,
-                "bg_color": "#1F4E78",
-                "font_color": "white",
-                "align": "center",
-                "valign": "vcenter",
-                "border": 1,
-            })
 
             for sheet_name, sheet_df in {
                 "推薦紀錄": local_df,
@@ -1343,10 +1340,13 @@ with tabs[4]:
                 "等級分析": tables["grade"],
                 "實際交易分析": tables["trade_mode"],
             }.items():
-                ws = writer.sheets[sheet_name]
-                for col_num, col_name in enumerate(sheet_df.columns):
-                    ws.write(0, col_num, col_name, header_fmt)
-                    ws.set_column(col_num, col_num, max(12, min(36, len(str(col_name)) + 6)))
+                ws = writer.book[sheet_name]
+
+                for col_idx, col_name in enumerate(sheet_df.columns, start=1):
+                    values = [str(col_name)]
+                    values.extend(sheet_df[col_name].fillna("").astype(str).head(300).tolist())
+                    max_len = min(max(len(v) for v in values) + 2, 36)
+                    ws.column_dimensions[get_column_letter(col_idx)].width = max(12, max_len)
 
         output.seek(0)
         return output.getvalue()
@@ -1360,7 +1360,6 @@ with tabs[4]:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
 
 # =========================================================
 # Tab 6
