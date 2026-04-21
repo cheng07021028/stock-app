@@ -14,7 +14,7 @@ from utils import (
     format_number,
 )
 
-PAGE_TITLE = "儀表板"
+PAGE_TITLE = "1_儀表板"
 PFX = "dash_"
 
 
