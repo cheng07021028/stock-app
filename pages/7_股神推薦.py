@@ -1148,7 +1148,7 @@ tabs = st.tabs([
 # Tab 1 推薦總表
 # =========================================================
 with tabs[0]:
-    safe_render_pro_section("推薦總表", "勾選後可直接寫入 8 頁或加入自選股。")
+    safe_render_pro_section("推薦總表", "勾選後可直接寫入 推薦紀錄或加入自選股。")
 
     view_df = rec_df.copy()
     view_df.insert(0, "勾選", False)
@@ -1243,7 +1243,7 @@ with tabs[2]:
 # Tab 4 勾選動作
 # =========================================================
 with tabs[3]:
-    safe_render_pro_section("勾選動作", "可直接寫入 8 頁、雲端同步、加入自選股。")
+    safe_render_pro_section("勾選動作", "可直接寫入 推薦紀錄、雲端同步、加入自選股。")
 
     action_cols = st.columns([1.2, 1.2, 1.4, 2.2])
 
@@ -1254,20 +1254,20 @@ with tabs[3]:
         st.metric("已勾選筆數", len(st.session_state["godpick_selected_to_records"]))
 
     with action_cols[2]:
-        direct_sync_records = st.toggle("寫入 8 頁時同步雲端", value=True)
+        direct_sync_records = st.toggle("寫入 推薦紀錄時同步雲端", value=True)
 
     with action_cols[3]:
-        st.caption("建議流程：勾選 → 寫入 8 頁 / 加入自選股 → 到 8 頁追蹤績效")
+        st.caption("建議流程：勾選 → 寫入 推薦紀錄 / 加入自選股 → 到 推薦紀錄追蹤績效")
 
     btn_cols2 = st.columns([1.3, 1.3, 1.3, 2.1])
 
     with btn_cols2[0]:
-        if st.button("📥 寫入 8 頁", use_container_width=True):
+        if st.button("📥 寫入 推薦紀錄", use_container_width=True):
             selected = ensure_record_columns(st.session_state["godpick_selected_to_records"].copy())
             if selected.empty:
                 st.warning("請先勾選推薦股票")
             else:
-                # session_state 交給 8 頁接收
+                # session_state 交給 推薦紀錄接收
                 st.session_state["godpick_records_pending_import"] = selected.copy()
 
                 if direct_sync_records:
@@ -1285,11 +1285,11 @@ with tabs[3]:
                     merged = merged.drop_duplicates("_k", keep="last").drop(columns=["_k"], errors="ignore")
                     result = save_godpick_records(merged)
                     if result["ok"]:
-                        st.success("已寫入 8 頁待匯入資料，且已同步 GitHub / Firestore")
+                        st.success("已寫入 推薦紀錄待匯入資料，且已同步 GitHub / Firestore")
                     else:
-                        st.warning("已寫入 8 頁待匯入資料，但雲端同步失敗")
+                        st.warning("已寫入 推薦紀錄待匯入資料，但雲端同步失敗")
                 else:
-                    st.success("已寫入 8 頁待匯入資料，切到 8 頁按『匯入 7 頁推薦結果』即可")
+                    st.success("已寫入 推薦紀錄待匯入資料，切到 推薦紀錄按『匯入 推薦 頁推薦結果』即可")
 
     with btn_cols2[1]:
         if st.button("⭐ 加入自選股", use_container_width=True):
@@ -1311,18 +1311,18 @@ with tabs[3]:
                     st.warning("已更新本地結構，但雲端同步失敗")
 
     with btn_cols2[2]:
-        if st.button("🧾 寫入 8 頁且清空勾選", use_container_width=True):
+        if st.button("🧾 寫入 推薦紀錄且清空勾選", use_container_width=True):
             selected = ensure_record_columns(st.session_state["godpick_selected_to_records"].copy())
             if selected.empty:
                 st.warning("請先勾選推薦股票")
             else:
                 st.session_state["godpick_records_pending_import"] = selected.copy()
                 st.session_state["godpick_selected_to_records"] = pd.DataFrame(columns=RECORD_COLUMNS)
-                st.success("已寫入 8 頁待匯入資料，並清空本頁暫存勾選")
+                st.success("已寫入 推薦紀錄待匯入資料，並清空本頁暫存勾選")
 
     with btn_cols2[3]:
         st.code(
-            "8 頁接收 key：\n"
+            "推薦紀錄接收 key：\n"
             "st.session_state['godpick_selected_to_records']\n"
             "st.session_state['godpick_records_pending_import']"
         )
