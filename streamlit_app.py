@@ -67,39 +67,148 @@ def _fmt_num(v: Any, digits: int = 2) -> str:
 
 
 # =========================================================
+# 快取資料處理
+# =========================================================
+@st.cache_data(ttl=60, show_spinner=False)
+def _build_watchlist_payload(raw_items: tuple) -> dict[str, list[dict[str, str]]]:
+    result: dict[str, list[dict[str, str]]] = {}
+
+    for group_name, items in raw_items:
+        g = _safe_str(group_name) or "未分組"
+        rows = []
+
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+
+            code = _safe_str(item[0])
+            name = _safe_str(item[1]) or code
+            market = _safe_str(item[2]) or "上市"
+
+            if code:
+                rows.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "market": market,
+                        "label": f"{code} {name}",
+                    }
+                )
+
+        result[g] = rows
+
+    return result
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _build_overview_df_cached(watchlist_items: tuple) -> pd.DataFrame:
+    rows = []
+    for group_name, items in watchlist_items:
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 4:
+                continue
+            rows.append(
+                {
+                    "群組": _safe_str(group_name),
+                    "股票代號": _safe_str(item[0]),
+                    "股票名稱": _safe_str(item[1]),
+                    "市場別": _safe_str(item[2]) or "上市",
+                    "股票": _safe_str(item[3]),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "股票"])
+
+    return pd.DataFrame(rows).sort_values(["群組", "股票代號"]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _build_group_summary_df_cached(watchlist_items: tuple) -> pd.DataFrame:
+    rows = []
+
+    for group_name, items in watchlist_items:
+        markets = []
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+            market = _safe_str(item[2]) or "上市"
+            markets.append(market)
+
+        rows.append(
+            {
+                "群組": _safe_str(group_name),
+                "股票數": len(items),
+                "市場別組成": " / ".join(sorted(set(markets))) if markets else "—",
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["群組", "股票數", "市場別組成"])
+
+    return pd.DataFrame(rows).sort_values(["股票數", "群組"], ascending=[False, True]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _build_search_rows_cached(watchlist_items: tuple) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+
+    for group_name, items in watchlist_items:
+        g = _safe_str(group_name)
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 4:
+                continue
+
+            code = _safe_str(item[0])
+            name = _safe_str(item[1])
+            market = _safe_str(item[2])
+            label = _safe_str(item[3])
+
+            rows.append(
+                {
+                    "group": g,
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                    "label": label,
+                    "blob": f"{g} {code} {name} {label}".lower(),
+                }
+            )
+
+    return rows
+
+
+# =========================================================
 # 自選股資料
 # =========================================================
 def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
     raw = get_normalized_watchlist()
-    result: dict[str, list[dict[str, str]]] = {}
+    packed_items = []
 
     if isinstance(raw, dict):
         for group_name, items in raw.items():
-            g = _safe_str(group_name) or "未分組"
-            result[g] = []
-
+            temp = []
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    code = _safe_str(item.get("code"))
-                    name = _safe_str(item.get("name")) or code
-                    market = _safe_str(item.get("market")) or "上市"
-                    if code:
-                        result[g].append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "market": market,
-                                "label": f"{code} {name}",
-                            }
+                    temp.append(
+                        (
+                            _safe_str(item.get("code")),
+                            _safe_str(item.get("name")),
+                            _safe_str(item.get("market")),
                         )
+                    )
+            packed_items.append((group_name, tuple(temp)))
+
+    result = _build_watchlist_payload(tuple(packed_items))
 
     if not result:
         all_df = get_all_code_name_map("")
         if isinstance(all_df, pd.DataFrame) and not all_df.empty:
             rows = []
-            for _, row in all_df.head(20).iterrows():
+            sample_df = all_df.head(20)
+            for _, row in sample_df.iterrows():
                 code = _safe_str(row.get("code"))
                 name = _safe_str(row.get("name")) or code
                 market = _safe_str(row.get("market")) or "上市"
@@ -118,56 +227,33 @@ def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
     return result
 
 
-def _build_overview_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
-    rows = []
+def _pack_watchlist_for_cache(watchlist: dict[str, list[dict[str, str]]]) -> tuple:
+    packed = []
     for group_name, items in watchlist.items():
+        temp = []
         for item in items:
-            rows.append(
-                {
-                    "群組": group_name,
-                    "股票代號": _safe_str(item.get("code")),
-                    "股票名稱": _safe_str(item.get("name")),
-                    "市場別": _safe_str(item.get("market")) or "上市",
-                    "股票": _safe_str(item.get("label")),
-                }
+            temp.append(
+                (
+                    _safe_str(item.get("code")),
+                    _safe_str(item.get("name")),
+                    _safe_str(item.get("market")),
+                    _safe_str(item.get("label")),
+                )
             )
-    if not rows:
-        return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "股票"])
-    return pd.DataFrame(rows).sort_values(["群組", "股票代號"]).reset_index(drop=True)
+        packed.append((group_name, tuple(temp)))
+    return tuple(packed)
+
+
+def _build_overview_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
+    return _build_overview_df_cached(_pack_watchlist_for_cache(watchlist))
 
 
 def _build_group_summary_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
-    rows = []
-    for group_name, items in watchlist.items():
-        rows.append(
-            {
-                "群組": group_name,
-                "股票數": len(items),
-                "市場別組成": " / ".join(
-                    sorted(set([_safe_str(x.get("market")) or "上市" for x in items]))
-                ) if items else "—",
-            }
-        )
-    if not rows:
-        return pd.DataFrame(columns=["群組", "股票數", "市場別組成"])
-    return pd.DataFrame(rows).sort_values(["股票數", "群組"], ascending=[False, True]).reset_index(drop=True)
+    return _build_group_summary_df_cached(_pack_watchlist_for_cache(watchlist))
 
 
 def _build_search_rows(watchlist: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for group_name, items in watchlist.items():
-        for item in items:
-            rows.append(
-                {
-                    "group": group_name,
-                    "code": _safe_str(item.get("code")),
-                    "name": _safe_str(item.get("name")),
-                    "market": _safe_str(item.get("market")),
-                    "label": _safe_str(item.get("label")),
-                    "blob": f"{group_name} {item.get('code','')} {item.get('name','')} {item.get('label','')}".lower(),
-                }
-            )
-    return rows
+    return _build_search_rows_cached(_pack_watchlist_for_cache(watchlist))
 
 
 def _find_search_target(keyword: str, rows: list[dict[str, str]]) -> dict[str, str] | None:
@@ -175,23 +261,25 @@ def _find_search_target(keyword: str, rows: list[dict[str, str]]) -> dict[str, s
     if not q:
         return None
 
-    for row in rows:
-        if q == row["code"].lower():
-            return row
-    for row in rows:
-        if q == row["name"].lower():
-            return row
-    for row in rows:
-        if q == row["label"].lower():
-            return row
+    exact_code = next((row for row in rows if q == row["code"].lower()), None)
+    if exact_code:
+        return exact_code
 
-    prefix_hits = [r for r in rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
-    if prefix_hits:
-        return prefix_hits[0]
+    exact_name = next((row for row in rows if q == row["name"].lower()), None)
+    if exact_name:
+        return exact_name
 
-    contain_hits = [r for r in rows if q in r["blob"]]
-    if contain_hits:
-        return contain_hits[0]
+    exact_label = next((row for row in rows if q == row["label"].lower()), None)
+    if exact_label:
+        return exact_label
+
+    prefix_hit = next((r for r in rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)), None)
+    if prefix_hit:
+        return prefix_hit
+
+    contain_hit = next((r for r in rows if q in r["blob"]), None)
+    if contain_hit:
+        return contain_hit
 
     return None
 
