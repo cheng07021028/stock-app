@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="8_股神推薦紀錄", page_icon="📒", layout="wide")
+st.set_page_config(page_title="股神推薦紀錄", page_icon="📒", layout="wide")
 
 
 # =========================================================
