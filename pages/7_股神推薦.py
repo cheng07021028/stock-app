@@ -405,8 +405,35 @@ def _infer_theme_category(code: Any = "", name: str = "", official_industry: Any
         return "其他_主題未映射"
     return "其他_官方未知"
 
-def _infer_category_from_record(name: str, raw_category: Any, official_industry: Any = "") -> str:
-    return _infer_theme_category(name, official_industry=official_industry or raw_category, raw_category=raw_category)
+def _infer_category_from_record(
+    name: Any = "",
+    raw_category: Any = "",
+    official_industry: Any = "",
+    code: Any = "",
+) -> str:
+    code = _normalize_code(code)
+    name = _safe_str(name)
+    raw_category = _canonical_category(raw_category)
+    official_industry = _normalize_official_industry(official_industry)
+
+    if code and code in BUILTIN_TOPIC_CODE_MAP:
+        return BUILTIN_TOPIC_CODE_MAP[code]
+
+    if raw_category and raw_category not in {"其他", "其他_官方未知", "其他_主題未映射"}:
+        return raw_category
+
+    theme = _infer_theme_category(
+        code=code,
+        name=name,
+        official_industry=official_industry,
+        raw_category=raw_category,
+    )
+    if theme:
+        return theme
+
+    if official_industry:
+        return "其他_主題未映射"
+    return "其他_官方未知"
 
 
 # =========================================================
@@ -1041,7 +1068,25 @@ def _load_stock_master_cache_from_repo() -> pd.DataFrame:
         df["code"] = df["code"].map(_normalize_code)
         df["name"] = df["name"].map(_safe_str)
         df["market"] = df["market"].map(_safe_str)
-        df["category"] = df.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category"), r.get("official_industry"), r.get("code")), axis=1)
+        df["official_industry"] = df["official_industry"].map(_normalize_official_industry)
+        df["theme_category"] = df.apply(
+            lambda r: _infer_theme_category(
+                code=r.get("code"),
+                name=r.get("name"),
+                official_industry=r.get("official_industry"),
+                raw_category=r.get("theme_category") or r.get("category"),
+            ),
+            axis=1,
+        )
+        df["category"] = df.apply(
+            lambda r: _infer_category_from_record(
+                name=r.get("name"),
+                raw_category=r.get("category") or r.get("theme_category"),
+                official_industry=r.get("official_industry"),
+                code=r.get("code"),
+            ),
+            axis=1,
+        )
         df = df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
         return df[[c for c in ["code", "name", "market", "official_industry", "theme_category", "category"] if c in df.columns]].copy()
     return pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "category"])
