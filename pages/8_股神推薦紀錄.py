@@ -325,6 +325,23 @@ def normalize_new_record(d: Dict[str, Any]) -> Dict[str, Any]:
 
     return x
 
+def safe_sort_df(df_in: pd.DataFrame, by_candidates, ascending=False):
+    df_out = df_in.copy()
+    if df_out is None or df_out.empty:
+        return df_out
+
+    valid_cols = [c for c in by_candidates if c in df_out.columns]
+    if not valid_cols:
+        return df_out
+
+    asc_list = ascending
+    if isinstance(ascending, list):
+        asc_list = ascending[:len(valid_cols)]
+        if len(asc_list) < len(valid_cols):
+            asc_list = asc_list + [ascending[-1]] * (len(valid_cols) - len(asc_list))
+
+    return df_out.sort_values(valid_cols, ascending=asc_list, na_position="last")
+
 
 # =========================================================
 # GitHub
@@ -453,7 +470,12 @@ def write_firestore_records(collection_name: str, records: List[Dict[str, Any]])
         for rec in records:
             rid = safe_str(rec.get("record_id"))
             if not rid:
-                rid = create_record_id(rec.get("股票代號", ""), rec.get("推薦日期", now_date()), rec.get("推薦時間", now_time()), rec.get("推薦模式", ""))
+                rid = create_record_id(
+                    rec.get("股票代號", ""),
+                    rec.get("推薦日期", now_date()),
+                    rec.get("推薦時間", now_time()),
+                    rec.get("推薦模式", "")
+                )
                 rec["record_id"] = rid
             new_ids.add(rid)
             batch.set(col_ref.document(rid), rec)
@@ -753,20 +775,25 @@ def refresh_from_source(force=True):
 
 
 # =========================================================
-# 先做快取計算，避免下方重複 groupby
+# 快取分析表
 # =========================================================
 df = ensure_core_columns(st.session_state["godpick_records_df"].copy())
 
 @st.cache_data(show_spinner=False, ttl=60)
 def build_analysis_tables(df_json: str):
     local_df = ensure_core_columns(pd.DataFrame(json.loads(df_json)))
+
+    empty_mode = pd.DataFrame(columns=["推薦模式", "筆數", "平均系統報酬", "系統勝率", "達目標1比率", "停損率", "平均推薦總分"])
+    empty_category = pd.DataFrame(columns=["類別", "筆數", "平均系統報酬", "系統勝率", "達目標1比率", "停損率"])
+    empty_grade = pd.DataFrame(columns=["推薦等級", "筆數", "平均系統報酬", "系統勝率", "達目標1比率", "停損率"])
+    empty_trade_mode = pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"])
+
     if local_df.empty:
-        empty = pd.DataFrame()
         return {
-            "mode": empty,
-            "category": empty,
-            "grade": empty,
-            "trade_mode": empty,
+            "mode": empty_mode,
+            "category": empty_category,
+            "grade": empty_grade,
+            "trade_mode": empty_trade_mode,
         }
 
     mode_df = local_df.groupby("推薦模式", dropna=False).agg(
@@ -796,7 +823,7 @@ def build_analysis_tables(df_json: str):
 
     trade_df = local_df[local_df["是否已實際買進"] == True].copy()
     if trade_df.empty:
-        trade_mode_df = pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"])
+        trade_mode_df = empty_trade_mode
     else:
         trade_mode_df = trade_df.groupby("推薦模式", dropna=False).agg(
             筆數=("record_id", "count"),
@@ -1203,11 +1230,23 @@ with tabs[2]:
     sub_tabs = st.tabs(["模式分析", "類別分析", "等級分析", "明細表"])
 
     with sub_tabs[0]:
-        st.dataframe(ana_tables["mode"].sort_values(["平均系統報酬", "系統勝率"], ascending=[False, False], na_position="last"), use_container_width=True, hide_index=True)
+        st.dataframe(
+            safe_sort_df(ana_tables["mode"], ["平均系統報酬", "系統勝率", "勝率"], ascending=[False, False, False]),
+            use_container_width=True,
+            hide_index=True,
+        )
     with sub_tabs[1]:
-        st.dataframe(ana_tables["category"].sort_values(["平均系統報酬", "系統勝率"], ascending=[False, False], na_position="last"), use_container_width=True, hide_index=True)
+        st.dataframe(
+            safe_sort_df(ana_tables["category"], ["平均系統報酬", "系統勝率", "勝率"], ascending=[False, False, False]),
+            use_container_width=True,
+            hide_index=True,
+        )
     with sub_tabs[2]:
-        st.dataframe(ana_tables["grade"].sort_values(["平均系統報酬", "系統勝率"], ascending=[False, False], na_position="last"), use_container_width=True, hide_index=True)
+        st.dataframe(
+            safe_sort_df(ana_tables["grade"], ["平均系統報酬", "系統勝率", "勝率"], ascending=[False, False, False]),
+            use_container_width=True,
+            hide_index=True,
+        )
     with sub_tabs[3]:
         st.dataframe(
             df[[
@@ -1250,7 +1289,11 @@ with tabs[3]:
         sub_tabs = st.tabs(["模式績效", "已買進明細"])
 
         with sub_tabs[0]:
-            st.dataframe(ana_tables["trade_mode"].sort_values(["平均實際報酬", "實際勝率"], ascending=[False, False], na_position="last"), use_container_width=True, hide_index=True)
+            st.dataframe(
+                safe_sort_df(ana_tables["trade_mode"], ["平均實際報酬", "實際勝率"], ascending=[False, False]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         with sub_tabs[1]:
             st.dataframe(
