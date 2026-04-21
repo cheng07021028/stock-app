@@ -42,19 +42,19 @@ def _fallback_render_pro_kpi_row(items, key: str = None):
         with c:
             st.metric(item.get("label", ""), item.get("value", ""), item.get("delta", None))
 
-def _fallback_format_number(x):
+def _fallback_format_number(x, d=2):
     try:
         if x is None or (isinstance(x, float) and math.isnan(x)):
             return "-"
         if isinstance(x, (int, np.integer)):
             return f"{int(x):,}"
         if isinstance(x, (float, np.floating)):
-            return f"{float(x):,.2f}"
+            return f"{float(x):,.{d}f}"
         return str(x)
     except Exception:
         return str(x)
 
-def _fallback_get_history_data(code: str, start_date=None, end_date=None):
+def _fallback_get_history_data(code: str = "", stock_no: str = "", start_date=None, end_date=None, **kwargs):
     return pd.DataFrame()
 
 def _fallback_get_all_code_name_map():
@@ -261,37 +261,56 @@ def to_bool(v):
     return s in {"true", "1", "yes", "y", "是"}
 
 def create_record_id(code: str, rec_date: str, rec_time: str, mode: str) -> str:
-    raw = f"{safe_str(code)}|{safe_str(rec_date)}|{safe_str(rec_time)}|{safe_str(mode)}|{uuid.uuid4().hex[:8]}"
+    raw = f"{safe_str(code)}|{safe_str(rec_date)}|{safe_str(rec_time)}|{safe_str(mode)}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+def business_key_of_df(df: pd.DataFrame) -> pd.Series:
+    return (
+        df["股票代號"].fillna("").astype(str) + "|"
+        + df["推薦日期"].fillna("").astype(str) + "|"
+        + df["推薦時間"].fillna("").astype(str) + "|"
+        + df["推薦模式"].fillna("").astype(str)
+    )
 
 def ensure_core_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         df = pd.DataFrame(columns=CORE_COLUMNS)
 
+    x = df.copy()
+
+    if "record_id" not in x.columns and "rec_id" in x.columns:
+        x["record_id"] = x["rec_id"]
+
     for col in CORE_COLUMNS:
-        if col not in df.columns:
-            df[col] = np.nan
+        if col not in x.columns:
+            x[col] = np.nan
 
     for c in NUMERIC_COLUMNS:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+        x[c] = pd.to_numeric(x[c], errors="coerce")
 
     for c in BOOL_COLUMNS:
-        df[c] = df[c].fillna(False).map(to_bool)
+        x[c] = x[c].fillna(False).map(to_bool)
 
-    if "目前狀態" in df.columns:
-        df["目前狀態"] = df["目前狀態"].fillna("觀察").replace("", "觀察")
+    x["目前狀態"] = x["目前狀態"].fillna("觀察").replace("", "觀察")
+    x["推薦日期"] = x["推薦日期"].fillna("").astype(str).replace("", now_date())
+    x["推薦時間"] = x["推薦時間"].fillna("").astype(str).replace("", now_time())
+    x["建立時間"] = x["建立時間"].fillna("").astype(str).replace("", now_ts())
+    x["更新時間"] = x["更新時間"].fillna("").astype(str).replace("", now_ts())
+    x["最新更新時間"] = x["最新更新時間"].fillna("").astype(str)
+    x["模式績效標籤"] = x["模式績效標籤"].fillna("").astype(str)
+    x["備註"] = x["備註"].fillna("").astype(str)
 
-    need_id_mask = df["record_id"].isna() | (df["record_id"].astype(str).str.strip() == "")
+    need_id_mask = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
     if need_id_mask.any():
-        for idx in df[need_id_mask].index:
-            df.at[idx, "record_id"] = create_record_id(
-                safe_str(df.at[idx, "股票代號"]),
-                safe_str(df.at[idx, "推薦日期"]) or now_date(),
-                safe_str(df.at[idx, "推薦時間"]) or now_time(),
-                safe_str(df.at[idx, "推薦模式"]),
+        for idx in x[need_id_mask].index:
+            x.at[idx, "record_id"] = create_record_id(
+                safe_str(x.at[idx, "股票代號"]),
+                safe_str(x.at[idx, "推薦日期"]) or now_date(),
+                safe_str(x.at[idx, "推薦時間"]) or now_time(),
+                safe_str(x.at[idx, "推薦模式"]),
             )
 
-    return df[CORE_COLUMNS].copy()
+    return x[CORE_COLUMNS].copy()
 
 def records_to_jsonable(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return ensure_core_columns(df.copy()).replace({np.nan: None}).to_dict(orient="records")
@@ -299,6 +318,9 @@ def records_to_jsonable(df: pd.DataFrame) -> List[Dict[str, Any]]:
 def normalize_new_record(d: Dict[str, Any]) -> Dict[str, Any]:
     x = {c: None for c in CORE_COLUMNS}
     x.update(d or {})
+
+    if not safe_str(x.get("record_id")) and safe_str(x.get("rec_id")):
+        x["record_id"] = safe_str(x.get("rec_id"))
 
     x["股票代號"] = safe_str(x.get("股票代號"))
     x["股票名稱"] = safe_str(x.get("股票名稱"))
@@ -308,11 +330,15 @@ def normalize_new_record(d: Dict[str, Any]) -> Dict[str, Any]:
     x["推薦等級"] = safe_str(x.get("推薦等級"))
     x["推薦標籤"] = safe_str(x.get("推薦標籤"))
     x["推薦理由摘要"] = safe_str(x.get("推薦理由摘要"))
+
     x["推薦日期"] = safe_str(x.get("推薦日期")) or now_date()
     x["推薦時間"] = safe_str(x.get("推薦時間")) or now_time()
     x["建立時間"] = safe_str(x.get("建立時間")) or now_ts()
     x["更新時間"] = now_ts()
     x["目前狀態"] = safe_str(x.get("目前狀態")) or "觀察"
+    x["最新更新時間"] = safe_str(x.get("最新更新時間"))
+    x["模式績效標籤"] = safe_str(x.get("模式績效標籤"))
+    x["備註"] = safe_str(x.get("備註"))
 
     for c in BOOL_COLUMNS:
         x[c] = to_bool(x.get(c))
@@ -321,9 +347,14 @@ def normalize_new_record(d: Dict[str, Any]) -> Dict[str, Any]:
         x[c] = to_float(x.get(c))
 
     if not safe_str(x.get("record_id")):
-        x["record_id"] = create_record_id(x["股票代號"], x["推薦日期"], x["推薦時間"], x["推薦模式"])
+        x["record_id"] = create_record_id(
+            x["股票代號"],
+            x["推薦日期"],
+            x["推薦時間"],
+            x["推薦模式"],
+        )
 
-    return x
+    return ensure_core_columns(pd.DataFrame([x])).iloc[0].to_dict()
 
 def safe_sort_df(df_in: pd.DataFrame, by_candidates, ascending=False):
     df_out = df_in.copy()
@@ -359,57 +390,60 @@ def read_github_json(path: str) -> List[Dict[str, Any]]:
     if not github_enabled():
         return []
 
-    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}"
-    r = requests.get(url, headers=github_api_headers(), params={"ref": GITHUB_REPO_BRANCH}, timeout=30)
-    if r.status_code == 404:
-        return []
-    r.raise_for_status()
-
-    obj = r.json()
-    content_b64 = obj.get("content", "")
-    if not content_b64:
-        return []
-
-    decoded = base64.b64decode(content_b64).decode("utf-8")
     try:
-        data = json.loads(decoded)
-    except Exception:
-        data = []
+        url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}"
+        r = requests.get(url, headers=github_api_headers(), params={"ref": GITHUB_REPO_BRANCH}, timeout=30)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
 
-    if isinstance(data, dict) and "records" in data:
-        data = data["records"]
-    if not isinstance(data, list):
-        data = []
-    return data
+        obj = r.json()
+        content_b64 = obj.get("content", "")
+        if not content_b64:
+            return []
+
+        decoded = base64.b64decode(content_b64).decode("utf-8")
+        data = json.loads(decoded)
+
+        if isinstance(data, dict) and "records" in data:
+            data = data["records"]
+        if not isinstance(data, list):
+            data = []
+        return data
+    except Exception:
+        return []
 
 def write_github_json(path: str, records: List[Dict[str, Any]], commit_message: str = "") -> Dict[str, Any]:
     if not github_enabled():
         return {"ok": False, "msg": "GitHub 未設定完整"}
 
-    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}"
-    r = requests.get(url, headers=github_api_headers(), params={"ref": GITHUB_REPO_BRANCH}, timeout=30)
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{path}"
+        r = requests.get(url, headers=github_api_headers(), params={"ref": GITHUB_REPO_BRANCH}, timeout=30)
 
-    sha = None
-    if r.status_code == 200:
-        sha = r.json().get("sha")
-    elif r.status_code != 404:
-        r.raise_for_status()
+        sha = None
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+        elif r.status_code != 404:
+            r.raise_for_status()
 
-    raw = json.dumps(records, ensure_ascii=False, indent=2)
-    b64 = base64.b64encode(raw.encode("utf-8")).decode("utf-8")
+        raw = json.dumps(records, ensure_ascii=False, indent=2)
+        b64 = base64.b64encode(raw.encode("utf-8")).decode("utf-8")
 
-    payload = {
-        "message": commit_message or f"update {path} @ {now_ts()}",
-        "content": b64,
-        "branch": GITHUB_REPO_BRANCH,
-    }
-    if sha:
-        payload["sha"] = sha
+        payload = {
+            "message": commit_message or f"update {path} @ {now_ts()}",
+            "content": b64,
+            "branch": GITHUB_REPO_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
 
-    put_r = requests.put(url, headers=github_api_headers(), json=payload, timeout=30)
-    if put_r.status_code not in (200, 201):
-        return {"ok": False, "msg": f"GitHub 寫入失敗：{put_r.status_code}"}
-    return {"ok": True, "msg": "GitHub 寫入成功"}
+        put_r = requests.put(url, headers=github_api_headers(), json=payload, timeout=30)
+        if put_r.status_code not in (200, 201):
+            return {"ok": False, "msg": f"GitHub 寫入失敗：{put_r.status_code}"}
+        return {"ok": True, "msg": "GitHub 寫入成功"}
+    except Exception as e:
+        return {"ok": False, "msg": f"GitHub 寫入失敗：{e}"}
 
 
 # =========================================================
@@ -508,10 +542,11 @@ def merge_sources_by_latest(github_rows: List[Dict[str, Any]], firestore_rows: L
 
     df = ensure_core_columns(pd.DataFrame(rows))
     temp = df.copy()
+    temp["_biz_key"] = business_key_of_df(temp)
     temp["_upd"] = pd.to_datetime(temp["更新時間"], errors="coerce")
-    temp = temp.sort_values(["record_id", "_upd"], ascending=[True, False], na_position="last")
-    temp = temp.drop_duplicates(subset=["record_id"], keep="first")
-    return ensure_core_columns(temp.drop(columns=["_upd"], errors="ignore"))
+    temp = temp.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
+    temp = temp.drop_duplicates(subset=["_biz_key"], keep="first")
+    return ensure_core_columns(temp.drop(columns=["_biz_key", "_upd"], errors="ignore"))
 
 @st.cache_data(show_spinner=False, ttl=60)
 def load_all_records_cached(cache_buster: int = 0) -> pd.DataFrame:
@@ -527,6 +562,13 @@ def load_records(force_refresh: bool = False) -> pd.DataFrame:
 def save_records(df: pd.DataFrame, commit_message: str = "") -> Dict[str, Any]:
     df2 = ensure_core_columns(df.copy())
     df2["更新時間"] = now_ts()
+
+    df2["_biz_key"] = business_key_of_df(df2)
+    df2["_upd"] = pd.to_datetime(df2["更新時間"], errors="coerce")
+    df2 = df2.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
+    df2 = df2.drop_duplicates(subset=["_biz_key"], keep="first")
+    df2 = ensure_core_columns(df2.drop(columns=["_biz_key", "_upd"], errors="ignore"))
+
     records = records_to_jsonable(df2)
 
     gh_result = {"ok": False, "msg": "GitHub 略過"}
@@ -560,80 +602,65 @@ def convert_page7_df_to_records(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return ensure_core_columns(pd.DataFrame())
 
-    mapping = {
-        "股票代號": "股票代號",
-        "股票名稱": "股票名稱",
-        "市場別": "市場別",
-        "類別": "類別",
-        "推薦模式": "推薦模式",
-        "推薦等級": "推薦等級",
-        "推薦總分": "推薦總分",
-        "技術結構分數": "技術結構分數",
-        "起漲前兆分數": "起漲前兆分數",
-        "交易可行分數": "交易可行分數",
-        "類股熱度分數": "類股熱度分數",
-        "同類股領先幅度": "同類股領先幅度",
-        "是否領先同類股": "是否領先同類股",
-        "推薦標籤": "推薦標籤",
-        "推薦理由摘要": "推薦理由摘要",
-        "推薦價格": "推薦價格",
-        "停損價": "停損價",
-        "賣出目標1": "賣出目標1",
-        "賣出目標2": "賣出目標2",
-    }
+    x = df.copy()
 
-    x = pd.DataFrame()
-    for src, dst in mapping.items():
-        x[dst] = df[src] if src in df.columns else np.nan
+    if "record_id" not in x.columns and "rec_id" in x.columns:
+        x["record_id"] = x["rec_id"]
 
-    x["推薦日期"] = now_date()
-    x["推薦時間"] = now_time()
-    x["建立時間"] = now_ts()
+    for c in CORE_COLUMNS:
+        if c not in x.columns:
+            x[c] = np.nan
+
+    x["推薦日期"] = x["推薦日期"].fillna("").astype(str).replace("", now_date())
+    x["推薦時間"] = x["推薦時間"].fillna("").astype(str).replace("", now_time())
+    x["建立時間"] = x["建立時間"].fillna("").astype(str).replace("", now_ts())
     x["更新時間"] = now_ts()
-    x["目前狀態"] = "觀察"
-    x["是否已實際買進"] = False
-    x["實際買進價"] = np.nan
-    x["實際賣出價"] = np.nan
-    x["實際報酬%"] = np.nan
-    x["最新價"] = np.nan
-    x["最新更新時間"] = ""
-    x["損益金額"] = np.nan
-    x["損益幅%"] = np.nan
-    x["是否達停損"] = False
-    x["是否達目標1"] = False
-    x["是否達目標2"] = False
-    x["持有天數"] = np.nan
-    x["模式績效標籤"] = ""
-    x["備註"] = ""
+    x["目前狀態"] = x["目前狀態"].fillna("觀察").replace("", "觀察")
+
+    if "是否已實際買進" in x.columns:
+        x["是否已實際買進"] = x["是否已實際買進"].map(to_bool)
+    else:
+        x["是否已實際買進"] = False
+
+    for c in ["是否達停損", "是否達目標1", "是否達目標2", "是否領先同類股"]:
+        if c in x.columns:
+            x[c] = x[c].map(to_bool)
+        else:
+            x[c] = False
+
+    for c in NUMERIC_COLUMNS:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    need_id = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
+    if need_id.any():
+        for idx in x[need_id].index:
+            x.at[idx, "record_id"] = create_record_id(
+                safe_str(x.at[idx, "股票代號"]),
+                safe_str(x.at[idx, "推薦日期"]),
+                safe_str(x.at[idx, "推薦時間"]),
+                safe_str(x.at[idx, "推薦模式"]),
+            )
 
     x = ensure_core_columns(x)
-    x["record_id"] = [
-        create_record_id(
-            safe_str(r["股票代號"]),
-            safe_str(r["推薦日期"]),
-            safe_str(r["推薦時間"]),
-            safe_str(r["推薦模式"]),
-        )
-        for _, r in x.iterrows()
-    ]
+    x = x.apply(calc_actual_trade_performance, axis=1)
+    x = x.apply(calc_system_performance, axis=1)
     return ensure_core_columns(x)
 
 def append_records_dedup(base_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
-    if new_df is None or new_df.empty:
-        return ensure_core_columns(base_df.copy())
+    base_df = ensure_core_columns(base_df.copy())
+    new_df = ensure_core_columns(new_df.copy())
 
-    merged = pd.concat([ensure_core_columns(base_df.copy()), ensure_core_columns(new_df.copy())], ignore_index=True)
-    merged["_dedup"] = (
-        merged["record_id"].fillna("").astype(str) + "|"
-        + merged["股票代號"].fillna("").astype(str) + "|"
-        + merged["推薦日期"].fillna("").astype(str) + "|"
-        + merged["推薦時間"].fillna("").astype(str) + "|"
-        + merged["推薦模式"].fillna("").astype(str)
-    )
+    if new_df.empty:
+        return base_df
+
+    merged = pd.concat([base_df, new_df], ignore_index=True)
+
+    merged["_biz_key"] = business_key_of_df(merged)
     merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
-    merged = merged.sort_values(["_dedup", "_upd"], ascending=[True, False], na_position="last")
-    merged = merged.drop_duplicates(subset=["_dedup"], keep="first")
-    return ensure_core_columns(merged.drop(columns=["_dedup", "_upd"], errors="ignore"))
+    merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
+    merged = merged.drop_duplicates(subset=["_biz_key"], keep="first")
+
+    return ensure_core_columns(merged.drop(columns=["_biz_key", "_upd"], errors="ignore"))
 
 
 # =========================================================
@@ -642,7 +669,16 @@ def append_records_dedup(base_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.Data
 @st.cache_data(show_spinner=False, ttl=600)
 def _fetch_latest_close_cached(code: str, start_date: str, end_date: str) -> Dict[str, Any]:
     try:
-        hist = get_history_data(code, start_date=start_date, end_date=end_date)
+        hist = get_history_data(code=code, start_date=start_date, end_date=end_date)
+    except TypeError:
+        try:
+            hist = get_history_data(stock_no=code, start_date=start_date, end_date=end_date)
+        except Exception:
+            hist = pd.DataFrame()
+    except Exception:
+        hist = pd.DataFrame()
+
+    try:
         if hist is None or hist.empty:
             return {"ok": False, "price": np.nan}
 
@@ -860,7 +896,15 @@ with top_cols[1]:
             st.warning("目前沒有可匯入的 7 頁資料")
         else:
             new_df = convert_page7_df_to_records(incoming)
-            st.session_state["godpick_records_df"] = append_records_dedup(st.session_state["godpick_records_df"], new_df)
+            st.session_state["godpick_records_df"] = append_records_dedup(
+                st.session_state["godpick_records_df"],
+                new_df
+            )
+
+            for key in ["godpick_selected_to_records", "godpick_records_pending_import", "godpick_rec_selected_df"]:
+                if key in st.session_state:
+                    st.session_state[key] = pd.DataFrame()
+
             st.success(f"已匯入 {len(new_df)} 筆，尚未同步")
 
 with top_cols[2]:
@@ -873,11 +917,12 @@ with top_cols[2]:
 
 with top_cols[3]:
     if st.button("📈 更新最新價", use_container_width=True):
-        st.session_state["godpick_records_df"] = update_latest_prices(st.session_state["godpick_records_df"], only_active=True)
+        only_active_update = st.session_state.get("godpick_only_active_update", True)
+        st.session_state["godpick_records_df"] = update_latest_prices(st.session_state["godpick_records_df"], only_active=only_active_update)
         st.success("已更新最新價，尚未同步")
 
 with top_cols[4]:
-    only_active_update = st.toggle("只更新未出場", value=True)
+    only_active_update = st.toggle("只更新未出場", value=True, key="godpick_only_active_update")
 
 with top_cols[5]:
     st.caption(
@@ -935,14 +980,16 @@ tabs = st.tabs([
 with tabs[0]:
     safe_render_pro_section("推薦紀錄總表", "不刪功能，加速版：先篩選再編輯，減少 data_editor 負擔。")
 
+    live_df = ensure_core_columns(st.session_state["godpick_records_df"].copy())
+
     filter_cols = st.columns([1.2, 1.2, 1.2, 1.2, 1.3, 1.1, 1.2])
 
     with filter_cols[0]:
         keyword = st.text_input("搜尋代號 / 名稱 / 理由", value="")
     with filter_cols[1]:
-        mode_filter = st.multiselect("推薦模式", sorted([x for x in df["推薦模式"].dropna().unique() if str(x).strip()]), default=[])
+        mode_filter = st.multiselect("推薦模式", sorted([x for x in live_df["推薦模式"].dropna().unique() if str(x).strip()]), default=[])
     with filter_cols[2]:
-        category_filter = st.multiselect("類別", sorted([x for x in df["類別"].dropna().unique() if str(x).strip()]), default=[])
+        category_filter = st.multiselect("類別", sorted([x for x in live_df["類別"].dropna().unique() if str(x).strip()]), default=[])
     with filter_cols[3]:
         status_filter = st.multiselect("目前狀態", STATUS_OPTIONS, default=[])
     with filter_cols[4]:
@@ -952,7 +999,7 @@ with tabs[0]:
     with filter_cols[6]:
         sort_asc = st.toggle("升冪", value=False)
 
-    view_df = df.copy()
+    view_df = live_df.copy()
 
     if keyword.strip():
         kw = keyword.strip().lower()
@@ -976,7 +1023,7 @@ with tabs[0]:
     if sort_by in view_df.columns:
         view_df = view_df.sort_values(sort_by, ascending=sort_asc, na_position="last").reset_index(drop=True)
 
-    st.caption(f"目前顯示 {len(view_df)} / {len(df)} 筆")
+    st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
 
     editor_df = view_df[[
         "record_id", "股票代號", "股票名稱", "市場別", "類別",
@@ -1034,7 +1081,7 @@ with tabs[0]:
 
     with action_cols[0]:
         if st.button("✅ 套用編輯", use_container_width=True):
-            master = st.session_state["godpick_records_df"].copy()
+            master = ensure_core_columns(st.session_state["godpick_records_df"].copy())
             edit_map = edited_df.set_index("record_id").to_dict(orient="index")
 
             for idx in master.index:
@@ -1063,14 +1110,17 @@ with tabs[0]:
             if not delete_ids:
                 st.warning("請先勾選要刪除的資料")
             else:
-                master = st.session_state["godpick_records_df"].copy()
+                master = ensure_core_columns(st.session_state["godpick_records_df"].copy())
                 master = master[~master["record_id"].isin(delete_ids)].copy()
                 st.session_state["godpick_records_df"] = ensure_core_columns(master)
                 st.success(f"已刪除 {len(delete_ids)} 筆，尚未同步")
 
     with action_cols[2]:
         if st.button("📈 更新價格", use_container_width=True):
-            st.session_state["godpick_records_df"] = update_latest_prices(st.session_state["godpick_records_df"], only_active=only_active_update)
+            st.session_state["godpick_records_df"] = update_latest_prices(
+                st.session_state["godpick_records_df"],
+                only_active=st.session_state.get("godpick_only_active_update", True)
+            )
             st.success("已更新價格，尚未同步")
 
     with action_cols[3]:
@@ -1086,6 +1136,14 @@ with tabs[1]:
     code_name_map = {}
     try:
         code_name_map = get_all_code_name_map() or {}
+        if isinstance(code_name_map, pd.DataFrame):
+            tmp_map = {}
+            for _, r in code_name_map.iterrows():
+                code = safe_str(r.get("code") or r.get("證券代號"))
+                name = safe_str(r.get("name") or r.get("證券名稱"))
+                if code:
+                    tmp_map[code] = name
+            code_name_map = tmp_map
     except Exception:
         code_name_map = {}
 
@@ -1213,14 +1271,15 @@ with tabs[1]:
 with tabs[2]:
     safe_render_pro_section("系統推薦績效分析", "以推薦價格對照最新價")
 
-    valid_sys = df["損益幅%"].dropna()
+    live_df = ensure_core_columns(st.session_state["godpick_records_df"].copy())
+    valid_sys = live_df["損益幅%"].dropna()
     avg_sys_ret = valid_sys.mean() if not valid_sys.empty else np.nan
     win_rate_sys = (valid_sys > 0).mean() * 100 if not valid_sys.empty else np.nan
-    target_rate = df["是否達目標1"].mean() * 100 if len(df) > 0 else np.nan
-    stop_rate = df["是否達停損"].mean() * 100 if len(df) > 0 else np.nan
+    target_rate = live_df["是否達目標1"].mean() * 100 if len(live_df) > 0 else np.nan
+    stop_rate = live_df["是否達停損"].mean() * 100 if len(live_df) > 0 else np.nan
 
     safe_render_pro_kpi_row([
-        {"label": "系統樣本數", "value": format_number(len(df))},
+        {"label": "系統樣本數", "value": format_number(len(live_df))},
         {"label": "系統勝率", "value": "-" if pd.isna(win_rate_sys) else f"{win_rate_sys:.2f}%"},
         {"label": "平均系統報酬%", "value": "-" if pd.isna(avg_sys_ret) else f"{avg_sys_ret:.2f}%"},
         {"label": "達目標1比率", "value": "-" if pd.isna(target_rate) else f"{target_rate:.2f}%"},
@@ -1231,25 +1290,25 @@ with tabs[2]:
 
     with sub_tabs[0]:
         st.dataframe(
-            safe_sort_df(ana_tables["mode"], ["平均系統報酬", "系統勝率", "勝率"], ascending=[False, False, False]),
+            safe_sort_df(ana_tables["mode"], ["平均系統報酬", "系統勝率"], ascending=[False, False]),
             use_container_width=True,
             hide_index=True,
         )
     with sub_tabs[1]:
         st.dataframe(
-            safe_sort_df(ana_tables["category"], ["平均系統報酬", "系統勝率", "勝率"], ascending=[False, False, False]),
+            safe_sort_df(ana_tables["category"], ["平均系統報酬", "系統勝率"], ascending=[False, False]),
             use_container_width=True,
             hide_index=True,
         )
     with sub_tabs[2]:
         st.dataframe(
-            safe_sort_df(ana_tables["grade"], ["平均系統報酬", "系統勝率", "勝率"], ascending=[False, False, False]),
+            safe_sort_df(ana_tables["grade"], ["平均系統報酬", "系統勝率"], ascending=[False, False]),
             use_container_width=True,
             hide_index=True,
         )
     with sub_tabs[3]:
         st.dataframe(
-            df[[
+            live_df[[
                 "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級",
                 "推薦價格", "最新價", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2",
                 "推薦日期", "持有天數", "推薦理由摘要"
@@ -1265,7 +1324,8 @@ with tabs[2]:
 with tabs[3]:
     safe_render_pro_section("實際交易分析", "只統計已實際買進樣本")
 
-    trade_df = df[df["是否已實際買進"] == True].copy()
+    live_df = ensure_core_columns(st.session_state["godpick_records_df"].copy())
+    trade_df = live_df[live_df["是否已實際買進"] == True].copy()
 
     if trade_df.empty:
         st.info("目前沒有已實際買進樣本")
@@ -1310,9 +1370,6 @@ with tabs[3]:
 # =========================================================
 # Tab 5
 # =========================================================
-# =========================================================
-# Tab 5
-# =========================================================
 with tabs[4]:
     safe_render_pro_section("Excel 匯出", "直接用目前資料匯出，不重算")
 
@@ -1325,7 +1382,6 @@ with tabs[4]:
 
         output = io.BytesIO()
 
-        # 改用 openpyxl，避免 xlsxwriter 未安裝錯誤
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             local_df.to_excel(writer, sheet_name="推薦紀錄", index=False)
             tables["mode"].to_excel(writer, sheet_name="模式分析", index=False)
@@ -1351,7 +1407,9 @@ with tabs[4]:
         output.seek(0)
         return output.getvalue()
 
-    excel_bytes = build_excel_bytes(df_json_key)
+    latest_df = ensure_core_columns(st.session_state["godpick_records_df"].copy())
+    latest_df_json = json.dumps(records_to_jsonable(latest_df), ensure_ascii=False, default=str)
+    excel_bytes = build_excel_bytes(latest_df_json)
 
     st.download_button(
         "📥 下載 Excel（推薦紀錄 / 模式分析 / 類別分析 / 等級分析 / 實際交易分析）",
@@ -1361,11 +1419,14 @@ with tabs[4]:
         use_container_width=True,
     )
 
+
 # =========================================================
 # Tab 6
 # =========================================================
 with tabs[5]:
     safe_render_pro_section("同步檢查", "檢查 secrets / 欄位 / session_state 串接")
+
+    live_df = ensure_core_columns(st.session_state["godpick_records_df"].copy())
 
     col1, col2 = st.columns(2)
 
@@ -1385,7 +1446,7 @@ with tabs[5]:
         st.markdown("**欄位完整性檢查**")
         st.dataframe(pd.DataFrame({
             "欄位": CORE_COLUMNS,
-            "是否存在": [c in df.columns for c in CORE_COLUMNS],
+            "是否存在": [c in live_df.columns for c in CORE_COLUMNS],
         }), use_container_width=True, hide_index=True)
 
     st.markdown("**目前 godpick 相關 session_state**")
@@ -1394,6 +1455,7 @@ with tabs[5]:
 
     st.markdown("**7 頁建議至少帶入欄位**")
     st.code("\n".join([
+        "record_id",
         "股票代號",
         "股票名稱",
         "市場別",
@@ -1413,4 +1475,6 @@ with tabs[5]:
         "停損價",
         "賣出目標1",
         "賣出目標2",
+        "推薦日期",
+        "推薦時間",
     ]))
