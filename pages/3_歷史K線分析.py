@@ -79,6 +79,73 @@ def _html(s: str):
 
 
 # =========================================================
+# 快取輔助
+# =========================================================
+@st.cache_data(ttl=120, show_spinner=False)
+def _flatten_group_map_cached(group_items: tuple) -> list[dict[str, str]]:
+    rows = []
+    for group_name, items in group_items:
+        g = _safe_str(group_name)
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 4:
+                continue
+            rows.append(
+                {
+                    "group": g,
+                    "code": _safe_str(item[0]),
+                    "name": _safe_str(item[1]),
+                    "market": _safe_str(item[2]),
+                    "label": _safe_str(item[3]),
+                }
+            )
+    return rows
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _build_group_stock_map_cached(watchlist_items: tuple) -> dict[str, list[dict[str, str]]]:
+    group_map: dict[str, list[dict[str, str]]] = {}
+
+    for group_name, items in watchlist_items:
+        g = _safe_str(group_name) or "未分組"
+        rows = []
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+            code = _safe_str(item[0])
+            name = _safe_str(item[1]) or code
+            market = _safe_str(item[2]) or "上市"
+            if code:
+                rows.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "market": market,
+                        "label": f"{code} {name}",
+                    }
+                )
+        group_map[g] = rows
+
+    return group_map
+
+
+def _pack_group_map(group_map: dict[str, list[dict[str, str]]]) -> tuple:
+    packed = []
+    for group_name, items in group_map.items():
+        temp = []
+        for item in items:
+            temp.append(
+                (
+                    _safe_str(item.get("code")),
+                    _safe_str(item.get("name")),
+                    _safe_str(item.get("market")),
+                    _safe_str(item.get("label")),
+                )
+            )
+        packed.append((group_name, tuple(temp)))
+    return tuple(packed)
+
+
+# =========================================================
 # watchlist 真同步
 # =========================================================
 def _get_watchlist_source() -> dict:
@@ -106,35 +173,33 @@ def _sync_watchlist_meta():
 
 def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
     watchlist = _get_watchlist_source()
-    group_map: dict[str, list[dict[str, str]]] = {}
+    packed = []
 
     if isinstance(watchlist, dict):
         for group_name, items in watchlist.items():
-            g = _safe_str(group_name) or "未分組"
-            group_map[g] = []
+            temp = []
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    code = _safe_str(item.get("code"))
-                    name = _safe_str(item.get("name")) or code
-                    market = _safe_str(item.get("market")) or "上市"
-                    if code:
-                        group_map[g].append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "market": market,
-                                "label": f"{code} {name}",
-                            }
+                    temp.append(
+                        (
+                            _safe_str(item.get("code")),
+                            _safe_str(item.get("name")),
+                            _safe_str(item.get("market")),
                         )
+                    )
+            packed.append((group_name, tuple(temp)))
+
+    group_map = _build_group_stock_map_cached(tuple(packed))
 
     if not group_map:
         try:
             all_df = get_all_code_name_map("")
             if isinstance(all_df, pd.DataFrame) and not all_df.empty:
                 rows = []
-                for _, row in all_df.head(150).iterrows():
+                sample_df = all_df.head(150)
+                for _, row in sample_df.iterrows():
                     code = _safe_str(row.get("code"))
                     name = _safe_str(row.get("name")) or code
                     market = _safe_str(row.get("market")) or "上市"
@@ -156,19 +221,7 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
 
 
 def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
-    rows = []
-    for group_name, items in group_map.items():
-        for item in items:
-            rows.append(
-                {
-                    "group": group_name,
-                    "code": _safe_str(item.get("code")),
-                    "name": _safe_str(item.get("name")),
-                    "market": _safe_str(item.get("market")),
-                    "label": _safe_str(item.get("label")),
-                }
-            )
-    return rows
+    return _flatten_group_map_cached(_pack_group_map(group_map))
 
 
 def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[str, str] | None:
@@ -176,26 +229,31 @@ def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[s
     if not q:
         return None
 
-    for row in flat_rows:
-        if q == row["code"].lower():
-            return row
-    for row in flat_rows:
-        if q == row["name"].lower():
-            return row
-    for row in flat_rows:
-        if q == row["label"].lower():
-            return row
+    exact_code = next((row for row in flat_rows if q == row["code"].lower()), None)
+    if exact_code:
+        return exact_code
 
-    prefix_hits = [r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
-    if prefix_hits:
-        return prefix_hits[0]
+    exact_name = next((row for row in flat_rows if q == row["name"].lower()), None)
+    if exact_name:
+        return exact_name
 
-    contain_hits = [
-        r for r in flat_rows
-        if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()
-    ]
-    if contain_hits:
-        return contain_hits[0]
+    exact_label = next((row for row in flat_rows if q == row["label"].lower()), None)
+    if exact_label:
+        return exact_label
+
+    prefix_hit = next(
+        (r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)),
+        None,
+    )
+    if prefix_hit:
+        return prefix_hit
+
+    contain_hit = next(
+        (r for r in flat_rows if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()),
+        None,
+    )
+    if contain_hit:
+        return contain_hit
 
     return None
 
@@ -381,7 +439,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
                 "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
                 params={"l": "zh-tw", "d": roc_date, "stkno": stock_no},
                 headers=headers,
-                timeout=20,
+                timeout=15,
                 verify=False,
             )
             r.raise_for_status()
@@ -556,7 +614,6 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
     stock_name = _safe_str(stock_name)
     market_type = _safe_str(market_type)
 
-    # 1. 先輪詢 utils 的主要資料源
     for try_name, try_market in _market_candidates(stock_no, stock_name, market_type):
         try:
             df = get_history_data(
@@ -572,7 +629,6 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
         except Exception:
             pass
 
-    # 2. 再直接跑上櫃來源 fallback，不再受 market_type 限制
     try:
         df2 = _get_tpex_history_data(stock_no, start_date, end_date)
         df2 = _prepare_history_df(df2)
@@ -584,6 +640,7 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
     return pd.DataFrame(), (_safe_str(market_type) or "未知"), "none"
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
     if df is None or df.empty or len(df) < window * 2 + 3:
         return [], []
@@ -622,6 +679,7 @@ def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
     return peak_idx, trough_idx
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     if df is None or df.empty or len(df) < 3:
@@ -752,7 +810,8 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
 
 
-def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: list[int], trough_idx: list[int]) -> go.Figure:
+@st.cache_data(ttl=600, show_spinner=False)
+def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]) -> go.Figure:
     fig = go.Figure()
 
     fig.add_trace(
@@ -795,6 +854,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
     return fig
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K"))
@@ -805,6 +865,7 @@ def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     return fig
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF"))
@@ -1336,8 +1397,9 @@ def main():
         st.checkbox("顯示起漲起跌點", key=_k("show_pivots"))
 
     filtered_event_df = event_df.copy()
-    if not filtered_event_df.empty and st.session_state.get(_k("event_filter")) != "全部":
-        filtered_event_df = filtered_event_df[filtered_event_df["事件分類"] == st.session_state.get(_k("event_filter"))].reset_index(drop=True)
+    selected_filter = st.session_state.get(_k("event_filter"))
+    if not filtered_event_df.empty and selected_filter != "全部":
+        filtered_event_df = filtered_event_df[filtered_event_df["事件分類"] == selected_filter].reset_index(drop=True)
 
     focus_df = _slice_by_focus(
         df=df,
@@ -1402,8 +1464,8 @@ def main():
                 stock_label,
                 show_ma=bool(st.session_state.get(_k("show_ma"), True)),
                 show_pivots=bool(st.session_state.get(_k("show_pivots"), True)),
-                peak_idx=focus_peak_idx,
-                trough_idx=focus_trough_idx,
+                peak_idx=tuple(focus_peak_idx),
+                trough_idx=tuple(focus_trough_idx),
             ),
             use_container_width=True,
         )
@@ -1497,7 +1559,8 @@ def main():
         st.write("3. 焦點事件切換只切 focus_df，不重抓歷史資料。")
         st.write("4. 已補上 watchlist 真同步，群組與股票失效時會自動修正。")
         st.write("5. 已補上市場自動 fallback，減少因市場別不一致造成的查無資料。")
-        st.write("6. 保留全部功能，不用刪功能換速度。")
+        st.write("6. Plotly 圖表已加快取，切頁與重繪更快。")
+        st.write("7. 保留全部功能，不用刪功能換速度。")
 
 
 if __name__ == "__main__":
