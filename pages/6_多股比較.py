@@ -102,31 +102,78 @@ def _safe_float(v: Any, default: float = np.nan) -> float:
 # =========================================================
 # watchlist / state
 # =========================================================
+@st.cache_data(ttl=120, show_spinner=False)
+def _build_group_stock_map_cached(raw_items: tuple) -> dict[str, list[dict[str, str]]]:
+    group_map: dict[str, list[dict[str, str]]] = {}
+
+    for group_name, items in raw_items:
+        g = _safe_str(group_name) or "未分組"
+        rows = []
+
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+
+            code = _safe_str(item[0])
+            name = _safe_str(item[1]) or code
+            market = _safe_str(item[2]) or "上市"
+
+            if code:
+                rows.append(
+                    {
+                        "code": code,
+                        "name": name,
+                        "market": market,
+                        "label": f"{code} {name}",
+                    }
+                )
+
+        group_map[g] = rows
+
+    return group_map
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _flatten_group_map_cached(group_items: tuple) -> list[dict[str, str]]:
+    rows = []
+    for group_name, items in group_items:
+        g = _safe_str(group_name)
+        for item in items:
+            if not isinstance(item, tuple) or len(item) < 4:
+                continue
+            rows.append(
+                {
+                    "group": g,
+                    "code": _safe_str(item[0]),
+                    "name": _safe_str(item[1]),
+                    "market": _safe_str(item[2]),
+                    "label": _safe_str(item[3]),
+                }
+            )
+    return rows
+
+
 def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
     watchlist = get_normalized_watchlist()
-    group_map: dict[str, list[dict[str, str]]] = {}
+    packed = []
 
     if isinstance(watchlist, dict):
         for group_name, items in watchlist.items():
-            g = _safe_str(group_name) or "未分組"
-            group_map[g] = []
-
+            temp = []
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    code = _safe_str(item.get("code"))
-                    name = _safe_str(item.get("name"))
-                    market = _safe_str(item.get("market")) or "上市"
-                    if code:
-                        group_map[g].append(
-                            {
-                                "code": code,
-                                "name": name or code,
-                                "market": market,
-                                "label": f"{code} {name or code}",
-                            }
+                    temp.append(
+                        (
+                            _safe_str(item.get("code")),
+                            _safe_str(item.get("name")),
+                            _safe_str(item.get("market")),
                         )
+                    )
+            packed.append((group_name, tuple(temp)))
+
+    group_map = _build_group_stock_map_cached(tuple(packed))
 
     if not group_map:
         all_df = get_all_code_name_map("")
@@ -152,19 +199,22 @@ def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
 
 
 def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
-    rows = []
-    for group_name, items in group_map.items():
-        for item in items:
-            rows.append(
-                {
-                    "group": group_name,
-                    "code": _safe_str(item.get("code")),
-                    "name": _safe_str(item.get("name")),
-                    "market": _safe_str(item.get("market")),
-                    "label": _safe_str(item.get("label")),
-                }
-            )
-    return rows
+    group_items = tuple(
+        (
+            group_name,
+            tuple(
+                (
+                    _safe_str(item.get("code")),
+                    _safe_str(item.get("name")),
+                    _safe_str(item.get("market")),
+                    _safe_str(item.get("label")),
+                )
+                for item in items
+            ),
+        )
+        for group_name, items in group_map.items()
+    )
+    return _flatten_group_map_cached(group_items)
 
 
 def _init_state(group_map: dict[str, list[dict[str, str]]]):
@@ -227,26 +277,31 @@ def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[s
     if not q:
         return None
 
-    for row in flat_rows:
-        if q == row["code"].lower():
-            return row
-    for row in flat_rows:
-        if q == row["name"].lower():
-            return row
-    for row in flat_rows:
-        if q == row["label"].lower():
-            return row
+    exact_code = next((row for row in flat_rows if q == row["code"].lower()), None)
+    if exact_code:
+        return exact_code
 
-    prefix_hits = [r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
-    if prefix_hits:
-        return prefix_hits[0]
+    exact_name = next((row for row in flat_rows if q == row["name"].lower()), None)
+    if exact_name:
+        return exact_name
 
-    contain_hits = [
-        r for r in flat_rows
-        if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()
-    ]
-    if contain_hits:
-        return contain_hits[0]
+    exact_label = next((row for row in flat_rows if q == row["label"].lower()), None)
+    if exact_label:
+        return exact_label
+
+    prefix_hit = next(
+        (r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)),
+        None,
+    )
+    if prefix_hit:
+        return prefix_hit
+
+    contain_hit = next(
+        (r for r in flat_rows if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()),
+        None,
+    )
+    if contain_hit:
+        return contain_hit
 
     return None
 
@@ -270,6 +325,9 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=["收盤價"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
     close = df["收盤價"]
     high = df["最高價"]
     low = df["最低價"]
@@ -294,9 +352,14 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_code_name_map_df() -> pd.DataFrame:
+    return get_all_code_name_map("")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_date: date, end_date: date) -> dict[str, Any]:
-    all_code_name_df = get_all_code_name_map("")
+    all_code_name_df = _get_code_name_map_df()
     stock_name, market_type2 = get_stock_name_and_market(code, all_code_name_df, manual_name)
     market = market_type or market_type2 or "上市"
 
@@ -356,19 +419,22 @@ def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_d
     }
 
 
-def _build_compare_df(group_map: dict[str, list[dict[str, str]]], selected_group: str, selected_codes: list[str], start_date: date, end_date: date) -> pd.DataFrame:
-    items = {x["code"]: x for x in group_map.get(selected_group, [])}
+@st.cache_data(ttl=300, show_spinner=False)
+def _build_compare_df(items_payload: tuple, start_date: date, end_date: date) -> pd.DataFrame:
     rows = []
 
-    for code in selected_codes:
-        item = items.get(code)
-        if not item:
+    for item in items_payload:
+        if not isinstance(item, tuple) or len(item) < 3:
             continue
 
+        code = _safe_str(item[0])
+        manual_name = _safe_str(item[1])
+        market_type = _safe_str(item[2]) or "上市"
+
         snap = _get_compare_snapshot(
-            code=_safe_str(item.get("code")),
-            manual_name=_safe_str(item.get("name")),
-            market_type=_safe_str(item.get("market")) or "上市",
+            code=code,
+            manual_name=manual_name,
+            market_type=market_type,
             start_date=start_date,
             end_date=end_date,
         )
@@ -426,9 +492,27 @@ def _build_compare_df(group_map: dict[str, list[dict[str, str]]], selected_group
     return df
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _format_compare_table(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    for col in ["最新收盤", "20日壓力", "20日支撐", "60日壓力", "60日支撐"]:
+        if col in work.columns:
+            work[col] = work[col].apply(lambda x: format_number(x, 2) if pd.notna(x) else "—")
+
+    for col in ["區間漲跌幅(%)"]:
+        if col in work.columns:
+            work[col] = work[col].apply(lambda x: _fmt_pct(x) if pd.notna(x) else "—")
+
+    for col in ["訊號分數", "雷達均分", "趨勢", "動能", "量能", "位置", "結構"]:
+        if col in work.columns:
+            work[col] = work[col].apply(lambda x: format_number(x, 1) if pd.notna(x) else "—")
+    return work
+
+
 # =========================================================
 # 圖表
 # =========================================================
+@st.cache_data(ttl=300, show_spinner=False)
 def _build_interval_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
@@ -448,6 +532,7 @@ def _build_interval_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def _build_signal_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
@@ -467,6 +552,7 @@ def _build_signal_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def _build_radar_avg_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
@@ -588,8 +674,18 @@ def main():
         home_end=end_date,
     )
 
+    items_payload = tuple(
+        (
+            _safe_str(code_to_item[code].get("code")),
+            _safe_str(code_to_item[code].get("name")),
+            _safe_str(code_to_item[code].get("market")),
+        )
+        for code in selected_codes
+        if code in code_to_item
+    )
+
     with st.spinner("計算多股比較中..."):
-        compare_df = _build_compare_df(group_map, current_group, selected_codes, start_date, end_date)
+        compare_df = _build_compare_df(items_payload, start_date, end_date)
 
     if compare_df.empty:
         st.error("查無可比較資料，請更換股票或日期區間。")
@@ -643,7 +739,7 @@ def main():
         st.plotly_chart(_build_radar_avg_chart(compare_df), use_container_width=True)
 
     render_pro_section("比較明細")
-    st.dataframe(compare_df, use_container_width=True, hide_index=True)
+    st.dataframe(_format_compare_table(compare_df), use_container_width=True, hide_index=True)
 
     render_pro_section("支撐壓力比較")
     sr_df = compare_df[
@@ -658,7 +754,7 @@ def main():
             "區間訊號",
         ]
     ].copy()
-    st.dataframe(sr_df, use_container_width=True, hide_index=True)
+    st.dataframe(_format_compare_table(sr_df), use_container_width=True, hide_index=True)
 
     render_pro_section("雷達細項比較")
     radar_df = compare_df[
@@ -672,7 +768,7 @@ def main():
             "雷達均分",
         ]
     ].copy()
-    st.dataframe(radar_df, use_container_width=True, hide_index=True)
+    st.dataframe(_format_compare_table(radar_df), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
