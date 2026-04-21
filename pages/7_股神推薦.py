@@ -626,10 +626,6 @@ def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
 # =========================================================
 # 8_股神推薦紀錄：GitHub / Firestore 寫入
 # =========================================================
-def _new_rec_id() -> str:
-    return uuid.uuid4().hex[:16]
-
-
 def _godpick_records_config() -> dict[str, str]:
     return {
         "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
@@ -986,103 +982,37 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
 
 
 # =========================================================
-# watchlist / 主檔
+# 股票資訊主檔
 # =========================================================
-def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        raw = get_normalized_watchlist()
-
-    result: dict[str, list[dict[str, str]]] = {}
-
-    if isinstance(raw, dict):
-        for group_name, items in raw.items():
-            g = _safe_str(group_name)
-            if not g:
-                continue
-
-            rows = []
-            seen = set()
-
-            if isinstance(items, list):
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-
-                    code = _normalize_code(item.get("code"))
-                    name = _safe_str(item.get("name")) or code
-                    market = _safe_str(item.get("market")) or "上市"
-                    category = _normalize_category(item.get("category")) or _infer_category_from_name(name)
-
-                    if not code or code in seen:
-                        continue
-                    seen.add(code)
-
-                    rows.append(
-                        {
-                            "code": code,
-                            "name": name,
-                            "market": market,
-                            "category": category,
-                            "label": f"{code} {name}",
-                        }
-                    )
-            result[g] = rows
-
-    return result
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
-def _load_master_df() -> pd.DataFrame:
+def _load_code_name_map_df() -> pd.DataFrame:
     dfs = []
-    category_candidates = [
-        "category", "industry", "sector", "theme",
-        "類別", "產業別", "產業", "主題",
-    ]
-
     for market_arg in ["", "上市", "上櫃", "興櫃"]:
         try:
             df = get_all_code_name_map(market_arg)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 temp = df.copy()
-
-                mapping = {
+                temp = temp.rename(columns={
                     "證券代號": "code",
                     "證券名稱": "name",
                     "市場別": "market",
-                    "code": "code",
-                    "name": "name",
-                    "market": "market",
-                }
-                temp = temp.rename(columns=mapping)
-
-                found_category_col = None
-                for col in temp.columns:
-                    if str(col).strip() in category_candidates:
-                        found_category_col = col
-                        break
-                if found_category_col:
-                    temp = temp.rename(columns={found_category_col: "category"})
-
+                })
                 for col in ["code", "name", "market"]:
                     if col not in temp.columns:
                         temp[col] = ""
                 if "category" not in temp.columns:
                     temp["category"] = ""
-
                 temp["code"] = temp["code"].map(_normalize_code)
                 temp["name"] = temp["name"].map(_safe_str)
                 temp["market"] = temp["market"].map(_safe_str)
                 temp["category"] = temp["category"].map(_normalize_category)
-
                 if market_arg in ["上市", "上櫃", "興櫃"]:
                     temp["market"] = temp["market"].replace("", market_arg)
-
+                temp["category"] = temp["category"].replace("", None)
                 temp["category"] = temp.apply(
                     lambda r: _normalize_category(r.get("category")) or _infer_category_from_name(r.get("name")),
                     axis=1,
                 )
-
                 dfs.append(temp[["code", "name", "market", "category"]])
         except Exception:
             pass
@@ -1091,379 +1021,25 @@ def _load_master_df() -> pd.DataFrame:
         return pd.DataFrame(columns=["code", "name", "market", "category"])
 
     out = pd.concat(dfs, ignore_index=True)
-    out["code"] = out["code"].map(_normalize_code)
-    out["name"] = out["name"].map(_safe_str)
-    out["market"] = out["market"].map(_safe_str).replace("", "上市")
-    out["category"] = out["category"].map(_normalize_category)
-    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
     return out
 
 
 # =========================================================
-# 股票主檔搜尋 / 更新中心
-# =========================================================
-def _search_master_df(
-    master_df: pd.DataFrame,
-    keyword: str,
-    market_filter: str = "全部",
-    category_filter: str = "全部",
-    limit: int = 100,
-) -> pd.DataFrame:
-    if master_df is None or master_df.empty:
-        return pd.DataFrame(columns=["code", "name", "market", "category"])
-
-    kw = _safe_str(keyword)
-    work = master_df.copy()
-
-    for c in ["code", "name", "market", "category"]:
-        if c not in work.columns:
-            work[c] = ""
-        work[c] = work[c].astype(str)
-
-    if _safe_str(market_filter) not in ["", "全部"]:
-        work = work[work["market"] == _safe_str(market_filter)].copy()
-
-    if _safe_str(category_filter) not in ["", "全部"]:
-        work = work[work["category"] == _safe_str(category_filter)].copy()
-
-    if not kw:
-        return work.head(limit).reset_index(drop=True)
-
-    exact_code = work[work["code"] == kw].copy()
-    exact_name = work[work["name"] == kw].copy()
-
-    fuzzy = work[
-        work["code"].str.contains(kw, case=False, na=False)
-        | work["name"].str.contains(kw, case=False, na=False)
-        | work["category"].str.contains(kw, case=False, na=False)
-        | work["market"].str.contains(kw, case=False, na=False)
-    ].copy()
-
-    if not fuzzy.empty:
-        fuzzy["sort_score"] = 0
-        fuzzy.loc[fuzzy["code"] == kw, "sort_score"] += 100
-        fuzzy.loc[fuzzy["name"] == kw, "sort_score"] += 90
-        fuzzy.loc[fuzzy["code"].str.startswith(kw, na=False), "sort_score"] += 50
-        fuzzy.loc[fuzzy["name"].str.startswith(kw, na=False), "sort_score"] += 40
-        fuzzy.loc[fuzzy["category"].str.contains(kw, case=False, na=False), "sort_score"] += 15
-        fuzzy = fuzzy.sort_values(["sort_score", "code"], ascending=[False, True])
-
-    out = pd.concat([exact_code, exact_name, fuzzy], ignore_index=True)
-    out = out.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return out[["code", "name", "market", "category"]].head(limit)
-
-
-def _refresh_master_df_now() -> pd.DataFrame:
-    try:
-        _load_master_df.clear()
-    except Exception:
-        pass
-    return _load_master_df()
-
-
-def _update_master_category_in_memory(master_df: pd.DataFrame, code: str, new_category: str) -> pd.DataFrame:
-    if master_df is None or master_df.empty:
-        return master_df
-
-    code = _normalize_code(code)
-    new_category = _normalize_category(new_category)
-    if not code or not new_category:
-        return master_df
-
-    temp = master_df.copy()
-    mask = temp["code"].astype(str) == code
-    if mask.any():
-        temp.loc[mask, "category"] = new_category
-    return temp
-
-
-def _market_options_from_master(master_df: pd.DataFrame) -> list[str]:
-    if master_df is None or master_df.empty:
-        return ["全部", "上市", "上櫃", "興櫃"]
-    vals = ["全部"] + sorted([x for x in master_df["market"].dropna().astype(str).unique().tolist() if x.strip()])
-    return vals
-
-
-def _category_options_from_master(master_df: pd.DataFrame) -> list[str]:
-    if master_df is None or master_df.empty:
-        return ["全部"]
-    vals = ["全部"] + sorted([x for x in master_df["category"].dropna().astype(str).unique().tolist() if x.strip()])
-    return vals
-
-
-def _append_stock_to_watchlist(
-    group_name: str,
-    code: str,
-    name: str,
-    market: str,
-    category: str,
-):
-    group_name = _safe_str(group_name)
-    code = _normalize_code(code)
-    name = _safe_str(name) or code
-    market = _safe_str(market) or "上市"
-    category = _normalize_category(category) or _infer_category_from_name(name)
-
-    if not group_name:
-        return False, "群組不可空白"
-    if not code:
-        return False, "股票代號不可空白"
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        raw = get_normalized_watchlist()
-
-    if group_name not in raw or not isinstance(raw[group_name], list):
-        raw[group_name] = []
-
-    for item in raw[group_name]:
-        if _normalize_code(item.get("code")) == code:
-            return False, f"{code} 已存在於 {group_name}"
-
-    row = {
-        "code": code,
-        "name": name,
-        "market": market,
-    }
-    if category:
-        row["category"] = category
-
-    raw[group_name].append(row)
-
-    ok = _force_write_watchlist_dual(raw)
-    if ok:
-        return True, f"已加入 {group_name}：{code} {name}"
-    return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
-
-
-def _append_multiple_stocks_to_watchlist(
-    group_name: str,
-    rows: list[dict[str, str]],
-) -> tuple[int, list[str]]:
-    group_name = _safe_str(group_name)
-    if not group_name:
-        return 0, ["請先選擇群組。"]
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        raw = get_normalized_watchlist()
-
-    if group_name not in raw or not isinstance(raw[group_name], list):
-        raw[group_name] = []
-
-    existing_codes = {_normalize_code(x.get("code")) for x in raw[group_name] if isinstance(x, dict)}
-    added = 0
-    messages = []
-
-    for row in rows:
-        code = _normalize_code(row.get("code"))
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-
-        if not code:
-            continue
-
-        if code in existing_codes:
-            messages.append(f"{code} 已存在於 {group_name}")
-            continue
-
-        item = {
-            "code": code,
-            "name": name,
-            "market": market,
-        }
-        if category:
-            item["category"] = category
-
-        raw[group_name].append(item)
-        existing_codes.add(code)
-        added += 1
-        messages.append(f"已加入 {group_name}：{code} {name}")
-
-    if added > 0:
-        ok = _force_write_watchlist_dual(raw)
-        if not ok:
-            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
-
-    return added, messages
-
-
-def _remove_stock_from_watchlist(group_name: str, code: str) -> tuple[bool, str]:
-    group_name = _safe_str(group_name)
-    code = _normalize_code(code)
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        raw = get_normalized_watchlist()
-
-    if group_name not in raw:
-        return False, f"找不到群組：{group_name}"
-
-    before_count = len(raw[group_name])
-    raw[group_name] = [x for x in raw[group_name] if _normalize_code(x.get("code")) != code]
-    after_count = len(raw[group_name])
-
-    if before_count == after_count:
-        return False, f"{code} 不在 {group_name}"
-
-    ok = _force_write_watchlist_dual(raw)
-    if ok:
-        return True, f"已從 {group_name} 刪除 {code}"
-    return False, _safe_str(st.session_state.get(_k("status_msg"), "刪除同步失敗"))
-
-
-# =========================================================
-# 股票資訊查找
-# =========================================================
-def _find_name_market_category(
-    code: str,
-    manual_name: str,
-    manual_market: str,
-    manual_category: str,
-    master_df: pd.DataFrame,
-) -> tuple[str, str, str]:
-    code = _normalize_code(code)
-    manual_name = _safe_str(manual_name)
-    manual_market = _safe_str(manual_market)
-    manual_category = _normalize_category(manual_category)
-
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-        matched = master_df[master_df["code"].astype(str) == code]
-        if not matched.empty:
-            row = matched.iloc[0]
-            final_name = _safe_str(row.get("name")) or manual_name or code
-            final_market = _safe_str(row.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_name(final_name)
-            return final_name, final_market, final_category
-
-    final_name = manual_name or code
-    final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_name(final_name)
-    return final_name, final_market, final_category
-
-
-def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
-    rows = []
-    seen = set()
-    raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
-
-    for raw in raw_lines:
-        txt = _safe_str(raw)
-        code = _normalize_code(txt)
-        name = ""
-        market = "上市"
-        category = ""
-
-        if not code and isinstance(master_df, pd.DataFrame) and not master_df.empty:
-            matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
-            if not matched.empty:
-                row = matched.iloc[0]
-                code = _normalize_code(row.get("code"))
-                name = _safe_str(row.get("name"))
-                market = _safe_str(row.get("market")) or "上市"
-                category = _normalize_category(row.get("category"))
-
-        if code and not name:
-            name, market, category = _find_name_market_category(code, "", market, category, master_df)
-
-        if code and code not in seen:
-            seen.add(code)
-            rows.append(
-                {
-                    "code": code,
-                    "name": name or code,
-                    "market": market or "上市",
-                    "category": category,
-                    "label": f"{code} {name or code}",
-                }
-            )
-    return rows
-
-
-def _build_universe_from_market(master_df: pd.DataFrame, market_mode: str, limit_count: Any, selected_categories: list[str]) -> list[dict[str, str]]:
-    if master_df is None or master_df.empty:
-        return []
-
-    work = master_df.copy()
-    market_mode = _safe_str(market_mode)
-
-    if market_mode == "上市":
-        work = work[work["market"].astype(str) == "上市"].copy()
-    elif market_mode == "上櫃":
-        work = work[work["market"].astype(str) == "上櫃"].copy()
-    elif market_mode == "興櫃":
-        work = work[work["market"].astype(str) == "興櫃"].copy()
-
-    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    if clean_categories:
-        work = work[work["category"].astype(str).isin(clean_categories)].copy()
-
-    if _safe_str(limit_count) != "全部":
-        try:
-            limit_n = int(limit_count)
-            if limit_n > 0:
-                work = work.head(limit_n).copy()
-        except Exception:
-            pass
-
-    rows = []
-    for _, row in work.iterrows():
-        code = _normalize_code(row.get("code"))
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-        if code:
-            rows.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "market": market,
-                    "category": category,
-                    "label": f"{code} {name}",
-                }
-            )
-    return rows
-
-
-def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
-    cats = set()
-
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-        for _, row in master_df.iterrows():
-            name = _safe_str(row.get("name"))
-            cat = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-            if cat:
-                cats.add(cat)
-
-    if isinstance(watchlist_map, dict):
-        for _, items in watchlist_map.items():
-            for item in items:
-                name = _safe_str(item.get("name"))
-                cat = _normalize_category(item.get("category")) or _infer_category_from_name(name)
-                if cat:
-                    cats.add(cat)
-
-    return sorted(list(cats))
-
-
-# =========================================================
-# 歷史資料
+# 歷史資料與指標
 # =========================================================
 def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
     temp = df.copy()
+
+    possible_date_cols = [c for c in temp.columns if str(c).lower() in {"date", "日期"}]
     if "日期" not in temp.columns:
-        possible_date = [c for c in temp.columns if str(c).lower() in {"date", "日期"}]
-        if possible_date:
-            temp = temp.rename(columns={possible_date[0]: "日期"})
+        if possible_date_cols:
+            temp = temp.rename(columns={possible_date_cols[0]: "日期"})
         else:
             return pd.DataFrame()
-
-    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
-    temp = temp.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
     rename_map = {}
     for c in temp.columns:
@@ -1479,6 +1055,9 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
         elif cs == "volume":
             rename_map[c] = "成交股數"
     temp = temp.rename(columns=rename_map)
+
+    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+    temp = temp.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
     for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
         if col in temp.columns:
@@ -1522,7 +1101,9 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     temp["VOL5"] = vol.rolling(5).mean()
     temp["VOL20"] = vol.rolling(20).mean()
 
+    temp["RET3"] = close.pct_change(3) * 100
     temp["RET5"] = close.pct_change(5) * 100
+    temp["RET10"] = close.pct_change(10) * 100
     temp["RET20"] = close.pct_change(20) * 100
     temp["RET60"] = close.pct_change(60) * 100
     temp["RET120"] = close.pct_change(120) * 100
@@ -1591,7 +1172,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
 
 # =========================================================
-# V2：進階選股精準度
+# 計分邏輯
 # =========================================================
 def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     if df is None or df.empty:
@@ -2163,6 +1744,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         "support_dist": support_dist,
         "radar_avg": radar_avg,
         "technical_score": technical_score,
+        "hist_df": hist_df,
     }
 
 
@@ -2230,6 +1812,12 @@ def _analyze_one_stock_for_recommend(
         + trade_score * 0.10
     )
 
+    hist_df = bundle.get("hist_df", pd.DataFrame())
+    ret3 = _safe_float(hist_df.iloc[-1].get("RET3")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
+    ret5 = _safe_float(hist_df.iloc[-1].get("RET5")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
+    ret10 = _safe_float(hist_df.iloc[-1].get("RET10")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
+    ret20 = _safe_float(hist_df.iloc[-1].get("RET20")) if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else None
+
     return {
         "股票代號": code,
         "股票名稱": stock_name,
@@ -2273,6 +1861,10 @@ def _analyze_one_stock_for_recommend(
         "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
         "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
         "推薦模式": mode,
+        "3日績效%": ret3,
+        "5日績效%": ret5,
+        "10日績效%": ret10,
+        "20日績效%": ret20,
     }
 
 
@@ -2429,6 +2021,13 @@ def _build_recommend_df(
         base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)
     ).map({True: "是", False: "否"})
 
+    base_df["類股內排名"] = (
+        base_df.groupby("類別")["個股原始總分"]
+        .rank(method="dense", ascending=False)
+        .astype(int)
+    )
+    base_df["類股前3強"] = base_df["類股內排名"].apply(lambda x: "是" if pd.notna(x) and int(x) <= 3 else "否")
+
     mode_scores = base_df.apply(
         lambda r: _build_mode_score(
             mode=_safe_str(mode),
@@ -2445,6 +2044,8 @@ def _build_recommend_df(
     base_df["推薦標籤"] = [x[1] for x in mode_scores]
 
     def _recommend(score: float) -> str:
+        if score >= 90:
+            return "股神級"
         if score >= 84:
             return "強烈關注"
         if score >= 72:
@@ -2455,16 +2056,38 @@ def _build_recommend_df(
 
     base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
 
-    base_df["推薦理由摘要"] = base_df.apply(
-        lambda r: (
-            f"{_safe_str(r['類別'])}熱度 {_fmt_num(r['類股熱度分數'],1)}，"
-            f"起漲前兆 {_fmt_num(r['起漲前兆分數'],1)}，"
-            f"交易可行 {_fmt_num(r['交易可行分數'],1)}，"
-            f"{'領先同類股' if _safe_str(r['是否領先同類股']) == '是' else '未明顯領先同類股'}，"
-            f"{_safe_str(r['推薦標籤'])}"
-        ),
-        axis=1,
-    )
+    def _reason_builder(r):
+        reason_parts = []
+
+        if _safe_float(r.get("均線轉強分"), 0) >= 70:
+            reason_parts.append("均線結構轉強")
+        if _safe_float(r.get("量能啟動分"), 0) >= 65:
+            reason_parts.append("量能明顯放大")
+        if _safe_float(r.get("突破準備分"), 0) >= 70:
+            reason_parts.append("接近壓力突破位")
+        if _safe_float(r.get("動能翻多分"), 0) >= 65:
+            reason_parts.append("動能翻多")
+        if _safe_float(r.get("支撐防守分"), 0) >= 65:
+            reason_parts.append("支撐防守佳")
+        if _safe_str(r.get("是否領先同類股")) == "是":
+            reason_parts.append("領先同類股")
+        if _safe_str(r.get("類股前3強")) == "是":
+            reason_parts.append("類股前3強")
+        if _safe_float(r.get("類股熱度分數"), 0) >= 75:
+            reason_parts.append("所屬類股熱度高")
+        if _safe_float(r.get("交易可行分數"), 0) >= 70:
+            reason_parts.append("風險報酬佳")
+
+        if not reason_parts:
+            reason_parts.append("結構偏多，列入觀察")
+
+        return "、".join(reason_parts[:6])
+
+    base_df["推薦理由摘要"] = base_df.apply(_reason_builder, axis=1)
+
+    for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
+        if c not in base_df.columns:
+            base_df[c] = pd.NA
 
     final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
     final_df = final_df.sort_values(
@@ -2472,13 +2095,16 @@ def _build_recommend_df(
         ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
+    if "勾選" not in final_df.columns:
+        final_df.insert(0, "勾選", False)
+
     return final_df, category_strength_df
 
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
-    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅"]
+    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
         "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
@@ -2546,7 +2172,10 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
             "股票代號",
             "股票名稱",
             "類別",
+            "類股內排名",
+            "類股前3強",
             "是否領先同類股",
+            "同類股領先幅度",
             "個股原始總分",
             "類股平均總分",
             "類股熱度分數",
@@ -2651,8 +2280,22 @@ def _render_selected_export_block():
     if not isinstance(selected_df, pd.DataFrame) or selected_df.empty:
         return
 
+    export_df = selected_df.copy()
+    want_cols = [
+        "股票代號", "股票名稱", "市場別", "類別",
+        "類股內排名", "類股前3強",
+        "推薦模式", "推薦等級", "推薦總分",
+        "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+        "同類股領先幅度", "是否領先同類股",
+        "最新價", "推薦買點_拉回", "推薦買點_突破",
+        "停損價", "賣出目標1", "賣出目標2",
+        "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        "推薦標籤", "推薦理由摘要",
+    ]
+    export_df = export_df[[c for c in want_cols if c in export_df.columns]].copy()
+
     selected_bytes = _build_excel_bytes(
-        rec_export=selected_df,
+        rec_export=export_df,
         cat_export=pd.DataFrame(),
         leader_export=pd.DataFrame(),
         factor_export=pd.DataFrame(),
@@ -2676,7 +2319,7 @@ def main():
     inject_pro_theme()
 
     watchlist_map = _load_watchlist_map()
-    master_df = _load_master_df()
+    master_df = _load_code_name_map_df()
     today = date.today()
 
     defaults = {
@@ -2740,178 +2383,6 @@ def main():
                 else ""
             )
         )
-
-    if _k("master_search_keyword") not in st.session_state:
-        st.session_state[_k("master_search_keyword")] = ""
-    if _k("master_search_market") not in st.session_state:
-        st.session_state[_k("master_search_market")] = "全部"
-    if _k("master_search_category") not in st.session_state:
-        st.session_state[_k("master_search_category")] = "全部"
-    if _k("master_search_result") not in st.session_state:
-        st.session_state[_k("master_search_result")] = pd.DataFrame()
-    if _k("master_selected_code") not in st.session_state:
-        st.session_state[_k("master_selected_code")] = ""
-    if _k("master_manual_category") not in st.session_state:
-        st.session_state[_k("master_manual_category")] = ""
-
-    with st.expander("股票主檔搜尋 / 更新中心", expanded=False):
-        render_pro_info_card(
-            "功能說明",
-            [
-                ("搜尋股票", "可用代號、名稱、分類搜尋。", ""),
-                ("主檔更新", "可強制重新抓最新股票主檔。", ""),
-                ("快速加入", "找到股票後可直接加入自選群組。", ""),
-                ("分類修正", "可手動修正單檔分類，供本次頁面使用。", ""),
-                ("雙寫同步", "新增/刪除/批次加入時，同步寫 GitHub + Firestore。", ""),
-            ],
-            chips=["功能不變", "進階版", "搜尋更新", "雙寫同步"],
-        )
-
-        s1, s2, s3, s4 = st.columns([2, 1, 1, 1])
-
-        market_opts = _market_options_from_master(master_df)
-        category_opts = _category_options_from_master(master_df)
-
-        with s1:
-            search_kw = st.text_input(
-                "搜尋股票 / 類別",
-                value=st.session_state.get(_k("master_search_keyword"), ""),
-                placeholder="例如：2330、台積電、AI伺服器、IC設計",
-                key=_k("master_search_keyword_input"),
-            )
-        with s2:
-            saved_market = st.session_state.get(_k("master_search_market"), "全部")
-            search_market = st.selectbox(
-                "市場篩選",
-                market_opts,
-                index=market_opts.index(saved_market) if saved_market in market_opts else 0,
-                key=_k("master_search_market_input"),
-            )
-        with s3:
-            saved_category = st.session_state.get(_k("master_search_category"), "全部")
-            search_category = st.selectbox(
-                "分類篩選",
-                category_opts,
-                index=category_opts.index(saved_category) if saved_category in category_opts else 0,
-                key=_k("master_search_category_input"),
-            )
-        with s4:
-            st.write("")
-            st.write("")
-            do_refresh_master = st.button("更新股票主檔", use_container_width=True, key=_k("refresh_master_btn"))
-
-        if do_refresh_master:
-            master_df = _refresh_master_df_now()
-            st.success(f"股票主檔已重新更新，共 {len(master_df):,} 筆。")
-
-        b1, b2 = st.columns([1, 1])
-        with b1:
-            do_search_master = st.button("搜尋股票", use_container_width=True, key=_k("search_master_btn"))
-        with b2:
-            do_clear_master = st.button("清空搜尋", use_container_width=True, key=_k("clear_master_btn"))
-
-        if do_clear_master:
-            st.session_state[_k("master_search_keyword")] = ""
-            st.session_state[_k("master_search_market")] = "全部"
-            st.session_state[_k("master_search_category")] = "全部"
-            st.session_state[_k("master_search_result")] = pd.DataFrame()
-            st.session_state[_k("master_selected_code")] = ""
-            st.session_state[_k("master_manual_category")] = ""
-            st.rerun()
-
-        if do_search_master:
-            st.session_state[_k("master_search_keyword")] = search_kw
-            st.session_state[_k("master_search_market")] = search_market
-            st.session_state[_k("master_search_category")] = search_category
-
-            result_df = _search_master_df(
-                master_df=master_df,
-                keyword=search_kw,
-                market_filter=search_market,
-                category_filter=search_category,
-                limit=100,
-            )
-            st.session_state[_k("master_search_result")] = result_df
-
-        result_df = st.session_state.get(_k("master_search_result"), pd.DataFrame())
-
-        if isinstance(result_df, pd.DataFrame) and not result_df.empty:
-            st.dataframe(
-                result_df.rename(
-                    columns={
-                        "code": "股票代號",
-                        "name": "股票名稱",
-                        "market": "市場別",
-                        "category": "分類",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            code_options = result_df["code"].astype(str).tolist()
-            if code_options and st.session_state.get(_k("master_selected_code"), "") not in code_options:
-                st.session_state[_k("master_selected_code")] = code_options[0]
-
-            c1, c2, c3 = st.columns([2, 2, 2])
-
-            with c1:
-                selected_code = st.selectbox(
-                    "選擇股票",
-                    code_options,
-                    format_func=lambda x: (
-                        f"{x} "
-                        f"{result_df[result_df['code'].astype(str) == str(x)]['name'].iloc[0]}"
-                    ),
-                    key=_k("master_selected_code"),
-                )
-
-            selected_row = result_df[result_df["code"].astype(str) == str(selected_code)].iloc[0]
-
-            with c2:
-                watchlist_groups = list(watchlist_map.keys()) if watchlist_map else []
-                add_group = st.selectbox(
-                    "加入自選群組",
-                    watchlist_groups if watchlist_groups else [""],
-                    key=_k("master_add_group"),
-                )
-
-            with c3:
-                st.write("")
-                st.write("")
-                add_to_watchlist = st.button("加入自選股", use_container_width=True, key=_k("add_watchlist_btn"))
-
-            if add_to_watchlist:
-                ok, msg = _append_stock_to_watchlist(
-                    group_name=add_group,
-                    code=selected_row["code"],
-                    name=selected_row["name"],
-                    market=selected_row["market"],
-                    category=selected_row["category"],
-                )
-                if ok:
-                    st.success(msg)
-                    watchlist_map = _load_watchlist_map()
-                else:
-                    st.warning(msg)
-
-            d1, d2 = st.columns([2, 1])
-            with d1:
-                manual_category = st.text_input(
-                    "手動修正分類（本次執行立即生效）",
-                    value=selected_row["category"],
-                    key=_k("master_manual_category"),
-                )
-            with d2:
-                st.write("")
-                st.write("")
-                save_manual_category = st.button("套用分類修正", use_container_width=True, key=_k("save_manual_category_btn"))
-
-            if save_manual_category:
-                master_df = _update_master_category_in_memory(master_df, selected_row["code"], manual_category)
-                st.success(f"{selected_row['code']} {selected_row['name']} 分類已改為：{manual_category}")
-        else:
-            st.caption("尚未搜尋，或目前沒有符合的股票。")
 
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
@@ -3059,7 +2530,7 @@ def main():
         except Exception:
             pass
         try:
-            _load_master_df.clear()
+            _load_code_name_map_df.clear()
         except Exception:
             pass
         try:
@@ -3119,6 +2590,7 @@ def main():
             ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
             ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
             ("推薦紀錄", "新增可勾選後直接寫入 8_股神推薦紀錄。", ""),
+            ("勾選快照", "本輪精華推薦表可直接勾選，並同步到自選股/推薦紀錄/勾選匯出。", ""),
         ],
         chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
     )
@@ -3181,14 +2653,14 @@ def main():
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.iloc[:top_n].copy()
 
-    strong_count = int((rec_df["推薦等級"] == "強烈關注").sum())
+    strong_count = int((rec_df["推薦等級"].isin(["股神級", "強烈關注"])).sum())
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
     leader_count = int((rec_df["是否領先同類股"] == "是").sum())
 
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
-            {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "強勢推薦", "value": strong_count, "delta": "最高等級群", "delta_class": "pro-kpi-delta-flat"},
             {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
@@ -3365,35 +2837,60 @@ def main():
     _render_selected_export_block()
 
     render_pro_section("本輪精華推薦")
-    st.dataframe(
-        _format_df(
-            top_df[
-                [
-                    "股票代號",
-                    "股票名稱",
-                    "市場別",
-                    "類別",
-                    "推薦模式",
-                    "推薦等級",
-                    "推薦總分",
-                    "起漲前兆分數",
-                    "交易可行分數",
-                    "類股熱度分數",
-                    "是否領先同類股",
-                    "起漲判斷",
-                    "最新價",
-                    "推薦買點_拉回",
-                    "推薦買點_突破",
-                    "停損價",
-                    "賣出目標1",
-                    "賣出目標2",
-                    "推薦理由摘要",
-                ]
-            ]
-        ),
+
+    top_show_df = top_df[
+        [
+            "勾選",
+            "股票代號",
+            "股票名稱",
+            "市場別",
+            "類別",
+            "類股內排名",
+            "類股前3強",
+            "推薦模式",
+            "推薦等級",
+            "推薦總分",
+            "起漲前兆分數",
+            "交易可行分數",
+            "類股熱度分數",
+            "是否領先同類股",
+            "起漲判斷",
+            "最新價",
+            "推薦買點_拉回",
+            "推薦買點_突破",
+            "停損價",
+            "賣出目標1",
+            "賣出目標2",
+            "推薦理由摘要",
+        ]
+    ].copy()
+
+    edited_top_df = st.data_editor(
+        _format_df(top_show_df),
         use_container_width=True,
         hide_index=True,
+        num_rows="fixed",
+        key=_k("top_pick_editor"),
+        column_config={
+            "勾選": st.column_config.CheckboxColumn("勾選"),
+            "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
+        }
     )
+
+    picked_codes_from_top = []
+    for _, row in edited_top_df.iterrows():
+        if str(row.get("勾選", "")).strip().lower() in {"true", "1"}:
+            picked_codes_from_top.append(_normalize_code(row.get("股票代號")))
+
+    if picked_codes_from_top:
+        st.session_state[_k("rec_pick_codes")] = picked_codes_from_top
+        st.session_state[_k("rec_record_codes")] = picked_codes_from_top
+
+    selected_snapshot_top = rec_df[
+        rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])
+    ].copy()
+    st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_top
+    st.session_state["godpick_rec_selected_df"] = selected_snapshot_top
 
     pick_options = top_df["股票代號"].astype(str).tolist()
     if pick_options and st.session_state.get(_k("focus_code"), "") not in pick_options:
@@ -3416,6 +2913,8 @@ def main():
             [
                 ("股票", f"{_safe_str(focus_row.get('股票代號'))} {_safe_str(focus_row.get('股票名稱'))}", ""),
                 ("類別", _safe_str(focus_row.get("類別")), ""),
+                ("類股內排名", _safe_str(focus_row.get("類股內排名")), ""),
+                ("類股前3強", _safe_str(focus_row.get("類股前3強")), ""),
                 ("推薦模式", _safe_str(focus_row.get("推薦模式")), ""),
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
@@ -3473,7 +2972,10 @@ def main():
                         "股票代號",
                         "股票名稱",
                         "類別",
+                        "類股內排名",
+                        "類股前3強",
                         "是否領先同類股",
+                        "同類股領先幅度",
                         "個股原始總分",
                         "類股平均總分",
                         "類股熱度分數",
@@ -3520,6 +3022,11 @@ def main():
                 ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
                 ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅、類股熱度與類股加速度。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
+                ("推薦表勾選", "本輪精華推薦表可直接勾選，會同步到加入自選股與寫入 8 頁用的勾選清單。", ""),
+                ("類股內排名", "新增每個類別內部排名，快速找該族群最強個股。", ""),
+                ("類股前3強", "若個股在該類別內排名 1~3，會標記為類股前3強。", ""),
+                ("理由升級", "推薦理由已改成更偏交易決策語言，不只是分數描述。", ""),
+                ("績效預留", "已預留 3日 / 5日 / 10日 / 20日績效欄位，供下一版自動回填。", ""),
                 ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
                 ("寫入推薦紀錄", "可直接勾選推薦結果並批次寫入 8_股神推薦紀錄。", ""),
                 ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
