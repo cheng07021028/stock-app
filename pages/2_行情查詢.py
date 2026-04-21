@@ -5,7 +5,6 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
-import requests
 import streamlit as st
 
 from utils import (
@@ -83,66 +82,48 @@ def _html(s: str):
 
 
 # =========================================================
-# 群組 / 搜尋
+# 快取資料
 # =========================================================
-def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
-    watchlist = get_normalized_watchlist()
+@st.cache_data(ttl=120, show_spinner=False)
+def _get_group_stock_map_cached(watchlist_items: tuple) -> dict[str, list[dict[str, str]]]:
     group_map: dict[str, list[dict[str, str]]] = {}
 
-    if isinstance(watchlist, dict):
-        for group_name, items in watchlist.items():
-            g = _safe_str(group_name) or "未分組"
-            group_map[g] = []
-            if isinstance(items, list):
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    code = _safe_str(item.get("code"))
-                    name = _safe_str(item.get("name")) or code
-                    market = _safe_str(item.get("market")) or "上市"
-                    if code:
-                        group_map[g].append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "market": market,
-                                "label": f"{code} {name}",
-                            }
-                        )
+    for group_name, items in watchlist_items:
+        g = _safe_str(group_name) or "未分組"
+        rows = []
 
-    if not group_map:
-        try:
-            all_df = get_all_code_name_map("")
-            if isinstance(all_df, pd.DataFrame) and not all_df.empty:
-                rows = []
-                for _, row in all_df.head(150).iterrows():
-                    code = _safe_str(row.get("code"))
-                    name = _safe_str(row.get("name")) or code
-                    market = _safe_str(row.get("market")) or "上市"
-                    if code:
-                        rows.append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "market": market,
-                                "label": f"{code} {name}",
-                            }
-                        )
-                if rows:
-                    group_map["全部股票"] = rows
-        except Exception:
-            pass
+        if isinstance(items, tuple):
+            for item in items:
+                if not isinstance(item, tuple) or len(item) < 3:
+                    continue
+
+                code = _safe_str(item[0])
+                name = _safe_str(item[1]) or code
+                market = _safe_str(item[2]) or "上市"
+
+                if code:
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                            "label": f"{code} {name}",
+                        }
+                    )
+
+        group_map[g] = rows
 
     return group_map
 
 
-def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
+@st.cache_data(ttl=120, show_spinner=False)
+def _flatten_group_map_cached(group_items: tuple) -> list[dict[str, str]]:
     rows = []
-    for group_name, items in group_map.items():
+    for group_name, items in group_items:
         for item in items:
             rows.append(
                 {
-                    "group": group_name,
+                    "group": _safe_str(group_name),
                     "code": _safe_str(item.get("code")),
                     "name": _safe_str(item.get("name")),
                     "market": _safe_str(item.get("market")),
@@ -150,138 +131,6 @@ def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[
                 }
             )
     return rows
-
-
-def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[str, str] | None:
-    q = _safe_str(keyword).lower()
-    if not q:
-        return None
-
-    for row in flat_rows:
-        if q == row["code"].lower():
-            return row
-    for row in flat_rows:
-        if q == row["name"].lower():
-            return row
-    for row in flat_rows:
-        if q == row["label"].lower():
-            return row
-
-    prefix_hits = [r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)]
-    if prefix_hits:
-        return prefix_hits[0]
-
-    contain_hits = [
-        r for r in flat_rows
-        if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()
-    ]
-    if contain_hits:
-        return contain_hits[0]
-
-    return None
-
-
-# =========================================================
-# State
-# =========================================================
-def _init_state(group_map: dict[str, list[dict[str, str]]]):
-    saved = load_last_query_state()
-    groups = list(group_map.keys())
-    today = date.today()
-    default_start = today - timedelta(days=180)
-    default_end = today
-
-    if _k("group") not in st.session_state:
-        saved_group = _safe_str(saved.get("quick_group", ""))
-        st.session_state[_k("group")] = saved_group if saved_group in groups else (groups[0] if groups else "")
-
-    if _k("stock_code") not in st.session_state:
-        st.session_state[_k("stock_code")] = _safe_str(saved.get("quick_stock_code", ""))
-
-    if _k("search_input") not in st.session_state:
-        st.session_state[_k("search_input")] = ""
-
-    if _k("start_date") not in st.session_state:
-        st.session_state[_k("start_date")] = parse_date_safe(saved.get("home_start"), default_start)
-
-    if _k("end_date") not in st.session_state:
-        st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
-
-    _repair_state(group_map)
-
-
-def _repair_state(group_map: dict[str, list[dict[str, str]]]):
-    groups = list(group_map.keys())
-    current_group = _safe_str(st.session_state.get(_k("group"), ""))
-
-    if current_group not in group_map:
-        st.session_state[_k("group")] = groups[0] if groups else ""
-        current_group = st.session_state[_k("group")]
-
-    items = group_map.get(current_group, [])
-    valid_codes = [x["code"] for x in items]
-    current_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
-
-    if valid_codes:
-        if current_code not in valid_codes:
-            st.session_state[_k("stock_code")] = valid_codes[0]
-    else:
-        st.session_state[_k("stock_code")] = ""
-
-
-def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
-    current_group = _safe_str(st.session_state.get(_k("group"), ""))
-    items = group_map.get(current_group, [])
-    st.session_state[_k("stock_code")] = items[0]["code"] if items else ""
-
-
-# =========================================================
-# 歷史資料 + fallback
-# =========================================================
-def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
-    if "日期" not in df.columns:
-        return pd.DataFrame()
-
-    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
-    df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
-
-    numeric_cols = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if "收盤價" not in df.columns:
-        return pd.DataFrame()
-
-    df = df.dropna(subset=["收盤價"]).copy()
-    if df.empty:
-        return pd.DataFrame()
-
-    close = df["收盤價"]
-    high = df["最高價"] if "最高價" in df.columns else close
-    low = df["最低價"] if "最低價" in df.columns else close
-
-    for n in [5, 10, 20, 60, 120, 240]:
-        df[f"MA{n}"] = close.rolling(n).mean()
-
-    low_9 = low.rolling(9).min()
-    high_9 = high.rolling(9).max()
-    rsv = (close - low_9) / (high_9 - low_9).replace(0, pd.NA) * 100
-    df["K"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
-    df["D"] = df["K"].ewm(alpha=1 / 3, adjust=False).mean()
-    df["J"] = 3 * df["K"] - 2 * df["D"]
-
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    df["DIF"] = ema12 - ema26
-    df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
-    df["MACD_HIST"] = df["DIF"] - df["DEA"]
-
-    return df
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -297,6 +146,12 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
 
     month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
     frames = []
+
+    try:
+        import requests
+    except Exception:
+        return pd.DataFrame()
+
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.tpex.org.tw/"}
 
     for dt in month_starts:
@@ -307,7 +162,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
                 "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
                 params={"l": "zh-tw", "d": roc_date, "stkno": stock_no},
                 headers=headers,
-                timeout=20,
+                timeout=15,
                 verify=False,
             )
             r.raise_for_status()
@@ -416,6 +271,200 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
 
 
 # =========================================================
+# 群組 / 搜尋
+# =========================================================
+def _build_group_stock_map() -> dict[str, list[dict[str, str]]]:
+    watchlist = get_normalized_watchlist()
+
+    watchlist_items = []
+    if isinstance(watchlist, dict):
+        for group_name, items in watchlist.items():
+            temp_items = []
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    temp_items.append(
+                        (
+                            _safe_str(item.get("code")),
+                            _safe_str(item.get("name")),
+                            _safe_str(item.get("market")),
+                        )
+                    )
+            watchlist_items.append((group_name, tuple(temp_items)))
+
+    group_map = _get_group_stock_map_cached(tuple(watchlist_items))
+
+    if not group_map:
+        try:
+            all_df = get_all_code_name_map("")
+            if isinstance(all_df, pd.DataFrame) and not all_df.empty:
+                rows = []
+                sample_df = all_df.head(150)
+                for _, row in sample_df.iterrows():
+                    code = _safe_str(row.get("code"))
+                    name = _safe_str(row.get("name")) or code
+                    market = _safe_str(row.get("market")) or "上市"
+                    if code:
+                        rows.append(
+                            {
+                                "code": code,
+                                "name": name,
+                                "market": market,
+                                "label": f"{code} {name}",
+                            }
+                        )
+                if rows:
+                    group_map["全部股票"] = rows
+        except Exception:
+            pass
+
+    return group_map
+
+
+def _flatten_group_map(group_map: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
+    group_items = tuple((group_name, tuple(items)) for group_name, items in group_map.items())
+    return _flatten_group_map_cached(group_items)
+
+
+def _find_search_target(keyword: str, flat_rows: list[dict[str, str]]) -> dict[str, str] | None:
+    q = _safe_str(keyword).lower()
+    if not q:
+        return None
+
+    exact_code = next((row for row in flat_rows if q == row["code"].lower()), None)
+    if exact_code:
+        return exact_code
+
+    exact_name = next((row for row in flat_rows if q == row["name"].lower()), None)
+    if exact_name:
+        return exact_name
+
+    exact_label = next((row for row in flat_rows if q == row["label"].lower()), None)
+    if exact_label:
+        return exact_label
+
+    prefix_hit = next(
+        (r for r in flat_rows if r["code"].lower().startswith(q) or r["name"].lower().startswith(q)),
+        None,
+    )
+    if prefix_hit:
+        return prefix_hit
+
+    contain_hit = next(
+        (r for r in flat_rows if q in f"{r['group']} {r['code']} {r['name']} {r['label']}".lower()),
+        None,
+    )
+    if contain_hit:
+        return contain_hit
+
+    return None
+
+
+# =========================================================
+# State
+# =========================================================
+def _init_state(group_map: dict[str, list[dict[str, str]]]):
+    saved = load_last_query_state()
+    groups = list(group_map.keys())
+    today = date.today()
+    default_start = today - timedelta(days=180)
+    default_end = today
+
+    if _k("group") not in st.session_state:
+        saved_group = _safe_str(saved.get("quick_group", ""))
+        st.session_state[_k("group")] = saved_group if saved_group in groups else (groups[0] if groups else "")
+
+    if _k("stock_code") not in st.session_state:
+        st.session_state[_k("stock_code")] = _safe_str(saved.get("quick_stock_code", ""))
+
+    if _k("search_input") not in st.session_state:
+        st.session_state[_k("search_input")] = ""
+
+    if _k("start_date") not in st.session_state:
+        st.session_state[_k("start_date")] = parse_date_safe(saved.get("home_start"), default_start)
+
+    if _k("end_date") not in st.session_state:
+        st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
+
+    _repair_state(group_map)
+
+
+def _repair_state(group_map: dict[str, list[dict[str, str]]]):
+    groups = list(group_map.keys())
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+
+    if current_group not in group_map:
+        st.session_state[_k("group")] = groups[0] if groups else ""
+        current_group = st.session_state[_k("group")]
+
+    items = group_map.get(current_group, [])
+    valid_codes = [x["code"] for x in items]
+    current_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
+
+    if valid_codes:
+        if current_code not in valid_codes:
+            st.session_state[_k("stock_code")] = valid_codes[0]
+    else:
+        st.session_state[_k("stock_code")] = ""
+
+
+def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
+    current_group = _safe_str(st.session_state.get(_k("group"), ""))
+    items = group_map.get(current_group, [])
+    st.session_state[_k("stock_code")] = items[0]["code"] if items else ""
+
+
+# =========================================================
+# 歷史資料整理
+# =========================================================
+def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    if "日期" not in df.columns:
+        return pd.DataFrame()
+
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    df = df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+
+    numeric_cols = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "收盤價" not in df.columns:
+        return pd.DataFrame()
+
+    df = df.dropna(subset=["收盤價"]).copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    close = df["收盤價"]
+    high = df["最高價"] if "最高價" in df.columns else close
+    low = df["最低價"] if "最低價" in df.columns else close
+
+    for n in [5, 10, 20, 60, 120, 240]:
+        df[f"MA{n}"] = close.rolling(n).mean()
+
+    low_9 = low.rolling(9).min()
+    high_9 = high.rolling(9).max()
+    rsv = (close - low_9) / (high_9 - low_9).replace(0, pd.NA) * 100
+    df["K"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    df["D"] = df["K"].ewm(alpha=1 / 3, adjust=False).mean()
+    df["J"] = 3 * df["K"] - 2 * df["D"]
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    df["DIF"] = ema12 - ema26
+    df["DEA"] = df["DIF"].ewm(span=9, adjust=False).mean()
+    df["MACD_HIST"] = df["DIF"] - df["DEA"]
+
+    return df
+
+
+# =========================================================
 # 事件摘要
 # =========================================================
 def _build_recent_event_summary(df: pd.DataFrame) -> list[tuple[str, str, str]]:
@@ -432,7 +481,6 @@ def _build_recent_event_summary(df: pd.DataFrame) -> list[tuple[str, str, str]]:
 
         ma5 = _safe_float(last.get("MA5"))
         ma10 = _safe_float(last.get("MA10"))
-        ma20 = _safe_float(last.get("MA20"))
         prev_ma5 = _safe_float(prev.get("MA5"))
         prev_ma10 = _safe_float(prev.get("MA10"))
 
@@ -472,6 +520,7 @@ def _build_recent_event_summary(df: pd.DataFrame) -> list[tuple[str, str, str]]:
             if close_price is not None and low20 is not None and close_price <= low20:
                 rows.append((date_text, "跌破20日低", ""))
 
+        ma20 = _safe_float(last.get("MA20"))
         if ma20 is not None:
             close_price = _safe_float(last.get("收盤價"))
             if close_price is not None:
@@ -621,25 +670,28 @@ def main():
     market_type = _safe_str(selected_item.get("market")) or "上市"
     stock_label = f"{selected_code} {stock_name}"
 
+    start_date = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=180))
+    end_date = _to_date(st.session_state.get(_k("end_date")), date.today())
+
     save_last_query_state(
         quick_group=selected_group,
         quick_stock_code=selected_code,
-        home_start=st.session_state.get(_k("start_date")),
-        home_end=st.session_state.get(_k("end_date")),
+        home_start=start_date,
+        home_end=end_date,
     )
 
-    with st.spinner("載入即時資料中..."):
-        all_code_name_df = get_all_code_name_map("")
-        stock_name2, market_type2 = get_stock_name_and_market(selected_code, all_code_name_df, stock_name)
-        info = get_realtime_stock_info(selected_code, stock_name2 or stock_name, market_type2 or market_type)
+    all_code_name_df = get_all_code_name_map("")
+    stock_name2, market_type2 = get_stock_name_and_market(selected_code, all_code_name_df, stock_name)
+    final_name = stock_name2 or stock_name
+    final_market = market_type2 or market_type
 
-    start_date = date.today() - timedelta(days=180)
-    end_date = date.today()
+    with st.spinner("載入即時資料中..."):
+        info = get_realtime_stock_info(selected_code, final_name, final_market)
 
     history_df = _get_history_data_smart(
         stock_no=selected_code,
-        stock_name=stock_name,
-        market_type=market_type,
+        stock_name=final_name,
+        market_type=final_market,
         start_date=start_date,
         end_date=end_date,
     )
@@ -649,7 +701,7 @@ def main():
     badge_text, _ = score_to_badge(signal_snapshot.get("score", 0)) if signal_snapshot else ("整理", "pro-flat")
     recent_events = _build_recent_event_summary(history_df)
 
-    _render_realtime_hero(info, stock_label, market_type)
+    _render_realtime_hero(info, f"{selected_code} {final_name}", final_market)
 
     left, right = st.columns([1.15, 1.85])
 
@@ -670,7 +722,7 @@ def main():
         render_pro_info_card(
             "最近事件摘要",
             recent_events,
-            chips=[market_type],
+            chips=[final_market],
         )
 
     with right:
@@ -697,7 +749,7 @@ def main():
                 ("焦點重點", _safe_str(sr_snapshot.get("comment_focus", "資料不足")), ""),
                 ("操作提醒", _safe_str(sr_snapshot.get("comment_action", "資料不足")), ""),
             ],
-            chips=[badge_text, market_type],
+            chips=[badge_text, final_market],
         )
 
     with st.expander("原始即時資料"):
@@ -705,8 +757,8 @@ def main():
             [
                 {
                     "股票代號": selected_code,
-                    "股票名稱": stock_name,
-                    "市場別": market_type,
+                    "股票名稱": final_name,
+                    "市場別": final_market,
                     "現價": info.get("price"),
                     "昨收": info.get("prev_close"),
                     "開盤": info.get("open"),
@@ -729,6 +781,8 @@ def main():
         st.write("2. 歷史資料用 cache，避免每次重抓。")
         st.write("3. 上櫃股票會自動嘗試 fallback。")
         st.write("4. 群組與股票選擇以 session_state 真同步。")
+        st.write("5. 股票主檔只抓一次，不重複取得。")
+        st.write("6. 群組展平與搜尋映射已加快取。")
 
 
 if __name__ == "__main__":
