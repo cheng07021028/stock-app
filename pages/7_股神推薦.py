@@ -8,6 +8,7 @@ import copy
 import json
 import base64
 import io
+import uuid
 
 import pandas as pd
 import requests
@@ -117,6 +118,10 @@ def _fmt_seconds(sec: float) -> str:
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _today_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def _set_status(msg: str, level: str = "info"):
@@ -487,6 +492,323 @@ def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
 
     _set_status("GitHub / Firestore 都失敗", "error")
     return False
+
+
+# =========================================================
+# 8_股神推薦紀錄：GitHub / Firestore 寫入
+# =========================================================
+def _new_rec_id() -> str:
+    return uuid.uuid4().hex[:16]
+
+
+def _godpick_records_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("GODPICK_RECORDS_GITHUB_PATH", "godpick_records.json")) or "godpick_records.json",
+    }
+
+
+def _read_godpick_records_from_github() -> tuple[list[dict[str, Any]], str]:
+    cfg = _godpick_records_config()
+    token = cfg["token"]
+    if not token:
+        return [], "未設定 GITHUB_TOKEN"
+
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+
+        if resp.status_code == 404:
+            return [], ""
+
+        if resp.status_code != 200:
+            return [], f"讀取推薦紀錄失敗：{resp.status_code} / {resp.text[:300]}"
+
+        data = resp.json()
+        content = data.get("content", "")
+        if not content:
+            return [], ""
+
+        decoded = base64.b64decode(content).decode("utf-8")
+        payload = json.loads(decoded)
+
+        if isinstance(payload, list):
+            return payload, ""
+        return [], ""
+    except Exception as e:
+        return [], f"讀取推薦紀錄例外：{e}"
+
+
+def _get_godpick_records_sha() -> tuple[str, str]:
+    cfg = _godpick_records_config()
+    token = cfg["token"]
+    if not token:
+        return "", "缺少 GITHUB_TOKEN"
+
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+
+        if resp.status_code == 200:
+            return _safe_str(resp.json().get("sha")), ""
+
+        if resp.status_code == 404:
+            return "", ""
+
+        return "", f"讀取推薦紀錄 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return "", f"讀取推薦紀錄 SHA 例外：{e}"
+
+
+def _write_godpick_records_to_github(records: list[dict[str, Any]]) -> tuple[bool, str]:
+    cfg = _godpick_records_config()
+    token = cfg["token"]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN"
+
+    sha, err = _get_godpick_records_sha()
+    if err:
+        return False, err
+
+    content_text = json.dumps(records, ensure_ascii=False, indent=2)
+    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+
+    body: dict[str, Any] = {
+        "message": f"update godpick records at {_now_text()}",
+        "content": encoded_content,
+        "branch": cfg["branch"],
+    }
+    if sha:
+        body["sha"] = sha
+
+    try:
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫 GitHub：{cfg['path']}"
+        return False, f"推薦紀錄 GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"推薦紀錄 GitHub 寫入例外：{e}"
+
+
+def _write_godpick_records_to_firestore(records: list[dict[str, Any]]) -> tuple[bool, str]:
+    try:
+        _init_firebase_app()
+        db = firestore.client()
+        batch = db.batch()
+        now = firestore.SERVER_TIMESTAMP
+
+        summary_ref = db.collection("system").document("godpick_records_summary")
+        batch.set(
+            summary_ref,
+            {
+                "count": len(records),
+                "updated_at": now,
+                "source": "streamlit_godpick_records",
+            },
+            merge=True,
+        )
+
+        records_ref = db.collection("godpick_records")
+        existing_docs = list(records_ref.stream())
+        existing_ids = {doc.id for doc in existing_docs}
+        new_ids = set()
+
+        for row in records:
+            rec_id = _safe_str(row.get("rec_id"))
+            if not rec_id:
+                continue
+
+            new_ids.add(rec_id)
+            doc_ref = records_ref.document(rec_id)
+            doc_data = dict(row)
+            doc_data["updated_at"] = now
+            batch.set(doc_ref, doc_data, merge=True)
+
+        for old_id in existing_ids - new_ids:
+            batch.delete(records_ref.document(old_id))
+
+        batch.commit()
+        return True, "已同步寫入 Firestore"
+    except Exception as e:
+        return False, f"推薦紀錄 Firestore 寫入失敗：{e}"
+
+
+def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
+    rec_price = _safe_float(row.get("推薦價格"))
+    latest_price = _safe_float(row.get("最新價"))
+    stop_price = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+    target2 = _safe_float(row.get("賣出目標2"))
+
+    pnl_amt = None
+    pnl_pct = None
+    if rec_price not in [None, 0] and latest_price is not None:
+        pnl_amt = latest_price - rec_price
+        pnl_pct = (pnl_amt / rec_price) * 100
+
+    hit_stop = "否"
+    if stop_price is not None and latest_price is not None and latest_price <= stop_price:
+        hit_stop = "是"
+
+    hit_target1 = "否"
+    if target1 is not None and latest_price is not None and latest_price >= target1:
+        hit_target1 = "是"
+
+    hit_target2 = "否"
+    if target2 is not None and latest_price is not None and latest_price >= target2:
+        hit_target2 = "是"
+
+    return {
+        "rec_id": _safe_str(row.get("rec_id")) or _new_rec_id(),
+        "推薦日期": _safe_str(row.get("推薦日期")) or _today_text(),
+        "推薦時間": _safe_str(row.get("推薦時間")) or _now_text(),
+        "股票代號": _normalize_code(row.get("股票代號")),
+        "股票名稱": _safe_str(row.get("股票名稱")),
+        "市場別": _safe_str(row.get("市場別")) or "上市",
+        "類別": _normalize_category(row.get("類別")),
+        "推薦模式": _safe_str(row.get("推薦模式")),
+        "推薦等級": _safe_str(row.get("推薦等級")),
+        "推薦總分": _safe_float(row.get("推薦總分")),
+        "起漲前兆分數": _safe_float(row.get("起漲前兆分數")),
+        "交易可行分數": _safe_float(row.get("交易可行分數")),
+        "類股熱度分數": _safe_float(row.get("類股熱度分數")),
+        "是否領先同類股": _safe_str(row.get("是否領先同類股")),
+        "推薦價格": rec_price,
+        "最新價": latest_price,
+        "損益金額": pnl_amt,
+        "損益幅%": pnl_pct,
+        "停損價": stop_price,
+        "賣出目標1": target1,
+        "賣出目標2": target2,
+        "是否達停損": hit_stop,
+        "是否達目標1": hit_target1,
+        "是否達目標2": hit_target2,
+        "目前狀態": _safe_str(row.get("目前狀態")) or "觀察",
+        "是否已實際買進": _safe_str(row.get("是否已實際買進")) or "否",
+        "實際買進價": _safe_float(row.get("實際買進價")),
+        "實際賣出價": _safe_float(row.get("實際賣出價")),
+        "實際報酬%": _safe_float(row.get("實際報酬%")),
+        "推薦理由摘要": _safe_str(row.get("推薦理由摘要")),
+        "備註": _safe_str(row.get("備註")),
+        "來源頁面": "7_股神推薦",
+        "最後更新時間": _now_text(),
+    }
+
+
+def _append_godpick_records(rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
+    existing_records, read_err = _read_godpick_records_from_github()
+    if read_err:
+        return 0, [read_err]
+
+    normalized_existing = []
+    for row in existing_records:
+        if isinstance(row, dict):
+            normalized_existing.append(_normalize_godpick_record(row))
+
+    existed_keys = {
+        (
+            _safe_str(x.get("推薦日期")),
+            _normalize_code(x.get("股票代號")),
+            _safe_str(x.get("推薦模式")),
+        )
+        for x in normalized_existing
+    }
+
+    added = 0
+    messages = []
+
+    for row in rows:
+        norm = _normalize_godpick_record(row)
+        dup_key = (
+            _safe_str(norm.get("推薦日期")),
+            _normalize_code(norm.get("股票代號")),
+            _safe_str(norm.get("推薦模式")),
+        )
+
+        if dup_key in existed_keys:
+            messages.append(f"{norm.get('股票代號')} 今日同模式已存在紀錄")
+            continue
+
+        normalized_existing.append(norm)
+        existed_keys.add(dup_key)
+        added += 1
+        messages.append(f"已記錄：{norm.get('股票代號')} {norm.get('股票名稱')}")
+
+    if added == 0:
+        return 0, messages
+
+    ok_github, msg_github = _write_godpick_records_to_github(normalized_existing)
+    ok_firestore, msg_firestore = _write_godpick_records_to_firestore(normalized_existing)
+
+    st.session_state[_k("last_record_write_detail")] = [
+        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
+        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
+    ]
+
+    if ok_github and ok_firestore:
+        _set_status(f"已成功寫入 {added} 筆到 8_股神推薦紀錄", "success")
+        return added, messages
+
+    if ok_github or ok_firestore:
+        _set_status(f"已部分寫入 {added} 筆到 8_股神推薦紀錄", "warning")
+        return added, messages
+
+    return 0, [msg_github, msg_firestore]
+
+
+def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[str]) -> list[dict[str, Any]]:
+    if rec_df is None or rec_df.empty:
+        return []
+
+    work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in selected_codes])].copy()
+    rows = []
+
+    for _, r in work.iterrows():
+        rows.append(
+            {
+                "rec_id": _new_rec_id(),
+                "推薦日期": _today_text(),
+                "推薦時間": _now_text(),
+                "股票代號": _normalize_code(r.get("股票代號")),
+                "股票名稱": _safe_str(r.get("股票名稱")),
+                "市場別": _safe_str(r.get("市場別")) or "上市",
+                "類別": _normalize_category(r.get("類別")),
+                "推薦模式": _safe_str(r.get("推薦模式")),
+                "推薦等級": _safe_str(r.get("推薦等級")),
+                "推薦總分": _safe_float(r.get("推薦總分")),
+                "起漲前兆分數": _safe_float(r.get("起漲前兆分數")),
+                "交易可行分數": _safe_float(r.get("交易可行分數")),
+                "類股熱度分數": _safe_float(r.get("類股熱度分數")),
+                "是否領先同類股": _safe_str(r.get("是否領先同類股")),
+                "推薦價格": _safe_float(r.get("最新價")),
+                "最新價": _safe_float(r.get("最新價")),
+                "停損價": _safe_float(r.get("停損價")),
+                "賣出目標1": _safe_float(r.get("賣出目標1")),
+                "賣出目標2": _safe_float(r.get("賣出目標2")),
+                "目前狀態": "觀察",
+                "是否已實際買進": "否",
+                "推薦理由摘要": _safe_str(r.get("推薦理由摘要")),
+                "備註": "",
+            }
+        )
+
+    return rows
 
 
 # =========================================================
@@ -2151,6 +2473,7 @@ def main():
         "status_type": "info",
         "rec_pick_group": list(watchlist_map.keys())[0] if watchlist_map else "",
         "rec_pick_codes": [],
+        "rec_record_codes": [],
         "result_saved_at": "",
         "recommend_mode": "飆股模式",
         "risk_strictness": "標準",
@@ -2168,7 +2491,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦｜V2 升級版",
-        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 顯示加速。",
+        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 寫入 8_股神推薦紀錄。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -2539,6 +2862,8 @@ def main():
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
         st.session_state[_k("category_strength_store")] = pd.DataFrame()
         st.session_state[_k("rec_pick_codes_next")] = []
+        st.session_state[_k("rec_pick_codes")] = []
+        st.session_state[_k("rec_record_codes")] = []
         st.rerun()
 
     if submit_recommend or submit_refresh:
@@ -2566,8 +2891,9 @@ def main():
             ("交易可行", "新增拉回買點分數、突破買點分數、追價風險分數、風險報酬評級。", ""),
             ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
             ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
+            ("推薦紀錄", "新增可勾選後直接寫入 8_股神推薦紀錄。", ""),
         ],
-        chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出"],
+        chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
     )
 
     if not st.session_state.get(_k("submitted_once"), False):
@@ -2726,6 +3052,74 @@ def main():
     if detail_lines:
         with st.expander("雙寫狀態明細", expanded=False):
             for line in detail_lines:
+                st.write(f"- {line}")
+
+    render_pro_section("寫入 8_股神推薦紀錄")
+
+    record_code_to_label = {
+        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
+        for _, r in rec_df.iterrows()
+    }
+    record_all_codes = rec_df["股票代號"].astype(str).tolist()
+
+    rr1, rr2 = st.columns([4, 2])
+    with rr1:
+        current_record_codes = [
+            x for x in st.session_state.get(_k("rec_record_codes"), [])
+            if x in record_all_codes
+        ]
+
+        st.multiselect(
+            "勾選要記錄到 8_股神推薦紀錄 的股票",
+            options=record_all_codes,
+            default=current_record_codes,
+            format_func=lambda x: record_code_to_label.get(str(x), str(x)),
+            key=_k("rec_record_codes"),
+        )
+
+    with rr2:
+        st.write("")
+        st.write("")
+        record_to_log_btn = st.button("記錄到 8_股神推薦紀錄", use_container_width=True, type="primary")
+
+    rr3, rr4 = st.columns([1, 1])
+    with rr3:
+        if st.button("全選本輪推薦做紀錄", use_container_width=True):
+            st.session_state[_k("rec_record_codes")] = record_all_codes
+            st.rerun()
+
+    with rr4:
+        if st.button("清空紀錄勾選", use_container_width=True):
+            st.session_state[_k("rec_record_codes")] = []
+            st.rerun()
+
+    if record_to_log_btn:
+        selected_record_codes = [
+            _normalize_code(x)
+            for x in st.session_state.get(_k("rec_record_codes"), [])
+            if _normalize_code(x)
+        ]
+
+        if not selected_record_codes:
+            st.warning("請先勾選要記錄的推薦股票。")
+        else:
+            record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
+            added_count, record_msgs = _append_godpick_records(record_rows)
+
+            if added_count > 0:
+                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
+            else:
+                st.warning("沒有新增任何推薦紀錄。")
+
+            if record_msgs:
+                with st.expander("推薦紀錄寫入明細", expanded=False):
+                    for msg in record_msgs:
+                        st.write(f"- {msg}")
+
+    record_detail_lines = st.session_state.get(_k("last_record_write_detail"), [])
+    if record_detail_lines:
+        with st.expander("8_股神推薦紀錄 同步明細", expanded=False):
+            for line in record_detail_lines:
                 st.write(f"- {line}")
 
     _render_export_block(
@@ -2891,13 +3285,14 @@ def main():
                 ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅、類股熱度與類股加速度。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
                 ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
+                ("寫入推薦紀錄", "可直接勾選推薦結果並批次寫入 8_股神推薦紀錄。", ""),
                 ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
                 ("Excel 匯出", "可匯出完整推薦表、類股強度榜、同類股領先榜、自動因子榜。", ""),
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
                 ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
             ],
-            chips=["V2", "功能不刪", "顯示加速", "三模式", "起漲前兆", "風險過濾", "Excel匯出"],
+            chips=["V2", "功能不刪", "顯示加速", "三模式", "起漲前兆", "風險過濾", "Excel匯出", "推薦紀錄串接"],
         )
 
 
