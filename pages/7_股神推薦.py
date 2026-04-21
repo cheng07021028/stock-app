@@ -7,6 +7,7 @@ import time
 import copy
 import json
 import base64
+import io
 
 import pandas as pd
 import requests
@@ -162,7 +163,7 @@ def _infer_category_from_name(name: str) -> str:
         ("證券", ["證券"]),
         ("航運", ["長榮", "陽明", "萬海", "航運", "海運", "貨櫃"]),
         ("航空觀光", ["華航", "長榮航", "航空", "觀光", "旅遊", "飯店"]),
-        ("鋼鐵", ["中鋼", "大成鋼", "鋼", "鋼鐵"]),
+        ("鋼鐵", ["中鋼", "大成鋼", "鋼鐵", "鋼"]),
         ("塑化", ["台塑", "南亞", "台化", "台塑化", "塑化", "化工"]),
         ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥"]),
         ("車用電子", ["和大", "貿聯", "車用", "車電", "汽車"]),
@@ -234,6 +235,11 @@ def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
         if resp.status_code == 404:
             return "", ""
 
+        if resp.status_code == 401:
+            return "", "GitHub 驗證失敗（401）"
+        if resp.status_code == 403:
+            return "", "GitHub 權限不足（403）"
+
         return "", f"讀取 GitHub 檔案失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
         return "", f"讀取 GitHub 檔案例外：{e}"
@@ -257,7 +263,6 @@ def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple
     content_text = json.dumps(payload, ensure_ascii=False, indent=2)
     encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
 
-    # commit message 保持純英文 ASCII，避免 latin-1 編碼錯誤
     body: dict[str, Any] = {
         "message": f"update watchlist from streamlit at {_now_text()}",
         "content": encoded_content,
@@ -295,14 +300,9 @@ def _firebase_config() -> dict[str, str]:
 
 def _clean_private_key(raw_key: str) -> str:
     private_key = _safe_str(raw_key)
-
-    # 常見格式修正
     private_key = private_key.replace("\\n", "\n").strip()
-
-    # 去 BOM
     if private_key.startswith("\ufeff"):
         private_key = private_key.lstrip("\ufeff")
-
     return private_key
 
 
@@ -323,7 +323,6 @@ def _init_firebase_app():
         raise ValueError("缺少 FIREBASE_CLIENT_EMAIL")
     if not private_key:
         raise ValueError("缺少 FIREBASE_PRIVATE_KEY")
-
     if "BEGIN PRIVATE KEY" not in private_key or "END PRIVATE KEY" not in private_key:
         raise ValueError("FIREBASE_PRIVATE_KEY 不是有效的 PEM 私鑰格式")
 
@@ -340,14 +339,6 @@ def _init_firebase_app():
 
 
 def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
-    """
-    Firestore 結構：
-    - system/watchlist_summary
-    - watchlists/{group_name}
-    - watchlists/{group_name}/stocks/{code}
-
-    會同步刪除群組中已不存在的舊 stocks 文件。
-    """
     try:
         _init_firebase_app()
         db = firestore.client()
@@ -405,7 +396,6 @@ def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tu
                     merge=True,
                 )
 
-            # 清掉舊 stocks 文件
             existing_docs = list(group_ref.collection("stocks").stream())
             for doc in existing_docs:
                 if doc.id not in new_codes:
@@ -994,6 +984,19 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     for n in [5, 10, 20, 60, 120, 240]:
         temp[f"MA{n}"] = close.rolling(n).mean()
 
+    low_9 = low.rolling(9).min()
+    high_9 = high.rolling(9).max()
+    rsv = (close - low_9) / (high_9 - low_9).replace(0, pd.NA) * 100
+    temp["K"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    temp["D"] = temp["K"].ewm(alpha=1 / 3, adjust=False).mean()
+    temp["J"] = 3 * temp["K"] - 2 * temp["D"]
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    temp["DIF"] = ema12 - ema26
+    temp["DEA"] = temp["DIF"].ewm(span=9, adjust=False).mean()
+    temp["MACD_HIST"] = temp["DIF"] - temp["DEA"]
+
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
@@ -1007,8 +1010,11 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     temp["RET5"] = close.pct_change(5) * 100
     temp["RET20"] = close.pct_change(20) * 100
     temp["RET60"] = close.pct_change(60) * 100
+    temp["RET120"] = close.pct_change(120) * 100
 
     temp["UP_DAY"] = (close > close.shift(1)).astype(float)
+    temp["MA20_SLOPE"] = temp["MA20"].diff(3)
+    temp["MA60_SLOPE"] = temp["MA60"].diff(3)
 
     return temp
 
@@ -1060,6 +1066,342 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
             return df, (mk or market_type or "未知")
 
     return pd.DataFrame(), (_safe_str(market_type) or "未知")
+
+
+# =========================================================
+# V2：進階選股精準度
+# =========================================================
+def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {
+            "起漲前兆分數": 0.0,
+            "均線轉強分": 0.0,
+            "量能啟動分": 0.0,
+            "突破準備分": 0.0,
+            "動能翻多分": 0.0,
+            "支撐防守分": 0.0,
+        }
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+
+    close_now = _safe_float(last.get("收盤價"))
+    ma5 = _safe_float(last.get("MA5"))
+    ma10 = _safe_float(last.get("MA10"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    ma20_slope = _safe_float(last.get("MA20_SLOPE"), 0) or 0
+    vol5 = _safe_float(last.get("VOL5"))
+    vol20 = _safe_float(last.get("VOL20"))
+    ret5 = _safe_float(last.get("RET5"), 0) or 0
+    k_now = _safe_float(last.get("K"))
+    d_now = _safe_float(last.get("D"))
+    k_prev = _safe_float(prev.get("K"))
+    d_prev = _safe_float(prev.get("D"))
+    hist_now = _safe_float(last.get("MACD_HIST"))
+    hist_prev = _safe_float(prev.get("MACD_HIST"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+
+    trend_score = 0.0
+    if close_now is not None and ma20 is not None and close_now >= ma20:
+        trend_score += 25
+    if close_now is not None and ma60 is not None and close_now >= ma60:
+        trend_score += 18
+    if ma5 is not None and ma10 is not None and ma5 >= ma10:
+        trend_score += 18
+    if ma20_slope > 0:
+        trend_score += 22
+    trend_score = _score_clip(trend_score)
+
+    volume_score = 0.0
+    if vol5 not in [None, 0] and vol20 not in [None, 0]:
+        ratio = vol5 / vol20
+        if ratio >= 1.8:
+            volume_score = 85
+        elif ratio >= 1.4:
+            volume_score = 72
+        elif ratio >= 1.1:
+            volume_score = 60
+        elif ratio >= 0.9:
+            volume_score = 45
+        else:
+            volume_score = 25
+
+    breakout_score = 0.0
+    if close_now not in [None] and res20 not in [None, 0]:
+        dist = ((res20 - close_now) / res20) * 100
+        if 0 <= dist <= 2:
+            breakout_score = 90
+        elif 2 < dist <= 5:
+            breakout_score = 72
+        elif 5 < dist <= 8:
+            breakout_score = 55
+        elif dist < 0:
+            breakout_score = 60
+        else:
+            breakout_score = 30
+
+    momentum_score = 0.0
+    if k_prev is not None and d_prev is not None and k_now is not None and d_now is not None:
+        if k_prev <= d_prev and k_now > d_now:
+            momentum_score += 45
+        elif k_now > d_now:
+            momentum_score += 28
+
+    if hist_now is not None:
+        if hist_prev is not None and hist_prev <= 0 < hist_now:
+            momentum_score += 35
+        elif hist_now > 0:
+            momentum_score += 20
+
+    radar_m = _safe_float(radar.get("momentum"), 50) or 50
+    momentum_score += radar_m * 0.2
+    momentum_score = _score_clip(momentum_score)
+
+    support_score = 0.0
+    if close_now not in [None] and sup20 not in [None, 0]:
+        dist_sup = ((close_now - sup20) / sup20) * 100
+        if 0 <= dist_sup <= 2:
+            support_score = 85
+        elif 2 < dist_sup <= 5:
+            support_score = 70
+        elif 5 < dist_sup <= 8:
+            support_score = 55
+        elif dist_sup < 0:
+            support_score = 20
+        else:
+            support_score = 40
+
+    if ret5 > 12:
+        breakout_score -= 15
+    if ret5 > 20:
+        breakout_score -= 25
+
+    total = _avg_safe([trend_score, volume_score, breakout_score, momentum_score, support_score], 0)
+
+    return {
+        "起漲前兆分數": _score_clip(total),
+        "均線轉強分": _score_clip(trend_score),
+        "量能啟動分": _score_clip(volume_score),
+        "突破準備分": _score_clip(breakout_score),
+        "動能翻多分": _score_clip(momentum_score),
+        "支撐防守分": _score_clip(support_score),
+    }
+
+
+def _build_risk_filter(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, strictness: str) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {
+            "是否通過風險過濾": False,
+            "風險分數": 0.0,
+            "淘汰原因": "無歷史資料",
+        }
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    atr14 = _safe_float(last.get("ATR14"))
+    vol20 = _safe_float(last.get("VOL20"))
+    ret20 = _safe_float(last.get("RET20"), 0) or 0
+    pressure_dist = None
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    if close_now not in [None] and res20 not in [None, 0]:
+        pressure_dist = ((res20 - close_now) / res20) * 100
+
+    rules = {
+        "寬鬆": {
+            "min_days": 60,
+            "min_vol20": 300000,
+            "max_atr_pct": 11.0,
+            "max_ret20": 35.0,
+        },
+        "標準": {
+            "min_days": 90,
+            "min_vol20": 800000,
+            "max_atr_pct": 8.5,
+            "max_ret20": 28.0,
+        },
+        "嚴格": {
+            "min_days": 120,
+            "min_vol20": 1200000,
+            "max_atr_pct": 6.5,
+            "max_ret20": 22.0,
+        },
+    }
+    cfg = rules.get(_safe_str(strictness), rules["標準"])
+
+    reasons = []
+    risk_score = 100.0
+
+    if len(df) < cfg["min_days"]:
+        reasons.append(f"歷史資料不足{cfg['min_days']}天")
+        risk_score -= 30
+
+    if vol20 not in [None] and vol20 < cfg["min_vol20"]:
+        reasons.append("量能不足")
+        risk_score -= 22
+
+    if close_now not in [None] and atr14 not in [None]:
+        atr_pct = atr14 / close_now * 100 if close_now != 0 else 999
+        if atr_pct > cfg["max_atr_pct"]:
+            reasons.append("波動過大")
+            risk_score -= 18
+
+    if close_now not in [None] and ma20 not in [None] and ma60 not in [None]:
+        if close_now < ma20 and close_now < ma60:
+            reasons.append("中期結構偏弱")
+            risk_score -= 20
+
+    if ret20 > cfg["max_ret20"]:
+        reasons.append("近20日漲幅過大")
+        risk_score -= 16
+
+    if pressure_dist is not None and pressure_dist < 0:
+        risk_score -= 4
+    elif pressure_dist is not None and pressure_dist > 10:
+        risk_score -= 8
+
+    signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
+    risk_score += max(min(signal_score * 1.8, 12), -12)
+    risk_score = _score_clip(risk_score)
+
+    passed = len(reasons) == 0 or risk_score >= 55
+
+    return {
+        "是否通過風險過濾": passed,
+        "風險分數": risk_score,
+        "淘汰原因": "；".join(reasons) if reasons else "",
+    }
+
+
+def _build_trade_feasibility(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {
+            "交易可行分數": 0.0,
+            "追價風險分數": 0.0,
+            "拉回買點分數": 0.0,
+            "突破買點分數": 0.0,
+            "風險報酬評級": "—",
+        }
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"), 0) or 0
+    atr14 = _safe_float(last.get("ATR14"), 0) or max(close_now * 0.03, 1.0)
+    ma20 = _safe_float(last.get("MA20"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+
+    pullback_buy = ma20 if ma20 is not None else (sup20 if sup20 is not None else close_now)
+    breakout_buy = res20 if res20 is not None else close_now
+    stop_price = sup20 if sup20 is not None else max(close_now - atr14, 0)
+    target_1 = res20 if res20 is not None and res20 > close_now else close_now + atr14 * 1.5
+    target_2 = target_1 + atr14 * 1.2
+
+    def _rr(entry: float, stop: float, target: float) -> float:
+        risk = entry - stop
+        reward = target - entry
+        if risk <= 0:
+            return 0.0
+        return reward / risk
+
+    rr_pullback = _rr(pullback_buy, stop_price, target_1) if pullback_buy and stop_price is not None and target_1 else 0.0
+    rr_breakout = _rr(breakout_buy, stop_price, target_2) if breakout_buy and stop_price is not None and target_2 else 0.0
+
+    pullback_score = 25 + min(rr_pullback * 28, 45)
+    breakout_score = 25 + min(rr_breakout * 22, 40)
+
+    chase_risk = 0.0
+    if ma20 not in [None, 0] and close_now not in [None]:
+        bias = ((close_now - ma20) / ma20) * 100
+        if bias >= 12:
+            chase_risk = 88
+        elif bias >= 8:
+            chase_risk = 72
+        elif bias >= 5:
+            chase_risk = 58
+        else:
+            chase_risk = 35
+
+    signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
+    feasibility = _avg_safe(
+        [
+            _score_clip(pullback_score),
+            _score_clip(breakout_score),
+            _score_clip(100 - chase_risk),
+            50 + signal_score * 5,
+        ],
+        0,
+    )
+
+    if feasibility >= 80:
+        rr_grade = "A"
+    elif feasibility >= 68:
+        rr_grade = "B"
+    elif feasibility >= 55:
+        rr_grade = "C"
+    else:
+        rr_grade = "D"
+
+    return {
+        "交易可行分數": _score_clip(feasibility),
+        "追價風險分數": _score_clip(chase_risk),
+        "拉回買點分數": _score_clip(pullback_score),
+        "突破買點分數": _score_clip(breakout_score),
+        "風險報酬評級": rr_grade,
+    }
+
+
+def _build_mode_score(
+    mode: str,
+    technical_score: float,
+    prelaunch_score: float,
+    category_heat_score: float,
+    factor_score: float,
+    trade_score: float,
+    leader_advantage: float,
+) -> tuple[float, str]:
+    mode = _safe_str(mode)
+
+    if mode == "飆股模式":
+        total = (
+            prelaunch_score * 0.35
+            + technical_score * 0.25
+            + category_heat_score * 0.20
+            + factor_score * 0.10
+            + trade_score * 0.10
+        )
+        tag = "突破前夜 / 起漲優先"
+    elif mode == "波段模式":
+        total = (
+            technical_score * 0.30
+            + category_heat_score * 0.25
+            + factor_score * 0.20
+            + trade_score * 0.15
+            + prelaunch_score * 0.10
+        )
+        tag = "趨勢延續 / 波段優先"
+    elif mode == "領頭羊模式":
+        total = (
+            leader_advantage * 0.30
+            + category_heat_score * 0.25
+            + technical_score * 0.20
+            + prelaunch_score * 0.15
+            + factor_score * 0.10
+        )
+        tag = "類股領先 / 龍頭優先"
+    else:
+        total = (
+            technical_score * 0.30
+            + prelaunch_score * 0.20
+            + category_heat_score * 0.20
+            + factor_score * 0.15
+            + trade_score * 0.15
+        )
+        tag = "綜合推薦"
+
+    return _score_clip(total), tag
 
 
 # =========================================================
@@ -1228,7 +1570,7 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date) -> dict[str, Any]:
+def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date, risk_strictness: str) -> dict[str, Any]:
     hist_df, used_market = _get_history_smart(
         stock_no=stock_no,
         stock_name=stock_name,
@@ -1244,6 +1586,9 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
     radar = compute_radar_scores(hist_df)
     auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
     trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
+    prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
+    risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
+    trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
 
     last = hist_df.iloc[-1]
     first = hist_df.iloc[0]
@@ -1274,6 +1619,12 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         50.0,
     )
 
+    technical_score = _score_clip(
+        (radar_avg * 0.55)
+        + ((_safe_float(signal_snapshot.get("score"), 0) or 0) * 7.5)
+        + ((_safe_float(period_pct, 0) or 0) * 0.18)
+    )
+
     return {
         "used_market": used_market,
         "signal_snapshot": signal_snapshot,
@@ -1281,11 +1632,15 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         "radar": radar,
         "auto_factor": auto_factor,
         "trade_plan": trade_plan,
+        "prelaunch": prelaunch,
+        "risk_filter": risk_filter,
+        "trade_feasibility": trade_feasibility,
         "close_now": close_now,
         "period_pct": period_pct,
         "pressure_dist": pressure_dist,
         "support_dist": support_dist,
         "radar_avg": radar_avg,
+        "technical_score": technical_score,
     }
 
 
@@ -1296,6 +1651,10 @@ def _analyze_one_stock_for_recommend(
     end_dt: date,
     min_signal_score: float,
     clean_categories: list[str],
+    mode: str,
+    risk_strictness: str,
+    min_prelaunch_score: float,
+    min_trade_score: float,
 ):
     code = _normalize_code(item.get("code"))
     manual_name = _safe_str(item.get("name"))
@@ -1318,6 +1677,7 @@ def _analyze_one_stock_for_recommend(
         market_type=market_type,
         start_dt=start_dt,
         end_dt=end_dt,
+        risk_strictness=risk_strictness,
     )
     if not bundle:
         return None
@@ -1326,22 +1686,27 @@ def _analyze_one_stock_for_recommend(
     if signal_score < min_signal_score:
         return None
 
+    risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
+    if not risk_pass:
+        return None
+
+    prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
+    if prelaunch_score < min_prelaunch_score:
+        return None
+
+    trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
+    if trade_score < min_trade_score:
+        return None
+
     auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
-    technical_score = _score_clip(signal_score * 12 + (_safe_float(bundle["radar_avg"], 50) or 50) * 0.45)
+    technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
 
-    position_bonus = 0.0
-    if bundle["pressure_dist"] is not None and 0 <= bundle["pressure_dist"] <= 8:
-        position_bonus += 8.0
-    if bundle["support_dist"] is not None and 0 <= bundle["support_dist"] <= 6:
-        position_bonus += 6.0
-
-    base_composite = (
-        technical_score * 0.44
-        + auto_factor_total * 0.40
-        + position_bonus
-        + (_safe_float(bundle["period_pct"], 0) * 0.10 if bundle["period_pct"] is not None else 0)
+    base_composite = _score_clip(
+        technical_score * 0.40
+        + auto_factor_total * 0.32
+        + prelaunch_score * 0.18
+        + trade_score * 0.10
     )
-    base_composite = _score_clip(base_composite)
 
     return {
         "股票代號": code,
@@ -1352,6 +1717,13 @@ def _analyze_one_stock_for_recommend(
         "區間漲跌幅%": bundle["period_pct"],
         "訊號分數": signal_score,
         "雷達均分": bundle["radar_avg"],
+        "技術結構分數": technical_score,
+        "起漲前兆分數": prelaunch_score,
+        "交易可行分數": trade_score,
+        "追價風險分數": _safe_float(bundle["trade_feasibility"].get("追價風險分數"), 0) or 0,
+        "拉回買點分數": _safe_float(bundle["trade_feasibility"].get("拉回買點分數"), 0) or 0,
+        "突破買點分數": _safe_float(bundle["trade_feasibility"].get("突破買點分數"), 0) or 0,
+        "風險報酬評級": _safe_str(bundle["trade_feasibility"].get("風險報酬評級")),
         "自動因子總分": auto_factor_total,
         "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
         "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
@@ -1371,6 +1743,14 @@ def _analyze_one_stock_for_recommend(
         "風險報酬_突破": bundle["trade_plan"]["rr2"],
         "自動因子摘要": bundle["auto_factor"]["factor_summary"],
         "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
+        "風險分數": _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0,
+        "淘汰原因": _safe_str(bundle["risk_filter"].get("淘汰原因")),
+        "均線轉強分": _safe_float(bundle["prelaunch"].get("均線轉強分"), 0) or 0,
+        "量能啟動分": _safe_float(bundle["prelaunch"].get("量能啟動分"), 0) or 0,
+        "突破準備分": _safe_float(bundle["prelaunch"].get("突破準備分"), 0) or 0,
+        "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
+        "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
+        "推薦模式": mode,
     }
 
 
@@ -1390,19 +1770,30 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
             類股平均漲幅=("區間漲跌幅%", "mean"),
             類股平均雷達=("雷達均分", "mean"),
             類股平均自動因子=("自動因子總分", "mean"),
+            類股平均起漲前兆=("起漲前兆分數", "mean"),
+            類股平均交易可行=("交易可行分數", "mean"),
         )
         .reset_index()
     )
 
     grp["類股熱度分數"] = (
-        grp["類股平均總分"] * 0.38
-        + grp["類股平均訊號"] * 6.5
-        + grp["類股平均漲幅"].fillna(0) * 0.45
-        + grp["類股平均雷達"] * 0.22
-        + grp["類股平均自動因子"] * 0.15
+        grp["類股平均總分"] * 0.28
+        + grp["類股平均訊號"] * 5.5
+        + grp["類股平均漲幅"].fillna(0) * 0.32
+        + grp["類股平均雷達"] * 0.16
+        + grp["類股平均自動因子"] * 0.12
+        + grp["類股平均起漲前兆"] * 0.12
+    ).apply(lambda x: _score_clip(x))
+
+    grp["類股加速度"] = (
+        grp["類股平均起漲前兆"] * 0.45
+        + grp["類股平均交易可行"] * 0.20
+        + grp["類股平均訊號"] * 4.0
+        + grp["類股平均漲幅"].fillna(0) * 0.18
     ).apply(lambda x: _score_clip(x))
 
     grp = grp.sort_values(["類股熱度分數", "類股平均總分"], ascending=[False, False]).reset_index(drop=True)
+    grp["類股熱度排名"] = range(1, len(grp) + 1)
     return grp
 
 
@@ -1417,6 +1808,10 @@ def _build_recommend_df(
     min_total_score: float,
     min_signal_score: float,
     selected_categories: list[str],
+    mode: str,
+    risk_strictness: str,
+    min_prelaunch_score: float,
+    min_trade_score: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
 
@@ -1444,6 +1839,10 @@ def _build_recommend_df(
                 end_dt,
                 min_signal_score,
                 clean_categories,
+                mode,
+                risk_strictness,
+                min_prelaunch_score,
+                min_trade_score,
             )
             for item in universe_items
         ]
@@ -1489,21 +1888,39 @@ def _build_recommend_df(
         base_df["類股平均訊號"] = None
         base_df["類股平均漲幅"] = None
         base_df["類股熱度分數"] = None
+        base_df["類股熱度排名"] = None
+        base_df["類股加速度"] = None
     else:
         base_df = base_df.merge(
-            category_strength_df[["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數"]],
+            category_strength_df[
+                [
+                    "類別", "類股平均總分", "類股平均訊號", "類股平均漲幅",
+                    "類股熱度分數", "類股熱度排名", "類股加速度"
+                ]
+            ],
             on="類別",
             how="left",
         )
 
+    base_df["同類股領先幅度"] = (base_df["個股原始總分"] - base_df["類股平均總分"].fillna(0)).apply(lambda x: _score_clip(50 + x))
     base_df["是否領先同類股"] = (
         base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)
     ).map({True: "是", False: "否"})
 
-    base_df["推薦總分"] = (
-        base_df["個股原始總分"] * 0.78
-        + base_df["類股熱度分數"].fillna(0) * 0.22
-    ).apply(lambda x: _score_clip(x))
+    mode_scores = base_df.apply(
+        lambda r: _build_mode_score(
+            mode=_safe_str(mode),
+            technical_score=_safe_float(r.get("技術結構分數"), 0) or 0,
+            prelaunch_score=_safe_float(r.get("起漲前兆分數"), 0) or 0,
+            category_heat_score=_safe_float(r.get("類股熱度分數"), 0) or 0,
+            factor_score=_safe_float(r.get("自動因子總分"), 0) or 0,
+            trade_score=_safe_float(r.get("交易可行分數"), 0) or 0,
+            leader_advantage=_safe_float(r.get("同類股領先幅度"), 0) or 0,
+        ),
+        axis=1,
+    )
+    base_df["推薦總分"] = [x[0] for x in mode_scores]
+    base_df["推薦標籤"] = [x[1] for x in mode_scores]
 
     def _recommend(score: float) -> str:
         if score >= 84:
@@ -1519,17 +1936,18 @@ def _build_recommend_df(
     base_df["推薦理由摘要"] = base_df.apply(
         lambda r: (
             f"{_safe_str(r['類別'])}熱度 {_fmt_num(r['類股熱度分數'],1)}，"
-            f"個股分數 {_fmt_num(r['個股原始總分'],1)}，"
+            f"起漲前兆 {_fmt_num(r['起漲前兆分數'],1)}，"
+            f"交易可行 {_fmt_num(r['交易可行分數'],1)}，"
             f"{'領先同類股' if _safe_str(r['是否領先同類股']) == '是' else '未明顯領先同類股'}，"
-            f"{_safe_str(r['起漲判斷'])}"
+            f"{_safe_str(r['推薦標籤'])}"
         ),
         axis=1,
     )
 
     final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
     final_df = final_df.sort_values(
-        ["推薦總分", "訊號分數", "區間漲跌幅%"],
-        ascending=[False, False, False]
+        ["推薦總分", "起漲前兆分數", "訊號分數", "區間漲跌幅%"],
+        ascending=[False, False, False, False]
     ).reset_index(drop=True)
 
     return final_df, category_strength_df
@@ -1540,10 +1958,13 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅"]
     score_cols = [
-        "訊號分數", "雷達均分", "自動因子總分",
-        "EPS代理分數", "營收動能代理分數", "獲利代理分數",
+        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "交易可行分數",
+        "追價風險分數", "拉回買點分數", "突破買點分數",
+        "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
-        "個股原始總分", "類股平均總分", "類股平均訊號", "類股熱度分數", "推薦總分"
+        "個股原始總分", "類股平均總分", "類股平均訊號", "類股熱度分數",
+        "類股加速度", "同類股領先幅度", "推薦總分", "風險分數",
+        "均線轉強分", "量能啟動分", "突破準備分", "動能翻多分", "支撐防守分"
     ]
 
     for c in price_cols:
@@ -1576,6 +1997,134 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 # =========================================================
+# Excel 匯出
+# =========================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
+    if rec_df is None or rec_df.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty
+
+    rec_export = rec_df.copy()
+
+    leader_df = rec_df.sort_values(
+        ["是否領先同類股", "推薦總分", "類股熱度分數"],
+        ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+    factor_rank = rec_df.sort_values(
+        ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
+        ascending=[False, False, False, False]
+    ).reset_index(drop=True)
+
+    cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
+
+    leader_export = leader_df[
+        [
+            "股票代號",
+            "股票名稱",
+            "類別",
+            "是否領先同類股",
+            "個股原始總分",
+            "類股平均總分",
+            "類股熱度分數",
+            "推薦總分",
+            "推薦理由摘要",
+        ]
+    ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
+
+    factor_export = factor_rank[
+        [
+            "股票代號",
+            "股票名稱",
+            "類別",
+            "自動因子總分",
+            "EPS代理分數",
+            "營收動能代理分數",
+            "獲利代理分數",
+            "大戶鎖碼代理分數",
+            "法人連買代理分數",
+            "自動因子摘要",
+        ]
+    ].head(top_n).copy() if not factor_rank.empty else pd.DataFrame()
+
+    return rec_export, cat_export, leader_export, factor_export
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _build_excel_bytes(
+    rec_export: pd.DataFrame,
+    cat_export: pd.DataFrame,
+    leader_export: pd.DataFrame,
+    factor_export: pd.DataFrame,
+) -> bytes:
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        if rec_export is not None:
+            rec_export.to_excel(writer, sheet_name="完整推薦表", index=False)
+        if cat_export is not None:
+            cat_export.to_excel(writer, sheet_name="類股強度榜", index=False)
+        if leader_export is not None:
+            leader_export.to_excel(writer, sheet_name="同類股領先榜", index=False)
+        if factor_export is not None:
+            factor_export.to_excel(writer, sheet_name="自動因子榜", index=False)
+
+        try:
+            for ws in writer.book.worksheets:
+                ws.freeze_panes = "A2"
+                for col_cells in ws.columns:
+                    max_len = 0
+                    col_letter = col_cells[0].column_letter
+                    for cell in col_cells:
+                        cell_val = "" if cell.value is None else str(cell.value)
+                        if len(cell_val) > max_len:
+                            max_len = len(cell_val)
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 40)
+        except Exception:
+            pass
+
+    output.seek(0)
+    return output.getvalue()
+
+
+def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
+    if rec_df is None or rec_df.empty:
+        return
+
+    rec_export, cat_export, leader_export, factor_export = _build_export_views(
+        rec_df=rec_df,
+        category_strength_df=category_strength_df,
+        top_n=top_n,
+    )
+
+    excel_bytes = _build_excel_bytes(
+        rec_export=rec_export,
+        cat_export=cat_export,
+        leader_export=leader_export,
+        factor_export=factor_export,
+    )
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_name = f"股神推薦_V2_{ts}.xlsx"
+
+    render_pro_section("Excel 匯出")
+    c1, c2 = st.columns([2, 4])
+
+    with c1:
+        st.download_button(
+            label="匯出推薦結果 Excel",
+            data=excel_bytes,
+            file_name=file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    with c2:
+        st.caption("匯出內容：完整推薦表、類股強度榜、同類股領先榜、自動因子榜。")
+
+
+# =========================================================
 # Main
 # =========================================================
 def main():
@@ -1603,6 +2152,10 @@ def main():
         "rec_pick_group": list(watchlist_map.keys())[0] if watchlist_map else "",
         "rec_pick_codes": [],
         "result_saved_at": "",
+        "recommend_mode": "飆股模式",
+        "risk_strictness": "標準",
+        "min_prelaunch_score": 45.0,
+        "min_trade_score": 45.0,
     }
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
@@ -1614,8 +2167,8 @@ def main():
         st.session_state[real_pick_key] = st.session_state.pop(next_pick_key)
 
     render_pro_hero(
-        title="股神推薦｜類股強度版",
-        subtitle="按下按鈕才開始推薦，支援 GitHub + Firestore 雙寫、自選股同步、主檔搜尋更新、加速與 ETA。",
+        title="股神推薦｜V2 升級版",
+        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 顯示加速。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -1860,7 +2413,6 @@ def main():
             form_top_n = st.selectbox("輸出 Top N", topn_options, index=topn_options.index(saved_topn))
 
         d1, d2 = st.columns([2, 2])
-
         with d1:
             limit_options = [100, 200, 300, 500, 1000, 1500, 2000, "全部"]
             saved_limit = st.session_state.get(_k("scan_limit"), 1000)
@@ -1882,7 +2434,25 @@ def main():
                 placeholder="2330\n2454\n3548\n台積電",
             )
 
-        render_pro_section("類型篩選")
+        render_pro_section("模式 / 類型篩選")
+        m1, m2 = st.columns([2, 2])
+        with m1:
+            form_recommend_mode = st.selectbox(
+                "推薦模式",
+                ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"],
+                index=["飆股模式", "波段模式", "領頭羊模式", "綜合模式"].index(
+                    st.session_state.get(_k("recommend_mode"), "飆股模式")
+                ),
+            )
+        with m2:
+            form_risk_strictness = st.selectbox(
+                "風險過濾強度",
+                ["寬鬆", "標準", "嚴格"],
+                index=["寬鬆", "標準", "嚴格"].index(
+                    st.session_state.get(_k("risk_strictness"), "標準")
+                ),
+            )
+
         form_selected_categories = st.multiselect(
             "選擇類型（可多選）",
             options=category_options,
@@ -1891,7 +2461,7 @@ def main():
         )
 
         render_pro_section("推薦門檻")
-        f1, f2 = st.columns(2)
+        f1, f2, f3, f4 = st.columns(4)
         with f1:
             form_min_total_score = st.number_input(
                 "推薦總分下限",
@@ -1902,6 +2472,18 @@ def main():
             form_min_signal_score = st.number_input(
                 "訊號分數下限",
                 value=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+                step=1.0,
+            )
+        with f3:
+            form_min_prelaunch_score = st.number_input(
+                "起漲前兆分數下限",
+                value=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+                step=1.0,
+            )
+        with f4:
+            form_min_trade_score = st.number_input(
+                "交易可行分數下限",
+                value=float(st.session_state.get(_k("min_trade_score"), 45.0)),
                 step=1.0,
             )
 
@@ -1932,6 +2514,10 @@ def main():
             _load_master_df.clear()
         except Exception:
             pass
+        try:
+            _build_excel_bytes.clear()
+        except Exception:
+            pass
         st.success("推薦快取已清除")
 
     if submit_clear:
@@ -1944,6 +2530,10 @@ def main():
         st.session_state[_k("selected_categories")] = ["全部"]
         st.session_state[_k("min_total_score")] = 55.0
         st.session_state[_k("min_signal_score")] = -2.0
+        st.session_state[_k("min_prelaunch_score")] = 45.0
+        st.session_state[_k("min_trade_score")] = 45.0
+        st.session_state[_k("recommend_mode")] = "飆股模式"
+        st.session_state[_k("risk_strictness")] = "標準"
         st.session_state[_k("submitted_once")] = False
         st.session_state[_k("focus_code")] = ""
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
@@ -1961,17 +2551,23 @@ def main():
         st.session_state[_k("selected_categories")] = form_selected_categories if form_selected_categories else ["全部"]
         st.session_state[_k("min_total_score")] = float(form_min_total_score)
         st.session_state[_k("min_signal_score")] = float(form_min_signal_score)
+        st.session_state[_k("min_prelaunch_score")] = float(form_min_prelaunch_score)
+        st.session_state[_k("min_trade_score")] = float(form_min_trade_score)
+        st.session_state[_k("recommend_mode")] = form_recommend_mode
+        st.session_state[_k("risk_strictness")] = form_risk_strictness
         st.session_state[_k("submitted_once")] = True
 
     render_pro_info_card(
-        "類股強度邏輯",
+        "V2 選股邏輯",
         [
-            ("類型細分", "半導體 / AI / 電子 / 金融已再細分成更小分類。", ""),
-            ("類股熱度", "用同類股平均總分、平均訊號、平均漲幅計算。", ""),
-            ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
-            ("最終推薦", "個股原始總分 + 類股熱度分數一起決定。", ""),
+            ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
+            ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
+            ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
+            ("交易可行", "新增拉回買點分數、突破買點分數、追價風險分數、風險報酬評級。", ""),
+            ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
+            ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
         ],
-        chips=["類型更細", "類股強度", "股神版"],
+        chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出"],
     )
 
     if not st.session_state.get(_k("submitted_once"), False):
@@ -2012,6 +2608,10 @@ def main():
             min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
             min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
             selected_categories=selected_categories,
+            mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
+            risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
+            min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+            min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
         )
         _save_recommend_result_to_state(rec_df, category_strength_df)
     else:
@@ -2026,7 +2626,7 @@ def main():
         st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}")
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
-    top_df = rec_df.head(top_n).copy()
+    top_df = rec_df.iloc[:top_n].copy()
 
     strong_count = int((rec_df["推薦等級"] == "強烈關注").sum())
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
@@ -2037,7 +2637,7 @@ def main():
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強烈關注", "value": strong_count, "delta": "最高等級", "delta_class": "pro-kpi-delta-flat"},
             {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": "含類股熱度", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -2128,6 +2728,12 @@ def main():
             for line in detail_lines:
                 st.write(f"- {line}")
 
+    _render_export_block(
+        rec_df=rec_df,
+        category_strength_df=category_strength_df,
+        top_n=top_n,
+    )
+
     render_pro_section("本輪精華推薦")
     st.dataframe(
         _format_df(
@@ -2137,8 +2743,11 @@ def main():
                     "股票名稱",
                     "市場別",
                     "類別",
+                    "推薦模式",
                     "推薦等級",
                     "推薦總分",
+                    "起漲前兆分數",
+                    "交易可行分數",
                     "類股熱度分數",
                     "是否領先同類股",
                     "起漲判斷",
@@ -2177,8 +2786,11 @@ def main():
             [
                 ("股票", f"{_safe_str(focus_row.get('股票代號'))} {_safe_str(focus_row.get('股票名稱'))}", ""),
                 ("類別", _safe_str(focus_row.get("類別")), ""),
+                ("推薦模式", _safe_str(focus_row.get("推薦模式")), ""),
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
+                ("起漲前兆分數", format_number(focus_row.get("起漲前兆分數"), 1), ""),
+                ("交易可行分數", format_number(focus_row.get("交易可行分數"), 1), ""),
                 ("類股熱度分數", format_number(focus_row.get("類股熱度分數"), 1), ""),
                 ("是否領先同類股", _safe_str(focus_row.get("是否領先同類股")), ""),
                 ("起漲判斷", _safe_str(focus_row.get("起漲判斷")), ""),
@@ -2194,9 +2806,19 @@ def main():
             chips=[
                 _safe_str(focus_row.get("推薦等級")),
                 _safe_str(focus_row.get("類別")),
-                _safe_str(focus_row.get("是否領先同類股")),
+                _safe_str(focus_row.get("推薦標籤")),
             ],
         )
+
+    leader_df = rec_df.sort_values(
+        ["是否領先同類股", "推薦總分", "類股熱度分數"],
+        ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+    factor_rank = rec_df.sort_values(
+        ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
+        ascending=[False, False, False, False]
+    ).reset_index(drop=True)
 
     tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "操作說明"])
 
@@ -2205,7 +2827,7 @@ def main():
 
     with tabs[1]:
         category_show = category_strength_df.copy()
-        for c in ["類股平均總分", "類股平均訊號", "類股平均漲幅", "類股平均雷達", "類股平均自動因子", "類股熱度分數"]:
+        for c in ["類股平均總分", "類股平均訊號", "類股平均漲幅", "類股平均雷達", "類股平均自動因子", "類股平均起漲前兆", "類股平均交易可行", "類股熱度分數", "類股加速度"]:
             if c in category_show.columns:
                 if c == "類股平均漲幅":
                     category_show[c] = category_show[c].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
@@ -2214,7 +2836,6 @@ def main():
         st.dataframe(category_show, use_container_width=True, hide_index=True)
 
     with tabs[2]:
-        leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).copy()
         st.dataframe(
             _format_df(
                 leader_df[
@@ -2236,10 +2857,6 @@ def main():
         )
 
     with tabs[3]:
-        factor_rank = rec_df.sort_values(
-            ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"],
-            ascending=[False, False, False, False]
-        ).reset_index(drop=True)
         st.dataframe(
             _format_df(
                 factor_rank[
@@ -2263,23 +2880,24 @@ def main():
 
     with tabs[4]:
         render_pro_info_card(
-            "模組邏輯",
+            "V2 模組邏輯",
             [
                 ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑。", ""),
                 ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
-                ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅與類股熱度分數。", ""),
+                ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
+                ("風險過濾", "新增 寬鬆 / 標準 / 嚴格，先淘汰不合格股票。", ""),
+                ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
+                ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
+                ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅、類股熱度與類股加速度。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
-                ("推薦總分", "個股原始總分 78% + 類股熱度 22%。", ""),
-                ("股票搜尋更新中心", "新增搜尋主檔、更新主檔、加入自選股、分類修正。", ""),
-                ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
                 ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
                 ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
-                ("GitHub 修正", "commit message 改純英文 ASCII，避免 latin-1 錯誤。", ""),
-                ("Firestore 修正", "私鑰增加 BOM/換行清理與 PEM 格式檢查。", ""),
+                ("Excel 匯出", "可匯出完整推薦表、類股強度榜、同類股領先榜、自動因子榜。", ""),
+                ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
                 ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
             ],
-            chips=["按鈕觸發", "類股強度版", "股神版", "進階搜尋更新", "加速+ETA", "GitHub+Firestore雙寫", "PEM修正", "全部掃描"],
+            chips=["V2", "功能不刪", "顯示加速", "三模式", "起漲前兆", "風險過濾", "Excel匯出"],
         )
 
 
