@@ -2947,6 +2947,142 @@ def _build_record_export_bytes(record_rows: list[dict[str, Any]]) -> bytes:
     return output.getvalue()
 
 
+
+
+def _render_recommendation_scoring_guide():
+    st.markdown(
+        """
+        <style>
+        .gp-guide-wrap{
+            background:#f8fafc;
+            border:1px solid rgba(99,102,241,.14);
+            border-radius:18px;
+            padding:18px 18px 14px 18px;
+            margin:18px 0 10px 0;
+        }
+        .gp-guide-title{
+            font-size:1.65rem;
+            font-weight:800;
+            color:#0f172a;
+            margin-bottom:16px;
+        }
+        .gp-guide-grid{
+            display:grid;
+            grid-template-columns:repeat(4,minmax(0,1fr));
+            gap:14px;
+        }
+        .gp-guide-card{
+            background:#ffffff;
+            border:1px solid rgba(99,102,241,.14);
+            border-radius:18px;
+            padding:18px 18px 14px 18px;
+            box-shadow:0 1px 3px rgba(15,23,42,.04);
+            height:100%;
+        }
+        .gp-guide-card h4{
+            margin:0 0 10px 0;
+            font-size:1.28rem;
+            font-weight:800;
+            color:#111827;
+        }
+        .gp-guide-card p{
+            margin:0 0 10px 0;
+            color:#334155;
+            line-height:1.75;
+            font-size:1rem;
+        }
+        .gp-guide-card ul{
+            margin:0;
+            padding-left:1.2rem;
+        }
+        .gp-guide-card li{
+            margin:0 0 8px 0;
+            color:#334155;
+            line-height:1.75;
+            font-size:1rem;
+        }
+        .gp-score-list{display:flex;flex-direction:column;gap:10px;}
+        .gp-score-row{display:flex;align-items:flex-start;gap:10px;line-height:1.6;}
+        .gp-badge{
+            display:inline-block;
+            min-width:92px;
+            text-align:center;
+            padding:6px 10px;
+            border-radius:10px;
+            font-size:.95rem;
+            font-weight:800;
+            border:1px solid transparent;
+            white-space:nowrap;
+        }
+        .gp-badge.green{background:#e8f7ee;color:#15803d;border-color:#b7e4c7;}
+        .gp-badge.green2{background:#eefbf3;color:#166534;border-color:#ccefd7;}
+        .gp-badge.yellow{background:#fff7db;color:#b45309;border-color:#f7d98a;}
+        .gp-badge.orange{background:#fff1e6;color:#c2410c;border-color:#fdc9a6;}
+        .gp-badge.red{background:#feecec;color:#b91c1c;border-color:#f5b5b5;}
+        .gp-guide-foot{
+            margin-top:14px;
+            padding-top:10px;
+            border-top:1px solid rgba(99,102,241,.12);
+            color:#475569;
+            font-size:.98rem;
+            font-weight:600;
+        }
+        @media (max-width: 1200px){
+            .gp-guide-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+        }
+        @media (max-width: 760px){
+            .gp-guide-grid{grid-template-columns:1fr;}
+        }
+        </style>
+        <div class="gp-guide-wrap">
+            <div class="gp-guide-title">推薦條件說明 / 分數解讀</div>
+            <div class="gp-guide-grid">
+                <div class="gp-guide-card">
+                    <h4>評分是怎麼算的？</h4>
+                    <p>系統依多個面向加總評分，分數越高，代表技術面、趨勢面、量價面與風險報酬條件越完整。</p>
+                    <ul>
+                        <li><b>趨勢強度：</b>均線多頭、突破型態、是否站穩關鍵價位</li>
+                        <li><b>量價結構：</b>量能放大、價量配合、是否有主力進場跡象</li>
+                        <li><b>風險控管：</b>回檔風險、追高風險、破線風險、波動風險</li>
+                        <li><b>交易可行：</b>進場點清楚、停損點明確、風險報酬比合理</li>
+                        <li><b>類股動能：</b>所屬類股熱度、資金輪動、族群帶動性</li>
+                    </ul>
+                </div>
+                <div class="gp-guide-card">
+                    <h4>分數代表什麼？</h4>
+                    <div class="gp-score-list">
+                        <div class="gp-score-row"><span class="gp-badge green">90 分以上</span><div><b>強勢買進區：</b>條件完整，可優先關注</div></div>
+                        <div class="gp-score-row"><span class="gp-badge green2">80–89 分</span><div><b>偏多觀察區：</b>適合逢回找買點</div></div>
+                        <div class="gp-score-row"><span class="gp-badge yellow">70–79 分</span><div><b>觀察等待區：</b>條件尚可，需搭配突破或量能確認</div></div>
+                        <div class="gp-score-row"><span class="gp-badge orange">60–69 分</span><div><b>保守區：</b>有題材但訊號不足，先觀察</div></div>
+                        <div class="gp-score-row"><span class="gp-badge red">60 分以下</span><div><b>不建議進場：</b>風險較高，勝率不足</div></div>
+                    </div>
+                </div>
+                <div class="gp-guide-card">
+                    <h4>何時適合買入？</h4>
+                    <ul>
+                        <li>建議 <b>80 分以上</b> 再優先考慮進場</li>
+                        <li>若達 <b>90 分以上</b>，且量價配合、風險報酬佳，可列為高優先名單</li>
+                        <li><b>70–79 分</b> 可列入觀察名單，等待突破、放量或回測支撐成功</li>
+                        <li>低於 <b>70 分</b> 原則上不追價</li>
+                    </ul>
+                </div>
+                <div class="gp-guide-card">
+                    <h4>使用提醒</h4>
+                    <ul>
+                        <li>本分數為輔助判斷，不等於保證獲利</li>
+                        <li>建議搭配停損、部位控管與大盤方向一起判讀</li>
+                        <li>短線、波段、領頭羊模式的標準會略有不同</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="gp-guide-foot">提醒：市場隨時變化，請搭配最新資訊與自身交易策略，謹慎評估風險。</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_record_export_block(rec_df: pd.DataFrame):
     selected_df = st.session_state.get(_k("selected_rec_snapshot"))
     if not isinstance(selected_df, pd.DataFrame) or selected_df.empty:
@@ -3235,6 +3371,8 @@ def main():
         ],
         chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
     )
+
+    _render_recommendation_scoring_guide()
 
     if not st.session_state.get(_k("submitted_once"), False):
         st.info("請先設定條件，再按「開始推薦」。")
