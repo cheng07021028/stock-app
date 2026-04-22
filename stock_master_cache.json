@@ -32228,6 +32228,20 @@
     "repair_reason": ""
   },
   {
+    "code": "7911",
+    "name": "阿波羅電力",
+    "market": "上市",
+    "official_industry_raw": "",
+    "official_industry_source_col": "",
+    "official_industry": "",
+    "theme_category": "其他_官方未知",
+    "category": "其他_官方未知",
+    "source": "utils_fallback",
+    "source_api": "utils_all",
+    "source_rank": 9,
+    "repair_reason": "官方產業未抓到"
+  },
+  {
     "code": "7915",
     "name": "廌家",
     "market": "上市",
