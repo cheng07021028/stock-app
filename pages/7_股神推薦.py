@@ -1780,6 +1780,72 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
     return grp
 
 
+
+def _build_universe_from_market(
+    master_df: pd.DataFrame,
+    market_mode: str,
+    limit_count: int,
+    selected_categories: list[str],
+) -> list[dict[str, str]]:
+    if master_df is None or master_df.empty:
+        return []
+
+    work = master_df.copy()
+
+    market_mode = _safe_str(market_mode)
+    clean_categories = [
+        _normalize_category(x)
+        for x in (selected_categories or [])
+        if _normalize_category(x) and _normalize_category(x) != "全部"
+    ]
+
+    if market_mode == "上市":
+        work = work[work["market"].astype(str) == "上市"].copy()
+    elif market_mode == "上櫃":
+        work = work[work["market"].astype(str) == "上櫃"].copy()
+    elif market_mode == "興櫃":
+        work = work[work["market"].astype(str) == "興櫃"].copy()
+    elif market_mode == "上市+上櫃":
+        work = work[work["market"].astype(str).isin(["上市", "上櫃"])].copy()
+    else:
+        work = work.copy()
+
+    if clean_categories:
+        work = work[
+            work["category"].fillna("").astype(str).isin(clean_categories)
+            | work["official_industry"].fillna("").astype(str).isin(clean_categories)
+        ].copy()
+
+    if "source_rank" in work.columns:
+        work = work.sort_values(["source_rank", "code"], ascending=[True, True])
+    else:
+        work = work.sort_values(["code"], ascending=[True])
+
+    try:
+        limit_count = int(limit_count)
+    except Exception:
+        limit_count = 1000
+
+    if limit_count > 0:
+        work = work.head(limit_count).copy()
+
+    items: list[dict[str, str]] = []
+    for _, r in work.iterrows():
+        code = _normalize_code(r.get("code"))
+        if not code:
+            continue
+        items.append(
+            {
+                "code": code,
+                "name": _safe_str(r.get("name")),
+                "market": _safe_str(r.get("market")) or "上市",
+                "category": _normalize_category(r.get("category")),
+            }
+        )
+
+    return items
+
+
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
