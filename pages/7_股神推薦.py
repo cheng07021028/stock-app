@@ -3782,17 +3782,28 @@ def _apply_master_overrides(base: pd.DataFrame) -> pd.DataFrame:
 
 def _build_master_diagnostics(
     twse_info: dict | None = None,
-    twse_isin_info: dict | None = None,
     tpex_o_info: dict | None = None,
     tpex_r_info: dict | None = None,
     utils_info: dict | None = None,
     merged: pd.DataFrame | None = None,
+    twse_isin_info: dict | None = None,
 ) -> list[str]:
-    twse_info = twse_info or {}
-    twse_isin_info = twse_isin_info or {}
-    tpex_o_info = tpex_o_info or {}
-    tpex_r_info = tpex_r_info or {}
-    utils_info = utils_info or {}
+    """
+    診斷資訊彙整。
+    支援目前主流程的 5 參數呼叫：
+        _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged)
+    也支援額外傳入 twse_isin_info。
+    """
+    if not isinstance(twse_info, dict):
+        twse_info = {}
+    if not isinstance(twse_isin_info, dict):
+        twse_isin_info = {}
+    if not isinstance(tpex_o_info, dict):
+        tpex_o_info = {}
+    if not isinstance(tpex_r_info, dict):
+        tpex_r_info = {}
+    if not isinstance(utils_info, dict):
+        utils_info = {}
     merged = merged.copy() if isinstance(merged, pd.DataFrame) else pd.DataFrame()
 
     def _rows(info: dict) -> int:
@@ -3811,53 +3822,48 @@ def _build_master_diagnostics(
 
     def _cols(info: dict) -> str:
         cols = info.get("columns") or info.get("raw_cols") or []
+        if not isinstance(cols, list):
+            try:
+                cols = list(cols)
+            except Exception:
+                cols = []
         return ", ".join([str(x) for x in cols[:8]])
 
     merged_hit = 0
     if not merged.empty and "official_industry" in merged.columns:
-        merged_hit = int(merged["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
+        merged_hit = int(
+            merged["official_industry"].fillna("").astype(str).str.strip().ne("").sum()
+        )
 
-    logs = [
-        f"TWSE OpenAPI：{_rows(twse_info)} 筆 / 正式產業有值 {_hits(twse_info)} 筆 / 欄位 {_cols(twse_info)}",
-        f"TWSE ISIN 補值：{_rows(twse_isin_info)} 筆 / 正式產業有值 {_hits(twse_isin_info)} 筆 / 欄位 {_cols(twse_isin_info)}",
-        f"TPEX-上櫃：{_rows(tpex_o_info)} 筆 / 正式產業有值 {_hits(tpex_o_info)} 筆 / 欄位 {_cols(tpex_o_info)}",
-        f"TPEX-興櫃：{_rows(tpex_r_info)} 筆 / 正式產業有值 {_hits(tpex_r_info)} 筆 / 欄位 {_cols(tpex_r_info)}",
-        f"utils fallback：{_rows(utils_info)} 筆 / 官方產業有值 {_hits(utils_info)} 筆",
-        f"合併後：{len(merged):,} 筆 / 正式產業有值 {merged_hit:,} 筆",
-    ]
+    logs: list[str] = []
+    logs.append(f"TWSE：{_rows(twse_info)} 筆 / 正式產業有值 {_hits(twse_info)} 筆 / API: {_safe_str(twse_info.get('source_api')) or '-'}")
+    twse_cols = _cols(twse_info)
+    if twse_cols:
+        logs.append(f"TWSE 欄位：{twse_cols}")
+
+    if twse_isin_info:
+        logs.append(f"TWSE ISIN 補值：{_rows(twse_isin_info)} 筆 / 正式產業有值 {_hits(twse_isin_info)} 筆 / API: {_safe_str(twse_isin_info.get('source_api')) or '-'}")
+        isin_cols = _cols(twse_isin_info)
+        if isin_cols:
+            logs.append(f"TWSE ISIN 欄位：{isin_cols}")
+
+    logs.append(f"TPEX-上櫃：{_rows(tpex_o_info)} 筆 / 正式產業有值 {_hits(tpex_o_info)} 筆 / API: {_safe_str(tpex_o_info.get('source_api')) or '-'}")
+    tpex_o_cols = _cols(tpex_o_info)
+    if tpex_o_cols:
+        logs.append(f"TPEX-上櫃 欄位：{tpex_o_cols}")
+
+    logs.append(f"TPEX-興櫃：{_rows(tpex_r_info)} 筆 / 正式產業有值 {_hits(tpex_r_info)} 筆 / API: {_safe_str(tpex_r_info.get('source_api')) or '-'}")
+    tpex_r_cols = _cols(tpex_r_info)
+    if tpex_r_cols:
+        logs.append(f"TPEX-興櫃 欄位：{tpex_r_cols}")
+
+    logs.append(f"utils fallback：{_rows(utils_info)} 筆 / API: {_safe_str(utils_info.get('source_api')) or '-'}")
+    utils_cols = _cols(utils_info)
+    if utils_cols:
+        logs.append(f"utils 欄位：{utils_cols}")
+
+    logs.append(f"合併後：{len(merged)} 筆 / 正式產業有值 {merged_hit} 筆")
     return logs
-
-def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
-    twse_df, twse_info = _fetch_twse_master()
-    twse_isin_df, twse_isin_info = _fetch_twse_isin_listed_fill()
-    tpex_o_df, tpex_o_info = _fetch_tpex_master_one(TPEX_OFFICIAL_O_URL, "上櫃", "mopsfin_t187ap03_O")
-    tpex_r_df, tpex_r_info = _fetch_tpex_master_one(TPEX_OFFICIAL_R_URL, "興櫃", "mopsfin_t187ap03_R")
-    utils_df, utils_info = _fetch_utils_master_fallback()
-    merged = _merge_master_sources(twse_df, tpex_o_df, tpex_r_df, utils_df)
-    merged = _backfill_listed_official_industry(merged, twse_isin_df)
-    merged = _apply_master_overrides(merged)
-    logs = _build_master_diagnostics(twse_info, twse_isin_info, tpex_o_info, tpex_r_info, utils_info, merged)
-    ok, msg = _save_master_cache_to_repo(merged)
-    logs.insert(0, msg)
-    if ok:
-        try:
-            _load_stock_master_cache_from_repo.clear()
-            _load_master_df.clear()
-        except Exception:
-            pass
-    st.session_state[_k("master_diag_logs")] = logs
-    return merged, logs
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_master_df() -> pd.DataFrame:
-    twse_df, twse_info = _fetch_twse_master()
-    tpex_o_df, tpex_o_info = _fetch_tpex_master_one(TPEX_OFFICIAL_O_URL, "上櫃", "mopsfin_t187ap03_O")
-    tpex_r_df, tpex_r_info = _fetch_tpex_master_one(TPEX_OFFICIAL_R_URL, "興櫃", "mopsfin_t187ap03_R")
-    utils_df, utils_info = _fetch_utils_master_fallback()
-    merged = _merge_master_sources(twse_df, tpex_o_df, tpex_r_df, utils_df)
-    merged = _apply_master_overrides(merged)
-    st.session_state[_k("master_diag_logs")] = _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged)
-    return merged
 
 def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
     work = _ensure_master_columns(master_df)
