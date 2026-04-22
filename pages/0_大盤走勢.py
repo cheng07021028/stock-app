@@ -21,8 +21,23 @@ from utils import (
     render_pro_section,
 )
 
-PAGE_TITLE = "大盤走勢｜股神Pro準確率強化版"
-PFX = "macro_godpro_"
+try:
+    from utils import get_normalized_watchlist
+except Exception:
+    get_normalized_watchlist = None
+
+try:
+    from utils import get_history_data
+except Exception:
+    get_history_data = None
+
+try:
+    from utils import get_realtime_stock_info
+except Exception:
+    get_realtime_stock_info = None
+
+PAGE_TITLE = "大盤走勢｜股神Pro因子強化版"
+PFX = "macro_godpro_factor_"
 
 RECORD_COLUMNS = [
     "record_id",
@@ -68,6 +83,16 @@ RECORD_COLUMNS = [
     "外資買賣超估分",
     "期貨選擇權估分",
     "類股輪動估分",
+    "外資買賣超(億)",
+    "三大法人合計(億)",
+    "外資期貨淨單",
+    "PCR",
+    "融資增減(億)",
+    "融券增減張",
+    "強勢族群",
+    "弱勢族群",
+    "重大事件清單",
+    "因子來源狀態",
     "股神推論邏輯",
     "進場確認條件",
     "出場警訊",
@@ -200,8 +225,9 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "國際新聞風險分", "美股因子分", "夜盤因子分", "技術面因子分", "籌碼面因子分", "事件因子分",
         "結構面因子分", "風險面因子分", "大盤基準點", "加權收盤", "加權漲跌%", "成交量估分",
         "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%",
-        "NQ夜盤漲跌%", "外資買賣超估分", "期貨選擇權估分", "類股輪動估分", "實際漲跌點", "實際高點",
-        "實際低點", "點數誤差",
+        "NQ夜盤漲跌%", "外資買賣超估分", "期貨選擇權估分", "類股輪動估分",
+        "外資買賣超(億)", "三大法人合計(億)", "外資期貨淨單", "PCR", "融資增減(億)", "融券增減張",
+        "實際漲跌點", "實際高點", "實際低點", "點數誤差",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -211,7 +237,8 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in [
         "推估日期", "建立時間", "更新時間", "模式名稱", "市場情境", "推估方向", "方向強度", "是否適合進場", "是否適合續抱",
         "是否適合減碼", "是否適合出場", "建議動作", "風險等級", "股神推論邏輯", "進場確認條件", "出場警訊", "主要風險",
-        "建議倉位", "實際方向", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
+        "建議倉位", "強勢族群", "弱勢族群", "重大事件清單", "因子來源狀態",
+        "實際方向", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
     ]:
         x[c] = x[c].fillna("").astype(str)
     return x[RECORD_COLUMNS].copy()
@@ -404,6 +431,214 @@ def _score_from_pct(pct: float | None, scale: float = 2.0, cap: float = 10.0) ->
     return max(-cap, min(cap, pct * scale))
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _fetch_json(url: str, timeout: int = 12) -> Any:
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception:
+        return None
+
+
+def _to_roc_date(dt: pd.Timestamp) -> str:
+    return f"{dt.year-1911}/{dt.month:02d}/{dt.day:02d}"
+
+
+def _extract_num(text: Any, div: float = 1.0):
+    s = _safe_str(text).replace(',', '').replace('+', '')
+    if not s:
+        return None
+    try:
+        return float(s) / div
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
+    dt = pd.to_datetime(pred_date_text, errors='coerce')
+    if pd.isna(dt):
+        dt = pd.Timestamp.today()
+    ymd = dt.strftime('%Y%m%d')
+    urls = [
+        f'https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json',
+        f'https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json',
+    ]
+    data = None
+    for u in urls:
+        data = _fetch_json(u)
+        if data:
+            break
+    out = {"foreign": None, "total3": None, "source": "fallback"}
+    if not data or 'data' not in data:
+        return out
+    foreign = None
+    total3 = None
+    for row in data.get('data', []):
+        label = _safe_str(row[0]) if isinstance(row, list) and row else ''
+        if '外資' in label and '自營商' not in label and len(row) >= 4:
+            nums = [_extract_num(x, 100000000) for x in row[1:4]]
+            nums = [x for x in nums if x is not None]
+            foreign = sum(nums) if nums else foreign
+        if ('三大法人' in label or '合計' in label) and len(row) >= 4:
+            nums = [_extract_num(x, 100000000) for x in row[1:4]]
+            nums = [x for x in nums if x is not None]
+            total3 = sum(nums) if nums else total3
+    out.update({"foreign": foreign, "total3": total3, "source": 'twse'})
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
+    # 公開來源不穩，抓不到就自動降級
+    out = {"foreign_fut_net": None, "pcr": None, "source": 'fallback'}
+    dt = pd.to_datetime(pred_date_text, errors='coerce')
+    if pd.isna(dt):
+        dt = pd.Timestamp.today()
+    date_slash = dt.strftime('%Y/%m/%d')
+    # put/call 嘗試公開CSV/json樣式端點
+    candidates = [
+        f'https://www.taifex.com.tw/cht/3/pcRatio?queryStartDate={date_slash}&queryEndDate={date_slash}',
+        f'https://www.taifex.com.tw/cht/3/futContractsDate?queryDate={date_slash}',
+    ]
+    for u in candidates:
+        try:
+            txt = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
+            if 'Put/Call Ratio' in txt or 'PCR' in txt:
+                import re
+                m = re.search(r'(?:Put/Call Ratio|PCR)[^0-9]{0,20}([0-9]+\.[0-9]+)', txt, re.I)
+                if m:
+                    out['pcr'] = float(m.group(1))
+                    out['source'] = 'taifex_html'
+                    break
+        except Exception:
+            pass
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
+    dt = pd.to_datetime(pred_date_text, errors='coerce')
+    if pd.isna(dt):
+        dt = pd.Timestamp.today()
+    ymd = dt.strftime('%Y%m%d')
+    out = {"margin_change": None, "short_change": None, "source": 'fallback'}
+    urls = [
+        f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={ymd}&selectType=MS&response=json',
+        f'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&date={ymd}&selectType=MS',
+    ]
+    for u in urls:
+        data = _fetch_json(u)
+        if not data or 'data' not in data:
+            continue
+        try:
+            rows = data.get('data', [])
+            # 末行常有合計；抓可解析的最後一筆
+            cand = None
+            for row in reversed(rows):
+                vals = [_extract_num(x) for x in row]
+                if sum(v is not None for v in vals) >= 2:
+                    cand = row
+                    break
+            if cand:
+                nums = [_extract_num(x) for x in cand]
+                nums = [x for x in nums if x is not None]
+                if len(nums) >= 2:
+                    out['margin_change'] = nums[-2] / 100000000 if abs(nums[-2]) > 10000 else nums[-2]
+                    out['short_change'] = nums[-1]
+                    out['source'] = 'twse_margin'
+                    return out
+        except Exception:
+            pass
+    return out
+
+
+def _derive_chip_scores(inst: dict[str, Any], futopt: dict[str, Any], margin: dict[str, Any], adr_pct: float, es_pct: float, nq_pct: float) -> dict[str, Any]:
+    foreign_amt = _safe_float(inst.get('foreign'))
+    total3_amt = _safe_float(inst.get('total3'))
+    foreign_fut_net = _safe_float(futopt.get('foreign_fut_net'))
+    pcr = _safe_float(futopt.get('pcr'))
+    margin_change = _safe_float(margin.get('margin_change'))
+    short_change = _safe_float(margin.get('short_change'))
+
+    foreign_score = 0.0
+    if foreign_amt is not None:
+        foreign_score += max(-8, min(8, foreign_amt / 35.0))
+    else:
+        foreign_score += _score_from_pct(adr_pct, 1.6, 5)
+    if total3_amt is not None:
+        foreign_score += max(-5, min(5, total3_amt / 45.0))
+
+    futures_score = 0.0
+    if foreign_fut_net is not None:
+        futures_score += max(-7, min(7, foreign_fut_net / 12000.0))
+    else:
+        futures_score += _score_from_pct(es_pct, 1.6, 4) + _score_from_pct(nq_pct, 1.8, 4)
+    if pcr is not None:
+        if pcr >= 1.2:
+            futures_score += 1.5
+        elif pcr <= 0.8:
+            futures_score -= 1.5
+
+    margin_score = 0.0
+    if margin_change is not None:
+        # 融資大增偏熱、融資下降偏冷
+        margin_score += max(-4, min(4, -margin_change / 12.0))
+    if short_change is not None:
+        margin_score += max(-3, min(3, short_change / 15000.0))
+
+    return {
+        'foreign_amt': foreign_amt, 'total3_amt': total3_amt, 'foreign_fut_net': foreign_fut_net, 'pcr': pcr,
+        'margin_change': margin_change, 'short_change': short_change,
+        'foreign_score': foreign_score, 'futures_score': futures_score, 'margin_score': margin_score,
+    }
+
+
+def _derive_sector_tags(sox_pct: float, nas_pct: float, adr_pct: float, spx_pct: float) -> tuple[str, str, float]:
+    strong = []
+    weak = []
+    score = 0.0
+    if sox_pct >= 1.0:
+        strong.append('半導體')
+        score += 3.0
+    elif sox_pct <= -1.0:
+        weak.append('半導體')
+        score -= 3.0
+    if nas_pct >= 0.8:
+        strong.append('AI/科技')
+        score += 2.4
+    elif nas_pct <= -0.8:
+        weak.append('AI/科技')
+        score -= 2.4
+    if adr_pct >= 1.0:
+        strong.append('權值電子')
+        score += 2.8
+    elif adr_pct <= -1.0:
+        weak.append('權值電子')
+        score -= 2.8
+    if spx_pct <= -0.8 and not weak:
+        weak.append('廣泛市場')
+        score -= 1.2
+    if not strong:
+        strong.append('無明顯強勢')
+    if not weak:
+        weak.append('無明顯弱勢')
+    return ' / '.join(strong), ' / '.join(weak), score
+
+
+def _derive_event_list(news_rows: list[dict[str, str]]) -> str:
+    hits = []
+    keys = ['war', 'tariff', 'sanction', 'nvidia', 'tsmc', 'apple', 'microsoft', 'fed', 'cpi', '關稅', '戰爭', '制裁', '法說']
+    for row in news_rows:
+        t = _safe_str(row.get('title'))
+        tl = t.lower()
+        if any(k.lower() in tl for k in keys):
+            hits.append(t[:50])
+    return '｜'.join(hits[:5]) if hits else '無重大事件關鍵字'
+
+
 def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     twii = _fetch_stooq("^twii", pred_date_text)
     nas = _fetch_stooq("^ixic", pred_date_text)
@@ -416,6 +651,10 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     usdtwd = _fetch_stooq("usdtwd", pred_date_text)
     news_rows = _search_news_headlines(pred_date_text)
     news_score, news_logic, main_risk = _news_risk_score(news_rows)
+
+    inst = _fetch_twse_institutional(pred_date_text)
+    futopt = _fetch_taifex_sentiment(pred_date_text)
+    margin = _fetch_twse_margin(pred_date_text)
 
     tech_score = 0.0
     structure_notes = []
@@ -437,17 +676,20 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         structure_notes.append("加權跌破MA20")
     tech_score += _score_from_pct(tw_pct, scale=1.3, cap=6)
 
-    us_score = (
-        _score_from_pct(_safe_float(nas.get("pct"), 0.0), 1.8, 8)
-        + _score_from_pct(_safe_float(sox.get("pct"), 0.0), 2.2, 9)
-        + _score_from_pct(_safe_float(spx.get("pct"), 0.0), 1.2, 6)
-        + _score_from_pct(_safe_float(adr.get("pct"), 0.0), 2.0, 8)
-    )
+    adr_pct = _safe_float(adr.get("pct"), 0.0)
+    es_pct = _safe_float(es.get("pct"), 0.0)
+    nq_pct = _safe_float(nq.get("pct"), 0.0)
+    nas_pct = _safe_float(nas.get("pct"), 0.0)
+    sox_pct = _safe_float(sox.get("pct"), 0.0)
+    spx_pct = _safe_float(spx.get("pct"), 0.0)
 
-    night_score = (
-        _score_from_pct(_safe_float(es.get("pct"), 0.0), 2.0, 8)
-        + _score_from_pct(_safe_float(nq.get("pct"), 0.0), 2.4, 9)
+    us_score = (
+        _score_from_pct(nas_pct, 1.8, 8)
+        + _score_from_pct(sox_pct, 2.2, 9)
+        + _score_from_pct(spx_pct, 1.2, 6)
+        + _score_from_pct(adr_pct, 2.0, 8)
     )
+    night_score = _score_from_pct(es_pct, 2.0, 8) + _score_from_pct(nq_pct, 2.4, 9)
 
     vix_val = _safe_float(vix.get("close"), 18.0)
     risk_score = 0.0
@@ -466,19 +708,25 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     elif fx_val <= 31.8:
         risk_score += 1.0
 
-    # 估分模組：先用代理值，後續可再接正式資料源
-    foreign_score = _score_from_pct(_safe_float(adr.get("pct"), 0.0), 1.6, 6) + _score_from_pct(_safe_float(spx.get("pct"), 0.0), 0.8, 3)
-    futures_score = _score_from_pct(_safe_float(es.get("pct"), 0.0), 1.6, 6) + _score_from_pct(_safe_float(nq.get("pct"), 0.0), 1.8, 6)
-    sector_score = _score_from_pct(_safe_float(sox.get("pct"), 0.0), 2.0, 7) + _score_from_pct(_safe_float(nas.get("pct"), 0.0), 1.0, 4)
+    chip = _derive_chip_scores(inst, futopt, margin, adr_pct, es_pct, nq_pct)
+    sector_strong, sector_weak, sector_score = _derive_sector_tags(sox_pct, nas_pct, adr_pct, spx_pct)
+    event_list = _derive_event_list(news_rows)
 
-    # 重大事件代理：VIX + 關鍵新聞風險
+    foreign_score = chip['foreign_score']
+    futures_score = chip['futures_score']
+    margin_score = chip['margin_score']
     event_score = -news_score * 1.8
     if vix_val >= 25:
         event_score -= 2.0
+    if chip['pcr'] is not None:
+        if chip['pcr'] >= 1.2:
+            event_score += 0.8
+        elif chip['pcr'] <= 0.8:
+            event_score -= 0.8
 
-    if tw_pct >= 1.2 and us_score > 3:
+    if tw_pct >= 1.2 and us_score > 3 and foreign_score >= 0:
         scenario = "多頭延續日"
-    elif tw_pct <= -1.2 and us_score < -3:
+    elif tw_pct <= -1.2 and us_score < -3 and foreign_score <= 0:
         scenario = "空頭延續日"
     elif news_score >= 4 or vix_val >= 25:
         scenario = "重大風險事件日"
@@ -486,6 +734,8 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         scenario = "高檔/低檔震盪日"
     else:
         scenario = "一般趨勢日"
+
+    source_status = f"法人:{inst.get('source','fallback')}｜期權:{futopt.get('source','fallback')}｜融資券:{margin.get('source','fallback')}"
 
     return {
         "twii": twii, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
@@ -498,7 +748,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "night_score": night_score,
         "risk_score": risk_score,
         "foreign_score": foreign_score,
-        "futures_score": futures_score,
+        "futures_score": futures_score + margin_score,
         "sector_score": sector_score,
         "event_score": event_score,
         "scenario": scenario,
@@ -507,7 +757,18 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "tw_pct": tw_pct,
         "vix_val": vix_val,
         "fx_val": fx_val,
+        "foreign_amt": chip['foreign_amt'],
+        "total3_amt": chip['total3_amt'],
+        "foreign_fut_net": chip['foreign_fut_net'],
+        "pcr": chip['pcr'],
+        "margin_change": chip['margin_change'],
+        "short_change": chip['short_change'],
+        "sector_strong": sector_strong,
+        "sector_weak": sector_weak,
+        "event_list": event_list,
+        "source_status": source_status,
     }
+
 
 
 def _get_dynamic_weights(records_df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -631,6 +892,8 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         f"美股/ADR {ctx['us_score']:.1f}，夜盤 {ctx['night_score']:.1f}",
         f"新聞風險 {ctx['news_score']:.1f}（{ctx['news_logic']}）",
         f"VIX {ctx['vix_val']:.2f}、美元台幣 {ctx['fx_val']:.2f}，風險面 {ctx['risk_score']:.1f}",
+        f"外資現貨 {(_safe_float(ctx.get('foreign_amt')) or 0):.1f} 億 / 三大法人 {(_safe_float(ctx.get('total3_amt')) or 0):.1f} 億 / PCR {(_safe_float(ctx.get('pcr')) or 0):.2f}",
+        f"強勢族群 {ctx.get('sector_strong','')}；弱勢族群 {ctx.get('sector_weak','')}",
         f"模式 {model_name} 權重下總分 {total_score:.1f}",
     ]
     entry_confirm = "、".join([
@@ -694,6 +957,16 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "出場警訊": exit_alerts,
         "主要風險": ctx["main_risk"],
         "建議倉位": position,
+        "外資買賣超(億)": None if ctx.get("foreign_amt") is None else round(ctx.get("foreign_amt"), 2),
+        "三大法人合計(億)": None if ctx.get("total3_amt") is None else round(ctx.get("total3_amt"), 2),
+        "外資期貨淨單": ctx.get("foreign_fut_net"),
+        "PCR": None if ctx.get("pcr") is None else round(ctx.get("pcr"), 3),
+        "融資增減(億)": None if ctx.get("margin_change") is None else round(ctx.get("margin_change"), 2),
+        "融券增減張": ctx.get("short_change"),
+        "強勢族群": ctx.get("sector_strong", ""),
+        "弱勢族群": ctx.get("sector_weak", ""),
+        "重大事件清單": ctx.get("event_list", ""),
+        "因子來源狀態": ctx.get("source_status", ""),
         "實際方向": "",
         "實際漲跌點": None,
         "實際高點": None,
@@ -795,12 +1068,14 @@ def _format_pred_df(df: pd.DataFrame) -> pd.DataFrame:
     return x
 
 
-def _build_export_bytes(df: pd.DataFrame, scoreboard: pd.DataFrame, pred_df: pd.DataFrame) -> bytes:
+def _build_export_bytes(df: pd.DataFrame, scoreboard: pd.DataFrame, pred_df: pd.DataFrame, stock_df: pd.DataFrame | None = None) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         _ensure_columns(df).to_excel(writer, sheet_name="歷史紀錄", index=False)
         scoreboard.to_excel(writer, sheet_name="模式排行榜", index=False)
         pred_df.to_excel(writer, sheet_name="本次推估", index=False)
+        if stock_df is not None and isinstance(stock_df, pd.DataFrame) and not stock_df.empty:
+            stock_df.to_excel(writer, sheet_name="個股連動", index=False)
         try:
             for ws in writer.book.worksheets:
                 ws.freeze_panes = "A2"
@@ -814,6 +1089,202 @@ def _build_export_bytes(df: pd.DataFrame, scoreboard: pd.DataFrame, pred_df: pd.
     return output.getvalue()
 
 
+
+
+def _safe_pct_text(v: Any) -> str:
+    f = _safe_float(v)
+    return "-" if f is None else f"{f:.2f}%"
+
+
+def _load_watchlist_items() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if get_normalized_watchlist is None:
+        return rows
+    try:
+        data = get_normalized_watchlist()
+        if not isinstance(data, dict):
+            return rows
+        seen = set()
+        for group_name, items in data.items():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                code = _safe_str(item.get("code"))
+                if not code:
+                    continue
+                key = (group_name, code)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "群組": _safe_str(group_name) or "未分組",
+                    "股票代號": code,
+                    "股票名稱": _safe_str(item.get("name")) or code,
+                    "市場別": _safe_str(item.get("market")) or "上市",
+                })
+    except Exception:
+        return []
+    return rows
+
+
+def _parse_custom_stock_text(text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in _safe_str(text).splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        s = s.replace("，", ",").replace("	", ",")
+        parts = [x.strip() for x in s.split(",") if x.strip()]
+        if not parts:
+            continue
+        code = _safe_str(parts[0])
+        name = _safe_str(parts[1]) if len(parts) >= 2 else code
+        market = _safe_str(parts[2]) if len(parts) >= 3 else "上市"
+        rows.append({"群組": "自訂", "股票代號": code, "股票名稱": name, "市場別": market})
+    return rows
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _get_stock_linkage_snapshot(stock_no: str, stock_name: str, market_type: str) -> dict[str, Any]:
+    out = {
+        "最新價": None,
+        "漲跌%": None,
+        "MA5": None,
+        "MA20": None,
+        "技術分": 0.0,
+        "來源": "fallback",
+    }
+    stock_no = _safe_str(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type) or "上市"
+    # 即時價
+    if get_realtime_stock_info is not None:
+        try:
+            info = get_realtime_stock_info(stock_no, stock_name, market_type, refresh_token="macro_link")
+            price = _safe_float(info.get("price"))
+            chg_pct = _safe_float(info.get("pct_chg"))
+            if chg_pct is None:
+                chg_pct = _safe_float(info.get("change_percent"))
+            if chg_pct is None:
+                chg_pct = _safe_float(info.get("漲跌幅"))
+            out["最新價"] = price
+            out["漲跌%"] = chg_pct
+            out["來源"] = _safe_str(info.get("price_source")) or out["來源"]
+        except Exception:
+            pass
+    # 歷史技術面
+    if get_history_data is not None:
+        try:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=80)
+            try:
+                df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=market_type, start_date=start_date, end_date=end_date)
+            except TypeError:
+                try:
+                    df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=market_type, start_dt=start_date, end_dt=end_date)
+                except Exception:
+                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                if "日期" not in temp.columns:
+                    for c in temp.columns:
+                        if str(c).lower() in {"date", "日期"}:
+                            temp = temp.rename(columns={c: "日期"})
+                            break
+                for c in temp.columns:
+                    if str(c).lower() == "close":
+                        temp = temp.rename(columns={c: "收盤價"})
+                if "收盤價" in temp.columns:
+                    temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
+                    temp = temp.dropna(subset=["收盤價"]).copy()
+                    if not temp.empty:
+                        temp["MA5"] = temp["收盤價"].rolling(5).mean()
+                        temp["MA20"] = temp["收盤價"].rolling(20).mean()
+                        last = temp.iloc[-1]
+                        px = out["最新價"] if out["最新價"] is not None else _safe_float(last.get("收盤價"))
+                        ma5 = _safe_float(last.get("MA5"))
+                        ma20 = _safe_float(last.get("MA20"))
+                        out["MA5"] = ma5
+                        out["MA20"] = ma20
+                        tech = 0.0
+                        if px is not None and ma5 is not None:
+                            tech += 1.6 if px >= ma5 else -1.6
+                        if px is not None and ma20 is not None:
+                            tech += 2.4 if px >= ma20 else -2.4
+                        chg_pct = out["漲跌%"]
+                        if chg_pct is not None:
+                            tech += 1.2 if chg_pct > 2 else (0.6 if chg_pct > 0 else (-1.0 if chg_pct < -2 else -0.4 if chg_pct < 0 else 0))
+                        out["技術分"] = tech
+        except Exception:
+            pass
+    return out
+
+
+def _macro_stock_action(total_score: float, risk_level: str, stock_tech_score: float, stock_chg_pct: float | None) -> tuple[str, str, str]:
+    c = stock_chg_pct if stock_chg_pct is not None else 0.0
+    if risk_level in {"極高", "高"} and total_score <= 4:
+        if stock_tech_score <= -1:
+            return "賣出/減碼", "防守", "大盤高風險且個股轉弱"
+        return "觀望", "保守", "大盤風險高，先觀察"
+    if total_score >= 14 and stock_tech_score >= 2.0:
+        if c >= 4:
+            return "不追高，等拉回", "中性", "大盤偏多但個股短線過熱"
+        return "可分批買進", "偏多", "大盤與個股同步偏強"
+    if total_score >= 6 and stock_tech_score >= 0:
+        return "小倉試單", "偏多", "大盤偏多，個股維持強勢"
+    if -5 < total_score < 6:
+        if stock_tech_score >= 2:
+            return "條件式低接", "中性", "大盤震盪，僅強股可低接"
+        if stock_tech_score <= -2:
+            return "減碼觀望", "偏空", "大盤震盪但個股偏弱"
+        return "觀望", "中性", "大盤訊號不夠集中"
+    if stock_tech_score <= -1:
+        return "減碼/出場", "偏空", "大盤偏空且個股轉弱"
+    return "續抱不加碼", "保守", "大盤轉弱，先控倉"
+
+
+def _build_stock_linkage_df(top_pick: dict[str, Any], ctx: dict[str, Any], use_watchlist: bool, custom_text: str) -> pd.DataFrame:
+    rows = _load_watchlist_items() if use_watchlist else []
+    rows.extend(_parse_custom_stock_text(custom_text))
+    if not rows:
+        return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "最新價", "漲跌%", "MA5", "MA20", "個股技術分", "大盤模式", "大盤方向", "股神分數", "風險等級", "建議動作", "偏向", "推論"])
+    out = []
+    macro_score = _safe_float(top_pick.get("股神模式分數"), 0) or 0.0
+    macro_dir = _safe_str(top_pick.get("推估方向"))
+    macro_mode = _safe_str(top_pick.get("模式名稱"))
+    risk_level = _safe_str(top_pick.get("風險等級"))
+    for r in rows:
+        snap = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"])
+        action, bias, reason = _macro_stock_action(macro_score, risk_level, _safe_float(snap.get("技術分"), 0) or 0.0, _safe_float(snap.get("漲跌%")))
+        out.append({
+            "群組": r["群組"],
+            "股票代號": r["股票代號"],
+            "股票名稱": r["股票名稱"],
+            "市場別": r["市場別"],
+            "最新價": snap.get("最新價"),
+            "漲跌%": snap.get("漲跌%"),
+            "MA5": snap.get("MA5"),
+            "MA20": snap.get("MA20"),
+            "個股技術分": snap.get("技術分"),
+            "大盤模式": macro_mode,
+            "大盤方向": macro_dir,
+            "股神分數": macro_score,
+            "風險等級": risk_level,
+            "建議動作": action,
+            "偏向": bias,
+            "推論": reason,
+            "資料來源": snap.get("來源"),
+        })
+    df = pd.DataFrame(out)
+    action_order = {"可分批買進": 1, "小倉試單": 2, "條件式低接": 3, "續抱不加碼": 4, "觀望": 5, "減碼觀望": 6, "賣出/減碼": 7, "減碼/出場": 8, "不追高，等拉回": 9}
+    if not df.empty:
+        df["_sort"] = df["建議動作"].map(lambda x: action_order.get(_safe_str(x), 99))
+        df = df.sort_values(["_sort", "群組", "股票代號"], ascending=[True, True, True]).drop(columns=["_sort"])
+    return df
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
@@ -823,8 +1294,8 @@ def main():
         st.session_state[_k("status_type")] = "info"
 
     render_pro_hero(
-        title="大盤走勢｜股神Pro準確率強化版",
-        subtitle="大盤 / 美股 / 夜盤 / 新聞風險 / 情境分流 / 進出場分離 / 權重自我修正 / 模式排行榜。",
+        title="大盤走勢｜股神Pro因子強化版",
+        subtitle="補強法人 / 期貨選擇權 / 融資融券 / 類股輪動 / 事件因子，抓不到資料時自動降級。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -874,6 +1345,18 @@ def main():
         {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
 
+
+    factor_cols = st.columns(4)
+    with factor_cols[0]:
+        st.metric("外資買賣超(億)", "-" if ctx.get("foreign_amt") is None else f"{ctx.get('foreign_amt'):.1f}", delta=f"三大法人 {0 if ctx.get('total3_amt') is None else ctx.get('total3_amt'):.1f}")
+    with factor_cols[1]:
+        st.metric("PCR", "-" if ctx.get("pcr") is None else f"{ctx.get('pcr'):.2f}", delta=f"期貨估分 {pred_df.iloc[0]['期貨選擇權估分']:.1f}" if not pred_df.empty else "")
+    with factor_cols[2]:
+        st.metric("融資增減(億)", "-" if ctx.get("margin_change") is None else f"{ctx.get('margin_change'):.2f}", delta=f"融券 {0 if ctx.get('short_change') is None else ctx.get('short_change'):.0f}")
+    with factor_cols[3]:
+        st.metric("因子來源", ctx.get("source_status", "fallback"))
+
+
     a1, a2 = st.columns([1.4, 1.2])
     with a1:
         render_pro_info_card(
@@ -897,10 +1380,39 @@ def main():
             "籌碼面因子分", "事件因子分", "國際新聞風險分",
         ]
         st.dataframe(_format_pred_df(pred_df[show_cols]), use_container_width=True, hide_index=True)
+        with st.expander("查看 Pro 因子細節", expanded=False):
+            st.write(f"**強勢族群**：{ctx.get('sector_strong','')}  ")
+            st.write(f"**弱勢族群**：{ctx.get('sector_weak','')}  ")
+            st.write(f"**重大事件清單**：{ctx.get('event_list','')}  ")
+            st.write(f"**因子來源狀態**：{ctx.get('source_status','')}  ")
 
-    tabs = st.tabs(["📌 儲存推估", "🧪 回填實際結果", "🏆 模式排行榜", "📚 歷史紀錄", "📤 Excel匯出"])
+
+    stock_link_df = _build_stock_linkage_df(top_pick, ctx, bool(st.session_state.get(_k("use_watchlist"), True)), _safe_str(st.session_state.get(_k("custom_stock_text"), "")))
+
+    tabs = st.tabs(["🎯 個股連動", "📌 儲存推估", "🧪 回填實際結果", "🏆 模式排行榜", "📚 歷史紀錄", "📤 Excel匯出"])
 
     with tabs[0]:
+        render_pro_section("個股連動｜真正式籌碼 + 大盤風險同步")
+        left_link, right_link = st.columns([1.1, 1.4])
+        with left_link:
+            st.toggle("納入 4_自選股中心 watchlist", value=True, key=_k("use_watchlist"))
+            st.text_area("自訂股票（每行：代號,名稱,市場）", value="", height=120, key=_k("custom_stock_text"), placeholder="2330,台積電,上市\n2454,聯發科,上市")
+            st.caption("邏輯：先用本頁最佳模式判斷大盤，再疊加個股技術分，輸出買進 / 觀望 / 減碼建議。")
+        with right_link:
+            if stock_link_df.empty:
+                st.info("目前沒有可連動的股票。可開啟 watchlist 或輸入自訂股票。")
+            else:
+                k1, k2, k3 = st.columns(3)
+                with k1:
+                    st.metric("可買進", int(stock_link_df[stock_link_df["建議動作"].isin(["可分批買進", "小倉試單", "條件式低接"])].shape[0]))
+                with k2:
+                    st.metric("觀望/續抱", int(stock_link_df[stock_link_df["建議動作"].isin(["觀望", "續抱不加碼", "不追高，等拉回"])].shape[0]))
+                with k3:
+                    st.metric("減碼/出場", int(stock_link_df[stock_link_df["建議動作"].isin(["減碼觀望", "賣出/減碼", "減碼/出場"])].shape[0]))
+        if not stock_link_df.empty:
+            st.dataframe(stock_link_df, use_container_width=True, hide_index=True)
+
+    with tabs[5]:
         render_pro_section("儲存本次推估")
         st.caption("會將 5 套模式一起存入紀錄檔，後續可比較哪一套最近最準。")
         c1, c2 = st.columns([1.2, 4])
@@ -923,7 +1435,7 @@ def main():
                 st.rerun()
         st.dataframe(_format_pred_df(pred_df[[c for c in RECORD_COLUMNS if c in pred_df.columns][:25]]), use_container_width=True, hide_index=True)
 
-    with tabs[1]:
+    with tabs[5]:
         render_pro_section("回填實際結果 / 追蹤準確率")
         hist_df = _get_state_df()
         fill_date = st.selectbox("選擇要回填的日期", options=sorted(hist_df["推估日期"].dropna().astype(str).unique().tolist(), reverse=True) if not hist_df.empty else [pred_date_text], key=_k("fill_date"))
@@ -981,7 +1493,7 @@ def main():
                     _set_status("已套用回填結果，尚未同步 GitHub", "success")
                 st.rerun()
 
-    with tabs[2]:
+    with tabs[5]:
         render_pro_section("模式排行榜 / 自我修正參考")
         scoreboard = _build_scoreboard(_get_state_df())
         if scoreboard.empty:
@@ -991,7 +1503,7 @@ def main():
             best = scoreboard.iloc[0]
             st.success(f"目前最近最強模式：{best['模式名稱']}｜方向命中率 {best['方向命中率']:.1f}%｜平均點數誤差 {best['平均點數誤差'] if not pd.isna(best['平均點數誤差']) else 0:.1f}")
 
-    with tabs[3]:
+    with tabs[5]:
         render_pro_section("歷史紀錄")
         hist = _get_state_df().copy()
         if hist.empty:
@@ -1023,9 +1535,9 @@ def main():
             ]
             st.dataframe(hist[show_cols], use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         render_pro_section("Excel 匯出")
-        export_bytes = _build_export_bytes(_get_state_df(), _build_scoreboard(_get_state_df()), pred_df)
+        export_bytes = _build_export_bytes(_get_state_df(), _build_scoreboard(_get_state_df()), pred_df, stock_link_df)
         st.download_button(
             "📥 下載 Excel（歷史紀錄 / 模式排行榜 / 本次推估）",
             data=export_bytes,
