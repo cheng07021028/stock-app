@@ -21,10 +21,6 @@ def _get_tw_now():
 
 
 def init_firebase():
-    """
-    初始化 Firebase Admin
-    只初始化一次，避免重複 initialize_app() 報錯
-    """
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
@@ -39,9 +35,12 @@ def init_firebase():
     info = json.loads(raw_json)
     cred = credentials.Certificate(info)
 
-    app = firebase_admin.initialize_app(cred, {
-        "storageBucket": bucket_name,
-    })
+    app = firebase_admin.initialize_app(
+        cred,
+        {
+            "storageBucket": bucket_name,
+        },
+    )
     return app
 
 
@@ -51,21 +50,15 @@ def backup_github_repo_to_firebase(
     branch: str = "main",
     github_token: str | None = None,
 ):
-    """
-    抓 GitHub repo zip -> 上傳 Firebase Storage -> 寫入 Firestore 紀錄
-    """
     init_firebase()
 
-    # 公開 repo 可直接抓 zip；若未來改 private，可加 token
     zip_url = f"https://github.com/{repo_owner}/{repo_name}/archive/refs/heads/{branch}.zip"
 
-    headers = {
-        "User-Agent": "streamlit-stock-app-backup"
-    }
+    headers = {"User-Agent": "streamlit-stock-app-backup"}
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
 
-    resp = requests.get(zip_url, headers=headers, timeout=60)
+    resp = requests.get(zip_url, headers=headers, timeout=120)
     resp.raise_for_status()
 
     zip_bytes = resp.content
@@ -74,18 +67,17 @@ def backup_github_repo_to_firebase(
 
     now = _get_tw_now()
     ts = now.strftime("%Y%m%d_%H%M%S")
+
     blob_name = f"github_backups/{repo_name}/{branch}/{repo_name}_{branch}_{ts}.zip"
 
     bucket = storage.bucket()
     blob = bucket.blob(blob_name)
 
-    # 上傳 zip
     blob.upload_from_file(
         io.BytesIO(zip_bytes),
-        content_type="application/zip"
+        content_type="application/zip",
     )
 
-    # 可選：產生可讀 metadata
     blob.metadata = {
         "repo_owner": repo_owner,
         "repo_name": repo_name,
@@ -95,7 +87,6 @@ def backup_github_repo_to_firebase(
     }
     blob.patch()
 
-    # Firestore 寫紀錄
     db = firestore.client()
     record = {
         "repo_owner": repo_owner,
@@ -119,9 +110,6 @@ def backup_github_repo_to_firebase(
 
 
 def list_recent_backups(limit: int = 10):
-    """
-    顯示最近幾次備份
-    """
     init_firebase()
     db = firestore.client()
 
@@ -135,12 +123,14 @@ def list_recent_backups(limit: int = 10):
     rows = []
     for doc in docs:
         d = doc.to_dict() or {}
-        rows.append({
-            "備份時間": d.get("backup_time_tw", ""),
-            "專案": f"{d.get('repo_owner', '')}/{d.get('repo_name', '')}",
-            "分支": d.get("branch", ""),
-            "檔案路徑": d.get("storage_path", ""),
-            "大小(bytes)": d.get("size_bytes", 0),
-            "狀態": d.get("status", ""),
-        })
+        rows.append(
+            {
+                "備份時間": d.get("backup_time_tw", ""),
+                "專案": f"{d.get('repo_owner', '')}/{d.get('repo_name', '')}",
+                "分支": d.get("branch", ""),
+                "檔案路徑": d.get("storage_path", ""),
+                "大小(bytes)": d.get("size_bytes", 0),
+                "狀態": d.get("status", ""),
+            }
+        )
     return rows
