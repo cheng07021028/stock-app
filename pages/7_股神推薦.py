@@ -11,6 +11,7 @@ import json
 import base64
 import io
 import hashlib
+import re
 
 import pandas as pd
 import requests
@@ -249,102 +250,96 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
 # =========================================================
 # 類別推論
 # =========================================================
-INDUSTRY_CODE_MAP = {
-    "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維", "05": "電機機械",
-    "06": "電器電纜", "08": "玻璃陶瓷", "09": "造紙工業", "10": "鋼鐵工業", "11": "橡膠工業",
-    "12": "汽車工業", "13": "電子工業", "14": "建材營造業", "15": "航運業", "16": "觀光餐旅",
-    "17": "金融保險業", "18": "貿易百貨業", "19": "綜合", "20": "其他業", "21": "化學工業",
-    "22": "生技醫療業", "23": "油電燃氣業", "24": "半導體業", "25": "電腦及週邊設備業",
-    "26": "光電業", "27": "通信網路業", "28": "電子零組件業", "29": "電子通路業",
-    "30": "資訊服務業", "31": "其他電子業", "32": "文化創意業", "33": "農業科技業",
-    "35": "綠能環保", "36": "數位雲端", "37": "運動休閒", "38": "居家生活",
-}
-
 CATEGORY_KEYWORD_RULES: list[tuple[str, list[str]]] = [
-    ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc", "晶圓代工"]),
-    ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺", "天鈺", "義隆", "祥碩", "譜瑞", "聯陽", "瑞鼎", "義傳", "ic設計"]),
-    ("封測", ["日月光", "矽品", "京元電", "頎邦", "欣銓", "矽格", "封測", "測試"]),
-    ("記憶體", ["南亞科", "華邦電", "旺宏", "宇瞻", "十銓", "記憶體", "dram", "nand"]),
-    ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓"]),
-    ("半導體設備材料", ["帆宣", "漢唐", "家登", "辛耘", "中砂", "崇越", "萬潤", "均豪", "弘塑", "設備", "材料"]),
-    ("IP矽智財", ["力旺", "晶心科", "智原", "創意", "世芯", "ip", "矽智財"]),
-    ("AI伺服器", ["伺服器", "server", "緯穎", "廣達", "英業達", "緯創", "鴻海", "技嘉", "微星", "華碩"]),
-    ("散熱", ["雙鴻", "奇鋐", "建準", "散熱", "風扇", "熱導管"]),
-    ("機殼", ["勤誠", "晟銘電", "迎廣", "機殼"]),
-    ("電源供應", ["台達電", "光寶科", "群電", "全漢", "康舒", "電源", "供應器"]),
-    ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "威鋒", "usb4", "pcie"]),
-    ("網通交換器", ["智邦", "明泰", "中磊", "智易", "啟碁", "網通", "交換器", "switch"]),
-    ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "眾達", "聯亞", "光聖", "cpo"]),
-    ("PCB載板", ["欣興", "南電", "景碩", "金像電", "健鼎", "台燿", "華通", "載板", "pcb", "銅箔基板"]),
-    ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
-    ("面板", ["友達", "群創", "彩晶", "凌巨", "面板"]),
-    ("光學鏡頭", ["大立光", "玉晶光", "亞光", "今國光", "鏡頭", "光學"]),
-    ("被動元件", ["國巨", "華新科", "禾伸堂", "凱美", "立隆電", "被動元件", "電容", "電阻"]),
-    ("連接器", ["貿聯", "嘉澤", "信邦", "良維", "胡連", "連接器", "端子", "連接線"]),
-    ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "材料", "鋰"]),
-    ("金控", ["金控"]), ("銀行", ["銀行"]), ("保險", ["保險"]), ("證券", ["證券"]),
-    ("航運", ["長榮", "陽明", "萬海", "裕民", "慧洋", "航運", "海運", "貨櫃", "散裝"]),
-    ("航空觀光", ["華航", "長榮航", "星宇", "航空", "觀光", "旅遊", "飯店"]),
-    ("鋼鐵", ["中鋼", "大成鋼", "東和鋼鐵", "鋼鐵", "鋼"]),
-    ("塑化", ["台塑", "南亞", "台化", "台塑化", "台聚", "塑化", "化工"]),
-    ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥", "醫材"]),
-    ("車用電子", ["和大", "貿聯", "堤維西", "東陽", "車用", "車電", "汽車"]),
-    ("綠能儲能", ["中興電", "華城", "士電", "儲能", "綠能", "太陽能", "風電"]),
-    ("營建資產", ["營建", "建設", "資產"]),
-    ("食品民生", ["統一", "大成", "食品", "餐飲", "飲料"]),
-    ("紡織製鞋", ["儒鴻", "聚陽", "志強", "豐泰", "寶成", "紡織", "成衣", "製鞋"]),
-    ("電機機械", ["上銀", "亞德客", "直得", "全球傳動", "機械", "工具機", "自動化"]),
-    ("其他電子", ["電子", "電腦", "光電"]),
+    ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc", "晶圓代工", "foundry", "wafer fabrication"]),
+    ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺", "天鈺", "義隆", "祥碩", "譜瑞", "聯陽", "瑞鼎", "義傳", "ic設計", "fabless"]),
+    ("封測", ["日月光", "矽品", "京元電", "頎邦", "欣銓", "矽格", "封測", "測試", "outsourced semiconductor assembly", "semiconductor testing", "osat"]),
+    ("記憶體", ["南亞科", "華邦電", "旺宏", "宇瞻", "十銓", "記憶體", "dram", "nand", "flash memory", "memory"]),
+    ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓", "silicon wafer", "wafer"]),
+    ("半導體設備材料", ["帆宣", "漢唐", "家登", "辛耘", "中砂", "崇越", "萬潤", "均豪", "弘塑", "設備", "材料", "semiconductor equipment", "semiconductor materials"]),
+    ("IP矽智財", ["力旺", "晶心科", "智原", "創意", "世芯", "ip", "矽智財", "intellectual property"]),
+    ("AI伺服器", ["伺服器", "server", "緯穎", "廣達", "英業達", "緯創", "鴻海", "技嘉", "微星", "華碩", "data center", "ai server"]),
+    ("散熱", ["雙鴻", "奇鋐", "建準", "散熱", "風扇", "熱導管", "thermal", "cooling"]),
+    ("機殼", ["勤誠", "晟銘電", "迎廣", "機殼", "chassis", "enclosure"]),
+    ("電源供應", ["台達電", "光寶科", "群電", "全漢", "康舒", "電源", "供應器", "power supply", "power management"]),
+    ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "威鋒", "usb4", "pcie", "high speed"]),
+    ("網通交換器", ["智邦", "明泰", "中磊", "智易", "啟碁", "網通", "交換器", "switch", "router", "networking", "communication equipment"]),
+    ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "眾達", "聯亞", "光聖", "cpo", "optical", "photonics", "fiber"]),
+    ("PCB載板", ["欣興", "南電", "景碩", "金像電", "健鼎", "台燿", "華通", "載板", "pcb", "銅箔基板", "printed circuit", "substrate"]),
+    ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝", "ems", "electronics manufacturing"]),
+    ("面板", ["友達", "群創", "彩晶", "凌巨", "面板", "display", "lcd", "oled"]),
+    ("光學鏡頭", ["大立光", "玉晶光", "亞光", "今國光", "鏡頭", "光學", "lens", "optical lens"]),
+    ("被動元件", ["國巨", "華新科", "禾伸堂", "凱美", "立隆電", "被動元件", "電容", "電阻", "capacitor", "resistor", "passive"]),
+    ("連接器", ["貿聯", "嘉澤", "信邦", "良維", "胡連", "連接器", "端子", "連接線", "connector", "cable assembly"]),
+    ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "鋰", "battery", "cathode", "anode"]),
+    ("金控", ["金控", "financial holding"]),
+    ("銀行", ["銀行", "bank", "banking"]),
+    ("保險", ["保險", "insurance"]),
+    ("證券", ["證券", "brokerage", "securities"]),
+    ("航運", ["長榮", "陽明", "萬海", "裕民", "慧洋", "航運", "海運", "貨櫃", "散裝", "shipping", "marine transportation"]),
+    ("航空觀光", ["華航", "長榮航", "星宇", "航空", "觀光", "旅遊", "飯店", "airline", "tourism", "hotel"]),
+    ("鋼鐵", ["中鋼", "大成鋼", "東和鋼鐵", "鋼鐵", "steel", "metal"]),
+    ("塑化", ["台塑", "南亞", "台化", "台塑化", "台聚", "塑化", "化工", "petrochemical", "chemical"]),
+    ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥", "醫材", "biotech", "pharmaceutical", "medical"]),
+    ("車用電子", ["和大", "貿聯", "堤維西", "東陽", "車用", "車電", "汽車", "automotive", "auto parts"]),
+    ("綠能儲能", ["中興電", "華城", "士電", "儲能", "綠能", "太陽能", "風電", "energy storage", "renewable", "solar", "wind"]),
+    ("營建資產", ["營建", "建設", "資產", "construction", "real estate", "property"]),
+    ("食品民生", ["統一", "大成", "食品", "餐飲", "飲料", "food", "beverage", "consumer staples"]),
+    ("紡織製鞋", ["儒鴻", "聚陽", "志強", "豐泰", "寶成", "紡織", "成衣", "製鞋", "textile", "apparel", "footwear"]),
+    ("電機機械", ["上銀", "亞德客", "直得", "全球傳動", "機械", "工具機", "自動化", "machinery", "industrial", "automation"]),
+    ("其他電子", ["電子", "電腦", "光電", "technology", "electronic components"]),
 ]
-
-OFFICIAL_TO_THEME_RULES: list[tuple[list[str], str]] = [
-    (["半導體業"], "半導體"),
-    (["電腦及週邊設備業"], "AI伺服器"),
-    (["電子零組件業"], "電子零組件"),
-    (["通信網路業"], "網通交換器"),
-    (["光電業"], "光學鏡頭"),
-    (["資訊服務業", "數位雲端"], "資訊服務"),
-    (["金融保險業"], "金融保險"),
-    (["航運業"], "航運"),
-    (["鋼鐵工業"], "鋼鐵"),
-    (["建材營造業"], "營建資產"),
-    (["觀光餐旅"], "航空觀光"),
-    (["生技醫療業"], "生技醫療"),
-    (["電機機械"], "電機機械"),
-    (["食品工業"], "食品民生"),
-    (["紡織纖維"], "紡織製鞋"),
-    (["綠能環保"], "綠能儲能"),
-    (["汽車工業"], "車用電子"),
-    (["塑膠工業", "化學工業", "油電燃氣業"], "塑化"),
-]
-
-
-
-BUILTIN_TOPIC_CODE_MAP: dict[str, str] = {
-    "2330": "晶圓代工", "2303": "晶圓代工", "5347": "晶圓代工", "6770": "晶圓代工",
-    "2454": "IC設計", "2379": "IC設計", "3034": "IC設計", "3443": "IC設計", "3661": "IC設計",
-    "5274": "IC設計", "6531": "IC設計", "3035": "IC設計", "6415": "IC設計",
-    "3711": "IC設計", "3529": "封測", "2449": "封測",
-    "8299": "半導體設備材料", "6187": "半導體設備材料", "8028": "半導體設備材料",
-    "6669": "AI伺服器", "3231": "AI伺服器", "2382": "AI伺服器", "2356": "AI伺服器",
-    "3017": "AI伺服器", "3706": "AI伺服器", "8210": "機殼", "3017": "AI伺服器",
-    "3324": "散熱", "3017": "AI伺服器", "3653": "高速傳輸", "5269": "高速傳輸",
-    "3413": "光通訊", "4908": "光通訊", "3081": "光通訊", "6136": "光通訊", "6861": "光通訊",
-    "2345": "網通交換器", "2344": "網通交換器", "3596": "網通交換器",
-    "2383": "電源供應", "2308": "電源供應", "6414": "電源供應",
-    "3017": "AI伺服器", "3036": "機殼", "2460": "機殼",
-    "8046": "PCB載板", "3189": "PCB載板", "3037": "高速傳輸",
-}
-
 
 CANONICAL_CATEGORY_ALIAS = {
-    "半導體": "半導體", "半導體設備": "半導體設備材料", "設備材料": "半導體設備材料",
-    "半導體材料": "半導體設備材料", "伺服器": "AI伺服器", "server": "AI伺服器",
-    "網通": "網通交換器", "交換器": "網通交換器", "光通訊/cpo": "光通訊",
-    "載板": "PCB載板", "pcb": "PCB載板", "ems": "EMS代工", "鏡頭": "光學鏡頭",
-    "光學": "光學鏡頭", "被動": "被動元件", "電池": "電池材料", "生技": "生技醫療",
-    "醫療": "生技醫療", "車電": "車用電子", "綠能": "綠能儲能", "建材營造": "營建資產",
-    "營建": "營建資產", "機械": "電機機械", "金融": "金融保險", "零組件": "電子零組件",
+    "半導體": "半導體設備材料",
+    "半導體設備": "半導體設備材料",
+    "設備材料": "半導體設備材料",
+    "半導體材料": "半導體設備材料",
+    "伺服器": "AI伺服器",
+    "server": "AI伺服器",
+    "網通": "網通交換器",
+    "交換器": "網通交換器",
+    "光通訊/cpo": "光通訊",
+    "載板": "PCB載板",
+    "pcb": "PCB載板",
+    "ems": "EMS代工",
+    "鏡頭": "光學鏡頭",
+    "光學": "光學鏡頭",
+    "被動": "被動元件",
+    "電池": "電池材料",
+    "生技": "生技醫療",
+    "醫療": "生技醫療",
+    "車電": "車用電子",
+    "綠能": "綠能儲能",
+    "建材營造": "營建資產",
+    "營建": "營建資產",
+    "機械": "電機機械",
+    "半導體業": "半導體業",
+    "電子零組件業": "電子零組件業",
+    "電腦及週邊設備業": "電腦及週邊設備業",
+}
+
+OFFICIAL_INDUSTRY_ALIAS = {
+    "semi": "半導體業",
+    "semiconductor": "半導體業",
+    "semiconductors": "半導體業",
+    "半導體": "半導體業",
+    "electronics components": "電子零組件業",
+    "electronic components": "電子零組件業",
+    "電子零組件": "電子零組件業",
+    "computer hardware": "電腦及週邊設備業",
+    "computer peripheral": "電腦及週邊設備業",
+    "computer and peripheral equipment": "電腦及週邊設備業",
+    "電腦及週邊設備": "電腦及週邊設備業",
+    "communication network": "通信網路業",
+    "communication equipment": "通信網路業",
+    "通信網路": "通信網路業",
+    "shipping": "航運業",
+    "marine transportation": "航運業",
+    "banks": "金融保險業",
+    "banking": "金融保險業",
+    "insurance": "金融保險業",
+    "financial": "金融保險業",
 }
 
 def _canonical_category(v: Any) -> str:
@@ -357,83 +352,199 @@ def _canonical_category(v: Any) -> str:
             return target
     return text
 
+def _canonical_official_industry(v: Any) -> str:
+    text = _normalize_category(v)
+    if not text:
+        return ""
+    key = text.lower()
+    for alias, target in OFFICIAL_INDUSTRY_ALIAS.items():
+        if alias in key:
+            return target
+    return text
+
 def _infer_category_from_name(name: str) -> str:
     n = _safe_str(name)
     if not n:
-        return "其他"
+        return "其他_官方未知"
     s = n.lower()
     for cat, keywords in CATEGORY_KEYWORD_RULES:
         for kw in keywords:
             if kw.lower() in s:
                 return cat
-    return "其他"
+    return "其他_主題未映射"
 
-def _normalize_official_industry(v: Any) -> str:
-    text = _normalize_category(v)
-    if not text:
-        return ""
-    text = text.replace("．", ".")
-    if text.isdigit():
-        text = text.zfill(2)
-        return INDUSTRY_CODE_MAP.get(text, text)
-    alias = {
-        "金融保險": "金融保險業", "觀光事業": "觀光餐旅", "通信網路業": "通信網路業",
-        "電機機械業": "電機機械", "其他電子業": "其他電子業", "電子零組件": "電子零組件業",
-        "電腦及週邊": "電腦及週邊設備業", "生技醫療": "生技醫療業", "農業科技": "農業科技業",
+def _category_set() -> set[str]:
+    return {x[0] for x in CATEGORY_KEYWORD_RULES}
+
+def _yahoo_symbol_candidates(code: Any, market: Any = "") -> list[str]:
+    c = _normalize_code(code)
+    m = _safe_str(market)
+    if not c:
+        return []
+    if m == "上市":
+        return [f"{c}.TW", f"{c}.TWO"]
+    if m in {"上櫃", "興櫃"}:
+        return [f"{c}.TWO", f"{c}.TW"]
+    return [f"{c}.TW", f"{c}.TWO"]
+
+def _guess_market_from_symbol(symbol: str) -> str:
+    s = _safe_str(symbol).upper()
+    if s.endswith(".TW"):
+        return "上市"
+    if s.endswith(".TWO"):
+        return "上櫃"
+    return ""
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_yahoo_profile(code: Any, market: Any = "") -> dict[str, Any]:
+    """
+    Yahoo Finance / Yahoo 奇摩股市 輔助分類來源。
+    先用 quoteSummary assetProfile / summaryProfile，
+    不行再嘗試抓 quote 頁面的嵌入 JSON。
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
     }
-    return alias.get(text, text)
+    result = {
+        "ok": False,
+        "symbol": "",
+        "market": _safe_str(market),
+        "sector": "",
+        "industry": "",
+        "longBusinessSummary": "",
+        "source": "",
+    }
 
-def _infer_theme_category(code: Any = "", name: str = "", official_industry: Any = "", raw_category: Any = "") -> str:
-    code = _normalize_code(code)
-    if code and code in BUILTIN_TOPIC_CODE_MAP:
-        return BUILTIN_TOPIC_CODE_MAP[code]
+    for symbol in _yahoo_symbol_candidates(code, market):
+        try:
+            url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+            params = {"modules": "assetProfile,summaryProfile,price"}
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                payload = resp.json()
+                q = (((payload or {}).get("quoteSummary") or {}).get("result") or [None])[0] or {}
+                asset = q.get("assetProfile") or {}
+                summary = q.get("summaryProfile") or {}
+                price = q.get("price") or {}
+                sector = _safe_str(asset.get("sector")) or _safe_str(summary.get("sector"))
+                industry = _safe_str(asset.get("industry")) or _safe_str(summary.get("industry"))
+                biz = _safe_str(asset.get("longBusinessSummary")) or _safe_str(summary.get("longBusinessSummary"))
+                if sector or industry or biz:
+                    result.update({
+                        "ok": True,
+                        "symbol": symbol,
+                        "market": _safe_str(market) or _guess_market_from_symbol(_safe_str(price.get("symbol")) or symbol),
+                        "sector": sector,
+                        "industry": industry,
+                        "longBusinessSummary": biz,
+                        "source": "yahoo_quoteSummary",
+                    })
+                    return result
+        except Exception:
+            pass
 
-    official = _normalize_official_industry(official_industry)
-    raw_cat = _canonical_category(raw_category)
-    if raw_cat and raw_cat != official and raw_cat not in {"其他", "其他_官方未知", "其他_主題未映射"}:
-        return raw_cat
+        # HTML fallback
+        try:
+            url = f"https://tw.stock.yahoo.com/quote/{symbol}/profile"
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                html = resp.text
+                sector = ""
+                industry = ""
+                biz = ""
+                for pat in [
+                    r'"sector"\s*:\s*"([^"]+)"',
+                    r'"industry"\s*:\s*"([^"]+)"',
+                    r'"longBusinessSummary"\s*:\s*"([^"]+)"',
+                ]:
+                    m = re.search(pat, html)
+                    if m:
+                        if "sector" in pat:
+                            sector = m.group(1)
+                        elif "industry" in pat:
+                            industry = m.group(1)
+                        else:
+                            biz = m.group(1)
+                if sector or industry or biz:
+                    result.update({
+                        "ok": True,
+                        "symbol": symbol,
+                        "market": _safe_str(market) or _guess_market_from_symbol(symbol),
+                        "sector": sector,
+                        "industry": industry,
+                        "longBusinessSummary": biz,
+                        "source": "yahoo_html",
+                    })
+                    return result
+        except Exception:
+            pass
 
-    name_guess = _infer_category_from_name(name)
-    if name_guess != "其他":
-        return name_guess
+    return result
 
-    for official_list, theme in OFFICIAL_TO_THEME_RULES:
-        if official in official_list:
-            return theme
-
-    if official:
-        return "其他_主題未映射"
-    return "其他_官方未知"
-
-def _infer_category_from_record(
-    name: Any = "",
-    raw_category: Any = "",
-    official_industry: Any = "",
+def _infer_theme_category(
     code: Any = "",
+    name: Any = "",
+    official_industry: Any = "",
+    raw_category: Any = "",
+    yahoo_sector: Any = "",
+    yahoo_industry: Any = "",
+    yahoo_summary: Any = "",
 ) -> str:
     code = _normalize_code(code)
     name = _safe_str(name)
     raw_category = _canonical_category(raw_category)
-    official_industry = _normalize_official_industry(official_industry)
+    official_industry = _canonical_official_industry(official_industry)
+    yahoo_sector = _normalize_category(yahoo_sector)
+    yahoo_industry = _normalize_category(yahoo_industry)
+    yahoo_summary = _safe_str(yahoo_summary)
 
-    if code and code in BUILTIN_TOPIC_CODE_MAP:
-        return BUILTIN_TOPIC_CODE_MAP[code]
-
-    if raw_category and raw_category not in {"其他", "其他_官方未知", "其他_主題未映射"}:
+    # 1. 既有合法主題類別直接回傳
+    if raw_category in _category_set():
         return raw_category
 
-    theme = _infer_theme_category(
+    # 2. 綜合文字規則（名稱 + 官方 + Yahoo）
+    context = " ".join([
+        code,
+        name,
+        raw_category,
+        official_industry,
+        yahoo_sector,
+        yahoo_industry,
+        yahoo_summary,
+    ]).lower()
+
+    for cat, keywords in CATEGORY_KEYWORD_RULES:
+        for kw in keywords:
+            if kw.lower() in context:
+                return cat
+
+    # 3. 官方 / Yahoo 行業大類 fallback，不直接掉其他
+    preferred = official_industry or _canonical_official_industry(yahoo_industry) or _canonical_official_industry(yahoo_sector)
+    if preferred:
+        return preferred
+
+    return "其他_官方未知"
+
+def _infer_category_from_record(
+    code: Any = "",
+    name: Any = "",
+    raw_category: Any = "",
+    official_industry: Any = "",
+    yahoo_sector: Any = "",
+    yahoo_industry: Any = "",
+    yahoo_summary: Any = "",
+) -> str:
+    return _infer_theme_category(
         code=code,
         name=name,
         official_industry=official_industry,
         raw_category=raw_category,
+        yahoo_sector=yahoo_sector,
+        yahoo_industry=yahoo_industry,
+        yahoo_summary=yahoo_summary,
     )
-    if theme:
-        return theme
-
-    if official_industry:
-        return "其他_主題未映射"
-    return "其他_官方未知"
 
 
 # =========================================================
@@ -1060,36 +1171,33 @@ def _write_json_to_github(path: str, payload: Any, commit_message: str) -> tuple
 def _load_stock_master_cache_from_repo() -> pd.DataFrame:
     cfg = _stock_master_config()
     payload, _ = _read_json_from_github(cfg["master_path"])
+    cols = ["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"]
     if isinstance(payload, list):
         df = pd.DataFrame(payload)
-        for c in ["code", "name", "market", "official_industry", "theme_category", "category"]:
+        for c in cols:
             if c not in df.columns:
                 df[c] = ""
         df["code"] = df["code"].map(_normalize_code)
         df["name"] = df["name"].map(_safe_str)
         df["market"] = df["market"].map(_safe_str)
-        df["official_industry"] = df["official_industry"].map(_normalize_official_industry)
-        df["theme_category"] = df.apply(
-            lambda r: _infer_theme_category(
-                code=r.get("code"),
-                name=r.get("name"),
-                official_industry=r.get("official_industry"),
-                raw_category=r.get("theme_category") or r.get("category"),
-            ),
-            axis=1,
-        )
+        df["official_industry"] = df["official_industry"].map(_canonical_official_industry)
+        df["yahoo_sector"] = df["yahoo_sector"].map(_normalize_category)
+        df["yahoo_industry"] = df["yahoo_industry"].map(_normalize_category)
         df["category"] = df.apply(
             lambda r: _infer_category_from_record(
-                name=r.get("name"),
-                raw_category=r.get("category") or r.get("theme_category"),
-                official_industry=r.get("official_industry"),
                 code=r.get("code"),
+                name=r.get("name"),
+                raw_category=r.get("category"),
+                official_industry=r.get("official_industry"),
+                yahoo_sector=r.get("yahoo_sector"),
+                yahoo_industry=r.get("yahoo_industry"),
             ),
             axis=1,
         )
+        df["category_source"] = df["category_source"].replace("", "repo_cache")
         df = df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-        return df[[c for c in ["code", "name", "market", "official_industry", "theme_category", "category"] if c in df.columns]].copy()
-    return pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "category"])
+        return df[cols].copy()
+    return pd.DataFrame(columns=cols)
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
@@ -1107,6 +1215,7 @@ def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
                     "name": _safe_str(item.get("name")),
                     "market": _safe_str(item.get("market")),
                     "category": _canonical_category(item.get("category")),
+                    "official_industry": _canonical_official_industry(item.get("official_industry")),
                     "updated_at": _safe_str(item.get("updated_at")),
                 }
             else:
@@ -1115,63 +1224,81 @@ def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
                     "name": "",
                     "market": "",
                     "category": _canonical_category(item),
+                    "official_industry": "",
                     "updated_at": "",
                 }
         return out
     return {}
 
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_topic_code_whitelist_map() -> dict[str, str]:
-    cfg = _stock_master_config()
-    payload, _ = _read_json_from_github(cfg["whitelist_path"])
-    out: dict[str, str] = {}
-    for code, topic in BUILTIN_TOPIC_CODE_MAP.items():
-        norm_code = _normalize_code(code)
-        if norm_code and _safe_str(topic):
-            out[norm_code] = _canonical_category(topic)
-    if isinstance(payload, dict):
-        for code, item in payload.items():
-            norm_code = _normalize_code(code)
-            if not norm_code:
-                continue
-            if isinstance(item, dict):
-                topic = _safe_str(item.get("topic") or item.get("category") or item.get("theme_category"))
-            else:
-                topic = _safe_str(item)
-            if topic:
-                out[norm_code] = _canonical_category(topic)
-    return out
+def _enrich_master_with_yahoo(master_df: pd.DataFrame, max_rows: int = 600) -> tuple[pd.DataFrame, list[str]]:
+    if master_df is None or master_df.empty:
+        return pd.DataFrame(columns=["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"]), ["主檔為空，無法補 Yahoo"]
+    work = master_df.copy()
+    for c in ["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"]:
+        if c not in work.columns:
+            work[c] = ""
+    needs = work[
+        (work["yahoo_industry"].astype(str).str.strip() == "")
+        | (work["category"].astype(str).str.startswith("其他"))
+    ].copy()
+    if max_rows > 0:
+        needs = needs.head(max_rows).copy()
+    logs = [f"Yahoo 輔助更新目標：{len(needs):,} 檔"]
+    updated = 0
+    for idx in needs.index:
+        code = work.at[idx, "code"]
+        market = work.at[idx, "market"]
+        y = _fetch_yahoo_profile(code, market)
+        if y.get("ok"):
+            work.at[idx, "yahoo_sector"] = _normalize_category(y.get("sector"))
+            work.at[idx, "yahoo_industry"] = _normalize_category(y.get("industry"))
+            work.at[idx, "yahoo_source"] = _safe_str(y.get("source"))
+            guessed_market = _safe_str(y.get("market"))
+            if guessed_market and work.at[idx, "market"] == "":
+                work.at[idx, "market"] = guessed_market
+            updated += 1
+    work["official_industry"] = work["official_industry"].map(_canonical_official_industry)
+    work["category"] = work.apply(
+        lambda r: _infer_category_from_record(
+            code=r.get("code"),
+            name=r.get("name"),
+            raw_category=r.get("category"),
+            official_industry=r.get("official_industry"),
+            yahoo_sector=r.get("yahoo_sector"),
+            yahoo_industry=r.get("yahoo_industry"),
+        ),
+        axis=1,
+    )
+    work["category_source"] = work.apply(
+        lambda r: "yahoo_assisted" if _safe_str(r.get("yahoo_industry")) else (_safe_str(r.get("category_source")) or "base"),
+        axis=1,
+    )
+    logs.append(f"Yahoo 成功補強：{updated:,} 檔")
+    return work, logs
 
 def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"]
     if master_df is None or master_df.empty:
-        master_df = pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "category"])
+        master_df = pd.DataFrame(columns=cols)
     work = master_df.copy()
 
-    for c in ["code", "name", "market", "official_industry", "theme_category", "category"]:
+    for c in cols:
         if c not in work.columns:
             work[c] = ""
 
     work["code"] = work["code"].map(_normalize_code)
     work["name"] = work["name"].map(_safe_str)
     work["market"] = work["market"].map(_safe_str).replace("", "上市")
-    work["official_industry"] = work["official_industry"].map(_normalize_official_industry)
-    work["theme_category"] = work.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
-    work["category"] = work["theme_category"]
+    work["official_industry"] = work["official_industry"].map(_canonical_official_industry)
+    work["yahoo_sector"] = work["yahoo_sector"].map(_normalize_category)
+    work["yahoo_industry"] = work["yahoo_industry"].map(_normalize_category)
 
     repo_df = _load_stock_master_cache_from_repo()
     if isinstance(repo_df, pd.DataFrame) and not repo_df.empty:
         repo_df = repo_df.copy()
-        for c in ["code", "name", "market", "official_industry", "theme_category", "category"]:
-            if c not in repo_df.columns:
-                repo_df[c] = ""
         repo_df["code"] = repo_df["code"].map(_normalize_code)
-        repo_df["official_industry"] = repo_df["official_industry"].map(_normalize_official_industry)
-        repo_df["theme_category"] = repo_df.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
-        repo_df["category"] = repo_df["theme_category"]
         work = pd.concat([work, repo_df], ignore_index=True)
-        work["source_rank"] = work.get("source_rank", pd.Series([9]*len(work))).fillna(9)
-        work = work.sort_values(["code", "source_rank"]).drop_duplicates(subset=["code"], keep="first")
+        work = work.sort_values(["code"]).drop_duplicates(subset=["code"], keep="first")
 
     override_map = _load_stock_category_override_map()
     if override_map:
@@ -1183,45 +1310,79 @@ def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
                     work.at[idx, "name"] = _safe_str(item.get("name"))
                 if _safe_str(item.get("market")):
                     work.at[idx, "market"] = _safe_str(item.get("market"))
+                if _safe_str(item.get("official_industry")):
+                    work.at[idx, "official_industry"] = _canonical_official_industry(item.get("official_industry"))
                 if _safe_str(item.get("category")):
-                    work.at[idx, "theme_category"] = _canonical_category(item.get("category"))
                     work.at[idx, "category"] = _canonical_category(item.get("category"))
+                    work.at[idx, "category_source"] = "override"
             else:
-                nm = _safe_str(item.get("name")) or code
-                th = _canonical_category(item.get("category")) or _infer_theme_category(code=code, name=nm)
-                work = pd.concat([
-                    work,
-                    pd.DataFrame([{
-                        "code": code, "name": nm, "market": _safe_str(item.get("market")) or "上市",
-                        "official_industry": "", "theme_category": th, "category": th,
-                    }])
-                ], ignore_index=True)
+                work = pd.concat(
+                    [
+                        work,
+                        pd.DataFrame(
+                            [{
+                                "code": code,
+                                "name": _safe_str(item.get("name")) or code,
+                                "market": _safe_str(item.get("market")) or "上市",
+                                "official_industry": _canonical_official_industry(item.get("official_industry")),
+                                "yahoo_sector": "",
+                                "yahoo_industry": "",
+                                "yahoo_source": "",
+                                "category": _canonical_category(item.get("category")) or "其他_官方未知",
+                                "category_source": "override",
+                            }]
+                        ),
+                    ],
+                    ignore_index=True,
+                )
 
-    work["official_industry"] = work["official_industry"].map(_normalize_official_industry)
-    work["theme_category"] = work.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
-    work["category"] = work["theme_category"]
+    work["category"] = work.apply(
+        lambda r: _infer_category_from_record(
+            code=r.get("code"),
+            name=r.get("name"),
+            raw_category=r.get("category"),
+            official_industry=r.get("official_industry"),
+            yahoo_sector=r.get("yahoo_sector"),
+            yahoo_industry=r.get("yahoo_industry"),
+        ),
+        axis=1,
+    )
+    work["category_source"] = work.apply(
+        lambda r: _safe_str(r.get("category_source")) or ("yahoo_assisted" if _safe_str(r.get("yahoo_industry")) else ("official_or_rule" if _safe_str(r.get("official_industry")) else "name_rule")),
+        axis=1,
+    )
     work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return work[["code", "name", "market", "official_industry", "theme_category", "category"]].copy()
+    return work[cols].copy()
 
 def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
     cfg = _stock_master_config()
     if master_df is None:
         return False, "主檔為空"
+    cols = ["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"]
     work = master_df.copy()
-    for c in ["code", "name", "market", "category"]:
+    for c in cols:
         if c not in work.columns:
             work[c] = ""
     work["code"] = work["code"].map(_normalize_code)
     work["name"] = work["name"].map(_safe_str)
     work["market"] = work["market"].map(_safe_str).replace("", "上市")
-    work["official_industry"] = work["official_industry"].map(_normalize_official_industry)
-    work["theme_category"] = work.apply(lambda r: _infer_theme_category(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
-    work["category"] = work["theme_category"]
+    work["official_industry"] = work["official_industry"].map(_canonical_official_industry)
+    work["category"] = work.apply(
+        lambda r: _infer_category_from_record(
+            code=r.get("code"),
+            name=r.get("name"),
+            raw_category=r.get("category"),
+            official_industry=r.get("official_industry"),
+            yahoo_sector=r.get("yahoo_sector"),
+            yahoo_industry=r.get("yahoo_industry"),
+        ),
+        axis=1,
+    )
     work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").sort_values(["code"]).reset_index(drop=True)
-    payload = work[["code", "name", "market", "official_industry", "theme_category", "category"]].to_dict(orient="records")
+    payload = work[cols].to_dict(orient="records")
     return _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
 
-def _save_category_override(code: str, name: str, market: str, category: str) -> tuple[bool, str]:
+def _save_category_override(code: str, name: str, market: str, category: str, official_industry: str = "") -> tuple[bool, str]:
     cfg = _stock_master_config()
     code = _normalize_code(code)
     if not code:
@@ -1235,7 +1396,8 @@ def _save_category_override(code: str, name: str, market: str, category: str) ->
         "code": code,
         "name": _safe_str(name),
         "market": _safe_str(market) or "上市",
-        "category": _canonical_category(category) or _infer_theme_category(code=code, name=_safe_str(name)),
+        "official_industry": _canonical_official_industry(official_industry),
+        "category": _canonical_category(category) or _infer_category_from_name(_safe_str(name)),
         "updated_at": _now_text(),
     }
     ok, msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
@@ -1255,21 +1417,25 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
 
     fresh_df = _load_master_df()
     if fresh_df.empty:
-        return fresh_df, ["主檔更新失敗：證交所 / 櫃買中心主檔未取回資料，且 fallback 也失敗"]
+        return fresh_df, ["主檔更新失敗：get_all_code_name_map 未取回資料"]
 
-    ok, msg = _save_master_cache_to_repo(fresh_df)
+    # Yahoo 輔助分類補強
+    enriched_df, yahoo_logs = _enrich_master_with_yahoo(fresh_df)
+    logs.extend(yahoo_logs)
+
+    ok, msg = _save_master_cache_to_repo(enriched_df)
     logs.append(msg)
     if ok:
         try:
             _load_stock_master_cache_from_repo.clear()
         except Exception:
             pass
-    final_df = _apply_master_overrides(fresh_df)
+    final_df = _apply_master_overrides(enriched_df)
     return final_df, logs
 
 def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
     if master_df is None or master_df.empty:
-        return pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "category"])
+        return pd.DataFrame(columns=["code", "name", "market", "official_industry", "yahoo_industry", "category", "category_source"])
 
     work = master_df.copy()
     kw = _safe_str(keyword)
@@ -1279,45 +1445,28 @@ def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str,
     if market_filter and market_filter != "全部":
         work = work[work["market"].astype(str) == market_filter].copy()
     if category_filter and category_filter != "全部":
-        work = work[(work["theme_category"].astype(str) == category_filter) | (work["category"].astype(str) == category_filter)].copy()
+        work = work[work["category"].astype(str) == category_filter].copy()
 
     if kw:
         work = work[
             work["code"].astype(str).str.contains(kw, case=False, na=False)
             | work["name"].astype(str).str.contains(kw, case=False, na=False)
             | work["category"].astype(str).str.contains(kw, case=False, na=False)
+            | work["official_industry"].astype(str).str.contains(kw, case=False, na=False)
+            | work["yahoo_industry"].astype(str).str.contains(kw, case=False, na=False)
         ].copy()
 
     work = work.sort_values(["market", "category", "code"]).reset_index(drop=True)
     return work
 
-
-def _build_category_repair_df(master_df: pd.DataFrame, rec_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    if master_df is None or master_df.empty:
-        return pd.DataFrame(columns=["code", "name", "market", "official_industry", "theme_category", "repair_reason", "推薦總分"])
-    work = master_df.copy()
-    for c in ["code", "name", "market", "official_industry", "theme_category", "category"]:
-        if c not in work.columns:
-            work[c] = ""
-    work["repair_reason"] = ""
-    work.loc[work["official_industry"].astype(str).str.strip() == "", "repair_reason"] = "官方主檔未知"
-    unmapped_mask = work["theme_category"].astype(str).isin(["其他", "其他_官方未知", "其他_主題未映射"])
-    work.loc[unmapped_mask & (work["repair_reason"] == ""), "repair_reason"] = "主題未映射"
-    pending = work[work["repair_reason"] != ""].copy()
-    pending["推薦總分"] = pd.NA
-    if isinstance(rec_df, pd.DataFrame) and not rec_df.empty and "股票代號" in rec_df.columns:
-        score_map = rec_df.set_index(rec_df["股票代號"].astype(str))["推薦總分"].to_dict()
-        pending["推薦總分"] = pending["code"].astype(str).map(score_map)
-    pending = pending.sort_values(["推薦總分", "market", "code"], ascending=[False, True, True], na_position="last").reset_index(drop=True)
-    return pending[["code", "name", "market", "official_industry", "theme_category", "repair_reason", "推薦總分"]]
-
-def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str], rec_df: pd.DataFrame | None = None) -> pd.DataFrame:
+def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str]) -> pd.DataFrame:
     render_pro_section("股票主檔搜尋 / 更新中心")
 
     with st.expander("展開股票主檔搜尋 / 更新中心", expanded=False):
+        st.caption("類別優先順序：override → 官方主檔/Repo → Yahoo 奇摩股市輔助分類 → 名稱規則 fallback")
         c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
         with c1:
-            master_kw = st.text_input("搜尋代號 / 名稱 / 類別", key=_k("master_kw"))
+            master_kw = st.text_input("搜尋代號 / 名稱 / 類別 / 官方產業 / Yahoo行業", key=_k("master_kw"))
         with c2:
             master_market = st.selectbox("市場別篩選", ["全部", "上市", "上櫃", "興櫃"], key=_k("master_market"))
         with c3:
@@ -1326,10 +1475,10 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
         with c4:
             st.write("")
             st.write("")
-            refresh_master_btn = st.button("更新股票主檔", key=_k("refresh_master_btn"), use_container_width=True, type="primary")
+            refresh_master_btn = st.button("更新股票主檔 + Yahoo", key=_k("refresh_master_btn"), use_container_width=True, type="primary")
 
         if refresh_master_btn:
-            with st.spinner("更新股票主檔中..."):
+            with st.spinner("更新股票主檔與 Yahoo 輔助分類中..."):
                 new_master_df, logs = _refresh_stock_master_now()
                 if not new_master_df.empty:
                     master_df = new_master_df.copy()
@@ -1341,30 +1490,30 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
                         st.caption(line)
 
         found_df = _search_master_df(master_df, master_kw, master_market, master_cat)
-        st.caption(f"主檔筆數：{len(master_df):,}｜目前篩選結果：{len(found_df):,}｜分類順序：override → 代號白名單 → 正式產業別 → 名稱/規則 fallback")
-        pending_df = _build_category_repair_df(master_df, rec_df)
-        if not pending_df.empty:
-            with st.expander(f"分類待修清單（{len(pending_df):,} 檔）", expanded=False):
-                pending_show = pending_df.rename(columns={
-                    "code": "股票代號", "name": "股票名稱", "market": "市場別",
-                    "official_industry": "正式產業別", "theme_category": "操作主題類別", "repair_reason": "待修原因"
-                }).copy()
-                st.dataframe(_format_df(pending_show.head(300)), use_container_width=True, hide_index=True)
-                st.caption("建議優先修正：推薦總分高、仍落在 其他_官方未知 / 其他_主題未映射 的股票。")
+        st.caption(f"主檔筆數：{len(master_df):,}｜目前篩選結果：{len(found_df):,}")
 
-        show_df = found_df.rename(columns={"code": "股票代號", "name": "股票名稱", "market": "市場別", "official_industry": "正式產業別", "theme_category": "操作主題類別", "category": "類別"}).copy()
+        show_cols = ["code", "name", "market", "official_industry", "yahoo_industry", "category", "category_source"]
+        show_df = found_df[show_cols].rename(
+            columns={
+                "code": "股票代號",
+                "name": "股票名稱",
+                "market": "市場別",
+                "official_industry": "官方產業",
+                "yahoo_industry": "Yahoo行業",
+                "category": "操作類別",
+                "category_source": "分類來源",
+            }
+        ).copy()
         st.dataframe(show_df.head(300), use_container_width=True, hide_index=True)
 
         if found_df.empty:
             return master_df
 
-        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r.get('theme_category', r.get('category', ''))}" for _, r in found_df.head(300).iterrows()]
-        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r.get('theme_category', r.get('category', ''))}": r.to_dict() for _, r in found_df.head(300).iterrows()}
+        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}" for _, r in found_df.head(300).iterrows()]
+        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}": r.to_dict() for _, r in found_df.head(300).iterrows()}
 
         picked_label = st.selectbox("選擇股票進行修正 / 加入自選股", labels, key=_k("master_pick_label"))
         picked = label_map.get(picked_label, {})
-
-        st.caption(f"目前正式產業別：{_safe_str(picked.get('official_industry')) or '(空白)'}｜目前操作主題類別：{_safe_str(picked.get('theme_category') or picked.get('category')) or '(空白)'}")
 
         e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
         with e1:
@@ -1376,10 +1525,12 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
         with e4:
             edit_category = st.selectbox(
                 "修正類別",
-                list(dict.fromkeys((list(all_categories) if all_categories else []) + ["其他_官方未知", "其他_主題未映射", "其他"])) if all_categories else [picked.get("category") or "其他_主題未映射"],
+                list(all_categories) if all_categories else [picked.get("category") or "其他_官方未知"],
                 index=(list(all_categories).index(_safe_str(picked.get("category"))) if _safe_str(picked.get("category")) in all_categories else 0),
                 key=_k("master_edit_category"),
             )
+
+        st.caption(f"官方產業：{_safe_str(picked.get('official_industry')) or '—'}｜Yahoo 行業：{_safe_str(picked.get('yahoo_industry')) or '—'}｜分類來源：{_safe_str(picked.get('category_source')) or '—'}")
 
         a1, a2, a3 = st.columns([2, 2, 2])
         group_options = list(watchlist_map.keys()) if watchlist_map else [""]
@@ -1391,7 +1542,7 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
             add_watch_btn = st.button("直接加入自選股", key=_k("master_add_watch_btn"), use_container_width=True)
 
         if apply_override_btn:
-            ok, msg = _save_category_override(edit_code, edit_name, edit_market, edit_category)
+            ok, msg = _save_category_override(edit_code, edit_name, edit_market, edit_category, _safe_str(picked.get("official_industry")))
             if ok:
                 st.success(msg)
                 try:
@@ -1415,67 +1566,135 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
 
     return master_df
 
-def _append_godpick_records(record_rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
-    if not record_rows:
-        return 0, ["沒有可寫入的推薦紀錄。"]
+# =========================================================
+# 主檔 / universe helpers
+# =========================================================
+def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
 
-    normalized_rows = [_normalize_godpick_record(r) for r in record_rows if isinstance(r, dict)]
-    if not normalized_rows:
-        return 0, ["沒有可寫入的推薦紀錄。"]
+    result: dict[str, list[dict[str, str]]] = {}
+    if isinstance(raw, dict):
+        for group_name, items in raw.items():
+            g = _safe_str(group_name)
+            if not g:
+                continue
 
-    existing_records, read_err = _read_godpick_records_from_github()
-    base_df = _ensure_godpick_record_columns(pd.DataFrame(existing_records))
-    new_df = _ensure_godpick_record_columns(pd.DataFrame(normalized_rows))
+            rows = []
+            seen = set()
 
-    merged_df = _append_records_dedup_by_business_key(base_df, new_df)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        code = _normalize_code(item.get("code"))
+                        name = _safe_str(item.get("name")) or code
+                        market = _safe_str(item.get("market")) or "上市"
+                        category = _infer_category_from_record(code=code, name=name, raw_category=item.get("category"))
+                    else:
+                        code = _normalize_code(item)
+                        name = code
+                        market = "上市"
+                        category = ""
 
-    before_keys = set()
-    if not base_df.empty:
-        before_keys = set(
-            (
-                base_df["股票代號"].fillna("").astype(str) + "|"
-                + base_df["推薦日期"].fillna("").astype(str) + "|"
-                + base_df["推薦時間"].fillna("").astype(str) + "|"
-                + base_df["推薦模式"].fillna("").astype(str)
-            ).tolist()
-        )
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
 
-    after_keys = set(
-        (
-            merged_df["股票代號"].fillna("").astype(str) + "|"
-            + merged_df["推薦日期"].fillna("").astype(str) + "|"
-            + merged_df["推薦時間"].fillna("").astype(str) + "|"
-            + merged_df["推薦模式"].fillna("").astype(str)
-        ).tolist()
-    ) if not merged_df.empty else set()
+                    rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                            "category": category,
+                            "label": f"{code} {name}",
+                        }
+                    )
+            result[g] = rows
+    return result
 
-    added_count = max(len(after_keys - before_keys), 0)
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_master_df() -> pd.DataFrame:
+    dfs = []
+    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題", "industry_name", "industry_category"]
 
-    records_payload = merged_df.to_dict(orient="records")
-    ok_github, msg_github = _write_godpick_records_to_github(records_payload)
-    ok_firestore, msg_firestore = _write_godpick_records_to_firestore(records_payload)
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                mapping = {
+                    "證券代號": "code",
+                    "證券名稱": "name",
+                    "市場別": "market",
+                    "code": "code",
+                    "name": "name",
+                    "market": "market",
+                }
+                temp = temp.rename(columns=mapping)
 
-    st.session_state[_k("last_record_write_detail")] = [
-        f"讀取既有紀錄：{'成功' if not read_err else '失敗'}" + (f" | {read_err}" if read_err else ""),
-        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
-        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
-        f"新增筆數：{added_count}",
-        f"合併後總筆數：{len(merged_df)}",
-    ]
+                found_category_col = None
+                for col in temp.columns:
+                    if str(col).strip() in category_candidates:
+                        found_category_col = col
+                        break
 
-    if ok_github or ok_firestore:
-        _set_status(f"已寫入推薦紀錄 {added_count} 筆", "success" if (ok_github and ok_firestore) else "warning")
+                for col in ["code", "name", "market"]:
+                    if col not in temp.columns:
+                        temp[col] = ""
+
+                temp["official_industry"] = temp[found_category_col] if found_category_col else ""
+                temp["category"] = ""
+                temp["yahoo_sector"] = ""
+                temp["yahoo_industry"] = ""
+                temp["yahoo_source"] = ""
+                temp["category_source"] = ""
+
+                temp["code"] = temp["code"].map(_normalize_code)
+                temp["name"] = temp["name"].map(_safe_str)
+                temp["market"] = temp["market"].map(_safe_str)
+                if market_arg in ["上市", "上櫃", "興櫃"]:
+                    temp["market"] = temp["market"].replace("", market_arg)
+                temp["official_industry"] = temp["official_industry"].map(_canonical_official_industry)
+                temp["category"] = temp.apply(
+                    lambda r: _infer_category_from_record(
+                        code=r.get("code"),
+                        name=r.get("name"),
+                        raw_category="",
+                        official_industry=r.get("official_industry"),
+                    ),
+                    axis=1,
+                )
+                temp["category_source"] = temp["official_industry"].apply(lambda x: "official_base" if _safe_str(x) else "name_rule")
+                dfs.append(temp[["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"]])
+        except Exception:
+            pass
+
+    if not dfs:
+        base = pd.DataFrame(columns=["code", "name", "market", "official_industry", "yahoo_sector", "yahoo_industry", "yahoo_source", "category", "category_source"])
     else:
-        _set_status("推薦紀錄寫入失敗", "error")
+        base = pd.concat(dfs, ignore_index=True)
+        base["code"] = base["code"].map(_normalize_code)
+        base["name"] = base["name"].map(_safe_str)
+        base["market"] = base["market"].map(_safe_str).replace("", "上市")
+        base["official_industry"] = base["official_industry"].map(_canonical_official_industry)
+        base["category"] = base.apply(
+            lambda r: _infer_category_from_record(
+                code=r.get("code"),
+                name=r.get("name"),
+                raw_category=r.get("category"),
+                official_industry=r.get("official_industry"),
+                yahoo_sector=r.get("yahoo_sector"),
+                yahoo_industry=r.get("yahoo_industry"),
+            ),
+            axis=1,
+        )
+        base = base[base["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
 
-    messages = []
-    if read_err:
-        messages.append(f"讀取既有紀錄時發生問題：{read_err}")
-    messages.append(msg_github)
-    messages.append(msg_firestore)
-
-    return added_count, [m for m in messages if _safe_str(m)]
-
+    return _apply_master_overrides(base)
 
 # =========================================================
 # 主檔 / universe helpers
