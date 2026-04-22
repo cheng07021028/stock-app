@@ -18,6 +18,7 @@ from firebase_admin import credentials, firestore
 from utils import (
     format_number,
     get_history_data,
+    get_realtime_stock_info,
     inject_pro_theme,
     render_pro_hero,
     render_pro_info_card,
@@ -471,19 +472,34 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
     return False
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str]:
-    today = date.today()
-    start_date = today - timedelta(days=60)
+@st.cache_data(ttl=120, show_spinner=False)
+def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
+    stock_no = _normalize_code(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type) or "上市"
+
+    # 先抓即時資料，避免只拿到歷史收盤價
     tried = []
-    primary = _safe_str(market_type)
-    if primary:
-        tried.append(primary)
-    for mk in ["上市", "上櫃", "興櫃", ""]:
+    if market_type:
+        tried.append(market_type)
+    for mk in ["上市", "上櫃", "興櫃"]:
         if mk not in tried:
             tried.append(mk)
 
     for mk in tried:
+        try:
+            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=str(int(datetime.now().timestamp() * 1000)))
+            price = _safe_float(info.get("price"))
+            if price is not None and price > 0:
+                src = _safe_str(info.get("price_source")) or "realtime"
+                return float(price), _safe_str(info.get("market") or mk), src
+        except Exception:
+            pass
+
+    # 即時抓不到，再退回歷史最新收盤
+    today = date.today()
+    start_date = today - timedelta(days=60)
+    for mk in tried + [""]:
         try:
             try:
                 df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_date=start_date, end_date=today)
@@ -508,10 +524,10 @@ def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple
                 temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
                 temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期")
                 if not temp.empty:
-                    return float(temp.iloc[-1]["收盤價"]), _safe_str(mk or market_type or "未知")
+                    return float(temp.iloc[-1]["收盤價"]), _safe_str(mk or market_type or "未知"), "history_close"
         except Exception:
             pass
-    return None, _safe_str(market_type or "未知")
+    return None, _safe_str(market_type or "未知"), ""
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -519,6 +535,66 @@ def _get_forward_return(stock_no: str, stock_name: str, market_type: str, rec_da
     rec_date = pd.to_datetime(rec_date_text, errors="coerce")
     if pd.isna(rec_date):
         return None
+
+    start_date = rec_date.date() - timedelta(days=5)
+    end_date = rec_date.date() + timedelta(days=max(days_after * 4, 40))
+    tried = []
+    primary = _safe_str(market_type)
+    if primary:
+        tried.append(primary)
+    for mk in ["上市", "上櫃", "興櫃", ""]:
+        if mk not in tried:
+            tried.append(mk)
+
+    for mk in tried:
+        try:
+            try:
+                df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_date=start_date, end_date=end_date)
+            except TypeError:
+                try:
+                    df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_dt=start_date, end_dt=end_date)
+                except Exception:
+                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+
+            temp = df.copy()
+            if "日期" not in temp.columns:
+                for c in temp.columns:
+                    if str(c).lower() in {"date", "日期"}:
+                        temp = temp.rename(columns={c: "日期"})
+                        break
+            for c in temp.columns:
+                if str(c).lower() == "close":
+                    temp = temp.rename(columns={c: "收盤價"})
+            if "日期" not in temp.columns or "收盤價" not in temp.columns:
+                continue
+
+            temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+            temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
+            temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
+            if temp.empty:
+                continue
+
+            # 基準價：推薦日當天或之後第一個交易日
+            base_candidates = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
+            if base_candidates.empty:
+                continue
+
+            # 沒滿指定交易日，就回傳 None，不要硬算成 0
+            if len(base_candidates) <= days_after:
+                return None
+
+            base_px = float(base_candidates.iloc[0]["收盤價"])
+            target_px = float(base_candidates.iloc[days_after]["收盤價"])
+            if base_px == 0:
+                return None
+
+            return (target_px - base_px) / base_px * 100
+        except Exception:
+            pass
+
+    return None
     start_date = rec_date.date() - timedelta(days=5)
     end_date = rec_date.date() + timedelta(days=max(days_after * 4, 30))
     tried = []
@@ -644,22 +720,35 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     return src
 
 
-def _refresh_latest_prices(df: pd.DataFrame) -> pd.DataFrame:
+def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
     if df is None or df.empty:
         return _ensure_godpick_record_columns(pd.DataFrame())
+
     rows = []
+    active_status = {"觀察", "已買進", "持有", "追蹤"}
+
     for _, row in df.iterrows():
-        stock_no = _normalize_code(row.get("股票代號"))
-        stock_name = _safe_str(row.get("股票名稱"))
-        market = _safe_str(row.get("市場別"))
-        latest, used_market = _get_latest_close(stock_no, stock_name, market)
         payload = dict(row)
+        status = _safe_str(payload.get("目前狀態")) or "觀察"
+
+        if only_active and status not in active_status:
+            rows.append(_recalc_row(payload))
+            continue
+
+        stock_no = _normalize_code(payload.get("股票代號"))
+        stock_name = _safe_str(payload.get("股票名稱"))
+        market = _safe_str(payload.get("市場別"))
+
+        latest, used_market, price_src = _get_latest_close(stock_no, stock_name, market)
         if latest is not None:
             payload["最新價"] = latest
             payload["市場別"] = used_market or market
             payload["最新更新時間"] = _now_text()
+            payload["備註"] = (_safe_str(payload.get("備註")) + f"｜最新價來源:{price_src}").strip("｜")
+
         payload = _recalc_row(payload)
         rows.append(payload)
+
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
 
@@ -985,7 +1074,7 @@ def main():
     with top_cols[1]:
         if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
-            df = _refresh_latest_prices(df)
+            df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
             df = _apply_mode_labels(df)
             _save_state_df(df)
             st.success("已更新最新價，尚未同步")
@@ -1350,7 +1439,7 @@ def main():
                 ("主要來源", "godpick_records.json + Firestore", "雙寫"),
                 ("刪除 / 清空", "支援", "總表管理內"),
                 ("批次更新", "支援表格編輯 / 刪除 / 清空 / 更新", "已保留"),
-                ("前推績效", "3/5/10/20 日績效%", "已整合"),
+                ("前推績效", "3/5/10/20 日績效%（未滿交易日顯示空白）", "已整合"),
                 ("模式績效標籤", "依模式歷史表現自動標記", "已整合"),
                 ("最強模式 / 類別", "依20日績效 + 勝率綜合排序", "已整合"),
                 ("Excel 匯出", "推薦紀錄 / 分析表 / 最強榜", "已整合"),
