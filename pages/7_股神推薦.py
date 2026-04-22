@@ -3926,29 +3926,92 @@ def _normalize_master_schema(
     return _ensure_master_diag_columns(out)
 
 
+def _twse_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://www.twse.com.tw/",
+    }
+
+
+def _normalize_twse_isin_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+    work = df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+
+    combined_col = _first_existing_col(work, ["有價證券代號及名稱", "有價證券代號及名稱 Code and Name", "證券代號及名稱"])
+    if combined_col and "有價證券代號" not in work.columns and "有價證券名稱" not in work.columns:
+        pair = work[combined_col].astype(str).str.extract(r"^\s*([0-9]{4,6})\s+(.+?)\s*$")
+        if not pair.empty:
+            work["有價證券代號"] = pair[0]
+            work["有價證券名稱"] = pair[1]
+
+    code_col = _first_existing_col(work, ["有價證券代號", "證券代號", "股票代號", "公司代號"]) or _first_contains_col(work, ["代號"])
+    name_col = _first_existing_col(work, ["有價證券名稱", "證券名稱", "股票名稱", "公司簡稱", "公司名稱"]) or _first_contains_col(work, ["名稱"])
+    market_col = _first_existing_col(work, ["市場別", "市場"])
+    industry_col = _first_existing_col(work, ["產業別", "產業類別", "產業名稱"]) or _first_contains_col(work, ["產業"])
+
+    if not code_col or not name_col:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+
+    temp = pd.DataFrame({
+        "公司代號": work[code_col],
+        "公司簡稱": work[name_col],
+        "市場別": work[market_col] if market_col else "上市",
+        "產業別": work[industry_col] if industry_col else "",
+    })
+    return _normalize_master_schema(
+        temp,
+        default_market="上市",
+        source="official_twse",
+        source_api="twse_isin_class",
+        source_rank=1,
+    )
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_official_master() -> pd.DataFrame:
     frames = []
     sources = [
-        ("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "twse_t187ap03_L", 0),
-        ("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", "twse_bwibbu_all", 2),
+        ("json", "https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "twse_t187ap03_L", 0),
+        ("json", "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", "twse_bwibbu_all", 2),
+        ("html", "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", "twse_c_public", 1),
+        ("html", "https://isin.twse.com.tw/isin/class_main.jsp?issuetype=1&market=1", "twse_class_main", 1),
     ]
-    for url, label, rank in sources:
+    for kind, url, label, rank in sources:
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(url, headers=_twse_headers(), timeout=30)
             if resp.status_code != 200:
                 continue
-            payload = resp.json()
-            if isinstance(payload, list) and payload:
-                temp = _normalize_master_schema(
-                    pd.DataFrame(payload),
-                    default_market="上市",
-                    source="official_twse",
-                    source_api=label,
-                    source_rank=rank,
-                )
-                if not temp.empty:
-                    frames.append(temp)
+            if kind == "json":
+                payload = resp.json()
+                if isinstance(payload, list) and payload:
+                    temp = _normalize_master_schema(
+                        pd.DataFrame(payload),
+                        default_market="上市",
+                        source="official_twse",
+                        source_api=label,
+                        source_rank=rank,
+                    )
+                    if not temp.empty:
+                        frames.append(temp)
+            else:
+                html = resp.text
+                try:
+                    tables = pd.read_html(io.StringIO(html))
+                except Exception:
+                    tables = []
+                for tb in tables:
+                    temp = _normalize_twse_isin_table(tb)
+                    if not temp.empty:
+                        temp["source_api"] = label
+                        temp["source_rank"] = rank
+                        frames.append(temp)
+                        break
         except Exception:
             continue
     if not frames:
@@ -4117,17 +4180,30 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
 
     try:
         twse = _fetch_twse_official_master()
-        logs.append(f"TWSE：{len(twse)} 筆 / 正式產業有值 {(twse['official_industry'].astype(str).str.strip()!='').sum() if not twse.empty else 0} 筆")
+        twse_hit = (twse['official_industry'].astype(str).str.strip()!='').sum() if not twse.empty else 0
+        twse_cols = []
+        if not twse.empty:
+            twse_cols = sorted(set([c for c in twse.get('official_industry_source_col', pd.Series(dtype=str)).dropna().astype(str).tolist() if c]))
+        logs.append(f"TWSE：{len(twse)} 筆 / 正式產業有值 {twse_hit} 筆")
+        logs.append(f"TWSE 原始產業欄位：{', '.join(twse_cols) if twse_cols else '(未識別)'}")
+        if not twse.empty:
+            logs.append(f"TWSE 來源API：{', '.join(sorted(set(twse.get('source_api', pd.Series(dtype=str)).dropna().astype(str).tolist())))}")
     except Exception as e:
         logs.append(f"TWSE 診斷失敗：{e}")
     try:
         tpex = _fetch_tpex_official_master()
-        logs.append(f"TPEX：{len(tpex)} 筆 / 正式產業有值 {(tpex['official_industry'].astype(str).str.strip()!='').sum() if not tpex.empty else 0} 筆")
+        tpex_hit = (tpex['official_industry'].astype(str).str.strip()!='').sum() if not tpex.empty else 0
+        tpex_cols = []
+        if not tpex.empty:
+            tpex_cols = sorted(set([c for c in tpex.get('official_industry_source_col', pd.Series(dtype=str)).dropna().astype(str).tolist() if c]))
+        logs.append(f"TPEX：{len(tpex)} 筆 / 正式產業有值 {tpex_hit} 筆")
+        logs.append(f"TPEX 原始產業欄位：{', '.join(tpex_cols) if tpex_cols else '(未識別)'}")
     except Exception as e:
         logs.append(f"TPEX 診斷失敗：{e}")
 
     final_df = _apply_master_overrides(fresh_df)
-    logs.append(f"合併後：{len(final_df)} 筆 / 正式產業有值 {(final_df['official_industry'].astype(str).str.strip()!='').sum() if not final_df.empty else 0} 筆")
+    final_hit = (final_df['official_industry'].astype(str).str.strip()!='').sum() if not final_df.empty else 0
+    logs.append(f"合併後：{len(final_df)} 筆 / 正式產業有值 {final_hit} 筆")
     return final_df, logs
 
 
