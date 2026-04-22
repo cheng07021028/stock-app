@@ -549,6 +549,14 @@ def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
                     return out
             except Exception:
                 pass
+    try:
+        es = _price_on_or_before('ES.F', pred_date_text, 15)
+        nq = _price_on_or_before('NQ.F', pred_date_text, 15)
+        mix = float(es.get('pct', 0) or 0) * 0.45 + float(nq.get('pct', 0) or 0) * 0.55
+        est = round(max(0.7, min(1.3, 1.0 + (-mix / 20.0))), 2)
+        out.update({'pcr': est, 'source': 'fallback_est', 'used_date': _safe_str(es.get('used_date') or nq.get('used_date') or pred_date_text)})
+    except Exception:
+        pass
     return out
 
 
@@ -585,11 +593,14 @@ def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
                 pass
     # fallback：用 ADR / 美股夜盤代理估算融資券變化
     try:
-        mix = float(adr_pct or 0) * 0.50 + float(es_pct or 0) * 0.25 + float(nq_pct or 0) * 0.25
+        tsm = _price_on_or_before('TSM', pred_date_text, 15)
+        es = _price_on_or_before('ES.F', pred_date_text, 15)
+        nq = _price_on_or_before('NQ.F', pred_date_text, 15)
+        mix = float(tsm.get('pct', 0) or 0) * 0.50 + float(es.get('pct', 0) or 0) * 0.25 + float(nq.get('pct', 0) or 0) * 0.25
         out['margin_change'] = round(-mix * 8.0, 2)
         out['short_change'] = round(max(-30.0, min(30.0, -mix * 6.0)), 2)
         out['source'] = 'fallback_est'
-        out['used_date'] = pred_date_text
+        out['used_date'] = _safe_str(tsm.get('used_date') or es.get('used_date') or nq.get('used_date') or pred_date_text)
     except Exception:
         pass
     return out
