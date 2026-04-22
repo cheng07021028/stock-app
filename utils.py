@@ -717,8 +717,8 @@ def _empty_realtime_result(stock_no, stock_name="", market_type="上市", messag
     }
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_realtime_stock_info_batch(stock_items):
+@st.cache_data(ttl=5, show_spinner=False)
+def get_realtime_stock_info_batch(stock_items, refresh_token=""):
     if not stock_items:
         return {}
 
@@ -760,7 +760,7 @@ def get_realtime_stock_info_batch(stock_items):
             "ex_ch": "|".join(ex_ch_list),
             "json": "1",
             "delay": "0",
-            "_": str(int(time.time() * 1000)),
+            "_": refresh_token or str(int(time.time() * 1000)),
         }
 
         try:
@@ -808,8 +808,8 @@ def get_realtime_stock_info_batch(stock_items):
     return result_map
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_realtime_stock_info(stock_no, stock_name="", market_type="上市"):
+@st.cache_data(ttl=5, show_spinner=False)
+def get_realtime_stock_info(stock_no, stock_name="", market_type="上市", refresh_token=""):
     stock_no = str(stock_no).strip()
     stock_name = str(stock_name).strip()
     market_type = str(market_type).strip() or "上市"
@@ -823,13 +823,16 @@ def get_realtime_stock_info(stock_no, stock_name="", market_type="上市"):
             "message": "股票代號為空白",
         }
 
-    result_map = get_realtime_stock_info_batch([
-        {
-            "code": stock_no,
-            "name": stock_name,
-            "market": market_type,
-        }
-    ])
+    result_map = get_realtime_stock_info_batch(
+        [
+            {
+                "code": stock_no,
+                "name": stock_name,
+                "market": market_type,
+            }
+        ],
+        refresh_token=refresh_token,
+    )
     return result_map.get(
         stock_no,
         {
@@ -891,8 +894,8 @@ def render_realtime_info_card(info, title="即時資訊"):
         st.metric("昨收", format_number(prev_close, 2))
 
 
-@st.cache_data(ttl=15, show_spinner=False)
-def get_realtime_watchlist_df(watchlist_dict, query_date=""):
+@st.cache_data(ttl=5, show_spinner=False)
+def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
     all_code_name_df = get_all_code_name_map(query_date)
     prepared_items = []
     rows = []
@@ -916,14 +919,17 @@ def get_realtime_watchlist_df(watchlist_dict, query_date=""):
     if not prepared_items:
         return pd.DataFrame()
 
-    batch_result = get_realtime_stock_info_batch([
-        {
-            "code": x["code"],
-            "name": x["name"],
-            "market": x["market"],
-        }
-        for x in prepared_items
-    ])
+    batch_result = get_realtime_stock_info_batch(
+        [
+            {
+                "code": x["code"],
+                "name": x["name"],
+                "market": x["market"],
+            }
+            for x in prepared_items
+        ],
+        refresh_token=refresh_token,
+    )
 
     for item in prepared_items:
         info = batch_result.get(
