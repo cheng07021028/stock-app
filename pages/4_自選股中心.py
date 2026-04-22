@@ -12,7 +12,6 @@ import requests
 import streamlit as st
 
 from utils import (
-    get_all_code_name_map,
     get_normalized_watchlist,
     inject_pro_theme,
     render_pro_hero,
@@ -20,6 +19,8 @@ from utils import (
     render_pro_kpi_row,
     render_pro_section,
 )
+
+from stock_master_service import load_stock_master, search_stock_master
 
 PAGE_TITLE = "自選股中心"
 PFX = "watch_"
@@ -275,40 +276,17 @@ def _persist_watchlist(success_msg: str) -> bool:
     return ok
 
 
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_stock_master() -> pd.DataFrame:
-    dfs = []
-
-    for market_arg in ["", "上市", "上櫃", "興櫃"]:
-        try:
-            df = get_all_code_name_map(market_arg)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                temp = df.copy()
-
-                for col in ["code", "name", "market"]:
-                    if col not in temp.columns:
-                        temp[col] = ""
-
-                temp["code"] = temp["code"].map(_normalize_code)
-                temp["name"] = temp["name"].map(_safe_str)
-                temp["market"] = temp["market"].map(_safe_str)
-
-                if market_arg in ["上市", "上櫃", "興櫃"]:
-                    temp["market"] = temp["market"].replace("", market_arg)
-
-                dfs.append(temp[["code", "name", "market"]])
-        except Exception:
-            pass
-
-    if not dfs:
-        return pd.DataFrame(columns=["code", "name", "market"])
-
-    out = pd.concat(dfs, ignore_index=True)
-    out["code"] = out["code"].map(_normalize_code)
-    out["name"] = out["name"].map(_safe_str)
-    out["market"] = out["market"].map(_safe_str).replace("", "上市")
-    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return out
+    """
+    自選股中心統一改由 stock_master_service.py 讀取股票主檔，
+    避免與股神推薦 / 股票主檔更新頁的資料來源不一致。
+    """
+    try:
+        return load_stock_master()
+    except Exception:
+        return pd.DataFrame(columns=["code", "name", "market", "category", "official_industry", "theme_category"])
 
 
 # =========================================================
@@ -704,38 +682,40 @@ def _build_group_summary_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.Da
     return pd.DataFrame(rows).sort_values(["股票數", "群組"], ascending=[False, True]).reset_index(drop=True)
 
 
+
 def _filter_master_df(df: pd.DataFrame, keyword: str) -> pd.DataFrame:
-    q = _safe_str(keyword).lower()
-
+    q = _safe_str(keyword)
     if df is None or df.empty:
-        return pd.DataFrame(columns=["code", "name", "market"])
+        return pd.DataFrame(columns=["code", "name", "market", "category", "official_industry", "theme_category"])
 
-    work = df.copy()
-    work["code"] = work["code"].astype(str)
-    work["name"] = work["name"].astype(str)
-    work["market"] = work["market"].astype(str)
+    try:
+        if not q:
+            work = df.copy()
+            show_cols = [c for c in ["code", "name", "market", "category", "official_industry", "theme_category"] if c in work.columns]
+            return work[show_cols].head(100).copy()
 
-    if not q:
+        work = search_stock_master(
+            df,
+            keyword=q,
+            market_filter="全部",
+            category_filter="全部",
+        )
+        show_cols = [c for c in ["code", "name", "market", "category", "official_industry", "theme_category"] if c in work.columns]
+        return work[show_cols].head(100).copy()
+    except Exception:
+        work = df.copy()
+        if not q:
+            return work.head(100).copy()
+        for col in ["code", "name", "market"]:
+            if col not in work.columns:
+                work[col] = ""
+        ql = q.lower()
+        work = work[
+            work["code"].astype(str).str.lower().str.contains(ql, na=False)
+            | work["name"].astype(str).str.lower().str.contains(ql, na=False)
+            | work["market"].astype(str).str.lower().str.contains(ql, na=False)
+        ].copy()
         return work.head(100).copy()
-
-    exact = work[(work["code"].str.lower() == q) | (work["name"].str.lower() == q)].copy()
-    if not exact.empty:
-        return exact.head(100).copy()
-
-    prefix = work[
-        work["code"].str.lower().str.startswith(q, na=False)
-        | work["name"].str.lower().str.startswith(q, na=False)
-    ].copy()
-    if not prefix.empty:
-        return prefix.head(100).copy()
-
-    contain = work[
-        work["code"].str.lower().str.contains(q, na=False)
-        | work["name"].str.lower().str.contains(q, na=False)
-        | work["market"].str.lower().str.contains(q, na=False)
-    ].copy()
-
-    return contain.head(100).copy()
 
 
 # =========================================================
@@ -758,6 +738,7 @@ def main():
         title="自選股中心｜GitHub API 強制回寫版",
         subtitle="只要新增、刪除、改名、批次操作，都直接 commit 回 GitHub repo 的 watchlist.json。",
     )
+    st.caption("股票主檔來源已統一改由 stock_master_service.py 提供，與股神推薦 / 股票主檔更新頁共用同一份主檔。")
 
     overview_df = _build_overview_df(watchlist)
     group_summary_df = _build_group_summary_df(watchlist)
@@ -945,9 +926,17 @@ def main():
         if search_df.empty:
             st.info("查無符合資料。")
         else:
-            display_df = search_df.rename(columns={"code": "股票代號", "name": "股票名稱", "market": "市場別"})
+            display_df = search_df.rename(columns={
+                "code": "股票代號",
+                "name": "股票名稱",
+                "market": "市場別",
+                "category": "類別",
+                "official_industry": "正式產業別",
+                "theme_category": "主題類別",
+            })
             display_df["股票"] = display_df["股票代號"].astype(str) + " " + display_df["股票名稱"].astype(str)
-            st.dataframe(display_df[["股票代號", "股票名稱", "市場別", "股票"]], use_container_width=True, hide_index=True)
+            show_cols = [c for c in ["股票代號", "股票名稱", "市場別", "正式產業別", "主題類別", "類別", "股票"] if c in display_df.columns]
+            st.dataframe(display_df[show_cols], use_container_width=True, hide_index=True)
 
     render_pro_section("目前群組明細")
 
