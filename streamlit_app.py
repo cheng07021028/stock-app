@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from firebase_backup import backup_github_repo_to_firebase, list_recent_backups
 from utils import (
     format_number,
     get_all_code_name_map,
@@ -302,8 +303,100 @@ def _init_state():
     if _k("end_date") not in st.session_state:
         st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
 
+    if _k("backup_rows") not in st.session_state:
+        st.session_state[_k("backup_rows")] = []
+
     st.session_state[_k("start_date")] = _to_pydate(st.session_state.get(_k("start_date")), default_start)
     st.session_state[_k("end_date")] = _to_pydate(st.session_state.get(_k("end_date")), default_end)
+
+
+# =========================================================
+# Firebase 備份區
+# =========================================================
+def _render_backup_section():
+    render_pro_section("GitHub 專案一鍵備份到 Firebase")
+
+    repo_owner = "cheng07021028"
+    repo_name = "stock-app"
+    branch = "main"
+
+    st.caption("按下按鈕後，會將 GitHub 專案打包成 zip，上傳到 Firebase Storage，並同步寫入 Firestore 備份紀錄。")
+
+    c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
+
+    with c1:
+        st.text_input("GitHub 擁有者", value=repo_owner, disabled=True, key=_k("repo_owner_view"))
+
+    with c2:
+        st.text_input("GitHub 專案", value=repo_name, disabled=True, key=_k("repo_name_view"))
+
+    with c3:
+        st.text_input("分支", value=branch, disabled=True, key=_k("repo_branch_view"))
+
+    b1, b2 = st.columns([1.5, 1])
+
+    with b1:
+        if st.button("一鍵備份 GitHub 專案到 Firebase", type="primary", use_container_width=True, key=_k("backup_btn")):
+            with st.spinner("正在備份 GitHub 專案到 Firebase..."):
+                try:
+                    result = backup_github_repo_to_firebase(
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                        branch=branch,
+                        github_token=st.secrets.get("GITHUB_TOKEN", None),
+                    )
+                    st.session_state[_k("last_backup_result")] = result
+                    st.success("備份成功")
+                except Exception as e:
+                    st.session_state[_k("last_backup_error")] = str(e)
+                    st.error(f"備份失敗：{e}")
+
+    with b2:
+        if st.button("重新整理備份紀錄", use_container_width=True, key=_k("backup_refresh_btn")):
+            try:
+                st.session_state[_k("backup_rows")] = list_recent_backups(limit=10)
+                st.success("已重新整理備份紀錄")
+            except Exception as e:
+                st.error(f"讀取備份紀錄失敗：{e}")
+
+    last_result = st.session_state.get(_k("last_backup_result"))
+    if last_result:
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            render_pro_info_card(
+                "最新備份時間",
+                [("時間", _safe_str(last_result.get("backup_time_tw")), "")],
+            )
+        with r2:
+            render_pro_info_card(
+                "最新備份大小",
+                [("bytes", f"{int(last_result.get('size_bytes', 0)):,}", "")],
+            )
+        with r3:
+            render_pro_info_card(
+                "Storage 路徑",
+                [("路徑", _safe_str(last_result.get("storage_path")), "")],
+            )
+
+    try:
+        backup_rows = list_recent_backups(limit=10)
+        st.session_state[_k("backup_rows")] = backup_rows
+    except Exception:
+        backup_rows = st.session_state.get(_k("backup_rows"), [])
+
+    if backup_rows:
+        st.dataframe(pd.DataFrame(backup_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("目前尚無備份紀錄，或 Firebase 尚未完成設定。")
+
+    render_pro_info_card(
+        "Firebase 設定提醒",
+        [
+            ("Storage", "需先設定 FIREBASE_STORAGE_BUCKET", ""),
+            ("金鑰", "需先設定 FIREBASE_SERVICE_ACCOUNT_JSON", ""),
+            ("紀錄", "備份成功後會寫入 Firestore：github_repo_backups", ""),
+        ],
+    )
 
 
 # =========================================================
@@ -432,6 +525,8 @@ def _render_home_page():
             home_end=st.session_state.get(_k("end_date")),
         )
         st.success("已記錄首頁日期區間。")
+
+    _render_backup_section()
 
 
 # =========================================================
