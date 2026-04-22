@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from datetime import datetime, timedelta, date
+from datetime import datetime, date, timedelta
 from typing import Any
 import base64
 import hashlib
+import io
 import json
-import re
-import xml.etree.ElementTree as ET
+import math
 
 import pandas as pd
 import requests
@@ -21,55 +21,85 @@ from utils import (
     render_pro_section,
 )
 
-PAGE_TITLE = "大盤走勢"
-PFX = "macro_trend_"
-UA = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/147.0.0.0 Safari/537.36"
-    )
-}
-TIMEOUT = 10
+PAGE_TITLE = "大盤走勢｜股神Pro準確率強化版"
+PFX = "macro_godpro_"
+
 RECORD_COLUMNS = [
-    "record_id", "預測日期", "建立時間", "更新時間",
-    "推估分數", "推估方向", "推估漲跌點", "推估漲跌%", "推估區間低", "推估區間高",
-    "操作建議", "風險等級",
-    "台股加權", "台股漲跌%", "NASDAQ漲跌%", "SOX漲跌%", "NQ漲跌%", "ES漲跌%", "TSM ADR漲跌%", "USD/TWD漲跌%", "VIX漲跌%",
-    "新聞分數", "新聞風險", "因子摘要",
-    "實際收盤", "實際漲跌點", "實際漲跌%", "實際方向",
-    "方向命中", "點數誤差", "區間命中",
-    "開盤是否適合進場", "收盤檢討", "備註",
-    "股神模式分數", "進場燈號", "出場燈號", "股神結論", "股神推論邏輯", "股神信心度",
+    "record_id",
+    "推估日期",
+    "建立時間",
+    "更新時間",
+    "模式名稱",
+    "市場情境",
+    "推估方向",
+    "方向強度",
+    "是否適合進場",
+    "是否適合續抱",
+    "是否適合減碼",
+    "是否適合出場",
+    "建議動作",
+    "股神模式分數",
+    "股神信心度",
+    "預估漲跌點",
+    "預估高點",
+    "預估低點",
+    "預估區間寬度",
+    "風險等級",
+    "國際新聞風險分",
+    "美股因子分",
+    "夜盤因子分",
+    "技術面因子分",
+    "籌碼面因子分",
+    "事件因子分",
+    "結構面因子分",
+    "風險面因子分",
+    "大盤基準點",
+    "加權收盤",
+    "加權漲跌%",
+    "成交量估分",
+    "VIX",
+    "美元台幣",
+    "NASDAQ漲跌%",
+    "SOX漲跌%",
+    "SP500漲跌%",
+    "台積電ADR漲跌%",
+    "ES夜盤漲跌%",
+    "NQ夜盤漲跌%",
+    "外資買賣超估分",
+    "期貨選擇權估分",
+    "類股輪動估分",
+    "股神推論邏輯",
+    "進場確認條件",
+    "出場警訊",
+    "主要風險",
+    "建議倉位",
+    "實際方向",
+    "實際漲跌點",
+    "實際高點",
+    "實際低點",
+    "方向是否命中",
+    "區間是否命中",
+    "點數誤差",
+    "建議動作是否合適",
+    "誤判主因類別",
+    "誤判主因",
+    "收盤檢討",
+    "備註",
 ]
 
-NEGATIVE_KEYWORDS = {
-    "war": -6, "attack": -6, "missile": -7, "tariff": -5, "sanction": -5,
-    "earthquake": -4, "crash": -7, "recession": -6, "inflation": -4,
-    "hawkish": -4, "layoff": -3, "ban": -4, "investigation": -3,
-    "downgrade": -3, "strike": -3,
-    "戰爭": -7, "衝突": -5, "空襲": -6, "飛彈": -7, "關稅": -5,
-    "制裁": -5, "通膨": -4, "升息": -4, "衰退": -6, "地震": -4,
-    "下修": -3, "裁員": -3, "禁令": -4, "調查": -3,
-}
-POSITIVE_KEYWORDS = {
-    "beat": 4, "surge": 4, "growth": 3, "record": 4, "upgrade": 3,
-    "eases": 3, "cooling": 2, "deal": 2, "stimulus": 4, "rebound": 3,
-    "AI": 2, "chip": 2, "semiconductor": 2,
-    "優於預期": 4, "成長": 3, "新高": 4, "上修": 3, "降息": 5,
-    "降溫": 2, "合作": 2, "刺激": 4, "反彈": 3, "AI": 2,
-    "晶片": 2, "半導體": 2,
-}
-BIG_TECH_NAMES = [
-    "NVIDIA", "NVDA", "TSMC", "台積電", "Apple", "AAPL", "Microsoft", "MSFT",
-    "Amazon", "AMZN", "Meta", "Google", "Alphabet", "AMD", "Broadcom", "AVGO",
-    "Intel", "Qualcomm", "Tesla", "ASML",
+MODEL_NAMES = [
+    "股神平衡版",
+    "技術面優先",
+    "美夜盤優先",
+    "新聞風險優先",
+    "籌碼事件優先",
 ]
 
+DIRECTION_OPTIONS = ["偏多", "偏空", "震盪"]
+RISK_OPTIONS = ["低", "中", "高", "極高"]
+ERROR_CAUSES = ["", "新聞", "夜盤", "美股", "技術", "籌碼", "事件", "風險控管", "點數高估", "點數低估", "其他"]
 
-# =========================================================
-# 基礎工具
-# =========================================================
+
 def _k(key: str) -> str:
     return f"{PFX}{key}"
 
@@ -85,7 +115,7 @@ def _safe_str(v: Any) -> str:
     return str(v).strip()
 
 
-def _safe_float(v: Any, default: float | None = None) -> float | None:
+def _safe_float(v: Any, default=None):
     try:
         if pd.isna(v):
             return default
@@ -102,32 +132,12 @@ def _now_text() -> str:
 
 
 def _today_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return date.today().strftime("%Y-%m-%d")
 
 
-def _score_clip(v: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, v))
-
-
-def _fmt_num(v: Any, digits: int = 2) -> str:
-    x = _safe_float(v)
-    if x is None:
-        return "-"
-    return f"{x:,.{digits}f}"
-
-
-def _fmt_pct(v: Any, digits: int = 2) -> str:
-    x = _safe_float(v)
-    if x is None:
-        return "-"
-    return f"{x:,.{digits}f}%"
-
-
-def _fmt_bool(v: Any) -> str:
-    if isinstance(v, bool):
-        return "是" if v else "否"
-    s = _safe_str(v).lower()
-    return "是" if s in {"true", "1", "yes", "y", "是"} else "否"
+def _create_record_id(pred_date: str, model_name: str) -> str:
+    raw = f"{pred_date}|{model_name}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 def _set_status(msg: str, level: str = "info"):
@@ -135,53 +145,6 @@ def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_type")] = level
 
 
-def _show_status():
-    msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
-    level = _safe_str(st.session_state.get(_k("status_type"), "info"))
-    if not msg:
-        return
-    if level == "success":
-        st.success(msg)
-    elif level == "warning":
-        st.warning(msg)
-    elif level == "error":
-        st.error(msg)
-    else:
-        st.info(msg)
-
-
-def _normalize_direction_from_points(points: float | None) -> str:
-    x = _safe_float(points)
-    if x is None:
-        return "未知"
-    if x > 15:
-        return "偏多"
-    if x < -15:
-        return "偏空"
-    return "震盪"
-
-
-def _create_record_id(pred_date: str) -> str:
-    raw = f"macro|{_safe_str(pred_date)}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
-
-
-def _date_context_text(target_date: str) -> str:
-    target = pd.to_datetime(target_date, errors="coerce")
-    today = pd.to_datetime(_today_text(), errors="coerce")
-    if pd.isna(target) or pd.isna(today):
-        return ""
-    diff = int((target.date() - today.date()).days)
-    if diff == 0:
-        return "以最新可得市場資料推估今日走勢。"
-    if diff > 0:
-        return f"以最新可得市場資料，預推 {target.strftime('%Y-%m-%d')} 走勢。距今天 {diff} 天。"
-    return f"此日期早於今天，屬於回顧式推估檢查。距今天 {abs(diff)} 天。"
-
-
-# =========================================================
-# GitHub 儲存
-# =========================================================
 def _github_config() -> dict[str, str]:
     return {
         "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
@@ -204,40 +167,14 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
     return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
 
-def _read_json_from_github(path: str) -> tuple[Any, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return None, "未設定 GITHUB_TOKEN"
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], path),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code == 404:
-            return None, ""
-        if resp.status_code != 200:
-            return None, f"GitHub 讀取失敗：{resp.status_code} / {resp.text[:300]}"
-        data = resp.json()
-        content = _safe_str(data.get("content"))
-        if not content:
-            return None, ""
-        decoded = base64.b64decode(content).decode("utf-8")
-        return json.loads(decoded), ""
-    except Exception as e:
-        return None, f"GitHub 讀取例外：{e}"
-
-
-def _get_file_sha(path: str) -> tuple[str, str]:
+def _get_file_sha() -> tuple[str, str]:
     cfg = _github_config()
     token = cfg["token"]
     if not token:
         return "", "缺少 GITHUB_TOKEN"
     try:
         resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_github_headers(token),
             params={"ref": cfg["branch"]},
             timeout=20,
@@ -246,667 +183,12 @@ def _get_file_sha(path: str) -> tuple[str, str]:
             return _safe_str(resp.json().get("sha")), ""
         if resp.status_code == 404:
             return "", ""
-        return "", f"讀取 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+        return "", f"讀取 GitHub SHA 失敗：{resp.status_code} / {resp.text[:200]}"
     except Exception as e:
-        return "", f"讀取 SHA 例外：{e}"
+        return "", f"讀取 GitHub SHA 例外：{e}"
 
 
-def _write_json_to_github(path: str, payload: Any, message: str) -> tuple[bool, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return False, "未設定 GITHUB_TOKEN"
-    sha, err = _get_file_sha(path)
-    if err:
-        return False, err
-    content_text = json.dumps(payload, ensure_ascii=False, indent=2)
-    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-    body: dict[str, Any] = {
-        "message": message,
-        "content": encoded,
-        "branch": cfg["branch"],
-    }
-    if sha:
-        body["sha"] = sha
-    try:
-        resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], path),
-            headers=_github_headers(token),
-            json=body,
-            timeout=30,
-        )
-        if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{path}"
-        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
-    except Exception as e:
-        return False, f"GitHub 寫入例外：{e}"
-
-
-# =========================================================
-# 市場資料
-# =========================================================
-@st.cache_data(ttl=180, show_spinner=False)
-def _get_yahoo_chart(symbol: str, interval: str = "1d", rng: str = "3mo", refresh_key: str = "") -> pd.DataFrame:
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {
-        "interval": interval,
-        "range": rng,
-        "includePrePost": "true",
-        "events": "div,splits",
-    }
-    resp = requests.get(url, headers=UA, params=params, timeout=TIMEOUT)
-    resp.raise_for_status()
-    raw = resp.json()
-
-    result = (((raw or {}).get("chart") or {}).get("result") or [None])[0] or {}
-    ts = result.get("timestamp") or []
-    quote = (((result.get("indicators") or {}).get("quote") or [None])[0] or {})
-    adj = (((result.get("indicators") or {}).get("adjclose") or [None])[0] or {})
-
-    df = pd.DataFrame(
-        {
-            "timestamp": ts,
-            "open": quote.get("open", []),
-            "high": quote.get("high", []),
-            "low": quote.get("low", []),
-            "close": quote.get("close", []),
-            "volume": quote.get("volume", []),
-            "adjclose": adj.get("adjclose", []),
-        }
-    )
-    if df.empty:
-        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume", "adjclose"])
-
-    df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
-    for c in ["open", "high", "low", "close", "volume", "adjclose"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
-    return df[["datetime", "open", "high", "low", "close", "volume", "adjclose"]].copy()
-
-
-@st.cache_data(ttl=180, show_spinner=False)
-def _get_market_snapshot(refresh_key: str = "") -> dict[str, dict[str, Any]]:
-    symbol_map = {
-        "台股加權": "^TWII",
-        "那斯達克": "^IXIC",
-        "費半": "^SOX",
-        "標普500期": "ES=F",
-        "那指期": "NQ=F",
-        "道瓊": "^DJI",
-        "台積電ADR": "TSM",
-        "美元台幣": "TWD=X",
-        "VIX恐慌": "^VIX",
-    }
-    out: dict[str, dict[str, Any]] = {}
-
-    for name, symbol in symbol_map.items():
-        try:
-            df = _get_yahoo_chart(symbol, interval="1d", rng="3mo", refresh_key=refresh_key)
-            if df.empty:
-                out[name] = {"symbol": symbol, "error": "empty"}
-                continue
-            temp = df.dropna(subset=["close"]).copy()
-            if len(temp) < 2:
-                out[name] = {"symbol": symbol, "error": "insufficient"}
-                continue
-
-            latest = temp.iloc[-1]
-            prev = temp.iloc[-2]
-            close_now = _safe_float(latest["close"])
-            close_prev = _safe_float(prev["close"])
-            chg = None if close_now is None or close_prev is None else close_now - close_prev
-            chg_pct = None if chg is None or close_prev in [None, 0] else chg / close_prev * 100
-
-            temp["ma5"] = temp["close"].rolling(5).mean()
-            temp["ma10"] = temp["close"].rolling(10).mean()
-            temp["ma20"] = temp["close"].rolling(20).mean()
-
-            ma5 = _safe_float(temp.iloc[-1]["ma5"])
-            ma10 = _safe_float(temp.iloc[-1]["ma10"])
-            ma20 = _safe_float(temp.iloc[-1]["ma20"])
-
-            out[name] = {
-                "symbol": symbol,
-                "close": close_now,
-                "prev_close": close_prev,
-                "change": chg,
-                "change_pct": chg_pct,
-                "ma5": ma5,
-                "ma10": ma10,
-                "ma20": ma20,
-                "time": latest["datetime"],
-                "df": temp.tail(60).copy(),
-            }
-        except Exception as e:
-            out[name] = {"symbol": symbol, "error": str(e)}
-    return out
-
-
-def _pick_history_row(df: pd.DataFrame, target_dt: pd.Timestamp) -> tuple[pd.Series | None, pd.Series | None]:
-    if df is None or df.empty:
-        return None, None
-    temp = df.dropna(subset=["close"]).copy()
-    if temp.empty:
-        return None, None
-    temp["date_only"] = pd.to_datetime(temp["datetime"], errors="coerce").dt.normalize()
-    temp = temp.dropna(subset=["date_only"]).sort_values("datetime").reset_index(drop=True)
-    hit = temp[temp["date_only"] <= target_dt.normalize()].copy()
-    if hit.empty:
-        return None, None
-    latest = hit.iloc[-1]
-    prev_pool = temp[temp["datetime"] < latest["datetime"]]
-    prev = prev_pool.iloc[-1] if not prev_pool.empty else None
-    return latest, prev
-
-
-@st.cache_data(ttl=180, show_spinner=False)
-def _get_market_snapshot_for_date(target_date_text: str = "", refresh_key: str = "") -> dict[str, dict[str, Any]]:
-    target_dt = pd.to_datetime(target_date_text, errors="coerce")
-    if pd.isna(target_dt):
-        return _get_market_snapshot(refresh_key=refresh_key)
-
-    lookback_days = max((datetime.now().date() - target_dt.date()).days + 40, 120)
-    if target_dt.date() > datetime.now().date():
-        lookback_days = 120
-    approx_months = max(6, min(24, int(lookback_days / 30) + 2))
-    rng = f"{approx_months}mo"
-
-    symbol_map = {
-        "台股加權": "^TWII",
-        "那斯達克": "^IXIC",
-        "費半": "^SOX",
-        "標普500期": "ES=F",
-        "那指期": "NQ=F",
-        "道瓊": "^DJI",
-        "台積電ADR": "TSM",
-        "美元台幣": "TWD=X",
-        "VIX恐慌": "^VIX",
-    }
-    out: dict[str, dict[str, Any]] = {}
-    for name, symbol in symbol_map.items():
-        try:
-            df = _get_yahoo_chart(symbol, interval="1d", rng=rng, refresh_key=f"{refresh_key}_{target_date_text}_{symbol}")
-            latest, prev = _pick_history_row(df, target_dt)
-            if latest is None:
-                out[name] = {"symbol": symbol, "error": "target_not_found"}
-                continue
-
-            temp = df.dropna(subset=["close"]).copy().sort_values("datetime").reset_index(drop=True)
-            temp["ma5"] = temp["close"].rolling(5).mean()
-            temp["ma10"] = temp["close"].rolling(10).mean()
-            temp["ma20"] = temp["close"].rolling(20).mean()
-            latest_time = latest["datetime"]
-            row = temp[temp["datetime"] == latest_time].tail(1)
-            row = row.iloc[0] if not row.empty else latest
-
-            close_now = _safe_float(row["close"])
-            close_prev = _safe_float(prev["close"]) if prev is not None else None
-            chg = None if close_now is None or close_prev is None else close_now - close_prev
-            chg_pct = None if chg is None or close_prev in [None, 0] else chg / close_prev * 100
-
-            out[name] = {
-                "symbol": symbol,
-                "close": close_now,
-                "prev_close": close_prev,
-                "change": chg,
-                "change_pct": chg_pct,
-                "ma5": _safe_float(row.get("ma5")),
-                "ma10": _safe_float(row.get("ma10")),
-                "ma20": _safe_float(row.get("ma20")),
-                "time": latest_time,
-                "df": temp[temp["datetime"] <= latest_time].tail(60).copy(),
-                "replay": True,
-            }
-        except Exception as e:
-            out[name] = {"symbol": symbol, "error": str(e), "replay": True}
-    return out
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _get_twii_history(refresh_key: str = "") -> pd.DataFrame:
-    df = _get_yahoo_chart("^TWII", interval="1d", rng="1y", refresh_key=refresh_key)
-    if df.empty:
-        return pd.DataFrame(columns=["date", "close", "prev_close", "change", "change_pct"])
-    temp = df.dropna(subset=["close"]).copy().reset_index(drop=True)
-    temp["date"] = pd.to_datetime(temp["datetime"], errors="coerce").dt.date
-    temp["prev_close"] = temp["close"].shift(1)
-    temp["change"] = temp["close"] - temp["prev_close"]
-    temp["change_pct"] = temp["change"] / temp["prev_close"] * 100
-    temp = temp.dropna(subset=["date"]).copy()
-    return temp[["date", "close", "prev_close", "change", "change_pct"]]
-
-
-# =========================================================
-# 新聞資料
-# =========================================================
-@st.cache_data(ttl=300, show_spinner=False)
-def _fetch_google_news_rss(query: str, refresh_key: str = "", start_date_text: str = "", end_date_text: str = "") -> list[dict[str, Any]]:
-    url = "https://news.google.com/rss/search"
-    date_filter = ""
-    if start_date_text and end_date_text:
-        date_filter = f" after:{start_date_text} before:{end_date_text}"
-    params = {
-        "q": f"{query}{date_filter}",
-        "hl": "zh-TW",
-        "gl": "TW",
-        "ceid": "TW:zh-Hant",
-    }
-    resp = requests.get(url, headers=UA, params=params, timeout=TIMEOUT)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.text)
-
-    rows: list[dict[str, Any]] = []
-    for item in root.findall(".//item")[:12]:
-        rows.append(
-            {
-                "title": _safe_str(item.findtext("title")),
-                "link": _safe_str(item.findtext("link")),
-                "pub_date": _safe_str(item.findtext("pubDate")),
-                "source": _safe_str(item.findtext("source")),
-            }
-        )
-    return rows
-
-
-def _score_news_title(title: str) -> tuple[int, list[str]]:
-    text = _safe_str(title)
-    if not text:
-        return 0, []
-    score = 0
-    hits: list[str] = []
-    low = text.lower()
-    for k, v in NEGATIVE_KEYWORDS.items():
-        if (k.lower() in low) if re.match(r"^[A-Za-z0-9_=-]+$", k) else (k in text):
-            score += v
-            hits.append(k)
-    for k, v in POSITIVE_KEYWORDS.items():
-        if (k.lower() in low) if re.match(r"^[A-Za-z0-9_=-]+$", k) else (k in text):
-            score += v
-            hits.append(k)
-    return score, hits
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _get_news_bundle(target_date_text: str = "", refresh_key: str = "") -> dict[str, Any]:
-    queries = {
-        "國際風險": '(war OR tariff OR sanctions OR fed OR inflation OR recession OR geopolitics) (stocks OR semiconductor OR Taiwan)',
-        "科技半導體": '(NVIDIA OR TSMC OR semiconductor OR chip OR AI) (stocks OR market)',
-        "台股市場": '(Taiwan stocks OR Taiex OR 台股 OR 加權指數 OR 台積電)',
-    }
-    out: dict[str, Any] = {"items": [], "summary": []}
-    seen = set()
-
-    target_dt = pd.to_datetime(target_date_text, errors="coerce")
-    today_dt = pd.Timestamp(datetime.now().date())
-    start_date_text = ""
-    end_date_text = ""
-    replay_mode = False
-    if pd.notna(target_dt):
-        day_gap = abs((today_dt - target_dt.normalize()).days)
-        if day_gap >= 2:
-            replay_mode = True
-            start_date_text = (target_dt - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-            end_date_text = (target_dt + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-
-    for bucket, query in queries.items():
-        try:
-            rows = _fetch_google_news_rss(
-                query,
-                refresh_key=refresh_key,
-                start_date_text=start_date_text,
-                end_date_text=end_date_text,
-            )
-        except Exception:
-            rows = []
-        for row in rows:
-            key = _safe_str(row.get("title"))
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            score, hits = _score_news_title(key)
-            big_tech_hit = any(x.lower() in key.lower() for x in BIG_TECH_NAMES)
-            if big_tech_hit:
-                score += 2
-                hits.append("世界大廠")
-            row["bucket"] = bucket
-            row["score"] = score
-            row["hits"] = "、".join(sorted(set(hits)))
-            out["items"].append(row)
-
-    news_df = pd.DataFrame(out["items"])
-    if news_df.empty:
-        out["df"] = pd.DataFrame(columns=["bucket", "title", "source", "score", "hits", "pub_date"])
-        out["news_score"] = 50.0
-        out["risk_level"] = "中性"
-        out["mode"] = "歷史回放" if replay_mode else "即時模式"
-        out["window"] = f"{start_date_text} ~ {end_date_text}" if replay_mode else "最近新聞"
-        return out
-
-    news_df["score"] = pd.to_numeric(news_df["score"], errors="coerce").fillna(0)
-    news_df = news_df.sort_values(["score", "pub_date"], ascending=[True, False]).reset_index(drop=True)
-    raw_sum = float(news_df["score"].head(12).sum())
-    news_score = _score_clip(50 + raw_sum * 1.8, 0, 100)
-    if news_score >= 60:
-        risk_level = "偏多"
-    elif news_score <= 40:
-        risk_level = "偏空"
-    else:
-        risk_level = "中性"
-
-    out["df"] = news_df[["bucket", "title", "source", "score", "hits", "pub_date", "link"]].copy()
-    out["news_score"] = news_score
-    out["risk_level"] = risk_level
-    out["mode"] = "歷史回放" if replay_mode else "即時模式"
-    out["window"] = f"{start_date_text} ~ {end_date_text}" if replay_mode else "最近新聞"
-    return out
-
-
-# =========================================================
-# 推估模型
-
-# =========================================================
-# 推估模型
-# =========================================================
-def _pct_to_score(x: float | None, center: float = 0.0, scale: float = 4.0, invert: bool = False) -> float | None:
-    if x is None:
-        return None
-    z = ((x - center) / scale) * 25
-    val = 50 + (-z if invert else z)
-    return _score_clip(val)
-
-
-def _build_factor_table(snapshot: dict[str, dict[str, Any]], news_bundle: dict[str, Any]) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-
-    def add_factor(name: str, value: float | None, weight: float, comment: str):
-        if value is None:
-            rows.append({"因子": name, "分數": None, "權重": weight, "加權分": None, "說明": comment})
-            return
-        score = _score_clip(value)
-        rows.append({"因子": name, "分數": score, "權重": weight, "加權分": score * weight, "說明": comment})
-
-    twii = snapshot.get("台股加權", {})
-    nasdaq = snapshot.get("那斯達克", {})
-    sox = snapshot.get("費半", {})
-    es = snapshot.get("標普500期", {})
-    nq = snapshot.get("那指期", {})
-    tsm = snapshot.get("台積電ADR", {})
-    usdtwd = snapshot.get("美元台幣", {})
-    vix = snapshot.get("VIX恐慌", {})
-
-    tw_close = _safe_float(twii.get("close"))
-    tw_ma20 = _safe_float(twii.get("ma20"))
-    trend_pct = None if tw_close is None or tw_ma20 in [None, 0] else (tw_close - tw_ma20) / tw_ma20 * 100
-    add_factor("台股中期趨勢", _pct_to_score(trend_pct, scale=3.0), 0.22, f"加權相對 MA20：{_fmt_pct(trend_pct)}")
-
-    nas_pct = _safe_float(nasdaq.get("change_pct"))
-    sox_pct = _safe_float(sox.get("change_pct"))
-    tech_mix = None if nas_pct is None and sox_pct is None else ((nas_pct or 0) * 0.45 + (sox_pct or 0) * 0.55)
-    add_factor("美股科技氛圍", _pct_to_score(tech_mix, scale=2.5), 0.18, f"NASDAQ {_fmt_pct(nas_pct)} / SOX {_fmt_pct(sox_pct)}")
-
-    es_pct = _safe_float(es.get("change_pct"))
-    nq_pct = _safe_float(nq.get("change_pct"))
-    night_mix = None if es_pct is None and nq_pct is None else ((es_pct or 0) * 0.40 + (nq_pct or 0) * 0.60)
-    add_factor("夜盤 / 期貨代理", _pct_to_score(night_mix, scale=2.0), 0.18, f"ES {_fmt_pct(es_pct)} / NQ {_fmt_pct(nq_pct)}")
-
-    tsm_pct = _safe_float(tsm.get("change_pct"))
-    add_factor("台積電 ADR", _pct_to_score(tsm_pct, scale=2.5), 0.10, f"TSM {_fmt_pct(tsm_pct)}")
-
-    twd_pct = _safe_float(usdtwd.get("change_pct"))
-    add_factor("美元台幣", _pct_to_score(twd_pct, scale=1.2, invert=True), 0.08, f"USD/TWD {_fmt_pct(twd_pct)}")
-
-    vix_pct = _safe_float(vix.get("change_pct"))
-    add_factor("風險偏好 / VIX", _pct_to_score(vix_pct, scale=8.0, invert=True), 0.09, f"VIX {_fmt_pct(vix_pct)}")
-
-    add_factor("國際新聞風險", _safe_float(news_bundle.get("news_score"), 50.0), 0.15, f"新聞風險：{_safe_str(news_bundle.get('risk_level'))}")
-    return pd.DataFrame(rows)
-
-
-def _build_prediction(snapshot: dict[str, dict[str, Any]], factor_df: pd.DataFrame) -> dict[str, Any]:
-    twii = snapshot.get("台股加權", {})
-    tw_close = _safe_float(twii.get("close")) or 22000.0
-
-    valid = factor_df.dropna(subset=["加權分", "權重"]).copy()
-    total_weight = valid["權重"].sum() if not valid.empty else 1.0
-    total_score = float(valid["加權分"].sum() / total_weight) if total_weight else 50.0
-
-    bias = total_score - 50.0
-    expected_pct = max(-2.5, min(2.5, bias * 0.03))
-    expected_points = tw_close * expected_pct / 100
-
-    day_range_pct = 0.55 + abs(expected_pct) * 0.75
-    up_target = tw_close + expected_points + (tw_close * day_range_pct / 100) * 0.25
-    down_target = tw_close + expected_points - (tw_close * day_range_pct / 100) * 0.25
-
-    if total_score >= 68:
-        stance = "偏多可進場"
-        action = "可分批布局強勢股 / AI / 半導體，但不要一次滿倉。"
-        risk = "中"
-    elif total_score >= 58:
-        stance = "偏多但不追高"
-        action = "可以找拉回分批進，優先看量價結構完整個股。"
-        risk = "中"
-    elif total_score >= 45:
-        stance = "震盪觀察"
-        action = "先看盤後半小時方向，避免開高追價或急跌亂接。"
-        risk = "中高"
-    elif total_score >= 35:
-        stance = "偏空保守"
-        action = "以減碼、短打、快進快出為主，不適合重押。"
-        risk = "高"
-    else:
-        stance = "明顯偏空"
-        action = "先保資金，少接刀，已有持股優先看停損與避險。"
-        risk = "很高"
-
-    return {
-        "score": round(total_score, 2),
-        "expected_pct": round(expected_pct, 2),
-        "expected_points": round(expected_points, 0),
-        "range_low": round(down_target, 0),
-        "range_high": round(up_target, 0),
-        "stance": stance,
-        "action": action,
-        "risk": risk,
-    }
-
-
-def _build_entry_rules(pred: dict[str, Any], snapshot: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
-    twii = snapshot.get("台股加權", {})
-    close_v = _safe_float(twii.get("close"))
-    ma5 = _safe_float(twii.get("ma5"))
-    ma20 = _safe_float(twii.get("ma20"))
-
-    rules = []
-    rules.append({"策略": "開盤判斷", "建議": f"若加權開盤後 15~30 分鐘站穩前收附近，且量能不失速，可按 {pred['stance']} 執行。"})
-    if close_v is not None and ma5 is not None and ma20 is not None:
-        rules.append({"策略": "均線位階", "建議": f"目前加權 {close_v:,.0f}，MA5 {ma5:,.0f}，MA20 {ma20:,.0f}；站穩 MA5 才適合積極，跌破 MA20 轉保守。"})
-    rules.append({"策略": "買點", "建議": "優先挑強於大盤、量增、族群同步轉強的個股，不追單一利多爆量長紅末端。"})
-    rules.append({"策略": "賣點", "建議": "若大盤預估轉弱，先處理弱勢股、破五日線股、爆量不漲股；強勢股改移動停利。"})
-    rules.append({"策略": "風控", "建議": "單筆先小倉，確認盤勢延續再加碼；若與預估相反，照紀律停損，不要凹單。"})
-    return rules
-
-
-def _history_bias_adjustment(records_df: pd.DataFrame) -> dict[str, float]:
-    x = _ensure_record_columns(records_df) if isinstance(records_df, pd.DataFrame) else pd.DataFrame()
-    if x.empty or "方向命中" not in x.columns:
-        return {"score_adj": 0.0, "confidence_adj": 0.0}
-    done = x.dropna(subset=["實際漲跌點"]).copy()
-    if len(done) < 8:
-        return {"score_adj": 0.0, "confidence_adj": 0.0}
-    hit_rate = float(done["方向命中"].fillna(False).mean() * 100)
-    avg_err = pd.to_numeric(done["點數誤差"], errors="coerce").dropna()
-    avg_err = float(avg_err.mean()) if not avg_err.empty else 120.0
-    score_adj = 0.0
-    conf_adj = 0.0
-    if hit_rate >= 62:
-        score_adj += 2.0
-        conf_adj += 4.0
-    elif hit_rate <= 45:
-        score_adj -= 2.5
-        conf_adj -= 6.0
-    if avg_err <= 80:
-        score_adj += 1.0
-        conf_adj += 3.0
-    elif avg_err >= 180:
-        score_adj -= 1.5
-        conf_adj -= 4.0
-    return {"score_adj": score_adj, "confidence_adj": conf_adj}
-
-
-def _build_god_mode_signal(pred: dict[str, Any], snapshot: dict[str, dict[str, Any]], news_bundle: dict[str, Any], factor_df: pd.DataFrame, records_df: pd.DataFrame | None = None) -> dict[str, Any]:
-    twii = snapshot.get("台股加權", {})
-    nasdaq = snapshot.get("那斯達克", {})
-    sox = snapshot.get("費半", {})
-    nq = snapshot.get("那指期", {})
-    es = snapshot.get("標普500期", {})
-    tsm = snapshot.get("台積電ADR", {})
-    vix = snapshot.get("VIX恐慌", {})
-
-    tw_close = _safe_float(twii.get("close"))
-    ma5 = _safe_float(twii.get("ma5"))
-    ma10 = _safe_float(twii.get("ma10"))
-    ma20 = _safe_float(twii.get("ma20"))
-    nas_pct = _safe_float(nasdaq.get("change_pct"), 0.0) or 0.0
-    sox_pct = _safe_float(sox.get("change_pct"), 0.0) or 0.0
-    nq_pct = _safe_float(nq.get("change_pct"), 0.0) or 0.0
-    es_pct = _safe_float(es.get("change_pct"), 0.0) or 0.0
-    tsm_pct = _safe_float(tsm.get("change_pct"), 0.0) or 0.0
-    vix_pct = _safe_float(vix.get("change_pct"), 0.0) or 0.0
-    news_score = _safe_float(news_bundle.get("news_score"), 50.0) or 50.0
-
-    base_score = _safe_float(pred.get("score"), 50.0) or 50.0
-    bias = _history_bias_adjustment(records_df if isinstance(records_df, pd.DataFrame) else pd.DataFrame())
-    god_score = base_score + bias["score_adj"]
-    logic: list[str] = []
-    plus = 0.0
-    minus = 0.0
-
-    if tw_close is not None and ma5 is not None and ma20 is not None:
-        if tw_close > ma5 > ma20:
-            plus += 9
-            logic.append(f"加權站上 MA5 / MA20，多頭結構完整（{tw_close:,.0f} > {ma5:,.0f} > {ma20:,.0f}）")
-        elif tw_close > ma20:
-            plus += 4
-            logic.append("加權仍守在 MA20 之上，趨勢尚未轉壞")
-        elif tw_close < ma5 < ma20:
-            minus += 10
-            logic.append(f"加權跌破 MA5 / MA20，轉弱明確（{tw_close:,.0f} < {ma5:,.0f} < {ma20:,.0f}）")
-        else:
-            minus += 3
-            logic.append("加權均線結構混亂，盤勢偏震盪")
-
-    tech_strength = (nas_pct * 0.35) + (sox_pct * 0.40) + (nq_pct * 0.15) + (tsm_pct * 0.10)
-    if tech_strength >= 1.2:
-        plus += 9
-        logic.append(f"美科技 / 費半 / ADR 同步偏強，外部風向有利台股（綜合 {tech_strength:+.2f}%）")
-    elif tech_strength >= 0.3:
-        plus += 4
-        logic.append(f"美科技股偏正向，但不是全面大多頭（綜合 {tech_strength:+.2f}%）")
-    elif tech_strength <= -1.2:
-        minus += 9
-        logic.append(f"美科技 / 費半 / ADR 同步轉弱，台股隔日承壓機率高（綜合 {tech_strength:+.2f}%）")
-    elif tech_strength <= -0.3:
-        minus += 4
-        logic.append(f"外部科技股風向偏空，追價風險提高（綜合 {tech_strength:+.2f}%）")
-
-    futures_mix = nq_pct * 0.6 + es_pct * 0.4
-    if futures_mix >= 0.6:
-        plus += 6
-        logic.append(f"夜盤代理偏多，盤前氣氛加分（ES/NQ 綜合 {futures_mix:+.2f}%）")
-    elif futures_mix <= -0.6:
-        minus += 6
-        logic.append(f"夜盤代理偏空，開盤追多不利（ES/NQ 綜合 {futures_mix:+.2f}%）")
-
-    if vix_pct <= -3:
-        plus += 4
-        logic.append(f"VIX 回落，市場風險偏好改善（{vix_pct:+.2f}%）")
-    elif vix_pct >= 6:
-        minus += 8
-        logic.append(f"VIX 明顯升高，先把風險放第一（{vix_pct:+.2f}%）")
-
-    if news_score >= 60:
-        plus += 5
-        logic.append(f"國際新聞總分偏多（{news_score:.1f}），利空干擾較低")
-    elif news_score <= 40:
-        minus += 8
-        logic.append(f"國際新聞總分偏空（{news_score:.1f}），戰爭 / 關稅 / 制裁類風險需保守")
-
-    god_score = _score_clip(god_score + plus - minus, 0, 100)
-
-    entry_light = "紅燈"
-    exit_light = "綠燈"
-    conclusion = "觀望"
-    action = "先觀望"
-
-    if god_score >= 78:
-        entry_light = "綠燈"
-        exit_light = "紅燈"
-        conclusion = "可分批進場，偏多操作"
-        action = "優先布局強勢族群與領先股，採分批進場，不建議一次滿倉。"
-    elif god_score >= 66:
-        entry_light = "黃綠燈"
-        exit_light = "黃燈"
-        conclusion = "可拉回找買點，續抱強股"
-        action = "可進場，但以拉回承接為主；已有強勢股可續抱並設移動停利。"
-    elif god_score >= 54:
-        entry_light = "黃燈"
-        exit_light = "黃燈"
-        conclusion = "中性偏多，先小倉試單"
-        action = "只適合小倉試單，需等開盤後量價確認再加碼。"
-    elif god_score >= 42:
-        entry_light = "橘燈"
-        exit_light = "黃紅燈"
-        conclusion = "偏保守，減少新倉"
-        action = "新倉要少，已有持股看強弱分化；弱股先減碼。"
-    else:
-        entry_light = "紅燈"
-        exit_light = "綠燈"
-        conclusion = "偏空防守，優先出場或減碼"
-        action = "不適合主動進場，先保留現金；破線弱勢股優先出場。"
-
-    confidence = _score_clip(55 + abs(god_score - 50) * 0.9 + bias["confidence_adj"], 35, 95)
-    if abs((_safe_float(pred.get("expected_points"), 0.0) or 0.0)) < 40:
-        confidence = max(35.0, confidence - 8.0)
-        logic.append("預估點數幅度不大，代表方向雖有傾向，但延續力未必強")
-
-    if god_score <= 40:
-        logic.insert(0, "防守優先：當前綜合風險偏高，先想怎麼少輸，不是先想賺多少")
-    elif god_score >= 75:
-        logic.insert(0, "順勢優先：多方條件同時成立，適合做多但仍需分批與風控")
-
-    sell_triggers = [
-        "開盤後跌破前收且 30 分鐘站不回",
-        "加權跌破 MA5，且費半 / 台積電 ADR 同步轉弱",
-        "原本強勢股爆量不漲、開高走低",
-        "國際突發利空升級，VIX 明顯飆升",
-    ]
-    buy_triggers = [
-        "開盤 15~30 分鐘站穩前收或關鍵支撐",
-        "強勢族群同步走強，不是單一個股獨漲",
-        "量能放大但不是爆量長黑",
-        "夜盤與美科技因子沒有明顯轉壞",
-    ]
-
-    logic_text = "\n".join([f"- {x}" for x in logic])
-    return {
-        "god_score": round(god_score, 2),
-        "entry_light": entry_light,
-        "exit_light": exit_light,
-        "conclusion": conclusion,
-        "action": action,
-        "logic_list": logic,
-        "logic_text": logic_text,
-        "confidence": round(confidence, 1),
-        "buy_triggers": buy_triggers,
-        "sell_triggers": sell_triggers,
-    }
-
-
-# =========================================================
-# 紀錄 / 回測
-# =========================================================
-def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=RECORD_COLUMNS)
     x = df.copy()
@@ -914,194 +196,624 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         if c not in x.columns:
             x[c] = None
     numeric_cols = [
-        "推估分數", "推估漲跌點", "推估漲跌%", "推估區間低", "推估區間高",
-        "台股加權", "台股漲跌%", "NASDAQ漲跌%", "SOX漲跌%", "NQ漲跌%", "ES漲跌%", "TSM ADR漲跌%", "USD/TWD漲跌%", "VIX漲跌%",
-        "新聞分數", "實際收盤", "實際漲跌點", "實際漲跌%", "點數誤差",
+        "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "預估區間寬度",
+        "國際新聞風險分", "美股因子分", "夜盤因子分", "技術面因子分", "籌碼面因子分", "事件因子分",
+        "結構面因子分", "風險面因子分", "大盤基準點", "加權收盤", "加權漲跌%", "成交量估分",
+        "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%",
+        "NQ夜盤漲跌%", "外資買賣超估分", "期貨選擇權估分", "類股輪動估分", "實際漲跌點", "實際高點",
+        "實際低點", "點數誤差",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
-    for c in ["方向命中", "區間命中", "開盤是否適合進場"]:
+    bool_cols = ["方向是否命中", "區間是否命中", "建議動作是否合適"]
+    for c in bool_cols:
         x[c] = x[c].fillna(False).map(lambda v: str(v).lower() in {"true", "1", "yes", "y", "是"})
-    x["預測日期"] = x["預測日期"].fillna("").astype(str)
-    need_id = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
-    for idx in x[need_id].index:
-        x.at[idx, "record_id"] = _create_record_id(_safe_str(x.at[idx, "預測日期"]))
+    for c in [
+        "推估日期", "建立時間", "更新時間", "模式名稱", "市場情境", "推估方向", "方向強度", "是否適合進場", "是否適合續抱",
+        "是否適合減碼", "是否適合出場", "建議動作", "風險等級", "股神推論邏輯", "進場確認條件", "出場警訊", "主要風險",
+        "建議倉位", "實際方向", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
+    ]:
+        x[c] = x[c].fillna("").astype(str)
     return x[RECORD_COLUMNS].copy()
 
 
-@st.cache_data(ttl=120, show_spinner=False)
-def _load_prediction_records(refresh_key: str = "") -> tuple[pd.DataFrame, str]:
-    payload, err = _read_json_from_github(_github_config()["path"])
+def _read_records_from_github() -> tuple[pd.DataFrame, str]:
+    cfg = _github_config()
+    if not cfg["token"]:
+        return pd.DataFrame(columns=RECORD_COLUMNS), "未設定 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(cfg["token"]),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return pd.DataFrame(columns=RECORD_COLUMNS), ""
+        if resp.status_code != 200:
+            return pd.DataFrame(columns=RECORD_COLUMNS), f"GitHub 讀取失敗：{resp.status_code} / {resp.text[:200]}"
+        content = resp.json().get("content", "")
+        if not content:
+            return pd.DataFrame(columns=RECORD_COLUMNS), ""
+        payload = json.loads(base64.b64decode(content).decode("utf-8"))
+        if isinstance(payload, list):
+            return _ensure_columns(pd.DataFrame(payload)), ""
+        return pd.DataFrame(columns=RECORD_COLUMNS), ""
+    except Exception as e:
+        return pd.DataFrame(columns=RECORD_COLUMNS), f"GitHub 讀取例外：{e}"
+
+
+def _write_records_to_github(df: pd.DataFrame) -> tuple[bool, str]:
+    cfg = _github_config()
+    if not cfg["token"]:
+        return False, "未設定 GITHUB_TOKEN"
+    sha, err = _get_file_sha()
     if err:
-        return pd.DataFrame(columns=RECORD_COLUMNS), err
-    if isinstance(payload, list):
-        return _ensure_record_columns(pd.DataFrame(payload)), ""
-    return pd.DataFrame(columns=RECORD_COLUMNS), ""
+        return False, err
+    body: dict[str, Any] = {
+        "message": f"update macro trend records at {_now_text()}",
+        "content": base64.b64encode(json.dumps(_ensure_columns(df).to_dict(orient="records"), ensure_ascii=False, indent=2).encode("utf-8")).decode("utf-8"),
+        "branch": cfg["branch"],
+    }
+    if sha:
+        body["sha"] = sha
+    try:
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(cfg["token"]),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已同步 GitHub：{cfg['path']}"
+        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return False, f"GitHub 寫入例外：{e}"
 
 
-def _save_prediction_records(df: pd.DataFrame) -> bool:
-    clean = _ensure_record_columns(df)
-    ok, msg = _write_json_to_github(
-        _github_config()["path"],
-        clean.to_dict(orient="records"),
-        f"update macro trend records at {_now_text()}",
-    )
-    if ok:
+def _save_state_df(df: pd.DataFrame):
+    st.session_state[_k("records_df")] = _ensure_columns(df)
+    st.session_state[_k("saved_at")] = _now_text()
+
+
+def _get_state_df() -> pd.DataFrame:
+    df = st.session_state.get(_k("records_df"))
+    if isinstance(df, pd.DataFrame):
+        return _ensure_columns(df)
+    return pd.DataFrame(columns=RECORD_COLUMNS)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
+    # 歷史/當日統一走 stooq CSV，避免太多來源造成延遲
+    pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
+    if pd.isna(pred_dt):
+        pred_dt = pd.Timestamp.today()
+    start = (pred_dt - pd.Timedelta(days=40)).strftime("%Y%m%d")
+    end = pred_dt.strftime("%Y%m%d")
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+    try:
+        df = pd.read_csv(url)
+        if df.empty:
+            return {}
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        if "date" not in df.columns:
+            return {}
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        for c in ["open", "high", "low", "close", "volume"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date")
+        df = df[(df["date"] >= pd.to_datetime(start)) & (df["date"] <= pd.to_datetime(end))]
+        if df.empty:
+            return {}
+        row = df.iloc[-1]
+        prev_close = pd.to_numeric(df["close"], errors="coerce").dropna().iloc[-2] if len(df.dropna(subset=["close"])) >= 2 else None
+        close = _safe_float(row.get("close"))
+        pct = ((close - prev_close) / prev_close * 100) if (close is not None and prev_close not in [None, 0]) else None
+        ma5 = df["close"].tail(5).mean() if "close" in df.columns else None
+        ma20 = df["close"].tail(20).mean() if "close" in df.columns else None
+        return {
+            "date": row.get("date"),
+            "open": _safe_float(row.get("open")),
+            "high": _safe_float(row.get("high")),
+            "low": _safe_float(row.get("low")),
+            "close": close,
+            "volume": _safe_float(row.get("volume")),
+            "pct": pct,
+            "ma5": _safe_float(ma5),
+            "ma20": _safe_float(ma20),
+        }
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _search_news_headlines(pred_date_text: str, max_items: int = 8) -> list[dict[str, str]]:
+    # 輕量新聞：Google News RSS 關鍵字搜尋
+    pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
+    if pd.isna(pred_dt):
+        pred_dt = pd.Timestamp.today()
+    ymd = pred_dt.strftime("%Y-%m-%d")
+    keywords = [
+        "Taiwan stock market",
+        "NASDAQ semiconductor",
+        "war tariff chip export",
+        "TSMC Nvidia Apple Microsoft earnings",
+    ]
+    rows: list[dict[str, str]] = []
+    for kw in keywords:
+        url = f"https://news.google.com/rss/search?q={requests.utils.quote(kw + ' after:' + ymd)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
         try:
-            _load_prediction_records.clear()
+            resp = requests.get(url, timeout=12)
+            text = resp.text
+            items = text.split("<item>")[1:3]
+            for it in items:
+                title = it.split("<title>", 1)[1].split("</title>", 1)[0] if "<title>" in it else ""
+                pub = it.split("<pubDate>", 1)[1].split("</pubDate>", 1)[0] if "<pubDate>" in it else ""
+                link = it.split("<link>", 1)[1].split("</link>", 1)[0] if "<link>" in it else ""
+                rows.append({"title": title.replace("<![CDATA[", "").replace("]]>", ""), "pubDate": pub, "link": link})
         except Exception:
             pass
-        _set_status(msg, "success")
-        return True
-    _set_status(msg, "error")
-    return False
+    unique = []
+    seen = set()
+    for r in rows:
+        key = _safe_str(r.get("title"))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    return unique[:max_items]
 
 
-def _build_factor_summary(factor_df: pd.DataFrame) -> str:
-    if factor_df is None or factor_df.empty:
-        return ""
-    parts = []
-    temp = factor_df.copy().sort_values("權重", ascending=False)
-    for _, r in temp.head(4).iterrows():
-        parts.append(f"{_safe_str(r.get('因子'))}:{_fmt_num(r.get('分數'), 1)}")
-    return "｜".join(parts)
+def _news_risk_score(news_rows: list[dict[str, str]]) -> tuple[float, str, str]:
+    if not news_rows:
+        return 0.0, "新聞平淡，未見重大風險關鍵詞", "無明顯新聞衝擊"
+    negative_words = {
+        "war": 4.0, "missile": 4.0, "attack": 4.0, "tariff": 3.0, "sanction": 3.5,
+        "crash": 3.0, "slump": 2.5, "ban": 3.0, "restrict": 2.8, "inflation": 2.0,
+        "recession": 3.0, "downgrade": 2.5, "probe": 2.0, "earthquake": 2.5,
+        "strike": 2.2, "關稅": 3.0, "戰爭": 4.0, "制裁": 3.5, "禁令": 3.0, "衝突": 3.0,
+    }
+    positive_words = {
+        "beat": 2.2, "surge": 2.4, "growth": 1.8, "rebound": 2.0, "upgrade": 1.8,
+        "expand": 1.5, "AI": 1.2, "strong": 1.5, "record": 1.8, "訂單": 1.8, "成長": 1.5,
+    }
+    risk = 0.0
+    positives = 0.0
+    tags = []
+    for row in news_rows:
+        title = _safe_str(row.get("title")).lower()
+        for w, score in negative_words.items():
+            if w.lower() in title:
+                risk += score
+                tags.append(f"風險:{w}")
+        for w, score in positive_words.items():
+            if w.lower() in title:
+                positives += score
+                tags.append(f"偏多:{w}")
+    net = risk - positives * 0.6
+    logic = "、".join(tags[:8]) if tags else "新聞未出現極端關鍵詞"
+    main_risk = "國際新聞風險偏高" if net >= 4 else ("國際新聞中性" if net > 0 else "國際新聞偏正向")
+    return max(-5.0, min(10.0, net)), logic, main_risk
 
 
-def _build_record_row(pred_date: str, pred: dict[str, Any], snapshot: dict[str, dict[str, Any]], news_bundle: dict[str, Any], factor_df: pd.DataFrame) -> dict[str, Any]:
+def _score_from_pct(pct: float | None, scale: float = 2.0, cap: float = 10.0) -> float:
+    if pct is None:
+        return 0.0
+    return max(-cap, min(cap, pct * scale))
+
+
+def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
+    twii = _fetch_stooq("^twii", pred_date_text)
+    nas = _fetch_stooq("^ixic", pred_date_text)
+    sox = _fetch_stooq("^sox", pred_date_text)
+    spx = _fetch_stooq("^spx", pred_date_text)
+    adr = _fetch_stooq("tsm.us", pred_date_text)
+    es = _fetch_stooq("es.f", pred_date_text)
+    nq = _fetch_stooq("nq.f", pred_date_text)
+    vix = _fetch_stooq("^vix", pred_date_text)
+    usdtwd = _fetch_stooq("usdtwd", pred_date_text)
+    news_rows = _search_news_headlines(pred_date_text)
+    news_score, news_logic, main_risk = _news_risk_score(news_rows)
+
+    tech_score = 0.0
+    structure_notes = []
+    tw_close = _safe_float(twii.get("close"), 22000.0)
+    tw_pct = _safe_float(twii.get("pct"), 0.0)
+    tw_ma5 = _safe_float(twii.get("ma5"), tw_close)
+    tw_ma20 = _safe_float(twii.get("ma20"), tw_close)
+    if tw_close >= tw_ma5:
+        tech_score += 2.5
+        structure_notes.append("加權站上MA5")
+    else:
+        tech_score -= 2.5
+        structure_notes.append("加權跌破MA5")
+    if tw_close >= tw_ma20:
+        tech_score += 3.0
+        structure_notes.append("加權站上MA20")
+    else:
+        tech_score -= 3.0
+        structure_notes.append("加權跌破MA20")
+    tech_score += _score_from_pct(tw_pct, scale=1.3, cap=6)
+
+    us_score = (
+        _score_from_pct(_safe_float(nas.get("pct"), 0.0), 1.8, 8)
+        + _score_from_pct(_safe_float(sox.get("pct"), 0.0), 2.2, 9)
+        + _score_from_pct(_safe_float(spx.get("pct"), 0.0), 1.2, 6)
+        + _score_from_pct(_safe_float(adr.get("pct"), 0.0), 2.0, 8)
+    )
+
+    night_score = (
+        _score_from_pct(_safe_float(es.get("pct"), 0.0), 2.0, 8)
+        + _score_from_pct(_safe_float(nq.get("pct"), 0.0), 2.4, 9)
+    )
+
+    vix_val = _safe_float(vix.get("close"), 18.0)
+    risk_score = 0.0
+    if vix_val >= 30:
+        risk_score -= 8
+    elif vix_val >= 24:
+        risk_score -= 5
+    elif vix_val >= 20:
+        risk_score -= 2
+    elif vix_val <= 15:
+        risk_score += 1.5
+
+    fx_val = _safe_float(usdtwd.get("close"), 32.0)
+    if fx_val >= 32.5:
+        risk_score -= 2.5
+    elif fx_val <= 31.8:
+        risk_score += 1.0
+
+    # 估分模組：先用代理值，後續可再接正式資料源
+    foreign_score = _score_from_pct(_safe_float(adr.get("pct"), 0.0), 1.6, 6) + _score_from_pct(_safe_float(spx.get("pct"), 0.0), 0.8, 3)
+    futures_score = _score_from_pct(_safe_float(es.get("pct"), 0.0), 1.6, 6) + _score_from_pct(_safe_float(nq.get("pct"), 0.0), 1.8, 6)
+    sector_score = _score_from_pct(_safe_float(sox.get("pct"), 0.0), 2.0, 7) + _score_from_pct(_safe_float(nas.get("pct"), 0.0), 1.0, 4)
+
+    # 重大事件代理：VIX + 關鍵新聞風險
+    event_score = -news_score * 1.8
+    if vix_val >= 25:
+        event_score -= 2.0
+
+    if tw_pct >= 1.2 and us_score > 3:
+        scenario = "多頭延續日"
+    elif tw_pct <= -1.2 and us_score < -3:
+        scenario = "空頭延續日"
+    elif news_score >= 4 or vix_val >= 25:
+        scenario = "重大風險事件日"
+    elif abs(tw_pct) <= 0.5 and abs(us_score) <= 3:
+        scenario = "高檔/低檔震盪日"
+    else:
+        scenario = "一般趨勢日"
+
     return {
-        "record_id": _create_record_id(pred_date),
-        "預測日期": pred_date,
+        "twii": twii, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
+        "news_rows": news_rows,
+        "news_score": news_score,
+        "news_logic": news_logic,
+        "main_risk": main_risk,
+        "tech_score": tech_score,
+        "us_score": us_score,
+        "night_score": night_score,
+        "risk_score": risk_score,
+        "foreign_score": foreign_score,
+        "futures_score": futures_score,
+        "sector_score": sector_score,
+        "event_score": event_score,
+        "scenario": scenario,
+        "structure_notes": structure_notes,
+        "tw_close": tw_close,
+        "tw_pct": tw_pct,
+        "vix_val": vix_val,
+        "fx_val": fx_val,
+    }
+
+
+def _get_dynamic_weights(records_df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    default = {
+        "股神平衡版": {"tech": 0.24, "us": 0.18, "night": 0.15, "news": 0.10, "chip": 0.12, "event": 0.10, "sector": 0.06, "risk": 0.05},
+        "技術面優先": {"tech": 0.34, "us": 0.12, "night": 0.10, "news": 0.08, "chip": 0.14, "event": 0.08, "sector": 0.09, "risk": 0.05},
+        "美夜盤優先": {"tech": 0.15, "us": 0.28, "night": 0.22, "news": 0.08, "chip": 0.10, "event": 0.07, "sector": 0.05, "risk": 0.05},
+        "新聞風險優先": {"tech": 0.14, "us": 0.14, "night": 0.10, "news": 0.22, "chip": 0.08, "event": 0.17, "sector": 0.05, "risk": 0.10},
+        "籌碼事件優先": {"tech": 0.15, "us": 0.12, "night": 0.10, "news": 0.09, "chip": 0.22, "event": 0.18, "sector": 0.08, "risk": 0.06},
+    }
+    df = _ensure_columns(records_df)
+    if df.empty:
+        return default
+    hist = df[df["方向是否命中"].fillna(False) == True].copy()
+    if hist.empty:
+        return default
+    out = json.loads(json.dumps(default))
+    for model in MODEL_NAMES:
+        hit_df = df[df["模式名稱"].astype(str) == model].copy()
+        if len(hit_df) < 8:
+            continue
+        win = hit_df["方向是否命中"].fillna(False).mean()
+        point_err = pd.to_numeric(hit_df["點數誤差"], errors="coerce").dropna().mean()
+        adj = 1.0
+        if win >= 0.65:
+            adj += 0.08
+        elif win <= 0.45:
+            adj -= 0.06
+        if point_err is not None and not pd.isna(point_err):
+            if point_err <= 60:
+                adj += 0.03
+            elif point_err >= 120:
+                adj -= 0.03
+        base = out[model]
+        if model == "新聞風險優先":
+            base["news"] *= adj
+            base["event"] *= adj
+        elif model == "技術面優先":
+            base["tech"] *= adj
+            base["sector"] *= adj
+        elif model == "美夜盤優先":
+            base["us"] *= adj
+            base["night"] *= adj
+        elif model == "籌碼事件優先":
+            base["chip"] *= adj
+            base["event"] *= adj
+        else:
+            base["tech"] *= adj
+            base["us"] *= adj
+        total = sum(base.values())
+        out[model] = {k: v / total for k, v in base.items()}
+    return out
+
+
+def _direction_strength(score: float) -> tuple[str, str]:
+    if score >= 15:
+        return "偏多", "強多"
+    if score >= 5:
+        return "偏多", "弱多"
+    if score <= -15:
+        return "偏空", "強空"
+    if score <= -5:
+        return "偏空", "弱空"
+    return "震盪", "中性震盪"
+
+
+def _risk_level(total_score: float, news_score: float, vix_val: float) -> str:
+    if news_score >= 5 or vix_val >= 30:
+        return "極高"
+    if news_score >= 3 or vix_val >= 24 or total_score <= -12:
+        return "高"
+    if abs(total_score) < 5:
+        return "中"
+    return "低"
+
+
+def _build_action_pack(direction: str, strength: str, risk_level: str, scenario: str, tech_score: float) -> tuple[str, str, str, str, str, str, str]:
+    if risk_level in {"極高", "高"} and direction != "偏多":
+        return ("否", "否", "是", "是", "觀望或減碼", "10%~20%", "風險事件優先，避免追價")
+    if direction == "偏多" and strength == "強多" and scenario != "重大風險事件日":
+        return ("是", "是", "否", "否", "可分批進場與續抱", "40%~70%", "偏多結構完整，可分批布局")
+    if direction == "偏多":
+        return ("是", "是", "否", "否", "小倉分批進場", "20%~40%", "偏多但強度一般，避免重壓")
+    if direction == "震盪":
+        if tech_score >= 0:
+            return ("條件式", "是", "視個股", "否", "低接不追價", "10%~30%", "震盪盤偏向低接高出")
+        return ("否", "否", "是", "否", "觀望等待確認", "0%~20%", "方向不明確，降低交易頻率")
+    return ("否", "否", "是", "是", "減碼或出場防守", "0%~15%", "偏空結構不利持股")
+
+
+def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[str, dict[str, float]], pred_date_text: str) -> dict[str, Any]:
+    w = weight_map.get(model_name, weight_map["股神平衡版"])
+    component = {
+        "tech": ctx["tech_score"],
+        "us": ctx["us_score"],
+        "night": ctx["night_score"],
+        "news": -ctx["news_score"] * 2.2,
+        "chip": ctx["foreign_score"] + ctx["futures_score"],
+        "event": ctx["event_score"],
+        "sector": ctx["sector_score"],
+        "risk": ctx["risk_score"],
+    }
+    total_score = sum(component[k] * w[k] for k in component) * 3.2
+
+    direction, strength = _direction_strength(total_score)
+    risk_level = _risk_level(total_score, ctx["news_score"], ctx["vix_val"])
+    fit_entry, fit_hold, fit_trim, fit_exit, action, position, action_note = _build_action_pack(direction, strength, risk_level, ctx["scenario"], ctx["tech_score"])
+
+    base = ctx["tw_close"] or 22000.0
+    day_vol = max(80.0, min(420.0, abs(ctx["tw_pct"] or 0) * 120 + abs(ctx["us_score"]) * 6 + abs(ctx["night_score"]) * 5 + ctx["news_score"] * 12))
+    predicted_points = total_score * 8.5
+    if direction == "震盪":
+        predicted_points = max(-80, min(80, predicted_points))
+    high = base + max(20.0, predicted_points + day_vol * 0.45)
+    low = base + min(-20.0, predicted_points - day_vol * 0.45)
+    confidence = max(35.0, min(92.0, 55 + abs(total_score) * 1.3 - ctx["news_score"] * 1.2 - (ctx["vix_val"] - 18) * 0.6))
+
+    logic_lines = [
+        f"情境：{ctx['scenario']}",
+        f"技術面 {ctx['tech_score']:.1f}（{' / '.join(ctx['structure_notes'][:3]) or '結構中性'}）",
+        f"美股/ADR {ctx['us_score']:.1f}，夜盤 {ctx['night_score']:.1f}",
+        f"新聞風險 {ctx['news_score']:.1f}（{ctx['news_logic']}）",
+        f"VIX {ctx['vix_val']:.2f}、美元台幣 {ctx['fx_val']:.2f}，風險面 {ctx['risk_score']:.1f}",
+        f"模式 {model_name} 權重下總分 {total_score:.1f}",
+    ]
+    entry_confirm = "、".join([
+        "加權至少站穩 MA5" if ctx["tw_close"] >= _safe_float(ctx["twii"].get("ma5"), ctx["tw_close"]) else "需先站回 MA5",
+        "美股科技不轉弱" if ctx["us_score"] >= -2 else "美股仍偏弱需保守",
+        "夜盤不急轉空" if ctx["night_score"] >= -2 else "夜盤偏空避免搶反彈",
+        "VIX 不高於 24" if ctx["vix_val"] < 24 else "VIX 過高需降倉位",
+    ])
+    exit_alerts = "、".join([
+        "若開高走低跌破前低應減碼",
+        "若 VIX 再拉高或國際風險升溫應防守",
+        "若美股/夜盤同步轉空可提高出場意願",
+    ])
+
+    return {
+        "record_id": _create_record_id(pred_date_text, model_name),
+        "推估日期": pred_date_text,
         "建立時間": _now_text(),
         "更新時間": _now_text(),
-        "推估分數": pred.get("score"),
-        "推估方向": _normalize_direction_from_points(pred.get("expected_points")),
-        "推估漲跌點": pred.get("expected_points"),
-        "推估漲跌%": pred.get("expected_pct"),
-        "推估區間低": pred.get("range_low"),
-        "推估區間高": pred.get("range_high"),
-        "操作建議": pred.get("action"),
-        "風險等級": pred.get("risk"),
-        "台股加權": _safe_float(snapshot.get("台股加權", {}).get("close")),
-        "台股漲跌%": _safe_float(snapshot.get("台股加權", {}).get("change_pct")),
-        "NASDAQ漲跌%": _safe_float(snapshot.get("那斯達克", {}).get("change_pct")),
-        "SOX漲跌%": _safe_float(snapshot.get("費半", {}).get("change_pct")),
-        "NQ漲跌%": _safe_float(snapshot.get("那指期", {}).get("change_pct")),
-        "ES漲跌%": _safe_float(snapshot.get("標普500期", {}).get("change_pct")),
-        "TSM ADR漲跌%": _safe_float(snapshot.get("台積電ADR", {}).get("change_pct")),
-        "USD/TWD漲跌%": _safe_float(snapshot.get("美元台幣", {}).get("change_pct")),
-        "VIX漲跌%": _safe_float(snapshot.get("VIX恐慌", {}).get("change_pct")),
-        "新聞分數": _safe_float(news_bundle.get("news_score")),
-        "新聞風險": _safe_str(news_bundle.get("risk_level")),
-        "因子摘要": _build_factor_summary(factor_df),
-        "實際收盤": None,
-        "實際漲跌點": None,
-        "實際漲跌%": None,
+        "模式名稱": model_name,
+        "市場情境": ctx["scenario"],
+        "推估方向": direction,
+        "方向強度": strength,
+        "是否適合進場": fit_entry,
+        "是否適合續抱": fit_hold,
+        "是否適合減碼": fit_trim,
+        "是否適合出場": fit_exit,
+        "建議動作": action,
+        "股神模式分數": round(total_score, 2),
+        "股神信心度": round(confidence, 2),
+        "預估漲跌點": round(predicted_points, 2),
+        "預估高點": round(high, 2),
+        "預估低點": round(low, 2),
+        "預估區間寬度": round(high - low, 2),
+        "風險等級": risk_level,
+        "國際新聞風險分": round(ctx["news_score"], 2),
+        "美股因子分": round(ctx["us_score"], 2),
+        "夜盤因子分": round(ctx["night_score"], 2),
+        "技術面因子分": round(ctx["tech_score"], 2),
+        "籌碼面因子分": round(ctx["foreign_score"] + ctx["futures_score"], 2),
+        "事件因子分": round(ctx["event_score"], 2),
+        "結構面因子分": round(ctx["sector_score"], 2),
+        "風險面因子分": round(ctx["risk_score"], 2),
+        "大盤基準點": round(base, 2),
+        "加權收盤": round(_safe_float(ctx["twii"].get("close"), base), 2),
+        "加權漲跌%": round(_safe_float(ctx["twii"].get("pct"), 0.0), 2),
+        "成交量估分": round(abs(_safe_float(ctx["twii"].get("pct"), 0.0)) * 4.5, 2),
+        "VIX": round(ctx["vix_val"], 2),
+        "美元台幣": round(ctx["fx_val"], 4),
+        "NASDAQ漲跌%": round(_safe_float(ctx["nas"].get("pct"), 0.0), 2),
+        "SOX漲跌%": round(_safe_float(ctx["sox"].get("pct"), 0.0), 2),
+        "SP500漲跌%": round(_safe_float(ctx["spx"].get("pct"), 0.0), 2),
+        "台積電ADR漲跌%": round(_safe_float(ctx["adr"].get("pct"), 0.0), 2),
+        "ES夜盤漲跌%": round(_safe_float(ctx["es"].get("pct"), 0.0), 2),
+        "NQ夜盤漲跌%": round(_safe_float(ctx["nq"].get("pct"), 0.0), 2),
+        "外資買賣超估分": round(ctx["foreign_score"], 2),
+        "期貨選擇權估分": round(ctx["futures_score"], 2),
+        "類股輪動估分": round(ctx["sector_score"], 2),
+        "股神推論邏輯": "\n".join(logic_lines),
+        "進場確認條件": entry_confirm,
+        "出場警訊": exit_alerts,
+        "主要風險": ctx["main_risk"],
+        "建議倉位": position,
         "實際方向": "",
-        "方向命中": False,
+        "實際漲跌點": None,
+        "實際高點": None,
+        "實際低點": None,
+        "方向是否命中": False,
+        "區間是否命中": False,
         "點數誤差": None,
-        "區間命中": False,
-        "開盤是否適合進場": False,
-        "收盤檢討": "",
+        "建議動作是否合適": False,
+        "誤判主因類別": "",
+        "誤判主因": "",
+        "收盤檢討": action_note,
         "備註": "",
-        "股神模式分數": None,
-        "進場燈號": "",
-        "出場燈號": "",
-        "股神結論": "",
-        "股神推論邏輯": "",
-        "股神信心度": None,
     }
 
 
-def _upsert_record(df: pd.DataFrame, row: dict[str, Any]) -> pd.DataFrame:
-    x = _ensure_record_columns(df)
-    rid = _safe_str(row.get("record_id"))
-    if rid and rid in x["record_id"].astype(str).tolist():
-        idx = x.index[x["record_id"].astype(str) == rid][0]
-        old_create = _safe_str(x.at[idx, "建立時間"])
-        for k, v in row.items():
-            if k in x.columns:
-                x.at[idx, k] = v
-        x.at[idx, "建立時間"] = old_create or _now_text()
-        x.at[idx, "更新時間"] = _now_text()
-        return _ensure_record_columns(x)
-    return _ensure_record_columns(pd.concat([x, pd.DataFrame([row])], ignore_index=True))
+def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    ctx = _calc_market_context(pred_date_text)
+    weights = _get_dynamic_weights(records_df)
+    rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
+    pred_df = pd.DataFrame(rows)
+    pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
+    pred_df = pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False]).reset_index(drop=True)
+    return pred_df, ctx
 
 
-def _apply_actual_result_to_row(row: dict[str, Any], twii_history: pd.DataFrame) -> dict[str, Any]:
-    x = dict(row)
-    pred_date = pd.to_datetime(_safe_str(x.get("預測日期")), errors="coerce")
-    if pd.isna(pred_date) or twii_history.empty:
-        return x
-    hit = twii_history[twii_history["date"] == pred_date.date()]
-    if hit.empty:
-        return x
-    r = hit.iloc[-1]
-    actual_close = _safe_float(r.get("close"))
-    actual_points = _safe_float(r.get("change"))
-    actual_pct = _safe_float(r.get("change_pct"))
-    pred_points = _safe_float(x.get("推估漲跌點"))
-    pred_dir = _safe_str(x.get("推估方向")) or _normalize_direction_from_points(pred_points)
-    actual_dir = _normalize_direction_from_points(actual_points)
-    low = _safe_float(x.get("推估區間低"))
-    high = _safe_float(x.get("推估區間高"))
-    range_hit = False
-    if actual_close is not None and low is not None and high is not None:
-        range_hit = min(low, high) <= actual_close <= max(low, high)
-    point_error = None
+def _upsert_predictions(base_df: pd.DataFrame, pred_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = _ensure_columns(base_df)
+    pred_df = _ensure_columns(pred_df)
+    if pred_df.empty:
+        return base_df.copy()
+    merged = pd.concat([base_df, pred_df], ignore_index=True)
+    merged = merged.sort_values(["推估日期", "模式名稱", "更新時間"], ascending=[True, True, False], na_position="last")
+    merged = merged.drop_duplicates(subset=["推估日期", "模式名稱"], keep="first")
+    return _ensure_columns(merged)
+
+
+def _derive_actual_direction(actual_points: float | None) -> str:
+    if actual_points is None:
+        return ""
+    if actual_points >= 35:
+        return "偏多"
+    if actual_points <= -35:
+        return "偏空"
+    return "震盪"
+
+
+def _apply_actual_result(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
+    src = dict(row)
+    pred_dir = _safe_str(src.get("推估方向"))
+    pred_points = _safe_float(src.get("預估漲跌點"))
+    pred_high = _safe_float(src.get("預估高點"))
+    pred_low = _safe_float(src.get("預估低點"))
+    base = _safe_float(src.get("大盤基準點"))
+    actual_points = _safe_float(src.get("實際漲跌點"))
+    actual_high = _safe_float(src.get("實際高點"))
+    actual_low = _safe_float(src.get("實際低點"))
+    actual_dir = _safe_str(src.get("實際方向")) or _derive_actual_direction(actual_points)
+    src["實際方向"] = actual_dir
+    if actual_dir:
+        src["方向是否命中"] = (pred_dir == actual_dir)
     if pred_points is not None and actual_points is not None:
-        point_error = abs(pred_points - actual_points)
-
-    x["實際收盤"] = actual_close
-    x["實際漲跌點"] = actual_points
-    x["實際漲跌%"] = actual_pct
-    x["實際方向"] = actual_dir
-    x["方向命中"] = pred_dir == actual_dir
-    x["點數誤差"] = point_error
-    x["區間命中"] = range_hit
-    x["更新時間"] = _now_text()
-    return x
+        src["點數誤差"] = abs(pred_points - actual_points)
+    if pred_high is not None and pred_low is not None and actual_high is not None and actual_low is not None:
+        src["區間是否命中"] = (actual_high <= pred_high + 60) and (actual_low >= pred_low - 60)
+    src["更新時間"] = _now_text()
+    return src
 
 
-def _backfill_actual_results(records_df: pd.DataFrame, twii_history: pd.DataFrame) -> pd.DataFrame:
-    x = _ensure_record_columns(records_df)
-    if x.empty or twii_history.empty:
-        return x
-    rows = []
-    for _, row in x.iterrows():
-        rows.append(_apply_actual_result_to_row(row.to_dict(), twii_history))
-    return _ensure_record_columns(pd.DataFrame(rows))
-
-
-def _build_accuracy_summary(df: pd.DataFrame) -> dict[str, Any]:
-    x = _ensure_record_columns(df)
+def _build_scoreboard(df: pd.DataFrame) -> pd.DataFrame:
+    x = _ensure_columns(df)
     if x.empty:
-        return {"樣本數": 0, "方向命中率": 0.0, "區間命中率": 0.0, "平均點數誤差": None, "平均實際漲跌點": None}
-    done = x.dropna(subset=["實際漲跌點"]).copy()
-    if done.empty:
-        return {"樣本數": 0, "方向命中率": 0.0, "區間命中率": 0.0, "平均點數誤差": None, "平均實際漲跌點": None}
-    return {
-        "樣本數": int(len(done)),
-        "方向命中率": float(done["方向命中"].fillna(False).mean() * 100),
-        "區間命中率": float(done["區間命中"].fillna(False).mean() * 100),
-        "平均點數誤差": float(pd.to_numeric(done["點數誤差"], errors="coerce").dropna().mean()) if not pd.to_numeric(done["點數誤差"], errors="coerce").dropna().empty else None,
-        "平均實際漲跌點": float(pd.to_numeric(done["實際漲跌點"], errors="coerce").dropna().mean()) if not pd.to_numeric(done["實際漲跌點"], errors="coerce").dropna().empty else None,
-    }
+        return pd.DataFrame(columns=["模式名稱", "樣本數", "方向命中率", "區間命中率", "平均點數誤差", "適合動作命中率", "綜合表現分數"])
+    out = x.groupby("模式名稱", dropna=False).agg(
+        樣本數=("record_id", "count"),
+        方向命中率=("方向是否命中", lambda s: float(pd.Series(s).fillna(False).mean() * 100)),
+        區間命中率=("區間是否命中", lambda s: float(pd.Series(s).fillna(False).mean() * 100)),
+        平均點數誤差=("點數誤差", "mean"),
+        適合動作命中率=("建議動作是否合適", lambda s: float(pd.Series(s).fillna(False).mean() * 100)),
+    ).reset_index()
+    out["平均點數誤差"] = pd.to_numeric(out["平均點數誤差"], errors="coerce")
+    out["綜合表現分數"] = (
+        out["方向命中率"].fillna(0) * 0.45
+        + out["區間命中率"].fillna(0) * 0.25
+        + out["適合動作命中率"].fillna(0) * 0.20
+        + (120 - out["平均點數誤差"].fillna(120).clip(upper=120)) * 0.10
+    )
+    return out.sort_values(["綜合表現分數", "方向命中率"], ascending=[False, False]).reset_index(drop=True)
 
 
-def _format_records_for_show(df: pd.DataFrame) -> pd.DataFrame:
-    x = _ensure_record_columns(df).copy()
-    for c in ["推估分數", "推估漲跌點", "推估漲跌%", "推估區間低", "推估區間高", "實際收盤", "實際漲跌點", "實際漲跌%", "點數誤差", "新聞分數"]:
+def _format_pred_df(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+    for c in [
+        "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "預估區間寬度", "國際新聞風險分",
+        "美股因子分", "夜盤因子分", "技術面因子分", "籌碼面因子分", "事件因子分", "結構面因子分", "風險面因子分",
+        "加權漲跌%", "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%", "NQ夜盤漲跌%"
+    ]:
         if c in x.columns:
-            x[c] = x[c].apply(lambda v: "" if pd.isna(v) else round(float(v), 2))
-    for c in ["方向命中", "區間命中", "開盤是否適合進場"]:
-        if c in x.columns:
-            x[c] = x[c].apply(_fmt_bool)
+            x[c] = x[c].apply(lambda v: "" if pd.isna(v) else f"{float(v):,.2f}")
     return x
 
 
-# =========================================================
-# 主畫面
-# =========================================================
+def _build_export_bytes(df: pd.DataFrame, scoreboard: pd.DataFrame, pred_df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        _ensure_columns(df).to_excel(writer, sheet_name="歷史紀錄", index=False)
+        scoreboard.to_excel(writer, sheet_name="模式排行榜", index=False)
+        pred_df.to_excel(writer, sheet_name="本次推估", index=False)
+        try:
+            for ws in writer.book.worksheets:
+                ws.freeze_panes = "A2"
+                for col_cells in ws.columns:
+                    col_letter = col_cells[0].column_letter
+                    max_len = max(len(str(c.value)) if c.value is not None else 0 for c in col_cells)
+                    ws.column_dimensions[col_letter].width = min(max(10, max_len + 2), 40)
+        except Exception:
+            pass
+    output.seek(0)
+    return output.getvalue()
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
@@ -1109,290 +821,218 @@ def main():
     if _k("status_msg") not in st.session_state:
         st.session_state[_k("status_msg")] = ""
         st.session_state[_k("status_type")] = "info"
-    if _k("refresh_key") not in st.session_state:
-        st.session_state[_k("refresh_key")] = _now_text()
-    if _k("record_refresh_key") not in st.session_state:
-        st.session_state[_k("record_refresh_key")] = _now_text()
 
     render_pro_hero(
-        title="大盤走勢",
-        subtitle="以台股大盤、美股科技、夜盤、美盤、國際新聞與世界大廠消息，加入股神模式推論進場 / 出場建議，並可記錄回測準確率。",
+        title="大盤走勢｜股神Pro準確率強化版",
+        subtitle="大盤 / 美股 / 夜盤 / 新聞風險 / 情境分流 / 進出場分離 / 權重自我修正 / 模式排行榜。",
     )
-    _show_status()
 
-    top_cols = st.columns([1.0, 1.0, 1.0, 1.0, 3.0])
-    with top_cols[0]:
-        if st.button("🔄 重新抓資料", use_container_width=True):
-            st.session_state[_k("refresh_key")] = _now_text()
+    status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
+    status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
+    if status_msg:
+        getattr(st, status_type if status_type in {"success", "warning", "error", "info"} else "info")(status_msg)
+
+    top = st.columns([1.1, 1.2, 1.0, 1.0, 2.2])
+    with top[0]:
+        if st.button("🔄 重新載入紀錄", use_container_width=True):
+            df, err = _read_records_from_github()
+            _save_state_df(df)
+            _set_status("已重新載入紀錄" if not err else err, "success" if not err else "warning")
+            st.rerun()
+    with top[1]:
+        if st.button("🧹 清除資料快取", use_container_width=True):
             try:
-                _get_market_snapshot.clear()
-                _get_news_bundle.clear()
-                _fetch_google_news_rss.clear()
-                _get_yahoo_chart.clear()
-                _get_twii_history.clear()
+                _fetch_stooq.clear()
+                _search_news_headlines.clear()
             except Exception:
                 pass
-            _set_status("已重新抓取大盤 / 美盤 / 新聞資料", "success")
+            _set_status("資料快取已清除", "success")
             st.rerun()
-    with top_cols[1]:
-        st.toggle("快顯模式", value=True, key=_k("fast_mode"))
-    with top_cols[2]:
-        st.toggle("顯示新聞明細", value=False, key=_k("show_news_detail"))
-    with top_cols[3]:
-        if st.button("📂 重新讀紀錄", use_container_width=True):
-            st.session_state[_k("record_refresh_key")] = _now_text()
-            try:
-                _load_prediction_records.clear()
-            except Exception:
-                pass
-            _set_status("已重新讀取推估紀錄", "success")
-            st.rerun()
-    with top_cols[4]:
-        st.caption(f"資料更新：{st.session_state.get(_k('refresh_key'), '-') } ｜ 紀錄更新：{st.session_state.get(_k('record_refresh_key'), '-')}")
+    with top[2]:
+        quick_mode = st.toggle("快顯模式", value=True, key=_k("quick_mode"))
+    with top[3]:
+        auto_save = st.toggle("儲存即同步", value=False, key=_k("auto_save"))
+    with top[4]:
+        pred_date = st.date_input("推估日期", value=date.today(), key=_k("pred_date"))
 
-    target_cols = st.columns([1.2, 2.8])
-    with target_cols[0]:
-        target_date = st.date_input("推估日期", value=datetime.now().date(), key=_k("target_date"))
-    with target_cols[1]:
-        st.info(_date_context_text(str(target_date)))
+    base_df = _get_state_df()
+    if base_df.empty:
+        df, _ = _read_records_from_github()
+        _save_state_df(df)
+        base_df = _get_state_df()
 
-    refresh_key = _safe_str(st.session_state.get(_k("refresh_key"), ""))
-    record_refresh_key = _safe_str(st.session_state.get(_k("record_refresh_key"), ""))
-    target_date_text = str(target_date)
-    today_text = datetime.now().strftime("%Y-%m-%d")
-    replay_mode = target_date_text != today_text
-    snapshot = _get_market_snapshot_for_date(target_date_text=target_date_text, refresh_key=refresh_key) if replay_mode else _get_market_snapshot(refresh_key=refresh_key)
-    news_bundle = _get_news_bundle(target_date_text=target_date_text, refresh_key=refresh_key)
-    factor_df = _build_factor_table(snapshot, news_bundle)
-    pred = _build_prediction(snapshot, factor_df)
-    rules = _build_entry_rules(pred, snapshot)
-    twii_history = _get_twii_history(refresh_key=refresh_key)
-    records_df, records_err = _load_prediction_records(refresh_key=record_refresh_key)
-    if records_err:
-        st.warning(records_err)
-    records_df = _backfill_actual_results(records_df, twii_history)
-    acc = _build_accuracy_summary(records_df)
-    god_mode = _build_god_mode_signal(pred, snapshot, news_bundle, factor_df, records_df)
-
-    twii = snapshot.get("台股加權", {})
-    nasdaq = snapshot.get("那斯達克", {})
-    sox = snapshot.get("費半", {})
-    nq = snapshot.get("那指期", {})
+    pred_date_text = pd.to_datetime(pred_date).strftime("%Y-%m-%d")
+    pred_df, ctx = _predict_all_models(pred_date_text, base_df)
+    top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
+    scoreboard = _build_scoreboard(base_df)
 
     render_pro_kpi_row([
-        {"label": "股神模式分數", "value": f"{god_mode['god_score']:.1f}", "delta": god_mode["conclusion"], "delta_class": "pro-kpi-delta-flat"},
-        {"label": "推估漲跌點", "value": f"{pred['expected_points']:+,.0f} 點", "delta": f"{pred['expected_pct']:+.2f}%", "delta_class": "pro-kpi-delta-flat"},
-        {"label": "台股加權", "value": _fmt_num(twii.get("close"), 0), "delta": _fmt_pct(twii.get("change_pct")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "方向命中率", "value": f"{acc['方向命中率']:.1f}%", "delta": f"樣本 {acc['樣本數']}", "delta_class": "pro-kpi-delta-flat"},
-        {"label": "平均點數誤差", "value": "-" if acc['平均點數誤差'] is None else f"{acc['平均點數誤差']:.1f}", "delta": f"區間命中 {acc['區間命中率']:.1f}%", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "推估日期", "value": pred_date_text, "delta": ctx.get("scenario", ""), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "最佳模式", "value": _safe_str(top_pick.get("模式名稱")), "delta": _safe_str(top_pick.get("建議動作")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "股神分數", "value": f"{_safe_float(top_pick.get('股神模式分數'), 0):.2f}", "delta": _safe_str(top_pick.get("推估方向")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "信心度", "value": f"{_safe_float(top_pick.get('股神信心度'), 0):.1f}%", "delta": _safe_str(top_pick.get("風險等級")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
 
-    st.info(
-        f"股神判讀：**{god_mode['conclusion']}**｜進場燈號 **{god_mode['entry_light']}**｜出場燈號 **{god_mode['exit_light']}**｜"
-        f"推估 {target_date.strftime('%Y-%m-%d')} 大盤合理區間約 **{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}**。"
-        f" 建議：{god_mode['action']}｜股神信心度：{god_mode['confidence']:.1f}%"
-    )
+    a1, a2 = st.columns([1.4, 1.2])
+    with a1:
+        render_pro_info_card(
+            "股神模式結論",
+            [
+                ("建議動作", _safe_str(top_pick.get("建議動作")), _safe_str(top_pick.get("建議倉位"))),
+                ("是否適合進場", _safe_str(top_pick.get("是否適合進場")), _safe_str(top_pick.get("是否適合續抱"))),
+                ("是否適合減碼/出場", f"{_safe_str(top_pick.get('是否適合減碼'))} / {_safe_str(top_pick.get('是否適合出場'))}", _safe_str(top_pick.get("風險等級"))),
+                ("主要風險", _safe_str(top_pick.get("主要風險")), ""),
+            ],
+            chips=[_safe_str(top_pick.get("模式名稱")), _safe_str(top_pick.get("市場情境")), _safe_str(top_pick.get("方向強度"))],
+        )
+        st.text_area("股神推論邏輯", value=_safe_str(top_pick.get("股神推論邏輯")), height=180, disabled=True)
+        st.text_area("進場確認條件", value=_safe_str(top_pick.get("進場確認條件")), height=95, disabled=True)
+        st.text_area("出場警訊", value=_safe_str(top_pick.get("出場警訊")), height=95, disabled=True)
+    with a2:
+        render_pro_section("本次模式比較")
+        show_cols = [
+            "模式名稱", "推估方向", "方向強度", "建議動作", "股神模式分數", "股神信心度",
+            "預估漲跌點", "風險等級", "技術面因子分", "美股因子分", "夜盤因子分",
+            "籌碼面因子分", "事件因子分", "國際新聞風險分",
+        ]
+        st.dataframe(_format_pred_df(pred_df[show_cols]), use_container_width=True, hide_index=True)
 
-    tabs = st.tabs(["📌 總覽", "🔥 股神模式", "📊 因子評分", "📝 紀錄追蹤", "📰 新聞風險", "🧠 股神判斷因子", "📈 市場明細"])
+    tabs = st.tabs(["📌 儲存推估", "🧪 回填實際結果", "🏆 模式排行榜", "📚 歷史紀錄", "📤 Excel匯出"])
 
     with tabs[0]:
-        render_pro_section(f"{target_date.strftime('%Y-%m-%d')} 進場結論")
-        left, right = st.columns([1.35, 1.0])
-        with left:
-            st.dataframe(pd.DataFrame(rules), use_container_width=True, hide_index=True)
-        with right:
-            render_pro_info_card(
-                "核心結論",
-                [
-                    ("推估日期", target_date.strftime('%Y-%m-%d'), ""),
-                    ("大盤偏向", pred["stance"], ""),
-                    ("推估漲跌點", f"{pred['expected_points']:+,.0f}", ""),
-                    ("預估區間", f"{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}", ""),
-                    ("新聞風險", _safe_str(news_bundle.get("risk_level")), ""),
-                    ("操作重點", pred["action"], ""),
-                ],
-                chips=["大盤走勢", "進場依據", "可記錄", "可回測"],
-            )
+        render_pro_section("儲存本次推估")
+        st.caption("會將 5 套模式一起存入紀錄檔，後續可比較哪一套最近最準。")
+        c1, c2 = st.columns([1.2, 4])
+        with c1:
+            if st.button("💾 儲存本次推估", use_container_width=True, type="primary"):
+                merged = _upsert_predictions(base_df, pred_df)
+                _save_state_df(merged)
+                if auto_save:
+                    ok, msg = _write_records_to_github(merged)
+                    _set_status(msg, "success" if ok else "error")
+                else:
+                    _set_status("已存入本頁狀態，尚未同步 GitHub", "success")
+                st.rerun()
+        with c2:
+            if st.button("☁️ 立即同步 GitHub", use_container_width=True):
+                merged = _upsert_predictions(_get_state_df(), pred_df)
+                _save_state_df(merged)
+                ok, msg = _write_records_to_github(merged)
+                _set_status(msg, "success" if ok else "error")
+                st.rerun()
+        st.dataframe(_format_pred_df(pred_df[[c for c in RECORD_COLUMNS if c in pred_df.columns][:25]]), use_container_width=True, hide_index=True)
 
     with tabs[1]:
-        render_pro_section("股神模式｜進場 / 出場判讀")
-        g1, g2 = st.columns([1.15, 1.0])
-        with g1:
-            render_pro_info_card(
-                "股神模式結論",
-                [
-                    ("推估日期", target_date.strftime('%Y-%m-%d'), ""),
-                    ("股神模式分數", f"{god_mode['god_score']:.1f}", ""),
-                    ("進場燈號", god_mode["entry_light"], ""),
-                    ("出場燈號", god_mode["exit_light"], ""),
-                    ("結論", god_mode["conclusion"], ""),
-                    ("信心度", f"{god_mode['confidence']:.1f}%", ""),
-                ],
-                chips=["股神模式", "進場", "出場", "風控"],
-            )
-            st.markdown("**股神推論邏輯**")
-            st.markdown(god_mode["logic_text"] or "- 暫無")
-        with g2:
-            st.markdown("**適合進場的確認條件**")
-            for x in god_mode["buy_triggers"]:
-                st.markdown(f"- {x}")
-            st.markdown("**該出場 / 減碼的警訊**")
-            for x in god_mode["sell_triggers"]:
-                st.markdown(f"- {x}")
-            st.warning("沒有任何策略能保證 100% 準確率。這一頁的用途是提升一致性與紀律，不是保證每次都對。")
-
-    with tabs[2]:
-        render_pro_section("因子評分")
-        show_factor = factor_df.copy()
-        if not show_factor.empty:
-            show_factor["分數"] = show_factor["分數"].apply(lambda x: None if pd.isna(x) else round(float(x), 2))
-            show_factor["加權分"] = show_factor["加權分"].apply(lambda x: None if pd.isna(x) else round(float(x), 2))
-            st.dataframe(show_factor, use_container_width=True, hide_index=True)
+        render_pro_section("回填實際結果 / 追蹤準確率")
+        hist_df = _get_state_df()
+        fill_date = st.selectbox("選擇要回填的日期", options=sorted(hist_df["推估日期"].dropna().astype(str).unique().tolist(), reverse=True) if not hist_df.empty else [pred_date_text], key=_k("fill_date"))
+        current_fill = hist_df[hist_df["推估日期"].astype(str) == str(fill_date)].copy() if not hist_df.empty else pd.DataFrame()
+        if current_fill.empty:
+            st.info("目前這個日期還沒有儲存推估。")
         else:
-            st.info("目前無法產生因子評分。")
-
-    with tabs[3]:
-        render_pro_section("推估紀錄 / 回測檢討", "把每天推估存起來，之後回填實際結果，檢討準確率。")
-        pred_date = st.date_input("紀錄日期", value=target_date, key=_k("pred_date"))
-        c1, c2, c3 = st.columns([1.2, 1.2, 2.6])
-        with c1:
-            if st.button("💾 儲存此日期推估", use_container_width=True, type="primary"):
-                row = _build_record_row(str(pred_date), pred, snapshot, news_bundle, factor_df)
-                row["股神模式分數"] = god_mode["god_score"]
-                row["進場燈號"] = god_mode["entry_light"]
-                row["出場燈號"] = god_mode["exit_light"]
-                row["股神結論"] = god_mode["conclusion"]
-                row["股神推論邏輯"] = god_mode["logic_text"]
-                row["股神信心度"] = god_mode["confidence"]
-                row["操作建議"] = god_mode["action"]
-                new_df = _upsert_record(records_df, row)
-                if _save_prediction_records(new_df):
-                    st.session_state[_k("record_refresh_key")] = _now_text()
-                    st.rerun()
-        with c2:
-            if st.button("🧮 回填實際結果", use_container_width=True):
-                filled = _backfill_actual_results(records_df, twii_history)
-                if _save_prediction_records(filled):
-                    st.session_state[_k("record_refresh_key")] = _now_text()
-                    st.rerun()
-        with c3:
-            st.caption("可指定任意日期先存推估；若是歷史日期，可於收盤資料完整後回填檢查模型偏差。")
-
-        render_pro_kpi_row([
-            {"label": "已回測樣本", "value": acc["樣本數"], "delta": "有實際結果", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "方向命中率", "value": f"{acc['方向命中率']:.2f}%", "delta": "偏多 / 偏空 / 震盪", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "區間命中率", "value": f"{acc['區間命中率']:.2f}%", "delta": "實際收盤落入預估區間", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均點數誤差", "value": "-" if acc['平均點數誤差'] is None else f"{acc['平均點數誤差']:.2f}", "delta": "越低越好", "delta_class": "pro-kpi-delta-flat"},
-        ])
-
-        if records_df.empty:
-            st.info("目前還沒有推估紀錄。")
-        else:
-            show_records = _format_records_for_show(records_df.sort_values("預測日期", ascending=False))
-            st.dataframe(
-                show_records[[c for c in [
-                    "預測日期", "股神模式分數", "進場燈號", "出場燈號", "股神結論",
-                    "推估方向", "推估漲跌點", "推估區間低", "推估區間高",
-                    "實際方向", "實際漲跌點", "實際收盤", "方向命中", "區間命中", "點數誤差",
-                    "新聞風險", "因子摘要", "更新時間"
-                ] if c in show_records.columns]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            edit_cols = [
-                "record_id", "預測日期", "股神模式分數", "進場燈號", "出場燈號", "股神結論",
-                "開盤是否適合進場", "收盤檢討", "備註",
-                "推估方向", "推估漲跌點", "實際方向", "實際漲跌點", "方向命中", "點數誤差"
-            ]
-            editor_df = records_df[[c for c in edit_cols if c in records_df.columns]].copy().sort_values("預測日期", ascending=False)
+            edit_df = current_fill[[
+                "record_id", "模式名稱", "推估方向", "建議動作", "預估漲跌點", "預估高點", "預估低點",
+                "實際方向", "實際漲跌點", "實際高點", "實際低點", "建議動作是否合適", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
+            ]].copy()
             edited = st.data_editor(
-                editor_df,
+                edit_df,
                 use_container_width=True,
                 hide_index=True,
-                num_rows="fixed",
-                key=_k("record_editor"),
+                key=_k("actual_editor"),
                 column_config={
                     "record_id": st.column_config.TextColumn("record_id", disabled=True),
-                    "預測日期": st.column_config.TextColumn("預測日期", disabled=True),
-                    "股神模式分數": st.column_config.NumberColumn("股神模式分數", format="%.2f", disabled=True),
-                    "進場燈號": st.column_config.TextColumn("進場燈號", disabled=True),
-                    "出場燈號": st.column_config.TextColumn("出場燈號", disabled=True),
-                    "股神結論": st.column_config.TextColumn("股神結論", disabled=True),
-                    "開盤是否適合進場": st.column_config.CheckboxColumn("開盤是否適合進場"),
+                    "模式名稱": st.column_config.TextColumn("模式名稱", disabled=True),
+                    "推估方向": st.column_config.TextColumn("推估方向", disabled=True),
+                    "建議動作": st.column_config.TextColumn("建議動作", disabled=True),
+                    "預估漲跌點": st.column_config.NumberColumn("預估漲跌點", disabled=True, format="%.1f"),
+                    "預估高點": st.column_config.NumberColumn("預估高點", disabled=True, format="%.1f"),
+                    "預估低點": st.column_config.NumberColumn("預估低點", disabled=True, format="%.1f"),
+                    "實際方向": st.column_config.SelectboxColumn("實際方向", options=[""] + DIRECTION_OPTIONS),
+                    "實際漲跌點": st.column_config.NumberColumn("實際漲跌點", format="%.1f"),
+                    "實際高點": st.column_config.NumberColumn("實際高點", format="%.1f"),
+                    "實際低點": st.column_config.NumberColumn("實際低點", format="%.1f"),
+                    "建議動作是否合適": st.column_config.CheckboxColumn("建議動作是否合適"),
+                    "誤判主因類別": st.column_config.SelectboxColumn("誤判主因類別", options=ERROR_CAUSES),
+                    "誤判主因": st.column_config.TextColumn("誤判主因", width="large"),
                     "收盤檢討": st.column_config.TextColumn("收盤檢討", width="large"),
                     "備註": st.column_config.TextColumn("備註", width="large"),
-                    "推估方向": st.column_config.TextColumn("推估方向", disabled=True),
-                    "推估漲跌點": st.column_config.NumberColumn("推估漲跌點", format="%.2f", disabled=True),
-                    "實際方向": st.column_config.TextColumn("實際方向", disabled=True),
-                    "實際漲跌點": st.column_config.NumberColumn("實際漲跌點", format="%.2f", disabled=True),
-                    "方向命中": st.column_config.CheckboxColumn("方向命中", disabled=True),
-                    "點數誤差": st.column_config.NumberColumn("點數誤差", format="%.2f", disabled=True),
                 },
             )
-            if st.button("✅ 儲存檢討內容", use_container_width=True):
-                base = records_df.copy()
+            if st.button("✅ 套用回填結果", use_container_width=True):
+                master = hist_df.copy()
                 edit_map = {str(r["record_id"]): dict(r) for _, r in edited.iterrows()}
-                for idx in base.index:
-                    rid = _safe_str(base.at[idx, "record_id"])
-                    if rid not in edit_map:
+                for idx in master.index:
+                    rec_id = _safe_str(master.at[idx, "record_id"])
+                    if rec_id not in edit_map:
                         continue
-                    base.at[idx, "開盤是否適合進場"] = bool(edit_map[rid].get("開盤是否適合進場"))
-                    base.at[idx, "收盤檢討"] = _safe_str(edit_map[rid].get("收盤檢討"))
-                    base.at[idx, "備註"] = _safe_str(edit_map[rid].get("備註"))
-                    base.at[idx, "更新時間"] = _now_text()
-                if _save_prediction_records(base):
-                    st.session_state[_k("record_refresh_key")] = _now_text()
-                    st.rerun()
+                    src = edit_map[rec_id]
+                    for c in ["實際方向", "實際漲跌點", "實際高點", "實際低點", "建議動作是否合適", "誤判主因類別", "誤判主因", "收盤檢討", "備註"]:
+                        master.at[idx, c] = src.get(c)
+                    applied = _apply_actual_result(master.loc[idx].to_dict())
+                    for k2, v2 in applied.items():
+                        if k2 in master.columns:
+                            master.at[idx, k2] = v2
+                _save_state_df(master)
+                if auto_save:
+                    ok, msg = _write_records_to_github(master)
+                    _set_status(msg, "success" if ok else "error")
+                else:
+                    _set_status("已套用回填結果，尚未同步 GitHub", "success")
+                st.rerun()
+
+    with tabs[2]:
+        render_pro_section("模式排行榜 / 自我修正參考")
+        scoreboard = _build_scoreboard(_get_state_df())
+        if scoreboard.empty:
+            st.info("尚未累積足夠回填結果，排行榜還沒有資料。")
+        else:
+            st.dataframe(scoreboard, use_container_width=True, hide_index=True)
+            best = scoreboard.iloc[0]
+            st.success(f"目前最近最強模式：{best['模式名稱']}｜方向命中率 {best['方向命中率']:.1f}%｜平均點數誤差 {best['平均點數誤差'] if not pd.isna(best['平均點數誤差']) else 0:.1f}")
+
+    with tabs[3]:
+        render_pro_section("歷史紀錄")
+        hist = _get_state_df().copy()
+        if hist.empty:
+            st.info("目前沒有歷史紀錄。")
+        else:
+            left, right, right2 = st.columns([1.2, 1.2, 1.6])
+            with left:
+                mode_filter = st.selectbox("模式篩選", ["全部"] + MODEL_NAMES, key=_k("hist_mode_filter"))
+            with right:
+                dir_filter = st.selectbox("方向篩選", ["全部"] + DIRECTION_OPTIONS, key=_k("hist_dir_filter"))
+            with right2:
+                kw = st.text_input("搜尋日期 / 檢討 / 風險 / 備註", value="", key=_k("hist_kw"))
+            if mode_filter != "全部":
+                hist = hist[hist["模式名稱"].astype(str) == mode_filter].copy()
+            if dir_filter != "全部":
+                hist = hist[hist["推估方向"].astype(str) == dir_filter].copy()
+            if kw:
+                mask = (
+                    hist["推估日期"].astype(str).str.contains(kw, case=False, na=False)
+                    | hist["收盤檢討"].astype(str).str.contains(kw, case=False, na=False)
+                    | hist["主要風險"].astype(str).str.contains(kw, case=False, na=False)
+                    | hist["備註"].astype(str).str.contains(kw, case=False, na=False)
+                )
+                hist = hist[mask].copy()
+            hist = hist.sort_values(["推估日期", "模式名稱"], ascending=[False, True])
+            show_cols = [
+                "推估日期", "模式名稱", "市場情境", "推估方向", "建議動作", "股神模式分數", "股神信心度", "預估漲跌點",
+                "實際方向", "實際漲跌點", "方向是否命中", "區間是否命中", "點數誤差", "建議動作是否合適", "誤判主因類別", "收盤檢討", "備註"
+            ]
+            st.dataframe(hist[show_cols], use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        render_pro_section("國際新聞 / 世界大廠消息風險")
-        news_df = news_bundle.get("df")
-        if isinstance(news_df, pd.DataFrame) and not news_df.empty:
-            show_news = news_df.copy()
-            if st.session_state.get(_k("fast_mode"), True) and not st.session_state.get(_k("show_news_detail"), False):
-                show_news = show_news.head(8).copy()
-            st.dataframe(show_news[[c for c in ["bucket", "title", "source", "score", "hits", "pub_date"] if c in show_news.columns]], use_container_width=True, hide_index=True)
-            if st.session_state.get(_k("show_news_detail"), False):
-                for _, row in show_news.head(12).iterrows():
-                    st.markdown(f"- [{_safe_str(row.get('title'))}]({_safe_str(row.get('link'))}) ｜ {_safe_str(row.get('source'))} ｜ 分數 {(_safe_float(row.get('score'), 0) or 0):+.0f}")
-        else:
-            st.info("目前抓不到新聞資料。")
-
-    with tabs[5]:
-        render_pro_section("股神角度還要看的判斷因子")
-        extra_factors = pd.DataFrame([
-            {"因子": "開盤半小時量價", "用途": "判斷預估方向有沒有被市場確認", "是否建議加入": "強烈建議"},
-            {"因子": "台積電 / 聯發科 / 鴻海三權值同步性", "用途": "避免只看指數忽略權值股帶動力", "是否建議加入": "強烈建議"},
-            {"因子": "族群同步強弱", "用途": "AI、半導體、機器人、重電是否整體共振", "是否建議加入": "強烈建議"},
-            {"因子": "融資增減與隔日沖熱度", "用途": "判斷籌碼是否過熱", "是否建議加入": "建議"},
-            {"因子": "外資期貨未平倉 / 現貨買賣超", "用途": "判斷大資金方向", "是否建議加入": "強烈建議"},
-            {"因子": "重大事件日曆", "用途": "Fed、CPI、NVIDIA財報、台積電法說", "是否建議加入": "強烈建議"},
-            {"因子": "前一日強勢股隔日延續率", "用途": "判斷市場願不願意追價", "是否建議加入": "建議"},
-            {"因子": "恐慌事件等級", "用途": "戰爭、制裁、關稅、禁運是否屬於短期雜訊或中期趨勢", "是否建議加入": "強烈建議"},
-        ])
-        st.dataframe(extra_factors, use_container_width=True, hide_index=True)
-        st.warning("這一版已先把大盤 / 美盤 / 夜盤 / 世界大廠 / 國際新聞整合進來，並加上每日記錄與回測。下一階段最值得補的是：外資籌碼、正式台指夜盤、重大事件日曆。")
-
-    with tabs[6]:
-        render_pro_section("市場明細")
-        rows = []
-        for name, info in snapshot.items():
-            rows.append(
-                {
-                    "市場": name,
-                    "代號": _safe_str(info.get("symbol")),
-                    "收盤/最新": _safe_float(info.get("close")),
-                    "昨收": _safe_float(info.get("prev_close")),
-                    "漲跌": _safe_float(info.get("change")),
-                    "漲跌%": _safe_float(info.get("change_pct")),
-                    "MA5": _safe_float(info.get("ma5")),
-                    "MA20": _safe_float(info.get("ma20")),
-                    "資料時間": _safe_str(info.get("time")),
-                    "錯誤": _safe_str(info.get("error")),
-                }
-            )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        render_pro_section("Excel 匯出")
+        export_bytes = _build_export_bytes(_get_state_df(), _build_scoreboard(_get_state_df()), pred_df)
+        st.download_button(
+            "📥 下載 Excel（歷史紀錄 / 模式排行榜 / 本次推估）",
+            data=export_bytes,
+            file_name=f"大盤走勢_股神Pro_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
 
 if __name__ == "__main__":
