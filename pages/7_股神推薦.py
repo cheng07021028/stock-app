@@ -389,6 +389,85 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
     return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
 
+def _stock_master_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "master_path": _safe_str(st.secrets.get("STOCK_MASTER_GITHUB_PATH", "stock_master.cache.json")) or "stock_master.cache.json",
+        "override_path": _safe_str(st.secrets.get("STOCK_CATEGORY_OVERRIDE_GITHUB_PATH", "stock_category_override.json")) or "stock_category_override.json",
+    }
+
+
+def _read_json_from_github(path: str) -> tuple[Any, str]:
+    cfg = _stock_master_config()
+    token = cfg["token"]
+    if not token:
+        return None, "未設定 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return None, ""
+        if resp.status_code != 200:
+            return None, f"讀取 GitHub JSON 失敗：{resp.status_code} / {resp.text[:300]}"
+        data = resp.json()
+        content = data.get("content", "")
+        if not content:
+            return None, ""
+        decoded = base64.b64decode(content).decode("utf-8")
+        return json.loads(decoded), ""
+    except Exception as e:
+        return None, f"讀取 GitHub JSON 例外：{e}"
+
+
+def _write_json_to_github(path: str, payload: Any, message: str) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    token = cfg["token"]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN"
+    sha = ""
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            sha = _safe_str(resp.json().get("sha"))
+        elif resp.status_code not in (200, 404):
+            return False, f"讀取 GitHub 舊檔失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return False, f"讀取 GitHub 舊檔例外：{e}"
+    try:
+        content_text = json.dumps(payload, ensure_ascii=False, indent=2)
+        encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+        body: dict[str, Any] = {
+            "message": message,
+            "content": encoded_content,
+            "branch": cfg["branch"],
+        }
+        if sha:
+            body["sha"] = sha
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫 GitHub：{path}"
+        return False, f"GitHub JSON 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"GitHub JSON 寫入例外：{e}"
+
+
 def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
     token = cfg["token"]
     if not token:
