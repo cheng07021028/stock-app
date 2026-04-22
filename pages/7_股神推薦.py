@@ -1686,6 +1686,93 @@ def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) ->
     return work, info
 
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_stock_master_cache_from_repo() -> pd.DataFrame:
+    cfg = _stock_master_config()
+    payload, _ = _read_json_from_github(cfg["master_path"])
+    if not isinstance(payload, list):
+        return _empty_master_df()
+    return _normalize_master_df(pd.DataFrame(payload))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
+    cfg = _stock_master_config()
+    payload, _ = _read_json_from_github(cfg["override_path"])
+    if not isinstance(payload, dict):
+        return {}
+    out = {}
+    for code, item in payload.items():
+        norm_code = _normalize_code(code)
+        if not norm_code:
+            continue
+        if not isinstance(item, dict):
+            item = {"category": item}
+        out[norm_code] = {
+            "code": norm_code,
+            "name": _safe_str(item.get("name")),
+            "market": _safe_str(item.get("market")),
+            "category": _canonical_category(item.get("category")),
+            "updated_at": _safe_str(item.get("updated_at")),
+        }
+    return out
+
+
+def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
+    work = _normalize_master_df(master_df)
+    override_map = _load_stock_category_override_map()
+    if not override_map:
+        return work
+    for code, item in override_map.items():
+        matched = work["code"].astype(str) == str(code)
+        if matched.any():
+            idx = work[matched].index[0]
+            if _safe_str(item.get("name")):
+                work.at[idx, "name"] = _safe_str(item.get("name"))
+            if _safe_str(item.get("market")) in {"上市", "上櫃", "興櫃"}:
+                work.at[idx, "market"] = _safe_str(item.get("market"))
+            if _safe_str(item.get("category")):
+                cat = _canonical_category(item.get("category"))
+                work.at[idx, "theme_category"] = cat
+                work.at[idx, "category"] = cat
+                work.at[idx, "source"] = "override"
+                work.at[idx, "source_api"] = "github_override"
+                work.at[idx, "source_rank"] = 0
+                work.at[idx, "待修原因"] = ""
+    return _normalize_master_df(work)
+
+
+def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    work = _normalize_master_df(master_df)
+    payload = work.sort_values(["market", "code"]).to_dict(orient="records")
+    return _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
+
+
+def _save_category_override(code: str, name: str, market: str, category: str) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    code = _normalize_code(code)
+    if not code:
+        return False, "股票代號不可空白"
+    payload, _ = _read_json_from_github(cfg["override_path"])
+    if not isinstance(payload, dict):
+        payload = {}
+    payload[code] = {
+        "code": code,
+        "name": _safe_str(name),
+        "market": _safe_str(market) or "上市",
+        "category": _canonical_category(category) or _infer_category_from_record(name, category),
+        "updated_at": _now_text(),
+    }
+    ok, msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
+    if ok:
+        try:
+            _load_stock_category_override_map.clear()
+        except Exception:
+            pass
+    return ok, msg
+
 def _build_master_diagnostics(base_info=None, yahoo_info=None, merged=None) -> list[str]:
     base_info = base_info if isinstance(base_info, dict) else {}
     twse_info = base_info.get("twse_info", {}) if isinstance(base_info.get("twse_info", {}), dict) else {}
