@@ -1525,12 +1525,8 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
     return master_df
 
 
-# =========================================================
-# Legacy fallback loader kept only for reference.
-# Do NOT use this to avoid overriding the official master pipeline above.
-# =========================================================
 @st.cache_data(ttl=1800, show_spinner=False)
-def _load_master_df_legacy() -> pd.DataFrame:
+def _load_master_df() -> pd.DataFrame:
     twse_df, twse_info = _fetch_twse_master()
     tpex_o_df, tpex_o_info = _fetch_tpex_master("上櫃")
     tpex_r_df, tpex_r_info = _fetch_tpex_master("興櫃")
@@ -1597,61 +1593,6 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _load_master_df() -> pd.DataFrame:
-    dfs = []
-    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題", "industry_name"]
-
-    for market_arg in ["", "上市", "上櫃", "興櫃"]:
-        try:
-            df = get_all_code_name_map(market_arg)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                temp = df.copy()
-                mapping = {
-                    "證券代號": "code",
-                    "證券名稱": "name",
-                    "市場別": "market",
-                    "code": "code",
-                    "name": "name",
-                    "market": "market",
-                }
-                temp = temp.rename(columns=mapping)
-
-                found_category_col = None
-                for col in temp.columns:
-                    if str(col).strip() in category_candidates:
-                        found_category_col = col
-                        break
-                if found_category_col:
-                    temp = temp.rename(columns={found_category_col: "category"})
-
-                for col in ["code", "name", "market"]:
-                    if col not in temp.columns:
-                        temp[col] = ""
-                if "category" not in temp.columns:
-                    temp["category"] = ""
-
-                temp["code"] = temp["code"].map(_normalize_code)
-                temp["name"] = temp["name"].map(_safe_str)
-                temp["market"] = temp["market"].map(_safe_str)
-                if market_arg in ["上市", "上櫃", "興櫃"]:
-                    temp["market"] = temp["market"].replace("", market_arg)
-                temp["category"] = temp.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
-                dfs.append(temp[["code", "name", "market", "category"]])
-        except Exception:
-            pass
-
-    if not dfs:
-        base = pd.DataFrame(columns=["code", "name", "market", "category"])
-    else:
-        base = pd.concat(dfs, ignore_index=True)
-        base["code"] = base["code"].map(_normalize_code)
-        base["name"] = base["name"].map(_safe_str)
-        base["market"] = base["market"].map(_safe_str).replace("", "上市")
-        base["category"] = base.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
-        base = base[base["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-
-    return _apply_master_overrides(base)
-
 def _find_name_market_category(
     code: str,
     manual_name: str,
