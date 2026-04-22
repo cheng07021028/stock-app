@@ -10,3 +10,8 @@ requests
 firebase-admin>=6.5.0
 google-cloud-storage>=2.16.0
 requests>=2.31.0
+streamlit>=1.36.0
+pandas>=2.2.2
+requests>=2.31.0
+firebase-admin>=6.5.0
+google-cloud-storage>=2.16.0
