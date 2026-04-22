@@ -40,6 +40,7 @@ RECORD_COLUMNS = [
     "實際收盤", "實際漲跌點", "實際漲跌%", "實際方向",
     "方向命中", "點數誤差", "區間命中",
     "開盤是否適合進場", "收盤檢討", "備註",
+    "股神模式分數", "進場燈號", "出場燈號", "股神結論", "股神推論邏輯", "股神信心度",
 ]
 
 NEGATIVE_KEYWORDS = {
@@ -726,6 +727,182 @@ def _build_entry_rules(pred: dict[str, Any], snapshot: dict[str, dict[str, Any]]
     return rules
 
 
+def _history_bias_adjustment(records_df: pd.DataFrame) -> dict[str, float]:
+    x = _ensure_record_columns(records_df) if isinstance(records_df, pd.DataFrame) else pd.DataFrame()
+    if x.empty or "方向命中" not in x.columns:
+        return {"score_adj": 0.0, "confidence_adj": 0.0}
+    done = x.dropna(subset=["實際漲跌點"]).copy()
+    if len(done) < 8:
+        return {"score_adj": 0.0, "confidence_adj": 0.0}
+    hit_rate = float(done["方向命中"].fillna(False).mean() * 100)
+    avg_err = pd.to_numeric(done["點數誤差"], errors="coerce").dropna()
+    avg_err = float(avg_err.mean()) if not avg_err.empty else 120.0
+    score_adj = 0.0
+    conf_adj = 0.0
+    if hit_rate >= 62:
+        score_adj += 2.0
+        conf_adj += 4.0
+    elif hit_rate <= 45:
+        score_adj -= 2.5
+        conf_adj -= 6.0
+    if avg_err <= 80:
+        score_adj += 1.0
+        conf_adj += 3.0
+    elif avg_err >= 180:
+        score_adj -= 1.5
+        conf_adj -= 4.0
+    return {"score_adj": score_adj, "confidence_adj": conf_adj}
+
+
+def _build_god_mode_signal(pred: dict[str, Any], snapshot: dict[str, dict[str, Any]], news_bundle: dict[str, Any], factor_df: pd.DataFrame, records_df: pd.DataFrame | None = None) -> dict[str, Any]:
+    twii = snapshot.get("台股加權", {})
+    nasdaq = snapshot.get("那斯達克", {})
+    sox = snapshot.get("費半", {})
+    nq = snapshot.get("那指期", {})
+    es = snapshot.get("標普500期", {})
+    tsm = snapshot.get("台積電ADR", {})
+    vix = snapshot.get("VIX恐慌", {})
+
+    tw_close = _safe_float(twii.get("close"))
+    ma5 = _safe_float(twii.get("ma5"))
+    ma10 = _safe_float(twii.get("ma10"))
+    ma20 = _safe_float(twii.get("ma20"))
+    nas_pct = _safe_float(nasdaq.get("change_pct"), 0.0) or 0.0
+    sox_pct = _safe_float(sox.get("change_pct"), 0.0) or 0.0
+    nq_pct = _safe_float(nq.get("change_pct"), 0.0) or 0.0
+    es_pct = _safe_float(es.get("change_pct"), 0.0) or 0.0
+    tsm_pct = _safe_float(tsm.get("change_pct"), 0.0) or 0.0
+    vix_pct = _safe_float(vix.get("change_pct"), 0.0) or 0.0
+    news_score = _safe_float(news_bundle.get("news_score"), 50.0) or 50.0
+
+    base_score = _safe_float(pred.get("score"), 50.0) or 50.0
+    bias = _history_bias_adjustment(records_df if isinstance(records_df, pd.DataFrame) else pd.DataFrame())
+    god_score = base_score + bias["score_adj"]
+    logic: list[str] = []
+    plus = 0.0
+    minus = 0.0
+
+    if tw_close is not None and ma5 is not None and ma20 is not None:
+        if tw_close > ma5 > ma20:
+            plus += 9
+            logic.append(f"加權站上 MA5 / MA20，多頭結構完整（{tw_close:,.0f} > {ma5:,.0f} > {ma20:,.0f}）")
+        elif tw_close > ma20:
+            plus += 4
+            logic.append("加權仍守在 MA20 之上，趨勢尚未轉壞")
+        elif tw_close < ma5 < ma20:
+            minus += 10
+            logic.append(f"加權跌破 MA5 / MA20，轉弱明確（{tw_close:,.0f} < {ma5:,.0f} < {ma20:,.0f}）")
+        else:
+            minus += 3
+            logic.append("加權均線結構混亂，盤勢偏震盪")
+
+    tech_strength = (nas_pct * 0.35) + (sox_pct * 0.40) + (nq_pct * 0.15) + (tsm_pct * 0.10)
+    if tech_strength >= 1.2:
+        plus += 9
+        logic.append(f"美科技 / 費半 / ADR 同步偏強，外部風向有利台股（綜合 {tech_strength:+.2f}%）")
+    elif tech_strength >= 0.3:
+        plus += 4
+        logic.append(f"美科技股偏正向，但不是全面大多頭（綜合 {tech_strength:+.2f}%）")
+    elif tech_strength <= -1.2:
+        minus += 9
+        logic.append(f"美科技 / 費半 / ADR 同步轉弱，台股隔日承壓機率高（綜合 {tech_strength:+.2f}%）")
+    elif tech_strength <= -0.3:
+        minus += 4
+        logic.append(f"外部科技股風向偏空，追價風險提高（綜合 {tech_strength:+.2f}%）")
+
+    futures_mix = nq_pct * 0.6 + es_pct * 0.4
+    if futures_mix >= 0.6:
+        plus += 6
+        logic.append(f"夜盤代理偏多，盤前氣氛加分（ES/NQ 綜合 {futures_mix:+.2f}%）")
+    elif futures_mix <= -0.6:
+        minus += 6
+        logic.append(f"夜盤代理偏空，開盤追多不利（ES/NQ 綜合 {futures_mix:+.2f}%）")
+
+    if vix_pct <= -3:
+        plus += 4
+        logic.append(f"VIX 回落，市場風險偏好改善（{vix_pct:+.2f}%）")
+    elif vix_pct >= 6:
+        minus += 8
+        logic.append(f"VIX 明顯升高，先把風險放第一（{vix_pct:+.2f}%）")
+
+    if news_score >= 60:
+        plus += 5
+        logic.append(f"國際新聞總分偏多（{news_score:.1f}），利空干擾較低")
+    elif news_score <= 40:
+        minus += 8
+        logic.append(f"國際新聞總分偏空（{news_score:.1f}），戰爭 / 關稅 / 制裁類風險需保守")
+
+    god_score = _score_clip(god_score + plus - minus, 0, 100)
+
+    entry_light = "紅燈"
+    exit_light = "綠燈"
+    conclusion = "觀望"
+    action = "先觀望"
+
+    if god_score >= 78:
+        entry_light = "綠燈"
+        exit_light = "紅燈"
+        conclusion = "可分批進場，偏多操作"
+        action = "優先布局強勢族群與領先股，採分批進場，不建議一次滿倉。"
+    elif god_score >= 66:
+        entry_light = "黃綠燈"
+        exit_light = "黃燈"
+        conclusion = "可拉回找買點，續抱強股"
+        action = "可進場，但以拉回承接為主；已有強勢股可續抱並設移動停利。"
+    elif god_score >= 54:
+        entry_light = "黃燈"
+        exit_light = "黃燈"
+        conclusion = "中性偏多，先小倉試單"
+        action = "只適合小倉試單，需等開盤後量價確認再加碼。"
+    elif god_score >= 42:
+        entry_light = "橘燈"
+        exit_light = "黃紅燈"
+        conclusion = "偏保守，減少新倉"
+        action = "新倉要少，已有持股看強弱分化；弱股先減碼。"
+    else:
+        entry_light = "紅燈"
+        exit_light = "綠燈"
+        conclusion = "偏空防守，優先出場或減碼"
+        action = "不適合主動進場，先保留現金；破線弱勢股優先出場。"
+
+    confidence = _score_clip(55 + abs(god_score - 50) * 0.9 + bias["confidence_adj"], 35, 95)
+    if abs((_safe_float(pred.get("expected_points"), 0.0) or 0.0)) < 40:
+        confidence = max(35.0, confidence - 8.0)
+        logic.append("預估點數幅度不大，代表方向雖有傾向，但延續力未必強")
+
+    if god_score <= 40:
+        logic.insert(0, "防守優先：當前綜合風險偏高，先想怎麼少輸，不是先想賺多少")
+    elif god_score >= 75:
+        logic.insert(0, "順勢優先：多方條件同時成立，適合做多但仍需分批與風控")
+
+    sell_triggers = [
+        "開盤後跌破前收且 30 分鐘站不回",
+        "加權跌破 MA5，且費半 / 台積電 ADR 同步轉弱",
+        "原本強勢股爆量不漲、開高走低",
+        "國際突發利空升級，VIX 明顯飆升",
+    ]
+    buy_triggers = [
+        "開盤 15~30 分鐘站穩前收或關鍵支撐",
+        "強勢族群同步走強，不是單一個股獨漲",
+        "量能放大但不是爆量長黑",
+        "夜盤與美科技因子沒有明顯轉壞",
+    ]
+
+    logic_text = "\n".join([f"- {x}" for x in logic])
+    return {
+        "god_score": round(god_score, 2),
+        "entry_light": entry_light,
+        "exit_light": exit_light,
+        "conclusion": conclusion,
+        "action": action,
+        "logic_list": logic,
+        "logic_text": logic_text,
+        "confidence": round(confidence, 1),
+        "buy_triggers": buy_triggers,
+        "sell_triggers": sell_triggers,
+    }
+
+
 # =========================================================
 # 紀錄 / 回測
 # =========================================================
@@ -826,6 +1003,12 @@ def _build_record_row(pred_date: str, pred: dict[str, Any], snapshot: dict[str, 
         "開盤是否適合進場": False,
         "收盤檢討": "",
         "備註": "",
+        "股神模式分數": None,
+        "進場燈號": "",
+        "出場燈號": "",
+        "股神結論": "",
+        "股神推論邏輯": "",
+        "股神信心度": None,
     }
 
 
@@ -933,7 +1116,7 @@ def main():
 
     render_pro_hero(
         title="大盤走勢",
-        subtitle="以台股大盤、美股科技、夜盤、美盤、國際新聞與世界大廠消息，推估當日漲跌方向、點數與是否適合進場，並可記錄回測準確率。",
+        subtitle="以台股大盤、美股科技、夜盤、美盤、國際新聞與世界大廠消息，加入股神模式推論進場 / 出場建議，並可記錄回測準確率。",
     )
     _show_status()
 
@@ -989,6 +1172,7 @@ def main():
         st.warning(records_err)
     records_df = _backfill_actual_results(records_df, twii_history)
     acc = _build_accuracy_summary(records_df)
+    god_mode = _build_god_mode_signal(pred, snapshot, news_bundle, factor_df, records_df)
 
     twii = snapshot.get("台股加權", {})
     nasdaq = snapshot.get("那斯達克", {})
@@ -996,7 +1180,7 @@ def main():
     nq = snapshot.get("那指期", {})
 
     render_pro_kpi_row([
-        {"label": "大盤推估分數", "value": f"{pred['score']:.1f}", "delta": pred["stance"], "delta_class": "pro-kpi-delta-flat"},
+        {"label": "股神模式分數", "value": f"{god_mode['god_score']:.1f}", "delta": god_mode["conclusion"], "delta_class": "pro-kpi-delta-flat"},
         {"label": "推估漲跌點", "value": f"{pred['expected_points']:+,.0f} 點", "delta": f"{pred['expected_pct']:+.2f}%", "delta_class": "pro-kpi-delta-flat"},
         {"label": "台股加權", "value": _fmt_num(twii.get("close"), 0), "delta": _fmt_pct(twii.get("change_pct")), "delta_class": "pro-kpi-delta-flat"},
         {"label": "方向命中率", "value": f"{acc['方向命中率']:.1f}%", "delta": f"樣本 {acc['樣本數']}", "delta_class": "pro-kpi-delta-flat"},
@@ -1004,11 +1188,12 @@ def main():
     ])
 
     st.info(
-        f"股神判讀：**{pred['stance']}**｜推估 {target_date.strftime('%Y-%m-%d')} 大盤合理區間約 **{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}**。"
-        f" 建議：{pred['action']}｜風險等級：{pred['risk']}"
+        f"股神判讀：**{god_mode['conclusion']}**｜進場燈號 **{god_mode['entry_light']}**｜出場燈號 **{god_mode['exit_light']}**｜"
+        f"推估 {target_date.strftime('%Y-%m-%d')} 大盤合理區間約 **{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}**。"
+        f" 建議：{god_mode['action']}｜股神信心度：{god_mode['confidence']:.1f}%"
     )
 
-    tabs = st.tabs(["📌 總覽", "📊 因子評分", "📝 紀錄追蹤", "📰 新聞風險", "🧠 股神判斷因子", "📈 市場明細"])
+    tabs = st.tabs(["📌 總覽", "🔥 股神模式", "📊 因子評分", "📝 紀錄追蹤", "📰 新聞風險", "🧠 股神判斷因子", "📈 市場明細"])
 
     with tabs[0]:
         render_pro_section(f"{target_date.strftime('%Y-%m-%d')} 進場結論")
@@ -1030,6 +1215,33 @@ def main():
             )
 
     with tabs[1]:
+        render_pro_section("股神模式｜進場 / 出場判讀")
+        g1, g2 = st.columns([1.15, 1.0])
+        with g1:
+            render_pro_info_card(
+                "股神模式結論",
+                [
+                    ("推估日期", target_date.strftime('%Y-%m-%d'), ""),
+                    ("股神模式分數", f"{god_mode['god_score']:.1f}", ""),
+                    ("進場燈號", god_mode["entry_light"], ""),
+                    ("出場燈號", god_mode["exit_light"], ""),
+                    ("結論", god_mode["conclusion"], ""),
+                    ("信心度", f"{god_mode['confidence']:.1f}%", ""),
+                ],
+                chips=["股神模式", "進場", "出場", "風控"],
+            )
+            st.markdown("**股神推論邏輯**")
+            st.markdown(god_mode["logic_text"] or "- 暫無")
+        with g2:
+            st.markdown("**適合進場的確認條件**")
+            for x in god_mode["buy_triggers"]:
+                st.markdown(f"- {x}")
+            st.markdown("**該出場 / 減碼的警訊**")
+            for x in god_mode["sell_triggers"]:
+                st.markdown(f"- {x}")
+            st.warning("沒有任何策略能保證 100% 準確率。這一頁的用途是提升一致性與紀律，不是保證每次都對。")
+
+    with tabs[2]:
         render_pro_section("因子評分")
         show_factor = factor_df.copy()
         if not show_factor.empty:
@@ -1039,13 +1251,20 @@ def main():
         else:
             st.info("目前無法產生因子評分。")
 
-    with tabs[2]:
+    with tabs[3]:
         render_pro_section("推估紀錄 / 回測檢討", "把每天推估存起來，之後回填實際結果，檢討準確率。")
         pred_date = st.date_input("紀錄日期", value=target_date, key=_k("pred_date"))
         c1, c2, c3 = st.columns([1.2, 1.2, 2.6])
         with c1:
             if st.button("💾 儲存此日期推估", use_container_width=True, type="primary"):
                 row = _build_record_row(str(pred_date), pred, snapshot, news_bundle, factor_df)
+                row["股神模式分數"] = god_mode["god_score"]
+                row["進場燈號"] = god_mode["entry_light"]
+                row["出場燈號"] = god_mode["exit_light"]
+                row["股神結論"] = god_mode["conclusion"]
+                row["股神推論邏輯"] = god_mode["logic_text"]
+                row["股神信心度"] = god_mode["confidence"]
+                row["操作建議"] = god_mode["action"]
                 new_df = _upsert_record(records_df, row)
                 if _save_prediction_records(new_df):
                     st.session_state[_k("record_refresh_key")] = _now_text()
@@ -1072,7 +1291,8 @@ def main():
             show_records = _format_records_for_show(records_df.sort_values("預測日期", ascending=False))
             st.dataframe(
                 show_records[[c for c in [
-                    "預測日期", "推估方向", "推估漲跌點", "推估區間低", "推估區間高",
+                    "預測日期", "股神模式分數", "進場燈號", "出場燈號", "股神結論",
+                    "推估方向", "推估漲跌點", "推估區間低", "推估區間高",
                     "實際方向", "實際漲跌點", "實際收盤", "方向命中", "區間命中", "點數誤差",
                     "新聞風險", "因子摘要", "更新時間"
                 ] if c in show_records.columns]],
@@ -1081,7 +1301,8 @@ def main():
             )
 
             edit_cols = [
-                "record_id", "預測日期", "開盤是否適合進場", "收盤檢討", "備註",
+                "record_id", "預測日期", "股神模式分數", "進場燈號", "出場燈號", "股神結論",
+                "開盤是否適合進場", "收盤檢討", "備註",
                 "推估方向", "推估漲跌點", "實際方向", "實際漲跌點", "方向命中", "點數誤差"
             ]
             editor_df = records_df[[c for c in edit_cols if c in records_df.columns]].copy().sort_values("預測日期", ascending=False)
@@ -1094,6 +1315,10 @@ def main():
                 column_config={
                     "record_id": st.column_config.TextColumn("record_id", disabled=True),
                     "預測日期": st.column_config.TextColumn("預測日期", disabled=True),
+                    "股神模式分數": st.column_config.NumberColumn("股神模式分數", format="%.2f", disabled=True),
+                    "進場燈號": st.column_config.TextColumn("進場燈號", disabled=True),
+                    "出場燈號": st.column_config.TextColumn("出場燈號", disabled=True),
+                    "股神結論": st.column_config.TextColumn("股神結論", disabled=True),
                     "開盤是否適合進場": st.column_config.CheckboxColumn("開盤是否適合進場"),
                     "收盤檢討": st.column_config.TextColumn("收盤檢討", width="large"),
                     "備註": st.column_config.TextColumn("備註", width="large"),
@@ -1120,7 +1345,7 @@ def main():
                     st.session_state[_k("record_refresh_key")] = _now_text()
                     st.rerun()
 
-    with tabs[3]:
+    with tabs[4]:
         render_pro_section("國際新聞 / 世界大廠消息風險")
         news_df = news_bundle.get("df")
         if isinstance(news_df, pd.DataFrame) and not news_df.empty:
@@ -1134,7 +1359,7 @@ def main():
         else:
             st.info("目前抓不到新聞資料。")
 
-    with tabs[4]:
+    with tabs[5]:
         render_pro_section("股神角度還要看的判斷因子")
         extra_factors = pd.DataFrame([
             {"因子": "開盤半小時量價", "用途": "判斷預估方向有沒有被市場確認", "是否建議加入": "強烈建議"},
@@ -1149,7 +1374,7 @@ def main():
         st.dataframe(extra_factors, use_container_width=True, hide_index=True)
         st.warning("這一版已先把大盤 / 美盤 / 夜盤 / 世界大廠 / 國際新聞整合進來，並加上每日記錄與回測。下一階段最值得補的是：外資籌碼、正式台指夜盤、重大事件日曆。")
 
-    with tabs[5]:
+    with tabs[6]:
         render_pro_section("市場明細")
         rows = []
         for name, info in snapshot.items():
