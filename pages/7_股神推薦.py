@@ -11,6 +11,7 @@ import json
 import base64
 import io
 import hashlib
+import html
 
 import pandas as pd
 import requests
@@ -1213,67 +1214,87 @@ def _split_code_name(raw: Any) -> tuple[str, str]:
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_twse_isin_base() -> tuple[pd.DataFrame, dict[str, Any]]:
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    diag = {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_isin", "error": ""}
+    diag = {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_isin_html", "error": ""}
+
+    def _clean_cell(cell_html: str) -> str:
+        txt = re.sub(r"<br\s*/?>", " ", cell_html, flags=re.I)
+        txt = re.sub(r"<[^>]+>", "", txt)
+        txt = html.unescape(txt)
+        txt = txt.replace("\u3000", " ").replace("&nbsp;", " ")
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt
+
     try:
         html_text = _http_get_text(url, timeout=40)
-        tables = pd.read_html(io.StringIO(html_text))
     except Exception as e:
         diag["error"] = f"{type(e).__name__}: {e}"
         return _empty_master_df(), diag
 
     rows = []
-    for tb in tables:
-        df = tb.copy()
-        df.columns = [_safe_str(c) for c in df.columns]
-        if not len(df.columns):
+    tr_blocks = re.findall(r"<tr[^>]*>(.*?)</tr>", html_text, flags=re.I | re.S)
+    if not tr_blocks:
+        diag["error"] = "無法解析 TWSE ISIN HTML 列資料"
+        return _empty_master_df(), diag
+
+    diag["raw_cols"] = ["有價證券代號及名稱", "ISIN", "上市日", "市場別", "產業別", "CFI", "備註"]
+
+    for tr in tr_blocks:
+        cells_html = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, flags=re.I | re.S)
+        cells = [_clean_cell(x) for x in cells_html]
+        if len(cells) < 5:
             continue
 
-        combined_col = _find_col(list(df.columns), ["有價證券代號"])
-        if not combined_col:
-            combined_col = _find_col(list(df.columns), ["代號", "名稱"])
-        code_col = _find_col(list(df.columns), ["有價證券代號"])
-        name_col = _find_col(list(df.columns), ["有價證券名稱"])
-        industry_col = _find_col(list(df.columns), ["產業別"])
-        market_col = _find_col(list(df.columns), ["市場別"])
+        code, name = _split_code_name(cells[0])
+        code = _normalize_code(code)
+        if not re.fullmatch(r"\d{4}", code or ""):
+            continue
 
-        for _, r in df.iterrows():
-            code = ""
-            name = ""
-            if combined_col:
-                code, name = _split_code_name(r.get(combined_col))
-            if not code and code_col:
-                code = _normalize_code(r.get(code_col))
-            if not name and name_col:
-                name = _safe_str(r.get(name_col))
+        market = ""
+        market_idx = -1
+        for i, c in enumerate(cells):
+            if "上市" in c or "上櫃" in c or "興櫃" in c:
+                market = c
+                market_idx = i
+                break
+        if market and "上市" not in market:
+            continue
+        if not market:
+            market = "上市"
 
-            if not re.fullmatch(r"\d{4}", code or ""):
-                continue
+        official_raw = ""
+        if market_idx >= 0 and market_idx + 1 < len(cells):
+            official_raw = _safe_str(cells[market_idx + 1])
 
-            market = _safe_str(r.get(market_col)) if market_col else "上市"
-            if market and "上市" not in market:
-                continue
+        if not official_raw:
+            for c in cells[1:]:
+                c2 = _safe_str(c)
+                if any(k in c2 for k in ["工業", "業", "保險", "銀行", "證券", "其他電子", "半導體", "光電", "通信網路", "電子零組件", "電腦及週邊設備", "資訊服務", "貿易百貨", "生技醫療", "油電燃氣", "建材營造", "觀光餐旅", "航運"]):
+                    official_raw = c2
+                    break
 
-            official_raw = _safe_str(r.get(industry_col)) if industry_col else ""
-            official = _official_industry_name(official_raw)
-            rows.append({
-                "code": code,
-                "name": name or code,
-                "market": "上市",
-                "official_industry_raw": official_raw,
-                "official_industry_raw_col": industry_col or "產業別",
-                "official_industry": official,
-                "theme_category": _yahoo_industry_to_theme(official, name),
-                "category": _yahoo_industry_to_theme(official, name),
-                "source": "twse_isin_base",
-                "source_api": "twse_isin",
-                "source_rank": 3,
-                "待修原因": "" if official else "Yahoo / 官方產業待補",
-            })
+        official = _official_industry_name(official_raw)
+        theme = _yahoo_industry_to_theme(official, name)
+
+        rows.append({
+            "code": code,
+            "name": name or code,
+            "market": "上市",
+            "official_industry_raw": official_raw,
+            "official_industry_raw_col": "產業別",
+            "official_industry": official,
+            "theme_category": theme,
+            "category": theme,
+            "source": "twse_isin_base",
+            "source_api": "twse_isin_html",
+            "source_rank": 3,
+            "待修原因": "" if official else "Yahoo / 官方產業待補",
+        })
 
     out = _normalize_master_df(pd.DataFrame(rows))
     diag["rows"] = len(out)
     diag["official_hit"] = int(out["official_industry"].fillna("").astype(str).str.strip().ne("").sum()) if not out.empty else 0
-    diag["raw_cols"] = list(tables[0].columns) if tables else []
+    if diag["rows"] == 0 and not diag["error"]:
+        diag["error"] = "TWSE ISIN HTML 已抓到，但未解析出上市 4 碼股票"
     return out, diag
 
 
