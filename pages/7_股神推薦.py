@@ -1461,6 +1461,46 @@ def _fetch_tpex_base(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
     return out, diag
 
 
+
+def _build_utils_name_aux() -> pd.DataFrame:
+    dfs = []
+    for market_arg in ["上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+        except Exception:
+            df = pd.DataFrame()
+        if df is None or df.empty:
+            continue
+        temp = df.copy().rename(columns={"證券代號": "code", "證券名稱": "name", "市場別": "market"})
+        for c in ["code", "name", "market"]:
+            if c not in temp.columns:
+                temp[c] = ""
+        temp["code"] = temp["code"].map(_normalize_code)
+        temp["name"] = temp["name"].map(_safe_str)
+        temp["market"] = temp["market"].map(_safe_str).replace("", market_arg)
+        temp = temp[temp["code"].astype(str).str.fullmatch(r"\d{4}")].copy()
+        dfs.append(temp[["code", "name", "market"]])
+    if not dfs:
+        return pd.DataFrame(columns=["code", "name_aux", "market_aux"])
+    out = pd.concat(dfs, ignore_index=True).drop_duplicates("code", keep="first").reset_index(drop=True)
+    out = out.rename(columns={"name": "name_aux", "market": "market_aux"})
+    return out
+
+
+def _apply_aux_name_market(master_df: pd.DataFrame) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return _empty_master_df()
+    aux = _build_utils_name_aux()
+    if aux.empty:
+        return master_df
+    work = master_df.merge(aux, on="code", how="left")
+    for idx in work.index:
+        if not _safe_str(work.at[idx, "name"]) and _safe_str(work.at[idx, "name_aux"]):
+            work.at[idx, "name"] = _safe_str(work.at[idx, "name_aux"])
+        if _safe_str(work.at[idx, "market"]) not in {"上市", "上櫃", "興櫃"} and _safe_str(work.at[idx, "market_aux"]) in {"上市", "上櫃", "興櫃"}:
+            work.at[idx, "market"] = _safe_str(work.at[idx, "market_aux"])
+    return _normalize_master_df(work.drop(columns=["name_aux", "market_aux"], errors="ignore"))
+
 def _build_formal_base_master() -> tuple[pd.DataFrame, dict[str, Any]]:
     twse_df, twse_info = _fetch_twse_isin_base()
     tpex_o_df, tpex_o_info = _fetch_tpex_base("上櫃")
