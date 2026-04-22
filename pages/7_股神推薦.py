@@ -25,6 +25,7 @@ from utils import (
     format_number,
     get_all_code_name_map,
     get_history_data,
+    get_history_data_debug,
     get_normalized_watchlist,
     inject_pro_theme,
     render_pro_hero,
@@ -175,6 +176,61 @@ def _create_record_id(code: str, rec_date: str, rec_time: str, mode: str) -> str
 def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_msg")] = msg
     st.session_state[_k("status_type")] = level
+
+
+def _save_debug_scan_summary(summary: dict[str, Any]):
+    st.session_state[_k("debug_scan_summary")] = summary or {}
+
+
+def _load_debug_scan_summary() -> dict[str, Any]:
+    data = st.session_state.get(_k("debug_scan_summary"), {})
+    return data if isinstance(data, dict) else {}
+
+
+def _render_debug_scan_summary():
+    data = _load_debug_scan_summary()
+    if not data:
+        return
+
+    render_pro_section("推薦除錯摘要")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("掃描總數", int(data.get("total_count", 0)))
+    with c2:
+        st.metric("進入評分", int(data.get("analyzed_ok", 0)))
+    with c3:
+        st.metric("通過最終門檻", int(data.get("passed_final", 0)))
+    with c4:
+        st.metric("例外錯誤", int(data.get("analysis_error", 0)))
+
+    lines = []
+    mapping = [
+        ("invalid_code", "代號無效"),
+        ("category_filtered", "類型篩選排除"),
+        ("no_history", "抓不到歷史資料"),
+        ("analysis_error", "指標/分析錯誤"),
+        ("signal_filtered", "訊號分數淘汰"),
+        ("risk_filtered", "風險過濾淘汰"),
+        ("prelaunch_filtered", "起漲前兆淘汰"),
+        ("trade_filtered", "交易可行淘汰"),
+        ("final_score_filtered", "推薦總分淘汰"),
+    ]
+    for key, label in mapping:
+        lines.append(f"{label}：{int(data.get(key, 0))} 檔")
+    st.caption("｜".join(lines))
+
+    history_debug = data.get("history_debug_samples", []) or []
+    error_debug = data.get("error_samples", []) or []
+    if history_debug or error_debug:
+        with st.expander("除錯明細", expanded=False):
+            if history_debug:
+                st.markdown("**歷史資料抓取樣本**")
+                for item in history_debug[:10]:
+                    st.write(f"- {item}")
+            if error_debug:
+                st.markdown("**分析錯誤樣本**")
+                for item in error_debug[:10]:
+                    st.write(f"- {item}")
 
 
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1906,7 +1962,7 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, dict[str, Any]]:
     primary = _safe_str(market_type)
     tried = []
     if primary:
@@ -1923,7 +1979,30 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         if mk not in tried:
             tried.append(mk)
 
+    debug_attempts: list[dict[str, Any]] = []
+
     for mk in tried:
+        debug_info = {}
+        try:
+            debug_info = get_history_data_debug(
+                stock_no=stock_no,
+                stock_name=stock_name,
+                market_type=mk,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as e:
+            debug_info = {
+                "ok": False,
+                "source": "history_debug_exception",
+                "market_type": mk,
+                "error": str(e),
+                "rows": 0,
+                "debug_lines": [f"get_history_data_debug 例外：{e}"],
+            }
+
+        debug_attempts.append(debug_info)
+
         try:
             df = get_history_data(
                 stock_no=stock_no,
@@ -1951,9 +2030,23 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 
         df = _prepare_history_df(df)
         if not df.empty:
-            return df, (mk or market_type or "未知")
+            return df, (mk or market_type or "未知"), {
+                "ok": True,
+                "stock_no": stock_no,
+                "stock_name": stock_name,
+                "used_market": (mk or market_type or "未知"),
+                "attempts": debug_attempts,
+                "rows": len(df),
+            }
 
-    return pd.DataFrame(), (_safe_str(market_type) or "未知")
+    return pd.DataFrame(), (_safe_str(market_type) or "未知"), {
+        "ok": False,
+        "stock_no": stock_no,
+        "stock_name": stock_name,
+        "used_market": (_safe_str(market_type) or "未知"),
+        "attempts": debug_attempts,
+        "rows": 0,
+    }
 
 
 # =========================================================
@@ -2380,77 +2473,94 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date, risk_strictness: str) -> dict[str, Any]:
-    hist_df, used_market = _get_history_smart(
-        stock_no=stock_no,
-        stock_name=stock_name,
-        market_type=market_type,
-        start_date=start_dt,
-        end_date=end_dt,
-    )
-    if hist_df.empty:
-        return {}
+    try:
+        hist_df, used_market, history_debug = _get_history_smart(
+            stock_no=stock_no,
+            stock_name=stock_name,
+            market_type=market_type,
+            start_date=start_dt,
+            end_date=end_dt,
+        )
+        if hist_df.empty:
+            return {
+                "ok": False,
+                "error_stage": "history",
+                "error_message": "抓不到歷史資料",
+                "used_market": used_market,
+                "history_debug": history_debug,
+            }
 
-    signal_snapshot = compute_signal_snapshot(hist_df)
-    sr_snapshot = compute_support_resistance_snapshot(hist_df)
-    radar = compute_radar_scores(hist_df)
-    auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
-    trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
-    prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
-    risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
-    trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
+        signal_snapshot = compute_signal_snapshot(hist_df)
+        sr_snapshot = compute_support_resistance_snapshot(hist_df)
+        radar = compute_radar_scores(hist_df)
+        auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
+        trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
+        prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
+        risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
+        trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
 
-    last = hist_df.iloc[-1]
-    first = hist_df.iloc[0]
+        last = hist_df.iloc[-1]
+        first = hist_df.iloc[0]
 
-    close_now = _safe_float(last.get("收盤價"))
-    close_first = _safe_float(first.get("收盤價"))
-    period_pct = None
-    if close_now is not None and close_first not in [None, 0]:
-        period_pct = ((close_now / close_first) - 1) * 100
+        close_now = _safe_float(last.get("收盤價"))
+        close_first = _safe_float(first.get("收盤價"))
+        period_pct = None
+        if close_now is not None and close_first not in [None, 0]:
+            period_pct = ((close_now / close_first) - 1) * 100
 
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-    pressure_dist = None
-    support_dist = None
-    if close_now is not None and res20 not in [None, 0]:
-        pressure_dist = ((res20 - close_now) / res20) * 100
-    if close_now is not None and sup20 not in [None, 0]:
-        support_dist = ((close_now - sup20) / sup20) * 100
+        res20 = _safe_float(sr_snapshot.get("res_20"))
+        sup20 = _safe_float(sr_snapshot.get("sup_20"))
+        pressure_dist = None
+        support_dist = None
+        if close_now is not None and res20 not in [None, 0]:
+            pressure_dist = ((res20 - close_now) / res20) * 100
+        if close_now is not None and sup20 not in [None, 0]:
+            support_dist = ((close_now - sup20) / sup20) * 100
 
-    radar_avg = _avg_safe(
-        [
-            _safe_float(radar.get("trend")),
-            _safe_float(radar.get("momentum")),
-            _safe_float(radar.get("volume")),
-            _safe_float(radar.get("position")),
-            _safe_float(radar.get("structure")),
-        ],
-        50.0,
-    )
+        radar_avg = _avg_safe(
+            [
+                _safe_float(radar.get("trend")),
+                _safe_float(radar.get("momentum")),
+                _safe_float(radar.get("volume")),
+                _safe_float(radar.get("position")),
+                _safe_float(radar.get("structure")),
+            ],
+            50.0,
+        )
 
-    technical_score = _score_clip(
-        (radar_avg * 0.55)
-        + ((_safe_float(signal_snapshot.get("score"), 0) or 0) * 7.5)
-        + ((_safe_float(period_pct, 0) or 0) * 0.18)
-    )
+        technical_score = _score_clip(
+            (radar_avg * 0.55)
+            + ((_safe_float(signal_snapshot.get("score"), 0) or 0) * 7.5)
+            + ((_safe_float(period_pct, 0) or 0) * 0.18)
+        )
 
-    return {
-        "used_market": used_market,
-        "signal_snapshot": signal_snapshot,
-        "sr_snapshot": sr_snapshot,
-        "radar": radar,
-        "auto_factor": auto_factor,
-        "trade_plan": trade_plan,
-        "prelaunch": prelaunch,
-        "risk_filter": risk_filter,
-        "trade_feasibility": trade_feasibility,
-        "close_now": close_now,
-        "period_pct": period_pct,
-        "pressure_dist": pressure_dist,
-        "support_dist": support_dist,
-        "radar_avg": radar_avg,
-        "technical_score": technical_score,
-    }
+        return {
+            "ok": True,
+            "used_market": used_market,
+            "history_debug": history_debug,
+            "signal_snapshot": signal_snapshot,
+            "sr_snapshot": sr_snapshot,
+            "radar": radar,
+            "auto_factor": auto_factor,
+            "trade_plan": trade_plan,
+            "prelaunch": prelaunch,
+            "risk_filter": risk_filter,
+            "trade_feasibility": trade_feasibility,
+            "close_now": close_now,
+            "period_pct": period_pct,
+            "pressure_dist": pressure_dist,
+            "support_dist": support_dist,
+            "radar_avg": radar_avg,
+            "technical_score": technical_score,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error_stage": "analysis",
+            "error_message": str(e),
+            "used_market": _safe_str(market_type) or "未知",
+            "history_debug": {},
+        }
 
 
 def _analyze_one_stock_for_recommend(
@@ -2471,12 +2581,12 @@ def _analyze_one_stock_for_recommend(
     manual_category = _normalize_category(item.get("category"))
 
     if not code:
-        return None
+        return {"status": "invalid_code", "code": "", "message": "股票代號空白"}
 
     stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_df)
 
     if clean_categories and category not in clean_categories:
-        return None
+        return {"status": "category_filtered", "code": code, "message": f"類型不符合：{category}"}
 
     bundle = _analyze_stock_bundle(
         stock_no=code,
@@ -2486,24 +2596,37 @@ def _analyze_one_stock_for_recommend(
         end_dt=end_dt,
         risk_strictness=risk_strictness,
     )
-    if not bundle:
-        return None
+    if not bundle or not bundle.get("ok", False):
+        history_debug = bundle.get("history_debug", {}) if isinstance(bundle, dict) else {}
+        if isinstance(bundle, dict) and bundle.get("error_stage") == "analysis":
+            return {
+                "status": "analysis_error",
+                "code": code,
+                "message": _safe_str(bundle.get("error_message")) or "分析錯誤",
+                "history_debug": history_debug,
+            }
+        return {
+            "status": "no_history",
+            "code": code,
+            "message": "抓不到歷史資料",
+            "history_debug": history_debug,
+        }
 
     signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
     if signal_score < min_signal_score:
-        return None
+        return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
 
     risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
     if not risk_pass:
-        return None
+        return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
 
     prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
     if prelaunch_score < min_prelaunch_score:
-        return None
+        return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
 
     trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
     if trade_score < min_trade_score:
-        return None
+        return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
 
     auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
     technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
@@ -2511,48 +2634,52 @@ def _analyze_one_stock_for_recommend(
     base_composite = _score_clip(technical_score * 0.40 + auto_factor_total * 0.32 + prelaunch_score * 0.18 + trade_score * 0.10)
 
     return {
-        "股票代號": code,
-        "股票名稱": stock_name,
-        "市場別": bundle["used_market"],
-        "類別": category or _infer_category_from_record(stock_name, category),
-        "最新價": bundle["close_now"],
-        "區間漲跌幅%": bundle["period_pct"],
-        "訊號分數": signal_score,
-        "雷達均分": bundle["radar_avg"],
-        "技術結構分數": technical_score,
-        "起漲前兆分數": prelaunch_score,
-        "交易可行分數": trade_score,
-        "追價風險分數": _safe_float(bundle["trade_feasibility"].get("追價風險分數"), 0) or 0,
-        "拉回買點分數": _safe_float(bundle["trade_feasibility"].get("拉回買點分數"), 0) or 0,
-        "突破買點分數": _safe_float(bundle["trade_feasibility"].get("突破買點分數"), 0) or 0,
-        "風險報酬評級": _safe_str(bundle["trade_feasibility"].get("風險報酬評級")),
-        "自動因子總分": auto_factor_total,
-        "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
-        "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
-        "獲利代理分數": bundle["auto_factor"]["profit_proxy"],
-        "大戶鎖碼代理分數": bundle["auto_factor"]["lock_proxy"],
-        "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
-        "20日壓力距離%": bundle["pressure_dist"],
-        "20日支撐距離%": bundle["support_dist"],
-        "個股原始總分": base_composite,
-        "起漲判斷": bundle["trade_plan"]["launch_tag"],
-        "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
-        "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
-        "停損價": bundle["trade_plan"]["stop_price"],
-        "賣出目標1": bundle["trade_plan"]["sell_target_1"],
-        "賣出目標2": bundle["trade_plan"]["sell_target_2"],
-        "風險報酬_拉回": bundle["trade_plan"]["rr1"],
-        "風險報酬_突破": bundle["trade_plan"]["rr2"],
-        "自動因子摘要": bundle["auto_factor"]["factor_summary"],
-        "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
-        "風險分數": _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0,
-        "淘汰原因": _safe_str(bundle["risk_filter"].get("淘汰原因")),
-        "均線轉強分": _safe_float(bundle["prelaunch"].get("均線轉強分"), 0) or 0,
-        "量能啟動分": _safe_float(bundle["prelaunch"].get("量能啟動分"), 0) or 0,
-        "突破準備分": _safe_float(bundle["prelaunch"].get("突破準備分"), 0) or 0,
-        "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
-        "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
-        "推薦模式": mode,
+        "status": "ok",
+        "row": {
+            "股票代號": code,
+            "股票名稱": stock_name,
+            "市場別": bundle["used_market"],
+            "類別": category or _infer_category_from_record(stock_name, category),
+            "最新價": bundle["close_now"],
+            "區間漲跌幅%": bundle["period_pct"],
+            "訊號分數": signal_score,
+            "雷達均分": bundle["radar_avg"],
+            "技術結構分數": technical_score,
+            "起漲前兆分數": prelaunch_score,
+            "交易可行分數": trade_score,
+            "追價風險分數": _safe_float(bundle["trade_feasibility"].get("追價風險分數"), 0) or 0,
+            "拉回買點分數": _safe_float(bundle["trade_feasibility"].get("拉回買點分數"), 0) or 0,
+            "突破買點分數": _safe_float(bundle["trade_feasibility"].get("突破買點分數"), 0) or 0,
+            "風險報酬評級": _safe_str(bundle["trade_feasibility"].get("風險報酬評級")),
+            "自動因子總分": auto_factor_total,
+            "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
+            "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
+            "獲利代理分數": bundle["auto_factor"]["profit_proxy"],
+            "大戶鎖碼代理分數": bundle["auto_factor"]["lock_proxy"],
+            "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
+            "20日壓力距離%": bundle["pressure_dist"],
+            "20日支撐距離%": bundle["support_dist"],
+            "個股原始總分": base_composite,
+            "起漲判斷": bundle["trade_plan"]["launch_tag"],
+            "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
+            "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
+            "停損價": bundle["trade_plan"]["stop_price"],
+            "賣出目標1": bundle["trade_plan"]["sell_target_1"],
+            "賣出目標2": bundle["trade_plan"]["sell_target_2"],
+            "風險報酬_拉回": bundle["trade_plan"]["rr1"],
+            "風險報酬_突破": bundle["trade_plan"]["rr2"],
+            "自動因子摘要": bundle["auto_factor"]["factor_summary"],
+            "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
+            "風險分數": _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0,
+            "淘汰原因": _safe_str(bundle["risk_filter"].get("淘汰原因")),
+            "均線轉強分": _safe_float(bundle["prelaunch"].get("均線轉強分"), 0) or 0,
+            "量能啟動分": _safe_float(bundle["prelaunch"].get("量能啟動分"), 0) or 0,
+            "突破準備分": _safe_float(bundle["prelaunch"].get("突破準備分"), 0) or 0,
+            "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
+            "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
+            "推薦模式": mode,
+        },
+        "history_debug": bundle.get("history_debug", {}),
     }
 
 
@@ -2611,6 +2738,7 @@ def _build_recommend_df(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if not universe_items:
+        _save_debug_scan_summary({})
         return pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
@@ -2623,6 +2751,22 @@ def _build_recommend_df(
     start_ts = time.time()
     done_count = 0
     base_rows = []
+    debug_summary = {
+        "total_count": total_count,
+        "analyzed_ok": 0,
+        "passed_final": 0,
+        "invalid_code": 0,
+        "category_filtered": 0,
+        "no_history": 0,
+        "analysis_error": 0,
+        "signal_filtered": 0,
+        "risk_filtered": 0,
+        "prelaunch_filtered": 0,
+        "trade_filtered": 0,
+        "final_score_filtered": 0,
+        "history_debug_samples": [],
+        "error_samples": [],
+    }
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
@@ -2645,11 +2789,36 @@ def _build_recommend_df(
         for future in as_completed(futures):
             done_count += 1
             try:
-                row = future.result()
-                if row:
-                    base_rows.append(row)
-            except Exception:
-                pass
+                result = future.result()
+                if not isinstance(result, dict):
+                    debug_summary["analysis_error"] += 1
+                    debug_summary["error_samples"].append("未知錯誤：future.result 非 dict")
+                else:
+                    status = _safe_str(result.get("status")) or "analysis_error"
+                    if status == "ok":
+                        row = result.get("row")
+                        if isinstance(row, dict):
+                            base_rows.append(row)
+                            debug_summary["analyzed_ok"] += 1
+                    else:
+                        debug_summary[status] = int(debug_summary.get(status, 0)) + 1
+                        msg = _safe_str(result.get("message"))
+                        code = _safe_str(result.get("code"))
+                        if status == "no_history":
+                            hdbg = result.get("history_debug", {}) or {}
+                            attempt_lines = []
+                            for att in hdbg.get("attempts", [])[:3]:
+                                market = _safe_str(att.get("market_type")) or "未知市場"
+                                rows = att.get("rows", 0)
+                                err = _safe_str(att.get("error"))
+                                source = _safe_str(att.get("source"))
+                                attempt_lines.append(f"{market} rows={rows} source={source} err={err}")
+                            debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
+                        elif status == "analysis_error":
+                            debug_summary["error_samples"].append(f"{code}：{msg}")
+            except Exception as e:
+                debug_summary["analysis_error"] += 1
+                debug_summary["error_samples"].append(f"future.result 例外：{e}")
 
             elapsed = time.time() - start_ts
             avg_per_stock = elapsed / done_count if done_count > 0 else 0
@@ -2754,6 +2923,10 @@ def _build_recommend_df(
             base_df[c] = pd.NA
 
     final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
+    debug_summary["final_score_filtered"] = max(len(base_df) - len(final_df), 0)
+    debug_summary["passed_final"] = len(final_df)
+    _save_debug_scan_summary(debug_summary)
+
     final_df = final_df.sort_values(["推薦總分", "起漲前兆分數", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False, False]).reset_index(drop=True)
 
     if "勾選" not in final_df.columns:
@@ -3421,10 +3594,12 @@ def main():
     else:
         rec_df, category_strength_df = _load_recommend_result_from_state()
 
+    _render_debug_scan_summary()
+
     if rec_df.empty:
         if submit_recommend or submit_refresh:
-            st.warning("本輪條件篩選後為 0 檔，代表推薦流程有執行，但目前門檻、風險過濾或掃描池條件過嚴，沒有股票通過。")
-            st.info("建議先改成：風險過濾=寬鬆、起漲前兆下限=30、交易可行下限=30、訊號分數下限=-3，再重新推薦。")
+            st.warning("本輪條件篩選後為 0 檔。可能不是門檻太高，也可能是歷史資料抓不到或分析函式出錯。")
+            st.info("先看上方『推薦除錯摘要』：若抓不到歷史資料或分析錯誤很多，先修資料模組，不要只調低門檻。")
         else:
             st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
         return
