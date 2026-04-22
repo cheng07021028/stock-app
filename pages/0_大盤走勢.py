@@ -106,6 +106,9 @@ RECORD_COLUMNS = [
     "區間是否命中",
     "點數誤差",
     "建議動作是否合適",
+    "進場建議績效分",
+    "出場建議績效分",
+    "整體檢討分",
     "誤判主因類別",
     "誤判主因",
     "收盤檢討",
@@ -227,7 +230,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%",
         "NQ夜盤漲跌%", "外資買賣超估分", "期貨選擇權估分", "類股輪動估分",
         "外資買賣超(億)", "三大法人合計(億)", "外資期貨淨單", "PCR", "融資增減(億)", "融券增減張",
-        "實際漲跌點", "實際高點", "實際低點", "點數誤差",
+        "實際漲跌點", "實際高點", "實際低點", "點數誤差", "進場建議績效分", "出場建議績效分", "整體檢討分",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -1003,6 +1006,58 @@ def _upsert_predictions(base_df: pd.DataFrame, pred_df: pd.DataFrame) -> pd.Data
     return _ensure_columns(merged)
 
 
+def _delete_records_by_ids(df: pd.DataFrame, record_ids: list[str]) -> pd.DataFrame:
+    x = _ensure_columns(df)
+    ids = {_safe_str(v) for v in (record_ids or []) if _safe_str(v)}
+    if x.empty or not ids:
+        return x.copy()
+    out = x[~x["record_id"].astype(str).isin(ids)].copy()
+    return _ensure_columns(out)
+
+
+def _action_family(action: str) -> str:
+    a = _safe_str(action)
+    if a in {"可分批買進", "小倉試單", "條件式低接", "低接不追價", "可進場", "分批布局"}:
+        return "buy"
+    if a in {"減碼觀望", "賣出/減碼", "減碼/出場", "出場", "賣出"}:
+        return "sell"
+    return "hold"
+
+
+def _score_entry_exit(action: str, actual_points: float | None) -> tuple[float | None, float | None, float | None, bool | None]:
+    if actual_points is None:
+        return None, None, None, None
+    family = _action_family(action)
+    if family == "buy":
+        entry = max(0.0, min(100.0, 50.0 + actual_points * 0.8))
+        exit_score = max(0.0, min(100.0, 50.0 - actual_points * 0.8))
+        fit = actual_points >= -20
+    elif family == "sell":
+        entry = max(0.0, min(100.0, 50.0 - actual_points * 0.8))
+        exit_score = max(0.0, min(100.0, 50.0 + actual_points * 0.8))
+        fit = actual_points <= 20
+    else:
+        entry = max(0.0, min(100.0, 85.0 - abs(actual_points) * 0.7))
+        exit_score = entry
+        fit = abs(actual_points) <= 60
+    overall = round(entry * 0.4 + exit_score * 0.2 + (100.0 if fit else 35.0) * 0.4, 2)
+    return round(entry, 2), round(exit_score, 2), overall, fit
+
+
+def _build_review_summary(df: pd.DataFrame) -> dict[str, Any]:
+    x = _ensure_columns(df)
+    if x.empty:
+        return {"樣本數": 0, "進場適合率": 0.0, "方向命中率": 0.0, "區間命中率": 0.0, "平均檢討分": 0.0}
+    valid_action = x[~x["建議動作是否合適"].isna()].copy()
+    return {
+        "樣本數": int(len(x)),
+        "進場適合率": float(pd.Series(x["建議動作是否合適"]).fillna(False).mean() * 100) if len(x) else 0.0,
+        "方向命中率": float(pd.Series(x["方向是否命中"]).fillna(False).mean() * 100) if len(x) else 0.0,
+        "區間命中率": float(pd.Series(x["區間是否命中"]).fillna(False).mean() * 100) if len(x) else 0.0,
+        "平均檢討分": float(pd.to_numeric(x["整體檢討分"], errors="coerce").dropna().mean()) if len(x) else 0.0,
+    }
+
+
 def _derive_actual_direction(actual_points: float | None) -> str:
     if actual_points is None:
         return ""
@@ -1019,7 +1074,6 @@ def _apply_actual_result(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     pred_points = _safe_float(src.get("預估漲跌點"))
     pred_high = _safe_float(src.get("預估高點"))
     pred_low = _safe_float(src.get("預估低點"))
-    base = _safe_float(src.get("大盤基準點"))
     actual_points = _safe_float(src.get("實際漲跌點"))
     actual_high = _safe_float(src.get("實際高點"))
     actual_low = _safe_float(src.get("實際低點"))
@@ -1031,6 +1085,12 @@ def _apply_actual_result(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
         src["點數誤差"] = abs(pred_points - actual_points)
     if pred_high is not None and pred_low is not None and actual_high is not None and actual_low is not None:
         src["區間是否命中"] = (actual_high <= pred_high + 60) and (actual_low >= pred_low - 60)
+    entry_score, exit_score, overall_score, fit = _score_entry_exit(_safe_str(src.get("建議動作")), actual_points)
+    src["進場建議績效分"] = entry_score
+    src["出場建議績效分"] = exit_score
+    src["整體檢討分"] = overall_score
+    if fit is not None and not bool(src.get("建議動作是否合適")):
+        src["建議動作是否合適"] = fit
     src["更新時間"] = _now_text()
     return src
 
@@ -1436,7 +1496,12 @@ def main():
                 ok, msg = _write_records_to_github(merged)
                 _set_status(msg, "success" if ok else "error")
                 st.rerun()
-        st.dataframe(_format_pred_df(pred_df[[c for c in RECORD_COLUMNS if c in pred_df.columns][:25]]), use_container_width=True, hide_index=True)
+        preview_cols = [
+            "推估日期", "模式名稱", "推估方向", "方向強度", "是否適合進場", "是否適合續抱", "是否適合減碼", "是否適合出場",
+            "建議動作", "建議倉位", "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "風險等級",
+            "主要風險", "進場確認條件", "出場警訊"
+        ]
+        st.dataframe(_format_pred_df(pred_df[[c for c in preview_cols if c in pred_df.columns]]), use_container_width=True, hide_index=True)
 
     with tabs[2]:
         render_pro_section("回填實際結果 / 追蹤準確率")
@@ -1447,8 +1512,8 @@ def main():
             st.info("目前這個日期還沒有儲存推估。")
         else:
             edit_df = current_fill[[
-                "record_id", "模式名稱", "推估方向", "建議動作", "預估漲跌點", "預估高點", "預估低點",
-                "實際方向", "實際漲跌點", "實際高點", "實際低點", "建議動作是否合適", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
+                "record_id", "模式名稱", "推估方向", "是否適合進場", "建議動作", "建議倉位", "預估漲跌點", "預估高點", "預估低點",
+                "實際方向", "實際漲跌點", "實際高點", "實際低點", "建議動作是否合適", "進場建議績效分", "出場建議績效分", "整體檢討分", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
             ]].copy()
             edited = st.data_editor(
                 edit_df,
@@ -1459,7 +1524,9 @@ def main():
                     "record_id": st.column_config.TextColumn("record_id", disabled=True),
                     "模式名稱": st.column_config.TextColumn("模式名稱", disabled=True),
                     "推估方向": st.column_config.TextColumn("推估方向", disabled=True),
+                    "是否適合進場": st.column_config.TextColumn("是否適合進場", disabled=True),
                     "建議動作": st.column_config.TextColumn("建議動作", disabled=True),
+                    "建議倉位": st.column_config.TextColumn("建議倉位", disabled=True),
                     "預估漲跌點": st.column_config.NumberColumn("預估漲跌點", disabled=True, format="%.1f"),
                     "預估高點": st.column_config.NumberColumn("預估高點", disabled=True, format="%.1f"),
                     "預估低點": st.column_config.NumberColumn("預估低點", disabled=True, format="%.1f"),
@@ -1468,6 +1535,9 @@ def main():
                     "實際高點": st.column_config.NumberColumn("實際高點", format="%.1f"),
                     "實際低點": st.column_config.NumberColumn("實際低點", format="%.1f"),
                     "建議動作是否合適": st.column_config.CheckboxColumn("建議動作是否合適"),
+                    "進場建議績效分": st.column_config.NumberColumn("進場建議績效分", format="%.1f", disabled=True),
+                    "出場建議績效分": st.column_config.NumberColumn("出場建議績效分", format="%.1f", disabled=True),
+                    "整體檢討分": st.column_config.NumberColumn("整體檢討分", format="%.1f", disabled=True),
                     "誤判主因類別": st.column_config.SelectboxColumn("誤判主因類別", options=ERROR_CAUSES),
                     "誤判主因": st.column_config.TextColumn("誤判主因", width="large"),
                     "收盤檢討": st.column_config.TextColumn("收盤檢討", width="large"),
@@ -1512,32 +1582,112 @@ def main():
         if hist.empty:
             st.info("目前沒有歷史紀錄。")
         else:
-            left, right, right2 = st.columns([1.2, 1.2, 1.6])
+            left, right, right2, right3 = st.columns([1.1, 1.1, 1.5, 1.2])
             with left:
                 mode_filter = st.selectbox("模式篩選", ["全部"] + MODEL_NAMES, key=_k("hist_mode_filter"))
             with right:
                 dir_filter = st.selectbox("方向篩選", ["全部"] + DIRECTION_OPTIONS, key=_k("hist_dir_filter"))
             with right2:
                 kw = st.text_input("搜尋日期 / 檢討 / 風險 / 備註", value="", key=_k("hist_kw"))
+            with right3:
+                review_filter = st.selectbox("進場建議", ["全部", "適合", "不適合"], key=_k("hist_action_fit"))
             if mode_filter != "全部":
                 hist = hist[hist["模式名稱"].astype(str) == mode_filter].copy()
             if dir_filter != "全部":
                 hist = hist[hist["推估方向"].astype(str) == dir_filter].copy()
+            if review_filter == "適合":
+                hist = hist[hist["建議動作是否合適"].fillna(False) == True].copy()
+            elif review_filter == "不適合":
+                hist = hist[hist["建議動作是否合適"].fillna(False) == False].copy()
             if kw:
                 mask = (
                     hist["推估日期"].astype(str).str.contains(kw, case=False, na=False)
                     | hist["收盤檢討"].astype(str).str.contains(kw, case=False, na=False)
                     | hist["主要風險"].astype(str).str.contains(kw, case=False, na=False)
                     | hist["備註"].astype(str).str.contains(kw, case=False, na=False)
+                    | hist["進場確認條件"].astype(str).str.contains(kw, case=False, na=False)
                 )
                 hist = hist[mask].copy()
             hist = hist.sort_values(["推估日期", "模式名稱"], ascending=[False, True])
-            show_cols = [
-                "推估日期", "模式名稱", "市場情境", "推估方向", "建議動作", "股神模式分數", "股神信心度", "預估漲跌點",
-                "實際方向", "實際漲跌點", "方向是否命中", "區間是否命中", "點數誤差", "建議動作是否合適", "誤判主因類別", "收盤檢討", "備註"
-            ]
-            st.dataframe(hist[show_cols], use_container_width=True, hide_index=True)
 
+            summary = _build_review_summary(hist)
+            s1, s2, s3, s4, s5 = st.columns(5)
+            with s1:
+                st.metric("樣本數", summary["樣本數"])
+            with s2:
+                st.metric("進場建議適合率", f"{summary['進場適合率']:.1f}%")
+            with s3:
+                st.metric("方向命中率", f"{summary['方向命中率']:.1f}%")
+            with s4:
+                st.metric("區間命中率", f"{summary['區間命中率']:.1f}%")
+            with s5:
+                st.metric("平均檢討分", "-" if pd.isna(summary['平均檢討分']) else f"{summary['平均檢討分']:.1f}")
+
+            edit_hist = hist[[c for c in [
+                "record_id", "推估日期", "模式名稱", "推估方向", "是否適合進場", "建議動作", "建議倉位", "股神模式分數", "股神信心度",
+                "預估漲跌點", "實際方向", "實際漲跌點", "方向是否命中", "區間是否命中", "點數誤差", "建議動作是否合適",
+                "進場建議績效分", "出場建議績效分", "整體檢討分", "主要風險", "進場確認條件", "出場警訊", "收盤檢討", "備註"
+            ] if c in hist.columns]].copy()
+            edit_hist.insert(0, "刪除", False)
+            edited_hist = st.data_editor(
+                edit_hist,
+                use_container_width=True,
+                hide_index=True,
+                key=_k("hist_editor"),
+                column_config={
+                    "刪除": st.column_config.CheckboxColumn("刪除"),
+                    "record_id": st.column_config.TextColumn("record_id", disabled=True),
+                    "推估日期": st.column_config.TextColumn("推估日期", disabled=True),
+                    "模式名稱": st.column_config.TextColumn("模式名稱", disabled=True),
+                    "推估方向": st.column_config.TextColumn("推估方向", disabled=True),
+                    "是否適合進場": st.column_config.TextColumn("是否適合進場", disabled=True),
+                    "建議動作": st.column_config.TextColumn("建議動作", disabled=True),
+                    "建議倉位": st.column_config.TextColumn("建議倉位", disabled=True),
+                    "股神模式分數": st.column_config.NumberColumn("股神模式分數", format="%.2f", disabled=True),
+                    "股神信心度": st.column_config.NumberColumn("股神信心度", format="%.2f", disabled=True),
+                    "預估漲跌點": st.column_config.NumberColumn("預估漲跌點", format="%.1f", disabled=True),
+                    "實際方向": st.column_config.TextColumn("實際方向", disabled=True),
+                    "實際漲跌點": st.column_config.NumberColumn("實際漲跌點", format="%.1f", disabled=True),
+                    "方向是否命中": st.column_config.CheckboxColumn("方向是否命中", disabled=True),
+                    "區間是否命中": st.column_config.CheckboxColumn("區間是否命中", disabled=True),
+                    "點數誤差": st.column_config.NumberColumn("點數誤差", format="%.1f", disabled=True),
+                    "建議動作是否合適": st.column_config.CheckboxColumn("建議動作是否合適", disabled=True),
+                    "進場建議績效分": st.column_config.NumberColumn("進場建議績效分", format="%.1f", disabled=True),
+                    "出場建議績效分": st.column_config.NumberColumn("出場建議績效分", format="%.1f", disabled=True),
+                    "整體檢討分": st.column_config.NumberColumn("整體檢討分", format="%.1f", disabled=True),
+                    "主要風險": st.column_config.TextColumn("主要風險", disabled=True),
+                    "進場確認條件": st.column_config.TextColumn("進場確認條件", width="large", disabled=True),
+                    "出場警訊": st.column_config.TextColumn("出場警訊", width="large", disabled=True),
+                    "收盤檢討": st.column_config.TextColumn("收盤檢討", width="large"),
+                    "備註": st.column_config.TextColumn("備註", width="large"),
+                },
+            )
+            a1, a2, a3 = st.columns([1.2, 1.2, 3])
+            with a1:
+                if st.button("🗑️ 刪除勾選紀錄", use_container_width=True):
+                    delete_ids = edited_hist.loc[edited_hist["刪除"] == True, "record_id"].astype(str).tolist()
+                    if not delete_ids:
+                        st.warning("請先勾選要刪除的紀錄。")
+                    else:
+                        new_df = _delete_records_by_ids(_get_state_df(), delete_ids)
+                        _save_state_df(new_df)
+                        _set_status(f"已刪除 {len(delete_ids)} 筆歷史紀錄，尚未同步 GitHub", "success")
+                        st.rerun()
+            with a2:
+                if st.button("💾 儲存歷史檢討", use_container_width=True):
+                    master = _get_state_df().copy()
+                    edit_map = {str(r["record_id"]): dict(r) for _, r in edited_hist.iterrows()}
+                    for idx in master.index:
+                        rec_id = _safe_str(master.at[idx, "record_id"])
+                        if rec_id in edit_map:
+                            master.at[idx, "收盤檢討"] = _safe_str(edit_map[rec_id].get("收盤檢討"))
+                            master.at[idx, "備註"] = _safe_str(edit_map[rec_id].get("備註"))
+                            master.at[idx, "更新時間"] = _now_text()
+                    _save_state_df(master)
+                    _set_status("歷史檢討已更新，尚未同步 GitHub", "success")
+                    st.rerun()
+            with a3:
+                st.caption("現在歷史紀錄已包含：進場建議、續抱/減碼方向、績效檢討分、方向命中、區間命中、點數誤差，可直接用來檢討模型。")
     with tabs[5]:
         render_pro_section("Excel 匯出")
         export_bytes = _build_export_bytes(_get_state_df(), _build_scoreboard(_get_state_df()), pred_df, stock_link_df)
