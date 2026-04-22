@@ -245,61 +245,108 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
     return _ensure_godpick_record_columns(merged.drop(columns=["_biz_key", "_upd"], errors="ignore"))
 
 
+
 # =========================================================
 # 類別推論
 # =========================================================
+CATEGORY_KEYWORD_RULES: list[tuple[str, list[str]]] = [
+    ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc", "晶圓代工"]),
+    ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺", "天鈺", "義隆", "祥碩", "譜瑞", "聯陽", "瑞鼎", "義傳", "ic設計"]),
+    ("封測", ["日月光", "矽品", "京元電", "頎邦", "欣銓", "矽格", "封測", "測試"]),
+    ("記憶體", ["南亞科", "華邦電", "旺宏", "宇瞻", "十銓", "記憶體", "dram", "nand"]),
+    ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓"]),
+    ("半導體設備材料", ["帆宣", "漢唐", "家登", "辛耘", "中砂", "崇越", "萬潤", "均豪", "弘塑", "設備", "材料"]),
+    ("IP矽智財", ["力旺", "晶心科", "智原", "創意", "世芯", "ip", "矽智財"]),
+    ("AI伺服器", ["伺服器", "server", "緯穎", "廣達", "英業達", "緯創", "鴻海", "技嘉", "微星", "華碩"]),
+    ("散熱", ["雙鴻", "奇鋐", "建準", "散熱", "風扇", "熱導管"]),
+    ("機殼", ["勤誠", "晟銘電", "迎廣", "機殼"]),
+    ("電源供應", ["台達電", "光寶科", "群電", "全漢", "康舒", "電源", "供應器"]),
+    ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "威鋒", "usb4", "pcie"]),
+    ("網通交換器", ["智邦", "明泰", "中磊", "智易", "啟碁", "網通", "交換器", "switch"]),
+    ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "眾達", "聯亞", "光聖", "cpo"]),
+    ("PCB載板", ["欣興", "南電", "景碩", "金像電", "健鼎", "台燿", "華通", "載板", "pcb", "銅箔基板"]),
+    ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
+    ("面板", ["友達", "群創", "彩晶", "凌巨", "面板"]),
+    ("光學鏡頭", ["大立光", "玉晶光", "亞光", "今國光", "鏡頭", "光學"]),
+    ("被動元件", ["國巨", "華新科", "禾伸堂", "凱美", "立隆電", "被動元件", "電容", "電阻"]),
+    ("連接器", ["貿聯", "嘉澤", "信邦", "良維", "胡連", "連接器", "端子", "連接線"]),
+    ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "材料", "鋰"]),
+    ("金控", ["金控"]),
+    ("銀行", ["銀行"]),
+    ("保險", ["保險"]),
+    ("證券", ["證券"]),
+    ("航運", ["長榮", "陽明", "萬海", "裕民", "慧洋", "航運", "海運", "貨櫃", "散裝"]),
+    ("航空觀光", ["華航", "長榮航", "星宇", "航空", "觀光", "旅遊", "飯店"]),
+    ("鋼鐵", ["中鋼", "大成鋼", "東和鋼鐵", "鋼鐵", "鋼"]),
+    ("塑化", ["台塑", "南亞", "台化", "台塑化", "台聚", "塑化", "化工"]),
+    ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥", "醫材"]),
+    ("車用電子", ["和大", "貿聯", "堤維西", "東陽", "車用", "車電", "汽車"]),
+    ("綠能儲能", ["中興電", "華城", "士電", "儲能", "綠能", "太陽能", "風電"]),
+    ("營建資產", ["營建", "建設", "資產"]),
+    ("食品民生", ["統一", "大成", "食品", "餐飲", "飲料"]),
+    ("紡織製鞋", ["儒鴻", "聚陽", "志強", "豐泰", "寶成", "紡織", "成衣", "製鞋"]),
+    ("電機機械", ["上銀", "亞德客", "直得", "全球傳動", "機械", "工具機", "自動化"]),
+    ("其他電子", ["電子", "電腦", "光電"]),
+]
+
+CANONICAL_CATEGORY_ALIAS = {
+    "半導體": "半導體設備材料",
+    "半導體設備": "半導體設備材料",
+    "設備材料": "半導體設備材料",
+    "半導體材料": "半導體設備材料",
+    "伺服器": "AI伺服器",
+    "server": "AI伺服器",
+    "網通": "網通交換器",
+    "交換器": "網通交換器",
+    "光通訊/cpo": "光通訊",
+    "載板": "PCB載板",
+    "pcb": "PCB載板",
+    "ems": "EMS代工",
+    "鏡頭": "光學鏡頭",
+    "光學": "光學鏡頭",
+    "被動": "被動元件",
+    "電池": "電池材料",
+    "生技": "生技醫療",
+    "醫療": "生技醫療",
+    "車電": "車用電子",
+    "綠能": "綠能儲能",
+    "建材營造": "營建資產",
+    "營建": "營建資產",
+    "機械": "電機機械",
+}
+
+def _canonical_category(v: Any) -> str:
+    text = _normalize_category(v)
+    if not text:
+        return ""
+    key = text.lower()
+    for alias, target in CANONICAL_CATEGORY_ALIAS.items():
+        if key == alias.lower():
+            return target
+    return text
+
 def _infer_category_from_name(name: str) -> str:
     n = _safe_str(name)
     if not n:
         return "其他"
 
     s = n.lower()
-    category_rules = [
-        ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc"]),
-        ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺"]),
-        ("封測", ["日月光", "矽品", "京元電", "頎邦", "封測", "測試"]),
-        ("記憶體", ["南亞科", "華邦電", "旺宏", "記憶體", "dram", "nand"]),
-        ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓"]),
-        ("半導體設備材料", ["帆宣", "漢唐", "家登", "辛耘", "中砂", "崇越", "設備", "材料"]),
-        ("IP矽智財", ["力旺", "晶心科", "智原", "創意", "世芯", "ip", "矽智財"]),
-        ("AI伺服器", ["伺服器", "server", "緯穎", "廣達", "英業達", "緯創", "鴻海", "技嘉"]),
-        ("散熱", ["雙鴻", "奇鋐", "散熱", "風扇", "熱導管"]),
-        ("機殼", ["勤誠", "晟銘電", "機殼"]),
-        ("電源供應", ["台達電", "光寶科", "群電", "電源", "供應器"]),
-        ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "usb4", "pcie"]),
-        ("網通交換器", ["智邦", "明泰", "中磊", "網通", "交換器", "switch"]),
-        ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "cpo"]),
-        ("PCB載板", ["欣興", "南電", "景碩", "金像電", "載板", "pcb"]),
-        ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
-        ("消費電子", ["大立光", "玉晶光", "耳機", "鏡頭", "聲學"]),
-        ("面板", ["友達", "群創", "彩晶", "面板"]),
-        ("光學鏡頭", ["大立光", "玉晶光", "亞光", "鏡頭", "光學"]),
-        ("被動元件", ["國巨", "華新科", "禾伸堂", "被動元件", "電容", "電阻"]),
-        ("連接器", ["貿聯", "嘉澤", "連接器", "端子"]),
-        ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "材料"]),
-        ("金控", ["金控"]),
-        ("銀行", ["銀行"]),
-        ("保險", ["保險"]),
-        ("證券", ["證券"]),
-        ("航運", ["長榮", "陽明", "萬海", "航運", "海運", "貨櫃"]),
-        ("航空觀光", ["華航", "長榮航", "航空", "觀光", "旅遊", "飯店"]),
-        ("鋼鐵", ["中鋼", "大成鋼", "鋼鐵", "鋼"]),
-        ("塑化", ["台塑", "南亞", "台化", "台塑化", "塑化", "化工"]),
-        ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥"]),
-        ("車用電子", ["和大", "貿聯", "車用", "車電", "汽車"]),
-        ("綠能儲能", ["中興電", "華城", "儲能", "綠能", "太陽能", "風電"]),
-        ("營建資產", ["營建", "建設", "資產"]),
-        ("食品民生", ["統一", "食品", "餐飲"]),
-        ("紡織製鞋", ["紡織", "成衣", "製鞋"]),
-        ("電機機械", ["上銀", "亞德客", "機械", "工具機", "自動化"]),
-        ("其他電子", ["電子", "電腦", "光電"]),
-    ]
-
-    for cat, keywords in category_rules:
+    for cat, keywords in CATEGORY_KEYWORD_RULES:
         for kw in keywords:
             if kw.lower() in s:
                 return cat
     return "其他"
+
+def _infer_category_from_record(name: str, raw_category: Any) -> str:
+    raw_cat = _canonical_category(raw_category)
+    if raw_cat:
+        if raw_cat in {x[0] for x in CATEGORY_KEYWORD_RULES}:
+            return raw_cat
+        by_name = _infer_category_from_name(raw_cat)
+        if by_name != "其他":
+            return by_name
+        return raw_cat
+    return _infer_category_from_name(name)
 
 
 # =========================================================
@@ -829,6 +876,671 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     return rows
 
 
+
+# =========================================================
+# 股票主檔 / 分類修正持久化
+# =========================================================
+
+# 官方產業代碼映射（TWSE / TPEX 常用）
+OFFICIAL_INDUSTRY_CODE_MAP = {
+    "01": "水泥工業",
+    "02": "食品工業",
+    "03": "塑膠工業",
+    "04": "紡織纖維",
+    "05": "電機機械",
+    "06": "電器電纜",
+    "08": "玻璃陶瓷",
+    "09": "造紙工業",
+    "10": "鋼鐵工業",
+    "11": "橡膠工業",
+    "12": "汽車工業",
+    "14": "建材營造",
+    "15": "航運業",
+    "16": "觀光餐旅",
+    "17": "金融保險",
+    "18": "貿易百貨",
+    "19": "綜合",
+    "20": "其他",
+    "21": "化學工業",
+    "22": "生技醫療",
+    "23": "油電燃氣",
+    "24": "半導體業",
+    "25": "電腦及週邊設備業",
+    "26": "光電業",
+    "27": "通信網路業",
+    "28": "電子零組件業",
+    "29": "電子通路業",
+    "30": "資訊服務業",
+    "31": "其他電子業",
+    "32": "文化創意業",
+    "33": "農業科技業",
+    "34": "綠能環保",
+    "35": "數位雲端",
+    "36": "運動休閒",
+    "37": "居家生活",
+}
+
+
+def _stock_master_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "master_path": _safe_str(st.secrets.get("STOCK_MASTER_GITHUB_PATH", "stock_master_cache.json")) or "stock_master_cache.json",
+        "override_path": _safe_str(st.secrets.get("STOCK_CATEGORY_OVERRIDE_GITHUB_PATH", "stock_category_overrides.json")) or "stock_category_overrides.json",
+    }
+
+
+def _read_json_from_github(path: str) -> tuple[Any, str]:
+    cfg = _stock_master_config()
+    token = cfg["token"]
+    if not token:
+        return None, "未設定 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return None, ""
+        if resp.status_code != 200:
+            return None, f"讀取 GitHub JSON 失敗：{resp.status_code} / {resp.text[:300]}"
+        data = resp.json()
+        content = data.get("content", "")
+        if not content:
+            return None, ""
+        decoded = base64.b64decode(content).decode("utf-8")
+        return json.loads(decoded), ""
+    except Exception as e:
+        return None, f"讀取 GitHub JSON 例外：{e}"
+
+
+def _get_github_sha_by_path(path: str) -> tuple[str, str]:
+    cfg = _stock_master_config()
+    token = cfg["token"]
+    if not token:
+        return "", "缺少 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            return _safe_str(resp.json().get("sha")), ""
+        if resp.status_code == 404:
+            return "", ""
+        return "", f"讀取 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return "", f"讀取 SHA 例外：{e}"
+
+
+def _write_json_to_github(path: str, payload: Any, commit_message: str) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    token = cfg["token"]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN"
+
+    sha, err = _get_github_sha_by_path(path)
+    if err:
+        return False, err
+
+    content_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+    body: dict[str, Any] = {
+        "message": commit_message,
+        "content": encoded_content,
+        "branch": cfg["branch"],
+    }
+    if sha:
+        body["sha"] = sha
+
+    try:
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫 GitHub：{path}"
+        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"GitHub 寫入例外：{e}"
+
+
+def _official_industry_name(raw_value: Any) -> str:
+    raw = _safe_str(raw_value)
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 1:
+        digits = digits.zfill(2)
+    if digits in OFFICIAL_INDUSTRY_CODE_MAP:
+        return OFFICIAL_INDUSTRY_CODE_MAP[digits]
+    return raw.replace("業別", "").replace("工業", "工業").strip()
+
+
+def _theme_from_official(official_industry: Any, name: Any) -> str:
+    official = _official_industry_name(official_industry)
+    by_name = _infer_category_from_name(_safe_str(name))
+    if by_name != "其他":
+        return by_name
+    if not official:
+        return "其他_官方未知"
+    mapping = {
+        "水泥工業": "水泥工業",
+        "食品工業": "食品民生",
+        "塑膠工業": "塑化",
+        "紡織纖維": "紡織製鞋",
+        "電機機械": "電機機械",
+        "電器電纜": "電器電纜",
+        "玻璃陶瓷": "玻璃陶瓷",
+        "造紙工業": "造紙工業",
+        "鋼鐵工業": "鋼鐵",
+        "橡膠工業": "橡膠工業",
+        "汽車工業": "汽車",
+        "建材營造": "營建資產",
+        "航運業": "航運",
+        "觀光餐旅": "航空觀光",
+        "金融保險": "金融保險",
+        "貿易百貨": "貿易百貨",
+        "綜合": "綜合",
+        "其他": "其他_主題未映射",
+        "化學工業": "塑化",
+        "生技醫療": "生技醫療",
+        "油電燃氣": "油電燃氣",
+        "半導體業": "半導體業",
+        "電腦及週邊設備業": "電腦及週邊設備業",
+        "光電業": "光電業",
+        "通信網路業": "通信網路業",
+        "電子零組件業": "電子零組件業",
+        "電子通路業": "電子通路業",
+        "資訊服務業": "資訊服務業",
+        "其他電子業": "其他電子業",
+        "文化創意業": "文化創意業",
+        "農業科技業": "農業科技業",
+        "綠能環保": "綠能環保",
+        "數位雲端": "數位雲端",
+        "運動休閒": "運動休閒",
+        "居家生活": "居家生活",
+    }
+    return mapping.get(official, official)
+
+
+def _normalize_master_columns(df: pd.DataFrame, market_label: str, code_col: str, name_col: str, industry_col: str, source_api: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if df is None or df.empty:
+        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": source_api}
+    work = df.copy()
+    for c in [code_col, name_col, industry_col]:
+        if c not in work.columns:
+            work[c] = ""
+    work = work.rename(columns={code_col: "code", name_col: "name", industry_col: "official_industry_raw"})
+    work["code"] = work["code"].map(_normalize_code)
+    work["name"] = work["name"].map(_safe_str)
+    work["market"] = market_label
+    work["official_industry_raw_col"] = industry_col
+    work["official_industry"] = work["official_industry_raw"].map(_official_industry_name)
+    work["theme_category"] = work.apply(lambda r: _theme_from_official(r.get("official_industry"), r.get("name")), axis=1)
+    work["category"] = work["theme_category"]
+    work["source"] = f"official_{market_label}"
+    work["source_api"] = source_api
+    work["source_rank"] = 1
+    work["待修原因"] = work["official_industry"].map(lambda x: "" if _safe_str(x) else "官方產業未抓到")
+    work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    info = {
+        "rows": len(work),
+        "official_hit": int(work["official_industry"].fillna("").astype(str).str.strip().ne("").sum()),
+        "raw_cols": list(df.columns),
+        "source_api": source_api,
+    }
+    return work[["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]].copy(), info
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_twse_master() -> tuple[pd.DataFrame, dict[str, Any]]:
+    url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+        df = pd.DataFrame(payload)
+        return _normalize_master_columns(df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi")
+    except Exception:
+        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_openapi"}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_tpex_master(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if mode == "上櫃":
+        url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
+    else:
+        url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R"
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        payload = resp.json()
+        df = pd.DataFrame(payload)
+        return _normalize_master_columns(df, mode, "SecuritiesCompanyCode", "CompanyAbbreviation", "SecuritiesIndustryCode", f"tpex_{mode}")
+    except Exception:
+        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": f"tpex_{mode}"}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_twse_isin_fill_map() -> dict[str, str]:
+    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+    out: dict[str, str] = {}
+    try:
+        tables = pd.read_html(url)
+    except Exception:
+        return out
+    for tb in tables:
+        tmp = tb.copy()
+        tmp.columns = [str(c) for c in tmp.columns]
+        cols = set(tmp.columns)
+        if not ({"有價證券代號", "產業別"} <= cols):
+            continue
+        for _, r in tmp.iterrows():
+            code = _normalize_code(r.get("有價證券代號"))
+            industry = _official_industry_name(r.get("產業別"))
+            if code and industry:
+                out[code] = industry
+    return out
+
+
+def _build_utils_master_fallback() -> tuple[pd.DataFrame, dict[str, Any]]:
+    dfs = []
+    for market_arg in ["上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+        except Exception:
+            df = pd.DataFrame()
+        if df is None or df.empty:
+            continue
+        temp = df.copy().rename(columns={"證券代號":"code", "證券名稱":"name", "市場別":"market"})
+        for c in ["code","name","market"]:
+            if c not in temp.columns:
+                temp[c] = ""
+        temp["code"] = temp["code"].map(_normalize_code)
+        temp["name"] = temp["name"].map(_safe_str)
+        temp["market"] = temp["market"].map(_safe_str).replace("", market_arg)
+        temp["official_industry_raw"] = ""
+        temp["official_industry_raw_col"] = ""
+        temp["official_industry"] = ""
+        temp["theme_category"] = temp["name"].map(_infer_category_from_name).replace("其他", "其他_官方未知")
+        temp["category"] = temp["theme_category"]
+        temp["source"] = "utils_fallback"
+        temp["source_api"] = "utils_all"
+        temp["source_rank"] = 9
+        temp["待修原因"] = "官方產業未抓到"
+        dfs.append(temp[["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]])
+    if not dfs:
+        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "utils_all"}
+    out = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return out, {"rows": len(out), "official_hit": 0, "raw_cols": list(out.columns), "source_api": "utils_all"}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_stock_master_cache_from_repo() -> pd.DataFrame:
+    cfg = _stock_master_config()
+    payload, _ = _read_json_from_github(cfg["master_path"])
+    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+    if not isinstance(payload, list):
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(payload)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    df["code"] = df["code"].map(_normalize_code)
+    df["name"] = df["name"].map(_safe_str)
+    df["market"] = df["market"].map(_safe_str).replace("", "上市")
+    df["official_industry"] = df["official_industry"].map(_official_industry_name)
+    df["theme_category"] = df.apply(lambda r: _theme_from_official(r.get("official_industry"), r.get("name")), axis=1)
+    df["category"] = df["theme_category"]
+    return df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first")[cols].reset_index(drop=True)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
+    cfg = _stock_master_config()
+    payload, _ = _read_json_from_github(cfg["override_path"])
+    if not isinstance(payload, dict):
+        return {}
+    out = {}
+    for code, item in payload.items():
+        norm_code = _normalize_code(code)
+        if not norm_code:
+            continue
+        if not isinstance(item, dict):
+            item = {"category": item}
+        out[norm_code] = {
+            "code": norm_code,
+            "name": _safe_str(item.get("name")),
+            "market": _safe_str(item.get("market")),
+            "category": _canonical_category(item.get("category")),
+            "updated_at": _safe_str(item.get("updated_at")),
+        }
+    return out
+
+
+def _merge_master_sources(*dfs: pd.DataFrame) -> pd.DataFrame:
+    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+    items = []
+    for df in dfs:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            tmp = df.copy()
+            for c in cols:
+                if c not in tmp.columns:
+                    tmp[c] = ""
+            items.append(tmp[cols])
+    if not items:
+        return pd.DataFrame(columns=cols)
+    merged = pd.concat(items, ignore_index=True)
+    merged["source_rank"] = pd.to_numeric(merged["source_rank"], errors="coerce").fillna(999)
+    merged["official_hit"] = merged["official_industry"].fillna("").astype(str).str.strip().ne("").astype(int)
+    merged = merged.sort_values(["code", "official_hit", "source_rank"], ascending=[True, False, True])
+    merged = merged.drop_duplicates(subset=["code"], keep="first").drop(columns=["official_hit"]).reset_index(drop=True)
+    return merged
+
+
+def _apply_twse_isin_fill(master_df: pd.DataFrame) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return master_df
+    fill_map = _fetch_twse_isin_fill_map()
+    if not fill_map:
+        return master_df
+    work = master_df.copy()
+    mask = (work["market"].astype(str) == "上市") & (work["official_industry"].fillna("").astype(str).str.strip() == "")
+    for idx in work[mask].index:
+        code = _normalize_code(work.at[idx, "code"])
+        fill = fill_map.get(code, "")
+        if fill:
+            work.at[idx, "official_industry_raw"] = fill
+            work.at[idx, "official_industry_raw_col"] = "TWSE_ISIN_產業別"
+            work.at[idx, "official_industry"] = fill
+            work.at[idx, "theme_category"] = _theme_from_official(fill, work.at[idx, "name"])
+            work.at[idx, "category"] = work.at[idx, "theme_category"]
+            work.at[idx, "source"] = "twse_isin_fill"
+            work.at[idx, "source_api"] = "twse_isin"
+            work.at[idx, "source_rank"] = 2
+            work.at[idx, "待修原因"] = ""
+    return work
+
+
+def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        master_df = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+    work = master_df.copy()
+    repo_df = _load_stock_master_cache_from_repo()
+    work = _merge_master_sources(work, repo_df)
+    override_map = _load_stock_category_override_map()
+    if override_map:
+        for code, item in override_map.items():
+            matched = work["code"].astype(str) == str(code)
+            if matched.any():
+                idx = work[matched].index[0]
+                if _safe_str(item.get("name")):
+                    work.at[idx, "name"] = _safe_str(item.get("name"))
+                if _safe_str(item.get("market")):
+                    work.at[idx, "market"] = _safe_str(item.get("market"))
+                if _safe_str(item.get("category")):
+                    work.at[idx, "theme_category"] = _canonical_category(item.get("category"))
+                    work.at[idx, "category"] = _canonical_category(item.get("category"))
+                    work.at[idx, "source"] = "override"
+                    work.at[idx, "source_api"] = "github_override"
+                    work.at[idx, "source_rank"] = 0
+                    work.at[idx, "待修原因"] = ""
+    work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return work
+
+
+def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+    work = master_df.copy() if isinstance(master_df, pd.DataFrame) else pd.DataFrame(columns=cols)
+    for c in cols:
+        if c not in work.columns:
+            work[c] = ""
+    work = work[work["code"].map(_normalize_code) != ""].copy()
+    work["code"] = work["code"].map(_normalize_code)
+    work["name"] = work["name"].map(_safe_str)
+    work["market"] = work["market"].map(_safe_str)
+    payload = work[cols].drop_duplicates(subset=["code"], keep="first").sort_values(["code"]).to_dict(orient="records")
+    return _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
+
+
+def _save_category_override(code: str, name: str, market: str, category: str) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    code = _normalize_code(code)
+    if not code:
+        return False, "股票代號不可空白"
+    payload, _ = _read_json_from_github(cfg["override_path"])
+    if not isinstance(payload, dict):
+        payload = {}
+    payload[code] = {
+        "code": code,
+        "name": _safe_str(name),
+        "market": _safe_str(market) or "上市",
+        "category": _canonical_category(category) or _infer_category_from_name(_safe_str(name)),
+        "updated_at": _now_text(),
+    }
+    ok, msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
+    if ok:
+        try:
+            _load_stock_category_override_map.clear()
+        except Exception:
+            pass
+    return ok, msg
+
+
+def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None, utils_info=None, merged=None) -> list[str]:
+    twse_info = twse_info if isinstance(twse_info, dict) else {}
+    tpex_o_info = tpex_o_info if isinstance(tpex_o_info, dict) else {}
+    tpex_r_info = tpex_r_info if isinstance(tpex_r_info, dict) else {}
+    utils_info = utils_info if isinstance(utils_info, dict) else {}
+    merged_df = merged if isinstance(merged, pd.DataFrame) else pd.DataFrame()
+
+    def _n(v, default=0):
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    logs = []
+    logs.append(f"TWSE：{_n(twse_info.get('rows'))} 筆 / 正式產業有值 {_n(twse_info.get('official_hit'))} 筆 / API: {_safe_str(twse_info.get('source_api')) or '-'}")
+    if twse_info.get("raw_cols"):
+        logs.append("TWSE 欄位：" + ", ".join([str(x) for x in list(twse_info.get("raw_cols", []))[:20]]))
+    logs.append(f"TPEX-上櫃：{_n(tpex_o_info.get('rows'))} 筆 / 正式產業有值 {_n(tpex_o_info.get('official_hit'))} 筆 / API: {_safe_str(tpex_o_info.get('source_api')) or '-'}")
+    logs.append(f"TPEX-興櫃：{_n(tpex_r_info.get('rows'))} 筆 / 正式產業有值 {_n(tpex_r_info.get('official_hit'))} 筆 / API: {_safe_str(tpex_r_info.get('source_api')) or '-'}")
+    logs.append(f"utils fallback：{_n(utils_info.get('rows'))} 筆 / API: {_safe_str(utils_info.get('source_api')) or '-'}")
+    if not merged_df.empty and "official_industry" in merged_df.columns:
+        hit = int(merged_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
+        logs.append(f"合併後：{len(merged_df)} 筆 / 正式產業有值 {hit} 筆")
+    else:
+        logs.append("合併後：0 筆 / 正式產業有值 0 筆")
+    return logs
+
+
+def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
+    try:
+        _load_master_df.clear()
+    except Exception:
+        pass
+    fresh_df = _load_master_df()
+    logs = list(st.session_state.get(_k("master_diag_logs"), []))
+    if fresh_df.empty:
+        return fresh_df, logs + ["主檔更新失敗：官方主檔與 fallback 皆無資料"]
+    ok, msg = _save_master_cache_to_repo(fresh_df)
+    logs.append(msg)
+    if ok:
+        try:
+            _load_stock_master_cache_from_repo.clear()
+        except Exception:
+            pass
+    return fresh_df, logs
+
+
+def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
+    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+    if master_df is None or master_df.empty:
+        return pd.DataFrame(columns=cols)
+    work = master_df.copy()
+    kw = _safe_str(keyword)
+    market_filter = _safe_str(market_filter)
+    category_filter = _safe_str(category_filter)
+    if market_filter and market_filter != "全部":
+        work = work[work["market"].astype(str) == market_filter].copy()
+    if category_filter and category_filter != "全部":
+        work = work[(work["category"].astype(str) == category_filter) | (work["official_industry"].astype(str) == category_filter)].copy()
+    if kw:
+        work = work[
+            work["code"].astype(str).str.contains(kw, case=False, na=False)
+            | work["name"].astype(str).str.contains(kw, case=False, na=False)
+            | work["official_industry"].astype(str).str.contains(kw, case=False, na=False)
+            | work["theme_category"].astype(str).str.contains(kw, case=False, na=False)
+            | work["category"].astype(str).str.contains(kw, case=False, na=False)
+        ].copy()
+    return work.sort_values(["market","source_rank","code"]).reset_index(drop=True)
+
+
+def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str]) -> pd.DataFrame:
+    render_pro_section("股票主檔搜尋 / 更新中心")
+    with st.expander("展開股票主檔搜尋 / 更新中心", expanded=True):
+        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+        with c1:
+            master_kw = st.text_input("搜尋股票代號 / 名稱 / 正式產業別 / 主題類別", key=_k("master_kw"))
+        with c2:
+            master_market = st.selectbox("市場別篩選", ["全部", "上市", "上櫃", "興櫃"], key=_k("master_market"))
+        with c3:
+            cat_opts = ["全部"] + sorted({x for x in all_categories if _safe_str(x)})
+            master_cat = st.selectbox("類別 / 產業篩選", cat_opts, key=_k("master_cat"))
+        with c4:
+            st.write("")
+            st.write("")
+            refresh_master_btn = st.button("更新股票主檔（官方診斷）", key=_k("refresh_master_btn"), use_container_width=True, type="primary")
+
+        if refresh_master_btn:
+            with st.spinner("更新股票主檔中..."):
+                new_master_df, logs = _refresh_stock_master_now()
+                if not new_master_df.empty:
+                    master_df = new_master_df.copy()
+                    st.success("股票主檔已更新，已套用官方主檔診斷。")
+                else:
+                    st.error("股票主檔更新失敗，仍保留目前版本。")
+                for line in logs:
+                    st.caption(line)
+
+        logs = st.session_state.get(_k("master_diag_logs"), [])
+        with st.expander("官方主檔診斷訊息", expanded=False):
+            for line in logs:
+                st.write(f"- {line}")
+
+        total_count = len(master_df) if isinstance(master_df, pd.DataFrame) else 0
+        official_hit = 0
+        if isinstance(master_df, pd.DataFrame) and not master_df.empty and "official_industry" in master_df.columns:
+            official_hit = int(master_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
+        theme_hit = 0
+        if isinstance(master_df, pd.DataFrame) and not master_df.empty and "theme_category" in master_df.columns:
+            theme_hit = int(master_df["theme_category"].fillna("").astype(str).str.strip().ne("").sum())
+        need_fix = 0
+        if isinstance(master_df, pd.DataFrame) and not master_df.empty and "待修原因" in master_df.columns:
+            need_fix = int(master_df["待修原因"].fillna("").astype(str).str.strip().ne("").sum())
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("主檔總筆數", f"{total_count:,}")
+        k2.metric("正式產業有值", f"{official_hit:,}")
+        k3.metric("主題有值", f"{theme_hit:,}")
+        k4.metric("需作修正主檔欄位", f"{need_fix:,}")
+        st.caption(f"目前顯示 {total_count:,} / {total_count:,} 筆")
+
+        found_df = _search_master_df(master_df, master_kw, master_market, master_cat)
+        show_cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+        show_df = found_df[[c for c in show_cols if c in found_df.columns]].rename(columns={
+            "code": "股票代號",
+            "name": "股票名稱",
+            "market": "市場別",
+            "official_industry_raw": "官方原始產業值",
+            "official_industry_raw_col": "官方原始產業欄位",
+            "official_industry": "正式產業別",
+            "theme_category": "操作主題類別",
+            "category": "類別",
+        })
+        st.dataframe(show_df.head(500), use_container_width=True, hide_index=True)
+
+        if found_df.empty:
+            return master_df
+
+        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}" for _, r in found_df.head(300).iterrows()]
+        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}": r.to_dict() for _, r in found_df.head(300).iterrows()}
+        picked_label = st.selectbox("選擇股票進行修正 / 加入自選股", labels, key=_k("master_pick_label"))
+        picked = label_map.get(picked_label, {})
+
+        e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
+        with e1:
+            edit_code = st.text_input("股票代號", value=_safe_str(picked.get("code")), key=_k("master_edit_code"), disabled=True)
+        with e2:
+            edit_name = st.text_input("股票名稱", value=_safe_str(picked.get("name")), key=_k("master_edit_name"))
+        with e3:
+            current_market = _safe_str(picked.get("market"))
+            if current_market not in {"上市", "上櫃", "興櫃"}:
+                current_market = "上市"
+            edit_market = st.selectbox("修正市場別", ["上市", "上櫃", "興櫃"], index=["上市", "上櫃", "興櫃"].index(current_market), key=_k("master_edit_market"))
+        with e4:
+            edit_category = st.text_input("修正操作類別", value=_safe_str(picked.get("category")), key=_k("master_edit_category_text"))
+
+        a1, a2, a3 = st.columns([2, 2, 2])
+        group_options = list(watchlist_map.keys()) if watchlist_map else [""]
+        with a1:
+            add_group = st.selectbox("加入自選股群組", group_options, key=_k("master_add_group"))
+        with a2:
+            apply_override_btn = st.button("套用分類修正並持久化", key=_k("apply_override_btn"), use_container_width=True)
+        with a3:
+            add_watch_btn = st.button("直接加入自選股", key=_k("master_add_watch_btn"), use_container_width=True)
+
+        if apply_override_btn:
+            ok, msg = _save_category_override(edit_code, edit_name, edit_market, edit_category)
+            if ok:
+                st.success(msg)
+                try:
+                    _load_stock_category_override_map.clear()
+                    _load_master_df.clear()
+                except Exception:
+                    pass
+            else:
+                st.error(msg)
+        if add_watch_btn:
+            ok, msg = _append_stock_to_watchlist(add_group, edit_code, edit_name, edit_market, edit_category)
+            if ok:
+                st.success(msg)
+            else:
+                st.warning(msg)
+    return master_df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_master_df() -> pd.DataFrame:
+    twse_df, twse_info = _fetch_twse_master()
+    tpex_o_df, tpex_o_info = _fetch_tpex_master("上櫃")
+    tpex_r_df, tpex_r_info = _fetch_tpex_master("興櫃")
+    utils_df, utils_info = _build_utils_master_fallback()
+    merged = _merge_master_sources(twse_df, tpex_o_df, tpex_r_df, utils_df)
+    merged = _apply_twse_isin_fill(merged)
+    merged = _apply_master_overrides(merged)
+    st.session_state[_k("master_diag_logs")] = _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged)
+    return merged
+
+# =========================================================
+# 主檔 / universe helpers
+# =========================================================
+
 # =========================================================
 # 主檔 / universe helpers
 # =========================================================
@@ -856,7 +1568,7 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                         code = _normalize_code(item.get("code"))
                         name = _safe_str(item.get("name")) or code
                         market = _safe_str(item.get("market")) or "上市"
-                        category = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                        category = _infer_category_from_record(name, item.get("category"))
                     else:
                         code = _normalize_code(item)
                         name = code
@@ -883,7 +1595,7 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_master_df() -> pd.DataFrame:
     dfs = []
-    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題"]
+    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題", "industry_name"]
 
     for market_arg in ["", "上市", "上櫃", "興櫃"]:
         try:
@@ -917,31 +1629,24 @@ def _load_master_df() -> pd.DataFrame:
                 temp["code"] = temp["code"].map(_normalize_code)
                 temp["name"] = temp["name"].map(_safe_str)
                 temp["market"] = temp["market"].map(_safe_str)
-                temp["category"] = temp["category"].map(_normalize_category)
-
                 if market_arg in ["上市", "上櫃", "興櫃"]:
                     temp["market"] = temp["market"].replace("", market_arg)
-
-                temp["category"] = temp.apply(
-                    lambda r: _normalize_category(r.get("category")) or _infer_category_from_name(r.get("name")),
-                    axis=1,
-                )
-
+                temp["category"] = temp.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
                 dfs.append(temp[["code", "name", "market", "category"]])
         except Exception:
             pass
 
     if not dfs:
-        return pd.DataFrame(columns=["code", "name", "market", "category"])
+        base = pd.DataFrame(columns=["code", "name", "market", "category"])
+    else:
+        base = pd.concat(dfs, ignore_index=True)
+        base["code"] = base["code"].map(_normalize_code)
+        base["name"] = base["name"].map(_safe_str)
+        base["market"] = base["market"].map(_safe_str).replace("", "上市")
+        base["category"] = base.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
+        base = base[base["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
 
-    out = pd.concat(dfs, ignore_index=True)
-    out["code"] = out["code"].map(_normalize_code)
-    out["name"] = out["name"].map(_safe_str)
-    out["market"] = out["market"].map(_safe_str).replace("", "上市")
-    out["category"] = out["category"].map(_normalize_category)
-    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return out
-
+    return _apply_master_overrides(base)
 
 def _find_name_market_category(
     code: str,
@@ -961,12 +1666,12 @@ def _find_name_market_category(
             row = matched.iloc[0]
             final_name = _safe_str(row.get("name")) or manual_name or code
             final_market = _safe_str(row.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_name(final_name)
+            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
             return final_name, final_market, final_category
 
     final_name = manual_name or code
     final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_name(final_name)
+    final_category = manual_category or _infer_category_from_record(final_name, manual_category)
     return final_name, final_market, final_category
 
 
@@ -1058,133 +1763,6 @@ def _build_universe_from_market(
     return rows
 
 
-
-def _build_filter_debug_df(
-    universe_items: list[dict[str, str]],
-    master_df: pd.DataFrame,
-    start_dt: date,
-    end_dt: date,
-    min_signal_score: float,
-    selected_categories: list[str],
-    mode: str,
-    risk_strictness: str,
-    min_prelaunch_score: float,
-    min_trade_score: float,
-    min_total_score: float,
-) -> pd.DataFrame:
-    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    rows = []
-
-    for item in universe_items:
-        code = _normalize_code(item.get("code"))
-        manual_name = _safe_str(item.get("name"))
-        manual_market = _safe_str(item.get("market"))
-        manual_category = _normalize_category(item.get("category"))
-        stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_df)
-
-        info = {
-            "股票代號": code,
-            "股票名稱": stock_name,
-            "市場別": market_type,
-            "類別": category or _infer_category_from_name(stock_name),
-            "類別通過": "是",
-            "訊號通過": "否",
-            "風險通過": "否",
-            "起漲通過": "否",
-            "交易通過": "否",
-            "總分通過": "否",
-            "訊號分數": None,
-            "風險分數": None,
-            "起漲前兆分數": None,
-            "交易可行分數": None,
-            "推薦總分": None,
-            "淘汰原因": "",
-            "最後卡關": "",
-        }
-
-        if clean_categories and info["類別"] not in clean_categories:
-            info["類別通過"] = "否"
-            info["最後卡關"] = "類別"
-            rows.append(info)
-            continue
-
-        bundle = _analyze_stock_bundle(
-            stock_no=code,
-            stock_name=stock_name,
-            market_type=market_type,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            risk_strictness=risk_strictness,
-        )
-        if not bundle:
-            info["最後卡關"] = "歷史資料"
-            info["淘汰原因"] = "無歷史資料"
-            rows.append(info)
-            continue
-
-        signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
-        risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
-        risk_score = _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0
-        prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
-        trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
-        auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
-        technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
-        total_score, _ = _build_mode_score(
-            mode=_safe_str(mode),
-            technical_score=technical_score,
-            prelaunch_score=prelaunch_score,
-            category_heat_score=0,
-            factor_score=auto_factor_total,
-            trade_score=trade_score,
-            leader_advantage=50,
-        )
-
-        info["訊號分數"] = signal_score
-        info["風險分數"] = risk_score
-        info["起漲前兆分數"] = prelaunch_score
-        info["交易可行分數"] = trade_score
-        info["推薦總分"] = total_score
-        info["淘汰原因"] = _safe_str(bundle["risk_filter"].get("淘汰原因"))
-
-        if signal_score >= min_signal_score:
-            info["訊號通過"] = "是"
-        else:
-            info["最後卡關"] = "訊號"
-            rows.append(info)
-            continue
-
-        if risk_pass:
-            info["風險通過"] = "是"
-        else:
-            info["最後卡關"] = "風險"
-            rows.append(info)
-            continue
-
-        if prelaunch_score >= min_prelaunch_score:
-            info["起漲通過"] = "是"
-        else:
-            info["最後卡關"] = "起漲前兆"
-            rows.append(info)
-            continue
-
-        if trade_score >= min_trade_score:
-            info["交易通過"] = "是"
-        else:
-            info["最後卡關"] = "交易可行"
-            rows.append(info)
-            continue
-
-        if total_score >= min_total_score:
-            info["總分通過"] = "是"
-            info["最後卡關"] = "通過"
-        else:
-            info["最後卡關"] = "推薦總分"
-
-        rows.append(info)
-
-    return pd.DataFrame(rows)
-
-
 def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
     cats = set()
 
@@ -1199,7 +1777,7 @@ def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, li
         for _, items in watchlist_map.items():
             for item in items:
                 name = _safe_str(item.get("name"))
-                cat = _normalize_category(item.get("category")) or _infer_category_from_name(name)
+                cat = _infer_category_from_record(name, item.get("category"))
                 if cat:
                     cats.add(cat)
 
@@ -1211,7 +1789,7 @@ def _append_stock_to_watchlist(group_name: str, code: str, name: str, market: st
     code = _normalize_code(code)
     name = _safe_str(name) or code
     market = _safe_str(market) or "上市"
-    category = _normalize_category(category) or _infer_category_from_name(name)
+    category = _canonical_category(category) or _infer_category_from_record(name, category)
 
     if not group_name:
         return False, "群組不可空白"
@@ -1431,7 +2009,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 # =========================================================
 # 計分
 # =========================================================
-def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: Any, sr_snapshot: Any, radar: Any) -> dict[str, Any]:
+def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     if df is None or df.empty:
         return {
             "起漲前兆分數": 0.0,
@@ -1441,10 +2019,6 @@ def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: Any, sr_snapshot:
             "動能翻多分": 0.0,
             "支撐防守分": 0.0,
         }
-
-    signal_snapshot = signal_snapshot if isinstance(signal_snapshot, dict) else {}
-    sr_snapshot = sr_snapshot if isinstance(sr_snapshot, dict) else {}
-    radar = radar if isinstance(radar, dict) else {}
 
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
@@ -1712,7 +2286,7 @@ def _build_mode_score(
     return _score_clip(total), tag
 
 
-def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: Any, sr_snapshot: Any, radar: Any) -> dict[str, Any]:
+def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
     last = df.iloc[-1]
     close_now = _safe_float(last.get("收盤價"))
     ma20 = _safe_float(last.get("MA20"))
@@ -1723,10 +2297,6 @@ def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: Any, sr_snapsho
     vol20 = _safe_float(last.get("VOL20"))
     ret20 = _safe_float(last.get("RET20"))
     ret60 = _safe_float(last.get("RET60"))
-
-    signal_snapshot = signal_snapshot if isinstance(signal_snapshot, dict) else {}
-    sr_snapshot = sr_snapshot if isinstance(sr_snapshot, dict) else {}
-    radar = radar if isinstance(radar, dict) else {}
 
     signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
     radar_trend = _safe_float(radar.get("trend"), 50) or 50
@@ -1873,11 +2443,6 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
     signal_snapshot = compute_signal_snapshot(hist_df)
     sr_snapshot = compute_support_resistance_snapshot(hist_df)
     radar = compute_radar_scores(hist_df)
-
-    signal_snapshot = signal_snapshot if isinstance(signal_snapshot, dict) else {}
-    sr_snapshot = sr_snapshot if isinstance(sr_snapshot, dict) else {}
-    radar = radar if isinstance(radar, dict) else {}
-
     auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
     trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
     prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
@@ -1904,11 +2469,11 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
     radar_avg = _avg_safe(
         [
-            _safe_float(radar.get("trend")) if isinstance(radar, dict) else None,
-            _safe_float(radar.get("momentum")) if isinstance(radar, dict) else None,
-            _safe_float(radar.get("volume")) if isinstance(radar, dict) else None,
-            _safe_float(radar.get("position")) if isinstance(radar, dict) else None,
-            _safe_float(radar.get("structure")) if isinstance(radar, dict) else None,
+            _safe_float(radar.get("trend")),
+            _safe_float(radar.get("momentum")),
+            _safe_float(radar.get("volume")),
+            _safe_float(radar.get("position")),
+            _safe_float(radar.get("structure")),
         ],
         50.0,
     )
@@ -1999,7 +2564,7 @@ def _analyze_one_stock_for_recommend(
         "股票代號": code,
         "股票名稱": stock_name,
         "市場別": bundle["used_market"],
-        "類別": category or _infer_category_from_name(stock_name),
+        "類別": category or _infer_category_from_record(stock_name, category),
         "最新價": bundle["close_now"],
         "區間漲跌幅%": bundle["period_pct"],
         "訊號分數": signal_score,
@@ -2029,7 +2594,7 @@ def _analyze_one_stock_for_recommend(
         "風險報酬_拉回": bundle["trade_plan"]["rr1"],
         "風險報酬_突破": bundle["trade_plan"]["rr2"],
         "自動因子摘要": bundle["auto_factor"]["factor_summary"],
-        "雷達摘要": _safe_str(bundle["radar"].get("summary")) if isinstance(bundle.get("radar"), dict) else "—",
+        "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
         "風險分數": _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0,
         "淘汰原因": _safe_str(bundle["risk_filter"].get("淘汰原因")),
         "均線轉強分": _safe_float(bundle["prelaunch"].get("均線轉強分"), 0) or 0,
@@ -2410,6 +2975,54 @@ def _render_selected_export_block():
     )
 
 
+
+def _build_record_export_bytes(record_rows: list[dict[str, Any]]) -> bytes:
+    df = _ensure_godpick_record_columns(pd.DataFrame(record_rows))
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="股神推薦紀錄匯入", index=False)
+        try:
+            ws = writer.book["股神推薦紀錄匯入"]
+            ws.freeze_panes = "A2"
+            for col_cells in ws.columns:
+                max_len = 0
+                col_letter = col_cells[0].column_letter
+                for cell in col_cells:
+                    cell_val = "" if cell.value is None else str(cell.value)
+                    max_len = max(max_len, len(cell_val))
+                ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 42)
+        except Exception:
+            pass
+    output.seek(0)
+    return output.getvalue()
+
+
+def _render_record_export_block(rec_df: pd.DataFrame):
+    selected_df = st.session_state.get(_k("selected_rec_snapshot"))
+    if not isinstance(selected_df, pd.DataFrame) or selected_df.empty:
+        return
+
+    selected_codes = [_normalize_code(x) for x in selected_df["股票代號"].astype(str).tolist() if _normalize_code(x)]
+    if not selected_codes:
+        return
+
+    record_rows = _build_record_rows_from_rec_df(rec_df, selected_codes)
+    if not record_rows:
+        return
+
+    record_bytes = _build_record_export_bytes(record_rows)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    render_pro_section("匯出到股神推薦紀錄")
+    st.caption("這裡只做匯出，不直接串接 8_股神推薦紀錄。你可以下載後自行備份或匯入。")
+    st.download_button(
+        label="匯出股神推薦紀錄 Excel",
+        data=record_bytes,
+        file_name=f"股神推薦紀錄匯入檔_{ts}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
 # =========================================================
 # Main
 # =========================================================
@@ -2437,6 +3050,7 @@ def main():
         "status_type": "info",
         "rec_pick_group": list(watchlist_map.keys())[0] if watchlist_map else "",
         "rec_pick_codes": [],
+        "rec_record_codes": [],
         "result_saved_at": "",
         "recommend_mode": "飆股模式",
         "risk_strictness": "標準",
@@ -2455,10 +3069,14 @@ def main():
     if next_pick_key in st.session_state:
         st.session_state[real_pick_key] = st.session_state.pop(next_pick_key)
 
+    next_record_key = _k("rec_record_codes_next")
+    real_record_key = _k("rec_record_codes")
+    if next_record_key in st.session_state:
+        st.session_state[real_record_key] = st.session_state.pop(next_record_key)
 
     render_pro_hero(
         title="股神推薦｜V2 升級版",
-        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出，不串接 8_股神推薦紀錄。",
+        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 寫入 8_股神推薦紀錄。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -2483,6 +3101,10 @@ def main():
             )
         )
 
+    all_categories = _collect_all_categories(master_df, watchlist_map)
+    category_options = ["全部"] + all_categories if all_categories else ["全部"]
+
+    master_df = _render_stock_master_center(master_df, watchlist_map, all_categories)
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
@@ -2629,6 +3251,7 @@ def main():
         st.session_state[_k("category_strength_store")] = pd.DataFrame()
         st.session_state[_k("rec_pick_codes_next")] = []
         st.session_state[_k("rec_pick_codes")] = []
+        st.session_state[_k("rec_record_codes")] = []
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
         st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
         st.rerun()
@@ -2658,9 +3281,10 @@ def main():
             ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
             ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
             ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
-                        ("勾選快照", "本輪精華推薦表可直接勾選，並同步到自選股/勾選匯出。", ""),
+            ("推薦紀錄", "新增可勾選後直接寫入 8_股神推薦紀錄。", ""),
+            ("勾選快照", "本輪精華推薦表可直接勾選，並同步到自選股/推薦紀錄/勾選匯出。", ""),
         ],
-        chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出"],
+        chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
     )
 
     if not st.session_state.get(_k("submitted_once"), False):
@@ -2710,49 +3334,8 @@ def main():
     else:
         rec_df, category_strength_df = _load_recommend_result_from_state()
 
-    debug_df = _build_filter_debug_df(
-        universe_items=universe_items,
-        master_df=master_df,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-        selected_categories=selected_categories,
-        mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-        risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
-        min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-        min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
-        min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-    )
-
-    if not debug_df.empty:
-        total_universe = len(debug_df)
-        pass_cat = int((debug_df["類別通過"] == "是").sum()) if "類別通過" in debug_df.columns else total_universe
-        pass_signal = int((debug_df["訊號通過"] == "是").sum()) if "訊號通過" in debug_df.columns else 0
-        pass_risk = int((debug_df["風險通過"] == "是").sum()) if "風險通過" in debug_df.columns else 0
-        pass_pre = int((debug_df["起漲通過"] == "是").sum()) if "起漲通過" in debug_df.columns else 0
-        pass_trade = int((debug_df["交易通過"] == "是").sum()) if "交易通過" in debug_df.columns else 0
-        pass_total = int((debug_df["總分通過"] == "是").sum()) if "總分通過" in debug_df.columns else 0
-
-        render_pro_section("推薦流程診斷")
-        render_pro_kpi_row(
-            [
-                {"label": "掃描池", "value": total_universe, "delta": "原始股票數", "delta_class": "pro-kpi-delta-flat"},
-                {"label": "訊號通過", "value": pass_signal, "delta": "第1關", "delta_class": "pro-kpi-delta-flat"},
-                {"label": "風險通過", "value": pass_risk, "delta": "第2關", "delta_class": "pro-kpi-delta-flat"},
-                {"label": "起漲通過", "value": pass_pre, "delta": "第3關", "delta_class": "pro-kpi-delta-flat"},
-                {"label": "交易通過", "value": pass_trade, "delta": "第4關", "delta_class": "pro-kpi-delta-flat"},
-                {"label": "總分通過", "value": pass_total, "delta": "最終輸出", "delta_class": "pro-kpi-delta-flat"},
-            ]
-        )
-        fail_rank = debug_df["最後卡關"].value_counts(dropna=False).reset_index()
-        fail_rank.columns = ["卡關位置", "檔數"]
-        with st.expander("每道篩選卡關統計", expanded=False):
-            st.dataframe(fail_rank, use_container_width=True, hide_index=True)
-            show_cols = [c for c in ["股票代號", "股票名稱", "市場別", "類別", "訊號分數", "風險分數", "起漲前兆分數", "交易可行分數", "推薦總分", "最後卡關", "淘汰原因"] if c in debug_df.columns]
-            st.dataframe(debug_df[show_cols].head(300), use_container_width=True, hide_index=True)
-
     if rec_df.empty:
-        st.error("目前沒有符合條件的推薦股票。請先看上方『推薦流程診斷』，確認是卡在訊號、風險、起漲前兆、交易可行，還是推薦總分。")
+        st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
         return
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
@@ -2856,8 +3439,70 @@ def main():
             for line in detail_lines:
                 st.write(f"- {line}")
 
+    render_pro_section("寫入 8_股神推薦紀錄")
+    record_code_to_label = {
+        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
+        for _, r in rec_df.iterrows()
+    }
+    record_all_codes = rec_df["股票代號"].astype(str).tolist()
+
+    rr1, rr2 = st.columns([4, 2])
+    with rr1:
+        current_record_codes = [x for x in st.session_state.get(_k("rec_record_codes"), []) if x in record_all_codes]
+        st.multiselect(
+            "勾選要記錄到 8_股神推薦紀錄 的股票",
+            options=record_all_codes,
+            default=current_record_codes,
+            format_func=lambda x: record_code_to_label.get(str(x), str(x)),
+            key=_k("rec_record_codes"),
+        )
+
+    with rr2:
+        st.write("")
+        st.write("")
+        record_to_log_btn = st.button("記錄到 8_股神推薦紀錄", use_container_width=True, type="primary")
+
+    rr3, rr4 = st.columns([1, 1])
+    with rr3:
+        if st.button("全選本輪推薦做紀錄", use_container_width=True):
+            st.session_state[_k("rec_record_codes_next")] = record_all_codes
+            st.rerun()
+    with rr4:
+        if st.button("清空紀錄勾選", use_container_width=True):
+            st.session_state[_k("rec_record_codes_next")] = []
+            st.rerun()
+
+    selected_snapshot_df = rec_df[
+        rec_df["股票代號"].astype(str).isin([_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)])
+    ].copy()
+    st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_df
+    st.session_state["godpick_rec_selected_df"] = selected_snapshot_df
+
+    if record_to_log_btn:
+        selected_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
+        if not selected_record_codes:
+            st.warning("請先勾選要記錄的推薦股票。")
+        else:
+            record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
+            added_count, record_msgs = _append_godpick_records(record_rows)
+            if added_count > 0:
+                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
+            else:
+                st.warning("沒有新增任何推薦紀錄。")
+            if record_msgs:
+                with st.expander("推薦紀錄寫入明細", expanded=False):
+                    for msg in record_msgs:
+                        st.write(f"- {msg}")
+
+    record_detail_lines = st.session_state.get(_k("last_record_write_detail"), [])
+    if record_detail_lines:
+        with st.expander("8_股神推薦紀錄 同步明細", expanded=False):
+            for line in record_detail_lines:
+                st.write(f"- {line}")
+
     _render_export_block(rec_df=rec_df, category_strength_df=category_strength_df, top_n=top_n)
     _render_selected_export_block()
+    _render_record_export_block(rec_df)
 
     render_pro_section("本輪精華推薦")
 
@@ -2914,8 +3559,12 @@ def main():
                 picked_codes_from_top.append(code)
 
     current_pick_codes = st.session_state.get(_k("rec_pick_codes"), [])
+    current_record_codes = st.session_state.get(_k("rec_record_codes"), [])
+
     if picked_codes_from_top != current_pick_codes:
         st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
+    if picked_codes_from_top != current_record_codes:
+        st.session_state[_k("rec_record_codes_next")] = picked_codes_from_top
 
     selected_snapshot_top = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
     st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_top
@@ -3030,14 +3679,15 @@ def main():
                 ("理由升級", "推薦理由已改成更偏交易決策語言，不只是分數描述。", ""),
                 ("績效預留", "已預留 3日 / 5日 / 10日 / 20日績效欄位，供下一版自動回填。", ""),
                 ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
-                                ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
+                ("寫入推薦紀錄", "可直接勾選推薦結果並批次寫入 8_股神推薦紀錄。", ""),
+                ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
                 ("Excel 匯出", "可匯出完整推薦表、類股強度榜、同類股領先榜、自動因子榜。", ""),
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
                 ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
                 ("7/8 對齊", "record_id、推薦日期、推薦時間、推薦欄位已正式對齊 8 頁。", ""),
             ],
-            chips=["V2", "功能不刪", "顯示加速", "三模式", "起漲前兆", "風險過濾", "Excel匯出"],
+            chips=["V2", "功能不刪", "顯示加速", "三模式", "起漲前兆", "風險過濾", "Excel匯出", "推薦紀錄串接"],
         )
 
 
