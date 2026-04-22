@@ -11,6 +11,7 @@ import json
 import base64
 import io
 import hashlib
+import re
 
 import pandas as pd
 import requests
@@ -1103,32 +1104,20 @@ def _normalize_master_columns(df: pd.DataFrame, market_label: str, code_col: str
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-@st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_master() -> tuple[pd.DataFrame, dict[str, Any]]:
     url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
 
     def _empty(msg: str = ""):
-        empty = pd.DataFrame(columns=[
-            "code","name","market","official_industry_raw","official_industry_raw_col",
-            "official_industry","theme_category","category","source","source_api",
-            "source_rank","待修原因"
-        ])
-        return empty, {
-            "rows": 0,
-            "official_hit": 0,
-            "raw_cols": [],
-            "source_api": "twse_openapi",
-            "error": msg,
-        }
+        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_openapi", "error": msg}
 
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, timeout=30, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
         df = pd.DataFrame(payload)
-        out_df, info = _normalize_master_columns(
-            df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi"
-        )
+        out_df, info = _normalize_master_columns(df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi")
         info["error"] = ""
         return out_df, info
     except Exception as e1:
@@ -1137,13 +1126,11 @@ def _fetch_twse_master() -> tuple[pd.DataFrame, dict[str, Any]]:
         except Exception:
             pass
         try:
-            resp = requests.get(url, timeout=30, verify=False)
+            resp = requests.get(url, timeout=30, headers=headers, verify=False)
             resp.raise_for_status()
             payload = resp.json()
             df = pd.DataFrame(payload)
-            out_df, info = _normalize_master_columns(
-                df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi_insecure"
-            )
+            out_df, info = _normalize_master_columns(df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi_insecure")
             info["error"] = f"SSL fallback used: {type(e1).__name__}: {e1}"
             return out_df, info
         except Exception as e2:
@@ -1154,27 +1141,16 @@ def _fetch_tpex_master(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
     url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O" if mode == "上櫃" else "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R"
 
     def _empty(msg: str = ""):
-        empty = pd.DataFrame(columns=[
-            "code","name","market","official_industry_raw","official_industry_raw_col",
-            "official_industry","theme_category","category","source","source_api",
-            "source_rank","待修原因"
-        ])
-        return empty, {
-            "rows": 0,
-            "official_hit": 0,
-            "raw_cols": [],
-            "source_api": f"tpex_{mode}",
-            "error": msg,
-        }
+        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": f"tpex_{mode}", "error": msg}
 
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, timeout=30)
+        resp = requests.get(url, timeout=30, headers=headers)
         resp.raise_for_status()
         payload = resp.json()
         df = pd.DataFrame(payload)
-        out_df, info = _normalize_master_columns(
-            df, mode, "SecuritiesCompanyCode", "CompanyAbbreviation", "SecuritiesIndustryCode", f"tpex_{mode}"
-        )
+        out_df, info = _normalize_master_columns(df, mode, "SecuritiesCompanyCode", "CompanyAbbreviation", "SecuritiesIndustryCode", f"tpex_{mode}")
         info["error"] = ""
         return out_df, info
     except Exception as e1:
@@ -1183,13 +1159,11 @@ def _fetch_tpex_master(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
         except Exception:
             pass
         try:
-            resp = requests.get(url, timeout=30, verify=False)
+            resp = requests.get(url, timeout=30, headers=headers, verify=False)
             resp.raise_for_status()
             payload = resp.json()
             df = pd.DataFrame(payload)
-            out_df, info = _normalize_master_columns(
-                df, mode, "SecuritiesCompanyCode", "CompanyAbbreviation", "SecuritiesIndustryCode", f"tpex_{mode}_insecure"
-            )
+            out_df, info = _normalize_master_columns(df, mode, "SecuritiesCompanyCode", "CompanyAbbreviation", "SecuritiesIndustryCode", f"tpex_{mode}_insecure")
             info["error"] = f"SSL fallback used: {type(e1).__name__}: {e1}"
             return out_df, info
         except Exception as e2:
@@ -1199,77 +1173,187 @@ def _fetch_tpex_master(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
 def _fetch_twse_isin_fill_map() -> dict[str, str]:
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     out: dict[str, str] = {}
-
-    def _flatten_cols(cols) -> list[str]:
-        out_cols = []
-        for c in cols:
-            if isinstance(c, tuple):
-                txt = " ".join([_safe_str(x) for x in c if _safe_str(x)])
-            else:
-                txt = _safe_str(c)
-            out_cols.append(txt.replace("\ufeff", "").strip())
-        return out_cols
-
-    def _find_col(cols: list[str], keywords: list[str]) -> str:
-        for c in cols:
-            if all(k in c for k in keywords):
-                return c
-        return ""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    html = ""
+    try:
+        resp = requests.get(url, timeout=30, headers=headers)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or resp.encoding
+        html = resp.text
+    except Exception:
+        try:
+            requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            resp = requests.get(url, timeout=30, headers=headers, verify=False)
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or resp.encoding
+            html = resp.text
+        except Exception:
+            return out
 
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        html = resp.text
         tables = pd.read_html(io.StringIO(html))
     except Exception:
         return out
 
     for tb in tables:
-        try:
-            tmp = tb.copy()
-            tmp.columns = _flatten_cols(tmp.columns)
-            cols = list(tmp.columns)
-
-            code_col = ""
-            for c in cols:
-                cs = str(c)
-                if "代號及名稱" in cs or ("有價證券代號" in cs and "名稱" in cs):
-                    code_col = c
-                    break
-            if not code_col:
-                code_col = _find_col(cols, ["代號"]) or _find_col(cols, ["證券代號"]) or _find_col(cols, ["有價證券代號"])
-
-            industry_col = _find_col(cols, ["產業別"]) or _find_col(cols, ["產業"])
-            market_col = _find_col(cols, ["市場別"])
-
-            if not code_col or not industry_col:
-                continue
-
-            for _, r in tmp.iterrows():
-                raw_code_val = r.get(code_col)
-                code = _normalize_code(raw_code_val)
-                if not code:
-                    raw_text = _safe_str(raw_code_val)
-                    digits = "".join(ch for ch in raw_text if ch.isdigit())
-                    if 4 <= len(digits) <= 6:
-                        code = digits[:6] if len(digits) > 6 else digits
-                if not code:
-                    continue
-
-                if market_col:
-                    market_txt = _safe_str(r.get(market_col))
-                    if market_txt and "上市" not in market_txt:
-                        continue
-
-                industry = _official_industry_name(r.get(industry_col))
-                if industry:
-                    out[code] = industry
-        except Exception:
+        tmp = tb.copy()
+        tmp.columns = [str(c).strip() for c in tmp.columns]
+        code_col = None
+        industry_col = None
+        for c in tmp.columns:
+            cc = str(c)
+            if code_col is None and ("代號" in cc or "股票代號" in cc or "有價證券代號" in cc):
+                code_col = c
+            if industry_col is None and "產業" in cc:
+                industry_col = c
+        if not code_col or not industry_col:
             continue
-
+        for _, r in tmp.iterrows():
+            code = _normalize_code(r.get(code_col))
+            industry = _official_industry_name(r.get(industry_col))
+            if code and industry:
+                out[code] = industry
     return out
 
 
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_yahoo_profile_one(code: str, market: str = "") -> dict[str, str]:
+    code = _normalize_code(code)
+    market = _safe_str(market)
+    if not code:
+        return {}
+
+    try:
+        requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    if market == "上市":
+        symbols = [f"{code}.TW", f"{code}.TWO", code]
+    elif market in {"上櫃", "興櫃"}:
+        symbols = [f"{code}.TWO", f"{code}.TW", code]
+    else:
+        symbols = [f"{code}.TW", f"{code}.TWO", code]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    for symbol in symbols:
+        api_url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=assetProfile,price"
+        try:
+            resp = requests.get(api_url, timeout=20, headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+            result = (((payload or {}).get("quoteSummary") or {}).get("result") or [None])[0] or {}
+            asset = result.get("assetProfile") or {}
+            price = result.get("price") or {}
+            industry = _safe_str(asset.get("industry")) or _safe_str(asset.get("sector"))
+            exchange_name = _safe_str(price.get("exchangeName"))
+            if industry or exchange_name:
+                market_guess = market
+                if not market_guess:
+                    if symbol.endswith('.TW'):
+                        market_guess = '上市'
+                    elif symbol.endswith('.TWO'):
+                        market_guess = '上櫃'
+                return {
+                    "official_industry_raw": industry,
+                    "official_industry": industry,
+                    "market": market_guess,
+                    "source_api": "yahoo_quoteSummary",
+                    "raw_col": "YahooIndustry",
+                }
+        except Exception:
+            pass
+
+        profile_url = f"https://tw.stock.yahoo.com/quote/{symbol}/profile"
+        try:
+            resp = requests.get(profile_url, timeout=20, headers=headers)
+            resp.raise_for_status()
+            html = resp.text
+            industry = ""
+            market_guess = market
+            m = re.search(r"產業類別[^一-鿿A-Za-z0-9]{0,20}([一-鿿A-Za-z0-9・\-&／/ ]{2,30})", html)
+            if m:
+                industry = _safe_str(m.group(1))
+            m2 = re.search(r"市場別[^一-鿿A-Za-z0-9]{0,20}([一-鿿A-Za-z0-9 ]{2,10})", html)
+            if m2:
+                market_guess = _safe_str(m2.group(1))
+            if industry or market_guess:
+                return {
+                    "official_industry_raw": industry,
+                    "official_industry": industry,
+                    "market": market_guess,
+                    "source_api": "yahoo_profile",
+                    "raw_col": "YahooProfile",
+                }
+        except Exception:
+            pass
+
+    return {}
+
+
+def _apply_yahoo_profile_fill(master_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+    if master_df is None or master_df.empty:
+        return pd.DataFrame(columns=cols), {"rows": 0, "official_hit": 0, "source_api": "yahoo_profile_fill", "error": ""}
+
+    work = master_df.copy()
+    target_mask = work["official_industry"].fillna("").astype(str).str.strip().eq("")
+    targets = work[target_mask][["code", "market"]].drop_duplicates().to_dict(orient="records")
+    if not targets:
+        return work, {"rows": 0, "official_hit": 0, "source_api": "yahoo_profile_fill", "error": ""}
+
+    results: dict[str, dict[str, str]] = {}
+    max_workers = min(12, max(4, len(targets) // 30 + 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        fut_map = {ex.submit(_fetch_yahoo_profile_one, t.get("code", ""), t.get("market", "")): t for t in targets}
+        for fut in as_completed(fut_map):
+            t = fut_map[fut]
+            code = _normalize_code(t.get("code"))
+            try:
+                res = fut.result() or {}
+            except Exception:
+                res = {}
+            if code and res:
+                results[code] = res
+
+    hit = 0
+    for idx in work.index:
+        code = _normalize_code(work.at[idx, "code"])
+        res = results.get(code, {})
+        if not res:
+            continue
+        industry_raw = _safe_str(res.get("official_industry_raw"))
+        industry_name = _official_industry_name(res.get("official_industry")) or _official_industry_name(industry_raw)
+        market_guess = _safe_str(res.get("market"))
+        if market_guess and _safe_str(work.at[idx, "market"]) == "":
+            work.at[idx, "market"] = market_guess
+        if industry_name:
+            work.at[idx, "official_industry_raw"] = industry_raw or industry_name
+            work.at[idx, "official_industry_raw_col"] = _safe_str(res.get("raw_col")) or "YahooIndustry"
+            work.at[idx, "official_industry"] = industry_name
+            work.at[idx, "theme_category"] = _theme_from_official(industry_name, work.at[idx, "name"])
+            work.at[idx, "category"] = work.at[idx, "theme_category"]
+            work.at[idx, "source"] = "yahoo_profile_fill"
+            work.at[idx, "source_api"] = _safe_str(res.get("source_api")) or "yahoo_profile"
+            work.at[idx, "source_rank"] = 3
+            work.at[idx, "待修原因"] = ""
+            hit += 1
+
+    info = {
+        "rows": len(results),
+        "official_hit": hit,
+        "source_api": "yahoo_profile_fill",
+        "error": "",
+    }
+    return work[cols].copy(), info
 
 def _build_utils_master_fallback() -> tuple[pd.DataFrame, dict[str, Any]]:
     dfs = []
@@ -1457,11 +1541,12 @@ def _save_category_override(code: str, name: str, market: str, category: str) ->
     return ok, msg
 
 
-def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None, utils_info=None, merged=None) -> list[str]:
+def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None, utils_info=None, merged=None, yahoo_info=None) -> list[str]:
     twse_info = twse_info if isinstance(twse_info, dict) else {}
     tpex_o_info = tpex_o_info if isinstance(tpex_o_info, dict) else {}
     tpex_r_info = tpex_r_info if isinstance(tpex_r_info, dict) else {}
     utils_info = utils_info if isinstance(utils_info, dict) else {}
+    yahoo_info = yahoo_info if isinstance(yahoo_info, dict) else {}
     merged_df = merged if isinstance(merged, pd.DataFrame) else pd.DataFrame()
 
     def _n(v, default=0):
@@ -1485,6 +1570,10 @@ def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None
     if _safe_str(tpex_r_info.get("error")):
         logs.append(f"TPEX-興櫃 錯誤：{_safe_str(tpex_r_info.get('error'))}")
 
+    logs.append(f"Yahoo 補值：{_n(yahoo_info.get('rows'))} 筆 / 成功補正式產業 {_n(yahoo_info.get('official_hit'))} 筆 / API: {_safe_str(yahoo_info.get('source_api')) or '-'}")
+    if _safe_str(yahoo_info.get("error")):
+        logs.append(f"Yahoo 錯誤：{_safe_str(yahoo_info.get('error'))}")
+
     logs.append(f"utils fallback：{_n(utils_info.get('rows'))} 筆 / API: {_safe_str(utils_info.get('source_api')) or '-'}")
     if not merged_df.empty and "official_industry" in merged_df.columns:
         hit = int(merged_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
@@ -1502,11 +1591,12 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
     logs = list(st.session_state.get(_k("master_diag_logs"), []))
 
     twse_failed = any("TWSE 錯誤：" in str(x) for x in logs) or any("TWSE：0 筆" in str(x) for x in logs)
+    yahoo_helped = any("Yahoo 補值：" in str(x) and "成功補正式產業 0 筆" not in str(x) for x in logs)
     if fresh_df.empty:
         return fresh_df, logs + ["主檔更新失敗：官方主檔與 fallback 皆無資料"]
 
-    if twse_failed:
-        logs.append("已阻擋寫回 cache：因 TWSE 官方主檔本次抓取失敗。")
+    if twse_failed and not yahoo_helped:
+        logs.append("已阻擋寫回 cache：因 TWSE 官方主檔本次抓取失敗，且 Yahoo 補值未成功。")
         return fresh_df, logs
 
     ok, msg = _save_master_cache_to_repo(fresh_df)
@@ -1663,8 +1753,9 @@ def _load_master_df() -> pd.DataFrame:
     utils_df, utils_info = _build_utils_master_fallback()
     merged = _merge_master_sources(twse_df, tpex_o_df, tpex_r_df, utils_df)
     merged = _apply_twse_isin_fill(merged)
+    merged, yahoo_info = _apply_yahoo_profile_fill(merged)
     merged = _apply_master_overrides(merged)
-    st.session_state[_k("master_diag_logs")] = _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged)
+    st.session_state[_k("master_diag_logs")] = _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged, yahoo_info)
     return merged
 
 # =========================================================
@@ -1723,6 +1814,61 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _load_master_df() -> pd.DataFrame:
+    dfs = []
+    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題", "industry_name"]
+
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                mapping = {
+                    "證券代號": "code",
+                    "證券名稱": "name",
+                    "市場別": "market",
+                    "code": "code",
+                    "name": "name",
+                    "market": "market",
+                }
+                temp = temp.rename(columns=mapping)
+
+                found_category_col = None
+                for col in temp.columns:
+                    if str(col).strip() in category_candidates:
+                        found_category_col = col
+                        break
+                if found_category_col:
+                    temp = temp.rename(columns={found_category_col: "category"})
+
+                for col in ["code", "name", "market"]:
+                    if col not in temp.columns:
+                        temp[col] = ""
+                if "category" not in temp.columns:
+                    temp["category"] = ""
+
+                temp["code"] = temp["code"].map(_normalize_code)
+                temp["name"] = temp["name"].map(_safe_str)
+                temp["market"] = temp["market"].map(_safe_str)
+                if market_arg in ["上市", "上櫃", "興櫃"]:
+                    temp["market"] = temp["market"].replace("", market_arg)
+                temp["category"] = temp.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
+                dfs.append(temp[["code", "name", "market", "category"]])
+        except Exception:
+            pass
+
+    if not dfs:
+        base = pd.DataFrame(columns=["code", "name", "market", "category"])
+    else:
+        base = pd.concat(dfs, ignore_index=True)
+        base["code"] = base["code"].map(_normalize_code)
+        base["name"] = base["name"].map(_safe_str)
+        base["market"] = base["market"].map(_safe_str).replace("", "上市")
+        base["category"] = base.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
+        base = base[base["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+
+    return _apply_master_overrides(base)
+
 def _find_name_market_category(
     code: str,
     manual_name: str,
