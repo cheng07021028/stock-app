@@ -196,8 +196,8 @@
     "name": "台泥",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "水泥工業",
+    "category": "水泥工業"
   },
   {
     "code": "1102",
@@ -260,8 +260,8 @@
     "name": "味全",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "食品民生",
+    "category": "食品民生"
   },
   {
     "code": "1203",
@@ -292,8 +292,8 @@
     "name": "卜蜂",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "食品民生",
+    "category": "食品民生"
   },
   {
     "code": "1216",
@@ -420,8 +420,8 @@
     "name": "茂生農經",
     "market": "上櫃",
     "official_industry": "農業科技業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "農業科技",
+    "category": "農業科技"
   },
   {
     "code": "1242",
@@ -532,24 +532,24 @@
     "name": "台塑",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1303",
     "name": "南亞",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1304",
     "name": "台聚",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1305",
@@ -588,16 +588,16 @@
     "name": "台苯",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1312",
     "name": "國喬",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1313",
@@ -612,8 +612,8 @@
     "name": "中石化",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1315",
@@ -676,8 +676,8 @@
     "name": "台化",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1328",
@@ -756,8 +756,8 @@
     "name": "遠東新",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "紡織製鞋",
+    "category": "紡織製鞋"
   },
   {
     "code": "1408",
@@ -1172,8 +1172,8 @@
     "name": "東元",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "電機機械",
+    "category": "電機機械"
   },
   {
     "code": "1506",
@@ -1204,8 +1204,8 @@
     "name": "亞力",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "綠能儲能",
+    "category": "綠能儲能"
   },
   {
     "code": "1515",
@@ -1260,8 +1260,8 @@
     "name": "耿鼎",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "車用電子",
+    "category": "車用電子"
   },
   {
     "code": "1525",
@@ -1492,8 +1492,8 @@
     "name": "精剛",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "1585",
@@ -1556,8 +1556,8 @@
     "name": "祺驊",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "1594",
@@ -1628,8 +1628,8 @@
     "name": "華新",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "電器電纜",
+    "category": "電器電纜"
   },
   {
     "code": "1608",
@@ -1972,8 +1972,8 @@
     "name": "台蠟",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1745",
@@ -2020,8 +2020,8 @@
     "name": "長春石化",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1765",
@@ -2036,8 +2036,8 @@
     "name": "大連化工",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "1767",
@@ -2188,8 +2188,8 @@
     "name": "台玻",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "化學工業",
+    "category": "化學工業"
   },
   {
     "code": "1805",
@@ -2284,8 +2284,8 @@
     "name": "華紙",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "造紙工業",
+    "category": "造紙工業"
   },
   {
     "code": "1906",
@@ -2348,8 +2348,8 @@
     "name": "第一銅",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "鋼鐵",
+    "category": "鋼鐵"
   },
   {
     "code": "2010",
@@ -2500,8 +2500,8 @@
     "name": "允強",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "鋼鐵",
+    "category": "鋼鐵"
   },
   {
     "code": "2035",
@@ -2564,8 +2564,8 @@
     "name": "風青",
     "market": "上櫃",
     "official_industry": "電器電纜",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "電器電纜",
+    "category": "電器電纜"
   },
   {
     "code": "2062",
@@ -2700,8 +2700,8 @@
     "name": "正新",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "橡膠工業",
+    "category": "橡膠工業"
   },
   {
     "code": "2106",
@@ -2756,16 +2756,16 @@
     "name": "裕隆",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "汽車",
+    "category": "汽車"
   },
   {
     "code": "2204",
     "name": "中華",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "汽車",
+    "category": "汽車"
   },
   {
     "code": "2206",
@@ -2836,8 +2836,8 @@
     "name": "大甲",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "2222",
@@ -3140,8 +3140,8 @@
     "name": "仁寶",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "EMS代工",
-    "category": "EMS代工"
+    "theme_category": "半導體",
+    "category": "半導體"
   },
   {
     "code": "2327",
@@ -3516,16 +3516,16 @@
     "name": "正崴",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "連接器",
+    "category": "連接器"
   },
   {
     "code": "2393",
     "name": "億光",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "LED",
+    "category": "LED"
   },
   {
     "code": "2395",
@@ -3804,8 +3804,8 @@
     "name": "超豐",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "封測",
+    "category": "封測"
   },
   {
     "code": "2442",
@@ -3988,8 +3988,8 @@
     "name": "可成",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "可成",
+    "category": "可成"
   },
   {
     "code": "2476",
@@ -4380,8 +4380,8 @@
     "name": "鈺通營造",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "營建資產",
+    "category": "營建資產"
   },
   {
     "code": "2596",
@@ -4428,8 +4428,8 @@
     "name": "新興",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "航運",
+    "category": "航運"
   },
   {
     "code": "2606",
@@ -4532,8 +4532,8 @@
     "name": "長榮航",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "航運",
-    "category": "航運"
+    "theme_category": "航空觀光",
+    "category": "航空觀光"
   },
   {
     "code": "2619",
@@ -4572,8 +4572,8 @@
     "name": "漢翔",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "航空觀光",
+    "category": "航空觀光"
   },
   {
     "code": "2636",
@@ -4748,8 +4748,8 @@
     "name": "藝舍-KY",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "2726",
@@ -4780,8 +4780,8 @@
     "name": "雄獅",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "航空觀光",
+    "category": "航空觀光"
   },
   {
     "code": "2732",
@@ -4956,8 +4956,8 @@
     "name": "彰銀",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金融保險",
+    "category": "金融保險"
   },
   {
     "code": "2807",
@@ -5188,16 +5188,16 @@
     "name": "富邦金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2882",
     "name": "國泰金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2883",
@@ -5212,32 +5212,32 @@
     "name": "玉山金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2885",
     "name": "元大金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2886",
     "name": "兆豐金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2887",
     "name": "台新新光金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2889",
@@ -5260,16 +5260,16 @@
     "name": "中信金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2892",
     "name": "第一金",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "金控",
+    "category": "金控"
   },
   {
     "code": "2893",
@@ -5404,8 +5404,8 @@
     "name": "滿心",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "2920",
@@ -5428,8 +5428,8 @@
     "name": "宏太-KY",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "2926",
@@ -5452,8 +5452,8 @@
     "name": "集雅社",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "2938",
@@ -5484,8 +5484,8 @@
     "name": "米斯特",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "2942",
@@ -5508,16 +5508,16 @@
     "name": "振宇五金",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "2948",
     "name": "寶陞",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "2949",
@@ -5708,16 +5708,16 @@
     "name": "增你強",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "電子通路",
+    "category": "電子通路"
   },
   {
     "code": "3029",
     "name": "零壹",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "資訊服務",
+    "category": "資訊服務"
   },
   {
     "code": "3030",
@@ -5836,8 +5836,8 @@
     "name": "台灣大",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "台灣大",
+    "category": "台灣大"
   },
   {
     "code": "3046",
@@ -6052,8 +6052,8 @@
     "name": "日電貿",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "被動元件",
+    "category": "被動元件"
   },
   {
     "code": "3092",
@@ -6284,8 +6284,8 @@
     "name": "炎洲流通",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "3176",
@@ -6596,8 +6596,8 @@
     "name": "太普高",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "3285",
@@ -6644,8 +6644,8 @@
     "name": "鈊象",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "IC設計",
-    "category": "IC設計"
+    "theme_category": "鈊象",
+    "category": "鈊象"
   },
   {
     "code": "3294",
@@ -6732,8 +6732,8 @@
     "name": "斐成",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "3317",
@@ -7012,8 +7012,8 @@
     "name": "奇鈦科",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "3432",
@@ -7644,8 +7644,8 @@
     "name": "艾笛森",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "LED",
+    "category": "LED"
   },
   {
     "code": "3592",
@@ -8068,8 +8068,8 @@
     "name": "大聯大",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "電子通路",
+    "category": "電子通路"
   },
   {
     "code": "3703",
@@ -8164,16 +8164,16 @@
     "name": "富采",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "LED",
+    "category": "LED"
   },
   {
     "code": "3715",
     "name": "定穎投控",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "PCB載板",
+    "category": "PCB載板"
   },
   {
     "code": "3716",
@@ -8468,8 +8468,8 @@
     "name": "樂威科-KY",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "4155",
@@ -8572,8 +8572,8 @@
     "name": "瑞基",
     "market": "上櫃",
     "official_industry": "農業科技業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "農業科技",
+    "category": "農業科技"
   },
   {
     "code": "4172",
@@ -8708,24 +8708,24 @@
     "name": "信立",
     "market": "上櫃",
     "official_industry": "塑膠工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4304",
     "name": "勝昱",
     "market": "上櫃",
     "official_industry": "塑膠工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4305",
     "name": "世坤",
     "market": "上櫃",
     "official_industry": "塑膠工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4306",
@@ -8828,8 +8828,8 @@
     "name": "耀億",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "4431",
@@ -8972,8 +8972,8 @@
     "name": "淳紳",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "4530",
@@ -9060,8 +9060,8 @@
     "name": "晟田",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "4542",
@@ -9172,8 +9172,8 @@
     "name": "旭然",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "4557",
@@ -9420,40 +9420,40 @@
     "name": "唐鋒",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "4702",
     "name": "中美實",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "4706",
     "name": "大恭",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4707",
     "name": "磐亞",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4711",
     "name": "永純",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4712",
@@ -9468,16 +9468,16 @@
     "name": "永捷",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4716",
     "name": "大立",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4720",
@@ -9596,8 +9596,8 @@
     "name": "泓瀚",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4743",
@@ -9652,8 +9652,8 @@
     "name": "國碳科",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4755",
@@ -9708,16 +9708,16 @@
     "name": "誠泰科技",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4768",
     "name": "晶呈科技",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4770",
@@ -9740,8 +9740,8 @@
     "name": "台特化",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "4773",
@@ -9804,8 +9804,8 @@
     "name": "正文",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "網通交換器",
+    "category": "網通交換器"
   },
   {
     "code": "4907",
@@ -10300,8 +10300,8 @@
     "name": "新鼎",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5210",
@@ -10556,8 +10556,8 @@
     "name": "達輝-KY",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5278",
@@ -10716,8 +10716,8 @@
     "name": "世紀*",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5315",
@@ -10772,8 +10772,8 @@
     "name": "馥鴻",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5346",
@@ -10796,8 +10796,8 @@
     "name": "正能量智能",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "5351",
@@ -10892,8 +10892,8 @@
     "name": "慕康生醫",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5403",
@@ -10972,8 +10972,8 @@
     "name": "南良",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5452",
@@ -11076,8 +11076,8 @@
     "name": "新華",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5483",
@@ -11252,8 +11252,8 @@
     "name": "龍巖",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5531",
@@ -11356,8 +11356,8 @@
     "name": "中連",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "5607",
@@ -11412,8 +11412,8 @@
     "name": "鳳凰",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "航空觀光",
+    "category": "航空觀光"
   },
   {
     "code": "5827",
@@ -11740,24 +11740,24 @@
     "name": "德記",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "5903",
     "name": "全家",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "5904",
     "name": "寶雅",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "5905",
@@ -12020,8 +12020,8 @@
     "name": "邁達特",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "資訊服務",
+    "category": "資訊服務"
   },
   {
     "code": "6113",
@@ -12460,8 +12460,8 @@
     "name": "亞通",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "6180",
@@ -12572,8 +12572,8 @@
     "name": "詩肯",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "6196",
@@ -12604,8 +12604,8 @@
     "name": "天品",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "6201",
@@ -12708,8 +12708,8 @@
     "name": "精誠",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "資訊服務",
+    "category": "資訊服務"
   },
   {
     "code": "6215",
@@ -12876,8 +12876,8 @@
     "name": "中湛",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "6237",
@@ -13620,8 +13620,8 @@
     "name": "台塑化",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "6506",
@@ -13636,16 +13636,16 @@
     "name": "惠光",
     "market": "上櫃",
     "official_industry": "農業科技業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "農業科技",
+    "category": "農業科技"
   },
   {
     "code": "6509",
     "name": "聚和",
     "market": "上櫃",
     "official_industry": "化學工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "6510",
@@ -14028,8 +14028,8 @@
     "name": "達邦蛋白",
     "market": "上櫃",
     "official_industry": "農業科技業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "農業科技",
+    "category": "農業科技"
   },
   {
     "code": "6579",
@@ -14268,8 +14268,8 @@
     "name": "特昇-KY",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "6617",
@@ -14340,8 +14340,8 @@
     "name": "泰金-KY",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "6634",
@@ -14852,8 +14852,8 @@
     "name": "信實",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "6722",
@@ -14900,8 +14900,8 @@
     "name": "上洋",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "6729",
@@ -15204,8 +15204,8 @@
     "name": "AES-KY",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "電池材料",
+    "category": "電池材料"
   },
   {
     "code": "6782",
@@ -15356,8 +15356,8 @@
     "name": "明係",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "6805",
@@ -15908,8 +15908,8 @@
     "name": "潤德",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "6882",
@@ -15964,8 +15964,8 @@
     "name": "來億-KY",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "紡織製鞋",
+    "category": "紡織製鞋"
   },
   {
     "code": "6891",
@@ -16044,8 +16044,8 @@
     "name": "伯鑫",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "6906",
@@ -16500,8 +16500,8 @@
     "name": "萬達寵物",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "6969",
@@ -17404,8 +17404,8 @@
     "name": "中華資安",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "資訊服務",
+    "category": "資訊服務"
   },
   {
     "code": "7767",
@@ -17484,8 +17484,8 @@
     "name": "能率亞洲",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "7779",
@@ -17516,8 +17516,8 @@
     "name": "光速火箭",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "7783",
@@ -17604,8 +17604,8 @@
     "name": "宏碁智新",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "7795",
@@ -17700,8 +17700,8 @@
     "name": "民盛",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "7812",
@@ -17764,8 +17764,8 @@
     "name": "精誠金融科技股份有限公司",
     "market": "上櫃",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "資訊服務",
+    "category": "資訊服務"
   },
   {
     "code": "7820",
@@ -18652,8 +18652,8 @@
     "name": "來思達",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "8067",
@@ -18932,8 +18932,8 @@
     "name": "至上",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "電子通路",
+    "category": "電子通路"
   },
   {
     "code": "8114",
@@ -19332,8 +19332,8 @@
     "name": "益張",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8343",
@@ -19372,8 +19372,8 @@
     "name": "冠好",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8358",
@@ -19508,8 +19508,8 @@
     "name": "白紗科",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8403",
@@ -19572,8 +19572,8 @@
     "name": "旭源",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8422",
@@ -19604,8 +19604,8 @@
     "name": "紅木-KY",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8429",
@@ -19636,16 +19636,16 @@
     "name": "弘帆",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "8435",
     "name": "鉅邁",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8436",
@@ -19660,8 +19660,8 @@
     "name": "大地-KY",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8438",
@@ -19700,8 +19700,8 @@
     "name": "綠河-KY",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8446",
@@ -19900,8 +19900,8 @@
     "name": "三貝德",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8499",
@@ -19916,48 +19916,48 @@
     "name": "裕國",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8906",
     "name": "花王",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8908",
     "name": "欣雄",
     "market": "上櫃",
     "official_industry": "油電燃氣業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "8916",
     "name": "光隆",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8917",
     "name": "欣泰",
     "market": "上櫃",
     "official_industry": "油電燃氣業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "8921",
     "name": "沈氏",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8923",
@@ -19972,8 +19972,8 @@
     "name": "大田",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "8926",
@@ -19988,24 +19988,24 @@
     "name": "北基",
     "market": "上櫃",
     "official_industry": "油電燃氣業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "8928",
     "name": "鉅明",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "8929",
     "name": "富堡",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8930",
@@ -20020,56 +20020,56 @@
     "name": "大汽電",
     "market": "上櫃",
     "official_industry": "油電燃氣業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "8932",
     "name": "智通*",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8933",
     "name": "愛地雅",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "8935",
     "name": "邦泰",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8936",
     "name": "國統",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8937",
     "name": "合騏*",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8938",
     "name": "明安",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "8940",
@@ -20084,16 +20084,16 @@
     "name": "關中",
     "market": "上櫃",
     "official_industry": "居家生活",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "居家生活",
+    "category": "居家生活"
   },
   {
     "code": "8942",
     "name": "森鉅",
     "market": "上櫃",
     "official_industry": "其他業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他業",
+    "category": "其他業"
   },
   {
     "code": "8943",
@@ -20404,8 +20404,8 @@
     "name": "高力",
     "market": "上市",
     "official_industry": "",
-    "theme_category": "其他_官方未知",
-    "category": "其他_官方未知"
+    "theme_category": "散熱",
+    "category": "散熱"
   },
   {
     "code": "8999",
@@ -20796,8 +20796,8 @@
     "name": "萬國通",
     "market": "上櫃",
     "official_industry": "塑膠工業",
-    "theme_category": "塑化",
-    "category": "塑化"
+    "theme_category": "塑膠工業",
+    "category": "塑膠工業"
   },
   {
     "code": "9951",
@@ -20836,8 +20836,8 @@
     "name": "邁達康",
     "market": "上櫃",
     "official_industry": "運動休閒",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "運動休閒",
+    "category": "運動休閒"
   },
   {
     "code": "9962",
