@@ -316,25 +316,28 @@ def _init_state():
 def _render_backup_section():
     render_pro_section("GitHub 專案一鍵備份到 Firebase")
 
-    repo_owner = "cheng07021028"
-    repo_name = "stock-app"
-    branch = "main"
+    repo_owner = st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")
+    repo_name = st.secrets.get("GITHUB_REPO_NAME", "stock-app")
+    branch = st.secrets.get("GITHUB_REPO_BRANCH", "main")
+    bucket_name = st.secrets.get("FIREBASE_STORAGE_BUCKET", "").strip()
 
     st.caption("按下按鈕後，會將 GitHub 專案打包成 zip，上傳到 Firebase Storage，並同步寫入 Firestore 備份紀錄。")
 
     c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
-
     with c1:
         st.text_input("GitHub 擁有者", value=repo_owner, disabled=True, key=_k("repo_owner_view"))
-
     with c2:
         st.text_input("GitHub 專案", value=repo_name, disabled=True, key=_k("repo_name_view"))
-
     with c3:
         st.text_input("分支", value=branch, disabled=True, key=_k("repo_branch_view"))
 
-    b1, b2 = st.columns([1.5, 1])
+    info1, info2 = st.columns([1.6, 1])
+    with info1:
+        st.caption(f"Firebase Storage Bucket：{bucket_name or '未設定'}")
+    with info2:
+        st.caption("若顯示未設定，請先補 Secrets。")
 
+    b1, b2 = st.columns([1.5, 1])
     with b1:
         if st.button("一鍵備份 GitHub 專案到 Firebase", type="primary", use_container_width=True, key=_k("backup_btn")):
             with st.spinner("正在備份 GitHub 專案到 Firebase..."):
@@ -377,6 +380,10 @@ def _render_backup_section():
                 "Storage 路徑",
                 [("路徑", _safe_str(last_result.get("storage_path")), "")],
             )
+
+    last_error = st.session_state.get(_k("last_backup_error"))
+    if last_error:
+        st.warning(f"最近一次錯誤：{last_error}")
 
     try:
         backup_rows = list_recent_backups(limit=10)
