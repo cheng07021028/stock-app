@@ -93,6 +93,13 @@ RECORD_COLUMNS = [
     "弱勢族群",
     "重大事件清單",
     "因子來源狀態",
+    "加權資料日期",
+    "美股資料日期",
+    "夜盤資料日期",
+    "法人資料日期",
+    "期權資料日期",
+    "融資券資料日期",
+    "新聞資料區間",
     "股神推論邏輯",
     "進場確認條件",
     "出場警訊",
@@ -786,6 +793,13 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "event_list": event_list,
         "source_status": source_status,
         "market_data_date": _safe_str(twii.get('date')),
+        "twii_date": _safe_str(twii.get('date')),
+        "us_data_date": " / ".join([x for x in [_safe_str(nas.get('date')), _safe_str(sox.get('date')), _safe_str(spx.get('date')), _safe_str(adr.get('date'))] if x]),
+        "night_data_date": " / ".join([x for x in [_safe_str(es.get('date')), _safe_str(nq.get('date'))] if x]),
+        "inst_used_date": _safe_str(inst.get('used_date')),
+        "futopt_used_date": _safe_str(futopt.get('used_date')),
+        "margin_used_date": _safe_str(margin.get('used_date')),
+        "news_range": f"{pred_date_text} 前後搜尋" if news_rows else "無新聞命中",
     }
 
 
@@ -970,6 +984,13 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "外資買賣超估分": round(ctx["foreign_score"], 2),
         "期貨選擇權估分": round(ctx["futures_score"], 2),
         "類股輪動估分": round(ctx["sector_score"], 2),
+        "加權資料日期": _safe_str(ctx.get("twii_date")),
+        "美股資料日期": _safe_str(ctx.get("us_data_date")),
+        "夜盤資料日期": _safe_str(ctx.get("night_data_date")),
+        "法人資料日期": _safe_str(ctx.get("inst_used_date")),
+        "期權資料日期": _safe_str(ctx.get("futopt_used_date")),
+        "融資券資料日期": _safe_str(ctx.get("margin_used_date")),
+        "新聞資料區間": _safe_str(ctx.get("news_range")),
         "股神推論邏輯": "\n".join(logic_lines),
         "進場確認條件": entry_confirm,
         "出場警訊": exit_alerts,
@@ -1370,7 +1391,7 @@ def main():
 
     render_pro_hero(
         title="大盤走勢｜股神Pro因子強化版",
-        subtitle="補強法人 / 期貨選擇權 / 融資融券 / 類股輪動 / 事件因子，抓不到資料時自動降級。",
+        subtitle="補強法人 / 期貨選擇權 / 融資融券 / 類股輪動 / 事件因子，並顯示每個因子的實際取樣日期與來源。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -1440,6 +1461,19 @@ def main():
         st.metric("融資增減(億)", "-" if ctx.get("margin_change") is None else f"{ctx.get('margin_change'):.2f}", delta=f"融券 {0 if ctx.get('short_change') is None else ctx.get('short_change'):.0f}")
     with factor_cols[3]:
         st.metric("因子來源", ctx.get("source_status", "fallback"))
+
+    with st.expander("查看每個因子的實際取樣日期 / 來源", expanded=False):
+        transparent_rows = pd.DataFrame([
+            {"因子": "加權指數", "實際取樣日期": _safe_str(ctx.get("twii_date")) or "fallback", "來源": "stooq", "值": f"{_safe_float(ctx.get('tw_close'), 0):.2f} / {_safe_float(ctx.get('tw_pct'), 0):.2f}%"},
+            {"因子": "美股 / ADR", "實際取樣日期": _safe_str(ctx.get("us_data_date")) or "fallback", "來源": "stooq", "值": f"NASDAQ {_safe_float(ctx.get('nas', {}).get('pct'), 0):.2f}% / SOX {_safe_float(ctx.get('sox', {}).get('pct'), 0):.2f}% / ADR {_safe_float(ctx.get('adr', {}).get('pct'), 0):.2f}%"},
+            {"因子": "夜盤", "實際取樣日期": _safe_str(ctx.get("night_data_date")) or "fallback", "來源": "stooq", "值": f"ES {_safe_float(ctx.get('es', {}).get('pct'), 0):.2f}% / NQ {_safe_float(ctx.get('nq', {}).get('pct'), 0):.2f}%"},
+            {"因子": "法人", "實際取樣日期": _safe_str(ctx.get("inst_used_date")) or "fallback", "來源": "twse / fallback", "值": (f"外資 {ctx.get('foreign_amt'):.1f}億 / 三大法人 {ctx.get('total3_amt'):.1f}億" if ctx.get('foreign_amt') is not None and ctx.get('total3_amt') is not None else f"外資 {'-' if ctx.get('foreign_amt') is None else f'{ctx.get('foreign_amt'):.1f}億'} / 三大法人 {'-' if ctx.get('total3_amt') is None else f'{ctx.get('total3_amt'):.1f}億'}")},
+            {"因子": "期權", "實際取樣日期": _safe_str(ctx.get("futopt_used_date")) or "fallback", "來源": "taifex / fallback", "值": f"PCR {'-' if ctx.get('pcr') is None else f'{ctx.get('pcr'):.2f}'}"},
+            {"因子": "融資券", "實際取樣日期": _safe_str(ctx.get("margin_used_date")) or "fallback", "來源": "twse / fallback", "值": f"融資 {'-' if ctx.get('margin_change') is None else f'{ctx.get('margin_change'):.2f}億'} / 融券 {'-' if ctx.get('short_change') is None else f'{ctx.get('short_change'):.0f}張'}"},
+            {"因子": "新聞", "實際取樣日期": _safe_str(ctx.get("news_range")) or "fallback", "來源": "news search", "值": _safe_str(ctx.get("main_risk")) or "無"},
+        ])
+        st.dataframe(transparent_rows, use_container_width=True, hide_index=True)
+        st.caption("說明：如果你選的日期不是交易日，或當日官方資料尚未公布，系統會自動往前回找最近可用日期。")
 
 
     a1, a2 = st.columns([1.4, 1.2])
@@ -1524,7 +1558,7 @@ def main():
         preview_cols = [
             "推估日期", "模式名稱", "推估方向", "方向強度", "是否適合進場", "是否適合續抱", "是否適合減碼", "是否適合出場",
             "建議動作", "建議倉位", "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "風險等級",
-            "主要風險", "進場確認條件", "出場警訊"
+            "主要風險", "加權資料日期", "美股資料日期", "夜盤資料日期", "法人資料日期", "期權資料日期", "融資券資料日期", "進場確認條件", "出場警訊"
         ]
         st.dataframe(_format_pred_df(pred_df[[c for c in preview_cols if c in pred_df.columns]]), use_container_width=True, hide_index=True)
 
