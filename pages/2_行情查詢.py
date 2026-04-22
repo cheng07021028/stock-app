@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import time
 from typing import Any
 
 import pandas as pd
@@ -371,6 +372,9 @@ def _init_state(group_map: dict[str, list[dict[str, str]]]):
     default_start = today - timedelta(days=180)
     default_end = today
 
+    if _k("refresh_token") not in st.session_state:
+        st.session_state[_k("refresh_token")] = "init"
+
     if _k("group") not in st.session_state:
         saved_group = _safe_str(saved.get("quick_group", ""))
         st.session_state[_k("group")] = saved_group if saved_group in groups else (groups[0] if groups else "")
@@ -549,6 +553,22 @@ def _render_realtime_hero(info: dict[str, Any], stock_label: str, market_type: s
     change_pct = _safe_float(info.get("change_pct"))
     total_volume = _safe_float(info.get("total_volume"))
     update_time = _safe_str(info.get("update_time"))
+    price_source = _safe_str(info.get("price_source"))
+    change_source = _safe_str(info.get("change_source"))
+
+    source_map = {
+        "trade": "成交價",
+        "match": "撮合價",
+        "mid": "買賣中間價",
+        "bid": "買進價",
+        "ask": "賣出價",
+        "prev_close": "昨收回退",
+        "none": "無",
+    }
+    change_map = {
+        "realtime_vs_prev": "即時價對昨收",
+        "prev_close_missing": "缺昨收",
+    }
 
     delta_text = "—"
     if change is not None and change_pct is not None:
@@ -589,7 +609,9 @@ def _render_realtime_hero(info: dict[str, Any], stock_label: str, market_type: s
         f"""
         <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-radius:18px;padding:14px 16px;margin-bottom:14px;">
             <div style="font-size:22px;font-weight:900;color:#f8fafc;">{stock_label}</div>
-            <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">市場：{market_type}｜更新時間：{update_time or '—'}</div>
+            <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">
+            市場：{market_type}｜更新時間：{update_time or '—'}｜價格來源：{source_map.get(price_source, price_source or '—')}｜漲跌來源：{change_map.get(change_source, change_source or '—')}
+        </div>
         </div>
         """
     )
@@ -641,6 +663,13 @@ def main():
     render_pro_section("查詢條件")
     _repair_state(group_map)
 
+    refresh_cols = st.columns([1.2, 5])
+    with refresh_cols[0]:
+        if st.button("更新即時資料", use_container_width=True, type="primary", key=_k("refresh_btn")):
+            st.session_state[_k("refresh_token")] = str(int(time.time() * 1000))
+    with refresh_cols[1]:
+        st.caption(f"刷新識別：{st.session_state.get(_k('refresh_token'), 'init')}")
+
     groups = list(group_map.keys())
     current_group = _safe_str(st.session_state.get(_k("group"), ""))
     items = group_map.get(current_group, [])
@@ -686,7 +715,12 @@ def main():
     final_market = market_type2 or market_type
 
     with st.spinner("載入即時資料中..."):
-        info = get_realtime_stock_info(selected_code, final_name, final_market)
+        info = get_realtime_stock_info(
+            selected_code,
+            final_name,
+            final_market,
+            refresh_token=st.session_state.get(_k("refresh_token"), "init"),
+        )
 
     history_df = _get_history_data_smart(
         stock_no=selected_code,
@@ -768,6 +802,8 @@ def main():
                     "漲跌幅(%)": info.get("change_pct"),
                     "總量": info.get("total_volume"),
                     "單量": info.get("trade_volume"),
+                    "價格來源": info.get("price_source"),
+                    "漲跌來源": info.get("change_source"),
                     "更新時間": info.get("update_time"),
                     "是否成功": info.get("ok"),
                     "訊息": info.get("message"),
