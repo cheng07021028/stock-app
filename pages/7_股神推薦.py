@@ -1302,16 +1302,16 @@ def _fetch_yahoo_profile_one(code: str, market: str = "") -> dict[str, str]:
 def _apply_yahoo_profile_fill(master_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
     if master_df is None or master_df.empty:
-        return pd.DataFrame(columns=cols), {"rows": 0, "official_hit": 0, "source_api": "yahoo_profile_fill", "error": ""}
+        return pd.DataFrame(columns=cols), {"rows": 0, "official_hit": 0, "source_api": "yahoo_profile_primary", "error": ""}
 
     work = master_df.copy()
-    target_mask = work["official_industry"].fillna("").astype(str).str.strip().eq("")
-    targets = work[target_mask][["code", "market"]].drop_duplicates().to_dict(orient="records")
+    targets = work[["code", "market"]].drop_duplicates().to_dict(orient="records")
     if not targets:
-        return work, {"rows": 0, "official_hit": 0, "source_api": "yahoo_profile_fill", "error": ""}
+        return work, {"rows": 0, "official_hit": 0, "source_api": "yahoo_profile_primary", "error": ""}
 
     results: dict[str, dict[str, str]] = {}
-    max_workers = min(12, max(4, len(targets) // 30 + 1))
+    errors: list[str] = []
+    max_workers = min(12, max(4, len(targets) // 40 + 1))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         fut_map = {ex.submit(_fetch_yahoo_profile_one, t.get("code", ""), t.get("market", "")): t for t in targets}
         for fut in as_completed(fut_map):
@@ -1319,21 +1319,25 @@ def _apply_yahoo_profile_fill(master_df: pd.DataFrame) -> tuple[pd.DataFrame, di
             code = _normalize_code(t.get("code"))
             try:
                 res = fut.result() or {}
-            except Exception:
+            except Exception as e:
                 res = {}
+                if len(errors) < 5:
+                    errors.append(f"{code}:{type(e).__name__}")
             if code and res:
                 results[code] = res
 
     hit = 0
+    yahoo_rows = 0
     for idx in work.index:
         code = _normalize_code(work.at[idx, "code"])
         res = results.get(code, {})
         if not res:
             continue
+        yahoo_rows += 1
         industry_raw = _safe_str(res.get("official_industry_raw"))
         industry_name = _official_industry_name(res.get("official_industry")) or _official_industry_name(industry_raw)
         market_guess = _safe_str(res.get("market"))
-        if market_guess and _safe_str(work.at[idx, "market"]) == "":
+        if market_guess:
             work.at[idx, "market"] = market_guess
         if industry_name:
             work.at[idx, "official_industry_raw"] = industry_raw or industry_name
@@ -1341,19 +1345,23 @@ def _apply_yahoo_profile_fill(master_df: pd.DataFrame) -> tuple[pd.DataFrame, di
             work.at[idx, "official_industry"] = industry_name
             work.at[idx, "theme_category"] = _theme_from_official(industry_name, work.at[idx, "name"])
             work.at[idx, "category"] = work.at[idx, "theme_category"]
-            work.at[idx, "source"] = "yahoo_profile_fill"
+            work.at[idx, "source"] = "yahoo_profile_primary"
             work.at[idx, "source_api"] = _safe_str(res.get("source_api")) or "yahoo_profile"
-            work.at[idx, "source_rank"] = 3
+            work.at[idx, "source_rank"] = 0
             work.at[idx, "待修原因"] = ""
             hit += 1
+        else:
+            if _safe_str(work.at[idx, "category"]).startswith("其他"):
+                work.at[idx, "待修原因"] = _safe_str(work.at[idx, "待修原因"]) or "Yahoo 類別未抓到"
 
     info = {
-        "rows": len(results),
+        "rows": yahoo_rows,
         "official_hit": hit,
-        "source_api": "yahoo_profile_fill",
-        "error": "",
+        "source_api": "yahoo_profile_primary",
+        "error": "；".join(errors[:5]),
     }
     return work[cols].copy(), info
+
 
 def _build_utils_master_fallback() -> tuple[pd.DataFrame, dict[str, Any]]:
     dfs = []
@@ -1570,7 +1578,7 @@ def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None
     if _safe_str(tpex_r_info.get("error")):
         logs.append(f"TPEX-興櫃 錯誤：{_safe_str(tpex_r_info.get('error'))}")
 
-    logs.append(f"Yahoo 補值：{_n(yahoo_info.get('rows'))} 筆 / 成功補正式產業 {_n(yahoo_info.get('official_hit'))} 筆 / API: {_safe_str(yahoo_info.get('source_api')) or '-'}")
+    logs.append(f"Yahoo 主來源：{_n(yahoo_info.get('rows'))} 筆 / 成功套用類別 {_n(yahoo_info.get('official_hit'))} 筆 / API: {_safe_str(yahoo_info.get('source_api')) or '-'}")
     if _safe_str(yahoo_info.get("error")):
         logs.append(f"Yahoo 錯誤：{_safe_str(yahoo_info.get('error'))}")
 
@@ -1591,7 +1599,7 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
     logs = list(st.session_state.get(_k("master_diag_logs"), []))
 
     twse_failed = any("TWSE 錯誤：" in str(x) for x in logs) or any("TWSE：0 筆" in str(x) for x in logs)
-    yahoo_helped = any("Yahoo 補值：" in str(x) and "成功補正式產業 0 筆" not in str(x) for x in logs)
+    yahoo_helped = any("Yahoo 主來源：" in str(x) and "成功套用類別 0 筆" not in str(x) for x in logs)
     if fresh_df.empty:
         return fresh_df, logs + ["主檔更新失敗：官方主檔與 fallback 皆無資料"]
 
