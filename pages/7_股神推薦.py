@@ -1488,7 +1488,7 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _load_master_df() -> pd.DataFrame:
+def _load_master_df_fallback_only() -> pd.DataFrame:
     try:
         repo_df = load_stock_master()
     except Exception:
@@ -3422,7 +3422,11 @@ def main():
         rec_df, category_strength_df = _load_recommend_result_from_state()
 
     if rec_df.empty:
-        st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
+        if submit_recommend or submit_refresh:
+            st.warning("本輪條件篩選後為 0 檔，代表推薦流程有執行，但目前門檻、風險過濾或掃描池條件過嚴，沒有股票通過。")
+            st.info("建議先改成：風險過濾=寬鬆、起漲前兆下限=30、交易可行下限=30、訊號分數下限=-3，再重新推薦。")
+        else:
+            st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
         return
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
