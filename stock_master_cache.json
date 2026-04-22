@@ -516,8 +516,8 @@
     "name": "漢田生技",
     "market": "上櫃",
     "official_industry": "食品工業",
-    "theme_category": "生技醫療",
-    "category": "生技醫療"
+    "theme_category": "食品民生",
+    "category": "食品民生"
   },
   {
     "code": "1295",
@@ -692,8 +692,8 @@
     "name": "台翰",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "1337",
@@ -1452,8 +1452,8 @@
     "name": "濱川",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "1570",
@@ -1572,8 +1572,8 @@
     "name": "川寶",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "1597",
@@ -2132,8 +2132,8 @@
     "name": "光洋科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "1786",
@@ -2172,8 +2172,8 @@
     "name": "金穎生技",
     "market": "上櫃",
     "official_industry": "食品工業",
-    "theme_category": "生技醫療",
-    "category": "生技醫療"
+    "theme_category": "食品民生",
+    "category": "食品民生"
   },
   {
     "code": "1799",
@@ -2244,8 +2244,8 @@
     "name": "富喬",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "1817",
@@ -5436,8 +5436,8 @@
     "name": "誠品生活",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "2929",
@@ -5964,32 +5964,32 @@
     "name": "泰偉",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "3066",
     "name": "李洲",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3067",
     "name": "全域",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3071",
     "name": "協禧",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3073",
@@ -6004,8 +6004,8 @@
     "name": "僑威",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3081",
@@ -6020,8 +6020,8 @@
     "name": "網龍",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "3085",
@@ -6036,16 +6036,16 @@
     "name": "華義*",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "3088",
     "name": "艾訊",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3090",
@@ -6068,8 +6068,8 @@
     "name": "港建*",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3094",
@@ -6108,16 +6108,16 @@
     "name": "好德",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3115",
     "name": "富榮綱",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3117",
@@ -6148,8 +6148,8 @@
     "name": "昇銳",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3130",
@@ -6164,8 +6164,8 @@
     "name": "弘塑",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "半導體設備材料",
-    "category": "半導體設備材料"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3135",
@@ -6332,8 +6332,8 @@
     "name": "雲嘉南",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3197",
@@ -6364,16 +6364,16 @@
     "name": "志豐",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3207",
     "name": "耀勝",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3209",
@@ -6388,24 +6388,24 @@
     "name": "順達",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3213",
     "name": "茂訊",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3217",
     "name": "優群",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3218",
@@ -6420,8 +6420,8 @@
     "name": "倚強科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3221",
@@ -6436,8 +6436,8 @@
     "name": "三顧",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3226",
@@ -6476,8 +6476,8 @@
     "name": "錦明",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3231",
@@ -6492,8 +6492,8 @@
     "name": "昱捷",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3234",
@@ -6508,8 +6508,8 @@
     "name": "千如",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3252",
@@ -6580,16 +6580,16 @@
     "name": "東碩",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3276",
     "name": "宇環",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3284",
@@ -6604,56 +6604,56 @@
     "name": "微端",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3287",
     "name": "廣寰科",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3288",
     "name": "點晶",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3289",
     "name": "宜特",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3290",
     "name": "東浦",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3293",
     "name": "鈊象",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "3294",
     "name": "英濟",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3296",
@@ -6668,16 +6668,16 @@
     "name": "杭特",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3303",
     "name": "岱稜",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3305",
@@ -6708,8 +6708,8 @@
     "name": "佳穎",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3311",
@@ -6756,16 +6756,16 @@
     "name": "建舜電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3323",
     "name": "加百裕",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3324",
@@ -6780,16 +6780,16 @@
     "name": "旭品",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3332",
     "name": "幸康",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3338",
@@ -6804,8 +6804,8 @@
     "name": "泰谷",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3342",
@@ -6828,16 +6828,16 @@
     "name": "寶德",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3354",
     "name": "律勝",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3356",
@@ -6852,24 +6852,24 @@
     "name": "臺慶科",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3360",
     "name": "尚立",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3362",
     "name": "先進光",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3363",
@@ -6900,8 +6900,8 @@
     "name": "熱映",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3374",
@@ -6940,24 +6940,24 @@
     "name": "崇越電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "半導體設備材料",
-    "category": "半導體設備材料"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3390",
     "name": "旭軟",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3402",
     "name": "漢科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3405",
@@ -7028,8 +7028,8 @@
     "name": "哲固",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3437",
@@ -7068,8 +7068,8 @@
     "name": "利機",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3447",
@@ -7092,8 +7092,8 @@
     "name": "由田",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3463",
@@ -7140,8 +7140,8 @@
     "name": "安勤",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3481",
@@ -7156,16 +7156,16 @@
     "name": "力致",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3484",
     "name": "崧騰",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3485",
@@ -7188,8 +7188,8 @@
     "name": "單井",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3491",
@@ -7204,8 +7204,8 @@
     "name": "長盛",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3494",
@@ -7220,8 +7220,8 @@
     "name": "陽程",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3499",
@@ -7252,8 +7252,8 @@
     "name": "位速",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3509",
@@ -7276,8 +7276,8 @@
     "name": "矽瑪",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3512",
@@ -7300,8 +7300,8 @@
     "name": "亞帝歐",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3518",
@@ -7316,8 +7316,8 @@
     "name": "華盈",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3521",
@@ -7340,8 +7340,8 @@
     "name": "迎輝",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3525",
@@ -7356,8 +7356,8 @@
     "name": "凡甲",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3527",
@@ -7396,8 +7396,8 @@
     "name": "先益",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3532",
@@ -7428,24 +7428,24 @@
     "name": "堡達",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3540",
     "name": "曜越",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3541",
     "name": "西柏",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3543",
@@ -7468,16 +7468,16 @@
     "name": "宇峻",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "3548",
     "name": "兆利",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3550",
@@ -7500,8 +7500,8 @@
     "name": "同致",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3555",
@@ -7588,16 +7588,16 @@
     "name": "泓格",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3580",
     "name": "友威科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3581",
@@ -7628,8 +7628,8 @@
     "name": "閎康",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3588",
@@ -7668,8 +7668,8 @@
     "name": "磐儀",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3595",
@@ -7692,8 +7692,8 @@
     "name": "映興",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3601",
@@ -7732,24 +7732,24 @@
     "name": "三一東林",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3611",
     "name": "鼎翰",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3615",
     "name": "安可",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3616",
@@ -7780,56 +7780,56 @@
     "name": "富晶通",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3624",
     "name": "光頡",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3625",
     "name": "西勝",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3628",
     "name": "盈正",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3629",
     "name": "地心引力",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "3630",
     "name": "新鉅科",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3631",
     "name": "晟楠",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3632",
@@ -7860,8 +7860,8 @@
     "name": "艾恩特",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3652",
@@ -7900,8 +7900,8 @@
     "name": "鑫科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3664",
@@ -7924,8 +7924,8 @@
     "name": "光耀",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3669",
@@ -8028,24 +8028,24 @@
     "name": "湧德",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3691",
     "name": "碩禾",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3693",
     "name": "營邦",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3694",
@@ -8124,16 +8124,16 @@
     "name": "鑫聯大投控",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "3710",
     "name": "連展投控",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "3711",
@@ -9068,8 +9068,8 @@
     "name": "科嶠",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4543",
@@ -9156,8 +9156,8 @@
     "name": "橙的",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4555",
@@ -9324,8 +9324,8 @@
     "name": "達航科技",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4580",
@@ -9532,8 +9532,8 @@
     "name": "熒茂",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4730",
@@ -9668,8 +9668,8 @@
     "name": "勤凱科技",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4763",
@@ -9764,8 +9764,8 @@
     "name": "桂田文創",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "4807",
@@ -9884,8 +9884,8 @@
     "name": "欣厚-KY",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "4925",
@@ -9916,16 +9916,16 @@
     "name": "新盛力",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "4933",
     "name": "友輝",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4934",
@@ -9956,8 +9956,8 @@
     "name": "亞電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4942",
@@ -9980,8 +9980,8 @@
     "name": "辣椒",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "4949",
@@ -10092,8 +10092,8 @@
     "name": "湯石照明",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4973",
@@ -10108,8 +10108,8 @@
     "name": "亞泰",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4976",
@@ -10156,8 +10156,8 @@
     "name": "科誠",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "4989",
@@ -10188,8 +10188,8 @@
     "name": "晶達",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "4999",
@@ -10372,8 +10372,8 @@
     "name": "安力-KY",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5225",
@@ -10388,24 +10388,24 @@
     "name": "立凱-KY",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電池材料",
-    "category": "電池材料"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5228",
     "name": "鈺鎧",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5230",
     "name": "雷笛克光學",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5234",
@@ -10452,8 +10452,8 @@
     "name": "智晶",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5246",
@@ -10476,8 +10476,8 @@
     "name": "天鉞電",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5254",
@@ -10508,8 +10508,8 @@
     "name": "智崴",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "5267",
@@ -10612,16 +10612,16 @@
     "name": "宜鼎",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5291",
     "name": "邑昇",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5292",
@@ -10692,8 +10692,8 @@
     "name": "系統電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5310",
@@ -10724,8 +10724,8 @@
     "name": "光聯",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5321",
@@ -10748,16 +10748,16 @@
     "name": "華容",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5340",
     "name": "建榮",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5344",
@@ -10820,16 +10820,16 @@
     "name": "佳總",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5356",
     "name": "協益",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5364",
@@ -10852,16 +10852,16 @@
     "name": "光譜",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5386",
     "name": "青雲",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5387",
@@ -10884,8 +10884,8 @@
     "name": "能率",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5398",
@@ -10924,8 +10924,8 @@
     "name": "振發",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5432",
@@ -10948,16 +10948,16 @@
     "name": "東友",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5439",
     "name": "高技",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5443",
@@ -10980,8 +10980,8 @@
     "name": "佶優",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5455",
@@ -10996,32 +10996,32 @@
     "name": "宣德",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5460",
     "name": "同協",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5464",
     "name": "霖宏",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5465",
     "name": "富驊",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5468",
@@ -11052,24 +11052,24 @@
     "name": "聰泰",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5475",
     "name": "德宏",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5478",
     "name": "智冠",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "5481",
@@ -11108,40 +11108,40 @@
     "name": "松普",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5489",
     "name": "彩富",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5490",
     "name": "同亨",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "5493",
     "name": "三聯",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5498",
     "name": "凱崴",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5508",
@@ -11284,8 +11284,8 @@
     "name": "聖暉*",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "5538",
@@ -11620,8 +11620,8 @@
     "name": "致和證",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "5865",
@@ -11716,8 +11716,8 @@
     "name": "台名",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "5880",
@@ -11804,40 +11804,40 @@
     "name": "宏遠證",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6016",
     "name": "康和證",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6020",
     "name": "大展證",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6021",
     "name": "美好證",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6023",
     "name": "元大期貨",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6024",
@@ -11860,8 +11860,8 @@
     "name": "福邦證",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6027",
@@ -11876,8 +11876,8 @@
     "name": "公勝保經",
     "market": "上櫃",
     "official_industry": "金融保險業",
-    "theme_category": "金融保險",
-    "category": "金融保險"
+    "theme_category": "保險",
+    "category": "保險"
   },
   {
     "code": "6029",
@@ -11972,8 +11972,8 @@
     "name": "寬魚國際",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6103",
@@ -12012,8 +12012,8 @@
     "name": "光聚晶電",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6112",
@@ -12028,16 +12028,16 @@
     "name": "亞矽",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6114",
     "name": "久威",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6115",
@@ -12068,8 +12068,8 @@
     "name": "建達",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6120",
@@ -12084,8 +12084,8 @@
     "name": "新普",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6122",
@@ -12108,32 +12108,32 @@
     "name": "業強",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6125",
     "name": "廣運",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6126",
     "name": "信音",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6127",
     "name": "九豪",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6128",
@@ -12172,8 +12172,8 @@
     "name": "萬旭",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6136",
@@ -12236,16 +12236,16 @@
     "name": "得利影",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6146",
     "name": "耕興",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6147",
@@ -12268,16 +12268,16 @@
     "name": "撼訊",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6151",
     "name": "晉倫",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6152",
@@ -12300,8 +12300,8 @@
     "name": "順發",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6155",
@@ -12316,32 +12316,32 @@
     "name": "松上",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6158",
     "name": "禾昌",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6160",
     "name": "欣技",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6161",
     "name": "捷波",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6163",
@@ -12380,8 +12380,8 @@
     "name": "久正",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6168",
@@ -12396,8 +12396,8 @@
     "name": "昱泉",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6170",
@@ -12420,24 +12420,24 @@
     "name": "信昌電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6174",
     "name": "安碁",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6175",
     "name": "立敦",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6176",
@@ -12468,8 +12468,8 @@
     "name": "橘子",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6182",
@@ -12500,8 +12500,8 @@
     "name": "幃翔",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6186",
@@ -12524,8 +12524,8 @@
     "name": "廣明",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6189",
@@ -12564,8 +12564,8 @@
     "name": "育富",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6195",
@@ -12628,16 +12628,16 @@
     "name": "海韻電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6204",
     "name": "艾華",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6205",
@@ -12660,8 +12660,8 @@
     "name": "雷科",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6208",
@@ -12684,8 +12684,8 @@
     "name": "慶生",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6212",
@@ -12732,8 +12732,8 @@
     "name": "中探針",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6218",
@@ -12756,8 +12756,8 @@
     "name": "岳豐",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6221",
@@ -12772,8 +12772,8 @@
     "name": "立軒",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6223",
@@ -12812,16 +12812,16 @@
     "name": "茂綸",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6228",
     "name": "全譜",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6229",
@@ -12860,8 +12860,8 @@
     "name": "高僑",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6235",
@@ -12932,8 +12932,8 @@
     "name": "茂迪",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6245",
@@ -12948,8 +12948,8 @@
     "name": "臺龍",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6248",
@@ -12972,8 +12972,8 @@
     "name": "百徽",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6261",
@@ -13004,16 +13004,16 @@
     "name": "方土昶",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6266",
     "name": "泰詠",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6269",
@@ -13028,8 +13028,8 @@
     "name": "倍微",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6271",
@@ -13052,24 +13052,24 @@
     "name": "台燿",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "PCB載板",
-    "category": "PCB載板"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6275",
     "name": "元山",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6276",
     "name": "安鈦克",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6277",
@@ -13092,8 +13092,8 @@
     "name": "胡連",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "連接器",
-    "category": "連接器"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6281",
@@ -13124,8 +13124,8 @@
     "name": "佳邦",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6285",
@@ -13148,8 +13148,8 @@
     "name": "良維",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "連接器",
-    "category": "連接器"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6291",
@@ -13164,16 +13164,16 @@
     "name": "迅德",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6294",
     "name": "智基",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6403",
@@ -13260,16 +13260,16 @@
     "name": "詠昇",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6419",
     "name": "京晨科",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6423",
@@ -13316,8 +13316,8 @@
     "name": "今展科",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6434",
@@ -13348,8 +13348,8 @@
     "name": "廣錠",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6442",
@@ -13484,8 +13484,8 @@
     "name": "華豫寧",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6475",
@@ -13516,8 +13516,8 @@
     "name": "弘煜科",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6483",
@@ -13596,8 +13596,8 @@
     "name": "久禾光",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6499",
@@ -13660,8 +13660,8 @@
     "name": "啟發電",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6515",
@@ -13684,8 +13684,8 @@
     "name": "保勝光學",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6518",
@@ -13788,8 +13788,8 @@
     "name": "倉和",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6539",
@@ -13812,8 +13812,8 @@
     "name": "隆中",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6543",
@@ -13892,8 +13892,8 @@
     "name": "勝品",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6558",
@@ -13916,8 +13916,8 @@
     "name": "欣普羅",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6561",
@@ -13980,8 +13980,8 @@
     "name": "維田",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6572",
@@ -14020,8 +14020,8 @@
     "name": "勁豐",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6578",
@@ -14076,8 +14076,8 @@
     "name": "南俊國際",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6585",
@@ -14156,16 +14156,16 @@
     "name": "寬宏藝術",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6597",
     "name": "立誠",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6598",
@@ -14244,8 +14244,8 @@
     "name": "朋億*",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6614",
@@ -14396,8 +14396,8 @@
     "name": "富致",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6643",
@@ -14468,8 +14468,8 @@
     "name": "天正國際",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6655",
@@ -14532,8 +14532,8 @@
     "name": "群翊",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6665",
@@ -14556,8 +14556,8 @@
     "name": "信紘科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6668",
@@ -14644,8 +14644,8 @@
     "name": "鑫創電子",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "其他電子",
-    "category": "其他電子"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6682",
@@ -14876,8 +14876,8 @@
     "name": "矽科宏晟",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6726",
@@ -14892,8 +14892,8 @@
     "name": "亞泰金屬",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6728",
@@ -14948,8 +14948,8 @@
     "name": "美達科技",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6737",
@@ -14972,8 +14972,8 @@
     "name": "竹陞科技",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6741",
@@ -15100,8 +15100,8 @@
     "name": "穩得",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6762",
@@ -15484,8 +15484,8 @@
     "name": "聯寶",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6823",
@@ -15604,8 +15604,8 @@
     "name": "東研信超",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6841",
@@ -15716,16 +15716,16 @@
     "name": "數泓科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6856",
     "name": "鑫傳",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "6857",
@@ -15748,8 +15748,8 @@
     "name": "伯特光",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6861",
@@ -15884,8 +15884,8 @@
     "name": "鏵友益",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6878",
@@ -16012,8 +16012,8 @@
     "name": "創為精密",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6901",
@@ -16036,8 +16036,8 @@
     "name": "巨漢",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6904",
@@ -16108,8 +16108,8 @@
     "name": "鴻呈",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6914",
@@ -16180,8 +16180,8 @@
     "name": "宸曜",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "6923",
@@ -16492,8 +16492,8 @@
     "name": "汎瑋材料",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "半導體設備材料",
-    "category": "半導體設備材料"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "6968",
@@ -16716,8 +16716,8 @@
     "name": "邑錡",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "7419",
@@ -16868,8 +16868,8 @@
     "name": "樂意",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "7590",
@@ -16956,8 +16956,8 @@
     "name": "銳澤",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "7704",
@@ -16996,8 +16996,8 @@
     "name": "全家餐飲",
     "market": "上櫃",
     "official_industry": "觀光餐旅",
-    "theme_category": "食品民生",
-    "category": "食品民生"
+    "theme_category": "航空觀光",
+    "category": "航空觀光"
   },
   {
     "code": "7709",
@@ -17140,8 +17140,8 @@
     "name": "光焱科技",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "7729",
@@ -17244,8 +17244,8 @@
     "name": "崴寶",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "7745",
@@ -17316,8 +17316,8 @@
     "name": "星亞",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "7754",
@@ -17588,8 +17588,8 @@
     "name": "安葆",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "7793",
@@ -18500,8 +18500,8 @@
     "name": "光菱",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8033",
@@ -18524,8 +18524,8 @@
     "name": "長園科",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電池材料",
-    "category": "電池材料"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8039",
@@ -18548,16 +18548,16 @@
     "name": "金山電",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8043",
     "name": "蜜望實",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8044",
@@ -18588,8 +18588,8 @@
     "name": "星雲",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8048",
@@ -18604,16 +18604,16 @@
     "name": "晶采",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8050",
     "name": "廣積",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "8054",
@@ -18644,8 +18644,8 @@
     "name": "東捷",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8066",
@@ -18660,24 +18660,24 @@
     "name": "志旭",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8068",
     "name": "全達",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8069",
     "name": "元太",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8070",
@@ -18692,8 +18692,8 @@
     "name": "能率網通",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "網通交換器",
-    "category": "網通交換器"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8072",
@@ -18708,16 +18708,16 @@
     "name": "鉅橡",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8076",
     "name": "伍豐",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "8077",
@@ -18756,16 +18756,16 @@
     "name": "巨虹",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8085",
     "name": "福華",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8086",
@@ -18812,24 +18812,24 @@
     "name": "建暐",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8093",
     "name": "保銳",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8096",
     "name": "擎亞",
     "market": "上櫃",
     "official_industry": "電子通路業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8097",
@@ -18908,8 +18908,8 @@
     "name": "博大",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8110",
@@ -18924,8 +18924,8 @@
     "name": "立碁",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8112",
@@ -18964,8 +18964,8 @@
     "name": "越峰",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8131",
@@ -18996,8 +18996,8 @@
     "name": "正淩",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8150",
@@ -19020,8 +19020,8 @@
     "name": "博智",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8162",
@@ -19060,16 +19060,16 @@
     "name": "加高",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8183",
     "name": "精星",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8201",
@@ -19132,16 +19132,16 @@
     "name": "新漢",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "8240",
     "name": "華宏",
     "market": "上櫃",
     "official_industry": "光電業",
-    "theme_category": "光學鏡頭",
-    "category": "光學鏡頭"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8249",
@@ -19220,16 +19220,16 @@
     "name": "泰藝",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8291",
     "name": "尚茂",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8298",
@@ -19380,8 +19380,8 @@
     "name": "金居",
     "market": "上櫃",
     "official_industry": "電子零組件業",
-    "theme_category": "電子零組件",
-    "category": "電子零組件"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8359",
@@ -19540,8 +19540,8 @@
     "name": "森田",
     "market": "上櫃",
     "official_industry": "電腦及週邊設備業",
-    "theme_category": "AI伺服器",
-    "category": "AI伺服器"
+    "theme_category": "半導體設備材料",
+    "category": "半導體設備材料"
   },
   {
     "code": "8411",
@@ -19620,8 +19620,8 @@
     "name": "匯鑽科",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8432",
@@ -19708,16 +19708,16 @@
     "name": "華研",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "8450",
     "name": "霹靂",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "8452",
@@ -19748,8 +19748,8 @@
     "name": "大拓-KY",
     "market": "上櫃",
     "official_industry": "其他電子業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "其他電子",
+    "category": "其他電子"
   },
   {
     "code": "8456",
@@ -19964,8 +19964,8 @@
     "name": "時報",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "8924",
@@ -20788,8 +20788,8 @@
     "name": "琉園",
     "market": "上櫃",
     "official_industry": "文化創意業",
-    "theme_category": "其他_主題未映射",
-    "category": "其他_主題未映射"
+    "theme_category": "IC設計",
+    "category": "IC設計"
   },
   {
     "code": "9950",
