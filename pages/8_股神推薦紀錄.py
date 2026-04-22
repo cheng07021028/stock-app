@@ -466,26 +466,39 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
     return payload
 
 
+def _read_watchlist_from_github() -> tuple[dict[str, list[dict[str, str]]], str]:
+    cfg = _watchlist_github_config()
+    token = cfg["token"]
+    if not token:
+        return {}, "未設定 GITHUB_TOKEN，無法讀取 watchlist.json"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return {}, ""
+        if resp.status_code != 200:
+            return {}, f"watchlist GitHub 讀取失敗：{resp.status_code} / {resp.text[:300]}"
+        data = resp.json()
+        content = data.get("content", "")
+        if not content:
+            return {}, ""
+        decoded = base64.b64decode(content).decode("utf-8")
+        payload = json.loads(decoded)
+        if not isinstance(payload, dict):
+            return {}, "watchlist.json 格式錯誤，根層必須是 dict"
+        return _normalize_watchlist_payload(payload), ""
+    except Exception as e:
+        return {}, f"watchlist GitHub 讀取例外：{e}"
+
+
 def _load_watchlist_payload() -> dict[str, list[dict[str, str]]]:
-    raw = get_normalized_watchlist()
-    result: dict[str, list[dict[str, str]]] = {}
-    if isinstance(raw, dict):
-        for group_name, items in raw.items():
-            g = _safe_str(group_name) or "未分組"
-            result[g] = []
-            if isinstance(items, list):
-                seen = set()
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    code = _normalize_code(item.get("code"))
-                    name = _safe_str(item.get("name")) or code
-                    market = _safe_str(item.get("market")) or "上市"
-                    if not code or code in seen:
-                        continue
-                    seen.add(code)
-                    result[g].append({"code": code, "name": name, "market": market})
-    return _normalize_watchlist_payload(result)
+    payload, err = _read_watchlist_from_github()
+    st.session_state[_k("watchlist_import_detail")] = err or "GitHub watchlist 讀取成功"
+    return _normalize_watchlist_payload(payload)
 
 
 def _get_watchlist_sha() -> tuple[str, str]:
@@ -581,9 +594,14 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
     payload = _normalize_watchlist_payload(payload)
     ok, msg = _write_watchlist_to_github(payload)
     if ok:
+        try:
+            get_normalized_watchlist.clear()
+        except Exception:
+            pass
         st.session_state["watchlist_data"] = copy.deepcopy(payload)
         st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
         st.session_state["watchlist_last_saved_at"] = _now_text()
+        st.session_state[_k("watchlist_import_detail")] = f"目標群組：{target_group}｜新增 {add_count} 檔｜略過 {skip_count} 檔"
         return True, f"{msg}｜匯入 {add_count} 檔，略過 {skip_count} 檔"
     return False, msg
 
@@ -1263,6 +1281,9 @@ def main():
                 ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
                 _set_status(msg, "success" if ok else "warning")
                 st.rerun()
+            detail_msg = _safe_str(st.session_state.get(_k("watchlist_import_detail"), ""))
+            if detail_msg:
+                st.caption(detail_msg)
         with action_cols[2]:
             if st.button("✅ 套用編輯", use_container_width=True):
                 master = live_df.copy()
