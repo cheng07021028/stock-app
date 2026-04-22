@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 import streamlit as st
@@ -16,23 +16,31 @@ from firebase_admin import credentials, firestore, storage
 TAIWAN_TZ = timezone(timedelta(hours=8))
 
 
-def _get_tw_now():
+def _get_tw_now() -> datetime:
     return datetime.now(TAIWAN_TZ)
 
 
 def init_firebase():
+    """
+    初始化 Firebase Admin。
+    只初始化一次，避免重複 initialize_app() 報錯。
+    """
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
     raw_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON", "")
-    bucket_name = st.secrets.get("FIREBASE_STORAGE_BUCKET", "")
+    bucket_name = st.secrets.get("FIREBASE_STORAGE_BUCKET", "").strip()
 
     if not raw_json:
         raise RuntimeError("未設定 FIREBASE_SERVICE_ACCOUNT_JSON")
     if not bucket_name:
         raise RuntimeError("未設定 FIREBASE_STORAGE_BUCKET")
 
-    info = json.loads(raw_json)
+    try:
+        info = json.loads(raw_json)
+    except Exception as e:
+        raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT_JSON 不是有效 JSON：{e}") from e
+
     cred = credentials.Certificate(info)
 
     app = firebase_admin.initialize_app(
@@ -49,7 +57,11 @@ def backup_github_repo_to_firebase(
     repo_name: str,
     branch: str = "main",
     github_token: str | None = None,
-):
+) -> dict:
+    """
+    從 GitHub 下載 repo zip，備份到 Firebase Storage，
+    並同步寫入 Firestore 備份紀錄。
+    """
     init_firebase()
 
     zip_url = f"https://github.com/{repo_owner}/{repo_name}/archive/refs/heads/{branch}.zip"
@@ -67,10 +79,13 @@ def backup_github_repo_to_firebase(
 
     now = _get_tw_now()
     ts = now.strftime("%Y%m%d_%H%M%S")
-
     blob_name = f"github_backups/{repo_name}/{branch}/{repo_name}_{branch}_{ts}.zip"
 
-    bucket = storage.bucket()
+    bucket_name = st.secrets.get("FIREBASE_STORAGE_BUCKET", "").strip()
+    if not bucket_name:
+        raise RuntimeError("未設定 FIREBASE_STORAGE_BUCKET")
+
+    bucket = storage.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
     blob.upload_from_file(
@@ -109,7 +124,10 @@ def backup_github_repo_to_firebase(
     }
 
 
-def list_recent_backups(limit: int = 10):
+def list_recent_backups(limit: int = 10) -> list[dict]:
+    """
+    讀取最近幾筆備份紀錄。
+    """
     init_firebase()
     db = firestore.client()
 
