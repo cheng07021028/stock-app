@@ -1,4 +1,5 @@
 from datetime import date
+import time
 import pandas as pd
 import streamlit as st
 
@@ -34,7 +35,7 @@ def _safe_float(v, default=None):
         return default
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def _prepare_dashboard_metrics(df: pd.DataFrame) -> dict:
     if df is None or df.empty:
         return {
@@ -73,7 +74,7 @@ def _prepare_dashboard_metrics(df: pd.DataFrame) -> dict:
     }
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def _prepare_dashboard_table(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -92,7 +93,6 @@ def _prepare_dashboard_table(df: pd.DataFrame) -> pd.DataFrame:
     if exist_numeric_cols:
         display_df[exist_numeric_cols] = display_df[exist_numeric_cols].apply(pd.to_numeric, errors="coerce")
 
-    sort_cols = [c for c in ["群組", "漲跌幅(%)", "漲跌", "總量"] if c in display_df.columns]
     if "群組" in display_df.columns and "漲跌幅(%)" in display_df.columns:
         display_df = display_df.sort_values(
             by=["群組", "漲跌幅(%)"],
@@ -188,6 +188,9 @@ def _init_page_state():
     if _k("force_refresh") not in st.session_state:
         st.session_state[_k("force_refresh")] = False
 
+    if _k("refresh_token") not in st.session_state:
+        st.session_state[_k("refresh_token")] = "init"
+
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
@@ -208,21 +211,34 @@ def main():
 
     query_date = date.today().strftime("%Y%m%d")
 
-    top1, top2 = st.columns([1, 5])
+    top1, top2, top3 = st.columns([1.2, 3, 2])
     with top1:
         refresh_clicked = st.button("更新即時資料", type="primary", use_container_width=True)
     with top2:
         st.caption(f"查詢日期：{query_date}")
+    with top3:
+        st.caption(f"刷新識別：{st.session_state[_k('refresh_token')]}")
 
     if refresh_clicked:
+        new_token = str(int(time.time() * 1000))
+        st.session_state[_k("force_refresh")] = True
+        st.session_state[_k("refresh_token")] = new_token
+        st.session_state[_k("last_refresh_date")] = query_date
+
         get_realtime_watchlist_df.clear()
         _prepare_dashboard_metrics.clear()
         _prepare_dashboard_table.clear()
-        st.session_state[_k("force_refresh")] = True
-        st.session_state[_k("last_refresh_date")] = query_date
+
+    refresh_token = st.session_state[_k("refresh_token")]
 
     with st.spinner("正在讀取即時資料..."):
-        realtime_df = get_realtime_watchlist_df(watchlist_dict, query_date)
+        realtime_df = get_realtime_watchlist_df(
+            watchlist_dict=watchlist_dict,
+            query_date=query_date,
+            refresh_token=refresh_token,
+        )
+
+    st.session_state[_k("force_refresh")] = False
 
     if realtime_df is None or realtime_df.empty:
         st.info("目前沒有可顯示的即時資料。")
