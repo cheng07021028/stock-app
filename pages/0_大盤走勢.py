@@ -329,19 +329,6 @@ def _iter_recent_dates(pred_date_text: str, lookback_days: int = 10) -> list[pd.
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-
-
-def _official_factor_anchor_date(pred_date_text: str) -> pd.Timestamp:
-    dt = pd.to_datetime(pred_date_text, errors="coerce")
-    now = pd.Timestamp.now()
-    if pd.isna(dt):
-        dt = now.normalize()
-    # 官方日資料通常盤後才完整，當天與未來日期一律先回退到前一日再往前找
-    if dt.normalize() >= now.normalize():
-        dt = now.normalize() - pd.Timedelta(days=1)
-    return dt.normalize()
-
-
 def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
     pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
     if pd.isna(pred_dt):
@@ -491,8 +478,7 @@ def _extract_num(text: Any, div: float = 1.0):
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
     out = {"foreign": None, "total3": None, "source": "fallback", "used_date": ""}
-    anchor = _official_factor_anchor_date(pred_date_text)
-    for dt in [anchor - pd.Timedelta(days=i) for i in range(10)]:
+    for dt in _iter_recent_dates(pred_date_text, 8):
         ymd = dt.strftime('%Y%m%d')
         urls = [
             f'https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json',
@@ -521,27 +507,19 @@ def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
             if ('三大法人' in label or label == '合計') and total3 is None:
                 total3 = nums[-1]
         if foreign is not None or total3 is not None:
-            out.update({"foreign": foreign, "total3": total3, "source": 'twse_roll', "used_date": dt.strftime('%Y-%m-%d')})
+            out.update({"foreign": foreign, "total3": total3, "source": 'twse', "used_date": dt.strftime('%Y-%m-%d')})
             return out
+    # fallback：用 ADR / 美股夜盤代理估算，避免頁面只剩空殼
     try:
-        tsm = _price_on_or_before('TSM', pred_date_text, 20)
-        sox = _price_on_or_before('^SOX', pred_date_text, 20)
-        ixic = _price_on_or_before('^IXIC', pred_date_text, 20)
-        es = _price_on_or_before('ES.F', pred_date_text, 20)
-        tw = _price_on_or_before('^TWII', pred_date_text, 20)
-        pct_mix = (
-            float(tsm.get('pct', 0) or 0) * 0.30
-            + float(sox.get('pct', 0) or 0) * 0.25
-            + float(ixic.get('pct', 0) or 0) * 0.20
-            + float(es.get('pct', 0) or 0) * 0.15
-            + float(tw.get('pct', 0) or 0) * 0.10
-        )
-        if abs(pct_mix) < 0.01:
-            pct_mix = float(tw.get('pct', 0) or 0)
-        out['foreign'] = round(pct_mix * 32.0, 2)
-        out['total3'] = round(pct_mix * 40.0, 2)
+        tsm = _price_on_or_before('TSM', pred_date_text, 15)
+        sox = _price_on_or_before('^SOX', pred_date_text, 15)
+        ixic = _price_on_or_before('^IXIC', pred_date_text, 15)
+        spx = _price_on_or_before('^GSPC', pred_date_text, 15)
+        pct_mix = float(tsm.get('pct', 0) or 0) * 0.40 + float(sox.get('pct', 0) or 0) * 0.25 + float(ixic.get('pct', 0) or 0) * 0.20 + float(spx.get('pct', 0) or 0) * 0.15
+        out['foreign'] = round(pct_mix * 28.0, 2)
+        out['total3'] = round(pct_mix * 36.0, 2)
         out['source'] = 'fallback_est'
-        out['used_date'] = _safe_str(tsm.get('used_date') or sox.get('used_date') or ixic.get('used_date') or es.get('used_date') or tw.get('used_date') or pred_date_text)
+        out['used_date'] = _safe_str(tsm.get('used_date') or sox.get('used_date') or ixic.get('used_date') or spx.get('used_date') or pred_date_text)
     except Exception:
         pass
     return out
@@ -550,8 +528,7 @@ def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
 def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
     out = {"foreign_fut_net": None, "pcr": None, "source": 'fallback', "used_date": ""}
     import re
-    anchor = _official_factor_anchor_date(pred_date_text)
-    for dt in [anchor - pd.Timedelta(days=i) for i in range(10)]:
+    for dt in _iter_recent_dates(pred_date_text, 8):
         date_slash = dt.strftime('%Y/%m/%d')
         candidates = [
             f'https://www.taifex.com.tw/cht/3/pcRatio?queryStartDate={date_slash}&queryEndDate={date_slash}',
@@ -568,28 +545,16 @@ def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
                         hit = v
                         break
                 if hit is not None:
-                    out.update({'pcr': hit, 'source': 'taifex_html_roll', 'used_date': dt.strftime('%Y-%m-%d')})
+                    out.update({'pcr': hit, 'source': 'taifex_html', 'used_date': dt.strftime('%Y-%m-%d')})
                     return out
             except Exception:
                 pass
-    try:
-        es = _price_on_or_before('ES.F', pred_date_text, 20)
-        nq = _price_on_or_before('NQ.F', pred_date_text, 20)
-        tsm = _price_on_or_before('TSM', pred_date_text, 20)
-        mix = float(es.get('pct', 0) or 0) * 0.35 + float(nq.get('pct', 0) or 0) * 0.45 + float(tsm.get('pct', 0) or 0) * 0.20
-        out['pcr'] = round(max(0.7, min(1.35, 1.0 - mix / 12.0)), 2)
-        out['foreign_fut_net'] = round(mix * 1800, 0)
-        out['source'] = 'fallback_est'
-        out['used_date'] = _safe_str(es.get('used_date') or nq.get('used_date') or tsm.get('used_date') or pred_date_text)
-    except Exception:
-        pass
     return out
 
 
 def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
     out = {"margin_change": None, "short_change": None, "source": 'fallback', "used_date": ""}
-    anchor = _official_factor_anchor_date(pred_date_text)
-    for dt in [anchor - pd.Timedelta(days=i) for i in range(10)]:
+    for dt in _iter_recent_dates(pred_date_text, 8):
         ymd = dt.strftime('%Y%m%d')
         urls = [
             f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={ymd}&selectType=MS&response=json',
@@ -613,20 +578,18 @@ def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
                 if cand:
                     out['margin_change'] = cand[-2] / 100000000 if abs(cand[-2]) > 10000 else cand[-2]
                     out['short_change'] = cand[-1]
-                    out['source'] = 'twse_margin_roll'
+                    out['source'] = 'twse_margin'
                     out['used_date'] = dt.strftime('%Y-%m-%d')
                     return out
             except Exception:
                 pass
+    # fallback：用 ADR / 美股夜盤代理估算融資券變化
     try:
-        tsm = _price_on_or_before('TSM', pred_date_text, 20)
-        es = _price_on_or_before('ES.F', pred_date_text, 20)
-        nq = _price_on_or_before('NQ.F', pred_date_text, 20)
-        mix = float(tsm.get('pct', 0) or 0) * 0.45 + float(es.get('pct', 0) or 0) * 0.20 + float(nq.get('pct', 0) or 0) * 0.35
+        mix = float(adr_pct or 0) * 0.50 + float(es_pct or 0) * 0.25 + float(nq_pct or 0) * 0.25
         out['margin_change'] = round(-mix * 8.0, 2)
         out['short_change'] = round(max(-30.0, min(30.0, -mix * 6.0)), 2)
         out['source'] = 'fallback_est'
-        out['used_date'] = _safe_str(tsm.get('used_date') or es.get('used_date') or nq.get('used_date') or pred_date_text)
+        out['used_date'] = pred_date_text
     except Exception:
         pass
     return out
@@ -1524,13 +1487,13 @@ def main():
 
     factor_cols = st.columns(4)
     with factor_cols[0]:
-        st.metric("外資買賣超(億)", "-" if ctx.get("foreign_amt") is None else f"{ctx.get('foreign_amt'):.1f}", delta=f"三大法人 {0 if ctx.get('total3_amt') is None else ctx.get('total3_amt'):.1f}")
+        st.metric("外資買賣超(億)", ("-" if ctx.get("foreign_amt") is None else f"{ctx.get('foreign_amt'):.1f}"), delta=f"三大法人 {0 if ctx.get('total3_amt') is None else ctx.get('total3_amt'):.1f} ｜ {(_safe_str(ctx.get('inst_used_date')) or '估算')}")
     with factor_cols[1]:
-        st.metric("PCR", "-" if ctx.get("pcr") is None else f"{ctx.get('pcr'):.2f}", delta=f"期貨估分 {pred_df.iloc[0]['期貨選擇權估分']:.1f}" if not pred_df.empty else "")
+        st.metric("PCR", "-" if ctx.get("pcr") is None else f"{ctx.get('pcr'):.2f}", delta=((f"期貨估分 {pred_df.iloc[0]['期貨選擇權估分']:.1f} ｜ " if not pred_df.empty else "") + (_safe_str(ctx.get('futopt_used_date')) or '估算')))
     with factor_cols[2]:
-        st.metric("融資增減(億)", "-" if ctx.get("margin_change") is None else f"{ctx.get('margin_change'):.2f}", delta=f"融券 {0 if ctx.get('short_change') is None else ctx.get('short_change'):.0f}")
+        st.metric("融資增減(億)", "-" if ctx.get("margin_change") is None else f"{ctx.get('margin_change'):.2f}", delta=f"融券 {0 if ctx.get('short_change') is None else ctx.get('short_change'):.0f} ｜ {(_safe_str(ctx.get('margin_used_date')) or '估算')}")
     with factor_cols[3]:
-        st.metric("因子來源", ctx.get("source_status", "fallback")[:48] + ('...' if len(ctx.get("source_status", "")) > 48 else ''))
+        st.metric("因子來源", ctx.get("source_status", "fallback"))
 
     with st.expander("查看每個因子的實際取樣日期 / 來源", expanded=False):
         transparent_rows = pd.DataFrame([
