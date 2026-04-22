@@ -99,6 +99,54 @@ def _safe_float(v: Any, default: float = np.nan) -> float:
         return default
 
 
+def _ensure_score_dict(v: Any, default_keys: list[str] | None = None, default_value: float = 50.0) -> dict[str, float]:
+    default_keys = default_keys or []
+    base = {k: float(default_value) for k in default_keys}
+
+    if isinstance(v, dict):
+        out = base.copy()
+        for k, val in v.items():
+            out[str(k)] = _safe_float(val, default_value)
+        return out
+
+    if isinstance(v, (list, tuple)):
+        out = base.copy()
+        for i, k in enumerate(default_keys):
+            if i < len(v):
+                out[k] = _safe_float(v[i], default_value)
+        return out
+
+    return base.copy()
+
+
+def _ensure_signal_dict(v: Any) -> dict[str, Any]:
+    if isinstance(v, dict):
+        return v
+    return {"score": 0.0, "label": "中性", "class": "pro-flat"}
+
+
+def _ensure_sr_dict(v: Any) -> dict[str, Any]:
+    if isinstance(v, dict):
+        return v
+    return {
+        "res_20": np.nan,
+        "sup_20": np.nan,
+        "res_60": np.nan,
+        "sup_60": np.nan,
+        "pressure_signal": ("中性", "pro-flat"),
+        "support_signal": ("中性", "pro-flat"),
+        "break_signal": ("區間內", "pro-flat"),
+    }
+
+
+def _signal_label(v: Any, fallback: str) -> str:
+    if isinstance(v, (list, tuple)) and len(v) > 0:
+        return _safe_str(v[0]) or fallback
+    if isinstance(v, dict):
+        return _safe_str(v.get("label")) or fallback
+    return _safe_str(v) or fallback
+
+
 # =========================================================
 # watchlist / state
 # =========================================================
@@ -374,9 +422,17 @@ def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_d
     if df.empty or len(df) < 2:
         return {"ok": False, "code": code, "name": stock_name, "market": market}
 
-    signal = compute_signal_snapshot(df)
-    sr = compute_support_resistance_snapshot(df)
-    radar = compute_radar_scores(df)
+    signal_raw = compute_signal_snapshot(df)
+    sr_raw = compute_support_resistance_snapshot(df)
+    radar_raw = compute_radar_scores(df)
+
+    signal = _ensure_signal_dict(signal_raw)
+    sr = _ensure_sr_dict(sr_raw)
+    radar = _ensure_score_dict(
+        radar_raw,
+        default_keys=["trend", "momentum", "volume", "position", "structure"],
+        default_value=50.0,
+    )
 
     first_close = _safe_float(df.iloc[0].get("收盤價"))
     last_close = _safe_float(df.iloc[-1].get("收盤價"))
@@ -385,14 +441,16 @@ def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_d
     radar_avg = float(
         np.mean(
             [
-                radar.get("trend", 50),
-                radar.get("momentum", 50),
-                radar.get("volume", 50),
-                radar.get("position", 50),
-                radar.get("structure", 50),
+                _safe_float(radar.get("trend", 50), 50),
+                _safe_float(radar.get("momentum", 50), 50),
+                _safe_float(radar.get("volume", 50), 50),
+                _safe_float(radar.get("position", 50), 50),
+                _safe_float(radar.get("structure", 50), 50),
             ]
         )
     )
+
+    signal_score = _safe_float(signal.get("score"), 0.0)
 
     return {
         "ok": True,
@@ -403,20 +461,21 @@ def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_d
         "days": len(df),
         "last_close": last_close,
         "interval_pct": interval_pct,
-        "signal_score": _safe_float(signal.get("score"), 0.0),
-        "signal_badge": score_to_badge(signal.get("score", 0))[0],
+        "signal_score": signal_score,
+        "signal_badge": score_to_badge(signal_score)[0],
         "signal": signal,
         "sr": sr,
         "radar": radar,
         "radar_avg": radar_avg,
         "radar_rows": {
-            "趨勢": radar.get("trend", 50),
-            "動能": radar.get("momentum", 50),
-            "量能": radar.get("volume", 50),
-            "位置": radar.get("position", 50),
-            "結構": radar.get("structure", 50),
+            "趨勢": _safe_float(radar.get("trend", 50), 50),
+            "動能": _safe_float(radar.get("momentum", 50), 50),
+            "量能": _safe_float(radar.get("volume", 50), 50),
+            "位置": _safe_float(radar.get("position", 50), 50),
+            "結構": _safe_float(radar.get("structure", 50), 50),
         },
     }
+
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -461,9 +520,9 @@ def _build_compare_df(items_payload: tuple, start_date: date, end_date: date) ->
                 "20日支撐": sr.get("sup_20"),
                 "60日壓力": sr.get("res_60"),
                 "60日支撐": sr.get("sup_60"),
-                "壓力訊號": sr.get("pressure_signal", ("中性", "pro-flat"))[0],
-                "支撐訊號": sr.get("support_signal", ("中性", "pro-flat"))[0],
-                "區間訊號": sr.get("break_signal", ("區間內", "pro-flat"))[0],
+                "壓力訊號": _signal_label(sr.get("pressure_signal", ("中性", "pro-flat")), "中性"),
+                "支撐訊號": _signal_label(sr.get("support_signal", ("中性", "pro-flat")), "中性"),
+                "區間訊號": _signal_label(sr.get("break_signal", ("區間內", "pro-flat")), "區間內"),
             }
         )
 
