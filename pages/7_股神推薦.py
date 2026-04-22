@@ -1058,6 +1058,133 @@ def _build_universe_from_market(
     return rows
 
 
+
+def _build_filter_debug_df(
+    universe_items: list[dict[str, str]],
+    master_df: pd.DataFrame,
+    start_dt: date,
+    end_dt: date,
+    min_signal_score: float,
+    selected_categories: list[str],
+    mode: str,
+    risk_strictness: str,
+    min_prelaunch_score: float,
+    min_trade_score: float,
+    min_total_score: float,
+) -> pd.DataFrame:
+    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
+    rows = []
+
+    for item in universe_items:
+        code = _normalize_code(item.get("code"))
+        manual_name = _safe_str(item.get("name"))
+        manual_market = _safe_str(item.get("market"))
+        manual_category = _normalize_category(item.get("category"))
+        stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_df)
+
+        info = {
+            "股票代號": code,
+            "股票名稱": stock_name,
+            "市場別": market_type,
+            "類別": category or _infer_category_from_name(stock_name),
+            "類別通過": "是",
+            "訊號通過": "否",
+            "風險通過": "否",
+            "起漲通過": "否",
+            "交易通過": "否",
+            "總分通過": "否",
+            "訊號分數": None,
+            "風險分數": None,
+            "起漲前兆分數": None,
+            "交易可行分數": None,
+            "推薦總分": None,
+            "淘汰原因": "",
+            "最後卡關": "",
+        }
+
+        if clean_categories and info["類別"] not in clean_categories:
+            info["類別通過"] = "否"
+            info["最後卡關"] = "類別"
+            rows.append(info)
+            continue
+
+        bundle = _analyze_stock_bundle(
+            stock_no=code,
+            stock_name=stock_name,
+            market_type=market_type,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            risk_strictness=risk_strictness,
+        )
+        if not bundle:
+            info["最後卡關"] = "歷史資料"
+            info["淘汰原因"] = "無歷史資料"
+            rows.append(info)
+            continue
+
+        signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
+        risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
+        risk_score = _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0
+        prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
+        trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
+        auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
+        technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
+        total_score, _ = _build_mode_score(
+            mode=_safe_str(mode),
+            technical_score=technical_score,
+            prelaunch_score=prelaunch_score,
+            category_heat_score=0,
+            factor_score=auto_factor_total,
+            trade_score=trade_score,
+            leader_advantage=50,
+        )
+
+        info["訊號分數"] = signal_score
+        info["風險分數"] = risk_score
+        info["起漲前兆分數"] = prelaunch_score
+        info["交易可行分數"] = trade_score
+        info["推薦總分"] = total_score
+        info["淘汰原因"] = _safe_str(bundle["risk_filter"].get("淘汰原因"))
+
+        if signal_score >= min_signal_score:
+            info["訊號通過"] = "是"
+        else:
+            info["最後卡關"] = "訊號"
+            rows.append(info)
+            continue
+
+        if risk_pass:
+            info["風險通過"] = "是"
+        else:
+            info["最後卡關"] = "風險"
+            rows.append(info)
+            continue
+
+        if prelaunch_score >= min_prelaunch_score:
+            info["起漲通過"] = "是"
+        else:
+            info["最後卡關"] = "起漲前兆"
+            rows.append(info)
+            continue
+
+        if trade_score >= min_trade_score:
+            info["交易通過"] = "是"
+        else:
+            info["最後卡關"] = "交易可行"
+            rows.append(info)
+            continue
+
+        if total_score >= min_total_score:
+            info["總分通過"] = "是"
+            info["最後卡關"] = "通過"
+        else:
+            info["最後卡關"] = "推薦總分"
+
+        rows.append(info)
+
+    return pd.DataFrame(rows)
+
+
 def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
     cats = set()
 
@@ -2297,7 +2424,6 @@ def main():
         "status_type": "info",
         "rec_pick_group": list(watchlist_map.keys())[0] if watchlist_map else "",
         "rec_pick_codes": [],
-        "rec_record_codes": [],
         "result_saved_at": "",
         "recommend_mode": "飆股模式",
         "risk_strictness": "標準",
@@ -2316,14 +2442,10 @@ def main():
     if next_pick_key in st.session_state:
         st.session_state[real_pick_key] = st.session_state.pop(next_pick_key)
 
-    next_record_key = _k("rec_record_codes_next")
-    real_record_key = _k("rec_record_codes")
-    if next_record_key in st.session_state:
-        st.session_state[real_record_key] = st.session_state.pop(next_record_key)
 
     render_pro_hero(
         title="股神推薦｜V2 升級版",
-        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出。",
+        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出，不串接 8_股神推薦紀錄。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -2494,7 +2616,6 @@ def main():
         st.session_state[_k("category_strength_store")] = pd.DataFrame()
         st.session_state[_k("rec_pick_codes_next")] = []
         st.session_state[_k("rec_pick_codes")] = []
-        st.session_state[_k("rec_record_codes")] = []
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
         st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
         st.rerun()
@@ -2576,8 +2697,49 @@ def main():
     else:
         rec_df, category_strength_df = _load_recommend_result_from_state()
 
+    debug_df = _build_filter_debug_df(
+        universe_items=universe_items,
+        master_df=master_df,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+        selected_categories=selected_categories,
+        mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
+        risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
+        min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+        min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
+        min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+    )
+
+    if not debug_df.empty:
+        total_universe = len(debug_df)
+        pass_cat = int((debug_df["類別通過"] == "是").sum()) if "類別通過" in debug_df.columns else total_universe
+        pass_signal = int((debug_df["訊號通過"] == "是").sum()) if "訊號通過" in debug_df.columns else 0
+        pass_risk = int((debug_df["風險通過"] == "是").sum()) if "風險通過" in debug_df.columns else 0
+        pass_pre = int((debug_df["起漲通過"] == "是").sum()) if "起漲通過" in debug_df.columns else 0
+        pass_trade = int((debug_df["交易通過"] == "是").sum()) if "交易通過" in debug_df.columns else 0
+        pass_total = int((debug_df["總分通過"] == "是").sum()) if "總分通過" in debug_df.columns else 0
+
+        render_pro_section("推薦流程診斷")
+        render_pro_kpi_row(
+            [
+                {"label": "掃描池", "value": total_universe, "delta": "原始股票數", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "訊號通過", "value": pass_signal, "delta": "第1關", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "風險通過", "value": pass_risk, "delta": "第2關", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "起漲通過", "value": pass_pre, "delta": "第3關", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "交易通過", "value": pass_trade, "delta": "第4關", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "總分通過", "value": pass_total, "delta": "最終輸出", "delta_class": "pro-kpi-delta-flat"},
+            ]
+        )
+        fail_rank = debug_df["最後卡關"].value_counts(dropna=False).reset_index()
+        fail_rank.columns = ["卡關位置", "檔數"]
+        with st.expander("每道篩選卡關統計", expanded=False):
+            st.dataframe(fail_rank, use_container_width=True, hide_index=True)
+            show_cols = [c for c in ["股票代號", "股票名稱", "市場別", "類別", "訊號分數", "風險分數", "起漲前兆分數", "交易可行分數", "推薦總分", "最後卡關", "淘汰原因"] if c in debug_df.columns]
+            st.dataframe(debug_df[show_cols].head(300), use_container_width=True, hide_index=True)
+
     if rec_df.empty:
-        st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
+        st.error("目前沒有符合條件的推薦股票。請先看上方『推薦流程診斷』，確認是卡在訊號、風險、起漲前兆、交易可行，還是推薦總分。")
         return
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
@@ -2739,12 +2901,8 @@ def main():
                 picked_codes_from_top.append(code)
 
     current_pick_codes = st.session_state.get(_k("rec_pick_codes"), [])
-    current_record_codes = st.session_state.get(_k("rec_record_codes"), [])
-
     if picked_codes_from_top != current_pick_codes:
         st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
-    if picked_codes_from_top != current_record_codes:
-        st.session_state[_k("rec_record_codes_next")] = picked_codes_from_top
 
     selected_snapshot_top = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
     st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_top
