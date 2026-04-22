@@ -3351,6 +3351,7 @@ def main():
 # 官方主檔整合流程（單一乾淨版，覆蓋舊版定義）
 # =========================================================
 TWSE_OFFICIAL_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+TWSE_ISIN_LIST_URL = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
 TPEX_OFFICIAL_O_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
 TPEX_OFFICIAL_R_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R"
 MASTER_CORE_COLUMNS = [
@@ -3551,6 +3552,100 @@ def _fetch_utils_master_fallback() -> tuple[pd.DataFrame, dict[str, Any]]:
     out = _ensure_master_columns(out)
     return out, {"source": "utils", "source_api": "utils_all", "rows": total_rows, "columns": list(out.columns), "industry_hits": 0}
 
+def _fetch_twse_isin_listed_fill() -> tuple[pd.DataFrame, dict[str, Any]]:
+    info = {"url": TWSE_ISIN_LIST_URL, "rows": 0, "columns": [], "industry_hits": 0, "error": ""}
+    try:
+        resp = requests.get(TWSE_ISIN_LIST_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        tables = pd.read_html(resp.text)
+        if not tables:
+            info["error"] = "read_html 無資料表"
+            return _ensure_master_columns(pd.DataFrame()), info
+        target = pd.DataFrame()
+        for tbl in tables:
+            cols = [str(c).strip() for c in tbl.columns]
+            if ("有價證券代號" in cols or "股票代號" in cols) and "產業別" in cols:
+                target = tbl.copy()
+                target.columns = cols
+                break
+        if target.empty:
+            info["error"] = "找不到 ISIN 代號/產業別資料表"
+            return _ensure_master_columns(pd.DataFrame()), info
+        rename_map = {}
+        for c in target.columns:
+            cs = str(c).strip()
+            if cs in {"有價證券代號", "股票代號"}:
+                rename_map[c] = "code"
+            elif cs in {"有價證券名稱", "股票名稱"}:
+                rename_map[c] = "name"
+            elif cs == "市場別":
+                rename_map[c] = "market"
+            elif cs == "產業別":
+                rename_map[c] = "official_industry_raw"
+            elif cs == "有價證券別":
+                rename_map[c] = "security_type"
+        target = target.rename(columns=rename_map)
+        for c in ["code", "name", "market", "official_industry_raw"]:
+            if c not in target.columns:
+                target[c] = ""
+        if "security_type" not in target.columns:
+            target["security_type"] = ""
+        target["code"] = target["code"].map(_normalize_code)
+        target["name"] = target["name"].map(_safe_str)
+        target["market"] = target["market"].map(_safe_str)
+        target["official_industry_raw"] = target["official_industry_raw"].map(_safe_str)
+        target["security_type"] = target["security_type"].map(_safe_str)
+        target = target[(target["market"].str.contains("上市", na=False)) & (target["code"] != "")].copy()
+        if (target["security_type"].astype(str).str.strip() != "").any():
+            target = target[target["security_type"].str.contains("股票", na=False)].copy()
+        out = pd.DataFrame({
+            "code": target["code"],
+            "name": target["name"],
+            "market": "上市",
+            "official_industry_raw": target["official_industry_raw"],
+            "official_industry_raw_col": "產業別(ISIN)",
+        })
+        out["official_industry"] = out["official_industry_raw"].map(_safe_str)
+        out["theme_category"] = out.apply(lambda r: _infer_theme_from_official(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=""), axis=1)
+        out["category"] = out["theme_category"]
+        out["source"] = "twse_isin_fill"
+        out["source_api"] = "twse_isin"
+        out["source_rank"] = 2
+        out["待修原因"] = out["official_industry"].map(lambda x: "" if _safe_str(x) else "官方產業未抓到")
+        out = _ensure_master_columns(out)
+        info["rows"] = len(out)
+        info["columns"] = list(target.columns)
+        info["industry_hits"] = int(out["official_industry"].astype(str).str.strip().ne("").sum())
+        return out, info
+    except Exception as e:
+        info["error"] = str(e)
+        return _ensure_master_columns(pd.DataFrame()), info
+
+def _backfill_listed_official_industry(base: pd.DataFrame, isin_df: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_master_columns(base).copy()
+    isin_df = _ensure_master_columns(isin_df)
+    if work.empty or isin_df.empty:
+        return work
+    fill_cols = ["official_industry_raw", "official_industry_raw_col", "official_industry", "theme_category", "category", "source", "source_api", "source_rank", "待修原因"]
+    isin_map = isin_df.drop_duplicates(subset=["code"], keep="first").set_index("code")
+    mask = (work["market"].astype(str) == "上市") & (work["official_industry"].astype(str).str.strip() == "")
+    for idx in work[mask].index:
+        code = _normalize_code(work.at[idx, "code"])
+        if not code or code not in isin_map.index:
+            continue
+        row = isin_map.loc[code]
+        for c in fill_cols:
+            val = row.get(c) if hasattr(row, 'get') else row[c]
+            if c == "source_rank":
+                work.at[idx, c] = int(pd.to_numeric(val, errors="coerce") if pd.notna(val) else 2)
+            else:
+                work.at[idx, c] = _safe_str(val)
+    work["theme_category"] = work.apply(lambda r: _infer_theme_from_official(code=r.get("code"), name=r.get("name"), official_industry=r.get("official_industry"), raw_category=r.get("theme_category") or r.get("category")), axis=1)
+    work["category"] = work["theme_category"]
+    work["待修原因"] = work.apply(lambda r: "" if _safe_str(r.get("official_industry")) else "官方產業未抓到", axis=1)
+    return _ensure_master_columns(work)
+
 def _read_json_from_github(path: str) -> tuple[Any, str]:
     cfg = _stock_master_config()
     token = cfg["token"]
@@ -3685,9 +3780,10 @@ def _apply_master_overrides(base: pd.DataFrame) -> pd.DataFrame:
     work["待修原因"] = work.apply(lambda r: "" if _safe_str(r.get("official_industry")) else "官方產業未抓到", axis=1)
     return _ensure_master_columns(work)
 
-def _build_master_diagnostics(twse_info: dict, tpex_o_info: dict, tpex_r_info: dict, utils_info: dict, merged: pd.DataFrame) -> list[str]:
+def _build_master_diagnostics(twse_info: dict, twse_isin_info: dict, tpex_o_info: dict, tpex_r_info: dict, utils_info: dict, merged: pd.DataFrame) -> list[str]:
     return [
-        f"TWSE：{twse_info.get('rows',0)} 筆 / 正式產業有值 {twse_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(twse_info.get('columns',[])[:8])}",
+        f"TWSE OpenAPI：{twse_info.get('rows',0)} 筆 / 正式產業有值 {twse_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(twse_info.get('columns',[])[:8])}",
+        f"TWSE ISIN 補值：{twse_isin_info.get('rows',0)} 筆 / 正式產業有值 {twse_isin_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(twse_isin_info.get('columns',[])[:8])}",
         f"TPEX-上櫃：{tpex_o_info.get('rows',0)} 筆 / 正式產業有值 {tpex_o_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(tpex_o_info.get('columns',[])[:8])}",
         f"TPEX-興櫃：{tpex_r_info.get('rows',0)} 筆 / 正式產業有值 {tpex_r_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(tpex_r_info.get('columns',[])[:8])}",
         f"utils fallback：{utils_info.get('rows',0)} 筆",
@@ -3696,12 +3792,14 @@ def _build_master_diagnostics(twse_info: dict, tpex_o_info: dict, tpex_r_info: d
 
 def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
     twse_df, twse_info = _fetch_twse_master()
+    twse_isin_df, twse_isin_info = _fetch_twse_isin_listed_fill()
     tpex_o_df, tpex_o_info = _fetch_tpex_master_one(TPEX_OFFICIAL_O_URL, "上櫃", "mopsfin_t187ap03_O")
     tpex_r_df, tpex_r_info = _fetch_tpex_master_one(TPEX_OFFICIAL_R_URL, "興櫃", "mopsfin_t187ap03_R")
     utils_df, utils_info = _fetch_utils_master_fallback()
     merged = _merge_master_sources(twse_df, tpex_o_df, tpex_r_df, utils_df)
+    merged = _backfill_listed_official_industry(merged, twse_isin_df)
     merged = _apply_master_overrides(merged)
-    logs = _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged)
+    logs = _build_master_diagnostics(twse_info, twse_isin_info, tpex_o_info, tpex_r_info, utils_info, merged)
     ok, msg = _save_master_cache_to_repo(merged)
     logs.insert(0, msg)
     if ok:
