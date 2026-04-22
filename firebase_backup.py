@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -20,27 +19,48 @@ def _get_tw_now() -> datetime:
     return datetime.now(TAIWAN_TZ)
 
 
+def _build_credential_info_from_secrets() -> dict:
+    project_id = st.secrets.get("FIREBASE_PROJECT_ID", "").strip()
+    client_email = st.secrets.get("FIREBASE_CLIENT_EMAIL", "").strip()
+    private_key = st.secrets.get("FIREBASE_PRIVATE_KEY", "")
+
+    if not project_id:
+        raise RuntimeError("未設定 FIREBASE_PROJECT_ID")
+    if not client_email:
+        raise RuntimeError("未設定 FIREBASE_CLIENT_EMAIL")
+    if not private_key:
+        raise RuntimeError("未設定 FIREBASE_PRIVATE_KEY")
+
+    # 某些情況 Secrets 內是字面上的 \n，需要轉成真正換行
+    private_key = private_key.replace("\\n", "\n").strip()
+    if "BEGIN PRIVATE KEY" not in private_key:
+        raise RuntimeError("FIREBASE_PRIVATE_KEY 格式不正確，缺少 BEGIN PRIVATE KEY")
+    if not private_key.endswith("\n"):
+        private_key += "\n"
+
+    return {
+        "type": "service_account",
+        "project_id": project_id,
+        "private_key": private_key,
+        "client_email": client_email,
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+
+
 def init_firebase():
     """
     初始化 Firebase Admin。
     只初始化一次，避免重複 initialize_app() 報錯。
+    這個版本不吃整份 JSON，直接從 Secrets 拆欄位組 credentials。
     """
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
-    raw_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON", "")
     bucket_name = st.secrets.get("FIREBASE_STORAGE_BUCKET", "").strip()
-
-    if not raw_json:
-        raise RuntimeError("未設定 FIREBASE_SERVICE_ACCOUNT_JSON")
     if not bucket_name:
         raise RuntimeError("未設定 FIREBASE_STORAGE_BUCKET")
 
-    try:
-        info = json.loads(raw_json)
-    except Exception as e:
-        raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT_JSON 不是有效 JSON：{e}") from e
-
+    info = _build_credential_info_from_secrets()
     cred = credentials.Certificate(info)
 
     app = firebase_admin.initialize_app(
