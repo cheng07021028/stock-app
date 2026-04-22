@@ -562,7 +562,7 @@ def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
         out['foreign'] = round(pct_mix * 28.0, 2)
         out['total3'] = round(pct_mix * 36.0, 2)
         out['source'] = 'fallback_est'
-        out['used_date'] = _safe_str(tsm.get('used_date') or sox.get('used_date') or ixic.get('used_date') or spx.get('used_date') or pred_date_text)
+        out['used_date'] = _safe_str(tsm.get('used_date') or sox.get('used_date') or ixic.get('used_date') or spx.get('used_date'))
     except Exception:
         pass
     return out
@@ -597,7 +597,7 @@ def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
         nq = _price_on_or_before('NQ.F', pred_date_text, 15)
         mix = float(es.get('pct', 0) or 0) * 0.45 + float(nq.get('pct', 0) or 0) * 0.55
         est = round(max(0.7, min(1.3, 1.0 + (-mix / 20.0))), 2)
-        out.update({'pcr': est, 'source': 'fallback_est', 'used_date': _safe_str(es.get('used_date') or nq.get('used_date') or pred_date_text)})
+        out.update({'pcr': est, 'source': 'fallback_est', 'used_date': _safe_str(es.get('used_date') or nq.get('used_date'))})
     except Exception:
         pass
     return out
@@ -643,7 +643,7 @@ def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
         out['margin_change'] = round(-mix * 8.0, 2)
         out['short_change'] = round(max(-30.0, min(30.0, -mix * 6.0)), 2)
         out['source'] = 'fallback_est'
-        out['used_date'] = _safe_str(tsm.get('used_date') or es.get('used_date') or nq.get('used_date') or pred_date_text)
+        out['used_date'] = _safe_str(tsm.get('used_date') or es.get('used_date') or nq.get('used_date'))
     except Exception:
         pass
     return out
@@ -843,10 +843,10 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         scenario = "一般趨勢日"
 
     source_status = (
-        f"加權:{_safe_str(twii.get('date')) or 'fallback'}｜"
-        f"法人:{_safe_str(chip.get('inst_used_date')) or inst.get('source','fallback')}｜"
-        f"期權:{_safe_str(chip.get('futopt_used_date')) or futopt.get('source','fallback')}｜"
-        f"融資券:{_safe_str(chip.get('margin_used_date')) or margin.get('source','fallback')}"
+        f"加權:{_safe_str(twii.get('used_date') or twii.get('date')) or '失敗'}｜"
+        f"法人:{_safe_str(chip.get('inst_used_date')) or '失敗'}｜"
+        f"期權:{_safe_str(chip.get('futopt_used_date')) or '失敗'}｜"
+        f"融資券:{_safe_str(chip.get('margin_used_date')) or '失敗'}"
     )
 
     return {
@@ -879,10 +879,10 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "sector_weak": sector_weak,
         "event_list": event_list,
         "source_status": source_status,
-        "market_data_date": _safe_str(twii.get('date')),
-        "twii_date": _safe_str(twii.get('date')),
-        "us_data_date": " / ".join([x for x in [_safe_str(nas.get('date')), _safe_str(sox.get('date')), _safe_str(spx.get('date')), _safe_str(adr.get('date'))] if x]),
-        "night_data_date": " / ".join([x for x in [_safe_str(es.get('date')), _safe_str(nq.get('date'))] if x]),
+        "market_data_date": _safe_str(twii.get('used_date') or twii.get('date')),
+        "twii_date": _safe_str(twii.get('used_date') or twii.get('date')),
+        "us_data_date": " / ".join([x for x in [_safe_str(nas.get('used_date') or nas.get('date')), _safe_str(sox.get('used_date') or sox.get('date')), _safe_str(spx.get('used_date') or spx.get('date')), _safe_str(adr.get('used_date') or adr.get('date'))] if x]),
+        "night_data_date": " / ".join([x for x in [_safe_str(es.get('used_date') or es.get('date')), _safe_str(nq.get('used_date') or nq.get('date'))] if x]),
         "inst_used_date": _safe_str(inst.get('used_date')),
         "futopt_used_date": _safe_str(futopt.get('used_date')),
         "margin_used_date": _safe_str(margin.get('used_date')),
@@ -1562,19 +1562,28 @@ def main():
         st.dataframe(transparent_rows, use_container_width=True, hide_index=True)
         st.caption("說明：如果你選的日期不是交易日，或當日官方資料尚未公布，系統會自動往前回找最近可用日期。")
 
-    with st.expander("DEBUG｜原始抓取資料", expanded=False):
-        st.write("TWII", ctx.get("twii"))
-        st.write("NASDAQ", ctx.get("nas"))
-        st.write("SOX", ctx.get("sox"))
-        st.write("SPX", ctx.get("spx"))
-        st.write("TSM ADR", ctx.get("adr"))
-        st.write("ES", ctx.get("es"))
-        st.write("NQ", ctx.get("nq"))
-        st.write("VIX", ctx.get("vix"))
-        st.write("USDTWD", ctx.get("usdtwd"))
-        st.write("法人", {"foreign_amt": ctx.get("foreign_amt"), "total3_amt": ctx.get("total3_amt"), "used_date": ctx.get("inst_used_date"), "source_status": ctx.get("source_status")})
-        st.write("期權", {"pcr": ctx.get("pcr"), "used_date": ctx.get("futopt_used_date")})
-        st.write("融資券", {"margin_change": ctx.get("margin_change"), "short_change": ctx.get("short_change"), "used_date": ctx.get("margin_used_date")})
+
+    with st.expander("DEBUG｜抓取成功/失敗狀態", expanded=False):
+        debug_rows = pd.DataFrame([
+            {"項目": "加權指數", "狀態": "成功" if _safe_str(ctx.get("twii", {}).get("used_date") or ctx.get("twii", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("twii", {}).get("used_date") or ctx.get("twii", {}).get("date")), "來源": _safe_str(ctx.get("twii", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("twii", {}).get("close")), "漲跌%": _safe_float(ctx.get("twii", {}).get("pct"))},
+            {"項目": "NASDAQ", "狀態": "成功" if _safe_str(ctx.get("nas", {}).get("used_date") or ctx.get("nas", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("nas", {}).get("used_date") or ctx.get("nas", {}).get("date")), "來源": _safe_str(ctx.get("nas", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("nas", {}).get("close")), "漲跌%": _safe_float(ctx.get("nas", {}).get("pct"))},
+            {"項目": "SOX", "狀態": "成功" if _safe_str(ctx.get("sox", {}).get("used_date") or ctx.get("sox", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("sox", {}).get("used_date") or ctx.get("sox", {}).get("date")), "來源": _safe_str(ctx.get("sox", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("sox", {}).get("close")), "漲跌%": _safe_float(ctx.get("sox", {}).get("pct"))},
+            {"項目": "SPX", "狀態": "成功" if _safe_str(ctx.get("spx", {}).get("used_date") or ctx.get("spx", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("spx", {}).get("used_date") or ctx.get("spx", {}).get("date")), "來源": _safe_str(ctx.get("spx", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("spx", {}).get("close")), "漲跌%": _safe_float(ctx.get("spx", {}).get("pct"))},
+            {"項目": "TSM ADR", "狀態": "成功" if _safe_str(ctx.get("adr", {}).get("used_date") or ctx.get("adr", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("adr", {}).get("used_date") or ctx.get("adr", {}).get("date")), "來源": _safe_str(ctx.get("adr", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("adr", {}).get("close")), "漲跌%": _safe_float(ctx.get("adr", {}).get("pct"))},
+            {"項目": "ES夜盤", "狀態": "成功" if _safe_str(ctx.get("es", {}).get("used_date") or ctx.get("es", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("es", {}).get("used_date") or ctx.get("es", {}).get("date")), "來源": _safe_str(ctx.get("es", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("es", {}).get("close")), "漲跌%": _safe_float(ctx.get("es", {}).get("pct"))},
+            {"項目": "NQ夜盤", "狀態": "成功" if _safe_str(ctx.get("nq", {}).get("used_date") or ctx.get("nq", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("nq", {}).get("used_date") or ctx.get("nq", {}).get("date")), "來源": _safe_str(ctx.get("nq", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("nq", {}).get("close")), "漲跌%": _safe_float(ctx.get("nq", {}).get("pct"))},
+            {"項目": "VIX", "狀態": "成功" if _safe_str(ctx.get("vix", {}).get("used_date") or ctx.get("vix", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("vix", {}).get("used_date") or ctx.get("vix", {}).get("date")), "來源": _safe_str(ctx.get("vix", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("vix", {}).get("close")), "漲跌%": _safe_float(ctx.get("vix", {}).get("pct"))},
+            {"項目": "美元台幣", "狀態": "成功" if _safe_str(ctx.get("usdtwd", {}).get("used_date") or ctx.get("usdtwd", {}).get("date")) else "失敗", "實際日期": _safe_str(ctx.get("usdtwd", {}).get("used_date") or ctx.get("usdtwd", {}).get("date")), "來源": _safe_str(ctx.get("usdtwd", {}).get("source")) or "fallback", "收盤": _safe_float(ctx.get("usdtwd", {}).get("close")), "漲跌%": _safe_float(ctx.get("usdtwd", {}).get("pct"))},
+            {"項目": "法人", "狀態": "成功" if _safe_str(ctx.get("inst_used_date")) else "失敗", "實際日期": _safe_str(ctx.get("inst_used_date")), "來源": "twse/fallback", "收盤": _safe_float(ctx.get("foreign_amt")), "漲跌%": _safe_float(ctx.get("total3_amt"))},
+            {"項目": "期權PCR", "狀態": "成功" if _safe_str(ctx.get("futopt_used_date")) else "失敗", "實際日期": _safe_str(ctx.get("futopt_used_date")), "來源": "taifex/fallback", "收盤": _safe_float(ctx.get("pcr")), "漲跌%": None},
+            {"項目": "融資券", "狀態": "成功" if _safe_str(ctx.get("margin_used_date")) else "失敗", "實際日期": _safe_str(ctx.get("margin_used_date")), "來源": "twse/fallback", "收盤": _safe_float(ctx.get("margin_change")), "漲跌%": _safe_float(ctx.get("short_change"))},
+        ])
+        st.dataframe(debug_rows, use_container_width=True, hide_index=True)
+        failed_count = int((debug_rows["狀態"] == "失敗").sum())
+        if failed_count > 0:
+            st.error(f"目前有 {failed_count} 個資料來源抓取失敗，所以頁面會退回估算值或保底值。")
+        else:
+            st.success("主要資料來源皆有抓到可用資料。")
 
 
     a1, a2 = st.columns([1.4, 1.2])
