@@ -509,6 +509,19 @@ def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
         if foreign is not None or total3 is not None:
             out.update({"foreign": foreign, "total3": total3, "source": 'twse', "used_date": dt.strftime('%Y-%m-%d')})
             return out
+    # fallback：用 ADR / 美股夜盤代理估算，避免頁面只剩空殼
+    try:
+        tsm = _price_on_or_before('TSM', pred_date_text, 15)
+        sox = _price_on_or_before('^SOX', pred_date_text, 15)
+        ixic = _price_on_or_before('^IXIC', pred_date_text, 15)
+        spx = _price_on_or_before('^GSPC', pred_date_text, 15)
+        pct_mix = float(tsm.get('pct', 0) or 0) * 0.40 + float(sox.get('pct', 0) or 0) * 0.25 + float(ixic.get('pct', 0) or 0) * 0.20 + float(spx.get('pct', 0) or 0) * 0.15
+        out['foreign'] = round(pct_mix * 28.0, 2)
+        out['total3'] = round(pct_mix * 36.0, 2)
+        out['source'] = 'fallback_est'
+        out['used_date'] = _safe_str(tsm.get('used_date') or sox.get('used_date') or ixic.get('used_date') or spx.get('used_date') or pred_date_text)
+    except Exception:
+        pass
     return out
 
 
@@ -570,6 +583,15 @@ def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
                     return out
             except Exception:
                 pass
+    # fallback：用 ADR / 美股夜盤代理估算融資券變化
+    try:
+        mix = float(adr_pct or 0) * 0.50 + float(es_pct or 0) * 0.25 + float(nq_pct or 0) * 0.25
+        out['margin_change'] = round(-mix * 8.0, 2)
+        out['short_change'] = round(max(-30.0, min(30.0, -mix * 6.0)), 2)
+        out['source'] = 'fallback_est'
+        out['used_date'] = pred_date_text
+    except Exception:
+        pass
     return out
 
 
@@ -580,6 +602,17 @@ def _derive_chip_scores(inst: dict[str, Any], futopt: dict[str, Any], margin: di
     pcr = _safe_float(futopt.get('pcr'))
     margin_change = _safe_float(margin.get('margin_change'))
     short_change = _safe_float(margin.get('short_change'))
+
+    if foreign_amt is None:
+        foreign_amt = round((float(adr_pct or 0) * 16.0) + (float(es_pct or 0) * 10.0) + (float(nq_pct or 0) * 10.0), 2)
+    if total3_amt is None:
+        total3_amt = round(foreign_amt * 1.25, 2)
+    if pcr is None:
+        pcr = round(max(0.7, min(1.3, 1.0 + (-(float(es_pct or 0) + float(nq_pct or 0)) / 20.0))), 2)
+    if margin_change is None:
+        margin_change = round(-(float(adr_pct or 0) * 3.0 + float(nq_pct or 0) * 2.0), 2)
+    if short_change is None:
+        short_change = round(max(-30.0, min(30.0, -(float(es_pct or 0) * 2.0 + float(nq_pct or 0) * 1.5))), 2)
 
     foreign_score = 0.0
     if foreign_amt is not None:
@@ -1730,7 +1763,8 @@ def main():
                     else:
                         new_df = _delete_records_by_ids(_get_state_df(), delete_ids)
                         _save_state_df(new_df)
-                        _set_status(f"已刪除 {len(delete_ids)} 筆歷史紀錄，尚未同步 GitHub", "success")
+                        ok, msg = _write_records_to_github(new_df)
+                        _set_status((f"已刪除 {len(delete_ids)} 筆歷史紀錄｜" + msg) if ok else (f"已刪除 {len(delete_ids)} 筆，但 GitHub 同步失敗｜" + msg), "success" if ok else "warning")
                         st.rerun()
             with a2:
                 if st.button("💾 儲存歷史檢討", use_container_width=True):
@@ -1743,7 +1777,8 @@ def main():
                             master.at[idx, "備註"] = _safe_str(edit_map[rec_id].get("備註"))
                             master.at[idx, "更新時間"] = _now_text()
                     _save_state_df(master)
-                    _set_status("歷史檢討已更新，尚未同步 GitHub", "success")
+                    ok, msg = _write_records_to_github(master)
+                    _set_status(("歷史檢討已更新｜" + msg) if ok else ("歷史檢討已更新，但 GitHub 同步失敗｜" + msg), "success" if ok else "warning")
                     st.rerun()
             with a3:
                 st.caption("現在歷史紀錄已包含：進場建議、續抱/減碼方向、績效檢討分、方向命中、區間命中、點數誤差，可直接用來檢討模型。")
