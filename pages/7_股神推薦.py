@@ -1368,15 +1368,44 @@ def _fetch_yahoo_profile_fill(code: str, market: str) -> dict[str, str]:
     else:
         suffixes = ["TW", "TWO"]
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Referer": "https://tw.stock.yahoo.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
+    def _regex_pick(text: str, label: str) -> str:
+        patterns = [
+            rf"{label}\s*[：:]?\s*([\u4e00-\u9fffA-Za-z0-9\-（）()、／/．\. ]{{1,80}})",
+            rf'\"{label}\"\s*[:：]\s*\"([^\"]{{1,80}})\"',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, flags=re.S)
+            if m:
+                val = _safe_str(m.group(1))
+                if val and val != label:
+                    return val
+        return ""
+
     for sfx in suffixes:
         url = f"https://tw.stock.yahoo.com/quote/{code}.{sfx}/profile"
         try:
-            html_text = _http_get_text(url, timeout=12, headers=headers)
+            html_text = _http_get_text(url, timeout=20, headers=headers)
             lines = _extract_text_lines_from_html(html_text)
-            industry = _pick_after(lines, ["產業類別"])
-            market_found = _pick_after(lines, ["市場別"])
-            name = _pick_after(lines, ["公司名稱"])
+
+            industry = _pick_after(lines, ["產業類別"]) or _regex_pick(html_text, "產業類別")
+            market_found = _pick_after(lines, ["市場別"]) or _regex_pick(html_text, "市場別")
+            name = _pick_after(lines, ["公司名稱"]) or _regex_pick(html_text, "公司名稱")
+
+            if not name:
+                m = re.search(r"#\s*([^\n#]+)", html_text)
+                if m:
+                    cand = _safe_str(m.group(1))
+                    if cand and "(" not in cand and "Yahoo" not in cand:
+                        name = cand
+
             if industry or market_found or name:
                 return {
                     "code": code,
@@ -1389,13 +1418,16 @@ def _fetch_yahoo_profile_fill(code: str, market: str) -> dict[str, str]:
             continue
     return {}
 
-
 def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) -> tuple[pd.DataFrame, dict[str, Any]]:
     if base_df is None or base_df.empty:
         return _empty_master_df(), {"rows": 0, "hit": 0, "error": ""}
 
     work = base_df.copy()
-    rows = work.to_dict(orient="records")
+    target_df = work[
+        work["official_industry"].fillna("").astype(str).str.strip().eq("")
+        | work["category"].fillna("").astype(str).str.contains("其他", na=False)
+    ].copy()
+    rows = target_df.to_dict(orient="records")
     results: dict[str, dict[str, str]] = {}
     errors = []
 
@@ -1425,11 +1457,12 @@ def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) ->
 
         if yahoo_industry:
             official = _official_industry_name(yahoo_industry)
+            theme = _yahoo_industry_to_theme(official or yahoo_industry, work.at[idx, "name"])
             work.at[idx, "official_industry_raw"] = yahoo_industry
             work.at[idx, "official_industry_raw_col"] = "Yahoo_產業類別"
-            work.at[idx, "official_industry"] = official
-            work.at[idx, "theme_category"] = _yahoo_industry_to_theme(official, work.at[idx, "name"])
-            work.at[idx, "category"] = work.at[idx, "theme_category"]
+            work.at[idx, "official_industry"] = official or yahoo_industry
+            work.at[idx, "theme_category"] = theme
+            work.at[idx, "category"] = theme
             work.at[idx, "source"] = "yahoo_profile_primary"
             work.at[idx, "source_api"] = _safe_str(info.get("source_api")) or "yahoo_profile"
             work.at[idx, "source_rank"] = 1
@@ -1437,13 +1470,13 @@ def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) ->
             hit += 1
         else:
             if not _safe_str(work.at[idx, "official_industry"]):
-                work.at[idx, "theme_category"] = _yahoo_industry_to_theme(work.at[idx, "official_industry"], work.at[idx, "name"])
-                work.at[idx, "category"] = work.at[idx, "theme_category"]
+                theme = _yahoo_industry_to_theme(work.at[idx, "official_industry"], work.at[idx, "name"])
+                work.at[idx, "theme_category"] = theme
+                work.at[idx, "category"] = theme
                 work.at[idx, "待修原因"] = "Yahoo 產業未抓到"
 
     diag = {"rows": len(work), "hit": hit, "error": "; ".join(errors[:10])}
     return _normalize_master_df(work), diag
-
 
 def _build_utils_name_aux() -> pd.DataFrame:
     dfs = []
@@ -1620,6 +1653,19 @@ def _build_live_master_df() -> tuple[pd.DataFrame, list[str], dict[str, Any], di
 
 
 def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
+    try:
+        _fetch_yahoo_profile_fill.clear()
+    except Exception:
+        pass
+    try:
+        _build_live_master_df.clear()
+    except Exception:
+        pass
+    try:
+        _load_master_df.clear()
+    except Exception:
+        pass
+
     fresh_df, logs, base_info, yahoo_info = _build_live_master_df()
     if fresh_df.empty:
         return fresh_df, logs + ["主檔更新失敗：正式股票清單為空。"]
@@ -1632,7 +1678,6 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
             pass
     st.session_state[_k("master_diag_logs")] = logs
     return fresh_df, logs
-
 
 def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
     cols = _master_cols()
@@ -1770,10 +1815,19 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_master_df() -> pd.DataFrame:
     repo_df = _load_stock_master_cache_from_repo()
-    if not repo_df.empty:
+    repo_df = _normalize_master_df(repo_df)
+
+    need_live = repo_df.empty
+    if not need_live:
+        official_hit = int(repo_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
+        yahoo_hit = int((repo_df["source"].fillna("").astype(str) == "yahoo_profile_primary").sum())
+        need_live = (official_hit < 1500) or (yahoo_hit < 200)
+
+    if not need_live:
         logs = [
             f"已載入 GitHub cache：{len(repo_df)} 筆",
             f"cache 正式產業有值：{int(repo_df['official_industry'].fillna('').astype(str).str.strip().ne('').sum())} 筆",
+            f"cache Yahoo主來源：{int((repo_df['source'].fillna('').astype(str) == 'yahoo_profile_primary').sum())} 筆",
             f"cache 待修：{int(repo_df['待修原因'].fillna('').astype(str).str.strip().ne('').sum())} 筆",
         ]
         st.session_state[_k("master_diag_logs")] = logs
