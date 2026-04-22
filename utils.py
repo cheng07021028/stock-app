@@ -417,6 +417,18 @@ def _safe_num(value):
     return to_number(text)
 
 
+def _split_price_list(text):
+    s = _safe_text(text)
+    if not s:
+        return []
+    out = []
+    for x in s.split("_"):
+        v = _safe_num(x)
+        if v is not None and v > 0:
+            out.append(v)
+    return out
+
+
 def parse_date_safe(value, fallback):
     if not value:
         return fallback
@@ -658,14 +670,53 @@ def _market_prefix(market_type):
     return "otc" if str(market_type).strip() == "上櫃" else "tse"
 
 
+def _pick_best_realtime_price(raw):
+    z = _safe_num(raw.get("z"))
+    if z is not None and z > 0:
+        return z, "trade"
+
+    pz = _safe_num(raw.get("pz"))
+    if pz is not None and pz > 0:
+        return pz, "match"
+
+    bids = _split_price_list(raw.get("b"))
+    asks = _split_price_list(raw.get("a"))
+    best_bid = bids[0] if bids else None
+    best_ask = asks[0] if asks else None
+
+    if best_bid is not None and best_ask is not None:
+        return round((best_bid + best_ask) / 2, 2), "mid"
+    if best_bid is not None:
+        return best_bid, "bid"
+    if best_ask is not None:
+        return best_ask, "ask"
+
+    y = _safe_num(raw.get("y"))
+    if y is not None and y > 0:
+        return y, "prev_close"
+
+    return None, "none"
+
+
+def _pick_prev_close(raw, current_price=None):
+    y = _safe_num(raw.get("y"))
+    if y is not None and y > 0:
+        return y
+
+    for key in ["rp", "bp"]:
+        v = _safe_num(raw.get(key))
+        if v is not None and v > 0:
+            return v
+
+    return current_price
+
+
 def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_market="上市"):
     code = _safe_text(raw.get("c")) or fallback_code
     name = _safe_text(raw.get("n")) or fallback_name or f"股票{fallback_code}"
 
-    prev_close = _safe_num(raw.get("y"))
-    current_price = _safe_num(raw.get("z"))
-    if current_price is None:
-        current_price = prev_close
+    current_price, price_source = _pick_best_realtime_price(raw)
+    prev_close = _pick_prev_close(raw, current_price=current_price)
 
     open_price = _safe_num(raw.get("o"))
     high_price = _safe_num(raw.get("h"))
@@ -702,6 +753,7 @@ def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_mar
         "total_volume": total_volume,
         "trade_volume": trade_volume,
         "update_time": update_text,
+        "price_source": price_source,
         "raw": raw,
         "message": "",
     }
@@ -713,6 +765,17 @@ def _empty_realtime_result(stock_no, stock_name="", market_type="上市", messag
         "code": stock_no,
         "name": stock_name,
         "market": market_type,
+        "price": None,
+        "prev_close": None,
+        "open": None,
+        "high": None,
+        "low": None,
+        "change": None,
+        "change_pct": None,
+        "total_volume": None,
+        "trade_volume": None,
+        "update_time": "",
+        "price_source": "",
         "message": message,
     }
 
@@ -835,13 +898,7 @@ def get_realtime_stock_info(stock_no, stock_name="", market_type="上市", refre
     )
     return result_map.get(
         stock_no,
-        {
-            "ok": False,
-            "code": stock_no,
-            "name": stock_name,
-            "market": market_type,
-            "message": "查無即時資料",
-        },
+        _empty_realtime_result(stock_no, stock_name, market_type, "查無即時資料"),
     )
 
 
@@ -868,8 +925,20 @@ def render_realtime_info_card(info, title="即時資訊"):
     total_volume = info.get("total_volume")
     prev_close = info.get("prev_close")
     update_time = info.get("update_time", "")
+    price_source = info.get("price_source", "")
 
-    st.caption(f"{name}（{code}）｜{market}｜更新時間：{update_time or '—'}")
+    source_map = {
+        "trade": "成交價",
+        "match": "撮合價",
+        "mid": "買賣中間價",
+        "bid": "買進價",
+        "ask": "賣出價",
+        "prev_close": "昨收回退",
+        "none": "無",
+    }
+    source_text = source_map.get(price_source, price_source)
+
+    st.caption(f"{name}（{code}）｜{market}｜更新時間：{update_time or '—'}｜價格來源：{source_text}")
 
     delta_text = None
     if change is not None and change_pct is not None:
@@ -951,6 +1020,7 @@ def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
             "漲跌幅(%)": info.get("change_pct"),
             "總量": info.get("total_volume"),
             "單量": info.get("trade_volume"),
+            "價格來源": info.get("price_source", ""),
             "更新時間": info.get("update_time"),
             "是否成功": info.get("ok", False),
             "訊息": info.get("message", ""),
@@ -975,7 +1045,7 @@ def render_realtime_table(df, height=520):
     show_cols = [
         "群組", "股票代號", "股票名稱", "市場別",
         "現價", "漲跌", "漲跌幅(%)",
-        "開盤", "最高", "最低", "總量", "更新時間"
+        "開盤", "最高", "最低", "總量", "價格來源", "更新時間"
     ]
     show_cols = [c for c in show_cols if c in df.columns]
     display_df = df[show_cols].copy()
@@ -986,6 +1056,18 @@ def render_realtime_table(df, height=520):
             format_dict[col] = "{:,.2f}"
     if "總量" in display_df.columns:
         format_dict["總量"] = "{:,.0f}"
+
+    source_map = {
+        "trade": "成交價",
+        "match": "撮合價",
+        "mid": "買賣中間價",
+        "bid": "買進價",
+        "ask": "賣出價",
+        "prev_close": "昨收回退",
+        "none": "無",
+    }
+    if "價格來源" in display_df.columns:
+        display_df["價格來源"] = display_df["價格來源"].astype(str).map(lambda x: source_map.get(x, x))
 
     def color_change(val):
         if pd.isna(val):
