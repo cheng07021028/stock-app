@@ -81,14 +81,15 @@ def _prepare_dashboard_table(df: pd.DataFrame) -> pd.DataFrame:
 
     show_cols = [
         "群組", "股票代號", "股票名稱", "市場別",
-        "現價", "漲跌", "漲跌幅(%)",
-        "開盤", "最高", "最低", "總量", "更新時間"
+        "現價", "昨收", "漲跌", "漲跌幅(%)",
+        "開盤", "最高", "最低", "總量",
+        "價格來源", "漲跌來源", "更新時間"
     ]
     show_cols = [c for c in show_cols if c in df.columns]
 
     display_df = df[show_cols].copy()
 
-    numeric_cols = ["現價", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低", "總量"]
+    numeric_cols = ["現價", "昨收", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低", "總量"]
     exist_numeric_cols = [c for c in numeric_cols if c in display_df.columns]
     if exist_numeric_cols:
         display_df[exist_numeric_cols] = display_df[exist_numeric_cols].apply(pd.to_numeric, errors="coerce")
@@ -149,7 +150,7 @@ def render_dashboard_table(df: pd.DataFrame, height: int = 720):
         return
 
     format_dict = {}
-    for col in ["現價", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低"]:
+    for col in ["現價", "昨收", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低"]:
         if col in display_df.columns:
             format_dict[col] = "{:,.2f}"
     if "總量" in display_df.columns:
