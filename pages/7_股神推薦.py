@@ -3780,15 +3780,52 @@ def _apply_master_overrides(base: pd.DataFrame) -> pd.DataFrame:
     work["待修原因"] = work.apply(lambda r: "" if _safe_str(r.get("official_industry")) else "官方產業未抓到", axis=1)
     return _ensure_master_columns(work)
 
-def _build_master_diagnostics(twse_info: dict, twse_isin_info: dict, tpex_o_info: dict, tpex_r_info: dict, utils_info: dict, merged: pd.DataFrame) -> list[str]:
-    return [
-        f"TWSE OpenAPI：{twse_info.get('rows',0)} 筆 / 正式產業有值 {twse_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(twse_info.get('columns',[])[:8])}",
-        f"TWSE ISIN 補值：{twse_isin_info.get('rows',0)} 筆 / 正式產業有值 {twse_isin_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(twse_isin_info.get('columns',[])[:8])}",
-        f"TPEX-上櫃：{tpex_o_info.get('rows',0)} 筆 / 正式產業有值 {tpex_o_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(tpex_o_info.get('columns',[])[:8])}",
-        f"TPEX-興櫃：{tpex_r_info.get('rows',0)} 筆 / 正式產業有值 {tpex_r_info.get('industry_hits',0)} 筆 / 欄位 {', '.join(tpex_r_info.get('columns',[])[:8])}",
-        f"utils fallback：{utils_info.get('rows',0)} 筆",
-        f"合併後：{len(merged):,} 筆 / 正式產業有值 {int(merged['official_industry'].astype(str).str.strip().ne('').sum()) if not merged.empty else 0:,} 筆",
+def _build_master_diagnostics(
+    twse_info: dict | None = None,
+    twse_isin_info: dict | None = None,
+    tpex_o_info: dict | None = None,
+    tpex_r_info: dict | None = None,
+    utils_info: dict | None = None,
+    merged: pd.DataFrame | None = None,
+) -> list[str]:
+    twse_info = twse_info or {}
+    twse_isin_info = twse_isin_info or {}
+    tpex_o_info = tpex_o_info or {}
+    tpex_r_info = tpex_r_info or {}
+    utils_info = utils_info or {}
+    merged = merged.copy() if isinstance(merged, pd.DataFrame) else pd.DataFrame()
+
+    def _rows(info: dict) -> int:
+        try:
+            return int(info.get("rows", 0) or 0)
+        except Exception:
+            return 0
+
+    def _hits(info: dict) -> int:
+        for k in ("industry_hits", "official_hit", "hits"):
+            try:
+                return int(info.get(k, 0) or 0)
+            except Exception:
+                continue
+        return 0
+
+    def _cols(info: dict) -> str:
+        cols = info.get("columns") or info.get("raw_cols") or []
+        return ", ".join([str(x) for x in cols[:8]])
+
+    merged_hit = 0
+    if not merged.empty and "official_industry" in merged.columns:
+        merged_hit = int(merged["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
+
+    logs = [
+        f"TWSE OpenAPI：{_rows(twse_info)} 筆 / 正式產業有值 {_hits(twse_info)} 筆 / 欄位 {_cols(twse_info)}",
+        f"TWSE ISIN 補值：{_rows(twse_isin_info)} 筆 / 正式產業有值 {_hits(twse_isin_info)} 筆 / 欄位 {_cols(twse_isin_info)}",
+        f"TPEX-上櫃：{_rows(tpex_o_info)} 筆 / 正式產業有值 {_hits(tpex_o_info)} 筆 / 欄位 {_cols(tpex_o_info)}",
+        f"TPEX-興櫃：{_rows(tpex_r_info)} 筆 / 正式產業有值 {_hits(tpex_r_info)} 筆 / 欄位 {_cols(tpex_r_info)}",
+        f"utils fallback：{_rows(utils_info)} 筆 / 官方產業有值 {_hits(utils_info)} 筆",
+        f"合併後：{len(merged):,} 筆 / 正式產業有值 {merged_hit:,} 筆",
     ]
+    return logs
 
 def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
     twse_df, twse_info = _fetch_twse_master()
