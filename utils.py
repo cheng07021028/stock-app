@@ -703,12 +703,11 @@ def _pick_prev_close(raw, current_price=None):
     if y is not None and y > 0:
         return y
 
-    for key in ["rp", "bp"]:
-        v = _safe_num(raw.get(key))
-        if v is not None and v > 0:
-            return v
+    rp = _safe_num(raw.get("rp"))
+    if rp is not None and rp > 0:
+        return rp
 
-    return current_price
+    return None
 
 
 def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_market="上市"):
@@ -726,9 +725,16 @@ def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_mar
 
     change_value = None
     change_pct = None
+    change_source = ""
+
     if current_price is not None and prev_close not in [None, 0]:
         change_value = current_price - prev_close
         change_pct = (change_value / prev_close) * 100
+        change_source = "realtime_vs_prev"
+    else:
+        change_value = None
+        change_pct = None
+        change_source = "prev_close_missing"
 
     update_date = _safe_text(raw.get("d"))
     update_time = _safe_text(raw.get("t"))
@@ -750,6 +756,7 @@ def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_mar
         "low": low_price,
         "change": change_value,
         "change_pct": change_pct,
+        "change_source": change_source,
         "total_volume": total_volume,
         "trade_volume": trade_volume,
         "update_time": update_text,
@@ -772,6 +779,7 @@ def _empty_realtime_result(stock_no, stock_name="", market_type="上市", messag
         "low": None,
         "change": None,
         "change_pct": None,
+        "change_source": "",
         "total_volume": None,
         "trade_volume": None,
         "update_time": "",
@@ -926,6 +934,7 @@ def render_realtime_info_card(info, title="即時資訊"):
     prev_close = info.get("prev_close")
     update_time = info.get("update_time", "")
     price_source = info.get("price_source", "")
+    change_source = info.get("change_source", "")
 
     source_map = {
         "trade": "成交價",
@@ -936,9 +945,16 @@ def render_realtime_info_card(info, title="即時資訊"):
         "prev_close": "昨收回退",
         "none": "無",
     }
-    source_text = source_map.get(price_source, price_source)
+    change_map = {
+        "realtime_vs_prev": "即時價對昨收",
+        "prev_close_missing": "缺昨收",
+    }
 
-    st.caption(f"{name}（{code}）｜{market}｜更新時間：{update_time or '—'}｜價格來源：{source_text}")
+    st.caption(
+        f"{name}（{code}）｜{market}｜更新時間：{update_time or '—'}"
+        f"｜價格來源：{source_map.get(price_source, price_source)}"
+        f"｜漲跌來源：{change_map.get(change_source, change_source)}"
+    )
 
     delta_text = None
     if change is not None and change_pct is not None:
@@ -1021,6 +1037,7 @@ def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
             "總量": info.get("total_volume"),
             "單量": info.get("trade_volume"),
             "價格來源": info.get("price_source", ""),
+            "漲跌來源": info.get("change_source", ""),
             "更新時間": info.get("update_time"),
             "是否成功": info.get("ok", False),
             "訊息": info.get("message", ""),
@@ -1044,14 +1061,15 @@ def render_realtime_table(df, height=520):
 
     show_cols = [
         "群組", "股票代號", "股票名稱", "市場別",
-        "現價", "漲跌", "漲跌幅(%)",
-        "開盤", "最高", "最低", "總量", "價格來源", "更新時間"
+        "現價", "昨收", "漲跌", "漲跌幅(%)",
+        "開盤", "最高", "最低", "總量",
+        "價格來源", "漲跌來源", "更新時間"
     ]
     show_cols = [c for c in show_cols if c in df.columns]
     display_df = df[show_cols].copy()
 
     format_dict = {}
-    for col in ["現價", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低"]:
+    for col in ["現價", "昨收", "漲跌", "漲跌幅(%)", "開盤", "最高", "最低"]:
         if col in display_df.columns:
             format_dict[col] = "{:,.2f}"
     if "總量" in display_df.columns:
@@ -1066,8 +1084,15 @@ def render_realtime_table(df, height=520):
         "prev_close": "昨收回退",
         "none": "無",
     }
+    change_map = {
+        "realtime_vs_prev": "即時價對昨收",
+        "prev_close_missing": "缺昨收",
+    }
+
     if "價格來源" in display_df.columns:
         display_df["價格來源"] = display_df["價格來源"].astype(str).map(lambda x: source_map.get(x, x))
+    if "漲跌來源" in display_df.columns:
+        display_df["漲跌來源"] = display_df["漲跌來源"].astype(str).map(lambda x: change_map.get(x, x))
 
     def color_change(val):
         if pd.isna(val):
