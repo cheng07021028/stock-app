@@ -1601,7 +1601,7 @@ def _fetch_yahoo_profile_fill(code: str, market: str) -> dict[str, str]:
             continue
     return {}
 
-def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 8) -> tuple[pd.DataFrame, dict[str, Any]]:
     if base_df is None or base_df.empty:
         return _empty_master_df(), {"rows": 0, "hit": 0, "error": "", "processed": 0, "secondary_refine": 0}
 
@@ -1609,13 +1609,14 @@ def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) ->
     target_df = work[
         work["official_industry"].fillna("").astype(str).str.strip().eq("")
         | work["category"].fillna("").astype(str).str.contains("其他", na=False)
+        | work["待修原因"].fillna("").astype(str).str.strip().ne("")
     ].copy()
     rows = target_df.to_dict(orient="records")
     results: dict[str, dict[str, str]] = {}
     errors = []
 
     if rows:
-        with ThreadPoolExecutor(max_workers=max(4, min(workers, 16))) as ex:
+        with ThreadPoolExecutor(max_workers=max(4, min(workers, 8))) as ex:
             fut_map = {ex.submit(_fetch_yahoo_profile_fill, r["code"], r["market"]): r["code"] for r in rows}
             for fut in as_completed(fut_map):
                 code = fut_map[fut]
@@ -1657,7 +1658,6 @@ def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) ->
             if refine_src:
                 secondary_refine += 1
 
-    # pending second pass
     for idx in work.index:
         if _safe_str(work.at[idx, "待修原因"]) or "其他" in _safe_str(work.at[idx, "category"]):
             final_official, final_theme, refine_src = _secondary_refine_theme(
@@ -1684,7 +1684,6 @@ def _apply_yahoo_primary_categories(base_df: pd.DataFrame, workers: int = 12) ->
         "error": "；".join(errors[:20]),
     }
     return work, info
-
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1815,12 +1814,58 @@ def _build_master_diagnostics(base_info=None, yahoo_info=None, merged=None) -> l
     return logs
 
 
+
+def _overlay_repo_seed(base_df: pd.DataFrame, repo_df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    if base_df is None or base_df.empty:
+        return _empty_master_df(), 0
+    if repo_df is None or repo_df.empty:
+        return _normalize_master_df(base_df), 0
+
+    base = _normalize_master_df(base_df)
+    repo = _normalize_master_df(repo_df)
+    repo_map = repo.set_index("code").to_dict(orient="index")
+
+    reused = 0
+    for idx in base.index:
+        code = _normalize_code(base.at[idx, "code"])
+        old = repo_map.get(code)
+        if not old:
+            continue
+
+        old_official = _safe_str(old.get("official_industry"))
+        old_category = _safe_str(old.get("category"))
+        old_source = _safe_str(old.get("source"))
+        old_pending = _safe_str(old.get("待修原因"))
+
+        if old_official and old_category and not old_pending and old_source in {
+            "yahoo_profile_primary", "secondary_refine", "override",
+            "twse_isin_base", "tpex_上櫃_base", "tpex_興櫃_base"
+        }:
+            for col in ["name", "market", "official_industry_raw", "official_industry_raw_col",
+                        "official_industry", "theme_category", "category", "source", "source_api",
+                        "source_rank", "待修原因"]:
+                if col in base.columns and col in old:
+                    base.at[idx, col] = old.get(col, base.at[idx, col])
+            reused += 1
+
+    return _normalize_master_df(base), reused
+
+
 def _build_live_master_df() -> tuple[pd.DataFrame, list[str], dict[str, Any], dict[str, Any]]:
     base_df, base_info = _build_formal_base_master()
     base_df = _apply_aux_name_market(base_df)
-    yahoo_df, yahoo_info = _apply_yahoo_primary_categories(base_df)
+
+    try:
+        repo_seed_df = _load_stock_master_cache_from_repo()
+    except Exception:
+        repo_seed_df = _empty_master_df()
+
+    base_df, reused_count = _overlay_repo_seed(base_df, repo_seed_df)
+    yahoo_df, yahoo_info = _apply_yahoo_primary_categories(base_df, workers=8)
     merged = _apply_master_overrides(yahoo_df)
     logs = _build_master_diagnostics(base_info, yahoo_info, merged)
+    if reused_count > 0:
+        logs.append(f"增量沿用 cache 已完成資料：{reused_count} 筆")
     return merged, logs, base_info, yahoo_info
 
 
@@ -1849,6 +1894,7 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
         except Exception:
             pass
     pending = int(fresh_df["待修原因"].fillna("").astype(str).str.strip().ne("").sum()) if "待修原因" in fresh_df.columns else 0
+    logs.append(f"本次實際待補 Yahoo 範圍：{int(yahoo_info.get('processed', 0))} 筆")
     if pending > 0:
         logs.append(f"待修清單仍有 {pending} 檔，建議優先在主檔搜尋中心檢查 source / 官方產業 / 類別。")
     st.session_state[_k("master_diag_logs")] = logs
@@ -1859,7 +1905,7 @@ def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str,
     cols = _master_cols()
     if master_df is None or master_df.empty:
         return pd.DataFrame(columns=cols)
-    work = _normalize_master_df(master_df)
+    work = master_df.copy()
     kw = _safe_str(keyword)
     market_filter = _safe_str(market_filter)
     category_filter = _safe_str(category_filter)
