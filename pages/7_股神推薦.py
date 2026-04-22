@@ -3788,5 +3788,550 @@ def main():
         )
 
 
+
+# =========================================================
+# 官方主檔診斷修正版（後置覆寫）
+# =========================================================
+_MASTER_DIAG_COLS = [
+    "code", "name", "market",
+    "official_industry_raw", "official_industry_source_col", "official_industry",
+    "theme_category", "category", "source", "source_api", "source_rank"
+]
+
+
+def _first_contains_col(df: pd.DataFrame, keywords: list[str]) -> str:
+    for col in df.columns:
+        text = str(col).strip().lower()
+        if all(k.lower() in text for k in keywords):
+            return col
+    for col in df.columns:
+        text = str(col).strip().lower()
+        if any(k.lower() in text for k in keywords):
+            return col
+    return ""
+
+
+
+def _ensure_master_diag_columns(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    for c in _MASTER_DIAG_COLS:
+        if c not in work.columns:
+            work[c] = "" if c not in {"source_rank"} else 99
+    work["code"] = work["code"].map(_normalize_code)
+    work["name"] = work["name"].map(_safe_str)
+    work["market"] = work["market"].map(_safe_str).replace("", "上市")
+    work["official_industry_raw"] = work["official_industry_raw"].map(_safe_str)
+    work["official_industry_source_col"] = work["official_industry_source_col"].map(_safe_str)
+    # 若 official_industry 為空，但 raw 有值，補正規化結果
+    work["official_industry"] = work.apply(
+        lambda r: _normalize_official_industry(r.get("official_industry") or r.get("official_industry_raw")), axis=1
+    )
+    work["source"] = work["source"].map(_safe_str)
+    work["source_api"] = work["source_api"].map(_safe_str)
+    work["source_rank"] = pd.to_numeric(work["source_rank"], errors="coerce").fillna(99)
+    work["theme_category"] = work.apply(
+        lambda r: _infer_theme_category(
+            code=r.get("code"),
+            name=r.get("name"),
+            official_industry=r.get("official_industry"),
+            raw_category=r.get("theme_category") or r.get("category"),
+        ),
+        axis=1,
+    )
+    work["category"] = work.apply(
+        lambda r: _infer_category_from_record(
+            name=r.get("name"),
+            raw_category=r.get("theme_category") or r.get("category"),
+            official_industry=r.get("official_industry"),
+            code=r.get("code"),
+        ),
+        axis=1,
+    )
+    work = work[work["code"] != ""].copy()
+    return work
+
+
+
+def _master_repair_reason(row: pd.Series) -> str:
+    official = _safe_str(row.get("official_industry"))
+    raw = _safe_str(row.get("official_industry_raw"))
+    category = _safe_str(row.get("category"))
+    source_col = _safe_str(row.get("official_industry_source_col"))
+    if not official and raw:
+        return f"官方欄位待正規化（{source_col or '未知欄位'}）"
+    if not official:
+        return "官方產業未抓到"
+    if category in {"其他", "其他_官方未知", "其他_主題未映射"}:
+        return "主題分類待映射"
+    return ""
+
+
+
+def _normalize_master_schema(
+    df: pd.DataFrame,
+    default_market: str = "",
+    source: str = "official",
+    source_api: str = "",
+    source_rank: int = 0,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+
+    work = df.copy()
+    code_col = _first_existing_col(work, [
+        "code", "股票代號", "公司代號", "有價證券代號", "證券代號", "股票代碼",
+        "公司代號CompanyCode", "SecuritiesCompanyCode", "SECCODE",
+    ]) or _first_contains_col(work, ["代號"])
+    name_col = _first_existing_col(work, [
+        "name", "股票名稱", "公司簡稱", "公司名稱", "有價證券名稱", "證券名稱",
+        "CompanyAbbreviation", "CompanyName", "Name",
+    ]) or _first_contains_col(work, ["名稱"])
+    market_col = _first_existing_col(work, ["market", "市場別", "Market", "市場"]) or _first_contains_col(work, ["市場"])
+    industry_col = _first_existing_col(work, [
+        "official_industry", "industry", "industry_name", "產業別", "產業類別", "產業名稱",
+        "Industry", "IndustryName", "industryCategory", "industryName", "SecuritiesIndustryCode", "SecuritiesIndustry",
+    ])
+    if not industry_col:
+        industry_col = _first_contains_col(work, ["產業"])
+    if not industry_col:
+        industry_col = _first_contains_col(work, ["industry"])
+
+    # utils fallback 可能沒有正式產業欄，退一步找 category 類欄位保留原始值以利診斷
+    fallback_cat_col = _first_existing_col(work, ["category", "類別", "產業", "industry", "theme"]) if not industry_col else ""
+
+    if not code_col or not name_col:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+
+    if industry_col:
+        raw_industry = work[industry_col]
+        raw_col_name = str(industry_col)
+    elif fallback_cat_col:
+        raw_industry = work[fallback_cat_col]
+        raw_col_name = str(fallback_cat_col)
+    else:
+        raw_industry = ""
+        raw_col_name = ""
+
+    out = pd.DataFrame({
+        "code": work[code_col],
+        "name": work[name_col],
+        "market": work[market_col] if market_col else default_market,
+        "official_industry_raw": raw_industry,
+        "official_industry_source_col": raw_col_name,
+    })
+    out["official_industry"] = out["official_industry_raw"].map(_normalize_official_industry)
+    out["source"] = source
+    out["source_api"] = source_api
+    out["source_rank"] = source_rank
+    return _ensure_master_diag_columns(out)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_twse_official_master() -> pd.DataFrame:
+    frames = []
+    sources = [
+        ("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "twse_t187ap03_L", 0),
+        ("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", "twse_bwibbu_all", 2),
+    ]
+    for url, label, rank in sources:
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            if isinstance(payload, list) and payload:
+                temp = _normalize_master_schema(
+                    pd.DataFrame(payload),
+                    default_market="上市",
+                    source="official_twse",
+                    source_api=label,
+                    source_rank=rank,
+                )
+                if not temp.empty:
+                    frames.append(temp)
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+    out = pd.concat(frames, ignore_index=True)
+    out["has_official_industry"] = out["official_industry"].astype(str).str.strip().ne("")
+    out = out.sort_values(["code", "has_official_industry", "source_rank"], ascending=[True, False, True])
+    out = out.drop_duplicates(subset=["code"], keep="first").drop(columns=["has_official_industry"], errors="ignore")
+    return _ensure_master_diag_columns(out)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_tpex_official_master() -> pd.DataFrame:
+    frames = []
+    sources = [
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", "上櫃", "tpex_t187ap03_O", 0),
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R", "興櫃", "tpex_t187ap03_R", 0),
+    ]
+    for url, market, label, rank in sources:
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            if isinstance(payload, list) and payload:
+                temp = _normalize_master_schema(
+                    pd.DataFrame(payload),
+                    default_market=market,
+                    source="official_tpex",
+                    source_api=label,
+                    source_rank=rank,
+                )
+                if not temp.empty:
+                    frames.append(temp)
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+    out = pd.concat(frames, ignore_index=True)
+    out["has_official_industry"] = out["official_industry"].astype(str).str.strip().ne("")
+    out = out.sort_values(["code", "has_official_industry", "source_rank"], ascending=[True, False, True])
+    out = out.drop_duplicates(subset=["code"], keep="first").drop(columns=["has_official_industry"], errors="ignore")
+    return _ensure_master_diag_columns(out)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_utils_master_fallback() -> pd.DataFrame:
+    dfs = []
+    for market_arg in ["", "上市", "上櫃", "興櫃"]:
+        try:
+            df = get_all_code_name_map(market_arg)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = _normalize_master_schema(
+                    df,
+                    default_market=market_arg or "上市",
+                    source="utils_fallback",
+                    source_api=f"utils_{market_arg or 'all'}",
+                    source_rank=9,
+                )
+                if not temp.empty:
+                    dfs.append(temp)
+        except Exception:
+            pass
+    if not dfs:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+    out = pd.concat(dfs, ignore_index=True)
+    out["has_official_industry"] = out["official_industry"].astype(str).str.strip().ne("")
+    out = out.sort_values(["code", "has_official_industry", "source_rank"], ascending=[True, False, True])
+    out = out.drop_duplicates(subset=["code"], keep="first").drop(columns=["has_official_industry"], errors="ignore")
+    return _ensure_master_diag_columns(out)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_stock_master_cache_from_repo() -> pd.DataFrame:
+    cfg = _stock_master_config()
+    payload, _ = _read_json_from_github(cfg["master_path"])
+    if isinstance(payload, list):
+        df = pd.DataFrame(payload)
+        df = _ensure_master_diag_columns(df)
+        df = df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+        return df[_MASTER_DIAG_COLS + [c for c in ["repair_reason"] if c in df.columns]].copy()
+    return pd.DataFrame(columns=_MASTER_DIAG_COLS)
+
+
+
+def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_master_diag_columns(master_df if isinstance(master_df, pd.DataFrame) else pd.DataFrame())
+
+    repo_df = _load_stock_master_cache_from_repo()
+    if isinstance(repo_df, pd.DataFrame) and not repo_df.empty:
+        repo_df = _ensure_master_diag_columns(repo_df)
+        repo_df["source_rank"] = pd.to_numeric(repo_df["source_rank"], errors="coerce").fillna(50)
+        work = pd.concat([work, repo_df], ignore_index=True)
+
+    if not work.empty:
+        work["has_official_industry"] = work["official_industry"].astype(str).str.strip().ne("")
+        work = work.sort_values(["code", "has_official_industry", "source_rank"], ascending=[True, False, True])
+        work = work.drop_duplicates(subset=["code"], keep="first").drop(columns=["has_official_industry"], errors="ignore")
+
+    override_map = _load_stock_category_override_map()
+    if override_map:
+        for code, item in override_map.items():
+            matched = work["code"].astype(str) == str(code)
+            if matched.any():
+                idx = work[matched].index[0]
+                if _safe_str(item.get("name")):
+                    work.at[idx, "name"] = _safe_str(item.get("name"))
+                if _safe_str(item.get("market")):
+                    work.at[idx, "market"] = _safe_str(item.get("market"))
+                if _safe_str(item.get("category")):
+                    work.at[idx, "theme_category"] = _canonical_category(item.get("category"))
+                    work.at[idx, "category"] = _canonical_category(item.get("category"))
+            else:
+                nm = _safe_str(item.get("name")) or code
+                th = _canonical_category(item.get("category")) or _infer_theme_category(code=code, name=nm)
+                work = pd.concat([
+                    work,
+                    pd.DataFrame([{
+                        "code": code,
+                        "name": nm,
+                        "market": _safe_str(item.get("market")) or "上市",
+                        "official_industry_raw": "",
+                        "official_industry_source_col": "",
+                        "official_industry": "",
+                        "theme_category": th,
+                        "category": th,
+                        "source": "override_only",
+                        "source_api": "override",
+                        "source_rank": 1,
+                    }])
+                ], ignore_index=True)
+
+    work = _ensure_master_diag_columns(work)
+    work["repair_reason"] = work.apply(_master_repair_reason, axis=1)
+    work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    return work[_MASTER_DIAG_COLS + ["repair_reason"]].copy()
+
+
+
+def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
+    cfg = _stock_master_config()
+    if master_df is None:
+        return False, "主檔為空"
+    work = _ensure_master_diag_columns(master_df)
+    work["repair_reason"] = work.apply(_master_repair_reason, axis=1)
+    work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").sort_values(["code"]).reset_index(drop=True)
+    payload_cols = _MASTER_DIAG_COLS + ["repair_reason"]
+    payload = work[payload_cols].to_dict(orient="records")
+    return _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
+
+
+
+def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
+    logs = []
+    for fn in [_load_master_df, _load_stock_master_cache_from_repo, _fetch_twse_official_master, _fetch_tpex_official_master, _fetch_utils_master_fallback]:
+        try:
+            fn.clear()
+        except Exception:
+            pass
+    fresh_df = _load_master_df()
+    if fresh_df.empty:
+        return fresh_df, ["主檔更新失敗：官方 + fallback 未取回資料"]
+
+    ok, msg = _save_master_cache_to_repo(fresh_df)
+    logs.append(msg)
+
+    try:
+        twse = _fetch_twse_official_master()
+        logs.append(f"TWSE：{len(twse)} 筆 / 正式產業有值 {(twse['official_industry'].astype(str).str.strip()!='').sum() if not twse.empty else 0} 筆")
+    except Exception as e:
+        logs.append(f"TWSE 診斷失敗：{e}")
+    try:
+        tpex = _fetch_tpex_official_master()
+        logs.append(f"TPEX：{len(tpex)} 筆 / 正式產業有值 {(tpex['official_industry'].astype(str).str.strip()!='').sum() if not tpex.empty else 0} 筆")
+    except Exception as e:
+        logs.append(f"TPEX 診斷失敗：{e}")
+
+    final_df = _apply_master_overrides(fresh_df)
+    logs.append(f"合併後：{len(final_df)} 筆 / 正式產業有值 {(final_df['official_industry'].astype(str).str.strip()!='').sum() if not final_df.empty else 0} 筆")
+    return final_df, logs
+
+
+
+def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
+    if master_df is None or master_df.empty:
+        return pd.DataFrame(columns=_MASTER_DIAG_COLS + ["repair_reason"])
+
+    work = master_df.copy()
+    kw = _safe_str(keyword)
+    market_filter = _safe_str(market_filter)
+    category_filter = _safe_str(category_filter)
+
+    if market_filter and market_filter != "全部":
+        work = work[work["market"].astype(str) == market_filter].copy()
+    if category_filter and category_filter != "全部":
+        work = work[
+            (work["category"].astype(str) == category_filter)
+            | (work["theme_category"].astype(str) == category_filter)
+            | (work["official_industry"].astype(str) == category_filter)
+        ].copy()
+
+    if kw:
+        work = work[
+            work["code"].astype(str).str.contains(kw, case=False, na=False)
+            | work["name"].astype(str).str.contains(kw, case=False, na=False)
+            | work["category"].astype(str).str.contains(kw, case=False, na=False)
+            | work["theme_category"].astype(str).str.contains(kw, case=False, na=False)
+            | work["official_industry"].astype(str).str.contains(kw, case=False, na=False)
+            | work["official_industry_raw"].astype(str).str.contains(kw, case=False, na=False)
+            | work["official_industry_source_col"].astype(str).str.contains(kw, case=False, na=False)
+        ].copy()
+
+    if "repair_reason" not in work.columns:
+        work["repair_reason"] = work.apply(_master_repair_reason, axis=1)
+    work = work.sort_values(["market", "official_industry", "category", "code"]).reset_index(drop=True)
+    return work
+
+
+
+def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str], rec_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    render_pro_section("股票主檔搜尋 / 更新中心")
+    if rec_df is None:
+        rec_df = pd.DataFrame()
+
+    with st.expander("展開股票主檔搜尋 / 更新中心", expanded=False):
+        top1, top2, top3, top4 = st.columns([3, 2, 2, 2])
+        with top1:
+            keyword = st.text_input("搜尋股票代號 / 名稱 / 正式產業別 / 主題類別", key=_k("master_search_keyword"))
+        with top2:
+            market_filter = st.selectbox("市場別篩選", ["全部", "上市", "上櫃", "興櫃"], key=_k("master_market_filter"))
+        with top3:
+            category_choices = ["全部"] + sorted(list({x for x in (all_categories or []) if _safe_str(x)} | set(master_df.get("official_industry", pd.Series(dtype=str)).dropna().astype(str).tolist()) | set(master_df.get("theme_category", pd.Series(dtype=str)).dropna().astype(str).tolist())))
+            category_filter = st.selectbox("類別 / 產業篩選", category_choices, key=_k("master_category_filter"))
+        with top4:
+            refresh_btn = st.button("更新股票主檔（官方診斷）", key=_k("refresh_master_btn"), use_container_width=True)
+
+        if refresh_btn:
+            fresh_df, logs = _refresh_stock_master_now()
+            master_df = fresh_df.copy()
+            st.session_state[_k("master_diag_logs")] = logs
+            if not fresh_df.empty:
+                st.success("股票主檔已更新，已套用官方主檔診斷。")
+            else:
+                st.error("股票主檔更新失敗。")
+
+        logs = st.session_state.get(_k("master_diag_logs"), [])
+        if logs:
+            with st.expander("官方主檔診斷訊息", expanded=False):
+                for line in logs:
+                    st.write(f"- {line}")
+
+        if "repair_reason" not in master_df.columns:
+            master_df = master_df.copy()
+            master_df["repair_reason"] = master_df.apply(_master_repair_reason, axis=1)
+
+        total_count = len(master_df)
+        official_ok = int(master_df["official_industry"].astype(str).str.strip().ne("").sum()) if not master_df.empty else 0
+        official_missing = total_count - official_ok
+        topic_pending = int(master_df["repair_reason"].astype(str).eq("主題分類待映射").sum()) if not master_df.empty else 0
+        raw_present = int(master_df["official_industry_raw"].astype(str).str.strip().ne("").sum()) if not master_df.empty else 0
+
+        render_pro_kpi_row([
+            {"label": "主檔總筆數", "value": total_count, "delta": "官方主檔診斷", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "正式產業有值", "value": official_ok, "delta": f"覆蓋率 {((official_ok/total_count)*100 if total_count else 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "正式產業空白", "value": official_missing, "delta": "需先修主檔欄位", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "主題待映射", "value": topic_pending, "delta": "已抓到產業但主題未細分", "delta_class": "pro-kpi-delta-flat"},
+        ])
+        st.caption(f"原始官方產業欄位有值：{raw_present} 筆｜目前正式產業欄位有值：{official_ok} 筆")
+
+        found_df = _search_master_df(master_df, keyword, market_filter, category_filter)
+        st.caption(f"目前顯示 {len(found_df)} / {len(master_df)} 筆")
+
+        pending_df = found_df[found_df["repair_reason"].astype(str) != ""].copy() if not found_df.empty else pd.DataFrame()
+        with st.expander(f"分類待修清單（{len(pending_df):,} 檔）", expanded=False):
+            if pending_df.empty:
+                st.success("目前沒有待修清單。")
+            else:
+                pending_show = pending_df.rename(columns={
+                    "code": "股票代號", "name": "股票名稱", "market": "市場別",
+                    "official_industry_raw": "官方原始產業值", "official_industry_source_col": "官方原始產業欄位",
+                    "official_industry": "正式產業別", "theme_category": "操作主題類別", "category": "類別", "repair_reason": "待修原因",
+                    "source": "來源", "source_api": "來源API"
+                }).copy()
+                st.dataframe(pending_show.head(500), use_container_width=True, hide_index=True)
+
+        diag_show = found_df.rename(columns={
+            "code": "股票代號", "name": "股票名稱", "market": "市場別",
+            "official_industry_raw": "官方原始產業值", "official_industry_source_col": "官方原始產業欄位",
+            "official_industry": "正式產業別", "theme_category": "操作主題類別", "category": "類別",
+            "repair_reason": "待修原因", "source": "來源", "source_api": "來源API"
+        }).copy()
+        st.dataframe(diag_show.head(500), use_container_width=True, hide_index=True)
+
+        if found_df.empty:
+            return master_df
+
+        label_rows = found_df.head(300).copy()
+        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r.get('theme_category') or r.get('category') or r.get('official_industry') or '未分類'}" for _, r in label_rows.iterrows()]
+        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r.get('theme_category') or r.get('category') or r.get('official_industry') or '未分類'}": r.to_dict() for _, r in label_rows.iterrows()}
+        picked_label = st.selectbox("選擇股票進行修正 / 加入自選股", labels, key=_k("master_pick_label"))
+        picked = label_map.get(picked_label, {})
+
+        st.caption(
+            f"官方原始產業欄位：{_safe_str(picked.get('official_industry_source_col')) or '(空白)'}｜"
+            f"官方原始產業值：{_safe_str(picked.get('official_industry_raw')) or '(空白)'}｜"
+            f"正式產業別：{_safe_str(picked.get('official_industry')) or '(空白)'}｜"
+            f"目前操作主題類別：{_safe_str(picked.get('theme_category') or picked.get('category')) or '(空白)'}"
+        )
+
+        e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
+        with e1:
+            edit_code = st.text_input("股票代號", value=_safe_str(picked.get("code")), key=_k("master_edit_code"), disabled=True)
+        with e2:
+            edit_name = st.text_input("股票名稱", value=_safe_str(picked.get("name")), key=_k("master_edit_name"))
+        with e3:
+            default_market = _safe_str(picked.get("market")) if _safe_str(picked.get("market")) in {"上市", "上櫃", "興櫃"} else "上市"
+            edit_market = st.selectbox("修正市場別", ["上市", "上櫃", "興櫃"], index=["上市", "上櫃", "興櫃"].index(default_market), key=_k("master_edit_market"))
+        with e4:
+            edit_category = st.selectbox(
+                "修正操作主題類別",
+                list(dict.fromkeys((list(all_categories) if all_categories else []) + ["其他_官方未知", "其他_主題未映射", _safe_str(picked.get("official_industry"))])) if all_categories else [_safe_str(picked.get("category")) or "其他_主題未映射"],
+                index=0,
+                key=_k("master_edit_category"),
+            )
+
+        a1, a2, a3 = st.columns([2, 2, 2])
+        group_options = list(watchlist_map.keys()) if watchlist_map else [""]
+        with a1:
+            add_group = st.selectbox("加入自選股群組", group_options, key=_k("master_add_group"))
+        with a2:
+            apply_override_btn = st.button("套用分類修正並持久化", key=_k("apply_override_btn"), use_container_width=True)
+        with a3:
+            add_watch_btn = st.button("直接加入自選股", key=_k("master_add_watch_btn"), use_container_width=True)
+
+        if apply_override_btn:
+            ok, msg = _save_category_override(edit_code, edit_name, edit_market, edit_category)
+            if ok:
+                st.success(msg)
+                for fn in [_load_master_df, _load_stock_master_cache_from_repo, _load_stock_category_override_map]:
+                    try:
+                        fn.clear()
+                    except Exception:
+                        pass
+                master_df = _load_master_df()
+            else:
+                st.error(msg)
+
+        if add_watch_btn:
+            ok, msg = _append_stock_to_watchlist(add_group, edit_code, edit_name, edit_market, edit_category)
+            if ok:
+                st.success(msg)
+            else:
+                st.warning(msg)
+
+    return master_df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_master_df() -> pd.DataFrame:
+    twse_df = _fetch_twse_official_master()
+    tpex_df = _fetch_tpex_official_master()
+    fallback_df = _fetch_utils_master_fallback()
+
+    dfs = [df for df in [twse_df, tpex_df, fallback_df] if isinstance(df, pd.DataFrame) and not df.empty]
+    if not dfs:
+        base = pd.DataFrame(columns=_MASTER_DIAG_COLS)
+    else:
+        base = pd.concat(dfs, ignore_index=True)
+        base = _ensure_master_diag_columns(base)
+        base["has_official_industry"] = base["official_industry"].astype(str).str.strip().ne("")
+        base = base.sort_values(["code", "has_official_industry", "source_rank"], ascending=[True, False, True])
+        base = base.drop_duplicates(subset=["code"], keep="first").drop(columns=["has_official_industry"], errors="ignore")
+
+    final_df = _apply_master_overrides(base)
+    try:
+        st.session_state[_k("master_diag_summary")] = {
+            "total": len(final_df),
+            "official_ok": int(final_df["official_industry"].astype(str).str.strip().ne("").sum()) if not final_df.empty else 0,
+            "official_missing": int(final_df["official_industry"].astype(str).str.strip().eq("").sum()) if not final_df.empty else 0,
+        }
+    except Exception:
+        pass
+    return final_df
+
 if __name__ == "__main__":
     main()
