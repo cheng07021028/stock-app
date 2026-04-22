@@ -9,6 +9,8 @@ import base64
 import io
 import hashlib
 import copy
+import time
+from functools import lru_cache
 
 import pandas as pd
 import requests
@@ -41,6 +43,23 @@ GODPICK_RECORD_COLUMNS = [
 ]
 
 STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
+
+
+DEFAULT_STANDARD_COLS = [
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+    "推薦價格", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
+]
+
+DEFAULT_ADVANCED_COLS = [
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+    "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
+    "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
+    "推薦日期", "推薦時間", "模式績效標籤", "推薦理由摘要", "備註"
+]
+
+FAST_VISIBLE_LIMIT = 500
 
 
 def _k(key: str) -> str:
@@ -869,6 +888,7 @@ def _load_records() -> pd.DataFrame:
 def _save_state_df(df: pd.DataFrame):
     st.session_state[_k("records_df")] = _ensure_godpick_record_columns(df)
     st.session_state[_k("records_saved_at")] = _now_text()
+    _invalidate_analysis_cache()
 
 
 def _get_state_df() -> pd.DataFrame:
@@ -895,6 +915,143 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
         if c in show.columns:
             show[c] = show[c].map(lambda v: "是" if _normalize_bool(v) else "否")
     return show
+
+
+def _df_signature(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "empty"
+    base_cols = [c for c in ["record_id", "更新時間", "最新更新時間", "最新價", "損益幅%", "實際報酬%", "20日績效%"] if c in df.columns]
+    if not base_cols:
+        base_cols = list(df.columns[:8])
+    try:
+        sig_src = df[base_cols].fillna("").astype(str)
+        return hashlib.md5(sig_src.to_csv(index=False).encode("utf-8")).hexdigest()
+    except Exception:
+        return hashlib.md5(str(df.shape).encode("utf-8")).hexdigest()
+
+
+def _get_default_col_profile(mode: str) -> list[str]:
+    return DEFAULT_ADVANCED_COLS.copy() if mode == "進階" else DEFAULT_STANDARD_COLS.copy()
+
+
+def _get_profile_key(mode: str) -> str:
+    return _k(f"col_profile_{mode}")
+
+
+def _get_saved_col_profile(mode: str, available_cols: list[str]) -> list[str]:
+    default_cols = _get_default_col_profile(mode)
+    saved = st.session_state.get(_get_profile_key(mode), default_cols.copy())
+    saved = [c for c in saved if c in available_cols]
+    remain = [c for c in default_cols if c in available_cols and c not in saved]
+    extra = [c for c in available_cols if c not in saved and c not in remain]
+    final_cols = saved + remain + extra
+    return final_cols
+
+
+def _save_col_profile(mode: str, cols: list[str]):
+    st.session_state[_get_profile_key(mode)] = cols.copy()
+    st.session_state[_k("last_col_profile_save")] = _now_text()
+
+
+def _reset_col_profile(mode: str, available_cols: list[str]):
+    default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
+    _save_col_profile(mode, default_cols)
+
+
+def _move_col(cols: list[str], col_name: str, direction: str) -> list[str]:
+    x = cols.copy()
+    if col_name not in x:
+        return x
+    idx = x.index(col_name)
+    if direction == "up" and idx > 0:
+        x[idx], x[idx - 1] = x[idx - 1], x[idx]
+    elif direction == "down" and idx < len(x) - 1:
+        x[idx], x[idx + 1] = x[idx + 1], x[idx]
+    elif direction == "top" and idx > 0:
+        x.insert(0, x.pop(idx))
+    elif direction == "bottom" and idx < len(x) - 1:
+        x.append(x.pop(idx))
+    return x
+
+
+def _build_filtered_view_df(
+    df: pd.DataFrame,
+    keyword: str,
+    mode_filter: str,
+    category_filter: str,
+    status_filter: str,
+    bought_filter: str,
+    sort_by: str,
+    sort_asc: bool,
+) -> pd.DataFrame:
+    view_df = df.copy()
+
+    if keyword:
+        mask = (
+            view_df["股票代號"].astype(str).str.contains(keyword, case=False, na=False)
+            | view_df["股票名稱"].astype(str).str.contains(keyword, case=False, na=False)
+            | view_df["推薦理由摘要"].astype(str).str.contains(keyword, case=False, na=False)
+        )
+        view_df = view_df[mask].copy()
+
+    if mode_filter != "全部":
+        view_df = view_df[view_df["推薦模式"].astype(str) == mode_filter].copy()
+
+    if category_filter != "全部":
+        view_df = view_df[view_df["類別"].astype(str) == category_filter].copy()
+
+    if status_filter != "全部":
+        view_df = view_df[view_df["目前狀態"].astype(str) == status_filter].copy()
+
+    if bought_filter != "全部":
+        target_bool = bought_filter == "是"
+        view_df = view_df[view_df["是否已實際買進"].fillna(False).map(_normalize_bool) == target_bool].copy()
+
+    if sort_by in view_df.columns:
+        view_df = view_df.sort_values(sort_by, ascending=sort_asc, na_position="last")
+
+    return view_df.reset_index(drop=True)
+
+
+def _get_analysis_cache(df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], dict[str, Any], float | None, float | None]:
+    sig = _df_signature(df)
+    cache_key = _k("analysis_cache")
+    cache = st.session_state.get(cache_key, {})
+
+    if cache.get("sig") == sig:
+        return cache["ana_tables"], cache["summary"], cache["avg_20"], cache["avg_real"]
+
+    ana_tables = _build_analysis_tables(df)
+    summary = _build_summary(df)
+    avg_20 = pd.to_numeric(df["20日績效%"], errors="coerce").dropna().mean() if not df.empty else None
+    avg_real = pd.to_numeric(df.loc[df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if not df.empty else None
+
+    st.session_state[cache_key] = {
+        "sig": sig,
+        "ana_tables": ana_tables,
+        "summary": summary,
+        "avg_20": avg_20,
+        "avg_real": avg_real,
+    }
+    return ana_tables, summary, avg_20, avg_real
+
+
+def _invalidate_analysis_cache():
+    st.session_state.pop(_k("analysis_cache"), None)
+
+
+def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, visible_limit: int) -> tuple[pd.DataFrame, int, bool]:
+    src = view_df[[c for c in use_cols if c in view_df.columns]].copy()
+    truncated = False
+    total_rows = len(src)
+
+    if fast_mode and total_rows > visible_limit:
+        src = src.head(visible_limit).copy()
+        truncated = True
+
+    src.insert(0, "匯入自選", False)
+    src.insert(1, "刪除", False)
+    return src, total_rows, truncated
 
 
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
@@ -1077,6 +1234,14 @@ def main():
         st.session_state[_k("status_type")] = "info"
     if _k("watchlist_target_group") not in st.session_state:
         st.session_state[_k("watchlist_target_group")] = "股神推薦"
+    if _k("fast_mode") not in st.session_state:
+        st.session_state[_k("fast_mode")] = True
+    if _k("visible_limit") not in st.session_state:
+        st.session_state[_k("visible_limit")] = FAST_VISIBLE_LIMIT
+    if _k("show_column_manager") not in st.session_state:
+        st.session_state[_k("show_column_manager")] = False
+    if _k("selected_col_to_move") not in st.session_state:
+        st.session_state[_k("selected_col_to_move")] = ""
 
     render_pro_hero(
         title="股神推薦紀錄",
@@ -1105,13 +1270,17 @@ def main():
     with top_cols[1]:
         if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
+            before_sig = _df_signature(df)
             df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
-            df = _apply_mode_labels(df)
+            after_sig = _df_signature(df)
+            if before_sig != after_sig:
+                df = _apply_mode_labels(df)
             _save_state_df(df)
             st.success("已更新最新價，尚未同步")
     with top_cols[2]:
         if st.button("💾 儲存同步", use_container_width=True):
-            latest_df = _apply_mode_labels(_get_state_df())
+            latest_df = _get_state_df()
+            latest_df = _apply_mode_labels(latest_df)
             _save_state_df(latest_df)
             ok = _save_records_dual(latest_df)
             if ok:
@@ -1157,10 +1326,7 @@ def main():
                 st.write(f"- {line}")
 
     live_df = _ensure_godpick_record_columns(_get_state_df().copy())
-    ana_tables = _build_analysis_tables(live_df)
-    summary = _build_summary(live_df)
-    avg_20 = pd.to_numeric(live_df["20日績效%"], errors="coerce").dropna().mean() if not live_df.empty else None
-    avg_real = pd.to_numeric(live_df.loc[live_df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if not live_df.empty else None
+    ana_tables, summary, avg_20, avg_real = _get_analysis_cache(live_df)
 
     render_pro_kpi_row([
         {"label": "總筆數", "value": summary["count"], "delta": "推薦紀錄", "delta_class": "pro-kpi-delta-flat"},
@@ -1172,7 +1338,20 @@ def main():
     tabs = st.tabs(["📋 總表管理", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
     with tabs[0]:
-        render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。並可勾選匯入 4_自選股中心。")
+        render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。支援欄位順序自訂、記憶、快速顯示。")
+
+        opt_top = st.columns([1.2, 1.2, 1.2, 2.8])
+        with opt_top[0]:
+            st.toggle("快速模式", value=st.session_state.get(_k("fast_mode"), True), key=_k("fast_mode"))
+        with opt_top[1]:
+            st.number_input("顯示筆數上限", min_value=100, max_value=5000, step=100, key=_k("visible_limit"))
+        with opt_top[2]:
+            if st.button("🧩 欄位管理", use_container_width=True):
+                st.session_state[_k("show_column_manager")] = not st.session_state.get(_k("show_column_manager"), False)
+                st.rerun()
+        with opt_top[3]:
+            st.caption("快速模式開啟時，大表只先渲染前 N 筆，避免 data_editor 過重；資料本體不刪、功能不減。")
+
         filter_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 1.0, 1.0, 1.0])
         with filter_cols[0]:
             keyword = st.text_input("搜尋代號 / 名稱 / 理由", value="", key=_k("kw"))
@@ -1191,51 +1370,100 @@ def main():
         with filter_cols[7]:
             show_cols_mode = st.selectbox("顯示模式", ["標準", "進階"], index=0, key=_k("show_cols_mode"))
 
-        view_df = live_df.copy()
-        if keyword:
-            mask = (
-                view_df["股票代號"].astype(str).str.contains(keyword, case=False, na=False)
-                | view_df["股票名稱"].astype(str).str.contains(keyword, case=False, na=False)
-                | view_df["推薦理由摘要"].astype(str).str.contains(keyword, case=False, na=False)
-            )
-            view_df = view_df[mask].copy()
-        if mode_filter != "全部":
-            view_df = view_df[view_df["推薦模式"].astype(str) == mode_filter].copy()
-        if category_filter != "全部":
-            view_df = view_df[view_df["類別"].astype(str) == category_filter].copy()
-        if status_filter != "全部":
-            view_df = view_df[view_df["目前狀態"].astype(str) == status_filter].copy()
-        if bought_filter != "全部":
-            target_bool = bought_filter == "是"
-            view_df = view_df[view_df["是否已實際買進"].fillna(False).map(_normalize_bool) == target_bool].copy()
-        if sort_by in view_df.columns:
-            view_df = view_df.sort_values(sort_by, ascending=sort_asc, na_position="last").reset_index(drop=True)
+        view_df = _build_filtered_view_df(
+            live_df,
+            keyword=keyword,
+            mode_filter=mode_filter,
+            category_filter=category_filter,
+            status_filter=status_filter,
+            bought_filter=bought_filter,
+            sort_by=sort_by,
+            sort_asc=sort_asc,
+        )
 
-        st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
+        available_cols = [c for c in (DEFAULT_ADVANCED_COLS if show_cols_mode == "進階" else DEFAULT_STANDARD_COLS) if c in view_df.columns]
+        use_cols = _get_saved_col_profile(show_cols_mode, available_cols)
 
-        standard_cols = [
-            "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-            "推薦價格", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-            "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
-        ]
-        advanced_cols = [
-            "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-            "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
-            "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
-            "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
-            "推薦日期", "推薦時間", "模式績效標籤", "推薦理由摘要", "備註"
-        ]
-        use_cols = advanced_cols if show_cols_mode == "進階" else standard_cols
-        editor_df = view_df[[c for c in use_cols if c in view_df.columns]].copy()
-        editor_df.insert(0, "匯入自選", False)
-        editor_df.insert(1, "刪除", False)
+        if st.session_state.get(_k("show_column_manager"), False):
+            with st.expander("欄位順序管理", expanded=True):
+                mgr_cols = st.columns([2.0, 0.9, 0.9, 0.9, 0.9, 1.2])
+                with mgr_cols[0]:
+                    selected_col = st.selectbox(
+                        "選擇要移動的欄位",
+                        options=use_cols,
+                        index=0 if use_cols else None,
+                        key=_k("selected_col_to_move"),
+                    )
+                with mgr_cols[1]:
+                    if st.button("⬆ 上移", use_container_width=True, disabled=not use_cols):
+                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "up"))
+                        st.rerun()
+                with mgr_cols[2]:
+                    if st.button("⬇ 下移", use_container_width=True, disabled=not use_cols):
+                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "down"))
+                        st.rerun()
+                with mgr_cols[3]:
+                    if st.button("⏫ 置頂", use_container_width=True, disabled=not use_cols):
+                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "top"))
+                        st.rerun()
+                with mgr_cols[4]:
+                    if st.button("⏬ 置底", use_container_width=True, disabled=not use_cols):
+                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "bottom"))
+                        st.rerun()
+                with mgr_cols[5]:
+                    if st.button("♻ 重設預設", use_container_width=True):
+                        _reset_col_profile(show_cols_mode, available_cols)
+                        st.rerun()
+
+                st.markdown("**目前欄位順序**")
+                st.code(" | ".join(use_cols), language=None)
+
+                st.markdown("**快速欄位方案**")
+                preset_cols = st.columns(4)
+                with preset_cols[0]:
+                    if st.button("方案A：交易核心", use_container_width=True):
+                        preset = [c for c in [
+                            "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦價格", "最新價",
+                            "損益幅%", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "備註"
+                        ] if c in available_cols]
+                        _save_col_profile(show_cols_mode, preset)
+                        st.rerun()
+                with preset_cols[1]:
+                    if st.button("方案B：績效核心", use_container_width=True):
+                        preset = [c for c in [
+                            "record_id", "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分",
+                            "3日績效%", "5日績效%", "10日績效%", "20日績效%", "損益幅%", "模式績效標籤"
+                        ] if c in available_cols]
+                        _save_col_profile(show_cols_mode, preset)
+                        st.rerun()
+                with preset_cols[2]:
+                    if st.button("方案C：完整預設", use_container_width=True):
+                        _reset_col_profile(show_cols_mode, available_cols)
+                        st.rerun()
+                with preset_cols[3]:
+                    st.caption(f"最後保存：{_safe_str(st.session_state.get(_k('last_col_profile_save'), '未保存'))}")
+
+        fast_mode = bool(st.session_state.get(_k("fast_mode"), True))
+        visible_limit = int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT))
+
+        editor_df, total_rows, truncated = _get_editor_df(
+            view_df=view_df,
+            use_cols=use_cols,
+            fast_mode=fast_mode,
+            visible_limit=visible_limit,
+        )
+
+        if truncated:
+            st.warning(f"快速模式啟用中：目前符合條件 {total_rows} 筆，只先顯示前 {len(editor_df)} 筆以加速操作。要編輯全部可關閉快速模式。")
+        else:
+            st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
 
         edited_df = st.data_editor(
             editor_df,
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            key=_k("record_editor"),
+            key=_k(f"record_editor_{show_cols_mode}"),
             column_config={
                 "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
                 "刪除": st.column_config.CheckboxColumn("刪除"),
@@ -1315,14 +1543,15 @@ def main():
                     st.success(f"已刪除 {len(delete_ids)} 筆，尚未同步")
         with action_cols[4]:
             if st.button("🧼 清空目前篩選", use_container_width=True):
-                if view_df.empty:
+                source_df = view_df if not truncated else view_df.head(visible_limit)
+                if source_df.empty:
                     st.warning("目前篩選結果沒有資料可清空。")
                 else:
-                    new_df = _clear_filtered_records(live_df, view_df)
+                    new_df = _clear_filtered_records(live_df, source_df)
                     _save_state_df(new_df)
-                    st.success(f"已清空 {len(view_df)} 筆，尚未同步")
+                    st.success(f"已清空 {len(source_df)} 筆，尚未同步")
         with action_cols[5]:
-            st.caption("流程：篩選 → 勾選匯入自選 / 編輯 → 套用 / 刪除 / 清空 → 更新價格 / 更新績效 → 儲存同步")
+            st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 更新價格 / 更新績效 → 儲存同步")
 
     with tabs[1]:
         render_pro_section("手動新增推薦紀錄")
