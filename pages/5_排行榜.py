@@ -55,6 +55,31 @@ def _safe_float(v: Any, default=None):
         return default
 
 
+def _normalize_radar_result(radar: Any) -> dict[str, Any]:
+    if isinstance(radar, dict):
+        return radar
+
+    if isinstance(radar, tuple):
+        # 相容舊版 utils：可能回傳 (summary, score) 或其他 tuple
+        if len(radar) >= 1:
+            return {
+                "summary": _safe_str(radar[0]) if radar[0] is not None else "—",
+                "score": _safe_float(radar[1], None) if len(radar) >= 2 else None,
+            }
+
+    if isinstance(radar, list):
+        if len(radar) >= 1:
+            return {
+                "summary": _safe_str(radar[0]) if radar[0] is not None else "—",
+                "score": _safe_float(radar[1], None) if len(radar) >= 2 else None,
+            }
+
+    if radar is None:
+        return {"summary": "—"}
+
+    return {"summary": _safe_str(radar) or "—"}
+
+
 def _normalize_code(v: Any) -> str:
     text = _safe_str(v)
     if not text:
@@ -283,7 +308,7 @@ def _analyze_stock_row(
 
     signal = compute_signal_snapshot(hist_df)
     sr = compute_support_resistance_snapshot(hist_df)
-    radar = compute_radar_scores(hist_df)
+    radar = _normalize_radar_result(compute_radar_scores(hist_df))
 
     res20 = _safe_float(sr.get("res_20"))
     sup20 = _safe_float(sr.get("sup_20"))
