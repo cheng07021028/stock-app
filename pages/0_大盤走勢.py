@@ -475,6 +475,49 @@ def _extract_num(text: Any, div: float = 1.0):
         return None
 
 
+
+
+def _normalize_stooq_symbol(symbol: str) -> str:
+    s = _safe_str(symbol).strip()
+    mapping = {
+        "TSM": "tsm.us",
+        "^TWII": "^twii",
+        "^IXIC": "^ixic",
+        "^SOX": "^sox",
+        "^GSPC": "^spx",
+        "ES.F": "es.f",
+        "NQ.F": "nq.f",
+        "^VIX": "^vix",
+        "USDTWD": "usdtwd",
+    }
+    return mapping.get(s, s.lower())
+
+
+def _price_on_or_before(symbol: str, pred_date_text: str, lookback_days: int = 15) -> dict[str, Any]:
+    normalized = _normalize_stooq_symbol(symbol)
+    data = _fetch_stooq(normalized, pred_date_text)
+    if data:
+        data = dict(data)
+        data["used_date"] = _safe_str(data.get("date"))
+        data["symbol"] = normalized
+        return data
+
+    pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
+    if pd.isna(pred_dt):
+        pred_dt = pd.Timestamp.today().normalize()
+
+    for i in range(1, lookback_days + 1):
+        dt_text = (pred_dt - pd.Timedelta(days=i)).strftime("%Y-%m-%d")
+        data = _fetch_stooq(normalized, dt_text)
+        if data:
+            data = dict(data)
+            data["used_date"] = _safe_str(data.get("date"))
+            data["symbol"] = normalized
+            return data
+
+    return {"date": "", "used_date": "", "pct": None, "close": None, "symbol": normalized, "source": "fallback"}
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
     out = {"foreign": None, "total3": None, "source": "fallback", "used_date": ""}
