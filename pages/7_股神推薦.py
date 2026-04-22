@@ -1525,8 +1525,12 @@ def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str
     return master_df
 
 
+# =========================================================
+# Legacy fallback loader kept only for reference.
+# Do NOT use this to avoid overriding the official master pipeline above.
+# =========================================================
 @st.cache_data(ttl=1800, show_spinner=False)
-def _load_master_df() -> pd.DataFrame:
+def _load_master_df_legacy() -> pd.DataFrame:
     twse_df, twse_info = _fetch_twse_master()
     tpex_o_df, tpex_o_info = _fetch_tpex_master("上櫃")
     tpex_r_df, tpex_r_info = _fetch_tpex_master("興櫃")
