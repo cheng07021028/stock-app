@@ -1613,5 +1613,3 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
         result["summary"] = "整體評分偏弱，短線保守為宜。"
     else:
         result["summary"] = "整體評分明顯偏弱，宜先以風險控管為主。"
-
-    return result
