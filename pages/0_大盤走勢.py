@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any
 import base64
 import hashlib
@@ -163,6 +163,19 @@ def _normalize_direction_from_points(points: float | None) -> str:
 def _create_record_id(pred_date: str) -> str:
     raw = f"macro|{_safe_str(pred_date)}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _date_context_text(target_date: str) -> str:
+    target = pd.to_datetime(target_date, errors="coerce")
+    today = pd.to_datetime(_today_text(), errors="coerce")
+    if pd.isna(target) or pd.isna(today):
+        return ""
+    diff = int((target.date() - today.date()).days)
+    if diff == 0:
+        return "以最新可得市場資料推估今日走勢。"
+    if diff > 0:
+        return f"以最新可得市場資料，預推 {target.strftime('%Y-%m-%d')} 走勢。距今天 {diff} 天。"
+    return f"此日期早於今天，屬於回顧式推估檢查。距今天 {abs(diff)} 天。"
 
 
 # =========================================================
@@ -368,6 +381,86 @@ def _get_market_snapshot(refresh_key: str = "") -> dict[str, dict[str, Any]]:
     return out
 
 
+def _pick_history_row(df: pd.DataFrame, target_dt: pd.Timestamp) -> tuple[pd.Series | None, pd.Series | None]:
+    if df is None or df.empty:
+        return None, None
+    temp = df.dropna(subset=["close"]).copy()
+    if temp.empty:
+        return None, None
+    temp["date_only"] = pd.to_datetime(temp["datetime"], errors="coerce").dt.normalize()
+    temp = temp.dropna(subset=["date_only"]).sort_values("datetime").reset_index(drop=True)
+    hit = temp[temp["date_only"] <= target_dt.normalize()].copy()
+    if hit.empty:
+        return None, None
+    latest = hit.iloc[-1]
+    prev_pool = temp[temp["datetime"] < latest["datetime"]]
+    prev = prev_pool.iloc[-1] if not prev_pool.empty else None
+    return latest, prev
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def _get_market_snapshot_for_date(target_date_text: str = "", refresh_key: str = "") -> dict[str, dict[str, Any]]:
+    target_dt = pd.to_datetime(target_date_text, errors="coerce")
+    if pd.isna(target_dt):
+        return _get_market_snapshot(refresh_key=refresh_key)
+
+    lookback_days = max((datetime.now().date() - target_dt.date()).days + 40, 120)
+    if target_dt.date() > datetime.now().date():
+        lookback_days = 120
+    approx_months = max(6, min(24, int(lookback_days / 30) + 2))
+    rng = f"{approx_months}mo"
+
+    symbol_map = {
+        "台股加權": "^TWII",
+        "那斯達克": "^IXIC",
+        "費半": "^SOX",
+        "標普500期": "ES=F",
+        "那指期": "NQ=F",
+        "道瓊": "^DJI",
+        "台積電ADR": "TSM",
+        "美元台幣": "TWD=X",
+        "VIX恐慌": "^VIX",
+    }
+    out: dict[str, dict[str, Any]] = {}
+    for name, symbol in symbol_map.items():
+        try:
+            df = _get_yahoo_chart(symbol, interval="1d", rng=rng, refresh_key=f"{refresh_key}_{target_date_text}_{symbol}")
+            latest, prev = _pick_history_row(df, target_dt)
+            if latest is None:
+                out[name] = {"symbol": symbol, "error": "target_not_found"}
+                continue
+
+            temp = df.dropna(subset=["close"]).copy().sort_values("datetime").reset_index(drop=True)
+            temp["ma5"] = temp["close"].rolling(5).mean()
+            temp["ma10"] = temp["close"].rolling(10).mean()
+            temp["ma20"] = temp["close"].rolling(20).mean()
+            latest_time = latest["datetime"]
+            row = temp[temp["datetime"] == latest_time].tail(1)
+            row = row.iloc[0] if not row.empty else latest
+
+            close_now = _safe_float(row["close"])
+            close_prev = _safe_float(prev["close"]) if prev is not None else None
+            chg = None if close_now is None or close_prev is None else close_now - close_prev
+            chg_pct = None if chg is None or close_prev in [None, 0] else chg / close_prev * 100
+
+            out[name] = {
+                "symbol": symbol,
+                "close": close_now,
+                "prev_close": close_prev,
+                "change": chg,
+                "change_pct": chg_pct,
+                "ma5": _safe_float(row.get("ma5")),
+                "ma10": _safe_float(row.get("ma10")),
+                "ma20": _safe_float(row.get("ma20")),
+                "time": latest_time,
+                "df": temp[temp["datetime"] <= latest_time].tail(60).copy(),
+                "replay": True,
+            }
+        except Exception as e:
+            out[name] = {"symbol": symbol, "error": str(e), "replay": True}
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def _get_twii_history(refresh_key: str = "") -> pd.DataFrame:
     df = _get_yahoo_chart("^TWII", interval="1d", rng="1y", refresh_key=refresh_key)
@@ -386,10 +479,13 @@ def _get_twii_history(refresh_key: str = "") -> pd.DataFrame:
 # 新聞資料
 # =========================================================
 @st.cache_data(ttl=300, show_spinner=False)
-def _fetch_google_news_rss(query: str, refresh_key: str = "") -> list[dict[str, Any]]:
+def _fetch_google_news_rss(query: str, refresh_key: str = "", start_date_text: str = "", end_date_text: str = "") -> list[dict[str, Any]]:
     url = "https://news.google.com/rss/search"
+    date_filter = ""
+    if start_date_text and end_date_text:
+        date_filter = f" after:{start_date_text} before:{end_date_text}"
     params = {
-        "q": query,
+        "q": f"{query}{date_filter}",
         "hl": "zh-TW",
         "gl": "TW",
         "ceid": "TW:zh-Hant",
@@ -430,7 +526,7 @@ def _score_news_title(title: str) -> tuple[int, list[str]]:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _get_news_bundle(refresh_key: str = "") -> dict[str, Any]:
+def _get_news_bundle(target_date_text: str = "", refresh_key: str = "") -> dict[str, Any]:
     queries = {
         "國際風險": '(war OR tariff OR sanctions OR fed OR inflation OR recession OR geopolitics) (stocks OR semiconductor OR Taiwan)',
         "科技半導體": '(NVIDIA OR TSMC OR semiconductor OR chip OR AI) (stocks OR market)',
@@ -439,9 +535,26 @@ def _get_news_bundle(refresh_key: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {"items": [], "summary": []}
     seen = set()
 
+    target_dt = pd.to_datetime(target_date_text, errors="coerce")
+    today_dt = pd.Timestamp(datetime.now().date())
+    start_date_text = ""
+    end_date_text = ""
+    replay_mode = False
+    if pd.notna(target_dt):
+        day_gap = abs((today_dt - target_dt.normalize()).days)
+        if day_gap >= 2:
+            replay_mode = True
+            start_date_text = (target_dt - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+            end_date_text = (target_dt + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+
     for bucket, query in queries.items():
         try:
-            rows = _fetch_google_news_rss(query, refresh_key=refresh_key)
+            rows = _fetch_google_news_rss(
+                query,
+                refresh_key=refresh_key,
+                start_date_text=start_date_text,
+                end_date_text=end_date_text,
+            )
         except Exception:
             rows = []
         for row in rows:
@@ -464,6 +577,8 @@ def _get_news_bundle(refresh_key: str = "") -> dict[str, Any]:
         out["df"] = pd.DataFrame(columns=["bucket", "title", "source", "score", "hits", "pub_date"])
         out["news_score"] = 50.0
         out["risk_level"] = "中性"
+        out["mode"] = "歷史回放" if replay_mode else "即時模式"
+        out["window"] = f"{start_date_text} ~ {end_date_text}" if replay_mode else "最近新聞"
         return out
 
     news_df["score"] = pd.to_numeric(news_df["score"], errors="coerce").fillna(0)
@@ -480,8 +595,13 @@ def _get_news_bundle(refresh_key: str = "") -> dict[str, Any]:
     out["df"] = news_df[["bucket", "title", "source", "score", "hits", "pub_date", "link"]].copy()
     out["news_score"] = news_score
     out["risk_level"] = risk_level
+    out["mode"] = "歷史回放" if replay_mode else "即時模式"
+    out["window"] = f"{start_date_text} ~ {end_date_text}" if replay_mode else "最近新聞"
     return out
 
+
+# =========================================================
+# 推估模型
 
 # =========================================================
 # 推估模型
@@ -847,10 +967,19 @@ def main():
     with top_cols[4]:
         st.caption(f"資料更新：{st.session_state.get(_k('refresh_key'), '-') } ｜ 紀錄更新：{st.session_state.get(_k('record_refresh_key'), '-')}")
 
+    target_cols = st.columns([1.2, 2.8])
+    with target_cols[0]:
+        target_date = st.date_input("推估日期", value=datetime.now().date(), key=_k("target_date"))
+    with target_cols[1]:
+        st.info(_date_context_text(str(target_date)))
+
     refresh_key = _safe_str(st.session_state.get(_k("refresh_key"), ""))
     record_refresh_key = _safe_str(st.session_state.get(_k("record_refresh_key"), ""))
-    snapshot = _get_market_snapshot(refresh_key=refresh_key)
-    news_bundle = _get_news_bundle(refresh_key=refresh_key)
+    target_date_text = str(target_date)
+    today_text = datetime.now().strftime("%Y-%m-%d")
+    replay_mode = target_date_text != today_text
+    snapshot = _get_market_snapshot_for_date(target_date_text=target_date_text, refresh_key=refresh_key) if replay_mode else _get_market_snapshot(refresh_key=refresh_key)
+    news_bundle = _get_news_bundle(target_date_text=target_date_text, refresh_key=refresh_key)
     factor_df = _build_factor_table(snapshot, news_bundle)
     pred = _build_prediction(snapshot, factor_df)
     rules = _build_entry_rules(pred, snapshot)
@@ -875,14 +1004,14 @@ def main():
     ])
 
     st.info(
-        f"股神判讀：**{pred['stance']}**｜推估今日大盤合理區間約 **{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}**。"
+        f"股神判讀：**{pred['stance']}**｜推估 {target_date.strftime('%Y-%m-%d')} 大盤合理區間約 **{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}**。"
         f" 建議：{pred['action']}｜風險等級：{pred['risk']}"
     )
 
     tabs = st.tabs(["📌 總覽", "📊 因子評分", "📝 紀錄追蹤", "📰 新聞風險", "🧠 股神判斷因子", "📈 市場明細"])
 
     with tabs[0]:
-        render_pro_section("今日進場結論")
+        render_pro_section(f"{target_date.strftime('%Y-%m-%d')} 進場結論")
         left, right = st.columns([1.35, 1.0])
         with left:
             st.dataframe(pd.DataFrame(rules), use_container_width=True, hide_index=True)
@@ -890,6 +1019,7 @@ def main():
             render_pro_info_card(
                 "核心結論",
                 [
+                    ("推估日期", target_date.strftime('%Y-%m-%d'), ""),
                     ("大盤偏向", pred["stance"], ""),
                     ("推估漲跌點", f"{pred['expected_points']:+,.0f}", ""),
                     ("預估區間", f"{pred['range_low']:,.0f} ~ {pred['range_high']:,.0f}", ""),
@@ -911,10 +1041,10 @@ def main():
 
     with tabs[2]:
         render_pro_section("推估紀錄 / 回測檢討", "把每天推估存起來，之後回填實際結果，檢討準確率。")
-        pred_date = st.date_input("紀錄日期", value=datetime.now().date(), key=_k("pred_date"))
+        pred_date = st.date_input("紀錄日期", value=target_date, key=_k("pred_date"))
         c1, c2, c3 = st.columns([1.2, 1.2, 2.6])
         with c1:
-            if st.button("💾 儲存今日推估", use_container_width=True, type="primary"):
+            if st.button("💾 儲存此日期推估", use_container_width=True, type="primary"):
                 row = _build_record_row(str(pred_date), pred, snapshot, news_bundle, factor_df)
                 new_df = _upsert_record(records_df, row)
                 if _save_prediction_records(new_df):
@@ -927,7 +1057,7 @@ def main():
                     st.session_state[_k("record_refresh_key")] = _now_text()
                     st.rerun()
         with c3:
-            st.caption("建議每天開盤前或盤前存一次，收盤後按『回填實際結果』，就能累積準確率。")
+            st.caption("可指定任意日期先存推估；若是歷史日期，可於收盤資料完整後回填檢查模型偏差。")
 
         render_pro_kpi_row([
             {"label": "已回測樣本", "value": acc["樣本數"], "delta": "有實際結果", "delta_class": "pro-kpi-delta-flat"},
