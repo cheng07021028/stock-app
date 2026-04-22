@@ -1873,6 +1873,11 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
     signal_snapshot = compute_signal_snapshot(hist_df)
     sr_snapshot = compute_support_resistance_snapshot(hist_df)
     radar = compute_radar_scores(hist_df)
+
+    signal_snapshot = signal_snapshot if isinstance(signal_snapshot, dict) else {}
+    sr_snapshot = sr_snapshot if isinstance(sr_snapshot, dict) else {}
+    radar = radar if isinstance(radar, dict) else {}
+
     auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
     trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
     prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
@@ -1899,11 +1904,11 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
     radar_avg = _avg_safe(
         [
-            _safe_float(radar.get("trend")),
-            _safe_float(radar.get("momentum")),
-            _safe_float(radar.get("volume")),
-            _safe_float(radar.get("position")),
-            _safe_float(radar.get("structure")),
+            _safe_float(radar.get("trend")) if isinstance(radar, dict) else None,
+            _safe_float(radar.get("momentum")) if isinstance(radar, dict) else None,
+            _safe_float(radar.get("volume")) if isinstance(radar, dict) else None,
+            _safe_float(radar.get("position")) if isinstance(radar, dict) else None,
+            _safe_float(radar.get("structure")) if isinstance(radar, dict) else None,
         ],
         50.0,
     )
