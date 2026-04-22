@@ -1359,16 +1359,19 @@ def main():
 
     a1, a2 = st.columns([1.4, 1.2])
     with a1:
-        render_pro_info_card(
-            "股神模式結論",
-            [
-                ("建議動作", _safe_str(top_pick.get("建議動作")), _safe_str(top_pick.get("建議倉位"))),
-                ("是否適合進場", _safe_str(top_pick.get("是否適合進場")), _safe_str(top_pick.get("是否適合續抱"))),
-                ("是否適合減碼/出場", f"{_safe_str(top_pick.get('是否適合減碼'))} / {_safe_str(top_pick.get('是否適合出場'))}", _safe_str(top_pick.get("風險等級"))),
-                ("主要風險", _safe_str(top_pick.get("主要風險")), ""),
-            ],
-            chips=[_safe_str(top_pick.get("模式名稱")), _safe_str(top_pick.get("市場情境")), _safe_str(top_pick.get("方向強度"))],
-        )
+        render_pro_section("股神模式結論")
+        chip_text = " ｜ ".join([x for x in [_safe_str(top_pick.get("模式名稱")), _safe_str(top_pick.get("市場情境")), _safe_str(top_pick.get("方向強度"))] if x])
+        if chip_text:
+            st.caption(chip_text)
+        g1, g2, g3, g4 = st.columns(4)
+        with g1:
+            st.metric("建議動作", _safe_str(top_pick.get("建議動作")) or "-", _safe_str(top_pick.get("建議倉位")) or None)
+        with g2:
+            st.metric("是否適合進場", _safe_str(top_pick.get("是否適合進場")) or "-", _safe_str(top_pick.get("是否適合續抱")) or None)
+        with g3:
+            st.metric("是否適合減碼/出場", f"{_safe_str(top_pick.get('是否適合減碼')) or '-'} / {_safe_str(top_pick.get('是否適合出場')) or '-'}", _safe_str(top_pick.get("風險等級")) or None)
+        with g4:
+            st.metric("主要風險", _safe_str(top_pick.get("主要風險")) or "-")
         st.text_area("股神推論邏輯", value=_safe_str(top_pick.get("股神推論邏輯")), height=180, disabled=True)
         st.text_area("進場確認條件", value=_safe_str(top_pick.get("進場確認條件")), height=95, disabled=True)
         st.text_area("出場警訊", value=_safe_str(top_pick.get("出場警訊")), height=95, disabled=True)
@@ -1412,7 +1415,7 @@ def main():
         if not stock_link_df.empty:
             st.dataframe(stock_link_df, use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    with tabs[1]:
         render_pro_section("儲存本次推估")
         st.caption("會將 5 套模式一起存入紀錄檔，後續可比較哪一套最近最準。")
         c1, c2 = st.columns([1.2, 4])
@@ -1435,7 +1438,7 @@ def main():
                 st.rerun()
         st.dataframe(_format_pred_df(pred_df[[c for c in RECORD_COLUMNS if c in pred_df.columns][:25]]), use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    with tabs[2]:
         render_pro_section("回填實際結果 / 追蹤準確率")
         hist_df = _get_state_df()
         fill_date = st.selectbox("選擇要回填的日期", options=sorted(hist_df["推估日期"].dropna().astype(str).unique().tolist(), reverse=True) if not hist_df.empty else [pred_date_text], key=_k("fill_date"))
@@ -1493,7 +1496,7 @@ def main():
                     _set_status("已套用回填結果，尚未同步 GitHub", "success")
                 st.rerun()
 
-    with tabs[5]:
+    with tabs[3]:
         render_pro_section("模式排行榜 / 自我修正參考")
         scoreboard = _build_scoreboard(_get_state_df())
         if scoreboard.empty:
@@ -1503,7 +1506,7 @@ def main():
             best = scoreboard.iloc[0]
             st.success(f"目前最近最強模式：{best['模式名稱']}｜方向命中率 {best['方向命中率']:.1f}%｜平均點數誤差 {best['平均點數誤差'] if not pd.isna(best['平均點數誤差']) else 0:.1f}")
 
-    with tabs[5]:
+    with tabs[4]:
         render_pro_section("歷史紀錄")
         hist = _get_state_df().copy()
         if hist.empty:
