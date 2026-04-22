@@ -1,6 +1,6 @@
 {
   "fast_mode": true,
-  "visible_limit": 500,
+  "visible_limit": 100,
   "profiles": {
     "標準": [
       "股票代號",
@@ -67,5 +67,5 @@
       "備註"
     ]
   },
-  "updated_at": "2026-04-22 07:38:51"
+  "updated_at": "2026-04-22 07:38:58"
 }
