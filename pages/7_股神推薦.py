@@ -1708,7 +1708,7 @@ def _build_mode_score(
     return _score_clip(total), tag
 
 
-def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
+def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: Any, sr_snapshot: Any, radar: Any) -> dict[str, Any]:
     last = df.iloc[-1]
     close_now = _safe_float(last.get("收盤價"))
     ma20 = _safe_float(last.get("MA20"))
@@ -1719,6 +1719,10 @@ def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapsh
     vol20 = _safe_float(last.get("VOL20"))
     ret20 = _safe_float(last.get("RET20"))
     ret60 = _safe_float(last.get("RET60"))
+
+    signal_snapshot = signal_snapshot if isinstance(signal_snapshot, dict) else {}
+    sr_snapshot = sr_snapshot if isinstance(sr_snapshot, dict) else {}
+    radar = radar if isinstance(radar, dict) else {}
 
     signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
     radar_trend = _safe_float(radar.get("trend"), 50) or 50
@@ -2016,7 +2020,7 @@ def _analyze_one_stock_for_recommend(
         "風險報酬_拉回": bundle["trade_plan"]["rr1"],
         "風險報酬_突破": bundle["trade_plan"]["rr2"],
         "自動因子摘要": bundle["auto_factor"]["factor_summary"],
-        "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
+        "雷達摘要": _safe_str(bundle["radar"].get("summary")) if isinstance(bundle.get("radar"), dict) else "—",
         "風險分數": _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0,
         "淘汰原因": _safe_str(bundle["risk_filter"].get("淘汰原因")),
         "均線轉強分": _safe_float(bundle["prelaunch"].get("均線轉強分"), 0) or 0,
