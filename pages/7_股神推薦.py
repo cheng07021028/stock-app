@@ -1103,17 +1103,71 @@ def _normalize_master_columns(df: pd.DataFrame, market_label: str, code_col: str
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_master() -> tuple[pd.DataFrame, dict[str, Any]]:
     url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+    empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
+    info = {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_openapi", "error": ""}
+
     try:
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
         payload = resp.json()
+        if not isinstance(payload, list):
+            info["error"] = f"TWSE payload 型別異常：{type(payload).__name__}"
+            return empty, info
+
         df = pd.DataFrame(payload)
-        return _normalize_master_columns(df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi")
-    except Exception:
-        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
-        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_openapi"}
+        if df.empty:
+            info["error"] = "TWSE 回傳空資料"
+            return empty, info
+
+        df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+        info["raw_cols"] = list(df.columns)
+
+        code_candidates = ["公司代號", "證券代號", "有價證券代號"]
+        name_candidates = ["公司簡稱", "公司名稱", "證券名稱", "有價證券名稱"]
+        industry_candidates = ["產業別", "產業類別", "產業代碼"]
+
+        code_col = next((c for c in code_candidates if c in df.columns), "")
+        name_col = next((c for c in name_candidates if c in df.columns), "")
+        industry_col = next((c for c in industry_candidates if c in df.columns), "")
+
+        if not code_col:
+            for c in df.columns:
+                cs = str(c)
+                if "代號" in cs and ("公司" in cs or "證券" in cs or "有價證券" in cs):
+                    code_col = c
+                    break
+        if not name_col:
+            for c in df.columns:
+                cs = str(c)
+                if ("名稱" in cs or "簡稱" in cs) and ("公司" in cs or "證券" in cs or "有價證券" in cs):
+                    name_col = c
+                    break
+        if not industry_col:
+            for c in df.columns:
+                if "產業" in str(c):
+                    industry_col = c
+                    break
+
+        if not code_col or not name_col or not industry_col:
+            info["error"] = f"TWSE 欄位對應失敗｜code={code_col or '-'}｜name={name_col or '-'}｜industry={industry_col or '-'}"
+            return empty, info
+
+        norm_df, norm_info = _normalize_master_columns(df, "上市", code_col, name_col, industry_col, "twse_openapi")
+        info.update(norm_info)
+
+        if norm_info.get("rows", 0) == 0:
+            info["error"] = "TWSE 正規化後無資料"
+        elif norm_info.get("official_hit", 0) == 0:
+            info["error"] = "TWSE 已抓到資料，但正式產業命中數為 0"
+
+        return norm_df, info
+
+    except Exception as e:
+        info["error"] = f"{type(e).__name__}: {e}"
+        return empty, info
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -1134,25 +1188,80 @@ def _fetch_tpex_master(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_isin_fill_map() -> dict[str, str]:
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     out: dict[str, str] = {}
+
+    def _flatten_cols(cols) -> list[str]:
+        out_cols = []
+        for c in cols:
+            if isinstance(c, tuple):
+                txt = " ".join([_safe_str(x) for x in c if _safe_str(x)])
+            else:
+                txt = _safe_str(c)
+            out_cols.append(txt.replace("\ufeff", "").strip())
+        return out_cols
+
+    def _find_col(cols: list[str], keywords: list[str]) -> str:
+        for c in cols:
+            if all(k in c for k in keywords):
+                return c
+        return ""
+
     try:
-        tables = pd.read_html(url)
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        html = resp.text
+        tables = pd.read_html(io.StringIO(html))
     except Exception:
         return out
+
     for tb in tables:
-        tmp = tb.copy()
-        tmp.columns = [str(c) for c in tmp.columns]
-        cols = set(tmp.columns)
-        if not ({"有價證券代號", "產業別"} <= cols):
+        try:
+            tmp = tb.copy()
+            tmp.columns = _flatten_cols(tmp.columns)
+            cols = list(tmp.columns)
+
+            code_col = ""
+            for c in cols:
+                cs = str(c)
+                if "代號及名稱" in cs or ("有價證券代號" in cs and "名稱" in cs):
+                    code_col = c
+                    break
+            if not code_col:
+                code_col = _find_col(cols, ["代號"]) or _find_col(cols, ["證券代號"]) or _find_col(cols, ["有價證券代號"])
+
+            industry_col = _find_col(cols, ["產業別"]) or _find_col(cols, ["產業"])
+            market_col = _find_col(cols, ["市場別"])
+
+            if not code_col or not industry_col:
+                continue
+
+            for _, r in tmp.iterrows():
+                raw_code_val = r.get(code_col)
+                code = _normalize_code(raw_code_val)
+                if not code:
+                    raw_text = _safe_str(raw_code_val)
+                    digits = "".join(ch for ch in raw_text if ch.isdigit())
+                    if 4 <= len(digits) <= 6:
+                        code = digits[:6] if len(digits) > 6 else digits
+                if not code:
+                    continue
+
+                if market_col:
+                    market_txt = _safe_str(r.get(market_col))
+                    if market_txt and "上市" not in market_txt:
+                        continue
+
+                industry = _official_industry_name(r.get(industry_col))
+                if industry:
+                    out[code] = industry
+        except Exception:
             continue
-        for _, r in tmp.iterrows():
-            code = _normalize_code(r.get("有價證券代號"))
-            industry = _official_industry_name(r.get("產業別"))
-            if code and industry:
-                out[code] = industry
+
     return out
+
 
 
 def _build_utils_master_fallback() -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -1358,8 +1467,14 @@ def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None
     logs.append(f"TWSE：{_n(twse_info.get('rows'))} 筆 / 正式產業有值 {_n(twse_info.get('official_hit'))} 筆 / API: {_safe_str(twse_info.get('source_api')) or '-'}")
     if twse_info.get("raw_cols"):
         logs.append("TWSE 欄位：" + ", ".join([str(x) for x in list(twse_info.get("raw_cols", []))[:20]]))
+    if _safe_str(twse_info.get("error")):
+        logs.append("TWSE 診斷：" + _safe_str(twse_info.get("error")))
     logs.append(f"TPEX-上櫃：{_n(tpex_o_info.get('rows'))} 筆 / 正式產業有值 {_n(tpex_o_info.get('official_hit'))} 筆 / API: {_safe_str(tpex_o_info.get('source_api')) or '-'}")
+    if _safe_str(tpex_o_info.get("error")):
+        logs.append("TPEX-上櫃 診斷：" + _safe_str(tpex_o_info.get("error")))
     logs.append(f"TPEX-興櫃：{_n(tpex_r_info.get('rows'))} 筆 / 正式產業有值 {_n(tpex_r_info.get('official_hit'))} 筆 / API: {_safe_str(tpex_r_info.get('source_api')) or '-'}")
+    if _safe_str(tpex_r_info.get("error")):
+        logs.append("TPEX-興櫃 診斷：" + _safe_str(tpex_r_info.get("error")))
     logs.append(f"utils fallback：{_n(utils_info.get('rows'))} 筆 / API: {_safe_str(utils_info.get('source_api')) or '-'}")
     if not merged_df.empty and "official_industry" in merged_df.columns:
         hit = int(merged_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
@@ -1369,15 +1484,50 @@ def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None
     return logs
 
 
+
 def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
     try:
         _load_master_df.clear()
     except Exception:
         pass
+    try:
+        _fetch_twse_master.clear()
+    except Exception:
+        pass
+    try:
+        _fetch_tpex_master.clear()
+    except Exception:
+        pass
+    try:
+        _fetch_twse_isin_fill_map.clear()
+    except Exception:
+        pass
+
     fresh_df = _load_master_df()
     logs = list(st.session_state.get(_k("master_diag_logs"), []))
+
     if fresh_df.empty:
         return fresh_df, logs + ["主檔更新失敗：官方主檔與 fallback 皆無資料"]
+
+    twse_ok = False
+    twse_official = 0
+    try:
+        twse_df, twse_info = _fetch_twse_master()
+        twse_ok = int(twse_info.get("rows", 0)) > 0
+        twse_official = int(twse_info.get("official_hit", 0))
+        if _safe_str(twse_info.get("error")):
+            logs.append(f"TWSE 錯誤：{_safe_str(twse_info.get('error'))}")
+    except Exception as e:
+        logs.append(f"TWSE 重抓失敗：{type(e).__name__}: {e}")
+
+    if not twse_ok:
+        logs.append("已阻擋寫回 cache：因 TWSE 官方主檔本次抓取失敗。")
+        return fresh_df, logs
+
+    if twse_official <= 0:
+        logs.append("已阻擋寫回 cache：因 TWSE 正式產業命中數為 0。")
+        return fresh_df, logs
+
     ok, msg = _save_master_cache_to_repo(fresh_df)
     logs.append(msg)
     if ok:
@@ -1386,6 +1536,7 @@ def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
         except Exception:
             pass
     return fresh_df, logs
+
 
 
 def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
