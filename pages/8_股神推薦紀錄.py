@@ -8,6 +8,7 @@ import json
 import base64
 import io
 import hashlib
+import copy
 
 import pandas as pd
 import requests
@@ -24,59 +25,22 @@ from utils import (
     render_pro_info_card,
     render_pro_kpi_row,
     render_pro_section,
+    get_normalized_watchlist,
 )
 
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 
 GODPICK_RECORD_COLUMNS = [
-    "record_id",
-    "股票代號",
-    "股票名稱",
-    "市場別",
-    "類別",
-    "推薦模式",
-    "推薦等級",
-    "推薦總分",
-    "技術結構分數",
-    "起漲前兆分數",
-    "交易可行分數",
-    "類股熱度分數",
-    "同類股領先幅度",
-    "是否領先同類股",
-    "推薦標籤",
-    "推薦理由摘要",
-    "推薦價格",
-    "停損價",
-    "賣出目標1",
-    "賣出目標2",
-    "推薦日期",
-    "推薦時間",
-    "建立時間",
-    "更新時間",
-    "目前狀態",
-    "是否已實際買進",
-    "實際買進價",
-    "實際賣出價",
-    "實際報酬%",
-    "最新價",
-    "最新更新時間",
-    "損益金額",
-    "損益幅%",
-    "是否達停損",
-    "是否達目標1",
-    "是否達目標2",
-    "持有天數",
-    "模式績效標籤",
-    "備註",
-    "3日績效%",
-    "5日績效%",
-    "10日績效%",
-    "20日績效%",
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
+    "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
+    "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
+    "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
+    "模式績效標籤", "備註", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
 
-STATUS_OPTIONS = ["觀察", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
-PERF_LABEL_OPTIONS = ["", "強", "中", "弱", "觀察中", "待驗證"]
+STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
 
 
 def _k(key: str) -> str:
@@ -126,10 +90,6 @@ def _normalize_category(v: Any) -> str:
     return _safe_str(v).replace("　", " ").strip()
 
 
-def _score_clip(v: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, v))
-
-
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -162,6 +122,16 @@ def _github_config() -> dict[str, str]:
     }
 
 
+def _watchlist_github_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("WATCHLIST_GITHUB_PATH", "watchlist.json")) or "watchlist.json",
+    }
+
+
 def _github_headers(token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {token}",
@@ -183,8 +153,7 @@ def _firebase_config() -> dict[str, str]:
 
 
 def _clean_private_key(raw_key: str) -> str:
-    private_key = _safe_str(raw_key)
-    private_key = private_key.replace("\\n", "\n").strip()
+    private_key = _safe_str(raw_key).replace("\\n", "\n").strip()
     if private_key.startswith("\ufeff"):
         private_key = private_key.lstrip("\ufeff")
     return private_key
@@ -472,13 +441,159 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
     return False
 
 
+def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
+    payload: dict[str, list[dict[str, str]]] = {}
+    for group_name, items in data.items():
+        g = _safe_str(group_name)
+        if not g:
+            continue
+        seen = set()
+        normalized_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            code = _normalize_code(item.get("code"))
+            name = _safe_str(item.get("name")) or code
+            market = _safe_str(item.get("market")) or "上市"
+            if not code:
+                continue
+            key = (g, code)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append({"code": code, "name": name, "market": market})
+        payload[g] = sorted(normalized_items, key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
+    return payload
+
+
+def _load_watchlist_payload() -> dict[str, list[dict[str, str]]]:
+    raw = get_normalized_watchlist()
+    result: dict[str, list[dict[str, str]]] = {}
+    if isinstance(raw, dict):
+        for group_name, items in raw.items():
+            g = _safe_str(group_name) or "未分組"
+            result[g] = []
+            if isinstance(items, list):
+                seen = set()
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    code = _normalize_code(item.get("code"))
+                    name = _safe_str(item.get("name")) or code
+                    market = _safe_str(item.get("market")) or "上市"
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+                    result[g].append({"code": code, "name": name, "market": market})
+    return _normalize_watchlist_payload(result)
+
+
+def _get_watchlist_sha() -> tuple[str, str]:
+    cfg = _watchlist_github_config()
+    token = cfg["token"]
+    if not token:
+        return "", "缺少 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            return _safe_str(resp.json().get("sha")), ""
+        if resp.status_code == 404:
+            return "", ""
+        return "", f"讀取 watchlist SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return "", f"讀取 watchlist SHA 例外：{e}"
+
+
+def _write_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    cfg = _watchlist_github_config()
+    token = cfg["token"]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN，無法回寫 watchlist.json"
+
+    sha, err = _get_watchlist_sha()
+    if err:
+        return False, err
+
+    content_text = json.dumps(_normalize_watchlist_payload(payload), ensure_ascii=False, indent=2)
+    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+    body: dict[str, Any] = {
+        "message": f"update watchlist from godpick record page at {_now_text()}",
+        "content": encoded,
+        "branch": cfg["branch"],
+    }
+    if sha:
+        body["sha"] = sha
+
+    try:
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫自選股：{cfg['path']}"
+        return False, f"watchlist GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"watchlist GitHub 寫入例外：{e}"
+
+
+def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[str], target_group: str) -> tuple[bool, str]:
+    records_df = _ensure_godpick_record_columns(records_df)
+    ids = {_safe_str(x) for x in (selected_ids or []) if _safe_str(x)}
+    if records_df.empty:
+        return False, "目前沒有推薦紀錄可匯出"
+    if not ids:
+        return False, "請先勾選要匯入自選股中心的股票"
+
+    chosen = records_df[records_df["record_id"].astype(str).isin(ids)].copy()
+    if chosen.empty:
+        return False, "找不到要匯入的推薦紀錄"
+
+    payload = _load_watchlist_payload()
+    target_group = _safe_str(target_group) or "股神推薦"
+    if target_group not in payload:
+        payload[target_group] = []
+
+    existing_codes = {_normalize_code(x.get("code")) for x in payload.get(target_group, [])}
+    add_count = 0
+    skip_count = 0
+
+    for _, row in chosen.iterrows():
+        code = _normalize_code(row.get("股票代號"))
+        name = _safe_str(row.get("股票名稱")) or code
+        market = _safe_str(row.get("市場別")) or "上市"
+        if not code:
+            skip_count += 1
+            continue
+        if code in existing_codes:
+            skip_count += 1
+            continue
+        payload[target_group].append({"code": code, "name": name, "market": market})
+        existing_codes.add(code)
+        add_count += 1
+
+    payload = _normalize_watchlist_payload(payload)
+    ok, msg = _write_watchlist_to_github(payload)
+    if ok:
+        st.session_state["watchlist_data"] = copy.deepcopy(payload)
+        st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
+        st.session_state["watchlist_last_saved_at"] = _now_text()
+        return True, f"{msg}｜匯入 {add_count} 檔，略過 {skip_count} 檔"
+    return False, msg
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
     stock_no = _normalize_code(stock_no)
     stock_name = _safe_str(stock_name)
     market_type = _safe_str(market_type) or "上市"
 
-    # 先抓即時資料，避免只拿到歷史收盤價
     tried = []
     if market_type:
         tried.append(market_type)
@@ -496,7 +611,6 @@ def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple
         except Exception:
             pass
 
-    # 即時抓不到，再退回歷史最新收盤
     today = date.today()
     start_date = today - timedelta(days=60)
     for mk in tried + [""]:
@@ -576,12 +690,9 @@ def _get_forward_return(stock_no: str, stock_name: str, market_type: str, rec_da
             if temp.empty:
                 continue
 
-            # 基準價：推薦日當天或之後第一個交易日
             base_candidates = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
             if base_candidates.empty:
                 continue
-
-            # 沒滿指定交易日，就回傳 None，不要硬算成 0
             if len(base_candidates) <= days_after:
                 return None
 
@@ -589,58 +700,6 @@ def _get_forward_return(stock_no: str, stock_name: str, market_type: str, rec_da
             target_px = float(base_candidates.iloc[days_after]["收盤價"])
             if base_px == 0:
                 return None
-
-            return (target_px - base_px) / base_px * 100
-        except Exception:
-            pass
-
-    return None
-    start_date = rec_date.date() - timedelta(days=5)
-    end_date = rec_date.date() + timedelta(days=max(days_after * 4, 30))
-    tried = []
-    primary = _safe_str(market_type)
-    if primary:
-        tried.append(primary)
-    for mk in ["上市", "上櫃", "興櫃", ""]:
-        if mk not in tried:
-            tried.append(mk)
-
-    for mk in tried:
-        try:
-            try:
-                df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_date=start_date, end_date=end_date)
-            except TypeError:
-                try:
-                    df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_dt=start_date, end_dt=end_date)
-                except Exception:
-                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                continue
-            temp = df.copy()
-            if "日期" not in temp.columns:
-                for c in temp.columns:
-                    if str(c).lower() in {"date", "日期"}:
-                        temp = temp.rename(columns={c: "日期"})
-                        break
-            for c in temp.columns:
-                if str(c).lower() == "close":
-                    temp = temp.rename(columns={c: "收盤價"})
-            if "日期" not in temp.columns or "收盤價" not in temp.columns:
-                continue
-            temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
-            temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
-            temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
-            if temp.empty:
-                continue
-
-            base_candidates = temp[temp["日期"].dt.date >= rec_date.date()]
-            if base_candidates.empty:
-                continue
-            base_px = float(base_candidates.iloc[0]["收盤價"])
-            if base_px == 0:
-                return None
-            target_idx = min(days_after, len(base_candidates) - 1)
-            target_px = float(base_candidates.iloc[target_idx]["收盤價"])
             return (target_px - base_px) / base_px * 100
         except Exception:
             pass
@@ -672,7 +731,7 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
         actual_ret = (sell_price - buy_price) / buy_price * 100
 
     buy_flag = src.get("是否已實際買進")
-    buy_flag = _normalize_bool(buy_flag) or buy_price not in [None, 0] or status == "已買進"
+    buy_flag = _normalize_bool(buy_flag) or buy_price not in [None, 0] or status in {"已買進", "持有"}
 
     hit_stop = _normalize_bool(src.get("是否達停損"))
     hit_t1 = _normalize_bool(src.get("是否達目標1"))
@@ -822,13 +881,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
-        return {
-            "count": 0,
-            "buy_count": 0,
-            "sold_count": 0,
-            "avg_ret": 0,
-            "win_rate": 0,
-        }
+        return {"count": 0, "buy_count": 0, "sold_count": 0, "avg_ret": 0, "win_rate": 0}
     ret_series = pd.to_numeric(df["實際報酬%"], errors="coerce")
     pnl_series = pd.to_numeric(df["損益幅%"], errors="coerce")
     used_ret = ret_series.fillna(pnl_series)
@@ -837,42 +890,7 @@ def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     sold_count = int(df["目前狀態"].isin(["已賣出", "停損", "達標"]).sum())
     win_rate = float((valid > 0).mean() * 100) if not valid.empty else 0.0
     avg_ret = float(valid.mean()) if not valid.empty else 0.0
-    return {
-        "count": int(len(df)),
-        "buy_count": buy_count,
-        "sold_count": sold_count,
-        "avg_ret": avg_ret,
-        "win_rate": win_rate,
-    }
-
-
-def _build_mode_stats(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    x = df.copy()
-    x["報酬基準"] = pd.to_numeric(x["實際報酬%"], errors="coerce").fillna(pd.to_numeric(x["損益幅%"], errors="coerce"))
-    grp = x.groupby("推薦模式", dropna=False).agg(
-        筆數=("record_id", "count"),
-        已買進筆數=("是否已實際買進", lambda s: int(pd.Series(s).fillna(False).map(_normalize_bool).sum())),
-        平均報酬=("報酬基準", "mean"),
-        勝率=("報酬基準", lambda s: (pd.Series(s).dropna() > 0).mean() * 100 if len(pd.Series(s).dropna()) else 0),
-    ).reset_index()
-    grp = grp.sort_values(["勝率", "平均報酬", "筆數"], ascending=[False, False, False]).reset_index(drop=True)
-    return grp
-
-
-def _build_category_stats(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    x = df.copy()
-    x["報酬基準"] = pd.to_numeric(x["實際報酬%"], errors="coerce").fillna(pd.to_numeric(x["損益幅%"], errors="coerce"))
-    grp = x.groupby("類別", dropna=False).agg(
-        筆數=("record_id", "count"),
-        平均報酬=("報酬基準", "mean"),
-        勝率=("報酬基準", lambda s: (pd.Series(s).dropna() > 0).mean() * 100 if len(pd.Series(s).dropna()) else 0),
-    ).reset_index()
-    grp = grp.sort_values(["勝率", "平均報酬", "筆數"], ascending=[False, False, False]).reset_index(drop=True)
-    return grp
+    return {"count": int(len(df)), "buy_count": buy_count, "sold_count": sold_count, "avg_ret": avg_ret, "win_rate": win_rate}
 
 
 def _win_rate(series) -> float:
@@ -969,14 +987,7 @@ def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         )
         best_category_df = best_category_df.sort_values(["綜合類別分數", "平均20日績效", "20日勝率"], ascending=[False, False, False]).reset_index(drop=True)
 
-    return {
-        "mode": mode_df,
-        "category": category_df,
-        "grade": grade_df,
-        "trade_mode": trade_mode_df,
-        "best_mode": best_mode_df,
-        "best_category": best_category_df,
-    }
+    return {"mode": mode_df, "category": category_df, "grade": grade_df, "trade_mode": trade_mode_df, "best_mode": best_mode_df, "best_category": best_category_df}
 
 
 def _build_mode_performance_label(row: pd.Series | dict[str, Any], mode_stats_df: pd.DataFrame) -> str:
@@ -1046,10 +1057,12 @@ def main():
     if _k("status_msg") not in st.session_state:
         st.session_state[_k("status_msg")] = ""
         st.session_state[_k("status_type")] = "info"
+    if _k("watchlist_target_group") not in st.session_state:
+        st.session_state[_k("watchlist_target_group")] = "股神推薦"
 
     render_pro_hero(
         title="股神推薦紀錄",
-        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出。",
+        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -1102,7 +1115,11 @@ def main():
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
     with top_cols[6]:
-        st.caption(f"GitHub：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ Firestore：{'✅' if _safe_str(_firebase_config().get('project_id')) else '❌'}")
+        st.caption(
+            f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
+            f"Firestore：{'✅' if _safe_str(_firebase_config().get('project_id')) else '❌'} ｜ "
+            f"自選股：{'✅' if _safe_str(_watchlist_github_config().get('token')) else '❌'}"
+        )
 
     df = _get_state_df()
     if df.empty:
@@ -1137,7 +1154,7 @@ def main():
     tabs = st.tabs(["📋 總表管理", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
     with tabs[0]:
-        render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。")
+        render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。並可勾選匯入 4_自選股中心。")
         filter_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 1.0, 1.0, 1.0])
         with filter_cols[0]:
             keyword = st.text_input("搜尋代號 / 名稱 / 理由", value="", key=_k("kw"))
@@ -1179,26 +1196,21 @@ def main():
         st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
 
         standard_cols = [
-            "record_id", "股票代號", "股票名稱", "市場別", "類別",
-            "推薦模式", "推薦等級", "推薦總分",
-            "推薦價格", "最新價", "損益幅%",
-            "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-            "目前狀態", "是否已實際買進",
-            "實際買進價", "實際賣出價", "實際報酬%",
-            "推薦日期", "推薦時間", "模式績效標籤", "備註"
+            "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+            "推薦價格", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+            "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
         ]
         advanced_cols = [
-            "record_id", "股票代號", "股票名稱", "市場別", "類別",
-            "推薦模式", "推薦等級", "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
-            "推薦價格", "停損價", "賣出目標1", "賣出目標2",
-            "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-            "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%",
-            "是否達停損", "是否達目標1", "是否達目標2",
-            "持有天數", "推薦日期", "推薦時間", "模式績效標籤", "推薦理由摘要", "備註"
+            "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+            "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+            "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
+            "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
+            "推薦日期", "推薦時間", "模式績效標籤", "推薦理由摘要", "備註"
         ]
         use_cols = advanced_cols if show_cols_mode == "進階" else standard_cols
         editor_df = view_df[[c for c in use_cols if c in view_df.columns]].copy()
-        editor_df.insert(0, "刪除", False)
+        editor_df.insert(0, "匯入自選", False)
+        editor_df.insert(1, "刪除", False)
 
         edited_df = st.data_editor(
             editor_df,
@@ -1207,6 +1219,7 @@ def main():
             num_rows="fixed",
             key=_k("record_editor"),
             column_config={
+                "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
                 "刪除": st.column_config.CheckboxColumn("刪除"),
                 "record_id": st.column_config.TextColumn("record_id", disabled=True),
                 "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
@@ -1241,8 +1254,16 @@ def main():
             },
         )
 
-        action_cols = st.columns([1.2, 1.2, 1.2, 1.2, 3.2])
+        action_cols = st.columns([1.6, 1.2, 1.2, 1.2, 1.2, 2.6])
         with action_cols[0]:
+            target_group = st.text_input("匯入自選群組", value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"), key=_k("watchlist_target_group"))
+        with action_cols[1]:
+            if st.button("📥 匯入勾選到4_自選股", use_container_width=True):
+                selected_ids = edited_df.loc[edited_df["匯入自選"] == True, "record_id"].astype(str).tolist()
+                ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
+                _set_status(msg, "success" if ok else "warning")
+                st.rerun()
+        with action_cols[2]:
             if st.button("✅ 套用編輯", use_container_width=True):
                 master = live_df.copy()
                 edit_map = {str(r["record_id"]): dict(r) for _, r in edited_df.iterrows()}
@@ -1262,7 +1283,7 @@ def main():
                 master = _apply_mode_labels(master)
                 _save_state_df(master)
                 st.success("已套用，尚未同步")
-        with action_cols[1]:
+        with action_cols[3]:
             if st.button("🗑️ 刪除勾選", use_container_width=True):
                 delete_ids = edited_df.loc[edited_df["刪除"] == True, "record_id"].astype(str).tolist()
                 if not delete_ids:
@@ -1271,7 +1292,7 @@ def main():
                     new_df = _delete_records_by_ids(live_df, delete_ids)
                     _save_state_df(new_df)
                     st.success(f"已刪除 {len(delete_ids)} 筆，尚未同步")
-        with action_cols[2]:
+        with action_cols[4]:
             if st.button("🧼 清空目前篩選", use_container_width=True):
                 if view_df.empty:
                     st.warning("目前篩選結果沒有資料可清空。")
@@ -1279,14 +1300,8 @@ def main():
                     new_df = _clear_filtered_records(live_df, view_df)
                     _save_state_df(new_df)
                     st.success(f"已清空 {len(view_df)} 筆，尚未同步")
-        with action_cols[3]:
-            if st.button("🧮 更新績效", use_container_width=True):
-                updated = _backfill_perf_columns(_get_state_df())
-                updated = _apply_mode_labels(updated)
-                _save_state_df(updated)
-                st.success("已更新 3/5/10/20 日績效，尚未同步")
-        with action_cols[4]:
-            st.caption("流程：篩選 → 編輯 → 套用 / 刪除 / 清空 → 更新價格 / 更新績效 → 儲存同步")
+        with action_cols[5]:
+            st.caption("流程：篩選 → 勾選匯入自選 / 編輯 → 套用 / 刪除 / 清空 → 更新價格 / 更新績效 → 儲存同步")
 
     with tabs[1]:
         render_pro_section("手動新增推薦紀錄")
@@ -1397,10 +1412,8 @@ def main():
         with sub_tabs[3]:
             detail_cols = [c for c in [
                 "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
-                "推薦價格", "最新價", "損益金額", "損益幅%",
-                "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-                "是否達停損", "是否達目標1", "是否達目標2",
-                "推薦日期", "持有天數", "推薦理由摘要"
+                "推薦價格", "最新價", "損益金額", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+                "是否達停損", "是否達目標1", "是否達目標2", "推薦日期", "持有天數", "推薦理由摘要"
             ] if c in live_df.columns]
             st.dataframe(_format_df(live_df[detail_cols]), use_container_width=True, hide_index=True)
 
@@ -1437,6 +1450,8 @@ def main():
             "同步 / 欄位完整性",
             [
                 ("主要來源", "godpick_records.json + Firestore", "雙寫"),
+                ("自選股匯入", "可將勾選紀錄匯入 watchlist.json", "已整合"),
+                ("匯入位置", _watchlist_github_config()["path"], "沿用4_自選股中心"),
                 ("刪除 / 清空", "支援", "總表管理內"),
                 ("批次更新", "支援表格編輯 / 刪除 / 清空 / 更新", "已保留"),
                 ("前推績效", "3/5/10/20 日績效%（未滿交易日顯示空白）", "已整合"),
@@ -1444,7 +1459,7 @@ def main():
                 ("最強模式 / 類別", "依20日績效 + 勝率綜合排序", "已整合"),
                 ("Excel 匯出", "推薦紀錄 / 分析表 / 最強榜", "已整合"),
             ],
-            chips=["完整版", "不可缺功能", "雙寫同步", "前推績效", "最強模式", "最強類別"],
+            chips=["完整版", "不可缺功能", "雙寫同步", "匯入自選股", "前推績效", "最強模式", "最強類別"],
         )
 
 
