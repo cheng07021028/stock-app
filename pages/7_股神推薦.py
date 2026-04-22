@@ -1431,7 +1431,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
 # =========================================================
 # 計分
 # =========================================================
-def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
+def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: Any, sr_snapshot: Any, radar: Any) -> dict[str, Any]:
     if df is None or df.empty:
         return {
             "起漲前兆分數": 0.0,
@@ -1441,6 +1441,10 @@ def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot
             "動能翻多分": 0.0,
             "支撐防守分": 0.0,
         }
+
+    signal_snapshot = signal_snapshot if isinstance(signal_snapshot, dict) else {}
+    sr_snapshot = sr_snapshot if isinstance(sr_snapshot, dict) else {}
+    radar = radar if isinstance(radar, dict) else {}
 
     last = df.iloc[-1]
     prev = df.iloc[-2] if len(df) >= 2 else last
