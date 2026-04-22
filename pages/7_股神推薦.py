@@ -32,6 +32,7 @@ from utils import (
     render_pro_kpi_row,
     render_pro_section,
 )
+from stock_master_service import load_stock_master
 
 PAGE_TITLE = "股神推薦"
 PFX = "godpick_"
@@ -1411,117 +1412,11 @@ def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str,
     return work.sort_values(["market","source_rank","code"]).reset_index(drop=True)
 
 
-def _render_stock_master_center(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]], all_categories: list[str]) -> pd.DataFrame:
-    render_pro_section("股票主檔搜尋 / 更新中心")
-    with st.expander("展開股票主檔搜尋 / 更新中心", expanded=True):
-        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-        with c1:
-            master_kw = st.text_input("搜尋股票代號 / 名稱 / 正式產業別 / 主題類別", key=_k("master_kw"))
-        with c2:
-            master_market = st.selectbox("市場別篩選", ["全部", "上市", "上櫃", "興櫃"], key=_k("master_market"))
-        with c3:
-            cat_opts = ["全部"] + sorted({x for x in all_categories if _safe_str(x)})
-            master_cat = st.selectbox("類別 / 產業篩選", cat_opts, key=_k("master_cat"))
-        with c4:
-            st.write("")
-            st.write("")
-            refresh_master_btn = st.button("更新股票主檔（官方診斷）", key=_k("refresh_master_btn"), use_container_width=True, type="primary")
-
-        if refresh_master_btn:
-            with st.spinner("更新股票主檔中..."):
-                new_master_df, logs = _refresh_stock_master_now()
-                if not new_master_df.empty:
-                    master_df = new_master_df.copy()
-                    st.success("股票主檔已更新，已套用官方主檔診斷。")
-                else:
-                    st.error("股票主檔更新失敗，仍保留目前版本。")
-                for line in logs:
-                    st.caption(line)
-
-        logs = st.session_state.get(_k("master_diag_logs"), [])
-        with st.expander("官方主檔診斷訊息", expanded=False):
-            for line in logs:
-                st.write(f"- {line}")
-
-        total_count = len(master_df) if isinstance(master_df, pd.DataFrame) else 0
-        official_hit = 0
-        if isinstance(master_df, pd.DataFrame) and not master_df.empty and "official_industry" in master_df.columns:
-            official_hit = int(master_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
-        theme_hit = 0
-        if isinstance(master_df, pd.DataFrame) and not master_df.empty and "theme_category" in master_df.columns:
-            theme_hit = int(master_df["theme_category"].fillna("").astype(str).str.strip().ne("").sum())
-        need_fix = 0
-        if isinstance(master_df, pd.DataFrame) and not master_df.empty and "待修原因" in master_df.columns:
-            need_fix = int(master_df["待修原因"].fillna("").astype(str).str.strip().ne("").sum())
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("主檔總筆數", f"{total_count:,}")
-        k2.metric("正式產業有值", f"{official_hit:,}")
-        k3.metric("主題有值", f"{theme_hit:,}")
-        k4.metric("需作修正主檔欄位", f"{need_fix:,}")
-        st.caption(f"目前顯示 {total_count:,} / {total_count:,} 筆")
-
-        found_df = _search_master_df(master_df, master_kw, master_market, master_cat)
-        show_cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
-        show_df = found_df[[c for c in show_cols if c in found_df.columns]].rename(columns={
-            "code": "股票代號",
-            "name": "股票名稱",
-            "market": "市場別",
-            "official_industry_raw": "官方原始產業值",
-            "official_industry_raw_col": "官方原始產業欄位",
-            "official_industry": "正式產業別",
-            "theme_category": "操作主題類別",
-            "category": "類別",
-        })
-        st.dataframe(show_df.head(500), use_container_width=True, hide_index=True)
-
-        if found_df.empty:
-            return master_df
-
-        labels = [f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}" for _, r in found_df.head(300).iterrows()]
-        label_map = {f"{r['code']} {r['name']}｜{r['market']}｜{r['category']}": r.to_dict() for _, r in found_df.head(300).iterrows()}
-        picked_label = st.selectbox("選擇股票進行修正 / 加入自選股", labels, key=_k("master_pick_label"))
-        picked = label_map.get(picked_label, {})
-
-        e1, e2, e3, e4 = st.columns([2, 2, 2, 2])
-        with e1:
-            edit_code = st.text_input("股票代號", value=_safe_str(picked.get("code")), key=_k("master_edit_code"), disabled=True)
-        with e2:
-            edit_name = st.text_input("股票名稱", value=_safe_str(picked.get("name")), key=_k("master_edit_name"))
-        with e3:
-            current_market = _safe_str(picked.get("market"))
-            if current_market not in {"上市", "上櫃", "興櫃"}:
-                current_market = "上市"
-            edit_market = st.selectbox("修正市場別", ["上市", "上櫃", "興櫃"], index=["上市", "上櫃", "興櫃"].index(current_market), key=_k("master_edit_market"))
-        with e4:
-            edit_category = st.text_input("修正操作類別", value=_safe_str(picked.get("category")), key=_k("master_edit_category_text"))
-
-        a1, a2, a3 = st.columns([2, 2, 2])
-        group_options = list(watchlist_map.keys()) if watchlist_map else [""]
-        with a1:
-            add_group = st.selectbox("加入自選股群組", group_options, key=_k("master_add_group"))
-        with a2:
-            apply_override_btn = st.button("套用分類修正並持久化", key=_k("apply_override_btn"), use_container_width=True)
-        with a3:
-            add_watch_btn = st.button("直接加入自選股", key=_k("master_add_watch_btn"), use_container_width=True)
-
-        if apply_override_btn:
-            ok, msg = _save_category_override(edit_code, edit_name, edit_market, edit_category)
-            if ok:
-                st.success(msg)
-                try:
-                    _load_stock_category_override_map.clear()
-                    _load_master_df.clear()
-                except Exception:
-                    pass
-            else:
-                st.error(msg)
-        if add_watch_btn:
-            ok, msg = _append_stock_to_watchlist(add_group, edit_code, edit_name, edit_market, edit_category)
-            if ok:
-                st.success(msg)
-            else:
-                st.warning(msg)
+def _render_stock_master_center(
+    master_df: pd.DataFrame,
+    watchlist_map: dict[str, list[dict[str, str]]],
+    all_categories: list[str],
+) -> pd.DataFrame:
     return master_df
 
 
@@ -1592,61 +1487,48 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
     return result
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _load_master_df() -> pd.DataFrame:
-    dfs = []
-    category_candidates = ["category", "industry", "sector", "theme", "類別", "產業別", "產業", "主題", "industry_name"]
+    try:
+        repo_df = load_stock_master()
+    except Exception:
+        repo_df = pd.DataFrame()
 
-    for market_arg in ["", "上市", "上櫃", "興櫃"]:
-        try:
-            df = get_all_code_name_map(market_arg)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                temp = df.copy()
-                mapping = {
-                    "證券代號": "code",
-                    "證券名稱": "name",
-                    "市場別": "market",
-                    "code": "code",
-                    "name": "name",
-                    "market": "market",
-                }
-                temp = temp.rename(columns=mapping)
+    if repo_df is None or repo_df.empty:
+        repo_df = _load_stock_master_cache_from_repo()
 
-                found_category_col = None
-                for col in temp.columns:
-                    if str(col).strip() in category_candidates:
-                        found_category_col = col
-                        break
-                if found_category_col:
-                    temp = temp.rename(columns={found_category_col: "category"})
+    if repo_df is None or repo_df.empty:
+        return pd.DataFrame(columns=["code", "name", "market", "category"])
 
-                for col in ["code", "name", "market"]:
-                    if col not in temp.columns:
-                        temp[col] = ""
-                if "category" not in temp.columns:
-                    temp["category"] = ""
+    work = repo_df.copy()
 
-                temp["code"] = temp["code"].map(_normalize_code)
-                temp["name"] = temp["name"].map(_safe_str)
-                temp["market"] = temp["market"].map(_safe_str)
-                if market_arg in ["上市", "上櫃", "興櫃"]:
-                    temp["market"] = temp["market"].replace("", market_arg)
-                temp["category"] = temp.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
-                dfs.append(temp[["code", "name", "market", "category"]])
-        except Exception:
-            pass
+    if "code" not in work.columns:
+        work["code"] = ""
+    if "name" not in work.columns:
+        work["name"] = ""
+    if "market" not in work.columns:
+        work["market"] = "上市"
+    if "category" not in work.columns:
+        if "theme_category" in work.columns:
+            work["category"] = work["theme_category"]
+        else:
+            work["category"] = ""
 
-    if not dfs:
-        base = pd.DataFrame(columns=["code", "name", "market", "category"])
-    else:
-        base = pd.concat(dfs, ignore_index=True)
-        base["code"] = base["code"].map(_normalize_code)
-        base["name"] = base["name"].map(_safe_str)
-        base["market"] = base["market"].map(_safe_str).replace("", "上市")
-        base["category"] = base.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
-        base = base[base["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    work["code"] = work["code"].map(_normalize_code)
+    work["name"] = work["name"].map(_safe_str)
+    work["market"] = work["market"].map(_safe_str).replace("", "上市")
+    work["category"] = work.apply(
+        lambda r: _infer_category_from_record(r.get("name"), r.get("category")),
+        axis=1,
+    )
 
-    return _apply_master_overrides(base)
+    work = _apply_master_overrides(work)
+
+    return (
+        work[work["code"] != ""]
+        .drop_duplicates(subset=["code"], keep="first")
+        .reset_index(drop=True)
+    )
 
 def _find_name_market_category(
     code: str,
@@ -1868,6 +1750,74 @@ def _append_multiple_stocks_to_watchlist(group_name: str, rows: list[dict[str, s
             return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
 
     return added, messages
+
+
+def _create_watchlist_group(group_name: str) -> tuple[bool, str]:
+    group_name = _safe_str(group_name)
+    if not group_name:
+        return False, "群組名稱不可空白"
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or raw is None:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    if not isinstance(raw, dict):
+        raw = {}
+
+    if group_name in raw:
+        return False, f"群組已存在：{group_name}"
+
+    raw[group_name] = []
+    ok = _force_write_watchlist_dual(raw)
+    if ok:
+        return True, f"已新增群組：{group_name}"
+    return False, _safe_str(st.session_state.get(_k("status_msg"), "新增群組失敗"))
+
+
+def _append_godpick_records(record_rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
+    if not record_rows:
+        return 0, ["沒有可寫入的推薦紀錄。"]
+
+    try:
+        old_records, read_msg = _read_godpick_records_from_github()
+        if read_msg:
+            old_records = []
+
+        old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
+        new_df = _ensure_godpick_record_columns(pd.DataFrame([_normalize_godpick_record(x) for x in record_rows]))
+
+        before_count = len(old_df)
+        merged_df = _append_records_dedup_by_business_key(old_df, new_df)
+        after_count = len(merged_df)
+        added_count = max(after_count - before_count, 0)
+
+        merged_records = merged_df.to_dict(orient="records")
+
+        ok_github, msg_github = _write_godpick_records_to_github(merged_records)
+        ok_firestore, msg_firestore = _write_godpick_records_to_firestore(merged_records)
+
+        st.session_state[_k("last_record_write_detail")] = [
+            f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
+            f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
+            f"本次寫入筆數: {added_count}",
+            f"合併後總筆數: {after_count}",
+        ]
+
+        msgs = []
+        msgs.append(msg_github if ok_github else f"GitHub 失敗：{msg_github}")
+        msgs.append(msg_firestore if ok_firestore else f"Firestore 失敗：{msg_firestore}")
+
+        if ok_github or ok_firestore:
+            return added_count, msgs
+
+        return 0, msgs
+
+    except Exception as e:
+        st.session_state[_k("last_record_write_detail")] = [f"例外：{e}"]
+        return 0, [f"寫入 8_股神推薦紀錄失敗：{e}"]
 
 
 # =========================================================
@@ -3104,7 +3054,6 @@ def main():
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
-    master_df = _render_stock_master_center(master_df, watchlist_map, all_categories)
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
@@ -3360,6 +3309,33 @@ def main():
 
     render_pro_section("推薦股票加入自選股中心")
     watchlist_map = _load_watchlist_map()
+
+    g1, g2, g3 = st.columns([3, 2, 1])
+    with g1:
+        new_group_name = st.text_input("新增群組名稱", key=_k("new_group_name"), placeholder="例如：0422股神推薦")
+    with g2:
+        st.write("")
+        st.write("")
+        create_group_btn = st.button("新增群組", key=_k("create_group_btn"), use_container_width=True)
+    with g3:
+        st.write("")
+        st.write("")
+        refresh_group_btn = st.button("重新載入群組", key=_k("refresh_group_btn"), use_container_width=True)
+
+    if create_group_btn:
+        ok, msg = _create_watchlist_group(new_group_name)
+        if ok:
+            st.success(msg)
+            watchlist_map = _load_watchlist_map()
+            st.session_state[_k("rec_pick_group")] = _safe_str(new_group_name)
+            st.rerun()
+        else:
+            st.warning(msg)
+
+    if refresh_group_btn:
+        watchlist_map = _load_watchlist_map()
+        st.rerun()
+
     rec_group_options = list(watchlist_map.keys()) if watchlist_map else [""]
     saved_pick_group = st.session_state.get(_k("rec_pick_group"), "")
     if saved_pick_group not in rec_group_options:
@@ -3374,12 +3350,16 @@ def main():
 
     p1, p2, p3 = st.columns([2, 4, 2])
     with p1:
-        pick_group = st.selectbox(
-            "加入群組",
-            options=rec_group_options,
-            index=rec_group_options.index(saved_pick_group) if saved_pick_group in rec_group_options else 0,
-            key=_k("rec_pick_group"),
-        )
+        if rec_group_options and rec_group_options != [""]:
+            pick_group = st.selectbox(
+                "加入群組",
+                options=rec_group_options,
+                index=rec_group_options.index(saved_pick_group) if saved_pick_group in rec_group_options else 0,
+                key=_k("rec_pick_group"),
+            )
+        else:
+            pick_group = ""
+            st.info("目前尚無群組，請先新增群組名稱。")
     with p2:
         current_pick_codes = [x for x in st.session_state.get(_k("rec_pick_codes"), []) if x in rec_all_codes]
         st.multiselect(
