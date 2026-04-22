@@ -747,15 +747,15 @@ def _derive_event_list(news_rows: list[dict[str, str]]) -> str:
 
 
 def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
-    twii = _fetch_stooq("^twii", pred_date_text)
-    nas = _fetch_stooq("^ixic", pred_date_text)
-    sox = _fetch_stooq("^sox", pred_date_text)
-    spx = _fetch_stooq("^spx", pred_date_text)
-    adr = _fetch_stooq("tsm.us", pred_date_text)
-    es = _fetch_stooq("es.f", pred_date_text)
-    nq = _fetch_stooq("nq.f", pred_date_text)
-    vix = _fetch_stooq("^vix", pred_date_text)
-    usdtwd = _fetch_stooq("usdtwd", pred_date_text)
+    twii = _price_on_or_before("^TWII", pred_date_text, 15)
+    nas = _price_on_or_before("^IXIC", pred_date_text, 15)
+    sox = _price_on_or_before("^SOX", pred_date_text, 15)
+    spx = _price_on_or_before("^GSPC", pred_date_text, 15)
+    adr = _price_on_or_before("TSM", pred_date_text, 15)
+    es = _price_on_or_before("ES.F", pred_date_text, 15)
+    nq = _price_on_or_before("NQ.F", pred_date_text, 15)
+    vix = _price_on_or_before("^VIX", pred_date_text, 15)
+    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 15)
     news_rows = _search_news_headlines(pred_date_text)
     news_score, news_logic, main_risk = _news_risk_score(news_rows)
 
@@ -1561,6 +1561,20 @@ def main():
         ])
         st.dataframe(transparent_rows, use_container_width=True, hide_index=True)
         st.caption("說明：如果你選的日期不是交易日，或當日官方資料尚未公布，系統會自動往前回找最近可用日期。")
+
+    with st.expander("DEBUG｜原始抓取資料", expanded=False):
+        st.write("TWII", ctx.get("twii"))
+        st.write("NASDAQ", ctx.get("nas"))
+        st.write("SOX", ctx.get("sox"))
+        st.write("SPX", ctx.get("spx"))
+        st.write("TSM ADR", ctx.get("adr"))
+        st.write("ES", ctx.get("es"))
+        st.write("NQ", ctx.get("nq"))
+        st.write("VIX", ctx.get("vix"))
+        st.write("USDTWD", ctx.get("usdtwd"))
+        st.write("法人", {"foreign_amt": ctx.get("foreign_amt"), "total3_amt": ctx.get("total3_amt"), "used_date": ctx.get("inst_used_date"), "source_status": ctx.get("source_status")})
+        st.write("期權", {"pcr": ctx.get("pcr"), "used_date": ctx.get("futopt_used_date")})
+        st.write("融資券", {"margin_change": ctx.get("margin_change"), "short_change": ctx.get("short_change"), "used_date": ctx.get("margin_used_date")})
 
 
     a1, a2 = st.columns([1.4, 1.2])
