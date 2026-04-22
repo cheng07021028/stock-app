@@ -314,13 +314,19 @@ def _get_state_df() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def _iter_recent_dates(pred_date_text: str, lookback_days: int = 10) -> list[pd.Timestamp]:
+    dt = pd.to_datetime(pred_date_text, errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp.today().normalize()
+    return [dt - pd.Timedelta(days=i) for i in range(lookback_days + 1)]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
-    # 歷史/當日統一走 stooq CSV，避免太多來源造成延遲
     pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
     if pd.isna(pred_dt):
-        pred_dt = pd.Timestamp.today()
-    start = (pred_dt - pd.Timedelta(days=40)).strftime("%Y%m%d")
-    end = pred_dt.strftime("%Y%m%d")
+        pred_dt = pd.Timestamp.today().normalize()
+    start_dt = pred_dt - pd.Timedelta(days=80)
     url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
     try:
         df = pd.read_csv(url)
@@ -334,17 +340,20 @@ def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         df = df.dropna(subset=["date"]).sort_values("date")
-        df = df[(df["date"] >= pd.to_datetime(start)) & (df["date"] <= pd.to_datetime(end))]
+        df = df[(df["date"] >= start_dt) & (df["date"] <= pred_dt)]
         if df.empty:
             return {}
-        row = df.iloc[-1]
-        prev_close = pd.to_numeric(df["close"], errors="coerce").dropna().iloc[-2] if len(df.dropna(subset=["close"])) >= 2 else None
+        valid_close = df.dropna(subset=["close"]).copy()
+        if valid_close.empty:
+            return {}
+        row = valid_close.iloc[-1]
+        prev_close = valid_close.iloc[-2]["close"] if len(valid_close) >= 2 else None
         close = _safe_float(row.get("close"))
         pct = ((close - prev_close) / prev_close * 100) if (close is not None and prev_close not in [None, 0]) else None
-        ma5 = df["close"].tail(5).mean() if "close" in df.columns else None
-        ma20 = df["close"].tail(20).mean() if "close" in df.columns else None
+        ma5 = valid_close["close"].tail(5).mean() if "close" in valid_close.columns else None
+        ma20 = valid_close["close"].tail(20).mean() if "close" in valid_close.columns else None
         return {
-            "date": row.get("date"),
+            "date": pd.to_datetime(row.get("date")).strftime("%Y-%m-%d") if row.get("date") is not None else "",
             "open": _safe_float(row.get("open")),
             "high": _safe_float(row.get("high")),
             "low": _safe_float(row.get("low")),
@@ -353,12 +362,12 @@ def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
             "pct": pct,
             "ma5": _safe_float(ma5),
             "ma20": _safe_float(ma20),
+            "source": "stooq",
         }
     except Exception:
         return {}
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def _search_news_headlines(pred_date_text: str, max_items: int = 8) -> list[dict[str, str]]:
     # 輕量新聞：Google News RSS 關鍵字搜尋
     pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
@@ -461,100 +470,99 @@ def _extract_num(text: Any, div: float = 1.0):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
-    dt = pd.to_datetime(pred_date_text, errors='coerce')
-    if pd.isna(dt):
-        dt = pd.Timestamp.today()
-    ymd = dt.strftime('%Y%m%d')
-    urls = [
-        f'https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json',
-        f'https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json',
-    ]
-    data = None
-    for u in urls:
-        data = _fetch_json(u)
-        if data:
-            break
-    out = {"foreign": None, "total3": None, "source": "fallback"}
-    if not data or 'data' not in data:
-        return out
-    foreign = None
-    total3 = None
-    for row in data.get('data', []):
-        label = _safe_str(row[0]) if isinstance(row, list) and row else ''
-        if '外資' in label and '自營商' not in label and len(row) >= 4:
-            nums = [_extract_num(x, 100000000) for x in row[1:4]]
-            nums = [x for x in nums if x is not None]
-            foreign = sum(nums) if nums else foreign
-        if ('三大法人' in label or '合計' in label) and len(row) >= 4:
-            nums = [_extract_num(x, 100000000) for x in row[1:4]]
-            nums = [x for x in nums if x is not None]
-            total3 = sum(nums) if nums else total3
-    out.update({"foreign": foreign, "total3": total3, "source": 'twse'})
-    return out
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
-    # 公開來源不穩，抓不到就自動降級
-    out = {"foreign_fut_net": None, "pcr": None, "source": 'fallback'}
-    dt = pd.to_datetime(pred_date_text, errors='coerce')
-    if pd.isna(dt):
-        dt = pd.Timestamp.today()
-    date_slash = dt.strftime('%Y/%m/%d')
-    # put/call 嘗試公開CSV/json樣式端點
-    candidates = [
-        f'https://www.taifex.com.tw/cht/3/pcRatio?queryStartDate={date_slash}&queryEndDate={date_slash}',
-        f'https://www.taifex.com.tw/cht/3/futContractsDate?queryDate={date_slash}',
-    ]
-    for u in candidates:
-        try:
-            txt = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
-            if 'Put/Call Ratio' in txt or 'PCR' in txt:
-                import re
-                m = re.search(r'(?:Put/Call Ratio|PCR)[^0-9]{0,20}([0-9]+\.[0-9]+)', txt, re.I)
-                if m:
-                    out['pcr'] = float(m.group(1))
-                    out['source'] = 'taifex_html'
-                    break
-        except Exception:
-            pass
-    return out
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
-    dt = pd.to_datetime(pred_date_text, errors='coerce')
-    if pd.isna(dt):
-        dt = pd.Timestamp.today()
-    ymd = dt.strftime('%Y%m%d')
-    out = {"margin_change": None, "short_change": None, "source": 'fallback'}
-    urls = [
-        f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={ymd}&selectType=MS&response=json',
-        f'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&date={ymd}&selectType=MS',
-    ]
-    for u in urls:
-        data = _fetch_json(u)
+    out = {"foreign": None, "total3": None, "source": "fallback", "used_date": ""}
+    for dt in _iter_recent_dates(pred_date_text, 8):
+        ymd = dt.strftime('%Y%m%d')
+        urls = [
+            f'https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json',
+            f'https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json',
+        ]
+        data = None
+        for u in urls:
+            data = _fetch_json(u)
+            if data and data.get('data'):
+                break
         if not data or 'data' not in data:
             continue
-        try:
-            rows = data.get('data', [])
-            # 末行常有合計；抓可解析的最後一筆
-            cand = None
-            for row in reversed(rows):
-                vals = [_extract_num(x) for x in row]
-                if sum(v is not None for v in vals) >= 2:
-                    cand = row
-                    break
-            if cand:
-                nums = [_extract_num(x) for x in cand]
-                nums = [x for x in nums if x is not None]
-                if len(nums) >= 2:
-                    out['margin_change'] = nums[-2] / 100000000 if abs(nums[-2]) > 10000 else nums[-2]
-                    out['short_change'] = nums[-1]
-                    out['source'] = 'twse_margin'
+
+        foreign = None
+        total3 = None
+        for row in data.get('data', []):
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            label = _safe_str(row[0])
+            vals = [_extract_num(x, 100000000) for x in row[1:]]
+            nums = [x for x in vals if x is not None]
+            if not nums:
+                continue
+            if ('外資' in label or '陸資' in label) and '自營商' not in label and foreign is None:
+                foreign = nums[-1]
+            if ('三大法人' in label or label == '合計') and total3 is None:
+                total3 = nums[-1]
+        if foreign is not None or total3 is not None:
+            out.update({"foreign": foreign, "total3": total3, "source": 'twse', "used_date": dt.strftime('%Y-%m-%d')})
+            return out
+    return out
+
+
+def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
+    out = {"foreign_fut_net": None, "pcr": None, "source": 'fallback', "used_date": ""}
+    import re
+    for dt in _iter_recent_dates(pred_date_text, 8):
+        date_slash = dt.strftime('%Y/%m/%d')
+        candidates = [
+            f'https://www.taifex.com.tw/cht/3/pcRatio?queryStartDate={date_slash}&queryEndDate={date_slash}',
+            f'https://www.taifex.com.tw/cht/3/pcRatio?queryStartDate={date_slash}&queryEndDate={date_slash}&commodityId=TXO',
+        ]
+        for u in candidates:
+            try:
+                txt = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
+                nums = re.findall(r'([0-9]+\.[0-9]+)', txt)
+                hit = None
+                for x in nums:
+                    v = float(x)
+                    if 0.4 <= v <= 2.5:
+                        hit = v
+                        break
+                if hit is not None:
+                    out.update({'pcr': hit, 'source': 'taifex_html', 'used_date': dt.strftime('%Y-%m-%d')})
                     return out
-        except Exception:
-            pass
+            except Exception:
+                pass
+    return out
+
+
+def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
+    out = {"margin_change": None, "short_change": None, "source": 'fallback', "used_date": ""}
+    for dt in _iter_recent_dates(pred_date_text, 8):
+        ymd = dt.strftime('%Y%m%d')
+        urls = [
+            f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={ymd}&selectType=MS&response=json',
+            f'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&date={ymd}&selectType=MS',
+        ]
+        for u in urls:
+            data = _fetch_json(u)
+            if not data or 'data' not in data:
+                continue
+            try:
+                rows = data.get('data', [])
+                cand = None
+                for row in reversed(rows):
+                    if not isinstance(row, list):
+                        continue
+                    nums = [_extract_num(x) for x in row]
+                    vals = [x for x in nums if x is not None]
+                    if len(vals) >= 2:
+                        cand = vals
+                        break
+                if cand:
+                    out['margin_change'] = cand[-2] / 100000000 if abs(cand[-2]) > 10000 else cand[-2]
+                    out['short_change'] = cand[-1]
+                    out['source'] = 'twse_margin'
+                    out['used_date'] = dt.strftime('%Y-%m-%d')
+                    return out
+            except Exception:
+                pass
     return out
 
 
@@ -587,7 +595,6 @@ def _derive_chip_scores(inst: dict[str, Any], futopt: dict[str, Any], margin: di
 
     margin_score = 0.0
     if margin_change is not None:
-        # 融資大增偏熱、融資下降偏冷
         margin_score += max(-4, min(4, -margin_change / 12.0))
     if short_change is not None:
         margin_score += max(-3, min(3, short_change / 15000.0))
@@ -596,6 +603,9 @@ def _derive_chip_scores(inst: dict[str, Any], futopt: dict[str, Any], margin: di
         'foreign_amt': foreign_amt, 'total3_amt': total3_amt, 'foreign_fut_net': foreign_fut_net, 'pcr': pcr,
         'margin_change': margin_change, 'short_change': short_change,
         'foreign_score': foreign_score, 'futures_score': futures_score, 'margin_score': margin_score,
+        'inst_used_date': _safe_str(inst.get('used_date')),
+        'futopt_used_date': _safe_str(futopt.get('used_date')),
+        'margin_used_date': _safe_str(margin.get('used_date')),
     }
 
 
@@ -738,7 +748,12 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     else:
         scenario = "一般趨勢日"
 
-    source_status = f"法人:{inst.get('source','fallback')}｜期權:{futopt.get('source','fallback')}｜融資券:{margin.get('source','fallback')}"
+    source_status = (
+        f"加權:{_safe_str(twii.get('date')) or 'fallback'}｜"
+        f"法人:{_safe_str(chip.get('inst_used_date')) or inst.get('source','fallback')}｜"
+        f"期權:{_safe_str(chip.get('futopt_used_date')) or futopt.get('source','fallback')}｜"
+        f"融資券:{_safe_str(chip.get('margin_used_date')) or margin.get('source','fallback')}"
+    )
 
     return {
         "twii": twii, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
@@ -770,8 +785,8 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "sector_weak": sector_weak,
         "event_list": event_list,
         "source_status": source_status,
+        "market_data_date": _safe_str(twii.get('date')),
     }
-
 
 
 def _get_dynamic_weights(records_df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -1384,7 +1399,14 @@ def main():
     with top[3]:
         auto_save = st.toggle("儲存即同步", value=False, key=_k("auto_save"))
     with top[4]:
-        pred_date = st.date_input("推估日期", value=date.today(), key=_k("pred_date"))
+        pred_date_input = st.date_input("推估日期", value=st.session_state.get(_k("active_pred_date"), date.today()), key=_k("pred_date"))
+        if st.button("套用日期", use_container_width=True, key=_k("apply_pred_date")):
+            st.session_state[_k("active_pred_date")] = pred_date_input
+            st.rerun()
+
+    active_pred_date = st.session_state.get(_k("active_pred_date"), pred_date_input)
+    if pd.to_datetime(active_pred_date, errors="coerce") != pd.to_datetime(pred_date_input, errors="coerce"):
+        st.info(f"目前分析日期仍為 {pd.to_datetime(active_pred_date).strftime('%Y-%m-%d')}，按一下『套用日期』才會重新計算。")
 
     base_df = _get_state_df()
     if base_df.empty:
@@ -1392,10 +1414,13 @@ def main():
         _save_state_df(df)
         base_df = _get_state_df()
 
-    pred_date_text = pd.to_datetime(pred_date).strftime("%Y-%m-%d")
+    pred_date_text = pd.to_datetime(active_pred_date).strftime("%Y-%m-%d")
     pred_df, ctx = _predict_all_models(pred_date_text, base_df)
     top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
     scoreboard = _build_scoreboard(base_df)
+
+    if _safe_str(ctx.get("market_data_date")) and _safe_str(ctx.get("market_data_date")) != pred_date_text:
+        st.warning(f"你選的是 {pred_date_text}，但加權最近可用交易資料是 {ctx.get('market_data_date')}，因此部分因子會以最近交易日回放。")
 
     render_pro_kpi_row([
         {"label": "推估日期", "value": pred_date_text, "delta": ctx.get("scenario", ""), "delta_class": "pro-kpi-delta-flat"},
