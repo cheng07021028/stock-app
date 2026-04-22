@@ -37,23 +37,26 @@ GODPICK_RECORD_COLUMNS = [
     "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
     "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
-    "模式績效標籤", "備註", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "模式績效標籤", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+    "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
 
 STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
 
 DEFAULT_STANDARD_COLS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間",
     "推薦價格", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
 ]
 
 DEFAULT_ADVANCED_COLS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "股神決策分數", "股神建議動作",
+    "股神信心", "股神進場區間", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
     "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
     "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
-    "推薦日期", "推薦時間", "模式績效標籤", "推薦理由摘要", "備註"
+    "推薦日期", "推薦時間", "模式績效標籤", "股神推論", "推薦理由摘要", "備註"
 ]
 
 FAST_VISIBLE_LIMIT = 500
@@ -241,7 +244,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
-        "持有天數", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        "持有天數", "股神決策分數", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -252,7 +255,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     text_cols = [
         "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦標籤", "推薦理由摘要",
-        "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "備註",
+        "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
     ]
     for c in text_cols:
         x[c] = x[c].fillna("").astype(str)
@@ -907,6 +910,169 @@ def _get_forward_return(stock_no: str, stock_name: str, market_type: str, rec_da
     return None
 
 
+def _clip(v: float | None, low: float, high: float, default: float = 0.0) -> float:
+    if v is None:
+        return default
+    try:
+        v = float(v)
+    except Exception:
+        return default
+    return max(low, min(high, v))
+
+
+def _fmt_pct(v: float | None) -> str:
+    return "-" if v is None else f"{v:.2f}%"
+
+
+def _build_entry_zone(rec_price: float | None, stop_price: float | None) -> str:
+    if rec_price in [None, 0]:
+        return "-"
+    low = rec_price * 0.97
+    high = rec_price * 1.03
+    if stop_price not in [None, 0]:
+        low = max(low, stop_price * 1.03)
+    return f"{low:.2f} ~ {high:.2f}"
+
+
+def _god_mode_decision(row: dict[str, Any]) -> dict[str, Any]:
+    rec_price = _safe_float(row.get("推薦價格"))
+    latest = _safe_float(row.get("最新價"))
+    stop_price = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+    target2 = _safe_float(row.get("賣出目標2"))
+    bought = _normalize_bool(row.get("是否已實際買進"))
+    status = _safe_str(row.get("目前狀態")) or "觀察"
+
+    rec_total = _clip(_safe_float(row.get("推薦總分"), 0), 0, 100, 0)
+    tech = _clip(_safe_float(row.get("技術結構分數"), rec_total), 0, 100, rec_total)
+    pre_move = _clip(_safe_float(row.get("起漲前兆分數"), rec_total), 0, 100, rec_total)
+    trade = _clip(_safe_float(row.get("交易可行分數"), rec_total), 0, 100, rec_total)
+    sector = _clip(_safe_float(row.get("類股熱度分數"), rec_total), 0, 100, rec_total)
+
+    perf3 = _safe_float(row.get("3日績效%"))
+    perf5 = _safe_float(row.get("5日績效%"))
+    perf10 = _safe_float(row.get("10日績效%"))
+    perf20 = _safe_float(row.get("20日績效%"))
+    pnl_pct = _safe_float(row.get("損益幅%"))
+
+    setup_score = rec_total * 0.28 + tech * 0.24 + pre_move * 0.20 + trade * 0.14 + sector * 0.14
+
+    perf_score = 0.0
+    for p, w in [(perf3, 0.15), (perf5, 0.20), (perf10, 0.25), (perf20, 0.40)]:
+        if p is not None:
+            perf_score += _clip(50 + p * 4, 0, 100, 50) * w
+        else:
+            perf_score += 50 * w
+
+    mode_label = _safe_str(row.get("模式績效標籤"))
+    mode_bonus = {"強勢模式": 8, "穩健模式": 4, "一般模式": 0, "觀察中": -2, "偏弱模式": -8, "弱": -10, "樣本不足": 0}.get(mode_label, 0)
+
+    price_bonus = 0.0
+    reasons = []
+    if latest not in [None, 0] and rec_price not in [None, 0]:
+        drift = (latest - rec_price) / rec_price * 100
+        if -3 <= drift <= 3:
+            price_bonus += 8
+            reasons.append(f"股價接近推薦價({_fmt_pct(drift)})")
+        elif 3 < drift <= 8:
+            price_bonus += 2
+            reasons.append(f"股價小幅高於推薦價({_fmt_pct(drift)})")
+        elif drift > 15:
+            price_bonus -= 10
+            reasons.append(f"股價偏離推薦價過大({_fmt_pct(drift)})")
+        elif drift < -8:
+            price_bonus -= 6
+            reasons.append(f"股價明顯跌破推薦價({_fmt_pct(drift)})")
+
+    risk_penalty = 0.0
+    if latest not in [None, 0] and stop_price not in [None, 0]:
+        risk_gap = (latest - stop_price) / latest * 100
+        if risk_gap <= 0:
+            risk_penalty -= 25
+            reasons.append("已跌破停損價")
+        elif risk_gap < 2.5:
+            risk_penalty -= 14
+            reasons.append("距停損過近")
+        elif risk_gap < 5:
+            risk_penalty -= 6
+            reasons.append("停損空間偏小")
+
+    target_bonus = 0.0
+    if latest not in [None, 0] and target1 not in [None, 0]:
+        if latest >= target1:
+            target_bonus -= 4
+            reasons.append("已接近/到達目標1")
+    if latest not in [None, 0] and target2 not in [None, 0] and latest >= target2:
+        target_bonus -= 10
+        reasons.append("已到達目標2")
+
+    total_score = _clip(setup_score * 0.55 + perf_score * 0.25 + 50 * 0.20 + mode_bonus + price_bonus + risk_penalty + target_bonus, 0, 100, 0)
+
+    if status in {"已賣出", "取消", "封存"}:
+        action = "不追蹤"
+    elif latest not in [None, 0] and stop_price not in [None, 0] and latest <= stop_price:
+        action = "立即出場"
+    elif latest not in [None, 0] and target2 not in [None, 0] and latest >= target2:
+        action = "分批停利"
+    elif bought or status in {"持有", "已買進"}:
+        if total_score >= 78:
+            action = "續抱"
+        elif total_score >= 63:
+            action = "續抱觀察"
+        elif total_score >= 50:
+            action = "減碼觀察"
+        else:
+            action = "轉弱出場"
+    else:
+        if total_score >= 80:
+            action = "可進場"
+        elif total_score >= 68:
+            action = "拉回可布局"
+        elif total_score >= 56:
+            action = "觀察等待"
+        else:
+            action = "暫不進場"
+
+    if total_score >= 85:
+        confidence = "高"
+    elif total_score >= 70:
+        confidence = "中高"
+    elif total_score >= 58:
+        confidence = "中"
+    else:
+        confidence = "保守"
+
+    if tech >= 75:
+        reasons.append("技術結構分數強")
+    if pre_move >= 75:
+        reasons.append("起漲前兆明顯")
+    if trade >= 70:
+        reasons.append("交易可行性佳")
+    if sector >= 70:
+        reasons.append("類股熱度有支撐")
+    if perf20 is not None and perf20 > 0:
+        reasons.append(f"20日績效為正({_fmt_pct(perf20)})")
+    elif perf20 is not None and perf20 < 0:
+        reasons.append(f"20日績效轉弱({_fmt_pct(perf20)})")
+    if pnl_pct is not None and bought:
+        reasons.append(f"目前持倉損益{_fmt_pct(pnl_pct)}")
+
+    # 去重保留前 5 項
+    cleaned = []
+    for r in reasons:
+        if r and r not in cleaned:
+            cleaned.append(r)
+    reason_text = "；".join(cleaned[:5]) if cleaned else "依分數、價格位置、停損距離與歷史績效綜合判斷"
+
+    return {
+        "股神決策分數": round(total_score, 2),
+        "股神建議動作": action,
+        "股神信心": confidence,
+        "股神進場區間": _build_entry_zone(rec_price, stop_price),
+        "股神推論": reason_text,
+    }
+
+
 def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src = dict(row)
     rec_price = _safe_float(src.get("推薦價格"))
@@ -976,6 +1142,7 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src["是否達目標2"] = hit_t2
     src["持有天數"] = holding_days
     src["模式績效標籤"] = perf_label
+    src.update(_god_mode_decision(src))
     src["更新時間"] = _now_text()
     return src
 
@@ -1046,6 +1213,8 @@ def _load_records() -> pd.DataFrame:
         f"GitHub: {'OK' if not gh_err else gh_err}",
         f"Firestore: {'OK' if not fs_err else fs_err}",
     ]
+    if not base_df.empty:
+        base_df = _ensure_godpick_record_columns(pd.DataFrame([_recalc_row(r) for _, r in base_df.iterrows()]))
     return _ensure_godpick_record_columns(base_df)
 
 
@@ -1516,7 +1685,7 @@ def main():
         {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
     ])
 
-    tabs = st.tabs(["📋 總表管理", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
+    tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
     with tabs[0]:
         render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。支援欄位順序永久保存、重新整理不還原。")
@@ -1661,6 +1830,10 @@ def main():
                 "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
                 "推薦等級": st.column_config.TextColumn("推薦等級", disabled=True),
                 "推薦總分": st.column_config.NumberColumn("推薦總分", format="%.2f", disabled=True),
+                "股神決策分數": st.column_config.NumberColumn("股神決策分數", format="%.2f", disabled=True),
+                "股神建議動作": st.column_config.TextColumn("股神建議動作", disabled=True),
+                "股神信心": st.column_config.TextColumn("股神信心", disabled=True),
+                "股神進場區間": st.column_config.TextColumn("股神進場區間", disabled=True),
                 "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
                 "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
                 "交易可行分數": st.column_config.NumberColumn("交易可行分數", format="%.2f", disabled=True),
@@ -1683,6 +1856,7 @@ def main():
                 "推薦日期": st.column_config.TextColumn("推薦日期", disabled=True),
                 "推薦時間": st.column_config.TextColumn("推薦時間", disabled=True),
                 "模式績效標籤": st.column_config.TextColumn("模式績效標籤", disabled=True),
+                "股神推論": st.column_config.TextColumn("股神推論", width="large", disabled=True),
                 "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large", disabled=True),
                 "備註": st.column_config.TextColumn("備註", width="large"),
             },
@@ -1710,7 +1884,7 @@ def main():
                         continue
                     src = edit_map[rec_id]
                     for c in [c for c in master.columns if c in src]:
-                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
+                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
                             continue
                         master.at[idx, c] = src.get(c)
                     recalc = _recalc_row(master.loc[idx].to_dict())
@@ -1742,6 +1916,49 @@ def main():
             st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 更新價格 / 更新績效 → 儲存同步")
 
     with tabs[1]:
+        render_pro_section("股神模式進出場決策", "將 7_股神推薦 的分數欄位，結合最新價、停損距離、歷史績效與模式標籤，轉成可操作建議。")
+        god_df = live_df.copy()
+        if god_df.empty:
+            st.info("目前沒有推薦紀錄可分析。")
+        else:
+            topk = st.columns(4)
+            decision_counts = god_df["股神建議動作"].fillna("未判定").value_counts()
+            with topk[0]:
+                render_pro_info_card("可進場 / 布局", [("筆數", int(decision_counts.get("可進場", 0) + decision_counts.get("拉回可布局", 0)), "股神模式")], chips=["進場"])
+            with topk[1]:
+                render_pro_info_card("續抱 / 續抱觀察", [("筆數", int(decision_counts.get("續抱", 0) + decision_counts.get("續抱觀察", 0)), "股神模式")], chips=["持有"])
+            with topk[2]:
+                render_pro_info_card("減碼 / 出場", [("筆數", int(decision_counts.get("減碼觀察", 0) + decision_counts.get("轉弱出場", 0) + decision_counts.get("立即出場", 0) + decision_counts.get("分批停利", 0)), "股神模式")], chips=["風險"])
+            with topk[3]:
+                avg_god = pd.to_numeric(god_df["股神決策分數"], errors="coerce").dropna().mean()
+                render_pro_info_card("平均決策分數", [("分數", "-" if pd.isna(avg_god) else f"{avg_god:.2f}", "0~100")], chips=["綜合"])
+
+            decision_filter_cols = st.columns([1.2, 1.2, 1.2])
+            with decision_filter_cols[0]:
+                act_filter = st.selectbox("股神建議動作", ["全部"] + sorted([x for x in god_df["股神建議動作"].dropna().astype(str).unique().tolist() if x]), key=_k("god_action_filter"))
+            with decision_filter_cols[1]:
+                conf_filter = st.selectbox("股神信心", ["全部"] + sorted([x for x in god_df["股神信心"].dropna().astype(str).unique().tolist() if x]), key=_k("god_conf_filter"))
+            with decision_filter_cols[2]:
+                min_score = st.slider("最低決策分數", 0, 100, 60, 1, key=_k("god_min_score"))
+
+            show_god = god_df.copy()
+            if act_filter != "全部":
+                show_god = show_god[show_god["股神建議動作"].astype(str) == act_filter].copy()
+            if conf_filter != "全部":
+                show_god = show_god[show_god["股神信心"].astype(str) == conf_filter].copy()
+            show_god = show_god[pd.to_numeric(show_god["股神決策分數"], errors="coerce").fillna(0) >= min_score].copy()
+            show_god = show_god.sort_values(["股神決策分數", "推薦總分", "20日績效%"], ascending=[False, False, False], na_position="last")
+
+            st.dataframe(
+                show_god[[c for c in [
+                    "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分", "股神決策分數", "股神建議動作", "股神信心",
+                    "股神進場區間", "推薦價格", "最新價", "停損價", "賣出目標1", "賣出目標2", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
+                ] if c in show_god.columns]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tabs[2]:
         render_pro_section("手動新增推薦紀錄")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -1808,7 +2025,7 @@ def main():
                     st.success("已加入並同步成功")
                     st.rerun()
 
-    with tabs[2]:
+    with tabs[3]:
         render_pro_section("系統推薦績效分析", "以推薦價格對照最新價與前推 3/5/10/20 日績效")
         valid_sys = pd.to_numeric(live_df["損益幅%"], errors="coerce").dropna()
         win_rate_sys = float((valid_sys > 0).mean() * 100) if not valid_sys.empty else 0.0
@@ -1855,7 +2072,7 @@ def main():
             ] if c in live_df.columns]
             st.dataframe(_format_df(live_df[detail_cols]), use_container_width=True, hide_index=True)
 
-    with tabs[3]:
+    with tabs[4]:
         render_pro_section("實際交易分析", "只統計有實際買進資料的紀錄")
         trade_df = live_df[live_df["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
         if trade_df.empty:
@@ -1872,7 +2089,7 @@ def main():
             st.dataframe(trade_df[[c for c in ["股票代號", "股票名稱", "推薦模式", "推薦價格", "實際買進價", "實際賣出價", "實際報酬%", "目前狀態", "備註"] if c in trade_df.columns]], use_container_width=True, hide_index=True)
             st.dataframe(ana_tables["trade_mode"], use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         render_pro_section("Excel 匯出")
         excel_bytes = _build_export_bytes(live_df, ana_tables)
         st.download_button(
@@ -1883,7 +2100,7 @@ def main():
             use_container_width=True,
         )
 
-    with tabs[5]:
+    with tabs[6]:
         render_pro_info_card(
             "同步 / 欄位完整性",
             [
