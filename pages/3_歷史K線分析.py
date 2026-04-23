@@ -27,7 +27,7 @@ from utils import (
     score_to_badge,
 )
 
-PAGE_TITLE = "歷史K線分析"
+PAGE_TITLE = "歷史K線分析｜升級完整版"
 PFX = "hk_"
 
 
@@ -81,6 +81,65 @@ def _html(s: str):
 def _safe_mapping(v: Any) -> dict:
     return v if isinstance(v, dict) else {}
 
+
+def _get_handoff_stock_code() -> str:
+    return _safe_str(st.session_state.get("kline_focus_stock_code", ""))
+
+
+def _get_handoff_stock_name() -> str:
+    return _safe_str(st.session_state.get("kline_focus_stock_name", ""))
+
+
+def _get_handoff_watch_group() -> str:
+    return _safe_str(st.session_state.get("godpick_last_watch_group", ""))
+
+
+def _get_handoff_watch_codes() -> list[str]:
+    raw = st.session_state.get("godpick_last_watch_codes", [])
+    if not isinstance(raw, list):
+        return []
+    return [_safe_str(x) for x in raw if _safe_str(x)]
+
+
+def _apply_external_focus_if_any(group_map: dict[str, list[dict[str, str]]]) -> bool:
+    focus_code = _get_handoff_stock_code()
+    focus_name = _get_handoff_stock_name()
+    if not focus_code:
+        return False
+
+    for group_name, items in group_map.items():
+        for item in items:
+            if _safe_str(item.get("code")) == focus_code:
+                st.session_state[_k("group")] = group_name
+                st.session_state[_k("stock_code")] = focus_code
+                st.session_state[_k("focus_event_idx")] = -1
+                save_last_query_state(
+                    quick_group=group_name,
+                    quick_stock_code=focus_code,
+                    home_start=st.session_state.get(_k("start_date")),
+                    home_end=st.session_state.get(_k("end_date")),
+                )
+                return True
+
+    if group_map:
+        group_name = list(group_map.keys())[0]
+        items = group_map.get(group_name, [])
+        if items:
+            st.session_state[_k("group")] = group_name
+            st.session_state[_k("stock_code")] = focus_code
+            st.session_state[_k("focus_event_idx")] = -1
+            if focus_name:
+                # hint for UI caption only
+                st.session_state[_k("external_focus_name")] = focus_name
+            save_last_query_state(
+                quick_group=group_name,
+                quick_stock_code=focus_code,
+                home_start=st.session_state.get(_k("start_date")),
+                home_end=st.session_state.get(_k("end_date")),
+            )
+            return True
+
+    return False
 
 def _metric_text(source: Any, key: str, default: str = "—") -> str:
     data = _safe_mapping(source)
@@ -2079,15 +2138,17 @@ def main():
     group_map = _build_group_stock_map()
     flat_rows = _flatten_group_map(group_map)
     _init_state(group_map)
+    _apply_external_focus_if_any(group_map)
 
     if _apply_watchlist_sync_if_needed(group_map):
         group_map = _build_group_stock_map()
         flat_rows = _flatten_group_map(group_map)
         _repair_state(group_map)
+        _apply_external_focus_if_any(group_map)
 
     render_pro_hero(
-        title="歷史K線分析｜股神強化穩定版",
-        subtitle="修正雷達異常、補上主檔搜尋 fallback，並新增主升段 / 假突破 / 背離 / 股神強化判讀。",
+        title="歷史K線分析｜升級完整版",
+        subtitle="承接 7_股神推薦 / 4_自選股中心 的股票焦點，保留原功能並補強單股決策終端。",
     )
 
     watchlist_version = st.session_state.get("watchlist_version", 0)
@@ -2096,6 +2157,15 @@ def main():
         st.caption(
             f"自選股同步狀態：watchlist_version = {watchlist_version}"
             + (f" / 最後更新：{watchlist_saved_at}" if watchlist_saved_at else "")
+        )
+
+    handoff_code = _get_handoff_stock_code()
+    handoff_group = _get_handoff_watch_group()
+    if handoff_code:
+        st.caption(
+            f"外部承接焦點：股票 {handoff_code}"
+            + (f" / 群組 {handoff_group}" if handoff_group else "")
+            + (f" / 名稱 {_get_handoff_stock_name()}" if _get_handoff_stock_name() else "")
         )
 
     render_pro_section("快速搜尋股票")
@@ -2153,6 +2223,20 @@ def main():
 
     with c4:
         st.date_input("結束日期", key=_k("end_date"))
+
+    action_cols = st.columns(3)
+    with action_cols[0]:
+        if st.button("承接 4頁送來的股票", use_container_width=True):
+            changed = _apply_external_focus_if_any(group_map)
+            if changed:
+                st.rerun()
+    with action_cols[1]:
+        if st.button("清除外部焦點", use_container_width=True):
+            st.session_state["kline_focus_stock_code"] = ""
+            st.session_state["kline_focus_stock_name"] = ""
+            st.rerun()
+    with action_cols[2]:
+        st.caption("可直接承接 4_自選股中心 / 7_股神推薦 送來的焦點股票")
 
     selected_group = _safe_str(st.session_state.get(_k("group"), ""))
     selected_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
@@ -2273,6 +2357,17 @@ def main():
             },
         ]
     )
+
+
+    focus_hint_rows = []
+    if _get_handoff_stock_code():
+        focus_hint_rows.append(("外部焦點股票", _get_handoff_stock_code(), ""))
+    if _get_handoff_stock_name():
+        focus_hint_rows.append(("外部焦點名稱", _get_handoff_stock_name(), ""))
+    if _get_handoff_watch_group():
+        focus_hint_rows.append(("來源群組", _get_handoff_watch_group(), ""))
+    if focus_hint_rows:
+        render_pro_info_card("跨頁承接資訊", focus_hint_rows, chips=["4頁", "7頁", "焦點股票"])
 
     left, right = st.columns([1.15, 2.85])
 
@@ -2472,6 +2567,7 @@ def main():
         st.write("7. 保留全部功能，不用刪功能換速度。")
         st.write("8. 新增股神進階判斷：真假突破、主升段確認、背離強弱分級、股神訊號總表。")
         st.write("9. 新增可回測買點分級：統計 S/A/B/C 分級在 5 / 10 / 20 日的勝率與平均報酬。")
+        st.write("10. 可承接 4_自選股中心 / 7_股神推薦 送來的焦點股票，不必重新搜尋。")
 
 
 if __name__ == "__main__":
