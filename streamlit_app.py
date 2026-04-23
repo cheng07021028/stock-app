@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from firebase_backup import backup_github_repo_to_firebase, list_recent_backups
+from google_drive_backup import backup_github_repo_to_google_drive, list_recent_drive_backups
 from utils import (
     format_number,
     get_all_code_name_map,
@@ -25,9 +25,6 @@ PAGE_TITLE = "股票分析系統首頁"
 PFX = "home_"
 
 
-# =========================================================
-# 基礎工具
-# =========================================================
 def _k(key: str) -> str:
     return f"{PFX}{key}"
 
@@ -67,9 +64,6 @@ def _fmt_num(v: Any, digits: int = 2) -> str:
     return format_number(v, digits)
 
 
-# =========================================================
-# 快取資料處理
-# =========================================================
 @st.cache_data(ttl=60, show_spinner=False)
 def _build_watchlist_payload(raw_items: tuple) -> dict[str, list[dict[str, str]]]:
     result: dict[str, list[dict[str, str]]] = {}
@@ -179,9 +173,6 @@ def _build_search_rows_cached(watchlist_items: tuple) -> list[dict[str, str]]:
     return rows
 
 
-# =========================================================
-# 自選股資料
-# =========================================================
 def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
     raw = get_normalized_watchlist()
     packed_items = []
@@ -285,9 +276,6 @@ def _find_search_target(keyword: str, rows: list[dict[str, str]]) -> dict[str, s
     return None
 
 
-# =========================================================
-# Session State
-# =========================================================
 def _init_state():
     saved = load_last_query_state()
     today = date.today()
@@ -310,18 +298,16 @@ def _init_state():
     st.session_state[_k("end_date")] = _to_pydate(st.session_state.get(_k("end_date")), default_end)
 
 
-# =========================================================
-# Firebase 備份區
-# =========================================================
 def _render_backup_section():
-    render_pro_section("GitHub 專案一鍵備份到 Firebase")
+    render_pro_section("GitHub 專案一鍵備份到 Google Drive")
 
     repo_owner = st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")
     repo_name = st.secrets.get("GITHUB_REPO_NAME", "stock-app")
     branch = st.secrets.get("GITHUB_REPO_BRANCH", "main")
-    bucket_name = st.secrets.get("FIREBASE_STORAGE_BUCKET", "").strip()
+    folder_name = st.secrets.get("GDRIVE_BACKUP_FOLDER_NAME", "stock-app-backups")
+    parent_folder_id = st.secrets.get("GDRIVE_BACKUP_PARENT_FOLDER_ID", "").strip()
 
-    st.caption("按下按鈕後，會將 GitHub 專案打包成 zip，上傳到 Firebase Storage，並同步寫入 Firestore 備份紀錄。")
+    st.caption("按下按鈕後，會將 GitHub 專案打包成 zip，上傳到 Google Drive 指定備份資料夾。")
 
     c1, c2, c3 = st.columns([1.2, 1.2, 1.2])
     with c1:
@@ -331,24 +317,27 @@ def _render_backup_section():
     with c3:
         st.text_input("分支", value=branch, disabled=True, key=_k("repo_branch_view"))
 
-    info1, info2 = st.columns([1.6, 1])
-    with info1:
-        st.caption(f"Firebase Storage Bucket：{bucket_name or '未設定'}")
-    with info2:
-        st.caption("若顯示未設定，請先補 Secrets。")
+    i1, i2 = st.columns([1.5, 1.2])
+    with i1:
+        st.caption(f"Google Drive 備份資料夾：{folder_name}")
+    with i2:
+        st.caption(f"上層資料夾ID：{parent_folder_id or '未設定'}")
 
     b1, b2 = st.columns([1.5, 1])
+
     with b1:
-        if st.button("一鍵備份 GitHub 專案到 Firebase", type="primary", use_container_width=True, key=_k("backup_btn")):
-            with st.spinner("正在備份 GitHub 專案到 Firebase..."):
+        if st.button("一鍵備份 GitHub 專案到 Google Drive", type="primary", use_container_width=True, key=_k("backup_btn")):
+            with st.spinner("正在備份 GitHub 專案到 Google Drive..."):
                 try:
-                    result = backup_github_repo_to_firebase(
+                    result = backup_github_repo_to_google_drive(
                         repo_owner=repo_owner,
                         repo_name=repo_name,
                         branch=branch,
                         github_token=st.secrets.get("GITHUB_TOKEN", None),
+                        root_folder_name=folder_name,
                     )
                     st.session_state[_k("last_backup_result")] = result
+                    st.session_state[_k("last_backup_error")] = ""
                     st.success("備份成功")
                 except Exception as e:
                     st.session_state[_k("last_backup_error")] = str(e)
@@ -357,7 +346,10 @@ def _render_backup_section():
     with b2:
         if st.button("重新整理備份紀錄", use_container_width=True, key=_k("backup_refresh_btn")):
             try:
-                st.session_state[_k("backup_rows")] = list_recent_backups(limit=10)
+                st.session_state[_k("backup_rows")] = list_recent_drive_backups(
+                    root_folder_name=folder_name,
+                    limit=10,
+                )
                 st.success("已重新整理備份紀錄")
             except Exception as e:
                 st.error(f"讀取備份紀錄失敗：{e}")
@@ -377,16 +369,23 @@ def _render_backup_section():
             )
         with r3:
             render_pro_info_card(
-                "Storage 路徑",
-                [("路徑", _safe_str(last_result.get("storage_path")), "")],
+                "最新Drive檔案",
+                [("檔名", _safe_str(last_result.get("file_name")), "")],
             )
+
+        link = _safe_str(last_result.get("web_view_link"))
+        if link:
+            st.markdown(f"[開啟 Google Drive 備份檔]({link})")
 
     last_error = st.session_state.get(_k("last_backup_error"))
     if last_error:
         st.warning(f"最近一次錯誤：{last_error}")
 
     try:
-        backup_rows = list_recent_backups(limit=10)
+        backup_rows = list_recent_drive_backups(
+            root_folder_name=folder_name,
+            limit=10,
+        )
         st.session_state[_k("backup_rows")] = backup_rows
     except Exception:
         backup_rows = st.session_state.get(_k("backup_rows"), [])
@@ -394,21 +393,18 @@ def _render_backup_section():
     if backup_rows:
         st.dataframe(pd.DataFrame(backup_rows), use_container_width=True, hide_index=True)
     else:
-        st.info("目前尚無備份紀錄，或 Firebase 尚未完成設定。")
+        st.info("目前尚無備份紀錄，或 Google Drive 尚未完成設定。")
 
     render_pro_info_card(
-        "Firebase 設定提醒",
+        "Google Drive 設定提醒",
         [
-            ("Storage", "需先設定 FIREBASE_STORAGE_BUCKET", ""),
-            ("金鑰", "需先設定 FIREBASE_SERVICE_ACCOUNT_JSON", ""),
-            ("紀錄", "備份成功後會寫入 Firestore：github_repo_backups", ""),
+            ("必要欄位", "GDRIVE_PROJECT_ID / GDRIVE_CLIENT_EMAIL / GDRIVE_PRIVATE_KEY", ""),
+            ("資料夾名稱", "GDRIVE_BACKUP_FOLDER_NAME", ""),
+            ("上層資料夾ID", "GDRIVE_BACKUP_PARENT_FOLDER_ID", ""),
         ],
     )
 
 
-# =========================================================
-# 原首頁內容（免登入版）
-# =========================================================
 def _render_home_page():
     watchlist = _load_watchlist_data()
     overview_df = _build_overview_df(watchlist)
@@ -536,9 +532,6 @@ def _render_home_page():
     _render_backup_section()
 
 
-# =========================================================
-# 主程序
-# =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
