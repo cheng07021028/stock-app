@@ -54,24 +54,14 @@ except Exception:
     apply_macro_mode_to_stock_score = None
     render_macro_mode_hint = None
 
-try:
-    from watchlist_runtime_sync import ensure_watchlist_runtime_fresh
-except Exception:
-    ensure_watchlist_runtime_fresh = None
-
-try:
-    from project_perf_hub import dedupe_stock_rows, make_signature, session_cached_compute
-except Exception:
-    dedupe_stock_rows = None
-    make_signature = None
-    session_cached_compute = None
-
-
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 10   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
+PROGRESS_UPDATE_EVERY = 25   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
+MAX_SCAN_WORKERS = 18        # 網路抓取型任務的並行上限，避免雲端過度塞爆
+MACRO_SCORE_BLEND = 0.12     # 大盤趨勢僅作輔助，不直接主導個股總分
+FAST_DEBUG_DISABLE_OVER = 300  # 掃描量太大時停用重型除錯樣本收集
 
 GODPICK_RECORD_COLUMNS = [
     "record_id",
@@ -357,103 +347,6 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
     return {"score": score, "label": label, "summary": summary}
 
 
-
-def _bounded_adjust(v: Any, low: float, high: float, default: float = 0.0) -> float:
-    x = _safe_float(v, default)
-    if x is None:
-        x = default
-    return max(low, min(high, float(x)))
-
-def _sigmoid01(x: float) -> float:
-    try:
-        import math
-        return 1.0 / (1.0 + math.exp(-x))
-    except Exception:
-        return 0.5
-
-def _apply_score_desaturation(base_df: pd.DataFrame) -> pd.DataFrame:
-    if base_df is None or base_df.empty:
-        return base_df
-
-    work = base_df.copy()
-
-    for c in [
-        "原始推薦總分", "大盤動態加權分", "技術結構分數", "起漲前兆分數", "交易可行分數",
-        "類股熱度分數", "型態突破分數", "爆發力分數", "市場環境分數", "同類股領先幅度",
-        "大盤校正Bias", "大盤信心加成"
-    ]:
-        if c not in work.columns:
-            work[c] = None
-
-    raw = pd.to_numeric(work["原始推薦總分"], errors="coerce").fillna(0.0)
-    macro = pd.to_numeric(work["大盤動態加權分"], errors="coerce")
-    macro_safe = raw + (macro.fillna(raw) - raw).clip(-6, 6)
-
-    quality_anchor = (
-        pd.to_numeric(work["技術結構分數"], errors="coerce").fillna(0.0) * 0.22
-        + pd.to_numeric(work["起漲前兆分數"], errors="coerce").fillna(0.0) * 0.18
-        + pd.to_numeric(work["交易可行分數"], errors="coerce").fillna(0.0) * 0.16
-        + pd.to_numeric(work["型態突破分數"], errors="coerce").fillna(0.0) * 0.14
-        + pd.to_numeric(work["爆發力分數"], errors="coerce").fillna(0.0) * 0.12
-        + pd.to_numeric(work["類股熱度分數"], errors="coerce").fillna(0.0) * 0.10
-        + pd.to_numeric(work["市場環境分數"], errors="coerce").fillna(0.0) * 0.08
-    )
-
-    edge_bonus = (
-        (pd.to_numeric(work["同類股領先幅度"], errors="coerce").fillna(50.0) - 50.0).clip(lower=0.0) * 0.10
-        + work.get("類股前3強", pd.Series(["否"] * len(work))).astype(str).eq("是").astype(float) * 1.8
-        + work.get("是否領先同類股", pd.Series(["否"] * len(work))).astype(str).eq("是").astype(float) * 1.5
-        + pd.to_numeric(work["大盤校正Bias"], errors="coerce").fillna(0.0).clip(-2.5, 2.5) * 0.45
-        + pd.to_numeric(work["大盤信心加成"], errors="coerce").fillna(0.0).clip(-2.0, 2.0) * 0.35
-    )
-
-    blended_raw = quality_anchor * 0.56 + raw * 0.24 + macro_safe * 0.20 + edge_bonus
-    pct_rank = blended_raw.rank(method="average", pct=True).fillna(0.5)
-    mean_v = float(blended_raw.mean()) if len(blended_raw) else 0.0
-    std_v = float(blended_raw.std()) if len(blended_raw) else 0.0
-    if std_v <= 1e-9:
-        z_like = pd.Series([0.0] * len(work), index=work.index)
-    else:
-        z_like = (blended_raw - mean_v) / std_v
-
-    z_scaled = z_like.map(lambda x: _sigmoid01(float(x) * 1.15) * 100.0)
-
-    final = (
-        24.0
-        + quality_anchor * 0.36
-        + raw * 0.10
-        + macro_safe * 0.08
-        + pct_rank * 22.0
-        + z_scaled * 0.20
-        + edge_bonus
-    ).clip(45.0, 98.0)
-
-    # 若整批分數太擠，進一步拉開尾端差距
-    saturation_ratio = float((final >= 95).mean()) if len(final) else 0.0
-    if saturation_ratio > 0.12:
-        top_mask = pct_rank >= 0.85
-        final.loc[top_mask] = (90.0 + (pct_rank.loc[top_mask] - 0.85) / 0.15 * 7.0).clip(90.0, 97.0)
-        mid_mask = ~top_mask
-        final.loc[mid_mask] = (final.loc[mid_mask] - (saturation_ratio - 0.12) * 6.0).clip(45.0, 92.5)
-
-    work["分布校正分數"] = final.round(2)
-    work["同批排名分位"] = (pct_rank * 100.0).round(2)
-    work["推薦總分"] = work["分布校正分數"]
-
-    def _recommend(score: float) -> str:
-        if score >= 94:
-            return "股神級"
-        if score >= 88:
-            return "強烈關注"
-        if score >= 80:
-            return "優先觀察"
-        if score >= 70:
-            return "可列追蹤"
-        return "觀察"
-
-    work["推薦等級"] = pd.to_numeric(work["推薦總分"], errors="coerce").fillna(0).map(_recommend)
-    return work
-
 def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> dict[str, Any]:
     technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
     prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -484,8 +377,7 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     macro_scale = 1.0
     macro_bias = 0.0
     macro_conf_bonus = 0.0
-
-    raw_total = _score_clip(base_total)
+    total = _score_clip(base_total)
 
     if callable(apply_macro_mode_to_stock_score):
         factor_scores = {
@@ -499,34 +391,29 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
         }
         try:
             macro_pack = apply_macro_mode_to_stock_score(
-                base_score=float(raw_total),
+                base_score=float(_score_clip(base_total)),
                 factor_scores=factor_scores,
                 lookback_days=30,
             )
             macro_mode_name = _safe_str(macro_pack.get("best_mode_name")) or "股神平衡版"
             macro_weighted_score = _safe_float(macro_pack.get("macro_weighted_score"))
+            macro_target = _safe_float(macro_pack.get("final_score"), _score_clip(base_total)) or _score_clip(base_total)
+            total = _score_clip((_score_clip(base_total) * (1.0 - MACRO_SCORE_BLEND)) + (macro_target * MACRO_SCORE_BLEND))
             macro_reason = _safe_str(macro_pack.get("best_mode_reason"))
             macro_adj = macro_pack.get("macro_adjustment") or {}
-            macro_scale = _bounded_adjust(macro_adj.get("scale"), 0.94, 1.08, 1.0)
-            macro_bias = _bounded_adjust(macro_adj.get("bias"), -4.0, 4.0, 0.0)
-            macro_conf_bonus = _bounded_adjust(macro_adj.get("confidence_bonus"), -3.0, 3.0, 0.0)
-            if macro_weighted_score is None:
-                macro_weighted_score = raw_total * macro_scale + macro_bias + macro_conf_bonus
-            else:
-                macro_weighted_score = raw_total + (macro_weighted_score - raw_total) * 0.45 + macro_bias * 0.35 + macro_conf_bonus * 0.30
-            tag = f"{tag} / 大盤:{macro_mode_name}"
+            macro_scale = _safe_float(macro_adj.get("scale"), 1.0) or 1.0
+            macro_bias = _safe_float(macro_adj.get("bias"), 0.0) or 0.0
+            macro_conf_bonus = _safe_float(macro_adj.get("confidence_bonus"), 0.0) or 0.0
+            tag = f"{tag} / 大盤輔助:{macro_mode_name}"
         except Exception:
-            macro_weighted_score = raw_total
-
-    if macro_weighted_score is None:
-        macro_weighted_score = raw_total
+            pass
 
     return {
-        "推薦總分": _score_clip(macro_weighted_score),
+        "推薦總分": total,
         "推薦標籤": tag,
-        "原始推薦總分": raw_total,
+        "原始推薦總分": _score_clip(base_total),
         "大盤最準模式": macro_mode_name,
-        "大盤動態加權分": round(float(macro_weighted_score), 2),
+        "大盤動態加權分": macro_weighted_score,
         "大盤模式說明": macro_reason,
         "大盤校正Scale": macro_scale,
         "大盤校正Bias": macro_bias,
@@ -3068,6 +2955,41 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         }
 
 
+
+def _dedupe_universe_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    out = []
+    seen = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        code = _normalize_code(item.get("code"))
+        market = _safe_str(item.get("market")) or "上市"
+        if not code:
+            continue
+        key = (code, market)
+        if key in seen:
+            continue
+        seen.add(key)
+        row = dict(item)
+        row["code"] = code
+        row["market"] = market
+        row["name"] = _safe_str(item.get("name")) or code
+        row["category"] = _normalize_category(item.get("category")) or _infer_category_from_record(row["name"], item.get("category"))
+        row["label"] = row.get("label") or f"{code} {row['name']}"
+        out.append(row)
+    return out
+
+def _get_progress_update_every(total_count: int) -> int:
+    if total_count >= 1500:
+        return 60
+    if total_count >= 1000:
+        return 45
+    if total_count >= 600:
+        return 35
+    if total_count >= 300:
+        return 25
+    return PROGRESS_UPDATE_EVERY
+
 def _analyze_one_stock_for_recommend(
     item: dict[str, str],
     master_lookup: dict[str, dict[str, str]],
@@ -3297,12 +3219,14 @@ def _build_recommend_df(
     min_trade_score: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
+    universe_items = _dedupe_universe_items(universe_items)
     if not universe_items:
         _save_debug_scan_summary({})
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
+    worker_count = min(MAX_SCAN_WORKERS, max(6, total_count // 20 if total_count >= 120 else 6))
+    progress_every = _get_progress_update_every(total_count)
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
@@ -3312,6 +3236,7 @@ def _build_recommend_df(
     start_ts = time.time()
     done_count = 0
     base_rows = []
+    collect_debug_samples = total_count <= FAST_DEBUG_DISABLE_OVER
     debug_summary = {
         "total_count": total_count,
         "analyzed_ok": 0,
@@ -3365,25 +3290,26 @@ def _build_recommend_df(
                         debug_summary[status] = int(debug_summary.get(status, 0)) + 1
                         msg = _safe_str(result.get("message"))
                         code = _safe_str(result.get("code"))
-                        if status == "no_history":
+                        if collect_debug_samples and status == "no_history":
                             hdbg = result.get("history_debug", {}) or {}
                             attempt_lines = []
-                            for att in hdbg.get("attempts", [])[:3]:
+                            for att in hdbg.get("attempts", [])[:2]:
                                 market = _safe_str(att.get("market_type")) or "未知市場"
                                 rows = att.get("rows", 0)
                                 err = _safe_str(att.get("error"))
                                 source = _safe_str(att.get("source"))
                                 attempt_lines.append(f"{market} rows={rows} source={source} err={err}")
                             debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
-                        elif status == "analysis_error":
+                        elif collect_debug_samples and status == "analysis_error":
                             debug_summary["error_samples"].append(f"{code}：{msg}")
             except Exception as e:
                 debug_summary["analysis_error"] += 1
-                debug_summary["error_samples"].append(f"future.result 例外：{e}")
+                if collect_debug_samples:
+                    debug_summary["error_samples"].append(f"future.result 例外：{e}")
             should_update_progress = (
                 done_count == 1
                 or done_count == total_count
-                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
+                or done_count % max(1, progress_every) == 0
                 or done_count / total_count >= 0.98
             )
             if should_update_progress:
@@ -3450,7 +3376,18 @@ def _build_recommend_df(
         if c in mode_scores_df.columns:
             base_df[c] = mode_scores_df[c]
 
-    base_df = _apply_score_desaturation(base_df)
+    def _recommend(score: float) -> str:
+        if score >= 90:
+            return "股神級"
+        if score >= 84:
+            return "強烈關注"
+        if score >= 72:
+            return "優先觀察"
+        if score >= 60:
+            return "可列追蹤"
+        return "觀察"
+
+    base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
 
     def _reason_builder(r):
         reason_parts = []
@@ -3640,7 +3577,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分", "原始推薦總分", "同批排名分位",
+        "推薦模式", "推薦等級", "推薦總分",
         "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "是否領先同類股",
         "最新價", "推薦買點_拉回", "推薦買點_突破",
@@ -4014,6 +3951,8 @@ def main():
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
 
+    st.caption("本版已調降大盤趨勢對個股總分的影響，並針對 1000 檔以上掃描加入去重、降低重型除錯、提高並行效率。")
+
     if callable(render_macro_mode_hint):
         render_macro_mode_hint()
 
@@ -4291,11 +4230,7 @@ def main():
             selected_categories=selected_categories,
         )
 
-    if callable(dedupe_stock_rows):
-        universe_items = dedupe_stock_rows(
-            universe_items,
-            key_fields=("code", "market"),
-        )
+    universe_items = _dedupe_universe_items(universe_items)
 
     if not universe_items:
         st.warning("目前掃描池沒有股票。")
@@ -4304,63 +4239,26 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
+    st.caption(f"本輪實際掃描去重後股票數：{len(universe_items)} 檔｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%")
+
     rec_df = pd.DataFrame()
     category_strength_df = pd.DataFrame()
     hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh:
-        perf_payload = {
-            "watchlist_version": int(st.session_state.get("watchlist_version", 0) or 0),
-            "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"), "")),
-            "group": _safe_str(st.session_state.get(_k("group"), "")),
-            "days": int(st.session_state.get(_k("days"), 120)),
-            "scan_limit": _safe_str(st.session_state.get(_k("scan_limit"), 1000)),
-            "selected_categories": selected_categories,
-            "min_total_score": float(st.session_state.get(_k("min_total_score"), 55.0)),
-            "min_signal_score": float(st.session_state.get(_k("min_signal_score"), -2.0)),
-            "min_prelaunch_score": float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-            "min_trade_score": float(st.session_state.get(_k("min_trade_score"), 45.0)),
-            "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-            "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
-            "pick_strategy": _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")),
-            "universe_codes": [f"{_normalize_code(x.get('code'))}|{_safe_str(x.get('market'))}" for x in universe_items],
-        }
-        perf_sig = make_signature(perf_payload) if callable(make_signature) else ""
-        if callable(session_cached_compute) and perf_sig:
-            (rec_df, category_strength_df, hot_pick_df), used_cache = session_cached_compute(
-                st=st,
-                cache_name="godpick_result_bundle",
-                signature=perf_sig,
-                compute_fn=lambda: _build_recommend_df(
-                    universe_items=universe_items,
-                    master_df=master_df,
-                    start_dt=start_dt,
-                    end_dt=end_dt,
-                    min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-                    min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-                    selected_categories=selected_categories,
-                    mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-                    risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
-                    min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-                    min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
-                ),
-            )
-            if used_cache:
-                _set_status("同條件直接使用本輪快取結果，未重複掃描。", "success")
-        else:
-            rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
-                universe_items=universe_items,
-                master_df=master_df,
-                start_dt=start_dt,
-                end_dt=end_dt,
-                min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-                min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-                selected_categories=selected_categories,
-                mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-                risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
-                min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-                min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
-            )
+        rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
+            universe_items=universe_items,
+            master_df=master_df,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+            min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+            selected_categories=selected_categories,
+            mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
+            risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
+            min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+            min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
+        )
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
@@ -4396,18 +4294,6 @@ def main():
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
     )
-
-    score_dist = pd.to_numeric(rec_df.get("推薦總分"), errors="coerce").dropna()
-    if not score_dist.empty:
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric("90分以上", int((score_dist >= 90).sum()))
-        with k2:
-            st.metric("80-89分", int(((score_dist >= 80) & (score_dist < 90)).sum()))
-        with k3:
-            st.metric("70-79分", int(((score_dist >= 70) & (score_dist < 80)).sum()))
-        with k4:
-            st.metric("中位數", f"{float(score_dist.median()):.1f}")
 
     render_pro_section("推薦股票加入自選股中心")
     watchlist_map = _load_watchlist_map()
@@ -4589,41 +4475,39 @@ def main():
     render_pro_section("本輪精華推薦")
     st.caption("推薦總分已套用大盤最近最準模式動態校正；可比較原始分數與校正後分數差異。")
 
-    top_show_cols = [
-        "勾選",
-        "股票代號",
-        "股票名稱",
-        "市場別",
-        "類別",
-        "類股內排名",
-        "類股前3強",
-        "推薦模式",
-        "推薦等級",
-        "推薦總分",
-        "原始推薦總分",
-        "分布校正分數",
-        "同批排名分位",
-        "大盤最準模式",
-        "大盤動態加權分",
-        "市場環境分數",
-        "型態名稱",
-        "型態突破分數",
-        "爆發力分數",
-        "起漲前兆分數",
-        "交易可行分數",
-        "類股熱度分數",
-        "是否領先同類股",
-        "起漲判斷",
-        "最新價",
-        "推薦買點_拉回",
-        "推薦買點_突破",
-        "停損價",
-        "賣出目標1",
-        "賣出目標2",
-        "推薦理由摘要",
-    ]
-    top_show_cols = [c for c in top_show_cols if c in top_df.columns]
-    top_show_df = top_df[top_show_cols].copy()
+    top_show_df = top_df[
+        [
+            "勾選",
+            "股票代號",
+            "股票名稱",
+            "市場別",
+            "類別",
+            "類股內排名",
+            "類股前3強",
+            "推薦模式",
+            "推薦等級",
+            "推薦總分",
+            "原始推薦總分",
+            "大盤最準模式",
+            "大盤動態加權分",
+            "市場環境分數",
+            "型態名稱",
+            "型態突破分數",
+            "爆發力分數",
+            "起漲前兆分數",
+            "交易可行分數",
+            "類股熱度分數",
+            "是否領先同類股",
+            "起漲判斷",
+            "最新價",
+            "推薦買點_拉回",
+            "推薦買點_突破",
+            "停損價",
+            "賣出目標1",
+            "賣出目標2",
+            "推薦理由摘要",
+        ]
+    ].copy()
 
     edited_top_df = st.data_editor(
         _format_df(top_show_df),
@@ -4689,8 +4573,6 @@ def main():
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
                 ("原始推薦總分", format_number(focus_row.get("原始推薦總分"), 1), ""),
-                ("分布校正分數", format_number(focus_row.get("分布校正分數"), 1), ""),
-                ("同批排名分位", format_number(focus_row.get("同批排名分位"), 1), "%"),
                 ("大盤最準模式", _safe_str(focus_row.get("大盤最準模式")), ""),
                 ("大盤動態加權分", format_number(focus_row.get("大盤動態加權分"), 1), ""),
                 ("市場環境", _safe_str(focus_row.get("市場環境")), ""),
@@ -4742,7 +4624,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "原始推薦總分", "同批排名分位",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
