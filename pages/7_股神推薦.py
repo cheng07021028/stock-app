@@ -3319,28 +3319,31 @@ def _build_recommend_df(
     scan_mode: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
+    universe_items = _dedupe_universe_items(universe_items)
     if not universe_items:
         _save_debug_scan_summary({})
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
+    worker_count = min(MAX_SCAN_WORKERS, max(6, total_count // 20 if total_count >= 120 else 6))
+    collect_debug = total_count <= STAGE1_DEBUG_LIMIT
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
-    progress_bar = progress_wrap.progress(0, text="準備開始推薦...")
+    progress_bar = progress_wrap.progress(0, text="第一階段：低成本初篩...")
     progress_text = progress_wrap.empty()
 
     start_ts = time.time()
-    done_count = 0
-    base_rows = []
     debug_summary = {
         "total_count": total_count,
+        "stage1_passed": 0,
+        "stage1_keep": 0,
         "analyzed_ok": 0,
         "passed_final": 0,
         "invalid_code": 0,
         "category_filtered": 0,
         "no_history": 0,
+        "prefilter_filtered": 0,
         "analysis_error": 0,
         "signal_filtered": 0,
         "risk_filtered": 0,
@@ -3350,6 +3353,68 @@ def _build_recommend_df(
         "history_debug_samples": [],
         "error_samples": [],
     }
+
+    stage1_rows = []
+    done_count = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _quick_prefilter_one_stock,
+                item,
+                master_lookup,
+                start_dt,
+                end_dt,
+                clean_categories,
+            )
+            for item in universe_items
+        ]
+
+        for future in as_completed(futures):
+            done_count += 1
+            try:
+                result = future.result()
+                if not isinstance(result, dict):
+                    debug_summary["analysis_error"] += 1
+                else:
+                    status = _safe_str(result.get("status")) or "analysis_error"
+                    debug_summary[status] = int(debug_summary.get(status, 0)) + 1
+                    if status == "stage1_ok":
+                        stage1_rows.append(result)
+                    elif collect_debug and status == "no_history":
+                        hdbg = result.get("history_debug", {}) or {}
+                        attempts = []
+                        for att in hdbg.get("attempts", [])[:2]:
+                            attempts.append(f"{_safe_str(att.get('market_type')) or '未知'}:{att.get('rows', 0)}")
+                        debug_summary["history_debug_samples"].append(f"{_safe_str(result.get('code'))}｜" + " / ".join(attempts))
+            except Exception as e:
+                debug_summary["analysis_error"] += 1
+                if collect_debug:
+                    debug_summary["error_samples"].append(f"stage1 例外：{e}")
+
+            if done_count == 1 or done_count == total_count or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0:
+                ratio = done_count / total_count if total_count > 0 else 0
+                elapsed = time.time() - start_ts
+                progress_bar.progress(min(max(ratio * 0.45, 0.0), 0.45), text=f"第一階段：低成本初篩 {done_count}/{total_count}")
+                progress_text.caption(f"已完成 {done_count}/{total_count}｜已花時間：{_fmt_seconds(elapsed)}")
+
+    stage1_df = pd.DataFrame(stage1_rows)
+    if stage1_df.empty:
+        _save_debug_scan_summary(debug_summary)
+        progress_bar.progress(1.0, text="初篩完成，但沒有股票通過")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    stage1_df = stage1_df.sort_values(["prefilter_score", "code"], ascending=[False, True]).reset_index(drop=True)
+    keep_count = _get_scan_mode_keep_count(scan_mode, len(stage1_df))
+    keep_codes = set(stage1_df.head(keep_count)["code"].astype(str).tolist())
+    debug_summary["stage1_passed"] = len(stage1_df)
+    debug_summary["stage1_keep"] = len(keep_codes)
+
+    progress_bar.progress(0.5, text=f"第二階段：完整股神分析 {len(keep_codes)} 檔")
+
+    base_rows = []
+    done_count = 0
+    target_items = [item for item in universe_items if _normalize_code(item.get("code")) in keep_codes]
+    total_second = len(target_items)
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
@@ -3366,7 +3431,7 @@ def _build_recommend_df(
                 min_prelaunch_score,
                 min_trade_score,
             )
-            for item in universe_items
+            for item in target_items
         ]
 
         for future in as_completed(futures):
@@ -3375,7 +3440,6 @@ def _build_recommend_df(
                 result = future.result()
                 if not isinstance(result, dict):
                     debug_summary["analysis_error"] += 1
-                    debug_summary["error_samples"].append("未知錯誤：future.result 非 dict")
                 else:
                     status = _safe_str(result.get("status")) or "analysis_error"
                     if status == "ok":
@@ -3390,7 +3454,7 @@ def _build_recommend_df(
                         if collect_debug and status == "no_history":
                             hdbg = result.get("history_debug", {}) or {}
                             attempt_lines = []
-                            for att in hdbg.get("attempts", [])[:3]:
+                            for att in hdbg.get("attempts", [])[:2]:
                                 market = _safe_str(att.get("market_type")) or "未知市場"
                                 rows = att.get("rows", 0)
                                 err = _safe_str(att.get("error"))
@@ -3403,35 +3467,29 @@ def _build_recommend_df(
                 debug_summary["analysis_error"] += 1
                 if collect_debug:
                     debug_summary["error_samples"].append(f"future.result 例外：{e}")
-            should_update_progress = (
-                done_count == 1
-                or done_count == total_count
-                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
-                or done_count / total_count >= 0.98
-            )
-            if should_update_progress:
-                elapsed = time.time() - start_ts
-                avg_per_stock = elapsed / done_count if done_count > 0 else 0
-                remain_count = max(total_count - done_count, 0)
-                eta_sec = avg_per_stock * remain_count
-                ratio = done_count / total_count if total_count > 0 else 0
 
+            if done_count == 1 or done_count == total_second or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0:
                 total_second_safe = max(total_second, 1)
                 phase_ratio = done_count / total_second_safe
+                elapsed = time.time() - start_ts
+                avg_per_stock = elapsed / max(done_count, 1)
+                remain_count = max(total_second_safe - done_count, 0)
+                eta_sec = avg_per_stock * remain_count
                 progress_bar.progress(min(max(0.5 + phase_ratio * 0.5, 0.5), 1.0), text=f"第二階段：完整股神分析 {done_count}/{total_second_safe} ({phase_ratio*100:.1f}%)")
                 progress_text.caption(
-                    f"第二階段已完成 {done_count}/{max(total_second,1)}｜"
+                    f"第二階段已完成 {done_count}/{total_second_safe}｜"
                     f"已花時間：{_fmt_seconds(elapsed)}｜"
                     f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
                     f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
                 )
 
-    progress_bar.progress(1.0, text=f"推薦完成｜初篩通過 {len(stage1_df)} 檔｜完整分析 {len(stage1_keep_codes)} 檔")
+    progress_bar.progress(1.0, text=f"推薦完成｜初篩通過 {len(stage1_df)} 檔｜完整分析 {len(keep_codes)} 檔")
     total_elapsed = time.time() - start_ts
     progress_text.caption(f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}")
 
     base_df = pd.DataFrame(base_rows)
     if base_df.empty:
+        _save_debug_scan_summary(debug_summary)
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     category_strength_df = _compute_category_strength(base_df)
@@ -3487,31 +3545,6 @@ def _build_recommend_df(
         return "觀察"
 
     base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
-
-    def _reason_builder(r):
-        reason_parts = []
-        if _safe_float(r.get("均線轉強分"), 0) >= 70:
-            reason_parts.append("均線結構轉強")
-        if _safe_float(r.get("量能啟動分"), 0) >= 65:
-            reason_parts.append("量能明顯放大")
-        if _safe_float(r.get("突破準備分"), 0) >= 70:
-            reason_parts.append("接近壓力突破位")
-        if _safe_float(r.get("動能翻多分"), 0) >= 65:
-            reason_parts.append("動能翻多")
-        if _safe_float(r.get("支撐防守分"), 0) >= 65:
-            reason_parts.append("支撐防守佳")
-        if _safe_str(r.get("是否領先同類股")) == "是":
-            reason_parts.append("領先同類股")
-        if _safe_str(r.get("類股前3強")) == "是":
-            reason_parts.append("類股前3強")
-        if _safe_float(r.get("類股熱度分數"), 0) >= 75:
-            reason_parts.append("所屬類股熱度高")
-        if _safe_float(r.get("交易可行分數"), 0) >= 70:
-            reason_parts.append("風險報酬佳")
-        if not reason_parts:
-            reason_parts.append("結構偏多，列入觀察")
-        return "、".join(reason_parts[:6])
-
     base_df["推薦理由摘要"] = base_df.apply(_build_recommend_reason_v2, axis=1)
 
     for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
