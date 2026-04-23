@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import io
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
 import streamlit as st
-
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -61,12 +59,13 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def _escape_query_value(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def ensure_backup_folder(service, folder_name: str, parent_folder_id: str | None = None) -> str:
-    """
-    取得或建立備份資料夾，回傳 folder id
-    """
     query_parts = [
-        f"name = '{folder_name.replace(\"'\", \"\\'\")}'",
+        f"name = '{_escape_query_value(folder_name)}'",
         "mimeType = 'application/vnd.google-apps.folder'",
         "trashed = false",
     ]
@@ -115,9 +114,6 @@ def backup_github_repo_to_google_drive(
     github_token: str | None = None,
     root_folder_name: str = "stock-app-backups",
 ) -> dict:
-    """
-    GitHub repo zip -> Google Drive 資料夾
-    """
     service = get_drive_service()
 
     zip_url = f"https://github.com/{repo_owner}/{repo_name}/archive/refs/heads/{branch}.zip"
