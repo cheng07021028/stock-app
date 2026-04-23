@@ -32270,6 +32270,20 @@
     "待修原因": ""
   },
   {
+    "code": "7907",
+    "name": "錸恩帕斯",
+    "market": "興櫃",
+    "official_industry_raw": "20",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "其他",
+    "theme_category": "其他",
+    "category": "其他",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "7909",
     "name": "鈺祥",
     "market": "興櫃",
@@ -32278,6 +32292,20 @@
     "official_industry": "半導體業",
     "theme_category": "半導體業",
     "category": "半導體業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
+    "code": "7912",
+    "name": "新聿科",
+    "market": "興櫃",
+    "official_industry_raw": "28",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "電子零組件業",
+    "theme_category": "電子零組件業",
+    "category": "電子零組件業",
     "source": "tpex_興櫃_base",
     "source_api": "tpex_興櫃",
     "source_rank": 3,
