@@ -78,6 +78,174 @@ def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
 
 
+def _safe_mapping(v: Any) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def _metric_text(source: Any, key: str, default: str = "—") -> str:
+    data = _safe_mapping(source)
+    val = data.get(key, default)
+    if isinstance(val, (list, tuple)):
+        if len(val) >= 1:
+            return _safe_str(val[0]) or default
+        return default
+    if isinstance(val, dict):
+        return _safe_str(val.get("label") or val.get("text") or default)
+    return _safe_str(val) or default
+
+
+def _metric_number(source: Any, key: str, default: float | int | None = None):
+    data = _safe_mapping(source)
+    val = data.get(key, default)
+    if isinstance(val, (list, tuple)):
+        if len(val) >= 1:
+            return _safe_float(val[0], default)
+        return default
+    if isinstance(val, dict):
+        for candidate in ["value", "score", "number"]:
+            if candidate in val:
+                return _safe_float(val.get(candidate), default)
+        return default
+    return _safe_float(val, default)
+
+
+def _default_signal_snapshot() -> dict[str, Any]:
+    return {
+        "score": 0,
+        "ma_trend": ("整理", ""),
+        "kd_cross": ("無新交叉", ""),
+        "macd_trend": ("整理", ""),
+        "price_vs_ma20": ("接近 MA20", ""),
+        "breakout_20d": ("區間內", ""),
+        "volume_state": ("量能普通", ""),
+    }
+
+
+def _default_sr_snapshot() -> dict[str, Any]:
+    return {
+        "res_20": None,
+        "sup_20": None,
+        "res_60": None,
+        "sup_60": None,
+        "pressure_signal": ("—", ""),
+        "support_signal": ("—", ""),
+        "break_signal": ("區間內", ""),
+    }
+
+
+def _default_radar_snapshot() -> dict[str, Any]:
+    return {
+        "trend": 50,
+        "momentum": 50,
+        "volume": 50,
+        "position": 50,
+        "structure": 50,
+        "summary": "訊號中性，等待更明確方向。",
+    }
+
+
+def _compute_god_signal(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {
+            "phase": "整理",
+            "action": "觀察",
+            "confidence": 50,
+            "summary": "資料不足，先觀察。",
+            "reason": [],
+        }
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    k_val = _safe_float(last.get("K"))
+    d_val = _safe_float(last.get("D"))
+    dif = _safe_float(last.get("DIF"))
+    dea = _safe_float(last.get("DEA"))
+    score = _metric_number(signal_snapshot, "score", 0) or 0
+    trend = _metric_number(radar, "trend", 50) or 50
+    momentum = _metric_number(radar, "momentum", 50) or 50
+    structure = _metric_number(radar, "structure", 50) or 50
+    volume_score = _metric_number(radar, "volume", 50) or 50
+    break_text = _metric_text(sr_snapshot, "break_signal", "區間內")
+
+    reasons = []
+    bull_points = 0
+    bear_points = 0
+
+    if close_now is not None and ma20 is not None and close_now > ma20:
+        bull_points += 1
+        reasons.append("股價站上 MA20")
+    elif close_now is not None and ma20 is not None and close_now < ma20:
+        bear_points += 1
+        reasons.append("股價跌破 MA20")
+
+    if close_now is not None and ma60 is not None and close_now > ma60:
+        bull_points += 1
+        reasons.append("股價位於 MA60 上方")
+    elif close_now is not None and ma60 is not None and close_now < ma60:
+        bear_points += 1
+        reasons.append("股價位於 MA60 下方")
+
+    if k_val is not None and d_val is not None and k_val > d_val:
+        bull_points += 1
+        reasons.append("KD 偏多")
+    elif k_val is not None and d_val is not None and k_val < d_val:
+        bear_points += 1
+        reasons.append("KD 偏弱")
+
+    if dif is not None and dea is not None and dif > dea:
+        bull_points += 1
+        reasons.append("MACD 偏多")
+    elif dif is not None and dea is not None and dif < dea:
+        bear_points += 1
+        reasons.append("MACD 偏弱")
+
+    if "突破" in break_text:
+        bull_points += 2
+        reasons.append("結構突破")
+    elif "跌破" in break_text:
+        bear_points += 2
+        reasons.append("結構跌破")
+
+    if score >= 3:
+        bull_points += 1
+    elif score <= -3:
+        bear_points += 1
+
+    confidence = int(max(0, min(100, round((trend + momentum + structure + volume_score) / 4))))
+    diff = bull_points - bear_points
+
+    if diff >= 3:
+        phase = "主升候選"
+        action = "偏多"
+        summary = "多方條件同時成立，重點改看是否能延續量價與守住突破位。"
+    elif diff <= -3:
+        phase = "主跌候選"
+        action = "偏空"
+        summary = "空方條件較完整，反彈若無法站回關鍵位，弱勢延續機率較高。"
+    elif diff >= 1:
+        phase = "轉強觀察"
+        action = "偏多觀察"
+        summary = "已有轉強跡象，但仍要確認量能與突破有效性。"
+    elif diff <= -1:
+        phase = "轉弱觀察"
+        action = "偏空觀察"
+        summary = "已有轉弱跡象，但仍要確認跌破是否有效。"
+    else:
+        phase = "整理"
+        action = "觀察"
+        summary = "多空訊號混合，先等市場表態再提高勝率。"
+
+    return {
+        "phase": phase,
+        "action": action,
+        "confidence": confidence,
+        "summary": summary,
+        "reason": reasons[:6],
+    }
+
+
 # =========================================================
 # 快取輔助
 # =========================================================
@@ -731,6 +899,43 @@ def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
             if pd.notna(close_price) and pd.notna(low20) and close_price <= low20:
                 rows.append({"日期": d, "事件分類": "跌破", "事件": "跌破20日低", "說明": "股價創 20 日新低。"})
 
+        if i >= 20 and all(c in df.columns for c in ["成交股數", "VOL20", "MA20", "MA60", "收盤價", "最高價", "最低價", "K", "D", "DIF", "DEA"]):
+            vol20 = _safe_float(cur.get("VOL20"))
+            vol_now = _safe_float(cur.get("成交股數"))
+            ma20 = _safe_float(cur.get("MA20"))
+            ma60 = _safe_float(cur.get("MA60"))
+            close_price = _safe_float(cur.get("收盤價"))
+            prev_high20 = _safe_float(df.iloc[max(0, i - 20): i]["最高價"].max())
+            prev_low20 = _safe_float(df.iloc[max(0, i - 20): i]["最低價"].min())
+
+            if all(v is not None for v in [vol20, vol_now, ma20, ma60, close_price, prev_high20]):
+                if close_price > ma20 and close_price > ma60 and vol_now >= vol20 * 1.3 and close_price >= prev_high20:
+                    rows.append({"日期": d, "事件分類": "主升段", "事件": "主升段啟動候選", "說明": "股價站上中期均線且放量突破，疑似主升段起點。"})
+            if all(v is not None for v in [close_price, prev_high20]):
+                if close_price < prev_high20 and _safe_float(prev.get("收盤價")) is not None and _safe_float(prev.get("收盤價")) >= prev_high20:
+                    rows.append({"日期": d, "事件分類": "假突破", "事件": "突破失敗", "說明": "前一交易日突破後無法站穩，需防假突破回落。"})
+            if all(v is not None for v in [close_price, prev_low20]):
+                if close_price > prev_low20 and _safe_float(prev.get("收盤價")) is not None and _safe_float(prev.get("收盤價")) <= prev_low20:
+                    rows.append({"日期": d, "事件分類": "假突破", "事件": "跌破失敗", "說明": "前一交易日跌破後快速站回，需防假跌破反彈。"})
+
+        if i >= 10 and all(c in df.columns for c in ["收盤價", "K", "DIF"]):
+            price_now = _safe_float(cur.get("收盤價"))
+            price_prev5 = _safe_float(df.iloc[max(0, i - 5)].get("收盤價"))
+            k_now = _safe_float(cur.get("K"))
+            k_prev5 = _safe_float(df.iloc[max(0, i - 5)].get("K"))
+            dif_now = _safe_float(cur.get("DIF"))
+            dif_prev5 = _safe_float(df.iloc[max(0, i - 5)].get("DIF"))
+            if all(v is not None for v in [price_now, price_prev5, k_now, k_prev5]):
+                if price_now < price_prev5 and k_now > k_prev5:
+                    rows.append({"日期": d, "事件分類": "背離", "事件": "KD 底背離候選", "說明": "價格創較弱位置，但 KD 未同步轉弱，留意止跌。"})
+                elif price_now > price_prev5 and k_now < k_prev5:
+                    rows.append({"日期": d, "事件分類": "背離", "事件": "KD 頂背離候選", "說明": "價格走高但 KD 未同步走強，留意追價風險。"})
+            if all(v is not None for v in [price_now, price_prev5, dif_now, dif_prev5]):
+                if price_now < price_prev5 and dif_now > dif_prev5:
+                    rows.append({"日期": d, "事件分類": "背離", "事件": "MACD 底背離候選", "說明": "價格偏弱但 MACD 動能未再惡化，留意轉折。"})
+                elif price_now > price_prev5 and dif_now < dif_prev5:
+                    rows.append({"日期": d, "事件分類": "背離", "事件": "MACD 頂背離候選", "說明": "價格續漲但 MACD 動能走弱，留意假強。"})
+
     if not rows:
         return pd.DataFrame(columns=["日期", "事件分類", "事件", "說明"])
 
@@ -739,12 +944,30 @@ def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _compute_analysis_bundle(df: pd.DataFrame) -> dict[str, Any]:
-    signal_snapshot = compute_signal_snapshot(df)
-    sr_snapshot = compute_support_resistance_snapshot(df)
-    radar = compute_radar_scores(df)
-    badge_text, _ = score_to_badge(signal_snapshot.get("score", 0))
+    signal_snapshot = _default_signal_snapshot()
+    sr_snapshot = _default_sr_snapshot()
+    radar = _default_radar_snapshot()
+
+    try:
+        signal_snapshot = _safe_mapping(compute_signal_snapshot(df)) or _default_signal_snapshot()
+    except Exception:
+        signal_snapshot = _default_signal_snapshot()
+
+    try:
+        sr_snapshot = _safe_mapping(compute_support_resistance_snapshot(df)) or _default_sr_snapshot()
+    except Exception:
+        sr_snapshot = _default_sr_snapshot()
+
+    try:
+        radar = _safe_mapping(compute_radar_scores(df)) or _default_radar_snapshot()
+    except Exception:
+        radar = _default_radar_snapshot()
+
+    safe_score = _metric_number(signal_snapshot, "score", 0) or 0
+    badge_text, _ = score_to_badge(safe_score)
     event_df = _build_event_df(df)
     peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
+    god_signal = _compute_god_signal(df, signal_snapshot, sr_snapshot, radar)
 
     return {
         "signal_snapshot": signal_snapshot,
@@ -754,6 +977,7 @@ def _compute_analysis_bundle(df: pd.DataFrame) -> dict[str, Any]:
         "event_df": event_df,
         "peak_idx": peak_idx,
         "trough_idx": trough_idx,
+        "god_signal": god_signal,
     }
 
 
@@ -791,6 +1015,9 @@ def _event_style(event_type: str) -> dict[str, str]:
         "MACD": {"bg": "#fff7ed", "border": "#f97316", "tag": "#c2410c", "text": "#9a3412"},
         "突破": {"bg": "#f0fdfa", "border": "#14b8a6", "tag": "#0f766e", "text": "#134e4a"},
         "跌破": {"bg": "#f8fafc", "border": "#334155", "tag": "#0f172a", "text": "#334155"},
+        "背離": {"bg": "#fff1f2", "border": "#e11d48", "tag": "#be123c", "text": "#881337"},
+        "主升段": {"bg": "#ecfeff", "border": "#0891b2", "tag": "#0e7490", "text": "#164e63"},
+        "假突破": {"bg": "#fff7ed", "border": "#ea580c", "tag": "#c2410c", "text": "#9a3412"},
     }
     return mapping.get(event_type, {"bg": "#f8fafc", "border": "#94a3b8", "tag": "#475569", "text": "#334155"})
 
@@ -799,9 +1026,9 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     name = _safe_str(event_name)
     typ = _safe_str(event_type)
 
-    if typ in ["起漲點", "突破"]:
+    if typ in ["起漲點", "突破", "主升段"]:
         return {"arrow": "↑", "label": "偏多", "bg": "#dcfce7", "color": "#166534"}
-    if typ in ["起跌點", "跌破"]:
+    if typ in ["起跌點", "跌破", "假突破"]:
         return {"arrow": "↓", "label": "偏空", "bg": "#fee2e2", "color": "#991b1b"}
     if "黃金交叉" in name:
         return {"arrow": "↑", "label": "轉強", "bg": "#dbeafe", "color": "#1d4ed8"}
@@ -907,10 +1134,10 @@ def _render_focus_summary_bar(filtered_event_df: pd.DataFrame, signal_snapshot: 
         )
         _html(html)
     else:
-        trend_text = _safe_str(signal_snapshot.get("ma_trend", ("整理", ""))[0])
-        kd_text = _safe_str(signal_snapshot.get("kd_cross", ("無新交叉", ""))[0])
-        macd_text = _safe_str(signal_snapshot.get("macd_trend", ("整理", ""))[0])
-        break_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+        trend_text = _metric_text(signal_snapshot, "ma_trend", "整理")
+        kd_text = _metric_text(signal_snapshot, "kd_cross", "無新交叉")
+        macd_text = _metric_text(signal_snapshot, "macd_trend", "整理")
+        break_text = _metric_text(sr_snapshot, "break_signal", "區間內")
 
         html = (
             '<div style="background:linear-gradient(135deg,#eff6ff 0%,#ffffff 100%);border:2px solid #bfdbfe;border-radius:18px;padding:14px 16px;margin-bottom:12px;box-shadow:0 8px 20px rgba(15,23,42,0.06);">'
@@ -957,7 +1184,7 @@ def _render_key_price_bar(df: pd.DataFrame, sr_snapshot: dict):
 
     pressure_dist = dist_to_pressure(res20, close_now)
     support_dist = dist_to_support(sup20, close_now)
-    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+    structure_text = _metric_text(sr_snapshot, "break_signal", "區間內")
 
     html = (
         '<div style="background:linear-gradient(135deg,#0f172a 0%,#162033 45%,#1e293b 100%);border:1px solid rgba(148,163,184,0.2);border-radius:18px;padding:14px 16px;margin-bottom:12px;box-shadow:0 10px 26px rgba(15,23,42,0.18);">'
@@ -1063,8 +1290,8 @@ def _build_strategy_cards(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: 
     ma60 = _safe_float(last.get("MA60"))
     res20 = _safe_float(sr_snapshot.get("res_20"))
     sup20 = _safe_float(sr_snapshot.get("sup_20"))
-    score = int(_safe_float(signal_snapshot.get("score"), 0) or 0)
-    structure_text = _safe_str(sr_snapshot.get("break_signal", ("區間內", ""))[0])
+    score = int(_metric_number(signal_snapshot, "score", 0) or 0)
+    structure_text = _metric_text(sr_snapshot, "break_signal", "區間內")
     radar_summary = _safe_str(radar.get("summary", "—"))
 
     bullish_trigger = "站穩 20 日壓力並延續量能"
@@ -1119,7 +1346,7 @@ def _build_execution_plan(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: 
     sup20 = _safe_float(sr_snapshot.get("sup_20"))
     res60 = _safe_float(sr_snapshot.get("res_60"))
     sup60 = _safe_float(sr_snapshot.get("sup_60"))
-    score = _safe_float(signal_snapshot.get("score"), 0) or 0
+    score = _metric_number(signal_snapshot, "score", 0) or 0
 
     if close_now is None:
         close_now = 0.0
@@ -1206,9 +1433,9 @@ def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapsho
         else:
             views.append(("動能觀點", "擺盪動能與趨勢動能未完全共振，走勢容易反覆。", ""))
 
-    pressure_text = _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0])
-    support_text = _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0])
-    break_text = _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0])
+    pressure_text = _metric_text(sr_snapshot, "pressure_signal", "—")
+    support_text = _metric_text(sr_snapshot, "support_signal", "—")
+    break_text = _metric_text(sr_snapshot, "break_signal", "—")
 
     if "突破" in break_text:
         views.append(("結構觀點", "目前屬突破結構，關鍵在突破後是否守住，不是只看站上那一刻。", ""))
@@ -1265,8 +1492,8 @@ def main():
         _repair_state(group_map)
 
     render_pro_hero(
-        title="歷史K線分析｜策略區可執行版 + 效能優化版",
-        subtitle="保留完整功能，補上自選股真同步、偏多/偏空進場位、失效位、目標位與風險報酬概念。",
+        title="歷史K線分析｜股神強化穩定版",
+        subtitle="修正雷達異常、補上主檔搜尋 fallback，並新增主升段 / 假突破 / 背離 / 股神強化判讀。",
     )
 
     watchlist_version = st.session_state.get("watchlist_version", 0)
@@ -1381,6 +1608,7 @@ def main():
     radar = bundle["radar"]
     badge_text = bundle["badge_text"]
     event_df = bundle["event_df"]
+    god_signal = bundle["god_signal"]
     peak_idx = bundle["peak_idx"]
     trough_idx = bundle["trough_idx"]
 
@@ -1388,7 +1616,7 @@ def main():
     i1, i2, i3, i4 = st.columns([2, 2, 2, 2])
 
     with i1:
-        st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter"))
+        st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破", "背離", "主升段", "假突破"], key=_k("event_filter"))
     with i2:
         st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], key=_k("focus_window"))
     with i3:
@@ -1429,7 +1657,7 @@ def main():
             {
                 "label": "訊號燈號",
                 "value": badge_text,
-                "delta": f"分數 {signal_snapshot.get('score', 0)}",
+                "delta": f"分數 {_metric_number(signal_snapshot, 'score', 0)}",
                 "delta_class": "pro-kpi-delta-flat",
             },
             {
@@ -1470,7 +1698,7 @@ def main():
             use_container_width=True,
         )
 
-    tabs = st.tabs(["KD / MACD", "雷達 / 訊號", "策略區", "最近事件", "原始資料"])
+    tabs = st.tabs(["KD / MACD", "雷達 / 訊號", "股神強化", "策略區", "最近事件", "原始資料"])
 
     with tabs[0]:
         c_kd, c_macd = st.columns(2)
@@ -1485,37 +1713,37 @@ def main():
             render_pro_info_card(
                 "股神雷達評分",
                 [
-                    ("趨勢", radar.get("trend", 50), ""),
-                    ("動能", radar.get("momentum", 50), ""),
-                    ("量能", radar.get("volume", 50), ""),
-                    ("位置", radar.get("position", 50), ""),
-                    ("結構", radar.get("structure", 50), ""),
-                    ("摘要", _safe_str(radar.get("summary", "—")), ""),
+                    ("趨勢", _metric_number(radar, "trend", 50), ""),
+                    ("動能", _metric_number(radar, "momentum", 50), ""),
+                    ("量能", _metric_number(radar, "volume", 50), ""),
+                    ("位置", _metric_number(radar, "position", 50), ""),
+                    ("結構", _metric_number(radar, "structure", 50), ""),
+                    ("摘要", _metric_text(radar, "summary", "—"), ""),
                 ],
                 chips=[badge_text],
             )
             render_pro_info_card(
                 "訊號燈號",
                 [
-                    ("均線趨勢", _safe_str(signal_snapshot.get("ma_trend", ("—", ""))[0]), ""),
-                    ("KD交叉", _safe_str(signal_snapshot.get("kd_cross", ("—", ""))[0]), ""),
-                    ("MACD趨勢", _safe_str(signal_snapshot.get("macd_trend", ("—", ""))[0]), ""),
-                    ("價位狀態", _safe_str(signal_snapshot.get("price_vs_ma20", ("—", ""))[0]), ""),
-                    ("突破狀態", _safe_str(signal_snapshot.get("breakout_20d", ("—", ""))[0]), ""),
-                    ("量能狀態", _safe_str(signal_snapshot.get("volume_state", ("—", ""))[0]), ""),
+                    ("均線趨勢", _metric_text(signal_snapshot, "ma_trend", "—"), ""),
+                    ("KD交叉", _metric_text(signal_snapshot, "kd_cross", "—"), ""),
+                    ("MACD趨勢", _metric_text(signal_snapshot, "macd_trend", "—"), ""),
+                    ("價位狀態", _metric_text(signal_snapshot, "price_vs_ma20", "—"), ""),
+                    ("突破狀態", _metric_text(signal_snapshot, "breakout_20d", "—"), ""),
+                    ("量能狀態", _metric_text(signal_snapshot, "volume_state", "—"), ""),
                 ],
             )
         with r2:
             render_pro_info_card(
                 "支撐壓力",
                 [
-                    ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
-                    ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
-                    ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
-                    ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
-                    ("壓力訊號", _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0]), ""),
-                    ("支撐訊號", _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0]), ""),
-                    ("區間判斷", _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0]), ""),
+                    ("20日壓力", format_number(_metric_number(sr_snapshot, "res_20"), 2), ""),
+                    ("20日支撐", format_number(_metric_number(sr_snapshot, "sup_20"), 2), ""),
+                    ("60日壓力", format_number(_metric_number(sr_snapshot, "res_60"), 2), ""),
+                    ("60日支撐", format_number(_metric_number(sr_snapshot, "sup_60"), 2), ""),
+                    ("壓力訊號", _metric_text(sr_snapshot, "pressure_signal", "—"), ""),
+                    ("支撐訊號", _metric_text(sr_snapshot, "support_signal", "—"), ""),
+                    ("區間判斷", _metric_text(sr_snapshot, "break_signal", "—"), ""),
                 ],
             )
             render_pro_info_card(
@@ -1525,6 +1753,30 @@ def main():
             )
 
     with tabs[2]:
+        render_pro_info_card(
+            "股神強化判讀",
+            [
+                ("市場階段", _safe_str(god_signal.get("phase", "整理")), ""),
+                ("操作動作", _safe_str(god_signal.get("action", "觀察")), ""),
+                ("訊號信心", f"{_safe_float(god_signal.get('confidence'), 50):.0f}", ""),
+                ("核心摘要", _safe_str(god_signal.get("summary", "—")), ""),
+                ("關鍵理由1", _safe_str((god_signal.get("reason") or ["—"])[0]), ""),
+                ("關鍵理由2", _safe_str((god_signal.get("reason") or ["—", "—"])[1] if len(god_signal.get("reason") or []) > 1 else "—"), ""),
+            ],
+            chips=[badge_text, actual_market],
+        )
+        render_pro_info_card(
+            "更接近股神的執行重點",
+            [
+                ("1", "突破不是買點本身，突破後守住才是。", ""),
+                ("2", "先看失效位，再決定能不能進場。", ""),
+                ("3", "量價、均線、KD、MACD 至少三項共振再提高倉位。", ""),
+                ("4", "整理盤不預測方向，等市場先出手。", ""),
+            ],
+            chips=["主升段", "假突破", "風控"],
+        )
+
+    with tabs[3]:
         bullish, bearish, observe, fail = _build_strategy_cards(df, signal_snapshot, sr_snapshot, radar)
         exec_plan = _build_execution_plan(df, signal_snapshot, sr_snapshot)
         s1, s2 = st.columns(2)
@@ -1538,13 +1790,13 @@ def main():
             render_pro_info_card("偏空可執行區", exec_plan["short"], chips=["進場/失效/目標"])
         render_pro_info_card("執行說明", exec_plan["notes"], chips=["風控優先"])
 
-    with tabs[3]:
+    with tabs[4]:
         if filtered_event_df.empty:
             st.info("目前沒有符合條件的事件。")
         else:
             st.dataframe(filtered_event_df, use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         raw_cols = [
             "日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數",
             "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
