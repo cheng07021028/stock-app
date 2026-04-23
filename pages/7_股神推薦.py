@@ -43,7 +43,7 @@ try:
 except Exception:
     load_stock_master = None
 
-PAGE_TITLE = "股神推薦 V3"
+PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -3686,6 +3686,93 @@ def _render_record_export_block(rec_df: pd.DataFrame):
         use_container_width=True,
     )
 
+
+
+# =========================================================
+# 頁面設定 / 欄位順序記憶
+# =========================================================
+def _ui_pref_key(name: str) -> str:
+    return _k(f"ui_{name}")
+
+def _ensure_ui_pref(name: str, default):
+    pref_key = _k(name)
+    ui_key = _ui_pref_key(name)
+    if pref_key not in st.session_state:
+        st.session_state[pref_key] = copy.deepcopy(default)
+    if ui_key not in st.session_state:
+        st.session_state[ui_key] = copy.deepcopy(st.session_state[pref_key])
+
+def _sync_ui_pref_to_saved(name: str):
+    pref_key = _k(name)
+    ui_key = _ui_pref_key(name)
+    if ui_key in st.session_state:
+        st.session_state[pref_key] = copy.deepcopy(st.session_state[ui_key])
+
+def _reset_ui_pref(name: str, default):
+    pref_key = _k(name)
+    ui_key = _ui_pref_key(name)
+    st.session_state[pref_key] = copy.deepcopy(default)
+    st.session_state[ui_key] = copy.deepcopy(default)
+
+def _normalize_column_order(saved_order, available_cols: list[str], default_cols: list[str]) -> list[str]:
+    saved = [str(x) for x in (saved_order or []) if str(x) in available_cols]
+    defaults = [str(x) for x in default_cols if str(x) in available_cols]
+    remain = [c for c in available_cols if c not in saved and c not in defaults]
+    merged = saved + [c for c in defaults if c not in saved] + remain
+    final = []
+    seen = set()
+    for c in merged:
+        if c in available_cols and c not in seen:
+            final.append(c)
+            seen.add(c)
+    return final
+
+def _column_order_state_key(name: str) -> str:
+    return _k(f"column_order_{name}")
+
+def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
+    state_key = _column_order_state_key(name)
+    current_order = _normalize_column_order(st.session_state.get(state_key, default_cols), available_cols, default_cols)
+    st.session_state[state_key] = current_order
+
+    with st.expander(title, expanded=False):
+        st.caption("可調整欄位順序並記住，不切頁、不重整都會保留。")
+        pick_key = _k(f"column_pick_{name}")
+        if pick_key not in st.session_state or st.session_state[pick_key] not in current_order:
+            st.session_state[pick_key] = current_order[0] if current_order else ""
+        picked = st.selectbox("選擇欄位", current_order, key=pick_key) if current_order else ""
+
+        b1, b2, b3, b4 = st.columns(4)
+        changed = False
+        if current_order and picked:
+            idx = current_order.index(picked)
+            with b1:
+                if st.button("左移", key=_k(f"move_left_{name}"), use_container_width=True) and idx > 0:
+                    current_order[idx - 1], current_order[idx] = current_order[idx], current_order[idx - 1]
+                    changed = True
+            with b2:
+                if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(current_order) - 1:
+                    current_order[idx + 1], current_order[idx] = current_order[idx], current_order[idx + 1]
+                    changed = True
+            with b3:
+                if st.button("移到最前", key=_k(f"move_front_{name}"), use_container_width=True):
+                    current_order.remove(picked)
+                    current_order.insert(0, picked)
+                    changed = True
+            with b4:
+                if st.button("重設", key=_k(f"move_reset_{name}"), use_container_width=True):
+                    current_order = _normalize_column_order(default_cols, available_cols, default_cols)
+                    changed = True
+
+        if changed:
+            st.session_state[state_key] = current_order
+            st.rerun()
+
+        st.caption("目前欄位順序：" + " ｜ ".join(current_order[:20]) + (" ..." if len(current_order) > 20 else ""))
+
+    return st.session_state.get(state_key, current_order)
+
+
 # =========================================================
 # Main
 # =========================================================
@@ -3722,6 +3809,8 @@ def main():
         "min_prelaunch_score": 45.0,
         "min_trade_score": 45.0,
         "pick_strategy": "結合版",
+        "top_table_columns": [],
+        "full_table_columns": [],
     }
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
@@ -3729,6 +3818,21 @@ def main():
 
     if _k("selected_rec_snapshot") not in st.session_state:
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
+
+    _ensure_ui_pref("universe_mode", st.session_state.get(_k("universe_mode"), "自選群組"))
+    _ensure_ui_pref("group", st.session_state.get(_k("group"), list(watchlist_map.keys())[0] if watchlist_map else ""))
+    _ensure_ui_pref("days", st.session_state.get(_k("days"), 120))
+    _ensure_ui_pref("top_n", st.session_state.get(_k("top_n"), 20))
+    _ensure_ui_pref("manual_codes", st.session_state.get(_k("manual_codes"), ""))
+    _ensure_ui_pref("scan_limit", st.session_state.get(_k("scan_limit"), 1000))
+    _ensure_ui_pref("selected_categories", st.session_state.get(_k("selected_categories"), ["全部"]))
+    _ensure_ui_pref("recommend_mode", st.session_state.get(_k("recommend_mode"), "飆股模式"))
+    _ensure_ui_pref("risk_strictness", st.session_state.get(_k("risk_strictness"), "標準"))
+    _ensure_ui_pref("pick_strategy", st.session_state.get(_k("pick_strategy"), "結合版"))
+    _ensure_ui_pref("min_total_score", float(st.session_state.get(_k("min_total_score"), 55.0)))
+    _ensure_ui_pref("min_signal_score", float(st.session_state.get(_k("min_signal_score"), -2.0)))
+    _ensure_ui_pref("min_prelaunch_score", float(st.session_state.get(_k("min_prelaunch_score"), 45.0)))
+    _ensure_ui_pref("min_trade_score", float(st.session_state.get(_k("min_trade_score"), 45.0)))
 
     next_pick_key = _k("rec_pick_codes_next")
     real_pick_key = _k("rec_pick_codes")
@@ -3741,8 +3845,8 @@ def main():
         st.session_state[real_record_key] = st.session_state.pop(next_record_key)
 
     render_pro_hero(
-        title="股神推薦｜V3 最終修整版",
-        subtitle="保留舊版完整功能 + 市場/型態/爆發整合 + 勾選/匯出/推薦紀錄再修整。",
+        title="股神推薦｜V4 加速記憶版",
+        subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
 
     if master_df is None or master_df.empty:
@@ -3778,6 +3882,7 @@ def main():
     saved_categories = [x for x in saved_categories if x in category_options] or ["全部"]
 
     render_pro_section("掃描設定")
+    st.caption("本頁條件會自動記住；切換頁面回來不需要重新設定。推薦結果也會保留，除非你手動清空條件。")
 
     with st.form(key=_k("recommend_form"), clear_on_submit=False):
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -3787,28 +3892,36 @@ def main():
             saved_universe = st.session_state.get(_k("universe_mode"), "自選群組")
             if saved_universe not in universe_options:
                 saved_universe = "自選群組"
-            form_universe_mode = st.selectbox("掃描範圍", universe_options, index=universe_options.index(saved_universe))
+            if st.session_state.get(_ui_pref_key("universe_mode")) not in universe_options:
+                st.session_state[_ui_pref_key("universe_mode")] = saved_universe
+            form_universe_mode = st.selectbox("掃描範圍", universe_options, key=_ui_pref_key("universe_mode"))
 
         with c2:
             group_options = list(watchlist_map.keys()) if watchlist_map else [""]
             saved_group = st.session_state.get(_k("group"), "")
             if saved_group not in group_options:
                 saved_group = group_options[0] if group_options else ""
-            form_group = st.selectbox("自選群組", group_options, index=group_options.index(saved_group) if saved_group in group_options else 0)
+            if st.session_state.get(_ui_pref_key("group")) not in group_options:
+                st.session_state[_ui_pref_key("group")] = saved_group
+            form_group = st.selectbox("自選群組", group_options, key=_ui_pref_key("group"))
 
         with c3:
             day_options = [60, 90, 120, 180, 240]
             saved_days = int(st.session_state.get(_k("days"), 120))
             if saved_days not in day_options:
                 saved_days = 120
-            form_days = st.selectbox("觀察天數", day_options, index=day_options.index(saved_days))
+            if st.session_state.get(_ui_pref_key("days")) not in day_options:
+                st.session_state[_ui_pref_key("days")] = saved_days
+            form_days = st.selectbox("觀察天數", day_options, key=_ui_pref_key("days"))
 
         with c4:
             topn_options = [10, 20, 30, 50]
             saved_topn = int(st.session_state.get(_k("top_n"), 20))
             if saved_topn not in topn_options:
                 saved_topn = 20
-            form_top_n = st.selectbox("輸出 Top N", topn_options, index=topn_options.index(saved_topn))
+            if st.session_state.get(_ui_pref_key("top_n")) not in topn_options:
+                st.session_state[_ui_pref_key("top_n")] = saved_topn
+            form_top_n = st.selectbox("輸出 Top N", topn_options, key=_ui_pref_key("top_n"))
 
         d1, d2 = st.columns([2, 2])
         with d1:
@@ -3816,17 +3929,19 @@ def main():
             saved_limit = st.session_state.get(_k("scan_limit"), 1000)
             if saved_limit not in limit_options:
                 saved_limit = 1000
+            if st.session_state.get(_ui_pref_key("scan_limit")) not in limit_options:
+                st.session_state[_ui_pref_key("scan_limit")] = saved_limit
             form_scan_limit = st.selectbox(
                 "掃描上限筆數",
                 limit_options,
-                index=limit_options.index(saved_limit),
+                key=_ui_pref_key("scan_limit"),
                 help="選『全部』時，會把目前市場範圍內的股票全部納入掃描，不做截斷。",
             )
 
         with d2:
             form_manual_codes = st.text_area(
                 "手動輸入股票（可代碼 / 名稱，一行一檔）",
-                value=st.session_state.get(_k("manual_codes"), ""),
+                key=_ui_pref_key("manual_codes"),
                 height=110,
                 placeholder="2330\n2454\n3548\n台積電",
             )
@@ -3834,42 +3949,45 @@ def main():
         render_pro_section("模式 / 類型篩選")
         m1, m2, m3 = st.columns([2, 2, 2])
         with m1:
-            form_recommend_mode = st.selectbox(
-                "推薦模式",
-                ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"],
-                index=["飆股模式", "波段模式", "領頭羊模式", "綜合模式"].index(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-            )
+            mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"]
+            if st.session_state.get(_ui_pref_key("recommend_mode")) not in mode_options:
+                st.session_state[_ui_pref_key("recommend_mode")] = st.session_state.get(_k("recommend_mode"), "飆股模式")
+            form_recommend_mode = st.selectbox("推薦模式", mode_options, key=_ui_pref_key("recommend_mode"))
         with m2:
-            form_risk_strictness = st.selectbox(
-                "風險過濾強度",
-                ["寬鬆", "標準", "嚴格"],
-                index=["寬鬆", "標準", "嚴格"].index(st.session_state.get(_k("risk_strictness"), "標準")),
-            )
+            strict_options = ["寬鬆", "標準", "嚴格"]
+            if st.session_state.get(_ui_pref_key("risk_strictness")) not in strict_options:
+                st.session_state[_ui_pref_key("risk_strictness")] = st.session_state.get(_k("risk_strictness"), "標準")
+            form_risk_strictness = st.selectbox("風險過濾強度", strict_options, key=_ui_pref_key("risk_strictness"))
         with m3:
+            pick_options = ["精準版", "結合版"]
+            if st.session_state.get(_ui_pref_key("pick_strategy")) not in pick_options:
+                st.session_state[_ui_pref_key("pick_strategy")] = st.session_state.get(_k("pick_strategy"), "結合版")
             form_pick_strategy = st.selectbox(
                 "推薦策略",
-                ["精準版", "結合版"],
-                index=["精準版", "結合版"].index(st.session_state.get(_k("pick_strategy"), "結合版")),
+                pick_options,
+                key=_ui_pref_key("pick_strategy"),
                 help="精準版=只看主名單；結合版=主名單外另顯示飆股補抓名單，不混入主名單排序。",
             )
 
+        valid_saved_categories = [x for x in st.session_state.get(_ui_pref_key("selected_categories"), saved_categories) if x in category_options] or ["全部"]
+        st.session_state[_ui_pref_key("selected_categories")] = valid_saved_categories
         form_selected_categories = st.multiselect(
             "選擇類型（可多選）",
             options=category_options,
-            default=saved_categories,
+            key=_ui_pref_key("selected_categories"),
             help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
         )
 
         render_pro_section("推薦門檻")
         f1, f2, f3, f4 = st.columns(4)
         with f1:
-            form_min_total_score = st.number_input("推薦總分下限", value=float(st.session_state.get(_k("min_total_score"), 55.0)), step=1.0)
+            form_min_total_score = st.number_input("推薦總分下限", key=_ui_pref_key("min_total_score"), step=1.0)
         with f2:
-            form_min_signal_score = st.number_input("訊號分數下限", value=float(st.session_state.get(_k("min_signal_score"), -2.0)), step=1.0)
+            form_min_signal_score = st.number_input("訊號分數下限", key=_ui_pref_key("min_signal_score"), step=1.0)
         with f3:
-            form_min_prelaunch_score = st.number_input("起漲前兆分數下限", value=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)), step=1.0)
+            form_min_prelaunch_score = st.number_input("起漲前兆分數下限", key=_ui_pref_key("min_prelaunch_score"), step=1.0)
         with f4:
-            form_min_trade_score = st.number_input("交易可行分數下限", value=float(st.session_state.get(_k("min_trade_score"), 45.0)), step=1.0)
+            form_min_trade_score = st.number_input("交易可行分數下限", key=_ui_pref_key("min_trade_score"), step=1.0)
 
         btn1, btn2, btn3 = st.columns([2, 2, 2])
         with btn1:
@@ -3905,6 +4023,20 @@ def main():
         st.success("推薦快取已清除")
 
     if submit_clear:
+        _reset_ui_pref("universe_mode", "自選群組")
+        _reset_ui_pref("group", list(watchlist_map.keys())[0] if watchlist_map else "")
+        _reset_ui_pref("days", 120)
+        _reset_ui_pref("top_n", 20)
+        _reset_ui_pref("manual_codes", "")
+        _reset_ui_pref("scan_limit", 1000)
+        _reset_ui_pref("selected_categories", ["全部"])
+        _reset_ui_pref("min_total_score", 55.0)
+        _reset_ui_pref("min_signal_score", -2.0)
+        _reset_ui_pref("min_prelaunch_score", 45.0)
+        _reset_ui_pref("min_trade_score", 45.0)
+        _reset_ui_pref("recommend_mode", "飆股模式")
+        _reset_ui_pref("risk_strictness", "標準")
+        _reset_ui_pref("pick_strategy", "結合版")
         st.session_state[_k("universe_mode")] = "自選群組"
         st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
         st.session_state[_k("days")] = 120
@@ -3931,6 +4063,13 @@ def main():
         st.rerun()
 
     if submit_recommend or submit_refresh:
+        for pref_name in [
+            "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
+            "selected_categories", "min_total_score", "min_signal_score",
+            "min_prelaunch_score", "min_trade_score", "pick_strategy",
+            "recommend_mode", "risk_strictness",
+        ]:
+            _sync_ui_pref_to_saved(pref_name)
         st.session_state[_k("universe_mode")] = form_universe_mode
         st.session_state[_k("group")] = form_group
         st.session_state[_k("days")] = form_days
@@ -4359,7 +4498,18 @@ def main():
     tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
 
     with tabs[0]:
-        st.dataframe(_format_df(rec_df), use_container_width=True, hide_index=True)
+        full_default_cols = [
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
+            "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+            "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
+            "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
+            "推薦標籤", "推薦理由摘要"
+        ]
+        full_available_cols = list(rec_df.columns)
+        full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
+        full_show_cols = [c for c in full_order if c in rec_df.columns]
+        st.dataframe(_format_df(rec_df[full_show_cols].copy()), use_container_width=True, hide_index=True)
 
     with tabs[1]:
         category_show = category_strength_df.copy()
@@ -4411,7 +4561,7 @@ def main():
         render_pro_info_card(
             "V2 模組邏輯",
             [
-                ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑。", ""),
+                ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑；條件會自動記住。", ""),
                 ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
                 ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
                 ("市場環境分數", "新增市場順風/逆風分數，讓同樣條件下順風盤優先。", ""),
@@ -4422,7 +4572,7 @@ def main():
                 ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
                 ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅、類股熱度與類股加速度。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
-                ("推薦表勾選", "本輪精華推薦表可直接勾選，會同步到加入自選股與寫入 8 頁用的勾選清單。", ""),
+                ("推薦表勾選", "本輪精華推薦表可直接勾選，且欄位順序可調整並記住。", ""),
                 ("類股內排名", "新增每個類別內部排名，快速找該族群最強個股。", ""),
                 ("類股前3強", "若個股在該類別內排名 1~3，會標記為類股前3強。", ""),
                 ("理由升級", "推薦理由已改成更偏交易決策語言，不只是分數描述。", ""),
@@ -4432,7 +4582,7 @@ def main():
                 ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
                 ("Excel 匯出", "可匯出完整推薦表、類股強度榜、同類股領先榜、自動因子榜。", ""),
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
-                ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
+                ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失，條件也會一起記住。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
                 ("7/8 對齊", "record_id、推薦日期、推薦時間、推薦欄位已正式對齊 8 頁。", ""),
             ],
