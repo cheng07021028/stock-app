@@ -543,8 +543,35 @@ def _read_watchlist_from_github() -> tuple[dict[str, list[dict[str, str]]], str]
 
 def _load_watchlist_payload() -> dict[str, list[dict[str, str]]]:
     payload, err = _read_watchlist_from_github()
+    if (not payload) and isinstance(st.session_state.get("watchlist_data"), dict):
+        payload = st.session_state.get("watchlist_data", {})
+        err = err or "改用 session_state watchlist_data"
     st.session_state[_k("watchlist_import_detail")] = err or "GitHub watchlist 讀取成功"
     return _normalize_watchlist_payload(payload)
+
+
+def _merge_watchlist_sources() -> dict[str, list[dict[str, str]]]:
+    repo_payload = _load_watchlist_payload()
+    state_payload = st.session_state.get("watchlist_data", {})
+    if not isinstance(state_payload, dict):
+        state_payload = {}
+    merged = _normalize_watchlist_payload(repo_payload)
+    state_payload = _normalize_watchlist_payload(state_payload)
+    for group_name, items in state_payload.items():
+        if group_name not in merged:
+            merged[group_name] = []
+        code_map = {_normalize_code(x.get("code")): dict(x) for x in merged[group_name] if isinstance(x, dict)}
+        for item in items:
+            code = _normalize_code(item.get("code"))
+            if not code:
+                continue
+            code_map[code] = {
+                "code": code,
+                "name": _safe_str(item.get("name")) or code,
+                "market": _safe_str(item.get("market")) or "上市",
+            }
+        merged[group_name] = sorted(code_map.values(), key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
+    return _normalize_watchlist_payload(merged)
 
 
 def _get_watchlist_sha() -> tuple[str, str]:
@@ -614,13 +641,23 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
     if chosen.empty:
         return False, "找不到要匯入的推薦紀錄"
 
-    payload = _load_watchlist_payload()
+    payload = _merge_watchlist_sources()
     target_group = _safe_str(target_group) or "股神推薦"
     if target_group not in payload:
         payload[target_group] = []
 
-    existing_codes = {_normalize_code(x.get("code")) for x in payload.get(target_group, [])}
+    existing_map = {
+        _normalize_code(x.get("code")): {
+            "code": _normalize_code(x.get("code")),
+            "name": _safe_str(x.get("name")) or _normalize_code(x.get("code")),
+            "market": _safe_str(x.get("market")) or "上市",
+        }
+        for x in payload.get(target_group, [])
+        if isinstance(x, dict) and _normalize_code(x.get("code"))
+    }
+
     add_count = 0
+    update_count = 0
     skip_count = 0
 
     for _, row in chosen.iterrows():
@@ -630,14 +667,27 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
         if not code:
             skip_count += 1
             continue
-        if code in existing_codes:
-            skip_count += 1
-            continue
-        payload[target_group].append({"code": code, "name": name, "market": market})
-        existing_codes.add(code)
-        add_count += 1
 
+        new_item = {"code": code, "name": name, "market": market}
+        old_item = existing_map.get(code)
+
+        if old_item is None:
+            existing_map[code] = new_item
+            add_count += 1
+        else:
+            changed = (
+                _safe_str(old_item.get("name")) != name
+                or _safe_str(old_item.get("market")) != market
+            )
+            existing_map[code] = new_item
+            if changed:
+                update_count += 1
+            else:
+                skip_count += 1
+
+    payload[target_group] = sorted(existing_map.values(), key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
     payload = _normalize_watchlist_payload(payload)
+
     ok, msg = _write_watchlist_to_github(payload)
     if ok:
         try:
@@ -647,8 +697,10 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
         st.session_state["watchlist_data"] = copy.deepcopy(payload)
         st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
         st.session_state["watchlist_last_saved_at"] = _now_text()
-        st.session_state[_k("watchlist_import_detail")] = f"目標群組：{target_group}｜新增 {add_count} 檔｜略過 {skip_count} 檔"
-        return True, f"{msg}｜匯入 {add_count} 檔，略過 {skip_count} 檔"
+        st.session_state[_k("watchlist_import_detail")] = (
+            f"目標群組：{target_group}｜新增 {add_count} 檔｜更新 {update_count} 檔｜略過 {skip_count} 檔"
+        )
+        return True, f"{msg}｜新增 {add_count} 檔，更新 {update_count} 檔，略過 {skip_count} 檔"
     return False, msg
 
 
