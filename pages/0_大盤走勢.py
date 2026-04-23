@@ -13,13 +13,44 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from utils import (
-    inject_pro_theme,
-    render_pro_hero,
-    render_pro_info_card,
-    render_pro_kpi_row,
-    render_pro_section,
-)
+try:
+    from utils import (
+        inject_pro_theme,
+        render_pro_hero,
+        render_pro_info_card,
+        render_pro_kpi_row,
+        render_pro_section,
+    )
+    _UTILS_IMPORT_ERROR = ""
+except Exception as e:
+    _UTILS_IMPORT_ERROR = str(e)
+
+    def inject_pro_theme():
+        return None
+
+    def render_pro_hero(title, subtitle="", chips=None):
+        st.title(title)
+        if subtitle:
+            st.caption(subtitle)
+
+    def render_pro_info_card(title, info_pairs, chips=None):
+        st.subheader(title)
+        rows = []
+        for label, value, _css_class in info_pairs:
+            rows.append({"項目": label, "內容": value})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    def render_pro_kpi_row(items):
+        cols = st.columns(len(items)) if items else []
+        for idx, item in enumerate(items):
+            with cols[idx]:
+                st.metric(item.get("label", "—"), item.get("value", "—"), item.get("delta", None))
+
+    def render_pro_section(title, subtitle=""):
+        st.subheader(title)
+        if subtitle:
+            st.caption(subtitle)
 
 try:
     from utils import get_normalized_watchlist
@@ -1768,6 +1799,9 @@ def main():
         title="大盤走勢｜股神級預測升級版 V2",
         subtitle="加入盤型辨識、三情境機率、開高低收推估、誤差校正與個股連動。",
     )
+
+    if _UTILS_IMPORT_ERROR:
+        st.warning(f"utils 載入失敗，已切換為基本顯示模式：{_UTILS_IMPORT_ERROR}")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
