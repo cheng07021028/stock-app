@@ -2285,63 +2285,107 @@ def main():
     code_to_item = {x["code"]: x for x in items}
     code_options = [x["code"] for x in items]
 
+    form_group_key = _k("form_group")
+    form_stock_key = _k("form_stock_code")
+    form_start_key = _k("form_start_date")
+    form_end_key = _k("form_end_date")
+
+    if form_group_key not in st.session_state:
+        st.session_state[form_group_key] = current_group
+    if form_stock_key not in st.session_state:
+        st.session_state[form_stock_key] = _safe_str(st.session_state.get(_k("stock_code"), ""))
+    if form_start_key not in st.session_state:
+        st.session_state[form_start_key] = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365))
+    if form_end_key not in st.session_state:
+        st.session_state[form_end_key] = _to_date(st.session_state.get(_k("end_date")), date.today())
+
+    form_group = _safe_str(st.session_state.get(form_group_key, current_group))
+    form_items = group_map.get(form_group, items)
+    form_code_to_item = {x["code"]: x for x in form_items}
+    form_code_options = [x["code"] for x in form_items] or [""]
+    form_stock = _safe_str(st.session_state.get(form_stock_key, ""))
+    if form_stock not in form_code_options:
+        st.session_state[form_stock_key] = form_code_options[0]
+
     with st.form(key=_k("query_form"), clear_on_submit=False):
         c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
 
         with c1:
-            st.selectbox("選擇群組", options=groups, key=_k("group"), on_change=_on_group_change, args=(group_map,))
+            st.selectbox("選擇群組", options=groups, key=form_group_key)
 
         with c2:
             st.selectbox(
                 "群組股票",
-                options=code_options if code_options else [""],
-                key=_k("stock_code"),
-                format_func=lambda code: code_to_item.get(code, {}).get("label", code),
+                options=form_code_options,
+                key=form_stock_key,
+                format_func=lambda code: form_code_to_item.get(code, {}).get("label", code),
             )
 
         with c3:
-            st.date_input("開始日期", key=_k("start_date"))
+            st.date_input("開始日期", key=form_start_key)
 
         with c4:
-            st.date_input("結束日期", key=_k("end_date"))
+            st.date_input("結束日期", key=form_end_key)
 
         action_cols = st.columns(4)
         apply_query = False
         handoff_applied = False
+        clear_handoff = False
 
         with action_cols[0]:
             apply_query = st.form_submit_button("套用查詢 / 重新載入", use_container_width=True, type="primary")
 
         with action_cols[1]:
-            if st.form_submit_button("承接 4頁送來的股票", use_container_width=True):
-                changed = _apply_external_focus_if_any(group_map)
-                if changed:
-                    _set_applied_query(
-                        _safe_str(st.session_state.get(_k("group"), "")),
-                        _safe_str(st.session_state.get(_k("stock_code"), "")),
-                        _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365)),
-                        _to_date(st.session_state.get(_k("end_date")), date.today()),
-                    )
-                    handoff_applied = True
-                    st.session_state[_k("focus_event_idx")] = -1
+            handoff_applied = st.form_submit_button("承接 4頁送來的股票", use_container_width=True)
 
         with action_cols[2]:
-            if st.form_submit_button("清除外部焦點", use_container_width=True):
-                st.session_state["kline_focus_stock_code"] = ""
-                st.session_state["kline_focus_stock_name"] = ""
+            clear_handoff = st.form_submit_button("清除外部焦點", use_container_width=True)
 
         with action_cols[3]:
             st.caption("只有按『套用查詢』才會重抓歷史資料")
 
+    if clear_handoff:
+        st.session_state["kline_focus_stock_code"] = ""
+        st.session_state["kline_focus_stock_name"] = ""
+
+    if handoff_applied:
+        changed = _apply_external_focus_if_any(group_map)
+        if changed:
+            st.session_state[form_group_key] = _safe_str(st.session_state.get(_k("group"), ""))
+            st.session_state[form_stock_key] = _safe_str(st.session_state.get(_k("stock_code"), ""))
+            st.session_state[form_start_key] = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365))
+            st.session_state[form_end_key] = _to_date(st.session_state.get(_k("end_date")), date.today())
+            _set_applied_query(
+                st.session_state[form_group_key],
+                st.session_state[form_stock_key],
+                st.session_state[form_start_key],
+                st.session_state[form_end_key],
+            )
+            st.session_state[_k("focus_event_idx")] = -1
+            st.rerun()
+
     st.caption("可直接承接 4_自選股中心 / 7_股神推薦 送來的焦點股票")
     st.info("已改成手動載入模式：切換群組、股票、日期時不會立刻重抓資料，避免歷史資料頁卡住。")
 
-    if apply_query or handoff_applied:
+    if apply_query:
+        submitted_group = _safe_str(st.session_state.get(form_group_key, ""))
+        submitted_items = group_map.get(submitted_group, [])
+        submitted_code_to_item = {x["code"]: x for x in submitted_items}
+        submitted_code = _safe_str(st.session_state.get(form_stock_key, ""))
+        if submitted_code not in submitted_code_to_item:
+            submitted_code = submitted_items[0]["code"] if submitted_items else ""
+            st.session_state[form_stock_key] = submitted_code
+
+        st.session_state[_k("group")] = submitted_group
+        st.session_state[_k("stock_code")] = submitted_code
+        st.session_state[_k("start_date")] = _to_date(st.session_state.get(form_start_key), date.today() - timedelta(days=365))
+        st.session_state[_k("end_date")] = _to_date(st.session_state.get(form_end_key), date.today())
+
         _set_applied_query(
-            _safe_str(st.session_state.get(_k("group"), "")),
-            _safe_str(st.session_state.get(_k("stock_code"), "")),
-            _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365)),
-            _to_date(st.session_state.get(_k("end_date")), date.today()),
+            submitted_group,
+            submitted_code,
+            st.session_state[_k("start_date")],
+            st.session_state[_k("end_date")],
         )
         st.session_state[_k("focus_event_idx")] = -1
 
