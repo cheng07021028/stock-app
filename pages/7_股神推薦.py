@@ -148,6 +148,62 @@ def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
         return default
     return sum(clean) / len(clean)
 
+def _ensure_signal_snapshot(v: Any) -> dict[str, Any]:
+    if isinstance(v, dict):
+        out = dict(v)
+        out.setdefault("score", 0.0)
+        out.setdefault("label", "中性")
+        out.setdefault("class", "pro-flat")
+        return out
+    return {"score": 0.0, "label": "中性", "class": "pro-flat"}
+
+
+def _ensure_sr_snapshot(v: Any) -> dict[str, Any]:
+    if isinstance(v, dict):
+        out = dict(v)
+        out.setdefault("res_20", None)
+        out.setdefault("sup_20", None)
+        out.setdefault("res_60", None)
+        out.setdefault("sup_60", None)
+        out.setdefault("pressure_signal", ("中性", "pro-flat"))
+        out.setdefault("support_signal", ("中性", "pro-flat"))
+        out.setdefault("break_signal", ("區間內", "pro-flat"))
+        return out
+    return {
+        "res_20": None,
+        "sup_20": None,
+        "res_60": None,
+        "sup_60": None,
+        "pressure_signal": ("中性", "pro-flat"),
+        "support_signal": ("中性", "pro-flat"),
+        "break_signal": ("區間內", "pro-flat"),
+    }
+
+
+def _ensure_radar_scores(v: Any) -> dict[str, Any]:
+    base = {
+        "trend": 50.0,
+        "momentum": 50.0,
+        "volume": 50.0,
+        "position": 50.0,
+        "structure": 50.0,
+        "summary": "—",
+    }
+    if isinstance(v, dict):
+        out = dict(base)
+        out.update(v)
+        return out
+    if isinstance(v, (list, tuple)):
+        out = dict(base)
+        keys = ["trend", "momentum", "volume", "position", "structure"]
+        for i, key in enumerate(keys):
+            if i < len(v):
+                out[key] = _safe_float(v[i], base[key])
+        if len(v) >= 6 and _safe_str(v[5]):
+            out["summary"] = _safe_str(v[5])
+        return out
+    return dict(base)
+
 
 def _fmt_seconds(sec: float) -> str:
     try:
@@ -2548,9 +2604,9 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
                 "history_debug": history_debug,
             }
 
-        signal_snapshot = compute_signal_snapshot(hist_df)
-        sr_snapshot = compute_support_resistance_snapshot(hist_df)
-        radar = compute_radar_scores(hist_df)
+        signal_snapshot = _ensure_signal_snapshot(compute_signal_snapshot(hist_df))
+        sr_snapshot = _ensure_sr_snapshot(compute_support_resistance_snapshot(hist_df))
+        radar = _ensure_radar_scores(compute_radar_scores(hist_df))
         auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
         trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
         prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
