@@ -21,6 +21,7 @@ from utils import (
 )
 
 from stock_master_service import load_stock_master, search_stock_master
+from watchlist_runtime_sync import ensure_watchlist_runtime_fresh
 
 PAGE_TITLE = "自選股中心｜升級完整版"
 PFX = "watch_"
@@ -272,7 +273,10 @@ def _send_group_to_other_pages(group_name: str, codes: list[str]):
     st.session_state["godpick_last_watch_codes"] = [str(_normalize_code(x)) for x in codes if _normalize_code(x)]
     st.session_state["godpick_last_watch_sent_at"] = _now_text()
 def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
-    raw = get_normalized_watchlist()
+    raw = ensure_watchlist_runtime_fresh(
+        load_func=get_normalized_watchlist,
+        namespace="watchlist_center",
+    )
     result: dict[str, list[dict[str, str]]] = {}
 
     if isinstance(raw, dict):
@@ -287,14 +291,16 @@ def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
                     code = _normalize_code(item.get("code"))
                     name = _safe_str(item.get("name")) or code
                     market = _safe_str(item.get("market")) or "上市"
+                    category = _safe_str(item.get("category"))
                     if code:
-                        result[g].append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "market": market,
-                            }
-                        )
+                        row = {
+                            "code": code,
+                            "name": name,
+                            "market": market,
+                        }
+                        if category:
+                            row["category"] = category
+                        result[g].append(row)
     return result
 
 
@@ -443,9 +449,18 @@ def _init_state():
     _repair_selected_group()
 
     st.session_state["watchlist_data"] = copy.deepcopy(st.session_state[_k("watchlist")])
-    st.session_state["watchlist_version"] = st.session_state.get(_k("version"), 0)
-    st.session_state["watchlist_last_saved_at"] = st.session_state.get(_k("last_saved_at"), "")
-    st.session_state["watchlist_last_saved_hash"] = st.session_state.get(_k("payload_hash"), "")
+    st.session_state["watchlist_version"] = max(
+        int(st.session_state.get("watchlist_version", 0) or 0),
+        int(st.session_state.get(_k("version"), 0) or 0),
+    )
+    st.session_state["watchlist_last_saved_at"] = (
+        st.session_state.get("watchlist_last_saved_at", "")
+        or st.session_state.get(_k("last_saved_at"), "")
+    )
+    st.session_state["watchlist_last_saved_hash"] = (
+        st.session_state.get("watchlist_last_saved_hash", "")
+        or st.session_state.get(_k("payload_hash"), "")
+    )
 
 
 def _repair_selected_group():
@@ -848,6 +863,14 @@ def main():
         subtitle="保留 GitHub 強制回寫，並串接股神推薦紀錄，顯示最近推薦分數 / 買點分級 / 推薦模式 / 推薦時間。",
     )
     st.caption("股票主檔來源已統一改由 stock_master_service.py 提供，與股神推薦 / 股票主檔更新頁共用同一份主檔。")
+    st.caption(
+        f"watchlist_version：{int(st.session_state.get('watchlist_version', 0) or 0)}"
+        + (
+            f"｜最後同步：{_safe_str(st.session_state.get('watchlist_last_saved_at', ''))}"
+            if _safe_str(st.session_state.get('watchlist_last_saved_at', ''))
+            else ""
+        )
+    )
 
     overview_df = _build_overview_df(watchlist, rec_map)
     group_summary_df = _build_group_summary_df(watchlist, rec_map)
