@@ -60,7 +60,7 @@ PFX = "godpick_"
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 20   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
 MAX_SCAN_WORKERS = 16        # 大量掃描並行上限
-MACRO_SCORE_BLEND = 0.12     # 大盤輔助權重，避免 0_大盤走勢誤差過度影響個股
+MACRO_SCORE_BLEND = 0.03     # 大盤輔助權重大幅降低，避免 0_大盤走勢把個股分數整批拉高
 STAGE1_DEBUG_LIMIT = 250     # 掃描量過大時，不收集重型 debug 樣本
 
 GODPICK_RECORD_COLUMNS = [
@@ -420,6 +420,64 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
         "大盤信心加成": macro_conf_bonus,
     }
 
+
+
+def _apply_final_score_desaturation(base_df: pd.DataFrame) -> pd.DataFrame:
+    if base_df is None or base_df.empty:
+        return base_df
+
+    work = base_df.copy()
+    score_cols = [
+        "推薦總分", "原始推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數",
+        "類股熱度分數", "型態突破分數", "爆發力分數", "市場環境分數", "同類股領先幅度"
+    ]
+    for c in score_cols:
+        if c not in work.columns:
+            work[c] = None
+
+    raw = pd.to_numeric(work["原始推薦總分"], errors="coerce").fillna(0.0)
+    current = pd.to_numeric(work["推薦總分"], errors="coerce").fillna(raw)
+    tech = pd.to_numeric(work["技術結構分數"], errors="coerce").fillna(0.0)
+    pre = pd.to_numeric(work["起漲前兆分數"], errors="coerce").fillna(0.0)
+    trade = pd.to_numeric(work["交易可行分數"], errors="coerce").fillna(0.0)
+    heat = pd.to_numeric(work["類股熱度分數"], errors="coerce").fillna(0.0)
+    pattern = pd.to_numeric(work["型態突破分數"], errors="coerce").fillna(0.0)
+    burst = pd.to_numeric(work["爆發力分數"], errors="coerce").fillna(0.0)
+    market = pd.to_numeric(work["市場環境分數"], errors="coerce").fillna(50.0)
+    leader = pd.to_numeric(work["同類股領先幅度"], errors="coerce").fillna(50.0)
+
+    core = tech * 0.24 + pre * 0.18 + trade * 0.16 + heat * 0.12 + pattern * 0.12 + burst * 0.10 + market * 0.05 + leader * 0.03
+    blended = raw * 0.60 + current * 0.18 + core * 0.22
+    pct = blended.rank(method="average", pct=True).fillna(0.5)
+
+    final = (
+        52.0
+        + (blended - blended.mean()) * 0.60
+        + pct * 20.0
+    ).clip(58.0, 96.5)
+
+    high_share = float((final >= 92).mean()) if len(final) else 0.0
+    if high_share > 0.15:
+        final = (final - (high_share - 0.15) * 14.0).clip(58.0, 95.0)
+        pct = blended.rank(method="average", pct=True).fillna(0.5)
+        top_mask = pct >= 0.90
+        final.loc[top_mask] = (90.0 + (pct.loc[top_mask] - 0.90) / 0.10 * 5.0).clip(90.0, 95.0)
+
+    work["推薦總分"] = final.round(2)
+
+    def _recommend(score: float) -> str:
+        if score >= 92:
+            return "股神級"
+        if score >= 86:
+            return "強烈關注"
+        if score >= 78:
+            return "優先觀察"
+        if score >= 70:
+            return "可列追蹤"
+        return "觀察"
+
+    work["推薦等級"] = pd.to_numeric(work["推薦總分"], errors="coerce").fillna(0).map(_recommend)
+    return work
 
 def _build_recommend_reason_v2(r: pd.Series) -> str:
     parts = []
@@ -3533,18 +3591,7 @@ def _build_recommend_df(
         if c in mode_scores_df.columns:
             base_df[c] = mode_scores_df[c]
 
-    def _recommend(score: float) -> str:
-        if score >= 90:
-            return "股神級"
-        if score >= 84:
-            return "強烈關注"
-        if score >= 72:
-            return "優先觀察"
-        if score >= 60:
-            return "可列追蹤"
-        return "觀察"
-
-    base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
+    base_df = _apply_final_score_desaturation(base_df)
     base_df["推薦理由摘要"] = base_df.apply(_build_recommend_reason_v2, axis=1)
 
     for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
@@ -4385,7 +4432,7 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
-    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%")
+    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%（已大幅降低）")
 
     rec_df = pd.DataFrame()
     category_strength_df = pd.DataFrame()
