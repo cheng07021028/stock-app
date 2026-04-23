@@ -25,7 +25,6 @@ from utils import (
     format_number,
     get_all_code_name_map,
     get_history_data,
-    get_history_data_debug,
     get_normalized_watchlist,
     inject_pro_theme,
     render_pro_hero,
@@ -33,7 +32,16 @@ from utils import (
     render_pro_kpi_row,
     render_pro_section,
 )
-from stock_master_service import load_stock_master
+
+try:
+    from utils import get_history_data_debug
+except Exception:
+    get_history_data_debug = None
+
+try:
+    from stock_master_service import load_stock_master
+except Exception:
+    load_stock_master = None
 
 PAGE_TITLE = "股神推薦"
 PFX = "godpick_"
@@ -1546,7 +1554,7 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_master_df_fallback_only() -> pd.DataFrame:
     try:
-        repo_df = load_stock_master()
+        repo_df = load_stock_master() if callable(load_stock_master) else pd.DataFrame()
     except Exception:
         repo_df = pd.DataFrame()
 
@@ -3291,6 +3299,8 @@ def main():
 
     watchlist_map = _load_watchlist_map()
     master_df = _load_master_df()
+    if master_df is None or master_df.empty:
+        master_df = _load_master_df_fallback_only()
     today = date.today()
 
     defaults = {
@@ -3337,6 +3347,10 @@ def main():
         title="股神推薦｜V2 升級版",
         subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 寫入 8_股神推薦紀錄。",
     )
+
+    if master_df is None or master_df.empty:
+        st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
+
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
