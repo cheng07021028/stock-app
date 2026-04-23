@@ -329,16 +329,45 @@ def inject_pro_theme():
     )
 
 
-def render_pro_hero(title, subtitle=""):
+def render_pro_hero(title, subtitle="", chips=None):
+    import html
+
+    safe_title = html.escape("" if title is None else str(title))
+    safe_subtitle = html.escape("" if subtitle is None else str(subtitle))
+
     st.markdown(
         f"""
         <div class="pro-hero">
-            <div class="pro-hero-title">{title}</div>
-            <div class="pro-hero-subtitle">{subtitle}</div>
+            <div class="pro-hero-title">{safe_title}</div>
+            <div class="pro-hero-subtitle">{safe_subtitle}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    if not chips:
+        return
+
+    if isinstance(chips, str):
+        chips = [chips]
+    elif not isinstance(chips, (list, tuple, set)):
+        chips = [str(chips)]
+
+    chip_html = "".join(
+        f'<span class="pro-chip">{html.escape(str(c))}</span>'
+        for c in chips
+        if c is not None and str(c).strip() != ""
+    )
+
+    if chip_html.strip():
+        st.markdown(
+            f"""
+            <div style="margin: -6px 0 14px 0;">
+                {chip_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_pro_section(title, subtitle=""):
