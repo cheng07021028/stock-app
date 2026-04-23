@@ -37,10 +37,11 @@ except Exception:
     get_realtime_stock_info = None
 
 try:
-    from project_perf_hub import make_signature, session_cached_compute
+    from project_perf_hub import make_signature, session_cached_compute, dedupe_stock_rows
 except Exception:
     make_signature = None
     session_cached_compute = None
+    dedupe_stock_rows = None
 
 PAGE_TITLE = "大盤走勢｜股神Pro因子強化版"
 PFX = "macro_godpro_factor_"
@@ -1053,7 +1054,57 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "sector": ctx["sector_score"],
         "risk": ctx["risk_score"],
     }
-    total_score = sum(component[k] * w[k] for k in component) * 3.2
+
+    raw_score = sum(component[k] * w[k] for k in component) * 3.2
+
+    # 修正「幾乎天天都偏多」的問題：
+    # 不是直接把分數壓低，而是加入空方懲罰與多空平衡校正，
+    # 讓美股轉弱 / 夜盤轉弱 / 新聞風險升高 / VIX 升高時，方向更容易翻成震盪或偏空。
+    bearish_penalty = 0.0
+    bullish_bonus = 0.0
+
+    if (ctx["us_score"] or 0) < -2:
+        bearish_penalty += abs(ctx["us_score"]) * 0.85
+    if (ctx["night_score"] or 0) < -2:
+        bearish_penalty += abs(ctx["night_score"]) * 0.95
+    if (ctx["tech_score"] or 0) < -1.5:
+        bearish_penalty += abs(ctx["tech_score"]) * 0.70
+    if (ctx["foreign_score"] + ctx["futures_score"]) < -2:
+        bearish_penalty += abs(ctx["foreign_score"] + ctx["futures_score"]) * 0.55
+    if (ctx["news_score"] or 0) >= 2.5:
+        bearish_penalty += ctx["news_score"] * 1.25
+    if (ctx["vix_val"] or 0) >= 24:
+        bearish_penalty += min(6.0, ((ctx["vix_val"] - 24) * 0.65) + 1.0)
+
+    if (ctx["us_score"] or 0) > 2:
+        bullish_bonus += ctx["us_score"] * 0.35
+    if (ctx["night_score"] or 0) > 2:
+        bullish_bonus += ctx["night_score"] * 0.45
+    if (ctx["tech_score"] or 0) > 1.5:
+        bullish_bonus += ctx["tech_score"] * 0.30
+    if (ctx["foreign_score"] + ctx["futures_score"]) > 2:
+        bullish_bonus += (ctx["foreign_score"] + ctx["futures_score"]) * 0.20
+
+    sign_series = [
+        1 if (ctx["tech_score"] or 0) > 0 else -1 if (ctx["tech_score"] or 0) < 0 else 0,
+        1 if (ctx["us_score"] or 0) > 0 else -1 if (ctx["us_score"] or 0) < 0 else 0,
+        1 if (ctx["night_score"] or 0) > 0 else -1 if (ctx["night_score"] or 0) < 0 else 0,
+        1 if (ctx["foreign_score"] + ctx["futures_score"]) > 0 else -1 if (ctx["foreign_score"] + ctx["futures_score"]) < 0 else 0,
+        1 if (ctx["sector_score"] or 0) > 0 else -1 if (ctx["sector_score"] or 0) < 0 else 0,
+    ]
+    sign_balance = sum(sign_series)
+
+    total_score = raw_score - bearish_penalty + bullish_bonus
+    if sign_balance <= -3:
+        total_score -= 4.0
+    elif sign_balance >= 3:
+        total_score += 2.0
+
+    # 壓掉輕微多方偏誤，避免小幅正分就全部判成上漲
+    if 0 < total_score < 4.5:
+        total_score -= 2.2
+    elif -4.5 < total_score < 0:
+        total_score += 1.1
 
     direction, strength = _direction_strength(total_score)
     risk_level = _risk_level(total_score, ctx["news_score"], ctx["vix_val"])
@@ -1064,6 +1115,11 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     predicted_points = total_score * 8.5
     if direction == "震盪":
         predicted_points = max(-80, min(80, predicted_points))
+    elif direction == "偏空":
+        predicted_points = min(predicted_points, -18.0)
+    elif direction == "偏多":
+        predicted_points = max(predicted_points, 18.0)
+
     high = base + max(20.0, predicted_points + day_vol * 0.45)
     low = base + min(-20.0, predicted_points - day_vol * 0.45)
     confidence = max(35.0, min(92.0, 55 + abs(total_score) * 1.3 - ctx["news_score"] * 1.2 - (ctx["vix_val"] - 18) * 0.6))
@@ -1076,7 +1132,7 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         f"VIX {ctx['vix_val']:.2f}、美元台幣 {ctx['fx_val']:.2f}，風險面 {ctx['risk_score']:.1f}",
         f"外資現貨 {(_safe_float(ctx.get('foreign_amt')) or 0):.1f} 億 / 三大法人 {(_safe_float(ctx.get('total3_amt')) or 0):.1f} 億 / PCR {(_safe_float(ctx.get('pcr')) or 0):.2f}",
         f"強勢族群 {ctx.get('sector_strong','')}；弱勢族群 {ctx.get('sector_weak','')}",
-        f"模式 {model_name} 權重下總分 {total_score:.1f}",
+        f"模式 {model_name} 權重下總分 {total_score:.1f}（原始 {raw_score:.1f} / 空方修正 -{bearish_penalty:.1f} / 多方加成 +{bullish_bonus:.1f}）",
     ]
     entry_confirm = "、".join([
         "加權至少站穩 MA5" if ctx["tw_close"] >= _safe_float(ctx["twii"].get("ma5"), ctx["tw_close"]) else "需先站回 MA5",
