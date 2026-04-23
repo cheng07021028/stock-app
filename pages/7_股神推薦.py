@@ -4579,14 +4579,6 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
-    normalized_weights = _normalize_user_weight_map(score_weight_map)
-    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%（已大幅降低）")
-    st.caption("目前權重正規化後：" + "｜".join([f"{k}:{v*100:.0f}%" for k, v in normalized_weights.items()]))
-
-    rec_df = pd.DataFrame()
-    category_strength_df = pd.DataFrame()
-    hot_pick_df = pd.DataFrame()
-
     score_weight_map = {
         "market": float(st.session_state.get(_k("weight_market"), 3.0)),
         "tech": float(st.session_state.get(_k("weight_tech"), 24.0)),
@@ -4598,6 +4590,13 @@ def main():
         "leader": float(st.session_state.get(_k("weight_leader"), 5.0)),
         "factor": float(st.session_state.get(_k("weight_factor"), 2.0)),
     }
+    normalized_weights = _normalize_user_weight_map(score_weight_map)
+    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%（已大幅降低）")
+    st.caption("目前權重正規化後：" + "｜".join([f"{k}:{v*100:.0f}%" for k, v in normalized_weights.items()]))
+
+    rec_df = pd.DataFrame()
+    category_strength_df = pd.DataFrame()
+    hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh:
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
