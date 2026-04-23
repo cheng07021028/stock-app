@@ -46,6 +46,9 @@ except Exception:
 PAGE_TITLE = "股神推薦"
 PFX = "godpick_"
 
+HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
+PROGRESS_UPDATE_EVERY = 10   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
+
 GODPICK_RECORD_COLUMNS = [
     "record_id",
     "股票代號",
@@ -1594,26 +1597,62 @@ def _load_master_df_fallback_only() -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_master_lookup(master_df: pd.DataFrame) -> dict[str, dict[str, str]]:
+    if master_df is None or master_df.empty:
+        return {}
+    work = master_df.copy()
+    if "code" not in work.columns:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for _, row in work.iterrows():
+        code = _normalize_code(row.get("code"))
+        if not code or code in out:
+            continue
+        name = _safe_str(row.get("name")) or code
+        market = _safe_str(row.get("market")) or "上市"
+        category = _normalize_category(row.get("category")) or _infer_category_from_record(name, row.get("category"))
+        out[code] = {
+            "name": name,
+            "market": market,
+            "category": category,
+        }
+    return out
+
 def _find_name_market_category(
     code: str,
     manual_name: str,
     manual_market: str,
     manual_category: str,
-    master_df: pd.DataFrame,
+    master_df_or_lookup,
 ) -> tuple[str, str, str]:
     code = _normalize_code(code)
     manual_name = _safe_str(manual_name)
     manual_market = _safe_str(manual_market)
     manual_category = _normalize_category(manual_category)
 
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-        matched = master_df[master_df["code"].astype(str) == code]
+    if isinstance(master_df_or_lookup, dict):
+        found = master_df_or_lookup.get(code, {})
+        if found:
+            final_name = _safe_str(found.get("name")) or manual_name or code
+            final_market = _safe_str(found.get("market")) or manual_market or "上市"
+            final_category = _normalize_category(found.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
+            return final_name, final_market, final_category
+
+    if isinstance(master_df_or_lookup, pd.DataFrame) and not master_df_or_lookup.empty:
+        matched = master_df_or_lookup[master_df_or_lookup["code"].astype(str) == code]
         if not matched.empty:
             row = matched.iloc[0]
             final_name = _safe_str(row.get("name")) or manual_name or code
             final_market = _safe_str(row.get("market")) or manual_market or "上市"
             final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
             return final_name, final_market, final_category
+
+    final_name = manual_name or code
+    final_market = manual_market or "上市"
+    final_category = manual_category or _infer_category_from_record(final_name, manual_category)
+    return final_name, final_market, final_category
 
     final_name = manual_name or code
     final_market = manual_market or "上市"
@@ -1987,30 +2026,9 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         if mk not in tried:
             tried.append(mk)
 
-    debug_attempts: list[dict[str, Any]] = []
+    attempt_summary: list[dict[str, Any]] = []
 
     for mk in tried:
-        debug_info = {}
-        try:
-            debug_info = get_history_data_debug(
-                stock_no=stock_no,
-                stock_name=stock_name,
-                market_type=mk,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        except Exception as e:
-            debug_info = {
-                "ok": False,
-                "source": "history_debug_exception",
-                "market_type": mk,
-                "error": str(e),
-                "rows": 0,
-                "debug_lines": [f"get_history_data_debug 例外：{e}"],
-            }
-
-        debug_attempts.append(debug_info)
-
         try:
             df = get_history_data(
                 stock_no=stock_no,
@@ -2028,24 +2046,81 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
                     start_dt=start_date,
                     end_dt=end_date,
                 )
-            except Exception:
+            except Exception as e1:
                 try:
                     df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
-                except Exception:
+                except Exception as e2:
+                    attempt_summary.append({
+                        "market_type": mk,
+                        "rows": 0,
+                        "source": "history_fetch_exception",
+                        "error": f"{e1} / fallback: {e2}",
+                    })
                     df = pd.DataFrame()
-        except Exception:
+        except Exception as e:
+            attempt_summary.append({
+                "market_type": mk,
+                "rows": 0,
+                "source": "history_fetch_exception",
+                "error": str(e),
+            })
             df = pd.DataFrame()
 
-        df = _prepare_history_df(df)
-        if not df.empty:
-            return df, (mk or market_type or "未知"), {
+        prepared_df = _prepare_history_df(df)
+        if not prepared_df.empty:
+            history_debug = {
                 "ok": True,
                 "stock_no": stock_no,
                 "stock_name": stock_name,
                 "used_market": (mk or market_type or "未知"),
-                "attempts": debug_attempts,
-                "rows": len(df),
+                "attempts": attempt_summary + [{
+                    "market_type": mk,
+                    "rows": int(len(prepared_df)),
+                    "source": "history_fetch_ok",
+                    "error": "",
+                }],
+                "rows": len(prepared_df),
             }
+            return prepared_df, (mk or market_type or "未知"), history_debug
+
+        attempt_summary.append({
+            "market_type": mk,
+            "rows": 0,
+            "source": "history_fetch_empty",
+            "error": "",
+        })
+
+    debug_attempts: list[dict[str, Any]] = []
+    if HISTORY_DEBUG_EAGER or not attempt_summary:
+        debug_attempts = attempt_summary
+    else:
+        debug_attempts = attempt_summary.copy()
+        for mk in tried:
+            debug_info = {}
+            try:
+                debug_info = get_history_data_debug(
+                    stock_no=stock_no,
+                    stock_name=stock_name,
+                    market_type=mk,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as e:
+                debug_info = {
+                    "ok": False,
+                    "source": "history_debug_exception",
+                    "market_type": mk,
+                    "error": str(e),
+                    "rows": 0,
+                    "debug_lines": [f"get_history_data_debug 例外：{e}"],
+                }
+
+            debug_attempts.append({
+                "market_type": _safe_str(debug_info.get("market_type")) or mk,
+                "rows": int(debug_info.get("rows", 0) or 0),
+                "source": _safe_str(debug_info.get("source")) or "history_debug",
+                "error": _safe_str(debug_info.get("error")),
+            })
 
     return pd.DataFrame(), (_safe_str(market_type) or "未知"), {
         "ok": False,
@@ -2573,7 +2648,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
 def _analyze_one_stock_for_recommend(
     item: dict[str, str],
-    master_df: pd.DataFrame,
+    master_lookup: dict[str, dict[str, str]],
     start_dt: date,
     end_dt: date,
     min_signal_score: float,
@@ -2591,7 +2666,7 @@ def _analyze_one_stock_for_recommend(
     if not code:
         return {"status": "invalid_code", "code": "", "message": "股票代號空白"}
 
-    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_df)
+    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_lookup)
 
     if clean_categories and category not in clean_categories:
         return {"status": "category_filtered", "code": code, "message": f"類型不符合：{category}"}
@@ -2750,7 +2825,8 @@ def _build_recommend_df(
         return pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(12, max(4, total_count // 8 if total_count >= 8 else 4))
+    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
+    master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
     progress_bar = progress_wrap.progress(0, text="準備開始推薦...")
@@ -2781,7 +2857,7 @@ def _build_recommend_df(
             executor.submit(
                 _analyze_one_stock_for_recommend,
                 item,
-                master_df,
+                master_lookup,
                 start_dt,
                 end_dt,
                 min_signal_score,
@@ -2827,20 +2903,26 @@ def _build_recommend_df(
             except Exception as e:
                 debug_summary["analysis_error"] += 1
                 debug_summary["error_samples"].append(f"future.result 例外：{e}")
-
-            elapsed = time.time() - start_ts
-            avg_per_stock = elapsed / done_count if done_count > 0 else 0
-            remain_count = max(total_count - done_count, 0)
-            eta_sec = avg_per_stock * remain_count
-            ratio = done_count / total_count if total_count > 0 else 0
-
-            progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
-            progress_text.caption(
-                f"已完成 {done_count}/{total_count}｜"
-                f"已花時間：{_fmt_seconds(elapsed)}｜"
-                f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
+            should_update_progress = (
+                done_count == 1
+                or done_count == total_count
+                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
+                or done_count / total_count >= 0.98
             )
+            if should_update_progress:
+                elapsed = time.time() - start_ts
+                avg_per_stock = elapsed / done_count if done_count > 0 else 0
+                remain_count = max(total_count - done_count, 0)
+                eta_sec = avg_per_stock * remain_count
+                ratio = done_count / total_count if total_count > 0 else 0
+
+                progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
+                progress_text.caption(
+                    f"已完成 {done_count}/{total_count}｜"
+                    f"已花時間：{_fmt_seconds(elapsed)}｜"
+                    f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
+                    f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
+                )
 
     progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
     total_elapsed = time.time() - start_ts
@@ -3373,9 +3455,6 @@ def main():
                 else ""
             )
         )
-
-    all_categories = _collect_all_categories(master_df, watchlist_map)
-    category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
