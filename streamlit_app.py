@@ -20,7 +20,7 @@ from utils import (
     save_last_query_state,
 )
 
-PAGE_TITLE = "股票分析系統首頁"
+PAGE_TITLE = "股票分析系統首頁｜升級完整版"
 PFX = "home_"
 
 
@@ -62,6 +62,93 @@ def _to_pydate(v: Any, fallback: date) -> date:
 def _fmt_num(v: Any, digits: int = 2) -> str:
     return format_number(v, digits)
 
+
+def _godpick_records_github_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("GODPICK_RECORDS_GITHUB_PATH", "godpick_records.json")) or "godpick_records.json",
+    }
+
+
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_contents_url(owner: str, repo: str, path: str) -> str:
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_godpick_records_df() -> pd.DataFrame:
+    cols = [
+        "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
+        "買點分級", "型態名稱", "爆發等級", "推薦日期", "推薦時間", "目前狀態"
+    ]
+    cfg = _godpick_records_github_config()
+    if not cfg["token"]:
+        return pd.DataFrame(columns=cols)
+
+    try:
+        import base64, json, requests
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(cfg["token"]),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return pd.DataFrame(columns=cols)
+
+        content = resp.json().get("content", "")
+        if not content:
+            return pd.DataFrame(columns=cols)
+
+        data = json.loads(base64.b64decode(content).decode("utf-8"))
+        df = pd.DataFrame(data if isinstance(data, list) else [])
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None
+
+        df["股票代號"] = df["股票代號"].astype(str).str.extract(r"(\d+)")[0].fillna(df["股票代號"].astype(str))
+        df["推薦總分"] = pd.to_numeric(df["推薦總分"], errors="coerce")
+        return df[cols].copy()
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+
+def _build_latest_rec_df(rec_df: pd.DataFrame) -> pd.DataFrame:
+    if rec_df is None or rec_df.empty:
+        return pd.DataFrame(columns=[
+            "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級",
+            "型態名稱", "爆發等級", "最近推薦時間", "目前狀態"
+        ])
+
+    work = rec_df.copy()
+    work["_sort_dt"] = pd.to_datetime(
+        work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str),
+        errors="coerce",
+    )
+    work = work.sort_values(["股票代號", "_sort_dt"], ascending=[True, False], na_position="last")
+    work = work.drop_duplicates(subset=["股票代號"], keep="first").reset_index(drop=True)
+    work["最近推薦時間"] = (
+        work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str)
+    ).str.strip()
+
+    cols = [
+        "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級",
+        "型態名稱", "爆發等級", "最近推薦時間", "目前狀態"
+    ]
+    for c in cols:
+        if c not in work.columns:
+            work[c] = ""
+    return work[cols].copy()
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _build_watchlist_payload(raw_items: tuple) -> dict[str, list[dict[str, str]]]:
@@ -299,27 +386,31 @@ def _render_home_page():
     overview_df = _build_overview_df(watchlist)
     group_summary_df = _build_group_summary_df(watchlist)
     search_rows = _build_search_rows(watchlist)
+    rec_df = _load_godpick_records_df()
+    latest_rec_df = _build_latest_rec_df(rec_df)
 
     total_groups = len(watchlist)
     total_stocks = len(overview_df)
     listed_count = int((overview_df["市場別"] == "上市").sum()) if not overview_df.empty else 0
     otc_count = int((overview_df["市場別"] == "上櫃").sum()) if not overview_df.empty else 0
+    total_rec = len(latest_rec_df)
+    strong_focus = int((pd.to_numeric(latest_rec_df["推薦總分"], errors="coerce") >= 85).sum()) if not latest_rec_df.empty else 0
 
     st.sidebar.markdown("### 📌 系統狀態")
     st.sidebar.success("免登入模式")
     st.sidebar.caption("已取消帳號密碼登入，開啟即直接使用。")
 
     render_pro_hero(
-        title="台股分析系統｜股神版首頁",
-        subtitle="免登入版本｜首頁會直接讀取最新自選股清單，新增刪除後重新整理即可同步。",
+        title="台股分析系統｜升級完整版首頁",
+        subtitle="首頁總控面板｜串接自選股、股神推薦紀錄、快速入口與最近查詢狀態。",
     )
 
     render_pro_kpi_row(
         [
             {"label": "自選股群組", "value": total_groups, "delta": "最新 watchlist", "delta_class": "pro-kpi-delta-flat"},
             {"label": "自選股總數", "value": total_stocks, "delta": "最新 watchlist", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "上市檔數", "value": listed_count, "delta": "市場別統計", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "上櫃檔數", "value": otc_count, "delta": "市場別統計", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "最近推薦股票數", "value": total_rec, "delta": "股神推薦紀錄", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "強烈關注數", "value": strong_focus, "delta": "推薦總分 ≥ 85", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
@@ -349,6 +440,31 @@ def _render_home_page():
         else:
             st.warning("找不到對應股票。")
 
+
+    render_pro_section("系統總覽")
+    a1, a2 = st.columns([1, 1])
+    with a1:
+        render_pro_info_card(
+            "最近推薦摘要",
+            [
+                ("最近推薦股票數", total_rec, ""),
+                ("高分股票數", strong_focus, ""),
+                ("最近查詢群組", _safe_str(load_last_query_state().get("quick_group", "—")), ""),
+                ("最近查詢股票", _safe_str(load_last_query_state().get("quick_stock_code", "—")), ""),
+            ],
+            chips=["7頁", "8頁", "首頁總控"],
+        )
+    with a2:
+        render_pro_info_card(
+            "首頁提醒",
+            [
+                ("同步邏輯", "首頁會讀取最新自選股與股神推薦紀錄。", ""),
+                ("承接功能", "搜尋後可供 2 / 3 / 7 頁承接查詢狀態。", ""),
+                ("建議流程", "7頁選股 → 3頁確認 → 8頁追蹤。", ""),
+            ],
+            chips=["系統流程"],
+        )
+
     render_pro_section("快速入口")
 
     q1, q2, q3, q4 = st.columns(4)
@@ -361,13 +477,13 @@ def _render_home_page():
     with q2:
         render_pro_info_card(
             "歷史K線分析",
-            [("用途", "看 K 線、MA、KD、MACD、事件與策略。", "")],
+            [("用途", "看 K 線、MA、KD、MACD、事件與策略。", ""), ("承接", "可接收 4頁 / 7頁送來的焦點股票。", "")],
             chips=["pages/3_歷史K線分析.py"],
         )
     with q3:
         render_pro_info_card(
             "自選股中心",
-            [("用途", "新增 / 刪除 / 批次管理自選股。", "")],
+            [("用途", "新增 / 刪除 / 批次管理自選股。", ""), ("承接", "可顯示最近推薦總分 / 買點分級。", "")],
             chips=["pages/4_自選股中心.py"],
         )
     with q4:
@@ -390,7 +506,7 @@ def _render_home_page():
             "首頁提醒",
             [
                 ("同步邏輯", "首頁每次重新整理都會重新讀取最新 watchlist.json。", ""),
-                ("使用方式", "先在自選股中心新增 / 刪除，再回首頁重新整理即可。", ""),
+                ("推薦追蹤", "同時讀取股神推薦紀錄，方便從首頁掌握最新高分股票。", ""),
                 ("快速搜尋", "搜尋後會把群組與股票記錄到共用查詢狀態。", ""),
             ],
         )
@@ -402,6 +518,14 @@ def _render_home_page():
         else:
             st.dataframe(overview_df.head(30), use_container_width=True, hide_index=True)
 
+        render_pro_section("最近高分推薦")
+        if latest_rec_df.empty:
+            st.info("目前沒有推薦紀錄。")
+        else:
+            show_cols = [c for c in ["股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級", "型態名稱", "爆發等級", "最近推薦時間", "目前狀態"] if c in latest_rec_df.columns]
+            top_df = latest_rec_df.sort_values("推薦總分", ascending=False).head(12)
+            st.dataframe(top_df[show_cols], use_container_width=True, hide_index=True)
+
     render_pro_section("最近常用查詢日期")
     d1, d2 = st.columns([2, 2])
     with d1:
@@ -409,14 +533,29 @@ def _render_home_page():
     with d2:
         st.date_input("結束日期", key=_k("end_date"))
 
-    if st.button("記錄日期區間", use_container_width=True):
-        save_last_query_state(
-            quick_group="",
-            quick_stock_code="",
-            home_start=st.session_state.get(_k("start_date")),
-            home_end=st.session_state.get(_k("end_date")),
-        )
-        st.success("已記錄首頁日期區間。")
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        if st.button("記錄日期區間", use_container_width=True):
+            save_last_query_state(
+                quick_group="",
+                quick_stock_code="",
+                home_start=st.session_state.get(_k("start_date")),
+                home_end=st.session_state.get(_k("end_date")),
+            )
+            st.success("已記錄首頁日期區間。")
+    with h2:
+        if st.button("帶目前搜尋到 2頁 / 3頁", use_container_width=True):
+            target = _find_search_target(st.session_state.get(_k("search_input"), ""), search_rows)
+            if target:
+                st.session_state["kline_focus_stock_code"] = target["code"]
+                st.session_state["kline_focus_stock_name"] = target["name"]
+                st.success(f"已設定焦點股票：{target['label']}")
+            else:
+                st.warning("請先輸入可辨識的股票代號或名稱。")
+    with h3:
+        if st.button("清除首頁搜尋紀錄", use_container_width=True):
+            st.session_state[_k("search_input")] = ""
+            st.success("已清除首頁搜尋欄位。")
 
 
 def main():
