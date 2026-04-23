@@ -347,7 +347,76 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
     return {"score": score, "label": label, "summary": summary}
 
 
-def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> dict[str, Any]:
+
+DEFAULT_SCORE_WEIGHT_MAP = {
+    "market": 3.0,
+    "tech": 24.0,
+    "prelaunch": 18.0,
+    "trade": 14.0,
+    "heat": 12.0,
+    "pattern": 12.0,
+    "burst": 10.0,
+    "leader": 5.0,
+    "factor": 2.0,
+}
+
+def _normalize_user_weight_map(user_weight_map: dict[str, float] | None) -> dict[str, float]:
+    merged = dict(DEFAULT_SCORE_WEIGHT_MAP)
+    if isinstance(user_weight_map, dict):
+        for k in merged.keys():
+            if k in user_weight_map:
+                merged[k] = max(0.0, float(_safe_float(user_weight_map.get(k), merged[k]) or 0.0))
+    total = sum(merged.values()) or 1.0
+    return {k: v / total for k, v in merged.items()}
+
+def _get_mode_seed_weight(mode: str) -> dict[str, float]:
+    if mode == "飆股模式":
+        return {"market": 0.06, "tech": 0.10, "prelaunch": 0.20, "trade": 0.08, "heat": 0.14, "pattern": 0.20, "burst": 0.18, "leader": 0.02, "factor": 0.02}
+    if mode == "波段模式":
+        return {"market": 0.08, "tech": 0.22, "prelaunch": 0.12, "trade": 0.14, "heat": 0.16, "pattern": 0.12, "burst": 0.06, "leader": 0.04, "factor": 0.06}
+    if mode == "領頭羊模式":
+        return {"market": 0.06, "tech": 0.14, "prelaunch": 0.10, "trade": 0.08, "heat": 0.18, "pattern": 0.10, "burst": 0.06, "leader": 0.24, "factor": 0.04}
+    return {"market": 0.07, "tech": 0.18, "prelaunch": 0.14, "trade": 0.11, "heat": 0.15, "pattern": 0.12, "burst": 0.09, "leader": 0.07, "factor": 0.07}
+
+def _blend_mode_and_user_weights(mode: str, user_weight_map: dict[str, float] | None) -> dict[str, float]:
+    seed = _get_mode_seed_weight(mode)
+    user_w = _normalize_user_weight_map(user_weight_map)
+    mixed = {}
+    for k in seed.keys():
+        mixed[k] = seed[k] * (0.55 + user_w.get(k, 0.0) * 0.90)
+    total = sum(mixed.values()) or 1.0
+    return {k: v / total for k, v in mixed.items()}
+
+def _render_strategy_explainers():
+    render_pro_section("掃描 / 評分 / 風險 / 推薦策略說明")
+    e1, e2 = st.columns(2)
+    with e1:
+        with st.expander("掃描模式怎麼算", expanded=False):
+            st.write("股神建議：全部先過低成本初篩，再挑合理數量進完整股神分析。")
+            st.write("初篩：全部先過低成本初篩，再保留較多股票進完整分析。")
+            st.write("篩選一半：初篩通過後，只取前半進完整分析。")
+            st.write("全篩：通過初篩後，全部進完整分析，最完整也最慢。")
+            st.write("初篩只排除明顯不值得分析的股票，不會因高價股就淘汰。")
+        with st.expander("風險過濾說明", expanded=False):
+            st.write("寬鬆：保留更多股票，較不容易漏早期轉強股。")
+            st.write("標準：日常建議模式，平衡風險與完整性。")
+            st.write("嚴格：會砍較多邊緣股，速度快，但可能漏掉部分剛起漲股票。")
+            st.write("風險過濾會考慮：資料天數、量能、波動、近20日漲幅、結構強弱。")
+    with e2:
+        with st.expander("評分條件有哪些", expanded=False):
+            st.write("技術結構：均線、趨勢、結構完整度。")
+            st.write("起漲前兆：均線轉強、量能啟動、突破準備、動能翻多。")
+            st.write("交易可行：買點清楚、停損合理、風險報酬比。")
+            st.write("類股熱度：所屬類股強弱、資金輪動、同族群相對位置。")
+            st.write("型態突破：平台、箱型、壓力位狀態。")
+            st.write("爆發力：近5/20日動能、量價加速。")
+            st.write("大盤輔助：僅低權重輔助，不主導個股。")
+        with st.expander("推薦策略說明", expanded=False):
+            st.write("精準版：只看主推薦名單。")
+            st.write("結合版：主推薦名單外，再列出接近達標、具起漲結構的補抓名單。")
+            st.write("建議平常用 股神建議 + 標準 + 結合版。")
+
+def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float, user_weight_map: dict[str, float] | None = None) -> dict[str, Any]:
     technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
     prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
     category_heat_score = _safe_float(row.get("類股熱度分數"), 0) or 0
@@ -356,19 +425,28 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     leader_advantage = _safe_float(row.get("同類股領先幅度"), 0) or 0
     pattern_score = _safe_float(row.get("型態突破分數"), 0) or 0
     burst_score = _safe_float(row.get("爆發力分數"), 0) or 0
-    risk_score = _safe_float(row.get("風險分數"), 0) or 0
+
+    weight_mix = _blend_mode_and_user_weights(_safe_str(mode), user_weight_map)
+    score_pack = {
+        "market": market_score,
+        "tech": technical_score,
+        "prelaunch": prelaunch_score,
+        "trade": trade_score,
+        "heat": category_heat_score,
+        "pattern": pattern_score,
+        "burst": burst_score,
+        "leader": leader_advantage,
+        "factor": factor_score,
+    }
+    base_total = sum((score_pack.get(k, 0.0) or 0.0) * weight_mix.get(k, 0.0) for k in weight_mix.keys())
 
     if mode == "飆股模式":
-        base_total = market_score * 0.12 + category_heat_score * 0.16 + pattern_score * 0.20 + burst_score * 0.18 + prelaunch_score * 0.16 + technical_score * 0.10 + trade_score * 0.08
         tag = "爆發優先 / 起漲優先"
     elif mode == "波段模式":
-        base_total = market_score * 0.14 + technical_score * 0.24 + category_heat_score * 0.18 + trade_score * 0.14 + pattern_score * 0.12 + factor_score * 0.10 + risk_score * 0.08
         tag = "趨勢延續 / 波段優先"
     elif mode == "領頭羊模式":
-        base_total = market_score * 0.12 + leader_advantage * 0.22 + category_heat_score * 0.22 + technical_score * 0.16 + prelaunch_score * 0.10 + pattern_score * 0.10 + trade_score * 0.08
         tag = "類股領先 / 龍頭優先"
     else:
-        base_total = market_score * 0.14 + technical_score * 0.18 + prelaunch_score * 0.14 + category_heat_score * 0.16 + factor_score * 0.12 + trade_score * 0.10 + pattern_score * 0.10 + burst_score * 0.06
         tag = "綜合推薦"
 
     macro_mode_name = "未啟用"
@@ -386,7 +464,7 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
             "trend": _score_clip(market_score * 0.45 + pattern_score * 0.35 + category_heat_score * 0.20),
             "value": trade_score,
             "event": _score_clip(prelaunch_score * 0.45 + pattern_score * 0.35 + category_heat_score * 0.20),
-            "risk": risk_score,
+            "risk": _safe_float(row.get("風險分數"), 0) or 0,
             "momentum": _score_clip(burst_score * 0.60 + prelaunch_score * 0.40),
         }
         try:
@@ -395,23 +473,27 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
                 factor_scores=factor_scores,
                 lookback_days=30,
             )
-            macro_mode_name = _safe_str(macro_pack.get("best_mode_name")) or "股神平衡版"
-            macro_weighted_score = _safe_float(macro_pack.get("macro_weighted_score"))
+            raw_macro_weighted = _safe_float(macro_pack.get("macro_weighted_score"))
             macro_target = _safe_float(macro_pack.get("final_score"), _score_clip(base_total)) or _score_clip(base_total)
             total = _score_clip((_score_clip(base_total) * (1.0 - MACRO_SCORE_BLEND)) + (macro_target * MACRO_SCORE_BLEND))
             macro_reason = _safe_str(macro_pack.get("best_mode_reason"))
+            macro_mode_name = _safe_str(macro_pack.get("best_mode_name")) or "股神平衡版"
             macro_adj = macro_pack.get("macro_adjustment") or {}
             macro_scale = _safe_float(macro_adj.get("scale"), 1.0) or 1.0
             macro_bias = _safe_float(macro_adj.get("bias"), 0.0) or 0.0
             macro_conf_bonus = _safe_float(macro_adj.get("confidence_bonus"), 0.0) or 0.0
-            tag = f"{tag} / 大盤:{macro_mode_name}"
+            if raw_macro_weighted is None:
+                macro_weighted_score = round(total, 2)
+            else:
+                macro_weighted_score = round(_score_clip((_score_clip(base_total) * 0.9) + (_score_clip(raw_macro_weighted) * 0.1)), 2)
+            tag = f"{tag} / 大盤輔助:{macro_mode_name}"
         except Exception:
             pass
 
     return {
         "推薦總分": total,
         "推薦標籤": tag,
-        "原始推薦總分": _score_clip(base_total),
+        "原始推薦總分": round(_score_clip(base_total), 4),
         "大盤最準模式": macro_mode_name,
         "大盤動態加權分": macro_weighted_score,
         "大盤模式說明": macro_reason,
@@ -419,8 +501,6 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
         "大盤校正Bias": macro_bias,
         "大盤信心加成": macro_conf_bonus,
     }
-
-
 
 def _apply_final_score_desaturation(base_df: pd.DataFrame) -> pd.DataFrame:
     if base_df is None or base_df.empty:
@@ -3375,6 +3455,7 @@ def _build_recommend_df(
     min_prelaunch_score: float,
     min_trade_score: float,
     scan_mode: str,
+    score_weight_map: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     universe_items = _dedupe_universe_items(universe_items)
@@ -3583,6 +3664,7 @@ def _build_recommend_df(
             row=r,
             mode=_safe_str(mode),
             market_score=_safe_float(market_info.get("score"), 50) or 50,
+            user_weight_map=score_weight_map,
         ),
         axis=1,
     )
@@ -4091,6 +4173,15 @@ def main():
         "min_trade_score": 45.0,
         "pick_strategy": "結合版",
         "scan_mode": "股神建議",
+        "weight_market": 3.0,
+        "weight_tech": 24.0,
+        "weight_prelaunch": 18.0,
+        "weight_trade": 14.0,
+        "weight_heat": 12.0,
+        "weight_pattern": 12.0,
+        "weight_burst": 10.0,
+        "weight_leader": 5.0,
+        "weight_factor": 2.0,
         "top_table_columns": [],
         "full_table_columns": [],
     }
@@ -4112,6 +4203,15 @@ def main():
     _ensure_ui_pref("risk_strictness", st.session_state.get(_k("risk_strictness"), "標準"))
     _ensure_ui_pref("pick_strategy", st.session_state.get(_k("pick_strategy"), "結合版"))
     _ensure_ui_pref("scan_mode", st.session_state.get(_k("scan_mode"), "股神建議"))
+    _ensure_ui_pref("weight_market", float(st.session_state.get(_k("weight_market"), 3.0)))
+    _ensure_ui_pref("weight_tech", float(st.session_state.get(_k("weight_tech"), 24.0)))
+    _ensure_ui_pref("weight_prelaunch", float(st.session_state.get(_k("weight_prelaunch"), 18.0)))
+    _ensure_ui_pref("weight_trade", float(st.session_state.get(_k("weight_trade"), 14.0)))
+    _ensure_ui_pref("weight_heat", float(st.session_state.get(_k("weight_heat"), 12.0)))
+    _ensure_ui_pref("weight_pattern", float(st.session_state.get(_k("weight_pattern"), 12.0)))
+    _ensure_ui_pref("weight_burst", float(st.session_state.get(_k("weight_burst"), 10.0)))
+    _ensure_ui_pref("weight_leader", float(st.session_state.get(_k("weight_leader"), 5.0)))
+    _ensure_ui_pref("weight_factor", float(st.session_state.get(_k("weight_factor"), 2.0)))
     _ensure_ui_pref("min_total_score", float(st.session_state.get(_k("min_total_score"), 55.0)))
     _ensure_ui_pref("min_signal_score", float(st.session_state.get(_k("min_signal_score"), -2.0)))
     _ensure_ui_pref("min_prelaunch_score", float(st.session_state.get(_k("min_prelaunch_score"), 45.0)))
@@ -4274,6 +4374,22 @@ def main():
             help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
         )
 
+        render_pro_section("評分權重%（可調）")
+        st.caption("這些權重會影響個股完整分析時的主評分比例。系統會自動正規化為 100%，大盤輔助仍維持低權重輔助。")
+        w1, w2, w3 = st.columns(3)
+        with w1:
+            st.slider("技術結構%", 0.0, 40.0, key=_ui_pref_key("weight_tech"), step=1.0)
+            st.slider("起漲前兆%", 0.0, 35.0, key=_ui_pref_key("weight_prelaunch"), step=1.0)
+            st.slider("交易可行%", 0.0, 30.0, key=_ui_pref_key("weight_trade"), step=1.0)
+        with w2:
+            st.slider("類股熱度%", 0.0, 25.0, key=_ui_pref_key("weight_heat"), step=1.0)
+            st.slider("型態突破%", 0.0, 25.0, key=_ui_pref_key("weight_pattern"), step=1.0)
+            st.slider("爆發力%", 0.0, 25.0, key=_ui_pref_key("weight_burst"), step=1.0)
+        with w3:
+            st.slider("同類股領先%", 0.0, 20.0, key=_ui_pref_key("weight_leader"), step=1.0)
+            st.slider("自動因子%", 0.0, 15.0, key=_ui_pref_key("weight_factor"), step=1.0)
+            st.slider("大盤輔助%", 0.0, 10.0, key=_ui_pref_key("weight_market"), step=1.0)
+
         render_pro_section("推薦門檻")
         f1, f2, f3, f4 = st.columns(4)
         with f1:
@@ -4334,6 +4450,15 @@ def main():
         _reset_ui_pref("risk_strictness", "標準")
         _reset_ui_pref("pick_strategy", "結合版")
         _reset_ui_pref("scan_mode", "股神建議")
+        _reset_ui_pref("weight_market", 3.0)
+        _reset_ui_pref("weight_tech", 24.0)
+        _reset_ui_pref("weight_prelaunch", 18.0)
+        _reset_ui_pref("weight_trade", 14.0)
+        _reset_ui_pref("weight_heat", 12.0)
+        _reset_ui_pref("weight_pattern", 12.0)
+        _reset_ui_pref("weight_burst", 10.0)
+        _reset_ui_pref("weight_leader", 5.0)
+        _reset_ui_pref("weight_factor", 2.0)
         st.session_state[_k("universe_mode")] = "自選群組"
         st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
         st.session_state[_k("days")] = 120
@@ -4349,6 +4474,15 @@ def main():
         st.session_state[_k("risk_strictness")] = "標準"
         st.session_state[_k("pick_strategy")] = "結合版"
         st.session_state[_k("scan_mode")] = "股神建議"
+        st.session_state[_k("weight_market")] = 3.0
+        st.session_state[_k("weight_tech")] = 24.0
+        st.session_state[_k("weight_prelaunch")] = 18.0
+        st.session_state[_k("weight_trade")] = 14.0
+        st.session_state[_k("weight_heat")] = 12.0
+        st.session_state[_k("weight_pattern")] = 12.0
+        st.session_state[_k("weight_burst")] = 10.0
+        st.session_state[_k("weight_leader")] = 5.0
+        st.session_state[_k("weight_factor")] = 2.0
         st.session_state[_k("submitted_once")] = False
         st.session_state[_k("focus_code")] = ""
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
@@ -4365,6 +4499,7 @@ def main():
             "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
             "selected_categories", "min_total_score", "min_signal_score",
             "min_prelaunch_score", "min_trade_score", "pick_strategy", "scan_mode",
+            "weight_market", "weight_tech", "weight_prelaunch", "weight_trade", "weight_heat", "weight_pattern", "weight_burst", "weight_leader", "weight_factor",
             "recommend_mode", "risk_strictness",
         ]:
             _sync_ui_pref_to_saved(pref_name)
@@ -4381,9 +4516,20 @@ def main():
         st.session_state[_k("min_trade_score")] = float(form_min_trade_score)
         st.session_state[_k("pick_strategy")] = form_pick_strategy
         st.session_state[_k("scan_mode")] = form_scan_mode
+        st.session_state[_k("weight_market")] = float(st.session_state.get(_ui_pref_key("weight_market"), 3.0))
+        st.session_state[_k("weight_tech")] = float(st.session_state.get(_ui_pref_key("weight_tech"), 24.0))
+        st.session_state[_k("weight_prelaunch")] = float(st.session_state.get(_ui_pref_key("weight_prelaunch"), 18.0))
+        st.session_state[_k("weight_trade")] = float(st.session_state.get(_ui_pref_key("weight_trade"), 14.0))
+        st.session_state[_k("weight_heat")] = float(st.session_state.get(_ui_pref_key("weight_heat"), 12.0))
+        st.session_state[_k("weight_pattern")] = float(st.session_state.get(_ui_pref_key("weight_pattern"), 12.0))
+        st.session_state[_k("weight_burst")] = float(st.session_state.get(_ui_pref_key("weight_burst"), 10.0))
+        st.session_state[_k("weight_leader")] = float(st.session_state.get(_ui_pref_key("weight_leader"), 5.0))
+        st.session_state[_k("weight_factor")] = float(st.session_state.get(_ui_pref_key("weight_factor"), 2.0))
         st.session_state[_k("recommend_mode")] = form_recommend_mode
         st.session_state[_k("risk_strictness")] = form_risk_strictness
         st.session_state[_k("submitted_once")] = True
+
+    _render_strategy_explainers()
 
     render_pro_info_card(
         "V2 選股邏輯",
@@ -4391,6 +4537,7 @@ def main():
             ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
             ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
             ("掃描模式", "新增 股神建議 / 初篩 / 篩選一半 / 全篩。", ""),
+            ("權重可調", "技術 / 起漲前兆 / 交易可行 / 類股熱度 / 型態 / 爆發力 / 領先 / 自動因子 / 大盤輔助 % 可調。", ""),
             ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
             ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
             ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
@@ -4432,11 +4579,25 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
+    normalized_weights = _normalize_user_weight_map(score_weight_map)
     st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%（已大幅降低）")
+    st.caption("目前權重正規化後：" + "｜".join([f"{k}:{v*100:.0f}%" for k, v in normalized_weights.items()]))
 
     rec_df = pd.DataFrame()
     category_strength_df = pd.DataFrame()
     hot_pick_df = pd.DataFrame()
+
+    score_weight_map = {
+        "market": float(st.session_state.get(_k("weight_market"), 3.0)),
+        "tech": float(st.session_state.get(_k("weight_tech"), 24.0)),
+        "prelaunch": float(st.session_state.get(_k("weight_prelaunch"), 18.0)),
+        "trade": float(st.session_state.get(_k("weight_trade"), 14.0)),
+        "heat": float(st.session_state.get(_k("weight_heat"), 12.0)),
+        "pattern": float(st.session_state.get(_k("weight_pattern"), 12.0)),
+        "burst": float(st.session_state.get(_k("weight_burst"), 10.0)),
+        "leader": float(st.session_state.get(_k("weight_leader"), 5.0)),
+        "factor": float(st.session_state.get(_k("weight_factor"), 2.0)),
+    }
 
     if submit_recommend or submit_refresh:
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
@@ -4452,6 +4613,7 @@ def main():
             min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
             scan_mode=_safe_str(st.session_state.get(_k("scan_mode"), "股神建議")),
+            score_weight_map=score_weight_map,
         )
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
@@ -4887,6 +5049,7 @@ def main():
                 ("型態 / 爆發", "新增型態突破分數、爆發力分數，讓起漲股更容易被拉出。", ""),
             ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
             ("掃描模式", "新增 股神建議 / 初篩 / 篩選一半 / 全篩。", ""),
+            ("權重可調", "技術 / 起漲前兆 / 交易可行 / 類股熱度 / 型態 / 爆發力 / 領先 / 自動因子 / 大盤輔助 % 可調。", ""),
                 ("風險過濾", "新增 寬鬆 / 標準 / 嚴格，先淘汰不合格股票。", ""),
                 ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
                 ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
