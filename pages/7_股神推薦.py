@@ -43,7 +43,7 @@ try:
 except Exception:
     load_stock_master = None
 
-PAGE_TITLE = "股神推薦"
+PAGE_TITLE = "股神推薦 V3"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -1158,7 +1158,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "類股熱度分數": _safe_float(r.get("類股熱度分數")),
                 "同類股領先幅度": _safe_float(r.get("同類股領先幅度")),
                 "是否領先同類股": _safe_str(r.get("是否領先同類股")) in {"是", "True", "true", "1"},
-                "推薦標籤": _safe_str(r.get("推薦標籤")),
+                "推薦標籤": "｜".join([x for x in [_safe_str(r.get("推薦標籤")), _safe_str(r.get("型態名稱")), _safe_str(r.get("爆發等級"))] if x]),
                 "推薦理由摘要": _safe_str(r.get("推薦理由摘要")),
                 "推薦價格": _safe_float(r.get("最新價") if pd.notna(r.get("最新價")) else r.get("推薦買點_拉回")),
                 "停損價": _safe_float(r.get("停損價")),
@@ -3103,8 +3103,8 @@ def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, m
         axis=1,
     )
     hot_df = hot_df.sort_values(
-        ["起漲前兆分數", "類股熱度分數", "交易可行分數", "推薦總分", "訊號分數"],
-        ascending=[False, False, False, False, False],
+        ["型態突破分數", "爆發力分數", "起漲前兆分數", "類股熱度分數", "交易可行分數", "推薦總分", "訊號分數"],
+        ascending=[False, False, False, False, False, False, False],
     ).reset_index(drop=True)
     return hot_df
 
@@ -3322,7 +3322,10 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    final_df = final_df.sort_values(["推薦總分", "起漲前兆分數", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False, False]).reset_index(drop=True)
+    final_df = final_df.sort_values(
+        ["推薦總分", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"],
+        ascending=[False, False, False, False, False, False, False],
+    ).reset_index(drop=True)
 
     if "勾選" not in final_df.columns:
         final_df.insert(0, "勾選", False)
@@ -3393,11 +3396,11 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
     cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
 
     leader_export = leader_df[
-        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
+        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
     ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
 
     factor_export = factor_rank[
-        ["股票代號", "股票名稱", "類別", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
+        ["股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
     ].head(top_n).copy() if not factor_rank.empty else pd.DataFrame()
 
     return rec_export, cat_export, leader_export, factor_export
@@ -3738,8 +3741,8 @@ def main():
         st.session_state[real_record_key] = st.session_state.pop(next_record_key)
 
     render_pro_hero(
-        title="股神推薦｜V2 升級版",
-        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 寫入 8_股神推薦紀錄。",
+        title="股神推薦｜V3 最終修整版",
+        subtitle="保留舊版完整功能 + 市場/型態/爆發整合 + 勾選/匯出/推薦紀錄再修整。",
     )
 
     if master_df is None or master_df.empty:
@@ -4031,11 +4034,13 @@ def main():
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
     leader_count = int((rec_df["是否領先同類股"] == "是").sum())
 
+    hot_count = len(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) else 0
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強勢推薦", "value": strong_count, "delta": "最高等級群", "delta_class": "pro-kpi-delta-flat"},
             {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "補抓名單", "value": hot_count, "delta": "起漲補抓", "delta_class": "pro-kpi-delta-flat"},
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
     )
@@ -4323,6 +4328,7 @@ def main():
                 ("類股熱度分數", format_number(focus_row.get("類股熱度分數"), 1), ""),
                 ("是否領先同類股", _safe_str(focus_row.get("是否領先同類股")), ""),
                 ("起漲判斷", _safe_str(focus_row.get("起漲判斷")), ""),
+                ("建議切入區", _safe_str(focus_row.get("建議切入區")), ""),
                 ("推薦買點（拉回）", format_number(focus_row.get("推薦買點_拉回"), 2), ""),
                 ("推薦買點（突破）", format_number(focus_row.get("推薦買點_突破"), 2), ""),
                 ("停損價", format_number(focus_row.get("停損價"), 2), ""),
@@ -4341,8 +4347,9 @@ def main():
         st.caption("這份名單不影響主名單排序；用途是補抓接近門檻、但具起漲結構與類股熱度的股票。")
         hot_show_cols = [
             "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分",
+            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "起漲前兆分數", "交易可行分數", "類股熱度分數", "訊號分數",
-            "起漲判斷", "推薦理由摘要", "補抓原因"
+            "起漲判斷", "建議切入區", "推薦理由摘要", "補抓原因"
         ]
         st.dataframe(_format_df(hot_pick_df[[c for c in hot_show_cols if c in hot_pick_df.columns]].head(max(top_n, 20))), use_container_width=True, hide_index=True)
 
@@ -4370,7 +4377,7 @@ def main():
                 leader_df[
                     [
                         "股票代號", "股票名稱", "類別", "類股內排名", "類股前3強",
-                        "是否領先同類股", "同類股領先幅度", "個股原始總分",
+                        "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分",
                         "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要",
                     ]
                 ].head(top_n)
@@ -4384,7 +4391,7 @@ def main():
             _format_df(
                 factor_rank[
                     [
-                        "股票代號", "股票名稱", "類別", "自動因子總分", "EPS代理分數",
+                        "股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數",
                         "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數",
                         "法人連買代理分數", "自動因子摘要",
                     ]
