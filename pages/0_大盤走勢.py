@@ -195,6 +195,14 @@ def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_type")] = level
 
 
+def _refresh_nonce() -> int:
+    return int(st.session_state.get(_k("refresh_nonce"), 0) or 0)
+
+
+def _bump_refresh_nonce():
+    st.session_state[_k("refresh_nonce")] = _refresh_nonce() + 1
+
+
 def _github_config() -> dict[str, str]:
     return {
         "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
@@ -344,7 +352,7 @@ def _iter_recent_dates(pred_date_text: str, lookback_days: int = 10) -> list[pd.
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
+def _fetch_stooq(symbol: str, pred_date_text: str, refresh_nonce: int = 0) -> dict[str, Any]:
     pred_dt = pd.to_datetime(pred_date_text, errors="coerce")
     if pd.isna(pred_dt):
         pred_dt = pd.Timestamp.today().normalize()
@@ -561,9 +569,9 @@ def _normalize_stooq_symbol(symbol: str) -> str:
     }
     return mapping.get(s, s)
 
-def _price_on_or_before(symbol: str, pred_date_text: str, lookback_days: int = 15) -> dict[str, Any]:
+def _price_on_or_before(symbol: str, pred_date_text: str, lookback_days: int = 15, refresh_nonce: int = 0) -> dict[str, Any]:
     normalized = _normalize_stooq_symbol(symbol)
-    data = _fetch_stooq(normalized, pred_date_text)
+    data = _fetch_stooq(normalized, pred_date_text, refresh_nonce)
     if data:
         data = dict(data)
         data["used_date"] = _safe_str(data.get("date"))
@@ -576,7 +584,7 @@ def _price_on_or_before(symbol: str, pred_date_text: str, lookback_days: int = 1
 
     for i in range(1, lookback_days + 1):
         dt_text = (pred_dt - pd.Timedelta(days=i)).strftime("%Y-%m-%d")
-        data = _fetch_stooq(normalized, dt_text)
+        data = _fetch_stooq(normalized, dt_text, refresh_nonce)
         if data:
             data = dict(data)
             data["used_date"] = _safe_str(data.get("date"))
@@ -587,7 +595,7 @@ def _price_on_or_before(symbol: str, pred_date_text: str, lookback_days: int = 1
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
+def _fetch_twse_institutional(pred_date_text: str, refresh_nonce: int = 0) -> dict[str, Any]:
     out = {"foreign": None, "total3": None, "source": "fallback", "used_date": ""}
     for dt in _iter_recent_dates(pred_date_text, 8):
         ymd = dt.strftime('%Y%m%d')
@@ -622,10 +630,10 @@ def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
             return out
     # fallback：用 ADR / 美股夜盤代理估算，避免頁面只剩空殼
     try:
-        tsm = _price_on_or_before('TSM', pred_date_text, 15)
-        sox = _price_on_or_before('^SOX', pred_date_text, 15)
-        ixic = _price_on_or_before('^IXIC', pred_date_text, 15)
-        spx = _price_on_or_before('^GSPC', pred_date_text, 15)
+        tsm = _price_on_or_before('TSM', pred_date_text, 15, refresh_nonce)
+        sox = _price_on_or_before('^SOX', pred_date_text, 15, refresh_nonce)
+        ixic = _price_on_or_before('^IXIC', pred_date_text, 15, refresh_nonce)
+        spx = _price_on_or_before('^GSPC', pred_date_text, 15, refresh_nonce)
         pct_mix = float(tsm.get('pct', 0) or 0) * 0.40 + float(sox.get('pct', 0) or 0) * 0.25 + float(ixic.get('pct', 0) or 0) * 0.20 + float(spx.get('pct', 0) or 0) * 0.15
         out['foreign'] = round(pct_mix * 28.0, 2)
         out['total3'] = round(pct_mix * 36.0, 2)
@@ -636,7 +644,7 @@ def _fetch_twse_institutional(pred_date_text: str) -> dict[str, Any]:
     return out
 
 
-def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
+def _fetch_taifex_sentiment(pred_date_text: str, refresh_nonce: int = 0) -> dict[str, Any]:
     out = {"foreign_fut_net": None, "pcr": None, "source": 'fallback', "used_date": ""}
     import re
     for dt in _iter_recent_dates(pred_date_text, 8):
@@ -661,8 +669,8 @@ def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
             except Exception:
                 pass
     try:
-        es = _price_on_or_before('ES.F', pred_date_text, 15)
-        nq = _price_on_or_before('NQ.F', pred_date_text, 15)
+        es = _price_on_or_before('ES.F', pred_date_text, 15, refresh_nonce)
+        nq = _price_on_or_before('NQ.F', pred_date_text, 15, refresh_nonce)
         mix = float(es.get('pct', 0) or 0) * 0.45 + float(nq.get('pct', 0) or 0) * 0.55
         est = round(max(0.7, min(1.3, 1.0 + (-mix / 20.0))), 2)
         out.update({'pcr': est, 'source': 'fallback_est', 'used_date': _safe_str(es.get('used_date') or nq.get('used_date') or pred_date_text)})
@@ -671,7 +679,7 @@ def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
     return out
 
 
-def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
+def _fetch_twse_margin(pred_date_text: str, refresh_nonce: int = 0) -> dict[str, Any]:
     out = {"margin_change": None, "short_change": None, "source": 'fallback', "used_date": ""}
     for dt in _iter_recent_dates(pred_date_text, 8):
         ymd = dt.strftime('%Y%m%d')
@@ -704,9 +712,9 @@ def _fetch_twse_margin(pred_date_text: str) -> dict[str, Any]:
                 pass
     # fallback：用 ADR / 美股夜盤代理估算融資券變化
     try:
-        tsm = _price_on_or_before('TSM', pred_date_text, 15)
-        es = _price_on_or_before('ES.F', pred_date_text, 15)
-        nq = _price_on_or_before('NQ.F', pred_date_text, 15)
+        tsm = _price_on_or_before('TSM', pred_date_text, 15, refresh_nonce)
+        es = _price_on_or_before('ES.F', pred_date_text, 15, refresh_nonce)
+        nq = _price_on_or_before('NQ.F', pred_date_text, 15, refresh_nonce)
         mix = float(tsm.get('pct', 0) or 0) * 0.50 + float(es.get('pct', 0) or 0) * 0.25 + float(nq.get('pct', 0) or 0) * 0.25
         out['margin_change'] = round(-mix * 8.0, 2)
         out['short_change'] = round(max(-30.0, min(30.0, -mix * 6.0)), 2)
@@ -814,26 +822,22 @@ def _derive_event_list(news_rows: list[dict[str, str]]) -> str:
     return '｜'.join(hits[:5]) if hits else '無重大事件關鍵字'
 
 
-def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
-    twii = _price_on_or_before("^TWII", pred_date_text, 15)
-    nas = _price_on_or_before("^IXIC", pred_date_text, 15)
-    sox = _price_on_or_before("^SOX", pred_date_text, 15)
-    spx = _price_on_or_before("^GSPC", pred_date_text, 15)
-    adr = _price_on_or_before("TSM", pred_date_text, 15)
-    es = _price_on_or_before("ES.F", pred_date_text, 15)
-    nq = _price_on_or_before("NQ.F", pred_date_text, 15)
-    vix = _price_on_or_before("^VIX", pred_date_text, 15)
-    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 15)
+def _calc_market_context(pred_date_text: str, refresh_nonce: int = 0) -> dict[str, Any]:
+    twii = _price_on_or_before("^TWII", pred_date_text, 15, refresh_nonce)
+    nas = _price_on_or_before("^IXIC", pred_date_text, 15, refresh_nonce)
+    sox = _price_on_or_before("^SOX", pred_date_text, 15, refresh_nonce)
+    spx = _price_on_or_before("^GSPC", pred_date_text, 15, refresh_nonce)
+    adr = _price_on_or_before("TSM", pred_date_text, 15, refresh_nonce)
+    es = _price_on_or_before("ES.F", pred_date_text, 15, refresh_nonce)
+    nq = _price_on_or_before("NQ.F", pred_date_text, 15, refresh_nonce)
+    vix = _price_on_or_before("^VIX", pred_date_text, 15, refresh_nonce)
+    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 15, refresh_nonce)
     news_rows = _search_news_headlines(pred_date_text)
     news_score, news_logic, main_risk = _news_risk_score(news_rows)
 
-    inst = _fetch_twse_institutional(pred_date_text)
-    futopt = _fetch_taifex_sentiment(pred_date_text)
-    margin = _fetch_twse_margin(pred_date_text)
-
-    inst = _fetch_twse_institutional(pred_date_text)
-    futopt = _fetch_taifex_sentiment(pred_date_text)
-    margin = _fetch_twse_margin(pred_date_text)
+    inst = _fetch_twse_institutional(pred_date_text, refresh_nonce)
+    futopt = _fetch_taifex_sentiment(pred_date_text, refresh_nonce)
+    margin = _fetch_twse_margin(pred_date_text, refresh_nonce)
 
     tech_score = 0.0
     structure_notes = []
@@ -1349,15 +1353,16 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     }
 
 
-def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame, refresh_nonce: int = 0) -> tuple[pd.DataFrame, dict[str, Any]]:
     sig_payload = {
         "pred_date_text": pred_date_text,
+        "refresh_nonce": refresh_nonce,
         "records": _ensure_columns(records_df)[["推估日期", "模式名稱", "更新時間", "整體檢討分", "方向是否命中", "區間是否命中", "建議動作是否合適"]].fillna("").astype(str).to_dict(orient="records") if isinstance(records_df, pd.DataFrame) and not records_df.empty else [],
     }
     sig = make_signature(sig_payload) if callable(make_signature) else ""
     if callable(session_cached_compute) and sig:
         def _compute():
-            ctx = _calc_market_context(pred_date_text)
+            ctx = _calc_market_context(pred_date_text, refresh_nonce)
             weights = _get_dynamic_weights(records_df)
             rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
             pred_df = pd.DataFrame(rows)
@@ -1368,7 +1373,7 @@ def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame) -> tuple[
         (pred_df, ctx), _ = session_cached_compute(st, "macro_predict_all_models", sig, _compute)
         return pred_df, ctx
 
-    ctx = _calc_market_context(pred_date_text)
+    ctx = _calc_market_context(pred_date_text, refresh_nonce)
     weights = _get_dynamic_weights(records_df)
     rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
     pred_df = pd.DataFrame(rows)
@@ -1604,7 +1609,7 @@ def _parse_custom_stock_text(text: str) -> list[dict[str, str]]:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _get_stock_linkage_snapshot(stock_no: str, stock_name: str, market_type: str) -> dict[str, Any]:
+def _get_stock_linkage_snapshot(stock_no: str, stock_name: str, market_type: str, refresh_nonce: int = 0) -> dict[str, Any]:
     out = {
         "最新價": None,
         "漲跌%": None,
@@ -1721,7 +1726,7 @@ def _build_stock_linkage_df(top_pick: dict[str, Any], ctx: dict[str, Any], use_w
     for r in rows:
         cache_key = (_safe_str(r["股票代號"]), _safe_str(r["股票名稱"]), _safe_str(r["市場別"]))
         if cache_key not in snap_cache:
-            snap_cache[cache_key] = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"])
+            snap_cache[cache_key] = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"], _refresh_nonce())
         snap = snap_cache.get(cache_key, {})
         action, bias, reason = _macro_stock_action(macro_score, risk_level, _safe_float(snap.get("技術分"), 0) or 0.0, _safe_float(snap.get("漲跌%")))
         out.append({
@@ -1774,6 +1779,7 @@ def main():
         if st.button("🔄 重新載入紀錄", use_container_width=True):
             df, err = _read_records_from_github()
             _save_state_df(df)
+            _bump_refresh_nonce()
             _set_status("已重新載入紀錄" if not err else err, "success" if not err else "warning")
             st.rerun()
     with top[1]:
@@ -1781,9 +1787,15 @@ def main():
             try:
                 _fetch_stooq.clear()
                 _search_news_headlines.clear()
+                _fetch_twse_institutional.clear()
+                _fetch_taifex_sentiment.clear()
+                _fetch_twse_margin.clear()
+                _get_stock_linkage_snapshot.clear()
+                _predict_all_models.clear()
             except Exception:
                 pass
-            _set_status("資料快取已清除", "success")
+            _bump_refresh_nonce()
+            _set_status("資料快取已清除，已強制重新抓取最新資料", "success")
             st.rerun()
     with top[2]:
         quick_mode = st.toggle("快顯模式", value=True, key=_k("quick_mode"))
@@ -1791,13 +1803,13 @@ def main():
         auto_save = st.toggle("儲存即同步", value=False, key=_k("auto_save"))
     with top[4]:
         pred_date_input = st.date_input("推估日期", value=st.session_state.get(_k("active_pred_date"), date.today()), key=_k("pred_date"))
-        if st.button("套用日期", use_container_width=True, key=_k("apply_pred_date")):
+        if pd.to_datetime(st.session_state.get(_k("active_pred_date"), date.today()), errors="coerce") != pd.to_datetime(pred_date_input, errors="coerce"):
             st.session_state[_k("active_pred_date")] = pred_date_input
+            _bump_refresh_nonce()
             st.rerun()
+        st.caption("日期變更後會自動重新計算，不需要再按套用。")
 
     active_pred_date = st.session_state.get(_k("active_pred_date"), pred_date_input)
-    if pd.to_datetime(active_pred_date, errors="coerce") != pd.to_datetime(pred_date_input, errors="coerce"):
-        st.info(f"目前分析日期仍為 {pd.to_datetime(active_pred_date).strftime('%Y-%m-%d')}，按一下『套用日期』才會重新計算。")
 
     base_df = _get_state_df()
     if base_df.empty:
@@ -1806,12 +1818,31 @@ def main():
         base_df = _get_state_df()
 
     pred_date_text = pd.to_datetime(active_pred_date).strftime("%Y-%m-%d")
-    pred_df, ctx = _predict_all_models(pred_date_text, base_df)
+    pred_df, ctx = _predict_all_models(pred_date_text, base_df, _refresh_nonce())
     top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
     scoreboard = _build_scoreboard(base_df)
 
     if _safe_str(ctx.get("market_data_date")) and _safe_str(ctx.get("market_data_date")) != pred_date_text:
         st.warning(f"你選的是 {pred_date_text}，但加權最近可用交易資料是 {ctx.get('market_data_date')}，因此部分因子會以最近交易日回放。")
+
+    refresh_col1, refresh_col2 = st.columns([1.2, 5])
+    with refresh_col1:
+        if st.button("📡 立即更新大盤資料", use_container_width=True, key=_k("force_refresh_market")):
+            try:
+                _fetch_stooq.clear()
+                _search_news_headlines.clear()
+                _fetch_twse_institutional.clear()
+                _fetch_taifex_sentiment.clear()
+                _fetch_twse_margin.clear()
+                _get_stock_linkage_snapshot.clear()
+                _predict_all_models.clear()
+            except Exception:
+                pass
+            _bump_refresh_nonce()
+            _set_status("已強制重新抓取最新大盤資料", "success")
+            st.rerun()
+    with refresh_col2:
+        st.caption(f"目前快取版本：{_refresh_nonce()}｜若你覺得數字不動，按左邊這顆就會重抓。")
 
     render_pro_kpi_row([
         {"label": "推估日期", "value": pred_date_text, "delta": ctx.get("scenario", ""), "delta_class": "pro-kpi-delta-flat"},
@@ -1820,6 +1851,9 @@ def main():
         {"label": "信心度", "value": f"{_safe_float(top_pick.get('股神信心度'), 0):.1f}%", "delta": _safe_str(top_pick.get("風險等級")), "delta_class": "pro-kpi-delta-flat"},
         {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
+
+    if quick_mode:
+        st.caption("快顯模式啟用中：本頁仍會更新資料，但優先顯示關鍵結論。")
 
     _render_macro_dashboard(top_pick, pred_df, ctx)
 
