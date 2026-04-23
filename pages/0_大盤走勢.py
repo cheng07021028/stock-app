@@ -36,6 +36,12 @@ try:
 except Exception:
     get_realtime_stock_info = None
 
+try:
+    from project_perf_hub import make_signature, session_cached_compute
+except Exception:
+    make_signature = None
+    session_cached_compute = None
+
 PAGE_TITLE = "大盤走勢｜股神Pro因子強化版"
 PFX = "macro_godpro_factor_"
 
