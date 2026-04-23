@@ -1482,7 +1482,7 @@ def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         },
         平均買點回測分數=("買點回測分數", "mean"),
         平均20日勝率=("20日勝率%", "mean"),
-        平均報酬%=("平均報酬%", "mean"),
+        平均報酬_pct=("平均報酬%", "mean"),
         達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
         停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
         平均推薦總分=("推薦總分", "mean"),
