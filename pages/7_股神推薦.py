@@ -387,22 +387,32 @@ def _raw_user_weight_map_from_ui() -> dict[str, float]:
         "factor": float(st.session_state.get(_ui_pref_key("weight_factor"), st.session_state.get(_k("weight_factor"), 2.0))),
     }
 
-def _reset_weight_ui_to_defaults():
-    defaults = dict(DEFAULT_SCORE_WEIGHT_MAP)
-    st.session_state[_ui_pref_key("weight_market")] = float(defaults["market"])
-    st.session_state[_ui_pref_key("weight_tech")] = float(defaults["tech"])
-    st.session_state[_ui_pref_key("weight_prelaunch")] = float(defaults["prelaunch"])
-    st.session_state[_ui_pref_key("weight_trade")] = float(defaults["trade"])
-    st.session_state[_ui_pref_key("weight_heat")] = float(defaults["heat"])
-    st.session_state[_ui_pref_key("weight_pattern")] = float(defaults["pattern"])
-    st.session_state[_ui_pref_key("weight_burst")] = float(defaults["burst"])
-    st.session_state[_ui_pref_key("weight_leader")] = float(defaults["leader"])
-    st.session_state[_ui_pref_key("weight_factor")] = float(defaults["factor"])
+def _apply_pending_weight_actions():
+    if st.session_state.get(_k("weight_reset_requested"), False):
+        defaults = dict(DEFAULT_SCORE_WEIGHT_MAP)
+        st.session_state[_ui_pref_key("weight_market")] = float(defaults["market"])
+        st.session_state[_ui_pref_key("weight_tech")] = float(defaults["tech"])
+        st.session_state[_ui_pref_key("weight_prelaunch")] = float(defaults["prelaunch"])
+        st.session_state[_ui_pref_key("weight_trade")] = float(defaults["trade"])
+        st.session_state[_ui_pref_key("weight_heat")] = float(defaults["heat"])
+        st.session_state[_ui_pref_key("weight_pattern")] = float(defaults["pattern"])
+        st.session_state[_ui_pref_key("weight_burst")] = float(defaults["burst"])
+        st.session_state[_ui_pref_key("weight_leader")] = float(defaults["leader"])
+        st.session_state[_ui_pref_key("weight_factor")] = float(defaults["factor"])
+        st.session_state[_k("weight_reset_requested")] = False
 
-def _apply_weight_ui_to_runtime():
+    pending_apply = st.session_state.get(_k("weight_apply_pending_map"))
+    if isinstance(pending_apply, dict):
+        for key, val in pending_apply.items():
+            st.session_state[_k(f"weight_{key}")] = float(val)
+        st.session_state[_k("weight_apply_pending_map")] = None
+
+def _request_reset_weight_ui_to_defaults():
+    st.session_state[_k("weight_reset_requested")] = True
+
+def _request_apply_weight_ui_to_runtime():
     raw_map = _raw_user_weight_map_from_ui()
-    for key, val in raw_map.items():
-        st.session_state[_k(f"weight_{key}")] = float(val)
+    st.session_state[_k("weight_apply_pending_map")] = raw_map
     return raw_map
 
 def _get_mode_seed_weight(mode: str) -> dict[str, float]:
@@ -4382,6 +4392,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 # Main
 # =========================================================
 def main():
+    _apply_pending_weight_actions()
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
@@ -4656,7 +4667,7 @@ def main():
             apply_weight_btn = st.form_submit_button("套用權重", use_container_width=True)
 
         if reset_weight_btn:
-            _reset_weight_ui_to_defaults()
+            _request_reset_weight_ui_to_defaults()
             st.session_state[_k("weight_apply_msg")] = "已恢復原始權重設定。"
             st.rerun()
 
@@ -4664,7 +4675,7 @@ def main():
             if abs(remaining_weight) > 1e-9:
                 st.session_state[_k("weight_apply_msg")] = f"權重總和目前為 {raw_weight_total:.0f}%，必須剛好 100% 才能套用。"
             else:
-                _apply_weight_ui_to_runtime()
+                _request_apply_weight_ui_to_runtime()
                 st.session_state[_k("weight_apply_msg")] = "權重已套用。"
 
         weight_msg = _safe_str(st.session_state.get(_k("weight_apply_msg"), ""))
