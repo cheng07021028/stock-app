@@ -54,6 +54,19 @@ except Exception:
     apply_macro_mode_to_stock_score = None
     render_macro_mode_hint = None
 
+try:
+    from watchlist_runtime_sync import ensure_watchlist_runtime_fresh
+except Exception:
+    ensure_watchlist_runtime_fresh = None
+
+try:
+    from project_perf_hub import dedupe_stock_rows, make_signature, session_cached_compute
+except Exception:
+    dedupe_stock_rows = None
+    make_signature = None
+    session_cached_compute = None
+
+
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -4185,6 +4198,12 @@ def main():
             selected_categories=selected_categories,
         )
 
+    if callable(dedupe_stock_rows):
+        universe_items = dedupe_stock_rows(
+            universe_items,
+            key_fields=("code", "market"),
+        )
+
     if not universe_items:
         st.warning("目前掃描池沒有股票。")
         return
@@ -4197,19 +4216,58 @@ def main():
     hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh:
-        rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
-            universe_items=universe_items,
-            master_df=master_df,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-            min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-            selected_categories=selected_categories,
-            mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-            risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
-            min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-            min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
-        )
+        perf_payload = {
+            "watchlist_version": int(st.session_state.get("watchlist_version", 0) or 0),
+            "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"), "")),
+            "group": _safe_str(st.session_state.get(_k("group"), "")),
+            "days": int(st.session_state.get(_k("days"), 120)),
+            "scan_limit": _safe_str(st.session_state.get(_k("scan_limit"), 1000)),
+            "selected_categories": selected_categories,
+            "min_total_score": float(st.session_state.get(_k("min_total_score"), 55.0)),
+            "min_signal_score": float(st.session_state.get(_k("min_signal_score"), -2.0)),
+            "min_prelaunch_score": float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+            "min_trade_score": float(st.session_state.get(_k("min_trade_score"), 45.0)),
+            "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
+            "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
+            "pick_strategy": _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")),
+            "universe_codes": [f"{_normalize_code(x.get('code'))}|{_safe_str(x.get('market'))}" for x in universe_items],
+        }
+        perf_sig = make_signature(perf_payload) if callable(make_signature) else ""
+        if callable(session_cached_compute) and perf_sig:
+            (rec_df, category_strength_df, hot_pick_df), used_cache = session_cached_compute(
+                st=st,
+                cache_name="godpick_result_bundle",
+                signature=perf_sig,
+                compute_fn=lambda: _build_recommend_df(
+                    universe_items=universe_items,
+                    master_df=master_df,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+                    min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+                    selected_categories=selected_categories,
+                    mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
+                    risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
+                    min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+                    min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
+                ),
+            )
+            if used_cache:
+                _set_status("同條件直接使用本輪快取結果，未重複掃描。", "success")
+        else:
+            rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
+                universe_items=universe_items,
+                master_df=master_df,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
+                min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
+                selected_categories=selected_categories,
+                mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
+                risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
+                min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
+                min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
+            )
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
