@@ -58,10 +58,10 @@ PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 25   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
-MAX_SCAN_WORKERS = 18        # 網路抓取型任務的並行上限，避免雲端過度塞爆
-MACRO_SCORE_BLEND = 0.12     # 大盤趨勢僅作輔助，不直接主導個股總分
-FAST_DEBUG_DISABLE_OVER = 300  # 掃描量太大時停用重型除錯樣本收集
+PROGRESS_UPDATE_EVERY = 20   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
+MAX_SCAN_WORKERS = 16        # 大量掃描並行上限
+MACRO_SCORE_BLEND = 0.12     # 大盤輔助權重，避免 0_大盤走勢誤差過度影響個股
+STAGE1_DEBUG_LIMIT = 250     # 掃描量過大時，不收集重型 debug 樣本
 
 GODPICK_RECORD_COLUMNS = [
     "record_id",
@@ -404,7 +404,7 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
             macro_scale = _safe_float(macro_adj.get("scale"), 1.0) or 1.0
             macro_bias = _safe_float(macro_adj.get("bias"), 0.0) or 0.0
             macro_conf_bonus = _safe_float(macro_adj.get("confidence_bonus"), 0.0) or 0.0
-            tag = f"{tag} / 大盤輔助:{macro_mode_name}"
+            tag = f"{tag} / 大盤:{macro_mode_name}"
         except Exception:
             pass
 
@@ -2979,16 +2979,115 @@ def _dedupe_universe_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
         out.append(row)
     return out
 
-def _get_progress_update_every(total_count: int) -> int:
-    if total_count >= 1500:
-        return 60
-    if total_count >= 1000:
-        return 45
-    if total_count >= 600:
-        return 35
-    if total_count >= 300:
-        return 25
-    return PROGRESS_UPDATE_EVERY
+def _get_scan_mode_keep_count(scan_mode: str, passed_count: int) -> int:
+    scan_mode = _safe_str(scan_mode)
+    if passed_count <= 0:
+        return 0
+    if scan_mode == "全篩":
+        return passed_count
+    if scan_mode == "篩選一半":
+        return max(1, int(round(passed_count * 0.5)))
+    if scan_mode == "初篩":
+        return max(120, int(round(passed_count * 0.35)))
+    # 股神建議：偏保守但不太小，避免漏股
+    return max(180, min(320, int(round(passed_count * 0.25))))
+
+def _quick_prefilter_from_hist(hist_df: pd.DataFrame) -> tuple[bool, float, str]:
+    if hist_df is None or hist_df.empty:
+        return False, 0.0, "無歷史資料"
+
+    last = hist_df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    vol20 = _safe_float(last.get("VOL20"))
+    vol5 = _safe_float(last.get("VOL5"))
+    ret20 = _safe_float(last.get("RET20"), 0) or 0
+    atr14 = _safe_float(last.get("ATR14"))
+
+    if close_now in [None, 0]:
+        return False, 0.0, "收盤價無效"
+    if len(hist_df) < 60:
+        return False, 0.0, "歷史資料不足60天"
+    if vol20 not in [None] and vol20 < 80000:
+        return False, 0.0, "量能過低"
+
+    score = 45.0
+    if ma20 not in [None] and close_now >= ma20:
+        score += 12
+    if ma60 not in [None] and close_now >= ma60:
+        score += 10
+    if ma20 not in [None] and ma60 not in [None] and ma20 >= ma60:
+        score += 8
+    if vol5 not in [None, 0] and vol20 not in [None, 0]:
+        vr = vol5 / vol20
+        if vr >= 1.5:
+            score += 10
+        elif vr >= 1.1:
+            score += 6
+        elif vr < 0.65:
+            score -= 6
+    if ret20 > 0:
+        score += min(ret20 * 0.6, 12)
+    elif ret20 < -18:
+        score -= 10
+    if atr14 not in [None] and close_now not in [None, 0]:
+        atr_pct = atr14 / close_now * 100
+        if atr_pct > 12:
+            score -= 12
+        elif atr_pct > 8:
+            score -= 6
+
+    passed = score >= 44
+    return passed, _score_clip(score), "" if passed else "低成本初篩未通過"
+
+def _quick_prefilter_one_stock(
+    item: dict[str, str],
+    master_lookup: dict[str, dict[str, str]],
+    start_dt: date,
+    end_dt: date,
+    clean_categories: list[str],
+) -> dict[str, Any]:
+    code = _normalize_code(item.get("code"))
+    manual_name = _safe_str(item.get("name"))
+    manual_market = _safe_str(item.get("market"))
+    manual_category = _normalize_category(item.get("category"))
+
+    if not code:
+        return {"status": "invalid_code", "code": "", "prefilter_score": 0.0, "message": "股票代號空白"}
+
+    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_lookup)
+
+    if clean_categories and category not in clean_categories:
+        return {"status": "category_filtered", "code": code, "prefilter_score": 0.0, "message": f"類型不符合：{category}"}
+
+    hist_df, used_market, history_debug = _get_history_smart(
+        stock_no=code,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+    if hist_df.empty:
+        return {
+            "status": "no_history",
+            "code": code,
+            "prefilter_score": 0.0,
+            "message": "抓不到歷史資料",
+            "history_debug": history_debug,
+            "used_market": used_market,
+        }
+
+    passed, prefilter_score, msg = _quick_prefilter_from_hist(hist_df)
+    return {
+        "status": "stage1_ok" if passed else "prefilter_filtered",
+        "code": code,
+        "name": stock_name,
+        "market": used_market,
+        "category": category,
+        "prefilter_score": prefilter_score,
+        "message": msg,
+    }
 
 def _analyze_one_stock_for_recommend(
     item: dict[str, str],
@@ -3217,16 +3316,15 @@ def _build_recommend_df(
     risk_strictness: str,
     min_prelaunch_score: float,
     min_trade_score: float,
+    scan_mode: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    universe_items = _dedupe_universe_items(universe_items)
     if not universe_items:
         _save_debug_scan_summary({})
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(MAX_SCAN_WORKERS, max(6, total_count // 20 if total_count >= 120 else 6))
-    progress_every = _get_progress_update_every(total_count)
+    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
@@ -3236,7 +3334,6 @@ def _build_recommend_df(
     start_ts = time.time()
     done_count = 0
     base_rows = []
-    collect_debug_samples = total_count <= FAST_DEBUG_DISABLE_OVER
     debug_summary = {
         "total_count": total_count,
         "analyzed_ok": 0,
@@ -3290,26 +3387,26 @@ def _build_recommend_df(
                         debug_summary[status] = int(debug_summary.get(status, 0)) + 1
                         msg = _safe_str(result.get("message"))
                         code = _safe_str(result.get("code"))
-                        if collect_debug_samples and status == "no_history":
+                        if collect_debug and status == "no_history":
                             hdbg = result.get("history_debug", {}) or {}
                             attempt_lines = []
-                            for att in hdbg.get("attempts", [])[:2]:
+                            for att in hdbg.get("attempts", [])[:3]:
                                 market = _safe_str(att.get("market_type")) or "未知市場"
                                 rows = att.get("rows", 0)
                                 err = _safe_str(att.get("error"))
                                 source = _safe_str(att.get("source"))
                                 attempt_lines.append(f"{market} rows={rows} source={source} err={err}")
                             debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
-                        elif collect_debug_samples and status == "analysis_error":
+                        elif collect_debug and status == "analysis_error":
                             debug_summary["error_samples"].append(f"{code}：{msg}")
             except Exception as e:
                 debug_summary["analysis_error"] += 1
-                if collect_debug_samples:
+                if collect_debug:
                     debug_summary["error_samples"].append(f"future.result 例外：{e}")
             should_update_progress = (
                 done_count == 1
                 or done_count == total_count
-                or done_count % max(1, progress_every) == 0
+                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
                 or done_count / total_count >= 0.98
             )
             if should_update_progress:
@@ -3319,15 +3416,17 @@ def _build_recommend_df(
                 eta_sec = avg_per_stock * remain_count
                 ratio = done_count / total_count if total_count > 0 else 0
 
-                progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
+                total_second_safe = max(total_second, 1)
+                phase_ratio = done_count / total_second_safe
+                progress_bar.progress(min(max(0.5 + phase_ratio * 0.5, 0.5), 1.0), text=f"第二階段：完整股神分析 {done_count}/{total_second_safe} ({phase_ratio*100:.1f}%)")
                 progress_text.caption(
-                    f"已完成 {done_count}/{total_count}｜"
+                    f"第二階段已完成 {done_count}/{max(total_second,1)}｜"
                     f"已花時間：{_fmt_seconds(elapsed)}｜"
                     f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
                     f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
                 )
 
-    progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
+    progress_bar.progress(1.0, text=f"推薦完成｜初篩通過 {len(stage1_df)} 檔｜完整分析 {len(stage1_keep_codes)} 檔")
     total_elapsed = time.time() - start_ts
     progress_text.caption(f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}")
 
@@ -3911,6 +4010,7 @@ def main():
         "min_prelaunch_score": 45.0,
         "min_trade_score": 45.0,
         "pick_strategy": "結合版",
+        "scan_mode": "股神建議",
         "top_table_columns": [],
         "full_table_columns": [],
     }
@@ -3931,6 +4031,7 @@ def main():
     _ensure_ui_pref("recommend_mode", st.session_state.get(_k("recommend_mode"), "飆股模式"))
     _ensure_ui_pref("risk_strictness", st.session_state.get(_k("risk_strictness"), "標準"))
     _ensure_ui_pref("pick_strategy", st.session_state.get(_k("pick_strategy"), "結合版"))
+    _ensure_ui_pref("scan_mode", st.session_state.get(_k("scan_mode"), "股神建議"))
     _ensure_ui_pref("min_total_score", float(st.session_state.get(_k("min_total_score"), 55.0)))
     _ensure_ui_pref("min_signal_score", float(st.session_state.get(_k("min_signal_score"), -2.0)))
     _ensure_ui_pref("min_prelaunch_score", float(st.session_state.get(_k("min_prelaunch_score"), 45.0)))
@@ -3950,8 +4051,6 @@ def main():
         title="股神推薦｜V4 加速記憶版",
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
-
-    st.caption("本版已調降大盤趨勢對個股總分的影響，並針對 1000 檔以上掃描加入去重、降低重型除錯、提高並行效率。")
 
     if callable(render_macro_mode_hint):
         render_macro_mode_hint()
@@ -4054,7 +4153,7 @@ def main():
             )
 
         render_pro_section("模式 / 類型篩選")
-        m1, m2, m3 = st.columns([2, 2, 2])
+        m1, m2, m3, m4 = st.columns([2, 2, 2, 2])
         with m1:
             mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"]
             if st.session_state.get(_ui_pref_key("recommend_mode")) not in mode_options:
@@ -4066,6 +4165,16 @@ def main():
                 st.session_state[_ui_pref_key("risk_strictness")] = st.session_state.get(_k("risk_strictness"), "標準")
             form_risk_strictness = st.selectbox("風險過濾強度", strict_options, key=_ui_pref_key("risk_strictness"))
         with m3:
+            scan_mode_options = ["股神建議", "初篩", "篩選一半", "全篩"]
+            if st.session_state.get(_ui_pref_key("scan_mode")) not in scan_mode_options:
+                st.session_state[_ui_pref_key("scan_mode")] = st.session_state.get(_k("scan_mode"), "股神建議")
+            form_scan_mode = st.selectbox(
+                "掃描模式",
+                scan_mode_options,
+                key=_ui_pref_key("scan_mode"),
+                help="股神建議=先做低成本初篩，再對較有機會的股票做完整分析；全篩=全部都進完整分析。",
+            )
+        with m4:
             pick_options = ["精準版", "結合版"]
             if st.session_state.get(_ui_pref_key("pick_strategy")) not in pick_options:
                 st.session_state[_ui_pref_key("pick_strategy")] = st.session_state.get(_k("pick_strategy"), "結合版")
@@ -4144,6 +4253,7 @@ def main():
         _reset_ui_pref("recommend_mode", "飆股模式")
         _reset_ui_pref("risk_strictness", "標準")
         _reset_ui_pref("pick_strategy", "結合版")
+        _reset_ui_pref("scan_mode", "股神建議")
         st.session_state[_k("universe_mode")] = "自選群組"
         st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
         st.session_state[_k("days")] = 120
@@ -4158,6 +4268,7 @@ def main():
         st.session_state[_k("recommend_mode")] = "飆股模式"
         st.session_state[_k("risk_strictness")] = "標準"
         st.session_state[_k("pick_strategy")] = "結合版"
+        st.session_state[_k("scan_mode")] = "股神建議"
         st.session_state[_k("submitted_once")] = False
         st.session_state[_k("focus_code")] = ""
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
@@ -4173,7 +4284,7 @@ def main():
         for pref_name in [
             "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
             "selected_categories", "min_total_score", "min_signal_score",
-            "min_prelaunch_score", "min_trade_score", "pick_strategy",
+            "min_prelaunch_score", "min_trade_score", "pick_strategy", "scan_mode",
             "recommend_mode", "risk_strictness",
         ]:
             _sync_ui_pref_to_saved(pref_name)
@@ -4189,6 +4300,7 @@ def main():
         st.session_state[_k("min_prelaunch_score")] = float(form_min_prelaunch_score)
         st.session_state[_k("min_trade_score")] = float(form_min_trade_score)
         st.session_state[_k("pick_strategy")] = form_pick_strategy
+        st.session_state[_k("scan_mode")] = form_scan_mode
         st.session_state[_k("recommend_mode")] = form_recommend_mode
         st.session_state[_k("risk_strictness")] = form_risk_strictness
         st.session_state[_k("submitted_once")] = True
@@ -4198,6 +4310,7 @@ def main():
         [
             ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
             ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
+            ("掃描模式", "新增 股神建議 / 初篩 / 篩選一半 / 全篩。", ""),
             ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
             ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
             ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
@@ -4239,7 +4352,7 @@ def main():
     start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
     end_dt = today
 
-    st.caption(f"本輪實際掃描去重後股票數：{len(universe_items)} 檔｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%")
+    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%")
 
     rec_df = pd.DataFrame()
     category_strength_df = pd.DataFrame()
@@ -4258,6 +4371,7 @@ def main():
             risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
             min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
+            scan_mode=_safe_str(st.session_state.get(_k("scan_mode"), "股神建議")),
         )
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
@@ -4692,6 +4806,7 @@ def main():
                 ("市場環境分數", "新增市場順風/逆風分數，讓同樣條件下順風盤優先。", ""),
                 ("型態 / 爆發", "新增型態突破分數、爆發力分數，讓起漲股更容易被拉出。", ""),
             ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
+            ("掃描模式", "新增 股神建議 / 初篩 / 篩選一半 / 全篩。", ""),
                 ("風險過濾", "新增 寬鬆 / 標準 / 嚴格，先淘汰不合格股票。", ""),
                 ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
                 ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
