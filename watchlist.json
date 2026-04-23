@@ -1,11 +1,6 @@
 {
   "庫存": [
     {
-      "code": "1342",
-      "name": "八貫",
-      "market": "上市"
-    },
-    {
       "code": "1504",
       "name": "東元",
       "market": "上市"
@@ -82,14 +77,12 @@
     {
       "code": "1441",
       "name": "大東",
-      "market": "上市",
-      "category": "紡織製鞋"
+      "market": "上市"
     },
     {
       "code": "1711",
       "name": "永光",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "1721",
@@ -104,8 +97,7 @@
     {
       "code": "2248",
       "name": "華勝-KY",
-      "market": "上市",
-      "category": "汽車"
+      "market": "上市"
     },
     {
       "code": "2474",
@@ -120,8 +112,7 @@
     {
       "code": "3189",
       "name": "景碩",
-      "market": "上市",
-      "category": "PCB載板"
+      "market": "上市"
     },
     {
       "code": "3338",
@@ -131,20 +122,17 @@
     {
       "code": "3588",
       "name": "通嘉",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "3605",
       "name": "宏致",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "3665",
       "name": "貿聯-KY",
-      "market": "上市",
-      "category": "連接器"
+      "market": "上市"
     }
   ]
 }
