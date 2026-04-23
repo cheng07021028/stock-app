@@ -246,6 +246,283 @@ def _compute_god_signal(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: di
     }
 
 
+
+
+def _grade_level(score: float, levels: list[tuple[float, str]]) -> str:
+    for threshold, label in levels:
+        if score >= threshold:
+            return label
+    return levels[-1][1] if levels else "一般"
+
+
+def _compute_main_uptrend_signal(df: pd.DataFrame) -> dict[str, Any]:
+    if df is None or df.empty or len(df) < 80:
+        return {"score": 0, "level": "資料不足", "summary": "資料不足，無法判斷主升段。", "items": []}
+
+    last = df.iloc[-1]
+    prev5 = df.iloc[max(0, len(df) - 6)]
+    prev10 = df.iloc[max(0, len(df) - 11)]
+    score = 0
+    items = []
+
+    close_now = _safe_float(last.get("收盤價"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    ma120 = _safe_float(last.get("MA120"))
+    ma20_prev = _safe_float(prev5.get("MA20"))
+    ma60_prev = _safe_float(prev10.get("MA60"))
+    dif = _safe_float(last.get("DIF"))
+    dea = _safe_float(last.get("DEA"))
+    vol = _safe_float(last.get("成交股數"), 0) or 0
+    vol20 = _safe_float(last.get("VOL20"), 0) or 0
+
+    if close_now is not None and ma20 is not None and close_now > ma20:
+        score += 18
+        items.append(("站上MA20", "是", ""))
+    else:
+        items.append(("站上MA20", "否", ""))
+
+    if close_now is not None and ma60 is not None and close_now > ma60:
+        score += 18
+        items.append(("站上MA60", "是", ""))
+    else:
+        items.append(("站上MA60", "否", ""))
+
+    if ma20 is not None and ma20_prev is not None and ma20 > ma20_prev:
+        score += 16
+        items.append(("MA20上彎", "是", ""))
+    else:
+        items.append(("MA20上彎", "否", ""))
+
+    if ma60 is not None and ma60_prev is not None and ma60 > ma60_prev:
+        score += 14
+        items.append(("MA60上彎", "是", ""))
+    else:
+        items.append(("MA60上彎", "否", ""))
+
+    if ma120 is not None and ma60 is not None and ma20 is not None and ma20 >= ma60 >= ma120:
+        score += 12
+        items.append(("均線多頭排列", "是", ""))
+    else:
+        items.append(("均線多頭排列", "否", ""))
+
+    recent_low = _safe_float(df.tail(20)["最低價"].min())
+    if close_now is not None and recent_low is not None and close_now >= recent_low * 1.08:
+        score += 10
+        items.append(("脫離近20日低點", "是", ""))
+    else:
+        items.append(("脫離近20日低點", "否", ""))
+
+    if dif is not None and dea is not None and dif > dea:
+        score += 6
+        items.append(("MACD偏多", "是", ""))
+    else:
+        items.append(("MACD偏多", "否", ""))
+
+    if dif is not None and dif > 0:
+        score += 6
+        items.append(("DIF站上0軸", "是", ""))
+    else:
+        items.append(("DIF站上0軸", "否", ""))
+
+    if vol20 > 0 and vol >= vol20:
+        score += 8
+        items.append(("量能不弱於20日均量", "是", ""))
+    else:
+        items.append(("量能不弱於20日均量", "否", ""))
+
+    level = _grade_level(score, [(78, "主升段明確"), (60, "主升段候選"), (40, "轉強觀察"), (0, "尚未成立")])
+    summary = f"主升段評分 {score}，判定：{level}。"
+    return {"score": score, "level": level, "summary": summary, "items": items}
+
+
+def _compute_false_break_signal(df: pd.DataFrame) -> dict[str, Any]:
+    if df is None or df.empty or len(df) < 25:
+        return {"score": 0, "direction": "無", "level": "資料不足", "summary": "資料不足，無法判斷真假突破。", "items": []}
+
+    score = 0
+    direction = "無"
+    level = "一般"
+    summary = "目前沒有明顯假突破 / 假跌破訊號。"
+    items = []
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev3 = df.iloc[-4:-1].copy()
+    close_now = _safe_float(last.get("收盤價"))
+    vol_now = _safe_float(last.get("成交股數"), 0) or 0
+    vol20 = _safe_float(last.get("VOL20"), 0) or 0
+    high20_prev = _safe_float(df.iloc[-21:-1]["最高價"].max())
+    low20_prev = _safe_float(df.iloc[-21:-1]["最低價"].min())
+
+    if close_now is not None and high20_prev is not None:
+        if _safe_float(prev.get("收盤價")) is not None and _safe_float(prev.get("收盤價")) > high20_prev and close_now < high20_prev:
+            direction = "假突破"
+            score += 45
+            items.append(("跌回前20日高下方", "是", ""))
+        else:
+            items.append(("跌回前20日高下方", "否", ""))
+
+    if close_now is not None and low20_prev is not None:
+        if _safe_float(prev.get("收盤價")) is not None and _safe_float(prev.get("收盤價")) < low20_prev and close_now > low20_prev:
+            direction = "假跌破"
+            score += 45
+            items.append(("站回前20日低上方", "是", ""))
+        else:
+            items.append(("站回前20日低上方", "否", ""))
+
+    if direction == "假突破":
+        if vol20 > 0 and vol_now < vol20:
+            score += 15
+            items.append(("回落量縮", "是", ""))
+        if prev3 is not None and not prev3.empty and all(prev3["收盤價"].fillna(0) <= (high20_prev or 0) * 1.03):
+            score += 10
+            items.append(("前段未能有效連續站穩", "是", ""))
+        level = _grade_level(score, [(65, "強假突破"), (45, "中假突破"), (25, "弱假突破"), (0, "一般")])
+        summary = f"真假突破評分 {score}，判定：{level}。突破後無法續強，需防追價陷阱。"
+    elif direction == "假跌破":
+        if vol20 > 0 and vol_now >= vol20:
+            score += 15
+            items.append(("站回帶量", "是", ""))
+        if prev3 is not None and not prev3.empty and all(prev3["收盤價"].fillna(0) >= (low20_prev or 0) * 0.97):
+            score += 10
+            items.append(("前段未能有效連續跌深", "是", ""))
+        level = _grade_level(score, [(65, "強假跌破"), (45, "中假跌破"), (25, "弱假跌破"), (0, "一般")])
+        summary = f"真假突破評分 {score}，判定：{level}。跌破後又站回，需防空方陷阱。"
+
+    return {"score": score, "direction": direction, "level": level, "summary": summary, "items": items}
+
+
+def _compute_divergence_signal(df: pd.DataFrame) -> dict[str, Any]:
+    if df is None or df.empty or len(df) < 50:
+        return {"score": 0, "type": "無", "level": "資料不足", "summary": "資料不足，無法判斷背離。", "items": []}
+
+    peak_idx, trough_idx = _detect_pivots_smart(df, window=3, min_gap=5)
+    items = []
+    score = 0
+    dtype = "無"
+    level = "一般"
+    summary = "目前沒有明顯背離。"
+
+    if len(trough_idx) >= 2:
+        i1, i2 = trough_idx[-2], trough_idx[-1]
+        p1, p2 = df.iloc[i1], df.iloc[i2]
+        low1, low2 = _safe_float(p1.get("最低價")), _safe_float(p2.get("最低價"))
+        k1, k2 = _safe_float(p1.get("K")), _safe_float(p2.get("K"))
+        dif1, dif2 = _safe_float(p1.get("DIF")), _safe_float(p2.get("DIF"))
+        v1, v2 = _safe_float(p1.get("成交股數"), 0) or 0, _safe_float(p2.get("成交股數"), 0) or 0
+        if low1 is not None and low2 is not None and low2 < low1:
+            if k1 is not None and k2 is not None and k2 > k1:
+                score += 28
+                items.append(("KD底背離", "是", ""))
+            if dif1 is not None and dif2 is not None and dif2 > dif1:
+                score += 28
+                items.append(("MACD底背離", "是", ""))
+            if v2 <= v1:
+                score += 12
+                items.append(("破底量未放大", "是", ""))
+            if score > 0:
+                dtype = "多方背離"
+                level = _grade_level(score, [(60, "強"), (40, "中"), (20, "弱"), (0, "一般")])
+                summary = f"背離評分 {score}，判定：{level}多方背離。"
+
+    bear_score = 0
+    bear_items = []
+    if len(peak_idx) >= 2:
+        i1, i2 = peak_idx[-2], peak_idx[-1]
+        p1, p2 = df.iloc[i1], df.iloc[i2]
+        h1, h2 = _safe_float(p1.get("最高價")), _safe_float(p2.get("最高價"))
+        k1, k2 = _safe_float(p1.get("K")), _safe_float(p2.get("K"))
+        dif1, dif2 = _safe_float(p1.get("DIF")), _safe_float(p2.get("DIF"))
+        v1, v2 = _safe_float(p1.get("成交股數"), 0) or 0, _safe_float(p2.get("成交股數"), 0) or 0
+        if h1 is not None and h2 is not None and h2 > h1:
+            if k1 is not None and k2 is not None and k2 < k1:
+                bear_score += 28
+                bear_items.append(("KD頂背離", "是", ""))
+            if dif1 is not None and dif2 is not None and dif2 < dif1:
+                bear_score += 28
+                bear_items.append(("MACD頂背離", "是", ""))
+            if v2 <= v1:
+                bear_score += 12
+                bear_items.append(("過高量未放大", "是", ""))
+
+    if bear_score > score and bear_score > 0:
+        score = bear_score
+        dtype = "空方背離"
+        level = _grade_level(score, [(60, "強"), (40, "中"), (20, "弱"), (0, "一般")])
+        items = bear_items
+        summary = f"背離評分 {score}，判定：{level}空方背離。"
+
+    return {"score": score, "type": dtype, "level": level, "summary": summary, "items": items}
+
+
+def _compute_god_table_signal(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict, god_signal: dict, main_up: dict, false_break: dict, divergence: dict) -> dict[str, Any]:
+    score = 0
+    reasons = []
+    safe_signal_score = _metric_number(signal_snapshot, "score", 0) or 0
+    radar_trend = _metric_number(radar, "trend", 50) or 50
+    radar_structure = _metric_number(radar, "structure", 50) or 50
+    break_text = _metric_text(sr_snapshot, "break_signal", "區間內")
+
+    score += safe_signal_score * 4
+    score += (radar_trend - 50) * 0.6
+    score += (radar_structure - 50) * 0.5
+    score += (_safe_float(main_up.get("score"), 0) or 0) * 0.5
+
+    if _safe_str(false_break.get("direction")) == "假突破":
+        score -= (_safe_float(false_break.get("score"), 0) or 0) * 0.9
+        reasons.append("出現假突破風險")
+    elif _safe_str(false_break.get("direction")) == "假跌破":
+        score += (_safe_float(false_break.get("score"), 0) or 0) * 0.5
+        reasons.append("出現假跌破收復")
+
+    if _safe_str(divergence.get("type")) == "多方背離":
+        score += (_safe_float(divergence.get("score"), 0) or 0) * 0.45
+        reasons.append("多方背離加分")
+    elif _safe_str(divergence.get("type")) == "空方背離":
+        score -= (_safe_float(divergence.get("score"), 0) or 0) * 0.45
+        reasons.append("空方背離扣分")
+
+    if "突破" in break_text:
+        score += 10
+        reasons.append("結構突破")
+    elif "跌破" in break_text:
+        score -= 10
+        reasons.append("結構跌破")
+
+    phase = _safe_str(god_signal.get("phase", "整理"))
+    if "主升" in phase:
+        score += 10
+        reasons.append("主升候選")
+    elif "主跌" in phase:
+        score -= 10
+        reasons.append("主跌候選")
+
+    if score >= 85:
+        status = "可偏多追蹤"
+    elif score >= 60:
+        status = "可試單"
+    elif score >= 35:
+        status = "可觀察"
+    else:
+        status = "暫不出手"
+
+    return {
+        "score": round(score, 1),
+        "status": status,
+        "summary": f"股神總表評分 {round(score,1)}，判定：{status}。",
+        "reasons": reasons[:6],
+    }
+
+
+def _render_signal_summary_table(god_table: dict, main_up: dict, false_break: dict, divergence: dict):
+    rows = [
+        {"模組": "股神總表", "結果": _safe_str(god_table.get("status", "暫不出手")), "分數": _safe_float(god_table.get("score"), 0), "摘要": _safe_str(god_table.get("summary", "—"))},
+        {"模組": "主升段確認", "結果": _safe_str(main_up.get("level", "—")), "分數": _safe_float(main_up.get("score"), 0), "摘要": _safe_str(main_up.get("summary", "—"))},
+        {"模組": "真假突破", "結果": _safe_str(false_break.get("level", "—")), "分數": _safe_float(false_break.get("score"), 0), "摘要": _safe_str(false_break.get("summary", "—"))},
+        {"模組": "背離強弱", "結果": f"{_safe_str(divergence.get('level', '—'))}{_safe_str(divergence.get('type', ''))}", "分數": _safe_float(divergence.get("score"), 0), "摘要": _safe_str(divergence.get("summary", "—"))},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 # =========================================================
 # 快取輔助
 # =========================================================
@@ -968,6 +1245,11 @@ def _compute_analysis_bundle(df: pd.DataFrame) -> dict[str, Any]:
     event_df = _build_event_df(df)
     peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
     god_signal = _compute_god_signal(df, signal_snapshot, sr_snapshot, radar)
+    main_up = _compute_main_uptrend_signal(df)
+    false_break = _compute_false_break_signal(df)
+    divergence = _compute_divergence_signal(df)
+    god_table = _compute_god_table_signal(df, signal_snapshot, sr_snapshot, radar, god_signal, main_up, false_break, divergence)
+    buy_backtest = _compute_buy_point_backtest(df)
 
     return {
         "signal_snapshot": signal_snapshot,
@@ -978,7 +1260,319 @@ def _compute_analysis_bundle(df: pd.DataFrame) -> dict[str, Any]:
         "peak_idx": peak_idx,
         "trough_idx": trough_idx,
         "god_signal": god_signal,
+        "main_up": main_up,
+        "false_break": false_break,
+        "divergence": divergence,
+        "god_table": god_table,
+        "buy_backtest": buy_backtest,
     }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _compute_buy_point_backtest(df: pd.DataFrame) -> dict[str, Any]:
+    empty_overall = pd.DataFrame(columns=["分級", "訊號數", "5日勝率", "10日勝率", "20日勝率", "5日平均報酬", "10日平均報酬", "20日平均報酬", "最大20日報酬", "最大20日回撤"])
+    empty_signals = pd.DataFrame(columns=["日期", "收盤價", "分級", "分數", "型態", "5日報酬", "10日報酬", "20日報酬", "最大20日報酬", "最大20日回撤", "理由"])
+    if df is None or df.empty or len(df) < 80:
+        return {
+            "current": {"grade": "資料不足", "score": 0, "pattern": "—", "summary": "資料筆數不足，無法回測買點分級。", "reasons": []},
+            "overall": empty_overall,
+            "by_pattern": pd.DataFrame(columns=["型態", "訊號數", "5日勝率", "10日勝率", "20日勝率", "20日平均報酬"]),
+            "signals": empty_signals,
+        }
+
+    work = df.copy().reset_index(drop=True)
+    close = pd.to_numeric(work.get("收盤價"), errors="coerce")
+    high = pd.to_numeric(work.get("最高價"), errors="coerce")
+    low = pd.to_numeric(work.get("最低價"), errors="coerce")
+    vol = pd.to_numeric(work.get("成交股數"), errors="coerce")
+
+    signals = []
+
+    def _grade(score: float) -> str:
+        if score >= 85:
+            return "S級買點"
+        if score >= 75:
+            return "A級買點"
+        if score >= 65:
+            return "B級買點"
+        if score >= 55:
+            return "C級觀察"
+        return "未達標"
+
+    def _ret(idx: int, days: int):
+        if idx + days >= len(work):
+            return None
+        p0 = _safe_float(close.iloc[idx])
+        p1 = _safe_float(close.iloc[idx + days])
+        if p0 in [None, 0] or p1 is None:
+            return None
+        return (p1 / p0 - 1) * 100
+
+    def _max_gain_drawdown(idx: int, days: int = 20):
+        if idx + 1 >= len(work):
+            return None, None
+        p0 = _safe_float(close.iloc[idx])
+        if p0 in [None, 0]:
+            return None, None
+        window = work.iloc[idx + 1:min(len(work), idx + days + 1)]
+        if window.empty:
+            return None, None
+        hh = _safe_float(pd.to_numeric(window["最高價"], errors="coerce").max())
+        ll = _safe_float(pd.to_numeric(window["最低價"], errors="coerce").min())
+        gain = ((hh / p0) - 1) * 100 if hh not in [None, 0] else None
+        draw = ((ll / p0) - 1) * 100 if ll not in [None, 0] else None
+        return gain, draw
+
+    for i in range(60, len(work) - 1):
+        row = work.iloc[i]
+        prev = work.iloc[i - 1]
+        price = _safe_float(row.get("收盤價"))
+        ma20 = _safe_float(row.get("MA20"))
+        ma60 = _safe_float(row.get("MA60"))
+        ma120 = _safe_float(row.get("MA120"))
+        vol20 = _safe_float(row.get("VOL20"))
+        vol_now = _safe_float(row.get("成交股數"))
+        k_now = _safe_float(row.get("K"))
+        d_now = _safe_float(row.get("D"))
+        dif = _safe_float(row.get("DIF"))
+        dea = _safe_float(row.get("DEA"))
+        atr14 = _safe_float(row.get("ATR14"), 0) or 0
+        high20_prev = _safe_float(high.iloc[max(0, i - 20):i].max())
+        low10_prev = _safe_float(low.iloc[max(0, i - 10):i].min())
+        close_prev5 = _safe_float(close.iloc[i - 5])
+        dif_prev5 = _safe_float(work.iloc[i - 5].get("DIF"))
+        k_prev5 = _safe_float(work.iloc[i - 5].get("K"))
+
+        score = 0
+        reasons = []
+        pattern = []
+
+        if price is None:
+            continue
+
+        if ma20 is not None and price > ma20:
+            score += 12
+            reasons.append("站上MA20")
+        if ma60 is not None and price > ma60:
+            score += 12
+            reasons.append("站上MA60")
+        if ma20 is not None and ma60 is not None and ma20 > ma60:
+            score += 8
+            reasons.append("MA20在MA60上方")
+        if ma120 is not None and ma60 is not None and ma60 > ma120:
+            score += 6
+            reasons.append("MA60在MA120上方")
+
+        if all(v is not None for v in [vol_now, vol20]) and vol20 > 0:
+            vr = vol_now / vol20
+            if vr >= 1.8:
+                score += 16
+                reasons.append("量能明顯放大")
+            elif vr >= 1.3:
+                score += 10
+                reasons.append("量能優於20日均量")
+
+        if high20_prev is not None and price >= high20_prev:
+            score += 18
+            pattern.append("20日突破")
+            reasons.append("突破前20日高")
+        elif high20_prev is not None and price >= high20_prev * 0.985:
+            score += 8
+            reasons.append("逼近前20日高")
+
+        if k_now is not None and d_now is not None and k_now > d_now:
+            score += 8
+            reasons.append("KD偏多")
+        if dif is not None and dea is not None and dif > dea:
+            score += 8
+            reasons.append("MACD偏多")
+        if dif is not None and dea is not None and dif > 0:
+            score += 5
+            reasons.append("DIF位於0軸上")
+
+        if all(v is not None for v in [price, close_prev5]) and price > close_prev5:
+            score += 5
+            reasons.append("5日價格延續")
+
+        if all(v is not None for v in [price, low10_prev]) and low10_prev > 0:
+            pullback = (price / low10_prev - 1) * 100
+            if 3 <= pullback <= 18:
+                score += 6
+                reasons.append("回檔後再轉強")
+                pattern.append("回檔轉強")
+
+        if all(v is not None for v in [price, close_prev5, dif, dif_prev5]) and price < close_prev5 and dif > dif_prev5:
+            score += 6
+            reasons.append("MACD底背離候選")
+            pattern.append("底背離")
+
+        if all(v is not None for v in [price, close_prev5, k_now, k_prev5]) and price < close_prev5 and k_now > k_prev5:
+            score += 4
+            reasons.append("KD底背離候選")
+            if "底背離" not in pattern:
+                pattern.append("底背離")
+
+        if atr14 > 0 and ma20 is not None and abs(price - ma20) <= atr14 * 1.2:
+            score += 4
+            reasons.append("接近MA20風險較可控")
+
+        if high20_prev is not None and _safe_float(prev.get("收盤價")) is not None and _safe_float(prev.get("收盤價")) >= high20_prev and price < high20_prev:
+            score -= 12
+            reasons.append("前一日突破後回落")
+
+        if ma20 is not None and price < ma20:
+            score -= 8
+        if ma60 is not None and price < ma60:
+            score -= 10
+        if all(v is not None for v in [vol_now, vol20]) and vol20 > 0 and vol_now < vol20 * 0.7:
+            score -= 6
+
+        grade = _grade(score)
+        if grade == "未達標":
+            continue
+
+        if not pattern:
+            if high20_prev is not None and price >= high20_prev:
+                pattern = ["突破追蹤"]
+            elif ma20 is not None and ma60 is not None and price > ma20 > ma60:
+                pattern = ["主升段延續"]
+            else:
+                pattern = ["整理轉強"]
+
+        ret5 = _ret(i, 5)
+        ret10 = _ret(i, 10)
+        ret20 = _ret(i, 20)
+        mg, md = _max_gain_drawdown(i, 20)
+
+        signals.append({
+            "日期": row.get("日期"),
+            "收盤價": price,
+            "分級": grade,
+            "分數": round(score, 1),
+            "型態": " / ".join(pattern),
+            "5日報酬": ret5,
+            "10日報酬": ret10,
+            "20日報酬": ret20,
+            "最大20日報酬": mg,
+            "最大20日回撤": md,
+            "理由": "、".join(reasons[:8]),
+        })
+
+    signals_df = pd.DataFrame(signals)
+    if signals_df.empty:
+        return {
+            "current": {"grade": "尚無有效買點", "score": 0, "pattern": "—", "summary": "目前條件不足，尚未形成可回測買點。", "reasons": []},
+            "overall": empty_overall,
+            "by_pattern": pd.DataFrame(columns=["型態", "訊號數", "5日勝率", "10日勝率", "20日勝率", "20日平均報酬"]),
+            "signals": empty_signals,
+        }
+
+    def _win_rate(series: pd.Series):
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        if s.empty:
+            return None
+        return (s > 0).mean() * 100
+
+    def _avg(series: pd.Series):
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        return None if s.empty else s.mean()
+
+    overall_rows = []
+    for grade in ["S級買點", "A級買點", "B級買點", "C級觀察"]:
+        sub = signals_df[signals_df["分級"] == grade].copy()
+        if sub.empty:
+            continue
+        overall_rows.append({
+            "分級": grade,
+            "訊號數": int(len(sub)),
+            "5日勝率": _win_rate(sub["5日報酬"]),
+            "10日勝率": _win_rate(sub["10日報酬"]),
+            "20日勝率": _win_rate(sub["20日報酬"]),
+            "5日平均報酬": _avg(sub["5日報酬"]),
+            "10日平均報酬": _avg(sub["10日報酬"]),
+            "20日平均報酬": _avg(sub["20日報酬"]),
+            "最大20日報酬": _avg(sub["最大20日報酬"]),
+            "最大20日回撤": _avg(sub["最大20日回撤"]),
+        })
+
+    pattern_rows = []
+    tmp = signals_df.copy()
+    tmp["主型態"] = tmp["型態"].astype(str).str.split(" / ").str[0]
+    for pat, sub in tmp.groupby("主型態"):
+        pattern_rows.append({
+            "型態": pat,
+            "訊號數": int(len(sub)),
+            "5日勝率": _win_rate(sub["5日報酬"]),
+            "10日勝率": _win_rate(sub["10日報酬"]),
+            "20日勝率": _win_rate(sub["20日報酬"]),
+            "20日平均報酬": _avg(sub["20日報酬"]),
+        })
+
+    current = signals_df.iloc[-1].to_dict()
+    overall_df = pd.DataFrame(overall_rows)
+    if not overall_df.empty:
+        overall_df = overall_df.sort_values("訊號數", ascending=False).reset_index(drop=True)
+    pattern_df = pd.DataFrame(pattern_rows)
+    if not pattern_df.empty:
+        pattern_df = pattern_df.sort_values(["20日平均報酬", "訊號數"], ascending=[False, False]).reset_index(drop=True)
+
+    current_summary = f"最近一次可回測買點為{_safe_str(current.get('分級'))}，型態偏{_safe_str(current.get('型態'))}，歷史同分級可用來看5/10/20日勝率。"
+
+    return {
+        "current": {
+            "grade": _safe_str(current.get("分級")),
+            "score": _safe_float(current.get("分數"), 0) or 0,
+            "pattern": _safe_str(current.get("型態")),
+            "summary": current_summary,
+            "reasons": _safe_str(current.get("理由")).split("、") if _safe_str(current.get("理由")) else [],
+            "ret5": current.get("5日報酬"),
+            "ret10": current.get("10日報酬"),
+            "ret20": current.get("20日報酬"),
+        },
+        "overall": overall_df,
+        "by_pattern": pattern_df,
+        "signals": signals_df.sort_values("日期", ascending=False).reset_index(drop=True),
+    }
+
+
+def _format_backtest_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    pct_cols = [c for c in out.columns if "勝率" in c or "報酬" in c or "回撤" in c]
+    for col in pct_cols:
+        out[col] = pd.to_numeric(out[col], errors="coerce").map(lambda x: None if pd.isna(x) else round(float(x), 2))
+    if "收盤價" in out.columns:
+        out["收盤價"] = pd.to_numeric(out["收盤價"], errors="coerce").map(lambda x: None if pd.isna(x) else round(float(x), 2))
+    if "分數" in out.columns:
+        out["分數"] = pd.to_numeric(out["分數"], errors="coerce").map(lambda x: None if pd.isna(x) else round(float(x), 1))
+    return out
+
+
+def _render_backtest_summary_cards(backtest: dict[str, Any]):
+    current = backtest.get("current", {}) if isinstance(backtest, dict) else {}
+    overall = backtest.get("overall") if isinstance(backtest, dict) else None
+
+    top_win = None
+    top_grade = "—"
+    if isinstance(overall, pd.DataFrame) and not overall.empty and "20日勝率" in overall.columns:
+        tmp = overall.dropna(subset=["20日勝率"]).sort_values("20日勝率", ascending=False)
+        if not tmp.empty:
+            top_win = _safe_float(tmp.iloc[0].get("20日勝率"))
+            top_grade = _safe_str(tmp.iloc[0].get("分級"))
+
+    render_pro_info_card(
+        "可回測買點總覽",
+        [
+            ("最近買點分級", _safe_str(current.get("grade", "—")), ""),
+            ("最近買點分數", _safe_str(current.get("score", 0)), ""),
+            ("最近型態", _safe_str(current.get("pattern", "—")), ""),
+            ("最佳歷史分級", top_grade, ""),
+            ("最佳20日勝率", "—" if top_win is None else f"{top_win:.1f}%", ""),
+            ("摘要", _safe_str(current.get("summary", "—")), ""),
+        ],
+        chips=["回測分級", "5/10/20日"],
+    )
 
 
 def _slice_by_focus(df: pd.DataFrame, event_df: pd.DataFrame, focus_event_idx: int, focus_window: str) -> pd.DataFrame:
@@ -1609,6 +2203,11 @@ def main():
     badge_text = bundle["badge_text"]
     event_df = bundle["event_df"]
     god_signal = bundle["god_signal"]
+    main_up = bundle["main_up"]
+    false_break = bundle["false_break"]
+    divergence = bundle["divergence"]
+    god_table = bundle["god_table"]
+    buy_backtest = bundle["buy_backtest"]
     peak_idx = bundle["peak_idx"]
     trough_idx = bundle["trough_idx"]
 
@@ -1698,7 +2297,7 @@ def main():
             use_container_width=True,
         )
 
-    tabs = st.tabs(["KD / MACD", "雷達 / 訊號", "股神強化", "策略區", "最近事件", "原始資料"])
+    tabs = st.tabs(["KD / MACD", "雷達 / 訊號", "股神進階判斷", "可回測買點", "策略區", "最近事件", "原始資料"])
 
     with tabs[0]:
         c_kd, c_macd = st.columns(2)
@@ -1753,30 +2352,88 @@ def main():
             )
 
     with tabs[2]:
-        render_pro_info_card(
-            "股神強化判讀",
-            [
-                ("市場階段", _safe_str(god_signal.get("phase", "整理")), ""),
-                ("操作動作", _safe_str(god_signal.get("action", "觀察")), ""),
-                ("訊號信心", f"{_safe_float(god_signal.get('confidence'), 50):.0f}", ""),
-                ("核心摘要", _safe_str(god_signal.get("summary", "—")), ""),
-                ("關鍵理由1", _safe_str((god_signal.get("reason") or ["—"])[0]), ""),
-                ("關鍵理由2", _safe_str((god_signal.get("reason") or ["—", "—"])[1] if len(god_signal.get("reason") or []) > 1 else "—"), ""),
-            ],
-            chips=[badge_text, actual_market],
-        )
+        top_l, top_r = st.columns(2)
+        with top_l:
+            render_pro_info_card(
+                "股神總表",
+                [
+                    ("判定", _safe_str(god_table.get("status", "暫不出手")), ""),
+                    ("總分", _safe_str(god_table.get("score", 0)), ""),
+                    ("市場階段", _safe_str(god_signal.get("phase", "整理")), ""),
+                    ("操作動作", _safe_str(god_signal.get("action", "觀察")), ""),
+                    ("訊號信心", f"{_safe_float(god_signal.get('confidence'), 50):.0f}", ""),
+                    ("核心摘要", _safe_str(god_table.get("summary", "—")), ""),
+                ],
+                chips=[badge_text, actual_market],
+            )
+            render_pro_info_card(
+                "主升段確認",
+                [("判定", _safe_str(main_up.get("level", "—")), ""), ("分數", _safe_str(main_up.get("score", 0)), ""), ("摘要", _safe_str(main_up.get("summary", "—")), "")] + list(main_up.get("items", []))[:6],
+                chips=["主升段", "趨勢確認"],
+            )
+        with top_r:
+            render_pro_info_card(
+                "真假突破 / 假跌破",
+                [("方向", _safe_str(false_break.get("direction", "無")), ""), ("判定", _safe_str(false_break.get("level", "—")), ""), ("分數", _safe_str(false_break.get("score", 0)), ""), ("摘要", _safe_str(false_break.get("summary", "—")), "")] + list(false_break.get("items", []))[:6],
+                chips=["真假突破", "過濾假訊號"],
+            )
+            render_pro_info_card(
+                "背離強弱分級",
+                [("型態", _safe_str(divergence.get("type", "無")), ""), ("強弱", _safe_str(divergence.get("level", "—")), ""), ("分數", _safe_str(divergence.get("score", 0)), ""), ("摘要", _safe_str(divergence.get("summary", "—")), "")] + list(divergence.get("items", []))[:6],
+                chips=["KD", "MACD", "背離"],
+            )
+
         render_pro_info_card(
             "更接近股神的執行重點",
             [
-                ("1", "突破不是買點本身，突破後守住才是。", ""),
-                ("2", "先看失效位，再決定能不能進場。", ""),
-                ("3", "量價、均線、KD、MACD 至少三項共振再提高倉位。", ""),
-                ("4", "整理盤不預測方向，等市場先出手。", ""),
+                ("1", "突破當天不算完成，至少再看 2~3 根是否站穩。", ""),
+                ("2", "主升段不是單看漲，而是均線、價位、量能一起確認。", ""),
+                ("3", "背離只當輔助，必須搭配結構收復或失守。", ""),
+                ("4", "先看失效位，再決定是否進場，這樣才更像做交易。", ""),
             ],
-            chips=["主升段", "假突破", "風控"],
+            chips=["主升段", "假突破", "背離", "風控"],
         )
+        _render_signal_summary_table(god_table, main_up, false_break, divergence)
 
     with tabs[3]:
+        _render_backtest_summary_cards(buy_backtest)
+        b1, b2 = st.columns(2)
+        with b1:
+            overall_df = _format_backtest_display(buy_backtest.get("overall"))
+            if isinstance(overall_df, pd.DataFrame) and not overall_df.empty:
+                st.markdown("#### 分級勝率表")
+                st.dataframe(overall_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("目前沒有足夠的回測買點樣本。")
+        with b2:
+            pattern_df = _format_backtest_display(buy_backtest.get("by_pattern"))
+            if isinstance(pattern_df, pd.DataFrame) and not pattern_df.empty:
+                st.markdown("#### 型態勝率表")
+                st.dataframe(pattern_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("目前沒有足夠的型態樣本。")
+
+        current = buy_backtest.get("current", {}) if isinstance(buy_backtest, dict) else {}
+        reasons = current.get("reasons", []) if isinstance(current, dict) else []
+        render_pro_info_card(
+            "最近一次可回測買點",
+            [
+                ("分級", _safe_str(current.get("grade", "—")), ""),
+                ("分數", _safe_str(current.get("score", 0)), ""),
+                ("型態", _safe_str(current.get("pattern", "—")), ""),
+                ("5日報酬", format_number(current.get("ret5"), 2) + "%" if current.get("ret5") is not None else "—", ""),
+                ("10日報酬", format_number(current.get("ret10"), 2) + "%" if current.get("ret10") is not None else "—", ""),
+                ("20日報酬", format_number(current.get("ret20"), 2) + "%" if current.get("ret20") is not None else "—", ""),
+            ] + [(f"理由{i+1}", _safe_str(r), "") for i, r in enumerate(reasons[:6])],
+            chips=["歷史回測", "最近訊號"],
+        )
+
+        signals_df = _format_backtest_display(buy_backtest.get("signals"))
+        if isinstance(signals_df, pd.DataFrame) and not signals_df.empty:
+            st.markdown("#### 歷史買點明細")
+            st.dataframe(signals_df.head(80), use_container_width=True, hide_index=True)
+
+    with tabs[4]:
         bullish, bearish, observe, fail = _build_strategy_cards(df, signal_snapshot, sr_snapshot, radar)
         exec_plan = _build_execution_plan(df, signal_snapshot, sr_snapshot)
         s1, s2 = st.columns(2)
@@ -1790,13 +2447,13 @@ def main():
             render_pro_info_card("偏空可執行區", exec_plan["short"], chips=["進場/失效/目標"])
         render_pro_info_card("執行說明", exec_plan["notes"], chips=["風控優先"])
 
-    with tabs[4]:
+    with tabs[5]:
         if filtered_event_df.empty:
             st.info("目前沒有符合條件的事件。")
         else:
             st.dataframe(filtered_event_df, use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    with tabs[6]:
         raw_cols = [
             "日期", "開盤價", "最高價", "最低價", "收盤價", "成交股數",
             "MA5", "MA10", "MA20", "MA60", "MA120", "MA240",
@@ -1813,6 +2470,8 @@ def main():
         st.write("5. 已補上市場自動 fallback，減少因市場別不一致造成的查無資料。")
         st.write("6. Plotly 圖表已加快取，切頁與重繪更快。")
         st.write("7. 保留全部功能，不用刪功能換速度。")
+        st.write("8. 新增股神進階判斷：真假突破、主升段確認、背離強弱分級、股神訊號總表。")
+        st.write("9. 新增可回測買點分級：統計 S/A/B/C 分級在 5 / 10 / 20 日的勝率與平均報酬。")
 
 
 if __name__ == "__main__":
