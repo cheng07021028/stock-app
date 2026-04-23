@@ -28,6 +28,11 @@ from utils import (
     get_normalized_watchlist,
 )
 
+try:
+    from project_perf_hub import make_signature
+except Exception:
+    make_signature = None
+
 PAGE_TITLE = "股神推薦紀錄｜升級完整版"
 PFX = "godpick_record_"
 
@@ -1270,10 +1275,12 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
 
+
 def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return _ensure_godpick_record_columns(pd.DataFrame())
     rows = []
+    perf_cache: dict[tuple[str, str, str, str, int], float | None] = {}
     for _, row in df.iterrows():
         payload = dict(row)
         code = _normalize_code(payload.get("股票代號"))
@@ -1284,7 +1291,10 @@ def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
             key = f"{d}日績效%"
             val = _safe_float(payload.get(key))
             if val is None:
-                payload[key] = _get_forward_return(code, name, market, rec_date, d)
+                cache_key = (code, name, market, rec_date, d)
+                if cache_key not in perf_cache:
+                    perf_cache[cache_key] = _get_forward_return(code, name, market, rec_date, d)
+                payload[key] = perf_cache.get(cache_key)
         payload = _recalc_row(payload)
         rows.append(payload)
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
