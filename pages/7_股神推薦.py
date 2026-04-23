@@ -46,9 +46,6 @@ except Exception:
 PAGE_TITLE = "股神推薦"
 PFX = "godpick_"
 
-HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 10   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
-
 GODPICK_RECORD_COLUMNS = [
     "record_id",
     "股票代號",
@@ -1597,62 +1594,26 @@ def _load_master_df_fallback_only() -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _build_master_lookup(master_df: pd.DataFrame) -> dict[str, dict[str, str]]:
-    if master_df is None or master_df.empty:
-        return {}
-    work = master_df.copy()
-    if "code" not in work.columns:
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for _, row in work.iterrows():
-        code = _normalize_code(row.get("code"))
-        if not code or code in out:
-            continue
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_record(name, row.get("category"))
-        out[code] = {
-            "name": name,
-            "market": market,
-            "category": category,
-        }
-    return out
-
 def _find_name_market_category(
     code: str,
     manual_name: str,
     manual_market: str,
     manual_category: str,
-    master_df_or_lookup,
+    master_df: pd.DataFrame,
 ) -> tuple[str, str, str]:
     code = _normalize_code(code)
     manual_name = _safe_str(manual_name)
     manual_market = _safe_str(manual_market)
     manual_category = _normalize_category(manual_category)
 
-    if isinstance(master_df_or_lookup, dict):
-        found = master_df_or_lookup.get(code, {})
-        if found:
-            final_name = _safe_str(found.get("name")) or manual_name or code
-            final_market = _safe_str(found.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(found.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
-            return final_name, final_market, final_category
-
-    if isinstance(master_df_or_lookup, pd.DataFrame) and not master_df_or_lookup.empty:
-        matched = master_df_or_lookup[master_df_or_lookup["code"].astype(str) == code]
+    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
+        matched = master_df[master_df["code"].astype(str) == code]
         if not matched.empty:
             row = matched.iloc[0]
             final_name = _safe_str(row.get("name")) or manual_name or code
             final_market = _safe_str(row.get("market")) or manual_market or "上市"
             final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
             return final_name, final_market, final_category
-
-    final_name = manual_name or code
-    final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_record(final_name, manual_category)
-    return final_name, final_market, final_category
 
     final_name = manual_name or code
     final_market = manual_market or "上市"
@@ -2026,9 +1987,30 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         if mk not in tried:
             tried.append(mk)
 
-    attempt_summary: list[dict[str, Any]] = []
+    debug_attempts: list[dict[str, Any]] = []
 
     for mk in tried:
+        eager_debug_info = None
+        if HISTORY_DEBUG_EAGER and callable(get_history_data_debug):
+            try:
+                eager_debug_info = get_history_data_debug(
+                    stock_no=stock_no,
+                    stock_name=stock_name,
+                    market_type=mk,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as e:
+                eager_debug_info = {
+                    "ok": False,
+                    "source": "history_debug_exception",
+                    "market_type": mk,
+                    "error": str(e),
+                    "rows": 0,
+                    "debug_lines": [f"get_history_data_debug 例外：{e}"],
+                }
+
+        history_call_error = ""
         try:
             df = get_history_data(
                 stock_no=stock_no,
@@ -2050,76 +2032,69 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
                 try:
                     df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
                 except Exception as e2:
-                    attempt_summary.append({
-                        "market_type": mk,
-                        "rows": 0,
-                        "source": "history_fetch_exception",
-                        "error": f"{e1} / fallback: {e2}",
-                    })
                     df = pd.DataFrame()
+                    history_call_error = f"type_fallback={e1} | code_fallback={e2}"
         except Exception as e:
-            attempt_summary.append({
-                "market_type": mk,
-                "rows": 0,
-                "source": "history_fetch_exception",
-                "error": str(e),
-            })
             df = pd.DataFrame()
+            history_call_error = str(e)
 
-        prepared_df = _prepare_history_df(df)
-        if not prepared_df.empty:
-            history_debug = {
+        if history_call_error:
+            debug_attempts.append({
+                "ok": False,
+                "source": "history_call_exception",
+                "market_type": mk,
+                "error": history_call_error,
+                "rows": 0,
+                "debug_lines": [f"get_history_data 例外：{history_call_error}"],
+            })
+
+        df = _prepare_history_df(df)
+        if not df.empty:
+            debug_attempts.append(eager_debug_info or {
+                "ok": True,
+                "source": "history_data",
+                "market_type": mk,
+                "error": "",
+                "rows": len(df),
+                "debug_lines": [f"get_history_data 成功：market={mk or market_type or '未知'} rows={len(df)}"],
+            })
+            return df, (mk or market_type or "未知"), {
                 "ok": True,
                 "stock_no": stock_no,
                 "stock_name": stock_name,
                 "used_market": (mk or market_type or "未知"),
-                "attempts": attempt_summary + [{
-                    "market_type": mk,
-                    "rows": int(len(prepared_df)),
-                    "source": "history_fetch_ok",
-                    "error": "",
-                }],
-                "rows": len(prepared_df),
+                "attempts": debug_attempts,
+                "rows": len(df),
             }
-            return prepared_df, (mk or market_type or "未知"), history_debug
 
-        attempt_summary.append({
-            "market_type": mk,
-            "rows": 0,
-            "source": "history_fetch_empty",
-            "error": "",
-        })
-
-    debug_attempts: list[dict[str, Any]] = []
-    if HISTORY_DEBUG_EAGER or not attempt_summary:
-        debug_attempts = attempt_summary
-    else:
-        debug_attempts = attempt_summary.copy()
-        for mk in tried:
-            debug_info = {}
+        if eager_debug_info:
+            debug_attempts.append(eager_debug_info)
+        elif callable(get_history_data_debug):
             try:
-                debug_info = get_history_data_debug(
+                debug_attempts.append(get_history_data_debug(
                     stock_no=stock_no,
                     stock_name=stock_name,
                     market_type=mk,
                     start_date=start_date,
                     end_date=end_date,
-                )
+                ))
             except Exception as e:
-                debug_info = {
+                debug_attempts.append({
                     "ok": False,
                     "source": "history_debug_exception",
                     "market_type": mk,
                     "error": str(e),
                     "rows": 0,
                     "debug_lines": [f"get_history_data_debug 例外：{e}"],
-                }
-
+                })
+        else:
             debug_attempts.append({
-                "market_type": _safe_str(debug_info.get("market_type")) or mk,
-                "rows": int(debug_info.get("rows", 0) or 0),
-                "source": _safe_str(debug_info.get("source")) or "history_debug",
-                "error": _safe_str(debug_info.get("error")),
+                "ok": False,
+                "source": "history_data",
+                "market_type": mk,
+                "error": "get_history_data 回傳空資料",
+                "rows": 0,
+                "debug_lines": [f"get_history_data 無資料：market={mk or market_type or '未知'}"],
             })
 
     return pd.DataFrame(), (_safe_str(market_type) or "未知"), {
@@ -2648,7 +2623,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
 def _analyze_one_stock_for_recommend(
     item: dict[str, str],
-    master_lookup: dict[str, dict[str, str]],
+    master_df: pd.DataFrame,
     start_dt: date,
     end_dt: date,
     min_signal_score: float,
@@ -2666,7 +2641,7 @@ def _analyze_one_stock_for_recommend(
     if not code:
         return {"status": "invalid_code", "code": "", "message": "股票代號空白"}
 
-    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_lookup)
+    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_df)
 
     if clean_categories and category not in clean_categories:
         return {"status": "category_filtered", "code": code, "message": f"類型不符合：{category}"}
@@ -2806,51 +2781,6 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
     return grp
 
 
-def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, min_total_score: float) -> pd.DataFrame:
-    if base_df is None or base_df.empty:
-        return pd.DataFrame()
-
-    final_codes = set()
-    if isinstance(final_df, pd.DataFrame) and not final_df.empty and "股票代號" in final_df.columns:
-        final_codes = set(final_df["股票代號"].astype(str).tolist())
-
-    work = base_df.copy()
-    work = work[~work["股票代號"].astype(str).isin(final_codes)].copy()
-    if work.empty:
-        return pd.DataFrame()
-
-    score_floor = max(float(min_total_score) - 10.0, 45.0)
-    hot_mask = (
-        (pd.to_numeric(work.get("推薦總分"), errors="coerce").fillna(0) >= score_floor)
-        & (pd.to_numeric(work.get("起漲前兆分數"), errors="coerce").fillna(0) >= 70)
-        & (pd.to_numeric(work.get("交易可行分數"), errors="coerce").fillna(0) >= 60)
-        & (pd.to_numeric(work.get("類股熱度分數"), errors="coerce").fillna(0) >= 68)
-        & (pd.to_numeric(work.get("訊號分數"), errors="coerce").fillna(-999) >= 0)
-        & (work.get("起漲判斷", "").astype(str).isin(["強勢起漲候選", "偏多轉強候選"]))
-    )
-    hot_df = work[hot_mask].copy()
-    if hot_df.empty:
-        return pd.DataFrame()
-
-    hot_df["補抓原因"] = hot_df.apply(
-        lambda r: "、".join([
-            x for x in [
-                "起漲前兆強" if _safe_float(r.get("起漲前兆分數"), 0) >= 75 else "",
-                "交易可行佳" if _safe_float(r.get("交易可行分數"), 0) >= 68 else "",
-                "類股熱度高" if _safe_float(r.get("類股熱度分數"), 0) >= 72 else "",
-                "類股前3強" if _safe_str(r.get("類股前3強")) == "是" else "",
-                "領先同類股" if _safe_str(r.get("是否領先同類股")) == "是" else "",
-            ] if x
-        ]) or "接近主名單門檻但具起漲結構" ,
-        axis=1,
-    )
-    hot_df = hot_df.sort_values(
-        ["起漲前兆分數", "類股熱度分數", "交易可行分數", "推薦總分", "訊號分數"],
-        ascending=[False, False, False, False, False],
-    ).reset_index(drop=True)
-    return hot_df
-
-
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
@@ -2863,15 +2793,14 @@ def _build_recommend_df(
     risk_strictness: str,
     min_prelaunch_score: float,
     min_trade_score: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if not universe_items:
         _save_debug_scan_summary({})
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
-    master_lookup = _build_master_lookup(master_df)
+    worker_count = min(12, max(4, total_count // 8 if total_count >= 8 else 4))
 
     progress_wrap = st.container()
     progress_bar = progress_wrap.progress(0, text="準備開始推薦...")
@@ -2902,7 +2831,7 @@ def _build_recommend_df(
             executor.submit(
                 _analyze_one_stock_for_recommend,
                 item,
-                master_lookup,
+                master_df,
                 start_dt,
                 end_dt,
                 min_signal_score,
@@ -2948,26 +2877,20 @@ def _build_recommend_df(
             except Exception as e:
                 debug_summary["analysis_error"] += 1
                 debug_summary["error_samples"].append(f"future.result 例外：{e}")
-            should_update_progress = (
-                done_count == 1
-                or done_count == total_count
-                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
-                or done_count / total_count >= 0.98
-            )
-            if should_update_progress:
-                elapsed = time.time() - start_ts
-                avg_per_stock = elapsed / done_count if done_count > 0 else 0
-                remain_count = max(total_count - done_count, 0)
-                eta_sec = avg_per_stock * remain_count
-                ratio = done_count / total_count if total_count > 0 else 0
 
-                progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
-                progress_text.caption(
-                    f"已完成 {done_count}/{total_count}｜"
-                    f"已花時間：{_fmt_seconds(elapsed)}｜"
-                    f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                    f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
-                )
+            elapsed = time.time() - start_ts
+            avg_per_stock = elapsed / done_count if done_count > 0 else 0
+            remain_count = max(total_count - done_count, 0)
+            eta_sec = avg_per_stock * remain_count
+            ratio = done_count / total_count if total_count > 0 else 0
+
+            progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
+            progress_text.caption(
+                f"已完成 {done_count}/{total_count}｜"
+                f"已花時間：{_fmt_seconds(elapsed)}｜"
+                f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
+                f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
+            )
 
     progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
     total_elapsed = time.time() - start_ts
@@ -2975,7 +2898,10 @@ def _build_recommend_df(
 
     base_df = pd.DataFrame(base_rows)
     if base_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        debug_summary["final_score_filtered"] = 0
+        debug_summary["passed_final"] = 0
+        _save_debug_scan_summary(debug_summary)
+        return pd.DataFrame(), pd.DataFrame()
 
     category_strength_df = _compute_category_strength(base_df)
     if category_strength_df.empty:
@@ -3067,9 +2993,7 @@ def _build_recommend_df(
     if "勾選" not in final_df.columns:
         final_df.insert(0, "勾選", False)
 
-    hot_pick_df = _build_hot_stock_candidates(base_df, final_df, min_total_score)
-
-    return final_df, category_strength_df, hot_pick_df
+    return final_df, category_strength_df
 
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -3099,23 +3023,19 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     return show
 
 
-def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame):
+def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame):
     st.session_state[_k("rec_df_store")] = rec_df.copy()
     st.session_state[_k("category_strength_store")] = category_strength_df.copy()
-    st.session_state[_k("hot_pick_store")] = hot_pick_df.copy()
     st.session_state[_k("result_saved_at")] = _now_text()
 
 
-def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame]:
     rec_df = st.session_state.get(_k("rec_df_store"))
     cat_df = st.session_state.get(_k("category_strength_store"))
-    hot_df = st.session_state.get(_k("hot_pick_store"))
 
     if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame):
-        if not isinstance(hot_df, pd.DataFrame):
-            hot_df = pd.DataFrame()
-        return rec_df.copy(), cat_df.copy(), hot_df.copy()
-    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return rec_df.copy(), cat_df.copy()
+    return pd.DataFrame(), pd.DataFrame()
 
 
 # =========================================================
@@ -3458,7 +3378,6 @@ def main():
         "risk_strictness": "標準",
         "min_prelaunch_score": 45.0,
         "min_trade_score": 45.0,
-        "pick_strategy": "結合版",
     }
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
@@ -3507,6 +3426,9 @@ def main():
                 else ""
             )
         )
+
+    all_categories = _collect_all_categories(master_df, watchlist_map)
+    category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
@@ -3569,7 +3491,7 @@ def main():
             )
 
         render_pro_section("模式 / 類型篩選")
-        m1, m2, m3 = st.columns([2, 2, 2])
+        m1, m2 = st.columns([2, 2])
         with m1:
             form_recommend_mode = st.selectbox(
                 "推薦模式",
@@ -3581,13 +3503,6 @@ def main():
                 "風險過濾強度",
                 ["寬鬆", "標準", "嚴格"],
                 index=["寬鬆", "標準", "嚴格"].index(st.session_state.get(_k("risk_strictness"), "標準")),
-            )
-        with m3:
-            form_pick_strategy = st.selectbox(
-                "推薦策略",
-                ["精準版", "結合版"],
-                index=["精準版", "結合版"].index(st.session_state.get(_k("pick_strategy"), "結合版")),
-                help="精準版=只看主名單；結合版=主名單外另顯示飆股補抓名單，不混入主名單排序。",
             )
 
         form_selected_categories = st.multiselect(
@@ -3655,7 +3570,6 @@ def main():
         st.session_state[_k("min_trade_score")] = 45.0
         st.session_state[_k("recommend_mode")] = "飆股模式"
         st.session_state[_k("risk_strictness")] = "標準"
-        st.session_state[_k("pick_strategy")] = "結合版"
         st.session_state[_k("submitted_once")] = False
         st.session_state[_k("focus_code")] = ""
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
@@ -3679,7 +3593,6 @@ def main():
         st.session_state[_k("min_signal_score")] = float(form_min_signal_score)
         st.session_state[_k("min_prelaunch_score")] = float(form_min_prelaunch_score)
         st.session_state[_k("min_trade_score")] = float(form_min_trade_score)
-        st.session_state[_k("pick_strategy")] = form_pick_strategy
         st.session_state[_k("recommend_mode")] = form_recommend_mode
         st.session_state[_k("risk_strictness")] = form_risk_strictness
         st.session_state[_k("submitted_once")] = True
@@ -3688,7 +3601,6 @@ def main():
         "V2 選股邏輯",
         [
             ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
-            ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
             ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
             ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
             ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
@@ -3730,10 +3642,9 @@ def main():
 
     rec_df = pd.DataFrame()
     category_strength_df = pd.DataFrame()
-    hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh:
-        rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
+        rec_df, category_strength_df = _build_recommend_df(
             universe_items=universe_items,
             master_df=master_df,
             start_dt=start_dt,
@@ -3746,9 +3657,9 @@ def main():
             min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
         )
-        _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
+        _save_recommend_result_to_state(rec_df, category_strength_df)
     else:
-        rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
+        rec_df, category_strength_df = _load_recommend_result_from_state()
 
     _render_debug_scan_summary()
 
@@ -3762,7 +3673,7 @@ def main():
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
     if saved_at:
-        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{_safe_str(st.session_state.get(_k("pick_strategy"), "結合版"))}")
+        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}")
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.iloc[:top_n].copy()
@@ -4066,21 +3977,10 @@ def main():
             chips=[_safe_str(focus_row.get("推薦等級")), _safe_str(focus_row.get("類別")), _safe_str(focus_row.get("推薦標籤"))],
         )
 
-
-    if _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")) == "結合版" and isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
-        render_pro_section("飆股補抓名單")
-        st.caption("這份名單不影響主名單排序；用途是補抓接近門檻、但具起漲結構與類股熱度的股票。")
-        hot_show_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分",
-            "起漲前兆分數", "交易可行分數", "類股熱度分數", "訊號分數",
-            "起漲判斷", "推薦理由摘要", "補抓原因"
-        ]
-        st.dataframe(_format_df(hot_pick_df[[c for c in hot_show_cols if c in hot_pick_df.columns]].head(max(top_n, 20))), use_container_width=True, hide_index=True)
-
     leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
     factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
 
-    tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
+    tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "操作說明"])
 
     with tabs[0]:
         st.dataframe(_format_df(rec_df), use_container_width=True, hide_index=True)
@@ -4126,19 +4026,12 @@ def main():
         )
 
     with tabs[4]:
-        if _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")) == "結合版" and isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
-            st.dataframe(_format_df(hot_pick_df), use_container_width=True, hide_index=True)
-        else:
-            st.info("目前未啟用結合版，或本輪沒有補抓名單。")
-
-    with tabs[5]:
         render_pro_info_card(
             "V2 模組邏輯",
             [
                 ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑。", ""),
                 ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
                 ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
-            ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
                 ("風險過濾", "新增 寬鬆 / 標準 / 嚴格，先淘汰不合格股票。", ""),
                 ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
                 ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
