@@ -43,6 +43,17 @@ try:
 except Exception:
     load_stock_master = None
 
+try:
+    from macro_mode_bridge import (
+        get_macro_best_mode,
+        apply_macro_mode_to_stock_score,
+        render_macro_mode_hint,
+    )
+except Exception:
+    get_macro_best_mode = None
+    apply_macro_mode_to_stock_score = None
+    render_macro_mode_hint = None
+
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -333,7 +344,7 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
     return {"score": score, "label": label, "summary": summary}
 
 
-def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> tuple[float, str]:
+def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> dict[str, Any]:
     technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
     prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
     category_heat_score = _safe_float(row.get("類股熱度分數"), 0) or 0
@@ -345,19 +356,65 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     risk_score = _safe_float(row.get("風險分數"), 0) or 0
 
     if mode == "飆股模式":
-        total = market_score * 0.12 + category_heat_score * 0.16 + pattern_score * 0.20 + burst_score * 0.18 + prelaunch_score * 0.16 + technical_score * 0.10 + trade_score * 0.08
+        base_total = market_score * 0.12 + category_heat_score * 0.16 + pattern_score * 0.20 + burst_score * 0.18 + prelaunch_score * 0.16 + technical_score * 0.10 + trade_score * 0.08
         tag = "爆發優先 / 起漲優先"
     elif mode == "波段模式":
-        total = market_score * 0.14 + technical_score * 0.24 + category_heat_score * 0.18 + trade_score * 0.14 + pattern_score * 0.12 + factor_score * 0.10 + risk_score * 0.08
+        base_total = market_score * 0.14 + technical_score * 0.24 + category_heat_score * 0.18 + trade_score * 0.14 + pattern_score * 0.12 + factor_score * 0.10 + risk_score * 0.08
         tag = "趨勢延續 / 波段優先"
     elif mode == "領頭羊模式":
-        total = market_score * 0.12 + leader_advantage * 0.22 + category_heat_score * 0.22 + technical_score * 0.16 + prelaunch_score * 0.10 + pattern_score * 0.10 + trade_score * 0.08
+        base_total = market_score * 0.12 + leader_advantage * 0.22 + category_heat_score * 0.22 + technical_score * 0.16 + prelaunch_score * 0.10 + pattern_score * 0.10 + trade_score * 0.08
         tag = "類股領先 / 龍頭優先"
     else:
-        total = market_score * 0.14 + technical_score * 0.18 + prelaunch_score * 0.14 + category_heat_score * 0.16 + factor_score * 0.12 + trade_score * 0.10 + pattern_score * 0.10 + burst_score * 0.06
+        base_total = market_score * 0.14 + technical_score * 0.18 + prelaunch_score * 0.14 + category_heat_score * 0.16 + factor_score * 0.12 + trade_score * 0.10 + pattern_score * 0.10 + burst_score * 0.06
         tag = "綜合推薦"
 
-    return _score_clip(total), tag
+    macro_mode_name = "未啟用"
+    macro_weighted_score = None
+    macro_reason = ""
+    macro_scale = 1.0
+    macro_bias = 0.0
+    macro_conf_bonus = 0.0
+    total = _score_clip(base_total)
+
+    if callable(apply_macro_mode_to_stock_score):
+        factor_scores = {
+            "tech": technical_score,
+            "chip": _score_clip(factor_score * 0.65 + leader_advantage * 0.35),
+            "trend": _score_clip(market_score * 0.45 + pattern_score * 0.35 + category_heat_score * 0.20),
+            "value": trade_score,
+            "event": _score_clip(prelaunch_score * 0.45 + pattern_score * 0.35 + category_heat_score * 0.20),
+            "risk": risk_score,
+            "momentum": _score_clip(burst_score * 0.60 + prelaunch_score * 0.40),
+        }
+        try:
+            macro_pack = apply_macro_mode_to_stock_score(
+                base_score=float(_score_clip(base_total)),
+                factor_scores=factor_scores,
+                lookback_days=30,
+            )
+            macro_mode_name = _safe_str(macro_pack.get("best_mode_name")) or "股神平衡版"
+            macro_weighted_score = _safe_float(macro_pack.get("macro_weighted_score"))
+            total = _score_clip(_safe_float(macro_pack.get("final_score"), _score_clip(base_total)) or _score_clip(base_total))
+            macro_reason = _safe_str(macro_pack.get("best_mode_reason"))
+            macro_adj = macro_pack.get("macro_adjustment") or {}
+            macro_scale = _safe_float(macro_adj.get("scale"), 1.0) or 1.0
+            macro_bias = _safe_float(macro_adj.get("bias"), 0.0) or 0.0
+            macro_conf_bonus = _safe_float(macro_adj.get("confidence_bonus"), 0.0) or 0.0
+            tag = f"{tag} / 大盤:{macro_mode_name}"
+        except Exception:
+            pass
+
+    return {
+        "推薦總分": total,
+        "推薦標籤": tag,
+        "原始推薦總分": _score_clip(base_total),
+        "大盤最準模式": macro_mode_name,
+        "大盤動態加權分": macro_weighted_score,
+        "大盤模式說明": macro_reason,
+        "大盤校正Scale": macro_scale,
+        "大盤校正Bias": macro_bias,
+        "大盤信心加成": macro_conf_bonus,
+    }
 
 
 def _build_recommend_reason_v2(r: pd.Series) -> str:
@@ -3271,8 +3328,10 @@ def _build_recommend_df(
         ),
         axis=1,
     )
-    base_df["推薦總分"] = [x[0] for x in mode_scores]
-    base_df["推薦標籤"] = [x[1] for x in mode_scores]
+    mode_scores_df = pd.DataFrame(list(mode_scores))
+    for c in ["推薦總分", "推薦標籤", "原始推薦總分", "大盤最準模式", "大盤動態加權分", "大盤模式說明", "大盤校正Scale", "大盤校正Bias", "大盤信心加成"]:
+        if c in mode_scores_df.columns:
+            base_df[c] = mode_scores_df[c]
 
     def _recommend(score: float) -> str:
         if score >= 90:
@@ -3849,6 +3908,9 @@ def main():
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
 
+    if callable(render_macro_mode_hint):
+        render_macro_mode_hint()
+
     if master_df is None or master_df.empty:
         st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
 
@@ -4362,6 +4424,7 @@ def main():
     _render_record_export_block(rec_df)
 
     render_pro_section("本輪精華推薦")
+    st.caption("推薦總分已套用大盤最近最準模式動態校正；可比較原始分數與校正後分數差異。")
 
     top_show_df = top_df[
         [
@@ -4375,6 +4438,9 @@ def main():
             "推薦模式",
             "推薦等級",
             "推薦總分",
+            "原始推薦總分",
+            "大盤最準模式",
+            "大盤動態加權分",
             "市場環境分數",
             "型態名稱",
             "型態突破分數",
@@ -4457,6 +4523,9 @@ def main():
                 ("推薦模式", _safe_str(focus_row.get("推薦模式")), ""),
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
+                ("原始推薦總分", format_number(focus_row.get("原始推薦總分"), 1), ""),
+                ("大盤最準模式", _safe_str(focus_row.get("大盤最準模式")), ""),
+                ("大盤動態加權分", format_number(focus_row.get("大盤動態加權分"), 1), ""),
                 ("市場環境", _safe_str(focus_row.get("市場環境")), ""),
                 ("市場環境分數", format_number(focus_row.get("市場環境分數"), 1), ""),
                 ("型態名稱", _safe_str(focus_row.get("型態名稱")), ""),
@@ -4478,6 +4547,13 @@ def main():
                 ("推薦理由摘要", _safe_str(focus_row.get("推薦理由摘要")), ""),
             ],
             chips=[_safe_str(focus_row.get("推薦等級")), _safe_str(focus_row.get("類別")), _safe_str(focus_row.get("推薦標籤"))],
+        )
+        st.caption(
+            f"大盤校正：模式={_safe_str(focus_row.get('大盤最準模式')) or '-'}"
+            f"｜動態加權分={format_number(focus_row.get('大盤動態加權分'), 1)}"
+            f"｜Scale={format_number(focus_row.get('大盤校正Scale'), 2)}"
+            f"｜Bias={format_number(focus_row.get('大盤校正Bias'), 1)}"
+            f"｜信心加成={format_number(focus_row.get('大盤信心加成'), 1)}"
         )
 
 
