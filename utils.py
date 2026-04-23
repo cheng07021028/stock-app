@@ -120,166 +120,6 @@ def format_number(value, digits=2):
         return "—"
 
 
-
-
-def _convert_roc_date(x):
-    x = _safe_text(x)
-    if not x:
-        return pd.NaT
-    if "/" in x:
-        parts = x.split("/")
-        if len(parts) == 3:
-            try:
-                year = int(parts[0]) + 1911
-                month = int(parts[1])
-                day = int(parts[2])
-                return pd.Timestamp(year=year, month=month, day=day)
-            except Exception:
-                return pd.NaT
-    try:
-        return pd.to_datetime(x)
-    except Exception:
-        return pd.NaT
-
-
-def _normalize_history_month_df(df):
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    work = df.copy()
-    rename_map = {}
-    for col in work.columns:
-        c = _safe_text(col)
-        if c in ["日期", "日 期", "Date"]:
-            rename_map[col] = "日期"
-        elif "成交股數" in c or "成交仟股" in c or c == "Volume":
-            rename_map[col] = "成交股數"
-        elif "成交金額" in c or "成交仟元" in c or c == "Amount":
-            rename_map[col] = "成交金額"
-        elif "開盤" in c or c == "Open":
-            rename_map[col] = "開盤價"
-        elif "最高" in c or c == "High":
-            rename_map[col] = "最高價"
-        elif "最低" in c or c == "Low":
-            rename_map[col] = "最低價"
-        elif "收盤" in c or c == "Close":
-            rename_map[col] = "收盤價"
-        elif "成交筆數" in c or c == "Trades":
-            rename_map[col] = "成交筆數"
-    work = work.rename(columns=rename_map)
-
-    if "日期" not in work.columns:
-        return pd.DataFrame()
-
-    work["日期"] = work["日期"].apply(_convert_roc_date)
-    work = work.dropna(subset=["日期"]).copy()
-
-    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
-        if col in work.columns:
-            work[col] = (
-                work[col].astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace(" ", "", regex=False)
-                .replace(["--", "---", "----", ""], pd.NA)
-            )
-            work[col] = pd.to_numeric(work[col], errors="coerce")
-
-    if "成交股數" in work.columns:
-        try:
-            med = work["成交股數"].dropna().median()
-            if pd.notna(med) and med < 100000:
-                work["成交股數"] = work["成交股數"] * 1000
-        except Exception:
-            pass
-
-    keep_cols = [c for c in ["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"] if c in work.columns]
-    return work[keep_cols].sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-
-
-def _fetch_twse_history_month(stock_no, month_dt):
-    month_str = pd.to_datetime(month_dt).strftime("%Y%m01")
-    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-    params = {"response": "json", "date": month_str, "stockNo": str(stock_no).strip()}
-    data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
-    stat = _safe_text(data.get("stat"))
-    rows = data.get("data", []) or []
-    cols = data.get("fields", []) or []
-    if stat != "OK" or not rows or not cols:
-        return pd.DataFrame(), {"source": "twse_stock_day", "month": month_str, "stat": stat or "-", "rows": len(rows), "cols": len(cols), "error": ""}
-    return _normalize_history_month_df(pd.DataFrame(rows, columns=cols)), {"source": "twse_stock_day", "month": month_str, "stat": stat or "OK", "rows": len(rows), "cols": len(cols), "error": ""}
-
-
-def _fetch_tpex_history_month(stock_no, month_dt):
-    dt = pd.to_datetime(month_dt)
-    roc_date = f"{dt.year - 1911}/{dt.month:02d}"
-    url = "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php"
-    headers = {"Referer": "https://www.tpex.org.tw/", "User-Agent": "Mozilla/5.0"}
-    data = _json_get(url, params={"l": "zh-tw", "d": roc_date, "stkno": str(stock_no).strip()}, timeout=REQUEST_TIMEOUT_NORMAL, headers=headers)
-    rows = data.get("aaData", []) or []
-    cols = data.get("fields", []) or []
-    stat = _safe_text(data.get("iTotalRecords") or data.get("stat") or ("OK" if rows else "-"))
-    if not rows:
-        return pd.DataFrame(), {"source": "tpex_st43", "month": roc_date, "stat": stat or "-", "rows": 0, "cols": len(cols), "error": ""}
-    if cols and len(cols) == len(rows[0]):
-        raw_df = pd.DataFrame(rows, columns=cols)
-    else:
-        raw_df = pd.DataFrame(rows)
-    return _normalize_history_month_df(raw_df), {"source": "tpex_st43", "month": roc_date, "stat": stat or "OK", "rows": len(rows), "cols": len(cols), "error": ""}
-
-
-def _fetch_history_by_source(stock_no, market_type, start_ts, end_ts, collect_debug=False):
-    stock_no = str(stock_no).strip()
-    market_type = _safe_text(market_type) or "上市"
-    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
-
-    if market_type == "上市":
-        fetchers = [_fetch_twse_history_month]
-    elif market_type in ["上櫃", "興櫃"]:
-        fetchers = [_fetch_tpex_history_month, _fetch_twse_history_month]
-    else:
-        fetchers = [_fetch_twse_history_month, _fetch_tpex_history_month]
-
-    debug_lines = []
-    attempts = []
-    best_frames = []
-    best_source = ""
-
-    for fetcher in fetchers:
-        frames = []
-        local_attempts = []
-        local_lines = []
-        local_source = ""
-        for dt in month_starts:
-            try:
-                month_df, info = fetcher(stock_no, dt)
-            except Exception as e:
-                source_name = "twse_stock_day" if fetcher is _fetch_twse_history_month else "tpex_st43"
-                month_label = pd.to_datetime(dt).strftime("%Y%m01") if fetcher is _fetch_twse_history_month else f"{pd.to_datetime(dt).year - 1911}/{pd.to_datetime(dt).month:02d}"
-                info = {"source": source_name, "month": month_label, "stat": "EXCEPTION", "rows": 0, "cols": 0, "error": str(e)}
-                month_df = pd.DataFrame()
-            local_source = info.get("source") or local_source
-            local_attempts.append(info)
-            local_lines.append(f"{info.get('source','?')} {info.get('month','?')}: stat={info.get('stat','-')} rows={info.get('rows',0)} cols={info.get('cols',0)} err={info.get('error','')}")
-            if isinstance(month_df, pd.DataFrame) and not month_df.empty:
-                frames.append(month_df)
-
-        attempts.extend(local_attempts)
-        debug_lines.extend(local_lines)
-
-        if frames:
-            merged = pd.concat(frames, ignore_index=True)
-            merged = _normalize_history_month_df(merged)
-            merged = merged[(merged["日期"] >= start_ts) & (merged["日期"] <= end_ts)].copy()
-            if not merged.empty:
-                best_frames = [merged]
-                best_source = local_source
-                break
-
-    if best_frames:
-        out = best_frames[0].sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-        return out, {"ok": True, "stock_no": stock_no, "market_type": market_type, "source": best_source, "rows": len(out), "debug_lines": debug_lines, "attempts": attempts, "error": ""}
-
-    return pd.DataFrame(), {"ok": False, "stock_no": stock_no, "market_type": market_type, "source": best_source or "history_fetch", "rows": 0, "debug_lines": debug_lines, "attempts": attempts, "error": "所有來源都沒有抓到有效資料"}
 def get_font_scale():
     return 110
 
@@ -489,45 +329,16 @@ def inject_pro_theme():
     )
 
 
-def render_pro_hero(title, subtitle="", chips=None):
-    import html
-
-    safe_title = html.escape("" if title is None else str(title))
-    safe_subtitle = html.escape("" if subtitle is None else str(subtitle))
-
+def render_pro_hero(title, subtitle=""):
     st.markdown(
         f"""
         <div class="pro-hero">
-            <div class="pro-hero-title">{safe_title}</div>
-            <div class="pro-hero-subtitle">{safe_subtitle}</div>
+            <div class="pro-hero-title">{title}</div>
+            <div class="pro-hero-subtitle">{subtitle}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    if not chips:
-        return
-
-    if isinstance(chips, str):
-        chips = [chips]
-    elif not isinstance(chips, (list, tuple, set)):
-        chips = [str(chips)]
-
-    chip_html = "".join(
-        f'<span class="pro-chip">{html.escape(str(c))}</span>'
-        for c in chips
-        if c is not None and str(c).strip() != ""
-    )
-
-    if chip_html.strip():
-        st.markdown(
-            f"""
-            <div style="margin: -6px 0 14px 0;">
-                {chip_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
 
 
 def render_pro_section(title, subtitle=""):
@@ -1321,57 +1132,94 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
 
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
+
     if end_ts < start_ts:
         return pd.DataFrame()
 
-    df, _debug = _fetch_history_by_source(stock_no, market_type, start_ts, end_ts, collect_debug=False)
-    return df
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    frames = []
 
+    for dt in month_starts:
+        month_str = dt.strftime("%Y%m01")
 
-@st.cache_data(ttl=600, show_spinner=False)
-def get_history_data_debug(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
-    stock_no = str(stock_no).strip()
-    market_type = str(market_type).strip() or "上市"
+        try:
+            url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+            params = {
+                "response": "json",
+                "date": month_str,
+                "stockNo": stock_no,
+            }
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
 
-    debug = {
-        "ok": False,
-        "stock_no": stock_no,
-        "stock_name": str(stock_name).strip(),
-        "market_type": market_type,
-        "source": "",
-        "rows": 0,
-        "debug_lines": [],
-        "attempts": [],
-        "error": "",
+            if data.get("stat") != "OK":
+                continue
+
+            rows = data.get("data", [])
+            cols = data.get("fields", [])
+            if not rows or not cols:
+                continue
+
+            df_month = pd.DataFrame(rows, columns=cols)
+            frames.append(df_month)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+
+    rename_map = {
+        "日期": "日期",
+        "成交股數": "成交股數",
+        "成交金額": "成交金額",
+        "開盤價": "開盤價",
+        "最高價": "最高價",
+        "最低價": "最低價",
+        "收盤價": "收盤價",
+        "成交筆數": "成交筆數",
     }
+    df = df.rename(columns=rename_map)
 
-    if not stock_no:
-        debug["error"] = "股票代號空白"
-        debug["debug_lines"].append("股票代號空白")
-        return debug
+    if "日期" not in df.columns:
+        return pd.DataFrame()
 
-    if start_date is None:
-        start_date = date.today() - timedelta(days=90)
-    if end_date is None:
-        end_date = date.today()
+    def convert_tw_date(x):
+        x = _safe_text(x)
+        if not x:
+            return pd.NaT
 
-    start_ts = pd.to_datetime(start_date)
-    end_ts = pd.to_datetime(end_date)
-    if end_ts < start_ts:
-        debug["error"] = "結束日期早於開始日期"
-        debug["debug_lines"].append("結束日期早於開始日期")
-        return debug
+        if "/" in x:
+            parts = x.split("/")
+            if len(parts) == 3:
+                try:
+                    year = int(parts[0]) + 1911
+                    month = int(parts[1])
+                    day = int(parts[2])
+                    return pd.Timestamp(year=year, month=month, day=day)
+                except Exception:
+                    return pd.NaT
 
-    try:
-        _df, result = _fetch_history_by_source(stock_no, market_type, start_ts, end_ts, collect_debug=True)
-        debug.update(result)
-        debug["stock_name"] = str(stock_name).strip()
-        return debug
-    except Exception as e:
-        debug["source"] = "history_fetch_exception"
-        debug["error"] = f"歷史資料除錯例外：{e}"
-        debug["debug_lines"].append(debug["error"])
-        return debug
+        try:
+            return pd.to_datetime(x)
+        except Exception:
+            return pd.NaT
+
+    df["日期"] = df["日期"].apply(convert_tw_date)
+    df = df.dropna(subset=["日期"])
+
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(",", "", regex=False)
+                .replace(["--", "---", ""], pd.NA)
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+    df = df.sort_values("日期").reset_index(drop=True)
+    return df
 
 
 def to_excel_bytes(df_dict):
