@@ -1,14 +1,50 @@
 {
   "庫存": [
     {
+      "code": "1342",
+      "name": "八貫",
+      "market": "上市",
+      "category": "其他_主題未映射"
+    },
+    {
       "code": "1504",
       "name": "東元",
       "market": "上市"
     },
     {
+      "code": "1721",
+      "name": "三晃",
+      "market": "上市",
+      "category": "塑化"
+    },
+    {
+      "code": "1773",
+      "name": "勝一",
+      "market": "上市",
+      "category": "塑化"
+    },
+    {
       "code": "2344",
       "name": "華邦電",
       "market": "上市"
+    },
+    {
+      "code": "2474",
+      "name": "可成",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
+      "code": "2540",
+      "name": "愛山林",
+      "market": "上市",
+      "category": "建材營造業"
+    },
+    {
+      "code": "3338",
+      "name": "泰碩",
+      "market": "上市",
+      "category": "電子零組件業"
     },
     {
       "code": "3548",
