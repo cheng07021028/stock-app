@@ -102,6 +102,11 @@ GODPICK_RECORD_COLUMNS = [
     "是否達目標2",
     "持有天數",
     "模式績效標籤",
+    "買點分級",
+    "決策摘要",
+    "假突破風險分數",
+    "龍頭股判定",
+    "部位建議",
     "備註",
 ]
 
@@ -558,6 +563,211 @@ def _apply_final_score_desaturation(base_df: pd.DataFrame) -> pd.DataFrame:
 
     work["推薦等級"] = pd.to_numeric(work["推薦總分"], errors="coerce").fillna(0).map(_recommend)
     return work
+
+
+def _safe_pct_rank(series: pd.Series) -> pd.Series:
+    if series is None or len(series) == 0:
+        return pd.Series(dtype=float)
+    try:
+        return pd.to_numeric(series, errors="coerce").rank(method="average", pct=True).fillna(0.0)
+    except Exception:
+        return pd.Series([0.0] * len(series), index=series.index if hasattr(series, "index") else None)
+
+def _build_buy_grade(row: pd.Series) -> tuple[str, str, str]:
+    total = _safe_float(row.get("推薦總分"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+    latest = _safe_float(row.get("最新價"))
+    pullback = _safe_float(row.get("推薦買點_拉回"))
+    breakout = _safe_float(row.get("推薦買點_突破"))
+    stop_price = _safe_float(row.get("停損價"))
+
+    if total >= 90 and trade >= 72 and pattern >= 75:
+        grade = "A級買點"
+        action = "可優先考慮"
+    elif total >= 82 and pre >= 70 and trade >= 65:
+        grade = "B級買點"
+        action = "等確認再進"
+    elif total >= 74 and (pre >= 65 or burst >= 70):
+        grade = "C級觀察"
+        action = "先追蹤"
+    else:
+        grade = "觀察"
+        action = "暫不優先"
+
+    if latest is not None and breakout is not None and latest >= breakout:
+        trigger = f"突破買點 {format_number(breakout,2)} 後可再評估"
+    elif latest is not None and pullback is not None:
+        trigger = f"拉回守住 {format_number(pullback,2)} 再考慮"
+    else:
+        trigger = "等待結構更明確"
+    if stop_price is not None:
+        trigger += f"｜停損 {format_number(stop_price,2)}"
+    return grade, action, trigger
+
+def _build_false_breakout_risk(row: pd.Series) -> float:
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+    latest = _safe_float(row.get("最新價"))
+    breakout = _safe_float(row.get("推薦買點_突破"))
+    pullback = _safe_float(row.get("推薦買點_拉回"))
+    risk = 42.0
+    if pattern < 65:
+        risk += 16
+    if trade < 60:
+        risk += 10
+    if burst > 82:
+        risk += 8
+    if latest is not None and breakout not in [None, 0]:
+        dist = abs((latest - breakout) / breakout) * 100
+        if latest >= breakout and dist < 1.2:
+            risk += 10
+        elif latest >= breakout and dist > 5.0:
+            risk += 6
+    if latest is not None and pullback not in [None, 0]:
+        pull_dist = abs((latest - pullback) / pullback) * 100
+        if pull_dist > 9:
+            risk += 6
+    return _score_clip(risk)
+
+def _build_position_suggestion(row: pd.Series, market_label: str) -> str:
+    total = _safe_float(row.get("推薦總分"), 0) or 0
+    risk_score = _safe_float(row.get("風險分數"), 0) or 0
+    false_risk = _safe_float(row.get("假突破風險分數"), 0) or 0
+    if "逆風" in market_label:
+        base = "20%"
+    elif total >= 90 and risk_score >= 70 and false_risk <= 50:
+        base = "35%~50%"
+    elif total >= 82 and risk_score >= 60:
+        base = "20%~35%"
+    else:
+        base = "10%~20%"
+    return base
+
+def _apply_decision_pack(base_df: pd.DataFrame, category_strength_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    if base_df is None or base_df.empty:
+        return base_df
+
+    work = base_df.copy()
+    if "類別" not in work.columns:
+        work["類別"] = ""
+
+    # 類股輪動分層
+    heat_rank = _safe_pct_rank(work.get("類股熱度分數", pd.Series([0]*len(work))))
+    acc_rank = _safe_pct_rank(work.get("類股加速度", pd.Series([0]*len(work))))
+    combined_theme = (heat_rank * 0.65 + acc_rank * 0.35).fillna(0.0)
+    work["類股輪動層級"] = combined_theme.map(
+        lambda x: "強勢主流" if x >= 0.85 else ("次主流" if x >= 0.65 else ("補漲觀察" if x >= 0.45 else "退潮觀察"))
+    )
+
+    # 龍頭 / 跟風判定
+    work["龍頭股判定"] = work.apply(
+        lambda r: "真龍頭"
+        if (_safe_str(r.get("類股前3強")) == "是" and _safe_str(r.get("是否領先同類股")) == "是" and (_safe_float(r.get("類股內排名"), 99) or 99) <= 2)
+        else ("補漲股" if _safe_str(r.get("類股前3強")) == "否" and (_safe_float(r.get("爆發力分數"), 0) or 0) >= 75 else "跟風股"),
+        axis=1,
+    )
+
+    work["假突破風險分數"] = work.apply(_build_false_breakout_risk, axis=1)
+
+    buy_pack = work.apply(lambda r: _build_buy_grade(r), axis=1)
+    work["買點分級"] = [x[0] for x in buy_pack]
+    work["買入建議"] = [x[1] for x in buy_pack]
+    work["買點觸發條件"] = [x[2] for x in buy_pack]
+    work["部位建議"] = work.apply(lambda r: _build_position_suggestion(r, _safe_str(r.get("市場環境"))), axis=1)
+
+    work["決策摘要"] = work.apply(
+        lambda r: "｜".join([
+            _safe_str(r.get("龍頭股判定")) or "—",
+            _safe_str(r.get("類股輪動層級")) or "—",
+            _safe_str(r.get("買點分級")) or "—",
+            f"假突破風險 {format_number(r.get('假突破風險分數'),1)}",
+            f"部位 { _safe_str(r.get('部位建議')) or '—'}",
+        ]),
+        axis=1,
+    )
+
+    return work
+
+def _build_mode_performance_summary(rec_df: pd.DataFrame) -> pd.DataFrame:
+    if rec_df is None or rec_df.empty or "推薦模式" not in rec_df.columns:
+        return pd.DataFrame(columns=["推薦模式", "樣本數", "平均分數", "平均3日", "平均5日", "平均10日", "平均20日", "綜合觀察"])
+
+    work = rec_df.copy()
+    for c in ["推薦總分", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
+        if c in work.columns:
+            work[c] = pd.to_numeric(work[c], errors="coerce")
+
+    grp = (
+        work.groupby("推薦模式", dropna=False)
+        .agg(
+            樣本數=("股票代號", "count"),
+            平均分數=("推薦總分", "mean"),
+            平均3日=("3日績效%", "mean"),
+            平均5日=("5日績效%", "mean"),
+            平均10日=("10日績效%", "mean"),
+            平均20日=("20日績效%", "mean"),
+        )
+        .reset_index()
+    )
+    grp["綜合觀察"] = grp.apply(
+        lambda r: "近期偏佳" if (_safe_float(r.get("平均5日"), 0) or 0) >= 0 and (_safe_float(r.get("平均10日"), 0) or 0) >= 0 else "需持續追蹤",
+        axis=1,
+    )
+    return grp.sort_values(["平均分數", "平均5日", "平均10日"], ascending=[False, False, False]).reset_index(drop=True)
+
+def _render_decision_pack_sections(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
+    if rec_df is None or rec_df.empty:
+        return
+
+    render_pro_section("股神版決策升級包")
+    tabs = st.tabs(["模式績效榜", "買點分級", "分數拆解", "類股輪動"])
+
+    with tabs[0]:
+        perf_df = _build_mode_performance_summary(rec_df)
+        if perf_df.empty:
+            st.info("目前尚無足夠資料建立模式績效榜。")
+        else:
+            st.dataframe(perf_df, use_container_width=True, hide_index=True)
+
+    with tabs[1]:
+        buy_cols = [c for c in ["股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級", "買入建議", "買點觸發條件", "部位建議", "假突破風險分數", "最新價", "推薦買點_拉回", "推薦買點_突破", "停損價"] if c in rec_df.columns]
+        st.dataframe(_format_df(rec_df[buy_cols].head(max(20, top_n)).copy()), use_container_width=True, hide_index=True)
+
+    with tabs[2]:
+        focus_df = rec_df.head(max(20, top_n)).copy()
+        pick_labels = [f"{_safe_str(r.get('股票代號'))} {_safe_str(r.get('股票名稱'))}" for _, r in focus_df.iterrows()]
+        pick_idx = st.selectbox("查看哪一檔的分數拆解", range(len(pick_labels)), format_func=lambda i: pick_labels[i])
+        if len(focus_df) > 0:
+            r = focus_df.iloc[int(pick_idx)]
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("推薦總分", format_number(r.get("推薦總分"), 1))
+                st.metric("買點分級", _safe_str(r.get("買點分級")))
+                st.metric("部位建議", _safe_str(r.get("部位建議")))
+            with c2:
+                st.metric("假突破風險", format_number(r.get("假突破風險分數"), 1))
+                st.metric("龍頭股判定", _safe_str(r.get("龍頭股判定")))
+                st.metric("類股輪動層級", _safe_str(r.get("類股輪動層級")))
+            breakdown = pd.DataFrame([
+                {"因子": "技術結構", "分數": _safe_float(r.get("技術結構分數"), 0) or 0},
+                {"因子": "起漲前兆", "分數": _safe_float(r.get("起漲前兆分數"), 0) or 0},
+                {"因子": "交易可行", "分數": _safe_float(r.get("交易可行分數"), 0) or 0},
+                {"因子": "類股熱度", "分數": _safe_float(r.get("類股熱度分數"), 0) or 0},
+                {"因子": "型態突破", "分數": _safe_float(r.get("型態突破分數"), 0) or 0},
+                {"因子": "爆發力", "分數": _safe_float(r.get("爆發力分數"), 0) or 0},
+                {"因子": "同類股領先", "分數": _safe_float(r.get("同類股領先幅度"), 0) or 0},
+                {"因子": "原始推薦總分", "分數": _safe_float(r.get("原始推薦總分"), 0) or 0},
+            ])
+            st.dataframe(breakdown, use_container_width=True, hide_index=True)
+            st.info(_safe_str(r.get("決策摘要")) or "—")
+
+    with tabs[3]:
+        theme_cols = [c for c in ["股票代號", "股票名稱", "類別", "類股輪動層級", "龍頭股判定", "類股熱度分數", "類股加速度", "類股內排名", "是否領先同類股", "推薦總分"] if c in rec_df.columns]
+        st.dataframe(_format_df(rec_df[theme_cols].copy()), use_container_width=True, hide_index=True)
 
 def _build_recommend_reason_v2(r: pd.Series) -> str:
     parts = []
@@ -3674,6 +3884,7 @@ def _build_recommend_df(
             base_df[c] = mode_scores_df[c]
 
     base_df = _apply_final_score_desaturation(base_df)
+    base_df = _apply_decision_pack(base_df, category_strength_df)
     base_df["推薦理由摘要"] = base_df.apply(_build_recommend_reason_v2, axis=1)
 
     for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
@@ -4630,7 +4841,7 @@ def main():
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
     if saved_at:
-        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{_safe_str(st.session_state.get(_k("pick_strategy"), "結合版"))}")
+        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{_safe_str(st.session_state.get(_k("pick_strategy"), "結合版"))}｜換頁不丟失，直到你重新推薦或清空。")
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.iloc[:top_n].copy()
@@ -4830,39 +5041,43 @@ def main():
     render_pro_section("本輪精華推薦")
     st.caption("推薦總分已套用大盤最近最準模式動態校正；可比較原始分數與校正後分數差異。")
 
-    top_show_df = top_df[
-        [
-            "勾選",
-            "股票代號",
-            "股票名稱",
-            "市場別",
-            "類別",
-            "類股內排名",
-            "類股前3強",
-            "推薦模式",
-            "推薦等級",
-            "推薦總分",
-            "原始推薦總分",
-            "大盤最準模式",
-            "大盤動態加權分",
-            "市場環境分數",
-            "型態名稱",
-            "型態突破分數",
-            "爆發力分數",
-            "起漲前兆分數",
-            "交易可行分數",
-            "類股熱度分數",
-            "是否領先同類股",
-            "起漲判斷",
-            "最新價",
-            "推薦買點_拉回",
-            "推薦買點_突破",
-            "停損價",
-            "賣出目標1",
-            "賣出目標2",
-            "推薦理由摘要",
-        ]
-    ].copy()
+    top_default_cols = [
+        "勾選",
+        "股票代號",
+        "股票名稱",
+        "市場別",
+        "類別",
+        "類股內排名",
+        "類股前3強",
+        "推薦模式",
+        "推薦等級",
+        "推薦總分",
+        "原始推薦總分",
+        "買點分級",
+        "龍頭股判定",
+        "部位建議",
+        "大盤最準模式",
+        "市場環境分數",
+        "型態名稱",
+        "型態突破分數",
+        "爆發力分數",
+        "起漲前兆分數",
+        "交易可行分數",
+        "類股熱度分數",
+        "是否領先同類股",
+        "起漲判斷",
+        "最新價",
+        "推薦買點_拉回",
+        "推薦買點_突破",
+        "停損價",
+        "賣出目標1",
+        "賣出目標2",
+        "推薦理由摘要",
+    ]
+    top_available_cols = list(top_df.columns)
+    top_order = _render_column_order_manager("top_table", "本輪精華推薦欄位順序設定", top_available_cols, top_default_cols)
+    top_show_cols = [c for c in top_order if c in top_df.columns]
+    top_show_df = top_df[top_show_cols].copy()
 
     edited_top_df = st.data_editor(
         _format_df(top_show_df),
@@ -4906,6 +5121,8 @@ def main():
         st.session_state[_k("focus_code")] = pick_options[0]
 
     code_to_row = {str(r["股票代號"]): r for _, r in rec_df.iterrows()}
+
+    _render_decision_pack_sections(rec_df, category_strength_df, top_n)
 
     render_pro_section("單股股神劇本")
     selected_code = st.selectbox(
