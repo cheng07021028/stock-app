@@ -862,6 +862,83 @@ def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
     st.session_state[_k("focus_event_idx")] = -1
 
 
+
+def _init_applied_query_state():
+    if _k("applied_group") not in st.session_state:
+        st.session_state[_k("applied_group")] = _safe_str(st.session_state.get(_k("group"), ""))
+    if _k("applied_stock_code") not in st.session_state:
+        st.session_state[_k("applied_stock_code")] = _safe_str(st.session_state.get(_k("stock_code"), ""))
+    if _k("applied_start_date") not in st.session_state:
+        st.session_state[_k("applied_start_date")] = _to_date(
+            st.session_state.get(_k("start_date")),
+            date.today() - timedelta(days=365),
+        )
+    if _k("applied_end_date") not in st.session_state:
+        st.session_state[_k("applied_end_date")] = _to_date(
+            st.session_state.get(_k("end_date")),
+            date.today(),
+        )
+    if _k("runtime_history_cache") not in st.session_state:
+        st.session_state[_k("runtime_history_cache")] = {}
+
+
+def _set_applied_query(group: str, stock_code: str, start_date: date, end_date: date):
+    st.session_state[_k("applied_group")] = _safe_str(group)
+    st.session_state[_k("applied_stock_code")] = _safe_str(stock_code)
+    st.session_state[_k("applied_start_date")] = _to_date(start_date, date.today() - timedelta(days=365))
+    st.session_state[_k("applied_end_date")] = _to_date(end_date, date.today())
+
+
+def _get_applied_query() -> tuple[str, str, date, date]:
+    return (
+        _safe_str(st.session_state.get(_k("applied_group"), "")),
+        _safe_str(st.session_state.get(_k("applied_stock_code"), "")),
+        _to_date(st.session_state.get(_k("applied_start_date")), date.today() - timedelta(days=365)),
+        _to_date(st.session_state.get(_k("applied_end_date")), date.today()),
+    )
+
+
+def _load_history_runtime_cached(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, str]:
+    cache = st.session_state.get(_k("runtime_history_cache"), {})
+    if not isinstance(cache, dict):
+        cache = {}
+
+    sig = "|".join([
+        _safe_str(stock_no),
+        _safe_str(stock_name),
+        _safe_str(market_type),
+        _to_date(start_date, date.today()).isoformat(),
+        _to_date(end_date, date.today()).isoformat(),
+    ])
+
+    cached = cache.get(sig)
+    if isinstance(cached, dict):
+        df = cached.get("df")
+        actual_market = _safe_str(cached.get("actual_market", market_type or "未知"))
+        data_source = _safe_str(cached.get("data_source", "none"))
+        if isinstance(df, pd.DataFrame):
+            return df.copy(), actual_market, data_source
+
+    df, actual_market, data_source = _get_history_data_smart(
+        stock_no=stock_no,
+        stock_name=stock_name,
+        market_type=market_type,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    cache[sig] = {
+        "df": df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(),
+        "actual_market": actual_market,
+        "data_source": data_source,
+    }
+    if len(cache) > 12:
+        keys = list(cache.keys())
+        for old_key in keys[:-12]:
+            cache.pop(old_key, None)
+    st.session_state[_k("runtime_history_cache")] = cache
+    return df, actual_market, data_source
+
+
 def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -2168,6 +2245,9 @@ def main():
             + (f" / 名稱 {_get_handoff_stock_name()}" if _get_handoff_stock_name() else "")
         )
 
+
+    _init_applied_query_state()
+
     render_pro_section("快速搜尋股票")
     s1, s2 = st.columns([5, 1])
 
@@ -2205,53 +2285,91 @@ def main():
     code_to_item = {x["code"]: x for x in items}
     code_options = [x["code"] for x in items]
 
-    c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
+    with st.form(key=_k("query_form"), clear_on_submit=False):
+        c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
 
-    with c1:
-        st.selectbox("選擇群組", options=groups, key=_k("group"), on_change=_on_group_change, args=(group_map,))
+        with c1:
+            st.selectbox("選擇群組", options=groups, key=_k("group"), on_change=_on_group_change, args=(group_map,))
 
-    with c2:
-        st.selectbox(
-            "群組股票",
-            options=code_options if code_options else [""],
-            key=_k("stock_code"),
-            format_func=lambda code: code_to_item.get(code, {}).get("label", code),
+        with c2:
+            st.selectbox(
+                "群組股票",
+                options=code_options if code_options else [""],
+                key=_k("stock_code"),
+                format_func=lambda code: code_to_item.get(code, {}).get("label", code),
+            )
+
+        with c3:
+            st.date_input("開始日期", key=_k("start_date"))
+
+        with c4:
+            st.date_input("結束日期", key=_k("end_date"))
+
+        action_cols = st.columns(4)
+        apply_query = False
+        handoff_applied = False
+
+        with action_cols[0]:
+            apply_query = st.form_submit_button("套用查詢 / 重新載入", use_container_width=True, type="primary")
+
+        with action_cols[1]:
+            if st.form_submit_button("承接 4頁送來的股票", use_container_width=True):
+                changed = _apply_external_focus_if_any(group_map)
+                if changed:
+                    _set_applied_query(
+                        _safe_str(st.session_state.get(_k("group"), "")),
+                        _safe_str(st.session_state.get(_k("stock_code"), "")),
+                        _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365)),
+                        _to_date(st.session_state.get(_k("end_date")), date.today()),
+                    )
+                    handoff_applied = True
+                    st.session_state[_k("focus_event_idx")] = -1
+
+        with action_cols[2]:
+            if st.form_submit_button("清除外部焦點", use_container_width=True):
+                st.session_state["kline_focus_stock_code"] = ""
+                st.session_state["kline_focus_stock_name"] = ""
+
+        with action_cols[3]:
+            st.caption("只有按『套用查詢』才會重抓歷史資料")
+
+    st.caption("可直接承接 4_自選股中心 / 7_股神推薦 送來的焦點股票")
+    st.info("已改成手動載入模式：切換群組、股票、日期時不會立刻重抓資料，避免歷史資料頁卡住。")
+
+    if apply_query or handoff_applied:
+        _set_applied_query(
+            _safe_str(st.session_state.get(_k("group"), "")),
+            _safe_str(st.session_state.get(_k("stock_code"), "")),
+            _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365)),
+            _to_date(st.session_state.get(_k("end_date")), date.today()),
         )
+        st.session_state[_k("focus_event_idx")] = -1
 
-    with c3:
-        st.date_input("開始日期", key=_k("start_date"))
+    applied_group, applied_code, start_date, end_date = _get_applied_query()
 
-    with c4:
-        st.date_input("結束日期", key=_k("end_date"))
+    if applied_group and applied_group in group_map:
+        selected_group = applied_group
+    else:
+        selected_group = _safe_str(st.session_state.get(_k("group"), ""))
 
-    action_cols = st.columns(3)
-    with action_cols[0]:
-        if st.button("承接 4頁送來的股票", use_container_width=True):
-            changed = _apply_external_focus_if_any(group_map)
-            if changed:
-                st.rerun()
-    with action_cols[1]:
-        if st.button("清除外部焦點", use_container_width=True):
-            st.session_state["kline_focus_stock_code"] = ""
-            st.session_state["kline_focus_stock_name"] = ""
-            st.rerun()
-    with action_cols[2]:
-        st.caption("可直接承接 4_自選股中心 / 7_股神推薦 送來的焦點股票")
-
-    selected_group = _safe_str(st.session_state.get(_k("group"), ""))
-    selected_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
-    start_date = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365))
-    end_date = _to_date(st.session_state.get(_k("end_date")), date.today())
+    selected_items = group_map.get(selected_group, [])
+    selected_code_to_item = {x["code"]: x for x in selected_items}
 
     if start_date > end_date:
         st.error("開始日期不可大於結束日期。")
         st.stop()
 
-    if not selected_code or selected_code not in code_to_item:
-        st.warning("請先選擇股票。")
-        st.stop()
+    if not applied_code or applied_code not in selected_code_to_item:
+        fallback_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
+        if fallback_code in selected_code_to_item:
+            applied_code = fallback_code
+            _set_applied_query(selected_group, applied_code, start_date, end_date)
+        else:
+            st.warning("請先選擇股票。")
+            st.stop()
 
-    selected_item = code_to_item[selected_code]
+    selected_item = selected_code_to_item[applied_code]
+    selected_code = applied_code
     stock_name = _safe_str(selected_item.get("name"))
     market_type = _safe_str(selected_item.get("market")) or "上市"
     stock_label = f"{selected_code} {stock_name}"
@@ -2264,7 +2382,7 @@ def main():
     )
 
     with st.spinner("載入股神資料中..."):
-        df, actual_market, data_source = _get_history_data_smart(
+        df, actual_market, data_source = _load_history_runtime_cached(
             stock_no=selected_code,
             stock_name=stock_name,
             market_type=market_type,
@@ -2275,26 +2393,6 @@ def main():
     st.caption(
         f"目前實際查詢值：群組【{selected_group}】 / 股票【{stock_label}】 / 自選市場【{market_type}】 / 實際市場【{actual_market}】 / 資料源【{data_source}】"
     )
-
-    if df.empty:
-        st.error("查無歷史資料，已自動嘗試上市 / 上櫃 / 興櫃與 fallback 來源，仍無資料。請更換股票或日期區間。")
-        st.stop()
-
-    bundle = _compute_analysis_bundle(df)
-    signal_snapshot = bundle["signal_snapshot"]
-    sr_snapshot = bundle["sr_snapshot"]
-    radar = bundle["radar"]
-    badge_text = bundle["badge_text"]
-    event_df = bundle["event_df"]
-    god_signal = bundle["god_signal"]
-    main_up = bundle["main_up"]
-    false_break = bundle["false_break"]
-    divergence = bundle["divergence"]
-    god_table = bundle["god_table"]
-    buy_backtest = bundle["buy_backtest"]
-    peak_idx = bundle["peak_idx"]
-    trough_idx = bundle["trough_idx"]
-
     render_pro_section("互動控制")
     i1, i2, i3, i4 = st.columns([2, 2, 2, 2])
 
