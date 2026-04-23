@@ -357,6 +357,103 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
     return {"score": score, "label": label, "summary": summary}
 
 
+
+def _bounded_adjust(v: Any, low: float, high: float, default: float = 0.0) -> float:
+    x = _safe_float(v, default)
+    if x is None:
+        x = default
+    return max(low, min(high, float(x)))
+
+def _sigmoid01(x: float) -> float:
+    try:
+        import math
+        return 1.0 / (1.0 + math.exp(-x))
+    except Exception:
+        return 0.5
+
+def _apply_score_desaturation(base_df: pd.DataFrame) -> pd.DataFrame:
+    if base_df is None or base_df.empty:
+        return base_df
+
+    work = base_df.copy()
+
+    for c in [
+        "原始推薦總分", "大盤動態加權分", "技術結構分數", "起漲前兆分數", "交易可行分數",
+        "類股熱度分數", "型態突破分數", "爆發力分數", "市場環境分數", "同類股領先幅度",
+        "大盤校正Bias", "大盤信心加成"
+    ]:
+        if c not in work.columns:
+            work[c] = None
+
+    raw = pd.to_numeric(work["原始推薦總分"], errors="coerce").fillna(0.0)
+    macro = pd.to_numeric(work["大盤動態加權分"], errors="coerce")
+    macro_safe = raw + (macro.fillna(raw) - raw).clip(-6, 6)
+
+    quality_anchor = (
+        pd.to_numeric(work["技術結構分數"], errors="coerce").fillna(0.0) * 0.22
+        + pd.to_numeric(work["起漲前兆分數"], errors="coerce").fillna(0.0) * 0.18
+        + pd.to_numeric(work["交易可行分數"], errors="coerce").fillna(0.0) * 0.16
+        + pd.to_numeric(work["型態突破分數"], errors="coerce").fillna(0.0) * 0.14
+        + pd.to_numeric(work["爆發力分數"], errors="coerce").fillna(0.0) * 0.12
+        + pd.to_numeric(work["類股熱度分數"], errors="coerce").fillna(0.0) * 0.10
+        + pd.to_numeric(work["市場環境分數"], errors="coerce").fillna(0.0) * 0.08
+    )
+
+    edge_bonus = (
+        (pd.to_numeric(work["同類股領先幅度"], errors="coerce").fillna(50.0) - 50.0).clip(lower=0.0) * 0.10
+        + work.get("類股前3強", pd.Series(["否"] * len(work))).astype(str).eq("是").astype(float) * 1.8
+        + work.get("是否領先同類股", pd.Series(["否"] * len(work))).astype(str).eq("是").astype(float) * 1.5
+        + pd.to_numeric(work["大盤校正Bias"], errors="coerce").fillna(0.0).clip(-2.5, 2.5) * 0.45
+        + pd.to_numeric(work["大盤信心加成"], errors="coerce").fillna(0.0).clip(-2.0, 2.0) * 0.35
+    )
+
+    blended_raw = quality_anchor * 0.56 + raw * 0.24 + macro_safe * 0.20 + edge_bonus
+    pct_rank = blended_raw.rank(method="average", pct=True).fillna(0.5)
+    mean_v = float(blended_raw.mean()) if len(blended_raw) else 0.0
+    std_v = float(blended_raw.std()) if len(blended_raw) else 0.0
+    if std_v <= 1e-9:
+        z_like = pd.Series([0.0] * len(work), index=work.index)
+    else:
+        z_like = (blended_raw - mean_v) / std_v
+
+    z_scaled = z_like.map(lambda x: _sigmoid01(float(x) * 1.15) * 100.0)
+
+    final = (
+        24.0
+        + quality_anchor * 0.36
+        + raw * 0.10
+        + macro_safe * 0.08
+        + pct_rank * 22.0
+        + z_scaled * 0.20
+        + edge_bonus
+    ).clip(45.0, 98.0)
+
+    # 若整批分數太擠，進一步拉開尾端差距
+    saturation_ratio = float((final >= 95).mean()) if len(final) else 0.0
+    if saturation_ratio > 0.12:
+        top_mask = pct_rank >= 0.85
+        final.loc[top_mask] = (90.0 + (pct_rank.loc[top_mask] - 0.85) / 0.15 * 7.0).clip(90.0, 97.0)
+        mid_mask = ~top_mask
+        final.loc[mid_mask] = (final.loc[mid_mask] - (saturation_ratio - 0.12) * 6.0).clip(45.0, 92.5)
+
+    work["分布校正分數"] = final.round(2)
+    work["同批排名分位"] = (pct_rank * 100.0).round(2)
+    work["推薦總分"] = work["分布校正分數"]
+
+    def _recommend(score: float) -> str:
+        if score >= 94:
+            return "股神級"
+        if score >= 88:
+            return "強烈關注"
+        if score >= 80:
+            return "優先觀察"
+        if score >= 70:
+            return "可列追蹤"
+        return "觀察"
+
+    work["推薦等級"] = pd.to_numeric(work["推薦總分"], errors="coerce").fillna(0).map(_recommend)
+    return work
+
 def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> dict[str, Any]:
     technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
     prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -387,7 +484,8 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     macro_scale = 1.0
     macro_bias = 0.0
     macro_conf_bonus = 0.0
-    total = _score_clip(base_total)
+
+    raw_total = _score_clip(base_total)
 
     if callable(apply_macro_mode_to_stock_score):
         factor_scores = {
@@ -401,28 +499,34 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
         }
         try:
             macro_pack = apply_macro_mode_to_stock_score(
-                base_score=float(_score_clip(base_total)),
+                base_score=float(raw_total),
                 factor_scores=factor_scores,
                 lookback_days=30,
             )
             macro_mode_name = _safe_str(macro_pack.get("best_mode_name")) or "股神平衡版"
             macro_weighted_score = _safe_float(macro_pack.get("macro_weighted_score"))
-            total = _score_clip(_safe_float(macro_pack.get("final_score"), _score_clip(base_total)) or _score_clip(base_total))
             macro_reason = _safe_str(macro_pack.get("best_mode_reason"))
             macro_adj = macro_pack.get("macro_adjustment") or {}
-            macro_scale = _safe_float(macro_adj.get("scale"), 1.0) or 1.0
-            macro_bias = _safe_float(macro_adj.get("bias"), 0.0) or 0.0
-            macro_conf_bonus = _safe_float(macro_adj.get("confidence_bonus"), 0.0) or 0.0
+            macro_scale = _bounded_adjust(macro_adj.get("scale"), 0.94, 1.08, 1.0)
+            macro_bias = _bounded_adjust(macro_adj.get("bias"), -4.0, 4.0, 0.0)
+            macro_conf_bonus = _bounded_adjust(macro_adj.get("confidence_bonus"), -3.0, 3.0, 0.0)
+            if macro_weighted_score is None:
+                macro_weighted_score = raw_total * macro_scale + macro_bias + macro_conf_bonus
+            else:
+                macro_weighted_score = raw_total + (macro_weighted_score - raw_total) * 0.45 + macro_bias * 0.35 + macro_conf_bonus * 0.30
             tag = f"{tag} / 大盤:{macro_mode_name}"
         except Exception:
-            pass
+            macro_weighted_score = raw_total
+
+    if macro_weighted_score is None:
+        macro_weighted_score = raw_total
 
     return {
-        "推薦總分": total,
+        "推薦總分": _score_clip(macro_weighted_score),
         "推薦標籤": tag,
-        "原始推薦總分": _score_clip(base_total),
+        "原始推薦總分": raw_total,
         "大盤最準模式": macro_mode_name,
-        "大盤動態加權分": macro_weighted_score,
+        "大盤動態加權分": round(float(macro_weighted_score), 2),
         "大盤模式說明": macro_reason,
         "大盤校正Scale": macro_scale,
         "大盤校正Bias": macro_bias,
@@ -3346,18 +3450,7 @@ def _build_recommend_df(
         if c in mode_scores_df.columns:
             base_df[c] = mode_scores_df[c]
 
-    def _recommend(score: float) -> str:
-        if score >= 90:
-            return "股神級"
-        if score >= 84:
-            return "強烈關注"
-        if score >= 72:
-            return "優先觀察"
-        if score >= 60:
-            return "可列追蹤"
-        return "觀察"
-
-    base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
+    base_df = _apply_score_desaturation(base_df)
 
     def _reason_builder(r):
         reason_parts = []
@@ -3547,7 +3640,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分",
+        "推薦模式", "推薦等級", "推薦總分", "原始推薦總分", "同批排名分位",
         "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "是否領先同類股",
         "最新價", "推薦買點_拉回", "推薦買點_突破",
@@ -4304,6 +4397,18 @@ def main():
         ]
     )
 
+    score_dist = pd.to_numeric(rec_df.get("推薦總分"), errors="coerce").dropna()
+    if not score_dist.empty:
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("90分以上", int((score_dist >= 90).sum()))
+        with k2:
+            st.metric("80-89分", int(((score_dist >= 80) & (score_dist < 90)).sum()))
+        with k3:
+            st.metric("70-79分", int(((score_dist >= 70) & (score_dist < 80)).sum()))
+        with k4:
+            st.metric("中位數", f"{float(score_dist.median()):.1f}")
+
     render_pro_section("推薦股票加入自選股中心")
     watchlist_map = _load_watchlist_map()
 
@@ -4497,6 +4602,10 @@ def main():
             "推薦等級",
             "推薦總分",
             "原始推薦總分",
+            "分布校正分數",
+            "同批排名分位",
+    "分布校正分數",
+    "同批排名分位",
             "大盤最準模式",
             "大盤動態加權分",
             "市場環境分數",
@@ -4582,6 +4691,8 @@ def main():
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
                 ("原始推薦總分", format_number(focus_row.get("原始推薦總分"), 1), ""),
+                ("分布校正分數", format_number(focus_row.get("分布校正分數"), 1), ""),
+                ("同批排名分位", format_number(focus_row.get("同批排名分位"), 1), "%"),
                 ("大盤最準模式", _safe_str(focus_row.get("大盤最準模式")), ""),
                 ("大盤動態加權分", format_number(focus_row.get("大盤動態加權分"), 1), ""),
                 ("市場環境", _safe_str(focus_row.get("市場環境")), ""),
@@ -4633,7 +4744,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "原始推薦總分", "同批排名分位",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
