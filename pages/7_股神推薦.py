@@ -3381,6 +3381,59 @@ def _get_scan_mode_keep_count(scan_mode: str, passed_count: int) -> int:
     # 股神建議：偏保守但不太小，避免漏股
     return max(180, min(320, int(round(passed_count * 0.25))))
 
+
+def _ultra_prefilter_item(
+    item: dict[str, str],
+    master_lookup: dict[str, dict[str, str]],
+    clean_categories: list[str],
+) -> dict[str, Any]:
+    code = _normalize_code(item.get("code"))
+    manual_name = _safe_str(item.get("name"))
+    manual_market = _safe_str(item.get("market"))
+    manual_category = _normalize_category(item.get("category"))
+
+    if not code:
+        return {"status": "invalid_code", "code": "", "message": "股票代號空白"}
+
+    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_lookup)
+
+    if clean_categories and category not in clean_categories:
+        return {"status": "category_filtered", "code": code, "message": f"類型不符合：{category}"}
+
+    label = f"{code} {stock_name}".strip()
+    if not stock_name:
+        return {"status": "stage0_filtered", "code": code, "message": "缺少股票名稱"}
+
+    upper_name = stock_name.upper()
+    # 超低成本預篩：只排掉最明顯不值得分析的標的，不因高價股而淘汰
+    if any(x in upper_name for x in ["權證", "特別股"]):
+        return {"status": "stage0_filtered", "code": code, "message": "非主要普通股標的"}
+    if market_type not in ["上市", "上櫃", "興櫃"]:
+        return {"status": "stage0_filtered", "code": code, "message": f"市場別不支援：{market_type}"}
+
+    return {
+        "status": "stage0_ok",
+        "code": code,
+        "name": stock_name,
+        "market": market_type,
+        "category": category,
+        "label": label,
+        "message": "",
+    }
+
+def _get_stage0_keep_count(scan_mode: str, passed_count: int) -> int:
+    scan_mode = _safe_str(scan_mode)
+    if passed_count <= 0:
+        return 0
+    if scan_mode == "全篩":
+        return passed_count
+    if scan_mode == "篩選一半":
+        return max(300, int(round(passed_count * 0.65)))
+    if scan_mode == "初篩":
+        return max(240, int(round(passed_count * 0.45)))
+    # 股神建議：大量掃描時先做更便宜的第一刀
+    return max(220, min(900, int(round(passed_count * 0.38))))
+
 def _quick_prefilter_from_hist(hist_df: pd.DataFrame) -> tuple[bool, float, str]:
     if hist_df is None or hist_df.empty:
         return False, 0.0, "無歷史資料"
@@ -3720,18 +3773,21 @@ def _build_recommend_df(
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
-    progress_bar = progress_wrap.progress(0, text="第一階段：低成本初篩...")
+    progress_bar = progress_wrap.progress(0, text="第0階段：超低成本預篩...")
     progress_text = progress_wrap.empty()
 
     start_ts = time.time()
     debug_summary = {
         "total_count": total_count,
+        "stage0_passed": 0,
+        "stage0_keep": 0,
         "stage1_passed": 0,
         "stage1_keep": 0,
         "analyzed_ok": 0,
         "passed_final": 0,
         "invalid_code": 0,
         "category_filtered": 0,
+        "stage0_filtered": 0,
         "no_history": 0,
         "prefilter_filtered": 0,
         "analysis_error": 0,
@@ -3744,8 +3800,64 @@ def _build_recommend_df(
         "error_samples": [],
     }
 
+    # ==================================================
+    # 第0階段：超低成本預篩（不抓歷史資料）
+    # ==================================================
+    stage0_rows = []
+    done0 = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _ultra_prefilter_item,
+                item,
+                master_lookup,
+                clean_categories,
+            )
+            for item in universe_items
+        ]
+        for future in as_completed(futures):
+            done0 += 1
+            try:
+                result = future.result()
+                if not isinstance(result, dict):
+                    debug_summary["analysis_error"] += 1
+                else:
+                    status = _safe_str(result.get("status")) or "analysis_error"
+                    debug_summary[status] = int(debug_summary.get(status, 0)) + 1
+                    if status == "stage0_ok":
+                        stage0_rows.append(result)
+            except Exception as e:
+                debug_summary["analysis_error"] += 1
+                if collect_debug:
+                    debug_summary["error_samples"].append(f"stage0 例外：{e}")
+
+            if done0 == 1 or done0 == total_count or done0 % max(1, PROGRESS_UPDATE_EVERY) == 0:
+                ratio = done0 / total_count if total_count > 0 else 0
+                elapsed = time.time() - start_ts
+                progress_bar.progress(min(max(ratio * 0.12, 0.0), 0.12), text=f"第0階段：超低成本預篩 {done0}/{total_count}")
+                progress_text.caption(f"第0階段已完成 {done0}/{total_count}｜已花時間：{_fmt_seconds(elapsed)}")
+
+    stage0_df = pd.DataFrame(stage0_rows)
+    if stage0_df.empty:
+        _save_debug_scan_summary(debug_summary)
+        progress_bar.progress(1.0, text="預篩完成，但沒有股票通過")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    stage0_df = stage0_df.sort_values(["code"], ascending=[True]).reset_index(drop=True)
+    stage0_keep_count = _get_stage0_keep_count(scan_mode, len(stage0_df))
+    stage0_keep_codes = set(stage0_df.head(stage0_keep_count)["code"].astype(str).tolist())
+    debug_summary["stage0_passed"] = len(stage0_df)
+    debug_summary["stage0_keep"] = len(stage0_keep_codes)
+
+    # ==================================================
+    # 第1階段：低成本初篩（抓歷史資料，但只算基本條件）
+    # ==================================================
+    progress_bar.progress(0.15, text=f"第1階段：低成本初篩 {len(stage0_keep_codes)} 檔")
     stage1_rows = []
-    done_count = 0
+    done1 = 0
+    stage1_items = [item for item in universe_items if _normalize_code(item.get("code")) in stage0_keep_codes]
+    total_stage1 = len(stage1_items)
+
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = [
             executor.submit(
@@ -3756,11 +3868,11 @@ def _build_recommend_df(
                 end_dt,
                 clean_categories,
             )
-            for item in universe_items
+            for item in stage1_items
         ]
 
         for future in as_completed(futures):
-            done_count += 1
+            done1 += 1
             try:
                 result = future.result()
                 if not isinstance(result, dict):
@@ -3781,11 +3893,12 @@ def _build_recommend_df(
                 if collect_debug:
                     debug_summary["error_samples"].append(f"stage1 例外：{e}")
 
-            if done_count == 1 or done_count == total_count or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0:
-                ratio = done_count / total_count if total_count > 0 else 0
+            if done1 == 1 or done1 == total_stage1 or done1 % max(1, PROGRESS_UPDATE_EVERY) == 0:
+                total_stage1_safe = max(total_stage1, 1)
+                ratio = done1 / total_stage1_safe
                 elapsed = time.time() - start_ts
-                progress_bar.progress(min(max(ratio * 0.45, 0.0), 0.45), text=f"第一階段：低成本初篩 {done_count}/{total_count}")
-                progress_text.caption(f"已完成 {done_count}/{total_count}｜已花時間：{_fmt_seconds(elapsed)}")
+                progress_bar.progress(min(max(0.15 + ratio * 0.35, 0.15), 0.50), text=f"第1階段：低成本初篩 {done1}/{total_stage1_safe}")
+                progress_text.caption(f"第1階段已完成 {done1}/{total_stage1_safe}｜已花時間：{_fmt_seconds(elapsed)}")
 
     stage1_df = pd.DataFrame(stage1_rows)
     if stage1_df.empty:
@@ -3799,10 +3912,12 @@ def _build_recommend_df(
     debug_summary["stage1_passed"] = len(stage1_df)
     debug_summary["stage1_keep"] = len(keep_codes)
 
-    progress_bar.progress(0.5, text=f"第二階段：完整股神分析 {len(keep_codes)} 檔")
-
+    # ==================================================
+    # 第2階段：完整股神分析
+    # ==================================================
+    progress_bar.progress(0.55, text=f"第2階段：完整股神分析 {len(keep_codes)} 檔")
     base_rows = []
-    done_count = 0
+    done2 = 0
     target_items = [item for item in universe_items if _normalize_code(item.get("code")) in keep_codes]
     total_second = len(target_items)
 
@@ -3825,7 +3940,7 @@ def _build_recommend_df(
         ]
 
         for future in as_completed(futures):
-            done_count += 1
+            done2 += 1
             try:
                 result = future.result()
                 if not isinstance(result, dict):
@@ -3858,22 +3973,22 @@ def _build_recommend_df(
                 if collect_debug:
                     debug_summary["error_samples"].append(f"future.result 例外：{e}")
 
-            if done_count == 1 or done_count == total_second or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0:
+            if done2 == 1 or done2 == total_second or done2 % max(1, PROGRESS_UPDATE_EVERY) == 0:
                 total_second_safe = max(total_second, 1)
-                phase_ratio = done_count / total_second_safe
+                phase_ratio = done2 / total_second_safe
                 elapsed = time.time() - start_ts
-                avg_per_stock = elapsed / max(done_count, 1)
-                remain_count = max(total_second_safe - done_count, 0)
+                avg_per_stock = elapsed / max(done2, 1)
+                remain_count = max(total_second_safe - done2, 0)
                 eta_sec = avg_per_stock * remain_count
-                progress_bar.progress(min(max(0.5 + phase_ratio * 0.5, 0.5), 1.0), text=f"第二階段：完整股神分析 {done_count}/{total_second_safe} ({phase_ratio*100:.1f}%)")
+                progress_bar.progress(min(max(0.55 + phase_ratio * 0.45, 0.55), 1.0), text=f"第2階段：完整股神分析 {done2}/{total_second_safe} ({phase_ratio*100:.1f}%)")
                 progress_text.caption(
-                    f"第二階段已完成 {done_count}/{total_second_safe}｜"
+                    f"第2階段已完成 {done2}/{total_second_safe}｜"
                     f"已花時間：{_fmt_seconds(elapsed)}｜"
                     f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
                     f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
                 )
 
-    progress_bar.progress(1.0, text=f"推薦完成｜初篩通過 {len(stage1_df)} 檔｜完整分析 {len(keep_codes)} 檔")
+    progress_bar.progress(1.0, text=f"推薦完成｜預篩通過 {len(stage0_df)} 檔｜初篩通過 {len(stage1_df)} 檔｜完整分析 {len(keep_codes)} 檔")
     total_elapsed = time.time() - start_ts
     progress_text.caption(f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}")
 
@@ -3946,7 +4061,6 @@ def _build_recommend_df(
         final_df.insert(0, "勾選", False)
 
     hot_pick_df = _build_hot_stock_candidates(base_df, final_df, min_total_score)
-
     return final_df, category_strength_df, hot_pick_df
 
 
@@ -4877,7 +4991,7 @@ def main():
         "factor": float(st.session_state.get(_k("weight_factor"), 2.0)),
     }
     normalized_weights = _normalize_user_weight_map(score_weight_map)
-    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%（已大幅降低）")
+    st.caption(f"本輪去重後掃描池：{len(universe_items)} 檔｜掃描模式：{_safe_str(st.session_state.get(_k('scan_mode'), '股神建議'))}｜大盤輔助權重：{MACRO_SCORE_BLEND*100:.0f}%（已大幅降低）｜三段式：預篩→初篩→完整分析")
     st.caption("目前權重正規化後：" + "｜".join([f"{k}:{v*100:.0f}%" for k, v in normalized_weights.items()]))
 
     rec_df = pd.DataFrame()
