@@ -799,187 +799,46 @@ def _derive_event_list(news_rows: list[dict[str, str]]) -> str:
     return '｜'.join(hits[:5]) if hits else '無重大事件關鍵字'
 
 
-def _get_prev_trade_date_text(target_date_text: str) -> str:
-    target_dt = pd.to_datetime(target_date_text, errors="coerce")
-    if pd.isna(target_dt):
-        target_dt = pd.Timestamp.today().normalize()
-    probe_date = (target_dt - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    prev_tw = _price_on_or_before("^TWII", probe_date, 20)
-    used = _safe_str(prev_tw.get("used_date") or prev_tw.get("date"))
-    return used or probe_date
-
-
-def _fetch_exact_session(symbol: str, session_date_text: str) -> dict[str, Any]:
-    raw = _fetch_stooq(_normalize_stooq_symbol(symbol), session_date_text)
-    if not raw:
-        return {}
-    raw_date = _safe_str(raw.get("date"))
-    if raw_date != _safe_str(session_date_text):
-        return {}
-    return dict(raw)
-
-
-def _build_actual_market_result(pred_date_text: str, base_close: float | None = None) -> dict[str, Any]:
-    actual = _fetch_exact_session("^TWII", pred_date_text)
-    if not actual:
-        return {
-            "has_actual": False,
-            "actual_date": "",
-            "actual_open": None,
-            "actual_close": None,
-            "actual_high": None,
-            "actual_low": None,
-            "actual_points": None,
-            "actual_direction": "",
-            "actual_pct": None,
-        }
-    actual_open = _safe_float(actual.get("open"))
-    actual_close = _safe_float(actual.get("close"))
-    actual_high = _safe_float(actual.get("high"))
-    actual_low = _safe_float(actual.get("low"))
-    actual_pct = _safe_float(actual.get("pct"))
-    actual_points = None
-    if base_close is not None and actual_close is not None:
-        actual_points = actual_close - base_close
-    elif actual_pct is not None and actual_close is not None:
-        try:
-            prev_close = actual_close / (1 + actual_pct / 100.0)
-            actual_points = actual_close - prev_close
-        except Exception:
-            actual_points = None
-    return {
-        "has_actual": True,
-        "actual_date": _safe_str(actual.get("date")),
-        "actual_open": actual_open,
-        "actual_close": actual_close,
-        "actual_high": actual_high,
-        "actual_low": actual_low,
-        "actual_points": actual_points,
-        "actual_direction": _derive_actual_direction(actual_points),
-        "actual_pct": actual_pct,
-    }
-
-
-def _get_model_calibration_map(records_df: pd.DataFrame) -> dict[str, dict[str, float]]:
-    out = {m: {"scale": 1.0, "bias": 0.0, "confidence_adj": 0.0, "sample": 0} for m in MODEL_NAMES}
-    df = _ensure_columns(records_df)
-    if df.empty:
-        return out
-    hist = df.copy()
-    hist["預估漲跌點"] = pd.to_numeric(hist["預估漲跌點"], errors="coerce")
-    hist["實際漲跌點"] = pd.to_numeric(hist["實際漲跌點"], errors="coerce")
-    hist = hist.dropna(subset=["預估漲跌點", "實際漲跌點"])
-    if hist.empty:
-        return out
-    for model in MODEL_NAMES:
-        x = hist[hist["模式名稱"].astype(str) == model].copy()
-        if len(x) < 5:
-            continue
-        avg_pred = float(x["預估漲跌點"].abs().mean() or 0)
-        avg_actual = float(x["實際漲跌點"].abs().mean() or 0)
-        if avg_pred <= 1e-9:
-            scale = 1.0
-        else:
-            scale = max(0.55, min(1.15, avg_actual / avg_pred))
-        bias = float((x["實際漲跌點"] - x["預估漲跌點"]).mean() or 0)
-        bias = max(-60.0, min(60.0, bias))
-        hit_rate = float(x["方向是否命中"].fillna(False).mean() or 0)
-        conf_adj = max(-10.0, min(6.0, (hit_rate - 0.5) * 20.0))
-        out[model] = {
-            "scale": scale,
-            "bias": bias,
-            "confidence_adj": conf_adj,
-            "sample": int(len(x)),
-        }
-    return out
-
-
-def _apply_actuals_to_pred_df(pred_df: pd.DataFrame, actual_ctx: dict[str, Any]) -> pd.DataFrame:
-    if pred_df is None or pred_df.empty:
-        return pred_df
-    if not actual_ctx.get("has_actual"):
-        return pred_df
-    out = pred_df.copy()
-    for idx in out.index:
-        out.at[idx, "實際方向"] = actual_ctx.get("actual_direction")
-        out.at[idx, "實際漲跌點"] = actual_ctx.get("actual_points")
-        out.at[idx, "實際高點"] = actual_ctx.get("actual_high")
-        out.at[idx, "實際低點"] = actual_ctx.get("actual_low")
-        applied = _apply_actual_result(out.loc[idx].to_dict())
-        for k, v in applied.items():
-            if k in out.columns:
-                out.at[idx, k] = v
-    return out
-
-
-def _build_compare_summary(pred_df: pd.DataFrame) -> dict[str, Any]:
-    x = _ensure_columns(pred_df)
-    if x.empty:
-        return {"has_actual": False}
-    actual_points = _safe_float(x.iloc[0].get("實際漲跌點"))
-    actual_dir = _safe_str(x.iloc[0].get("實際方向"))
-    if actual_points is None:
-        return {"has_actual": False}
-    best_row = x.sort_values(["點數誤差", "方向是否命中"], ascending=[True, False], na_position="last").iloc[0]
-    top_row = x.iloc[0]
-    direction_hit_rate = float(x["方向是否命中"].fillna(False).mean() * 100)
-    avg_error = float(pd.to_numeric(x["點數誤差"], errors="coerce").dropna().mean()) if len(x) else None
-    return {
-        "has_actual": True,
-        "actual_points": actual_points,
-        "actual_direction": actual_dir,
-        "best_model": _safe_str(best_row.get("模式名稱")),
-        "best_error": _safe_float(best_row.get("點數誤差")),
-        "top_model": _safe_str(top_row.get("模式名稱")),
-        "top_pred_points": _safe_float(top_row.get("預估漲跌點")),
-        "top_error": _safe_float(top_row.get("點數誤差")),
-        "top_hit": bool(top_row.get("方向是否命中")),
-        "direction_hit_rate": direction_hit_rate,
-        "avg_error": avg_error,
-    }
-
-
-
 def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
-    signal_date_text = _get_prev_trade_date_text(pred_date_text)
-
-    twii = _price_on_or_before("^TWII", signal_date_text, 20)
-    nas = _price_on_or_before("^IXIC", signal_date_text, 20)
-    sox = _price_on_or_before("^SOX", signal_date_text, 20)
-    spx = _price_on_or_before("^GSPC", signal_date_text, 20)
-    adr = _price_on_or_before("TSM", signal_date_text, 20)
-    es = _price_on_or_before("ES.F", signal_date_text, 20)
-    nq = _price_on_or_before("NQ.F", signal_date_text, 20)
-    vix = _price_on_or_before("^VIX", signal_date_text, 20)
-    usdtwd = _price_on_or_before("USDTWD", signal_date_text, 20)
-
-    news_rows = _search_news_headlines(signal_date_text)
+    twii = _price_on_or_before("^TWII", pred_date_text, 15)
+    nas = _price_on_or_before("^IXIC", pred_date_text, 15)
+    sox = _price_on_or_before("^SOX", pred_date_text, 15)
+    spx = _price_on_or_before("^GSPC", pred_date_text, 15)
+    adr = _price_on_or_before("TSM", pred_date_text, 15)
+    es = _price_on_or_before("ES.F", pred_date_text, 15)
+    nq = _price_on_or_before("NQ.F", pred_date_text, 15)
+    vix = _price_on_or_before("^VIX", pred_date_text, 15)
+    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 15)
+    news_rows = _search_news_headlines(pred_date_text)
     news_score, news_logic, main_risk = _news_risk_score(news_rows)
 
-    inst = _fetch_twse_institutional(signal_date_text)
-    futopt = _fetch_taifex_sentiment(signal_date_text)
-    margin = _fetch_twse_margin(signal_date_text)
+    inst = _fetch_twse_institutional(pred_date_text)
+    futopt = _fetch_taifex_sentiment(pred_date_text)
+    margin = _fetch_twse_margin(pred_date_text)
+
+    inst = _fetch_twse_institutional(pred_date_text)
+    futopt = _fetch_taifex_sentiment(pred_date_text)
+    margin = _fetch_twse_margin(pred_date_text)
 
     tech_score = 0.0
     structure_notes = []
-    base_close = _safe_float(twii.get("close"), 22000.0)
+    tw_close = _safe_float(twii.get("close"), 22000.0)
     tw_pct = _safe_float(twii.get("pct"), 0.0)
-    tw_ma5 = _safe_float(twii.get("ma5"), base_close)
-    tw_ma20 = _safe_float(twii.get("ma20"), base_close)
-
-    if base_close >= tw_ma5:
+    tw_ma5 = _safe_float(twii.get("ma5"), tw_close)
+    tw_ma20 = _safe_float(twii.get("ma20"), tw_close)
+    if tw_close >= tw_ma5:
         tech_score += 2.5
-        structure_notes.append("前一日加權站上MA5")
+        structure_notes.append("加權站上MA5")
     else:
         tech_score -= 2.5
-        structure_notes.append("前一日加權跌破MA5")
-    if base_close >= tw_ma20:
+        structure_notes.append("加權跌破MA5")
+    if tw_close >= tw_ma20:
         tech_score += 3.0
-        structure_notes.append("前一日加權站上MA20")
+        structure_notes.append("加權站上MA20")
     else:
         tech_score -= 3.0
-        structure_notes.append("前一日加權跌破MA20")
-    tech_score += _score_from_pct(tw_pct, scale=1.2, cap=5)
+        structure_notes.append("加權跌破MA20")
+    tech_score += _score_from_pct(tw_pct, scale=1.3, cap=6)
 
     adr_pct = _safe_float(adr.get("pct"), 0.0)
     es_pct = _safe_float(es.get("pct"), 0.0)
@@ -989,21 +848,21 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     spx_pct = _safe_float(spx.get("pct"), 0.0)
 
     us_score = (
-        _score_from_pct(nas_pct, 1.7, 7)
-        + _score_from_pct(sox_pct, 2.1, 8)
-        + _score_from_pct(spx_pct, 1.1, 5)
+        _score_from_pct(nas_pct, 1.8, 8)
+        + _score_from_pct(sox_pct, 2.2, 9)
+        + _score_from_pct(spx_pct, 1.2, 6)
         + _score_from_pct(adr_pct, 2.0, 8)
     )
-    night_score = _score_from_pct(es_pct, 1.8, 7) + _score_from_pct(nq_pct, 2.2, 8)
+    night_score = _score_from_pct(es_pct, 2.0, 8) + _score_from_pct(nq_pct, 2.4, 9)
 
     vix_val = _safe_float(vix.get("close"), 18.0)
     risk_score = 0.0
     if vix_val >= 30:
-        risk_score -= 8.0
+        risk_score -= 8
     elif vix_val >= 24:
-        risk_score -= 5.0
+        risk_score -= 5
     elif vix_val >= 20:
-        risk_score -= 2.0
+        risk_score -= 2
     elif vix_val <= 15:
         risk_score += 1.5
 
@@ -1020,8 +879,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     foreign_score = chip['foreign_score']
     futures_score = chip['futures_score']
     margin_score = chip['margin_score']
-
-    event_score = -news_score * 1.7
+    event_score = -news_score * 1.8
     if vix_val >= 25:
         event_score -= 2.0
     if chip['pcr'] is not None:
@@ -1030,9 +888,9 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         elif chip['pcr'] <= 0.8:
             event_score -= 0.8
 
-    if tw_pct >= 1.0 and us_score > 3 and foreign_score >= 0:
+    if tw_pct >= 1.2 and us_score > 3 and foreign_score >= 0:
         scenario = "多頭延續日"
-    elif tw_pct <= -1.0 and us_score < -3 and foreign_score <= 0:
+    elif tw_pct <= -1.2 and us_score < -3 and foreign_score <= 0:
         scenario = "空頭延續日"
     elif news_score >= 4 or vix_val >= 25:
         scenario = "重大風險事件日"
@@ -1041,10 +899,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     else:
         scenario = "一般趨勢日"
 
-    actual_ctx = _build_actual_market_result(pred_date_text, base_close)
-
     source_status = (
-        f"預測基準日:{signal_date_text}｜"
         f"加權:{_safe_str(twii.get('date')) or 'fallback'}｜"
         f"法人:{_safe_str(chip.get('inst_used_date')) or inst.get('source','fallback')}｜"
         f"期權:{_safe_str(chip.get('futopt_used_date')) or futopt.get('source','fallback')}｜"
@@ -1052,16 +907,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     )
 
     return {
-        "signal_date_text": signal_date_text,
-        "twii": twii,
-        "nas": nas,
-        "sox": sox,
-        "spx": spx,
-        "adr": adr,
-        "es": es,
-        "nq": nq,
-        "vix": vix,
-        "usdtwd": usdtwd,
+        "twii": twii, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
         "news_rows": news_rows,
         "news_score": news_score,
         "news_logic": news_logic,
@@ -1076,8 +922,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "event_score": event_score,
         "scenario": scenario,
         "structure_notes": structure_notes,
-        "base_close": base_close,
-        "tw_close": base_close,
+        "tw_close": tw_close,
         "tw_pct": tw_pct,
         "vix_val": vix_val,
         "fx_val": fx_val,
@@ -1098,8 +943,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "inst_used_date": _safe_str(inst.get('used_date')),
         "futopt_used_date": _safe_str(futopt.get('used_date')),
         "margin_used_date": _safe_str(margin.get('used_date')),
-        "news_range": f"{signal_date_text} 前後搜尋" if news_rows else "無新聞命中",
-        "actual_ctx": actual_ctx,
+        "news_range": f"{pred_date_text} 前後搜尋" if news_rows else "無新聞命中",
     }
 
 
@@ -1191,11 +1035,7 @@ def _build_action_pack(direction: str, strength: str, risk_level: str, scenario:
     return ("否", "否", "是", "是", "減碼或出場防守", "0%~15%", "偏空結構不利持股")
 
 
-
-def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[str, dict[str, float]], pred_date_text: str, calibration_map: dict[str, dict[str, float]] | None = None) -> dict[str, Any]:
-    calibration_map = calibration_map or {}
-    model_cal = calibration_map.get(model_name, {"scale": 1.0, "bias": 0.0, "confidence_adj": 0.0, "sample": 0})
-
+def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[str, dict[str, float]], pred_date_text: str) -> dict[str, Any]:
     w = weight_map.get(model_name, weight_map["股神平衡版"])
     component = {
         "tech": ctx["tech_score"],
@@ -1213,45 +1053,16 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     risk_level = _risk_level(total_score, ctx["news_score"], ctx["vix_val"])
     fit_entry, fit_hold, fit_trim, fit_exit, action, position, action_note = _build_action_pack(direction, strength, risk_level, ctx["scenario"], ctx["tech_score"])
 
-    base = ctx["base_close"] or 22000.0
-    day_vol = max(
-        70.0,
-        min(
-            320.0,
-            abs(ctx["tw_pct"] or 0) * 85
-            + abs(ctx["us_score"]) * 5
-            + abs(ctx["night_score"]) * 4
-            + ctx["news_score"] * 10
-        ),
-    )
-
-    raw_points = total_score * 8.5
-    predicted_points = raw_points * float(model_cal.get("scale", 1.0) or 1.0) + float(model_cal.get("bias", 0.0) or 0.0)
-
+    base = ctx["tw_close"] or 22000.0
+    day_vol = max(80.0, min(420.0, abs(ctx["tw_pct"] or 0) * 120 + abs(ctx["us_score"]) * 6 + abs(ctx["night_score"]) * 5 + ctx["news_score"] * 12))
+    predicted_points = total_score * 8.5
     if direction == "震盪":
-        predicted_points = max(-65.0, min(65.0, predicted_points))
-    else:
-        predicted_points = max(-260.0, min(260.0, predicted_points))
-
-    range_amp = max(45.0, min(180.0, day_vol * 0.50 + abs(predicted_points) * 0.35))
-    high = base + max(predicted_points, 0.0) + range_amp
-    low = base + min(predicted_points, 0.0) - range_amp
-
-    confidence = max(
-        35.0,
-        min(
-            94.0,
-            55
-            + abs(total_score) * 1.2
-            - ctx["news_score"] * 1.1
-            - max(ctx["vix_val"] - 18, 0) * 0.55
-            + float(model_cal.get("confidence_adj", 0.0) or 0.0),
-        ),
-    )
+        predicted_points = max(-80, min(80, predicted_points))
+    high = base + max(20.0, predicted_points + day_vol * 0.45)
+    low = base + min(-20.0, predicted_points - day_vol * 0.45)
+    confidence = max(35.0, min(92.0, 55 + abs(total_score) * 1.3 - ctx["news_score"] * 1.2 - (ctx["vix_val"] - 18) * 0.6))
 
     logic_lines = [
-        f"預測目標日：{pred_date_text}",
-        f"預測基準日：{ctx.get('signal_date_text','')}",
         f"情境：{ctx['scenario']}",
         f"技術面 {ctx['tech_score']:.1f}（{' / '.join(ctx['structure_notes'][:3]) or '結構中性'}）",
         f"美股/ADR {ctx['us_score']:.1f}，夜盤 {ctx['night_score']:.1f}",
@@ -1260,10 +1071,9 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         f"外資現貨 {(_safe_float(ctx.get('foreign_amt')) or 0):.1f} 億 / 三大法人 {(_safe_float(ctx.get('total3_amt')) or 0):.1f} 億 / PCR {(_safe_float(ctx.get('pcr')) or 0):.2f}",
         f"強勢族群 {ctx.get('sector_strong','')}；弱勢族群 {ctx.get('sector_weak','')}",
         f"模式 {model_name} 權重下總分 {total_score:.1f}",
-        f"模型校正：scale={float(model_cal.get('scale', 1.0)):.2f} / bias={float(model_cal.get('bias', 0.0)):.1f} / sample={int(model_cal.get('sample', 0) or 0)}",
     ]
     entry_confirm = "、".join([
-        "以前一日加權站穩 MA5 為主" if ctx["tw_close"] >= _safe_float(ctx["twii"].get("ma5"), ctx["tw_close"]) else "需先站回 MA5",
+        "加權至少站穩 MA5" if ctx["tw_close"] >= _safe_float(ctx["twii"].get("ma5"), ctx["tw_close"]) else "需先站回 MA5",
         "美股科技不轉弱" if ctx["us_score"] >= -2 else "美股仍偏弱需保守",
         "夜盤不急轉空" if ctx["night_score"] >= -2 else "夜盤偏空避免搶反彈",
         "VIX 不高於 24" if ctx["vix_val"] < 24 else "VIX 過高需降倉位",
@@ -1306,7 +1116,7 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "大盤基準點": round(base, 2),
         "加權收盤": round(_safe_float(ctx["twii"].get("close"), base), 2),
         "加權漲跌%": round(_safe_float(ctx["twii"].get("pct"), 0.0), 2),
-        "成交量估分": round(abs(_safe_float(ctx["twii"].get("pct"), 0.0)) * 4.0, 2),
+        "成交量估分": round(abs(_safe_float(ctx["twii"].get("pct"), 0.0)) * 4.5, 2),
         "VIX": round(ctx["vix_val"], 2),
         "美元台幣": round(ctx["fx_val"], 4),
         "NASDAQ漲跌%": round(_safe_float(ctx["nas"].get("pct"), 0.0), 2),
@@ -1355,20 +1165,31 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     }
 
 
-
 def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    sig_payload = {
+        "pred_date_text": pred_date_text,
+        "records": _ensure_columns(records_df)[["推估日期", "模式名稱", "更新時間", "整體檢討分", "方向是否命中", "區間是否命中", "建議動作是否合適"]].fillna("").astype(str).to_dict(orient="records") if isinstance(records_df, pd.DataFrame) and not records_df.empty else [],
+    }
+    sig = make_signature(sig_payload) if callable(make_signature) else ""
+    if callable(session_cached_compute) and sig:
+        def _compute():
+            ctx = _calc_market_context(pred_date_text)
+            weights = _get_dynamic_weights(records_df)
+            rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
+            pred_df = pd.DataFrame(rows)
+            pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
+            pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False], inplace=True)
+            pred_df.reset_index(drop=True, inplace=True)
+            return pred_df, ctx
+        (pred_df, ctx), _ = session_cached_compute(st, "macro_predict_all_models", sig, _compute)
+        return pred_df, ctx
+
     ctx = _calc_market_context(pred_date_text)
     weights = _get_dynamic_weights(records_df)
-    calibration_map = _get_model_calibration_map(records_df)
-    rows = [_predict_for_model(model, ctx, weights, pred_date_text, calibration_map) for model in MODEL_NAMES]
+    rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
     pred_df = pd.DataFrame(rows)
-    pred_df = _apply_actuals_to_pred_df(pred_df, ctx.get("actual_ctx", {}))
     pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
-    if "點數誤差" in pred_df.columns and pred_df["點數誤差"].notna().any():
-        pred_df["綜合排名分"] = pred_df["綜合排名分"] - pred_df["點數誤差"].fillna(pred_df["點數誤差"].max() if pred_df["點數誤差"].notna().any() else 0) * 0.02
     pred_df = pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False]).reset_index(drop=True)
-    ctx["calibration_map"] = calibration_map
-    ctx["compare_summary"] = _build_compare_summary(pred_df)
     return pred_df, ctx
 
 
@@ -1445,7 +1266,6 @@ def _derive_actual_direction(actual_points: float | None) -> str:
     return "震盪"
 
 
-
 def _apply_actual_result(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src = dict(row)
     pred_dir = _safe_str(src.get("推估方向"))
@@ -1457,32 +1277,18 @@ def _apply_actual_result(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     actual_low = _safe_float(src.get("實際低點"))
     actual_dir = _safe_str(src.get("實際方向")) or _derive_actual_direction(actual_points)
     src["實際方向"] = actual_dir
-
     if actual_dir:
         src["方向是否命中"] = (pred_dir == actual_dir)
-
     if pred_points is not None and actual_points is not None:
         src["點數誤差"] = abs(pred_points - actual_points)
-
     if pred_high is not None and pred_low is not None and actual_high is not None and actual_low is not None:
-        src["區間是否命中"] = (actual_high <= pred_high + 80) and (actual_low >= pred_low - 80)
-
+        src["區間是否命中"] = (actual_high <= pred_high + 60) and (actual_low >= pred_low - 60)
     entry_score, exit_score, overall_score, fit = _score_entry_exit(_safe_str(src.get("建議動作")), actual_points)
     src["進場建議績效分"] = entry_score
     src["出場建議績效分"] = exit_score
     src["整體檢討分"] = overall_score
-
-    if fit is not None:
-        src["建議動作是否合適"] = bool(fit)
-
-    if actual_points is not None and pred_points is not None:
-        if src.get("方向是否命中") and abs(actual_points - pred_points) <= 35:
-            src["收盤檢討"] = _safe_str(src.get("收盤檢討")) or "方向正確且點數誤差小，模型表現佳"
-        elif src.get("方向是否命中"):
-            src["收盤檢討"] = _safe_str(src.get("收盤檢討")) or "方向正確，但點數落差仍需收斂"
-        else:
-            src["收盤檢討"] = _safe_str(src.get("收盤檢討")) or "方向錯誤，需檢查美股/夜盤/事件權重"
-
+    if fit is not None and not bool(src.get("建議動作是否合適")):
+        src["建議動作是否合適"] = fit
     src["更新時間"] = _now_text()
     return src
 
@@ -1550,10 +1356,15 @@ def _safe_pct_text(v: Any) -> str:
 
 def _load_watchlist_items() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    if get_normalized_watchlist is None:
-        return rows
+    data = st.session_state.get("watchlist_data")
+    if not isinstance(data, dict) or not data:
+        if get_normalized_watchlist is None:
+            return rows
+        try:
+            data = get_normalized_watchlist()
+        except Exception:
+            data = {}
     try:
-        data = get_normalized_watchlist()
         if not isinstance(data, dict):
             return rows
         seen = set()
@@ -1578,6 +1389,11 @@ def _load_watchlist_items() -> list[dict[str, str]]:
                 })
     except Exception:
         return []
+    if callable(dedupe_stock_rows):
+        try:
+            rows = dedupe_stock_rows(rows, key_fields=("股票代號", "市場別"))
+        except Exception:
+            pass
     return rows
 
 
@@ -1587,7 +1403,7 @@ def _parse_custom_stock_text(text: str) -> list[dict[str, str]]:
         s = line.strip()
         if not s:
             continue
-        s = s.replace("，", ",").replace("	", ",")
+        s = s.replace("，", ",").replace("\t", ",")
         parts = [x.strip() for x in s.split(",") if x.strip()]
         if not parts:
             continue
@@ -1595,6 +1411,11 @@ def _parse_custom_stock_text(text: str) -> list[dict[str, str]]:
         name = _safe_str(parts[1]) if len(parts) >= 2 else code
         market = _safe_str(parts[2]) if len(parts) >= 3 else "上市"
         rows.append({"群組": "自訂", "股票代號": code, "股票名稱": name, "市場別": market})
+    if callable(dedupe_stock_rows):
+        try:
+            rows = dedupe_stock_rows(rows, key_fields=("股票代號", "市場別"))
+        except Exception:
+            pass
     return rows
 
 
@@ -1700,6 +1521,11 @@ def _macro_stock_action(total_score: float, risk_level: str, stock_tech_score: f
 def _build_stock_linkage_df(top_pick: dict[str, Any], ctx: dict[str, Any], use_watchlist: bool, custom_text: str) -> pd.DataFrame:
     rows = _load_watchlist_items() if use_watchlist else []
     rows.extend(_parse_custom_stock_text(custom_text))
+    if callable(dedupe_stock_rows):
+        try:
+            rows = dedupe_stock_rows(rows, key_fields=("股票代號", "市場別"))
+        except Exception:
+            pass
     if not rows:
         return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "最新價", "漲跌%", "MA5", "MA20", "個股技術分", "大盤模式", "大盤方向", "股神分數", "風險等級", "建議動作", "偏向", "推論"])
     out = []
@@ -1707,8 +1533,12 @@ def _build_stock_linkage_df(top_pick: dict[str, Any], ctx: dict[str, Any], use_w
     macro_dir = _safe_str(top_pick.get("推估方向"))
     macro_mode = _safe_str(top_pick.get("模式名稱"))
     risk_level = _safe_str(top_pick.get("風險等級"))
+    snap_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
     for r in rows:
-        snap = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"])
+        cache_key = (_safe_str(r["股票代號"]), _safe_str(r["股票名稱"]), _safe_str(r["市場別"]))
+        if cache_key not in snap_cache:
+            snap_cache[cache_key] = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"])
+        snap = snap_cache.get(cache_key, {})
         action, bias, reason = _macro_stock_action(macro_score, risk_level, _safe_float(snap.get("技術分"), 0) or 0.0, _safe_float(snap.get("漲跌%")))
         out.append({
             "群組": r["群組"],
@@ -1796,8 +1626,8 @@ def main():
     top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
     scoreboard = _build_scoreboard(base_df)
 
-    if _safe_str(ctx.get("market_data_date")) and _safe_str(ctx.get("market_data_date")) != _safe_str(ctx.get("signal_date_text")):
-        st.warning(f"你選的是 {pred_date_text}，系統預測基準日採用 {ctx.get('signal_date_text')}，而加權最近可用資料為 {ctx.get('market_data_date')}。")
+    if _safe_str(ctx.get("market_data_date")) and _safe_str(ctx.get("market_data_date")) != pred_date_text:
+        st.warning(f"你選的是 {pred_date_text}，但加權最近可用交易資料是 {ctx.get('market_data_date')}，因此部分因子會以最近交易日回放。")
 
     render_pro_kpi_row([
         {"label": "推估日期", "value": pred_date_text, "delta": ctx.get("scenario", ""), "delta_class": "pro-kpi-delta-flat"},
@@ -1806,28 +1636,6 @@ def main():
         {"label": "信心度", "value": f"{_safe_float(top_pick.get('股神信心度'), 0):.1f}%", "delta": _safe_str(top_pick.get("風險等級")), "delta_class": "pro-kpi-delta-flat"},
         {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
-
-    compare_summary = ctx.get("compare_summary", {})
-    if compare_summary.get("has_actual"):
-        render_pro_section("推估 vs 實際｜當日自動比對")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        with c1:
-            st.metric("當日實際方向", _safe_str(compare_summary.get("actual_direction")) or "-", f"{_safe_float(compare_summary.get('actual_points'), 0):.1f} 點")
-        with c2:
-            st.metric("目前最佳模型", _safe_str(compare_summary.get("best_model")) or "-", None if compare_summary.get("best_error") is None else f"誤差 {compare_summary.get('best_error'):.1f}")
-        with c3:
-            st.metric("頁面首選模型", _safe_str(compare_summary.get("top_model")) or "-", None if compare_summary.get("top_error") is None else f"誤差 {compare_summary.get('top_error'):.1f}")
-        with c4:
-            st.metric("五模型方向命中率", f"{_safe_float(compare_summary.get('direction_hit_rate'), 0):.1f}%")
-        with c5:
-            st.metric("五模型平均點差", "-" if compare_summary.get("avg_error") is None else f"{compare_summary.get('avg_error'):.1f}")
-        compare_cols = [
-            "模式名稱", "推估方向", "實際方向", "預估漲跌點", "實際漲跌點", "點數誤差",
-            "方向是否命中", "區間是否命中", "建議動作", "建議動作是否合適", "整體檢討分"
-        ]
-        st.dataframe(pred_df[[c for c in compare_cols if c in pred_df.columns]], use_container_width=True, hide_index=True)
-    else:
-        st.info(f"{pred_date_text} 尚無完整當日實際結果可比對；系統仍會以前一交易日 {ctx.get('signal_date_text','')} 的資訊做預測。")
 
 
     factor_cols = st.columns(4)
