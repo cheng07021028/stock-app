@@ -374,6 +374,37 @@ def _normalize_user_weight_map(user_weight_map: dict[str, float] | None) -> dict
     total = sum(merged.values()) or 1.0
     return {k: v / total for k, v in merged.items()}
 
+def _raw_user_weight_map_from_ui() -> dict[str, float]:
+    return {
+        "market": float(st.session_state.get(_ui_pref_key("weight_market"), st.session_state.get(_k("weight_market"), 3.0))),
+        "tech": float(st.session_state.get(_ui_pref_key("weight_tech"), st.session_state.get(_k("weight_tech"), 24.0))),
+        "prelaunch": float(st.session_state.get(_ui_pref_key("weight_prelaunch"), st.session_state.get(_k("weight_prelaunch"), 18.0))),
+        "trade": float(st.session_state.get(_ui_pref_key("weight_trade"), st.session_state.get(_k("weight_trade"), 14.0))),
+        "heat": float(st.session_state.get(_ui_pref_key("weight_heat"), st.session_state.get(_k("weight_heat"), 12.0))),
+        "pattern": float(st.session_state.get(_ui_pref_key("weight_pattern"), st.session_state.get(_k("weight_pattern"), 12.0))),
+        "burst": float(st.session_state.get(_ui_pref_key("weight_burst"), st.session_state.get(_k("weight_burst"), 10.0))),
+        "leader": float(st.session_state.get(_ui_pref_key("weight_leader"), st.session_state.get(_k("weight_leader"), 5.0))),
+        "factor": float(st.session_state.get(_ui_pref_key("weight_factor"), st.session_state.get(_k("weight_factor"), 2.0))),
+    }
+
+def _reset_weight_ui_to_defaults():
+    defaults = dict(DEFAULT_SCORE_WEIGHT_MAP)
+    st.session_state[_ui_pref_key("weight_market")] = float(defaults["market"])
+    st.session_state[_ui_pref_key("weight_tech")] = float(defaults["tech"])
+    st.session_state[_ui_pref_key("weight_prelaunch")] = float(defaults["prelaunch"])
+    st.session_state[_ui_pref_key("weight_trade")] = float(defaults["trade"])
+    st.session_state[_ui_pref_key("weight_heat")] = float(defaults["heat"])
+    st.session_state[_ui_pref_key("weight_pattern")] = float(defaults["pattern"])
+    st.session_state[_ui_pref_key("weight_burst")] = float(defaults["burst"])
+    st.session_state[_ui_pref_key("weight_leader")] = float(defaults["leader"])
+    st.session_state[_ui_pref_key("weight_factor")] = float(defaults["factor"])
+
+def _apply_weight_ui_to_runtime():
+    raw_map = _raw_user_weight_map_from_ui()
+    for key, val in raw_map.items():
+        st.session_state[_k(f"weight_{key}")] = float(val)
+    return raw_map
+
 def _get_mode_seed_weight(mode: str) -> dict[str, float]:
     if mode == "飆股模式":
         return {"market": 0.06, "tech": 0.10, "prelaunch": 0.20, "trade": 0.08, "heat": 0.14, "pattern": 0.20, "burst": 0.18, "leader": 0.02, "factor": 0.02}
@@ -4586,20 +4617,62 @@ def main():
         )
 
         render_pro_section("評分權重%（可調）")
-        st.caption("這些權重會影響個股完整分析時的主評分比例。系統會自動正規化為 100%，大盤輔助仍維持低權重輔助。")
-        w1, w2, w3 = st.columns(3)
-        with w1:
+        st.caption("調整後不會立即生效，需按『套用權重』。總和必須剛好 100%，否則無法套用。")
+        raw_weight_preview = _raw_user_weight_map_from_ui()
+        raw_weight_total = sum(raw_weight_preview.values())
+        remaining_weight = 100.0 - raw_weight_total
+
+        s1, s2, s3 = st.columns(3)
+        with s1:
             st.slider("技術結構%", 0.0, 40.0, key=_ui_pref_key("weight_tech"), step=1.0)
             st.slider("起漲前兆%", 0.0, 35.0, key=_ui_pref_key("weight_prelaunch"), step=1.0)
             st.slider("交易可行%", 0.0, 30.0, key=_ui_pref_key("weight_trade"), step=1.0)
-        with w2:
+        with s2:
             st.slider("類股熱度%", 0.0, 25.0, key=_ui_pref_key("weight_heat"), step=1.0)
             st.slider("型態突破%", 0.0, 25.0, key=_ui_pref_key("weight_pattern"), step=1.0)
             st.slider("爆發力%", 0.0, 25.0, key=_ui_pref_key("weight_burst"), step=1.0)
-        with w3:
+        with s3:
             st.slider("同類股領先%", 0.0, 20.0, key=_ui_pref_key("weight_leader"), step=1.0)
             st.slider("自動因子%", 0.0, 15.0, key=_ui_pref_key("weight_factor"), step=1.0)
             st.slider("大盤輔助%", 0.0, 10.0, key=_ui_pref_key("weight_market"), step=1.0)
+
+        info1, info2, info3 = st.columns([1.2, 1.2, 2.2])
+        with info1:
+            st.metric("目前總和", f"{raw_weight_total:.0f}%")
+        with info2:
+            st.metric("剩餘/超出", f"{remaining_weight:+.0f}%")
+        with info3:
+            if remaining_weight == 0:
+                st.success("目前剛好 100%，可以套用。")
+            elif remaining_weight > 0:
+                st.warning(f"還差 {remaining_weight:.0f}% 才能套用。")
+            else:
+                st.error(f"超出 {-remaining_weight:.0f}% ，請調整回 100%。")
+
+        bw1, bw2, bw3 = st.columns([1, 1, 3])
+        with bw1:
+            reset_weight_btn = st.form_submit_button("恢復原始設定", use_container_width=True)
+        with bw2:
+            apply_weight_btn = st.form_submit_button("套用權重", use_container_width=True)
+
+        if reset_weight_btn:
+            _reset_weight_ui_to_defaults()
+            st.session_state[_k("weight_apply_msg")] = "已恢復原始權重設定。"
+            st.rerun()
+
+        if apply_weight_btn:
+            if abs(remaining_weight) > 1e-9:
+                st.session_state[_k("weight_apply_msg")] = f"權重總和目前為 {raw_weight_total:.0f}%，必須剛好 100% 才能套用。"
+            else:
+                _apply_weight_ui_to_runtime()
+                st.session_state[_k("weight_apply_msg")] = "權重已套用。"
+
+        weight_msg = _safe_str(st.session_state.get(_k("weight_apply_msg"), ""))
+        if weight_msg:
+            if "已套用" in weight_msg or "已恢復" in weight_msg:
+                st.success(weight_msg)
+            else:
+                st.error(weight_msg)
 
         render_pro_section("推薦門檻")
         f1, f2, f3, f4 = st.columns(4)
@@ -4727,15 +4800,6 @@ def main():
         st.session_state[_k("min_trade_score")] = float(form_min_trade_score)
         st.session_state[_k("pick_strategy")] = form_pick_strategy
         st.session_state[_k("scan_mode")] = form_scan_mode
-        st.session_state[_k("weight_market")] = float(st.session_state.get(_ui_pref_key("weight_market"), 3.0))
-        st.session_state[_k("weight_tech")] = float(st.session_state.get(_ui_pref_key("weight_tech"), 24.0))
-        st.session_state[_k("weight_prelaunch")] = float(st.session_state.get(_ui_pref_key("weight_prelaunch"), 18.0))
-        st.session_state[_k("weight_trade")] = float(st.session_state.get(_ui_pref_key("weight_trade"), 14.0))
-        st.session_state[_k("weight_heat")] = float(st.session_state.get(_ui_pref_key("weight_heat"), 12.0))
-        st.session_state[_k("weight_pattern")] = float(st.session_state.get(_ui_pref_key("weight_pattern"), 12.0))
-        st.session_state[_k("weight_burst")] = float(st.session_state.get(_ui_pref_key("weight_burst"), 10.0))
-        st.session_state[_k("weight_leader")] = float(st.session_state.get(_ui_pref_key("weight_leader"), 5.0))
-        st.session_state[_k("weight_factor")] = float(st.session_state.get(_ui_pref_key("weight_factor"), 2.0))
         st.session_state[_k("recommend_mode")] = form_recommend_mode
         st.session_state[_k("risk_strictness")] = form_risk_strictness
         st.session_state[_k("submitted_once")] = True
