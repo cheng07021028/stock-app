@@ -1299,6 +1299,32 @@ def _reset_col_profile(mode: str, available_cols: list[str]):
     _save_col_profile(mode, default_cols)
 
 
+def _stage_col_profile(mode: str, cols: list[str]):
+    """只暫存欄位順序，不永久保存；按『套用設定』後才正式記錄。"""
+    st.session_state[_k(f"staged_col_profile_{mode}")] = [c for c in cols if c]
+
+
+def _get_staged_or_saved_col_profile(mode: str, available_cols: list[str]) -> list[str]:
+    staged = st.session_state.get(_k(f"staged_col_profile_{mode}"))
+    if isinstance(staged, list) and staged:
+        clean = [c for c in staged if c in available_cols]
+        extra = [c for c in available_cols if c not in clean]
+        return clean + extra
+    return _get_saved_col_profile(mode, available_cols)
+
+
+def _apply_staged_col_profile(mode: str, available_cols: list[str]):
+    cols = _get_staged_or_saved_col_profile(mode, available_cols)
+    cols = [c for c in cols if c in available_cols]
+    _save_col_profile(mode, cols)
+    st.session_state[_k(f"staged_col_profile_{mode}")] = cols.copy()
+
+
+def _restore_original_col_profile(mode: str, available_cols: list[str]):
+    default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
+    st.session_state[_k(f"staged_col_profile_{mode}")] = default_cols.copy()
+
+
 def _move_col(cols: list[str], col_name: str, direction: str) -> list[str]:
     x = cols.copy()
     if col_name not in x:
@@ -1745,7 +1771,7 @@ def main():
         )
 
         available_cols = [c for c in (DEFAULT_ADVANCED_COLS if show_cols_mode == "進階" else DEFAULT_STANDARD_COLS) if c in view_df.columns]
-        use_cols = _get_saved_col_profile(show_cols_mode, available_cols)
+        use_cols = _get_staged_or_saved_col_profile(show_cols_mode, available_cols)
 
         if st.session_state.get(_k("show_column_manager"), False):
             with st.expander("欄位順序管理", expanded=True):
@@ -1759,27 +1785,41 @@ def main():
                     )
                 with mgr_cols[1]:
                     if st.button("⬆ 上移", use_container_width=True, disabled=not use_cols):
-                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "up"))
+                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "up"))
                         st.rerun()
                 with mgr_cols[2]:
                     if st.button("⬇ 下移", use_container_width=True, disabled=not use_cols):
-                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "down"))
+                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "down"))
                         st.rerun()
                 with mgr_cols[3]:
                     if st.button("⏫ 置頂", use_container_width=True, disabled=not use_cols):
-                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "top"))
+                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "top"))
                         st.rerun()
                 with mgr_cols[4]:
                     if st.button("⏬ 置底", use_container_width=True, disabled=not use_cols):
-                        _save_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "bottom"))
+                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "bottom"))
                         st.rerun()
                 with mgr_cols[5]:
-                    if st.button("♻ 重設預設", use_container_width=True):
-                        _reset_col_profile(show_cols_mode, available_cols)
+                    if st.button("↩ 原始設定", use_container_width=True):
+                        _restore_original_col_profile(show_cols_mode, available_cols)
                         st.rerun()
 
                 st.markdown("**目前欄位順序**")
                 st.code(" | ".join(use_cols), language=None)
+
+                apply_cols = st.columns([1.2, 1.2, 2.4])
+                with apply_cols[0]:
+                    if st.button("✅ 套用設定並永久記錄", use_container_width=True):
+                        _apply_staged_col_profile(show_cols_mode, available_cols)
+                        st.success("標題列順序已永久記錄，會保留到下次變更套用。")
+                        st.rerun()
+                with apply_cols[1]:
+                    if st.button("↩ 還原原始設定", use_container_width=True):
+                        _restore_original_col_profile(show_cols_mode, available_cols)
+                        st.info("已還原到原始設定，請按『套用設定並永久記錄』才會永久保存。")
+                        st.rerun()
+                with apply_cols[2]:
+                    st.caption("移動欄位或選快速方案只會暫存；按『套用設定並永久記錄』後，才會寫入 GitHub UI 設定並永久保存。")
 
                 st.markdown("**快速欄位方案**")
                 preset_cols = st.columns(4)
@@ -1789,7 +1829,7 @@ def main():
                             "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦價格", "最新價",
                             "損益幅%", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "備註"
                         ] if c in available_cols]
-                        _save_col_profile(show_cols_mode, preset)
+                        _stage_col_profile(show_cols_mode, preset)
                         st.rerun()
                 with preset_cols[1]:
                     if st.button("方案B：績效核心", use_container_width=True):
@@ -1797,11 +1837,11 @@ def main():
                             "record_id", "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分",
                             "3日績效%", "5日績效%", "10日績效%", "20日績效%", "損益幅%", "模式績效標籤"
                         ] if c in available_cols]
-                        _save_col_profile(show_cols_mode, preset)
+                        _stage_col_profile(show_cols_mode, preset)
                         st.rerun()
                 with preset_cols[2]:
                     if st.button("方案C：完整預設", use_container_width=True):
-                        _reset_col_profile(show_cols_mode, available_cols)
+                        _restore_original_col_profile(show_cols_mode, available_cols)
                         st.rerun()
                 with preset_cols[3]:
                     st.caption(f"最後保存：{_safe_str(st.session_state.get(_k('ui_last_saved_at'), '未保存'))}")
