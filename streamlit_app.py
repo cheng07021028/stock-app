@@ -458,6 +458,12 @@ def _init_state():
     st.session_state[_k("end_date")] = _to_pydate(st.session_state.get(_k("end_date")), default_end)
 
 
+def _clear_home_search_input():
+    """使用 callback 清除首頁搜尋欄，避免 widget 建立後改 session_state 造成 StreamlitAPIException。"""
+    st.session_state[_k("search_input")] = ""
+    st.session_state[_k("search_cleared_notice")] = True
+
+
 def _render_home_page():
     watchlist = _load_watchlist_data()
     overview_df = _build_overview_df(watchlist)
@@ -630,9 +636,15 @@ def _render_home_page():
             else:
                 st.warning("請先輸入可辨識的股票代號或名稱。")
     with h3:
-        if st.button("清除首頁搜尋紀錄", use_container_width=True):
-            st.session_state[_k("search_input")] = ""
-            st.success("已清除首頁搜尋欄位。")
+        st.button(
+            "清除首頁搜尋紀錄",
+            use_container_width=True,
+            on_click=_clear_home_search_input,
+        )
+
+    if st.session_state.get(_k("search_cleared_notice"), False):
+        st.success("已清除首頁搜尋欄位。")
+        st.session_state[_k("search_cleared_notice")] = False
 
 
 def main():
