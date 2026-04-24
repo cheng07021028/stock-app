@@ -82,6 +82,94 @@ def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
 
 
+def _clean_card_text(v: Any, default: str = "—") -> str:
+    """清除 Streamlit/HTML 殘片，避免 <div> 或 </div> 被當成文字顯示。"""
+    import re
+    import html
+
+    text = _safe_str(v)
+    if not text:
+        return default
+
+    bad_tokens = [
+        "<div", "</div", "class=", "pro-info-", "pro-card", "unsafe_allow_html",
+        "&lt;div", "&lt;/div", "<span", "</span", "<style", "</style"
+    ]
+    lower = text.lower()
+    if any(tok in lower for tok in bad_tokens):
+        return default
+
+    # 一般 HTML tag 也全部移除，保留純文字
+    text = re.sub(r"<[^>]*>", "", text).strip()
+    if not text:
+        return default
+    return html.escape(text)
+
+
+def _render_info_card_safe(title: str, info_pairs, chips=None):
+    """本頁專用安全卡片：不依賴 utils.render_pro_info_card，避免 HTML 殘片外露。"""
+    import html
+
+    safe_title = _clean_card_text(title, "—")
+
+    chip_html = ""
+    if chips:
+        if isinstance(chips, str):
+            chips = [chips]
+        safe_chips = []
+        for c in chips:
+            ct = _clean_card_text(c, "")
+            if ct:
+                safe_chips.append(f'<span class="pro-chip">{ct}</span>')
+        chip_html = "".join(safe_chips)
+
+    items_html = ""
+    if not isinstance(info_pairs, (list, tuple)):
+        info_pairs = []
+
+    for item in info_pairs:
+        if not isinstance(item, (list, tuple)):
+            continue
+
+        label = item[0] if len(item) >= 1 else "—"
+        value = item[1] if len(item) >= 2 else "—"
+        css_class = item[2] if len(item) >= 3 else ""
+
+        safe_label = _clean_card_text(label, "—")
+        safe_value = _clean_card_text(value, "—")
+        safe_css = _safe_str(css_class)
+        if safe_css not in ["pro-up", "pro-down", "pro-flat"]:
+            safe_css = ""
+
+        items_html += f"""
+        <div class="pro-info-item">
+            <div class="pro-info-label">{safe_label}</div>
+            <div class="pro-info-value {safe_css}">{safe_value}</div>
+        </div>
+        """
+
+    if not items_html:
+        items_html = """
+        <div class="pro-info-item">
+            <div class="pro-info-label">狀態</div>
+            <div class="pro-info-value">資料不足</div>
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="pro-card">
+            <div class="pro-card-title">{safe_title}</div>
+            <div style="margin-bottom:10px;">{chip_html}</div>
+            <div class="pro-info-grid">
+                {items_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # =========================================================
 # 快取資料
 # =========================================================
@@ -740,7 +828,7 @@ def main():
     left, right = st.columns([1.15, 1.85])
 
     with left:
-        render_pro_info_card(
+        _render_info_card_safe(
             "訊號燈號",
             [
                 ("燈號", badge_text, ""),
@@ -753,14 +841,14 @@ def main():
             chips=[badge_text],
         )
 
-        render_pro_info_card(
+        _render_info_card_safe(
             "最近事件摘要",
             recent_events,
             chips=[final_market],
         )
 
     with right:
-        render_pro_info_card(
+        _render_info_card_safe(
             "支撐壓力",
             [
                 ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
@@ -774,7 +862,7 @@ def main():
             chips=["結構位階"],
         )
 
-        render_pro_info_card(
+        _render_info_card_safe(
             "股神快速判讀",
             [
                 ("目前結論", _safe_str(signal_snapshot.get("comment", "資料不足")), ""),
