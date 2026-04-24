@@ -1,12 +1,8 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
 import io
 import json
 import os
 import time
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -31,9 +27,6 @@ REQUEST_TIMEOUT_NORMAL = 15
 REALTIME_BATCH_SIZE = 20
 
 
-# =========================================================
-# 基礎 HTTP Session
-# =========================================================
 @st.cache_resource(show_spinner=False)
 def get_requests_session():
     session = requests.Session()
@@ -52,10 +45,8 @@ def get_requests_session():
     session.mount("https://", adapter)
 
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json,text/plain,*/*",
-        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-        "Connection": "keep-alive",
     })
     return session
 
@@ -68,28 +59,29 @@ def _json_get(url, params=None, timeout=REQUEST_TIMEOUT_NORMAL, headers=None):
 
     r = session.get(url, params=params, timeout=timeout, verify=False, headers=req_headers)
     r.raise_for_status()
+    return r.json()
 
-    text = r.text.strip()
-    if not text:
+
+def _find_existing_watchlist_path():
+    for path in WATCHLIST_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    return ""
+
+
+@st.cache_data(show_spinner=False)
+def _load_watchlist_raw_cached(filepath, mtime):
+    if not filepath or not os.path.exists(filepath):
         return {}
 
     try:
-        return r.json()
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
     except Exception:
-        try:
-            return json.loads(text)
-        except Exception:
-            return {"raw_text": text}
-
-
-def _text_get(url, params=None, timeout=REQUEST_TIMEOUT_NORMAL, headers=None):
-    session = get_requests_session()
-    req_headers = {}
-    if headers:
-        req_headers.update(headers)
-    r = session.get(url, params=params, timeout=timeout, verify=False, headers=req_headers)
-    r.raise_for_status()
-    return r.text
+        pass
+    return {}
 
 
 def _chunk_list(items, size):
@@ -99,32 +91,16 @@ def _chunk_list(items, size):
         yield items[i:i + size]
 
 
-def _safe_text(value):
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text in ["", "-", "--", "---", "—", "null", "None", "nan", "NaN"]:
-        return ""
-    return text
-
-
 def to_number(value):
     if value is None:
         return None
-    text = str(value).replace(",", "").replace("%", "").strip()
-    if text in ["", "-", "--", "---", "—", "None", "null", "nan", "NaN"]:
+    text = str(value).replace(",", "").strip()
+    if text in ["", "-", "--", "—", "None", "null"]:
         return None
     try:
         return float(text)
     except Exception:
         return None
-
-
-def _safe_num(value):
-    text = _safe_text(value)
-    if not text:
-        return None
-    return to_number(text)
 
 
 def format_number(value, digits=2):
@@ -144,95 +120,12 @@ def format_number(value, digits=2):
         return "—"
 
 
-def _split_price_list(text):
-    s = _safe_text(text)
-    if not s:
-        return []
-    out = []
-    for x in s.split("_"):
-        v = _safe_num(x)
-        if v is not None and v > 0:
-            out.append(v)
-    return out
-
-
-def parse_date_safe(value, fallback):
-    if not value:
-        return fallback
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d").date()
-    except Exception:
-        return fallback
-
-
-def _normalize_code_text(x):
-    x = str(x).strip()
-    digits = "".join(ch for ch in x if ch.isdigit())
-    if 4 <= len(digits) <= 6:
-        return digits
-    return x
-
-
-def _normalize_market_text(x, fallback="上市"):
-    text = str(x or "").strip()
-    if not text:
-        return fallback
-
-    if text in ["上櫃", "櫃買", "OTC", "otc", "TPEX", "TPEx", "ROSE"]:
-        return "上櫃"
-    if text in ["上市", "TWSE", "twse", "TSE", "tse"]:
-        return "上市"
-    if text in ["興櫃", "Emerging", "ESB", "esb"]:
-        return "興櫃"
-
-    if "上櫃" in text or "櫃買" in text:
-        return "上櫃"
-    if "興櫃" in text:
-        return "興櫃"
-    if "上市" in text:
-        return "上市"
-
-    return fallback
-
-
-def _coerce_date(value):
-    if value is None:
-        return pd.NaT
-
-    text = _safe_text(value)
-    if not text:
-        return pd.NaT
-
-    text = text.replace(".", "/").replace("-", "/")
-
-    parts = text.split("/")
-    if len(parts) == 3:
-        try:
-            y = int(parts[0])
-            m = int(parts[1])
-            d = int(parts[2])
-            if y < 1911:
-                y += 1911
-            return pd.Timestamp(year=y, month=m, day=d)
-        except Exception:
-            pass
-
-    try:
-        return pd.to_datetime(text)
-    except Exception:
-        return pd.NaT
-
-
-# =========================================================
-# 字體與主題
-# =========================================================
 def get_font_scale():
-    return int(st.session_state.get("font_scale", 110))
+    return 110
 
 
 def apply_font_scale(scale):
     base_pct = max(80, min(220, int(scale)))
-    st.session_state["font_scale"] = base_pct
     st.markdown(
         f"""
         <style>
@@ -488,9 +381,6 @@ def render_pro_section(title, subtitle=""):
 
 
 def render_pro_kpi_row(items):
-    if not items:
-        return
-
     cols = st.columns(len(items))
     for idx, item in enumerate(items):
         label = item.get("label", "—")
@@ -512,24 +402,80 @@ def render_pro_kpi_row(items):
 
 
 def render_pro_info_card(title, info_pairs, chips=None):
+    """
+    專業資訊卡片修正版：
+    - 過濾誤傳的 HTML 結束標籤，避免畫面出現 </div>。
+    - 支援 info_pairs 傳入 2 欄、3 欄或 dict。
+    - 對文字做 escape，避免破壞版面。
+    """
+    import html
+
+    def _clean_display_text(x):
+        if x is None:
+            return "—"
+        s = str(x).strip()
+        if s in ["", "None", "nan", "NaN"]:
+            return "—"
+        bad_tokens = {"</div>", "</span>", "</p>", "</section>", "</article>"}
+        if s.lower() in bad_tokens:
+            return "—"
+        return html.escape(s)
+
+    safe_title = _clean_display_text(title)
+
     chips_html = ""
     if chips:
-        chips_html = "".join([f'<span class="pro-chip">{x}</span>' for x in chips])
+        if isinstance(chips, str):
+            chips = [chips]
+        chips_html = "".join(
+            f'<span class="pro-chip">{_clean_display_text(x)}</span>'
+            for x in chips
+            if x is not None and str(x).strip() != ""
+        )
 
     items_html = ""
-    for label, value, css_class in info_pairs:
-        css = css_class if css_class else ""
-        items_html += f"""
+    for item in info_pairs or []:
+        try:
+            if isinstance(item, (list, tuple)):
+                if len(item) >= 3:
+                    label, value, css_class = item[0], item[1], item[2]
+                elif len(item) == 2:
+                    label, value = item[0], item[1]
+                    css_class = ""
+                else:
+                    continue
+            elif isinstance(item, dict):
+                label = item.get("label", "")
+                value = item.get("value", "—")
+                css_class = item.get("css_class", "") or item.get("class", "")
+            else:
+                continue
+
+            css = str(css_class or "").strip()
+            safe_label = _clean_display_text(label)
+            safe_value = _clean_display_text(value)
+
+            items_html += f"""
+            <div class="pro-info-item">
+                <div class="pro-info-label">{safe_label}</div>
+                <div class="pro-info-value {css}">{safe_value}</div>
+            </div>
+            """
+        except Exception:
+            continue
+
+    if not items_html.strip():
+        items_html = """
         <div class="pro-info-item">
-            <div class="pro-info-label">{label}</div>
-            <div class="pro-info-value {css}">{value}</div>
+            <div class="pro-info-label">狀態</div>
+            <div class="pro-info-value pro-flat">—</div>
         </div>
         """
 
     st.markdown(
         f"""
         <div class="pro-card">
-            <div class="pro-card-title">{title}</div>
+            <div class="pro-card-title">{safe_title}</div>
             <div style="margin-bottom:10px;">{chips_html}</div>
             <div class="pro-info-grid">
                 {items_html}
@@ -539,10 +485,43 @@ def render_pro_info_card(title, info_pairs, chips=None):
         unsafe_allow_html=True,
     )
 
+def _safe_text(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text in ["", "-", "--", "—", "null", "None"]:
+        return ""
+    return text
 
-# =========================================================
-# 查詢狀態記憶
-# =========================================================
+
+def _safe_num(value):
+    text = _safe_text(value)
+    if not text:
+        return None
+    return to_number(text)
+
+
+def _split_price_list(text):
+    s = _safe_text(text)
+    if not s:
+        return []
+    out = []
+    for x in s.split("_"):
+        v = _safe_num(x)
+        if v is not None and v > 0:
+            out.append(v)
+    return out
+
+
+def parse_date_safe(value, fallback):
+    if not value:
+        return fallback
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except Exception:
+        return fallback
+
+
 def load_last_query_state():
     default_state = {
         "quick_group": "",
@@ -557,9 +536,6 @@ def load_last_query_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-
-        if not isinstance(data, dict):
-            return default_state
 
         for k, v in default_state.items():
             if k not in data:
@@ -582,31 +558,6 @@ def save_last_query_state(quick_group="", quick_stock_code="", home_start=None, 
         return True
     except Exception:
         return False
-
-
-# =========================================================
-# 自選股
-# =========================================================
-def _find_existing_watchlist_path():
-    for path in WATCHLIST_CANDIDATES:
-        if os.path.exists(path):
-            return path
-    return ""
-
-
-@st.cache_data(show_spinner=False)
-def _load_watchlist_raw_cached(filepath, mtime):
-    if not filepath or not os.path.exists(filepath):
-        return {}
-
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
 
 
 def load_watchlist_raw():
@@ -645,7 +596,7 @@ def get_normalized_watchlist():
 
                 code = str(item.get("code", "")).strip()
                 name = str(item.get("name", "")).strip()
-                market = _normalize_market_text(item.get("market", ""), "上市")
+                market = str(item.get("market", "")).strip() or "上市"
 
                 if not code:
                     continue
@@ -668,30 +619,15 @@ def get_normalized_watchlist():
 
 def save_watchlist(data, filepath="watchlist.json"):
     try:
-        dir_name = os.path.dirname(filepath)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
-        try:
-            _load_watchlist_raw_cached.clear()
-        except Exception:
-            pass
-        try:
-            get_normalized_watchlist.clear()
-        except Exception:
-            pass
-
+        _load_watchlist_raw_cached.clear()
+        get_normalized_watchlist.clear()
         return True
     except Exception:
         return False
 
 
-# =========================================================
-# 股票代號 / 名稱 / 市場別
-# =========================================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_all_code_name_map(lookup_date=""):
     rows = []
@@ -701,6 +637,13 @@ def get_all_code_name_map(lookup_date=""):
             if c in df.columns:
                 return c
         return None
+
+    def _normalize_code_text(x):
+        x = str(x).strip()
+        digits = "".join(ch for ch in x if ch.isdigit())
+        if 4 <= len(digits) <= 6:
+            return digits
+        return x
 
     def _append_rows(df, code_candidates, name_candidates, fallback_market=""):
         nonlocal rows
@@ -713,7 +656,7 @@ def get_all_code_name_map(lookup_date=""):
 
         code_col = _pick_col(df, code_candidates)
         name_col = _pick_col(df, name_candidates)
-        market_col = _pick_col(df, ["市場別", "market", "Market", "交易市場", "上市櫃", "exchange", "Exchange"])
+        market_col = _pick_col(df, ["市場別", "market", "Market", "交易市場", "上市櫃"])
 
         if not code_col or not name_col:
             return
@@ -721,9 +664,8 @@ def get_all_code_name_map(lookup_date=""):
         temp = pd.DataFrame()
         temp["code"] = df[code_col].astype(str).str.strip().map(_normalize_code_text)
         temp["name"] = df[name_col].astype(str).str.strip()
-
         if market_col:
-            temp["market"] = df[market_col].astype(str).str.strip().map(lambda x: _normalize_market_text(x, fallback_market or "上市"))
+            temp["market"] = df[market_col].astype(str).str.strip()
         else:
             temp["market"] = fallback_market or "上市"
 
@@ -743,7 +685,7 @@ def get_all_code_name_map(lookup_date=""):
     for url in twse_urls:
         try:
             data = _json_get(url, timeout=REQUEST_TIMEOUT_NORMAL)
-            df = pd.DataFrame(data if isinstance(data, list) else data.get("data", []))
+            df = pd.DataFrame(data)
             _append_rows(
                 df,
                 ["公司代號", "證券代號", "Code", "code", "股票代號", "代號"],
@@ -757,25 +699,17 @@ def get_all_code_name_map(lookup_date=""):
         ("https://www.tpex.org.tw/openapi/v1/mkt/sm_mainboard", "上櫃"),
         ("https://www.tpex.org.tw/openapi/v1/mkt/sm_esb", "興櫃"),
         ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", "上櫃"),
-        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R", "興櫃"),
+        ("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R", "上櫃"),
     ]
 
     for url, fallback_market in tpex_urls:
         try:
             data = _json_get(url, timeout=REQUEST_TIMEOUT_NORMAL)
-            df = pd.DataFrame(data if isinstance(data, list) else data.get("data", []))
+            df = pd.DataFrame(data)
             _append_rows(
                 df,
-                [
-                    "SecuritiesCompanyCode", "SecuritiesCompany_Code",
-                    "股票代號", "Code", "code", "代號", "公司代號", "證券代號",
-                    "有價證券代號"
-                ],
-                [
-                    "CompanyName", "Company_Name",
-                    "股票名稱", "Name", "name", "名稱", "公司簡稱", "證券名稱",
-                    "有價證券名稱"
-                ],
+                ["SecuritiesCompanyCode", "股票代號", "Code", "code", "代號", "公司代號", "證券代號"],
+                ["CompanyName", "股票名稱", "Name", "name", "名稱", "公司簡稱", "證券名稱"],
                 fallback_market=fallback_market,
             )
         except Exception:
@@ -787,7 +721,7 @@ def get_all_code_name_map(lookup_date=""):
     df_all = pd.DataFrame(rows)
     df_all["code"] = df_all["code"].astype(str).str.strip()
     df_all["name"] = df_all["name"].astype(str).str.strip()
-    df_all["market"] = df_all["market"].astype(str).str.strip().map(lambda x: _normalize_market_text(x, "上市"))
+    df_all["market"] = df_all["market"].astype(str).str.strip().replace("", "上市")
 
     df_all = df_all[(df_all["code"] != "") & (df_all["name"] != "")]
     df_all = df_all.drop_duplicates(subset=["code", "market"]).reset_index(drop=True)
@@ -807,7 +741,7 @@ def get_stock_name_and_market(code, all_code_name_df, manual_name=""):
         if not matched.empty:
             row = matched.iloc[0]
             stock_name = str(row.get("name", "")).strip() or manual_name or code
-            market_type = _normalize_market_text(row.get("market", ""), "上市")
+            market_type = str(row.get("market", "")).strip() or "上市"
             return stock_name, market_type
 
     if manual_name:
@@ -816,14 +750,8 @@ def get_stock_name_and_market(code, all_code_name_df, manual_name=""):
     return code, "上市"
 
 
-# =========================================================
-# 即時資料
-# =========================================================
 def _market_prefix(market_type):
-    market_type = _normalize_market_text(market_type, "上市")
-    if market_type in ["上櫃", "興櫃"]:
-        return "otc"
-    return "tse"
+    return "otc" if str(market_type).strip() == "上櫃" else "tse"
 
 
 def _pick_best_realtime_price(raw):
@@ -869,7 +797,6 @@ def _pick_prev_close(raw, current_price=None):
 def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_market="上市"):
     code = _safe_text(raw.get("c")) or fallback_code
     name = _safe_text(raw.get("n")) or fallback_name or f"股票{fallback_code}"
-    fallback_market = _normalize_market_text(fallback_market, "上市")
 
     current_price, price_source = _pick_best_realtime_price(raw)
     prev_close = _pick_prev_close(raw, current_price=current_price)
@@ -889,6 +816,8 @@ def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_mar
         change_pct = (change_value / prev_close) * 100
         change_source = "realtime_vs_prev"
     else:
+        change_value = None
+        change_pct = None
         change_source = "prev_close_missing"
 
     update_date = _safe_text(raw.get("d"))
@@ -900,7 +829,7 @@ def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_mar
         update_text = update_time
 
     return {
-        "ok": current_price is not None,
+        "ok": True,
         "code": code,
         "name": name,
         "market": fallback_market,
@@ -917,7 +846,7 @@ def _build_realtime_result(raw, fallback_code="", fallback_name="", fallback_mar
         "update_time": update_text,
         "price_source": price_source,
         "raw": raw,
-        "message": "" if current_price is not None else "即時價為空，已避免顯示為 0",
+        "message": "",
     }
 
 
@@ -926,7 +855,7 @@ def _empty_realtime_result(stock_no, stock_name="", market_type="上市", messag
         "ok": False,
         "code": stock_no,
         "name": stock_name,
-        "market": _normalize_market_text(market_type, "上市"),
+        "market": market_type,
         "price": None,
         "prev_close": None,
         "open": None,
@@ -960,8 +889,7 @@ def get_realtime_stock_info_batch(stock_items, refresh_token=""):
     for item in stock_items:
         code = str(item.get("code", "")).strip()
         name = str(item.get("name", "")).strip()
-        market = _normalize_market_text(item.get("market", ""), "上市")
-
+        market = str(item.get("market", "")).strip() or "上市"
         if not code:
             continue
 
@@ -1039,7 +967,7 @@ def get_realtime_stock_info_batch(stock_items, refresh_token=""):
 def get_realtime_stock_info(stock_no, stock_name="", market_type="上市", refresh_token=""):
     stock_no = str(stock_no).strip()
     stock_name = str(stock_name).strip()
-    market_type = _normalize_market_text(market_type, "上市")
+    market_type = str(market_type).strip() or "上市"
 
     if not stock_no:
         return {
@@ -1145,15 +1073,11 @@ def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
         for item in items:
             code = str(item.get("code", "")).strip()
             manual_name = str(item.get("name", "")).strip()
-            manual_market = _normalize_market_text(item.get("market", ""), "上市")
 
             if not code:
                 continue
 
             stock_name, market_type = get_stock_name_and_market(code, all_code_name_df, manual_name)
-            if manual_market and manual_market != "上市":
-                market_type = manual_market
-
             prepared_items.append({
                 "group": group_name,
                 "code": code,
@@ -1223,7 +1147,7 @@ def render_realtime_table(df, height=520):
         "群組", "股票代號", "股票名稱", "市場別",
         "現價", "昨收", "漲跌", "漲跌幅(%)",
         "開盤", "最高", "最低", "總量",
-        "價格來源", "漲跌來源", "更新時間", "訊息"
+        "價格來源", "漲跌來源", "更新時間"
     ]
     show_cols = [c for c in show_cols if c in df.columns]
     display_df = df[show_cols].copy()
@@ -1277,156 +1201,10 @@ def render_realtime_table(df, height=520):
     st.dataframe(styler, use_container_width=True, hide_index=True, height=height)
 
 
-# =========================================================
-# 歷史資料：TWSE + TPEX 備援
-# =========================================================
-def _normalize_history_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    alias = {
-        "日期": ["日期", "日 期", "Date", "date"],
-        "成交股數": ["成交股數", "成交股數/仟股", "成交股數(股)", "成交量", "成交仟股", "成交張數", "Trading Volume", "Volume"],
-        "成交金額": ["成交金額", "成交金額(元)", "成交金額/元", "成交金額(仟元)", "Trading Value"],
-        "開盤價": ["開盤價", "開盤", "開盤價(元)", "Open", "open"],
-        "最高價": ["最高價", "最高", "最高價(元)", "High", "high"],
-        "最低價": ["最低價", "最低", "最低價(元)", "Low", "low"],
-        "收盤價": ["收盤價", "收盤", "收盤價(元)", "Close", "close"],
-        "漲跌價差": ["漲跌價差", "漲跌", "漲跌價", "Change", "change"],
-        "成交筆數": ["成交筆數", "成交筆數(筆)", "Transaction", "transactions"],
-    }
-
-    out = pd.DataFrame()
-
-    for target, candidates in alias.items():
-        source_col = None
-        for c in candidates:
-            if c in df.columns:
-                source_col = c
-                break
-        if source_col:
-            out[target] = df[source_col]
-
-    if "日期" not in out.columns:
-        return pd.DataFrame()
-
-    out["日期"] = out["日期"].apply(_coerce_date)
-    out = out.dropna(subset=["日期"])
-
-    numeric_cols = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"]
-    for col in numeric_cols:
-        if col in out.columns:
-            out[col] = (
-                out[col].astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace("+", "", regex=False)
-                .replace(["--", "---", "", "除權息"], pd.NA)
-            )
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    required = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
-    for col in required:
-        if col not in out.columns:
-            out[col] = pd.NA
-
-    out = out.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-    return out
-
-
-def _fetch_twse_history_month(stock_no: str, month_str: str) -> pd.DataFrame:
-    url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-    params = {
-        "response": "json",
-        "date": month_str,
-        "stockNo": stock_no,
-    }
-    data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
-
-    if str(data.get("stat", "")).strip() != "OK":
-        return pd.DataFrame()
-
-    rows = data.get("data", []) or []
-    cols = data.get("fields", []) or []
-    if not rows or not cols:
-        return pd.DataFrame()
-
-    return pd.DataFrame(rows, columns=cols)
-
-
-def _roc_month_text(ts: pd.Timestamp) -> str:
-    return f"{ts.year - 1911}/{ts.month:02d}"
-
-
-def _fetch_tpex_history_month(stock_no: str, ts: pd.Timestamp) -> pd.DataFrame:
-    roc_month = _roc_month_text(ts)
-
-    candidates = [
-        {
-            "url": "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
-            "params": {
-                "l": "zh-tw",
-                "d": roc_month,
-                "stkno": stock_no,
-            },
-        },
-        {
-            "url": "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock",
-            "params": {
-                "code": stock_no,
-                "date": roc_month,
-                "response": "json",
-            },
-        },
-        {
-            "url": "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock",
-            "params": {
-                "stkno": stock_no,
-                "date": roc_month,
-                "response": "json",
-            },
-        },
-    ]
-
-    for item in candidates:
-        try:
-            data = _json_get(item["url"], params=item["params"], timeout=REQUEST_TIMEOUT_NORMAL)
-            if not isinstance(data, dict):
-                continue
-
-            tables = []
-            for key in ["aaData", "data", "tables"]:
-                val = data.get(key)
-                if isinstance(val, list) and val:
-                    tables = val
-                    break
-
-            fields = data.get("fields") or data.get("columns") or data.get("headers") or []
-
-            if tables and isinstance(tables[0], dict):
-                df = pd.DataFrame(tables)
-                return df
-
-            if tables and isinstance(tables[0], list):
-                if fields and len(fields) == len(tables[0]):
-                    return pd.DataFrame(tables, columns=fields)
-
-                default_cols = ["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"]
-                col_count = len(tables[0])
-                return pd.DataFrame(tables, columns=default_cols[:col_count])
-
-        except Exception:
-            continue
-
-    return pd.DataFrame()
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     stock_no = str(stock_no).strip()
-    market_type = _normalize_market_text(market_type, "上市")
+    market_type = str(market_type).strip() or "上市"
 
     if not stock_no:
         return pd.DataFrame()
@@ -1446,16 +1224,27 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     frames = []
 
     for dt in month_starts:
-        try:
-            if market_type == "上市":
-                month_str = dt.strftime("%Y%m01")
-                raw_df = _fetch_twse_history_month(stock_no, month_str)
-            else:
-                raw_df = _fetch_tpex_history_month(stock_no, dt)
+        month_str = dt.strftime("%Y%m01")
 
-            norm_df = _normalize_history_df(raw_df)
-            if not norm_df.empty:
-                frames.append(norm_df)
+        try:
+            url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+            params = {
+                "response": "json",
+                "date": month_str,
+                "stockNo": stock_no,
+            }
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
+
+            if data.get("stat") != "OK":
+                continue
+
+            rows = data.get("data", [])
+            cols = data.get("fields", [])
+            if not rows or not cols:
+                continue
+
+            df_month = pd.DataFrame(rows, columns=cols)
+            frames.append(df_month)
         except Exception:
             continue
 
@@ -1463,19 +1252,64 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
         return pd.DataFrame()
 
     df = pd.concat(frames, ignore_index=True)
-    df = _normalize_history_df(df)
-    if df.empty:
+
+    rename_map = {
+        "日期": "日期",
+        "成交股數": "成交股數",
+        "成交金額": "成交金額",
+        "開盤價": "開盤價",
+        "最高價": "最高價",
+        "最低價": "最低價",
+        "收盤價": "收盤價",
+        "成交筆數": "成交筆數",
+    }
+    df = df.rename(columns=rename_map)
+
+    if "日期" not in df.columns:
         return pd.DataFrame()
 
+    def convert_tw_date(x):
+        x = _safe_text(x)
+        if not x:
+            return pd.NaT
+
+        if "/" in x:
+            parts = x.split("/")
+            if len(parts) == 3:
+                try:
+                    year = int(parts[0]) + 1911
+                    month = int(parts[1])
+                    day = int(parts[2])
+                    return pd.Timestamp(year=year, month=month, day=day)
+                except Exception:
+                    return pd.NaT
+
+        try:
+            return pd.to_datetime(x)
+        except Exception:
+            return pd.NaT
+
+    df["日期"] = df["日期"].apply(convert_tw_date)
+    df = df.dropna(subset=["日期"])
+
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(",", "", regex=False)
+                .replace(["--", "---", ""], pd.NA)
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
-    df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+    df = df.sort_values("日期").reset_index(drop=True)
     return df
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_history_data_debug(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     stock_no = str(stock_no).strip()
-    market_type = _normalize_market_text(market_type, "上市")
+    market_type = str(market_type).strip() or "上市"
 
     debug = {
         "ok": False,
@@ -1500,70 +1334,90 @@ def get_history_data_debug(stock_no, stock_name="", market_type="上市", start_
 
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
-
     if end_ts < start_ts:
         debug["error"] = "結束日期早於開始日期"
         debug["debug_lines"].append("結束日期早於開始日期")
         return debug
 
-    source_name = "twse_stock_day" if market_type == "上市" else "tpex_trading_stock"
-    debug["source"] = source_name
+    if market_type != "上市":
+        debug["source"] = "unsupported_market_debug"
+        debug["error"] = f"目前 get_history_data 僅實作上市(TWSE)日線，market_type={market_type} 尚未正式串接"
+        debug["debug_lines"].append(debug["error"])
+        return debug
 
     month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
     frames = []
-
     for dt in month_starts:
+        month_str = dt.strftime("%Y%m01")
         try:
-            if market_type == "上市":
-                month_key = dt.strftime("%Y%m01")
-                raw_df = _fetch_twse_history_month(stock_no, month_key)
-            else:
-                month_key = _roc_month_text(dt)
-                raw_df = _fetch_tpex_history_month(stock_no, dt)
-
-            norm_df = _normalize_history_df(raw_df)
-            debug["debug_lines"].append(
-                f"{month_key}: raw_rows={0 if raw_df is None else len(raw_df)} normalized_rows={0 if norm_df is None else len(norm_df)}"
-            )
-
-            if norm_df is not None and not norm_df.empty:
-                frames.append(norm_df)
-
+            url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+            params = {"response": "json", "date": month_str, "stockNo": stock_no}
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
+            stat = str(data.get("stat", "")).strip()
+            rows = data.get("data", []) or []
+            cols = data.get("fields", []) or []
+            debug["debug_lines"].append(f"{month_str}: stat={stat or '-'} rows={len(rows)} cols={len(cols)}")
+            if stat != "OK":
+                continue
+            if not rows or not cols:
+                continue
+            frames.append(pd.DataFrame(rows, columns=cols))
         except Exception as e:
-            debug["debug_lines"].append(f"{dt.strftime('%Y-%m')}: exception={e}")
+            debug["debug_lines"].append(f"{month_str}: exception={e}")
 
     if not frames:
+        debug["source"] = "twse_stock_day"
         debug["error"] = "所有月份都沒有抓到有效資料"
         return debug
 
     try:
         df = pd.concat(frames, ignore_index=True)
-        df = _normalize_history_df(df)
-
-        if df.empty:
-            debug["error"] = "資料整理後為空"
+        if "日期" not in df.columns:
+            debug["source"] = "twse_stock_day"
+            debug["error"] = "回傳欄位缺少 日期"
+            debug["debug_lines"].append("回傳欄位缺少 日期")
             return debug
 
-        df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
-        df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+        def convert_tw_date(x):
+            x = _safe_text(x)
+            if not x:
+                return pd.NaT
+            if "/" in x:
+                parts = x.split("/")
+                if len(parts) == 3:
+                    try:
+                        year = int(parts[0]) + 1911
+                        month = int(parts[1])
+                        day = int(parts[2])
+                        return pd.Timestamp(year=year, month=month, day=day)
+                    except Exception:
+                        return pd.NaT
+            try:
+                return pd.to_datetime(x)
+            except Exception:
+                return pd.NaT
 
+        df["日期"] = df["日期"].apply(convert_tw_date)
+        df = df.dropna(subset=["日期"])
+        for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(",", "", regex=False).replace(["--", "---", ""], pd.NA)
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+        df = df.sort_values("日期").reset_index(drop=True)
         debug["ok"] = not df.empty
         debug["rows"] = len(df)
-
+        debug["source"] = "twse_stock_day"
         if df.empty:
             debug["error"] = "日期區間內無有效資料"
-
         return debug
-
     except Exception as e:
+        debug["source"] = "twse_stock_day"
         debug["error"] = f"資料整理例外：{e}"
         debug["debug_lines"].append(debug["error"])
         return debug
 
 
-# =========================================================
-# Excel 匯出
-# =========================================================
 def to_excel_bytes(df_dict):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1574,9 +1428,6 @@ def to_excel_bytes(df_dict):
     return output.getvalue()
 
 
-# =========================================================
-# 技術指標 / 訊號
-# =========================================================
 def classify_signal(value, positive_text="偏多", negative_text="偏空", neutral_text="中性"):
     if value is True:
         return positive_text, "pro-up"
@@ -1946,13 +1797,7 @@ def compute_radar_scores(df: pd.DataFrame) -> dict:
     result["position"] = int(round(position_score))
     result["structure"] = int(round(structure_score))
 
-    avg_score = (
-        result["trend"]
-        + result["momentum"]
-        + result["volume"]
-        + result["position"]
-        + result["structure"]
-    ) / 5
+    avg_score = (result["trend"] + result["momentum"] + result["volume"] + result["position"] + result["structure"]) / 5
 
     if avg_score >= 80:
         result["summary"] = "整體評分強勢，趨勢、動能與位置多數站在多方。"
