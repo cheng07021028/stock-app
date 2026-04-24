@@ -4624,7 +4624,9 @@ def main():
         key=_k("top_pick_editor"),
         column_config={
             "勾選": st.column_config.CheckboxColumn("勾選"),
-            "推薦理由摘要": st.column_config.TextColumn("股神推論邏輯", "風險說明", "推薦理由摘要", width="large"),
+            "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
+                "風險說明": st.column_config.TextColumn("風險說明", width="large"),
+                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
         }
     )
 
