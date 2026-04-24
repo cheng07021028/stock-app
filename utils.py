@@ -402,78 +402,119 @@ def render_pro_kpi_row(items):
 
 
 def render_pro_info_card(title, info_pairs, chips=None):
-    """
-    專業資訊卡片修正版：
-    - 過濾誤傳的 HTML 結束標籤，避免畫面出現 </div>。
-    - 支援 info_pairs 傳入 2 欄、3 欄或 dict。
-    - 對文字做 escape，避免破壞版面。
-    """
+    """相容版資訊卡片：支援 tuple/dict，也支援舊版頁面直接傳入 HTML 片段。"""
     import html
 
-    def _clean_display_text(x):
+    def _is_html_fragment(x):
+        s = "" if x is None else str(x).strip()
+        return ("<div" in s.lower() or "<span" in s.lower() or "<br" in s.lower())
+
+    def _clean_text(x):
         if x is None:
             return "—"
         s = str(x).strip()
         if s in ["", "None", "nan", "NaN"]:
             return "—"
-        bad_tokens = {"</div>", "</span>", "</p>", "</section>", "</article>"}
-        if s.lower() in bad_tokens:
+        if s.lower() in {"</div>", "</span>", "</p>", "</section>", "</article>"}:
             return "—"
         return html.escape(s)
 
-    safe_title = _clean_display_text(title)
+    def _clean_css_class(x):
+        s = "" if x is None else str(x).strip()
+        parts = []
+        for part in s.split():
+            part = "".join(ch for ch in part if ch.isalnum() or ch in ["-", "_"])
+            if part:
+                parts.append(part)
+        return " ".join(parts)
+
+    safe_title = _clean_text(title)
 
     chips_html = ""
     if chips:
         if isinstance(chips, str):
             chips = [chips]
         chips_html = "".join(
-            f'<span class="pro-chip">{_clean_display_text(x)}</span>'
+            f'<span class="pro-chip">{_clean_text(x)}</span>'
             for x in chips
             if x is not None and str(x).strip() != ""
         )
 
     items_html = ""
-    for item in info_pairs or []:
-        try:
-            if isinstance(item, (list, tuple)):
-                if len(item) >= 3:
-                    label, value, css_class = item[0], item[1], item[2]
-                elif len(item) == 2:
-                    label, value = item[0], item[1]
-                    css_class = ""
+
+    if isinstance(info_pairs, str):
+        if _is_html_fragment(info_pairs):
+            items_html = info_pairs
+        else:
+            items_html = f'''
+            <div class="pro-info-item">
+                <div class="pro-info-label">資訊</div>
+                <div class="pro-info-value">{_clean_text(info_pairs)}</div>
+            </div>
+            '''
+    else:
+        for item in info_pairs or []:
+            try:
+                if isinstance(item, str):
+                    if _is_html_fragment(item):
+                        items_html += item
+                    elif item.strip():
+                        items_html += f'''
+                        <div class="pro-info-item">
+                            <div class="pro-info-label">資訊</div>
+                            <div class="pro-info-value">{_clean_text(item)}</div>
+                        </div>
+                        '''
+                    continue
+
+                if isinstance(item, dict):
+                    label = item.get("label", "")
+                    value = item.get("value", "—")
+                    css_class = item.get("css_class", "") or item.get("class", "")
+                elif isinstance(item, (list, tuple)):
+                    if len(item) >= 3:
+                        label, value, css_class = item[0], item[1], item[2]
+                    elif len(item) == 2:
+                        label, value = item[0], item[1]
+                        css_class = ""
+                    elif len(item) == 1:
+                        only = item[0]
+                        if _is_html_fragment(only):
+                            items_html += str(only)
+                            continue
+                        label, value, css_class = "資訊", only, ""
+                    else:
+                        continue
                 else:
                     continue
-            elif isinstance(item, dict):
-                label = item.get("label", "")
-                value = item.get("value", "—")
-                css_class = item.get("css_class", "") or item.get("class", "")
-            else:
+
+                if _is_html_fragment(label) and str(value).strip() in ["", "—"]:
+                    items_html += str(label)
+                    continue
+                if _is_html_fragment(value):
+                    items_html += str(value)
+                    continue
+
+                css = _clean_css_class(css_class)
+                items_html += f'''
+                <div class="pro-info-item">
+                    <div class="pro-info-label">{_clean_text(label)}</div>
+                    <div class="pro-info-value {css}">{_clean_text(value)}</div>
+                </div>
+                '''
+            except Exception:
                 continue
 
-            css = str(css_class or "").strip()
-            safe_label = _clean_display_text(label)
-            safe_value = _clean_display_text(value)
-
-            items_html += f"""
-            <div class="pro-info-item">
-                <div class="pro-info-label">{safe_label}</div>
-                <div class="pro-info-value {css}">{safe_value}</div>
-            </div>
-            """
-        except Exception:
-            continue
-
     if not items_html.strip():
-        items_html = """
+        items_html = '''
         <div class="pro-info-item">
             <div class="pro-info-label">狀態</div>
             <div class="pro-info-value pro-flat">—</div>
         </div>
-        """
+        '''
 
     st.markdown(
-        f"""
+        f'''
         <div class="pro-card">
             <div class="pro-card-title">{safe_title}</div>
             <div style="margin-bottom:10px;">{chips_html}</div>
@@ -481,9 +522,10 @@ def render_pro_info_card(title, info_pairs, chips=None):
                 {items_html}
             </div>
         </div>
-        """,
+        ''',
         unsafe_allow_html=True,
     )
+
 
 def _safe_text(value):
     if value is None:
