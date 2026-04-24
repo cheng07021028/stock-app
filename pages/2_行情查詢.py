@@ -82,120 +82,35 @@ def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
 
 
-def _normalize_card_text(v: Any) -> str:
-    import html
+def _clean_card_text(v: Any, default: str = "—") -> str:
+    """清除 Streamlit/HTML 殘片，避免 <div> 或 </div> 被當成文字顯示。"""
     import re
+    import html
 
     text = _safe_str(v)
     if not text:
-        return ""
+        return default
 
-    for _ in range(3):
-        new_text = html.unescape(text)
-        if new_text == text:
-            break
-        text = new_text
-
-    text = text.replace("​", " ").replace(" ", " ").strip()
-    text = re.sub(r"<br\s*/?>", " ", text, flags=re.I)
-    return text.strip()
-
-
-def _is_card_html_noise(v: Any) -> bool:
-    import re
-
-    text = _normalize_card_text(v).lower()
-    if not text:
-        return False
-
-    bad_patterns = [
-        r"</?div",
-        r"</?span",
-        r"</?p",
-        r"</?style",
-        r"class\s*=",
-        r"unsafe_allow_html",
-        r"pro-info",
-        r"pro-card",
-        r"streamlit",
+    bad_tokens = [
+        "<div", "</div", "class=", "pro-info-", "pro-card", "unsafe_allow_html",
+        "&lt;div", "&lt;/div", "<span", "</span", "<style", "</style"
     ]
-    if text in {"<div>", "</div>", "<span>", "</span>", "<p>", "</p>", "/div", "div"}:
-        return True
-    return any(re.search(p, text, flags=re.I) for p in bad_patterns)
+    lower = text.lower()
+    if any(tok in lower for tok in bad_tokens):
+        return default
 
-
-def _clean_card_text(v: Any, default: str = "—") -> str:
-    """清除 Streamlit/HTML 殘片，避免 <div> 或 </div> 被當成文字顯示。"""
-    import html
-    import re
-
-    text = _normalize_card_text(v)
+    # 一般 HTML tag 也全部移除，保留純文字
+    text = re.sub(r"<[^>]*>", "", text).strip()
     if not text:
-        return default
-    if _is_card_html_noise(text):
-        return default
-
-    text = re.sub(r"<[^>]*>", " ", text)
-    text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text or _is_card_html_noise(text):
         return default
     return html.escape(text)
 
 
-def _get_card_grid_class(title: str, item_count: int) -> str:
-    title = _safe_str(title)
-    if title in ["股神快速判讀", "最近事件摘要"]:
-        return "quote-info-grid quote-info-grid-2"
-    if title == "訊號燈號":
-        return "quote-info-grid quote-info-grid-3"
-    if title == "支撐壓力":
-        return "quote-info-grid quote-info-grid-4"
-    if item_count <= 2:
-        return "quote-info-grid quote-info-grid-2"
-    if item_count <= 6:
-        return "quote-info-grid quote-info-grid-3"
-    return "quote-info-grid quote-info-grid-4"
-
-
 def _render_info_card_safe(title: str, info_pairs, chips=None):
-    """本頁專用安全卡片：避免 HTML 殘片外露，並依內容自動調整欄位位置。"""
-    safe_title = _clean_card_text(title, "—")
+    """本頁專用安全卡片：不依賴 utils.render_pro_info_card，避免 HTML 殘片外露。"""
+    import html
 
-    st.markdown(
-        """
-        <style>
-        .quote-info-grid {
-            display: grid;
-            gap: 12px;
-        }
-        .quote-info-grid-2 {
-            grid-template-columns: repeat(2, minmax(180px, 1fr));
-        }
-        .quote-info-grid-3 {
-            grid-template-columns: repeat(3, minmax(160px, 1fr));
-        }
-        .quote-info-grid-4 {
-            grid-template-columns: repeat(4, minmax(140px, 1fr));
-        }
-        @media (max-width: 1100px) {
-            .quote-info-grid-2,
-            .quote-info-grid-3,
-            .quote-info-grid-4 {
-                grid-template-columns: repeat(2, minmax(150px, 1fr));
-            }
-        }
-        @media (max-width: 768px) {
-            .quote-info-grid-2,
-            .quote-info-grid-3,
-            .quote-info-grid-4 {
-                grid-template-columns: 1fr;
-            }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    safe_title = _clean_card_text(title, "—")
 
     chip_html = ""
     if chips:
@@ -203,50 +118,29 @@ def _render_info_card_safe(title: str, info_pairs, chips=None):
             chips = [chips]
         safe_chips = []
         for c in chips:
-            if _is_card_html_noise(c):
-                continue
             ct = _clean_card_text(c, "")
             if ct:
                 safe_chips.append(f'<span class="pro-chip">{ct}</span>')
         chip_html = "".join(safe_chips)
 
-    normalized = []
-    if isinstance(info_pairs, dict):
-        info_pairs = [info_pairs]
+    items_html = ""
     if not isinstance(info_pairs, (list, tuple)):
         info_pairs = []
 
     for item in info_pairs:
-        label = "—"
-        value = "—"
-        css_class = ""
-
-        if isinstance(item, dict):
-            label = item.get("label", "—")
-            value = item.get("value", "—")
-            css_class = item.get("css_class", item.get("class", ""))
-        elif isinstance(item, (list, tuple)):
-            label = item[0] if len(item) >= 1 else "—"
-            value = item[1] if len(item) >= 2 else "—"
-            css_class = item[2] if len(item) >= 3 else ""
-        else:
-            value = item
-
-        if _is_card_html_noise(label) or _is_card_html_noise(value):
+        if not isinstance(item, (list, tuple)):
             continue
 
-        safe_label = _clean_card_text(label, "資訊")
+        label = item[0] if len(item) >= 1 else "—"
+        value = item[1] if len(item) >= 2 else "—"
+        css_class = item[2] if len(item) >= 3 else ""
+
+        safe_label = _clean_card_text(label, "—")
         safe_value = _clean_card_text(value, "—")
-        if safe_value in ["", "—"] and safe_label in ["", "資訊", "—"]:
-            continue
-
         safe_css = _safe_str(css_class)
         if safe_css not in ["pro-up", "pro-down", "pro-flat"]:
             safe_css = ""
-        normalized.append((safe_label, safe_value, safe_css))
 
-    items_html = ""
-    for safe_label, safe_value, safe_css in normalized:
         items_html += f"""
         <div class="pro-info-item">
             <div class="pro-info-label">{safe_label}</div>
@@ -262,14 +156,12 @@ def _render_info_card_safe(title: str, info_pairs, chips=None):
         </div>
         """
 
-    grid_class = _get_card_grid_class(safe_title, len(normalized))
-
     st.markdown(
         f"""
         <div class="pro-card">
             <div class="pro-card-title">{safe_title}</div>
             <div style="margin-bottom:10px;">{chip_html}</div>
-            <div class="{grid_class}">
+            <div class="pro-info-grid">
                 {items_html}
             </div>
         </div>
@@ -933,7 +825,7 @@ def main():
 
     _render_realtime_hero(info, f"{selected_code} {final_name}", final_market)
 
-    left, right = st.columns([1.0, 1.35])
+    left, right = st.columns([1.15, 1.85])
 
     with left:
         _render_info_card_safe(
