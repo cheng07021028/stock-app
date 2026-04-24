@@ -4404,45 +4404,90 @@ def _column_order_state_key(name: str) -> str:
 
 def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
     state_key = _column_order_state_key(name)
-    current_order = _normalize_column_order(st.session_state.get(state_key, default_cols), available_cols, default_cols)
-    st.session_state[state_key] = current_order
+    applied_key = _k(f"column_order_applied_{name}")
+    draft_key = _k(f"column_order_draft_{name}")
+    pick_key = _k(f"column_pick_{name}")
+
+    applied_order = _normalize_column_order(
+        st.session_state.get(applied_key, st.session_state.get(state_key, default_cols)),
+        available_cols,
+        default_cols,
+    )
+    draft_order = _normalize_column_order(
+        st.session_state.get(draft_key, applied_order),
+        available_cols,
+        default_cols,
+    )
+
+    st.session_state[applied_key] = applied_order
+    st.session_state[draft_key] = draft_order
+    st.session_state[state_key] = applied_order
 
     with st.expander(title, expanded=False):
-        st.caption("可調整欄位順序並記住，不切頁、不重整都會保留。")
-        pick_key = _k(f"column_pick_{name}")
-        if pick_key not in st.session_state or st.session_state[pick_key] not in current_order:
-            st.session_state[pick_key] = current_order[0] if current_order else ""
-        picked = st.selectbox("選擇欄位", current_order, key=pick_key) if current_order else ""
+        st.caption("可調整欄位順序；調整後先暫存，按「套用」後才永久套用到表格。")
+        if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
+            st.session_state[pick_key] = draft_order[0] if draft_order else ""
+        picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
 
-        b1, b2, b3, b4 = st.columns(4)
+        b1, b2, b3, b4, b5 = st.columns(5)
         changed = False
-        if current_order and picked:
-            idx = current_order.index(picked)
+
+        if draft_order and picked:
+            idx = draft_order.index(picked)
             with b1:
                 if st.button("左移", key=_k(f"move_left_{name}"), use_container_width=True) and idx > 0:
-                    current_order[idx - 1], current_order[idx] = current_order[idx], current_order[idx - 1]
+                    draft_order[idx - 1], draft_order[idx] = draft_order[idx], draft_order[idx - 1]
                     changed = True
             with b2:
-                if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(current_order) - 1:
-                    current_order[idx + 1], current_order[idx] = current_order[idx], current_order[idx + 1]
+                if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(draft_order) - 1:
+                    draft_order[idx + 1], draft_order[idx] = draft_order[idx], draft_order[idx + 1]
                     changed = True
             with b3:
                 if st.button("移到最前", key=_k(f"move_front_{name}"), use_container_width=True):
-                    current_order.remove(picked)
-                    current_order.insert(0, picked)
+                    draft_order.remove(picked)
+                    draft_order.insert(0, picked)
                     changed = True
             with b4:
-                if st.button("重設", key=_k(f"move_reset_{name}"), use_container_width=True):
-                    current_order = _normalize_column_order(default_cols, available_cols, default_cols)
+                if st.button("移到最後", key=_k(f"move_last_{name}"), use_container_width=True):
+                    draft_order.remove(picked)
+                    draft_order.append(picked)
+                    changed = True
+            with b5:
+                if st.button("恢復原始設定", key=_k(f"move_restore_default_{name}"), use_container_width=True):
+                    draft_order = _normalize_column_order(default_cols, available_cols, default_cols)
                     changed = True
 
+        a1, a2, a3 = st.columns([1.2, 1.2, 3])
+        with a1:
+            apply_clicked = st.button("套用", key=_k(f"apply_column_order_{name}"), use_container_width=True, type="primary")
+        with a2:
+            cancel_clicked = st.button("取消暫存", key=_k(f"cancel_column_order_{name}"), use_container_width=True)
+        with a3:
+            if draft_order != applied_order:
+                st.warning("欄位順序已有變更，按「套用」後才會正式套用。")
+            else:
+                st.caption("目前已套用最新欄位順序。")
+
         if changed:
-            st.session_state[state_key] = current_order
+            st.session_state[draft_key] = draft_order
             st.rerun()
 
-        st.caption("目前欄位順序：" + " ｜ ".join(current_order[:20]) + (" ..." if len(current_order) > 20 else ""))
+        if apply_clicked:
+            applied_order = _normalize_column_order(draft_order, available_cols, default_cols)
+            st.session_state[applied_key] = applied_order
+            st.session_state[state_key] = applied_order
+            st.session_state[draft_key] = applied_order
+            st.success("欄位順序已套用。")
+            st.rerun()
 
-    return st.session_state.get(state_key, current_order)
+        if cancel_clicked:
+            st.session_state[draft_key] = applied_order
+            st.info("已取消暫存變更，回到目前已套用欄位順序。")
+            st.rerun()
+
+        st.caption("目前暫存欄位順序：" + " ｜ ".join(draft_order[:20]) + (" ..." if len(draft_order) > 20 else ""))
+
+    return st.session_state.get(applied_key, applied_order)
 
 
 # =========================================================
