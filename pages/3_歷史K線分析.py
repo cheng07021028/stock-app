@@ -20,7 +20,7 @@ from utils import (
     load_last_query_state,
     parse_date_safe,
     render_pro_hero,
-    render_pro_info_card,
+    render_pro_info_card as _utils_render_pro_info_card,
     render_pro_kpi_row,
     render_pro_section,
     save_last_query_state,
@@ -120,6 +120,107 @@ def _to_date(v: Any, fallback: date) -> date:
 
 def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
+
+
+# =========================================================
+# 本頁專用卡片渲染防呆
+# 目的：完全避開舊版 utils.render_pro_info_card 造成 HTML 殘片 </div> 顯示在畫面上的問題。
+# 保留同名函式，下面所有原本呼叫不用改。
+# =========================================================
+def _strip_html_artifact(v: Any, default: str = "—") -> str:
+    import html as _html_lib
+    import re
+
+    if v is None:
+        return default
+    try:
+        if pd.isna(v):
+            return default
+    except Exception:
+        pass
+
+    s = str(v).strip()
+    if not s or s.lower() in {"none", "nan", "null"}:
+        return default
+
+    low = s.lower()
+    if "<div" in low or "</div" in low or "class=\"pro-" in low or "class='pro-" in low:
+        return default
+
+    s = re.sub(r"<[^>]+>", "", s).strip()
+    if not s:
+        return default
+    return _html_lib.escape(s)
+
+
+def render_pro_info_card(title, info_pairs, chips=None):
+    """本頁安全版資訊卡：重建乾淨 HTML，並過濾所有 HTML 殘片。"""
+    safe_title = _strip_html_artifact(title, "")
+
+    chips_html = ""
+    if chips:
+        if isinstance(chips, str):
+            chips_iter = [chips]
+        else:
+            try:
+                chips_iter = list(chips)
+            except Exception:
+                chips_iter = [chips]
+        chip_parts = []
+        for c in chips_iter:
+            cs = _strip_html_artifact(c, "")
+            if cs:
+                chip_parts.append(f'<span class="pro-chip">{cs}</span>')
+        chips_html = "".join(chip_parts)
+
+    items_html = ""
+    if info_pairs is None:
+        info_pairs = []
+
+    for item in info_pairs:
+        label, value, css_class = "", "—", ""
+        try:
+            if isinstance(item, dict):
+                label = item.get("label", "")
+                value = item.get("value", "—")
+                css_class = item.get("css_class", "") or item.get("class", "")
+            elif isinstance(item, (list, tuple)):
+                if len(item) >= 1:
+                    label = item[0]
+                if len(item) >= 2:
+                    value = item[1]
+                if len(item) >= 3:
+                    css_class = item[2]
+            else:
+                label = "項目"
+                value = item
+        except Exception:
+            label, value, css_class = "項目", item, ""
+
+        safe_label = _strip_html_artifact(label, "—")
+        safe_value = _strip_html_artifact(value, "—")
+        css = str(css_class or "").strip()
+        if css not in {"pro-up", "pro-down", "pro-flat", ""}:
+            css = ""
+
+        items_html += (
+            '<div class="pro-info-item">'
+            f'<div class="pro-info-label">{safe_label}</div>'
+            f'<div class="pro-info-value {css}">{safe_value}</div>'
+            '</div>'
+        )
+
+    if not items_html.strip():
+        items_html = '<div class="pro-info-item"><div class="pro-info-label">狀態</div><div class="pro-info-value">—</div></div>'
+
+    card_html = (
+        '<div class="pro-card">'
+        f'<div class="pro-card-title">{safe_title}</div>'
+        f'<div style="margin-bottom:10px;">{chips_html}</div>'
+        f'<div class="pro-info-grid">{items_html}</div>'
+        '</div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
 
 
 # =========================================================
