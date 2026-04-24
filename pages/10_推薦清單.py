@@ -50,6 +50,10 @@ GODPICK_RECORD_COLUMNS = [
     "推薦模式",
     "推薦等級",
     "推薦總分",
+    "買點分級",
+    "風險說明",
+    "股神推論邏輯",
+    "權重設定",
     "技術結構分數",
     "起漲前兆分數",
     "交易可行分數",
@@ -149,6 +153,51 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
     return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
 
+
+def _derive_list_buy_grade(row: pd.Series) -> str:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    if score >= 88 and pre >= 75 and trade >= 70:
+        return "A+｜可積極觀察"
+    if score >= 80 and trade >= 65:
+        return "A｜優先觀察"
+    if score >= 72:
+        return "B｜等確認"
+    if score >= 60:
+        return "C｜僅觀察"
+    return "D｜暫不追價"
+
+
+def _derive_list_risk(row: pd.Series) -> str:
+    stop_loss = row.get("停損價")
+    target1 = row.get("賣出目標1")
+    parts = []
+    if pd.notna(stop_loss):
+        parts.append(f"停損 {format_number(stop_loss, 2)}")
+    if pd.notna(target1):
+        parts.append(f"目標1 {format_number(target1, 2)}")
+    if _safe_float(row.get("交易可行分數"), 0) < 55:
+        parts.append("交易可行偏低")
+    return "｜".join(parts) if parts else "依原推薦風控"
+
+
+def _derive_list_logic(row: pd.Series) -> str:
+    parts = []
+    if _safe_str(row.get("類別")):
+        parts.append(_safe_str(row.get("類別")))
+    if _safe_float(row.get("起漲前兆分數"), 0) >= 75:
+        parts.append("起漲前兆強")
+    if _safe_float(row.get("類股熱度分數"), 0) >= 75:
+        parts.append("類股熱度高")
+    if _safe_str(row.get("是否領先同類股")).lower() in ["true", "1", "是"]:
+        parts.append("領先同類股")
+    if _safe_float(row.get("交易可行分數"), 0) >= 70:
+        parts.append("進出場清楚")
+    return "、".join(parts) if parts else _safe_str(row.get("推薦理由摘要")) or "觀察名單"
+
+
+
 def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -158,6 +207,24 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in GODPICK_RECORD_COLUMNS:
         if c not in x.columns:
             x[c] = None
+
+    if "買點分級" in x.columns:
+        x["買點分級"] = x["買點分級"].fillna("").astype(str)
+        mask = x["買點分級"].str.strip() == ""
+        if mask.any():
+            x.loc[mask, "買點分級"] = x.loc[mask].apply(_derive_list_buy_grade, axis=1)
+
+    if "風險說明" in x.columns:
+        x["風險說明"] = x["風險說明"].fillna("").astype(str)
+        mask = x["風險說明"].str.strip() == ""
+        if mask.any():
+            x.loc[mask, "風險說明"] = x.loc[mask].apply(_derive_list_risk, axis=1)
+
+    if "股神推論邏輯" in x.columns:
+        x["股神推論邏輯"] = x["股神推論邏輯"].fillna("").astype(str)
+        mask = x["股神推論邏輯"].str.strip() == ""
+        if mask.any():
+            x.loc[mask, "股神推論邏輯"] = x.loc[mask].apply(_derive_list_logic, axis=1)
     num_cols = [
         "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
@@ -450,8 +517,9 @@ def main():
     render_pro_section("推薦清單明細")
     show_cols = [
         "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
-        "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
-        "推薦價格", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態", "推薦理由摘要", "備註"
+        "買點分級", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+        "推薦價格", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態",
+        "股神推論邏輯", "風險說明", "推薦理由摘要", "備註"
     ]
     existing_cols = [c for c in show_cols if c in filtered_df.columns]
     st.dataframe(_format_show_df(filtered_df[existing_cols]), use_container_width=True, height=620)
