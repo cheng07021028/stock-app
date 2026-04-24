@@ -58,6 +58,50 @@ def _safe_float(v: Any, default=None):
         return default
 
 
+
+def _ensure_radar_dict(radar_obj: Any) -> dict[str, Any]:
+    """
+    相容 utils.compute_radar_scores 不同版本：
+    - 正常新版：dict
+    - 舊版 / 異常：None、tuple、list、字串
+    避免頁面在 radar.get(...) 時 AttributeError。
+    """
+    default = {
+        "trend": 50,
+        "momentum": 50,
+        "volume": 50,
+        "position": 50,
+        "structure": 50,
+        "summary": "雷達資料異常，已用中性分數保護顯示。",
+    }
+
+    if isinstance(radar_obj, dict):
+        out = default.copy()
+        out.update(radar_obj)
+        return out
+
+    if isinstance(radar_obj, (list, tuple)):
+        out = default.copy()
+        keys = ["trend", "momentum", "volume", "position", "structure"]
+        for i, key in enumerate(keys):
+            if i < len(radar_obj):
+                try:
+                    out[key] = float(radar_obj[i])
+                except Exception:
+                    pass
+        if len(radar_obj) > 5:
+            out["summary"] = str(radar_obj[5])
+        else:
+            out["summary"] = "雷達回傳格式為 list/tuple，已自動轉換。"
+        return out
+
+    if radar_obj is None:
+        return default
+
+    out = default.copy()
+    out["summary"] = str(radar_obj)
+    return out
+
 def _to_date(v: Any, fallback: date) -> date:
     if v is None:
         return fallback
@@ -741,7 +785,7 @@ def _build_event_df(df: pd.DataFrame) -> pd.DataFrame:
 def _compute_analysis_bundle(df: pd.DataFrame) -> dict[str, Any]:
     signal_snapshot = compute_signal_snapshot(df)
     sr_snapshot = compute_support_resistance_snapshot(df)
-    radar = compute_radar_scores(df)
+    radar = _ensure_radar_dict(compute_radar_scores(df))
     badge_text, _ = score_to_badge(signal_snapshot.get("score", 0))
     event_df = _build_event_df(df)
     peak_idx, trough_idx = _detect_pivots_smart(df, window=4, min_gap=6)
@@ -1378,7 +1422,7 @@ def main():
     bundle = _compute_analysis_bundle(df)
     signal_snapshot = bundle["signal_snapshot"]
     sr_snapshot = bundle["sr_snapshot"]
-    radar = bundle["radar"]
+    radar = _ensure_radar_dict(bundle["radar"])
     badge_text = bundle["badge_text"]
     event_df = bundle["event_df"]
     peak_idx = bundle["peak_idx"]
