@@ -825,54 +825,55 @@ def main():
 
     _render_realtime_hero(info, f"{selected_code} {final_name}", final_market)
 
-    left, right = st.columns([1.15, 1.85])
+    # 版面防重疊：
+    # 原本這裡用左右欄並排，當螢幕寬度、字體比例或卡片內容較長時，
+    # 左側卡片會壓到右側卡片。這版改為上下分區，保留全部資訊但不重疊。
+    render_pro_section("股神即時判讀", "訊號、支撐壓力、事件與操作提醒分區顯示，避免資訊互相覆蓋。")
 
-    with left:
-        _render_info_card_safe(
-            "訊號燈號",
-            [
-                ("燈號", badge_text, ""),
-                ("均線趨勢", _safe_str(signal_snapshot.get("ma_trend", ("—", ""))[0]), ""),
-                ("KD交叉", _safe_str(signal_snapshot.get("kd_cross", ("—", ""))[0]), ""),
-                ("MACD趨勢", _safe_str(signal_snapshot.get("macd_trend", ("—", ""))[0]), ""),
-                ("價位狀態", _safe_str(signal_snapshot.get("price_vs_ma20", ("—", ""))[0]), ""),
-                ("量能狀態", _safe_str(signal_snapshot.get("volume_state", ("—", ""))[0]), ""),
-            ],
-            chips=[badge_text],
-        )
+    _render_info_card_safe(
+        "訊號燈號",
+        [
+            ("燈號", badge_text, ""),
+            ("均線趨勢", _safe_str(signal_snapshot.get("ma_trend", ("—", ""))[0]), ""),
+            ("KD交叉", _safe_str(signal_snapshot.get("kd_cross", ("—", ""))[0]), ""),
+            ("MACD趨勢", _safe_str(signal_snapshot.get("macd_trend", ("—", ""))[0]), ""),
+            ("價位狀態", _safe_str(signal_snapshot.get("price_vs_ma20", ("—", ""))[0]), ""),
+            ("量能狀態", _safe_str(signal_snapshot.get("volume_state", ("—", ""))[0]), ""),
+        ],
+        chips=[badge_text],
+    )
 
-        _render_info_card_safe(
-            "最近事件摘要",
-            recent_events,
-            chips=[final_market],
-        )
+    _render_info_card_safe(
+        "支撐壓力",
+        [
+            ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
+            ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
+            ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
+            ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
+            ("壓力訊號", _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0]), ""),
+            ("支撐訊號", _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0]), ""),
+            ("區間判斷", _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0]), ""),
+        ],
+        chips=["結構位階"],
+    )
 
-    with right:
-        _render_info_card_safe(
-            "支撐壓力",
-            [
-                ("20日壓力", format_number(sr_snapshot.get("res_20"), 2), ""),
-                ("20日支撐", format_number(sr_snapshot.get("sup_20"), 2), ""),
-                ("60日壓力", format_number(sr_snapshot.get("res_60"), 2), ""),
-                ("60日支撐", format_number(sr_snapshot.get("sup_60"), 2), ""),
-                ("壓力訊號", _safe_str(sr_snapshot.get("pressure_signal", ("—", ""))[0]), ""),
-                ("支撐訊號", _safe_str(sr_snapshot.get("support_signal", ("—", ""))[0]), ""),
-                ("區間判斷", _safe_str(sr_snapshot.get("break_signal", ("—", ""))[0]), ""),
-            ],
-            chips=["結構位階"],
-        )
+    _render_info_card_safe(
+        "最近事件摘要",
+        recent_events,
+        chips=[final_market],
+    )
 
-        _render_info_card_safe(
-            "股神快速判讀",
-            [
-                ("目前結論", _safe_str(signal_snapshot.get("comment", "資料不足")), ""),
-                ("趨勢觀察", _safe_str(sr_snapshot.get("comment_trend", "資料不足")), ""),
-                ("風險提醒", _safe_str(sr_snapshot.get("comment_risk", "資料不足")), ""),
-                ("焦點重點", _safe_str(sr_snapshot.get("comment_focus", "資料不足")), ""),
-                ("操作提醒", _safe_str(sr_snapshot.get("comment_action", "資料不足")), ""),
-            ],
-            chips=[badge_text, final_market],
-        )
+    _render_info_card_safe(
+        "股神快速判讀",
+        [
+            ("目前結論", _safe_str(signal_snapshot.get("comment", "資料不足")), ""),
+            ("趨勢觀察", _safe_str(sr_snapshot.get("comment_trend", "資料不足")), ""),
+            ("風險提醒", _safe_str(sr_snapshot.get("comment_risk", "資料不足")), ""),
+            ("焦點重點", _safe_str(sr_snapshot.get("comment_focus", "資料不足")), ""),
+            ("操作提醒", _safe_str(sr_snapshot.get("comment_action", "資料不足")), ""),
+        ],
+        chips=[badge_text, final_market],
+    )
 
     with st.expander("原始即時資料"):
         raw_df = pd.DataFrame(
