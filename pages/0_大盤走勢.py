@@ -36,14 +36,7 @@ try:
 except Exception:
     get_realtime_stock_info = None
 
-try:
-    from project_perf_hub import make_signature, session_cached_compute, dedupe_stock_rows
-except Exception:
-    make_signature = None
-    session_cached_compute = None
-    dedupe_stock_rows = None
-
-PAGE_TITLE = "大盤走勢｜股神級預測升級版 V2"
+PAGE_TITLE = "大盤走勢｜股神Pro因子強化版"
 PFX = "macro_godpro_factor_"
 
 RECORD_COLUMNS = [
@@ -66,14 +59,6 @@ RECORD_COLUMNS = [
     "預估高點",
     "預估低點",
     "預估區間寬度",
-    "預估開盤",
-    "預估收盤",
-    "盤型辨識",
-    "偏多機率%",
-    "震盪機率%",
-    "偏空機率%",
-    "主情境機率%",
-    "備用情境",
     "風險等級",
     "國際新聞風險分",
     "美股因子分",
@@ -1050,99 +1035,6 @@ def _build_action_pack(direction: str, strength: str, risk_level: str, scenario:
     return ("否", "否", "是", "是", "減碼或出場防守", "0%~15%", "偏空結構不利持股")
 
 
-
-def _softmax_probs(pos_score: float, flat_score: float, neg_score: float) -> tuple[float, float, float]:
-    vals = [math.exp(max(min(pos_score / 8.0, 8), -8)), math.exp(max(min(flat_score / 8.0, 8), -8)), math.exp(max(min(neg_score / 8.0, 8), -8))]
-    total = sum(vals) or 1.0
-    bull = vals[0] / total * 100
-    flat = vals[1] / total * 100
-    bear = vals[2] / total * 100
-    return round(bull, 2), round(flat, 2), round(bear, 2)
-
-def _detect_market_pattern(ctx: dict[str, Any], total_score: float, day_vol: float) -> str:
-    tech = _safe_float(ctx.get("tech_score"), 0) or 0
-    us = _safe_float(ctx.get("us_score"), 0) or 0
-    night = _safe_float(ctx.get("night_score"), 0) or 0
-    news = _safe_float(ctx.get("news_score"), 0) or 0
-    foreign_mix = (_safe_float(ctx.get("foreign_score"), 0) or 0) + (_safe_float(ctx.get("futures_score"), 0) or 0)
-
-    if total_score >= 8 and tech >= 2 and foreign_mix >= 0:
-        return "趨勢偏多盤"
-    if total_score <= -8 and (us <= -2 or night <= -2):
-        return "趨勢偏空盤"
-    if day_vol >= 260 and abs(total_score) <= 6:
-        return "高波動震盪盤"
-    if us < 0 and night > 0 and total_score > 0:
-        return "開低走高機率盤"
-    if us > 0 and night < 0 and total_score < 2:
-        return "開高走低機率盤"
-    if news >= 3:
-        return "事件主導盤"
-    return "一般趨勢日"
-
-def _build_intraday_prices(base: float, predicted_points: float, day_vol: float, direction: str) -> tuple[float, float, float, float]:
-    if direction == "偏多":
-        open_px = base + predicted_points * 0.22
-        close_px = base + predicted_points * 0.92
-        high_px = max(open_px, close_px) + day_vol * 0.28
-        low_px = min(open_px, close_px) - day_vol * 0.17
-    elif direction == "偏空":
-        open_px = base + predicted_points * 0.18
-        close_px = base + predicted_points * 0.88
-        high_px = max(open_px, close_px) + day_vol * 0.18
-        low_px = min(open_px, close_px) - day_vol * 0.30
-    else:
-        open_px = base + predicted_points * 0.12
-        close_px = base + predicted_points * 0.25
-        high_px = max(open_px, close_px) + day_vol * 0.24
-        low_px = min(open_px, close_px) - day_vol * 0.24
-
-    high_px = max(high_px, open_px, close_px)
-    low_px = min(low_px, open_px, close_px)
-    return round(open_px, 2), round(close_px, 2), round(high_px, 2), round(low_px, 2)
-
-def _render_macro_dashboard(top_pick: dict[str, Any], pred_df: pd.DataFrame, ctx: dict[str, Any]):
-    render_pro_section("股神級預測儀表板", "加入盤型辨識、三情境機率、開高低收推估與操作條件。")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("盤型辨識", _safe_str(top_pick.get("盤型辨識")) or "—")
-    with c2:
-        st.metric("預估開盤", "-" if _safe_float(top_pick.get("預估開盤")) is None else f"{_safe_float(top_pick.get('預估開盤')):.0f}")
-    with c3:
-        st.metric("預估收盤", "-" if _safe_float(top_pick.get("預估收盤")) is None else f"{_safe_float(top_pick.get('預估收盤')):.0f}")
-    with c4:
-        st.metric("主情境機率", f"{_safe_float(top_pick.get('主情境機率%'), 0):.1f}%")
-
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        st.metric("偏多機率", f"{_safe_float(top_pick.get('偏多機率%'), 0):.1f}%")
-    with p2:
-        st.metric("震盪機率", f"{_safe_float(top_pick.get('震盪機率%'), 0):.1f}%")
-    with p3:
-        st.metric("偏空機率", f"{_safe_float(top_pick.get('偏空機率%'), 0):.1f}%")
-
-    d1, d2 = st.columns([1.3, 1.7])
-    with d1:
-        info_text = (
-            f"主模型：{_safe_str(top_pick.get('模式名稱'))}\n\n"
-            f"主方向：{_safe_str(top_pick.get('推估方向'))}\n\n"
-            f"備用情境：{_safe_str(top_pick.get('備用情境')) or '—'}\n\n"
-            f"建議動作：{_safe_str(top_pick.get('建議動作'))}"
-        )
-        st.info(info_text)
-    with d2:
-        ops = pd.DataFrame([
-            {"項目": "進場確認", "內容": _safe_str(top_pick.get("進場確認條件"))},
-            {"項目": "出場警訊", "內容": _safe_str(top_pick.get("出場警訊"))},
-            {"項目": "主要風險", "內容": _safe_str(top_pick.get("主要風險"))},
-            {"項目": "建議倉位", "內容": _safe_str(top_pick.get("建議倉位"))},
-        ])
-        st.dataframe(ops, use_container_width=True, hide_index=True)
-
-    if isinstance(pred_df, pd.DataFrame) and not pred_df.empty:
-        show_cols = [c for c in ["模式名稱", "盤型辨識", "推估方向", "股神模式分數", "股神信心度", "預估開盤", "預估高點", "預估低點", "預估收盤", "偏多機率%", "震盪機率%", "偏空機率%", "建議動作"] if c in pred_df.columns]
-        st.dataframe(pred_df[show_cols], use_container_width=True, hide_index=True)
-
 def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[str, dict[str, float]], pred_date_text: str) -> dict[str, Any]:
     w = weight_map.get(model_name, weight_map["股神平衡版"])
     component = {
@@ -1155,57 +1047,7 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "sector": ctx["sector_score"],
         "risk": ctx["risk_score"],
     }
-
-    raw_score = sum(component[k] * w[k] for k in component) * 3.2
-
-    # 修正「幾乎天天都偏多」的問題：
-    # 不是直接把分數壓低，而是加入空方懲罰與多空平衡校正，
-    # 讓美股轉弱 / 夜盤轉弱 / 新聞風險升高 / VIX 升高時，方向更容易翻成震盪或偏空。
-    bearish_penalty = 0.0
-    bullish_bonus = 0.0
-
-    if (ctx["us_score"] or 0) < -2:
-        bearish_penalty += abs(ctx["us_score"]) * 0.85
-    if (ctx["night_score"] or 0) < -2:
-        bearish_penalty += abs(ctx["night_score"]) * 0.95
-    if (ctx["tech_score"] or 0) < -1.5:
-        bearish_penalty += abs(ctx["tech_score"]) * 0.70
-    if (ctx["foreign_score"] + ctx["futures_score"]) < -2:
-        bearish_penalty += abs(ctx["foreign_score"] + ctx["futures_score"]) * 0.55
-    if (ctx["news_score"] or 0) >= 2.5:
-        bearish_penalty += ctx["news_score"] * 1.25
-    if (ctx["vix_val"] or 0) >= 24:
-        bearish_penalty += min(6.0, ((ctx["vix_val"] - 24) * 0.65) + 1.0)
-
-    if (ctx["us_score"] or 0) > 2:
-        bullish_bonus += ctx["us_score"] * 0.35
-    if (ctx["night_score"] or 0) > 2:
-        bullish_bonus += ctx["night_score"] * 0.45
-    if (ctx["tech_score"] or 0) > 1.5:
-        bullish_bonus += ctx["tech_score"] * 0.30
-    if (ctx["foreign_score"] + ctx["futures_score"]) > 2:
-        bullish_bonus += (ctx["foreign_score"] + ctx["futures_score"]) * 0.20
-
-    sign_series = [
-        1 if (ctx["tech_score"] or 0) > 0 else -1 if (ctx["tech_score"] or 0) < 0 else 0,
-        1 if (ctx["us_score"] or 0) > 0 else -1 if (ctx["us_score"] or 0) < 0 else 0,
-        1 if (ctx["night_score"] or 0) > 0 else -1 if (ctx["night_score"] or 0) < 0 else 0,
-        1 if (ctx["foreign_score"] + ctx["futures_score"]) > 0 else -1 if (ctx["foreign_score"] + ctx["futures_score"]) < 0 else 0,
-        1 if (ctx["sector_score"] or 0) > 0 else -1 if (ctx["sector_score"] or 0) < 0 else 0,
-    ]
-    sign_balance = sum(sign_series)
-
-    total_score = raw_score - bearish_penalty + bullish_bonus
-    if sign_balance <= -3:
-        total_score -= 4.0
-    elif sign_balance >= 3:
-        total_score += 2.0
-
-    # 壓掉輕微多方偏誤，避免小幅正分就全部判成上漲
-    if 0 < total_score < 4.5:
-        total_score -= 2.2
-    elif -4.5 < total_score < 0:
-        total_score += 1.1
+    total_score = sum(component[k] * w[k] for k in component) * 3.2
 
     direction, strength = _direction_strength(total_score)
     risk_level = _risk_level(total_score, ctx["news_score"], ctx["vix_val"])
@@ -1216,27 +1058,9 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     predicted_points = total_score * 8.5
     if direction == "震盪":
         predicted_points = max(-80, min(80, predicted_points))
-    elif direction == "偏空":
-        predicted_points = min(predicted_points, -18.0)
-    elif direction == "偏多":
-        predicted_points = max(predicted_points, 18.0)
-
     high = base + max(20.0, predicted_points + day_vol * 0.45)
     low = base + min(-20.0, predicted_points - day_vol * 0.45)
     confidence = max(35.0, min(92.0, 55 + abs(total_score) * 1.3 - ctx["news_score"] * 1.2 - (ctx["vix_val"] - 18) * 0.6))
-
-    bull_prob, flat_prob, bear_prob = _softmax_probs(total_score + bullish_bonus, max(0.0, 8.5 - abs(total_score)), -total_score + bearish_penalty)
-    pattern_name = _detect_market_pattern(ctx, total_score, day_vol)
-    predicted_open, predicted_close, intraday_high, intraday_low = _build_intraday_prices(base, predicted_points, day_vol, direction)
-    high = round(max(high, intraday_high), 2)
-    low = round(min(low, intraday_low), 2)
-    primary_prob = max(bull_prob, flat_prob, bear_prob)
-    if primary_prob == bull_prob:
-        backup_scenario = "震盪" if flat_prob >= bear_prob else "偏空"
-    elif primary_prob == flat_prob:
-        backup_scenario = "偏多" if bull_prob >= bear_prob else "偏空"
-    else:
-        backup_scenario = "震盪" if flat_prob >= bull_prob else "偏多"
 
     logic_lines = [
         f"情境：{ctx['scenario']}",
@@ -1246,7 +1070,7 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         f"VIX {ctx['vix_val']:.2f}、美元台幣 {ctx['fx_val']:.2f}，風險面 {ctx['risk_score']:.1f}",
         f"外資現貨 {(_safe_float(ctx.get('foreign_amt')) or 0):.1f} 億 / 三大法人 {(_safe_float(ctx.get('total3_amt')) or 0):.1f} 億 / PCR {(_safe_float(ctx.get('pcr')) or 0):.2f}",
         f"強勢族群 {ctx.get('sector_strong','')}；弱勢族群 {ctx.get('sector_weak','')}",
-        f"模式 {model_name} 權重下總分 {total_score:.1f}（原始 {raw_score:.1f} / 空方修正 -{bearish_penalty:.1f} / 多方加成 +{bullish_bonus:.1f}）",
+        f"模式 {model_name} 權重下總分 {total_score:.1f}",
     ]
     entry_confirm = "、".join([
         "加權至少站穩 MA5" if ctx["tw_close"] >= _safe_float(ctx["twii"].get("ma5"), ctx["tw_close"]) else "需先站回 MA5",
@@ -1280,14 +1104,6 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "預估高點": round(high, 2),
         "預估低點": round(low, 2),
         "預估區間寬度": round(high - low, 2),
-        "預估開盤": round(predicted_open, 2),
-        "預估收盤": round(predicted_close, 2),
-        "盤型辨識": pattern_name,
-        "偏多機率%": bull_prob,
-        "震盪機率%": flat_prob,
-        "偏空機率%": bear_prob,
-        "主情境機率%": round(primary_prob, 2),
-        "備用情境": backup_scenario,
         "風險等級": risk_level,
         "國際新聞風險分": round(ctx["news_score"], 2),
         "美股因子分": round(ctx["us_score"], 2),
@@ -1350,24 +1166,6 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
 
 
 def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
-    sig_payload = {
-        "pred_date_text": pred_date_text,
-        "records": _ensure_columns(records_df)[["推估日期", "模式名稱", "更新時間", "整體檢討分", "方向是否命中", "區間是否命中", "建議動作是否合適"]].fillna("").astype(str).to_dict(orient="records") if isinstance(records_df, pd.DataFrame) and not records_df.empty else [],
-    }
-    sig = make_signature(sig_payload) if callable(make_signature) else ""
-    if callable(session_cached_compute) and sig:
-        def _compute():
-            ctx = _calc_market_context(pred_date_text)
-            weights = _get_dynamic_weights(records_df)
-            rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
-            pred_df = pd.DataFrame(rows)
-            pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
-            pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False], inplace=True)
-            pred_df.reset_index(drop=True, inplace=True)
-            return pred_df, ctx
-        (pred_df, ctx), _ = session_cached_compute(st, "macro_predict_all_models", sig, _compute)
-        return pred_df, ctx
-
     ctx = _calc_market_context(pred_date_text)
     weights = _get_dynamic_weights(records_df)
     rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
@@ -1540,15 +1338,10 @@ def _safe_pct_text(v: Any) -> str:
 
 def _load_watchlist_items() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    data = st.session_state.get("watchlist_data")
-    if not isinstance(data, dict) or not data:
-        if get_normalized_watchlist is None:
-            return rows
-        try:
-            data = get_normalized_watchlist()
-        except Exception:
-            data = {}
+    if get_normalized_watchlist is None:
+        return rows
     try:
+        data = get_normalized_watchlist()
         if not isinstance(data, dict):
             return rows
         seen = set()
@@ -1573,11 +1366,6 @@ def _load_watchlist_items() -> list[dict[str, str]]:
                 })
     except Exception:
         return []
-    if callable(dedupe_stock_rows):
-        try:
-            rows = dedupe_stock_rows(rows, key_fields=("股票代號", "市場別"))
-        except Exception:
-            pass
     return rows
 
 
@@ -1587,7 +1375,7 @@ def _parse_custom_stock_text(text: str) -> list[dict[str, str]]:
         s = line.strip()
         if not s:
             continue
-        s = s.replace("，", ",").replace("\t", ",")
+        s = s.replace("，", ",").replace("	", ",")
         parts = [x.strip() for x in s.split(",") if x.strip()]
         if not parts:
             continue
@@ -1595,11 +1383,6 @@ def _parse_custom_stock_text(text: str) -> list[dict[str, str]]:
         name = _safe_str(parts[1]) if len(parts) >= 2 else code
         market = _safe_str(parts[2]) if len(parts) >= 3 else "上市"
         rows.append({"群組": "自訂", "股票代號": code, "股票名稱": name, "市場別": market})
-    if callable(dedupe_stock_rows):
-        try:
-            rows = dedupe_stock_rows(rows, key_fields=("股票代號", "市場別"))
-        except Exception:
-            pass
     return rows
 
 
@@ -1705,11 +1488,6 @@ def _macro_stock_action(total_score: float, risk_level: str, stock_tech_score: f
 def _build_stock_linkage_df(top_pick: dict[str, Any], ctx: dict[str, Any], use_watchlist: bool, custom_text: str) -> pd.DataFrame:
     rows = _load_watchlist_items() if use_watchlist else []
     rows.extend(_parse_custom_stock_text(custom_text))
-    if callable(dedupe_stock_rows):
-        try:
-            rows = dedupe_stock_rows(rows, key_fields=("股票代號", "市場別"))
-        except Exception:
-            pass
     if not rows:
         return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "最新價", "漲跌%", "MA5", "MA20", "個股技術分", "大盤模式", "大盤方向", "股神分數", "風險等級", "建議動作", "偏向", "推論"])
     out = []
@@ -1717,12 +1495,8 @@ def _build_stock_linkage_df(top_pick: dict[str, Any], ctx: dict[str, Any], use_w
     macro_dir = _safe_str(top_pick.get("推估方向"))
     macro_mode = _safe_str(top_pick.get("模式名稱"))
     risk_level = _safe_str(top_pick.get("風險等級"))
-    snap_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
     for r in rows:
-        cache_key = (_safe_str(r["股票代號"]), _safe_str(r["股票名稱"]), _safe_str(r["市場別"]))
-        if cache_key not in snap_cache:
-            snap_cache[cache_key] = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"])
-        snap = snap_cache.get(cache_key, {})
+        snap = _get_stock_linkage_snapshot(r["股票代號"], r["股票名稱"], r["市場別"])
         action, bias, reason = _macro_stock_action(macro_score, risk_level, _safe_float(snap.get("技術分"), 0) or 0.0, _safe_float(snap.get("漲跌%")))
         out.append({
             "群組": r["群組"],
@@ -1760,8 +1534,8 @@ def main():
         st.session_state[_k("status_type")] = "info"
 
     render_pro_hero(
-        title="大盤走勢｜股神級預測升級版 V2",
-        subtitle="加入盤型辨識、三情境機率、開高低收推估、誤差校正與個股連動。",
+        title="大盤走勢｜股神Pro因子強化版",
+        subtitle="補強法人 / 期貨選擇權 / 融資融券 / 類股輪動 / 事件因子，並顯示每個因子的實際取樣日期與來源。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -1821,7 +1595,6 @@ def main():
         {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
 
-    _render_macro_dashboard(top_pick, pred_df, ctx)
 
     factor_cols = st.columns(4)
     with factor_cols[0]:
