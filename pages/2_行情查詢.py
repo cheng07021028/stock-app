@@ -28,7 +28,7 @@ from utils import (
     score_to_badge,
 )
 
-PAGE_TITLE = "行情查詢｜升級完整版"
+PAGE_TITLE = "行情查詢"
 PFX = "rt_"
 
 
@@ -81,98 +81,6 @@ def _to_date(v: Any, fallback: date) -> date:
 def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
 
-
-def _godpick_records_github_config() -> dict[str, str]:
-    return {
-        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
-        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
-        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
-        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
-        "path": _safe_str(st.secrets.get("GODPICK_RECORDS_GITHUB_PATH", "godpick_records.json")) or "godpick_records.json",
-    }
-
-
-def _github_headers(token: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-
-def _github_contents_url(owner: str, repo: str, path: str) -> str:
-    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_godpick_records_df() -> pd.DataFrame:
-    cols = [
-        "record_id", "股票代號", "股票名稱", "推薦模式", "推薦總分", "買點分級",
-        "型態名稱", "爆發等級", "推薦日期", "推薦時間", "目前狀態"
-    ]
-    cfg = _godpick_records_github_config()
-    if not cfg["token"]:
-        return pd.DataFrame(columns=cols)
-    try:
-        import requests
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(cfg["token"]),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return pd.DataFrame(columns=cols)
-        payload = resp.json()
-        content = payload.get("content", "")
-        if not content:
-            return pd.DataFrame(columns=cols)
-        import base64, json
-        data = json.loads(base64.b64decode(content).decode("utf-8"))
-        df = pd.DataFrame(data if isinstance(data, list) else [])
-        for c in cols:
-            if c not in df.columns:
-                df[c] = None
-        df["股票代號"] = df["股票代號"].astype(str).str.extract(r"(\d+)")[0].fillna(df["股票代號"].astype(str))
-        df["推薦總分"] = pd.to_numeric(df["推薦總分"], errors="coerce")
-        return df[cols].copy()
-    except Exception:
-        return pd.DataFrame(columns=cols)
-
-
-def _latest_rec_map(rec_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    if rec_df is None or rec_df.empty:
-        return {}
-    work = rec_df.copy()
-    work["_sort_dt"] = pd.to_datetime(work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str), errors="coerce")
-    work = work.sort_values(["股票代號", "_sort_dt"], ascending=[True, False], na_position="last").drop_duplicates("股票代號", keep="first")
-    out = {}
-    for _, r in work.iterrows():
-        code = _safe_str(r.get("股票代號"))
-        if code:
-            out[code] = {
-                "最近推薦模式": _safe_str(r.get("推薦模式")),
-                "最近推薦總分": _safe_float(r.get("推薦總分")),
-                "買點分級": _safe_str(r.get("買點分級")),
-                "型態名稱": _safe_str(r.get("型態名稱")),
-                "爆發等級": _safe_str(r.get("爆發等級")),
-                "最近推薦時間": ((_safe_str(r.get("推薦日期")) + " " + _safe_str(r.get("推薦時間"))).strip()),
-                "是否曾被股神推薦": "是",
-                "推薦狀態": _safe_str(r.get("目前狀態")) or "觀察",
-            }
-    return out
-
-
-def _watchlist_has_code(code: str) -> bool:
-    raw = get_normalized_watchlist()
-    if not isinstance(raw, dict):
-        return False
-    for _, items in raw.items():
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict) and _safe_str(item.get("code")) == _safe_str(code):
-                    return True
-    return False
 
 # =========================================================
 # 快取資料
@@ -718,28 +626,12 @@ def main():
 
     group_map = _build_group_stock_map()
     flat_rows = _flatten_group_map(group_map)
-    rec_df = _load_godpick_records_df()
-    rec_map = _latest_rec_map(rec_df)
     _init_state(group_map)
 
-    # 承接外部焦點股票
-    focus_code = _safe_str(st.session_state.get("kline_focus_stock_code", ""))
-    if focus_code:
-        for g, items in group_map.items():
-            hit = next((x for x in items if _safe_str(x.get("code")) == focus_code), None)
-            if hit:
-                st.session_state[_k("group")] = g
-                st.session_state[_k("stock_code")] = focus_code
-                break
-
     render_pro_hero(
-        title="行情查詢｜升級完整版",
-        subtitle="保留原本即時查詢，並串接自選股 / 股神推薦 / 推薦紀錄，做成快速決策入口。",
+        title="行情查詢｜股神版",
+        subtitle="單股即時資訊、訊號燈號、支撐壓力、最近事件摘要，一頁快速看懂。",
     )
-
-
-    # 自選 / 推薦承接摘要
-    st.caption("本頁已串接自選股中心與股神推薦紀錄，可直接看到最近推薦分數 / 買點分級 / 推薦模式。")
 
     render_pro_section("快速搜尋股票")
     s1, s2 = st.columns([5, 1])
@@ -795,21 +687,6 @@ def main():
             format_func=lambda code: code_to_item.get(code, {}).get("label", code),
         )
 
-    qa1, qa2, qa3 = st.columns(3)
-    with qa1:
-        if st.button("送到3_歷史K線分析", use_container_width=True):
-            st.session_state["kline_focus_stock_code"] = _safe_str(st.session_state.get(_k("stock_code"), ""))
-            st.session_state["kline_focus_stock_name"] = _safe_str(code_to_item.get(_safe_str(st.session_state.get(_k("stock_code"), "")), {}).get("name"))
-            st.rerun()
-    with qa2:
-        if st.button("送到7_股神推薦", use_container_width=True):
-            st.session_state["godpick_last_watch_codes"] = [_safe_str(st.session_state.get(_k("stock_code"), ""))]
-            st.session_state["godpick_last_watch_group"] = _safe_str(st.session_state.get(_k("group"), ""))
-            st.session_state["godpick_last_watch_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.rerun()
-    with qa3:
-        st.caption("快速帶到其他頁面")
-
     selected_group = _safe_str(st.session_state.get(_k("group"), ""))
     selected_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
 
@@ -821,8 +698,6 @@ def main():
     stock_name = _safe_str(selected_item.get("name"))
     market_type = _safe_str(selected_item.get("market")) or "上市"
     stock_label = f"{selected_code} {stock_name}"
-    latest_rec = rec_map.get(selected_code, {})
-    in_watchlist = _watchlist_has_code(selected_code)
 
     start_date = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=180))
     end_date = _to_date(st.session_state.get(_k("end_date")), date.today())
@@ -862,36 +737,6 @@ def main():
 
     _render_realtime_hero(info, f"{selected_code} {final_name}", final_market)
 
-    # 推薦與自選整合摘要
-    render_pro_kpi_row(
-        [
-            {
-                "label": "是否在自選",
-                "value": "是" if in_watchlist else "否",
-                "delta": _safe_str(st.session_state.get(_k("group"), "")),
-                "delta_class": "pro-kpi-delta-flat",
-            },
-            {
-                "label": "是否曾被股神推薦",
-                "value": _safe_str(latest_rec.get("是否曾被股神推薦", "否")),
-                "delta": _safe_str(latest_rec.get("最近推薦模式", "—")),
-                "delta_class": "pro-kpi-delta-flat",
-            },
-            {
-                "label": "最近推薦總分",
-                "value": format_number(latest_rec.get("最近推薦總分"), 2),
-                "delta": _safe_str(latest_rec.get("買點分級", "—")),
-                "delta_class": "pro-kpi-delta-flat",
-            },
-            {
-                "label": "型態 / 爆發",
-                "value": f"{_safe_str(latest_rec.get('型態名稱', '—'))} / {_safe_str(latest_rec.get('爆發等級', '—'))}",
-                "delta": _safe_str(latest_rec.get("最近推薦時間", "—")),
-                "delta_class": "pro-kpi-delta-flat",
-            },
-        ]
-    )
-
     left, right = st.columns([1.15, 1.85])
 
     with left:
@@ -912,19 +757,6 @@ def main():
             "最近事件摘要",
             recent_events,
             chips=[final_market],
-        )
-
-        render_pro_info_card(
-            "推薦追蹤摘要",
-            [
-                ("是否在自選", "是" if in_watchlist else "否", ""),
-                ("是否曾被股神推薦", _safe_str(latest_rec.get("是否曾被股神推薦", "否")), ""),
-                ("最近推薦模式", _safe_str(latest_rec.get("最近推薦模式", "—")), ""),
-                ("最近推薦總分", format_number(latest_rec.get("最近推薦總分"), 2), ""),
-                ("買點分級", _safe_str(latest_rec.get("買點分級", "—")), ""),
-                ("推薦狀態", _safe_str(latest_rec.get("推薦狀態", "—")), ""),
-            ],
-            chips=["7頁", "8頁", "自選互通"],
         )
 
     with right:
@@ -975,14 +807,6 @@ def main():
                     "更新時間": info.get("update_time"),
                     "是否成功": info.get("ok"),
                     "訊息": info.get("message"),
-                    "是否在自選": "是" if in_watchlist else "否",
-                    "是否曾被股神推薦": _safe_str(latest_rec.get("是否曾被股神推薦", "否")),
-                    "最近推薦模式": _safe_str(latest_rec.get("最近推薦模式", "")),
-                    "最近推薦總分": latest_rec.get("最近推薦總分"),
-                    "買點分級": _safe_str(latest_rec.get("買點分級", "")),
-                    "型態名稱": _safe_str(latest_rec.get("型態名稱", "")),
-                    "爆發等級": _safe_str(latest_rec.get("爆發等級", "")),
-                    "最近推薦時間": _safe_str(latest_rec.get("最近推薦時間", "")),
                 }
             ]
         )
@@ -995,8 +819,6 @@ def main():
         st.write("4. 群組與股票選擇以 session_state 真同步。")
         st.write("5. 股票主檔只抓一次，不重複取得。")
         st.write("6. 群組展平與搜尋映射已加快取。")
-        st.write("7. 已串接 7_股神推薦 / 8_股神推薦紀錄，可直接看最近推薦分數與買點分級。")
-        st.write("8. 可將單股快速送到 3_歷史K線分析 / 7_股神推薦。")
 
 
 if __name__ == "__main__":
