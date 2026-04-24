@@ -28,19 +28,12 @@ from utils import (
     get_normalized_watchlist,
 )
 
-try:
-    from project_perf_hub import make_signature
-except Exception:
-    make_signature = None
-
-PAGE_TITLE = "股神推薦紀錄｜升級完整版"
+PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 
 GODPICK_RECORD_COLUMNS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-    "市場環境分數", "市場環境", "型態名稱", "型態突破分數", "突破風險", "爆發等級", "爆發力分數",
-    "買點回測分數", "買點分級", "最近買點日期", "5日勝率%", "10日勝率%", "20日勝率%", "平均報酬%",
-    "建議切入區", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
+    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
     "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
     "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
@@ -52,7 +45,6 @@ STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達�
 
 DEFAULT_STANDARD_COLS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-    "市場環境", "型態名稱", "爆發等級", "買點分級", "20日勝率%", "平均報酬%", "建議切入區",
     "股神決策分數", "股神建議動作", "股神信心", "股神進場區間",
     "推薦價格", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
@@ -60,8 +52,6 @@ DEFAULT_STANDARD_COLS = [
 
 DEFAULT_ADVANCED_COLS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-    "市場環境分數", "市場環境", "型態名稱", "型態突破分數", "突破風險", "爆發等級", "爆發力分數",
-    "買點回測分數", "買點分級", "最近買點日期", "5日勝率%", "10日勝率%", "20日勝率%", "平均報酬%", "建議切入區",
     "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "股神決策分數", "股神建議動作",
     "股神信心", "股神進場區間", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
     "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
@@ -254,9 +244,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
-        "持有天數", "股神決策分數", "市場環境分數", "型態突破分數", "爆發力分數",
-        "買點回測分數", "5日勝率%", "10日勝率%", "20日勝率%", "平均報酬%",
-        "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        "持有天數", "股神決策分數", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -268,7 +256,6 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     text_cols = [
         "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦標籤", "推薦理由摘要",
         "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
-        "市場環境", "型態名稱", "突破風險", "爆發等級", "買點分級", "最近買點日期", "建議切入區",
     ]
     for c in text_cols:
         x[c] = x[c].fillna("").astype(str)
@@ -548,35 +535,8 @@ def _read_watchlist_from_github() -> tuple[dict[str, list[dict[str, str]]], str]
 
 def _load_watchlist_payload() -> dict[str, list[dict[str, str]]]:
     payload, err = _read_watchlist_from_github()
-    if (not payload) and isinstance(st.session_state.get("watchlist_data"), dict):
-        payload = st.session_state.get("watchlist_data", {})
-        err = err or "改用 session_state watchlist_data"
     st.session_state[_k("watchlist_import_detail")] = err or "GitHub watchlist 讀取成功"
     return _normalize_watchlist_payload(payload)
-
-
-def _merge_watchlist_sources() -> dict[str, list[dict[str, str]]]:
-    repo_payload = _load_watchlist_payload()
-    state_payload = st.session_state.get("watchlist_data", {})
-    if not isinstance(state_payload, dict):
-        state_payload = {}
-    merged = _normalize_watchlist_payload(repo_payload)
-    state_payload = _normalize_watchlist_payload(state_payload)
-    for group_name, items in state_payload.items():
-        if group_name not in merged:
-            merged[group_name] = []
-        code_map = {_normalize_code(x.get("code")): dict(x) for x in merged[group_name] if isinstance(x, dict)}
-        for item in items:
-            code = _normalize_code(item.get("code"))
-            if not code:
-                continue
-            code_map[code] = {
-                "code": code,
-                "name": _safe_str(item.get("name")) or code,
-                "market": _safe_str(item.get("market")) or "上市",
-            }
-        merged[group_name] = sorted(code_map.values(), key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
-    return _normalize_watchlist_payload(merged)
 
 
 def _get_watchlist_sha() -> tuple[str, str]:
@@ -646,23 +606,13 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
     if chosen.empty:
         return False, "找不到要匯入的推薦紀錄"
 
-    payload = _merge_watchlist_sources()
+    payload = _load_watchlist_payload()
     target_group = _safe_str(target_group) or "股神推薦"
     if target_group not in payload:
         payload[target_group] = []
 
-    existing_map = {
-        _normalize_code(x.get("code")): {
-            "code": _normalize_code(x.get("code")),
-            "name": _safe_str(x.get("name")) or _normalize_code(x.get("code")),
-            "market": _safe_str(x.get("market")) or "上市",
-        }
-        for x in payload.get(target_group, [])
-        if isinstance(x, dict) and _normalize_code(x.get("code"))
-    }
-
+    existing_codes = {_normalize_code(x.get("code")) for x in payload.get(target_group, [])}
     add_count = 0
-    update_count = 0
     skip_count = 0
 
     for _, row in chosen.iterrows():
@@ -672,27 +622,14 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
         if not code:
             skip_count += 1
             continue
+        if code in existing_codes:
+            skip_count += 1
+            continue
+        payload[target_group].append({"code": code, "name": name, "market": market})
+        existing_codes.add(code)
+        add_count += 1
 
-        new_item = {"code": code, "name": name, "market": market}
-        old_item = existing_map.get(code)
-
-        if old_item is None:
-            existing_map[code] = new_item
-            add_count += 1
-        else:
-            changed = (
-                _safe_str(old_item.get("name")) != name
-                or _safe_str(old_item.get("market")) != market
-            )
-            existing_map[code] = new_item
-            if changed:
-                update_count += 1
-            else:
-                skip_count += 1
-
-    payload[target_group] = sorted(existing_map.values(), key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
     payload = _normalize_watchlist_payload(payload)
-
     ok, msg = _write_watchlist_to_github(payload)
     if ok:
         try:
@@ -702,10 +639,8 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
         st.session_state["watchlist_data"] = copy.deepcopy(payload)
         st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
         st.session_state["watchlist_last_saved_at"] = _now_text()
-        st.session_state[_k("watchlist_import_detail")] = (
-            f"目標群組：{target_group}｜新增 {add_count} 檔｜更新 {update_count} 檔｜略過 {skip_count} 檔"
-        )
-        return True, f"{msg}｜新增 {add_count} 檔，更新 {update_count} 檔，略過 {skip_count} 檔"
+        st.session_state[_k("watchlist_import_detail")] = f"目標群組：{target_group}｜新增 {add_count} 檔｜略過 {skip_count} 檔"
+        return True, f"{msg}｜匯入 {add_count} 檔，略過 {skip_count} 檔"
     return False, msg
 
 
@@ -973,37 +908,6 @@ def _get_forward_return(stock_no: str, stock_name: str, market_type: str, rec_da
         except Exception:
             pass
     return None
-
-
-
-def _safe_mean(values: list[float | None]) -> float | None:
-    vals = [float(v) for v in values if v is not None]
-    if not vals:
-        return None
-    return sum(vals) / len(vals)
-
-
-def _backtest_grade(score: float | None) -> str:
-    x = _safe_float(score)
-    if x is None:
-        return ""
-    if x >= 85:
-        return "A"
-    if x >= 72:
-        return "B"
-    if x >= 60:
-        return "C"
-    return "D"
-
-
-def _entry_zone_text(rec_price: float | None, stop_price: float | None) -> str:
-    if rec_price in [None, 0]:
-        return "-"
-    low = rec_price * 0.97
-    high = rec_price * 1.03
-    if stop_price not in [None, 0]:
-        low = max(low, stop_price * 1.03)
-    return f"{low:.2f} ~ {high:.2f}"
 
 
 def _clip(v: float | None, low: float, high: float, default: float = 0.0) -> float:
@@ -1275,12 +1179,10 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
 
-
 def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return _ensure_godpick_record_columns(pd.DataFrame())
     rows = []
-    perf_cache: dict[tuple[str, str, str, str, int], float | None] = {}
     for _, row in df.iterrows():
         payload = dict(row)
         code = _normalize_code(payload.get("股票代號"))
@@ -1291,10 +1193,7 @@ def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
             key = f"{d}日績效%"
             val = _safe_float(payload.get(key))
             if val is None:
-                cache_key = (code, name, market, rec_date, d)
-                if cache_key not in perf_cache:
-                    perf_cache[cache_key] = _get_forward_return(code, name, market, rec_date, d)
-                payload[key] = perf_cache.get(cache_key)
+                payload[key] = _get_forward_return(code, name, market, rec_date, d)
         payload = _recalc_row(payload)
         rows.append(payload)
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
@@ -1516,7 +1415,7 @@ def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     local_df = _ensure_godpick_record_columns(df.copy())
     if local_df.empty:
         return {
-            "mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均系統報酬", "系統勝率", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "平均買點回測分數", "平均20日勝率", "平均報酬%", "達目標1比率", "停損率", "平均推薦總分"]),
+            "mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均系統報酬", "系統勝率", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "達目標1比率", "停損率", "平均推薦總分"]),
             "category": pd.DataFrame(columns=["類別", "筆數", "平均系統報酬", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "系統勝率", "達目標1比率", "停損率"]),
             "grade": pd.DataFrame(columns=["推薦等級", "筆數", "平均系統報酬", "系統勝率", "達目標1比率", "停損率"]),
             "trade_mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"]),
@@ -1542,9 +1441,6 @@ def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
             "10日勝率": ("10日績效%", _win_rate),
             "20日勝率": ("20日績效%", _win_rate),
         },
-        平均買點回測分數=("買點回測分數", "mean"),
-        平均20日勝率=("20日勝率%", "mean"),
-        平均報酬_pct=("平均報酬%", "mean"),
         達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
         停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
         平均推薦總分=("推薦總分", "mean"),
@@ -1589,11 +1485,9 @@ def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     best_mode_df = mode_df.copy()
     if not best_mode_df.empty:
         best_mode_df["綜合模式分數"] = (
-            best_mode_df["平均20日績效"].fillna(0) * 0.35
-            + best_mode_df["20日勝率"].fillna(0) * 0.25
+            best_mode_df["平均20日績效"].fillna(0) * 0.50
+            + best_mode_df["20日勝率"].fillna(0) * 0.35
             + best_mode_df["平均推薦總分"].fillna(0) * 0.15
-            + best_mode_df["平均買點回測分數"].fillna(0) * 0.15
-            + best_mode_df["平均20日勝率"].fillna(0) * 0.10
         )
         best_mode_df = best_mode_df.sort_values(["綜合模式分數", "平均20日績效", "20日勝率"], ascending=[False, False, False]).reset_index(drop=True)
 
@@ -1689,7 +1583,7 @@ def main():
 
     render_pro_hero(
         title="股神推薦紀錄",
-        subtitle="追蹤 7_股神推薦 推薦股票，承接市場/型態/爆發/回測欄位，支援 GitHub + Firestore 雙寫、每日更新、模式/類別/買點分級分析、Excel 匯出，並可匯入 4_自選股中心。",
+        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
@@ -1790,18 +1684,6 @@ def main():
         {"label": "平均系統報酬%", "value": f"{summary['avg_ret']:.2f}%", "delta": f"勝率 {summary['win_rate']:.1f}%", "delta_class": "pro-kpi-delta-flat"},
         {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
     ])
-    extra_kpi = st.columns(4)
-    with extra_kpi[0]:
-        st.metric("平均買點回測分數", f"{pd.to_numeric(live_df['買點回測分數'], errors='coerce').dropna().mean():.2f}" if not live_df.empty and pd.to_numeric(live_df["買點回測分數"], errors="coerce").dropna().size else "-")
-    with extra_kpi[1]:
-        st.metric("平均20日勝率", f"{pd.to_numeric(live_df['20日勝率%'], errors='coerce').dropna().mean():.2f}%" if not live_df.empty and pd.to_numeric(live_df["20日勝率%"], errors="coerce").dropna().size else "-")
-    with extra_kpi[2]:
-        st.metric("平均報酬%", f"{pd.to_numeric(live_df['平均報酬%'], errors='coerce').dropna().mean():.2f}%" if not live_df.empty and pd.to_numeric(live_df["平均報酬%"], errors="coerce").dropna().size else "-")
-    with extra_kpi[3]:
-        top_grade = pd.Series(live_df["買點分級"]).fillna("").astype(str)
-        top_grade = top_grade[top_grade != ""].mode()
-        st.metric("主流買點分級", top_grade.iloc[0] if not top_grade.empty else "-")
-
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
@@ -1901,8 +1783,7 @@ def main():
                 with preset_cols[0]:
                     if st.button("方案A：交易核心", use_container_width=True):
                         preset = [c for c in [
-                            "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "市場環境", "型態名稱", "爆發等級",
-                            "買點分級", "20日勝率%", "平均報酬%", "推薦價格", "最新價",
+                            "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦價格", "最新價",
                             "損益幅%", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "備註"
                         ] if c in available_cols]
                         _save_col_profile(show_cols_mode, preset)
@@ -1911,7 +1792,6 @@ def main():
                     if st.button("方案B：績效核心", use_container_width=True):
                         preset = [c for c in [
                             "record_id", "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分",
-                            "買點回測分數", "買點分級", "5日勝率%", "10日勝率%", "20日勝率%", "平均報酬%",
                             "3日績效%", "5日績效%", "10日績效%", "20日績效%", "損益幅%", "模式績效標籤"
                         ] if c in available_cols]
                         _save_col_profile(show_cols_mode, preset)
@@ -1950,24 +1830,9 @@ def main():
                 "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
                 "推薦等級": st.column_config.TextColumn("推薦等級", disabled=True),
                 "推薦總分": st.column_config.NumberColumn("推薦總分", format="%.2f", disabled=True),
-                "市場環境分數": st.column_config.NumberColumn("市場環境分數", format="%.2f", disabled=True),
-                "型態突破分數": st.column_config.NumberColumn("型態突破分數", format="%.2f", disabled=True),
-                "爆發力分數": st.column_config.NumberColumn("爆發力分數", format="%.2f", disabled=True),
-                "買點回測分數": st.column_config.NumberColumn("買點回測分數", format="%.2f", disabled=True),
-                "5日勝率%": st.column_config.NumberColumn("5日勝率%", format="%.2f", disabled=True),
-                "10日勝率%": st.column_config.NumberColumn("10日勝率%", format="%.2f", disabled=True),
-                "20日勝率%": st.column_config.NumberColumn("20日勝率%", format="%.2f", disabled=True),
-                "平均報酬%": st.column_config.NumberColumn("平均報酬%", format="%.2f", disabled=True),
                 "股神決策分數": st.column_config.NumberColumn("股神決策分數", format="%.2f", disabled=True),
                 "股神建議動作": st.column_config.TextColumn("股神建議動作", disabled=True),
                 "股神信心": st.column_config.TextColumn("股神信心", disabled=True),
-                "市場環境": st.column_config.TextColumn("市場環境", disabled=True),
-                "型態名稱": st.column_config.TextColumn("型態名稱", disabled=True),
-                "突破風險": st.column_config.TextColumn("突破風險", disabled=True),
-                "爆發等級": st.column_config.TextColumn("爆發等級", disabled=True),
-                "買點分級": st.column_config.TextColumn("買點分級", disabled=True),
-                "最近買點日期": st.column_config.TextColumn("最近買點日期", disabled=True),
-                "建議切入區": st.column_config.TextColumn("建議切入區", disabled=True),
                 "股神進場區間": st.column_config.TextColumn("股神進場區間", disabled=True),
                 "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
                 "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
@@ -2086,9 +1951,8 @@ def main():
 
             st.dataframe(
                 show_god[[c for c in [
-                    "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分", "市場環境", "型態名稱", "爆發等級", "買點分級",
-                    "20日勝率%", "平均報酬%", "股神決策分數", "股神建議動作", "股神信心",
-                    "建議切入區", "股神進場區間", "推薦價格", "最新價", "停損價", "賣出目標1", "賣出目標2", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
+                    "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分", "股神決策分數", "股神建議動作", "股神信心",
+                    "股神進場區間", "推薦價格", "最新價", "停損價", "賣出目標1", "賣出目標2", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
                 ] if c in show_god.columns]],
                 use_container_width=True,
                 hide_index=True,
@@ -2202,8 +2066,7 @@ def main():
             st.dataframe(ana_tables["grade"], use_container_width=True, hide_index=True)
         with sub_tabs[3]:
             detail_cols = [c for c in [
-                "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "市場環境", "型態名稱", "爆發等級",
-                "買點分級", "20日勝率%", "平均報酬%", "模式績效標籤",
+                "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
                 "推薦價格", "最新價", "損益金額", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
                 "是否達停損", "是否達目標1", "是否達目標2", "推薦日期", "持有天數", "推薦理由摘要"
             ] if c in live_df.columns]
