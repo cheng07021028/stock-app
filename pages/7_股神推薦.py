@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta, datetime
 from typing import Any
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import copy
@@ -64,6 +65,11 @@ GODPICK_DEFAULT_SCORE_WEIGHTS = {
 GODPICK_ACTIVE_SCORE_WEIGHTS = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
 
 
+GODPICK_SETTINGS_FILE = "godpick_user_settings.json"
+GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
+GODPICK_LIST_FILE = "godpick_recommend_list.json"
+
+
 GODPICK_RECORD_COLUMNS = [
     "record_id",
     "股票代號",
@@ -84,7 +90,7 @@ GODPICK_RECORD_COLUMNS = [
     "同類股領先幅度",
     "是否領先同類股",
     "推薦標籤",
-    "股神推論邏輯", "風險說明", "推薦理由摘要",
+    "推薦理由摘要",
     "推薦價格",
     "停損價",
     "賣出目標1",
@@ -353,6 +359,236 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
 
 
 
+
+# =========================================================
+# 永久設定 / 本輪推薦結果保存
+# =========================================================
+def _safe_json_read_local(path: str, default):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return copy.deepcopy(default)
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if data is not None else copy.deepcopy(default)
+    except Exception:
+        return copy.deepcopy(default)
+
+
+def _safe_json_write_local(path: str, payload) -> tuple[bool, str]:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        return True, f"已寫入本機：{path}"
+    except Exception as e:
+        return False, f"本機寫入失敗：{path} / {e}"
+
+
+def _generic_github_file_config(path_name: str) -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": path_name,
+    }
+
+
+def _read_json_from_github_path(path_name: str, default):
+    cfg = _generic_github_file_config(path_name)
+    token = cfg["token"]
+    if not token:
+        return copy.deepcopy(default), "未設定 GITHUB_TOKEN"
+
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return copy.deepcopy(default), ""
+        if resp.status_code != 200:
+            return copy.deepcopy(default), f"讀取 GitHub {path_name} 失敗：{resp.status_code}"
+
+        content = resp.json().get("content", "")
+        if not content:
+            return copy.deepcopy(default), ""
+        payload = json.loads(base64.b64decode(content).decode("utf-8"))
+        return payload, ""
+    except Exception as e:
+        return copy.deepcopy(default), f"讀取 GitHub {path_name} 例外：{e}"
+
+
+def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
+    cfg = _generic_github_file_config(path_name)
+    token = cfg["token"]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN"
+
+    sha = ""
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            sha = _safe_str(resp.json().get("sha"))
+        elif resp.status_code != 404:
+            return False, f"讀取 GitHub SHA 失敗：{resp.status_code}"
+    except Exception as e:
+        return False, f"讀取 GitHub SHA 例外：{e}"
+
+    body = {
+        "message": f"update {path_name} at {_now_text()}",
+        "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")).decode("utf-8"),
+        "branch": cfg["branch"],
+    }
+    if sha:
+        body["sha"] = sha
+
+    try:
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已寫入 GitHub：{path_name}"
+        return False, f"GitHub 寫入 {path_name} 失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return False, f"GitHub 寫入 {path_name} 例外：{e}"
+
+
+def _load_persistent_settings() -> dict[str, Any]:
+    default_payload = {
+        "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
+        "applied_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
+        "updated_at": "",
+        "version": "godpick_v4_weight_persistent",
+    }
+
+    github_payload, _ = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
+    if isinstance(github_payload, dict) and github_payload:
+        payload = {**default_payload, **github_payload}
+        payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
+        return payload
+
+    local_payload = _safe_json_read_local(GODPICK_SETTINGS_FILE, {})
+    if isinstance(local_payload, dict) and local_payload:
+        payload = {**default_payload, **local_payload}
+        payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
+        return payload
+
+    return default_payload
+
+
+def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, list[str]]:
+    payload = {
+        "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
+        "applied_weights": _normalize_weight_map(applied_weights),
+        "updated_at": _now_text(),
+        "version": "godpick_v4_weight_persistent",
+    }
+    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
+    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
+    return (local_ok or github_ok), [local_msg, github_msg]
+
+
+def _df_to_records_for_json(df: pd.DataFrame) -> list[dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+    clean = df.copy()
+    for col in clean.columns:
+        if pd.api.types.is_datetime64_any_dtype(clean[col]):
+            clean[col] = clean[col].astype(str)
+    return json.loads(clean.to_json(orient="records", force_ascii=False, date_format="iso"))
+
+
+def _records_to_df_for_json(records: list[dict[str, Any]]) -> pd.DataFrame:
+    if not isinstance(records, list) or not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
+
+
+def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> tuple[bool, list[str]]:
+    payload = {
+        "saved_at": _now_text(),
+        "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
+        "recommendations": _df_to_records_for_json(rec_df),
+        "category_strength": _df_to_records_for_json(category_strength_df),
+        "hot_pick": _df_to_records_for_json(hot_pick_df),
+    }
+    local_ok, local_msg = _safe_json_write_local(GODPICK_LATEST_FILE, payload)
+    github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
+
+    # 給 10_推薦清單.py 讀取的清單檔：只保存本輪推薦明細，下一次推薦會覆蓋。
+    list_payload = payload.get("recommendations", [])
+    list_local_ok, list_local_msg = _safe_json_write_local(GODPICK_LIST_FILE, list_payload)
+    list_github_ok, list_github_msg = _write_json_to_github_path(GODPICK_LIST_FILE, list_payload)
+
+    msgs = [local_msg, github_msg, list_local_msg, list_github_msg]
+    st.session_state[_k("latest_recommendation_sync_msgs")] = msgs
+    return (local_ok or github_ok or list_local_ok or list_github_ok), msgs
+
+
+def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    payload, msg = _read_json_from_github_path(GODPICK_LATEST_FILE, {})
+    if not isinstance(payload, dict) or not payload:
+        payload = _safe_json_read_local(GODPICK_LATEST_FILE, {})
+    if not isinstance(payload, dict) or not payload:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), msg
+
+    rec_df = _records_to_df_for_json(payload.get("recommendations", []))
+    cat_df = _records_to_df_for_json(payload.get("category_strength", []))
+    hot_df = _records_to_df_for_json(payload.get("hot_pick", []))
+    return rec_df, cat_df, hot_df, _safe_str(payload.get("saved_at", ""))
+
+
+def _render_recommend_status_panel(rec_df: pd.DataFrame):
+    saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
+    total = 0 if rec_df is None or rec_df.empty else len(rec_df)
+    weights = _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS))
+
+    render_pro_info_card(
+        "推薦狀態說明",
+        [
+            ("目前狀態", "已有本輪推薦結果" if total > 0 else "尚未產生推薦結果", ""),
+            ("本輪筆數", total, ""),
+            ("保存時間", saved_at or "—", ""),
+            ("保存方式", "session_state + JSON 永久記錄", ""),
+            ("清除規則", "下一次按開始推薦/重新推薦時覆蓋舊本輪結果", ""),
+            ("目前權重", _weight_text(weights), ""),
+        ],
+        chips=["狀態", "永久記錄", "推薦清單可讀取"],
+    )
+
+
+def _render_weight_dynamic_guide(weights: dict[str, int]):
+    weights = _normalize_weight_map(weights)
+    top_factors = sorted(weights.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_text = "、".join([f"{k}{v}%" for k, v in top_factors])
+
+    render_pro_info_card(
+        "推薦條件說明 / 分數解讀",
+        [
+            ("核心權重", top_text, ""),
+            ("分數來源", "推薦總分會依目前已套用權重即時計算；權重改變後，說明與下次推薦分數同步改變。", ""),
+            ("85分以上", "高分候選，需同時檢查買點分級與風險說明，不代表無風險追價。", ""),
+            ("75~85分", "優先觀察區，適合等待突破確認或回測支撐。", ""),
+            ("65~75分", "候補追蹤區，需搭配類股熱度與成交量改善。", ""),
+            ("65分以下", "通常不列入主名單，除非起漲補抓名單有特殊結構。", ""),
+            ("買點分級", "A+ / A 代表交易條件較完整；B 需等確認；C/D 不建議急追。", ""),
+            ("風險解讀", "同時考慮追價風險、停損距離、目標價與交易可行分數。", ""),
+        ],
+        chips=["動態說明", "依權重更新"],
+    )
+
+
 def _normalize_weight_map(raw: dict[str, Any] | None) -> dict[str, int]:
     base = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
     if isinstance(raw, dict):
@@ -420,12 +656,20 @@ def _render_score_weight_panel():
         st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
         for name in weight_keys:
             st.session_state[_k(f"weight_edit_{name}")] = GODPICK_DEFAULT_SCORE_WEIGHTS[name]
-        st.success("已恢復原始權重。")
+        ok, msgs = _save_persistent_settings(GODPICK_DEFAULT_SCORE_WEIGHTS.copy())
+        st.success("已恢復原始權重，並永久記錄。" if ok else "已恢復原始權重，但永久記錄失敗。")
+        with st.expander("權重保存明細", expanded=False):
+            for msg in msgs:
+                st.write(f"- {msg}")
         st.rerun()
 
     if apply_weight:
         st.session_state[_k("score_weights")] = edit.copy()
-        st.success("權重已套用，本次開始推薦會使用新權重。")
+        ok, msgs = _save_persistent_settings(edit.copy())
+        st.success("權重已套用並永久記錄，本次開始推薦會使用新權重。" if ok else "權重已套用，但永久記錄失敗。")
+        with st.expander("權重保存明細", expanded=False):
+            for msg in msgs:
+                st.write(f"- {msg}")
 
     applied = _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS))
     st.caption("目前已套用權重：" + " / ".join([f"{k} {v}%" for k, v in applied.items()]))
@@ -1299,6 +1543,10 @@ def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
         "推薦模式": mode,
         "推薦等級": _safe_str(row.get("推薦等級")),
         "推薦總分": _safe_float(row.get("推薦總分")),
+        "買點分級": _safe_str(row.get("買點分級")),
+        "風險說明": _safe_str(row.get("風險說明")),
+        "股神推論邏輯": _safe_str(row.get("股神推論邏輯")),
+        "權重設定": _safe_str(row.get("權重設定")),
         "技術結構分數": _safe_float(row.get("技術結構分數")),
         "起漲前兆分數": _safe_float(row.get("起漲前兆分數")),
         "交易可行分數": _safe_float(row.get("交易可行分數")),
@@ -3577,6 +3825,7 @@ def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: 
     st.session_state[_k("category_strength_store")] = category_strength_df.copy()
     st.session_state[_k("hot_pick_store")] = hot_pick_df.copy()
     st.session_state[_k("result_saved_at")] = _now_text()
+    _save_latest_recommendation_pack(rec_df, category_strength_df, hot_pick_df)
 
 
 def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -3584,10 +3833,19 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
     cat_df = st.session_state.get(_k("category_strength_store"))
     hot_df = st.session_state.get(_k("hot_pick_store"))
 
-    if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame):
+    if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame) and not rec_df.empty:
         if not isinstance(hot_df, pd.DataFrame):
             hot_df = pd.DataFrame()
         return rec_df.copy(), cat_df.copy(), hot_df.copy()
+
+    rec_df, cat_df, hot_df, saved_at = _load_latest_recommendation_pack()
+    if isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
+        st.session_state[_k("rec_df_store")] = rec_df.copy()
+        st.session_state[_k("category_strength_store")] = cat_df.copy()
+        st.session_state[_k("hot_pick_store")] = hot_df.copy()
+        st.session_state[_k("result_saved_at")] = saved_at or _now_text()
+        return rec_df.copy(), cat_df.copy(), hot_df.copy()
+
     return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
@@ -4024,9 +4282,17 @@ def main():
         "top_table_columns": [],
         "full_table_columns": [],
     }
+    persistent_settings = _load_persistent_settings()
+    persisted_weights = _normalize_weight_map(persistent_settings.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
+
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
             st.session_state[_k(name)] = value
+
+    if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
+        st.session_state[_k("score_weights")] = persisted_weights.copy()
+    if _k("score_weights_edit") not in st.session_state or st.session_state.get(_k("score_weights_edit")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
+        st.session_state[_k("score_weights_edit")] = persisted_weights.copy()
 
     if _k("selected_rec_snapshot") not in st.session_state:
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
@@ -4099,6 +4365,9 @@ def main():
     applied_weights = _render_score_weight_panel()
     global GODPICK_ACTIVE_SCORE_WEIGHTS
     GODPICK_ACTIVE_SCORE_WEIGHTS = applied_weights.copy()
+
+    show_v2_logic = st.toggle("顯示 V2 選股邏輯 / 條件說明", value=False, key=_k("show_v2_logic"))
+    _render_weight_dynamic_guide(applied_weights)
 
     with st.form(key=_k("recommend_form"), clear_on_submit=False):
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -4304,23 +4573,26 @@ def main():
         st.session_state[_k("risk_strictness")] = form_risk_strictness
         st.session_state[_k("submitted_once")] = True
 
-    render_pro_info_card(
-        "V2 選股邏輯",
-        [
-            ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
-            ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
-            ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
-            ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
-            ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
-            ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
-            ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
-            ("推薦紀錄", "新增可勾選後直接寫入 8_股神推薦紀錄。", ""),
-            ("勾選快照", "本輪精華推薦表可直接勾選，並同步到自選股/推薦紀錄/勾選匯出。", ""),
-        ],
-        chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
-    )
+    if show_v2_logic:
+        render_pro_info_card(
+            "V2 選股邏輯",
+            [
+                ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
+                ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
+                ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
+                ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
+                ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
+                ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
+                ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
+                ("推薦紀錄", "新增可勾選後直接寫入 8_股神推薦紀錄。", ""),
+                ("勾選快照", "本輪精華推薦表可直接勾選，並同步到自選股/推薦紀錄/勾選匯出。", ""),
+            ],
+            chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
+        )
 
-    _render_recommendation_scoring_guide()
+
+    if show_v2_logic:
+        _render_recommendation_scoring_guide()
 
     if not st.session_state.get(_k("submitted_once"), False):
         st.info("請先設定條件，再按「開始推薦」。")
@@ -4375,6 +4647,12 @@ def main():
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
 
     _render_debug_scan_summary()
+    _render_recommend_status_panel(rec_df)
+
+    if st.session_state.get(_k("latest_recommendation_sync_msgs")):
+        with st.expander("本輪推薦永久保存明細", expanded=False):
+            for msg in st.session_state.get(_k("latest_recommendation_sync_msgs"), []):
+                st.write(f"- {msg}")
 
     if rec_df.empty:
         if submit_recommend or submit_refresh:
@@ -4407,6 +4685,7 @@ def main():
     )
 
     render_pro_section("推薦股票加入自選股中心")
+    st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")
     watchlist_map = _load_watchlist_map()
 
     g1, g2, g3 = st.columns([3, 2, 1])
@@ -4597,6 +4876,7 @@ def main():
             "推薦模式",
             "推薦等級",
             "推薦總分",
+            "買點分級",
             "市場環境分數",
             "型態名稱",
             "型態突破分數",
