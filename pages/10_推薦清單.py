@@ -392,8 +392,8 @@ def main():
 
     render_pro_hero(
         title="推薦清單",
-        subtitle="集中查看股神推薦紀錄，支援日期篩選、快速日期區間、批次刪除、匯出備份與 GitHub/Firestore 同步。",
-        chips=["日期篩選", "快速日期", "批次刪除", "推薦分數", "GitHub 同步"],
+        subtitle="集中查看股神推薦紀錄，支援日期篩選、批次刪除、匯出備份與 GitHub/Firestore 同步。",
+        chips=["日期篩選", "批次刪除", "推薦分數", "GitHub 同步"],
     )
 
     if _k("last_sync_msgs") not in st.session_state:
@@ -423,29 +423,11 @@ def main():
     min_d = rec_dates.min().date() if not rec_dates.empty else (date.today() - timedelta(days=30))
     max_d = rec_dates.max().date() if not rec_dates.empty else date.today()
 
-    q1, q2, q3, q4 = st.columns(4)
-    with q1:
-        if st.button("今天", use_container_width=True):
-            st.session_state[_k("start_date")] = date.today()
-            st.session_state[_k("end_date")] = date.today()
-    with q2:
-        if st.button("近7天", use_container_width=True):
-            st.session_state[_k("start_date")] = date.today() - timedelta(days=6)
-            st.session_state[_k("end_date")] = date.today()
-    with q3:
-        if st.button("近30天", use_container_width=True):
-            st.session_state[_k("start_date")] = date.today() - timedelta(days=29)
-            st.session_state[_k("end_date")] = date.today()
-    with q4:
-        if st.button("全部日期", use_container_width=True):
-            st.session_state[_k("start_date")] = min_d
-            st.session_state[_k("end_date")] = max_d
-
     c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.4])
     with c1:
-        start_date = st.date_input("開始日期", value=st.session_state.get(_k("start_date"), min_d), key=_k("start_date"))
+        start_date = st.date_input("開始日期", value=min_d, key=_k("start_date"))
     with c2:
-        end_date = st.date_input("結束日期", value=st.session_state.get(_k("end_date"), max_d), key=_k("end_date"))
+        end_date = st.date_input("結束日期", value=max_d, key=_k("end_date"))
     with c3:
         mode = st.selectbox("推薦模式", mode_options, key=_k("mode_filter"))
     with c4:
