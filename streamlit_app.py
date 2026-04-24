@@ -459,9 +459,23 @@ def _init_state():
 
 
 def _clear_home_search_input():
-    """使用 callback 清除首頁搜尋欄，避免 widget 建立後改 session_state 造成 StreamlitAPIException。"""
+    """用 callback 清空首頁搜尋欄，避免 widget key 於建立後被直接改值。"""
     st.session_state[_k("search_input")] = ""
-    st.session_state[_k("search_cleared_notice")] = True
+
+
+def _carry_home_search_to_pages(search_rows: list[dict[str, str]]):
+    """把首頁目前搜尋結果寫入共用查詢狀態，供 2/3/6/7 頁承接，不直接改其他頁 widget key。"""
+    target = _find_search_target(st.session_state.get(_k("search_input"), ""), search_rows)
+    if not target:
+        return None
+
+    save_last_query_state(
+        quick_group=target["group"],
+        quick_stock_code=target["code"],
+        home_start=st.session_state.get(_k("start_date")),
+        home_end=st.session_state.get(_k("end_date")),
+    )
+    return target
 
 
 def _render_home_page():
@@ -627,24 +641,21 @@ def _render_home_page():
             )
             st.success("已記錄首頁日期區間。")
     with h2:
-        if st.button("帶目前搜尋到 2頁 / 3頁", use_container_width=True):
-            target = _find_search_target(st.session_state.get(_k("search_input"), ""), search_rows)
+        carry_clicked = st.button("帶目前搜尋到 2頁 / 3頁", use_container_width=True)
+        if carry_clicked:
+            target = _carry_home_search_to_pages(search_rows)
             if target:
-                st.session_state["kline_focus_stock_code"] = target["code"]
-                st.session_state["kline_focus_stock_name"] = target["name"]
-                st.success(f"已設定焦點股票：{target['label']}")
+                st.success(f"已設定焦點股票：{target['label']}，2頁 / 3頁會自動承接。")
             else:
                 st.warning("請先輸入可辨識的股票代號或名稱。")
     with h3:
-        st.button(
+        cleared = st.button(
             "清除首頁搜尋紀錄",
             use_container_width=True,
             on_click=_clear_home_search_input,
         )
-
-    if st.session_state.get(_k("search_cleared_notice"), False):
-        st.success("已清除首頁搜尋欄位。")
-        st.session_state[_k("search_cleared_notice")] = False
+        if cleared:
+            st.success("已清除首頁搜尋欄位。")
 
 
 def main():
