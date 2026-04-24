@@ -83,6 +83,16 @@ GODPICK_RECORD_COLUMNS = [
     "風險說明",
     "股神推論邏輯",
     "權重設定",
+    "推薦分桶",
+    "信心等級",
+    "買點劇本",
+    "失效條件",
+    "假突破風險",
+    "過熱風險",
+    "3日追蹤預留",
+    "5日追蹤預留",
+    "10日追蹤預留",
+    "20日追蹤預留",
     "技術結構分數",
     "起漲前兆分數",
     "交易可行分數",
@@ -757,15 +767,180 @@ def _derive_god_reasoning(row: pd.Series) -> str:
     return "、".join(parts[:7])
 
 
+
+def _derive_confidence_level(row: pd.Series) -> str:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+    hot_risk = _safe_str(row.get("過熱風險"))
+    fake_risk = _safe_str(row.get("假突破風險"))
+
+    if score >= 88 and pre >= 75 and trade >= 70 and heat >= 70 and pattern >= 70 and "高" not in hot_risk and "高" not in fake_risk:
+        return "S級｜高信心"
+    if score >= 80 and pre >= 68 and trade >= 62:
+        return "A級｜優先觀察"
+    if score >= 72:
+        return "B級｜等待確認"
+    if score >= 65:
+        return "C級｜候補追蹤"
+    return "D級｜暫不追價"
+
+
+def _derive_overheat_risk(row: pd.Series) -> str:
+    latest = _safe_float(row.get("最新價"), 0) or 0
+    ma20 = _safe_float(row.get("MA20"))
+    chase = _safe_float(row.get("追價風險分數"), 0) or 0
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+
+    dist_ma20 = None
+    if latest and ma20 not in [None, 0]:
+        dist_ma20 = (latest - ma20) / ma20 * 100
+
+    flags = []
+    if dist_ma20 is not None and dist_ma20 >= 18:
+        flags.append("離MA20過遠")
+    if chase >= 78:
+        flags.append("追價風險高")
+    if burst >= 88 and chase >= 70:
+        flags.append("短線爆發後易震盪")
+
+    if len(flags) >= 2:
+        return "高｜" + "、".join(flags)
+    if len(flags) == 1:
+        return "中｜" + flags[0]
+    return "低｜未見明顯過熱"
+
+
+def _derive_fake_breakout_risk(row: pd.Series) -> str:
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    volume = _safe_float(row.get("量能啟動分"), 0) or 0
+    support = _safe_float(row.get("支撐防守分"), 0) or 0
+    breakout = _safe_float(row.get("突破買點分數"), 0) or 0
+
+    flags = []
+    if pattern >= 70 and volume < 55:
+        flags.append("突破但量能不足")
+    if breakout >= 70 and support < 55:
+        flags.append("突破後支撐未確認")
+    if trade < 55:
+        flags.append("交易可行分數偏低")
+
+    if len(flags) >= 2:
+        return "高｜" + "、".join(flags)
+    if len(flags) == 1:
+        return "中｜" + flags[0]
+    return "低｜突破結構尚可"
+
+
+def _derive_recommend_bucket(row: pd.Series) -> str:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
+    pullback = _safe_float(row.get("拉回買點分數"), 0) or 0
+    breakout = _safe_float(row.get("突破買點分數"), 0) or 0
+    overheat = _safe_str(row.get("過熱風險"))
+    fake = _safe_str(row.get("假突破風險"))
+
+    if "高" in overheat:
+        return "高分但過熱｜不急追"
+    if "高" in fake:
+        return "假突破風險｜等確認"
+    if score >= 85 and trade >= 70:
+        return "立即觀察｜條件完整"
+    if pre >= 78 and score >= 75:
+        return "剛起漲候選｜優先追蹤"
+    if heat >= 75 and score >= 72:
+        return "族群領先｜看類股延續"
+    if pullback >= breakout and pullback >= 62:
+        return "等拉回｜低接觀察"
+    if breakout > pullback and breakout >= 62:
+        return "等突破｜確認再動"
+    return "候補觀察｜等待訊號"
+
+
+def _derive_trade_script(row: pd.Series) -> str:
+    latest = _safe_float(row.get("最新價"))
+    pullback = _safe_float(row.get("推薦買點_拉回"))
+    breakout = _safe_float(row.get("推薦買點_突破"))
+    stop = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+    target2 = _safe_float(row.get("賣出目標2"))
+    bucket = _safe_str(row.get("推薦分桶"))
+    grade = _safe_str(row.get("買點分級"))
+
+    parts = []
+    if latest is not None:
+        parts.append(f"現價 {format_number(latest, 2)}")
+    if pullback is not None:
+        parts.append(f"拉回觀察 {format_number(pullback, 2)}")
+    if breakout is not None:
+        parts.append(f"突破確認 {format_number(breakout, 2)}")
+    if stop is not None:
+        parts.append(f"失守 {format_number(stop, 2)} 轉弱")
+    if target1 is not None:
+        parts.append(f"目標1 {format_number(target1, 2)}")
+    if target2 is not None:
+        parts.append(f"目標2 {format_number(target2, 2)}")
+
+    prefix = bucket or grade or "交易劇本"
+    return prefix + "｜" + "｜".join(parts[:7])
+
+
+def _derive_invalid_condition(row: pd.Series) -> str:
+    stop = _safe_float(row.get("停損價"))
+    support = _safe_float(row.get("推薦買點_拉回"))
+    latest = _safe_float(row.get("最新價"))
+    fake = _safe_str(row.get("假突破風險"))
+
+    parts = []
+    if stop is not None:
+        parts.append(f"跌破停損 {format_number(stop, 2)}")
+    if support is not None:
+        parts.append(f"回測 {format_number(support, 2)} 無法守住")
+    if "高" in fake:
+        parts.append("突破後量價無法延續")
+    if latest is not None:
+        parts.append("連續轉弱需降級觀察")
+    return "｜".join(parts) if parts else "跌破關鍵支撐或量價轉弱即失效"
+
+
+def _build_tracking_placeholders(row: pd.Series) -> dict[str, str]:
+    code = _normalize_code(row.get("股票代號"))
+    rec_date = _safe_str(row.get("推薦日期")) or _now_date_text()
+    return {
+        "3日追蹤預留": f"{code}｜{rec_date}｜待回填3日最高漲幅/最大回撤/是否觸價",
+        "5日追蹤預留": f"{code}｜{rec_date}｜待回填5日最高漲幅/最大回撤/是否觸價",
+        "10日追蹤預留": f"{code}｜{rec_date}｜待回填10日最高漲幅/最大回撤/是否觸價",
+        "20日追蹤預留": f"{code}｜{rec_date}｜待回填20日最高漲幅/最大回撤/是否觸價",
+    }
+
+
+
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     """補齊進階欄位，不破壞舊欄位與既有紀錄格式。"""
     if df is None or df.empty:
         return df
     out = df.copy()
     out["買點分級"] = out.apply(_derive_buy_point_grade, axis=1)
+    out["過熱風險"] = out.apply(_derive_overheat_risk, axis=1)
+    out["假突破風險"] = out.apply(_derive_fake_breakout_risk, axis=1)
+    out["推薦分桶"] = out.apply(_derive_recommend_bucket, axis=1)
+    out["信心等級"] = out.apply(_derive_confidence_level, axis=1)
+    out["買點劇本"] = out.apply(_derive_trade_script, axis=1)
+    out["失效條件"] = out.apply(_derive_invalid_condition, axis=1)
     out["風險說明"] = out.apply(_derive_risk_text, axis=1)
     out["股神推論邏輯"] = out.apply(_derive_god_reasoning, axis=1)
     out["權重設定"] = _weight_text()
+
+    tracking_df = out.apply(_build_tracking_placeholders, axis=1, result_type="expand")
+    for c in ["3日追蹤預留", "5日追蹤預留", "10日追蹤預留", "20日追蹤預留"]:
+        out[c] = tracking_df[c] if c in tracking_df.columns else ""
+
     return out
 
 
@@ -1629,6 +1804,16 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "風險說明": _safe_str(r.get("風險說明")),
                 "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
                 "權重設定": _safe_str(r.get("權重設定")),
+                "推薦分桶": _safe_str(r.get("推薦分桶")),
+                "信心等級": _safe_str(r.get("信心等級")),
+                "買點劇本": _safe_str(r.get("買點劇本")),
+                "失效條件": _safe_str(r.get("失效條件")),
+                "假突破風險": _safe_str(r.get("假突破風險")),
+                "過熱風險": _safe_str(r.get("過熱風險")),
+                "3日追蹤預留": _safe_str(r.get("3日追蹤預留")),
+                "5日追蹤預留": _safe_str(r.get("5日追蹤預留")),
+                "10日追蹤預留": _safe_str(r.get("10日追蹤預留")),
+                "20日追蹤預留": _safe_str(r.get("20日追蹤預留")),
                 "技術結構分數": _safe_float(r.get("技術結構分數")),
                 "起漲前兆分數": _safe_float(r.get("起漲前兆分數")),
                 "交易可行分數": _safe_float(r.get("交易可行分數")),
@@ -4668,6 +4853,18 @@ def main():
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
 
+    render_pro_info_card(
+        "股神交易決策升級",
+        [
+            ("推薦分桶", "把結果分為立即觀察、等拉回、等突破、高分但過熱、假突破風險等交易情境。", ""),
+            ("信心等級", "依總分、起漲、交易可行、類股熱度、過熱與假突破風險綜合分級。", ""),
+            ("買點劇本", "自動整理現價、拉回買點、突破買點、停損、目標價。", ""),
+            ("失效條件", "明確標示跌破何處或量價不延續時應降級。", ""),
+            ("追蹤預留", "保留 3/5/10/20 日追蹤欄位，後續可做推薦勝率回測。", ""),
+        ],
+        chips=["交易決策", "風控", "回測預留"],
+    )
+
     if st.session_state.get(_k("latest_recommendation_sync_msgs")):
         with st.expander("本輪推薦永久保存明細", expanded=False):
             for msg in st.session_state.get(_k("latest_recommendation_sync_msgs"), []):
@@ -4900,6 +5097,8 @@ def main():
             "推薦等級",
             "推薦總分",
             "買點分級",
+            "信心等級",
+            "推薦分桶",
             "市場環境分數",
             "型態名稱",
             "型態突破分數",
@@ -4915,7 +5114,7 @@ def main():
             "停損價",
             "賣出目標1",
             "賣出目標2",
-            "股神推論邏輯", "風險說明", "推薦理由摘要",
+            "股神推論邏輯", "風險說明", "買點劇本", "失效條件", "假突破風險", "過熱風險", "推薦理由摘要",
         ]
     ].copy()
 
