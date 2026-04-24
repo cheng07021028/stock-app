@@ -182,7 +182,7 @@ def _godpick_records_github_config() -> dict[str, str]:
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def _load_godpick_records_df() -> pd.DataFrame:
     cfg = _godpick_records_github_config()
     token = cfg["token"]
@@ -387,6 +387,67 @@ def _load_stock_master() -> pd.DataFrame:
         return load_stock_master()
     except Exception:
         return pd.DataFrame(columns=["code", "name", "market", "category", "official_industry", "theme_category"])
+
+
+
+# =========================================================
+# 重新帶入 / 加速
+# =========================================================
+def _clear_data_caches():
+    """清除本頁與共用資料快取；不改變功能，只讓使用者需要時手動重新抓資料。"""
+    for func in [_load_godpick_records_df, _load_stock_master]:
+        try:
+            func.clear()
+        except Exception:
+            pass
+
+    try:
+        if hasattr(get_normalized_watchlist, "clear"):
+            get_normalized_watchlist.clear()
+    except Exception:
+        pass
+
+
+def _reload_watchlist_master_records():
+    """
+    重新帶入最新 watchlist / 股票主檔 / 股神推薦紀錄。
+    用按鈕觸發，避免每次頁面 rerun 都重抓造成卡頓。
+    """
+    _clear_data_caches()
+
+    fresh_watchlist = _load_watchlist_data()
+    fresh_master = _load_stock_master()
+    fresh_rec_df = _load_godpick_records_df()
+
+    st.session_state[_k("watchlist")] = copy.deepcopy(fresh_watchlist)
+    st.session_state[_k("master_df")] = fresh_master.copy() if isinstance(fresh_master, pd.DataFrame) else pd.DataFrame()
+
+    groups = list(fresh_watchlist.keys())
+    current = _safe_str(st.session_state.get(_k("selected_group"), ""))
+    if current not in groups:
+        st.session_state[_k("selected_group")] = groups[0] if groups else ""
+        st.session_state[_k("rename_group_name")] = groups[0] if groups else ""
+
+    version = int(st.session_state.get(_k("version"), 0) or 0) + 1
+    payload_hash = _payload_hash(_normalize_watchlist_payload(fresh_watchlist))
+
+    st.session_state[_k("version")] = version
+    st.session_state[_k("last_saved_at")] = _now_text()
+    st.session_state[_k("payload_hash")] = payload_hash
+
+    st.session_state["watchlist_data"] = copy.deepcopy(fresh_watchlist)
+    st.session_state["watchlist_version"] = version
+    st.session_state["watchlist_last_saved_at"] = st.session_state[_k("last_saved_at")]
+    st.session_state["watchlist_last_saved_hash"] = payload_hash
+
+    rec_count = len(fresh_rec_df) if isinstance(fresh_rec_df, pd.DataFrame) else 0
+    stock_count = sum(len(v) for v in fresh_watchlist.values()) if isinstance(fresh_watchlist, dict) else 0
+    master_count = len(fresh_master) if isinstance(fresh_master, pd.DataFrame) else 0
+
+    _set_status(
+        f"已重新帶入資料｜自選股 {stock_count} 檔｜股票主檔 {master_count} 筆｜股神推薦紀錄 {rec_count} 筆｜版本 v{version}",
+        "success",
+    )
 
 
 # =========================================================
@@ -875,6 +936,20 @@ def main():
         else:
             st.info(status_msg)
 
+    render_pro_section("資料重新帶入 / 加速")
+    reload_cols = st.columns([1.2, 1.2, 2.6])
+    with reload_cols[0]:
+        if st.button("🔄 重新帶入資料", use_container_width=True, type="primary"):
+            _reload_watchlist_master_records()
+            st.rerun()
+    with reload_cols[1]:
+        if st.button("🧹 清除快取", use_container_width=True):
+            _clear_data_caches()
+            _set_status("快取已清除；可按『重新帶入資料』抓最新資料。", "success")
+            st.rerun()
+    with reload_cols[2]:
+        st.caption("重新帶入會刷新 watchlist、股票主檔、股神推薦紀錄；一般切換頁面不重抓資料，加快顯示速度。")
+
     render_pro_section("GitHub 回寫設定")
     render_pro_info_card(
         "目前目標",
@@ -1070,7 +1145,8 @@ def main():
                 "股票": f"{_normalize_code(x.get('code'))} {_safe_str(x.get('name'))}",
             }
             for x in current_items
-        ]
+        ],
+        columns=["群組", "股票代號", "股票名稱", "市場別", "股票"],
     )
     current_df = _enrich_watchlist_rows(current_df, rec_map)
 
