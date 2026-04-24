@@ -402,31 +402,61 @@ def render_pro_kpi_row(items):
 
 
 def render_pro_info_card(title, info_pairs, chips=None):
-    """
-    專業資訊卡片最終防呆版：
-    - 不再把呼叫端傳入的 HTML 片段原樣塞回頁面，避免 <div class=...> 被顯示成文字。
-    - 支援 tuple/list/dict/純文字/舊版 HTML 片段。
-    - 若舊頁面傳入 HTML 片段，會自動萃取 pro-info-label / pro-info-value 文字後重新渲染。
-    """
+    """最終強制清理版：保留函式名稱，過濾殘留 HTML。"""
     import html
     import re
 
-    def _clean_display_text(x):
+    HTML_NOISE_PATTERNS = [
+        r"</?div\b", r"</?span\b", r"</?p\b", r"class\s*=",
+        r"pro-info", r"pro-card", r"pro-chip", r"unsafe_allow_html",
+    ]
+
+    def _unescape_all(x):
+        s = "" if x is None else str(x).strip()
+        for _ in range(3):
+            ns = html.unescape(s)
+            if ns == s:
+                break
+            s = ns
+        return s.strip()
+
+    def _is_html_noise(x):
+        s = _unescape_all(x)
+        if not s:
+            return False
+        low = s.lower().strip()
+        if low in {"<div>", "</div>", "<span>", "</span>", "<p>", "</p>", "/div", "div"}:
+            return True
+        return any(re.search(pat, low, flags=re.I) for pat in HTML_NOISE_PATTERNS)
+
+    def _strip_tags(x):
+        s = _unescape_all(x)
+        s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
+        s = re.sub(r"<[^>]*>", " ", s)
+        s = html.unescape(s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _clean_text(x, default="—"):
         if x is None:
-            return "—"
-        s = str(x).strip()
-        if s in ["", "None", "nan", "NaN", "null"]:
-            return "—"
-        bad_tokens = {
-            "</div>", "</span>", "</p>", "</section>", "</article>",
-            "<div>", "<span>", "<p>", "<section>", "<article>",
-        }
-        if s.lower() in bad_tokens:
-            return "—"
+            return default
+        s = _unescape_all(x)
+        if not s or s in ["None", "nan", "NaN", "null", "NULL"]:
+            return default
+        if _is_html_noise(s):
+            stripped = _strip_tags(s)
+            if not stripped or _is_html_noise(stripped):
+                return default
+            s = stripped
+        s = _strip_tags(s)
+        if not s or _is_html_noise(s):
+            return default
         return html.escape(s)
 
     def _clean_css_class(x):
-        s = "" if x is None else str(x).strip()
+        s = _unescape_all(x)
+        if _is_html_noise(s):
+            return ""
         parts = []
         for part in s.split():
             part = "".join(ch for ch in part if ch.isalnum() or ch in ["-", "_"])
@@ -434,141 +464,75 @@ def render_pro_info_card(title, info_pairs, chips=None):
                 parts.append(part)
         return " ".join(parts)
 
-    def _strip_tags(x):
-        s = "" if x is None else str(x)
-        s = re.sub(r"<br\s*/?>", " ", s, flags=re.I)
-        s = re.sub(r"<[^>]+>", " ", s)
-        s = html.unescape(s)
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
-
-    def _looks_like_html(x):
-        s = "" if x is None else str(x)
-        return bool(re.search(r"</?\w+[^>]*>", s))
-
-    def _extract_pairs_from_html(x):
-        s = "" if x is None else str(x)
-        if not _looks_like_html(s):
-            return []
-
-        labels = re.findall(
-            r'<div[^>]*class=["\'][^"\']*pro-info-label[^"\']*["\'][^>]*>(.*?)</div>',
-            s,
-            flags=re.I | re.S,
-        )
-        values = re.findall(
-            r'<div[^>]*class=["\'][^"\']*pro-info-value[^"\']*["\'][^>]*>(.*?)</div>',
-            s,
-            flags=re.I | re.S,
-        )
-
-        pairs = []
-        max_len = max(len(labels), len(values))
-        for i in range(max_len):
-            label = _strip_tags(labels[i]) if i < len(labels) else "資訊"
-            value = _strip_tags(values[i]) if i < len(values) else "—"
-            if label or value:
-                pairs.append((label or "資訊", value or "—", ""))
-
-        if pairs:
-            return pairs
-
-        plain = _strip_tags(s)
-        if not plain or plain.lower() in ["div", "span"]:
-            return []
-        return [("資訊", plain, "")]
-
     def _normalize_items(source):
         out = []
-
         if source is None:
             return out
-
         if isinstance(source, dict):
             source = [source]
         elif isinstance(source, str):
-            if _looks_like_html(source):
-                return _extract_pairs_from_html(source)
-            return [("資訊", source, "")]
-
+            source = [("資訊", source, "")]
         try:
             iterator = list(source)
         except Exception:
-            return [("資訊", str(source), "")]
-
+            iterator = [("資訊", str(source), "")]
         for item in iterator:
             try:
+                label, value, css_class = "資訊", "—", ""
                 if isinstance(item, dict):
-                    label = item.get("label", "")
+                    label = item.get("label", "資訊")
                     value = item.get("value", "—")
                     css_class = item.get("css_class", "") or item.get("class", "")
-                    if _looks_like_html(label) or _looks_like_html(value):
-                        html_pairs = _extract_pairs_from_html(label) + _extract_pairs_from_html(value)
-                        if html_pairs:
-                            out.extend(html_pairs)
-                            continue
-                    out.append((label, value, css_class))
-                    continue
-
-                if isinstance(item, str):
-                    if _looks_like_html(item):
-                        out.extend(_extract_pairs_from_html(item))
-                    elif item.strip():
-                        out.append(("資訊", item, ""))
-                    continue
-
-                if isinstance(item, (list, tuple)):
+                elif isinstance(item, (list, tuple)):
                     if len(item) >= 3:
                         label, value, css_class = item[0], item[1], item[2]
                     elif len(item) == 2:
-                        label, value, css_class = item[0], item[1], ""
+                        label, value = item[0], item[1]
                     elif len(item) == 1:
-                        label, value, css_class = "資訊", item[0], ""
+                        label, value = "資訊", item[0]
                     else:
                         continue
-
-                    if _looks_like_html(label) or _looks_like_html(value):
-                        html_pairs = _extract_pairs_from_html(label) + _extract_pairs_from_html(value)
-                        if html_pairs:
-                            out.extend(html_pairs)
-                            continue
-
-                    out.append((label, value, css_class))
+                else:
+                    label, value = "資訊", item
+                if _is_html_noise(value):
+                    cleaned_value = _clean_text(value, default="")
+                    if not cleaned_value:
+                        continue
+                    value = cleaned_value
+                if _is_html_noise(label):
+                    label = "資訊"
+                safe_label = _clean_text(label, default="資訊")
+                safe_value = _clean_text(value, default="—")
+                safe_css = _clean_css_class(css_class)
+                if safe_value in ["", "—"] and safe_label in ["", "資訊"]:
                     continue
-
+                out.append((safe_label, safe_value, safe_css))
             except Exception:
                 continue
-
         return out
 
-    safe_title = _clean_display_text(title)
-
+    safe_title = _clean_text(title, default="資訊卡")
     chips_html = ""
     if chips:
         if isinstance(chips, str):
             chips = [chips]
-        chips_html = "".join(
-            f'<span class="pro-chip">{_clean_display_text(x)}</span>'
-            for x in chips
-            if x is not None and str(x).strip() != ""
-        )
-
+        clean_chips = []
+        for x in chips:
+            if x is None or _is_html_noise(x):
+                continue
+            tx = _clean_text(x, default="")
+            if tx:
+                clean_chips.append(f'<span class="pro-chip">{tx}</span>')
+        chips_html = "".join(clean_chips)
     normalized = _normalize_items(info_pairs)
-
     items_html = ""
-    for label, value, css_class in normalized:
-        safe_label = _clean_display_text(_strip_tags(label) if _looks_like_html(label) else label)
-        safe_value = _clean_display_text(_strip_tags(value) if _looks_like_html(value) else value)
-        css = _clean_css_class(css_class)
-        if safe_label == "—" and safe_value == "—":
-            continue
+    for safe_label, safe_value, safe_css in normalized:
         items_html += f"""
         <div class="pro-info-item">
             <div class="pro-info-label">{safe_label}</div>
-            <div class="pro-info-value {css}">{safe_value}</div>
+            <div class="pro-info-value {safe_css}">{safe_value}</div>
         </div>
         """
-
     if not items_html.strip():
         items_html = """
         <div class="pro-info-item">
@@ -576,7 +540,6 @@ def render_pro_info_card(title, info_pairs, chips=None):
             <div class="pro-info-value pro-flat">—</div>
         </div>
         """
-
     st.markdown(
         f"""
         <div class="pro-card">
