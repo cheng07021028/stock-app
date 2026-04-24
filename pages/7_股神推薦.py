@@ -49,6 +49,21 @@ PFX = "godpick_"
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 10   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
 
+GODPICK_DEFAULT_SCORE_WEIGHTS = {
+    "市場環境": 10,
+    "技術結構": 15,
+    "起漲前兆": 20,
+    "類股熱度": 15,
+    "自動因子": 10,
+    "交易可行": 10,
+    "型態突破": 12,
+    "爆發力": 8,
+}
+
+# 執行推薦時會把已套用權重複製到這裡，避免 ThreadPool 內直接讀 widget 狀態造成不穩。
+GODPICK_ACTIVE_SCORE_WEIGHTS = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+
+
 GODPICK_RECORD_COLUMNS = [
     "record_id",
     "股票代號",
@@ -58,6 +73,10 @@ GODPICK_RECORD_COLUMNS = [
     "推薦模式",
     "推薦等級",
     "推薦總分",
+    "買點分級",
+    "風險說明",
+    "股神推論邏輯",
+    "權重設定",
     "技術結構分數",
     "起漲前兆分數",
     "交易可行分數",
@@ -65,7 +84,7 @@ GODPICK_RECORD_COLUMNS = [
     "同類股領先幅度",
     "是否領先同類股",
     "推薦標籤",
-    "推薦理由摘要",
+    "股神推論邏輯", "風險說明", "推薦理由摘要",
     "推薦價格",
     "停損價",
     "賣出目標1",
@@ -333,6 +352,180 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
     return {"score": score, "label": label, "summary": summary}
 
 
+
+def _normalize_weight_map(raw: dict[str, Any] | None) -> dict[str, int]:
+    base = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+    if isinstance(raw, dict):
+        for k in base.keys():
+            try:
+                base[k] = int(raw.get(k, base[k]))
+            except Exception:
+                pass
+    # 保護範圍，避免異常值造成分數扭曲
+    for k in list(base.keys()):
+        base[k] = max(0, min(100, int(base[k])))
+    return base
+
+
+def _weight_total(weights: dict[str, int]) -> int:
+    return int(sum(int(v) for v in weights.values()))
+
+
+def _render_score_weight_panel():
+    """股神評分權重控制台：必須總和 100 才能套用，避免誤調造成推薦結果失真。"""
+    render_pro_section("股神權重設定", "可調整推薦評分邏輯；只有總和等於 100% 時才能套用。")
+
+    if _k("score_weights") not in st.session_state:
+        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+    if _k("score_weights_edit") not in st.session_state:
+        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+
+    edit = _normalize_weight_map(st.session_state.get(_k("score_weights_edit"), GODPICK_DEFAULT_SCORE_WEIGHTS))
+
+    c1, c2, c3, c4 = st.columns(4)
+    weight_keys = list(GODPICK_DEFAULT_SCORE_WEIGHTS.keys())
+    containers = [c1, c2, c3, c4]
+    for idx, name in enumerate(weight_keys):
+        with containers[idx % 4]:
+            edit[name] = int(
+                st.number_input(
+                    f"{name}%",
+                    min_value=0,
+                    max_value=100,
+                    value=int(edit.get(name, GODPICK_DEFAULT_SCORE_WEIGHTS[name])),
+                    step=1,
+                    key=_k(f"weight_edit_{name}"),
+                )
+            )
+
+    total = _weight_total(edit)
+    remain = 100 - total
+    st.session_state[_k("score_weights_edit")] = edit
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("目前權重總和", f"{total}%")
+    with k2:
+        st.metric("剩餘權重", f"{remain:+d}%")
+    with k3:
+        apply_weight = st.button("套用權重", use_container_width=True, type="primary", disabled=(total != 100))
+    with k4:
+        reset_weight = st.button("恢復原始設定", use_container_width=True)
+
+    if total != 100:
+        st.warning("權重總和必須等於 100% 才能套用；目前不能影響推薦結果。")
+
+    if reset_weight:
+        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+        for name in weight_keys:
+            st.session_state[_k(f"weight_edit_{name}")] = GODPICK_DEFAULT_SCORE_WEIGHTS[name]
+        st.success("已恢復原始權重。")
+        st.rerun()
+
+    if apply_weight:
+        st.session_state[_k("score_weights")] = edit.copy()
+        st.success("權重已套用，本次開始推薦會使用新權重。")
+
+    applied = _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS))
+    st.caption("目前已套用權重：" + " / ".join([f"{k} {v}%" for k, v in applied.items()]))
+    return applied
+
+
+def _get_active_weight_map() -> dict[str, int]:
+    global GODPICK_ACTIVE_SCORE_WEIGHTS
+    return _normalize_weight_map(GODPICK_ACTIVE_SCORE_WEIGHTS)
+
+
+def _weight_text(weights: dict[str, int] | None = None) -> str:
+    weights = _normalize_weight_map(weights or _get_active_weight_map())
+    return " / ".join([f"{k}{v}%" for k, v in weights.items()])
+
+
+def _derive_buy_point_grade(row: pd.Series) -> str:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    pullback = _safe_float(row.get("拉回買點分數"), 0) or 0
+    breakout = _safe_float(row.get("突破買點分數"), 0) or 0
+    chase = _safe_float(row.get("追價風險分數"), 50) or 50
+    rr = _safe_str(row.get("風險報酬評級"))
+
+    if score >= 88 and pre >= 75 and trade >= 70 and chase <= 65:
+        return "A+｜可積極觀察"
+    if score >= 80 and trade >= 65 and (pullback >= 65 or breakout >= 65):
+        return "A｜優先觀察"
+    if score >= 72 and trade >= 55:
+        return "B｜等拉回或突破確認"
+    if score >= 60:
+        return "C｜僅列觀察"
+    return "D｜暫不追價"
+
+
+def _derive_risk_text(row: pd.Series) -> str:
+    risk = _safe_float(row.get("風險分數"), 0) or 0
+    chase = _safe_float(row.get("追價風險分數"), 0) or 0
+    stop_loss = row.get("停損價")
+    target1 = row.get("賣出目標1")
+
+    notes = []
+    if chase >= 75:
+        notes.append("追價風險偏高")
+    elif chase >= 60:
+        notes.append("追價需控管")
+    else:
+        notes.append("追價風險可控")
+
+    if risk < 55:
+        notes.append("整體風險偏高")
+    elif risk < 70:
+        notes.append("風險中性")
+    else:
+        notes.append("風險相對可控")
+
+    if pd.notna(stop_loss):
+        notes.append(f"停損 {format_number(stop_loss, 2)}")
+    if pd.notna(target1):
+        notes.append(f"目標1 {format_number(target1, 2)}")
+    return "｜".join(notes)
+
+
+def _derive_god_reasoning(row: pd.Series) -> str:
+    parts = []
+    category = _safe_str(row.get("類別"))
+    mode = _safe_str(row.get("推薦模式"))
+    if category:
+        parts.append(f"{category}族群")
+    if mode:
+        parts.append(mode)
+    if _safe_float(row.get("起漲前兆分數"), 0) >= 75:
+        parts.append("起漲前兆強")
+    if _safe_float(row.get("型態突破分數"), 0) >= 75:
+        parts.append(_safe_str(row.get("型態名稱")) or "型態突破")
+    if _safe_float(row.get("類股熱度分數"), 0) >= 75:
+        parts.append("類股熱度高")
+    if _safe_str(row.get("是否領先同類股")) == "是" or row.get("是否領先同類股") is True:
+        parts.append("領先同類股")
+    if _safe_float(row.get("交易可行分數"), 0) >= 70:
+        parts.append("進出場區間清楚")
+    if not parts:
+        parts.append("條件接近門檻，建議續觀察")
+    return "、".join(parts[:7])
+
+
+def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """補齊進階欄位，不破壞舊欄位與既有紀錄格式。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["買點分級"] = out.apply(_derive_buy_point_grade, axis=1)
+    out["風險說明"] = out.apply(_derive_risk_text, axis=1)
+    out["股神推論邏輯"] = out.apply(_derive_god_reasoning, axis=1)
+    out["權重設定"] = _weight_text()
+    return out
+
+
+
 def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> tuple[float, str]:
     technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
     prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -344,17 +537,30 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     burst_score = _safe_float(row.get("爆發力分數"), 0) or 0
     risk_score = _safe_float(row.get("風險分數"), 0) or 0
 
+    weights = _get_active_weight_map()
+    total = (
+        market_score * weights["市場環境"] / 100
+        + technical_score * weights["技術結構"] / 100
+        + prelaunch_score * weights["起漲前兆"] / 100
+        + category_heat_score * weights["類股熱度"] / 100
+        + factor_score * weights["自動因子"] / 100
+        + trade_score * weights["交易可行"] / 100
+        + pattern_score * weights["型態突破"] / 100
+        + burst_score * weights["爆發力"] / 100
+    )
+
+    # 模式只做專業微調，不再硬編死權重，避免使用者調整失效。
     if mode == "飆股模式":
-        total = market_score * 0.12 + category_heat_score * 0.16 + pattern_score * 0.20 + burst_score * 0.18 + prelaunch_score * 0.16 + technical_score * 0.10 + trade_score * 0.08
+        total += prelaunch_score * 0.04 + burst_score * 0.04 + pattern_score * 0.03
         tag = "爆發優先 / 起漲優先"
     elif mode == "波段模式":
-        total = market_score * 0.14 + technical_score * 0.24 + category_heat_score * 0.18 + trade_score * 0.14 + pattern_score * 0.12 + factor_score * 0.10 + risk_score * 0.08
+        total += technical_score * 0.04 + trade_score * 0.03 + risk_score * 0.03
         tag = "趨勢延續 / 波段優先"
     elif mode == "領頭羊模式":
-        total = market_score * 0.12 + leader_advantage * 0.22 + category_heat_score * 0.22 + technical_score * 0.16 + prelaunch_score * 0.10 + pattern_score * 0.10 + trade_score * 0.08
+        total += leader_advantage * 0.08 + category_heat_score * 0.04
         tag = "類股領先 / 龍頭優先"
     else:
-        total = market_score * 0.14 + technical_score * 0.18 + prelaunch_score * 0.14 + category_heat_score * 0.16 + factor_score * 0.12 + trade_score * 0.10 + pattern_score * 0.10 + burst_score * 0.06
+        total += (technical_score + prelaunch_score + category_heat_score + trade_score) * 0.015
         tag = "綜合推薦"
 
     return _score_clip(total), tag
@@ -1152,6 +1358,10 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "推薦模式": mode,
                 "推薦等級": _safe_str(r.get("推薦等級")),
                 "推薦總分": _safe_float(r.get("推薦總分")),
+                "買點分級": _safe_str(r.get("買點分級")),
+                "風險說明": _safe_str(r.get("風險說明")),
+                "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
+                "權重設定": _safe_str(r.get("權重設定")),
                 "技術結構分數": _safe_float(r.get("技術結構分數")),
                 "起漲前兆分數": _safe_float(r.get("起漲前兆分數")),
                 "交易可行分數": _safe_float(r.get("交易可行分數")),
@@ -3481,7 +3691,7 @@ def _render_selected_export_block():
         "最新價", "推薦買點_拉回", "推薦買點_突破",
         "停損價", "賣出目標1", "賣出目標2",
         "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-        "推薦標籤", "推薦理由摘要",
+        "推薦標籤", "股神推論邏輯", "風險說明", "推薦理由摘要",
     ]
     export_df = export_df[[c for c in want_cols if c in export_df.columns]].copy()
 
@@ -3809,6 +4019,8 @@ def main():
         "min_prelaunch_score": 45.0,
         "min_trade_score": 45.0,
         "pick_strategy": "結合版",
+        "score_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
+        "score_weights_edit": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "top_table_columns": [],
         "full_table_columns": [],
     }
@@ -3883,6 +4095,10 @@ def main():
 
     render_pro_section("掃描設定")
     st.caption("本頁條件會自動記住；切換頁面回來不需要重新設定。推薦結果也會保留，除非你手動清空條件。")
+
+    applied_weights = _render_score_weight_panel()
+    global GODPICK_ACTIVE_SCORE_WEIGHTS
+    GODPICK_ACTIVE_SCORE_WEIGHTS = applied_weights.copy()
 
     with st.form(key=_k("recommend_form"), clear_on_submit=False):
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -4037,6 +4253,8 @@ def main():
         _reset_ui_pref("recommend_mode", "飆股模式")
         _reset_ui_pref("risk_strictness", "標準")
         _reset_ui_pref("pick_strategy", "結合版")
+        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
         st.session_state[_k("universe_mode")] = "自選群組"
         st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
         st.session_state[_k("days")] = 120
@@ -4148,9 +4366,13 @@ def main():
             min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
         )
+        rec_df = _apply_advanced_godpick_columns(rec_df)
+        hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
+        rec_df = _apply_advanced_godpick_columns(rec_df)
+        hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
 
     _render_debug_scan_summary()
 
@@ -4390,7 +4612,7 @@ def main():
             "停損價",
             "賣出目標1",
             "賣出目標2",
-            "推薦理由摘要",
+            "股神推論邏輯", "風險說明", "推薦理由摘要",
         ]
     ].copy()
 
@@ -4402,7 +4624,7 @@ def main():
         key=_k("top_pick_editor"),
         column_config={
             "勾選": st.column_config.CheckboxColumn("勾選"),
-            "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
+            "推薦理由摘要": st.column_config.TextColumn("股神推論邏輯", "風險說明", "推薦理由摘要", width="large"),
         }
     )
 
@@ -4475,7 +4697,7 @@ def main():
                 ("賣出目標2", format_number(focus_row.get("賣出目標2"), 2), ""),
                 ("風險報酬（拉回）", _safe_str(focus_row.get("風險報酬_拉回")), ""),
                 ("風險報酬（突破）", _safe_str(focus_row.get("風險報酬_突破")), ""),
-                ("推薦理由摘要", _safe_str(focus_row.get("推薦理由摘要")), ""),
+                ("股神推論邏輯", "風險說明", "推薦理由摘要", _safe_str(focus_row.get("推薦理由摘要")), ""),
             ],
             chips=[_safe_str(focus_row.get("推薦等級")), _safe_str(focus_row.get("類別")), _safe_str(focus_row.get("推薦標籤"))],
         )
@@ -4488,7 +4710,7 @@ def main():
             "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "起漲前兆分數", "交易可行分數", "類股熱度分數", "訊號分數",
-            "起漲判斷", "建議切入區", "推薦理由摘要", "補抓原因"
+            "起漲判斷", "建議切入區", "股神推論邏輯", "風險說明", "推薦理由摘要", "補抓原因"
         ]
         st.dataframe(_format_df(hot_pick_df[[c for c in hot_show_cols if c in hot_pick_df.columns]].head(max(top_n, 20))), use_container_width=True, hide_index=True)
 
@@ -4528,7 +4750,7 @@ def main():
                     [
                         "股票代號", "股票名稱", "類別", "類股內排名", "類股前3強",
                         "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分",
-                        "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要",
+                        "類股平均總分", "類股熱度分數", "推薦總分", "股神推論邏輯", "風險說明", "推薦理由摘要",
                     ]
                 ].head(top_n)
             ),
