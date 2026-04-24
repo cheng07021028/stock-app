@@ -91,11 +91,13 @@ def build_market_summary(df: pd.DataFrame) -> dict[str, int]:
     if df is None or df.empty:
         return summary
 
-    if "市場別" not in df.columns:
+    # 相容新版 stock_master_service 的英文欄位 market，以及舊頁面用的中文欄位 市場別
+    market_col = "市場別" if "市場別" in df.columns else ("market" if "market" in df.columns else "")
+    if not market_col:
         summary["其他"] = len(df)
         return summary
 
-    vc = df["市場別"].fillna("其他").astype(str).value_counts()
+    vc = df[market_col].fillna("其他").astype(str).str.strip().replace("", "其他").value_counts()
     for k, v in vc.items():
         if k in summary:
             summary[k] = int(v)
