@@ -43,7 +43,7 @@ try:
 except Exception:
     load_stock_master = None
 
-PAGE_TITLE = "股神推薦"
+PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -143,6 +143,250 @@ def _normalize_category(v: Any) -> str:
 
 def _score_clip(v: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, v))
+
+
+def _ensure_radar_dict(radar_obj: Any) -> dict[str, Any]:
+    if radar_obj is None:
+        radar_obj = {}
+    elif not isinstance(radar_obj, dict):
+        try:
+            radar_obj = dict(radar_obj)
+        except Exception:
+            radar_obj = {}
+
+    base = {
+        "trend": _safe_float(radar_obj.get("trend"), 50) or 50,
+        "momentum": _safe_float(radar_obj.get("momentum"), 50) or 50,
+        "volume": _safe_float(radar_obj.get("volume"), 50) or 50,
+        "position": _safe_float(radar_obj.get("position"), 50) or 50,
+        "structure": _safe_float(radar_obj.get("structure"), 50) or 50,
+        "summary": _safe_str(radar_obj.get("summary")) or "",
+    }
+    for k, v in radar_obj.items():
+        if k not in base:
+            base[k] = v
+    return base
+
+
+def _score_band(v: Any) -> str:
+    x = _safe_float(v, 0) or 0
+    if x >= 90:
+        return "極強"
+    if x >= 80:
+        return "偏強"
+    if x >= 70:
+        return "可用"
+    if x >= 60:
+        return "觀察"
+    return "保守"
+
+
+def _build_pattern_breakout_scores(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {"型態名稱": "資料不足", "型態突破分數": 0.0, "突破風險": "資料不足"}
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"), 0) or 0
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    vol5 = _safe_float(last.get("VOL5"))
+    vol20 = _safe_float(last.get("VOL20"))
+    ret5 = _safe_float(last.get("RET5"), 0) or 0
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+
+    score = 45.0
+    pattern_name = "整理中"
+    risk_text = "正常"
+
+    if close_now and res20 not in [None, 0]:
+        dist = ((res20 - close_now) / res20) * 100
+        if -1.5 <= dist <= 1.5:
+            score += 28
+            pattern_name = "平台整理突破"
+        elif 1.5 < dist <= 4.5:
+            score += 18
+            pattern_name = "箱型整理待突破"
+        elif dist < -1.5:
+            score += 12
+            pattern_name = "已突破觀察"
+
+    if ma20 not in [None, 0] and ma60 not in [None, 0]:
+        if close_now >= ma20 >= ma60:
+            score += 16
+        elif close_now >= ma20:
+            score += 8
+
+    if vol5 not in [None, 0] and vol20 not in [None, 0]:
+        vr = vol5 / vol20
+        if vr >= 1.6:
+            score += 18
+        elif vr >= 1.2:
+            score += 10
+        elif vr < 0.8:
+            score -= 5
+
+    if ret5 > 12:
+        score -= 8
+        risk_text = "短線偏熱"
+    if ret5 > 20:
+        score -= 12
+        risk_text = "短線過熱"
+
+    if sup20 not in [None, 0] and close_now < sup20:
+        score -= 10
+        risk_text = "跌破支撐"
+
+    return {
+        "型態名稱": pattern_name,
+        "型態突破分數": _score_clip(score),
+        "突破風險": risk_text,
+    }
+
+
+def _build_burst_scores(df: pd.DataFrame) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {"爆發力分數": 0.0, "爆發等級": "資料不足"}
+
+    last = df.iloc[-1]
+    ret5 = _safe_float(last.get("RET5"), 0) or 0
+    ret20 = _safe_float(last.get("RET20"), 0) or 0
+    vol5 = _safe_float(last.get("VOL5"))
+    vol20 = _safe_float(last.get("VOL20"))
+    close_now = _safe_float(last.get("收盤價"), 0) or 0
+    atr14 = _safe_float(last.get("ATR14"))
+
+    score = 48.0
+    if ret5 > 5:
+        score += 12
+    if ret5 > 8:
+        score += 10
+    if ret20 > 12:
+        score += 8
+    if vol5 not in [None, 0] and vol20 not in [None, 0]:
+        vr = vol5 / vol20
+        if vr >= 1.8:
+            score += 14
+        elif vr >= 1.3:
+            score += 8
+    if close_now not in [None, 0] and atr14 not in [None, 0]:
+        atr_pct = atr14 / close_now * 100
+        if 2.2 <= atr_pct <= 6.0:
+            score += 8
+        elif atr_pct > 8.5:
+            score -= 8
+
+    score = _score_clip(score)
+    if score >= 85:
+        level = "高爆發"
+    elif score >= 72:
+        level = "中強勢"
+    elif score >= 60:
+        level = "觀察"
+    else:
+        level = "普通"
+    return {"爆發力分數": score, "爆發等級": level}
+
+
+def _build_entry_zone_text(pullback_buy: Any, breakout_buy: Any) -> str:
+    pb = _safe_float(pullback_buy)
+    bb = _safe_float(breakout_buy)
+    if pb not in [None] and bb not in [None]:
+        low = min(pb, bb)
+        high = max(pb, bb)
+        return f"{format_number(low, 2)} ~ {format_number(high, 2)}"
+    if pb is not None:
+        return format_number(pb, 2)
+    if bb is not None:
+        return format_number(bb, 2)
+    return ""
+
+
+def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
+    if base_df is None or base_df.empty:
+        return {"score": 50.0, "label": "中性", "summary": "無市場樣本"}
+
+    ret_mean = pd.to_numeric(base_df.get("區間漲跌幅%"), errors="coerce").fillna(0).mean()
+    signal_mean = pd.to_numeric(base_df.get("訊號分數"), errors="coerce").fillna(0).mean()
+    prelaunch_mean = pd.to_numeric(base_df.get("起漲前兆分數"), errors="coerce").fillna(0).mean()
+    positive_ratio = (pd.to_numeric(base_df.get("區間漲跌幅%"), errors="coerce").fillna(0) > 0).mean()
+
+    score = 50.0
+    score += max(min(ret_mean * 0.9, 14), -14)
+    score += max(min(signal_mean * 5.5, 18), -18)
+    score += max(min((prelaunch_mean - 50) * 0.35, 12), -12)
+    score += max(min((positive_ratio - 0.5) * 60, 10), -10)
+    score = _score_clip(score)
+
+    if score >= 80:
+        label = "市場順風"
+    elif score >= 68:
+        label = "市場偏多"
+    elif score >= 55:
+        label = "市場中性偏多"
+    elif score >= 45:
+        label = "市場中性"
+    else:
+        label = "市場逆風"
+
+    summary = f"{label}｜平均漲幅 {ret_mean:.2f}%｜正報酬占比 {positive_ratio*100:.1f}%"
+    return {"score": score, "label": label, "summary": summary}
+
+
+def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> tuple[float, str]:
+    technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
+    prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    category_heat_score = _safe_float(row.get("類股熱度分數"), 0) or 0
+    factor_score = _safe_float(row.get("自動因子總分"), 0) or 0
+    trade_score = _safe_float(row.get("交易可行分數"), 0) or 0
+    leader_advantage = _safe_float(row.get("同類股領先幅度"), 0) or 0
+    pattern_score = _safe_float(row.get("型態突破分數"), 0) or 0
+    burst_score = _safe_float(row.get("爆發力分數"), 0) or 0
+    risk_score = _safe_float(row.get("風險分數"), 0) or 0
+
+    if mode == "飆股模式":
+        total = market_score * 0.12 + category_heat_score * 0.16 + pattern_score * 0.20 + burst_score * 0.18 + prelaunch_score * 0.16 + technical_score * 0.10 + trade_score * 0.08
+        tag = "爆發優先 / 起漲優先"
+    elif mode == "波段模式":
+        total = market_score * 0.14 + technical_score * 0.24 + category_heat_score * 0.18 + trade_score * 0.14 + pattern_score * 0.12 + factor_score * 0.10 + risk_score * 0.08
+        tag = "趨勢延續 / 波段優先"
+    elif mode == "領頭羊模式":
+        total = market_score * 0.12 + leader_advantage * 0.22 + category_heat_score * 0.22 + technical_score * 0.16 + prelaunch_score * 0.10 + pattern_score * 0.10 + trade_score * 0.08
+        tag = "類股領先 / 龍頭優先"
+    else:
+        total = market_score * 0.14 + technical_score * 0.18 + prelaunch_score * 0.14 + category_heat_score * 0.16 + factor_score * 0.12 + trade_score * 0.10 + pattern_score * 0.10 + burst_score * 0.06
+        tag = "綜合推薦"
+
+    return _score_clip(total), tag
+
+
+def _build_recommend_reason_v2(r: pd.Series) -> str:
+    parts = []
+    if _safe_str(r.get("市場環境")):
+        parts.append(_safe_str(r.get("市場環境")))
+    if _safe_float(r.get("型態突破分數"), 0) >= 78:
+        parts.append(_safe_str(r.get("型態名稱")) or "型態突破")
+    if _safe_float(r.get("起漲前兆分數"), 0) >= 75:
+        parts.append("起漲前兆強")
+    if _safe_float(r.get("交易可行分數"), 0) >= 70:
+        parts.append("進出場清楚")
+    if _safe_float(r.get("類股熱度分數"), 0) >= 75:
+        parts.append("族群熱度高")
+    if _safe_str(r.get("類股前3強")) == "是":
+        parts.append("類股前3強")
+    if _safe_str(r.get("是否領先同類股")) == "是":
+        parts.append("領先同類股")
+    if _safe_float(r.get("爆發力分數"), 0) >= 75:
+        parts.append("爆發力佳")
+    if _safe_float(r.get("風險分數"), 0) < 60:
+        parts.append("風險需控管")
+    text = "、".join([x for x in parts if x][:6])
+    if not text:
+        text = "結構偏多，列入觀察"
+    entry_zone = _safe_str(r.get("建議切入區"))
+    stop_loss = format_number(r.get("停損價"), 2) if pd.notna(r.get("停損價")) else "—"
+    target_1 = format_number(r.get("賣出目標1"), 2) if pd.notna(r.get("賣出目標1")) else "—"
+    return f"{text}｜切入區 {entry_zone or '—'}｜停損 {stop_loss}｜目標1 {target_1}"
 
 
 def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
@@ -914,7 +1158,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "類股熱度分數": _safe_float(r.get("類股熱度分數")),
                 "同類股領先幅度": _safe_float(r.get("同類股領先幅度")),
                 "是否領先同類股": _safe_str(r.get("是否領先同類股")) in {"是", "True", "true", "1"},
-                "推薦標籤": _safe_str(r.get("推薦標籤")),
+                "推薦標籤": "｜".join([x for x in [_safe_str(r.get("推薦標籤")), _safe_str(r.get("型態名稱")), _safe_str(r.get("爆發等級"))] if x]),
                 "推薦理由摘要": _safe_str(r.get("推薦理由摘要")),
                 "推薦價格": _safe_float(r.get("最新價") if pd.notna(r.get("最新價")) else r.get("推薦買點_拉回")),
                 "停損價": _safe_float(r.get("停損價")),
@@ -2575,9 +2819,11 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
         signal_snapshot = compute_signal_snapshot(hist_df)
         sr_snapshot = compute_support_resistance_snapshot(hist_df)
-        radar = compute_radar_scores(hist_df)
+        radar = _ensure_radar_dict(compute_radar_scores(hist_df))
         auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
         trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
+        pattern_info = _build_pattern_breakout_scores(hist_df, sr_snapshot, signal_snapshot)
+        burst_info = _build_burst_scores(hist_df)
         prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
         risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
         trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
@@ -2626,6 +2872,8 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "radar": radar,
             "auto_factor": auto_factor,
             "trade_plan": trade_plan,
+            "pattern_info": pattern_info,
+            "burst_info": burst_info,
             "prelaunch": prelaunch,
             "risk_filter": risk_filter,
             "trade_feasibility": trade_feasibility,
@@ -2743,6 +2991,14 @@ def _analyze_one_stock_for_recommend(
             "20日壓力距離%": bundle["pressure_dist"],
             "20日支撐距離%": bundle["support_dist"],
             "個股原始總分": base_composite,
+            "市場環境分數": None,
+            "市場環境": "",
+            "型態名稱": _safe_str(bundle["pattern_info"].get("型態名稱")),
+            "型態突破分數": _safe_float(bundle["pattern_info"].get("型態突破分數"), 0) or 0,
+            "突破風險": _safe_str(bundle["pattern_info"].get("突破風險")),
+            "爆發力分數": _safe_float(bundle["burst_info"].get("爆發力分數"), 0) or 0,
+            "爆發等級": _safe_str(bundle["burst_info"].get("爆發等級")),
+            "建議切入區": _build_entry_zone_text(bundle["trade_plan"]["pullback_buy"], bundle["trade_plan"]["breakout_buy"]),
             "起漲判斷": bundle["trade_plan"]["launch_tag"],
             "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
             "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
@@ -2781,6 +3037,8 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
             類股平均自動因子=("自動因子總分", "mean"),
             類股平均起漲前兆=("起漲前兆分數", "mean"),
             類股平均交易可行=("交易可行分數", "mean"),
+            類股平均型態突破=("型態突破分數", "mean"),
+            類股平均爆發力=("爆發力分數", "mean"),
         )
         .reset_index()
     )
@@ -2845,8 +3103,8 @@ def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, m
         axis=1,
     )
     hot_df = hot_df.sort_values(
-        ["起漲前兆分數", "類股熱度分數", "交易可行分數", "推薦總分", "訊號分數"],
-        ascending=[False, False, False, False, False],
+        ["型態突破分數", "爆發力分數", "起漲前兆分數", "類股熱度分數", "交易可行分數", "推薦總分", "訊號分數"],
+        ascending=[False, False, False, False, False, False, False],
     ).reset_index(drop=True)
     return hot_df
 
@@ -2985,14 +3243,20 @@ def _build_recommend_df(
         base_df["類股熱度分數"] = None
         base_df["類股熱度排名"] = None
         base_df["類股加速度"] = None
+        base_df["類股平均型態突破"] = None
+        base_df["類股平均爆發力"] = None
     else:
         base_df = base_df.merge(
             category_strength_df[
-                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度"]
+                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度", "類股平均型態突破", "類股平均爆發力"]
             ],
             on="類別",
             how="left",
         )
+
+    market_info = _build_market_environment(base_df)
+    base_df["市場環境分數"] = market_info.get("score", 50)
+    base_df["市場環境"] = market_info.get("label", "中性")
 
     base_df["同類股領先幅度"] = (base_df["個股原始總分"] - base_df["類股平均總分"].fillna(0)).apply(lambda x: _score_clip(50 + x))
     base_df["是否領先同類股"] = (base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)).map({True: "是", False: "否"})
@@ -3000,14 +3264,10 @@ def _build_recommend_df(
     base_df["類股前3強"] = base_df["類股內排名"].apply(lambda x: "是" if pd.notna(x) and int(x) <= 3 else "否")
 
     mode_scores = base_df.apply(
-        lambda r: _build_mode_score(
+        lambda r: _build_final_god_score_row(
+            row=r,
             mode=_safe_str(mode),
-            technical_score=_safe_float(r.get("技術結構分數"), 0) or 0,
-            prelaunch_score=_safe_float(r.get("起漲前兆分數"), 0) or 0,
-            category_heat_score=_safe_float(r.get("類股熱度分數"), 0) or 0,
-            factor_score=_safe_float(r.get("自動因子總分"), 0) or 0,
-            trade_score=_safe_float(r.get("交易可行分數"), 0) or 0,
-            leader_advantage=_safe_float(r.get("同類股領先幅度"), 0) or 0,
+            market_score=_safe_float(market_info.get("score"), 50) or 50,
         ),
         axis=1,
     )
@@ -3051,7 +3311,7 @@ def _build_recommend_df(
             reason_parts.append("結構偏多，列入觀察")
         return "、".join(reason_parts[:6])
 
-    base_df["推薦理由摘要"] = base_df.apply(_reason_builder, axis=1)
+    base_df["推薦理由摘要"] = base_df.apply(_build_recommend_reason_v2, axis=1)
 
     for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
         if c not in base_df.columns:
@@ -3062,7 +3322,10 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    final_df = final_df.sort_values(["推薦總分", "起漲前兆分數", "訊號分數", "區間漲跌幅%"], ascending=[False, False, False, False]).reset_index(drop=True)
+    final_df = final_df.sort_values(
+        ["推薦總分", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"],
+        ascending=[False, False, False, False, False, False, False],
+    ).reset_index(drop=True)
 
     if "勾選" not in final_df.columns:
         final_df.insert(0, "勾選", False)
@@ -3081,7 +3344,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
         "追價風險分數", "拉回買點分數", "突破買點分數",
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
-        "個股原始總分", "類股平均總分", "類股平均訊號", "類股熱度分數",
+        "個股原始總分", "市場環境分數", "型態突破分數", "爆發力分數", "類股平均總分", "類股平均訊號", "類股熱度分數",
         "類股加速度", "同類股領先幅度", "推薦總分", "風險分數",
         "均線轉強分", "量能啟動分", "突破準備分", "動能翻多分", "支撐防守分"
     ]
@@ -3133,11 +3396,11 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
     cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
 
     leader_export = leader_df[
-        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
+        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
     ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
 
     factor_export = factor_rank[
-        ["股票代號", "股票名稱", "類別", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
+        ["股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
     ].head(top_n).copy() if not factor_rank.empty else pd.DataFrame()
 
     return rec_export, cat_export, leader_export, factor_export
@@ -3423,6 +3686,93 @@ def _render_record_export_block(rec_df: pd.DataFrame):
         use_container_width=True,
     )
 
+
+
+# =========================================================
+# 頁面設定 / 欄位順序記憶
+# =========================================================
+def _ui_pref_key(name: str) -> str:
+    return _k(f"ui_{name}")
+
+def _ensure_ui_pref(name: str, default):
+    pref_key = _k(name)
+    ui_key = _ui_pref_key(name)
+    if pref_key not in st.session_state:
+        st.session_state[pref_key] = copy.deepcopy(default)
+    if ui_key not in st.session_state:
+        st.session_state[ui_key] = copy.deepcopy(st.session_state[pref_key])
+
+def _sync_ui_pref_to_saved(name: str):
+    pref_key = _k(name)
+    ui_key = _ui_pref_key(name)
+    if ui_key in st.session_state:
+        st.session_state[pref_key] = copy.deepcopy(st.session_state[ui_key])
+
+def _reset_ui_pref(name: str, default):
+    pref_key = _k(name)
+    ui_key = _ui_pref_key(name)
+    st.session_state[pref_key] = copy.deepcopy(default)
+    st.session_state[ui_key] = copy.deepcopy(default)
+
+def _normalize_column_order(saved_order, available_cols: list[str], default_cols: list[str]) -> list[str]:
+    saved = [str(x) for x in (saved_order or []) if str(x) in available_cols]
+    defaults = [str(x) for x in default_cols if str(x) in available_cols]
+    remain = [c for c in available_cols if c not in saved and c not in defaults]
+    merged = saved + [c for c in defaults if c not in saved] + remain
+    final = []
+    seen = set()
+    for c in merged:
+        if c in available_cols and c not in seen:
+            final.append(c)
+            seen.add(c)
+    return final
+
+def _column_order_state_key(name: str) -> str:
+    return _k(f"column_order_{name}")
+
+def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
+    state_key = _column_order_state_key(name)
+    current_order = _normalize_column_order(st.session_state.get(state_key, default_cols), available_cols, default_cols)
+    st.session_state[state_key] = current_order
+
+    with st.expander(title, expanded=False):
+        st.caption("可調整欄位順序並記住，不切頁、不重整都會保留。")
+        pick_key = _k(f"column_pick_{name}")
+        if pick_key not in st.session_state or st.session_state[pick_key] not in current_order:
+            st.session_state[pick_key] = current_order[0] if current_order else ""
+        picked = st.selectbox("選擇欄位", current_order, key=pick_key) if current_order else ""
+
+        b1, b2, b3, b4 = st.columns(4)
+        changed = False
+        if current_order and picked:
+            idx = current_order.index(picked)
+            with b1:
+                if st.button("左移", key=_k(f"move_left_{name}"), use_container_width=True) and idx > 0:
+                    current_order[idx - 1], current_order[idx] = current_order[idx], current_order[idx - 1]
+                    changed = True
+            with b2:
+                if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(current_order) - 1:
+                    current_order[idx + 1], current_order[idx] = current_order[idx], current_order[idx + 1]
+                    changed = True
+            with b3:
+                if st.button("移到最前", key=_k(f"move_front_{name}"), use_container_width=True):
+                    current_order.remove(picked)
+                    current_order.insert(0, picked)
+                    changed = True
+            with b4:
+                if st.button("重設", key=_k(f"move_reset_{name}"), use_container_width=True):
+                    current_order = _normalize_column_order(default_cols, available_cols, default_cols)
+                    changed = True
+
+        if changed:
+            st.session_state[state_key] = current_order
+            st.rerun()
+
+        st.caption("目前欄位順序：" + " ｜ ".join(current_order[:20]) + (" ..." if len(current_order) > 20 else ""))
+
+    return st.session_state.get(state_key, current_order)
+
+
 # =========================================================
 # Main
 # =========================================================
@@ -3459,6 +3809,8 @@ def main():
         "min_prelaunch_score": 45.0,
         "min_trade_score": 45.0,
         "pick_strategy": "結合版",
+        "top_table_columns": [],
+        "full_table_columns": [],
     }
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
@@ -3466,6 +3818,21 @@ def main():
 
     if _k("selected_rec_snapshot") not in st.session_state:
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
+
+    _ensure_ui_pref("universe_mode", st.session_state.get(_k("universe_mode"), "自選群組"))
+    _ensure_ui_pref("group", st.session_state.get(_k("group"), list(watchlist_map.keys())[0] if watchlist_map else ""))
+    _ensure_ui_pref("days", st.session_state.get(_k("days"), 120))
+    _ensure_ui_pref("top_n", st.session_state.get(_k("top_n"), 20))
+    _ensure_ui_pref("manual_codes", st.session_state.get(_k("manual_codes"), ""))
+    _ensure_ui_pref("scan_limit", st.session_state.get(_k("scan_limit"), 1000))
+    _ensure_ui_pref("selected_categories", st.session_state.get(_k("selected_categories"), ["全部"]))
+    _ensure_ui_pref("recommend_mode", st.session_state.get(_k("recommend_mode"), "飆股模式"))
+    _ensure_ui_pref("risk_strictness", st.session_state.get(_k("risk_strictness"), "標準"))
+    _ensure_ui_pref("pick_strategy", st.session_state.get(_k("pick_strategy"), "結合版"))
+    _ensure_ui_pref("min_total_score", float(st.session_state.get(_k("min_total_score"), 55.0)))
+    _ensure_ui_pref("min_signal_score", float(st.session_state.get(_k("min_signal_score"), -2.0)))
+    _ensure_ui_pref("min_prelaunch_score", float(st.session_state.get(_k("min_prelaunch_score"), 45.0)))
+    _ensure_ui_pref("min_trade_score", float(st.session_state.get(_k("min_trade_score"), 45.0)))
 
     next_pick_key = _k("rec_pick_codes_next")
     real_pick_key = _k("rec_pick_codes")
@@ -3478,8 +3845,8 @@ def main():
         st.session_state[real_record_key] = st.session_state.pop(next_record_key)
 
     render_pro_hero(
-        title="股神推薦｜V2 升級版",
-        subtitle="保留原功能 + 起漲前兆分數 + 風險淘汰 + 三模式推薦 + Excel 匯出 + 寫入 8_股神推薦紀錄。",
+        title="股神推薦｜V4 加速記憶版",
+        subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
 
     if master_df is None or master_df.empty:
@@ -3515,6 +3882,7 @@ def main():
     saved_categories = [x for x in saved_categories if x in category_options] or ["全部"]
 
     render_pro_section("掃描設定")
+    st.caption("本頁條件會自動記住；切換頁面回來不需要重新設定。推薦結果也會保留，除非你手動清空條件。")
 
     with st.form(key=_k("recommend_form"), clear_on_submit=False):
         c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -3524,28 +3892,36 @@ def main():
             saved_universe = st.session_state.get(_k("universe_mode"), "自選群組")
             if saved_universe not in universe_options:
                 saved_universe = "自選群組"
-            form_universe_mode = st.selectbox("掃描範圍", universe_options, index=universe_options.index(saved_universe))
+            if st.session_state.get(_ui_pref_key("universe_mode")) not in universe_options:
+                st.session_state[_ui_pref_key("universe_mode")] = saved_universe
+            form_universe_mode = st.selectbox("掃描範圍", universe_options, key=_ui_pref_key("universe_mode"))
 
         with c2:
             group_options = list(watchlist_map.keys()) if watchlist_map else [""]
             saved_group = st.session_state.get(_k("group"), "")
             if saved_group not in group_options:
                 saved_group = group_options[0] if group_options else ""
-            form_group = st.selectbox("自選群組", group_options, index=group_options.index(saved_group) if saved_group in group_options else 0)
+            if st.session_state.get(_ui_pref_key("group")) not in group_options:
+                st.session_state[_ui_pref_key("group")] = saved_group
+            form_group = st.selectbox("自選群組", group_options, key=_ui_pref_key("group"))
 
         with c3:
             day_options = [60, 90, 120, 180, 240]
             saved_days = int(st.session_state.get(_k("days"), 120))
             if saved_days not in day_options:
                 saved_days = 120
-            form_days = st.selectbox("觀察天數", day_options, index=day_options.index(saved_days))
+            if st.session_state.get(_ui_pref_key("days")) not in day_options:
+                st.session_state[_ui_pref_key("days")] = saved_days
+            form_days = st.selectbox("觀察天數", day_options, key=_ui_pref_key("days"))
 
         with c4:
             topn_options = [10, 20, 30, 50]
             saved_topn = int(st.session_state.get(_k("top_n"), 20))
             if saved_topn not in topn_options:
                 saved_topn = 20
-            form_top_n = st.selectbox("輸出 Top N", topn_options, index=topn_options.index(saved_topn))
+            if st.session_state.get(_ui_pref_key("top_n")) not in topn_options:
+                st.session_state[_ui_pref_key("top_n")] = saved_topn
+            form_top_n = st.selectbox("輸出 Top N", topn_options, key=_ui_pref_key("top_n"))
 
         d1, d2 = st.columns([2, 2])
         with d1:
@@ -3553,17 +3929,19 @@ def main():
             saved_limit = st.session_state.get(_k("scan_limit"), 1000)
             if saved_limit not in limit_options:
                 saved_limit = 1000
+            if st.session_state.get(_ui_pref_key("scan_limit")) not in limit_options:
+                st.session_state[_ui_pref_key("scan_limit")] = saved_limit
             form_scan_limit = st.selectbox(
                 "掃描上限筆數",
                 limit_options,
-                index=limit_options.index(saved_limit),
+                key=_ui_pref_key("scan_limit"),
                 help="選『全部』時，會把目前市場範圍內的股票全部納入掃描，不做截斷。",
             )
 
         with d2:
             form_manual_codes = st.text_area(
                 "手動輸入股票（可代碼 / 名稱，一行一檔）",
-                value=st.session_state.get(_k("manual_codes"), ""),
+                key=_ui_pref_key("manual_codes"),
                 height=110,
                 placeholder="2330\n2454\n3548\n台積電",
             )
@@ -3571,42 +3949,45 @@ def main():
         render_pro_section("模式 / 類型篩選")
         m1, m2, m3 = st.columns([2, 2, 2])
         with m1:
-            form_recommend_mode = st.selectbox(
-                "推薦模式",
-                ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"],
-                index=["飆股模式", "波段模式", "領頭羊模式", "綜合模式"].index(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-            )
+            mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"]
+            if st.session_state.get(_ui_pref_key("recommend_mode")) not in mode_options:
+                st.session_state[_ui_pref_key("recommend_mode")] = st.session_state.get(_k("recommend_mode"), "飆股模式")
+            form_recommend_mode = st.selectbox("推薦模式", mode_options, key=_ui_pref_key("recommend_mode"))
         with m2:
-            form_risk_strictness = st.selectbox(
-                "風險過濾強度",
-                ["寬鬆", "標準", "嚴格"],
-                index=["寬鬆", "標準", "嚴格"].index(st.session_state.get(_k("risk_strictness"), "標準")),
-            )
+            strict_options = ["寬鬆", "標準", "嚴格"]
+            if st.session_state.get(_ui_pref_key("risk_strictness")) not in strict_options:
+                st.session_state[_ui_pref_key("risk_strictness")] = st.session_state.get(_k("risk_strictness"), "標準")
+            form_risk_strictness = st.selectbox("風險過濾強度", strict_options, key=_ui_pref_key("risk_strictness"))
         with m3:
+            pick_options = ["精準版", "結合版"]
+            if st.session_state.get(_ui_pref_key("pick_strategy")) not in pick_options:
+                st.session_state[_ui_pref_key("pick_strategy")] = st.session_state.get(_k("pick_strategy"), "結合版")
             form_pick_strategy = st.selectbox(
                 "推薦策略",
-                ["精準版", "結合版"],
-                index=["精準版", "結合版"].index(st.session_state.get(_k("pick_strategy"), "結合版")),
+                pick_options,
+                key=_ui_pref_key("pick_strategy"),
                 help="精準版=只看主名單；結合版=主名單外另顯示飆股補抓名單，不混入主名單排序。",
             )
 
+        valid_saved_categories = [x for x in st.session_state.get(_ui_pref_key("selected_categories"), saved_categories) if x in category_options] or ["全部"]
+        st.session_state[_ui_pref_key("selected_categories")] = valid_saved_categories
         form_selected_categories = st.multiselect(
             "選擇類型（可多選）",
             options=category_options,
-            default=saved_categories,
+            key=_ui_pref_key("selected_categories"),
             help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
         )
 
         render_pro_section("推薦門檻")
         f1, f2, f3, f4 = st.columns(4)
         with f1:
-            form_min_total_score = st.number_input("推薦總分下限", value=float(st.session_state.get(_k("min_total_score"), 55.0)), step=1.0)
+            form_min_total_score = st.number_input("推薦總分下限", key=_ui_pref_key("min_total_score"), step=1.0)
         with f2:
-            form_min_signal_score = st.number_input("訊號分數下限", value=float(st.session_state.get(_k("min_signal_score"), -2.0)), step=1.0)
+            form_min_signal_score = st.number_input("訊號分數下限", key=_ui_pref_key("min_signal_score"), step=1.0)
         with f3:
-            form_min_prelaunch_score = st.number_input("起漲前兆分數下限", value=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)), step=1.0)
+            form_min_prelaunch_score = st.number_input("起漲前兆分數下限", key=_ui_pref_key("min_prelaunch_score"), step=1.0)
         with f4:
-            form_min_trade_score = st.number_input("交易可行分數下限", value=float(st.session_state.get(_k("min_trade_score"), 45.0)), step=1.0)
+            form_min_trade_score = st.number_input("交易可行分數下限", key=_ui_pref_key("min_trade_score"), step=1.0)
 
         btn1, btn2, btn3 = st.columns([2, 2, 2])
         with btn1:
@@ -3642,6 +4023,20 @@ def main():
         st.success("推薦快取已清除")
 
     if submit_clear:
+        _reset_ui_pref("universe_mode", "自選群組")
+        _reset_ui_pref("group", list(watchlist_map.keys())[0] if watchlist_map else "")
+        _reset_ui_pref("days", 120)
+        _reset_ui_pref("top_n", 20)
+        _reset_ui_pref("manual_codes", "")
+        _reset_ui_pref("scan_limit", 1000)
+        _reset_ui_pref("selected_categories", ["全部"])
+        _reset_ui_pref("min_total_score", 55.0)
+        _reset_ui_pref("min_signal_score", -2.0)
+        _reset_ui_pref("min_prelaunch_score", 45.0)
+        _reset_ui_pref("min_trade_score", 45.0)
+        _reset_ui_pref("recommend_mode", "飆股模式")
+        _reset_ui_pref("risk_strictness", "標準")
+        _reset_ui_pref("pick_strategy", "結合版")
         st.session_state[_k("universe_mode")] = "自選群組"
         st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
         st.session_state[_k("days")] = 120
@@ -3668,6 +4063,13 @@ def main():
         st.rerun()
 
     if submit_recommend or submit_refresh:
+        for pref_name in [
+            "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
+            "selected_categories", "min_total_score", "min_signal_score",
+            "min_prelaunch_score", "min_trade_score", "pick_strategy",
+            "recommend_mode", "risk_strictness",
+        ]:
+            _sync_ui_pref_to_saved(pref_name)
         st.session_state[_k("universe_mode")] = form_universe_mode
         st.session_state[_k("group")] = form_group
         st.session_state[_k("days")] = form_days
@@ -3771,11 +4173,13 @@ def main():
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
     leader_count = int((rec_df["是否領先同類股"] == "是").sum())
 
+    hot_count = len(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) else 0
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "強勢推薦", "value": strong_count, "delta": "最高等級群", "delta_class": "pro-kpi-delta-flat"},
             {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "補抓名單", "value": hot_count, "delta": "起漲補抓", "delta_class": "pro-kpi-delta-flat"},
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
     )
@@ -3971,6 +4375,10 @@ def main():
             "推薦模式",
             "推薦等級",
             "推薦總分",
+            "市場環境分數",
+            "型態名稱",
+            "型態突破分數",
+            "爆發力分數",
             "起漲前兆分數",
             "交易可行分數",
             "類股熱度分數",
@@ -4049,11 +4457,17 @@ def main():
                 ("推薦模式", _safe_str(focus_row.get("推薦模式")), ""),
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
+                ("市場環境", _safe_str(focus_row.get("市場環境")), ""),
+                ("市場環境分數", format_number(focus_row.get("市場環境分數"), 1), ""),
+                ("型態名稱", _safe_str(focus_row.get("型態名稱")), ""),
+                ("型態突破分數", format_number(focus_row.get("型態突破分數"), 1), ""),
+                ("爆發力分數", format_number(focus_row.get("爆發力分數"), 1), ""),
                 ("起漲前兆分數", format_number(focus_row.get("起漲前兆分數"), 1), ""),
                 ("交易可行分數", format_number(focus_row.get("交易可行分數"), 1), ""),
                 ("類股熱度分數", format_number(focus_row.get("類股熱度分數"), 1), ""),
                 ("是否領先同類股", _safe_str(focus_row.get("是否領先同類股")), ""),
                 ("起漲判斷", _safe_str(focus_row.get("起漲判斷")), ""),
+                ("建議切入區", _safe_str(focus_row.get("建議切入區")), ""),
                 ("推薦買點（拉回）", format_number(focus_row.get("推薦買點_拉回"), 2), ""),
                 ("推薦買點（突破）", format_number(focus_row.get("推薦買點_突破"), 2), ""),
                 ("停損價", format_number(focus_row.get("停損價"), 2), ""),
@@ -4072,8 +4486,9 @@ def main():
         st.caption("這份名單不影響主名單排序；用途是補抓接近門檻、但具起漲結構與類股熱度的股票。")
         hot_show_cols = [
             "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分",
+            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "起漲前兆分數", "交易可行分數", "類股熱度分數", "訊號分數",
-            "起漲判斷", "推薦理由摘要", "補抓原因"
+            "起漲判斷", "建議切入區", "推薦理由摘要", "補抓原因"
         ]
         st.dataframe(_format_df(hot_pick_df[[c for c in hot_show_cols if c in hot_pick_df.columns]].head(max(top_n, 20))), use_container_width=True, hide_index=True)
 
@@ -4083,7 +4498,18 @@ def main():
     tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
 
     with tabs[0]:
-        st.dataframe(_format_df(rec_df), use_container_width=True, hide_index=True)
+        full_default_cols = [
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
+            "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+            "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
+            "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
+            "推薦標籤", "推薦理由摘要"
+        ]
+        full_available_cols = list(rec_df.columns)
+        full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
+        full_show_cols = [c for c in full_order if c in rec_df.columns]
+        st.dataframe(_format_df(rec_df[full_show_cols].copy()), use_container_width=True, hide_index=True)
 
     with tabs[1]:
         category_show = category_strength_df.copy()
@@ -4101,7 +4527,7 @@ def main():
                 leader_df[
                     [
                         "股票代號", "股票名稱", "類別", "類股內排名", "類股前3強",
-                        "是否領先同類股", "同類股領先幅度", "個股原始總分",
+                        "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分",
                         "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要",
                     ]
                 ].head(top_n)
@@ -4115,7 +4541,7 @@ def main():
             _format_df(
                 factor_rank[
                     [
-                        "股票代號", "股票名稱", "類別", "自動因子總分", "EPS代理分數",
+                        "股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數",
                         "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數",
                         "法人連買代理分數", "自動因子摘要",
                     ]
@@ -4135,16 +4561,18 @@ def main():
         render_pro_info_card(
             "V2 模組邏輯",
             [
-                ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑。", ""),
+                ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑；條件會自動記住。", ""),
                 ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
                 ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
+                ("市場環境分數", "新增市場順風/逆風分數，讓同樣條件下順風盤優先。", ""),
+                ("型態 / 爆發", "新增型態突破分數、爆發力分數，讓起漲股更容易被拉出。", ""),
             ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
                 ("風險過濾", "新增 寬鬆 / 標準 / 嚴格，先淘汰不合格股票。", ""),
                 ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
                 ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
                 ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅、類股熱度與類股加速度。", ""),
                 ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
-                ("推薦表勾選", "本輪精華推薦表可直接勾選，會同步到加入自選股與寫入 8 頁用的勾選清單。", ""),
+                ("推薦表勾選", "本輪精華推薦表可直接勾選，且欄位順序可調整並記住。", ""),
                 ("類股內排名", "新增每個類別內部排名，快速找該族群最強個股。", ""),
                 ("類股前3強", "若個股在該類別內排名 1~3，會標記為類股前3強。", ""),
                 ("理由升級", "推薦理由已改成更偏交易決策語言，不只是分數描述。", ""),
@@ -4154,7 +4582,7 @@ def main():
                 ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
                 ("Excel 匯出", "可匯出完整推薦表、類股強度榜、同類股領先榜、自動因子榜。", ""),
                 ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
-                ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失。", ""),
+                ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失，條件也會一起記住。", ""),
                 ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
                 ("7/8 對齊", "record_id、推薦日期、推薦時間、推薦欄位已正式對齊 8 頁。", ""),
             ],
