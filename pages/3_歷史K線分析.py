@@ -754,11 +754,135 @@ def _market_candidates(stock_no: str, stock_name: str, market_type: str) -> list
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _get_twse_history_data_direct(stock_no: str, start_date: date, end_date: date) -> pd.DataFrame:
+    """上市股票歷史日線直連備援：不依賴 utils，避免共用層失敗時整頁查無資料。"""
+    stock_no = _safe_str(stock_no)
+    if not stock_no:
+        return pd.DataFrame()
+
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+    if end_ts < start_ts:
+        return pd.DataFrame()
+
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    frames = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Referer": "https://www.twse.com.tw/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    urls = [
+        "https://www.twse.com.tw/exchangeReport/STOCK_DAY",
+        "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
+    ]
+
+    for dt in month_starts:
+        month_str = dt.strftime("%Y%m01")
+        for url in urls:
+            try:
+                r = requests.get(
+                    url,
+                    params={"response": "json", "date": month_str, "stockNo": stock_no},
+                    headers=headers,
+                    timeout=15,
+                    verify=False,
+                )
+                r.raise_for_status()
+                data = r.json()
+                stat = _safe_str(data.get("stat"))
+                raw_rows = data.get("data", []) or []
+                fields = data.get("fields", []) or []
+                if "OK" not in stat.upper() or not raw_rows or not fields:
+                    continue
+                temp = pd.DataFrame(raw_rows, columns=fields if len(fields) == len(raw_rows[0]) else None)
+                frames.append(temp)
+                break
+            except Exception:
+                continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+
+    rename_map = {}
+    for col in df.columns:
+        c = _safe_str(col)
+        if c in ["日期", "日 期"]:
+            rename_map[col] = "日期"
+        elif "成交股數" in c or "成交量" in c:
+            rename_map[col] = "成交股數"
+        elif "成交金額" in c:
+            rename_map[col] = "成交金額"
+        elif "開盤" in c:
+            rename_map[col] = "開盤價"
+        elif "最高" in c:
+            rename_map[col] = "最高價"
+        elif "最低" in c:
+            rename_map[col] = "最低價"
+        elif "收盤" in c:
+            rename_map[col] = "收盤價"
+        elif "成交筆數" in c:
+            rename_map[col] = "成交筆數"
+    df = df.rename(columns=rename_map)
+
+    if "日期" not in df.columns:
+        return pd.DataFrame()
+
+    def convert_tw_date(x):
+        x = _safe_str(x)
+        if not x:
+            return pd.NaT
+        if "/" in x:
+            parts = x.split("/")
+            if len(parts) == 3:
+                try:
+                    y = int(parts[0])
+                    if y < 1911:
+                        y += 1911
+                    return pd.Timestamp(year=y, month=int(parts[1]), day=int(parts[2]))
+                except Exception:
+                    return pd.NaT
+        try:
+            return pd.to_datetime(x)
+        except Exception:
+            return pd.NaT
+
+    df["日期"] = df["日期"].apply(convert_tw_date)
+    df = df.dropna(subset=["日期"])
+
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("+", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .replace(["--", "---", "", "----"], pd.NA)
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+    df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+    return df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, str]:
     stock_no = _safe_str(stock_no)
     stock_name = _safe_str(stock_name)
-    market_type = _safe_str(market_type)
+    market_type = _safe_str(market_type) or "上市"
 
+    debug_try = []
+
+    # 1) 先走 utils：保留原架構與共用快取。
     for try_name, try_market in _market_candidates(stock_no, stock_name, market_type):
         try:
             df = get_history_data(
@@ -769,22 +893,34 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
                 end_date=end_date,
             )
             df = _prepare_history_df(df)
+            debug_try.append(f"utils:{try_market or '空'}={len(df)}")
             if not df.empty:
-                return df, (_safe_str(try_market) or "未標示"), "utils"
-        except Exception:
-            pass
+                return df, (_safe_str(try_market) or market_type or "未標示"), "utils"
+        except Exception as e:
+            debug_try.append(f"utils:{try_market or '空'}=ERR {e}")
 
+    # 2) 上市直連 TWSE：修正 6271 這類上市股票被 utils fallback 失敗的情況。
     try:
-        df2 = _get_tpex_history_data(stock_no, start_date, end_date)
-        df2 = _prepare_history_df(df2)
-        if not df2.empty:
-            return df2, "上櫃", "tpex"
-    except Exception:
-        pass
+        df_twse = _get_twse_history_data_direct(stock_no, start_date, end_date)
+        df_twse = _prepare_history_df(df_twse)
+        debug_try.append(f"twse_direct={len(df_twse)}")
+        if not df_twse.empty:
+            return df_twse, "上市", "twse_direct"
+    except Exception as e:
+        debug_try.append(f"twse_direct=ERR {e}")
 
+    # 3) 上櫃直連 TPEX：保留原本 fallback。
+    try:
+        df_tpex = _get_tpex_history_data(stock_no, start_date, end_date)
+        df_tpex = _prepare_history_df(df_tpex)
+        debug_try.append(f"tpex_direct={len(df_tpex)}")
+        if not df_tpex.empty:
+            return df_tpex, "上櫃", "tpex_direct"
+    except Exception as e:
+        debug_try.append(f"tpex_direct=ERR {e}")
+
+    st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-12:])
     return pd.DataFrame(), (_safe_str(market_type) or "未知"), "none"
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
     if df is None or df.empty or len(df) < window * 2 + 3:
