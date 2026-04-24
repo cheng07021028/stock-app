@@ -874,104 +874,6 @@ def _get_twse_history_data_direct(stock_no: str, start_date: date, end_date: dat
     return df
 
 
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
-    """Yahoo Finance 備援日線：支援上市 .TW 與上櫃 .TWO，避免 TWSE/TPEX 官方端點異常時整頁無資料。"""
-    stock_no = _safe_str(stock_no)
-    market_type = _safe_str(market_type)
-    if not stock_no:
-        return pd.DataFrame(), ""
-
-    start_ts = pd.to_datetime(start_date)
-    end_ts = pd.to_datetime(end_date)
-    if end_ts < start_ts:
-        return pd.DataFrame(), ""
-
-    period1 = int(start_ts.timestamp())
-    # Yahoo period2 是 exclusive，補一天避免結束日漏抓
-    period2 = int((end_ts + pd.Timedelta(days=1)).timestamp())
-
-    if market_type == "上櫃":
-        symbols = [f"{stock_no}.TWO", f"{stock_no}.TW"]
-    elif market_type == "上市":
-        symbols = [f"{stock_no}.TW", f"{stock_no}.TWO"]
-    else:
-        symbols = [f"{stock_no}.TW", f"{stock_no}.TWO"]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-        "Accept": "application/json,text/plain,*/*",
-    }
-
-    for symbol in symbols:
-        try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            params = {
-                "period1": period1,
-                "period2": period2,
-                "interval": "1d",
-                "events": "history",
-                "includeAdjustedClose": "true",
-            }
-            r = requests.get(url, params=params, headers=headers, timeout=18, verify=False)
-            r.raise_for_status()
-            data = r.json()
-            result = (((data or {}).get("chart") or {}).get("result") or [])
-            if not result:
-                continue
-
-            item = result[0]
-            timestamps = item.get("timestamp") or []
-            quote = (((item.get("indicators") or {}).get("quote") or [{}])[0]) or {}
-            if not timestamps or not quote:
-                continue
-
-            adjclose = (((item.get("indicators") or {}).get("adjclose") or [{}])[0] or {}).get("adjclose") or []
-            rows = []
-            for idx, ts in enumerate(timestamps):
-                try:
-                    d = pd.to_datetime(int(ts), unit="s").tz_localize("UTC").tz_convert("Asia/Taipei").tz_localize(None).normalize()
-                except Exception:
-                    d = pd.to_datetime(int(ts), unit="s")
-
-                open_v = quote.get("open", [None] * len(timestamps))[idx]
-                high_v = quote.get("high", [None] * len(timestamps))[idx]
-                low_v = quote.get("low", [None] * len(timestamps))[idx]
-                close_v = quote.get("close", [None] * len(timestamps))[idx]
-                volume_v = quote.get("volume", [None] * len(timestamps))[idx]
-
-                if close_v is None:
-                    continue
-
-                rows.append({
-                    "日期": d,
-                    "開盤價": open_v,
-                    "最高價": high_v,
-                    "最低價": low_v,
-                    "收盤價": close_v,
-                    "成交股數": volume_v,
-                    "成交金額": pd.NA,
-                    "成交筆數": pd.NA,
-                })
-
-            if not rows:
-                continue
-
-            df = pd.DataFrame(rows)
-            for col in ["開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-            df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
-            df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-            if not df.empty:
-                return df, symbol
-        except Exception:
-            continue
-
-    return pd.DataFrame(), ""
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, str]:
     stock_no = _safe_str(stock_no)
@@ -1017,18 +919,7 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
     except Exception as e:
         debug_try.append(f"tpex_direct=ERR {e}")
 
-    # 4) Yahoo Finance 最後備援：官方 TWSE/TPEX 端點異常時仍可取得日線。
-    try:
-        df_yahoo, yahoo_symbol = _get_yahoo_history_data(stock_no, market_type, start_date, end_date)
-        df_yahoo = _prepare_history_df(df_yahoo)
-        debug_try.append(f"yahoo:{yahoo_symbol or '-'}={len(df_yahoo)}")
-        if not df_yahoo.empty:
-            yahoo_market = "上櫃" if yahoo_symbol.endswith(".TWO") else "上市"
-            return df_yahoo, yahoo_market, f"yahoo:{yahoo_symbol}"
-    except Exception as e:
-        debug_try.append(f"yahoo=ERR {e}")
-
-    st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
+    st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-12:])
     return pd.DataFrame(), (_safe_str(market_type) or "未知"), "none"
 @st.cache_data(ttl=1800, show_spinner=False)
 def _detect_pivots_smart(df: pd.DataFrame, window: int = 4, min_gap: int = 6):
