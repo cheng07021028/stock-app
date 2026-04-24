@@ -1336,8 +1336,25 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
     return payload
 
 
+
+def _write_watchlist_local(payload: dict[str, list[dict[str, str]]], path: str = "watchlist.json") -> tuple[bool, str]:
+    """本機強制寫回 watchlist.json；GitHub / Firestore 失敗時仍保留自選股資料。"""
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        try:
+            get_normalized_watchlist.clear()
+        except Exception:
+            pass
+        return True, f"已寫入本機 {path}"
+    except Exception as e:
+        return False, f"本機 watchlist.json 寫入失敗：{e}"
+
+
 def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
     payload = _normalize_watchlist_payload(data)
+
+    ok_local, msg_local = _write_watchlist_local(payload)
     ok_github, msg_github = _push_watchlist_to_github(payload)
     ok_firestore, msg_firestore = _push_watchlist_to_firestore(payload)
 
@@ -1346,17 +1363,19 @@ def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
     st.session_state["watchlist_last_saved_at"] = _now_text()
 
     st.session_state[_k("last_dual_write_detail")] = [
+        f"本機: {'成功' if ok_local else '失敗'} | {msg_local}",
         f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
         f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
     ]
 
-    if ok_github and ok_firestore:
-        _set_status("GitHub + Firestore 同步成功", "success")
+    if ok_local and ok_github and ok_firestore:
+        _set_status("本機 + GitHub + Firestore 同步成功", "success")
         return True
-    if ok_github or ok_firestore:
-        _set_status("部分同步成功", "warning")
+    if ok_local or ok_github or ok_firestore:
+        _set_status("自選股已保存；部分同步來源失敗，請查看同步明細。", "warning")
         return True
-    _set_status("GitHub / Firestore 都失敗", "error")
+
+    _set_status("本機 / GitHub / Firestore 都寫入失敗", "error")
     return False
 
 
@@ -4765,7 +4784,11 @@ def main():
     if add_selected_btn:
         selected_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
         if not selected_codes:
-            st.warning("請先勾選推薦股票。")
+            snap = st.session_state.get(_k("selected_rec_snapshot"))
+            if isinstance(snap, pd.DataFrame) and not snap.empty and "股票代號" in snap.columns:
+                selected_codes = [_normalize_code(x) for x in snap["股票代號"].astype(str).tolist() if _normalize_code(x)]
+        if not selected_codes:
+            st.warning("請先勾選推薦股票。可在『本輪精華推薦』表格勾選後，直接按表格下方加入自選股。")
         else:
             picked_rows = []
             work = rec_df[rec_df["股票代號"].astype(str).isin(selected_codes)].copy()
@@ -4934,6 +4957,56 @@ def main():
     selected_snapshot_top = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
     st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_top
     st.session_state["godpick_rec_selected_df"] = selected_snapshot_top
+
+    if picked_codes_from_top:
+        st.success(f"已勾選 {len(picked_codes_from_top)} 檔：可直接加入自選股或寫入股神推薦紀錄。")
+
+        fast_a1, fast_a2, fast_a3 = st.columns([1.4, 1.4, 2.2])
+        with fast_a1:
+            quick_add_watchlist = st.button("將勾選股票加入自選股中心", use_container_width=True, type="primary", key=_k("quick_add_watchlist_from_editor"))
+        with fast_a2:
+            quick_add_record = st.button("將勾選股票寫入股神推薦紀錄", use_container_width=True, key=_k("quick_add_record_from_editor"))
+        with fast_a3:
+            st.caption("此處直接使用表格勾選結果，不需要再到上方多選一次。")
+
+        if quick_add_watchlist:
+            pick_group = _safe_str(st.session_state.get(_k("rec_pick_group"), ""))
+            if not pick_group:
+                st.warning("請先在上方選擇或新增自選股群組。")
+            else:
+                work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
+                picked_rows = []
+                for _, r in work.iterrows():
+                    picked_rows.append(
+                        {
+                            "code": _normalize_code(r.get("股票代號")),
+                            "name": _safe_str(r.get("股票名稱")),
+                            "market": _safe_str(r.get("市場別")) or "上市",
+                            "category": _normalize_category(r.get("類別")),
+                        }
+                    )
+                added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
+                if added > 0:
+                    st.success(f"已加入 {added} 檔到自選股中心：{pick_group}")
+                    st.session_state[_k("rec_pick_codes")] = picked_codes_from_top
+                    st.rerun()
+                else:
+                    st.warning("沒有新增成功，可能已存在或寫入失敗。")
+                with st.expander("加入自選股明細", expanded=True):
+                    for msg in messages:
+                        st.write(f"- {msg}")
+
+        if quick_add_record:
+            record_rows = _build_record_rows_from_rec_df(rec_df, picked_codes_from_top)
+            added_count, record_msgs = _append_godpick_records(record_rows)
+            if added_count > 0:
+                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
+                st.session_state[_k("rec_record_codes")] = picked_codes_from_top
+            else:
+                st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
+            with st.expander("推薦紀錄寫入明細", expanded=True):
+                for msg in record_msgs:
+                    st.write(f"- {msg}")
 
     pick_options = top_df["股票代號"].astype(str).tolist()
     if pick_options and st.session_state.get(_k("focus_code"), "") not in pick_options:
