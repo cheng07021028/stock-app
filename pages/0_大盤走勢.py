@@ -119,6 +119,16 @@ RECORD_COLUMNS = [
     "誤判主因類別",
     "誤判主因",
     "收盤檢討",
+    "總體風險分桶",
+    "進攻防守 regime",
+    "資金流向判斷",
+    "隔日劇本",
+    "盤中確認訊號",
+    "倉位上限%",
+    "ETF參考動作",
+    "個股操作總則",
+    "模型一致性分數",
+    "模型分歧警示",
     "備註",
 ]
 
@@ -238,6 +248,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "NQ夜盤漲跌%", "外資買賣超估分", "期貨選擇權估分", "類股輪動估分",
         "外資買賣超(億)", "三大法人合計(億)", "外資期貨淨單", "PCR", "融資增減(億)", "融券增減張",
         "實際漲跌點", "實際高點", "實際低點", "點數誤差", "進場建議績效分", "出場建議績效分", "整體檢討分",
+        "倉位上限%", "模型一致性分數",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -1165,11 +1176,182 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     }
 
 
+
+# =========================================================
+# 華爾街級大盤決策引擎：regime / risk bucket / playbook
+# =========================================================
+def _score_to_regime(total_score: float, risk_level: str, ctx: dict[str, Any]) -> tuple[str, str]:
+    vix = _safe_float(ctx.get("vix_val"), 18) or 18
+    news = _safe_float(ctx.get("news_score"), 0) or 0
+    if risk_level in {"極高", "高"} or vix >= 26 or news >= 5:
+        return "Risk-Off｜防守模式", "風險優先，降低槓桿與追價行為"
+    if total_score >= 18:
+        return "Risk-On｜進攻模式", "順勢偏多，允許核心強勢股分批進攻"
+    if total_score >= 6:
+        return "Selective Long｜精選偏多", "只做強勢族群與低風險買點"
+    if total_score <= -12:
+        return "De-risk｜降風險模式", "偏空結構，優先保護本金"
+    return "Neutral｜震盪模式", "等待方向確認，以低接高出與風控為主"
+
+
+def _risk_bucket(total_score: float, risk_level: str, ctx: dict[str, Any]) -> str:
+    vix = _safe_float(ctx.get("vix_val"), 18) or 18
+    fx = _safe_float(ctx.get("fx_val"), 32) or 32
+    news = _safe_float(ctx.get("news_score"), 0) or 0
+    if risk_level == "極高" or vix >= 30 or news >= 6:
+        return "紅燈｜重大風險"
+    if risk_level == "高" or vix >= 24 or fx >= 32.8:
+        return "橘燈｜高波動"
+    if total_score >= 12 and vix < 22:
+        return "綠燈｜可進攻"
+    if abs(total_score) < 6:
+        return "黃燈｜震盪觀察"
+    return "藍燈｜選股優先"
+
+
+def _capital_flow_judgement(ctx: dict[str, Any]) -> str:
+    foreign = _safe_float(ctx.get("foreign_amt"), 0) or 0
+    total3 = _safe_float(ctx.get("total3_amt"), 0) or 0
+    pcr = _safe_float(ctx.get("pcr"), 1) or 1
+    margin = _safe_float(ctx.get("margin_change"), 0) or 0
+    parts = []
+    if foreign > 80:
+        parts.append("外資強買")
+    elif foreign > 20:
+        parts.append("外資偏買")
+    elif foreign < -80:
+        parts.append("外資強賣")
+    elif foreign < -20:
+        parts.append("外資偏賣")
+    else:
+        parts.append("外資中性")
+
+    if total3 > 100:
+        parts.append("三大法人同步偏多")
+    elif total3 < -100:
+        parts.append("三大法人同步偏空")
+
+    if pcr >= 1.18:
+        parts.append("選擇權避險偏多")
+    elif pcr <= 0.82:
+        parts.append("選擇權偏空/過熱警戒")
+
+    if margin > 20:
+        parts.append("融資增加需防追價")
+    elif margin < -20:
+        parts.append("融資下降籌碼較乾淨")
+    return "｜".join(parts)
+
+
+def _position_ceiling(total_score: float, risk_level: str, ctx: dict[str, Any]) -> float:
+    vix = _safe_float(ctx.get("vix_val"), 18) or 18
+    news = _safe_float(ctx.get("news_score"), 0) or 0
+    base = 35.0
+    if total_score >= 18:
+        base = 70.0
+    elif total_score >= 10:
+        base = 55.0
+    elif total_score >= 3:
+        base = 35.0
+    elif total_score <= -10:
+        base = 10.0
+    else:
+        base = 20.0
+
+    if risk_level in {"高", "極高"}:
+        base -= 20
+    if vix >= 25:
+        base -= 15
+    if news >= 4:
+        base -= 10
+    return float(max(0, min(80, base)))
+
+
+def _build_next_day_playbook(row: dict[str, Any], ctx: dict[str, Any]) -> tuple[str, str, str, str]:
+    score = _safe_float(row.get("股神模式分數"), 0) or 0
+    direction = _safe_str(row.get("推估方向"))
+    risk_level = _safe_str(row.get("風險等級"))
+    base = _safe_float(row.get("大盤基準點"), _safe_float(ctx.get("tw_close"), 0)) or 0
+    pred_high = _safe_float(row.get("預估高點"), base) or base
+    pred_low = _safe_float(row.get("預估低點"), base) or base
+
+    if direction == "偏多" and risk_level not in {"高", "極高"}:
+        playbook = (
+            f"開盤若站穩 {base:,.0f} 且量能不縮，採分批偏多；"
+            f"接近 {pred_high:,.0f} 不追價，回測不破再加碼。"
+        )
+        intraday = "盤中確認：金融/電子權值同步強、台積電ADR/半導體族群不轉弱、外資期貨未急殺。"
+        etf_action = "ETF參考：可偏多分批，避免單筆滿倉；若急拉接近高點則等回測。"
+        stock_rule = "個股總則：優先強勢族群龍頭、突破後回測不破者；避開爆量長上影。"
+    elif direction == "偏空" or risk_level in {"高", "極高"}:
+        playbook = (
+            f"若跌破 {base:,.0f} 或盤中反彈無量，降低持股；"
+            f"接近 {pred_low:,.0f} 觀察是否止跌，不急著攤平。"
+        )
+        intraday = "盤中確認：反彈量不足、權值股弱於大盤、VIX/匯率走升時提高現金。"
+        etf_action = "ETF參考：不追空但降低曝險；有槓桿部位優先降風險。"
+        stock_rule = "個股總則：跌破MA20或支撐轉弱者先減碼；只留低位階強勢股。"
+    else:
+        playbook = (
+            f"區間震盪：上緣參考 {pred_high:,.0f}、下緣參考 {pred_low:,.0f}；"
+            "不追高，等量價確認方向。"
+        )
+        intraday = "盤中確認：等待突破區間且成交量放大；若多空不同步，以保守倉位處理。"
+        etf_action = "ETF參考：以小倉位區間操作，不做重倉方向押注。"
+        stock_rule = "個股總則：只做有事件/族群支撐的個股，沒有量能不進場。"
+    return playbook, intraday, etf_action, stock_rule
+
+
+def _model_consensus(pred_df: pd.DataFrame) -> tuple[float, str]:
+    if pred_df is None or pred_df.empty or "推估方向" not in pred_df.columns:
+        return 0.0, "模型不足"
+    direction_counts = pred_df["推估方向"].astype(str).value_counts()
+    top_dir = direction_counts.index[0]
+    top_ratio = float(direction_counts.iloc[0] / max(1, len(pred_df)) * 100)
+    if top_ratio >= 80:
+        msg = f"模型高度一致：{top_dir} {top_ratio:.0f}%"
+    elif top_ratio >= 60:
+        msg = f"模型偏向一致：{top_dir} {top_ratio:.0f}%"
+    else:
+        msg = f"模型分歧：最大共識僅 {top_dir} {top_ratio:.0f}%"
+    return top_ratio, msg
+
+
+def _enrich_macro_predictions(pred_df: pd.DataFrame, ctx: dict[str, Any]) -> pd.DataFrame:
+    if pred_df is None or pred_df.empty:
+        return pred_df
+    out = pred_df.copy()
+    consensus, consensus_msg = _model_consensus(out)
+    enriched_rows = []
+    for _, row in out.iterrows():
+        r = dict(row)
+        score = _safe_float(r.get("股神模式分數"), 0) or 0
+        risk = _safe_str(r.get("風險等級"))
+        regime, regime_note = _score_to_regime(score, risk, ctx)
+        playbook, intraday, etf_action, stock_rule = _build_next_day_playbook(r, ctx)
+
+        r["總體風險分桶"] = _risk_bucket(score, risk, ctx)
+        r["進攻防守 regime"] = regime
+        r["資金流向判斷"] = _capital_flow_judgement(ctx)
+        r["隔日劇本"] = playbook
+        r["盤中確認訊號"] = intraday
+        r["倉位上限%"] = _position_ceiling(score, risk, ctx)
+        r["ETF參考動作"] = etf_action
+        r["個股操作總則"] = stock_rule
+        r["模型一致性分數"] = consensus
+        r["模型分歧警示"] = consensus_msg
+        if _safe_str(r.get("股神推論邏輯")):
+            r["股神推論邏輯"] = _safe_str(r.get("股神推論邏輯")) + f"\n進攻防守：{regime}｜{regime_note}\n模型共識：{consensus_msg}"
+        enriched_rows.append(r)
+    return pd.DataFrame(enriched_rows)
+
+
 def _predict_all_models(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     ctx = _calc_market_context(pred_date_text)
     weights = _get_dynamic_weights(records_df)
     rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
     pred_df = pd.DataFrame(rows)
+    pred_df = _enrich_macro_predictions(pred_df, ctx)
     pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
     pred_df = pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False]).reset_index(drop=True)
     return pred_df, ctx
@@ -1301,7 +1483,8 @@ def _format_pred_df(df: pd.DataFrame) -> pd.DataFrame:
     for c in [
         "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "預估區間寬度", "國際新聞風險分",
         "美股因子分", "夜盤因子分", "技術面因子分", "籌碼面因子分", "事件因子分", "結構面因子分", "風險面因子分",
-        "加權漲跌%", "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%", "NQ夜盤漲跌%"
+        "加權漲跌%", "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%", "NQ夜盤漲跌%",
+        "倉位上限%", "模型一致性分數"
     ]:
         if c in x.columns:
             x[c] = x[c].apply(lambda v: "" if pd.isna(v) else f"{float(v):,.2f}")
@@ -1596,6 +1779,37 @@ def main():
     ])
 
 
+    render_pro_section("華爾街決策儀表板｜Regime / 風險 / 劇本")
+    render_pro_kpi_row([
+        {"label": "風險分桶", "value": _safe_str(top_pick.get("總體風險分桶")) or "-", "delta": _safe_str(top_pick.get("風險等級")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "進攻防守", "value": _safe_str(top_pick.get("進攻防守 regime")) or "-", "delta": _safe_str(top_pick.get("建議動作")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "資金流", "value": _safe_str(top_pick.get("資金流向判斷"))[:22] or "-", "delta": _safe_str(ctx.get("sector_strong")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "倉位上限", "value": f"{_safe_float(top_pick.get('倉位上限%'), 0):.0f}%", "delta": _safe_str(top_pick.get("建議倉位")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "模型一致性", "value": f"{_safe_float(top_pick.get('模型一致性分數'), 0):.0f}%", "delta": _safe_str(top_pick.get("模型分歧警示")), "delta_class": "pro-kpi-delta-flat"},
+    ])
+
+    wall_a, wall_b = st.columns([1.25, 1.25])
+    with wall_a:
+        render_pro_info_card(
+            "隔日交易劇本",
+            [
+                ("隔日劇本", _safe_str(top_pick.get("隔日劇本")), ""),
+                ("盤中確認訊號", _safe_str(top_pick.get("盤中確認訊號")), ""),
+                ("ETF參考動作", _safe_str(top_pick.get("ETF參考動作")), ""),
+            ],
+            chips=["劇本", "盤中確認", "ETF"],
+        )
+    with wall_b:
+        render_pro_info_card(
+            "個股與倉位總則",
+            [
+                ("個股操作總則", _safe_str(top_pick.get("個股操作總則")), ""),
+                ("模型分歧警示", _safe_str(top_pick.get("模型分歧警示")), ""),
+                ("資金流向判斷", _safe_str(top_pick.get("資金流向判斷")), ""),
+            ],
+            chips=["個股", "倉位", "風控"],
+        )
+
     factor_cols = st.columns(4)
     with factor_cols[0]:
         st.metric("外資買賣超(億)", ("-" if ctx.get("foreign_amt") is None else f"{ctx.get('foreign_amt'):.1f}"), delta=f"三大法人 {0 if ctx.get('total3_amt') is None else ctx.get('total3_amt'):.1f} ｜ {(_safe_str(ctx.get('inst_used_date')) or '估算')}")
@@ -1642,7 +1856,8 @@ def main():
         render_pro_section("本次模式比較")
         show_cols = [
             "模式名稱", "推估方向", "方向強度", "建議動作", "股神模式分數", "股神信心度",
-            "預估漲跌點", "風險等級", "技術面因子分", "美股因子分", "夜盤因子分",
+            "預估漲跌點", "風險等級", "總體風險分桶", "進攻防守 regime", "倉位上限%",
+            "技術面因子分", "美股因子分", "夜盤因子分",
             "籌碼面因子分", "事件因子分", "國際新聞風險分",
         ]
         st.dataframe(_format_pred_df(pred_df[show_cols]), use_container_width=True, hide_index=True)
@@ -1702,6 +1917,7 @@ def main():
         preview_cols = [
             "推估日期", "模式名稱", "推估方向", "方向強度", "是否適合進場", "是否適合續抱", "是否適合減碼", "是否適合出場",
             "建議動作", "建議倉位", "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "風險等級",
+            "總體風險分桶", "進攻防守 regime", "資金流向判斷", "倉位上限%", "隔日劇本", "盤中確認訊號",
             "主要風險", "加權資料日期", "美股資料日期", "夜盤資料日期", "法人資料日期", "期權資料日期", "融資券資料日期", "進場確認條件", "出場警訊"
         ]
         st.dataframe(_format_pred_df(pred_df[[c for c in preview_cols if c in pred_df.columns]]), use_container_width=True, hide_index=True)
