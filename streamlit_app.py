@@ -63,6 +63,83 @@ def _fmt_num(v: Any, digits: int = 2) -> str:
     return format_number(v, digits)
 
 
+# =========================================================
+# 本頁專用安全卡片渲染
+# 說明：覆蓋 utils.render_pro_info_card，避免 utils 舊快取或 HTML escaping 造成 <div> 原始碼顯示在頁面。
+# 支援 info_pairs = (label, value) 或 (label, value, css_class)，不影響其他頁面。
+# =========================================================
+def render_pro_info_card(title, info_pairs, chips=None):
+    import html
+
+    safe_title = html.escape(_safe_str(title) or "—")
+
+    chips_html = ""
+    if chips:
+        if isinstance(chips, str):
+            chip_list = [chips]
+        else:
+            chip_list = list(chips)
+        chips_html = "".join(
+            f'<span class="pro-chip">{html.escape(_safe_str(x))}</span>'
+            for x in chip_list
+            if _safe_str(x)
+        )
+
+    items_html = ""
+    for pair in info_pairs or []:
+        label = ""
+        value = ""
+        css_class = ""
+        try:
+            if isinstance(pair, (list, tuple)):
+                if len(pair) >= 1:
+                    label = pair[0]
+                if len(pair) >= 2:
+                    value = pair[1]
+                if len(pair) >= 3:
+                    css_class = pair[2]
+            elif isinstance(pair, dict):
+                label = pair.get("label", "")
+                value = pair.get("value", "")
+                css_class = pair.get("css_class", "")
+            else:
+                value = pair
+        except Exception:
+            value = pair
+
+        safe_label = html.escape(_safe_str(label) or "—")
+        safe_value = html.escape(_safe_str(value) or "—")
+        safe_css = html.escape(_safe_str(css_class))
+
+        items_html += f"""
+        <div class="pro-info-item">
+            <div class="pro-info-label">{safe_label}</div>
+            <div class="pro-info-value {safe_css}">{safe_value}</div>
+        </div>
+        """
+
+    if not items_html.strip():
+        items_html = """
+        <div class="pro-info-item">
+            <div class="pro-info-label">狀態</div>
+            <div class="pro-info-value">—</div>
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="pro-card">
+            <div class="pro-card-title">{safe_title}</div>
+            <div style="margin-bottom:10px;">{chips_html}</div>
+            <div class="pro-info-grid">
+                {items_html}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _godpick_records_github_config() -> dict[str, str]:
     return {
         "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
