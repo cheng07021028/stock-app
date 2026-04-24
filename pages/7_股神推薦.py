@@ -478,6 +478,7 @@ def _load_persistent_settings() -> dict[str, Any]:
     default_payload = {
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "applied_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
+        "column_orders": {},
         "updated_at": "",
         "version": "godpick_v4_weight_persistent",
     }
@@ -498,12 +499,36 @@ def _load_persistent_settings() -> dict[str, Any]:
 
 
 def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, list[str]]:
+    old_payload = _load_persistent_settings()
     payload = {
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "applied_weights": _normalize_weight_map(applied_weights),
+        "column_orders": old_payload.get("column_orders", {}) if isinstance(old_payload, dict) else {},
         "updated_at": _now_text(),
         "version": "godpick_v4_weight_persistent",
     }
+    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
+    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
+    return (local_ok or github_ok), [local_msg, github_msg]
+
+
+def _load_persistent_column_order(name: str) -> list[str]:
+    payload = _load_persistent_settings()
+    orders = payload.get("column_orders", {}) if isinstance(payload, dict) else {}
+    val = orders.get(name, []) if isinstance(orders, dict) else []
+    return val if isinstance(val, list) else []
+
+
+def _save_persistent_column_order(name: str, order: list[str]) -> tuple[bool, list[str]]:
+    payload = _load_persistent_settings()
+    orders = payload.get("column_orders", {}) if isinstance(payload, dict) else {}
+    if not isinstance(orders, dict):
+        orders = {}
+    orders[name] = [str(x) for x in order if str(x)]
+    payload["column_orders"] = orders
+    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
+    payload["updated_at"] = _now_text()
+    payload["version"] = "godpick_v4_weight_persistent"
     local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
     return (local_ok or github_ok), [local_msg, github_msg]
@@ -4408,23 +4433,18 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
     draft_key = _k(f"column_order_draft_{name}")
     pick_key = _k(f"column_pick_{name}")
 
-    applied_order = _normalize_column_order(
-        st.session_state.get(applied_key, st.session_state.get(state_key, default_cols)),
-        available_cols,
-        default_cols,
-    )
-    draft_order = _normalize_column_order(
-        st.session_state.get(draft_key, applied_order),
-        available_cols,
-        default_cols,
-    )
+    persistent_order = _load_persistent_column_order(name)
+    base_order = persistent_order if persistent_order else st.session_state.get(applied_key, st.session_state.get(state_key, default_cols))
+
+    applied_order = _normalize_column_order(base_order, available_cols, default_cols)
+    draft_order = _normalize_column_order(st.session_state.get(draft_key, applied_order), available_cols, default_cols)
 
     st.session_state[applied_key] = applied_order
     st.session_state[draft_key] = draft_order
     st.session_state[state_key] = applied_order
 
     with st.expander(title, expanded=False):
-        st.caption("可調整欄位順序；調整後先暫存，按「套用」後才永久套用到表格。")
+        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定。")
         if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
             st.session_state[pick_key] = draft_order[0] if draft_order else ""
         picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
@@ -4464,9 +4484,9 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
             cancel_clicked = st.button("取消暫存", key=_k(f"cancel_column_order_{name}"), use_container_width=True)
         with a3:
             if draft_order != applied_order:
-                st.warning("欄位順序已有變更，按「套用」後才會正式套用。")
+                st.warning("欄位順序已有暫存變更；按「套用」後才會永久記錄。")
             else:
-                st.caption("目前已套用最新欄位順序。")
+                st.caption("目前欄位順序已套用並會永久保留。")
 
         if changed:
             st.session_state[draft_key] = draft_order
@@ -4477,7 +4497,11 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
             st.session_state[applied_key] = applied_order
             st.session_state[state_key] = applied_order
             st.session_state[draft_key] = applied_order
-            st.success("欄位順序已套用。")
+            ok, msgs = _save_persistent_column_order(name, applied_order)
+            st.success("欄位順序已套用並永久記錄。" if ok else "欄位順序已套用，但永久記錄失敗。")
+            with st.expander("欄位設定保存明細", expanded=False):
+                for msg in msgs:
+                    st.write(f"- {msg}")
             st.rerun()
 
         if cancel_clicked:
@@ -4844,8 +4868,13 @@ def main():
         _render_recommendation_scoring_guide()
 
     if not st.session_state.get(_k("submitted_once"), False):
-        st.info("請先設定條件，再按「開始推薦」。")
-        return
+        saved_rec_df, saved_cat_df, saved_hot_df = _load_recommend_result_from_state()
+        if isinstance(saved_rec_df, pd.DataFrame) and not saved_rec_df.empty:
+            st.session_state[_k("submitted_once")] = True
+            st.info("已載入上一次推薦結果；資料會保留到下一次按「開始推薦 / 重新推薦」才覆蓋。")
+        else:
+            st.info("請先設定條件，再按「開始推薦」。")
+            return
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
     universe_mode = _safe_str(st.session_state.get(_k("universe_mode"), ""))
