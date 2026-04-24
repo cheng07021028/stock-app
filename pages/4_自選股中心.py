@@ -21,9 +21,8 @@ from utils import (
 )
 
 from stock_master_service import load_stock_master, search_stock_master
-from watchlist_runtime_sync import ensure_watchlist_runtime_fresh
 
-PAGE_TITLE = "自選股中心｜升級完整版"
+PAGE_TITLE = "自選股中心"
 PFX = "watch_"
 
 
@@ -172,111 +171,8 @@ def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple
 # =========================================================
 # 讀取 / 儲存
 # =========================================================
-
-def _godpick_records_github_config() -> dict[str, str]:
-    return {
-        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
-        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
-        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
-        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
-        "path": _safe_str(st.secrets.get("GODPICK_RECORDS_GITHUB_PATH", "godpick_records.json")) or "godpick_records.json",
-    }
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_godpick_records_df() -> pd.DataFrame:
-    cfg = _godpick_records_github_config()
-    token = cfg["token"]
-    cols = [
-        "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-        "買點分級", "型態名稱", "爆發等級", "推薦日期", "推薦時間", "更新時間", "目前狀態",
-        "是否已實際買進", "推薦標籤"
-    ]
-    if not token:
-        return pd.DataFrame(columns=cols)
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return pd.DataFrame(columns=cols)
-        content = resp.json().get("content", "")
-        if not content:
-            return pd.DataFrame(columns=cols)
-        payload = json.loads(base64.b64decode(content).decode("utf-8"))
-        df = pd.DataFrame(payload if isinstance(payload, list) else [])
-        for c in cols:
-            if c not in df.columns:
-                df[c] = None
-        df["股票代號"] = df["股票代號"].map(_normalize_code)
-        df["推薦總分"] = pd.to_numeric(df["推薦總分"], errors="coerce")
-        df["推薦日期"] = df["推薦日期"].fillna("").astype(str)
-        df["推薦時間"] = df["推薦時間"].fillna("").astype(str)
-        df["更新時間"] = df["更新時間"].fillna("").astype(str)
-        return df[cols].copy()
-    except Exception:
-        return pd.DataFrame(columns=cols)
-
-
-def _build_latest_rec_map(rec_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    if rec_df is None or rec_df.empty:
-        return {}
-    work = rec_df.copy()
-    work["_sort_dt"] = pd.to_datetime(
-        work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str),
-        errors="coerce"
-    )
-    work["_upd_dt"] = pd.to_datetime(work["更新時間"], errors="coerce")
-    work = work.sort_values(["股票代號", "_sort_dt", "_upd_dt"], ascending=[True, False, False], na_position="last")
-    work = work.drop_duplicates(subset=["股票代號"], keep="first")
-    out = {}
-    for _, r in work.iterrows():
-        code = _normalize_code(r.get("股票代號"))
-        if code:
-            out[code] = {
-                "最近推薦模式": _safe_str(r.get("推薦模式")),
-                "最近推薦總分": r.get("推薦總分"),
-                "買點分級": _safe_str(r.get("買點分級")),
-                "型態名稱": _safe_str(r.get("型態名稱")),
-                "爆發等級": _safe_str(r.get("爆發等級")),
-                "最近推薦日期": _safe_str(r.get("推薦日期")),
-                "最近推薦時間": _safe_str(r.get("推薦時間")),
-                "最近推薦狀態": _safe_str(r.get("目前狀態")),
-                "是否已寫入推薦紀錄": "是",
-            }
-    return out
-
-
-def _enrich_watchlist_rows(rows_df: pd.DataFrame, rec_map: dict[str, dict[str, Any]]) -> pd.DataFrame:
-    if rows_df is None or rows_df.empty:
-        return rows_df
-    x = rows_df.copy()
-    x["股票代號"] = x["股票代號"].map(_normalize_code)
-    x["是否曾被股神推薦"] = x["股票代號"].map(lambda c: "是" if c in rec_map else "否")
-    x["最近推薦總分"] = x["股票代號"].map(lambda c: rec_map.get(c, {}).get("最近推薦總分"))
-    x["買點分級"] = x["股票代號"].map(lambda c: rec_map.get(c, {}).get("買點分級", ""))
-    x["最近推薦模式"] = x["股票代號"].map(lambda c: rec_map.get(c, {}).get("最近推薦模式", ""))
-    x["型態名稱"] = x["股票代號"].map(lambda c: rec_map.get(c, {}).get("型態名稱", ""))
-    x["爆發等級"] = x["股票代號"].map(lambda c: rec_map.get(c, {}).get("爆發等級", ""))
-    x["最近推薦時間"] = x["股票代號"].map(
-        lambda c: ((rec_map.get(c, {}).get("最近推薦日期", "") + " " + rec_map.get(c, {}).get("最近推薦時間", "")).strip())
-    )
-    x["是否已寫入推薦紀錄"] = x["股票代號"].map(lambda c: rec_map.get(c, {}).get("是否已寫入推薦紀錄", "否"))
-    return x
-
-
-def _send_group_to_other_pages(group_name: str, codes: list[str]):
-    st.session_state["godpick_last_watch_group"] = _safe_str(group_name)
-    st.session_state["godpick_last_watch_codes"] = [str(_normalize_code(x)) for x in codes if _normalize_code(x)]
-    st.session_state["godpick_last_watch_sent_at"] = _now_text()
 def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
-    raw = ensure_watchlist_runtime_fresh(
-        load_func=get_normalized_watchlist,
-        namespace="watchlist_center",
-    )
+    raw = get_normalized_watchlist()
     result: dict[str, list[dict[str, str]]] = {}
 
     if isinstance(raw, dict):
@@ -291,16 +187,14 @@ def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
                     code = _normalize_code(item.get("code"))
                     name = _safe_str(item.get("name")) or code
                     market = _safe_str(item.get("market")) or "上市"
-                    category = _safe_str(item.get("category"))
                     if code:
-                        row = {
-                            "code": code,
-                            "name": name,
-                            "market": market,
-                        }
-                        if category:
-                            row["category"] = category
-                        result[g].append(row)
+                        result[g].append(
+                            {
+                                "code": code,
+                                "name": name,
+                                "market": market,
+                            }
+                        )
     return result
 
 
@@ -449,18 +343,9 @@ def _init_state():
     _repair_selected_group()
 
     st.session_state["watchlist_data"] = copy.deepcopy(st.session_state[_k("watchlist")])
-    st.session_state["watchlist_version"] = max(
-        int(st.session_state.get("watchlist_version", 0) or 0),
-        int(st.session_state.get(_k("version"), 0) or 0),
-    )
-    st.session_state["watchlist_last_saved_at"] = (
-        st.session_state.get("watchlist_last_saved_at", "")
-        or st.session_state.get(_k("last_saved_at"), "")
-    )
-    st.session_state["watchlist_last_saved_hash"] = (
-        st.session_state.get("watchlist_last_saved_hash", "")
-        or st.session_state.get(_k("payload_hash"), "")
-    )
+    st.session_state["watchlist_version"] = st.session_state.get(_k("version"), 0)
+    st.session_state["watchlist_last_saved_at"] = st.session_state.get(_k("last_saved_at"), "")
+    st.session_state["watchlist_last_saved_hash"] = st.session_state.get(_k("payload_hash"), "")
 
 
 def _repair_selected_group():
@@ -764,7 +649,7 @@ def _apply_bulk_add(group_name: str, text: str) -> tuple[int, list[str]]:
 # =========================================================
 # 畫面資料
 # =========================================================
-def _build_overview_df(watchlist: dict[str, list[dict[str, str]]], rec_map: dict[str, dict[str, Any]] | None = None) -> pd.DataFrame:
+def _build_overview_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
     rows = []
     for group_name, items in watchlist.items():
         for item in items:
@@ -779,28 +664,21 @@ def _build_overview_df(watchlist: dict[str, list[dict[str, str]]], rec_map: dict
             )
     if not rows:
         return pd.DataFrame(columns=["群組", "股票代號", "股票名稱", "市場別", "股票"])
-    out = pd.DataFrame(rows).sort_values(["群組", "股票代號"]).reset_index(drop=True)
-    return _enrich_watchlist_rows(out, rec_map or {})
+    return pd.DataFrame(rows).sort_values(["群組", "股票代號"]).reset_index(drop=True)
 
 
-def _build_group_summary_df(watchlist: dict[str, list[dict[str, str]]], rec_map: dict[str, dict[str, Any]] | None = None) -> pd.DataFrame:
-    rec_map = rec_map or {}
+def _build_group_summary_df(watchlist: dict[str, list[dict[str, str]]]) -> pd.DataFrame:
     rows = []
     for group_name, items in watchlist.items():
-        codes = [_normalize_code(x.get("code")) for x in items if _normalize_code(x.get("code"))]
-        rec_codes = [c for c in codes if c in rec_map]
         rows.append(
             {
                 "群組": group_name,
                 "股票數": len(items),
-                "已被推薦數": len(rec_codes),
-                "推薦覆蓋率%": round((len(rec_codes) / len(codes) * 100), 2) if codes else 0.0,
-                "平均最近推薦分數": round(pd.to_numeric(pd.Series([rec_map.get(c, {}).get("最近推薦總分") for c in rec_codes]), errors="coerce").dropna().mean(), 2) if rec_codes else None,
                 "市場別組成": " / ".join(sorted(set([_safe_str(x.get("market")) or "上市" for x in items]))) if items else "—",
             }
         )
     if not rows:
-        return pd.DataFrame(columns=["群組", "股票數", "已被推薦數", "推薦覆蓋率%", "平均最近推薦分數", "市場別組成"])
+        return pd.DataFrame(columns=["群組", "股票數", "市場別組成"])
     return pd.DataFrame(rows).sort_values(["股票數", "群組"], ascending=[False, True]).reset_index(drop=True)
 
 
@@ -850,8 +728,6 @@ def main():
 
     watchlist = st.session_state[_k("watchlist")]
     master_df = st.session_state[_k("master_df")]
-    rec_df = _load_godpick_records_df()
-    rec_map = _build_latest_rec_map(rec_df)
     _repair_selected_group()
 
     current_group = _safe_str(st.session_state.get(_k("selected_group"), ""))
@@ -859,28 +735,19 @@ def main():
         st.session_state[_k("rename_group_name")] = current_group
 
     render_pro_hero(
-        title="自選股中心｜升級完整版",
-        subtitle="保留 GitHub 強制回寫，並串接股神推薦紀錄，顯示最近推薦分數 / 買點分級 / 推薦模式 / 推薦時間。",
+        title="自選股中心｜GitHub API 強制回寫版",
+        subtitle="只要新增、刪除、改名、批次操作，都直接 commit 回 GitHub repo 的 watchlist.json。",
     )
     st.caption("股票主檔來源已統一改由 stock_master_service.py 提供，與股神推薦 / 股票主檔更新頁共用同一份主檔。")
-    st.caption(
-        f"watchlist_version：{int(st.session_state.get('watchlist_version', 0) or 0)}"
-        + (
-            f"｜最後同步：{_safe_str(st.session_state.get('watchlist_last_saved_at', ''))}"
-            if _safe_str(st.session_state.get('watchlist_last_saved_at', ''))
-            else ""
-        )
-    )
 
-    overview_df = _build_overview_df(watchlist, rec_map)
-    group_summary_df = _build_group_summary_df(watchlist, rec_map)
+    overview_df = _build_overview_df(watchlist)
+    group_summary_df = _build_group_summary_df(watchlist)
     github_cfg = _github_config()
 
     render_pro_kpi_row(
         [
             {"label": "群組數", "value": len(watchlist), "delta": "自選股群組", "delta_class": "pro-kpi-delta-flat"},
             {"label": "股票總數", "value": len(overview_df), "delta": "自選股總計", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "已被股神推薦", "value": int((overview_df["是否曾被股神推薦"] == "是").sum()) if not overview_df.empty else 0, "delta": "推薦覆蓋", "delta_class": "pro-kpi-delta-flat"},
             {"label": "同步版本", "value": st.session_state.get(_k("version"), 0), "delta": "GitHub commit", "delta_class": "pro-kpi-delta-flat"},
             {"label": "最後儲存", "value": st.session_state.get(_k("last_saved_at"), "—") or "—", "delta": github_cfg["path"], "delta_class": "pro-kpi-delta-flat"},
         ]
@@ -1037,7 +904,6 @@ def main():
 
     with left:
         render_pro_section("群組總覽")
-        st.caption("已串接 7_股神推薦 / 8_股神推薦紀錄，顯示每個群組被推薦覆蓋率與平均最近推薦分數。")
         if group_summary_df.empty:
             st.info("目前沒有任何群組。")
         else:
@@ -1072,12 +938,6 @@ def main():
             show_cols = [c for c in ["股票代號", "股票名稱", "市場別", "正式產業別", "主題類別", "類別", "股票"] if c in display_df.columns]
             st.dataframe(display_df[show_cols], use_container_width=True, hide_index=True)
 
-
-    with st.expander("股神推薦串接說明", expanded=False):
-        st.write("1. 本頁會讀取 godpick_records.json，顯示每檔自選股最近一次股神推薦分數。")
-        st.write("2. 可看見買點分級、最近推薦模式、型態名稱、爆發等級、最近推薦時間。")
-        st.write("3. 按下『將目前群組送到7_股神推薦』後，會把群組代號記到 session_state，方便其他頁承接。")
-
     render_pro_section("目前群組明細")
 
     current_group_name = _safe_str(st.session_state.get(_k("selected_group"), ""))
@@ -1095,28 +955,11 @@ def main():
             for x in current_items
         ]
     )
-    current_df = _enrich_watchlist_rows(current_df, rec_map)
 
     if current_df.empty:
         st.info("目前群組沒有股票。")
     else:
         st.dataframe(current_df, use_container_width=True, hide_index=True)
-
-        action_top = st.columns(3)
-        with action_top[0]:
-            if st.button("🚀 將目前群組送到7_股神推薦", use_container_width=True):
-                _send_group_to_other_pages(current_group_name, current_df["股票代號"].astype(str).tolist())
-                _set_status(f"已記錄群組 {current_group_name}，可到 7_股神推薦.py 接續使用。", "success")
-                st.rerun()
-        with action_top[1]:
-            if st.button("📘 將第一檔送到3_歷史K線分析", use_container_width=True):
-                if not current_df.empty:
-                    st.session_state["kline_focus_stock_code"] = _safe_str(current_df.iloc[0]["股票代號"])
-                    st.session_state["kline_focus_stock_name"] = _safe_str(current_df.iloc[0]["股票名稱"])
-                    _set_status(f"已記錄 {_safe_str(current_df.iloc[0]['股票代號'])}，可到 3_歷史K線分析.py 接續查看。", "success")
-                    st.rerun()
-        with action_top[2]:
-            st.caption(f"最近送出：{_safe_str(st.session_state.get('godpick_last_watch_sent_at', '未送出'))}")
 
         m1, m2 = st.columns(2)
 
@@ -1180,12 +1023,11 @@ def main():
             st.rerun()
 
     render_pro_section("全部自選股總覽")
-    final_overview_df = _build_overview_df(st.session_state[_k("watchlist")], rec_map)
+    final_overview_df = _build_overview_df(st.session_state[_k("watchlist")])
     if final_overview_df.empty:
         st.info("目前沒有任何自選股。")
     else:
-        show_cols = [c for c in ["群組", "股票代號", "股票名稱", "市場別", "是否曾被股神推薦", "最近推薦總分", "買點分級", "最近推薦模式", "型態名稱", "爆發等級", "最近推薦時間", "是否已寫入推薦紀錄"] if c in final_overview_df.columns]
-        st.dataframe(final_overview_df[show_cols], use_container_width=True, hide_index=True)
+        st.dataframe(final_overview_df, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
