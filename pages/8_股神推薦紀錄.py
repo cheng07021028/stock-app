@@ -177,6 +177,19 @@ def _create_record_id(code: str, rec_date: str, rec_time: str, mode: str) -> str
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _record_business_key(row: Any) -> str:
+    """股神推薦紀錄防重複 key。
+
+    防呆規則：同一天同一檔股票只允許一筆推薦紀錄。
+    不使用推薦時間 / 推薦模式，避免同日同股票因時間不同而重複顯示。
+    """
+    try:
+        getter = row.get
+    except Exception:
+        return "|"
+    return f"{_normalize_code(getter('股票代號'))}|{_safe_str(getter('推薦日期'))}"
+
+
 def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_msg")] = msg
     st.session_state[_k("status_type")] = level
@@ -371,11 +384,11 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
         return base_df.copy()
 
     merged = pd.concat([base_df, new_df], ignore_index=True)
+    # 防重複規則：同一天同一檔股票只保留一筆。
+    # 不使用推薦時間 / 推薦模式，避免同日同股票因時間不同而重複顯示。
     merged["_biz_key"] = (
-        merged["股票代號"].fillna("").astype(str) + "|"
-        + merged["推薦日期"].fillna("").astype(str) + "|"
-        + merged["推薦時間"].fillna("").astype(str) + "|"
-        + merged["推薦模式"].fillna("").astype(str)
+        merged["股票代號"].fillna("").astype(str).map(_normalize_code) + "|"
+        + merged["推薦日期"].fillna("").astype(str)
     )
     merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
     merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
@@ -547,7 +560,11 @@ def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
 
 
 def _save_records_dual(df: pd.DataFrame) -> bool:
-    clean_df = _ensure_godpick_record_columns(df)
+    # 儲存前再次防重複，避免表格編輯或外部同步造成重複紀錄。
+    clean_df = _append_records_dedup_by_business_key(
+        pd.DataFrame(columns=GODPICK_RECORD_COLUMNS),
+        _ensure_godpick_record_columns(df),
+    )
     ok1, msg1 = _write_records_to_github(clean_df)
     ok2, msg2 = _write_records_to_firestore(clean_df)
     st.session_state[_k("last_sync_detail")] = [
@@ -1299,6 +1316,8 @@ def _load_records() -> pd.DataFrame:
         f"Firestore: {'OK' if not fs_err else fs_err}",
     ]
     if not base_df.empty:
+        # 進入紀錄頁時先清除同日同股票重複資料，畫面不再看到重複紀錄。
+        base_df = _append_records_dedup_by_business_key(pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), base_df)
         base_df = _ensure_godpick_record_columns(pd.DataFrame([_recalc_row(r) for _, r in base_df.iterrows()]))
     return _ensure_godpick_record_columns(base_df)
 
