@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from utils import (
@@ -196,8 +198,18 @@ def _load_master_df() -> pd.DataFrame:
     out = pd.concat(dfs, ignore_index=True)
     out["code"] = out["code"].map(_normalize_code)
     out["name"] = out["name"].map(_safe_str)
-    out["market"] = out["market"].map(_safe_str).replace("", "上市")
-    out = out[out["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+    out["market"] = out["market"].map(_safe_str)
+
+    market_priority = {"上櫃": 3, "上市": 2, "興櫃": 1, "": 0}
+    out["_priority"] = out["market"].map(lambda x: market_priority.get(_safe_str(x), 0))
+    out = (
+        out[out["code"] != ""]
+        .sort_values(["code", "_priority"], ascending=[True, False])
+        .drop_duplicates(subset=["code"], keep="first")
+        .drop(columns=["_priority"])
+        .reset_index(drop=True)
+    )
+    out["market"] = out["market"].replace("", "上市")
     return out
 
 
@@ -218,17 +230,169 @@ def _find_name_market(code: str, manual_name: str, manual_market: str, master_df
     return manual_name or code, manual_market or "上市"
 
 
+
+def _prepare_history_df_rank(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    if "日期" not in work.columns:
+        return pd.DataFrame()
+    work["日期"] = pd.to_datetime(work["日期"], errors="coerce")
+    work = work.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+
+    for c in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if c in work.columns:
+            work[c] = pd.to_numeric(work[c], errors="coerce")
+        else:
+            work[c] = pd.NA
+
+    if "收盤價" not in work.columns:
+        return pd.DataFrame()
+    work = work.dropna(subset=["收盤價"]).copy()
+    return work
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_yahoo_history_rank(stock_no: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+    code = _normalize_code(stock_no)
+    market_type = _safe_str(market_type)
+    if not code:
+        return pd.DataFrame(), ""
+
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+    if pd.isna(start_ts) or pd.isna(end_ts) or end_ts < start_ts:
+        return pd.DataFrame(), ""
+
+    period1 = int((start_ts - pd.Timedelta(days=5)).timestamp())
+    period2 = int((end_ts + pd.Timedelta(days=2)).timestamp())
+
+    # 上櫃股票優先 .TWO；但若自選股市場別誤標，仍會交叉測 .TW。
+    symbols = [f"{code}.TWO", f"{code}.TW"] if market_type in ["上櫃", "興櫃"] else [f"{code}.TW", f"{code}.TWO"]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    for symbol in symbols:
+        for host in ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]:
+            try:
+                url = f"https://{host}/v8/finance/chart/{symbol}"
+                r = requests.get(
+                    url,
+                    params={
+                        "period1": period1,
+                        "period2": period2,
+                        "interval": "1d",
+                        "events": "history",
+                        "includeAdjustedClose": "true",
+                    },
+                    headers=headers,
+                    timeout=18,
+                    verify=False,
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                result = (((data or {}).get("chart") or {}).get("result") or [])
+                if not result:
+                    continue
+                item = result[0]
+                timestamps = item.get("timestamp") or []
+                quote = (((item.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+                if not timestamps or not quote:
+                    continue
+
+                rows = []
+                for i, ts in enumerate(timestamps):
+                    try:
+                        d = pd.to_datetime(int(ts), unit="s").tz_localize("UTC").tz_convert("Asia/Taipei").tz_localize(None).normalize()
+                    except Exception:
+                        d = pd.to_datetime(int(ts), unit="s")
+
+                    def pick(key):
+                        arr = quote.get(key) or []
+                        return arr[i] if i < len(arr) else None
+
+                    close_v = pick("close")
+                    if close_v is None:
+                        continue
+                    rows.append(
+                        {
+                            "日期": d,
+                            "開盤價": pick("open"),
+                            "最高價": pick("high"),
+                            "最低價": pick("low"),
+                            "收盤價": close_v,
+                            "成交股數": pick("volume"),
+                            "成交金額": pd.NA,
+                            "成交筆數": pd.NA,
+                        }
+                    )
+
+                df = pd.DataFrame(rows)
+                df = _prepare_history_df_rank(df)
+                df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+                if not df.empty:
+                    df["資料源"] = f"yahoo:{symbol}"
+                    return df, f"yahoo:{symbol}"
+            except Exception:
+                continue
+
+    return pd.DataFrame(), ""
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_history_from_kline_page_rank(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+    """排行榜最後保險：橋接 3_歷史K線分析.py 的成功抓取邏輯。"""
+    try:
+        import importlib.util
+
+        page3_path = Path(__file__).with_name("3_歷史K線分析.py")
+        if not page3_path.exists():
+            return pd.DataFrame(), ""
+
+        spec = importlib.util.spec_from_file_location("rank_kline_bridge", str(page3_path))
+        if spec is None or spec.loader is None:
+            return pd.DataFrame(), ""
+
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        fn = getattr(mod, "_get_history_data_smart", None)
+        if fn is None:
+            return pd.DataFrame(), ""
+
+        result = fn(stock_no, stock_name, market_type, start_date, end_date)
+        if isinstance(result, tuple):
+            df = result[0] if len(result) >= 1 else pd.DataFrame()
+            source = result[2] if len(result) >= 3 else (result[1] if len(result) >= 2 else "3頁橋接")
+        else:
+            df = result
+            source = "3頁橋接"
+
+        df = _prepare_history_df_rank(df)
+        if not df.empty:
+            df["資料源"] = f"3頁橋接:{source}"
+            return df, f"3頁橋接:{source}"
+    except Exception:
+        pass
+
+    return pd.DataFrame(), ""
+
+
 # =========================================================
 # 歷史資料抓取
 # =========================================================
 @st.cache_data(ttl=300, show_spinner=False)
 def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
     candidates = []
-    for mk in [market_type, "上市", "上櫃", "興櫃", ""]:
+    for mk in [market_type, "上櫃", "上市", "興櫃", ""]:
         mk = _safe_str(mk)
         if mk not in candidates:
             candidates.append(mk)
 
+    # 1) 共用 utils 原架構
     for mk in candidates:
         try:
             df = get_history_data(
@@ -252,12 +416,22 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         except Exception:
             df = pd.DataFrame()
 
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            work = df.copy()
-            if "日期" in work.columns:
-                work["日期"] = pd.to_datetime(work["日期"], errors="coerce")
-                work = work.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
-            return work, (mk or market_type or "未知")
+        df = _prepare_history_df_rank(df)
+        if not df.empty:
+            df["資料源"] = f"utils:{mk or '空'}"
+            return df, (mk or market_type or "未知")
+
+    # 2) Yahoo fallback：補 3548 兆利等上櫃股票
+    df_yahoo, src = _get_yahoo_history_rank(stock_no, market_type, start_date, end_date)
+    if not df_yahoo.empty:
+        used_market = "上櫃" if ".TWO" in src else ("上市" if ".TW" in src else (_safe_str(market_type) or "未知"))
+        return df_yahoo, used_market
+
+    # 3) 與 3_歷史K線分析橋接，確保排行與K線頁資料一致
+    df_kline, src2 = _get_history_from_kline_page_rank(stock_no, stock_name, market_type, start_date, end_date)
+    if not df_kline.empty:
+        used_market = "上櫃" if ".TWO" in src2 else ("上市" if ".TW" in src2 else (_safe_str(market_type) or "未知"))
+        return df_kline, used_market
 
     return pd.DataFrame(), (_safe_str(market_type) or "未知")
 
@@ -293,6 +467,7 @@ def _analyze_stock_row(
             "訊號分數": None,
             "20日壓力距離%": None,
             "20日支撐距離%": None,
+            "資料源": "none",
             "雷達摘要": "無資料",
         }
 
