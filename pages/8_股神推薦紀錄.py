@@ -32,8 +32,8 @@ PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 
 GODPICK_RECORD_COLUMNS = [
-    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-    "買點分級", "風險說明", "股神推論邏輯", "權重設定",
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "起漲等級",
+    "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
     "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
     "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
@@ -54,7 +54,7 @@ DEFAULT_STANDARD_COLS = [
 
 DEFAULT_ADVANCED_COLS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-    "買點分級", "風險說明", "股神推論邏輯", "權重設定",
+    "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
     "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "股神決策分數", "股神建議動作",
     "股神信心", "股神進場區間", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
     "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
@@ -258,7 +258,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     text_cols = [
         "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦標籤", "推薦理由摘要",
-        "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+        "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
     ]
     for c in text_cols:
         x[c] = x[c].fillna("").astype(str)
@@ -266,6 +266,13 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     x["股票代號"] = x["股票代號"].map(_normalize_code)
     x["類別"] = x["類別"].map(_normalize_category)
     x["目前狀態"] = x["目前狀態"].fillna("觀察").astype(str).replace("", "觀察")
+
+
+    # 舊紀錄沒有起漲等級時，依起漲前兆分數自動補齊，避免 7頁/8頁/10頁欄位不一致。
+    if "起漲等級" in x.columns:
+        empty_grade = x["起漲等級"].fillna("").astype(str).str.strip() == ""
+        if empty_grade.any():
+            x.loc[empty_grade, "起漲等級"] = x.loc[empty_grade, "起漲前兆分數"].apply(_derive_prelaunch_grade_from_score)
 
     need_id = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
     if need_id.any():
@@ -2191,3 +2198,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+def _derive_prelaunch_grade_from_score(score: Any) -> str:
+    s = _safe_float(score, 0) or 0
+    if s >= 88:
+        return "S｜強烈起漲"
+    if s >= 78:
+        return "A｜起漲優先"
+    if s >= 68:
+        return "B｜轉強確認"
+    if s >= 55:
+        return "C｜初步轉強"
+    return "D｜尚未起漲"
+
+
+
