@@ -492,53 +492,67 @@ def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, e
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date, refresh_token: str = "init") -> pd.DataFrame:
-    """
-    與 3_歷史K線分析.py 同步的歷史資料來源邏輯：
-    1. utils.get_history_data 原市場
-    2. utils.get_history_data 交叉市場
-    3. TPEX 官方上櫃
-    4. Yahoo Finance，沿用 3_歷史K線分析.py 已驗證可抓 3548.TWO 的寫法
-    """
-    market = _safe_str(market_type)
-    markets_to_try = []
-    for m in [market, "上櫃", "上市", "興櫃"]:
-        if m and m not in markets_to_try:
-            markets_to_try.append(m)
+    stock_no = _safe_str(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type) or "上市"
+    debug_try = []
 
-    for m in markets_to_try:
+    # 1) utils + 市場交叉
+    for try_name, try_market in _market_candidates_quote(stock_no, stock_name, market_type):
         try:
             df = get_history_data(
                 stock_no=stock_no,
-                stock_name=stock_name,
-                market_type=m,
+                stock_name=try_name,
+                market_type=try_market,
                 start_date=start_date,
                 end_date=end_date,
             )
             df = _prepare_history_df(df)
+            debug_try.append(f"utils:{try_market or '空'}={len(df)}")
             if not df.empty:
-                df["資料源"] = f"utils:{m}"
+                df["資料源"] = f"utils:{try_market or '空'}"
+                st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
                 return df
-        except Exception:
-            pass
+        except Exception as e:
+            debug_try.append(f"utils:{try_market or '空'}=ERR {str(e)[:60]}")
 
+    # 2) TWSE 直連
     try:
-        df2 = _get_tpex_history_data(stock_no, start_date, end_date)
-        df2 = _prepare_history_df(df2)
-        if not df2.empty:
-            df2["資料源"] = "tpex"
-            return df2
-    except Exception:
-        pass
+        df_twse = _get_twse_history_data_direct_quote(stock_no, start_date, end_date, refresh_token)
+        df_twse = _prepare_history_df(df_twse)
+        debug_try.append(f"twse_direct={len(df_twse)}")
+        if not df_twse.empty:
+            df_twse["資料源"] = "twse_direct"
+            st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
+            return df_twse
+    except Exception as e:
+        debug_try.append(f"twse_direct=ERR {str(e)[:60]}")
 
+    # 3) TPEX 直連
     try:
-        df3_raw, source = _get_yahoo_history_data(stock_no, market_type, start_date, end_date, refresh_token)
-        df3 = _prepare_history_df(df3_raw)
-        if not df3.empty:
-            df3["資料源"] = source or "yahoo"
-            return df3
-    except Exception:
-        pass
+        df_tpex = _get_tpex_history_data(stock_no, start_date, end_date)
+        df_tpex = _prepare_history_df(df_tpex)
+        debug_try.append(f"tpex_direct={len(df_tpex)}")
+        if not df_tpex.empty:
+            df_tpex["資料源"] = "tpex_direct"
+            st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
+            return df_tpex
+    except Exception as e:
+        debug_try.append(f"tpex_direct=ERR {str(e)[:60]}")
 
+    # 4) Yahoo，沿用 3_歷史K線分析.py 的成功格式
+    try:
+        df_yahoo, yahoo_symbol = _get_yahoo_history_data(stock_no, market_type, start_date, end_date, refresh_token)
+        df_yahoo = _prepare_history_df(df_yahoo)
+        debug_try.append(f"yahoo:{yahoo_symbol or '-'}={len(df_yahoo)}")
+        if not df_yahoo.empty:
+            df_yahoo["資料源"] = f"yahoo:{yahoo_symbol}"
+            st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
+            return df_yahoo
+    except Exception as e:
+        debug_try.append(f"yahoo=ERR {str(e)[:80]}")
+
+    st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
     return pd.DataFrame()
 
 
@@ -688,6 +702,159 @@ def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
     current_group = _safe_str(st.session_state.get(_k("group"), ""))
     items = group_map.get(current_group, [])
     st.session_state[_k("stock_code")] = items[0]["code"] if items else ""
+
+
+
+def _resolve_market_from_master_quote(stock_no: str, stock_name: str, fallback_market: str) -> tuple[str, str]:
+    """用股票主檔再校正市場別；避免 3548 這類上櫃股被自選股資料誤標成上市。"""
+    code = _safe_str(stock_no)
+    name = _safe_str(stock_name)
+    market = _safe_str(fallback_market) or "上市"
+    try:
+        nm, mk = get_stock_name_and_market(code)
+        if _safe_str(nm):
+            name = _safe_str(nm)
+        if _safe_str(mk):
+            market = _safe_str(mk)
+    except Exception:
+        pass
+    return name, market
+
+
+def _market_candidates_quote(stock_no: str, stock_name: str, market_type: str) -> list[tuple[str, str]]:
+    real_name, real_market = _resolve_market_from_master_quote(stock_no, stock_name, market_type)
+    raw = [
+        (real_name, real_market),
+        (stock_name or real_name, market_type),
+        (real_name, "上櫃"),
+        (real_name, "上市"),
+        (real_name, "興櫃"),
+        (real_name, ""),
+        (stock_name or real_name, ""),
+    ]
+    out = []
+    seen = set()
+    for nm, mk in raw:
+        key = (_safe_str(nm), _safe_str(mk))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_twse_history_data_direct_quote(stock_no: str, start_date: date, end_date: date, refresh_token: str = "init") -> pd.DataFrame:
+    stock_no = _safe_str(stock_no)
+    if not stock_no:
+        return pd.DataFrame()
+
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+    if end_ts < start_ts:
+        return pd.DataFrame()
+
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    frames = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Referer": "https://www.twse.com.tw/",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    urls = [
+        "https://www.twse.com.tw/exchangeReport/STOCK_DAY",
+        "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY",
+    ]
+
+    for dt in month_starts:
+        month_str = dt.strftime("%Y%m01")
+        for url in urls:
+            try:
+                r = requests.get(
+                    url,
+                    params={"response": "json", "date": month_str, "stockNo": stock_no},
+                    headers=headers,
+                    timeout=15,
+                    verify=False,
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                raw_rows = data.get("data") or []
+                fields = data.get("fields") or []
+                if not raw_rows:
+                    continue
+                temp = pd.DataFrame(raw_rows, columns=fields if fields and len(fields) == len(raw_rows[0]) else None)
+                frames.append(temp)
+                break
+            except Exception:
+                continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    rename_map = {}
+    for col in df.columns:
+        c = _safe_str(col)
+        if "日期" in c:
+            rename_map[col] = "日期"
+        elif "成交股數" in c:
+            rename_map[col] = "成交股數"
+        elif "成交金額" in c:
+            rename_map[col] = "成交金額"
+        elif "開盤" in c:
+            rename_map[col] = "開盤價"
+        elif "最高" in c:
+            rename_map[col] = "最高價"
+        elif "最低" in c:
+            rename_map[col] = "最低價"
+        elif "收盤" in c:
+            rename_map[col] = "收盤價"
+        elif "成交筆數" in c:
+            rename_map[col] = "成交筆數"
+
+    df = df.rename(columns=rename_map)
+    if "日期" not in df.columns:
+        return pd.DataFrame()
+
+    def convert_roc_date(x):
+        x = _safe_str(x)
+        if not x:
+            return pd.NaT
+        parts = x.split("/")
+        if len(parts) == 3:
+            try:
+                y = int(parts[0])
+                if y < 1911:
+                    y += 1911
+                return pd.Timestamp(year=y, month=int(parts[1]), day=int(parts[2]))
+            except Exception:
+                return pd.NaT
+        return pd.to_datetime(x, errors="coerce")
+
+    df["日期"] = df["日期"].apply(convert_roc_date)
+    df = df.dropna(subset=["日期"])
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("X", "", regex=False)
+                .str.replace("+", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .replace(["--", "---", "", "----"], pd.NA)
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+    df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+    return df
 
 
 # =========================================================
@@ -939,7 +1106,7 @@ def main():
         if st.button("更新即時資料", use_container_width=True, type="primary", key=_k("refresh_btn")):
             st.session_state[_k("refresh_token")] = str(int(time.time() * 1000))
             # 清掉之前抓不到歷史資料時留下的空快取，避免修正後仍讀到舊空資料。
-            for _func in [_get_history_data_smart, _get_yahoo_history_data, _get_tpex_history_data]:
+            for _func in [_get_history_data_smart, _get_yahoo_history_data, _get_tpex_history_data, _get_twse_history_data_direct_quote]:
                 try:
                     _func.clear()
                 except Exception:
@@ -1025,11 +1192,15 @@ def main():
     if history_df.empty:
         st.warning(
             f"技術訊號歷史資料暫時抓不到：{selected_code} {final_name} / 市場 {final_market}。"
-            "已嘗試 utils / TPEX / Yahoo fallback。即時報價仍可使用。"
+            "已嘗試 utils / TWSE / TPEX / Yahoo fallback。即時報價仍可使用。"
             "請先按一次「更新即時資料」清除舊空快取；若 3_歷史K線分析可抓到，2頁會同步使用相同 Yahoo 邏輯。"
         )
+        with st.expander("歷史資料抓取除錯", expanded=False):
+            st.write(st.session_state.get(_k("history_debug_try"), "尚無除錯資料"))
     else:
         st.caption(f"技術訊號資料源：{history_source}｜歷史筆數：{len(history_df)}")
+        with st.expander("歷史資料抓取除錯", expanded=False):
+            st.write(st.session_state.get(_k("history_debug_try"), ""))
 
     # 版面防重疊：
     # 原本這裡用左右欄並排，當螢幕寬度、字體比例或卡片內容較長時，
