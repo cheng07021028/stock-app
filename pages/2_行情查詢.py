@@ -82,34 +82,52 @@ def _html(s: str):
     st.markdown(s, unsafe_allow_html=True)
 
 
-def _clean_card_text(v: Any, default: str = "—") -> str:
-    """清除 Streamlit/HTML 殘片，避免 <div> 或 </div> 被當成文字顯示。"""
-    import re
+def _is_html_noise(v: Any) -> bool:
     import html
+    import re
+
+    s = _safe_str(v)
+    if not s:
+        return False
+    for _ in range(3):
+        ns = html.unescape(s)
+        if ns == s:
+            break
+        s = ns
+    low = s.lower().strip()
+    if low in {"<div>", "</div>", "<span>", "</span>", "<p>", "</p>", "div", "/div", "none", "nan"}:
+        return True
+    return bool(re.search(r"</?\s*(div|span|p|style|script)\b|class\s*=|pro-info-|pro-card|unsafe_allow_html", low))
+
+
+def _clean_card_text(v: Any, default: str = "—") -> str:
+    """強制清除 HTML 殘片，避免 </div> 顯示在卡片裡。"""
+    import html
+    import re
+
+    if _is_html_noise(v):
+        return default
 
     text = _safe_str(v)
     if not text:
         return default
 
-    bad_tokens = [
-        "<div", "</div", "class=", "pro-info-", "pro-card", "unsafe_allow_html",
-        "&lt;div", "&lt;/div", "<span", "</span", "<style", "</style"
-    ]
-    lower = text.lower()
-    if any(tok in lower for tok in bad_tokens):
+    for _ in range(3):
+        new_text = html.unescape(text)
+        if new_text == text:
+            break
+        text = new_text
+
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or _is_html_noise(text):
         return default
 
-    # 一般 HTML tag 也全部移除，保留純文字
-    text = re.sub(r"<[^>]*>", "", text).strip()
-    if not text:
-        return default
     return html.escape(text)
 
 
 def _render_info_card_safe(title: str, info_pairs, chips=None):
     """本頁專用安全卡片：不依賴 utils.render_pro_info_card，避免 HTML 殘片外露。"""
-    import html
-
     safe_title = _clean_card_text(title, "—")
 
     chip_html = ""
@@ -118,12 +136,16 @@ def _render_info_card_safe(title: str, info_pairs, chips=None):
             chips = [chips]
         safe_chips = []
         for c in chips:
+            if _is_html_noise(c):
+                continue
             ct = _clean_card_text(c, "")
             if ct:
                 safe_chips.append(f'<span class="pro-chip">{ct}</span>')
         chip_html = "".join(safe_chips)
 
     items_html = ""
+    if isinstance(info_pairs, dict):
+        info_pairs = list(info_pairs.items())
     if not isinstance(info_pairs, (list, tuple)):
         info_pairs = []
 
@@ -135,12 +157,17 @@ def _render_info_card_safe(title: str, info_pairs, chips=None):
         value = item[1] if len(item) >= 2 else "—"
         css_class = item[2] if len(item) >= 3 else ""
 
-        safe_label = _clean_card_text(label, "—")
-        safe_value = _clean_card_text(value, "—")
-        if safe_value in ["</div>", "<div>", "&lt;/div&gt;", "&lt;div&gt;"]:
+        if _is_html_noise(label) or _is_html_noise(value):
             continue
-        if safe_label == "—" and safe_value == "—":
+
+        safe_label = _clean_card_text(label, "")
+        safe_value = _clean_card_text(value, "")
+        if not safe_label and not safe_value:
             continue
+        if not safe_label:
+            safe_label = "資訊"
+        if not safe_value:
+            safe_value = "—"
 
         safe_css = _safe_str(css_class)
         if safe_css not in ["pro-up", "pro-down", "pro-flat"]:
@@ -166,13 +193,36 @@ def _render_info_card_safe(title: str, info_pairs, chips=None):
         <div class="pro-card">
             <div class="pro-card-title">{safe_title}</div>
             <div style="margin-bottom:10px;">{chip_html}</div>
-            <div class="pro-info-grid">
+            <div class="quote-info-grid quote-info-grid-3">
                 {items_html}
             </div>
         </div>
+        <style>
+        .quote-info-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }}
+        .quote-info-grid .pro-info-item {{
+            min-width: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }}
+        @media (max-width: 1100px) {{
+            .quote-info-grid {{
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }}
+        }}
+        @media (max-width: 768px) {{
+            .quote-info-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+        </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 
 # =========================================================
@@ -347,9 +397,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
 def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
     """
     Yahoo Finance 歷史資料備援。
-    3548 兆利這類上櫃股票官方來源常會抓不到，這裡會自動試：
-    - 上櫃 / 興櫃：.TWO 優先，再試 .TW
-    - 上市：.TW 優先，再試 .TWO
+    會同時測試 .TWO / .TW，且 query1 / query2 都試，避免單一來源失敗。
     """
     stock_no = _safe_str(stock_no)
     if not stock_no:
@@ -363,87 +411,136 @@ def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, e
     if pd.isna(start_ts) or pd.isna(end_ts) or end_ts < start_ts:
         return pd.DataFrame()
 
-    period1 = int((start_ts - pd.Timedelta(days=5)).timestamp())
-    period2 = int((end_ts + pd.Timedelta(days=2)).timestamp())
+    period1 = int((start_ts - pd.Timedelta(days=10)).timestamp())
+    period2 = int((end_ts + pd.Timedelta(days=3)).timestamp())
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    base_hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
 
     for suffix in suffixes:
         symbol = f"{stock_no}{suffix}"
-        try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            resp = requests.get(
-                url,
-                params={
-                    "period1": period1,
-                    "period2": period2,
-                    "interval": "1d",
-                    "includePrePost": "false",
-                    "events": "history",
-                },
-                headers=headers,
-                timeout=15,
-            )
-            if resp.status_code != 200:
+        for host in base_hosts:
+            try:
+                url = f"https://{host}/v8/finance/chart/{symbol}"
+                resp = requests.get(
+                    url,
+                    params={
+                        "period1": period1,
+                        "period2": period2,
+                        "interval": "1d",
+                        "includePrePost": "false",
+                        "events": "history",
+                    },
+                    headers=headers,
+                    timeout=20,
+                    verify=False,
+                )
+                if resp.status_code != 200:
+                    continue
+
+                payload = resp.json()
+                chart = (payload or {}).get("chart") or {}
+                error = chart.get("error")
+                if error:
+                    continue
+                result_list = chart.get("result") or []
+                if not result_list:
+                    continue
+
+                result = result_list[0] or {}
+                timestamps = result.get("timestamp") or []
+                quote = (((result.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+                if not timestamps or not quote:
+                    continue
+
+                def pick(name):
+                    arr = quote.get(name, [])
+                    if arr is None:
+                        return []
+                    return arr
+
+                df = pd.DataFrame({
+                    "日期": pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Taipei").tz_localize(None).normalize(),
+                    "開盤價": pick("open"),
+                    "最高價": pick("high"),
+                    "最低價": pick("low"),
+                    "收盤價": pick("close"),
+                    "成交股數": pick("volume"),
+                })
+
+                for c in ["開盤價", "最高價", "最低價", "收盤價", "成交股數"]:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+                df = df.dropna(subset=["日期", "收盤價"]).copy()
+                df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+                df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+
+                if not df.empty:
+                    df["資料源"] = f"yahoo:{symbol}"
+                    return df
+            except Exception:
                 continue
-            payload = resp.json()
-            result = (((payload or {}).get("chart") or {}).get("result") or [{}])[0]
-            timestamps = result.get("timestamp") or []
-            quote = (((result.get("indicators") or {}).get("quote") or [{}])[0]) or {}
-            if not timestamps or not quote:
-                continue
-
-            df = pd.DataFrame({
-                "日期": pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Taipei").tz_localize(None),
-                "開盤價": quote.get("open", []),
-                "最高價": quote.get("high", []),
-                "最低價": quote.get("low", []),
-                "收盤價": quote.get("close", []),
-                "成交股數": quote.get("volume", []),
-            })
-
-            for c in ["開盤價", "最高價", "最低價", "收盤價", "成交股數"]:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
-            df = df.dropna(subset=["日期", "收盤價"]).copy()
-            df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
-            df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-
-            if not df.empty:
-                df["資料源"] = f"yahoo:{symbol}"
-                return df
-        except Exception:
-            continue
 
     return pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
-    df = get_history_data(
-        stock_no=stock_no,
-        stock_name=stock_name,
-        market_type=market_type,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    df = _prepare_history_df(df)
-    if not df.empty:
-        return df
+    """
+    多層歷史資料來源：
+    1. utils.get_history_data 原市場
+    2. utils.get_history_data 交叉市場
+    3. TPEX 官方上櫃
+    4. Yahoo .TWO / .TW
+    """
+    market = _safe_str(market_type)
+    markets_to_try = []
+    for m in [market, "上櫃", "上市", "興櫃"]:
+        if m and m not in markets_to_try:
+            markets_to_try.append(m)
 
-    if _safe_str(market_type) in ["上櫃", "興櫃"]:
+    for m in markets_to_try:
+        try:
+            df = get_history_data(
+                stock_no=stock_no,
+                stock_name=stock_name,
+                market_type=m,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            df = _prepare_history_df(df)
+            if not df.empty:
+                df["資料源"] = f"utils:{m}"
+                return df
+        except Exception:
+            pass
+
+    try:
         df2 = _get_tpex_history_data(stock_no, start_date, end_date)
         df2 = _prepare_history_df(df2)
         if not df2.empty:
+            df2["資料源"] = "tpex"
             return df2
+    except Exception:
+        pass
 
-    # 最後備援：Yahoo。可修正 3548 兆利等上櫃股票在官方來源抓不到導致訊號不足。
-    df3_raw = _get_yahoo_history_data(stock_no, market_type, start_date, end_date)
-    df3 = _prepare_history_df(df3_raw)
-    if not df3.empty:
-        if "資料源" not in df3.columns and "資料源" in df3_raw.columns:
-            df3["資料源"] = df3_raw["資料源"].iloc[-1]
-        return df3
+    try:
+        df3_raw = _get_yahoo_history_data(stock_no, market_type, start_date, end_date)
+        df3 = _prepare_history_df(df3_raw)
+        if not df3.empty:
+            source = "yahoo"
+            try:
+                if "資料源" in df3_raw.columns:
+                    source = _safe_str(df3_raw["資料源"].dropna().iloc[-1]) or "yahoo"
+            except Exception:
+                pass
+            df3["資料源"] = source
+            return df3
+    except Exception:
+        pass
 
     return pd.DataFrame()
 
@@ -912,7 +1009,22 @@ def main():
     badge_text, _ = score_to_badge(signal_snapshot.get("score", 0)) if signal_snapshot else ("整理", "pro-flat")
     recent_events = _build_recent_event_summary(history_df)
 
+    history_source = "none"
+    try:
+        if isinstance(history_df, pd.DataFrame) and not history_df.empty and "資料源" in history_df.columns:
+            history_source = _safe_str(history_df["資料源"].dropna().iloc[-1]) or "unknown"
+    except Exception:
+        history_source = "unknown"
+
     _render_realtime_hero(info, f"{selected_code} {final_name}", final_market)
+
+    if history_df.empty:
+        st.warning(
+            f"技術訊號歷史資料暫時抓不到：{selected_code} {final_name} / 市場 {final_market}。"
+            "已嘗試 utils / TPEX / Yahoo fallback。即時報價仍可使用，請稍後按「更新即時資料」或到 3_歷史K線分析交叉確認。"
+        )
+    else:
+        st.caption(f"技術訊號資料源：{history_source}｜歷史筆數：{len(history_df)}")
 
     # 版面防重疊：
     # 原本這裡用左右欄並排，當螢幕寬度、字體比例或卡片內容較長時，
