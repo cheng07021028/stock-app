@@ -46,6 +46,7 @@ except Exception:
 
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
+PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -98,6 +99,8 @@ GODPICK_RECORD_COLUMNS = [
     "20日追蹤預留",
     "技術結構分數",
     "起漲前兆分數",
+    "飆股起漲分數",
+    "起漲摘要",
     "交易可行分數",
     "類股熱度分數",
     "同類股領先幅度",
@@ -941,6 +944,45 @@ def _derive_trade_script(row: pd.Series) -> str:
     return prefix + "｜" + "｜".join(parts[:7])
 
 
+
+def _derive_prelaunch_summary(row: pd.Series) -> str:
+    """飆股起漲摘要：把短線爆發因子轉成可讀文字，供 7/8/9 串聯顯示。"""
+    score = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數"))
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    tech = _safe_float(row.get("技術結構分數"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+    parts = []
+
+    if score is not None and score >= 90:
+        parts.append("接近漲停")
+    elif score is not None and score >= 78:
+        parts.append("強漲")
+    elif score is not None and score >= 68:
+        parts.append("明顯上漲")
+    elif score is not None and score >= 55:
+        parts.append("小漲轉強")
+
+    if burst >= 80:
+        parts.append("量能大幅放大")
+    elif burst >= 68:
+        parts.append("量能轉強")
+
+    if pattern >= 80:
+        parts.append("突破20日高")
+    elif pattern >= 68:
+        parts.append("盤中挑戰20日高")
+
+    if tech >= 70:
+        parts.append("站上MA20")
+    if trade >= 70:
+        parts.append("短均線偏多")
+
+    if not parts:
+        return "未見明顯起漲訊號"
+    return "、".join(dict.fromkeys(parts))
+
+
 def _derive_invalid_condition(row: pd.Series) -> str:
     stop = _safe_float(row.get("停損價"))
     support = _safe_float(row.get("推薦買點_拉回"))
@@ -980,7 +1022,9 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["過熱風險"] = out.apply(_derive_overheat_risk, axis=1)
     out["假突破風險"] = out.apply(_derive_fake_breakout_risk, axis=1)
     out["推薦分桶"] = out.apply(_derive_recommend_bucket, axis=1)
+    out["飆股起漲分數"] = pd.to_numeric(out.get("起漲前兆分數"), errors="coerce")
     out["起漲等級"] = out.apply(_derive_prelaunch_grade, axis=1)
+    out["起漲摘要"] = out.apply(_derive_prelaunch_summary, axis=1)
     out["信心等級"] = out.apply(_derive_confidence_level, axis=1)
     out["買點劇本"] = out.apply(_derive_trade_script, axis=1)
     out["失效條件"] = out.apply(_derive_invalid_condition, axis=1)
@@ -1794,6 +1838,8 @@ def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
         "權重設定": _safe_str(row.get("權重設定")),
         "技術結構分數": _safe_float(row.get("技術結構分數")),
         "起漲前兆分數": _safe_float(row.get("起漲前兆分數")),
+        "飆股起漲分數": _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")),
+        "起漲摘要": _safe_str(row.get("起漲摘要")),
         "交易可行分數": _safe_float(row.get("交易可行分數")),
         "類股熱度分數": _safe_float(row.get("類股熱度分數")),
         "同類股領先幅度": _safe_float(row.get("同類股領先幅度")),
@@ -1868,6 +1914,8 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "20日追蹤預留": _safe_str(r.get("20日追蹤預留")),
                 "技術結構分數": _safe_float(r.get("技術結構分數")),
                 "起漲前兆分數": _safe_float(r.get("起漲前兆分數")),
+                "飆股起漲分數": _safe_float(r.get("飆股起漲分數"), r.get("起漲前兆分數")),
+                "起漲摘要": _safe_str(r.get("起漲摘要")),
                 "交易可行分數": _safe_float(r.get("交易可行分數")),
                 "類股熱度分數": _safe_float(r.get("類股熱度分數")),
                 "同類股領先幅度": _safe_float(r.get("同類股領先幅度")),
@@ -4158,7 +4206,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
-        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "交易可行分數",
+        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
@@ -4257,7 +4305,7 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
     cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
 
     leader_export = leader_df[
-        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
+        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "飆股起漲分數", "起漲等級", "起漲摘要", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
     ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
 
     factor_export = factor_rank[
@@ -4341,7 +4389,7 @@ def _render_selected_export_block():
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
         "推薦模式", "推薦等級", "推薦總分", "推薦分桶", "起漲等級", "信心等級",
-        "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+        "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "是否領先同類股",
         "最新價", "推薦買點_拉回", "推薦買點_突破",
         "停損價", "賣出目標1", "賣出目標2",
@@ -4778,6 +4826,7 @@ def main():
 
     st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
+    st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
 
     if master_df is None or master_df.empty:
         st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
