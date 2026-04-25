@@ -30,6 +30,7 @@ from utils import (
 
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
+DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 
 GODPICK_RECORD_COLUMNS = [
@@ -1472,6 +1473,13 @@ def _invalidate_analysis_cache():
 def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, visible_limit: int) -> tuple[pd.DataFrame, int, bool]:
     safe_cols = []
     seen = set()
+
+    # record_id 是刪除 / 編輯 / 同步的必要識別欄。
+    # 即使使用者欄位設定把它移除，也要保留在 editor_df 裡，畫面再用 column_config 隱藏。
+    if "record_id" in view_df.columns:
+        safe_cols.append("record_id")
+        seen.add("record_id")
+
     for c in use_cols or []:
         if c in view_df.columns and c not in seen and c not in ["匯入自選", "刪除"]:
             safe_cols.append(c)
@@ -1688,6 +1696,7 @@ def main():
         subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
+    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -1792,6 +1801,8 @@ def main():
 
     with tabs[0]:
         render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。支援欄位順序永久保存、重新整理不還原。")
+        if st.session_state.get(_k("last_delete_msg")):
+            st.success(st.session_state.pop(_k("last_delete_msg")))
 
         opt_top = st.columns([1.2, 1.2, 1.2, 2.8])
         with opt_top[0]:
@@ -1950,7 +1961,7 @@ def main():
             column_config={
                 "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
                 "刪除": st.column_config.CheckboxColumn("刪除"),
-                "record_id": st.column_config.TextColumn("record_id", disabled=True),
+                "record_id": None,  # 隱藏但保留，供刪除 / 編輯用
                 "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
                 "股票名稱": st.column_config.TextColumn("股票名稱", disabled=True),
                 "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
@@ -2022,13 +2033,26 @@ def main():
                 st.success("已套用，尚未同步")
         with action_cols[3]:
             if st.button("🗑️ 刪除勾選", use_container_width=True):
-                delete_ids = edited_df.loc[edited_df["刪除"] == True, "record_id"].astype(str).tolist()
-                if not delete_ids:
-                    st.warning("請先勾選要刪除的紀錄。")
+                if "刪除" not in edited_df.columns:
+                    st.warning("目前表格缺少刪除欄位，請重新載入後再試。")
                 else:
-                    new_df = _delete_records_by_ids(live_df, delete_ids)
-                    _save_state_df(new_df)
-                    st.success(f"已刪除 {len(delete_ids)} 筆，尚未同步")
+                    checked_df = edited_df[edited_df["刪除"].fillna(False).astype(bool)].copy()
+
+                    delete_ids = []
+                    if not checked_df.empty and "record_id" in checked_df.columns:
+                        delete_ids = [_safe_str(x) for x in checked_df["record_id"].astype(str).tolist() if _safe_str(x)]
+
+                    if not delete_ids:
+                        st.warning("請先勾選要刪除的紀錄。")
+                    else:
+                        before_n = len(live_df)
+                        new_df = _delete_records_by_ids(live_df, delete_ids)
+                        after_n = len(new_df)
+                        deleted_n = max(before_n - after_n, 0)
+
+                        _save_state_df(new_df)
+                        st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，尚未同步；若要永久寫回，請按「儲存同步」。"
+                        st.rerun()
         with action_cols[4]:
             if st.button("🧼 清空目前篩選", use_container_width=True):
                 source_df = view_df if not truncated else view_df.head(int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)))
