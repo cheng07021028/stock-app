@@ -465,6 +465,9 @@ def _analyze_stock_row(
             "成交金額": None,
             "成交筆數": None,
             "訊號分數": None,
+            "飆股起漲分數": None,
+            "起漲等級": "",
+            "起漲摘要": "無資料",
             "20日壓力距離%": None,
             "20日支撐距離%": None,
             "資料源": "none",
@@ -484,6 +487,7 @@ def _analyze_stock_row(
     signal = compute_signal_snapshot(hist_df)
     sr = compute_support_resistance_snapshot(hist_df)
     radar = _normalize_radar_result(compute_radar_scores(hist_df))
+    burst_score, burst_summary = _calc_burst_start_score(hist_df)
 
     res20 = _safe_float(sr.get("res_20"))
     sup20 = _safe_float(sr.get("sup_20"))
@@ -575,7 +579,7 @@ def _format_table_cached(df: pd.DataFrame) -> pd.DataFrame:
         if col in show_df.columns:
             show_df[col] = show_df[col].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
 
-    for col in ["成交股數", "成交金額", "成交筆數", "訊號分數"]:
+    for col in ["成交股數", "成交金額", "成交筆數", "訊號分數", "飆股起漲分數"]:
         if col in show_df.columns:
             show_df[col] = show_df[col].apply(lambda x: format_number(x, 0) if pd.notna(x) else "")
 
@@ -636,7 +640,7 @@ def main():
         st.selectbox("選擇群組", groups, key=_k("group"))
 
     with c2:
-        st.selectbox("排行指標", ["訊號分數", "漲跌幅%", "成交金額", "成交股數", "20日壓力距離%", "20日支撐距離%"], key=_k("sort_metric"))
+        st.selectbox("排行指標", ["飆股起漲分數", "訊號分數", "漲跌幅%", "成交金額", "成交股數", "20日壓力距離%", "20日支撐距離%"], key=_k("sort_metric"))
 
     with c3:
         st.selectbox("區間天數", [20, 40, 60, 90, 120], key=_k("days"))
@@ -682,20 +686,31 @@ def main():
     valid_up = int(rank_df["漲跌幅%"].notna().sum()) if "漲跌幅%" in rank_df.columns else 0
     valid_amount = int(rank_df["成交金額"].notna().sum()) if "成交金額" in rank_df.columns else 0
     valid_signal = int(rank_df["訊號分數"].notna().sum()) if "訊號分數" in rank_df.columns else 0
+    valid_burst = int(rank_df["飆股起漲分數"].notna().sum()) if "飆股起漲分數" in rank_df.columns else 0
 
     render_pro_kpi_row(
         [
             {"label": "群組股票數", "value": total_count, "delta": _safe_str(st.session_state.get(_k("group"), "")), "delta_class": "pro-kpi-delta-flat"},
             {"label": "可比較漲跌", "value": valid_up, "delta": "有漲跌幅資料", "delta_class": "pro-kpi-delta-flat"},
             {"label": "有成交金額", "value": valid_amount, "delta": "量價排行", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "有訊號分數", "value": valid_signal, "delta": "股神燈號", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "有訊號分數", "value": valid_signal, "delta": "結構燈號", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "有起漲分數", "value": valid_burst, "delta": "飆股啟動", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
 
-    with st.expander("訊號分數怎麼看？", expanded=False):
+    with st.expander("訊號分數 / 飆股起漲分數怎麼看？", expanded=False):
         st.markdown(
             """
-            **訊號分數是技術面綜合排序分數，不是直接買賣指令。**
+            **訊號分數是技術結構完整度；飆股起漲分數是短線爆發與剛啟動強度。兩個分數用途不同。**
+
+            ### 飆股起漲分數
+            - **85～100｜S 強烈啟動**：接近漲停、量能大幅放大、突破20日/60日高，屬短線強勢候選。
+            - **70～84｜A 起漲優先**：漲幅與量能同步轉強，可列優先追蹤。
+            - **55～69｜B 轉強觀察**：有起漲跡象，但仍需要確認續航。
+            - **40～54｜C 初步觀察**：有局部轉強，但條件還不完整。
+            - **0～39｜D 未明顯啟動**：短線爆發訊號不足。
+
+            ### 訊號分數
 
             - **80 分以上｜強勢優先觀察**：均線、價位、量能、支撐壓力結構通常較完整，適合放進優先追蹤清單。
             - **60～79 分｜偏多或轉強觀察**：有部分條件轉強，但仍要看是否接近壓力、是否量價配合。
@@ -729,29 +744,33 @@ def main():
         weak_df = _top_table(rank_df, weak_metric, True, top_n)
         st.dataframe(_format_table(weak_df), use_container_width=True, hide_index=True)
 
-    tabs = st.tabs(["漲幅排行", "跌幅排行", "成交金額排行", "成交股數排行", "訊號分數排行", "完整排行表"])
+    tabs = st.tabs(["飆股起漲排行", "漲幅排行", "跌幅排行", "成交金額排行", "成交股數排行", "訊號分數排行", "完整排行表"])
 
     with tabs[0]:
+        burst_df = _top_table(rank_df, "飆股起漲分數", False, top_n)
+        st.dataframe(_format_table(burst_df), use_container_width=True, hide_index=True)
+
+    with tabs[1]:
         up_df = _top_table(rank_df, "漲跌幅%", False, top_n)
         st.dataframe(_format_table(up_df), use_container_width=True, hide_index=True)
 
-    with tabs[1]:
+    with tabs[2]:
         down_df = _top_table(rank_df, "漲跌幅%", True, top_n)
         st.dataframe(_format_table(down_df), use_container_width=True, hide_index=True)
 
-    with tabs[2]:
+    with tabs[3]:
         amount_df = _top_table(rank_df, "成交金額", False, top_n)
         st.dataframe(_format_table(amount_df), use_container_width=True, hide_index=True)
 
-    with tabs[3]:
+    with tabs[4]:
         volume_df = _top_table(rank_df, "成交股數", False, top_n)
         st.dataframe(_format_table(volume_df), use_container_width=True, hide_index=True)
 
-    with tabs[4]:
+    with tabs[5]:
         signal_df = _top_table(rank_df, "訊號分數", False, top_n)
         st.dataframe(_format_table(signal_df), use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    with tabs[6]:
         st.dataframe(_format_table(rank_df), use_container_width=True, hide_index=True)
 
     render_pro_section("排行榜說明")
@@ -760,6 +779,7 @@ def main():
         [
             ("資料來源", "以自選股群組為主，逐檔抓取歷史資料後計算。", ""),
             ("訊號分數", "綜合均線、KD/MACD、價位結構、支撐壓力與雷達摘要；分數越高代表技術條件越完整。", ""),
+            ("飆股起漲分數", "專門看今日強漲、放量、突破20日高、重新站回均線與短線啟動；用來補捉剛起漲股票。", ""),
             ("80分以上", "強勢優先觀察，但仍需確認是否過度接近壓力或短線過熱。", ""),
             ("60～79分", "偏多或轉強觀察，適合等待突破或拉回不破。", ""),
             ("40～59分", "中性整理，不急著追，等方向更明確。", ""),
