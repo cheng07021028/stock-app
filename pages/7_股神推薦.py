@@ -4650,13 +4650,21 @@ def main():
 
     next_pick_key = _k("rec_pick_codes_next")
     real_pick_key = _k("rec_pick_codes")
+    widget_pick_key = _k("rec_pick_codes_widget")
     if next_pick_key in st.session_state:
-        st.session_state[real_pick_key] = st.session_state.pop(next_pick_key)
+        _next_pick_val = st.session_state.pop(next_pick_key)
+        st.session_state[real_pick_key] = _next_pick_val
+        # widget 尚未建立前可安全更新 widget key
+        st.session_state[widget_pick_key] = _next_pick_val
 
     next_record_key = _k("rec_record_codes_next")
     real_record_key = _k("rec_record_codes")
+    widget_record_key = _k("rec_record_codes_widget")
     if next_record_key in st.session_state:
-        st.session_state[real_record_key] = st.session_state.pop(next_record_key)
+        _next_record_val = st.session_state.pop(next_record_key)
+        st.session_state[real_record_key] = _next_record_val
+        # widget 尚未建立前可安全更新 widget key
+        st.session_state[widget_record_key] = _next_record_val
 
     render_pro_hero(
         title="股神推薦｜V4 加速記憶版",
@@ -4880,6 +4888,8 @@ def main():
         st.session_state[_k("category_strength_store")] = pd.DataFrame()
         st.session_state[_k("rec_pick_codes_next")] = []
         st.session_state[_k("rec_record_codes_next")] = []
+        st.session_state[_k("rec_pick_codes_widget")] = []
+        st.session_state[_k("rec_record_codes_widget")] = []
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
         st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
         st.rerun()
@@ -5093,13 +5103,17 @@ def main():
             st.info("目前尚無群組，請先新增群組名稱。")
     with p2:
         current_pick_codes = [x for x in st.session_state.get(_k("rec_pick_codes"), []) if x in rec_all_codes]
-        st.multiselect(
+        if _k("rec_pick_codes_widget") not in st.session_state:
+            st.session_state[_k("rec_pick_codes_widget")] = current_pick_codes
+        selected_pick_widget = st.multiselect(
             "勾選推薦股",
             options=rec_all_codes,
             default=current_pick_codes,
             format_func=lambda x: rec_code_to_label.get(str(x), str(x)),
-            key=_k("rec_pick_codes"),
+            key=_k("rec_pick_codes_widget"),
         )
+        # rec_pick_codes 不是 widget key，可以安全同步資料狀態
+        st.session_state[_k("rec_pick_codes")] = selected_pick_widget
     with p3:
         st.write("")
         st.write("")
@@ -5168,13 +5182,17 @@ def main():
     rr1, rr2 = st.columns([4, 2])
     with rr1:
         current_record_codes = [x for x in st.session_state.get(_k("rec_record_codes"), []) if x in record_all_codes]
-        st.multiselect(
+        if _k("rec_record_codes_widget") not in st.session_state:
+            st.session_state[_k("rec_record_codes_widget")] = current_record_codes
+        selected_record_widget = st.multiselect(
             "勾選要記錄到 8_股神推薦紀錄 的股票",
             options=record_all_codes,
             default=current_record_codes,
             format_func=lambda x: record_code_to_label.get(str(x), str(x)),
-            key=_k("rec_record_codes"),
+            key=_k("rec_record_codes_widget"),
         )
+        # rec_record_codes 不是 widget key，可以安全同步資料狀態
+        st.session_state[_k("rec_record_codes")] = selected_record_widget
 
     with rr2:
         st.write("")
