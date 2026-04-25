@@ -30,13 +30,14 @@ from utils import (
 
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
+PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 
 GODPICK_RECORD_COLUMNS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
     "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
-    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
+    "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲摘要", "飆股起漲分數", "起漲摘要", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
     "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
     "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
@@ -269,6 +270,28 @@ def _init_firebase_app():
     return firebase_admin.initialize_app(cred, {"projectId": project_id})
 
 
+
+def _derive_prelaunch_summary_from_row(row: pd.Series) -> str:
+    s = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    text = _safe_str(row.get("起漲摘要"))
+    if text:
+        return text
+    parts = []
+    if s >= 90:
+        parts.append("接近漲停")
+    elif s >= 78:
+        parts.append("強漲")
+    elif s >= 68:
+        parts.append("明顯上漲")
+    elif s >= 55:
+        parts.append("小漲轉強")
+    if _safe_float(row.get("爆發力分數"), 0) and _safe_float(row.get("爆發力分數"), 0) >= 70:
+        parts.append("量能放大")
+    if _safe_float(row.get("型態突破分數"), 0) and _safe_float(row.get("型態突破分數"), 0) >= 70:
+        parts.append("突破結構")
+    return "、".join(parts) if parts else "未見明顯起漲訊號"
+
+
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -282,7 +305,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
             x[c] = None
 
     numeric_cols = [
-        "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+        "推薦總分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
         "持有天數", "股神決策分數", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
@@ -311,6 +334,20 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         empty_grade = x["起漲等級"].fillna("").astype(str).str.strip() == ""
         if empty_grade.any():
             x.loc[empty_grade, "起漲等級"] = x.loc[empty_grade, "起漲前兆分數"].apply(_derive_prelaunch_grade_from_score)
+
+    # 7/8/9 起漲欄位串聯補齊：舊資料沒有新欄位時自動用起漲前兆分數補。
+    if "飆股起漲分數" in x.columns:
+        x["飆股起漲分數"] = pd.to_numeric(x["飆股起漲分數"], errors="coerce")
+        if "起漲前兆分數" in x.columns:
+            x["飆股起漲分數"] = x["飆股起漲分數"].fillna(pd.to_numeric(x["起漲前兆分數"], errors="coerce"))
+    if "起漲等級" in x.columns:
+        empty_grade = x["起漲等級"].fillna("").astype(str).str.strip() == ""
+        if empty_grade.any():
+            x.loc[empty_grade, "起漲等級"] = x.loc[empty_grade, "飆股起漲分數"].apply(_derive_prelaunch_grade_from_score)
+    if "起漲摘要" in x.columns:
+        empty_summary = x["起漲摘要"].fillna("").astype(str).str.strip() == ""
+        if empty_summary.any():
+            x.loc[empty_summary, "起漲摘要"] = x.loc[empty_summary].apply(_derive_prelaunch_summary_from_row, axis=1)
 
     need_id = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
     if need_id.any():
@@ -1697,6 +1734,7 @@ def main():
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
+    st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -1973,6 +2011,9 @@ def main():
                 "股神進場區間": st.column_config.TextColumn("股神進場區間", disabled=True),
                 "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
                 "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
+                "飆股起漲分數": st.column_config.NumberColumn("飆股起漲分數", format="%.2f", disabled=True),
+                "起漲等級": st.column_config.TextColumn("起漲等級", disabled=True),
+                "起漲摘要": st.column_config.TextColumn("起漲摘要", disabled=True),
                 "交易可行分數": st.column_config.NumberColumn("交易可行分數", format="%.2f", disabled=True),
                 "類股熱度分數": st.column_config.NumberColumn("類股熱度分數", format="%.2f", disabled=True),
                 "最新價": st.column_config.NumberColumn("最新價", format="%.2f", disabled=True),
