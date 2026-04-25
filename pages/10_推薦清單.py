@@ -41,6 +41,8 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
 
+GODPICK_RECOMMEND_LIST_FILE = "godpick_recommend_list.json"
+
 GODPICK_RECORD_COLUMNS = [
     "record_id",
     "股票代號",
@@ -54,6 +56,9 @@ GODPICK_RECORD_COLUMNS = [
     "風險說明",
     "股神推論邏輯",
     "權重設定",
+    "推薦分桶",
+    "起漲等級",
+    "信心等級",
     "技術結構分數",
     "起漲前兆分數",
     "交易可行分數",
@@ -154,6 +159,64 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
 
 
 
+def _read_json_file_from_github(path_name: str, default):
+    cfg = _github_config()
+    token = cfg["token"]
+    if not token:
+        return default, "未設定 GITHUB_TOKEN"
+
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], path_name),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return default, f"{path_name} 尚未建立"
+        if resp.status_code != 200:
+            return default, f"讀取 {path_name} 失敗：{resp.status_code}"
+
+        content = resp.json().get("content", "")
+        if not content:
+            return default, f"{path_name} 內容空白"
+        payload = json.loads(base64.b64decode(content).decode("utf-8"))
+        return payload, f"已讀取 {path_name}"
+    except Exception as e:
+        return default, f"讀取 {path_name} 例外：{e}"
+
+
+def _read_recommend_list_from_latest() -> tuple[pd.DataFrame, str]:
+    payload, msg = _read_json_file_from_github(GODPICK_RECOMMEND_LIST_FILE, [])
+    if not isinstance(payload, list) or not payload:
+        try:
+            with open(GODPICK_RECOMMEND_LIST_FILE, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            msg = f"已讀取本機 {GODPICK_RECOMMEND_LIST_FILE}"
+        except Exception:
+            payload = []
+    if not isinstance(payload, list):
+        payload = []
+    return _ensure_record_columns(pd.DataFrame(payload)), msg
+
+
+
+def _derive_list_prelaunch_grade(row: pd.Series) -> str:
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    mix = pre * 0.6 + burst * 0.25 + pattern * 0.15
+    if mix >= 88:
+        return "S｜強烈起漲"
+    if mix >= 78:
+        return "A｜起漲優先"
+    if mix >= 68:
+        return "B｜轉強確認"
+    if mix >= 55:
+        return "C｜初步轉強"
+    return "D｜尚未起漲"
+
+
 def _derive_list_buy_grade(row: pd.Series) -> str:
     score = _safe_float(row.get("推薦總分"), 0) or 0
     pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -207,6 +270,13 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in GODPICK_RECORD_COLUMNS:
         if c not in x.columns:
             x[c] = None
+
+
+    if "起漲等級" in x.columns:
+        x["起漲等級"] = x["起漲等級"].fillna("").astype(str)
+        mask = x["起漲等級"].str.strip() == ""
+        if mask.any():
+            x.loc[mask, "起漲等級"] = x.loc[mask].apply(_derive_list_prelaunch_grade, axis=1)
 
     if "買點分級" in x.columns:
         x["買點分級"] = x["買點分級"].fillna("").astype(str)
@@ -401,8 +471,29 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
 def _load_records_cached(force: bool = False) -> pd.DataFrame:
     if force or _k("records_df") not in st.session_state:
         df, msg = _read_records_from_github()
-        st.session_state[_k("records_df")] = df.copy()
-        st.session_state[_k("load_msg")] = msg
+        latest_df, latest_msg = _read_recommend_list_from_latest()
+
+        frames = []
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            df = df.copy()
+            df["資料來源"] = "股神推薦紀錄"
+            frames.append(df)
+        if isinstance(latest_df, pd.DataFrame) and not latest_df.empty:
+            latest_df = latest_df.copy()
+            latest_df["資料來源"] = "本輪推薦清單"
+            frames.append(latest_df)
+
+        if frames:
+            merged = pd.concat(frames, ignore_index=True)
+            if "record_id" in merged.columns:
+                merged = merged.drop_duplicates(subset=["record_id"], keep="last")
+            else:
+                merged = merged.drop_duplicates(subset=["股票代號", "推薦日期", "推薦時間", "推薦模式"], keep="last")
+        else:
+            merged = pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+
+        st.session_state[_k("records_df")] = _ensure_record_columns(merged).copy()
+        st.session_state[_k("load_msg")] = f"{msg}｜{latest_msg}"
         st.session_state[_k("loaded_at")] = _now_text()
     rec = st.session_state.get(_k("records_df"), pd.DataFrame(columns=GODPICK_RECORD_COLUMNS))
     return _ensure_record_columns(rec)
@@ -516,7 +607,7 @@ def main():
 
     render_pro_section("推薦清單明細")
     show_cols = [
-        "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
+        "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "起漲等級",
         "買點分級", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "推薦價格", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態",
         "股神推論邏輯", "風險說明", "推薦理由摘要", "備註"
