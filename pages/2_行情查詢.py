@@ -1045,6 +1045,63 @@ def _build_recent_event_summary(df: pd.DataFrame) -> list[tuple[str, str, str]]:
 # =========================================================
 # 即時卡片
 # =========================================================
+
+def _fill_realtime_from_history(info: dict[str, Any], history_df: pd.DataFrame) -> dict[str, Any]:
+    """
+    即時資料失敗時，用歷史資料最後一根K棒補 KPI。
+    目的：避免 3548 這類即時源暫時失敗時，上方現價/開盤/高低/總量全部變空白。
+    """
+    out = dict(info or {})
+    if out.get("price") not in [None, "", "—"]:
+        try:
+            if pd.notna(pd.to_numeric(out.get("price"), errors="coerce")):
+                return out
+        except Exception:
+            pass
+
+    if history_df is None or history_df.empty:
+        return out
+
+    df = history_df.copy().sort_values("日期").reset_index(drop=True)
+    if df.empty:
+        return out
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else None
+
+    close = _safe_float(last.get("收盤價"))
+    open_p = _safe_float(last.get("開盤價"))
+    high_p = _safe_float(last.get("最高價"))
+    low_p = _safe_float(last.get("最低價"))
+    vol = _safe_float(last.get("成交股數"))
+    prev_close = _safe_float(prev.get("收盤價")) if prev is not None else None
+
+    if close is None:
+        return out
+
+    change = close - prev_close if prev_close not in [None, 0] else None
+    change_pct = (change / prev_close * 100) if change is not None and prev_close not in [None, 0] else None
+
+    out.update(
+        {
+            "price": close,
+            "prev_close": prev_close,
+            "open": open_p if open_p is not None else close,
+            "high": high_p if high_p is not None else close,
+            "low": low_p if low_p is not None else close,
+            "change": change,
+            "change_pct": change_pct,
+            "total_volume": vol,
+            "update_time": pd.to_datetime(last.get("日期")).strftime("%Y-%m-%d"),
+            "price_source": "history_close",
+            "change_source": "history_vs_prev",
+            "ok": True,
+            "message": "即時資料暫時失敗，已用歷史K線最後收盤資料備援",
+        }
+    )
+    return out
+
+
 def _render_realtime_hero(info: dict[str, Any], stock_label: str, market_type: str):
     price = _safe_float(info.get("price"))
     prev_close = _safe_float(info.get("prev_close"))
@@ -1065,10 +1122,12 @@ def _render_realtime_hero(info: dict[str, Any], stock_label: str, market_type: s
         "bid": "買進價",
         "ask": "賣出價",
         "prev_close": "昨收回退",
+        "history_close": "歷史收盤備援",
         "none": "無",
     }
     change_map = {
         "realtime_vs_prev": "即時價對昨收",
+        "history_vs_prev": "歷史收盤對前收",
         "prev_close_missing": "缺昨收",
     }
 
@@ -1238,6 +1297,9 @@ def main():
         end_date=end_date,
         refresh_token=st.session_state.get(_k("refresh_token"), "init"),
     )
+
+    # 即時資料源失敗時，用歷史K線最後一筆補上方 KPI，避免整排空白。
+    info = _fill_realtime_from_history(info, history_df)
 
     signal_snapshot = compute_signal_snapshot(history_df) if not history_df.empty else {}
     sr_snapshot = compute_support_resistance_snapshot(history_df) if not history_df.empty else {}
