@@ -44,6 +44,7 @@ try:
 except Exception:
     load_stock_master = None
 
+STATE_FIX_VERSION = "record_widget_state_v2_20260425"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -4878,8 +4879,7 @@ def main():
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
         st.session_state[_k("category_strength_store")] = pd.DataFrame()
         st.session_state[_k("rec_pick_codes_next")] = []
-        st.session_state[_k("rec_pick_codes")] = []
-        st.session_state[_k("rec_record_codes")] = []
+        st.session_state[_k("rec_record_codes_next")] = []
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
         st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
         st.rerun()
