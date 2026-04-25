@@ -44,7 +44,7 @@ try:
 except Exception:
     load_stock_master = None
 
-STATE_FIX_VERSION = "record_widget_state_v2_20260425"
+STATE_FIX_VERSION = "widget_key_separated_v3_no_direct_record_codes_20260425"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -4670,6 +4670,8 @@ def main():
         title="股神推薦｜V4 加速記憶版",
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
+
+    st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
 
     if master_df is None or master_df.empty:
         st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
