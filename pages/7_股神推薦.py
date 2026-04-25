@@ -84,6 +84,7 @@ GODPICK_RECORD_COLUMNS = [
     "股神推論邏輯",
     "權重設定",
     "推薦分桶",
+    "起漲等級",
     "信心等級",
     "買點劇本",
     "失效條件",
@@ -861,6 +862,28 @@ def _derive_fake_breakout_risk(row: pd.Series) -> str:
     return "低｜突破結構尚可"
 
 
+
+def _derive_prelaunch_grade(row: pd.Series) -> str:
+    """起漲等級：依起漲前兆、爆發力、型態突破、量能啟動、交易可行綜合判斷。"""
+    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
+    burst = _safe_float(row.get("爆發力分數"), 0) or 0
+    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
+    vol = _safe_float(row.get("量能啟動分"), 0) or 0
+    trade = _safe_float(row.get("交易可行分數"), 0) or 0
+
+    mix = pre * 0.42 + burst * 0.22 + pattern * 0.18 + vol * 0.10 + trade * 0.08
+
+    if mix >= 88:
+        return "S｜強烈起漲"
+    if mix >= 78:
+        return "A｜起漲優先"
+    if mix >= 68:
+        return "B｜轉強確認"
+    if mix >= 55:
+        return "C｜初步轉強"
+    return "D｜尚未起漲"
+
+
 def _derive_recommend_bucket(row: pd.Series) -> str:
     score = _safe_float(row.get("推薦總分"), 0) or 0
     pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -955,6 +978,7 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["過熱風險"] = out.apply(_derive_overheat_risk, axis=1)
     out["假突破風險"] = out.apply(_derive_fake_breakout_risk, axis=1)
     out["推薦分桶"] = out.apply(_derive_recommend_bucket, axis=1)
+    out["起漲等級"] = out.apply(_derive_prelaunch_grade, axis=1)
     out["信心等級"] = out.apply(_derive_confidence_level, axis=1)
     out["買點劇本"] = out.apply(_derive_trade_script, axis=1)
     out["失效條件"] = out.apply(_derive_invalid_condition, axis=1)
@@ -1152,7 +1176,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
             x[c] = None
 
     numeric_cols = [
-        "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+        "推薦總分", "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數"
     ]
@@ -1830,6 +1854,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
                 "權重設定": _safe_str(r.get("權重設定")),
                 "推薦分桶": _safe_str(r.get("推薦分桶")),
+                "起漲等級": _safe_str(r.get("起漲等級")),
                 "信心等級": _safe_str(r.get("信心等級")),
                 "買點劇本": _safe_str(r.get("買點劇本")),
                 "失效條件": _safe_str(r.get("失效條件")),
@@ -4931,6 +4956,7 @@ def main():
         "股神交易決策升級",
         [
             ("推薦分桶", "把結果分為立即觀察、等拉回、等突破、高分但過熱、假突破風險等交易情境。", ""),
+            ("起漲等級串聯", "會同步寫入本輪推薦、股神推薦紀錄與推薦清單，避免頁面間欄位不一致。", ""),
             ("信心等級", "依總分、起漲、交易可行、類股熱度、過熱與假突破風險綜合分級。", ""),
             ("買點劇本", "自動整理現價、拉回買點、突破買點、停損、目標價。", ""),
             ("失效條件", "明確標示跌破何處或量價不延續時應降級。", ""),
