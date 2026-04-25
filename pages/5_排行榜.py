@@ -82,6 +82,145 @@ def _normalize_radar_result(radar: Any) -> dict[str, Any]:
     return {"summary": _safe_str(radar) or "—"}
 
 
+def _score_clip(v: Any, low: float = 0, high: float = 100) -> float:
+    x = _safe_float(v, 0) or 0
+    return float(max(low, min(high, x)))
+
+
+def _calc_burst_start_score(hist_df: pd.DataFrame) -> tuple[float, str]:
+    """
+    飆股起漲分數：
+    訊號分數偏重技術結構完整度；本分數偏重短線爆發、剛啟動、放量突破。
+    滿分 100 分。
+    """
+    if hist_df is None or hist_df.empty or len(hist_df) < 5:
+        return 0.0, "資料不足"
+
+    df = hist_df.copy().sort_values("日期").reset_index(drop=True)
+
+    close = pd.to_numeric(df.get("收盤價"), errors="coerce")
+    high = pd.to_numeric(df.get("最高價", close), errors="coerce")
+    low = pd.to_numeric(df.get("最低價", close), errors="coerce")
+    vol = pd.to_numeric(df.get("成交股數", 0), errors="coerce").fillna(0)
+
+    latest_close = _safe_float(close.iloc[-1], 0) or 0
+    prev_close = _safe_float(close.iloc[-2], 0) or 0
+    latest_high = _safe_float(high.iloc[-1], latest_close) or latest_close
+    latest_low = _safe_float(low.iloc[-1], latest_close) or latest_close
+    latest_vol = _safe_float(vol.iloc[-1], 0) or 0
+
+    if latest_close <= 0 or prev_close <= 0:
+        return 0.0, "價格資料不足"
+
+    pct = (latest_close - prev_close) / prev_close * 100
+
+    vol_ma5 = _safe_float(vol.tail(6).iloc[:-1].mean(), 0) or 0
+    vol_ma20 = _safe_float(vol.tail(21).iloc[:-1].mean(), 0) or 0
+    vol_ratio5 = latest_vol / vol_ma5 if vol_ma5 > 0 else 0
+    vol_ratio20 = latest_vol / vol_ma20 if vol_ma20 > 0 else 0
+
+    prev_20_high = _safe_float(high.tail(21).iloc[:-1].max(), 0) or 0
+    prev_60_high = _safe_float(high.tail(61).iloc[:-1].max(), 0) or 0
+    prev_20_low = _safe_float(low.tail(21).iloc[:-1].min(), 0) or 0
+
+    ma5 = _safe_float(close.rolling(5).mean().iloc[-1])
+    ma10 = _safe_float(close.rolling(10).mean().iloc[-1])
+    ma20 = _safe_float(close.rolling(20).mean().iloc[-1])
+
+    score = 0.0
+    reasons = []
+
+    if pct >= 9:
+        score += 25
+        reasons.append("接近漲停")
+    elif pct >= 6:
+        score += 20
+        reasons.append("強漲")
+    elif pct >= 3:
+        score += 12
+        reasons.append("明顯上漲")
+    elif pct > 0:
+        score += 5
+        reasons.append("小漲")
+
+    if vol_ratio20 >= 3:
+        score += 22
+        reasons.append("量能大幅放大")
+    elif vol_ratio20 >= 2:
+        score += 17
+        reasons.append("量能放大")
+    elif vol_ratio20 >= 1.3:
+        score += 10
+        reasons.append("量能轉強")
+
+    if vol_ratio5 >= 1.8:
+        score += 10
+        reasons.append("短線資金升溫")
+    elif vol_ratio5 >= 1.2:
+        score += 5
+
+    if prev_20_high > 0 and latest_close >= prev_20_high:
+        score += 18
+        reasons.append("突破20日高")
+    elif prev_20_high > 0 and latest_high >= prev_20_high:
+        score += 12
+        reasons.append("盤中挑戰20日高")
+
+    if prev_60_high > 0 and latest_close >= prev_60_high:
+        score += 10
+        reasons.append("突破60日高")
+
+    if ma20 and latest_close >= ma20:
+        if prev_close < ma20:
+            score += 12
+            reasons.append("重新站回MA20")
+        else:
+            score += 5
+            reasons.append("站上MA20")
+
+    if ma5 and ma10 and ma20:
+        if ma5 >= ma10 >= ma20:
+            score += 8
+            reasons.append("短均線偏多")
+        elif latest_close >= ma5 >= ma10:
+            score += 5
+            reasons.append("短線轉強")
+
+    if prev_20_low > 0:
+        rebound_from_low = (latest_close - prev_20_low) / prev_20_low * 100
+        if 3 <= rebound_from_low <= 18 and pct >= 3:
+            score += 8
+            reasons.append("低位階啟動")
+        elif rebound_from_low > 35:
+            score -= 10
+            reasons.append("短線已高位")
+
+    if ma20 and latest_close > ma20 * 1.25:
+        score -= 12
+        reasons.append("離MA20過遠")
+
+    if latest_high > latest_low and latest_close < latest_low + (latest_high - latest_low) * 0.45 and pct > 3:
+        score -= 8
+        reasons.append("長上影警戒")
+
+    score = _score_clip(score)
+    summary = "、".join(reasons[:6]) if reasons else "未見明顯起漲訊號"
+    return score, summary
+
+
+def _burst_score_grade(score: Any) -> str:
+    s = _safe_float(score, 0) or 0
+    if s >= 85:
+        return "S｜強烈啟動"
+    if s >= 70:
+        return "A｜起漲優先"
+    if s >= 55:
+        return "B｜轉強觀察"
+    if s >= 40:
+        return "C｜初步觀察"
+    return "D｜未明顯啟動"
+
+
 def _normalize_code(v: Any) -> str:
     text = _safe_str(v)
     if not text:
@@ -512,6 +651,9 @@ def _analyze_stock_row(
         "成交金額": latest.get("成交金額"),
         "成交筆數": latest.get("成交筆數"),
         "訊號分數": signal.get("score"),
+        "飆股起漲分數": burst_score,
+        "起漲等級": _burst_score_grade(burst_score),
+        "起漲摘要": burst_summary,
         "20日壓力距離%": pressure_dist,
         "20日支撐距離%": support_dist,
         "雷達摘要": _safe_str(radar.get("summary")) or "—",
