@@ -32,7 +32,7 @@ PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 
 GODPICK_RECORD_COLUMNS = [
-    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "起漲等級",
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
     "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
     "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
     "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
@@ -72,6 +72,21 @@ UI_CONFIG_DEFAULT = {
     },
     "updated_at": "",
 }
+
+
+def _dedupe_keep_order(seq):
+    out = []
+    seen = set()
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+GODPICK_RECORD_COLUMNS = _dedupe_keep_order(GODPICK_RECORD_COLUMNS)
+DEFAULT_STANDARD_COLS = _dedupe_keep_order(DEFAULT_STANDARD_COLS)
+DEFAULT_ADVANCED_COLS = _dedupe_keep_order(DEFAULT_ADVANCED_COLS)
+
 
 
 def _k(key: str) -> str:
@@ -1433,7 +1448,16 @@ def _invalidate_analysis_cache():
 
 
 def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, visible_limit: int) -> tuple[pd.DataFrame, int, bool]:
-    src = view_df[[c for c in use_cols if c in view_df.columns]].copy()
+    safe_cols = []
+    seen = set()
+    for c in use_cols or []:
+        if c in view_df.columns and c not in seen and c not in ["匯入自選", "刪除"]:
+            safe_cols.append(c)
+            seen.add(c)
+
+    src = view_df[safe_cols].copy()
+    # Streamlit data_editor 不允許重複欄位名稱；這裡再保險清除一次。
+    src = src.loc[:, ~src.columns.duplicated()].copy()
     truncated = False
     total_rows = len(src)
 
@@ -1441,8 +1465,10 @@ def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, 
         src = src.head(visible_limit).copy()
         truncated = True
 
-    src.insert(0, "匯入自選", False)
-    src.insert(1, "刪除", False)
+    if "匯入自選" not in src.columns:
+        src.insert(0, "匯入自選", False)
+    if "刪除" not in src.columns:
+        src.insert(1, "刪除", False)
     return src, total_rows, truncated
 
 
