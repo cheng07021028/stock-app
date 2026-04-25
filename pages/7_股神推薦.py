@@ -44,7 +44,7 @@ try:
 except Exception:
     load_stock_master = None
 
-STATE_FIX_VERSION = "widget_key_separated_v3_no_direct_record_codes_20260425"
+STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
