@@ -1274,18 +1274,41 @@ def _get_profile_key(mode: str) -> str:
     return _k(f"col_profile_{mode}")
 
 
+def _dedupe_cols(cols: list[str], available_cols: list[str]) -> list[str]:
+    final = []
+    seen = set()
+    for c in cols or []:
+        c = _safe_str(c)
+        if c in available_cols and c not in seen:
+            final.append(c)
+            seen.add(c)
+    return final
+
+
 def _get_saved_col_profile(mode: str, available_cols: list[str]) -> list[str]:
-    default_cols = _get_default_col_profile(mode)
-    saved = st.session_state.get(_get_profile_key(mode), default_cols.copy())
-    saved = [c for c in saved if c in available_cols]
-    remain = [c for c in default_cols if c in available_cols and c not in saved]
-    extra = [c for c in available_cols if c not in saved and c not in remain]
-    final_cols = saved + remain + extra
-    return final_cols
+    """
+    重要修正：
+    只要使用者已經按「套用設定並永久記錄」，就完全依照已套用順序顯示。
+    不再把 DEFAULT_STANDARD_COLS / DEFAULT_ADVANCED_COLS 插回中間，
+    避免「推薦日期」等欄位下次又跑回原始位置。
+    """
+    profile_key = _get_profile_key(mode)
+    has_saved = profile_key in st.session_state and isinstance(st.session_state.get(profile_key), list) and len(st.session_state.get(profile_key)) > 0
+
+    if has_saved:
+        saved = _dedupe_cols(st.session_state.get(profile_key), available_cols)
+        extra = [c for c in available_cols if c not in saved]
+        return saved + extra
+
+    default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
+    extra = [c for c in available_cols if c not in default_cols]
+    return default_cols + extra
 
 
 def _save_col_profile(mode: str, cols: list[str]):
-    st.session_state[_get_profile_key(mode)] = cols.copy()
+    # 保存完整順序；後續只補新欄位到最後，不會重套預設順序。
+    available = list(dict.fromkeys(cols or []))
+    st.session_state[_get_profile_key(mode)] = available.copy()
     st.session_state[_k("last_col_profile_save")] = _now_text()
     ok, msg = _persist_ui_config()
     if ok:
@@ -1296,33 +1319,28 @@ def _save_col_profile(mode: str, cols: list[str]):
 
 def _reset_col_profile(mode: str, available_cols: list[str]):
     default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
-    _save_col_profile(mode, default_cols)
+    extra = [c for c in available_cols if c not in default_cols]
+    _save_col_profile(mode, default_cols + extra)
 
 
-def _stage_col_profile(mode: str, cols: list[str]):
-    """只暫存欄位順序，不永久保存；按『套用設定』後才正式記錄。"""
-    st.session_state[_k(f"staged_col_profile_{mode}")] = [c for c in cols if c]
+def _stage_col_profile(mode: str, cols: list[str], available_cols: list[str]):
+    st.session_state[_k(f"staged_col_profile_{mode}")] = _dedupe_cols(cols, available_cols) + [
+        c for c in available_cols if c not in _dedupe_cols(cols, available_cols)
+    ]
 
 
-def _get_staged_or_saved_col_profile(mode: str, available_cols: list[str]) -> list[str]:
+def _get_stage_col_profile(mode: str, applied_cols: list[str], available_cols: list[str]) -> list[str]:
     staged = st.session_state.get(_k(f"staged_col_profile_{mode}"))
     if isinstance(staged, list) and staged:
-        clean = [c for c in staged if c in available_cols]
-        extra = [c for c in available_cols if c not in clean]
-        return clean + extra
-    return _get_saved_col_profile(mode, available_cols)
+        staged = _dedupe_cols(staged, available_cols)
+        return staged + [c for c in available_cols if c not in staged]
+    return applied_cols.copy()
 
 
-def _apply_staged_col_profile(mode: str, available_cols: list[str]):
-    cols = _get_staged_or_saved_col_profile(mode, available_cols)
-    cols = [c for c in cols if c in available_cols]
-    _save_col_profile(mode, cols)
-    st.session_state[_k(f"staged_col_profile_{mode}")] = cols.copy()
-
-
-def _restore_original_col_profile(mode: str, available_cols: list[str]):
+def _restore_original_col_profile_to_stage(mode: str, available_cols: list[str]):
     default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
-    st.session_state[_k(f"staged_col_profile_{mode}")] = default_cols.copy()
+    extra = [c for c in available_cols if c not in default_cols]
+    st.session_state[_k(f"staged_col_profile_{mode}")] = default_cols + extra
 
 
 def _move_col(cols: list[str], col_name: str, direction: str) -> list[str]:
@@ -1770,56 +1788,63 @@ def main():
             sort_asc=sort_asc,
         )
 
-        available_cols = [c for c in (DEFAULT_ADVANCED_COLS if show_cols_mode == "進階" else DEFAULT_STANDARD_COLS) if c in view_df.columns]
-        use_cols = _get_staged_or_saved_col_profile(show_cols_mode, available_cols)
+        # 欄位順序修正：以 view_df 實際欄位為可用欄位，避免推薦日期/新欄位被預設清單重新插回。
+        available_cols = [c for c in view_df.columns if c not in ["匯入自選", "刪除"]]
+        applied_cols = _get_saved_col_profile(show_cols_mode, available_cols)
+        use_cols = applied_cols
 
         if st.session_state.get(_k("show_column_manager"), False):
             with st.expander("欄位順序管理", expanded=True):
+                draft_cols = _get_stage_col_profile(show_cols_mode, applied_cols, available_cols)
+
                 mgr_cols = st.columns([2.0, 0.9, 0.9, 0.9, 0.9, 1.2])
                 with mgr_cols[0]:
                     selected_col = st.selectbox(
                         "選擇要移動的欄位",
-                        options=use_cols,
-                        index=0 if use_cols else None,
+                        options=draft_cols,
+                        index=0 if draft_cols else None,
                         key=_k("selected_col_to_move"),
                     )
                 with mgr_cols[1]:
-                    if st.button("⬆ 上移", use_container_width=True, disabled=not use_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "up"))
+                    if st.button("⬆ 上移", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "up"), available_cols)
                         st.rerun()
                 with mgr_cols[2]:
-                    if st.button("⬇ 下移", use_container_width=True, disabled=not use_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "down"))
+                    if st.button("⬇ 下移", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "down"), available_cols)
                         st.rerun()
                 with mgr_cols[3]:
-                    if st.button("⏫ 置頂", use_container_width=True, disabled=not use_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "top"))
+                    if st.button("⏫ 置頂", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "top"), available_cols)
                         st.rerun()
                 with mgr_cols[4]:
-                    if st.button("⏬ 置底", use_container_width=True, disabled=not use_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(use_cols, selected_col, "bottom"))
+                    if st.button("⏬ 置底", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "bottom"), available_cols)
                         st.rerun()
                 with mgr_cols[5]:
-                    if st.button("↩ 原始設定", use_container_width=True):
-                        _restore_original_col_profile(show_cols_mode, available_cols)
+                    if st.button("↩ 還原原始設定", use_container_width=True):
+                        _restore_original_col_profile_to_stage(show_cols_mode, available_cols)
                         st.rerun()
 
                 st.markdown("**目前欄位順序**")
-                st.code(" | ".join(use_cols), language=None)
+                st.code(" | ".join(draft_cols), language=None)
 
-                apply_cols = st.columns([1.2, 1.2, 2.4])
+                apply_cols = st.columns([1.2, 1.2, 3.0])
                 with apply_cols[0]:
-                    if st.button("✅ 套用設定並永久記錄", use_container_width=True):
-                        _apply_staged_col_profile(show_cols_mode, available_cols)
-                        st.success("標題列順序已永久記錄，會保留到下次變更套用。")
+                    if st.button("✅ 套用設定並永久記錄", use_container_width=True, type="primary"):
+                        _save_col_profile(show_cols_mode, draft_cols)
+                        st.session_state[_k(f"staged_col_profile_{show_cols_mode}")] = _get_saved_col_profile(show_cols_mode, available_cols)
+                        st.success("欄位順序已套用並永久記錄；下次切換頁面或重新整理不會恢復原始設定。")
                         st.rerun()
                 with apply_cols[1]:
-                    if st.button("↩ 還原原始設定", use_container_width=True):
-                        _restore_original_col_profile(show_cols_mode, available_cols)
-                        st.info("已還原到原始設定，請按『套用設定並永久記錄』才會永久保存。")
+                    if st.button("取消暫存", use_container_width=True):
+                        st.session_state[_k(f"staged_col_profile_{show_cols_mode}")] = applied_cols.copy()
                         st.rerun()
                 with apply_cols[2]:
-                    st.caption("移動欄位或選快速方案只會暫存；按『套用設定並永久記錄』後，才會寫入 GitHub UI 設定並永久保存。")
+                    if draft_cols != applied_cols:
+                        st.warning("欄位順序已有暫存變更，按『套用設定並永久記錄』後才會正式保存。")
+                    else:
+                        st.caption("目前欄位順序已套用並永久保存。")
 
                 st.markdown("**快速欄位方案**")
                 preset_cols = st.columns(4)
@@ -1829,7 +1854,7 @@ def main():
                             "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦價格", "最新價",
                             "損益幅%", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "備註"
                         ] if c in available_cols]
-                        _stage_col_profile(show_cols_mode, preset)
+                        _stage_col_profile(show_cols_mode, preset, available_cols)
                         st.rerun()
                 with preset_cols[1]:
                     if st.button("方案B：績效核心", use_container_width=True):
@@ -1837,14 +1862,16 @@ def main():
                             "record_id", "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分",
                             "3日績效%", "5日績效%", "10日績效%", "20日績效%", "損益幅%", "模式績效標籤"
                         ] if c in available_cols]
-                        _stage_col_profile(show_cols_mode, preset)
+                        _stage_col_profile(show_cols_mode, preset, available_cols)
                         st.rerun()
                 with preset_cols[2]:
                     if st.button("方案C：完整預設", use_container_width=True):
-                        _restore_original_col_profile(show_cols_mode, available_cols)
+                        _restore_original_col_profile_to_stage(show_cols_mode, available_cols)
                         st.rerun()
                 with preset_cols[3]:
                     st.caption(f"最後保存：{_safe_str(st.session_state.get(_k('ui_last_saved_at'), '未保存'))}")
+
+                use_cols = _get_saved_col_profile(show_cols_mode, available_cols)
 
         editor_df, total_rows, truncated = _get_editor_df(
             view_df=view_df,
