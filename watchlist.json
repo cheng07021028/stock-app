@@ -8,14 +8,12 @@
     {
       "code": "1773",
       "name": "勝一",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "2330",
       "name": "台積電",
-      "market": "上市",
-      "category": "晶圓代工"
+      "market": "上市"
     },
     {
       "code": "2344",
@@ -25,32 +23,27 @@
     {
       "code": "2368",
       "name": "金像電",
-      "market": "上市",
-      "category": "PCB載板"
+      "market": "上市"
     },
     {
       "code": "3019",
       "name": "亞光",
-      "market": "上市",
-      "category": "光學鏡頭"
+      "market": "上市"
     },
     {
       "code": "3035",
       "name": "智原",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "3189",
       "name": "景碩",
-      "market": "上市",
-      "category": "PCB載板"
+      "market": "上市"
     },
     {
       "code": "3209",
       "name": "全科",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "3548",
@@ -60,8 +53,7 @@
     {
       "code": "6108",
       "name": "競國",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6271",
@@ -71,23 +63,20 @@
     {
       "code": "6799",
       "name": "來頡",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6861",
       "name": "睿生光電",
-      "market": "上市",
-      "category": "其他電子"
+      "market": "上市"
     },
     {
       "code": "8081",
       "name": "致新",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     }
   ],
-  "0422股神推薦": [
+  "0422": [
     {
       "code": "3189",
       "name": "景碩",
