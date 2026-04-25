@@ -394,107 +394,110 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
-    """
-    Yahoo Finance 歷史資料備援。
-    會同時測試 .TWO / .TW，且 query1 / query2 都試，避免單一來源失敗。
-    """
+def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+    """Yahoo Finance 備援日線：支援上市 .TW 與上櫃 .TWO，避免 TWSE/TPEX 官方端點異常時整頁無資料。"""
     stock_no = _safe_str(stock_no)
+    market_type = _safe_str(market_type)
     if not stock_no:
-        return pd.DataFrame()
-
-    market = _safe_str(market_type)
-    suffixes = [".TWO", ".TW"] if market in ["上櫃", "興櫃"] else [".TW", ".TWO"]
+        return pd.DataFrame(), ""
 
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
-    if pd.isna(start_ts) or pd.isna(end_ts) or end_ts < start_ts:
-        return pd.DataFrame()
+    if end_ts < start_ts:
+        return pd.DataFrame(), ""
 
-    period1 = int((start_ts - pd.Timedelta(days=10)).timestamp())
-    period2 = int((end_ts + pd.Timedelta(days=3)).timestamp())
+    period1 = int(start_ts.timestamp())
+    # Yahoo period2 是 exclusive，補一天避免結束日漏抓
+    period2 = int((end_ts + pd.Timedelta(days=1)).timestamp())
+
+    if market_type == "上櫃":
+        symbols = [f"{stock_no}.TWO", f"{stock_no}.TW"]
+    elif market_type == "上市":
+        symbols = [f"{stock_no}.TW", f"{stock_no}.TWO"]
+    else:
+        symbols = [f"{stock_no}.TW", f"{stock_no}.TWO"]
+
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Accept": "application/json,text/plain,*/*",
     }
 
-    base_hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
-
-    for suffix in suffixes:
-        symbol = f"{stock_no}{suffix}"
-        for host in base_hosts:
-            try:
-                url = f"https://{host}/v8/finance/chart/{symbol}"
-                resp = requests.get(
-                    url,
-                    params={
-                        "period1": period1,
-                        "period2": period2,
-                        "interval": "1d",
-                        "includePrePost": "false",
-                        "events": "history",
-                    },
-                    headers=headers,
-                    timeout=20,
-                    verify=False,
-                )
-                if resp.status_code != 200:
-                    continue
-
-                payload = resp.json()
-                chart = (payload or {}).get("chart") or {}
-                error = chart.get("error")
-                if error:
-                    continue
-                result_list = chart.get("result") or []
-                if not result_list:
-                    continue
-
-                result = result_list[0] or {}
-                timestamps = result.get("timestamp") or []
-                quote = (((result.get("indicators") or {}).get("quote") or [{}])[0]) or {}
-                if not timestamps or not quote:
-                    continue
-
-                def pick(name):
-                    arr = quote.get(name, [])
-                    if arr is None:
-                        return []
-                    return arr
-
-                df = pd.DataFrame({
-                    "日期": pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Taipei").tz_localize(None).normalize(),
-                    "開盤價": pick("open"),
-                    "最高價": pick("high"),
-                    "最低價": pick("low"),
-                    "收盤價": pick("close"),
-                    "成交股數": pick("volume"),
-                })
-
-                for c in ["開盤價", "最高價", "最低價", "收盤價", "成交股數"]:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-
-                df = df.dropna(subset=["日期", "收盤價"]).copy()
-                df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
-                df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-
-                if not df.empty:
-                    df["資料源"] = f"yahoo:{symbol}"
-                    return df
-            except Exception:
+    for symbol in symbols:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+            params = {
+                "period1": period1,
+                "period2": period2,
+                "interval": "1d",
+                "events": "history",
+                "includeAdjustedClose": "true",
+            }
+            r = requests.get(url, params=params, headers=headers, timeout=18, verify=False)
+            r.raise_for_status()
+            data = r.json()
+            result = (((data or {}).get("chart") or {}).get("result") or [])
+            if not result:
                 continue
 
-    return pd.DataFrame()
+            item = result[0]
+            timestamps = item.get("timestamp") or []
+            quote = (((item.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+            if not timestamps or not quote:
+                continue
+
+            adjclose = (((item.get("indicators") or {}).get("adjclose") or [{}])[0] or {}).get("adjclose") or []
+            rows = []
+            for idx, ts in enumerate(timestamps):
+                try:
+                    d = pd.to_datetime(int(ts), unit="s").tz_localize("UTC").tz_convert("Asia/Taipei").tz_localize(None).normalize()
+                except Exception:
+                    d = pd.to_datetime(int(ts), unit="s")
+
+                open_v = quote.get("open", [None] * len(timestamps))[idx]
+                high_v = quote.get("high", [None] * len(timestamps))[idx]
+                low_v = quote.get("low", [None] * len(timestamps))[idx]
+                close_v = quote.get("close", [None] * len(timestamps))[idx]
+                volume_v = quote.get("volume", [None] * len(timestamps))[idx]
+
+                if close_v is None:
+                    continue
+
+                rows.append({
+                    "日期": d,
+                    "開盤價": open_v,
+                    "最高價": high_v,
+                    "最低價": low_v,
+                    "收盤價": close_v,
+                    "成交股數": volume_v,
+                    "成交金額": pd.NA,
+                    "成交筆數": pd.NA,
+                })
+
+            if not rows:
+                continue
+
+            df = pd.DataFrame(rows)
+            for col in ["開盤價", "最高價", "最低價", "收盤價", "成交股數", "成交金額", "成交筆數"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+            df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+            if not df.empty:
+                return df, symbol
+        except Exception:
+            continue
+
+    return pd.DataFrame(), ""
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
     """
-    多層歷史資料來源：
+    與 3_歷史K線分析.py 同步的歷史資料來源邏輯：
     1. utils.get_history_data 原市場
     2. utils.get_history_data 交叉市場
     3. TPEX 官方上櫃
-    4. Yahoo .TWO / .TW
+    4. Yahoo Finance，沿用 3_歷史K線分析.py 已驗證可抓 3548.TWO 的寫法
     """
     market = _safe_str(market_type)
     markets_to_try = []
@@ -528,16 +531,10 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
         pass
 
     try:
-        df3_raw = _get_yahoo_history_data(stock_no, market_type, start_date, end_date)
+        df3_raw, source = _get_yahoo_history_data(stock_no, market_type, start_date, end_date)
         df3 = _prepare_history_df(df3_raw)
         if not df3.empty:
-            source = "yahoo"
-            try:
-                if "資料源" in df3_raw.columns:
-                    source = _safe_str(df3_raw["資料源"].dropna().iloc[-1]) or "yahoo"
-            except Exception:
-                pass
-            df3["資料源"] = source
+            df3["資料源"] = source or "yahoo"
             return df3
     except Exception:
         pass
