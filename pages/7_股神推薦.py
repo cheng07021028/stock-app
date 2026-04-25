@@ -1265,11 +1265,11 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
         return base_df.copy()
 
     merged = pd.concat([base_df, new_df], ignore_index=True)
+    # 防重複規則：同一天同一檔股票只保留一筆。
+    # 不使用推薦時間 / 推薦模式，避免同日同股票重複寫入推薦紀錄。
     merged["_biz_key"] = (
-        merged["股票代號"].fillna("").astype(str) + "|"
-        + merged["推薦日期"].fillna("").astype(str) + "|"
-        + merged["推薦時間"].fillna("").astype(str) + "|"
-        + merged["推薦模式"].fillna("").astype(str)
+        merged["股票代號"].fillna("").astype(str).map(_normalize_code) + "|"
+        + merged["推薦日期"].fillna("").astype(str)
     )
     merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
     merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
@@ -2805,12 +2805,14 @@ def _find_existing_watchlist_codes(group_name: str, codes: list[str]) -> list[st
 
 
 def _record_business_key(row: dict[str, Any]) -> str:
-    """股神推薦紀錄去重用 business key。"""
+    """股神推薦紀錄防重複 business key。
+
+    防呆規則：同一天同一檔股票只允許一筆推薦紀錄。
+    不再把「推薦時間 / 推薦模式」放進 key，避免同股票同日因時間不同而重複寫入。
+    """
     return (
         f"{_normalize_code(row.get('股票代號'))}|"
-        f"{_safe_str(row.get('推薦日期'))}|"
-        f"{_safe_str(row.get('推薦時間'))}|"
-        f"{_safe_str(row.get('推薦模式'))}"
+        f"{_safe_str(row.get('推薦日期'))}"
     )
 
 
@@ -2835,12 +2837,7 @@ def _find_existing_godpick_record_codes(record_rows: list[dict[str, Any]]) -> tu
 
     old_keys = set()
     for _, r in old_df.iterrows():
-        old_keys.add(
-            f"{_normalize_code(r.get('股票代號'))}|"
-            f"{_safe_str(r.get('推薦日期'))}|"
-            f"{_safe_str(r.get('推薦時間'))}|"
-            f"{_safe_str(r.get('推薦模式'))}"
-        )
+        old_keys.add(_record_business_key(r.to_dict()))
 
     dup_codes = []
     dup_keys = []
@@ -5406,37 +5403,26 @@ def main():
             record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
             dup_codes, dup_keys = _find_existing_godpick_record_codes(record_rows)
 
-            if dup_codes and not st.session_state.get(_k("confirm_record_duplicate"), False):
+            if dup_codes:
                 st.warning(
-                    f"8_股神推薦紀錄已存在 {len(dup_codes)} 檔相同推薦紀錄："
+                    f"8_股神推薦紀錄已存在 {len(dup_codes)} 檔，系統已防呆不重複寫入："
                     + "、".join(dup_codes[:20])
                     + ("..." if len(dup_codes) > 20 else "")
                 )
-                st.info("請確認是否仍要重複紀錄。若確認，會保留舊紀錄並新增一筆新紀錄，備註會標記『使用者確認重複紀錄』。")
-                st.session_state[_k("pending_record_rows")] = record_rows
-                if st.button("確認：仍要重複寫入股神推薦紀錄", use_container_width=True, key=_k("confirm_record_duplicate_btn")):
-                    st.session_state[_k("confirm_record_duplicate")] = True
-                    st.rerun()
+                st.info("防重複規則：推薦日期 + 股票代號。已存在的股票會自動略過，只新增尚未存在的股票。")
+
+            added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=False)
+            st.session_state[_k("confirm_record_duplicate")] = False
+            st.session_state[_k("pending_record_rows")] = []
+
+            if added_count > 0:
+                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄；已存在者自動略過。")
             else:
-                force_duplicate = bool(st.session_state.get(_k("confirm_record_duplicate"), False))
-                if force_duplicate:
-                    record_rows = st.session_state.get(_k("pending_record_rows"), record_rows)
-
-                added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=force_duplicate)
-                st.session_state[_k("confirm_record_duplicate")] = False
-                st.session_state[_k("pending_record_rows")] = []
-
-                if added_count > 0:
-                    if force_duplicate:
-                        st.success(f"已重複寫入 {added_count} 筆到 8_股神推薦紀錄")
-                    else:
-                        st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
-                else:
-                    st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
-                if record_msgs:
-                    with st.expander("推薦紀錄寫入明細", expanded=True):
-                        for msg in record_msgs:
-                            st.write(f"- {msg}")
+                st.warning("沒有新增任何推薦紀錄，因為勾選股票可能都已存在或寫入失敗。")
+            if record_msgs:
+                with st.expander("推薦紀錄寫入明細", expanded=True):
+                    for msg in record_msgs:
+                        st.write(f"- {msg}")
 
     record_detail_lines = st.session_state.get(_k("last_record_write_detail"), [])
     if record_detail_lines:
