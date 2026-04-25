@@ -490,6 +490,58 @@ def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, e
     return pd.DataFrame(), ""
 
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_history_from_kline_page(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date, refresh_token: str = "init") -> tuple[pd.DataFrame, str]:
+    """
+    最後保險：直接呼叫同資料夾的 3_歷史K線分析.py 歷史資料函式。
+    因為 3 頁已確認可抓到 3548 yahoo:3548.TWO，所以 2 頁若自身來源都失敗，就沿用 3 頁已驗證邏輯。
+    """
+    try:
+        import importlib.util
+        from pathlib import Path as _Path
+
+        page3_path = _Path(__file__).with_name("3_歷史K線分析.py")
+        if not page3_path.exists():
+            return pd.DataFrame(), "3頁檔案不存在"
+
+        spec = importlib.util.spec_from_file_location("kline_page_bridge_for_quote", str(page3_path))
+        if spec is None or spec.loader is None:
+            return pd.DataFrame(), "3頁載入失敗"
+
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        fn = getattr(mod, "_get_history_data_smart", None)
+        prep = getattr(mod, "_prepare_history_df", None)
+        if fn is None:
+            return pd.DataFrame(), "3頁沒有 _get_history_data_smart"
+
+        result = fn(stock_no, stock_name, market_type, start_date, end_date)
+
+        if isinstance(result, tuple):
+            df = result[0] if len(result) >= 1 else pd.DataFrame()
+            source = result[2] if len(result) >= 3 else (result[1] if len(result) >= 2 else "kline_page")
+        else:
+            df = result
+            source = "kline_page"
+
+        if prep is not None:
+            try:
+                df = prep(df)
+            except Exception:
+                pass
+
+        df = _prepare_history_df(df)
+        if not df.empty:
+            df["資料源"] = f"3頁橋接:{source}"
+            return df, f"3頁橋接:{source}"
+
+        return pd.DataFrame(), f"3頁橋接空資料:{source}"
+    except Exception as e:
+        return pd.DataFrame(), f"3頁橋接錯誤:{str(e)[:100]}"
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date, refresh_token: str = "init") -> pd.DataFrame:
     stock_no = _safe_str(stock_no)
@@ -551,6 +603,18 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
             return df_yahoo
     except Exception as e:
         debug_try.append(f"yahoo=ERR {str(e)[:80]}")
+
+    # 5) 最後保險：直接橋接 3_歷史K線分析.py，使用該頁已驗證可成功的歷史資料邏輯。
+    try:
+        df_kline, kline_source = _get_history_from_kline_page(stock_no, stock_name, market_type, start_date, end_date, refresh_token)
+        df_kline = _prepare_history_df(df_kline)
+        debug_try.append(f"kline_page:{kline_source}={len(df_kline)}")
+        if not df_kline.empty:
+            df_kline["資料源"] = kline_source or "3頁橋接"
+            st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
+            return df_kline
+    except Exception as e:
+        debug_try.append(f"kline_page=ERR {str(e)[:80]}")
 
     st.session_state[_k("history_debug_try")] = "｜".join(debug_try[-16:])
     return pd.DataFrame()
@@ -1106,7 +1170,7 @@ def main():
         if st.button("更新即時資料", use_container_width=True, type="primary", key=_k("refresh_btn")):
             st.session_state[_k("refresh_token")] = str(int(time.time() * 1000))
             # 清掉之前抓不到歷史資料時留下的空快取，避免修正後仍讀到舊空資料。
-            for _func in [_get_history_data_smart, _get_yahoo_history_data, _get_tpex_history_data, _get_twse_history_data_direct_quote]:
+            for _func in [_get_history_data_smart, _get_yahoo_history_data, _get_tpex_history_data, _get_twse_history_data_direct_quote, _get_history_from_kline_page]:
                 try:
                     _func.clear()
                 except Exception:
@@ -1192,7 +1256,7 @@ def main():
     if history_df.empty:
         st.warning(
             f"技術訊號歷史資料暫時抓不到：{selected_code} {final_name} / 市場 {final_market}。"
-            "已嘗試 utils / TWSE / TPEX / Yahoo fallback。即時報價仍可使用。"
+            "已嘗試 utils / TWSE / TPEX / Yahoo fallback / 3頁橋接。即時報價仍可使用。"
             "請先按一次「更新即時資料」清除舊空快取；若 3_歷史K線分析可抓到，2頁會同步使用相同 Yahoo 邏輯。"
         )
         with st.expander("歷史資料抓取除錯", expanded=False):
