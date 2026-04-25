@@ -30,6 +30,7 @@ from utils import (
 
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
+RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 
 GODPICK_RECORD_COLUMNS = [
     "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
@@ -114,6 +115,27 @@ def _safe_float(v: Any, default=None):
         return float(v)
     except Exception:
         return default
+
+
+
+def _derive_prelaunch_grade_from_score(score: Any) -> str:
+    """依起漲前兆分數補齊舊紀錄的起漲等級。"""
+    s = _safe_float(score, 0) or 0
+    if s >= 88:
+        return "S｜強烈起漲"
+    if s >= 78:
+        return "A｜起漲優先"
+    if s >= 68:
+        return "B｜轉強確認"
+    if s >= 55:
+        return "C｜初步轉強"
+    return "D｜尚未起漲"
+
+
+# 相容保險：處理任何舊版呼叫名稱
+def derive_prelaunch_grade_from_score(score: Any) -> str:
+    return _derive_prelaunch_grade_from_score(score)
+
 
 
 def _normalize_code(v: Any) -> str:
@@ -1665,6 +1687,7 @@ def main():
         title="股神推薦紀錄",
         subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
+    st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -2224,17 +2247,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-def _derive_prelaunch_grade_from_score(score: Any) -> str:
-    s = _safe_float(score, 0) or 0
-    if s >= 88:
-        return "S｜強烈起漲"
-    if s >= 78:
-        return "A｜起漲優先"
-    if s >= 68:
-        return "B｜轉強確認"
-    if s >= 55:
-        return "C｜初步轉強"
-    return "D｜尚未起漲"
-
 
 
