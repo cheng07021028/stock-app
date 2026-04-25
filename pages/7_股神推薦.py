@@ -4107,12 +4107,45 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 # Excel 匯出
 # =========================================================
 @st.cache_data(ttl=300, show_spinner=False)
-def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
+
+def _get_full_table_default_cols() -> list[str]:
+    return [
+        "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
+        "推薦模式", "推薦等級", "推薦總分", "買點分級",
+        "信心等級", "推薦分桶", "市場環境分數",
+        "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
+        "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
+        "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
+        "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
+        "推薦標籤", "股神推論邏輯", "風險說明", "推薦理由摘要",
+        "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    ]
+
+
+def _get_full_table_order_for_export(rec_df: pd.DataFrame) -> list[str]:
+    """
+    讓 Excel 的「完整推薦表」與畫面上的「完整推薦表」欄位順序完全一致。
+    會吃使用者在完整推薦表欄位管理中套用並永久記錄的順序。
+    """
+    if rec_df is None or rec_df.empty:
+        return []
+    available_cols = list(rec_df.columns)
+    default_cols = _get_full_table_default_cols()
+    saved_order = _load_persistent_column_order("full_table")
+    full_order = _normalize_column_order(saved_order if saved_order else default_cols, available_cols, default_cols)
+    return [c for c in full_order if c in rec_df.columns]
+
+
+def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int, full_order: list[str] | None = None):
     if rec_df is None or rec_df.empty:
         empty = pd.DataFrame()
         return empty, empty, empty, empty
 
-    rec_export = rec_df.copy()
+    if full_order is None:
+        full_order = _get_full_table_order_for_export(rec_df)
+
+    # Excel「完整推薦表」必須和畫面上的完整推薦表欄位一致。
+    rec_export = rec_df[[c for c in full_order if c in rec_df.columns]].copy() if full_order else rec_df.copy()
     leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
     factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
     cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
@@ -4168,8 +4201,12 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
     if rec_df is None or rec_df.empty:
         return
 
-    rec_export, cat_export, leader_export, factor_export = _build_export_views(rec_df, category_strength_df, top_n)
-    excel_bytes = _build_excel_bytes(rec_export, cat_export, leader_export, factor_export)
+    full_order = _get_full_table_order_for_export(rec_df)
+    rec_export, cat_export, leader_export, factor_export = _build_export_views(rec_df, category_strength_df, top_n, full_order=full_order)
+
+    # 讓 Excel 內容顯示格式盡量與畫面上的完整推薦表一致。
+    rec_export_for_excel = _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export
+    excel_bytes = _build_excel_bytes(rec_export_for_excel, cat_export, leader_export, factor_export)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"股神推薦_V2_{ts}.xlsx"
@@ -4185,7 +4222,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("匯出內容：完整推薦表、類股強度榜、同類股領先榜、自動因子榜。")
+        st.caption("匯出內容：完整推薦表會與畫面欄位順序一致，另含類股強度榜、同類股領先榜、自動因子榜。")
 
 
 def _render_selected_export_block():
@@ -4197,7 +4234,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分",
+        "推薦模式", "推薦等級", "推薦總分", "推薦分桶", "起漲等級", "信心等級",
         "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "是否領先同類股",
         "最新價", "推薦買點_拉回", "推薦買點_突破",
@@ -5072,10 +5109,14 @@ def main():
     with q1:
         if st.button("全選本輪推薦", use_container_width=True):
             st.session_state[_k("rec_pick_codes_next")] = rec_all_codes
+            st.session_state[_k("rec_record_codes_next")] = rec_all_codes
+            st.session_state[_k("top_pick_codes_next")] = rec_all_codes
             st.rerun()
     with q2:
         if st.button("清空勾選", use_container_width=True):
             st.session_state[_k("rec_pick_codes_next")] = []
+            st.session_state[_k("rec_record_codes_next")] = []
+            st.session_state[_k("top_pick_codes_next")] = []
             st.rerun()
 
     if add_selected_btn:
@@ -5144,10 +5185,14 @@ def main():
     with rr3:
         if st.button("全選本輪推薦做紀錄", use_container_width=True):
             st.session_state[_k("rec_record_codes_next")] = record_all_codes
+            st.session_state[_k("rec_pick_codes_next")] = record_all_codes
+            st.session_state[_k("top_pick_codes_next")] = record_all_codes
             st.rerun()
     with rr4:
         if st.button("清空紀錄勾選", use_container_width=True):
             st.session_state[_k("rec_record_codes_next")] = []
+            st.session_state[_k("rec_pick_codes_next")] = []
+            st.session_state[_k("top_pick_codes_next")] = []
             st.rerun()
 
     selected_snapshot_df = rec_df[
@@ -5183,6 +5228,16 @@ def main():
     _render_record_export_block(rec_df)
 
     render_pro_section("本輪精華推薦")
+
+    top_selected_codes = st.session_state.pop(_k("top_pick_codes_next"), None)
+    if top_selected_codes is None:
+        top_selected_codes = st.session_state.get(_k("rec_record_codes"), st.session_state.get(_k("rec_pick_codes"), []))
+    top_selected_codes = {_normalize_code(x) for x in top_selected_codes if _normalize_code(x)}
+
+    top_df = top_df.copy()
+    if "勾選" not in top_df.columns:
+        top_df.insert(0, "勾選", False)
+    top_df["勾選"] = top_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in top_selected_codes)
 
     top_show_df = top_df[
         [
@@ -5245,9 +5300,12 @@ def main():
             if code:
                 picked_codes_from_top.append(code)
 
-    current_pick_codes = st.session_state.get(_k("rec_pick_codes"), [])
-    current_record_codes = st.session_state.get(_k("rec_record_codes"), [])
+    current_pick_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
+    current_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
 
+    # 注意：rec_pick_codes / rec_record_codes 是 multiselect widget key。
+    # Streamlit 不允許 widget 建立後在同一次 rerun 直接寫入該 key，
+    # 所以只能寫到 *_next，下一次 rerun 開頭再套用，避免 StreamlitAPIException。
     if picked_codes_from_top != current_pick_codes:
         st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
     if picked_codes_from_top != current_record_codes:
@@ -5287,7 +5345,7 @@ def main():
                 added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
                 if added > 0:
                     st.success(f"已加入 {added} 檔到自選股中心：{pick_group}")
-                    st.session_state[_k("rec_pick_codes")] = picked_codes_from_top
+                    st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
                     st.rerun()
                 else:
                     st.warning("沒有新增成功，可能已存在或寫入失敗。")
@@ -5300,7 +5358,7 @@ def main():
             added_count, record_msgs = _append_godpick_records(record_rows)
             if added_count > 0:
                 st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
-                st.session_state[_k("rec_record_codes")] = picked_codes_from_top
+                st.session_state[_k("rec_record_codes_next")] = picked_codes_from_top
             else:
                 st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
             with st.expander("推薦紀錄寫入明細", expanded=True):
