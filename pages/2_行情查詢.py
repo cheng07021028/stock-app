@@ -394,7 +394,7 @@ def _get_tpex_history_data(stock_no: str, start_date: date, end_date: date) -> p
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str]:
+def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, end_date: date, refresh_token: str = "init") -> tuple[pd.DataFrame, str]:
     """Yahoo Finance 備援日線：支援上市 .TW 與上櫃 .TWO，避免 TWSE/TPEX 官方端點異常時整頁無資料。"""
     stock_no = _safe_str(stock_no)
     market_type = _safe_str(market_type)
@@ -491,7 +491,7 @@ def _get_yahoo_history_data(stock_no: str, market_type: str, start_date: date, e
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> pd.DataFrame:
+def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date, refresh_token: str = "init") -> pd.DataFrame:
     """
     與 3_歷史K線分析.py 同步的歷史資料來源邏輯：
     1. utils.get_history_data 原市場
@@ -531,7 +531,7 @@ def _get_history_data_smart(stock_no: str, stock_name: str, market_type: str, st
         pass
 
     try:
-        df3_raw, source = _get_yahoo_history_data(stock_no, market_type, start_date, end_date)
+        df3_raw, source = _get_yahoo_history_data(stock_no, market_type, start_date, end_date, refresh_token)
         df3 = _prepare_history_df(df3_raw)
         if not df3.empty:
             df3["資料源"] = source or "yahoo"
@@ -938,6 +938,12 @@ def main():
     with refresh_cols[0]:
         if st.button("更新即時資料", use_container_width=True, type="primary", key=_k("refresh_btn")):
             st.session_state[_k("refresh_token")] = str(int(time.time() * 1000))
+            # 清掉之前抓不到歷史資料時留下的空快取，避免修正後仍讀到舊空資料。
+            for _func in [_get_history_data_smart, _get_yahoo_history_data, _get_tpex_history_data]:
+                try:
+                    _func.clear()
+                except Exception:
+                    pass
     with refresh_cols[1]:
         st.caption(f"刷新識別：{st.session_state.get(_k('refresh_token'), 'init')}")
 
@@ -999,6 +1005,7 @@ def main():
         market_type=final_market,
         start_date=start_date,
         end_date=end_date,
+        refresh_token=st.session_state.get(_k("refresh_token"), "init"),
     )
 
     signal_snapshot = compute_signal_snapshot(history_df) if not history_df.empty else {}
@@ -1018,7 +1025,8 @@ def main():
     if history_df.empty:
         st.warning(
             f"技術訊號歷史資料暫時抓不到：{selected_code} {final_name} / 市場 {final_market}。"
-            "已嘗試 utils / TPEX / Yahoo fallback。即時報價仍可使用，請稍後按「更新即時資料」或到 3_歷史K線分析交叉確認。"
+            "已嘗試 utils / TPEX / Yahoo fallback。即時報價仍可使用。"
+            "請先按一次「更新即時資料」清除舊空快取；若 3_歷史K線分析可抓到，2頁會同步使用相同 Yahoo 邏輯。"
         )
     else:
         st.caption(f"技術訊號資料源：{history_source}｜歷史筆數：{len(history_df)}")
