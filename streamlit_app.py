@@ -162,70 +162,173 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
     return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_godpick_records_df() -> pd.DataFrame:
-    cols = [
-        "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
-        "買點分級", "型態名稱", "爆發等級", "推薦日期", "推薦時間", "目前狀態"
-    ]
+
+def _read_github_json_file(path_name: str, default):
     cfg = _godpick_records_github_config()
-    if not cfg["token"]:
-        return pd.DataFrame(columns=cols)
+    token = cfg["token"]
+    if not token:
+        return default
 
     try:
-        import base64, json, requests
         resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(cfg["token"]),
+            _github_contents_url(cfg["owner"], cfg["repo"], path_name),
+            headers=_github_headers(token),
             params={"ref": cfg["branch"]},
             timeout=20,
         )
         if resp.status_code != 200:
-            return pd.DataFrame(columns=cols)
-
+            return default
         content = resp.json().get("content", "")
         if not content:
-            return pd.DataFrame(columns=cols)
-
-        data = json.loads(base64.b64decode(content).decode("utf-8"))
-        df = pd.DataFrame(data if isinstance(data, list) else [])
-        for c in cols:
-            if c not in df.columns:
-                df[c] = None
-
-        df["股票代號"] = df["股票代號"].astype(str).str.extract(r"(\d+)")[0].fillna(df["股票代號"].astype(str))
-        df["推薦總分"] = pd.to_numeric(df["推薦總分"], errors="coerce")
-        return df[cols].copy()
+            return default
+        return json.loads(base64.b64decode(content).decode("utf-8"))
     except Exception:
-        return pd.DataFrame(columns=cols)
+        return default
+
+
+def _read_local_json_file(path_name: str, default):
+    try:
+        p = Path(path_name)
+        if not p.exists():
+            return default
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _normalize_godpick_payload(payload) -> pd.DataFrame:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("recommendations"), list):
+            payload = payload.get("recommendations")
+        elif isinstance(payload.get("records"), list):
+            payload = payload.get("records")
+        else:
+            payload = []
+    if not isinstance(payload, list):
+        payload = []
+    return pd.DataFrame(payload)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_godpick_records_df() -> pd.DataFrame:
+    """
+    首頁最近高分推薦資料源強化：
+    1. 優先讀取 godpick_latest_recommendations.json（7頁本輪推薦永久保存）
+    2. 再讀取 godpick_recommend_list.json（10頁推薦清單）
+    3. 再讀取 godpick_records.json（8頁推薦紀錄）
+    4. 欄位自動相容新版：推薦分桶 / 信心等級 / 買點劇本 / 風險說明
+    """
+    cols = [
+        "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
+        "買點分級", "推薦分桶", "信心等級", "型態名稱", "爆發等級",
+        "風險說明", "股神推論邏輯", "推薦日期", "推薦時間", "更新時間", "建立時間", "目前狀態"
+    ]
+
+    payloads = []
+
+    # GitHub：新版本輪推薦
+    latest_payload = _read_github_json_file("godpick_latest_recommendations.json", {})
+    if not latest_payload:
+        latest_payload = _read_local_json_file("godpick_latest_recommendations.json", {})
+    latest_df = _normalize_godpick_payload(latest_payload)
+    if not latest_df.empty:
+        latest_df["首頁資料來源"] = "本輪推薦"
+
+    # GitHub：推薦清單
+    list_payload = _read_github_json_file("godpick_recommend_list.json", [])
+    if not list_payload:
+        list_payload = _read_local_json_file("godpick_recommend_list.json", [])
+    list_df = _normalize_godpick_payload(list_payload)
+    if not list_df.empty:
+        list_df["首頁資料來源"] = "推薦清單"
+
+    # GitHub：推薦紀錄
+    cfg = _godpick_records_github_config()
+    rec_payload = _read_github_json_file(cfg["path"], [])
+    if not rec_payload:
+        rec_payload = _read_local_json_file(cfg["path"], [])
+    rec_df = _normalize_godpick_payload(rec_payload)
+    if not rec_df.empty:
+        rec_df["首頁資料來源"] = "推薦紀錄"
+
+    for df in [latest_df, list_df, rec_df]:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            payloads.append(df)
+
+    if not payloads:
+        return pd.DataFrame(columns=cols + ["首頁資料來源"])
+
+    df = pd.concat(payloads, ignore_index=True, sort=False)
+
+    for c in cols + ["首頁資料來源"]:
+        if c not in df.columns:
+            df[c] = ""
+
+    # 新版欄位相容：如果舊欄位沒有資料，就用新版欄位補。
+    df["型態名稱"] = df["型態名稱"].where(df["型態名稱"].fillna("").astype(str).str.strip() != "", df.get("推薦分桶", ""))
+    df["爆發等級"] = df["爆發等級"].where(df["爆發等級"].fillna("").astype(str).str.strip() != "", df.get("信心等級", ""))
+
+    if "目前狀態" in df.columns:
+        df["目前狀態"] = df["目前狀態"].replace({None: "", "None": ""}).fillna("")
+    df["目前狀態"] = df["目前狀態"].where(df["目前狀態"].astype(str).str.strip() != "", "觀察")
+
+    for c in ["股票代號", "股票名稱", "推薦模式", "推薦等級", "買點分級", "型態名稱", "爆發等級", "推薦日期", "推薦時間", "更新時間", "建立時間", "首頁資料來源"]:
+        df[c] = df[c].replace({None: "", "None": ""}).fillna("").astype(str)
+
+    df["股票代號"] = df["股票代號"].astype(str).str.extract(r"(\d+)")[0].fillna(df["股票代號"].astype(str))
+    df["推薦總分"] = pd.to_numeric(df["推薦總分"], errors="coerce").fillna(0)
+
+    return df[cols + ["首頁資料來源"]].copy()
 
 
 def _build_latest_rec_df(rec_df: pd.DataFrame) -> pd.DataFrame:
+    show_cols = [
+        "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級",
+        "型態名稱", "爆發等級", "最近推薦時間", "目前狀態", "首頁資料來源"
+    ]
     if rec_df is None or rec_df.empty:
-        return pd.DataFrame(columns=[
-            "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級",
-            "型態名稱", "爆發等級", "最近推薦時間", "目前狀態"
-        ])
+        return pd.DataFrame(columns=show_cols)
 
     work = rec_df.copy()
-    work["_sort_dt"] = pd.to_datetime(
-        work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str),
-        errors="coerce",
-    )
-    work = work.sort_values(["股票代號", "_sort_dt"], ascending=[True, False], na_position="last")
-    work = work.drop_duplicates(subset=["股票代號"], keep="first").reset_index(drop=True)
-    work["最近推薦時間"] = (
-        work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str)
-    ).str.strip()
-
-    cols = [
-        "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級",
-        "型態名稱", "爆發等級", "最近推薦時間", "目前狀態"
-    ]
-    for c in cols:
+    for c in ["推薦日期", "推薦時間", "更新時間", "建立時間"]:
         if c not in work.columns:
             work[c] = ""
-    return work[cols].copy()
+        work[c] = work[c].fillna("").astype(str)
+
+    work["_sort_dt"] = pd.to_datetime(
+        work["推薦日期"].astype(str) + " " + work["推薦時間"].astype(str),
+        errors="coerce",
+    )
+    # 若日期時間欄位沒有，改用更新/建立時間補排序。
+    upd_dt = pd.to_datetime(work["更新時間"], errors="coerce")
+    crt_dt = pd.to_datetime(work["建立時間"], errors="coerce")
+    work["_sort_dt"] = work["_sort_dt"].fillna(upd_dt).fillna(crt_dt)
+
+    # 本輪推薦 / 推薦清單優先於歷史紀錄，避免首頁抓到舊資料。
+    source_rank = {"本輪推薦": 3, "推薦清單": 2, "推薦紀錄": 1}
+    work["_source_rank"] = work.get("首頁資料來源", "").map(lambda x: source_rank.get(str(x), 0))
+
+    work = work.sort_values(
+        ["推薦總分", "_source_rank", "_sort_dt"],
+        ascending=[False, False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    work["最近推薦時間"] = work["_sort_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    work["最近推薦時間"] = work["最近推薦時間"].replace("NaT", "")
+    work["最近推薦時間"] = work["最近推薦時間"].where(
+        work["最近推薦時間"].astype(str).str.strip() != "",
+        (work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str)).str.strip()
+    )
+
+    # 顯示不要再出現 None。
+    for c in show_cols:
+        if c not in work.columns:
+            work[c] = ""
+        work[c] = work[c].replace({None: "", "None": ""}).fillna("")
+
+    return work[show_cols].copy()
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _build_watchlist_payload(raw_items: tuple) -> dict[str, list[dict[str, str]]]:
@@ -459,23 +562,9 @@ def _init_state():
 
 
 def _clear_home_search_input():
-    """用 callback 清空首頁搜尋欄，避免 widget key 於建立後被直接改值。"""
+    """使用 callback 清除首頁搜尋欄，避免 widget 建立後改 session_state 造成 StreamlitAPIException。"""
     st.session_state[_k("search_input")] = ""
-
-
-def _carry_home_search_to_pages(search_rows: list[dict[str, str]]):
-    """把首頁目前搜尋結果寫入共用查詢狀態，供 2/3/6/7 頁承接，不直接改其他頁 widget key。"""
-    target = _find_search_target(st.session_state.get(_k("search_input"), ""), search_rows)
-    if not target:
-        return None
-
-    save_last_query_state(
-        quick_group=target["group"],
-        quick_stock_code=target["code"],
-        home_start=st.session_state.get(_k("start_date")),
-        home_end=st.session_state.get(_k("end_date")),
-    )
-    return target
+    st.session_state[_k("search_cleared_notice")] = True
 
 
 def _render_home_page():
@@ -619,9 +708,19 @@ def _render_home_page():
         if latest_rec_df.empty:
             st.info("目前沒有推薦紀錄。")
         else:
-            show_cols = [c for c in ["股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級", "型態名稱", "爆發等級", "最近推薦時間", "目前狀態"] if c in latest_rec_df.columns]
-            top_df = latest_rec_df.sort_values("推薦總分", ascending=False).head(12)
+            show_cols = [c for c in ["股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "買點分級", "型態名稱", "爆發等級", "最近推薦時間", "目前狀態", "首頁資料來源"] if c in latest_rec_df.columns]
+            top_df = latest_rec_df.sort_values("推薦總分", ascending=False).head(12).copy()
+            for c in show_cols:
+                if c in top_df.columns:
+                    top_df[c] = top_df[c].replace({None: "", "None": ""}).fillna("")
             st.dataframe(top_df[show_cols], use_container_width=True, hide_index=True)
+
+            if st.button("🔄 重新載入最近高分推薦", use_container_width=True, key=_k("reload_latest_recommend")):
+                try:
+                    _load_godpick_records_df.clear()
+                except Exception:
+                    pass
+                st.rerun()
 
     render_pro_section("最近常用查詢日期")
     d1, d2 = st.columns([2, 2])
@@ -641,21 +740,24 @@ def _render_home_page():
             )
             st.success("已記錄首頁日期區間。")
     with h2:
-        carry_clicked = st.button("帶目前搜尋到 2頁 / 3頁", use_container_width=True)
-        if carry_clicked:
-            target = _carry_home_search_to_pages(search_rows)
+        if st.button("帶目前搜尋到 2頁 / 3頁", use_container_width=True):
+            target = _find_search_target(st.session_state.get(_k("search_input"), ""), search_rows)
             if target:
-                st.success(f"已設定焦點股票：{target['label']}，2頁 / 3頁會自動承接。")
+                st.session_state["kline_focus_stock_code"] = target["code"]
+                st.session_state["kline_focus_stock_name"] = target["name"]
+                st.success(f"已設定焦點股票：{target['label']}")
             else:
                 st.warning("請先輸入可辨識的股票代號或名稱。")
     with h3:
-        cleared = st.button(
+        st.button(
             "清除首頁搜尋紀錄",
             use_container_width=True,
             on_click=_clear_home_search_input,
         )
-        if cleared:
-            st.success("已清除首頁搜尋欄位。")
+
+    if st.session_state.get(_k("search_cleared_notice"), False):
+        st.success("已清除首頁搜尋欄位。")
+        st.session_state[_k("search_cleared_notice")] = False
 
 
 def main():
