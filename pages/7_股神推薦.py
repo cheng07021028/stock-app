@@ -45,6 +45,7 @@ except Exception:
     load_stock_master = None
 
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
+DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -2726,6 +2727,87 @@ def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, li
     return sorted(list(cats))
 
 
+
+
+def _find_existing_watchlist_codes(group_name: str, codes: list[str]) -> list[str]:
+    """檢查勾選股票是否已存在於自選股群組。"""
+    group_name = _safe_str(group_name)
+    check_codes = {_normalize_code(x) for x in codes if _normalize_code(x)}
+    if not group_name or not check_codes:
+        return []
+
+    raw = st.session_state.get("watchlist_data")
+    if not isinstance(raw, dict) or not raw:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    group_items = raw.get(group_name, []) if isinstance(raw, dict) else []
+    exists = set()
+    for item in group_items:
+        if isinstance(item, dict):
+            c = _normalize_code(item.get("code"))
+        else:
+            c = _normalize_code(item)
+        if c in check_codes:
+            exists.add(c)
+
+    return sorted(exists)
+
+
+def _record_business_key(row: dict[str, Any]) -> str:
+    """股神推薦紀錄去重用 business key。"""
+    return (
+        f"{_normalize_code(row.get('股票代號'))}|"
+        f"{_safe_str(row.get('推薦日期'))}|"
+        f"{_safe_str(row.get('推薦時間'))}|"
+        f"{_safe_str(row.get('推薦模式'))}"
+    )
+
+
+def _find_existing_godpick_record_codes(record_rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """
+    檢查將寫入 8_股神推薦紀錄 的資料是否已存在。
+    回傳：(重複股票代號, 重複 business keys)
+    """
+    if not record_rows:
+        return [], []
+
+    try:
+        old_records, read_msg = _read_godpick_records_from_github()
+        if read_msg:
+            old_records = []
+    except Exception:
+        old_records = []
+
+    old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
+    if old_df.empty:
+        return [], []
+
+    old_keys = set()
+    for _, r in old_df.iterrows():
+        old_keys.add(
+            f"{_normalize_code(r.get('股票代號'))}|"
+            f"{_safe_str(r.get('推薦日期'))}|"
+            f"{_safe_str(r.get('推薦時間'))}|"
+            f"{_safe_str(r.get('推薦模式'))}"
+        )
+
+    dup_codes = []
+    dup_keys = []
+    for row in record_rows:
+        key = _record_business_key(row)
+        if key in old_keys:
+            code = _normalize_code(row.get("股票代號"))
+            if code:
+                dup_codes.append(code)
+            dup_keys.append(key)
+
+    return sorted(set(dup_codes)), sorted(set(dup_keys))
+
+
+
 def _append_stock_to_watchlist(group_name: str, code: str, name: str, market: str, category: str):
     group_name = _safe_str(group_name)
     code = _normalize_code(code)
@@ -2837,7 +2919,7 @@ def _create_watchlist_group(group_name: str) -> tuple[bool, str]:
     return False, _safe_str(st.session_state.get(_k("status_msg"), "新增群組失敗"))
 
 
-def _append_godpick_records(record_rows: list[dict[str, Any]]) -> tuple[int, list[str]]:
+def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False) -> tuple[int, list[str]]:
     if not record_rows:
         return 0, ["沒有可寫入的推薦紀錄。"]
 
@@ -2850,7 +2932,30 @@ def _append_godpick_records(record_rows: list[dict[str, Any]]) -> tuple[int, lis
         new_df = _ensure_godpick_record_columns(pd.DataFrame([_normalize_godpick_record(x) for x in record_rows]))
 
         before_count = len(old_df)
-        merged_df = _append_records_dedup_by_business_key(old_df, new_df)
+
+        if force_duplicate:
+            # 使用者確認要重複紀錄時，不做 business key 去重。
+            # 為避免 record_id 撞到舊紀錄，重複寫入時重新生成唯一 record_id。
+            new_df = new_df.copy()
+            now_tag = str(int(time.time() * 1000))
+            for idx in new_df.index:
+                raw = (
+                    f"{_safe_str(new_df.at[idx, '股票代號'])}|"
+                    f"{_safe_str(new_df.at[idx, '推薦日期'])}|"
+                    f"{_safe_str(new_df.at[idx, '推薦時間'])}|"
+                    f"{_safe_str(new_df.at[idx, '推薦模式'])}|"
+                    f"duplicate|{now_tag}|{idx}"
+                )
+                new_df.at[idx, "record_id"] = hashlib.md5(raw.encode("utf-8")).hexdigest()
+                new_df.at[idx, "備註"] = (
+                    (_safe_str(new_df.at[idx, "備註"]) + "；") if _safe_str(new_df.at[idx, "備註"]) else ""
+                ) + "使用者確認重複紀錄"
+                new_df.at[idx, "更新時間"] = _now_text()
+
+            merged_df = _ensure_godpick_record_columns(pd.concat([old_df, new_df], ignore_index=True))
+        else:
+            merged_df = _append_records_dedup_by_business_key(old_df, new_df)
+
         after_count = len(merged_df)
         added_count = max(after_count - before_count, 0)
 
@@ -4672,6 +4777,7 @@ def main():
     )
 
     st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
+    st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
 
     if master_df is None or master_df.empty:
         st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
@@ -5156,17 +5262,39 @@ def main():
                     }
                 )
 
-            added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
-            if added > 0:
-                st.success(f"已加入 {added} 檔到 {pick_group}")
-                watchlist_map = _load_watchlist_map()
+            duplicate_codes = _find_existing_watchlist_codes(pick_group, selected_codes)
+            if duplicate_codes and not st.session_state.get(_k("confirm_watchlist_duplicate"), False):
+                st.warning(
+                    f"自選股中心群組「{pick_group}」已存在 {len(duplicate_codes)} 檔："
+                    + "、".join(duplicate_codes[:20])
+                    + ("..." if len(duplicate_codes) > 20 else "")
+                )
+                st.info("請確認是否仍要繼續加入；已存在的股票會略過，只加入未重複股票。")
+                st.session_state[_k("pending_watchlist_rows")] = picked_rows
+                st.session_state[_k("pending_watchlist_group")] = pick_group
+                if st.button("確認：繼續加入未重複股票", use_container_width=True, key=_k("confirm_watchlist_duplicate_btn")):
+                    st.session_state[_k("confirm_watchlist_duplicate")] = True
+                    st.rerun()
             else:
-                st.warning("沒有新增成功。")
+                if st.session_state.get(_k("confirm_watchlist_duplicate"), False):
+                    picked_rows = st.session_state.get(_k("pending_watchlist_rows"), picked_rows)
+                    pick_group = st.session_state.get(_k("pending_watchlist_group"), pick_group)
 
-            if messages:
-                with st.expander("加入結果明細", expanded=False):
-                    for msg in messages:
-                        st.write(f"- {msg}")
+                added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
+                st.session_state[_k("confirm_watchlist_duplicate")] = False
+                st.session_state[_k("pending_watchlist_rows")] = []
+                st.session_state[_k("pending_watchlist_group")] = ""
+
+                if added > 0:
+                    st.success(f"已加入 {added} 檔到 {pick_group}")
+                    watchlist_map = _load_watchlist_map()
+                else:
+                    st.warning("沒有新增成功，可能勾選股票都已存在。")
+
+                if messages:
+                    with st.expander("加入結果明細", expanded=True):
+                        for msg in messages:
+                            st.write(f"- {msg}")
 
     detail_lines = st.session_state.get(_k("last_dual_write_detail"), [])
     if detail_lines:
@@ -5227,15 +5355,39 @@ def main():
             st.warning("請先勾選要記錄的推薦股票。")
         else:
             record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
-            added_count, record_msgs = _append_godpick_records(record_rows)
-            if added_count > 0:
-                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
+            dup_codes, dup_keys = _find_existing_godpick_record_codes(record_rows)
+
+            if dup_codes and not st.session_state.get(_k("confirm_record_duplicate"), False):
+                st.warning(
+                    f"8_股神推薦紀錄已存在 {len(dup_codes)} 檔相同推薦紀錄："
+                    + "、".join(dup_codes[:20])
+                    + ("..." if len(dup_codes) > 20 else "")
+                )
+                st.info("請確認是否仍要重複紀錄。若確認，會保留舊紀錄並新增一筆新紀錄，備註會標記『使用者確認重複紀錄』。")
+                st.session_state[_k("pending_record_rows")] = record_rows
+                if st.button("確認：仍要重複寫入股神推薦紀錄", use_container_width=True, key=_k("confirm_record_duplicate_btn")):
+                    st.session_state[_k("confirm_record_duplicate")] = True
+                    st.rerun()
             else:
-                st.warning("沒有新增任何推薦紀錄。")
-            if record_msgs:
-                with st.expander("推薦紀錄寫入明細", expanded=False):
-                    for msg in record_msgs:
-                        st.write(f"- {msg}")
+                force_duplicate = bool(st.session_state.get(_k("confirm_record_duplicate"), False))
+                if force_duplicate:
+                    record_rows = st.session_state.get(_k("pending_record_rows"), record_rows)
+
+                added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=force_duplicate)
+                st.session_state[_k("confirm_record_duplicate")] = False
+                st.session_state[_k("pending_record_rows")] = []
+
+                if added_count > 0:
+                    if force_duplicate:
+                        st.success(f"已重複寫入 {added_count} 筆到 8_股神推薦紀錄")
+                    else:
+                        st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
+                else:
+                    st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
+                if record_msgs:
+                    with st.expander("推薦紀錄寫入明細", expanded=True):
+                        for msg in record_msgs:
+                            st.write(f"- {msg}")
 
     record_detail_lines = st.session_state.get(_k("last_record_write_detail"), [])
     if record_detail_lines:
