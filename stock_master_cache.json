@@ -31332,20 +31332,6 @@
     "待修原因": ""
   },
   {
-    "code": "7820",
-    "name": "立盈",
-    "market": "興櫃",
-    "official_industry_raw": "35",
-    "official_industry_raw_col": "SecuritiesIndustryCode",
-    "official_industry": "數位雲端",
-    "theme_category": "數位雲端",
-    "category": "數位雲端",
-    "source": "tpex_興櫃_base",
-    "source_api": "tpex_興櫃",
-    "source_rank": 3,
-    "待修原因": ""
-  },
-  {
     "code": "7824",
     "name": "智寶",
     "market": "興櫃",
