@@ -390,6 +390,69 @@ def _load_stock_master() -> pd.DataFrame:
 
 
 
+
+
+def _sync_watchlist_from_shared_or_source(force_reload: bool = False) -> tuple[bool, str]:
+    """同步自選股中心資料。
+
+    問題來源：
+    - 7_股神推薦 / 8_推薦紀錄 / 儀表板可能會更新 st.session_state["watchlist_data"] 或 watchlist.json。
+    - 但本頁原本只看 watch_watchlist，導致「全部自選股總覽」不會更新。
+
+    修正策略：
+    1. force_reload=True：清除 get_normalized_watchlist cache，重新讀 watchlist.json。
+    2. force_reload=False：若全域 watchlist_data 比本頁資料不同，立即同步。
+    """
+    current = st.session_state.get(_k("watchlist"), {})
+    current_hash = _payload_hash(_normalize_watchlist_payload(current)) if isinstance(current, dict) else ""
+
+    if force_reload:
+        try:
+            if hasattr(get_normalized_watchlist, "clear"):
+                get_normalized_watchlist.clear()
+        except Exception:
+            pass
+
+        fresh = _load_watchlist_data()
+        fresh_hash = _payload_hash(_normalize_watchlist_payload(fresh))
+
+        st.session_state[_k("watchlist")] = copy.deepcopy(fresh)
+        st.session_state[_k("payload_hash")] = fresh_hash
+        st.session_state[_k("version")] = int(st.session_state.get(_k("version"), 0) or 0) + 1
+        st.session_state[_k("last_saved_at")] = _now_text()
+
+        st.session_state["watchlist_data"] = copy.deepcopy(fresh)
+        st.session_state["watchlist_version"] = st.session_state[_k("version")]
+        st.session_state["watchlist_last_saved_at"] = st.session_state[_k("last_saved_at")]
+        st.session_state["watchlist_last_saved_hash"] = fresh_hash
+
+        _repair_selected_group()
+        return True, f"已強制重新讀取 watchlist.json｜版本 v{st.session_state[_k('version')]}"
+
+    shared = st.session_state.get("watchlist_data")
+    if isinstance(shared, dict) and shared:
+        shared_norm = _normalize_watchlist_payload(shared)
+        shared_hash = _payload_hash(shared_norm)
+
+        if shared_hash and shared_hash != current_hash:
+            st.session_state[_k("watchlist")] = copy.deepcopy(shared_norm)
+            st.session_state[_k("payload_hash")] = shared_hash
+            st.session_state[_k("version")] = int(st.session_state.get("watchlist_version", st.session_state.get(_k("version"), 0)) or 0)
+            st.session_state[_k("last_saved_at")] = _safe_str(
+                st.session_state.get("watchlist_last_saved_at")
+                or st.session_state.get(_k("last_saved_at"))
+                or _now_text()
+            )
+
+            st.session_state["watchlist_data"] = copy.deepcopy(shared_norm)
+            st.session_state["watchlist_last_saved_hash"] = shared_hash
+            _repair_selected_group()
+            return True, "已同步其他頁面的最新自選股資料"
+
+    return False, "目前自選股資料已是最新"
+
+
+
 # =========================================================
 # 重新帶入 / 加速
 # =========================================================
@@ -414,6 +477,13 @@ def _reload_watchlist_master_records():
     用按鈕觸發，避免每次頁面 rerun 都重抓造成卡頓。
     """
     _clear_data_caches()
+
+    # 強制重新讀取 watchlist.json，避免「全部自選股總覽」停在舊 session_state。
+    try:
+        if hasattr(get_normalized_watchlist, "clear"):
+            get_normalized_watchlist.clear()
+    except Exception:
+        pass
 
     fresh_watchlist = _load_watchlist_data()
     fresh_master = _load_stock_master()
@@ -502,6 +572,13 @@ def _init_state():
             st.session_state[real_key] = st.session_state.pop(next_key)
 
     _repair_selected_group()
+
+    # 自動同步其他頁面更新過的全域 watchlist_data。
+    # 例如：7_股神推薦匯入自選股後，回到本頁不需手動清 cache 才會看到。
+    try:
+        _sync_watchlist_from_shared_or_source(force_reload=False)
+    except Exception:
+        pass
 
     st.session_state["watchlist_data"] = copy.deepcopy(st.session_state[_k("watchlist")])
     st.session_state["watchlist_version"] = st.session_state.get(_k("version"), 0)
@@ -894,6 +971,12 @@ def main():
     inject_pro_theme()
     _init_state()
 
+    # 進入頁面時先同步一次 shared watchlist_data，避免總覽顯示舊資料。
+    try:
+        _sync_watchlist_from_shared_or_source(force_reload=False)
+    except Exception:
+        pass
+
     watchlist = st.session_state[_k("watchlist")]
     master_df = st.session_state[_k("master_df")]
     rec_df = _load_godpick_records_df()
@@ -939,7 +1022,7 @@ def main():
     render_pro_section("資料重新帶入 / 加速")
     reload_cols = st.columns([1.2, 1.2, 2.6])
     with reload_cols[0]:
-        if st.button("🔄 重新帶入資料", use_container_width=True, type="primary"):
+        if st.button("🔄 重新同步自選股 / 推薦紀錄", use_container_width=True, type="primary"):
             _reload_watchlist_master_records()
             st.rerun()
     with reload_cols[1]:
@@ -948,7 +1031,7 @@ def main():
             _set_status("快取已清除；可按『重新帶入資料』抓最新資料。", "success")
             st.rerun()
     with reload_cols[2]:
-        st.caption("重新帶入會刷新 watchlist、股票主檔、股神推薦紀錄；一般切換頁面不重抓資料，加快顯示速度。")
+        st.caption("重新同步會強制清除 watchlist 快取，重新讀取 watchlist.json、股票主檔與股神推薦紀錄，確保『全部自選股總覽』更新。")
 
     render_pro_section("GitHub 回寫設定")
     render_pro_info_card(
@@ -1233,6 +1316,11 @@ def main():
             st.rerun()
 
     render_pro_section("全部自選股總覽")
+    st.caption(
+        f"自選股同步版本：v{st.session_state.get(_k('version'), 0)}｜"
+        f"最後同步 / 儲存：{st.session_state.get(_k('last_saved_at'), '—') or '—'}｜"
+        f"資料Hash：{st.session_state.get(_k('payload_hash'), '')[:8]}"
+    )
     final_overview_df = _build_overview_df(st.session_state[_k("watchlist")], rec_map)
     if final_overview_df.empty:
         st.info("目前沒有任何自選股。")
