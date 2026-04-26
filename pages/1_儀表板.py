@@ -15,6 +15,51 @@ from utils import (
     format_number,
 )
 
+
+# ============================================================
+# 儀表板強制市場別修正
+# ============================================================
+def _dashboard_force_fix_watchlist_data(data):
+    """修正 watchlist 舊資料造成的市場別錯誤。
+    目前防呆：3548 兆利必須為上櫃。
+    """
+    if not isinstance(data, dict):
+        return data
+
+    fixed = {}
+    for group_name, items in data.items():
+        if not isinstance(items, list):
+            fixed[group_name] = items
+            continue
+
+        new_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                new_items.append(item)
+                continue
+
+            row = dict(item)
+            code = str(row.get("code") or row.get("股票代號") or row.get("代號") or "").strip()
+            if code.endswith(".0"):
+                code = code[:-2]
+
+            if code == "3548":
+                row["code"] = "3548"
+                row["股票代號"] = "3548"
+                row["name"] = "兆利"
+                row["股票名稱"] = "兆利"
+                row["market"] = "上櫃"
+                row["市場別"] = "上櫃"
+                row["category"] = row.get("category") or "光學鏡頭"
+                row["類別"] = row.get("類別") or "光學鏡頭"
+
+            new_items.append(row)
+
+        fixed[group_name] = new_items
+
+    return fixed
+
+
 PAGE_TITLE = "儀表板"
 PFX = "dash_"
 
@@ -200,59 +245,7 @@ def _init_page_state():
 
 
 def main():
-    
-
-# ============================================================
-# 儀表板強制市場別修正
-# 目的：避免 watchlist.json 舊資料把上櫃股寫成上市，造成即時 / Yahoo 備援查無資料。
-# ============================================================
-DASHBOARD_STOCK_FORCE_FIX = {
-    "3548": {"股票名稱": "兆利", "market": "上櫃", "市場別": "上櫃", "name": "兆利", "category": "光學鏡頭"},
-}
-
-
-def _dashboard_force_fix_watchlist_data(data):
-    if not isinstance(data, dict):
-        return data
-
-    fixed = {}
-    for group_name, items in data.items():
-        if not isinstance(items, list):
-            fixed[group_name] = items
-            continue
-
-        new_items = []
-        for item in items:
-            if not isinstance(item, dict):
-                new_items.append(item)
-                continue
-
-            row = dict(item)
-            code = str(row.get("code") or row.get("股票代號") or row.get("代號") or "").strip()
-            if code.endswith(".0"):
-                code = code[:-2]
-
-            if code in DASHBOARD_STOCK_FORCE_FIX:
-                fix = DASHBOARD_STOCK_FORCE_FIX[code]
-                row["code"] = code
-                row["股票代號"] = code
-                row["name"] = fix["name"]
-                row["股票名稱"] = fix["股票名稱"]
-                row["market"] = fix["market"]
-                row["市場別"] = fix["市場別"]
-                if not row.get("category") and fix.get("category"):
-                    row["category"] = fix["category"]
-                if not row.get("類別") and fix.get("category"):
-                    row["類別"] = fix["category"]
-
-            new_items.append(row)
-
-        fixed[group_name] = new_items
-
-    return fixed
-
-
-st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
+    st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
     _init_page_state()
 
     apply_font_scale(st.session_state.font_scale)
@@ -291,12 +284,14 @@ st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
     refresh_token = st.session_state[_k("refresh_token")]
 
     with st.spinner("正在讀取即時資料..."):
-# 強制修正 watchlist 內市場別錯誤，避免上櫃股被當上市查詢。
-try:
-    if isinstance(st.session_state.get("watchlist_data"), dict):
-        st.session_state["watchlist_data"] = _dashboard_force_fix_watchlist_data(st.session_state.get("watchlist_data"))
-except Exception:
-    pass
+        # DASHBOARD_FORCE_FIX_SAFE_V3
+        try:
+            if 'watchlist_map' in locals():
+                watchlist_map = _dashboard_force_fix_watchlist_data(watchlist_map)
+            if 'watchlist_data' in locals():
+                watchlist_data = _dashboard_force_fix_watchlist_data(watchlist_data)
+        except Exception:
+            pass
 
         realtime_df = get_realtime_watchlist_df(
             watchlist_dict=watchlist_dict,
