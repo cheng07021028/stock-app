@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
@@ -1202,47 +1203,273 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]) -> go.Figure:
-    fig = go.Figure()
+    """專業版 K 線圖。
+
+    設計重點：
+    - 台股慣例：紅 K 上漲、綠 K 下跌。
+    - K棒實體與上下影線加粗，避免紅綠棒與引線不清楚。
+    - 起漲 / 起跌標記加大、加邊框、加文字，並用淡色垂直引導線提示位置。
+    - 下方加入成交量柱，主圖只保留價格訊號，判讀更清楚。
+    - 限制 pivot 輔助線數量，避免大量 shapes 拖慢 Streamlit / Plotly。
+    """
+    if df is None or df.empty:
+        return go.Figure()
+
+    work = df.copy()
+    work = work.sort_values("日期").reset_index(drop=True)
+
+    for c in ["開盤價", "最高價", "最低價", "收盤價"]:
+        if c in work.columns:
+            work[c] = pd.to_numeric(work[c], errors="coerce")
+    work = work.dropna(subset=["日期", "開盤價", "最高價", "最低價", "收盤價"]).reset_index(drop=True)
+
+    if work.empty:
+        return go.Figure()
+
+    has_volume = "成交股數" in work.columns
+    if has_volume:
+        work["成交股數"] = pd.to_numeric(work["成交股數"], errors="coerce").fillna(0)
+
+    up_color = "#ef4444"      # 台股上漲紅
+    down_color = "#16a34a"    # 台股下跌綠
+    wick_color = "#334155"
+    grid_color = "rgba(148,163,184,0.22)"
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.035,
+        row_heights=[0.76, 0.24],
+        specs=[[{"secondary_y": False}], [{"secondary_y": False}]],
+    )
+
+    customdata = work[["開盤價", "最高價", "最低價", "收盤價"]].round(2).to_numpy()
 
     fig.add_trace(
         go.Candlestick(
-            x=df["日期"],
-            open=df["開盤價"],
-            high=df["最高價"],
-            low=df["最低價"],
-            close=df["收盤價"],
+            x=work["日期"],
+            open=work["開盤價"],
+            high=work["最高價"],
+            low=work["最低價"],
+            close=work["收盤價"],
             name="K線",
-        )
+            increasing=dict(line=dict(color=up_color, width=2.2), fillcolor="rgba(239,68,68,0.86)"),
+            decreasing=dict(line=dict(color=down_color, width=2.2), fillcolor="rgba(22,163,74,0.86)"),
+            whiskerwidth=0.55,
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{x|%Y-%m-%d}</b><br>"
+                "開盤：%{customdata[0]:,.2f}<br>"
+                "最高：%{customdata[1]:,.2f}<br>"
+                "最低：%{customdata[2]:,.2f}<br>"
+                "收盤：%{customdata[3]:,.2f}<extra>K線</extra>"
+            ),
+        ),
+        row=1,
+        col=1,
     )
+
+    if has_volume:
+        volume_colors = [up_color if c >= o else down_color for o, c in zip(work["開盤價"], work["收盤價"])]
+        fig.add_trace(
+            go.Bar(
+                x=work["日期"],
+                y=work["成交股數"],
+                name="成交量",
+                marker=dict(color=volume_colors, opacity=0.34, line=dict(width=0)),
+                hovertemplate="<b>%{x|%Y-%m-%d}</b><br>成交量：%{y:,.0f}<extra>成交量</extra>",
+            ),
+            row=2,
+            col=1,
+        )
 
     if show_ma:
+        ma_styles = {
+            5: dict(color="#60a5fa", width=1.8),
+            10: dict(color="#f97316", width=1.9),
+            20: dict(color="#ef4444", width=2.2),
+            60: dict(color="#14b8a6", width=2.1),
+            120: dict(color="#22c55e", width=1.9),
+            240: dict(color="#a855f7", width=1.8),
+        }
         for n in [5, 10, 20, 60, 120, 240]:
             col = f"MA{n}"
-            if col in df.columns:
-                fig.add_trace(go.Scatter(x=df["日期"], y=df[col], mode="lines", name=col))
+            if col in work.columns:
+                y = pd.to_numeric(work[col], errors="coerce")
+                if y.notna().sum() == 0:
+                    continue
+                style = ma_styles.get(n, dict(color="#64748b", width=1.6))
+                fig.add_trace(
+                    go.Scatter(
+                        x=work["日期"],
+                        y=y,
+                        mode="lines",
+                        name=col,
+                        line=dict(color=style["color"], width=style["width"]),
+                        connectgaps=False,
+                        hovertemplate=f"<b>%{{x|%Y-%m-%d}}</b><br>{col}：%{{y:,.2f}}<extra>{col}</extra>",
+                    ),
+                    row=1,
+                    col=1,
+                )
+
+    price_min = float(work["最低價"].min())
+    price_max = float(work["最高價"].max())
+    span = max(price_max - price_min, abs(price_max) * 0.06, 1.0)
+    marker_offset = span * 0.035
 
     if show_pivots:
+        # 避免過多標記拖慢，只顯示圖上最後 35 個起漲 / 起跌訊號。
+        max_marker_count = 35
+
         if trough_idx:
-            idxs = [i for i in trough_idx if 0 <= i < len(df)]
+            idxs = [int(i) for i in trough_idx if 0 <= int(i) < len(work)][-max_marker_count:]
             if idxs:
-                sub = df.iloc[idxs].copy()
-                fig.add_trace(go.Scatter(x=sub["日期"], y=sub["最低價"], mode="markers", name="起漲點", marker=dict(size=10, symbol="triangle-up")))
+                sub = work.iloc[idxs].copy()
+                y_mark = sub["最低價"] - marker_offset
+                fig.add_trace(
+                    go.Scatter(
+                        x=sub["日期"],
+                        y=y_mark,
+                        mode="markers+text",
+                        name="起漲點",
+                        text=["起漲"] * len(sub),
+                        textposition="bottom center",
+                        textfont=dict(size=12, color="#92400e", family="Arial Black"),
+                        marker=dict(
+                            size=15,
+                            symbol="triangle-up",
+                            color="#facc15",
+                            line=dict(color="#92400e", width=1.8),
+                        ),
+                        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>起漲訊號<br>低點：%{customdata:,.2f}<extra>起漲點</extra>",
+                        customdata=sub["最低價"].round(2),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                for _, rr in sub.tail(18).iterrows():
+                    fig.add_shape(
+                        type="line",
+                        x0=rr["日期"], x1=rr["日期"],
+                        y0=rr["最低價"], y1=float(rr["最低價"]) - marker_offset * 0.72,
+                        line=dict(color="rgba(250,204,21,0.55)", width=1.4, dash="dot"),
+                        row=1, col=1,
+                    )
+
         if peak_idx:
-            idxs = [i for i in peak_idx if 0 <= i < len(df)]
+            idxs = [int(i) for i in peak_idx if 0 <= int(i) < len(work)][-max_marker_count:]
             if idxs:
-                sub = df.iloc[idxs].copy()
-                fig.add_trace(go.Scatter(x=sub["日期"], y=sub["最高價"], mode="markers", name="起跌點", marker=dict(size=10, symbol="triangle-down")))
+                sub = work.iloc[idxs].copy()
+                y_mark = sub["最高價"] + marker_offset
+                fig.add_trace(
+                    go.Scatter(
+                        x=sub["日期"],
+                        y=y_mark,
+                        mode="markers+text",
+                        name="起跌點",
+                        text=["起跌"] * len(sub),
+                        textposition="top center",
+                        textfont=dict(size=12, color="#6d28d9", family="Arial Black"),
+                        marker=dict(
+                            size=15,
+                            symbol="triangle-down",
+                            color="#7c3aed",
+                            line=dict(color="#ffffff", width=1.8),
+                        ),
+                        hovertemplate="<b>%{x|%Y-%m-%d}</b><br>起跌訊號<br>高點：%{customdata:,.2f}<extra>起跌點</extra>",
+                        customdata=sub["最高價"].round(2),
+                    ),
+                    row=1,
+                    col=1,
+                )
+                for _, rr in sub.tail(18).iterrows():
+                    fig.add_shape(
+                        type="line",
+                        x0=rr["日期"], x1=rr["日期"],
+                        y0=rr["最高價"], y1=float(rr["最高價"]) + marker_offset * 0.72,
+                        line=dict(color="rgba(124,58,237,0.48)", width=1.4, dash="dot"),
+                        row=1, col=1,
+                    )
+
+    latest_close = float(work["收盤價"].iloc[-1])
+    latest_date = work["日期"].iloc[-1]
+    fig.add_hline(
+        y=latest_close,
+        line=dict(color="rgba(15,23,42,0.55)", width=1.2, dash="dot"),
+        annotation_text=f"最新 {latest_close:,.2f}",
+        annotation_position="right",
+        row=1,
+        col=1,
+    )
 
     fig.update_layout(
-        title=f"{stock_label}｜歷史K線分析",
-        height=760,
-        margin=dict(l=20, r=20, t=50, b=20),
-        xaxis_title="日期",
-        yaxis_title="價格",
+        title=dict(
+            text=f"{stock_label}｜歷史K線分析",
+            x=0.01,
+            xanchor="left",
+            font=dict(size=20, color="#0f172a"),
+        ),
+        height=820,
+        margin=dict(l=18, r=24, t=58, b=26),
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="rgba(15,23,42,0.92)", font_size=13, font_color="#ffffff"),
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=0.98,
+            xanchor="left",
+            x=1.02,
+            bgcolor="rgba(255,255,255,0.88)",
+            bordercolor="rgba(148,163,184,0.35)",
+            borderwidth=1,
+        ),
         xaxis_rangeslider_visible=False,
+        uirevision=f"kline_{stock_label}",
+        dragmode="pan",
     )
-    return fig
 
+    fig.update_xaxes(
+        showspikes=True,
+        spikemode="across",
+        spikesnap="cursor",
+        spikecolor="rgba(15,23,42,0.35)",
+        spikethickness=1,
+        showgrid=False,
+        tickformat="%Y-%m-%d",
+        row=1,
+        col=1,
+    )
+    fig.update_xaxes(
+        showgrid=False,
+        tickformat="%Y-%m-%d",
+        title_text="日期",
+        row=2,
+        col=1,
+    )
+
+    fig.update_yaxes(
+        title_text="價格",
+        showgrid=True,
+        gridcolor=grid_color,
+        zeroline=False,
+        range=[price_min - marker_offset * 2.2, price_max + marker_offset * 2.2],
+        row=1,
+        col=1,
+    )
+    fig.update_yaxes(
+        title_text="成交量",
+        showgrid=True,
+        gridcolor="rgba(148,163,184,0.14)",
+        zeroline=False,
+        row=2,
+        col=1,
+    )
+
+    return fig
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
@@ -1856,6 +2083,7 @@ def main():
                 trough_idx=tuple(focus_trough_idx),
             ),
             use_container_width=True,
+            config={"displaylogo": False, "scrollZoom": True, "responsive": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
         )
 
     # 版面修正：
