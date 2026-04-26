@@ -40,6 +40,8 @@ def _prepare_dashboard_metrics(df: pd.DataFrame) -> dict:
     if df is None or df.empty:
         return {
             "total_count": 0,
+            "success_count": 0,
+            "fail_count": 0,
             "up_count": 0,
             "down_count": 0,
             "flat_count": 0,
@@ -57,15 +59,19 @@ def _prepare_dashboard_metrics(df: pd.DataFrame) -> dict:
         work["總量"] = pd.to_numeric(work["總量"], errors="coerce")
 
     total_count = len(work)
+    success_count = int(work["現價"].notna().sum()) if "現價" in work.columns else 0
+    fail_count = max(0, total_count - success_count)
     up_count = int((work["漲跌"] > 0).sum()) if "漲跌" in work.columns else 0
     down_count = int((work["漲跌"] < 0).sum()) if "漲跌" in work.columns else 0
-    flat_count = max(0, total_count - up_count - down_count)
+    flat_count = max(0, success_count - up_count - down_count)
 
-    avg_change_pct = work["漲跌幅(%)"].mean() if "漲跌幅(%)" in work.columns else None
-    total_volume = work["總量"].sum() if "總量" in work.columns else None
+    avg_change_pct = work["漲跌幅(%)"].dropna().mean() if "漲跌幅(%)" in work.columns else None
+    total_volume = work["總量"].dropna().sum() if "總量" in work.columns else None
 
     return {
         "total_count": total_count,
+        "success_count": success_count,
+        "fail_count": fail_count,
         "up_count": up_count,
         "down_count": down_count,
         "flat_count": flat_count,
@@ -83,7 +89,7 @@ def _prepare_dashboard_table(df: pd.DataFrame) -> pd.DataFrame:
         "群組", "股票代號", "股票名稱", "市場別",
         "現價", "昨收", "漲跌", "漲跌幅(%)",
         "開盤", "最高", "最低", "總量",
-        "價格來源", "漲跌來源", "更新時間"
+        "價格來源", "漲跌來源", "更新時間", "是否成功", "訊息"
     ]
     show_cols = [c for c in show_cols if c in df.columns]
 
@@ -124,7 +130,7 @@ def render_dashboard_summary(df: pd.DataFrame):
         {
             "label": "監控股票數",
             "value": f"{metrics['total_count']:,}",
-            "delta": f"上漲 {metrics['up_count']}｜下跌 {metrics['down_count']}｜平盤 {metrics['flat_count']}",
+            "delta": f"成功 {metrics['success_count']}｜失敗 {metrics['fail_count']}｜上漲 {metrics['up_count']}｜下跌 {metrics['down_count']}",
             "delta_class": "pro-kpi-delta-flat"
         },
         {
@@ -247,6 +253,13 @@ def main():
 
     render_dashboard_summary(realtime_df)
     render_pro_section("即時盤面清單", "可快速掃描各群組成員的價格、漲跌幅與成交量變化")
+    fail_df = realtime_df[realtime_df["現價"].isna()] if "現價" in realtime_df.columns else pd.DataFrame()
+    if not fail_df.empty:
+        with st.expander(f"資料來源診斷｜仍有 {len(fail_df)} 檔無價格", expanded=False):
+            diag_cols = [c for c in ["群組", "股票代號", "股票名稱", "市場別", "價格來源", "漲跌來源", "訊息"] if c in fail_df.columns]
+            st.dataframe(fail_df[diag_cols], use_container_width=True, hide_index=True)
+            st.caption("常見原因：休市日、TWSE/TPEX MIS 即時 API 暫時無回應、股票市場別判斷錯誤、或該股票近期無歷史K資料。")
+
     render_dashboard_table(realtime_df, height=760)
 
 
