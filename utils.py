@@ -1,3 +1,4 @@
+DASHBOARD_FORCE_MARKET_FIX_V2 = True
 import io
 import json
 import os
@@ -1154,7 +1155,11 @@ def _load_dashboard_stock_master_lookup():
 
 
 def _fix_dashboard_stock_identity(code, name="", market="", category=""):
-    """用股票主檔修正股票名稱 / 市場別 / 類別。"""
+    """用股票主檔修正股票名稱 / 市場別 / 類別。
+    V2 強制規則：
+    - 3548 兆利必定視為上櫃，避免 watchlist.json 寫成上市造成查無資料。
+    - 名稱過長時改用主檔簡稱。
+    """
     code = str(code).strip()
     if code.endswith(".0"):
         code = code[:-2]
@@ -1163,17 +1168,16 @@ def _fix_dashboard_stock_identity(code, name="", market="", category=""):
     market = str(market or "").strip()
     category = str(category or "").strip()
 
+    # 最優先硬防呆，避免任何舊 watchlist / 舊主檔覆蓋掉正確市場別。
+    if code == "3548":
+        return "兆利", "上櫃", category or "光學鏡頭"
+
     lookup = _load_dashboard_stock_master_lookup()
     found = lookup.get(code, {})
 
     fixed_name = str(found.get("name") or name or code).strip()
     fixed_market = str(found.get("market") or market or "上市").strip()
     fixed_category = str(found.get("category") or category or "").strip()
-
-    # 上櫃股常見錯誤修正
-    if code == "3548":
-        fixed_name = "兆利"
-        fixed_market = "上櫃"
 
     return fixed_name, fixed_market, fixed_category
 
