@@ -940,6 +940,129 @@ def _empty_realtime_result(stock_no, stock_name="", market_type="上市", messag
     }
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _get_realtime_history_fallback(stock_no, stock_name="", market_type="上市", refresh_day=""):
+    """即時資料失敗時的安全備援。
+    使用最近歷史K資料補現價/昨收/開高低/成交量，避免週末、休市、MIS API 異常時儀表板整片 None。
+    """
+    stock_no = str(stock_no).strip()
+    stock_name = str(stock_name).strip()
+    market_type = str(market_type).strip() or "上市"
+    if not stock_no:
+        return _empty_realtime_result(stock_no, stock_name, market_type, "股票代號為空白")
+
+    end_dt = date.today()
+    start_dt = end_dt - timedelta(days=45)
+    try:
+        hist = get_history_data(
+            stock_no=stock_no,
+            stock_name=stock_name,
+            market_type=market_type,
+            start_date=start_dt,
+            end_date=end_dt,
+        )
+    except TypeError:
+        try:
+            hist = get_history_data(
+                stock_no=stock_no,
+                stock_name=stock_name,
+                market_type=market_type,
+                start_dt=start_dt,
+                end_dt=end_dt,
+            )
+        except Exception:
+            hist = pd.DataFrame()
+    except Exception:
+        hist = pd.DataFrame()
+
+    if hist is None or hist.empty:
+        return _empty_realtime_result(stock_no, stock_name, market_type, "即時資料失敗，歷史備援也無資料")
+
+    df = hist.copy()
+    rename_map = {}
+    for c in df.columns:
+        cs = str(c).strip().lower()
+        if cs == "date": rename_map[c] = "日期"
+        elif cs == "open": rename_map[c] = "開盤價"
+        elif cs == "high": rename_map[c] = "最高價"
+        elif cs == "low": rename_map[c] = "最低價"
+        elif cs == "close": rename_map[c] = "收盤價"
+        elif cs == "volume": rename_map[c] = "成交股數"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    if "日期" in df.columns:
+        df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+        df = df.dropna(subset=["日期"]).sort_values("日期")
+    else:
+        df = df.reset_index(drop=True)
+
+    for c in ["開盤價", "最高價", "最低價", "收盤價", "成交股數", "總量"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if "收盤價" not in df.columns:
+        return _empty_realtime_result(stock_no, stock_name, market_type, "歷史備援缺少收盤價")
+
+    df = df.dropna(subset=["收盤價"])
+    if df.empty:
+        return _empty_realtime_result(stock_no, stock_name, market_type, "歷史備援收盤價空白")
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else last
+    price = _safe_num(last.get("收盤價"))
+    prev_close = _safe_num(prev.get("收盤價"))
+    open_price = _safe_num(last.get("開盤價"))
+    high_price = _safe_num(last.get("最高價"))
+    low_price = _safe_num(last.get("最低價"))
+    volume = _safe_num(last.get("成交股數")) if "成交股數" in df.columns else _safe_num(last.get("總量"))
+
+    change_value = None
+    change_pct = None
+    if price is not None and prev_close not in [None, 0]:
+        change_value = price - prev_close
+        change_pct = change_value / prev_close * 100
+
+    update_text = ""
+    if "日期" in df.columns:
+        try:
+            update_text = pd.to_datetime(last.get("日期")).strftime("%Y%m%d") + " 歷史收盤"
+        except Exception:
+            update_text = "歷史收盤"
+
+    return {
+        "ok": True,
+        "code": stock_no,
+        "name": stock_name or stock_no,
+        "market": market_type,
+        "price": price,
+        "prev_close": prev_close,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "change": change_value,
+        "change_pct": change_pct,
+        "change_source": "history_vs_prev_close",
+        "total_volume": volume,
+        "trade_volume": None,
+        "update_time": update_text,
+        "price_source": "history_close_fallback",
+        "raw": {},
+        "message": "即時資料失敗，已使用最近歷史K收盤資料備援",
+    }
+
+
+def _realtime_info_has_price(info):
+    if not isinstance(info, dict):
+        return False
+    for key in ["price", "prev_close", "open", "high", "low"]:
+        v = _safe_num(info.get(key))
+        if v is not None and v > 0:
+            return True
+    return False
+
+
+
 @st.cache_data(ttl=5, show_spinner=False)
 def get_realtime_stock_info_batch(stock_items, refresh_token=""):
     if not stock_items:
@@ -1173,6 +1296,17 @@ def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
             item["code"],
             _empty_realtime_result(item["code"], item["name"], item["market"], "查無即時資料")
         )
+
+        # 週末、休市或 MIS API 異常時常會整批回傳空值；改用最近歷史K收盤資料備援，避免儀表板整片 None。
+        if not _realtime_info_has_price(info):
+            fallback_info = _get_realtime_history_fallback(
+                item["code"],
+                item["name"],
+                item["market"],
+                refresh_day=str(query_date or ""),
+            )
+            if _realtime_info_has_price(fallback_info):
+                info = fallback_info
 
         rows.append({
             "群組": item["group"],
