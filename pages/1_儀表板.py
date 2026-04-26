@@ -258,7 +258,7 @@ def main():
         with st.expander(f"資料來源診斷｜仍有 {len(fail_df)} 檔無價格", expanded=False):
             diag_cols = [c for c in ["群組", "股票代號", "股票名稱", "市場別", "價格來源", "漲跌來源", "訊息"] if c in fail_df.columns]
             st.dataframe(fail_df[diag_cols], use_container_width=True, hide_index=True)
-            st.caption("常見原因：休市日、TWSE/TPEX MIS 即時 API 暫時無回應、股票市場別判斷錯誤、或該股票近期無歷史K資料。")
+            st.caption("常見原因：TWSE/TPEX MIS 即時 API 暫時無回應、Yahoo 也暫時無資料、股票市場別判斷錯誤、或該股票近期無交易資料。")
 
     render_dashboard_table(realtime_df, height=760)
 
