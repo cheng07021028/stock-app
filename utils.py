@@ -1052,6 +1052,148 @@ def _get_realtime_history_fallback(stock_no, stock_name="", market_type="上市"
     }
 
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _get_realtime_yahoo_history_fallback(stock_no, stock_name="", market_type="上市", refresh_day=""):
+    """第三層安全備援：Yahoo Finance 台股日線。
+    用途：
+    1. TWSE/TPEX MIS 即時 API 連線失敗時補價格。
+    2. 原 get_history_data 也抓不到時，仍能用 .TW / .TWO 最近日線補現價。
+    3. 休市日 / 週末時，顯示最近交易日收盤價，避免儀表板整片 None。
+    """
+    stock_no = str(stock_no).strip()
+    stock_name = str(stock_name).strip()
+    market_type = str(market_type).strip() or "上市"
+
+    if not stock_no:
+        return _empty_realtime_result(stock_no, stock_name, market_type, "股票代號為空白")
+
+    # 台股 Yahoo 後綴：上市多為 .TW，上櫃/興櫃多為 .TWO。
+    suffix_candidates = []
+    if market_type == "上市":
+        suffix_candidates = ["TW", "TWO"]
+    elif market_type in ["上櫃", "興櫃"]:
+        suffix_candidates = ["TWO", "TW"]
+    else:
+        suffix_candidates = ["TW", "TWO"]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    last_error = ""
+
+    for suffix in suffix_candidates:
+        symbol = f"{stock_no}.{suffix}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {
+            "range": "3mo",
+            "interval": "1d",
+            "includePrePost": "false",
+            "events": "history",
+        }
+
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=12)
+            if resp.status_code != 200:
+                last_error = f"Yahoo {symbol} HTTP {resp.status_code}"
+                continue
+
+            payload = resp.json()
+            result = (((payload or {}).get("chart") or {}).get("result") or [])
+            if not result:
+                last_error = f"Yahoo {symbol} 無 result"
+                continue
+
+            node = result[0]
+            timestamps = node.get("timestamp") or []
+            quote = (((node.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            volumes = quote.get("volume") or []
+
+            rows = []
+            for i, ts in enumerate(timestamps):
+                close_v = closes[i] if i < len(closes) else None
+                if close_v is None:
+                    continue
+
+                rows.append({
+                    "ts": ts,
+                    "open": opens[i] if i < len(opens) else None,
+                    "high": highs[i] if i < len(highs) else None,
+                    "low": lows[i] if i < len(lows) else None,
+                    "close": close_v,
+                    "volume": volumes[i] if i < len(volumes) else None,
+                })
+
+            if not rows:
+                last_error = f"Yahoo {symbol} 無有效收盤價"
+                continue
+
+            last = rows[-1]
+            prev = rows[-2] if len(rows) >= 2 else rows[-1]
+
+            price = _safe_num(last.get("close"))
+            prev_close = _safe_num(prev.get("close"))
+            open_price = _safe_num(last.get("open"))
+            high_price = _safe_num(last.get("high"))
+            low_price = _safe_num(last.get("low"))
+            volume = _safe_num(last.get("volume"))
+
+            if price is None or price <= 0:
+                last_error = f"Yahoo {symbol} 價格無效"
+                continue
+
+            change_value = None
+            change_pct = None
+            if prev_close not in [None, 0]:
+                change_value = price - prev_close
+                change_pct = change_value / prev_close * 100
+
+            update_text = "Yahoo日線"
+            try:
+                update_text = datetime.fromtimestamp(int(last.get("ts"))).strftime("%Y%m%d") + " Yahoo日線"
+            except Exception:
+                pass
+
+            return {
+                "ok": True,
+                "code": stock_no,
+                "name": stock_name or stock_no,
+                "market": market_type,
+                "price": price,
+                "prev_close": prev_close,
+                "open": open_price,
+                "high": high_price,
+                "low": low_price,
+                "change": change_value,
+                "change_pct": change_pct,
+                "change_source": "yahoo_daily_vs_prev_close",
+                "total_volume": volume,
+                "trade_volume": None,
+                "update_time": update_text,
+                "price_source": "yahoo_daily_fallback",
+                "raw": {},
+                "message": "MIS即時資料失敗，已使用 Yahoo 台股日線備援",
+            }
+
+        except Exception as e:
+            last_error = f"Yahoo {symbol} 例外：{e}"
+            continue
+
+    return _empty_realtime_result(
+        stock_no,
+        stock_name,
+        market_type,
+        f"即時資料失敗，歷史備援與 Yahoo 備援皆無資料；{last_error}",
+    )
+
+
 def _realtime_info_has_price(info):
     if not isinstance(info, dict):
         return False
@@ -1218,11 +1360,15 @@ def render_realtime_info_card(info, title="即時資訊"):
         "bid": "買進價",
         "ask": "賣出價",
         "prev_close": "昨收回退",
+        "history_close_fallback": "歷史收盤備援",
+        "yahoo_daily_fallback": "Yahoo日線備援",
         "none": "無",
     }
     change_map = {
         "realtime_vs_prev": "即時價對昨收",
         "prev_close_missing": "缺昨收",
+        "history_vs_prev_close": "歷史收盤對前收",
+        "yahoo_daily_vs_prev_close": "Yahoo日線對前收",
     }
 
     st.caption(
@@ -1297,7 +1443,8 @@ def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
             _empty_realtime_result(item["code"], item["name"], item["market"], "查無即時資料")
         )
 
-        # 週末、休市或 MIS API 異常時常會整批回傳空值；改用最近歷史K收盤資料備援，避免儀表板整片 None。
+        # 週末、休市或 MIS API 異常時常會整批回傳空值。
+        # 第一備援：專案原本歷史K資料；第二備援：Yahoo Finance 台股日線。
         if not _realtime_info_has_price(info):
             fallback_info = _get_realtime_history_fallback(
                 item["code"],
@@ -1307,6 +1454,19 @@ def get_realtime_watchlist_df(watchlist_dict, query_date="", refresh_token=""):
             )
             if _realtime_info_has_price(fallback_info):
                 info = fallback_info
+            else:
+                yahoo_fallback_info = _get_realtime_yahoo_history_fallback(
+                    item["code"],
+                    item["name"],
+                    item["market"],
+                    refresh_day=str(query_date or ""),
+                )
+                if _realtime_info_has_price(yahoo_fallback_info):
+                    info = yahoo_fallback_info
+                else:
+                    # 保留最完整的失敗訊息，方便在資料診斷頁追查。
+                    if isinstance(yahoo_fallback_info, dict) and yahoo_fallback_info.get("message"):
+                        info = yahoo_fallback_info
 
         rows.append({
             "群組": item["group"],
@@ -1368,11 +1528,15 @@ def render_realtime_table(df, height=520):
         "bid": "買進價",
         "ask": "賣出價",
         "prev_close": "昨收回退",
+        "history_close_fallback": "歷史收盤備援",
+        "yahoo_daily_fallback": "Yahoo日線備援",
         "none": "無",
     }
     change_map = {
         "realtime_vs_prev": "即時價對昨收",
         "prev_close_missing": "缺昨收",
+        "history_vs_prev_close": "歷史收盤對前收",
+        "yahoo_daily_vs_prev_close": "Yahoo日線對前收",
     }
 
     if "價格來源" in display_df.columns:
