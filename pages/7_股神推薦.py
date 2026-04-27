@@ -47,6 +47,7 @@ except Exception:
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
+MACRO_LINK_VERSION = "macro_link_v1_20260427"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -82,6 +83,18 @@ GODPICK_RECORD_COLUMNS = [
     "推薦模式",
     "推薦等級",
     "推薦總分",
+    "大盤參考等級",
+    "大盤可參考分數",
+    "大盤加權分",
+    "大盤風險濾網",
+    "大盤推薦權重",
+    "大盤降權原因",
+    "大盤操作風格",
+    "大盤市場廣度分數",
+    "大盤量價確認分數",
+    "大盤權值支撐分數",
+    "大盤推薦同步分數",
+    "大盤資料日期",
     "買點分級",
     "風險說明",
     "股神推論邏輯",
@@ -1032,6 +1045,24 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["股神推論邏輯"] = out.apply(_derive_god_reasoning, axis=1)
     out["權重設定"] = _weight_text()
 
+    macro_ref = _load_latest_macro_reference()
+    macro_adj = out.apply(lambda r: _macro_adjust_score(r, macro_ref), axis=1)
+    out["大盤加權分"] = [x[0] for x in macro_adj]
+    out["大盤風險濾網"] = [x[1] for x in macro_adj]
+    out["推薦總分"] = pd.to_numeric(out["推薦總分"], errors="coerce").fillna(0) + pd.to_numeric(out["大盤加權分"], errors="coerce").fillna(0)
+    out["推薦總分"] = out["推薦總分"].clip(lower=0, upper=100)
+
+    out["大盤參考等級"] = macro_ref.get("大盤參考等級")
+    out["大盤可參考分數"] = macro_ref.get("大盤可參考分數")
+    out["大盤推薦權重"] = macro_ref.get("大盤推薦權重")
+    out["大盤降權原因"] = macro_ref.get("大盤降權原因")
+    out["大盤操作風格"] = macro_ref.get("大盤操作風格")
+    out["大盤市場廣度分數"] = macro_ref.get("大盤市場廣度分數")
+    out["大盤量價確認分數"] = macro_ref.get("大盤量價確認分數")
+    out["大盤權值支撐分數"] = macro_ref.get("大盤權值支撐分數")
+    out["大盤推薦同步分數"] = macro_ref.get("大盤推薦同步分數")
+    out["大盤資料日期"] = macro_ref.get("大盤資料日期")
+
     tracking_df = out.apply(_build_tracking_placeholders, axis=1, result_type="expand")
     for c in ["3日追蹤預留", "5日追蹤預留", "10日追蹤預留", "20日追蹤預留"]:
         out[c] = tracking_df[c] if c in tracking_df.columns else ""
@@ -1265,11 +1296,11 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
         return base_df.copy()
 
     merged = pd.concat([base_df, new_df], ignore_index=True)
-    # 防重複規則：同一天同一檔股票只保留一筆。
-    # 不使用推薦時間 / 推薦模式，避免同日同股票重複寫入推薦紀錄。
     merged["_biz_key"] = (
-        merged["股票代號"].fillna("").astype(str).map(_normalize_code) + "|"
-        + merged["推薦日期"].fillna("").astype(str)
+        merged["股票代號"].fillna("").astype(str) + "|"
+        + merged["推薦日期"].fillna("").astype(str) + "|"
+        + merged["推薦時間"].fillna("").astype(str) + "|"
+        + merged["推薦模式"].fillna("").astype(str)
     )
     merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
     merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
@@ -1792,6 +1823,153 @@ def _write_godpick_records_to_firestore(records: list[dict[str, Any]]) -> tuple[
         return False, f"推薦紀錄 Firestore 寫入失敗：{e}"
 
 
+
+
+# =========================================================
+# 大盤走勢串聯：讀取 0_大盤走勢.py 儲存的 macro_trend_records.json
+# =========================================================
+MACRO_RECORD_FILES = [
+    "macro_trend_records.json",
+]
+
+
+def _macro_grade_weight(grade: str, score: Any) -> tuple[float, str]:
+    """依大盤參考等級決定在 7_股神推薦 的自動權重，不硬篩避免漏逆勢飆股。"""
+    g = _safe_str(grade)
+    s = _safe_float(score, 50) or 50
+    if g.startswith("A") or s >= 80:
+        return 0.12, "大盤A級，作主要輔助加權"
+    if g.startswith("B") or s >= 65:
+        return 0.07, "大盤B級，作輔助加權"
+    if g.startswith("C") or s >= 50:
+        return 0.00, "大盤C級，只作風險濾網"
+    return -0.08, "大盤D級，降低追價與弱勢股權重"
+
+
+def _load_latest_macro_reference() -> dict[str, Any]:
+    """讀取最新大盤參考結果。沒有資料時回傳中性，避免 7 頁推薦壞掉。"""
+    base_dir = Path(__file__).resolve().parent.parent
+    rows = []
+    for fn in MACRO_RECORD_FILES:
+        p = base_dir / fn
+        if not p.exists():
+            continue
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, list):
+            data_rows = payload
+        elif isinstance(payload, dict):
+            if isinstance(payload.get("records"), list):
+                data_rows = payload.get("records", [])
+            elif isinstance(payload.get("data"), list):
+                data_rows = payload.get("data", [])
+            else:
+                data_rows = []
+        else:
+            data_rows = []
+        for r in data_rows:
+            if isinstance(r, dict):
+                rows.append(r)
+
+    if not rows:
+        return {
+            "大盤參考等級": "C｜僅作風險濾網",
+            "大盤可參考分數": 50.0,
+            "大盤操作風格": "未讀到大盤紀錄",
+            "大盤推薦權重": "0%",
+            "大盤降權原因": "尚未儲存 0_大盤走勢 的投顧參考結果，7頁以中性處理",
+            "大盤資料日期": "",
+            "大盤市場廣度分數": None,
+            "大盤量價確認分數": None,
+            "大盤權值支撐分數": None,
+            "大盤推薦同步分數": None,
+            "大盤風險濾網": "中性",
+            "_macro_adjust_weight": 0.0,
+        }
+
+    def sort_key(r):
+        return (
+            _safe_str(r.get("推估日期")),
+            _safe_str(r.get("更新時間") or r.get("建立時間")),
+            _safe_float(r.get("大盤可參考分數"), 0) or 0,
+        )
+
+    latest = sorted(rows, key=sort_key, reverse=True)[0]
+    score = _safe_float(latest.get("大盤可參考分數"), 50) or 50
+    grade = _safe_str(latest.get("大盤參考等級")) or _macro_reference_grade(score)
+    weight, reason = _macro_grade_weight(grade, score)
+    risk_filter = "中性"
+    if grade.startswith("A"):
+        risk_filter = "可加權"
+    elif grade.startswith("B"):
+        risk_filter = "輔助加權"
+    elif grade.startswith("C"):
+        risk_filter = "只控風險"
+    elif grade.startswith("D"):
+        risk_filter = "降權防守"
+
+    return {
+        "大盤參考等級": grade,
+        "大盤可參考分數": score,
+        "大盤操作風格": _safe_str(latest.get("今日適合操作風格")) or _safe_str(latest.get("建議動作")) or "未判定",
+        "大盤推薦權重": _safe_str(latest.get("推薦加權建議")) or f"{weight*100:.0f}%",
+        "大盤降權原因": _safe_str(latest.get("推薦降權原因")) or reason,
+        "大盤資料日期": _safe_str(latest.get("推估日期")),
+        "大盤市場廣度分數": _safe_float(latest.get("市場廣度分數")),
+        "大盤量價確認分數": _safe_float(latest.get("量價確認分數")),
+        "大盤權值支撐分數": _safe_float(latest.get("權值支撐分數")),
+        "大盤推薦同步分數": _safe_float(latest.get("推薦同步分數")),
+        "大盤風險濾網": risk_filter,
+        "_macro_adjust_weight": weight,
+    }
+
+
+def _macro_reference_grade(score: Any) -> str:
+    s = _safe_float(score, 50) or 50
+    if s >= 80:
+        return "A｜可作主要參考"
+    if s >= 65:
+        return "B｜可作輔助參考"
+    if s >= 50:
+        return "C｜僅作風險濾網"
+    return "D｜不建議作推薦依據"
+
+
+def _macro_adjust_score(row: pd.Series, macro: dict[str, Any]) -> tuple[float, str]:
+    """
+    大盤加權採「輔助與降權」，不硬刪股票。
+    避免大盤弱但個股逆勢起漲時被漏掉。
+    """
+    weight = _safe_float(macro.get("_macro_adjust_weight"), 0) or 0
+    macro_score = _safe_float(macro.get("大盤可參考分數"), 50) or 50
+    if abs(weight) < 0.0001:
+        return 0.0, _safe_str(macro.get("大盤風險濾網")) or "中性"
+
+    rec_score = _safe_float(row.get("推薦總分"), 0) or 0
+    prelaunch = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    tech = _safe_float(row.get("技術結構分數"), 0) or 0
+    risk = _safe_float(row.get("風險分數"), 50) or 50
+
+    stock_quality = rec_score * 0.45 + prelaunch * 0.25 + tech * 0.20 + max(0, 100 - risk) * 0.10
+    raw = (macro_score - 50) * weight * 0.55 + (stock_quality - 60) * weight * 0.35
+
+    # 大盤D級時：只扣追高/弱勢，不重砍逆勢強股。
+    grade = _safe_str(macro.get("大盤參考等級"))
+    if grade.startswith("D"):
+        if prelaunch >= 75 and tech >= 65:
+            raw = max(raw, -1.5)
+        elif rec_score < 70 or risk >= 65:
+            raw -= 2.5
+    elif grade.startswith("A"):
+        if prelaunch >= 68 and tech >= 60:
+            raw += 1.2
+
+    return round(_score_clip(raw, -8, 8), 2), _safe_str(macro.get("大盤風險濾網")) or "中性"
+
+
+
 def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
     rec_price = _safe_float(row.get("推薦價格"))
     latest_price = _safe_float(row.get("最新價"))
@@ -1833,6 +2011,18 @@ def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
         "推薦等級": _safe_str(row.get("推薦等級")),
         "推薦總分": _safe_float(row.get("推薦總分")),
         "買點分級": _safe_str(row.get("買點分級")),
+        "大盤參考等級": _safe_str(row.get("大盤參考等級")),
+        "大盤可參考分數": _safe_float(row.get("大盤可參考分數")),
+        "大盤加權分": _safe_float(row.get("大盤加權分")),
+        "大盤風險濾網": _safe_str(row.get("大盤風險濾網")),
+        "大盤推薦權重": _safe_str(row.get("大盤推薦權重")),
+        "大盤降權原因": _safe_str(row.get("大盤降權原因")),
+        "大盤操作風格": _safe_str(row.get("大盤操作風格")),
+        "大盤市場廣度分數": _safe_float(row.get("大盤市場廣度分數")),
+        "大盤量價確認分數": _safe_float(row.get("大盤量價確認分數")),
+        "大盤權值支撐分數": _safe_float(row.get("大盤權值支撐分數")),
+        "大盤推薦同步分數": _safe_float(row.get("大盤推薦同步分數")),
+        "大盤資料日期": _safe_str(row.get("大盤資料日期")),
         "風險說明": _safe_str(row.get("風險說明")),
         "股神推論邏輯": _safe_str(row.get("股神推論邏輯")),
         "權重設定": _safe_str(row.get("權重設定")),
@@ -1898,6 +2088,18 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "推薦等級": _safe_str(r.get("推薦等級")),
                 "推薦總分": _safe_float(r.get("推薦總分")),
                 "買點分級": _safe_str(r.get("買點分級")),
+                "大盤參考等級": _safe_str(r.get("大盤參考等級")),
+                "大盤可參考分數": _safe_float(r.get("大盤可參考分數")),
+                "大盤加權分": _safe_float(r.get("大盤加權分")),
+                "大盤風險濾網": _safe_str(r.get("大盤風險濾網")),
+                "大盤推薦權重": _safe_str(r.get("大盤推薦權重")),
+                "大盤降權原因": _safe_str(r.get("大盤降權原因")),
+                "大盤操作風格": _safe_str(r.get("大盤操作風格")),
+                "大盤市場廣度分數": _safe_float(r.get("大盤市場廣度分數")),
+                "大盤量價確認分數": _safe_float(r.get("大盤量價確認分數")),
+                "大盤權值支撐分數": _safe_float(r.get("大盤權值支撐分數")),
+                "大盤推薦同步分數": _safe_float(r.get("大盤推薦同步分數")),
+                "大盤資料日期": _safe_str(r.get("大盤資料日期")),
                 "風險說明": _safe_str(r.get("風險說明")),
                 "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
                 "權重設定": _safe_str(r.get("權重設定")),
@@ -2805,14 +3007,12 @@ def _find_existing_watchlist_codes(group_name: str, codes: list[str]) -> list[st
 
 
 def _record_business_key(row: dict[str, Any]) -> str:
-    """股神推薦紀錄防重複 business key。
-
-    防呆規則：同一天同一檔股票只允許一筆推薦紀錄。
-    不再把「推薦時間 / 推薦模式」放進 key，避免同股票同日因時間不同而重複寫入。
-    """
+    """股神推薦紀錄去重用 business key。"""
     return (
         f"{_normalize_code(row.get('股票代號'))}|"
-        f"{_safe_str(row.get('推薦日期'))}"
+        f"{_safe_str(row.get('推薦日期'))}|"
+        f"{_safe_str(row.get('推薦時間'))}|"
+        f"{_safe_str(row.get('推薦模式'))}"
     )
 
 
@@ -2837,7 +3037,12 @@ def _find_existing_godpick_record_codes(record_rows: list[dict[str, Any]]) -> tu
 
     old_keys = set()
     for _, r in old_df.iterrows():
-        old_keys.add(_record_business_key(r.to_dict()))
+        old_keys.add(
+            f"{_normalize_code(r.get('股票代號'))}|"
+            f"{_safe_str(r.get('推薦日期'))}|"
+            f"{_safe_str(r.get('推薦時間'))}|"
+            f"{_safe_str(r.get('推薦模式'))}"
+        )
 
     dup_codes = []
     dup_keys = []
@@ -4203,7 +4408,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
-        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "交易可行分數",
+        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
@@ -4824,6 +5029,23 @@ def main():
     st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
+    st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
+
+    macro_ref_for_ui = _load_latest_macro_reference()
+    with st.expander("大盤走勢串聯狀態", expanded=False):
+        render_pro_info_card(
+            "大盤已串入股神推薦評分",
+            [
+                ("大盤參考等級", _safe_str(macro_ref_for_ui.get("大盤參考等級")), ""),
+                ("大盤可參考分數", format_number(_safe_float(macro_ref_for_ui.get("大盤可參考分數"), 0), 2), ""),
+                ("推薦權重建議", _safe_str(macro_ref_for_ui.get("大盤推薦權重")), ""),
+                ("操作風格", _safe_str(macro_ref_for_ui.get("大盤操作風格")), ""),
+                ("資料日期", _safe_str(macro_ref_for_ui.get("大盤資料日期")) or "尚未儲存大盤紀錄", ""),
+            ],
+            chips=["大盤濾網", "輔助加權", "不硬篩"],
+        )
+        st.caption("大盤採輔助加權與風險降權，不會直接刪除逆勢強股，避免漏掉飆股。")
+
 
     if master_df is None or master_df.empty:
         st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
@@ -5403,26 +5625,37 @@ def main():
             record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
             dup_codes, dup_keys = _find_existing_godpick_record_codes(record_rows)
 
-            if dup_codes:
+            if dup_codes and not st.session_state.get(_k("confirm_record_duplicate"), False):
                 st.warning(
-                    f"8_股神推薦紀錄已存在 {len(dup_codes)} 檔，系統已防呆不重複寫入："
+                    f"8_股神推薦紀錄已存在 {len(dup_codes)} 檔相同推薦紀錄："
                     + "、".join(dup_codes[:20])
                     + ("..." if len(dup_codes) > 20 else "")
                 )
-                st.info("防重複規則：推薦日期 + 股票代號。已存在的股票會自動略過，只新增尚未存在的股票。")
-
-            added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=False)
-            st.session_state[_k("confirm_record_duplicate")] = False
-            st.session_state[_k("pending_record_rows")] = []
-
-            if added_count > 0:
-                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄；已存在者自動略過。")
+                st.info("請確認是否仍要重複紀錄。若確認，會保留舊紀錄並新增一筆新紀錄，備註會標記『使用者確認重複紀錄』。")
+                st.session_state[_k("pending_record_rows")] = record_rows
+                if st.button("確認：仍要重複寫入股神推薦紀錄", use_container_width=True, key=_k("confirm_record_duplicate_btn")):
+                    st.session_state[_k("confirm_record_duplicate")] = True
+                    st.rerun()
             else:
-                st.warning("沒有新增任何推薦紀錄，因為勾選股票可能都已存在或寫入失敗。")
-            if record_msgs:
-                with st.expander("推薦紀錄寫入明細", expanded=True):
-                    for msg in record_msgs:
-                        st.write(f"- {msg}")
+                force_duplicate = bool(st.session_state.get(_k("confirm_record_duplicate"), False))
+                if force_duplicate:
+                    record_rows = st.session_state.get(_k("pending_record_rows"), record_rows)
+
+                added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=force_duplicate)
+                st.session_state[_k("confirm_record_duplicate")] = False
+                st.session_state[_k("pending_record_rows")] = []
+
+                if added_count > 0:
+                    if force_duplicate:
+                        st.success(f"已重複寫入 {added_count} 筆到 8_股神推薦紀錄")
+                    else:
+                        st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
+                else:
+                    st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
+                if record_msgs:
+                    with st.expander("推薦紀錄寫入明細", expanded=True):
+                        for msg in record_msgs:
+                            st.write(f"- {msg}")
 
     record_detail_lines = st.session_state.get(_k("last_record_write_detail"), [])
     if record_detail_lines:
@@ -5640,7 +5873,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
