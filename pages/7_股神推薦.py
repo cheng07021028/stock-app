@@ -48,6 +48,7 @@ STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_2
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
 MACRO_LINK_VERSION = "macro_link_v1_20260427"
+WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -670,6 +671,14 @@ def _render_score_weight_panel():
     if _k("score_weights_edit") not in st.session_state:
         st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
 
+    # Streamlit 規則：number_input 建立後，不可在同一次 rerun 直接寫入它的 widget key。
+    # 所以「恢復原始設定」先寫 pending reset；下一次 rerun、widget 建立前再安全同步。
+    if st.session_state.pop(_k("weight_reset_pending"), False):
+        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+        for _name, _val in GODPICK_DEFAULT_SCORE_WEIGHTS.items():
+            st.session_state[_k(f"weight_edit_{_name}")] = int(_val)
+
     edit = _normalize_weight_map(st.session_state.get(_k("score_weights_edit"), GODPICK_DEFAULT_SCORE_WEIGHTS))
 
     c1, c2, c3, c4 = st.columns(4)
@@ -705,16 +714,21 @@ def _render_score_weight_panel():
     if total != 100:
         st.warning("權重總和必須等於 100% 才能套用；目前不能影響推薦結果。")
 
+    if st.session_state.get(_k("weight_reset_msg")):
+        st.success(st.session_state.pop(_k("weight_reset_msg")))
+        _msgs = st.session_state.pop(_k("weight_reset_msgs"), [])
+        if _msgs:
+            with st.expander("權重保存明細", expanded=False):
+                for msg in _msgs:
+                    st.write(f"- {msg}")
+
     if reset_weight:
-        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        for name in weight_keys:
-            st.session_state[_k(f"weight_edit_{name}")] = GODPICK_DEFAULT_SCORE_WEIGHTS[name]
+        # 不直接寫入 weight_edit_* widget key，避免 StreamlitAPIException。
+        # 改為下一輪 rerun 在 number_input 建立前同步。
+        st.session_state[_k("weight_reset_pending")] = True
         ok, msgs = _save_persistent_settings(GODPICK_DEFAULT_SCORE_WEIGHTS.copy())
-        st.success("已恢復原始權重，並永久記錄。" if ok else "已恢復原始權重，但永久記錄失敗。")
-        with st.expander("權重保存明細", expanded=False):
-            for msg in msgs:
-                st.write(f"- {msg}")
+        st.session_state[_k("weight_reset_msg")] = "已恢復原始權重，並永久記錄。" if ok else "已恢復原始權重，但永久記錄失敗。"
+        st.session_state[_k("weight_reset_msgs")] = msgs
         st.rerun()
 
     if apply_weight:
@@ -5030,6 +5044,7 @@ def main():
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
+    st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
 
     macro_ref_for_ui = _load_latest_macro_reference()
     with st.expander("大盤走勢串聯狀態", expanded=False):
