@@ -43,11 +43,18 @@ PFX = "godpick_list_"
 GOD_DECISION_V5_LINK_VERSION = "recommend_list_v5_link_v1_20260427"
 DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
 V5_BACKFILL_FIX_VERSION = "recommend_list_v5_backfill_fix_v1_20260427"
+READ_FALLBACK_VERSION = "recommend_list_multi_source_read_v1_20260427"
 
 GODPICK_RECOMMEND_LIST_FILE = "godpick_recommend_list.json"
+GODPICK_RECOMMEND_SOURCE_FILES = [
+    "godpick_recommend_list.json",
+    "godpick_latest_recommendations.json",
+    "godpick_records.json",
+]
 
 GODPICK_RECORD_COLUMNS = [
     "record_id",
+    "資料來源",
     "股票代號",
     "股票名稱",
     "市場別",
@@ -205,19 +212,97 @@ def _read_json_file_from_github(path_name: str, default):
         return default, f"讀取 {path_name} 例外：{e}"
 
 
-def _read_recommend_list_from_latest() -> tuple[pd.DataFrame, str]:
-    payload, msg = _read_json_file_from_github(GODPICK_RECOMMEND_LIST_FILE, [])
-    if not isinstance(payload, list) or not payload:
-        try:
-            with open(GODPICK_RECOMMEND_LIST_FILE, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            msg = f"已讀取本機 {GODPICK_RECOMMEND_LIST_FILE}"
-        except Exception:
-            payload = []
-    if not isinstance(payload, list):
-        payload = []
-    return _ensure_record_columns(pd.DataFrame(payload)), msg
+def _extract_recommend_rows_from_payload(payload: Any) -> list[dict[str, Any]]:
+    """支援 list / dict(records|data|items|recommendations) 等多種推薦資料格式。"""
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        for key in ["records", "data", "items", "recommendations", "latest_recommendations", "rows"]:
+            if isinstance(payload.get(key), list):
+                rows = payload.get(key, [])
+                break
+        else:
+            rows = []
+    else:
+        rows = []
 
+    clean_rows = []
+    for r in rows:
+        if isinstance(r, dict):
+            clean_rows.append(dict(r))
+    return clean_rows
+
+
+def _row_dedupe_key(row: dict[str, Any]) -> str:
+    rid = _safe_str(row.get("record_id") or row.get("rec_id") or row.get("id"))
+    if rid:
+        return f"id:{rid}"
+    code = _normalize_code(row.get("股票代號") or row.get("code"))
+    date_s = _safe_str(row.get("推薦日期") or row.get("date"))
+    time_s = _safe_str(row.get("推薦時間") or row.get("time") or row.get("建立時間") or row.get("created_at"))
+    score_s = _safe_str(row.get("推薦總分") or row.get("score"))
+    return f"{code}|{date_s}|{time_s}|{score_s}"
+
+
+def _read_rows_from_github_or_local(path_name: str) -> tuple[list[dict[str, Any]], str]:
+    payload, msg = _read_json_file_from_github(path_name, [])
+    rows = _extract_recommend_rows_from_payload(payload)
+
+    if not rows:
+        try:
+            with open(path_name, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            rows = _extract_recommend_rows_from_payload(payload)
+            if rows:
+                msg = f"已讀取本機 {path_name}"
+        except Exception:
+            pass
+
+    for r in rows:
+        if not _safe_str(r.get("資料來源")):
+            r["資料來源"] = path_name
+    return rows, msg
+
+
+def _read_recommend_list_from_latest() -> tuple[pd.DataFrame, str]:
+    """
+    推薦清單讀取強化版：
+    1. 優先讀 godpick_recommend_list.json
+    2. 若清單空白，自動 fallback 讀 godpick_latest_recommendations.json
+    3. 再 fallback 讀 godpick_records.json
+    4. 多來源合併去重，避免使用者以為7頁沒有匯入
+    """
+    all_rows: list[dict[str, Any]] = []
+    msgs: list[str] = []
+
+    for path_name in GODPICK_RECOMMEND_SOURCE_FILES:
+        rows, msg = _read_rows_from_github_or_local(path_name)
+        msgs.append(f"{path_name}：{msg}｜{len(rows)}筆")
+        if rows:
+            all_rows.extend(rows)
+
+    deduped: dict[str, dict[str, Any]] = {}
+    for r in all_rows:
+        key = _row_dedupe_key(r)
+        if not key or key == "|||":
+            key = f"row:{len(deduped)}"
+        # 後讀來源若資料較完整，補欄位；不覆蓋已有非空值
+        if key not in deduped:
+            deduped[key] = r
+        else:
+            base = deduped[key]
+            for k, v in r.items():
+                if _safe_str(base.get(k)) == "" and _safe_str(v) != "":
+                    base[k] = v
+
+    rows = list(deduped.values())
+    df = _ensure_record_columns(pd.DataFrame(rows))
+    source_msg = "；".join(msgs)
+    if rows:
+        source_msg = f"已合併讀取 {len(rows)} 筆｜" + source_msg
+    else:
+        source_msg = "未讀到推薦資料｜" + source_msg
+    return df, source_msg
 
 
 def _derive_list_prelaunch_grade(row: pd.Series) -> str:
@@ -740,7 +825,7 @@ def main():
 
     if df.empty:
         render_pro_section("推薦清單資料")
-        st.warning("目前沒有推薦紀錄。先到 7_股神推薦頁面把勾選結果寫入推薦紀錄。")
+        st.warning("目前沒有推薦資料。已嘗試讀取 godpick_recommend_list.json、godpick_latest_recommendations.json、godpick_records.json；若仍空白，請先到 7_股神推薦重新推薦並寫入推薦清單。")
         return
 
     mode_options = ["全部"] + sorted([x for x in df["推薦模式"].dropna().astype(str).unique().tolist() if x])
