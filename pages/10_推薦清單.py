@@ -40,7 +40,7 @@ except Exception:
 
 PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
-PRELAUNCH_78910_VERSION = "recommend_list_prelaunch_78910_v1_20260425"
+GOD_DECISION_V5_LINK_VERSION = "recommend_list_v5_link_v1_20260427"
 
 GODPICK_RECOMMEND_LIST_FILE = "godpick_recommend_list.json"
 
@@ -52,15 +52,28 @@ GODPICK_RECORD_COLUMNS = [
     "類別",
     "推薦模式",
     "推薦等級",
-    "推薦總分",
+    "推薦總分", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%",
+    "股神決策模式",
+    "股神進場建議",
+    "推薦分層",
+    "建議部位%",
+    "風險報酬比",
+    "追價風險分",
+    "停損距離%",
+    "目標報酬%",
+    "不建議買進原因",
+    "最佳操作劇本",
+    "隔日操作建議",
+    "失效價位",
+    "轉弱條件",
+    "大盤情境調權說明",
+    "大盤情境分桶",
     "買點分級",
     "風險說明",
     "股神推論邏輯",
     "權重設定",
     "推薦分桶",
-    "飆股起漲分數",
     "起漲等級",
-    "起漲摘要",
     "信心等級",
     "技術結構分數",
     "起漲前兆分數",
@@ -204,30 +217,6 @@ def _read_recommend_list_from_latest() -> tuple[pd.DataFrame, str]:
 
 
 
-
-def _derive_list_prelaunch_summary(row: pd.Series) -> str:
-    existing = _safe_str(row.get("起漲摘要"))
-    if existing:
-        return existing
-    s = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
-    parts = []
-    if s >= 90:
-        parts.append("接近漲停")
-    elif s >= 78:
-        parts.append("強漲")
-    elif s >= 68:
-        parts.append("明顯上漲")
-    elif s >= 55:
-        parts.append("小漲轉強")
-    else:
-        parts.append("未見明顯起漲訊號")
-    if _safe_float(row.get("爆發力分數"), 0) and _safe_float(row.get("爆發力分數"), 0) >= 70:
-        parts.append("量能放大")
-    if _safe_float(row.get("型態突破分數"), 0) and _safe_float(row.get("型態突破分數"), 0) >= 70:
-        parts.append("突破結構")
-    return "、".join(parts)
-
-
 def _derive_list_prelaunch_grade(row: pd.Series) -> str:
     pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
     burst = _safe_float(row.get("爆發力分數"), 0) or 0
@@ -304,23 +293,6 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         mask = x["起漲等級"].str.strip() == ""
         if mask.any():
             x.loc[mask, "起漲等級"] = x.loc[mask].apply(_derive_list_prelaunch_grade, axis=1)
-
-
-    # 7/8/9/10 起漲欄位串聯補齊：舊資料沒有新欄位時自動補。
-    if "飆股起漲分數" in x.columns:
-        x["飆股起漲分數"] = pd.to_numeric(x["飆股起漲分數"], errors="coerce")
-        if "起漲前兆分數" in x.columns:
-            x["飆股起漲分數"] = x["飆股起漲分數"].fillna(pd.to_numeric(x["起漲前兆分數"], errors="coerce"))
-    if "起漲等級" in x.columns:
-        x["起漲等級"] = x["起漲等級"].fillna("").astype(str)
-        mask = x["起漲等級"].str.strip() == ""
-        if mask.any():
-            x.loc[mask, "起漲等級"] = x.loc[mask].apply(_derive_list_prelaunch_grade, axis=1)
-    if "起漲摘要" in x.columns:
-        x["起漲摘要"] = x["起漲摘要"].fillna("").astype(str)
-        mask = x["起漲摘要"].str.strip() == ""
-        if mask.any():
-            x.loc[mask, "起漲摘要"] = x.loc[mask].apply(_derive_list_prelaunch_summary, axis=1)
 
     if "買點分級" in x.columns:
         x["買點分級"] = x["買點分級"].fillna("").astype(str)
@@ -651,7 +623,7 @@ def main():
 
     render_pro_section("推薦清單明細")
     show_cols = [
-        "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "飆股起漲分數", "起漲等級", "起漲摘要",
+        "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分", "飆股起漲分數", "起漲等級", "起漲摘要",
         "買點分級", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
         "推薦價格", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態",
         "股神推論邏輯", "風險說明", "推薦理由摘要", "備註"
