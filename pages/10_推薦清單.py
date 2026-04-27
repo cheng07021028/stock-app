@@ -41,6 +41,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
 GOD_DECISION_V5_LINK_VERSION = "recommend_list_v5_link_v1_20260427"
+DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
 
 GODPICK_RECOMMEND_LIST_FILE = "godpick_recommend_list.json"
 
@@ -52,7 +53,7 @@ GODPICK_RECORD_COLUMNS = [
     "類別",
     "推薦模式",
     "推薦等級",
-    "推薦總分", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%",
+    "推薦總分",
     "股神決策模式",
     "股神進場建議",
     "推薦分層",
@@ -73,7 +74,9 @@ GODPICK_RECORD_COLUMNS = [
     "股神推論邏輯",
     "權重設定",
     "推薦分桶",
+    "飆股起漲分數",
     "起漲等級",
+    "起漲摘要",
     "信心等級",
     "技術結構分數",
     "起漲前兆分數",
@@ -107,7 +110,6 @@ GODPICK_RECORD_COLUMNS = [
     "模式績效標籤",
     "備註",
 ]
-
 
 def _k(key: str) -> str:
     return f"{PFX}{key}"
@@ -281,6 +283,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
     x = df.copy()
+    x = x.loc[:, ~x.columns.duplicated()].copy()
     if "record_id" not in x.columns and "rec_id" in x.columns:
         x["record_id"] = x["rec_id"]
     for c in GODPICK_RECORD_COLUMNS:
@@ -541,6 +544,7 @@ def _filter_df(df: pd.DataFrame, start_date: date, end_date: date, mode: str, st
 
 def _format_show_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
+    show = show.loc[:, ~show.columns.duplicated()].copy()
     show = show.drop(columns=[c for c in ["record_id"] if c in show.columns])
     num1_cols = ["推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "實際報酬%", "損益幅%"]
     price_cols = ["推薦價格", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額"]
@@ -628,14 +632,18 @@ def main():
         "推薦價格", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態",
         "股神推論邏輯", "風險說明", "推薦理由摘要", "備註"
     ]
-    existing_cols = [c for c in show_cols if c in filtered_df.columns]
-    st.dataframe(_format_show_df(filtered_df[existing_cols]), use_container_width=True, height=620)
+    existing_cols = []
+    for c in show_cols:
+        if c in filtered_df.columns and c not in existing_cols:
+            existing_cols.append(c)
+    filtered_show_df = filtered_df.loc[:, ~filtered_df.columns.duplicated()].copy()
+    st.dataframe(_format_show_df(filtered_show_df[existing_cols]), use_container_width=True, height=620)
 
     ex1, ex2 = st.columns(2)
     with ex1:
         st.download_button(
             label="下載目前篩選結果 Excel",
-            data=_to_excel_bytes(filtered_df),
+            data=_to_excel_bytes(filtered_df.loc[:, ~filtered_df.columns.duplicated()].copy()),
             file_name=f"推薦清單_{_now_text().replace(':','-').replace(' ','_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
@@ -643,7 +651,7 @@ def main():
     with ex2:
         st.download_button(
             label="下載目前篩選結果 CSV",
-            data=filtered_df.to_csv(index=False, encoding="utf-8-sig"),
+            data=filtered_df.loc[:, ~filtered_df.columns.duplicated()].copy().to_csv(index=False, encoding="utf-8-sig"),
             file_name=f"推薦清單_{_now_text().replace(':','-').replace(' ','_')}.csv",
             mime="text/csv",
             use_container_width=True,
