@@ -51,6 +51,7 @@ MACRO_LINK_VERSION = "macro_link_v1_20260427"
 WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
 GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
+SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -5201,12 +5202,24 @@ def _save_persistent_recommend_scan_settings(settings: dict[str, Any]) -> tuple[
     return (local_ok or github_ok), [local_msg, github_msg]
 
 
-def _apply_recommend_scan_settings_to_state(settings: dict[str, Any]):
+def _apply_recommend_scan_settings_to_state(settings: dict[str, Any], sync_widgets: bool = True):
+    """
+    套用推薦設定到 session_state。
+
+    重要：
+    Streamlit 的 selectbox / number_input / multiselect / text_area widget key
+    一旦在本次 rerun 建立後，就不能再直接改 st.session_state[widget_key]。
+    所以：
+    - 頁面最前面載入設定時：sync_widgets=True
+    - 按「開始推薦 / 重新推薦 / 套用設定」後：widget 已建立，必須 sync_widgets=False
+    """
     settings = settings or {}
     for name in _recommend_setting_names():
         val = copy.deepcopy(settings.get(name, _default_recommend_scan_settings().get(name)))
         st.session_state[_k(name)] = val
-        st.session_state[_ui_pref_key(name)] = val
+        ui_key = _ui_pref_key(name)
+        if sync_widgets and ui_key not in st.session_state:
+            st.session_state[ui_key] = val
 
 
 def _current_form_settings_from_values(
@@ -5443,6 +5456,7 @@ def main():
     st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
     st.caption(f"股神決策引擎：{GOD_DECISION_ENGINE_VERSION}")
     st.caption(f"推薦設定永久記錄版：{SCAN_SETTINGS_PERSIST_VERSION}")
+    st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
 
     macro_ref_for_ui = _load_latest_macro_reference()
@@ -5497,11 +5511,11 @@ def main():
     if st.session_state.pop(_k("scan_settings_reset_pending"), False):
         _payload = st.session_state.pop(_k("scan_settings_reset_payload"), _default_recommend_scan_settings(watchlist_map))
         _payload = _normalize_recommend_scan_settings(_payload, watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(_payload)
+        _apply_recommend_scan_settings_to_state(_payload, sync_widgets=True)
 
     if not st.session_state.get(_k("scan_settings_loaded_once"), False):
         _persistent_scan_settings = _load_persistent_recommend_scan_settings(watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(_persistent_scan_settings)
+        _apply_recommend_scan_settings_to_state(_persistent_scan_settings, sync_widgets=True)
         st.session_state[_k("scan_settings_loaded_once")] = True
 
     render_pro_section("掃描設定")
@@ -5667,7 +5681,7 @@ def main():
 
     if submit_apply_settings:
         normalized_settings = _normalize_recommend_scan_settings(current_form_settings, watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(normalized_settings)
+        _apply_recommend_scan_settings_to_state(normalized_settings, sync_widgets=False)
         ok, msgs = _save_persistent_recommend_scan_settings(normalized_settings)
         st.session_state[_k("scan_settings_msg")] = "推薦設定已套用並永久記錄。" if ok else "推薦設定已套用，但永久記錄失敗。"
         st.session_state[_k("scan_settings_save_msgs")] = msgs
