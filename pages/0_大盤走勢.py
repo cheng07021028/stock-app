@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, date, timedelta
 from typing import Any
+from pathlib import Path
 import base64
 import hashlib
 import io
@@ -43,7 +44,7 @@ except Exception:
 
 PAGE_TITLE = "大盤走勢｜股神Pro因子強化版"
 PFX = "macro_godpro_factor_"
-MACRO_ADVISOR_VERSION = "macro_advisor_reference_v2_20260427"
+MACRO_ADVISOR_VERSION = "macro_advisor_reference_v2_pathfix_20260427"
 
 RECORD_COLUMNS = [
     "record_id",
