@@ -36,8 +36,14 @@ try:
 except Exception:
     get_realtime_stock_info = None
 
+try:
+    from stock_master_service import load_stock_master
+except Exception:
+    load_stock_master = None
+
 PAGE_TITLE = "大盤走勢｜股神Pro因子強化版"
 PFX = "macro_godpro_factor_"
+MACRO_ADVISOR_VERSION = "macro_advisor_reference_v2_20260427"
 
 RECORD_COLUMNS = [
     "record_id",
@@ -129,6 +135,26 @@ RECORD_COLUMNS = [
     "個股操作總則",
     "模型一致性分數",
     "模型分歧警示",
+    "大盤可參考分數",
+    "大盤參考等級",
+    "市場廣度分數",
+    "類股輪動分數",
+    "量價確認分數",
+    "權值支撐分數",
+    "推薦同步分數",
+    "推薦加權建議",
+    "推薦降權原因",
+    "今日適合操作風格",
+    "廣度樣本數",
+    "上漲家數",
+    "下跌家數",
+    "站上MA20比例",
+    "站上MA60比例",
+    "創20日新高家數",
+    "創20日新低家數",
+    "推薦強勢比例",
+    "推薦平均分數",
+    "推薦起漲比例",
     "備註",
 ]
 
@@ -248,7 +274,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "NQ夜盤漲跌%", "外資買賣超估分", "期貨選擇權估分", "類股輪動估分",
         "外資買賣超(億)", "三大法人合計(億)", "外資期貨淨單", "PCR", "融資增減(億)", "融券增減張",
         "實際漲跌點", "實際高點", "實際低點", "點數誤差", "進場建議績效分", "出場建議績效分", "整體檢討分",
-        "倉位上限%", "模型一致性分數",
+        "倉位上限%", "模型一致性分數", "大盤可參考分數", "市場廣度分數", "類股輪動分數", "量價確認分數", "權值支撐分數", "推薦同步分數", "廣度樣本數", "上漲家數", "下跌家數", "站上MA20比例", "站上MA60比例", "創20日新高家數", "創20日新低家數", "推薦強勢比例", "推薦平均分數", "推薦起漲比例",
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -259,7 +285,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推估日期", "建立時間", "更新時間", "模式名稱", "市場情境", "推估方向", "方向強度", "是否適合進場", "是否適合續抱",
         "是否適合減碼", "是否適合出場", "建議動作", "風險等級", "股神推論邏輯", "進場確認條件", "出場警訊", "主要風險",
         "建議倉位", "強勢族群", "弱勢族群", "重大事件清單", "因子來源狀態",
-        "實際方向", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
+        "實際方向", "誤判主因類別", "誤判主因", "收盤檢討", "大盤參考等級", "推薦加權建議", "推薦降權原因", "今日適合操作風格", "備註"
     ]:
         x[c] = x[c].fillna("").astype(str)
     return x[RECORD_COLUMNS].copy()
@@ -370,13 +396,24 @@ def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
         pct = ((close - prev_close) / prev_close * 100) if (close is not None and prev_close not in [None, 0]) else None
         ma5 = valid_close["close"].tail(5).mean() if "close" in valid_close.columns else None
         ma20 = valid_close["close"].tail(20).mean() if "close" in valid_close.columns else None
+        vol = _safe_float(row.get("volume"))
+        vol_ma20 = None
+        vol_ratio20 = None
+        if "volume" in valid_close.columns:
+            vol_series = pd.to_numeric(valid_close["volume"], errors="coerce").dropna()
+            if not vol_series.empty:
+                vol_ma20 = vol_series.tail(20).mean()
+                if vol not in [None, 0] and vol_ma20 not in [None, 0]:
+                    vol_ratio20 = vol / vol_ma20
         return {
             "date": pd.to_datetime(row.get("date")).strftime("%Y-%m-%d") if row.get("date") is not None else "",
             "open": _safe_float(row.get("open")),
             "high": _safe_float(row.get("high")),
             "low": _safe_float(row.get("low")),
             "close": close,
-            "volume": _safe_float(row.get("volume")),
+            "volume": vol,
+            "vol_ma20": _safe_float(vol_ma20),
+            "vol_ratio20": _safe_float(vol_ratio20),
             "pct": pct,
             "ma5": _safe_float(ma5),
             "ma20": _safe_float(ma20),
@@ -810,6 +847,457 @@ def _derive_event_list(news_rows: list[dict[str, str]]) -> str:
     return '｜'.join(hits[:5]) if hits else '無重大事件關鍵字'
 
 
+
+
+# =========================================================
+# 投顧級大盤參考因子：市場廣度 / 權值 / 量價 / 推薦同步
+# =========================================================
+HEAVYWEIGHT_STOCKS = [
+    {"股票代號": "2330", "股票名稱": "台積電", "市場別": "上市"},
+    {"股票代號": "2317", "股票名稱": "鴻海", "市場別": "上市"},
+    {"股票代號": "2454", "股票名稱": "聯發科", "市場別": "上市"},
+    {"股票代號": "2382", "股票名稱": "廣達", "市場別": "上市"},
+    {"股票代號": "2308", "股票名稱": "台達電", "市場別": "上市"},
+    {"股票代號": "2881", "股票名稱": "富邦金", "市場別": "上市"},
+    {"股票代號": "2882", "股票名稱": "國泰金", "市場別": "上市"},
+]
+
+RECOMMENDATION_JSON_FILES = [
+    "godpick_latest_recommendations.json",
+    "godpick_recommend_list.json",
+    "godpick_records.json",
+]
+
+
+def _clip_score(v: Any, low: float = 0.0, high: float = 100.0) -> float:
+    x = _safe_float(v, 0) or 0
+    return float(max(low, min(high, x)))
+
+
+def _load_recommendation_rows() -> list[dict[str, Any]]:
+    base_dir = Path(__file__).resolve().parent.parent
+    rows: list[dict[str, Any]] = []
+    for fn in RECOMMENDATION_JSON_FILES:
+        p = base_dir / fn
+        if not p.exists():
+            continue
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, list):
+            data_rows = payload
+        elif isinstance(payload, dict):
+            if isinstance(payload.get("records"), list):
+                data_rows = payload.get("records", [])
+            elif isinstance(payload.get("data"), list):
+                data_rows = payload.get("data", [])
+            elif isinstance(payload.get("items"), list):
+                data_rows = payload.get("items", [])
+            else:
+                data_rows = []
+        else:
+            data_rows = []
+        for r in data_rows:
+            if isinstance(r, dict):
+                r = dict(r)
+                r["_來源檔"] = fn
+                rows.append(r)
+    return rows
+
+
+def _stock_snapshot_for_macro(code: str, name: str, market: str) -> dict[str, Any]:
+    """輕量個股快照，供市場廣度 / 權值股支撐使用。"""
+    out = {"code": code, "name": name, "market": market, "price": None, "pct": None, "ma20": None, "ma60": None, "high20": None, "low20": None, "source": ""}
+    if get_realtime_stock_info is not None:
+        try:
+            info = get_realtime_stock_info(code, name, market, refresh_token="macro_advisor")
+            out["price"] = _safe_float(info.get("price"))
+            out["pct"] = _safe_float(info.get("pct_chg"), _safe_float(info.get("change_percent"), _safe_float(info.get("漲跌幅"))))
+            out["source"] = _safe_str(info.get("price_source")) or "realtime"
+        except Exception:
+            pass
+
+    if get_history_data is not None:
+        try:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=120)
+            try:
+                df = get_history_data(stock_no=code, stock_name=name, market_type=market, start_date=start_date, end_date=end_date)
+            except TypeError:
+                try:
+                    df = get_history_data(stock_no=code, stock_name=name, market_type=market, start_dt=start_date, end_dt=end_date)
+                except Exception:
+                    df = get_history_data(code=code, start_date=start_date, end_date=end_date)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                if "收盤價" not in temp.columns:
+                    for c in temp.columns:
+                        if str(c).lower() in {"close", "收盤價"}:
+                            temp = temp.rename(columns={c: "收盤價"})
+                            break
+                if "最高價" not in temp.columns:
+                    for c in temp.columns:
+                        if str(c).lower() in {"high", "最高價"}:
+                            temp = temp.rename(columns={c: "最高價"})
+                            break
+                if "最低價" not in temp.columns:
+                    for c in temp.columns:
+                        if str(c).lower() in {"low", "最低價"}:
+                            temp = temp.rename(columns={c: "最低價"})
+                            break
+                if "收盤價" in temp.columns:
+                    temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
+                    temp = temp.dropna(subset=["收盤價"]).copy()
+                    if not temp.empty:
+                        close = temp["收盤價"]
+                        if out["price"] is None:
+                            out["price"] = _safe_float(close.iloc[-1])
+                        if out["pct"] is None and len(close) >= 2 and close.iloc[-2] not in [0, None]:
+                            out["pct"] = _safe_float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100)
+                        out["ma20"] = _safe_float(close.tail(20).mean()) if len(close) >= 20 else None
+                        out["ma60"] = _safe_float(close.tail(60).mean()) if len(close) >= 60 else None
+                        if "最高價" in temp.columns:
+                            high = pd.to_numeric(temp["最高價"], errors="coerce").dropna()
+                            out["high20"] = _safe_float(high.tail(20).max()) if not high.empty else None
+                        if "最低價" in temp.columns:
+                            low = pd.to_numeric(temp["最低價"], errors="coerce").dropna()
+                            out["low20"] = _safe_float(low.tail(20).min()) if not low.empty else None
+                        out["source"] = out["source"] or "history"
+        except Exception:
+            pass
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_market_breadth_snapshot(max_scan: int = 180) -> dict[str, Any]:
+    """市場廣度：用股票主檔抽樣掃描，避免整個系統卡死。"""
+    rows: list[dict[str, str]] = []
+    if load_stock_master is not None:
+        try:
+            master = load_stock_master()
+            if isinstance(master, pd.DataFrame) and not master.empty:
+                code_col = "股票代號" if "股票代號" in master.columns else ("code" if "code" in master.columns else "")
+                name_col = "股票名稱" if "股票名稱" in master.columns else ("name" if "name" in master.columns else "")
+                market_col = "市場別" if "市場別" in master.columns else ("market" if "market" in master.columns else "")
+                if code_col:
+                    temp = master.copy()
+                    if market_col:
+                        temp = temp[temp[market_col].astype(str).isin(["上市", "上櫃"])]
+                    for _, r in temp.head(max_scan).iterrows():
+                        rows.append({
+                            "股票代號": _safe_str(r.get(code_col)),
+                            "股票名稱": _safe_str(r.get(name_col)) if name_col else _safe_str(r.get(code_col)),
+                            "市場別": _safe_str(r.get(market_col)) if market_col else "上市",
+                        })
+        except Exception:
+            rows = []
+
+    # 若主檔不可用，退回用自選股樣本
+    if not rows and get_normalized_watchlist is not None:
+        try:
+            data = get_normalized_watchlist()
+            if isinstance(data, dict):
+                for _, items in data.items():
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        if isinstance(item, dict):
+                            rows.append({
+                                "股票代號": _safe_str(item.get("code")),
+                                "股票名稱": _safe_str(item.get("name")) or _safe_str(item.get("code")),
+                                "市場別": _safe_str(item.get("market")) or "上市",
+                            })
+        except Exception:
+            pass
+        rows = rows[:max_scan]
+
+    sample_n = 0
+    up_n = down_n = ma20_n = ma60_n = high20_n = low20_n = 0
+    for r in rows:
+        code = _safe_str(r.get("股票代號"))
+        if not code:
+            continue
+        snap = _stock_snapshot_for_macro(code, _safe_str(r.get("股票名稱")) or code, _safe_str(r.get("市場別")) or "上市")
+        price = _safe_float(snap.get("price"))
+        if price is None:
+            continue
+        sample_n += 1
+        pct = _safe_float(snap.get("pct"), 0) or 0
+        if pct > 0:
+            up_n += 1
+        elif pct < 0:
+            down_n += 1
+        ma20 = _safe_float(snap.get("ma20"))
+        ma60 = _safe_float(snap.get("ma60"))
+        high20 = _safe_float(snap.get("high20"))
+        low20 = _safe_float(snap.get("low20"))
+        if ma20 not in [None, 0] and price >= ma20:
+            ma20_n += 1
+        if ma60 not in [None, 0] and price >= ma60:
+            ma60_n += 1
+        if high20 not in [None, 0] and price >= high20:
+            high20_n += 1
+        if low20 not in [None, 0] and price <= low20:
+            low20_n += 1
+
+    if sample_n <= 0:
+        return {
+            "市場廣度分數": 50.0,
+            "廣度樣本數": 0,
+            "上漲家數": 0,
+            "下跌家數": 0,
+            "站上MA20比例": 0.0,
+            "站上MA60比例": 0.0,
+            "創20日新高家數": 0,
+            "創20日新低家數": 0,
+            "市場廣度摘要": "市場廣度資料不足，降級為中性參考",
+        }
+
+    up_ratio = up_n / sample_n * 100
+    ma20_ratio = ma20_n / sample_n * 100
+    ma60_ratio = ma60_n / sample_n * 100
+    high_low_balance = (high20_n - low20_n) / sample_n * 100
+    score = 35 + up_ratio * 0.25 + ma20_ratio * 0.25 + ma60_ratio * 0.15 + high_low_balance * 0.25
+    score = _clip_score(score)
+
+    return {
+        "市場廣度分數": round(score, 2),
+        "廣度樣本數": sample_n,
+        "上漲家數": up_n,
+        "下跌家數": down_n,
+        "站上MA20比例": round(ma20_ratio, 2),
+        "站上MA60比例": round(ma60_ratio, 2),
+        "創20日新高家數": high20_n,
+        "創20日新低家數": low20_n,
+        "市場廣度摘要": f"樣本{sample_n}檔｜上漲{up_n} / 下跌{down_n}｜MA20上方{ma20_ratio:.1f}%｜20日新高{high20_n}檔",
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _build_heavyweight_support_score() -> dict[str, Any]:
+    rows = []
+    for item in HEAVYWEIGHT_STOCKS:
+        snap = _stock_snapshot_for_macro(item["股票代號"], item["股票名稱"], item["市場別"])
+        price = _safe_float(snap.get("price"))
+        pct = _safe_float(snap.get("pct"), 0) or 0
+        ma20 = _safe_float(snap.get("ma20"))
+        support = 0.0
+        if pct > 0:
+            support += min(12, pct * 3)
+        elif pct < 0:
+            support += max(-12, pct * 3)
+        if price is not None and ma20 not in [None, 0]:
+            support += 8 if price >= ma20 else -8
+        rows.append({**item, **snap, "權值支撐估分": support})
+
+    valid = [r for r in rows if _safe_float(r.get("price")) is not None]
+    if not valid:
+        return {"權值支撐分數": 50.0, "權值支撐摘要": "權值股資料不足", "權值股明細": rows}
+
+    avg = sum(_safe_float(r.get("權值支撐估分"), 0) or 0 for r in valid) / len(valid)
+    score = _clip_score(50 + avg * 2.2)
+    strong = [f"{r['股票名稱']}({(_safe_float(r.get('pct'),0) or 0):.1f}%)" for r in valid if (_safe_float(r.get("權值支撐估分"), 0) or 0) > 3]
+    weak = [f"{r['股票名稱']}({(_safe_float(r.get('pct'),0) or 0):.1f}%)" for r in valid if (_safe_float(r.get("權值支撐估分"), 0) or 0) < -3]
+    return {
+        "權值支撐分數": round(score, 2),
+        "權值支撐摘要": f"支撐:{'、'.join(strong[:4]) or '無明顯'}｜拖累:{'、'.join(weak[:4]) or '無明顯'}",
+        "權值股明細": rows,
+    }
+
+
+def _build_recommendation_sync_snapshot() -> dict[str, Any]:
+    rows = _load_recommendation_rows()
+    if not rows:
+        return {
+            "推薦同步分數": 50.0,
+            "推薦強勢比例": 0.0,
+            "推薦平均分數": 0.0,
+            "推薦起漲比例": 0.0,
+            "推薦同步摘要": "尚未讀到股神推薦清單，暫以中性處理",
+        }
+
+    scores = []
+    burst_scores = []
+    strong_count = 0
+    burst_count = 0
+    for r in rows:
+        total = _safe_float(r.get("推薦總分"), _safe_float(r.get("股神決策分數")))
+        burst = _safe_float(r.get("飆股起漲分數"), _safe_float(r.get("起漲前兆分數")))
+        if total is not None:
+            scores.append(total)
+            if total >= 70:
+                strong_count += 1
+        if burst is not None:
+            burst_scores.append(burst)
+            if burst >= 68:
+                burst_count += 1
+
+    n = max(len(rows), 1)
+    avg_score = sum(scores) / len(scores) if scores else 0.0
+    strong_ratio = strong_count / n * 100
+    burst_ratio = burst_count / n * 100
+    score = _clip_score(avg_score * 0.45 + strong_ratio * 0.30 + burst_ratio * 0.25)
+    return {
+        "推薦同步分數": round(score, 2),
+        "推薦強勢比例": round(strong_ratio, 2),
+        "推薦平均分數": round(avg_score, 2),
+        "推薦起漲比例": round(burst_ratio, 2),
+        "推薦同步摘要": f"推薦{len(rows)}筆｜平均分{avg_score:.1f}｜強勢{strong_ratio:.1f}%｜起漲{burst_ratio:.1f}%",
+    }
+
+
+def _volume_price_confirm_score(twii: dict[str, Any]) -> tuple[float, str]:
+    pct = _safe_float(twii.get("pct"), 0) or 0
+    vol_ratio = _safe_float(twii.get("vol_ratio20"))
+    score = 50.0
+    notes = []
+
+    if pct >= 1.0:
+        score += 14
+        notes.append("價強")
+    elif pct >= 0.3:
+        score += 7
+        notes.append("小漲")
+    elif pct <= -1.0:
+        score -= 14
+        notes.append("價弱")
+    elif pct <= -0.3:
+        score -= 7
+        notes.append("小跌")
+
+    if vol_ratio is not None:
+        if pct > 0 and vol_ratio >= 1.15:
+            score += 18
+            notes.append("價漲量增")
+        elif pct > 0 and vol_ratio < 0.85:
+            score -= 8
+            notes.append("價漲量縮")
+        elif pct < 0 and vol_ratio >= 1.15:
+            score -= 16
+            notes.append("價跌量增")
+        elif pct < 0 and vol_ratio < 0.85:
+            score += 5
+            notes.append("價跌量縮")
+        notes.append(f"量比{vol_ratio:.2f}")
+    else:
+        notes.append("量能基準不足")
+
+    return round(_clip_score(score), 2), "、".join(notes)
+
+
+def _data_integrity_score(ctx: dict[str, Any]) -> tuple[float, str]:
+    fields = [
+        ctx.get("twii_date"),
+        ctx.get("us_data_date"),
+        ctx.get("night_data_date"),
+        ctx.get("inst_used_date"),
+        ctx.get("futopt_used_date"),
+        ctx.get("margin_used_date"),
+    ]
+    hit = sum(1 for x in fields if _safe_str(x))
+    score = hit / len(fields) * 100
+    return round(score, 2), f"可用因子 {hit}/{len(fields)}"
+
+
+def _reference_grade(score: float) -> str:
+    if score >= 80:
+        return "A｜可作主要參考"
+    if score >= 65:
+        return "B｜可作輔助參考"
+    if score >= 50:
+        return "C｜僅作風險濾網"
+    return "D｜不建議作推薦依據"
+
+
+def _operation_style(score: float, total_score: float, risk_level: str) -> str:
+    if risk_level in {"極高", "高"} or score < 45:
+        return "降低持股 / 嚴控風險"
+    if score >= 80 and total_score >= 12:
+        return "積極進攻"
+    if score >= 65 and total_score >= 5:
+        return "精選強勢股"
+    if score >= 50:
+        return "低接不追高"
+    return "只看不做"
+
+
+def _reference_weight(score: float, risk_level: str) -> tuple[str, str]:
+    if risk_level in {"極高", "高"}:
+        return "建議降權至 20% 以下", "風險等級偏高，大盤僅作風險控管，不宜作進攻依據"
+    if score >= 80:
+        return "建議權重 40%~55%", "資料完整且多數因子同向，可作主要參考"
+    if score >= 65:
+        return "建議權重 25%~40%", "可作輔助參考，但仍需個股條件確認"
+    if score >= 50:
+        return "建議權重 10%~25%", "方向不夠集中，只作風險濾網"
+    return "建議權重 0%~10%", "模型參考性不足，避免用大盤推動推薦"
+
+
+def _build_macro_reference_pack(ctx: dict[str, Any], top_score: float, risk_level: str) -> dict[str, Any]:
+    breadth = _build_market_breadth_snapshot()
+    heavy = _build_heavyweight_support_score()
+    rec_sync = _build_recommendation_sync_snapshot()
+    vol_score, vol_note = _volume_price_confirm_score(ctx.get("twii", {}))
+    integrity, integrity_note = _data_integrity_score(ctx)
+
+    sector_score_raw = _safe_float(ctx.get("sector_score"), 0) or 0
+    sector_score = _clip_score(50 + sector_score_raw * 6)
+
+    reference_score = (
+        (_safe_float(breadth.get("市場廣度分數"), 50) or 50) * 0.22
+        + sector_score * 0.16
+        + vol_score * 0.14
+        + (_safe_float(heavy.get("權值支撐分數"), 50) or 50) * 0.16
+        + (_safe_float(rec_sync.get("推薦同步分數"), 50) or 50) * 0.20
+        + integrity * 0.12
+    )
+
+    # 風險降級
+    vix = _safe_float(ctx.get("vix_val"), 18) or 18
+    news = _safe_float(ctx.get("news_score"), 0) or 0
+    if risk_level in {"高", "極高"}:
+        reference_score -= 8
+    if vix >= 25:
+        reference_score -= 6
+    if news >= 5:
+        reference_score -= 6
+
+    reference_score = round(_clip_score(reference_score), 2)
+    grade = _reference_grade(reference_score)
+    weight, reason = _reference_weight(reference_score, risk_level)
+
+    return {
+        "大盤可參考分數": reference_score,
+        "大盤參考等級": grade,
+        "市場廣度分數": breadth.get("市場廣度分數"),
+        "類股輪動分數": round(sector_score, 2),
+        "量價確認分數": vol_score,
+        "權值支撐分數": heavy.get("權值支撐分數"),
+        "推薦同步分數": rec_sync.get("推薦同步分數"),
+        "推薦加權建議": weight,
+        "推薦降權原因": reason,
+        "今日適合操作風格": _operation_style(reference_score, top_score, risk_level),
+        "廣度樣本數": breadth.get("廣度樣本數"),
+        "上漲家數": breadth.get("上漲家數"),
+        "下跌家數": breadth.get("下跌家數"),
+        "站上MA20比例": breadth.get("站上MA20比例"),
+        "站上MA60比例": breadth.get("站上MA60比例"),
+        "創20日新高家數": breadth.get("創20日新高家數"),
+        "創20日新低家數": breadth.get("創20日新低家數"),
+        "推薦強勢比例": rec_sync.get("推薦強勢比例"),
+        "推薦平均分數": rec_sync.get("推薦平均分數"),
+        "推薦起漲比例": rec_sync.get("推薦起漲比例"),
+        "市場廣度摘要": breadth.get("市場廣度摘要"),
+        "量價確認摘要": vol_note,
+        "權值支撐摘要": heavy.get("權值支撐摘要"),
+        "推薦同步摘要": rec_sync.get("推薦同步摘要"),
+        "資料完整度分": integrity,
+        "資料完整度摘要": integrity_note,
+        "權值股明細": heavy.get("權值股明細", []),
+    }
+
+
 def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     twii = _price_on_or_before("^TWII", pred_date_text, 15)
     nas = _price_on_or_before("^IXIC", pred_date_text, 15)
@@ -1072,6 +1560,7 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
     high = base + max(20.0, predicted_points + day_vol * 0.45)
     low = base + min(-20.0, predicted_points - day_vol * 0.45)
     confidence = max(35.0, min(92.0, 55 + abs(total_score) * 1.3 - ctx["news_score"] * 1.2 - (ctx["vix_val"] - 18) * 0.6))
+    reference_pack = _build_macro_reference_pack(ctx, total_score, risk_level)
 
     logic_lines = [
         f"情境：{ctx['scenario']}",
@@ -1172,6 +1661,26 @@ def _predict_for_model(model_name: str, ctx: dict[str, Any], weight_map: dict[st
         "誤判主因類別": "",
         "誤判主因": "",
         "收盤檢討": action_note,
+        "大盤可參考分數": reference_pack.get("大盤可參考分數"),
+        "大盤參考等級": reference_pack.get("大盤參考等級"),
+        "市場廣度分數": reference_pack.get("市場廣度分數"),
+        "類股輪動分數": reference_pack.get("類股輪動分數"),
+        "量價確認分數": reference_pack.get("量價確認分數"),
+        "權值支撐分數": reference_pack.get("權值支撐分數"),
+        "推薦同步分數": reference_pack.get("推薦同步分數"),
+        "推薦加權建議": reference_pack.get("推薦加權建議"),
+        "推薦降權原因": reference_pack.get("推薦降權原因"),
+        "今日適合操作風格": reference_pack.get("今日適合操作風格"),
+        "廣度樣本數": reference_pack.get("廣度樣本數"),
+        "上漲家數": reference_pack.get("上漲家數"),
+        "下跌家數": reference_pack.get("下跌家數"),
+        "站上MA20比例": reference_pack.get("站上MA20比例"),
+        "站上MA60比例": reference_pack.get("站上MA60比例"),
+        "創20日新高家數": reference_pack.get("創20日新高家數"),
+        "創20日新低家數": reference_pack.get("創20日新低家數"),
+        "推薦強勢比例": reference_pack.get("推薦強勢比例"),
+        "推薦平均分數": reference_pack.get("推薦平均分數"),
+        "推薦起漲比例": reference_pack.get("推薦起漲比例"),
         "備註": "",
     }
 
@@ -1484,7 +1993,7 @@ def _format_pred_df(df: pd.DataFrame) -> pd.DataFrame:
         "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "預估區間寬度", "國際新聞風險分",
         "美股因子分", "夜盤因子分", "技術面因子分", "籌碼面因子分", "事件因子分", "結構面因子分", "風險面因子分",
         "加權漲跌%", "VIX", "美元台幣", "NASDAQ漲跌%", "SOX漲跌%", "SP500漲跌%", "台積電ADR漲跌%", "ES夜盤漲跌%", "NQ夜盤漲跌%",
-        "倉位上限%", "模型一致性分數"
+        "倉位上限%", "模型一致性分數", "大盤可參考分數", "市場廣度分數", "類股輪動分數", "量價確認分數", "權值支撐分數", "推薦同步分數", "站上MA20比例", "站上MA60比例", "推薦強勢比例", "推薦平均分數", "推薦起漲比例"
     ]:
         if c in x.columns:
             x[c] = x[c].apply(lambda v: "" if pd.isna(v) else f"{float(v):,.2f}")
@@ -1720,6 +2229,7 @@ def main():
         title="大盤走勢｜股神Pro因子強化版",
         subtitle="補強法人 / 期貨選擇權 / 融資融券 / 類股輪動 / 事件因子，並顯示每個因子的實際取樣日期與來源。",
     )
+    st.caption(f"大盤投顧參考版：{MACRO_ADVISOR_VERSION}")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -1777,6 +2287,50 @@ def main():
         {"label": "信心度", "value": f"{_safe_float(top_pick.get('股神信心度'), 0):.1f}%", "delta": _safe_str(top_pick.get("風險等級")), "delta_class": "pro-kpi-delta-flat"},
         {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
+
+
+    render_pro_section("投顧級大盤參考依據｜可否拿來輔助股神推薦")
+    ref_pack = _build_macro_reference_pack(ctx, _safe_float(top_pick.get("股神模式分數"), 0) or 0, _safe_str(top_pick.get("風險等級")))
+    render_pro_kpi_row([
+        {"label": "大盤可參考分數", "value": f"{_safe_float(ref_pack.get('大盤可參考分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("大盤參考等級")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "市場廣度", "value": f"{_safe_float(ref_pack.get('市場廣度分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("市場廣度摘要"))[:28], "delta_class": "pro-kpi-delta-flat"},
+        {"label": "量價確認", "value": f"{_safe_float(ref_pack.get('量價確認分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("量價確認摘要")), "delta_class": "pro-kpi-delta-flat"},
+        {"label": "權值支撐", "value": f"{_safe_float(ref_pack.get('權值支撐分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("權值支撐摘要"))[:28], "delta_class": "pro-kpi-delta-flat"},
+        {"label": "推薦同步", "value": f"{_safe_float(ref_pack.get('推薦同步分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("推薦同步摘要"))[:28], "delta_class": "pro-kpi-delta-flat"},
+    ])
+
+    c_ref1, c_ref2 = st.columns([1.2, 1.2])
+    with c_ref1:
+        render_pro_info_card(
+            "大盤作為推薦依據的結論",
+            [
+                ("參考等級", _safe_str(ref_pack.get("大盤參考等級")), ""),
+                ("推薦加權建議", _safe_str(ref_pack.get("推薦加權建議")), ""),
+                ("今日適合操作風格", _safe_str(ref_pack.get("今日適合操作風格")), ""),
+                ("降權原因", _safe_str(ref_pack.get("推薦降權原因")), ""),
+            ],
+            chips=["投顧參考", "推薦權重", "風控"],
+        )
+    with c_ref2:
+        render_pro_info_card(
+            "市場品質摘要",
+            [
+                ("市場廣度", _safe_str(ref_pack.get("市場廣度摘要")), ""),
+                ("量價確認", _safe_str(ref_pack.get("量價確認摘要")), ""),
+                ("權值股", _safe_str(ref_pack.get("權值支撐摘要")), ""),
+                ("推薦同步", _safe_str(ref_pack.get("推薦同步摘要")), ""),
+                ("資料完整度", f"{_safe_float(ref_pack.get('資料完整度分'), 0):.1f}｜{_safe_str(ref_pack.get('資料完整度摘要'))}", ""),
+            ],
+            chips=["廣度", "量價", "權值", "推薦"],
+        )
+
+    with st.expander("權值股支撐明細", expanded=False):
+        heavy_df = pd.DataFrame(ref_pack.get("權值股明細", []))
+        if heavy_df.empty:
+            st.info("目前權值股明細不足。")
+        else:
+            show_cols = [c for c in ["股票代號", "股票名稱", "price", "pct", "ma20", "權值支撐估分", "source"] if c in heavy_df.columns]
+            st.dataframe(heavy_df[show_cols], use_container_width=True, hide_index=True)
 
 
     render_pro_section("華爾街決策儀表板｜Regime / 風險 / 劇本")
@@ -1856,7 +2410,9 @@ def main():
         render_pro_section("本次模式比較")
         show_cols = [
             "模式名稱", "推估方向", "方向強度", "建議動作", "股神模式分數", "股神信心度",
-            "預估漲跌點", "風險等級", "總體風險分桶", "進攻防守 regime", "倉位上限%",
+            "預估漲跌點", "風險等級", "大盤參考等級", "大盤可參考分數", "今日適合操作風格",
+            "總體風險分桶", "進攻防守 regime", "倉位上限%",
+            "市場廣度分數", "類股輪動分數", "量價確認分數", "權值支撐分數", "推薦同步分數",
             "技術面因子分", "美股因子分", "夜盤因子分",
             "籌碼面因子分", "事件因子分", "國際新聞風險分",
         ]
@@ -1917,6 +2473,8 @@ def main():
         preview_cols = [
             "推估日期", "模式名稱", "推估方向", "方向強度", "是否適合進場", "是否適合續抱", "是否適合減碼", "是否適合出場",
             "建議動作", "建議倉位", "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "風險等級",
+            "大盤參考等級", "大盤可參考分數", "推薦加權建議", "今日適合操作風格",
+            "市場廣度分數", "量價確認分數", "權值支撐分數", "推薦同步分數",
             "總體風險分桶", "進攻防守 regime", "資金流向判斷", "倉位上限%", "隔日劇本", "盤中確認訊號",
             "主要風險", "加權資料日期", "美股資料日期", "夜盤資料日期", "法人資料日期", "期權資料日期", "融資券資料日期", "進場確認條件", "出場警訊"
         ]
@@ -2043,7 +2601,7 @@ def main():
                 st.metric("平均檢討分", "-" if pd.isna(summary['平均檢討分']) else f"{summary['平均檢討分']:.1f}")
 
             edit_hist = hist[[c for c in [
-                "record_id", "推估日期", "模式名稱", "推估方向", "是否適合進場", "建議動作", "建議倉位", "股神模式分數", "股神信心度",
+                "record_id", "推估日期", "模式名稱", "推估方向", "是否適合進場", "建議動作", "建議倉位", "大盤參考等級", "大盤可參考分數", "今日適合操作風格", "股神模式分數", "股神信心度",
                 "預估漲跌點", "實際方向", "實際漲跌點", "方向是否命中", "區間是否命中", "點數誤差", "建議動作是否合適",
                 "進場建議績效分", "出場建議績效分", "整體檢討分", "主要風險", "進場確認條件", "出場警訊", "收盤檢討", "備註"
             ] if c in hist.columns]].copy()
