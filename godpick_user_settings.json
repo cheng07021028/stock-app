@@ -139,12 +139,12 @@
     ]
   },
   "scan_settings": {
-    "universe_mode": "自選群組",
+    "universe_mode": "全市場",
     "group": "庫存",
     "days": 120,
-    "top_n": 20,
+    "top_n": 10,
     "manual_codes": "",
-    "scan_limit": 1000,
+    "scan_limit": "全部",
     "selected_categories": [
       "全部"
     ],
@@ -156,6 +156,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-27 13:52:49",
+  "updated_at": "2026-04-27 13:53:39",
   "version": "godpick_v5_persistent_settings"
 }
