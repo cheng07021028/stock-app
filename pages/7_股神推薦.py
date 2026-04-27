@@ -49,6 +49,7 @@ DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
 MACRO_LINK_VERSION = "macro_link_v1_20260427"
 WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
+GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -96,6 +97,21 @@ GODPICK_RECORD_COLUMNS = [
     "大盤權值支撐分數",
     "大盤推薦同步分數",
     "大盤資料日期",
+    "股神決策模式",
+    "股神進場建議",
+    "建議部位%",
+    "風險報酬比",
+    "追價風險分",
+    "停損距離%",
+    "目標報酬%",
+    "不建議買進原因",
+    "最佳操作劇本",
+    "大盤情境調權說明",
+    "大盤情境分桶",
+    "推薦分層",
+    "隔日操作建議",
+    "失效價位",
+    "轉弱條件",
     "買點分級",
     "風險說明",
     "股神推論邏輯",
@@ -1040,6 +1056,232 @@ def _build_tracking_placeholders(row: pd.Series) -> dict[str, str]:
 
 
 
+
+# =========================================================
+# 股神決策引擎 V5：大盤情境調權 / 分層 / 風控 / 劇本
+# =========================================================
+def _macro_bucket_from_row(row: pd.Series) -> str:
+    grade = _safe_str(row.get("大盤參考等級"))
+    score = _safe_float(row.get("大盤可參考分數"), 50) or 50
+    if grade.startswith("A") or score >= 80:
+        return "A｜進攻環境"
+    if grade.startswith("B") or score >= 65:
+        return "B｜精選偏多"
+    if grade.startswith("C") or score >= 50:
+        return "C｜震盪控風險"
+    return "D｜防守觀望"
+
+
+def _calc_chase_risk_score(row: pd.Series) -> float:
+    price = _safe_float(row.get("最新價"), _safe_float(row.get("推薦價格")))
+    pullback = _safe_float(row.get("推薦買點_拉回"), row.get("推薦價格"))
+    breakout = _safe_float(row.get("推薦買點_突破"), row.get("推薦價格"))
+    pre = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    overheat = _safe_str(row.get("過熱風險"))
+    risk = 35.0
+    if price not in [None, 0] and pullback not in [None, 0]:
+        dist = (price - pullback) / pullback * 100
+        risk += max(0, min(28, dist * 2.3))
+    if price not in [None, 0] and breakout not in [None, 0] and price > breakout:
+        risk += 8
+    if pre >= 90:
+        risk += 15
+    elif pre >= 78:
+        risk += 8
+    if "高" in overheat or "過熱" in overheat:
+        risk += 15
+    return round(_score_clip(risk, 0, 100), 2)
+
+
+def _calc_trade_risk_reward(row: pd.Series) -> tuple:
+    price = _safe_float(row.get("最新價"), _safe_float(row.get("推薦價格")))
+    stop = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+    if price in [None, 0] or stop in [None, 0] or target1 in [None, 0]:
+        return None, None, None
+    stop_dist = max(0, (price - stop) / price * 100)
+    target_ret = max(0, (target1 - price) / price * 100)
+    rr = target_ret / stop_dist if stop_dist > 0 else None
+    return (round(rr, 2) if rr is not None else None, round(stop_dist, 2), round(target_ret, 2))
+
+
+def _derive_position_size(row: pd.Series) -> float:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    buy_grade = _safe_str(row.get("買點分級"))
+    pos = 0
+    if score >= 90:
+        pos = 20
+    elif score >= 85:
+        pos = 15
+    elif score >= 78:
+        pos = 10
+    elif score >= 70:
+        pos = 5
+    if rr >= 2:
+        pos += 5
+    elif rr > 0 and rr < 1:
+        pos -= 5
+    if chase >= 75:
+        pos -= 8
+    elif chase >= 65:
+        pos -= 4
+    if macro_bucket.startswith("A"):
+        pos += 5
+    elif macro_bucket.startswith("C"):
+        pos -= 5
+    elif macro_bucket.startswith("D"):
+        pos -= 10
+    if "C" in buy_grade or "D" in buy_grade:
+        pos -= 5
+    return round(_score_clip(pos, 0, 30), 1)
+
+
+def _derive_v5_decision_mode(row: pd.Series) -> str:
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    pre = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    tech = _safe_float(row.get("技術結構分數"), 0) or 0
+    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    if macro_bucket.startswith("D"):
+        return "逆勢強股防守模式" if pre >= 78 and tech >= 65 else "防守觀望模式"
+    if macro_bucket.startswith("C"):
+        return "低接確認模式" if chase <= 58 and tech >= 70 else "震盪精選模式"
+    if pre >= 78 and heat >= 65:
+        return "飆股起漲模式"
+    if tech >= 72:
+        return "波段順勢模式"
+    return "綜合精選模式"
+
+
+def _derive_entry_advice(row: pd.Series) -> str:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    buy_grade = _safe_str(row.get("買點分級"))
+    if macro_bucket.startswith("D"):
+        return "只允許小部位試單" if score >= 88 and chase < 60 else "不建議進場"
+    if chase >= 78:
+        return "高分但不急追"
+    if score >= 88 and rr >= 1.5 and ("A" in buy_grade or "B" in buy_grade):
+        return "可優先觀察進場"
+    if score >= 80:
+        return "等突破或回測確認"
+    if score >= 70:
+        return "列入觀察名單"
+    return "暫不建議進場"
+
+
+def _derive_recommend_layer(row: pd.Series) -> str:
+    advice = _safe_str(row.get("股神進場建議"))
+    mode = _safe_str(row.get("股神決策模式"))
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    if advice == "可優先觀察進場":
+        return "今日可進攻"
+    if "逆勢" in mode:
+        return "逆勢強股"
+    if chase >= 75 and score >= 85:
+        return "高分但過熱"
+    if macro_bucket.startswith("C") and score >= 80:
+        return "等拉回低接"
+    if score >= 80:
+        return "等突破確認"
+    if score >= 70:
+        return "觀察不追"
+    return "淘汰但接近條件"
+
+
+def _derive_v5_no_buy_reason(row: pd.Series) -> str:
+    reasons = []
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    stop_dist = _safe_float(row.get("停損距離%"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    buy_grade = _safe_str(row.get("買點分級"))
+    if macro_bucket.startswith("D"):
+        reasons.append("大盤參考等級偏低")
+    if chase >= 75:
+        reasons.append("追價風險過高")
+    if stop_dist >= 8:
+        reasons.append("停損距離過大")
+    if rr and rr < 1:
+        reasons.append("風險報酬比不足")
+    if "C" in buy_grade or "D" in buy_grade:
+        reasons.append("買點條件尚未完整")
+    return "、".join(reasons) if reasons else "未觸發主要否決條件"
+
+
+def _derive_best_trade_script_v5(row: pd.Series) -> str:
+    pullback = _safe_float(row.get("推薦買點_拉回"), row.get("推薦價格"))
+    breakout = _safe_float(row.get("推薦買點_突破"), row.get("推薦價格"))
+    stop = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+    advice = _safe_str(row.get("股神進場建議"))
+    parts = [advice]
+    if pullback:
+        parts.append(f"拉回觀察 {pullback:.2f}")
+    if breakout:
+        parts.append(f"突破確認 {breakout:.2f}")
+    if stop:
+        parts.append(f"失效停損 {stop:.2f}")
+    if target1:
+        parts.append(f"第一目標 {target1:.2f}")
+    return "｜".join(parts)
+
+
+def _derive_next_day_action(row: pd.Series) -> str:
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    pre = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    if macro_bucket.startswith("D"):
+        return "開高不追，僅低量試單或觀望"
+    if chase >= 75:
+        return "開高不追，等回測支撐"
+    if pre >= 80:
+        return "若量價續強可追蹤突破確認"
+    return "等量價確認後再動作"
+
+
+def _derive_weak_condition_v5(row: pd.Series) -> str:
+    stop = _safe_float(row.get("停損價"))
+    parts = []
+    if stop:
+        parts.append(f"跌破停損 {stop:.2f}")
+    parts.append("跌破MA20且量增")
+    parts.append("推薦分層轉弱")
+    return "、".join(parts)
+
+
+def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["大盤情境分桶"] = out.apply(_macro_bucket_from_row, axis=1)
+    rr_data = out.apply(_calc_trade_risk_reward, axis=1)
+    out["風險報酬比"] = [x[0] for x in rr_data]
+    out["停損距離%"] = [x[1] for x in rr_data]
+    out["目標報酬%"] = [x[2] for x in rr_data]
+    out["追價風險分"] = out.apply(_calc_chase_risk_score, axis=1)
+    out["股神決策模式"] = out.apply(_derive_v5_decision_mode, axis=1)
+    out["股神進場建議"] = out.apply(_derive_entry_advice, axis=1)
+    out["建議部位%"] = out.apply(_derive_position_size, axis=1)
+    out["推薦分層"] = out.apply(_derive_recommend_layer, axis=1)
+    out["不建議買進原因"] = out.apply(_derive_v5_no_buy_reason, axis=1)
+    out["最佳操作劇本"] = out.apply(_derive_best_trade_script_v5, axis=1)
+    out["隔日操作建議"] = out.apply(_derive_next_day_action, axis=1)
+    out["失效價位"] = out["停損價"] if "停損價" in out.columns else ""
+    out["轉弱條件"] = out.apply(_derive_weak_condition_v5, axis=1)
+    out["大盤情境調權說明"] = out.apply(
+        lambda r: f"{_safe_str(r.get('大盤情境分桶'))}｜大盤加權{_safe_float(r.get('大盤加權分'), 0):+.2f}｜{_safe_str(r.get('大盤風險濾網'))}",
+        axis=1,
+    )
+    return out
+
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     """補齊進階欄位，不破壞舊欄位與既有紀錄格式。"""
     if df is None or df.empty:
@@ -1081,6 +1323,7 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["3日追蹤預留", "5日追蹤預留", "10日追蹤預留", "20日追蹤預留"]:
         out[c] = tracking_df[c] if c in tracking_df.columns else ""
 
+    out = _apply_god_decision_v5_columns(out)
     return out
 
 
@@ -4422,7 +4665,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
-        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "交易可行分數",
+        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
@@ -5044,6 +5287,7 @@ def main():
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
+    st.caption(f"股神決策引擎：{GOD_DECISION_ENGINE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
 
     macro_ref_for_ui = _load_latest_macro_reference()
@@ -5888,7 +6132,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
