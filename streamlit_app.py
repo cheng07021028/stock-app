@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+HOME_V5_LINK_VERSION = "home_v5_link_v1_20260427"
+
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -221,7 +223,8 @@ def _load_godpick_records_df() -> pd.DataFrame:
     """
     cols = [
         "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分",
-        "買點分級", "推薦分桶", "信心等級", "型態名稱", "爆發等級",
+        "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分",
+        "大盤參考等級", "大盤加權分", "買點分級", "推薦分桶", "信心等級", "型態名稱", "爆發等級",
         "風險說明", "股神推論邏輯", "推薦日期", "推薦時間", "更新時間", "建立時間", "目前狀態"
     ]
 
@@ -762,6 +765,7 @@ def _render_home_page():
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    st.caption(f"首頁股神決策V5串聯版：{HOME_V5_LINK_VERSION}")
     inject_pro_theme()
     _init_state()
     _render_home_page()
