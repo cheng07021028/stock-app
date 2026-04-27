@@ -153,9 +153,9 @@
     "min_prelaunch_score": 45.0,
     "min_trade_score": 45.0,
     "recommend_mode": "綜合模式",
-    "risk_strictness": "標準",
+    "risk_strictness": "嚴格",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-27 14:49:24",
+  "updated_at": "2026-04-27 14:50:07",
   "version": "godpick_v5_persistent_settings"
 }
