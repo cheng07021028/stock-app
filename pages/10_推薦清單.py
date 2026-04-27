@@ -42,6 +42,7 @@ PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
 GOD_DECISION_V5_LINK_VERSION = "recommend_list_v5_link_v1_20260427"
 DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
+V5_BACKFILL_FIX_VERSION = "recommend_list_v5_backfill_fix_v1_20260427"
 
 GODPICK_RECOMMEND_LIST_FILE = "godpick_recommend_list.json"
 
@@ -279,6 +280,149 @@ def _derive_list_logic(row: pd.Series) -> str:
 
 
 
+
+
+# =========================================================
+# V5 舊資料補值：避免推薦清單顯示 None
+# =========================================================
+def _derive_v5_from_legacy_row(row: pd.Series) -> dict[str, Any]:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    burst = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    tech = _safe_float(row.get("技術結構分數"), 0) or 0
+    buy_grade = _safe_str(row.get("買點分級"))
+    macro_bucket = _safe_str(row.get("大盤情境分桶")) or "舊資料未串聯大盤"
+    price = _safe_float(row.get("最新價"), row.get("推薦價格"))
+    stop = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+
+    if burst >= 78:
+        decision_mode = "飆股起漲模式"
+    elif tech >= 72:
+        decision_mode = "波段順勢模式"
+    elif "C" in buy_grade:
+        decision_mode = "觀察等待模式"
+    else:
+        decision_mode = "綜合精選模式"
+
+    stop_dist = None
+    target_ret = None
+    rr = None
+    if price not in [None, 0] and stop not in [None, 0]:
+        stop_dist = max(0, (price - stop) / price * 100)
+    if price not in [None, 0] and target1 not in [None, 0]:
+        target_ret = max(0, (target1 - price) / price * 100)
+    if stop_dist not in [None, 0] and target_ret is not None:
+        rr = target_ret / stop_dist
+
+    chase = 35.0
+    if burst >= 90:
+        chase += 25
+    elif burst >= 78:
+        chase += 15
+    elif burst >= 68:
+        chase += 8
+    if "C" in buy_grade:
+        chase += 8
+    chase = max(0, min(100, chase))
+
+    if score >= 88 and chase < 75 and (rr is None or rr >= 1.2):
+        advice = "可優先觀察進場"
+    elif score >= 80:
+        advice = "等突破或回測確認"
+    elif score >= 70:
+        advice = "列入觀察名單"
+    else:
+        advice = "暫不建議進場"
+
+    if advice == "可優先觀察進場":
+        layer = "今日可進攻"
+    elif chase >= 75 and score >= 85:
+        layer = "高分但過熱"
+    elif score >= 80:
+        layer = "等突破確認"
+    elif score >= 70:
+        layer = "觀察不追"
+    else:
+        layer = "淘汰但接近條件"
+
+    pos = 0
+    if score >= 90:
+        pos = 20
+    elif score >= 85:
+        pos = 15
+    elif score >= 78:
+        pos = 10
+    elif score >= 70:
+        pos = 5
+    if chase >= 75:
+        pos = max(0, pos - 8)
+    if rr is not None and rr < 1:
+        pos = max(0, pos - 5)
+
+    no_buy = []
+    if chase >= 75:
+        no_buy.append("追價風險偏高")
+    if stop_dist is not None and stop_dist >= 8:
+        no_buy.append("停損距離偏大")
+    if rr is not None and rr < 1:
+        no_buy.append("風險報酬比不足")
+    if "C" in buy_grade:
+        no_buy.append("買點仍需確認")
+
+    script_parts = [advice]
+    if price:
+        script_parts.append(f"現價 {price:.2f}")
+    if stop:
+        script_parts.append(f"失效停損 {stop:.2f}")
+    if target1:
+        script_parts.append(f"第一目標 {target1:.2f}")
+
+    return {
+        "股神決策模式": decision_mode,
+        "股神進場建議": advice,
+        "推薦分層": layer,
+        "建議部位%": round(pos, 1),
+        "風險報酬比": round(rr, 2) if rr is not None else "",
+        "追價風險分": round(chase, 2),
+        "停損距離%": round(stop_dist, 2) if stop_dist is not None else "",
+        "目標報酬%": round(target_ret, 2) if target_ret is not None else "",
+        "不建議買進原因": "、".join(no_buy) if no_buy else "未觸發主要否決條件",
+        "最佳操作劇本": "｜".join(script_parts),
+        "隔日操作建議": "開高不追，等量價確認" if chase >= 75 else "等量價確認後再動作",
+        "失效價位": stop if stop is not None else "",
+        "轉弱條件": f"跌破停損 {stop:.2f}、跌破MA20且量增" if stop else "跌破MA20且量增",
+        "大盤情境調權說明": "舊資料未串聯大盤；請由7頁重新推薦可取得完整大盤調權" if "舊資料" in macro_bucket else macro_bucket,
+        "大盤情境分桶": macro_bucket,
+    }
+
+
+def _backfill_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    x = df.copy()
+    x = x.loc[:, ~x.columns.duplicated()].copy()
+    v5_cols = [
+        "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分",
+        "停損距離%", "目標報酬%", "不建議買進原因", "最佳操作劇本", "隔日操作建議",
+        "失效價位", "轉弱條件", "大盤情境調權說明", "大盤情境分桶"
+    ]
+    for c in v5_cols:
+        if c not in x.columns:
+            x[c] = ""
+    for idx, row in x.iterrows():
+        need = any(_safe_str(row.get(c)) in ["", "None", "nan", "NaN"] for c in ["股神決策模式", "股神進場建議", "推薦分層"])
+        if not need:
+            continue
+        fill = _derive_v5_from_legacy_row(row)
+        for c, v in fill.items():
+            if c in x.columns and _safe_str(x.at[idx, c]) in ["", "None", "nan", "NaN"]:
+                x.at[idx, c] = v
+    for c in x.columns:
+        if x[c].dtype == object:
+            x[c] = x[c].replace(["None", "nan", "NaN"], "")
+    return x
+
+
 def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -328,6 +472,8 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         x[c] = x[c].fillna("").astype(str)
     x["股票代號"] = x["股票代號"].map(_normalize_code)
     x["股票名稱"] = x["股票名稱"].fillna("").astype(str)
+    x = _backfill_v5_columns(x)
+    x = x.loc[:, ~x.columns.duplicated()].copy()
     return x[GODPICK_RECORD_COLUMNS].copy()
 
 
@@ -545,6 +691,7 @@ def _filter_df(df: pd.DataFrame, start_date: date, end_date: date, mode: str, st
 def _format_show_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     show = show.loc[:, ~show.columns.duplicated()].copy()
+    show = _backfill_v5_columns(show)
     show = show.drop(columns=[c for c in ["record_id"] if c in show.columns])
     num1_cols = ["推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "實際報酬%", "損益幅%"]
     price_cols = ["推薦價格", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額"]
@@ -554,6 +701,7 @@ def _format_show_df(df: pd.DataFrame) -> pd.DataFrame:
     for c in price_cols:
         if c in show.columns:
             show[c] = show[c].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
+    show = show.replace(["None", "nan", "NaN"], "")
     return show
 
 
