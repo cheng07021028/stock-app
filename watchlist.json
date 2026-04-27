@@ -16,11 +16,6 @@
       "market": "上市"
     },
     {
-      "code": "2501",
-      "name": "國建",
-      "market": "上市"
-    },
-    {
       "code": "2908",
       "name": "特力",
       "market": "上市"
@@ -114,32 +109,27 @@
     {
       "code": "2501",
       "name": "國建",
-      "market": "上市",
-      "category": "建材營造業"
+      "market": "上市"
     },
     {
       "code": "2908",
       "name": "特力",
-      "market": "上市",
-      "category": "貿易百貨業"
+      "market": "上市"
     },
     {
       "code": "3652",
       "name": "精聯",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "4967",
       "name": "十銓",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     },
     {
       "code": "8103",
       "name": "瀚荃",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     }
   ]
 }
