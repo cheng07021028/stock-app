@@ -50,6 +50,7 @@ PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
 MACRO_LINK_VERSION = "macro_link_v1_20260427"
 WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
 GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
+SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -515,8 +516,9 @@ def _load_persistent_settings() -> dict[str, Any]:
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "applied_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "column_orders": {},
+        "scan_settings": {},
         "updated_at": "",
-        "version": "godpick_v4_weight_persistent",
+        "version": "godpick_v5_persistent_settings",
     }
 
     github_payload, _ = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
@@ -540,8 +542,9 @@ def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, li
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "applied_weights": _normalize_weight_map(applied_weights),
         "column_orders": old_payload.get("column_orders", {}) if isinstance(old_payload, dict) else {},
+        "scan_settings": old_payload.get("scan_settings", {}) if isinstance(old_payload, dict) else {},
         "updated_at": _now_text(),
-        "version": "godpick_v4_weight_persistent",
+        "version": "godpick_v5_persistent_settings",
     }
     local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
@@ -564,7 +567,7 @@ def _save_persistent_column_order(name: str, order: list[str]) -> tuple[bool, li
     payload["column_orders"] = orders
     payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
     payload["updated_at"] = _now_text()
-    payload["version"] = "godpick_v4_weight_persistent"
+    payload["version"] = "godpick_v5_persistent_settings"
     local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
     return (local_ok or github_ok), [local_msg, github_msg]
@@ -5086,6 +5089,157 @@ def _reset_ui_pref(name: str, default):
     st.session_state[pref_key] = copy.deepcopy(default)
     st.session_state[ui_key] = copy.deepcopy(default)
 
+
+def _default_recommend_scan_settings(watchlist_map=None) -> dict[str, Any]:
+    group_default = ""
+    try:
+        if isinstance(watchlist_map, dict) and watchlist_map:
+            group_default = list(watchlist_map.keys())[0]
+    except Exception:
+        group_default = ""
+    return {
+        "universe_mode": "自選群組",
+        "group": group_default,
+        "days": 120,
+        "top_n": 20,
+        "manual_codes": "",
+        "scan_limit": 1000,
+        "selected_categories": ["全部"],
+        "min_total_score": 55.0,
+        "min_signal_score": -2.0,
+        "min_prelaunch_score": 45.0,
+        "min_trade_score": 45.0,
+        "recommend_mode": "飆股模式",
+        "risk_strictness": "標準",
+        "pick_strategy": "結合版",
+    }
+
+
+def _recommend_setting_names() -> list[str]:
+    return [
+        "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
+        "selected_categories", "min_total_score", "min_signal_score",
+        "min_prelaunch_score", "min_trade_score",
+        "recommend_mode", "risk_strictness", "pick_strategy",
+    ]
+
+
+def _normalize_recommend_scan_settings(raw: Any, watchlist_map=None, category_options=None) -> dict[str, Any]:
+    base = _default_recommend_scan_settings(watchlist_map)
+    data = raw if isinstance(raw, dict) else {}
+
+    for k in base.keys():
+        if k in data:
+            base[k] = copy.deepcopy(data[k])
+
+    universe_options = ["自選群組", "手動輸入", "全市場", "上市", "上櫃", "興櫃"]
+    if base["universe_mode"] not in universe_options:
+        base["universe_mode"] = "自選群組"
+
+    group_options = list(watchlist_map.keys()) if isinstance(watchlist_map, dict) and watchlist_map else [""]
+    if base["group"] not in group_options:
+        base["group"] = group_options[0] if group_options else ""
+
+    for key, options, default in [
+        ("days", [60, 90, 120, 180, 240], 120),
+        ("top_n", [10, 20, 30, 50], 20),
+        ("scan_limit", [100, 200, 300, 500, 1000, 1500, 2000, "全部"], 1000),
+    ]:
+        if base[key] not in options:
+            try:
+                iv = int(base[key])
+                base[key] = iv if iv in options else default
+            except Exception:
+                base[key] = default
+
+    mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"]
+    if base["recommend_mode"] not in mode_options:
+        base["recommend_mode"] = "飆股模式"
+
+    strict_options = ["寬鬆", "標準", "嚴格"]
+    if base["risk_strictness"] not in strict_options:
+        base["risk_strictness"] = "標準"
+
+    pick_options = ["精準版", "結合版"]
+    if base["pick_strategy"] not in pick_options:
+        base["pick_strategy"] = "結合版"
+
+    category_options = category_options or ["全部"]
+    cats = base.get("selected_categories", ["全部"])
+    if not isinstance(cats, list):
+        cats = ["全部"]
+    cats = [x for x in cats if x in category_options] or ["全部"]
+    base["selected_categories"] = cats
+
+    for k in ["min_total_score", "min_signal_score", "min_prelaunch_score", "min_trade_score"]:
+        try:
+            base[k] = float(base[k])
+        except Exception:
+            base[k] = float(_default_recommend_scan_settings(watchlist_map)[k])
+
+    return base
+
+
+def _load_persistent_recommend_scan_settings(watchlist_map=None, category_options=None) -> dict[str, Any]:
+    payload = _load_persistent_settings()
+    raw = payload.get("scan_settings", {}) if isinstance(payload, dict) else {}
+    return _normalize_recommend_scan_settings(raw, watchlist_map, category_options)
+
+
+def _save_persistent_recommend_scan_settings(settings: dict[str, Any]) -> tuple[bool, list[str]]:
+    payload = _load_persistent_settings()
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["scan_settings"] = copy.deepcopy(settings)
+    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
+    payload["original_default_weights"] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
+    payload["column_orders"] = payload.get("column_orders", {}) if isinstance(payload.get("column_orders", {}), dict) else {}
+    payload["updated_at"] = _now_text()
+    payload["version"] = "godpick_v5_persistent_settings"
+    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
+    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
+    return (local_ok or github_ok), [local_msg, github_msg]
+
+
+def _apply_recommend_scan_settings_to_state(settings: dict[str, Any]):
+    settings = settings or {}
+    for name in _recommend_setting_names():
+        val = copy.deepcopy(settings.get(name, _default_recommend_scan_settings().get(name)))
+        st.session_state[_k(name)] = val
+        st.session_state[_ui_pref_key(name)] = val
+
+
+def _current_form_settings_from_values(
+    form_universe_mode, form_group, form_days, form_top_n, form_manual_codes,
+    form_scan_limit, form_selected_categories, form_min_total_score,
+    form_min_signal_score, form_min_prelaunch_score, form_min_trade_score,
+    form_recommend_mode, form_risk_strictness, form_pick_strategy,
+) -> dict[str, Any]:
+    return {
+        "universe_mode": form_universe_mode,
+        "group": form_group,
+        "days": form_days,
+        "top_n": form_top_n,
+        "manual_codes": form_manual_codes,
+        "scan_limit": form_scan_limit,
+        "selected_categories": form_selected_categories if form_selected_categories else ["全部"],
+        "min_total_score": float(form_min_total_score),
+        "min_signal_score": float(form_min_signal_score),
+        "min_prelaunch_score": float(form_min_prelaunch_score),
+        "min_trade_score": float(form_min_trade_score),
+        "recommend_mode": form_recommend_mode,
+        "risk_strictness": form_risk_strictness,
+        "pick_strategy": form_pick_strategy,
+    }
+
+
+def _stage_recommend_scan_settings_reset(settings: dict[str, Any], msg: str = ""):
+    st.session_state[_k("scan_settings_reset_pending")] = True
+    st.session_state[_k("scan_settings_reset_payload")] = copy.deepcopy(settings)
+    if msg:
+        st.session_state[_k("scan_settings_msg")] = msg
+
+
 def _normalize_column_order(saved_order, available_cols: list[str], default_cols: list[str]) -> list[str]:
     saved = [str(x) for x in (saved_order or []) if str(x) in available_cols]
     defaults = [str(x) for x in default_cols if str(x) in available_cols]
@@ -5288,6 +5442,7 @@ def main():
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
     st.caption(f"股神決策引擎：{GOD_DECISION_ENGINE_VERSION}")
+    st.caption(f"推薦設定永久記錄版：{SCAN_SETTINGS_PERSIST_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
 
     macro_ref_for_ui = _load_latest_macro_reference()
@@ -5338,8 +5493,21 @@ def main():
     saved_categories = st.session_state.get(_k("selected_categories"), ["全部"])
     saved_categories = [x for x in saved_categories if x in category_options] or ["全部"]
 
+    # 推薦設定永久記錄：第一次進頁面先載入；按恢復原始/套用後才改變。
+    if st.session_state.pop(_k("scan_settings_reset_pending"), False):
+        _payload = st.session_state.pop(_k("scan_settings_reset_payload"), _default_recommend_scan_settings(watchlist_map))
+        _payload = _normalize_recommend_scan_settings(_payload, watchlist_map, category_options)
+        _apply_recommend_scan_settings_to_state(_payload)
+
+    if not st.session_state.get(_k("scan_settings_loaded_once"), False):
+        _persistent_scan_settings = _load_persistent_recommend_scan_settings(watchlist_map, category_options)
+        _apply_recommend_scan_settings_to_state(_persistent_scan_settings)
+        st.session_state[_k("scan_settings_loaded_once")] = True
+
     render_pro_section("掃描設定")
-    st.caption("本頁條件會自動記住；切換頁面回來不需要重新設定。推薦結果也會保留，除非你手動清空條件。")
+    st.caption("本頁條件會固定保留；只有按「套用設定」或「恢復原始設定」才會永久變更。推薦結果也會保留，除非你重新推薦。")
+    if st.session_state.get(_k("scan_settings_msg")):
+        st.success(st.session_state.pop(_k("scan_settings_msg")))
 
     applied_weights = _render_score_weight_panel()
     global GODPICK_ACTIVE_SCORE_WEIGHTS
@@ -5453,12 +5621,16 @@ def main():
         with f4:
             form_min_trade_score = st.number_input("交易可行分數下限", key=_ui_pref_key("min_trade_score"), step=1.0)
 
-        btn1, btn2, btn3 = st.columns([2, 2, 2])
+        btn1, btn2, btn3, btn4, btn5 = st.columns([2, 2, 2, 2, 2])
         with btn1:
             submit_recommend = st.form_submit_button("開始推薦", use_container_width=True, type="primary")
         with btn2:
             submit_refresh = st.form_submit_button("重新推薦", use_container_width=True)
         with btn3:
+            submit_apply_settings = st.form_submit_button("套用設定", use_container_width=True)
+        with btn4:
+            submit_restore_default = st.form_submit_button("恢復原始設定", use_container_width=True)
+        with btn5:
             submit_clear = st.form_submit_button("清空條件", use_container_width=True)
 
     ccache1, ccache2 = st.columns([1, 1])
@@ -5486,37 +5658,35 @@ def main():
             pass
         st.success("推薦快取已清除")
 
+    current_form_settings = _current_form_settings_from_values(
+        form_universe_mode, form_group, form_days, form_top_n, form_manual_codes,
+        form_scan_limit, form_selected_categories, form_min_total_score,
+        form_min_signal_score, form_min_prelaunch_score, form_min_trade_score,
+        form_recommend_mode, form_risk_strictness, form_pick_strategy,
+    )
+
+    if submit_apply_settings:
+        normalized_settings = _normalize_recommend_scan_settings(current_form_settings, watchlist_map, category_options)
+        _apply_recommend_scan_settings_to_state(normalized_settings)
+        ok, msgs = _save_persistent_recommend_scan_settings(normalized_settings)
+        st.session_state[_k("scan_settings_msg")] = "推薦設定已套用並永久記錄。" if ok else "推薦設定已套用，但永久記錄失敗。"
+        st.session_state[_k("scan_settings_save_msgs")] = msgs
+        st.rerun()
+
+    if submit_restore_default:
+        default_settings = _normalize_recommend_scan_settings(_default_recommend_scan_settings(watchlist_map), watchlist_map, category_options)
+        ok, msgs = _save_persistent_recommend_scan_settings(default_settings)
+        _stage_recommend_scan_settings_reset(default_settings, "已恢復原始推薦設定並永久記錄。" if ok else "已恢復原始推薦設定，但永久記錄失敗。")
+        st.session_state[_k("scan_settings_save_msgs")] = msgs
+        st.rerun()
+
     if submit_clear:
-        _reset_ui_pref("universe_mode", "自選群組")
-        _reset_ui_pref("group", list(watchlist_map.keys())[0] if watchlist_map else "")
-        _reset_ui_pref("days", 120)
-        _reset_ui_pref("top_n", 20)
-        _reset_ui_pref("manual_codes", "")
-        _reset_ui_pref("scan_limit", 1000)
-        _reset_ui_pref("selected_categories", ["全部"])
-        _reset_ui_pref("min_total_score", 55.0)
-        _reset_ui_pref("min_signal_score", -2.0)
-        _reset_ui_pref("min_prelaunch_score", 45.0)
-        _reset_ui_pref("min_trade_score", 45.0)
-        _reset_ui_pref("recommend_mode", "飆股模式")
-        _reset_ui_pref("risk_strictness", "標準")
-        _reset_ui_pref("pick_strategy", "結合版")
+        default_settings = _normalize_recommend_scan_settings(_default_recommend_scan_settings(watchlist_map), watchlist_map, category_options)
+        ok, msgs = _save_persistent_recommend_scan_settings(default_settings)
+        _stage_recommend_scan_settings_reset(default_settings, "已清空條件、恢復原始推薦設定並永久記錄。" if ok else "已清空條件、恢復原始推薦設定，但永久記錄失敗。")
+        st.session_state[_k("scan_settings_save_msgs")] = msgs
         st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
         st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        st.session_state[_k("universe_mode")] = "自選群組"
-        st.session_state[_k("group")] = list(watchlist_map.keys())[0] if watchlist_map else ""
-        st.session_state[_k("days")] = 120
-        st.session_state[_k("top_n")] = 20
-        st.session_state[_k("manual_codes")] = ""
-        st.session_state[_k("scan_limit")] = 1000
-        st.session_state[_k("selected_categories")] = ["全部"]
-        st.session_state[_k("min_total_score")] = 55.0
-        st.session_state[_k("min_signal_score")] = -2.0
-        st.session_state[_k("min_prelaunch_score")] = 45.0
-        st.session_state[_k("min_trade_score")] = 45.0
-        st.session_state[_k("recommend_mode")] = "飆股模式"
-        st.session_state[_k("risk_strictness")] = "標準"
-        st.session_state[_k("pick_strategy")] = "結合版"
         st.session_state[_k("submitted_once")] = False
         st.session_state[_k("focus_code")] = ""
         st.session_state[_k("rec_df_store")] = pd.DataFrame()
@@ -5528,6 +5698,11 @@ def main():
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
         st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
         st.rerun()
+
+    if st.session_state.get(_k("scan_settings_save_msgs")):
+        with st.expander("推薦設定保存明細", expanded=False):
+            for msg in st.session_state.pop(_k("scan_settings_save_msgs"), []):
+                st.write(f"- {msg}")
 
     if submit_recommend or submit_refresh:
         for pref_name in [
