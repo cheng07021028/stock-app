@@ -16,14 +16,44 @@
       "market": "上市"
     },
     {
+      "code": "2501",
+      "name": "國建",
+      "market": "上市",
+      "category": "建材營造業"
+    },
+    {
+      "code": "2908",
+      "name": "特力",
+      "market": "上市",
+      "category": "貿易百貨業"
+    },
+    {
       "code": "3548",
       "name": "兆利科技工業股份有限公司",
       "market": "上櫃"
     },
     {
+      "code": "3652",
+      "name": "精聯",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "4967",
+      "name": "十銓",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
       "code": "6271",
       "name": "同欣電",
       "market": "上市"
+    },
+    {
+      "code": "8103",
+      "name": "瀚荃",
+      "market": "上市",
+      "category": "電子零組件業"
     }
   ],
   "0422": [
@@ -89,20 +119,17 @@
     {
       "code": "3652",
       "name": "精聯",
-      "market": "上市",
-      "category": "其他_官方未知"
+      "market": "上市"
     },
     {
       "code": "4927",
       "name": "泰鼎-KY",
-      "market": "上市",
-      "category": "其他_官方未知"
+      "market": "上市"
     },
     {
       "code": "8103",
       "name": "瀚荃",
-      "market": "上市",
-      "category": "其他_官方未知"
+      "market": "上市"
     }
   ]
 }
