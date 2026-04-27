@@ -52,6 +52,7 @@ WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
 GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
+SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 PAGE_TITLE = "股神推薦 V4"
 PFX = "godpick_"
 
@@ -5206,19 +5207,16 @@ def _apply_recommend_scan_settings_to_state(settings: dict[str, Any], sync_widge
     """
     套用推薦設定到 session_state。
 
-    重要：
-    Streamlit 的 selectbox / number_input / multiselect / text_area widget key
-    一旦在本次 rerun 建立後，就不能再直接改 st.session_state[widget_key]。
-    所以：
-    - 頁面最前面載入設定時：sync_widgets=True
-    - 按「開始推薦 / 重新推薦 / 套用設定」後：widget 已建立，必須 sync_widgets=False
+    sync_widgets=True 只能在 widget 建立前使用；此時要強制把畫面 widget key
+    同步成永久設定，避免換頁/重開後又吃到舊的 session 預設值。
+    sync_widgets=False 用於按鈕提交後，避免 StreamlitAPIException。
     """
     settings = settings or {}
     for name in _recommend_setting_names():
         val = copy.deepcopy(settings.get(name, _default_recommend_scan_settings().get(name)))
         st.session_state[_k(name)] = val
         ui_key = _ui_pref_key(name)
-        if sync_widgets and ui_key not in st.session_state:
+        if sync_widgets:
             st.session_state[ui_key] = val
 
 
@@ -5457,6 +5455,7 @@ def main():
     st.caption(f"股神決策引擎：{GOD_DECISION_ENGINE_VERSION}")
     st.caption(f"推薦設定永久記錄版：{SCAN_SETTINGS_PERSIST_VERSION}")
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
+    st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
 
     macro_ref_for_ui = _load_latest_macro_reference()
@@ -5683,7 +5682,10 @@ def main():
         normalized_settings = _normalize_recommend_scan_settings(current_form_settings, watchlist_map, category_options)
         _apply_recommend_scan_settings_to_state(normalized_settings, sync_widgets=False)
         ok, msgs = _save_persistent_recommend_scan_settings(normalized_settings)
-        st.session_state[_k("scan_settings_msg")] = "推薦設定已套用並永久記錄。" if ok else "推薦設定已套用，但永久記錄失敗。"
+        _stage_recommend_scan_settings_reset(
+            normalized_settings,
+            "推薦設定已套用並永久記錄，換頁或重新開啟後會沿用此設定。" if ok else "推薦設定已套用，但永久記錄失敗；請展開保存明細檢查 GitHub 寫入狀態。"
+        )
         st.session_state[_k("scan_settings_save_msgs")] = msgs
         st.rerun()
 
@@ -5719,10 +5721,19 @@ def main():
                 st.write(f"- {msg}")
 
     if submit_recommend or submit_refresh:
+        # 開始推薦 / 重新推薦時，同步把目前條件永久記錄；
+        # 這樣不用另外按套用，換頁或關閉後也不會恢復原始值。
+        normalized_settings = _normalize_recommend_scan_settings(current_form_settings, watchlist_map, category_options)
+        _apply_recommend_scan_settings_to_state(normalized_settings, sync_widgets=False)
+        ok, msgs = _save_persistent_recommend_scan_settings(normalized_settings)
+        st.session_state[_k("scan_settings_save_msgs")] = msgs
+        if ok:
+            st.session_state[_k("scan_settings_msg")] = "目前推薦條件已自動永久記錄。"
+        else:
+            st.session_state[_k("scan_settings_msg")] = "目前推薦條件已套用，但永久記錄失敗；請展開保存明細檢查。"
         for pref_name in [
             "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
-            "selected_categories", "min_total_score", "min_signal_score",
-            "min_prelaunch_score", "min_trade_score", "pick_strategy",
+            "selected_categories", "min_total_score", "min_signal_score", "min_prelaunch_score", "min_trade_score", "pick_strategy",
             "recommend_mode", "risk_strictness",
         ]:
             _sync_ui_pref_to_saved(pref_name)
