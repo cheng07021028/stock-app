@@ -1703,38 +1703,52 @@ def render_realtime_table(df, height=520):
     st.dataframe(styler, use_container_width=True, hide_index=True, height=height)
 
 
+# =========================================================
+# 歷史K資料：TWSE + TPEx 共用穩定版
+# =========================================================
+def _history_market_candidates(market_type: str) -> list[str]:
+    market_type = _safe_text(market_type) or "上市"
+    if market_type in ["上櫃", "興櫃", "TPEX", "OTC"]:
+        return ["上櫃", "上市"]
+    if market_type in ["上市", "TWSE"]:
+        return ["上市", "上櫃"]
+    return [market_type, "上市", "上櫃"]
 
-def _convert_tw_roc_date(value):
-    text = _safe_text(value)
-    if not text:
+
+def _parse_tw_roc_date(x):
+    x = _safe_text(x)
+    if not x:
         return pd.NaT
-    text = text.replace(".", "/").replace("-", "/")
-    if "/" in text:
-        parts = [p.strip() for p in text.split("/")]
-        if len(parts) == 3:
-            try:
-                year = int(parts[0])
-                if year < 1911:
-                    year += 1911
-                return pd.Timestamp(year=year, month=int(parts[1]), day=int(parts[2]))
-            except Exception:
-                return pd.NaT
+    x = x.replace(".", "/").replace("-", "/")
+    parts = x.split("/")
+    if len(parts) == 3:
+        try:
+            y = int(parts[0])
+            if y < 1911:
+                y += 1911
+            return pd.Timestamp(year=y, month=int(parts[1]), day=int(parts[2]))
+        except Exception:
+            return pd.NaT
     try:
-        return pd.to_datetime(text)
+        return pd.to_datetime(x, errors="coerce")
     except Exception:
         return pd.NaT
 
 
-def _normalize_history_df(df, source=""):
-    if df is None or df.empty:
+def _normalize_history_df(raw_df: pd.DataFrame, source: str, start_ts, end_ts) -> pd.DataFrame:
+    if raw_df is None or raw_df.empty:
         return pd.DataFrame()
-    work = df.copy()
 
-    # TPEx / TWSE 欄位名稱統一
-    alias_map = {
+    df = raw_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    rename_candidates = {
         "日期": "日期",
+        "Date": "日期",
         "成交股數": "成交股數",
         "成交仟股": "成交仟股",
+        "成交張數": "成交仟股",
+        "成交量": "成交股數",
         "成交金額": "成交金額",
         "成交仟元": "成交仟元",
         "開盤價": "開盤價",
@@ -1746,118 +1760,174 @@ def _normalize_history_df(df, source=""):
         "收盤價": "收盤價",
         "收盤": "收盤價",
         "成交筆數": "成交筆數",
-        "成交筆": "成交筆數",
         "筆數": "成交筆數",
     }
-    work = work.rename(columns={c: alias_map.get(str(c).strip(), str(c).strip()) for c in work.columns})
+    df = df.rename(columns={c: rename_candidates.get(c, c) for c in df.columns})
 
-    if "日期" not in work.columns:
+    if "日期" not in df.columns:
         return pd.DataFrame()
-    work["日期"] = work["日期"].apply(_convert_tw_roc_date)
-    work = work.dropna(subset=["日期"])
 
-    numeric_cols = ["成交股數", "成交仟股", "成交金額", "成交仟元", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
+    df["日期"] = df["日期"].apply(_parse_tw_roc_date)
+    df = df.dropna(subset=["日期"])
+    if df.empty:
+        return pd.DataFrame()
+
+    # TPEx 舊 API 常以「仟股 / 仟元」回傳，統一轉成股數 / 金額，避免量能被低估。
+    if "成交股數" not in df.columns and "成交仟股" in df.columns:
+        df["成交股數"] = df["成交仟股"]
+        df["__vol_is_thousand"] = True
+    if "成交金額" not in df.columns and "成交仟元" in df.columns:
+        df["成交金額"] = df["成交仟元"]
+        df["__amount_is_thousand"] = True
+
+    numeric_cols = ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
     for col in numeric_cols:
-        if col in work.columns:
-            work[col] = (
-                work[col].astype(str)
+        if col in df.columns:
+            s = (
+                df[col]
+                .astype(str)
                 .str.replace(",", "", regex=False)
                 .str.replace("+", "", regex=False)
-                .replace(["--", "---", "-", "", "nan", "None"], pd.NA)
+                .str.strip()
+                .replace(["--", "---", "", "nan", "None"], pd.NA)
             )
-            work[col] = pd.to_numeric(work[col], errors="coerce")
+            df[col] = pd.to_numeric(s, errors="coerce")
 
-    # TPEx 舊 API 回傳為仟股 / 仟元，轉成 TWSE 相同單位，避免量能分數失真
-    if "成交股數" not in work.columns and "成交仟股" in work.columns:
-        work["成交股數"] = work["成交仟股"] * 1000
-    if "成交金額" not in work.columns and "成交仟元" in work.columns:
-        work["成交金額"] = work["成交仟元"] * 1000
+    if "__vol_is_thousand" in df.columns and "成交股數" in df.columns:
+        df["成交股數"] = df["成交股數"] * 1000
+    if "__amount_is_thousand" in df.columns and "成交金額" in df.columns:
+        df["成交金額"] = df["成交金額"] * 1000
 
-    keep = [c for c in ["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"] if c in work.columns]
-    work = work[keep].copy()
-    work = work.drop_duplicates(subset=["日期"], keep="last")
-    work = work.sort_values("日期").reset_index(drop=True)
-    if source:
-        work.attrs["source"] = source
-    return work
+    required_price_cols = ["開盤價", "最高價", "最低價", "收盤價"]
+    for c in required_price_cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    if "成交股數" not in df.columns:
+        df["成交股數"] = pd.NA
+    if "成交金額" not in df.columns:
+        df["成交金額"] = pd.NA
+    if "成交筆數" not in df.columns:
+        df["成交筆數"] = pd.NA
+
+    df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)]
+    df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame()
+
+    keep_cols = ["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]
+    df = df[[c for c in keep_cols if c in df.columns]].copy()
+    df["資料源"] = source
+    return df
 
 
-def _fetch_twse_history_month(stock_no, month_dt):
-    month_str = pd.to_datetime(month_dt).strftime("%Y%m01")
+def _extract_table_from_payload(payload: Any) -> tuple[list[str], list[list[Any]]]:
+    if not isinstance(payload, dict):
+        return [], []
+
+    # TWSE: fields + data
+    fields = payload.get("fields") or payload.get("headers") or []
+    rows = payload.get("data") or payload.get("aaData") or []
+    if fields and rows:
+        return list(fields), list(rows)
+
+    # TPEx 新版：tables[0].fields / tables[0].data
+    tables = payload.get("tables") or []
+    if isinstance(tables, list) and tables:
+        t0 = tables[0] if isinstance(tables[0], dict) else {}
+        fields = t0.get("fields") or t0.get("headers") or []
+        rows = t0.get("data") or t0.get("aaData") or []
+        if fields and rows:
+            return list(fields), list(rows)
+
+    return [], []
+
+
+def _fetch_twse_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame, str]:
+    month_str = pd.to_datetime(month_start).strftime("%Y%m01")
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-    params = {"response": "json", "date": month_str, "stockNo": str(stock_no).strip()}
+    params = {"response": "json", "date": month_str, "stockNo": stock_no}
     data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
-    if str(data.get("stat", "")).strip() != "OK":
-        return pd.DataFrame(), f"TWSE {month_str}: stat={data.get('stat', '-') }"
-    rows = data.get("data", []) or []
-    cols = data.get("fields", []) or []
-    if not rows or not cols:
-        return pd.DataFrame(), f"TWSE {month_str}: rows=0"
-    return pd.DataFrame(rows, columns=cols), f"TWSE {month_str}: rows={len(rows)}"
+    stat = _safe_text(data.get("stat"))
+    fields, rows = _extract_table_from_payload(data)
+    if stat != "OK" or not fields or not rows:
+        return pd.DataFrame(), f"TWSE {month_str}: stat={stat or '-'} rows={len(rows)}"
+    return pd.DataFrame(rows, columns=fields), f"TWSE {month_str}: rows={len(rows)}"
 
 
-def _fetch_tpex_history_month(stock_no, month_dt):
-    ts = pd.to_datetime(month_dt)
-    roc_month = f"{ts.year - 1911}/{ts.month:02d}"
-    url = "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php"
-    params = {"l": "zh-tw", "d": roc_month, "stkno": str(stock_no).strip()}
-    data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
-    rows = data.get("aaData", []) or data.get("data", []) or []
-    fields = data.get("fields", []) or data.get("columns", []) or []
-    if fields and isinstance(fields[0], dict):
-        fields = [x.get("title") or x.get("data") or x.get("name") for x in fields]
-    if not fields:
-        fields = ["日期", "成交仟股", "成交仟元", "開盤", "最高", "最低", "收盤", "漲跌", "筆數"]
-    if not rows:
-        return pd.DataFrame(), f"TPEx {roc_month}: rows=0"
-    return pd.DataFrame(rows, columns=fields[:len(rows[0])]), f"TPEx {roc_month}: rows={len(rows)}"
+def _fetch_tpex_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame, str]:
+    dt = pd.to_datetime(month_start)
+    roc_month = f"{dt.year - 1911}/{dt.month:02d}"
+    ad_day = dt.strftime("%Y/%m/%d")
 
+    endpoints = [
+        (
+            "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php",
+            {"l": "zh-tw", "d": roc_month, "stkno": stock_no},
+            "TPEx-old",
+        ),
+        (
+            "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock",
+            {"code": stock_no, "date": ad_day, "id": "", "response": "json"},
+            "TPEx-new",
+        ),
+    ]
 
-def _fetch_history_by_source(stock_no, start_ts, end_ts, source):
-    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
-    frames = []
-    debug_lines = []
-    fetcher = _fetch_twse_history_month if source == "twse" else _fetch_tpex_history_month
-    for month_dt in month_starts:
+    last_msg = ""
+    for url, params, name in endpoints:
         try:
-            df_month, msg = fetcher(stock_no, month_dt)
-            debug_lines.append(msg)
-            if df_month is not None and not df_month.empty:
-                frames.append(df_month)
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
+            fields, rows = _extract_table_from_payload(data)
+            stat = _safe_text(data.get("stat") or data.get("statCode") or data.get("code"))
+            if fields and rows:
+                return pd.DataFrame(rows, columns=fields), f"{name} {roc_month}: rows={len(rows)}"
+            last_msg = f"{name} {roc_month}: stat={stat or '-'} rows=0"
         except Exception as e:
-            debug_lines.append(f"{source.upper()} {pd.to_datetime(month_dt).strftime('%Y-%m')}: exception={e}")
-    if not frames:
-        return pd.DataFrame(), debug_lines
-    df = pd.concat(frames, ignore_index=True)
-    df = _normalize_history_df(df, source=source)
-    if not df.empty:
-        df = df[(df["日期"] >= start_ts) & (df["日期"] <= end_ts)].sort_values("日期").reset_index(drop=True)
-        df.attrs["source"] = source
-    return df, debug_lines
+            last_msg = f"{name} {roc_month}: exception={str(e)[:80]}"
+    return pd.DataFrame(), last_msg
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     stock_no = str(stock_no).strip()
     market_type = str(market_type).strip() or "上市"
+
     if not stock_no:
         return pd.DataFrame()
+
     if start_date is None:
         start_date = date.today() - timedelta(days=90)
     if end_date is None:
         end_date = date.today()
+
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
     if end_ts < start_ts:
         return pd.DataFrame()
 
-    # 上櫃 / 興櫃優先 TPEx；上市優先 TWSE。若市場別錯誤，自動互換備援。
-    preferred = "twse" if market_type == "上市" else "tpex"
-    fallback = "tpex" if preferred == "twse" else "twse"
-    for source in [preferred, fallback]:
-        df, _ = _fetch_history_by_source(stock_no, start_ts, end_ts, source)
-        if df is not None and not df.empty:
-            return df
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    market_candidates = _history_market_candidates(market_type)
+
+    for mk in market_candidates:
+        frames = []
+        for dt in month_starts:
+            try:
+                if mk in ["上櫃", "興櫃", "TPEX", "OTC"]:
+                    raw, _msg = _fetch_tpex_history_month(stock_no, dt)
+                    source = "tpex_daily"
+                else:
+                    raw, _msg = _fetch_twse_history_month(stock_no, dt)
+                    source = "twse_stock_day"
+                if raw is not None and not raw.empty:
+                    frames.append(raw)
+            except Exception:
+                continue
+        if frames:
+            raw_df = pd.concat(frames, ignore_index=True)
+            df = _normalize_history_df(raw_df, source, start_ts, end_ts)
+            if not df.empty:
+                return df
+
     return pd.DataFrame()
 
 
@@ -1865,6 +1935,7 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
 def get_history_data_debug(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     stock_no = str(stock_no).strip()
     market_type = str(market_type).strip() or "上市"
+
     debug = {
         "ok": False,
         "stock_no": stock_no,
@@ -1875,33 +1946,65 @@ def get_history_data_debug(stock_no, stock_name="", market_type="上市", start_
         "debug_lines": [],
         "error": "",
     }
+
     if not stock_no:
         debug["error"] = "股票代號空白"
-        debug["debug_lines"].append(debug["error"])
+        debug["debug_lines"].append("股票代號空白")
         return debug
+
     if start_date is None:
         start_date = date.today() - timedelta(days=90)
     if end_date is None:
         end_date = date.today()
+
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
     if end_ts < start_ts:
         debug["error"] = "結束日期早於開始日期"
-        debug["debug_lines"].append(debug["error"])
+        debug["debug_lines"].append("結束日期早於開始日期")
         return debug
 
-    preferred = "twse" if market_type == "上市" else "tpex"
-    fallback = "tpex" if preferred == "twse" else "twse"
-    for source in [preferred, fallback]:
-        df, lines = _fetch_history_by_source(stock_no, start_ts, end_ts, source)
-        debug["debug_lines"].extend(lines)
-        if df is not None and not df.empty:
-            debug["ok"] = True
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    market_candidates = _history_market_candidates(market_type)
+
+    for mk in market_candidates:
+        frames = []
+        source = ""
+        debug["debug_lines"].append(f"開始嘗試市場別：{mk}")
+        for dt in month_starts:
+            try:
+                if mk in ["上櫃", "興櫃", "TPEX", "OTC"]:
+                    raw, msg = _fetch_tpex_history_month(stock_no, dt)
+                    source = "tpex_daily"
+                else:
+                    raw, msg = _fetch_twse_history_month(stock_no, dt)
+                    source = "twse_stock_day"
+                debug["debug_lines"].append(msg)
+                if raw is not None and not raw.empty:
+                    frames.append(raw)
+            except Exception as e:
+                debug["debug_lines"].append(f"{mk} {pd.to_datetime(dt).strftime('%Y-%m')}: exception={e}")
+
+        if not frames:
+            continue
+
+        try:
+            raw_df = pd.concat(frames, ignore_index=True)
+            df = _normalize_history_df(raw_df, source, start_ts, end_ts)
+            debug["source"] = source
             debug["rows"] = len(df)
-            debug["source"] = "twse_stock_day" if source == "twse" else "tpex_st43_result"
+            debug["ok"] = not df.empty
+            if df.empty:
+                debug["error"] = f"{mk} 有回傳但日期區間內無有效資料"
+                continue
             return debug
-    debug["source"] = "twse+tpex_fallback"
-    debug["error"] = "TWSE / TPEx 都沒有抓到有效歷史資料"
+        except Exception as e:
+            debug["source"] = source
+            debug["error"] = f"資料整理例外：{e}"
+            debug["debug_lines"].append(debug["error"])
+
+    if not debug["error"]:
+        debug["error"] = "TWSE / TPEx 都沒有抓到有效歷史資料"
     return debug
 
 
