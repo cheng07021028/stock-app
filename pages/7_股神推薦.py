@@ -58,7 +58,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE_TITLE = "股神推薦 V4"
+OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
+PAGE_TITLE = "股神推薦 V5｜低檔拉回機會版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -91,6 +92,14 @@ GODPICK_RECORD_COLUMNS = [
     "市場別",
     "類別",
     "推薦模式",
+    "推薦型態",
+    "機會型態",
+    "低檔位置分數",
+    "拉回承接分數",
+    "支撐回測分數",
+    "止跌轉強分數",
+    "機會股分數",
+    "機會股說明",
     "推薦等級",
     "推薦總分",
     "大盤參考等級",
@@ -365,6 +374,171 @@ def _build_burst_scores(df: pd.DataFrame) -> dict[str, Any]:
     else:
         level = "普通"
     return {"爆發力分數": score, "爆發等級": level}
+
+
+def _last_num(df: pd.DataFrame, col: str, default: float | None = None) -> float | None:
+    try:
+        if df is None or df.empty or col not in df.columns:
+            return default
+        return _safe_float(df[col].iloc[-1], default)
+    except Exception:
+        return default
+
+
+def _recent_low_high(df: pd.DataFrame, days: int = 60) -> tuple[float | None, float | None]:
+    try:
+        w = df.tail(days)
+        low = pd.to_numeric(w.get("最低價"), errors="coerce").dropna()
+        high = pd.to_numeric(w.get("最高價"), errors="coerce").dropna()
+        return (float(low.min()) if not low.empty else None, float(high.max()) if not high.empty else None)
+    except Exception:
+        return None, None
+
+
+def _vol_ratio(df: pd.DataFrame, short_col: str = "VOL5", long_col: str = "VOL20") -> float | None:
+    v1 = _last_num(df, short_col)
+    v2 = _last_num(df, long_col)
+    if v1 not in [None, 0] and v2 not in [None, 0]:
+        return float(v1) / float(v2)
+    return None
+
+
+def _build_opportunity_scores(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict, radar: dict) -> dict[str, Any]:
+    """低檔 / 拉回 / 回測機會股評分。"""
+    if df is None or df.empty or len(df) < 30:
+        return {"低檔位置分數": 0.0, "拉回承接分數": 0.0, "支撐回測分數": 0.0, "止跌轉強分數": 0.0, "機會股分數": 0.0, "機會型態": "資料不足", "推薦型態": "資料不足", "機會股說明": "歷史資料不足，無法判斷低檔/拉回/回測機會", "追高風險分_機會": 80.0}
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"), 0) or 0
+    open_now = _safe_float(last.get("開盤價"), close_now) or close_now
+    ma5 = _safe_float(last.get("MA5"))
+    ma10 = _safe_float(last.get("MA10"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    ret3 = _safe_float(last.get("RET3"), 0) or 0
+    ret5 = _safe_float(last.get("RET5"), 0) or 0
+    ret20 = _safe_float(last.get("RET20"), 0) or 0
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    sup60 = _safe_float(sr_snapshot.get("sup_60"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    vr = _vol_ratio(df)
+
+    low60, high60 = _recent_low_high(df, 60)
+    low120, high120 = _recent_low_high(df, 120)
+    low_dist60 = ((close_now - low60) / low60 * 100) if close_now and low60 not in [None, 0] else None
+    high_drawdown60 = ((close_now - high60) / high60 * 100) if close_now and high60 not in [None, 0] else None
+    low_dist120 = ((close_now - low120) / low120 * 100) if close_now and low120 not in [None, 0] else None
+
+    low_score = 42.0
+    if low_dist60 is not None:
+        if low_dist60 <= 8: low_score += 30
+        elif low_dist60 <= 15: low_score += 20
+        elif low_dist60 <= 25: low_score += 10
+        else: low_score -= min(18, (low_dist60 - 25) * 0.35)
+    if low_dist120 is not None and low_dist120 <= 18: low_score += 8
+    if high_drawdown60 is not None:
+        if -28 <= high_drawdown60 <= -8: low_score += 12
+        elif high_drawdown60 > -3: low_score -= 10
+    if ret20 > 18: low_score -= 18
+    elif -8 <= ret20 <= 8: low_score += 8
+    if ma20 not in [None, 0] and close_now:
+        dist_ma20 = (close_now - ma20) / ma20 * 100
+        if -4 <= dist_ma20 <= 5: low_score += 8
+        elif dist_ma20 < -10: low_score -= 8
+
+    pullback_score = 38.0
+    if ma20 not in [None, 0] and ma60 not in [None, 0]:
+        if ma20 >= ma60: pullback_score += 18
+        if close_now >= ma60: pullback_score += 10
+        else: pullback_score -= 14
+    if ma20 not in [None, 0] and close_now:
+        dist_ma20 = (close_now - ma20) / ma20 * 100
+        if -3 <= dist_ma20 <= 4.5: pullback_score += 26
+        elif -7 <= dist_ma20 < -3: pullback_score += 12
+        elif dist_ma20 > 10: pullback_score -= 16
+    if vr is not None:
+        if 0.55 <= vr <= 1.10: pullback_score += 10
+        elif vr >= 1.8 and ret5 < 0: pullback_score -= 12
+    if -10 <= ret20 <= 12 and ret5 <= 6: pullback_score += 7
+    if close_now >= open_now and ret3 >= -2: pullback_score += 7
+
+    retest_score = 40.0
+    support_candidates = [x for x in [sup20, sup60, ma20, ma60] if x not in [None, 0]]
+    nearest_support = None
+    if close_now and support_candidates:
+        nearest_support = min(support_candidates, key=lambda x: abs(close_now - x) / x)
+        support_dist = (close_now - nearest_support) / nearest_support * 100
+        if -1.5 <= support_dist <= 4.5: retest_score += 28
+        elif 4.5 < support_dist <= 8: retest_score += 12
+        elif support_dist < -3: retest_score -= 14
+    if res20 not in [None, 0] and close_now:
+        dist_res = (close_now - res20) / res20 * 100
+        if -3 <= dist_res <= 3: retest_score += 15
+    if ma20 not in [None, 0] and ma60 not in [None, 0] and ma20 >= ma60: retest_score += 8
+    if ret5 > 12: retest_score -= 12
+
+    rebound_score = 40.0
+    if close_now >= open_now: rebound_score += 10
+    if ret3 > 0: rebound_score += 10
+    if ret5 > -3: rebound_score += 8
+    if ma5 not in [None, 0] and ma10 not in [None, 0] and close_now >= ma5:
+        rebound_score += 8
+        if ma5 >= ma10: rebound_score += 8
+    if vr is not None:
+        if 0.9 <= vr <= 1.7: rebound_score += 10
+        elif vr > 2.4 and ret5 < 0: rebound_score -= 10
+    sig = _safe_float(signal_snapshot.get("score"), 0) or 0
+    rebound_score += min(12, max(0, sig * 2.2))
+
+    chase_risk = 35.0
+    if ret5 > 8: chase_risk += 18
+    if ret20 > 18: chase_risk += 22
+    if low_dist60 is not None and low_dist60 > 35: chase_risk += 12
+    if ma20 not in [None, 0] and close_now:
+        dist_ma20 = (close_now - ma20) / ma20 * 100
+        if dist_ma20 > 10: chase_risk += 16
+        elif -3 <= dist_ma20 <= 5: chase_risk -= 8
+    if vr is not None and vr > 2.2 and ret5 > 5: chase_risk += 12
+
+    low_score = _score_clip(low_score)
+    pullback_score = _score_clip(pullback_score)
+    retest_score = _score_clip(retest_score)
+    rebound_score = _score_clip(rebound_score)
+    chase_risk = _score_clip(chase_risk)
+    opportunity_score = _score_clip(low_score * 0.28 + pullback_score * 0.24 + retest_score * 0.24 + rebound_score * 0.20 + max(0, 100 - chase_risk) * 0.04)
+
+    candidates = [("低檔轉強", low_score), ("拉回承接", pullback_score), ("回測支撐", retest_score), ("止跌反彈", rebound_score)]
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    opportunity_type = candidates[0][0]
+    if chase_risk >= 75 and opportunity_score >= 65:
+        opportunity_type = f"{opportunity_type}｜但勿追高"
+
+    reason_parts = []
+    if low_score >= 70: reason_parts.append("位置接近低檔")
+    if pullback_score >= 70: reason_parts.append("拉回均線承接")
+    if retest_score >= 70: reason_parts.append("回測支撐不破")
+    if rebound_score >= 70: reason_parts.append("止跌轉強")
+    if chase_risk >= 72: reason_parts.append("追高風險偏高，等回測")
+    elif chase_risk <= 55: reason_parts.append("追高風險相對低")
+    if nearest_support not in [None, 0]: reason_parts.append(f"鄰近支撐 {nearest_support:.2f}")
+    if not reason_parts: reason_parts.append("低檔/拉回條件普通，列觀察")
+
+    return {
+        "低檔位置分數": round(low_score, 2),
+        "拉回承接分數": round(pullback_score, 2),
+        "支撐回測分數": round(retest_score, 2),
+        "止跌轉強分數": round(rebound_score, 2),
+        "機會股分數": round(opportunity_score, 2),
+        "機會型態": opportunity_type,
+        "推薦型態": opportunity_type,
+        "機會股說明": "、".join(reason_parts[:6]),
+        "追高風險分_機會": round(chase_risk, 2),
+    }
+
+
+def _is_opportunity_mode(mode: str) -> bool:
+    text = _safe_str(mode)
+    return any(k in text for k in ["低檔", "拉回", "回測", "機會", "保守低風險"])
 
 
 def _build_entry_zone_text(pullback_buy: Any, breakout_buy: Any) -> str:
@@ -1358,6 +1532,9 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["風險說明"] = out.apply(_derive_risk_text, axis=1)
     out["股神推論邏輯"] = out.apply(_derive_god_reasoning, axis=1)
     out["權重設定"] = _weight_text()
+    if "推薦型態" not in out.columns:
+        out["推薦型態"] = out.get("機會型態", "")
+    out["推薦型態"] = out["推薦型態"].fillna("").astype(str).replace("", "綜合推薦")
 
     macro_ref = _load_latest_macro_reference()
     macro_adj = out.apply(lambda r: _macro_adjust_score(r, macro_ref), axis=1)
@@ -1395,6 +1572,11 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     leader_advantage = _safe_float(row.get("同類股領先幅度"), 0) or 0
     pattern_score = _safe_float(row.get("型態突破分數"), 0) or 0
     burst_score = _safe_float(row.get("爆發力分數"), 0) or 0
+    opportunity_score = _safe_float(row.get("機會股分數"), 0) or 0
+    low_score = _safe_float(row.get("低檔位置分數"), 0) or 0
+    pullback_score = _safe_float(row.get("拉回承接分數"), 0) or 0
+    retest_score = _safe_float(row.get("支撐回測分數"), 0) or 0
+    rebound_score = _safe_float(row.get("止跌轉強分數"), 0) or 0
     risk_score = _safe_float(row.get("風險分數"), 0) or 0
 
     weights = _get_active_weight_map()
@@ -1419,8 +1601,23 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     elif mode == "領頭羊模式":
         total += leader_advantage * 0.08 + category_heat_score * 0.04
         tag = "類股領先 / 龍頭優先"
+    elif mode == "低檔轉強模式":
+        total = total * 0.62 + low_score * 0.16 + rebound_score * 0.12 + opportunity_score * 0.10
+        tag = "低檔轉強 / 不追高"
+    elif mode == "拉回承接模式":
+        total = total * 0.60 + pullback_score * 0.18 + trade_score * 0.08 + opportunity_score * 0.14
+        tag = "強勢拉回 / 第二買點"
+    elif mode == "回測支撐模式":
+        total = total * 0.58 + retest_score * 0.20 + rebound_score * 0.08 + opportunity_score * 0.14
+        tag = "突破回測 / 支撐確認"
+    elif mode == "低檔拉回綜合模式":
+        total = total * 0.60 + opportunity_score * 0.22 + max(low_score, pullback_score, retest_score) * 0.12 + rebound_score * 0.06
+        tag = "低檔拉回 / 機會優先"
+    elif mode == "保守低風險模式":
+        total = total * 0.55 + opportunity_score * 0.20 + trade_score * 0.15 + max(0, 100 - risk_score) * 0.10
+        tag = "低風險 / 支撐優先"
     else:
-        total += (technical_score + prelaunch_score + category_heat_score + trade_score) * 0.015
+        total += (technical_score + prelaunch_score + category_heat_score + trade_score) * 0.012 + opportunity_score * 0.015
         tag = "綜合推薦"
 
     return _score_clip(total), tag
@@ -1444,6 +1641,10 @@ def _build_recommend_reason_v2(r: pd.Series) -> str:
         parts.append("領先同類股")
     if _safe_float(r.get("爆發力分數"), 0) >= 75:
         parts.append("爆發力佳")
+    if _safe_float(r.get("機會股分數"), 0) >= 70:
+        parts.append(_safe_str(r.get("機會型態")) or "低檔拉回機會")
+    if _safe_str(r.get("機會股說明")):
+        parts.append(_safe_str(r.get("機會股說明")))
     if _safe_float(r.get("風險分數"), 0) < 60:
         parts.append("風險需控管")
     text = "、".join([x for x in parts if x][:6])
@@ -4209,6 +4410,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
         pattern_info = _build_pattern_breakout_scores(hist_df, sr_snapshot, signal_snapshot)
         burst_info = _build_burst_scores(hist_df)
+        opportunity_info = _build_opportunity_scores(hist_df, sr_snapshot, signal_snapshot, radar)
         prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
         risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
         trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
@@ -4259,6 +4461,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "trade_plan": trade_plan,
             "pattern_info": pattern_info,
             "burst_info": burst_info,
+            "opportunity_info": opportunity_info,
             "prelaunch": prelaunch,
             "risk_filter": risk_filter,
             "trade_feasibility": trade_feasibility,
@@ -4329,20 +4532,37 @@ def _analyze_one_stock_for_recommend(
         }
 
     signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
+    opportunity_info = bundle.get("opportunity_info", {}) or {}
+    opportunity_score = _safe_float(opportunity_info.get("機會股分數"), 0) or 0
+    opportunity_core = max(
+        _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0,
+        _safe_float(opportunity_info.get("拉回承接分數"), 0) or 0,
+        _safe_float(opportunity_info.get("支撐回測分數"), 0) or 0,
+        _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0,
+    )
+    opportunity_mode = _is_opportunity_mode(mode)
     if signal_score < min_signal_score:
-        return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
+        relaxed_signal_floor = max(0.0, float(min_signal_score) - (35.0 if opportunity_mode else 0.0))
+        if not (opportunity_mode and signal_score >= relaxed_signal_floor and opportunity_core >= 60):
+            return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
 
     risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
+    opportunity_chase = _safe_float(opportunity_info.get("追高風險分_機會"), 50) or 50
     if not risk_pass:
-        return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
+        if not (opportunity_mode and opportunity_score >= 62 and opportunity_chase <= 72):
+            return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
 
     prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
     if prelaunch_score < min_prelaunch_score:
-        return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
+        relaxed_prelaunch_floor = max(0.0, float(min_prelaunch_score) - (35.0 if opportunity_mode else 0.0))
+        if not (opportunity_mode and (opportunity_score >= 62 or opportunity_core >= 66) and prelaunch_score >= relaxed_prelaunch_floor):
+            return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
 
     trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
     if trade_score < min_trade_score:
-        return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
+        relaxed_trade_floor = max(0.0, float(min_trade_score) - (25.0 if opportunity_mode else 0.0))
+        if not (opportunity_mode and opportunity_score >= 60 and trade_score >= relaxed_trade_floor):
+            return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
 
     auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
     technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
@@ -4383,6 +4603,14 @@ def _analyze_one_stock_for_recommend(
             "突破風險": _safe_str(bundle["pattern_info"].get("突破風險")),
             "爆發力分數": _safe_float(bundle["burst_info"].get("爆發力分數"), 0) or 0,
             "爆發等級": _safe_str(bundle["burst_info"].get("爆發等級")),
+            "推薦型態": _safe_str(opportunity_info.get("推薦型態")),
+            "機會型態": _safe_str(opportunity_info.get("機會型態")),
+            "低檔位置分數": _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0,
+            "拉回承接分數": _safe_float(opportunity_info.get("拉回承接分數"), 0) or 0,
+            "支撐回測分數": _safe_float(opportunity_info.get("支撐回測分數"), 0) or 0,
+            "止跌轉強分數": _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0,
+            "機會股分數": _safe_float(opportunity_info.get("機會股分數"), 0) or 0,
+            "機會股說明": _safe_str(opportunity_info.get("機會股說明")),
             "建議切入區": _build_entry_zone_text(bundle["trade_plan"]["pullback_buy"], bundle["trade_plan"]["breakout_buy"]),
             "起漲判斷": bundle["trade_plan"]["launch_tag"],
             "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
@@ -4707,9 +4935,11 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
+    sort_cols = ["推薦總分", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
+    active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     final_df = final_df.sort_values(
-        ["推薦總分", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"],
-        ascending=[False, False, False, False, False, False, False],
+        active_sort_cols,
+        ascending=[False] * len(active_sort_cols),
     ).reset_index(drop=True)
 
     if "勾選" not in final_df.columns:
@@ -4727,6 +4957,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     score_cols = [
         "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
+        "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數",
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
         "個股原始總分", "市場環境分數", "型態突破分數", "爆發力分數", "類股平均總分", "類股平均訊號", "類股熱度分數",
@@ -4784,13 +5015,14 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分", "買點分級",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "買點分級",
+        "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數",
         "信心等級", "推薦分桶", "市場環境分數",
         "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
         "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
         "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
-        "推薦標籤", "股神推論邏輯", "風險說明", "推薦理由摘要",
+        "推薦標籤", "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要",
         "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     ]
 
@@ -4913,7 +5145,7 @@ def _render_selected_export_block():
         "最新價", "推薦買點_拉回", "推薦買點_突破",
         "停損價", "賣出目標1", "賣出目標2",
         "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-        "推薦標籤", "股神推論邏輯", "風險說明", "推薦理由摘要",
+        "推薦標籤", "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要",
     ]
     export_df = export_df[[c for c in want_cols if c in export_df.columns]].copy()
 
@@ -5649,7 +5881,7 @@ def main():
         render_pro_section("模式 / 類型篩選")
         m1, m2, m3 = st.columns([2, 2, 2])
         with m1:
-            mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"]
+            mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式", "低檔轉強模式", "拉回承接模式", "回測支撐模式", "低檔拉回綜合模式", "保守低風險模式"]
             if st.session_state.get(_ui_pref_key("recommend_mode")) not in mode_options:
                 st.session_state[_ui_pref_key("recommend_mode")] = st.session_state.get(_k("recommend_mode"), "飆股模式")
             form_recommend_mode = st.selectbox("推薦模式", mode_options, key=_ui_pref_key("recommend_mode"))
@@ -5812,7 +6044,7 @@ def main():
         render_pro_info_card(
             "V2 選股邏輯",
             [
-                ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
+                ("推薦模式", "保留飆股/波段/領頭羊/綜合，新增低檔轉強、拉回承接、回測支撐、低檔拉回綜合、保守低風險。", ""),
                 ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
                 ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
                 ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
@@ -6451,7 +6683,7 @@ def main():
             [
                 ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑；條件會自動記住。", ""),
                 ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
-                ("推薦模式", "新增 飆股模式 / 波段模式 / 領頭羊模式 / 綜合模式。", ""),
+                ("推薦模式", "保留飆股/波段/領頭羊/綜合，新增低檔轉強、拉回承接、回測支撐、低檔拉回綜合、保守低風險。", ""),
                 ("市場環境分數", "新增市場順風/逆風分數，讓同樣條件下順風盤優先。", ""),
                 ("型態 / 爆發", "新增型態突破分數、爆發力分數，讓起漲股更容易被拉出。", ""),
             ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
