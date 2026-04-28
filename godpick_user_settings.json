@@ -11,8 +11,8 @@
   },
   "applied_weights": {
     "市場環境": 3,
-    "技術結構": 17,
-    "起漲前兆": 15,
+    "技術結構": 15,
+    "起漲前兆": 17,
     "類股熱度": 15,
     "自動因子": 20,
     "交易可行": 7,
@@ -156,6 +156,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-28 09:27:34",
+  "updated_at": "2026-04-28 09:33:00",
   "version": "godpick_v5_persistent_settings"
 }
