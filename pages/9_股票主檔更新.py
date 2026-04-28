@@ -9,6 +9,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from utils import inject_pro_theme
+
 from stock_master_service import (
     load_stock_master,
     refresh_stock_master,
@@ -18,6 +20,7 @@ from stock_master_service import (
 )
 
 st.set_page_config(page_title="股票主檔更新", layout="wide")
+inject_pro_theme()
 st.title("股票主檔更新")
 
 # =========================================================
