@@ -6,6 +6,12 @@
       "market": "上市"
     },
     {
+      "code": "1533",
+      "name": "車王電",
+      "market": "上市",
+      "category": "汽車"
+    },
+    {
       "code": "2330",
       "name": "台積電",
       "market": "上市"
@@ -18,8 +24,7 @@
     {
       "code": "3059",
       "name": "華晶科",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "3548",
@@ -27,9 +32,39 @@
       "market": "上櫃"
     },
     {
+      "code": "3605",
+      "name": "宏致",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "4958",
+      "name": "臻鼎-KY",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "4967",
+      "name": "十銓",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
       "code": "6271",
       "name": "同欣電",
       "market": "上市"
+    },
+    {
+      "code": "6651",
+      "name": "全宇昕",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8103",
+      "name": "瀚荃",
+      "market": "上市",
+      "category": "電子零組件業"
     }
   ],
   "0422": [
