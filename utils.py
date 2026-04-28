@@ -371,6 +371,90 @@ def inject_pro_theme():
             font-weight: 800 !important;
         }
 
+
+        /* ===== 側邊欄美化分區（v25.2）===== */
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+        }
+
+        [data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li a {
+            border-radius: 10px;
+            margin: 2px 6px;
+            min-height: 36px;
+            transition: all 0.15s ease-in-out;
+        }
+
+        [data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"]:hover,
+        [data-testid="stSidebarNav"] ul li a:hover {
+            background: #e0f2fe !important;
+            transform: translateX(2px);
+        }
+
+        [data-testid="stSidebarNav"] ul li [aria-current="page"],
+        [data-testid="stSidebarNav"] ul li [aria-current="page"] * {
+            background: linear-gradient(90deg, #dbeafe 0%, #eff6ff 100%) !important;
+            color: #0f172a !important;
+            font-weight: 900 !important;
+        }
+
+        /* 大盤、儀表板、行情、K線、自選、排行榜、多股比較 */
+        [data-testid="stSidebarNav"] ul li:nth-of-type(2) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(3) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(4) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(5) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(6) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(7) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(8) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(2) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(3) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(4) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(5) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(6) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(7) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(8) [data-testid="stSidebarNavLink"] {
+            border-left: 4px solid #38bdf8;
+        }
+
+        /* 股神核心模組：推薦、紀錄、推薦清單、管理中心 */
+        [data-testid="stSidebarNav"] ul li:nth-of-type(9) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(10) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(12) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(9) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(10) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(12) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"] {
+            border-left: 4px solid #ef4444;
+            background: rgba(254, 242, 242, 0.55);
+        }
+
+        /* 系統維護模組：股票主檔、資料診斷 */
+        [data-testid="stSidebarNav"] ul li:nth-of-type(11) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(13) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(11) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(13) [data-testid="stSidebarNavLink"] {
+            border-left: 4px solid #64748b;
+            background: rgba(248, 250, 252, 0.85);
+        }
+
+        /* 用粗體提示股神模組 */
+        [data-testid="stSidebarNav"] ul li:nth-of-type(9) span,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(10) span,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(12) span,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) span {
+            font-weight: 900 !important;
+            color: #7f1d1d !important;
+        }
+
+        /* 側邊欄狀態卡片更清楚 */
+        [data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] h3 {
+            font-size: 18px;
+            margin-top: 14px;
+            margin-bottom: 8px;
+        }
+
+
         @media (max-width: 1100px) {
             .pro-info-grid {
                 grid-template-columns: repeat(2, minmax(160px, 1fr));
