@@ -16,6 +16,12 @@
       "market": "上市"
     },
     {
+      "code": "3059",
+      "name": "華晶科",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
       "code": "3548",
       "name": "兆利科技工業股份有限公司",
       "market": "上櫃"
@@ -121,8 +127,7 @@
     {
       "code": "3033",
       "name": "威健",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "3059",
@@ -132,20 +137,17 @@
     {
       "code": "3317",
       "name": "尼克森",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "3526",
       "name": "凡甲",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "5289",
       "name": "宜鼎",
-      "market": "上櫃",
-      "category": "電腦及週邊設備業"
+      "market": "上櫃"
     },
     {
       "code": "6658",
