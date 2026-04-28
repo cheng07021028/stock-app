@@ -59,7 +59,8 @@ SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
-PAGE_TITLE = "股神推薦 V11｜高速全量掃描版"
+SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
+PAGE_TITLE = "股神推薦 V13｜類股資金流強化版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -167,6 +168,14 @@ GODPICK_RECORD_COLUMNS = [
     "起漲摘要",
     "交易可行分數",
     "類股熱度分數",
+    "強勢族群等級",
+    "族群資金流分數",
+    "族群輪動狀態",
+    "同族群強勢比例",
+    "同族群推薦密度",
+    "同族群平均量能分",
+    "族群策略建議",
+    "族群資金流說明",
     "同類股領先幅度",
     "是否領先同類股",
     "推薦標籤",
@@ -2014,6 +2023,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     numeric_cols = [
         "推薦總分", "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
+        "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "族群策略建議",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數"
     ]
@@ -4897,12 +4907,91 @@ def _analyze_one_stock_for_recommend(
     }
 
 
+def _sector_flow_grade(score: Any) -> str:
+    score = _safe_float(score, 0) or 0
+    if score >= 85:
+        return "S級資金主流"
+    if score >= 75:
+        return "A級強勢輪動"
+    if score >= 65:
+        return "B級轉強族群"
+    if score >= 55:
+        return "C級觀察族群"
+    return "弱勢/資金不足"
+
+
+def _sector_rotation_state(row: pd.Series) -> str:
+    flow = _safe_float(row.get("族群資金流分數"), 0) or 0
+    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
+    accel = _safe_float(row.get("類股加速度"), 0) or 0
+    avg_ret = _safe_float(row.get("類股平均漲幅"), 0) or 0
+    strong_ratio = _safe_float(row.get("同族群強勢比例"), 0) or 0
+    if heat >= 78 and accel >= 76 and strong_ratio >= 35:
+        return "主流加速"
+    if flow >= 72 and avg_ret <= 6 and accel >= 65:
+        return "低位吸金"
+    if heat >= 72 and accel < 60:
+        return "高檔鈍化"
+    if flow >= 65 and strong_ratio >= 25:
+        return "輪動轉強"
+    if flow < 55:
+        return "資金退潮"
+    return "中性輪動"
+
+
+def _sector_strategy_text(row: pd.Series) -> str:
+    state = _safe_str(row.get("族群輪動狀態"))
+    grade = _safe_str(row.get("強勢族群等級"))
+    if "主流加速" in state:
+        return "主流族群，優先找拉回承接與回測支撐，不盲目追高。"
+    if "低位吸金" in state:
+        return "族群尚未大漲但資金轉入，優先找低檔轉強與剛起漲。"
+    if "輪動轉強" in state:
+        return "族群開始輪動，先挑類股內前段班並控管停損。"
+    if "高檔鈍化" in state:
+        return "族群熱但加速度下降，避免追價，等拉回或量縮整理。"
+    if "退潮" in state or "弱勢" in grade:
+        return "族群資金不足，只保留個股訊號很強且風險低者。"
+    return "族群中性，個股條件需明確優於同類股。"
+
+
+def _sector_flow_summary(row: pd.Series) -> str:
+    return (
+        f"{_safe_str(row.get('強勢族群等級'))}｜{_safe_str(row.get('族群輪動狀態'))}｜"
+        f"強勢比例{format_number(row.get('同族群強勢比例'),1)}%｜"
+        f"量能{format_number(row.get('同族群平均量能分'),1)}｜"
+        f"密度{format_number(row.get('同族群推薦密度'),1)}%"
+    )
+
+
 def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
     if base_df is None or base_df.empty:
-        return pd.DataFrame(columns=["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數"])
+        return pd.DataFrame(columns=[
+            "類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數",
+            "族群資金流分數", "強勢族群等級", "族群輪動狀態", "同族群強勢比例",
+            "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明"
+        ])
+
+    work = base_df.copy()
+    for c in ["個股原始總分", "訊號分數", "區間漲跌幅%", "雷達均分", "自動因子總分", "起漲前兆分數", "交易可行分數", "型態突破分數", "爆發力分數", "量能啟動分"]:
+        if c in work.columns:
+            work[c] = pd.to_numeric(work[c], errors="coerce")
+        else:
+            work[c] = 0
+
+    work["_sector_strong_flag"] = (
+        (work["個股原始總分"].fillna(0) >= 70)
+        | (work["起漲前兆分數"].fillna(0) >= 72)
+        | ((work["型態突破分數"].fillna(0) >= 70) & (work["量能啟動分"].fillna(0) >= 62))
+    ).astype(float)
+    work["_sector_candidate_flag"] = (
+        (work["個股原始總分"].fillna(0) >= 62)
+        | (work["起漲前兆分數"].fillna(0) >= 65)
+        | (work["交易可行分數"].fillna(0) >= 68)
+    ).astype(float)
 
     grp = (
-        base_df.groupby("類別", dropna=False)
+        work.groupby("類別", dropna=False)
         .agg(
             股票數=("股票代號", "count"),
             類股平均總分=("個股原始總分", "mean"),
@@ -4914,9 +5003,15 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
             類股平均交易可行=("交易可行分數", "mean"),
             類股平均型態突破=("型態突破分數", "mean"),
             類股平均爆發力=("爆發力分數", "mean"),
+            同族群平均量能分=("量能啟動分", "mean"),
+            同族群強勢比例=("_sector_strong_flag", "mean"),
+            同族群推薦密度=("_sector_candidate_flag", "mean"),
         )
         .reset_index()
     )
+
+    grp["同族群強勢比例"] = (grp["同族群強勢比例"].fillna(0) * 100).clip(0, 100)
+    grp["同族群推薦密度"] = (grp["同族群推薦密度"].fillna(0) * 100).clip(0, 100)
 
     grp["類股熱度分數"] = (
         grp["類股平均總分"] * 0.28
@@ -4934,10 +5029,23 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
         + grp["類股平均漲幅"].fillna(0) * 0.18
     ).apply(lambda x: _score_clip(x))
 
-    grp = grp.sort_values(["類股熱度分數", "類股平均總分"], ascending=[False, False]).reset_index(drop=True)
+    grp["族群資金流分數"] = (
+        grp["同族群強勢比例"].fillna(0) * 0.30
+        + grp["同族群推薦密度"].fillna(0) * 0.18
+        + grp["同族群平均量能分"].fillna(0) * 0.22
+        + grp["類股加速度"].fillna(0) * 0.18
+        + grp["類股平均爆發力"].fillna(0) * 0.07
+        + grp["類股平均型態突破"].fillna(0) * 0.05
+    ).apply(lambda x: _score_clip(x))
+
+    grp["強勢族群等級"] = grp["族群資金流分數"].apply(_sector_flow_grade)
+    grp["族群輪動狀態"] = grp.apply(_sector_rotation_state, axis=1)
+    grp["族群策略建議"] = grp.apply(_sector_strategy_text, axis=1)
+    grp["族群資金流說明"] = grp.apply(_sector_flow_summary, axis=1)
+
+    grp = grp.sort_values(["族群資金流分數", "類股熱度分數", "類股平均總分"], ascending=[False, False, False]).reset_index(drop=True)
     grp["類股熱度排名"] = range(1, len(grp) + 1)
     return grp
-
 
 def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, min_total_score: float) -> pd.DataFrame:
     if base_df is None or base_df.empty:
@@ -5122,10 +5230,18 @@ def _build_recommend_df(
         base_df["類股加速度"] = None
         base_df["類股平均型態突破"] = None
         base_df["類股平均爆發力"] = None
+        base_df["族群資金流分數"] = None
+        base_df["強勢族群等級"] = ""
+        base_df["族群輪動狀態"] = ""
+        base_df["同族群強勢比例"] = None
+        base_df["同族群推薦密度"] = None
+        base_df["同族群平均量能分"] = None
+        base_df["族群策略建議"] = ""
+        base_df["族群資金流說明"] = ""
     else:
         base_df = base_df.merge(
             category_strength_df[
-                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度", "類股平均型態突破", "類股平均爆發力"]
+                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度", "類股平均型態突破", "類股平均爆發力", "族群資金流分數", "強勢族群等級", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明"]
             ],
             on="類別",
             how="left",
@@ -5150,6 +5266,15 @@ def _build_recommend_df(
     )
     base_df["推薦總分"] = [x[0] for x in mode_scores]
     base_df["推薦標籤"] = [x[1] for x in mode_scores]
+
+    # V13：類股資金流只做加權與排序，不做硬篩選，避免漏掉股票。
+    if "族群資金流分數" in base_df.columns:
+        flow_score = pd.to_numeric(base_df["族群資金流分數"], errors="coerce").fillna(50)
+        sector_bonus = ((flow_score - 60) / 10).clip(lower=-2.0, upper=4.0)
+        base_df["族群資金流加權"] = sector_bonus.round(2)
+        base_df["推薦總分"] = (pd.to_numeric(base_df["推薦總分"], errors="coerce").fillna(0) + sector_bonus).clip(lower=0, upper=100)
+    else:
+        base_df["族群資金流加權"] = 0.0
 
     def _recommend(score: float) -> str:
         if score >= 90:
@@ -5182,6 +5307,10 @@ def _build_recommend_df(
             reason_parts.append("類股前3強")
         if _safe_float(r.get("類股熱度分數"), 0) >= 75:
             reason_parts.append("所屬類股熱度高")
+        if _safe_float(r.get("族群資金流分數"), 0) >= 75:
+            reason_parts.append("族群資金流強")
+        if _safe_str(r.get("族群輪動狀態")) in ["低位吸金", "輪動轉強", "主流加速"]:
+            reason_parts.append(_safe_str(r.get("族群輪動狀態")))
         if _safe_float(r.get("交易可行分數"), 0) >= 70:
             reason_parts.append("風險報酬佳")
         if not reason_parts:
@@ -5199,7 +5328,7 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    sort_cols = ["推薦總分", "進場時機分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
+    sort_cols = ["推薦總分", "進場時機分數", "族群資金流分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
     active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     final_df = final_df.sort_values(
         active_sort_cols,
@@ -5226,7 +5355,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
         "個股原始總分", "市場環境分數", "型態突破分數", "爆發力分數", "類股平均總分", "類股平均訊號", "類股熱度分數",
-        "類股加速度", "同類股領先幅度", "推薦總分", "風險分數",
+        "類股加速度", "族群資金流分數", "族群資金流加權", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "同類股領先幅度", "推薦總分", "風險分數",
         "均線轉強分", "量能啟動分", "突破準備分", "動能翻多分", "支撐防守分"
     ]
 
@@ -5285,6 +5414,7 @@ def _get_full_table_default_cols() -> list[str]:
         "信心等級", "推薦分桶", "市場環境分數",
         "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
         "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
+        "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "族群策略建議",
         "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
         "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
         "推薦標籤", "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要",
@@ -5321,7 +5451,7 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
     cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
 
     leader_export = leader_df[
-        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "飆股起漲分數", "起漲等級", "起漲摘要", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
+        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "飆股起漲分數", "起漲等級", "起漲摘要", "個股原始總分", "類股平均總分", "類股熱度分數", "族群資金流分數", "強勢族群等級", "推薦總分", "推薦理由摘要"]
     ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
 
     factor_export = factor_rank[
@@ -6913,7 +7043,7 @@ def main():
                     [
                         "股票代號", "股票名稱", "類別", "類股內排名", "類股前3強",
                         "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分",
-                        "類股平均總分", "類股熱度分數", "推薦總分", "股神推論邏輯", "風險說明", "推薦理由摘要",
+                        "類股平均總分", "類股熱度分數", "族群資金流分數", "強勢族群等級", "推薦總分", "股神推論邏輯", "風險說明", "推薦理由摘要",
                     ]
                 ].head(top_n)
             ),
