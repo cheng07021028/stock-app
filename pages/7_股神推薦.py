@@ -59,11 +59,12 @@ SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
-PAGE_TITLE = "股神推薦 V5｜低檔拉回機會版"
+PAGE_TITLE = "股神推薦 V11｜高速全量掃描版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 10   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
+PROGRESS_UPDATE_EVERY = 25   # V11：降低前端重繪，掃描結果不受影響
+SCAN_MAX_WORKERS = 18         # V11：全量掃描平行化上限；不做預篩選，避免漏掉機會股
 
 GODPICK_DEFAULT_SCORE_WEIGHTS = {
     "市場環境": 10,
@@ -100,6 +101,22 @@ GODPICK_RECORD_COLUMNS = [
     "止跌轉強分數",
     "機會股分數",
     "機會股說明",
+    "進場時機",
+    "進場時機分數",
+    "建議動作",
+    "等待條件",
+    "近端支撐",
+    "主要支撐",
+    "近端壓力",
+    "突破確認價",
+    "停損參考",
+    "操作區間",
+    "風險報酬比_決策",
+    "追高風險分數_決策",
+    "追高風險等級",
+    "是否建議追價",
+    "風險扣分原因",
+    "決策說明",
     "推薦等級",
     "推薦總分",
     "大盤參考等級",
@@ -535,6 +552,233 @@ def _build_opportunity_scores(df: pd.DataFrame, sr_snapshot: dict, signal_snapsh
         "追高風險分_機會": round(chase_risk, 2),
     }
 
+
+
+def _pct_distance(price: Any, base: Any) -> float | None:
+    p = _safe_float(price)
+    b = _safe_float(base)
+    if p in [None, 0] or b in [None, 0]:
+        return None
+    try:
+        return (float(p) - float(b)) / float(b) * 100
+    except Exception:
+        return None
+
+
+def _build_entry_decision_scores(
+    df: pd.DataFrame,
+    sr_snapshot: dict,
+    opportunity_info: dict,
+    trade_plan: dict,
+    trade_feasibility: dict,
+) -> dict[str, Any]:
+    """V10 股神進場決策引擎：把推薦股票轉成可操作的進場/等待/停損策略。"""
+    if df is None or df.empty or len(df) < 25:
+        return {
+            "進場時機": "資料不足",
+            "進場時機分數": 0.0,
+            "建議動作": "暫不判斷",
+            "等待條件": "歷史資料不足，先不要追價",
+            "近端支撐": None,
+            "主要支撐": None,
+            "近端壓力": None,
+            "突破確認價": None,
+            "停損參考": None,
+            "操作區間": "",
+            "風險報酬比_決策": None,
+            "追高風險分數_決策": 80.0,
+            "追高風險等級": "高",
+            "是否建議追價": "否",
+            "風險扣分原因": "歷史資料不足",
+            "決策說明": "資料不足時不建議追價，先等待資料恢復。",
+        }
+
+    last = df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"), 0) or 0
+    ma5 = _safe_float(last.get("MA5"))
+    ma10 = _safe_float(last.get("MA10"))
+    ma20 = _safe_float(last.get("MA20"))
+    ma60 = _safe_float(last.get("MA60"))
+    ret3 = _safe_float(last.get("RET3"), 0) or 0
+    ret5 = _safe_float(last.get("RET5"), 0) or 0
+    ret20 = _safe_float(last.get("RET20"), 0) or 0
+    rsi = _safe_float(last.get("RSI14"), _safe_float(last.get("RSI")))
+    vr = _vol_ratio(df)
+
+    sup20 = _safe_float(sr_snapshot.get("sup_20"))
+    sup60 = _safe_float(sr_snapshot.get("sup_60"))
+    res20 = _safe_float(sr_snapshot.get("res_20"))
+    res60 = _safe_float(sr_snapshot.get("res_60"))
+
+    support_candidates = [x for x in [sup20, ma20, sup60, ma60] if x not in [None, 0]]
+    resistance_candidates = [x for x in [res20, res60] if x not in [None, 0]]
+    near_support = None
+    main_support = None
+    near_resistance = None
+    if close_now and support_candidates:
+        below_or_near = [x for x in support_candidates if x <= close_now * 1.03]
+        near_support = max(below_or_near) if below_or_near else min(support_candidates, key=lambda x: abs(close_now - x))
+        main_support = min(support_candidates)
+    if close_now and resistance_candidates:
+        above_or_near = [x for x in resistance_candidates if x >= close_now * 0.98]
+        near_resistance = min(above_or_near) if above_or_near else max(resistance_candidates)
+
+    breakout_price = _safe_float(trade_plan.get("breakout_buy"), near_resistance)
+    stop_ref = _safe_float(trade_plan.get("stop_price"))
+    if stop_ref in [None, 0] and near_support not in [None, 0]:
+        stop_ref = near_support * 0.975
+
+    pullback_buy = _safe_float(trade_plan.get("pullback_buy"))
+    zone_low = None
+    zone_high = None
+    zone_vals = [x for x in [pullback_buy, near_support, close_now] if x not in [None, 0]]
+    if zone_vals:
+        zone_low = min(zone_vals)
+        zone_high = max(zone_vals)
+    operation_zone = ""
+    if zone_low not in [None, 0] and zone_high not in [None, 0]:
+        operation_zone = f"{zone_low:.2f} ~ {zone_high:.2f}"
+
+    support_dist = _pct_distance(close_now, near_support)
+    ma20_dist = _pct_distance(close_now, ma20)
+    pressure_space = None
+    if close_now not in [None, 0] and near_resistance not in [None, 0]:
+        pressure_space = (near_resistance - close_now) / close_now * 100
+
+    # 追高風險：越高越不適合追價
+    chase_risk = _safe_float(opportunity_info.get("追高風險分_機會"), 35) or 35
+    risk_reasons = []
+    if ret5 > 8:
+        chase_risk += 14
+        risk_reasons.append("5日漲幅偏大")
+    if ret20 > 18:
+        chase_risk += 18
+        risk_reasons.append("20日漲幅偏大")
+    if ma20_dist is not None and ma20_dist > 10:
+        chase_risk += 16
+        risk_reasons.append("股價離月線過遠")
+    if rsi is not None and rsi >= 72:
+        chase_risk += 12
+        risk_reasons.append("RSI過熱")
+    if vr is not None and vr > 2.4 and ret5 > 5:
+        chase_risk += 10
+        risk_reasons.append("放量急漲")
+    if pressure_space is not None and pressure_space < 4:
+        chase_risk += 10
+        risk_reasons.append("接近壓力區")
+    if support_dist is not None and -1.5 <= support_dist <= 5:
+        chase_risk -= 10
+    chase_risk = _score_clip(chase_risk)
+
+    low_score = _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0
+    pullback_score = _safe_float(opportunity_info.get("拉回承接分數"), 0) or 0
+    retest_score = _safe_float(opportunity_info.get("支撐回測分數"), 0) or 0
+    rebound_score = _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0
+    trade_score = _safe_float(trade_feasibility.get("交易可行分數"), 50) or 50
+    rr_trade = _safe_float(trade_plan.get("rr1"), _safe_float(trade_plan.get("rr2")))
+
+    entry_score = 45.0
+    entry_score += low_score * 0.10
+    entry_score += pullback_score * 0.16
+    entry_score += retest_score * 0.18
+    entry_score += rebound_score * 0.14
+    entry_score += trade_score * 0.12
+    if support_dist is not None:
+        if -1.5 <= support_dist <= 4.0:
+            entry_score += 12
+        elif 4.0 < support_dist <= 8.0:
+            entry_score += 6
+        elif support_dist > 12:
+            entry_score -= 8
+    if pressure_space is not None:
+        if pressure_space >= 10:
+            entry_score += 8
+        elif pressure_space < 4:
+            entry_score -= 8
+    if rr_trade is not None:
+        if rr_trade >= 2.0:
+            entry_score += 10
+        elif rr_trade >= 1.4:
+            entry_score += 5
+        elif rr_trade < 1.0:
+            entry_score -= 8
+    entry_score -= max(0, chase_risk - 55) * 0.35
+    entry_score = _score_clip(entry_score)
+
+    if chase_risk >= 78:
+        chase_level = "高"
+    elif chase_risk >= 62:
+        chase_level = "中"
+    else:
+        chase_level = "低"
+
+    if entry_score >= 82 and chase_risk <= 62:
+        timing = "可分批進場"
+        action = "小量分批，嚴守停損"
+    elif entry_score >= 72 and chase_risk <= 72:
+        timing = "接近可進場"
+        action = "觀察承接，等紅K或量能確認"
+    elif retest_score >= 70 and support_dist is not None and support_dist <= 5:
+        timing = "等支撐確認"
+        action = "支撐不破再分批，跌破停損"
+    elif pullback_score >= 70:
+        timing = "等拉回承接"
+        action = "等靠近均線或支撐後觀察承接"
+    elif chase_risk >= 75:
+        timing = "不宜追高"
+        action = "等拉回，不追價"
+    else:
+        timing = "觀察等待"
+        action = "等待突破、支撐或量能確認"
+
+    wait_parts = []
+    if chase_risk >= 70:
+        wait_parts.append("等追高風險下降")
+    if near_support not in [None, 0]:
+        wait_parts.append(f"守住支撐 {near_support:.2f}")
+    if breakout_price not in [None, 0]:
+        wait_parts.append(f"突破 {breakout_price:.2f} 轉強")
+    if vr is None or vr < 0.8:
+        wait_parts.append("等量能確認")
+    if not wait_parts:
+        wait_parts.append("等紅K續強與風險報酬維持")
+
+    rr_decision = None
+    if close_now not in [None, 0] and stop_ref not in [None, 0] and near_resistance not in [None, 0]:
+        downside = max(0.01, close_now - stop_ref)
+        upside = max(0.0, near_resistance - close_now)
+        rr_decision = upside / downside if downside else None
+    if rr_decision is None:
+        rr_decision = rr_trade
+
+    should_chase = "是" if (entry_score >= 80 and chase_risk <= 58 and pressure_space is not None and pressure_space >= 8) else "否"
+    if should_chase == "否" and timing in ["可分批進場", "接近可進場"]:
+        should_chase = "不追價，可分批"
+
+    decision_note = f"{timing}；{action}。"
+    if risk_reasons:
+        decision_note += " 風險：" + "、".join(risk_reasons[:4]) + "。"
+    if near_support not in [None, 0] or near_resistance not in [None, 0]:
+        decision_note += f" 支撐/壓力參考：{format_number(near_support,2)} / {format_number(near_resistance,2)}。"
+
+    return {
+        "進場時機": timing,
+        "進場時機分數": round(entry_score, 2),
+        "建議動作": action,
+        "等待條件": "、".join(wait_parts[:5]),
+        "近端支撐": round(near_support, 2) if near_support not in [None, 0] else None,
+        "主要支撐": round(main_support, 2) if main_support not in [None, 0] else None,
+        "近端壓力": round(near_resistance, 2) if near_resistance not in [None, 0] else None,
+        "突破確認價": round(breakout_price, 2) if breakout_price not in [None, 0] else None,
+        "停損參考": round(stop_ref, 2) if stop_ref not in [None, 0] else None,
+        "操作區間": operation_zone,
+        "風險報酬比_決策": round(rr_decision, 2) if rr_decision not in [None, 0] else None,
+        "追高風險分數_決策": round(chase_risk, 2),
+        "追高風險等級": chase_level,
+        "是否建議追價": should_chase,
+        "風險扣分原因": "、".join(risk_reasons[:6]) if risk_reasons else "無明顯追高扣分",
+        "決策說明": decision_note,
+    }
 
 def _is_opportunity_mode(mode: str) -> bool:
     text = _safe_str(mode)
@@ -4414,6 +4658,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
         risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
         trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
+        entry_decision = _build_entry_decision_scores(hist_df, sr_snapshot, opportunity_info, trade_plan, trade_feasibility)
 
         last = hist_df.iloc[-1]
         first = hist_df.iloc[0]
@@ -4465,6 +4710,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "prelaunch": prelaunch,
             "risk_filter": risk_filter,
             "trade_feasibility": trade_feasibility,
+            "entry_decision": entry_decision,
             "close_now": close_now,
             "period_pct": period_pct,
             "pressure_dist": pressure_dist,
@@ -4611,6 +4857,22 @@ def _analyze_one_stock_for_recommend(
             "止跌轉強分數": _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0,
             "機會股分數": _safe_float(opportunity_info.get("機會股分數"), 0) or 0,
             "機會股說明": _safe_str(opportunity_info.get("機會股說明")),
+            "進場時機": _safe_str(bundle.get("entry_decision", {}).get("進場時機")),
+            "進場時機分數": _safe_float(bundle.get("entry_decision", {}).get("進場時機分數"), 0) or 0,
+            "建議動作": _safe_str(bundle.get("entry_decision", {}).get("建議動作")),
+            "等待條件": _safe_str(bundle.get("entry_decision", {}).get("等待條件")),
+            "近端支撐": bundle.get("entry_decision", {}).get("近端支撐"),
+            "主要支撐": bundle.get("entry_decision", {}).get("主要支撐"),
+            "近端壓力": bundle.get("entry_decision", {}).get("近端壓力"),
+            "突破確認價": bundle.get("entry_decision", {}).get("突破確認價"),
+            "停損參考": bundle.get("entry_decision", {}).get("停損參考"),
+            "操作區間": _safe_str(bundle.get("entry_decision", {}).get("操作區間")),
+            "風險報酬比_決策": bundle.get("entry_decision", {}).get("風險報酬比_決策"),
+            "追高風險分數_決策": _safe_float(bundle.get("entry_decision", {}).get("追高風險分數_決策"), 0) or 0,
+            "追高風險等級": _safe_str(bundle.get("entry_decision", {}).get("追高風險等級")),
+            "是否建議追價": _safe_str(bundle.get("entry_decision", {}).get("是否建議追價")),
+            "風險扣分原因": _safe_str(bundle.get("entry_decision", {}).get("風險扣分原因")),
+            "決策說明": _safe_str(bundle.get("entry_decision", {}).get("決策說明")),
             "建議切入區": _build_entry_zone_text(bundle["trade_plan"]["pullback_buy"], bundle["trade_plan"]["breakout_buy"]),
             "起漲判斷": bundle["trade_plan"]["launch_tag"],
             "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
@@ -4741,7 +5003,7 @@ def _build_recommend_df(
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
+    worker_count = min(SCAN_MAX_WORKERS, max(6, total_count // 40 if total_count >= 120 else 4))
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
@@ -4766,9 +5028,11 @@ def _build_recommend_df(
         "final_score_filtered": 0,
         "history_debug_samples": [],
         "error_samples": [],
+        "worker_count": worker_count,
+        "speed_version": "v11_yahoo_fast_full_scan_no_prefilter",
     }
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="godpick_scan") as executor:
         futures = [
             executor.submit(
                 _analyze_one_stock_for_recommend,
@@ -4837,7 +5101,7 @@ def _build_recommend_df(
                     f"已完成 {done_count}/{total_count}｜"
                     f"已花時間：{_fmt_seconds(elapsed)}｜"
                     f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                    f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
+                    f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}"
                 )
 
     progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
@@ -4935,7 +5199,7 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    sort_cols = ["推薦總分", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
+    sort_cols = ["推薦總分", "進場時機分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
     active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     final_df = final_df.sort_values(
         active_sort_cols,
@@ -4952,12 +5216,13 @@ def _build_recommend_df(
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
-    price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
+    price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
         "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
         "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數",
+        "進場時機分數", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "風險報酬比_決策", "追高風險分數_決策",
         "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
         "大戶鎖碼代理分數", "法人連買代理分數",
         "個股原始總分", "市場環境分數", "型態突破分數", "爆發力分數", "類股平均總分", "類股平均訊號", "類股熱度分數",
