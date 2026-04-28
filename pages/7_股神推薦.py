@@ -1212,26 +1212,31 @@ def _render_score_weight_panel():
 
     edit = _normalize_weight_map(st.session_state.get(_k("score_weights_edit"), GODPICK_DEFAULT_SCORE_WEIGHTS))
 
-    c1, c2, c3, c4 = st.columns(4)
+    # v25.5：修正權重區塊在 4 欄循環渲染時，第二排與統計/按鈕列視覺交錯，看起來像重複項目。
+    # 改成明確兩列，每列 4 個權重欄位，統計與按鈕固定放在最下方。
     weight_keys = list(GODPICK_DEFAULT_SCORE_WEIGHTS.keys())
-    containers = [c1, c2, c3, c4]
-    for idx, name in enumerate(weight_keys):
-        with containers[idx % 4]:
-            edit[name] = int(
-                st.number_input(
-                    f"{name}%",
-                    min_value=0,
-                    max_value=100,
-                    value=int(edit.get(name, GODPICK_DEFAULT_SCORE_WEIGHTS[name])),
-                    step=1,
-                    key=_k(f"weight_edit_{name}"),
+    weight_rows = [weight_keys[i:i + 4] for i in range(0, len(weight_keys), 4)]
+
+    for row_keys in weight_rows:
+        cols = st.columns(4)
+        for idx, name in enumerate(row_keys):
+            with cols[idx]:
+                edit[name] = int(
+                    st.number_input(
+                        f"{name}%",
+                        min_value=0,
+                        max_value=100,
+                        value=int(edit.get(name, GODPICK_DEFAULT_SCORE_WEIGHTS[name])),
+                        step=1,
+                        key=_k(f"weight_edit_{name}"),
+                    )
                 )
-            )
 
     total = _weight_total(edit)
     remain = 100 - total
     st.session_state[_k("score_weights_edit")] = edit
 
+    st.markdown("<div style='height: 0.45rem;'></div>", unsafe_allow_html=True)
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         st.metric("目前權重總和", f"{total}%")
@@ -1265,13 +1270,16 @@ def _render_score_weight_panel():
     if apply_weight:
         st.session_state[_k("score_weights")] = edit.copy()
         ok, msgs = _save_persistent_settings(edit.copy())
-        st.success("權重已套用並永久記錄，本次開始推薦會使用新權重。" if ok else "權重已套用，但永久記錄失敗。")
+        if ok:
+            st.success("權重已套用並永久記錄。")
+        else:
+            st.warning("權重已套用，但永久記錄失敗，請查看明細。")
         with st.expander("權重保存明細", expanded=False):
             for msg in msgs:
                 st.write(f"- {msg}")
 
     applied = _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS))
-    st.caption("目前已套用權重：" + " / ".join([f"{k} {v}%" for k, v in applied.items()]))
+    st.caption("目前已套用權重：" + _weight_text(applied))
     return applied
 
 
