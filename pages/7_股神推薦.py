@@ -7662,7 +7662,7 @@ def main():
 
         st.caption(f"完整推薦表目前勾選：{len(full_picked_codes)} 檔。可直接匯入 05_自選股中心 或 09_股神推薦紀錄。")
 
-        full_a1, full_a2, full_a3, full_a4 = st.columns([1.3, 1.4, 1.4, 2.0])
+        full_a1, full_a2, full_a3, full_a4, full_a5 = st.columns([1.25, 1.25, 1.25, 1.25, 2.0])
         with full_a1:
             group_options_full = list(watchlist_map.keys()) if isinstance(watchlist_map, dict) and watchlist_map else ["預設"]
             default_full_group = st.session_state.get(_k("full_table_pick_group"), st.session_state.get(_k("rec_pick_group"), group_options_full[0]))
@@ -7690,7 +7690,35 @@ def main():
                 key=_k("full_table_add_record"),
             )
         with full_a4:
-            st.caption("這裡會直接使用完整推薦表左側的勾選欄，不需要再到其他區塊重選。")
+            # v25.7：完整推薦表直接匯出 Excel。
+            export_target_df = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()
+            export_target_cols = ["勾選"] + [c for c in full_show_cols if c != "勾選"]
+            if "勾選" not in export_target_df.columns:
+                if "股票代號" in export_target_df.columns:
+                    export_target_df.insert(0, "勾選", export_target_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in set(full_picked_codes)))
+                else:
+                    export_target_df.insert(0, "勾選", False)
+            export_target_df = export_target_df[[c for c in export_target_cols if c in export_target_df.columns]].copy()
+            export_target_for_excel = _format_df(export_target_df.copy()) if isinstance(export_target_df, pd.DataFrame) and not export_target_df.empty else export_target_df
+            export_bytes_full_table = _build_excel_bytes(
+                rec_export=export_target_for_excel,
+                cat_export=pd.DataFrame(),
+                leader_export=pd.DataFrame(),
+                factor_export=pd.DataFrame(),
+            )
+            export_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_label = "匯出勾選 Excel" if len(full_picked_codes) > 0 else "匯出完整 Excel"
+            export_name = f"股神推薦_完整推薦表_{'勾選' if len(full_picked_codes) > 0 else '全部'}_{export_ts}.xlsx"
+            st.download_button(
+                export_label,
+                data=export_bytes_full_table,
+                file_name=export_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=_k("full_table_excel_download"),
+            )
+        with full_a5:
+            st.caption("這裡會直接使用完整推薦表左側的勾選欄；有勾選時匯出勾選資料，未勾選時匯出完整表。")
 
         if full_add_watchlist:
             work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
