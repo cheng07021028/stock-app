@@ -1887,8 +1887,143 @@ def _fetch_tpex_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame,
     return pd.DataFrame(), last_msg
 
 
+
+def _history_yahoo_range_param(start_ts, end_ts) -> str:
+    """依日期跨度選擇 Yahoo chart range，讓股神掃描每檔股票盡量只打一個日線請求。
+
+    不影響完整性：Yahoo 只做高速第一來源；若失敗或資料太少，會自動回到 TWSE/TPEx 月資料。
+    """
+    try:
+        days = max(int((pd.to_datetime(end_ts) - pd.to_datetime(start_ts)).days) + 7, 30)
+    except Exception:
+        days = 180
+    if days <= 95:
+        return "3mo"
+    if days <= 190:
+        return "6mo"
+    if days <= 370:
+        return "1y"
+    if days <= 740:
+        return "2y"
+    return "5y"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, end_date=None):
+    """Yahoo Finance 台股日線高速來源。
+
+    設計原則：
+    1. 掃描速度優先：通常 1 檔股票只需 1 次請求，不再逐月抓 TWSE/TPEx。
+    2. 不漏股票：此函式失敗會回傳空表，由 get_history_data 自動 fallback 官方月資料。
+    3. 不偽裝資料：價格欄無效或有效筆數不足時，直接回空表。
+    """
+    stock_no = str(stock_no).strip()
+    market_type = str(market_type).strip() or "上市"
+    if not stock_no:
+        return pd.DataFrame()
+
+    if start_date is None:
+        start_date = date.today() - timedelta(days=120)
+    if end_date is None:
+        end_date = date.today()
+
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+
+    suffix_candidates = []
+    if market_type in ["上櫃", "興櫃", "TPEX", "OTC"]:
+        suffix_candidates = ["TWO", "TW"]
+    elif market_type == "上市":
+        suffix_candidates = ["TW", "TWO"]
+    else:
+        suffix_candidates = ["TW", "TWO"]
+
+    range_param = _history_yahoo_range_param(start_ts, end_ts)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+
+    for suffix in suffix_candidates:
+        symbol = f"{stock_no}.{suffix}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {
+            "range": range_param,
+            "interval": "1d",
+            "includePrePost": "false",
+            "events": "history",
+        }
+
+        try:
+            resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            result = (((payload or {}).get("chart") or {}).get("result") or [])
+            if not result:
+                continue
+
+            node = result[0] or {}
+            timestamps = node.get("timestamp") or []
+            quote = (((node.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            volumes = quote.get("volume") or []
+
+            rows = []
+            for i, ts in enumerate(timestamps):
+                close_v = closes[i] if i < len(closes) else None
+                if close_v is None:
+                    continue
+                try:
+                    dt = pd.to_datetime(datetime.fromtimestamp(int(ts)).date())
+                except Exception:
+                    continue
+                if dt < start_ts or dt > end_ts:
+                    continue
+
+                rows.append({
+                    "日期": dt,
+                    "成交股數": volumes[i] if i < len(volumes) else None,
+                    "成交金額": None,
+                    "開盤價": opens[i] if i < len(opens) else None,
+                    "最高價": highs[i] if i < len(highs) else None,
+                    "最低價": lows[i] if i < len(lows) else None,
+                    "收盤價": close_v,
+                    "成交筆數": None,
+                })
+
+            if len(rows) < 20:
+                continue
+
+            df = pd.DataFrame(rows)
+            for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["收盤價"])
+            df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+            if df.empty:
+                continue
+            df["資料源"] = f"yahoo_chart_{suffix}"
+            return df[["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數", "資料源"]].copy()
+        except Exception:
+            continue
+
+    return pd.DataFrame()
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
+    """取得歷史日線資料。
+
+    V11 加速原則：
+    - 先用 Yahoo chart 單次請求快速取得日線，通常比逐月 TWSE/TPEx 快很多。
+    - 若 Yahoo 失敗、資料不足或市場別不符，立即 fallback 官方 TWSE/TPEx 月資料。
+    - 不做低成本初篩、不跳過任何股票，因此不會因加速而漏掉候選股。
+    """
     stock_no = str(stock_no).strip()
     market_type = str(market_type).strip() or "上市"
 
@@ -1905,6 +2040,15 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     if end_ts < start_ts:
         return pd.DataFrame()
 
+    # 第一來源：Yahoo 高速日線。失敗不代表該股票沒資料，必須 fallback 官方來源。
+    try:
+        fast_df = _fetch_yahoo_history_fast(stock_no, market_type=market_type, start_date=start_ts, end_date=end_ts)
+        if fast_df is not None and not fast_df.empty:
+            return fast_df
+    except Exception:
+        pass
+
+    # 第二來源：官方 TWSE / TPEx 月資料。保留完整 fallback，避免漏股票。
     month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
     market_candidates = _history_market_candidates(market_type)
 
@@ -1929,7 +2073,6 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
                 return df
 
     return pd.DataFrame()
-
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_history_data_debug(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
