@@ -16,8 +16,13 @@ import hashlib
 import pandas as pd
 import requests
 import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, firestore
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+except Exception:
+    firebase_admin = None
+    credentials = None
+    firestore = None
 
 from utils import (
     compute_radar_scores,
@@ -514,6 +519,12 @@ def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
 
 
 def _load_persistent_settings() -> dict[str, Any]:
+    """讀取股神推薦永久設定。
+
+    修正重點：舊版只要 GitHub 有舊資料就會直接採用，導致本機 JSON 已保存的新權重/掃描條件
+    在換頁或重新整理後又被 GitHub 舊值覆蓋。這版會同時讀 GitHub 與本機，依 updated_at 較新的為準；
+    若無法判斷時間，優先採用本機，避免使用者剛套用的設定消失。
+    """
     default_payload = {
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "applied_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
@@ -523,19 +534,39 @@ def _load_persistent_settings() -> dict[str, Any]:
         "version": "godpick_v5_persistent_settings",
     }
 
-    github_payload, _ = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
-    if isinstance(github_payload, dict) and github_payload:
-        payload = {**default_payload, **github_payload}
-        payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
-        return payload
-
+    github_payload, github_msg = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
     local_payload = _safe_json_read_local(GODPICK_SETTINGS_FILE, {})
-    if isinstance(local_payload, dict) and local_payload:
-        payload = {**default_payload, **local_payload}
-        payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
-        return payload
 
-    return default_payload
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(github_payload, dict) and github_payload:
+        candidates.append(("github", github_payload))
+    if isinstance(local_payload, dict) and local_payload:
+        candidates.append(("local", local_payload))
+
+    if not candidates:
+        payload = default_payload.copy()
+    elif len(candidates) == 1:
+        payload = candidates[0][1]
+    else:
+        def _ts(item: tuple[str, dict[str, Any]]):
+            source, data = item
+            raw = _safe_str(data.get("updated_at"))
+            try:
+                return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                # 無時間戳時，本機優先，避免 GitHub 舊值覆蓋剛剛套用的設定
+                return datetime.min if source == "github" else datetime.max
+
+        payload = sorted(candidates, key=_ts, reverse=True)[0][1]
+
+    payload = {**default_payload, **payload}
+    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
+    if not isinstance(payload.get("column_orders"), dict):
+        payload["column_orders"] = {}
+    if not isinstance(payload.get("scan_settings"), dict):
+        payload["scan_settings"] = {}
+    st.session_state[_k("persistent_settings_source_detail")] = f"GitHub: {github_msg}｜本機設定: {'有' if isinstance(local_payload, dict) and local_payload else '無'}"
+    return payload
 
 
 def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, list[str]]:
@@ -602,8 +633,30 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     local_ok, local_msg = _safe_json_write_local(GODPICK_LATEST_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
 
-    # 給 10_推薦清單.py 讀取的清單檔：只保存本輪推薦明細，下一次推薦會覆蓋。
+    # 給 10_推薦清單.py 讀取的清單檔：保存本輪推薦明細。
+    # 維持 list 格式相容舊版，同時補齊 record_id/資料來源/建立時間，避免 10 頁讀取後欄位不一致。
     list_payload = payload.get("recommendations", [])
+    if isinstance(list_payload, list):
+        fixed_rows = []
+        for i, row in enumerate(list_payload):
+            if not isinstance(row, dict):
+                continue
+            r = dict(row)
+            if not _safe_str(r.get("record_id")):
+                r["record_id"] = _create_record_id(
+                    _normalize_code(r.get("股票代號")),
+                    _safe_str(r.get("推薦日期")) or _now_date_text(),
+                    _safe_str(r.get("推薦時間")) or _now_time_text(),
+                    _safe_str(r.get("推薦模式")) or "股神推薦",
+                )
+            r["資料來源"] = GODPICK_LIST_FILE
+            if not _safe_str(r.get("建立時間")):
+                r["建立時間"] = payload.get("saved_at", _now_text())
+            if not _safe_str(r.get("更新時間")):
+                r["更新時間"] = payload.get("saved_at", _now_text())
+            fixed_rows.append(r)
+        list_payload = fixed_rows
+
     list_local_ok, list_local_msg = _safe_json_write_local(GODPICK_LIST_FILE, list_payload)
     list_github_ok, list_github_msg = _write_json_to_github_path(GODPICK_LIST_FILE, list_payload)
 
@@ -1772,6 +1825,8 @@ def _clean_private_key(raw_key: str) -> str:
 
 
 def _init_firebase_app():
+    if firebase_admin is None or credentials is None or firestore is None:
+        raise RuntimeError("firebase-admin 未安裝或無法載入；已略過 Firestore，同步改用本機/GitHub。")
     try:
         return firebase_admin.get_app()
     except ValueError:
