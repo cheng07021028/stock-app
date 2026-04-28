@@ -277,32 +277,78 @@ def main():
         st.session_state[_k("refresh_token")] = new_token
         st.session_state[_k("last_refresh_date")] = query_date
 
-        get_realtime_watchlist_df.clear()
-        _prepare_dashboard_metrics.clear()
-        _prepare_dashboard_table.clear()
-
-    refresh_token = st.session_state[_k("refresh_token")]
-
-    with st.spinner("正在讀取即時資料..."):
-        # DASHBOARD_FORCE_FIX_SAFE_V3
+        # 清掉即時資料與表格快取；若 utils 的自選股快取存在，也一併清除。
         try:
-            if 'watchlist_map' in locals():
-                watchlist_map = _dashboard_force_fix_watchlist_data(watchlist_map)
-            if 'watchlist_data' in locals():
-                watchlist_data = _dashboard_force_fix_watchlist_data(watchlist_data)
+            get_realtime_watchlist_df.clear()
+        except Exception:
+            pass
+        try:
+            get_normalized_watchlist.clear()
+        except Exception:
+            pass
+        try:
+            _prepare_dashboard_metrics.clear()
+        except Exception:
+            pass
+        try:
+            _prepare_dashboard_table.clear()
         except Exception:
             pass
 
-        realtime_df = get_realtime_watchlist_df(
-            watchlist_dict=watchlist_dict,
-            query_date=query_date,
-            refresh_token=refresh_token,
-        )
+    refresh_token = st.session_state[_k("refresh_token")]
+
+    realtime_error = ""
+    with st.spinner("正在讀取即時資料..."):
+        # DASHBOARD_FORCE_FIX_SAFE_V6
+        try:
+            watchlist_dict = _dashboard_force_fix_watchlist_data(watchlist_dict)
+        except Exception:
+            pass
+
+        try:
+            realtime_df = get_realtime_watchlist_df(
+                watchlist_dict=watchlist_dict,
+                query_date=query_date,
+                refresh_token=refresh_token,
+            )
+        except Exception as e:
+            realtime_df = pd.DataFrame()
+            realtime_error = str(e)
 
     st.session_state[_k("force_refresh")] = False
 
     if realtime_df is None or realtime_df.empty:
-        st.info("目前沒有可顯示的即時資料。")
+        st.warning("目前即時資料暫時沒有回傳價格，但自選股清單已正常讀取。")
+        fallback_rows = []
+        for group_name, items in (watchlist_dict or {}).items():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                fallback_rows.append(
+                    {
+                        "群組": group_name,
+                        "股票代號": str(item.get("code", "")).strip(),
+                        "股票名稱": str(item.get("name", "")).strip(),
+                        "市場別": str(item.get("market", "")).strip(),
+                        "狀態": "即時資料待更新",
+                    }
+                )
+        fallback_df = pd.DataFrame(fallback_rows)
+        render_pro_kpi_row(
+            [
+                {"label": "自選股群組", "value": len(watchlist_dict or {}), "delta": "watchlist 正常", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "自選股總數", "value": len(fallback_df), "delta": "即時資料未回傳", "delta_class": "pro-kpi-delta-down"},
+                {"label": "查詢日期", "value": query_date, "delta": "可按更新重試", "delta_class": "pro-kpi-delta-flat"},
+            ]
+        )
+        if not fallback_df.empty:
+            st.dataframe(fallback_df, use_container_width=True, hide_index=True)
+        with st.expander("即時資料診斷", expanded=True):
+            if realtime_error:
+                st.error(realtime_error)
+            st.caption("這裡不再把抓不到的現價偽裝成 0。請先確認 11_資料診斷 的即時資料測試；若單股可抓到，通常是快取或批次 API 暫時異常。")
         return
 
     render_dashboard_summary(realtime_df)
