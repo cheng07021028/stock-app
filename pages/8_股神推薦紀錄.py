@@ -1922,6 +1922,128 @@ def _apply_mode_labels(df: pd.DataFrame) -> pd.DataFrame:
     return _ensure_godpick_record_columns(x)
 
 
+def _v15_perf_series(df: pd.DataFrame) -> pd.Series:
+    """V15：依可用欄位自動選擇回測績效基準，不改原始資料。"""
+    for col in ["推薦後20日%", "20日績效%", "推薦後10日%", "10日績效%", "推薦後5日%", "5日績效%", "損益幅%"]:
+        if col in df.columns:
+            s = pd.to_numeric(df[col], errors="coerce")
+            if s.notna().sum() > 0:
+                return s
+    return pd.Series([float("nan")] * len(df), index=df.index, dtype="float64")
+
+
+def _build_v15_auto_tune_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """V15：用推薦後績效反推哪些模式、買點、型態應提高或降低權重。"""
+    x = _ensure_godpick_record_columns(df.copy())
+    if x.empty:
+        empty = pd.DataFrame(columns=["項目", "樣本數", "平均績效%", "勝率%", "平均最大回撤%", "校正分數", "建議"])
+        return {"mode": empty.copy(), "type": empty.copy(), "entry": empty.copy(), "risk": empty.copy(), "sector": empty.copy(), "summary": empty.copy()}
+
+    perf = _v15_perf_series(x)
+    x["__v15_perf"] = perf
+    x["__v15_win"] = perf > 0
+    if "推薦後最大回撤%" in x.columns:
+        x["__v15_dd"] = pd.to_numeric(x["推薦後最大回撤%"], errors="coerce")
+    else:
+        x["__v15_dd"] = pd.Series([float("nan")] * len(x), index=x.index, dtype="float64")
+
+    def one_table(group_col: str, label: str) -> pd.DataFrame:
+        if group_col not in x.columns:
+            return pd.DataFrame(columns=[label, "樣本數", "平均績效%", "勝率%", "平均最大回撤%", "校正分數", "建議", "校正原因"])
+        rows = []
+        work = x.copy()
+        work[group_col] = work[group_col].fillna("").astype(str).replace("", "未分類")
+        for key, g in work.groupby(group_col, dropna=False):
+            v = pd.to_numeric(g["__v15_perf"], errors="coerce").dropna()
+            n = int(len(v))
+            if n <= 0:
+                continue
+            avg = float(v.mean())
+            win = float((v > 0).mean() * 100)
+            dd = pd.to_numeric(g["__v15_dd"], errors="coerce").dropna()
+            avg_dd = float(dd.mean()) if not dd.empty else float("nan")
+            dd_penalty = min(abs(avg_dd), 12) if avg_dd == avg_dd else 3.0
+            sample_bonus = min(n / 20 * 8, 8)
+            tune_score = max(0.0, min(100.0, 50 + avg * 3.0 + (win - 50) * 0.45 - dd_penalty * 1.2 + sample_bonus))
+            if n < 3:
+                suggestion = "樣本不足，暫不調權"
+                reason = "樣本少於3筆，先累積紀錄，避免過度擬合。"
+            elif tune_score >= 68 and avg > 0 and win >= 55:
+                suggestion = "建議提高權重"
+                reason = "平均績效與勝率同時偏強，可提高此類訊號排序權重。"
+            elif tune_score <= 42 or (avg < 0 and win < 50):
+                suggestion = "建議降低權重"
+                reason = "回測績效偏弱或勝率不足，建議降低排序權重並檢查追高風險。"
+            else:
+                suggestion = "建議維持觀察"
+                reason = "績效尚可但優勢不明顯，先維持現有權重。"
+            rows.append({
+                label: key,
+                "樣本數": n,
+                "平均績效%": round(avg, 2),
+                "勝率%": round(win, 2),
+                "平均最大回撤%": None if avg_dd != avg_dd else round(avg_dd, 2),
+                "校正分數": round(tune_score, 2),
+                "建議": suggestion,
+                "校正原因": reason,
+            })
+        out = pd.DataFrame(rows)
+        if out.empty:
+            return pd.DataFrame(columns=[label, "樣本數", "平均績效%", "勝率%", "平均最大回撤%", "校正分數", "建議", "校正原因"])
+        return out.sort_values(["校正分數", "樣本數"], ascending=[False, False]).reset_index(drop=True)
+
+    mode_df = one_table("推薦模式", "推薦模式")
+    type_df = one_table("推薦型態", "推薦型態")
+    entry_df = one_table("進場時機", "進場時機")
+    risk_df = one_table("追高風險等級", "追高風險等級")
+    sector_df = one_table("類別", "類別")
+
+    summary_rows = []
+    for name, table, key_col in [
+        ("推薦模式", mode_df, "推薦模式"),
+        ("推薦型態", type_df, "推薦型態"),
+        ("進場時機", entry_df, "進場時機"),
+        ("追高風險", risk_df, "追高風險等級"),
+        ("類別", sector_df, "類別"),
+    ]:
+        if not table.empty:
+            top = table.iloc[0]
+            weak = table.sort_values(["校正分數", "樣本數"], ascending=[True, False]).iloc[0]
+            summary_rows.append({
+                "校正面向": name,
+                "最強項目": _safe_str(top.get(key_col)),
+                "最強校正分數": _safe_float(top.get("校正分數"), 0),
+                "最強建議": _safe_str(top.get("建議")),
+                "偏弱項目": _safe_str(weak.get(key_col)),
+                "偏弱校正分數": _safe_float(weak.get("校正分數"), 0),
+                "偏弱建議": _safe_str(weak.get("建議")),
+            })
+    summary_df = pd.DataFrame(summary_rows)
+    return {"mode": mode_df, "type": type_df, "entry": entry_df, "risk": risk_df, "sector": sector_df, "summary": summary_df}
+
+
+def _render_v15_auto_tune_panel(df: pd.DataFrame):
+    """V15：顯示自動權重校正建議；只提供決策參考，不直接改權重，避免誤傷推薦邏輯。"""
+    render_pro_section("V15 權重回饋校正建議", "根據推薦後績效、勝率與最大回撤，判斷哪些推薦模式/型態應提高或降低權重；此區不自動改設定，避免過度擬合。")
+    tables = _build_v15_auto_tune_tables(df)
+    if tables["summary"].empty:
+        st.info("目前回測樣本不足。請先在本頁按『更新推薦後績效』，並累積更多推薦紀錄。")
+        return
+    st.dataframe(tables["summary"], use_container_width=True, hide_index=True)
+    st.caption("判讀：校正分數越高，代表該模式/型態在目前紀錄中平均績效、勝率、回撤表現越好。樣本少於3筆不建議調權。")
+    sub = st.tabs(["推薦模式", "推薦型態", "進場時機", "追高風險", "類別"])
+    with sub[0]:
+        st.dataframe(tables["mode"], use_container_width=True, hide_index=True)
+    with sub[1]:
+        st.dataframe(tables["type"], use_container_width=True, hide_index=True)
+    with sub[2]:
+        st.dataframe(tables["entry"], use_container_width=True, hide_index=True)
+    with sub[3]:
+        st.dataframe(tables["risk"], use_container_width=True, hide_index=True)
+    with sub[4]:
+        st.dataframe(tables["sector"], use_container_width=True, hide_index=True)
+
+
 def _build_export_bytes(df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -2518,6 +2640,9 @@ def main():
             ] if c in live_df.columns]
             st.dataframe(_format_df(live_df[detail_cols]), use_container_width=True, hide_index=True)
 
+        st.divider()
+        _render_v15_auto_tune_panel(live_df)
+
     with tabs[4]:
         render_pro_section("實際交易分析", "只統計有實際買進資料的紀錄")
         trade_df = live_df[live_df["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
@@ -2558,10 +2683,11 @@ def main():
                 ("批次更新", "支援表格編輯 / 刪除 / 清空 / 更新", "已保留"),
                 ("推薦後績效", "1/3/5/10/20 日績效% + 最大漲幅/回撤 + 命中結果", "V12已整合"),
                 ("模式績效標籤", "依模式歷史表現自動標記", "已整合"),
+                ("V15權重回饋", "依推薦後績效、勝率、回撤提出調權建議", "只建議不自動改"),
                 ("最強模式 / 類別", "依20日績效 + 勝率綜合排序", "已整合"),
                 ("Excel 匯出", "推薦紀錄 / 分析表 / 最強榜", "已整合"),
             ],
-            chips=["完整版", "不可缺功能", "雙寫同步", "匯入自選股", "推薦後績效", "回測校正", "最強模式", "最強類別", "UI永久記錄"],
+            chips=["完整版", "不可缺功能", "雙寫同步", "匯入自選股", "推薦後績效", "回測校正", "最強模式", "最強類別", "權重回饋V15", "UI永久記錄"],
         )
 
 
