@@ -40,7 +40,7 @@ except Exception:
 
 PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
-GOD_DECISION_V5_LINK_VERSION = "recommend_list_v5_link_v1_20260427"
+GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
 DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
 V5_BACKFILL_FIX_VERSION = "recommend_list_v5_backfill_fix_v1_20260427"
 READ_FALLBACK_VERSION = "recommend_list_multi_source_read_v1_20260427"
@@ -68,6 +68,22 @@ GODPICK_RECORD_COLUMNS = [
     "止跌轉強分數",
     "機會股分數",
     "機會股說明",
+    "進場時機",
+    "進場時機分數",
+    "建議動作",
+    "等待條件",
+    "近端支撐",
+    "主要支撐",
+    "近端壓力",
+    "突破確認價",
+    "停損參考",
+    "操作區間",
+    "風險報酬比_決策",
+    "追高風險分數_決策",
+    "追高風險等級",
+    "是否建議追價",
+    "風險扣分原因",
+    "決策說明",
     "推薦等級",
     "推薦總分",
     "股神決策模式",
@@ -510,17 +526,17 @@ def _derive_v5_from_legacy_row(row: pd.Series) -> dict[str, Any]:
     }
 
 
-def _backfill_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _backfill_v10_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     x = df.copy()
     x = x.loc[:, ~x.columns.duplicated()].copy()
-    v5_cols = [
-        "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分",
+    v10_cols = [
+        "股神決策模式", "股神進場建議", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "追高風險等級", "是否建議追價", "推薦分層", "建議部位%", "風險報酬比", "追價風險分",
         "停損距離%", "目標報酬%", "不建議買進原因", "最佳操作劇本", "隔日操作建議",
         "失效價位", "轉弱條件", "大盤情境調權說明", "大盤情境分桶"
     ]
-    for c in v5_cols:
+    for c in v10_cols:
         if c not in x.columns:
             x[c] = ""
     for idx, row in x.iterrows():
@@ -574,7 +590,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
             x.loc[mask, "股神推論邏輯"] = x.loc[mask].apply(_derive_list_logic, axis=1)
     num_cols = [
         "推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
-        "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+        "同類股領先幅度", "推薦價格", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數"
     ]
     for c in num_cols:
@@ -586,7 +602,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         x[c] = x[c].fillna("").astype(str)
     x["股票代號"] = x["股票代號"].map(_normalize_code)
     x["股票名稱"] = x["股票名稱"].fillna("").astype(str)
-    x = _backfill_v5_columns(x)
+    x = _backfill_v10_columns(x)
     x = x.loc[:, ~x.columns.duplicated()].copy()
     return x[GODPICK_RECORD_COLUMNS].copy()
 
@@ -805,10 +821,10 @@ def _filter_df(df: pd.DataFrame, start_date: date, end_date: date, mode: str, st
 def _format_show_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     show = show.loc[:, ~show.columns.duplicated()].copy()
-    show = _backfill_v5_columns(show)
+    show = _backfill_v10_columns(show)
     show = show.drop(columns=[c for c in ["record_id"] if c in show.columns])
     num1_cols = ["推薦總分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "同類股領先幅度", "實際報酬%", "損益幅%"]
-    price_cols = ["推薦價格", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額"]
+    price_cols = ["推薦價格", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額"]
     for c in num1_cols:
         if c in show.columns:
             show[c] = show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
@@ -889,9 +905,9 @@ def main():
 
     render_pro_section("推薦清單明細")
     show_cols = [
-        "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分", "飆股起漲分數", "起漲等級", "起漲摘要",
+        "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "股神決策模式", "股神進場建議", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "追高風險等級", "是否建議追價", "推薦分層", "建議部位%", "風險報酬比", "追價風險分", "飆股起漲分數", "起漲等級", "起漲摘要",
         "買點分級", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
-        "推薦價格", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態",
+        "推薦價格", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態",
         "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要", "備註"
     ]
     existing_cols = []
