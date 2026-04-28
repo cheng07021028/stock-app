@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import base64
+import os
+import tempfile
 
 import pandas as pd
 import requests
@@ -71,6 +73,46 @@ def _payload_hash(payload: dict[str, list[dict[str, str]]]) -> str:
 def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_msg")] = msg
     st.session_state[_k("status_type")] = level
+
+
+def _local_watchlist_path() -> str:
+    """自選股本機 JSON 固定儲存位置。
+
+    GitHub 只是雲端備份 / 部署回寫，本機 watchlist.json 才是 Streamlit
+    各頁面同步讀取的最低保證來源。若 GitHub token 未設定或 API 失敗，仍必須
+    成功寫入本機，避免新增自選股後換頁消失。
+    """
+    try:
+        cfg_path = _safe_str(st.secrets.get("WATCHLIST_LOCAL_PATH", ""))
+    except Exception:
+        cfg_path = ""
+    return cfg_path or "watchlist.json"
+
+
+def _safe_write_json_local(path: str, payload: Any) -> tuple[bool, str]:
+    """安全寫入 JSON：先寫暫存檔，再原子替換，降低寫壞 watchlist.json 的風險。"""
+    try:
+        folder = os.path.dirname(path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+
+        target_dir = folder or "."
+        fd, tmp_path = tempfile.mkstemp(prefix="watchlist_", suffix=".tmp", dir=target_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+        return True, f"已寫入本機 JSON：{path}"
+    except Exception as e:
+        return False, f"本機 JSON 寫入失敗：{e}"
+
+
+def _clear_watchlist_cache_safely():
+    """清除自選股快取，讓其他頁面下一次讀取立即吃到最新 watchlist.json。"""
+    try:
+        if hasattr(get_normalized_watchlist, "clear"):
+            get_normalized_watchlist.clear()
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -342,8 +384,20 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
 
 
 def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool:
+    """強制儲存自選股。
+
+    v3 修正重點：
+    1. 先寫本機 watchlist.json，確保換頁 / 重新整理 / 其他模組一定讀得到。
+    2. GitHub API 只當遠端同步；未設定 token 或 API 失敗時，不視為整體失敗。
+    3. 寫入後同步 session_state 並清除 get_normalized_watchlist cache。
+    """
     payload = _normalize_watchlist_payload(data)
-    ok, msg = _push_watchlist_to_github(payload)
+
+    local_path = _local_watchlist_path()
+    local_ok, local_msg = _safe_write_json_local(local_path, payload)
+    _clear_watchlist_cache_safely()
+
+    github_ok, github_msg = _push_watchlist_to_github(payload)
 
     version = int(st.session_state.get(_k("version"), 0)) + 1
     saved_at = _now_text()
@@ -353,20 +407,22 @@ def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool
     st.session_state[_k("version")] = version
     st.session_state[_k("last_saved_at")] = saved_at
     st.session_state[_k("payload_hash")] = payload_md5
-    st.session_state[_k("last_github_msg")] = msg
+    st.session_state[_k("last_local_msg")] = local_msg
+    st.session_state[_k("last_github_msg")] = github_msg
 
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
     st.session_state["watchlist_version"] = version
     st.session_state["watchlist_last_saved_at"] = saved_at
     st.session_state["watchlist_last_saved_hash"] = payload_md5
 
-    if ok:
-        _set_status(f"{msg}｜版本 v{version}｜{saved_at}", "success")
+    if local_ok and github_ok:
+        _set_status(f"{local_msg}｜{github_msg}｜版本 v{version}｜{saved_at}", "success")
+    elif local_ok and not github_ok:
+        _set_status(f"{local_msg}｜GitHub 未同步：{github_msg}｜版本 v{version}｜{saved_at}", "warning")
     else:
-        _set_status(msg, "error")
+        _set_status(f"{local_msg}｜GitHub：{github_msg}", "error")
 
-    return ok
-
+    return bool(local_ok)
 
 def _persist_watchlist(success_msg: str) -> bool:
     ok = _force_write_watchlist_github(st.session_state[_k("watchlist")])
@@ -546,6 +602,7 @@ def _init_state():
         "status_type": "info",
         "last_saved_at": "",
         "last_github_msg": "",
+        "last_local_msg": "",
         "version": int(st.session_state.get("watchlist_version", 0) or 0),
         "payload_hash": "",
         "batch_delete_codes": [],
@@ -991,7 +1048,7 @@ def main():
         title="自選股中心｜升級完整版",
         subtitle="保留 GitHub 強制回寫，並串接股神推薦紀錄，顯示最近推薦分數 / 買點分級 / 推薦模式 / 推薦時間。",
     )
-    st.caption("股票主檔來源已統一改由 stock_master_service.py 提供，與股神推薦 / 股票主檔更新頁共用同一份主檔。")
+    st.caption("股票主檔來源已統一改由 stock_master_service.py 提供；自選股變更會先寫入本機 watchlist.json，再嘗試同步 GitHub。")
 
     overview_df = _build_overview_df(watchlist, rec_map)
     group_summary_df = _build_group_summary_df(watchlist, rec_map)
@@ -1033,15 +1090,16 @@ def main():
     with reload_cols[2]:
         st.caption("重新同步會強制清除 watchlist 快取，重新讀取 watchlist.json、股票主檔與股神推薦紀錄，確保『全部自選股總覽』更新。")
 
-    render_pro_section("GitHub 回寫設定")
+    render_pro_section("自選股儲存 / GitHub 回寫設定")
     render_pro_info_card(
         "目前目標",
         [
             ("Owner", github_cfg["owner"], ""),
             ("Repo", github_cfg["repo"], ""),
             ("Branch", github_cfg["branch"], ""),
-            ("Path", github_cfg["path"], ""),
-            ("Token 狀態", "已設定" if github_cfg["token"] else "未設定", ""),
+            ("GitHub Path", github_cfg["path"], ""),
+            ("本機 JSON", _local_watchlist_path(), ""),
+            ("Token 狀態", "已設定" if github_cfg["token"] else "未設定（仍會寫入本機 JSON）", ""),
         ],
     )
 
@@ -1181,10 +1239,11 @@ def main():
         render_pro_info_card(
             "回寫狀態",
             [
-                ("模式", "GitHub API 強制回寫", ""),
+                ("模式", "本機 JSON 必寫 + GitHub 選配同步", ""),
                 ("版本", f"v{st.session_state.get(_k('version'), 0)}", ""),
                 ("最後儲存", st.session_state.get(_k("last_saved_at"), "—") or "—", ""),
-                ("最後訊息", st.session_state.get(_k("last_github_msg"), "—") or "—", ""),
+                ("本機訊息", st.session_state.get(_k("last_local_msg"), "—") or "—", ""),
+                ("GitHub訊息", st.session_state.get(_k("last_github_msg"), "—") or "—", ""),
             ],
         )
 
