@@ -3222,16 +3222,18 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "市場別": _safe_str(r.get("市場別")) or "上市",
                 "類別": _normalize_category(r.get("類別")),
                 "推薦模式": mode,
-            "K線驗證標記": "已建立K線驗證資料",
-            "推薦日價格": bundle["close_now"],
-            "推薦日支撐壓力摘要": (
-                f"近端支撐 {format_number(bundle.get('entry_decision', {}).get('近端支撐'), 2)}｜"
-                f"主要支撐 {format_number(bundle.get('entry_decision', {}).get('主要支撐'), 2)}｜"
-                f"近端壓力 {format_number(bundle.get('entry_decision', {}).get('近端壓力'), 2)}｜"
-                f"停損 {format_number(bundle.get('entry_decision', {}).get('停損參考'), 2)}"
-            ),
-            "K線查詢參數": f"stock_code={code}&source=godpick",
-            "K線檢視提示": "至 3_歷史K線分析，輸入/帶入此股票，可對照推薦價、支撐、壓力、停損與後續走勢。",
+                "K線驗證標記": "已建立K線驗證資料",
+                # v26.1：修正匯出/匯入紀錄時 bundle 未定義造成 NameError。
+                # 這裡是由完整推薦表 rec_df 建立紀錄，因此直接使用當列 r 的價格與支撐壓力欄位。
+                "推薦日價格": _safe_float(r.get("最新價") if pd.notna(r.get("最新價")) else r.get("推薦價格")),
+                "推薦日支撐壓力摘要": (
+                    f"近端支撐 {format_number(_safe_float(r.get('近端支撐')), 2)}｜"
+                    f"主要支撐 {format_number(_safe_float(r.get('主要支撐')), 2)}｜"
+                    f"近端壓力 {format_number(_safe_float(r.get('近端壓力')), 2)}｜"
+                    f"停損 {format_number(_safe_float(r.get('停損參考') if pd.notna(r.get('停損參考')) else r.get('停損價')), 2)}"
+                ),
+                "K線查詢參數": f"stock_code={code}&source=godpick",
+                "K線檢視提示": "至 3_歷史K線分析，輸入/帶入此股票，可對照推薦價、支撐、壓力、停損與後續走勢。",
                 "推薦等級": _safe_str(r.get("推薦等級")),
                 "推薦總分": _safe_float(r.get("推薦總分")),
                 "買點分級": _safe_str(r.get("買點分級")),
@@ -4380,6 +4382,115 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
     except Exception as e:
         st.session_state[_k("last_record_write_detail")] = [f"例外：{e}"]
         return 0, [f"寫入 8_股神推薦紀錄失敗：{e}"]
+
+
+def _normalize_recommend_list_payload(payload) -> list[dict[str, Any]]:
+    """v26：支援 10_推薦清單 的 list / dict 格式。"""
+    if isinstance(payload, dict):
+        if isinstance(payload.get("recommendations"), list):
+            payload = payload.get("recommendations")
+        elif isinstance(payload.get("records"), list):
+            payload = payload.get("records")
+        elif isinstance(payload.get("data"), list):
+            payload = payload.get("data")
+        else:
+            payload = []
+    if not isinstance(payload, list):
+        return []
+    return [dict(x) for x in payload if isinstance(x, dict)]
+
+
+def _recommend_list_business_key(row: dict[str, Any]) -> str:
+    """v26：推薦清單防呆，同一天 + 同股票 + 同推薦模式不重複。"""
+    return (
+        f"{_normalize_code(row.get('股票代號'))}|"
+        f"{_safe_str(row.get('推薦日期'))}|"
+        f"{_safe_str(row.get('推薦模式'))}"
+    )
+
+
+def _build_recommend_list_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[str]) -> list[dict[str, Any]]:
+    if rec_df is None or rec_df.empty:
+        return []
+    codes = {_normalize_code(x) for x in selected_codes if _normalize_code(x)}
+    if not codes or "股票代號" not in rec_df.columns:
+        return []
+
+    rec_date = _now_date_text()
+    rec_time = _now_time_text()
+    build_time = _now_text()
+    work = rec_df[rec_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in codes)].copy()
+
+    rows: list[dict[str, Any]] = []
+    for _, r in work.iterrows():
+        row = dict(r)
+        code = _normalize_code(row.get("股票代號"))
+        mode = _safe_str(row.get("推薦模式"))
+        row["股票代號"] = code
+        row["股票名稱"] = _safe_str(row.get("股票名稱"))
+        row["市場別"] = _safe_str(row.get("市場別")) or "上市"
+        row["類別"] = _normalize_category(row.get("類別"))
+        row["推薦日期"] = _safe_str(row.get("推薦日期")) or rec_date
+        row["推薦時間"] = _safe_str(row.get("推薦時間")) or rec_time
+        row["推薦模式"] = mode
+        row["資料來源"] = _safe_str(row.get("資料來源")) or "7_股神推薦_完整推薦表"
+        row["狀態"] = _safe_str(row.get("狀態")) or "觀察中"
+        row["建立時間"] = _safe_str(row.get("建立時間")) or build_time
+        row["更新時間"] = build_time
+        if not _safe_str(row.get("record_id")):
+            row["record_id"] = _create_record_id(code, row["推薦日期"], row["推薦時間"], mode)
+        rows.append(row)
+    return rows
+
+
+def _append_recommend_list_from_full_table(rec_df: pd.DataFrame, selected_codes: list[str]) -> tuple[int, list[str]]:
+    """
+    v26：從完整推薦表勾選資料寫入 10_推薦清單。
+    防呆：同一天 + 股票代號 + 推薦模式 不重複。
+    """
+    new_rows = _build_recommend_list_rows_from_rec_df(rec_df, selected_codes)
+    if not new_rows:
+        return 0, ["沒有可寫入推薦清單的資料。"]
+
+    github_payload, github_msg = _read_json_from_github_path(GODPICK_LIST_FILE, [])
+    local_payload = _safe_json_read_local(GODPICK_LIST_FILE, [])
+
+    old_rows = []
+    old_rows.extend(_normalize_recommend_list_payload(github_payload))
+    old_rows.extend(_normalize_recommend_list_payload(local_payload))
+
+    merged_map: dict[str, dict[str, Any]] = {}
+    for row in old_rows:
+        key = _recommend_list_business_key(row)
+        if key.strip("|"):
+            merged_map[key] = row
+
+    added = 0
+    messages: list[str] = []
+    for row in new_rows:
+        key = _recommend_list_business_key(row)
+        code = _normalize_code(row.get("股票代號"))
+        name = _safe_str(row.get("股票名稱"))
+        if not key.strip("|") or not code:
+            messages.append(f"{code or '空代號'} 資料不完整，未寫入推薦清單")
+            continue
+        if key in merged_map:
+            messages.append(f"{code} {name} 今日同推薦模式已在 10_推薦清單，略過")
+            continue
+        merged_map[key] = row
+        added += 1
+        messages.append(f"{code} {name} 已加入 10_推薦清單")
+
+    merged_rows = list(merged_map.values())
+
+    local_ok, local_msg = _safe_json_write_local(GODPICK_LIST_FILE, merged_rows)
+    github_ok, github_msg2 = _write_json_to_github_path(GODPICK_LIST_FILE, merged_rows)
+
+    messages.append(local_msg)
+    messages.append(github_msg2 if github_ok else f"GitHub 同步略過/失敗：{github_msg2 or github_msg}")
+
+    return added, messages
+
 
 
 # =========================================================
@@ -7701,7 +7812,7 @@ def main():
 
         st.caption(f"完整推薦表目前勾選：{len(full_picked_codes)} 檔。可直接匯入 05_自選股中心 或 09_股神推薦紀錄。")
 
-        full_a1, full_a2, full_a3, full_a4, full_a5 = st.columns([1.25, 1.25, 1.25, 1.25, 2.0])
+        full_a1, full_a2, full_a3, full_a4 = st.columns([1.4, 1.3, 1.3, 1.6])
         with full_a1:
             group_options_full = list(watchlist_map.keys()) if isinstance(watchlist_map, dict) and watchlist_map else ["預設"]
             default_full_group = st.session_state.get(_k("full_table_pick_group"), st.session_state.get(_k("rec_pick_group"), group_options_full[0]))
@@ -7729,6 +7840,22 @@ def main():
                 key=_k("full_table_add_record"),
             )
         with full_a4:
+            full_add_list = st.button(
+                "匯入 10_推薦清單",
+                use_container_width=True,
+                disabled=(len(full_picked_codes) == 0),
+                key=_k("full_table_add_recommend_list"),
+            )
+
+        full_b1, full_b2, full_b3 = st.columns([1.5, 1.35, 3.0])
+        with full_b1:
+            full_sync_all = st.button(
+                "一鍵同步 05 + 09 + 10",
+                use_container_width=True,
+                disabled=(len(full_picked_codes) == 0),
+                key=_k("full_table_sync_all"),
+            )
+        with full_b2:
             # v25.7：完整推薦表直接匯出 Excel。
             export_target_df = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()
             export_target_cols = ["勾選"] + [c for c in full_show_cols if c != "勾選"]
@@ -7756,8 +7883,8 @@ def main():
                 use_container_width=True,
                 key=_k("full_table_excel_download"),
             )
-        with full_a5:
-            st.caption("這裡會直接使用完整推薦表左側的勾選欄；有勾選時匯出勾選資料，未勾選時匯出完整表。")
+        with full_b3:
+            st.caption("v26：可從完整推薦表勾選後，分別匯入 05/09/10，或一鍵同步三個模組；各模組都有重複匯入防呆。")
 
         if full_add_watchlist:
             work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
@@ -7795,6 +7922,48 @@ def main():
                 st.warning("沒有新增任何推薦紀錄：可能今天同股票、同推薦模式已存在，已由防呆機制阻擋重複匯入。")
             with st.expander("推薦紀錄寫入明細", expanded=True):
                 for msg in record_msgs:
+                    st.write(f"- {msg}")
+
+
+        if full_add_list:
+            added_list_count, list_msgs = _append_recommend_list_from_full_table(rec_df, full_picked_codes)
+            if added_list_count > 0:
+                st.success(f"已從完整推薦表寫入 {added_list_count} 筆到 10_推薦清單")
+            else:
+                st.warning("沒有新增任何推薦清單資料：可能今天同股票、同推薦模式已存在，已由防呆機制阻擋重複匯入。")
+            with st.expander("推薦清單寫入明細", expanded=True):
+                for msg in list_msgs:
+                    st.write(f"- {msg}")
+
+        if full_sync_all:
+            sync_messages = []
+            work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
+            picked_rows = []
+            for _, r in work.iterrows():
+                picked_rows.append(
+                    {
+                        "code": _normalize_code(r.get("股票代號")),
+                        "name": _safe_str(r.get("股票名稱")),
+                        "market": _safe_str(r.get("市場別")) or "上市",
+                        "category": _normalize_category(r.get("類別")),
+                    }
+                )
+
+            added_wl, msg_wl = _append_multiple_stocks_to_watchlist(full_target_group, picked_rows)
+            record_rows = _build_record_rows_from_rec_df(rec_df, full_picked_codes)
+            added_rec, msg_rec = _append_godpick_records(record_rows, force_duplicate=False)
+            added_list, msg_list = _append_recommend_list_from_full_table(rec_df, full_picked_codes)
+
+            st.success(f"一鍵同步完成：05自選股新增 {added_wl} 檔｜09紀錄新增 {added_rec} 筆｜10清單新增 {added_list} 筆")
+            with st.expander("一鍵同步明細", expanded=True):
+                st.write("#### 05_自選股中心")
+                for msg in msg_wl:
+                    st.write(f"- {msg}")
+                st.write("#### 09_股神推薦紀錄")
+                for msg in msg_rec:
+                    st.write(f"- {msg}")
+                st.write("#### 10_推薦清單")
+                for msg in msg_list:
                     st.write(f"- {msg}")
 
     with tabs[1]:
