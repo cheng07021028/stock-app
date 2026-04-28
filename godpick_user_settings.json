@@ -259,7 +259,6 @@
       "電源供應",
       "電腦及週邊設備業",
       "面板",
-      "食品民生",
       "高速傳輸"
     ],
     "min_total_score": 85.0,
@@ -270,6 +269,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-28 15:27:26",
+  "updated_at": "2026-04-28 15:27:32",
   "version": "godpick_v5_persistent_settings"
 }
