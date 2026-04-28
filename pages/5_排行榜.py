@@ -489,6 +489,8 @@ def _get_history_from_kline_page_rank(stock_no: str, stock_name: str, market_typ
 
         page3_path = Path(__file__).with_name("3_歷史K線分析.py")
         if not page3_path.exists():
+            page3_path = Path(__file__).with_name("3_#U6b77#U53f2K#U7dda#U5206#U6790.py")
+        if not page3_path.exists():
             return pd.DataFrame(), ""
 
         spec = importlib.util.spec_from_file_location("rank_kline_bridge", str(page3_path))
