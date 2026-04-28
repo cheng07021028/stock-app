@@ -2,6 +2,8 @@ import io
 import json
 import os
 import time
+import hashlib
+from pathlib import Path
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -1703,6 +1705,93 @@ def render_realtime_table(df, height=520):
     st.dataframe(styler, use_container_width=True, hide_index=True, height=height)
 
 
+
+# =========================================================
+# V22 歷史資料本機快取：加速全量掃描，不做預篩、不漏股票
+# =========================================================
+HISTORY_DISK_CACHE_DIR = Path("cache") / "history"
+HISTORY_DISK_CACHE_MAX_AGE_HOURS = 18
+
+
+def _history_disk_cache_key(stock_no, market_type, start_date, end_date) -> str:
+    raw = f"{str(stock_no).strip()}|{str(market_type).strip()}|{pd.to_datetime(start_date).date()}|{pd.to_datetime(end_date).date()}"
+    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:18]
+
+
+def _history_disk_cache_path(stock_no, market_type, start_date, end_date) -> Path:
+    code = str(stock_no).strip() or "unknown"
+    mk = str(market_type).strip() or "market"
+    key = _history_disk_cache_key(code, mk, start_date, end_date)
+    safe_mk = "".join(ch for ch in mk if ch.isalnum() or ch in ["_", "-"]) or "market"
+    return HISTORY_DISK_CACHE_DIR / f"{code}_{safe_mk}_{pd.to_datetime(start_date).date()}_{pd.to_datetime(end_date).date()}_{key}.pkl"
+
+
+def _load_history_disk_cache(stock_no, market_type, start_date, end_date) -> pd.DataFrame:
+    try:
+        path = _history_disk_cache_path(stock_no, market_type, start_date, end_date)
+        if not path.exists():
+            return pd.DataFrame()
+        age_hours = max((time.time() - path.stat().st_mtime) / 3600, 0)
+        end_day = pd.to_datetime(end_date).date()
+        today = date.today()
+        # 非今日區間視為歷史資料，可長期使用；含今日資料則用較短 TTL。
+        if end_day >= today and age_hours > HISTORY_DISK_CACHE_MAX_AGE_HOURS:
+            return pd.DataFrame()
+        df = pd.read_pickle(path)
+        if isinstance(df, pd.DataFrame) and not df.empty and "收盤價" in df.columns:
+            return df.copy()
+    except Exception:
+        return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def _save_history_disk_cache(stock_no, market_type, start_date, end_date, df: pd.DataFrame) -> None:
+    try:
+        if df is None or df.empty:
+            return
+        HISTORY_DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _history_disk_cache_path(stock_no, market_type, start_date, end_date)
+        tmp = path.with_suffix(".tmp")
+        df.copy().to_pickle(tmp)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def clear_history_disk_cache() -> tuple[int, str]:
+    """清除 V22 本機歷史快取。回傳刪除檔數與訊息。"""
+    try:
+        if not HISTORY_DISK_CACHE_DIR.exists():
+            return 0, "歷史快取資料夾不存在，無需清除。"
+        n = 0
+        for f in HISTORY_DISK_CACHE_DIR.glob("*.pkl"):
+            try:
+                f.unlink()
+                n += 1
+            except Exception:
+                pass
+        return n, f"已清除 {n} 個歷史快取檔。"
+    except Exception as e:
+        return 0, f"清除歷史快取失敗：{e}"
+
+
+def get_history_disk_cache_stats() -> dict:
+    try:
+        if not HISTORY_DISK_CACHE_DIR.exists():
+            return {"exists": False, "files": 0, "size_mb": 0.0, "latest_update": "", "path": str(HISTORY_DISK_CACHE_DIR)}
+        files = list(HISTORY_DISK_CACHE_DIR.glob("*.pkl"))
+        size = sum((f.stat().st_size for f in files if f.exists()), 0)
+        latest = max((f.stat().st_mtime for f in files), default=0)
+        return {
+            "exists": True,
+            "files": len(files),
+            "size_mb": round(size / 1024 / 1024, 2),
+            "latest_update": datetime.fromtimestamp(latest).strftime("%Y-%m-%d %H:%M:%S") if latest else "",
+            "path": str(HISTORY_DISK_CACHE_DIR),
+        }
+    except Exception as e:
+        return {"exists": False, "files": 0, "size_mb": 0.0, "latest_update": "", "path": str(HISTORY_DISK_CACHE_DIR), "error": str(e)}
+
 # =========================================================
 # 歷史K資料：TWSE + TPEx 共用穩定版
 # =========================================================
@@ -2040,10 +2129,19 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     if end_ts < start_ts:
         return pd.DataFrame()
 
-    # 第一來源：Yahoo 高速日線。失敗不代表該股票沒資料，必須 fallback 官方來源。
+    # V22：第一層先讀本機歷史快取。這不會跳過股票，只是避免重複下載同一段 K 線。
+    try:
+        cached_df = _load_history_disk_cache(stock_no, market_type, start_ts, end_ts)
+        if cached_df is not None and not cached_df.empty:
+            return cached_df
+    except Exception:
+        pass
+
+    # 第二來源：Yahoo 高速日線。失敗不代表該股票沒資料，必須 fallback 官方來源。
     try:
         fast_df = _fetch_yahoo_history_fast(stock_no, market_type=market_type, start_date=start_ts, end_date=end_ts)
         if fast_df is not None and not fast_df.empty:
+            _save_history_disk_cache(stock_no, market_type, start_ts, end_ts, fast_df)
             return fast_df
     except Exception:
         pass
@@ -2070,6 +2168,7 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
             raw_df = pd.concat(frames, ignore_index=True)
             df = _normalize_history_df(raw_df, source, start_ts, end_ts)
             if not df.empty:
+                _save_history_disk_cache(stock_no, mk, start_ts, end_ts, df)
                 return df
 
     return pd.DataFrame()
