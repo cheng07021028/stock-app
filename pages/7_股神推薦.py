@@ -2430,10 +2430,11 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
         return base_df.copy()
 
     merged = pd.concat([base_df, new_df], ignore_index=True)
+    # v25.9：推薦紀錄防呆改為「同一天 + 同股票代號 + 同推薦模式」不重複。
+    # 不再把推薦時間納入 business key，避免同一天重複按匯入造成重複紀錄。
     merged["_biz_key"] = (
         merged["股票代號"].fillna("").astype(str) + "|"
         + merged["推薦日期"].fillna("").astype(str) + "|"
-        + merged["推薦時間"].fillna("").astype(str) + "|"
         + merged["推薦模式"].fillna("").astype(str)
     )
     merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
@@ -5905,6 +5906,53 @@ def _build_recommend_df(
     return final_df, category_strength_df, hot_pick_df
 
 
+
+def _extract_checked_codes_from_editor_state(editor_key: str, source_df: pd.DataFrame) -> list[str]:
+    """
+    v25.8：修正 st.data_editor 勾選需點兩次的問題。
+    同時讀取回傳 DataFrame 與 st.session_state[editor_key]["edited_rows"]。
+    """
+    if source_df is None or source_df.empty or "股票代號" not in source_df.columns:
+        return []
+
+    base_df = source_df.reset_index(drop=True).copy()
+    checked_map: dict[str, bool] = {}
+
+    for idx, row in base_df.iterrows():
+        code = _normalize_code(row.get("股票代號"))
+        if not code:
+            continue
+        val = row.get("勾選", False)
+        if isinstance(val, bool):
+            checked_map[code] = val
+        else:
+            checked_map[code] = str(val).strip().lower() in {"true", "1", "yes", "y", "是"}
+
+    raw_state = st.session_state.get(editor_key, {})
+    edited_rows = raw_state.get("edited_rows", {}) if isinstance(raw_state, dict) else {}
+    if isinstance(edited_rows, dict):
+        for raw_idx, changes in edited_rows.items():
+            try:
+                idx = int(raw_idx)
+            except Exception:
+                continue
+            if idx < 0 or idx >= len(base_df):
+                continue
+            if not isinstance(changes, dict) or "勾選" not in changes:
+                continue
+            code = _normalize_code(base_df.iloc[idx].get("股票代號"))
+            if not code:
+                continue
+            val = changes.get("勾選")
+            if isinstance(val, bool):
+                checked_map[code] = val
+            else:
+                checked_map[code] = str(val).strip().lower() in {"true", "1", "yes", "y", "是"}
+
+    return [code for code, flag in checked_map.items() if flag]
+
+
+
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2"]
@@ -7639,17 +7687,8 @@ def main():
             },
         )
 
-        full_picked_codes = []
-        for _, row in full_editor_df.iterrows():
-            picked_val = row.get("勾選", False)
-            if isinstance(picked_val, bool):
-                is_checked = picked_val
-            else:
-                is_checked = str(picked_val).strip().lower() in {"true", "1", "yes", "y", "是"}
-            if is_checked:
-                code = _normalize_code(row.get("股票代號"))
-                if code:
-                    full_picked_codes.append(code)
+        # v25.8：同時讀取 data_editor 回傳值與 widget edited_rows，避免勾選要點兩次才生效。
+        full_picked_codes = _extract_checked_codes_from_editor_state(_k("full_table_editor"), full_editor_df)
 
         # 去重但保留表格順序。
         full_picked_codes = list(dict.fromkeys(full_picked_codes))
@@ -7745,12 +7784,15 @@ def main():
 
         if full_add_record:
             record_rows = _build_record_rows_from_rec_df(rec_df, full_picked_codes)
-            added_count, record_msgs = _append_godpick_records(record_rows)
+            # v25.9：完整推薦表匯入推薦紀錄加入防呆。
+            # 同一天 + 同股票代號 + 同推薦模式 已存在時，不再重複新增。
+            added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=False)
             if added_count > 0:
                 st.success(f"已從完整推薦表寫入 {added_count} 筆到 09_股神推薦紀錄")
                 st.session_state[_k("rec_record_codes_next")] = full_picked_codes
+                st.session_state[_k("full_table_selected_codes")] = full_picked_codes
             else:
-                st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
+                st.warning("沒有新增任何推薦紀錄：可能今天同股票、同推薦模式已存在，已由防呆機制阻擋重複匯入。")
             with st.expander("推薦紀錄寫入明細", expanded=True):
                 for msg in record_msgs:
                     st.write(f"- {msg}")
