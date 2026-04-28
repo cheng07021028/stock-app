@@ -406,21 +406,81 @@ def _get_code_name_map_df() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _get_history_data_compare_smart(code: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, str]:
+    """多股比較專用歷史資料防呆。
+    先依主檔市場別抓取；若市場別錯誤或 API 無資料，會自動交叉嘗試上市 / 上櫃 / 興櫃。
+    重點：抓不到時回傳空表與診斷字串，不把價格偽裝成 0。
+    """
+    code = _safe_str(code)
+    stock_name = _safe_str(stock_name)
+    base_market = _safe_str(market_type) or "上市"
+
+    candidates: list[str] = []
+    for mk in [base_market, "上櫃", "上市", "興櫃", ""]:
+        mk = _safe_str(mk)
+        if mk not in candidates:
+            candidates.append(mk)
+
+    debug_lines: list[str] = []
+    for mk in candidates:
+        try:
+            raw_df = get_history_data(
+                stock_no=code,
+                stock_name=stock_name,
+                market_type=mk,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except TypeError:
+            try:
+                raw_df = get_history_data(
+                    stock_no=code,
+                    stock_name=stock_name,
+                    market_type=mk,
+                    start_dt=start_date,
+                    end_dt=end_date,
+                )
+            except Exception as e:
+                debug_lines.append(f"{mk or '空'}:TypeError fallback failed {e}")
+                raw_df = pd.DataFrame()
+        except Exception as e:
+            debug_lines.append(f"{mk or '空'}:{e}")
+            raw_df = pd.DataFrame()
+
+        df = _prepare_history_df(raw_df)
+        debug_lines.append(f"{mk or '空'}={len(df)}")
+        if not df.empty:
+            try:
+                df["資料源"] = f"utils:{mk or '空'}"
+            except Exception:
+                pass
+            return df, (mk or base_market), "｜".join(debug_lines[-12:])
+
+    return pd.DataFrame(), base_market, "｜".join(debug_lines[-12:])
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_date: date, end_date: date) -> dict[str, Any]:
     all_code_name_df = _get_code_name_map_df()
     stock_name, market_type2 = get_stock_name_and_market(code, all_code_name_df, manual_name)
     market = market_type or market_type2 or "上市"
 
-    raw_df = get_history_data(
-        stock_no=code,
+    df, used_market, history_debug = _get_history_data_compare_smart(
+        code=code,
         stock_name=stock_name,
         market_type=market,
         start_date=start_date,
         end_date=end_date,
     )
-    df = _prepare_history_df(raw_df)
     if df.empty or len(df) < 2:
-        return {"ok": False, "code": code, "name": stock_name, "market": market}
+        return {
+            "ok": False,
+            "code": code,
+            "name": stock_name,
+            "market": used_market,
+            "source": "none",
+            "history_debug": history_debug,
+        }
 
     signal_raw = compute_signal_snapshot(df)
     sr_raw = compute_support_resistance_snapshot(df)
@@ -456,9 +516,11 @@ def _get_compare_snapshot(code: str, manual_name: str, market_type: str, start_d
         "ok": True,
         "code": code,
         "name": stock_name,
-        "market": market,
+        "market": used_market,
         "label": f"{code} {stock_name}",
         "days": len(df),
+        "source": _safe_str(df["資料源"].iloc[-1]) if "資料源" in df.columns and not df.empty else f"utils:{used_market}",
+        "history_debug": history_debug,
         "last_close": last_close,
         "interval_pct": interval_pct,
         "signal_score": signal_score,
@@ -523,6 +585,7 @@ def _build_compare_df(items_payload: tuple, start_date: date, end_date: date) ->
                 "壓力訊號": _signal_label(sr.get("pressure_signal", ("中性", "pro-flat")), "中性"),
                 "支撐訊號": _signal_label(sr.get("support_signal", ("中性", "pro-flat")), "中性"),
                 "區間訊號": _signal_label(sr.get("break_signal", ("區間內", "pro-flat")), "區間內"),
+                "資料源": snap.get("source", ""),
             }
         )
 
@@ -546,7 +609,8 @@ def _build_compare_df(items_payload: tuple, start_date: date, end_date: date) ->
         "60日支撐",
     ]
     for col in num_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
 
