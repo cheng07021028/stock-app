@@ -194,7 +194,7 @@
   "scan_settings": {
     "universe_mode": "全市場",
     "group": "庫存",
-    "days": 90,
+    "days": 180,
     "top_n": 10,
     "manual_codes": "",
     "scan_limit": "全部",
@@ -257,6 +257,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-28 15:32:26",
+  "updated_at": "2026-04-28 21:48:14",
   "version": "godpick_v5_persistent_settings"
 }
