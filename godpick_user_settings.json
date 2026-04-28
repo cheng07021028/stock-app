@@ -152,10 +152,10 @@
     "min_signal_score": -2.0,
     "min_prelaunch_score": 45.0,
     "min_trade_score": 45.0,
-    "recommend_mode": "波段模式",
+    "recommend_mode": "飆股模式",
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-28 09:11:39",
+  "updated_at": "2026-04-28 09:11:51",
   "version": "godpick_v5_persistent_settings"
 }
