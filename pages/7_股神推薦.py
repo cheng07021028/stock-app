@@ -135,6 +135,19 @@ GODPICK_RECORD_COLUMNS = [
     "股神決策模式",
     "股神進場建議",
     "建議部位%",
+    "建議倉位%",
+    "建議投入等級",
+    "分批策略",
+    "第一筆進場%",
+    "第二筆加碼條件",
+    "停利策略",
+    "停損策略",
+    "最大風險%",
+    "資金風險說明",
+    "單檔風險等級",
+    "族群集中警示",
+    "組合配置建議",
+
     "風險報酬比",
     "追價風險分",
     "停損距離%",
@@ -1747,6 +1760,200 @@ def _derive_weak_condition_v5(row: pd.Series) -> str:
     return "、".join(parts)
 
 
+
+
+# =========================================================
+# V16 股神風控與資金配置
+# =========================================================
+def _derive_v16_single_risk_level(row: pd.Series) -> str:
+    chase = _safe_float(row.get("追價風險分"), _safe_float(row.get("追高風險分數_決策"), 50)) or 50
+    stop_dist = _safe_float(row.get("停損距離%"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), _safe_float(row.get("風險報酬比_決策"), 0)) or 0
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    risk = 35.0
+    if chase >= 80:
+        risk += 28
+    elif chase >= 70:
+        risk += 18
+    elif chase <= 50:
+        risk -= 8
+    if stop_dist >= 10:
+        risk += 22
+    elif stop_dist >= 7:
+        risk += 12
+    elif 0 < stop_dist <= 4:
+        risk -= 6
+    if rr and rr < 1:
+        risk += 14
+    elif rr >= 2:
+        risk -= 10
+    if macro_bucket.startswith("D"):
+        risk += 18
+    elif macro_bucket.startswith("C"):
+        risk += 8
+    risk = _score_clip(risk, 0, 100)
+    if risk >= 78:
+        return "高風險"
+    if risk >= 58:
+        return "中風險"
+    return "低風險"
+
+
+def _derive_v16_position(row: pd.Series) -> float:
+    base = _safe_float(row.get("建議部位%"), 0) or 0
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), _safe_float(row.get("風險報酬比_決策"), 0)) or 0
+    risk_level = _derive_v16_single_risk_level(row)
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    sector_flow = _safe_float(row.get("族群資金流分數"), 50) or 50
+    position = base
+    if score >= 88 and rr >= 1.5:
+        position += 3
+    if sector_flow >= 75:
+        position += 2
+    if risk_level == "高風險":
+        position = min(position, 8)
+    elif risk_level == "中風險":
+        position = min(position, 15)
+    else:
+        position = min(position, 25)
+    if macro_bucket.startswith("D"):
+        position = min(position, 5)
+    elif macro_bucket.startswith("C"):
+        position = min(position, 12)
+    return round(_score_clip(position, 0, 25), 1)
+
+
+def _derive_v16_invest_level(row: pd.Series) -> str:
+    pos = _safe_float(row.get("建議倉位%"), _derive_v16_position(row)) or 0
+    risk = _safe_str(row.get("單檔風險等級", _derive_v16_single_risk_level(row)))
+    if pos >= 20 and risk == "低風險":
+        return "高信心配置"
+    if pos >= 12:
+        return "標準配置"
+    if pos > 0:
+        return "小部位試單"
+    return "暫不投入"
+
+
+def _derive_v16_first_entry_pct(row: pd.Series) -> float:
+    risk = _safe_str(row.get("單檔風險等級", _derive_v16_single_risk_level(row)))
+    timing = _safe_str(row.get("進場時機"))
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    if risk == "高風險" or chase >= 75:
+        return 30.0
+    if "等待" in timing or "觀察" in timing:
+        return 40.0
+    return 50.0
+
+
+def _derive_v16_scale_plan(row: pd.Series) -> str:
+    pos = _safe_float(row.get("建議倉位%"), _derive_v16_position(row)) or 0
+    first = _derive_v16_first_entry_pct(row)
+    if pos <= 0:
+        return "不進場，等待條件成熟"
+    if pos <= 8:
+        return f"小部位試單：先投入{first:.0f}%額度，其餘等確認"
+    return f"分兩到三筆：第一筆{first:.0f}%額度，確認支撐或突破後再加碼"
+
+
+def _derive_v16_add_condition(row: pd.Series) -> str:
+    breakout = _safe_float(row.get("突破確認價"), _safe_float(row.get("推薦買點_突破")))
+    support = _safe_float(row.get("近端支撐"), _safe_float(row.get("停損參考")))
+    flow = _safe_float(row.get("族群資金流分數"), 50) or 50
+    parts = []
+    if breakout:
+        parts.append(f"站穩突破確認價 {breakout:.2f}")
+    if support:
+        parts.append(f"回測支撐 {support:.2f} 不破")
+    if flow >= 70:
+        parts.append("族群資金流維持偏強")
+    else:
+        parts.append("量能重新放大且收紅K")
+    return "、".join(parts)
+
+
+def _derive_v16_take_profit(row: pd.Series) -> str:
+    t1 = _safe_float(row.get("賣出目標1"), _safe_float(row.get("近端壓力")))
+    t2 = _safe_float(row.get("賣出目標2"))
+    if t1 and t2:
+        return f"目標1 {t1:.2f} 先停利1/3；目標2 {t2:.2f} 再分批出場"
+    if t1:
+        return f"接近壓力/目標 {t1:.2f} 先減碼，保留獲利部位"
+    return "以移動停利為主，跌破短均或量價轉弱先降部位"
+
+
+def _derive_v16_stop_strategy(row: pd.Series) -> str:
+    stop = _safe_float(row.get("停損參考"), _safe_float(row.get("停損價")))
+    weak = _safe_str(row.get("轉弱條件"))
+    if stop:
+        return f"跌破 {stop:.2f} 或{weak if weak else '跌破MA20且量增'}，先停損/減碼"
+    return weak if weak else "跌破支撐且量增轉弱，先停損/減碼"
+
+
+def _derive_v16_max_risk(row: pd.Series) -> float:
+    pos = _safe_float(row.get("建議倉位%"), _derive_v16_position(row)) or 0
+    stop_dist = _safe_float(row.get("停損距離%"), 0) or 0
+    if pos <= 0 or stop_dist <= 0:
+        return 0.0
+    return round(pos * stop_dist / 100.0, 2)
+
+
+def _derive_v16_capital_note(row: pd.Series) -> str:
+    pos = _safe_float(row.get("建議倉位%"), _derive_v16_position(row)) or 0
+    max_risk = _safe_float(row.get("最大風險%"), _derive_v16_max_risk(row)) or 0
+    risk = _safe_str(row.get("單檔風險等級", _derive_v16_single_risk_level(row)))
+    if pos <= 0:
+        return "目前條件不足，不配置資金"
+    return f"建議單檔配置{pos:.1f}%，若觸發停損，約影響總資金{max_risk:.2f}%；風險等級：{risk}"
+
+
+def _derive_v16_sector_warning(row: pd.Series) -> str:
+    density = _safe_float(row.get("同族群推薦密度"), 0) or 0
+    ratio = _safe_float(row.get("同族群強勢比例"), 0) or 0
+    category = _safe_str(row.get("類別")) or "同族群"
+    if density >= 35 or ratio >= 70:
+        return f"{category} 推薦密度偏高，注意同族群集中風險"
+    if density >= 20 or ratio >= 55:
+        return f"{category} 有族群聚集，配置不宜過度集中"
+    return "族群集中風險正常"
+
+
+def _derive_v16_portfolio_suggestion(row: pd.Series) -> str:
+    risk = _safe_str(row.get("單檔風險等級", _derive_v16_single_risk_level(row)))
+    level = _safe_str(row.get("建議投入等級"))
+    warning = _safe_str(row.get("族群集中警示"))
+    if risk == "高風險":
+        return "僅列衛星部位，避免重倉；需嚴格依停損策略執行"
+    if "集中" in warning and "偏高" in warning:
+        return "同族群持股請分散，擇優配置1~2檔即可"
+    if "高信心" in level:
+        return "可列核心觀察部位，但仍需分批與停損控管"
+    if "標準" in level:
+        return "可列標準觀察部位，等待加碼條件成立"
+    return "先列追蹤池，等待量價與大盤條件同步"
+
+
+def _apply_v16_risk_allocation_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """V16：補齊風控與資金配置欄位；只做決策輔助，不硬篩股票。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["單檔風險等級"] = out.apply(_derive_v16_single_risk_level, axis=1)
+    out["建議倉位%"] = out.apply(_derive_v16_position, axis=1)
+    out["建議投入等級"] = out.apply(_derive_v16_invest_level, axis=1)
+    out["第一筆進場%"] = out.apply(_derive_v16_first_entry_pct, axis=1)
+    out["分批策略"] = out.apply(_derive_v16_scale_plan, axis=1)
+    out["第二筆加碼條件"] = out.apply(_derive_v16_add_condition, axis=1)
+    out["停利策略"] = out.apply(_derive_v16_take_profit, axis=1)
+    out["停損策略"] = out.apply(_derive_v16_stop_strategy, axis=1)
+    out["最大風險%"] = out.apply(_derive_v16_max_risk, axis=1)
+    out["資金風險說明"] = out.apply(_derive_v16_capital_note, axis=1)
+    out["族群集中警示"] = out.apply(_derive_v16_sector_warning, axis=1)
+    out["組合配置建議"] = out.apply(_derive_v16_portfolio_suggestion, axis=1)
+    return out
+
+
 def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -1770,6 +1977,7 @@ def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: f"{_safe_str(r.get('大盤情境分桶'))}｜大盤加權{_safe_float(r.get('大盤加權分'), 0):+.2f}｜{_safe_str(r.get('大盤風險濾網'))}",
         axis=1,
     )
+    out = _apply_v16_risk_allocation_columns(out)
     return out
 
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -5363,7 +5571,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
-        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%", "交易可行分數",
+        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "建議部位%", "建議倉位%", "第一筆進場%", "最大風險%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%", "交易可行分數",
         "追價風險分數", "拉回買點分數", "突破買點分數",
         "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數",
         "進場時機分數", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "風險報酬比_決策", "追高風險分數_決策",
@@ -7029,7 +7237,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
