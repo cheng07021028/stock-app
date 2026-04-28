@@ -103,6 +103,48 @@ def _ensure_radar_dict(radar_obj: Any) -> dict[str, Any]:
     out["summary"] = str(radar_obj)
     return out
 
+
+def _get_query_param_first(name: str, default: str = "") -> str:
+    """讀取 Streamlit query param，支援新版 st.query_params 與舊版 experimental_get_query_params。"""
+    try:
+        qp = getattr(st, "query_params", {})
+        if name in qp:
+            v = qp.get(name)
+            if isinstance(v, list):
+                return _safe_str(v[0]) if v else default
+            return _safe_str(v) or default
+    except Exception:
+        pass
+    try:
+        qp = st.experimental_get_query_params()
+        v = qp.get(name, [default])
+        return _safe_str(v[0]) if isinstance(v, list) and v else _safe_str(v) or default
+    except Exception:
+        return default
+
+
+def _apply_godpick_query_params(flat_rows: list[dict[str, str]]) -> None:
+    """接收 7/8/10 頁帶過來的 stock_code/code，直接帶入K線查詢。"""
+    code = _get_query_param_first("stock_code") or _get_query_param_first("code")
+    if not code:
+        return
+    code = code.split()[0].strip()
+    if not code:
+        return
+    current = _safe_str(st.session_state.get(_k("stock_code"), ""))
+    source = _get_query_param_first("source")
+    if current == code and st.session_state.get(_k("godpick_query_applied")) == code:
+        return
+    target = _find_search_target(code, flat_rows)
+    if target:
+        st.session_state[_k("group")] = target["group"]
+        st.session_state[_k("stock_code")] = target["code"]
+        st.session_state[_k("focus_event_idx")] = -1
+        st.session_state[_k("godpick_query_applied")] = target["code"]
+        if source:
+            st.session_state[_k("source_hint")] = source
+
+
 def _to_date(v: Any, fallback: date) -> date:
     if v is None:
         return fallback
@@ -1875,6 +1917,7 @@ def main():
     group_map = _build_group_stock_map()
     flat_rows = _flatten_group_map(group_map)
     _init_state(group_map)
+    _apply_godpick_query_params(flat_rows)
 
     if _apply_watchlist_sync_if_needed(group_map):
         group_map = _build_group_stock_map()
@@ -1893,6 +1936,9 @@ def main():
             f"自選股同步狀態：watchlist_version = {watchlist_version}"
             + (f" / 最後更新：{watchlist_saved_at}" if watchlist_saved_at else "")
         )
+
+    if st.session_state.get(_k("source_hint")) == "godpick":
+        st.success("已由股神推薦/推薦清單帶入此股票，可直接檢查推薦日後K線、支撐、壓力與停損位置。")
 
     render_pro_section("快速搜尋股票")
     s1, s2 = st.columns([5, 1])
