@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v21"
+PAGE_TITLE = "股神管理中心｜v21.1"
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RECOMMEND_FILES = [
@@ -71,6 +70,32 @@ def _safe_load_json(path: Path) -> Any:
         return json.loads(text)
     except Exception:
         return []
+
+
+
+def _file_status_rows(paths: List[Path]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for path in paths:
+        exists = path.exists()
+        size = path.stat().st_size if exists else 0
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S") if exists else ""
+        rows.append({
+            "資料檔": path.name,
+            "是否存在": "是" if exists else "否",
+            "檔案大小KB": round(size / 1024, 2) if exists else 0,
+            "最後修改時間": mtime,
+            "路徑": str(path),
+        })
+    return pd.DataFrame(rows)
+
+
+def _refresh_management_data() -> None:
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    st.session_state["v21_management_refresh_seq"] = int(st.session_state.get("v21_management_refresh_seq", 0)) + 1
+    st.session_state["v21_management_last_refresh"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _extract_rows(obj: Any) -> List[Dict[str, Any]]:
@@ -554,12 +579,24 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v21｜投資組合、每日追蹤、推薦品質、權重校正整合入口")
+            render_pro_hero("股神管理中心", "v21.1｜新增資訊重整帶入｜投資組合、每日追蹤、推薦品質整合入口")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
+
+    c_refresh, c_status = st.columns([1.2, 4])
+    with c_refresh:
+        if st.button("🔄 資訊重整帶入", type="primary", use_container_width=True, help="重新讀取推薦清單、推薦紀錄與品質分析資料，並清除 Streamlit 快取。"):
+            _refresh_management_data()
+            st.success("已重新讀取資料來源並清除快取。")
+    with c_status:
+        last_refresh = st.session_state.get("v21_management_last_refresh", "尚未手動重整")
+        st.info(f"目前資料讀取狀態：每次進頁會自動讀取 JSON；手動重整時間：{last_refresh}")
+
+    with st.expander("資料檔案更新狀態", expanded=False):
+        st.dataframe(_file_status_rows(ALL_DATA_FILES), use_container_width=True, hide_index=True)
 
     rec_df, rec_notes = _load_many(RECOMMEND_FILES, dedupe_latest=True)
     hist_df, hist_notes = _load_many(RECORD_FILES, dedupe_latest=False)
