@@ -1201,7 +1201,6 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
 
 
-@st.cache_data(ttl=600, show_spinner=False)
 def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...], render_token: str = "") -> go.Figure:
     """專業版 K 線圖。
 
@@ -1429,7 +1428,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         ),
         xaxis_rangeslider_visible=False,
         # v26.3：切換事件/起漲起跌標記時強制更新 Plotly 前端狀態，避免需換頁再回來才看到圖示。
-        uirevision=f"kline_{stock_label}_{render_token}",
+        uirevision=f"kline_{stock_label}_{render_token or 'main'}",
         dragmode="pan",
     )
 
@@ -2097,20 +2096,25 @@ def main():
             f"t{len(focus_trough_idx)}"
         )
 
-        st.plotly_chart(
-            _build_candlestick_chart(
-                focus_df,
-                stock_label,
-                show_ma=_show_ma_now,
-                show_pivots=_show_pivots_now,
-                peak_idx=tuple(focus_peak_idx),
-                trough_idx=tuple(focus_trough_idx),
-                render_token=_chart_render_token,
-            ),
-            use_container_width=True,
-            key=_k(f"kline_chart_{_chart_render_token}"),
-            config={"displaylogo": False, "scrollZoom": True, "responsive": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+        _main_fig = _build_candlestick_chart(
+            focus_df,
+            stock_label,
+            show_ma=_show_ma_now,
+            show_pivots=_show_pivots_now,
+            peak_idx=tuple(focus_peak_idx),
+            trough_idx=tuple(focus_trough_idx),
+            render_token=_chart_render_token,
         )
+
+        # v26.4：用穩定容器即時重畫，不使用大量動態 key，避免圖表空白。
+        _chart_slot = st.empty()
+        with _chart_slot.container():
+            st.plotly_chart(
+                _main_fig,
+                use_container_width=True,
+                key=_k("kline_chart_main"),
+                config={"displaylogo": False, "scrollZoom": True, "responsive": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            )
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
