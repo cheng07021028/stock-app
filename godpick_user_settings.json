@@ -144,7 +144,7 @@
     "days": 120,
     "top_n": 10,
     "manual_codes": "",
-    "scan_limit": 500,
+    "scan_limit": "全部",
     "selected_categories": [
       "全部"
     ],
@@ -156,6 +156,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-28 05:22:38",
+  "updated_at": "2026-04-28 05:23:17",
   "version": "godpick_v5_persistent_settings"
 }
