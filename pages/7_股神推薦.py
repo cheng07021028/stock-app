@@ -32,6 +32,8 @@ from utils import (
     get_all_code_name_map,
     get_history_data,
     get_normalized_watchlist,
+    clear_history_disk_cache,
+    get_history_disk_cache_stats,
     inject_pro_theme,
     render_pro_hero,
     render_pro_info_card,
@@ -60,12 +62,14 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-PAGE_TITLE = "股神推薦 V17｜大盤環境動態策略版"
+PAGE_TITLE = "股神推薦 V22｜高速快取與斷點續掃版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 25   # V11：降低前端重繪，掃描結果不受影響
 SCAN_MAX_WORKERS = 18         # V11：全量掃描平行化上限；不做預篩選，避免漏掉機會股
+V22_CHECKPOINT_EVERY = 100      # V22：每處理 100 檔保存一次斷點；不影響評分、不漏股票
+GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 
 GODPICK_DEFAULT_SCORE_WEIGHTS = {
     "市場環境": 10,
@@ -5454,6 +5458,140 @@ def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, m
     return hot_df
 
 
+
+# =========================================================
+# V22 高速快取與斷點續掃：不做預篩、不改評分、不漏股票
+# =========================================================
+def _v22_json_safe(obj: Any):
+    try:
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if pd.isna(obj):
+            return None
+    except Exception:
+        pass
+    if isinstance(obj, dict):
+        return {str(k): _v22_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_v22_json_safe(v) for v in obj]
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+    except Exception:
+        pass
+    return obj
+
+
+def _v22_scan_signature(
+    universe_items: list[dict[str, str]],
+    start_dt: date,
+    end_dt: date,
+    min_total_score: float,
+    min_signal_score: float,
+    selected_categories: list[str],
+    mode: str,
+    risk_strictness: str,
+    min_prelaunch_score: float,
+    min_trade_score: float,
+) -> str:
+    codes = [str(x.get("code", "")).strip() for x in universe_items if str(x.get("code", "")).strip()]
+    raw = {
+        "codes": codes,
+        "start_dt": str(start_dt),
+        "end_dt": str(end_dt),
+        "min_total_score": float(min_total_score),
+        "min_signal_score": float(min_signal_score),
+        "selected_categories": sorted([str(x) for x in selected_categories]),
+        "mode": str(mode),
+        "risk_strictness": str(risk_strictness),
+        "min_prelaunch_score": float(min_prelaunch_score),
+        "min_trade_score": float(min_trade_score),
+        "weights": GODPICK_ACTIVE_SCORE_WEIGHTS,
+        "version": "v22",
+    }
+    text = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _v22_checkpoint_path() -> Path:
+    return Path(GODPICK_SCAN_CHECKPOINT_FILE)
+
+
+def _v22_load_checkpoint(signature: str) -> dict[str, Any]:
+    path = _v22_checkpoint_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return {}
+        if str(payload.get("signature", "")) != str(signature):
+            return {}
+        results = payload.get("processed_results", [])
+        if not isinstance(results, list):
+            payload["processed_results"] = []
+        return payload
+    except Exception:
+        return {}
+
+
+def _v22_save_checkpoint(signature: str, processed_results: list[dict[str, Any]], total_count: int, finished: bool = False) -> None:
+    try:
+        path = _v22_checkpoint_path()
+        payload = {
+            "version": "v22_godpick_fast_cache_resume",
+            "signature": signature,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "finished": bool(finished),
+            "total_count": int(total_count),
+            "processed_count": int(len(processed_results)),
+            "processed_results": _v22_json_safe(processed_results),
+        }
+        tmp = path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _v22_clear_checkpoint() -> tuple[bool, str]:
+    try:
+        path = _v22_checkpoint_path()
+        if path.exists():
+            path.unlink()
+            return True, "已清除斷點續掃檔。"
+        return True, "目前沒有斷點續掃檔。"
+    except Exception as e:
+        return False, f"清除斷點續掃檔失敗：{e}"
+
+
+def _v22_checkpoint_status() -> dict[str, Any]:
+    path = _v22_checkpoint_path()
+    if not path.exists():
+        return {"exists": False, "path": str(path), "processed_count": 0, "total_count": 0, "updated_at": ""}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return {
+            "exists": True,
+            "path": str(path),
+            "processed_count": int(payload.get("processed_count", len(payload.get("processed_results", []) or [])) or 0),
+            "total_count": int(payload.get("total_count", 0) or 0),
+            "updated_at": str(payload.get("updated_at", "")),
+            "finished": bool(payload.get("finished", False)),
+        }
+    except Exception as e:
+        return {"exists": True, "path": str(path), "processed_count": 0, "total_count": 0, "updated_at": "", "error": str(e)}
+
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
@@ -5466,6 +5604,7 @@ def _build_recommend_df(
     risk_strictness: str,
     min_prelaunch_score: float,
     min_trade_score: float,
+    resume_scan: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if not universe_items:
@@ -5502,77 +5641,130 @@ def _build_recommend_df(
         "speed_version": "v11_yahoo_fast_full_scan_no_prefilter",
     }
 
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="godpick_scan") as executor:
-        futures = [
-            executor.submit(
-                _analyze_one_stock_for_recommend,
-                item,
-                master_lookup,
-                start_dt,
-                end_dt,
-                min_signal_score,
-                clean_categories,
-                mode,
-                risk_strictness,
-                min_prelaunch_score,
-                min_trade_score,
-            )
-            for item in universe_items
-        ]
+    scan_signature = _v22_scan_signature(
+        universe_items,
+        start_dt,
+        end_dt,
+        min_total_score,
+        min_signal_score,
+        selected_categories,
+        mode,
+        risk_strictness,
+        min_prelaunch_score,
+        min_trade_score,
+    )
+    processed_results: list[dict[str, Any]] = []
+    processed_codes: set[str] = set()
 
-        for future in as_completed(futures):
-            done_count += 1
-            try:
-                result = future.result()
-                if not isinstance(result, dict):
-                    debug_summary["analysis_error"] += 1
-                    debug_summary["error_samples"].append("未知錯誤：future.result 非 dict")
-                else:
-                    status = _safe_str(result.get("status")) or "analysis_error"
-                    if status == "ok":
-                        row = result.get("row")
-                        if isinstance(row, dict):
-                            base_rows.append(row)
-                            debug_summary["analyzed_ok"] += 1
-                    else:
-                        debug_summary[status] = int(debug_summary.get(status, 0)) + 1
-                        msg = _safe_str(result.get("message"))
-                        code = _safe_str(result.get("code"))
-                        if status == "no_history":
-                            hdbg = result.get("history_debug", {}) or {}
-                            attempt_lines = []
-                            for att in hdbg.get("attempts", [])[:3]:
-                                market = _safe_str(att.get("market_type")) or "未知市場"
-                                rows = att.get("rows", 0)
-                                err = _safe_str(att.get("error"))
-                                source = _safe_str(att.get("source"))
-                                attempt_lines.append(f"{market} rows={rows} source={source} err={err}")
-                            debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
-                        elif status == "analysis_error":
-                            debug_summary["error_samples"].append(f"{code}：{msg}")
-            except Exception as e:
-                debug_summary["analysis_error"] += 1
-                debug_summary["error_samples"].append(f"future.result 例外：{e}")
-            should_update_progress = (
-                done_count == 1
-                or done_count == total_count
-                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
-                or done_count / total_count >= 0.98
-            )
-            if should_update_progress:
-                elapsed = time.time() - start_ts
-                avg_per_stock = elapsed / done_count if done_count > 0 else 0
-                remain_count = max(total_count - done_count, 0)
-                eta_sec = avg_per_stock * remain_count
-                ratio = done_count / total_count if total_count > 0 else 0
+    def _consume_scan_result(result: dict[str, Any], from_checkpoint: bool = False) -> None:
+        if not isinstance(result, dict):
+            debug_summary["analysis_error"] += 1
+            debug_summary["error_samples"].append("未知錯誤：future.result 非 dict")
+            return
+        status = _safe_str(result.get("status")) or "analysis_error"
+        code = _safe_str(result.get("code"))
+        if not code and isinstance(result.get("row"), dict):
+            code = _safe_str(result.get("row", {}).get("股票代號"))
+        if code:
+            processed_codes.add(code)
 
-                progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
-                progress_text.caption(
-                    f"已完成 {done_count}/{total_count}｜"
-                    f"已花時間：{_fmt_seconds(elapsed)}｜"
-                    f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                    f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}"
+        if status == "ok":
+            row = result.get("row")
+            if isinstance(row, dict):
+                base_rows.append(row)
+                debug_summary["analyzed_ok"] += 1
+        else:
+            debug_summary[status] = int(debug_summary.get(status, 0)) + 1
+            msg = _safe_str(result.get("message"))
+            if status == "no_history":
+                hdbg = result.get("history_debug", {}) or {}
+                attempt_lines = []
+                for att in hdbg.get("attempts", [])[:3]:
+                    market = _safe_str(att.get("market_type")) or "未知市場"
+                    rows = att.get("rows", 0)
+                    err = _safe_str(att.get("error"))
+                    source = _safe_str(att.get("source"))
+                    attempt_lines.append(f"{market} rows={rows} source={source} err={err}")
+                debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
+            elif status == "analysis_error":
+                debug_summary["error_samples"].append(f"{code}：{msg}")
+
+    if resume_scan:
+        checkpoint_payload = _v22_load_checkpoint(scan_signature)
+        checkpoint_results = checkpoint_payload.get("processed_results", []) if isinstance(checkpoint_payload, dict) else []
+        if isinstance(checkpoint_results, list) and checkpoint_results:
+            for old_result in checkpoint_results:
+                if isinstance(old_result, dict):
+                    processed_results.append(old_result)
+                    _consume_scan_result(old_result, from_checkpoint=True)
+            progress_text.caption(f"已載入斷點續掃：{len(processed_results)} / {total_count} 檔，將只補掃未完成股票。")
+
+    pending_items = []
+    for item in universe_items:
+        c = _normalize_code(item.get("code"))
+        if c and c in processed_codes:
+            continue
+        pending_items.append(item)
+
+    done_count = len(processed_results)
+
+    if pending_items:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="godpick_scan") as executor:
+            futures = [
+                executor.submit(
+                    _analyze_one_stock_for_recommend,
+                    item,
+                    master_lookup,
+                    start_dt,
+                    end_dt,
+                    min_signal_score,
+                    clean_categories,
+                    mode,
+                    risk_strictness,
+                    min_prelaunch_score,
+                    min_trade_score,
                 )
+                for item in pending_items
+            ]
+
+            for future in as_completed(futures):
+                done_count += 1
+                try:
+                    result = future.result()
+                    if not isinstance(result, dict):
+                        result = {"status": "analysis_error", "code": "", "message": "future.result 非 dict"}
+                    processed_results.append(result)
+                    _consume_scan_result(result)
+
+                    if done_count % max(1, V22_CHECKPOINT_EVERY) == 0 or done_count == total_count:
+                        _v22_save_checkpoint(scan_signature, processed_results, total_count, finished=False)
+                except Exception as e:
+                    debug_summary["analysis_error"] += 1
+                    debug_summary["error_samples"].append(f"future.result 例外：{e}")
+                should_update_progress = (
+                    done_count == 1
+                    or done_count == total_count
+                    or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
+                    or done_count / total_count >= 0.98
+                )
+                if should_update_progress:
+                    elapsed = time.time() - start_ts
+                    avg_per_stock = elapsed / done_count if done_count > 0 else 0
+                    remain_count = max(total_count - done_count, 0)
+                    eta_sec = avg_per_stock * remain_count
+                    ratio = done_count / total_count if total_count > 0 else 0
+
+                    progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
+                    progress_text.caption(
+                        f"已完成 {done_count}/{total_count}｜"
+                        f"已花時間：{_fmt_seconds(elapsed)}｜"
+                        f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
+                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V22斷點續掃"
+                    )
+    else:
+        progress_text.caption(f"斷點資料已涵蓋全部 {total_count} 檔，直接整理結果。")
+
+    _v22_save_checkpoint(scan_signature, processed_results, total_count, finished=True)
 
     progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
     total_elapsed = time.time() - start_ts
@@ -6690,11 +6882,22 @@ def main():
         with btn5:
             submit_clear = st.form_submit_button("清空條件", use_container_width=True)
 
-    ccache1, ccache2 = st.columns([1, 1])
+    render_pro_section("V22 高速快取與斷點續掃")
+    cache_stat = get_history_disk_cache_stats() if callable(get_history_disk_cache_stats) else {}
+    cp_stat = _v22_checkpoint_status()
+    ccache1, ccache2, ccache3, ccache4 = st.columns([1.2, 1.2, 1.2, 2.2])
     with ccache1:
         clear_cache_btn = st.button("清除推薦快取", use_container_width=True)
     with ccache2:
-        st.caption("資料異常或想強制重算時再按")
+        resume_scan_btn = st.button("接續上次掃描", use_container_width=True)
+    with ccache3:
+        clear_checkpoint_btn = st.button("清除斷點檔", use_container_width=True)
+    with ccache4:
+        st.caption(
+            f"歷史快取：{int(cache_stat.get('files', 0) or 0)} 檔 / {cache_stat.get('size_mb', 0)} MB"
+            f"｜斷點：{int(cp_stat.get('processed_count', 0) or 0)}/{int(cp_stat.get('total_count', 0) or 0)}"
+            f"｜更新：{cp_stat.get('updated_at', '') or cache_stat.get('latest_update', '') or '—'}"
+        )
 
     if clear_cache_btn:
         try:
@@ -6713,7 +6916,18 @@ def main():
             _build_excel_bytes.clear()
         except Exception:
             pass
-        st.success("推薦快取已清除")
+        try:
+            n, msg = clear_history_disk_cache()
+            st.success(f"推薦快取已清除；{msg}")
+        except Exception:
+            st.success("推薦快取已清除")
+
+    if clear_checkpoint_btn:
+        ok, msg = _v22_clear_checkpoint()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
 
     current_form_settings = _current_form_settings_from_values(
         form_universe_mode, form_group, form_days, form_top_n, form_manual_codes,
@@ -6818,6 +7032,9 @@ def main():
     if show_v2_logic:
         _render_recommendation_scoring_guide()
 
+    if resume_scan_btn:
+        st.session_state[_k("submitted_once")] = True
+
     if not st.session_state.get(_k("submitted_once"), False):
         saved_rec_df, saved_cat_df, saved_hot_df = _load_recommend_result_from_state()
         if isinstance(saved_rec_df, pd.DataFrame) and not saved_rec_df.empty:
@@ -6853,7 +7070,7 @@ def main():
     category_strength_df = pd.DataFrame()
     hot_pick_df = pd.DataFrame()
 
-    if submit_recommend or submit_refresh:
+    if submit_recommend or submit_refresh or resume_scan_btn:
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
             universe_items=universe_items,
             master_df=master_df,
@@ -6866,6 +7083,7 @@ def main():
             risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
             min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
+            resume_scan=bool(resume_scan_btn),
         )
         rec_df = _apply_advanced_godpick_columns(rec_df)
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
