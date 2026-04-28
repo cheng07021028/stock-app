@@ -463,22 +463,38 @@ def _read_json_from_github(path: str) -> tuple[Any, str]:
         return None, f"讀取 GitHub JSON 例外：{e}"
 
 
+
+def _write_json_to_local(path: str, payload: Any) -> tuple[bool, str]:
+    """GitHub 不可用時寫回本機，避免主檔或設定更新後完全沒有保存。"""
+    try:
+        from pathlib import Path
+        candidates = [Path(path)]
+        if "/" in path:
+            candidates.append(Path(path.replace("/", "_")))
+        fp = candidates[0]
+        fp.parent.mkdir(parents=True, exist_ok=True) if fp.parent and str(fp.parent) != "." else None
+        fp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, f"已回寫本機：{fp.as_posix()}"
+    except Exception as e:
+        return False, f"本機寫入失敗：{e}"
+
+
 def _write_json_to_github(path: str, payload: Any, message: str) -> tuple[bool, str]:
     cfg = _stock_master_config()
     token = cfg["token"]
     if not token:
-        return False, "未設定 GITHUB_TOKEN"
+        return _write_json_to_local(path, payload)
 
     url = _github_contents_url(cfg["owner"], cfg["repo"], path)
     headers = _github_headers(token)
     sha = ""
-
     try:
         cur = requests.get(url, headers=headers, params={"ref": cfg["branch"]}, timeout=20)
         if cur.status_code == 200:
             sha = _safe_str(cur.json().get("sha"))
         elif cur.status_code not in (200, 404):
-            return False, f"讀取 GitHub 檔案失敗：{cur.status_code}"
+            ok, local_msg = _write_json_to_local(path, payload)
+            return ok, f"讀取 GitHub 檔案失敗：{cur.status_code}；{local_msg}"
         body = {
             "message": message,
             "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")).decode("utf-8"),
@@ -488,10 +504,12 @@ def _write_json_to_github(path: str, payload: Any, message: str) -> tuple[bool, 
             body["sha"] = sha
         resp = requests.put(url, headers=headers, json=body, timeout=30)
         if resp.status_code not in (200, 201):
-            return False, f"寫入 GitHub 失敗：{resp.status_code} / {resp.text[:300]}"
+            ok, local_msg = _write_json_to_local(path, payload)
+            return ok, f"寫入 GitHub 失敗：{resp.status_code}；{local_msg}"
         return True, f"已回寫 GitHub：{path}"
     except Exception as e:
-        return False, f"寫入 GitHub 例外：{e}"
+        ok, local_msg = _write_json_to_local(path, payload)
+        return ok, f"寫入 GitHub 例外：{e}；{local_msg}"
 
 
 # =========================================================
@@ -1029,21 +1047,26 @@ def refresh_stock_master() -> tuple[pd.DataFrame, list[str]]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_stock_master() -> pd.DataFrame:
-    repo_df = _load_stock_master_cache_from_repo()
-    repo_df = _normalize_master_df(repo_df)
+    """
+    一般頁面優先使用既有 stock_master_cache.json。
+    只有快取不存在或明顯壞掉時才重建，避免每個頁面開啟時都卡在 Yahoo / 官方資料補值。
+    """
+    try:
+        repo_df = _normalize_master_df(_load_stock_master_cache_from_repo())
+        if repo_df is not None and not repo_df.empty and len(repo_df) >= 100:
+            return _apply_master_overrides(repo_df)
+    except Exception:
+        repo_df = empty_master_df()
 
-    need_live = repo_df.empty
-    if not need_live:
-        official_hit = int(repo_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
-        yahoo_hit = int((repo_df["source"].fillna("").astype(str) == "yahoo_profile_primary").sum())
-        pending = int(repo_df["待修原因"].fillna("").astype(str).str.strip().ne("").sum())
-        need_live = (official_hit < 1500) or (yahoo_hit < 200) or (pending > 20)
+    try:
+        live_df, _, _, _ = _build_live_master_df()
+        live_df = _normalize_master_df(live_df)
+        if live_df is not None and not live_df.empty:
+            return _apply_master_overrides(live_df)
+    except Exception:
+        pass
 
-    if not need_live:
-        return _apply_master_overrides(repo_df)
-
-    live_df, _, _, _ = _build_live_master_df()
-    return _apply_master_overrides(live_df)
+    return _apply_master_overrides(repo_df) if repo_df is not None else empty_master_df()
 
 
 def search_stock_master(master_df: pd.DataFrame, keyword: str = "", market_filter: str = "全部", category_filter: str = "全部") -> pd.DataFrame:
