@@ -13,8 +13,13 @@ import copy
 import pandas as pd
 import requests
 import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, firestore
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+except Exception:
+    firebase_admin = None
+    credentials = None
+    firestore = None
 
 from utils import (
     format_number,
@@ -281,6 +286,8 @@ def _clean_private_key(raw_key: str) -> str:
 
 
 def _init_firebase_app():
+    if firebase_admin is None or credentials is None or firestore is None:
+        raise RuntimeError("firebase-admin 未安裝或無法載入；已略過 Firestore，同步改用本機/GitHub。")
     try:
         return firebase_admin.get_app()
     except ValueError:
@@ -770,6 +777,31 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
     return False, msg
 
 
+def _safe_json_read_local(path_name: str, default):
+    try:
+        with open(path_name, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _safe_json_write_local(path_name: str, payload) -> tuple[bool, str]:
+    try:
+        with open(path_name, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        return True, f"已寫入本機 UI 設定：{path_name}"
+    except Exception as e:
+        return False, f"本機 UI 設定寫入失敗：{e}"
+
+
+def _config_ts(payload: dict[str, Any]):
+    raw = _safe_str(payload.get("updated_at")) if isinstance(payload, dict) else ""
+    try:
+        return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.min
+
+
 def _normalize_ui_config(payload: dict[str, Any] | None) -> dict[str, Any]:
     base = copy.deepcopy(UI_CONFIG_DEFAULT)
     if not isinstance(payload, dict):
@@ -889,10 +921,23 @@ def _load_ui_config_once():
     if st.session_state.get(_k("ui_config_loaded"), False):
         return
 
-    payload, err = _read_ui_config_from_github()
+    github_payload, err = _read_ui_config_from_github()
+    local_payload = _safe_json_read_local(_ui_config_github_config()["path"], {})
+
+    github_payload = _normalize_ui_config(github_payload)
+    local_payload = _normalize_ui_config(local_payload) if isinstance(local_payload, dict) and local_payload else {}
+
+    # GitHub 舊資料不應覆蓋本機剛保存的欄位順序；有時間戳時取較新，無本機才用 GitHub。
+    if local_payload and (_config_ts(local_payload) >= _config_ts(github_payload)):
+        payload = local_payload
+        detail = "已讀取本機 UI 設定；" + (err or "GitHub UI 設定也可讀取")
+    else:
+        payload = github_payload
+        detail = err or "GitHub UI 設定讀取成功"
+
     payload = _normalize_ui_config(payload)
     st.session_state[_k("ui_config_loaded")] = True
-    st.session_state[_k("ui_config_detail")] = err or "GitHub UI 設定讀取成功"
+    st.session_state[_k("ui_config_detail")] = detail
     st.session_state[_k("ui_config")] = copy.deepcopy(payload)
     st.session_state[_k("fast_mode")] = bool(payload.get("fast_mode", True))
     st.session_state[_k("visible_limit")] = int(payload.get("visible_limit", FAST_VISIBLE_LIMIT))
@@ -912,10 +957,12 @@ def _persist_ui_config() -> tuple[bool, str]:
     }
     payload = _normalize_ui_config(payload)
     st.session_state[_k("ui_config")] = copy.deepcopy(payload)
-    ok, msg = _write_ui_config_to_github(payload)
+    local_ok, local_msg = _safe_json_write_local(_ui_config_github_config()["path"], payload)
+    github_ok, github_msg = _write_ui_config_to_github(payload)
+    msg = f"{local_msg}｜{github_msg}"
     st.session_state[_k("ui_save_detail")] = msg
     st.session_state[_k("ui_last_saved_at")] = _now_text()
-    return ok, msg
+    return (local_ok or github_ok), msg
 
 
 @st.cache_data(ttl=120, show_spinner=False)
