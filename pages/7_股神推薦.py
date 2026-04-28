@@ -4318,6 +4318,55 @@ def _create_watchlist_group(group_name: str) -> tuple[bool, str]:
     return False, _safe_str(st.session_state.get(_k("status_msg"), "新增群組失敗"))
 
 
+
+def _show_import_result_notice(title: str, added_count: int, selected_count: int, messages: list[str], module_name: str):
+    """v26.5：匯入成功 / 重複防呆 / 失敗提示統一顯示。"""
+    duplicate_msgs = []
+    fail_msgs = []
+    success_msgs = []
+
+    for msg in messages or []:
+        s = _safe_str(msg)
+        if not s:
+            continue
+        if any(k in s for k in ["已存在", "已在", "略過", "重複", "防呆"]):
+            duplicate_msgs.append(s)
+        elif any(k in s for k in ["失敗", "例外", "錯誤", "未設定"]):
+            fail_msgs.append(s)
+        else:
+            success_msgs.append(s)
+
+    duplicate_count = max(selected_count - int(added_count or 0), 0)
+
+    if added_count > 0 and duplicate_count > 0:
+        st.success(f"{title}：成功新增 {added_count} 筆；另有 {duplicate_count} 筆疑似重複或未寫入，請看明細。")
+    elif added_count > 0:
+        st.success(f"{title}：成功新增 {added_count} 筆到 {module_name}。")
+    elif duplicate_count > 0 or duplicate_msgs:
+        st.warning(f"{title}：沒有新增資料，可能已存在；防呆已阻擋重複匯入。")
+    else:
+        st.warning(f"{title}：沒有新增資料，請查看寫入明細。")
+
+    with st.expander(f"{title}｜寫入明細", expanded=True):
+        st.write(f"- 勾選筆數：{selected_count}")
+        st.write(f"- 新增筆數：{added_count}")
+        if duplicate_count > 0:
+            st.write(f"- 可能重複 / 略過筆數：{duplicate_count}")
+        if success_msgs:
+            st.write("#### 成功 / 同步訊息")
+            for msg in success_msgs:
+                st.write(f"- {msg}")
+        if duplicate_msgs:
+            st.write("#### 防呆略過")
+            for msg in duplicate_msgs:
+                st.write(f"- {msg}")
+        if fail_msgs:
+            st.write("#### 失敗 / 異常")
+            for msg in fail_msgs:
+                st.write(f"- {msg}")
+
+
+
 def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False) -> tuple[int, list[str]]:
     """
     v26.2：股神推薦紀錄寫入強化版。
@@ -7919,44 +7968,44 @@ def main():
                     }
                 )
             added, messages = _append_multiple_stocks_to_watchlist(full_target_group, picked_rows)
+            _show_import_result_notice(
+                title=f"匯入 05_自選股中心（{full_target_group}）",
+                added_count=added,
+                selected_count=len(full_picked_codes),
+                messages=messages,
+                module_name="05_自選股中心",
+            )
             if added > 0:
-                st.success(f"已從完整推薦表匯入 {added} 檔到 05_自選股中心：{full_target_group}")
                 st.session_state[_k("rec_pick_codes_next")] = full_picked_codes
-                st.rerun()
-            else:
-                st.warning("沒有新增成功，可能已存在或寫入失敗。")
-            with st.expander("匯入自選股明細", expanded=True):
-                for msg in messages:
-                    st.write(f"- {msg}")
 
         if full_add_record:
             record_rows = _build_record_rows_from_rec_df(rec_df, full_picked_codes)
             # v25.9：完整推薦表匯入推薦紀錄加入防呆。
             # 同一天 + 同股票代號 + 同推薦模式 已存在時，不再重複新增。
             added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=False)
+            _show_import_result_notice(
+                title="匯入 09_股神推薦紀錄",
+                added_count=added_count,
+                selected_count=len(full_picked_codes),
+                messages=record_msgs,
+                module_name="09_股神推薦紀錄",
+            )
             if added_count > 0:
-                st.success(f"已從完整推薦表寫入 {added_count} 筆到 09_股神推薦紀錄")
                 st.session_state[_k("rec_record_codes_next")] = full_picked_codes
                 st.session_state[_k("full_table_selected_codes")] = full_picked_codes
-            else:
-                st.warning("沒有新增任何推薦紀錄：可能今天同股票、同推薦模式已存在，已由防呆機制阻擋重複匯入。")
-            with st.expander("推薦紀錄寫入明細", expanded=True):
-                for msg in record_msgs:
-                    st.write(f"- {msg}")
 
 
         if full_add_list:
             added_list_count, list_msgs = _append_recommend_list_from_full_table(rec_df, full_picked_codes)
-            if added_list_count > 0:
-                st.success(f"已從完整推薦表寫入 {added_list_count} 筆到 10_推薦清單")
-            else:
-                st.warning("沒有新增任何推薦清單資料：可能今天同股票、同推薦模式已存在，已由防呆機制阻擋重複匯入。")
-            with st.expander("推薦清單寫入明細", expanded=True):
-                for msg in list_msgs:
-                    st.write(f"- {msg}")
+            _show_import_result_notice(
+                title="匯入 10_推薦清單",
+                added_count=added_list_count,
+                selected_count=len(full_picked_codes),
+                messages=list_msgs,
+                module_name="10_推薦清單",
+            )
 
         if full_sync_all:
-            sync_messages = []
             work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
             picked_rows = []
             for _, r in work.iterrows():
@@ -7975,16 +8024,9 @@ def main():
             added_list, msg_list = _append_recommend_list_from_full_table(rec_df, full_picked_codes)
 
             st.success(f"一鍵同步完成：05自選股新增 {added_wl} 檔｜09紀錄新增 {added_rec} 筆｜10清單新增 {added_list} 筆")
-            with st.expander("一鍵同步明細", expanded=True):
-                st.write("#### 05_自選股中心")
-                for msg in msg_wl:
-                    st.write(f"- {msg}")
-                st.write("#### 09_股神推薦紀錄")
-                for msg in msg_rec:
-                    st.write(f"- {msg}")
-                st.write("#### 10_推薦清單")
-                for msg in msg_list:
-                    st.write(f"- {msg}")
+            _show_import_result_notice("一鍵同步｜05_自選股中心", added_wl, len(full_picked_codes), msg_wl, "05_自選股中心")
+            _show_import_result_notice("一鍵同步｜09_股神推薦紀錄", added_rec, len(full_picked_codes), msg_rec, "09_股神推薦紀錄")
+            _show_import_result_notice("一鍵同步｜10_推薦清單", added_list, len(full_picked_codes), msg_list, "10_推薦清單")
 
     with tabs[1]:
         category_show = category_strength_df.copy()
