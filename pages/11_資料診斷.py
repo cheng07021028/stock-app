@@ -1,86 +1,419 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
+import importlib
 import json
+import os
+import sys
+import traceback
+
 import pandas as pd
 import streamlit as st
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+PFX = "diag_"
+
+
+def _k(key: str) -> str:
+    return f"{PFX}{key}"
+
+
+def _safe_str(v: Any) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
+
+
+def _fmt_dt(ts: float | None) -> str:
+    if not ts:
+        return ""
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _read_json_safe(path: Path) -> tuple[bool, Any, str]:
+    try:
+        if not path.exists():
+            return False, None, "檔案不存在"
+        txt = path.read_text(encoding="utf-8-sig")
+        if not txt.strip():
+            return False, None, "檔案空白"
+        return True, json.loads(txt), ""
+    except Exception as e:
+        return False, None, str(e)
+
+
+def _json_count(data: Any) -> str:
+    if isinstance(data, list):
+        return f"list：{len(data)} 筆"
+    if isinstance(data, dict):
+        return f"dict：{len(data)} 個鍵"
+    return type(data).__name__
+
+
+def _file_row(name: str, path: Path, must_exist: bool = True) -> dict[str, Any]:
+    exists = path.exists()
+    size = round(path.stat().st_size / 1024, 2) if exists and path.is_file() else ""
+    status = "正常" if exists or not must_exist else "缺少"
+    return {
+        "項目": name,
+        "狀態": status,
+        "是否存在": exists,
+        "大小KB": size,
+        "最後修改": _fmt_dt(path.stat().st_mtime) if exists else "",
+        "路徑": str(path),
+    }
+
+
+def _try_import(module_name: str):
+    try:
+        if str(BASE_DIR) not in sys.path:
+            sys.path.insert(0, str(BASE_DIR))
+        return importlib.import_module(module_name), ""
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _clear_streamlit_caches() -> list[str]:
+    msgs = []
+    try:
+        st.cache_data.clear()
+        msgs.append("st.cache_data 已清除")
+    except Exception as e:
+        msgs.append(f"st.cache_data 清除失敗：{e}")
+    try:
+        st.cache_resource.clear()
+        msgs.append("st.cache_resource 已清除")
+    except Exception as e:
+        msgs.append(f"st.cache_resource 清除失敗：{e}")
+    return msgs
+
+
+def _render_metric_card(title: str, value: str, note: str = "", tone: str = "info"):
+    colors = {
+        "ok": ("#ecfdf5", "#10b981", "#065f46"),
+        "warn": ("#fffbeb", "#f59e0b", "#92400e"),
+        "bad": ("#fef2f2", "#ef4444", "#991b1b"),
+        "info": ("#eff6ff", "#3b82f6", "#1e3a8a"),
+    }
+    bg, border, text = colors.get(tone, colors["info"])
+    st.markdown(
+        f"""
+        <div style="background:{bg};border:1px solid {border};border-radius:18px;padding:14px 16px;margin-bottom:10px;">
+          <div style="font-size:13px;color:{text};font-weight:800;">{title}</div>
+          <div style="font-size:24px;color:#0f172a;font-weight:900;line-height:1.35;">{value}</div>
+          <div style="font-size:12px;color:#475569;">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 try:
     from utils import inject_pro_theme, render_pro_hero
 except Exception:
-    def inject_pro_theme(): pass
-    def render_pro_hero(title, subtitle=""):
+    def inject_pro_theme():
+        pass
+
+    def render_pro_hero(title: str, subtitle: str = ""):
         st.title(title)
         if subtitle:
             st.caption(subtitle)
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
 
-st.set_page_config(page_title="11_資料診斷", layout="wide")
+st.set_page_config(page_title="資料診斷", layout="wide")
 inject_pro_theme()
-render_pro_hero("資料診斷", "檢查快取、JSON、頁面模組與常見串聯問題。")
+render_pro_hero("資料診斷｜系統健康檢查", "檢查 JSON、共用函式、股票主檔、自選股、即時資料、歷史資料與頁面檔案串聯狀態。")
 
-paths = [
-    ("專案根目錄", BASE_DIR),
-    ("pages 目錄", BASE_DIR / "pages"),
-    ("data 目錄", DATA_DIR),
-    ("watchlist.json", BASE_DIR / "watchlist.json"),
-    ("godpick_records.json", BASE_DIR / "godpick_records.json"),
-    ("godpick_record_ui_config.json", BASE_DIR / "godpick_record_ui_config.json"),
-    ("macro_trend_records.json", BASE_DIR / "macro_trend_records.json"),
-    ("stock_master_cache.json", BASE_DIR / "stock_master_cache.json"),
-    ("data/stock_master_cache.json", DATA_DIR / "stock_master_cache.json"),
-    ("last_query_state.json", BASE_DIR / "last_query_state.json"),
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    _render_metric_card("專案根目錄", "存在" if BASE_DIR.exists() else "缺少", str(BASE_DIR), "ok" if BASE_DIR.exists() else "bad")
+with c2:
+    _render_metric_card("pages 目錄", "存在" if (BASE_DIR / "pages").exists() else "缺少", str(BASE_DIR / "pages"), "ok" if (BASE_DIR / "pages").exists() else "bad")
+with c3:
+    _render_metric_card("Python", sys.version.split()[0], sys.executable, "info")
+with c4:
+    _render_metric_card("Streamlit Session", f"{len(st.session_state)} keys", "用於檢查換頁後狀態是否保留", "info")
+
+st.markdown("---")
+
+with st.sidebar:
+    st.subheader("診斷操作")
+    if st.button("清除 Streamlit 快取", use_container_width=True):
+        st.session_state[_k("cache_clear_msgs")] = _clear_streamlit_caches()
+        st.success("已執行快取清除")
+    if _k("cache_clear_msgs") in st.session_state:
+        for msg in st.session_state[_k("cache_clear_msgs")]:
+            st.caption(msg)
+
+    st.markdown("---")
+    st.subheader("測試股票")
+    test_code = st.text_input("股票代號", value=st.session_state.get(_k("test_code"), "3548"), key=_k("test_code"))
+    test_name = st.text_input("股票名稱", value=st.session_state.get(_k("test_name"), "兆利"), key=_k("test_name"))
+    test_market = st.selectbox("市場別", ["上市", "上櫃", "興櫃"], index=1, key=_k("test_market"))
+    test_days = st.slider("歷史資料測試天數", min_value=30, max_value=730, value=180, step=30, key=_k("test_days"))
+
+json_files = [
+    ("stock_master_cache.json", BASE_DIR / "stock_master_cache.json", True),
+    ("data/stock_master_cache.json", DATA_DIR / "stock_master_cache.json", False),
+    ("watchlist.json", BASE_DIR / "watchlist.json", True),
+    ("godpick_user_settings.json", BASE_DIR / "godpick_user_settings.json", False),
+    ("godpick_records.json", BASE_DIR / "godpick_records.json", False),
+    ("godpick_record_ui_config.json", BASE_DIR / "godpick_record_ui_config.json", False),
+    ("godpick_recommend_list.json", BASE_DIR / "godpick_recommend_list.json", False),
+    ("godpick_latest_recommendations.json", BASE_DIR / "godpick_latest_recommendations.json", False),
+    ("macro_trend_records.json", BASE_DIR / "macro_trend_records.json", False),
+    ("last_query_state.json", BASE_DIR / "last_query_state.json", False),
 ]
 
-rows = []
-for name, p in paths:
-    p = Path(p)
-    rows.append({
-        "項目": name,
-        "路徑": str(p),
-        "是否存在": p.exists(),
-        "大小KB": round(p.stat().st_size / 1024, 2) if p.exists() and p.is_file() else "",
-    })
+st.subheader("1. 關鍵檔案存在狀態")
+file_rows = [
+    _file_row("utils.py", BASE_DIR / "utils.py"),
+    _file_row("stock_master_service.py", BASE_DIR / "stock_master_service.py"),
+    _file_row("streamlit_app.py", BASE_DIR / "streamlit_app.py"),
+    _file_row("requirements.txt", BASE_DIR / "requirements.txt"),
+]
+file_rows += [_file_row(name, path, must) for name, path, must in json_files]
+st.dataframe(pd.DataFrame(file_rows), use_container_width=True, hide_index=True)
 
-st.subheader("檔案存在狀態")
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-st.subheader("JSON 讀取檢查")
+st.subheader("2. JSON 讀取檢查")
 json_rows = []
-for name, p in paths:
-    p = Path(p)
-    if p.exists() and p.is_file() and p.suffix.lower() == ".json":
-        status = "OK"
-        count = ""
-        err = ""
-        try:
-            data = json.loads(p.read_text(encoding="utf-8-sig"))
-            if isinstance(data, list):
-                count = len(data)
-            elif isinstance(data, dict):
-                count = len(data.keys())
-        except Exception as e:
-            status = "錯誤"
-            err = str(e)
-        json_rows.append({"檔案": name, "狀態": status, "筆數/鍵數": count, "錯誤": err})
-if json_rows:
-    st.dataframe(pd.DataFrame(json_rows), use_container_width=True, hide_index=True)
-else:
-    st.info("沒有 JSON 檔可檢查。")
+json_data_map: dict[str, Any] = {}
+for name, path, _must in json_files:
+    ok, data, err = _read_json_safe(path)
+    if ok:
+        json_data_map[name] = data
+    json_rows.append({
+        "檔案": name,
+        "狀態": "OK" if ok else "錯誤 / 不存在",
+        "型態與筆數": _json_count(data) if ok else "",
+        "錯誤訊息": err,
+        "路徑": str(path),
+    })
+st.dataframe(pd.DataFrame(json_rows), use_container_width=True, hide_index=True)
 
-with st.expander("查看 JSON 內容", expanded=False):
-    for name, p in paths:
-        p = Path(p)
-        if p.exists() and p.is_file() and p.suffix.lower() == ".json":
-            st.markdown(f"### {name}")
+bad_json = [r for r in json_rows if r["狀態"] != "OK" and r["檔案"] in {"stock_master_cache.json", "watchlist.json"}]
+if bad_json:
+    st.error("主檔或自選股 JSON 有異常，可能造成行情、歷史K線、股神推薦、推薦清單串聯失敗。")
+else:
+    st.success("主檔與自選股 JSON 基本讀取正常。")
+
+st.subheader("3. 頁面檔案與重複頁檢查")
+pages_dir = BASE_DIR / "pages"
+page_rows = []
+if pages_dir.exists():
+    for p in sorted(pages_dir.glob("*.py")):
+        page_rows.append({
+            "檔名": p.name,
+            "大小KB": round(p.stat().st_size / 1024, 2),
+            "最後修改": _fmt_dt(p.stat().st_mtime),
+            "路徑": str(p),
+        })
+page_df = pd.DataFrame(page_rows)
+st.dataframe(page_df, use_container_width=True, hide_index=True)
+
+if not page_df.empty:
+    duplicated_no = page_df["檔名"].str.extract(r"^(\d+)_")[0].dropna().value_counts()
+    duplicated_no = duplicated_no[duplicated_no > 1]
+    if not duplicated_no.empty:
+        st.warning("偵測到相同頁碼可能重複，Streamlit 側邊欄可能出現兩個相近頁面，請確認是否同時存在中文檔名與 #U 編碼檔名。")
+        st.dataframe(duplicated_no.rename("重複數").reset_index().rename(columns={"index": "頁碼"}), hide_index=True)
+
+st.subheader("4. 共用模組匯入檢查")
+module_rows = []
+utils_mod, utils_err = _try_import("utils")
+stock_mod, stock_err = _try_import("stock_master_service")
+for name, mod, err in [("utils", utils_mod, utils_err), ("stock_master_service", stock_mod, stock_err)]:
+    module_rows.append({
+        "模組": name,
+        "狀態": "OK" if mod is not None else "匯入失敗",
+        "錯誤": err,
+        "檔案": getattr(mod, "__file__", "") if mod is not None else "",
+    })
+st.dataframe(pd.DataFrame(module_rows), use_container_width=True, hide_index=True)
+
+expected_utils_funcs = [
+    "safe_read_json", "safe_write_json", "load_watchlist", "save_watchlist", "get_normalized_watchlist",
+    "get_history_data", "get_realtime_stock_info", "get_realtime_quotes", "inject_pro_theme",
+]
+expected_master_funcs = [
+    "load_stock_master", "refresh_stock_master", "search_stock_master", "get_stock_master_categories", "get_stock_master_diagnostics",
+]
+
+func_rows = []
+if utils_mod is not None:
+    for fn in expected_utils_funcs:
+        func_rows.append({"模組": "utils", "函式": fn, "是否存在": hasattr(utils_mod, fn)})
+if stock_mod is not None:
+    for fn in expected_master_funcs:
+        func_rows.append({"模組": "stock_master_service", "函式": fn, "是否存在": hasattr(stock_mod, fn)})
+if func_rows:
+    st.dataframe(pd.DataFrame(func_rows), use_container_width=True, hide_index=True)
+
+st.subheader("5. 股票主檔診斷")
+if stock_mod is None:
+    st.error(f"stock_master_service 匯入失敗：{stock_err}")
+else:
+    try:
+        master = stock_mod.load_stock_master()
+        if master is None:
+            master = pd.DataFrame()
+        st.write(f"主檔筆數：**{len(master):,}**")
+        if isinstance(master, pd.DataFrame) and not master.empty:
+            cols = list(master.columns)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.caption("欄位")
+                st.write("、".join(cols[:20]))
+            with c2:
+                if "市場別" in master.columns:
+                    st.caption("市場別分布")
+                    st.dataframe(master["市場別"].astype(str).value_counts().reset_index().rename(columns={"index": "市場別", "市場別": "筆數"}), hide_index=True, use_container_width=True)
+            with c3:
+                cat_col = "主題類別" if "主題類別" in master.columns else ("產業別" if "產業別" in master.columns else "")
+                if cat_col:
+                    st.caption(f"{cat_col} 前 15")
+                    st.dataframe(master[cat_col].astype(str).value_counts().head(15).reset_index().rename(columns={"index": cat_col, cat_col: "筆數"}), hide_index=True, use_container_width=True)
+            st.dataframe(master.head(80), use_container_width=True, hide_index=True)
+        else:
+            st.warning("主檔為空，請先到 9_股票主檔更新 重新建立。")
+    except Exception as e:
+        st.error(f"load_stock_master() 執行失敗：{e}")
+        st.code(traceback.format_exc())
+
+st.subheader("6. 自選股診斷")
+watch_data = json_data_map.get("watchlist.json")
+if watch_data is None:
+    st.warning("watchlist.json 無法讀取。")
+else:
+    try:
+        rows = []
+        if isinstance(watch_data, dict):
+            for group, items in watch_data.items():
+                if isinstance(items, list):
+                    rows.append({"群組": group, "股票數": len(items), "內容預覽": ", ".join([_safe_str(x) for x in items[:8]])})
+                else:
+                    rows.append({"群組": group, "股票數": "格式異常", "內容預覽": _safe_str(items)[:120]})
+        elif isinstance(watch_data, list):
+            rows.append({"群組": "list", "股票數": len(watch_data), "內容預覽": ", ".join([_safe_str(x) for x in watch_data[:8]])})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"自選股解析失敗：{e}")
+
+    if utils_mod is not None and hasattr(utils_mod, "get_normalized_watchlist"):
+        try:
+            normalized = utils_mod.get_normalized_watchlist()
+            st.caption("get_normalized_watchlist() 回傳")
+            if isinstance(normalized, dict):
+                norm_rows = [{"群組": k, "股票數": len(v) if isinstance(v, list) else "非 list"} for k, v in normalized.items()]
+                st.dataframe(pd.DataFrame(norm_rows), hide_index=True, use_container_width=True)
+            else:
+                st.write(type(normalized).__name__)
+                st.write(normalized)
+        except Exception as e:
+            st.error(f"get_normalized_watchlist() 執行失敗：{e}")
+
+st.subheader("7. 即時資料 / 歷史資料實測")
+run_realtime = st.button("測試即時資料", type="primary", use_container_width=True)
+run_history = st.button("測試歷史資料", use_container_width=True)
+
+if run_realtime:
+    if utils_mod is None or not hasattr(utils_mod, "get_realtime_stock_info"):
+        st.error("utils.get_realtime_stock_info 不存在。")
+    else:
+        try:
+            info = utils_mod.get_realtime_stock_info(test_code, test_name, test_market, refresh_token="diagnostics")
+            st.success("即時資料函式已回應。")
+            st.json(info if isinstance(info, (dict, list)) else {"value": _safe_str(info)})
+            if isinstance(info, dict):
+                price_keys = ["price", "current_price", "現價", "最新價", "close"]
+                vals = {k: info.get(k) for k in price_keys if k in info}
+                if vals and all(_safe_str(v) in {"", "0", "0.0", "None"} for v in vals.values()):
+                    st.warning("即時價格欄位疑似為 0 或空白，請檢查資料來源 fallback。")
+        except Exception as e:
+            st.error(f"即時資料測試失敗：{e}")
+            st.code(traceback.format_exc())
+
+if run_history:
+    if utils_mod is None or not hasattr(utils_mod, "get_history_data"):
+        st.error("utils.get_history_data 不存在。")
+    else:
+        end_dt = date.today()
+        start_dt = end_dt - timedelta(days=int(test_days))
+        try:
             try:
-                st.json(json.loads(p.read_text(encoding="utf-8-sig")))
-            except Exception as e:
-                st.error(f"JSON 讀取失敗：{e}")
+                hist = utils_mod.get_history_data(stock_no=test_code, stock_name=test_name, market_type=test_market, start_date=start_dt, end_date=end_dt)
+            except TypeError:
                 try:
-                    st.code(p.read_text(encoding="utf-8-sig")[:3000])
-                except Exception:
-                    pass
+                    hist = utils_mod.get_history_data(test_code, test_name, test_market, start_dt, end_dt)
+                except TypeError:
+                    hist = utils_mod.get_history_data(code=test_code, start_date=start_dt, end_date=end_dt)
+            if hist is None:
+                hist = pd.DataFrame()
+            st.write(f"歷史資料筆數：**{len(hist):,}**")
+            if isinstance(hist, pd.DataFrame) and not hist.empty:
+                st.success("歷史資料函式已回應且有資料。")
+                st.caption(f"欄位：{', '.join([str(c) for c in hist.columns])}")
+                st.dataframe(hist.tail(80), use_container_width=True, hide_index=True)
+                if "成交股數" in hist.columns:
+                    vol = pd.to_numeric(hist["成交股數"], errors="coerce")
+                    if vol.max(skipna=True) is not None and vol.max(skipna=True) < 10000:
+                        st.warning("成交量數值偏小，可能仍是張數而非股數，會影響量能分數。")
+            else:
+                st.warning("歷史資料為空。若測試的是上櫃股，請確認 utils.py 已有 TPEx fallback。")
+        except Exception as e:
+            st.error(f"歷史資料測試失敗：{e}")
+            st.code(traceback.format_exc())
+
+st.subheader("8. 推薦與紀錄 JSON 串聯檢查")
+record_files = ["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json", "godpick_user_settings.json", "godpick_record_ui_config.json"]
+rec_rows = []
+for name in record_files:
+    data = json_data_map.get(name)
+    path = BASE_DIR / name
+    ok, data2, err = _read_json_safe(path)
+    data = data if data is not None else data2
+    cols = ""
+    sample_id = ""
+    if isinstance(data, list) and data:
+        if isinstance(data[0], dict):
+            cols = ", ".join(list(data[0].keys())[:20])
+            sample_id = _safe_str(data[0].get("record_id") or data[0].get("id"))
+    elif isinstance(data, dict):
+        cols = ", ".join(list(data.keys())[:20])
+    rec_rows.append({
+        "檔案": name,
+        "狀態": "OK" if ok else "錯誤 / 不存在",
+        "型態與筆數": _json_count(data) if ok else "",
+        "樣本ID": sample_id,
+        "欄位預覽": cols,
+        "錯誤": err,
+    })
+st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
+
+with st.expander("查看 JSON 內容預覽", expanded=False):
+    pick = st.selectbox("選擇 JSON", [name for name, _, _ in json_files], key=_k("json_preview_pick"))
+    path = dict((name, path) for name, path, _ in json_files).get(pick)
+    if path:
+        ok, data, err = _read_json_safe(path)
+        if ok:
+            st.json(data)
+        else:
+            st.error(err)
+            try:
+                st.code(path.read_text(encoding="utf-8-sig")[:5000])
+            except Exception:
+                pass
+
+st.info("建議流程：先確認本頁主檔、自選股、歷史資料、即時資料都 OK，再回到 7_股神推薦.py 測試推薦與匯入 8 / 10。")
