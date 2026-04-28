@@ -60,7 +60,7 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-PAGE_TITLE = "股神推薦 V13｜類股資金流強化版"
+PAGE_TITLE = "股神推薦 V17｜大盤環境動態策略版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -147,6 +147,14 @@ GODPICK_RECORD_COLUMNS = [
     "單檔風險等級",
     "族群集中警示",
     "組合配置建議",
+    "大盤策略模式",
+    "大盤多空分數",
+    "推薦積極度係數",
+    "適合推薦型態",
+    "大盤策略建議",
+    "大盤風控建議",
+    "市場策略調整說明",
+    "動態建議倉位%",
 
     "風險報酬比",
     "追價風險分",
@@ -1954,6 +1962,136 @@ def _apply_v16_risk_allocation_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+
+# =========================
+# V17：大盤環境動態策略
+# 只做策略加權與說明，不做硬篩選，避免漏掉股票。
+# =========================
+def _derive_v17_market_score(row: pd.Series) -> float:
+    vals = []
+    weights = []
+    for col, w in [
+        ("大盤可參考分數", 0.30),
+        ("大盤市場廣度分數", 0.20),
+        ("大盤量價確認分數", 0.20),
+        ("大盤權值支撐分數", 0.15),
+        ("大盤推薦同步分數", 0.15),
+    ]:
+        v = _safe_float(row.get(col), None)
+        if v is not None:
+            vals.append(max(0.0, min(100.0, float(v))))
+            weights.append(w)
+    if vals and sum(weights) > 0:
+        return round(sum(v*w for v, w in zip(vals, weights)) / sum(weights), 2)
+    mw = _safe_float(row.get("大盤推薦權重"), None)
+    if mw is not None:
+        return round(max(0.0, min(100.0, 50.0 + float(mw) * 10.0)), 2)
+    return 50.0
+
+
+def _derive_v17_market_mode(row: pd.Series) -> str:
+    score = _safe_float(row.get("大盤多空分數"), _derive_v17_market_score(row)) or 50
+    risk_txt = _safe_str(row.get("大盤風險濾網"))
+    bucket = _safe_str(row.get("大盤情境分桶"))
+    if any(k in risk_txt + bucket for k in ["空頭", "高風險", "偏空"]):
+        if score < 55:
+            return "空頭防守"
+    if score >= 75:
+        return "多頭進攻"
+    if score >= 62:
+        return "偏多輪動"
+    if score >= 48:
+        return "震盪選股"
+    if score >= 35:
+        return "偏空防守"
+    return "空頭防守"
+
+
+def _derive_v17_aggressiveness(row: pd.Series) -> float:
+    mode = _safe_str(row.get("大盤策略模式", _derive_v17_market_mode(row)))
+    chase = _safe_str(row.get("追高風險等級"))
+    single_risk = _safe_str(row.get("單檔風險等級"))
+    opp = _safe_str(row.get("推薦型態")) + _safe_str(row.get("機會型態"))
+    base_map = {
+        "多頭進攻": 1.18,
+        "偏多輪動": 1.08,
+        "震盪選股": 0.95,
+        "偏空防守": 0.72,
+        "空頭防守": 0.52,
+    }
+    coef = base_map.get(mode, 0.90)
+    if any(k in chase for k in ["高", "過熱", "不建議"]):
+        coef -= 0.12
+    if any(k in single_risk for k in ["高", "極高"]):
+        coef -= 0.10
+    if any(k in opp for k in ["低檔", "拉回", "回測"]):
+        coef += 0.05 if mode in ["震盪選股", "偏多輪動"] else 0.0
+    return round(max(0.35, min(1.25, coef)), 2)
+
+
+def _derive_v17_suitable_types(row: pd.Series) -> str:
+    mode = _safe_str(row.get("大盤策略模式", _derive_v17_market_mode(row)))
+    if mode == "多頭進攻":
+        return "強勢突破、拉回承接、族群領先股"
+    if mode == "偏多輪動":
+        return "拉回承接、回測支撐、類股輪動剛啟動"
+    if mode == "震盪選股":
+        return "低檔轉強、回測支撐、量縮整理後轉強"
+    if mode == "偏空防守":
+        return "保守低風險、低檔止穩、小部位觀察"
+    return "現金防守、只追蹤不追價、等待大盤轉強"
+
+
+def _derive_v17_strategy_note(row: pd.Series) -> str:
+    mode = _safe_str(row.get("大盤策略模式", _derive_v17_market_mode(row)))
+    score = _safe_float(row.get("大盤多空分數"), 50) or 50
+    rec_type = _safe_str(row.get("推薦型態")) or _safe_str(row.get("機會型態"))
+    if mode == "多頭進攻":
+        return f"大盤分數{score:.1f}，環境偏多，可保留強勢與拉回股；{rec_type}可依風控分批執行。"
+    if mode == "偏多輪動":
+        return f"大盤分數{score:.1f}，資金輪動機率高，優先看族群資金流與拉回承接。"
+    if mode == "震盪選股":
+        return f"大盤分數{score:.1f}，不宜全面追價，優先低檔轉強與回測支撐。"
+    if mode == "偏空防守":
+        return f"大盤分數{score:.1f}，降低倉位，僅保留支撐明確且風險報酬比佳的標的。"
+    return f"大盤分數{score:.1f}，防守優先，等待量價與大盤同步轉強。"
+
+
+def _derive_v17_risk_note(row: pd.Series) -> str:
+    mode = _safe_str(row.get("大盤策略模式", _derive_v17_market_mode(row)))
+    chase = _safe_str(row.get("追高風險等級")) or "未判定"
+    coef = _safe_float(row.get("推薦積極度係數"), _derive_v17_aggressiveness(row)) or 0
+    if mode in ["偏空防守", "空頭防守"]:
+        return f"{mode}，推薦積極度{coef:.2f}；追高風險{chase}，以小倉位與停損優先。"
+    if mode == "震盪選股":
+        return f"震盪盤，推薦積極度{coef:.2f}；避免突破失敗，需等待量能確認。"
+    return f"{mode}，推薦積極度{coef:.2f}；仍需依停損策略控管單檔風險。"
+
+
+def _derive_v17_adjust_note(row: pd.Series) -> str:
+    base_pos = _safe_float(row.get("建議倉位%"), 0) or 0
+    dyn_pos = _safe_float(row.get("動態建議倉位%"), base_pos) or 0
+    coef = _safe_float(row.get("推薦積極度係數"), 1) or 1
+    return f"原建議倉位{base_pos:.1f}% × 大盤策略係數{coef:.2f} → 動態倉位{dyn_pos:.1f}%。"
+
+
+def _apply_v17_market_strategy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """V17：依大盤環境產出動態策略；不做硬篩，不改原始推薦名單。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["大盤多空分數"] = out.apply(_derive_v17_market_score, axis=1)
+    out["大盤策略模式"] = out.apply(_derive_v17_market_mode, axis=1)
+    out["推薦積極度係數"] = out.apply(_derive_v17_aggressiveness, axis=1)
+    out["適合推薦型態"] = out.apply(_derive_v17_suitable_types, axis=1)
+    out["大盤策略建議"] = out.apply(_derive_v17_strategy_note, axis=1)
+    out["大盤風控建議"] = out.apply(_derive_v17_risk_note, axis=1)
+    base_pos = pd.to_numeric(out.get("建議倉位%", 0), errors="coerce").fillna(0)
+    coef = pd.to_numeric(out.get("推薦積極度係數", 1), errors="coerce").fillna(1)
+    out["動態建議倉位%"] = (base_pos * coef).clip(lower=0, upper=35).round(1)
+    out["市場策略調整說明"] = out.apply(_derive_v17_adjust_note, axis=1)
+    return out
+
 def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -1978,6 +2116,7 @@ def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
     out = _apply_v16_risk_allocation_columns(out)
+    out = _apply_v17_market_strategy_columns(out)
     return out
 
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
