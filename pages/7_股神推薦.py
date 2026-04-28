@@ -7612,7 +7612,120 @@ def main():
         full_available_cols = list(rec_df.columns)
         full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
         full_show_cols = [c for c in full_order if c in rec_df.columns]
-        st.dataframe(_format_df(rec_df[full_show_cols].copy()), use_container_width=True, hide_index=True)
+
+        # v25.6：完整推薦表直接勾選，並可匯入 05_自選股中心 / 09_股神推薦紀錄。
+        full_selected_codes_prev = {
+            _normalize_code(x)
+            for x in st.session_state.get(_k("full_table_selected_codes"), [])
+            if _normalize_code(x)
+        }
+
+        full_work_df = rec_df[full_show_cols].copy()
+        if "勾選" not in full_work_df.columns:
+            full_work_df.insert(0, "勾選", False)
+        full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)
+
+        full_editor_df = st.data_editor(
+            _format_df(full_work_df),
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=_k("full_table_editor"),
+            column_config={
+                "勾選": st.column_config.CheckboxColumn("勾選"),
+                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
+                "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
+                "風險說明": st.column_config.TextColumn("風險說明", width="large"),
+            },
+        )
+
+        full_picked_codes = []
+        for _, row in full_editor_df.iterrows():
+            picked_val = row.get("勾選", False)
+            if isinstance(picked_val, bool):
+                is_checked = picked_val
+            else:
+                is_checked = str(picked_val).strip().lower() in {"true", "1", "yes", "y", "是"}
+            if is_checked:
+                code = _normalize_code(row.get("股票代號"))
+                if code:
+                    full_picked_codes.append(code)
+
+        # 去重但保留表格順序。
+        full_picked_codes = list(dict.fromkeys(full_picked_codes))
+        st.session_state[_k("full_table_selected_codes")] = full_picked_codes
+
+        selected_snapshot_full = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
+        if full_picked_codes:
+            st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_full
+            st.session_state["godpick_rec_selected_df"] = selected_snapshot_full
+
+        st.caption(f"完整推薦表目前勾選：{len(full_picked_codes)} 檔。可直接匯入 05_自選股中心 或 09_股神推薦紀錄。")
+
+        full_a1, full_a2, full_a3, full_a4 = st.columns([1.3, 1.4, 1.4, 2.0])
+        with full_a1:
+            group_options_full = list(watchlist_map.keys()) if isinstance(watchlist_map, dict) and watchlist_map else ["預設"]
+            default_full_group = st.session_state.get(_k("full_table_pick_group"), st.session_state.get(_k("rec_pick_group"), group_options_full[0]))
+            if default_full_group not in group_options_full:
+                default_full_group = group_options_full[0]
+            full_target_group = st.selectbox(
+                "匯入自選股群組",
+                options=group_options_full,
+                index=group_options_full.index(default_full_group),
+                key=_k("full_table_pick_group"),
+            )
+        with full_a2:
+            full_add_watchlist = st.button(
+                "匯入 05_自選股中心",
+                use_container_width=True,
+                type="primary",
+                disabled=(len(full_picked_codes) == 0),
+                key=_k("full_table_add_watchlist"),
+            )
+        with full_a3:
+            full_add_record = st.button(
+                "匯入 09_股神推薦紀錄",
+                use_container_width=True,
+                disabled=(len(full_picked_codes) == 0),
+                key=_k("full_table_add_record"),
+            )
+        with full_a4:
+            st.caption("這裡會直接使用完整推薦表左側的勾選欄，不需要再到其他區塊重選。")
+
+        if full_add_watchlist:
+            work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
+            picked_rows = []
+            for _, r in work.iterrows():
+                picked_rows.append(
+                    {
+                        "code": _normalize_code(r.get("股票代號")),
+                        "name": _safe_str(r.get("股票名稱")),
+                        "market": _safe_str(r.get("市場別")) or "上市",
+                        "category": _normalize_category(r.get("類別")),
+                    }
+                )
+            added, messages = _append_multiple_stocks_to_watchlist(full_target_group, picked_rows)
+            if added > 0:
+                st.success(f"已從完整推薦表匯入 {added} 檔到 05_自選股中心：{full_target_group}")
+                st.session_state[_k("rec_pick_codes_next")] = full_picked_codes
+                st.rerun()
+            else:
+                st.warning("沒有新增成功，可能已存在或寫入失敗。")
+            with st.expander("匯入自選股明細", expanded=True):
+                for msg in messages:
+                    st.write(f"- {msg}")
+
+        if full_add_record:
+            record_rows = _build_record_rows_from_rec_df(rec_df, full_picked_codes)
+            added_count, record_msgs = _append_godpick_records(record_rows)
+            if added_count > 0:
+                st.success(f"已從完整推薦表寫入 {added_count} 筆到 09_股神推薦紀錄")
+                st.session_state[_k("rec_record_codes_next")] = full_picked_codes
+            else:
+                st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
+            with st.expander("推薦紀錄寫入明細", expanded=True):
+                for msg in record_msgs:
+                    st.write(f"- {msg}")
 
     with tabs[1]:
         category_show = category_strength_df.copy()
