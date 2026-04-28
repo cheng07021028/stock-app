@@ -1,17 +1,14 @@
-# pages/7_股神推薦.py
+# pages/8_股神推薦紀錄.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from datetime import date, timedelta, datetime
+from datetime import datetime, date, timedelta
 from typing import Any
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
-import copy
 import json
 import base64
 import io
 import hashlib
+import copy
 
 import pandas as pd
 import requests
@@ -25,97 +22,29 @@ except Exception:
     firestore = None
 
 from utils import (
-    compute_radar_scores,
-    compute_signal_snapshot,
-    compute_support_resistance_snapshot,
     format_number,
-    get_all_code_name_map,
     get_history_data,
-    get_normalized_watchlist,
+    get_realtime_stock_info,
     inject_pro_theme,
     render_pro_hero,
     render_pro_info_card,
     render_pro_kpi_row,
     render_pro_section,
+    get_normalized_watchlist,
 )
 
-try:
-    from utils import get_history_data_debug
-except Exception:
-    get_history_data_debug = None
-
-try:
-    from stock_master_service import load_stock_master
-except Exception:
-    load_stock_master = None
-
-STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
-DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
-PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
-MACRO_LINK_VERSION = "macro_link_v1_20260427"
-WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
-GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
-SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
-SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
-SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
-PAGE_TITLE = "股神推薦 V5｜低檔拉回機會版"
-PFX = "godpick_"
-
-HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 10   # 進度條每完成 N 檔才更新一次，降低前端重繪成本
-
-GODPICK_DEFAULT_SCORE_WEIGHTS = {
-    "市場環境": 10,
-    "技術結構": 15,
-    "起漲前兆": 20,
-    "類股熱度": 15,
-    "自動因子": 10,
-    "交易可行": 10,
-    "型態突破": 12,
-    "爆發力": 8,
-}
-
-# 執行推薦時會把已套用權重複製到這裡，避免 ThreadPool 內直接讀 widget 狀態造成不穩。
-GODPICK_ACTIVE_SCORE_WEIGHTS = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-
-
-GODPICK_SETTINGS_FILE = "godpick_user_settings.json"
-GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
-GODPICK_LIST_FILE = "godpick_recommend_list.json"
-
+PAGE_TITLE = "股神推薦紀錄"
+PFX = "godpick_record_"
+GOD_DECISION_V5_LINK_VERSION = "record_v5_link_v1_20260427"
+PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
+DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
+RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 
 GODPICK_RECORD_COLUMNS = [
-    "record_id",
-    "股票代號",
-    "股票名稱",
-    "市場別",
-    "類別",
-    "推薦模式",
-    "推薦型態",
-    "機會型態",
-    "低檔位置分數",
-    "拉回承接分數",
-    "支撐回測分數",
-    "止跌轉強分數",
-    "機會股分數",
-    "機會股說明",
-    "推薦等級",
-    "推薦總分",
-    "大盤參考等級",
-    "大盤可參考分數",
-    "大盤加權分",
-    "大盤風險濾網",
-    "大盤推薦權重",
-    "大盤降權原因",
-    "大盤操作風格",
-    "大盤市場廣度分數",
-    "大盤量價確認分數",
-    "大盤權值支撐分數",
-    "大盤推薦同步分數",
-    "大盤資料日期",
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦型態", "機會型態", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "機會股說明", "推薦等級", "推薦總分",
     "股神決策模式",
     "股神進場建議",
+    "推薦分層",
     "建議部位%",
     "風險報酬比",
     "追價風險分",
@@ -123,66 +52,92 @@ GODPICK_RECORD_COLUMNS = [
     "目標報酬%",
     "不建議買進原因",
     "最佳操作劇本",
-    "大盤情境調權說明",
-    "大盤情境分桶",
-    "推薦分層",
     "隔日操作建議",
     "失效價位",
     "轉弱條件",
-    "買點分級",
-    "風險說明",
-    "股神推論邏輯",
-    "權重設定",
-    "推薦分桶",
-    "起漲等級",
-    "信心等級",
-    "買點劇本",
-    "失效條件",
-    "假突破風險",
-    "過熱風險",
-    "3日追蹤預留",
-    "5日追蹤預留",
-    "10日追蹤預留",
-    "20日追蹤預留",
-    "技術結構分數",
-    "起漲前兆分數",
-    "飆股起漲分數",
-    "起漲摘要",
-    "交易可行分數",
-    "類股熱度分數",
-    "同類股領先幅度",
-    "是否領先同類股",
-    "推薦標籤",
-    "推薦理由摘要",
-    "推薦價格",
-    "停損價",
-    "賣出目標1",
-    "賣出目標2",
-    "推薦日期",
-    "推薦時間",
-    "建立時間",
-    "更新時間",
-    "目前狀態",
-    "是否已實際買進",
-    "實際買進價",
-    "實際賣出價",
-    "實際報酬%",
-    "最新價",
-    "最新更新時間",
-    "損益金額",
-    "損益幅%",
-    "是否達停損",
-    "是否達目標1",
-    "是否達目標2",
-    "持有天數",
-    "模式績效標籤",
-    "備註",
+    "大盤情境調權說明",
+    "大盤情境分桶",
+    "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
+    "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲摘要", "飆股起漲分數", "起漲摘要", "交易可行分數", "類股熱度分數", "同類股領先幅度", "是否領先同類股",
+    "推薦標籤", "推薦理由摘要", "推薦價格", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
+    "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
+    "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
+    "模式績效標籤", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+    "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
 
+STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
 
-# =========================================================
-# 基礎工具
-# =========================================================
+DEFAULT_STANDARD_COLS = [
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦型態", "機會型態", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "機會股說明", "推薦等級", "推薦總分",
+    "股神決策模式",
+    "股神進場建議",
+    "推薦分層",
+    "建議部位%",
+    "風險報酬比",
+    "追價風險分",
+    "停損距離%",
+    "目標報酬%",
+    "不建議買進原因",
+    "最佳操作劇本",
+    "隔日操作建議",
+    "失效價位",
+    "轉弱條件",
+    "大盤情境調權說明",
+    "大盤情境分桶",
+    "買點分級", "風險說明", "股神推論邏輯",
+    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間",
+    "推薦價格", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
+]
+
+DEFAULT_ADVANCED_COLS = [
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦型態", "機會型態", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "機會股說明", "推薦等級", "推薦總分",
+    "股神決策模式",
+    "股神進場建議",
+    "推薦分層",
+    "建議部位%",
+    "風險報酬比",
+    "追價風險分",
+    "停損距離%",
+    "目標報酬%",
+    "不建議買進原因",
+    "最佳操作劇本",
+    "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
+    "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "股神決策分數", "股神建議動作",
+    "股神信心", "股神進場區間", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+    "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
+    "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
+    "推薦日期", "推薦時間", "模式績效標籤", "股神推論", "機會股說明", "推薦理由摘要", "備註"
+]
+
+FAST_VISIBLE_LIMIT = 500
+UI_CONFIG_DEFAULT = {
+    "fast_mode": True,
+    "visible_limit": FAST_VISIBLE_LIMIT,
+    "profiles": {
+        "標準": DEFAULT_STANDARD_COLS.copy(),
+        "進階": DEFAULT_ADVANCED_COLS.copy(),
+    },
+    "updated_at": "",
+}
+
+
+def _dedupe_keep_order(seq):
+    out = []
+    seen = set()
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+GODPICK_RECORD_COLUMNS = _dedupe_keep_order(GODPICK_RECORD_COLUMNS)
+DEFAULT_STANDARD_COLS = _dedupe_keep_order(DEFAULT_STANDARD_COLS)
+DEFAULT_ADVANCED_COLS = _dedupe_keep_order(DEFAULT_ADVANCED_COLS)
+
+
+
 def _k(key: str) -> str:
     return f"{PFX}{key}"
 
@@ -210,1472 +165,45 @@ def _safe_float(v: Any, default=None):
         return default
 
 
-def _normalize_code(v: Any) -> str:
-    text = _safe_str(v)
-    if not text:
-        return ""
-    if text.isdigit():
-        return text
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if 4 <= len(digits) <= 6:
-        return digits
-    return text
 
-
-def _normalize_category(v: Any) -> str:
-    text = _safe_str(v)
-    if not text:
-        return ""
-    return text.replace("　", " ").strip()
-
-
-def _score_clip(v: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, v))
-
-
-def _ensure_radar_dict(radar_obj: Any) -> dict[str, Any]:
-    if radar_obj is None:
-        radar_obj = {}
-    elif not isinstance(radar_obj, dict):
-        try:
-            radar_obj = dict(radar_obj)
-        except Exception:
-            radar_obj = {}
-
-    base = {
-        "trend": _safe_float(radar_obj.get("trend"), 50) or 50,
-        "momentum": _safe_float(radar_obj.get("momentum"), 50) or 50,
-        "volume": _safe_float(radar_obj.get("volume"), 50) or 50,
-        "position": _safe_float(radar_obj.get("position"), 50) or 50,
-        "structure": _safe_float(radar_obj.get("structure"), 50) or 50,
-        "summary": _safe_str(radar_obj.get("summary")) or "",
-    }
-    for k, v in radar_obj.items():
-        if k not in base:
-            base[k] = v
-    return base
-
-
-def _score_band(v: Any) -> str:
-    x = _safe_float(v, 0) or 0
-    if x >= 90:
-        return "極強"
-    if x >= 80:
-        return "偏強"
-    if x >= 70:
-        return "可用"
-    if x >= 60:
-        return "觀察"
-    return "保守"
-
-
-def _build_pattern_breakout_scores(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict) -> dict[str, Any]:
-    if df is None or df.empty:
-        return {"型態名稱": "資料不足", "型態突破分數": 0.0, "突破風險": "資料不足"}
-
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"), 0) or 0
-    ma20 = _safe_float(last.get("MA20"))
-    ma60 = _safe_float(last.get("MA60"))
-    vol5 = _safe_float(last.get("VOL5"))
-    vol20 = _safe_float(last.get("VOL20"))
-    ret5 = _safe_float(last.get("RET5"), 0) or 0
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-
-    score = 45.0
-    pattern_name = "整理中"
-    risk_text = "正常"
-
-    if close_now and res20 not in [None, 0]:
-        dist = ((res20 - close_now) / res20) * 100
-        if -1.5 <= dist <= 1.5:
-            score += 28
-            pattern_name = "平台整理突破"
-        elif 1.5 < dist <= 4.5:
-            score += 18
-            pattern_name = "箱型整理待突破"
-        elif dist < -1.5:
-            score += 12
-            pattern_name = "已突破觀察"
-
-    if ma20 not in [None, 0] and ma60 not in [None, 0]:
-        if close_now >= ma20 >= ma60:
-            score += 16
-        elif close_now >= ma20:
-            score += 8
-
-    if vol5 not in [None, 0] and vol20 not in [None, 0]:
-        vr = vol5 / vol20
-        if vr >= 1.6:
-            score += 18
-        elif vr >= 1.2:
-            score += 10
-        elif vr < 0.8:
-            score -= 5
-
-    if ret5 > 12:
-        score -= 8
-        risk_text = "短線偏熱"
-    if ret5 > 20:
-        score -= 12
-        risk_text = "短線過熱"
-
-    if sup20 not in [None, 0] and close_now < sup20:
-        score -= 10
-        risk_text = "跌破支撐"
-
-    return {
-        "型態名稱": pattern_name,
-        "型態突破分數": _score_clip(score),
-        "突破風險": risk_text,
-    }
-
-
-def _build_burst_scores(df: pd.DataFrame) -> dict[str, Any]:
-    if df is None or df.empty:
-        return {"爆發力分數": 0.0, "爆發等級": "資料不足"}
-
-    last = df.iloc[-1]
-    ret5 = _safe_float(last.get("RET5"), 0) or 0
-    ret20 = _safe_float(last.get("RET20"), 0) or 0
-    vol5 = _safe_float(last.get("VOL5"))
-    vol20 = _safe_float(last.get("VOL20"))
-    close_now = _safe_float(last.get("收盤價"), 0) or 0
-    atr14 = _safe_float(last.get("ATR14"))
-
-    score = 48.0
-    if ret5 > 5:
-        score += 12
-    if ret5 > 8:
-        score += 10
-    if ret20 > 12:
-        score += 8
-    if vol5 not in [None, 0] and vol20 not in [None, 0]:
-        vr = vol5 / vol20
-        if vr >= 1.8:
-            score += 14
-        elif vr >= 1.3:
-            score += 8
-    if close_now not in [None, 0] and atr14 not in [None, 0]:
-        atr_pct = atr14 / close_now * 100
-        if 2.2 <= atr_pct <= 6.0:
-            score += 8
-        elif atr_pct > 8.5:
-            score -= 8
-
-    score = _score_clip(score)
-    if score >= 85:
-        level = "高爆發"
-    elif score >= 72:
-        level = "中強勢"
-    elif score >= 60:
-        level = "觀察"
-    else:
-        level = "普通"
-    return {"爆發力分數": score, "爆發等級": level}
-
-
-def _last_num(df: pd.DataFrame, col: str, default: float | None = None) -> float | None:
-    try:
-        if df is None or df.empty or col not in df.columns:
-            return default
-        return _safe_float(df[col].iloc[-1], default)
-    except Exception:
-        return default
-
-
-def _recent_low_high(df: pd.DataFrame, days: int = 60) -> tuple[float | None, float | None]:
-    try:
-        w = df.tail(days)
-        low = pd.to_numeric(w.get("最低價"), errors="coerce").dropna()
-        high = pd.to_numeric(w.get("最高價"), errors="coerce").dropna()
-        return (float(low.min()) if not low.empty else None, float(high.max()) if not high.empty else None)
-    except Exception:
-        return None, None
-
-
-def _vol_ratio(df: pd.DataFrame, short_col: str = "VOL5", long_col: str = "VOL20") -> float | None:
-    v1 = _last_num(df, short_col)
-    v2 = _last_num(df, long_col)
-    if v1 not in [None, 0] and v2 not in [None, 0]:
-        return float(v1) / float(v2)
-    return None
-
-
-def _build_opportunity_scores(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict, radar: dict) -> dict[str, Any]:
-    """低檔 / 拉回 / 回測機會股評分。"""
-    if df is None or df.empty or len(df) < 30:
-        return {"低檔位置分數": 0.0, "拉回承接分數": 0.0, "支撐回測分數": 0.0, "止跌轉強分數": 0.0, "機會股分數": 0.0, "機會型態": "資料不足", "推薦型態": "資料不足", "機會股說明": "歷史資料不足，無法判斷低檔/拉回/回測機會", "追高風險分_機會": 80.0}
-
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"), 0) or 0
-    open_now = _safe_float(last.get("開盤價"), close_now) or close_now
-    ma5 = _safe_float(last.get("MA5"))
-    ma10 = _safe_float(last.get("MA10"))
-    ma20 = _safe_float(last.get("MA20"))
-    ma60 = _safe_float(last.get("MA60"))
-    ret3 = _safe_float(last.get("RET3"), 0) or 0
-    ret5 = _safe_float(last.get("RET5"), 0) or 0
-    ret20 = _safe_float(last.get("RET20"), 0) or 0
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-    sup60 = _safe_float(sr_snapshot.get("sup_60"))
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    vr = _vol_ratio(df)
-
-    low60, high60 = _recent_low_high(df, 60)
-    low120, high120 = _recent_low_high(df, 120)
-    low_dist60 = ((close_now - low60) / low60 * 100) if close_now and low60 not in [None, 0] else None
-    high_drawdown60 = ((close_now - high60) / high60 * 100) if close_now and high60 not in [None, 0] else None
-    low_dist120 = ((close_now - low120) / low120 * 100) if close_now and low120 not in [None, 0] else None
-
-    low_score = 42.0
-    if low_dist60 is not None:
-        if low_dist60 <= 8: low_score += 30
-        elif low_dist60 <= 15: low_score += 20
-        elif low_dist60 <= 25: low_score += 10
-        else: low_score -= min(18, (low_dist60 - 25) * 0.35)
-    if low_dist120 is not None and low_dist120 <= 18: low_score += 8
-    if high_drawdown60 is not None:
-        if -28 <= high_drawdown60 <= -8: low_score += 12
-        elif high_drawdown60 > -3: low_score -= 10
-    if ret20 > 18: low_score -= 18
-    elif -8 <= ret20 <= 8: low_score += 8
-    if ma20 not in [None, 0] and close_now:
-        dist_ma20 = (close_now - ma20) / ma20 * 100
-        if -4 <= dist_ma20 <= 5: low_score += 8
-        elif dist_ma20 < -10: low_score -= 8
-
-    pullback_score = 38.0
-    if ma20 not in [None, 0] and ma60 not in [None, 0]:
-        if ma20 >= ma60: pullback_score += 18
-        if close_now >= ma60: pullback_score += 10
-        else: pullback_score -= 14
-    if ma20 not in [None, 0] and close_now:
-        dist_ma20 = (close_now - ma20) / ma20 * 100
-        if -3 <= dist_ma20 <= 4.5: pullback_score += 26
-        elif -7 <= dist_ma20 < -3: pullback_score += 12
-        elif dist_ma20 > 10: pullback_score -= 16
-    if vr is not None:
-        if 0.55 <= vr <= 1.10: pullback_score += 10
-        elif vr >= 1.8 and ret5 < 0: pullback_score -= 12
-    if -10 <= ret20 <= 12 and ret5 <= 6: pullback_score += 7
-    if close_now >= open_now and ret3 >= -2: pullback_score += 7
-
-    retest_score = 40.0
-    support_candidates = [x for x in [sup20, sup60, ma20, ma60] if x not in [None, 0]]
-    nearest_support = None
-    if close_now and support_candidates:
-        nearest_support = min(support_candidates, key=lambda x: abs(close_now - x) / x)
-        support_dist = (close_now - nearest_support) / nearest_support * 100
-        if -1.5 <= support_dist <= 4.5: retest_score += 28
-        elif 4.5 < support_dist <= 8: retest_score += 12
-        elif support_dist < -3: retest_score -= 14
-    if res20 not in [None, 0] and close_now:
-        dist_res = (close_now - res20) / res20 * 100
-        if -3 <= dist_res <= 3: retest_score += 15
-    if ma20 not in [None, 0] and ma60 not in [None, 0] and ma20 >= ma60: retest_score += 8
-    if ret5 > 12: retest_score -= 12
-
-    rebound_score = 40.0
-    if close_now >= open_now: rebound_score += 10
-    if ret3 > 0: rebound_score += 10
-    if ret5 > -3: rebound_score += 8
-    if ma5 not in [None, 0] and ma10 not in [None, 0] and close_now >= ma5:
-        rebound_score += 8
-        if ma5 >= ma10: rebound_score += 8
-    if vr is not None:
-        if 0.9 <= vr <= 1.7: rebound_score += 10
-        elif vr > 2.4 and ret5 < 0: rebound_score -= 10
-    sig = _safe_float(signal_snapshot.get("score"), 0) or 0
-    rebound_score += min(12, max(0, sig * 2.2))
-
-    chase_risk = 35.0
-    if ret5 > 8: chase_risk += 18
-    if ret20 > 18: chase_risk += 22
-    if low_dist60 is not None and low_dist60 > 35: chase_risk += 12
-    if ma20 not in [None, 0] and close_now:
-        dist_ma20 = (close_now - ma20) / ma20 * 100
-        if dist_ma20 > 10: chase_risk += 16
-        elif -3 <= dist_ma20 <= 5: chase_risk -= 8
-    if vr is not None and vr > 2.2 and ret5 > 5: chase_risk += 12
-
-    low_score = _score_clip(low_score)
-    pullback_score = _score_clip(pullback_score)
-    retest_score = _score_clip(retest_score)
-    rebound_score = _score_clip(rebound_score)
-    chase_risk = _score_clip(chase_risk)
-    opportunity_score = _score_clip(low_score * 0.28 + pullback_score * 0.24 + retest_score * 0.24 + rebound_score * 0.20 + max(0, 100 - chase_risk) * 0.04)
-
-    candidates = [("低檔轉強", low_score), ("拉回承接", pullback_score), ("回測支撐", retest_score), ("止跌反彈", rebound_score)]
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    opportunity_type = candidates[0][0]
-    if chase_risk >= 75 and opportunity_score >= 65:
-        opportunity_type = f"{opportunity_type}｜但勿追高"
-
-    reason_parts = []
-    if low_score >= 70: reason_parts.append("位置接近低檔")
-    if pullback_score >= 70: reason_parts.append("拉回均線承接")
-    if retest_score >= 70: reason_parts.append("回測支撐不破")
-    if rebound_score >= 70: reason_parts.append("止跌轉強")
-    if chase_risk >= 72: reason_parts.append("追高風險偏高，等回測")
-    elif chase_risk <= 55: reason_parts.append("追高風險相對低")
-    if nearest_support not in [None, 0]: reason_parts.append(f"鄰近支撐 {nearest_support:.2f}")
-    if not reason_parts: reason_parts.append("低檔/拉回條件普通，列觀察")
-
-    return {
-        "低檔位置分數": round(low_score, 2),
-        "拉回承接分數": round(pullback_score, 2),
-        "支撐回測分數": round(retest_score, 2),
-        "止跌轉強分數": round(rebound_score, 2),
-        "機會股分數": round(opportunity_score, 2),
-        "機會型態": opportunity_type,
-        "推薦型態": opportunity_type,
-        "機會股說明": "、".join(reason_parts[:6]),
-        "追高風險分_機會": round(chase_risk, 2),
-    }
-
-
-def _is_opportunity_mode(mode: str) -> bool:
-    text = _safe_str(mode)
-    return any(k in text for k in ["低檔", "拉回", "回測", "機會", "保守低風險"])
-
-
-def _build_entry_zone_text(pullback_buy: Any, breakout_buy: Any) -> str:
-    pb = _safe_float(pullback_buy)
-    bb = _safe_float(breakout_buy)
-    if pb not in [None] and bb not in [None]:
-        low = min(pb, bb)
-        high = max(pb, bb)
-        return f"{format_number(low, 2)} ~ {format_number(high, 2)}"
-    if pb is not None:
-        return format_number(pb, 2)
-    if bb is not None:
-        return format_number(bb, 2)
-    return ""
-
-
-def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
-    if base_df is None or base_df.empty:
-        return {"score": 50.0, "label": "中性", "summary": "無市場樣本"}
-
-    ret_mean = pd.to_numeric(base_df.get("區間漲跌幅%"), errors="coerce").fillna(0).mean()
-    signal_mean = pd.to_numeric(base_df.get("訊號分數"), errors="coerce").fillna(0).mean()
-    prelaunch_mean = pd.to_numeric(base_df.get("起漲前兆分數"), errors="coerce").fillna(0).mean()
-    positive_ratio = (pd.to_numeric(base_df.get("區間漲跌幅%"), errors="coerce").fillna(0) > 0).mean()
-
-    score = 50.0
-    score += max(min(ret_mean * 0.9, 14), -14)
-    score += max(min(signal_mean * 5.5, 18), -18)
-    score += max(min((prelaunch_mean - 50) * 0.35, 12), -12)
-    score += max(min((positive_ratio - 0.5) * 60, 10), -10)
-    score = _score_clip(score)
-
-    if score >= 80:
-        label = "市場順風"
-    elif score >= 68:
-        label = "市場偏多"
-    elif score >= 55:
-        label = "市場中性偏多"
-    elif score >= 45:
-        label = "市場中性"
-    else:
-        label = "市場逆風"
-
-    summary = f"{label}｜平均漲幅 {ret_mean:.2f}%｜正報酬占比 {positive_ratio*100:.1f}%"
-    return {"score": score, "label": label, "summary": summary}
-
-
-
-
-# =========================================================
-# 永久設定 / 本輪推薦結果保存
-# =========================================================
-def _safe_json_read_local(path: str, default):
-    try:
-        p = Path(path)
-        if not p.exists():
-            return copy.deepcopy(default)
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if data is not None else copy.deepcopy(default)
-    except Exception:
-        return copy.deepcopy(default)
-
-
-def _safe_json_write_local(path: str, payload) -> tuple[bool, str]:
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
-        return True, f"已寫入本機：{path}"
-    except Exception as e:
-        return False, f"本機寫入失敗：{path} / {e}"
-
-
-def _generic_github_file_config(path_name: str) -> dict[str, str]:
-    return {
-        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
-        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
-        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
-        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
-        "path": path_name,
-    }
-
-
-def _read_json_from_github_path(path_name: str, default):
-    cfg = _generic_github_file_config(path_name)
-    token = cfg["token"]
-    if not token:
-        return copy.deepcopy(default), "未設定 GITHUB_TOKEN"
-
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code == 404:
-            return copy.deepcopy(default), ""
-        if resp.status_code != 200:
-            return copy.deepcopy(default), f"讀取 GitHub {path_name} 失敗：{resp.status_code}"
-
-        content = resp.json().get("content", "")
-        if not content:
-            return copy.deepcopy(default), ""
-        payload = json.loads(base64.b64decode(content).decode("utf-8"))
-        return payload, ""
-    except Exception as e:
-        return copy.deepcopy(default), f"讀取 GitHub {path_name} 例外：{e}"
-
-
-def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
-    cfg = _generic_github_file_config(path_name)
-    token = cfg["token"]
-    if not token:
-        return False, "未設定 GITHUB_TOKEN"
-
-    sha = ""
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code == 200:
-            sha = _safe_str(resp.json().get("sha"))
-        elif resp.status_code != 404:
-            return False, f"讀取 GitHub SHA 失敗：{resp.status_code}"
-    except Exception as e:
-        return False, f"讀取 GitHub SHA 例外：{e}"
-
-    body = {
-        "message": f"update {path_name} at {_now_text()}",
-        "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")).decode("utf-8"),
-        "branch": cfg["branch"],
-    }
-    if sha:
-        body["sha"] = sha
-
-    try:
-        resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            json=body,
-            timeout=30,
-        )
-        if resp.status_code in (200, 201):
-            return True, f"已寫入 GitHub：{path_name}"
-        return False, f"GitHub 寫入 {path_name} 失敗：{resp.status_code} / {resp.text[:300]}"
-    except Exception as e:
-        return False, f"GitHub 寫入 {path_name} 例外：{e}"
-
-
-def _load_persistent_settings() -> dict[str, Any]:
-    """讀取股神推薦永久設定。
-
-    修正重點：舊版只要 GitHub 有舊資料就會直接採用，導致本機 JSON 已保存的新權重/掃描條件
-    在換頁或重新整理後又被 GitHub 舊值覆蓋。這版會同時讀 GitHub 與本機，依 updated_at 較新的為準；
-    若無法判斷時間，優先採用本機，避免使用者剛套用的設定消失。
-    """
-    default_payload = {
-        "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
-        "applied_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
-        "column_orders": {},
-        "scan_settings": {},
-        "updated_at": "",
-        "version": "godpick_v5_persistent_settings",
-    }
-
-    github_payload, github_msg = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
-    local_payload = _safe_json_read_local(GODPICK_SETTINGS_FILE, {})
-
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    if isinstance(github_payload, dict) and github_payload:
-        candidates.append(("github", github_payload))
-    if isinstance(local_payload, dict) and local_payload:
-        candidates.append(("local", local_payload))
-
-    if not candidates:
-        payload = default_payload.copy()
-    elif len(candidates) == 1:
-        payload = candidates[0][1]
-    else:
-        def _ts(item: tuple[str, dict[str, Any]]):
-            source, data = item
-            raw = _safe_str(data.get("updated_at"))
-            try:
-                return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                # 無時間戳時，本機優先，避免 GitHub 舊值覆蓋剛剛套用的設定
-                return datetime.min if source == "github" else datetime.max
-
-        payload = sorted(candidates, key=_ts, reverse=True)[0][1]
-
-    payload = {**default_payload, **payload}
-    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
-    if not isinstance(payload.get("column_orders"), dict):
-        payload["column_orders"] = {}
-    if not isinstance(payload.get("scan_settings"), dict):
-        payload["scan_settings"] = {}
-    st.session_state[_k("persistent_settings_source_detail")] = f"GitHub: {github_msg}｜本機設定: {'有' if isinstance(local_payload, dict) and local_payload else '無'}"
-    return payload
-
-
-def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, list[str]]:
-    old_payload = _load_persistent_settings()
-    payload = {
-        "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
-        "applied_weights": _normalize_weight_map(applied_weights),
-        "column_orders": old_payload.get("column_orders", {}) if isinstance(old_payload, dict) else {},
-        "scan_settings": old_payload.get("scan_settings", {}) if isinstance(old_payload, dict) else {},
-        "updated_at": _now_text(),
-        "version": "godpick_v5_persistent_settings",
-    }
-    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
-    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
-    return (local_ok or github_ok), [local_msg, github_msg]
-
-
-def _load_persistent_column_order(name: str) -> list[str]:
-    payload = _load_persistent_settings()
-    orders = payload.get("column_orders", {}) if isinstance(payload, dict) else {}
-    val = orders.get(name, []) if isinstance(orders, dict) else []
-    return val if isinstance(val, list) else []
-
-
-def _save_persistent_column_order(name: str, order: list[str]) -> tuple[bool, list[str]]:
-    payload = _load_persistent_settings()
-    orders = payload.get("column_orders", {}) if isinstance(payload, dict) else {}
-    if not isinstance(orders, dict):
-        orders = {}
-    orders[name] = [str(x) for x in order if str(x)]
-    payload["column_orders"] = orders
-    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
-    payload["updated_at"] = _now_text()
-    payload["version"] = "godpick_v5_persistent_settings"
-    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
-    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
-    return (local_ok or github_ok), [local_msg, github_msg]
-
-
-def _df_to_records_for_json(df: pd.DataFrame) -> list[dict[str, Any]]:
-    if df is None or df.empty:
-        return []
-    clean = df.copy()
-    for col in clean.columns:
-        if pd.api.types.is_datetime64_any_dtype(clean[col]):
-            clean[col] = clean[col].astype(str)
-    return json.loads(clean.to_json(orient="records", force_ascii=False, date_format="iso"))
-
-
-def _records_to_df_for_json(records: list[dict[str, Any]]) -> pd.DataFrame:
-    if not isinstance(records, list) or not records:
-        return pd.DataFrame()
-    return pd.DataFrame(records)
-
-
-def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> tuple[bool, list[str]]:
-    payload = {
-        "saved_at": _now_text(),
-        "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
-        "recommendations": _df_to_records_for_json(rec_df),
-        "category_strength": _df_to_records_for_json(category_strength_df),
-        "hot_pick": _df_to_records_for_json(hot_pick_df),
-    }
-    local_ok, local_msg = _safe_json_write_local(GODPICK_LATEST_FILE, payload)
-    github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
-
-    # 給 10_推薦清單.py 讀取的清單檔：保存本輪推薦明細。
-    # 維持 list 格式相容舊版，同時補齊 record_id/資料來源/建立時間，避免 10 頁讀取後欄位不一致。
-    list_payload = payload.get("recommendations", [])
-    if isinstance(list_payload, list):
-        fixed_rows = []
-        for i, row in enumerate(list_payload):
-            if not isinstance(row, dict):
-                continue
-            r = dict(row)
-            if not _safe_str(r.get("record_id")):
-                r["record_id"] = _create_record_id(
-                    _normalize_code(r.get("股票代號")),
-                    _safe_str(r.get("推薦日期")) or _now_date_text(),
-                    _safe_str(r.get("推薦時間")) or _now_time_text(),
-                    _safe_str(r.get("推薦模式")) or "股神推薦",
-                )
-            r["資料來源"] = GODPICK_LIST_FILE
-            if not _safe_str(r.get("建立時間")):
-                r["建立時間"] = payload.get("saved_at", _now_text())
-            if not _safe_str(r.get("更新時間")):
-                r["更新時間"] = payload.get("saved_at", _now_text())
-            fixed_rows.append(r)
-        list_payload = fixed_rows
-
-    list_local_ok, list_local_msg = _safe_json_write_local(GODPICK_LIST_FILE, list_payload)
-    list_github_ok, list_github_msg = _write_json_to_github_path(GODPICK_LIST_FILE, list_payload)
-
-    msgs = [local_msg, github_msg, list_local_msg, list_github_msg]
-    st.session_state[_k("latest_recommendation_sync_msgs")] = msgs
-    return (local_ok or github_ok or list_local_ok or list_github_ok), msgs
-
-
-def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
-    payload, msg = _read_json_from_github_path(GODPICK_LATEST_FILE, {})
-    if not isinstance(payload, dict) or not payload:
-        payload = _safe_json_read_local(GODPICK_LATEST_FILE, {})
-    if not isinstance(payload, dict) or not payload:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), msg
-
-    rec_df = _records_to_df_for_json(payload.get("recommendations", []))
-    cat_df = _records_to_df_for_json(payload.get("category_strength", []))
-    hot_df = _records_to_df_for_json(payload.get("hot_pick", []))
-    return rec_df, cat_df, hot_df, _safe_str(payload.get("saved_at", ""))
-
-
-def _render_recommend_status_panel(rec_df: pd.DataFrame):
-    saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
-    total = 0 if rec_df is None or rec_df.empty else len(rec_df)
-    weights = _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS))
-
-    render_pro_info_card(
-        "推薦狀態說明",
-        [
-            ("目前狀態", "已有本輪推薦結果" if total > 0 else "尚未產生推薦結果", ""),
-            ("本輪筆數", total, ""),
-            ("保存時間", saved_at or "—", ""),
-            ("保存方式", "session_state + JSON 永久記錄", ""),
-            ("清除規則", "下一次按開始推薦/重新推薦時覆蓋舊本輪結果", ""),
-            ("目前權重", _weight_text(weights), ""),
-        ],
-        chips=["狀態", "永久記錄", "推薦清單可讀取"],
-    )
-
-
-def _render_weight_dynamic_guide(weights: dict[str, int]):
-    weights = _normalize_weight_map(weights)
-    top_factors = sorted(weights.items(), key=lambda x: x[1], reverse=True)[:3]
-    top_text = "、".join([f"{k}{v}%" for k, v in top_factors])
-
-    render_pro_info_card(
-        "推薦條件說明 / 分數解讀",
-        [
-            ("核心權重", top_text, ""),
-            ("分數來源", "推薦總分會依目前已套用權重即時計算；權重改變後，說明與下次推薦分數同步改變。", ""),
-            ("85分以上", "高分候選，需同時檢查買點分級與風險說明，不代表無風險追價。", ""),
-            ("75~85分", "優先觀察區，適合等待突破確認或回測支撐。", ""),
-            ("65~75分", "候補追蹤區，需搭配類股熱度與成交量改善。", ""),
-            ("65分以下", "通常不列入主名單，除非起漲補抓名單有特殊結構。", ""),
-            ("買點分級", "A+ / A 代表交易條件較完整；B 需等確認；C/D 不建議急追。", ""),
-            ("風險解讀", "同時考慮追價風險、停損距離、目標價與交易可行分數。", ""),
-        ],
-        chips=["動態說明", "依權重更新"],
-    )
-
-
-def _normalize_weight_map(raw: dict[str, Any] | None) -> dict[str, int]:
-    base = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-    if isinstance(raw, dict):
-        for k in base.keys():
-            try:
-                base[k] = int(raw.get(k, base[k]))
-            except Exception:
-                pass
-    # 保護範圍，避免異常值造成分數扭曲
-    for k in list(base.keys()):
-        base[k] = max(0, min(100, int(base[k])))
-    return base
-
-
-def _weight_total(weights: dict[str, int]) -> int:
-    return int(sum(int(v) for v in weights.values()))
-
-
-def _render_score_weight_panel():
-    """股神評分權重控制台：必須總和 100 才能套用，避免誤調造成推薦結果失真。"""
-    render_pro_section("股神權重設定", "可調整推薦評分邏輯；只有總和等於 100% 時才能套用。")
-
-    if _k("score_weights") not in st.session_state:
-        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-    if _k("score_weights_edit") not in st.session_state:
-        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-
-    # Streamlit 規則：number_input 建立後，不可在同一次 rerun 直接寫入它的 widget key。
-    # 所以「恢復原始設定」先寫 pending reset；下一次 rerun、widget 建立前再安全同步。
-    if st.session_state.pop(_k("weight_reset_pending"), False):
-        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        for _name, _val in GODPICK_DEFAULT_SCORE_WEIGHTS.items():
-            st.session_state[_k(f"weight_edit_{_name}")] = int(_val)
-
-    edit = _normalize_weight_map(st.session_state.get(_k("score_weights_edit"), GODPICK_DEFAULT_SCORE_WEIGHTS))
-
-    c1, c2, c3, c4 = st.columns(4)
-    weight_keys = list(GODPICK_DEFAULT_SCORE_WEIGHTS.keys())
-    containers = [c1, c2, c3, c4]
-    for idx, name in enumerate(weight_keys):
-        with containers[idx % 4]:
-            edit[name] = int(
-                st.number_input(
-                    f"{name}%",
-                    min_value=0,
-                    max_value=100,
-                    value=int(edit.get(name, GODPICK_DEFAULT_SCORE_WEIGHTS[name])),
-                    step=1,
-                    key=_k(f"weight_edit_{name}"),
-                )
-            )
-
-    total = _weight_total(edit)
-    remain = 100 - total
-    st.session_state[_k("score_weights_edit")] = edit
-
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("目前權重總和", f"{total}%")
-    with k2:
-        st.metric("剩餘權重", f"{remain:+d}%")
-    with k3:
-        apply_weight = st.button("套用權重", use_container_width=True, type="primary", disabled=(total != 100))
-    with k4:
-        reset_weight = st.button("恢復原始設定", use_container_width=True)
-
-    if total != 100:
-        st.warning("權重總和必須等於 100% 才能套用；目前不能影響推薦結果。")
-
-    if st.session_state.get(_k("weight_reset_msg")):
-        st.success(st.session_state.pop(_k("weight_reset_msg")))
-        _msgs = st.session_state.pop(_k("weight_reset_msgs"), [])
-        if _msgs:
-            with st.expander("權重保存明細", expanded=False):
-                for msg in _msgs:
-                    st.write(f"- {msg}")
-
-    if reset_weight:
-        # 不直接寫入 weight_edit_* widget key，避免 StreamlitAPIException。
-        # 改為下一輪 rerun 在 number_input 建立前同步。
-        st.session_state[_k("weight_reset_pending")] = True
-        ok, msgs = _save_persistent_settings(GODPICK_DEFAULT_SCORE_WEIGHTS.copy())
-        st.session_state[_k("weight_reset_msg")] = "已恢復原始權重，並永久記錄。" if ok else "已恢復原始權重，但永久記錄失敗。"
-        st.session_state[_k("weight_reset_msgs")] = msgs
-        st.rerun()
-
-    if apply_weight:
-        st.session_state[_k("score_weights")] = edit.copy()
-        ok, msgs = _save_persistent_settings(edit.copy())
-        st.success("權重已套用並永久記錄，本次開始推薦會使用新權重。" if ok else "權重已套用，但永久記錄失敗。")
-        with st.expander("權重保存明細", expanded=False):
-            for msg in msgs:
-                st.write(f"- {msg}")
-
-    applied = _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS))
-    st.caption("目前已套用權重：" + " / ".join([f"{k} {v}%" for k, v in applied.items()]))
-    return applied
-
-
-def _get_active_weight_map() -> dict[str, int]:
-    global GODPICK_ACTIVE_SCORE_WEIGHTS
-    return _normalize_weight_map(GODPICK_ACTIVE_SCORE_WEIGHTS)
-
-
-def _weight_text(weights: dict[str, int] | None = None) -> str:
-    weights = _normalize_weight_map(weights or _get_active_weight_map())
-    return " / ".join([f"{k}{v}%" for k, v in weights.items()])
-
-
-def _derive_buy_point_grade(row: pd.Series) -> str:
-    score = _safe_float(row.get("推薦總分"), 0) or 0
-    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
-    trade = _safe_float(row.get("交易可行分數"), 0) or 0
-    pullback = _safe_float(row.get("拉回買點分數"), 0) or 0
-    breakout = _safe_float(row.get("突破買點分數"), 0) or 0
-    chase = _safe_float(row.get("追價風險分數"), 50) or 50
-    rr = _safe_str(row.get("風險報酬評級"))
-
-    if score >= 88 and pre >= 75 and trade >= 70 and chase <= 65:
-        return "A+｜可積極觀察"
-    if score >= 80 and trade >= 65 and (pullback >= 65 or breakout >= 65):
-        return "A｜優先觀察"
-    if score >= 72 and trade >= 55:
-        return "B｜等拉回或突破確認"
-    if score >= 60:
-        return "C｜僅列觀察"
-    return "D｜暫不追價"
-
-
-def _derive_risk_text(row: pd.Series) -> str:
-    risk = _safe_float(row.get("風險分數"), 0) or 0
-    chase = _safe_float(row.get("追價風險分數"), 0) or 0
-    stop_loss = row.get("停損價")
-    target1 = row.get("賣出目標1")
-
-    notes = []
-    if chase >= 75:
-        notes.append("追價風險偏高")
-    elif chase >= 60:
-        notes.append("追價需控管")
-    else:
-        notes.append("追價風險可控")
-
-    if risk < 55:
-        notes.append("整體風險偏高")
-    elif risk < 70:
-        notes.append("風險中性")
-    else:
-        notes.append("風險相對可控")
-
-    if pd.notna(stop_loss):
-        notes.append(f"停損 {format_number(stop_loss, 2)}")
-    if pd.notna(target1):
-        notes.append(f"目標1 {format_number(target1, 2)}")
-    return "｜".join(notes)
-
-
-def _derive_god_reasoning(row: pd.Series) -> str:
-    parts = []
-    category = _safe_str(row.get("類別"))
-    mode = _safe_str(row.get("推薦模式"))
-    if category:
-        parts.append(f"{category}族群")
-    if mode:
-        parts.append(mode)
-    if _safe_float(row.get("起漲前兆分數"), 0) >= 75:
-        parts.append("起漲前兆強")
-    if _safe_float(row.get("型態突破分數"), 0) >= 75:
-        parts.append(_safe_str(row.get("型態名稱")) or "型態突破")
-    if _safe_float(row.get("類股熱度分數"), 0) >= 75:
-        parts.append("類股熱度高")
-    if _safe_str(row.get("是否領先同類股")) == "是" or row.get("是否領先同類股") is True:
-        parts.append("領先同類股")
-    if _safe_float(row.get("交易可行分數"), 0) >= 70:
-        parts.append("進出場區間清楚")
-    if not parts:
-        parts.append("條件接近門檻，建議續觀察")
-    return "、".join(parts[:7])
-
-
-
-def _derive_confidence_level(row: pd.Series) -> str:
-    score = _safe_float(row.get("推薦總分"), 0) or 0
-    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
-    trade = _safe_float(row.get("交易可行分數"), 0) or 0
-    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
-    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
-    burst = _safe_float(row.get("爆發力分數"), 0) or 0
-    hot_risk = _safe_str(row.get("過熱風險"))
-    fake_risk = _safe_str(row.get("假突破風險"))
-
-    if score >= 88 and pre >= 75 and trade >= 70 and heat >= 70 and pattern >= 70 and "高" not in hot_risk and "高" not in fake_risk:
-        return "S級｜高信心"
-    if score >= 80 and pre >= 68 and trade >= 62:
-        return "A級｜優先觀察"
-    if score >= 72:
-        return "B級｜等待確認"
-    if score >= 65:
-        return "C級｜候補追蹤"
-    return "D級｜暫不追價"
-
-
-def _derive_overheat_risk(row: pd.Series) -> str:
-    latest = _safe_float(row.get("最新價"), 0) or 0
-    ma20 = _safe_float(row.get("MA20"))
-    chase = _safe_float(row.get("追價風險分數"), 0) or 0
-    burst = _safe_float(row.get("爆發力分數"), 0) or 0
-
-    dist_ma20 = None
-    if latest and ma20 not in [None, 0]:
-        dist_ma20 = (latest - ma20) / ma20 * 100
-
-    flags = []
-    if dist_ma20 is not None and dist_ma20 >= 18:
-        flags.append("離MA20過遠")
-    if chase >= 78:
-        flags.append("追價風險高")
-    if burst >= 88 and chase >= 70:
-        flags.append("短線爆發後易震盪")
-
-    if len(flags) >= 2:
-        return "高｜" + "、".join(flags)
-    if len(flags) == 1:
-        return "中｜" + flags[0]
-    return "低｜未見明顯過熱"
-
-
-def _derive_fake_breakout_risk(row: pd.Series) -> str:
-    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
-    trade = _safe_float(row.get("交易可行分數"), 0) or 0
-    volume = _safe_float(row.get("量能啟動分"), 0) or 0
-    support = _safe_float(row.get("支撐防守分"), 0) or 0
-    breakout = _safe_float(row.get("突破買點分數"), 0) or 0
-
-    flags = []
-    if pattern >= 70 and volume < 55:
-        flags.append("突破但量能不足")
-    if breakout >= 70 and support < 55:
-        flags.append("突破後支撐未確認")
-    if trade < 55:
-        flags.append("交易可行分數偏低")
-
-    if len(flags) >= 2:
-        return "高｜" + "、".join(flags)
-    if len(flags) == 1:
-        return "中｜" + flags[0]
-    return "低｜突破結構尚可"
-
-
-
-def _derive_prelaunch_grade(row: pd.Series) -> str:
-    """起漲等級：依起漲前兆、爆發力、型態突破、量能啟動、交易可行綜合判斷。"""
-    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
-    burst = _safe_float(row.get("爆發力分數"), 0) or 0
-    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
-    vol = _safe_float(row.get("量能啟動分"), 0) or 0
-    trade = _safe_float(row.get("交易可行分數"), 0) or 0
-
-    mix = pre * 0.42 + burst * 0.22 + pattern * 0.18 + vol * 0.10 + trade * 0.08
-
-    if mix >= 88:
+def _derive_prelaunch_grade_from_score(score: Any) -> str:
+    """依起漲前兆分數補齊舊紀錄的起漲等級。"""
+    s = _safe_float(score, 0) or 0
+    if s >= 88:
         return "S｜強烈起漲"
-    if mix >= 78:
+    if s >= 78:
         return "A｜起漲優先"
-    if mix >= 68:
+    if s >= 68:
         return "B｜轉強確認"
-    if mix >= 55:
+    if s >= 55:
         return "C｜初步轉強"
     return "D｜尚未起漲"
 
 
-def _derive_recommend_bucket(row: pd.Series) -> str:
-    score = _safe_float(row.get("推薦總分"), 0) or 0
-    pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
-    trade = _safe_float(row.get("交易可行分數"), 0) or 0
-    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
-    pullback = _safe_float(row.get("拉回買點分數"), 0) or 0
-    breakout = _safe_float(row.get("突破買點分數"), 0) or 0
-    overheat = _safe_str(row.get("過熱風險"))
-    fake = _safe_str(row.get("假突破風險"))
-
-    if "高" in overheat:
-        return "高分但過熱｜不急追"
-    if "高" in fake:
-        return "假突破風險｜等確認"
-    if score >= 85 and trade >= 70:
-        return "立即觀察｜條件完整"
-    if pre >= 78 and score >= 75:
-        return "剛起漲候選｜優先追蹤"
-    if heat >= 75 and score >= 72:
-        return "族群領先｜看類股延續"
-    if pullback >= breakout and pullback >= 62:
-        return "等拉回｜低接觀察"
-    if breakout > pullback and breakout >= 62:
-        return "等突破｜確認再動"
-    return "候補觀察｜等待訊號"
-
-
-def _derive_trade_script(row: pd.Series) -> str:
-    latest = _safe_float(row.get("最新價"))
-    pullback = _safe_float(row.get("推薦買點_拉回"))
-    breakout = _safe_float(row.get("推薦買點_突破"))
-    stop = _safe_float(row.get("停損價"))
-    target1 = _safe_float(row.get("賣出目標1"))
-    target2 = _safe_float(row.get("賣出目標2"))
-    bucket = _safe_str(row.get("推薦分桶"))
-    grade = _safe_str(row.get("買點分級"))
-
-    parts = []
-    if latest is not None:
-        parts.append(f"現價 {format_number(latest, 2)}")
-    if pullback is not None:
-        parts.append(f"拉回觀察 {format_number(pullback, 2)}")
-    if breakout is not None:
-        parts.append(f"突破確認 {format_number(breakout, 2)}")
-    if stop is not None:
-        parts.append(f"失守 {format_number(stop, 2)} 轉弱")
-    if target1 is not None:
-        parts.append(f"目標1 {format_number(target1, 2)}")
-    if target2 is not None:
-        parts.append(f"目標2 {format_number(target2, 2)}")
-
-    prefix = bucket or grade or "交易劇本"
-    return prefix + "｜" + "｜".join(parts[:7])
+# 相容保險：處理任何舊版呼叫名稱
+def derive_prelaunch_grade_from_score(score: Any) -> str:
+    return _derive_prelaunch_grade_from_score(score)
 
 
 
-def _derive_prelaunch_summary(row: pd.Series) -> str:
-    """飆股起漲摘要：把短線爆發因子轉成可讀文字，供 7/8/9 串聯顯示。"""
-    score = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數"))
-    burst = _safe_float(row.get("爆發力分數"), 0) or 0
-    pattern = _safe_float(row.get("型態突破分數"), 0) or 0
-    tech = _safe_float(row.get("技術結構分數"), 0) or 0
-    trade = _safe_float(row.get("交易可行分數"), 0) or 0
-    parts = []
-
-    if score is not None and score >= 90:
-        parts.append("接近漲停")
-    elif score is not None and score >= 78:
-        parts.append("強漲")
-    elif score is not None and score >= 68:
-        parts.append("明顯上漲")
-    elif score is not None and score >= 55:
-        parts.append("小漲轉強")
-
-    if burst >= 80:
-        parts.append("量能大幅放大")
-    elif burst >= 68:
-        parts.append("量能轉強")
-
-    if pattern >= 80:
-        parts.append("突破20日高")
-    elif pattern >= 68:
-        parts.append("盤中挑戰20日高")
-
-    if tech >= 70:
-        parts.append("站上MA20")
-    if trade >= 70:
-        parts.append("短均線偏多")
-
-    if not parts:
-        return "未見明顯起漲訊號"
-    return "、".join(dict.fromkeys(parts))
+def _normalize_code(v: Any) -> str:
+    s = _safe_str(v)
+    if not s:
+        return ""
+    if s.isdigit():
+        return s
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if 4 <= len(digits) <= 6:
+        return digits
+    return s
 
 
-def _derive_invalid_condition(row: pd.Series) -> str:
-    stop = _safe_float(row.get("停損價"))
-    support = _safe_float(row.get("推薦買點_拉回"))
-    latest = _safe_float(row.get("最新價"))
-    fake = _safe_str(row.get("假突破風險"))
-
-    parts = []
-    if stop is not None:
-        parts.append(f"跌破停損 {format_number(stop, 2)}")
-    if support is not None:
-        parts.append(f"回測 {format_number(support, 2)} 無法守住")
-    if "高" in fake:
-        parts.append("突破後量價無法延續")
-    if latest is not None:
-        parts.append("連續轉弱需降級觀察")
-    return "｜".join(parts) if parts else "跌破關鍵支撐或量價轉弱即失效"
+def _normalize_bool(v: Any) -> bool:
+    return _safe_str(v).lower() in {"true", "1", "yes", "y", "是"}
 
 
-def _build_tracking_placeholders(row: pd.Series) -> dict[str, str]:
-    code = _normalize_code(row.get("股票代號"))
-    rec_date = _safe_str(row.get("推薦日期")) or _now_date_text()
-    return {
-        "3日追蹤預留": f"{code}｜{rec_date}｜待回填3日最高漲幅/最大回撤/是否觸價",
-        "5日追蹤預留": f"{code}｜{rec_date}｜待回填5日最高漲幅/最大回撤/是否觸價",
-        "10日追蹤預留": f"{code}｜{rec_date}｜待回填10日最高漲幅/最大回撤/是否觸價",
-        "20日追蹤預留": f"{code}｜{rec_date}｜待回填20日最高漲幅/最大回撤/是否觸價",
-    }
-
-
-
-
-# =========================================================
-# 股神決策引擎 V5：大盤情境調權 / 分層 / 風控 / 劇本
-# =========================================================
-def _macro_bucket_from_row(row: pd.Series) -> str:
-    grade = _safe_str(row.get("大盤參考等級"))
-    score = _safe_float(row.get("大盤可參考分數"), 50) or 50
-    if grade.startswith("A") or score >= 80:
-        return "A｜進攻環境"
-    if grade.startswith("B") or score >= 65:
-        return "B｜精選偏多"
-    if grade.startswith("C") or score >= 50:
-        return "C｜震盪控風險"
-    return "D｜防守觀望"
-
-
-def _calc_chase_risk_score(row: pd.Series) -> float:
-    price = _safe_float(row.get("最新價"), _safe_float(row.get("推薦價格")))
-    pullback = _safe_float(row.get("推薦買點_拉回"), row.get("推薦價格"))
-    breakout = _safe_float(row.get("推薦買點_突破"), row.get("推薦價格"))
-    pre = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
-    overheat = _safe_str(row.get("過熱風險"))
-    risk = 35.0
-    if price not in [None, 0] and pullback not in [None, 0]:
-        dist = (price - pullback) / pullback * 100
-        risk += max(0, min(28, dist * 2.3))
-    if price not in [None, 0] and breakout not in [None, 0] and price > breakout:
-        risk += 8
-    if pre >= 90:
-        risk += 15
-    elif pre >= 78:
-        risk += 8
-    if "高" in overheat or "過熱" in overheat:
-        risk += 15
-    return round(_score_clip(risk, 0, 100), 2)
-
-
-def _calc_trade_risk_reward(row: pd.Series) -> tuple:
-    price = _safe_float(row.get("最新價"), _safe_float(row.get("推薦價格")))
-    stop = _safe_float(row.get("停損價"))
-    target1 = _safe_float(row.get("賣出目標1"))
-    if price in [None, 0] or stop in [None, 0] or target1 in [None, 0]:
-        return None, None, None
-    stop_dist = max(0, (price - stop) / price * 100)
-    target_ret = max(0, (target1 - price) / price * 100)
-    rr = target_ret / stop_dist if stop_dist > 0 else None
-    return (round(rr, 2) if rr is not None else None, round(stop_dist, 2), round(target_ret, 2))
-
-
-def _derive_position_size(row: pd.Series) -> float:
-    score = _safe_float(row.get("推薦總分"), 0) or 0
-    rr = _safe_float(row.get("風險報酬比"), 0) or 0
-    chase = _safe_float(row.get("追價風險分"), 50) or 50
-    macro_bucket = _safe_str(row.get("大盤情境分桶"))
-    buy_grade = _safe_str(row.get("買點分級"))
-    pos = 0
-    if score >= 90:
-        pos = 20
-    elif score >= 85:
-        pos = 15
-    elif score >= 78:
-        pos = 10
-    elif score >= 70:
-        pos = 5
-    if rr >= 2:
-        pos += 5
-    elif rr > 0 and rr < 1:
-        pos -= 5
-    if chase >= 75:
-        pos -= 8
-    elif chase >= 65:
-        pos -= 4
-    if macro_bucket.startswith("A"):
-        pos += 5
-    elif macro_bucket.startswith("C"):
-        pos -= 5
-    elif macro_bucket.startswith("D"):
-        pos -= 10
-    if "C" in buy_grade or "D" in buy_grade:
-        pos -= 5
-    return round(_score_clip(pos, 0, 30), 1)
-
-
-def _derive_v5_decision_mode(row: pd.Series) -> str:
-    macro_bucket = _safe_str(row.get("大盤情境分桶"))
-    pre = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
-    tech = _safe_float(row.get("技術結構分數"), 0) or 0
-    heat = _safe_float(row.get("類股熱度分數"), 0) or 0
-    chase = _safe_float(row.get("追價風險分"), 50) or 50
-    if macro_bucket.startswith("D"):
-        return "逆勢強股防守模式" if pre >= 78 and tech >= 65 else "防守觀望模式"
-    if macro_bucket.startswith("C"):
-        return "低接確認模式" if chase <= 58 and tech >= 70 else "震盪精選模式"
-    if pre >= 78 and heat >= 65:
-        return "飆股起漲模式"
-    if tech >= 72:
-        return "波段順勢模式"
-    return "綜合精選模式"
-
-
-def _derive_entry_advice(row: pd.Series) -> str:
-    score = _safe_float(row.get("推薦總分"), 0) or 0
-    chase = _safe_float(row.get("追價風險分"), 50) or 50
-    rr = _safe_float(row.get("風險報酬比"), 0) or 0
-    macro_bucket = _safe_str(row.get("大盤情境分桶"))
-    buy_grade = _safe_str(row.get("買點分級"))
-    if macro_bucket.startswith("D"):
-        return "只允許小部位試單" if score >= 88 and chase < 60 else "不建議進場"
-    if chase >= 78:
-        return "高分但不急追"
-    if score >= 88 and rr >= 1.5 and ("A" in buy_grade or "B" in buy_grade):
-        return "可優先觀察進場"
-    if score >= 80:
-        return "等突破或回測確認"
-    if score >= 70:
-        return "列入觀察名單"
-    return "暫不建議進場"
-
-
-def _derive_recommend_layer(row: pd.Series) -> str:
-    advice = _safe_str(row.get("股神進場建議"))
-    mode = _safe_str(row.get("股神決策模式"))
-    score = _safe_float(row.get("推薦總分"), 0) or 0
-    chase = _safe_float(row.get("追價風險分"), 50) or 50
-    macro_bucket = _safe_str(row.get("大盤情境分桶"))
-    if advice == "可優先觀察進場":
-        return "今日可進攻"
-    if "逆勢" in mode:
-        return "逆勢強股"
-    if chase >= 75 and score >= 85:
-        return "高分但過熱"
-    if macro_bucket.startswith("C") and score >= 80:
-        return "等拉回低接"
-    if score >= 80:
-        return "等突破確認"
-    if score >= 70:
-        return "觀察不追"
-    return "淘汰但接近條件"
-
-
-def _derive_v5_no_buy_reason(row: pd.Series) -> str:
-    reasons = []
-    macro_bucket = _safe_str(row.get("大盤情境分桶"))
-    chase = _safe_float(row.get("追價風險分"), 50) or 50
-    stop_dist = _safe_float(row.get("停損距離%"), 0) or 0
-    rr = _safe_float(row.get("風險報酬比"), 0) or 0
-    buy_grade = _safe_str(row.get("買點分級"))
-    if macro_bucket.startswith("D"):
-        reasons.append("大盤參考等級偏低")
-    if chase >= 75:
-        reasons.append("追價風險過高")
-    if stop_dist >= 8:
-        reasons.append("停損距離過大")
-    if rr and rr < 1:
-        reasons.append("風險報酬比不足")
-    if "C" in buy_grade or "D" in buy_grade:
-        reasons.append("買點條件尚未完整")
-    return "、".join(reasons) if reasons else "未觸發主要否決條件"
-
-
-def _derive_best_trade_script_v5(row: pd.Series) -> str:
-    pullback = _safe_float(row.get("推薦買點_拉回"), row.get("推薦價格"))
-    breakout = _safe_float(row.get("推薦買點_突破"), row.get("推薦價格"))
-    stop = _safe_float(row.get("停損價"))
-    target1 = _safe_float(row.get("賣出目標1"))
-    advice = _safe_str(row.get("股神進場建議"))
-    parts = [advice]
-    if pullback:
-        parts.append(f"拉回觀察 {pullback:.2f}")
-    if breakout:
-        parts.append(f"突破確認 {breakout:.2f}")
-    if stop:
-        parts.append(f"失效停損 {stop:.2f}")
-    if target1:
-        parts.append(f"第一目標 {target1:.2f}")
-    return "｜".join(parts)
-
-
-def _derive_next_day_action(row: pd.Series) -> str:
-    chase = _safe_float(row.get("追價風險分"), 50) or 50
-    macro_bucket = _safe_str(row.get("大盤情境分桶"))
-    pre = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
-    if macro_bucket.startswith("D"):
-        return "開高不追，僅低量試單或觀望"
-    if chase >= 75:
-        return "開高不追，等回測支撐"
-    if pre >= 80:
-        return "若量價續強可追蹤突破確認"
-    return "等量價確認後再動作"
-
-
-def _derive_weak_condition_v5(row: pd.Series) -> str:
-    stop = _safe_float(row.get("停損價"))
-    parts = []
-    if stop:
-        parts.append(f"跌破停損 {stop:.2f}")
-    parts.append("跌破MA20且量增")
-    parts.append("推薦分層轉弱")
-    return "、".join(parts)
-
-
-def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    out["大盤情境分桶"] = out.apply(_macro_bucket_from_row, axis=1)
-    rr_data = out.apply(_calc_trade_risk_reward, axis=1)
-    out["風險報酬比"] = [x[0] for x in rr_data]
-    out["停損距離%"] = [x[1] for x in rr_data]
-    out["目標報酬%"] = [x[2] for x in rr_data]
-    out["追價風險分"] = out.apply(_calc_chase_risk_score, axis=1)
-    out["股神決策模式"] = out.apply(_derive_v5_decision_mode, axis=1)
-    out["股神進場建議"] = out.apply(_derive_entry_advice, axis=1)
-    out["建議部位%"] = out.apply(_derive_position_size, axis=1)
-    out["推薦分層"] = out.apply(_derive_recommend_layer, axis=1)
-    out["不建議買進原因"] = out.apply(_derive_v5_no_buy_reason, axis=1)
-    out["最佳操作劇本"] = out.apply(_derive_best_trade_script_v5, axis=1)
-    out["隔日操作建議"] = out.apply(_derive_next_day_action, axis=1)
-    out["失效價位"] = out["停損價"] if "停損價" in out.columns else ""
-    out["轉弱條件"] = out.apply(_derive_weak_condition_v5, axis=1)
-    out["大盤情境調權說明"] = out.apply(
-        lambda r: f"{_safe_str(r.get('大盤情境分桶'))}｜大盤加權{_safe_float(r.get('大盤加權分'), 0):+.2f}｜{_safe_str(r.get('大盤風險濾網'))}",
-        axis=1,
-    )
-    return out
-
-def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """補齊進階欄位，不破壞舊欄位與既有紀錄格式。"""
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    out["買點分級"] = out.apply(_derive_buy_point_grade, axis=1)
-    out["過熱風險"] = out.apply(_derive_overheat_risk, axis=1)
-    out["假突破風險"] = out.apply(_derive_fake_breakout_risk, axis=1)
-    out["推薦分桶"] = out.apply(_derive_recommend_bucket, axis=1)
-    out["飆股起漲分數"] = pd.to_numeric(out.get("起漲前兆分數"), errors="coerce")
-    out["起漲等級"] = out.apply(_derive_prelaunch_grade, axis=1)
-    out["起漲摘要"] = out.apply(_derive_prelaunch_summary, axis=1)
-    out["信心等級"] = out.apply(_derive_confidence_level, axis=1)
-    out["買點劇本"] = out.apply(_derive_trade_script, axis=1)
-    out["失效條件"] = out.apply(_derive_invalid_condition, axis=1)
-    out["風險說明"] = out.apply(_derive_risk_text, axis=1)
-    out["股神推論邏輯"] = out.apply(_derive_god_reasoning, axis=1)
-    out["權重設定"] = _weight_text()
-    if "推薦型態" not in out.columns:
-        out["推薦型態"] = out.get("機會型態", "")
-    out["推薦型態"] = out["推薦型態"].fillna("").astype(str).replace("", "綜合推薦")
-
-    macro_ref = _load_latest_macro_reference()
-    macro_adj = out.apply(lambda r: _macro_adjust_score(r, macro_ref), axis=1)
-    out["大盤加權分"] = [x[0] for x in macro_adj]
-    out["大盤風險濾網"] = [x[1] for x in macro_adj]
-    out["推薦總分"] = pd.to_numeric(out["推薦總分"], errors="coerce").fillna(0) + pd.to_numeric(out["大盤加權分"], errors="coerce").fillna(0)
-    out["推薦總分"] = out["推薦總分"].clip(lower=0, upper=100)
-
-    out["大盤參考等級"] = macro_ref.get("大盤參考等級")
-    out["大盤可參考分數"] = macro_ref.get("大盤可參考分數")
-    out["大盤推薦權重"] = macro_ref.get("大盤推薦權重")
-    out["大盤降權原因"] = macro_ref.get("大盤降權原因")
-    out["大盤操作風格"] = macro_ref.get("大盤操作風格")
-    out["大盤市場廣度分數"] = macro_ref.get("大盤市場廣度分數")
-    out["大盤量價確認分數"] = macro_ref.get("大盤量價確認分數")
-    out["大盤權值支撐分數"] = macro_ref.get("大盤權值支撐分數")
-    out["大盤推薦同步分數"] = macro_ref.get("大盤推薦同步分數")
-    out["大盤資料日期"] = macro_ref.get("大盤資料日期")
-
-    tracking_df = out.apply(_build_tracking_placeholders, axis=1, result_type="expand")
-    for c in ["3日追蹤預留", "5日追蹤預留", "10日追蹤預留", "20日追蹤預留"]:
-        out[c] = tracking_df[c] if c in tracking_df.columns else ""
-
-    out = _apply_god_decision_v5_columns(out)
-    return out
-
-
-
-def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> tuple[float, str]:
-    technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
-    prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
-    category_heat_score = _safe_float(row.get("類股熱度分數"), 0) or 0
-    factor_score = _safe_float(row.get("自動因子總分"), 0) or 0
-    trade_score = _safe_float(row.get("交易可行分數"), 0) or 0
-    leader_advantage = _safe_float(row.get("同類股領先幅度"), 0) or 0
-    pattern_score = _safe_float(row.get("型態突破分數"), 0) or 0
-    burst_score = _safe_float(row.get("爆發力分數"), 0) or 0
-    opportunity_score = _safe_float(row.get("機會股分數"), 0) or 0
-    low_score = _safe_float(row.get("低檔位置分數"), 0) or 0
-    pullback_score = _safe_float(row.get("拉回承接分數"), 0) or 0
-    retest_score = _safe_float(row.get("支撐回測分數"), 0) or 0
-    rebound_score = _safe_float(row.get("止跌轉強分數"), 0) or 0
-    risk_score = _safe_float(row.get("風險分數"), 0) or 0
-
-    weights = _get_active_weight_map()
-    total = (
-        market_score * weights["市場環境"] / 100
-        + technical_score * weights["技術結構"] / 100
-        + prelaunch_score * weights["起漲前兆"] / 100
-        + category_heat_score * weights["類股熱度"] / 100
-        + factor_score * weights["自動因子"] / 100
-        + trade_score * weights["交易可行"] / 100
-        + pattern_score * weights["型態突破"] / 100
-        + burst_score * weights["爆發力"] / 100
-    )
-
-    # 模式只做專業微調，不再硬編死權重，避免使用者調整失效。
-    if mode == "飆股模式":
-        total += prelaunch_score * 0.04 + burst_score * 0.04 + pattern_score * 0.03
-        tag = "爆發優先 / 起漲優先"
-    elif mode == "波段模式":
-        total += technical_score * 0.04 + trade_score * 0.03 + risk_score * 0.03
-        tag = "趨勢延續 / 波段優先"
-    elif mode == "領頭羊模式":
-        total += leader_advantage * 0.08 + category_heat_score * 0.04
-        tag = "類股領先 / 龍頭優先"
-    elif mode == "低檔轉強模式":
-        total = total * 0.62 + low_score * 0.16 + rebound_score * 0.12 + opportunity_score * 0.10
-        tag = "低檔轉強 / 不追高"
-    elif mode == "拉回承接模式":
-        total = total * 0.60 + pullback_score * 0.18 + trade_score * 0.08 + opportunity_score * 0.14
-        tag = "強勢拉回 / 第二買點"
-    elif mode == "回測支撐模式":
-        total = total * 0.58 + retest_score * 0.20 + rebound_score * 0.08 + opportunity_score * 0.14
-        tag = "突破回測 / 支撐確認"
-    elif mode == "低檔拉回綜合模式":
-        total = total * 0.60 + opportunity_score * 0.22 + max(low_score, pullback_score, retest_score) * 0.12 + rebound_score * 0.06
-        tag = "低檔拉回 / 機會優先"
-    elif mode == "保守低風險模式":
-        total = total * 0.55 + opportunity_score * 0.20 + trade_score * 0.15 + max(0, 100 - risk_score) * 0.10
-        tag = "低風險 / 支撐優先"
-    else:
-        total += (technical_score + prelaunch_score + category_heat_score + trade_score) * 0.012 + opportunity_score * 0.015
-        tag = "綜合推薦"
-
-    return _score_clip(total), tag
-
-
-def _build_recommend_reason_v2(r: pd.Series) -> str:
-    parts = []
-    if _safe_str(r.get("市場環境")):
-        parts.append(_safe_str(r.get("市場環境")))
-    if _safe_float(r.get("型態突破分數"), 0) >= 78:
-        parts.append(_safe_str(r.get("型態名稱")) or "型態突破")
-    if _safe_float(r.get("起漲前兆分數"), 0) >= 75:
-        parts.append("起漲前兆強")
-    if _safe_float(r.get("交易可行分數"), 0) >= 70:
-        parts.append("進出場清楚")
-    if _safe_float(r.get("類股熱度分數"), 0) >= 75:
-        parts.append("族群熱度高")
-    if _safe_str(r.get("類股前3強")) == "是":
-        parts.append("類股前3強")
-    if _safe_str(r.get("是否領先同類股")) == "是":
-        parts.append("領先同類股")
-    if _safe_float(r.get("爆發力分數"), 0) >= 75:
-        parts.append("爆發力佳")
-    if _safe_float(r.get("機會股分數"), 0) >= 70:
-        parts.append(_safe_str(r.get("機會型態")) or "低檔拉回機會")
-    if _safe_str(r.get("機會股說明")):
-        parts.append(_safe_str(r.get("機會股說明")))
-    if _safe_float(r.get("風險分數"), 0) < 60:
-        parts.append("風險需控管")
-    text = "、".join([x for x in parts if x][:6])
-    if not text:
-        text = "結構偏多，列入觀察"
-    entry_zone = _safe_str(r.get("建議切入區"))
-    stop_loss = format_number(r.get("停損價"), 2) if pd.notna(r.get("停損價")) else "—"
-    target_1 = format_number(r.get("賣出目標1"), 2) if pd.notna(r.get("賣出目標1")) else "—"
-    return f"{text}｜切入區 {entry_zone or '—'}｜停損 {stop_loss}｜目標1 {target_1}"
-
-
-def _avg_safe(values: list[float | None], default: float = 0.0) -> float:
-    clean = [float(x) for x in values if x is not None]
-    if not clean:
-        return default
-    return sum(clean) / len(clean)
-
-
-def _fmt_seconds(sec: float) -> str:
-    try:
-        sec = max(0, int(sec))
-    except Exception:
-        sec = 0
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    s = sec % 60
-    if h > 0:
-        return f"{h}小時 {m}分 {s}秒"
-    if m > 0:
-        return f"{m}分 {s}秒"
-    return f"{s}秒"
+def _normalize_category(v: Any) -> str:
+    return _safe_str(v).replace("　", " ").strip()
 
 
 def _now_text() -> str:
@@ -1700,244 +228,33 @@ def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_type")] = level
 
 
-def _save_debug_scan_summary(summary: dict[str, Any]):
-    st.session_state[_k("debug_scan_summary")] = summary or {}
-
-
-def _load_debug_scan_summary() -> dict[str, Any]:
-    data = st.session_state.get(_k("debug_scan_summary"), {})
-    return data if isinstance(data, dict) else {}
-
-
-def _render_debug_scan_summary():
-    data = _load_debug_scan_summary()
-    if not data:
-        return
-
-    render_pro_section("推薦除錯摘要")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("掃描總數", int(data.get("total_count", 0)))
-    with c2:
-        st.metric("進入評分", int(data.get("analyzed_ok", 0)))
-    with c3:
-        st.metric("通過最終門檻", int(data.get("passed_final", 0)))
-    with c4:
-        st.metric("例外錯誤", int(data.get("analysis_error", 0)))
-
-    lines = []
-    mapping = [
-        ("invalid_code", "代號無效"),
-        ("category_filtered", "類型篩選排除"),
-        ("no_history", "抓不到歷史資料"),
-        ("analysis_error", "指標/分析錯誤"),
-        ("signal_filtered", "訊號分數淘汰"),
-        ("risk_filtered", "風險過濾淘汰"),
-        ("prelaunch_filtered", "起漲前兆淘汰"),
-        ("trade_filtered", "交易可行淘汰"),
-        ("final_score_filtered", "推薦總分淘汰"),
-    ]
-    for key, label in mapping:
-        lines.append(f"{label}：{int(data.get(key, 0))} 檔")
-    st.caption("｜".join(lines))
-
-    history_debug = data.get("history_debug_samples", []) or []
-    error_debug = data.get("error_samples", []) or []
-    if history_debug or error_debug:
-        with st.expander("除錯明細", expanded=False):
-            if history_debug:
-                st.markdown("**歷史資料抓取樣本**")
-                for item in history_debug[:10]:
-                    st.write(f"- {item}")
-            if error_debug:
-                st.markdown("**分析錯誤樣本**")
-                for item in error_debug[:10]:
-                    st.write(f"- {item}")
-
-
-def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
-
-    x = df.copy()
-
-    if "record_id" not in x.columns and "rec_id" in x.columns:
-        x["record_id"] = x["rec_id"]
-
-    for c in GODPICK_RECORD_COLUMNS:
-        if c not in x.columns:
-            x[c] = None
-
-    numeric_cols = [
-        "推薦總分", "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
-        "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
-        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數"
-    ]
-    for c in numeric_cols:
-        x[c] = pd.to_numeric(x[c], errors="coerce")
-
-    bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2"]
-    for c in bool_cols:
-        x[c] = x[c].fillna(False).map(lambda v: str(v).strip().lower() in {"true", "1", "yes", "y", "是"})
-
-    x["目前狀態"] = x["目前狀態"].fillna("觀察").replace("", "觀察")
-    x["推薦日期"] = x["推薦日期"].fillna("").astype(str).replace("", _now_date_text())
-    x["推薦時間"] = x["推薦時間"].fillna("").astype(str).replace("", _now_time_text())
-    x["建立時間"] = x["建立時間"].fillna("").astype(str).replace("", _now_text())
-    x["更新時間"] = x["更新時間"].fillna("").astype(str).replace("", _now_text())
-    x["最新更新時間"] = x["最新更新時間"].fillna("").astype(str)
-    x["模式績效標籤"] = x["模式績效標籤"].fillna("").astype(str)
-    x["備註"] = x["備註"].fillna("").astype(str)
-
-    need_id = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
-    if need_id.any():
-        for idx in x[need_id].index:
-            rec_date = _safe_str(x.at[idx, "推薦日期"]) or _now_date_text()
-            rec_time = _safe_str(x.at[idx, "推薦時間"]) or _now_time_text()
-            x.at[idx, "record_id"] = _create_record_id(
-                _safe_str(x.at[idx, "股票代號"]),
-                rec_date,
-                rec_time,
-                _safe_str(x.at[idx, "推薦模式"]),
-            )
-
-    return x[GODPICK_RECORD_COLUMNS].copy()
-
-
-def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
-    base_df = _ensure_godpick_record_columns(base_df)
-    new_df = _ensure_godpick_record_columns(new_df)
-
-    if new_df.empty:
-        return base_df.copy()
-
-    merged = pd.concat([base_df, new_df], ignore_index=True)
-    merged["_biz_key"] = (
-        merged["股票代號"].fillna("").astype(str) + "|"
-        + merged["推薦日期"].fillna("").astype(str) + "|"
-        + merged["推薦時間"].fillna("").astype(str) + "|"
-        + merged["推薦模式"].fillna("").astype(str)
-    )
-    merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
-    merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
-    merged = merged.drop_duplicates(subset=["_biz_key"], keep="first")
-    return _ensure_godpick_record_columns(merged.drop(columns=["_biz_key", "_upd"], errors="ignore"))
-
-
-
-# =========================================================
-# 類別推論
-# =========================================================
-CATEGORY_KEYWORD_RULES: list[tuple[str, list[str]]] = [
-    ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc", "晶圓代工"]),
-    ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺", "天鈺", "義隆", "祥碩", "譜瑞", "聯陽", "瑞鼎", "義傳", "ic設計"]),
-    ("封測", ["日月光", "矽品", "京元電", "頎邦", "欣銓", "矽格", "封測", "測試"]),
-    ("記憶體", ["南亞科", "華邦電", "旺宏", "宇瞻", "十銓", "記憶體", "dram", "nand"]),
-    ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓"]),
-    ("半導體設備材料", ["帆宣", "漢唐", "家登", "辛耘", "中砂", "崇越", "萬潤", "均豪", "弘塑", "設備", "材料"]),
-    ("IP矽智財", ["力旺", "晶心科", "智原", "創意", "世芯", "ip", "矽智財"]),
-    ("AI伺服器", ["伺服器", "server", "緯穎", "廣達", "英業達", "緯創", "鴻海", "技嘉", "微星", "華碩"]),
-    ("散熱", ["雙鴻", "奇鋐", "建準", "散熱", "風扇", "熱導管"]),
-    ("機殼", ["勤誠", "晟銘電", "迎廣", "機殼"]),
-    ("電源供應", ["台達電", "光寶科", "群電", "全漢", "康舒", "電源", "供應器"]),
-    ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "威鋒", "usb4", "pcie"]),
-    ("網通交換器", ["智邦", "明泰", "中磊", "智易", "啟碁", "網通", "交換器", "switch"]),
-    ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "眾達", "聯亞", "光聖", "cpo"]),
-    ("PCB載板", ["欣興", "南電", "景碩", "金像電", "健鼎", "台燿", "華通", "載板", "pcb", "銅箔基板"]),
-    ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
-    ("面板", ["友達", "群創", "彩晶", "凌巨", "面板"]),
-    ("光學鏡頭", ["大立光", "玉晶光", "亞光", "今國光", "鏡頭", "光學"]),
-    ("被動元件", ["國巨", "華新科", "禾伸堂", "凱美", "立隆電", "被動元件", "電容", "電阻"]),
-    ("連接器", ["貿聯", "嘉澤", "信邦", "良維", "胡連", "連接器", "端子", "連接線"]),
-    ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "材料", "鋰"]),
-    ("金控", ["金控"]),
-    ("銀行", ["銀行"]),
-    ("保險", ["保險"]),
-    ("證券", ["證券"]),
-    ("航運", ["長榮", "陽明", "萬海", "裕民", "慧洋", "航運", "海運", "貨櫃", "散裝"]),
-    ("航空觀光", ["華航", "長榮航", "星宇", "航空", "觀光", "旅遊", "飯店"]),
-    ("鋼鐵", ["中鋼", "大成鋼", "東和鋼鐵", "鋼鐵", "鋼"]),
-    ("塑化", ["台塑", "南亞", "台化", "台塑化", "台聚", "塑化", "化工"]),
-    ("生技醫療", ["保瑞", "藥華藥", "美時", "生技", "醫療", "製藥", "藥", "醫材"]),
-    ("車用電子", ["和大", "貿聯", "堤維西", "東陽", "車用", "車電", "汽車"]),
-    ("綠能儲能", ["中興電", "華城", "士電", "儲能", "綠能", "太陽能", "風電"]),
-    ("營建資產", ["營建", "建設", "資產"]),
-    ("食品民生", ["統一", "大成", "食品", "餐飲", "飲料"]),
-    ("紡織製鞋", ["儒鴻", "聚陽", "志強", "豐泰", "寶成", "紡織", "成衣", "製鞋"]),
-    ("電機機械", ["上銀", "亞德客", "直得", "全球傳動", "機械", "工具機", "自動化"]),
-    ("其他電子", ["電子", "電腦", "光電"]),
-]
-
-CANONICAL_CATEGORY_ALIAS = {
-    "半導體": "半導體設備材料",
-    "半導體設備": "半導體設備材料",
-    "設備材料": "半導體設備材料",
-    "半導體材料": "半導體設備材料",
-    "伺服器": "AI伺服器",
-    "server": "AI伺服器",
-    "網通": "網通交換器",
-    "交換器": "網通交換器",
-    "光通訊/cpo": "光通訊",
-    "載板": "PCB載板",
-    "pcb": "PCB載板",
-    "ems": "EMS代工",
-    "鏡頭": "光學鏡頭",
-    "光學": "光學鏡頭",
-    "被動": "被動元件",
-    "電池": "電池材料",
-    "生技": "生技醫療",
-    "醫療": "生技醫療",
-    "車電": "車用電子",
-    "綠能": "綠能儲能",
-    "建材營造": "營建資產",
-    "營建": "營建資產",
-    "機械": "電機機械",
-}
-
-def _canonical_category(v: Any) -> str:
-    text = _normalize_category(v)
-    if not text:
-        return ""
-    key = text.lower()
-    for alias, target in CANONICAL_CATEGORY_ALIAS.items():
-        if key == alias.lower():
-            return target
-    return text
-
-def _infer_category_from_name(name: str) -> str:
-    n = _safe_str(name)
-    if not n:
-        return "其他"
-
-    s = n.lower()
-    for cat, keywords in CATEGORY_KEYWORD_RULES:
-        for kw in keywords:
-            if kw.lower() in s:
-                return cat
-    return "其他"
-
-def _infer_category_from_record(name: str, raw_category: Any) -> str:
-    raw_cat = _canonical_category(raw_category)
-    if raw_cat:
-        if raw_cat in {x[0] for x in CATEGORY_KEYWORD_RULES}:
-            return raw_cat
-        by_name = _infer_category_from_name(raw_cat)
-        if by_name != "其他":
-            return by_name
-        return raw_cat
-    return _infer_category_from_name(name)
-
-
-# =========================================================
-# GitHub / Firestore
-# =========================================================
 def _github_config() -> dict[str, str]:
     return {
         "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
         "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
         "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
         "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("GODPICK_RECORDS_GITHUB_PATH", "godpick_records.json")) or "godpick_records.json",
+    }
+
+
+def _watchlist_github_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
         "path": _safe_str(st.secrets.get("WATCHLIST_GITHUB_PATH", "watchlist.json")) or "watchlist.json",
+    }
+
+
+def _ui_config_github_config() -> dict[str, str]:
+    return {
+        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
+        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
+        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
+        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "path": _safe_str(st.secrets.get("GODPICK_UI_CONFIG_GITHUB_PATH", "godpick_record_ui_config.json")) or "godpick_record_ui_config.json",
     }
 
 
@@ -1953,62 +270,6 @@ def _github_contents_url(owner: str, repo: str, path: str) -> str:
     return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 
 
-def _get_repo_watchlist_sha(cfg: dict[str, str]) -> tuple[str, str]:
-    token = cfg["token"]
-    if not token:
-        return "", "缺少 GITHUB_TOKEN"
-
-    try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code == 200:
-            return _safe_str(resp.json().get("sha")), ""
-        if resp.status_code == 404:
-            return "", ""
-        return "", f"讀取 GitHub 檔案失敗：{resp.status_code} / {resp.text[:300]}"
-    except Exception as e:
-        return "", f"讀取 GitHub 檔案例外：{e}"
-
-
-def _push_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
-    cfg = _github_config()
-    token = cfg["token"]
-    if not token:
-        return False, "未設定 GITHUB_TOKEN"
-
-    sha, err = _get_repo_watchlist_sha(cfg)
-    if err:
-        return False, err
-
-    content_text = json.dumps(payload, ensure_ascii=False, indent=2)
-    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-
-    body: dict[str, Any] = {
-        "message": f"update watchlist from streamlit at {_now_text()}",
-        "content": encoded_content,
-        "branch": cfg["branch"],
-    }
-    if sha:
-        body["sha"] = sha
-
-    try:
-        resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            json=body,
-            timeout=30,
-        )
-        if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{cfg['path']}"
-        return False, f"GitHub API 寫入失敗：{resp.status_code} / {resp.text[:500]}"
-    except Exception as e:
-        return False, f"GitHub API 寫入例外：{e}"
-
-
 def _firebase_config() -> dict[str, str]:
     return {
         "project_id": _safe_str(st.secrets.get("FIREBASE_PROJECT_ID", "")),
@@ -2018,8 +279,7 @@ def _firebase_config() -> dict[str, str]:
 
 
 def _clean_private_key(raw_key: str) -> str:
-    private_key = _safe_str(raw_key)
-    private_key = private_key.replace("\\n", "\n").strip()
+    private_key = _safe_str(raw_key).replace("\\n", "\n").strip()
     if private_key.startswith("\ufeff"):
         private_key = private_key.lstrip("\ufeff")
     return private_key
@@ -2054,169 +314,162 @@ def _init_firebase_app():
         "client_email": client_email,
         "token_uri": "https://oauth2.googleapis.com/token",
     }
-
     cred = credentials.Certificate(cred_dict)
     return firebase_admin.initialize_app(cred, {"projectId": project_id})
 
 
-def _push_watchlist_to_firestore(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
-    try:
-        _init_firebase_app()
-        db = firestore.client()
-        batch = db.batch()
-        now = firestore.SERVER_TIMESTAMP
 
-        summary_ref = db.collection("system").document("watchlist_summary")
-        batch.set(
-            summary_ref,
-            {"group_count": len(payload), "updated_at": now, "source": "streamlit_dual_write"},
-            merge=True,
-        )
+def _derive_prelaunch_summary_from_row(row: pd.Series) -> str:
+    s = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
+    text = _safe_str(row.get("起漲摘要"))
+    if text:
+        return text
+    parts = []
+    if s >= 90:
+        parts.append("接近漲停")
+    elif s >= 78:
+        parts.append("強漲")
+    elif s >= 68:
+        parts.append("明顯上漲")
+    elif s >= 55:
+        parts.append("小漲轉強")
+    if _safe_float(row.get("爆發力分數"), 0) and _safe_float(row.get("爆發力分數"), 0) >= 70:
+        parts.append("量能放大")
+    if _safe_float(row.get("型態突破分數"), 0) and _safe_float(row.get("型態突破分數"), 0) >= 70:
+        parts.append("突破結構")
+    return "、".join(parts) if parts else "未見明顯起漲訊號"
 
-        for group_name, items in payload.items():
-            group_name = _safe_str(group_name)
-            if not group_name:
-                continue
 
-            group_ref = db.collection("watchlists").document(group_name)
-            batch.set(
-                group_ref,
-                {
-                    "group_name": group_name,
-                    "count": len(items),
-                    "items": items,
-                    "updated_at": now,
-                    "source": "streamlit_dual_write",
-                },
-                merge=True,
+def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+
+    x = df.copy()
+    if "record_id" not in x.columns and "rec_id" in x.columns:
+        x["record_id"] = x["rec_id"]
+
+    for c in GODPICK_RECORD_COLUMNS:
+        if c not in x.columns:
+            x[c] = None
+
+    numeric_cols = [
+        "推薦總分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "飆股起漲分數", "交易可行分數", "類股熱度分數",
+        "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
+        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
+        "持有天數", "股神決策分數", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    ]
+    for c in numeric_cols:
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+
+    bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2"]
+    for c in bool_cols:
+        x[c] = x[c].fillna(False).map(_normalize_bool)
+
+    text_cols = [
+        "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦標籤", "推薦理由摘要",
+        "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+    ]
+    for c in text_cols:
+        x[c] = x[c].fillna("").astype(str)
+
+    x["股票代號"] = x["股票代號"].map(_normalize_code)
+    x["類別"] = x["類別"].map(_normalize_category)
+    x["目前狀態"] = x["目前狀態"].fillna("觀察").astype(str).replace("", "觀察")
+
+
+    # 舊紀錄沒有起漲等級時，依起漲前兆分數自動補齊，避免 7頁/8頁/10頁欄位不一致。
+    if "起漲等級" in x.columns:
+        empty_grade = x["起漲等級"].fillna("").astype(str).str.strip() == ""
+        if empty_grade.any():
+            x.loc[empty_grade, "起漲等級"] = x.loc[empty_grade, "起漲前兆分數"].apply(_derive_prelaunch_grade_from_score)
+
+    # 7/8/9 起漲欄位串聯補齊：舊資料沒有新欄位時自動用起漲前兆分數補。
+    if "飆股起漲分數" in x.columns:
+        x["飆股起漲分數"] = pd.to_numeric(x["飆股起漲分數"], errors="coerce")
+        if "起漲前兆分數" in x.columns:
+            x["飆股起漲分數"] = x["飆股起漲分數"].fillna(pd.to_numeric(x["起漲前兆分數"], errors="coerce"))
+    if "起漲等級" in x.columns:
+        empty_grade = x["起漲等級"].fillna("").astype(str).str.strip() == ""
+        if empty_grade.any():
+            x.loc[empty_grade, "起漲等級"] = x.loc[empty_grade, "飆股起漲分數"].apply(_derive_prelaunch_grade_from_score)
+    if "起漲摘要" in x.columns:
+        empty_summary = x["起漲摘要"].fillna("").astype(str).str.strip() == ""
+        if empty_summary.any():
+            x.loc[empty_summary, "起漲摘要"] = x.loc[empty_summary].apply(_derive_prelaunch_summary_from_row, axis=1)
+
+    need_id = x["record_id"].isna() | (x["record_id"].astype(str).str.strip() == "")
+    if need_id.any():
+        for idx in x[need_id].index:
+            rec_date = _safe_str(x.at[idx, "推薦日期"]) or _now_date_text()
+            rec_time = _safe_str(x.at[idx, "推薦時間"]) or _now_time_text()
+            x.at[idx, "record_id"] = _create_record_id(
+                _safe_str(x.at[idx, "股票代號"]),
+                rec_date,
+                rec_time,
+                _safe_str(x.at[idx, "推薦模式"]),
             )
 
-            new_codes = set()
-            for item in items:
-                code = _normalize_code(item.get("code"))
-                if not code:
-                    continue
-                new_codes.add(code)
-                stock_ref = group_ref.collection("stocks").document(code)
-                batch.set(
-                    stock_ref,
-                    {
-                        "code": code,
-                        "name": _safe_str(item.get("name")) or code,
-                        "market": _safe_str(item.get("market")) or "上市",
-                        "category": _normalize_category(item.get("category")),
-                        "group_name": group_name,
-                        "updated_at": now,
-                    },
-                    merge=True,
-                )
-
-            existing_docs = list(group_ref.collection("stocks").stream())
-            for doc in existing_docs:
-                if doc.id not in new_codes:
-                    batch.delete(doc.reference)
-
-        batch.commit()
-        return True, "已同步寫入 Firestore"
-    except Exception as e:
-        return False, f"Firestore 寫入失敗：{e}"
+    return x[GODPICK_RECORD_COLUMNS].copy()
 
 
-def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
-    payload: dict[str, list[dict[str, str]]] = {}
-    for group_name, items in data.items():
-        g = _safe_str(group_name)
-        if not g:
-            continue
-        seen = set()
-        normalized_items = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
+def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = _ensure_godpick_record_columns(base_df)
+    new_df = _ensure_godpick_record_columns(new_df)
+    if new_df.empty:
+        return base_df.copy()
 
-            code = _normalize_code(item.get("code"))
-            name = _safe_str(item.get("name")) or code
-            market = _safe_str(item.get("market")) or "上市"
-            category = _normalize_category(item.get("category"))
-
-            if not code:
-                continue
-            key = (g, code)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            row = {"code": code, "name": name, "market": market}
-            if category:
-                row["category"] = category
-            normalized_items.append(row)
-
-        payload[g] = sorted(normalized_items, key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
-    return payload
+    merged = pd.concat([base_df, new_df], ignore_index=True)
+    merged["_biz_key"] = (
+        merged["股票代號"].fillna("").astype(str) + "|"
+        + merged["推薦日期"].fillna("").astype(str) + "|"
+        + merged["推薦時間"].fillna("").astype(str) + "|"
+        + merged["推薦模式"].fillna("").astype(str)
+    )
+    merged["_upd"] = pd.to_datetime(merged["更新時間"], errors="coerce")
+    merged = merged.sort_values(["_biz_key", "_upd"], ascending=[True, False], na_position="last")
+    merged = merged.drop_duplicates(subset=["_biz_key"], keep="first")
+    return _ensure_godpick_record_columns(merged.drop(columns=["_biz_key", "_upd"], errors="ignore"))
 
 
-
-def _write_watchlist_local(payload: dict[str, list[dict[str, str]]], path: str = "watchlist.json") -> tuple[bool, str]:
-    """本機強制寫回 watchlist.json；GitHub / Firestore 失敗時仍保留自選股資料。"""
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        try:
-            get_normalized_watchlist.clear()
-        except Exception:
-            pass
-        return True, f"已寫入本機 {path}"
-    except Exception as e:
-        return False, f"本機 watchlist.json 寫入失敗：{e}"
+def _delete_records_by_ids(df: pd.DataFrame, record_ids: list[str]) -> pd.DataFrame:
+    df = _ensure_godpick_record_columns(df)
+    ids = {_safe_str(x) for x in (record_ids or []) if _safe_str(x)}
+    if df.empty or not ids:
+        return df.copy()
+    out = df[~df["record_id"].astype(str).isin(ids)].copy()
+    out["更新時間"] = _now_text()
+    return _ensure_godpick_record_columns(out)
 
 
-def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
-    payload = _normalize_watchlist_payload(data)
+def _clear_filtered_records(df: pd.DataFrame, filtered_df: pd.DataFrame) -> pd.DataFrame:
+    df = _ensure_godpick_record_columns(df)
+    filtered_df = _ensure_godpick_record_columns(filtered_df)
+    if df.empty or filtered_df.empty:
+        return df.copy()
 
-    ok_local, msg_local = _write_watchlist_local(payload)
-    ok_github, msg_github = _push_watchlist_to_github(payload)
-    ok_firestore, msg_firestore = _push_watchlist_to_firestore(payload)
+    ids = {_safe_str(x) for x in filtered_df["record_id"].astype(str).tolist() if _safe_str(x)}
+    if ids:
+        out = df[~df["record_id"].astype(str).isin(ids)].copy()
+    else:
+        drop_keys = {
+            f"{_safe_str(r.get('股票代號'))}|{_safe_str(r.get('推薦日期'))}|{_safe_str(r.get('推薦時間'))}|{_safe_str(r.get('推薦模式'))}"
+            for _, r in filtered_df.iterrows()
+        }
+        keep_mask = []
+        for _, r in df.iterrows():
+            key = f"{_safe_str(r.get('股票代號'))}|{_safe_str(r.get('推薦日期'))}|{_safe_str(r.get('推薦時間'))}|{_safe_str(r.get('推薦模式'))}"
+            keep_mask.append(key not in drop_keys)
+        out = df[pd.Series(keep_mask, index=df.index)].copy()
 
-    st.session_state["watchlist_data"] = copy.deepcopy(payload)
-    st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
-    st.session_state["watchlist_last_saved_at"] = _now_text()
-
-    st.session_state[_k("last_dual_write_detail")] = [
-        f"本機: {'成功' if ok_local else '失敗'} | {msg_local}",
-        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
-        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
-    ]
-
-    if ok_local and ok_github and ok_firestore:
-        _set_status("本機 + GitHub + Firestore 同步成功", "success")
-        return True
-    if ok_local or ok_github or ok_firestore:
-        _set_status("自選股已保存；部分同步來源失敗，請查看同步明細。", "warning")
-        return True
-
-    _set_status("本機 / GitHub / Firestore 都寫入失敗", "error")
-    return False
+    out["更新時間"] = _now_text()
+    return _ensure_godpick_record_columns(out)
 
 
-# =========================================================
-# 8 頁推薦紀錄 寫入
-# =========================================================
-def _godpick_records_config() -> dict[str, str]:
-    return {
-        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
-        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
-        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
-        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
-        "path": _safe_str(st.secrets.get("GODPICK_RECORDS_GITHUB_PATH", "godpick_records.json")) or "godpick_records.json",
-    }
-
-
-def _read_godpick_records_from_github() -> tuple[list[dict[str, Any]], str]:
-    cfg = _godpick_records_config()
+def _read_records_from_github() -> tuple[pd.DataFrame, str]:
+    cfg = _github_config()
     token = cfg["token"]
     if not token:
-        return [], "未設定 GITHUB_TOKEN"
-
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "未設定 GITHUB_TOKEN"
     try:
         resp = requests.get(
             _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
@@ -2225,30 +478,27 @@ def _read_godpick_records_from_github() -> tuple[list[dict[str, Any]], str]:
             timeout=20,
         )
         if resp.status_code == 404:
-            return [], ""
+            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), ""
         if resp.status_code != 200:
-            return [], f"讀取推薦紀錄失敗：{resp.status_code} / {resp.text[:300]}"
-
+            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"GitHub 讀取失敗：{resp.status_code} / {resp.text[:300]}"
         data = resp.json()
         content = data.get("content", "")
         if not content:
-            return [], ""
-
+            return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), ""
         decoded = base64.b64decode(content).decode("utf-8")
         payload = json.loads(decoded)
         if isinstance(payload, list):
-            return payload, ""
-        return [], ""
+            return _ensure_godpick_record_columns(pd.DataFrame(payload)), ""
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), ""
     except Exception as e:
-        return [], f"讀取推薦紀錄例外：{e}"
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"GitHub 讀取例外：{e}"
 
 
-def _get_godpick_records_sha() -> tuple[str, str]:
-    cfg = _godpick_records_config()
+def _get_records_sha() -> tuple[str, str]:
+    cfg = _github_config()
     token = cfg["token"]
     if not token:
         return "", "缺少 GITHUB_TOKEN"
-
     try:
         resp = requests.get(
             _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
@@ -2260,27 +510,25 @@ def _get_godpick_records_sha() -> tuple[str, str]:
             return _safe_str(resp.json().get("sha")), ""
         if resp.status_code == 404:
             return "", ""
-        return "", f"讀取推薦紀錄 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+        return "", f"讀取 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
-        return "", f"讀取推薦紀錄 SHA 例外：{e}"
+        return "", f"讀取 SHA 例外：{e}"
 
 
-def _write_godpick_records_to_github(records: list[dict[str, Any]]) -> tuple[bool, str]:
-    cfg = _godpick_records_config()
+def _write_records_to_github(df: pd.DataFrame) -> tuple[bool, str]:
+    cfg = _github_config()
     token = cfg["token"]
     if not token:
         return False, "未設定 GITHUB_TOKEN"
-
-    sha, err = _get_godpick_records_sha()
+    sha, err = _get_records_sha()
     if err:
         return False, err
 
-    content_text = json.dumps(records, ensure_ascii=False, indent=2)
-    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
-
+    content_text = json.dumps(_ensure_godpick_record_columns(df).to_dict(orient="records"), ensure_ascii=False, indent=2)
+    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
     body: dict[str, Any] = {
         "message": f"update godpick records at {_now_text()}",
-        "content": encoded_content,
+        "content": encoded,
         "branch": cfg["branch"],
     }
     if sha:
@@ -2295,471 +543,143 @@ def _write_godpick_records_to_github(records: list[dict[str, Any]]) -> tuple[boo
         )
         if resp.status_code in (200, 201):
             return True, f"已回寫 GitHub：{cfg['path']}"
-        return False, f"推薦紀錄 GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
     except Exception as e:
-        return False, f"推薦紀錄 GitHub 寫入例外：{e}"
+        return False, f"GitHub 寫入例外：{e}"
 
 
-def _write_godpick_records_to_firestore(records: list[dict[str, Any]]) -> tuple[bool, str]:
+def _read_records_from_firestore() -> tuple[pd.DataFrame, str]:
+    try:
+        _init_firebase_app()
+        db = firestore.client()
+        docs = list(db.collection("godpick_records").stream())
+        rows = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            data.setdefault("record_id", doc.id)
+            rows.append(data)
+        return _ensure_godpick_record_columns(pd.DataFrame(rows)), ""
+    except Exception as e:
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"Firestore 讀取失敗：{e}"
+
+
+def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
     try:
         _init_firebase_app()
         db = firestore.client()
         batch = db.batch()
         now = firestore.SERVER_TIMESTAMP
-
-        summary_ref = db.collection("system").document("godpick_records_summary")
-        batch.set(summary_ref, {"count": len(records), "updated_at": now, "source": "streamlit_godpick_records"}, merge=True)
-
         records_ref = db.collection("godpick_records")
+        summary_ref = db.collection("system").document("godpick_records_summary")
+
+        clean_df = _ensure_godpick_record_columns(df)
+        batch.set(summary_ref, {"count": len(clean_df), "updated_at": now, "source": "streamlit_record_page"}, merge=True)
+
         existing_docs = list(records_ref.stream())
         existing_ids = {doc.id for doc in existing_docs}
         new_ids = set()
-
-        for row in records:
+        for row in clean_df.to_dict(orient="records"):
             rec_id = _safe_str(row.get("record_id"))
             if not rec_id:
-                rec_id = _create_record_id(
-                    _normalize_code(row.get("股票代號")),
-                    _safe_str(row.get("推薦日期")) or _now_date_text(),
-                    _safe_str(row.get("推薦時間")) or _now_time_text(),
-                    _safe_str(row.get("推薦模式")),
-                )
-                row["record_id"] = rec_id
-
+                continue
             new_ids.add(rec_id)
-            doc_ref = records_ref.document(rec_id)
-            doc_data = dict(row)
-            doc_data["updated_at"] = now
-            batch.set(doc_ref, doc_data, merge=True)
-
+            payload = dict(row)
+            payload["updated_at"] = now
+            batch.set(records_ref.document(rec_id), payload, merge=True)
         for old_id in existing_ids - new_ids:
             batch.delete(records_ref.document(old_id))
-
         batch.commit()
         return True, "已同步寫入 Firestore"
     except Exception as e:
-        return False, f"推薦紀錄 Firestore 寫入失敗：{e}"
+        return False, f"Firestore 寫入失敗：{e}"
 
 
+def _save_records_dual(df: pd.DataFrame) -> bool:
+    clean_df = _ensure_godpick_record_columns(df)
+    ok1, msg1 = _write_records_to_github(clean_df)
+    ok2, msg2 = _write_records_to_firestore(clean_df)
+    st.session_state[_k("last_sync_detail")] = [
+        f"GitHub: {'成功' if ok1 else '失敗'} | {msg1}",
+        f"Firestore: {'成功' if ok2 else '失敗'} | {msg2}",
+    ]
+    if ok1 and ok2:
+        _set_status("推薦紀錄 GitHub + Firestore 同步成功", "success")
+        return True
+    if ok1 or ok2:
+        _set_status("推薦紀錄部分同步成功", "warning")
+        return True
+    _set_status("推薦紀錄同步失敗", "error")
+    return False
 
 
-# =========================================================
-# 大盤走勢串聯：讀取 0_大盤走勢.py 儲存的 macro_trend_records.json
-# =========================================================
-MACRO_RECORD_FILES = [
-    "macro_trend_records.json",
-]
-
-
-def _macro_grade_weight(grade: str, score: Any) -> tuple[float, str]:
-    """依大盤參考等級決定在 7_股神推薦 的自動權重，不硬篩避免漏逆勢飆股。"""
-    g = _safe_str(grade)
-    s = _safe_float(score, 50) or 50
-    if g.startswith("A") or s >= 80:
-        return 0.12, "大盤A級，作主要輔助加權"
-    if g.startswith("B") or s >= 65:
-        return 0.07, "大盤B級，作輔助加權"
-    if g.startswith("C") or s >= 50:
-        return 0.00, "大盤C級，只作風險濾網"
-    return -0.08, "大盤D級，降低追價與弱勢股權重"
-
-
-def _load_latest_macro_reference() -> dict[str, Any]:
-    """讀取最新大盤參考結果。沒有資料時回傳中性，避免 7 頁推薦壞掉。"""
-    base_dir = Path(__file__).resolve().parent.parent
-    rows = []
-    for fn in MACRO_RECORD_FILES:
-        p = base_dir / fn
-        if not p.exists():
+def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
+    payload: dict[str, list[dict[str, str]]] = {}
+    for group_name, items in data.items():
+        g = _safe_str(group_name)
+        if not g:
             continue
-        try:
-            payload = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(payload, list):
-            data_rows = payload
-        elif isinstance(payload, dict):
-            if isinstance(payload.get("records"), list):
-                data_rows = payload.get("records", [])
-            elif isinstance(payload.get("data"), list):
-                data_rows = payload.get("data", [])
-            else:
-                data_rows = []
-        else:
-            data_rows = []
-        for r in data_rows:
-            if isinstance(r, dict):
-                rows.append(r)
-
-    if not rows:
-        return {
-            "大盤參考等級": "C｜僅作風險濾網",
-            "大盤可參考分數": 50.0,
-            "大盤操作風格": "未讀到大盤紀錄",
-            "大盤推薦權重": "0%",
-            "大盤降權原因": "尚未儲存 0_大盤走勢 的投顧參考結果，7頁以中性處理",
-            "大盤資料日期": "",
-            "大盤市場廣度分數": None,
-            "大盤量價確認分數": None,
-            "大盤權值支撐分數": None,
-            "大盤推薦同步分數": None,
-            "大盤風險濾網": "中性",
-            "_macro_adjust_weight": 0.0,
-        }
-
-    def sort_key(r):
-        return (
-            _safe_str(r.get("推估日期")),
-            _safe_str(r.get("更新時間") or r.get("建立時間")),
-            _safe_float(r.get("大盤可參考分數"), 0) or 0,
-        )
-
-    latest = sorted(rows, key=sort_key, reverse=True)[0]
-    score = _safe_float(latest.get("大盤可參考分數"), 50) or 50
-    grade = _safe_str(latest.get("大盤參考等級")) or _macro_reference_grade(score)
-    weight, reason = _macro_grade_weight(grade, score)
-    risk_filter = "中性"
-    if grade.startswith("A"):
-        risk_filter = "可加權"
-    elif grade.startswith("B"):
-        risk_filter = "輔助加權"
-    elif grade.startswith("C"):
-        risk_filter = "只控風險"
-    elif grade.startswith("D"):
-        risk_filter = "降權防守"
-
-    return {
-        "大盤參考等級": grade,
-        "大盤可參考分數": score,
-        "大盤操作風格": _safe_str(latest.get("今日適合操作風格")) or _safe_str(latest.get("建議動作")) or "未判定",
-        "大盤推薦權重": _safe_str(latest.get("推薦加權建議")) or f"{weight*100:.0f}%",
-        "大盤降權原因": _safe_str(latest.get("推薦降權原因")) or reason,
-        "大盤資料日期": _safe_str(latest.get("推估日期")),
-        "大盤市場廣度分數": _safe_float(latest.get("市場廣度分數")),
-        "大盤量價確認分數": _safe_float(latest.get("量價確認分數")),
-        "大盤權值支撐分數": _safe_float(latest.get("權值支撐分數")),
-        "大盤推薦同步分數": _safe_float(latest.get("推薦同步分數")),
-        "大盤風險濾網": risk_filter,
-        "_macro_adjust_weight": weight,
-    }
+        seen = set()
+        normalized_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            code = _normalize_code(item.get("code"))
+            name = _safe_str(item.get("name")) or code
+            market = _safe_str(item.get("market")) or "上市"
+            if not code:
+                continue
+            key = (g, code)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append({"code": code, "name": name, "market": market})
+        payload[g] = sorted(normalized_items, key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
+    return payload
 
 
-def _macro_reference_grade(score: Any) -> str:
-    s = _safe_float(score, 50) or 50
-    if s >= 80:
-        return "A｜可作主要參考"
-    if s >= 65:
-        return "B｜可作輔助參考"
-    if s >= 50:
-        return "C｜僅作風險濾網"
-    return "D｜不建議作推薦依據"
-
-
-def _macro_adjust_score(row: pd.Series, macro: dict[str, Any]) -> tuple[float, str]:
-    """
-    大盤加權採「輔助與降權」，不硬刪股票。
-    避免大盤弱但個股逆勢起漲時被漏掉。
-    """
-    weight = _safe_float(macro.get("_macro_adjust_weight"), 0) or 0
-    macro_score = _safe_float(macro.get("大盤可參考分數"), 50) or 50
-    if abs(weight) < 0.0001:
-        return 0.0, _safe_str(macro.get("大盤風險濾網")) or "中性"
-
-    rec_score = _safe_float(row.get("推薦總分"), 0) or 0
-    prelaunch = _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")) or 0
-    tech = _safe_float(row.get("技術結構分數"), 0) or 0
-    risk = _safe_float(row.get("風險分數"), 50) or 50
-
-    stock_quality = rec_score * 0.45 + prelaunch * 0.25 + tech * 0.20 + max(0, 100 - risk) * 0.10
-    raw = (macro_score - 50) * weight * 0.55 + (stock_quality - 60) * weight * 0.35
-
-    # 大盤D級時：只扣追高/弱勢，不重砍逆勢強股。
-    grade = _safe_str(macro.get("大盤參考等級"))
-    if grade.startswith("D"):
-        if prelaunch >= 75 and tech >= 65:
-            raw = max(raw, -1.5)
-        elif rec_score < 70 or risk >= 65:
-            raw -= 2.5
-    elif grade.startswith("A"):
-        if prelaunch >= 68 and tech >= 60:
-            raw += 1.2
-
-    return round(_score_clip(raw, -8, 8), 2), _safe_str(macro.get("大盤風險濾網")) or "中性"
-
-
-
-def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
-    rec_price = _safe_float(row.get("推薦價格"))
-    latest_price = _safe_float(row.get("最新價"))
-    stop_price = _safe_float(row.get("停損價"))
-    target1 = _safe_float(row.get("賣出目標1"))
-    target2 = _safe_float(row.get("賣出目標2"))
-
-    pnl_amt = None
-    pnl_pct = None
-    if rec_price not in [None, 0] and latest_price is not None:
-        pnl_amt = latest_price - rec_price
-        pnl_pct = (pnl_amt / rec_price) * 100
-
-    hit_stop = False
-    if stop_price is not None and latest_price is not None and latest_price <= stop_price:
-        hit_stop = True
-
-    hit_target1 = False
-    if target1 is not None and latest_price is not None and latest_price >= target1:
-        hit_target1 = True
-
-    hit_target2 = False
-    if target2 is not None and latest_price is not None and latest_price >= target2:
-        hit_target2 = True
-
-    rec_date = _safe_str(row.get("推薦日期")) or _now_date_text()
-    rec_time = _safe_str(row.get("推薦時間")) or _now_time_text()
-    mode = _safe_str(row.get("推薦模式"))
-
-    norm = {
-        "record_id": _safe_str(row.get("record_id")) or _safe_str(row.get("rec_id")) or _create_record_id(
-            _normalize_code(row.get("股票代號")), rec_date, rec_time, mode
-        ),
-        "股票代號": _normalize_code(row.get("股票代號")),
-        "股票名稱": _safe_str(row.get("股票名稱")),
-        "市場別": _safe_str(row.get("市場別")) or "上市",
-        "類別": _normalize_category(row.get("類別")),
-        "推薦模式": mode,
-        "推薦等級": _safe_str(row.get("推薦等級")),
-        "推薦總分": _safe_float(row.get("推薦總分")),
-        "買點分級": _safe_str(row.get("買點分級")),
-        "大盤參考等級": _safe_str(row.get("大盤參考等級")),
-        "大盤可參考分數": _safe_float(row.get("大盤可參考分數")),
-        "大盤加權分": _safe_float(row.get("大盤加權分")),
-        "大盤風險濾網": _safe_str(row.get("大盤風險濾網")),
-        "大盤推薦權重": _safe_str(row.get("大盤推薦權重")),
-        "大盤降權原因": _safe_str(row.get("大盤降權原因")),
-        "大盤操作風格": _safe_str(row.get("大盤操作風格")),
-        "大盤市場廣度分數": _safe_float(row.get("大盤市場廣度分數")),
-        "大盤量價確認分數": _safe_float(row.get("大盤量價確認分數")),
-        "大盤權值支撐分數": _safe_float(row.get("大盤權值支撐分數")),
-        "大盤推薦同步分數": _safe_float(row.get("大盤推薦同步分數")),
-        "大盤資料日期": _safe_str(row.get("大盤資料日期")),
-        "風險說明": _safe_str(row.get("風險說明")),
-        "股神推論邏輯": _safe_str(row.get("股神推論邏輯")),
-        "權重設定": _safe_str(row.get("權重設定")),
-        "技術結構分數": _safe_float(row.get("技術結構分數")),
-        "起漲前兆分數": _safe_float(row.get("起漲前兆分數")),
-        "飆股起漲分數": _safe_float(row.get("飆股起漲分數"), row.get("起漲前兆分數")),
-        "起漲摘要": _safe_str(row.get("起漲摘要")),
-        "交易可行分數": _safe_float(row.get("交易可行分數")),
-        "類股熱度分數": _safe_float(row.get("類股熱度分數")),
-        "同類股領先幅度": _safe_float(row.get("同類股領先幅度")),
-        "是否領先同類股": _safe_str(row.get("是否領先同類股")) in {"是", "True", "true", "1"},
-        "推薦標籤": _safe_str(row.get("推薦標籤")),
-        "推薦理由摘要": _safe_str(row.get("推薦理由摘要")),
-        "推薦價格": rec_price,
-        "停損價": stop_price,
-        "賣出目標1": target1,
-        "賣出目標2": target2,
-        "推薦日期": rec_date,
-        "推薦時間": rec_time,
-        "建立時間": _safe_str(row.get("建立時間")) or _now_text(),
-        "更新時間": _now_text(),
-        "目前狀態": _safe_str(row.get("目前狀態")) or "觀察",
-        "是否已實際買進": _safe_str(row.get("是否已實際買進")) in {"是", "True", "true", "1"},
-        "實際買進價": _safe_float(row.get("實際買進價")),
-        "實際賣出價": _safe_float(row.get("實際賣出價")),
-        "實際報酬%": _safe_float(row.get("實際報酬%")),
-        "最新價": latest_price,
-        "最新更新時間": _safe_str(row.get("最新更新時間")),
-        "損益金額": pnl_amt,
-        "損益幅%": pnl_pct,
-        "是否達停損": hit_stop if row.get("是否達停損") is None else (_safe_str(row.get("是否達停損")) in {"是", "True", "true", "1"}),
-        "是否達目標1": hit_target1 if row.get("是否達目標1") is None else (_safe_str(row.get("是否達目標1")) in {"是", "True", "true", "1"}),
-        "是否達目標2": hit_target2 if row.get("是否達目標2") is None else (_safe_str(row.get("是否達目標2")) in {"是", "True", "true", "1"}),
-        "持有天數": _safe_float(row.get("持有天數")),
-        "模式績效標籤": _safe_str(row.get("模式績效標籤")),
-        "備註": _safe_str(row.get("備註")),
-    }
-    return _ensure_godpick_record_columns(pd.DataFrame([norm])).iloc[0].to_dict()
-
-
-def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[str]) -> list[dict[str, Any]]:
-    if rec_df is None or rec_df.empty:
-        return []
-
-    work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in selected_codes])].copy()
-    rows = []
-
-    rec_date = _now_date_text()
-    rec_time = _now_time_text()
-    build_time = _now_text()
-
-    for _, r in work.iterrows():
-        code = _normalize_code(r.get("股票代號"))
-        mode = _safe_str(r.get("推薦模式"))
-        rows.append(
-            {
-                "record_id": _create_record_id(code, rec_date, rec_time, mode),
-                "股票代號": code,
-                "股票名稱": _safe_str(r.get("股票名稱")),
-                "市場別": _safe_str(r.get("市場別")) or "上市",
-                "類別": _normalize_category(r.get("類別")),
-                "推薦模式": mode,
-                "推薦等級": _safe_str(r.get("推薦等級")),
-                "推薦總分": _safe_float(r.get("推薦總分")),
-                "買點分級": _safe_str(r.get("買點分級")),
-                "大盤參考等級": _safe_str(r.get("大盤參考等級")),
-                "大盤可參考分數": _safe_float(r.get("大盤可參考分數")),
-                "大盤加權分": _safe_float(r.get("大盤加權分")),
-                "大盤風險濾網": _safe_str(r.get("大盤風險濾網")),
-                "大盤推薦權重": _safe_str(r.get("大盤推薦權重")),
-                "大盤降權原因": _safe_str(r.get("大盤降權原因")),
-                "大盤操作風格": _safe_str(r.get("大盤操作風格")),
-                "大盤市場廣度分數": _safe_float(r.get("大盤市場廣度分數")),
-                "大盤量價確認分數": _safe_float(r.get("大盤量價確認分數")),
-                "大盤權值支撐分數": _safe_float(r.get("大盤權值支撐分數")),
-                "大盤推薦同步分數": _safe_float(r.get("大盤推薦同步分數")),
-                "大盤資料日期": _safe_str(r.get("大盤資料日期")),
-                "風險說明": _safe_str(r.get("風險說明")),
-                "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
-                "權重設定": _safe_str(r.get("權重設定")),
-                "推薦分桶": _safe_str(r.get("推薦分桶")),
-                "起漲等級": _safe_str(r.get("起漲等級")),
-                "信心等級": _safe_str(r.get("信心等級")),
-                "買點劇本": _safe_str(r.get("買點劇本")),
-                "失效條件": _safe_str(r.get("失效條件")),
-                "假突破風險": _safe_str(r.get("假突破風險")),
-                "過熱風險": _safe_str(r.get("過熱風險")),
-                "3日追蹤預留": _safe_str(r.get("3日追蹤預留")),
-                "5日追蹤預留": _safe_str(r.get("5日追蹤預留")),
-                "10日追蹤預留": _safe_str(r.get("10日追蹤預留")),
-                "20日追蹤預留": _safe_str(r.get("20日追蹤預留")),
-                "技術結構分數": _safe_float(r.get("技術結構分數")),
-                "起漲前兆分數": _safe_float(r.get("起漲前兆分數")),
-                "飆股起漲分數": _safe_float(r.get("飆股起漲分數"), r.get("起漲前兆分數")),
-                "起漲摘要": _safe_str(r.get("起漲摘要")),
-                "交易可行分數": _safe_float(r.get("交易可行分數")),
-                "類股熱度分數": _safe_float(r.get("類股熱度分數")),
-                "同類股領先幅度": _safe_float(r.get("同類股領先幅度")),
-                "是否領先同類股": _safe_str(r.get("是否領先同類股")) in {"是", "True", "true", "1"},
-                "推薦標籤": "｜".join([x for x in [_safe_str(r.get("推薦標籤")), _safe_str(r.get("型態名稱")), _safe_str(r.get("爆發等級"))] if x]),
-                "推薦理由摘要": _safe_str(r.get("推薦理由摘要")),
-                "推薦價格": _safe_float(r.get("最新價") if pd.notna(r.get("最新價")) else r.get("推薦買點_拉回")),
-                "停損價": _safe_float(r.get("停損價")),
-                "賣出目標1": _safe_float(r.get("賣出目標1")),
-                "賣出目標2": _safe_float(r.get("賣出目標2")),
-                "推薦日期": rec_date,
-                "推薦時間": rec_time,
-                "建立時間": build_time,
-                "更新時間": build_time,
-                "目前狀態": "觀察",
-                "是否已實際買進": False,
-                "實際買進價": None,
-                "實際賣出價": None,
-                "實際報酬%": None,
-                "最新價": _safe_float(r.get("最新價")),
-                "最新更新時間": "",
-                "損益金額": None,
-                "損益幅%": None,
-                "是否達停損": False,
-                "是否達目標1": False,
-                "是否達目標2": False,
-                "持有天數": None,
-                "模式績效標籤": "",
-                "備註": "",
-            }
-        )
-    return rows
-
-
-
-# =========================================================
-# 股票主檔 / 分類修正持久化
-# =========================================================
-
-# 官方產業代碼映射（TWSE / TPEX 常用）
-OFFICIAL_INDUSTRY_CODE_MAP = {
-    "01": "水泥工業",
-    "02": "食品工業",
-    "03": "塑膠工業",
-    "04": "紡織纖維",
-    "05": "電機機械",
-    "06": "電器電纜",
-    "08": "玻璃陶瓷",
-    "09": "造紙工業",
-    "10": "鋼鐵工業",
-    "11": "橡膠工業",
-    "12": "汽車工業",
-    "14": "建材營造",
-    "15": "航運業",
-    "16": "觀光餐旅",
-    "17": "金融保險",
-    "18": "貿易百貨",
-    "19": "綜合",
-    "20": "其他",
-    "21": "化學工業",
-    "22": "生技醫療",
-    "23": "油電燃氣",
-    "24": "半導體業",
-    "25": "電腦及週邊設備業",
-    "26": "光電業",
-    "27": "通信網路業",
-    "28": "電子零組件業",
-    "29": "電子通路業",
-    "30": "資訊服務業",
-    "31": "其他電子業",
-    "32": "文化創意業",
-    "33": "農業科技業",
-    "34": "綠能環保",
-    "35": "數位雲端",
-    "36": "運動休閒",
-    "37": "居家生活",
-}
-
-
-def _stock_master_config() -> dict[str, str]:
-    return {
-        "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
-        "owner": _safe_str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")),
-        "repo": _safe_str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")),
-        "branch": _safe_str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
-        "master_path": _safe_str(st.secrets.get("STOCK_MASTER_GITHUB_PATH", "stock_master_cache.json")) or "stock_master_cache.json",
-        "override_path": _safe_str(st.secrets.get("STOCK_CATEGORY_OVERRIDE_GITHUB_PATH", "stock_category_overrides.json")) or "stock_category_overrides.json",
-    }
-
-
-def _read_json_from_github(path: str) -> tuple[Any, str]:
-    cfg = _stock_master_config()
+def _read_watchlist_from_github() -> tuple[dict[str, list[dict[str, str]]], str]:
+    cfg = _watchlist_github_config()
     token = cfg["token"]
     if not token:
-        return None, "未設定 GITHUB_TOKEN"
+        return {}, "未設定 GITHUB_TOKEN，無法讀取 watchlist.json"
     try:
         resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_github_headers(token),
             params={"ref": cfg["branch"]},
             timeout=20,
         )
         if resp.status_code == 404:
-            return None, ""
+            return {}, ""
         if resp.status_code != 200:
-            return None, f"讀取 GitHub JSON 失敗：{resp.status_code} / {resp.text[:300]}"
+            return {}, f"watchlist GitHub 讀取失敗：{resp.status_code} / {resp.text[:300]}"
         data = resp.json()
         content = data.get("content", "")
         if not content:
-            return None, ""
+            return {}, ""
         decoded = base64.b64decode(content).decode("utf-8")
-        return json.loads(decoded), ""
+        payload = json.loads(decoded)
+        if not isinstance(payload, dict):
+            return {}, "watchlist.json 格式錯誤，根層必須是 dict"
+        return _normalize_watchlist_payload(payload), ""
     except Exception as e:
-        return None, f"讀取 GitHub JSON 例外：{e}"
+        return {}, f"watchlist GitHub 讀取例外：{e}"
 
 
-def _get_github_sha_by_path(path: str) -> tuple[str, str]:
-    cfg = _stock_master_config()
+def _load_watchlist_payload() -> dict[str, list[dict[str, str]]]:
+    payload, err = _read_watchlist_from_github()
+    st.session_state[_k("watchlist_import_detail")] = err or "GitHub watchlist 讀取成功"
+    return _normalize_watchlist_payload(payload)
+
+
+def _get_watchlist_sha() -> tuple[str, str]:
+    cfg = _watchlist_github_config()
     token = cfg["token"]
     if not token:
         return "", "缺少 GITHUB_TOKEN"
     try:
         resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_github_headers(token),
             params={"ref": cfg["branch"]},
             timeout=20,
@@ -2768,26 +688,26 @@ def _get_github_sha_by_path(path: str) -> tuple[str, str]:
             return _safe_str(resp.json().get("sha")), ""
         if resp.status_code == 404:
             return "", ""
-        return "", f"讀取 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+        return "", f"讀取 watchlist SHA 失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
-        return "", f"讀取 SHA 例外：{e}"
+        return "", f"讀取 watchlist SHA 例外：{e}"
 
 
-def _write_json_to_github(path: str, payload: Any, commit_message: str) -> tuple[bool, str]:
-    cfg = _stock_master_config()
+def _write_watchlist_to_github(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    cfg = _watchlist_github_config()
     token = cfg["token"]
     if not token:
-        return False, "未設定 GITHUB_TOKEN"
+        return False, "未設定 GITHUB_TOKEN，無法回寫 watchlist.json"
 
-    sha, err = _get_github_sha_by_path(path)
+    sha, err = _get_watchlist_sha()
     if err:
         return False, err
 
-    content_text = json.dumps(payload, ensure_ascii=False, indent=2)
-    encoded_content = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+    content_text = json.dumps(_normalize_watchlist_payload(payload), ensure_ascii=False, indent=2)
+    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
     body: dict[str, Any] = {
-        "message": commit_message,
-        "content": encoded_content,
+        "message": f"update watchlist from godpick record page at {_now_text()}",
+        "content": encoded,
         "branch": cfg["branch"],
     }
     if sha:
@@ -2795,2295 +715,1073 @@ def _write_json_to_github(path: str, payload: Any, commit_message: str) -> tuple
 
     try:
         resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], path),
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_github_headers(token),
             json=body,
             timeout=30,
         )
         if resp.status_code in (200, 201):
-            return True, f"已回寫 GitHub：{path}"
-        return False, f"GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+            return True, f"已回寫自選股：{cfg['path']}"
+        return False, f"watchlist GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
     except Exception as e:
-        return False, f"GitHub 寫入例外：{e}"
+        return False, f"watchlist GitHub 寫入例外：{e}"
 
 
-def _official_industry_name(raw_value: Any) -> str:
-    raw = _safe_str(raw_value)
-    if not raw:
-        return ""
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) == 1:
-        digits = digits.zfill(2)
-    if digits in OFFICIAL_INDUSTRY_CODE_MAP:
-        return OFFICIAL_INDUSTRY_CODE_MAP[digits]
-    return raw.replace("業別", "").replace("工業", "工業").strip()
+def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[str], target_group: str) -> tuple[bool, str]:
+    records_df = _ensure_godpick_record_columns(records_df)
+    ids = {_safe_str(x) for x in (selected_ids or []) if _safe_str(x)}
+    if records_df.empty:
+        return False, "目前沒有推薦紀錄可匯出"
+    if not ids:
+        return False, "請先勾選要匯入自選股中心的股票"
 
+    chosen = records_df[records_df["record_id"].astype(str).isin(ids)].copy()
+    if chosen.empty:
+        return False, "找不到要匯入的推薦紀錄"
 
-def _theme_from_official(official_industry: Any, name: Any) -> str:
-    official = _official_industry_name(official_industry)
-    by_name = _infer_category_from_name(_safe_str(name))
-    if by_name != "其他":
-        return by_name
-    if not official:
-        return "其他_官方未知"
-    mapping = {
-        "水泥工業": "水泥工業",
-        "食品工業": "食品民生",
-        "塑膠工業": "塑化",
-        "紡織纖維": "紡織製鞋",
-        "電機機械": "電機機械",
-        "電器電纜": "電器電纜",
-        "玻璃陶瓷": "玻璃陶瓷",
-        "造紙工業": "造紙工業",
-        "鋼鐵工業": "鋼鐵",
-        "橡膠工業": "橡膠工業",
-        "汽車工業": "汽車",
-        "建材營造": "營建資產",
-        "航運業": "航運",
-        "觀光餐旅": "航空觀光",
-        "金融保險": "金融保險",
-        "貿易百貨": "貿易百貨",
-        "綜合": "綜合",
-        "其他": "其他_主題未映射",
-        "化學工業": "塑化",
-        "生技醫療": "生技醫療",
-        "油電燃氣": "油電燃氣",
-        "半導體業": "半導體業",
-        "電腦及週邊設備業": "電腦及週邊設備業",
-        "光電業": "光電業",
-        "通信網路業": "通信網路業",
-        "電子零組件業": "電子零組件業",
-        "電子通路業": "電子通路業",
-        "資訊服務業": "資訊服務業",
-        "其他電子業": "其他電子業",
-        "文化創意業": "文化創意業",
-        "農業科技業": "農業科技業",
-        "綠能環保": "綠能環保",
-        "數位雲端": "數位雲端",
-        "運動休閒": "運動休閒",
-        "居家生活": "居家生活",
-    }
-    return mapping.get(official, official)
+    payload = _load_watchlist_payload()
+    target_group = _safe_str(target_group) or "股神推薦"
+    if target_group not in payload:
+        payload[target_group] = []
 
+    existing_codes = {_normalize_code(x.get("code")) for x in payload.get(target_group, [])}
+    add_count = 0
+    skip_count = 0
 
-def _normalize_master_columns(df: pd.DataFrame, market_label: str, code_col: str, name_col: str, industry_col: str, source_api: str) -> tuple[pd.DataFrame, dict[str, Any]]:
-    if df is None or df.empty:
-        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
-        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": source_api}
-    work = df.copy()
-    for c in [code_col, name_col, industry_col]:
-        if c not in work.columns:
-            work[c] = ""
-    work = work.rename(columns={code_col: "code", name_col: "name", industry_col: "official_industry_raw"})
-    work["code"] = work["code"].map(_normalize_code)
-    work["name"] = work["name"].map(_safe_str)
-    work["market"] = market_label
-    work["official_industry_raw_col"] = industry_col
-    work["official_industry"] = work["official_industry_raw"].map(_official_industry_name)
-    work["theme_category"] = work.apply(lambda r: _theme_from_official(r.get("official_industry"), r.get("name")), axis=1)
-    work["category"] = work["theme_category"]
-    work["source"] = f"official_{market_label}"
-    work["source_api"] = source_api
-    work["source_rank"] = 1
-    work["待修原因"] = work["official_industry"].map(lambda x: "" if _safe_str(x) else "官方產業未抓到")
-    work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    info = {
-        "rows": len(work),
-        "official_hit": int(work["official_industry"].fillna("").astype(str).str.strip().ne("").sum()),
-        "raw_cols": list(df.columns),
-        "source_api": source_api,
-    }
-    return work[["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]].copy(), info
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_twse_master() -> tuple[pd.DataFrame, dict[str, Any]]:
-    url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        payload = resp.json()
-        df = pd.DataFrame(payload)
-        return _normalize_master_columns(df, "上市", "公司代號", "公司簡稱", "產業別", "twse_openapi")
-    except Exception:
-        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
-        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "twse_openapi"}
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_tpex_master(mode: str) -> tuple[pd.DataFrame, dict[str, Any]]:
-    if mode == "上櫃":
-        url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
-    else:
-        url = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_R"
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        payload = resp.json()
-        df = pd.DataFrame(payload)
-        return _normalize_master_columns(df, mode, "SecuritiesCompanyCode", "CompanyAbbreviation", "SecuritiesIndustryCode", f"tpex_{mode}")
-    except Exception:
-        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
-        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": f"tpex_{mode}"}
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_twse_isin_fill_map() -> dict[str, str]:
-    url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-    out: dict[str, str] = {}
-    try:
-        tables = pd.read_html(url)
-    except Exception:
-        return out
-    for tb in tables:
-        tmp = tb.copy()
-        tmp.columns = [str(c) for c in tmp.columns]
-        cols = set(tmp.columns)
-        if not ({"有價證券代號", "產業別"} <= cols):
+    for _, row in chosen.iterrows():
+        code = _normalize_code(row.get("股票代號"))
+        name = _safe_str(row.get("股票名稱")) or code
+        market = _safe_str(row.get("市場別")) or "上市"
+        if not code:
+            skip_count += 1
             continue
-        for _, r in tmp.iterrows():
-            code = _normalize_code(r.get("有價證券代號"))
-            industry = _official_industry_name(r.get("產業別"))
-            if code and industry:
-                out[code] = industry
-    return out
+        if code in existing_codes:
+            skip_count += 1
+            continue
+        payload[target_group].append({"code": code, "name": name, "market": market})
+        existing_codes.add(code)
+        add_count += 1
 
-
-def _build_utils_master_fallback() -> tuple[pd.DataFrame, dict[str, Any]]:
-    dfs = []
-    for market_arg in ["上市", "上櫃", "興櫃"]:
+    payload = _normalize_watchlist_payload(payload)
+    ok, msg = _write_watchlist_to_github(payload)
+    if ok:
         try:
-            df = get_all_code_name_map(market_arg)
+            get_normalized_watchlist.clear()
         except Exception:
-            df = pd.DataFrame()
-        if df is None or df.empty:
-            continue
-        temp = df.copy().rename(columns={"證券代號":"code", "證券名稱":"name", "市場別":"market"})
-        for c in ["code","name","market"]:
-            if c not in temp.columns:
-                temp[c] = ""
-        temp["code"] = temp["code"].map(_normalize_code)
-        temp["name"] = temp["name"].map(_safe_str)
-        temp["market"] = temp["market"].map(_safe_str).replace("", market_arg)
-        temp["official_industry_raw"] = ""
-        temp["official_industry_raw_col"] = ""
-        temp["official_industry"] = ""
-        temp["theme_category"] = temp["name"].map(_infer_category_from_name).replace("其他", "其他_官方未知")
-        temp["category"] = temp["theme_category"]
-        temp["source"] = "utils_fallback"
-        temp["source_api"] = "utils_all"
-        temp["source_rank"] = 9
-        temp["待修原因"] = "官方產業未抓到"
-        dfs.append(temp[["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]])
-    if not dfs:
-        empty = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
-        return empty, {"rows": 0, "official_hit": 0, "raw_cols": [], "source_api": "utils_all"}
-    out = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return out, {"rows": len(out), "official_hit": 0, "raw_cols": list(out.columns), "source_api": "utils_all"}
+            pass
+        st.session_state["watchlist_data"] = copy.deepcopy(payload)
+        st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
+        st.session_state["watchlist_last_saved_at"] = _now_text()
+        st.session_state[_k("watchlist_import_detail")] = f"目標群組：{target_group}｜新增 {add_count} 檔｜略過 {skip_count} 檔"
+        return True, f"{msg}｜匯入 {add_count} 檔，略過 {skip_count} 檔"
+    return False, msg
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _load_stock_master_cache_from_repo() -> pd.DataFrame:
-    cfg = _stock_master_config()
-    payload, _ = _read_json_from_github(cfg["master_path"])
-    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
-    if not isinstance(payload, list):
-        return pd.DataFrame(columns=cols)
-    df = pd.DataFrame(payload)
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
-    df["code"] = df["code"].map(_normalize_code)
-    df["name"] = df["name"].map(_safe_str)
-    df["market"] = df["market"].map(_safe_str).replace("", "上市")
-    df["official_industry"] = df["official_industry"].map(_official_industry_name)
-    df["theme_category"] = df.apply(lambda r: _theme_from_official(r.get("official_industry"), r.get("name")), axis=1)
-    df["category"] = df["theme_category"]
-    return df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first")[cols].reset_index(drop=True)
+def _safe_json_read_local(path_name: str, default):
+    try:
+        with open(path_name, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_stock_category_override_map() -> dict[str, dict[str, str]]:
-    cfg = _stock_master_config()
-    payload, _ = _read_json_from_github(cfg["override_path"])
-    if not isinstance(payload, dict):
-        return {}
-    out = {}
-    for code, item in payload.items():
-        norm_code = _normalize_code(code)
-        if not norm_code:
-            continue
-        if not isinstance(item, dict):
-            item = {"category": item}
-        out[norm_code] = {
-            "code": norm_code,
-            "name": _safe_str(item.get("name")),
-            "market": _safe_str(item.get("market")),
-            "category": _canonical_category(item.get("category")),
-            "updated_at": _safe_str(item.get("updated_at")),
-        }
-    return out
+def _safe_json_write_local(path_name: str, payload) -> tuple[bool, str]:
+    try:
+        with open(path_name, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        return True, f"已寫入本機 UI 設定：{path_name}"
+    except Exception as e:
+        return False, f"本機 UI 設定寫入失敗：{e}"
 
 
-def _merge_master_sources(*dfs: pd.DataFrame) -> pd.DataFrame:
-    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
-    items = []
-    for df in dfs:
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            tmp = df.copy()
-            for c in cols:
-                if c not in tmp.columns:
-                    tmp[c] = ""
-            items.append(tmp[cols])
-    if not items:
-        return pd.DataFrame(columns=cols)
-    merged = pd.concat(items, ignore_index=True)
-    merged["source_rank"] = pd.to_numeric(merged["source_rank"], errors="coerce").fillna(999)
-    merged["official_hit"] = merged["official_industry"].fillna("").astype(str).str.strip().ne("").astype(int)
-    merged = merged.sort_values(["code", "official_hit", "source_rank"], ascending=[True, False, True])
-    merged = merged.drop_duplicates(subset=["code"], keep="first").drop(columns=["official_hit"]).reset_index(drop=True)
-    return merged
+def _config_ts(payload: dict[str, Any]):
+    raw = _safe_str(payload.get("updated_at")) if isinstance(payload, dict) else ""
+    try:
+        return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.min
 
 
-def _apply_twse_isin_fill(master_df: pd.DataFrame) -> pd.DataFrame:
-    if master_df is None or master_df.empty:
-        return master_df
-    fill_map = _fetch_twse_isin_fill_map()
-    if not fill_map:
-        return master_df
-    work = master_df.copy()
-    mask = (work["market"].astype(str) == "上市") & (work["official_industry"].fillna("").astype(str).str.strip() == "")
-    for idx in work[mask].index:
-        code = _normalize_code(work.at[idx, "code"])
-        fill = fill_map.get(code, "")
-        if fill:
-            work.at[idx, "official_industry_raw"] = fill
-            work.at[idx, "official_industry_raw_col"] = "TWSE_ISIN_產業別"
-            work.at[idx, "official_industry"] = fill
-            work.at[idx, "theme_category"] = _theme_from_official(fill, work.at[idx, "name"])
-            work.at[idx, "category"] = work.at[idx, "theme_category"]
-            work.at[idx, "source"] = "twse_isin_fill"
-            work.at[idx, "source_api"] = "twse_isin"
-            work.at[idx, "source_rank"] = 2
-            work.at[idx, "待修原因"] = ""
-    return work
-
-
-def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
-    if master_df is None or master_df.empty:
-        master_df = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
-    work = master_df.copy()
-    repo_df = _load_stock_master_cache_from_repo()
-    work = _merge_master_sources(work, repo_df)
-    override_map = _load_stock_category_override_map()
-    if override_map:
-        for code, item in override_map.items():
-            matched = work["code"].astype(str) == str(code)
-            if matched.any():
-                idx = work[matched].index[0]
-                if _safe_str(item.get("name")):
-                    work.at[idx, "name"] = _safe_str(item.get("name"))
-                if _safe_str(item.get("market")):
-                    work.at[idx, "market"] = _safe_str(item.get("market"))
-                if _safe_str(item.get("category")):
-                    work.at[idx, "theme_category"] = _canonical_category(item.get("category"))
-                    work.at[idx, "category"] = _canonical_category(item.get("category"))
-                    work.at[idx, "source"] = "override"
-                    work.at[idx, "source_api"] = "github_override"
-                    work.at[idx, "source_rank"] = 0
-                    work.at[idx, "待修原因"] = ""
-    work = work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
-    return work
-
-
-def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
-    cfg = _stock_master_config()
-    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
-    work = master_df.copy() if isinstance(master_df, pd.DataFrame) else pd.DataFrame(columns=cols)
-    for c in cols:
-        if c not in work.columns:
-            work[c] = ""
-    work = work[work["code"].map(_normalize_code) != ""].copy()
-    work["code"] = work["code"].map(_normalize_code)
-    work["name"] = work["name"].map(_safe_str)
-    work["market"] = work["market"].map(_safe_str)
-    payload = work[cols].drop_duplicates(subset=["code"], keep="first").sort_values(["code"]).to_dict(orient="records")
-    return _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
-
-
-def _save_category_override(code: str, name: str, market: str, category: str) -> tuple[bool, str]:
-    cfg = _stock_master_config()
-    code = _normalize_code(code)
-    if not code:
-        return False, "股票代號不可空白"
-    payload, _ = _read_json_from_github(cfg["override_path"])
+def _normalize_ui_config(payload: dict[str, Any] | None) -> dict[str, Any]:
+    base = copy.deepcopy(UI_CONFIG_DEFAULT)
     if not isinstance(payload, dict):
         payload = {}
-    payload[code] = {
-        "code": code,
-        "name": _safe_str(name),
-        "market": _safe_str(market) or "上市",
-        "category": _canonical_category(category) or _infer_category_from_name(_safe_str(name)),
+
+    base["fast_mode"] = bool(payload.get("fast_mode", base["fast_mode"]))
+    base["visible_limit"] = int(_safe_float(payload.get("visible_limit"), base["visible_limit"]) or base["visible_limit"])
+    base["visible_limit"] = max(100, min(base["visible_limit"], 5000))
+    base["updated_at"] = _safe_str(payload.get("updated_at"))
+
+    profiles = payload.get("profiles", {})
+    if not isinstance(profiles, dict):
+        profiles = {}
+
+    for mode, defaults in UI_CONFIG_DEFAULT["profiles"].items():
+        raw_cols = profiles.get(mode, defaults)
+        if not isinstance(raw_cols, list):
+            raw_cols = defaults
+        clean_cols = []
+        seen = set()
+        for c in raw_cols:
+            cc = _safe_str(c)
+            if cc and cc not in seen:
+                seen.add(cc)
+                clean_cols.append(cc)
+        remain = [c for c in defaults if c not in seen]
+        base["profiles"][mode] = clean_cols + remain
+
+    return base
+
+
+def _read_ui_config_from_github() -> tuple[dict[str, Any], str]:
+    cfg = _ui_config_github_config()
+    token = cfg["token"]
+    if not token:
+        return copy.deepcopy(UI_CONFIG_DEFAULT), "未設定 GITHUB_TOKEN，無法讀取 UI 設定"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 404:
+            return copy.deepcopy(UI_CONFIG_DEFAULT), ""
+        if resp.status_code != 200:
+            return copy.deepcopy(UI_CONFIG_DEFAULT), f"UI 設定 GitHub 讀取失敗：{resp.status_code} / {resp.text[:300]}"
+        data = resp.json()
+        content = data.get("content", "")
+        if not content:
+            return copy.deepcopy(UI_CONFIG_DEFAULT), ""
+        decoded = base64.b64decode(content).decode("utf-8")
+        payload = json.loads(decoded)
+        return _normalize_ui_config(payload), ""
+    except Exception as e:
+        return copy.deepcopy(UI_CONFIG_DEFAULT), f"UI 設定 GitHub 讀取例外：{e}"
+
+
+def _get_ui_config_sha() -> tuple[str, str]:
+    cfg = _ui_config_github_config()
+    token = cfg["token"]
+    if not token:
+        return "", "缺少 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            return _safe_str(resp.json().get("sha")), ""
+        if resp.status_code == 404:
+            return "", ""
+        return "", f"讀取 UI 設定 SHA 失敗：{resp.status_code} / {resp.text[:300]}"
+    except Exception as e:
+        return "", f"讀取 UI 設定 SHA 例外：{e}"
+
+
+def _write_ui_config_to_github(payload: dict[str, Any]) -> tuple[bool, str]:
+    cfg = _ui_config_github_config()
+    token = cfg["token"]
+    if not token:
+        return False, "未設定 GITHUB_TOKEN，無法回寫 UI 設定"
+
+    sha, err = _get_ui_config_sha()
+    if err:
+        return False, err
+
+    clean_payload = _normalize_ui_config(payload)
+    clean_payload["updated_at"] = _now_text()
+    content_text = json.dumps(clean_payload, ensure_ascii=False, indent=2)
+    encoded = base64.b64encode(content_text.encode("utf-8")).decode("utf-8")
+    body: dict[str, Any] = {
+        "message": f"update godpick ui config at {_now_text()}",
+        "content": encoded,
+        "branch": cfg["branch"],
+    }
+    if sha:
+        body["sha"] = sha
+
+    try:
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            json=body,
+            timeout=30,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"已回寫 UI 設定：{cfg['path']}"
+        return False, f"UI 設定 GitHub 寫入失敗：{resp.status_code} / {resp.text[:500]}"
+    except Exception as e:
+        return False, f"UI 設定 GitHub 寫入例外：{e}"
+
+
+def _load_ui_config_once():
+    if st.session_state.get(_k("ui_config_loaded"), False):
+        return
+
+    github_payload, err = _read_ui_config_from_github()
+    local_payload = _safe_json_read_local(_ui_config_github_config()["path"], {})
+
+    github_payload = _normalize_ui_config(github_payload)
+    local_payload = _normalize_ui_config(local_payload) if isinstance(local_payload, dict) and local_payload else {}
+
+    # GitHub 舊資料不應覆蓋本機剛保存的欄位順序；有時間戳時取較新，無本機才用 GitHub。
+    if local_payload and (_config_ts(local_payload) >= _config_ts(github_payload)):
+        payload = local_payload
+        detail = "已讀取本機 UI 設定；" + (err or "GitHub UI 設定也可讀取")
+    else:
+        payload = github_payload
+        detail = err or "GitHub UI 設定讀取成功"
+
+    payload = _normalize_ui_config(payload)
+    st.session_state[_k("ui_config_loaded")] = True
+    st.session_state[_k("ui_config_detail")] = detail
+    st.session_state[_k("ui_config")] = copy.deepcopy(payload)
+    st.session_state[_k("fast_mode")] = bool(payload.get("fast_mode", True))
+    st.session_state[_k("visible_limit")] = int(payload.get("visible_limit", FAST_VISIBLE_LIMIT))
+    for mode in ["標準", "進階"]:
+        st.session_state[_get_profile_key(mode)] = payload.get("profiles", {}).get(mode, _get_default_col_profile(mode)).copy()
+
+
+def _persist_ui_config() -> tuple[bool, str]:
+    payload = {
+        "fast_mode": bool(st.session_state.get(_k("fast_mode"), True)),
+        "visible_limit": int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)),
+        "profiles": {
+            "標準": st.session_state.get(_get_profile_key("標準"), DEFAULT_STANDARD_COLS.copy()),
+            "進階": st.session_state.get(_get_profile_key("進階"), DEFAULT_ADVANCED_COLS.copy()),
+        },
         "updated_at": _now_text(),
     }
-    ok, msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
-    if ok:
-        try:
-            _load_stock_category_override_map.clear()
-        except Exception:
-            pass
-    return ok, msg
+    payload = _normalize_ui_config(payload)
+    st.session_state[_k("ui_config")] = copy.deepcopy(payload)
+    local_ok, local_msg = _safe_json_write_local(_ui_config_github_config()["path"], payload)
+    github_ok, github_msg = _write_ui_config_to_github(payload)
+    msg = f"{local_msg}｜{github_msg}"
+    st.session_state[_k("ui_save_detail")] = msg
+    st.session_state[_k("ui_last_saved_at")] = _now_text()
+    return (local_ok or github_ok), msg
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
+    stock_no = _normalize_code(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type) or "上市"
 
-
-def _build_master_diagnostics(twse_info=None, tpex_o_info=None, tpex_r_info=None, utils_info=None, merged=None) -> list[str]:
-    twse_info = twse_info if isinstance(twse_info, dict) else {}
-    tpex_o_info = tpex_o_info if isinstance(tpex_o_info, dict) else {}
-    tpex_r_info = tpex_r_info if isinstance(tpex_r_info, dict) else {}
-    utils_info = utils_info if isinstance(utils_info, dict) else {}
-    merged_df = merged if isinstance(merged, pd.DataFrame) else pd.DataFrame()
-
-    def _n(v, default=0):
-        try:
-            return int(v)
-        except Exception:
-            return default
-
-    logs = []
-    logs.append(f"TWSE：{_n(twse_info.get('rows'))} 筆 / 正式產業有值 {_n(twse_info.get('official_hit'))} 筆 / API: {_safe_str(twse_info.get('source_api')) or '-'}")
-    if twse_info.get("raw_cols"):
-        logs.append("TWSE 欄位：" + ", ".join([str(x) for x in list(twse_info.get("raw_cols", []))[:20]]))
-    logs.append(f"TPEX-上櫃：{_n(tpex_o_info.get('rows'))} 筆 / 正式產業有值 {_n(tpex_o_info.get('official_hit'))} 筆 / API: {_safe_str(tpex_o_info.get('source_api')) or '-'}")
-    logs.append(f"TPEX-興櫃：{_n(tpex_r_info.get('rows'))} 筆 / 正式產業有值 {_n(tpex_r_info.get('official_hit'))} 筆 / API: {_safe_str(tpex_r_info.get('source_api')) or '-'}")
-    logs.append(f"utils fallback：{_n(utils_info.get('rows'))} 筆 / API: {_safe_str(utils_info.get('source_api')) or '-'}")
-    if not merged_df.empty and "official_industry" in merged_df.columns:
-        hit = int(merged_df["official_industry"].fillna("").astype(str).str.strip().ne("").sum())
-        logs.append(f"合併後：{len(merged_df)} 筆 / 正式產業有值 {hit} 筆")
-    else:
-        logs.append("合併後：0 筆 / 正式產業有值 0 筆")
-    return logs
-
-
-def _refresh_stock_master_now() -> tuple[pd.DataFrame, list[str]]:
-    try:
-        _load_master_df.clear()
-    except Exception:
-        pass
-    fresh_df = _load_master_df()
-    logs = list(st.session_state.get(_k("master_diag_logs"), []))
-    if fresh_df.empty:
-        return fresh_df, logs + ["主檔更新失敗：官方主檔與 fallback 皆無資料"]
-    ok, msg = _save_master_cache_to_repo(fresh_df)
-    logs.append(msg)
-    if ok:
-        try:
-            _load_stock_master_cache_from_repo.clear()
-        except Exception:
-            pass
-    return fresh_df, logs
-
-
-def _search_master_df(master_df: pd.DataFrame, keyword: str, market_filter: str, category_filter: str) -> pd.DataFrame:
-    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
-    if master_df is None or master_df.empty:
-        return pd.DataFrame(columns=cols)
-    work = master_df.copy()
-    kw = _safe_str(keyword)
-    market_filter = _safe_str(market_filter)
-    category_filter = _safe_str(category_filter)
-    if market_filter and market_filter != "全部":
-        work = work[work["market"].astype(str) == market_filter].copy()
-    if category_filter and category_filter != "全部":
-        work = work[(work["category"].astype(str) == category_filter) | (work["official_industry"].astype(str) == category_filter)].copy()
-    if kw:
-        work = work[
-            work["code"].astype(str).str.contains(kw, case=False, na=False)
-            | work["name"].astype(str).str.contains(kw, case=False, na=False)
-            | work["official_industry"].astype(str).str.contains(kw, case=False, na=False)
-            | work["theme_category"].astype(str).str.contains(kw, case=False, na=False)
-            | work["category"].astype(str).str.contains(kw, case=False, na=False)
-        ].copy()
-    return work.sort_values(["market","source_rank","code"]).reset_index(drop=True)
-
-
-def _render_stock_master_center(
-    master_df: pd.DataFrame,
-    watchlist_map: dict[str, list[dict[str, str]]],
-    all_categories: list[str],
-) -> pd.DataFrame:
-    return master_df
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _load_master_df() -> pd.DataFrame:
-    twse_df, twse_info = _fetch_twse_master()
-    tpex_o_df, tpex_o_info = _fetch_tpex_master("上櫃")
-    tpex_r_df, tpex_r_info = _fetch_tpex_master("興櫃")
-    utils_df, utils_info = _build_utils_master_fallback()
-    merged = _merge_master_sources(twse_df, tpex_o_df, tpex_r_df, utils_df)
-    merged = _apply_twse_isin_fill(merged)
-    merged = _apply_master_overrides(merged)
-    st.session_state[_k("master_diag_logs")] = _build_master_diagnostics(twse_info, tpex_o_info, tpex_r_info, utils_info, merged)
-    return merged
-
-# =========================================================
-# 主檔 / universe helpers
-# =========================================================
-
-# =========================================================
-# 主檔 / universe helpers
-# =========================================================
-def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    result: dict[str, list[dict[str, str]]] = {}
-    if isinstance(raw, dict):
-        for group_name, items in raw.items():
-            g = _safe_str(group_name)
-            if not g:
-                continue
-
-            rows = []
-            seen = set()
-
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict):
-                        code = _normalize_code(item.get("code"))
-                        name = _safe_str(item.get("name")) or code
-                        market = _safe_str(item.get("market")) or "上市"
-                        category = _infer_category_from_record(name, item.get("category"))
-                    else:
-                        code = _normalize_code(item)
-                        name = code
-                        market = "上市"
-                        category = ""
-
-                    if not code or code in seen:
-                        continue
-                    seen.add(code)
-
-                    rows.append(
-                        {
-                            "code": code,
-                            "name": name,
-                            "market": market,
-                            "category": category,
-                            "label": f"{code} {name}",
-                        }
-                    )
-            result[g] = rows
-    return result
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_master_df_fallback_only() -> pd.DataFrame:
-    try:
-        repo_df = load_stock_master() if callable(load_stock_master) else pd.DataFrame()
-    except Exception:
-        repo_df = pd.DataFrame()
-
-    if repo_df is None or repo_df.empty:
-        repo_df = _load_stock_master_cache_from_repo()
-
-    if repo_df is None or repo_df.empty:
-        return pd.DataFrame(columns=["code", "name", "market", "category"])
-
-    work = repo_df.copy()
-
-    if "code" not in work.columns:
-        work["code"] = ""
-    if "name" not in work.columns:
-        work["name"] = ""
-    if "market" not in work.columns:
-        work["market"] = "上市"
-    if "category" not in work.columns:
-        if "theme_category" in work.columns:
-            work["category"] = work["theme_category"]
-        else:
-            work["category"] = ""
-
-    work["code"] = work["code"].map(_normalize_code)
-    work["name"] = work["name"].map(_safe_str)
-    work["market"] = work["market"].map(_safe_str).replace("", "上市")
-    work["category"] = work.apply(
-        lambda r: _infer_category_from_record(r.get("name"), r.get("category")),
-        axis=1,
-    )
-
-    work = _apply_master_overrides(work)
-
-    return (
-        work[work["code"] != ""]
-        .drop_duplicates(subset=["code"], keep="first")
-        .reset_index(drop=True)
-    )
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _build_master_lookup(master_df: pd.DataFrame) -> dict[str, dict[str, str]]:
-    if master_df is None or master_df.empty:
-        return {}
-    work = master_df.copy()
-    if "code" not in work.columns:
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for _, row in work.iterrows():
-        code = _normalize_code(row.get("code"))
-        if not code or code in out:
-            continue
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_record(name, row.get("category"))
-        out[code] = {
-            "name": name,
-            "market": market,
-            "category": category,
-        }
-    return out
-
-def _find_name_market_category(
-    code: str,
-    manual_name: str,
-    manual_market: str,
-    manual_category: str,
-    master_df_or_lookup,
-) -> tuple[str, str, str]:
-    code = _normalize_code(code)
-    manual_name = _safe_str(manual_name)
-    manual_market = _safe_str(manual_market)
-    manual_category = _normalize_category(manual_category)
-
-    if isinstance(master_df_or_lookup, dict):
-        found = master_df_or_lookup.get(code, {})
-        if found:
-            final_name = _safe_str(found.get("name")) or manual_name or code
-            final_market = _safe_str(found.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(found.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
-            return final_name, final_market, final_category
-
-    if isinstance(master_df_or_lookup, pd.DataFrame) and not master_df_or_lookup.empty:
-        matched = master_df_or_lookup[master_df_or_lookup["code"].astype(str) == code]
-        if not matched.empty:
-            row = matched.iloc[0]
-            final_name = _safe_str(row.get("name")) or manual_name or code
-            final_market = _safe_str(row.get("market")) or manual_market or "上市"
-            final_category = _normalize_category(row.get("category")) or manual_category or _infer_category_from_record(final_name, manual_category)
-            return final_name, final_market, final_category
-
-    final_name = manual_name or code
-    final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_record(final_name, manual_category)
-    return final_name, final_market, final_category
-
-    final_name = manual_name or code
-    final_market = manual_market or "上市"
-    final_category = manual_category or _infer_category_from_record(final_name, manual_category)
-    return final_name, final_market, final_category
-
-
-def _parse_manual_codes(text: str, master_df: pd.DataFrame) -> list[dict[str, str]]:
-    rows = []
-    seen = set()
-    raw_lines = [x.strip() for x in _safe_str(text).replace("，", "\n").replace(",", "\n").splitlines() if x.strip()]
-
-    for raw in raw_lines:
-        txt = _safe_str(raw)
-        code = _normalize_code(txt)
-        name = ""
-        market = "上市"
-        category = ""
-
-        if not code and isinstance(master_df, pd.DataFrame) and not master_df.empty:
-            matched = master_df[master_df["name"].astype(str).str.contains(txt, case=False, na=False)]
-            if not matched.empty:
-                row = matched.iloc[0]
-                code = _normalize_code(row.get("code"))
-                name = _safe_str(row.get("name"))
-                market = _safe_str(row.get("market")) or "上市"
-                category = _normalize_category(row.get("category"))
-
-        if code and not name:
-            name, market, category = _find_name_market_category(code, "", market, category, master_df)
-
-        if code and code not in seen:
-            seen.add(code)
-            rows.append(
-                {
-                    "code": code,
-                    "name": name or code,
-                    "market": market or "上市",
-                    "category": category,
-                    "label": f"{code} {name or code}",
-                }
-            )
-    return rows
-
-
-def _build_universe_from_market(
-    master_df: pd.DataFrame,
-    market_mode: str,
-    limit_count: Any,
-    selected_categories: list[str],
-) -> list[dict[str, str]]:
-    if master_df is None or master_df.empty:
-        return []
-
-    work = master_df.copy()
-    market_mode = _safe_str(market_mode)
-
-    if market_mode == "上市":
-        work = work[work["market"].astype(str) == "上市"].copy()
-    elif market_mode == "上櫃":
-        work = work[work["market"].astype(str) == "上櫃"].copy()
-    elif market_mode == "興櫃":
-        work = work[work["market"].astype(str) == "興櫃"].copy()
-
-    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    if clean_categories:
-        work = work[work["category"].astype(str).isin(clean_categories)].copy()
-
-    if _safe_str(limit_count) != "全部":
-        try:
-            limit_n = int(limit_count)
-            if limit_n > 0:
-                work = work.head(limit_n).copy()
-        except Exception:
-            pass
-
-    rows = []
-    for _, row in work.iterrows():
-        code = _normalize_code(row.get("code"))
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-        if code:
-            rows.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "market": market,
-                    "category": category,
-                    "label": f"{code} {name}",
-                }
-            )
-    return rows
-
-
-def _collect_all_categories(master_df: pd.DataFrame, watchlist_map: dict[str, list[dict[str, str]]]) -> list[str]:
-    cats = set()
-
-    if isinstance(master_df, pd.DataFrame) and not master_df.empty:
-        for _, row in master_df.iterrows():
-            name = _safe_str(row.get("name"))
-            cat = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-            if cat:
-                cats.add(cat)
-
-    if isinstance(watchlist_map, dict):
-        for _, items in watchlist_map.items():
-            for item in items:
-                name = _safe_str(item.get("name"))
-                cat = _infer_category_from_record(name, item.get("category"))
-                if cat:
-                    cats.add(cat)
-
-    return sorted(list(cats))
-
-
-
-
-def _find_existing_watchlist_codes(group_name: str, codes: list[str]) -> list[str]:
-    """檢查勾選股票是否已存在於自選股群組。"""
-    group_name = _safe_str(group_name)
-    check_codes = {_normalize_code(x) for x in codes if _normalize_code(x)}
-    if not group_name or not check_codes:
-        return []
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    group_items = raw.get(group_name, []) if isinstance(raw, dict) else []
-    exists = set()
-    for item in group_items:
-        if isinstance(item, dict):
-            c = _normalize_code(item.get("code"))
-        else:
-            c = _normalize_code(item)
-        if c in check_codes:
-            exists.add(c)
-
-    return sorted(exists)
-
-
-def _record_business_key(row: dict[str, Any]) -> str:
-    """股神推薦紀錄去重用 business key。"""
-    return (
-        f"{_normalize_code(row.get('股票代號'))}|"
-        f"{_safe_str(row.get('推薦日期'))}|"
-        f"{_safe_str(row.get('推薦時間'))}|"
-        f"{_safe_str(row.get('推薦模式'))}"
-    )
-
-
-def _find_existing_godpick_record_codes(record_rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
-    """
-    檢查將寫入 8_股神推薦紀錄 的資料是否已存在。
-    回傳：(重複股票代號, 重複 business keys)
-    """
-    if not record_rows:
-        return [], []
-
-    try:
-        old_records, read_msg = _read_godpick_records_from_github()
-        if read_msg:
-            old_records = []
-    except Exception:
-        old_records = []
-
-    old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
-    if old_df.empty:
-        return [], []
-
-    old_keys = set()
-    for _, r in old_df.iterrows():
-        old_keys.add(
-            f"{_normalize_code(r.get('股票代號'))}|"
-            f"{_safe_str(r.get('推薦日期'))}|"
-            f"{_safe_str(r.get('推薦時間'))}|"
-            f"{_safe_str(r.get('推薦模式'))}"
-        )
-
-    dup_codes = []
-    dup_keys = []
-    for row in record_rows:
-        key = _record_business_key(row)
-        if key in old_keys:
-            code = _normalize_code(row.get("股票代號"))
-            if code:
-                dup_codes.append(code)
-            dup_keys.append(key)
-
-    return sorted(set(dup_codes)), sorted(set(dup_keys))
-
-
-
-def _append_stock_to_watchlist(group_name: str, code: str, name: str, market: str, category: str):
-    group_name = _safe_str(group_name)
-    code = _normalize_code(code)
-    name = _safe_str(name) or code
-    market = _safe_str(market) or "上市"
-    category = _canonical_category(category) or _infer_category_from_record(name, category)
-
-    if not group_name:
-        return False, "群組不可空白"
-    if not code:
-        return False, "股票代號不可空白"
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    if group_name not in raw or not isinstance(raw[group_name], list):
-        raw[group_name] = []
-
-    for item in raw[group_name]:
-        if isinstance(item, dict) and _normalize_code(item.get("code")) == code:
-            return False, f"{code} 已存在於 {group_name}"
-
-    row = {"code": code, "name": name, "market": market}
-    if category:
-        row["category"] = category
-
-    raw[group_name].append(row)
-    ok = _force_write_watchlist_dual(raw)
-    if ok:
-        return True, f"已加入 {group_name}：{code} {name}"
-    return False, _safe_str(st.session_state.get(_k("status_msg"), "寫入失敗"))
-
-
-def _append_multiple_stocks_to_watchlist(group_name: str, rows: list[dict[str, str]]) -> tuple[int, list[str]]:
-    group_name = _safe_str(group_name)
-    if not group_name:
-        return 0, ["請先選擇群組。"]
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    if group_name not in raw or not isinstance(raw[group_name], list):
-        raw[group_name] = []
-
-    existing_codes = {_normalize_code(x.get("code")) for x in raw[group_name] if isinstance(x, dict)}
-    added = 0
-    messages = []
-
-    for row in rows:
-        code = _normalize_code(row.get("code"))
-        name = _safe_str(row.get("name")) or code
-        market = _safe_str(row.get("market")) or "上市"
-        category = _normalize_category(row.get("category")) or _infer_category_from_name(name)
-
-        if not code:
-            continue
-
-        if code in existing_codes:
-            messages.append(f"{code} 已存在於 {group_name}")
-            continue
-
-        item = {"code": code, "name": name, "market": market}
-        if category:
-            item["category"] = category
-
-        raw[group_name].append(item)
-        existing_codes.add(code)
-        added += 1
-        messages.append(f"已加入 {group_name}：{code} {name}")
-
-    if added > 0:
-        ok = _force_write_watchlist_dual(raw)
-        if not ok:
-            return 0, [_safe_str(st.session_state.get(_k("status_msg"), "GitHub / Firestore 寫入失敗"))]
-
-    return added, messages
-
-
-def _create_watchlist_group(group_name: str) -> tuple[bool, str]:
-    group_name = _safe_str(group_name)
-    if not group_name:
-        return False, "群組名稱不可空白"
-
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or raw is None:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
-
-    if not isinstance(raw, dict):
-        raw = {}
-
-    if group_name in raw:
-        return False, f"群組已存在：{group_name}"
-
-    raw[group_name] = []
-    ok = _force_write_watchlist_dual(raw)
-    if ok:
-        return True, f"已新增群組：{group_name}"
-    return False, _safe_str(st.session_state.get(_k("status_msg"), "新增群組失敗"))
-
-
-def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False) -> tuple[int, list[str]]:
-    if not record_rows:
-        return 0, ["沒有可寫入的推薦紀錄。"]
-
-    try:
-        old_records, read_msg = _read_godpick_records_from_github()
-        if read_msg:
-            old_records = []
-
-        old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
-        new_df = _ensure_godpick_record_columns(pd.DataFrame([_normalize_godpick_record(x) for x in record_rows]))
-
-        before_count = len(old_df)
-
-        if force_duplicate:
-            # 使用者確認要重複紀錄時，不做 business key 去重。
-            # 為避免 record_id 撞到舊紀錄，重複寫入時重新生成唯一 record_id。
-            new_df = new_df.copy()
-            now_tag = str(int(time.time() * 1000))
-            for idx in new_df.index:
-                raw = (
-                    f"{_safe_str(new_df.at[idx, '股票代號'])}|"
-                    f"{_safe_str(new_df.at[idx, '推薦日期'])}|"
-                    f"{_safe_str(new_df.at[idx, '推薦時間'])}|"
-                    f"{_safe_str(new_df.at[idx, '推薦模式'])}|"
-                    f"duplicate|{now_tag}|{idx}"
-                )
-                new_df.at[idx, "record_id"] = hashlib.md5(raw.encode("utf-8")).hexdigest()
-                new_df.at[idx, "備註"] = (
-                    (_safe_str(new_df.at[idx, "備註"]) + "；") if _safe_str(new_df.at[idx, "備註"]) else ""
-                ) + "使用者確認重複紀錄"
-                new_df.at[idx, "更新時間"] = _now_text()
-
-            merged_df = _ensure_godpick_record_columns(pd.concat([old_df, new_df], ignore_index=True))
-        else:
-            merged_df = _append_records_dedup_by_business_key(old_df, new_df)
-
-        after_count = len(merged_df)
-        added_count = max(after_count - before_count, 0)
-
-        merged_records = merged_df.to_dict(orient="records")
-
-        ok_github, msg_github = _write_godpick_records_to_github(merged_records)
-        ok_firestore, msg_firestore = _write_godpick_records_to_firestore(merged_records)
-
-        st.session_state[_k("last_record_write_detail")] = [
-            f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
-            f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
-            f"本次寫入筆數: {added_count}",
-            f"合併後總筆數: {after_count}",
-        ]
-
-        msgs = []
-        msgs.append(msg_github if ok_github else f"GitHub 失敗：{msg_github}")
-        msgs.append(msg_firestore if ok_firestore else f"Firestore 失敗：{msg_firestore}")
-
-        if ok_github or ok_firestore:
-            return added_count, msgs
-
-        return 0, msgs
-
-    except Exception as e:
-        st.session_state[_k("last_record_write_detail")] = [f"例外：{e}"]
-        return 0, [f"寫入 8_股神推薦紀錄失敗：{e}"]
-
-
-# =========================================================
-# 歷史資料 / 指標
-# =========================================================
-def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    temp = df.copy()
-    if "日期" not in temp.columns:
-        possible_date = [c for c in temp.columns if str(c).lower() in {"date", "日期"}]
-        if possible_date:
-            temp = temp.rename(columns={possible_date[0]: "日期"})
-        else:
-            return pd.DataFrame()
-
-    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
-    temp = temp.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
-
-    rename_map = {}
-    for c in temp.columns:
-        cs = str(c).lower()
-        if cs == "open":
-            rename_map[c] = "開盤價"
-        elif cs == "high":
-            rename_map[c] = "最高價"
-        elif cs == "low":
-            rename_map[c] = "最低價"
-        elif cs == "close":
-            rename_map[c] = "收盤價"
-        elif cs == "volume":
-            rename_map[c] = "成交股數"
-    temp = temp.rename(columns=rename_map)
-
-    for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
-        if col in temp.columns:
-            temp[col] = pd.to_numeric(temp[col], errors="coerce")
-
-    if "收盤價" not in temp.columns:
-        return pd.DataFrame()
-
-    temp = temp.dropna(subset=["收盤價"]).copy()
-    if temp.empty:
-        return pd.DataFrame()
-
-    close = temp["收盤價"]
-    high = temp["最高價"] if "最高價" in temp.columns else close
-    low = temp["最低價"] if "最低價" in temp.columns else close
-    vol = pd.to_numeric(temp["成交股數"], errors="coerce") if "成交股數" in temp.columns else pd.Series(index=temp.index, dtype=float)
-
-    for n in [5, 10, 20, 60, 120, 240]:
-        temp[f"MA{n}"] = close.rolling(n).mean()
-
-    low_9 = low.rolling(9).min()
-    high_9 = high.rolling(9).max()
-    rsv = (close - low_9) / (high_9 - low_9).replace(0, pd.NA) * 100
-    temp["K"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
-    temp["D"] = temp["K"].ewm(alpha=1 / 3, adjust=False).mean()
-    temp["J"] = 3 * temp["K"] - 2 * temp["D"]
-
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    temp["DIF"] = ema12 - ema26
-    temp["DEA"] = temp["DIF"].ewm(span=9, adjust=False).mean()
-    temp["MACD_HIST"] = temp["DIF"] - temp["DEA"]
-
-    prev_close = close.shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    temp["ATR14"] = tr.rolling(14).mean()
-
-    temp["VOL5"] = vol.rolling(5).mean()
-    temp["VOL20"] = vol.rolling(20).mean()
-    temp["RET5"] = close.pct_change(5) * 100
-    temp["RET20"] = close.pct_change(20) * 100
-    temp["RET60"] = close.pct_change(60) * 100
-    temp["RET120"] = close.pct_change(120) * 100
-    temp["UP_DAY"] = (close > close.shift(1)).astype(float)
-    temp["MA20_SLOPE"] = temp["MA20"].diff(3)
-    temp["MA60_SLOPE"] = temp["MA60"].diff(3)
-
-    return temp
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, dict[str, Any]]:
-    primary = _safe_str(market_type)
     tried = []
-    if primary:
-        tried.append(primary)
-
-    fallback_map = {
-        "上市": ["上櫃", "興櫃", ""],
-        "上櫃": ["上市", "興櫃", ""],
-        "興櫃": ["上市", "上櫃", ""],
-        "": ["上市", "上櫃", "興櫃"],
-    }
-
-    for mk in fallback_map.get(primary, ["上市", "上櫃", "興櫃", ""]):
+    if market_type:
+        tried.append(market_type)
+    for mk in ["上市", "上櫃", "興櫃"]:
         if mk not in tried:
             tried.append(mk)
 
-    attempt_summary: list[dict[str, Any]] = []
-
     for mk in tried:
         try:
-            df = get_history_data(
-                stock_no=stock_no,
-                stock_name=stock_name,
-                market_type=mk,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        except TypeError:
+            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=str(int(datetime.now().timestamp() * 1000)))
+            price = _safe_float(info.get("price"))
+            if price is not None and price > 0:
+                src = _safe_str(info.get("price_source")) or "realtime"
+                return float(price), _safe_str(info.get("market") or mk), src
+        except Exception:
+            pass
+
+    today = date.today()
+    start_date = today - timedelta(days=60)
+    for mk in tried + [""]:
+        try:
             try:
-                df = get_history_data(
-                    stock_no=stock_no,
-                    stock_name=stock_name,
-                    market_type=mk,
-                    start_dt=start_date,
-                    end_dt=end_date,
-                )
-            except Exception as e1:
+                df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_date=start_date, end_date=today)
+            except TypeError:
                 try:
-                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
-                except Exception as e2:
-                    attempt_summary.append({
-                        "market_type": mk,
-                        "rows": 0,
-                        "source": "history_fetch_exception",
-                        "error": f"{e1} / fallback: {e2}",
-                    })
-                    df = pd.DataFrame()
-        except Exception as e:
-            attempt_summary.append({
-                "market_type": mk,
-                "rows": 0,
-                "source": "history_fetch_exception",
-                "error": str(e),
-            })
-            df = pd.DataFrame()
-
-        prepared_df = _prepare_history_df(df)
-        if not prepared_df.empty:
-            history_debug = {
-                "ok": True,
-                "stock_no": stock_no,
-                "stock_name": stock_name,
-                "used_market": (mk or market_type or "未知"),
-                "attempts": attempt_summary + [{
-                    "market_type": mk,
-                    "rows": int(len(prepared_df)),
-                    "source": "history_fetch_ok",
-                    "error": "",
-                }],
-                "rows": len(prepared_df),
-            }
-            return prepared_df, (mk or market_type or "未知"), history_debug
-
-        attempt_summary.append({
-            "market_type": mk,
-            "rows": 0,
-            "source": "history_fetch_empty",
-            "error": "",
-        })
-
-    debug_attempts: list[dict[str, Any]] = []
-    if HISTORY_DEBUG_EAGER or not attempt_summary:
-        debug_attempts = attempt_summary
-    else:
-        debug_attempts = attempt_summary.copy()
-        for mk in tried:
-            debug_info = {}
-            try:
-                debug_info = get_history_data_debug(
-                    stock_no=stock_no,
-                    stock_name=stock_name,
-                    market_type=mk,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-            except Exception as e:
-                debug_info = {
-                    "ok": False,
-                    "source": "history_debug_exception",
-                    "market_type": mk,
-                    "error": str(e),
-                    "rows": 0,
-                    "debug_lines": [f"get_history_data_debug 例外：{e}"],
-                }
-
-            debug_attempts.append({
-                "market_type": _safe_str(debug_info.get("market_type")) or mk,
-                "rows": int(debug_info.get("rows", 0) or 0),
-                "source": _safe_str(debug_info.get("source")) or "history_debug",
-                "error": _safe_str(debug_info.get("error")),
-            })
-
-    return pd.DataFrame(), (_safe_str(market_type) or "未知"), {
-        "ok": False,
-        "stock_no": stock_no,
-        "stock_name": stock_name,
-        "used_market": (_safe_str(market_type) or "未知"),
-        "attempts": debug_attempts,
-        "rows": 0,
-    }
-
-
-# =========================================================
-# 計分
-# =========================================================
-def _build_prelaunch_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
-    if df is None or df.empty:
-        return {
-            "起漲前兆分數": 0.0,
-            "均線轉強分": 0.0,
-            "量能啟動分": 0.0,
-            "突破準備分": 0.0,
-            "動能翻多分": 0.0,
-            "支撐防守分": 0.0,
-        }
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) >= 2 else last
-
-    close_now = _safe_float(last.get("收盤價"))
-    ma5 = _safe_float(last.get("MA5"))
-    ma10 = _safe_float(last.get("MA10"))
-    ma20 = _safe_float(last.get("MA20"))
-    ma60 = _safe_float(last.get("MA60"))
-    ma20_slope = _safe_float(last.get("MA20_SLOPE"), 0) or 0
-    vol5 = _safe_float(last.get("VOL5"))
-    vol20 = _safe_float(last.get("VOL20"))
-    ret5 = _safe_float(last.get("RET5"), 0) or 0
-    k_now = _safe_float(last.get("K"))
-    d_now = _safe_float(last.get("D"))
-    k_prev = _safe_float(prev.get("K"))
-    d_prev = _safe_float(prev.get("D"))
-    hist_now = _safe_float(last.get("MACD_HIST"))
-    hist_prev = _safe_float(prev.get("MACD_HIST"))
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-
-    trend_score = 0.0
-    if close_now is not None and ma20 is not None and close_now >= ma20:
-        trend_score += 25
-    if close_now is not None and ma60 is not None and close_now >= ma60:
-        trend_score += 18
-    if ma5 is not None and ma10 is not None and ma5 >= ma10:
-        trend_score += 18
-    if ma20_slope > 0:
-        trend_score += 22
-    trend_score = _score_clip(trend_score)
-
-    volume_score = 0.0
-    if vol5 not in [None, 0] and vol20 not in [None, 0]:
-        ratio = vol5 / vol20
-        if ratio >= 1.8:
-            volume_score = 85
-        elif ratio >= 1.4:
-            volume_score = 72
-        elif ratio >= 1.1:
-            volume_score = 60
-        elif ratio >= 0.9:
-            volume_score = 45
-        else:
-            volume_score = 25
-
-    breakout_score = 0.0
-    if close_now is not None and res20 not in [None, 0]:
-        dist = ((res20 - close_now) / res20) * 100
-        if 0 <= dist <= 2:
-            breakout_score = 90
-        elif 2 < dist <= 5:
-            breakout_score = 72
-        elif 5 < dist <= 8:
-            breakout_score = 55
-        elif dist < 0:
-            breakout_score = 60
-        else:
-            breakout_score = 30
-
-    momentum_score = 0.0
-    if k_prev is not None and d_prev is not None and k_now is not None and d_now is not None:
-        if k_prev <= d_prev and k_now > d_now:
-            momentum_score += 45
-        elif k_now > d_now:
-            momentum_score += 28
-    if hist_now is not None:
-        if hist_prev is not None and hist_prev <= 0 < hist_now:
-            momentum_score += 35
-        elif hist_now > 0:
-            momentum_score += 20
-    radar_m = _safe_float(radar.get("momentum"), 50) or 50
-    momentum_score += radar_m * 0.2
-    momentum_score = _score_clip(momentum_score)
-
-    support_score = 0.0
-    if close_now is not None and sup20 not in [None, 0]:
-        dist_sup = ((close_now - sup20) / sup20) * 100
-        if 0 <= dist_sup <= 2:
-            support_score = 85
-        elif 2 < dist_sup <= 5:
-            support_score = 70
-        elif 5 < dist_sup <= 8:
-            support_score = 55
-        elif dist_sup < 0:
-            support_score = 20
-        else:
-            support_score = 40
-
-    if ret5 > 12:
-        breakout_score -= 15
-    if ret5 > 20:
-        breakout_score -= 25
-
-    total = _avg_safe([trend_score, volume_score, breakout_score, momentum_score, support_score], 0)
-    return {
-        "起漲前兆分數": _score_clip(total),
-        "均線轉強分": _score_clip(trend_score),
-        "量能啟動分": _score_clip(volume_score),
-        "突破準備分": _score_clip(breakout_score),
-        "動能翻多分": _score_clip(momentum_score),
-        "支撐防守分": _score_clip(support_score),
-    }
-
-
-def _build_risk_filter(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, strictness: str) -> dict[str, Any]:
-    if df is None or df.empty:
-        return {"是否通過風險過濾": False, "風險分數": 0.0, "淘汰原因": "無歷史資料"}
-
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"))
-    ma20 = _safe_float(last.get("MA20"))
-    ma60 = _safe_float(last.get("MA60"))
-    atr14 = _safe_float(last.get("ATR14"))
-    vol20 = _safe_float(last.get("VOL20"))
-    ret20 = _safe_float(last.get("RET20"), 0) or 0
-    pressure_dist = None
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    if close_now not in [None] and res20 not in [None, 0]:
-        pressure_dist = ((res20 - close_now) / res20) * 100
-
-    rules = {
-        "寬鬆": {"min_days": 60, "min_vol20": 300000, "max_atr_pct": 11.0, "max_ret20": 35.0},
-        "標準": {"min_days": 90, "min_vol20": 800000, "max_atr_pct": 8.5, "max_ret20": 28.0},
-        "嚴格": {"min_days": 120, "min_vol20": 1200000, "max_atr_pct": 6.5, "max_ret20": 22.0},
-    }
-    cfg = rules.get(_safe_str(strictness), rules["標準"])
-
-    reasons = []
-    risk_score = 100.0
-
-    if len(df) < cfg["min_days"]:
-        reasons.append(f"歷史資料不足{cfg['min_days']}天")
-        risk_score -= 30
-    if vol20 not in [None] and vol20 < cfg["min_vol20"]:
-        reasons.append("量能不足")
-        risk_score -= 22
-    if close_now not in [None] and atr14 not in [None]:
-        atr_pct = atr14 / close_now * 100 if close_now != 0 else 999
-        if atr_pct > cfg["max_atr_pct"]:
-            reasons.append("波動過大")
-            risk_score -= 18
-    if close_now not in [None] and ma20 not in [None] and ma60 not in [None]:
-        if close_now < ma20 and close_now < ma60:
-            reasons.append("中期結構偏弱")
-            risk_score -= 20
-    if ret20 > cfg["max_ret20"]:
-        reasons.append("近20日漲幅過大")
-        risk_score -= 16
-
-    if pressure_dist is not None and pressure_dist < 0:
-        risk_score -= 4
-    elif pressure_dist is not None and pressure_dist > 10:
-        risk_score -= 8
-
-    signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
-    risk_score += max(min(signal_score * 1.8, 12), -12)
-    risk_score = _score_clip(risk_score)
-
-    passed = len(reasons) == 0 or risk_score >= 55
-    return {
-        "是否通過風險過濾": passed,
-        "風險分數": risk_score,
-        "淘汰原因": "；".join(reasons) if reasons else "",
-    }
-
-
-def _build_trade_feasibility(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict) -> dict[str, Any]:
-    if df is None or df.empty:
-        return {
-            "交易可行分數": 0.0,
-            "追價風險分數": 0.0,
-            "拉回買點分數": 0.0,
-            "突破買點分數": 0.0,
-            "風險報酬評級": "—",
-        }
-
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"), 0) or 0
-    atr14 = _safe_float(last.get("ATR14"), 0) or max(close_now * 0.03, 1.0)
-    ma20 = _safe_float(last.get("MA20"))
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-
-    pullback_buy = ma20 if ma20 is not None else (sup20 if sup20 is not None else close_now)
-    breakout_buy = res20 if res20 is not None else close_now
-    stop_price = sup20 if sup20 is not None else max(close_now - atr14, 0)
-    target_1 = res20 if res20 is not None and res20 > close_now else close_now + atr14 * 1.5
-    target_2 = target_1 + atr14 * 1.2
-
-    def _rr(entry: float, stop: float, target: float) -> float:
-        risk = entry - stop
-        reward = target - entry
-        if risk <= 0:
-            return 0.0
-        return reward / risk
-
-    rr_pullback = _rr(pullback_buy, stop_price, target_1) if pullback_buy and stop_price is not None and target_1 else 0.0
-    rr_breakout = _rr(breakout_buy, stop_price, target_2) if breakout_buy and stop_price is not None and target_2 else 0.0
-
-    pullback_score = 25 + min(rr_pullback * 28, 45)
-    breakout_score = 25 + min(rr_breakout * 22, 40)
-
-    chase_risk = 0.0
-    if ma20 not in [None, 0] and close_now not in [None]:
-        bias = ((close_now - ma20) / ma20) * 100
-        if bias >= 12:
-            chase_risk = 88
-        elif bias >= 8:
-            chase_risk = 72
-        elif bias >= 5:
-            chase_risk = 58
-        else:
-            chase_risk = 35
-
-    signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
-    feasibility = _avg_safe(
-        [_score_clip(pullback_score), _score_clip(breakout_score), _score_clip(100 - chase_risk), 50 + signal_score * 5],
-        0,
-    )
-
-    if feasibility >= 80:
-        rr_grade = "A"
-    elif feasibility >= 68:
-        rr_grade = "B"
-    elif feasibility >= 55:
-        rr_grade = "C"
-    else:
-        rr_grade = "D"
-
-    return {
-        "交易可行分數": _score_clip(feasibility),
-        "追價風險分數": _score_clip(chase_risk),
-        "拉回買點分數": _score_clip(pullback_score),
-        "突破買點分數": _score_clip(breakout_score),
-        "風險報酬評級": rr_grade,
-    }
-
-
-def _build_mode_score(
-    mode: str,
-    technical_score: float,
-    prelaunch_score: float,
-    category_heat_score: float,
-    factor_score: float,
-    trade_score: float,
-    leader_advantage: float,
-) -> tuple[float, str]:
-    mode = _safe_str(mode)
-
-    if mode == "飆股模式":
-        total = prelaunch_score * 0.35 + technical_score * 0.25 + category_heat_score * 0.20 + factor_score * 0.10 + trade_score * 0.10
-        tag = "突破前夜 / 起漲優先"
-    elif mode == "波段模式":
-        total = technical_score * 0.30 + category_heat_score * 0.25 + factor_score * 0.20 + trade_score * 0.15 + prelaunch_score * 0.10
-        tag = "趨勢延續 / 波段優先"
-    elif mode == "領頭羊模式":
-        total = leader_advantage * 0.30 + category_heat_score * 0.25 + technical_score * 0.20 + prelaunch_score * 0.15 + factor_score * 0.10
-        tag = "類股領先 / 龍頭優先"
-    else:
-        total = technical_score * 0.30 + prelaunch_score * 0.20 + category_heat_score * 0.20 + factor_score * 0.15 + trade_score * 0.15
-        tag = "綜合推薦"
-
-    return _score_clip(total), tag
-
-
-def _build_auto_factor_scores(df: pd.DataFrame, signal_snapshot: dict, sr_snapshot: dict, radar: dict) -> dict[str, Any]:
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"))
-    ma20 = _safe_float(last.get("MA20"))
-    ma60 = _safe_float(last.get("MA60"))
-    ma120 = _safe_float(last.get("MA120"))
-    atr14 = _safe_float(last.get("ATR14"))
-    vol5 = _safe_float(last.get("VOL5"))
-    vol20 = _safe_float(last.get("VOL20"))
-    ret20 = _safe_float(last.get("RET20"))
-    ret60 = _safe_float(last.get("RET60"))
-
-    signal_score = _safe_float(signal_snapshot.get("score"), 0) or 0
-    radar_trend = _safe_float(radar.get("trend"), 50) or 50
-    radar_momentum = _safe_float(radar.get("momentum"), 50) or 50
-    radar_volume = _safe_float(radar.get("volume"), 50) or 50
-    radar_structure = _safe_float(radar.get("structure"), 50) or 50
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-
-    eps_proxy = 50.0
-    if close_now not in [None, 0]:
-        trend_bonus = 0.0
-        if ma120 is not None and close_now > ma120:
-            trend_bonus += 18
-        if ma60 is not None and close_now > ma60:
-            trend_bonus += 12
-        if ma20 is not None and close_now > ma20:
-            trend_bonus += 8
-
-        vol_penalty = 0.0
-        if atr14 is not None:
-            atr_pct = atr14 / close_now * 100
-            if atr_pct <= 2.5:
-                vol_penalty = 0
-            elif atr_pct <= 5:
-                vol_penalty = 6
-            else:
-                vol_penalty = 12
-
-        eps_proxy = _score_clip(30 + trend_bonus + radar_structure * 0.25 + radar_trend * 0.20 - vol_penalty)
-
-    revenue_proxy = _score_clip(25 + (_safe_float(ret20, 0) or 0) * 0.9 + (_safe_float(ret60, 0) or 0) * 0.35 + radar_momentum * 0.30 + radar_volume * 0.20)
-    profit_proxy = _score_clip(30 + signal_score * 6 + radar_trend * 0.28 + radar_structure * 0.22 + (_safe_float(ret60, 0) or 0) * 0.35)
-
-    lock_proxy = 45.0
-    if close_now not in [None, 0]:
-        vol_ratio = None
-        if vol5 not in [None, 0] and vol20 not in [None, 0]:
-            vol_ratio = vol5 / vol20
-
-        atr_pct = None
-        if atr14 is not None:
-            atr_pct = atr14 / close_now * 100
-
-        lock_bonus = 0.0
-        if ma20 is not None and close_now >= ma20:
-            lock_bonus += 12
-        if sup20 is not None and close_now >= sup20:
-            lock_bonus += 10
-        if vol_ratio is not None:
-            if 0.7 <= vol_ratio <= 1.15:
-                lock_bonus += 12
-            elif vol_ratio < 0.7:
-                lock_bonus += 8
-        if atr_pct is not None:
-            if atr_pct <= 2.5:
-                lock_bonus += 14
-            elif atr_pct <= 4:
-                lock_bonus += 8
-
-        lock_proxy = _score_clip(20 + lock_bonus + radar_structure * 0.24)
-
-    recent = df.tail(5).copy()
-    up_days_5 = int(recent["UP_DAY"].sum()) if "UP_DAY" in recent.columns else 0
-    inst_proxy = _score_clip(20 + up_days_5 * 10 + signal_score * 5 + radar_momentum * 0.25 + radar_volume * 0.20)
-
-    factor_summary = (
-        f"EPS代理 {format_number(eps_proxy,1)} / "
-        f"營收動能代理 {format_number(revenue_proxy,1)} / "
-        f"獲利代理 {format_number(profit_proxy,1)} / "
-        f"大戶鎖碼代理 {format_number(lock_proxy,1)} / "
-        f"法人連買代理 {format_number(inst_proxy,1)}"
-    )
-
-    return {
-        "auto_factor_total": _avg_safe([eps_proxy, revenue_proxy, profit_proxy, lock_proxy, inst_proxy], 0),
-        "eps_proxy": eps_proxy,
-        "revenue_proxy": revenue_proxy,
-        "profit_proxy": profit_proxy,
-        "lock_proxy": lock_proxy,
-        "inst_proxy": inst_proxy,
-        "factor_summary": factor_summary,
-    }
-
-
-def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict) -> dict[str, Any]:
-    last = df.iloc[-1]
-    close_now = _safe_float(last.get("收盤價"), 0) or 0
-    atr14 = _safe_float(last.get("ATR14"), 0) or max(close_now * 0.03, 1.0)
-    ma20 = _safe_float(last.get("MA20"))
-    res20 = _safe_float(sr_snapshot.get("res_20"))
-    sup20 = _safe_float(sr_snapshot.get("sup_20"))
-    res60 = _safe_float(sr_snapshot.get("res_60"))
-    score = _safe_float(signal_snapshot.get("score"), 0) or 0
-
-    breakout_buy = res20 if res20 is not None else close_now
-    pullback_buy = ma20 if ma20 is not None else (sup20 if sup20 is not None else close_now)
-    stop_price = sup20 if sup20 is not None else max(close_now - atr14, 0)
-    sell_target_1 = res20 if res20 is not None and res20 > close_now else close_now + atr14 * 1.5
-    sell_target_2 = res60 if res60 is not None and res60 > sell_target_1 else sell_target_1 + atr14 * 1.2
-
-    if score >= 4:
-        launch_tag = "強勢起漲候選"
-    elif score >= 2:
-        launch_tag = "偏多轉強候選"
-    elif score <= -2:
-        launch_tag = "不建議追價"
-    else:
-        launch_tag = "等待表態"
-
-    def _rr(entry: float, stop: float, target: float) -> str:
-        risk = entry - stop
-        reward = target - entry
-        if risk <= 0:
-            return "—"
-        return f"1 : {reward / risk:.2f}"
-
-    rr1 = _rr(pullback_buy, stop_price, sell_target_1) if pullback_buy and stop_price is not None and sell_target_1 else "—"
-    rr2 = _rr(breakout_buy, stop_price, sell_target_2) if breakout_buy and stop_price is not None and sell_target_2 else "—"
-
-    return {
-        "launch_tag": launch_tag,
-        "breakout_buy": breakout_buy,
-        "pullback_buy": pullback_buy,
-        "stop_price": stop_price,
-        "sell_target_1": sell_target_1,
-        "sell_target_2": sell_target_2,
-        "rr1": rr1,
-        "rr2": rr2,
-    }
+                    df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_dt=start_date, end_dt=today)
+                except Exception:
+                    df = get_history_data(code=stock_no, start_date=start_date, end_date=today)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                temp = df.copy()
+                if "日期" not in temp.columns:
+                    for c in temp.columns:
+                        if str(c).lower() in {"date", "日期"}:
+                            temp = temp.rename(columns={c: "日期"})
+                            break
+                for c in temp.columns:
+                    if str(c).lower() == "close":
+                        temp = temp.rename(columns={c: "收盤價"})
+                if "收盤價" not in temp.columns:
+                    continue
+                temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+                temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
+                temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期")
+                if not temp.empty:
+                    return float(temp.iloc[-1]["收盤價"]), _safe_str(mk or market_type or "未知"), "history_close"
+        except Exception:
+            pass
+    return None, _safe_str(market_type or "未知"), ""
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date, risk_strictness: str) -> dict[str, Any]:
+def _get_forward_return(stock_no: str, stock_name: str, market_type: str, rec_date_text: str, days_after: int) -> float | None:
+    rec_date = pd.to_datetime(rec_date_text, errors="coerce")
+    if pd.isna(rec_date):
+        return None
+
+    start_date = rec_date.date() - timedelta(days=5)
+    end_date = rec_date.date() + timedelta(days=max(days_after * 4, 40))
+    tried = []
+    primary = _safe_str(market_type)
+    if primary:
+        tried.append(primary)
+    for mk in ["上市", "上櫃", "興櫃", ""]:
+        if mk not in tried:
+            tried.append(mk)
+
+    for mk in tried:
+        try:
+            try:
+                df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_date=start_date, end_date=end_date)
+            except TypeError:
+                try:
+                    df = get_history_data(stock_no=stock_no, stock_name=stock_name, market_type=mk, start_dt=start_date, end_dt=end_date)
+                except Exception:
+                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+
+            temp = df.copy()
+            if "日期" not in temp.columns:
+                for c in temp.columns:
+                    if str(c).lower() in {"date", "日期"}:
+                        temp = temp.rename(columns={c: "日期"})
+                        break
+            for c in temp.columns:
+                if str(c).lower() == "close":
+                    temp = temp.rename(columns={c: "收盤價"})
+            if "日期" not in temp.columns or "收盤價" not in temp.columns:
+                continue
+
+            temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+            temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
+            temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
+            if temp.empty:
+                continue
+
+            base_candidates = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
+            if base_candidates.empty:
+                continue
+            if len(base_candidates) <= days_after:
+                return None
+
+            base_px = float(base_candidates.iloc[0]["收盤價"])
+            target_px = float(base_candidates.iloc[days_after]["收盤價"])
+            if base_px == 0:
+                return None
+            return (target_px - base_px) / base_px * 100
+        except Exception:
+            pass
+    return None
+
+
+def _clip(v: float | None, low: float, high: float, default: float = 0.0) -> float:
+    if v is None:
+        return default
     try:
-        hist_df, used_market, history_debug = _get_history_smart(
-            stock_no=stock_no,
-            stock_name=stock_name,
-            market_type=market_type,
-            start_date=start_dt,
-            end_date=end_dt,
-        )
-        if hist_df.empty:
-            return {
-                "ok": False,
-                "error_stage": "history",
-                "error_message": "抓不到歷史資料",
-                "used_market": used_market,
-                "history_debug": history_debug,
-            }
-
-        signal_snapshot = compute_signal_snapshot(hist_df)
-        sr_snapshot = compute_support_resistance_snapshot(hist_df)
-        radar = _ensure_radar_dict(compute_radar_scores(hist_df))
-        auto_factor = _build_auto_factor_scores(hist_df, signal_snapshot, sr_snapshot, radar)
-        trade_plan = _build_trade_plan(hist_df, sr_snapshot, signal_snapshot)
-        pattern_info = _build_pattern_breakout_scores(hist_df, sr_snapshot, signal_snapshot)
-        burst_info = _build_burst_scores(hist_df)
-        opportunity_info = _build_opportunity_scores(hist_df, sr_snapshot, signal_snapshot, radar)
-        prelaunch = _build_prelaunch_scores(hist_df, signal_snapshot, sr_snapshot, radar)
-        risk_filter = _build_risk_filter(hist_df, signal_snapshot, sr_snapshot, risk_strictness)
-        trade_feasibility = _build_trade_feasibility(hist_df, sr_snapshot, signal_snapshot)
-
-        last = hist_df.iloc[-1]
-        first = hist_df.iloc[0]
-
-        close_now = _safe_float(last.get("收盤價"))
-        close_first = _safe_float(first.get("收盤價"))
-        period_pct = None
-        if close_now is not None and close_first not in [None, 0]:
-            period_pct = ((close_now / close_first) - 1) * 100
-
-        res20 = _safe_float(sr_snapshot.get("res_20"))
-        sup20 = _safe_float(sr_snapshot.get("sup_20"))
-        pressure_dist = None
-        support_dist = None
-        if close_now is not None and res20 not in [None, 0]:
-            pressure_dist = ((res20 - close_now) / res20) * 100
-        if close_now is not None and sup20 not in [None, 0]:
-            support_dist = ((close_now - sup20) / sup20) * 100
-
-        radar_avg = _avg_safe(
-            [
-                _safe_float(radar.get("trend")),
-                _safe_float(radar.get("momentum")),
-                _safe_float(radar.get("volume")),
-                _safe_float(radar.get("position")),
-                _safe_float(radar.get("structure")),
-            ],
-            50.0,
-        )
-
-        technical_score = _score_clip(
-            (radar_avg * 0.55)
-            + ((_safe_float(signal_snapshot.get("score"), 0) or 0) * 7.5)
-            + ((_safe_float(period_pct, 0) or 0) * 0.18)
-        )
-
-        return {
-            "ok": True,
-            "used_market": used_market,
-            "history_debug": history_debug,
-            "signal_snapshot": signal_snapshot,
-            "sr_snapshot": sr_snapshot,
-            "radar": radar,
-            "auto_factor": auto_factor,
-            "trade_plan": trade_plan,
-            "pattern_info": pattern_info,
-            "burst_info": burst_info,
-            "opportunity_info": opportunity_info,
-            "prelaunch": prelaunch,
-            "risk_filter": risk_filter,
-            "trade_feasibility": trade_feasibility,
-            "close_now": close_now,
-            "period_pct": period_pct,
-            "pressure_dist": pressure_dist,
-            "support_dist": support_dist,
-            "radar_avg": radar_avg,
-            "technical_score": technical_score,
-        }
-    except Exception as e:
-        return {
-            "ok": False,
-            "error_stage": "analysis",
-            "error_message": str(e),
-            "used_market": _safe_str(market_type) or "未知",
-            "history_debug": {},
-        }
+        v = float(v)
+    except Exception:
+        return default
+    return max(low, min(high, v))
 
 
-def _analyze_one_stock_for_recommend(
-    item: dict[str, str],
-    master_lookup: dict[str, dict[str, str]],
-    start_dt: date,
-    end_dt: date,
-    min_signal_score: float,
-    clean_categories: list[str],
-    mode: str,
-    risk_strictness: str,
-    min_prelaunch_score: float,
-    min_trade_score: float,
-):
-    code = _normalize_code(item.get("code"))
-    manual_name = _safe_str(item.get("name"))
-    manual_market = _safe_str(item.get("market"))
-    manual_category = _normalize_category(item.get("category"))
+def _fmt_pct(v: float | None) -> str:
+    return "-" if v is None else f"{v:.2f}%"
 
-    if not code:
-        return {"status": "invalid_code", "code": "", "message": "股票代號空白"}
 
-    stock_name, market_type, category = _find_name_market_category(code, manual_name, manual_market, manual_category, master_lookup)
+def _build_entry_zone(rec_price: float | None, stop_price: float | None) -> str:
+    if rec_price in [None, 0]:
+        return "-"
+    low = rec_price * 0.97
+    high = rec_price * 1.03
+    if stop_price not in [None, 0]:
+        low = max(low, stop_price * 1.03)
+    return f"{low:.2f} ~ {high:.2f}"
 
-    if clean_categories and category not in clean_categories:
-        return {"status": "category_filtered", "code": code, "message": f"類型不符合：{category}"}
 
-    bundle = _analyze_stock_bundle(
-        stock_no=code,
-        stock_name=stock_name,
-        market_type=market_type,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        risk_strictness=risk_strictness,
-    )
-    if not bundle or not bundle.get("ok", False):
-        history_debug = bundle.get("history_debug", {}) if isinstance(bundle, dict) else {}
-        if isinstance(bundle, dict) and bundle.get("error_stage") == "analysis":
-            return {
-                "status": "analysis_error",
-                "code": code,
-                "message": _safe_str(bundle.get("error_message")) or "分析錯誤",
-                "history_debug": history_debug,
-            }
-        return {
-            "status": "no_history",
-            "code": code,
-            "message": "抓不到歷史資料",
-            "history_debug": history_debug,
-        }
+def _god_mode_decision(row: dict[str, Any]) -> dict[str, Any]:
+    rec_price = _safe_float(row.get("推薦價格"))
+    latest = _safe_float(row.get("最新價"))
+    stop_price = _safe_float(row.get("停損價"))
+    target1 = _safe_float(row.get("賣出目標1"))
+    target2 = _safe_float(row.get("賣出目標2"))
+    bought = _normalize_bool(row.get("是否已實際買進"))
+    status = _safe_str(row.get("目前狀態")) or "觀察"
 
-    signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
-    opportunity_info = bundle.get("opportunity_info", {}) or {}
-    opportunity_score = _safe_float(opportunity_info.get("機會股分數"), 0) or 0
-    opportunity_core = max(
-        _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0,
-        _safe_float(opportunity_info.get("拉回承接分數"), 0) or 0,
-        _safe_float(opportunity_info.get("支撐回測分數"), 0) or 0,
-        _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0,
-    )
-    opportunity_mode = _is_opportunity_mode(mode)
-    if signal_score < min_signal_score:
-        relaxed_signal_floor = max(0.0, float(min_signal_score) - (35.0 if opportunity_mode else 0.0))
-        if not (opportunity_mode and signal_score >= relaxed_signal_floor and opportunity_core >= 60):
-            return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
+    rec_total = _clip(_safe_float(row.get("推薦總分"), 0), 0, 100, 0)
+    tech = _clip(_safe_float(row.get("技術結構分數"), rec_total), 0, 100, rec_total)
+    pre_move = _clip(_safe_float(row.get("起漲前兆分數"), rec_total), 0, 100, rec_total)
+    trade = _clip(_safe_float(row.get("交易可行分數"), rec_total), 0, 100, rec_total)
+    sector = _clip(_safe_float(row.get("類股熱度分數"), rec_total), 0, 100, rec_total)
 
-    risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
-    opportunity_chase = _safe_float(opportunity_info.get("追高風險分_機會"), 50) or 50
-    if not risk_pass:
-        if not (opportunity_mode and opportunity_score >= 62 and opportunity_chase <= 72):
-            return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
+    perf3 = _safe_float(row.get("3日績效%"))
+    perf5 = _safe_float(row.get("5日績效%"))
+    perf10 = _safe_float(row.get("10日績效%"))
+    perf20 = _safe_float(row.get("20日績效%"))
+    pnl_pct = _safe_float(row.get("損益幅%"))
 
-    prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
-    if prelaunch_score < min_prelaunch_score:
-        relaxed_prelaunch_floor = max(0.0, float(min_prelaunch_score) - (35.0 if opportunity_mode else 0.0))
-        if not (opportunity_mode and (opportunity_score >= 62 or opportunity_core >= 66) and prelaunch_score >= relaxed_prelaunch_floor):
-            return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
+    setup_score = rec_total * 0.28 + tech * 0.24 + pre_move * 0.20 + trade * 0.14 + sector * 0.14
 
-    trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
-    if trade_score < min_trade_score:
-        relaxed_trade_floor = max(0.0, float(min_trade_score) - (25.0 if opportunity_mode else 0.0))
-        if not (opportunity_mode and opportunity_score >= 60 and trade_score >= relaxed_trade_floor):
-            return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
+    perf_score = 0.0
+    for p, w in [(perf3, 0.15), (perf5, 0.20), (perf10, 0.25), (perf20, 0.40)]:
+        if p is not None:
+            perf_score += _clip(50 + p * 4, 0, 100, 50) * w
+        else:
+            perf_score += 50 * w
 
-    auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
-    technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
+    mode_label = _safe_str(row.get("模式績效標籤"))
+    mode_bonus = {"強勢模式": 8, "穩健模式": 4, "一般模式": 0, "觀察中": -2, "偏弱模式": -8, "弱": -10, "樣本不足": 0}.get(mode_label, 0)
 
-    base_composite = _score_clip(technical_score * 0.40 + auto_factor_total * 0.32 + prelaunch_score * 0.18 + trade_score * 0.10)
+    price_bonus = 0.0
+    reasons = []
+    if latest not in [None, 0] and rec_price not in [None, 0]:
+        drift = (latest - rec_price) / rec_price * 100
+        if -3 <= drift <= 3:
+            price_bonus += 8
+            reasons.append(f"股價接近推薦價({_fmt_pct(drift)})")
+        elif 3 < drift <= 8:
+            price_bonus += 2
+            reasons.append(f"股價小幅高於推薦價({_fmt_pct(drift)})")
+        elif drift > 15:
+            price_bonus -= 10
+            reasons.append(f"股價偏離推薦價過大({_fmt_pct(drift)})")
+        elif drift < -8:
+            price_bonus -= 6
+            reasons.append(f"股價明顯跌破推薦價({_fmt_pct(drift)})")
+
+    risk_penalty = 0.0
+    if latest not in [None, 0] and stop_price not in [None, 0]:
+        risk_gap = (latest - stop_price) / latest * 100
+        if risk_gap <= 0:
+            risk_penalty -= 25
+            reasons.append("已跌破停損價")
+        elif risk_gap < 2.5:
+            risk_penalty -= 14
+            reasons.append("距停損過近")
+        elif risk_gap < 5:
+            risk_penalty -= 6
+            reasons.append("停損空間偏小")
+
+    target_bonus = 0.0
+    if latest not in [None, 0] and target1 not in [None, 0]:
+        if latest >= target1:
+            target_bonus -= 4
+            reasons.append("已接近/到達目標1")
+    if latest not in [None, 0] and target2 not in [None, 0] and latest >= target2:
+        target_bonus -= 10
+        reasons.append("已到達目標2")
+
+    total_score = _clip(setup_score * 0.55 + perf_score * 0.25 + 50 * 0.20 + mode_bonus + price_bonus + risk_penalty + target_bonus, 0, 100, 0)
+
+    if status in {"已賣出", "取消", "封存"}:
+        action = "不追蹤"
+    elif latest not in [None, 0] and stop_price not in [None, 0] and latest <= stop_price:
+        action = "立即出場"
+    elif latest not in [None, 0] and target2 not in [None, 0] and latest >= target2:
+        action = "分批停利"
+    elif bought or status in {"持有", "已買進"}:
+        if total_score >= 78:
+            action = "續抱"
+        elif total_score >= 63:
+            action = "續抱觀察"
+        elif total_score >= 50:
+            action = "減碼觀察"
+        else:
+            action = "轉弱出場"
+    else:
+        if total_score >= 80:
+            action = "可進場"
+        elif total_score >= 68:
+            action = "拉回可布局"
+        elif total_score >= 56:
+            action = "觀察等待"
+        else:
+            action = "暫不進場"
+
+    if total_score >= 85:
+        confidence = "高"
+    elif total_score >= 70:
+        confidence = "中高"
+    elif total_score >= 58:
+        confidence = "中"
+    else:
+        confidence = "保守"
+
+    if tech >= 75:
+        reasons.append("技術結構分數強")
+    if pre_move >= 75:
+        reasons.append("起漲前兆明顯")
+    if trade >= 70:
+        reasons.append("交易可行性佳")
+    if sector >= 70:
+        reasons.append("類股熱度有支撐")
+    if perf20 is not None and perf20 > 0:
+        reasons.append(f"20日績效為正({_fmt_pct(perf20)})")
+    elif perf20 is not None and perf20 < 0:
+        reasons.append(f"20日績效轉弱({_fmt_pct(perf20)})")
+    if pnl_pct is not None and bought:
+        reasons.append(f"目前持倉損益{_fmt_pct(pnl_pct)}")
+
+    # 去重保留前 5 項
+    cleaned = []
+    for r in reasons:
+        if r and r not in cleaned:
+            cleaned.append(r)
+    reason_text = "；".join(cleaned[:5]) if cleaned else "依分數、價格位置、停損距離與歷史績效綜合判斷"
 
     return {
-        "status": "ok",
-        "row": {
-            "股票代號": code,
-            "股票名稱": stock_name,
-            "市場別": bundle["used_market"],
-            "類別": category or _infer_category_from_record(stock_name, category),
-            "最新價": bundle["close_now"],
-            "區間漲跌幅%": bundle["period_pct"],
-            "訊號分數": signal_score,
-            "雷達均分": bundle["radar_avg"],
-            "技術結構分數": technical_score,
-            "起漲前兆分數": prelaunch_score,
-            "交易可行分數": trade_score,
-            "追價風險分數": _safe_float(bundle["trade_feasibility"].get("追價風險分數"), 0) or 0,
-            "拉回買點分數": _safe_float(bundle["trade_feasibility"].get("拉回買點分數"), 0) or 0,
-            "突破買點分數": _safe_float(bundle["trade_feasibility"].get("突破買點分數"), 0) or 0,
-            "風險報酬評級": _safe_str(bundle["trade_feasibility"].get("風險報酬評級")),
-            "自動因子總分": auto_factor_total,
-            "EPS代理分數": bundle["auto_factor"]["eps_proxy"],
-            "營收動能代理分數": bundle["auto_factor"]["revenue_proxy"],
-            "獲利代理分數": bundle["auto_factor"]["profit_proxy"],
-            "大戶鎖碼代理分數": bundle["auto_factor"]["lock_proxy"],
-            "法人連買代理分數": bundle["auto_factor"]["inst_proxy"],
-            "20日壓力距離%": bundle["pressure_dist"],
-            "20日支撐距離%": bundle["support_dist"],
-            "個股原始總分": base_composite,
-            "市場環境分數": None,
-            "市場環境": "",
-            "型態名稱": _safe_str(bundle["pattern_info"].get("型態名稱")),
-            "型態突破分數": _safe_float(bundle["pattern_info"].get("型態突破分數"), 0) or 0,
-            "突破風險": _safe_str(bundle["pattern_info"].get("突破風險")),
-            "爆發力分數": _safe_float(bundle["burst_info"].get("爆發力分數"), 0) or 0,
-            "爆發等級": _safe_str(bundle["burst_info"].get("爆發等級")),
-            "推薦型態": _safe_str(opportunity_info.get("推薦型態")),
-            "機會型態": _safe_str(opportunity_info.get("機會型態")),
-            "低檔位置分數": _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0,
-            "拉回承接分數": _safe_float(opportunity_info.get("拉回承接分數"), 0) or 0,
-            "支撐回測分數": _safe_float(opportunity_info.get("支撐回測分數"), 0) or 0,
-            "止跌轉強分數": _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0,
-            "機會股分數": _safe_float(opportunity_info.get("機會股分數"), 0) or 0,
-            "機會股說明": _safe_str(opportunity_info.get("機會股說明")),
-            "建議切入區": _build_entry_zone_text(bundle["trade_plan"]["pullback_buy"], bundle["trade_plan"]["breakout_buy"]),
-            "起漲判斷": bundle["trade_plan"]["launch_tag"],
-            "推薦買點_突破": bundle["trade_plan"]["breakout_buy"],
-            "推薦買點_拉回": bundle["trade_plan"]["pullback_buy"],
-            "停損價": bundle["trade_plan"]["stop_price"],
-            "賣出目標1": bundle["trade_plan"]["sell_target_1"],
-            "賣出目標2": bundle["trade_plan"]["sell_target_2"],
-            "風險報酬_拉回": bundle["trade_plan"]["rr1"],
-            "風險報酬_突破": bundle["trade_plan"]["rr2"],
-            "自動因子摘要": bundle["auto_factor"]["factor_summary"],
-            "雷達摘要": _safe_str(bundle["radar"].get("summary")) or "—",
-            "風險分數": _safe_float(bundle["risk_filter"].get("風險分數"), 0) or 0,
-            "淘汰原因": _safe_str(bundle["risk_filter"].get("淘汰原因")),
-            "均線轉強分": _safe_float(bundle["prelaunch"].get("均線轉強分"), 0) or 0,
-            "量能啟動分": _safe_float(bundle["prelaunch"].get("量能啟動分"), 0) or 0,
-            "突破準備分": _safe_float(bundle["prelaunch"].get("突破準備分"), 0) or 0,
-            "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
-            "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
-            "推薦模式": mode,
-        },
-        "history_debug": bundle.get("history_debug", {}),
+        "股神決策分數": round(total_score, 2),
+        "股神建議動作": action,
+        "股神信心": confidence,
+        "股神進場區間": _build_entry_zone(rec_price, stop_price),
+        "股神推論": reason_text,
     }
 
 
-def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
-    if base_df is None or base_df.empty:
-        return pd.DataFrame(columns=["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數"])
+def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
+    src = dict(row)
+    rec_price = _safe_float(src.get("推薦價格"))
+    buy_price = _safe_float(src.get("實際買進價"))
+    sell_price = _safe_float(src.get("實際賣出價"))
+    latest_price = _safe_float(src.get("最新價"))
+    stop_price = _safe_float(src.get("停損價"))
+    target1 = _safe_float(src.get("賣出目標1"))
+    target2 = _safe_float(src.get("賣出目標2"))
+    status = _safe_str(src.get("目前狀態")) or "觀察"
 
-    grp = (
-        base_df.groupby("類別", dropna=False)
-        .agg(
-            股票數=("股票代號", "count"),
-            類股平均總分=("個股原始總分", "mean"),
-            類股平均訊號=("訊號分數", "mean"),
-            類股平均漲幅=("區間漲跌幅%", "mean"),
-            類股平均雷達=("雷達均分", "mean"),
-            類股平均自動因子=("自動因子總分", "mean"),
-            類股平均起漲前兆=("起漲前兆分數", "mean"),
-            類股平均交易可行=("交易可行分數", "mean"),
-            類股平均型態突破=("型態突破分數", "mean"),
-            類股平均爆發力=("爆發力分數", "mean"),
-        )
-        .reset_index()
-    )
+    effective_cost = buy_price if buy_price not in [None, 0] else rec_price
+    mark_price = sell_price if sell_price not in [None, 0] else latest_price
 
-    grp["類股熱度分數"] = (
-        grp["類股平均總分"] * 0.28
-        + grp["類股平均訊號"] * 5.5
-        + grp["類股平均漲幅"].fillna(0) * 0.32
-        + grp["類股平均雷達"] * 0.16
-        + grp["類股平均自動因子"] * 0.12
-        + grp["類股平均起漲前兆"] * 0.12
-    ).apply(lambda x: _score_clip(x))
+    pnl_amt = None
+    pnl_pct = None
+    if effective_cost not in [None, 0] and mark_price is not None:
+        pnl_amt = mark_price - effective_cost
+        pnl_pct = (pnl_amt / effective_cost) * 100
 
-    grp["類股加速度"] = (
-        grp["類股平均起漲前兆"] * 0.45
-        + grp["類股平均交易可行"] * 0.20
-        + grp["類股平均訊號"] * 4.0
-        + grp["類股平均漲幅"].fillna(0) * 0.18
-    ).apply(lambda x: _score_clip(x))
+    actual_ret = None
+    if buy_price not in [None, 0] and sell_price not in [None, 0]:
+        actual_ret = (sell_price - buy_price) / buy_price * 100
 
-    grp = grp.sort_values(["類股熱度分數", "類股平均總分"], ascending=[False, False]).reset_index(drop=True)
-    grp["類股熱度排名"] = range(1, len(grp) + 1)
-    return grp
+    buy_flag = src.get("是否已實際買進")
+    buy_flag = _normalize_bool(buy_flag) or buy_price not in [None, 0] or status in {"已買進", "持有"}
 
+    hit_stop = _normalize_bool(src.get("是否達停損"))
+    hit_t1 = _normalize_bool(src.get("是否達目標1"))
+    hit_t2 = _normalize_bool(src.get("是否達目標2"))
+    if latest_price is not None:
+        if stop_price is not None and latest_price <= stop_price:
+            hit_stop = True
+        if target1 is not None and latest_price >= target1:
+            hit_t1 = True
+        if target2 is not None and latest_price >= target2:
+            hit_t2 = True
 
-def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, min_total_score: float) -> pd.DataFrame:
-    if base_df is None or base_df.empty:
-        return pd.DataFrame()
+    rec_date = pd.to_datetime(_safe_str(src.get("推薦日期")), errors="coerce")
+    holding_days = _safe_float(src.get("持有天數"))
+    if pd.notna(rec_date):
+        holding_days = max((date.today() - rec_date.date()).days, 0)
 
-    final_codes = set()
-    if isinstance(final_df, pd.DataFrame) and not final_df.empty and "股票代號" in final_df.columns:
-        final_codes = set(final_df["股票代號"].astype(str).tolist())
+    perf_label = _safe_str(src.get("模式績效標籤"))
+    score_for_label = actual_ret if actual_ret is not None else pnl_pct
+    if not perf_label and score_for_label is not None:
+        if score_for_label >= 12:
+            perf_label = "強"
+        elif score_for_label >= 3:
+            perf_label = "中"
+        elif score_for_label > -3:
+            perf_label = "觀察中"
+        else:
+            perf_label = "弱"
 
-    work = base_df.copy()
-    work = work[~work["股票代號"].astype(str).isin(final_codes)].copy()
-    if work.empty:
-        return pd.DataFrame()
+    if status == "停損":
+        hit_stop = True
+    if status == "達標":
+        hit_t1 = True
 
-    score_floor = max(float(min_total_score) - 10.0, 45.0)
-    hot_mask = (
-        (pd.to_numeric(work.get("推薦總分"), errors="coerce").fillna(0) >= score_floor)
-        & (pd.to_numeric(work.get("起漲前兆分數"), errors="coerce").fillna(0) >= 70)
-        & (pd.to_numeric(work.get("交易可行分數"), errors="coerce").fillna(0) >= 60)
-        & (pd.to_numeric(work.get("類股熱度分數"), errors="coerce").fillna(0) >= 68)
-        & (pd.to_numeric(work.get("訊號分數"), errors="coerce").fillna(-999) >= 0)
-        & (work.get("起漲判斷", "").astype(str).isin(["強勢起漲候選", "偏多轉強候選"]))
-    )
-    hot_df = work[hot_mask].copy()
-    if hot_df.empty:
-        return pd.DataFrame()
-
-    hot_df["補抓原因"] = hot_df.apply(
-        lambda r: "、".join([
-            x for x in [
-                "起漲前兆強" if _safe_float(r.get("起漲前兆分數"), 0) >= 75 else "",
-                "交易可行佳" if _safe_float(r.get("交易可行分數"), 0) >= 68 else "",
-                "類股熱度高" if _safe_float(r.get("類股熱度分數"), 0) >= 72 else "",
-                "類股前3強" if _safe_str(r.get("類股前3強")) == "是" else "",
-                "領先同類股" if _safe_str(r.get("是否領先同類股")) == "是" else "",
-            ] if x
-        ]) or "接近主名單門檻但具起漲結構" ,
-        axis=1,
-    )
-    hot_df = hot_df.sort_values(
-        ["型態突破分數", "爆發力分數", "起漲前兆分數", "類股熱度分數", "交易可行分數", "推薦總分", "訊號分數"],
-        ascending=[False, False, False, False, False, False, False],
-    ).reset_index(drop=True)
-    return hot_df
+    src["是否已實際買進"] = buy_flag
+    src["損益金額"] = pnl_amt
+    src["損益幅%"] = pnl_pct
+    src["實際報酬%"] = actual_ret
+    src["是否達停損"] = hit_stop
+    src["是否達目標1"] = hit_t1
+    src["是否達目標2"] = hit_t2
+    src["持有天數"] = holding_days
+    src["模式績效標籤"] = perf_label
+    src.update(_god_mode_decision(src))
+    src["更新時間"] = _now_text()
+    return src
 
 
-def _build_recommend_df(
-    universe_items: list[dict[str, str]],
-    master_df: pd.DataFrame,
-    start_dt: date,
-    end_dt: date,
-    min_total_score: float,
-    min_signal_score: float,
-    selected_categories: list[str],
-    mode: str,
-    risk_strictness: str,
-    min_prelaunch_score: float,
-    min_trade_score: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
-    if not universe_items:
-        _save_debug_scan_summary({})
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _ensure_godpick_record_columns(pd.DataFrame())
 
-    total_count = len(universe_items)
-    worker_count = min(12, max(4, total_count // 12 if total_count >= 12 else 4))
-    master_lookup = _build_master_lookup(master_df)
+    rows = []
+    active_status = {"觀察", "已買進", "持有", "追蹤"}
 
-    progress_wrap = st.container()
-    progress_bar = progress_wrap.progress(0, text="準備開始推薦...")
-    progress_text = progress_wrap.empty()
+    for _, row in df.iterrows():
+        payload = dict(row)
+        status = _safe_str(payload.get("目前狀態")) or "觀察"
 
-    start_ts = time.time()
-    done_count = 0
-    base_rows = []
-    debug_summary = {
-        "total_count": total_count,
-        "analyzed_ok": 0,
-        "passed_final": 0,
-        "invalid_code": 0,
-        "category_filtered": 0,
-        "no_history": 0,
-        "analysis_error": 0,
-        "signal_filtered": 0,
-        "risk_filtered": 0,
-        "prelaunch_filtered": 0,
-        "trade_filtered": 0,
-        "final_score_filtered": 0,
-        "history_debug_samples": [],
-        "error_samples": [],
-    }
+        if only_active and status not in active_status:
+            rows.append(_recalc_row(payload))
+            continue
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(
-                _analyze_one_stock_for_recommend,
-                item,
-                master_lookup,
-                start_dt,
-                end_dt,
-                min_signal_score,
-                clean_categories,
-                mode,
-                risk_strictness,
-                min_prelaunch_score,
-                min_trade_score,
-            )
-            for item in universe_items
-        ]
+        stock_no = _normalize_code(payload.get("股票代號"))
+        stock_name = _safe_str(payload.get("股票名稱"))
+        market = _safe_str(payload.get("市場別"))
 
-        for future in as_completed(futures):
-            done_count += 1
-            try:
-                result = future.result()
-                if not isinstance(result, dict):
-                    debug_summary["analysis_error"] += 1
-                    debug_summary["error_samples"].append("未知錯誤：future.result 非 dict")
-                else:
-                    status = _safe_str(result.get("status")) or "analysis_error"
-                    if status == "ok":
-                        row = result.get("row")
-                        if isinstance(row, dict):
-                            base_rows.append(row)
-                            debug_summary["analyzed_ok"] += 1
-                    else:
-                        debug_summary[status] = int(debug_summary.get(status, 0)) + 1
-                        msg = _safe_str(result.get("message"))
-                        code = _safe_str(result.get("code"))
-                        if status == "no_history":
-                            hdbg = result.get("history_debug", {}) or {}
-                            attempt_lines = []
-                            for att in hdbg.get("attempts", [])[:3]:
-                                market = _safe_str(att.get("market_type")) or "未知市場"
-                                rows = att.get("rows", 0)
-                                err = _safe_str(att.get("error"))
-                                source = _safe_str(att.get("source"))
-                                attempt_lines.append(f"{market} rows={rows} source={source} err={err}")
-                            debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
-                        elif status == "analysis_error":
-                            debug_summary["error_samples"].append(f"{code}：{msg}")
-            except Exception as e:
-                debug_summary["analysis_error"] += 1
-                debug_summary["error_samples"].append(f"future.result 例外：{e}")
-            should_update_progress = (
-                done_count == 1
-                or done_count == total_count
-                or done_count % max(1, PROGRESS_UPDATE_EVERY) == 0
-                or done_count / total_count >= 0.98
-            )
-            if should_update_progress:
-                elapsed = time.time() - start_ts
-                avg_per_stock = elapsed / done_count if done_count > 0 else 0
-                remain_count = max(total_count - done_count, 0)
-                eta_sec = avg_per_stock * remain_count
-                ratio = done_count / total_count if total_count > 0 else 0
+        latest, used_market, price_src = _get_latest_close(stock_no, stock_name, market)
+        if latest is not None:
+            payload["最新價"] = latest
+            payload["市場別"] = used_market or market
+            payload["最新更新時間"] = _now_text()
+            payload["備註"] = (_safe_str(payload.get("備註")) + f"｜最新價來源:{price_src}").strip("｜")
 
-                progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
-                progress_text.caption(
-                    f"已完成 {done_count}/{total_count}｜"
-                    f"已花時間：{_fmt_seconds(elapsed)}｜"
-                    f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                    f"平均每檔：約 {_fmt_seconds(avg_per_stock)}"
-                )
+        payload = _recalc_row(payload)
+        rows.append(payload)
 
-    progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
-    total_elapsed = time.time() - start_ts
-    progress_text.caption(f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}")
+    return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
-    base_df = pd.DataFrame(base_rows)
-    if base_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    category_strength_df = _compute_category_strength(base_df)
-    if category_strength_df.empty:
-        base_df["類股平均總分"] = None
-        base_df["類股平均訊號"] = None
-        base_df["類股平均漲幅"] = None
-        base_df["類股熱度分數"] = None
-        base_df["類股熱度排名"] = None
-        base_df["類股加速度"] = None
-        base_df["類股平均型態突破"] = None
-        base_df["類股平均爆發力"] = None
-    else:
-        base_df = base_df.merge(
-            category_strength_df[
-                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度", "類股平均型態突破", "類股平均爆發力"]
-            ],
-            on="類別",
-            how="left",
-        )
+def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return _ensure_godpick_record_columns(pd.DataFrame())
+    rows = []
+    for _, row in df.iterrows():
+        payload = dict(row)
+        code = _normalize_code(payload.get("股票代號"))
+        name = _safe_str(payload.get("股票名稱"))
+        market = _safe_str(payload.get("市場別"))
+        rec_date = _safe_str(payload.get("推薦日期"))
+        for d in [3, 5, 10, 20]:
+            key = f"{d}日績效%"
+            val = _safe_float(payload.get(key))
+            if val is None:
+                payload[key] = _get_forward_return(code, name, market, rec_date, d)
+        payload = _recalc_row(payload)
+        rows.append(payload)
+    return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
-    market_info = _build_market_environment(base_df)
-    base_df["市場環境分數"] = market_info.get("score", 50)
-    base_df["市場環境"] = market_info.get("label", "中性")
 
-    base_df["同類股領先幅度"] = (base_df["個股原始總分"] - base_df["類股平均總分"].fillna(0)).apply(lambda x: _score_clip(50 + x))
-    base_df["是否領先同類股"] = (base_df["個股原始總分"] >= base_df["類股平均總分"].fillna(0)).map({True: "是", False: "否"})
-    base_df["類股內排名"] = base_df.groupby("類別")["個股原始總分"].rank(method="dense", ascending=False).astype(int)
-    base_df["類股前3強"] = base_df["類股內排名"].apply(lambda x: "是" if pd.notna(x) and int(x) <= 3 else "否")
+def _load_records() -> pd.DataFrame:
+    gh_df, gh_err = _read_records_from_github()
+    fs_df, fs_err = _read_records_from_firestore()
 
-    mode_scores = base_df.apply(
-        lambda r: _build_final_god_score_row(
-            row=r,
-            mode=_safe_str(mode),
-            market_score=_safe_float(market_info.get("score"), 50) or 50,
-        ),
-        axis=1,
-    )
-    base_df["推薦總分"] = [x[0] for x in mode_scores]
-    base_df["推薦標籤"] = [x[1] for x in mode_scores]
+    base_df = pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+    if not gh_df.empty:
+        base_df = gh_df.copy()
+    if not fs_df.empty:
+        base_df = _append_records_dedup_by_business_key(base_df, fs_df)
 
-    def _recommend(score: float) -> str:
-        if score >= 90:
-            return "股神級"
-        if score >= 84:
-            return "強烈關注"
-        if score >= 72:
-            return "優先觀察"
-        if score >= 60:
-            return "可列追蹤"
-        return "觀察"
+    st.session_state[_k("load_detail")] = [
+        f"GitHub: {'OK' if not gh_err else gh_err}",
+        f"Firestore: {'OK' if not fs_err else fs_err}",
+    ]
+    if not base_df.empty:
+        base_df = _ensure_godpick_record_columns(pd.DataFrame([_recalc_row(r) for _, r in base_df.iterrows()]))
+    return _ensure_godpick_record_columns(base_df)
 
-    base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
 
-    def _reason_builder(r):
-        reason_parts = []
-        if _safe_float(r.get("均線轉強分"), 0) >= 70:
-            reason_parts.append("均線結構轉強")
-        if _safe_float(r.get("量能啟動分"), 0) >= 65:
-            reason_parts.append("量能明顯放大")
-        if _safe_float(r.get("突破準備分"), 0) >= 70:
-            reason_parts.append("接近壓力突破位")
-        if _safe_float(r.get("動能翻多分"), 0) >= 65:
-            reason_parts.append("動能翻多")
-        if _safe_float(r.get("支撐防守分"), 0) >= 65:
-            reason_parts.append("支撐防守佳")
-        if _safe_str(r.get("是否領先同類股")) == "是":
-            reason_parts.append("領先同類股")
-        if _safe_str(r.get("類股前3強")) == "是":
-            reason_parts.append("類股前3強")
-        if _safe_float(r.get("類股熱度分數"), 0) >= 75:
-            reason_parts.append("所屬類股熱度高")
-        if _safe_float(r.get("交易可行分數"), 0) >= 70:
-            reason_parts.append("風險報酬佳")
-        if not reason_parts:
-            reason_parts.append("結構偏多，列入觀察")
-        return "、".join(reason_parts[:6])
+def _save_state_df(df: pd.DataFrame):
+    st.session_state[_k("records_df")] = _ensure_godpick_record_columns(df)
+    st.session_state[_k("records_saved_at")] = _now_text()
+    _invalidate_analysis_cache()
 
-    base_df["推薦理由摘要"] = base_df.apply(_build_recommend_reason_v2, axis=1)
 
-    for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
-        if c not in base_df.columns:
-            base_df[c] = pd.NA
-
-    final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
-    debug_summary["final_score_filtered"] = max(len(base_df) - len(final_df), 0)
-    debug_summary["passed_final"] = len(final_df)
-    _save_debug_scan_summary(debug_summary)
-
-    sort_cols = ["推薦總分", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
-    active_sort_cols = [c for c in sort_cols if c in final_df.columns]
-    final_df = final_df.sort_values(
-        active_sort_cols,
-        ascending=[False] * len(active_sort_cols),
-    ).reset_index(drop=True)
-
-    if "勾選" not in final_df.columns:
-        final_df.insert(0, "勾選", False)
-
-    hot_pick_df = _build_hot_stock_candidates(base_df, final_df, min_total_score)
-
-    return final_df, category_strength_df, hot_pick_df
+def _get_state_df() -> pd.DataFrame:
+    df = st.session_state.get(_k("records_df"))
+    if isinstance(df, pd.DataFrame):
+        return _ensure_godpick_record_columns(df)
+    return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
 
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
-    price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "停損價", "賣出目標1", "賣出目標2"]
-    pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
-    score_cols = [
-        "訊號分數", "雷達均分", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "大盤可參考分數", "大盤加權分", "大盤市場廣度分數", "大盤量價確認分數", "大盤權值支撐分數", "大盤推薦同步分數", "建議部位%", "風險報酬比", "追價風險分", "停損距離%", "目標報酬%", "交易可行分數",
-        "追價風險分數", "拉回買點分數", "突破買點分數",
-        "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數",
-        "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
-        "大戶鎖碼代理分數", "法人連買代理分數",
-        "個股原始總分", "市場環境分數", "型態突破分數", "爆發力分數", "類股平均總分", "類股平均訊號", "類股熱度分數",
-        "類股加速度", "同類股領先幅度", "推薦總分", "風險分數",
-        "均線轉強分", "量能啟動分", "突破準備分", "動能翻多分", "支撐防守分"
+    pct_cols = ["實際報酬%", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
+    num_cols = [
+        "推薦總分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "同類股領先幅度",
+        "推薦價格", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額", "持有天數",
     ]
-
-    for c in price_cols:
-        if c in show.columns:
-            show[c] = show[c].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
     for c in pct_cols:
         if c in show.columns:
             show[c] = show[c].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
-    for c in score_cols:
+    for c in num_cols:
         if c in show.columns:
-            show[c] = show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
-
+            show[c] = show[c].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
+    for c in ["是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2"]:
+        if c in show.columns:
+            show[c] = show[c].map(lambda v: "是" if _normalize_bool(v) else "否")
     return show
 
 
-def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame):
-    st.session_state[_k("rec_df_store")] = rec_df.copy()
-    st.session_state[_k("category_strength_store")] = category_strength_df.copy()
-    st.session_state[_k("hot_pick_store")] = hot_pick_df.copy()
-    st.session_state[_k("result_saved_at")] = _now_text()
-    _save_latest_recommendation_pack(rec_df, category_strength_df, hot_pick_df)
+def _df_signature(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "empty"
+    base_cols = [c for c in ["record_id", "更新時間", "最新更新時間", "最新價", "損益幅%", "實際報酬%", "20日績效%"] if c in df.columns]
+    if not base_cols:
+        base_cols = list(df.columns[:8])
+    try:
+        sig_src = df[base_cols].fillna("").astype(str)
+        return hashlib.md5(sig_src.to_csv(index=False).encode("utf-8")).hexdigest()
+    except Exception:
+        return hashlib.md5(str(df.shape).encode("utf-8")).hexdigest()
 
 
-def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    rec_df = st.session_state.get(_k("rec_df_store"))
-    cat_df = st.session_state.get(_k("category_strength_store"))
-    hot_df = st.session_state.get(_k("hot_pick_store"))
-
-    if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame) and not rec_df.empty:
-        if not isinstance(hot_df, pd.DataFrame):
-            hot_df = pd.DataFrame()
-        return rec_df.copy(), cat_df.copy(), hot_df.copy()
-
-    rec_df, cat_df, hot_df, saved_at = _load_latest_recommendation_pack()
-    if isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
-        st.session_state[_k("rec_df_store")] = rec_df.copy()
-        st.session_state[_k("category_strength_store")] = cat_df.copy()
-        st.session_state[_k("hot_pick_store")] = hot_df.copy()
-        st.session_state[_k("result_saved_at")] = saved_at or _now_text()
-        return rec_df.copy(), cat_df.copy(), hot_df.copy()
-
-    return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+def _get_default_col_profile(mode: str) -> list[str]:
+    return DEFAULT_ADVANCED_COLS.copy() if mode == "進階" else DEFAULT_STANDARD_COLS.copy()
 
 
-# =========================================================
-# Excel 匯出
-# =========================================================
-@st.cache_data(ttl=300, show_spinner=False)
+def _get_profile_key(mode: str) -> str:
+    return _k(f"col_profile_{mode}")
 
-def _get_full_table_default_cols() -> list[str]:
-    return [
-        "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "買點分級",
-        "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數",
-        "信心等級", "推薦分桶", "市場環境分數",
-        "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
-        "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
-        "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
-        "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
-        "推薦標籤", "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要",
-        "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+
+def _dedupe_cols(cols: list[str], available_cols: list[str]) -> list[str]:
+    final = []
+    seen = set()
+    for c in cols or []:
+        c = _safe_str(c)
+        if c in available_cols and c not in seen:
+            final.append(c)
+            seen.add(c)
+    return final
+
+
+def _get_saved_col_profile(mode: str, available_cols: list[str]) -> list[str]:
+    """
+    重要修正：
+    只要使用者已經按「套用設定並永久記錄」，就完全依照已套用順序顯示。
+    不再把 DEFAULT_STANDARD_COLS / DEFAULT_ADVANCED_COLS 插回中間，
+    避免「推薦日期」等欄位下次又跑回原始位置。
+    """
+    profile_key = _get_profile_key(mode)
+    has_saved = profile_key in st.session_state and isinstance(st.session_state.get(profile_key), list) and len(st.session_state.get(profile_key)) > 0
+
+    if has_saved:
+        saved = _dedupe_cols(st.session_state.get(profile_key), available_cols)
+        extra = [c for c in available_cols if c not in saved]
+        return saved + extra
+
+    default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
+    extra = [c for c in available_cols if c not in default_cols]
+    return default_cols + extra
+
+
+def _save_col_profile(mode: str, cols: list[str]):
+    # 保存完整順序；後續只補新欄位到最後，不會重套預設順序。
+    available = list(dict.fromkeys(cols or []))
+    st.session_state[_get_profile_key(mode)] = available.copy()
+    st.session_state[_k("last_col_profile_save")] = _now_text()
+    ok, msg = _persist_ui_config()
+    if ok:
+        _set_status(f"欄位順序已保存：{mode}", "success")
+    else:
+        _set_status(f"欄位順序已更新本機狀態，但 GitHub 保存失敗：{msg}", "warning")
+
+
+def _reset_col_profile(mode: str, available_cols: list[str]):
+    default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
+    extra = [c for c in available_cols if c not in default_cols]
+    _save_col_profile(mode, default_cols + extra)
+
+
+def _stage_col_profile(mode: str, cols: list[str], available_cols: list[str]):
+    st.session_state[_k(f"staged_col_profile_{mode}")] = _dedupe_cols(cols, available_cols) + [
+        c for c in available_cols if c not in _dedupe_cols(cols, available_cols)
     ]
 
 
-def _get_full_table_order_for_export(rec_df: pd.DataFrame) -> list[str]:
-    """
-    讓 Excel 的「完整推薦表」與畫面上的「完整推薦表」欄位順序完全一致。
-    會吃使用者在完整推薦表欄位管理中套用並永久記錄的順序。
-    """
-    if rec_df is None or rec_df.empty:
-        return []
-    available_cols = list(rec_df.columns)
-    default_cols = _get_full_table_default_cols()
-    saved_order = _load_persistent_column_order("full_table")
-    full_order = _normalize_column_order(saved_order if saved_order else default_cols, available_cols, default_cols)
-    return [c for c in full_order if c in rec_df.columns]
+def _get_stage_col_profile(mode: str, applied_cols: list[str], available_cols: list[str]) -> list[str]:
+    staged = st.session_state.get(_k(f"staged_col_profile_{mode}"))
+    if isinstance(staged, list) and staged:
+        staged = _dedupe_cols(staged, available_cols)
+        return staged + [c for c in available_cols if c not in staged]
+    return applied_cols.copy()
 
 
-def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int, full_order: list[str] | None = None):
-    if rec_df is None or rec_df.empty:
-        empty = pd.DataFrame()
-        return empty, empty, empty, empty
-
-    if full_order is None:
-        full_order = _get_full_table_order_for_export(rec_df)
-
-    # Excel「完整推薦表」必須和畫面上的完整推薦表欄位一致。
-    rec_export = rec_df[[c for c in full_order if c in rec_df.columns]].copy() if full_order else rec_df.copy()
-    leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
-    factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
-    cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
-
-    leader_export = leader_df[
-        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "飆股起漲分數", "起漲等級", "起漲摘要", "個股原始總分", "類股平均總分", "類股熱度分數", "推薦總分", "推薦理由摘要"]
-    ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
-
-    factor_export = factor_rank[
-        ["股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
-    ].head(top_n).copy() if not factor_rank.empty else pd.DataFrame()
-
-    return rec_export, cat_export, leader_export, factor_export
+def _restore_original_col_profile_to_stage(mode: str, available_cols: list[str]):
+    default_cols = [c for c in _get_default_col_profile(mode) if c in available_cols]
+    extra = [c for c in available_cols if c not in default_cols]
+    st.session_state[_k(f"staged_col_profile_{mode}")] = default_cols + extra
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _build_excel_bytes(
-    rec_export: pd.DataFrame,
-    cat_export: pd.DataFrame,
-    leader_export: pd.DataFrame,
-    factor_export: pd.DataFrame,
-) -> bytes:
+def _move_col(cols: list[str], col_name: str, direction: str) -> list[str]:
+    x = cols.copy()
+    if col_name not in x:
+        return x
+    idx = x.index(col_name)
+    if direction == "up" and idx > 0:
+        x[idx], x[idx - 1] = x[idx - 1], x[idx]
+    elif direction == "down" and idx < len(x) - 1:
+        x[idx], x[idx + 1] = x[idx + 1], x[idx]
+    elif direction == "top" and idx > 0:
+        x.insert(0, x.pop(idx))
+    elif direction == "bottom" and idx < len(x) - 1:
+        x.append(x.pop(idx))
+    return x
+
+
+def _build_filtered_view_df(
+    df: pd.DataFrame,
+    keyword: str,
+    mode_filter: str,
+    category_filter: str,
+    status_filter: str,
+    bought_filter: str,
+    sort_by: str,
+    sort_asc: bool,
+) -> pd.DataFrame:
+    view_df = df.copy()
+
+    if keyword:
+        mask = (
+            view_df["股票代號"].astype(str).str.contains(keyword, case=False, na=False)
+            | view_df["股票名稱"].astype(str).str.contains(keyword, case=False, na=False)
+            | view_df["推薦理由摘要"].astype(str).str.contains(keyword, case=False, na=False)
+        )
+        view_df = view_df[mask].copy()
+
+    if mode_filter != "全部":
+        view_df = view_df[view_df["推薦模式"].astype(str) == mode_filter].copy()
+
+    if category_filter != "全部":
+        view_df = view_df[view_df["類別"].astype(str) == category_filter].copy()
+
+    if status_filter != "全部":
+        view_df = view_df[view_df["目前狀態"].astype(str) == status_filter].copy()
+
+    if bought_filter != "全部":
+        target_bool = bought_filter == "是"
+        view_df = view_df[view_df["是否已實際買進"].fillna(False).map(_normalize_bool) == target_bool].copy()
+
+    if sort_by in view_df.columns:
+        view_df = view_df.sort_values(sort_by, ascending=sort_asc, na_position="last")
+
+    return view_df.reset_index(drop=True)
+
+
+def _get_analysis_cache(df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], dict[str, Any], float | None, float | None]:
+    sig = _df_signature(df)
+    cache_key = _k("analysis_cache")
+    cache = st.session_state.get(cache_key, {})
+
+    if cache.get("sig") == sig:
+        return cache["ana_tables"], cache["summary"], cache["avg_20"], cache["avg_real"]
+
+    ana_tables = _build_analysis_tables(df)
+    summary = _build_summary(df)
+    avg_20 = pd.to_numeric(df["20日績效%"], errors="coerce").dropna().mean() if not df.empty else None
+    avg_real = pd.to_numeric(df.loc[df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if not df.empty else None
+
+    st.session_state[cache_key] = {
+        "sig": sig,
+        "ana_tables": ana_tables,
+        "summary": summary,
+        "avg_20": avg_20,
+        "avg_real": avg_real,
+    }
+    return ana_tables, summary, avg_20, avg_real
+
+
+def _invalidate_analysis_cache():
+    st.session_state.pop(_k("analysis_cache"), None)
+
+
+def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, visible_limit: int) -> tuple[pd.DataFrame, int, bool]:
+    safe_cols = []
+    seen = set()
+
+    # record_id 是刪除 / 編輯 / 同步的必要識別欄。
+    # 即使使用者欄位設定把它移除，也要保留在 editor_df 裡，畫面再用 column_config 隱藏。
+    if "record_id" in view_df.columns:
+        safe_cols.append("record_id")
+        seen.add("record_id")
+
+    for c in use_cols or []:
+        if c in view_df.columns and c not in seen and c not in ["匯入自選", "刪除"]:
+            safe_cols.append(c)
+            seen.add(c)
+
+    src = view_df[safe_cols].copy()
+    # Streamlit data_editor 不允許重複欄位名稱；這裡再保險清除一次。
+    src = src.loc[:, ~src.columns.duplicated()].copy()
+    truncated = False
+    total_rows = len(src)
+
+    if fast_mode and total_rows > visible_limit:
+        src = src.head(visible_limit).copy()
+        truncated = True
+
+    if "匯入自選" not in src.columns:
+        src.insert(0, "匯入自選", False)
+    if "刪除" not in src.columns:
+        src.insert(1, "刪除", False)
+    return src, total_rows, truncated
+
+
+def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {"count": 0, "buy_count": 0, "sold_count": 0, "avg_ret": 0, "win_rate": 0}
+    ret_series = pd.to_numeric(df["實際報酬%"], errors="coerce")
+    pnl_series = pd.to_numeric(df["損益幅%"], errors="coerce")
+    used_ret = ret_series.fillna(pnl_series)
+    valid = used_ret.dropna()
+    buy_count = int(df["是否已實際買進"].fillna(False).map(_normalize_bool).sum())
+    sold_count = int(df["目前狀態"].isin(["已賣出", "停損", "達標"]).sum())
+    win_rate = float((valid > 0).mean() * 100) if not valid.empty else 0.0
+    avg_ret = float(valid.mean()) if not valid.empty else 0.0
+    return {"count": int(len(df)), "buy_count": buy_count, "sold_count": sold_count, "avg_ret": avg_ret, "win_rate": win_rate}
+
+
+def _win_rate(series) -> float:
+    s = pd.to_numeric(pd.Series(series), errors="coerce").dropna()
+    return float((s > 0).mean() * 100) if len(s) else 0.0
+
+
+def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    local_df = _ensure_godpick_record_columns(df.copy())
+    if local_df.empty:
+        return {
+            "mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均系統報酬", "系統勝率", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "達目標1比率", "停損率", "平均推薦總分"]),
+            "category": pd.DataFrame(columns=["類別", "筆數", "平均系統報酬", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "系統勝率", "達目標1比率", "停損率"]),
+            "grade": pd.DataFrame(columns=["推薦等級", "筆數", "平均系統報酬", "系統勝率", "達目標1比率", "停損率"]),
+            "trade_mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"]),
+            "best_mode": pd.DataFrame(),
+            "best_category": pd.DataFrame(),
+        }
+
+    x = local_df.copy()
+    x["系統報酬基準"] = pd.to_numeric(x["損益幅%"], errors="coerce")
+    x["實際交易基準"] = pd.to_numeric(x["實際報酬%"], errors="coerce")
+
+    mode_df = x.groupby("推薦模式", dropna=False).agg(
+        筆數=("record_id", "count"),
+        平均系統報酬=("系統報酬基準", "mean"),
+        系統勝率=("系統報酬基準", _win_rate),
+        平均3日績效=("3日績效%", "mean"),
+        平均5日績效=("5日績效%", "mean"),
+        平均10日績效=("10日績效%", "mean"),
+        平均20日績效=("20日績效%", "mean"),
+        **{
+            "3日勝率": ("3日績效%", _win_rate),
+            "5日勝率": ("5日績效%", _win_rate),
+            "10日勝率": ("10日績效%", _win_rate),
+            "20日勝率": ("20日績效%", _win_rate),
+        },
+        達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        平均推薦總分=("推薦總分", "mean"),
+    ).reset_index()
+
+    category_df = x.groupby("類別", dropna=False).agg(
+        筆數=("record_id", "count"),
+        平均系統報酬=("系統報酬基準", "mean"),
+        平均3日績效=("3日績效%", "mean"),
+        平均5日績效=("5日績效%", "mean"),
+        平均10日績效=("10日績效%", "mean"),
+        平均20日績效=("20日績效%", "mean"),
+        **{
+            "3日勝率": ("3日績效%", _win_rate),
+            "5日勝率": ("5日績效%", _win_rate),
+            "10日勝率": ("10日績效%", _win_rate),
+            "20日勝率": ("20日績效%", _win_rate),
+        },
+        系統勝率=("系統報酬基準", _win_rate),
+        達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+    ).reset_index()
+
+    grade_df = x.groupby("推薦等級", dropna=False).agg(
+        筆數=("record_id", "count"),
+        平均系統報酬=("系統報酬基準", "mean"),
+        系統勝率=("系統報酬基準", _win_rate),
+        達目標1比率=("是否達目標1", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+        停損率=("是否達停損", lambda s: float(pd.Series(s).fillna(False).map(_normalize_bool).mean() * 100) if len(pd.Series(s)) else 0.0),
+    ).reset_index()
+
+    trade_df = x[x["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
+    if trade_df.empty:
+        trade_mode_df = pd.DataFrame(columns=["推薦模式", "筆數", "平均實際報酬", "實際勝率"])
+    else:
+        trade_mode_df = trade_df.groupby("推薦模式", dropna=False).agg(
+            筆數=("record_id", "count"),
+            平均實際報酬=("實際交易基準", "mean"),
+            實際勝率=("實際交易基準", _win_rate),
+        ).reset_index()
+
+    best_mode_df = mode_df.copy()
+    if not best_mode_df.empty:
+        best_mode_df["綜合模式分數"] = (
+            best_mode_df["平均20日績效"].fillna(0) * 0.50
+            + best_mode_df["20日勝率"].fillna(0) * 0.35
+            + best_mode_df["平均推薦總分"].fillna(0) * 0.15
+        )
+        best_mode_df = best_mode_df.sort_values(["綜合模式分數", "平均20日績效", "20日勝率"], ascending=[False, False, False]).reset_index(drop=True)
+
+    best_category_df = category_df.copy()
+    if not best_category_df.empty:
+        best_category_df["綜合類別分數"] = (
+            best_category_df["平均20日績效"].fillna(0) * 0.55
+            + best_category_df["20日勝率"].fillna(0) * 0.35
+            + best_category_df["系統勝率"].fillna(0) * 0.10
+        )
+        best_category_df = best_category_df.sort_values(["綜合類別分數", "平均20日績效", "20日勝率"], ascending=[False, False, False]).reset_index(drop=True)
+
+    return {"mode": mode_df, "category": category_df, "grade": grade_df, "trade_mode": trade_mode_df, "best_mode": best_mode_df, "best_category": best_category_df}
+
+
+def _build_mode_performance_label(row: pd.Series | dict[str, Any], mode_stats_df: pd.DataFrame) -> str:
+    src = dict(row)
+    mode = _safe_str(src.get("推薦模式"))
+    if mode_stats_df is None or mode_stats_df.empty or not mode:
+        return _safe_str(src.get("模式績效標籤"))
+    hit = mode_stats_df[mode_stats_df["推薦模式"].astype(str) == mode]
+    if hit.empty:
+        return _safe_str(src.get("模式績效標籤"))
+    r = hit.iloc[0]
+    avg_20 = _safe_float(r.get("平均20日績效"))
+    win20 = _safe_float(r.get("20日勝率"))
+    sample_n = int(_safe_float(r.get("筆數"), 0) or 0)
+    if sample_n < 3:
+        return "樣本不足"
+    if avg_20 is not None and win20 is not None:
+        if avg_20 >= 8 and win20 >= 65:
+            return "強勢模式"
+        if avg_20 >= 3 and win20 >= 55:
+            return "穩健模式"
+        if avg_20 < 0 and win20 < 45:
+            return "偏弱模式"
+        return "一般模式"
+    return _safe_str(src.get("模式績效標籤"))
+
+
+def _apply_mode_labels(df: pd.DataFrame) -> pd.DataFrame:
+    x = _ensure_godpick_record_columns(df.copy())
+    ana = _build_analysis_tables(x)
+    x["模式績效標籤"] = x.apply(lambda r: _build_mode_performance_label(r, ana["mode"]), axis=1)
+    return _ensure_godpick_record_columns(x)
+
+
+def _build_export_bytes(df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        if rec_export is not None:
-            rec_export.to_excel(writer, sheet_name="完整推薦表", index=False)
-        if cat_export is not None:
-            cat_export.to_excel(writer, sheet_name="類股強度榜", index=False)
-        if leader_export is not None:
-            leader_export.to_excel(writer, sheet_name="同類股領先榜", index=False)
-        if factor_export is not None:
-            factor_export.to_excel(writer, sheet_name="自動因子榜", index=False)
-
+        _ensure_godpick_record_columns(df).to_excel(writer, sheet_name="推薦紀錄", index=False)
+        tables["mode"].to_excel(writer, sheet_name="模式分析", index=False)
+        tables["category"].to_excel(writer, sheet_name="類別分析", index=False)
+        tables["grade"].to_excel(writer, sheet_name="等級分析", index=False)
+        tables["trade_mode"].to_excel(writer, sheet_name="實際交易分析", index=False)
+        if not tables["best_mode"].empty:
+            tables["best_mode"].to_excel(writer, sheet_name="最強模式", index=False)
+        if not tables["best_category"].empty:
+            tables["best_category"].to_excel(writer, sheet_name="最強類別", index=False)
         try:
             for ws in writer.book.worksheets:
                 ws.freeze_panes = "A2"
@@ -5092,678 +1790,40 @@ def _build_excel_bytes(
                     col_letter = col_cells[0].column_letter
                     for cell in col_cells:
                         cell_val = "" if cell.value is None else str(cell.value)
-                        if len(cell_val) > max_len:
-                            max_len = len(cell_val)
-                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 40)
-        except Exception:
-            pass
-
-    output.seek(0)
-    return output.getvalue()
-
-
-def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
-    if rec_df is None or rec_df.empty:
-        return
-
-    full_order = _get_full_table_order_for_export(rec_df)
-    rec_export, cat_export, leader_export, factor_export = _build_export_views(rec_df, category_strength_df, top_n, full_order=full_order)
-
-    # 讓 Excel 內容顯示格式盡量與畫面上的完整推薦表一致。
-    rec_export_for_excel = _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export
-    excel_bytes = _build_excel_bytes(rec_export_for_excel, cat_export, leader_export, factor_export)
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_name = f"股神推薦_V2_{ts}.xlsx"
-
-    render_pro_section("Excel 匯出")
-    c1, c2 = st.columns([2, 4])
-    with c1:
-        st.download_button(
-            label="匯出推薦結果 Excel",
-            data=excel_bytes,
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with c2:
-        st.caption("匯出內容：完整推薦表會與畫面欄位順序一致，另含類股強度榜、同類股領先榜、自動因子榜。")
-
-
-def _render_selected_export_block():
-    selected_df = st.session_state.get(_k("selected_rec_snapshot"))
-    if not isinstance(selected_df, pd.DataFrame) or selected_df.empty:
-        return
-
-    export_df = selected_df.copy()
-    want_cols = [
-        "股票代號", "股票名稱", "市場別", "類別",
-        "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分", "推薦分桶", "起漲等級", "信心等級",
-        "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
-        "同類股領先幅度", "是否領先同類股",
-        "最新價", "推薦買點_拉回", "推薦買點_突破",
-        "停損價", "賣出目標1", "賣出目標2",
-        "3日績效%", "5日績效%", "10日績效%", "20日績效%",
-        "推薦標籤", "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要",
-    ]
-    export_df = export_df[[c for c in want_cols if c in export_df.columns]].copy()
-
-    selected_bytes = _build_excel_bytes(
-        rec_export=export_df,
-        cat_export=pd.DataFrame(),
-        leader_export=pd.DataFrame(),
-        factor_export=pd.DataFrame(),
-    )
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.download_button(
-        label="匯出勾選推薦股 Excel",
-        data=selected_bytes,
-        file_name=f"股神推薦_勾選結果_{ts}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-
-
-def _build_record_export_bytes(record_rows: list[dict[str, Any]]) -> bytes:
-    df = _ensure_godpick_record_columns(pd.DataFrame(record_rows))
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="股神推薦紀錄匯入", index=False)
-        try:
-            ws = writer.book["股神推薦紀錄匯入"]
-            ws.freeze_panes = "A2"
-            for col_cells in ws.columns:
-                max_len = 0
-                col_letter = col_cells[0].column_letter
-                for cell in col_cells:
-                    cell_val = "" if cell.value is None else str(cell.value)
-                    max_len = max(max_len, len(cell_val))
-                ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 42)
+                        max_len = max(max_len, len(cell_val))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 42)
         except Exception:
             pass
     output.seek(0)
     return output.getvalue()
 
 
-
-
-def _render_recommendation_scoring_guide():
-    st.markdown(
-        """
-        <style>
-        .gp-guide-wrap{
-            background:#f8fafc;
-            border:1px solid rgba(99,102,241,.14);
-            border-radius:18px;
-            padding:18px 18px 14px 18px;
-            margin:18px 0 10px 0;
-        }
-        .gp-guide-title{
-            font-size:1.65rem;
-            font-weight:800;
-            color:#0f172a;
-            margin-bottom:16px;
-        }
-        .gp-guide-grid{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:14px;
-        }
-        .gp-guide-card{
-            background:#ffffff;
-            border:1px solid rgba(99,102,241,.14);
-            border-radius:18px;
-            padding:18px 18px 14px 18px;
-            box-shadow:0 1px 3px rgba(15,23,42,.04);
-            height:100%;
-        }
-        .gp-guide-card h4{
-            margin:0 0 10px 0;
-            font-size:1.28rem;
-            font-weight:800;
-            color:#111827;
-        }
-        .gp-guide-card p{
-            margin:0 0 10px 0;
-            color:#334155;
-            line-height:1.75;
-            font-size:1rem;
-        }
-        .gp-guide-card ul{
-            margin:0;
-            padding-left:1.2rem;
-        }
-        .gp-guide-card li{
-            margin:0 0 8px 0;
-            color:#334155;
-            line-height:1.75;
-            font-size:1rem;
-        }
-        .gp-score-list{display:flex;flex-direction:column;gap:10px;}
-        .gp-score-row{display:flex;align-items:flex-start;gap:10px;line-height:1.6;}
-        .gp-badge{
-            display:inline-block;
-            min-width:92px;
-            text-align:center;
-            padding:6px 10px;
-            border-radius:10px;
-            font-size:.95rem;
-            font-weight:800;
-            border:1px solid transparent;
-            white-space:nowrap;
-        }
-        .gp-badge.green{background:#e8f7ee;color:#15803d;border-color:#b7e4c7;}
-        .gp-badge.green2{background:#eefbf3;color:#166534;border-color:#ccefd7;}
-        .gp-badge.yellow{background:#fff7db;color:#b45309;border-color:#f7d98a;}
-        .gp-badge.orange{background:#fff1e6;color:#c2410c;border-color:#fdc9a6;}
-        .gp-badge.red{background:#feecec;color:#b91c1c;border-color:#f5b5b5;}
-        .gp-guide-foot{
-            margin-top:14px;
-            padding-top:10px;
-            border-top:1px solid rgba(99,102,241,.12);
-            color:#475569;
-            font-size:.98rem;
-            font-weight:600;
-        }
-        @media (max-width: 1200px){
-            .gp-guide-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
-        }
-        @media (max-width: 760px){
-            .gp-guide-grid{grid-template-columns:1fr;}
-        }
-        </style>
-        <div class="gp-guide-wrap">
-            <div class="gp-guide-title">推薦條件說明 / 分數解讀</div>
-            <div class="gp-guide-grid">
-                <div class="gp-guide-card">
-                    <h4>評分是怎麼算的？</h4>
-                    <p>系統依多個面向加總評分，分數越高，代表技術面、趨勢面、量價面與風險報酬條件越完整。</p>
-                    <ul>
-                        <li><b>趨勢強度：</b>均線多頭、突破型態、是否站穩關鍵價位</li>
-                        <li><b>量價結構：</b>量能放大、價量配合、是否有主力進場跡象</li>
-                        <li><b>風險控管：</b>回檔風險、追高風險、破線風險、波動風險</li>
-                        <li><b>交易可行：</b>進場點清楚、停損點明確、風險報酬比合理</li>
-                        <li><b>類股動能：</b>所屬類股熱度、資金輪動、族群帶動性</li>
-                    </ul>
-                </div>
-                <div class="gp-guide-card">
-                    <h4>分數代表什麼？</h4>
-                    <div class="gp-score-list">
-                        <div class="gp-score-row"><span class="gp-badge green">90 分以上</span><div><b>強勢買進區：</b>條件完整，可優先關注</div></div>
-                        <div class="gp-score-row"><span class="gp-badge green2">80–89 分</span><div><b>偏多觀察區：</b>適合逢回找買點</div></div>
-                        <div class="gp-score-row"><span class="gp-badge yellow">70–79 分</span><div><b>觀察等待區：</b>條件尚可，需搭配突破或量能確認</div></div>
-                        <div class="gp-score-row"><span class="gp-badge orange">60–69 分</span><div><b>保守區：</b>有題材但訊號不足，先觀察</div></div>
-                        <div class="gp-score-row"><span class="gp-badge red">60 分以下</span><div><b>不建議進場：</b>風險較高，勝率不足</div></div>
-                    </div>
-                </div>
-                <div class="gp-guide-card">
-                    <h4>何時適合買入？</h4>
-                    <ul>
-                        <li>建議 <b>80 分以上</b> 再優先考慮進場</li>
-                        <li>若達 <b>90 分以上</b>，且量價配合、風險報酬佳，可列為高優先名單</li>
-                        <li><b>70–79 分</b> 可列入觀察名單，等待突破、放量或回測支撐成功</li>
-                        <li>低於 <b>70 分</b> 原則上不追價</li>
-                    </ul>
-                </div>
-                <div class="gp-guide-card">
-                    <h4>使用提醒</h4>
-                    <ul>
-                        <li>本分數為輔助判斷，不等於保證獲利</li>
-                        <li>建議搭配停損、部位控管與大盤方向一起判讀</li>
-                        <li>短線、波段、領頭羊模式的標準會略有不同</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="gp-guide-foot">提醒：市場隨時變化，請搭配最新資訊與自身交易策略，謹慎評估風險。</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def _render_record_export_block(rec_df: pd.DataFrame):
-    selected_df = st.session_state.get(_k("selected_rec_snapshot"))
-    if not isinstance(selected_df, pd.DataFrame) or selected_df.empty:
-        return
-
-    selected_codes = [_normalize_code(x) for x in selected_df["股票代號"].astype(str).tolist() if _normalize_code(x)]
-    if not selected_codes:
-        return
-
-    record_rows = _build_record_rows_from_rec_df(rec_df, selected_codes)
-    if not record_rows:
-        return
-
-    record_bytes = _build_record_export_bytes(record_rows)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    render_pro_section("匯出到股神推薦紀錄")
-    st.caption("這裡只做匯出，不直接串接 8_股神推薦紀錄。你可以下載後自行備份或匯入。")
-    st.download_button(
-        label="匯出股神推薦紀錄 Excel",
-        data=record_bytes,
-        file_name=f"股神推薦紀錄匯入檔_{ts}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
-
-
-# =========================================================
-# 頁面設定 / 欄位順序記憶
-# =========================================================
-def _ui_pref_key(name: str) -> str:
-    return _k(f"ui_{name}")
-
-def _ensure_ui_pref(name: str, default):
-    pref_key = _k(name)
-    ui_key = _ui_pref_key(name)
-    if pref_key not in st.session_state:
-        st.session_state[pref_key] = copy.deepcopy(default)
-    if ui_key not in st.session_state:
-        st.session_state[ui_key] = copy.deepcopy(st.session_state[pref_key])
-
-def _sync_ui_pref_to_saved(name: str):
-    pref_key = _k(name)
-    ui_key = _ui_pref_key(name)
-    if ui_key in st.session_state:
-        st.session_state[pref_key] = copy.deepcopy(st.session_state[ui_key])
-
-def _reset_ui_pref(name: str, default):
-    pref_key = _k(name)
-    ui_key = _ui_pref_key(name)
-    st.session_state[pref_key] = copy.deepcopy(default)
-    st.session_state[ui_key] = copy.deepcopy(default)
-
-
-def _default_recommend_scan_settings(watchlist_map=None) -> dict[str, Any]:
-    group_default = ""
-    try:
-        if isinstance(watchlist_map, dict) and watchlist_map:
-            group_default = list(watchlist_map.keys())[0]
-    except Exception:
-        group_default = ""
-    return {
-        "universe_mode": "自選群組",
-        "group": group_default,
-        "days": 120,
-        "top_n": 20,
-        "manual_codes": "",
-        "scan_limit": 1000,
-        "selected_categories": ["全部"],
-        "min_total_score": 55.0,
-        "min_signal_score": -2.0,
-        "min_prelaunch_score": 45.0,
-        "min_trade_score": 45.0,
-        "recommend_mode": "飆股模式",
-        "risk_strictness": "標準",
-        "pick_strategy": "結合版",
-    }
-
-
-def _recommend_setting_names() -> list[str]:
-    return [
-        "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
-        "selected_categories", "min_total_score", "min_signal_score",
-        "min_prelaunch_score", "min_trade_score",
-        "recommend_mode", "risk_strictness", "pick_strategy",
-    ]
-
-
-def _normalize_recommend_scan_settings(raw: Any, watchlist_map=None, category_options=None) -> dict[str, Any]:
-    base = _default_recommend_scan_settings(watchlist_map)
-    data = raw if isinstance(raw, dict) else {}
-
-    for k in base.keys():
-        if k in data:
-            base[k] = copy.deepcopy(data[k])
-
-    universe_options = ["自選群組", "手動輸入", "全市場", "上市", "上櫃", "興櫃"]
-    if base["universe_mode"] not in universe_options:
-        base["universe_mode"] = "自選群組"
-
-    group_options = list(watchlist_map.keys()) if isinstance(watchlist_map, dict) and watchlist_map else [""]
-    if base["group"] not in group_options:
-        base["group"] = group_options[0] if group_options else ""
-
-    for key, options, default in [
-        ("days", [60, 90, 120, 180, 240], 120),
-        ("top_n", [10, 20, 30, 50], 20),
-        ("scan_limit", [100, 200, 300, 500, 1000, 1500, 2000, "全部"], 1000),
-    ]:
-        if base[key] not in options:
-            try:
-                iv = int(base[key])
-                base[key] = iv if iv in options else default
-            except Exception:
-                base[key] = default
-
-    mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式"]
-    if base["recommend_mode"] not in mode_options:
-        base["recommend_mode"] = "飆股模式"
-
-    strict_options = ["寬鬆", "標準", "嚴格"]
-    if base["risk_strictness"] not in strict_options:
-        base["risk_strictness"] = "標準"
-
-    pick_options = ["精準版", "結合版"]
-    if base["pick_strategy"] not in pick_options:
-        base["pick_strategy"] = "結合版"
-
-    category_options = category_options or ["全部"]
-    cats = base.get("selected_categories", ["全部"])
-    if not isinstance(cats, list):
-        cats = ["全部"]
-    cats = [x for x in cats if x in category_options] or ["全部"]
-    base["selected_categories"] = cats
-
-    for k in ["min_total_score", "min_signal_score", "min_prelaunch_score", "min_trade_score"]:
-        try:
-            base[k] = float(base[k])
-        except Exception:
-            base[k] = float(_default_recommend_scan_settings(watchlist_map)[k])
-
-    return base
-
-
-def _load_persistent_recommend_scan_settings(watchlist_map=None, category_options=None) -> dict[str, Any]:
-    payload = _load_persistent_settings()
-    raw = payload.get("scan_settings", {}) if isinstance(payload, dict) else {}
-    return _normalize_recommend_scan_settings(raw, watchlist_map, category_options)
-
-
-def _save_persistent_recommend_scan_settings(settings: dict[str, Any]) -> tuple[bool, list[str]]:
-    payload = _load_persistent_settings()
-    if not isinstance(payload, dict):
-        payload = {}
-    payload["scan_settings"] = copy.deepcopy(settings)
-    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
-    payload["original_default_weights"] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-    payload["column_orders"] = payload.get("column_orders", {}) if isinstance(payload.get("column_orders", {}), dict) else {}
-    payload["updated_at"] = _now_text()
-    payload["version"] = "godpick_v5_persistent_settings"
-    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
-    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
-    return (local_ok or github_ok), [local_msg, github_msg]
-
-
-def _apply_recommend_scan_settings_to_state(settings: dict[str, Any], sync_widgets: bool = True):
-    """
-    套用推薦設定到 session_state。
-
-    sync_widgets=True 只能在 widget 建立前使用；此時要強制把畫面 widget key
-    同步成永久設定，避免換頁/重開後又吃到舊的 session 預設值。
-    sync_widgets=False 用於按鈕提交後，避免 StreamlitAPIException。
-    """
-    settings = settings or {}
-    for name in _recommend_setting_names():
-        val = copy.deepcopy(settings.get(name, _default_recommend_scan_settings().get(name)))
-        st.session_state[_k(name)] = val
-        ui_key = _ui_pref_key(name)
-        if sync_widgets:
-            st.session_state[ui_key] = val
-
-
-def _current_form_settings_from_values(
-    form_universe_mode, form_group, form_days, form_top_n, form_manual_codes,
-    form_scan_limit, form_selected_categories, form_min_total_score,
-    form_min_signal_score, form_min_prelaunch_score, form_min_trade_score,
-    form_recommend_mode, form_risk_strictness, form_pick_strategy,
-) -> dict[str, Any]:
-    return {
-        "universe_mode": form_universe_mode,
-        "group": form_group,
-        "days": form_days,
-        "top_n": form_top_n,
-        "manual_codes": form_manual_codes,
-        "scan_limit": form_scan_limit,
-        "selected_categories": form_selected_categories if form_selected_categories else ["全部"],
-        "min_total_score": float(form_min_total_score),
-        "min_signal_score": float(form_min_signal_score),
-        "min_prelaunch_score": float(form_min_prelaunch_score),
-        "min_trade_score": float(form_min_trade_score),
-        "recommend_mode": form_recommend_mode,
-        "risk_strictness": form_risk_strictness,
-        "pick_strategy": form_pick_strategy,
-    }
-
-
-def _stage_recommend_scan_settings_reset(settings: dict[str, Any], msg: str = ""):
-    st.session_state[_k("scan_settings_reset_pending")] = True
-    st.session_state[_k("scan_settings_reset_payload")] = copy.deepcopy(settings)
-    if msg:
-        st.session_state[_k("scan_settings_msg")] = msg
-
-
-def _normalize_column_order(saved_order, available_cols: list[str], default_cols: list[str]) -> list[str]:
-    saved = [str(x) for x in (saved_order or []) if str(x) in available_cols]
-    defaults = [str(x) for x in default_cols if str(x) in available_cols]
-    remain = [c for c in available_cols if c not in saved and c not in defaults]
-    merged = saved + [c for c in defaults if c not in saved] + remain
-    final = []
-    seen = set()
-    for c in merged:
-        if c in available_cols and c not in seen:
-            final.append(c)
-            seen.add(c)
-    return final
-
-def _column_order_state_key(name: str) -> str:
-    return _k(f"column_order_{name}")
-
-def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
-    state_key = _column_order_state_key(name)
-    applied_key = _k(f"column_order_applied_{name}")
-    draft_key = _k(f"column_order_draft_{name}")
-    pick_key = _k(f"column_pick_{name}")
-
-    persistent_order = _load_persistent_column_order(name)
-    base_order = persistent_order if persistent_order else st.session_state.get(applied_key, st.session_state.get(state_key, default_cols))
-
-    applied_order = _normalize_column_order(base_order, available_cols, default_cols)
-    draft_order = _normalize_column_order(st.session_state.get(draft_key, applied_order), available_cols, default_cols)
-
-    st.session_state[applied_key] = applied_order
-    st.session_state[draft_key] = draft_order
-    st.session_state[state_key] = applied_order
-
-    with st.expander(title, expanded=False):
-        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定。")
-        if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
-            st.session_state[pick_key] = draft_order[0] if draft_order else ""
-        picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
-
-        b1, b2, b3, b4, b5 = st.columns(5)
-        changed = False
-
-        if draft_order and picked:
-            idx = draft_order.index(picked)
-            with b1:
-                if st.button("左移", key=_k(f"move_left_{name}"), use_container_width=True) and idx > 0:
-                    draft_order[idx - 1], draft_order[idx] = draft_order[idx], draft_order[idx - 1]
-                    changed = True
-            with b2:
-                if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(draft_order) - 1:
-                    draft_order[idx + 1], draft_order[idx] = draft_order[idx], draft_order[idx + 1]
-                    changed = True
-            with b3:
-                if st.button("移到最前", key=_k(f"move_front_{name}"), use_container_width=True):
-                    draft_order.remove(picked)
-                    draft_order.insert(0, picked)
-                    changed = True
-            with b4:
-                if st.button("移到最後", key=_k(f"move_last_{name}"), use_container_width=True):
-                    draft_order.remove(picked)
-                    draft_order.append(picked)
-                    changed = True
-            with b5:
-                if st.button("恢復原始設定", key=_k(f"move_restore_default_{name}"), use_container_width=True):
-                    draft_order = _normalize_column_order(default_cols, available_cols, default_cols)
-                    changed = True
-
-        a1, a2, a3 = st.columns([1.2, 1.2, 3])
-        with a1:
-            apply_clicked = st.button("套用", key=_k(f"apply_column_order_{name}"), use_container_width=True, type="primary")
-        with a2:
-            cancel_clicked = st.button("取消暫存", key=_k(f"cancel_column_order_{name}"), use_container_width=True)
-        with a3:
-            if draft_order != applied_order:
-                st.warning("欄位順序已有暫存變更；按「套用」後才會永久記錄。")
-            else:
-                st.caption("目前欄位順序已套用並會永久保留。")
-
-        if changed:
-            st.session_state[draft_key] = draft_order
-            st.rerun()
-
-        if apply_clicked:
-            applied_order = _normalize_column_order(draft_order, available_cols, default_cols)
-            st.session_state[applied_key] = applied_order
-            st.session_state[state_key] = applied_order
-            st.session_state[draft_key] = applied_order
-            ok, msgs = _save_persistent_column_order(name, applied_order)
-            st.success("欄位順序已套用並永久記錄。" if ok else "欄位順序已套用，但永久記錄失敗。")
-            with st.expander("欄位設定保存明細", expanded=False):
-                for msg in msgs:
-                    st.write(f"- {msg}")
-            st.rerun()
-
-        if cancel_clicked:
-            st.session_state[draft_key] = applied_order
-            st.info("已取消暫存變更，回到目前已套用欄位順序。")
-            st.rerun()
-
-        st.caption("目前暫存欄位順序：" + " ｜ ".join(draft_order[:20]) + (" ..." if len(draft_order) > 20 else ""))
-
-    return st.session_state.get(applied_key, applied_order)
-
-
-# =========================================================
-# Main
-# =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
-    watchlist_map = _load_watchlist_map()
-    master_df = _load_master_df()
-    if master_df is None or master_df.empty:
-        master_df = _load_master_df_fallback_only()
-    today = date.today()
+    if _k("status_msg") not in st.session_state:
+        st.session_state[_k("status_msg")] = ""
+        st.session_state[_k("status_type")] = "info"
+    if _k("watchlist_target_group") not in st.session_state:
+        st.session_state[_k("watchlist_target_group")] = "股神推薦"
+    if _k("show_column_manager") not in st.session_state:
+        st.session_state[_k("show_column_manager")] = False
+    if _k("selected_col_to_move") not in st.session_state:
+        st.session_state[_k("selected_col_to_move")] = ""
+    if _k("ui_auto_save_flag") not in st.session_state:
+        st.session_state[_k("ui_auto_save_flag")] = False
 
-    defaults = {
-        "universe_mode": "自選群組",
-        "group": list(watchlist_map.keys())[0] if watchlist_map else "",
-        "days": 120,
-        "top_n": 20,
-        "manual_codes": "",
-        "scan_limit": 1000,
-        "selected_categories": ["全部"],
-        "min_total_score": 55.0,
-        "min_signal_score": -2.0,
-        "submitted_once": False,
-        "focus_code": "",
-        "status_msg": "",
-        "status_type": "info",
-        "rec_pick_group": list(watchlist_map.keys())[0] if watchlist_map else "",
-        "rec_pick_codes": [],
-        "rec_record_codes": [],
-        "result_saved_at": "",
-        "recommend_mode": "飆股模式",
-        "risk_strictness": "標準",
-        "min_prelaunch_score": 45.0,
-        "min_trade_score": 45.0,
-        "pick_strategy": "結合版",
-        "score_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
-        "score_weights_edit": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
-        "top_table_columns": [],
-        "full_table_columns": [],
-    }
-    persistent_settings = _load_persistent_settings()
-    persisted_weights = _normalize_weight_map(persistent_settings.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
-
-    for name, value in defaults.items():
-        if _k(name) not in st.session_state:
-            st.session_state[_k(name)] = value
-
-    if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
-        st.session_state[_k("score_weights")] = persisted_weights.copy()
-    if _k("score_weights_edit") not in st.session_state or st.session_state.get(_k("score_weights_edit")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
-        st.session_state[_k("score_weights_edit")] = persisted_weights.copy()
-
-    if _k("selected_rec_snapshot") not in st.session_state:
-        st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
-
-    _ensure_ui_pref("universe_mode", st.session_state.get(_k("universe_mode"), "自選群組"))
-    _ensure_ui_pref("group", st.session_state.get(_k("group"), list(watchlist_map.keys())[0] if watchlist_map else ""))
-    _ensure_ui_pref("days", st.session_state.get(_k("days"), 120))
-    _ensure_ui_pref("top_n", st.session_state.get(_k("top_n"), 20))
-    _ensure_ui_pref("manual_codes", st.session_state.get(_k("manual_codes"), ""))
-    _ensure_ui_pref("scan_limit", st.session_state.get(_k("scan_limit"), 1000))
-    _ensure_ui_pref("selected_categories", st.session_state.get(_k("selected_categories"), ["全部"]))
-    _ensure_ui_pref("recommend_mode", st.session_state.get(_k("recommend_mode"), "飆股模式"))
-    _ensure_ui_pref("risk_strictness", st.session_state.get(_k("risk_strictness"), "標準"))
-    _ensure_ui_pref("pick_strategy", st.session_state.get(_k("pick_strategy"), "結合版"))
-    _ensure_ui_pref("min_total_score", float(st.session_state.get(_k("min_total_score"), 55.0)))
-    _ensure_ui_pref("min_signal_score", float(st.session_state.get(_k("min_signal_score"), -2.0)))
-    _ensure_ui_pref("min_prelaunch_score", float(st.session_state.get(_k("min_prelaunch_score"), 45.0)))
-    _ensure_ui_pref("min_trade_score", float(st.session_state.get(_k("min_trade_score"), 45.0)))
-
-    next_pick_key = _k("rec_pick_codes_next")
-    real_pick_key = _k("rec_pick_codes")
-    widget_pick_key = _k("rec_pick_codes_widget")
-    if next_pick_key in st.session_state:
-        _next_pick_val = st.session_state.pop(next_pick_key)
-        st.session_state[real_pick_key] = _next_pick_val
-        # widget 尚未建立前可安全更新 widget key
-        st.session_state[widget_pick_key] = _next_pick_val
-
-    next_record_key = _k("rec_record_codes_next")
-    real_record_key = _k("rec_record_codes")
-    widget_record_key = _k("rec_record_codes_widget")
-    if next_record_key in st.session_state:
-        _next_record_val = st.session_state.pop(next_record_key)
-        st.session_state[real_record_key] = _next_record_val
-        # widget 尚未建立前可安全更新 widget key
-        st.session_state[widget_record_key] = _next_record_val
+    _load_ui_config_once()
 
     render_pro_hero(
-        title="股神推薦｜V4 加速記憶版",
-        subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
+        title="股神推薦紀錄",
+        subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
-
-    st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
-    st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
+    st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
+    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
-    st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
-    st.caption(f"股神決策引擎：{GOD_DECISION_ENGINE_VERSION}")
-    st.caption(f"推薦設定永久記錄版：{SCAN_SETTINGS_PERSIST_VERSION}")
-    st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
-    st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
-    st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-
-    macro_ref_for_ui = _load_latest_macro_reference()
-    with st.expander("大盤走勢串聯狀態", expanded=False):
-        render_pro_info_card(
-            "大盤已串入股神推薦評分",
-            [
-                ("大盤參考等級", _safe_str(macro_ref_for_ui.get("大盤參考等級")), ""),
-                ("大盤可參考分數", format_number(_safe_float(macro_ref_for_ui.get("大盤可參考分數"), 0), 2), ""),
-                ("推薦權重建議", _safe_str(macro_ref_for_ui.get("大盤推薦權重")), ""),
-                ("操作風格", _safe_str(macro_ref_for_ui.get("大盤操作風格")), ""),
-                ("資料日期", _safe_str(macro_ref_for_ui.get("大盤資料日期")) or "尚未儲存大盤紀錄", ""),
-            ],
-            chips=["大盤濾網", "輔助加權", "不硬篩"],
-        )
-        st.caption("大盤採輔助加權與風險降權，不會直接刪除逆勢強股，避免漏掉飆股。")
-
-
-    if master_df is None or master_df.empty:
-        st.warning("股票主檔暫時抓不到，已改用備援模式。若推薦結果偏少，請先到股票主檔頁更新主檔後再試。")
-
+    st.caption(f"股神決策V5串聯版：{GOD_DECISION_V5_LINK_VERSION}")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -5777,938 +1837,582 @@ def main():
         else:
             st.info(status_msg)
 
-    if st.session_state.get("watchlist_version"):
+    top_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.2, 1.4, 2.0])
+    with top_cols[0]:
+        if st.button("🔄 重新載入", use_container_width=True):
+            df = _load_records()
+            _save_state_df(df)
+            _load_ui_config_once()
+            _set_status("推薦紀錄已重新載入", "success")
+            st.rerun()
+    with top_cols[1]:
+        if st.button("📈 更新最新價", use_container_width=True):
+            df = _get_state_df()
+            before_sig = _df_signature(df)
+            df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
+            after_sig = _df_signature(df)
+            if before_sig != after_sig:
+                df = _apply_mode_labels(df)
+            _save_state_df(df)
+            st.success("已更新最新價，尚未同步")
+    with top_cols[2]:
+        if st.button("💾 儲存同步", use_container_width=True):
+            latest_df = _get_state_df()
+            latest_df = _apply_mode_labels(latest_df)
+            _save_state_df(latest_df)
+            ok = _save_records_dual(latest_df)
+            if ok:
+                st.rerun()
+    with top_cols[3]:
+        if st.button("🧹 清除快取", use_container_width=True):
+            try:
+                _get_latest_close.clear()
+                _get_forward_return.clear()
+            except Exception:
+                pass
+            _invalidate_analysis_cache()
+            st.success("快取已清除")
+    with top_cols[4]:
+        if st.button("🧮 更新前推績效", use_container_width=True):
+            updated = _backfill_perf_columns(_get_state_df())
+            updated = _apply_mode_labels(updated)
+            _save_state_df(updated)
+            st.success("已更新 3/5/10/20 日績效與模式績效標籤，尚未同步")
+    with top_cols[5]:
+        st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
+    with top_cols[6]:
         st.caption(
-            f"自選股同步狀態：watchlist_version = {st.session_state.get('watchlist_version', 0)}"
-            + (
-                f" / 最後更新：{_safe_str(st.session_state.get('watchlist_last_saved_at', ''))}"
-                if _safe_str(st.session_state.get("watchlist_last_saved_at", ""))
-                else ""
-            )
+            f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
+            f"Firestore：{'✅' if _safe_str(_firebase_config().get('project_id')) else '❌'} ｜ "
+            f"自選股：{'✅' if _safe_str(_watchlist_github_config().get('token')) else '❌'} ｜ "
+            f"UI設定：{'✅' if _safe_str(_ui_config_github_config().get('token')) else '❌'}"
         )
 
-    all_categories = _collect_all_categories(master_df, watchlist_map)
-    category_options = ["全部"] + all_categories if all_categories else ["全部"]
+    df = _get_state_df()
+    if df.empty:
+        df = _load_records()
+        _save_state_df(df)
 
-    saved_categories = st.session_state.get(_k("selected_categories"), ["全部"])
-    saved_categories = [x for x in saved_categories if x in category_options] or ["全部"]
-
-    # 推薦設定永久記錄：第一次進頁面先載入；按恢復原始/套用後才改變。
-    if st.session_state.pop(_k("scan_settings_reset_pending"), False):
-        _payload = st.session_state.pop(_k("scan_settings_reset_payload"), _default_recommend_scan_settings(watchlist_map))
-        _payload = _normalize_recommend_scan_settings(_payload, watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(_payload, sync_widgets=True)
-
-    if not st.session_state.get(_k("scan_settings_loaded_once"), False):
-        _persistent_scan_settings = _load_persistent_recommend_scan_settings(watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(_persistent_scan_settings, sync_widgets=True)
-        st.session_state[_k("scan_settings_loaded_once")] = True
-
-    render_pro_section("掃描設定")
-    st.caption("本頁條件會固定保留；只有按「套用設定」或「恢復原始設定」才會永久變更。推薦結果也會保留，除非你重新推薦。")
-    if st.session_state.get(_k("scan_settings_msg")):
-        st.success(st.session_state.pop(_k("scan_settings_msg")))
-
-    applied_weights = _render_score_weight_panel()
-    global GODPICK_ACTIVE_SCORE_WEIGHTS
-    GODPICK_ACTIVE_SCORE_WEIGHTS = applied_weights.copy()
-
-    show_v2_logic = st.toggle("顯示 V2 選股邏輯 / 條件說明", value=False, key=_k("show_v2_logic"))
-    _render_weight_dynamic_guide(applied_weights)
-
-    with st.form(key=_k("recommend_form"), clear_on_submit=False):
-        c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-
-        with c1:
-            universe_options = ["自選群組", "手動輸入", "全市場", "上市", "上櫃", "興櫃"]
-            saved_universe = st.session_state.get(_k("universe_mode"), "自選群組")
-            if saved_universe not in universe_options:
-                saved_universe = "自選群組"
-            if st.session_state.get(_ui_pref_key("universe_mode")) not in universe_options:
-                st.session_state[_ui_pref_key("universe_mode")] = saved_universe
-            form_universe_mode = st.selectbox("掃描範圍", universe_options, key=_ui_pref_key("universe_mode"))
-
-        with c2:
-            group_options = list(watchlist_map.keys()) if watchlist_map else [""]
-            saved_group = st.session_state.get(_k("group"), "")
-            if saved_group not in group_options:
-                saved_group = group_options[0] if group_options else ""
-            if st.session_state.get(_ui_pref_key("group")) not in group_options:
-                st.session_state[_ui_pref_key("group")] = saved_group
-            form_group = st.selectbox("自選群組", group_options, key=_ui_pref_key("group"))
-
-        with c3:
-            day_options = [60, 90, 120, 180, 240]
-            saved_days = int(st.session_state.get(_k("days"), 120))
-            if saved_days not in day_options:
-                saved_days = 120
-            if st.session_state.get(_ui_pref_key("days")) not in day_options:
-                st.session_state[_ui_pref_key("days")] = saved_days
-            form_days = st.selectbox("觀察天數", day_options, key=_ui_pref_key("days"))
-
-        with c4:
-            topn_options = [10, 20, 30, 50]
-            saved_topn = int(st.session_state.get(_k("top_n"), 20))
-            if saved_topn not in topn_options:
-                saved_topn = 20
-            if st.session_state.get(_ui_pref_key("top_n")) not in topn_options:
-                st.session_state[_ui_pref_key("top_n")] = saved_topn
-            form_top_n = st.selectbox("輸出 Top N", topn_options, key=_ui_pref_key("top_n"))
-
-        d1, d2 = st.columns([2, 2])
-        with d1:
-            limit_options = [100, 200, 300, 500, 1000, 1500, 2000, "全部"]
-            saved_limit = st.session_state.get(_k("scan_limit"), 1000)
-            if saved_limit not in limit_options:
-                saved_limit = 1000
-            if st.session_state.get(_ui_pref_key("scan_limit")) not in limit_options:
-                st.session_state[_ui_pref_key("scan_limit")] = saved_limit
-            form_scan_limit = st.selectbox(
-                "掃描上限筆數",
-                limit_options,
-                key=_ui_pref_key("scan_limit"),
-                help="選『全部』時，會把目前市場範圍內的股票全部納入掃描，不做截斷。",
-            )
-
-        with d2:
-            form_manual_codes = st.text_area(
-                "手動輸入股票（可代碼 / 名稱，一行一檔）",
-                key=_ui_pref_key("manual_codes"),
-                height=110,
-                placeholder="2330\n2454\n3548\n台積電",
-            )
-
-        render_pro_section("模式 / 類型篩選")
-        m1, m2, m3 = st.columns([2, 2, 2])
-        with m1:
-            mode_options = ["飆股模式", "波段模式", "領頭羊模式", "綜合模式", "低檔轉強模式", "拉回承接模式", "回測支撐模式", "低檔拉回綜合模式", "保守低風險模式"]
-            if st.session_state.get(_ui_pref_key("recommend_mode")) not in mode_options:
-                st.session_state[_ui_pref_key("recommend_mode")] = st.session_state.get(_k("recommend_mode"), "飆股模式")
-            form_recommend_mode = st.selectbox("推薦模式", mode_options, key=_ui_pref_key("recommend_mode"))
-        with m2:
-            strict_options = ["寬鬆", "標準", "嚴格"]
-            if st.session_state.get(_ui_pref_key("risk_strictness")) not in strict_options:
-                st.session_state[_ui_pref_key("risk_strictness")] = st.session_state.get(_k("risk_strictness"), "標準")
-            form_risk_strictness = st.selectbox("風險過濾強度", strict_options, key=_ui_pref_key("risk_strictness"))
-        with m3:
-            pick_options = ["精準版", "結合版"]
-            if st.session_state.get(_ui_pref_key("pick_strategy")) not in pick_options:
-                st.session_state[_ui_pref_key("pick_strategy")] = st.session_state.get(_k("pick_strategy"), "結合版")
-            form_pick_strategy = st.selectbox(
-                "推薦策略",
-                pick_options,
-                key=_ui_pref_key("pick_strategy"),
-                help="精準版=只看主名單；結合版=主名單外另顯示飆股補抓名單，不混入主名單排序。",
-            )
-
-        valid_saved_categories = [x for x in st.session_state.get(_ui_pref_key("selected_categories"), saved_categories) if x in category_options] or ["全部"]
-        st.session_state[_ui_pref_key("selected_categories")] = valid_saved_categories
-        form_selected_categories = st.multiselect(
-            "選擇類型（可多選）",
-            options=category_options,
-            key=_ui_pref_key("selected_categories"),
-            help="已細分為 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。",
-        )
-
-        render_pro_section("推薦門檻")
-        f1, f2, f3, f4 = st.columns(4)
-        with f1:
-            form_min_total_score = st.number_input("推薦總分下限", key=_ui_pref_key("min_total_score"), step=1.0)
-        with f2:
-            form_min_signal_score = st.number_input("訊號分數下限", key=_ui_pref_key("min_signal_score"), step=1.0)
-        with f3:
-            form_min_prelaunch_score = st.number_input("起漲前兆分數下限", key=_ui_pref_key("min_prelaunch_score"), step=1.0)
-        with f4:
-            form_min_trade_score = st.number_input("交易可行分數下限", key=_ui_pref_key("min_trade_score"), step=1.0)
-
-        btn1, btn2, btn3, btn4, btn5 = st.columns([2, 2, 2, 2, 2])
-        with btn1:
-            submit_recommend = st.form_submit_button("開始推薦", use_container_width=True, type="primary")
-        with btn2:
-            submit_refresh = st.form_submit_button("重新推薦", use_container_width=True)
-        with btn3:
-            submit_apply_settings = st.form_submit_button("套用設定", use_container_width=True)
-        with btn4:
-            submit_restore_default = st.form_submit_button("恢復原始設定", use_container_width=True)
-        with btn5:
-            submit_clear = st.form_submit_button("清空條件", use_container_width=True)
-
-    ccache1, ccache2 = st.columns([1, 1])
-    with ccache1:
-        clear_cache_btn = st.button("清除推薦快取", use_container_width=True)
-    with ccache2:
-        st.caption("資料異常或想強制重算時再按")
-
-    if clear_cache_btn:
-        try:
-            _get_history_smart.clear()
-        except Exception:
-            pass
-        try:
-            _analyze_stock_bundle.clear()
-        except Exception:
-            pass
-        try:
-            _load_master_df.clear()
-        except Exception:
-            pass
-        try:
-            _build_excel_bytes.clear()
-        except Exception:
-            pass
-        st.success("推薦快取已清除")
-
-    current_form_settings = _current_form_settings_from_values(
-        form_universe_mode, form_group, form_days, form_top_n, form_manual_codes,
-        form_scan_limit, form_selected_categories, form_min_total_score,
-        form_min_signal_score, form_min_prelaunch_score, form_min_trade_score,
-        form_recommend_mode, form_risk_strictness, form_pick_strategy,
-    )
-
-    if submit_apply_settings:
-        normalized_settings = _normalize_recommend_scan_settings(current_form_settings, watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(normalized_settings, sync_widgets=False)
-        ok, msgs = _save_persistent_recommend_scan_settings(normalized_settings)
-        _stage_recommend_scan_settings_reset(
-            normalized_settings,
-            "推薦設定已套用並永久記錄，換頁或重新開啟後會沿用此設定。" if ok else "推薦設定已套用，但永久記錄失敗；請展開保存明細檢查 GitHub 寫入狀態。"
-        )
-        st.session_state[_k("scan_settings_save_msgs")] = msgs
-        st.rerun()
-
-    if submit_restore_default:
-        default_settings = _normalize_recommend_scan_settings(_default_recommend_scan_settings(watchlist_map), watchlist_map, category_options)
-        ok, msgs = _save_persistent_recommend_scan_settings(default_settings)
-        _stage_recommend_scan_settings_reset(default_settings, "已恢復原始推薦設定並永久記錄。" if ok else "已恢復原始推薦設定，但永久記錄失敗。")
-        st.session_state[_k("scan_settings_save_msgs")] = msgs
-        st.rerun()
-
-    if submit_clear:
-        default_settings = _normalize_recommend_scan_settings(_default_recommend_scan_settings(watchlist_map), watchlist_map, category_options)
-        ok, msgs = _save_persistent_recommend_scan_settings(default_settings)
-        _stage_recommend_scan_settings_reset(default_settings, "已清空條件、恢復原始推薦設定並永久記錄。" if ok else "已清空條件、恢復原始推薦設定，但永久記錄失敗。")
-        st.session_state[_k("scan_settings_save_msgs")] = msgs
-        st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        st.session_state[_k("score_weights_edit")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-        st.session_state[_k("submitted_once")] = False
-        st.session_state[_k("focus_code")] = ""
-        st.session_state[_k("rec_df_store")] = pd.DataFrame()
-        st.session_state[_k("category_strength_store")] = pd.DataFrame()
-        st.session_state[_k("rec_pick_codes_next")] = []
-        st.session_state[_k("rec_record_codes_next")] = []
-        st.session_state[_k("rec_pick_codes_widget")] = []
-        st.session_state[_k("rec_record_codes_widget")] = []
-        st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
-        st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
-        st.rerun()
-
-    if st.session_state.get(_k("scan_settings_save_msgs")):
-        with st.expander("推薦設定保存明細", expanded=False):
-            for msg in st.session_state.pop(_k("scan_settings_save_msgs"), []):
-                st.write(f"- {msg}")
-
-    if submit_recommend or submit_refresh:
-        # 開始推薦 / 重新推薦時，同步把目前條件永久記錄；
-        # 這樣不用另外按套用，換頁或關閉後也不會恢復原始值。
-        normalized_settings = _normalize_recommend_scan_settings(current_form_settings, watchlist_map, category_options)
-        _apply_recommend_scan_settings_to_state(normalized_settings, sync_widgets=False)
-        ok, msgs = _save_persistent_recommend_scan_settings(normalized_settings)
-        st.session_state[_k("scan_settings_save_msgs")] = msgs
-        if ok:
-            st.session_state[_k("scan_settings_msg")] = "目前推薦條件已自動永久記錄。"
-        else:
-            st.session_state[_k("scan_settings_msg")] = "目前推薦條件已套用，但永久記錄失敗；請展開保存明細檢查。"
-        for pref_name in [
-            "universe_mode", "group", "days", "top_n", "manual_codes", "scan_limit",
-            "selected_categories", "min_total_score", "min_signal_score", "min_prelaunch_score", "min_trade_score", "pick_strategy",
-            "recommend_mode", "risk_strictness",
-        ]:
-            _sync_ui_pref_to_saved(pref_name)
-        st.session_state[_k("universe_mode")] = form_universe_mode
-        st.session_state[_k("group")] = form_group
-        st.session_state[_k("days")] = form_days
-        st.session_state[_k("top_n")] = form_top_n
-        st.session_state[_k("manual_codes")] = form_manual_codes
-        st.session_state[_k("scan_limit")] = form_scan_limit
-        st.session_state[_k("selected_categories")] = form_selected_categories if form_selected_categories else ["全部"]
-        st.session_state[_k("min_total_score")] = float(form_min_total_score)
-        st.session_state[_k("min_signal_score")] = float(form_min_signal_score)
-        st.session_state[_k("min_prelaunch_score")] = float(form_min_prelaunch_score)
-        st.session_state[_k("min_trade_score")] = float(form_min_trade_score)
-        st.session_state[_k("pick_strategy")] = form_pick_strategy
-        st.session_state[_k("recommend_mode")] = form_recommend_mode
-        st.session_state[_k("risk_strictness")] = form_risk_strictness
-        st.session_state[_k("submitted_once")] = True
-
-    if show_v2_logic:
-        render_pro_info_card(
-            "V2 選股邏輯",
-            [
-                ("推薦模式", "保留飆股/波段/領頭羊/綜合，新增低檔轉強、拉回承接、回測支撐、低檔拉回綜合、保守低風險。", ""),
-                ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
-                ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
-                ("風險淘汰", "新增風險過濾強度：寬鬆 / 標準 / 嚴格。", ""),
-                ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
-                ("類股強度", "保留類股熱度，新增類股加速度與熱度排名。", ""),
-                ("匯出", "新增 Excel 匯出，不重算目前結果。", ""),
-                ("推薦紀錄", "新增可勾選後直接寫入 8_股神推薦紀錄。", ""),
-                ("勾選快照", "本輪精華推薦表可直接勾選，並同步到自選股/推薦紀錄/勾選匯出。", ""),
-            ],
-            chips=["V2", "功能不刪", "顯示加速", "精準度升級", "Excel匯出", "推薦紀錄串接"],
-        )
-
-
-    if show_v2_logic:
-        _render_recommendation_scoring_guide()
-
-    if not st.session_state.get(_k("submitted_once"), False):
-        saved_rec_df, saved_cat_df, saved_hot_df = _load_recommend_result_from_state()
-        if isinstance(saved_rec_df, pd.DataFrame) and not saved_rec_df.empty:
-            st.session_state[_k("submitted_once")] = True
-            st.info("已載入上一次推薦結果；資料會保留到下一次按「開始推薦 / 重新推薦」才覆蓋。")
-        else:
-            st.info("請先設定條件，再按「開始推薦」。")
-            return
-
-    selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
-    universe_mode = _safe_str(st.session_state.get(_k("universe_mode"), ""))
-
-    if universe_mode == "自選群組":
-        universe_items = watchlist_map.get(_safe_str(st.session_state.get(_k("group"), "")), [])
-    elif universe_mode == "手動輸入":
-        universe_items = _parse_manual_codes(st.session_state.get(_k("manual_codes"), ""), master_df)
-    else:
-        universe_items = _build_universe_from_market(
-            master_df=master_df,
-            market_mode=universe_mode,
-            limit_count=st.session_state.get(_k("scan_limit"), 1000),
-            selected_categories=selected_categories,
-        )
-
-    if not universe_items:
-        st.warning("目前掃描池沒有股票。")
-        return
-
-    start_dt = today - timedelta(days=int(st.session_state.get(_k("days"), 120)))
-    end_dt = today
-
-    rec_df = pd.DataFrame()
-    category_strength_df = pd.DataFrame()
-    hot_pick_df = pd.DataFrame()
-
-    if submit_recommend or submit_refresh:
-        rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
-            universe_items=universe_items,
-            master_df=master_df,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            min_total_score=float(st.session_state.get(_k("min_total_score"), 55.0)),
-            min_signal_score=float(st.session_state.get(_k("min_signal_score"), -2.0)),
-            selected_categories=selected_categories,
-            mode=_safe_str(st.session_state.get(_k("recommend_mode"), "飆股模式")),
-            risk_strictness=_safe_str(st.session_state.get(_k("risk_strictness"), "標準")),
-            min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
-            min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
-        )
-        rec_df = _apply_advanced_godpick_columns(rec_df)
-        hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
-        _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
-    else:
-        rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
-        rec_df = _apply_advanced_godpick_columns(rec_df)
-        hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
-
-    _render_debug_scan_summary()
-    _render_recommend_status_panel(rec_df)
-
-    render_pro_info_card(
-        "股神交易決策升級",
-        [
-            ("推薦分桶", "把結果分為立即觀察、等拉回、等突破、高分但過熱、假突破風險等交易情境。", ""),
-            ("起漲等級串聯", "會同步寫入本輪推薦、股神推薦紀錄與推薦清單，避免頁面間欄位不一致。", ""),
-            ("信心等級", "依總分、起漲、交易可行、類股熱度、過熱與假突破風險綜合分級。", ""),
-            ("買點劇本", "自動整理現價、拉回買點、突破買點、停損、目標價。", ""),
-            ("失效條件", "明確標示跌破何處或量價不延續時應降級。", ""),
-            ("追蹤預留", "保留 3/5/10/20 日追蹤欄位，後續可做推薦勝率回測。", ""),
-        ],
-        chips=["交易決策", "風控", "回測預留"],
-    )
-
-    if st.session_state.get(_k("latest_recommendation_sync_msgs")):
-        with st.expander("本輪推薦永久保存明細", expanded=False):
-            for msg in st.session_state.get(_k("latest_recommendation_sync_msgs"), []):
-                st.write(f"- {msg}")
-
-    if rec_df.empty:
-        if submit_recommend or submit_refresh:
-            st.warning("本輪條件篩選後為 0 檔。可能不是門檻太高，也可能是歷史資料抓不到或分析函式出錯。")
-            st.info("先看上方『推薦除錯摘要』：若抓不到歷史資料或分析錯誤很多，先修資料模組，不要只調低門檻。")
-        else:
-            st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
-        return
-
-    saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
-    if saved_at:
-        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{_safe_str(st.session_state.get(_k("pick_strategy"), "結合版"))}")
-
-    top_n = int(st.session_state.get(_k("top_n"), 20))
-    top_df = rec_df.iloc[:top_n].copy()
-
-    strong_count = int((rec_df["推薦等級"].isin(["股神級", "強烈關注"])).sum())
-    avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
-    leader_count = int((rec_df["是否領先同類股"] == "是").sum())
-
-    hot_count = len(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) else 0
-    render_pro_kpi_row(
-        [
-            {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
-            {"label": "強勢推薦", "value": strong_count, "delta": "最高等級群", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "補抓名單", "value": hot_count, "delta": "起漲補抓", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
-        ]
-    )
-
-    render_pro_section("推薦股票加入自選股中心")
-    st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")
-    watchlist_map = _load_watchlist_map()
-
-    g1, g2, g3 = st.columns([3, 2, 1])
-    with g1:
-        new_group_name = st.text_input("新增群組名稱", key=_k("new_group_name"), placeholder="例如：0422股神推薦")
-    with g2:
-        st.write("")
-        st.write("")
-        create_group_btn = st.button("新增群組", key=_k("create_group_btn"), use_container_width=True)
-    with g3:
-        st.write("")
-        st.write("")
-        refresh_group_btn = st.button("重新載入群組", key=_k("refresh_group_btn"), use_container_width=True)
-
-    if create_group_btn:
-        ok, msg = _create_watchlist_group(new_group_name)
-        if ok:
-            st.success(msg)
-            watchlist_map = _load_watchlist_map()
-            st.session_state[_k("rec_pick_group")] = _safe_str(new_group_name)
-            st.rerun()
-        else:
-            st.warning(msg)
-
-    if refresh_group_btn:
-        watchlist_map = _load_watchlist_map()
-        st.rerun()
-
-    rec_group_options = list(watchlist_map.keys()) if watchlist_map else [""]
-    saved_pick_group = st.session_state.get(_k("rec_pick_group"), "")
-    if saved_pick_group not in rec_group_options:
-        saved_pick_group = rec_group_options[0] if rec_group_options else ""
-        st.session_state[_k("rec_pick_group")] = saved_pick_group
-
-    rec_code_to_label = {
-        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
-        for _, r in rec_df.iterrows()
-    }
-    rec_all_codes = rec_df["股票代號"].astype(str).tolist()
-
-    p1, p2, p3 = st.columns([2, 4, 2])
-    with p1:
-        if rec_group_options and rec_group_options != [""]:
-            pick_group = st.selectbox(
-                "加入群組",
-                options=rec_group_options,
-                index=rec_group_options.index(saved_pick_group) if saved_pick_group in rec_group_options else 0,
-                key=_k("rec_pick_group"),
-            )
-        else:
-            pick_group = ""
-            st.info("目前尚無群組，請先新增群組名稱。")
-    with p2:
-        current_pick_codes = [x for x in st.session_state.get(_k("rec_pick_codes"), []) if x in rec_all_codes]
-        if _k("rec_pick_codes_widget") not in st.session_state:
-            st.session_state[_k("rec_pick_codes_widget")] = current_pick_codes
-        selected_pick_widget = st.multiselect(
-            "勾選推薦股",
-            options=rec_all_codes,
-            default=current_pick_codes,
-            format_func=lambda x: rec_code_to_label.get(str(x), str(x)),
-            key=_k("rec_pick_codes_widget"),
-        )
-        # rec_pick_codes 不是 widget key，可以安全同步資料狀態
-        st.session_state[_k("rec_pick_codes")] = selected_pick_widget
-    with p3:
-        st.write("")
-        st.write("")
-        add_selected_btn = st.button("加入勾選股票到自選股中心", use_container_width=True, type="primary")
-
-    q1, q2 = st.columns([1, 1])
-    with q1:
-        if st.button("全選本輪推薦", use_container_width=True):
-            st.session_state[_k("rec_pick_codes_next")] = rec_all_codes
-            st.session_state[_k("rec_record_codes_next")] = rec_all_codes
-            st.session_state[_k("top_pick_codes_next")] = rec_all_codes
-            st.rerun()
-    with q2:
-        if st.button("清空勾選", use_container_width=True):
-            st.session_state[_k("rec_pick_codes_next")] = []
-            st.session_state[_k("rec_record_codes_next")] = []
-            st.session_state[_k("top_pick_codes_next")] = []
-            st.rerun()
-
-    if add_selected_btn:
-        selected_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
-        if not selected_codes:
-            snap = st.session_state.get(_k("selected_rec_snapshot"))
-            if isinstance(snap, pd.DataFrame) and not snap.empty and "股票代號" in snap.columns:
-                selected_codes = [_normalize_code(x) for x in snap["股票代號"].astype(str).tolist() if _normalize_code(x)]
-        if not selected_codes:
-            st.warning("請先勾選推薦股票。可在『本輪精華推薦』表格勾選後，直接按表格下方加入自選股。")
-        else:
-            picked_rows = []
-            work = rec_df[rec_df["股票代號"].astype(str).isin(selected_codes)].copy()
-            for _, r in work.iterrows():
-                picked_rows.append(
-                    {
-                        "code": _normalize_code(r.get("股票代號")),
-                        "name": _safe_str(r.get("股票名稱")),
-                        "market": _safe_str(r.get("市場別")) or "上市",
-                        "category": _normalize_category(r.get("類別")),
-                    }
-                )
-
-            duplicate_codes = _find_existing_watchlist_codes(pick_group, selected_codes)
-            if duplicate_codes and not st.session_state.get(_k("confirm_watchlist_duplicate"), False):
-                st.warning(
-                    f"自選股中心群組「{pick_group}」已存在 {len(duplicate_codes)} 檔："
-                    + "、".join(duplicate_codes[:20])
-                    + ("..." if len(duplicate_codes) > 20 else "")
-                )
-                st.info("請確認是否仍要繼續加入；已存在的股票會略過，只加入未重複股票。")
-                st.session_state[_k("pending_watchlist_rows")] = picked_rows
-                st.session_state[_k("pending_watchlist_group")] = pick_group
-                if st.button("確認：繼續加入未重複股票", use_container_width=True, key=_k("confirm_watchlist_duplicate_btn")):
-                    st.session_state[_k("confirm_watchlist_duplicate")] = True
-                    st.rerun()
-            else:
-                if st.session_state.get(_k("confirm_watchlist_duplicate"), False):
-                    picked_rows = st.session_state.get(_k("pending_watchlist_rows"), picked_rows)
-                    pick_group = st.session_state.get(_k("pending_watchlist_group"), pick_group)
-
-                added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
-                st.session_state[_k("confirm_watchlist_duplicate")] = False
-                st.session_state[_k("pending_watchlist_rows")] = []
-                st.session_state[_k("pending_watchlist_group")] = ""
-
-                if added > 0:
-                    st.success(f"已加入 {added} 檔到 {pick_group}")
-                    watchlist_map = _load_watchlist_map()
-                else:
-                    st.warning("沒有新增成功，可能勾選股票都已存在。")
-
-                if messages:
-                    with st.expander("加入結果明細", expanded=True):
-                        for msg in messages:
-                            st.write(f"- {msg}")
-
-    detail_lines = st.session_state.get(_k("last_dual_write_detail"), [])
-    if detail_lines:
-        with st.expander("雙寫狀態明細", expanded=False):
-            for line in detail_lines:
+    load_detail = st.session_state.get(_k("load_detail"), [])
+    if load_detail:
+        with st.expander("讀取來源明細", expanded=False):
+            for line in load_detail:
                 st.write(f"- {line}")
 
-    render_pro_section("寫入 8_股神推薦紀錄")
-    record_code_to_label = {
-        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
-        for _, r in rec_df.iterrows()
-    }
-    record_all_codes = rec_df["股票代號"].astype(str).tolist()
-
-    rr1, rr2 = st.columns([4, 2])
-    with rr1:
-        current_record_codes = [x for x in st.session_state.get(_k("rec_record_codes"), []) if x in record_all_codes]
-        if _k("rec_record_codes_widget") not in st.session_state:
-            st.session_state[_k("rec_record_codes_widget")] = current_record_codes
-        selected_record_widget = st.multiselect(
-            "勾選要記錄到 8_股神推薦紀錄 的股票",
-            options=record_all_codes,
-            default=current_record_codes,
-            format_func=lambda x: record_code_to_label.get(str(x), str(x)),
-            key=_k("rec_record_codes_widget"),
-        )
-        # rec_record_codes 不是 widget key，可以安全同步資料狀態
-        st.session_state[_k("rec_record_codes")] = selected_record_widget
-
-    with rr2:
-        st.write("")
-        st.write("")
-        record_to_log_btn = st.button("記錄到 8_股神推薦紀錄", use_container_width=True, type="primary")
-
-    rr3, rr4 = st.columns([1, 1])
-    with rr3:
-        if st.button("全選本輪推薦做紀錄", use_container_width=True):
-            st.session_state[_k("rec_record_codes_next")] = record_all_codes
-            st.session_state[_k("rec_pick_codes_next")] = record_all_codes
-            st.session_state[_k("top_pick_codes_next")] = record_all_codes
-            st.rerun()
-    with rr4:
-        if st.button("清空紀錄勾選", use_container_width=True):
-            st.session_state[_k("rec_record_codes_next")] = []
-            st.session_state[_k("rec_pick_codes_next")] = []
-            st.session_state[_k("top_pick_codes_next")] = []
-            st.rerun()
-
-    selected_snapshot_df = rec_df[
-        rec_df["股票代號"].astype(str).isin([_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)])
-    ].copy()
-    st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_df
-    st.session_state["godpick_rec_selected_df"] = selected_snapshot_df
-
-    if record_to_log_btn:
-        selected_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
-        if not selected_record_codes:
-            st.warning("請先勾選要記錄的推薦股票。")
-        else:
-            record_rows = _build_record_rows_from_rec_df(rec_df, selected_record_codes)
-            dup_codes, dup_keys = _find_existing_godpick_record_codes(record_rows)
-
-            if dup_codes and not st.session_state.get(_k("confirm_record_duplicate"), False):
-                st.warning(
-                    f"8_股神推薦紀錄已存在 {len(dup_codes)} 檔相同推薦紀錄："
-                    + "、".join(dup_codes[:20])
-                    + ("..." if len(dup_codes) > 20 else "")
-                )
-                st.info("請確認是否仍要重複紀錄。若確認，會保留舊紀錄並新增一筆新紀錄，備註會標記『使用者確認重複紀錄』。")
-                st.session_state[_k("pending_record_rows")] = record_rows
-                if st.button("確認：仍要重複寫入股神推薦紀錄", use_container_width=True, key=_k("confirm_record_duplicate_btn")):
-                    st.session_state[_k("confirm_record_duplicate")] = True
-                    st.rerun()
-            else:
-                force_duplicate = bool(st.session_state.get(_k("confirm_record_duplicate"), False))
-                if force_duplicate:
-                    record_rows = st.session_state.get(_k("pending_record_rows"), record_rows)
-
-                added_count, record_msgs = _append_godpick_records(record_rows, force_duplicate=force_duplicate)
-                st.session_state[_k("confirm_record_duplicate")] = False
-                st.session_state[_k("pending_record_rows")] = []
-
-                if added_count > 0:
-                    if force_duplicate:
-                        st.success(f"已重複寫入 {added_count} 筆到 8_股神推薦紀錄")
-                    else:
-                        st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
-                else:
-                    st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
-                if record_msgs:
-                    with st.expander("推薦紀錄寫入明細", expanded=True):
-                        for msg in record_msgs:
-                            st.write(f"- {msg}")
-
-    record_detail_lines = st.session_state.get(_k("last_record_write_detail"), [])
-    if record_detail_lines:
-        with st.expander("8_股神推薦紀錄 同步明細", expanded=False):
-            for line in record_detail_lines:
+    sync_detail = st.session_state.get(_k("last_sync_detail"), [])
+    if sync_detail:
+        with st.expander("同步明細", expanded=False):
+            for line in sync_detail:
                 st.write(f"- {line}")
 
-    _render_export_block(rec_df=rec_df, category_strength_df=category_strength_df, top_n=top_n)
-    _render_selected_export_block()
-    _render_record_export_block(rec_df)
+    ui_detail = _safe_str(st.session_state.get(_k("ui_config_detail"), ""))
+    ui_save_detail = _safe_str(st.session_state.get(_k("ui_save_detail"), ""))
+    if ui_detail or ui_save_detail:
+        with st.expander("UI 設定明細", expanded=False):
+            if ui_detail:
+                st.write(f"- 載入：{ui_detail}")
+            if ui_save_detail:
+                st.write(f"- 保存：{ui_save_detail}")
 
-    render_pro_section("本輪精華推薦")
+    live_df = _ensure_godpick_record_columns(_get_state_df().copy())
+    ana_tables, summary, avg_20, avg_real = _get_analysis_cache(live_df)
 
-    top_selected_codes = st.session_state.pop(_k("top_pick_codes_next"), None)
-    if top_selected_codes is None:
-        top_selected_codes = st.session_state.get(_k("rec_record_codes"), st.session_state.get(_k("rec_pick_codes"), []))
-    top_selected_codes = {_normalize_code(x) for x in top_selected_codes if _normalize_code(x)}
+    render_pro_kpi_row([
+        {"label": "總筆數", "value": summary["count"], "delta": "推薦紀錄", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "持有中", "value": int((live_df["目前狀態"] == "持有").sum()) if not live_df.empty else 0, "delta": "狀態追蹤", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "平均系統報酬%", "value": f"{summary['avg_ret']:.2f}%", "delta": f"勝率 {summary['win_rate']:.1f}%", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
+    ])
 
-    top_df = top_df.copy()
-    if "勾選" not in top_df.columns:
-        top_df.insert(0, "勾選", False)
-    top_df["勾選"] = top_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in top_selected_codes)
-
-    top_show_df = top_df[
-        [
-            "勾選",
-            "股票代號",
-            "股票名稱",
-            "市場別",
-            "類別",
-            "類股內排名",
-            "類股前3強",
-            "推薦模式",
-            "推薦等級",
-            "推薦總分",
-            "買點分級",
-            "信心等級",
-            "推薦分桶",
-            "市場環境分數",
-            "型態名稱",
-            "型態突破分數",
-            "爆發力分數",
-            "起漲前兆分數",
-            "交易可行分數",
-            "類股熱度分數",
-            "是否領先同類股",
-            "起漲判斷",
-            "最新價",
-            "推薦買點_拉回",
-            "推薦買點_突破",
-            "停損價",
-            "賣出目標1",
-            "賣出目標2",
-            "股神推論邏輯", "風險說明", "買點劇本", "失效條件", "假突破風險", "過熱風險", "推薦理由摘要",
-        ]
-    ].copy()
-
-    edited_top_df = st.data_editor(
-        _format_df(top_show_df),
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        key=_k("top_pick_editor"),
-        column_config={
-            "勾選": st.column_config.CheckboxColumn("勾選"),
-            "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
-                "風險說明": st.column_config.TextColumn("風險說明", width="large"),
-                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
-        }
-    )
-
-    picked_codes_from_top = []
-    for _, row in edited_top_df.iterrows():
-        picked_val = row.get("勾選", False)
-        if isinstance(picked_val, bool):
-            is_checked = picked_val
-        else:
-            is_checked = str(picked_val).strip().lower() in {"true", "1", "yes", "y", "是"}
-
-        if is_checked:
-            code = _normalize_code(row.get("股票代號"))
-            if code:
-                picked_codes_from_top.append(code)
-
-    current_pick_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
-    current_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
-
-    # 注意：rec_pick_codes / rec_record_codes 是 multiselect widget key。
-    # Streamlit 不允許 widget 建立後在同一次 rerun 直接寫入該 key，
-    # 所以只能寫到 *_next，下一次 rerun 開頭再套用，避免 StreamlitAPIException。
-    if picked_codes_from_top != current_pick_codes:
-        st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
-    if picked_codes_from_top != current_record_codes:
-        st.session_state[_k("rec_record_codes_next")] = picked_codes_from_top
-
-    selected_snapshot_top = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
-    st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_top
-    st.session_state["godpick_rec_selected_df"] = selected_snapshot_top
-
-    if picked_codes_from_top:
-        st.success(f"已勾選 {len(picked_codes_from_top)} 檔：可直接加入自選股或寫入股神推薦紀錄。")
-
-        fast_a1, fast_a2, fast_a3 = st.columns([1.4, 1.4, 2.2])
-        with fast_a1:
-            quick_add_watchlist = st.button("將勾選股票加入自選股中心", use_container_width=True, type="primary", key=_k("quick_add_watchlist_from_editor"))
-        with fast_a2:
-            quick_add_record = st.button("將勾選股票寫入股神推薦紀錄", use_container_width=True, key=_k("quick_add_record_from_editor"))
-        with fast_a3:
-            st.caption("此處直接使用表格勾選結果，不需要再到上方多選一次。")
-
-        if quick_add_watchlist:
-            pick_group = _safe_str(st.session_state.get(_k("rec_pick_group"), ""))
-            if not pick_group:
-                st.warning("請先在上方選擇或新增自選股群組。")
-            else:
-                work = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in picked_codes_from_top])].copy()
-                picked_rows = []
-                for _, r in work.iterrows():
-                    picked_rows.append(
-                        {
-                            "code": _normalize_code(r.get("股票代號")),
-                            "name": _safe_str(r.get("股票名稱")),
-                            "market": _safe_str(r.get("市場別")) or "上市",
-                            "category": _normalize_category(r.get("類別")),
-                        }
-                    )
-                added, messages = _append_multiple_stocks_to_watchlist(pick_group, picked_rows)
-                if added > 0:
-                    st.success(f"已加入 {added} 檔到自選股中心：{pick_group}")
-                    st.session_state[_k("rec_pick_codes_next")] = picked_codes_from_top
-                    st.rerun()
-                else:
-                    st.warning("沒有新增成功，可能已存在或寫入失敗。")
-                with st.expander("加入自選股明細", expanded=True):
-                    for msg in messages:
-                        st.write(f"- {msg}")
-
-        if quick_add_record:
-            record_rows = _build_record_rows_from_rec_df(rec_df, picked_codes_from_top)
-            added_count, record_msgs = _append_godpick_records(record_rows)
-            if added_count > 0:
-                st.success(f"已寫入 {added_count} 筆到 8_股神推薦紀錄")
-                st.session_state[_k("rec_record_codes_next")] = picked_codes_from_top
-            else:
-                st.warning("沒有新增任何推薦紀錄，可能已存在或寫入失敗。")
-            with st.expander("推薦紀錄寫入明細", expanded=True):
-                for msg in record_msgs:
-                    st.write(f"- {msg}")
-
-    pick_options = top_df["股票代號"].astype(str).tolist()
-    if pick_options and st.session_state.get(_k("focus_code"), "") not in pick_options:
-        st.session_state[_k("focus_code")] = pick_options[0]
-
-    code_to_row = {str(r["股票代號"]): r for _, r in rec_df.iterrows()}
-
-    render_pro_section("單股股神劇本")
-    selected_code = st.selectbox(
-        "選擇推薦股",
-        options=pick_options,
-        format_func=lambda x: f"{x} {code_to_row.get(str(x), {}).get('股票名稱', '')}",
-        key=_k("focus_code"),
-    )
-
-    focus_row = code_to_row.get(str(selected_code))
-    if focus_row is not None:
-        render_pro_info_card(
-            "股神推薦結論",
-            [
-                ("股票", f"{_safe_str(focus_row.get('股票代號'))} {_safe_str(focus_row.get('股票名稱'))}", ""),
-                ("類別", _safe_str(focus_row.get("類別")), ""),
-                ("類股內排名", _safe_str(focus_row.get("類股內排名")), ""),
-                ("類股前3強", _safe_str(focus_row.get("類股前3強")), ""),
-                ("推薦模式", _safe_str(focus_row.get("推薦模式")), ""),
-                ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
-                ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
-                ("市場環境", _safe_str(focus_row.get("市場環境")), ""),
-                ("市場環境分數", format_number(focus_row.get("市場環境分數"), 1), ""),
-                ("型態名稱", _safe_str(focus_row.get("型態名稱")), ""),
-                ("型態突破分數", format_number(focus_row.get("型態突破分數"), 1), ""),
-                ("爆發力分數", format_number(focus_row.get("爆發力分數"), 1), ""),
-                ("起漲前兆分數", format_number(focus_row.get("起漲前兆分數"), 1), ""),
-                ("交易可行分數", format_number(focus_row.get("交易可行分數"), 1), ""),
-                ("類股熱度分數", format_number(focus_row.get("類股熱度分數"), 1), ""),
-                ("是否領先同類股", _safe_str(focus_row.get("是否領先同類股")), ""),
-                ("起漲判斷", _safe_str(focus_row.get("起漲判斷")), ""),
-                ("建議切入區", _safe_str(focus_row.get("建議切入區")), ""),
-                ("推薦買點（拉回）", format_number(focus_row.get("推薦買點_拉回"), 2), ""),
-                ("推薦買點（突破）", format_number(focus_row.get("推薦買點_突破"), 2), ""),
-                ("停損價", format_number(focus_row.get("停損價"), 2), ""),
-                ("賣出目標1", format_number(focus_row.get("賣出目標1"), 2), ""),
-                ("賣出目標2", format_number(focus_row.get("賣出目標2"), 2), ""),
-                ("風險報酬（拉回）", _safe_str(focus_row.get("風險報酬_拉回")), ""),
-                ("風險報酬（突破）", _safe_str(focus_row.get("風險報酬_突破")), ""),
-                ("股神推論邏輯", "風險說明", "推薦理由摘要", _safe_str(focus_row.get("推薦理由摘要")), ""),
-            ],
-            chips=[_safe_str(focus_row.get("推薦等級")), _safe_str(focus_row.get("類別")), _safe_str(focus_row.get("推薦標籤"))],
-        )
-
-
-    if _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")) == "結合版" and isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
-        render_pro_section("飆股補抓名單")
-        st.caption("這份名單不影響主名單排序；用途是補抓接近門檻、但具起漲結構與類股熱度的股票。")
-        hot_show_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分",
-            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
-            "起漲前兆分數", "交易可行分數", "類股熱度分數", "訊號分數",
-            "起漲判斷", "建議切入區", "股神推論邏輯", "風險說明", "推薦理由摘要", "補抓原因"
-        ]
-        st.dataframe(_format_df(hot_pick_df[[c for c in hot_show_cols if c in hot_pick_df.columns]].head(max(top_n, 20))), use_container_width=True, hide_index=True)
-
-    leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
-    factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
-
-    tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
+    tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
     with tabs[0]:
-        full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
-            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
-            "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
-            "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
-            "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
-            "推薦標籤", "推薦理由摘要"
-        ]
-        full_available_cols = list(rec_df.columns)
-        full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
-        full_show_cols = [c for c in full_order if c in rec_df.columns]
-        st.dataframe(_format_df(rec_df[full_show_cols].copy()), use_container_width=True, hide_index=True)
+        render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。支援欄位順序永久保存、重新整理不還原。")
+        if st.session_state.get(_k("last_delete_msg")):
+            st.success(st.session_state.pop(_k("last_delete_msg")))
+
+        opt_top = st.columns([1.2, 1.2, 1.2, 2.8])
+        with opt_top[0]:
+            fast_mode = st.toggle("快速模式", value=bool(st.session_state.get(_k("fast_mode"), True)), key=_k("fast_mode"))
+        with opt_top[1]:
+            visible_limit = st.number_input("顯示筆數上限", min_value=100, max_value=5000, step=100, key=_k("visible_limit"))
+        with opt_top[2]:
+            if st.button("🧩 欄位管理", use_container_width=True):
+                st.session_state[_k("show_column_manager")] = not st.session_state.get(_k("show_column_manager"), False)
+                st.rerun()
+        with opt_top[3]:
+            st.caption("快速模式開啟時，大表只先渲染前 N 筆；快速模式與顯示筆數也會永久保存到 GitHub。")
+
+        auto_sig = f"{bool(fast_mode)}|{int(visible_limit)}"
+        last_auto_sig = _safe_str(st.session_state.get(_k("ui_last_auto_sig")))
+        if auto_sig != last_auto_sig:
+            st.session_state[_k("ui_last_auto_sig")] = auto_sig
+            ok, msg = _persist_ui_config()
+            if ok:
+                st.session_state[_k("ui_save_detail")] = msg
+            else:
+                st.session_state[_k("ui_save_detail")] = msg
+
+        filter_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.1, 1.0, 1.0, 1.0])
+        with filter_cols[0]:
+            keyword = st.text_input("搜尋代號 / 名稱 / 理由", value="", key=_k("kw"))
+        with filter_cols[1]:
+            mode_filter = st.selectbox("推薦模式", ["全部"] + sorted([x for x in live_df["推薦模式"].dropna().astype(str).unique().tolist() if x]), index=0, key=_k("mode_filter"))
+        with filter_cols[2]:
+            category_filter = st.selectbox("類別", ["全部"] + sorted([x for x in live_df["類別"].dropna().astype(str).unique().tolist() if x]), index=0, key=_k("cat_filter"))
+        with filter_cols[3]:
+            status_filter = st.selectbox("狀態", ["全部"] + STATUS_OPTIONS, index=0, key=_k("status_filter"))
+        with filter_cols[4]:
+            bought_filter = st.selectbox("是否已買進", ["全部", "是", "否"], index=0, key=_k("buy_filter"))
+        with filter_cols[5]:
+            sort_by = st.selectbox("排序", ["推薦日期", "推薦總分", "20日績效%", "損益幅%", "實際報酬%", "持有天數"], index=0, key=_k("sort_by"))
+        with filter_cols[6]:
+            sort_asc = st.toggle("升冪", value=False, key=_k("sort_asc"))
+        with filter_cols[7]:
+            show_cols_mode = st.selectbox("顯示模式", ["標準", "進階"], index=0, key=_k("show_cols_mode"))
+
+        view_df = _build_filtered_view_df(
+            live_df,
+            keyword=keyword,
+            mode_filter=mode_filter,
+            category_filter=category_filter,
+            status_filter=status_filter,
+            bought_filter=bought_filter,
+            sort_by=sort_by,
+            sort_asc=sort_asc,
+        )
+
+        # 欄位順序修正：以 view_df 實際欄位為可用欄位，避免推薦日期/新欄位被預設清單重新插回。
+        available_cols = [c for c in view_df.columns if c not in ["匯入自選", "刪除"]]
+        applied_cols = _get_saved_col_profile(show_cols_mode, available_cols)
+        use_cols = applied_cols
+
+        if st.session_state.get(_k("show_column_manager"), False):
+            with st.expander("欄位順序管理", expanded=True):
+                draft_cols = _get_stage_col_profile(show_cols_mode, applied_cols, available_cols)
+
+                mgr_cols = st.columns([2.0, 0.9, 0.9, 0.9, 0.9, 1.2])
+                with mgr_cols[0]:
+                    selected_col = st.selectbox(
+                        "選擇要移動的欄位",
+                        options=draft_cols,
+                        index=0 if draft_cols else None,
+                        key=_k("selected_col_to_move"),
+                    )
+                with mgr_cols[1]:
+                    if st.button("⬆ 上移", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "up"), available_cols)
+                        st.rerun()
+                with mgr_cols[2]:
+                    if st.button("⬇ 下移", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "down"), available_cols)
+                        st.rerun()
+                with mgr_cols[3]:
+                    if st.button("⏫ 置頂", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "top"), available_cols)
+                        st.rerun()
+                with mgr_cols[4]:
+                    if st.button("⏬ 置底", use_container_width=True, disabled=not draft_cols):
+                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "bottom"), available_cols)
+                        st.rerun()
+                with mgr_cols[5]:
+                    if st.button("↩ 還原原始設定", use_container_width=True):
+                        _restore_original_col_profile_to_stage(show_cols_mode, available_cols)
+                        st.rerun()
+
+                st.markdown("**目前欄位順序**")
+                st.code(" | ".join(draft_cols), language=None)
+
+                apply_cols = st.columns([1.2, 1.2, 3.0])
+                with apply_cols[0]:
+                    if st.button("✅ 套用設定並永久記錄", use_container_width=True, type="primary"):
+                        _save_col_profile(show_cols_mode, draft_cols)
+                        st.session_state[_k(f"staged_col_profile_{show_cols_mode}")] = _get_saved_col_profile(show_cols_mode, available_cols)
+                        st.success("欄位順序已套用並永久記錄；下次切換頁面或重新整理不會恢復原始設定。")
+                        st.rerun()
+                with apply_cols[1]:
+                    if st.button("取消暫存", use_container_width=True):
+                        st.session_state[_k(f"staged_col_profile_{show_cols_mode}")] = applied_cols.copy()
+                        st.rerun()
+                with apply_cols[2]:
+                    if draft_cols != applied_cols:
+                        st.warning("欄位順序已有暫存變更，按『套用設定並永久記錄』後才會正式保存。")
+                    else:
+                        st.caption("目前欄位順序已套用並永久保存。")
+
+                st.markdown("**快速欄位方案**")
+                preset_cols = st.columns(4)
+                with preset_cols[0]:
+                    if st.button("方案A：交易核心", use_container_width=True):
+                        preset = [c for c in [
+                            "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦價格", "最新價",
+                            "損益幅%", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "備註"
+                        ] if c in available_cols]
+                        _stage_col_profile(show_cols_mode, preset, available_cols)
+                        st.rerun()
+                with preset_cols[1]:
+                    if st.button("方案B：績效核心", use_container_width=True):
+                        preset = [c for c in [
+                            "record_id", "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分",
+                            "3日績效%", "5日績效%", "10日績效%", "20日績效%", "損益幅%", "模式績效標籤"
+                        ] if c in available_cols]
+                        _stage_col_profile(show_cols_mode, preset, available_cols)
+                        st.rerun()
+                with preset_cols[2]:
+                    if st.button("方案C：完整預設", use_container_width=True):
+                        _restore_original_col_profile_to_stage(show_cols_mode, available_cols)
+                        st.rerun()
+                with preset_cols[3]:
+                    st.caption(f"最後保存：{_safe_str(st.session_state.get(_k('ui_last_saved_at'), '未保存'))}")
+
+                use_cols = _get_saved_col_profile(show_cols_mode, available_cols)
+
+        editor_df, total_rows, truncated = _get_editor_df(
+            view_df=view_df,
+            use_cols=use_cols,
+            fast_mode=bool(st.session_state.get(_k("fast_mode"), True)),
+            visible_limit=int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)),
+        )
+
+        if truncated:
+            st.warning(f"快速模式啟用中：目前符合條件 {total_rows} 筆，只先顯示前 {len(editor_df)} 筆以加速操作。要編輯全部可關閉快速模式。")
+        else:
+            st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
+
+        edited_df = st.data_editor(
+            editor_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=_k(f"record_editor_{show_cols_mode}"),
+            column_config={
+                "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
+                "刪除": st.column_config.CheckboxColumn("刪除"),
+                "record_id": None,  # 隱藏但保留，供刪除 / 編輯用
+                "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
+                "股票名稱": st.column_config.TextColumn("股票名稱", disabled=True),
+                "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
+                "推薦等級": st.column_config.TextColumn("推薦等級", disabled=True),
+                "推薦總分": st.column_config.NumberColumn("推薦總分", format="%.2f", disabled=True),
+                "股神決策模式": st.column_config.TextColumn("股神決策模式", disabled=True),
+                "股神進場建議": st.column_config.TextColumn("股神進場建議", disabled=True),
+                "推薦分層": st.column_config.TextColumn("推薦分層", disabled=True),
+                "建議部位%": st.column_config.NumberColumn("建議部位%", format="%.1f", disabled=True),
+                "風險報酬比": st.column_config.NumberColumn("風險報酬比", format="%.2f", disabled=True),
+                "追價風險分": st.column_config.NumberColumn("追價風險分", format="%.2f", disabled=True),
+                "停損距離%": st.column_config.NumberColumn("停損距離%", format="%.2f", disabled=True),
+                "目標報酬%": st.column_config.NumberColumn("目標報酬%", format="%.2f", disabled=True),
+                "不建議買進原因": st.column_config.TextColumn("不建議買進原因", disabled=True),
+                "最佳操作劇本": st.column_config.TextColumn("最佳操作劇本", disabled=True),
+                "隔日操作建議": st.column_config.TextColumn("隔日操作建議", disabled=True),
+                "轉弱條件": st.column_config.TextColumn("轉弱條件", disabled=True),
+
+                "股神決策分數": st.column_config.NumberColumn("股神決策分數", format="%.2f", disabled=True),
+                "股神建議動作": st.column_config.TextColumn("股神建議動作", disabled=True),
+                "股神信心": st.column_config.TextColumn("股神信心", disabled=True),
+                "股神進場區間": st.column_config.TextColumn("股神進場區間", disabled=True),
+                "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
+                "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
+                "飆股起漲分數": st.column_config.NumberColumn("飆股起漲分數", format="%.2f", disabled=True),
+                "起漲等級": st.column_config.TextColumn("起漲等級", disabled=True),
+                "起漲摘要": st.column_config.TextColumn("起漲摘要", disabled=True),
+                "交易可行分數": st.column_config.NumberColumn("交易可行分數", format="%.2f", disabled=True),
+                "類股熱度分數": st.column_config.NumberColumn("類股熱度分數", format="%.2f", disabled=True),
+                "最新價": st.column_config.NumberColumn("最新價", format="%.2f", disabled=True),
+                "損益幅%": st.column_config.NumberColumn("損益幅%", format="%.2f", disabled=True),
+                "3日績效%": st.column_config.NumberColumn("3日績效%", format="%.2f", disabled=True),
+                "5日績效%": st.column_config.NumberColumn("5日績效%", format="%.2f", disabled=True),
+                "10日績效%": st.column_config.NumberColumn("10日績效%", format="%.2f", disabled=True),
+                "20日績效%": st.column_config.NumberColumn("20日績效%", format="%.2f", disabled=True),
+                "目前狀態": st.column_config.SelectboxColumn("目前狀態", options=STATUS_OPTIONS),
+                "是否已實際買進": st.column_config.CheckboxColumn("是否已實際買進"),
+                "實際買進價": st.column_config.NumberColumn("實際買進價", format="%.2f"),
+                "實際賣出價": st.column_config.NumberColumn("實際賣出價", format="%.2f"),
+                "實際報酬%": st.column_config.NumberColumn("實際報酬%", format="%.2f", disabled=True),
+                "是否達停損": st.column_config.CheckboxColumn("是否達停損"),
+                "是否達目標1": st.column_config.CheckboxColumn("是否達目標1"),
+                "是否達目標2": st.column_config.CheckboxColumn("是否達目標2"),
+                "持有天數": st.column_config.NumberColumn("持有天數", format="%d", disabled=True),
+                "推薦日期": st.column_config.TextColumn("推薦日期", disabled=True),
+                "推薦時間": st.column_config.TextColumn("推薦時間", disabled=True),
+                "模式績效標籤": st.column_config.TextColumn("模式績效標籤", disabled=True),
+                "股神推論": st.column_config.TextColumn("股神推論", width="large", disabled=True),
+                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large", disabled=True),
+                "備註": st.column_config.TextColumn("備註", width="large"),
+            },
+        )
+
+        action_cols = st.columns([1.6, 1.2, 1.2, 1.2, 1.2, 2.6])
+        with action_cols[0]:
+            target_group = st.text_input("匯入自選群組", value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"), key=_k("watchlist_target_group"))
+        with action_cols[1]:
+            if st.button("📥 匯入勾選到4_自選股", use_container_width=True):
+                selected_ids = edited_df.loc[edited_df["匯入自選"] == True, "record_id"].astype(str).tolist()
+                ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
+                _set_status(msg, "success" if ok else "warning")
+                st.rerun()
+            detail_msg = _safe_str(st.session_state.get(_k("watchlist_import_detail"), ""))
+            if detail_msg:
+                st.caption(detail_msg)
+        with action_cols[2]:
+            if st.button("✅ 套用編輯", use_container_width=True):
+                master = live_df.copy()
+                edit_map = {str(r["record_id"]): dict(r) for _, r in edited_df.iterrows()}
+                for idx in master.index:
+                    rec_id = _safe_str(master.at[idx, "record_id"])
+                    if rec_id not in edit_map:
+                        continue
+                    src = edit_map[rec_id]
+                    for c in [c for c in master.columns if c in src]:
+                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
+                            continue
+                        master.at[idx, c] = src.get(c)
+                    recalc = _recalc_row(master.loc[idx].to_dict())
+                    for k2, v2 in recalc.items():
+                        if k2 in master.columns:
+                            master.at[idx, k2] = v2
+                master = _apply_mode_labels(master)
+                _save_state_df(master)
+                st.success("已套用，尚未同步")
+        with action_cols[3]:
+            if st.button("🗑️ 刪除勾選", use_container_width=True):
+                if "刪除" not in edited_df.columns:
+                    st.warning("目前表格缺少刪除欄位，請重新載入後再試。")
+                else:
+                    checked_df = edited_df[edited_df["刪除"].fillna(False).astype(bool)].copy()
+
+                    delete_ids = []
+                    if not checked_df.empty and "record_id" in checked_df.columns:
+                        delete_ids = [_safe_str(x) for x in checked_df["record_id"].astype(str).tolist() if _safe_str(x)]
+
+                    if not delete_ids:
+                        st.warning("請先勾選要刪除的紀錄。")
+                    else:
+                        before_n = len(live_df)
+                        new_df = _delete_records_by_ids(live_df, delete_ids)
+                        after_n = len(new_df)
+                        deleted_n = max(before_n - after_n, 0)
+
+                        _save_state_df(new_df)
+                        st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，尚未同步；若要永久寫回，請按「儲存同步」。"
+                        st.rerun()
+        with action_cols[4]:
+            if st.button("🧼 清空目前篩選", use_container_width=True):
+                source_df = view_df if not truncated else view_df.head(int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)))
+                if source_df.empty:
+                    st.warning("目前篩選結果沒有資料可清空。")
+                else:
+                    new_df = _clear_filtered_records(live_df, source_df)
+                    _save_state_df(new_df)
+                    st.success(f"已清空 {len(source_df)} 筆，尚未同步")
+        with action_cols[5]:
+            st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 更新價格 / 更新績效 → 儲存同步")
 
     with tabs[1]:
-        category_show = category_strength_df.copy()
-        for c in ["類股平均總分", "類股平均訊號", "類股平均漲幅", "類股平均雷達", "類股平均自動因子", "類股平均起漲前兆", "類股平均交易可行", "類股熱度分數", "類股加速度"]:
-            if c in category_show.columns:
-                if c == "類股平均漲幅":
-                    category_show[c] = category_show[c].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
-                else:
-                    category_show[c] = category_show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
-        st.dataframe(category_show, use_container_width=True, hide_index=True)
+        render_pro_section("股神模式進出場決策", "將 7_股神推薦 的分數欄位，結合最新價、停損距離、歷史績效與模式標籤，轉成可操作建議。")
+        god_df = live_df.copy()
+        if god_df.empty:
+            st.info("目前沒有推薦紀錄可分析。")
+        else:
+            topk = st.columns(4)
+            decision_counts = god_df["股神建議動作"].fillna("未判定").value_counts()
+            with topk[0]:
+                render_pro_info_card("可進場 / 布局", [("筆數", int(decision_counts.get("可進場", 0) + decision_counts.get("拉回可布局", 0)), "股神模式")], chips=["進場"])
+            with topk[1]:
+                render_pro_info_card("續抱 / 續抱觀察", [("筆數", int(decision_counts.get("續抱", 0) + decision_counts.get("續抱觀察", 0)), "股神模式")], chips=["持有"])
+            with topk[2]:
+                render_pro_info_card("減碼 / 出場", [("筆數", int(decision_counts.get("減碼觀察", 0) + decision_counts.get("轉弱出場", 0) + decision_counts.get("立即出場", 0) + decision_counts.get("分批停利", 0)), "股神模式")], chips=["風險"])
+            with topk[3]:
+                avg_god = pd.to_numeric(god_df["股神決策分數"], errors="coerce").dropna().mean()
+                render_pro_info_card("平均決策分數", [("分數", "-" if pd.isna(avg_god) else f"{avg_god:.2f}", "0~100")], chips=["綜合"])
+
+            decision_filter_cols = st.columns([1.2, 1.2, 1.2])
+            with decision_filter_cols[0]:
+                act_filter = st.selectbox("股神建議動作", ["全部"] + sorted([x for x in god_df["股神建議動作"].dropna().astype(str).unique().tolist() if x]), key=_k("god_action_filter"))
+            with decision_filter_cols[1]:
+                conf_filter = st.selectbox("股神信心", ["全部"] + sorted([x for x in god_df["股神信心"].dropna().astype(str).unique().tolist() if x]), key=_k("god_conf_filter"))
+            with decision_filter_cols[2]:
+                min_score = st.slider("最低決策分數", 0, 100, 60, 1, key=_k("god_min_score"))
+
+            show_god = god_df.copy()
+            if act_filter != "全部":
+                show_god = show_god[show_god["股神建議動作"].astype(str) == act_filter].copy()
+            if conf_filter != "全部":
+                show_god = show_god[show_god["股神信心"].astype(str) == conf_filter].copy()
+            show_god = show_god[pd.to_numeric(show_god["股神決策分數"], errors="coerce").fillna(0) >= min_score].copy()
+            show_god = show_god.sort_values(["股神決策分數", "推薦總分", "20日績效%"], ascending=[False, False, False], na_position="last")
+
+            st.dataframe(
+                show_god[[c for c in [
+                    "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分", "買點分級", "風險說明", "股神推論邏輯",
+                    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "推薦價格", "最新價", "停損價", "賣出目標1", "賣出目標2", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
+                ] if c in show_god.columns]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with tabs[2]:
-        st.dataframe(
-            _format_df(
-                leader_df[
-                    [
-                        "股票代號", "股票名稱", "類別", "類股內排名", "類股前3強",
-                        "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "個股原始總分",
-                        "類股平均總分", "類股熱度分數", "推薦總分", "股神推論邏輯", "風險說明", "推薦理由摘要",
-                    ]
-                ].head(top_n)
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        render_pro_section("手動新增推薦紀錄")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            manual_code = st.text_input("股票代號", value="", key=_k("manual_code"))
+        with c2:
+            manual_name = st.text_input("股票名稱", value="", key=_k("manual_name"))
+        with c3:
+            manual_market = st.selectbox("市場別", ["上市", "上櫃", "興櫃"], index=0, key=_k("manual_market"))
+        with c4:
+            manual_category = st.text_input("類別", value="", key=_k("manual_category"))
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            manual_mode = st.text_input("推薦模式", value="手動新增", key=_k("manual_mode"))
+        with c6:
+            manual_grade = st.selectbox("推薦等級", ["", "S", "A", "B", "C", "股神級", "強烈關注", "優先觀察", "可列追蹤", "觀察"], index=1, key=_k("manual_grade"))
+        with c7:
+            manual_total = st.number_input("推薦總分", min_value=0.0, max_value=1000.0, value=85.0, step=0.1, key=_k("manual_total"))
+        with c8:
+            manual_price = st.number_input("推薦價格", min_value=0.0, value=0.0, step=0.01, key=_k("manual_price"))
+        c9, c10, c11, c12 = st.columns(4)
+        with c9:
+            manual_stop = st.number_input("停損價", min_value=0.0, value=0.0, step=0.01, key=_k("manual_stop"))
+        with c10:
+            manual_t1 = st.number_input("賣出目標1", min_value=0.0, value=0.0, step=0.01, key=_k("manual_t1"))
+        with c11:
+            manual_t2 = st.number_input("賣出目標2", min_value=0.0, value=0.0, step=0.01, key=_k("manual_t2"))
+        with c12:
+            manual_status = st.selectbox("目前狀態", STATUS_OPTIONS, index=0, key=_k("manual_status"))
+        manual_reason = st.text_area("推薦理由摘要", value="", height=90, key=_k("manual_reason"))
+        manual_tag = st.text_input("推薦標籤", value="", key=_k("manual_tag"))
+        if st.button("➕ 新增並同步", use_container_width=True, type="primary"):
+            if not _normalize_code(manual_code):
+                st.warning("請輸入股票代號")
+            else:
+                rec_date = _now_date_text()
+                rec_time = _now_time_text()
+                row = {
+                    "record_id": _create_record_id(_normalize_code(manual_code), rec_date, rec_time, manual_mode),
+                    "股票代號": _normalize_code(manual_code),
+                    "股票名稱": _safe_str(manual_name) or _normalize_code(manual_code),
+                    "市場別": manual_market,
+                    "類別": manual_category,
+                    "推薦模式": manual_mode,
+                    "推薦等級": manual_grade,
+                    "推薦總分": manual_total,
+                    "推薦價格": manual_price if manual_price > 0 else None,
+                    "停損價": manual_stop if manual_stop > 0 else None,
+                    "賣出目標1": manual_t1 if manual_t1 > 0 else None,
+                    "賣出目標2": manual_t2 if manual_t2 > 0 else None,
+                    "推薦日期": rec_date,
+                    "推薦時間": rec_time,
+                    "建立時間": _now_text(),
+                    "更新時間": _now_text(),
+                    "目前狀態": manual_status,
+                    "推薦標籤": manual_tag,
+                    "推薦理由摘要": manual_reason,
+                }
+                new_df = _append_records_dedup_by_business_key(_get_state_df(), pd.DataFrame([row]))
+                new_df = _backfill_perf_columns(new_df)
+                new_df = _apply_mode_labels(new_df)
+                _save_state_df(new_df)
+                ok = _save_records_dual(new_df)
+                if ok:
+                    st.success("已加入並同步成功")
+                    st.rerun()
 
     with tabs[3]:
-        st.dataframe(
-            _format_df(
-                factor_rank[
-                    [
-                        "股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數",
-                        "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數",
-                        "法人連買代理分數", "自動因子摘要",
-                    ]
-                ].head(top_n)
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        render_pro_section("系統推薦績效分析", "以推薦價格對照最新價與前推 3/5/10/20 日績效")
+        valid_sys = pd.to_numeric(live_df["損益幅%"], errors="coerce").dropna()
+        win_rate_sys = float((valid_sys > 0).mean() * 100) if not valid_sys.empty else 0.0
+        avg_sys_ret = float(valid_sys.mean()) if not valid_sys.empty else 0.0
+        valid_20 = pd.to_numeric(live_df["20日績效%"], errors="coerce").dropna()
+        avg_20_v = float(valid_20.mean()) if not valid_20.empty else 0.0
+        win_20 = float((valid_20 > 0).mean() * 100) if not valid_20.empty else 0.0
+        target_rate = float(live_df["是否達目標1"].fillna(False).map(_normalize_bool).mean() * 100) if len(live_df) else 0.0
+        stop_rate = float(live_df["是否達停損"].fillna(False).map(_normalize_bool).mean() * 100) if len(live_df) else 0.0
+
+        render_pro_kpi_row([
+            {"label": "系統樣本數", "value": format_number(len(live_df)), "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "系統勝率", "value": f"{win_rate_sys:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均系統報酬%", "value": f"{avg_sys_ret:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "20日勝率", "value": f"{win_20:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均20日績效%", "value": f"{avg_20_v:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "達目標1比率", "value": f"{target_rate:.2f}%", "delta": f"停損率 {stop_rate:.2f}%", "delta_class": "pro-kpi-delta-flat"},
+        ])
+        best_cols = st.columns(2)
+        with best_cols[0]:
+            if not ana_tables["best_mode"].empty:
+                top_mode = ana_tables["best_mode"].iloc[0]
+                st.info(f"最強模式：{_safe_str(top_mode.get('推薦模式'))} ｜ 平均20日績效 {(_safe_float(top_mode.get('平均20日績效'), 0) or 0):.2f}% ｜ 20日勝率 {(_safe_float(top_mode.get('20日勝率'), 0) or 0):.2f}%")
+            else:
+                st.info("最強模式：暫無資料")
+        with best_cols[1]:
+            if not ana_tables["best_category"].empty:
+                top_cat = ana_tables["best_category"].iloc[0]
+                st.info(f"最強類別：{_safe_str(top_cat.get('類別'))} ｜ 平均20日績效 {(_safe_float(top_cat.get('平均20日績效'), 0) or 0):.2f}% ｜ 20日勝率 {(_safe_float(top_cat.get('20日勝率'), 0) or 0):.2f}%")
+            else:
+                st.info("最強類別：暫無資料")
+        sub_tabs = st.tabs(["模式分析", "類別分析", "等級分析", "明細表"])
+        with sub_tabs[0]:
+            st.dataframe(ana_tables["mode"], use_container_width=True, hide_index=True)
+        with sub_tabs[1]:
+            st.dataframe(ana_tables["category"], use_container_width=True, hide_index=True)
+        with sub_tabs[2]:
+            st.dataframe(ana_tables["grade"], use_container_width=True, hide_index=True)
+        with sub_tabs[3]:
+            detail_cols = [c for c in [
+                "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
+                "推薦價格", "最新價", "損益金額", "損益幅%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+                "是否達停損", "是否達目標1", "是否達目標2", "推薦日期", "持有天數", "推薦理由摘要"
+            ] if c in live_df.columns]
+            st.dataframe(_format_df(live_df[detail_cols]), use_container_width=True, hide_index=True)
 
     with tabs[4]:
-        if _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")) == "結合版" and isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
-            st.dataframe(_format_df(hot_pick_df), use_container_width=True, hide_index=True)
+        render_pro_section("實際交易分析", "只統計有實際買進資料的紀錄")
+        trade_df = live_df[live_df["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
+        if trade_df.empty:
+            st.info("目前沒有實際交易資料。")
         else:
-            st.info("目前未啟用結合版，或本輪沒有補抓名單。")
+            valid_real = pd.to_numeric(trade_df["實際報酬%"], errors="coerce").dropna()
+            real_win = float((valid_real > 0).mean() * 100) if not valid_real.empty else 0.0
+            real_avg = float(valid_real.mean()) if not valid_real.empty else 0.0
+            render_pro_kpi_row([
+                {"label": "實際交易筆數", "value": len(trade_df), "delta": "", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "實際勝率", "value": f"{real_win:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "平均實際報酬%", "value": f"{real_avg:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
+            ])
+            st.dataframe(trade_df[[c for c in ["股票代號", "股票名稱", "推薦模式", "推薦價格", "實際買進價", "實際賣出價", "實際報酬%", "目前狀態", "備註"] if c in trade_df.columns]], use_container_width=True, hide_index=True)
+            st.dataframe(ana_tables["trade_mode"], use_container_width=True, hide_index=True)
 
     with tabs[5]:
+        render_pro_section("Excel 匯出")
+        excel_bytes = _build_export_bytes(live_df, ana_tables)
+        st.download_button(
+            "📥 下載 Excel（推薦紀錄 / 模式分析 / 類別分析 / 等級分析 / 實際交易分析 / 最強模式 / 最強類別）",
+            data=excel_bytes,
+            file_name=f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    with tabs[6]:
         render_pro_info_card(
-            "V2 模組邏輯",
+            "同步 / 欄位完整性",
             [
-                ("按鈕觸發", "調整條件不會自動重算，按下開始推薦才會跑；條件會自動記住。", ""),
-                ("類型更細分", "已由大類擴充成 IC設計、晶圓代工、封測、AI伺服器、散熱、金控、銀行等。", ""),
-                ("推薦模式", "保留飆股/波段/領頭羊/綜合，新增低檔轉強、拉回承接、回測支撐、低檔拉回綜合、保守低風險。", ""),
-                ("市場環境分數", "新增市場順風/逆風分數，讓同樣條件下順風盤優先。", ""),
-                ("型態 / 爆發", "新增型態突破分數、爆發力分數，讓起漲股更容易被拉出。", ""),
-            ("推薦策略", "新增 精準版 / 結合版；結合版會另外列出飆股補抓，不混入主名單。", ""),
-                ("風險過濾", "新增 寬鬆 / 標準 / 嚴格，先淘汰不合格股票。", ""),
-                ("起漲前兆", "新增均線轉強、量能啟動、突破準備、動能翻多、支撐防守。", ""),
-                ("交易可行", "新增交易可行分數、追價風險、拉回買點、突破買點、風險報酬評級。", ""),
-                ("類股強度", "每個類別都會算平均總分、平均訊號、平均漲幅、類股熱度與類股加速度。", ""),
-                ("個股領先", "若個股原始總分高於同類股平均，視為領先股。", ""),
-                ("推薦表勾選", "本輪精華推薦表可直接勾選，且欄位順序可調整並記住。", ""),
-                ("類股內排名", "新增每個類別內部排名，快速找該族群最強個股。", ""),
-                ("類股前3強", "若個股在該類別內排名 1~3，會標記為類股前3強。", ""),
-                ("理由升級", "推薦理由已改成更偏交易決策語言，不只是分數描述。", ""),
-                ("績效預留", "已預留 3日 / 5日 / 10日 / 20日績效欄位，供下一版自動回填。", ""),
-                ("推薦加入自選股", "可直接勾選推薦結果並批次加入指定群組。", ""),
-                ("寫入推薦紀錄", "可直接勾選推薦結果並批次寫入 8_股神推薦紀錄。", ""),
-                ("雙寫同步", "自選股新增/刪除/批次加入時，同步寫回 GitHub watchlist.json + Firestore。", ""),
-                ("Excel 匯出", "可匯出完整推薦表、類股強度榜、同類股領先榜、自動因子榜。", ""),
-                ("加速與 ETA", "歷史資料與單股分析保留快取，整批推薦改成併發並顯示剩餘時間。", ""),
-                ("推薦結果保留", "推薦結果會存到 session_state，切頁後回來不會立刻消失，條件也會一起記住。", ""),
-                ("掃描上限", "已支援 1000 / 1500 / 2000 / 全部掃描。", ""),
-                ("7/8 對齊", "record_id、推薦日期、推薦時間、推薦欄位已正式對齊 8 頁。", ""),
+                ("主要來源", "godpick_records.json + Firestore", "雙寫"),
+                ("自選股匯入", "可將勾選紀錄匯入 watchlist.json", "已整合"),
+                ("匯入位置", _watchlist_github_config()["path"], "沿用4_自選股中心"),
+                ("UI 設定", _ui_config_github_config()["path"], "永久記錄"),
+                ("刪除 / 清空", "支援", "總表管理內"),
+                ("批次更新", "支援表格編輯 / 刪除 / 清空 / 更新", "已保留"),
+                ("前推績效", "3/5/10/20 日績效%（未滿交易日顯示空白）", "已整合"),
+                ("模式績效標籤", "依模式歷史表現自動標記", "已整合"),
+                ("最強模式 / 類別", "依20日績效 + 勝率綜合排序", "已整合"),
+                ("Excel 匯出", "推薦紀錄 / 分析表 / 最強榜", "已整合"),
             ],
-            chips=["V2", "功能不刪", "顯示加速", "三模式", "起漲前兆", "風險過濾", "Excel匯出", "推薦紀錄串接"],
+            chips=["完整版", "不可缺功能", "雙寫同步", "匯入自選股", "前推績效", "最強模式", "最強類別", "UI永久記錄"],
         )
 
 
 if __name__ == "__main__":
     main()
+
+
