@@ -4319,22 +4319,37 @@ def _create_watchlist_group(group_name: str) -> tuple[bool, str]:
 
 
 def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False) -> tuple[int, list[str]]:
+    """
+    v26.2：股神推薦紀錄寫入強化版。
+    修正只有 GitHub / Firestore 成功才算成功的問題，改成：
+    - 先合併 GitHub 與本機 godpick_records.json
+    - 寫入本機 godpick_records.json
+    - 再同步 GitHub / Firestore
+    - 只要本機、GitHub、Firestore 任一成功，就回報成功
+    """
     if not record_rows:
         return 0, ["沒有可寫入的推薦紀錄。"]
 
     try:
-        old_records, read_msg = _read_godpick_records_from_github()
-        if read_msg:
-            old_records = []
+        github_records, read_msg = _read_godpick_records_from_github()
+        local_records = _safe_json_read_local("godpick_records.json", [])
 
-        old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
+        combined_old_records = []
+        if isinstance(github_records, list):
+            combined_old_records.extend(github_records)
+        if isinstance(local_records, list):
+            combined_old_records.extend([x for x in local_records if isinstance(x, dict)])
+
+        old_df = _ensure_godpick_record_columns(pd.DataFrame(combined_old_records))
+        if not old_df.empty:
+            # 先用 v25.9 business key 去重，避免 GitHub + 本機重複造成基準筆數膨脹。
+            old_df = _append_records_dedup_by_business_key(pd.DataFrame(), old_df)
+
         new_df = _ensure_godpick_record_columns(pd.DataFrame([_normalize_godpick_record(x) for x in record_rows]))
 
         before_count = len(old_df)
 
         if force_duplicate:
-            # 使用者確認要重複紀錄時，不做 business key 去重。
-            # 為避免 record_id 撞到舊紀錄，重複寫入時重新生成唯一 record_id。
             new_df = new_df.copy()
             now_tag = str(int(time.time() * 1000))
             for idx in new_df.index:
@@ -4357,31 +4372,36 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
 
         after_count = len(merged_df)
         added_count = max(after_count - before_count, 0)
-
         merged_records = merged_df.to_dict(orient="records")
 
+        # v26.2：本機一定先寫入，讓 8/9_股神推薦紀錄即使 GitHub/Firestore 失敗也讀得到。
+        ok_local, msg_local = _safe_json_write_local("godpick_records.json", merged_records)
         ok_github, msg_github = _write_godpick_records_to_github(merged_records)
         ok_firestore, msg_firestore = _write_godpick_records_to_firestore(merged_records)
 
         st.session_state[_k("last_record_write_detail")] = [
+            f"本機: {'成功' if ok_local else '失敗'} | {msg_local}",
             f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
             f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
-            f"本次寫入筆數: {added_count}",
+            f"本次新增筆數: {added_count}",
             f"合併後總筆數: {after_count}",
+            f"讀取來源: GitHub({'有' if isinstance(github_records, list) and github_records else '無'}) / 本機({'有' if isinstance(local_records, list) and local_records else '無'})",
         ]
 
-        msgs = []
-        msgs.append(msg_github if ok_github else f"GitHub 失敗：{msg_github}")
-        msgs.append(msg_firestore if ok_firestore else f"Firestore 失敗：{msg_firestore}")
+        msgs = [
+            msg_local if ok_local else f"本機失敗：{msg_local}",
+            msg_github if ok_github else f"GitHub 失敗/略過：{msg_github}",
+            msg_firestore if ok_firestore else f"Firestore 失敗/略過：{msg_firestore}",
+        ]
 
-        if ok_github or ok_firestore:
+        if ok_local or ok_github or ok_firestore:
             return added_count, msgs
 
         return 0, msgs
 
     except Exception as e:
         st.session_state[_k("last_record_write_detail")] = [f"例外：{e}"]
-        return 0, [f"寫入 8_股神推薦紀錄失敗：{e}"]
+        return 0, [f"寫入股神推薦紀錄失敗：{e}"]
 
 
 def _normalize_recommend_list_payload(payload) -> list[dict[str, Any]]:
