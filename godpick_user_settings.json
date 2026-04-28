@@ -21,9 +21,9 @@
   },
   "column_orders": {
     "full_table": [
-      "族群資金流說明",
       "勾選",
       "最新價",
+      "族群資金流說明",
       "飆股起漲分數",
       "起漲等級",
       "股票代號",
@@ -209,6 +209,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-28 10:02:54",
+  "updated_at": "2026-04-28 10:03:17",
   "version": "godpick_v5_persistent_settings"
 }
