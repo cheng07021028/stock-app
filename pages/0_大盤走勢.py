@@ -447,7 +447,7 @@ def _fetch_stooq(symbol: str, pred_date_text: str) -> dict[str, Any]:
                 "events": "div,splits",
             },
             headers={"User-Agent": "Mozilla/5.0"},
-            timeout=12,
+            timeout=5,
         )
         data = resp.json()
         result = (((data or {}).get("chart") or {}).get("result") or [{}])[0]
@@ -494,7 +494,7 @@ def _search_news_headlines(pred_date_text: str, max_items: int = 8) -> list[dict
     for kw in keywords:
         url = f"https://news.google.com/rss/search?q={requests.utils.quote(kw + ' after:' + ymd)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
         try:
-            resp = requests.get(url, timeout=12)
+            resp = requests.get(url, timeout=5)
             text = resp.text
             items = text.split("<item>")[1:3]
             for it in items:
@@ -554,7 +554,7 @@ def _score_from_pct(pct: float | None, scale: float = 2.0, cap: float = 10.0) ->
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _fetch_json(url: str, timeout: int = 12) -> Any:
+def _fetch_json(url: str, timeout: int = 5) -> Any:
     try:
         r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code != 200:
@@ -681,7 +681,7 @@ def _fetch_taifex_sentiment(pred_date_text: str) -> dict[str, Any]:
         ]
         for u in candidates:
             try:
-                txt = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0"}).text
+                txt = requests.get(u, timeout=5, headers={"User-Agent": "Mozilla/5.0"}).text
                 nums = re.findall(r'([0-9]+\.[0-9]+)', txt)
                 hit = None
                 for x in nums:
@@ -1316,10 +1316,6 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     futopt = _fetch_taifex_sentiment(pred_date_text)
     margin = _fetch_twse_margin(pred_date_text)
 
-    inst = _fetch_twse_institutional(pred_date_text)
-    futopt = _fetch_taifex_sentiment(pred_date_text)
-    margin = _fetch_twse_margin(pred_date_text)
-
     tech_score = 0.0
     structure_notes = []
     tw_close = _safe_float(twii.get("close"), 22000.0)
@@ -1445,6 +1441,160 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
         "margin_used_date": _safe_str(margin.get('used_date')),
         "news_range": f"{pred_date_text} 前後搜尋" if news_rows else "無新聞命中",
     }
+
+
+
+
+def _calc_market_context_quick(pred_date_text: str) -> dict[str, Any]:
+    """
+    v25.4 快顯模式：
+    只抓必要市場價格與少量風險代理資料，避免 Google News / TWSE / TAIFEX 外部端點等待過久，
+    讓 01_大盤趨勢可以先顯示。關閉「快顯模式」仍會走完整資料源。
+    """
+    twii = _price_on_or_before("^TWII", pred_date_text, 5)
+    nas = _price_on_or_before("^IXIC", pred_date_text, 5)
+    sox = _price_on_or_before("^SOX", pred_date_text, 5)
+    spx = _price_on_or_before("^GSPC", pred_date_text, 5)
+    adr = _price_on_or_before("TSM", pred_date_text, 5)
+    es = _price_on_or_before("ES.F", pred_date_text, 5)
+    nq = _price_on_or_before("NQ.F", pred_date_text, 5)
+    vix = _price_on_or_before("^VIX", pred_date_text, 5)
+    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 5)
+
+    news_rows: list[dict[str, str]] = []
+    news_score, news_logic, main_risk = 0.0, "快顯模式略過新聞即時抓取", "快顯模式：未納入新聞端點"
+
+    tech_score = 0.0
+    structure_notes = []
+    tw_close = _safe_float(twii.get("close"), 22000.0)
+    tw_pct = _safe_float(twii.get("pct"), 0.0)
+    tw_ma5 = _safe_float(twii.get("ma5"), tw_close)
+    tw_ma20 = _safe_float(twii.get("ma20"), tw_close)
+    if tw_close >= tw_ma5:
+        tech_score += 2.5
+        structure_notes.append("加權站上MA5")
+    else:
+        tech_score -= 2.5
+        structure_notes.append("加權跌破MA5")
+    if tw_close >= tw_ma20:
+        tech_score += 3.0
+        structure_notes.append("加權站上MA20")
+    else:
+        tech_score -= 3.0
+        structure_notes.append("加權跌破MA20")
+    tech_score += _score_from_pct(tw_pct, scale=1.3, cap=6)
+
+    adr_pct = _safe_float(adr.get("pct"), 0.0)
+    es_pct = _safe_float(es.get("pct"), 0.0)
+    nq_pct = _safe_float(nq.get("pct"), 0.0)
+    nas_pct = _safe_float(nas.get("pct"), 0.0)
+    sox_pct = _safe_float(sox.get("pct"), 0.0)
+    spx_pct = _safe_float(spx.get("pct"), 0.0)
+
+    us_score = (
+        _score_from_pct(nas_pct, 1.8, 8)
+        + _score_from_pct(sox_pct, 2.2, 9)
+        + _score_from_pct(spx_pct, 1.2, 6)
+        + _score_from_pct(adr_pct, 2.0, 8)
+    )
+    night_score = _score_from_pct(es_pct, 2.0, 8) + _score_from_pct(nq_pct, 2.4, 9)
+
+    vix_val = _safe_float(vix.get("close"), 18.0)
+    risk_score = 0.0
+    if vix_val >= 30:
+        risk_score -= 8
+    elif vix_val >= 24:
+        risk_score -= 5
+    elif vix_val >= 20:
+        risk_score -= 2
+    elif vix_val <= 15:
+        risk_score += 1.5
+
+    fx_val = _safe_float(usdtwd.get("close"), 32.0)
+    if fx_val >= 32.5:
+        risk_score -= 2.5
+    elif fx_val <= 31.8:
+        risk_score += 1.0
+
+    # 快顯模式用外盤與ADR代理籌碼估分，不等待法人/期權/融資券端點。
+    foreign_score = _score_from_pct(adr_pct * 0.45 + sox_pct * 0.30 + nas_pct * 0.25, scale=1.7, cap=8)
+    futures_score = _score_from_pct(es_pct * 0.45 + nq_pct * 0.55, scale=1.8, cap=8)
+    margin_score = _score_from_pct(-(adr_pct * 0.5 + es_pct * 0.25 + nq_pct * 0.25), scale=0.8, cap=4)
+    sector_strong, sector_weak, sector_score = _derive_sector_tags(sox_pct, nas_pct, adr_pct, spx_pct)
+    event_list = ["快顯模式：新聞/法人/期權端點略過，關閉快顯模式可完整抓取"]
+
+    event_score = -news_score * 1.8
+    if vix_val >= 25:
+        event_score -= 2.0
+
+    if tw_pct >= 1.2 and us_score > 3 and foreign_score >= 0:
+        scenario = "多頭延續日"
+    elif tw_pct <= -1.2 and us_score < -3 and foreign_score <= 0:
+        scenario = "空頭延續日"
+    elif news_score >= 4 or vix_val >= 25:
+        scenario = "重大風險事件日"
+    elif abs(tw_pct) <= 0.5 and abs(us_score) <= 3:
+        scenario = "高檔/低檔震盪日"
+    else:
+        scenario = "一般趨勢日"
+
+    source_status = (
+        f"快顯模式｜加權:{_safe_str(twii.get('date')) or 'fallback'}｜"
+        f"外盤:{_safe_str(nas.get('date')) or 'fallback'}｜"
+        f"法人/期權/融資券:代理估算"
+    )
+
+    return {
+        "twii": twii, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
+        "news_rows": news_rows,
+        "news_score": news_score,
+        "news_logic": news_logic,
+        "main_risk": main_risk,
+        "tech_score": tech_score,
+        "us_score": us_score,
+        "night_score": night_score,
+        "risk_score": risk_score,
+        "foreign_score": foreign_score,
+        "futures_score": futures_score + margin_score,
+        "sector_score": sector_score,
+        "event_score": event_score,
+        "scenario": scenario,
+        "structure_notes": structure_notes,
+        "tw_close": tw_close,
+        "tw_pct": tw_pct,
+        "vix_val": vix_val,
+        "fx_val": fx_val,
+        "foreign_amt": None,
+        "total3_amt": None,
+        "foreign_fut_net": None,
+        "pcr": None,
+        "margin_change": None,
+        "short_change": None,
+        "sector_strong": sector_strong,
+        "sector_weak": sector_weak,
+        "event_list": event_list,
+        "source_status": source_status,
+        "market_data_date": _safe_str(twii.get('date')),
+        "twii_date": _safe_str(twii.get('date')),
+        "us_data_date": " / ".join([x for x in [_safe_str(nas.get('date')), _safe_str(sox.get('date')), _safe_str(spx.get('date')), _safe_str(adr.get('date'))] if x]),
+        "night_data_date": " / ".join([x for x in [_safe_str(es.get('date')), _safe_str(nq.get('date'))] if x]),
+        "inst_used_date": "快顯代理估算",
+        "futopt_used_date": "快顯代理估算",
+        "margin_used_date": "快顯代理估算",
+        "news_range": "快顯模式略過新聞端點",
+    }
+
+
+def _predict_all_models_quick(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    ctx = _calc_market_context_quick(pred_date_text)
+    weights = _get_dynamic_weights(records_df)
+    rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
+    pred_df = pd.DataFrame(rows)
+    pred_df = _enrich_macro_predictions(pred_df, ctx)
+    pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
+    pred_df = pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False]).reset_index(drop=True)
+    return pred_df, ctx
+
 
 
 def _get_dynamic_weights(records_df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -2274,7 +2424,13 @@ def main():
         base_df = _get_state_df()
 
     pred_date_text = pd.to_datetime(active_pred_date).strftime("%Y-%m-%d")
-    pred_df, ctx = _predict_all_models(pred_date_text, base_df)
+    with st.spinner("正在產生大盤趨勢分析，快顯模式會優先顯示必要結果..."):
+        if quick_mode:
+            pred_df, ctx = _predict_all_models_quick(pred_date_text, base_df)
+        else:
+            pred_df, ctx = _predict_all_models(pred_date_text, base_df)
+    if quick_mode:
+        st.caption("⚡ 目前使用快顯模式：優先載入必要大盤結果；如需完整法人、期權、新聞端點，請關閉快顯模式後重新整理。")
     top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
     scoreboard = _build_scoreboard(base_df)
 
