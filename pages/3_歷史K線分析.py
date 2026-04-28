@@ -1201,7 +1201,7 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
 
 
-def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...], render_token: str = "") -> go.Figure:
+def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]) -> go.Figure:
     """專業版 K 線圖。
 
     設計重點：
@@ -1427,8 +1427,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             borderwidth=1,
         ),
         xaxis_rangeslider_visible=False,
-        # v26.3：切換事件/起漲起跌標記時強制更新 Plotly 前端狀態，避免需換頁再回來才看到圖示。
-        uirevision=f"kline_{stock_label}_{render_token or 'main'}",
+        uirevision=f"kline_{stock_label}",
         dragmode="pan",
     )
 
@@ -1599,7 +1598,7 @@ def _render_key_price_bar(df: pd.DataFrame, sr_snapshot: dict):
 def _render_left_event_panel(filtered_event_df: pd.DataFrame):
     st.markdown("### 事件面板")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         if st.button("上一事件", key=_k("prev_event"), use_container_width=True):
             if filtered_event_df is not None and not filtered_event_df.empty:
@@ -1610,6 +1609,7 @@ def _render_left_event_panel(filtered_event_df: pd.DataFrame):
                     st.session_state[_k("focus_event_idx")] = valid[max(0, pos - 1)]
                 else:
                     st.session_state[_k("focus_event_idx")] = valid[0]
+                st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
                 st.rerun()
 
     with c2:
@@ -1622,11 +1622,18 @@ def _render_left_event_panel(filtered_event_df: pd.DataFrame):
                     st.session_state[_k("focus_event_idx")] = valid[min(len(valid) - 1, pos + 1)]
                 else:
                     st.session_state[_k("focus_event_idx")] = valid[0]
+                st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
                 st.rerun()
 
     with c3:
         if st.button("全區間", key=_k("back_all"), use_container_width=True):
             st.session_state[_k("focus_event_idx")] = -1
+            st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
+            st.rerun()
+
+    with c4:
+        if st.button("重繪圖表", key=_k("redraw_chart"), use_container_width=True):
+            st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
             st.rerun()
 
     limit = int(st.session_state.get(_k("left_panel_limit"), 12))
@@ -2073,48 +2080,28 @@ def main():
         _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
         _render_key_price_bar(df, sr_snapshot)
 
-        # v26.3：Plotly 前端有時會沿用舊圖層，導致起漲/起跌/KD/MA 標記要換頁回來才顯示。
-        # 將事件焦點、範圍、標記數、最後日期都放進 key/uirevision，讓切換事件後立即重繪主圖。
-        _focus_idx_now = int(st.session_state.get(_k("focus_event_idx"), -1))
-        _focus_window_now = _safe_str(st.session_state.get(_k("focus_window"), "全部"))
-        _show_ma_now = bool(st.session_state.get(_k("show_ma"), True))
-        _show_pivots_now = bool(st.session_state.get(_k("show_pivots"), True))
-        _last_date_token = ""
-        try:
-            _last_date_token = pd.to_datetime(focus_df["日期"].iloc[-1]).strftime("%Y%m%d")
-        except Exception:
-            _last_date_token = "nodate"
-        _chart_render_token = (
-            f"{_normalize_code(stock_code)}_"
-            f"{len(focus_df)}_"
-            f"{_last_date_token}_"
-            f"ev{_focus_idx_now}_"
-            f"win{_focus_window_now}_"
-            f"ma{int(_show_ma_now)}_"
-            f"pv{int(_show_pivots_now)}_"
-            f"p{len(focus_peak_idx)}_"
-            f"t{len(focus_trough_idx)}"
-        )
-
+        _chart_seq = int(st.session_state.get(_k("chart_redraw_seq"), 0))
         _main_fig = _build_candlestick_chart(
             focus_df,
             stock_label,
-            show_ma=_show_ma_now,
-            show_pivots=_show_pivots_now,
+            show_ma=bool(st.session_state.get(_k("show_ma"), True)),
+            show_pivots=bool(st.session_state.get(_k("show_pivots"), True)),
             peak_idx=tuple(focus_peak_idx),
             trough_idx=tuple(focus_trough_idx),
-            render_token=_chart_render_token,
         )
-
-        # v26.4：用穩定容器即時重畫，不使用大量動態 key，避免圖表空白。
-        _chart_slot = st.empty()
-        with _chart_slot.container():
-            st.plotly_chart(
-                _main_fig,
-                use_container_width=True,
-                key=_k("kline_chart_main"),
-                config={"displaylogo": False, "scrollZoom": True, "responsive": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+        try:
+            _main_fig.update_layout(
+                datarevision=f"{_normalize_code(stock_code)}_{len(focus_df)}_{len(focus_peak_idx)}_{len(focus_trough_idx)}_{_chart_seq}",
+                uirevision=f"{_normalize_code(stock_code)}_{len(focus_df)}_{len(focus_peak_idx)}_{len(focus_trough_idx)}_{_chart_seq}",
             )
+        except Exception:
+            pass
+
+        st.plotly_chart(
+            _main_fig,
+            use_container_width=True,
+            config={"displaylogo": False, "scrollZoom": True, "responsive": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+        )
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
