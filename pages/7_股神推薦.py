@@ -180,6 +180,11 @@ GODPICK_RECORD_COLUMNS = [
     "是否領先同類股",
     "推薦標籤",
     "推薦理由摘要",
+    "K線驗證標記",
+    "推薦日價格",
+    "推薦日支撐壓力摘要",
+    "K線查詢參數",
+    "K線檢視提示",
     "推薦價格",
     "停損價",
     "賣出目標1",
@@ -2857,6 +2862,16 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "市場別": _safe_str(r.get("市場別")) or "上市",
                 "類別": _normalize_category(r.get("類別")),
                 "推薦模式": mode,
+            "K線驗證標記": "已建立K線驗證資料",
+            "推薦日價格": bundle["close_now"],
+            "推薦日支撐壓力摘要": (
+                f"近端支撐 {format_number(bundle.get('entry_decision', {}).get('近端支撐'), 2)}｜"
+                f"主要支撐 {format_number(bundle.get('entry_decision', {}).get('主要支撐'), 2)}｜"
+                f"近端壓力 {format_number(bundle.get('entry_decision', {}).get('近端壓力'), 2)}｜"
+                f"停損 {format_number(bundle.get('entry_decision', {}).get('停損參考'), 2)}"
+            ),
+            "K線查詢參數": f"stock_code={code}&source=godpick",
+            "K線檢視提示": "至 3_歷史K線分析，輸入/帶入此股票，可對照推薦價、支撐、壓力、停損與後續走勢。",
                 "推薦等級": _safe_str(r.get("推薦等級")),
                 "推薦總分": _safe_float(r.get("推薦總分")),
                 "買點分級": _safe_str(r.get("買點分級")),
