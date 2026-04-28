@@ -291,6 +291,71 @@ def inject_pro_theme():
             line-height: 1.35;
         }
 
+        /* ===== 側邊欄頁面編號（v25.1）===== */
+        [data-testid="stSidebarNav"] {
+            padding-top: 0.2rem;
+        }
+
+        [data-testid="stSidebarNav"] ul {
+            gap: 0.1rem;
+        }
+
+        [data-testid="stSidebarNav"] li [data-testid="stSidebarNavLink"] > div:first-child,
+        [data-testid="stSidebarNav"] li a > div:first-child {
+            display: flex;
+            align-items: center;
+            gap: 0.15rem;
+        }
+
+        [data-testid="stSidebarNav"] li [data-testid="stSidebarNavLink"] span,
+        [data-testid="stSidebarNav"] li a span {
+            font-weight: 700;
+            letter-spacing: 0.1px;
+        }
+
+        [data-testid="stSidebarNav"] ul li:nth-of-type(1) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(1) a span::before { content: "00. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(2) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(2) a span::before { content: "01. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(3) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(3) a span::before { content: "02. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(4) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(4) a span::before { content: "03. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(5) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(5) a span::before { content: "04. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(6) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(6) a span::before { content: "05. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(7) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(7) a span::before { content: "06. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(8) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(8) a span::before { content: "07. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(9) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(9) a span::before { content: "08. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(10) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(10) a span::before { content: "09. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(11) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(11) a span::before { content: "10. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(12) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(12) a span::before { content: "11. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(13) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(13) a span::before { content: "12. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) a span::before { content: "13. "; }
+
+        [data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li a span::before {
+            display: inline-block;
+            min-width: 2.3em;
+            color: #64748b;
+            font-weight: 800;
+            font-variant-numeric: tabular-nums;
+        }
+
+        [data-testid="stSidebarNav"] ul li [aria-current="page"] span::before,
+        [data-testid="stSidebarNav"] ul li [aria-current="page"] * span::before {
+            color: #1d4ed8;
+        }
+
         .pro-up {
             color: #dc2626 !important;
             font-weight: 800 !important;
