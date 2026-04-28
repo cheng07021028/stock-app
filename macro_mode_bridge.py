@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any
 import base64
 import json
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -97,30 +98,119 @@ def _headers(token: str) -> dict[str, str]:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_macro_records() -> pd.DataFrame:
+
+def _local_macro_path() -> Path:
+    """回傳 macro_trend_records.json 的本機路徑，優先使用專案根目錄。"""
+    try:
+        return Path(__file__).resolve().parent / "macro_trend_records.json"
+    except Exception:
+        return Path("macro_trend_records.json")
+
+
+def _load_macro_records_local() -> pd.DataFrame:
+    """讀取本機大盤紀錄。GitHub 未設定或失敗時不可讓股神推薦失去大盤參考。"""
+    path = _local_macro_path()
+    if not path.exists():
+        return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
+    try:
+        text = path.read_text(encoding="utf-8-sig").strip()
+        if not text:
+            return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            # 相容 {"records": [...]} 或 {"data": [...]} 格式
+            for key in ("records", "data", "items"):
+                if isinstance(payload.get(key), list):
+                    payload = payload[key]
+                    break
+
+        if not isinstance(payload, list):
+            return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
+        return _ensure_macro_columns(pd.DataFrame(payload))
+    except Exception:
+        return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
+
+def _load_macro_records_github() -> pd.DataFrame:
+    """讀取 GitHub 大盤紀錄；失敗只回空表，不拋錯拖垮頁面。"""
     cfg = _github_cfg()
     token = cfg["token"]
     if not token:
         return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
     try:
         r = requests.get(
             _github_url(cfg["owner"], cfg["repo"], cfg["path"]),
             headers=_headers(token),
             params={"ref": cfg["branch"]},
-            timeout=20,
+            timeout=12,
         )
         if r.status_code != 200:
             return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
         content = ((r.json() or {}).get("content") or "").strip()
         if not content:
             return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
         payload = json.loads(base64.b64decode(content).decode("utf-8"))
+        if isinstance(payload, dict):
+            for key in ("records", "data", "items"):
+                if isinstance(payload.get(key), list):
+                    payload = payload[key]
+                    break
+
         if not isinstance(payload, list):
             return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
         return _ensure_macro_columns(pd.DataFrame(payload))
     except Exception:
         return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
+
+def _merge_macro_record_sources(local_df: pd.DataFrame, github_df: pd.DataFrame) -> pd.DataFrame:
+    """合併本機與 GitHub 大盤紀錄，以 record_id 去重；本機最新資料優先保留。"""
+    frames = []
+    if github_df is not None and not github_df.empty:
+        frames.append(_ensure_macro_columns(github_df))
+    if local_df is not None and not local_df.empty:
+        frames.append(_ensure_macro_columns(local_df))
+
+    if not frames:
+        return pd.DataFrame(columns=MACRO_RECORD_COLUMNS)
+
+    out = pd.concat(frames, ignore_index=True)
+    if "record_id" in out.columns:
+        out["_rid"] = out["record_id"].map(lambda x: _safe_str(x))
+        no_id = out["_rid"].eq("")
+        if no_id.any():
+            out.loc[no_id, "_rid"] = (
+                out.loc[no_id, "推估日期"].astype(str) + "|" +
+                out.loc[no_id, "模式名稱"].astype(str) + "|" +
+                out.loc[no_id, "建立時間"].astype(str)
+            )
+        out = out.drop_duplicates("_rid", keep="last").drop(columns=["_rid"], errors="ignore")
+
+    return _ensure_macro_columns(out)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_macro_records() -> pd.DataFrame:
+    """
+    讀取大盤模式紀錄。
+
+    v5 修正重點：
+    1. 不再強制依賴 GitHub Token。
+    2. GitHub 未設定、API 逾時或失敗時，會讀取本機 macro_trend_records.json。
+    3. 同時有 GitHub 與本機時會合併，避免舊雲端資料蓋掉本機最新資料。
+    4. 回傳空表但不拋錯，避免 7_股神推薦.py 因大盤模組失敗而整頁卡死。
+    """
+    local_df = _load_macro_records_local()
+    github_df = _load_macro_records_github()
+    return _merge_macro_record_sources(local_df, github_df)
+
 
 def _build_mode_scoreboard(df: pd.DataFrame) -> pd.DataFrame:
     x = _ensure_macro_columns(df)
