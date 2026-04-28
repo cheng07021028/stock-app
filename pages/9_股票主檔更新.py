@@ -28,6 +28,7 @@ LOG_DIR = BASE_DIR / "data"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 UPDATE_LOG_FILE = LOG_DIR / "stock_master_update_log.json"
+CACHE_FILE = BASE_DIR / "stock_master_cache.json"
 MAX_LOG_ROWS = 200
 
 
@@ -122,6 +123,40 @@ def clear_update_logs() -> None:
     save_update_logs([])
 
 
+def get_cache_file_status() -> dict[str, Any]:
+    info = {
+        "exists": CACHE_FILE.exists(),
+        "path": str(CACHE_FILE),
+        "size_kb": 0.0,
+        "modified": "—",
+        "json_ok": False,
+        "row_like_count": 0,
+        "error": "",
+    }
+    try:
+        if not CACHE_FILE.exists():
+            info["error"] = "stock_master_cache.json 不存在"
+            return info
+        stat = CACHE_FILE.stat()
+        info["size_kb"] = round(stat.st_size / 1024, 1)
+        info["modified"] = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        info["json_ok"] = True
+        if isinstance(payload, list):
+            info["row_like_count"] = len(payload)
+        elif isinstance(payload, dict):
+            for key in ["data", "rows", "stocks", "items"]:
+                if isinstance(payload.get(key), list):
+                    info["row_like_count"] = len(payload[key])
+                    break
+            if not info["row_like_count"]:
+                info["row_like_count"] = len(payload)
+        return info
+    except Exception as e:
+        info["error"] = str(e)
+        return info
+
+
 # =========================================================
 # 載入主檔（預設直接讀快取，不會自動重跑）
 # =========================================================
@@ -159,6 +194,19 @@ with k4:
     st.metric("更新紀錄筆數", f"{len(update_logs):,}")
 
 st.caption("本頁預設直接載入既有股票主檔快取，不會每次進頁面都重新抓資料。只有你按「更新股票主檔」時才會重跑。")
+
+cache_status = get_cache_file_status()
+with st.expander("主檔快取檔案狀態", expanded=False):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("快取檔存在", "是" if cache_status["exists"] else "否")
+    c2.metric("JSON格式", "正常" if cache_status["json_ok"] else "異常")
+    c3.metric("檔案大小", f"{cache_status['size_kb']:,.1f} KB")
+    c4.metric("資料筆數估算", f"{cache_status['row_like_count']:,}")
+    st.caption(f"路徑：{cache_status['path']}")
+    st.caption(f"最後修改：{cache_status['modified']}")
+    if cache_status.get("error"):
+        st.warning(f"快取檢查訊息：{cache_status['error']}")
+    st.info("若主檔筆數異常、分類大量變其他類，請按上方『更新股票主檔』重建；一般查詢頁不會自動重建，避免頁面卡死。")
 
 # =========================================================
 # 篩選區
