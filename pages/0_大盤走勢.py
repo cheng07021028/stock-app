@@ -1153,7 +1153,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
 
 
 def _render_institutional_block(target_date: date):
-    st.markdown("### 法人籌碼手動回補")
+    st.markdown("### 法人籌碼背景 / 快取")
     inst = _default_inst_row(target_date)
     score = _institutional_score(inst)
 
@@ -1583,7 +1583,7 @@ def _render_taifex_bg_status():
 
 
 def _render_taifex_block(target_date: date):
-    st.markdown("### 期貨自動背景回補")
+    st.markdown("### 期貨自動背景更新")
     row = _default_taifex_row(target_date)
     score = _taifex_score(row)
 
@@ -2188,7 +2188,7 @@ def _render_taifex_block(target_date: date):
     v29.5：期貨狀態同步版。
     確保期貨不會因 v29.5 patch 遺失函式而消失。
     """
-    st.markdown("### 期貨自動背景回補")
+    st.markdown("### 期貨自動背景更新")
     row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
     score = _taifex_score(row) if "_taifex_score" in globals() else {"期貨分數": 50, "期貨狀態": "尚未更新", "期貨建議": "尚未納入期貨資料"}
 
@@ -2967,17 +2967,363 @@ def _v294_start_all_background(target_date: date):
             pass
 
 
+# ===== v30.0 01大盤趨勢未完成項目補完：櫃買 + market_snapshot + 完整橋接 =====
+OTC_CACHE_FILE = "macro_otc_cache.json"
+MARKET_SNAPSHOT_FILE = "market_snapshot.json"
+
+
+def _v30_read_json_dict(path_text: str) -> dict[str, Any]:
+    try:
+        p = Path(path_text)
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _v30_write_json_dict(path_text: str, data: dict[str, Any]) -> bool:
+    try:
+        p = Path(path_text)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp.replace(p)
+        return True
+    except Exception:
+        return False
+
+
+def _read_otc_cache() -> dict[str, Any]:
+    return _v30_read_json_dict(OTC_CACHE_FILE)
+
+
+def _write_otc_cache(cache: dict[str, Any]) -> None:
+    _v30_write_json_dict(OTC_CACHE_FILE, cache)
+
+
+def _save_otc_row(row: dict[str, Any]) -> None:
+    if not isinstance(row, dict) or not row.get("ok"):
+        return
+    ymd = _safe_str(row.get("used_date") or row.get("date")) or _tw_now().strftime("%Y-%m-%d")
+    key = pd.to_datetime(ymd, errors="coerce")
+    key = key.strftime("%Y%m%d") if pd.notna(key) else _tw_now().strftime("%Y%m%d")
+    cache = _read_otc_cache()
+    cache[key] = row
+    _write_otc_cache(cache)
+
+
+def _default_otc_row(target_date: date) -> dict[str, Any]:
+    cache = _read_otc_cache()
+    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
+    if isinstance(cache.get(ymd), dict) and cache[ymd].get("close") is not None:
+        return cache[ymd]
+    keys = sorted([k for k, v in cache.items() if isinstance(v, dict) and v.get("close") is not None], reverse=True)
+    if keys:
+        row = dict(cache[keys[0]])
+        row["is_cache_fallback"] = True
+        row["source"] = (_safe_str(row.get("source")) or "櫃買快取") + "｜最近快取"
+        return row
+    return {"ok": False, "source": "櫃買快取", "error": "尚無櫃買資料"}
+
+
+def _fetch_otc_with_fallback(target_date: date, timeout: float = 2.2) -> dict[str, Any]:
+    """
+    v30：櫃買指數自動取得。
+    優先使用 Yahoo ^TWOII 備援資料；失敗時保留最近快取，不偽裝今天、不偽裝 0。
+    """
+    tried = []
+    try:
+        y = _fetch_yahoo_chart("^TWOII", target_date, timeout=timeout)
+        tried.append(f"Yahoo ^TWOII:{y.get('error') if isinstance(y, dict) else 'unknown'}")
+        if isinstance(y, dict) and y.get("ok") and y.get("close") is not None:
+            close_val = _safe_float(y.get("close"))
+            pct_val = _safe_float(y.get("pct"))
+            change_points = None
+            if close_val is not None and pct_val is not None and abs(100 + pct_val) > 1e-9:
+                change_points = close_val * pct_val / (100 + pct_val)
+            row = {
+                "ok": True,
+                "source": "Yahoo ^TWOII 櫃買指數備援",
+                "source_grade": "備援",
+                "date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+                "used_date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+                "close": close_val,
+                "pct": pct_val,
+                "change_points": change_points,
+                "is_realtime": False,
+                "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            _v29_write_source_status("櫃買", "success", row.get("source"), "備援", "櫃買指數取得成功")
+            return row
+    except Exception as e:
+        tried.append(f"Yahoo ^TWOII例外:{e}")
+
+    cache = _default_otc_row(target_date)
+    if isinstance(cache, dict) and cache.get("close") is not None:
+        cache["ok"] = True
+        cache["source_grade"] = "快取"
+        _v29_write_source_status("櫃買", "cache", cache.get("source"), "快取", "使用最近可用櫃買快取")
+        return cache
+
+    _v29_write_source_status("櫃買", "failed", "Yahoo ^TWOII / 快取", "失敗", " / ".join(tried[-5:]))
+    return {
+        "ok": False,
+        "source": "櫃買多來源備援",
+        "source_grade": "失敗",
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "error": "櫃買資料取得失敗：" + " / ".join(tried[-5:]),
+    }
+
+
+def _background_otc_worker(target_date_text: str) -> None:
+    try:
+        d = pd.to_datetime(target_date_text, errors="coerce")
+        if pd.isna(d):
+            d = pd.Timestamp(_tw_now().date())
+        row = _fetch_otc_with_fallback(d.date(), timeout=2.2)
+        if row.get("ok"):
+            _save_otc_row(row)
+            _set_job_status("otc_auto_bg", "finished", f"櫃買更新成功：{row.get('source')} / {row.get('close')} / {row.get('change_points')}")
+        else:
+            _set_job_status("otc_auto_bg", "error", row.get("error", "櫃買更新失敗"))
+    except Exception as e:
+        _set_job_status("otc_auto_bg", "error", f"櫃買背景更新例外：{e}")
+
+
+def _start_otc_background_update(target_date: date, force: bool = False) -> None:
+    if not force and _job_is_recent("otc_auto_bg", MACRO_AUTO_REFRESH_SECONDS):
+        return
+    _set_job_status("otc_auto_bg", "running", "櫃買背景更新中")
+    threading.Thread(
+        target=_background_otc_worker,
+        args=(pd.to_datetime(target_date).strftime("%Y-%m-%d"),),
+        daemon=True,
+    ).start()
+
+
+def _otc_cache_to_df() -> pd.DataFrame:
+    cache = _read_otc_cache()
+    rows = []
+    for k, v in sorted(cache.items(), reverse=True):
+        if isinstance(v, dict):
+            rows.append({
+                "日期": v.get("used_date") or v.get("date") or k,
+                "櫃買指數": v.get("close"),
+                "櫃買漲跌點數": v.get("change_points"),
+                "櫃買漲跌幅%": v.get("pct"),
+                "來源": v.get("source"),
+                "更新時間": v.get("updated_at"),
+            })
+    return pd.DataFrame(rows)
+
+
+def _render_otc_block(target_date: date):
+    st.markdown("### 櫃買指數自動背景更新")
+    row = _default_otc_row(target_date)
+    c1, c2, c3, c4, c5 = st.columns([1.3, 1.1, 1.1, 1.2, 2.1])
+    close_val = _safe_float(row.get("close"))
+    chg = _safe_float(row.get("change_points"))
+    pct = _safe_float(row.get("pct"))
+    with c1:
+        if st.button("背景更新櫃買", use_container_width=True):
+            _start_otc_background_update(target_date, force=True)
+            st.success("已啟動櫃買背景更新，頁面不會等待。")
+    with c2:
+        st.metric("櫃買指數", f"{close_val:,.2f}" if close_val is not None else "尚未更新")
+    with c3:
+        st.metric("櫃買漲跌", (f"{chg:+.2f} 點" if chg is not None else "—"))
+    with c4:
+        st.metric("櫃買漲跌幅", (f"{pct:+.2f}%" if pct is not None else "—"))
+    with c5:
+        st.caption(f"來源：{_safe_str(row.get('source')) or '尚未取得'}｜日期：{_safe_str(row.get('used_date') or row.get('date')) or '—'}")
+
+    jobs = _read_bg_jobs()
+    item = jobs.get("otc_auto_bg", {}) if isinstance(jobs, dict) else {}
+    if item:
+        st.caption(f"櫃買背景狀態：{item.get('status')}｜{item.get('message')}｜{item.get('updated_at')}")
+
+    with st.expander("櫃買快取明細", expanded=False):
+        df = _otc_cache_to_df()
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if df is not None and not df.empty:
+            st.download_button(
+                "下載櫃買快取CSV",
+                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="macro_otc_cache.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+def _v30_market_trend_from_score(score: float) -> tuple[str, str, str]:
+    score = _safe_float(score, 50) or 50
+    if score >= 75:
+        return "偏多", "低", "大盤與風險情緒偏多，可正常尋找強勢突破與剛起漲股。"
+    if score >= 60:
+        return "中性偏多", "中低", "可找轉強股，但需避免高位爆量追價。"
+    if score >= 45:
+        return "震盪", "中", "盤勢震盪，股神推薦應偏重低位階剛起漲、量價轉強股。"
+    if score >= 30:
+        return "中性偏空", "中高", "盤勢逆風，降低追價分數並提高風險提示。"
+    return "偏空", "高", "市場風險偏高，建議保守控倉，避免追高與弱勢股。"
+
+
+def _build_market_snapshot_v30(row: dict[str, Any]) -> dict[str, Any]:
+    bridge_date = pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce")
+    bridge_date = bridge_date.date() if pd.notna(bridge_date) else date.today()
+    otc = _default_otc_row(bridge_date)
+    tx = _default_taifex_row(bridge_date)
+    factors = _calc_stable_market_factors(row)
+    inst = _default_inst_row(bridge_date)
+    inst_score = _institutional_score(inst)
+    us_row = _default_us_market_row(bridge_date)
+    us_score = _us_market_score(us_row)
+    tx_score = _taifex_score(tx)
+
+    base_score = _safe_float(factors.get("大盤穩定分"), 50) or 50
+    otc_pct = _safe_float(otc.get("pct"))
+    tx_score_val = _safe_float(tx_score.get("期貨分數"), 50) or 50
+    inst_score_val = _safe_float(inst_score.get("法人分數"), 50) or 50
+    us_score_val = _safe_float(us_score.get("外盤分數"), 50) or 50
+    otc_score = 50 if otc_pct is None else max(0, min(100, 50 + otc_pct * 20))
+
+    market_score = round(
+        base_score * 0.45
+        + otc_score * 0.18
+        + tx_score_val * 0.17
+        + inst_score_val * 0.10
+        + us_score_val * 0.10,
+        1,
+    )
+    trend, risk, comment = _v30_market_trend_from_score(market_score)
+
+    data_status = {
+        "twse_ok": bool(row.get("ok") or row.get("close") is not None),
+        "otc_ok": bool(otc.get("ok") or otc.get("close") is not None),
+        "taifex_ok": bool(tx.get("ok") or tx.get("tx_close") is not None),
+        "institutional_ok": bool(inst.get("ok")),
+        "us_market_ok": bool(us_row),
+    }
+    ok_count = sum(1 for v in data_status.values() if v)
+    data_quality = "良好" if ok_count >= 4 else "部分成功" if ok_count >= 2 else "不足" if ok_count == 1 else "失敗"
+
+    snapshot = {
+        "version": "v30.0_macro_trend_complete",
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "data_quality": data_quality,
+        "data_status": data_status,
+        "market_score": market_score,
+        "market_trend": trend,
+        "market_risk_level": risk,
+        "market_bias": comment,
+        "trend_comment": comment,
+        "twse_index": _safe_float(row.get("close")),
+        "twse_change": _calc_market_change_points(row),
+        "twse_change_pct": _safe_float(row.get("pct")),
+        "twse_data_date": _safe_str(row.get("used_date") or row.get("date")),
+        "twse_source": _safe_str(row.get("source")),
+        "otc_index": _safe_float(otc.get("close")),
+        "otc_change": _safe_float(otc.get("change_points")),
+        "otc_change_pct": _safe_float(otc.get("pct")),
+        "otc_data_date": _safe_str(otc.get("used_date") or otc.get("date")),
+        "otc_source": _safe_str(otc.get("source")),
+        "futures_index": _safe_float(tx.get("tx_close")),
+        "futures_change": _safe_float(tx.get("tx_change")),
+        "futures_change_pct": _safe_float(tx.get("tx_pct")),
+        "futures_data_date": _safe_str(tx.get("date")),
+        "futures_source": _safe_str(tx.get("source")),
+        "taifex_score": tx_score_val,
+        "taifex_state": _safe_str(tx_score.get("期貨狀態")),
+        "institutional_score": inst_score_val,
+        "us_market_score": us_score_val,
+        "recommendation_bias": _macro_bias_from_score(market_score),
+        "source_status_table": _v294_source_status_df().to_dict(orient="records") if "_v294_source_status_df" in globals() else [],
+    }
+    return snapshot
+
+
+def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
+    snapshot = _build_market_snapshot_v30(row)
+    ok1 = _v30_write_json_dict(MARKET_SNAPSHOT_FILE, snapshot)
+    # 同步更新舊橋接檔，避免 7_股神推薦.py 還讀 macro_mode_bridge.json 時串接不到。
+    bridge = _build_macro_bridge_payload(row)
+    bridge.update(snapshot)
+    ok2 = _v30_write_json_dict(BRIDGE_FILE, bridge)
+    if ok1 and ok2:
+        return True, f"已寫入 {MARKET_SNAPSHOT_FILE} 與 {BRIDGE_FILE}，股神推薦可讀取 market_score。"
+    if ok1:
+        return True, f"已寫入 {MARKET_SNAPSHOT_FILE}，但 {BRIDGE_FILE} 更新失敗。"
+    return False, f"寫入 {MARKET_SNAPSHOT_FILE} 失敗。"
+
+
+# 覆寫舊橋接函式：保留原欄位，同時補齊 market_snapshot.json 所需欄位。
+def _write_macro_bridge(row: dict[str, Any]) -> tuple[bool, str]:
+    return _write_market_snapshot_v30(row)
+
+
+def _render_market_snapshot_block(row: dict[str, Any]):
+    st.markdown("### 股神推薦 market_snapshot 串接")
+    snapshot = _build_market_snapshot_v30(row)
+    c1, c2, c3, c4 = st.columns([1.1, 1.1, 1.1, 2.6])
+    with c1:
+        st.metric("Market Score", f"{_safe_float(snapshot.get('market_score'), 50):.1f}")
+    with c2:
+        st.metric("市場趨勢", snapshot.get("market_trend", "—"))
+    with c3:
+        st.metric("風險等級", snapshot.get("market_risk_level", "—"))
+    with c4:
+        st.caption(snapshot.get("trend_comment", ""))
+
+    if st.button("立即寫入 market_snapshot.json", use_container_width=True, type="primary"):
+        ok, msg = _write_market_snapshot_v30(row)
+        if ok:
+            st.success(msg)
+        else:
+            st.warning(msg)
+
+    # 每次頁面載入都寫一次最新可用快照；失敗不阻塞畫面。
+    try:
+        _write_market_snapshot_v30(row)
+    except Exception:
+        pass
+
+    with st.expander("market_snapshot.json 預覽", expanded=False):
+        st.json(snapshot)
+
+
+# 覆寫一鍵背景更新：補入櫃買背景更新。
+def _v294_start_all_background(target_date: date):
+    try:
+        _reset_bg_jobs()
+    except Exception:
+        pass
+    _maybe_start_background_update(target_date, enabled=True)
+    try:
+        _start_taifex_background_update_v285(target_date, force=True)
+    except Exception:
+        try:
+            _start_taifex_background_update(target_date, force=True)
+        except Exception:
+            pass
+    try:
+        _start_otc_background_update(target_date, force=True)
+    except Exception:
+        pass
+
+
+
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="大盤走勢｜v29.5多來源備援池",
-        subtitle="頁面先顯示快取資料；大盤、法人、外盤改背景更新，避免外部端點卡住整頁。",
+        title="01 大盤趨勢｜v30完成版",
+        subtitle="加權、櫃買、台指期、外盤與法人採背景更新；輸出 market_snapshot.json 給股神推薦串接。",
     )
 
-    st.warning("目前使用 v29.5 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
+    st.info("目前使用 v30.0 大盤趨勢完成版：大盤 / 法人 / 外盤 / 期貨 / 櫃買採背景更新與快取，不阻塞主畫面。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
@@ -2985,7 +3331,7 @@ def main():
     with c2:
         update_close = st.button("更新收盤紀錄", use_container_width=True)
     with c3:
-        batch_close = st.button("補抓近20日收盤", use_container_width=True)
+        batch_close = st.button("背景更新近20日收盤", use_container_width=True)
     with c4:
         clear_cache = st.button("清除大盤快取", use_container_width=True)
     with c5:
@@ -2999,7 +3345,7 @@ def main():
     with ac1:
         if st.button("一鍵背景更新全部", use_container_width=True, type="primary"):
             _v294_start_all_background(target_date)
-            st.success("已啟動大盤 / 法人 / 外盤 / 期貨背景更新。頁面不會等待，稍後重新整理即可看結果。")
+            st.success("已啟動大盤 / 櫃買 / 法人 / 外盤 / 期貨背景更新。頁面不會等待，稍後重新整理即可看結果。")
     with ac2:
         if st.button("立即寫入股神橋接", use_container_width=True):
             _row_for_bridge = _default_market_row(target_date)
@@ -3042,7 +3388,7 @@ def main():
             st.warning(f"收盤紀錄更新失敗：{row.get('error')}")
 
     if batch_close:
-        with st.spinner("正在手動補抓近20日收盤資料；只在按下時執行，不會自動卡住頁面..."):
+        with st.spinner("正在背景更新近20日收盤資料；只在按下時執行，不會卡住頁面..."):
             added, msgs = _batch_fetch_close_cache(target_date, days=20)
         if added > 0:
             st.success(f"近20日收盤補抓完成，新增 {added} 筆。")
@@ -3094,10 +3440,12 @@ def main():
     ])
 
     _render_stable_factor_block(row)
+    _render_otc_block(target_date)
     _render_institutional_block(target_date)
     _render_us_market_block(target_date)
     _render_taifex_block(target_date)
     _render_market_cache_chart()
+    _render_market_snapshot_block(row)
     _render_macro_bridge_block(row)
     _render_macro_feature_center()
 
