@@ -62,13 +62,13 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-PAGE_TITLE = "股神推薦 V22｜高速快取與斷點續掃版"
+PAGE_TITLE = "股神推薦 V34｜高速掃描優化版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 25   # V11：降低前端重繪，掃描結果不受影響
-SCAN_MAX_WORKERS = 18         # V11：全量掃描平行化上限；不做預篩選，避免漏掉機會股
-V22_CHECKPOINT_EVERY = 100      # V22：每處理 100 檔保存一次斷點；不影響評分、不漏股票
+PROGRESS_UPDATE_EVERY = 50   # V34：降低前端重繪頻率，掃描結果不受影響
+SCAN_MAX_WORKERS = 24         # V34：提高平行掃描上限；不做低成本預篩，不漏股票
+V22_CHECKPOINT_EVERY = 200      # V34：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 
 GODPICK_DEFAULT_SCORE_WEIGHTS = {
@@ -5041,123 +5041,108 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, dict[str, Any]]:
-    primary = _safe_str(market_type)
-    tried = []
-    if primary:
-        tried.append(primary)
-
-    fallback_map = {
-        "上市": ["上櫃", "興櫃", ""],
-        "上櫃": ["上市", "興櫃", ""],
-        "興櫃": ["上市", "上櫃", ""],
-        "": ["上市", "上櫃", "興櫃"],
-    }
-
-    for mk in fallback_map.get(primary, ["上市", "上櫃", "興櫃", ""]):
-        if mk not in tried:
-            tried.append(mk)
-
+    primary = _safe_str(market_type) or "上市"
     attempt_summary: list[dict[str, Any]] = []
 
-    for mk in tried:
+    # V34 加速重點：只呼叫 get_history_data 一次。
+    # utils.get_history_data 內部已經包含：
+    # 1. 本機 disk cache
+    # 2. Yahoo 高速日線
+    # 3. TWSE / TPEx 官方 fallback
+    # 4. 上市 / 上櫃市場別候選
+    # 原本外層又再重跑上市/上櫃/興櫃，會讓同一檔股票重複下載 2~4 輪，
+    # 是畫面卡在 1/100、平均每檔 1 分鐘以上的主要原因之一。
+    try:
+        df = get_history_data(
+            stock_no=stock_no,
+            stock_name=stock_name,
+            market_type=primary,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except TypeError:
         try:
             df = get_history_data(
                 stock_no=stock_no,
                 stock_name=stock_name,
-                market_type=mk,
+                market_type=primary,
+                start_dt=start_date,
+                end_dt=end_date,
+            )
+        except Exception as e1:
+            try:
+                df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
+            except Exception as e2:
+                attempt_summary.append({
+                    "market_type": primary,
+                    "rows": 0,
+                    "source": "history_fetch_exception",
+                    "error": f"{e1} / fallback: {e2}",
+                })
+                df = pd.DataFrame()
+    except Exception as e:
+        attempt_summary.append({
+            "market_type": primary,
+            "rows": 0,
+            "source": "history_fetch_exception",
+            "error": str(e),
+        })
+        df = pd.DataFrame()
+
+    prepared_df = _prepare_history_df(df)
+    if not prepared_df.empty:
+        history_debug = {
+            "ok": True,
+            "stock_no": stock_no,
+            "stock_name": stock_name,
+            "used_market": primary,
+            "attempts": attempt_summary + [{
+                "market_type": primary,
+                "rows": int(len(prepared_df)),
+                "source": "history_fetch_ok_v34_single_call",
+                "error": "",
+            }],
+            "rows": len(prepared_df),
+        }
+        return prepared_df, primary, history_debug
+
+    attempt_summary.append({
+        "market_type": primary,
+        "rows": 0,
+        "source": "history_fetch_empty_v34_single_call",
+        "error": "",
+    })
+
+    # 只有在抓不到時才補 debug，且只補一次 primary，不再全市場重跑。
+    debug_attempts = attempt_summary.copy()
+    if callable(get_history_data_debug):
+        try:
+            debug_info = get_history_data_debug(
+                stock_no=stock_no,
+                stock_name=stock_name,
+                market_type=primary,
                 start_date=start_date,
                 end_date=end_date,
             )
-        except TypeError:
-            try:
-                df = get_history_data(
-                    stock_no=stock_no,
-                    stock_name=stock_name,
-                    market_type=mk,
-                    start_dt=start_date,
-                    end_dt=end_date,
-                )
-            except Exception as e1:
-                try:
-                    df = get_history_data(code=stock_no, start_date=start_date, end_date=end_date)
-                except Exception as e2:
-                    attempt_summary.append({
-                        "market_type": mk,
-                        "rows": 0,
-                        "source": "history_fetch_exception",
-                        "error": f"{e1} / fallback: {e2}",
-                    })
-                    df = pd.DataFrame()
-        except Exception as e:
-            attempt_summary.append({
-                "market_type": mk,
-                "rows": 0,
-                "source": "history_fetch_exception",
-                "error": str(e),
-            })
-            df = pd.DataFrame()
-
-        prepared_df = _prepare_history_df(df)
-        if not prepared_df.empty:
-            history_debug = {
-                "ok": True,
-                "stock_no": stock_no,
-                "stock_name": stock_name,
-                "used_market": (mk or market_type or "未知"),
-                "attempts": attempt_summary + [{
-                    "market_type": mk,
-                    "rows": int(len(prepared_df)),
-                    "source": "history_fetch_ok",
-                    "error": "",
-                }],
-                "rows": len(prepared_df),
-            }
-            return prepared_df, (mk or market_type or "未知"), history_debug
-
-        attempt_summary.append({
-            "market_type": mk,
-            "rows": 0,
-            "source": "history_fetch_empty",
-            "error": "",
-        })
-
-    debug_attempts: list[dict[str, Any]] = []
-    if HISTORY_DEBUG_EAGER or not attempt_summary:
-        debug_attempts = attempt_summary
-    else:
-        debug_attempts = attempt_summary.copy()
-        for mk in tried:
-            debug_info = {}
-            try:
-                debug_info = get_history_data_debug(
-                    stock_no=stock_no,
-                    stock_name=stock_name,
-                    market_type=mk,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-            except Exception as e:
-                debug_info = {
-                    "ok": False,
-                    "source": "history_debug_exception",
-                    "market_type": mk,
-                    "error": str(e),
-                    "rows": 0,
-                    "debug_lines": [f"get_history_data_debug 例外：{e}"],
-                }
-
             debug_attempts.append({
-                "market_type": _safe_str(debug_info.get("market_type")) or mk,
+                "market_type": _safe_str(debug_info.get("market_type")) or primary,
                 "rows": int(debug_info.get("rows", 0) or 0),
-                "source": _safe_str(debug_info.get("source")) or "history_debug",
+                "source": _safe_str(debug_info.get("source")) or "history_debug_v34",
                 "error": _safe_str(debug_info.get("error")),
             })
+        except Exception as e:
+            debug_attempts.append({
+                "market_type": primary,
+                "rows": 0,
+                "source": "history_debug_exception",
+                "error": str(e),
+            })
 
-    return pd.DataFrame(), (_safe_str(market_type) or "未知"), {
+    return pd.DataFrame(), primary, {
         "ok": False,
         "stock_no": stock_no,
         "stock_name": stock_name,
-        "used_market": (_safe_str(market_type) or "未知"),
+        "used_market": primary,
         "attempts": debug_attempts,
         "rows": 0,
     }
@@ -6041,7 +6026,7 @@ def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, m
 
 
 # =========================================================
-# V22 高速快取與斷點續掃：不做預篩、不改評分、不漏股票
+# V34 高速掃描優化：不做預篩、不改評分、不漏股票
 # =========================================================
 def _v22_json_safe(obj: Any):
     try:
@@ -6194,7 +6179,7 @@ def _build_recommend_df(
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(SCAN_MAX_WORKERS, max(6, total_count // 40 if total_count >= 120 else 4))
+    worker_count = min(SCAN_MAX_WORKERS, max(12, total_count // 25 if total_count >= 120 else 12))
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
@@ -6220,7 +6205,7 @@ def _build_recommend_df(
         "history_debug_samples": [],
         "error_samples": [],
         "worker_count": worker_count,
-        "speed_version": "v11_yahoo_fast_full_scan_no_prefilter",
+        "speed_version": "v34_single_history_call_no_duplicate_fallback",
     }
 
     scan_signature = _v22_scan_signature(
@@ -6341,7 +6326,7 @@ def _build_recommend_df(
                         f"已完成 {done_count}/{total_count}｜"
                         f"已花時間：{_fmt_seconds(elapsed)}｜"
                         f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V22斷點續掃"
+                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V34高速掃描"
                     )
     else:
         progress_text.caption(f"斷點資料已涵蓋全部 {total_count} 檔，直接整理結果。")
@@ -7514,7 +7499,7 @@ def main():
         with btn5:
             submit_clear = st.form_submit_button("清空條件", use_container_width=True)
 
-    render_pro_section("V22 高速快取與斷點續掃")
+    render_pro_section("V34 高速掃描優化與斷點續掃")
     cache_stat = get_history_disk_cache_stats() if callable(get_history_disk_cache_stats) else {}
     cp_stat = _v22_checkpoint_status()
     ccache1, ccache2, ccache3, ccache4 = st.columns([1.2, 1.2, 1.2, 2.2])
