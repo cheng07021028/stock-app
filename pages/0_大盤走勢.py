@@ -799,6 +799,7 @@ def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[s
             "used_date": _safe_str(row.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
             "close": _safe_float(row.get("close")),
             "pct": _safe_float(row.get("pct")),
+            "change_points": _calc_market_change_points({"close": _safe_float(row.get("close")), "pct": _safe_float(row.get("pct"))}),
             "is_realtime": False,
             "backup": True,
             "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -952,6 +953,7 @@ def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
         "is_realtime": bool(row.get("is_realtime")),
         "close": close_val,
         "pct": pct_val,
+        "change_points": _calc_market_change_points(row),
         "market_score": _safe_float(factors.get("大盤穩定分"), 50),
         "market_state": _safe_str(factors.get("大盤狀態")),
         "godpick_weight_advice": _safe_str(factors.get("股神推薦加權")),
@@ -1613,6 +1615,31 @@ def _render_macro_feature_center():
         st.warning("重點：外部資料源改成背景更新，不在主畫面等待；即使外部端點慢，頁面也不會卡住。")
 
 
+
+def _calc_market_change_points(row: dict[str, Any]) -> float | None:
+    """
+    v29.1：由目前大盤 close + pct 反推漲跌點數。
+    pct = (close - prev_close) / prev_close * 100
+    change = close - prev_close = close * pct / (100 + pct)
+    若資料源已提供 change / change_points 則優先使用。
+    """
+    for key in ["change_points", "change", "diff", "漲跌點數"]:
+        val = _safe_float(row.get(key))
+        if val is not None:
+            return val
+
+    close = _safe_float(row.get("close"))
+    pct = _safe_float(row.get("pct"))
+    if close is None or pct is None:
+        return None
+    if abs(100 + pct) < 1e-9:
+        return None
+    try:
+        return close * pct / (100 + pct)
+    except Exception:
+        return None
+
+
 def _score_context(row: dict[str, Any]) -> dict[str, str]:
     pct = _safe_float(row.get("pct"), 0) or 0
     if pct >= 1.0:
@@ -2243,6 +2270,7 @@ def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> di
                     "used_date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
                     "close": _safe_float(y.get("close")),
                     "pct": _safe_float(y.get("pct")),
+                    "change_points": _calc_market_change_points({"close": _safe_float(y.get("close")), "pct": _safe_float(y.get("pct"))}),
                     "is_realtime": False,
                     "backup": True,
                     "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2787,13 +2815,21 @@ def main():
 
     close_val = _safe_float(row.get("close"))
     pct_val = _safe_float(row.get("pct"))
+    change_points = _calc_market_change_points(row)
+    market_delta_text = "無漲跌幅"
+    if pct_val is not None and change_points is not None:
+        market_delta_text = f"{change_points:+,.2f} 點｜{pct_val:+.2f}%"
+    elif pct_val is not None:
+        market_delta_text = f"{pct_val:+.2f}%"
+    elif change_points is not None:
+        market_delta_text = f"{change_points:+,.2f} 點"
 
     render_pro_kpi_row([
         {
             "label": "目前大盤",
             "value": f"{close_val:,.2f}" if close_val is not None else "尚未更新",
-            "delta": f"{pct_val:+.2f}%" if pct_val is not None else "無漲跌幅",
-            "delta_class": "pro-kpi-delta-up" if (pct_val or 0) >= 0 else "pro-kpi-delta-down",
+            "delta": market_delta_text,
+            "delta_class": "pro-kpi-delta-up" if (change_points if change_points is not None else (pct_val or 0)) >= 0 else "pro-kpi-delta-down",
         },
         {
             "label": "資料型態",
