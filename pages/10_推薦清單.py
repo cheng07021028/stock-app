@@ -1137,6 +1137,7 @@ def main():
             ok, msgs = _sync_records(remain_df)
             if ok:
                 st.session_state[_k("records_df")] = _ensure_record_columns(remain_df)
+                st.session_state[_k("confirm_delete")] = False
                 st.success(f"已刪除 {len(filtered_df)} 筆推薦紀錄。")
             else:
                 st.error("批次刪除失敗。")
