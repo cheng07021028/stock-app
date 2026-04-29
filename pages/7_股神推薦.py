@@ -137,6 +137,12 @@ GODPICK_RECORD_COLUMNS = [
     "大盤權值支撐分數",
     "大盤推薦同步分數",
     "大盤資料日期",
+    "大盤橋接分數",
+    "大盤橋接狀態",
+    "大盤橋接加權",
+    "大盤橋接風控",
+    "大盤橋接策略",
+    "大盤橋接更新時間",
     "股神決策模式",
     "股神進場建議",
     "建議部位%",
@@ -1420,6 +1426,76 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     return bridge, adjusted, enabled
 
 
+
+def _macro_bridge_risk_text(bridge: dict[str, Any]) -> str:
+    bias = bridge.get("recommendation_bias")
+    if isinstance(bias, dict):
+        return _safe_str(bias.get("risk_filter")) or "中性"
+    return "中性"
+
+
+def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enabled: bool = True) -> pd.DataFrame:
+    """
+    v27.4：把大盤橋接狀態寫進推薦結果表，讓完整推薦表、Excel、推薦紀錄都看得到。
+    只增加欄位與備註，不重新篩選、不刪股票，避免漏選。
+    """
+    if df is None or df.empty:
+        return df
+    x = df.copy()
+    if not enabled or not bridge:
+        x["大盤橋接分數"] = ""
+        x["大盤橋接狀態"] = "未套用"
+        x["大盤橋接加權"] = "0%"
+        x["大盤橋接風控"] = "未套用"
+        x["大盤橋接策略"] = ""
+        x["大盤橋接更新時間"] = ""
+        return x
+
+    score = _safe_float(bridge.get("market_score"), 50)
+    state = _safe_str(bridge.get("market_state"))
+    weight = _safe_str(bridge.get("godpick_weight_advice")) or "0%"
+    risk = _macro_bridge_risk_text(bridge)
+    strategy = _safe_str(bridge.get("strategy"))
+    updated_at = _safe_str(bridge.get("updated_at"))
+
+    x["大盤橋接分數"] = score
+    x["大盤橋接狀態"] = state
+    x["大盤橋接加權"] = weight
+    x["大盤橋接風控"] = risk
+    x["大盤橋接策略"] = strategy
+    x["大盤橋接更新時間"] = updated_at
+
+    # 同步到原本大盤欄位，讓舊頁面/紀錄頁也可讀。
+    if "大盤可參考分數" in x.columns:
+        x["大盤可參考分數"] = score
+    if "大盤參考等級" in x.columns:
+        x["大盤參考等級"] = state
+    if "大盤推薦權重" in x.columns:
+        x["大盤推薦權重"] = weight
+    if "大盤操作風格" in x.columns:
+        x["大盤操作風格"] = strategy
+    if "大盤資料日期" in x.columns:
+        x["大盤資料日期"] = _safe_str(bridge.get("market_date"))
+
+    # 大盤偏弱時，不剔除股票，只提醒風控與部位。
+    if risk in {"偏嚴", "嚴格"}:
+        if "股神進場建議" in x.columns:
+            x["股神進場建議"] = x["股神進場建議"].astype(str).map(
+                lambda s: (s if s and s != "nan" else "觀察") + "｜大盤風控偏嚴，建議縮小部位"
+            )
+        if "風險說明" in x.columns:
+            x["風險說明"] = x["風險說明"].astype(str).map(
+                lambda s: ("" if s in {"nan", "None"} else s) + "｜大盤橋接：風控偏嚴，避免追高。"
+            )
+    elif risk in {"放寬", "正常"}:
+        if "推薦理由摘要" in x.columns:
+            x["推薦理由摘要"] = x["推薦理由摘要"].astype(str).map(
+                lambda s: ("" if s in {"nan", "None"} else s) + f"｜大盤橋接：{state}，{strategy}。"
+            )
+
+    return x
+
+
 def _derive_buy_point_grade(row: pd.Series) -> str:
     score = _safe_float(row.get("推薦總分"), 0) or 0
     pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -2516,7 +2592,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦總分", "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
         "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "族群策略建議",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
-        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數"
+        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數", "大盤橋接分數"
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
@@ -3376,6 +3452,12 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "大盤權值支撐分數": _safe_float(r.get("大盤權值支撐分數")),
                 "大盤推薦同步分數": _safe_float(r.get("大盤推薦同步分數")),
                 "大盤資料日期": _safe_str(r.get("大盤資料日期")),
+                "大盤橋接分數": _safe_float(r.get("大盤橋接分數")),
+                "大盤橋接狀態": _safe_str(r.get("大盤橋接狀態")),
+                "大盤橋接加權": _safe_str(r.get("大盤橋接加權")),
+                "大盤橋接風控": _safe_str(r.get("大盤橋接風控")),
+                "大盤橋接策略": _safe_str(r.get("大盤橋接策略")),
+                "大盤橋接更新時間": _safe_str(r.get("大盤橋接更新時間")),
                 "風險說明": _safe_str(r.get("風險說明")),
                 "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
                 "權重設定": _safe_str(r.get("權重設定")),
@@ -7453,11 +7535,15 @@ def main():
         )
         rec_df = _apply_advanced_godpick_columns(rec_df)
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
+        rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
+        hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
         rec_df = _apply_advanced_godpick_columns(rec_df)
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
+        rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
+        hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
 
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
@@ -7960,7 +8046,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格", "大盤橋接分數", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
