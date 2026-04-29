@@ -5,6 +5,8 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any
 import json
+import threading
+import time
 
 import pandas as pd
 import requests
@@ -41,6 +43,8 @@ CACHE_FILE = "macro_market_close_cache.json"
 INST_CACHE_FILE = "macro_institutional_cache.json"
 US_CACHE_FILE = "macro_us_market_cache.json"
 TAIFEX_CACHE_FILE = "macro_taifex_cache.json"
+MACRO_BG_JOB_FILE = "macro_background_jobs.json"
+MACRO_AUTO_REFRESH_SECONDS = 1800
 
 
 def _k(key: str) -> str:
@@ -594,6 +598,64 @@ def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]
         except Exception:
             continue
     return {"ok": False, "source": "TWSE 收盤紀錄", "error": "收盤資料尚未取得或交易所未發布"}
+
+
+
+def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
+    """
+    v28.1.1：TWSE HTTP 502 / SSL / 無資料時的備援。
+    使用 Yahoo ^TWII 日線，僅在手動/背景更新時呼叫，不會進頁同步等待。
+    """
+    try:
+        # _fetch_yahoo_chart 在本檔後段已存在；若未存在則直接略過。
+        if "_fetch_yahoo_chart" not in globals():
+            return {"ok": False, "source": "Yahoo ^TWII 備援", "error": "yahoo helper not available"}
+        row = _fetch_yahoo_chart("^TWII", target_date, timeout=timeout)
+        if not isinstance(row, dict) or not row.get("ok"):
+            return {"ok": False, "source": "Yahoo ^TWII 備援", "error": row.get("error") if isinstance(row, dict) else "no data"}
+        return {
+            "ok": True,
+            "source": "Yahoo ^TWII 備援",
+            "date": _safe_str(row.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+            "used_date": _safe_str(row.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+            "close": _safe_float(row.get("close")),
+            "pct": _safe_float(row.get("pct")),
+            "is_realtime": False,
+            "backup": True,
+            "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        return {"ok": False, "source": "Yahoo ^TWII 備援", "error": str(e)}
+
+
+def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
+    """
+    v28.1.1：大盤自動備援。
+    1. 盤中先 TWSE MIS。
+    2. 非盤中/晚上先 TWSE 收盤。
+    3. TWSE 失敗改 Yahoo ^TWII。
+    4. 失敗只回傳錯誤，不卡住整頁。
+    """
+    primary = None
+    if realtime:
+        primary = _fetch_twse_realtime(timeout=1.5)
+    else:
+        primary = _fetch_twse_close(target_date, timeout=2.0)
+
+    if isinstance(primary, dict) and primary.get("ok"):
+        return primary
+
+    backup = _fetch_taiex_yahoo_backup(target_date, timeout=2.0)
+    if isinstance(backup, dict) and backup.get("ok"):
+        backup["note"] = f"TWSE失敗，已改用Yahoo備援；TWSE原因：{(primary or {}).get('error', '')}"
+        return backup
+
+    return {
+        "ok": False,
+        "source": "大盤自動備援",
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "error": f"TWSE與Yahoo備援皆失敗；TWSE:{(primary or {}).get('error', '')} / Yahoo:{(backup or {}).get('error', '')}",
+    }
 
 
 def _default_market_row(target_date: date) -> dict[str, Any]:
@@ -1371,7 +1433,7 @@ def _render_macro_feature_center():
     with c3:
         st.metric("卡頓風險", "低")
     with c4:
-        st.metric("外部API自動執行", "0")
+        st.metric("外部API背景更新", "啟用")
 
     st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -1380,7 +1442,7 @@ def _render_macro_feature_center():
         st.write("2. 再回補：外盤 NASDAQ / SOX，但只抓收盤資料，不自動等待。")
         st.write("3. 再回補：TAIFEX 期權，同樣改成手動更新。")
         st.write("4. 最後才回補：Google News，因為最容易慢。")
-        st.warning("重點：不要再讓任何外部資料源進頁自動執行，否則大盤頁會再次卡住。")
+        st.warning("重點：外部資料源改成背景更新，不在主畫面等待；即使外部端點慢，頁面也不會卡住。")
 
 
 def _score_context(row: dict[str, Any]) -> dict[str, str]:
@@ -1533,16 +1595,138 @@ def _render_stable_factor_block(row: dict[str, Any]):
         st.json(factors)
 
 
+def _read_bg_jobs() -> dict[str, Any]:
+    p = Path(MACRO_BG_JOB_FILE)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_bg_jobs(data: dict[str, Any]) -> None:
+    try:
+        Path(MACRO_BG_JOB_FILE).write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _job_is_recent(job_name: str, seconds: int = MACRO_AUTO_REFRESH_SECONDS) -> bool:
+    jobs = _read_bg_jobs()
+    item = jobs.get(job_name, {})
+    if not isinstance(item, dict):
+        return False
+    ts = _safe_float(item.get("started_ts"), 0) or 0
+    status = _safe_str(item.get("status"))
+    return (time.time() - ts) < seconds and status in {"running", "finished"}
+
+
+def _set_job_status(job_name: str, status: str, message: str = "") -> None:
+    jobs = _read_bg_jobs()
+    old_ts = jobs.get(job_name, {}).get("started_ts", time.time()) if isinstance(jobs.get(job_name), dict) else time.time()
+    jobs[job_name] = {
+        "status": status,
+        "message": message,
+        "started_ts": time.time() if status == "running" else old_ts,
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _write_bg_jobs(jobs)
+
+
+def _background_update_worker(target_date_text: str) -> None:
+    try:
+        d = pd.to_datetime(target_date_text, errors="coerce")
+        if pd.isna(d):
+            d = pd.Timestamp(_tw_now().date())
+        d = d.date()
+
+        msgs = []
+
+        try:
+            mkt = _fetch_market_with_fallback(d, realtime=(9 <= _tw_now().hour < 14))
+            if isinstance(mkt, dict) and mkt.get("ok"):
+                _save_market_row(mkt)
+                msgs.append(f"大盤更新成功:{mkt.get('source')}")
+            else:
+                msgs.append("大盤略過")
+        except Exception:
+            msgs.append("大盤例外略過")
+
+        try:
+            inst = _fetch_twse_institutional_manual(d, timeout=2.0)
+            if isinstance(inst, dict) and inst.get("ok"):
+                _save_inst_row(inst)
+                msgs.append("法人更新成功")
+            else:
+                msgs.append("法人略過")
+        except Exception:
+            msgs.append("法人例外略過")
+
+        try:
+            added, _ = _fetch_us_market_manual(d)
+            msgs.append(f"外盤成功 {added} 項")
+        except Exception:
+            msgs.append("外盤例外略過")
+
+        msgs.append("期貨自動略過，避免TAIFEX卡住")
+
+        try:
+            row = _default_market_row(d)
+            ok, bridge_msg = _write_macro_bridge(row)
+            msgs.append("橋接成功" if ok else f"橋接失敗:{bridge_msg}")
+        except Exception:
+            msgs.append("橋接例外略過")
+
+        _set_job_status("macro_auto_bg", "finished", " / ".join(msgs))
+    except Exception as e:
+        _set_job_status("macro_auto_bg", "error", str(e))
+
+
+def _maybe_start_background_update(target_date: date, enabled: bool = True) -> None:
+    if not enabled:
+        return
+    if _job_is_recent("macro_auto_bg", MACRO_AUTO_REFRESH_SECONDS):
+        return
+    _set_job_status("macro_auto_bg", "running", "背景更新中")
+    t = threading.Thread(
+        target=_background_update_worker,
+        args=(pd.to_datetime(target_date).strftime("%Y-%m-%d"),),
+        daemon=True,
+    )
+    t.start()
+
+
+def _render_background_update_status():
+    jobs = _read_bg_jobs()
+    item = jobs.get("macro_auto_bg", {}) if isinstance(jobs, dict) else {}
+    status = _safe_str(item.get("status")) or "尚未啟動"
+    msg = _safe_str(item.get("message"))
+    updated = _safe_str(item.get("updated_at"))
+    st.markdown("### 自動背景更新狀態")
+    c1, c2, c3 = st.columns([1.1, 2.8, 1.5])
+    with c1:
+        st.metric("背景狀態", status)
+    with c2:
+        st.caption(msg or "啟用後會背景更新大盤、法人、外盤與橋接檔；不等待、不卡頁。")
+    with c3:
+        st.caption(updated or "尚未更新")
+    if status == "running":
+        st.info("背景更新仍在執行中；頁面不會被卡住。稍後重新整理或切換頁面回來即可看到快取更新。")
+
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="大盤走勢｜緊急穩定版",
-        subtitle="本頁預設完全不呼叫外部 API，先顯示畫面；按下更新才抓盤中即時或收盤紀錄。",
+        title="大盤走勢｜自動背景更新版",
+        subtitle="頁面先顯示快取資料；大盤、法人、外盤改背景更新，避免外部端點卡住整頁。",
     )
 
-    st.warning("目前使用 v26.9 緊急穩定版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
+    st.warning("目前使用 v28.1.1 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
@@ -1556,6 +1740,11 @@ def main():
     with c5:
         target_date = st.date_input("大盤日期", value=date.today(), key=_k("target_date"))
 
+    auto_bg = st.toggle("自動背景更新，不卡頁", value=True, key=_k("auto_bg_update"))
+    _maybe_start_background_update(target_date, enabled=auto_bg)
+    _render_background_update_status()
+
+
     if clear_cache:
         _write_cache({})
         st.success("已清除 macro_market_close_cache.json")
@@ -1563,21 +1752,21 @@ def main():
 
     status_msg = ""
     if update_realtime:
-        with st.spinner("正在抓取 TWSE 盤中即時大盤，最多等待約 2 秒..."):
-            row = _fetch_twse_realtime()
+        with st.spinner("正在抓取大盤資料；TWSE失敗會自動改用Yahoo備援..."):
+            row = _fetch_market_with_fallback(target_date, realtime=True)
         if row.get("ok"):
             _save_market_row(row)
-            status_msg = f"盤中即時更新成功：{row.get('close')}"
+            status_msg = f"大盤更新成功：{row.get('close')}｜{row.get('source')}"
             st.success(status_msg)
         else:
-            st.warning(f"盤中即時更新失敗：{row.get('error')}")
+            st.warning(f"大盤更新失敗：{row.get('error')}")
 
     if update_close:
-        with st.spinner("正在抓取 TWSE 收盤紀錄，最多等待約 3 秒..."):
-            row = _fetch_twse_close(target_date)
+        with st.spinner("正在抓取收盤紀錄；TWSE失敗會自動改用Yahoo備援..."):
+            row = _fetch_market_with_fallback(target_date, realtime=False)
         if row.get("ok"):
             _save_market_row(row)
-            status_msg = f"收盤紀錄更新成功：{row.get('close')}"
+            status_msg = f"收盤紀錄更新成功：{row.get('close')}｜{row.get('source')}"
             st.success(status_msg)
         else:
             st.warning(f"收盤紀錄更新失敗：{row.get('error')}")
