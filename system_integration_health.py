@@ -348,3 +348,239 @@ def run_full_integration_check(base_dir: Path) -> Dict[str, Any]:
         "all_rows": all_rows,
         "market_snapshot": market_snapshot,
     }
+
+
+# ============================================================
+# v42：推薦結果大盤欄位自動補齊 / 舊資料相容修復
+# ============================================================
+
+EXTRA_GODPICK_MARKET_KEYS = [
+    "大盤橋接加權",
+    "大盤橋接策略",
+    "大盤橋接更新時間",
+]
+
+
+def _compact_text(value: Any, max_len: int = 220) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        s = value
+    else:
+        try:
+            s = json.dumps(value, ensure_ascii=False)
+        except Exception:
+            s = str(value)
+    s = s.replace("\n", " ").strip()
+    return s[:max_len] + ("..." if len(s) > max_len else "")
+
+
+def _extract_market_effect(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    effect = snapshot.get("godpick_market_effect")
+    if isinstance(effect, dict):
+        return effect
+    return {}
+
+
+def _summarize_diagnostics(snapshot: Dict[str, Any]) -> str:
+    diag = snapshot.get("data_diagnostics")
+    if isinstance(diag, list):
+        parts = []
+        for item in diag[:8]:
+            if isinstance(item, dict):
+                name = item.get("項目") or item.get("name") or item.get("資料項目") or item.get("source") or "資料源"
+                status = item.get("狀態") or item.get("status") or item.get("success") or ""
+                freshness = item.get("鮮度") or item.get("freshness") or ""
+                parts.append(f"{name}:{status}{('/' + str(freshness)) if freshness else ''}")
+            else:
+                parts.append(str(item))
+        return "；".join(parts)
+    if isinstance(diag, dict):
+        parts = []
+        for k, v in list(diag.items())[:8]:
+            if isinstance(v, dict):
+                status = v.get("狀態") or v.get("status") or v.get("ok") or ""
+                parts.append(f"{k}:{status}")
+            else:
+                parts.append(f"{k}:{v}")
+        return "；".join(parts)
+    return _compact_text(diag)
+
+
+def build_market_field_defaults_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """把 0_大盤趨勢 market_snapshot 轉成 7/8/10 每筆紀錄可保存的大盤欄位。"""
+    effect = _extract_market_effect(snapshot)
+    session_label = snapshot.get("market_session_label") or snapshot.get("market_session") or ""
+    score_delta = (
+        effect.get("score_delta")
+        or effect.get("recommend_score_delta")
+        or effect.get("大盤影響加減分")
+        or snapshot.get("recommendation_adjustment")
+        or ""
+    )
+    effect_text = (
+        effect.get("effect_text")
+        or effect.get("summary")
+        or effect.get("description")
+        or snapshot.get("trend_comment")
+        or snapshot.get("market_bias")
+        or ""
+    )
+    bridge_weight = (
+        effect.get("weight")
+        or effect.get("market_weight")
+        or effect.get("大盤橋接加權")
+        or ""
+    )
+    strategy = (
+        effect.get("strategy")
+        or effect.get("suggestion")
+        or snapshot.get("position_hint")
+        or snapshot.get("risk_gate")
+        or ""
+    )
+    return {
+        "大盤橋接分數": snapshot.get("market_score", ""),
+        "大盤橋接狀態": snapshot.get("market_trend", ""),
+        "大盤橋接風控": snapshot.get("risk_gate", snapshot.get("market_risk_level", "")),
+        "大盤橋接加權": bridge_weight,
+        "大盤橋接策略": strategy,
+        "大盤橋接更新時間": snapshot.get("updated_at", ""),
+        "大盤交易時段": session_label,
+        "大盤交易時段可用": snapshot.get("market_session_usable", ""),
+        "大盤資料品質": snapshot.get("data_quality", ""),
+        "大盤影響加減分": score_delta,
+        "大盤影響說明": effect_text,
+        "大盤資料診斷摘要": _summarize_diagnostics(snapshot),
+    }
+
+
+def _iter_records_mutable(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for key in ["data", "records", "items", "recommendations"]:
+            val = data.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+    return []
+
+
+def repair_recommendation_market_fields(base_dir: Path, overwrite_blank: bool = True) -> Dict[str, Any]:
+    """
+    v42：補齊舊推薦資料的大盤欄位。
+    - 不刪除任何推薦紀錄。
+    - 不覆蓋已有非空值。
+    - 只對缺少欄位或空白欄位補入 market_snapshot 推導值。
+    """
+    base_dir = Path(base_dir)
+    ok, snapshot, err = safe_read_json(base_dir / "market_snapshot.json")
+    if not ok or not isinstance(snapshot, dict):
+        return {
+            "ok": False,
+            "message": f"market_snapshot.json 無法讀取：{err}",
+            "rows": [],
+        }
+
+    defaults = build_market_field_defaults_from_snapshot(snapshot)
+    target_keys = list(dict.fromkeys(GODPICK_RESULT_MARKET_KEYS + EXTRA_GODPICK_MARKET_KEYS + list(defaults.keys())))
+    files = [
+        "godpick_latest_recommendations.json",
+        "godpick_records.json",
+        "godpick_recommend_list.json",
+    ]
+    rows: List[Dict[str, Any]] = []
+    total_fixed_records = 0
+    total_added_fields = 0
+
+    for file_name in files:
+        path = base_dir / file_name
+        file_ok, data, file_err = safe_read_json(path)
+        if not file_ok:
+            rows.append({"檔案": file_name, "結果": "略過", "原因": file_err, "修復筆數": 0, "補欄位數": 0})
+            continue
+
+        records = _iter_records_mutable(data)
+        fixed_records = 0
+        added_fields = 0
+        for rec in records:
+            changed = False
+            for key in target_keys:
+                default_value = defaults.get(key, "")
+                if key not in rec:
+                    rec[key] = default_value
+                    added_fields += 1
+                    changed = True
+                elif overwrite_blank and str(rec.get(key, "")).strip() in {"", "—", "None", "nan"}:
+                    rec[key] = default_value
+                    added_fields += 1
+                    changed = True
+            if changed:
+                fixed_records += 1
+
+        if fixed_records > 0:
+            write_ok, msg = safe_write_json(path, data)
+            rows.append({
+                "檔案": file_name,
+                "結果": "OK" if write_ok else "寫入失敗",
+                "原因": msg,
+                "修復筆數": fixed_records,
+                "補欄位數": added_fields,
+            })
+            if write_ok:
+                total_fixed_records += fixed_records
+                total_added_fields += added_fields
+        else:
+            rows.append({"檔案": file_name, "結果": "無需修復", "原因": "欄位已完整或尚無資料", "修復筆數": 0, "補欄位數": 0})
+
+    return {
+        "ok": True,
+        "message": f"完成：修復 {total_fixed_records} 筆，補入 {total_added_fields} 個欄位。",
+        "rows": rows,
+        "defaults": defaults,
+    }
+
+
+def validate_recommendation_market_fields_v42(base_dir: Path) -> List[Dict[str, Any]]:
+    """v42：檢查 7/8/10 推薦資料大盤欄位，並提示可用一鍵補欄位修復。"""
+    rows = validate_recommendation_market_fields(base_dir)
+    for row in rows:
+        if row.get("大盤欄位狀態") == "缺欄位":
+            row["建議"] = "可按 v42 一鍵補齊舊推薦資料大盤欄位；之後新推薦請用 7_股神推薦 v40+。"
+    return rows
+
+
+# 覆蓋原本 run_full_integration_check，讓 v42 檢查結果使用新建議文字。
+def run_full_integration_check(base_dir: Path) -> Dict[str, Any]:
+    base_dir = Path(base_dir)
+    file_rows = validate_file_matrix(base_dir)
+    market_rows, market_snapshot = validate_market_snapshot(base_dir)
+    bridge_rows = validate_bridge_files(base_dir)
+    rec_rows = validate_recommendation_market_fields_v42(base_dir)
+    page_rows = validate_pages(base_dir)
+
+    all_rows: List[Dict[str, Any]] = []
+    for group_name, rows in [
+        ("核心 JSON", file_rows),
+        ("大盤快照", market_rows),
+        ("橋接檔", bridge_rows),
+        ("推薦/紀錄/清單", rec_rows),
+        ("頁面檔案", page_rows),
+    ]:
+        for row in rows:
+            merged = {"群組": group_name}
+            merged.update(row)
+            all_rows.append(merged)
+
+    summary = build_summary(all_rows)
+    return {
+        "summary": summary,
+        "file_rows": file_rows,
+        "market_rows": market_rows,
+        "bridge_rows": bridge_rows,
+        "recommendation_rows": rec_rows,
+        "page_rows": page_rows,
+        "all_rows": all_rows,
+        "market_snapshot": market_snapshot,
+        "v42_repair_available": True,
+    }
