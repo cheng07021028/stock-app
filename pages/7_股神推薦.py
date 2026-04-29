@@ -2796,6 +2796,48 @@ def _render_debug_scan_summary():
         lines.append(f"{label}：{int(data.get(key, 0))} 檔")
     st.caption("｜".join(lines))
 
+    # V48：推薦速度監控摘要。
+    if data.get("scan_elapsed_sec") is not None or data.get("slowest_stocks"):
+        with st.expander("V48 推薦速度監控", expanded=False):
+            s1, s2, s3, s4 = st.columns(4)
+            with s1:
+                st.metric("總耗時", _fmt_seconds(_safe_float(data.get("scan_elapsed_sec"), 0) or 0))
+            with s2:
+                st.metric("平均每檔", _fmt_seconds(_safe_float(data.get("avg_sec_per_stock"), 0) or 0))
+            with s3:
+                st.metric("歷史資料成功率", f"{_safe_float(data.get('history_success_rate_pct'), 0) or 0:.2f}%")
+            with s4:
+                st.metric("平行工人", int(data.get("worker_count", 0) or 0))
+
+            slowest = data.get("slowest_stocks", []) or []
+            if slowest:
+                st.markdown("**最慢 10 檔股票**")
+                st.dataframe(pd.DataFrame(slowest), use_container_width=True, hide_index=True)
+
+            status_summary = data.get("status_elapsed_summary", {}) or {}
+            if isinstance(status_summary, dict) and status_summary:
+                rows = []
+                for status, payload in status_summary.items():
+                    if isinstance(payload, dict):
+                        rows.append({
+                            "狀態": status,
+                            "檔數": payload.get("count", 0),
+                            "平均秒數": payload.get("avg_sec", 0),
+                            "最慢秒數": payload.get("max_sec", 0),
+                        })
+                if rows:
+                    st.markdown("**各淘汰 / 成功狀態耗時統計**")
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            if data.get("data_source_diagnostics_available"):
+                st.caption("已讀取 utils.py v47 data_source_diagnostics，可用於判斷 Yahoo / TWSE / TPEx 哪個資料源較慢或失敗。")
+                diag = data.get("data_source_diagnostics", {}) or {}
+                if isinstance(diag, dict):
+                    # 避免整包診斷太大，畫面只顯示摘要與前幾筆。
+                    st.json({k: diag.get(k) for k in list(diag.keys())[:12]}, expanded=False)
+            elif data.get("data_source_diagnostics_error"):
+                st.caption(f"資料源診斷讀取失敗：{data.get('data_source_diagnostics_error')}")
+
     history_debug = data.get("history_debug_samples", []) or []
     error_debug = data.get("error_samples", []) or []
     if history_debug or error_debug:
@@ -6302,7 +6344,15 @@ def _build_recommend_df(
         "history_debug_samples": [],
         "error_samples": [],
         "worker_count": worker_count,
-        "speed_version": "v34_single_history_call_no_duplicate_fallback",
+        "speed_version": "v48_speed_monitor_with_slowest_stock_diagnostics",
+        "scan_started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "scan_elapsed_sec": 0.0,
+        "avg_sec_per_stock": 0.0,
+        "history_success_rate_pct": 0.0,
+        "scan_speed_samples": [],
+        "slowest_stocks": [],
+        "status_elapsed_summary": {},
+        "data_source_diagnostics_available": False,
     }
 
     scan_signature = _v22_scan_signature(
@@ -6374,8 +6424,11 @@ def _build_recommend_df(
 
     if pending_items:
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="godpick_scan") as executor:
-            futures = [
-                executor.submit(
+            # V48：推薦速度監控。future 需要保留股票代號、名稱與送出時間，才能找出真正慢在哪幾檔。
+            futures: dict[Any, dict[str, Any]] = {}
+            for item in pending_items:
+                submit_ts = time.time()
+                future = executor.submit(
                     _analyze_one_stock_for_recommend,
                     item,
                     master_lookup,
@@ -6388,15 +6441,41 @@ def _build_recommend_df(
                     min_prelaunch_score,
                     min_trade_score,
                 )
-                for item in pending_items
-            ]
+                futures[future] = {
+                    "code": _normalize_code(item.get("code")),
+                    "name": _safe_str(item.get("name")),
+                    "market": _safe_str(item.get("market")),
+                    "submitted_at": submit_ts,
+                }
+
+            speed_samples: list[dict[str, Any]] = []
+            status_elapsed_bucket: dict[str, list[float]] = {}
 
             for future in as_completed(futures):
                 done_count += 1
+                future_meta = futures.get(future, {}) or {}
+                elapsed_one = max(time.time() - float(future_meta.get("submitted_at", time.time())), 0.0)
                 try:
                     result = future.result()
                     if not isinstance(result, dict):
-                        result = {"status": "analysis_error", "code": "", "message": "future.result 非 dict"}
+                        result = {"status": "analysis_error", "code": future_meta.get("code", ""), "message": "future.result 非 dict"}
+
+                    # V48：把單檔耗時寫入結果，不影響推薦分數，只用於診斷。
+                    result["scan_elapsed_sec"] = round(elapsed_one, 3)
+                    result["scan_code"] = _normalize_code(result.get("code") or future_meta.get("code"))
+                    result["scan_name"] = _safe_str(future_meta.get("name"))
+                    result["scan_market"] = _safe_str(future_meta.get("market"))
+                    result_status = _safe_str(result.get("status")) or "unknown"
+                    status_elapsed_bucket.setdefault(result_status, []).append(elapsed_one)
+                    speed_samples.append({
+                        "股票代號": result.get("scan_code") or _normalize_code(future_meta.get("code")),
+                        "股票名稱": result.get("scan_name") or _safe_str(future_meta.get("name")),
+                        "市場別": result.get("scan_market") or _safe_str(future_meta.get("market")),
+                        "狀態": result_status,
+                        "耗時秒": round(elapsed_one, 3),
+                        "訊息": _safe_str(result.get("message"))[:120],
+                    })
+
                     processed_results.append(result)
                     _consume_scan_result(result)
 
@@ -6405,6 +6484,15 @@ def _build_recommend_df(
                 except Exception as e:
                     debug_summary["analysis_error"] += 1
                     debug_summary["error_samples"].append(f"future.result 例外：{e}")
+                    status_elapsed_bucket.setdefault("future_exception", []).append(elapsed_one)
+                    speed_samples.append({
+                        "股票代號": _normalize_code(future_meta.get("code")),
+                        "股票名稱": _safe_str(future_meta.get("name")),
+                        "市場別": _safe_str(future_meta.get("market")),
+                        "狀態": "future_exception",
+                        "耗時秒": round(elapsed_one, 3),
+                        "訊息": str(e)[:120],
+                    })
                 should_update_progress = (
                     done_count == 1
                     or done_count == total_count
@@ -6423,7 +6511,7 @@ def _build_recommend_df(
                         f"已完成 {done_count}/{total_count}｜"
                         f"已花時間：{_fmt_seconds(elapsed)}｜"
                         f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V35高速穩定掃描"
+                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V48速度監控掃描"
                     )
     else:
         progress_text.caption(f"斷點資料已涵蓋全部 {total_count} 檔，直接整理結果。")
@@ -6432,7 +6520,47 @@ def _build_recommend_df(
 
     progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
     total_elapsed = time.time() - start_ts
-    progress_text.caption(f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}")
+
+    # V48：整理速度監控資訊。只做顯示與診斷，不影響推薦結果。
+    try:
+        all_speed_samples = locals().get("speed_samples", []) or []
+        all_status_elapsed_bucket = locals().get("status_elapsed_bucket", {}) or {}
+        slowest = sorted(all_speed_samples, key=lambda x: _safe_float(x.get("耗時秒"), 0) or 0, reverse=True)[:10]
+        status_summary = {}
+        for k, vals in all_status_elapsed_bucket.items():
+            vals = [float(v) for v in vals if v is not None]
+            if not vals:
+                continue
+            status_summary[k] = {
+                "count": len(vals),
+                "avg_sec": round(sum(vals) / len(vals), 3),
+                "max_sec": round(max(vals), 3),
+            }
+        debug_summary["scan_elapsed_sec"] = round(total_elapsed, 3)
+        debug_summary["avg_sec_per_stock"] = round(total_elapsed / max(done_count, 1), 3)
+        debug_summary["scan_speed_samples"] = all_speed_samples[:200]
+        debug_summary["slowest_stocks"] = slowest
+        debug_summary["status_elapsed_summary"] = status_summary
+        debug_summary["history_success_rate_pct"] = round((debug_summary.get("analyzed_ok", 0) / max(total_count, 1)) * 100, 2)
+        debug_summary["scan_finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # v47 utils.py 若有提供資料源診斷，推薦頁會在除錯摘要顯示。
+        try:
+            from utils import get_data_source_diagnostics  # type: ignore
+            diag = get_data_source_diagnostics()
+            if isinstance(diag, dict):
+                debug_summary["data_source_diagnostics_available"] = True
+                debug_summary["data_source_diagnostics"] = diag
+        except Exception as diag_err:
+            debug_summary["data_source_diagnostics_available"] = False
+            debug_summary["data_source_diagnostics_error"] = str(diag_err)
+    except Exception as speed_err:
+        debug_summary["speed_monitor_error"] = str(speed_err)
+
+    progress_text.caption(
+        f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}｜"
+        f"平均每檔：{_fmt_seconds(debug_summary.get('avg_sec_per_stock', 0))}｜"
+        f"歷史資料成功率：{debug_summary.get('history_success_rate_pct', 0)}%"
+    )
 
     base_df = pd.DataFrame(base_rows)
     if base_df.empty:
