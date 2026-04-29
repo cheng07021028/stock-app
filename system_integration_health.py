@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-系統串聯健康檢查服務 v41
+系統串聯健康檢查服務 v43
 
 用途：
 - 檢查 0_大盤趨勢 -> 7_股神推薦 -> 8_股神推薦紀錄 -> 10_推薦清單 -> 首頁/儀表板 的 JSON 串聯。
@@ -59,12 +59,43 @@ GODPICK_RESULT_MARKET_KEYS = [
 ]
 
 PAGE_REQUIRED = {
-    "0 大盤趨勢": ["0_#U5927#U76e4#U8d70#U52e2.py", "01_market_trend.py"],
-    "1 儀表板": ["1_#U5100#U8868#U677f.py"],
-    "7 股神推薦": ["7_#U80a1#U795e#U63a8#U85a6.py"],
-    "8 股神推薦紀錄": ["8_#U80a1#U795e#U63a8#U85a6#U7d00#U9304.py"],
-    "10 推薦清單": ["10_#U63a8#U85a6#U6e05#U55ae.py"],
-    "11 資料診斷": ["11_#U8cc7#U6599#U8a3a#U65b7.py"],
+    "0 大盤趨勢": [
+        "0_#U5927#U76e4#U8d70#U52e2.py", "0_大盤走勢.py", "0_大盤趨勢.py",
+        "01_大盤趨勢.py", "01_market_trend.py", "market_trend_01.py",
+    ],
+    "1 儀表板": [
+        "1_#U5100#U8868#U677f.py", "1_儀表板.py", "01_儀表板.py", "dashboard_1.py",
+    ],
+    "7 股神推薦": [
+        "7_#U80a1#U795e#U63a8#U85a6.py", "7_股神推薦.py", "07_股神推薦.py",
+    ],
+    "8 股神推薦紀錄": [
+        "8_#U80a1#U795e#U63a8#U85a6#U7d00#U9304.py", "8_股神推薦紀錄.py", "08_股神推薦紀錄.py",
+    ],
+    "10 推薦清單": [
+        "10_#U63a8#U85a6#U6e05#U55ae.py", "10_推薦清單.py", "10_recommend_list.py",
+    ],
+    "11 資料診斷": [
+        "11_#U8cc7#U6599#U8a3a#U65b7.py", "11_資料診斷.py", "11_data_diagnostics.py",
+    ],
+}
+
+PAGE_FUZZY_RULES = {
+    "0 大盤趨勢": ["0_", "01_"],
+    "1 儀表板": ["1_", "01_"],
+    "7 股神推薦": ["7_", "07_"],
+    "8 股神推薦紀錄": ["8_", "08_"],
+    "10 推薦清單": ["10_"],
+    "11 資料診斷": ["11_"],
+}
+
+PAGE_KEYWORDS = {
+    "0 大盤趨勢": ["大盤", "走勢", "趨勢", "market", "trend", "#u5927#u76e4", "#u8d70#u52e2"],
+    "1 儀表板": ["儀表", "dashboard", "#u5100#u8868#u677f"],
+    "7 股神推薦": ["股神", "推薦", "godpick", "#u80a1#u795e#u63a8#u85a6"],
+    "8 股神推薦紀錄": ["股神", "推薦", "紀錄", "record", "history", "#u7d00#u9304"],
+    "10 推薦清單": ["推薦", "清單", "recommend", "list", "#u63a8#u85a6#u6e05#u55ae"],
+    "11 資料診斷": ["資料", "診斷", "diagnostics", "health", "#u8cc7#u6599#u8a3a#u65b7"],
 }
 
 
@@ -280,17 +311,57 @@ def validate_recommendation_market_fields(base_dir: Path) -> List[Dict[str, Any]
     return rows
 
 
+def _page_name_norm(name: str) -> str:
+    return str(name).strip().lower().replace(" ", "")
+
+
+def _page_matches(module_name: str, file_name: str, candidates: List[str]) -> bool:
+    norm = _page_name_norm(file_name)
+    candidate_norms = {_page_name_norm(x) for x in candidates}
+    if norm in candidate_norms:
+        return True
+
+    # Streamlit / GitHub 有時會保留中文，有時會變成 #Uxxxx。
+    # 這裡改用「頁碼前綴 + 關鍵字」做寬鬆判斷，避免誤報缺少。
+    prefixes = PAGE_FUZZY_RULES.get(module_name, [])
+    keywords = PAGE_KEYWORDS.get(module_name, [])
+    prefix_ok = any(norm.startswith(_page_name_norm(p)) for p in prefixes)
+    keyword_ok = any(_page_name_norm(k) in norm for k in keywords)
+
+    # 針對 7 / 8：都含股神推薦，8 必須再含紀錄；7 則排除紀錄。
+    if module_name == "7 股神推薦" and prefix_ok:
+        return keyword_ok and ("紀錄" not in file_name and "#u7d00#u9304" not in norm and "record" not in norm and "history" not in norm)
+    if module_name == "8 股神推薦紀錄" and prefix_ok:
+        return keyword_ok and ("紀錄" in file_name or "#u7d00#u9304" in norm or "record" in norm or "history" in norm)
+
+    return prefix_ok and keyword_ok
+
+
 def validate_pages(base_dir: Path) -> List[Dict[str, Any]]:
     pages_dir = base_dir / "pages"
     rows: List[Dict[str, Any]] = []
+
+    if not pages_dir.exists():
+        for module_name, candidates in PAGE_REQUIRED.items():
+            rows.append({
+                "模組": module_name,
+                "狀態": "缺少",
+                "符合檔案": "",
+                "候選檔名": "、".join(candidates),
+                "建議": f"找不到 pages 資料夾：{pages_dir}",
+            })
+        return rows
+
+    actual_files = sorted([p.name for p in pages_dir.glob("*.py")])
+
     for module_name, candidates in PAGE_REQUIRED.items():
-        found = [name for name in candidates if (pages_dir / name).exists()]
+        found = [name for name in actual_files if _page_matches(module_name, name, candidates)]
         rows.append({
             "模組": module_name,
             "狀態": "OK" if found else "缺少",
             "符合檔案": "、".join(found),
             "候選檔名": "、".join(candidates),
-            "建議": "OK" if found else "請確認 pages 內檔名是否被改掉。",
+            "建議": "OK" if found else "請確認 pages 內檔名；v43 已支援中文檔名、#U 編碼檔名、英文備用檔名。",
         })
     return rows
 
