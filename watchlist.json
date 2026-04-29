@@ -203,20 +203,17 @@
     {
       "code": "1533",
       "name": "車王電",
-      "market": "上市",
-      "category": "汽車"
+      "market": "上市"
     },
     {
       "code": "1760",
       "name": "寶齡富錦",
-      "market": "上市",
-      "category": "生技醫療業"
+      "market": "上市"
     },
     {
       "code": "2464",
       "name": "盟立",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "3016",
@@ -226,14 +223,12 @@
     {
       "code": "3051",
       "name": "力特",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "3059",
       "name": "華晶科",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "3224",
@@ -246,10 +241,15 @@
       "market": "上櫃"
     },
     {
+      "code": "3605",
+      "name": "宏致",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
       "code": "4949",
       "name": "有成精密",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "4967",
@@ -259,14 +259,12 @@
     {
       "code": "5864",
       "name": "致和證",
-      "market": "上櫃",
-      "category": "金融保險"
+      "market": "上櫃"
     },
     {
       "code": "6016",
       "name": "康和證",
-      "market": "上櫃",
-      "category": "金融保險"
+      "market": "上櫃"
     },
     {
       "code": "6197",
@@ -281,14 +279,12 @@
     {
       "code": "6405",
       "name": "悅城",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "6658",
       "name": "聯策",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "8032",
