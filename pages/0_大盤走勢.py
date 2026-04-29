@@ -885,7 +885,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v27.9 已恢復台指期手動更新；不進頁自動抓，避免卡住。",
+            "說明": "v27.11 改為手動輸入保存，避免 TAIFEX 端點造成頁面卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1231,7 +1231,7 @@ def _render_taifex_block(target_date: date):
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.1, 1.1, 1.1, 2.0])
     with c1:
-        update_taifex = st.button("更新台指期", use_container_width=True)
+        update_taifex = st.button("台指期改手動輸入", use_container_width=True)
     with c2:
         st.metric("期貨分數", f"{_safe_float(score.get('期貨分數'), 50):.1f}")
     with c3:
@@ -1239,27 +1239,15 @@ def _render_taifex_block(target_date: date):
     with c4:
         st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
     with c5:
-        st.caption("手動抓 TAIFEX 台指期，不進頁自動執行。")
+        st.caption("TAIFEX 自動抓取已暫停，避免卡住；請使用手動輸入保存。")
 
     if update_taifex:
-        with st.spinner("正在手動更新 TAIFEX 台指期；只在按下時執行..."):
-            new_row = _fetch_taifex_futures_manual(target_date)
-        if new_row.get("ok"):
-            _save_taifex_row(new_row)
-            msg = f"台指期更新成功：收盤 {new_row.get('tx_close')} / 漲跌 {new_row.get('tx_change')}"
-            if new_row.get("note"):
-                msg += f"｜{new_row.get('note')}"
-            st.success(msg)
-            st.rerun()
-        else:
-            st.warning(f"台指期更新失敗：{new_row.get('error')}")
-            if new_row.get("tried"):
-                with st.expander("TAIFEX 嘗試明細", expanded=False):
-                    for item in new_row.get("tried", []):
-                        st.write(f"- {item}")
+        # v27.11：TAIFEX 端點在 Streamlit Cloud / 企業網路常會長時間等待。
+        # 為了避免頁面再次卡住，台指期先改為「不連線、手動輸入」。
+        st.warning("TAIFEX 自動連線已暫停，避免頁面卡住。請展開下方「手動輸入台指期資料」保存收盤與漲跌。")
 
-    with st.expander("手動輸入台指期資料", expanded=False):
-        st.caption("如果 TAIFEX 端點暫時抓不到，可先手動輸入台指期收盤/漲跌，仍會寫入 macro_taifex_cache.json 並可串聯股神橋接。")
+    with st.expander("手動輸入台指期資料", expanded=True):
+        st.caption("v27.11：為避免 TAIFEX 端點造成頁面卡住，台指期目前採手動輸入；資料會寫入 macro_taifex_cache.json 並可串聯股神橋接。")
         m1, m2, m3, m4 = st.columns([1.2, 1.2, 1.2, 1.2])
         with m1:
             manual_close = st.number_input("台指期收盤", min_value=0.0, value=float(_safe_float(row.get("tx_close"), 0) or 0), step=1.0, key=_k("manual_tx_close"))
