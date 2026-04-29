@@ -134,7 +134,7 @@ except Exception:
 
 st.set_page_config(page_title="資料診斷", layout="wide")
 inject_pro_theme()
-render_pro_hero("資料診斷｜v54 全系統健康檢查", "檢查 v45 大盤、v47 資料源、v48 推薦速度、v49 自選股同步、v50-v53 推薦績效與 JSON 串聯狀態。")
+render_pro_hero("資料診斷｜v55 全系統健康檢查", "檢查 v45 大盤、v47 資料源、v48 推薦速度、v49 自選股同步、v50-v53 推薦績效與 JSON 串聯狀態；v55 可一鍵產生 runtime 診斷檔。")
 
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -430,7 +430,7 @@ st.subheader('9. v54 全系統串聯驗證與欄位修復')
 st.caption('檢查 0_大盤趨勢、7_股神推薦、8_股神推薦紀錄、10_推薦清單、首頁 / 儀表板之間的 JSON 串聯。此區塊只讀本機檔案，不重新抓網路資料；v54 可補齊舊推薦紀錄缺少的大盤欄位。')
 
 try:
-    from system_integration_health import run_full_integration_check, ensure_missing_json_files, repair_recommendation_market_fields, repair_v54_missing_fields, backup_json_files
+    from system_integration_health import run_full_integration_check, ensure_missing_json_files, repair_recommendation_market_fields, repair_v54_missing_fields, backup_json_files, initialize_v55_runtime_diagnostics
     _v41_report = run_full_integration_check(BASE_DIR)
     _v41_summary = _v41_report.get('summary', {})
 
@@ -523,6 +523,17 @@ try:
             st.error(_perf_repair.get('message', '修復失敗'))
         st.dataframe(pd.DataFrame(_perf_repair.get('rows', [])), use_container_width=True, hide_index=True)
         st.info('請重新整理本頁，再看 v50-v53 推薦後績效欄位檢查是否下降。')
+
+    st.markdown('##### v55 runtime 診斷檔初始化')
+    st.caption('用途：你截圖中的 data_source_diagnostics.json、watchlist_runtime_snapshot.json、watchlist_normalized.json 是 runtime 產物；尚未執行 7_股神推薦或 4_自選股中心前可能不存在。此工具會依現有 watchlist.json 產生安全快照，並建立資料源診斷占位檔，不覆蓋既有資料。')
+    if st.button('v55 一鍵產生缺少的資料源 / 自選股 runtime 診斷檔', use_container_width=True, type='primary'):
+        _v55_init = initialize_v55_runtime_diagnostics(BASE_DIR)
+        if _v55_init.get('ok'):
+            st.success(_v55_init.get('message', '已完成'))
+        else:
+            st.error(_v55_init.get('message', '初始化失敗'))
+        st.dataframe(pd.DataFrame(_v55_init.get('rows', [])), use_container_width=True, hide_index=True)
+        st.info('請重新整理本頁，再看 v47 / v49 檢查是否轉為 OK。')
 
     st.markdown('##### v54 JSON 備份工具')
     st.caption('會把關鍵 JSON 備份到 backups/v54_health_backup_時間戳，不覆蓋原檔。')
