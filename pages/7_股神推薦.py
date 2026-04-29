@@ -89,6 +89,7 @@ GODPICK_ACTIVE_SCORE_WEIGHTS = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
 GODPICK_SETTINGS_FILE = "godpick_user_settings.json"
 GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
 GODPICK_LIST_FILE = "godpick_recommend_list.json"
+MACRO_MODE_BRIDGE_FILE = "macro_mode_bridge.json"
 
 
 GODPICK_RECORD_COLUMNS = [
@@ -1291,6 +1292,132 @@ def _get_active_weight_map() -> dict[str, int]:
 def _weight_text(weights: dict[str, int] | None = None) -> str:
     weights = _normalize_weight_map(weights or _get_active_weight_map())
     return " / ".join([f"{k}{v}%" for k, v in weights.items()])
+
+
+def _read_macro_mode_bridge() -> dict[str, Any]:
+    """v27.3：讀取 01_大盤趨勢 寫出的 macro_mode_bridge.json。"""
+    p = Path(MACRO_MODE_BRIDGE_FILE)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _macro_bridge_weight_delta(bridge: dict[str, Any]) -> int:
+    raw = _safe_str(bridge.get("godpick_weight_advice"))
+    if not raw:
+        return 0
+    raw = raw.replace("％", "%").replace("+", "")
+    try:
+        return int(float(raw.replace("%", "").strip()))
+    except Exception:
+        return 0
+
+
+def _normalize_int_weight_total(weights: dict[str, int], total: int = 100) -> dict[str, int]:
+    keys = list(GODPICK_DEFAULT_SCORE_WEIGHTS.keys())
+    out = {k: max(0, int(round(_safe_float(weights.get(k), GODPICK_DEFAULT_SCORE_WEIGHTS.get(k, 0)) or 0))) for k in keys}
+    diff = int(total) - sum(out.values())
+    # 優先補/扣在市場環境，仍不足再依序調整其他權重。
+    order = ["市場環境", "技術結構", "起漲前兆", "類股熱度", "交易可行", "型態突破", "爆發力", "自動因子"]
+    guard = 0
+    while diff != 0 and guard < 500:
+        guard += 1
+        changed = False
+        for k in order:
+            if diff == 0:
+                break
+            if diff > 0:
+                out[k] = out.get(k, 0) + 1
+                diff -= 1
+                changed = True
+            else:
+                if out.get(k, 0) > 0:
+                    out[k] -= 1
+                    diff += 1
+                    changed = True
+        if not changed:
+            break
+    return out
+
+
+def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, Any], enabled: bool = True) -> dict[str, int]:
+    """
+    v27.3：把大盤橋接檔轉成權重微調。
+    +10 / +5：提高市場環境權重，降低追高相關權重。
+    -10 / -20：降低市場環境與爆發追價權重，提高交易可行與技術結構防守。
+    """
+    base = _normalize_weight_map(weights)
+    if not enabled or not bridge:
+        return base
+
+    delta = _macro_bridge_weight_delta(bridge)
+    out = base.copy()
+
+    if delta > 0:
+        add = min(abs(delta), 10)
+        out["市場環境"] = out.get("市場環境", 0) + add
+        # 大盤偏多時仍避免盲目追高，從爆發力/型態突破小幅挪給大盤。
+        take_order = ["爆發力", "型態突破", "自動因子"]
+        remain = add
+        for k in take_order:
+            if remain <= 0:
+                break
+            take = min(remain, max(0, out.get(k, 0) - 3))
+            out[k] = out.get(k, 0) - take
+            remain -= take
+    elif delta < 0:
+        cut = min(abs(delta), 20)
+        # 大盤偏弱時，降低大盤鼓勵與爆發追高，轉成防守因子。
+        cut_market = min(cut // 2 + cut % 2, max(0, out.get("市場環境", 0) - 3))
+        out["市場環境"] = out.get("市場環境", 0) - cut_market
+        cut_burst = min(cut - cut_market, max(0, out.get("爆發力", 0) - 2))
+        out["爆發力"] = out.get("爆發力", 0) - cut_burst
+        out["交易可行"] = out.get("交易可行", 0) + cut_market
+        out["技術結構"] = out.get("技術結構", 0) + cut_burst
+
+    return _normalize_int_weight_total(out, 100)
+
+
+def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[str, Any], dict[str, int], bool]:
+    """v27.3：在股神推薦頁顯示大盤橋接狀態並回傳調整後權重。"""
+    bridge = _read_macro_mode_bridge()
+    render_pro_section("大盤橋接風控", "讀取 01_大盤趨勢 寫出的 macro_mode_bridge.json，將大盤穩定分帶入股神推薦權重。")
+
+    if not bridge:
+        st.info("尚未找到 macro_mode_bridge.json。請先到 01_大盤趨勢 按「寫入股神大盤參考」。")
+        return bridge, applied_weights, False
+
+    enabled_key = _k("macro_bridge_enabled")
+    if enabled_key not in st.session_state:
+        st.session_state[enabled_key] = True
+
+    c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.4])
+    with c1:
+        st.metric("大盤穩定分", f"{_safe_float(bridge.get('market_score'), 50):.1f}")
+    with c2:
+        st.metric("大盤狀態", _safe_str(bridge.get("market_state")) or "未定義")
+    with c3:
+        st.metric("建議加權", _safe_str(bridge.get("godpick_weight_advice")) or "0%")
+    with c4:
+        risk_filter = _safe_str((bridge.get("recommendation_bias") or {}).get("risk_filter")) if isinstance(bridge.get("recommendation_bias"), dict) else ""
+        st.metric("推薦風控", risk_filter or "中性")
+    with c5:
+        enabled = st.toggle("套用大盤橋接", value=bool(st.session_state.get(enabled_key, True)), key=enabled_key)
+
+    adjusted = _apply_macro_bridge_to_weights(applied_weights, bridge, enabled=enabled)
+    if enabled:
+        st.caption("已套用大盤橋接後權重：" + _weight_text(adjusted))
+    else:
+        st.caption("目前未套用大盤橋接，維持原始權重：" + _weight_text(applied_weights))
+
+    with st.expander("大盤橋接明細", expanded=False):
+        st.json(bridge)
+
+    return bridge, adjusted, enabled
 
 
 def _derive_buy_point_grade(row: pd.Series) -> str:
@@ -5703,7 +5830,8 @@ def _v22_scan_signature(
         "min_prelaunch_score": float(min_prelaunch_score),
         "min_trade_score": float(min_trade_score),
         "weights": GODPICK_ACTIVE_SCORE_WEIGHTS,
-        "version": "v22",
+        "macro_bridge": _read_macro_mode_bridge(),
+        "version": "v27.3",
     }
     text = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
@@ -6995,8 +7123,10 @@ def main():
         st.success(st.session_state.pop(_k("scan_settings_msg")))
 
     applied_weights = _render_score_weight_panel()
+    macro_bridge, macro_adjusted_weights, macro_bridge_enabled = _render_macro_bridge_panel(applied_weights)
+
     global GODPICK_ACTIVE_SCORE_WEIGHTS
-    GODPICK_ACTIVE_SCORE_WEIGHTS = applied_weights.copy()
+    GODPICK_ACTIVE_SCORE_WEIGHTS = macro_adjusted_weights.copy()
 
     show_v2_logic = st.toggle("顯示 V2 選股邏輯 / 條件說明", value=False, key=_k("show_v2_logic"))
     _render_weight_dynamic_guide(applied_weights)
