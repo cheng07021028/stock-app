@@ -2716,13 +2716,9 @@ def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
-    if _k("status_msg") not in st.session_state:
-        st.session_state[_k("status_msg")] = ""
-        st.session_state[_k("status_type")] = "info"
-
     render_pro_hero(
         title="大盤走勢｜股神Pro因子強化版",
-        subtitle="補強法人 / 期貨選擇權 / 融資融券 / 類股輪動 / 事件因子，並顯示每個因子的實際取樣日期與來源。",
+        subtitle="v26.8 緊急快顯版：先顯示目前大盤資訊，不自動等待外部 API；需要完整分析再手動啟動。",
     )
     st.caption(f"大盤投顧參考版：{MACRO_ADVISOR_VERSION}")
 
@@ -2731,77 +2727,93 @@ def main():
     if status_msg:
         getattr(st, status_type if status_type in {"success", "warning", "error", "info"} else "info")(status_msg)
 
-    top = st.columns([1.0, 1.0, 1.0, 0.85, 0.85, 2.0])
-    with top[0]:
-        if st.button("🔄 重新載入紀錄", use_container_width=True):
-            # v26.7：避免按鈕自動卡整頁，只有使用者按時才讀 GitHub。
-            df, err = _read_records_from_github()
-            _save_state_df(df)
-            _set_status("已重新載入紀錄" if not err else err, "success" if not err else "warning")
-            st.rerun()
-    with top[1]:
-        if st.button("⚡ 更新即時大盤", use_container_width=True):
-            _ok, _msg = _try_refresh_taiex_cache_now(pd.to_datetime(st.session_state.get(_k("active_pred_date"), date.today())).strftime("%Y-%m-%d"))
-            _set_status(_msg, "success" if _ok else "warning")
-            st.rerun()
-    with top[2]:
-        if st.button("🧹 清除快取", use_container_width=True):
-            try:
-                _fetch_stooq.clear()
-                _search_news_headlines.clear()
-                _fetch_twse_realtime_taiex.clear()
-                _fetch_twse_after_close_taiex.clear()
-            except Exception:
-                pass
-            _set_status("資料快取已清除", "success")
-            st.rerun()
-    with top[3]:
-        zero_wait_mode = st.toggle("零等待", value=True, key=_k("zero_wait_mode"))
-    with top[4]:
-        quick_mode = st.toggle("快顯模式", value=True, key=_k("quick_mode"))
-        auto_save = False
-    with top[5]:
-        pred_date_input = st.date_input("推估日期", value=st.session_state.get(_k("active_pred_date"), date.today()), key=_k("pred_date"))
-        if st.button("套用日期", use_container_width=True, key=_k("apply_pred_date")):
-            st.session_state[_k("active_pred_date")] = pred_date_input
-            st.rerun()
+    c0, c1, c2, c3 = st.columns([1.2, 1.2, 1.2, 2.4])
+    with c0:
+        refresh_now = st.button("⚡ 更新即時/收盤大盤", use_container_width=True, type="primary")
+    with c1:
+        run_quick = st.button("產生快顯分析", use_container_width=True)
+    with c2:
+        run_full = st.button("產生完整分析", use_container_width=True)
+    with c3:
+        pred_date_input = st.date_input(
+            "分析日期",
+            value=st.session_state.get(_k("active_pred_date"), date.today()),
+            key=_k("pred_date_fast"),
+        )
 
-    active_pred_date = st.session_state.get(_k("active_pred_date"), pred_date_input)
-    if pd.to_datetime(active_pred_date, errors="coerce") != pd.to_datetime(pred_date_input, errors="coerce"):
-        st.info(f"目前分析日期仍為 {pd.to_datetime(active_pred_date).strftime('%Y-%m-%d')}，按一下『套用日期』才會重新計算。")
+    pred_date_text = pd.to_datetime(pred_date_input).strftime("%Y-%m-%d")
+    st.session_state[_k("active_pred_date")] = pred_date_input
 
-    # v26.7：頁面載入時不自動讀 GitHub，避免大盤趨勢一直卡在遠端紀錄讀取。
-    # 需要歷史紀錄時，請按「重新載入紀錄」。
+    if refresh_now:
+        with st.spinner("正在手動更新 TWSE 即時 / 收盤大盤資料..."):
+            ok, msg = _try_refresh_taiex_cache_now(pred_date_text)
+        _set_status(msg, "success" if ok else "warning")
+        st.rerun()
+
+    # v26.8：預設完全不等待外部 API，只讀本機快取或安全預設值。
+    pred_df, ctx = _predict_all_models_instant(pred_date_text, pd.DataFrame())
+
+    taiex_live = ctx.get("taiex_now") if isinstance(ctx, dict) else {}
+    live_label = "收盤快取 / 安全預設"
+    if isinstance(taiex_live, dict):
+        live_label = "盤中即時" if taiex_live.get("is_realtime") else (_safe_str(taiex_live.get("source")) or "收盤快取 / 安全預設")
+
+    render_pro_kpi_row([
+        {
+            "label": f"目前大盤｜{live_label}",
+            "value": f"{_safe_float((taiex_live or {}).get('close'), 0):,.2f}",
+            "delta": f"{_safe_float((taiex_live or {}).get('pct'), 0):+.2f}%",
+            "delta_class": "pro-kpi-delta-up" if _safe_float((taiex_live or {}).get("pct"), 0) >= 0 else "pro-kpi-delta-down",
+        },
+        {
+            "label": "大盤資料日期",
+            "value": _safe_str((taiex_live or {}).get("used_date") or (taiex_live or {}).get("date") or pred_date_text),
+            "delta": _safe_str((taiex_live or {}).get("source")),
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "目前模式",
+            "value": "零等待快顯",
+            "delta": "不自動呼叫外部 API",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "操作建議",
+            "value": _safe_str(ctx.get("scenario", "先顯示再更新")),
+            "delta": "需完整因子請按下方按鈕",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+    ])
+
+    render_pro_info_card(
+        "大盤資料狀態",
+        [
+            ("目前資料來源", _safe_str((taiex_live or {}).get("source")) or "本機快取 / 安全預設", ""),
+            ("目前指數", f"{_safe_float((taiex_live or {}).get('close'), 0):,.2f}", ""),
+            ("漲跌幅", f"{_safe_float((taiex_live or {}).get('pct'), 0):+.2f}%", ""),
+            ("說明", "v26.8 預設不自動等待 Yahoo / Stooq / TWSE / Google News / TAIFEX；避免頁面一直轉圈。", ""),
+        ],
+        chips=["零等待", "先顯示", "手動更新"],
+    )
+
+    st.info("頁面已先載入完成。若要補抓目前大盤，按「更新即時/收盤大盤」；若要跑模型，按「產生快顯分析」或「產生完整分析」。")
+
+    if not run_quick and not run_full:
+        st.stop()
+
     base_df = _get_state_df()
     if base_df.empty:
         base_df = pd.DataFrame()
 
-    pred_date_text = pd.to_datetime(active_pred_date).strftime("%Y-%m-%d")
-    if zero_wait_mode:
-        pred_df, ctx = _predict_all_models_instant(pred_date_text, base_df)
-        st.caption("⚡ 零等待模式：不等待外部 API，先用本機收盤快取 / 安全預設顯示。需要即時大盤請按「更新即時大盤」。")
+    if run_full:
+        with st.spinner("正在產生完整大盤趨勢分析，會讀取較多外部資料，可能較久..."):
+            pred_df, ctx = _predict_all_models(pred_date_text, base_df)
     else:
-        with st.spinner("正在產生大盤趨勢分析，快顯模式會優先顯示必要結果..."):
-            if quick_mode:
-                pred_df, ctx = _predict_all_models_quick(pred_date_text, base_df)
-            else:
-                pred_df, ctx = _predict_all_models(pred_date_text, base_df)
-        if quick_mode:
-            st.caption("⚡ 目前使用快顯模式：優先載入必要大盤結果；如需完整法人、期權、新聞端點，請關閉快顯模式後重新整理。")
-    taiex_live = ctx.get("taiex_now") if isinstance(ctx, dict) else {}
-    if isinstance(taiex_live, dict) and taiex_live.get("close") is not None:
-        live_label = "盤中即時" if taiex_live.get("is_realtime") else "收盤紀錄"
-        live_delta = f"{_safe_float(taiex_live.get('pct'), 0):+.2f}%" if taiex_live.get("pct") is not None else _safe_str(taiex_live.get("source"))
-        render_pro_kpi_row([
-            {"label": f"目前大盤｜{live_label}", "value": f"{_safe_float(taiex_live.get('close'), 0):,.2f}", "delta": live_delta, "delta_class": "pro-kpi-delta-up" if _safe_float(taiex_live.get("pct"), 0) >= 0 else "pro-kpi-delta-down"},
-            {"label": "大盤資料來源", "value": _safe_str(taiex_live.get("source")), "delta": _safe_str(taiex_live.get("used_date")), "delta_class": "pro-kpi-delta-flat"},
-            {"label": "大盤資料型態", "value": live_label, "delta": "晚上自動讀收盤紀錄" if not taiex_live.get("is_realtime") else "盤中即時更新", "delta_class": "pro-kpi-delta-flat"},
-        ])
+        with st.spinner("正在產生快顯大盤趨勢分析..."):
+            pred_df, ctx = _predict_all_models_quick(pred_date_text, base_df)
+
     top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
     scoreboard = _build_scoreboard(base_df)
-
-    if _safe_str(ctx.get("market_data_date")) and _safe_str(ctx.get("market_data_date")) != pred_date_text:
-        st.warning(f"你選的是 {pred_date_text}，但加權最近可用交易資料是 {ctx.get('market_data_date')}，因此部分因子會以最近交易日回放。")
 
     render_pro_kpi_row([
         {"label": "推估日期", "value": pred_date_text, "delta": ctx.get("scenario", ""), "delta_class": "pro-kpi-delta-flat"},
@@ -2811,396 +2823,20 @@ def main():
         {"label": "預估點數", "value": f"{_safe_float(top_pick.get('預估漲跌點'), 0):.0f} 點", "delta": f"區間 { _safe_float(top_pick.get('預估低點'), 0):.0f} ~ { _safe_float(top_pick.get('預估高點'), 0):.0f}", "delta_class": "pro-kpi-delta-flat"},
     ])
 
-
-    render_pro_section("投顧級大盤參考依據｜可否拿來輔助股神推薦")
-    ref_pack = _build_macro_reference_pack(ctx, _safe_float(top_pick.get("股神模式分數"), 0) or 0, _safe_str(top_pick.get("風險等級")))
-    render_pro_kpi_row([
-        {"label": "大盤可參考分數", "value": f"{_safe_float(ref_pack.get('大盤可參考分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("大盤參考等級")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "市場廣度", "value": f"{_safe_float(ref_pack.get('市場廣度分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("市場廣度摘要"))[:28], "delta_class": "pro-kpi-delta-flat"},
-        {"label": "量價確認", "value": f"{_safe_float(ref_pack.get('量價確認分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("量價確認摘要")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "權值支撐", "value": f"{_safe_float(ref_pack.get('權值支撐分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("權值支撐摘要"))[:28], "delta_class": "pro-kpi-delta-flat"},
-        {"label": "推薦同步", "value": f"{_safe_float(ref_pack.get('推薦同步分數'), 0):.1f}", "delta": _safe_str(ref_pack.get("推薦同步摘要"))[:28], "delta_class": "pro-kpi-delta-flat"},
-    ])
-
-    c_ref1, c_ref2 = st.columns([1.2, 1.2])
-    with c_ref1:
-        render_pro_info_card(
-            "大盤作為推薦依據的結論",
-            [
-                ("參考等級", _safe_str(ref_pack.get("大盤參考等級")), ""),
-                ("推薦加權建議", _safe_str(ref_pack.get("推薦加權建議")), ""),
-                ("今日適合操作風格", _safe_str(ref_pack.get("今日適合操作風格")), ""),
-                ("降權原因", _safe_str(ref_pack.get("推薦降權原因")), ""),
-            ],
-            chips=["投顧參考", "推薦權重", "風控"],
-        )
-    with c_ref2:
-        render_pro_info_card(
-            "市場品質摘要",
-            [
-                ("市場廣度", _safe_str(ref_pack.get("市場廣度摘要")), ""),
-                ("量價確認", _safe_str(ref_pack.get("量價確認摘要")), ""),
-                ("權值股", _safe_str(ref_pack.get("權值支撐摘要")), ""),
-                ("推薦同步", _safe_str(ref_pack.get("推薦同步摘要")), ""),
-                ("資料完整度", f"{_safe_float(ref_pack.get('資料完整度分'), 0):.1f}｜{_safe_str(ref_pack.get('資料完整度摘要'))}", ""),
-            ],
-            chips=["廣度", "量價", "權值", "推薦"],
-        )
-
-    with st.expander("權值股支撐明細", expanded=False):
-        heavy_df = pd.DataFrame(ref_pack.get("權值股明細", []))
-        if heavy_df.empty:
-            st.info("目前權值股明細不足。")
-        else:
-            show_cols = [c for c in ["股票代號", "股票名稱", "price", "pct", "ma20", "權值支撐估分", "source"] if c in heavy_df.columns]
-            st.dataframe(heavy_df[show_cols], use_container_width=True, hide_index=True)
-
-
-    render_pro_section("華爾街決策儀表板｜Regime / 風險 / 劇本")
-    render_pro_kpi_row([
-        {"label": "風險分桶", "value": _safe_str(top_pick.get("總體風險分桶")) or "-", "delta": _safe_str(top_pick.get("風險等級")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "進攻防守", "value": _safe_str(top_pick.get("進攻防守 regime")) or "-", "delta": _safe_str(top_pick.get("建議動作")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "資金流", "value": _safe_str(top_pick.get("資金流向判斷"))[:22] or "-", "delta": _safe_str(ctx.get("sector_strong")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "倉位上限", "value": f"{_safe_float(top_pick.get('倉位上限%'), 0):.0f}%", "delta": _safe_str(top_pick.get("建議倉位")), "delta_class": "pro-kpi-delta-flat"},
-        {"label": "模型一致性", "value": f"{_safe_float(top_pick.get('模型一致性分數'), 0):.0f}%", "delta": _safe_str(top_pick.get("模型分歧警示")), "delta_class": "pro-kpi-delta-flat"},
-    ])
-
-    wall_a, wall_b = st.columns([1.25, 1.25])
-    with wall_a:
-        render_pro_info_card(
-            "隔日交易劇本",
-            [
-                ("隔日劇本", _safe_str(top_pick.get("隔日劇本")), ""),
-                ("盤中確認訊號", _safe_str(top_pick.get("盤中確認訊號")), ""),
-                ("ETF參考動作", _safe_str(top_pick.get("ETF參考動作")), ""),
-            ],
-            chips=["劇本", "盤中確認", "ETF"],
-        )
-    with wall_b:
-        render_pro_info_card(
-            "個股與倉位總則",
-            [
-                ("個股操作總則", _safe_str(top_pick.get("個股操作總則")), ""),
-                ("模型分歧警示", _safe_str(top_pick.get("模型分歧警示")), ""),
-                ("資金流向判斷", _safe_str(top_pick.get("資金流向判斷")), ""),
-            ],
-            chips=["個股", "倉位", "風控"],
-        )
-
-    factor_cols = st.columns(4)
-    with factor_cols[0]:
-        st.metric("外資買賣超(億)", ("-" if ctx.get("foreign_amt") is None else f"{ctx.get('foreign_amt'):.1f}"), delta=f"三大法人 {0 if ctx.get('total3_amt') is None else ctx.get('total3_amt'):.1f} ｜ {(_safe_str(ctx.get('inst_used_date')) or '估算')}")
-    with factor_cols[1]:
-        st.metric("PCR", "-" if ctx.get("pcr") is None else f"{ctx.get('pcr'):.2f}", delta=((f"期貨估分 {pred_df.iloc[0]['期貨選擇權估分']:.1f} ｜ " if not pred_df.empty else "") + (_safe_str(ctx.get('futopt_used_date')) or '估算')))
-    with factor_cols[2]:
-        st.metric("融資增減(億)", "-" if ctx.get("margin_change") is None else f"{ctx.get('margin_change'):.2f}", delta=f"融券 {0 if ctx.get('short_change') is None else ctx.get('short_change'):.0f} ｜ {(_safe_str(ctx.get('margin_used_date')) or '估算')}")
-    with factor_cols[3]:
-        st.metric("因子來源", ctx.get("source_status", "fallback"))
-
-    with st.expander("查看每個因子的實際取樣日期 / 來源", expanded=False):
-        transparent_rows = pd.DataFrame([
-            {"因子": "加權指數", "實際取樣日期": _safe_str(ctx.get("twii_date")) or "fallback", "來源": "stooq", "值": f"{_safe_float(ctx.get('tw_close'), 0):.2f} / {_safe_float(ctx.get('tw_pct'), 0):.2f}%"},
-            {"因子": "美股 / ADR", "實際取樣日期": _safe_str(ctx.get("us_data_date")) or "fallback", "來源": "stooq", "值": f"NASDAQ {_safe_float(ctx.get('nas', {}).get('pct'), 0):.2f}% / SOX {_safe_float(ctx.get('sox', {}).get('pct'), 0):.2f}% / ADR {_safe_float(ctx.get('adr', {}).get('pct'), 0):.2f}%"},
-            {"因子": "夜盤", "實際取樣日期": _safe_str(ctx.get("night_data_date")) or "fallback", "來源": "stooq", "值": f"ES {_safe_float(ctx.get('es', {}).get('pct'), 0):.2f}% / NQ {_safe_float(ctx.get('nq', {}).get('pct'), 0):.2f}%"},
-            {"因子": "法人", "實際取樣日期": _safe_str(ctx.get("inst_used_date")) or "fallback", "來源": "twse / fallback", "值": (f"外資 {ctx.get('foreign_amt'):.1f}億 / 三大法人 {ctx.get('total3_amt'):.1f}億" if ctx.get('foreign_amt') is not None and ctx.get('total3_amt') is not None else f"外資 {'-' if ctx.get('foreign_amt') is None else f'{ctx.get('foreign_amt'):.1f}億'} / 三大法人 {'-' if ctx.get('total3_amt') is None else f'{ctx.get('total3_amt'):.1f}億'}")},
-            {"因子": "期權", "實際取樣日期": _safe_str(ctx.get("futopt_used_date")) or "fallback", "來源": "taifex / fallback", "值": f"PCR {'-' if ctx.get('pcr') is None else f'{ctx.get('pcr'):.2f}'}"},
-            {"因子": "融資券", "實際取樣日期": _safe_str(ctx.get("margin_used_date")) or "fallback", "來源": "twse / fallback", "值": f"融資 {'-' if ctx.get('margin_change') is None else f'{ctx.get('margin_change'):.2f}億'} / 融券 {'-' if ctx.get('short_change') is None else f'{ctx.get('short_change'):.0f}張'}"},
-            {"因子": "新聞", "實際取樣日期": _safe_str(ctx.get("news_range")) or "fallback", "來源": "news search", "值": _safe_str(ctx.get("main_risk")) or "無"},
-        ])
-        st.dataframe(transparent_rows, use_container_width=True, hide_index=True)
-        st.caption("說明：如果你選的日期不是交易日，或當日官方資料尚未公布，系統會自動往前回找最近可用日期。")
-
-
-    a1, a2 = st.columns([1.4, 1.2])
-    with a1:
-        render_pro_section("股神模式結論")
-        chip_text = " ｜ ".join([x for x in [_safe_str(top_pick.get("模式名稱")), _safe_str(top_pick.get("市場情境")), _safe_str(top_pick.get("方向強度"))] if x])
-        if chip_text:
-            st.caption(chip_text)
-        g1, g2, g3, g4 = st.columns(4)
-        with g1:
-            st.metric("建議動作", _safe_str(top_pick.get("建議動作")) or "-", _safe_str(top_pick.get("建議倉位")) or None)
-        with g2:
-            st.metric("是否適合進場", _safe_str(top_pick.get("是否適合進場")) or "-", _safe_str(top_pick.get("是否適合續抱")) or None)
-        with g3:
-            st.metric("是否適合減碼/出場", f"{_safe_str(top_pick.get('是否適合減碼')) or '-'} / {_safe_str(top_pick.get('是否適合出場')) or '-'}", _safe_str(top_pick.get("風險等級")) or None)
-        with g4:
-            st.metric("主要風險", _safe_str(top_pick.get("主要風險")) or "-")
-        st.text_area("股神推論邏輯", value=_safe_str(top_pick.get("股神推論邏輯")), height=180, disabled=True)
-        st.text_area("進場確認條件", value=_safe_str(top_pick.get("進場確認條件")), height=95, disabled=True)
-        st.text_area("出場警訊", value=_safe_str(top_pick.get("出場警訊")), height=95, disabled=True)
-    with a2:
-        render_pro_section("本次模式比較")
+    render_pro_section("大盤模式推估結果")
+    if pred_df is not None and not pred_df.empty:
         show_cols = [
-            "模式名稱", "推估方向", "方向強度", "建議動作", "股神模式分數", "股神信心度",
-            "預估漲跌點", "風險等級", "大盤參考等級", "大盤可參考分數", "今日適合操作風格",
-            "總體風險分桶", "進攻防守 regime", "倉位上限%",
-            "市場廣度分數", "類股輪動分數", "量價確認分數", "權值支撐分數", "推薦同步分數",
-            "技術面因子分", "美股因子分", "夜盤因子分",
-            "籌碼面因子分", "事件因子分", "國際新聞風險分",
+            "模式名稱", "推估方向", "建議動作", "股神模式分數", "股神信心度",
+            "預估漲跌點", "預估低點", "預估高點", "風險等級", "推估理由"
         ]
-        st.dataframe(_format_pred_df(pred_df[show_cols]), use_container_width=True, hide_index=True)
-        with st.expander("查看 Pro 因子細節", expanded=False):
-            st.write(f"**強勢族群**：{ctx.get('sector_strong','')}  ")
-            st.write(f"**弱勢族群**：{ctx.get('sector_weak','')}  ")
-            st.write(f"**重大事件清單**：{ctx.get('event_list','')}  ")
-            st.write(f"**因子來源狀態**：{ctx.get('source_status','')}  ")
+        st.dataframe(pred_df[[c for c in show_cols if c in pred_df.columns]], use_container_width=True, hide_index=True)
+    else:
+        st.warning("目前沒有產生推估結果。")
 
-
-    stock_link_df = _build_stock_linkage_df(top_pick, ctx, bool(st.session_state.get(_k("use_watchlist"), True)), _safe_str(st.session_state.get(_k("custom_stock_text"), "")))
-
-    tabs = st.tabs(["🎯 個股連動", "📌 儲存推估", "🧪 回填實際結果", "🏆 模式排行榜", "📚 歷史紀錄", "📤 Excel匯出"])
-
-    with tabs[0]:
-        render_pro_section("個股連動｜真正式籌碼 + 大盤風險同步")
-        left_link, right_link = st.columns([1.1, 1.4])
-        with left_link:
-            st.toggle("納入 4_自選股中心 watchlist", value=True, key=_k("use_watchlist"))
-            st.text_area("自訂股票（每行：代號,名稱,市場）", value="", height=120, key=_k("custom_stock_text"), placeholder="2330,台積電,上市\n2454,聯發科,上市")
-            st.caption("邏輯：先用本頁最佳模式判斷大盤，再疊加個股技術分，輸出買進 / 觀望 / 減碼建議。")
-        with right_link:
-            if stock_link_df.empty:
-                st.info("目前沒有可連動的股票。可開啟 watchlist 或輸入自訂股票。")
-            else:
-                k1, k2, k3 = st.columns(3)
-                with k1:
-                    st.metric("可買進", int(stock_link_df[stock_link_df["建議動作"].isin(["可分批買進", "小倉試單", "條件式低接"])].shape[0]))
-                with k2:
-                    st.metric("觀望/續抱", int(stock_link_df[stock_link_df["建議動作"].isin(["觀望", "續抱不加碼", "不追高，等拉回"])].shape[0]))
-                with k3:
-                    st.metric("減碼/出場", int(stock_link_df[stock_link_df["建議動作"].isin(["減碼觀望", "賣出/減碼", "減碼/出場"])].shape[0]))
-        if not stock_link_df.empty:
-            st.dataframe(stock_link_df, use_container_width=True, hide_index=True)
-
-    with tabs[1]:
-        render_pro_section("儲存本次推估")
-        st.caption("會將 5 套模式一起存入紀錄檔，後續可比較哪一套最近最準。")
-        c1, c2 = st.columns([1.2, 4])
-        with c1:
-            if st.button("💾 儲存本次推估", use_container_width=True, type="primary"):
-                merged = _upsert_predictions(base_df, pred_df)
-                _save_state_df(merged)
-                if auto_save:
-                    ok, msg = _write_records_to_github(merged)
-                    _set_status(msg, "success" if ok else "error")
-                else:
-                    _set_status("已存入本頁狀態，尚未同步 GitHub", "success")
-                st.rerun()
-        with c2:
-            if st.button("☁️ 立即同步 GitHub", use_container_width=True):
-                merged = _upsert_predictions(_get_state_df(), pred_df)
-                _save_state_df(merged)
-                ok, msg = _write_records_to_github(merged)
-                _set_status(msg, "success" if ok else "error")
-                st.rerun()
-        preview_cols = [
-            "推估日期", "模式名稱", "推估方向", "方向強度", "是否適合進場", "是否適合續抱", "是否適合減碼", "是否適合出場",
-            "建議動作", "建議倉位", "股神模式分數", "股神信心度", "預估漲跌點", "預估高點", "預估低點", "風險等級",
-            "大盤參考等級", "大盤可參考分數", "推薦加權建議", "今日適合操作風格",
-            "市場廣度分數", "量價確認分數", "權值支撐分數", "推薦同步分數",
-            "總體風險分桶", "進攻防守 regime", "資金流向判斷", "倉位上限%", "隔日劇本", "盤中確認訊號",
-            "主要風險", "加權資料日期", "美股資料日期", "夜盤資料日期", "法人資料日期", "期權資料日期", "融資券資料日期", "進場確認條件", "出場警訊"
-        ]
-        st.dataframe(_format_pred_df(pred_df[[c for c in preview_cols if c in pred_df.columns]]), use_container_width=True, hide_index=True)
-
-    with tabs[2]:
-        render_pro_section("回填實際結果 / 追蹤準確率")
-        hist_df = _get_state_df()
-        fill_date = st.selectbox("選擇要回填的日期", options=sorted(hist_df["推估日期"].dropna().astype(str).unique().tolist(), reverse=True) if not hist_df.empty else [pred_date_text], key=_k("fill_date"))
-        current_fill = hist_df[hist_df["推估日期"].astype(str) == str(fill_date)].copy() if not hist_df.empty else pd.DataFrame()
-        if current_fill.empty:
-            st.info("目前這個日期還沒有儲存推估。")
-        else:
-            edit_df = current_fill[[
-                "record_id", "模式名稱", "推估方向", "是否適合進場", "建議動作", "建議倉位", "預估漲跌點", "預估高點", "預估低點",
-                "實際方向", "實際漲跌點", "實際高點", "實際低點", "建議動作是否合適", "進場建議績效分", "出場建議績效分", "整體檢討分", "誤判主因類別", "誤判主因", "收盤檢討", "備註"
-            ]].copy()
-            edited = st.data_editor(
-                edit_df,
-                use_container_width=True,
-                hide_index=True,
-                key=_k("actual_editor"),
-                column_config={
-                    "record_id": st.column_config.TextColumn("record_id", disabled=True),
-                    "模式名稱": st.column_config.TextColumn("模式名稱", disabled=True),
-                    "推估方向": st.column_config.TextColumn("推估方向", disabled=True),
-                    "是否適合進場": st.column_config.TextColumn("是否適合進場", disabled=True),
-                    "建議動作": st.column_config.TextColumn("建議動作", disabled=True),
-                    "建議倉位": st.column_config.TextColumn("建議倉位", disabled=True),
-                    "預估漲跌點": st.column_config.NumberColumn("預估漲跌點", disabled=True, format="%.1f"),
-                    "預估高點": st.column_config.NumberColumn("預估高點", disabled=True, format="%.1f"),
-                    "預估低點": st.column_config.NumberColumn("預估低點", disabled=True, format="%.1f"),
-                    "實際方向": st.column_config.SelectboxColumn("實際方向", options=[""] + DIRECTION_OPTIONS),
-                    "實際漲跌點": st.column_config.NumberColumn("實際漲跌點", format="%.1f"),
-                    "實際高點": st.column_config.NumberColumn("實際高點", format="%.1f"),
-                    "實際低點": st.column_config.NumberColumn("實際低點", format="%.1f"),
-                    "建議動作是否合適": st.column_config.CheckboxColumn("建議動作是否合適"),
-                    "進場建議績效分": st.column_config.NumberColumn("進場建議績效分", format="%.1f", disabled=True),
-                    "出場建議績效分": st.column_config.NumberColumn("出場建議績效分", format="%.1f", disabled=True),
-                    "整體檢討分": st.column_config.NumberColumn("整體檢討分", format="%.1f", disabled=True),
-                    "誤判主因類別": st.column_config.SelectboxColumn("誤判主因類別", options=ERROR_CAUSES),
-                    "誤判主因": st.column_config.TextColumn("誤判主因", width="large"),
-                    "收盤檢討": st.column_config.TextColumn("收盤檢討", width="large"),
-                    "備註": st.column_config.TextColumn("備註", width="large"),
-                },
-            )
-            if st.button("✅ 套用回填結果", use_container_width=True):
-                master = hist_df.copy()
-                edit_map = {str(r["record_id"]): dict(r) for _, r in edited.iterrows()}
-                for idx in master.index:
-                    rec_id = _safe_str(master.at[idx, "record_id"])
-                    if rec_id not in edit_map:
-                        continue
-                    src = edit_map[rec_id]
-                    for c in ["實際方向", "實際漲跌點", "實際高點", "實際低點", "建議動作是否合適", "誤判主因類別", "誤判主因", "收盤檢討", "備註"]:
-                        master.at[idx, c] = src.get(c)
-                    applied = _apply_actual_result(master.loc[idx].to_dict())
-                    for k2, v2 in applied.items():
-                        if k2 in master.columns:
-                            master.at[idx, k2] = v2
-                _save_state_df(master)
-                if auto_save:
-                    ok, msg = _write_records_to_github(master)
-                    _set_status(msg, "success" if ok else "error")
-                else:
-                    _set_status("已套用回填結果，尚未同步 GitHub", "success")
-                st.rerun()
-
-    with tabs[3]:
-        render_pro_section("模式排行榜 / 自我修正參考")
-        scoreboard = _build_scoreboard(_get_state_df())
-        if scoreboard.empty:
-            st.info("尚未累積足夠回填結果，排行榜還沒有資料。")
-        else:
-            st.dataframe(scoreboard, use_container_width=True, hide_index=True)
-            best = scoreboard.iloc[0]
-            st.success(f"目前最近最強模式：{best['模式名稱']}｜方向命中率 {best['方向命中率']:.1f}%｜平均點數誤差 {best['平均點數誤差'] if not pd.isna(best['平均點數誤差']) else 0:.1f}")
-
-    with tabs[4]:
-        render_pro_section("歷史紀錄")
-        hist = _get_state_df().copy()
-        if hist.empty:
-            st.info("目前沒有歷史紀錄。")
-        else:
-            left, right, right2, right3 = st.columns([1.1, 1.1, 1.5, 1.2])
-            with left:
-                mode_filter = st.selectbox("模式篩選", ["全部"] + MODEL_NAMES, key=_k("hist_mode_filter"))
-            with right:
-                dir_filter = st.selectbox("方向篩選", ["全部"] + DIRECTION_OPTIONS, key=_k("hist_dir_filter"))
-            with right2:
-                kw = st.text_input("搜尋日期 / 檢討 / 風險 / 備註", value="", key=_k("hist_kw"))
-            with right3:
-                review_filter = st.selectbox("進場建議", ["全部", "適合", "不適合"], key=_k("hist_action_fit"))
-            if mode_filter != "全部":
-                hist = hist[hist["模式名稱"].astype(str) == mode_filter].copy()
-            if dir_filter != "全部":
-                hist = hist[hist["推估方向"].astype(str) == dir_filter].copy()
-            if review_filter == "適合":
-                hist = hist[hist["建議動作是否合適"].fillna(False) == True].copy()
-            elif review_filter == "不適合":
-                hist = hist[hist["建議動作是否合適"].fillna(False) == False].copy()
-            if kw:
-                mask = (
-                    hist["推估日期"].astype(str).str.contains(kw, case=False, na=False)
-                    | hist["收盤檢討"].astype(str).str.contains(kw, case=False, na=False)
-                    | hist["主要風險"].astype(str).str.contains(kw, case=False, na=False)
-                    | hist["備註"].astype(str).str.contains(kw, case=False, na=False)
-                    | hist["進場確認條件"].astype(str).str.contains(kw, case=False, na=False)
-                )
-                hist = hist[mask].copy()
-            hist = hist.sort_values(["推估日期", "模式名稱"], ascending=[False, True])
-
-            summary = _build_review_summary(hist)
-            s1, s2, s3, s4, s5 = st.columns(5)
-            with s1:
-                st.metric("樣本數", summary["樣本數"])
-            with s2:
-                st.metric("進場建議適合率", f"{summary['進場適合率']:.1f}%")
-            with s3:
-                st.metric("方向命中率", f"{summary['方向命中率']:.1f}%")
-            with s4:
-                st.metric("區間命中率", f"{summary['區間命中率']:.1f}%")
-            with s5:
-                st.metric("平均檢討分", "-" if pd.isna(summary['平均檢討分']) else f"{summary['平均檢討分']:.1f}")
-
-            edit_hist = hist[[c for c in [
-                "record_id", "推估日期", "模式名稱", "推估方向", "是否適合進場", "建議動作", "建議倉位", "大盤參考等級", "大盤可參考分數", "今日適合操作風格", "股神模式分數", "股神信心度",
-                "預估漲跌點", "實際方向", "實際漲跌點", "方向是否命中", "區間是否命中", "點數誤差", "建議動作是否合適",
-                "進場建議績效分", "出場建議績效分", "整體檢討分", "主要風險", "進場確認條件", "出場警訊", "收盤檢討", "備註"
-            ] if c in hist.columns]].copy()
-            edit_hist.insert(0, "刪除", False)
-            edited_hist = st.data_editor(
-                edit_hist,
-                use_container_width=True,
-                hide_index=True,
-                key=_k("hist_editor"),
-                column_config={
-                    "刪除": st.column_config.CheckboxColumn("刪除"),
-                    "record_id": st.column_config.TextColumn("record_id", disabled=True),
-                    "推估日期": st.column_config.TextColumn("推估日期", disabled=True),
-                    "模式名稱": st.column_config.TextColumn("模式名稱", disabled=True),
-                    "推估方向": st.column_config.TextColumn("推估方向", disabled=True),
-                    "是否適合進場": st.column_config.TextColumn("是否適合進場", disabled=True),
-                    "建議動作": st.column_config.TextColumn("建議動作", disabled=True),
-                    "建議倉位": st.column_config.TextColumn("建議倉位", disabled=True),
-                    "股神模式分數": st.column_config.NumberColumn("股神模式分數", format="%.2f", disabled=True),
-                    "股神信心度": st.column_config.NumberColumn("股神信心度", format="%.2f", disabled=True),
-                    "預估漲跌點": st.column_config.NumberColumn("預估漲跌點", format="%.1f", disabled=True),
-                    "實際方向": st.column_config.TextColumn("實際方向", disabled=True),
-                    "實際漲跌點": st.column_config.NumberColumn("實際漲跌點", format="%.1f", disabled=True),
-                    "方向是否命中": st.column_config.CheckboxColumn("方向是否命中", disabled=True),
-                    "區間是否命中": st.column_config.CheckboxColumn("區間是否命中", disabled=True),
-                    "點數誤差": st.column_config.NumberColumn("點數誤差", format="%.1f", disabled=True),
-                    "建議動作是否合適": st.column_config.CheckboxColumn("建議動作是否合適", disabled=True),
-                    "進場建議績效分": st.column_config.NumberColumn("進場建議績效分", format="%.1f", disabled=True),
-                    "出場建議績效分": st.column_config.NumberColumn("出場建議績效分", format="%.1f", disabled=True),
-                    "整體檢討分": st.column_config.NumberColumn("整體檢討分", format="%.1f", disabled=True),
-                    "主要風險": st.column_config.TextColumn("主要風險", disabled=True),
-                    "進場確認條件": st.column_config.TextColumn("進場確認條件", width="large", disabled=True),
-                    "出場警訊": st.column_config.TextColumn("出場警訊", width="large", disabled=True),
-                    "收盤檢討": st.column_config.TextColumn("收盤檢討", width="large"),
-                    "備註": st.column_config.TextColumn("備註", width="large"),
-                },
-            )
-            a1, a2, a3 = st.columns([1.2, 1.2, 3])
-            with a1:
-                if st.button("🗑️ 刪除勾選紀錄", use_container_width=True):
-                    delete_ids = edited_hist.loc[edited_hist["刪除"] == True, "record_id"].astype(str).tolist()
-                    if not delete_ids:
-                        st.warning("請先勾選要刪除的紀錄。")
-                    else:
-                        new_df = _delete_records_by_ids(_get_state_df(), delete_ids)
-                        _save_state_df(new_df)
-                        ok, msg = _write_records_to_github(new_df)
-                        _set_status((f"已刪除 {len(delete_ids)} 筆歷史紀錄｜" + msg) if ok else (f"已刪除 {len(delete_ids)} 筆，但 GitHub 同步失敗｜" + msg), "success" if ok else "warning")
-                        st.rerun()
-            with a2:
-                if st.button("💾 儲存歷史檢討", use_container_width=True):
-                    master = _get_state_df().copy()
-                    edit_map = {str(r["record_id"]): dict(r) for _, r in edited_hist.iterrows()}
-                    for idx in master.index:
-                        rec_id = _safe_str(master.at[idx, "record_id"])
-                        if rec_id in edit_map:
-                            master.at[idx, "收盤檢討"] = _safe_str(edit_map[rec_id].get("收盤檢討"))
-                            master.at[idx, "備註"] = _safe_str(edit_map[rec_id].get("備註"))
-                            master.at[idx, "更新時間"] = _now_text()
-                    _save_state_df(master)
-                    ok, msg = _write_records_to_github(master)
-                    _set_status(("歷史檢討已更新｜" + msg) if ok else ("歷史檢討已更新，但 GitHub 同步失敗｜" + msg), "success" if ok else "warning")
-                    st.rerun()
-            with a3:
-                st.caption("現在歷史紀錄已包含：進場建議、續抱/減碼方向、績效檢討分、方向命中、區間命中、點數誤差，可直接用來檢討模型。")
-    with tabs[5]:
-        render_pro_section("Excel 匯出")
-        export_bytes = _build_export_bytes(_get_state_df(), _build_scoreboard(_get_state_df()), pred_df, stock_link_df)
-        st.download_button(
-            "📥 下載 Excel（歷史紀錄 / 模式排行榜 / 本次推估）",
-            data=export_bytes,
-            file_name=f"大盤走勢_股神Pro_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-
+    render_pro_section("資料來源明細")
+    st.write(_safe_str(ctx.get("source_status", "")))
+    with st.expander("完整 ctx 除錯資料", expanded=False):
+        st.json({k: v for k, v in ctx.items() if k not in {"news_rows"}})
 
 if __name__ == "__main__":
     main()
