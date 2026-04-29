@@ -3327,10 +3327,59 @@ def _v294_start_all_background(target_date: date):
 
 
 
-# ===== v31.0 串接強化：補齊 7_股神推薦可直接讀取欄位 =====
-def _v31_calc_volume_status(row: dict[str, Any], otc: dict[str, Any], tx: dict[str, Any]) -> str:
+
+# ===== v32.0 股神推薦風控輸出完成版：資料鮮度 / 風控閘門 / 紀錄檔 / 串接按鈕同步 =====
+MARKET_TREND_RECORDS_FILE = "macro_trend_records.json"
+
+
+def _v32_parse_any_date(v: Any):
+    try:
+        if v is None:
+            return None
+        s = _safe_str(v)
+        if not s:
+            return None
+        # 支援 20260429 / 2026-04-29 / 2026/04/29
+        if s.isdigit() and len(s) == 8:
+            return datetime.strptime(s, "%Y%m%d").date()
+        dt = pd.to_datetime(s, errors="coerce")
+        if pd.isna(dt):
+            return None
+        return dt.date()
+    except Exception:
+        return None
+
+
+def _v32_age_days(v: Any) -> int | None:
+    d = _v32_parse_any_date(v)
+    if d is None:
+        return None
+    return max(0, (_tw_now().date() - d).days)
+
+
+def _v32_freshness_label(v: Any) -> str:
+    age = _v32_age_days(v)
+    if age is None:
+        return "無日期"
+    if age <= 1:
+        return "新鮮"
+    if age <= 3:
+        return "可用"
+    if age <= 7:
+        return "偏舊"
+    return "過舊"
+
+
+def _v32_calc_volume_status(row: dict[str, Any], otc: dict[str, Any], tx: dict[str, Any], mtx: dict[str, Any]) -> str:
     vals = []
-    for obj, keys in [(row, ["volume", "total_volume", "成交量"]), (otc, ["volume", "total_volume"]), (tx, ["tx_volume", "volume"])]:
+    for obj, keys in [
+        (row, ["volume", "total_volume", "成交量", "market_volume"]),
+        (otc, ["volume", "total_volume", "成交量"]),
+        (tx, ["tx_volume", "volume", "成交量"]),
+        (mtx, ["mtx_volume", "volume", "成交量"]),
+    ]:
+        if not isinstance(obj, dict):
+            continue
         for k in keys:
             try:
                 v = _safe_float(obj.get(k))
@@ -3341,61 +3390,347 @@ def _v31_calc_volume_status(row: dict[str, Any], otc: dict[str, Any], tx: dict[s
                 pass
     if not vals:
         return "量能資料不足"
-    return "量能可用"
+    if len(vals) >= 2:
+        return "量能資料可用"
+    return "量能部分可用"
+
+
+def _v32_score_freshness_adjust(snapshot: dict[str, Any]) -> tuple[float, list[str]]:
+    score = _safe_float(snapshot.get("market_score"), 50) or 50
+    notes: list[str] = []
+
+    date_fields = [
+        ("加權", snapshot.get("twse_data_date")),
+        ("櫃買", snapshot.get("otc_data_date")),
+        ("台指期", snapshot.get("futures_data_date")),
+        ("小台期", snapshot.get("mini_futures_data_date")),
+    ]
+    stale_count = 0
+    missing_count = 0
+    for name, d in date_fields:
+        age = _v32_age_days(d)
+        if age is None:
+            missing_count += 1
+            notes.append(f"{name}缺日期")
+        elif age > 7:
+            stale_count += 1
+            notes.append(f"{name}資料過舊{age}天")
+        elif age > 3:
+            stale_count += 1
+            notes.append(f"{name}資料偏舊{age}天")
+
+    if stale_count >= 2:
+        score -= 12
+    elif stale_count == 1:
+        score -= 5
+
+    if missing_count >= 2:
+        score -= 8
+    elif missing_count == 1:
+        score -= 3
+
+    # 期貨明顯轉弱時直接壓低風險分數，避免推薦頁追高。
+    fut_pct = _safe_float(snapshot.get("futures_change_pct"))
+    if fut_pct is not None and fut_pct <= -1.0:
+        score -= 8
+        notes.append("台指期跌幅超過1%，推薦需保守")
+
+    otc_pct = _safe_float(snapshot.get("otc_change_pct"))
+    twse_pct = _safe_float(snapshot.get("twse_change_pct"))
+    if otc_pct is not None and twse_pct is not None:
+        spread = otc_pct - twse_pct
+        if spread >= 0.5:
+            notes.append("櫃買強於加權，中小型股相對有利")
+        elif spread <= -0.5:
+            score -= 4
+            notes.append("櫃買弱於加權，中小型股篩選需提高門檻")
+
+    return round(max(0, min(100, score)), 1), notes
+
+
+def _v32_risk_gate_from_score(score: float, source_health: dict[str, Any] | None = None) -> str:
+    success = 0
+    failed = 0
+    if isinstance(source_health, dict):
+        success = int(_safe_float(source_health.get("success"), 0) or 0)
+        failed = int(_safe_float(source_health.get("failed"), 0) or 0)
+
+    if failed >= 3 or success <= 1:
+        return "data_guard"
+    if score >= 65:
+        return "normal"
+    if score >= 45:
+        return "selective"
+    return "conservative"
+
+
+def _v32_position_hint(gate: str, score: float) -> str:
+    if gate == "normal":
+        return "可正常篩選；仍需避開過熱追高。"
+    if gate == "selective":
+        return "只挑低位階剛起漲、量價轉強股。"
+    if gate == "data_guard":
+        return "資料不足，推薦頁應降低大盤因子權重，避免誤判。"
+    return "保守控倉，降低追價與高風險股票分數。"
+
+
+def _v32_read_records() -> list[dict[str, Any]]:
+    try:
+        p = Path(MARKET_TREND_RECORDS_FILE)
+        if not p.exists():
+            return []
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict) and isinstance(data.get("records"), list):
+            return [x for x in data.get("records") if isinstance(x, dict)]
+    except Exception:
+        return []
+    return []
+
+
+def _v32_append_record(snapshot: dict[str, Any]) -> None:
+    try:
+        records = _v32_read_records()
+        item = {
+            "updated_at": snapshot.get("updated_at") or _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "market_score": snapshot.get("market_score"),
+            "market_trend": snapshot.get("market_trend"),
+            "market_risk_level": snapshot.get("market_risk_level"),
+            "risk_gate": snapshot.get("risk_gate"),
+            "twse_index": snapshot.get("twse_index"),
+            "twse_change": snapshot.get("twse_change"),
+            "twse_change_pct": snapshot.get("twse_change_pct"),
+            "otc_index": snapshot.get("otc_index"),
+            "otc_change": snapshot.get("otc_change"),
+            "otc_change_pct": snapshot.get("otc_change_pct"),
+            "futures_index": snapshot.get("futures_index"),
+            "futures_change": snapshot.get("futures_change"),
+            "futures_change_pct": snapshot.get("futures_change_pct"),
+            "data_quality": snapshot.get("data_quality"),
+            "version": snapshot.get("version"),
+        }
+        # 防止同一分鐘重複洗版
+        key = item.get("updated_at", "")[:16]
+        records = [r for r in records if _safe_str(r.get("updated_at"))[:16] != key]
+        records.insert(0, item)
+        records = records[:300]
+        Path(MARKET_TREND_RECORDS_FILE).write_text(json.dumps(records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
 
 _v30_build_market_snapshot_original = _build_market_snapshot_v30
+
 def _build_market_snapshot_v30(row: dict[str, Any]) -> dict[str, Any]:
+    """v32：保留 v30 原本欄位，再補齊推薦頁風控必讀欄位。"""
     snapshot = _v30_build_market_snapshot_original(row)
     try:
         bridge_date = pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce")
         bridge_date = bridge_date.date() if pd.notna(bridge_date) else date.today()
+
         otc = _default_otc_row(bridge_date)
         tx = _default_taifex_row(bridge_date)
-        snapshot["volume_status"] = _v31_calc_volume_status(row, otc, tx)
-        snapshot["market_reference_level"] = "可納入推薦" if _safe_float(snapshot.get("market_score"), 0) >= 45 else "僅作保守參考"
-        snapshot["recommendation_adjustment"] = _macro_bias_from_score(_safe_float(snapshot.get("market_score"), 50) or 50)
-        snapshot["risk_gate"] = "normal" if _safe_str(snapshot.get("market_risk_level")) in ["低", "中低", "中"] else "conservative"
-        snapshot["data_source_health"] = _v294_count_source_health() if "_v294_count_source_health" in globals() else {}
+        mtx = _default_taifex_row(bridge_date)
+
+        snapshot["volume_status"] = _v32_calc_volume_status(row, otc, tx, mtx)
+        source_health = _v294_count_source_health() if "_v294_count_source_health" in globals() else {}
+        snapshot["data_source_health"] = source_health
+
+        adjusted_score, guard_notes = _v32_score_freshness_adjust(snapshot)
+        snapshot["market_score_raw"] = snapshot.get("market_score")
+        snapshot["market_score"] = adjusted_score
+        trend, risk, comment = _v30_market_trend_from_score(adjusted_score)
+        snapshot["market_trend"] = trend
+        snapshot["market_risk_level"] = risk
+        snapshot["market_bias"] = _macro_bias_from_score(adjusted_score) if "_macro_bias_from_score" in globals() else comment
+        snapshot["recommendation_adjustment"] = snapshot["market_bias"]
+        snapshot["risk_gate"] = _v32_risk_gate_from_score(adjusted_score, source_health)
+        snapshot["position_hint"] = _v32_position_hint(snapshot["risk_gate"], adjusted_score)
+        snapshot["market_reference_level"] = "可納入推薦" if snapshot["risk_gate"] in ["normal", "selective"] else "僅作保守參考"
+        snapshot["data_guard_notes"] = guard_notes
+        snapshot["trend_comment"] = (snapshot.get("trend_comment") or comment) + ("｜" + "；".join(guard_notes) if guard_notes else "")
+
+        snapshot["freshness"] = {
+            "twse": _v32_freshness_label(snapshot.get("twse_data_date")),
+            "otc": _v32_freshness_label(snapshot.get("otc_data_date")),
+            "futures": _v32_freshness_label(snapshot.get("futures_data_date")),
+            "mini_futures": _v32_freshness_label(snapshot.get("mini_futures_data_date")),
+        }
+
         snapshot["required_by_godpick"] = {
             "market_score": snapshot.get("market_score"),
+            "market_score_raw": snapshot.get("market_score_raw"),
             "market_trend": snapshot.get("market_trend"),
             "market_risk_level": snapshot.get("market_risk_level"),
             "market_bias": snapshot.get("market_bias"),
+            "risk_gate": snapshot.get("risk_gate"),
+            "position_hint": snapshot.get("position_hint"),
             "twse_change": snapshot.get("twse_change"),
+            "twse_change_pct": snapshot.get("twse_change_pct"),
             "otc_change": snapshot.get("otc_change"),
+            "otc_change_pct": snapshot.get("otc_change_pct"),
             "futures_change": snapshot.get("futures_change"),
+            "futures_change_pct": snapshot.get("futures_change_pct"),
             "volume_status": snapshot.get("volume_status"),
             "trend_comment": snapshot.get("trend_comment"),
+            "data_quality": snapshot.get("data_quality"),
+            "freshness": snapshot.get("freshness"),
         }
-        snapshot["version"] = "v31.0_macro_trend_godpick_bridge"
+        snapshot["version"] = "v32.0_macro_trend_godpick_risk_gate"
     except Exception as e:
-        snapshot["v31_warning"] = str(e)
+        snapshot["v32_warning"] = str(e)
     return snapshot
 
-def _v31_render_godpick_bridge_summary(row: dict[str, Any]):
-    st.markdown("### 7_股神推薦串接摘要")
+
+def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
+    """v32：統一寫 market_snapshot、macro_mode_bridge、macro_trend_records。"""
+    snapshot = _build_market_snapshot_v30(row)
+    ok1 = _v30_write_json_dict(MARKET_SNAPSHOT_FILE, snapshot)
+
+    bridge = {
+        "updated_at": snapshot.get("updated_at") or _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version": snapshot.get("version"),
+        "market_score": snapshot.get("market_score"),
+        "market_score_raw": snapshot.get("market_score_raw"),
+        "market_trend": snapshot.get("market_trend"),
+        "market_risk_level": snapshot.get("market_risk_level"),
+        "market_bias": snapshot.get("market_bias"),
+        "risk_gate": snapshot.get("risk_gate"),
+        "position_hint": snapshot.get("position_hint"),
+        "recommendation_adjustment": snapshot.get("recommendation_adjustment"),
+        "volume_status": snapshot.get("volume_status"),
+        "trend_comment": snapshot.get("trend_comment"),
+        "required_by_godpick": snapshot.get("required_by_godpick"),
+        "data_source_health": snapshot.get("data_source_health"),
+        "data_quality": snapshot.get("data_quality"),
+        "freshness": snapshot.get("freshness"),
+        "twse_index": snapshot.get("twse_index"),
+        "twse_change": snapshot.get("twse_change"),
+        "twse_change_pct": snapshot.get("twse_change_pct"),
+        "otc_index": snapshot.get("otc_index"),
+        "otc_change": snapshot.get("otc_change"),
+        "otc_change_pct": snapshot.get("otc_change_pct"),
+        "futures_index": snapshot.get("futures_index"),
+        "futures_change": snapshot.get("futures_change"),
+        "futures_change_pct": snapshot.get("futures_change_pct"),
+        "mini_futures_index": snapshot.get("mini_futures_index"),
+        "mini_futures_change": snapshot.get("mini_futures_change"),
+        "mini_futures_change_pct": snapshot.get("mini_futures_change_pct"),
+    }
+    ok2 = _v30_write_json_dict(BRIDGE_FILE, bridge)
+    if ok1:
+        _v32_append_record(snapshot)
+    if ok1 and ok2:
+        return True, f"已同步寫入 {MARKET_SNAPSHOT_FILE}、{BRIDGE_FILE}、{MARKET_TREND_RECORDS_FILE}。"
+    if ok1:
+        return True, f"已寫入 {MARKET_SNAPSHOT_FILE}，但 {BRIDGE_FILE} 更新失敗。"
+    return False, f"{MARKET_SNAPSHOT_FILE} 寫入失敗。"
+
+
+# 讓舊按鈕「立即寫入股神橋接」也同步寫 market_snapshot，不再只寫舊橋接。
+def _write_macro_bridge(row: dict[str, Any]) -> tuple[bool, str]:
+    return _write_market_snapshot_v30(row)
+
+
+def _v294_write_bridge_with_quality(row: dict[str, Any]) -> tuple[bool, str]:
+    return _write_market_snapshot_v30(row)
+
+
+def _v32_render_godpick_bridge_summary(row: dict[str, Any]):
+    st.markdown("### 7_股神推薦串接摘要｜v32風控閘門")
     s = _build_market_snapshot_v30(row)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric("market_score", f"{_safe_float(s.get('market_score'), 50):.1f}")
     with c2:
-        st.metric("market_trend", _safe_str(s.get('market_trend')) or "—")
+        st.metric("market_trend", _safe_str(s.get("market_trend")) or "—")
     with c3:
-        st.metric("risk_gate", _safe_str(s.get('risk_gate')) or "—")
+        st.metric("risk_gate", _safe_str(s.get("risk_gate")) or "—")
     with c4:
-        st.metric("volume_status", _safe_str(s.get('volume_status')) or "—")
-    st.caption("此區塊確認 market_snapshot.json 已補齊 7_股神推薦.py 可直接讀取欄位。")
+        st.metric("volume_status", _safe_str(s.get("volume_status")) or "—")
+    with c5:
+        st.metric("data_quality", _safe_str(s.get("data_quality")) or "—")
+
+    st.info(_safe_str(s.get("position_hint")) or "已產生大盤風控輸出。")
+
+    with st.expander("推薦頁必讀欄位 required_by_godpick", expanded=False):
+        st.json(s.get("required_by_godpick") or {})
+
+    with st.expander("資料鮮度 / 風控註記", expanded=False):
+        st.json({
+            "freshness": s.get("freshness"),
+            "data_guard_notes": s.get("data_guard_notes"),
+            "data_source_health": s.get("data_source_health"),
+        })
+
+    cc1, cc2 = st.columns([1.2, 4])
+    with cc1:
+        if st.button("強制重寫股神串接檔", use_container_width=True, type="primary", key=_k("force_write_v32_bridge")):
+            ok, msg = _write_market_snapshot_v30(row)
+            if ok:
+                st.success(msg)
+            else:
+                st.warning(msg)
+    with cc2:
+        st.caption("v32：此按鈕會同步寫 market_snapshot.json、macro_mode_bridge.json、macro_trend_records.json。")
+
+
+def _v32_render_records_block():
+    st.markdown("### 大盤風控紀錄")
+    records = _v32_read_records()
+    if not records:
+        st.caption("尚無 macro_trend_records.json 紀錄；寫入 market_snapshot 後會自動建立。")
+        return
+    df = pd.DataFrame(records)
+    show_cols = [c for c in [
+        "updated_at", "market_score", "market_trend", "market_risk_level", "risk_gate",
+        "twse_index", "twse_change", "twse_change_pct", "otc_index", "otc_change", "otc_change_pct",
+        "futures_index", "futures_change", "futures_change_pct", "data_quality", "version"
+    ] if c in df.columns]
+    st.dataframe(df[show_cols].head(80), use_container_width=True, hide_index=True)
+    st.download_button(
+        "下載大盤風控紀錄CSV",
+        data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+        file_name="macro_trend_records.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+# 覆寫一鍵背景更新：補入櫃買，並維持不阻塞。
+def _v294_start_all_background(target_date: date):
+    try:
+        _reset_bg_jobs()
+    except Exception:
+        pass
+    try:
+        _maybe_start_background_update(target_date, enabled=True)
+    except Exception:
+        pass
+    try:
+        _start_taifex_background_update_v285(target_date, force=True)
+    except Exception:
+        try:
+            _start_taifex_background_update(target_date, force=True)
+        except Exception:
+            pass
+    try:
+        _start_otc_background_update(target_date, force=True)
+    except Exception:
+        pass
+
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="01 大盤趨勢｜v31串接強化版",
-        subtitle="加權、櫃買、台指期、外盤與法人採背景更新；輸出 market_snapshot.json 給股神推薦串接。",
+        title="01 大盤趨勢｜v32股神風控完成版",
+        subtitle="加權、櫃買、期貨、外盤與法人採背景更新；輸出 market_snapshot.json / macro_mode_bridge.json 給股神推薦。",
     )
 
-    st.info("目前使用 v31.0 大盤趨勢串接強化版：大盤 / 法人 / 外盤 / 期貨 / 櫃買採背景更新與快取，不阻塞主畫面。")
+    st.info("v32.0：補齊資料鮮度、risk_gate、position_hint、required_by_godpick、macro_trend_records；仍維持背景更新不卡頁。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
@@ -3427,25 +3762,21 @@ def main():
             else:
                 st.warning(msg)
     with ac3:
-        st.caption("v29.5：一鍵更新不阻塞畫面；橋接檔會帶入資料源可信度，讓股神推薦知道資料品質。")
+        st.caption("v32：橋接檔會同步寫 market_snapshot、macro_mode_bridge 與大盤風控紀錄，推薦頁可直接讀取 risk_gate。")
 
     _v294_render_source_health_panel()
-
-
 
     if clear_cache:
         _write_cache({})
         st.success("已清除 macro_market_close_cache.json")
         st.rerun()
 
-    status_msg = ""
     if update_realtime:
         with st.spinner("正在抓取大盤資料；TWSE失敗會自動改用Yahoo備援..."):
             row = _fetch_market_with_fallback(target_date, realtime=True)
         if row.get("ok"):
             _save_market_row(row)
-            status_msg = f"大盤更新成功：{row.get('close')}｜{row.get('source')}"
-            st.success(status_msg)
+            st.success(f"大盤更新成功：{row.get('close')}｜{row.get('source')}")
         else:
             st.warning(f"大盤更新失敗：{row.get('error')}")
 
@@ -3454,8 +3785,7 @@ def main():
             row = _fetch_market_with_fallback(target_date, realtime=False)
         if row.get("ok"):
             _save_market_row(row)
-            status_msg = f"收盤紀錄更新成功：{row.get('close')}｜{row.get('source')}"
-            st.success(status_msg)
+            st.success(f"收盤紀錄更新成功：{row.get('close')}｜{row.get('source')}")
         else:
             st.warning(f"收盤紀錄更新失敗：{row.get('error')}")
 
@@ -3518,8 +3848,9 @@ def main():
     _render_taifex_block(target_date)
     _render_market_cache_chart()
     _render_market_snapshot_block(row)
-    _v31_render_godpick_bridge_summary(row)
+    _v32_render_godpick_bridge_summary(row)
     _render_macro_bridge_block(row)
+    _v32_render_records_block()
     _render_macro_feature_center()
 
     dl_cols = st.columns([1.2, 4])
@@ -3533,16 +3864,16 @@ def main():
             disabled=_cache_to_market_df().empty,
         )
     with dl_cols[1]:
-        st.caption("v27.1：快取資料越完整，大盤穩定分、MA5/MA20、20日位置越有參考性。")
+        st.caption("v32：大盤、櫃買、期貨與資料鮮度會寫入股神推薦風控檔。")
 
-    # v26.10：改用原生 markdown 區塊，避免部分 theme card 在此頁輸出殘留 </div>。
     st.markdown("### 大盤操作參考")
     ref_cols = st.columns(4)
+    snapshot_now = _build_market_snapshot_v30(row)
     ref_items = [
-        ("目前狀態", ctx["mood"]),
-        ("操作建議", ctx["advice"]),
+        ("目前狀態", snapshot_now.get("market_trend") or ctx["mood"]),
+        ("風控閘門", snapshot_now.get("risk_gate") or "—"),
+        ("操作建議", snapshot_now.get("position_hint") or ctx["advice"]),
         ("資料來源", _safe_str(row.get("source"))),
-        ("重要說明", "先確保頁面不再卡住；完整法人/期權/新聞模型暫時停用，等大盤頁穩定後再逐項加回。"),
     ]
     for _col, (_title, _value) in zip(ref_cols, ref_items):
         with _col:
@@ -3560,6 +3891,8 @@ def main():
         st.json(_read_cache())
         st.write("目前列：")
         st.json(row)
+        st.write("v32 snapshot：")
+        st.json(snapshot_now)
 
 
 if __name__ == "__main__":
