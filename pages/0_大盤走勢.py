@@ -298,13 +298,14 @@ def _us_cache_to_df() -> pd.DataFrame:
     return df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
 
-def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) -> dict[str, Any]:
+def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v27.7：三大法人手動更新強化版。
-    - 支援 TWSE 新舊網址。
-    - 若指定日期尚無資料，會往前找最近 10 個工作日。
-    - 只在按鈕觸發時執行，不進頁自動抓，避免卡住。
-    - 單位：億元。
+    v28.2：法人籌碼自動備援版。
+    順序：
+    1. TWSE BFI82U 三大法人金額。
+    2. 若 BFI82U 抓不到，改抓 T86 個股法人買賣超「億股代理」作方向判斷。
+    3. 指定日無資料，自動往前找最近 10 個工作日。
+    4. 只在手動按鈕或背景 thread 中執行，不阻塞主畫面。
     """
     target_dt = pd.to_datetime(target_date).date()
 
@@ -312,18 +313,17 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) ->
         out = []
         cur = end_date
         guard = 0
-        while len(out) < max_days and guard < 20:
+        while len(out) < max_days and guard < 25:
             if cur.weekday() < 5:
                 out.append(cur)
             cur = cur - timedelta(days=1)
             guard += 1
         return out
 
-    def _parse_bfi82u_payload(data: dict[str, Any], used_date: date, source_name: str) -> dict[str, Any]:
+    def _parse_money_payload(data: dict[str, Any], used_date: date, source_name: str) -> dict[str, Any]:
         rows = []
         if isinstance(data, dict):
             rows = data.get("data") or data.get("aaData") or []
-            # 部分回應把表格包在 tables 裡
             if not rows and isinstance(data.get("tables"), list):
                 for t in data.get("tables") or []:
                     if isinstance(t, dict) and isinstance(t.get("data"), list):
@@ -347,8 +347,6 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) ->
             nums = [x for x in nums if x is not None]
             if not nums:
                 continue
-
-            # BFI82U 通常最後有效數字是「買賣超金額」；若欄位有買進/賣出/買賣超，最後值最穩。
             val = nums[-1]
             raw_rows.append({"項目": label or joined[:20], "買賣超億元": val, "原始列": row})
 
@@ -370,6 +368,7 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) ->
                 "ok": True,
                 "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
                 "source": source_name,
+                "unit": "億元",
                 "foreign_100m": foreign,
                 "investment_trust_100m": invest,
                 "dealer_100m": dealer,
@@ -379,25 +378,126 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) ->
             }
         return {}
 
+    def _to_float_plain(v):
+        s = _safe_str(v).replace(",", "").replace("+", "")
+        if not s or s in {"-", "--", "None", "nan"}:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def _parse_t86_proxy(data: dict[str, Any], used_date: date) -> dict[str, Any]:
+        rows = []
+        fields = []
+        if isinstance(data, dict):
+            rows = data.get("data") or data.get("aaData") or []
+            fields = data.get("fields") or data.get("stat") or []
+        if not isinstance(rows, list) or not rows:
+            return {}
+
+        # T86 單位多為股數，這裡轉成億股代理，只作方向分數，不冒充金額。
+        foreign_shares = 0.0
+        invest_shares = 0.0
+        dealer_shares = 0.0
+        used = 0
+
+        field_names = [_safe_str(x) for x in fields] if isinstance(fields, list) else []
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            used += 1
+            # 盡量用欄位名稱找；若欄位名不完整，使用常見 T86 index fallback。
+            row_map = {field_names[i]: row[i] for i in range(min(len(field_names), len(row)))}
+
+            f_val = None
+            i_val = None
+            d_val = None
+            for k, v in row_map.items():
+                kk = _safe_str(k)
+                if f_val is None and ("外陸資買賣超" in kk or "外資買賣超" in kk):
+                    f_val = _to_float_plain(v)
+                if i_val is None and "投信買賣超" in kk:
+                    i_val = _to_float_plain(v)
+                if d_val is None and "自營商買賣超" in kk:
+                    d_val = _to_float_plain(v)
+
+            # 常見欄位：證券代號,證券名稱,外陸資買進,外陸資賣出,外陸資買賣超,投信買進,投信賣出,投信買賣超,...
+            if f_val is None and len(row) > 4:
+                f_val = _to_float_plain(row[4])
+            if i_val is None and len(row) > 7:
+                i_val = _to_float_plain(row[7])
+            if d_val is None and len(row) > 10:
+                # 自營商總買賣超常在更後面，取一個較穩定 fallback
+                d_val = _to_float_plain(row[10])
+
+            foreign_shares += f_val or 0
+            invest_shares += i_val or 0
+            dealer_shares += d_val or 0
+
+        if used <= 0:
+            return {}
+
+        foreign_100m_share = foreign_shares / 100000000
+        invest_100m_share = invest_shares / 100000000
+        dealer_100m_share = dealer_shares / 100000000
+        total_proxy = foreign_100m_share + invest_100m_share + dealer_100m_share
+
+        return {
+            "ok": True,
+            "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
+            "source": "TWSE T86 法人方向代理",
+            "unit": "億股代理",
+            "is_proxy": True,
+            "foreign_100m": foreign_100m_share,
+            "investment_trust_100m": invest_100m_share,
+            "dealer_100m": dealer_100m_share,
+            "total_100m": total_proxy,
+            "raw_rows": [{"項目": "T86全市場加總", "樣本數": used, "單位": "億股代理"}],
+            "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "note": "BFI82U金額資料不可用，已改用T86個股法人買賣超股數作方向代理。"
+        }
+
     tried = []
     for d in _candidate_dates(target_dt, max_days=10):
         ymd = pd.to_datetime(d).strftime("%Y%m%d")
-        urls = [
-            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json",
-            f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json",
+
+        # A. BFI82U：三大法人金額
+        bfi_urls = [
+            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&weekDate={ymd}&monthDate={ymd}&type=day&response=json",
+            f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&weekDate={ymd}&monthDate={ymd}&type=day&response=json",
             f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={ymd}&type=day&response=json",
         ]
-        for url in urls:
-            tried.append(f"{ymd} {url.split('?')[0].split('/')[-1]}")
+        for url in bfi_urls:
+            tried.append(f"{ymd} BFI82U")
             try:
                 r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
                 if r.status_code != 200:
                     continue
-                data = r.json()
-                parsed = _parse_bfi82u_payload(data, d, "TWSE 三大法人")
+                parsed = _parse_money_payload(r.json(), d, "TWSE 三大法人")
                 if parsed:
                     if d != target_dt:
-                        parsed["source"] = f"TWSE 三大法人｜最近可用日"
+                        parsed["source"] = "TWSE 三大法人｜最近可用日"
+                        parsed["note"] = f"指定日期 {pd.to_datetime(target_dt).strftime('%Y-%m-%d')} 尚無資料，已使用最近可用日 {pd.to_datetime(d).strftime('%Y-%m-%d')}"
+                    return parsed
+            except Exception:
+                continue
+
+        # B. T86 proxy：方向代理，不是金額。
+        t86_urls = [
+            f"https://www.twse.com.tw/rwd/zh/fund/T86?date={ymd}&selectType=ALLBUT0999&response=json",
+            f"https://www.twse.com.tw/fund/T86?response=json&date={ymd}&selectType=ALLBUT0999",
+        ]
+        for url in t86_urls:
+            tried.append(f"{ymd} T86代理")
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code != 200:
+                    continue
+                parsed = _parse_t86_proxy(r.json(), d)
+                if parsed:
+                    if d != target_dt:
+                        parsed["source"] = "TWSE T86 法人方向代理｜最近可用日"
                         parsed["note"] = f"指定日期 {pd.to_datetime(target_dt).strftime('%Y-%m-%d')} 尚無資料，已使用最近可用日 {pd.to_datetime(d).strftime('%Y-%m-%d')}"
                     return parsed
             except Exception:
@@ -406,11 +506,10 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) ->
     return {
         "ok": False,
         "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-        "source": "TWSE 三大法人",
-        "error": "法人資料尚未取得；可能是尚未收盤、非交易日、TWSE暫無資料或連線失敗。已嘗試最近10個工作日。",
+        "source": "TWSE 三大法人 / T86代理",
+        "error": "法人資料尚未取得；BFI82U金額與T86代理皆失敗。可能是TWSE暫無資料、端點限制或連線失敗。",
         "tried": tried[-12:],
     }
-
 
 def _save_inst_row(row: dict[str, Any]) -> None:
     if not isinstance(row, dict) or not row.get("ok"):
@@ -476,10 +575,11 @@ def _inst_cache_to_df() -> pd.DataFrame:
                 continue
             rows.append({
                 "日期": v.get("date") or k,
-                "外資億元": v.get("foreign_100m"),
-                "投信億元": v.get("investment_trust_100m"),
-                "自營商億元": v.get("dealer_100m"),
-                "三大法人合計億元": v.get("total_100m"),
+                "外資": v.get("foreign_100m"),
+                "單位": v.get("unit", "億元"),
+                "投信": v.get("investment_trust_100m"),
+                "自營商": v.get("dealer_100m"),
+                "法人合計": v.get("total_100m"),
                 "來源": v.get("source"),
                 "更新時間": v.get("updated_at"),
             })
@@ -984,7 +1084,7 @@ def _render_institutional_block(target_date: date):
     with c3:
         st.metric("法人狀態", _safe_str(score.get("法人狀態")))
     with c4:
-        st.metric("合計億元", f"{_safe_float(inst.get('total_100m'), 0):+.2f}")
+        st.metric("法人合計", f"{_safe_float(inst.get('total_100m'), 0):+.2f} " + (_safe_str(inst.get("unit")) or "億元"))
     with c5:
         st.caption("只在按下時抓 TWSE 法人資料，不會進頁自動執行。")
 
@@ -1004,9 +1104,9 @@ def _render_institutional_block(target_date: date):
 
     detail = [
         ("資料日期", _safe_str(inst.get("date")) or "尚未更新"),
-        ("外資", f"{_safe_float(inst.get('foreign_100m'), 0):+.2f} 億"),
-        ("投信", f"{_safe_float(inst.get('investment_trust_100m'), 0):+.2f} 億"),
-        ("自營商", f"{_safe_float(inst.get('dealer_100m'), 0):+.2f} 億"),
+        ("外資", f"{_safe_float(inst.get('foreign_100m'), 0):+.2f} " + (_safe_str(inst.get("unit")) or "億元")),
+        ("投信", f"{_safe_float(inst.get('investment_trust_100m'), 0):+.2f} " + (_safe_str(inst.get("unit")) or "億元")),
+        ("自營商", f"{_safe_float(inst.get('dealer_100m'), 0):+.2f} " + (_safe_str(inst.get("unit")) or "億元")),
         ("法人建議", _safe_str(score.get("法人建議"))),
     ]
     cols = st.columns(len(detail))
