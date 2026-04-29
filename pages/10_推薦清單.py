@@ -43,7 +43,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "recommend_list_v50_perf_tracking_20260429"
+BACKTEST_V12_VERSION = "recommend_list_v52_keyerror_nostuck_20260429"
 DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
 V5_BACKFILL_FIX_VERSION = "recommend_list_v5_backfill_fix_v1_20260427"
 READ_FALLBACK_VERSION = "recommend_list_multi_source_read_v1_20260427"
@@ -639,17 +639,35 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "同類股領先幅度", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%"
     ]
+    # v52 安全補欄：舊推薦資料 / Firestore 回補資料可能缺少 v50/v51 新欄位，
+    # 任何欄位都必須先建立，再做型態轉換，避免 KeyError 造成整頁掛掉。
     for c in num_cols:
+        if c not in x.columns:
+            x[c] = None
         x[c] = pd.to_numeric(x[c], errors="coerce")
+
     bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2", "是否達標_回測", "是否停損_回測"]
     for c in bool_cols:
+        if c not in x.columns:
+            x[c] = False
         x[c] = x[c].fillna(False).map(lambda v: str(v).strip().lower() in {"true", "1", "yes", "y", "是"})
-    for c in ["推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "目前狀態", "模式績效標籤", "命中結果", "績效評語", "追蹤更新時間", "備註", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略", "大盤橋接更新時間", "大盤交易時段", "大盤交易時段可用", "大盤資料品質", "大盤影響說明", "大盤資料診斷摘要"]:
+
+    text_cols = ["推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "目前狀態", "模式績效標籤", "命中結果", "績效評語", "追蹤更新時間", "備註", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略", "大盤橋接更新時間", "大盤交易時段", "大盤交易時段可用", "大盤資料品質", "大盤影響說明", "大盤資料診斷摘要"]
+    for c in text_cols:
+        if c not in x.columns:
+            x[c] = ""
         x[c] = x[c].fillna("").astype(str)
+
+    for c in ["股票代號", "股票名稱"]:
+        if c not in x.columns:
+            x[c] = ""
     x["股票代號"] = x["股票代號"].map(_normalize_code)
     x["股票名稱"] = x["股票名稱"].fillna("").astype(str)
     x = _backfill_v10_columns(x)
     x = x.loc[:, ~x.columns.duplicated()].copy()
+    for c in GODPICK_RECORD_COLUMNS:
+        if c not in x.columns:
+            x[c] = None
     return x[GODPICK_RECORD_COLUMNS].copy()
 
 
