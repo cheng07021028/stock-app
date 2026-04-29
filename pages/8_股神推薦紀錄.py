@@ -1796,6 +1796,62 @@ def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, 
     return src, total_rows, truncated
 
 
+def _apply_sticky_editor_checkboxes(editor_key: str, edited_df: pd.DataFrame, id_col: str = "record_id", checkbox_cols: list[str] | None = None) -> pd.DataFrame:
+    """v40：修正推薦紀錄 data_editor 勾選欄位跳回未勾選。"""
+    if checkbox_cols is None:
+        checkbox_cols = ["匯入自選", "刪除"]
+    if edited_df is None or edited_df.empty or id_col not in edited_df.columns:
+        return edited_df
+
+    out = edited_df.copy()
+    base_df = out.reset_index(drop=True)
+
+    def _is_true(v: Any) -> bool:
+        if isinstance(v, bool):
+            return bool(v)
+        return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "勾選", "checked"}
+
+    raw_state = st.session_state.get(editor_key, {})
+    edited_rows = raw_state.get("edited_rows", {}) if isinstance(raw_state, dict) else {}
+    visible_ids = [_safe_str(x) for x in base_df[id_col].astype(str).tolist() if _safe_str(x)]
+    visible_id_set = set(visible_ids)
+
+    for col in checkbox_cols:
+        if col not in out.columns:
+            continue
+        state_key = _k(f"sticky_{editor_key}_{col}_ids")
+        selected = {_safe_str(x) for x in st.session_state.get(state_key, []) if _safe_str(x)}
+
+        for _, row in base_df.iterrows():
+            rec_id = _safe_str(row.get(id_col))
+            if rec_id and _is_true(row.get(col, False)):
+                selected.add(rec_id)
+
+        if isinstance(edited_rows, dict):
+            for raw_idx, changes in edited_rows.items():
+                try:
+                    idx = int(raw_idx)
+                except Exception:
+                    continue
+                if idx < 0 or idx >= len(base_df):
+                    continue
+                if not isinstance(changes, dict) or col not in changes:
+                    continue
+                rec_id = _safe_str(base_df.iloc[idx].get(id_col))
+                if not rec_id:
+                    continue
+                if _is_true(changes.get(col)):
+                    selected.add(rec_id)
+                else:
+                    selected.discard(rec_id)
+
+        selected = {x for x in selected if x in visible_id_set}
+        st.session_state[state_key] = [x for x in visible_ids if x in selected]
+        out[col] = out[id_col].astype(str).map(lambda x: _safe_str(x) in selected)
+
+    return out
+
+
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
         return {"count": 0, "buy_count": 0, "sold_count": 0, "avg_ret": 0, "win_rate": 0}
@@ -2371,12 +2427,15 @@ def main():
         else:
             st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
 
+        editor_key = _k(f"record_editor_{show_cols_mode}")
+        editor_df = _apply_sticky_editor_checkboxes(editor_key, editor_df, "record_id", ["匯入自選", "刪除"])
+
         edited_df = st.data_editor(
             editor_df,
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            key=_k(f"record_editor_{show_cols_mode}"),
+            key=editor_key,
             column_config={
                 "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
                 "刪除": st.column_config.CheckboxColumn("刪除"),
@@ -2442,6 +2501,8 @@ def main():
             },
         )
 
+        edited_df = _apply_sticky_editor_checkboxes(editor_key, edited_df, "record_id", ["匯入自選", "刪除"])
+
         action_cols = st.columns([1.6, 1.2, 1.2, 1.2, 1.2, 2.6])
         with action_cols[0]:
             target_group = st.text_input("匯入自選群組", value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"), key=_k("watchlist_target_group"))
@@ -2449,6 +2510,8 @@ def main():
             if st.button("📥 匯入勾選到4_自選股", use_container_width=True):
                 selected_ids = edited_df.loc[edited_df["匯入自選"] == True, "record_id"].astype(str).tolist()
                 ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
+                if ok:
+                    st.session_state[_k(f"sticky_{editor_key}_匯入自選_ids")] = []
                 _set_status(msg, "success" if ok else "warning")
                 st.rerun()
             detail_msg = _safe_str(st.session_state.get(_k("watchlist_import_detail"), ""))
@@ -2494,6 +2557,7 @@ def main():
                         deleted_n = max(before_n - after_n, 0)
 
                         _save_state_df(new_df)
+                        st.session_state[_k(f"sticky_{editor_key}_刪除_ids")] = []
                         st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，尚未同步；若要永久寫回，請按「儲存同步」。"
                         st.rerun()
         with action_cols[4]:
