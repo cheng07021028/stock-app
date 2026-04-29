@@ -197,7 +197,7 @@
     "days": 180,
     "top_n": 10,
     "manual_codes": "",
-    "scan_limit": 300,
+    "scan_limit": 500,
     "selected_categories": [
       "AI伺服器",
       "EMS代工",
@@ -257,6 +257,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-29 09:03:34",
+  "updated_at": "2026-04-29 09:10:17",
   "version": "godpick_v5_persistent_settings"
 }
