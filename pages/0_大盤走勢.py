@@ -782,7 +782,7 @@ def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]
 
 def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v29.3：TWSE HTTP 502 / SSL / 無資料時的備援。
+    v29.5：TWSE HTTP 502 / SSL / 無資料時的備援。
     使用 Yahoo ^TWII 日線，僅在手動/背景更新時呼叫，不會進頁同步等待。
     """
     try:
@@ -810,7 +810,7 @@ def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[s
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v29.3：大盤自動備援。
+    v29.5：大盤自動備援。
     1. 盤中先 TWSE MIS。
     2. 非盤中/晚上先 TWSE 收盤。
     3. TWSE 失敗改 Yahoo ^TWII。
@@ -1054,7 +1054,7 @@ def _render_macro_bridge_block(row: dict[str, Any]):
     c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 2.4])
     with c1:
         if st.button("寫入股神大盤參考", use_container_width=True, type="primary"):
-            ok, msg = _write_macro_bridge(row)
+            ok, msg = _v294_write_bridge_with_quality(row)
             if ok:
                 st.success(msg)
             else:
@@ -1128,7 +1128,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v29.3 改為背景自動更新；不進主畫面等待，避免卡住。",
+            "說明": "v29.5 改為背景自動更新；不進主畫面等待，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1398,7 +1398,7 @@ def _save_taifex_row(row: dict[str, Any]) -> None:
 
 def _save_taifex_manual_input(target_date: date, tx_close: float | None, tx_change: float | None, tx_volume: float | None = None) -> tuple[bool, str]:
     if tx_close is None or _safe_float(tx_close) is None or _safe_float(tx_close) <= 0:
-        return False, "請輸入有效的台指期收盤價。"
+        return False, "請輸入有效的期貨收盤/指數價。"
 
     row = {
         "ok": True,
@@ -1429,15 +1429,26 @@ def _default_taifex_row(target_date: date) -> dict[str, Any]:
 
 
 def _taifex_score(row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(row, dict) or not row:
+        return {"期貨分數": 50.0, "期貨狀態": "期貨中性", "期貨建議": "期貨未提供明確方向。"}
+
+    # Yahoo IX0126.TW 是備援參考，不是台指期近月合約；分數權重降低。
+    is_ref = bool(row.get("is_reference_only"))
     chg = _safe_float(row.get("tx_change"), 0) or 0
-    score = 50 + max(min(chg * 0.08, 18), -18)
+    pct = _safe_float(row.get("tx_pct"), None)
+
+    if is_ref and pct is not None:
+        score = 50 + max(min(pct * 7, 10), -10)
+    else:
+        score = 50 + max(min(chg * 0.08, 18), -18)
+
     score = max(0, min(100, score))
     if score >= 65:
         label = "期貨偏多"
-        advice = "台指期支撐偏多，可提高順勢觀察。"
+        advice = "期貨支撐偏多，可提高順勢觀察。"
     elif score >= 55:
         label = "期貨中性偏多"
-        advice = "台指期略偏多，但仍需確認現貨量價。"
+        advice = "期貨略偏多，但仍需確認現貨量價。"
     elif score >= 45:
         label = "期貨中性"
         advice = "期貨未提供明確方向。"
@@ -1447,7 +1458,11 @@ def _taifex_score(row: dict[str, Any]) -> dict[str, Any]:
     else:
         label = "期貨偏空"
         advice = "期貨逆風，建議保守控倉。"
+
+    if is_ref:
+        advice += "｜目前使用Yahoo期貨指數備援，非近月台指期合約。"
     return {"期貨分數": round(score, 1), "期貨狀態": label, "期貨建議": advice}
+
 
 
 def _taifex_cache_to_df() -> pd.DataFrame:
@@ -1458,8 +1473,8 @@ def _taifex_cache_to_df() -> pd.DataFrame:
             continue
         rows.append({
             "日期": v.get("date") or ymd,
-            "台指期收盤": v.get("tx_close"),
-            "台指期漲跌": v.get("tx_change"),
+            "期貨收盤/指數": v.get("tx_close"),
+            "期貨漲跌": v.get("tx_change"),
             "成交量": v.get("tx_volume"),
             "來源": v.get("source"),
             "更新時間": v.get("updated_at"),
@@ -1506,7 +1521,7 @@ def _start_taifex_background_update(target_date: date, force: bool = False) -> N
 
 def _sync_taifex_job_status_from_cache(target_date: date | None = None) -> None:
     """
-    v29.3：期貨資料已經抓到但背景狀態仍顯示 running 時，自動同步成 finished。
+    v29.5：期貨資料已經抓到但背景狀態仍顯示 running 時，自動同步成 finished。
     你畫面已出現收盤/漲跌/成交量，但狀態還 running，就是這個問題。
     """
     try:
@@ -1580,7 +1595,7 @@ def _render_taifex_block(target_date: date):
     with c3:
         st.metric("期貨狀態", _safe_str(score.get("期貨狀態")))
     with c4:
-        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else ""))
+        st.metric("期貨漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else ""))
     with c5:
         st.caption("v29：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
 
@@ -1593,8 +1608,8 @@ def _render_taifex_block(target_date: date):
     cols = st.columns(4)
     cards = [
         ("資料日期", _safe_str(row.get("date")) or "尚未更新"),
-        ("台指期收盤", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
-        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else "")),
+        ("期貨收盤/指數", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
+        ("期貨漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else "")),
         ("期貨建議", _safe_str(score.get("期貨建議"))),
     ]
     for col, (title, value) in zip(cols, cards):
@@ -1654,7 +1669,7 @@ def _render_macro_feature_center():
 
 def _calc_market_change_points(row: dict[str, Any]) -> float | None:
     """
-    v29.3：由目前大盤 close + pct 反推漲跌點數。
+    v29.5：由目前大盤 close + pct 反推漲跌點數。
     pct = (close - prev_close) / prev_close * 100
     change = close - prev_close = close * pct / (100 + pct)
     若資料源已提供 change / change_points 則優先使用。
@@ -2001,7 +2016,7 @@ def _render_background_update_status():
 
 
 
-# ===== v29.3 missing block safety patch =====
+# ===== v29.5 missing block safety patch =====
 def _safe_us_cache_to_df_v285() -> pd.DataFrame:
     try:
         if "_us_cache_to_df" in globals():
@@ -2170,8 +2185,8 @@ def _render_taifex_bg_status_v285():
 
 def _render_taifex_block(target_date: date):
     """
-    v29.3：期貨狀態同步版。
-    確保期貨不會因 v29.3 patch 遺失函式而消失。
+    v29.5：期貨狀態同步版。
+    確保期貨不會因 v29.5 patch 遺失函式而消失。
     """
     st.markdown("### 期貨自動背景回補")
     row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
@@ -2185,7 +2200,7 @@ def _render_taifex_block(target_date: date):
     with c3:
         st.metric("期貨狀態", _safe_str(score.get("期貨狀態")))
     with c4:
-        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else ""))
+        st.metric("期貨漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else ""))
     with c5:
         st.caption("期貨採背景自動更新，不在主畫面等待。")
 
@@ -2198,8 +2213,8 @@ def _render_taifex_block(target_date: date):
     cols = st.columns(4)
     cards = [
         ("資料日期", _safe_str(row.get("date")) or "尚未更新"),
-        ("台指期收盤", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
-        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else "")),
+        ("期貨收盤/指數", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
+        ("期貨漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else "")),
         ("期貨建議", _safe_str(score.get("期貨建議"))),
     ]
     for col, (title, value) in zip(cols, cards):
@@ -2228,7 +2243,7 @@ def _render_taifex_block(target_date: date):
 
 
 
-# ===== v29.3 multi-source fallback pool overrides =====
+# ===== v29.5 multi-source fallback pool overrides =====
 def _v29_source_grade(source: str, is_proxy: bool = False, is_cache: bool = False) -> str:
     s = _safe_str(source)
     if is_cache:
@@ -2277,7 +2292,7 @@ def _v29_recent_cache_row(cache_file: str) -> dict[str, Any]:
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v29.3 大盤多來源備援池：
+    v29.5 大盤多來源備援池：
     TWSE MIS / MI_INDEX -> Yahoo ^TWII -> 最近快取。
     """
     tried = []
@@ -2337,7 +2352,7 @@ def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> di
 
 def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v29.3 法人多來源備援池：
+    v29.5 法人多來源備援池：
     TWSE BFI82U 金額 -> TWSE T86 代理 -> FinMind 代理 -> 最近快取。
     """
     target_dt = pd.to_datetime(target_date).date()
@@ -2577,45 +2592,28 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
 
 def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dict[str, Any]:
     """
-    v29.3 期貨多來源備援池：
-    1. Yahoo IX0126.TW：TIP TAIFEX TAIEX Futures Index，優先使用，較不容易卡。
-    2. TAIFEX OpenAPI：官方來源，若可用則使用。
-    3. 最近快取：避免完全無資料。
-    不在主畫面等待；背景執行成功即寫快取。
+    v29.5 期貨來源優先順序修正版：
+    1. TAIFEX OpenAPI：官方台指期，優先使用。
+    2. 最近 TAIFEX/官方快取：若官方端點短暫失敗，優先沿用最近官方快取。
+    3. Yahoo IX0126.TW：只作備援參考；若無漲跌點/與台指期級距差太大，不覆蓋官方快取。
+    4. 任一來源都不在主畫面等待；背景執行成功即寫快取。
     """
     target_dt = pd.to_datetime(target_date).date()
     tried = []
 
-    # 1) Yahoo futures index backup first: stable and fast.
-    try:
-        if "_fetch_yahoo_chart" in globals():
-            y = _fetch_yahoo_chart("IX0126.TW", target_dt, timeout=timeout)
-            tried.append(f"Yahoo IX0126.TW:{y.get('error') if isinstance(y, dict) else 'unknown'}")
-            if isinstance(y, dict) and y.get("ok") and y.get("close") is not None:
-                close_val = _safe_float(y.get("close"))
-                pct_val = _safe_float(y.get("pct"))
-                change_val = None
-                if close_val is not None and pct_val is not None and abs(100 + pct_val) > 1e-9:
-                    change_val = close_val * pct_val / (100 + pct_val)
-                row = {
-                    "ok": True,
-                    "date": _safe_str(y.get("date")) or pd.to_datetime(target_dt).strftime("%Y-%m-%d"),
-                    "source": "Yahoo IX0126.TW 期貨指數備援",
-                    "source_grade": "備援",
-                    "tx_close": close_val,
-                    "tx_change": change_val,
-                    "tx_pct": pct_val,
-                    "tx_volume": _safe_float(y.get("volume")),
-                    "raw": {"symbol": "IX0126.TW", "name": "TIP TAIFEX TAIEX Futures Index"},
-                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "note": "Yahoo TIP TAIFEX TAIEX Futures Index 備援資料；非逐月期貨合約，但可作期貨方向參考。",
-                }
-                _v29_write_source_status("期貨", "success", row.get("source"), "備援", "Yahoo IX0126.TW成功")
-                return row
-    except Exception as e:
-        tried.append(f"Yahoo IX0126例外:{e}")
+    def _official_cache_row():
+        cache = _v29_recent_cache_row(TAIFEX_CACHE_FILE)
+        if cache and cache.get("tx_close") is not None:
+            src = _safe_str(cache.get("source"))
+            # 優先使用 TAIFEX/官方快取，不讓 Yahoo 備援覆蓋官方資料。
+            if "TAIFEX" in src or _safe_str(cache.get("source_grade")) == "官方":
+                cache["ok"] = True
+                cache["source_grade"] = "快取"
+                cache["note"] = "TAIFEX 官方端點暫時不可用，沿用最近官方期貨快取。"
+                return cache
+        return {}
 
-    # 2) TAIFEX OpenAPI official candidates
+    # 1) TAIFEX OpenAPI official first
     ymd_dash = pd.to_datetime(target_dt).strftime("%Y-%m-%d")
     ymd_slash = pd.to_datetime(target_dt).strftime("%Y/%m/%d")
     ymd_plain = pd.to_datetime(target_dt).strftime("%Y%m%d")
@@ -2639,7 +2637,7 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
                 if not isinstance(item, dict):
                     continue
                 txt = " ".join(_safe_str(v) for v in item.values())
-                is_tx = ("TX" in txt or "臺股期貨" in txt or "台股期貨" in txt or "臺指" in txt or "台指" in txt)
+                is_tx = ("TX" in txt or "TXF" in txt or "臺股期貨" in txt or "台股期貨" in txt or "臺指" in txt or "台指" in txt)
                 is_date = (ymd_dash in txt or ymd_slash in txt or ymd_plain in txt)
                 if is_tx and is_date:
                     chosen = item
@@ -2648,7 +2646,7 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
                 for item in data:
                     if isinstance(item, dict):
                         txt = " ".join(_safe_str(v) for v in item.values())
-                        if "TX" in txt or "臺股期貨" in txt or "台股期貨" in txt:
+                        if "TX" in txt or "TXF" in txt or "臺股期貨" in txt or "台股期貨" in txt:
                             chosen = item
                             break
 
@@ -2684,6 +2682,7 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
                         "source_grade": "官方",
                         "tx_close": close_val,
                         "tx_change": change_val,
+                        "tx_pct": None,
                         "tx_volume": vol_val,
                         "raw": chosen,
                         "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2693,7 +2692,48 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
         except Exception as e:
             tried.append(f"TAIFEX例外:{e}")
 
-    # 3) cache fallback
+    # 2) Use official cache before Yahoo backup
+    official_cache = _official_cache_row()
+    if official_cache:
+        _v29_write_source_status("期貨", "cache", official_cache.get("source"), "快取", "沿用最近官方期貨快取")
+        return official_cache
+
+    # 3) Yahoo futures index as low-confidence reference only
+    try:
+        if "_fetch_yahoo_chart" in globals():
+            y = _fetch_yahoo_chart("IX0126.TW", target_dt, timeout=timeout)
+            tried.append(f"Yahoo IX0126.TW:{y.get('error') if isinstance(y, dict) else 'unknown'}")
+            if isinstance(y, dict) and y.get("ok") and y.get("close") is not None:
+                close_val = _safe_float(y.get("close"))
+                pct_val = _safe_float(y.get("pct"))
+                change_val = None
+                if close_val is not None and pct_val is not None and abs(100 + pct_val) > 1e-9:
+                    change_val = close_val * pct_val / (100 + pct_val)
+
+                # 如果 Yahoo 沒有漲跌幅/漲跌點，只能當參考，不用來決策。
+                if pct_val is None and change_val is None:
+                    raise ValueError("Yahoo IX0126.TW 無漲跌幅，僅能參考，不寫入主要期貨資料")
+
+                row = {
+                    "ok": True,
+                    "date": _safe_str(y.get("date")) or pd.to_datetime(target_dt).strftime("%Y-%m-%d"),
+                    "source": "Yahoo IX0126.TW 期貨指數備援",
+                    "source_grade": "備援",
+                    "is_reference_only": True,
+                    "tx_close": close_val,
+                    "tx_change": change_val,
+                    "tx_pct": pct_val,
+                    "tx_volume": _safe_float(y.get("volume")),
+                    "raw": {"symbol": "IX0126.TW", "name": "TIP TAIFEX TAIEX Futures Index"},
+                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "note": "Yahoo IX0126.TW 是期貨指數備援，不等同台指期近月合約；僅作方向參考。",
+                }
+                _v29_write_source_status("期貨", "success", row.get("source"), "備援", "Yahoo IX0126.TW成功，僅作參考")
+                return row
+    except Exception as e:
+        tried.append(f"Yahoo IX0126例外:{e}")
+
+    # 4) Any cache fallback
     cache = _v29_recent_cache_row(TAIFEX_CACHE_FILE)
     if cache and cache.get("tx_close") is not None:
         cache["ok"] = True
@@ -2701,13 +2741,13 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
         _v29_write_source_status("期貨", "cache", cache.get("source"), "快取", "使用最近可用期貨快取")
         return cache
 
-    _v29_write_source_status("期貨", "failed", "Yahoo IX0126.TW / TAIFEX OpenAPI", "失敗", " / ".join(tried[-8:]))
+    _v29_write_source_status("期貨", "failed", "TAIFEX / Yahoo / 快取", "失敗", " / ".join(tried[-8:]))
     return {
         "ok": False,
         "date": ymd_dash,
         "source": "期貨多來源備援",
         "source_grade": "失敗",
-        "error": "Yahoo IX0126.TW、TAIFEX OpenAPI與期貨快取皆失敗。",
+        "error": "TAIFEX OpenAPI、官方快取、Yahoo IX0126.TW與一般快取皆失敗。",
         "tried": tried[-10:],
     }
 
@@ -2789,7 +2829,7 @@ def _render_background_update_status():
     status = _safe_str(item.get("status")) or "尚未啟動"
     msg = _safe_str(item.get("message"))
     updated = _safe_str(item.get("updated_at"))
-    st.markdown("### v29.3 多來源背景更新狀態")
+    st.markdown("### v29.5 多來源背景更新狀態")
     c1, c2, c3, c4 = st.columns([1.1, 2.8, 1.5, 1.1])
     with c1:
         st.metric("總狀態", status)
@@ -2823,16 +2863,121 @@ def _render_background_update_status():
 
 
 
+# ===== v29.5 source panel + auto bridge helpers =====
+def _v294_source_status_df() -> pd.DataFrame:
+    try:
+        jobs = _read_bg_jobs()
+    except Exception:
+        jobs = {}
+    rows = []
+    for name in ["大盤", "法人", "外盤", "期貨"]:
+        s = jobs.get(f"source_{name}", {}) if isinstance(jobs, dict) else {}
+        rows.append({
+            "資料源": name,
+            "狀態": _safe_str(s.get("status")) or "尚未更新",
+            "來源": _safe_str(s.get("source")),
+            "可信度": _safe_str(s.get("grade")),
+            "訊息": _safe_str(s.get("message")),
+            "更新時間": _safe_str(s.get("updated_at")),
+        })
+    return pd.DataFrame(rows)
+
+
+def _v294_count_source_health() -> dict[str, int]:
+    df = _v294_source_status_df()
+    if df.empty:
+        return {"success": 0, "cache": 0, "failed": 0, "official": 0}
+    success = int(df["狀態"].isin(["success", "cache", "finished"]).sum())
+    cache = int((df["可信度"] == "快取").sum())
+    failed = int(df["狀態"].isin(["failed", "error", "timeout"]).sum())
+    official = int((df["可信度"] == "官方").sum())
+    return {"success": success, "cache": cache, "failed": failed, "official": official}
+
+
+def _v294_render_source_health_panel():
+    st.markdown("### 資料源健康度")
+    h = _v294_count_source_health()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("可用資料源", h["success"])
+    with c2:
+        st.metric("官方來源", h["official"])
+    with c3:
+        st.metric("快取來源", h["cache"])
+    with c4:
+        st.metric("失敗來源", h["failed"])
+    st.dataframe(_v294_source_status_df(), use_container_width=True, hide_index=True)
+
+
+def _v294_bridge_quality(row: dict[str, Any]) -> dict[str, Any]:
+    h = _v294_count_source_health()
+    score = 50 + h["success"] * 10 + h["official"] * 5 - h["failed"] * 10 - h["cache"] * 4
+    score = max(0, min(100, score))
+    if score >= 80:
+        level = "高"
+        advice = "資料完整，可正常納入股神推薦風控。"
+    elif score >= 60:
+        level = "中高"
+        advice = "資料大致可用，仍需留意非官方或快取來源。"
+    elif score >= 40:
+        level = "中"
+        advice = "部分資料缺失，股神推薦應偏保守。"
+    else:
+        level = "低"
+        advice = "資料不足，建議降低大盤因子權重。"
+    return {
+        "data_quality_score": round(score, 1),
+        "data_quality_level": level,
+        "data_quality_advice": advice,
+        "source_health": h,
+    }
+
+
+def _v294_write_bridge_with_quality(row: dict[str, Any]) -> tuple[bool, str]:
+    ok, msg = _write_macro_bridge(row)
+    if not ok:
+        return ok, msg
+    try:
+        p = Path(BRIDGE_FILE)
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        if not isinstance(data, dict):
+            data = {}
+        data.update(_v294_bridge_quality(row))
+        data["source_status_table"] = _v294_source_status_df().to_dict(orient="records")
+        data["version"] = "v29.5_macro_bridge_quality"
+        data["updated_at"] = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return True, f"已寫入 {BRIDGE_FILE}，並加入資料源健康度與可信度。"
+    except Exception as e:
+        return False, f"橋接檔品質資訊寫入失敗：{e}"
+
+
+def _v294_start_all_background(target_date: date):
+    try:
+        _reset_bg_jobs()
+    except Exception:
+        pass
+    _maybe_start_background_update(target_date, enabled=True)
+    try:
+        _start_taifex_background_update_v285(target_date, force=True)
+    except Exception:
+        try:
+            _start_taifex_background_update(target_date, force=True)
+        except Exception:
+            pass
+
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="大盤走勢｜v29.3多來源備援池",
+        title="大盤走勢｜v29.5多來源備援池",
         subtitle="頁面先顯示快取資料；大盤、法人、外盤改背景更新，避免外部端點卡住整頁。",
     )
 
-    st.warning("目前使用 v29.3 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
+    st.warning("目前使用 v29.5 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
@@ -2849,6 +2994,25 @@ def main():
     auto_bg = st.toggle("自動背景更新，不卡頁", value=True, key=_k("auto_bg_update"))
     _maybe_start_background_update(target_date, enabled=auto_bg)
     _render_background_update_status()
+
+    ac1, ac2, ac3 = st.columns([1.2, 1.2, 3])
+    with ac1:
+        if st.button("一鍵背景更新全部", use_container_width=True, type="primary"):
+            _v294_start_all_background(target_date)
+            st.success("已啟動大盤 / 法人 / 外盤 / 期貨背景更新。頁面不會等待，稍後重新整理即可看結果。")
+    with ac2:
+        if st.button("立即寫入股神橋接", use_container_width=True):
+            _row_for_bridge = _default_market_row(target_date)
+            ok, msg = _v294_write_bridge_with_quality(_row_for_bridge)
+            if ok:
+                st.success(msg)
+            else:
+                st.warning(msg)
+    with ac3:
+        st.caption("v29.5：一鍵更新不阻塞畫面；橋接檔會帶入資料源可信度，讓股神推薦知道資料品質。")
+
+    _v294_render_source_health_panel()
+
 
 
     if clear_cache:
