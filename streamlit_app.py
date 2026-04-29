@@ -3,6 +3,11 @@ from __future__ import annotations
 HOME_V5_LINK_VERSION = "home_v5_link_v1_20260427"
 
 from datetime import date, datetime, timedelta
+import base64
+import json
+from pathlib import Path
+
+import requests
 from typing import Any
 
 import pandas as pd
@@ -570,6 +575,163 @@ def _clear_home_search_input():
     st.session_state[_k("search_cleared_notice")] = True
 
 
+
+# =========================================================
+# v39 首頁大盤趨勢快照串接
+# 讀取 0_大盤趨勢 / 01 大盤趨勢輸出的 market_snapshot.json。
+# 首頁只讀檔、不主動抓網路資料，避免拖慢首頁。
+# =========================================================
+def _read_market_snapshot_v39() -> dict[str, Any]:
+    candidates = [Path("market_snapshot.json"), Path("macro_mode_bridge.json")]
+    for p in candidates:
+        try:
+            if not p.exists():
+                continue
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data["_snapshot_file"] = str(p)
+                return data
+        except Exception:
+            continue
+    return {}
+
+
+def _market_value_v39(snapshot: dict[str, Any], key: str, default: Any = "—") -> Any:
+    if not isinstance(snapshot, dict):
+        return default
+    v = snapshot.get(key, default)
+    if v is None or v == "":
+        return default
+    return v
+
+
+def _market_float_v39(snapshot: dict[str, Any], key: str) -> float | None:
+    v = _market_value_v39(snapshot, key, None)
+    try:
+        if v is None or pd.isna(v):
+            return None
+    except Exception:
+        pass
+    try:
+        return float(str(v).replace(",", "").replace("%", ""))
+    except Exception:
+        return None
+
+
+def _fmt_market_num_v39(v: Any, digits: int = 2) -> str:
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+    except Exception:
+        pass
+    try:
+        return f"{float(str(v).replace(',', '').replace('%', '')):,.{digits}f}"
+    except Exception:
+        return str(v) if str(v).strip() else "—"
+
+
+def _fmt_market_signed_v39(v: Any, digits: int = 2, suffix: str = "") -> str:
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+    except Exception:
+        pass
+    try:
+        n = float(str(v).replace(',', '').replace('%', ''))
+        return f"{n:+,.{digits}f}{suffix}"
+    except Exception:
+        return str(v) if str(v).strip() else "—"
+
+
+def _render_market_snapshot_home_v39():
+    snapshot = _read_market_snapshot_v39()
+    render_pro_section("大盤趨勢總控｜0_大盤趨勢串接", "首頁直接讀取 market_snapshot.json，不重新抓資料，避免首頁變慢。")
+
+    if not snapshot:
+        render_pro_info_card(
+            "大盤快照尚未建立",
+            [
+                ("狀態", "尚未讀到 market_snapshot.json", ""),
+                ("建議", "先進入 0_大盤趨勢，執行更新並寫入股神橋接檔", ""),
+                ("首頁行為", "只讀檔，不會在首頁主動抓取大盤資料", ""),
+            ],
+            chips=["market_snapshot.json", "等待 0_大盤趨勢更新"],
+        )
+        return
+
+    score = _market_float_v39(snapshot, "market_score")
+    trend = _market_value_v39(snapshot, "market_trend")
+    risk = _market_value_v39(snapshot, "market_risk_level")
+    risk_gate = _market_value_v39(snapshot, "risk_gate", _market_value_v39(snapshot, "risk_gate_mode"))
+    session_label = _market_value_v39(snapshot, "market_session_label", _market_value_v39(snapshot, "market_session"))
+    usable = _market_value_v39(snapshot, "market_session_usable")
+    quality = _market_value_v39(snapshot, "data_quality")
+    updated_at = _market_value_v39(snapshot, "updated_at")
+    file_name = _market_value_v39(snapshot, "_snapshot_file")
+
+    effect = snapshot.get("godpick_market_effect", {}) if isinstance(snapshot.get("godpick_market_effect"), dict) else {}
+    adjustment = effect.get("recommendation_adjustment", snapshot.get("recommendation_adjustment", "—"))
+    effect_desc = effect.get("effect_summary", effect.get("description", snapshot.get("trend_comment", "—")))
+
+    render_pro_kpi_row([
+        {
+            "label": "大盤分數",
+            "value": _fmt_market_num_v39(score, 1),
+            "delta": f"{trend}｜風險 {risk}",
+            "delta_class": "pro-kpi-delta-up" if (score or 0) >= 60 else "pro-kpi-delta-down" if (score or 0) < 45 else "pro-kpi-delta-flat",
+        },
+        {
+            "label": "風控閘門",
+            "value": risk_gate,
+            "delta": f"交易時段：{session_label}",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "資料品質",
+            "value": quality,
+            "delta": f"時段可用：{usable}",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "推薦調整",
+            "value": str(adjustment),
+            "delta": "由 0_大盤趨勢輸出",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+    ])
+
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        render_pro_info_card(
+            "大盤對股神推薦影響",
+            [
+                ("大盤分數", _fmt_market_num_v39(score, 1), ""),
+                ("大盤趨勢", trend, ""),
+                ("風控閘門", risk_gate, ""),
+                ("交易時段", session_label, ""),
+                ("推薦調整", adjustment, ""),
+                ("影響說明", effect_desc, ""),
+            ],
+            chips=["market_snapshot", "godpick bridge"],
+        )
+    with c2:
+        render_pro_info_card(
+            "盤面漲跌摘要",
+            [
+                ("加權漲跌點", f"{_fmt_market_signed_v39(snapshot.get('twse_change'))}｜{_fmt_market_signed_v39(snapshot.get('twse_change_pct'), suffix='%')}", ""),
+                ("櫃買漲跌點", f"{_fmt_market_signed_v39(snapshot.get('otc_change'))}｜{_fmt_market_signed_v39(snapshot.get('otc_change_pct'), suffix='%')}", ""),
+                ("期貨漲跌點", f"{_fmt_market_signed_v39(snapshot.get('futures_change'))}｜{_fmt_market_signed_v39(snapshot.get('futures_change_pct'), suffix='%')}", ""),
+                ("更新時間", updated_at, ""),
+                ("快照檔案", file_name, ""),
+            ],
+            chips=["TWSE", "TPEx", "TAIFEX"],
+        )
+
+    diagnostics = snapshot.get("data_diagnostics", [])
+    if isinstance(diagnostics, list) and diagnostics:
+        with st.expander("大盤資料來源診斷", expanded=False):
+            st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
 def _render_home_page():
     watchlist = _load_watchlist_data()
     overview_df = _build_overview_df(watchlist)
@@ -593,6 +755,8 @@ def _render_home_page():
         title="台股分析系統｜升級完整版首頁",
         subtitle="首頁總控面板｜串接自選股、股神推薦紀錄、快速入口與最近查詢狀態。",
     )
+
+    _render_market_snapshot_home_v39()
 
     render_pro_kpi_row(
         [
