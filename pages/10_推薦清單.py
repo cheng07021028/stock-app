@@ -993,18 +993,94 @@ def _calc_backtest_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _update_backtest_metrics(df: pd.DataFrame) -> pd.DataFrame:
+
+def _row_needs_backtest_update(payload: dict[str, Any]) -> bool:
+    code = _normalize_code(payload.get("股票代號"))
+    if not code:
+        return False
+    rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
+    if pd.isna(rec_date):
+        return False
+    age_days = (date.today() - rec_date.date()).days
+    if age_days < 1:
+        return False
+    has_any = any(_safe_float(payload.get(c)) is not None for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"])
+    last = pd.to_datetime(_safe_str(payload.get("追蹤更新時間")), errors="coerce")
+    if has_any and not pd.isna(last):
+        try:
+            if (datetime.now() - last.to_pydatetime()).total_seconds() < 12 * 3600:
+                return False
+        except Exception:
+            pass
+    if not has_any:
+        return True
+    if age_days >= 20 and _safe_float(payload.get("推薦後20日%")) is None:
+        return True
+    if age_days >= 10 and _safe_float(payload.get("推薦後10日%")) is None:
+        return True
+    if age_days >= 5 and _safe_float(payload.get("推薦後5日%")) is None:
+        return True
+    if age_days >= 3 and _safe_float(payload.get("推薦後3日%")) is None:
+        return True
+    return False
+
+
+def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress: bool = True) -> pd.DataFrame:
+    """V51：分批更新推薦清單績效，避免一次全表連外造成一直跑。"""
     if df is None or df.empty:
         return _ensure_record_columns(pd.DataFrame())
+    work = _ensure_record_columns(df.copy()).reset_index(drop=True)
+    candidates = []
+    for i, row in work.iterrows():
+        if _row_needs_backtest_update(dict(row)):
+            candidates.append(i)
+    max_rows = int(max(1, min(max_rows or 30, 200)))
+    targets = set(candidates[:max_rows])
     rows = []
-    for _, row in df.iterrows():
+    done = ok_count = fail_count = 0
+    total = len(targets)
+    prog = st.progress(0, text="V51：準備更新推薦清單績效...") if show_progress and total else None
+    status_box = st.empty() if show_progress and total else None
+
+    for i, row in work.iterrows():
         payload = dict(row)
-        metrics = _calc_backtest_metrics(payload)
-        for k, v in metrics.items():
-            if k in GODPICK_RECORD_COLUMNS:
-                payload[k] = v
+        if i not in targets:
+            rows.append(payload)
+            continue
+        code = _normalize_code(payload.get("股票代號"))
+        name = _safe_str(payload.get("股票名稱"))
+        try:
+            metrics = _calc_backtest_metrics(payload)
+        except Exception as e:
+            metrics = {}
+            payload["績效評語"] = f"績效更新失敗：{str(e)[:60]}"
+        if metrics:
+            ok_count += 1
+            for k, v in metrics.items():
+                if k in GODPICK_RECORD_COLUMNS:
+                    payload[k] = v
+        else:
+            fail_count += 1
+            if not _safe_str(payload.get("績效評語")):
+                payload["績效評語"] = "本次未取得足夠歷史資料，已略過，不阻塞整批更新"
+            payload["追蹤更新時間"] = _now_text()
         rows.append(payload)
+        done += 1
+        if prog is not None:
+            prog.progress(min(1.0, done / max(total, 1)), text=f"V51：更新推薦清單績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
+        if status_box is not None and (done == total or done % 5 == 0):
+            status_box.caption(f"本次分批上限 {max_rows} 筆；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
+    st.session_state[_k("v51_perf_update_summary")] = {
+        "待更新總數": len(candidates),
+        "本次更新上限": max_rows,
+        "本次處理": done,
+        "成功": ok_count,
+        "略過或失敗": fail_count,
+        "剩餘": max(0, len(candidates)-done),
+        "更新時間": _now_text(),
+    }
     return _ensure_record_columns(pd.DataFrame(rows))
+
 
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
@@ -1153,14 +1229,19 @@ def main():
         if reload_btn:
             _load_records_cached(force=True)
         df = _load_records_cached(force=False)
+        batch_n = st.number_input("每次更新筆數", min_value=5, max_value=200, value=30, step=5, key=_k("perf_update_batch_size"))
         if st.button("更新推薦後績效", use_container_width=True):
-            updated_df = _update_backtest_metrics(df)
-            st.session_state[_k("records_df")] = updated_df
-            ok, msgs = _sync_records(updated_df)
+            with st.spinner("V51：分批更新推薦後績效中，避免一次全表卡住..."):
+                updated_df = _update_backtest_metrics(df, max_rows=int(batch_n), show_progress=True)
+                st.session_state[_k("records_df")] = updated_df
+                ok, msgs = _sync_records(updated_df)
+            summary = st.session_state.get(_k("v51_perf_update_summary"), {})
             if ok:
-                st.success("已更新推薦後 1/3/5/10/20 日績效與命中結果")
+                st.success(f"V51 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，剩餘約 {summary.get('剩餘', 0)} 筆。")
             else:
-                st.warning("已在本頁更新，但遠端同步可能失敗，請查看同步明細")
+                st.warning("已在本頁分批更新，但遠端同步可能失敗，請查看同步明細。")
+            if summary.get("剩餘", 0):
+                st.info("仍有舊紀錄待補績效，可再次按更新；每次分批處理可避免頁面一直跑。")
         load_msg = _safe_str(st.session_state.get(_k("load_msg"), ""))
         if load_msg:
             st.caption(load_msg)
