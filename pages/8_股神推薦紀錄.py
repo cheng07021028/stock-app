@@ -36,7 +36,7 @@ from utils import (
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "record_v12_backtest_tracking_v1_20260428"
+BACKTEST_V12_VERSION = "record_v46_keyerror_safe_20260429"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -376,11 +376,17 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
         "持有天數", "股神決策分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     ]
+    # v46 修正：舊紀錄或 Firestore 回補資料可能沒有部分數值欄。
+    # 先補欄再轉型，避免 x[c] 觸發 KeyError 造成整頁無法開啟。
     for c in numeric_cols:
+        if c not in x.columns:
+            x[c] = None
         x[c] = pd.to_numeric(x[c], errors="coerce")
 
     bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2"]
     for c in bool_cols:
+        if c not in x.columns:
+            x[c] = False
         x[c] = x[c].fillna(False).map(_normalize_bool)
 
     text_cols = [
@@ -388,7 +394,16 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
     ]
     for c in text_cols:
+        if c not in x.columns:
+            x[c] = ""
         x[c] = x[c].fillna("").astype(str)
+
+    if "目前狀態" not in x.columns:
+        x["目前狀態"] = "觀察"
+    if "股票代號" not in x.columns:
+        x["股票代號"] = ""
+    if "類別" not in x.columns:
+        x["類別"] = ""
 
     x["股票代號"] = x["股票代號"].map(_normalize_code)
     x["類別"] = x["類別"].map(_normalize_category)
