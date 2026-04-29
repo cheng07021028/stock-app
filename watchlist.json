@@ -8,8 +8,7 @@
     {
       "code": "1533",
       "name": "車王電",
-      "market": "上市",
-      "category": "汽車"
+      "market": "上市"
     },
     {
       "code": "2330",
@@ -34,20 +33,17 @@
     {
       "code": "3605",
       "name": "宏致",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "4958",
       "name": "臻鼎-KY",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "4967",
       "name": "十銓",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     },
     {
       "code": "6271",
@@ -57,14 +53,12 @@
     {
       "code": "6651",
       "name": "全宇昕",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "8103",
       "name": "瀚荃",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     }
   ],
   "0422": [
@@ -153,41 +147,5 @@
       "market": "上市"
     }
   ],
-  "0428": [
-    {
-      "code": "2464",
-      "name": "盟立",
-      "market": "上市"
-    },
-    {
-      "code": "3033",
-      "name": "威健",
-      "market": "上市"
-    },
-    {
-      "code": "3059",
-      "name": "華晶科",
-      "market": "上市"
-    },
-    {
-      "code": "3317",
-      "name": "尼克森",
-      "market": "上櫃"
-    },
-    {
-      "code": "3526",
-      "name": "凡甲",
-      "market": "上櫃"
-    },
-    {
-      "code": "5289",
-      "name": "宜鼎",
-      "market": "上櫃"
-    },
-    {
-      "code": "6658",
-      "name": "聯策",
-      "market": "上市"
-    }
-  ]
+  "0428": []
 }
