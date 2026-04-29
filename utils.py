@@ -24,9 +24,9 @@ WATCHLIST_CANDIDATES = [
 
 STATE_FILE = "last_query_state.json"
 
-REQUEST_TIMEOUT_FAST = 3
-REQUEST_TIMEOUT_NORMAL = 6
-REALTIME_BATCH_SIZE = 30
+REQUEST_TIMEOUT_FAST = 2
+REQUEST_TIMEOUT_NORMAL = 4
+REALTIME_BATCH_SIZE = 50
 
 
 @st.cache_resource(show_spinner=False)
@@ -1370,7 +1370,7 @@ def _get_realtime_yahoo_history_fallback(stock_no, stock_name="", market_type="�
         }
 
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=12)
+            resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST, verify=False)
             if resp.status_code != 200:
                 last_error = f"Yahoo {symbol} HTTP {resp.status_code}"
                 continue
@@ -2085,7 +2085,7 @@ def _fetch_twse_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame,
     month_str = pd.to_datetime(month_start).strftime("%Y%m01")
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     params = {"response": "json", "date": month_str, "stockNo": stock_no}
-    data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
+    data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST)
     stat = _safe_text(data.get("stat"))
     fields, rows = _extract_table_from_payload(data)
     if stat != "OK" or not fields or not rows:
@@ -2114,7 +2114,7 @@ def _fetch_tpex_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame,
     last_msg = ""
     for url, params, name in endpoints:
         try:
-            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_NORMAL)
+            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST)
             fields, rows = _extract_table_from_payload(data)
             stat = _safe_text(data.get("stat") or data.get("statCode") or data.get("code"))
             if fields and rows:
@@ -2257,9 +2257,9 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
 def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     """取得歷史日線資料。
 
-    V11 加速原則：
+    V35 加速原則：
     - 先用 Yahoo chart 單次請求快速取得日線，通常比逐月 TWSE/TPEx 快很多。
-    - 若 Yahoo 失敗、資料不足或市場別不符，立即 fallback 官方 TWSE/TPEx 月資料。
+    - 若 Yahoo 失敗、資料不足或市場別不符，快速 fallback 官方 TWSE/TPEx 月資料，所有請求都有短 timeout。
     - 不做低成本初篩、不跳過任何股票，因此不會因加速而漏掉候選股。
     """
     stock_no = str(stock_no).strip()
