@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-13_股神權重校正.py
+14_股神權重校正.py
 v64：v60～v63 準確度強化整合版
 
 整合內容：
@@ -31,7 +31,7 @@ import pandas as pd
 import streamlit as st
 
 
-st.set_page_config(page_title="13 股神權重校正｜v64", layout="wide")
+st.set_page_config(page_title="14 股神權重校正｜v64", layout="wide")
 
 APP_VERSION = "v64_accuracy_calibration_full"
 
@@ -515,7 +515,7 @@ def build_weight_suggestions(effect_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_intro():
-    st.title("13 股神權重校正｜v64 準確度強化整合版")
+    st.title("14 股神權重校正｜v64 準確度強化整合版")
     st.caption("整合 v60 上漲機率回測校正、v61 分數組成透明化、v62 風險報酬比、v63 自動權重校正建議。")
     st.info("此頁只讀取既有推薦紀錄，不連外、不重跑推薦、不自動覆蓋權重；所有建議都需要人工確認後再套用。")
 
