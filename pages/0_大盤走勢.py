@@ -8,7 +8,10 @@ import json
 
 import pandas as pd
 import requests
+import urllib3
 import streamlit as st
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     from utils import inject_pro_theme, render_pro_hero, render_pro_kpi_row, render_pro_info_card
@@ -112,7 +115,7 @@ def _fetch_twse_realtime(timeout: float = 1.8) -> dict[str, Any]:
         "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?stock=t00",
     }
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        r = requests.get(url, params=params, headers=headers, timeout=timeout, verify=False)
         if r.status_code != 200:
             return {"ok": False, "source": "TWSE MIS", "error": f"HTTP {r.status_code}"}
         data = r.json()
@@ -145,7 +148,7 @@ def _fetch_twse_realtime(timeout: float = 1.8) -> dict[str, Any]:
             "is_realtime": True,
         }
     except Exception as e:
-        return {"ok": False, "source": "TWSE MIS", "error": str(e)}
+        return {"ok": False, "source": "TWSE MIS", "error": "連線失敗或 SSL 憑證被雲端環境攔截，請改按收盤紀錄或稍後再試。"}
 
 
 def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
@@ -168,7 +171,7 @@ def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]
 
     for url in urls:
         try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
             if r.status_code != 200:
                 continue
             data = r.json()
@@ -336,16 +339,26 @@ def main():
         },
     ])
 
-    render_pro_info_card(
-        "大盤操作參考",
-        [
-            ("目前狀態", ctx["mood"], ""),
-            ("操作建議", ctx["advice"], ""),
-            ("資料來源", _safe_str(row.get("source")), ""),
-            ("重要說明", "這版先確保頁面不再卡住；完整法人/期權/新聞模型暫時停用，等大盤頁穩定後再逐項加回。", ""),
-        ],
-        chips=["不自動等待", "盤中即時", "晚上收盤快取"],
-    )
+    # v26.10：改用原生 markdown 區塊，避免部分 theme card 在此頁輸出殘留 </div>。
+    st.markdown("### 大盤操作參考")
+    ref_cols = st.columns(4)
+    ref_items = [
+        ("目前狀態", ctx["mood"]),
+        ("操作建議", ctx["advice"]),
+        ("資料來源", _safe_str(row.get("source"))),
+        ("重要說明", "先確保頁面不再卡住；完整法人/期權/新聞模型暫時停用，等大盤頁穩定後再逐項加回。"),
+    ]
+    for _col, (_title, _value) in zip(ref_cols, ref_items):
+        with _col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:14px;background:#ffffff;min-height:92px;">
+                    <div style="font-size:13px;color:#64748b;font-weight:800;">{_title}</div>
+                    <div style="font-size:16px;color:#0f172a;font-weight:900;margin-top:8px;">{_value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     with st.expander("大盤快取 / 除錯資料", expanded=False):
         st.json(_read_cache())
