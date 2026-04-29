@@ -993,94 +993,147 @@ def _write_taifex_cache(cache: dict[str, Any]) -> None:
 
 def _fetch_taifex_futures_manual(target_date: date, timeout: float = 3.0) -> dict[str, Any]:
     """
-    v27.9：TAIFEX 期貨手動更新。
-    只在按鈕觸發時執行。目標：抓台指期近月收盤/漲跌。
+    v27.10：TAIFEX 期貨手動更新強化版。
+    - 支援 GET / POST。
+    - 若指定日期尚無資料，會往前找最近 10 個工作日。
+    - 只在按鈕觸發時執行，不進頁自動抓，避免卡住。
+    - 若仍失敗，可用頁面上的手動輸入保存。
     """
-    ymd = pd.to_datetime(target_date).strftime("%Y/%m/%d")
-    urls = [
+    target_dt = pd.to_datetime(target_date).date()
+
+    def _candidate_dates(end_date: date, max_days: int = 10) -> list[date]:
+        out = []
+        cur = end_date
+        guard = 0
+        while len(out) < max_days and guard < 25:
+            if cur.weekday() < 5:
+                out.append(cur)
+            cur = cur - timedelta(days=1)
+            guard += 1
+        return out
+
+    def _parse_tables(html_text: str, used_date: date, source_name: str) -> dict[str, Any]:
+        try:
+            tables = pd.read_html(html_text)
+        except Exception:
+            tables = []
+
+        for tb in tables:
+            if tb is None or tb.empty:
+                continue
+
+            df = tb.copy()
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = ["_".join([str(x) for x in c if str(x) != "nan"]) for c in df.columns]
+            else:
+                df.columns = [str(c) for c in df.columns]
+
+            full_text = " ".join(df.astype(str).fillna("").values.flatten().tolist()) + " " + " ".join(df.columns)
+            if not any(k in full_text for k in ["TX", "臺股期貨", "台股期貨", "臺指", "台指", "契約"]):
+                continue
+
+            chosen = None
+            for _, row in df.iterrows():
+                row_text = " ".join(_safe_str(x) for x in row.values)
+                if ("TX" in row_text or "臺股期貨" in row_text or "台股期貨" in row_text or "臺指" in row_text or "台指" in row_text):
+                    chosen = row
+                    break
+            if chosen is None and len(df) > 0:
+                chosen = df.iloc[0]
+
+            row_dict = {str(k): chosen[k] for k in df.columns}
+            close_val = None
+            change_val = None
+            volume_val = None
+
+            for k, v in row_dict.items():
+                kk = _safe_str(k)
+                if close_val is None and any(x in kk for x in ["收盤", "最後成交", "最後"]):
+                    close_val = _safe_float(v)
+                if change_val is None and any(x in kk for x in ["漲跌", "價差"]):
+                    change_val = _safe_float(v)
+                if volume_val is None and any(x in kk for x in ["成交量", "交易量"]):
+                    volume_val = _safe_float(v)
+
+            nums = [_safe_float(x) for x in chosen.values]
+            nums = [x for x in nums if x is not None]
+
+            if close_val is None:
+                candidates = [x for x in nums if 5000 <= abs(x) <= 50000]
+                if candidates:
+                    # 台指期點數通常是接近 2萬～3萬的數字
+                    close_val = candidates[-1]
+
+            if change_val is None:
+                # 漲跌點通常絕對值小於 2000，避開月份/履約價
+                change_candidates = [x for x in nums if -2000 <= x <= 2000 and x != 0]
+                if change_candidates:
+                    change_val = change_candidates[-1]
+
+            if close_val is not None:
+                return {
+                    "ok": True,
+                    "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
+                    "source": source_name,
+                    "tx_close": close_val,
+                    "tx_change": change_val,
+                    "tx_volume": volume_val,
+                    "raw": row_dict,
+                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        return {}
+
+    tried = []
+    endpoints = [
         "https://www.taifex.com.tw/cht/3/futDailyMarketReport",
         "https://www.taifex.com.tw/cht/3/futDailyMarketReportDown",
     ]
-    params_list = [
-        {"queryDate": ymd, "commodity_id": "TX"},
-        {"queryDate": ymd, "commodity_id": "TX", "MarketCode": "0"},
-    ]
 
-    tried = []
-    for url in urls:
-        for params in params_list:
-            tried.append(f"{url.split('/')[-1]} {params}")
-            try:
-                r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
-                if r.status_code != 200:
-                    continue
-                # 先嘗試 pandas 解析 HTML 表格
-                tables = pd.read_html(r.text)
-                for tb in tables:
-                    if tb is None or tb.empty:
-                        continue
-                    flat_cols = [str(c) for c in tb.columns]
-                    joined_cols = " ".join(flat_cols)
-                    if not any(k in joined_cols for k in ["契約", "商品", "到期", "收盤", "漲跌"]):
-                        continue
-                    df = tb.copy()
-                    # 扁平化欄位
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = ["_".join([str(x) for x in c if str(x) != "nan"]) for c in df.columns]
-                    else:
-                        df.columns = [str(c) for c in df.columns]
+    for d in _candidate_dates(target_dt, max_days=10):
+        qdate = pd.to_datetime(d).strftime("%Y/%m/%d")
+        param_variants = [
+            {"queryDate": qdate, "commodity_id": "TX"},
+            {"queryDate": qdate, "commodity_id": "TX", "MarketCode": "0"},
+            {"queryDate": qdate, "commodity_id": "TX", "queryType": "1"},
+        ]
 
-                    # 找台指期列
-                    chosen = None
-                    for _, row in df.iterrows():
-                        row_text = " ".join(_safe_str(x) for x in row.values)
-                        if ("TX" in row_text or "臺股期貨" in row_text or "台股期貨" in row_text or "臺指" in row_text or "台指" in row_text):
-                            chosen = row
-                            break
-                    if chosen is None and len(df) > 0:
-                        chosen = df.iloc[0]
+        for url in endpoints:
+            for params in param_variants:
+                tag = f"{pd.to_datetime(d).strftime('%Y-%m-%d')} {url.split('/')[-1]} {params}"
+                tried.append(tag)
 
-                    row_dict = {str(k): chosen[k] for k in df.columns}
-                    close_val = None
-                    change_val = None
-                    volume_val = None
-                    for k, v in row_dict.items():
-                        kk = _safe_str(k)
-                        if close_val is None and ("收盤" in kk or "最後成交" in kk):
-                            close_val = _safe_float(v)
-                        if change_val is None and ("漲跌" in kk):
-                            change_val = _safe_float(v)
-                        if volume_val is None and ("成交量" in kk or "交易量" in kk):
-                            volume_val = _safe_float(v)
+                # GET
+                try:
+                    r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                    if r.status_code == 200:
+                        parsed = _parse_tables(r.text, d, "TAIFEX 台指期手動")
+                        if parsed:
+                            if d != target_dt:
+                                parsed["source"] = "TAIFEX 台指期手動｜最近可用日"
+                                parsed["note"] = f"指定日期 {pd.to_datetime(target_dt).strftime('%Y-%m-%d')} 尚無資料，已使用最近可用日 {pd.to_datetime(d).strftime('%Y-%m-%d')}"
+                            return parsed
+                except Exception:
+                    pass
 
-                    # 若欄位名不穩，從數值候選抓一個接近台指點數的數
-                    if close_val is None:
-                        nums = [_safe_float(x) for x in chosen.values]
-                        nums = [x for x in nums if x is not None]
-                        candidates = [x for x in nums if 5000 <= abs(x) <= 50000]
-                        if candidates:
-                            close_val = candidates[-1]
-
-                    if close_val is not None:
-                        return {
-                            "ok": True,
-                            "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-                            "source": "TAIFEX 台指期手動",
-                            "tx_close": close_val,
-                            "tx_change": change_val,
-                            "tx_volume": volume_val,
-                            "raw": row_dict,
-                            "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-            except Exception:
-                continue
+                # POST
+                try:
+                    r = requests.post(url, data=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                    if r.status_code == 200:
+                        parsed = _parse_tables(r.text, d, "TAIFEX 台指期手動")
+                        if parsed:
+                            if d != target_dt:
+                                parsed["source"] = "TAIFEX 台指期手動｜最近可用日"
+                                parsed["note"] = f"指定日期 {pd.to_datetime(target_dt).strftime('%Y-%m-%d')} 尚無資料，已使用最近可用日 {pd.to_datetime(d).strftime('%Y-%m-%d')}"
+                            return parsed
+                except Exception:
+                    pass
 
     return {
         "ok": False,
         "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
         "source": "TAIFEX 台指期手動",
-        "error": "TAIFEX 台指期資料尚未取得、非交易日或端點暫時無法連線",
-        "tried": tried[-8:],
+        "error": "TAIFEX 台指期資料尚未取得；可能是尚未收盤、非交易日、端點限制或雲端連線失敗。可用下方手動輸入保存。",
+        "tried": tried[-12:],
     }
 
 
@@ -1094,6 +1147,24 @@ def _save_taifex_row(row: dict[str, Any]) -> None:
     cache = _read_taifex_cache()
     cache[ymd] = row
     _write_taifex_cache(cache)
+
+
+def _save_taifex_manual_input(target_date: date, tx_close: float | None, tx_change: float | None, tx_volume: float | None = None) -> tuple[bool, str]:
+    if tx_close is None or _safe_float(tx_close) is None or _safe_float(tx_close) <= 0:
+        return False, "請輸入有效的台指期收盤價。"
+
+    row = {
+        "ok": True,
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "source": "手動輸入台指期",
+        "tx_close": _safe_float(tx_close),
+        "tx_change": _safe_float(tx_change, 0),
+        "tx_volume": _safe_float(tx_volume),
+        "raw": {"manual": True},
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_taifex_row(row)
+    return True, f"已手動保存台指期：收盤 {row['tx_close']} / 漲跌 {row['tx_change']}"
 
 
 def _default_taifex_row(target_date: date) -> dict[str, Any]:
@@ -1175,7 +1246,10 @@ def _render_taifex_block(target_date: date):
             new_row = _fetch_taifex_futures_manual(target_date)
         if new_row.get("ok"):
             _save_taifex_row(new_row)
-            st.success(f"台指期更新成功：收盤 {new_row.get('tx_close')} / 漲跌 {new_row.get('tx_change')}")
+            msg = f"台指期更新成功：收盤 {new_row.get('tx_close')} / 漲跌 {new_row.get('tx_change')}"
+            if new_row.get("note"):
+                msg += f"｜{new_row.get('note')}"
+            st.success(msg)
             st.rerun()
         else:
             st.warning(f"台指期更新失敗：{new_row.get('error')}")
@@ -1183,6 +1257,26 @@ def _render_taifex_block(target_date: date):
                 with st.expander("TAIFEX 嘗試明細", expanded=False):
                     for item in new_row.get("tried", []):
                         st.write(f"- {item}")
+
+    with st.expander("手動輸入台指期資料", expanded=False):
+        st.caption("如果 TAIFEX 端點暫時抓不到，可先手動輸入台指期收盤/漲跌，仍會寫入 macro_taifex_cache.json 並可串聯股神橋接。")
+        m1, m2, m3, m4 = st.columns([1.2, 1.2, 1.2, 1.2])
+        with m1:
+            manual_close = st.number_input("台指期收盤", min_value=0.0, value=float(_safe_float(row.get("tx_close"), 0) or 0), step=1.0, key=_k("manual_tx_close"))
+        with m2:
+            manual_change = st.number_input("台指期漲跌", value=float(_safe_float(row.get("tx_change"), 0) or 0), step=1.0, key=_k("manual_tx_change"))
+        with m3:
+            manual_volume = st.number_input("成交量，可空", min_value=0.0, value=float(_safe_float(row.get("tx_volume"), 0) or 0), step=1.0, key=_k("manual_tx_volume"))
+        with m4:
+            st.write("")
+            st.write("")
+            if st.button("保存手動台指期", use_container_width=True):
+                ok, msg = _save_taifex_manual_input(target_date, manual_close, manual_change, manual_volume)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.warning(msg)
 
     cols = st.columns(4)
     cards = [
