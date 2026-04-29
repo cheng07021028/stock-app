@@ -39,6 +39,7 @@ PAGE_TITLE = "大盤走勢"
 PFX = "macro_safe_"
 CACHE_FILE = "macro_market_close_cache.json"
 INST_CACHE_FILE = "macro_institutional_cache.json"
+US_CACHE_FILE = "macro_us_market_cache.json"
 
 
 def _k(key: str) -> str:
@@ -119,6 +120,177 @@ def _extract_money_100m(v: Any):
         return float(s) / 100000000
     except Exception:
         return None
+
+
+def _read_us_cache() -> dict[str, Any]:
+    p = Path(US_CACHE_FILE)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_us_cache(cache: dict[str, Any]) -> None:
+    try:
+        Path(US_CACHE_FILE).write_text(json.dumps(cache, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _fetch_yahoo_chart(symbol: str, target_date: date, timeout: float = 3.0) -> dict[str, Any]:
+    try:
+        target_dt = pd.to_datetime(target_date)
+        start_dt = target_dt - pd.Timedelta(days=10)
+        period1 = int(start_dt.timestamp())
+        period2 = int((target_dt + pd.Timedelta(days=2)).timestamp())
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{requests.utils.quote(symbol, safe='^=')}"
+        r = requests.get(
+            url,
+            params={"period1": period1, "period2": period2, "interval": "1d", "includePrePost": "false", "events": "div,splits"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=timeout,
+            verify=False,
+        )
+        if r.status_code != 200:
+            return {"ok": False, "symbol": symbol, "error": f"HTTP {r.status_code}"}
+        data = r.json()
+        result = (((data or {}).get("chart") or {}).get("result") or [{}])[0]
+        timestamps = result.get("timestamp") or []
+        quote = (((result.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+        if not timestamps or not quote:
+            return {"ok": False, "symbol": symbol, "error": "no data"}
+
+        df = pd.DataFrame({
+            "date": pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("Asia/Taipei").tz_localize(None),
+            "open": quote.get("open", []),
+            "high": quote.get("high", []),
+            "low": quote.get("low", []),
+            "close": quote.get("close", []),
+            "volume": quote.get("volume", []),
+        }).dropna(subset=["close"]).sort_values("date")
+
+        if df.empty:
+            return {"ok": False, "symbol": symbol, "error": "empty close"}
+        df = df[df["date"] <= (target_dt + pd.Timedelta(days=1))]
+        if df.empty:
+            return {"ok": False, "symbol": symbol, "error": "no date before target"}
+
+        row = df.iloc[-1]
+        prev = df.iloc[-2]["close"] if len(df) >= 2 else None
+        close = _safe_float(row.get("close"))
+        pct = ((close - prev) / prev * 100) if close is not None and prev not in [None, 0] else None
+
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "date": pd.to_datetime(row.get("date")).strftime("%Y-%m-%d"),
+            "close": close,
+            "pct": pct,
+            "source": "Yahoo 手動外盤",
+            "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        return {"ok": False, "symbol": symbol, "error": str(e)}
+
+
+def _fetch_us_market_manual(target_date: date) -> tuple[int, list[str]]:
+    symbols = {
+        "NASDAQ": "^IXIC",
+        "SOX半導體": "^SOX",
+        "S&P500": "^GSPC",
+        "VIX": "^VIX",
+        "台積電ADR": "TSM",
+        "美元台幣": "TWD=X",
+    }
+    cache = _read_us_cache()
+    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
+    if ymd not in cache or not isinstance(cache.get(ymd), dict):
+        cache[ymd] = {}
+
+    added = 0
+    msgs = []
+    for name, symbol in symbols.items():
+        row = _fetch_yahoo_chart(symbol, target_date, timeout=3.0)
+        if row.get("ok"):
+            cache[ymd][name] = row
+            added += 1
+            msgs.append(f"{name} {row.get('date')} 收盤 {row.get('close')} / {_safe_float(row.get('pct'), 0):+.2f}%")
+        else:
+            msgs.append(f"{name} 失敗：{row.get('error')}")
+    _write_us_cache(cache)
+    return added, msgs
+
+
+def _default_us_market_row(target_date: date) -> dict[str, Any]:
+    cache = _read_us_cache()
+    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
+    if isinstance(cache.get(ymd), dict):
+        return cache[ymd]
+    if cache:
+        keys = sorted([k for k in cache.keys() if isinstance(cache.get(k), dict)], reverse=True)
+        if keys:
+            return cache[keys[0]]
+    return {}
+
+
+def _us_market_score(us_row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(us_row, dict) or not us_row:
+        return {"外盤分數": 50.0, "外盤狀態": "尚未更新", "外盤建議": "未納入外盤資料"}
+
+    nas = _safe_float((us_row.get("NASDAQ") or {}).get("pct"), 0) or 0
+    sox = _safe_float((us_row.get("SOX半導體") or {}).get("pct"), 0) or 0
+    spx = _safe_float((us_row.get("S&P500") or {}).get("pct"), 0) or 0
+    adr = _safe_float((us_row.get("台積電ADR") or {}).get("pct"), 0) or 0
+    vix = _safe_float((us_row.get("VIX") or {}).get("pct"), 0) or 0
+
+    score = 50
+    score += max(min(nas * 4, 10), -10)
+    score += max(min(sox * 5, 14), -14)
+    score += max(min(spx * 3, 8), -8)
+    score += max(min(adr * 4, 10), -10)
+    score -= max(min(vix * 0.8, 8), -8)
+    score = max(0, min(100, score))
+
+    if score >= 70:
+        label = "外盤順風"
+        advice = "有利電子與半導體強勢股延續。"
+    elif score >= 55:
+        label = "外盤中性偏多"
+        advice = "可正常觀察，但仍看台股量價。"
+    elif score >= 45:
+        label = "外盤中性"
+        advice = "外盤未提供明確方向。"
+    elif score >= 30:
+        label = "外盤偏弱"
+        advice = "降低隔日追價，優先等拉回。"
+    else:
+        label = "外盤逆風"
+        advice = "隔日風險升高，保守控倉。"
+    return {"外盤分數": round(score, 1), "外盤狀態": label, "外盤建議": advice}
+
+
+def _us_cache_to_df() -> pd.DataFrame:
+    cache = _read_us_cache()
+    rows = []
+    for ymd, payload in (cache or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        row = {"日期": ymd}
+        for name, item in payload.items():
+            if not isinstance(item, dict):
+                continue
+            row[f"{name}_收盤"] = item.get("close")
+            row[f"{name}_漲跌幅%"] = item.get("pct")
+            row[f"{name}_資料日"] = item.get("date")
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    return df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
 
 def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) -> dict[str, Any]:
@@ -520,8 +692,12 @@ BRIDGE_FILE = "macro_mode_bridge.json"
 
 def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
     factors = _calc_stable_market_factors(row)
-    inst = _default_inst_row(pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce").date() if pd.notna(pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce")) else date.today())
+    _bridge_date = pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce")
+    _bridge_date = _bridge_date.date() if pd.notna(_bridge_date) else date.today()
+    inst = _default_inst_row(_bridge_date)
     inst_score = _institutional_score(inst)
+    us_row = _default_us_market_row(_bridge_date)
+    us_score = _us_market_score(us_row)
     close_val = _safe_float(row.get("close"))
     pct_val = _safe_float(row.get("pct"))
     payload = {
@@ -550,7 +726,14 @@ def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
         "investment_trust_100m": _safe_float(inst.get("investment_trust_100m")),
         "dealer_100m": _safe_float(inst.get("dealer_100m")),
         "institutional_total_100m": _safe_float(inst.get("total_100m")),
-        "recommendation_bias": _macro_bias_from_score((_safe_float(factors.get("大盤穩定分"), 50) * 0.75) + (_safe_float(inst_score.get("法人分數"), 50) * 0.25)),
+        "us_market_score": _safe_float(us_score.get("外盤分數"), 50),
+        "us_market_state": _safe_str(us_score.get("外盤狀態")),
+        "us_market_advice": _safe_str(us_score.get("外盤建議")),
+        "recommendation_bias": _macro_bias_from_score(
+            (_safe_float(factors.get("大盤穩定分"), 50) * 0.60)
+            + (_safe_float(inst_score.get("法人分數"), 50) * 0.25)
+            + (_safe_float(us_score.get("外盤分數"), 50) * 0.15)
+        ),
     }
     return payload
 
@@ -703,9 +886,9 @@ def _macro_feature_status_df() -> pd.DataFrame:
         },
         {
             "功能": "Yahoo / Stooq 外盤模型",
-            "目前狀態": "暫停",
-            "是否自動執行": "否",
-            "說明": "先暫停，避免外部站台延遲造成頁面卡住。",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，手動按鈕",
+            "說明": "v27.8 已恢復 Yahoo 外盤手動更新；不進頁自動抓，避免卡住。",
         },
         {
             "功能": "完整大盤模式預估",
@@ -776,6 +959,63 @@ def _render_institutional_block(target_date: date):
                 "下載法人快取CSV",
                 data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
                 file_name="macro_institutional_cache.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+def _render_us_market_block(target_date: date):
+    st.markdown("### 外盤手動回補")
+    us_row = _default_us_market_row(target_date)
+    us_score = _us_market_score(us_row)
+
+    c1, c2, c3, c4 = st.columns([1.25, 1.1, 1.1, 2.2])
+    with c1:
+        update_us = st.button("更新外盤收盤", use_container_width=True)
+    with c2:
+        st.metric("外盤分數", f"{_safe_float(us_score.get('外盤分數'), 50):.1f}")
+    with c3:
+        st.metric("外盤狀態", _safe_str(us_score.get("外盤狀態")))
+    with c4:
+        st.caption("手動抓 NASDAQ / SOX / S&P500 / VIX / 台積電ADR / 美元台幣，不進頁自動執行。")
+
+    if update_us:
+        with st.spinner("正在手動更新外盤資料；只在按下時執行..."):
+            added, msgs = _fetch_us_market_manual(target_date)
+        if added > 0:
+            st.success(f"外盤更新完成，成功 {added} 項。")
+        else:
+            st.warning("外盤沒有更新成功，可能 Yahoo 端點暫時無法連線。")
+        with st.expander("外盤更新明細", expanded=True):
+            for msg in msgs:
+                st.write(f"- {msg}")
+        if added > 0:
+            st.rerun()
+
+    items = ["NASDAQ", "SOX半導體", "S&P500", "VIX", "台積電ADR", "美元台幣"]
+    cols = st.columns(6)
+    for col, name in zip(cols, items):
+        item = us_row.get(name) if isinstance(us_row, dict) else {}
+        with col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#ffffff;min-height:88px;">
+                    <div style="font-size:13px;color:#64748b;font-weight:800;">{name}</div>
+                    <div style="font-size:15px;color:#0f172a;font-weight:900;margin-top:8px;">{_safe_float((item or {}).get('pct'), 0):+.2f}%</div>
+                    <div style="font-size:12px;color:#64748b;">{_safe_str((item or {}).get('date'))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("外盤快取明細", expanded=False):
+        df = _us_cache_to_df()
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if not df.empty:
+            st.download_button(
+                "下載外盤快取CSV",
+                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="macro_us_market_cache.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -1054,6 +1294,7 @@ def main():
 
     _render_stable_factor_block(row)
     _render_institutional_block(target_date)
+    _render_us_market_block(target_date)
     _render_market_cache_chart()
     _render_macro_bridge_block(row)
     _render_macro_feature_center()
