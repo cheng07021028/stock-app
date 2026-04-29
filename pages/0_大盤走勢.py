@@ -1797,6 +1797,138 @@ def _calc_market_context_quick(pred_date_text: str) -> dict[str, Any]:
     }
 
 
+
+def _calc_market_context_instant(pred_date_text: str) -> dict[str, Any]:
+    """
+    v26.7：零等待大盤模式。
+    不呼叫 Yahoo / Stooq / TWSE / Google News / TAIFEX。
+    先用本機收盤快取 macro_market_close_cache.json 或安全預設值讓頁面立即顯示。
+    使用者可再按「更新即時大盤」補抓資料。
+    """
+    cache = _read_macro_close_cache()
+    dt = pd.to_datetime(pred_date_text, errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp(_tw_now().date())
+    ymd = dt.strftime("%Y%m%d")
+    cached = cache.get(ymd, {}) if isinstance(cache, dict) else {}
+
+    close = _safe_float(cached.get("close"), None) if isinstance(cached, dict) else None
+    pct = _safe_float(cached.get("pct"), 0.0) if isinstance(cached, dict) else 0.0
+    used_date = _safe_str(cached.get("used_date") or cached.get("date")) if isinstance(cached, dict) else ""
+    source = _safe_str(cached.get("source")) if isinstance(cached, dict) else ""
+
+    if close is None:
+        close = 22000.0
+        pct = 0.0
+        used_date = pred_date_text
+        source = "安全預設值｜等待手動更新即時大盤"
+
+    twii = {
+        "ok": bool(cached),
+        "source": source or "本機快取",
+        "date": used_date or pred_date_text,
+        "used_date": used_date or pred_date_text,
+        "close": close,
+        "pct": pct,
+        "ma5": close,
+        "ma20": close,
+        "is_realtime": False,
+    }
+    empty_asset = {"date": "", "used_date": "", "pct": 0.0, "close": None, "source": "instant_skip"}
+
+    tech_score = _score_from_pct(pct, scale=1.3, cap=6)
+    us_score = 0.0
+    night_score = 0.0
+    risk_score = 0.0
+    foreign_score = 0.0
+    futures_score = 0.0
+    sector_score = 0.0
+    event_score = 0.0
+    scenario = "即時快顯等待更新"
+    if pct >= 0.8:
+        scenario = "大盤偏多"
+    elif pct <= -0.8:
+        scenario = "大盤偏空"
+    elif abs(pct) <= 0.3:
+        scenario = "大盤震盪"
+
+    return {
+        "twii": twii,
+        "taiex_now": twii,
+        "nas": empty_asset, "sox": empty_asset, "spx": empty_asset, "adr": empty_asset,
+        "es": empty_asset, "nq": empty_asset, "vix": empty_asset, "usdtwd": empty_asset,
+        "news_rows": [],
+        "news_score": 0.0,
+        "news_logic": "零等待模式略過新聞端點",
+        "main_risk": "零等待模式：未納入新聞/法人/期權端點",
+        "tech_score": tech_score,
+        "us_score": us_score,
+        "night_score": night_score,
+        "risk_score": risk_score,
+        "foreign_score": foreign_score,
+        "futures_score": futures_score,
+        "sector_score": sector_score,
+        "event_score": event_score,
+        "scenario": scenario,
+        "structure_notes": ["零等待模式先顯示頁面，請按更新即時大盤補抓資料"],
+        "tw_close": close,
+        "tw_pct": pct,
+        "vix_val": 18.0,
+        "fx_val": 32.0,
+        "foreign_amt": None,
+        "total3_amt": None,
+        "foreign_fut_net": None,
+        "pcr": None,
+        "margin_change": None,
+        "short_change": None,
+        "sector_strong": "零等待",
+        "sector_weak": "零等待",
+        "event_list": ["零等待模式：先顯示，不等待外部 API"],
+        "source_status": f"零等待模式｜加權:{source or '本機快取/安全預設'} / {used_date or pred_date_text}",
+        "market_data_date": used_date or pred_date_text,
+        "twii_date": used_date or pred_date_text,
+        "us_data_date": "零等待略過",
+        "night_data_date": "零等待略過",
+        "inst_used_date": "零等待略過",
+        "futopt_used_date": "零等待略過",
+        "margin_used_date": "零等待略過",
+        "news_range": "零等待略過新聞端點",
+    }
+
+
+def _predict_all_models_instant(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    ctx = _calc_market_context_instant(pred_date_text)
+    weights = _get_dynamic_weights(records_df)
+    rows = [_predict_for_model(model, ctx, weights, pred_date_text) for model in MODEL_NAMES]
+    pred_df = pd.DataFrame(rows)
+    pred_df = _enrich_macro_predictions(pred_df, ctx)
+    pred_df["綜合排名分"] = pred_df["股神模式分數"] * 0.55 + pred_df["股神信心度"] * 0.45
+    pred_df = pred_df.sort_values(["綜合排名分", "股神模式分數"], ascending=[False, False]).reset_index(drop=True)
+    return pred_df, ctx
+
+
+def _try_refresh_taiex_cache_now(pred_date_text: str) -> tuple[bool, str]:
+    """
+    手動更新即時/收盤大盤。失敗不讓整頁卡住。
+    """
+    try:
+        data = _fetch_taiex_realtime_or_close(pred_date_text)
+        if isinstance(data, dict) and data.get("close") is not None:
+            dt = pd.to_datetime(data.get("date") or pred_date_text, errors="coerce")
+            if pd.isna(dt):
+                dt = pd.to_datetime(pred_date_text, errors="coerce")
+            if pd.isna(dt):
+                dt = pd.Timestamp(_tw_now().date())
+            ymd = dt.strftime("%Y%m%d")
+            cache = _read_macro_close_cache()
+            cache[ymd] = data
+            _write_macro_close_cache(cache)
+            return True, f"已更新大盤資料：{data.get('source')}｜{data.get('date')}｜{_safe_float(data.get('close'), 0):,.2f}"
+        return False, "即時 / 收盤大盤更新失敗，已保留本機快顯資料。"
+    except Exception as e:
+        return False, f"即時 / 收盤大盤更新例外：{e}"
+
+
 def _predict_all_models_quick(pred_date_text: str, records_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
     ctx = _calc_market_context_quick(pred_date_text)
     weights = _get_dynamic_weights(records_df)
@@ -2599,15 +2731,21 @@ def main():
     if status_msg:
         getattr(st, status_type if status_type in {"success", "warning", "error", "info"} else "info")(status_msg)
 
-    top = st.columns([1.1, 1.2, 1.0, 1.0, 2.2])
+    top = st.columns([1.0, 1.0, 1.0, 0.85, 0.85, 2.0])
     with top[0]:
         if st.button("🔄 重新載入紀錄", use_container_width=True):
+            # v26.7：避免按鈕自動卡整頁，只有使用者按時才讀 GitHub。
             df, err = _read_records_from_github()
             _save_state_df(df)
             _set_status("已重新載入紀錄" if not err else err, "success" if not err else "warning")
             st.rerun()
     with top[1]:
-        if st.button("🧹 清除資料快取", use_container_width=True):
+        if st.button("⚡ 更新即時大盤", use_container_width=True):
+            _ok, _msg = _try_refresh_taiex_cache_now(pd.to_datetime(st.session_state.get(_k("active_pred_date"), date.today())).strftime("%Y-%m-%d"))
+            _set_status(_msg, "success" if _ok else "warning")
+            st.rerun()
+    with top[2]:
+        if st.button("🧹 清除快取", use_container_width=True):
             try:
                 _fetch_stooq.clear()
                 _search_news_headlines.clear()
@@ -2617,11 +2755,12 @@ def main():
                 pass
             _set_status("資料快取已清除", "success")
             st.rerun()
-    with top[2]:
-        quick_mode = st.toggle("快顯模式", value=True, key=_k("quick_mode"))
     with top[3]:
-        auto_save = st.toggle("儲存即同步", value=False, key=_k("auto_save"))
+        zero_wait_mode = st.toggle("零等待", value=True, key=_k("zero_wait_mode"))
     with top[4]:
+        quick_mode = st.toggle("快顯模式", value=True, key=_k("quick_mode"))
+        auto_save = False
+    with top[5]:
         pred_date_input = st.date_input("推估日期", value=st.session_state.get(_k("active_pred_date"), date.today()), key=_k("pred_date"))
         if st.button("套用日期", use_container_width=True, key=_k("apply_pred_date")):
             st.session_state[_k("active_pred_date")] = pred_date_input
@@ -2631,20 +2770,24 @@ def main():
     if pd.to_datetime(active_pred_date, errors="coerce") != pd.to_datetime(pred_date_input, errors="coerce"):
         st.info(f"目前分析日期仍為 {pd.to_datetime(active_pred_date).strftime('%Y-%m-%d')}，按一下『套用日期』才會重新計算。")
 
+    # v26.7：頁面載入時不自動讀 GitHub，避免大盤趨勢一直卡在遠端紀錄讀取。
+    # 需要歷史紀錄時，請按「重新載入紀錄」。
     base_df = _get_state_df()
     if base_df.empty:
-        df, _ = _read_records_from_github()
-        _save_state_df(df)
-        base_df = _get_state_df()
+        base_df = pd.DataFrame()
 
     pred_date_text = pd.to_datetime(active_pred_date).strftime("%Y-%m-%d")
-    with st.spinner("正在產生大盤趨勢分析，快顯模式會優先顯示必要結果..."):
+    if zero_wait_mode:
+        pred_df, ctx = _predict_all_models_instant(pred_date_text, base_df)
+        st.caption("⚡ 零等待模式：不等待外部 API，先用本機收盤快取 / 安全預設顯示。需要即時大盤請按「更新即時大盤」。")
+    else:
+        with st.spinner("正在產生大盤趨勢分析，快顯模式會優先顯示必要結果..."):
+            if quick_mode:
+                pred_df, ctx = _predict_all_models_quick(pred_date_text, base_df)
+            else:
+                pred_df, ctx = _predict_all_models(pred_date_text, base_df)
         if quick_mode:
-            pred_df, ctx = _predict_all_models_quick(pred_date_text, base_df)
-        else:
-            pred_df, ctx = _predict_all_models(pred_date_text, base_df)
-    if quick_mode:
-        st.caption("⚡ 目前使用快顯模式：優先載入必要大盤結果；如需完整法人、期權、新聞端點，請關閉快顯模式後重新整理。")
+            st.caption("⚡ 目前使用快顯模式：優先載入必要大盤結果；如需完整法人、期權、新聞端點，請關閉快顯模式後重新整理。")
     taiex_live = ctx.get("taiex_now") if isinstance(ctx, dict) else {}
     if isinstance(taiex_live, dict) and taiex_live.get("close") is not None:
         live_label = "盤中即時" if taiex_live.get("is_realtime") else "收盤紀錄"
