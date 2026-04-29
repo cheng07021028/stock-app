@@ -6,6 +6,7 @@ from typing import Any
 import base64
 import io
 import json
+import time
 
 import pandas as pd
 import requests
@@ -43,7 +44,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PFX = "godpick_list_"
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "recommend_list_v52_keyerror_nostuck_20260429"
+BACKTEST_V12_VERSION = "recommend_list_v53_perf_guard_20260429"
 DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
 V5_BACKFILL_FIX_VERSION = "recommend_list_v5_backfill_fix_v1_20260427"
 READ_FALLBACK_VERSION = "recommend_list_multi_source_read_v1_20260427"
@@ -1057,14 +1058,24 @@ def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress
     rows = []
     done = ok_count = fail_count = 0
     total = len(targets)
-    prog = st.progress(0, text="V51：準備更新推薦清單績效...") if show_progress and total else None
+    prog = st.progress(0, text="V53：準備更新推薦清單績效...") if show_progress and total else None
     status_box = st.empty() if show_progress and total else None
+    max_seconds = 28
+    started_ts = time.time()
+    stopped_by_time_guard = False
+    time_guard_skip_count = 0
 
     for i, row in work.iterrows():
         payload = dict(row)
         if i not in targets:
             rows.append(payload)
             continue
+        if time.time() - started_ts > max_seconds:
+            stopped_by_time_guard = True
+            time_guard_skip_count += 1
+            rows.append(payload)
+            continue
+
         code = _normalize_code(payload.get("股票代號"))
         name = _safe_str(payload.get("股票名稱"))
         try:
@@ -1085,9 +1096,9 @@ def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress
         rows.append(payload)
         done += 1
         if prog is not None:
-            prog.progress(min(1.0, done / max(total, 1)), text=f"V51：更新推薦清單績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
+            prog.progress(min(1.0, done / max(total, 1)), text=f"V53：更新推薦清單績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
         if status_box is not None and (done == total or done % 5 == 0):
-            status_box.caption(f"本次分批上限 {max_rows} 筆；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
+            status_box.caption(f"本次分批上限 {max_rows} 筆；本批時間防呆 {max_seconds} 秒；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
     st.session_state[_k("v51_perf_update_summary")] = {
         "待更新總數": len(candidates),
         "本次更新上限": max_rows,
@@ -1095,6 +1106,9 @@ def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress
         "成功": ok_count,
         "略過或失敗": fail_count,
         "剩餘": max(0, len(candidates)-done),
+        "時間防呆觸發": bool(stopped_by_time_guard),
+        "時間防呆略過": int(time_guard_skip_count),
+        "單批秒數上限": max_seconds,
         "更新時間": _now_text(),
     }
     return _ensure_record_columns(pd.DataFrame(rows))
@@ -1259,6 +1273,8 @@ def main():
             else:
                 st.warning("已在本頁分批更新，但遠端同步可能失敗，請查看同步明細。")
             if summary.get("剩餘", 0):
+                if summary.get("時間防呆觸發"):
+                    st.warning(f"V53 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 28)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
                 st.info("仍有舊紀錄待補績效，可再次按更新；每次分批處理可避免頁面一直跑。")
         load_msg = _safe_str(st.session_state.get(_k("load_msg"), ""))
         if load_msg:
