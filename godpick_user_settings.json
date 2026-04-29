@@ -22,9 +22,9 @@
   "column_orders": {
     "full_table": [
       "勾選",
-      "最新價",
       "飆股起漲分數",
       "起漲等級",
+      "最新價",
       "股票代號",
       "股票名稱",
       "市場別",
@@ -226,6 +226,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-29 15:49:55",
+  "updated_at": "2026-04-29 15:50:13",
   "version": "godpick_v5_persistent_settings"
 }
