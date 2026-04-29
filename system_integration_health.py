@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-系統串聯健康檢查服務 v43
+系統串聯健康檢查服務 v54
 
 用途：
 - 檢查 0_大盤趨勢 -> 7_股神推薦 -> 8_股神推薦紀錄 -> 10_推薦清單 -> 首頁/儀表板 的 JSON 串聯。
@@ -27,6 +27,9 @@ CORE_JSON_DEFAULTS: Dict[str, Any] = {
     "godpick_record_ui_config.json": {},
     "watchlist.json": {},
     "stock_master_cache.json": {},
+    "data_source_diagnostics.json": [],
+    "watchlist_runtime_snapshot.json": {},
+    "watchlist_normalized.json": {},
 }
 
 MARKET_REQUIRED_KEYS = [
@@ -44,6 +47,10 @@ MARKET_REQUIRED_KEYS = [
     "market_session_usable",
     "godpick_market_effect",
     "data_diagnostics",
+    # v45 0_大盤趨勢新增欄位
+    "event_factor",
+    "macro_mode_estimate",
+    "feature_center_version",
 ]
 
 GODPICK_RESULT_MARKET_KEYS = [
@@ -361,7 +368,7 @@ def validate_pages(base_dir: Path) -> List[Dict[str, Any]]:
             "狀態": "OK" if found else "缺少",
             "符合檔案": "、".join(found),
             "候選檔名": "、".join(candidates),
-            "建議": "OK" if found else "請確認 pages 內檔名；v43 已支援中文檔名、#U 編碼檔名、英文備用檔名。",
+            "建議": "OK" if found else "請確認 pages 內檔名；v54 已支援中文檔名、#U 編碼檔名、英文備用檔名。",
         })
     return rows
 
@@ -655,3 +662,166 @@ def run_full_integration_check(base_dir: Path) -> Dict[str, Any]:
         "market_snapshot": market_snapshot,
         "v42_repair_available": True,
     }
+
+
+# ============================================================
+# v54：全系統健康檢查更新版
+# ============================================================
+
+V54_PERFORMANCE_KEYS = [
+    "推薦後1日漲跌%", "推薦後3日漲跌%", "推薦後5日漲跌%", "推薦後10日漲跌%", "推薦後20日漲跌%",
+    "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標", "是否停損", "績效更新時間",
+]
+
+def validate_v45_market_feature_center(base_dir: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    ok, snap, err = safe_read_json(base_dir / "market_snapshot.json")
+    if not ok or not isinstance(snap, dict):
+        return [{"檢查項目": "v45 大盤功能管理中心", "狀態": "失敗", "說明": err, "建議": "先到 0_大盤趨勢重新寫入 market_snapshot.json。"}]
+    for key, desc in [("event_factor", "Google News / 事件風險因子"), ("macro_mode_estimate", "完整大盤模式預估"), ("feature_center_version", "大盤功能管理中心版本")]:
+        exists = key in snap
+        rows.append({"檢查項目": desc, "狀態": "OK" if exists else "缺欄位", "說明": json_shape(snap.get(key)) if exists else "", "建議": "OK" if exists else "請使用 0_大盤趨勢 v45+ 重新產生 market_snapshot.json。"})
+    macro = snap.get("macro_mode_estimate")
+    if isinstance(macro, dict):
+        mode = macro.get("完整模式") or macro.get("mode") or macro.get("macro_mode") or macro.get("模式")
+        confidence = macro.get("模型信心") or macro.get("confidence") or ""
+        rows.append({"檢查項目": "完整大盤模式內容", "狀態": "OK" if mode else "注意", "說明": f"模式={mode or '未提供'}；信心={confidence}", "建議": "OK" if mode else "可回 0_大盤趨勢按寫入橋接檔。"})
+    else:
+        rows.append({"檢查項目": "完整大盤模式內容", "狀態": "注意", "說明": json_shape(macro), "建議": "macro_mode_estimate 建議為 dict，方便 7_股神推薦讀取。"})
+    return rows
+
+def validate_v47_data_source_diagnostics(base_dir: Path) -> List[Dict[str, Any]]:
+    path = base_dir / "data_source_diagnostics.json"
+    ok, data, err = safe_read_json(path)
+    if not ok:
+        return [{"檢查項目": "data_source_diagnostics.json", "狀態": "注意", "說明": err, "建議": "需先執行 7_股神推薦或資料抓取，utils.py v47 才會產生診斷資料。"}]
+    records = data if isinstance(data, list) else (data.get("records", []) if isinstance(data, dict) else [])
+    rows = [{"檢查項目": "資料源診斷檔", "狀態": "OK", "說明": json_shape(data), "建議": "OK"}]
+    if isinstance(records, list) and records:
+        latest = records[-80:]
+        fail_count = 0
+        slow_count = 0
+        sources = set()
+        for r in latest:
+            if not isinstance(r, dict):
+                continue
+            source = r.get("source") or r.get("資料源") or r.get("type") or r.get("類型") or "unknown"
+            sources.add(str(source))
+            status = str(r.get("status") or r.get("狀態") or r.get("ok") or "").lower()
+            if any(x in status for x in ["fail", "error", "false", "失敗"]):
+                fail_count += 1
+            cost = normalize_number(r.get("elapsed") or r.get("耗時") or r.get("秒數") or r.get("duration"))
+            if cost is not None and cost >= 2.5:
+                slow_count += 1
+        rows.append({"檢查項目": "最近資料源樣本", "狀態": "OK" if fail_count == 0 else "注意", "說明": f"來源={len(sources)} 種；失敗={fail_count}；慢請求={slow_count}", "建議": "若失敗或慢請求偏多，檢查 utils timeout 與資料來源狀態。"})
+    else:
+        rows.append({"檢查項目": "最近資料源樣本", "狀態": "注意", "說明": "尚無紀錄", "建議": "跑一次 7_股神推薦或即時/歷史資料測試後再檢查。"})
+    return rows
+
+def validate_v49_watchlist_runtime(base_dir: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for file_name, desc in [("watchlist_runtime_snapshot.json", "v49 自選股 runtime 快照"), ("watchlist_normalized.json", "v49 自選股標準化資料")]:
+        ok, data, err = safe_read_json(base_dir / file_name)
+        rows.append({"檢查項目": desc, "狀態": "OK" if ok else "注意", "說明": json_shape(data) if ok else err, "建議": "OK" if ok else "進 4_自選股中心按重寫並驗證 watchlist，或新增/刪除一次自選股後產生。"})
+    return rows
+
+def validate_v50_v53_performance_fields(base_dir: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for file_name, label in [("godpick_records.json", "8_股神推薦紀錄"), ("godpick_recommend_list.json", "10_推薦清單")]:
+        ok, data, err = safe_read_json(base_dir / file_name)
+        if not ok:
+            rows.append({"檔案": file_name, "用途": label, "狀態": "注意", "筆數": "", "已更新績效筆數": "", "缺少績效欄位": err, "建議": "尚無資料可忽略；有資料則請確認檔案可讀。"})
+            continue
+        records = _iter_records_mutable(data)
+        if not records:
+            rows.append({"檔案": file_name, "用途": label, "狀態": "注意", "筆數": 0, "已更新績效筆數": 0, "缺少績效欄位": "尚無樣本", "建議": "產生推薦紀錄後再檢查。"})
+            continue
+        sample = records[:30]
+        missing = []
+        for k in V54_PERFORMANCE_KEYS:
+            if any(k not in rec for rec in sample):
+                missing.append(k)
+        updated = sum(1 for rec in records if str(rec.get("績效更新時間", "")).strip())
+        rows.append({"檔案": file_name, "用途": label, "狀態": "OK" if not missing else "缺欄位", "筆數": len(records), "已更新績效筆數": updated, "缺少績效欄位": "、".join(missing), "建議": "OK" if not missing else "請使用 v53 版 8/10，或到 11_資料診斷執行補欄位修復。"})
+    return rows
+
+def validate_v48_speed_monitor_files(base_dir: Path) -> List[Dict[str, Any]]:
+    ok, latest, err = safe_read_json(base_dir / "godpick_latest_recommendations.json")
+    if not ok:
+        return [{"檢查項目": "v48 推薦速度監控", "狀態": "注意", "說明": err, "建議": "跑一次 7_股神推薦後再檢查。"}]
+    first = get_first_record(latest)
+    if not first:
+        return [{"檢查項目": "v48 推薦速度監控", "狀態": "注意", "說明": "尚無推薦樣本", "建議": "跑一次 7_股神推薦後再檢查。"}]
+    return [{"檢查項目": "v48 推薦結果樣本", "狀態": "OK", "說明": f"最新推薦樣本欄位 {len(first.keys())} 個", "建議": "推薦頁完成掃描後，請展開 V48 推薦速度監控查看詳細耗時。"}]
+
+def backup_json_files(base_dir: Path) -> List[Dict[str, Any]]:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir = Path(base_dir) / "backups" / f"v54_health_backup_{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    rows: List[Dict[str, Any]] = []
+    for name in CORE_JSON_DEFAULTS.keys():
+        src = Path(base_dir) / name
+        if not src.exists():
+            rows.append({"檔案": name, "結果": "略過", "說明": "來源不存在"})
+            continue
+        try:
+            dst = backup_dir / name
+            dst.write_bytes(src.read_bytes())
+            rows.append({"檔案": name, "結果": "OK", "說明": str(dst)})
+        except Exception as e:
+            rows.append({"檔案": name, "結果": "失敗", "說明": f"{type(e).__name__}: {e}"})
+    return rows
+
+def repair_v54_missing_fields(base_dir: Path, overwrite_blank: bool = False) -> Dict[str, Any]:
+    files = ["godpick_records.json", "godpick_recommend_list.json"]
+    rows: List[Dict[str, Any]] = []
+    total_fixed = 0
+    total_fields = 0
+    for file_name in files:
+        path = Path(base_dir) / file_name
+        ok, data, err = safe_read_json(path)
+        if not ok:
+            rows.append({"檔案": file_name, "結果": "略過", "原因": err, "修復筆數": 0, "補欄位數": 0})
+            continue
+        records = _iter_records_mutable(data)
+        fixed = 0
+        fields = 0
+        for rec in records:
+            changed = False
+            for k in V54_PERFORMANCE_KEYS:
+                if k not in rec or (overwrite_blank and str(rec.get(k, "")).strip() in {"", "None", "nan", "—"}):
+                    rec[k] = False if k in {"是否達標", "是否停損"} else None
+                    fields += 1
+                    changed = True
+            if changed:
+                fixed += 1
+        if fixed:
+            w_ok, msg = safe_write_json(path, data)
+            rows.append({"檔案": file_name, "結果": "OK" if w_ok else "寫入失敗", "原因": msg, "修復筆數": fixed, "補欄位數": fields})
+            if w_ok:
+                total_fixed += fixed
+                total_fields += fields
+        else:
+            rows.append({"檔案": file_name, "結果": "無需修復", "原因": "績效欄位已完整", "修復筆數": 0, "補欄位數": 0})
+    return {"ok": True, "message": f"v54 完成：修復 {total_fixed} 筆，補入 {total_fields} 個績效欄位。", "rows": rows}
+
+def run_full_integration_check(base_dir: Path) -> Dict[str, Any]:
+    base_dir = Path(base_dir)
+    file_rows = validate_file_matrix(base_dir)
+    market_rows, market_snapshot = validate_market_snapshot(base_dir)
+    bridge_rows = validate_bridge_files(base_dir)
+    rec_rows = validate_recommendation_market_fields_v42(base_dir)
+    page_rows = validate_pages(base_dir)
+    v45_rows = validate_v45_market_feature_center(base_dir)
+    v47_rows = validate_v47_data_source_diagnostics(base_dir)
+    v48_rows = validate_v48_speed_monitor_files(base_dir)
+    v49_rows = validate_v49_watchlist_runtime(base_dir)
+    perf_rows = validate_v50_v53_performance_fields(base_dir)
+    all_rows: List[Dict[str, Any]] = []
+    for group_name, rows in [("核心 JSON", file_rows), ("大盤快照", market_rows), ("橋接檔", bridge_rows), ("推薦/紀錄/清單", rec_rows), ("頁面檔案", page_rows), ("v45 大盤功能管理中心", v45_rows), ("v47 資料源診斷", v47_rows), ("v48 推薦速度監控", v48_rows), ("v49 自選股同步", v49_rows), ("v50-v53 推薦後績效", perf_rows)]:
+        for row in rows:
+            merged = {"群組": group_name}
+            merged.update(row)
+            all_rows.append(merged)
+    summary = build_summary(all_rows)
+    return {"summary": summary, "file_rows": file_rows, "market_rows": market_rows, "bridge_rows": bridge_rows, "recommendation_rows": rec_rows, "page_rows": page_rows, "v45_rows": v45_rows, "v47_rows": v47_rows, "v48_rows": v48_rows, "v49_rows": v49_rows, "performance_rows": perf_rows, "all_rows": all_rows, "market_snapshot": market_snapshot, "v42_repair_available": True, "v54_repair_available": True}
