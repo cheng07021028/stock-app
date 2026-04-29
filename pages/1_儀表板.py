@@ -1,4 +1,6 @@
 from datetime import date
+import json
+from pathlib import Path
 import time
 import pandas as pd
 import streamlit as st
@@ -80,6 +82,94 @@ def _safe_float(v, default=None):
         return default
 
 
+
+# ============================================================
+# v39 儀表板大盤快照串接
+# 僅讀取 0_大盤趨勢輸出的 market_snapshot.json，不在儀表板重抓網路。
+# ============================================================
+def _read_market_snapshot_dash_v39() -> dict:
+    for p in [Path("market_snapshot.json"), Path("macro_mode_bridge.json")]:
+        try:
+            if not p.exists():
+                continue
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data["_snapshot_file"] = str(p)
+                return data
+        except Exception:
+            continue
+    return {}
+
+
+def _dash_pick(snapshot: dict, key: str, default="—"):
+    if not isinstance(snapshot, dict):
+        return default
+    v = snapshot.get(key, default)
+    if v is None or v == "":
+        return default
+    return v
+
+
+def _dash_num(v, digits=2, signed=False, suffix=""):
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+    except Exception:
+        pass
+    try:
+        n = float(str(v).replace(",", "").replace("%", ""))
+        sign = "+" if signed and n > 0 else ""
+        return f"{sign}{n:,.{digits}f}{suffix}"
+    except Exception:
+        return str(v) if str(v).strip() else "—"
+
+
+def render_market_risk_dashboard_v39():
+    snapshot = _read_market_snapshot_dash_v39()
+    render_pro_section("大盤風控快照", "讀取 0_大盤趨勢輸出的 market_snapshot.json，作為自選股監控的市場背景。")
+
+    if not snapshot:
+        st.info("尚未讀到 market_snapshot.json。請先到 0_大盤趨勢更新並寫入股神橋接檔。")
+        return
+
+    score = _dash_pick(snapshot, "market_score", None)
+    try:
+        score_float = float(score)
+    except Exception:
+        score_float = None
+
+    trend = _dash_pick(snapshot, "market_trend")
+    risk = _dash_pick(snapshot, "market_risk_level")
+    gate = _dash_pick(snapshot, "risk_gate", _dash_pick(snapshot, "risk_gate_mode"))
+    session_label = _dash_pick(snapshot, "market_session_label", _dash_pick(snapshot, "market_session"))
+    quality = _dash_pick(snapshot, "data_quality")
+    updated_at = _dash_pick(snapshot, "updated_at")
+
+    render_pro_kpi_row([
+        {
+            "label": "大盤分數",
+            "value": _dash_num(score, 1),
+            "delta": f"{trend}｜風險 {risk}",
+            "delta_class": "pro-kpi-delta-up" if (score_float or 0) >= 60 else "pro-kpi-delta-down" if (score_float or 0) < 45 else "pro-kpi-delta-flat",
+        },
+        {
+            "label": "風控閘門",
+            "value": gate,
+            "delta": f"交易時段：{session_label}",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "資料品質",
+            "value": quality,
+            "delta": f"更新：{updated_at}",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+    ])
+
+    effect = snapshot.get("godpick_market_effect", {}) if isinstance(snapshot.get("godpick_market_effect"), dict) else {}
+    effect_desc = effect.get("effect_summary") or effect.get("description") or snapshot.get("trend_comment") or "—"
+    st.caption(f"股神推薦影響：{effect_desc}")
 @st.cache_data(ttl=5, show_spinner=False)
 def _prepare_dashboard_metrics(df: pd.DataFrame) -> dict:
     if df is None or df.empty:
@@ -255,6 +345,8 @@ def main():
         "盤面儀表板",
         "專業監控視圖｜集中觀察自選股強弱、即時波動與成交量分布"
     )
+    render_market_risk_dashboard_v39()
+
 
     watchlist_dict = get_normalized_watchlist()
     if not watchlist_dict:
