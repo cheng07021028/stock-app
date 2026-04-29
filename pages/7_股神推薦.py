@@ -54,7 +54,7 @@ except Exception:
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
-MACRO_LINK_VERSION = "macro_link_v1_20260427"
+MACRO_LINK_VERSION = "macro_link_v33_market_snapshot_bridge_20260429"
 WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
 GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
@@ -90,6 +90,7 @@ GODPICK_SETTINGS_FILE = "godpick_user_settings.json"
 GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
 GODPICK_LIST_FILE = "godpick_recommend_list.json"
 MACRO_MODE_BRIDGE_FILE = "macro_mode_bridge.json"
+MARKET_SNAPSHOT_FILE = "market_snapshot.json"
 
 
 GODPICK_RECORD_COLUMNS = [
@@ -1300,26 +1301,157 @@ def _weight_text(weights: dict[str, int] | None = None) -> str:
     return " / ".join([f"{k}{v}%" for k, v in weights.items()])
 
 
-def _read_macro_mode_bridge() -> dict[str, Any]:
-    """v27.3：讀取 01_大盤趨勢 寫出的 macro_mode_bridge.json。"""
-    p = Path(MACRO_MODE_BRIDGE_FILE)
-    if not p.exists():
-        return {}
+def _read_project_json_file(file_name: str) -> dict[str, Any]:
+    """v33：安全讀取專案根目錄 JSON；失敗回傳空 dict，不能讓推薦頁空白。"""
+    candidates = []
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        candidates.append(Path(__file__).resolve().parent.parent / file_name)
     except Exception:
+        pass
+    candidates.append(Path.cwd() / file_name)
+    candidates.append(Path(file_name))
+    seen = set()
+    for p in candidates:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not p.exists():
+            continue
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            continue
+    return {}
+
+
+def _read_market_snapshot_v33() -> dict[str, Any]:
+    """v33：優先讀 01_大盤趨勢 v32 產生的 market_snapshot.json。"""
+    snapshot = _read_project_json_file(MARKET_SNAPSHOT_FILE)
+    if not isinstance(snapshot, dict):
         return {}
+    required = snapshot.get("required_by_godpick")
+    if isinstance(required, dict):
+        merged = snapshot.copy()
+        for k, v in required.items():
+            if merged.get(k) in [None, "", []]:
+                merged[k] = v
+        snapshot = merged
+    return snapshot
+
+
+def _macro_weight_advice_from_snapshot_v33(snapshot: dict[str, Any]) -> str:
+    """v33：把 risk_gate / market_score 轉成推薦頁可用的權重建議字串。"""
+    gate = _safe_str(snapshot.get("risk_gate"))
+    score = _safe_float(snapshot.get("market_score"), 50) or 50
+    if gate == "normal":
+        return "+5%" if score >= 70 else "+3%"
+    if gate == "selective":
+        return "0%"
+    if gate == "conservative":
+        return "-10%"
+    if gate == "data_guard":
+        return "-15%"
+    if score >= 75:
+        return "+5%"
+    if score >= 60:
+        return "+3%"
+    if score >= 45:
+        return "0%"
+    if score >= 30:
+        return "-8%"
+    return "-15%"
+
+
+def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """v33：將 market_snapshot.json 正規化成舊版 macro bridge 欄位，保留舊功能不破壞。"""
+    if not snapshot:
+        return {}
+    score = _safe_float(snapshot.get("market_score"), 50) or 50
+    trend = _safe_str(snapshot.get("market_trend")) or _macro_reference_grade(score)
+    risk_level = _safe_str(snapshot.get("market_risk_level")) or "中"
+    gate = _safe_str(snapshot.get("risk_gate")) or "selective"
+    position_hint = _safe_str(snapshot.get("position_hint")) or _safe_str(snapshot.get("market_bias"))
+    if gate == "normal":
+        risk_filter = "正常"
+    elif gate == "selective":
+        risk_filter = "中性"
+    elif gate == "conservative":
+        risk_filter = "偏嚴"
+    elif gate == "data_guard":
+        risk_filter = "嚴格"
+    else:
+        risk_filter = "中性"
+    return {
+        "updated_at": _safe_str(snapshot.get("updated_at")),
+        "version": _safe_str(snapshot.get("version")) or "market_snapshot_v33_adapter",
+        "market_score": score,
+        "market_score_raw": snapshot.get("market_score_raw", score),
+        "market_state": trend,
+        "market_trend": trend,
+        "market_risk_level": risk_level,
+        "market_bias": _safe_str(snapshot.get("market_bias")),
+        "risk_gate": gate,
+        "position_hint": position_hint,
+        "strategy": position_hint,
+        "godpick_weight_advice": _safe_str(snapshot.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(snapshot),
+        "recommendation_adjustment": snapshot.get("recommendation_adjustment") or snapshot.get("market_bias"),
+        "recommendation_bias": {"risk_filter": risk_filter, "position_hint": position_hint, "risk_gate": gate},
+        "volume_status": snapshot.get("volume_status"),
+        "trend_comment": _safe_str(snapshot.get("trend_comment")),
+        "data_quality": _safe_str(snapshot.get("data_quality")),
+        "freshness": snapshot.get("freshness"),
+        "market_date": _safe_str(snapshot.get("twse_data_date") or snapshot.get("otc_data_date") or snapshot.get("futures_data_date")),
+        "twse_change": snapshot.get("twse_change"),
+        "twse_change_pct": snapshot.get("twse_change_pct"),
+        "otc_change": snapshot.get("otc_change"),
+        "otc_change_pct": snapshot.get("otc_change_pct"),
+        "futures_change": snapshot.get("futures_change"),
+        "futures_change_pct": snapshot.get("futures_change_pct"),
+        "mini_futures_change": snapshot.get("mini_futures_change"),
+        "mini_futures_change_pct": snapshot.get("mini_futures_change_pct"),
+        "data_guard_notes": snapshot.get("data_guard_notes"),
+        "_source": "market_snapshot.json",
+    }
+
+
+def _load_macro_bridge_v33() -> dict[str, Any]:
+    """v33：優先 market_snapshot.json，並用 macro_mode_bridge.json 補欄位。"""
+    snapshot_bridge = _snapshot_to_macro_bridge_v33(_read_market_snapshot_v33())
+    legacy_bridge = _read_project_json_file(MACRO_MODE_BRIDGE_FILE)
+    if not isinstance(legacy_bridge, dict):
+        legacy_bridge = {}
+    if snapshot_bridge and legacy_bridge:
+        merged = legacy_bridge.copy()
+        merged.update({k: v for k, v in snapshot_bridge.items() if v not in [None, "", []]})
+        return merged
+    return snapshot_bridge or legacy_bridge or {}
+
+
+def _read_macro_mode_bridge() -> dict[str, Any]:
+    """v33：讀取 01_大盤趨勢輸出的 market_snapshot.json / macro_mode_bridge.json。"""
+    return _load_macro_bridge_v33()
 
 
 def _macro_bridge_weight_delta(bridge: dict[str, Any]) -> int:
     raw = _safe_str(bridge.get("godpick_weight_advice"))
     if not raw:
-        return 0
-    raw = raw.replace("％", "%").replace("+", "")
+        raw = _macro_weight_advice_from_snapshot_v33(bridge)
+    raw = raw.replace("％", "%").replace("＋", "+")
     try:
-        return int(float(raw.replace("%", "").strip()))
+        return int(float(raw.replace("%", "").replace("+", "").strip()))
     except Exception:
+        gate = _safe_str(bridge.get("risk_gate"))
+        if gate == "normal":
+            return 5
+        if gate == "conservative":
+            return -10
+        if gate == "data_guard":
+            return -15
         return 0
 
 
@@ -1389,29 +1521,38 @@ def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, An
 
 
 def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[str, Any], dict[str, int], bool]:
-    """v27.3：在股神推薦頁顯示大盤橋接狀態並回傳調整後權重。"""
+    """v33：顯示大盤橋接狀態；優先讀 market_snapshot.json，失敗才讀 macro_mode_bridge.json。"""
     bridge = _read_macro_mode_bridge()
-    render_pro_section("大盤橋接風控", "讀取 01_大盤趨勢 寫出的 macro_mode_bridge.json，將大盤穩定分帶入股神推薦權重。")
+    render_pro_section("大盤橋接風控", "讀取 01_大盤趨勢 輸出的 market_snapshot.json / macro_mode_bridge.json，將大盤風控帶入股神推薦。")
 
     if not bridge:
-        st.info("尚未找到 macro_mode_bridge.json。請先到 01_大盤趨勢 按「寫入股神大盤參考」。")
+        st.info("尚未找到 market_snapshot.json 或 macro_mode_bridge.json。請先到 01_大盤趨勢 按『立即寫入股神橋接 / market_snapshot』。")
         return bridge, applied_weights, False
 
     enabled_key = _k("macro_bridge_enabled")
     if enabled_key not in st.session_state:
         st.session_state[enabled_key] = True
 
-    c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.4])
+    score = _safe_float(bridge.get("market_score"), 50) or 50
+    trend = _safe_str(bridge.get("market_trend") or bridge.get("market_state")) or _macro_reference_grade(score)
+    risk_level = _safe_str(bridge.get("market_risk_level")) or _macro_bridge_risk_text(bridge)
+    risk_gate = _safe_str(bridge.get("risk_gate")) or "selective"
+    weight_advice = _safe_str(bridge.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(bridge)
+    position_hint = _safe_str(bridge.get("position_hint") or bridge.get("strategy") or bridge.get("market_bias"))
+    data_quality = _safe_str(bridge.get("data_quality")) or "未標示"
+
+    c1, c2, c3, c4, c5, c6 = st.columns([1.0, 1.0, 1.0, 1.0, 1.15, 1.25])
     with c1:
-        st.metric("大盤穩定分", f"{_safe_float(bridge.get('market_score'), 50):.1f}")
+        st.metric("大盤分數", f"{score:.1f}")
     with c2:
-        st.metric("大盤狀態", _safe_str(bridge.get("market_state")) or "未定義")
+        st.metric("趨勢", trend)
     with c3:
-        st.metric("建議加權", _safe_str(bridge.get("godpick_weight_advice")) or "0%")
+        st.metric("風險", risk_level)
     with c4:
-        risk_filter = _safe_str((bridge.get("recommendation_bias") or {}).get("risk_filter")) if isinstance(bridge.get("recommendation_bias"), dict) else ""
-        st.metric("推薦風控", risk_filter or "中性")
+        st.metric("風控閘門", risk_gate)
     with c5:
+        st.metric("建議加權", weight_advice)
+    with c6:
         enabled = st.toggle("套用大盤橋接", value=bool(st.session_state.get(enabled_key, True)), key=enabled_key)
 
     adjusted = _apply_macro_bridge_to_weights(applied_weights, bridge, enabled=enabled)
@@ -1420,7 +1561,12 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     else:
         st.caption("目前未套用大盤橋接，維持原始權重：" + _weight_text(applied_weights))
 
-    with st.expander("大盤橋接明細", expanded=False):
+    with st.expander("大盤橋接明細 / 對推薦影響", expanded=False):
+        st.write(f"**資料來源：** {_safe_str(bridge.get('_source')) or 'macro_mode_bridge.json'}")
+        st.write(f"**資料品質：** {data_quality}")
+        st.write(f"**資料日期：** {_safe_str(bridge.get('market_date')) or '—'}")
+        st.write(f"**部位建議：** {position_hint or '—'}")
+        st.write(f"**大盤解讀：** {_safe_str(bridge.get('trend_comment')) or _safe_str(bridge.get('market_bias')) or '—'}")
         st.json(bridge)
 
     return bridge, adjusted, enabled
@@ -1452,10 +1598,10 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         return x
 
     score = _safe_float(bridge.get("market_score"), 50)
-    state = _safe_str(bridge.get("market_state"))
-    weight = _safe_str(bridge.get("godpick_weight_advice")) or "0%"
+    state = _safe_str(bridge.get("market_trend") or bridge.get("market_state"))
+    weight = _safe_str(bridge.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(bridge)
     risk = _macro_bridge_risk_text(bridge)
-    strategy = _safe_str(bridge.get("strategy"))
+    strategy = _safe_str(bridge.get("position_hint") or bridge.get("strategy") or bridge.get("market_bias"))
     updated_at = _safe_str(bridge.get("updated_at"))
 
     x["大盤橋接分數"] = score
@@ -3187,7 +3333,44 @@ def _macro_grade_weight(grade: str, score: Any) -> tuple[float, str]:
 
 
 def _load_latest_macro_reference() -> dict[str, Any]:
-    """讀取最新大盤參考結果。沒有資料時回傳中性，避免 7 頁推薦壞掉。"""
+    """讀取最新大盤參考結果。v33 優先 market_snapshot.json，沒有才回舊 macro_trend_records。"""
+    snapshot = _read_market_snapshot_v33()
+    if snapshot:
+        score = _safe_float(snapshot.get("market_score"), 50) or 50
+        grade = _macro_reference_grade(score)
+        weight, reason = _macro_grade_weight(grade, score)
+        gate = _safe_str(snapshot.get("risk_gate"))
+        if gate == "normal":
+            risk_filter = "可加權"
+        elif gate == "selective":
+            risk_filter = "只控風險"
+        elif gate == "conservative":
+            risk_filter = "降權防守"
+        elif gate == "data_guard":
+            risk_filter = "資料保護"
+            weight = min(weight, -0.08)
+            reason = "大盤資料不足或過舊，啟用 data_guard，保守降權但不刪剛起漲股"
+        else:
+            risk_filter = "中性"
+        return {
+            "大盤參考等級": grade,
+            "大盤可參考分數": score,
+            "大盤操作風格": _safe_str(snapshot.get("position_hint") or snapshot.get("market_bias") or snapshot.get("trend_comment")) or "未判定",
+            "大盤推薦權重": _safe_str(snapshot.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(snapshot),
+            "大盤降權原因": _safe_str(snapshot.get("trend_comment")) or reason,
+            "大盤資料日期": _safe_str(snapshot.get("twse_data_date") or snapshot.get("otc_data_date") or snapshot.get("futures_data_date")),
+            "大盤市場廣度分數": _safe_float(snapshot.get("market_breadth_score")),
+            "大盤量價確認分數": _safe_float(snapshot.get("volume_confirm_score")),
+            "大盤權值支撐分數": _safe_float(snapshot.get("large_cap_support_score")),
+            "大盤推薦同步分數": score,
+            "大盤風險濾網": risk_filter,
+            "大盤策略模式": _safe_str(snapshot.get("risk_gate")),
+            "大盤多空分數": score,
+            "大盤策略建議": _safe_str(snapshot.get("position_hint")),
+            "大盤風控建議": _safe_str(snapshot.get("market_risk_level")),
+            "_macro_adjust_weight": weight,
+        }
+
     base_dir = Path(__file__).resolve().parent.parent
     rows = []
     for fn in MACRO_RECORD_FILES:
@@ -7149,6 +7332,7 @@ def main():
                 ("大盤可參考分數", format_number(_safe_float(macro_ref_for_ui.get("大盤可參考分數"), 0), 2), ""),
                 ("推薦權重建議", _safe_str(macro_ref_for_ui.get("大盤推薦權重")), ""),
                 ("操作風格", _safe_str(macro_ref_for_ui.get("大盤操作風格")), ""),
+                ("風控模式", _safe_str(macro_ref_for_ui.get("大盤策略模式")) or _safe_str(macro_ref_for_ui.get("大盤風險濾網")), ""),
                 ("資料日期", _safe_str(macro_ref_for_ui.get("大盤資料日期")) or "尚未儲存大盤紀錄", ""),
             ],
             chips=["大盤濾網", "輔助加權", "不硬篩"],
