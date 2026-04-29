@@ -1522,12 +1522,80 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
 
-def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
+
+def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
+    """V51：判斷是否真的需要抓歷史資料，避免每次全表重跑。"""
+    if not payload:
+        return False
+    code = _normalize_code(payload.get("股票代號"))
+    if not code:
+        return False
+    rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
+    if pd.isna(rec_date):
+        return False
+    # 推薦日太近時，1/3/5/10/20 日資料本來就尚未完整，不重複卡住等待。
+    age_days = (date.today() - rec_date.date()).days
+    if age_days < 1:
+        return False
+    # 已有 20 日績效且最近 12 小時更新過，就不重複抓。
+    has_any = any(_safe_float(payload.get(c)) is not None for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"])
+    last = pd.to_datetime(_safe_str(payload.get("追蹤更新時間")), errors="coerce")
+    if has_any and not pd.isna(last):
+        try:
+            if (datetime.now() - last.to_pydatetime()).total_seconds() < 12 * 3600:
+                return False
+        except Exception:
+            pass
+    # 優先更新缺資料、或 20 日資料尚未形成的紀錄。
+    if not has_any:
+        return True
+    if age_days >= 20 and _safe_float(payload.get("推薦後20日%")) is None:
+        return True
+    if age_days >= 10 and _safe_float(payload.get("推薦後10日%")) is None:
+        return True
+    if age_days >= 5 and _safe_float(payload.get("推薦後5日%")) is None:
+        return True
+    if age_days >= 3 and _safe_float(payload.get("推薦後3日%")) is None:
+        return True
+    return False
+
+
+def _backfill_perf_columns(df: pd.DataFrame, max_rows: int = 30, show_progress: bool = True) -> pd.DataFrame:
+    """V51：分批更新推薦後績效，避免按鈕一次全表連外導致一直跑。
+
+    設計原則：
+    1. 只更新需要補績效的列。
+    2. 每次最多 max_rows 筆，避免 Streamlit request timeout。
+    3. 不再對同一列額外呼叫 _get_forward_return 多次，避免 1 列重複抓 5 次歷史資料。
+    4. 失敗不阻塞，保留原資料並寫入簡短狀態。
+    """
     if df is None or df.empty:
         return _ensure_godpick_record_columns(pd.DataFrame())
+
+    work = _ensure_godpick_record_columns(df.copy()).reset_index(drop=True)
     rows = []
-    for _, row in df.iterrows():
+    candidates = []
+    for i, row in work.iterrows():
         payload = dict(row)
+        if _row_needs_perf_update(payload):
+            candidates.append(i)
+
+    max_rows = int(max(1, min(max_rows or 30, 200)))
+    targets = set(candidates[:max_rows])
+    total = len(targets)
+    done = 0
+    ok_count = 0
+    fail_count = 0
+
+    prog = st.progress(0, text="V51：準備更新推薦後績效...") if show_progress and total else None
+    status_box = st.empty() if show_progress and total else None
+
+    for i, row in work.iterrows():
+        payload = dict(row)
+        if i not in targets:
+            rows.append(payload)
+            continue
+
         code = _normalize_code(payload.get("股票代號"))
         name = _safe_str(payload.get("股票名稱"))
         market = _safe_str(payload.get("市場別"))
@@ -1535,24 +1603,46 @@ def _backfill_perf_columns(df: pd.DataFrame) -> pd.DataFrame:
         stop_price = _safe_float(payload.get("停損參考")) or _safe_float(payload.get("停損價"))
         target_price = _safe_float(payload.get("賣出目標1")) or _safe_float(payload.get("近端壓力"))
 
-        metrics = _get_forward_metrics(code, name, market, rec_date, stop_price, target_price)
-        for k, v in metrics.items():
-            if k in payload or k in GODPICK_RECORD_COLUMNS:
-                payload[k] = v
+        try:
+            metrics = _get_forward_metrics(code, name, market, rec_date, stop_price, target_price)
+        except Exception as e:
+            metrics = {}
+            payload["績效評語"] = f"績效更新失敗：{str(e)[:60]}"
 
-        # 舊欄位保留，避免既有分析與圖表失效；新欄位為 v12 標準欄位。
-        for d in [3, 5, 10, 20]:
-            old_key = f"{d}日績效%"
-            new_key = f"推薦後{d}日%"
-            if _safe_float(payload.get(old_key)) is None:
-                if _safe_float(payload.get(new_key)) is not None:
+        if metrics:
+            ok_count += 1
+            for k, v in metrics.items():
+                if k in payload or k in GODPICK_RECORD_COLUMNS:
+                    payload[k] = v
+            # 舊欄位同步，不再額外抓資料。
+            for d in [3, 5, 10, 20]:
+                old_key = f"{d}日績效%"
+                new_key = f"推薦後{d}日%"
+                if _safe_float(payload.get(old_key)) is None and _safe_float(payload.get(new_key)) is not None:
                     payload[old_key] = payload.get(new_key)
-                else:
-                    payload[old_key] = _get_forward_return(code, name, market, rec_date, d)
-            if _safe_float(payload.get(new_key)) is None and _safe_float(payload.get(old_key)) is not None:
-                payload[new_key] = payload.get(old_key)
+        else:
+            fail_count += 1
+            if not _safe_str(payload.get("績效評語")):
+                payload["績效評語"] = "本次未取得足夠歷史資料，已略過，不阻塞整批更新"
+            payload["追蹤更新時間"] = _now_text()
+
         payload = _recalc_row(payload)
         rows.append(payload)
+        done += 1
+        if prog is not None:
+            prog.progress(min(1.0, done / max(total, 1)), text=f"V51：更新推薦後績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
+        if status_box is not None and (done == total or done % 5 == 0):
+            status_box.caption(f"本次分批上限 {max_rows} 筆；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
+
+    st.session_state[_k("v51_perf_update_summary")] = {
+        "待更新總數": len(candidates),
+        "本次更新上限": max_rows,
+        "本次處理": done,
+        "成功": ok_count,
+        "略過或失敗": fail_count,
+        "剩餘": max(0, len(candidates) - done),
+        "更新時間": _now_text(),
+    }
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
 
@@ -2355,11 +2445,16 @@ def main():
             _invalidate_analysis_cache()
             st.success("快取已清除")
     with top_cols[4]:
+        batch_n = st.number_input("每次更新筆數", min_value=5, max_value=200, value=30, step=5, key=_k("perf_update_batch_size"))
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            updated = _backfill_perf_columns(_get_state_df())
-            updated = _apply_mode_labels(updated)
-            _save_state_df(updated)
-            st.success("已更新推薦後 1/3/5/10/20 日績效、最大漲幅/回撤、命中結果與模式績效標籤，尚未同步")
+            with st.spinner("V51：分批更新推薦後績效中，單次不全表重跑，避免卡住..."):
+                updated = _backfill_perf_columns(_get_state_df(), max_rows=int(batch_n), show_progress=True)
+                updated = _apply_mode_labels(updated)
+                _save_state_df(updated)
+            summary = st.session_state.get(_k("v51_perf_update_summary"), {})
+            st.success(f"V51 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，剩餘約 {summary.get('剩餘', 0)} 筆；尚未同步。")
+            if summary.get("剩餘", 0):
+                st.info("仍有舊紀錄待補績效，可再次按更新；每次分批處理可避免頁面一直跑。")
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
     with top_cols[6]:
