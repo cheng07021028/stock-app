@@ -1879,6 +1879,218 @@ def _render_background_update_status():
 
 
 
+# ===== v28.5 missing block safety patch =====
+def _safe_us_cache_to_df_v285() -> pd.DataFrame:
+    try:
+        if "_us_cache_to_df" in globals():
+            return _us_cache_to_df()
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _safe_default_us_market_row_v285(target_date: date) -> dict[str, Any]:
+    try:
+        if "_default_us_market_row" in globals():
+            row = _default_us_market_row(target_date)
+            return row if isinstance(row, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _safe_us_market_score_v285(us_row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        if "_us_market_score" in globals():
+            return _us_market_score(us_row)
+    except Exception:
+        pass
+    return {"外盤分數": 50.0, "外盤狀態": "尚未啟用", "外盤建議": "外盤函式未載入，暫不納入。"}
+
+
+def _render_us_market_block(target_date: date):
+    """
+    v28.5：外盤區塊安全版。
+    避免舊包 main 呼叫 _render_us_market_block 但函式未定義造成 NameError。
+    """
+    st.markdown("### 外盤自動背景 / 快取")
+    us_row = _safe_default_us_market_row_v285(target_date)
+    us_score = _safe_us_market_score_v285(us_row)
+
+    c1, c2, c3, c4 = st.columns([1.25, 1.1, 1.1, 2.2])
+    with c1:
+        update_us = st.button("背景更新外盤", use_container_width=True)
+    with c2:
+        st.metric("外盤分數", f"{_safe_float(us_score.get('外盤分數'), 50):.1f}")
+    with c3:
+        st.metric("外盤狀態", _safe_str(us_score.get("外盤狀態")))
+    with c4:
+        st.caption("外盤資料採背景/快取模式；不在主畫面等待，避免卡住。")
+
+    if update_us:
+        if "_fetch_us_market_manual" in globals():
+            try:
+                def _us_worker():
+                    try:
+                        added, _ = _fetch_us_market_manual(target_date)
+                        _set_job_status("us_auto_bg", "finished", f"外盤更新完成，成功 {added} 項")
+                    except Exception as e:
+                        _set_job_status("us_auto_bg", "error", f"外盤背景更新失敗：{e}")
+                _set_job_status("us_auto_bg", "running", "外盤背景更新中")
+                threading.Thread(target=_us_worker, daemon=True).start()
+                st.success("已啟動外盤背景更新，畫面不會等待。")
+            except Exception as e:
+                st.warning(f"外盤背景更新啟動失敗：{e}")
+        else:
+            st.warning("目前版本未載入外盤更新函式，請先保留快取資料或升級完整包。")
+
+    jobs = _read_bg_jobs() if "_read_bg_jobs" in globals() else {}
+    item = jobs.get("us_auto_bg", {}) if isinstance(jobs, dict) else {}
+    if item:
+        st.caption(f"外盤背景狀態：{item.get('status')}｜{item.get('message')}｜{item.get('updated_at')}")
+
+    items = ["NASDAQ", "SOX半導體", "S&P500", "VIX", "台積電ADR", "美元台幣"]
+    cols = st.columns(6)
+    for col, name in zip(cols, items):
+        item_data = us_row.get(name) if isinstance(us_row, dict) else {}
+        with col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#ffffff;min-height:88px;">
+                    <div style="font-size:13px;color:#64748b;font-weight:800;">{name}</div>
+                    <div style="font-size:15px;color:#0f172a;font-weight:900;margin-top:8px;">{_safe_float((item_data or {}).get('pct'), 0):+.2f}%</div>
+                    <div style="font-size:12px;color:#64748b;">{_safe_str((item_data or {}).get('date'))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("外盤快取明細", expanded=False):
+        df = _safe_us_cache_to_df_v285()
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if df is not None and not df.empty:
+            st.download_button(
+                "下載外盤快取CSV",
+                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="macro_us_market_cache.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+def _background_taifex_worker_v285(target_date_text: str) -> None:
+    try:
+        d = pd.to_datetime(target_date_text, errors="coerce")
+        if pd.isna(d):
+            d = pd.Timestamp(_tw_now().date())
+        d = d.date()
+
+        if "_fetch_taifex_futures_manual" not in globals():
+            _set_job_status("taifex_auto_bg", "error", "目前版本未載入TAIFEX抓取函式")
+            return
+
+        row = _fetch_taifex_futures_manual(d, timeout=2.0)
+        if isinstance(row, dict) and row.get("ok"):
+            _save_taifex_row(row)
+            _set_job_status("taifex_auto_bg", "finished", f"期貨更新成功：{row.get('source')} / 收盤 {row.get('tx_close')} / 漲跌 {row.get('tx_change')}")
+        else:
+            _set_job_status("taifex_auto_bg", "error", f"期貨更新失敗：{(row or {}).get('error', 'unknown')}")
+    except Exception as e:
+        _set_job_status("taifex_auto_bg", "error", f"期貨背景更新例外：{e}")
+
+
+def _start_taifex_background_update_v285(target_date: date, force: bool = False) -> None:
+    try:
+        if not force and _job_is_recent("taifex_auto_bg", MACRO_AUTO_REFRESH_SECONDS):
+            return
+        _set_job_status("taifex_auto_bg", "running", "期貨背景更新中")
+        t = threading.Thread(
+            target=_background_taifex_worker_v285,
+            args=(pd.to_datetime(target_date).strftime("%Y-%m-%d"),),
+            daemon=True,
+        )
+        t.start()
+    except Exception as e:
+        _set_job_status("taifex_auto_bg", "error", f"期貨背景啟動失敗：{e}")
+
+
+def _render_taifex_bg_status_v285():
+    jobs = _read_bg_jobs() if "_read_bg_jobs" in globals() else {}
+    item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
+    status = _safe_str(item.get("status")) or "尚未啟動"
+    msg = _safe_str(item.get("message"))
+    updated = _safe_str(item.get("updated_at"))
+    c1, c2, c3 = st.columns([1.1, 3.0, 1.5])
+    with c1:
+        st.metric("期貨背景狀態", status)
+    with c2:
+        st.caption(msg or "按下更新後會背景抓 TAIFEX，不會卡住頁面。")
+    with c3:
+        st.caption(updated or "尚未更新")
+    if status == "running":
+        st.info("期貨背景更新中；頁面不會等待。稍後重新整理或切頁回來即可看到結果。")
+
+
+def _render_taifex_block(target_date: date):
+    """
+    v28.5：期貨區塊恢復版。
+    確保期貨不會因 v28.4 patch 遺失函式而消失。
+    """
+    st.markdown("### 期貨自動背景回補")
+    row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
+    score = _taifex_score(row) if "_taifex_score" in globals() else {"期貨分數": 50, "期貨狀態": "尚未更新", "期貨建議": "尚未納入期貨資料"}
+
+    c1, c2, c3, c4, c5 = st.columns([1.3, 1.1, 1.1, 1.1, 2.1])
+    with c1:
+        update_taifex = st.button("背景更新台指期", use_container_width=True)
+    with c2:
+        st.metric("期貨分數", f"{_safe_float(score.get('期貨分數'), 50):.1f}")
+    with c3:
+        st.metric("期貨狀態", _safe_str(score.get("期貨狀態")))
+    with c4:
+        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
+    with c5:
+        st.caption("期貨採背景自動更新，不在主畫面等待。")
+
+    if update_taifex:
+        _start_taifex_background_update_v285(target_date, force=True)
+        st.success("已啟動期貨背景更新。頁面不會等待，稍後重新整理或切頁回來即可看到結果。")
+
+    _render_taifex_bg_status_v285()
+
+    cols = st.columns(4)
+    cards = [
+        ("資料日期", _safe_str(row.get("date")) or "尚未更新"),
+        ("台指期收盤", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
+        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}"),
+        ("期貨建議", _safe_str(score.get("期貨建議"))),
+    ]
+    for col, (title, value) in zip(cols, cards):
+        with col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#ffffff;min-height:88px;">
+                    <div style="font-size:13px;color:#64748b;font-weight:800;">{title}</div>
+                    <div style="font-size:15px;color:#0f172a;font-weight:900;margin-top:8px;">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("期貨快取明細", expanded=False):
+        df = _taifex_cache_to_df() if "_taifex_cache_to_df" in globals() else pd.DataFrame()
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if df is not None and not df.empty:
+            st.download_button(
+                "下載期貨快取CSV",
+                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="macro_taifex_cache.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
