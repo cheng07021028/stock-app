@@ -38,6 +38,7 @@ except Exception:
 PAGE_TITLE = "大盤走勢"
 PFX = "macro_safe_"
 CACHE_FILE = "macro_market_close_cache.json"
+INST_CACHE_FILE = "macro_institutional_cache.json"
 
 
 def _k(key: str) -> str:
@@ -89,6 +90,188 @@ def _write_cache(cache: dict[str, Any]) -> None:
         Path(CACHE_FILE).write_text(json.dumps(cache, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     except Exception:
         pass
+
+
+def _read_inst_cache() -> dict[str, Any]:
+    p = Path(INST_CACHE_FILE)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_inst_cache(cache: dict[str, Any]) -> None:
+    try:
+        Path(INST_CACHE_FILE).write_text(json.dumps(cache, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _extract_money_100m(v: Any):
+    """TWSE 金額通常為元，轉成億元。"""
+    s = _safe_str(v).replace(",", "").replace("+", "").replace(" ", "")
+    if not s or s in {"-", "--", "None", "nan"}:
+        return None
+    try:
+        return float(s) / 100000000
+    except Exception:
+        return None
+
+
+def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) -> dict[str, Any]:
+    """
+    v27.6：手動更新三大法人買賣超。
+    只有按按鈕才執行，不進頁自動抓，避免卡住。
+    單位：億元。
+    """
+    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
+    urls = [
+        f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json",
+        f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json",
+    ]
+
+    for url in urls:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            rows = data.get("data") or []
+            if not isinstance(rows, list) or not rows:
+                continue
+
+            foreign = None
+            invest = None
+            dealer = None
+            total = None
+            raw_rows = []
+
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                label = _safe_str(row[0])
+                nums = [_extract_money_100m(x) for x in row[1:]]
+                nums = [x for x in nums if x is not None]
+                if not nums:
+                    continue
+                # BFI82U 常見最後一欄為買賣超金額，取最後有效值。
+                val = nums[-1]
+                raw_rows.append({"項目": label, "買賣超億元": val})
+                if "外資" in label:
+                    foreign = val
+                elif "投信" in label:
+                    invest = val
+                elif "自營商" in label:
+                    dealer = val
+                elif "合計" in label or "總計" in label:
+                    total = val
+
+            calc_total = sum([x for x in [foreign, invest, dealer] if x is not None]) if any(x is not None for x in [foreign, invest, dealer]) else total
+            if total is None:
+                total = calc_total
+
+            if any(x is not None for x in [foreign, invest, dealer, total]):
+                return {
+                    "ok": True,
+                    "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+                    "source": "TWSE 三大法人",
+                    "foreign_100m": foreign,
+                    "investment_trust_100m": invest,
+                    "dealer_100m": dealer,
+                    "total_100m": total,
+                    "raw_rows": raw_rows,
+                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        except Exception:
+            continue
+
+    return {
+        "ok": False,
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "source": "TWSE 三大法人",
+        "error": "法人資料尚未取得、非交易日或連線失敗",
+    }
+
+
+def _save_inst_row(row: dict[str, Any]) -> None:
+    if not isinstance(row, dict) or not row.get("ok"):
+        return
+    dt = pd.to_datetime(row.get("date") or _tw_now().date(), errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp(_tw_now().date())
+    ymd = dt.strftime("%Y%m%d")
+    cache = _read_inst_cache()
+    cache[ymd] = row
+    _write_inst_cache(cache)
+
+
+def _default_inst_row(target_date: date) -> dict[str, Any]:
+    cache = _read_inst_cache()
+    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
+    if isinstance(cache.get(ymd), dict):
+        return cache[ymd]
+    if cache:
+        keys = sorted([k for k in cache.keys() if isinstance(cache.get(k), dict)], reverse=True)
+        if keys:
+            row = dict(cache[keys[0]])
+            row["source"] = _safe_str(row.get("source")) + "｜最近快取"
+            return row
+    return {"ok": False, "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"), "source": "尚未更新", "total_100m": None}
+
+
+def _institutional_score(inst: dict[str, Any]) -> dict[str, Any]:
+    total = _safe_float(inst.get("total_100m"), 0) or 0
+    foreign = _safe_float(inst.get("foreign_100m"), 0) or 0
+    invest = _safe_float(inst.get("investment_trust_100m"), 0) or 0
+    score = 50
+    score += max(min(total * 0.25, 18), -18)
+    score += max(min(foreign * 0.18, 12), -12)
+    score += max(min(invest * 0.35, 10), -10)
+    score = max(0, min(100, score))
+
+    if score >= 70:
+        label = "法人偏多"
+        advice = "可提高順勢與回測承接權重。"
+    elif score >= 55:
+        label = "法人中性偏多"
+        advice = "可正常觀察，但仍看技術確認。"
+    elif score >= 45:
+        label = "法人中性"
+        advice = "法人沒有明顯方向，回到個股條件。"
+    elif score >= 30:
+        label = "法人偏空"
+        advice = "降低追價，優先防守。"
+    else:
+        label = "法人明顯偏空"
+        advice = "建議縮小部位或觀望。"
+
+    return {"法人分數": round(score, 1), "法人狀態": label, "法人建議": advice}
+
+
+def _inst_cache_to_df() -> pd.DataFrame:
+    cache = _read_inst_cache()
+    rows = []
+    if isinstance(cache, dict):
+        for k, v in cache.items():
+            if not isinstance(v, dict):
+                continue
+            rows.append({
+                "日期": v.get("date") or k,
+                "外資億元": v.get("foreign_100m"),
+                "投信億元": v.get("investment_trust_100m"),
+                "自營商億元": v.get("dealer_100m"),
+                "三大法人合計億元": v.get("total_100m"),
+                "來源": v.get("source"),
+                "更新時間": v.get("updated_at"),
+            })
+    if not rows:
+        return pd.DataFrame(columns=["日期", "外資億元", "投信億元", "自營商億元", "三大法人合計億元", "來源", "更新時間"])
+    df = pd.DataFrame(rows)
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    return df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
 
 def _num_tw(v: Any):
@@ -298,6 +481,8 @@ BRIDGE_FILE = "macro_mode_bridge.json"
 
 def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
     factors = _calc_stable_market_factors(row)
+    inst = _default_inst_row(pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce").date() if pd.notna(pd.to_datetime(row.get("date") or row.get("used_date") or date.today(), errors="coerce")) else date.today())
+    inst_score = _institutional_score(inst)
     close_val = _safe_float(row.get("close"))
     pct_val = _safe_float(row.get("pct"))
     payload = {
@@ -318,7 +503,15 @@ def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
         "dist_ma20_pct": _safe_float(factors.get("距MA20%")),
         "position_20d_pct": _safe_float(factors.get("20日位置%")),
         "cache_count": int(factors.get("快取筆數") or 0),
-        "recommendation_bias": _macro_bias_from_score(_safe_float(factors.get("大盤穩定分"), 50)),
+        "institutional_date": _safe_str(inst.get("date")),
+        "institutional_score": _safe_float(inst_score.get("法人分數"), 50),
+        "institutional_state": _safe_str(inst_score.get("法人狀態")),
+        "institutional_advice": _safe_str(inst_score.get("法人建議")),
+        "foreign_100m": _safe_float(inst.get("foreign_100m")),
+        "investment_trust_100m": _safe_float(inst.get("investment_trust_100m")),
+        "dealer_100m": _safe_float(inst.get("dealer_100m")),
+        "institutional_total_100m": _safe_float(inst.get("total_100m")),
+        "recommendation_bias": _macro_bias_from_score((_safe_float(factors.get("大盤穩定分"), 50) * 0.75) + (_safe_float(inst_score.get("法人分數"), 50) * 0.25)),
     }
     return payload
 
@@ -465,9 +658,9 @@ def _macro_feature_status_df() -> pd.DataFrame:
         },
         {
             "功能": "完整法人籌碼",
-            "目前狀態": "暫停",
-            "是否自動執行": "否",
-            "說明": "先暫停，之後可改成手動更新並快取。",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，手動按鈕",
+            "說明": "v27.6 已改為手動更新三大法人並寫入本機快取。",
         },
         {
             "功能": "Yahoo / Stooq 外盤模型",
@@ -483,6 +676,66 @@ def _macro_feature_status_df() -> pd.DataFrame:
         },
     ]
     return pd.DataFrame(rows)
+
+
+def _render_institutional_block(target_date: date):
+    st.markdown("### 法人籌碼手動回補")
+    inst = _default_inst_row(target_date)
+    score = _institutional_score(inst)
+
+    c1, c2, c3, c4, c5 = st.columns([1.25, 1.1, 1.1, 1.1, 1.5])
+    with c1:
+        update_inst = st.button("更新三大法人", use_container_width=True)
+    with c2:
+        st.metric("法人分數", f"{_safe_float(score.get('法人分數'), 50):.1f}")
+    with c3:
+        st.metric("法人狀態", _safe_str(score.get("法人狀態")))
+    with c4:
+        st.metric("合計億元", f"{_safe_float(inst.get('total_100m'), 0):+.2f}")
+    with c5:
+        st.caption("只在按下時抓 TWSE 法人資料，不會進頁自動執行。")
+
+    if update_inst:
+        with st.spinner("正在手動更新 TWSE 三大法人，最多等待約 3 秒..."):
+            row = _fetch_twse_institutional_manual(target_date)
+        if row.get("ok"):
+            _save_inst_row(row)
+            st.success(f"三大法人更新成功：合計 { _safe_float(row.get('total_100m'), 0):+.2f} 億元")
+            st.rerun()
+        else:
+            st.warning(f"三大法人更新失敗：{row.get('error')}")
+
+    detail = [
+        ("資料日期", _safe_str(inst.get("date")) or "尚未更新"),
+        ("外資", f"{_safe_float(inst.get('foreign_100m'), 0):+.2f} 億"),
+        ("投信", f"{_safe_float(inst.get('investment_trust_100m'), 0):+.2f} 億"),
+        ("自營商", f"{_safe_float(inst.get('dealer_100m'), 0):+.2f} 億"),
+        ("法人建議", _safe_str(score.get("法人建議"))),
+    ]
+    cols = st.columns(len(detail))
+    for col, (title, value) in zip(cols, detail):
+        with col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#ffffff;min-height:84px;">
+                    <div style="font-size:13px;color:#64748b;font-weight:800;">{title}</div>
+                    <div style="font-size:15px;color:#0f172a;font-weight:900;margin-top:8px;">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("法人籌碼快取明細", expanded=False):
+        df = _inst_cache_to_df()
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if not df.empty:
+            st.download_button(
+                "下載法人快取CSV",
+                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="macro_institutional_cache.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 
 def _render_macro_feature_center():
@@ -757,6 +1010,7 @@ def main():
     ])
 
     _render_stable_factor_block(row)
+    _render_institutional_block(target_date)
     _render_market_cache_chart()
     _render_macro_bridge_block(row)
     _render_macro_feature_center()
