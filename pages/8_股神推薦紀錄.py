@@ -9,7 +9,6 @@ import base64
 import io
 import hashlib
 import copy
-import time
 
 import pandas as pd
 import requests
@@ -37,7 +36,7 @@ from utils import (
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "record_v53_perf_guard_20260429"
+BACKTEST_V12_VERSION = "record_v50_perf_tracking_20260429"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -1588,22 +1587,12 @@ def _backfill_perf_columns(df: pd.DataFrame, max_rows: int = 30, show_progress: 
     ok_count = 0
     fail_count = 0
 
-    prog = st.progress(0, text="V53：準備更新推薦後績效...") if show_progress and total else None
+    prog = st.progress(0, text="V51：準備更新推薦後績效...") if show_progress and total else None
     status_box = st.empty() if show_progress and total else None
-    max_seconds = 28
-    started_ts = time.time()
-    stopped_by_time_guard = False
-    time_guard_skip_count = 0
 
     for i, row in work.iterrows():
         payload = dict(row)
         if i not in targets:
-            rows.append(payload)
-            continue
-
-        if time.time() - started_ts > max_seconds:
-            stopped_by_time_guard = True
-            time_guard_skip_count += 1
             rows.append(payload)
             continue
 
@@ -1641,9 +1630,9 @@ def _backfill_perf_columns(df: pd.DataFrame, max_rows: int = 30, show_progress: 
         rows.append(payload)
         done += 1
         if prog is not None:
-            prog.progress(min(1.0, done / max(total, 1)), text=f"V53：更新推薦後績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
+            prog.progress(min(1.0, done / max(total, 1)), text=f"V51：更新推薦後績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
         if status_box is not None and (done == total or done % 5 == 0):
-            status_box.caption(f"本次分批上限 {max_rows} 筆；本批時間防呆 {max_seconds} 秒；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
+            status_box.caption(f"本次分批上限 {max_rows} 筆；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
 
     st.session_state[_k("v51_perf_update_summary")] = {
         "待更新總數": len(candidates),
@@ -1652,9 +1641,6 @@ def _backfill_perf_columns(df: pd.DataFrame, max_rows: int = 30, show_progress: 
         "成功": ok_count,
         "略過或失敗": fail_count,
         "剩餘": max(0, len(candidates) - done),
-        "時間防呆觸發": bool(stopped_by_time_guard),
-        "時間防呆略過": int(time_guard_skip_count),
-        "單批秒數上限": max_seconds,
         "更新時間": _now_text(),
     }
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
@@ -2468,8 +2454,6 @@ def main():
             summary = st.session_state.get(_k("v51_perf_update_summary"), {})
             st.success(f"V51 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，剩餘約 {summary.get('剩餘', 0)} 筆；尚未同步。")
             if summary.get("剩餘", 0):
-                if summary.get("時間防呆觸發"):
-                    st.warning(f"V53 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 28)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
                 st.info("仍有舊紀錄待補績效，可再次按更新；每次分批處理可避免頁面一直跑。")
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
