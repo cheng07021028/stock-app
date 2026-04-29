@@ -300,20 +300,21 @@ def _us_cache_to_df() -> pd.DataFrame:
 
 def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v28.2：法人籌碼自動備援版。
+    v28.3：法人籌碼多來源自動備援版。
     順序：
-    1. TWSE BFI82U 三大法人金額。
-    2. 若 BFI82U 抓不到，改抓 T86 個股法人買賣超「億股代理」作方向判斷。
-    3. 指定日無資料，自動往前找最近 10 個工作日。
-    4. 只在手動按鈕或背景 thread 中執行，不阻塞主畫面。
+    1. TWSE BFI82U 三大法人買賣超金額。
+    2. TWSE T86 個股法人買賣超加總代理。
+    3. FinMind TaiwanStockInstitutionalInvestorsBuySell 代理。
+    4. 指定日無資料，自動往前找最近 15 個工作日。
+    5. 只在手動按鈕或背景 thread 中執行，不阻塞主畫面。
     """
     target_dt = pd.to_datetime(target_date).date()
 
-    def _candidate_dates(end_date: date, max_days: int = 10) -> list[date]:
+    def _candidate_dates(end_date: date, max_days: int = 15) -> list[date]:
         out = []
         cur = end_date
         guard = 0
-        while len(out) < max_days and guard < 25:
+        while len(out) < max_days and guard < 35:
             if cur.weekday() < 5:
                 out.append(cur)
             cur = cur - timedelta(days=1)
@@ -387,7 +388,7 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
         except Exception:
             return None
 
-    def _parse_t86_proxy(data: dict[str, Any], used_date: date) -> dict[str, Any]:
+    def _parse_t86_proxy(data: dict[str, Any], used_date: date, source_name: str = "TWSE T86 法人方向代理") -> dict[str, Any]:
         rows = []
         fields = []
         if isinstance(data, dict):
@@ -396,7 +397,6 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
         if not isinstance(rows, list) or not rows:
             return {}
 
-        # T86 單位多為股數，這裡轉成億股代理，只作方向分數，不冒充金額。
         foreign_shares = 0.0
         invest_shares = 0.0
         dealer_shares = 0.0
@@ -407,7 +407,6 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
             if not isinstance(row, list):
                 continue
             used += 1
-            # 盡量用欄位名稱找；若欄位名不完整，使用常見 T86 index fallback。
             row_map = {field_names[i]: row[i] for i in range(min(len(field_names), len(row)))}
 
             f_val = None
@@ -422,13 +421,11 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
                 if d_val is None and "自營商買賣超" in kk:
                     d_val = _to_float_plain(v)
 
-            # 常見欄位：證券代號,證券名稱,外陸資買進,外陸資賣出,外陸資買賣超,投信買進,投信賣出,投信買賣超,...
             if f_val is None and len(row) > 4:
                 f_val = _to_float_plain(row[4])
             if i_val is None and len(row) > 7:
                 i_val = _to_float_plain(row[7])
             if d_val is None and len(row) > 10:
-                # 自營商總買賣超常在更後面，取一個較穩定 fallback
                 d_val = _to_float_plain(row[10])
 
             foreign_shares += f_val or 0
@@ -443,26 +440,99 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
         dealer_100m_share = dealer_shares / 100000000
         total_proxy = foreign_100m_share + invest_100m_share + dealer_100m_share
 
+        if abs(total_proxy) < 0.000001 and abs(foreign_100m_share) < 0.000001 and abs(invest_100m_share) < 0.000001 and abs(dealer_100m_share) < 0.000001:
+            return {}
+
         return {
             "ok": True,
             "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
-            "source": "TWSE T86 法人方向代理",
+            "source": source_name,
             "unit": "億股代理",
             "is_proxy": True,
             "foreign_100m": foreign_100m_share,
             "investment_trust_100m": invest_100m_share,
             "dealer_100m": dealer_100m_share,
             "total_100m": total_proxy,
-            "raw_rows": [{"項目": "T86全市場加總", "樣本數": used, "單位": "億股代理"}],
+            "raw_rows": [{"項目": "全市場加總", "樣本數": used, "單位": "億股代理"}],
             "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
-            "note": "BFI82U金額資料不可用，已改用T86個股法人買賣超股數作方向代理。"
+            "note": "三大法人金額不可用，已改用個股法人買賣超股數作方向代理。"
         }
 
+    def _fetch_finmind_proxy(used_date: date) -> dict[str, Any]:
+        """
+        FinMind 備援：無 token 也可嘗試；若被限流則略過。
+        以 buy-sell 股數加總，轉成億股代理。
+        """
+        day = pd.to_datetime(used_date).strftime("%Y-%m-%d")
+        urls = [
+            "https://api.finmindtrade.com/api/v4/data",
+            "https://api.finmindtrade.com/api/v3/data",
+        ]
+        params = {
+            "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+            "start_date": day,
+            "end_date": day,
+        }
+        for url in urls:
+            try:
+                r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                rows = data.get("data") if isinstance(data, dict) else []
+                if not isinstance(rows, list) or not rows:
+                    continue
+
+                foreign = 0.0
+                invest = 0.0
+                dealer = 0.0
+                used = 0
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    name = _safe_str(item.get("name") or item.get("institutional_investors"))
+                    buy = _safe_float(item.get("buy"), 0) or 0
+                    sell = _safe_float(item.get("sell"), 0) or 0
+                    net = buy - sell
+                    used += 1
+                    lname = name.lower()
+                    if "foreign" in lname or "外資" in name:
+                        foreign += net
+                    elif "investment" in lname or "trust" in lname or "投信" in name:
+                        invest += net
+                    elif "dealer" in lname or "自營" in name:
+                        dealer += net
+
+                if used <= 0:
+                    continue
+                f = foreign / 100000000
+                i = invest / 100000000
+                d = dealer / 100000000
+                total = f + i + d
+                if abs(total) < 0.000001 and abs(f) < 0.000001 and abs(i) < 0.000001 and abs(d) < 0.000001:
+                    continue
+                return {
+                    "ok": True,
+                    "date": day,
+                    "source": "FinMind 法人方向代理",
+                    "unit": "億股代理",
+                    "is_proxy": True,
+                    "foreign_100m": f,
+                    "investment_trust_100m": i,
+                    "dealer_100m": d,
+                    "total_100m": total,
+                    "raw_rows": [{"項目": "FinMind全市場加總", "樣本數": used, "單位": "億股代理"}],
+                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "note": "TWSE法人資料不可用，已改用FinMind法人買賣超股數作方向代理。",
+                }
+            except Exception:
+                continue
+        return {}
+
     tried = []
-    for d in _candidate_dates(target_dt, max_days=10):
+    for d in _candidate_dates(target_dt, max_days=15):
         ymd = pd.to_datetime(d).strftime("%Y%m%d")
 
-        # A. BFI82U：三大法人金額
         bfi_urls = [
             f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&weekDate={ymd}&monthDate={ymd}&type=day&response=json",
             f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&weekDate={ymd}&monthDate={ymd}&type=day&response=json",
@@ -483,10 +553,10 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
             except Exception:
                 continue
 
-        # B. T86 proxy：方向代理，不是金額。
         t86_urls = [
             f"https://www.twse.com.tw/rwd/zh/fund/T86?date={ymd}&selectType=ALLBUT0999&response=json",
             f"https://www.twse.com.tw/fund/T86?response=json&date={ymd}&selectType=ALLBUT0999",
+            f"https://www.twse.com.tw/rwd/zh/fund/T86?date={ymd}&selectType=ALL&response=json",
         ]
         for url in t86_urls:
             tried.append(f"{ymd} T86代理")
@@ -503,12 +573,20 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
             except Exception:
                 continue
 
+        tried.append(f"{ymd} FinMind代理")
+        parsed = _fetch_finmind_proxy(d)
+        if parsed:
+            if d != target_dt:
+                parsed["source"] = "FinMind 法人方向代理｜最近可用日"
+                parsed["note"] = f"指定日期 {pd.to_datetime(target_dt).strftime('%Y-%m-%d')} 尚無資料，已使用最近可用日 {pd.to_datetime(d).strftime('%Y-%m-%d')}"
+            return parsed
+
     return {
         "ok": False,
         "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-        "source": "TWSE 三大法人 / T86代理",
-        "error": "法人資料尚未取得；BFI82U金額與T86代理皆失敗。可能是TWSE暫無資料、端點限制或連線失敗。",
-        "tried": tried[-12:],
+        "source": "TWSE / FinMind 法人代理",
+        "error": "法人資料尚未取得；BFI82U金額、T86代理、FinMind代理皆失敗。可能是TWSE/FinMind暫無資料、端點限制或連線失敗。",
+        "tried": tried[-18:],
     }
 
 def _save_inst_row(row: dict[str, Any]) -> None:
@@ -1047,7 +1125,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v27.11 改為手動輸入保存，避免 TAIFEX 端點造成頁面卡住。",
+            "說明": "v28.4 改為背景自動更新；不進主畫面等待，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1386,14 +1464,65 @@ def _taifex_cache_to_df() -> pd.DataFrame:
     return df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
 
 
+def _background_taifex_worker(target_date_text: str) -> None:
+    """
+    v28.4：期貨自動背景更新。
+    不在主畫面等待 TAIFEX；成功就寫 macro_taifex_cache.json，失敗只寫狀態。
+    """
+    try:
+        d = pd.to_datetime(target_date_text, errors="coerce")
+        if pd.isna(d):
+            d = pd.Timestamp(_tw_now().date())
+        d = d.date()
+
+        row = _fetch_taifex_futures_manual(d, timeout=2.0)
+        if isinstance(row, dict) and row.get("ok"):
+            _save_taifex_row(row)
+            _set_job_status("taifex_auto_bg", "finished", f"期貨更新成功：{row.get('source')} / 收盤 {row.get('tx_close')} / 漲跌 {row.get('tx_change')}")
+        else:
+            _set_job_status("taifex_auto_bg", "error", f"期貨更新失敗：{(row or {}).get('error', 'unknown')}")
+    except Exception as e:
+        _set_job_status("taifex_auto_bg", "error", f"期貨背景更新例外：{e}")
+
+
+def _start_taifex_background_update(target_date: date, force: bool = False) -> None:
+    if not force and _job_is_recent("taifex_auto_bg", MACRO_AUTO_REFRESH_SECONDS):
+        return
+    _set_job_status("taifex_auto_bg", "running", "期貨背景更新中")
+    t = threading.Thread(
+        target=_background_taifex_worker,
+        args=(pd.to_datetime(target_date).strftime("%Y-%m-%d"),),
+        daemon=True,
+    )
+    t.start()
+
+
+def _render_taifex_bg_status():
+    jobs = _read_bg_jobs()
+    item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
+    status = _safe_str(item.get("status")) or "尚未啟動"
+    msg = _safe_str(item.get("message"))
+    updated = _safe_str(item.get("updated_at"))
+    c1, c2, c3 = st.columns([1.1, 3.0, 1.5])
+    with c1:
+        st.metric("期貨背景狀態", status)
+    with c2:
+        st.caption(msg or "按下更新後會背景抓 TAIFEX，不會卡住頁面。")
+    with c3:
+        st.caption(updated or "尚未更新")
+    if status == "running":
+        st.info("期貨背景更新中；頁面不會等待。稍後重新整理或切頁回來即可看到結果。")
+
+
+
 def _render_taifex_block(target_date: date):
-    st.markdown("### 期貨手動回補")
+    st.markdown("### 期貨自動背景回補")
     row = _default_taifex_row(target_date)
     score = _taifex_score(row)
 
-    c1, c2, c3, c4, c5 = st.columns([1.25, 1.1, 1.1, 1.1, 2.0])
+    c1, c2, c3, c4, c5 = st.columns([1.3, 1.1, 1.1, 1.1, 2.1])
     with c1:
-        update_taifex = st.button("台指期改手動輸入", use_container_width=True)
+        update_taifex = st.button("背景更新台指期", use_container_width=True)
     with c2:
         st.metric("期貨分數", f"{_safe_float(score.get('期貨分數'), 50):.1f}")
     with c3:
@@ -1401,32 +1530,13 @@ def _render_taifex_block(target_date: date):
     with c4:
         st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
     with c5:
-        st.caption("TAIFEX 自動抓取已暫停，避免卡住；請使用手動輸入保存。")
+        st.caption("v28.4：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
 
     if update_taifex:
-        # v27.11：TAIFEX 端點在 Streamlit Cloud / 企業網路常會長時間等待。
-        # 為了避免頁面再次卡住，台指期先改為「不連線、手動輸入」。
-        st.warning("TAIFEX 自動連線已暫停，避免頁面卡住。請展開下方「手動輸入台指期資料」保存收盤與漲跌。")
+        _start_taifex_background_update(target_date, force=True)
+        st.success("已啟動期貨背景更新。頁面不會等待，稍後重新整理或切頁回來即可看到結果。")
 
-    with st.expander("手動輸入台指期資料", expanded=True):
-        st.caption("v27.11：為避免 TAIFEX 端點造成頁面卡住，台指期目前採手動輸入；資料會寫入 macro_taifex_cache.json 並可串聯股神橋接。")
-        m1, m2, m3, m4 = st.columns([1.2, 1.2, 1.2, 1.2])
-        with m1:
-            manual_close = st.number_input("台指期收盤", min_value=0.0, value=float(_safe_float(row.get("tx_close"), 0) or 0), step=1.0, key=_k("manual_tx_close"))
-        with m2:
-            manual_change = st.number_input("台指期漲跌", value=float(_safe_float(row.get("tx_change"), 0) or 0), step=1.0, key=_k("manual_tx_change"))
-        with m3:
-            manual_volume = st.number_input("成交量，可空", min_value=0.0, value=float(_safe_float(row.get("tx_volume"), 0) or 0), step=1.0, key=_k("manual_tx_volume"))
-        with m4:
-            st.write("")
-            st.write("")
-            if st.button("保存手動台指期", use_container_width=True):
-                ok, msg = _save_taifex_manual_input(target_date, manual_close, manual_change, manual_volume)
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.warning(msg)
+    _render_taifex_bg_status()
 
     cols = st.columns(4)
     cards = [
@@ -1459,62 +1569,6 @@ def _render_taifex_block(target_date: date):
                 use_container_width=True,
             )
 
-
-def _render_us_market_block(target_date: date):
-    st.markdown("### 外盤手動回補")
-    us_row = _default_us_market_row(target_date)
-    us_score = _us_market_score(us_row)
-
-    c1, c2, c3, c4 = st.columns([1.25, 1.1, 1.1, 2.2])
-    with c1:
-        update_us = st.button("更新外盤收盤", use_container_width=True)
-    with c2:
-        st.metric("外盤分數", f"{_safe_float(us_score.get('外盤分數'), 50):.1f}")
-    with c3:
-        st.metric("外盤狀態", _safe_str(us_score.get("外盤狀態")))
-    with c4:
-        st.caption("手動抓 NASDAQ / SOX / S&P500 / VIX / 台積電ADR / 美元台幣，不進頁自動執行。")
-
-    if update_us:
-        with st.spinner("正在手動更新外盤資料；只在按下時執行..."):
-            added, msgs = _fetch_us_market_manual(target_date)
-        if added > 0:
-            st.success(f"外盤更新完成，成功 {added} 項。")
-        else:
-            st.warning("外盤沒有更新成功，可能 Yahoo 端點暫時無法連線。")
-        with st.expander("外盤更新明細", expanded=True):
-            for msg in msgs:
-                st.write(f"- {msg}")
-        if added > 0:
-            st.rerun()
-
-    items = ["NASDAQ", "SOX半導體", "S&P500", "VIX", "台積電ADR", "美元台幣"]
-    cols = st.columns(6)
-    for col, name in zip(cols, items):
-        item = us_row.get(name) if isinstance(us_row, dict) else {}
-        with col:
-            st.markdown(
-                f"""
-                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#ffffff;min-height:88px;">
-                    <div style="font-size:13px;color:#64748b;font-weight:800;">{name}</div>
-                    <div style="font-size:15px;color:#0f172a;font-weight:900;margin-top:8px;">{_safe_float((item or {}).get('pct'), 0):+.2f}%</div>
-                    <div style="font-size:12px;color:#64748b;">{_safe_str((item or {}).get('date'))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    with st.expander("外盤快取明細", expanded=False):
-        df = _us_cache_to_df()
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        if not df.empty:
-            st.download_button(
-                "下載外盤快取CSV",
-                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
-                file_name="macro_us_market_cache.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
 
 
 def _render_macro_feature_center():
@@ -1770,7 +1824,15 @@ def _background_update_worker(target_date_text: str) -> None:
         except Exception:
             msgs.append("外盤例外略過")
 
-        msgs.append("期貨自動略過，避免TAIFEX卡住")
+        try:
+            tx = _fetch_taifex_futures_manual(d, timeout=2.0)
+            if isinstance(tx, dict) and tx.get("ok"):
+                _save_taifex_row(tx)
+                msgs.append("期貨更新成功")
+            else:
+                msgs.append("期貨略過")
+        except Exception:
+            msgs.append("期貨例外略過")
 
         try:
             row = _default_market_row(d)
