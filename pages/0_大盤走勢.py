@@ -782,7 +782,7 @@ def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]
 
 def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v29.1：TWSE HTTP 502 / SSL / 無資料時的備援。
+    v29.2：TWSE HTTP 502 / SSL / 無資料時的備援。
     使用 Yahoo ^TWII 日線，僅在手動/背景更新時呼叫，不會進頁同步等待。
     """
     try:
@@ -810,7 +810,7 @@ def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[s
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v29.1：大盤自動備援。
+    v29.2：大盤自動備援。
     1. 盤中先 TWSE MIS。
     2. 非盤中/晚上先 TWSE 收盤。
     3. TWSE 失敗改 Yahoo ^TWII。
@@ -1128,7 +1128,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v29 改為背景自動更新；不進主畫面等待，避免卡住。",
+            "說明": "v29.2 改為背景自動更新；不進主畫面等待，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1544,7 +1544,7 @@ def _render_taifex_block(target_date: date):
     with c3:
         st.metric("期貨狀態", _safe_str(score.get("期貨狀態")))
     with c4:
-        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
+        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else ""))
     with c5:
         st.caption("v29：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
 
@@ -1558,7 +1558,7 @@ def _render_taifex_block(target_date: date):
     cards = [
         ("資料日期", _safe_str(row.get("date")) or "尚未更新"),
         ("台指期收盤", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
-        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}"),
+        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else "")),
         ("期貨建議", _safe_str(score.get("期貨建議"))),
     ]
     for col, (title, value) in zip(cols, cards):
@@ -1618,7 +1618,7 @@ def _render_macro_feature_center():
 
 def _calc_market_change_points(row: dict[str, Any]) -> float | None:
     """
-    v29.1：由目前大盤 close + pct 反推漲跌點數。
+    v29.2：由目前大盤 close + pct 反推漲跌點數。
     pct = (close - prev_close) / prev_close * 100
     change = close - prev_close = close * pct / (100 + pct)
     若資料源已提供 change / change_points 則優先使用。
@@ -1965,7 +1965,7 @@ def _render_background_update_status():
 
 
 
-# ===== v29 missing block safety patch =====
+# ===== v29.2 missing block safety patch =====
 def _safe_us_cache_to_df_v285() -> pd.DataFrame:
     try:
         if "_us_cache_to_df" in globals():
@@ -2134,7 +2134,7 @@ def _render_taifex_bg_status_v285():
 def _render_taifex_block(target_date: date):
     """
     v29：期貨區塊恢復版。
-    確保期貨不會因 v29 patch 遺失函式而消失。
+    確保期貨不會因 v29.2 patch 遺失函式而消失。
     """
     st.markdown("### 期貨自動背景回補")
     row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
@@ -2148,7 +2148,7 @@ def _render_taifex_block(target_date: date):
     with c3:
         st.metric("期貨狀態", _safe_str(score.get("期貨狀態")))
     with c4:
-        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
+        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else ""))
     with c5:
         st.caption("期貨採背景自動更新，不在主畫面等待。")
 
@@ -2162,7 +2162,7 @@ def _render_taifex_block(target_date: date):
     cards = [
         ("資料日期", _safe_str(row.get("date")) or "尚未更新"),
         ("台指期收盤", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
-        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}"),
+        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}" + (f"｜{_safe_float(row.get('tx_pct'), 0):+.2f}%" if row.get("tx_pct") is not None else "")),
         ("期貨建議", _safe_str(score.get("期貨建議"))),
     ]
     for col, (title, value) in zip(cols, cards):
@@ -2191,7 +2191,7 @@ def _render_taifex_block(target_date: date):
 
 
 
-# ===== v29 multi-source fallback pool overrides =====
+# ===== v29.2 multi-source fallback pool overrides =====
 def _v29_source_grade(source: str, is_proxy: bool = False, is_cache: bool = False) -> str:
     s = _safe_str(source)
     if is_cache:
@@ -2240,7 +2240,7 @@ def _v29_recent_cache_row(cache_file: str) -> dict[str, Any]:
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v29 大盤多來源備援池：
+    v29.2 大盤多來源備援池：
     TWSE MIS / MI_INDEX -> Yahoo ^TWII -> 最近快取。
     """
     tried = []
@@ -2300,7 +2300,7 @@ def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> di
 
 def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v29 法人多來源備援池：
+    v29.2 法人多來源備援池：
     TWSE BFI82U 金額 -> TWSE T86 代理 -> FinMind 代理 -> 最近快取。
     """
     target_dt = pd.to_datetime(target_date).date()
@@ -2540,16 +2540,49 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
 
 def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dict[str, Any]:
     """
-    v29 期貨多來源備援池：
-    TAIFEX OpenAPI / HTML -> Yahoo 台指期相關備援 -> 最近快取。
-    不在主畫面等待；背景執行時成功寫快取。
+    v29.2 期貨多來源備援池：
+    1. Yahoo IX0126.TW：TIP TAIFEX TAIEX Futures Index，優先使用，較不容易卡。
+    2. TAIFEX OpenAPI：官方來源，若可用則使用。
+    3. 最近快取：避免完全無資料。
+    不在主畫面等待；背景執行成功即寫快取。
     """
     target_dt = pd.to_datetime(target_date).date()
     tried = []
 
-    # 1) TAIFEX OpenAPI candidates
+    # 1) Yahoo futures index backup first: stable and fast.
+    try:
+        if "_fetch_yahoo_chart" in globals():
+            y = _fetch_yahoo_chart("IX0126.TW", target_dt, timeout=timeout)
+            tried.append(f"Yahoo IX0126.TW:{y.get('error') if isinstance(y, dict) else 'unknown'}")
+            if isinstance(y, dict) and y.get("ok") and y.get("close") is not None:
+                close_val = _safe_float(y.get("close"))
+                pct_val = _safe_float(y.get("pct"))
+                change_val = None
+                if close_val is not None and pct_val is not None and abs(100 + pct_val) > 1e-9:
+                    change_val = close_val * pct_val / (100 + pct_val)
+                row = {
+                    "ok": True,
+                    "date": _safe_str(y.get("date")) or pd.to_datetime(target_dt).strftime("%Y-%m-%d"),
+                    "source": "Yahoo IX0126.TW 期貨指數備援",
+                    "source_grade": "備援",
+                    "tx_close": close_val,
+                    "tx_change": change_val,
+                    "tx_pct": pct_val,
+                    "tx_volume": _safe_float(y.get("volume")),
+                    "raw": {"symbol": "IX0126.TW", "name": "TIP TAIFEX TAIEX Futures Index"},
+                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "note": "Yahoo TIP TAIFEX TAIEX Futures Index 備援資料；非逐月期貨合約，但可作期貨方向參考。",
+                }
+                _v29_write_source_status("期貨", "success", row.get("source"), "備援", "Yahoo IX0126.TW成功")
+                return row
+    except Exception as e:
+        tried.append(f"Yahoo IX0126例外:{e}")
+
+    # 2) TAIFEX OpenAPI official candidates
     ymd_dash = pd.to_datetime(target_dt).strftime("%Y-%m-%d")
     ymd_slash = pd.to_datetime(target_dt).strftime("%Y/%m/%d")
+    ymd_plain = pd.to_datetime(target_dt).strftime("%Y%m%d")
+
     for url in [
         "https://openapi.taifex.com.tw/v1/DailyMarketReportFut",
         "https://openapi.taifex.com.tw/v1/FutDailyMarketReport",
@@ -2557,64 +2590,72 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
         tried.append(url.split("/")[-1])
         try:
             r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list):
-                    chosen = None
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
+            if r.status_code != 200:
+                tried.append(f"{url.split('/')[-1]} HTTP {r.status_code}")
+                continue
+            data = r.json()
+            if not isinstance(data, list):
+                continue
+
+            chosen = None
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                txt = " ".join(_safe_str(v) for v in item.values())
+                is_tx = ("TX" in txt or "臺股期貨" in txt or "台股期貨" in txt or "臺指" in txt or "台指" in txt)
+                is_date = (ymd_dash in txt or ymd_slash in txt or ymd_plain in txt)
+                if is_tx and is_date:
+                    chosen = item
+                    break
+            if chosen is None:
+                for item in data:
+                    if isinstance(item, dict):
                         txt = " ".join(_safe_str(v) for v in item.values())
-                        if ("TX" in txt or "臺股期貨" in txt or "台股期貨" in txt) and (ymd_dash in txt or ymd_slash in txt or pd.to_datetime(target_dt).strftime("%Y%m%d") in txt):
+                        if "TX" in txt or "臺股期貨" in txt or "台股期貨" in txt:
                             chosen = item
                             break
-                    if chosen is None:
-                        for item in data:
-                            if isinstance(item, dict):
-                                txt = " ".join(_safe_str(v) for v in item.values())
-                                if "TX" in txt or "臺股期貨" in txt or "台股期貨" in txt:
-                                    chosen = item
-                                    break
-                    if chosen:
-                        close_val = None
-                        change_val = None
-                        vol_val = None
-                        for k, v in chosen.items():
-                            kk = _safe_str(k)
-                            if close_val is None and any(x in kk for x in ["收盤", "最後", "Close"]):
-                                close_val = _safe_float(v)
-                            if change_val is None and any(x in kk for x in ["漲跌", "Change"]):
-                                change_val = _safe_float(v)
-                            if vol_val is None and any(x in kk for x in ["成交量", "Volume"]):
-                                vol_val = _safe_float(v)
-                        nums = [_safe_float(v) for v in chosen.values()]
-                        nums = [x for x in nums if x is not None]
-                        if close_val is None:
-                            cands = [x for x in nums if 5000 <= abs(x) <= 50000]
-                            if cands:
-                                close_val = cands[-1]
-                        if change_val is None:
-                            cands = [x for x in nums if -2000 <= x <= 2000 and x != 0]
-                            if cands:
-                                change_val = cands[-1]
-                        if close_val is not None:
-                            row = {
-                                "ok": True,
-                                "date": ymd_dash,
-                                "source": "TAIFEX OpenAPI 台指期",
-                                "source_grade": "官方",
-                                "tx_close": close_val,
-                                "tx_change": change_val,
-                                "tx_volume": vol_val,
-                                "raw": chosen,
-                                "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
-                            }
-                            _v29_write_source_status("期貨", "success", row.get("source"), "官方", "TAIFEX OpenAPI成功")
-                            return row
-        except Exception:
-            pass
 
-    # 2) old HTML function fallback if available in previous code body is already this function, so skip recursive.
+            if chosen:
+                close_val = None
+                change_val = None
+                vol_val = None
+                for k, v in chosen.items():
+                    kk = _safe_str(k)
+                    if close_val is None and any(x in kk for x in ["收盤", "最後", "Close", "close"]):
+                        close_val = _safe_float(v)
+                    if change_val is None and any(x in kk for x in ["漲跌", "Change", "change"]):
+                        change_val = _safe_float(v)
+                    if vol_val is None and any(x in kk for x in ["成交量", "Volume", "volume"]):
+                        vol_val = _safe_float(v)
+
+                nums = [_safe_float(v) for v in chosen.values()]
+                nums = [x for x in nums if x is not None]
+                if close_val is None:
+                    cands = [x for x in nums if 5000 <= abs(x) <= 50000]
+                    if cands:
+                        close_val = cands[-1]
+                if change_val is None:
+                    cands = [x for x in nums if -2000 <= x <= 2000 and x != 0]
+                    if cands:
+                        change_val = cands[-1]
+
+                if close_val is not None:
+                    row = {
+                        "ok": True,
+                        "date": ymd_dash,
+                        "source": "TAIFEX OpenAPI 台指期",
+                        "source_grade": "官方",
+                        "tx_close": close_val,
+                        "tx_change": change_val,
+                        "tx_volume": vol_val,
+                        "raw": chosen,
+                        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    _v29_write_source_status("期貨", "success", row.get("source"), "官方", "TAIFEX OpenAPI成功")
+                    return row
+        except Exception as e:
+            tried.append(f"TAIFEX例外:{e}")
+
     # 3) cache fallback
     cache = _v29_recent_cache_row(TAIFEX_CACHE_FILE)
     if cache and cache.get("tx_close") is not None:
@@ -2623,14 +2664,14 @@ def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dic
         _v29_write_source_status("期貨", "cache", cache.get("source"), "快取", "使用最近可用期貨快取")
         return cache
 
-    _v29_write_source_status("期貨", "failed", "TAIFEX OpenAPI", "失敗", " / ".join(tried[-6:]))
+    _v29_write_source_status("期貨", "failed", "Yahoo IX0126.TW / TAIFEX OpenAPI", "失敗", " / ".join(tried[-8:]))
     return {
         "ok": False,
         "date": ymd_dash,
         "source": "期貨多來源備援",
         "source_grade": "失敗",
-        "error": "TAIFEX OpenAPI與期貨快取皆失敗。",
-        "tried": tried[-8:],
+        "error": "Yahoo IX0126.TW、TAIFEX OpenAPI與期貨快取皆失敗。",
+        "tried": tried[-10:],
     }
 
 
@@ -2711,7 +2752,7 @@ def _render_background_update_status():
     status = _safe_str(item.get("status")) or "尚未啟動"
     msg = _safe_str(item.get("message"))
     updated = _safe_str(item.get("updated_at"))
-    st.markdown("### v29 多來源背景更新狀態")
+    st.markdown("### v29.2 多來源背景更新狀態")
     c1, c2, c3, c4 = st.columns([1.1, 2.8, 1.5, 1.1])
     with c1:
         st.metric("總狀態", status)
@@ -2750,11 +2791,11 @@ def main():
     inject_pro_theme()
 
     render_pro_hero(
-        title="大盤走勢｜v29多來源備援池",
+        title="大盤走勢｜v29.2多來源備援池",
         subtitle="頁面先顯示快取資料；大盤、法人、外盤改背景更新，避免外部端點卡住整頁。",
     )
 
-    st.warning("目前使用 v29.1 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
+    st.warning("目前使用 v29.2 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
