@@ -127,6 +127,11 @@ GODPICK_RECORD_COLUMNS = [
     "決策說明",
     "推薦等級",
     "推薦總分",
+    "上漲機率估計%",
+    "上漲機率等級",
+    "上漲機率信心",
+    "上漲機率說明",
+    "上漲機率因子明細",
     "大盤參考等級",
     "大盤可參考分數",
     "大盤加權分",
@@ -325,6 +330,137 @@ def _ensure_radar_dict(radar_obj: Any) -> dict[str, Any]:
         if k not in base:
             base[k] = v
     return base
+
+
+
+# V59：上漲機率估計工具
+# 說明：此為「條件機率估計」，不是保證上漲機率。會用推薦總分、起漲/技術/交易/類股、大盤、風險與資料完整度綜合換算。
+def _estimate_upside_probability_row(row: Any) -> dict[str, Any]:
+    try:
+        score = _safe_float(row.get("推薦總分"), 0) or 0
+        tech = _safe_float(row.get("技術結構分數"), 50) or 50
+        launch = _safe_float(row.get("起漲前兆分數"), 50) or 50
+        hot = _safe_float(row.get("類股熱度分數"), 50) or 50
+        trade = _safe_float(row.get("交易可行分數"), 50) or 50
+        breakout = _safe_float(row.get("型態突破分數"), 50) or 50
+        burst = _safe_float(row.get("爆發力分數"), 50) or 50
+        market = _safe_float(row.get("大盤橋接分數"), row.get("大盤可參考分數"))
+        if market is None:
+            market = _safe_float(row.get("市場環境分數"), 50) or 50
+
+        # 風險欄位方向統一：數值越高代表追價/波動風險越高，因此使用 safety_score 加分。
+        risk_candidates = [
+            row.get("追價風險分"),
+            row.get("追高風險分數_決策"),
+            row.get("追價風險分數"),
+            row.get("風險分數"),
+        ]
+        risk = None
+        for rv in risk_candidates:
+            val = _safe_float(rv)
+            if val is not None:
+                risk = val
+                break
+        if risk is None:
+            risk = 50.0
+        safety = _score_clip(100 - risk)
+
+        confidence = 100.0
+        notes = []
+        if _safe_float(row.get("最新價")) is None and _safe_float(row.get("推薦價格")) is None:
+            confidence -= 18
+            notes.append("即時價缺漏")
+        if _safe_float(row.get("技術結構分數")) is None:
+            confidence -= 12
+            notes.append("技術分缺漏")
+        if _safe_float(row.get("起漲前兆分數")) is None:
+            confidence -= 12
+            notes.append("起漲分缺漏")
+        if not _safe_str(row.get("大盤橋接狀態")) and not _safe_str(row.get("大盤資料品質")):
+            confidence -= 8
+            notes.append("大盤橋接不足")
+        if _safe_str(row.get("大盤交易時段可用")) in ["False", "false", "否", "不可用"]:
+            confidence -= 6
+            notes.append("非即時交易時段")
+        confidence = _score_clip(confidence)
+
+        prob = 50.0
+        prob += (score - 60) * 0.42
+        prob += (launch - 50) * 0.10
+        prob += (tech - 50) * 0.08
+        prob += (trade - 50) * 0.07
+        prob += (hot - 50) * 0.06
+        prob += (breakout - 50) * 0.05
+        prob += (burst - 50) * 0.04
+        prob += (market - 50) * 0.06
+        prob += (safety - 50) * 0.08
+
+        grade = _safe_str(row.get("推薦等級"))
+        buy_grade = _safe_str(row.get("買點分級"))
+        if grade in ["股神級", "S", "S級"]:
+            prob += 2.5
+        elif grade in ["強烈關注", "A+", "A級"]:
+            prob += 1.5
+        if buy_grade in ["A+", "A", "S", "S級"]:
+            prob += 2.0
+        elif buy_grade in ["C", "D"]:
+            prob -= 3.0
+
+        shrink = confidence / 100.0
+        prob = 50 + (prob - 50) * shrink
+        prob = round(_score_clip(prob, 25, 82), 1)
+
+        if prob >= 68 and confidence >= 80:
+            level = "高"
+        elif prob >= 58 and confidence >= 65:
+            level = "中高"
+        elif prob >= 52:
+            level = "中"
+        elif prob >= 45:
+            level = "偏低"
+        else:
+            level = "低"
+
+        if confidence >= 85:
+            conf_label = "高"
+        elif confidence >= 70:
+            conf_label = "中高"
+        elif confidence >= 55:
+            conf_label = "中"
+        else:
+            conf_label = "低"
+
+        detail = {
+            "推薦總分": round(score, 2),
+            "技術結構": round(tech, 2),
+            "起漲前兆": round(launch, 2),
+            "類股熱度": round(hot, 2),
+            "交易可行": round(trade, 2),
+            "型態突破": round(breakout, 2),
+            "爆發力": round(burst, 2),
+            "大盤": round(market, 2),
+            "風險分數": round(risk, 2),
+            "安全分數": round(safety, 2),
+            "資料信心": round(confidence, 2),
+        }
+        reason = f"條件機率估計 {prob}%：依推薦總分、起漲/技術/交易/類股、大盤與風險折扣換算；非保證上漲機率。"
+        if notes:
+            reason += " 資料信心下修：" + "、".join(notes[:4]) + "。"
+        return {
+            "上漲機率估計%": prob,
+            "上漲機率等級": level,
+            "上漲機率信心": conf_label,
+            "上漲機率說明": reason,
+            "上漲機率因子明細": json.dumps(detail, ensure_ascii=False),
+        }
+    except Exception as e:
+        return {
+            "上漲機率估計%": None,
+            "上漲機率等級": "無法估計",
+            "上漲機率信心": "低",
+            "上漲機率說明": f"上漲機率估計失敗：{e}",
+            "上漲機率因子明細": "{}",
+        }
 
 
 def _score_band(v: Any) -> str:
@@ -6635,6 +6771,22 @@ def _build_recommend_df(
 
     base_df["推薦等級"] = base_df["推薦總分"].apply(_recommend)
 
+    # V59：加入上漲機率估計。此為條件機率，不等於保證上漲。
+    try:
+        upside_estimates = base_df.apply(_estimate_upside_probability_row, axis=1)
+        base_df["上漲機率估計%"] = [x.get("上漲機率估計%") for x in upside_estimates]
+        base_df["上漲機率等級"] = [x.get("上漲機率等級") for x in upside_estimates]
+        base_df["上漲機率信心"] = [x.get("上漲機率信心") for x in upside_estimates]
+        base_df["上漲機率說明"] = [x.get("上漲機率說明") for x in upside_estimates]
+        base_df["上漲機率因子明細"] = [x.get("上漲機率因子明細") for x in upside_estimates]
+    except Exception as prob_err:
+        base_df["上漲機率估計%"] = None
+        base_df["上漲機率等級"] = "無法估計"
+        base_df["上漲機率信心"] = "低"
+        base_df["上漲機率說明"] = f"上漲機率估計失敗：{prob_err}"
+        base_df["上漲機率因子明細"] = "{}"
+
+
     def _reason_builder(r):
         reason_parts = []
         if _safe_float(r.get("均線轉強分"), 0) >= 70:
@@ -6873,7 +7025,7 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "買點分級",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "買點分級",
         "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數",
         "信心等級", "推薦分桶", "市場環境分數",
         "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
@@ -6998,7 +7150,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分", "推薦分桶", "起漲等級", "信心等級",
+        "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦分桶", "起漲等級", "信心等級",
         "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
         "同類股領先幅度", "是否領先同類股",
         "最新價", "推薦買點_拉回", "推薦買點_突破",
@@ -8478,6 +8630,7 @@ def main():
                 ("推薦模式", _safe_str(focus_row.get("推薦模式")), ""),
                 ("推薦等級", _safe_str(focus_row.get("推薦等級")), ""),
                 ("推薦總分", format_number(focus_row.get("推薦總分"), 1), ""),
+                ("上漲機率估計", f"{format_number(focus_row.get('上漲機率估計%'), 1)}%", _safe_str(focus_row.get("上漲機率等級"))),
                 ("市場環境", _safe_str(focus_row.get("市場環境")), ""),
                 ("市場環境分數", format_number(focus_row.get("市場環境分數"), 1), ""),
                 ("型態名稱", _safe_str(focus_row.get("型態名稱")), ""),
@@ -8506,7 +8659,7 @@ def main():
         render_pro_section("飆股補抓名單")
         st.caption("這份名單不影響主名單排序；用途是補抓接近門檻、但具起漲結構與類股熱度的股票。")
         hot_show_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分", "上漲機率估計%", "上漲機率等級",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "起漲前兆分數", "交易可行分數", "類股熱度分數", "訊號分數",
             "起漲判斷", "建議切入區", "股神推論邏輯", "風險說明", "推薦理由摘要", "補抓原因"
@@ -8520,7 +8673,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格", "大盤橋接分數", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格", "大盤橋接分數", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
