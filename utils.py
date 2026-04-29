@@ -3,6 +3,8 @@ import json
 import os
 import time
 import hashlib
+import threading
+from collections import defaultdict
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
@@ -27,6 +29,122 @@ STATE_FILE = "last_query_state.json"
 REQUEST_TIMEOUT_FAST = 2
 REQUEST_TIMEOUT_NORMAL = 4
 REALTIME_BATCH_SIZE = 50
+
+# V47：資料源穩定診斷。只記錄摘要，不保存個資；供 7_股神推薦 / 11_資料診斷讀取。
+DATA_SOURCE_DIAG_FILE = Path("data_source_diagnostics.json")
+_DATA_SOURCE_DIAG_LOCK = threading.Lock()
+_DATA_SOURCE_DIAG = {
+    "version": "v47_data_source_stability",
+    "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    "updated_at": "",
+    "requests": {},
+    "history": {},
+    "realtime": {},
+    "latest_events": [],
+}
+_DATA_SOURCE_DIAG_MAX_EVENTS = 160
+
+
+def _diag_now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _diag_source_from_url(url: str) -> str:
+    text = str(url or "").lower()
+    if "twse.com" in text or "mis.twse" in text:
+        return "TWSE"
+    if "tpex.org" in text:
+        return "TPEx"
+    if "yahoo" in text or "finance.yahoo" in text:
+        return "Yahoo"
+    if "taifex" in text:
+        return "TAIFEX"
+    return "Other"
+
+
+def _diag_add_event(kind: str, source: str, ok: bool, message: str = "", elapsed=None, rows=None, code: str = ""):
+    try:
+        with _DATA_SOURCE_DIAG_LOCK:
+            _DATA_SOURCE_DIAG["updated_at"] = _diag_now()
+            bucket = _DATA_SOURCE_DIAG.setdefault(kind, {})
+            item = bucket.setdefault(source or "Unknown", {
+                "ok": 0,
+                "fail": 0,
+                "rows": 0,
+                "total_sec": 0.0,
+                "last_message": "",
+                "last_time": "",
+            })
+            if ok:
+                item["ok"] = int(item.get("ok", 0)) + 1
+            else:
+                item["fail"] = int(item.get("fail", 0)) + 1
+            if rows is not None:
+                try:
+                    item["rows"] = int(item.get("rows", 0)) + int(rows)
+                except Exception:
+                    pass
+            if elapsed is not None:
+                try:
+                    item["total_sec"] = round(float(item.get("total_sec", 0.0)) + float(elapsed), 3)
+                    total = int(item.get("ok", 0)) + int(item.get("fail", 0))
+                    if total > 0:
+                        item["avg_sec"] = round(float(item.get("total_sec", 0.0)) / total, 3)
+                except Exception:
+                    pass
+            item["last_message"] = str(message or "")[:240]
+            item["last_time"] = _DATA_SOURCE_DIAG["updated_at"]
+
+            events = _DATA_SOURCE_DIAG.setdefault("latest_events", [])
+            events.append({
+                "time": _DATA_SOURCE_DIAG["updated_at"],
+                "kind": kind,
+                "source": source,
+                "ok": bool(ok),
+                "code": str(code or ""),
+                "rows": rows,
+                "elapsed": round(float(elapsed), 3) if elapsed is not None else None,
+                "message": str(message or "")[:240],
+            })
+            if len(events) > _DATA_SOURCE_DIAG_MAX_EVENTS:
+                del events[:-_DATA_SOURCE_DIAG_MAX_EVENTS]
+    except Exception:
+        pass
+
+
+def get_data_source_diagnostics() -> dict:
+    """回傳 V47 資料源診斷摘要，給 7_股神推薦 / 11_資料診斷使用。"""
+    try:
+        with _DATA_SOURCE_DIAG_LOCK:
+            data = json.loads(json.dumps(_DATA_SOURCE_DIAG, ensure_ascii=False, default=str))
+        try:
+            DATA_SOURCE_DIAG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return data
+    except Exception:
+        return {"version": "v47_data_source_stability", "error": "diagnostics unavailable"}
+
+
+def clear_data_source_diagnostics() -> bool:
+    """清除 V47 資料源診斷，不影響任何股票資料或推薦紀錄。"""
+    try:
+        with _DATA_SOURCE_DIAG_LOCK:
+            _DATA_SOURCE_DIAG["started_at"] = _diag_now()
+            _DATA_SOURCE_DIAG["updated_at"] = ""
+            _DATA_SOURCE_DIAG["requests"] = {}
+            _DATA_SOURCE_DIAG["history"] = {}
+            _DATA_SOURCE_DIAG["realtime"] = {}
+            _DATA_SOURCE_DIAG["latest_events"] = []
+        try:
+            if DATA_SOURCE_DIAG_FILE.exists():
+                DATA_SOURCE_DIAG_FILE.unlink()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
 
 
 @st.cache_resource(show_spinner=False)
@@ -59,9 +177,17 @@ def _json_get(url, params=None, timeout=REQUEST_TIMEOUT_NORMAL, headers=None):
     if headers:
         req_headers.update(headers)
 
-    r = session.get(url, params=params, timeout=timeout, verify=False, headers=req_headers)
-    r.raise_for_status()
-    return r.json()
+    source = _diag_source_from_url(url)
+    t0 = time.perf_counter()
+    try:
+        r = session.get(url, params=params, timeout=timeout, verify=False, headers=req_headers)
+        r.raise_for_status()
+        payload = r.json()
+        _diag_add_event("requests", source, True, f"HTTP {r.status_code}", time.perf_counter() - t0)
+        return payload
+    except Exception as e:
+        _diag_add_event("requests", source, False, str(e), time.perf_counter() - t0)
+        raise
 
 
 def _find_existing_watchlist_path():
@@ -1526,10 +1652,13 @@ def get_realtime_stock_info_batch(stock_items, refresh_token=""):
             "_": refresh_token or str(int(time.time() * 1000)),
         }
 
+        t0 = time.perf_counter()
         try:
             data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST, headers=headers)
             msg_array = data.get("msgArray", []) or []
+            _diag_add_event("realtime", "TWSE_MIS", True, f"batch={len(chunk)} rows={len(msg_array)}", time.perf_counter() - t0, rows=len(msg_array))
         except Exception as e:
+            _diag_add_event("realtime", "TWSE_MIS", False, f"batch={len(chunk)} {e}", time.perf_counter() - t0, rows=0)
             for x in chunk:
                 result_map[x["code"]] = _empty_realtime_result(
                     x["code"],
@@ -2192,9 +2321,11 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
             "events": "history",
         }
 
+        t0 = time.perf_counter()
         try:
             resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
             if resp.status_code != 200:
+                _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} HTTP {resp.status_code}", time.perf_counter() - t0, code=stock_no)
                 continue
             payload = resp.json()
             result = (((payload or {}).get("chart") or {}).get("result") or [])
@@ -2246,8 +2377,10 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
             if df.empty:
                 continue
             df["資料源"] = f"yahoo_chart_{suffix}"
+            _diag_add_event("history", f"Yahoo_{suffix}", True, f"{symbol} rows={len(df)}", time.perf_counter() - t0, rows=len(df), code=stock_no)
             return df[["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數", "資料源"]].copy()
-        except Exception:
+        except Exception as e:
+            _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {e}", time.perf_counter() - t0, rows=0, code=stock_no)
             continue
 
     return pd.DataFrame()
@@ -2262,10 +2395,12 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     - 若 Yahoo 失敗、資料不足或市場別不符，快速 fallback 官方 TWSE/TPEx 月資料，所有請求都有短 timeout。
     - 不做低成本初篩、不跳過任何股票，因此不會因加速而漏掉候選股。
     """
+    scan_t0 = time.perf_counter()
     stock_no = str(stock_no).strip()
     market_type = str(market_type).strip() or "上市"
 
     if not stock_no:
+        _diag_add_event("history", "Input", False, "股票代號空白", time.perf_counter() - scan_t0, rows=0, code=stock_no)
         return pd.DataFrame()
 
     if start_date is None:
@@ -2282,18 +2417,23 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
     try:
         cached_df = _load_history_disk_cache(stock_no, market_type, start_ts, end_ts)
         if cached_df is not None and not cached_df.empty:
+            _diag_add_event("history", "DiskCache", True, f"cache hit rows={len(cached_df)}", time.perf_counter() - scan_t0, rows=len(cached_df), code=stock_no)
             return cached_df
-    except Exception:
-        pass
+        else:
+            _diag_add_event("history", "DiskCache", False, "cache miss", time.perf_counter() - scan_t0, rows=0, code=stock_no)
+    except Exception as e:
+        _diag_add_event("history", "DiskCache", False, f"cache error: {e}", time.perf_counter() - scan_t0, rows=0, code=stock_no)
 
     # 第二來源：Yahoo 高速日線。失敗不代表該股票沒資料，必須 fallback 官方來源。
     try:
         fast_df = _fetch_yahoo_history_fast(stock_no, market_type=market_type, start_date=start_ts, end_date=end_ts)
         if fast_df is not None and not fast_df.empty:
             _save_history_disk_cache(stock_no, market_type, start_ts, end_ts, fast_df)
+            _diag_add_event("history", "YahooFastTotal", True, f"rows={len(fast_df)}", time.perf_counter() - scan_t0, rows=len(fast_df), code=stock_no)
             return fast_df
-    except Exception:
-        pass
+        _diag_add_event("history", "YahooFastTotal", False, "empty or insufficient rows", time.perf_counter() - scan_t0, rows=0, code=stock_no)
+    except Exception as e:
+        _diag_add_event("history", "YahooFastTotal", False, str(e), time.perf_counter() - scan_t0, rows=0, code=stock_no)
 
     # 第二來源：官方 TWSE / TPEx 月資料。保留完整 fallback，避免漏股票。
     month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
@@ -2318,8 +2458,10 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
             df = _normalize_history_df(raw_df, source, start_ts, end_ts)
             if not df.empty:
                 _save_history_disk_cache(stock_no, mk, start_ts, end_ts, df)
+                _diag_add_event("history", source, True, f"{mk} rows={len(df)}", time.perf_counter() - scan_t0, rows=len(df), code=stock_no)
                 return df
 
+    _diag_add_event("history", "OfficialFallback", False, "TWSE / TPEx 都沒有抓到有效歷史資料", time.perf_counter() - scan_t0, rows=0, code=stock_no)
     return pd.DataFrame()
 
 @st.cache_data(ttl=600, show_spinner=False)
