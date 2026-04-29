@@ -293,6 +293,120 @@ def _render_market_cache_chart():
     st.line_chart(chart_df.set_index("日期"), use_container_width=True)
 
 
+BRIDGE_FILE = "macro_mode_bridge.json"
+
+
+def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
+    factors = _calc_stable_market_factors(row)
+    close_val = _safe_float(row.get("close"))
+    pct_val = _safe_float(row.get("pct"))
+    payload = {
+        "version": "v27.2_macro_bridge",
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "market_date": _safe_str(row.get("used_date") or row.get("date")),
+        "source": _safe_str(row.get("source")),
+        "is_realtime": bool(row.get("is_realtime")),
+        "close": close_val,
+        "pct": pct_val,
+        "market_score": _safe_float(factors.get("大盤穩定分"), 50),
+        "market_state": _safe_str(factors.get("大盤狀態")),
+        "godpick_weight_advice": _safe_str(factors.get("股神推薦加權")),
+        "strategy": _safe_str(factors.get("今日策略")),
+        "ma5": _safe_float(factors.get("MA5")),
+        "ma20": _safe_float(factors.get("MA20")),
+        "dist_ma5_pct": _safe_float(factors.get("距MA5%")),
+        "dist_ma20_pct": _safe_float(factors.get("距MA20%")),
+        "position_20d_pct": _safe_float(factors.get("20日位置%")),
+        "cache_count": int(factors.get("快取筆數") or 0),
+        "recommendation_bias": _macro_bias_from_score(_safe_float(factors.get("大盤穩定分"), 50)),
+    }
+    return payload
+
+
+def _macro_bias_from_score(score: float) -> dict[str, Any]:
+    score = _safe_float(score, 50) or 50
+    if score >= 75:
+        return {
+            "risk_filter": "放寬",
+            "preferred_modes": ["強勢突破", "低檔轉強", "拉回承接"],
+            "avoid_modes": ["純題材追高"],
+            "position_advice": "可正常至偏積極，但仍須控單檔風險。",
+        }
+    if score >= 60:
+        return {
+            "risk_filter": "正常",
+            "preferred_modes": ["低檔轉強", "拉回承接", "回測支撐"],
+            "avoid_modes": ["高位爆量追高"],
+            "position_advice": "可正常操作，優先挑選有支撐與族群轉強的標的。",
+        }
+    if score >= 45:
+        return {
+            "risk_filter": "中性",
+            "preferred_modes": ["回測支撐", "低檔止跌"],
+            "avoid_modes": ["追高突破", "無量反彈"],
+            "position_advice": "降低追價，採分批與小部位。",
+        }
+    if score >= 30:
+        return {
+            "risk_filter": "偏嚴",
+            "preferred_modes": ["低檔止跌", "防守型回測"],
+            "avoid_modes": ["強勢追價", "高波動題材"],
+            "position_advice": "保守操作，等待確認再進場。",
+        }
+    return {
+        "risk_filter": "嚴格",
+        "preferred_modes": ["觀望", "極低檔止跌"],
+        "avoid_modes": ["追高", "突破", "高槓桿題材"],
+        "position_advice": "以觀望與現金比重為主。",
+    }
+
+
+def _write_macro_bridge(row: dict[str, Any]) -> tuple[bool, str]:
+    payload = _build_macro_bridge_payload(row)
+    try:
+        Path(BRIDGE_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return True, f"已寫入 {BRIDGE_FILE}，股神推薦可讀取大盤穩定因子。"
+    except Exception as e:
+        return False, f"寫入 {BRIDGE_FILE} 失敗：{e}"
+
+
+def _read_macro_bridge() -> dict[str, Any]:
+    p = Path(BRIDGE_FILE)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _render_macro_bridge_block(row: dict[str, Any]):
+    st.markdown("### 股神推薦串聯")
+    payload = _build_macro_bridge_payload(row)
+    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 2.4])
+    with c1:
+        if st.button("寫入股神大盤參考", use_container_width=True, type="primary"):
+            ok, msg = _write_macro_bridge(row)
+            if ok:
+                st.success(msg)
+            else:
+                st.warning(msg)
+    with c2:
+        st.metric("推薦風控", payload.get("recommendation_bias", {}).get("risk_filter", "中性"))
+    with c3:
+        st.metric("建議加權", payload.get("godpick_weight_advice", "0%"))
+    with c4:
+        st.caption("v27.2：將大盤穩定分、策略、風控建議寫入 macro_mode_bridge.json，後續可讓 7_股神推薦讀取。")
+
+    with st.expander("股神大盤橋接檔內容", expanded=False):
+        st.json(payload)
+        old_bridge = _read_macro_bridge()
+        if old_bridge:
+            st.write("目前已存在橋接檔：")
+            st.json(old_bridge)
+
+
 def _score_context(row: dict[str, Any]) -> dict[str, str]:
     pct = _safe_float(row.get("pct"), 0) or 0
     if pct >= 1.0:
@@ -538,6 +652,7 @@ def main():
 
     _render_stable_factor_block(row)
     _render_market_cache_chart()
+    _render_macro_bridge_block(row)
 
     dl_cols = st.columns([1.2, 4])
     with dl_cols[0]:
