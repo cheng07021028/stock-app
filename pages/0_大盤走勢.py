@@ -564,6 +564,216 @@ def _fetch_json(url: str, timeout: int = 5) -> Any:
         return None
 
 
+def _tw_now() -> datetime:
+    """Taiwan local time; Streamlit Cloud server may use UTC."""
+    return datetime.utcnow() + timedelta(hours=8)
+
+
+def _num_tw(v: Any):
+    s = _safe_str(v).replace(",", "").replace("+", "").replace("%", "")
+    if not s or s in {"-", "--", "None", "nan"}:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _macro_close_cache_path() -> Path:
+    return Path("macro_market_close_cache.json")
+
+
+def _read_macro_close_cache() -> dict[str, Any]:
+    try:
+        p = _macro_close_cache_path()
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _write_macro_close_cache(data: dict[str, Any]):
+    try:
+        _macro_close_cache_path().write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _fetch_twse_realtime_taiex() -> dict[str, Any]:
+    """
+    即時加權指數：盤中優先使用 TWSE MIS。
+    若晚上 / 收盤後 z 可能為 '-'，會交給收盤資料函式處理。
+    """
+    now_ms = int(_tw_now().timestamp() * 1000)
+    url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+    params = {
+        "ex_ch": "tse_t00.tw",
+        "json": "1",
+        "delay": "0",
+        "_": now_ms,
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?stock=t00",
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=2.5)
+        if r.status_code != 200:
+            return {"ok": False, "source": "TWSE MIS", "error": f"HTTP {r.status_code}"}
+        data = r.json()
+        arr = data.get("msgArray") or []
+        if not arr:
+            return {"ok": False, "source": "TWSE MIS", "error": "msgArray empty"}
+        row = arr[0]
+        current = _num_tw(row.get("z"))
+        y_close = _num_tw(row.get("y"))
+        open_v = _num_tw(row.get("o"))
+        high_v = _num_tw(row.get("h"))
+        low_v = _num_tw(row.get("l"))
+        if current is None:
+            # 有些非盤中時間 z 會是 '-'，若有 h/l/y 不直接當即時，交給收盤 API。
+            return {"ok": False, "source": "TWSE MIS", "error": "no realtime price", "prev_close": y_close}
+        pct = ((current - y_close) / y_close * 100) if y_close not in [None, 0] else None
+        date_text = _safe_str(row.get("d"))
+        used_date = ""
+        if len(date_text) == 8:
+            used_date = f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]}"
+        return {
+            "ok": True,
+            "source": "TWSE MIS 即時",
+            "date": used_date or _tw_now().strftime("%Y-%m-%d"),
+            "used_date": used_date or _tw_now().strftime("%Y-%m-%d"),
+            "close": current,
+            "open": open_v,
+            "high": high_v,
+            "low": low_v,
+            "prev_close": y_close,
+            "pct": pct,
+            "time": _safe_str(row.get("t")),
+            "is_realtime": True,
+            "raw_name": _safe_str(row.get("n")),
+        }
+    except Exception as e:
+        return {"ok": False, "source": "TWSE MIS", "error": str(e)}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _fetch_twse_after_close_taiex(date_text: str) -> dict[str, Any]:
+    """
+    收盤後加權指數：晚上 / 非盤中優先抓 TWSE MI_INDEX。
+    會回寫 macro_market_close_cache.json，避免晚上重複等待外部端點。
+    """
+    dt = pd.to_datetime(date_text, errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp(_tw_now().date())
+    ymd = dt.strftime("%Y%m%d")
+    cache = _read_macro_close_cache()
+    if ymd in cache and isinstance(cache.get(ymd), dict):
+        row = dict(cache[ymd])
+        row["source"] = _safe_str(row.get("source")) or "macro_market_close_cache"
+        return row
+
+    urls = [
+        f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={ymd}&type=IND&response=json",
+        f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={ymd}&type=IND",
+    ]
+
+    def _walk_rows(obj):
+        if isinstance(obj, list):
+            if obj and all(not isinstance(x, (list, dict)) for x in obj):
+                yield obj
+            for x in obj:
+                yield from _walk_rows(x)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                yield from _walk_rows(v)
+
+    for url in urls:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            best = None
+            for row in _walk_rows(data):
+                joined = " ".join(_safe_str(x) for x in row)
+                if "發行量加權股價指數" in joined or "TAIEX" in joined.upper():
+                    nums = [_num_tw(x) for x in row]
+                    nums = [x for x in nums if x is not None]
+                    if nums:
+                        # 通常第一個有效數字是收盤指數；後面可能是漲跌點/百分比。
+                        close = nums[0]
+                        pct = None
+                        if len(nums) >= 3 and abs(nums[-1]) < 20:
+                            pct = nums[-1]
+                        best = {
+                            "ok": True,
+                            "source": "TWSE 收盤",
+                            "date": dt.strftime("%Y-%m-%d"),
+                            "used_date": dt.strftime("%Y-%m-%d"),
+                            "close": close,
+                            "pct": pct,
+                            "is_realtime": False,
+                            "raw_name": "發行量加權股價指數",
+                        }
+                        break
+            if best:
+                cache[ymd] = best
+                _write_macro_close_cache(cache)
+                return best
+        except Exception:
+            continue
+
+    return {"ok": False, "source": "TWSE 收盤", "date": dt.strftime("%Y-%m-%d"), "used_date": "", "close": None, "pct": None, "is_realtime": False}
+
+
+def _fetch_taiex_realtime_or_close(date_text: str) -> dict[str, Any]:
+    """
+    大盤主資料源：
+    - 今日盤中：TWSE MIS 即時
+    - 收盤後 / 晚上：TWSE MI_INDEX 收盤
+    - 失敗時：交回原 yahoo/stooq fallback
+    """
+    dt = pd.to_datetime(date_text, errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp(_tw_now().date())
+    tw_today = pd.Timestamp(_tw_now().date())
+    now = _tw_now()
+    is_today = dt.strftime("%Y-%m-%d") == tw_today.strftime("%Y-%m-%d")
+    # 台股常規：09:00~13:35。13:35 後先嘗試收盤資料；若交易所尚未發布，再 fallback。
+    if is_today and (9 <= now.hour < 14):
+        rt = _fetch_twse_realtime_taiex()
+        if rt.get("ok"):
+            return rt
+    close = _fetch_twse_after_close_taiex(dt.strftime("%Y-%m-%d"))
+    if close.get("ok"):
+        return close
+    if is_today:
+        rt = _fetch_twse_realtime_taiex()
+        if rt.get("ok"):
+            return rt
+    return {"ok": False, "source": "TWSE 即時/收盤 fallback", "date": dt.strftime("%Y-%m-%d"), "used_date": "", "close": None, "pct": None, "is_realtime": False}
+
+
+def _apply_taiex_override(twii: dict[str, Any], taiex_now: dict[str, Any]) -> dict[str, Any]:
+    out = dict(twii or {})
+    if not isinstance(taiex_now, dict) or taiex_now.get("close") is None:
+        return out
+    out["close"] = _safe_float(taiex_now.get("close"))
+    out["pct"] = _safe_float(taiex_now.get("pct"), _safe_float(out.get("pct")))
+    out["date"] = _safe_str(taiex_now.get("date")) or _safe_str(out.get("date"))
+    out["used_date"] = _safe_str(taiex_now.get("used_date")) or _safe_str(out.get("used_date"))
+    out["source"] = _safe_str(taiex_now.get("source")) or _safe_str(out.get("source"))
+    for k in ["open", "high", "low", "prev_close"]:
+        if taiex_now.get(k) is not None:
+            out[k] = _safe_float(taiex_now.get(k))
+    out["is_realtime"] = bool(taiex_now.get("is_realtime"))
+    return out
+
+
 def _to_roc_date(dt: pd.Timestamp) -> str:
     return f"{dt.year-1911}/{dt.month:02d}/{dt.day:02d}"
 
@@ -1403,7 +1613,7 @@ def _calc_market_context(pred_date_text: str) -> dict[str, Any]:
     )
 
     return {
-        "twii": twii, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
+        "twii": twii, "taiex_now": taiex_now, "nas": nas, "sox": sox, "spx": spx, "adr": adr, "es": es, "nq": nq, "vix": vix, "usdtwd": usdtwd,
         "news_rows": news_rows,
         "news_score": news_score,
         "news_logic": news_logic,
@@ -1451,15 +1661,17 @@ def _calc_market_context_quick(pred_date_text: str) -> dict[str, Any]:
     只抓必要市場價格與少量風險代理資料，避免 Google News / TWSE / TAIFEX 外部端點等待過久，
     讓 01_大盤趨勢可以先顯示。關閉「快顯模式」仍會走完整資料源。
     """
-    twii = _price_on_or_before("^TWII", pred_date_text, 5)
-    nas = _price_on_or_before("^IXIC", pred_date_text, 5)
-    sox = _price_on_or_before("^SOX", pred_date_text, 5)
-    spx = _price_on_or_before("^GSPC", pred_date_text, 5)
-    adr = _price_on_or_before("TSM", pred_date_text, 5)
-    es = _price_on_or_before("ES.F", pred_date_text, 5)
-    nq = _price_on_or_before("NQ.F", pred_date_text, 5)
-    vix = _price_on_or_before("^VIX", pred_date_text, 5)
-    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 5)
+    # v26.6：大盤加權指數優先使用 TWSE 即時 / 收盤，不再只依賴 Yahoo/Stooq 延遲資料。
+    taiex_now = _fetch_taiex_realtime_or_close(pred_date_text)
+    twii = _apply_taiex_override(_price_on_or_before("^TWII", pred_date_text, 5), taiex_now)
+    nas = _price_on_or_before("^IXIC", pred_date_text, 3)
+    sox = _price_on_or_before("^SOX", pred_date_text, 3)
+    spx = _price_on_or_before("^GSPC", pred_date_text, 3)
+    adr = _price_on_or_before("TSM", pred_date_text, 3)
+    es = _price_on_or_before("ES.F", pred_date_text, 3)
+    nq = _price_on_or_before("NQ.F", pred_date_text, 3)
+    vix = _price_on_or_before("^VIX", pred_date_text, 3)
+    usdtwd = _price_on_or_before("USDTWD", pred_date_text, 3)
 
     news_rows: list[dict[str, str]] = []
     news_score, news_logic, main_risk = 0.0, "快顯模式略過新聞即時抓取", "快顯模式：未納入新聞端點"
@@ -1539,7 +1751,7 @@ def _calc_market_context_quick(pred_date_text: str) -> dict[str, Any]:
         scenario = "一般趨勢日"
 
     source_status = (
-        f"快顯模式｜加權:{_safe_str(twii.get('date')) or 'fallback'}｜"
+        f"快顯模式｜加權:{_safe_str(twii.get('source')) or 'fallback'} / {_safe_str(twii.get('date')) or 'fallback'}｜"
         f"外盤:{_safe_str(nas.get('date')) or 'fallback'}｜"
         f"法人/期權/融資券:代理估算"
     )
@@ -2399,6 +2611,8 @@ def main():
             try:
                 _fetch_stooq.clear()
                 _search_news_headlines.clear()
+                _fetch_twse_realtime_taiex.clear()
+                _fetch_twse_after_close_taiex.clear()
             except Exception:
                 pass
             _set_status("資料快取已清除", "success")
@@ -2431,6 +2645,15 @@ def main():
             pred_df, ctx = _predict_all_models(pred_date_text, base_df)
     if quick_mode:
         st.caption("⚡ 目前使用快顯模式：優先載入必要大盤結果；如需完整法人、期權、新聞端點，請關閉快顯模式後重新整理。")
+    taiex_live = ctx.get("taiex_now") if isinstance(ctx, dict) else {}
+    if isinstance(taiex_live, dict) and taiex_live.get("close") is not None:
+        live_label = "盤中即時" if taiex_live.get("is_realtime") else "收盤紀錄"
+        live_delta = f"{_safe_float(taiex_live.get('pct'), 0):+.2f}%" if taiex_live.get("pct") is not None else _safe_str(taiex_live.get("source"))
+        render_pro_kpi_row([
+            {"label": f"目前大盤｜{live_label}", "value": f"{_safe_float(taiex_live.get('close'), 0):,.2f}", "delta": live_delta, "delta_class": "pro-kpi-delta-up" if _safe_float(taiex_live.get("pct"), 0) >= 0 else "pro-kpi-delta-down"},
+            {"label": "大盤資料來源", "value": _safe_str(taiex_live.get("source")), "delta": _safe_str(taiex_live.get("used_date")), "delta_class": "pro-kpi-delta-flat"},
+            {"label": "大盤資料型態", "value": live_label, "delta": "晚上自動讀收盤紀錄" if not taiex_live.get("is_realtime") else "盤中即時更新", "delta_class": "pro-kpi-delta-flat"},
+        ])
     top_pick = pred_df.iloc[0].to_dict() if not pred_df.empty else {}
     scoreboard = _build_scoreboard(base_df)
 
