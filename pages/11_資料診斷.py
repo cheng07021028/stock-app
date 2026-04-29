@@ -419,12 +419,12 @@ with st.expander("查看 JSON 內容預覽", expanded=False):
 st.info("建議流程：先確認本頁主檔、自選股、歷史資料、即時資料都 OK，再回到 7_股神推薦.py 測試推薦與匯入 8 / 10。")
 
 # ============================================================
-# v41 全系統串聯驗證：0 -> 7 -> 8 / 10 -> 首頁 / 儀表板
+# v43 全系統串聯驗證：0 -> 7 -> 8 / 10 -> 首頁 / 儀表板
 # ============================================================
 
 st.markdown('---')
-st.subheader('9. v42 全系統串聯驗證與欄位修復')
-st.caption('檢查 0_大盤趨勢、7_股神推薦、8_股神推薦紀錄、10_推薦清單、首頁 / 儀表板之間的 JSON 串聯。此區塊只讀本機檔案，不重新抓網路資料；v42 可補齊舊推薦紀錄缺少的大盤欄位。')
+st.subheader('9. v43 全系統串聯驗證與欄位修復')
+st.caption('檢查 0_大盤趨勢、7_股神推薦、8_股神推薦紀錄、10_推薦清單、首頁 / 儀表板之間的 JSON 串聯。此區塊只讀本機檔案，不重新抓網路資料；v43 可補齊舊推薦紀錄缺少的大盤欄位。')
 
 try:
     from system_integration_health import run_full_integration_check, ensure_missing_json_files, repair_recommendation_market_fields
@@ -441,12 +441,12 @@ try:
     with cc4:
         _render_metric_card('異常', str(_v41_summary.get('異常', 0)), '缺檔 / 缺欄位 / 格式異常', 'bad' if int(_v41_summary.get('異常', 0) or 0) else 'ok')
     with cc5:
-        _render_metric_card('總項目', str(_v41_summary.get('總項目', 0)), 'v42 串聯檢查項目數', 'info')
+        _render_metric_card('總項目', str(_v41_summary.get('總項目', 0)), 'v43 串聯檢查項目數', 'info')
 
-    with st.expander('v42 橋接檔檢查：market_snapshot / macro bridge', expanded=True):
+    with st.expander('v43 橋接檔檢查：market_snapshot / macro bridge', expanded=True):
         st.dataframe(pd.DataFrame(_v41_report.get('bridge_rows', [])), use_container_width=True, hide_index=True)
 
-    with st.expander('v42 大盤快照欄位檢查：0 大盤趨勢 -> 7 股神推薦', expanded=True):
+    with st.expander('v43 大盤快照欄位檢查：0 大盤趨勢 -> 7 股神推薦', expanded=True):
         st.dataframe(pd.DataFrame(_v41_report.get('market_rows', [])), use_container_width=True, hide_index=True)
         _snap = _v41_report.get('market_snapshot', {}) or {}
         if isinstance(_snap, dict) and _snap:
@@ -462,19 +462,19 @@ try:
             with st.expander('market_snapshot.json 完整內容', expanded=False):
                 st.json(_snap)
 
-    with st.expander('v42 推薦結果大盤欄位檢查：7 -> 8 / 10', expanded=True):
+    with st.expander('v43 推薦結果大盤欄位檢查：7 -> 8 / 10', expanded=True):
         st.dataframe(pd.DataFrame(_v41_report.get('recommendation_rows', [])), use_container_width=True, hide_index=True)
 
-    with st.expander('v42 關鍵 JSON 檔案矩陣', expanded=False):
+    with st.expander('v43 關鍵 JSON 檔案矩陣', expanded=False):
         st.dataframe(pd.DataFrame(_v41_report.get('file_rows', [])), use_container_width=True, hide_index=True)
 
-    with st.expander('v42 頁面檔案檢查', expanded=False):
+    with st.expander('v43 頁面檔案檢查', expanded=False):
         st.dataframe(pd.DataFrame(_v41_report.get('page_rows', [])), use_container_width=True, hide_index=True)
 
-    with st.expander('v42 全部檢查明細', expanded=False):
+    with st.expander('v43 全部檢查明細', expanded=False):
         st.dataframe(pd.DataFrame(_v41_report.get('all_rows', [])), use_container_width=True, hide_index=True)
 
-    st.markdown('#### v42 修復工具')
+    st.markdown('#### v43 修復工具')
     st.caption('缺檔修復只會建立不存在的空白 JSON；欄位修復會把 market_snapshot.json 的大盤欄位補到舊推薦結果 / 紀錄 / 推薦清單，不刪除既有資料、不覆蓋已有非空值。')
     if st.button('建立缺少的空白 JSON（不覆蓋既有檔）', use_container_width=True):
         _created = ensure_missing_json_files(BASE_DIR)
@@ -482,9 +482,9 @@ try:
         st.success('已完成缺檔建立檢查；請重新整理本頁再次驗證。')
 
 
-    st.markdown('##### v42 舊推薦資料大盤欄位補齊')
+    st.markdown('##### v43 舊推薦資料大盤欄位補齊')
     st.caption('用途：修正畫面上「7 -> 8 / 10」出現缺欄位造成異常數增加。此功能只補缺少或空白欄位，不刪除任何推薦紀錄。')
-    if st.button('v42 一鍵補齊舊推薦資料的大盤欄位', use_container_width=True, type='primary'):
+    if st.button('v43 一鍵補齊舊推薦資料的大盤欄位', use_container_width=True, type='primary'):
         _repair = repair_recommendation_market_fields(BASE_DIR)
         if _repair.get('ok'):
             st.success(_repair.get('message', '已完成'))
@@ -496,5 +496,5 @@ try:
         st.info('請重新整理本頁，再看異常數是否下降。')
 
 except Exception as _v41_e:
-    st.error(f'v42 全系統串聯驗證載入失敗：{_v41_e}')
+    st.error(f'v43 全系統串聯驗證載入失敗：{_v41_e}')
     st.code(traceback.format_exc())
