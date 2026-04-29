@@ -36,7 +36,7 @@ from utils import (
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "record_v46_keyerror_safe_20260429"
+BACKTEST_V12_VERSION = "record_v50_perf_tracking_20260429"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -2160,6 +2160,125 @@ def _build_export_bytes(df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> by
     return output.getvalue()
 
 
+# ============================================================
+# V50：推薦後績效追蹤總控
+# ============================================================
+def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦後績效追蹤總控") -> None:
+    """顯示推薦後 1/3/5/10/20 日績效、達標/停損、最大漲幅/回撤與分群勝率。"""
+    if df is None or df.empty:
+        st.info("V50：目前沒有資料可做推薦後績效追蹤。")
+        return
+
+    x = df.copy()
+    x = x.loc[:, ~x.columns.duplicated()].copy()
+
+    def _num_col(col: str) -> pd.Series:
+        if col not in x.columns:
+            return pd.Series([float('nan')] * len(x))
+        return pd.to_numeric(x[col], errors="coerce")
+
+    def _bool_rate(col: str) -> float:
+        if col not in x.columns or len(x) == 0:
+            return 0.0
+        s = x[col]
+        def _b(v):
+            if isinstance(v, bool):
+                return v
+            return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "達標", "停損"}
+        return float(s.map(_b).mean() * 100)
+
+    def _avg(col: str) -> float:
+        s = _num_col(col).dropna()
+        return float(s.mean()) if not s.empty else 0.0
+
+    def _wr(col: str) -> float:
+        s = _num_col(col).dropna()
+        return float((s > 0).mean() * 100) if not s.empty else 0.0
+
+    perf_cols = [c for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"] if c in x.columns]
+    if not perf_cols:
+        st.info("V50：目前尚未產生推薦後績效欄位，請先按『更新推薦後績效』。")
+        return
+
+    with st.expander(title, expanded=True):
+        kpi_payload = []
+        for col in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]:
+            if col in x.columns:
+                kpi_payload.append({
+                    "label": f"{col.replace('%','')} 勝率",
+                    "value": f"{_wr(col):.1f}%",
+                    "delta": f"平均 {_avg(col):.2f}%",
+                    "delta_class": "pro-kpi-delta-flat",
+                })
+        if 'render_pro_kpi_row' in globals() and callable(globals().get('render_pro_kpi_row')):
+            try:
+                render_pro_kpi_row(kpi_payload[:6])
+            except Exception:
+                cols = st.columns(max(1, min(len(kpi_payload), 5)))
+                for c, item in zip(cols, kpi_payload):
+                    c.metric(item["label"], item["value"], item["delta"])
+        else:
+            cols = st.columns(max(1, min(len(kpi_payload), 5)))
+            for c, item in zip(cols, kpi_payload):
+                c.metric(item["label"], item["value"], item["delta"])
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("追蹤樣本數", int(len(x)))
+        k2.metric("達標率", f"{_bool_rate('是否達標_回測') or _bool_rate('是否達目標1'):.1f}%")
+        k3.metric("停損率", f"{_bool_rate('是否停損_回測') or _bool_rate('是否達停損'):.1f}%")
+        k4.metric("平均最大回撤", f"{_avg('推薦後最大回撤%'):.2f}%")
+
+        st.caption("此區只做績效追蹤與驗證，不改變推薦結果。若欄位空白，請先更新推薦後績效。")
+
+        def _group_table(group_col: str) -> pd.DataFrame:
+            if group_col not in x.columns:
+                return pd.DataFrame()
+            rows = []
+            for key, g in x.groupby(group_col, dropna=False):
+                row = {group_col: key if str(key).strip() else "未分類", "筆數": len(g)}
+                for col in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]:
+                    if col in g.columns:
+                        s = pd.to_numeric(g[col], errors="coerce").dropna()
+                        row[f"平均{col}"] = round(float(s.mean()), 2) if not s.empty else None
+                        row[f"{col.replace('%','')}勝率"] = round(float((s > 0).mean() * 100), 1) if not s.empty else None
+                if "推薦後最大漲幅%" in g.columns:
+                    s1 = pd.to_numeric(g["推薦後最大漲幅%"], errors="coerce").dropna()
+                    row["平均最大漲幅%"] = round(float(s1.mean()), 2) if not s1.empty else None
+                if "推薦後最大回撤%" in g.columns:
+                    s2 = pd.to_numeric(g["推薦後最大回撤%"], errors="coerce").dropna()
+                    row["平均最大回撤%"] = round(float(s2.mean()), 2) if not s2.empty else None
+                rows.append(row)
+            out = pd.DataFrame(rows)
+            sort_col = "平均推薦後20日%" if "平均推薦後20日%" in out.columns else ("平均推薦後10日%" if "平均推薦後10日%" in out.columns else None)
+            if sort_col:
+                out = out.sort_values(sort_col, ascending=False, na_position="last")
+            return out
+
+        tabs_v50 = st.tabs(["依推薦模式", "依推薦等級", "依類別", "依大盤風控", "弱勢檢討清單"])
+        with tabs_v50[0]:
+            st.dataframe(_group_table("推薦模式"), use_container_width=True, hide_index=True)
+        with tabs_v50[1]:
+            st.dataframe(_group_table("推薦等級"), use_container_width=True, hide_index=True)
+        with tabs_v50[2]:
+            st.dataframe(_group_table("類別"), use_container_width=True, hide_index=True)
+        with tabs_v50[3]:
+            mcol = "大盤橋接風控" if "大盤橋接風控" in x.columns else ("大盤橋接狀態" if "大盤橋接狀態" in x.columns else "大盤趨勢")
+            if mcol in x.columns:
+                st.dataframe(_group_table(mcol), use_container_width=True, hide_index=True)
+            else:
+                st.info("尚無大盤風控欄位可分群。")
+        with tabs_v50[4]:
+            weak_col = "推薦後10日%" if "推薦後10日%" in x.columns else ("推薦後5日%" if "推薦後5日%" in x.columns else None)
+            if weak_col:
+                weak = x.copy()
+                weak[weak_col] = pd.to_numeric(weak[weak_col], errors="coerce")
+                weak = weak.sort_values(weak_col, ascending=True).head(30)
+                cols = [c for c in ["股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "推薦總分", weak_col, "推薦後最大回撤%", "命中結果", "績效評語", "推薦日期", "推薦理由摘要", "風險說明"] if c in weak.columns]
+                st.dataframe(weak[cols], use_container_width=True, hide_index=True)
+            else:
+                st.info("尚無 5日/10日績效欄位可列弱勢檢討清單。")
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
@@ -2716,6 +2835,8 @@ def main():
             {"label": "平均20日績效%", "value": f"{avg_20_v:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
             {"label": "達目標1比率", "value": f"{target_rate:.2f}%", "delta": f"停損率 {stop_rate:.2f}%", "delta_class": "pro-kpi-delta-flat"},
         ])
+
+        _render_v50_performance_tracker(live_df, "V50 推薦後績效追蹤總控｜8_股神推薦紀錄")
         best_cols = st.columns(2)
         with best_cols[0]:
             if not ana_tables["best_mode"].empty:
