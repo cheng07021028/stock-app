@@ -54,7 +54,7 @@ except Exception:
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
-MACRO_LINK_VERSION = "macro_link_v33_market_snapshot_bridge_20260429"
+MACRO_LINK_VERSION = "macro_link_v37_market_session_effect_bridge_20260429"
 WEIGHT_STATE_FIX_VERSION = "weight_widget_state_fix_v1_20260427"
 GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
@@ -62,7 +62,7 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-PAGE_TITLE = "股神推薦 V35｜高速穩定掃描版"
+PAGE_TITLE = "股神推薦 V37｜大盤趨勢完整串接版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -145,6 +145,12 @@ GODPICK_RECORD_COLUMNS = [
     "大盤橋接風控",
     "大盤橋接策略",
     "大盤橋接更新時間",
+    "大盤交易時段",
+    "大盤交易時段可用",
+    "大盤資料品質",
+    "大盤影響加減分",
+    "大盤影響說明",
+    "大盤資料診斷摘要",
     "股神決策模式",
     "股神進場建議",
     "建議部位%",
@@ -1416,6 +1422,11 @@ def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
         "mini_futures_change": snapshot.get("mini_futures_change"),
         "mini_futures_change_pct": snapshot.get("mini_futures_change_pct"),
         "data_guard_notes": snapshot.get("data_guard_notes"),
+        "market_session": snapshot.get("market_session"),
+        "market_session_label": snapshot.get("market_session_label"),
+        "market_session_usable": snapshot.get("market_session_usable"),
+        "godpick_market_effect": snapshot.get("godpick_market_effect"),
+        "data_diagnostics": snapshot.get("data_diagnostics"),
         "_source": "market_snapshot.json",
     }
 
@@ -1521,6 +1532,50 @@ def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, An
     return _normalize_int_weight_total(out, 100)
 
 
+
+def _market_effect_summary_v37(effect: Any) -> dict[str, Any]:
+    """v37: normalize godpick_market_effect from 01 market trend v36."""
+    if isinstance(effect, dict):
+        delta = _safe_float(effect.get("score_delta") or effect.get("recommend_score_delta") or effect.get("推薦加減分"), 0) or 0
+        chase = _safe_str(effect.get("chase_adjustment") or effect.get("追高因子調整"))
+        defense = _safe_str(effect.get("defense_adjustment") or effect.get("防守因子調整"))
+        style = _safe_str(effect.get("style_bias") or effect.get("市場風格偏向"))
+        note = _safe_str(effect.get("effect_note") or effect.get("summary") or effect.get("說明"))
+        parts = [p for p in [note, chase, defense, style] if p]
+        return {"score_delta": delta, "summary": "｜".join(parts) if parts else "—", "raw": effect}
+    txt = _safe_str(effect)
+    return {"score_delta": 0, "summary": txt or "—", "raw": effect}
+
+
+def _market_diagnostics_summary_v37(diag: Any) -> str:
+    """v37: compress data_diagnostics into a readable summary."""
+    if isinstance(diag, list):
+        chunks = []
+        for item in diag[:8]:
+            if isinstance(item, dict):
+                name = _safe_str(item.get("項目") or item.get("name") or item.get("label"))
+                ok = item.get("成功") if "成功" in item else item.get("ok")
+                status = _safe_str(item.get("狀態") or item.get("status"))
+                date = _safe_str(item.get("資料日期") or item.get("data_date"))
+                err = _safe_str(item.get("失敗原因") or item.get("error") or item.get("診斷說明"))
+                ok_text = "成功" if ok is True else "失敗" if ok is False else (status or "未標示")
+                chunks.append(f"{name or '資料源'}:{ok_text}{('/' + date) if date else ''}{('/' + err) if err and ok_text == '失敗' else ''}")
+            else:
+                chunks.append(_safe_str(item))
+        return "｜".join([c for c in chunks if c]) or "—"
+    if isinstance(diag, dict):
+        chunks = []
+        for k, v in list(diag.items())[:8]:
+            if isinstance(v, dict):
+                ok = v.get("ok")
+                date = _safe_str(v.get("data_date") or v.get("資料日期"))
+                chunks.append(f"{k}:{'成功' if ok is True else '失敗' if ok is False else '未標示'}{('/' + date) if date else ''}")
+            else:
+                chunks.append(f"{k}:{_safe_str(v)}")
+        return "｜".join(chunks) or "—"
+    return _safe_str(diag) or "—"
+
+
 def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[str, Any], dict[str, int], bool]:
     """v33：顯示大盤橋接狀態；優先讀 market_snapshot.json，失敗才讀 macro_mode_bridge.json。"""
     bridge = _read_macro_mode_bridge()
@@ -1541,6 +1596,11 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     weight_advice = _safe_str(bridge.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(bridge)
     position_hint = _safe_str(bridge.get("position_hint") or bridge.get("strategy") or bridge.get("market_bias"))
     data_quality = _safe_str(bridge.get("data_quality")) or "未標示"
+    market_session = _safe_str(bridge.get("market_session"))
+    market_session_label = _safe_str(bridge.get("market_session_label")) or market_session or "未標示"
+    market_session_usable = bridge.get("market_session_usable")
+    effect_info = _market_effect_summary_v37(bridge.get("godpick_market_effect"))
+    diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
 
     c1, c2, c3, c4, c5, c6 = st.columns([1.0, 1.0, 1.0, 1.0, 1.15, 1.25])
     with c1:
@@ -1556,6 +1616,14 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     with c6:
         enabled = st.toggle("套用大盤橋接", value=bool(st.session_state.get(enabled_key, True)), key=enabled_key)
 
+    c7, c8, c9 = st.columns([1.1, 1.1, 2.2])
+    with c7:
+        st.metric("交易時段", market_session_label)
+    with c8:
+        st.metric("時段可用", "可用" if market_session_usable is True else "不建議" if market_session_usable is False else "未標示")
+    with c9:
+        st.metric("大盤影響", f"{effect_info.get('score_delta', 0):+.1f} 分")
+
     adjusted = _apply_macro_bridge_to_weights(applied_weights, bridge, enabled=enabled)
     if enabled:
         st.caption("已套用大盤橋接後權重：" + _weight_text(adjusted))
@@ -1565,6 +1633,9 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     with st.expander("大盤橋接明細 / 對推薦影響", expanded=False):
         st.write(f"**資料來源：** {_safe_str(bridge.get('_source')) or 'macro_mode_bridge.json'}")
         st.write(f"**資料品質：** {data_quality}")
+        st.write(f"**交易時段：** {market_session_label}｜可用：{'是' if market_session_usable is True else '否' if market_session_usable is False else '未標示'}")
+        st.write(f"**大盤影響：** {effect_info.get('score_delta', 0):+.1f} 分｜{effect_info.get('summary')}")
+        st.write(f"**資料診斷：** {diagnostics_summary}")
         st.write(f"**資料日期：** {_safe_str(bridge.get('market_date')) or '—'}")
         st.write(f"**部位建議：** {position_hint or '—'}")
         st.write(f"**大盤解讀：** {_safe_str(bridge.get('trend_comment')) or _safe_str(bridge.get('market_bias')) or '—'}")
@@ -1596,6 +1667,12 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         x["大盤橋接風控"] = "未套用"
         x["大盤橋接策略"] = ""
         x["大盤橋接更新時間"] = ""
+        x["大盤交易時段"] = ""
+        x["大盤交易時段可用"] = ""
+        x["大盤資料品質"] = ""
+        x["大盤影響加減分"] = ""
+        x["大盤影響說明"] = ""
+        x["大盤資料診斷摘要"] = ""
         return x
 
     score = _safe_float(bridge.get("market_score"), 50)
@@ -1604,6 +1681,11 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     risk = _macro_bridge_risk_text(bridge)
     strategy = _safe_str(bridge.get("position_hint") or bridge.get("strategy") or bridge.get("market_bias"))
     updated_at = _safe_str(bridge.get("updated_at"))
+    market_session_label = _safe_str(bridge.get("market_session_label")) or _safe_str(bridge.get("market_session"))
+    market_session_usable = bridge.get("market_session_usable")
+    data_quality = _safe_str(bridge.get("data_quality"))
+    effect_info = _market_effect_summary_v37(bridge.get("godpick_market_effect"))
+    diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
 
     x["大盤橋接分數"] = score
     x["大盤橋接狀態"] = state
@@ -1611,6 +1693,12 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     x["大盤橋接風控"] = risk
     x["大盤橋接策略"] = strategy
     x["大盤橋接更新時間"] = updated_at
+    x["大盤交易時段"] = market_session_label
+    x["大盤交易時段可用"] = "是" if market_session_usable is True else "否" if market_session_usable is False else "未標示"
+    x["大盤資料品質"] = data_quality
+    x["大盤影響加減分"] = effect_info.get("score_delta", 0)
+    x["大盤影響說明"] = effect_info.get("summary")
+    x["大盤資料診斷摘要"] = diagnostics_summary
 
     # 同步到原本大盤欄位，讓舊頁面/紀錄頁也可讀。
     if "大盤可參考分數" in x.columns:
@@ -3642,6 +3730,12 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "大盤橋接風控": _safe_str(r.get("大盤橋接風控")),
                 "大盤橋接策略": _safe_str(r.get("大盤橋接策略")),
                 "大盤橋接更新時間": _safe_str(r.get("大盤橋接更新時間")),
+                "大盤交易時段": _safe_str(r.get("大盤交易時段")),
+                "大盤交易時段可用": _safe_str(r.get("大盤交易時段可用")),
+                "大盤資料品質": _safe_str(r.get("大盤資料品質")),
+                "大盤影響加減分": _safe_float(r.get("大盤影響加減分")),
+                "大盤影響說明": _safe_str(r.get("大盤影響說明")),
+                "大盤資料診斷摘要": _safe_str(r.get("大盤資料診斷摘要")),
                 "風險說明": _safe_str(r.get("風險說明")),
                 "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
                 "權重設定": _safe_str(r.get("權重設定")),
