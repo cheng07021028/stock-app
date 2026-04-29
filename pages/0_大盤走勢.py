@@ -301,7 +301,7 @@ def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
     close_val = _safe_float(row.get("close"))
     pct_val = _safe_float(row.get("pct"))
     payload = {
-        "version": "v27.2_macro_bridge",
+        "version": "v27.5_macro_bridge",
         "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
         "market_date": _safe_str(row.get("used_date") or row.get("date")),
         "source": _safe_str(row.get("source")),
@@ -397,7 +397,7 @@ def _render_macro_bridge_block(row: dict[str, Any]):
     with c3:
         st.metric("建議加權", payload.get("godpick_weight_advice", "0%"))
     with c4:
-        st.caption("v27.2：將大盤穩定分、策略、風控建議寫入 macro_mode_bridge.json，後續可讓 7_股神推薦讀取。")
+        st.caption("v27.5：將大盤穩定分、策略、風控建議寫入 macro_mode_bridge.json，後續可讓 7_股神推薦讀取。")
 
     with st.expander("股神大盤橋接檔內容", expanded=False):
         st.json(payload)
@@ -405,6 +405,112 @@ def _render_macro_bridge_block(row: dict[str, Any]):
         if old_bridge:
             st.write("目前已存在橋接檔：")
             st.json(old_bridge)
+
+
+def _macro_feature_status_df() -> pd.DataFrame:
+    rows = [
+        {
+            "功能": "頁面先顯示",
+            "目前狀態": "已恢復",
+            "是否自動執行": "是",
+            "說明": "進頁後直接顯示，不再等待外部API。",
+        },
+        {
+            "功能": "盤中即時大盤",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，手動按鈕",
+            "說明": "按「更新盤中即時大盤」才抓 TWSE MIS，避免卡住。",
+        },
+        {
+            "功能": "晚上/收盤紀錄",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，手動按鈕",
+            "說明": "按「更新收盤紀錄」或「補抓近20日收盤」。",
+        },
+        {
+            "功能": "大盤穩定因子",
+            "目前狀態": "已恢復",
+            "是否自動執行": "是，讀本機快取",
+            "說明": "使用 macro_market_close_cache.json 計算 MA5、MA20、20日位置與大盤穩定分。",
+        },
+        {
+            "功能": "股神推薦橋接",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，手動寫入",
+            "說明": "按「寫入股神大盤參考」產生 macro_mode_bridge.json。",
+        },
+        {
+            "功能": "大盤趨勢圖",
+            "目前狀態": "已恢復",
+            "是否自動執行": "是，讀本機快取",
+            "說明": "用本機快取畫收盤趨勢，不抓外部資料。",
+        },
+        {
+            "功能": "大盤快取下載",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，下載按鈕",
+            "說明": "可下載 macro_market_close_cache.csv。",
+        },
+        {
+            "功能": "Google News 事件因子",
+            "目前狀態": "暫停",
+            "是否自動執行": "否",
+            "說明": "先暫停，這是之前最容易造成頁面等待的來源之一。",
+        },
+        {
+            "功能": "TAIFEX 期權因子",
+            "目前狀態": "暫停",
+            "是否自動執行": "否",
+            "說明": "先暫停，之後可改成手動更新模式。",
+        },
+        {
+            "功能": "完整法人籌碼",
+            "目前狀態": "暫停",
+            "是否自動執行": "否",
+            "說明": "先暫停，之後可改成手動更新並快取。",
+        },
+        {
+            "功能": "Yahoo / Stooq 外盤模型",
+            "目前狀態": "暫停",
+            "是否自動執行": "否",
+            "說明": "先暫停，避免外部站台延遲造成頁面卡住。",
+        },
+        {
+            "功能": "完整大盤模式預估",
+            "目前狀態": "暫停",
+            "是否自動執行": "否",
+            "說明": "舊版會自動跑完整模型，已改為先穩定顯示，再逐項回補。",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def _render_macro_feature_center():
+    st.markdown("### 大盤功能管理中心")
+    st.caption("v27.5：把 0_大盤趨勢的功能狀態攤開顯示，避免不知道哪些功能已恢復、哪些先暫停。")
+    df = _macro_feature_status_df()
+
+    active_count = int((df["目前狀態"] == "已恢復").sum())
+    paused_count = int((df["目前狀態"] == "暫停").sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("已恢復功能", active_count)
+    with c2:
+        st.metric("暫停功能", paused_count)
+    with c3:
+        st.metric("卡頓風險", "低")
+    with c4:
+        st.metric("外部API自動執行", "0")
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with st.expander("後續建議回補順序", expanded=False):
+        st.write("1. 先回補：法人買賣超，但改成手動按鈕 + 本機快取。")
+        st.write("2. 再回補：外盤 NASDAQ / SOX，但只抓收盤資料，不自動等待。")
+        st.write("3. 再回補：TAIFEX 期權，同樣改成手動更新。")
+        st.write("4. 最後才回補：Google News，因為最容易慢。")
+        st.warning("重點：不要再讓任何外部資料源進頁自動執行，否則大盤頁會再次卡住。")
 
 
 def _score_context(row: dict[str, Any]) -> dict[str, str]:
@@ -653,6 +759,7 @@ def main():
     _render_stable_factor_block(row)
     _render_market_cache_chart()
     _render_macro_bridge_block(row)
+    _render_macro_feature_center()
 
     dl_cols = st.columns([1.2, 4])
     with dl_cols[0]:
