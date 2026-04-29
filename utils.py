@@ -24,9 +24,9 @@ WATCHLIST_CANDIDATES = [
 
 STATE_FILE = "last_query_state.json"
 
-REQUEST_TIMEOUT_FAST = 8
-REQUEST_TIMEOUT_NORMAL = 15
-REALTIME_BATCH_SIZE = 20
+REQUEST_TIMEOUT_FAST = 3
+REQUEST_TIMEOUT_NORMAL = 6
+REALTIME_BATCH_SIZE = 30
 
 
 @st.cache_resource(show_spinner=False)
@@ -34,14 +34,14 @@ def get_requests_session():
     session = requests.Session()
 
     retry = Retry(
-        total=2,
-        read=2,
-        connect=2,
-        backoff_factor=0.3,
+        total=0,
+        read=0,
+        connect=0,
+        backoff_factor=0.0,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=30, pool_maxsize=30)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=80, pool_maxsize=80)
 
     session.mount("http://", adapter)
     session.mount("https://", adapter)
