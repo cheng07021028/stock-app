@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 """
-系統串聯健康檢查服務 v54
+系統串聯健康檢查服務 v55
 
 用途：
 - 檢查 0_大盤趨勢 -> 7_股神推薦 -> 8_股神推薦紀錄 -> 10_推薦清單 -> 首頁/儀表板 的 JSON 串聯。
 - 不主動抓網路資料，不拖慢頁面。
-- JSON 缺檔時可由診斷頁手動建立預設空檔。
+- JSON 缺檔時可由診斷頁手動建立預設空檔；v55 可初始化 runtime 診斷檔。
 """
 
 import json
@@ -694,7 +694,7 @@ def validate_v47_data_source_diagnostics(base_dir: Path) -> List[Dict[str, Any]]
     path = base_dir / "data_source_diagnostics.json"
     ok, data, err = safe_read_json(path)
     if not ok:
-        return [{"檢查項目": "data_source_diagnostics.json", "狀態": "注意", "說明": err, "建議": "需先執行 7_股神推薦或資料抓取，utils.py v47 才會產生診斷資料。"}]
+        return [{"檢查項目": "data_source_diagnostics.json", "狀態": "注意", "說明": err, "建議": "可先按 v55 runtime 初始化；正式資料會在執行 7_股神推薦或資料抓取後更新。"}]
     records = data if isinstance(data, list) else (data.get("records", []) if isinstance(data, dict) else [])
     rows = [{"檢查項目": "資料源診斷檔", "狀態": "OK", "說明": json_shape(data), "建議": "OK"}]
     if isinstance(records, list) and records:
@@ -722,7 +722,7 @@ def validate_v49_watchlist_runtime(base_dir: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for file_name, desc in [("watchlist_runtime_snapshot.json", "v49 自選股 runtime 快照"), ("watchlist_normalized.json", "v49 自選股標準化資料")]:
         ok, data, err = safe_read_json(base_dir / file_name)
-        rows.append({"檢查項目": desc, "狀態": "OK" if ok else "注意", "說明": json_shape(data) if ok else err, "建議": "OK" if ok else "進 4_自選股中心按重寫並驗證 watchlist，或新增/刪除一次自選股後產生。"})
+        rows.append({"檢查項目": desc, "狀態": "OK" if ok else "注意", "說明": json_shape(data) if ok else err, "建議": "OK" if ok else "可先按 v55 runtime 初始化；正式快照會在進 4_自選股中心重寫驗證或新增/刪除後更新。"})
     return rows
 
 def validate_v50_v53_performance_fields(base_dir: Path) -> List[Dict[str, Any]]:
@@ -753,6 +753,128 @@ def validate_v48_speed_monitor_files(base_dir: Path) -> List[Dict[str, Any]]:
     if not first:
         return [{"檢查項目": "v48 推薦速度監控", "狀態": "注意", "說明": "尚無推薦樣本", "建議": "跑一次 7_股神推薦後再檢查。"}]
     return [{"檢查項目": "v48 推薦結果樣本", "狀態": "OK", "說明": f"最新推薦樣本欄位 {len(first.keys())} 個", "建議": "推薦頁完成掃描後，請展開 V48 推薦速度監控查看詳細耗時。"}]
+
+
+
+# ============================================================
+# v55：runtime 診斷檔初始化
+# ============================================================
+
+def _safe_hash_text(text: str) -> str:
+    try:
+        import hashlib
+        return hashlib.md5(text.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    except Exception:
+        return ""
+
+
+def _read_watchlist_for_v55(base_dir: Path) -> Any:
+    ok, data, _err = safe_read_json(Path(base_dir) / "watchlist.json")
+    if ok:
+        return data
+    return {}
+
+
+def _normalize_watchlist_for_v55(data: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """把各種 watchlist 格式轉成 runtime snapshot + normalized list。"""
+    groups: dict[str, list[Any]] = {}
+
+    if isinstance(data, dict):
+        # 常見格式 1：{"科技股": ["2330", ...]}
+        # 常見格式 2：{"groups": {"科技股": [...]}}
+        # 常見格式 3：{"watchlists": {...}}
+        src = data
+        for key in ["groups", "watchlists", "data"]:
+            if isinstance(data.get(key), dict):
+                src = data.get(key) or {}
+                break
+        for g, items in src.items():
+            if isinstance(items, list):
+                groups[str(g)] = items
+            elif isinstance(items, dict):
+                maybe = items.get("stocks") or items.get("items") or items.get("codes") or []
+                groups[str(g)] = maybe if isinstance(maybe, list) else []
+    elif isinstance(data, list):
+        groups["預設群組"] = data
+
+    normalized: list[dict[str, Any]] = []
+    for group_name, items in groups.items():
+        for item in items:
+            if isinstance(item, dict):
+                code = item.get("股票代號") or item.get("代號") or item.get("code") or item.get("stock_no") or item.get("symbol") or ""
+                name = item.get("股票名稱") or item.get("名稱") or item.get("name") or item.get("stock_name") or ""
+                market = item.get("市場別") or item.get("market") or item.get("market_type") or ""
+            else:
+                s = str(item).strip()
+                code = s.split()[0] if s else ""
+                name = ""
+                market = ""
+            if str(code).strip():
+                normalized.append({
+                    "群組": group_name,
+                    "股票代號": str(code).strip(),
+                    "股票名稱": str(name).strip(),
+                    "市場別": str(market).strip(),
+                })
+
+    snapshot = {
+        "updated_at": now_text(),
+        "source": "v55_initialize_runtime_diagnostics",
+        "group_count": len(groups),
+        "stock_count": len(normalized),
+        "groups": groups,
+    }
+    return snapshot, normalized
+
+
+def initialize_v55_runtime_diagnostics(base_dir: Path, overwrite_existing: bool = False) -> Dict[str, Any]:
+    """
+    建立 v47/v49 runtime 診斷檔。
+    - 預設不覆蓋既有檔案。
+    - data_source_diagnostics.json 只是初始化占位，正式紀錄仍由 utils.py v47 寫入。
+    - watchlist_runtime_snapshot / normalized 依 watchlist.json 轉出，供診斷頁與其他頁面快速同步。
+    """
+    base_dir = Path(base_dir)
+    rows: List[Dict[str, Any]] = []
+
+    # 1) data_source_diagnostics.json
+    ds_path = base_dir / "data_source_diagnostics.json"
+    if ds_path.exists() and ds_path.stat().st_size > 2 and not overwrite_existing:
+        rows.append({"檔案": ds_path.name, "動作": "略過", "結果": "已存在", "說明": "正式資料源診斷檔已存在，不覆蓋"})
+    else:
+        ds_payload = [{
+            "timestamp": now_text(),
+            "source": "v55_initializer",
+            "type": "runtime_init",
+            "status": "init",
+            "ok": True,
+            "elapsed": 0,
+            "message": "診斷檔初始化完成；正式資料會在 7_股神推薦或資料抓取後由 utils.py v47 更新。",
+        }]
+        ok, msg = safe_write_json(ds_path, ds_payload)
+        rows.append({"檔案": ds_path.name, "動作": "建立初始化檔", "結果": "OK" if ok else "失敗", "說明": msg})
+
+    # 2) watchlist runtime / normalized
+    watch_data = _read_watchlist_for_v55(base_dir)
+    snapshot, normalized = _normalize_watchlist_for_v55(watch_data)
+    try:
+        raw_text = json.dumps(watch_data, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        raw_text = str(watch_data)
+    snapshot["watchlist_hash"] = _safe_hash_text(raw_text)
+
+    for file_name, payload, desc in [
+        ("watchlist_runtime_snapshot.json", snapshot, "自選股 runtime 快照"),
+        ("watchlist_normalized.json", normalized, "自選股標準化資料"),
+    ]:
+        path = base_dir / file_name
+        if path.exists() and path.stat().st_size > 2 and not overwrite_existing:
+            rows.append({"檔案": file_name, "動作": "略過", "結果": "已存在", "說明": desc})
+            continue
+        ok, msg = safe_write_json(path, payload)
+        rows.append({"檔案": file_name, "動作": "依 watchlist.json 產生", "結果": "OK" if ok else "失敗", "說明": f"{desc}；{msg}"})
+
+    return {"ok": True, "message": "v55 runtime 診斷檔初始化完成。", "rows": rows}
 
 def backup_json_files(base_dir: Path) -> List[Dict[str, Any]]:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
