@@ -62,14 +62,15 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-PAGE_TITLE = "股神推薦 V34｜高速掃描優化版"
+PAGE_TITLE = "股神推薦 V35｜高速穩定掃描版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
-PROGRESS_UPDATE_EVERY = 50   # V34：降低前端重繪頻率，掃描結果不受影響
-SCAN_MAX_WORKERS = 24         # V34：提高平行掃描上限；不做低成本預篩，不漏股票
-V22_CHECKPOINT_EVERY = 200      # V34：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
+PROGRESS_UPDATE_EVERY = 100  # V35：再降低前端重繪頻率，避免 Streamlit 每檔刷新拖慢
+SCAN_MAX_WORKERS = 32         # V35：提高平行掃描上限；不做低成本預篩，不漏股票
+V22_CHECKPOINT_EVERY = 500    # V35：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
+HISTORY_DEBUG_ON_FAIL = False  # V35：掃描中失敗股票不再即時跑慢速 debug，失敗原因彙總到除錯摘要
 
 GODPICK_DEFAULT_SCORE_WEIGHTS = {
     "市場環境": 10,
@@ -5113,9 +5114,11 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         "error": "",
     })
 
-    # 只有在抓不到時才補 debug，且只補一次 primary，不再全市場重跑。
+    # V35：掃描時失敗股票不再立即跑慢速 debug。
+    # 原本 no_history 會再跑 get_history_data_debug，等於失敗股票又多打一輪官方資料源，
+    # 在大量掃描時會造成 1/100 卡很久。若需要詳細診斷，可把 HISTORY_DEBUG_ON_FAIL 改 True。
     debug_attempts = attempt_summary.copy()
-    if callable(get_history_data_debug):
+    if HISTORY_DEBUG_ON_FAIL and callable(get_history_data_debug):
         try:
             debug_info = get_history_data_debug(
                 stock_no=stock_no,
@@ -5127,7 +5130,7 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
             debug_attempts.append({
                 "market_type": _safe_str(debug_info.get("market_type")) or primary,
                 "rows": int(debug_info.get("rows", 0) or 0),
-                "source": _safe_str(debug_info.get("source")) or "history_debug_v34",
+                "source": _safe_str(debug_info.get("source")) or "history_debug_v35_optional",
                 "error": _safe_str(debug_info.get("error")),
             })
         except Exception as e:
@@ -6326,7 +6329,7 @@ def _build_recommend_df(
                         f"已完成 {done_count}/{total_count}｜"
                         f"已花時間：{_fmt_seconds(elapsed)}｜"
                         f"預估剩餘：{_fmt_seconds(eta_sec)}｜"
-                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V34高速掃描"
+                        f"平均每檔：約 {_fmt_seconds(avg_per_stock)}｜平行工人：{worker_count}｜V35高速穩定掃描"
                     )
     else:
         progress_text.caption(f"斷點資料已涵蓋全部 {total_count} 檔，直接整理結果。")
