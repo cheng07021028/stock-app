@@ -105,6 +105,67 @@ def _safe_write_json_local(path: str, payload: Any) -> tuple[bool, str]:
     except Exception as e:
         return False, f"本機 JSON 寫入失敗：{e}"
 
+def _safe_read_json_local(path: str, default: Any = None) -> tuple[Any, str]:
+    """安全讀取 JSON；讀不到時不讓頁面中斷。"""
+    if default is None:
+        default = {}
+    try:
+        if not os.path.exists(path):
+            return default, f"檔案不存在：{path}"
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), f"已讀取：{path}"
+    except Exception as e:
+        return default, f"讀取失敗：{e}"
+
+
+def _verify_local_watchlist(path: str, payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    """寫入後重新讀取驗證，避免畫面顯示已儲存但實際 JSON 沒更新。"""
+    disk_payload, msg = _safe_read_json_local(path, {})
+    disk_norm = _normalize_watchlist_payload(disk_payload if isinstance(disk_payload, dict) else {})
+    disk_hash = _payload_hash(disk_norm)
+    target_hash = _payload_hash(_normalize_watchlist_payload(payload))
+    if disk_hash and disk_hash == target_hash:
+        return True, f"本機 JSON 回讀驗證成功｜{disk_hash[:8]}"
+    return False, f"本機 JSON 回讀驗證失敗｜目標 {target_hash[:8]} / 實際 {disk_hash[:8]}｜{msg}"
+
+
+def _write_watchlist_bridge_files(payload: dict[str, list[dict[str, str]]]) -> tuple[bool, str]:
+    """寫入跨頁橋接檔，讓 7/8/10/首頁不需要等快取自然過期。"""
+    bridge_payload = {
+        "updated_at": _now_text(),
+        "version": int(st.session_state.get(_k("version"), 0) or 0),
+        "payload_hash": _payload_hash(payload),
+        "groups": list(payload.keys()),
+        "group_count": len(payload),
+        "stock_count": sum(len(v) for v in payload.values()),
+        "watchlist": payload,
+    }
+    ok1, msg1 = _safe_write_json_local("watchlist_runtime_snapshot.json", bridge_payload)
+    ok2, msg2 = _safe_write_json_local("watchlist_normalized.json", payload)
+    return bool(ok1 and ok2), f"{msg1}｜{msg2}"
+
+
+def _sync_runtime_watchlist_state(payload: dict[str, list[dict[str, str]]], version: int, saved_at: str, local_msg: str, github_msg: str, verify_msg: str):
+    """統一同步所有跨頁 session_state key，避免換頁或重新整理後又回舊資料。"""
+    payload = _normalize_watchlist_payload(payload)
+    payload_hash = _payload_hash(payload)
+
+    st.session_state[_k("watchlist")] = copy.deepcopy(payload)
+    st.session_state[_k("version")] = version
+    st.session_state[_k("last_saved_at")] = saved_at
+    st.session_state[_k("payload_hash")] = payload_hash
+    st.session_state[_k("last_local_msg")] = local_msg
+    st.session_state[_k("last_github_msg")] = github_msg
+    st.session_state[_k("last_verify_msg")] = verify_msg
+
+    # 給其他頁面使用的全域 key
+    st.session_state["watchlist_data"] = copy.deepcopy(payload)
+    st.session_state["watchlist_version"] = version
+    st.session_state["watchlist_last_saved_at"] = saved_at
+    st.session_state["watchlist_last_saved_hash"] = payload_hash
+    st.session_state["watchlist_last_verify_msg"] = verify_msg
+    st.session_state["watchlist_force_reload_token"] = f"{version}_{payload_hash[:8]}"
+
 
 def _clear_watchlist_cache_safely():
     """清除自選股快取，讓其他頁面下一次讀取立即吃到最新 watchlist.json。"""
@@ -395,34 +456,29 @@ def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool
 
     local_path = _local_watchlist_path()
     local_ok, local_msg = _safe_write_json_local(local_path, payload)
+
+    verify_ok, verify_msg = _verify_local_watchlist(local_path, payload) if local_ok else (False, "本機未寫入，略過回讀驗證")
+    bridge_ok, bridge_msg = _write_watchlist_bridge_files(payload) if local_ok and verify_ok else (False, "本機驗證未通過，略過橋接檔")
+
     _clear_watchlist_cache_safely()
 
     github_ok, github_msg = _push_watchlist_to_github(payload)
 
     version = int(st.session_state.get(_k("version"), 0)) + 1
     saved_at = _now_text()
-    payload_md5 = _payload_hash(payload)
+    _sync_runtime_watchlist_state(payload, version, saved_at, local_msg, github_msg, verify_msg)
+    st.session_state[_k("last_bridge_msg")] = bridge_msg
 
-    st.session_state[_k("watchlist")] = copy.deepcopy(payload)
-    st.session_state[_k("version")] = version
-    st.session_state[_k("last_saved_at")] = saved_at
-    st.session_state[_k("payload_hash")] = payload_md5
-    st.session_state[_k("last_local_msg")] = local_msg
-    st.session_state[_k("last_github_msg")] = github_msg
-
-    st.session_state["watchlist_data"] = copy.deepcopy(payload)
-    st.session_state["watchlist_version"] = version
-    st.session_state["watchlist_last_saved_at"] = saved_at
-    st.session_state["watchlist_last_saved_hash"] = payload_md5
-
-    if local_ok and github_ok:
-        _set_status(f"{local_msg}｜{github_msg}｜版本 v{version}｜{saved_at}", "success")
-    elif local_ok and not github_ok:
-        _set_status(f"{local_msg}｜GitHub 未同步：{github_msg}｜版本 v{version}｜{saved_at}", "warning")
+    if local_ok and verify_ok and bridge_ok and github_ok:
+        _set_status(f"{local_msg}｜{verify_msg}｜{bridge_msg}｜{github_msg}｜版本 v{version}｜{saved_at}", "success")
+    elif local_ok and verify_ok and bridge_ok and not github_ok:
+        _set_status(f"本機已完成：{local_msg}｜{verify_msg}｜{bridge_msg}｜GitHub 未同步：{github_msg}｜版本 v{version}｜{saved_at}", "warning")
+    elif local_ok and verify_ok and not bridge_ok:
+        _set_status(f"本機已完成但橋接檔未完成：{local_msg}｜{verify_msg}｜{bridge_msg}｜版本 v{version}", "warning")
     else:
-        _set_status(f"{local_msg}｜GitHub：{github_msg}", "error")
+        _set_status(f"本機儲存異常：{local_msg}｜{verify_msg}｜GitHub：{github_msg}", "error")
 
-    return bool(local_ok)
+    return bool(local_ok and verify_ok)
 
 def _persist_watchlist(success_msg: str) -> bool:
     ok = _force_write_watchlist_github(st.session_state[_k("watchlist")])
@@ -1102,6 +1158,26 @@ def main():
             ("Token 狀態", "已設定" if github_cfg["token"] else "未設定（仍會寫入本機 JSON）", ""),
         ],
     )
+
+    st.markdown("#### v49 watchlist 寫回驗證")
+    v49_cols = st.columns([1.2, 1.2, 1.6])
+    with v49_cols[0]:
+        if st.button("🧪 驗證本機 watchlist", use_container_width=True):
+            payload = _normalize_watchlist_payload(st.session_state.get(_k("watchlist"), {}))
+            ok, msg = _verify_local_watchlist(_local_watchlist_path(), payload)
+            _set_status(msg, "success" if ok else "error")
+            st.rerun()
+    with v49_cols[1]:
+        if st.button("🛠 重寫並驗證 watchlist", use_container_width=True, type="primary"):
+            payload = _normalize_watchlist_payload(st.session_state.get(_k("watchlist"), {}))
+            if _force_write_watchlist_github(payload):
+                _set_status("v49 已重寫 watchlist.json、橋接檔並完成回讀驗證。", "success")
+            st.rerun()
+    with v49_cols[2]:
+        st.caption(
+            f"回讀驗證：{st.session_state.get(_k('last_verify_msg'), '尚未驗證')}｜"
+            f"橋接檔：{st.session_state.get(_k('last_bridge_msg'), '尚未寫入')}"
+        )
 
     render_pro_section("群組管理")
 
