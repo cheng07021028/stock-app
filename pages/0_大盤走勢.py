@@ -123,76 +123,115 @@ def _extract_money_100m(v: Any):
 
 def _fetch_twse_institutional_manual(target_date: date, timeout: float = 3.0) -> dict[str, Any]:
     """
-    v27.6：手動更新三大法人買賣超。
-    只有按按鈕才執行，不進頁自動抓，避免卡住。
-    單位：億元。
+    v27.7：三大法人手動更新強化版。
+    - 支援 TWSE 新舊網址。
+    - 若指定日期尚無資料，會往前找最近 10 個工作日。
+    - 只在按鈕觸發時執行，不進頁自動抓，避免卡住。
+    - 單位：億元。
     """
-    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
-    urls = [
-        f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json",
-        f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json",
-    ]
+    target_dt = pd.to_datetime(target_date).date()
 
-    for url in urls:
-        try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
-            if r.status_code != 200:
+    def _candidate_dates(end_date: date, max_days: int = 10) -> list[date]:
+        out = []
+        cur = end_date
+        guard = 0
+        while len(out) < max_days and guard < 20:
+            if cur.weekday() < 5:
+                out.append(cur)
+            cur = cur - timedelta(days=1)
+            guard += 1
+        return out
+
+    def _parse_bfi82u_payload(data: dict[str, Any], used_date: date, source_name: str) -> dict[str, Any]:
+        rows = []
+        if isinstance(data, dict):
+            rows = data.get("data") or data.get("aaData") or []
+            # 部分回應把表格包在 tables 裡
+            if not rows and isinstance(data.get("tables"), list):
+                for t in data.get("tables") or []:
+                    if isinstance(t, dict) and isinstance(t.get("data"), list):
+                        rows.extend(t.get("data") or [])
+
+        if not isinstance(rows, list) or not rows:
+            return {}
+
+        foreign = None
+        invest = None
+        dealer = None
+        total = None
+        raw_rows = []
+
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 2:
                 continue
-            data = r.json()
-            rows = data.get("data") or []
-            if not isinstance(rows, list) or not rows:
+            label = _safe_str(row[0])
+            joined = " ".join(_safe_str(x) for x in row)
+            nums = [_extract_money_100m(x) for x in row[1:]]
+            nums = [x for x in nums if x is not None]
+            if not nums:
                 continue
 
-            foreign = None
-            invest = None
-            dealer = None
-            total = None
-            raw_rows = []
+            # BFI82U 通常最後有效數字是「買賣超金額」；若欄位有買進/賣出/買賣超，最後值最穩。
+            val = nums[-1]
+            raw_rows.append({"項目": label or joined[:20], "買賣超億元": val, "原始列": row})
 
-            for row in rows:
-                if not isinstance(row, list) or len(row) < 2:
+            if "外資" in label or "外資" in joined:
+                foreign = val
+            elif "投信" in label or "投信" in joined:
+                invest = val
+            elif "自營商" in label or "自營商" in joined:
+                dealer = val
+            elif "合計" in label or "總計" in label or "三大法人" in label or "合計" in joined:
+                total = val
+
+        calc_total = sum([x for x in [foreign, invest, dealer] if x is not None]) if any(x is not None for x in [foreign, invest, dealer]) else total
+        if total is None:
+            total = calc_total
+
+        if any(x is not None for x in [foreign, invest, dealer, total]):
+            return {
+                "ok": True,
+                "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
+                "source": source_name,
+                "foreign_100m": foreign,
+                "investment_trust_100m": invest,
+                "dealer_100m": dealer,
+                "total_100m": total,
+                "raw_rows": raw_rows,
+                "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        return {}
+
+    tried = []
+    for d in _candidate_dates(target_dt, max_days=10):
+        ymd = pd.to_datetime(d).strftime("%Y%m%d")
+        urls = [
+            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&type=day&response=json",
+            f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&type=day&response=json",
+            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?date={ymd}&type=day&response=json",
+        ]
+        for url in urls:
+            tried.append(f"{ymd} {url.split('?')[0].split('/')[-1]}")
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code != 200:
                     continue
-                label = _safe_str(row[0])
-                nums = [_extract_money_100m(x) for x in row[1:]]
-                nums = [x for x in nums if x is not None]
-                if not nums:
-                    continue
-                # BFI82U 常見最後一欄為買賣超金額，取最後有效值。
-                val = nums[-1]
-                raw_rows.append({"項目": label, "買賣超億元": val})
-                if "外資" in label:
-                    foreign = val
-                elif "投信" in label:
-                    invest = val
-                elif "自營商" in label:
-                    dealer = val
-                elif "合計" in label or "總計" in label:
-                    total = val
-
-            calc_total = sum([x for x in [foreign, invest, dealer] if x is not None]) if any(x is not None for x in [foreign, invest, dealer]) else total
-            if total is None:
-                total = calc_total
-
-            if any(x is not None for x in [foreign, invest, dealer, total]):
-                return {
-                    "ok": True,
-                    "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-                    "source": "TWSE 三大法人",
-                    "foreign_100m": foreign,
-                    "investment_trust_100m": invest,
-                    "dealer_100m": dealer,
-                    "total_100m": total,
-                    "raw_rows": raw_rows,
-                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-        except Exception:
-            continue
+                data = r.json()
+                parsed = _parse_bfi82u_payload(data, d, "TWSE 三大法人")
+                if parsed:
+                    if d != target_dt:
+                        parsed["source"] = f"TWSE 三大法人｜最近可用日"
+                        parsed["note"] = f"指定日期 {pd.to_datetime(target_dt).strftime('%Y-%m-%d')} 尚無資料，已使用最近可用日 {pd.to_datetime(d).strftime('%Y-%m-%d')}"
+                    return parsed
+            except Exception:
+                continue
 
     return {
         "ok": False,
         "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
         "source": "TWSE 三大法人",
-        "error": "法人資料尚未取得、非交易日或連線失敗",
+        "error": "法人資料尚未取得；可能是尚未收盤、非交易日、TWSE暫無資料或連線失敗。已嘗試最近10個工作日。",
+        "tried": tried[-12:],
     }
 
 
@@ -704,6 +743,10 @@ def _render_institutional_block(target_date: date):
             st.rerun()
         else:
             st.warning(f"三大法人更新失敗：{row.get('error')}")
+            if row.get("tried"):
+                with st.expander("法人更新嘗試明細", expanded=False):
+                    for item in row.get("tried", []):
+                        st.write(f"- {item}")
 
     detail = [
         ("資料日期", _safe_str(inst.get("date")) or "尚未更新"),
