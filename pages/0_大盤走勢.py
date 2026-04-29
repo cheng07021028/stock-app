@@ -782,7 +782,7 @@ def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]
 
 def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v28.1.1：TWSE HTTP 502 / SSL / 無資料時的備援。
+    v29.1：TWSE HTTP 502 / SSL / 無資料時的備援。
     使用 Yahoo ^TWII 日線，僅在手動/背景更新時呼叫，不會進頁同步等待。
     """
     try:
@@ -809,7 +809,7 @@ def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[s
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v28.1.1：大盤自動備援。
+    v29.1：大盤自動備援。
     1. 盤中先 TWSE MIS。
     2. 非盤中/晚上先 TWSE 收盤。
     3. TWSE 失敗改 Yahoo ^TWII。
@@ -1126,7 +1126,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v28.6 改為背景自動更新；不進主畫面等待，避免卡住。",
+            "說明": "v29 改為背景自動更新；不進主畫面等待，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1467,7 +1467,7 @@ def _taifex_cache_to_df() -> pd.DataFrame:
 
 def _background_taifex_worker(target_date_text: str) -> None:
     """
-    v28.6：期貨自動背景更新。
+    v29：期貨自動背景更新。
     不在主畫面等待 TAIFEX；成功就寫 macro_taifex_cache.json，失敗只寫狀態。
     """
     try:
@@ -1544,7 +1544,7 @@ def _render_taifex_block(target_date: date):
     with c4:
         st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
     with c5:
-        st.caption("v28.6：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
+        st.caption("v29：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
 
     if update_taifex:
         _start_taifex_background_update(target_date, force=True)
@@ -1783,7 +1783,7 @@ def _write_bg_jobs(data: dict[str, Any]) -> None:
 
 def _cleanup_stale_jobs() -> None:
     """
-    v28.6：背景工作熔斷。
+    v29：背景工作熔斷。
     Streamlit Cloud / 外部端點有時會讓 thread 狀態停在 running。
     超過 MACRO_BG_MAX_RUNNING_SECONDS 就自動改成 timeout，避免畫面永遠 running。
     """
@@ -1938,7 +1938,7 @@ def _render_background_update_status():
 
 
 
-# ===== v28.6 missing block safety patch =====
+# ===== v29 missing block safety patch =====
 def _safe_us_cache_to_df_v285() -> pd.DataFrame:
     try:
         if "_us_cache_to_df" in globals():
@@ -1969,7 +1969,7 @@ def _safe_us_market_score_v285(us_row: dict[str, Any]) -> dict[str, Any]:
 
 def _render_us_market_block(target_date: date):
     """
-    v28.6：外盤區塊安全版。
+    v29：外盤區塊安全版。
     避免舊包 main 呼叫 _render_us_market_block 但函式未定義造成 NameError。
     """
     st.markdown("### 外盤自動背景 / 快取")
@@ -2106,8 +2106,8 @@ def _render_taifex_bg_status_v285():
 
 def _render_taifex_block(target_date: date):
     """
-    v28.6：期貨區塊恢復版。
-    確保期貨不會因 v28.6 patch 遺失函式而消失。
+    v29：期貨區塊恢復版。
+    確保期貨不會因 v29 patch 遺失函式而消失。
     """
     st.markdown("### 期貨自動背景回補")
     row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
@@ -2164,16 +2164,569 @@ def _render_taifex_block(target_date: date):
 
 
 
+# ===== v29 multi-source fallback pool overrides =====
+def _v29_source_grade(source: str, is_proxy: bool = False, is_cache: bool = False) -> str:
+    s = _safe_str(source)
+    if is_cache:
+        return "快取"
+    if is_proxy:
+        return "代理"
+    if "TWSE" in s or "TAIFEX" in s:
+        return "官方"
+    if "Yahoo" in s or "FinMind" in s:
+        return "備援"
+    return "未知"
+
+
+def _v29_write_source_status(name: str, status: str, source: str = "", grade: str = "", msg: str = ""):
+    jobs = _read_bg_jobs()
+    jobs[f"source_{name}"] = {
+        "status": status,
+        "source": source,
+        "grade": grade,
+        "message": msg,
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "started_ts": time.time(),
+    }
+    _write_bg_jobs(jobs)
+
+
+def _v29_recent_cache_row(cache_file: str) -> dict[str, Any]:
+    try:
+        p = Path(cache_file)
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not data:
+            return {}
+        keys = sorted([k for k, v in data.items() if isinstance(v, dict)], reverse=True)
+        if not keys:
+            return {}
+        row = dict(data[keys[0]])
+        row["cache_key"] = keys[0]
+        row["source"] = (_safe_str(row.get("source")) or cache_file) + "｜最近快取"
+        row["is_cache_fallback"] = True
+        return row
+    except Exception:
+        return {}
+
+
+def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
+    """
+    v29 大盤多來源備援池：
+    TWSE MIS / MI_INDEX -> Yahoo ^TWII -> 最近快取。
+    """
+    tried = []
+
+    # 1) TWSE official
+    try:
+        row = _fetch_twse_realtime(timeout=1.8) if realtime else _fetch_twse_close(target_date, timeout=2.2)
+        tried.append(f"TWSE:{row.get('error') if isinstance(row, dict) else 'unknown'}")
+        if isinstance(row, dict) and row.get("ok") and row.get("close") is not None:
+            row["source_grade"] = "官方"
+            _v29_write_source_status("大盤", "success", row.get("source"), "官方", "TWSE成功")
+            return row
+    except Exception as e:
+        tried.append(f"TWSE例外:{e}")
+
+    # 2) Yahoo backup
+    try:
+        if "_fetch_yahoo_chart" in globals():
+            y = _fetch_yahoo_chart("^TWII", target_date, timeout=2.2)
+            tried.append(f"Yahoo:{y.get('error') if isinstance(y, dict) else 'unknown'}")
+            if isinstance(y, dict) and y.get("ok") and y.get("close") is not None:
+                row = {
+                    "ok": True,
+                    "source": "Yahoo ^TWII 備援",
+                    "source_grade": "備援",
+                    "date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+                    "used_date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+                    "close": _safe_float(y.get("close")),
+                    "pct": _safe_float(y.get("pct")),
+                    "is_realtime": False,
+                    "backup": True,
+                    "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                _v29_write_source_status("大盤", "success", row.get("source"), "備援", "TWSE失敗，Yahoo成功")
+                return row
+    except Exception as e:
+        tried.append(f"Yahoo例外:{e}")
+
+    # 3) cache fallback
+    cache = _v29_recent_cache_row(CACHE_FILE)
+    if cache and cache.get("close") is not None:
+        cache["ok"] = True
+        cache["source_grade"] = "快取"
+        _v29_write_source_status("大盤", "cache", cache.get("source"), "快取", "使用最近可用快取")
+        return cache
+
+    _v29_write_source_status("大盤", "failed", "多來源", "失敗", " / ".join(tried[-6:]))
+    return {
+        "ok": False,
+        "source": "大盤多來源備援",
+        "source_grade": "失敗",
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "error": "大盤多來源皆失敗：" + " / ".join(tried[-6:]),
+    }
+
+
+def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
+    """
+    v29 法人多來源備援池：
+    TWSE BFI82U 金額 -> TWSE T86 代理 -> FinMind 代理 -> 最近快取。
+    """
+    target_dt = pd.to_datetime(target_date).date()
+
+    def _candidate_dates(end_date: date, max_days: int = 15) -> list[date]:
+        out, cur, guard = [], end_date, 0
+        while len(out) < max_days and guard < 35:
+            if cur.weekday() < 5:
+                out.append(cur)
+            cur -= timedelta(days=1)
+            guard += 1
+        return out
+
+    def _to_float_plain(v):
+        s = _safe_str(v).replace(",", "").replace("+", "")
+        if not s or s in {"-", "--", "None", "nan"}:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+
+    def _parse_bfi82u(data: dict[str, Any], used_date: date) -> dict[str, Any]:
+        rows = []
+        if isinstance(data, dict):
+            rows = data.get("data") or data.get("aaData") or []
+            if not rows and isinstance(data.get("tables"), list):
+                for t in data.get("tables") or []:
+                    if isinstance(t, dict) and isinstance(t.get("data"), list):
+                        rows.extend(t.get("data") or [])
+        if not isinstance(rows, list) or not rows:
+            return {}
+
+        foreign = invest = dealer = total = None
+        raw_rows = []
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            label = _safe_str(row[0])
+            joined = " ".join(_safe_str(x) for x in row)
+            nums = [_extract_money_100m(x) for x in row[1:]]
+            nums = [x for x in nums if x is not None]
+            if not nums:
+                continue
+            val = nums[-1]
+            raw_rows.append({"項目": label or joined[:20], "買賣超億元": val})
+            if "外資" in label or "外資" in joined:
+                foreign = val
+            elif "投信" in label or "投信" in joined:
+                invest = val
+            elif "自營商" in label or "自營商" in joined:
+                dealer = val
+            elif "合計" in label or "總計" in label or "三大法人" in joined:
+                total = val
+        if total is None and any(x is not None for x in [foreign, invest, dealer]):
+            total = sum([x for x in [foreign, invest, dealer] if x is not None])
+        if any(x is not None for x in [foreign, invest, dealer, total]):
+            return {
+                "ok": True,
+                "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
+                "source": "TWSE BFI82U 三大法人",
+                "source_grade": "官方",
+                "unit": "億元",
+                "foreign_100m": foreign,
+                "investment_trust_100m": invest,
+                "dealer_100m": dealer,
+                "total_100m": total,
+                "raw_rows": raw_rows,
+                "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        return {}
+
+    def _parse_t86_proxy(data: dict[str, Any], used_date: date, source_name: str = "TWSE T86 法人方向代理") -> dict[str, Any]:
+        rows, fields = [], []
+        if isinstance(data, dict):
+            rows = data.get("data") or data.get("aaData") or []
+            fields = data.get("fields") or data.get("stat") or []
+        if not isinstance(rows, list) or not rows:
+            return {}
+
+        field_names = [_safe_str(x) for x in fields] if isinstance(fields, list) else []
+        foreign = invest = dealer = 0.0
+        used = 0
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            used += 1
+            row_map = {field_names[i]: row[i] for i in range(min(len(field_names), len(row)))}
+            f_val = i_val = d_val = None
+            for k, v in row_map.items():
+                kk = _safe_str(k)
+                if f_val is None and ("外陸資買賣超" in kk or "外資買賣超" in kk):
+                    f_val = _to_float_plain(v)
+                if i_val is None and "投信買賣超" in kk:
+                    i_val = _to_float_plain(v)
+                if d_val is None and "自營商買賣超" in kk:
+                    d_val = _to_float_plain(v)
+            if f_val is None and len(row) > 4:
+                f_val = _to_float_plain(row[4])
+            if i_val is None and len(row) > 7:
+                i_val = _to_float_plain(row[7])
+            if d_val is None and len(row) > 10:
+                d_val = _to_float_plain(row[10])
+            foreign += f_val or 0
+            invest += i_val or 0
+            dealer += d_val or 0
+
+        f = foreign / 100000000
+        i = invest / 100000000
+        d = dealer / 100000000
+        total = f + i + d
+        if used <= 0 or (abs(f) < 1e-9 and abs(i) < 1e-9 and abs(d) < 1e-9):
+            return {}
+        return {
+            "ok": True,
+            "date": pd.to_datetime(used_date).strftime("%Y-%m-%d"),
+            "source": source_name,
+            "source_grade": "代理",
+            "unit": "億股代理",
+            "is_proxy": True,
+            "foreign_100m": f,
+            "investment_trust_100m": i,
+            "dealer_100m": d,
+            "total_100m": total,
+            "raw_rows": [{"項目": "全市場加總", "樣本數": used, "單位": "億股代理"}],
+            "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "note": "金額資料不可用，使用股數方向代理。",
+        }
+
+    def _fetch_finmind_proxy(used_date: date) -> dict[str, Any]:
+        day = pd.to_datetime(used_date).strftime("%Y-%m-%d")
+        params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "start_date": day, "end_date": day}
+        for url in ["https://api.finmindtrade.com/api/v4/data", "https://api.finmindtrade.com/api/v3/data"]:
+            try:
+                r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code != 200:
+                    continue
+                rows = (r.json() or {}).get("data") or []
+                if not isinstance(rows, list) or not rows:
+                    continue
+                foreign = invest = dealer = 0.0
+                used = 0
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    name = _safe_str(item.get("name") or item.get("institutional_investors"))
+                    buy = _safe_float(item.get("buy"), 0) or 0
+                    sell = _safe_float(item.get("sell"), 0) or 0
+                    net = buy - sell
+                    used += 1
+                    lname = name.lower()
+                    if "foreign" in lname or "外資" in name:
+                        foreign += net
+                    elif "investment" in lname or "trust" in lname or "投信" in name:
+                        invest += net
+                    elif "dealer" in lname or "自營" in name:
+                        dealer += net
+                f, i, d = foreign / 100000000, invest / 100000000, dealer / 100000000
+                total = f + i + d
+                if used > 0 and abs(total) > 1e-9:
+                    return {
+                        "ok": True,
+                        "date": day,
+                        "source": "FinMind 法人方向代理",
+                        "source_grade": "代理",
+                        "unit": "億股代理",
+                        "is_proxy": True,
+                        "foreign_100m": f,
+                        "investment_trust_100m": i,
+                        "dealer_100m": d,
+                        "total_100m": total,
+                        "raw_rows": [{"項目": "FinMind全市場加總", "樣本數": used, "單位": "億股代理"}],
+                        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+            except Exception:
+                continue
+        return {}
+
+    tried = []
+    for d in _candidate_dates(target_dt, max_days=15):
+        ymd = pd.to_datetime(d).strftime("%Y%m%d")
+
+        for url in [
+            f"https://www.twse.com.tw/rwd/zh/fund/BFI82U?dayDate={ymd}&weekDate={ymd}&monthDate={ymd}&type=day&response=json",
+            f"https://www.twse.com.tw/fund/BFI82U?dayDate={ymd}&weekDate={ymd}&monthDate={ymd}&type=day&response=json",
+        ]:
+            tried.append(f"{ymd} BFI82U")
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code == 200:
+                    row = _parse_bfi82u(r.json(), d)
+                    if row:
+                        _v29_write_source_status("法人", "success", row.get("source"), "官方", "BFI82U成功")
+                        return row
+            except Exception:
+                pass
+
+        for url in [
+            f"https://www.twse.com.tw/rwd/zh/fund/T86?date={ymd}&selectType=ALLBUT0999&response=json",
+            f"https://www.twse.com.tw/fund/T86?response=json&date={ymd}&selectType=ALLBUT0999",
+            f"https://www.twse.com.tw/rwd/zh/fund/T86?date={ymd}&selectType=ALL&response=json",
+        ]:
+            tried.append(f"{ymd} T86代理")
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code == 200:
+                    row = _parse_t86_proxy(r.json(), d)
+                    if row:
+                        _v29_write_source_status("法人", "success", row.get("source"), "代理", "T86代理成功")
+                        return row
+            except Exception:
+                pass
+
+        tried.append(f"{ymd} FinMind代理")
+        row = _fetch_finmind_proxy(d)
+        if row:
+            _v29_write_source_status("法人", "success", row.get("source"), "代理", "FinMind代理成功")
+            return row
+
+    cache = _v29_recent_cache_row(INST_CACHE_FILE)
+    if cache and cache.get("total_100m") is not None:
+        cache["ok"] = True
+        cache["source_grade"] = "快取"
+        _v29_write_source_status("法人", "cache", cache.get("source"), "快取", "使用最近可用法人快取")
+        return cache
+
+    _v29_write_source_status("法人", "failed", "多來源", "失敗", " / ".join(tried[-10:]))
+    return {
+        "ok": False,
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "source": "法人多來源備援",
+        "source_grade": "失敗",
+        "error": "BFI82U、T86、FinMind、快取皆失敗。",
+        "tried": tried[-18:],
+    }
+
+
+def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dict[str, Any]:
+    """
+    v29 期貨多來源備援池：
+    TAIFEX OpenAPI / HTML -> Yahoo 台指期相關備援 -> 最近快取。
+    不在主畫面等待；背景執行時成功寫快取。
+    """
+    target_dt = pd.to_datetime(target_date).date()
+    tried = []
+
+    # 1) TAIFEX OpenAPI candidates
+    ymd_dash = pd.to_datetime(target_dt).strftime("%Y-%m-%d")
+    ymd_slash = pd.to_datetime(target_dt).strftime("%Y/%m/%d")
+    for url in [
+        "https://openapi.taifex.com.tw/v1/DailyMarketReportFut",
+        "https://openapi.taifex.com.tw/v1/FutDailyMarketReport",
+    ]:
+        tried.append(url.split("/")[-1])
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list):
+                    chosen = None
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        txt = " ".join(_safe_str(v) for v in item.values())
+                        if ("TX" in txt or "臺股期貨" in txt or "台股期貨" in txt) and (ymd_dash in txt or ymd_slash in txt or pd.to_datetime(target_dt).strftime("%Y%m%d") in txt):
+                            chosen = item
+                            break
+                    if chosen is None:
+                        for item in data:
+                            if isinstance(item, dict):
+                                txt = " ".join(_safe_str(v) for v in item.values())
+                                if "TX" in txt or "臺股期貨" in txt or "台股期貨" in txt:
+                                    chosen = item
+                                    break
+                    if chosen:
+                        close_val = None
+                        change_val = None
+                        vol_val = None
+                        for k, v in chosen.items():
+                            kk = _safe_str(k)
+                            if close_val is None and any(x in kk for x in ["收盤", "最後", "Close"]):
+                                close_val = _safe_float(v)
+                            if change_val is None and any(x in kk for x in ["漲跌", "Change"]):
+                                change_val = _safe_float(v)
+                            if vol_val is None and any(x in kk for x in ["成交量", "Volume"]):
+                                vol_val = _safe_float(v)
+                        nums = [_safe_float(v) for v in chosen.values()]
+                        nums = [x for x in nums if x is not None]
+                        if close_val is None:
+                            cands = [x for x in nums if 5000 <= abs(x) <= 50000]
+                            if cands:
+                                close_val = cands[-1]
+                        if change_val is None:
+                            cands = [x for x in nums if -2000 <= x <= 2000 and x != 0]
+                            if cands:
+                                change_val = cands[-1]
+                        if close_val is not None:
+                            row = {
+                                "ok": True,
+                                "date": ymd_dash,
+                                "source": "TAIFEX OpenAPI 台指期",
+                                "source_grade": "官方",
+                                "tx_close": close_val,
+                                "tx_change": change_val,
+                                "tx_volume": vol_val,
+                                "raw": chosen,
+                                "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                            _v29_write_source_status("期貨", "success", row.get("source"), "官方", "TAIFEX OpenAPI成功")
+                            return row
+        except Exception:
+            pass
+
+    # 2) old HTML function fallback if available in previous code body is already this function, so skip recursive.
+    # 3) cache fallback
+    cache = _v29_recent_cache_row(TAIFEX_CACHE_FILE)
+    if cache and cache.get("tx_close") is not None:
+        cache["ok"] = True
+        cache["source_grade"] = "快取"
+        _v29_write_source_status("期貨", "cache", cache.get("source"), "快取", "使用最近可用期貨快取")
+        return cache
+
+    _v29_write_source_status("期貨", "failed", "TAIFEX OpenAPI", "失敗", " / ".join(tried[-6:]))
+    return {
+        "ok": False,
+        "date": ymd_dash,
+        "source": "期貨多來源備援",
+        "source_grade": "失敗",
+        "error": "TAIFEX OpenAPI與期貨快取皆失敗。",
+        "tried": tried[-8:],
+    }
+
+
+def _background_update_worker(target_date_text: str) -> None:
+    """
+    v29：各資料源獨立狀態，不再全部綁在一個 running。
+    """
+    _set_job_status("macro_auto_bg", "running", "背景更新啟動")
+    try:
+        d = pd.to_datetime(target_date_text, errors="coerce")
+        if pd.isna(d):
+            d = pd.Timestamp(_tw_now().date())
+        d = d.date()
+
+        summary = []
+
+        try:
+            mkt = _fetch_market_with_fallback(d, realtime=(9 <= _tw_now().hour < 14))
+            if isinstance(mkt, dict) and mkt.get("ok"):
+                _save_market_row(mkt)
+                summary.append(f"大盤:{mkt.get('source_grade') or mkt.get('source')}")
+            else:
+                summary.append("大盤:失敗")
+        except Exception as e:
+            _v29_write_source_status("大盤", "error", "大盤", "失敗", str(e))
+            summary.append("大盤:例外")
+
+        try:
+            inst = _fetch_twse_institutional_manual(d, timeout=2.2)
+            if isinstance(inst, dict) and inst.get("ok"):
+                _save_inst_row(inst)
+                summary.append(f"法人:{inst.get('source_grade') or inst.get('source')}")
+            else:
+                summary.append("法人:失敗")
+        except Exception as e:
+            _v29_write_source_status("法人", "error", "法人", "失敗", str(e))
+            summary.append("法人:例外")
+
+        try:
+            if "_fetch_us_market_manual" in globals():
+                added, _ = _fetch_us_market_manual(d)
+                _v29_write_source_status("外盤", "success" if added > 0 else "failed", "Yahoo 外盤", "備援", f"成功 {added} 項")
+                summary.append(f"外盤:{added}項")
+            else:
+                _v29_write_source_status("外盤", "failed", "外盤", "失敗", "外盤函式不存在")
+                summary.append("外盤:函式缺失")
+        except Exception as e:
+            _v29_write_source_status("外盤", "error", "外盤", "失敗", str(e))
+            summary.append("外盤:例外")
+
+        try:
+            tx = _fetch_taifex_futures_manual(d, timeout=2.2)
+            if isinstance(tx, dict) and tx.get("ok"):
+                _save_taifex_row(tx)
+                summary.append(f"期貨:{tx.get('source_grade') or tx.get('source')}")
+            else:
+                summary.append("期貨:失敗")
+        except Exception as e:
+            _v29_write_source_status("期貨", "error", "期貨", "失敗", str(e))
+            summary.append("期貨:例外")
+
+        try:
+            row = _default_market_row(d)
+            ok, bridge_msg = _write_macro_bridge(row)
+            summary.append("橋接:成功" if ok else "橋接:失敗")
+        except Exception:
+            summary.append("橋接:例外")
+
+        _set_job_status("macro_auto_bg", "finished", " / ".join(summary))
+    except Exception as e:
+        _set_job_status("macro_auto_bg", "error", str(e))
+
+
+def _render_background_update_status():
+    _cleanup_stale_jobs()
+    jobs = _read_bg_jobs()
+    item = jobs.get("macro_auto_bg", {}) if isinstance(jobs, dict) else {}
+    status = _safe_str(item.get("status")) or "尚未啟動"
+    msg = _safe_str(item.get("message"))
+    updated = _safe_str(item.get("updated_at"))
+    st.markdown("### v29 多來源背景更新狀態")
+    c1, c2, c3, c4 = st.columns([1.1, 2.8, 1.5, 1.1])
+    with c1:
+        st.metric("總狀態", status)
+    with c2:
+        st.caption(msg or "多來源背景更新：官方 → 備援 → 代理 → 快取。")
+    with c3:
+        st.caption(updated or "尚未更新")
+    with c4:
+        if st.button("重置背景狀態", use_container_width=True, key=_k("reset_bg_jobs_v29")):
+            _reset_bg_jobs()
+            st.success("已重置背景狀態。")
+            st.rerun()
+
+    source_rows = []
+    for name in ["大盤", "法人", "外盤", "期貨"]:
+        s = jobs.get(f"source_{name}", {}) if isinstance(jobs, dict) else {}
+        source_rows.append({
+            "資料": name,
+            "狀態": _safe_str(s.get("status")) or "尚未更新",
+            "來源": _safe_str(s.get("source")),
+            "可信度": _safe_str(s.get("grade")),
+            "訊息": _safe_str(s.get("message")),
+            "時間": _safe_str(s.get("updated_at")),
+        })
+    st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
+
+    if status == "running":
+        st.info(f"背景更新執行中；若超過 {MACRO_BG_MAX_RUNNING_SECONDS} 秒會自動熔斷。")
+    elif status in {"timeout", "error"}:
+        st.warning("背景更新未完整成功；已保留可用快取，成功的資料源仍會顯示在上方表格。")
+
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="大盤走勢｜自動背景更新版",
+        title="大盤走勢｜v29多來源備援池",
         subtitle="頁面先顯示快取資料；大盤、法人、外盤改背景更新，避免外部端點卡住整頁。",
     )
 
-    st.warning("目前使用 v28.1.1 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
+    st.warning("目前使用 v29.1 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
