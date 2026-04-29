@@ -782,7 +782,7 @@ def _fetch_twse_close(target_date: date, timeout: float = 2.5) -> dict[str, Any]
 
 def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v29.2：TWSE HTTP 502 / SSL / 無資料時的備援。
+    v29.3：TWSE HTTP 502 / SSL / 無資料時的備援。
     使用 Yahoo ^TWII 日線，僅在手動/背景更新時呼叫，不會進頁同步等待。
     """
     try:
@@ -810,7 +810,7 @@ def _fetch_taiex_yahoo_backup(target_date: date, timeout: float = 2.5) -> dict[s
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v29.2：大盤自動備援。
+    v29.3：大盤自動備援。
     1. 盤中先 TWSE MIS。
     2. 非盤中/晚上先 TWSE 收盤。
     3. TWSE 失敗改 Yahoo ^TWII。
@@ -1128,7 +1128,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v29.2 改為背景自動更新；不進主畫面等待，避免卡住。",
+            "說明": "v29.3 改為背景自動更新；不進主畫面等待，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1390,6 +1390,10 @@ def _save_taifex_row(row: dict[str, Any]) -> None:
     cache = _read_taifex_cache()
     cache[ymd] = row
     _write_taifex_cache(cache)
+    try:
+        _set_job_status("taifex_auto_bg", "finished", f"期貨快取已更新：{row.get('source')} / 收盤 {row.get('tx_close')} / 漲跌 {row.get('tx_change')}")
+    except Exception:
+        pass
 
 
 def _save_taifex_manual_input(target_date: date, tx_close: float | None, tx_change: float | None, tx_volume: float | None = None) -> tuple[bool, str]:
@@ -1500,7 +1504,39 @@ def _start_taifex_background_update(target_date: date, force: bool = False) -> N
     t.start()
 
 
+def _sync_taifex_job_status_from_cache(target_date: date | None = None) -> None:
+    """
+    v29.3：期貨資料已經抓到但背景狀態仍顯示 running 時，自動同步成 finished。
+    你畫面已出現收盤/漲跌/成交量，但狀態還 running，就是這個問題。
+    """
+    try:
+        if target_date is None:
+            target_date = date.today()
+        row = _default_taifex_row(target_date)
+        if not isinstance(row, dict) or row.get("tx_close") is None:
+            return
+
+        jobs = _read_bg_jobs()
+        item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
+        status = _safe_str(item.get("status"))
+        started = _safe_float(item.get("started_ts"), 0) or 0
+
+        # 只要已有有效期貨快取，而狀態仍 running/空白，就改成 finished。
+        if status in {"running", "", "尚未啟動"}:
+            jobs["taifex_auto_bg"] = {
+                "status": "finished",
+                "message": f"期貨快取已更新：{row.get('source')} / 收盤 {row.get('tx_close')} / 漲跌 {row.get('tx_change')}",
+                "started_ts": started or time.time(),
+                "updated_at": _safe_str(row.get("updated_at")) or _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            _write_bg_jobs(jobs)
+    except Exception:
+        pass
+
+
+
 def _render_taifex_bg_status():
+    _sync_taifex_job_status_from_cache()
     _cleanup_stale_jobs()
     jobs = _read_bg_jobs()
     item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
@@ -1618,7 +1654,7 @@ def _render_macro_feature_center():
 
 def _calc_market_change_points(row: dict[str, Any]) -> float | None:
     """
-    v29.2：由目前大盤 close + pct 反推漲跌點數。
+    v29.3：由目前大盤 close + pct 反推漲跌點數。
     pct = (close - prev_close) / prev_close * 100
     change = close - prev_close = close * pct / (100 + pct)
     若資料源已提供 change / change_points 則優先使用。
@@ -1965,7 +2001,7 @@ def _render_background_update_status():
 
 
 
-# ===== v29.2 missing block safety patch =====
+# ===== v29.3 missing block safety patch =====
 def _safe_us_cache_to_df_v285() -> pd.DataFrame:
     try:
         if "_us_cache_to_df" in globals():
@@ -2101,6 +2137,7 @@ def _start_taifex_background_update_v285(target_date: date, force: bool = False)
 
 
 def _render_taifex_bg_status_v285():
+    _sync_taifex_job_status_from_cache()
     _cleanup_stale_jobs()
     jobs = _read_bg_jobs() if "_read_bg_jobs" in globals() else {}
     item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
@@ -2133,8 +2170,8 @@ def _render_taifex_bg_status_v285():
 
 def _render_taifex_block(target_date: date):
     """
-    v29：期貨區塊恢復版。
-    確保期貨不會因 v29.2 patch 遺失函式而消失。
+    v29.3：期貨狀態同步版。
+    確保期貨不會因 v29.3 patch 遺失函式而消失。
     """
     st.markdown("### 期貨自動背景回補")
     row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
@@ -2191,7 +2228,7 @@ def _render_taifex_block(target_date: date):
 
 
 
-# ===== v29.2 multi-source fallback pool overrides =====
+# ===== v29.3 multi-source fallback pool overrides =====
 def _v29_source_grade(source: str, is_proxy: bool = False, is_cache: bool = False) -> str:
     s = _safe_str(source)
     if is_cache:
@@ -2240,7 +2277,7 @@ def _v29_recent_cache_row(cache_file: str) -> dict[str, Any]:
 
 def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> dict[str, Any]:
     """
-    v29.2 大盤多來源備援池：
+    v29.3 大盤多來源備援池：
     TWSE MIS / MI_INDEX -> Yahoo ^TWII -> 最近快取。
     """
     tried = []
@@ -2300,7 +2337,7 @@ def _fetch_market_with_fallback(target_date: date, realtime: bool = False) -> di
 
 def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) -> dict[str, Any]:
     """
-    v29.2 法人多來源備援池：
+    v29.3 法人多來源備援池：
     TWSE BFI82U 金額 -> TWSE T86 代理 -> FinMind 代理 -> 最近快取。
     """
     target_dt = pd.to_datetime(target_date).date()
@@ -2540,7 +2577,7 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
 
 def _fetch_taifex_futures_manual(target_date: date, timeout: float = 2.2) -> dict[str, Any]:
     """
-    v29.2 期貨多來源備援池：
+    v29.3 期貨多來源備援池：
     1. Yahoo IX0126.TW：TIP TAIFEX TAIEX Futures Index，優先使用，較不容易卡。
     2. TAIFEX OpenAPI：官方來源，若可用則使用。
     3. 最近快取：避免完全無資料。
@@ -2752,7 +2789,7 @@ def _render_background_update_status():
     status = _safe_str(item.get("status")) or "尚未啟動"
     msg = _safe_str(item.get("message"))
     updated = _safe_str(item.get("updated_at"))
-    st.markdown("### v29.2 多來源背景更新狀態")
+    st.markdown("### v29.3 多來源背景更新狀態")
     c1, c2, c3, c4 = st.columns([1.1, 2.8, 1.5, 1.1])
     with c1:
         st.metric("總狀態", status)
@@ -2791,11 +2828,11 @@ def main():
     inject_pro_theme()
 
     render_pro_hero(
-        title="大盤走勢｜v29.2多來源備援池",
+        title="大盤走勢｜v29.3多來源備援池",
         subtitle="頁面先顯示快取資料；大盤、法人、外盤改背景更新，避免外部端點卡住整頁。",
     )
 
-    st.warning("目前使用 v29.2 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
+    st.warning("目前使用 v29.3 自動背景更新版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
