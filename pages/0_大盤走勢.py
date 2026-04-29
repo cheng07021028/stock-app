@@ -259,6 +259,136 @@ def _score_context(row: dict[str, Any]) -> dict[str, str]:
     return {"mood": mood, "advice": advice}
 
 
+def _cache_to_market_df() -> pd.DataFrame:
+    cache = _read_cache()
+    rows = []
+    if isinstance(cache, dict):
+        for k, v in cache.items():
+            if not isinstance(v, dict):
+                continue
+            dt = pd.to_datetime(v.get("date") or v.get("used_date") or k, errors="coerce")
+            close = _safe_float(v.get("close"))
+            pct = _safe_float(v.get("pct"))
+            if pd.isna(dt) or close is None:
+                continue
+            rows.append(
+                {
+                    "日期": dt,
+                    "收盤": close,
+                    "漲跌幅%": pct,
+                    "來源": _safe_str(v.get("source")),
+                    "即時": bool(v.get("is_realtime")),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["日期", "收盤", "漲跌幅%", "來源", "即時"])
+    df = pd.DataFrame(rows).drop_duplicates(subset=["日期"], keep="last")
+    return df.sort_values("日期").reset_index(drop=True)
+
+
+def _calc_stable_market_factors(row: dict[str, Any]) -> dict[str, Any]:
+    df = _cache_to_market_df()
+    close = _safe_float(row.get("close"))
+    pct = _safe_float(row.get("pct"), 0) or 0
+    if close is None and not df.empty:
+        close = _safe_float(df["收盤"].iloc[-1])
+    if close is None:
+        close = 0.0
+
+    if not df.empty:
+        closes = pd.to_numeric(df["收盤"], errors="coerce").dropna()
+    else:
+        closes = pd.Series(dtype=float)
+
+    ma5 = float(closes.tail(5).mean()) if len(closes) >= 2 else close
+    ma20 = float(closes.tail(20).mean()) if len(closes) >= 5 else close
+    high20 = float(closes.tail(20).max()) if len(closes) >= 2 else close
+    low20 = float(closes.tail(20).min()) if len(closes) >= 2 else close
+
+    dist_ma5 = ((close / ma5 - 1) * 100) if ma5 not in [None, 0] else 0
+    dist_ma20 = ((close / ma20 - 1) * 100) if ma20 not in [None, 0] else 0
+    pos20 = ((close - low20) / (high20 - low20) * 100) if high20 != low20 else 50
+
+    score = 50
+    score += max(min(pct * 8, 12), -12)
+    score += 8 if close >= ma5 else -8
+    score += 10 if close >= ma20 else -10
+    if pos20 >= 75:
+        score += 6
+    elif pos20 <= 25:
+        score -= 6
+    score = max(0, min(100, score))
+
+    if score >= 75:
+        market_state = "偏多可操作"
+        godpick_weight = "+10%"
+        strategy = "追強與回測支撐並行"
+    elif score >= 60:
+        market_state = "中性偏多"
+        godpick_weight = "+5%"
+        strategy = "優先挑選低檔轉強與拉回承接"
+    elif score >= 45:
+        market_state = "震盪觀望"
+        godpick_weight = "0%"
+        strategy = "降低追價，等支撐回測"
+    elif score >= 30:
+        market_state = "偏弱保守"
+        godpick_weight = "-10%"
+        strategy = "只做高勝率低檔止跌，不追高"
+    else:
+        market_state = "風險偏高"
+        godpick_weight = "-20%"
+        strategy = "以觀望與資金控管為主"
+
+    return {
+        "大盤穩定分": round(score, 1),
+        "大盤狀態": market_state,
+        "股神推薦加權": godpick_weight,
+        "今日策略": strategy,
+        "MA5": ma5,
+        "MA20": ma20,
+        "距MA5%": dist_ma5,
+        "距MA20%": dist_ma20,
+        "20日位置%": pos20,
+        "快取筆數": len(df),
+    }
+
+
+def _render_stable_factor_block(row: dict[str, Any]):
+    factors = _calc_stable_market_factors(row)
+    st.markdown("### 大盤穩定因子")
+    render_pro_kpi_row([
+        {
+            "label": "大盤穩定分",
+            "value": f"{_safe_float(factors.get('大盤穩定分'), 0):.1f}",
+            "delta": _safe_str(factors.get("大盤狀態")),
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "股神推薦加權",
+            "value": _safe_str(factors.get("股神推薦加權")),
+            "delta": "僅作推薦頁參考",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "今日策略",
+            "value": _safe_str(factors.get("今日策略")),
+            "delta": f"快取 {factors.get('快取筆數')} 筆",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+        {
+            "label": "20日位置",
+            "value": f"{_safe_float(factors.get('20日位置%'), 0):.1f}%",
+            "delta": f"距MA20 {_safe_float(factors.get('距MA20%'), 0):+.2f}%",
+            "delta_class": "pro-kpi-delta-flat",
+        },
+    ])
+
+    with st.expander("大盤穩定因子明細", expanded=False):
+        st.dataframe(_cache_to_market_df(), use_container_width=True, hide_index=True)
+        st.json(factors)
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
@@ -338,6 +468,8 @@ def main():
             "delta_class": "pro-kpi-delta-flat",
         },
     ])
+
+    _render_stable_factor_block(row)
 
     # v26.10：改用原生 markdown 區塊，避免部分 theme card 在此頁輸出殘留 </div>。
     st.markdown("### 大盤操作參考")
