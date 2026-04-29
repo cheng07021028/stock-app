@@ -147,5 +147,66 @@
       "market": "上市"
     }
   ],
-  "0428": []
+  "0428": [
+    {
+      "code": "1533",
+      "name": "車王電",
+      "market": "上市",
+      "category": "汽車"
+    },
+    {
+      "code": "3051",
+      "name": "力特",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "3059",
+      "name": "華晶科",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "3605",
+      "name": "宏致",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "4958",
+      "name": "臻鼎-KY",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "4967",
+      "name": "十銓",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "5289",
+      "name": "宜鼎",
+      "market": "上櫃",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "6651",
+      "name": "全宇昕",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "7750",
+      "name": "新代",
+      "market": "上市",
+      "category": "電機機械"
+    },
+    {
+      "code": "8103",
+      "name": "瀚荃",
+      "market": "上市",
+      "category": "電子零組件業"
+    }
+  ]
 }
