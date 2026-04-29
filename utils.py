@@ -467,6 +467,8 @@ def inject_pro_theme():
         [data-testid="stSidebarNav"] ul li:nth-of-type(13) a span::before { content: "12. "; }
         [data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"] span::before,
         [data-testid="stSidebarNav"] ul li:nth-of-type(14) a span::before { content: "13. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(15) [data-testid="stSidebarNavLink"] span::before,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(15) a span::before { content: "14. "; }
 
         [data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"] span::before,
         [data-testid="stSidebarNav"] ul li a span::before {
@@ -547,10 +549,12 @@ def inject_pro_theme():
         [data-testid="stSidebarNav"] ul li:nth-of-type(10) a,
         [data-testid="stSidebarNav"] ul li:nth-of-type(12) a,
         [data-testid="stSidebarNav"] ul li:nth-of-type(14) a,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(15) a,
         [data-testid="stSidebarNav"] ul li:nth-of-type(9) [data-testid="stSidebarNavLink"],
         [data-testid="stSidebarNav"] ul li:nth-of-type(10) [data-testid="stSidebarNavLink"],
         [data-testid="stSidebarNav"] ul li:nth-of-type(12) [data-testid="stSidebarNavLink"],
-        [data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"] {
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"],
+        [data-testid="stSidebarNav"] ul li:nth-of-type(15) [data-testid="stSidebarNavLink"] {
             border-left: 4px solid #ef4444;
             background: rgba(254, 242, 242, 0.55);
         }
@@ -568,7 +572,8 @@ def inject_pro_theme():
         [data-testid="stSidebarNav"] ul li:nth-of-type(9) span,
         [data-testid="stSidebarNav"] ul li:nth-of-type(10) span,
         [data-testid="stSidebarNav"] ul li:nth-of-type(12) span,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(14) span {
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) span,
+        [data-testid="stSidebarNav"] ul li:nth-of-type(15) span {
             font-weight: 900 !important;
             color: #7f1d1d !important;
         }
