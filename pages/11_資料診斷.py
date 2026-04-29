@@ -417,3 +417,70 @@ with st.expander("查看 JSON 內容預覽", expanded=False):
                 pass
 
 st.info("建議流程：先確認本頁主檔、自選股、歷史資料、即時資料都 OK，再回到 7_股神推薦.py 測試推薦與匯入 8 / 10。")
+
+# ============================================================
+# v41 全系統串聯驗證：0 -> 7 -> 8 / 10 -> 首頁 / 儀表板
+# ============================================================
+
+st.markdown('---')
+st.subheader('9. v41 全系統串聯驗證')
+st.caption('檢查 0_大盤趨勢、7_股神推薦、8_股神推薦紀錄、10_推薦清單、首頁 / 儀表板之間的 JSON 串聯。此區塊只讀本機檔案，不重新抓網路資料。')
+
+try:
+    from system_integration_health import run_full_integration_check, ensure_missing_json_files
+    _v41_report = run_full_integration_check(BASE_DIR)
+    _v41_summary = _v41_report.get('summary', {})
+
+    cc1, cc2, cc3, cc4, cc5 = st.columns(5)
+    with cc1:
+        _render_metric_card('整體狀態', str(_v41_summary.get('整體狀態', '')), str(_v41_summary.get('檢查時間', '')), 'ok' if _v41_summary.get('整體狀態') == 'OK' else ('warn' if _v41_summary.get('整體狀態') == '注意' else 'bad'))
+    with cc2:
+        _render_metric_card('正常', str(_v41_summary.get('正常', 0)), '串聯檢查正常項目', 'ok')
+    with cc3:
+        _render_metric_card('注意', str(_v41_summary.get('注意', 0)), '尚無樣本或可接受提醒', 'warn')
+    with cc4:
+        _render_metric_card('異常', str(_v41_summary.get('異常', 0)), '缺檔 / 缺欄位 / 格式異常', 'bad' if int(_v41_summary.get('異常', 0) or 0) else 'ok')
+    with cc5:
+        _render_metric_card('總項目', str(_v41_summary.get('總項目', 0)), 'v41 串聯檢查項目數', 'info')
+
+    with st.expander('v41 橋接檔檢查：market_snapshot / macro bridge', expanded=True):
+        st.dataframe(pd.DataFrame(_v41_report.get('bridge_rows', [])), use_container_width=True, hide_index=True)
+
+    with st.expander('v41 大盤快照欄位檢查：0 大盤趨勢 -> 7 股神推薦', expanded=True):
+        st.dataframe(pd.DataFrame(_v41_report.get('market_rows', [])), use_container_width=True, hide_index=True)
+        _snap = _v41_report.get('market_snapshot', {}) or {}
+        if isinstance(_snap, dict) and _snap:
+            s1, s2, s3, s4 = st.columns(4)
+            with s1:
+                st.metric('market_score', _safe_str(_snap.get('market_score') or '—'))
+            with s2:
+                st.metric('market_trend', _safe_str(_snap.get('market_trend') or '—'))
+            with s3:
+                st.metric('risk_gate', _safe_str(_snap.get('risk_gate') or '—'))
+            with s4:
+                st.metric('market_session', _safe_str(_snap.get('market_session_label') or _snap.get('market_session') or '—'))
+            with st.expander('market_snapshot.json 完整內容', expanded=False):
+                st.json(_snap)
+
+    with st.expander('v41 推薦結果大盤欄位檢查：7 -> 8 / 10', expanded=True):
+        st.dataframe(pd.DataFrame(_v41_report.get('recommendation_rows', [])), use_container_width=True, hide_index=True)
+
+    with st.expander('v41 關鍵 JSON 檔案矩陣', expanded=False):
+        st.dataframe(pd.DataFrame(_v41_report.get('file_rows', [])), use_container_width=True, hide_index=True)
+
+    with st.expander('v41 頁面檔案檢查', expanded=False):
+        st.dataframe(pd.DataFrame(_v41_report.get('page_rows', [])), use_container_width=True, hide_index=True)
+
+    with st.expander('v41 全部檢查明細', expanded=False):
+        st.dataframe(pd.DataFrame(_v41_report.get('all_rows', [])), use_container_width=True, hide_index=True)
+
+    st.markdown('#### v41 缺檔修復')
+    st.caption('只會建立不存在的空白 JSON；不覆蓋既有資料。若 market_snapshot.json 缺少，建議優先到 0_大盤趨勢 按立即寫入。')
+    if st.button('建立缺少的空白 JSON（不覆蓋既有檔）', use_container_width=True):
+        _created = ensure_missing_json_files(BASE_DIR)
+        st.dataframe(pd.DataFrame(_created), use_container_width=True, hide_index=True)
+        st.success('已完成缺檔建立檢查；請重新整理本頁再次驗證。')
+
+except Exception as _v41_e:
+    st.error(f'v41 全系統串聯驗證載入失敗：{_v41_e}')
+    st.code(traceback.format_exc())
