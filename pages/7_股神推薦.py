@@ -6618,6 +6618,67 @@ def _extract_checked_codes_from_editor_state(editor_key: str, source_df: pd.Data
     st.session_state[persist_key] = final_codes
     return final_codes
 
+
+
+def _stable_checkbox_editor_on_change(editor_key: str, code_map_key: str, persist_key: str) -> None:
+    """
+    v44：data_editor checkbox callback。
+    Streamlit data_editor 在 rerun 時，畫面會先用舊 dataframe 重建，容易讓勾選欄位看起來跳回未勾選。
+    這個 callback 在 rerun 前先把 edited_rows / edited_cells 寫入穩定的 session_state 清單，
+    下一輪重建 dataframe 時即可直接用該清單回填勾選欄位。
+    """
+    try:
+        code_map = [_normalize_code(x) for x in st.session_state.get(code_map_key, []) if _normalize_code(x)]
+        if not code_map:
+            return
+
+        selected = {_normalize_code(x) for x in st.session_state.get(persist_key, []) if _normalize_code(x)}
+        raw_state = st.session_state.get(editor_key, {})
+        if not isinstance(raw_state, dict):
+            return
+
+        def _is_true(v: Any) -> bool:
+            if isinstance(v, bool):
+                return bool(v)
+            return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "勾選", "checked"}
+
+        def _apply_row(idx: Any, val: Any) -> None:
+            try:
+                i = int(idx)
+            except Exception:
+                return
+            if i < 0 or i >= len(code_map):
+                return
+            code = _normalize_code(code_map[i])
+            if not code:
+                return
+            if _is_true(val):
+                selected.add(code)
+            else:
+                selected.discard(code)
+
+        # 新版 Streamlit data_editor state：edited_rows = {row_index: {col: value}}
+        edited_rows = raw_state.get("edited_rows", {})
+        if isinstance(edited_rows, dict):
+            for raw_idx, changes in edited_rows.items():
+                if isinstance(changes, dict) and "勾選" in changes:
+                    _apply_row(raw_idx, changes.get("勾選"))
+
+        # 舊版 / 部分環境：edited_cells = {"row:column": value}
+        edited_cells = raw_state.get("edited_cells", {})
+        if isinstance(edited_cells, dict):
+            for raw_key, val in edited_cells.items():
+                key_text = str(raw_key)
+                if ":勾選" in key_text or key_text.endswith(":0"):
+                    _apply_row(key_text.split(":", 1)[0], val)
+
+        # 只保留目前表格看得到的股票，避免舊結果殘留；依畫面順序排序。
+        visible = set(code_map)
+        st.session_state[persist_key] = [c for c in code_map if c in selected and c in visible]
+    except Exception:
+        # callback 不能讓主頁掛掉
+        return
+
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2"]
@@ -7406,6 +7467,7 @@ def main():
     )
 
     st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
+    st.caption("勾選欄位穩定版：v44 data_editor callback fix")
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"大盤串聯版：{MACRO_LINK_VERSION}")
@@ -8167,14 +8229,24 @@ def main():
         ]
     ].copy()
 
+    # v44：先建立 row_index → 股票代號 對照表，讓 on_change callback 可在 rerun 前保存勾選狀態。
+    top_editor_key = _k("top_pick_editor")
+    top_editor_code_map_key = _k("top_pick_editor_code_map")
+    st.session_state[top_editor_code_map_key] = [
+        _normalize_code(x) for x in top_show_df["股票代號"].astype(str).tolist()
+    ]
+
     edited_top_df = st.data_editor(
         _format_df(top_show_df),
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key=_k("top_pick_editor"),
+        key=top_editor_key,
+        on_change=_stable_checkbox_editor_on_change,
+        args=(top_editor_key, top_editor_code_map_key, _k("top_table_selected_codes")),
+        disabled=[c for c in top_show_df.columns if c != "勾選"],
         column_config={
-            "勾選": st.column_config.CheckboxColumn("勾選"),
+            "勾選": st.column_config.CheckboxColumn("勾選", help="v44 穩定勾選：點選後會立即寫入 session_state，不會因頁面 rerun 跳回。"),
             "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
                 "風險說明": st.column_config.TextColumn("風險說明", width="large"),
                 "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
@@ -8343,14 +8415,24 @@ def main():
             full_work_df.insert(0, "勾選", False)
         full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)
 
+        # v44：完整推薦表也使用 callback 先保存勾選狀態，避免 data_editor rerun 後跳回未勾選。
+        full_editor_key = _k("full_table_editor")
+        full_editor_code_map_key = _k("full_table_editor_code_map")
+        st.session_state[full_editor_code_map_key] = [
+            _normalize_code(x) for x in full_work_df["股票代號"].astype(str).tolist()
+        ]
+
         full_editor_df = st.data_editor(
             _format_df(full_work_df),
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
-            key=_k("full_table_editor"),
+            key=full_editor_key,
+            on_change=_stable_checkbox_editor_on_change,
+            args=(full_editor_key, full_editor_code_map_key, _k("full_table_selected_codes")),
+            disabled=[c for c in full_work_df.columns if c != "勾選"],
             column_config={
-                "勾選": st.column_config.CheckboxColumn("勾選"),
+                "勾選": st.column_config.CheckboxColumn("勾選", help="v44 穩定勾選：點選後會立即寫入 session_state，不會因頁面 rerun 跳回。"),
                 "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
                 "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
                 "風險說明": st.column_config.TextColumn("風險說明", width="large"),
