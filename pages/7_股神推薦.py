@@ -6562,27 +6562,37 @@ def _build_recommend_df(
 
 
 
-def _extract_checked_codes_from_editor_state(editor_key: str, source_df: pd.DataFrame) -> list[str]:
+def _extract_checked_codes_from_editor_state(editor_key: str, source_df: pd.DataFrame, state_key: str | None = None) -> list[str]:
     """
-    v25.8：修正 st.data_editor 勾選需點兩次的問題。
-    同時讀取回傳 DataFrame 與 st.session_state[editor_key]["edited_rows"]。
+    v40：穩定版勾選狀態。
+    修正 st.data_editor 勾選後，因為 rerun / 表格重繪 / 上方元件異動，
+    checkbox 瞬間跳回未勾選的問題。
     """
     if source_df is None or source_df.empty or "股票代號" not in source_df.columns:
         return []
 
-    base_df = source_df.reset_index(drop=True).copy()
-    checked_map: dict[str, bool] = {}
+    persist_key = state_key or f"{editor_key}__checked_codes"
+    previous = {_normalize_code(x) for x in st.session_state.get(persist_key, []) if _normalize_code(x)}
 
-    for idx, row in base_df.iterrows():
+    base_df = source_df.reset_index(drop=True).copy()
+    checked_set: set[str] = set(previous)
+    visible_order: list[str] = []
+
+    def _is_true(v: Any) -> bool:
+        if isinstance(v, bool):
+            return bool(v)
+        return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "勾選", "checked"}
+
+    # 回傳表格中的 True 只補入；False 不直接清空，避免 rerun 誤清。
+    for _, row in base_df.iterrows():
         code = _normalize_code(row.get("股票代號"))
         if not code:
             continue
-        val = row.get("勾選", False)
-        if isinstance(val, bool):
-            checked_map[code] = val
-        else:
-            checked_map[code] = str(val).strip().lower() in {"true", "1", "yes", "y", "是"}
+        visible_order.append(code)
+        if _is_true(row.get("勾選", False)):
+            checked_set.add(code)
 
+    # edited_rows 是使用者本次明確改動。True 加入，False 移除。
     raw_state = st.session_state.get(editor_key, {})
     edited_rows = raw_state.get("edited_rows", {}) if isinstance(raw_state, dict) else {}
     if isinstance(edited_rows, dict):
@@ -6598,15 +6608,15 @@ def _extract_checked_codes_from_editor_state(editor_key: str, source_df: pd.Data
             code = _normalize_code(base_df.iloc[idx].get("股票代號"))
             if not code:
                 continue
-            val = changes.get("勾選")
-            if isinstance(val, bool):
-                checked_map[code] = val
+            if _is_true(changes.get("勾選")):
+                checked_set.add(code)
             else:
-                checked_map[code] = str(val).strip().lower() in {"true", "1", "yes", "y", "是"}
+                checked_set.discard(code)
 
-    return [code for code, flag in checked_map.items() if flag]
-
-
+    visible_set = set(visible_order)
+    final_codes = [c for c in visible_order if c in checked_set and c in visible_set]
+    st.session_state[persist_key] = final_codes
+    return final_codes
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
@@ -7685,6 +7695,8 @@ def main():
         st.session_state[_k("rec_record_codes_widget")] = []
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
         st.session_state["godpick_rec_selected_df"] = pd.DataFrame()
+        st.session_state[_k("top_table_selected_codes")] = []
+        st.session_state[_k("full_table_selected_codes")] = []
         st.rerun()
 
     if st.session_state.get(_k("scan_settings_save_msgs")):
@@ -8110,7 +8122,10 @@ def main():
 
     top_selected_codes = st.session_state.pop(_k("top_pick_codes_next"), None)
     if top_selected_codes is None:
-        top_selected_codes = st.session_state.get(_k("rec_record_codes"), st.session_state.get(_k("rec_pick_codes"), []))
+        top_selected_codes = st.session_state.get(
+            _k("top_table_selected_codes"),
+            st.session_state.get(_k("rec_record_codes"), st.session_state.get(_k("rec_pick_codes"), [])),
+        )
     top_selected_codes = {_normalize_code(x) for x in top_selected_codes if _normalize_code(x)}
 
     top_df = top_df.copy()
@@ -8166,18 +8181,11 @@ def main():
         }
     )
 
-    picked_codes_from_top = []
-    for _, row in edited_top_df.iterrows():
-        picked_val = row.get("勾選", False)
-        if isinstance(picked_val, bool):
-            is_checked = picked_val
-        else:
-            is_checked = str(picked_val).strip().lower() in {"true", "1", "yes", "y", "是"}
-
-        if is_checked:
-            code = _normalize_code(row.get("股票代號"))
-            if code:
-                picked_codes_from_top.append(code)
+    picked_codes_from_top = _extract_checked_codes_from_editor_state(
+        _k("top_pick_editor"),
+        edited_top_df,
+        _k("top_table_selected_codes"),
+    )
 
     current_pick_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
     current_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
@@ -8350,7 +8358,11 @@ def main():
         )
 
         # v25.8：同時讀取 data_editor 回傳值與 widget edited_rows，避免勾選要點兩次才生效。
-        full_picked_codes = _extract_checked_codes_from_editor_state(_k("full_table_editor"), full_editor_df)
+        full_picked_codes = _extract_checked_codes_from_editor_state(
+            _k("full_table_editor"),
+            full_editor_df,
+            _k("full_table_selected_codes"),
+        )
 
         # 去重但保留表格順序。
         full_picked_codes = list(dict.fromkeys(full_picked_codes))
