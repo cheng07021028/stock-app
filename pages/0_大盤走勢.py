@@ -43,6 +43,7 @@ CACHE_FILE = "macro_market_close_cache.json"
 INST_CACHE_FILE = "macro_institutional_cache.json"
 US_CACHE_FILE = "macro_us_market_cache.json"
 TAIFEX_CACHE_FILE = "macro_taifex_cache.json"
+MACRO_EVENT_CACHE_FILE = "macro_news_event_cache.json"
 MACRO_BG_JOB_FILE = "macro_background_jobs.json"
 MACRO_AUTO_REFRESH_SECONDS = 1800
 MACRO_BG_MAX_RUNNING_SECONDS = 90
@@ -1120,9 +1121,9 @@ def _macro_feature_status_df() -> pd.DataFrame:
         },
         {
             "功能": "Google News 事件因子",
-            "目前狀態": "暫停",
-            "是否自動執行": "否",
-            "說明": "先暫停，這是之前最容易造成頁面等待的來源之一。",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，安全快取",
+            "說明": "v45 改為安全快取/預留欄位模式；不在主畫面等待外部 News API，無快取時回中性。",
         },
         {
             "功能": "TAIFEX 期權因子",
@@ -1144,9 +1145,9 @@ def _macro_feature_status_df() -> pd.DataFrame:
         },
         {
             "功能": "完整大盤模式預估",
-            "目前狀態": "暫停",
-            "是否自動執行": "否",
-            "說明": "舊版會自動跑完整模型，已改為先穩定顯示，再逐項回補。",
+            "目前狀態": "已恢復",
+            "是否自動執行": "是，讀本機快照",
+            "說明": "v45 由 market_score、risk_gate、交易時段、櫃買強弱、期貨風險與事件快取推論，不跑慢速外部模型。",
         },
     ]
     return pd.DataFrame(rows)
@@ -1640,7 +1641,7 @@ def _render_taifex_block(target_date: date):
 
 def _render_macro_feature_center():
     st.markdown("### 大盤功能管理中心")
-    st.caption("v27.5：把 0_大盤趨勢的功能狀態攤開顯示，避免不知道哪些功能已恢復、哪些先暫停。")
+    st.caption("v45：功能狀態已補齊，Google News 改安全快取模式，完整大盤模式預估改成本機快照推論，不再造成主頁卡住。")
     df = _macro_feature_status_df()
 
     active_count = int((df["目前狀態"] == "已恢復").sum())
@@ -1662,8 +1663,8 @@ def _render_macro_feature_center():
         st.write("1. 先回補：法人買賣超，但改成手動按鈕 + 本機快取。")
         st.write("2. 再回補：外盤 NASDAQ / SOX，但只抓收盤資料，不自動等待。")
         st.write("3. 再回補：TAIFEX 期權，同樣改成手動更新。")
-        st.write("4. 最後才回補：Google News，因為最容易慢。")
-        st.warning("重點：外部資料源改成背景更新，不在主畫面等待；即使外部端點慢，頁面也不會卡住。")
+        st.write("4. Google News 已改為安全快取/預留欄位，不進頁等待；若未來要接 API，也必須走背景更新。")
+        st.success("v45 重點：功能中心顯示應為 12 項已恢復、0 項暫停；所有高風險外部來源都不得阻塞主畫面。")
 
 
 
@@ -3966,6 +3967,10 @@ def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
         "data_quality": snapshot.get("data_quality"),
         "freshness": snapshot.get("freshness"),
         "data_guard_notes": snapshot.get("data_guard_notes"),
+        "data_diagnostics": snapshot.get("data_diagnostics"),
+        "event_factor": snapshot.get("event_factor"),
+        "macro_mode_estimate": snapshot.get("macro_mode_estimate"),
+        "feature_center_version": snapshot.get("feature_center_version"),
         "twse_index": snapshot.get("twse_index"),
         "twse_change": snapshot.get("twse_change"),
         "twse_change_pct": snapshot.get("twse_change_pct"),
@@ -4071,16 +4076,197 @@ def _v36_render_history_chart():
         st.dataframe(gate_df, use_container_width=True, hide_index=True)
 
 
+
+# ============================================================
+# v45：大盤功能管理中心補齊 + 完整大盤模式預估
+# ============================================================
+
+def _v45_read_event_cache() -> dict[str, Any]:
+    """讀取事件因子安全快取。此函式不連網，避免 Google News 類資料造成頁面卡住。"""
+    p = Path(MACRO_EVENT_CACHE_FILE)
+    if not p.exists():
+        return {
+            "status": "neutral",
+            "event_score_adjustment": 0,
+            "event_risk_level": "中性",
+            "summary": "尚未建立事件快取；目前以中性事件因子處理，不影響推薦分數。",
+            "source": "safe_default",
+            "updated_at": "",
+        }
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data.setdefault("event_score_adjustment", 0)
+            data.setdefault("event_risk_level", "中性")
+            data.setdefault("summary", "事件快取已讀取。")
+            data.setdefault("source", "local_cache")
+            return data
+    except Exception as e:
+        return {
+            "status": "cache_error",
+            "event_score_adjustment": 0,
+            "event_risk_level": "中性",
+            "summary": f"事件快取讀取失敗：{e}；以中性處理。",
+            "source": "cache_error",
+            "updated_at": "",
+        }
+    return {
+        "status": "neutral",
+        "event_score_adjustment": 0,
+        "event_risk_level": "中性",
+        "summary": "事件快取格式不是 dict；以中性處理。",
+        "source": "safe_default",
+        "updated_at": "",
+    }
+
+
+def _v45_write_neutral_event_cache() -> tuple[bool, str]:
+    payload = {
+        "status": "neutral",
+        "event_score_adjustment": 0,
+        "event_risk_level": "中性",
+        "summary": "v45 安全事件快取：目前未接外部 News API，事件因子維持中性。",
+        "source": "manual_safe_cache",
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "note": "若未來要接 Google News 或其他新聞來源，必須採背景更新，不得在主頁同步等待。",
+    }
+    try:
+        Path(MACRO_EVENT_CACHE_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        return True, f"已建立 {MACRO_EVENT_CACHE_FILE} 安全事件快取。"
+    except Exception as e:
+        return False, f"建立 {MACRO_EVENT_CACHE_FILE} 失敗：{e}"
+
+
+def _v45_macro_mode_estimate(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """完整大盤模式預估：只讀本機快照與快取，不跑慢速外部模型。"""
+    score = _safe_float(snapshot.get("market_score"), 50) or 50
+    risk_gate = _safe_str(snapshot.get("risk_gate")) or "selective"
+    trend = _safe_str(snapshot.get("market_trend")) or "震盪"
+    session_label = _safe_str(snapshot.get("market_session_label")) or _safe_str(snapshot.get("market_session")) or "未知"
+    tpex_minus_twse = _safe_float(snapshot.get("tpex_minus_twse_pct"), None)
+    futures_pct = _safe_float(snapshot.get("futures_change_pct"), None)
+    event_factor = _v45_read_event_cache()
+    event_adj = _safe_float(event_factor.get("event_score_adjustment"), 0) or 0
+    adjusted_score = max(0, min(100, score + event_adj))
+    if adjusted_score >= 75 and risk_gate in {"normal", "bullish", "selective"}:
+        mode = "積極偏多"
+        action = "可提高強勢股與剛起漲股的候選權重，但仍避免過熱追價。"
+    elif adjusted_score >= 60:
+        mode = "選股偏多"
+        action = "可正常選股，優先找低位階轉強、量價同步與族群強勢標的。"
+    elif adjusted_score >= 45:
+        mode = "震盪選股"
+        action = "不直接排除剛起漲股，但追高因子降權，防守與風險控管提高。"
+    elif adjusted_score >= 30:
+        mode = "保守防守"
+        action = "降低推薦積極度，優先觀察支撐、量縮整理與風險較低標的。"
+    else:
+        mode = "高風險觀望"
+        action = "大盤環境偏弱，推薦頁應保守降權，不建議追高。"
+    style_notes = []
+    if tpex_minus_twse is not None:
+        if tpex_minus_twse >= 0.35:
+            style_notes.append("櫃買強於加權，中小型題材股相對有利。")
+        elif tpex_minus_twse <= -0.35:
+            style_notes.append("櫃買弱於加權，中小型股需提高門檻。")
+        else:
+            style_notes.append("加權與櫃買強弱接近，市場風格中性。")
+    if futures_pct is not None:
+        if futures_pct <= -0.8:
+            style_notes.append("期貨轉弱，追高與隔日風險需下修。")
+        elif futures_pct >= 0.8:
+            style_notes.append("期貨偏強，短線風險情緒較佳。")
+        else:
+            style_notes.append("期貨變動中性，仍以現貨量價為主。")
+    confidence = "高" if snapshot.get("data_quality") in {"良好", "ok", "OK"} else "中"
+    if risk_gate == "data_guard":
+        confidence = "低"
+    return {
+        "version": "v45_macro_full_mode_estimate",
+        "mode": mode,
+        "action": action,
+        "confidence": confidence,
+        "base_market_score": score,
+        "event_score_adjustment": event_adj,
+        "adjusted_market_score": round(adjusted_score, 1),
+        "risk_gate": risk_gate,
+        "market_trend": trend,
+        "market_session_label": session_label,
+        "style_notes": style_notes,
+        "event_factor": event_factor,
+        "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+_v36_build_market_snapshot_before_v45 = _build_market_snapshot_v30
+
+def _build_market_snapshot_v30(row: dict[str, Any]) -> dict[str, Any]:
+    """v45：在 v36 快照上補事件因子與完整大盤模式預估。"""
+    snapshot = _v36_build_market_snapshot_before_v45(row)
+    try:
+        event_factor = _v45_read_event_cache()
+        macro_mode = _v45_macro_mode_estimate(snapshot)
+        snapshot["event_factor"] = event_factor
+        snapshot["macro_mode_estimate"] = macro_mode
+        snapshot["feature_center_version"] = "v45_feature_center_completed"
+        snapshot["version"] = "v45_macro_trend_full_mode_completed"
+        req = snapshot.get("required_by_godpick") if isinstance(snapshot.get("required_by_godpick"), dict) else {}
+        req.update({
+            "macro_mode": macro_mode.get("mode"),
+            "macro_mode_action": macro_mode.get("action"),
+            "macro_mode_confidence": macro_mode.get("confidence"),
+            "event_risk_level": event_factor.get("event_risk_level"),
+            "event_score_adjustment": event_factor.get("event_score_adjustment"),
+        })
+        snapshot["required_by_godpick"] = req
+    except Exception as e:
+        snapshot["v45_warning"] = str(e)
+    return snapshot
+
+
+def _v45_render_macro_full_mode_panel(row: dict[str, Any]):
+    st.markdown("### v45 完整大盤模式預估")
+    snapshot = _build_market_snapshot_v30(row)
+    model = snapshot.get("macro_mode_estimate") if isinstance(snapshot.get("macro_mode_estimate"), dict) else {}
+    event = snapshot.get("event_factor") if isinstance(snapshot.get("event_factor"), dict) else {}
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("完整模式", _safe_str(model.get("mode")) or "—")
+    with c2:
+        st.metric("調整後分數", f"{_safe_float(model.get('adjusted_market_score'), 0):.1f}")
+    with c3:
+        st.metric("模型信心", _safe_str(model.get("confidence")) or "—")
+    with c4:
+        st.metric("事件風險", _safe_str(event.get("event_risk_level")) or "中性")
+    with c5:
+        st.metric("事件加減分", f"{_safe_float(event.get('event_score_adjustment'), 0):+.0f}")
+    st.info(_safe_str(model.get("action")) or "完整大盤模式已啟用。")
+    notes = model.get("style_notes") if isinstance(model.get("style_notes"), list) else []
+    if notes:
+        st.caption("｜".join(str(x) for x in notes))
+    b1, b2 = st.columns([1.2, 4])
+    with b1:
+        if st.button("建立/刷新事件安全快取", use_container_width=True):
+            ok, msg = _v45_write_neutral_event_cache()
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.warning(msg)
+    with b2:
+        st.caption("Google News 事件因子已恢復為安全快取模式：不在主畫面連外等待，避免卡頁；無資料時以中性處理。")
+    with st.expander("v45 完整模式 / 事件因子 JSON", expanded=False):
+        st.json({"macro_mode_estimate": model, "event_factor": event})
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="01 大盤趨勢｜v32股神風控完成版",
+        title="01 大盤趨勢｜v45完整大盤模式版",
         subtitle="加權、櫃買、期貨、外盤與法人採背景更新；輸出 market_snapshot.json / macro_mode_bridge.json 給股神推薦。",
     )
 
-    st.info("v32.0：補齊資料鮮度、risk_gate、position_hint、required_by_godpick、macro_trend_records；仍維持背景更新不卡頁。")
+    st.info("v45.0：補齊大盤功能管理中心，Google News 事件因子改為安全快取模式，完整大盤模式預估已恢復；仍維持背景更新不卡頁。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
@@ -4112,7 +4298,7 @@ def main():
             else:
                 st.warning(msg)
     with ac3:
-        st.caption("v36：橋接檔會同步寫 market_snapshot、macro_mode_bridge 與大盤風控紀錄，並補上交易時段、推薦影響說明、資料診斷與歷史圖。")
+        st.caption("v45：橋接檔會同步寫 market_snapshot、macro_mode_bridge、大盤風控紀錄、事件因子與完整大盤模式預估。")
 
     _v294_render_source_health_panel()
 
@@ -4204,6 +4390,7 @@ def main():
     _render_macro_bridge_block(row)
     _v36_render_history_chart()
     _v32_render_records_block()
+    _v45_render_macro_full_mode_panel(row)
     _render_macro_feature_center()
 
     dl_cols = st.columns([1.2, 4])
@@ -4217,7 +4404,7 @@ def main():
             disabled=_cache_to_market_df().empty,
         )
     with dl_cols[1]:
-        st.caption("v36：大盤、櫃買、期貨、交易時段、資料診斷與推薦調整值會寫入股神推薦風控檔。")
+        st.caption("v45：大盤、櫃買、期貨、交易時段、資料診斷、事件因子與完整大盤模式會寫入股神推薦風控檔。")
 
     st.markdown("### 大盤操作參考")
     ref_cols = st.columns(4)
