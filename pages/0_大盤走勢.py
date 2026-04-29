@@ -45,6 +45,7 @@ US_CACHE_FILE = "macro_us_market_cache.json"
 TAIFEX_CACHE_FILE = "macro_taifex_cache.json"
 MACRO_BG_JOB_FILE = "macro_background_jobs.json"
 MACRO_AUTO_REFRESH_SECONDS = 1800
+MACRO_BG_MAX_RUNNING_SECONDS = 90
 
 
 def _k(key: str) -> str:
@@ -1125,7 +1126,7 @@ def _macro_feature_status_df() -> pd.DataFrame:
             "功能": "TAIFEX 期權因子",
             "目前狀態": "已恢復",
             "是否自動執行": "否，手動按鈕",
-            "說明": "v28.4 改為背景自動更新；不進主畫面等待，避免卡住。",
+            "說明": "v28.6 改為背景自動更新；不進主畫面等待，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -1466,7 +1467,7 @@ def _taifex_cache_to_df() -> pd.DataFrame:
 
 def _background_taifex_worker(target_date_text: str) -> None:
     """
-    v28.4：期貨自動背景更新。
+    v28.6：期貨自動背景更新。
     不在主畫面等待 TAIFEX；成功就寫 macro_taifex_cache.json，失敗只寫狀態。
     """
     try:
@@ -1498,20 +1499,33 @@ def _start_taifex_background_update(target_date: date, force: bool = False) -> N
 
 
 def _render_taifex_bg_status():
+    _cleanup_stale_jobs()
     jobs = _read_bg_jobs()
     item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
     status = _safe_str(item.get("status")) or "尚未啟動"
     msg = _safe_str(item.get("message"))
     updated = _safe_str(item.get("updated_at"))
-    c1, c2, c3 = st.columns([1.1, 3.0, 1.5])
+    c1, c2, c3, c4 = st.columns([1.1, 3.0, 1.5, 1.1])
     with c1:
         st.metric("期貨背景狀態", status)
     with c2:
-        st.caption(msg or "按下更新後會背景抓 TAIFEX，不會卡住頁面。")
+        st.caption(msg or "按下更新後會背景抓 TAIFEX；若逾時會自動熔斷。")
     with c3:
         st.caption(updated or "尚未更新")
+    with c4:
+        if st.button("重置期貨狀態", use_container_width=True, key=_k("reset_taifex_job_old")):
+            jobs = _read_bg_jobs()
+            if "taifex_auto_bg" in jobs:
+                jobs.pop("taifex_auto_bg", None)
+                _write_bg_jobs(jobs)
+            st.success("已重置期貨背景狀態。")
+            st.rerun()
     if status == "running":
-        st.info("期貨背景更新中；頁面不會等待。稍後重新整理或切頁回來即可看到結果。")
+        st.info(f"期貨背景更新中；若超過 {MACRO_BG_MAX_RUNNING_SECONDS} 秒會自動熔斷。")
+    elif status == "timeout":
+        st.warning("期貨背景更新逾時，已熔斷；保留舊快取。")
+
+
 
 
 
@@ -1530,7 +1544,7 @@ def _render_taifex_block(target_date: date):
     with c4:
         st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
     with c5:
-        st.caption("v28.4：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
+        st.caption("v28.6：期貨不再手動輸入，改成背景自動抓取；不等待、不卡頁。")
 
     if update_taifex:
         _start_taifex_background_update(target_date, force=True)
@@ -1767,13 +1781,45 @@ def _write_bg_jobs(data: dict[str, Any]) -> None:
         pass
 
 
+def _cleanup_stale_jobs() -> None:
+    """
+    v28.6：背景工作熔斷。
+    Streamlit Cloud / 外部端點有時會讓 thread 狀態停在 running。
+    超過 MACRO_BG_MAX_RUNNING_SECONDS 就自動改成 timeout，避免畫面永遠 running。
+    """
+    jobs = _read_bg_jobs()
+    if not isinstance(jobs, dict) or not jobs:
+        return
+    changed = False
+    now_ts = time.time()
+    for name, item in list(jobs.items()):
+        if not isinstance(item, dict):
+            continue
+        status = _safe_str(item.get("status"))
+        started = _safe_float(item.get("started_ts"), 0) or 0
+        if status == "running" and started > 0 and (now_ts - started) > MACRO_BG_MAX_RUNNING_SECONDS:
+            item["status"] = "timeout"
+            item["message"] = "背景更新逾時，已自動熔斷；保留舊快取，不影響頁面。"
+            item["updated_at"] = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
+            jobs[name] = item
+            changed = True
+    if changed:
+        _write_bg_jobs(jobs)
+
+
+def _reset_bg_jobs() -> None:
+    _write_bg_jobs({})
+
+
 def _job_is_recent(job_name: str, seconds: int = MACRO_AUTO_REFRESH_SECONDS) -> bool:
+    _cleanup_stale_jobs()
     jobs = _read_bg_jobs()
     item = jobs.get(job_name, {})
     if not isinstance(item, dict):
         return False
     ts = _safe_float(item.get("started_ts"), 0) or 0
     status = _safe_str(item.get("status"))
+    # timeout/error 不視為 recent，可重新啟動；running 只在未逾時時視為 recent。
     return (time.time() - ts) < seconds and status in {"running", "finished"}
 
 
@@ -1861,25 +1907,38 @@ def _maybe_start_background_update(target_date: date, enabled: bool = True) -> N
 
 
 def _render_background_update_status():
+    _cleanup_stale_jobs()
     jobs = _read_bg_jobs()
     item = jobs.get("macro_auto_bg", {}) if isinstance(jobs, dict) else {}
     status = _safe_str(item.get("status")) or "尚未啟動"
     msg = _safe_str(item.get("message"))
     updated = _safe_str(item.get("updated_at"))
     st.markdown("### 自動背景更新狀態")
-    c1, c2, c3 = st.columns([1.1, 2.8, 1.5])
+    c1, c2, c3, c4 = st.columns([1.1, 2.8, 1.5, 1.1])
     with c1:
         st.metric("背景狀態", status)
     with c2:
         st.caption(msg or "啟用後會背景更新大盤、法人、外盤與橋接檔；不等待、不卡頁。")
     with c3:
         st.caption(updated or "尚未更新")
+    with c4:
+        if st.button("重置背景狀態", use_container_width=True, key=_k("reset_bg_jobs")):
+            _reset_bg_jobs()
+            st.success("已重置背景狀態。")
+            st.rerun()
+
     if status == "running":
-        st.info("背景更新仍在執行中；頁面不會被卡住。稍後重新整理或切換頁面回來即可看到快取更新。")
+        st.info(f"背景更新執行中；若超過 {MACRO_BG_MAX_RUNNING_SECONDS} 秒會自動熔斷，不會一直 running。")
+    elif status == "timeout":
+        st.warning("背景更新逾時，已熔斷。可按「重置背景狀態」後重新啟動，或保留舊快取。")
+    elif status == "error":
+        st.warning("背景更新失敗，頁面仍使用舊快取。")
 
 
 
-# ===== v28.5 missing block safety patch =====
+
+
+# ===== v28.6 missing block safety patch =====
 def _safe_us_cache_to_df_v285() -> pd.DataFrame:
     try:
         if "_us_cache_to_df" in globals():
@@ -1910,7 +1969,7 @@ def _safe_us_market_score_v285(us_row: dict[str, Any]) -> dict[str, Any]:
 
 def _render_us_market_block(target_date: date):
     """
-    v28.5：外盤區塊安全版。
+    v28.6：外盤區塊安全版。
     避免舊包 main 呼叫 _render_us_market_block 但函式未定義造成 NameError。
     """
     st.markdown("### 外盤自動背景 / 快取")
@@ -2015,26 +2074,40 @@ def _start_taifex_background_update_v285(target_date: date, force: bool = False)
 
 
 def _render_taifex_bg_status_v285():
+    _cleanup_stale_jobs()
     jobs = _read_bg_jobs() if "_read_bg_jobs" in globals() else {}
     item = jobs.get("taifex_auto_bg", {}) if isinstance(jobs, dict) else {}
     status = _safe_str(item.get("status")) or "尚未啟動"
     msg = _safe_str(item.get("message"))
     updated = _safe_str(item.get("updated_at"))
-    c1, c2, c3 = st.columns([1.1, 3.0, 1.5])
+    c1, c2, c3, c4 = st.columns([1.1, 3.0, 1.5, 1.1])
     with c1:
         st.metric("期貨背景狀態", status)
     with c2:
-        st.caption(msg or "按下更新後會背景抓 TAIFEX，不會卡住頁面。")
+        st.caption(msg or "按下更新後會背景抓 TAIFEX；若逾時會自動熔斷。")
     with c3:
         st.caption(updated or "尚未更新")
+    with c4:
+        if st.button("重置期貨狀態", use_container_width=True, key=_k("reset_taifex_job")):
+            jobs = _read_bg_jobs()
+            if "taifex_auto_bg" in jobs:
+                jobs.pop("taifex_auto_bg", None)
+                _write_bg_jobs(jobs)
+            st.success("已重置期貨背景狀態。")
+            st.rerun()
     if status == "running":
-        st.info("期貨背景更新中；頁面不會等待。稍後重新整理或切頁回來即可看到結果。")
+        st.info(f"期貨背景更新中；若超過 {MACRO_BG_MAX_RUNNING_SECONDS} 秒會自動熔斷。")
+    elif status == "timeout":
+        st.warning("期貨背景更新逾時，已熔斷；保留舊快取。")
+
+
+
 
 
 def _render_taifex_block(target_date: date):
     """
-    v28.5：期貨區塊恢復版。
-    確保期貨不會因 v28.4 patch 遺失函式而消失。
+    v28.6：期貨區塊恢復版。
+    確保期貨不會因 v28.6 patch 遺失函式而消失。
     """
     st.markdown("### 期貨自動背景回補")
     row = _default_taifex_row(target_date) if "_default_taifex_row" in globals() else {}
