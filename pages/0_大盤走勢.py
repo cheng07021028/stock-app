@@ -40,6 +40,7 @@ PFX = "macro_safe_"
 CACHE_FILE = "macro_market_close_cache.json"
 INST_CACHE_FILE = "macro_institutional_cache.json"
 US_CACHE_FILE = "macro_us_market_cache.json"
+TAIFEX_CACHE_FILE = "macro_taifex_cache.json"
 
 
 def _k(key: str) -> str:
@@ -698,6 +699,8 @@ def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
     inst_score = _institutional_score(inst)
     us_row = _default_us_market_row(_bridge_date)
     us_score = _us_market_score(us_row)
+    tx_row = _default_taifex_row(_bridge_date)
+    tx_score = _taifex_score(tx_row)
     close_val = _safe_float(row.get("close"))
     pct_val = _safe_float(row.get("pct"))
     payload = {
@@ -729,10 +732,16 @@ def _build_macro_bridge_payload(row: dict[str, Any]) -> dict[str, Any]:
         "us_market_score": _safe_float(us_score.get("外盤分數"), 50),
         "us_market_state": _safe_str(us_score.get("外盤狀態")),
         "us_market_advice": _safe_str(us_score.get("外盤建議")),
+        "taifex_score": _safe_float(tx_score.get("期貨分數"), 50),
+        "taifex_state": _safe_str(tx_score.get("期貨狀態")),
+        "taifex_advice": _safe_str(tx_score.get("期貨建議")),
+        "tx_close": _safe_float(tx_row.get("tx_close")),
+        "tx_change": _safe_float(tx_row.get("tx_change")),
         "recommendation_bias": _macro_bias_from_score(
-            (_safe_float(factors.get("大盤穩定分"), 50) * 0.60)
-            + (_safe_float(inst_score.get("法人分數"), 50) * 0.25)
+            (_safe_float(factors.get("大盤穩定分"), 50) * 0.52)
+            + (_safe_float(inst_score.get("法人分數"), 50) * 0.23)
             + (_safe_float(us_score.get("外盤分數"), 50) * 0.15)
+            + (_safe_float(tx_score.get("期貨分數"), 50) * 0.10)
         ),
     }
     return payload
@@ -874,9 +883,9 @@ def _macro_feature_status_df() -> pd.DataFrame:
         },
         {
             "功能": "TAIFEX 期權因子",
-            "目前狀態": "暫停",
-            "是否自動執行": "否",
-            "說明": "先暫停，之後可改成手動更新模式。",
+            "目前狀態": "已恢復",
+            "是否自動執行": "否，手動按鈕",
+            "說明": "v27.9 已恢復台指期手動更新；不進頁自動抓，避免卡住。",
         },
         {
             "功能": "完整法人籌碼",
@@ -959,6 +968,249 @@ def _render_institutional_block(target_date: date):
                 "下載法人快取CSV",
                 data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
                 file_name="macro_institutional_cache.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+def _read_taifex_cache() -> dict[str, Any]:
+    p = Path(TAIFEX_CACHE_FILE)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_taifex_cache(cache: dict[str, Any]) -> None:
+    try:
+        Path(TAIFEX_CACHE_FILE).write_text(json.dumps(cache, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _fetch_taifex_futures_manual(target_date: date, timeout: float = 3.0) -> dict[str, Any]:
+    """
+    v27.9：TAIFEX 期貨手動更新。
+    只在按鈕觸發時執行。目標：抓台指期近月收盤/漲跌。
+    """
+    ymd = pd.to_datetime(target_date).strftime("%Y/%m/%d")
+    urls = [
+        "https://www.taifex.com.tw/cht/3/futDailyMarketReport",
+        "https://www.taifex.com.tw/cht/3/futDailyMarketReportDown",
+    ]
+    params_list = [
+        {"queryDate": ymd, "commodity_id": "TX"},
+        {"queryDate": ymd, "commodity_id": "TX", "MarketCode": "0"},
+    ]
+
+    tried = []
+    for url in urls:
+        for params in params_list:
+            tried.append(f"{url.split('/')[-1]} {params}")
+            try:
+                r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout, verify=False)
+                if r.status_code != 200:
+                    continue
+                # 先嘗試 pandas 解析 HTML 表格
+                tables = pd.read_html(r.text)
+                for tb in tables:
+                    if tb is None or tb.empty:
+                        continue
+                    flat_cols = [str(c) for c in tb.columns]
+                    joined_cols = " ".join(flat_cols)
+                    if not any(k in joined_cols for k in ["契約", "商品", "到期", "收盤", "漲跌"]):
+                        continue
+                    df = tb.copy()
+                    # 扁平化欄位
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = ["_".join([str(x) for x in c if str(x) != "nan"]) for c in df.columns]
+                    else:
+                        df.columns = [str(c) for c in df.columns]
+
+                    # 找台指期列
+                    chosen = None
+                    for _, row in df.iterrows():
+                        row_text = " ".join(_safe_str(x) for x in row.values)
+                        if ("TX" in row_text or "臺股期貨" in row_text or "台股期貨" in row_text or "臺指" in row_text or "台指" in row_text):
+                            chosen = row
+                            break
+                    if chosen is None and len(df) > 0:
+                        chosen = df.iloc[0]
+
+                    row_dict = {str(k): chosen[k] for k in df.columns}
+                    close_val = None
+                    change_val = None
+                    volume_val = None
+                    for k, v in row_dict.items():
+                        kk = _safe_str(k)
+                        if close_val is None and ("收盤" in kk or "最後成交" in kk):
+                            close_val = _safe_float(v)
+                        if change_val is None and ("漲跌" in kk):
+                            change_val = _safe_float(v)
+                        if volume_val is None and ("成交量" in kk or "交易量" in kk):
+                            volume_val = _safe_float(v)
+
+                    # 若欄位名不穩，從數值候選抓一個接近台指點數的數
+                    if close_val is None:
+                        nums = [_safe_float(x) for x in chosen.values]
+                        nums = [x for x in nums if x is not None]
+                        candidates = [x for x in nums if 5000 <= abs(x) <= 50000]
+                        if candidates:
+                            close_val = candidates[-1]
+
+                    if close_val is not None:
+                        return {
+                            "ok": True,
+                            "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+                            "source": "TAIFEX 台指期手動",
+                            "tx_close": close_val,
+                            "tx_change": change_val,
+                            "tx_volume": volume_val,
+                            "raw": row_dict,
+                            "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+            except Exception:
+                continue
+
+    return {
+        "ok": False,
+        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
+        "source": "TAIFEX 台指期手動",
+        "error": "TAIFEX 台指期資料尚未取得、非交易日或端點暫時無法連線",
+        "tried": tried[-8:],
+    }
+
+
+def _save_taifex_row(row: dict[str, Any]) -> None:
+    if not isinstance(row, dict) or not row.get("ok"):
+        return
+    dt = pd.to_datetime(row.get("date") or _tw_now().date(), errors="coerce")
+    if pd.isna(dt):
+        dt = pd.Timestamp(_tw_now().date())
+    ymd = dt.strftime("%Y%m%d")
+    cache = _read_taifex_cache()
+    cache[ymd] = row
+    _write_taifex_cache(cache)
+
+
+def _default_taifex_row(target_date: date) -> dict[str, Any]:
+    cache = _read_taifex_cache()
+    ymd = pd.to_datetime(target_date).strftime("%Y%m%d")
+    if isinstance(cache.get(ymd), dict):
+        return cache[ymd]
+    if cache:
+        keys = sorted([k for k in cache.keys() if isinstance(cache.get(k), dict)], reverse=True)
+        if keys:
+            row = dict(cache[keys[0]])
+            row["source"] = _safe_str(row.get("source")) + "｜最近快取"
+            return row
+    return {"ok": False, "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"), "source": "尚未更新", "tx_close": None, "tx_change": None}
+
+
+def _taifex_score(row: dict[str, Any]) -> dict[str, Any]:
+    chg = _safe_float(row.get("tx_change"), 0) or 0
+    score = 50 + max(min(chg * 0.08, 18), -18)
+    score = max(0, min(100, score))
+    if score >= 65:
+        label = "期貨偏多"
+        advice = "台指期支撐偏多，可提高順勢觀察。"
+    elif score >= 55:
+        label = "期貨中性偏多"
+        advice = "台指期略偏多，但仍需確認現貨量價。"
+    elif score >= 45:
+        label = "期貨中性"
+        advice = "期貨未提供明確方向。"
+    elif score >= 35:
+        label = "期貨偏弱"
+        advice = "隔日追高風險提高，等拉回確認。"
+    else:
+        label = "期貨偏空"
+        advice = "期貨逆風，建議保守控倉。"
+    return {"期貨分數": round(score, 1), "期貨狀態": label, "期貨建議": advice}
+
+
+def _taifex_cache_to_df() -> pd.DataFrame:
+    cache = _read_taifex_cache()
+    rows = []
+    for ymd, v in (cache or {}).items():
+        if not isinstance(v, dict):
+            continue
+        rows.append({
+            "日期": v.get("date") or ymd,
+            "台指期收盤": v.get("tx_close"),
+            "台指期漲跌": v.get("tx_change"),
+            "成交量": v.get("tx_volume"),
+            "來源": v.get("source"),
+            "更新時間": v.get("updated_at"),
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+    return df.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+
+
+def _render_taifex_block(target_date: date):
+    st.markdown("### 期貨手動回補")
+    row = _default_taifex_row(target_date)
+    score = _taifex_score(row)
+
+    c1, c2, c3, c4, c5 = st.columns([1.25, 1.1, 1.1, 1.1, 2.0])
+    with c1:
+        update_taifex = st.button("更新台指期", use_container_width=True)
+    with c2:
+        st.metric("期貨分數", f"{_safe_float(score.get('期貨分數'), 50):.1f}")
+    with c3:
+        st.metric("期貨狀態", _safe_str(score.get("期貨狀態")))
+    with c4:
+        st.metric("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}")
+    with c5:
+        st.caption("手動抓 TAIFEX 台指期，不進頁自動執行。")
+
+    if update_taifex:
+        with st.spinner("正在手動更新 TAIFEX 台指期；只在按下時執行..."):
+            new_row = _fetch_taifex_futures_manual(target_date)
+        if new_row.get("ok"):
+            _save_taifex_row(new_row)
+            st.success(f"台指期更新成功：收盤 {new_row.get('tx_close')} / 漲跌 {new_row.get('tx_change')}")
+            st.rerun()
+        else:
+            st.warning(f"台指期更新失敗：{new_row.get('error')}")
+            if new_row.get("tried"):
+                with st.expander("TAIFEX 嘗試明細", expanded=False):
+                    for item in new_row.get("tried", []):
+                        st.write(f"- {item}")
+
+    cols = st.columns(4)
+    cards = [
+        ("資料日期", _safe_str(row.get("date")) or "尚未更新"),
+        ("台指期收盤", f"{_safe_float(row.get('tx_close'), 0):,.0f}"),
+        ("台指期漲跌", f"{_safe_float(row.get('tx_change'), 0):+.0f}"),
+        ("期貨建議", _safe_str(score.get("期貨建議"))),
+    ]
+    for col, (title, value) in zip(cols, cards):
+        with col:
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0;border-radius:14px;padding:12px;background:#ffffff;min-height:88px;">
+                    <div style="font-size:13px;color:#64748b;font-weight:800;">{title}</div>
+                    <div style="font-size:15px;color:#0f172a;font-weight:900;margin-top:8px;">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("期貨快取明細", expanded=False):
+        df = _taifex_cache_to_df()
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        if not df.empty:
+            st.download_button(
+                "下載期貨快取CSV",
+                data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="macro_taifex_cache.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
@@ -1295,6 +1547,7 @@ def main():
     _render_stable_factor_block(row)
     _render_institutional_block(target_date)
     _render_us_market_block(target_date)
+    _render_taifex_block(target_date)
     _render_market_cache_chart()
     _render_macro_bridge_block(row)
     _render_macro_feature_center()
