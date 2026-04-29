@@ -239,6 +239,60 @@ def _save_market_row(row: dict[str, Any]) -> None:
     _write_cache(cache)
 
 
+def _recent_business_dates(end_date: date, days: int = 20) -> list[date]:
+    out = []
+    cur = pd.to_datetime(end_date).date()
+    guard = 0
+    while len(out) < int(days) and guard < 60:
+        if cur.weekday() < 5:
+            out.append(cur)
+        cur = cur - timedelta(days=1)
+        guard += 1
+    return list(reversed(out))
+
+
+def _batch_fetch_close_cache(end_date: date, days: int = 20) -> tuple[int, list[str]]:
+    """
+    v27.1：手動補抓近 N 個交易日收盤紀錄。
+    僅在使用者按鈕觸發，不會進頁自動跑，避免卡住。
+    """
+    cache = _read_cache()
+    added = 0
+    messages = []
+    for d in _recent_business_dates(end_date, days):
+        ymd = pd.to_datetime(d).strftime("%Y%m%d")
+        if isinstance(cache.get(ymd), dict) and cache[ymd].get("close") is not None:
+            messages.append(f"{ymd} 已有快取，略過")
+            continue
+        row = _fetch_twse_close(d, timeout=2.0)
+        if row.get("ok"):
+            cache[ymd] = row
+            added += 1
+            messages.append(f"{ymd} 收盤 {row.get('close')} 已加入")
+        else:
+            messages.append(f"{ymd} 未取得：{row.get('error')}")
+    _write_cache(cache)
+    return added, messages
+
+
+def _cache_download_csv_bytes() -> bytes:
+    df = _cache_to_market_df() if "_cache_to_market_df" in globals() else pd.DataFrame()
+    if df is None or df.empty:
+        return b""
+    return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def _render_market_cache_chart():
+    df = _cache_to_market_df()
+    if df is None or df.empty or len(df) < 2:
+        st.info("大盤快取資料不足，補抓近20日收盤後，這裡會顯示收盤趨勢。")
+        return
+    st.markdown("### 大盤快取趨勢")
+    chart_df = df[["日期", "收盤"]].copy()
+    chart_df["日期"] = pd.to_datetime(chart_df["日期"]).dt.strftime("%Y-%m-%d")
+    st.line_chart(chart_df.set_index("日期"), use_container_width=True)
+
+
 def _score_context(row: dict[str, Any]) -> dict[str, str]:
     pct = _safe_float(row.get("pct"), 0) or 0
     if pct >= 1.0:
@@ -400,14 +454,16 @@ def main():
 
     st.warning("目前使用 v26.9 緊急穩定版：不會自動跑外部資料與完整模型，避免頁面一直轉圈。")
 
-    c1, c2, c3, c4 = st.columns([1.4, 1.4, 1.4, 2.2])
+    c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
         update_realtime = st.button("更新盤中即時大盤", use_container_width=True, type="primary")
     with c2:
         update_close = st.button("更新收盤紀錄", use_container_width=True)
     with c3:
-        clear_cache = st.button("清除大盤快取", use_container_width=True)
+        batch_close = st.button("補抓近20日收盤", use_container_width=True)
     with c4:
+        clear_cache = st.button("清除大盤快取", use_container_width=True)
+    with c5:
         target_date = st.date_input("大盤日期", value=date.today(), key=_k("target_date"))
 
     if clear_cache:
@@ -435,6 +491,17 @@ def main():
             st.success(status_msg)
         else:
             st.warning(f"收盤紀錄更新失敗：{row.get('error')}")
+
+    if batch_close:
+        with st.spinner("正在手動補抓近20日收盤資料；只在按下時執行，不會自動卡住頁面..."):
+            added, msgs = _batch_fetch_close_cache(target_date, days=20)
+        if added > 0:
+            st.success(f"近20日收盤補抓完成，新增 {added} 筆。")
+        else:
+            st.warning("近20日收盤沒有新增資料，可能都已存在或交易所尚未提供。")
+        with st.expander("補抓明細", expanded=False):
+            for msg in msgs:
+                st.write(f"- {msg}")
 
     row = _default_market_row(target_date)
     ctx = _score_context(row)
@@ -470,6 +537,20 @@ def main():
     ])
 
     _render_stable_factor_block(row)
+    _render_market_cache_chart()
+
+    dl_cols = st.columns([1.2, 4])
+    with dl_cols[0]:
+        st.download_button(
+            "下載大盤快取CSV",
+            data=_cache_download_csv_bytes(),
+            file_name="macro_market_close_cache.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=_cache_to_market_df().empty,
+        )
+    with dl_cols[1]:
+        st.caption("v27.1：快取資料越完整，大盤穩定分、MA5/MA20、20日位置越有參考性。")
 
     # v26.10：改用原生 markdown 區塊，避免部分 theme card 在此頁輸出殘留 </div>。
     st.markdown("### 大盤操作參考")
