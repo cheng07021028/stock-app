@@ -334,6 +334,51 @@ def _init_page_state():
         st.session_state[_k("refresh_token")] = "init"
 
 
+
+# ============================================================
+# v75：儀表板隔夜風控快照
+# 只讀 01 大盤趨勢快照，不在儀表板重新連外。
+# ============================================================
+def _read_json_v75(path: str, default=None):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return default if default is not None else {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if data is not None else (default if default is not None else {})
+    except Exception:
+        return default if default is not None else {}
+
+def _fmt_signed_v75(v, digits=2, suffix="%"):
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+    except Exception:
+        pass
+    try:
+        return f"{float(str(v).replace(',', '').replace('%','')):+.{digits}f}{suffix}"
+    except Exception:
+        return "—"
+
+def render_overnight_risk_dashboard_v75():
+    snapshot = _read_json_v75("market_snapshot.json", {})
+    if not isinstance(snapshot, dict) or not snapshot:
+        return
+    if not any(k in snapshot for k in ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment"]):
+        return
+    render_pro_section("隔夜國際盤風控快照｜v75", "讀取 01 大盤趨勢一鍵更新結果，供盤前與隔日風險判斷。")
+    render_pro_kpi_row([
+        {"label":"隔夜分數", "value":format_number(snapshot.get("overnight_score"), 1), "delta":f"風險：{snapshot.get('overnight_risk_level','—')}", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"隔夜偏向", "value":str(snapshot.get("overnight_bias") or "—"), "delta":str(snapshot.get("overnight_data_quality") or snapshot.get("data_quality") or "—"), "delta_class":"pro-kpi-delta-flat"},
+        {"label":"Nasdaq", "value":_fmt_signed_v75(snapshot.get("nasdaq_change_pct")), "delta":"美股科技", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"費半", "value":_fmt_signed_v75(snapshot.get("sox_change_pct")), "delta":"半導體", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"台指夜盤", "value":_fmt_signed_v75(snapshot.get("night_futures_change_pct")), "delta":str(snapshot.get("night_futures_source") or "—"), "delta_class":"pro-kpi-delta-flat"},
+    ])
+    with st.expander("隔夜風控完整說明", expanded=False):
+        st.write(snapshot.get("overnight_comment") or "—")
+        st.caption(f"夜盤備援：{snapshot.get('night_futures_fallback_note') or '—'}")
+        st.caption(f"一鍵更新時間：{snapshot.get('macro_one_click_finished_at') or snapshot.get('updated_at') or '—'}")
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
     _init_page_state()
@@ -346,6 +391,7 @@ def main():
         "專業監控視圖｜集中觀察自選股強弱、即時波動與成交量分布"
     )
     render_market_risk_dashboard_v39()
+    render_overnight_risk_dashboard_v75()
 
 
     watchlist_dict = get_normalized_watchlist()
