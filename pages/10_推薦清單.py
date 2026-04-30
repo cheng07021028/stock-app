@@ -1387,5 +1387,26 @@ def main():
                 st.write(f"- {m}")
 
 
+# =========================================================
+# v71：隔夜國際盤欄位相容補強
+# 由 07 股神推薦 v69/v71 寫入，8/10 只負責保存與顯示，避免舊資料缺欄位 KeyError。
+# =========================================================
+OVERNIGHT_V71_COLUMNS = [
+    "隔夜風控分數", "隔夜風險等級", "隔夜偏向", "隔夜解讀",
+    "台指夜盤漲跌", "NASDAQ漲跌%", "S&P500漲跌%", "道瓊漲跌%", "費半漲跌%",
+    "Nasdaq期貨偏向", "S&P期貨偏向", "匯率風險等級",
+]
+try:
+    for _c in OVERNIGHT_V71_COLUMNS:
+        if _c not in GODPICK_RECORD_COLUMNS:
+            GODPICK_RECORD_COLUMNS.append(_c)
+        if "DEFAULT_STANDARD_COLS" in globals() and _c not in DEFAULT_STANDARD_COLS:
+            DEFAULT_STANDARD_COLS.append(_c)
+        if "DEFAULT_ADVANCED_COLS" in globals() and _c not in DEFAULT_ADVANCED_COLS:
+            DEFAULT_ADVANCED_COLS.append(_c)
+except Exception:
+    pass
+
+
 if __name__ == "__main__":
     main()
