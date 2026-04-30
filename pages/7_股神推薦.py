@@ -8075,7 +8075,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 
     with st.expander(title, expanded=False):
         fixed_msg = "；固定欄位：" + "、".join(fixed_cols) if fixed_cols else ""
-        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定" + fixed_msg + "。v78：表格會依套用順序強制重建，請用上方按鈕調整欄位，不要只拖曳表格欄位。")
+        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定" + fixed_msg + "。v80：按左移/右移/移到最前/移到最後後會立即保存並重建表格；不要只拖曳表格欄位。")
         if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
             st.session_state[pick_key] = draft_order[0] if draft_order else ""
         picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
@@ -8120,7 +8120,18 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
                 st.caption("目前欄位順序已套用並會永久保留。")
 
         if changed:
-            st.session_state[draft_key] = draft_order
+            # v80：欄位移動後立即套用並永久保存。
+            # 原因：使用者反映「移動後再按套用」仍可能因 Streamlit rerun / data_editor 前端狀態而需要重複設定。
+            # 這裡改成每次左移、右移、移到最前、移到最後、恢復原始設定，都直接保存並重建完整推薦表。
+            applied_order = _normalize_column_order(draft_order, managed_available_cols, managed_default_cols)
+            st.session_state[applied_key] = applied_order
+            st.session_state[state_key] = applied_order
+            st.session_state[draft_key] = applied_order
+            ok, msgs = _save_persistent_column_order(name, applied_order)
+            if name == "full_table":
+                _clear_full_table_editor_widget_states()
+                st.session_state[_k("full_table_layout_version")] = _column_order_fingerprint(fixed_cols + applied_order) + "_" + str(int(time.time() * 1000)) + "_" + str(int(time.time() * 1000))
+            st.toast("欄位順序已即時套用並保存。" if ok else "欄位順序已套用，但保存可能失敗。", icon="✅" if ok else "⚠️")
             st.rerun()
 
         if apply_clicked:
@@ -8133,7 +8144,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
             # v78：清掉所有完整推薦表 data_editor 舊狀態，並提高 layout 版本。
             if name == "full_table":
                 _clear_full_table_editor_widget_states()
-                st.session_state[_k("full_table_layout_version")] = _column_order_fingerprint(fixed_cols + applied_order)
+                st.session_state[_k("full_table_layout_version")] = _column_order_fingerprint(fixed_cols + applied_order) + "_" + str(int(time.time() * 1000))
 
             st.success("欄位順序已套用並永久記錄，完整推薦表將依新順序重建。" if ok else "欄位順序已套用，但永久記錄失敗。")
             with st.expander("欄位設定保存明細", expanded=False):
@@ -9202,12 +9213,13 @@ def main():
         # v78：完整推薦表 key 依欄位順序指紋重建。
         # 原因：Streamlit data_editor 會保留前端 column layout；若 key 固定，即使 Python 欄位順序改了，畫面仍可能沿用舊位置。
         full_order_hash = _column_order_fingerprint(list(full_work_df.columns))
-        full_editor_key = _k(f"full_table_editor_{full_order_hash}")
+        full_layout_version = st.session_state.get(_k("full_table_layout_version"), full_order_hash)
+        full_editor_key = _k(f"full_table_editor_{full_layout_version}")
         full_editor_code_map_key = _k(f"full_table_editor_code_map_{full_order_hash}")
         st.session_state[full_editor_code_map_key] = [
             _normalize_code(x) for x in full_work_df["股票代號"].astype(str).tolist()
         ]
-        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜若欄位順序剛套用，表格會自動重建。")
+        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v80：欄位移動後立即保存並強制重建。")
 
         full_editor_df = st.data_editor(
             _format_df(full_work_df),
