@@ -4527,16 +4527,271 @@ def _build_market_snapshot_v30(row: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+
+# =========================================================
+# v70：所有必要數據一鍵更新 + 一鍵寫入 + 完成狀態通知
+# 目的：把 01 大盤趨勢所需資料集中在同一個按鈕處理，並清楚告知是否全部更新 / 全部寫入完成。
+# 原則：
+# 1. 只在使用者按下按鈕時同步執行，不進頁自動等待。
+# 2. 單一資料源失敗不讓整頁掛掉，最後彙整成功 / 失敗明細。
+# 3. 寫入 market_snapshot.json / macro_mode_bridge.json / macro_trend_records.json。
+# 4. 不偽造行情；若資料抓不到，會顯示未完成原因。
+# =========================================================
+V70_ONE_CLICK_STATUS_FILE = Path("macro_v70_one_click_status.json")
+
+
+def _v70_step_result(name: str, ok: bool, message: str, elapsed: float | None = None, data_date: Any = "", source: str = "", extra: dict | None = None) -> dict[str, Any]:
+    return {
+        "項目": name,
+        "完成": bool(ok),
+        "狀態": "完成" if ok else "未完成",
+        "訊息": _safe_str(message),
+        "耗時秒": round(float(elapsed), 3) if elapsed is not None else None,
+        "資料日期": _safe_str(data_date),
+        "來源": _safe_str(source),
+        "extra": extra or {},
+    }
+
+
+def _v70_safe_write_json(path: Path | str, data: Any) -> tuple[bool, str]:
+    try:
+        p = Path(path)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        tmp.replace(p)
+        return True, str(p)
+    except Exception as e:
+        return False, str(e)
+
+
+def _v70_read_json(path: Path | str, default: Any):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return default
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if data is not None else default
+    except Exception:
+        return default
+
+
+def _v70_required_snapshot_keys() -> list[str]:
+    return [
+        "market_score", "market_trend", "market_risk_level", "risk_gate", "position_hint",
+        "twse_index", "twse_change", "twse_change_pct",
+        "otc_index", "otc_change", "otc_change_pct",
+        "futures_index", "futures_change", "futures_change_pct",
+        "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment",
+        "event_factor", "macro_mode_estimate", "feature_center_version",
+    ]
+
+
+def _v70_check_written_files() -> dict[str, Any]:
+    snapshot = _v70_read_json(MARKET_SNAPSHOT_FILE, {})
+    bridge = _v70_read_json(BRIDGE_FILE, {})
+    records = _v70_read_json(MARKET_TREND_RECORDS_FILE if "MARKET_TREND_RECORDS_FILE" in globals() else "macro_trend_records.json", [])
+
+    snap_ok = isinstance(snapshot, dict) and bool(snapshot)
+    bridge_ok = isinstance(bridge, dict) and bool(bridge)
+    records_ok = isinstance(records, list) and len(records) > 0
+
+    missing_snapshot = [k for k in _v70_required_snapshot_keys() if not (isinstance(snapshot, dict) and k in snapshot)]
+    missing_bridge = [k for k in ["market_score", "market_trend", "risk_gate", "overnight_score", "overnight_risk_level", "required_by_godpick"] if not (isinstance(bridge, dict) and k in bridge)]
+
+    all_written = snap_ok and bridge_ok and records_ok and not missing_snapshot and not missing_bridge
+    return {
+        "market_snapshot_ok": snap_ok,
+        "macro_mode_bridge_ok": bridge_ok,
+        "macro_trend_records_ok": records_ok,
+        "missing_snapshot_keys": missing_snapshot,
+        "missing_bridge_keys": missing_bridge,
+        "all_written": all_written,
+        "snapshot_updated_at": snapshot.get("updated_at") if isinstance(snapshot, dict) else "",
+        "bridge_updated_at": bridge.get("updated_at") if isinstance(bridge, dict) else "",
+        "records_count": len(records) if isinstance(records, list) else 0,
+    }
+
+
+def _v70_run_one_click_update_and_write(target_date: date) -> dict[str, Any]:
+    started_at = _tw_now().strftime("%Y-%m-%d %H:%M:%S") if "_tw_now" in globals() else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    steps: list[dict[str, Any]] = []
+
+    def _run_step(name: str, func):
+        t0 = time.perf_counter()
+        try:
+            ok, msg, data_date, source, extra = func()
+            steps.append(_v70_step_result(name, ok, msg, time.perf_counter() - t0, data_date, source, extra))
+            return ok
+        except Exception as e:
+            steps.append(_v70_step_result(name, False, f"例外：{e}", time.perf_counter() - t0))
+            return False
+
+    d = pd.to_datetime(target_date, errors="coerce")
+    if pd.isna(d):
+        d = pd.Timestamp(date.today())
+    d = d.date()
+
+    def step_market():
+        realtime = False
+        try:
+            now_obj = _tw_now() if "_tw_now" in globals() else datetime.now()
+            realtime = 9 <= now_obj.hour < 14
+        except Exception:
+            realtime = False
+        row = _fetch_market_with_fallback(d, realtime=realtime)
+        ok = isinstance(row, dict) and bool(row.get("ok"))
+        if ok:
+            _save_market_row(row)
+        return ok, (f"加權更新成功：{row.get('close')}" if ok else f"加權更新失敗：{row.get('error', 'unknown')}"), row.get("used_date") or row.get("date"), row.get("source"), row
+
+    def step_otc():
+        row = _fetch_otc_with_fallback(d, timeout=2.8) if "_fetch_otc_with_fallback" in globals() else {"ok": False, "error": "未載入櫃買更新函式"}
+        ok = isinstance(row, dict) and bool(row.get("ok"))
+        if ok and "_save_otc_row" in globals():
+            _save_otc_row(row)
+        return ok, (f"櫃買更新成功：{row.get('close')}" if ok else f"櫃買更新失敗：{row.get('error', 'unknown')}"), row.get("used_date") or row.get("date"), row.get("source"), row
+
+    def step_institutional():
+        row = _fetch_twse_institutional_manual(d, timeout=2.8) if "_fetch_twse_institutional_manual" in globals() else {"ok": False, "error": "未載入法人更新函式"}
+        ok = isinstance(row, dict) and bool(row.get("ok"))
+        if ok and "_save_inst_row" in globals():
+            _save_inst_row(row)
+        return ok, (f"法人更新成功：合計 {_safe_float(row.get('total_100m'), 0):+.2f} 億" if ok else f"法人更新失敗：{row.get('error', 'unknown')}"), row.get("date"), row.get("source"), row
+
+    def step_us_market():
+        if "_fetch_us_market_manual" not in globals():
+            return False, "未載入外盤更新函式", "", "", {}
+        added, msgs = _fetch_us_market_manual(d)
+        ok = int(added or 0) > 0
+        return ok, (f"外盤更新成功：{added} 項" if ok else "外盤無新增資料或更新失敗"), d.strftime("%Y-%m-%d"), "Yahoo / cache", {"added": added, "messages": msgs[:12] if isinstance(msgs, list) else msgs}
+
+    def step_taifex():
+        row = _fetch_taifex_futures_manual(d, timeout=2.8) if "_fetch_taifex_futures_manual" in globals() else {"ok": False, "error": "未載入期貨更新函式"}
+        ok = isinstance(row, dict) and bool(row.get("ok"))
+        if ok and "_save_taifex_row" in globals():
+            _save_taifex_row(row)
+        return ok, (f"期貨更新成功：{row.get('tx_close')} / {row.get('tx_change')}" if ok else f"期貨更新失敗：{row.get('error', 'unknown')}"), row.get("date"), row.get("source"), row
+
+    def step_overnight():
+        payload = _v68_fetch_overnight_global_market() if "_v68_fetch_overnight_global_market" in globals() else {"items": {}, "overnight_factor": {}}
+        ok_write, msg = _v68_write_json(OVERNIGHT_CACHE_FILE, payload) if "_v68_write_json" in globals() else _v70_safe_write_json(OVERNIGHT_CACHE_FILE, payload)
+        factor = payload.get("overnight_factor") if isinstance(payload.get("overnight_factor"), dict) else {}
+        ok_count = int(_safe_float(factor.get("overnight_ok_count"), 0) or 0)
+        ok = ok_write and ok_count > 0
+        return ok, (f"隔夜國際盤更新完成：有效 {ok_count} 項" if ok else f"隔夜國際盤資料不足：{msg}"), payload.get("updated_at"), payload.get("source_mode", "background_cache"), factor
+
+    def step_write_bridge():
+        row = _default_market_row(d)
+        ok, msg = _write_market_snapshot_v30(row)
+        check = _v70_check_written_files()
+        ok_final = bool(ok) and bool(check.get("all_written"))
+        if not ok_final:
+            miss = []
+            if check.get("missing_snapshot_keys"):
+                miss.append("snapshot缺欄位:" + ",".join(check.get("missing_snapshot_keys")[:8]))
+            if check.get("missing_bridge_keys"):
+                miss.append("bridge缺欄位:" + ",".join(check.get("missing_bridge_keys")[:8]))
+            if not check.get("macro_trend_records_ok"):
+                miss.append("macro_trend_records未建立")
+            msg = f"{msg}；寫入驗證未完全通過：" + " / ".join(miss)
+        return ok_final, msg, check.get("snapshot_updated_at") or check.get("bridge_updated_at"), "market_snapshot / macro_bridge", check
+
+    _run_step("加權指數", step_market)
+    _run_step("櫃買指數", step_otc)
+    _run_step("三大法人", step_institutional)
+    _run_step("外盤 / 美盤", step_us_market)
+    _run_step("台指期 / 期貨", step_taifex)
+    _run_step("隔夜國際盤", step_overnight)
+    _run_step("寫入股神橋接檔", step_write_bridge)
+
+    updated_steps = [s for s in steps if s.get("項目") != "寫入股神橋接檔"]
+    write_steps = [s for s in steps if s.get("項目") == "寫入股神橋接檔"]
+    all_updated = all(bool(s.get("完成")) for s in updated_steps)
+    all_written = bool(write_steps and write_steps[-1].get("完成"))
+    finished_at = _tw_now().strftime("%Y-%m-%d %H:%M:%S") if "_tw_now" in globals() else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    failed = [s for s in steps if not s.get("完成")]
+    status = {
+        "version": "v70_one_click_all_update_write",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "target_date": d.strftime("%Y-%m-%d"),
+        "all_required_updated": bool(all_updated),
+        "all_required_written": bool(all_written),
+        "all_done": bool(all_updated and all_written),
+        "failed_count": len(failed),
+        "failed_items": [s.get("項目") for s in failed],
+        "steps": steps,
+        "written_files_check": _v70_check_written_files(),
+    }
+    _v70_safe_write_json(V70_ONE_CLICK_STATUS_FILE, status)
+    return status
+
+
+def _v70_read_one_click_status() -> dict[str, Any]:
+    return _v70_read_json(V70_ONE_CLICK_STATUS_FILE, {})
+
+
+def _v70_render_completion_notice(status: dict[str, Any] | None = None):
+    if status is None:
+        status = _v70_read_one_click_status()
+    if not isinstance(status, dict) or not status:
+        st.caption("v70：尚未執行一鍵更新 / 寫入。")
+        return
+
+    all_updated = bool(status.get("all_required_updated"))
+    all_written = bool(status.get("all_required_written"))
+    all_done = bool(status.get("all_done"))
+    finished_at = _safe_str(status.get("finished_at"))
+
+    if all_done:
+        st.success(f"✅ v70 全部完成：所有必要數據已更新，market_snapshot / macro_bridge / trend_records 已寫入完成。完成時間：{finished_at}")
+    elif all_written and not all_updated:
+        st.warning(f"⚠️ v70 部分完成：橋接檔已寫入，但仍有資料源未更新成功。完成時間：{finished_at}")
+    else:
+        st.error(f"❌ v70 尚未全部完成：仍有資料未更新或橋接檔未完整寫入。完成時間：{finished_at}")
+
+    steps = status.get("steps") if isinstance(status.get("steps"), list) else []
+    if steps:
+        df = pd.DataFrame([{k: v for k, v in s.items() if k != "extra"} for s in steps])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    failed = status.get("failed_items") if isinstance(status.get("failed_items"), list) else []
+    if failed:
+        st.warning("未完成項目：" + "、".join(map(str, failed)))
+
+
+def _v70_render_one_click_control(target_date: date):
+    st.markdown("### v70 一鍵更新 / 一鍵寫入總控")
+    st.caption("一次更新 01 大盤趨勢所需資料：加權、櫃買、法人、外盤、美盤、期貨、隔夜國際盤，並立即寫入股神橋接檔。")
+    c1, c2 = st.columns([1.4, 3.6])
+    with c1:
+        run_now = st.button("一鍵更新全部並寫入", use_container_width=True, type="primary", key=_k("v70_update_all_and_write"))
+    with c2:
+        st.caption("按下後會同步執行並等待結果；若單一來源失敗，會列出未完成項目，不會偽裝成全部成功。")
+
+    if run_now:
+        with st.spinner("v70 正在更新所有必要數據並寫入股神橋接檔，請稍候..."):
+            status = _v70_run_one_click_update_and_write(target_date)
+        _v70_render_completion_notice(status)
+        if status.get("all_done"):
+            st.balloons()
+        return
+
+    with st.expander("v70 上次一鍵更新 / 寫入結果", expanded=False):
+        _v70_render_completion_notice()
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="01 大盤趨勢｜v68隔夜國際盤風控版",
-        subtitle="加權、櫃買、期貨、外盤、法人、夜盤、美盤與美國期貨採背景/快取；輸出 market_snapshot.json 給股神推薦。",
+        title="01 大盤趨勢｜v70一鍵更新寫入版",
+        subtitle="加權、櫃買、期貨、外盤、法人、夜盤、美盤與美國期貨可一鍵更新、一鍵寫入，並通知是否全部完成。",
     )
 
-    st.info("v45.0：補齊大盤功能管理中心，Google News 事件因子改為安全快取模式，完整大盤模式預估已恢復；仍維持背景更新不卡頁。")
+    st.info("v70：新增一鍵更新全部必要數據並寫入股神橋接檔；完成後會明確通知是否全部更新、全部寫入完成。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
@@ -4554,13 +4809,15 @@ def main():
     _maybe_start_background_update(target_date, enabled=auto_bg)
     _render_background_update_status()
 
+    _v70_render_one_click_control(target_date)
+
     ac1, ac2, ac3 = st.columns([1.2, 1.2, 3])
     with ac1:
-        if st.button("一鍵背景更新全部", use_container_width=True, type="primary"):
+        if st.button("背景更新全部", use_container_width=True):
             _v294_start_all_background(target_date)
             st.success("已啟動大盤 / 櫃買 / 法人 / 外盤 / 期貨背景更新。頁面不會等待，稍後重新整理即可看結果。")
     with ac2:
-        if st.button("立即寫入股神橋接", use_container_width=True):
+        if st.button("只寫入股神橋接", use_container_width=True):
             _row_for_bridge = _default_market_row(target_date)
             ok, msg = _v294_write_bridge_with_quality(_row_for_bridge)
             if ok:
@@ -4568,7 +4825,7 @@ def main():
             else:
                 st.warning(msg)
     with ac3:
-        st.caption("v45：橋接檔會同步寫 market_snapshot、macro_mode_bridge、大盤風控紀錄、事件因子與完整大盤模式預估。")
+        st.caption("v70：建議優先使用上方『一鍵更新全部並寫入』；舊背景更新與只寫入功能保留作備援。")
 
     _v294_render_source_health_panel()
 
@@ -4675,7 +4932,7 @@ def main():
             disabled=_cache_to_market_df().empty,
         )
     with dl_cols[1]:
-        st.caption("v68：大盤、櫃買、期貨、交易時段、資料診斷、事件因子、完整大盤模式與隔夜國際盤風控會寫入股神推薦風控檔。")
+        st.caption("v70：可一鍵更新全部必要數據、一鍵寫入股神橋接檔，並明確顯示是否全部更新 / 全部寫入完成。")
 
     st.markdown("### 大盤操作參考")
     ref_cols = st.columns(4)
