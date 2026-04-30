@@ -4435,119 +4435,10 @@ def _v68_build_overnight_factor(items: dict[str, Any] | None = None) -> dict[str
     return {"overnight_score": score, "overnight_risk_level": risk_level, "overnight_bias": bias, "overnight_data_quality": f"{ok_count}/9", "overnight_ok_count": ok_count, "night_futures_change_pct": tw_night, "nasdaq_change_pct": nasdaq, "sp500_change_pct": sp500, "dow_change_pct": dow, "sox_change_pct": sox, "nasdaq_futures_change_pct": nqf, "sp500_futures_change_pct": esf, "dxy_change_pct": dxy, "usdtwd_change_pct": usdtwd, "semiconductor_overnight_bias": semiconductor_bias, "fx_risk_level": fx_risk, "overnight_comment": comment}
 
 
-
-# =========================================================
-# v73：台指期夜盤參考修正
-# 說明：Yahoo 的 TXF=F 在部分環境會回 404，導致畫面顯示「台指期夜盤參考 資料不足」。
-# 這裡改成：先嘗試多個 Yahoo 候選代號；若仍失敗，改用 TAIFEX 期貨快取 / market_snapshot 期貨欄位作「夜盤參考備援」。
-# 注意：備援只做隔夜方向參考，不偽裝成真正夜盤成交資料。
-# =========================================================
-def _v73_recent_dict_from_json_file(path: Path | str) -> dict[str, Any]:
-    try:
-        p = Path(path)
-        if not p.exists():
-            return {}
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        dated = []
-        for k, v in data.items():
-            if isinstance(v, dict):
-                dated.append((str(k), v))
-        if dated:
-            dated.sort(key=lambda x: x[0], reverse=True)
-            return dict(dated[0][1])
-        return data
-    except Exception:
-        return {}
-
-
-def _v73_taifex_cache_to_overnight_item() -> dict[str, Any]:
-    """把既有 TAIFEX / market_snapshot 期貨資料轉成隔夜風控可讀格式。"""
-    row = _v73_recent_dict_from_json_file(TAIFEX_CACHE_FILE)
-    price = _v68_safe_float(row.get("tx_close") or row.get("futures_index") or row.get("close"))
-    change = _v68_safe_float(row.get("tx_change") or row.get("futures_change") or row.get("change"))
-    pct = _v68_safe_float(row.get("tx_pct") or row.get("futures_change_pct") or row.get("change_pct"))
-    data_date = _safe_str(row.get("date") or row.get("data_date") or row.get("資料日期"))
-    src = _safe_str(row.get("source")) or "TAIFEX 期貨快取"
-
-    if price is None:
-        for fp in [Path(MARKET_SNAPSHOT_FILE), Path(MACRO_MODE_BRIDGE_FILE)]:
-            snap = _v68_read_json(fp, {})
-            if isinstance(snap, dict):
-                price = _v68_safe_float(snap.get("futures_index"))
-                change = _v68_safe_float(snap.get("futures_change"))
-                pct = _v68_safe_float(snap.get("futures_change_pct"))
-                data_date = _safe_str(snap.get("futures_data_date") or snap.get("data_date") or snap.get("updated_at"))
-                src = f"{fp.name} 期貨欄位備援"
-                if price is not None:
-                    break
-
-    if pct is None and price not in (None, 0) and change is not None:
-        prev = price - change
-        if prev not in (None, 0):
-            pct = change / prev * 100
-
-    if price is not None:
-        return {
-            "label": "台指期夜盤參考",
-            "symbol": "TAIFEX_CACHE",
-            "ok": True,
-            "price": price,
-            "previous_close": (price - change) if change is not None else None,
-            "change": change,
-            "change_pct": pct,
-            "data_date": data_date,
-            "source": f"{src}｜夜盤參考備援",
-            "elapsed_sec": 0.0,
-            "error": "",
-            "note": "Yahoo 台指夜盤代號不可用時，使用既有 TAIFEX / 大盤快照期貨資料作隔夜方向參考；非即時夜盤成交資料。",
-        }
-
-    return {
-        "label": "台指期夜盤參考",
-        "symbol": "TAIFEX_CACHE",
-        "ok": False,
-        "price": None,
-        "previous_close": None,
-        "change": None,
-        "change_pct": None,
-        "data_date": "",
-        "source": "TAIFEX / market_snapshot 備援",
-        "elapsed_sec": 0.0,
-        "error": "Yahoo 台指夜盤候選代號與 TAIFEX 快取皆無可用資料",
-    }
-
-
-def _v73_fetch_tw_night_future_reference() -> dict[str, Any]:
-    """台指期夜盤參考：避免 TXF=F 404 直接造成畫面紅字。"""
-    yahoo_candidates = [
-        ("TXF=F", "台指期夜盤參考"),
-        ("TX=F", "台指期夜盤參考"),
-    ]
-    errors = []
-    for symbol, label in yahoo_candidates:
-        row = _v68_fetch_yahoo_chart(symbol, label)
-        if row.get("ok"):
-            row["label"] = "台指期夜盤參考"
-            row["source"] = f"Yahoo chart API｜{symbol}"
-            return row
-        errors.append(f"{symbol}:{row.get('error')}")
-
-    fallback = _v73_taifex_cache_to_overnight_item()
-    if fallback.get("ok"):
-        fallback["fallback_errors"] = errors[-5:]
-        return fallback
-    fallback["error"] = "；".join(errors[-5:] + [_safe_str(fallback.get("error"))])
-    return fallback
-
-
 def _v68_fetch_overnight_global_market() -> dict[str, Any]:
-    # v73：台指期夜盤參考改用多候選 + TAIFEX 快取備援，避免 TXF=F 404 造成畫面誤判資料不足。
-    tickers = {"nasdaq": ("^IXIC", "NASDAQ"), "sp500": ("^GSPC", "S&P 500"), "dow": ("^DJI", "道瓊"), "sox": ("^SOX", "費半"), "nasdaq_future": ("NQ=F", "Nasdaq Futures"), "sp500_future": ("ES=F", "S&P Futures"), "dow_future": ("YM=F", "Dow Futures"), "dxy": ("DX-Y.NYB", "美元指數 DXY"), "usdtwd": ("USDTWD=X", "美元/台幣")}
+    tickers = {"tw_night_future": ("TXF=F", "台指期夜盤參考"), "nasdaq": ("^IXIC", "NASDAQ"), "sp500": ("^GSPC", "S&P 500"), "dow": ("^DJI", "道瓊"), "sox": ("^SOX", "費半"), "nasdaq_future": ("NQ=F", "Nasdaq Futures"), "sp500_future": ("ES=F", "S&P Futures"), "dow_future": ("YM=F", "Dow Futures"), "dxy": ("DX-Y.NYB", "美元指數 DXY"), "usdtwd": ("USDTWD=X", "美元/台幣")}
     rows = {key: _v68_fetch_yahoo_chart(symbol, label) for key, (symbol, label) in tickers.items()}
-    rows["tw_night_future"] = _v73_fetch_tw_night_future_reference()
-    return {"version": "v73_overnight_global_market_taifex_fallback", "updated_at": _v68_now_str(), "source_mode": "background_cache", "items": rows, "overnight_factor": _v68_build_overnight_factor(rows)}
+    return {"version": "v68_overnight_global_market", "updated_at": _v68_now_str(), "source_mode": "background_cache", "items": rows, "overnight_factor": _v68_build_overnight_factor(rows)}
 
 
 def _v68_start_overnight_background_update():
@@ -4872,7 +4763,7 @@ def _v70_render_completion_notice(status: dict[str, Any] | None = None):
 
 
 def _v70_render_one_click_control(target_date: date):
-    st.markdown("### v73 一鍵更新 / 一鍵寫入總控")
+    st.markdown("### v70 一鍵更新 / 一鍵寫入總控")
     st.caption("一次更新 01 大盤趨勢所需資料：加權、櫃買、法人、外盤、美盤、期貨、隔夜國際盤，並立即寫入股神橋接檔。")
     c1, c2 = st.columns([1.4, 3.6])
     with c1:
@@ -5070,103 +4961,6 @@ def main():
         st.json(row)
         st.write("v32 snapshot：")
         st.json(snapshot_now)
-
-
-# =========================================================
-# v71：一鍵更新/寫入同步修正
-# 修正 v70 顯示「橋接檔未完整寫入」：完整把 v68 隔夜欄位與 v45 功能中心欄位寫入 macro_mode_bridge.json。
-# =========================================================
-MACRO_V71_SYNC_VERSION = "v71_macro_one_click_bridge_sync_20260430"
-
-def _v71_now_text() -> str:
-    try:
-        return _tw_now().strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def _v71_get_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-def _v71_enrich_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    snapshot.setdefault("updated_at", _v71_now_text())
-    snapshot["v71_sync_version"] = MACRO_V71_SYNC_VERSION
-    if not isinstance(snapshot.get("event_factor"), dict):
-        snapshot["event_factor"] = {"event_score": 50, "event_risk_level": "中性", "event_comment": "v71：尚無額外事件風險快取，採中性處理。", "source": "v71_default_neutral"}
-    if not isinstance(snapshot.get("macro_mode_estimate"), dict):
-        score = _safe_float(snapshot.get("market_score"), 50) or 50
-        if score >= 70: mode = "選股偏多"
-        elif score >= 55: mode = "震盪選股"
-        elif score >= 40: mode = "保守防守"
-        else: mode = "高風險觀望"
-        snapshot["macro_mode_estimate"] = {"mode": mode, "adjusted_score": score, "confidence": "中", "comment": "v71：依 market_score 自動補齊完整大盤模式預估。"}
-    snapshot.setdefault("feature_center_version", "v71_feature_center_sync")
-
-    factor = _v71_get_dict(snapshot.get("overnight_factor"))
-    if not factor:
-        try:
-            payload = _v68_get_overnight_payload() if "_v68_get_overnight_payload" in globals() else {}
-            factor = payload.get("overnight_factor") if isinstance(payload.get("overnight_factor"), dict) else {}
-            snapshot["overnight_factor"] = factor
-            snapshot["overnight_cache_updated_at"] = payload.get("updated_at", "") if isinstance(payload, dict) else ""
-        except Exception:
-            factor = {}
-    defaults = {
-        "overnight_score": 50, "overnight_risk_level": "資料不足", "overnight_bias": "data_guard",
-        "overnight_comment": "隔夜國際盤資料不足，僅標示 data_guard，不直接扣死推薦。",
-        "night_futures_change_pct": None, "nasdaq_change_pct": None, "sp500_change_pct": None, "dow_change_pct": None, "sox_change_pct": None,
-        "nasdaq_futures_change_pct": None, "sp500_futures_change_pct": None, "dxy_change_pct": None, "usdtwd_change_pct": None,
-        "fx_risk_level": "資料不足", "us_futures_bias": "data_guard",
-    }
-    for k, default in defaults.items():
-        if k not in snapshot or snapshot.get(k) in [None, ""]:
-            snapshot[k] = factor.get(k, default)
-    if snapshot.get("us_futures_bias") in [None, ""]:
-        snapshot["us_futures_bias"] = snapshot.get("overnight_bias")
-    snapshot["overnight_version"] = snapshot.get("overnight_version") or "v68/v71_overnight_sync"
-    req = _v71_get_dict(snapshot.get("required_by_godpick"))
-    for k in ["market_score", "market_trend", "market_risk_level", "risk_gate", "position_hint", "market_session", "market_session_label", "market_session_usable", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "sox_change_pct", "us_futures_bias", "fx_risk_level"]:
-        req[k] = snapshot.get(k)
-    req["v71_status"] = "synced"
-    snapshot["required_by_godpick"] = req
-    snapshot["one_click_sync_version"] = MACRO_V71_SYNC_VERSION
-    snapshot["one_click_sync_at"] = _v71_now_text()
-    return snapshot
-
-def _v71_build_bridge_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    snapshot = _v71_enrich_snapshot(snapshot)
-    keys = ["updated_at", "version", "v71_sync_version", "one_click_sync_version", "one_click_sync_at", "market_score", "market_score_raw", "market_trend", "market_risk_level", "market_bias", "risk_gate", "position_hint", "recommendation_adjustment", "volume_status", "trend_comment", "required_by_godpick", "godpick_market_effect", "market_session", "market_session_label", "market_session_usable", "data_source_health", "data_quality", "freshness", "data_guard_notes", "data_diagnostics", "event_factor", "macro_mode_estimate", "feature_center_version", "twse_index", "twse_change", "twse_change_pct", "otc_index", "otc_change", "otc_change_pct", "futures_index", "futures_change", "futures_change_pct", "mini_futures_index", "mini_futures_change", "mini_futures_change_pct", "overnight_factor", "overnight_cache_updated_at", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "dow_change_pct", "sox_change_pct", "nasdaq_futures_change_pct", "sp500_futures_change_pct", "dxy_change_pct", "usdtwd_change_pct", "us_futures_bias", "fx_risk_level", "overnight_version"]
-    return {k: snapshot.get(k) for k in keys}
-
-def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
-    snapshot = _v71_enrich_snapshot(_build_market_snapshot_v30(row))
-    bridge = _v71_build_bridge_from_snapshot(snapshot)
-    ok1 = _v30_write_json_dict(MARKET_SNAPSHOT_FILE, snapshot)
-    ok2 = _v30_write_json_dict(BRIDGE_FILE, bridge)
-    if ok1:
-        try: _v32_append_record(snapshot)
-        except Exception: pass
-    check = _v70_check_written_files()
-    if ok1 and ok2 and check.get("all_written"):
-        return True, f"v71 已完整同步寫入 {MARKET_SNAPSHOT_FILE}、{BRIDGE_FILE}、macro_trend_records.json。"
-    miss = []
-    if check.get("missing_snapshot_keys"): miss.append("snapshot缺欄位:" + ",".join(check.get("missing_snapshot_keys")[:8]))
-    if check.get("missing_bridge_keys"): miss.append("bridge缺欄位:" + ",".join(check.get("missing_bridge_keys")[:8]))
-    if not check.get("macro_trend_records_ok"): miss.append("macro_trend_records未建立")
-    return bool(ok1 and ok2), "v71 已寫入但驗證仍有提醒：" + (" / ".join(miss) if miss else "請重新整理後再檢查")
-
-def _v70_check_written_files() -> dict[str, Any]:
-    snapshot = _v70_read_json(MARKET_SNAPSHOT_FILE, {})
-    bridge = _v70_read_json(BRIDGE_FILE, {})
-    records = _v70_read_json(MARKET_TREND_RECORDS_FILE if "MARKET_TREND_RECORDS_FILE" in globals() else "macro_trend_records.json", [])
-    snap_ok = isinstance(snapshot, dict) and len(snapshot.keys()) > 0
-    bridge_ok = isinstance(bridge, dict) and len(bridge.keys()) > 0
-    records_ok = isinstance(records, list) and len(records) > 0
-    missing_snapshot = [k for k in _v70_required_snapshot_keys() if not (isinstance(snapshot, dict) and k in snapshot)]
-    missing_bridge = [k for k in ["market_score", "market_trend", "risk_gate", "position_hint", "required_by_godpick", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "event_factor", "macro_mode_estimate", "feature_center_version"] if not (isinstance(bridge, dict) and k in bridge)]
-    all_written = snap_ok and bridge_ok and records_ok and not missing_snapshot and not missing_bridge
-    return {"market_snapshot_ok": snap_ok, "macro_mode_bridge_ok": bridge_ok, "macro_trend_records_ok": records_ok, "missing_snapshot_keys": missing_snapshot, "missing_bridge_keys": missing_bridge, "all_written": all_written, "snapshot_updated_at": snapshot.get("updated_at") if isinstance(snapshot, dict) else "", "bridge_updated_at": bridge.get("updated_at") if isinstance(bridge, dict) else "", "records_count": len(records) if isinstance(records, list) else 0, "v71_sync_version": MACRO_V71_SYNC_VERSION}
 
 
 if __name__ == "__main__":
