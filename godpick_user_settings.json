@@ -21,6 +21,7 @@
   },
   "column_orders": {
     "full_table": [
+      "上漲機率等級",
       "起漲等級",
       "最新價",
       "股票代號",
@@ -201,7 +202,6 @@
       "大盤影響加減分",
       "大盤影響說明",
       "大盤資料診斷摘要",
-      "上漲機率等級",
       "上漲機率信心",
       "上漲機率說明",
       "上漲機率因子明細",
@@ -298,6 +298,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-30 15:39:38",
-  "version": "godpick_v5_persistent_settings"
+  "updated_at": "2026-04-30 15:42:10",
+  "version": "godpick_v72_column_order_stable"
 }
