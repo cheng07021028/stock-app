@@ -604,5 +604,42 @@ except Exception:
     pass
 
 
+
+# =========================================================
+# v74：台指夜盤備援 / 隔夜國際盤欄位檢查
+# =========================================================
+def _v74_render_overnight_taifex_fallback_health():
+    st.markdown("### v74｜台指夜盤備援 / 隔夜國際盤欄位檢查")
+    snapshot = _v71_read_json_file("market_snapshot.json", {})
+    bridge = _v71_read_json_file("macro_mode_bridge.json", {})
+    overnight_cache = _v71_read_json_file("overnight_global_market_cache.json", {})
+    rows = []
+    def _has(d, k):
+        return isinstance(d, dict) and k in d and d.get(k) not in [None, "", {}, []]
+    for src_name, data in [("market_snapshot", snapshot), ("macro_bridge", bridge)]:
+        for k in ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sox_change_pct", "fx_risk_level"]:
+            rows.append({"來源": src_name, "檢查欄位": k, "狀態": "OK" if _has(data, k) else "缺少", "值": data.get(k) if isinstance(data, dict) else ""})
+    tw_item = {}
+    try:
+        items = overnight_cache.get("items", {}) if isinstance(overnight_cache, dict) else {}
+        tw_item = items.get("tw_night_future", {}) if isinstance(items, dict) else {}
+    except Exception:
+        tw_item = {}
+    rows.append({"來源": "overnight_cache", "檢查欄位": "tw_night_future", "狀態": "OK" if isinstance(tw_item, dict) and tw_item.get("ok") else "注意", "值": tw_item.get("source") if isinstance(tw_item, dict) else ""})
+    if isinstance(tw_item, dict) and tw_item.get("error"):
+        rows.append({"來源": "overnight_cache", "檢查欄位": "tw_night_future.error", "狀態": "注意", "值": tw_item.get("error")})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if isinstance(tw_item, dict) and tw_item.get("ok"):
+        st.success("v74：台指夜盤參考已有可用資料或 TAIFEX 備援資料。")
+    else:
+        st.warning("v74：台指夜盤參考仍不足；請回 01 大盤趨勢按『一鍵更新全部並寫入』或確認 TAIFEX 快取。")
+
+try:
+    _v74_prev_main = main
+    def main():
+        _v74_prev_main()
+        _v74_render_overnight_taifex_fallback_health()
+except Exception:
+    pass
 if __name__ == "__main__":
     main()
