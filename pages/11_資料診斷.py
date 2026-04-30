@@ -641,5 +641,58 @@ try:
         _v74_render_overnight_taifex_fallback_health()
 except Exception:
     pass
+
+
+# =========================================================
+# v75：Final stable 總檢查｜隔夜風控 + 欄位順序 + 一鍵更新狀態
+# =========================================================
+def _v75_read_json(path, default):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return default
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if data is not None else default
+    except Exception:
+        return default
+
+def _v75_has_value(data, key):
+    return isinstance(data, dict) and data.get(key) not in [None, "", {}, []]
+
+def _v75_render_final_stable_health():
+    st.markdown("### v75｜全系統隔夜風控 final stable 總檢查")
+    snapshot = _v75_read_json("market_snapshot.json", {})
+    bridge = _v75_read_json("macro_mode_bridge.json", {})
+    one_click = _v75_read_json("macro_v70_one_click_status.json", {})
+    col_orders = _v75_read_json("godpick_column_orders.json", {})
+    overnight_cache = _v75_read_json("overnight_global_market_cache.json", {})
+    required = ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change", "night_futures_change_pct", "night_futures_source", "night_futures_fallback_note", "overnight_data_quality", "nasdaq_change_pct", "sox_change_pct"]
+    rows = []
+    for src_name, data in [("market_snapshot", snapshot), ("macro_bridge", bridge)]:
+        for k in required:
+            rows.append({"群組": src_name, "檢查項目": k, "狀態": "OK" if _v75_has_value(data, k) else "缺少", "值": data.get(k) if isinstance(data, dict) else ""})
+    rows.extend([
+        {"群組":"一鍵更新", "檢查項目":"macro_v70_one_click_status.json", "狀態":"OK" if isinstance(one_click, dict) and bool(one_click) else "缺少", "值":one_click.get("finished_at") if isinstance(one_click, dict) else ""},
+        {"群組":"一鍵更新", "檢查項目":"all_required_updated", "狀態":"OK" if isinstance(one_click, dict) and one_click.get("all_required_updated") else "注意", "值":one_click.get("all_required_updated") if isinstance(one_click, dict) else ""},
+        {"群組":"一鍵更新", "檢查項目":"all_required_written", "狀態":"OK" if isinstance(one_click, dict) and one_click.get("all_required_written") else "注意", "值":one_click.get("all_required_written") if isinstance(one_click, dict) else ""},
+        {"群組":"欄位順序", "檢查項目":"godpick_column_orders.json", "狀態":"OK" if isinstance(col_orders, dict) and bool(col_orders) else "注意", "值":f"{len(col_orders) if isinstance(col_orders, dict) else 0} 組設定"},
+        {"群組":"隔夜快取", "檢查項目":"overnight_global_market_cache.json", "狀態":"OK" if isinstance(overnight_cache, dict) and bool(overnight_cache) else "注意", "值":overnight_cache.get("updated_at") if isinstance(overnight_cache, dict) else ""},
+    ])
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    bad = df[~df["狀態"].isin(["OK"])] if not df.empty else pd.DataFrame()
+    if bad.empty:
+        st.success("v75：隔夜風控、橋接檔、一鍵更新狀態與欄位順序檢查皆正常。")
+    else:
+        st.warning("v75：仍有缺少或注意項目。建議先回 01 大盤趨勢按『一鍵更新全部並寫入』，再回 07 股神推薦套用欄位順序。")
+
+try:
+    _v75_prev_main = main
+    def main():
+        _v75_prev_main()
+        _v75_render_final_stable_health()
+except Exception:
+    pass
+
 if __name__ == "__main__":
     main()
