@@ -62,7 +62,8 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-PAGE_TITLE = "股神推薦 V37｜大盤趨勢完整串接版"
+OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v69_20260430"
+PAGE_TITLE = "股神推薦 V69｜隔夜國際盤風控串接版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -156,6 +157,18 @@ GODPICK_RECORD_COLUMNS = [
     "大盤影響加減分",
     "大盤影響說明",
     "大盤資料診斷摘要",
+    "隔夜風控分數",
+    "隔夜風險等級",
+    "隔夜偏向",
+    "隔夜解讀",
+    "台指夜盤漲跌",
+    "NASDAQ漲跌%",
+    "S&P500漲跌%",
+    "道瓊漲跌%",
+    "費半漲跌%",
+    "Nasdaq期貨偏向",
+    "S&P期貨偏向",
+    "匯率風險等級",
     "股神決策模式",
     "股神進場建議",
     "建議部位%",
@@ -1562,6 +1575,22 @@ def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
         "market_session_label": snapshot.get("market_session_label"),
         "market_session_usable": snapshot.get("market_session_usable"),
         "godpick_market_effect": snapshot.get("godpick_market_effect"),
+        "overnight_score": snapshot.get("overnight_score"),
+        "overnight_risk_level": snapshot.get("overnight_risk_level"),
+        "overnight_bias": snapshot.get("overnight_bias"),
+        "overnight_comment": snapshot.get("overnight_comment"),
+        "night_futures_change": snapshot.get("night_futures_change"),
+        "night_futures_change_pct": snapshot.get("night_futures_change_pct"),
+        "nasdaq_change_pct": snapshot.get("nasdaq_change_pct"),
+        "sp500_change_pct": snapshot.get("sp500_change_pct"),
+        "dow_change_pct": snapshot.get("dow_change_pct"),
+        "sox_change_pct": snapshot.get("sox_change_pct"),
+        "nasdaq_futures_change_pct": snapshot.get("nasdaq_futures_change_pct"),
+        "sp500_futures_change_pct": snapshot.get("sp500_futures_change_pct"),
+        "us_futures_bias": snapshot.get("us_futures_bias"),
+        "fx_risk_level": snapshot.get("fx_risk_level"),
+        "overnight_data_quality": snapshot.get("overnight_data_quality"),
+        "overnight_updated_at": snapshot.get("overnight_updated_at"),
         "data_diagnostics": snapshot.get("data_diagnostics"),
         "_source": "market_snapshot.json",
     }
@@ -1665,9 +1694,125 @@ def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, An
         out["交易可行"] = out.get("交易可行", 0) + cut_market
         out["技術結構"] = out.get("技術結構", 0) + cut_burst
 
+    # v69：隔夜國際盤只做小幅調權，不壓過個股本身條件。
+    overnight = _overnight_effect_summary_v69(bridge)
+    od = _safe_float(overnight.get("delta"), 0) or 0
+    if od > 0:
+        add = min(int(round(abs(od))), 4)
+        out["市場環境"] = out.get("市場環境", 0) + add
+        take = min(add, max(0, out.get("自動因子", 0) - 3))
+        out["自動因子"] = out.get("自動因子", 0) - take
+        if add - take > 0:
+            out["爆發力"] = max(0, out.get("爆發力", 0) - (add - take))
+    elif od < 0:
+        cut = min(int(round(abs(od))), 5)
+        cut_burst = min(cut, max(0, out.get("爆發力", 0) - 2))
+        out["爆發力"] = out.get("爆發力", 0) - cut_burst
+        out["交易可行"] = out.get("交易可行", 0) + cut_burst
+        if cut - cut_burst > 0:
+            cut_pattern = min(cut - cut_burst, max(0, out.get("型態突破", 0) - 3))
+            out["型態突破"] = out.get("型態突破", 0) - cut_pattern
+            out["技術結構"] = out.get("技術結構", 0) + cut_pattern
+
     return _normalize_int_weight_total(out, 100)
 
 
+
+
+def _safe_signed_pct_text_v69(v: Any) -> str:
+    x = _safe_float(v)
+    if x is None:
+        return "—"
+    return f"{x:+.2f}%"
+
+
+def _safe_signed_num_text_v69(v: Any) -> str:
+    x = _safe_float(v)
+    if x is None:
+        return "—"
+    return f"{x:+.2f}"
+
+
+def _overnight_effect_summary_v69(bridge: dict[str, Any]) -> dict[str, Any]:
+    """v69：把 01 大盤趨勢 v68 的隔夜國際盤欄位轉成推薦頁可用的微調與說明。
+    原則：只做小幅加減分與風險提示，不直接刪股票，避免漏掉台股本身剛起漲標的。
+    """
+    if not isinstance(bridge, dict):
+        bridge = {}
+    score = _safe_float(bridge.get("overnight_score"), None)
+    risk = _safe_str(bridge.get("overnight_risk_level")) or "未標示"
+    bias = _safe_str(bridge.get("overnight_bias")) or "未標示"
+    comment = _safe_str(bridge.get("overnight_comment"))
+    nasdaq = _safe_float(bridge.get("nasdaq_change_pct"), None)
+    sox = _safe_float(bridge.get("sox_change_pct"), None)
+    night_tx = _safe_float(bridge.get("night_futures_change"), None)
+    us_bias = _safe_str(bridge.get("us_futures_bias"))
+    fx_risk = _safe_str(bridge.get("fx_risk_level"))
+
+    delta = 0.0
+    if score is not None:
+        if score >= 75:
+            delta += 3.0
+        elif score >= 60:
+            delta += 1.5
+        elif score <= 25:
+            delta -= 4.0
+        elif score <= 40:
+            delta -= 2.0
+    if risk in ["高", "偏高", "high", "High"]:
+        delta -= 2.0
+    elif risk in ["低", "偏低", "low", "Low"]:
+        delta += 1.0
+    if nasdaq is not None and sox is not None:
+        if nasdaq >= 0.6 and sox >= 0.8:
+            delta += 1.5
+        elif nasdaq <= -0.8 and sox <= -1.0:
+            delta -= 2.0
+    if night_tx is not None:
+        if night_tx >= 80:
+            delta += 1.0
+        elif night_tx <= -80:
+            delta -= 1.5
+    delta = round(_score_clip(delta, -6, 5), 1)
+
+    if not comment:
+        parts = []
+        if score is not None:
+            parts.append(f"隔夜分數 {score:.1f}")
+        if bias and bias != "未標示":
+            parts.append(f"偏向 {bias}")
+        if risk and risk != "未標示":
+            parts.append(f"風險 {risk}")
+        if nasdaq is not None:
+            parts.append(f"NASDAQ {nasdaq:+.2f}%")
+        if sox is not None:
+            parts.append(f"費半 {sox:+.2f}%")
+        if night_tx is not None:
+            parts.append(f"台指夜盤 {night_tx:+.2f}")
+        if us_bias:
+            parts.append(f"美期 {us_bias}")
+        if fx_risk:
+            parts.append(f"匯率風險 {fx_risk}")
+        comment = "｜".join(parts) if parts else "隔夜資料不足，僅標示不扣死。"
+
+    return {
+        "score": score,
+        "risk": risk,
+        "bias": bias,
+        "comment": comment,
+        "delta": delta,
+        "nasdaq": nasdaq,
+        "sp500": _safe_float(bridge.get("sp500_change_pct"), None),
+        "dow": _safe_float(bridge.get("dow_change_pct"), None),
+        "sox": sox,
+        "night_tx": night_tx,
+        "nasdaq_futures": _safe_float(bridge.get("nasdaq_futures_change_pct"), None),
+        "sp500_futures": _safe_float(bridge.get("sp500_futures_change_pct"), None),
+        "us_bias": us_bias,
+        "fx_risk": fx_risk,
+        "quality": _safe_str(bridge.get("overnight_data_quality")),
+        "updated_at": _safe_str(bridge.get("overnight_updated_at")),
+    }
 
 def _market_effect_summary_v37(effect: Any) -> dict[str, Any]:
     """v37: normalize godpick_market_effect from 01 market trend v36."""
@@ -1760,6 +1905,17 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     with c9:
         st.metric("大盤影響", f"{effect_info.get('score_delta', 0):+.1f} 分")
 
+    overnight_info = _overnight_effect_summary_v69(bridge)
+    c10, c11, c12, c13 = st.columns([1.0, 1.0, 1.0, 2.0])
+    with c10:
+        st.metric("隔夜分數", "—" if overnight_info.get("score") is None else f"{overnight_info.get('score'):.1f}")
+    with c11:
+        st.metric("隔夜風險", overnight_info.get("risk") or "未標示")
+    with c12:
+        st.metric("隔夜加減", f"{overnight_info.get('delta', 0):+.1f} 分")
+    with c13:
+        st.metric("費半 / Nasdaq", f"{_safe_signed_pct_text_v69(overnight_info.get('sox'))} / {_safe_signed_pct_text_v69(overnight_info.get('nasdaq'))}")
+
     adjusted = _apply_macro_bridge_to_weights(applied_weights, bridge, enabled=enabled)
     if enabled:
         st.caption("已套用大盤橋接後權重：" + _weight_text(adjusted))
@@ -1772,6 +1928,9 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
         st.write(f"**交易時段：** {market_session_label}｜可用：{'是' if market_session_usable is True else '否' if market_session_usable is False else '未標示'}")
         st.write(f"**大盤影響：** {effect_info.get('score_delta', 0):+.1f} 分｜{effect_info.get('summary')}")
         st.write(f"**資料診斷：** {diagnostics_summary}")
+        st.write(f"**隔夜風控：** {overnight_info.get('risk') or '未標示'}｜{overnight_info.get('bias') or '未標示'}｜加減 {overnight_info.get('delta', 0):+.1f} 分")
+        st.write(f"**隔夜解讀：** {overnight_info.get('comment') or '—'}")
+        st.write(f"**美盤重點：** Nasdaq {_safe_signed_pct_text_v69(overnight_info.get('nasdaq'))}｜S&P500 {_safe_signed_pct_text_v69(overnight_info.get('sp500'))}｜費半 {_safe_signed_pct_text_v69(overnight_info.get('sox'))}｜台指夜盤 {_safe_signed_num_text_v69(overnight_info.get('night_tx'))}")
         st.write(f"**資料日期：** {_safe_str(bridge.get('market_date')) or '—'}")
         st.write(f"**部位建議：** {position_hint or '—'}")
         st.write(f"**大盤解讀：** {_safe_str(bridge.get('trend_comment')) or _safe_str(bridge.get('market_bias')) or '—'}")
@@ -1809,6 +1968,18 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         x["大盤影響加減分"] = ""
         x["大盤影響說明"] = ""
         x["大盤資料診斷摘要"] = ""
+        x["隔夜風控分數"] = ""
+        x["隔夜風險等級"] = ""
+        x["隔夜偏向"] = ""
+        x["隔夜解讀"] = ""
+        x["台指夜盤漲跌"] = ""
+        x["NASDAQ漲跌%"] = ""
+        x["S&P500漲跌%"] = ""
+        x["道瓊漲跌%"] = ""
+        x["費半漲跌%"] = ""
+        x["Nasdaq期貨偏向"] = ""
+        x["S&P期貨偏向"] = ""
+        x["匯率風險等級"] = ""
         return x
 
     score = _safe_float(bridge.get("market_score"), 50)
@@ -1822,6 +1993,7 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     data_quality = _safe_str(bridge.get("data_quality"))
     effect_info = _market_effect_summary_v37(bridge.get("godpick_market_effect"))
     diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
+    overnight_info = _overnight_effect_summary_v69(bridge)
 
     x["大盤橋接分數"] = score
     x["大盤橋接狀態"] = state
@@ -1835,6 +2007,18 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     x["大盤影響加減分"] = effect_info.get("score_delta", 0)
     x["大盤影響說明"] = effect_info.get("summary")
     x["大盤資料診斷摘要"] = diagnostics_summary
+    x["隔夜風控分數"] = overnight_info.get("score")
+    x["隔夜風險等級"] = overnight_info.get("risk")
+    x["隔夜偏向"] = overnight_info.get("bias")
+    x["隔夜解讀"] = overnight_info.get("comment")
+    x["台指夜盤漲跌"] = overnight_info.get("night_tx")
+    x["NASDAQ漲跌%"] = overnight_info.get("nasdaq")
+    x["S&P500漲跌%"] = overnight_info.get("sp500")
+    x["道瓊漲跌%"] = overnight_info.get("dow")
+    x["費半漲跌%"] = overnight_info.get("sox")
+    x["Nasdaq期貨偏向"] = overnight_info.get("us_bias") or _safe_signed_pct_text_v69(overnight_info.get("nasdaq_futures"))
+    x["S&P期貨偏向"] = overnight_info.get("us_bias") or _safe_signed_pct_text_v69(overnight_info.get("sp500_futures"))
+    x["匯率風險等級"] = overnight_info.get("fx_risk")
 
     # 同步到原本大盤欄位，讓舊頁面/紀錄頁也可讀。
     if "大盤可參考分數" in x.columns:
@@ -3913,6 +4097,18 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
                 "大盤資料品質": _safe_str(r.get("大盤資料品質")),
                 "大盤影響加減分": _safe_float(r.get("大盤影響加減分")),
                 "大盤影響說明": _safe_str(r.get("大盤影響說明")),
+                "隔夜風控分數": _safe_float(r.get("隔夜風控分數")),
+                "隔夜風險等級": _safe_str(r.get("隔夜風險等級")),
+                "隔夜偏向": _safe_str(r.get("隔夜偏向")),
+                "隔夜解讀": _safe_str(r.get("隔夜解讀")),
+                "台指夜盤漲跌": _safe_float(r.get("台指夜盤漲跌")),
+                "NASDAQ漲跌%": _safe_float(r.get("NASDAQ漲跌%")),
+                "S&P500漲跌%": _safe_float(r.get("S&P500漲跌%")),
+                "道瓊漲跌%": _safe_float(r.get("道瓊漲跌%")),
+                "費半漲跌%": _safe_float(r.get("費半漲跌%")),
+                "Nasdaq期貨偏向": _safe_str(r.get("Nasdaq期貨偏向")),
+                "S&P期貨偏向": _safe_str(r.get("S&P期貨偏向")),
+                "匯率風險等級": _safe_str(r.get("匯率風險等級")),
                 "大盤資料診斷摘要": _safe_str(r.get("大盤資料診斷摘要")),
                 "風險說明": _safe_str(r.get("風險說明")),
                 "股神推論邏輯": _safe_str(r.get("股神推論邏輯")),
