@@ -4435,10 +4435,119 @@ def _v68_build_overnight_factor(items: dict[str, Any] | None = None) -> dict[str
     return {"overnight_score": score, "overnight_risk_level": risk_level, "overnight_bias": bias, "overnight_data_quality": f"{ok_count}/9", "overnight_ok_count": ok_count, "night_futures_change_pct": tw_night, "nasdaq_change_pct": nasdaq, "sp500_change_pct": sp500, "dow_change_pct": dow, "sox_change_pct": sox, "nasdaq_futures_change_pct": nqf, "sp500_futures_change_pct": esf, "dxy_change_pct": dxy, "usdtwd_change_pct": usdtwd, "semiconductor_overnight_bias": semiconductor_bias, "fx_risk_level": fx_risk, "overnight_comment": comment}
 
 
+
+# =========================================================
+# v73：台指期夜盤參考修正
+# 說明：Yahoo 的 TXF=F 在部分環境會回 404，導致畫面顯示「台指期夜盤參考 資料不足」。
+# 這裡改成：先嘗試多個 Yahoo 候選代號；若仍失敗，改用 TAIFEX 期貨快取 / market_snapshot 期貨欄位作「夜盤參考備援」。
+# 注意：備援只做隔夜方向參考，不偽裝成真正夜盤成交資料。
+# =========================================================
+def _v73_recent_dict_from_json_file(path: Path | str) -> dict[str, Any]:
+    try:
+        p = Path(path)
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        dated = []
+        for k, v in data.items():
+            if isinstance(v, dict):
+                dated.append((str(k), v))
+        if dated:
+            dated.sort(key=lambda x: x[0], reverse=True)
+            return dict(dated[0][1])
+        return data
+    except Exception:
+        return {}
+
+
+def _v73_taifex_cache_to_overnight_item() -> dict[str, Any]:
+    """把既有 TAIFEX / market_snapshot 期貨資料轉成隔夜風控可讀格式。"""
+    row = _v73_recent_dict_from_json_file(TAIFEX_CACHE_FILE)
+    price = _v68_safe_float(row.get("tx_close") or row.get("futures_index") or row.get("close"))
+    change = _v68_safe_float(row.get("tx_change") or row.get("futures_change") or row.get("change"))
+    pct = _v68_safe_float(row.get("tx_pct") or row.get("futures_change_pct") or row.get("change_pct"))
+    data_date = _safe_str(row.get("date") or row.get("data_date") or row.get("資料日期"))
+    src = _safe_str(row.get("source")) or "TAIFEX 期貨快取"
+
+    if price is None:
+        for fp in [Path(MARKET_SNAPSHOT_FILE), Path(MACRO_MODE_BRIDGE_FILE)]:
+            snap = _v68_read_json(fp, {})
+            if isinstance(snap, dict):
+                price = _v68_safe_float(snap.get("futures_index"))
+                change = _v68_safe_float(snap.get("futures_change"))
+                pct = _v68_safe_float(snap.get("futures_change_pct"))
+                data_date = _safe_str(snap.get("futures_data_date") or snap.get("data_date") or snap.get("updated_at"))
+                src = f"{fp.name} 期貨欄位備援"
+                if price is not None:
+                    break
+
+    if pct is None and price not in (None, 0) and change is not None:
+        prev = price - change
+        if prev not in (None, 0):
+            pct = change / prev * 100
+
+    if price is not None:
+        return {
+            "label": "台指期夜盤參考",
+            "symbol": "TAIFEX_CACHE",
+            "ok": True,
+            "price": price,
+            "previous_close": (price - change) if change is not None else None,
+            "change": change,
+            "change_pct": pct,
+            "data_date": data_date,
+            "source": f"{src}｜夜盤參考備援",
+            "elapsed_sec": 0.0,
+            "error": "",
+            "note": "Yahoo 台指夜盤代號不可用時，使用既有 TAIFEX / 大盤快照期貨資料作隔夜方向參考；非即時夜盤成交資料。",
+        }
+
+    return {
+        "label": "台指期夜盤參考",
+        "symbol": "TAIFEX_CACHE",
+        "ok": False,
+        "price": None,
+        "previous_close": None,
+        "change": None,
+        "change_pct": None,
+        "data_date": "",
+        "source": "TAIFEX / market_snapshot 備援",
+        "elapsed_sec": 0.0,
+        "error": "Yahoo 台指夜盤候選代號與 TAIFEX 快取皆無可用資料",
+    }
+
+
+def _v73_fetch_tw_night_future_reference() -> dict[str, Any]:
+    """台指期夜盤參考：避免 TXF=F 404 直接造成畫面紅字。"""
+    yahoo_candidates = [
+        ("TXF=F", "台指期夜盤參考"),
+        ("TX=F", "台指期夜盤參考"),
+    ]
+    errors = []
+    for symbol, label in yahoo_candidates:
+        row = _v68_fetch_yahoo_chart(symbol, label)
+        if row.get("ok"):
+            row["label"] = "台指期夜盤參考"
+            row["source"] = f"Yahoo chart API｜{symbol}"
+            return row
+        errors.append(f"{symbol}:{row.get('error')}")
+
+    fallback = _v73_taifex_cache_to_overnight_item()
+    if fallback.get("ok"):
+        fallback["fallback_errors"] = errors[-5:]
+        return fallback
+    fallback["error"] = "；".join(errors[-5:] + [_safe_str(fallback.get("error"))])
+    return fallback
+
+
 def _v68_fetch_overnight_global_market() -> dict[str, Any]:
-    tickers = {"tw_night_future": ("TXF=F", "台指期夜盤參考"), "nasdaq": ("^IXIC", "NASDAQ"), "sp500": ("^GSPC", "S&P 500"), "dow": ("^DJI", "道瓊"), "sox": ("^SOX", "費半"), "nasdaq_future": ("NQ=F", "Nasdaq Futures"), "sp500_future": ("ES=F", "S&P Futures"), "dow_future": ("YM=F", "Dow Futures"), "dxy": ("DX-Y.NYB", "美元指數 DXY"), "usdtwd": ("USDTWD=X", "美元/台幣")}
+    # v73：台指期夜盤參考改用多候選 + TAIFEX 快取備援，避免 TXF=F 404 造成畫面誤判資料不足。
+    tickers = {"nasdaq": ("^IXIC", "NASDAQ"), "sp500": ("^GSPC", "S&P 500"), "dow": ("^DJI", "道瓊"), "sox": ("^SOX", "費半"), "nasdaq_future": ("NQ=F", "Nasdaq Futures"), "sp500_future": ("ES=F", "S&P Futures"), "dow_future": ("YM=F", "Dow Futures"), "dxy": ("DX-Y.NYB", "美元指數 DXY"), "usdtwd": ("USDTWD=X", "美元/台幣")}
     rows = {key: _v68_fetch_yahoo_chart(symbol, label) for key, (symbol, label) in tickers.items()}
-    return {"version": "v68_overnight_global_market", "updated_at": _v68_now_str(), "source_mode": "background_cache", "items": rows, "overnight_factor": _v68_build_overnight_factor(rows)}
+    rows["tw_night_future"] = _v73_fetch_tw_night_future_reference()
+    return {"version": "v73_overnight_global_market_taifex_fallback", "updated_at": _v68_now_str(), "source_mode": "background_cache", "items": rows, "overnight_factor": _v68_build_overnight_factor(rows)}
 
 
 def _v68_start_overnight_background_update():
@@ -4763,7 +4872,7 @@ def _v70_render_completion_notice(status: dict[str, Any] | None = None):
 
 
 def _v70_render_one_click_control(target_date: date):
-    st.markdown("### v70 一鍵更新 / 一鍵寫入總控")
+    st.markdown("### v73 一鍵更新 / 一鍵寫入總控")
     st.caption("一次更新 01 大盤趨勢所需資料：加權、櫃買、法人、外盤、美盤、期貨、隔夜國際盤，並立即寫入股神橋接檔。")
     c1, c2 = st.columns([1.4, 3.6])
     with c1:
