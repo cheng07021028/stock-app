@@ -260,44 +260,32 @@
     {
       "code": "2374",
       "name": "佳能",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "2449",
       "name": "京元電子",
-      "market": "上市",
-      "category": "封測"
+      "market": "上市"
     },
     {
       "code": "3707",
       "name": "漢磊",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "3711",
       "name": "日月光投控",
-      "market": "上市",
-      "category": "封測"
+      "market": "上市"
     },
     {
       "code": "4951",
       "name": "精拓科",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "4967",
       "name": "十銓",
-      "market": "上市",
-      "category": "記憶體"
-    },
-    {
-      "code": "8162",
-      "name": "微矽電子-創",
-      "market": "上市",
-      "category": "其他電子"
+      "market": "上市"
     }
   ]
 }
