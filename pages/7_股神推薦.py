@@ -8029,6 +8029,30 @@ def _column_order_state_key(name: str) -> str:
     return _k(f"column_order_{name}")
 
 
+def _column_order_fingerprint(cols: list[str]) -> str:
+    """v78：依欄位順序建立短指紋；用於重建 data_editor key，避免前端沿用舊欄位位置。"""
+    try:
+        raw = "|".join([str(c) for c in cols])
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()[:10]
+    except Exception:
+        return str(int(time.time()))
+
+
+def _clear_full_table_editor_widget_states():
+    """v78：清除完整推薦表所有舊版 / 動態 data_editor 狀態。
+    Streamlit data_editor 會保留前端欄位 layout；只清固定 key 不夠，必須清所有前綴。
+    """
+    prefixes = [
+        _k("full_table_editor"),
+        _k("full_table_editor_"),
+        _k("full_table_editor_code_map"),
+        _k("full_table_editor_code_map_"),
+    ]
+    for key in list(st.session_state.keys()):
+        if any(str(key).startswith(pfx) for pfx in prefixes):
+            st.session_state.pop(key, None)
+
+
 def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
     state_key = _column_order_state_key(name)
     applied_key = _k(f"column_order_applied_{name}")
@@ -8051,7 +8075,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 
     with st.expander(title, expanded=False):
         fixed_msg = "；固定欄位：" + "、".join(fixed_cols) if fixed_cols else ""
-        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定" + fixed_msg + "。")
+        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定" + fixed_msg + "。v78：表格會依套用順序強制重建，請用上方按鈕調整欄位，不要只拖曳表格欄位。")
         if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
             st.session_state[pick_key] = draft_order[0] if draft_order else ""
         picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
@@ -8106,15 +8130,12 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
             st.session_state[draft_key] = applied_order
             ok, msgs = _save_persistent_column_order(name, applied_order)
 
-            # v72：清掉 data_editor 舊狀態，下一輪強制按新欄位順序重建。
-            for key in [
-                _k("full_table_editor"),
-                _k("full_table_editor_code_map"),
-                _k("full_table_selected_codes"),
-            ]:
-                st.session_state.pop(key, None)
+            # v78：清掉所有完整推薦表 data_editor 舊狀態，並提高 layout 版本。
+            if name == "full_table":
+                _clear_full_table_editor_widget_states()
+                st.session_state[_k("full_table_layout_version")] = _column_order_fingerprint(fixed_cols + applied_order)
 
-            st.success("欄位順序已套用並永久記錄。" if ok else "欄位順序已套用，但永久記錄失敗。")
+            st.success("欄位順序已套用並永久記錄，完整推薦表將依新順序重建。" if ok else "欄位順序已套用，但永久記錄失敗。")
             with st.expander("欄位設定保存明細", expanded=False):
                 for msg in msgs:
                     st.write(f"- {msg}")
@@ -9163,6 +9184,9 @@ def main():
         full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
         full_show_cols = [c for c in full_order if c in rec_df.columns]
 
+        # v78：確保完整推薦表的 DataFrame 實體欄位順序完全依 full_show_cols 建立。
+        # 注意：直接在表格前端拖曳欄位不會寫回 Python；需使用上方欄位順序設定後按「套用」。
+
         # v25.6：完整推薦表直接勾選，並可匯入 05_自選股中心 / 09_股神推薦紀錄。
         full_selected_codes_prev = {
             _normalize_code(x)
@@ -9175,12 +9199,15 @@ def main():
             full_work_df.insert(0, "勾選", False)
         full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)
 
-        # v44：完整推薦表也使用 callback 先保存勾選狀態，避免 data_editor rerun 後跳回未勾選。
-        full_editor_key = _k("full_table_editor")
-        full_editor_code_map_key = _k("full_table_editor_code_map")
+        # v78：完整推薦表 key 依欄位順序指紋重建。
+        # 原因：Streamlit data_editor 會保留前端 column layout；若 key 固定，即使 Python 欄位順序改了，畫面仍可能沿用舊位置。
+        full_order_hash = _column_order_fingerprint(list(full_work_df.columns))
+        full_editor_key = _k(f"full_table_editor_{full_order_hash}")
+        full_editor_code_map_key = _k(f"full_table_editor_code_map_{full_order_hash}")
         st.session_state[full_editor_code_map_key] = [
             _normalize_code(x) for x in full_work_df["股票代號"].astype(str).tolist()
         ]
+        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜若欄位順序剛套用，表格會自動重建。")
 
         full_editor_df = st.data_editor(
             _format_df(full_work_df),
@@ -9201,7 +9228,7 @@ def main():
 
         # v25.8：同時讀取 data_editor 回傳值與 widget edited_rows，避免勾選要點兩次才生效。
         full_picked_codes = _extract_checked_codes_from_editor_state(
-            _k("full_table_editor"),
+            full_editor_key,
             full_editor_df,
             _k("full_table_selected_codes"),
         )
