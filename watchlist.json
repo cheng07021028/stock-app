@@ -6,11 +6,6 @@
       "market": "上市"
     },
     {
-      "code": "1533",
-      "name": "車王電",
-      "market": "上市"
-    },
-    {
       "code": "2330",
       "name": "台積電",
       "market": "上市"
@@ -295,38 +290,32 @@
     {
       "code": "2374",
       "name": "佳能",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "3605",
       "name": "宏致",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "5864",
       "name": "致和證",
-      "market": "上櫃",
-      "category": "金融保險"
+      "market": "上櫃"
     },
     {
       "code": "6016",
       "name": "康和證",
-      "market": "上櫃",
-      "category": "金融保險"
+      "market": "上櫃"
     },
     {
       "code": "6234",
       "name": "高僑",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "6412",
       "name": "群電",
-      "market": "上市",
-      "category": "電源供應"
+      "market": "上市"
     }
   ]
 }
