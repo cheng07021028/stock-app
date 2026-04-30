@@ -4257,13 +4257,283 @@ def _v45_render_macro_full_mode_panel(row: dict[str, Any]):
         st.caption("Google News 事件因子已恢復為安全快取模式：不在主畫面連外等待，避免卡頁；無資料時以中性處理。")
     with st.expander("v45 完整模式 / 事件因子 JSON", expanded=False):
         st.json({"macro_mode_estimate": model, "event_factor": event})
+
+# =========================================================
+# v68：隔夜國際盤 / 美盤 / 美國夜盤風控
+# 目的：提供 07 股神推薦隔夜風險參考，但不讓推薦頁連外、不卡住。
+# 說明：本區塊採背景更新與本機快取。若資料不足，採中性 data_guard，不偽造行情。
+# =========================================================
+OVERNIGHT_CACHE_FILE = Path("overnight_global_market_cache.json")
+OVERNIGHT_BG_JOB = "overnight_global_bg"
+
+
+def _v68_safe_float(v: Any, default: float | None = None) -> float | None:
+    try:
+        if v is None:
+            return default
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("%", "").replace("+", "").strip()
+            if v in {"", "-", "—", "None", "null"}:
+                return default
+        x = float(v)
+        if pd.isna(x):
+            return default
+        return x
+    except Exception:
+        return default
+
+
+def _v68_now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _v68_read_json(path: Path, default: Any):
+    try:
+        if not path.exists():
+            return default
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if data is not None else default
+    except Exception:
+        return default
+
+
+def _v68_write_json(path: Path, data: Any) -> tuple[bool, str]:
+    try:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        tmp.replace(path)
+        return True, str(path)
+    except Exception as e:
+        return False, str(e)
+
+
+def _v68_pct_to_score(pct: float | None, weight: float, inverse: bool = False) -> float:
+    """把漲跌幅轉為 0~weight 分；inverse=True 用於 DXY / 匯率風險，漲太多反而扣分。"""
+    if pct is None:
+        return weight * 0.50
+    x = -pct if inverse else pct
+    if x >= 1.2:
+        return weight
+    if x >= 0.6:
+        return weight * 0.82
+    if x >= 0.2:
+        return weight * 0.65
+    if x >= -0.2:
+        return weight * 0.52
+    if x >= -0.6:
+        return weight * 0.35
+    if x >= -1.2:
+        return weight * 0.18
+    return 0.0
+
+
+def _v68_fetch_yahoo_chart(symbol: str, label: str) -> dict[str, Any]:
+    """Yahoo chart 輕量抓取。失敗回傳 ok=False，不丟例外。"""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {"range": "5d", "interval": "1d"}
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/plain,*/*"}
+    t0 = time.perf_counter()
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=6, verify=False)
+        if r.status_code != 200:
+            return {"label": label, "symbol": symbol, "ok": False, "error": f"HTTP {r.status_code}"}
+        payload = r.json()
+        result = (((payload or {}).get("chart") or {}).get("result") or [None])[0]
+        if not isinstance(result, dict):
+            return {"label": label, "symbol": symbol, "ok": False, "error": "empty result"}
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+        quote = (((result.get("indicators") or {}).get("quote") or [None])[0]) or {}
+        closes = quote.get("close") if isinstance(quote.get("close"), list) else []
+        timestamps = result.get("timestamp") if isinstance(result.get("timestamp"), list) else []
+        valid = [(i, _v68_safe_float(c)) for i, c in enumerate(closes) if _v68_safe_float(c) is not None]
+        if not valid:
+            price = _v68_safe_float(meta.get("regularMarketPrice"))
+            prev = _v68_safe_float(meta.get("previousClose"))
+            idx = None
+        else:
+            idx, price = valid[-1]
+            prev = valid[-2][1] if len(valid) >= 2 else _v68_safe_float(meta.get("previousClose"))
+        change = None if price is None or prev in (None, 0) else price - prev
+        pct = None if change is None or prev in (None, 0) else change / prev * 100
+        data_date = ""
+        try:
+            if timestamps and idx is not None:
+                data_date = datetime.fromtimestamp(timestamps[idx]).strftime("%Y-%m-%d")
+        except Exception:
+            data_date = ""
+        return {"label": label, "symbol": symbol, "ok": price is not None, "price": price, "previous_close": prev, "change": change, "change_pct": pct, "data_date": data_date, "source": "Yahoo chart API", "elapsed_sec": round(time.perf_counter() - t0, 3), "error": "" if price is not None else "no price"}
+    except Exception as e:
+        return {"label": label, "symbol": symbol, "ok": False, "source": "Yahoo chart API", "elapsed_sec": round(time.perf_counter() - t0, 3), "error": str(e)[:220]}
+
+
+def _v68_build_overnight_factor(items: dict[str, Any] | None = None) -> dict[str, Any]:
+    if items is None:
+        cache = _v68_read_json(OVERNIGHT_CACHE_FILE, {})
+        items = cache.get("items") if isinstance(cache.get("items"), dict) else {}
+    if not isinstance(items, dict):
+        items = {}
+
+    def pct(key: str) -> float | None:
+        item = items.get(key) if isinstance(items.get(key), dict) else {}
+        return _v68_safe_float(item.get("change_pct")) if item.get("ok") else None
+
+    tw_night = pct("tw_night_future")
+    nasdaq = pct("nasdaq")
+    sp500 = pct("sp500")
+    dow = pct("dow")
+    sox = pct("sox")
+    nqf = pct("nasdaq_future")
+    esf = pct("sp500_future")
+    dxy = pct("dxy")
+    usdtwd = pct("usdtwd")
+
+    score = 0.0
+    score += _v68_pct_to_score(tw_night, 24)
+    score += _v68_pct_to_score(nasdaq, 14)
+    score += _v68_pct_to_score(sox, 18)
+    score += _v68_pct_to_score(sp500, 10)
+    score += _v68_pct_to_score(dow, 6)
+    score += _v68_pct_to_score(nqf, 12)
+    score += _v68_pct_to_score(esf, 6)
+    score += _v68_pct_to_score(dxy, 5, inverse=True)
+    score += _v68_pct_to_score(usdtwd, 5, inverse=True)
+    score = round(max(0, min(100, score)), 1)
+    ok_count = sum(1 for k in ["tw_night_future", "nasdaq", "sp500", "dow", "sox", "nasdaq_future", "sp500_future", "dxy", "usdtwd"] if isinstance(items.get(k), dict) and items[k].get("ok"))
+
+    if ok_count == 0:
+        risk_level, bias = "資料不足", "data_guard"
+        comment = "隔夜國際盤資料尚未建立；不扣死推薦分數，請先背景更新隔夜資料。"
+    elif score >= 72:
+        risk_level, bias = "低", "偏多"
+        comment = "台指夜盤 / 美股 / 費半結構偏多，有利電子與半導體族群，但仍需防追高。"
+    elif score >= 58:
+        risk_level, bias = "中低", "中性偏多"
+        comment = "隔夜國際盤偏穩，可保留強勢與剛起漲股票。"
+    elif score >= 43:
+        risk_level, bias = "中", "震盪"
+        comment = "隔夜國際盤分歧，推薦應偏重個股結構與量價確認。"
+    elif score >= 30:
+        risk_level, bias = "中高", "偏空"
+        comment = "隔夜國際盤轉弱，降低追高，保留低位階轉強股。"
+    else:
+        risk_level, bias = "高", "高風險"
+        comment = "隔夜國際盤明顯偏弱，隔日開盤風險升高，建議嚴控追價與部位。"
+
+    semiconductor_bias = "中性"
+    if sox is not None and nasdaq is not None:
+        if sox >= 0.8 and nasdaq >= 0.4:
+            semiconductor_bias = "半導體/AI 偏多"
+        elif sox <= -0.8 and nasdaq <= -0.4:
+            semiconductor_bias = "半導體/AI 風險升高"
+    fx_risk = "中性"
+    if dxy is not None and dxy >= 0.5:
+        fx_risk = "美元轉強風險"
+    if usdtwd is not None and usdtwd >= 0.5:
+        fx_risk = "台幣貶值/外資風險"
+    return {"overnight_score": score, "overnight_risk_level": risk_level, "overnight_bias": bias, "overnight_data_quality": f"{ok_count}/9", "overnight_ok_count": ok_count, "night_futures_change_pct": tw_night, "nasdaq_change_pct": nasdaq, "sp500_change_pct": sp500, "dow_change_pct": dow, "sox_change_pct": sox, "nasdaq_futures_change_pct": nqf, "sp500_futures_change_pct": esf, "dxy_change_pct": dxy, "usdtwd_change_pct": usdtwd, "semiconductor_overnight_bias": semiconductor_bias, "fx_risk_level": fx_risk, "overnight_comment": comment}
+
+
+def _v68_fetch_overnight_global_market() -> dict[str, Any]:
+    tickers = {"tw_night_future": ("TXF=F", "台指期夜盤參考"), "nasdaq": ("^IXIC", "NASDAQ"), "sp500": ("^GSPC", "S&P 500"), "dow": ("^DJI", "道瓊"), "sox": ("^SOX", "費半"), "nasdaq_future": ("NQ=F", "Nasdaq Futures"), "sp500_future": ("ES=F", "S&P Futures"), "dow_future": ("YM=F", "Dow Futures"), "dxy": ("DX-Y.NYB", "美元指數 DXY"), "usdtwd": ("USDTWD=X", "美元/台幣")}
+    rows = {key: _v68_fetch_yahoo_chart(symbol, label) for key, (symbol, label) in tickers.items()}
+    return {"version": "v68_overnight_global_market", "updated_at": _v68_now_str(), "source_mode": "background_cache", "items": rows, "overnight_factor": _v68_build_overnight_factor(rows)}
+
+
+def _v68_start_overnight_background_update():
+    def _worker():
+        try:
+            if "_set_job_status" in globals():
+                _set_job_status(OVERNIGHT_BG_JOB, "running", "隔夜國際盤背景更新中")
+            payload = _v68_fetch_overnight_global_market()
+            ok, msg = _v68_write_json(OVERNIGHT_CACHE_FILE, payload)
+            if "_set_job_status" in globals():
+                _set_job_status(OVERNIGHT_BG_JOB, "finished" if ok else "error", f"隔夜國際盤更新完成：{msg}")
+        except Exception as e:
+            if "_set_job_status" in globals():
+                _set_job_status(OVERNIGHT_BG_JOB, "error", f"隔夜國際盤更新失敗：{e}")
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _v68_get_overnight_payload() -> dict[str, Any]:
+    data = _v68_read_json(OVERNIGHT_CACHE_FILE, {})
+    if not isinstance(data, dict) or not data:
+        return {"version": "v68_overnight_global_market", "updated_at": "", "source_mode": "no_cache", "items": {}, "overnight_factor": _v68_build_overnight_factor({})}
+    data["overnight_factor"] = data.get("overnight_factor") if isinstance(data.get("overnight_factor"), dict) else _v68_build_overnight_factor(data.get("items", {}))
+    return data
+
+
+def _v68_render_overnight_risk_panel(row: dict[str, Any]):
+    st.markdown("### v68 隔夜國際盤風控｜夜盤 / 美盤 / 美國期貨")
+    payload = _v68_get_overnight_payload()
+    factor = payload.get("overnight_factor") if isinstance(payload.get("overnight_factor"), dict) else {}
+    items = payload.get("items") if isinstance(payload.get("items"), dict) else {}
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("隔夜分數", f"{_v68_safe_float(factor.get('overnight_score'), 50):.1f}")
+    with c2:
+        st.metric("隔夜風險", _safe_str(factor.get("overnight_risk_level")) or "資料不足")
+    with c3:
+        st.metric("隔夜偏向", _safe_str(factor.get("overnight_bias")) or "data_guard")
+    with c4:
+        st.metric("資料品質", _safe_str(factor.get("overnight_data_quality")) or "0/9")
+    with c5:
+        st.metric("費半/Nasdaq", _safe_str(factor.get("semiconductor_overnight_bias")) or "中性")
+    st.info(_safe_str(factor.get("overnight_comment")) or "隔夜國際盤採背景快取；資料不足時不直接扣死推薦分數。")
+    b1, b2, b3 = st.columns([1.2, 1.2, 4])
+    with b1:
+        if st.button("背景更新隔夜國際盤", use_container_width=True, key=_k("v68_bg_update_overnight")):
+            _v68_start_overnight_background_update()
+            st.success("已啟動背景更新，頁面不會等待。稍後重新整理或再進入本頁查看。")
+    with b2:
+        if st.button("寫入隔夜風控快照", use_container_width=True, key=_k("v68_write_snapshot")):
+            ok, msg = _write_market_snapshot_v30(row)
+            if ok:
+                st.success(f"已同步寫入 market_snapshot / bridge：{msg}")
+            else:
+                st.warning(msg)
+    with b3:
+        st.caption(f"快取更新時間：{_safe_str(payload.get('updated_at')) or '尚未建立'}｜來源：Yahoo chart API / 本機快取；07 股神推薦只讀 market_snapshot，不連外。")
+    rows = []
+    for key, label in [("tw_night_future", "台指期夜盤參考"), ("nasdaq", "NASDAQ"), ("sp500", "S&P 500"), ("dow", "道瓊"), ("sox", "費半"), ("nasdaq_future", "Nasdaq Futures"), ("sp500_future", "S&P Futures"), ("dxy", "美元指數 DXY"), ("usdtwd", "美元/台幣")]:
+        it = items.get(key) if isinstance(items.get(key), dict) else {}
+        rows.append({"項目": label, "狀態": "OK" if it.get("ok") else "資料不足", "價格/指數": _v68_safe_float(it.get("price")), "漲跌點": _v68_safe_float(it.get("change")), "漲跌幅%": _v68_safe_float(it.get("change_pct")), "資料日期": _safe_str(it.get("data_date")), "來源": _safe_str(it.get("source")), "錯誤": _safe_str(it.get("error"))})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    with st.expander("v68 隔夜國際盤 JSON / 股神串接欄位", expanded=False):
+        st.json({"overnight_factor": factor, "items": items, "snapshot_keys": ["overnight_score", "overnight_risk_level", "overnight_bias", "night_futures_change_pct", "nasdaq_change_pct", "sox_change_pct", "us_futures_bias", "fx_risk_level", "overnight_comment"]})
+
+
+_v45_build_market_snapshot_before_v68 = _build_market_snapshot_v30
+
+
+def _build_market_snapshot_v30(row: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _v45_build_market_snapshot_before_v68(row)
+    try:
+        overnight_payload = _v68_get_overnight_payload()
+        factor = overnight_payload.get("overnight_factor") if isinstance(overnight_payload.get("overnight_factor"), dict) else {}
+        snapshot["overnight_factor"] = factor
+        snapshot["overnight_cache_updated_at"] = overnight_payload.get("updated_at", "")
+        for k in ["overnight_score", "overnight_risk_level", "overnight_bias", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "dow_change_pct", "sox_change_pct", "dxy_change_pct", "usdtwd_change_pct", "fx_risk_level", "overnight_comment"]:
+            snapshot[k] = factor.get(k)
+        snapshot["us_futures_bias"] = factor.get("overnight_bias")
+        snapshot["overnight_version"] = "v68_overnight_global_market"
+        req = snapshot.get("required_by_godpick") if isinstance(snapshot.get("required_by_godpick"), dict) else {}
+        req.update({"overnight_score": factor.get("overnight_score"), "overnight_risk_level": factor.get("overnight_risk_level"), "overnight_bias": factor.get("overnight_bias"), "night_futures_change_pct": factor.get("night_futures_change_pct"), "nasdaq_change_pct": factor.get("nasdaq_change_pct"), "sox_change_pct": factor.get("sox_change_pct"), "fx_risk_level": factor.get("fx_risk_level"), "overnight_comment": factor.get("overnight_comment")})
+        snapshot["required_by_godpick"] = req
+        snapshot["version"] = "v68_overnight_global_market_bridge"
+    except Exception as e:
+        snapshot["v68_warning"] = str(e)
+    return snapshot
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
 
     render_pro_hero(
-        title="01 大盤趨勢｜v45完整大盤模式版",
-        subtitle="加權、櫃買、期貨、外盤與法人採背景更新；輸出 market_snapshot.json / macro_mode_bridge.json 給股神推薦。",
+        title="01 大盤趨勢｜v68隔夜國際盤風控版",
+        subtitle="加權、櫃買、期貨、外盤、法人、夜盤、美盤與美國期貨採背景/快取；輸出 market_snapshot.json 給股神推薦。",
     )
 
     st.info("v45.0：補齊大盤功能管理中心，Google News 事件因子改為安全快取模式，完整大盤模式預估已恢復；仍維持背景更新不卡頁。")
@@ -4381,6 +4651,7 @@ def main():
     _render_otc_block(target_date)
     _render_institutional_block(target_date)
     _render_us_market_block(target_date)
+    _v68_render_overnight_risk_panel(row)
     _render_taifex_block(target_date)
     _render_market_cache_chart()
     _render_market_snapshot_block(row)
@@ -4404,7 +4675,7 @@ def main():
             disabled=_cache_to_market_df().empty,
         )
     with dl_cols[1]:
-        st.caption("v45：大盤、櫃買、期貨、交易時段、資料診斷、事件因子與完整大盤模式會寫入股神推薦風控檔。")
+        st.caption("v68：大盤、櫃買、期貨、交易時段、資料診斷、事件因子、完整大盤模式與隔夜國際盤風控會寫入股神推薦風控檔。")
 
     st.markdown("### 大盤操作參考")
     ref_cols = st.columns(4)
