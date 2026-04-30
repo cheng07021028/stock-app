@@ -430,7 +430,7 @@ st.subheader('9. v54 全系統串聯驗證與欄位修復')
 st.caption('檢查 0_大盤趨勢、7_股神推薦、8_股神推薦紀錄、10_推薦清單、首頁 / 儀表板之間的 JSON 串聯。此區塊只讀本機檔案，不重新抓網路資料；v54 可補齊舊推薦紀錄缺少的大盤欄位。')
 
 try:
-    from system_integration_health import run_full_integration_check, ensure_missing_json_files, repair_recommendation_market_fields, repair_v54_missing_fields, backup_json_files, initialize_v55_runtime_diagnostics
+    from system_integration_health import run_full_integration_check, ensure_missing_json_files, repair_recommendation_market_fields, repair_v54_missing_fields, backup_json_files, initialize_v55_runtime_diagnostics, repair_empty_market_bridge_files
     _v41_report = run_full_integration_check(BASE_DIR)
     _v41_summary = _v41_report.get('summary', {})
 
@@ -500,6 +500,19 @@ try:
         st.success('已完成缺檔建立檢查；請重新整理本頁再次驗證。')
 
 
+    st.markdown('##### v58 大盤空快照修復')
+    st.caption('用途：修正 market_snapshot.json / macro_mode_bridge.json 顯示 dict / 0 keys 的狀況。此工具會優先從 macro_trend_records.json 最後一筆有效大盤紀錄恢復，不會偽造新的大盤行情。')
+    if st.button('v58 從大盤歷史紀錄恢復空的 market_snapshot / macro bridge', use_container_width=True):
+        _v58_repair = repair_empty_market_bridge_files(BASE_DIR)
+        if _v58_repair.get('ok'):
+            st.success(_v58_repair.get('message', '已完成'))
+        else:
+            st.error(_v58_repair.get('message', '修復失敗'))
+        st.dataframe(pd.DataFrame(_v58_repair.get('rows', [])), use_container_width=True, hide_index=True)
+        with st.expander('v58 恢復欄位', expanded=False):
+            st.json(_v58_repair.get('restored_snapshot_keys', []))
+        st.info('請重新整理本頁；若仍無法恢復，請到 0_大盤趨勢按立即寫入股神橋接 / market_snapshot。')
+
     st.markdown('##### v54 舊推薦資料大盤欄位補齊')
     st.caption('用途：修正畫面上「7 -> 8 / 10」出現缺欄位造成異常數增加。此功能只補缺少或空白欄位，不刪除任何推薦紀錄。')
     if st.button('v54 一鍵補齊舊推薦資料的大盤欄位', use_container_width=True, type='primary'):
@@ -545,3 +558,51 @@ try:
 except Exception as _v41_e:
     st.error(f'v54 全系統串聯驗證載入失敗：{_v41_e}')
     st.code(traceback.format_exc())
+
+
+# =========================================================
+# v71：01 大盤趨勢一鍵更新 / 一鍵寫入狀態檢查
+# =========================================================
+def _v71_read_json_file(path, default):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return default
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if data is not None else default
+    except Exception:
+        return default
+
+
+def _v71_render_macro_one_click_health():
+    st.markdown("### v71｜01 大盤趨勢一鍵更新 / 寫入狀態")
+    status = _v71_read_json_file("macro_v70_one_click_status.json", {})
+    snapshot = _v71_read_json_file("market_snapshot.json", {})
+    bridge = _v71_read_json_file("macro_mode_bridge.json", {})
+    rows = []
+    rows.append({"檢查項目": "一鍵狀態檔", "狀態": "OK" if isinstance(status, dict) and bool(status) else "缺少", "說明": status.get("finished_at", "尚未建立") if isinstance(status, dict) else ""})
+    rows.append({"檢查項目": "全部資料更新", "狀態": "OK" if status.get("all_required_updated") else "注意", "說明": str(status.get("failed_items", [])) if isinstance(status, dict) else ""})
+    rows.append({"檢查項目": "橋接檔完整寫入", "狀態": "OK" if status.get("all_required_written") else "注意", "說明": "market_snapshot / macro_bridge / trend_records"})
+    for k in ["overnight_score", "overnight_risk_level", "overnight_comment"]:
+        rows.append({"檢查項目": f"snapshot.{k}", "狀態": "OK" if isinstance(snapshot, dict) and k in snapshot else "缺少", "說明": snapshot.get(k) if isinstance(snapshot, dict) else ""})
+        rows.append({"檢查項目": f"bridge.{k}", "狀態": "OK" if isinstance(bridge, dict) and k in bridge else "缺少", "說明": bridge.get(k) if isinstance(bridge, dict) else ""})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if isinstance(status, dict) and status.get("all_required_updated") and status.get("all_required_written"):
+        st.success("v71：01 大盤趨勢已完成一鍵更新與完整寫入。")
+    else:
+        st.warning("v71：建議回 01 大盤趨勢按『一鍵更新全部並寫入』，再回本頁重新檢查。")
+    with st.expander("macro_v70_one_click_status.json 完整內容", expanded=False):
+        st.json(status)
+
+try:
+    _v71_old_main = main
+    def main():
+        _v71_old_main()
+        _v71_render_macro_one_click_health()
+except Exception:
+    pass
+
+
+if __name__ == "__main__":
+    main()
