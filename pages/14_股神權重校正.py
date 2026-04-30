@@ -17,6 +17,8 @@ from __future__ import annotations
 # 3. 不自動覆蓋 7_股神推薦.py 權重，只輸出建議檔。
 # 4. 舊資料缺欄位不報錯，全部安全補空。
 # =========================================================
+import json
+import math
 import os
 import re
 import time
