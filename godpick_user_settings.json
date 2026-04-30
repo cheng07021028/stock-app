@@ -22,7 +22,6 @@
   "column_orders": {
     "full_table": [
       "上漲機率估計%",
-      "勾選",
       "飆股起漲分數",
       "起漲等級",
       "最新價",
@@ -205,7 +204,19 @@
       "上漲機率等級",
       "上漲機率信心",
       "上漲機率說明",
-      "上漲機率因子明細"
+      "上漲機率因子明細",
+      "隔夜風控分數",
+      "隔夜風險等級",
+      "隔夜偏向",
+      "隔夜解讀",
+      "台指夜盤漲跌",
+      "NASDAQ漲跌%",
+      "S&P500漲跌%",
+      "道瓊漲跌%",
+      "費半漲跌%",
+      "Nasdaq期貨偏向",
+      "S&P期貨偏向",
+      "匯率風險等級"
     ]
   },
   "scan_settings": {
@@ -226,6 +237,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-30 02:20:03",
-  "version": "godpick_v5_persistent_settings"
+  "updated_at": "2026-04-30 02:48:30",
+  "version": "godpick_v72_column_order_stable"
 }
