@@ -134,6 +134,18 @@ GODPICK_RECORD_COLUMNS = [
     "上漲機率信心",
     "上漲機率說明",
     "上漲機率因子明細",
+
+    "買點狀態",
+    "進場型態",
+    "高分禁買旗標",
+    "高分禁買原因",
+    "實戰買點分數",
+    "支撐距離%",
+    "壓力空間%",
+    "近5日漲幅%",
+    "長上影風險",
+    "實戰操作建議",
+    "V76買點防呆版本",
     "大盤參考等級",
     "大盤可參考分數",
     "大盤加權分",
@@ -2542,6 +2554,207 @@ def _derive_v5_no_buy_reason(row: pd.Series) -> str:
     return "、".join(reasons) if reasons else "未觸發主要否決條件"
 
 
+
+# =========================================================
+# V76：實戰買點與禁買防呆
+# 目的：高分股票不代表立即可買；保留股票但明確標示買點狀態與禁買原因。
+# =========================================================
+def _v76_calc_support_distance_pct(row: pd.Series) -> float | None:
+    price = _safe_float(row.get("最新價"), _safe_float(row.get("推薦價格")))
+    support_candidates = [row.get("近端支撐"), row.get("主要支撐"), row.get("推薦買點_拉回"), row.get("停損價")]
+    support = None
+    for v in support_candidates:
+        x = _safe_float(v)
+        if x not in [None, 0]:
+            support = x
+            break
+    if price in [None, 0] or support in [None, 0]:
+        return None
+    return round((price - support) / support * 100, 2)
+
+
+def _v76_calc_resistance_space_pct(row: pd.Series) -> float | None:
+    price = _safe_float(row.get("最新價"), _safe_float(row.get("推薦價格")))
+    resistance_candidates = [row.get("近端壓力"), row.get("突破確認價"), row.get("賣出目標1"), row.get("賣出目標2")]
+    resistance = None
+    for v in resistance_candidates:
+        x = _safe_float(v)
+        if x not in [None, 0] and (price in [None, 0] or x >= price * 0.98):
+            resistance = x
+            break
+    if price in [None, 0] or resistance in [None, 0]:
+        return None
+    return round((resistance - price) / price * 100, 2)
+
+
+def _v76_recent_5d_return(row: pd.Series) -> float | None:
+    for c in ["近5日漲幅%", "5日漲跌幅%", "區間漲跌幅%", "RET5"]:
+        x = _safe_float(row.get(c))
+        if x is not None:
+            return round(x, 2)
+    return None
+
+
+def _v76_long_upper_shadow_risk(row: pd.Series) -> str:
+    text = " ".join([_safe_str(row.get("假突破風險")), _safe_str(row.get("過熱風險")), _safe_str(row.get("風險說明")), _safe_str(row.get("推薦理由摘要"))])
+    if any(k in text for k in ["長上影", "上影", "假突破", "爆量黑K", "爆量長黑"]):
+        return "高"
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    ret5 = _v76_recent_5d_return(row)
+    if chase >= 80 or (ret5 is not None and ret5 >= 14):
+        return "中高"
+    if chase >= 68:
+        return "中"
+    return "低"
+
+
+def _v76_entry_pattern(row: pd.Series) -> str:
+    opportunity = _safe_str(row.get("機會型態"))
+    pattern = _safe_str(row.get("型態名稱"))
+    pre = _safe_float(row.get("起漲前兆分數"), _safe_float(row.get("飆股起漲分數"), 0)) or 0
+    support_dist = _v76_calc_support_distance_pct(row)
+    break_score = _safe_float(row.get("型態突破分數"), 0) or 0
+    if any(k in opportunity for k in ["低檔", "止跌", "回測", "拉回"]):
+        return "低檔起漲 / 支撐回測"
+    if support_dist is not None and 0 <= support_dist <= 5.5 and pre >= 60:
+        return "回測支撐轉強"
+    if break_score >= 72 or any(k in pattern for k in ["突破", "平台", "箱型"]):
+        return "突破平台確認"
+    if pre >= 78:
+        return "轉強確認"
+    if _safe_str(row.get("是否領先同類股")) == "是":
+        return "族群領先延續"
+    return "綜合觀察"
+
+
+def _v76_no_buy_reasons(row: pd.Series) -> list[str]:
+    reasons = []
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    stop_dist = _safe_float(row.get("停損距離%"), 0) or 0
+    support_dist = _v76_calc_support_distance_pct(row)
+    resistance_space = _v76_calc_resistance_space_pct(row)
+    ret5 = _v76_recent_5d_return(row)
+    upper_risk = _v76_long_upper_shadow_risk(row)
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    overnight_risk = _safe_str(row.get("隔夜風險")) or _safe_str(row.get("overnight_risk_level"))
+    buy_grade = _safe_str(row.get("買點分級"))
+    if score >= 78 and support_dist is not None and support_dist >= 11:
+        reasons.append(f"距離支撐過遠{support_dist:.1f}%")
+    if score >= 78 and ret5 is not None and ret5 >= 12:
+        reasons.append(f"近5日漲幅偏大{ret5:.1f}%")
+    if score >= 78 and chase >= 78:
+        reasons.append("追價風險過高")
+    if rr and rr < 1.25:
+        reasons.append(f"R/R不足{rr:.2f}")
+    if stop_dist >= 8:
+        reasons.append(f"停損距離過大{stop_dist:.1f}%")
+    if resistance_space is not None and resistance_space < 3.0:
+        reasons.append(f"上方空間不足{resistance_space:.1f}%")
+    if upper_risk in ["高", "中高"]:
+        reasons.append(f"長上影/假突破風險{upper_risk}")
+    if macro_bucket.startswith("D") and score < 88:
+        reasons.append("大盤防守環境未達逆勢強股門檻")
+    if any(k in overnight_risk for k in ["高", "偏空", "逆風"]):
+        reasons.append("隔夜風控偏弱不宜追價")
+    if "C" in buy_grade or "D" in buy_grade:
+        reasons.append("買點分級偏弱")
+    return reasons
+
+
+def _derive_v76_buy_status(row: pd.Series) -> str:
+    reasons = _v76_no_buy_reasons(row)
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    support_dist = _v76_calc_support_distance_pct(row)
+    pre = _safe_float(row.get("起漲前兆分數"), _safe_float(row.get("飆股起漲分數"), 0)) or 0
+    break_score = _safe_float(row.get("型態突破分數"), 0) or 0
+    if reasons and score >= 78:
+        return "高分但暫不追"
+    if score >= 88 and chase <= 65 and rr >= 1.5:
+        return "立即可小量試單"
+    if support_dist is not None and 0 <= support_dist <= 5.5 and score >= 75:
+        return "回測可觀察"
+    if break_score >= 75 and pre >= 68 and chase <= 72:
+        return "突破確認可追蹤"
+    if score >= 75:
+        return "等拉回 / 等確認"
+    return "觀察名單"
+
+
+def _derive_v76_practical_score(row: pd.Series) -> float:
+    score = _safe_float(row.get("推薦總分"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    support_dist = _v76_calc_support_distance_pct(row)
+    resistance_space = _v76_calc_resistance_space_pct(row)
+    ret5 = _v76_recent_5d_return(row)
+    buy_grade = _safe_str(row.get("買點分級"))
+    practical = score * 0.55
+    practical += max(min((rr - 1.2) * 12, 14), -12) if rr else -4
+    practical += max(min((70 - chase) * 0.22, 10), -12)
+    if support_dist is not None:
+        if 0 <= support_dist <= 5.5:
+            practical += 10
+        elif support_dist <= 9:
+            practical += 3
+        elif support_dist >= 13:
+            practical -= 10
+    if resistance_space is not None:
+        if resistance_space >= 8:
+            practical += 7
+        elif resistance_space < 3:
+            practical -= 8
+    if ret5 is not None:
+        if 0 <= ret5 <= 8:
+            practical += 4
+        elif ret5 >= 14:
+            practical -= 9
+    if "A" in buy_grade or "S" in buy_grade:
+        practical += 5
+    elif "C" in buy_grade or "D" in buy_grade:
+        practical -= 6
+    return round(_score_clip(practical, 0, 100), 1)
+
+
+def _derive_v76_action_note(row: pd.Series) -> str:
+    status = _safe_str(row.get("買點狀態"))
+    reasons = _safe_str(row.get("高分禁買原因"))
+    pattern = _safe_str(row.get("進場型態"))
+    support = _safe_float(row.get("近端支撐"), _safe_float(row.get("主要支撐")))
+    breakout = _safe_float(row.get("突破確認價"), _safe_float(row.get("推薦買點_突破")))
+    stop = _safe_float(row.get("停損價"), _safe_float(row.get("停損參考")))
+    parts = [status, pattern]
+    if reasons:
+        parts.append("禁追原因：" + reasons)
+    if support:
+        parts.append(f"支撐觀察 {support:.2f}")
+    if breakout:
+        parts.append(f"突破確認 {breakout:.2f}")
+    if stop:
+        parts.append(f"失效 {stop:.2f}")
+    return "｜".join([p for p in parts if p])
+
+
+def _apply_v76_practical_entry_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["支撐距離%"] = out.apply(_v76_calc_support_distance_pct, axis=1)
+    out["壓力空間%"] = out.apply(_v76_calc_resistance_space_pct, axis=1)
+    out["近5日漲幅%"] = out.apply(_v76_recent_5d_return, axis=1)
+    out["長上影風險"] = out.apply(_v76_long_upper_shadow_risk, axis=1)
+    out["進場型態"] = out.apply(_v76_entry_pattern, axis=1)
+    out["高分禁買原因"] = out.apply(lambda r: "、".join(_v76_no_buy_reasons(r)), axis=1)
+    out["高分禁買旗標"] = out["高分禁買原因"].fillna("").astype(str).str.strip().map(lambda x: "是" if x else "否")
+    out["買點狀態"] = out.apply(_derive_v76_buy_status, axis=1)
+    out["實戰買點分數"] = out.apply(_derive_v76_practical_score, axis=1)
+    out["實戰操作建議"] = out.apply(_derive_v76_action_note, axis=1)
+    out["V76買點防呆版本"] = "v76_practical_entry_guard"
+    return out
+
 def _derive_best_trade_script_v5(row: pd.Series) -> str:
     pullback = _safe_float(row.get("推薦買點_拉回"), row.get("推薦價格"))
     breakout = _safe_float(row.get("推薦買點_突破"), row.get("推薦價格"))
@@ -2932,6 +3145,7 @@ def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     out = _apply_v16_risk_allocation_columns(out)
     out = _apply_v17_market_strategy_columns(out)
+    out = _apply_v76_practical_entry_columns(out)
     return out
 
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -7266,7 +7480,7 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "買點分級",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "買點分級", "買點狀態", "進場型態", "高分禁買旗標", "高分禁買原因", "實戰買點分數", "實戰操作建議", "支撐距離%", "壓力空間%", "近5日漲幅%", "長上影風險", 
         "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數",
         "信心等級", "推薦分桶", "市場環境分數",
         "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
@@ -8938,7 +9152,7 @@ def main():
 
     with tabs[0]:
         full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格", "大盤橋接分數", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略",
+            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "買點狀態", "進場型態", "高分禁買旗標", "高分禁買原因", "實戰買點分數", "實戰操作建議", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格", "大盤橋接分數", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
             "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
             "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
