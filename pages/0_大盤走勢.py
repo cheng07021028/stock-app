@@ -4963,5 +4963,102 @@ def main():
         st.json(snapshot_now)
 
 
+# =========================================================
+# v71：一鍵更新/寫入同步修正
+# 修正 v70 顯示「橋接檔未完整寫入」：完整把 v68 隔夜欄位與 v45 功能中心欄位寫入 macro_mode_bridge.json。
+# =========================================================
+MACRO_V71_SYNC_VERSION = "v71_macro_one_click_bridge_sync_20260430"
+
+def _v71_now_text() -> str:
+    try:
+        return _tw_now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def _v71_get_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+def _v71_enrich_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    snapshot.setdefault("updated_at", _v71_now_text())
+    snapshot["v71_sync_version"] = MACRO_V71_SYNC_VERSION
+    if not isinstance(snapshot.get("event_factor"), dict):
+        snapshot["event_factor"] = {"event_score": 50, "event_risk_level": "中性", "event_comment": "v71：尚無額外事件風險快取，採中性處理。", "source": "v71_default_neutral"}
+    if not isinstance(snapshot.get("macro_mode_estimate"), dict):
+        score = _safe_float(snapshot.get("market_score"), 50) or 50
+        if score >= 70: mode = "選股偏多"
+        elif score >= 55: mode = "震盪選股"
+        elif score >= 40: mode = "保守防守"
+        else: mode = "高風險觀望"
+        snapshot["macro_mode_estimate"] = {"mode": mode, "adjusted_score": score, "confidence": "中", "comment": "v71：依 market_score 自動補齊完整大盤模式預估。"}
+    snapshot.setdefault("feature_center_version", "v71_feature_center_sync")
+
+    factor = _v71_get_dict(snapshot.get("overnight_factor"))
+    if not factor:
+        try:
+            payload = _v68_get_overnight_payload() if "_v68_get_overnight_payload" in globals() else {}
+            factor = payload.get("overnight_factor") if isinstance(payload.get("overnight_factor"), dict) else {}
+            snapshot["overnight_factor"] = factor
+            snapshot["overnight_cache_updated_at"] = payload.get("updated_at", "") if isinstance(payload, dict) else ""
+        except Exception:
+            factor = {}
+    defaults = {
+        "overnight_score": 50, "overnight_risk_level": "資料不足", "overnight_bias": "data_guard",
+        "overnight_comment": "隔夜國際盤資料不足，僅標示 data_guard，不直接扣死推薦。",
+        "night_futures_change_pct": None, "nasdaq_change_pct": None, "sp500_change_pct": None, "dow_change_pct": None, "sox_change_pct": None,
+        "nasdaq_futures_change_pct": None, "sp500_futures_change_pct": None, "dxy_change_pct": None, "usdtwd_change_pct": None,
+        "fx_risk_level": "資料不足", "us_futures_bias": "data_guard",
+    }
+    for k, default in defaults.items():
+        if k not in snapshot or snapshot.get(k) in [None, ""]:
+            snapshot[k] = factor.get(k, default)
+    if snapshot.get("us_futures_bias") in [None, ""]:
+        snapshot["us_futures_bias"] = snapshot.get("overnight_bias")
+    snapshot["overnight_version"] = snapshot.get("overnight_version") or "v68/v71_overnight_sync"
+    req = _v71_get_dict(snapshot.get("required_by_godpick"))
+    for k in ["market_score", "market_trend", "market_risk_level", "risk_gate", "position_hint", "market_session", "market_session_label", "market_session_usable", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "sox_change_pct", "us_futures_bias", "fx_risk_level"]:
+        req[k] = snapshot.get(k)
+    req["v71_status"] = "synced"
+    snapshot["required_by_godpick"] = req
+    snapshot["one_click_sync_version"] = MACRO_V71_SYNC_VERSION
+    snapshot["one_click_sync_at"] = _v71_now_text()
+    return snapshot
+
+def _v71_build_bridge_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _v71_enrich_snapshot(snapshot)
+    keys = ["updated_at", "version", "v71_sync_version", "one_click_sync_version", "one_click_sync_at", "market_score", "market_score_raw", "market_trend", "market_risk_level", "market_bias", "risk_gate", "position_hint", "recommendation_adjustment", "volume_status", "trend_comment", "required_by_godpick", "godpick_market_effect", "market_session", "market_session_label", "market_session_usable", "data_source_health", "data_quality", "freshness", "data_guard_notes", "data_diagnostics", "event_factor", "macro_mode_estimate", "feature_center_version", "twse_index", "twse_change", "twse_change_pct", "otc_index", "otc_change", "otc_change_pct", "futures_index", "futures_change", "futures_change_pct", "mini_futures_index", "mini_futures_change", "mini_futures_change_pct", "overnight_factor", "overnight_cache_updated_at", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "dow_change_pct", "sox_change_pct", "nasdaq_futures_change_pct", "sp500_futures_change_pct", "dxy_change_pct", "usdtwd_change_pct", "us_futures_bias", "fx_risk_level", "overnight_version"]
+    return {k: snapshot.get(k) for k in keys}
+
+def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
+    snapshot = _v71_enrich_snapshot(_build_market_snapshot_v30(row))
+    bridge = _v71_build_bridge_from_snapshot(snapshot)
+    ok1 = _v30_write_json_dict(MARKET_SNAPSHOT_FILE, snapshot)
+    ok2 = _v30_write_json_dict(BRIDGE_FILE, bridge)
+    if ok1:
+        try: _v32_append_record(snapshot)
+        except Exception: pass
+    check = _v70_check_written_files()
+    if ok1 and ok2 and check.get("all_written"):
+        return True, f"v71 已完整同步寫入 {MARKET_SNAPSHOT_FILE}、{BRIDGE_FILE}、macro_trend_records.json。"
+    miss = []
+    if check.get("missing_snapshot_keys"): miss.append("snapshot缺欄位:" + ",".join(check.get("missing_snapshot_keys")[:8]))
+    if check.get("missing_bridge_keys"): miss.append("bridge缺欄位:" + ",".join(check.get("missing_bridge_keys")[:8]))
+    if not check.get("macro_trend_records_ok"): miss.append("macro_trend_records未建立")
+    return bool(ok1 and ok2), "v71 已寫入但驗證仍有提醒：" + (" / ".join(miss) if miss else "請重新整理後再檢查")
+
+def _v70_check_written_files() -> dict[str, Any]:
+    snapshot = _v70_read_json(MARKET_SNAPSHOT_FILE, {})
+    bridge = _v70_read_json(BRIDGE_FILE, {})
+    records = _v70_read_json(MARKET_TREND_RECORDS_FILE if "MARKET_TREND_RECORDS_FILE" in globals() else "macro_trend_records.json", [])
+    snap_ok = isinstance(snapshot, dict) and len(snapshot.keys()) > 0
+    bridge_ok = isinstance(bridge, dict) and len(bridge.keys()) > 0
+    records_ok = isinstance(records, list) and len(records) > 0
+    missing_snapshot = [k for k in _v70_required_snapshot_keys() if not (isinstance(snapshot, dict) and k in snapshot)]
+    missing_bridge = [k for k in ["market_score", "market_trend", "risk_gate", "position_hint", "required_by_godpick", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "event_factor", "macro_mode_estimate", "feature_center_version"] if not (isinstance(bridge, dict) and k in bridge)]
+    all_written = snap_ok and bridge_ok and records_ok and not missing_snapshot and not missing_bridge
+    return {"market_snapshot_ok": snap_ok, "macro_mode_bridge_ok": bridge_ok, "macro_trend_records_ok": records_ok, "missing_snapshot_keys": missing_snapshot, "missing_bridge_keys": missing_bridge, "all_written": all_written, "snapshot_updated_at": snapshot.get("updated_at") if isinstance(snapshot, dict) else "", "bridge_updated_at": bridge.get("updated_at") if isinstance(bridge, dict) else "", "records_count": len(records) if isinstance(records, list) else 0, "v71_sync_version": MACRO_V71_SYNC_VERSION}
+
+
 if __name__ == "__main__":
     main()
