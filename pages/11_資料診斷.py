@@ -694,5 +694,137 @@ try:
 except Exception:
     pass
 
+
+# =========================================================
+# v79：最終同步檢查版｜v76 買點防呆 + v78 欄位順序 + v77 法人中性保護
+# =========================================================
+def _v79_read_json(path, default):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return default
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if data is not None else default
+    except Exception:
+        return default
+
+def _v79_has_value(data, key):
+    return isinstance(data, dict) and data.get(key) not in [None, "", {}, []]
+
+def _v79_payload_to_records(payload):
+    if isinstance(payload, dict):
+        for k in ["recommendations", "records", "data", "items"]:
+            if isinstance(payload.get(k), list):
+                return payload.get(k)
+        return []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+def _v79_collect_record_sample():
+    samples = []
+    for filename in ["godpick_latest_recommendations.json", "godpick_records.json", "godpick_recommend_list.json"]:
+        payload = _v79_read_json(filename, [])
+        records = _v79_payload_to_records(payload)
+        if records:
+            for r in records[:20]:
+                if isinstance(r, dict):
+                    samples.append((filename, r))
+    return samples
+
+def _v79_check_record_fields(samples, required_fields):
+    rows = []
+    if not samples:
+        for f in required_fields:
+            rows.append({"群組": "推薦資料欄位", "檢查項目": f, "狀態": "注意", "說明": "目前沒有推薦樣本可檢查，請先跑 07 股神推薦並匯入 8/10。"})
+        return rows
+    for f in required_fields:
+        hit = 0
+        source_hit = []
+        for filename, r in samples:
+            if f in r:
+                hit += 1
+                if filename not in source_hit:
+                    source_hit.append(filename)
+        rows.append({
+            "群組": "推薦資料欄位",
+            "檢查項目": f,
+            "狀態": "OK" if hit > 0 else "缺少",
+            "說明": f"命中 {hit} 筆；來源：{', '.join(source_hit[:3])}" if hit else "推薦資料尚未寫入此欄位，請確認 7/8/10 是否已更新到 v76/v78。",
+        })
+    return rows
+
+def _v79_render_final_sync_health():
+    st.markdown("### v79｜最終同步檢查：v77 / v78 / v76 / 隔夜風控")
+    st.caption("檢查 01 大盤趨勢、07 股神推薦、8/10 紀錄、欄位順序與 JSON 橋接是否同步。此區塊只讀本機 JSON，不重新抓網路資料。")
+
+    snapshot = _v79_read_json("market_snapshot.json", {})
+    bridge = _v79_read_json("macro_mode_bridge.json", {})
+    one_click = _v79_read_json("macro_v70_one_click_status.json", {})
+    col_orders = _v79_read_json("godpick_column_orders.json", {})
+    overnight_cache = _v79_read_json("overnight_global_market_cache.json", {})
+    inst_cache = _v79_read_json("macro_institutional_cache.json", {})
+    samples = _v79_collect_record_sample()
+
+    required_overnight = [
+        "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment",
+        "night_futures_change", "night_futures_change_pct", "night_futures_source",
+        "night_futures_fallback_note", "overnight_data_quality", "nasdaq_change_pct", "sox_change_pct",
+    ]
+    practical_fields = [
+        "買點狀態", "進場型態", "高分禁買旗標", "高分禁買原因", "實戰買點分數",
+        "支撐距離%", "壓力空間%", "近5日漲幅%", "長上影風險", "實戰操作建議", "V76買點防呆版本",
+    ]
+    overnight_record_fields = [
+        "隔夜分數", "隔夜風險", "隔夜偏向", "隔夜解讀", "隔夜資料品質",
+        "台指夜盤資料來源", "台指夜盤備援說明",
+    ]
+
+    rows = []
+    for source_name, data in [("market_snapshot", snapshot), ("macro_bridge", bridge)]:
+        for k in required_overnight:
+            rows.append({
+                "群組": source_name,
+                "檢查項目": k,
+                "狀態": "OK" if _v79_has_value(data, k) else "缺少",
+                "說明": str(data.get(k, ""))[:160] if isinstance(data, dict) else "",
+            })
+
+    rows.extend([
+        {"群組": "v70一鍵更新", "檢查項目": "macro_v70_one_click_status.json", "狀態": "OK" if isinstance(one_click, dict) and bool(one_click) else "缺少", "說明": one_click.get("finished_at", "") if isinstance(one_click, dict) else ""},
+        {"群組": "v70一鍵更新", "檢查項目": "all_required_updated", "狀態": "OK" if isinstance(one_click, dict) and one_click.get("all_required_updated") else "注意", "說明": str(one_click.get("all_required_updated", "")) if isinstance(one_click, dict) else ""},
+        {"群組": "v70一鍵更新", "檢查項目": "all_required_written", "狀態": "OK" if isinstance(one_click, dict) and one_click.get("all_required_written") else "注意", "說明": str(one_click.get("all_required_written", "")) if isinstance(one_click, dict) else ""},
+        {"群組": "v78欄位順序", "檢查項目": "godpick_column_orders.json", "狀態": "OK" if isinstance(col_orders, dict) and bool(col_orders) else "注意", "說明": f"{len(col_orders) if isinstance(col_orders, dict) else 0} 組設定"},
+        {"群組": "v73台指夜盤備援", "檢查項目": "overnight_global_market_cache.json", "狀態": "OK" if isinstance(overnight_cache, dict) and bool(overnight_cache) else "注意", "說明": str(overnight_cache.get("updated_at", "")) if isinstance(overnight_cache, dict) else ""},
+        {"群組": "v77法人保護", "檢查項目": "macro_institutional_cache.json", "狀態": "OK" if isinstance(inst_cache, dict) and bool(inst_cache) else "注意", "說明": "若來源失敗，01 大盤趨勢應顯示法人中性保護，不應阻斷一鍵更新。"},
+    ])
+
+    rows.extend(_v79_check_record_fields(samples, practical_fields + overnight_record_fields))
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    if not df.empty:
+        ok_count = int((df["狀態"] == "OK").sum())
+        warn_count = int((df["狀態"] == "注意").sum())
+        bad_count = int((df["狀態"] == "缺少").sum())
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("OK", ok_count)
+        c2.metric("注意", warn_count)
+        c3.metric("缺少", bad_count)
+        c4.metric("推薦樣本", len(samples))
+        if bad_count == 0:
+            st.success("v79：主要橋接、隔夜風控、欄位順序與推薦資料欄位同步檢查完成，未發現缺少項目。")
+        else:
+            st.warning("v79：仍有缺少項目。建議先到 01 大盤趨勢按『一鍵更新全部並寫入』，再到 07 股神推薦重新掃描並匯入 8/10。")
+
+try:
+    _v79_prev_main = main
+    def main():
+        _v79_prev_main()
+        _v79_render_final_sync_health()
+except Exception:
+    pass
+
 if __name__ == "__main__":
     main()
