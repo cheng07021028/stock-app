@@ -89,6 +89,7 @@ GODPICK_ACTIVE_SCORE_WEIGHTS = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
 
 
 GODPICK_SETTINGS_FILE = "godpick_user_settings.json"
+GODPICK_COLUMN_ORDER_FILE = "godpick_column_orders.json"  # v72：欄位順序獨立保存，避免權重設定/GitHub 舊值覆蓋
 GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
 GODPICK_LIST_FILE = "godpick_recommend_list.json"
 MACRO_MODE_BRIDGE_FILE = "macro_mode_bridge.json"
@@ -1205,26 +1206,56 @@ def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, li
     return (local_ok or github_ok), [local_msg, github_msg]
 
 
+def _load_column_order_shadow_payload() -> dict[str, Any]:
+    """v72：欄位順序獨立檔，避免套用後被 GitHub 舊設定覆蓋。"""
+    payload = _safe_json_read_local(GODPICK_COLUMN_ORDER_FILE, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_column_order_shadow_payload(payload: dict[str, Any]) -> tuple[bool, str]:
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["updated_at"] = _now_text()
+    payload["version"] = "godpick_column_order_v72_stable"
+    return _safe_json_write_local(GODPICK_COLUMN_ORDER_FILE, payload)
+
+
 def _load_persistent_column_order(name: str) -> list[str]:
+    shadow = _load_column_order_shadow_payload()
+    shadow_orders = shadow.get("column_orders", {}) if isinstance(shadow, dict) else {}
+    val = shadow_orders.get(name, []) if isinstance(shadow_orders, dict) else []
+    if isinstance(val, list) and val:
+        return [str(x) for x in val if str(x)]
+
     payload = _load_persistent_settings()
     orders = payload.get("column_orders", {}) if isinstance(payload, dict) else {}
     val = orders.get(name, []) if isinstance(orders, dict) else []
-    return val if isinstance(val, list) else []
+    return [str(x) for x in val if str(x)] if isinstance(val, list) else []
 
 
 def _save_persistent_column_order(name: str, order: list[str]) -> tuple[bool, list[str]]:
+    clean_order = [str(x) for x in order if str(x)]
+
+    shadow = _load_column_order_shadow_payload()
+    shadow_orders = shadow.get("column_orders", {}) if isinstance(shadow, dict) else {}
+    if not isinstance(shadow_orders, dict):
+        shadow_orders = {}
+    shadow_orders[name] = clean_order
+    shadow["column_orders"] = shadow_orders
+    shadow_ok, shadow_msg = _save_column_order_shadow_payload(shadow)
+
     payload = _load_persistent_settings()
     orders = payload.get("column_orders", {}) if isinstance(payload, dict) else {}
     if not isinstance(orders, dict):
         orders = {}
-    orders[name] = [str(x) for x in order if str(x)]
+    orders[name] = clean_order
     payload["column_orders"] = orders
     payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
     payload["updated_at"] = _now_text()
-    payload["version"] = "godpick_v5_persistent_settings"
+    payload["version"] = "godpick_v72_column_order_stable"
     local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
-    return (local_ok or github_ok), [local_msg, github_msg]
+    return (shadow_ok or local_ok or github_ok), [shadow_msg, local_msg, github_msg]
 
 
 def _df_to_records_for_json(df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -7758,8 +7789,17 @@ def _normalize_column_order(saved_order, available_cols: list[str], default_cols
             seen.add(c)
     return final
 
+
+def _fixed_columns_for_order_manager(name: str) -> list[str]:
+    # v72：勾選欄固定在最前，不參與欄位順序調整，避免 data_editor 位置錯亂。
+    if name == "full_table":
+        return ["勾選"]
+    return []
+
+
 def _column_order_state_key(name: str) -> str:
     return _k(f"column_order_{name}")
+
 
 def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
     state_key = _column_order_state_key(name)
@@ -7767,18 +7807,23 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
     draft_key = _k(f"column_order_draft_{name}")
     pick_key = _k(f"column_pick_{name}")
 
-    persistent_order = _load_persistent_column_order(name)
-    base_order = persistent_order if persistent_order else st.session_state.get(applied_key, st.session_state.get(state_key, default_cols))
+    fixed_cols = [c for c in _fixed_columns_for_order_manager(name) if c in available_cols]
+    managed_available_cols = [c for c in available_cols if c not in fixed_cols]
+    managed_default_cols = [c for c in default_cols if c in managed_available_cols]
 
-    applied_order = _normalize_column_order(base_order, available_cols, default_cols)
-    draft_order = _normalize_column_order(st.session_state.get(draft_key, applied_order), available_cols, default_cols)
+    persistent_order = [c for c in _load_persistent_column_order(name) if c in managed_available_cols]
+    base_order = persistent_order if persistent_order else st.session_state.get(applied_key, st.session_state.get(state_key, managed_default_cols))
+
+    applied_order = _normalize_column_order(base_order, managed_available_cols, managed_default_cols)
+    draft_order = _normalize_column_order(st.session_state.get(draft_key, applied_order), managed_available_cols, managed_default_cols)
 
     st.session_state[applied_key] = applied_order
     st.session_state[draft_key] = draft_order
     st.session_state[state_key] = applied_order
 
     with st.expander(title, expanded=False):
-        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定。")
+        fixed_msg = "；固定欄位：" + "、".join(fixed_cols) if fixed_cols else ""
+        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定" + fixed_msg + "。")
         if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
             st.session_state[pick_key] = draft_order[0] if draft_order else ""
         picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
@@ -7808,7 +7853,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
                     changed = True
             with b5:
                 if st.button("恢復原始設定", key=_k(f"move_restore_default_{name}"), use_container_width=True):
-                    draft_order = _normalize_column_order(default_cols, available_cols, default_cols)
+                    draft_order = _normalize_column_order(managed_default_cols, managed_available_cols, managed_default_cols)
                     changed = True
 
         a1, a2, a3 = st.columns([1.2, 1.2, 3])
@@ -7827,11 +7872,20 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
             st.rerun()
 
         if apply_clicked:
-            applied_order = _normalize_column_order(draft_order, available_cols, default_cols)
+            applied_order = _normalize_column_order(draft_order, managed_available_cols, managed_default_cols)
             st.session_state[applied_key] = applied_order
             st.session_state[state_key] = applied_order
             st.session_state[draft_key] = applied_order
             ok, msgs = _save_persistent_column_order(name, applied_order)
+
+            # v72：清掉 data_editor 舊狀態，下一輪強制按新欄位順序重建。
+            for key in [
+                _k("full_table_editor"),
+                _k("full_table_editor_code_map"),
+                _k("full_table_selected_codes"),
+            ]:
+                st.session_state.pop(key, None)
+
             st.success("欄位順序已套用並永久記錄。" if ok else "欄位順序已套用，但永久記錄失敗。")
             with st.expander("欄位設定保存明細", expanded=False):
                 for msg in msgs:
@@ -7843,9 +7897,10 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
             st.info("已取消暫存變更，回到目前已套用欄位順序。")
             st.rerun()
 
-        st.caption("目前暫存欄位順序：" + " ｜ ".join(draft_order[:20]) + (" ..." if len(draft_order) > 20 else ""))
+        preview_order = fixed_cols + draft_order
+        st.caption("目前暫存欄位順序：" + " ｜ ".join(preview_order[:20]) + (" ..." if len(preview_order) > 20 else ""))
 
-    return st.session_state.get(applied_key, applied_order)
+    return fixed_cols + st.session_state.get(applied_key, applied_order)
 
 
 # =========================================================
