@@ -417,72 +417,45 @@ def inject_pro_theme():
             line-height: 1.35;
         }
 
-        /* ===== 側邊欄頁面編號（v25.1）===== */
-        [data-testid="stSidebarNav"] {
-            padding-top: 0.2rem;
-        }
-
-        [data-testid="stSidebarNav"] ul {
-            gap: 0.1rem;
-        }
-
-        [data-testid="stSidebarNav"] li [data-testid="stSidebarNavLink"] > div:first-child,
-        [data-testid="stSidebarNav"] li a > div:first-child {
-            display: flex;
-            align-items: center;
-            gap: 0.15rem;
-        }
-
-        [data-testid="stSidebarNav"] li [data-testid="stSidebarNavLink"] span,
-        [data-testid="stSidebarNav"] li a span {
-            font-weight: 700;
-            letter-spacing: 0.1px;
-        }
-
-        [data-testid="stSidebarNav"] ul li:nth-of-type(1) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(1) a span::before { content: "00. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(2) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(2) a span::before { content: "01. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(3) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(3) a span::before { content: "02. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(4) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(4) a span::before { content: "03. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(5) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(5) a span::before { content: "04. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(6) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(6) a span::before { content: "05. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(7) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(7) a span::before { content: "06. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(8) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(8) a span::before { content: "07. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(9) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(9) a span::before { content: "08. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(10) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(10) a span::before { content: "09. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(11) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(11) a span::before { content: "10. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(12) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(12) a span::before { content: "11. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(13) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(13) a span::before { content: "12. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(14) a span::before { content: "13. "; }
-        [data-testid="stSidebarNav"] ul li:nth-of-type(15) [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li:nth-of-type(15) a span::before { content: "14. "; }
-
-        [data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"] span::before,
-        [data-testid="stSidebarNav"] ul li a span::before {
-            display: inline-block;
-            min-width: 2.3em;
-            color: #64748b;
-            font-weight: 800;
-            font-variant-numeric: tabular-nums;
-        }
-
-        [data-testid="stSidebarNav"] ul li [aria-current="page"] span::before,
-        [data-testid="stSidebarNav"] ul li [aria-current="page"] * span::before {
-            color: #1d4ed8;
-        }
+        /* ===== 側邊欄頁面編號強化版（v66）===== */
+        section[data-testid="stSidebar"] nav ul li a,
+        div[data-testid="stSidebarNav"] ul li a,
+        div[data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"] { border-radius: 10px; margin: 2px 6px; min-height: 36px; transition: all 0.15s ease-in-out; }
+        section[data-testid="stSidebar"] nav ul li a:hover,
+        div[data-testid="stSidebarNav"] ul li a:hover,
+        div[data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"]:hover { background: #e0f2fe !important; transform: translateX(2px); }
+        section[data-testid="stSidebar"] nav ul li a span,
+        section[data-testid="stSidebar"] nav ul li a p,
+        div[data-testid="stSidebarNav"] ul li a span,
+        div[data-testid="stSidebarNav"] ul li a p,
+        div[data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"] span { font-weight: 700 !important; letter-spacing: 0.1px; }
+        section[data-testid="stSidebar"] nav ul li a span::before,
+        section[data-testid="stSidebar"] nav ul li a p::before,
+        div[data-testid="stSidebarNav"] ul li a span::before,
+        div[data-testid="stSidebarNav"] ul li a p::before,
+        div[data-testid="stSidebarNav"] ul li [data-testid="stSidebarNavLink"] span::before { display: inline-block; min-width: 2.45em; color: #64748b; font-weight: 900; font-variant-numeric: tabular-nums; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(1) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(1) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(1) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(1) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(1) [data-testid="stSidebarNavLink"] span::before { content: "00. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(2) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(2) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(2) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(2) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(2) [data-testid="stSidebarNavLink"] span::before { content: "01. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(3) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(3) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(3) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(3) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(3) [data-testid="stSidebarNavLink"] span::before { content: "02. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(4) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(4) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(4) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(4) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(4) [data-testid="stSidebarNavLink"] span::before { content: "03. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(5) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(5) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(5) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(5) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(5) [data-testid="stSidebarNavLink"] span::before { content: "04. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(6) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(6) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(6) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(6) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(6) [data-testid="stSidebarNavLink"] span::before { content: "05. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(7) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(7) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(7) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(7) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(7) [data-testid="stSidebarNavLink"] span::before { content: "06. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(8) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(8) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(8) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(8) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(8) [data-testid="stSidebarNavLink"] span::before { content: "07. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(9) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(9) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(9) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(9) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(9) [data-testid="stSidebarNavLink"] span::before { content: "08. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(10) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(10) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(10) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(10) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(10) [data-testid="stSidebarNavLink"] span::before { content: "09. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(11) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(11) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(11) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(11) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(11) [data-testid="stSidebarNavLink"] span::before { content: "10. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(12) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(12) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(12) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(12) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(12) [data-testid="stSidebarNavLink"] span::before { content: "11. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(13) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(13) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(13) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(13) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(13) [data-testid="stSidebarNavLink"] span::before { content: "12. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(14) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(14) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(14) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(14) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(14) [data-testid="stSidebarNavLink"] span::before { content: "13. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(15) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(15) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(15) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(15) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(15) [data-testid="stSidebarNavLink"] span::before { content: "14. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(16) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(16) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(16) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(16) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(16) [data-testid="stSidebarNavLink"] span::before { content: "15. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(17) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(17) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(17) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(17) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(17) [data-testid="stSidebarNavLink"] span::before { content: "16. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(18) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(18) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(18) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(18) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(18) [data-testid="stSidebarNavLink"] span::before { content: "17. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(19) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(19) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(19) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(19) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(19) [data-testid="stSidebarNavLink"] span::before { content: "18. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(20) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(20) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(20) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(20) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(20) [data-testid="stSidebarNavLink"] span::before { content: "19. "; }
+        section[data-testid="stSidebar"] nav ul li:nth-of-type(21) a span::before, section[data-testid="stSidebar"] nav ul li:nth-of-type(21) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(21) a span::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(21) a p::before, div[data-testid="stSidebarNav"] ul li:nth-of-type(21) [data-testid="stSidebarNavLink"] span::before { content: "20. "; }
+        section[data-testid="stSidebar"] nav ul li [aria-current="page"] span::before, section[data-testid="stSidebar"] nav ul li [aria-current="page"] p::before, div[data-testid="stSidebarNav"] ul li [aria-current="page"] span::before, div[data-testid="stSidebarNav"] ul li [aria-current="page"] p::before { color: #1d4ed8; }
 
         .pro-up {
             color: #dc2626 !important;
