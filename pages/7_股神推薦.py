@@ -9160,5 +9160,53 @@ def main():
         )
 
 
+# =========================================================
+# v71：讀取 01 大盤趨勢一鍵更新 / 寫入狀態
+# 07 股神推薦不連外，只顯示 01 是否已完成一鍵更新與橋接寫入。
+# =========================================================
+MACRO_V70_STATUS_FILE = "macro_v70_one_click_status.json"
+GODPICK_V71_MACRO_STATUS_VERSION = "v71_godpick_macro_status_sync_20260430"
+
+
+def _read_macro_one_click_status_v71() -> dict[str, Any]:
+    try:
+        p = Path(MACRO_V70_STATUS_FILE)
+        if not p.exists():
+            return {}
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _render_macro_one_click_status_v71():
+    status = _read_macro_one_click_status_v71()
+    if not status:
+        st.info("01 大盤趨勢尚未建立一鍵更新狀態檔；建議先到 01 大盤趨勢按『一鍵更新全部並寫入』。")
+        return
+    all_update = bool(status.get("all_required_updated"))
+    all_write = bool(status.get("all_required_written"))
+    finished = _safe_str(status.get("finished_at"))
+    failed = status.get("failed_items") if isinstance(status.get("failed_items"), list) else []
+    if all_update and all_write:
+        st.success(f"01 大盤趨勢：全部資料已更新，橋接檔已完整寫入。時間：{finished}")
+    elif all_write:
+        st.warning(f"01 大盤趨勢：橋接檔已寫入，但仍有資料源未完全更新。時間：{finished}｜未完成：{', '.join(map(str, failed)) if failed else '—'}")
+    else:
+        st.error(f"01 大盤趨勢：尚未完成完整寫入，建議回 01 大盤趨勢重新按一鍵更新。時間：{finished}｜未完成：{', '.join(map(str, failed)) if failed else '—'}")
+    with st.expander("v71 一鍵更新狀態明細", expanded=False):
+        st.json(status)
+
+# v71：包裝既有大盤橋接顯示函式，補上 01 一鍵更新完成通知。
+try:
+    _v71_old_render_market_bridge = _render_market_bridge_v37
+    def _render_market_bridge_v37(*args, **kwargs):
+        _v71_old_render_market_bridge(*args, **kwargs)
+        _render_macro_one_click_status_v71()
+except Exception:
+    pass
+
+
 if __name__ == "__main__":
     main()
