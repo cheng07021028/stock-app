@@ -21,8 +21,8 @@
   },
   "column_orders": {
     "full_table": [
-      "上漲機率估計%",
       "飆股起漲分數",
+      "上漲機率估計%",
       "起漲等級",
       "最新價",
       "股票代號",
@@ -251,6 +251,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-04-30 09:44:15",
+  "updated_at": "2026-04-30 09:44:29",
   "version": "godpick_v72_column_order_stable"
 }
