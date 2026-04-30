@@ -62,8 +62,8 @@ SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
-OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v69_20260430"
-PAGE_TITLE = "股神推薦 V69｜隔夜國際盤風控串接版"
+OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
+PAGE_TITLE = "股神推薦 V74｜隔夜夜盤備援串接版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -162,6 +162,9 @@ GODPICK_RECORD_COLUMNS = [
     "隔夜風險等級",
     "隔夜偏向",
     "隔夜解讀",
+    "隔夜資料品質",
+    "台指夜盤資料來源",
+    "台指夜盤備援說明",
     "台指夜盤漲跌",
     "NASDAQ漲跌%",
     "S&P500漲跌%",
@@ -1777,6 +1780,11 @@ def _overnight_effect_summary_v69(bridge: dict[str, Any]) -> dict[str, Any]:
     nasdaq = _safe_float(bridge.get("nasdaq_change_pct"), None)
     sox = _safe_float(bridge.get("sox_change_pct"), None)
     night_tx = _safe_float(bridge.get("night_futures_change"), None)
+    night_tx_pct = _safe_float(bridge.get("night_futures_change_pct"), None)
+    if night_tx is None:
+        night_tx = night_tx_pct
+    night_src = _safe_str(bridge.get("tw_night_future_source") or bridge.get("night_futures_source") or bridge.get("overnight_source_mode"))
+    night_note = _safe_str(bridge.get("tw_night_future_note") or bridge.get("night_futures_note"))
     us_bias = _safe_str(bridge.get("us_futures_bias"))
     fx_risk = _safe_str(bridge.get("fx_risk_level"))
 
@@ -1837,6 +1845,9 @@ def _overnight_effect_summary_v69(bridge: dict[str, Any]) -> dict[str, Any]:
         "dow": _safe_float(bridge.get("dow_change_pct"), None),
         "sox": sox,
         "night_tx": night_tx,
+        "night_tx_pct": night_tx_pct if "night_tx_pct" in locals() else None,
+        "night_source": night_src if "night_src" in locals() else "",
+        "night_note": night_note if "night_note" in locals() else "",
         "nasdaq_futures": _safe_float(bridge.get("nasdaq_futures_change_pct"), None),
         "sp500_futures": _safe_float(bridge.get("sp500_futures_change_pct"), None),
         "us_bias": us_bias,
@@ -2042,6 +2053,9 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     x["隔夜風險等級"] = overnight_info.get("risk")
     x["隔夜偏向"] = overnight_info.get("bias")
     x["隔夜解讀"] = overnight_info.get("comment")
+    x["隔夜資料品質"] = overnight_info.get("quality")
+    x["台指夜盤資料來源"] = overnight_info.get("night_source")
+    x["台指夜盤備援說明"] = overnight_info.get("night_note")
     x["台指夜盤漲跌"] = overnight_info.get("night_tx")
     x["NASDAQ漲跌%"] = overnight_info.get("nasdaq")
     x["S&P500漲跌%"] = overnight_info.get("sp500")
