@@ -291,5 +291,42 @@
       "market": "上櫃"
     }
   ],
-  "0430": []
+  "0430": [
+    {
+      "code": "2374",
+      "name": "佳能",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "3605",
+      "name": "宏致",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "5864",
+      "name": "致和證",
+      "market": "上櫃",
+      "category": "金融保險"
+    },
+    {
+      "code": "6016",
+      "name": "康和證",
+      "market": "上櫃",
+      "category": "金融保險"
+    },
+    {
+      "code": "6234",
+      "name": "高僑",
+      "market": "上櫃",
+      "category": "光電業"
+    },
+    {
+      "code": "6412",
+      "name": "群電",
+      "market": "上市",
+      "category": "電源供應"
+    }
+  ]
 }
