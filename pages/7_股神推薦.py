@@ -8054,10 +8054,19 @@ def _clear_full_table_editor_widget_states():
 
 
 def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
+    """v81：欄位順序快速管理器。
+
+    說明：Streamlit data_editor 的前端拖曳欄位順序不會穩定回寫 Python，
+    因此這裡提供不需額外套件的快速欄位管理：多選批次移動、指定位置、
+    常用版面套用；每次操作都會立即寫入 godpick_column_orders.json 並重建表格。
+    """
     state_key = _column_order_state_key(name)
     applied_key = _k(f"column_order_applied_{name}")
     draft_key = _k(f"column_order_draft_{name}")
     pick_key = _k(f"column_pick_{name}")
+    multi_key = _k(f"column_multi_pick_{name}")
+    target_pos_key = _k(f"column_target_pos_{name}")
+    preset_key = _k(f"column_preset_{name}")
 
     fixed_cols = [c for c in _fixed_columns_for_order_manager(name) if c in available_cols]
     managed_available_cols = [c for c in available_cols if c not in fixed_cols]
@@ -8073,99 +8082,176 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
     st.session_state[draft_key] = draft_order
     st.session_state[state_key] = applied_order
 
+    def _commit_column_order(new_order: list[str], toast_msg: str = "欄位順序已套用並保存。"):
+        new_order = _normalize_column_order(new_order, managed_available_cols, managed_default_cols)
+        st.session_state[applied_key] = new_order
+        st.session_state[state_key] = new_order
+        st.session_state[draft_key] = new_order
+        ok, msgs = _save_persistent_column_order(name, new_order)
+        if name == "full_table":
+            _clear_full_table_editor_widget_states()
+            st.session_state[_k("full_table_layout_version")] = (
+                _column_order_fingerprint(fixed_cols + new_order)
+                + "_"
+                + str(int(time.time() * 1000))
+            )
+        st.session_state[_k(f"column_order_last_message_{name}")] = toast_msg if ok else "欄位順序已套用，但保存可能失敗。"
+        st.session_state[_k(f"column_order_last_save_ok_{name}")] = bool(ok)
+        if not ok:
+            st.session_state[_k(f"column_order_last_save_msgs_{name}")] = msgs
+        st.toast(st.session_state[_k(f"column_order_last_message_{name}")], icon="✅" if ok else "⚠️")
+        st.rerun()
+
+    def _remove_selected(order: list[str], selected: list[str]) -> list[str]:
+        selected_set = set(selected)
+        return [c for c in order if c not in selected_set]
+
+    def _insert_selected(order: list[str], selected: list[str], index: int) -> list[str]:
+        selected_in_order = [c for c in order if c in set(selected)]
+        remain = _remove_selected(order, selected_in_order)
+        index = max(0, min(int(index), len(remain)))
+        return remain[:index] + selected_in_order + remain[index:]
+
+    def _preset_columns(preset_name: str) -> list[str]:
+        presets = {
+            "股神推薦精簡版": [
+                "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分",
+                "上漲機率估計%", "買點狀態", "高分禁買旗標", "高分禁買原因", "實戰買點分數",
+                "最新價", "推薦理由摘要",
+            ],
+            "買點實戰版": [
+                "股票代號", "股票名稱", "推薦等級", "推薦總分", "買點狀態", "進場型態",
+                "實戰買點分數", "支撐距離%", "壓力空間%", "近5日漲幅%", "風險報酬比",
+                "停損距離%", "目標報酬%", "停損價", "賣出目標1", "賣出目標2", "實戰操作建議",
+            ],
+            "風控檢查版": [
+                "股票代號", "股票名稱", "推薦總分", "高分禁買旗標", "高分禁買原因", "追價風險分",
+                "追高風險等級", "長上影風險", "假突破風險", "過熱風險", "大盤橋接風控",
+                "大盤資料品質", "隔夜風險", "隔夜資料品質", "風險說明",
+            ],
+            "隔夜風控版": [
+                "股票代號", "股票名稱", "推薦總分", "上漲機率估計%", "大盤橋接分數",
+                "大盤橋接風控", "大盤交易時段", "隔夜分數", "隔夜風險", "隔夜偏向",
+                "隔夜解讀", "NASDAQ漲跌%", "費半漲跌%", "台指夜盤漲跌", "台指夜盤資料來源",
+                "台指夜盤備援說明",
+            ],
+            "完整除錯版": managed_default_cols,
+        }
+        cols = presets.get(preset_name, managed_default_cols)
+        return [c for c in cols if c in managed_available_cols]
+
     with st.expander(title, expanded=False):
         fixed_msg = "；固定欄位：" + "、".join(fixed_cols) if fixed_cols else ""
-        st.caption("欄位順序會永久記錄；只有按「套用」後才正式保存，到下次重新設定前都不會恢復原始設定" + fixed_msg + "。v80：按左移/右移/移到最前/移到最後後會立即保存並重建表格；不要只拖曳表格欄位。")
+        st.caption(
+            "欄位順序會永久記錄；固定欄位不參與排序" + fixed_msg + "。"
+            "v81：提供批次移動、指定位置與常用版面；不要只拖曳表格欄位，拖曳結果無法穩定永久保存。"
+        )
+
+        last_msg = st.session_state.get(_k(f"column_order_last_message_{name}"), "")
+        if last_msg:
+            if st.session_state.get(_k(f"column_order_last_save_ok_{name}"), True):
+                st.success(last_msg)
+            else:
+                st.warning(last_msg)
+
+        p1, p2 = st.columns([2, 1])
+        with p1:
+            preset = st.selectbox(
+                "快速套用常用欄位版面",
+                ["請選擇", "股神推薦精簡版", "買點實戰版", "風控檢查版", "隔夜風控版", "完整除錯版"],
+                key=preset_key,
+            )
+        with p2:
+            if st.button("套用版面", key=_k(f"apply_preset_{name}"), use_container_width=True, type="primary"):
+                if preset and preset != "請選擇":
+                    _commit_column_order(_preset_columns(preset), f"已套用「{preset}」欄位版面。")
+                else:
+                    st.warning("請先選擇一個常用版面。")
+
         if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
             st.session_state[pick_key] = draft_order[0] if draft_order else ""
-        picked = st.selectbox("選擇欄位", draft_order, key=pick_key) if draft_order else ""
+        picked = st.selectbox("單一欄位快速移動", draft_order, key=pick_key) if draft_order else ""
 
         b1, b2, b3, b4, b5 = st.columns(5)
-        changed = False
-
         if draft_order and picked:
             idx = draft_order.index(picked)
             with b1:
                 if st.button("左移", key=_k(f"move_left_{name}"), use_container_width=True) and idx > 0:
-                    draft_order[idx - 1], draft_order[idx] = draft_order[idx], draft_order[idx - 1]
-                    changed = True
+                    new_order = draft_order.copy()
+                    new_order[idx - 1], new_order[idx] = new_order[idx], new_order[idx - 1]
+                    _commit_column_order(new_order, f"已將「{picked}」左移。")
             with b2:
                 if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(draft_order) - 1:
-                    draft_order[idx + 1], draft_order[idx] = draft_order[idx], draft_order[idx + 1]
-                    changed = True
+                    new_order = draft_order.copy()
+                    new_order[idx + 1], new_order[idx] = new_order[idx], new_order[idx + 1]
+                    _commit_column_order(new_order, f"已將「{picked}」右移。")
             with b3:
                 if st.button("移到最前", key=_k(f"move_front_{name}"), use_container_width=True):
-                    draft_order.remove(picked)
-                    draft_order.insert(0, picked)
-                    changed = True
+                    new_order = draft_order.copy()
+                    new_order.remove(picked)
+                    new_order.insert(0, picked)
+                    _commit_column_order(new_order, f"已將「{picked}」移到最前。")
             with b4:
                 if st.button("移到最後", key=_k(f"move_last_{name}"), use_container_width=True):
-                    draft_order.remove(picked)
-                    draft_order.append(picked)
-                    changed = True
+                    new_order = draft_order.copy()
+                    new_order.remove(picked)
+                    new_order.append(picked)
+                    _commit_column_order(new_order, f"已將「{picked}」移到最後。")
             with b5:
                 if st.button("恢復原始設定", key=_k(f"move_restore_default_{name}"), use_container_width=True):
-                    draft_order = _normalize_column_order(managed_default_cols, managed_available_cols, managed_default_cols)
-                    changed = True
+                    _commit_column_order(managed_default_cols, "已恢復原始欄位順序。")
 
-        a1, a2, a3 = st.columns([1.2, 1.2, 3])
-        with a1:
-            apply_clicked = st.button("套用", key=_k(f"apply_column_order_{name}"), use_container_width=True, type="primary")
-        with a2:
-            cancel_clicked = st.button("取消暫存", key=_k(f"cancel_column_order_{name}"), use_container_width=True)
-        with a3:
-            if draft_order != applied_order:
-                st.warning("欄位順序已有暫存變更；按「套用」後才會永久記錄。")
-            else:
-                st.caption("目前欄位順序已套用並會永久保留。")
+        st.divider()
+        st.markdown("**v81 批次欄位快速管理**")
 
-        if changed:
-            # v80：欄位移動後立即套用並永久保存。
-            # 原因：使用者反映「移動後再按套用」仍可能因 Streamlit rerun / data_editor 前端狀態而需要重複設定。
-            # 這裡改成每次左移、右移、移到最前、移到最後、恢復原始設定，都直接保存並重建完整推薦表。
-            applied_order = _normalize_column_order(draft_order, managed_available_cols, managed_default_cols)
-            st.session_state[applied_key] = applied_order
-            st.session_state[state_key] = applied_order
-            st.session_state[draft_key] = applied_order
-            ok, msgs = _save_persistent_column_order(name, applied_order)
-            if name == "full_table":
-                _clear_full_table_editor_widget_states()
-                st.session_state[_k("full_table_layout_version")] = _column_order_fingerprint(fixed_cols + applied_order) + "_" + str(int(time.time() * 1000)) + "_" + str(int(time.time() * 1000))
-            st.toast("欄位順序已即時套用並保存。" if ok else "欄位順序已套用，但保存可能失敗。", icon="✅" if ok else "⚠️")
-            st.rerun()
+        selected_cols = st.multiselect(
+            "一次選多個欄位",
+            options=draft_order,
+            default=[c for c in st.session_state.get(multi_key, []) if c in draft_order],
+            key=multi_key,
+            help="可一次選多個欄位，批次移到最前、最後、勾選後面或指定位置。",
+        )
 
-        if apply_clicked:
-            applied_order = _normalize_column_order(draft_order, managed_available_cols, managed_default_cols)
-            st.session_state[applied_key] = applied_order
-            st.session_state[state_key] = applied_order
-            st.session_state[draft_key] = applied_order
-            ok, msgs = _save_persistent_column_order(name, applied_order)
+        target_default = int(st.session_state.get(target_pos_key, 1) or 1)
+        target_pos = st.number_input(
+            "指定目標位置（1 = 第一個非固定欄位；勾選固定在最前不受影響）",
+            min_value=1,
+            max_value=max(1, len(draft_order)),
+            value=max(1, min(target_default, max(1, len(draft_order)))),
+            step=1,
+            key=target_pos_key,
+        )
 
-            # v78：清掉所有完整推薦表 data_editor 舊狀態，並提高 layout 版本。
-            if name == "full_table":
-                _clear_full_table_editor_widget_states()
-                st.session_state[_k("full_table_layout_version")] = _column_order_fingerprint(fixed_cols + applied_order) + "_" + str(int(time.time() * 1000))
+        q1, q2, q3, q4 = st.columns(4)
+        with q1:
+            if st.button("批次移到最前", key=_k(f"batch_front_{name}"), use_container_width=True, disabled=not selected_cols):
+                new_order = _insert_selected(draft_order, selected_cols, 0)
+                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位批次移到最前。")
+        with q2:
+            if st.button("批次移到最後", key=_k(f"batch_last_{name}"), use_container_width=True, disabled=not selected_cols):
+                remain = _remove_selected(draft_order, selected_cols)
+                selected_in_order = [c for c in draft_order if c in set(selected_cols)]
+                _commit_column_order(remain + selected_in_order, f"已將 {len(selected_cols)} 個欄位批次移到最後。")
+        with q3:
+            if st.button("移到勾選後面", key=_k(f"batch_after_checkbox_{name}"), use_container_width=True, disabled=not selected_cols):
+                new_order = _insert_selected(draft_order, selected_cols, 0)
+                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到勾選後面。")
+        with q4:
+            if st.button("移到指定位置", key=_k(f"batch_to_pos_{name}"), use_container_width=True, disabled=not selected_cols):
+                new_order = _insert_selected(draft_order, selected_cols, int(target_pos) - 1)
+                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到第 {int(target_pos)} 個位置。")
 
-            st.success("欄位順序已套用並永久記錄，完整推薦表將依新順序重建。" if ok else "欄位順序已套用，但永久記錄失敗。")
-            with st.expander("欄位設定保存明細", expanded=False):
-                for msg in msgs:
-                    st.write(f"- {msg}")
-            st.rerun()
+        c1, c2 = st.columns([1.3, 3])
+        with c1:
+            if st.button("儲存目前順序", key=_k(f"apply_column_order_{name}"), use_container_width=True):
+                _commit_column_order(draft_order, "目前欄位順序已重新儲存。")
+        with c2:
+            st.caption("提示：表格本身的滑鼠拖曳欄位只會改前端視覺，不會穩定回寫；請用本管理器保存。")
 
-        if cancel_clicked:
-            st.session_state[draft_key] = applied_order
-            st.info("已取消暫存變更，回到目前已套用欄位順序。")
-            st.rerun()
-
-        preview_order = fixed_cols + draft_order
-        st.caption("目前暫存欄位順序：" + " ｜ ".join(preview_order[:20]) + (" ..." if len(preview_order) > 20 else ""))
+        preview_order = fixed_cols + st.session_state.get(applied_key, applied_order)
+        st.caption("目前已保存欄位順序：" + " ｜ ".join(preview_order[:24]) + (" ..." if len(preview_order) > 24 else ""))
 
     return fixed_cols + st.session_state.get(applied_key, applied_order)
-
-
-# =========================================================
-# Main
-# =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     inject_pro_theme()
@@ -9219,7 +9305,7 @@ def main():
         st.session_state[full_editor_code_map_key] = [
             _normalize_code(x) for x in full_work_df["股票代號"].astype(str).tolist()
         ]
-        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v80：欄位移動後立即保存並強制重建。")
+        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v81：批次欄位快速管理並即時保存。")
 
         full_editor_df = st.data_editor(
             _format_df(full_work_df),
