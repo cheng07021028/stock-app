@@ -732,6 +732,28 @@ def _render_market_snapshot_home_v39():
     if isinstance(diagnostics, list) and diagnostics:
         with st.expander("大盤資料來源診斷", expanded=False):
             st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
+
+# =========================================================
+# v75：首頁隔夜風控摘要
+# 只讀 01 大盤趨勢輸出的快照檔，不重新連外抓資料。
+# =========================================================
+def _render_overnight_snapshot_home_v75():
+    snapshot = _read_market_snapshot_v39()
+    if not isinstance(snapshot, dict) or not snapshot:
+        return
+    has_any = any(k in snapshot for k in ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sox_change_pct", "macro_one_click_finished_at"])
+    if not has_any:
+        return
+    render_pro_section("隔夜國際盤風控｜v75", "讀取 01 大盤趨勢的夜盤 / 美盤 / 費半 / 匯率摘要，不重新抓資料。")
+    render_pro_kpi_row([
+        {"label":"隔夜分數", "value":_fmt_market_num_v39(snapshot.get("overnight_score"),1), "delta":f"風險：{snapshot.get('overnight_risk_level','—')}", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"隔夜偏向", "value":str(snapshot.get("overnight_bias") or "—"), "delta":f"更新：{snapshot.get('macro_one_click_finished_at') or snapshot.get('updated_at') or '—'}", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"Nasdaq", "value":_fmt_market_signed_v39(snapshot.get("nasdaq_change_pct"),2,"%"), "delta":"美股科技參考", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"費半", "value":_fmt_market_signed_v39(snapshot.get("sox_change_pct"),2,"%"), "delta":"半導體參考", "delta_class":"pro-kpi-delta-flat"},
+        {"label":"台指夜盤", "value":_fmt_market_signed_v39(snapshot.get("night_futures_change_pct"),2,"%"), "delta":str(snapshot.get("night_futures_source") or "—"), "delta_class":"pro-kpi-delta-flat"},
+    ])
+    render_pro_info_card("隔夜股神解讀", [("隔夜說明", snapshot.get("overnight_comment") or "—"), ("台指夜盤來源", snapshot.get("night_futures_source") or "—"), ("夜盤備援", snapshot.get("night_futures_fallback_note") or "—"), ("資料品質", snapshot.get("overnight_data_quality") or snapshot.get("data_quality") or "—")], chips=["v75", "overnight", "只讀快照"])
+
 def _render_home_page():
     watchlist = _load_watchlist_data()
     overview_df = _build_overview_df(watchlist)
@@ -757,6 +779,7 @@ def _render_home_page():
     )
 
     _render_market_snapshot_home_v39()
+    _render_overnight_snapshot_home_v75()
 
     render_pro_kpi_row(
         [
