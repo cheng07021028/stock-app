@@ -288,5 +288,168 @@
       "market": "上市"
     }
   ],
-  "0501": []
+  "0501": [
+    {
+      "code": "1595",
+      "name": "川寶",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2070",
+      "name": "精湛",
+      "market": "上櫃",
+      "category": "電機機械"
+    },
+    {
+      "code": "2233",
+      "name": "宇隆",
+      "market": "上市",
+      "category": "汽車"
+    },
+    {
+      "code": "2328",
+      "name": "廣宇",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2342",
+      "name": "茂矽",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "2374",
+      "name": "佳能",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "2449",
+      "name": "京元電子",
+      "market": "上市",
+      "category": "封測"
+    },
+    {
+      "code": "3016",
+      "name": "嘉晶",
+      "market": "上市",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "3135",
+      "name": "凌航",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "3356",
+      "name": "奇偶",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "3511",
+      "name": "矽瑪",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3581",
+      "name": "博磊",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3605",
+      "name": "宏致",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3680",
+      "name": "家登",
+      "market": "上櫃",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "3707",
+      "name": "漢磊",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "4563",
+      "name": "百德",
+      "market": "上櫃",
+      "category": "電機機械"
+    },
+    {
+      "code": "4950",
+      "name": "金耘國際",
+      "market": "上櫃",
+      "category": "鋼鐵"
+    },
+    {
+      "code": "4951",
+      "name": "精拓科",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5464",
+      "name": "霖宏",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6207",
+      "name": "雷科",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6234",
+      "name": "高僑",
+      "market": "上櫃",
+      "category": "光電業"
+    },
+    {
+      "code": "6485",
+      "name": "點序",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6695",
+      "name": "芯鼎",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "6823",
+      "name": "濾能",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6861",
+      "name": "睿生光電",
+      "market": "上市",
+      "category": "其他電子"
+    },
+    {
+      "code": "6953",
+      "name": "家碩",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8046",
+      "name": "南電",
+      "market": "上市",
+      "category": "PCB載板"
+    }
+  ]
 }
