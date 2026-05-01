@@ -7559,6 +7559,34 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
     if isinstance(cat_export, pd.DataFrame) and not cat_export.empty:
         cat_sort_cols = ["族群資金流分數", "類股熱度分數", "類股平均總分", "股票數"]
         cat_export = _safe_sort_export_df(cat_export, cat_sort_cols, [False, False, False, False]).head(top_n).copy()
+    else:
+        # v72：即使 _compute_category_strength 失敗，也直接從推薦表用最基本欄位重建類股榜，避免分頁空白。
+        try:
+            base = rec_df.copy()
+            cat_col = "類別" if "類別" in base.columns else None
+            score_col = "推薦總分" if "推薦總分" in base.columns else None
+            if cat_col:
+                if score_col:
+                    base[score_col] = pd.to_numeric(base[score_col], errors="coerce")
+                    cat_export = (
+                        base.groupby(cat_col, dropna=False)
+                        .agg(股票數=(cat_col, "size"), 類股平均總分=(score_col, "mean"), 類股最高分=(score_col, "max"))
+                        .reset_index()
+                        .rename(columns={cat_col: "類別"})
+                        .sort_values(["類股平均總分", "股票數"], ascending=[False, False])
+                        .head(top_n)
+                    )
+                else:
+                    cat_export = (
+                        base.groupby(cat_col, dropna=False)
+                        .size()
+                        .reset_index(name="股票數")
+                        .rename(columns={cat_col: "類別"})
+                        .sort_values("股票數", ascending=False)
+                        .head(top_n)
+                    )
+        except Exception:
+            cat_export = pd.DataFrame()
 
     # v70 修正：同類股領先榜欄位兼容。
     # 舊推薦紀錄可能缺少部分欄位，過去直接取欄會導致空白/失敗。
@@ -7593,41 +7621,119 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
 
     return rec_export, cat_export, leader_export, factor_export
 
-@st.cache_data(ttl=300, show_spinner=False)
+
+def _excel_safe_value(v):
+    """Excel 匯出專用：把 pandas/numpy 型別轉成 openpyxl 可寫入型別。"""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    try:
+        if hasattr(v, "item"):
+            v = v.item()
+    except Exception:
+        pass
+    if isinstance(v, (list, tuple, set, dict)):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    return v
+
+
+def _excel_safe_df(df: pd.DataFrame, fallback_title: str = "無資料") -> pd.DataFrame:
+    """
+    v72：Excel 匯出防空白。
+    1) 移除重複欄名，避免 Arrow / Excel 顯示異常。
+    2) MultiIndex 欄位轉字串。
+    3) 空表仍寫入提示列，避免 Excel 分頁完全空白造成誤判。
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame({"狀態": [fallback_title]})
+    work = df.copy()
+    try:
+        work.columns = [" / ".join(map(str, c)) if isinstance(c, tuple) else str(c) for c in work.columns]
+    except Exception:
+        work.columns = [str(c) for c in work.columns]
+    try:
+        work = work.loc[:, ~pd.Index(work.columns).duplicated()].copy()
+    except Exception:
+        pass
+    if work.empty:
+        return pd.DataFrame({"狀態": [fallback_title]})
+    real_cols = [c for c in work.columns if str(c).strip() and str(c) != "勾選"]
+    if not real_cols:
+        return pd.DataFrame({"狀態": [fallback_title]})
+    return work.reset_index(drop=True)
+
+
+def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
+    """v72：不用 pandas ExcelWriter，改用 openpyxl 逐格寫入，避免下載後整個分頁空白。"""
+    safe_name = str(sheet_name)[:31]
+    ws = wb.create_sheet(title=safe_name)
+    work = _excel_safe_df(df, fallback_title=fallback_title)
+    headers = [str(c) for c in work.columns]
+    ws.append(headers)
+    try:
+        for cell in ws[1]:
+            cell.font = cell.font.copy(bold=True)
+    except Exception:
+        pass
+    for _, row in work.iterrows():
+        ws.append([_excel_safe_value(row.get(c, "")) for c in work.columns])
+    try:
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = col_cells[0].column_letter
+            for cell in col_cells:
+                cell_val = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, len(cell_val))
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 42)
+    except Exception:
+        pass
+    return ws
+
+
 def _build_excel_bytes(
     rec_export: pd.DataFrame,
     cat_export: pd.DataFrame,
     leader_export: pd.DataFrame,
     factor_export: pd.DataFrame,
 ) -> bytes:
+    """
+    v72 Excel 防空白匯出核心。
+    前版使用 pandas ExcelWriter + cache，部分 Streamlit Cloud 狀況會下載到空白分頁。
+    這版改成 openpyxl 逐格寫入，且取消快取，確保每次按下載都是目前畫面資料。
+    """
+    from openpyxl import Workbook
+
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        if rec_export is not None:
-            rec_export.to_excel(writer, sheet_name="完整推薦表", index=False)
-        if cat_export is not None:
-            cat_export.to_excel(writer, sheet_name="類股強度榜", index=False)
-        if leader_export is not None:
-            leader_export.to_excel(writer, sheet_name="同類股領先榜", index=False)
-        if factor_export is not None:
-            factor_export.to_excel(writer, sheet_name="自動因子榜", index=False)
+    wb = Workbook()
+    try:
+        default_ws = wb.active
+        wb.remove(default_ws)
+    except Exception:
+        pass
 
-        try:
-            for ws in writer.book.worksheets:
-                ws.freeze_panes = "A2"
-                for col_cells in ws.columns:
-                    max_len = 0
-                    col_letter = col_cells[0].column_letter
-                    for cell in col_cells:
-                        cell_val = "" if cell.value is None else str(cell.value)
-                        if len(cell_val) > max_len:
-                            max_len = len(cell_val)
-                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 40)
-        except Exception:
-            pass
+    _write_df_to_ws(wb, "完整推薦表", rec_export, "完整推薦表沒有取得資料，請重新跑一次股神推薦後再匯出。")
+    _write_df_to_ws(wb, "類股強度榜", cat_export, "類股強度榜沒有取得資料，請確認推薦結果內有類別/推薦總分欄位。")
+    _write_df_to_ws(wb, "同類股領先榜", leader_export, "同類股領先榜沒有取得資料，請確認推薦結果內有類別/推薦總分欄位。")
+    _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
+    diag = pd.DataFrame([
+        {"分頁": "完整推薦表", "列數": 0 if rec_export is None else len(rec_export), "欄數": 0 if rec_export is None else len(rec_export.columns)},
+        {"分頁": "類股強度榜", "列數": 0 if cat_export is None else len(cat_export), "欄數": 0 if cat_export is None else len(cat_export.columns)},
+        {"分頁": "同類股領先榜", "列數": 0 if leader_export is None else len(leader_export), "欄數": 0 if leader_export is None else len(leader_export.columns)},
+        {"分頁": "自動因子榜", "列數": 0 if factor_export is None else len(factor_export), "欄數": 0 if factor_export is None else len(factor_export.columns)},
+    ])
+    _write_df_to_ws(wb, "匯出診斷", diag, "匯出診斷無資料")
+
+    wb.save(output)
     output.seek(0)
     return output.getvalue()
-
 
 def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
     if rec_df is None or rec_df.empty:
@@ -9457,11 +9563,37 @@ def main():
                     export_target_df.insert(0, "勾選", False)
             export_target_df = export_target_df[[c for c in export_target_cols if c in export_target_df.columns]].copy()
             export_target_for_excel = _format_df(export_target_df.copy()) if isinstance(export_target_df, pd.DataFrame) and not export_target_df.empty else export_target_df
+            # v72：若欄位管理狀態異常導致只剩「勾選」或空表，直接回退用完整 rec_df，避免 Excel 完整推薦表空白。
+            try:
+                _real_export_cols = [c for c in export_target_for_excel.columns if str(c) != "勾選"] if isinstance(export_target_for_excel, pd.DataFrame) else []
+                if (not isinstance(export_target_for_excel, pd.DataFrame)) or export_target_for_excel.empty or len(_real_export_cols) == 0:
+                    export_target_for_excel = _format_df((selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()))
+            except Exception:
+                export_target_for_excel = _format_df((selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()))
+
+            # v71 修正：完整推薦表區塊的「匯出完整 Excel / 匯出勾選 Excel」過去只匯出完整推薦表，
+            # 類股強度榜、同類股領先榜、自動因子榜被傳入空 DataFrame，所以 Excel 分頁會沒有資料。
+            # 這裡改成同時建立三個榜單分頁；若有勾選則依勾選資料輸出，未勾選則依全部推薦結果輸出。
+            export_source_for_rank = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()
+            if isinstance(export_source_for_rank, pd.DataFrame) and "勾選" in export_source_for_rank.columns:
+                export_source_for_rank = export_source_for_rank.drop(columns=["勾選"], errors="ignore")
+
+            try:
+                full_export_order = [c for c in export_target_for_excel.columns if c != "勾選"] if isinstance(export_target_for_excel, pd.DataFrame) else None
+                _, cat_export_full, leader_export_full, factor_export_full = _build_export_views(
+                    export_source_for_rank,
+                    category_strength_df if len(full_picked_codes) == 0 else pd.DataFrame(),
+                    top_n=max(int(top_n or 200), len(export_source_for_rank) if isinstance(export_source_for_rank, pd.DataFrame) else 200),
+                    full_order=full_export_order,
+                )
+            except Exception:
+                cat_export_full, leader_export_full, factor_export_full = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
             export_bytes_full_table = _build_excel_bytes(
                 rec_export=export_target_for_excel,
-                cat_export=pd.DataFrame(),
-                leader_export=pd.DataFrame(),
-                factor_export=pd.DataFrame(),
+                cat_export=cat_export_full,
+                leader_export=leader_export_full,
+                factor_export=factor_export_full,
             )
             export_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             export_label = "匯出勾選 Excel" if len(full_picked_codes) > 0 else "匯出完整 Excel"
