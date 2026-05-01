@@ -60,6 +60,34 @@ def _safe_float(v: Any, default=None):
 
 
 
+
+def _fmt_price(v: Any) -> str:
+    """圖表 hover 安全格式化價格。"""
+    x = _safe_float(v, None)
+    if x is None:
+        return "—"
+    return f"{x:,.2f}"
+
+
+def _fmt_volume(v: Any) -> str:
+    """圖表 hover 安全格式化成交量。"""
+    x = _safe_float(v, None)
+    if x is None:
+        return "—"
+    try:
+        return f"{int(round(x)):,.0f}"
+    except Exception:
+        return f"{x:,.0f}"
+
+
+def _fmt_pct(v: Any) -> str:
+    """圖表 hover 安全格式化百分比。"""
+    x = _safe_float(v, None)
+    if x is None:
+        return "—"
+    return f"{x:+.2f}%"
+
+
 def _ensure_radar_dict(radar_obj: Any) -> dict[str, Any]:
     """
     相容 utils.compute_radar_scores 不同版本：
@@ -1243,7 +1271,20 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         specs=[[{"secondary_y": False}], [{"secondary_y": False}]],
     )
 
-    customdata = work[["開盤價", "最高價", "最低價", "收盤價"]].round(2).to_numpy()
+    # v73：建立完整 hover 資訊，避免 Plotly/Streamlit 只顯示部分 OHLC。
+    prev_close = work["收盤價"].shift(1)
+    first_base = work["開盤價"].replace(0, pd.NA)
+    work["_漲跌"] = work["收盤價"] - prev_close
+    work.loc[work["_漲跌"].isna(), "_漲跌"] = work["收盤價"] - work["開盤價"]
+    work["_漲跌幅"] = (work["收盤價"] / prev_close.replace(0, pd.NA) - 1) * 100
+    work.loc[work["_漲跌幅"].isna(), "_漲跌幅"] = (work["收盤價"] / first_base - 1) * 100
+    work["_振幅"] = ((work["最高價"] - work["最低價"]) / prev_close.replace(0, pd.NA)) * 100
+    work.loc[work["_振幅"].isna(), "_振幅"] = ((work["最高價"] - work["最低價"]) / first_base) * 100
+    if "成交股數" not in work.columns:
+        work["成交股數"] = 0
+
+    hover_cols = ["開盤價", "最高價", "最低價", "收盤價", "成交股數", "_漲跌", "_漲跌幅", "_振幅"]
+    customdata = work[hover_cols].round(4).to_numpy()
 
     fig.add_trace(
         go.Candlestick(
@@ -1262,7 +1303,11 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                 "開盤：%{customdata[0]:,.2f}<br>"
                 "最高：%{customdata[1]:,.2f}<br>"
                 "最低：%{customdata[2]:,.2f}<br>"
-                "收盤：%{customdata[3]:,.2f}<extra>K線</extra>"
+                "收盤：%{customdata[3]:,.2f}<br>"
+                "成交量：%{customdata[4]:,.0f}<br>"
+                "漲跌：%{customdata[5]:+,.2f}<br>"
+                "漲跌幅：%{customdata[6]:+.2f}%<br>"
+                "振幅：%{customdata[7]:.2f}%<extra>K線完整資訊</extra>"
             ),
         ),
         row=1,
@@ -1394,6 +1439,12 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
 
     latest_close = float(work["收盤價"].iloc[-1])
     latest_date = work["日期"].iloc[-1]
+    latest_open = float(work["開盤價"].iloc[-1])
+    latest_high = float(work["最高價"].iloc[-1])
+    latest_low = float(work["最低價"].iloc[-1])
+    latest_vol = float(work["成交股數"].iloc[-1]) if "成交股數" in work.columns else 0.0
+    latest_chg = _safe_float(work["_漲跌"].iloc[-1], 0) or 0
+    latest_pct = _safe_float(work["_漲跌幅"].iloc[-1], 0) or 0
     fig.add_hline(
         y=latest_close,
         line=dict(color="rgba(15,23,42,0.55)", width=1.2, dash="dot"),
@@ -1401,6 +1452,26 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         annotation_position="right",
         row=1,
         col=1,
+    )
+    # v73：右上角固定顯示最新完整資訊，不需滑鼠 hover 也能看到重點。
+    try:
+        latest_date_text = pd.to_datetime(latest_date).strftime("%Y-%m-%d")
+    except Exception:
+        latest_date_text = str(latest_date)
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.995, y=0.995,
+        xanchor="right", yanchor="top",
+        align="left",
+        showarrow=False,
+        bgcolor="rgba(255,255,255,0.90)",
+        bordercolor="rgba(148,163,184,0.45)",
+        borderwidth=1,
+        font=dict(size=12, color="#0f172a"),
+        text=(
+            f"<b>最新交易日 {latest_date_text}</b><br>"
+            f"開 {latest_open:,.2f}｜高 {latest_high:,.2f}｜低 {latest_low:,.2f}｜收 {latest_close:,.2f}<br>"
+            f"漲跌 {latest_chg:+,.2f}｜漲跌幅 {latest_pct:+.2f}%｜量 {_fmt_volume(latest_vol)}"
+        ),
     )
 
     fig.update_layout(
@@ -1410,11 +1481,11 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             xanchor="left",
             font=dict(size=20, color="#0f172a"),
         ),
-        height=820,
-        margin=dict(l=18, r=24, t=58, b=26),
+        height=900,
+        margin=dict(l=20, r=145, t=72, b=34),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
-        hovermode="x unified",
+        hovermode="x",
         hoverlabel=dict(bgcolor="rgba(15,23,42,0.92)", font_size=13, font_color="#ffffff"),
         legend=dict(
             orientation="v",
@@ -2100,8 +2171,15 @@ def main():
         st.plotly_chart(
             _main_fig,
             use_container_width=True,
-            config={"displaylogo": False, "scrollZoom": True, "responsive": True, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            config={
+                "displaylogo": False,
+                "scrollZoom": True,
+                "responsive": True,
+                "displayModeBar": True,
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+            },
         )
+        st.caption("v73：主圖已改為完整 hover，滑鼠移到 K 棒可顯示開高低收、成交量、漲跌、漲跌幅與振幅；右上角固定顯示最新交易日完整資訊。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
