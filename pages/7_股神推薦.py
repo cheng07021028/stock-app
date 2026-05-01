@@ -7507,6 +7507,34 @@ def _get_full_table_order_for_export(rec_df: pd.DataFrame) -> list[str]:
     return [c for c in full_order if c in rec_df.columns]
 
 
+def _export_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Excel 匯出專用：只取存在欄位；如果全缺，回傳原表，避免分頁空白。"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    use_cols = [c for c in cols if c in df.columns]
+    if not use_cols:
+        return df.copy()
+    return df[use_cols].copy()
+
+
+def _safe_sort_export_df(df: pd.DataFrame, sort_cols: list[str], ascending: list[bool] | None = None) -> pd.DataFrame:
+    """Excel 匯出專用：排序欄位不存在時自動跳過，避免三個榜單空白或錯誤。"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    real_cols = [c for c in sort_cols if c in work.columns]
+    if not real_cols:
+        return work.reset_index(drop=True)
+    real_asc = []
+    if ascending is None:
+        real_asc = [False] * len(real_cols)
+    else:
+        for c in real_cols:
+            idx = sort_cols.index(c)
+            real_asc.append(ascending[idx] if idx < len(ascending) else False)
+    return work.sort_values(real_cols, ascending=real_asc).reset_index(drop=True)
+
+
 def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int, full_order: list[str] | None = None):
     if rec_df is None or rec_df.empty:
         empty = pd.DataFrame()
@@ -7517,20 +7545,53 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
 
     # Excel「完整推薦表」必須和畫面上的完整推薦表欄位一致。
     rec_export = rec_df[[c for c in full_order if c in rec_df.columns]].copy() if full_order else rec_df.copy()
-    leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
-    factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
-    cat_export = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
 
-    leader_export = leader_df[
-        ["股票代號", "股票名稱", "類別", "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數", "爆發力分數", "飆股起漲分數", "起漲等級", "起漲摘要", "個股原始總分", "類股平均總分", "類股熱度分數", "族群資金流分數", "強勢族群等級", "推薦總分", "推薦理由摘要"]
-    ].head(top_n).copy() if not leader_df.empty else pd.DataFrame()
+    # v70 修正：類股強度榜不能只依賴 session_state。
+    # 如果快取或舊資料沒有 category_strength_df，就直接用本次推薦結果重算，避免 Excel 分頁空白。
+    if isinstance(category_strength_df, pd.DataFrame) and not category_strength_df.empty:
+        cat_export = category_strength_df.copy()
+    else:
+        try:
+            cat_export = _compute_category_strength(rec_df.copy())
+        except Exception:
+            cat_export = pd.DataFrame()
 
-    factor_export = factor_rank[
-        ["股票代號", "股票名稱", "類別", "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "自動因子摘要"]
-    ].head(top_n).copy() if not factor_rank.empty else pd.DataFrame()
+    if isinstance(cat_export, pd.DataFrame) and not cat_export.empty:
+        cat_sort_cols = ["族群資金流分數", "類股熱度分數", "類股平均總分", "股票數"]
+        cat_export = _safe_sort_export_df(cat_export, cat_sort_cols, [False, False, False, False]).head(top_n).copy()
+
+    # v70 修正：同類股領先榜欄位兼容。
+    # 舊推薦紀錄可能缺少部分欄位，過去直接取欄會導致空白/失敗。
+    leader_df = _safe_sort_export_df(
+        rec_df,
+        ["是否領先同類股", "推薦總分", "類股熱度分數", "同類股領先幅度", "類股內排名"],
+        [False, False, False, False, True],
+    )
+    leader_cols = [
+        "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
+        "是否領先同類股", "同類股領先幅度", "市場環境分數", "型態名稱", "型態突破分數",
+        "爆發力分數", "飆股起漲分數", "起漲前兆分數", "起漲等級", "起漲摘要",
+        "個股原始總分", "類股平均總分", "類股熱度分數", "族群資金流分數",
+        "強勢族群等級", "推薦總分", "上漲機率估計%", "買點分級", "推薦理由摘要",
+    ]
+    leader_export = _export_cols(leader_df, leader_cols).head(top_n).copy()
+
+    # v70 修正：自動因子榜欄位兼容。
+    # 若 EPS/營收/獲利代理欄位不存在，至少用自動因子總分、推薦總分、技術分數排序並匯出。
+    factor_rank = _safe_sort_export_df(
+        rec_df,
+        ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "推薦總分", "起漲前兆分數"],
+        [False, False, False, False, False, False],
+    )
+    factor_cols = [
+        "股票代號", "股票名稱", "市場別", "類別", "市場環境分數", "型態名稱", "型態突破分數",
+        "爆發等級", "爆發力分數", "自動因子總分", "EPS代理分數", "營收動能代理分數",
+        "獲利代理分數", "大戶鎖碼代理分數", "法人連買代理分數", "起漲前兆分數",
+        "交易可行分數", "推薦總分", "上漲機率估計%", "自動因子摘要", "推薦理由摘要",
+    ]
+    factor_export = _export_cols(factor_rank, factor_cols).head(top_n).copy()
 
     return rec_export, cat_export, leader_export, factor_export
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _build_excel_bytes(
