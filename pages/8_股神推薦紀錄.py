@@ -1268,10 +1268,19 @@ def _get_forward_metrics(
 
 
 # =========================================================
-# V68：推薦後績效更新加速核心
-# 原本每一筆推薦紀錄都各自抓一次歷史K線，資料多時會很慢且容易卡住。
-# 本版改成「同一股票同一市場只抓一次區間K線」，再用本機 DataFrame 快速計算多筆推薦後績效。
+# V71：推薦後績效更新快取防卡核心
+# 核心原則：
+# 1. 同股票本批只抓一次 K 線。
+# 2. 同股票跨 rerun 優先使用本機 / session 快取。
+# 3. 單批限制「股票數」而不是只限制筆數，避免 150 筆分散成 80 檔時卡死。
+# 4. 歷史資料失敗會短時間黑名單，避免一直重試同一檔。
+# 5. 推薦日太近、交易日不足者直接標記等待，不硬抓。
 # =========================================================
+
+PERF_HISTORY_CACHE_FILE = "godpick_perf_history_cache.json"
+PERF_FAIL_RETRY_HOURS = 6
+PERF_CACHE_MAX_STOCKS = 180
+
 
 def _normalize_history_df_for_perf(df: pd.DataFrame) -> pd.DataFrame:
     """統一歷史K線欄位名稱，供推薦後績效批次計算使用。"""
@@ -1289,16 +1298,113 @@ def _normalize_history_df_for_perf(df: pd.DataFrame) -> pd.DataFrame:
             rename_map[c] = "最高價"
         elif low in {"low", "最低價", "最低"}:
             rename_map[c] = "最低價"
+        elif low in {"open", "開盤價", "開盤"}:
+            rename_map[c] = "開盤價"
+        elif low in {"volume", "成交量", "vol"}:
+            rename_map[c] = "成交量"
     if rename_map:
         temp = temp.rename(columns=rename_map)
     if "日期" not in temp.columns or "收盤價" not in temp.columns:
         return pd.DataFrame()
     temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
-    for c in ["收盤價", "最高價", "最低價"]:
+    for c in ["開盤價", "收盤價", "最高價", "最低價", "成交量"]:
         if c in temp.columns:
             temp[c] = pd.to_numeric(temp[c], errors="coerce")
-    temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
+    keep_cols = [c for c in ["日期", "開盤價", "最高價", "最低價", "收盤價", "成交量"] if c in temp.columns]
+    temp = temp[keep_cols].dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
     return temp
+
+
+def _perf_cache_load() -> dict[str, Any]:
+    """讀取 V71 歷史K線快取；session 優先，本機 JSON 備援。"""
+    key = _k("v71_perf_history_cache")
+    if isinstance(st.session_state.get(key), dict):
+        return st.session_state[key]
+    payload = _safe_json_read_local(PERF_HISTORY_CACHE_FILE, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload.setdefault("version", "v71")
+    payload.setdefault("history", {})
+    payload.setdefault("fail", {})
+    payload.setdefault("updated_at", _now_text())
+    st.session_state[key] = payload
+    return payload
+
+
+def _perf_cache_save(payload: dict[str, Any]) -> None:
+    """寫回 V71 歷史K線快取。失敗不影響主流程。"""
+    if not isinstance(payload, dict):
+        return
+    payload.setdefault("version", "v71")
+    payload.setdefault("history", {})
+    payload.setdefault("fail", {})
+    payload["updated_at"] = _now_text()
+    # 控制快取大小，避免 JSON 變太大拖慢 Streamlit Cloud。
+    hist = payload.get("history", {})
+    if isinstance(hist, dict) and len(hist) > PERF_CACHE_MAX_STOCKS:
+        items = sorted(hist.items(), key=lambda kv: _safe_str(kv[1].get("updated_at")) if isinstance(kv[1], dict) else "")[-PERF_CACHE_MAX_STOCKS:]
+        payload["history"] = dict(items)
+    st.session_state[_k("v71_perf_history_cache")] = payload
+    try:
+        _safe_json_write_local(PERF_HISTORY_CACHE_FILE, payload)
+    except Exception:
+        pass
+
+
+def _history_df_to_cache_payload(df: pd.DataFrame, used_market: str, msg: str) -> dict[str, Any]:
+    temp = _normalize_history_df_for_perf(df)
+    if temp.empty:
+        return {}
+    out = temp.copy()
+    out["日期"] = out["日期"].dt.strftime("%Y-%m-%d")
+    return {
+        "used_market": _safe_str(used_market),
+        "msg": _safe_str(msg or "OK"),
+        "start": _safe_str(out["日期"].min()),
+        "end": _safe_str(out["日期"].max()),
+        "updated_at": _now_text(),
+        "rows": out.to_dict(orient="records"),
+    }
+
+
+def _history_df_from_cache_payload(payload: dict[str, Any], need_start: date, need_end: date) -> tuple[pd.DataFrame, str, str, bool]:
+    if not isinstance(payload, dict):
+        return pd.DataFrame(), "", "無快取", False
+    rows = payload.get("rows", [])
+    if not rows:
+        return pd.DataFrame(), "", "無快取資料", False
+    c_start = pd.to_datetime(payload.get("start"), errors="coerce")
+    c_end = pd.to_datetime(payload.get("end"), errors="coerce")
+    if pd.isna(c_start) or pd.isna(c_end):
+        return pd.DataFrame(), "", "快取日期異常", False
+    # 快取涵蓋需求區間才直接使用。
+    if c_start.date() > need_start or c_end.date() < need_end:
+        return pd.DataFrame(), "", "快取區間不足", False
+    temp = _normalize_history_df_for_perf(pd.DataFrame(rows))
+    if temp.empty:
+        return pd.DataFrame(), "", "快取內容異常", False
+    return temp, _safe_str(payload.get("used_market")), _safe_str(payload.get("msg") or "CACHE"), True
+
+
+def _perf_cache_key(code: str, market: str) -> str:
+    return f"{_normalize_code(code)}|{_safe_str(market) or '未知'}"
+
+
+def _fail_cache_is_blocked(cache: dict[str, Any], key: str) -> tuple[bool, str]:
+    fail_map = cache.get("fail", {}) if isinstance(cache, dict) else {}
+    info = fail_map.get(key) if isinstance(fail_map, dict) else None
+    if not isinstance(info, dict):
+        return False, ""
+    ts = pd.to_datetime(_safe_str(info.get("time")), errors="coerce")
+    if pd.isna(ts):
+        return False, ""
+    try:
+        age_hr = (datetime.now() - ts.to_pydatetime()).total_seconds() / 3600
+        if age_hr < PERF_FAIL_RETRY_HOURS:
+            return True, _safe_str(info.get("reason") or "近期抓取失敗，暫停重試")
+    except Exception:
+        pass
+    return False, ""
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1309,7 +1415,7 @@ def _get_perf_history_bundle(
     start_date_text: str,
     end_date_text: str,
 ) -> tuple[pd.DataFrame, str, str]:
-    """V68：同一檔股票批次績效只抓一次歷史K線。"""
+    """V71：單股票歷史K線抓取函式；仍保留 Streamlit cache。"""
     stock_no = _normalize_code(stock_no)
     stock_name = _safe_str(stock_name)
     primary = _safe_str(market_type)
@@ -1339,9 +1445,49 @@ def _get_perf_history_bundle(
             if not temp.empty:
                 return temp, _safe_str(mk or primary or "未知"), "OK"
         except Exception as e:
-            last_err = str(e)[:80]
+            last_err = str(e)[:120]
             continue
     return pd.DataFrame(), _safe_str(primary or "未知"), last_err or "無歷史資料"
+
+
+def _get_perf_history_bundle_v71(
+    stock_no: str,
+    stock_name: str,
+    market_type: str,
+    start_date_value: date,
+    end_date_value: date,
+) -> tuple[pd.DataFrame, str, str, str]:
+    """V71：先查本機/session快取，必要時才抓線上歷史K線。回傳 df, market, msg, source。"""
+    code = _normalize_code(stock_no)
+    market = _safe_str(market_type)
+    cache = _perf_cache_load()
+    key = _perf_cache_key(code, market)
+
+    blocked, reason = _fail_cache_is_blocked(cache, key)
+    if blocked:
+        return pd.DataFrame(), market, f"失敗快取保護：{reason}", "FAIL_CACHE"
+
+    hist_map = cache.get("history", {}) if isinstance(cache.get("history"), dict) else {}
+    cached_df, cached_market, cached_msg, ok = _history_df_from_cache_payload(hist_map.get(key, {}), start_date_value, end_date_value)
+    if ok:
+        return cached_df, cached_market or market, cached_msg or "CACHE", "LOCAL_CACHE"
+
+    hist_df, used_market, hist_msg = _get_perf_history_bundle(code, stock_name, market, str(start_date_value), str(end_date_value))
+    if isinstance(hist_df, pd.DataFrame) and not hist_df.empty:
+        hist_map[key] = _history_df_to_cache_payload(hist_df, used_market, hist_msg)
+        cache["history"] = hist_map
+        # 成功後清掉同股票失敗快取。
+        fail_map = cache.get("fail", {}) if isinstance(cache.get("fail"), dict) else {}
+        fail_map.pop(key, None)
+        cache["fail"] = fail_map
+        _perf_cache_save(cache)
+        return hist_df, used_market, hist_msg, "ONLINE"
+
+    fail_map = cache.get("fail", {}) if isinstance(cache.get("fail"), dict) else {}
+    fail_map[key] = {"time": _now_text(), "reason": _safe_str(hist_msg or "無歷史資料")[:160]}
+    cache["fail"] = fail_map
+    _perf_cache_save(cache)
+    return pd.DataFrame(), used_market or market, hist_msg or "無歷史資料", "ONLINE_FAIL"
 
 
 def _calc_forward_metrics_from_history(
@@ -1350,7 +1496,7 @@ def _calc_forward_metrics_from_history(
     stop_price: float | None,
     target_price: float | None,
 ) -> dict[str, Any]:
-    """V68：用已抓好的單股K線快速計算單筆推薦後績效。"""
+    """V71：用已抓好的單股K線快速計算單筆推薦後績效。"""
     rec_date = pd.to_datetime(rec_date_text, errors="coerce")
     if pd.isna(rec_date) or not isinstance(hist_df, pd.DataFrame) or hist_df.empty:
         return {}
@@ -1427,6 +1573,7 @@ def _calc_forward_metrics_from_history(
     result["績效評語"] = comment
     result["追蹤更新時間"] = _now_text()
     return result
+
 
 def _clip(v: float | None, low: float, high: float, default: float = 0.0) -> float:
     if v is None:
@@ -1737,12 +1884,13 @@ def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
 
 def _backfill_perf_columns(
     df: pd.DataFrame,
-    max_rows: int = 150,
+    max_rows: int = 80,
     show_progress: bool = True,
     only_active: bool = True,
-    max_seconds: int = 75,
+    max_seconds: int = 60,
+    max_stocks: int = 10,
 ) -> pd.DataFrame:
-    """V68：高速批次更新推薦後績效。"""
+    """V71：績效更新快取防卡版。限制單批股票數，降低 Streamlit Cloud 逾時風險。"""
     if df is None or df.empty:
         return _ensure_godpick_record_columns(pd.DataFrame())
 
@@ -1751,30 +1899,43 @@ def _backfill_perf_columns(
     active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "等待"}
 
     candidates: list[int] = []
+    wait_count = 0
     for i, payload in enumerate(rows):
         status = _safe_str(payload.get("目前狀態")) or "觀察"
         if only_active and status not in active_status:
             continue
+        rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
+        if pd.isna(rec_date):
+            continue
+        age_days = (date.today() - rec_date.date()).days
+        if age_days < 1:
+            # 太新的推薦先標記等待，不浪費線上抓取。
+            payload["績效評語"] = "推薦日期太近，尚無足夠交易日，等待下一批更新。"
+            payload["追蹤更新時間"] = _now_text()
+            rows[i] = payload
+            wait_count += 1
+            continue
         if _row_needs_perf_update(payload):
             candidates.append(i)
 
-    max_rows = int(max(1, min(max_rows or 150, 1000)))
-    max_seconds = int(max(20, min(max_seconds or 75, 180)))
-    targets = candidates[:max_rows]
-    target_set = set(targets)
-    total = len(targets)
+    max_rows = int(max(10, min(max_rows or 80, 500)))
+    max_seconds = int(max(25, min(max_seconds or 60, 150)))
+    max_stocks = int(max(3, min(max_stocks or 10, 30)))
+    row_targets = candidates[:max_rows]
+    target_set = set(row_targets)
 
-    if total <= 0:
+    if not row_targets:
         st.session_state[_k("v51_perf_update_summary")] = {
             "待更新總數": len(candidates), "本次更新上限": max_rows, "本次處理": 0,
             "成功": 0, "略過或失敗": 0, "剩餘": 0, "時間防呆觸發": False,
             "時間防呆略過": 0, "單批秒數上限": max_seconds, "更新時間": _now_text(),
-            "加速模式": "V68 同股批次K線",
+            "加速模式": "V71 快取防卡版", "本批抓取股票數": 0, "快取命中估計": 0,
+            "等待交易日": wait_count, "單批股票上限": max_stocks,
         }
         return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for i in targets:
+    for i in row_targets:
         payload = rows[i]
         code = _normalize_code(payload.get("股票代號"))
         name = _safe_str(payload.get("股票名稱"))
@@ -1788,7 +1949,13 @@ def _backfill_perf_columns(
         item["min_date"] = min(item["min_date"], rec_date.date())
         item["max_date"] = max(item["max_date"], rec_date.date())
 
-    prog = st.progress(0, text="V68：準備高速更新推薦後績效...") if show_progress and total else None
+    # 優先處理同股筆數較多者，單次抓一檔可補較多紀錄。
+    group_items = sorted(groups.items(), key=lambda kv: len(kv[1].get("indices", [])), reverse=True)
+    selected_groups = group_items[:max_stocks]
+    selected_indices = {idx for _, grp in selected_groups for idx in grp.get("indices", [])}
+    total = len(selected_indices)
+
+    prog = st.progress(0, text="V71：準備快取防卡更新推薦後績效...") if show_progress and total else None
     status_box = st.empty() if show_progress and total else None
     started_ts = time.time()
     stopped_by_time_guard = False
@@ -1798,25 +1965,31 @@ def _backfill_perf_columns(
     fail_count = 0
     stock_fetch_count = 0
     cache_hit_count = 0
-    group_items = list(groups.items())
+    fail_cache_skip_count = 0
+    online_fail_count = 0
 
-    for g_pos, ((code, name, market), info) in enumerate(group_items):
+    for g_pos, ((code, name, market), info) in enumerate(selected_groups):
         if time.time() - started_ts > max_seconds:
             stopped_by_time_guard = True
-            remaining = [idx for _, grp in group_items[g_pos:] for idx in grp.get("indices", [])]
+            remaining = [idx for _, grp in selected_groups[g_pos:] for idx in grp.get("indices", [])]
             time_guard_skip_count += len([idx for idx in remaining if idx in target_set])
             break
 
         start_date = info["min_date"] - timedelta(days=5)
         max_end = min(date.today(), info["max_date"] + timedelta(days=95))
-        before_fetch = time.time()
-        hist_df, used_market, hist_msg = _get_perf_history_bundle(code, name, market, str(start_date), str(max_end))
-        stock_fetch_count += 1
-        if time.time() - before_fetch < 0.03:
+        hist_df, used_market, hist_msg, source = _get_perf_history_bundle_v71(code, name, market, start_date, max_end)
+        if source == "LOCAL_CACHE":
             cache_hit_count += 1
+        elif source == "FAIL_CACHE":
+            fail_cache_skip_count += 1
+        elif source == "ONLINE_FAIL":
+            online_fail_count += 1
+            stock_fetch_count += 1
+        else:
+            stock_fetch_count += 1
 
         for i in info.get("indices", []):
-            if i not in target_set:
+            if i not in selected_indices:
                 continue
             payload = rows[i]
             if time.time() - started_ts > max_seconds:
@@ -1824,10 +1997,10 @@ def _backfill_perf_columns(
                 time_guard_skip_count += 1
                 continue
 
-            rec_date = _safe_str(payload.get("推薦日期"))
+            rec_date_text = _safe_str(payload.get("推薦日期"))
             stop_price = _safe_float(payload.get("停損參考")) or _safe_float(payload.get("停損價"))
             target_price = _safe_float(payload.get("賣出目標1")) or _safe_float(payload.get("近端壓力"))
-            metrics = _calc_forward_metrics_from_history(hist_df, rec_date, stop_price, target_price)
+            metrics = _calc_forward_metrics_from_history(hist_df, rec_date_text, stop_price, target_price)
 
             if metrics:
                 ok_count += 1
@@ -1842,22 +2015,36 @@ def _backfill_perf_columns(
                         payload[old_key] = payload.get(new_key)
             else:
                 fail_count += 1
-                payload["績效評語"] = f"本次未取得足夠歷史資料，已略過：{hist_msg}"
+                payload["績效評語"] = f"V71 本批略過：{hist_msg}"
                 payload["追蹤更新時間"] = _now_text()
 
             rows[i] = _recalc_row(payload)
             done += 1
-            if prog is not None and (done == total or done % 10 == 0):
-                prog.progress(min(1.0, done / max(total, 1)), text=f"V68：高速更新 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
-            if status_box is not None and (done == total or done % 25 == 0):
-                status_box.caption(f"本次上限 {max_rows} 筆；時間防呆 {max_seconds} 秒；已抓 {stock_fetch_count} 檔K線；快取命中約 {cache_hit_count} 檔；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
+            if prog is not None and (done == total or done % 5 == 0):
+                prog.progress(
+                    min(1.0, done / max(total, 1)),
+                    text=f"V71：快取防卡更新 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}｜{source}",
+                )
+            if status_box is not None and (done == total or done % 20 == 0):
+                status_box.caption(
+                    f"本批股票上限 {max_stocks} 檔；筆數上限 {max_rows}；時間防呆 {max_seconds} 秒；"
+                    f"線上抓取 {stock_fetch_count} 檔；快取命中 {cache_hit_count} 檔；失敗保護略過 {fail_cache_skip_count} 檔；"
+                    f"剩餘待更新約 {max(0, len(candidates)-done)} 筆。"
+                )
+
+    remaining_count = max(0, len(candidates) - done)
+    # 未被本批股票數涵蓋者，也算保留到下一批，不視為失敗。
+    if len(row_targets) > len(selected_indices):
+        remaining_count = max(remaining_count, len(candidates) - len(selected_indices))
 
     st.session_state[_k("v51_perf_update_summary")] = {
         "待更新總數": len(candidates), "本次更新上限": max_rows, "本次處理": done,
-        "成功": ok_count, "略過或失敗": fail_count, "剩餘": max(0, len(candidates) - done),
+        "成功": ok_count, "略過或失敗": fail_count, "剩餘": remaining_count,
         "時間防呆觸發": bool(stopped_by_time_guard), "時間防呆略過": int(time_guard_skip_count),
-        "單批秒數上限": max_seconds, "更新時間": _now_text(), "加速模式": "V68 同股批次K線",
+        "單批秒數上限": max_seconds, "更新時間": _now_text(), "加速模式": "V71 快取防卡版",
         "本批抓取股票數": stock_fetch_count, "快取命中估計": cache_hit_count,
+        "單批股票上限": max_stocks, "失敗快取略過": fail_cache_skip_count,
+        "線上失敗股票數": online_fail_count, "等待交易日": wait_count,
     }
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
@@ -2760,32 +2947,44 @@ def main():
                 _get_perf_history_bundle.clear()
             except Exception:
                 pass
+            try:
+                st.session_state.pop(_k("v71_perf_history_cache"), None)
+                _safe_json_write_local(PERF_HISTORY_CACHE_FILE, {"version": "v71", "history": {}, "fail": {}, "updated_at": _now_text()})
+            except Exception:
+                pass
             _invalidate_analysis_cache()
             st.success("快取已清除")
     with top_cols[4]:
-        batch_n = st.number_input("每次更新筆數", min_value=20, max_value=1000, value=150, step=10, key=_k("perf_update_batch_size"))
-        perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=180, value=75, step=15, key=_k("perf_update_seconds"))
-        st.caption("V68：同一股票只抓一次K線，建議先用 150 筆 / 75 秒；若 Streamlit Cloud 還會逾時再降到 80。")
+        batch_n = st.number_input("每次更新筆數", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
+        perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
+        max_stock_n = st.number_input("單批股票上限", min_value=3, max_value=30, value=10, step=1, key=_k("perf_update_stock_limit"))
+        st.caption("V71：快取防卡版。建議 80 筆 / 60 秒 / 10 檔；比單純拉高筆數更穩，不會一直重抓失敗股票。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            with st.spinner("V68：高速批次更新中，同股只抓一次K線，避免一直卡住..."):
+            with st.spinner("V71：快取防卡批次更新中，限制單批股票數並使用歷史K線快取..."):
                 updated = _backfill_perf_columns(
                     _get_state_df(),
                     max_rows=int(batch_n),
                     show_progress=True,
                     only_active=bool(st.session_state.get(_k("only_active_update"), True)),
                     max_seconds=int(perf_seconds),
+                    max_stocks=int(max_stock_n),
                 )
                 updated = _apply_mode_labels(updated)
                 _save_state_df(updated)
             summary = st.session_state.get(_k("v51_perf_update_summary"), {})
             st.success(
-                f"V68 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，"
-                f"剩餘約 {summary.get('剩餘', 0)} 筆；抓取股票數 {summary.get('本批抓取股票數', 0)}；尚未同步。"
+                f"V71 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，"
+                f"剩餘約 {summary.get('剩餘', 0)} 筆；線上抓取 {summary.get('本批抓取股票數', 0)} 檔；"
+                f"快取命中 {summary.get('快取命中估計', 0)} 檔；尚未同步。"
             )
+            if summary.get("失敗快取略過", 0):
+                st.info(f"V71 已啟用失敗快取保護：{summary.get('失敗快取略過', 0)} 檔近期失敗股票本批不重試，避免頁面一直卡住。")
+            if summary.get("等待交易日", 0):
+                st.info(f"有 {summary.get('等待交易日', 0)} 筆推薦日期太近，已標記等待交易日，不浪費線上抓取。")
             if summary.get("剩餘", 0):
                 if summary.get("時間防呆觸發"):
-                    st.warning(f"V68 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 75)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
-                st.info("仍有紀錄待補績效，可再次按更新；V68 會優先使用快取與同股批次K線，速度會比逐筆更新快很多。")
+                    st.warning(f"V71 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 60)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
+                st.info("仍有紀錄待補績效，可再次按更新；V71 會優先使用歷史K線快取與失敗保護，穩定度會比單純拉高筆數更好。")
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
     with top_cols[6]:
