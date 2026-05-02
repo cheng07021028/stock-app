@@ -2201,6 +2201,78 @@ def _apply_sticky_editor_checkboxes(editor_key: str, edited_df: pd.DataFrame, id
     return out
 
 
+def _record_editor_checkbox_on_change_v70(editor_key: str, id_map_key: str, checkbox_cols: list[str] | None = None) -> None:
+    """v70：推薦紀錄總表 checkbox 單擊即生效。
+
+    Streamlit data_editor 的 checkbox 在部分雲端環境會出現「點一次只改前端、第二次才寫入」的體感。
+    原因是勾選值尚未被轉進我們自己的 sticky session_state 前，頁面就 rerun 並重建表格。
+    這個 callback 在 rerun 前先讀取 edited_rows / edited_cells，直接把 record_id 寫入 sticky 清單，
+    下一輪重建 editor_df 時就能立即回填，不需要點兩次。
+    """
+    try:
+        if checkbox_cols is None:
+            checkbox_cols = ["匯入自選", "刪除"]
+
+        id_map = [_safe_str(x) for x in st.session_state.get(id_map_key, []) if _safe_str(x)]
+        if not id_map:
+            return
+
+        raw_state = st.session_state.get(editor_key, {})
+        if not isinstance(raw_state, dict):
+            return
+
+        def _is_true(v: Any) -> bool:
+            if isinstance(v, bool):
+                return bool(v)
+            return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "勾選", "checked"}
+
+        def _apply(idx: Any, col: str, val: Any) -> None:
+            try:
+                i = int(idx)
+            except Exception:
+                return
+            if i < 0 or i >= len(id_map) or col not in checkbox_cols:
+                return
+            rec_id = _safe_str(id_map[i])
+            if not rec_id:
+                return
+            state_key = _k(f"sticky_{editor_key}_{col}_ids")
+            selected = {_safe_str(x) for x in st.session_state.get(state_key, []) if _safe_str(x)}
+            if _is_true(val):
+                selected.add(rec_id)
+            else:
+                selected.discard(rec_id)
+            visible = set(id_map)
+            st.session_state[state_key] = [x for x in id_map if x in selected and x in visible]
+
+        edited_rows = raw_state.get("edited_rows", {})
+        if isinstance(edited_rows, dict):
+            for raw_idx, changes in edited_rows.items():
+                if not isinstance(changes, dict):
+                    continue
+                for col in checkbox_cols:
+                    if col in changes:
+                        _apply(raw_idx, col, changes.get(col))
+
+        # 舊版 Streamlit / 部分 browser state 可能用 edited_cells：{"0:匯入自選": True} 或 {"0:0": True}
+        edited_cells = raw_state.get("edited_cells", {})
+        if isinstance(edited_cells, dict):
+            for raw_key, val in edited_cells.items():
+                parts = str(raw_key).split(":")
+                if not parts:
+                    continue
+                row_idx = parts[0]
+                col_token = parts[1] if len(parts) > 1 else ""
+                if col_token in checkbox_cols:
+                    _apply(row_idx, col_token, val)
+                elif col_token == "0":
+                    _apply(row_idx, "匯入自選", val)
+                elif col_token == "1":
+                    _apply(row_idx, "刪除", val)
+    except Exception:
+        return
+
+
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
         return {"count": 0, "buy_count": 0, "sold_count": 0, "avg_ret": 0, "win_rate": 0}
@@ -2918,12 +2990,21 @@ def main():
         editor_key = _k(f"record_editor_{show_cols_mode}")
         editor_df = _apply_sticky_editor_checkboxes(editor_key, editor_df, "record_id", ["匯入自選", "刪除"])
 
+        # v70：建立畫面列序 → record_id 對照，供 on_change 在 rerun 前立即保存 checkbox 狀態。
+        editor_id_map_key = _k(f"{editor_key}_record_id_map")
+        if "record_id" in editor_df.columns:
+            st.session_state[editor_id_map_key] = [_safe_str(x) for x in editor_df["record_id"].astype(str).tolist()]
+        else:
+            st.session_state[editor_id_map_key] = []
+
         edited_df = st.data_editor(
             editor_df,
             use_container_width=True,
             hide_index=True,
             num_rows="fixed",
             key=editor_key,
+            on_change=_record_editor_checkbox_on_change_v70,
+            args=(editor_key, editor_id_map_key, ["匯入自選", "刪除"]),
             column_config={
                 "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
                 "刪除": st.column_config.CheckboxColumn("刪除"),
@@ -2990,6 +3071,14 @@ def main():
         )
 
         edited_df = _apply_sticky_editor_checkboxes(editor_key, edited_df, "record_id", ["匯入自選", "刪除"])
+
+        # v70：顯示目前 sticky 勾選數，方便確認單擊已生效。
+        try:
+            _import_n = len(st.session_state.get(_k(f"sticky_{editor_key}_匯入自選_ids"), []))
+            _delete_n = len(st.session_state.get(_k(f"sticky_{editor_key}_刪除_ids"), []))
+            st.caption(f"目前勾選：匯入自選 {_import_n} 筆｜刪除 {_delete_n} 筆。v70 單擊穩定版。")
+        except Exception:
+            pass
 
         action_cols = st.columns([1.6, 1.2, 1.2, 1.2, 1.2, 2.6])
         with action_cols[0]:
