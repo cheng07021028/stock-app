@@ -2102,11 +2102,55 @@ def _unique_existing_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
     return out
 
 
-def _safe_display_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove duplicated dataframe columns before Streamlit Arrow conversion."""
+def _is_empty_display_value(v: Any) -> bool:
+    """v72：判斷畫面用空值，避免 None / nan / NaT 被直接顯示。"""
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    text = str(v).strip()
+    return text == "" or text.lower() in {"none", "nan", "nat", "null", "<na>"}
+
+
+def _clean_none_for_display(df: pd.DataFrame, *, drop_empty_cols: bool = False, keep_cols: list[str] | None = None) -> pd.DataFrame:
+    """v72：清理表格畫面的 None，必要時隱藏整欄都沒有資料的欄位。
+
+    注意：這只處理畫面顯示用 dataframe，不會刪除原始推薦紀錄資料。
+    """
     if df is None or not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
-    return df.loc[:, ~pd.Index(df.columns).duplicated()].copy()
+    out = df.loc[:, ~pd.Index(df.columns).duplicated()].copy()
+    keep_set = set(keep_cols or [])
+
+    # 先把字串型 None 清掉；object 欄位的 None 也清掉。
+    for c in list(out.columns):
+        try:
+            if out[c].dtype == "object":
+                out[c] = out[c].map(lambda x: "" if _is_empty_display_value(x) else x)
+        except Exception:
+            pass
+
+    if drop_empty_cols and not out.empty:
+        drop_cols: list[str] = []
+        for c in list(out.columns):
+            if c in keep_set:
+                continue
+            try:
+                if out[c].map(_is_empty_display_value).all():
+                    drop_cols.append(c)
+            except Exception:
+                pass
+        if drop_cols:
+            out = out.drop(columns=drop_cols, errors="ignore")
+    return out
+
+
+def _safe_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove duplicated dataframe columns before Streamlit Arrow conversion and clean None text."""
+    return _clean_none_for_display(df, drop_empty_cols=True)
 
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -2324,6 +2368,14 @@ def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, 
     if fast_mode and total_rows > visible_limit:
         src = src.head(visible_limit).copy()
         truncated = True
+
+    # v72：主表畫面不要直接露出 None；整欄都空的欄位自動隱藏。
+    # 只影響畫面 editor_df，不會刪除 live_df / JSON 內的原始欄位。
+    must_keep_cols = [
+        "record_id", "股票代號", "股票名稱", "推薦日期", "推薦時間", "推薦模式", "推薦等級",
+        "推薦總分", "狀態", "是否已實際買進", "實際買進價", "實際賣出價", "最新價",
+    ]
+    src = _clean_none_for_display(src, drop_empty_cols=True, keep_cols=must_keep_cols)
 
     if "匯入自選" not in src.columns:
         src.insert(0, "匯入自選", False)
