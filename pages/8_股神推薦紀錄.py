@@ -371,11 +371,172 @@ def _derive_prelaunch_summary_from_row(row: pd.Series) -> str:
     return "、".join(parts) if parts else "未見明顯起漲訊號"
 
 
+
+def _dedupe_keep_order_v73(cols: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in cols or []:
+        if c not in seen:
+            out.append(c)
+            seen.add(c)
+    return out
+
+
+V73_MESSAGE_TEXT_FIELDS = [
+    "推薦型態", "機會型態", "機會股說明", "進場時機", "建議動作", "等待條件",
+    "追高風險等級", "是否建議追價", "風險扣分原因", "決策說明",
+    "上漲機率等級", "上漲機率信心", "買點狀態", "進場型態", "高分禁買旗標", "高分禁買原因",
+    "實戰操作建議", "上漲機率說明", "上漲機率因子明細",
+    "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略", "大盤橋接更新時間",
+    "大盤交易時段", "大盤交易時段可用", "大盤資料品質", "大盤影響說明", "大盤資料診斷摘要",
+    "股神決策模式", "股神進場建議", "推薦分層", "建議投入等級", "分批策略",
+    "第二筆加碼條件", "停利策略", "停損策略", "資金風險說明", "單檔風險等級",
+    "族群集中警示", "組合配置建議", "大盤策略模式", "適合推薦型態", "大盤策略建議",
+    "大盤風控建議", "市場策略調整說明", "不建議買進原因", "最佳操作劇本", "隔日操作建議",
+    "失效價位", "轉弱條件", "大盤情境調權說明", "大盤情境分桶",
+    "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
+    "起漲摘要", "強勢族群等級", "族群輪動狀態", "族群策略建議", "族群資金流說明",
+    "是否領先同類股", "推薦標籤", "推薦理由摘要", "K線驗證標記", "推薦日支撐壓力摘要",
+    "K線查詢參數", "K線檢視提示", "建立時間", "更新時間", "目前狀態", "最新更新時間",
+    "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+    "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間",
+]
+
+
+V73_NUMERIC_FIELDS = [
+    "推薦總分", "上漲機率估計%", "大盤橋接分數", "大盤可參考分數", "大盤加權分", "大盤影響加減分",
+    "技術結構分數", "起漲前兆分數", "飆股起漲分數", "交易可行分數", "類股熱度分數",
+    "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "進場時機分數",
+    "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+    "風險報酬比_決策", "追高風險分數_決策", "建議部位%", "建議倉位%", "第一筆進場%",
+    "最大風險%", "大盤多空分數", "推薦積極度係數", "動態建議倉位%", "風險報酬比", "追價風險分",
+    "停損距離%", "目標報酬%", "族群資金流分數", "同族群強勢比例", "同族群推薦密度",
+    "同族群平均量能分", "同類股領先幅度", "推薦價格", "推薦日價格", "實際買進價", "實際賣出價",
+    "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數", "股神決策分數",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%",
+    "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+]
+
+
+def _restore_text_fields_from_raw_v73(x: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
+    """v73：修正舊版把文字訊息欄誤轉成數值後，畫面大量空白 / None 的問題。"""
+    if x is None or x.empty or raw is None or raw.empty:
+        return x
+    out = x.copy()
+    for c in V73_MESSAGE_TEXT_FIELDS:
+        if c not in out.columns:
+            out[c] = ""
+        # 先把目前欄位清成可顯示文字，避免 None/nan 露出。
+        try:
+            out[c] = out[c].map(lambda v: "" if _is_empty_display_value(v) else str(v))
+        except Exception:
+            out[c] = out[c].fillna("").astype(str)
+        if c in raw.columns:
+            raw_s = raw[c].map(lambda v: "" if _is_empty_display_value(v) else str(v))
+            empty_mask = out[c].map(_is_empty_display_value)
+            try:
+                out.loc[empty_mask, c] = raw_s.loc[empty_mask]
+            except Exception:
+                # index 不一致時用位置回補
+                vals = raw_s.tolist()
+                for i, idx in enumerate(out.index):
+                    if i < len(vals) and _is_empty_display_value(out.at[idx, c]):
+                        out.at[idx, c] = vals[i]
+    return out
+
+
+def _apply_display_backfill_v73(x: pd.DataFrame) -> pd.DataFrame:
+    """v73：補齊畫面常用說明欄位，避免資料存在於替代欄位但主表顯示空白。"""
+    if x is None or x.empty:
+        return x
+    out = x.copy()
+
+    def _fill_text(target: str, sources: list[str], default: str = "") -> None:
+        if target not in out.columns:
+            out[target] = ""
+        cur = out[target].map(lambda v: "" if _is_empty_display_value(v) else str(v))
+        for s in sources:
+            if s not in out.columns:
+                continue
+            src = out[s].map(lambda v: "" if _is_empty_display_value(v) else str(v))
+            mask = cur.map(_is_empty_display_value) & ~src.map(_is_empty_display_value)
+            cur.loc[mask] = src.loc[mask]
+        if default:
+            cur = cur.map(lambda v: default if _is_empty_display_value(v) else v)
+        out[target] = cur
+
+    def _fill_num(target: str, sources: list[str]) -> None:
+        if target not in out.columns:
+            out[target] = pd.NA
+        cur = pd.to_numeric(out[target], errors="coerce")
+        for s in sources:
+            if s not in out.columns:
+                continue
+            src = pd.to_numeric(out[s], errors="coerce")
+            cur = cur.fillna(src)
+        out[target] = cur
+
+    _fill_text("推薦型態", ["進場型態", "買點狀態", "推薦分桶", "起漲等級"])
+    _fill_text("機會型態", ["機會股說明", "起漲摘要", "推薦理由摘要", "股神推論邏輯"])
+    _fill_text("股神建議動作", ["建議動作", "股神進場建議", "實戰操作建議"])
+    _fill_text("股神信心", ["上漲機率信心", "信心等級"])
+    _fill_text("股神進場區間", ["操作區間", "股神場區間", "股神進場建議"])
+    _fill_text("股神推論", ["股神推論邏輯", "推薦理由摘要", "決策說明", "起漲摘要"])
+    _fill_text("買點分級", ["買點狀態", "進場型態", "起漲等級"])
+    _fill_text("風險說明", ["風險扣分原因", "不建議買進原因", "大盤風控建議", "轉弱條件"])
+    _fill_text("大盤情境調權說明", ["市場策略調整說明", "大盤影響說明", "大盤資料診斷摘要", "大盤策略建議"])
+    _fill_text("大盤情境分桶", ["大盤策略模式", "大盤橋接狀態", "大盤橋接風控"])
+    _fill_text("大盤橋接狀態", ["大盤策略模式", "大盤情境分桶"])
+    _fill_text("大盤資料品質", ["大盤交易時段可用", "大盤資料診斷摘要"])
+    _fill_text("族群策略建議", ["族群資金流說明", "類別"])
+    _fill_text("強勢族群等級", ["類別"])
+    _fill_text("K線驗證標記", ["K線檢視提示", "買點狀態"])
+    _fill_text("目前狀態", ["狀態"], "觀察")
+
+    _fill_num("推薦價格", ["推薦日價格", "最新價"])
+    _fill_num("推薦日價格", ["推薦價格", "最新價"])
+    _fill_num("股神決策分數", ["推薦總分", "實戰買點分數", "交易可行分數"])
+    _fill_num("3日績效%", ["推薦後3日%"])
+    _fill_num("5日績效%", ["推薦後5日%"])
+    _fill_num("10日績效%", ["推薦後10日%"])
+    _fill_num("20日績效%", ["推薦後20日%"])
+    return out
+
+
+def _data_completeness_report_v73(df: pd.DataFrame) -> pd.DataFrame:
+    """v73：檢查 8頁常用訊息欄位是否有資料，方便判斷是顯示問題還是 7頁匯入時未產生。"""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["欄位", "有資料筆數", "總筆數", "完整率%", "狀態"])
+    total = len(df)
+    check_cols = [
+        "推薦日期", "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "推薦總分",
+        "推薦型態", "機會型態", "股神建議動作", "股神信心", "股神進場區間", "股神推論",
+        "買點分級", "風險說明", "大盤情境調權說明", "大盤情境分桶", "大盤橋接狀態", "大盤資料品質",
+        "強勢族群等級", "族群策略建議", "K線驗證標記", "推薦價格", "最新價",
+        "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態",
+    ]
+    rows = []
+    for c in check_cols:
+        if c not in df.columns:
+            filled = 0
+        else:
+            filled = int((~df[c].map(_is_empty_display_value)).sum())
+        rate = round(filled / total * 100, 1) if total else 0
+        if rate >= 80:
+            status = "OK"
+        elif rate >= 30:
+            status = "部分資料"
+        else:
+            status = "缺很多"
+        rows.append({"欄位": c, "有資料筆數": filled, "總筆數": total, "完整率%": rate, "狀態": status})
+    return pd.DataFrame(rows)
+
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
 
     x = df.copy()
+    raw_src_v73 = df.copy()
     if "record_id" not in x.columns and "rec_id" in x.columns:
         x["record_id"] = x["rec_id"]
 
@@ -391,6 +552,9 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     ]
     # v46 修正：舊紀錄或 Firestore 回補資料可能沒有部分數值欄。
     # 先補欄再轉型，避免 x[c] 觸發 KeyError 造成整頁無法開啟。
+    # v73：舊版 numeric_cols 曾誤放多個文字訊息欄，會把「族群策略建議 / K線驗證 / 大盤說明」轉成 NaN。
+    # 這裡改用白名單數值欄，文字欄後續再由 raw_src_v73 回補。
+    numeric_cols = _dedupe_keep_order_v73(V73_NUMERIC_FIELDS)
     for c in numeric_cols:
         if c not in x.columns:
             x[c] = None
@@ -406,10 +570,13 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦標籤", "推薦理由摘要", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略", "大盤橋接更新時間", "大盤交易時段", "大盤交易時段可用", "大盤資料品質", "大盤影響說明", "大盤資料診斷摘要",
         "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
     ]
-    for c in text_cols:
+    # v73：把所有常用說明欄納入文字欄處理，並從原始 df 回補被舊版誤轉掉的訊息。
+    for c in _dedupe_keep_order_v73(text_cols + V73_MESSAGE_TEXT_FIELDS):
         if c not in x.columns:
             x[c] = ""
-        x[c] = x[c].fillna("").astype(str)
+        x[c] = x[c].map(lambda v: "" if _is_empty_display_value(v) else str(v))
+    x = _restore_text_fields_from_raw_v73(x, raw_src_v73)
+    x = _apply_display_backfill_v73(x)
 
     if "目前狀態" not in x.columns:
         x["目前狀態"] = "觀察"
@@ -455,7 +622,10 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
                 _safe_str(x.at[idx, "推薦模式"]),
             )
 
-    return x[GODPICK_RECORD_COLUMNS].copy()
+    # v73：GODPICK_RECORD_COLUMNS 內歷史整合後有重複欄名，回傳前統一去重，避免 data_editor / arrow 顯示異常。
+    ordered_cols = _dedupe_keep_order_v73([c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
+    x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
+    return x[ordered_cols].copy()
 
 
 def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
@@ -2369,7 +2539,7 @@ def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, 
         src = src.head(visible_limit).copy()
         truncated = True
 
-    # v72：主表畫面不要直接露出 None；整欄都空的欄位自動隱藏。
+    # v73：主表畫面不要直接露出 None；修正文字訊息欄被誤轉數值，並自動回補常用說明。
     # 只影響畫面 editor_df，不會刪除 live_df / JSON 內的原始欄位。
     must_keep_cols = [
         "record_id", "股票代號", "股票名稱", "推薦日期", "推薦時間", "推薦模式", "推薦等級",
@@ -3082,6 +3252,15 @@ def main():
         {"label": "平均系統報酬%", "value": f"{summary['avg_ret']:.2f}%", "delta": f"勝率 {summary['win_rate']:.1f}%", "delta_class": "pro-kpi-delta-flat"},
         {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
     ])
+
+    with st.expander("v73 資料完整度檢查 / 欄位訊息診斷", expanded=False):
+        st.caption("用來確認 8頁訊息沒出來的原因：若完整率很低，代表 7_股神推薦 匯入時該欄本來就沒產生；若完整率正常但主表沒顯示，代表是欄位管理或顯示模式問題。")
+        diag_df = _data_completeness_report_v73(live_df)
+        st.dataframe(_safe_display_df(diag_df), use_container_width=True, hide_index=True)
+        low_df = diag_df[diag_df["狀態"] == "缺很多"].copy() if not diag_df.empty else pd.DataFrame()
+        if not low_df.empty:
+            st.warning("下列欄位缺資料較多：" + "、".join(low_df["欄位"].astype(str).head(12).tolist()))
+        st.info("本版已修正：文字訊息欄不再被誤轉數值、主表 None 清理、常用說明欄自動從替代欄位回補。")
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
