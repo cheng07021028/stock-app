@@ -15,7 +15,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v21.1"
+PAGE_TITLE = "股神管理中心｜v22 完整資訊檢查修正版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RECOMMEND_FILES = [
@@ -131,6 +131,7 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         df = df[df["股票代號"].ne("")]
     if "推薦日期" in df.columns:
         df["推薦日期"] = df["推薦日期"].astype(str).replace({"NaT": "", "nan": "", "None": ""})
+    df = _backfill_management_fields(df)
     return df.reset_index(drop=True)
 
 
@@ -172,6 +173,150 @@ def _to_num(series: pd.Series, default: float = 0.0) -> pd.Series:
     return pd.to_numeric(series.astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce").fillna(default)
 
 
+
+
+def _is_blank_value(v: Any) -> bool:
+    try:
+        if v is None:
+            return True
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    s = str(v).strip()
+    return s == "" or s.lower() in {"none", "nan", "nat", "null", "<na>", "--", "-"}
+
+
+def _clean_text_value(v: Any) -> str:
+    if _is_blank_value(v):
+        return ""
+    return str(v).strip()
+
+
+def _first_existing_value(row: pd.Series, cols: List[str], default: str = "") -> str:
+    for c in cols:
+        if c in row.index and not _is_blank_value(row.get(c)):
+            return _clean_text_value(row.get(c))
+    return default
+
+
+def _fill_text_col(df: pd.DataFrame, target: str, sources: List[str], default: str = "") -> pd.DataFrame:
+    if target not in df.columns:
+        df[target] = ""
+    for idx, row in df.iterrows():
+        if _is_blank_value(row.get(target)):
+            df.at[idx, target] = _first_existing_value(row, sources, default)
+    return df
+
+
+def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: Any = None) -> pd.DataFrame:
+    if target not in df.columns:
+        df[target] = default
+    cur = pd.to_numeric(df[target].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
+    for s in sources:
+        if s in df.columns:
+            src = pd.to_numeric(df[s].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
+            cur = cur.fillna(src)
+    df[target] = cur
+    return df
+
+
+def _backfill_management_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """v22：把 7/8/10 不同版本的欄位名稱統一回管理中心要顯示的欄位。"""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    # 數值欄位回補
+    out = _fill_num_col(out, "推薦分數", ["推薦總分", "股神決策分數", "實戰買點分數", "交易可行分數", "score", "total_score"])
+    out = _fill_num_col(out, "建議倉位%", ["建議部位%", "建議倉位%", "動態建議倉位%"])
+    out = _fill_num_col(out, "動態建議倉位%", ["動態建議倉位%", "建議倉位%", "建議部位%"])
+    out = _fill_num_col(out, "近端支撐", ["近端支撐", "主要支撐", "支撐價", "停損價"])
+    out = _fill_num_col(out, "近端壓力", ["近端壓力", "突破確認價", "賣出目標1", "目標價"])
+    out = _fill_num_col(out, "停損參考", ["停損參考", "停損價", "失效價位"])
+
+    # 文字欄位回補
+    fill_map = {
+        "股票代號": ["股票代號", "code", "stock_code", "symbol"],
+        "股票名稱": ["股票名稱", "name", "stock_name"],
+        "市場別": ["市場別", "market"],
+        "類別": ["類別", "正式產業別", "主題類別", "category", "industry", "產業"],
+        "產業": ["產業", "類別", "正式產業別", "主題類別", "category", "industry"],
+        "推薦日期": ["推薦日期", "date", "recommend_date", "建立時間", "created_at"],
+        "推薦模式": ["推薦模式", "模式", "推薦分桶", "股神決策模式"],
+        "推薦型態": ["推薦型態", "買點狀態", "進場型態", "起漲等級", "推薦分桶"],
+        "機會型態": ["機會型態", "機會股說明", "起漲摘要", "推薦理由摘要", "股神推論", "股神推論邏輯"],
+        "進場時機": ["進場時機", "股神進場區間", "股神進場建議", "操作區間", "K線驗證標記", "K線檢視提示"],
+        "建議動作": ["建議動作", "股神建議動作", "股神進場建議", "實戰操作建議", "隔日操作建議"],
+        "等待條件": ["等待條件", "第二筆加碼條件", "轉弱條件", "K線檢視提示"],
+        "建議投入等級": ["建議投入等級", "股神信心", "上漲機率信心", "信心等級", "推薦等級"],
+        "第一筆進場%": ["第一筆進場%"],
+        "分批策略": ["分批策略", "組合配置建議", "最佳操作劇本"],
+        "第二筆加碼條件": ["第二筆加碼條件", "等待條件"],
+        "追高風險等級": ["追高風險等級", "單檔風險等級", "風險說明", "風險扣分原因"],
+        "單檔風險等級": ["單檔風險等級", "追高風險等級", "風險說明", "風險扣分原因"],
+        "最大風險%": ["最大風險%", "停損距離%"],
+        "停利策略": ["停利策略", "賣出目標1", "賣出目標2", "目標報酬%"],
+        "停損策略": ["停損策略", "停損價", "停損參考", "失效價位"],
+        "族群集中警示": ["族群集中警示", "族群策略建議", "族群資金流說明"],
+        "組合配置建議": ["組合配置建議", "分批策略", "資金風險說明"],
+        "大盤策略模式": ["大盤策略模式", "大盤情境分桶", "大盤橋接狀態", "大盤橋接風控"],
+        "大盤策略建議": ["大盤策略建議", "大盤風控建議", "市場策略調整說明", "大盤影響說明", "大盤情境調權說明"],
+        "強勢族群等級": ["強勢族群等級", "族群輪動狀態", "類別"],
+        "族群輪動狀態": ["族群輪動狀態", "族群策略建議", "族群資金流說明"],
+        "命中結果": ["命中結果", "績效評語", "是否達標_回測", "是否停損_回測"],
+        "狀態": ["狀態", "目前狀態"],
+    }
+    for target, sources in fill_map.items():
+        out = _fill_text_col(out, target, sources)
+
+    # 針對價格欄，組合出可讀文字，避免只顯示空白
+    for idx, row in out.iterrows():
+        if _is_blank_value(row.get("停利策略")):
+            t1 = _clean_text_value(row.get("賣出目標1")) if "賣出目標1" in out.columns else ""
+            t2 = _clean_text_value(row.get("賣出目標2")) if "賣出目標2" in out.columns else ""
+            if t1 or t2:
+                out.at[idx, "停利策略"] = f"目標1 {t1}" + (f" / 目標2 {t2}" if t2 else "")
+        if _is_blank_value(row.get("停損策略")):
+            stop = _clean_text_value(row.get("停損價")) if "停損價" in out.columns else ""
+            ref = _clean_text_value(row.get("停損參考")) if "停損參考" in out.columns else ""
+            if stop or ref:
+                out.at[idx, "停損策略"] = f"停損 {stop or ref}"
+        if _is_blank_value(row.get("狀態")):
+            out.at[idx, "狀態"] = "觀察"
+
+    # 統一清掉畫面上的 None / nan 字串
+    for c in out.columns:
+        if c not in ["推薦分數", "建議倉位%", "動態建議倉位%", "近端支撐", "近端壓力", "停損參考", "族群資金流分數"]:
+            out[c] = out[c].map(_clean_text_value)
+    return out
+
+
+def _drop_empty_display_columns(df: pd.DataFrame, keep_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    keep = set(keep_cols or [])
+    cols: List[str] = []
+    for c in df.columns:
+        if c in keep:
+            cols.append(c)
+            continue
+        s = df[c]
+        if any(not _is_blank_value(v) for v in s.tolist()):
+            cols.append(c)
+    return df[cols]
+
+
+def _safe_display_table(df: pd.DataFrame, keep_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out = _drop_empty_display_columns(out, keep_cols=keep_cols)
+    for c in out.columns:
+        if not pd.api.types.is_numeric_dtype(out[c]) and not pd.api.types.is_bool_dtype(out[c]):
+            out[c] = out[c].map(_clean_text_value)
+    return out
+
 def _risk_rank(value: Any) -> int:
     s = str(value or "")
     if any(x in s for x in ["極高", "高風險", "偏高", "不建議"]):
@@ -203,14 +348,27 @@ def _fail_flag(row: pd.Series) -> bool:
 
 
 def _display_cols(df: pd.DataFrame, preferred: List[str], limit_extra: int = 25) -> List[str]:
-    cols = [c for c in preferred if c in df.columns]
+    if df is None or df.empty:
+        return []
+    base_keep = ["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數", "狀態"]
+    cols = []
+    for c in preferred:
+        if c in df.columns and c not in cols:
+            cols.append(c)
     for c in df.columns:
-        if c not in cols and not c.startswith("_"):
+        if c not in cols and not str(c).startswith("_"):
             cols.append(c)
         if len(cols) >= len(preferred) + limit_extra:
             break
-    return cols
-
+    # 空欄不顯示，但保留核心欄位
+    shown = []
+    for c in cols:
+        if c in base_keep:
+            shown.append(c)
+            continue
+        if c in df.columns and any(not _is_blank_value(v) for v in df[c].tolist()):
+            shown.append(c)
+    return shown
 
 def _kpi_row(items: List[Tuple[str, str, Optional[str]]]) -> None:
     cols = st.columns(len(items))
@@ -449,8 +607,8 @@ def render_portfolio_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: Lis
             st.info("缺少推薦型態欄位。")
     display_cols = _display_cols(df, PORTFOLIO_COLUMNS)
     st.markdown("#### 投資組合明細")
-    st.dataframe(df[display_cols], use_container_width=True, hide_index=True, height=520)
-    st.download_button("下載投資組合分析 CSV", df[display_cols].to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_management_portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+    st.dataframe(_safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]), use_container_width=True, hide_index=True, height=520)
+    st.download_button("下載投資組合分析 CSV", _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]).to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_management_portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
 
 def render_daily_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: List[str]) -> None:
@@ -492,8 +650,8 @@ def render_daily_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: List[st
         ascending = [True if c == "追蹤分級" else False for c in sort_cols]
         df = df.sort_values(sort_cols, ascending=ascending)
     display_cols = _display_cols(df, DAILY_COLUMNS)
-    st.dataframe(df[display_cols], use_container_width=True, hide_index=True, height=560)
-    st.download_button("下載每日追蹤報告 CSV", df[display_cols].to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_daily_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+    st.dataframe(_safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]), use_container_width=True, hide_index=True, height=560)
+    st.download_button("下載每日追蹤報告 CSV", _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]).to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_daily_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
 
 def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
@@ -543,7 +701,7 @@ def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
         st.dataframe(fail_df[_display_cols(fail_df, QUALITY_COLUMNS)], use_container_width=True, hide_index=True, height=300)
     st.markdown("#### 品質明細")
     display_cols = _display_cols(df, QUALITY_COLUMNS)
-    st.dataframe(df[display_cols], use_container_width=True, hide_index=True, height=520)
+    st.dataframe(_safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]), use_container_width=True, hide_index=True, height=520)
     st.download_button("下載品質分析 CSV", df[display_cols].to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
     if not group_df.empty:
         st.download_button("下載分組校正建議 CSV", group_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_group_tune_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
@@ -579,12 +737,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v21.1｜新增資訊重整帶入｜投資組合、每日追蹤、推薦品質整合入口")
+            render_pro_hero("股神管理中心", "v22｜完整資訊檢查修正版：欄位回補、None清理、空欄自動隱藏、7/8/10資料串聯")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
+    st.caption("v22 修正：自動回補 7/8/10 不同版本欄位、清除 None/nan、隱藏整欄空白，避免資訊看起來沒跑出來。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
