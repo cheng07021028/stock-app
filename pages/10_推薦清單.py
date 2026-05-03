@@ -883,23 +883,79 @@ def _filter_df(df: pd.DataFrame, start_date: date, end_date: date, mode: str, st
     return work.sort_values(["推薦日期", "推薦時間", "推薦總分"], ascending=[False, False, False]).drop(columns=["推薦日期_dt"], errors="ignore").reset_index(drop=True)
 
 
-def _format_show_df(df: pd.DataFrame) -> pd.DataFrame:
+def _is_blank_series(s: pd.Series) -> bool:
+    """判斷整欄是否完全沒有有效資料，避免畫面出現大量空白 / None 欄位。"""
+    try:
+        if s is None:
+            return True
+        x = s.astype("object").copy()
+        x = x.where(pd.notna(x), "")
+        x = x.astype(str).str.strip()
+        x = x.replace(["None", "none", "nan", "NaN", "NaT", "<NA>"], "")
+        return bool((x == "").all())
+    except Exception:
+        return False
+
+
+def _format_show_df(df: pd.DataFrame, drop_empty_cols: bool = True) -> pd.DataFrame:
+    """
+    推薦清單畫面專用格式化。
+
+    修正重點：
+    1. 舊紀錄缺欄位時，_ensure_record_columns 會補 None；畫面不應直接顯示 None。
+    2. 大盤橋接、族群、K線驗證等欄位不是每筆資料都有；整欄沒資料時直接隱藏。
+    3. 保留有資料的欄位，不影響下載完整 Excel / CSV。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     show = df.copy()
     show = show.loc[:, ~show.columns.duplicated()].copy()
     show = _backfill_v10_columns(show)
     show = show.drop(columns=[c for c in ["record_id"] if c in show.columns])
-    num1_cols = ["推薦總分", "上漲機率估計%", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "同類股領先幅度", "實際報酬%", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%"]
-    price_cols = ["推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額"]
+
+    # 先把真正的 None / NaN / NaT 全部轉空白，避免 st.dataframe 顯示 None。
+    show = show.where(pd.notna(show), "")
+    show = show.replace([None, "None", "none", "nan", "NaN", "NaT", "<NA>"], "")
+
+    num1_cols = list(dict.fromkeys([
+        "推薦總分", "上漲機率估計%", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分",
+        "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群輪動狀態",
+        "同類股領先幅度", "實際報酬%", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%",
+        "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "大盤橋接分數", "大盤影響加減分",
+        "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "進場時機分數",
+        "建議部位%", "建議倉位%", "最大風險%", "大盤多空分數", "推薦積極度係數", "動態建議倉位%",
+        "風險報酬比", "追價風險分", "飆股起漲分數"
+    ]))
+    price_cols = list(dict.fromkeys([
+        "推薦價格", "推薦日價格", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+        "實際買進價", "實際賣出價", "最新價", "損益金額"
+    ]))
+
     for c in num1_cols:
         if c in show.columns:
-            show[c] = show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
+            show[c] = show[c].apply(lambda x: format_number(x, 1) if _safe_str(x) else "")
     for c in price_cols:
         if c in show.columns:
-            show[c] = show[c].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
-    show = show.replace(["None", "nan", "NaN"], "")
+            show[c] = show[c].apply(lambda x: format_number(x, 2) if _safe_str(x) else "")
+
+    # 再清一次，避免格式化後留下 None 字串。
+    show = show.where(pd.notna(show), "")
+    show = show.replace([None, "None", "none", "nan", "NaN", "NaT", "<NA>"], "")
+
+    if drop_empty_cols:
+        keep_always = {
+            "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "市場別", "類別",
+            "推薦模式", "推薦型態", "推薦等級", "推薦總分", "推薦價格", "最新價",
+            "目前狀態", "建議動作", "股神信心", "股神進場建議", "推薦理由摘要", "風險說明", "備註"
+        }
+        keep_cols = []
+        for c in show.columns:
+            if c in keep_always or not _is_blank_series(show[c]):
+                keep_cols.append(c)
+        show = show[keep_cols]
+
     return show
-
-
 
 
 def _fetch_history_for_backtest(stock_no: str, stock_name: str, market_type: str, rec_date_text: str) -> pd.DataFrame:
@@ -1262,7 +1318,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單V12回測校正版：{BACKTEST_V12_VERSION}")
+    st.caption(f"推薦清單 V13 空白欄位清理版：{BACKTEST_V12_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
