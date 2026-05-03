@@ -217,6 +217,60 @@ def _safe_float(v: Any, default=None):
         return default
 
 
+
+
+def _is_blank_value(v: Any) -> bool:
+    """判斷畫面用空值：None / NaN / 空字串 / 字串 None 都視為空白。"""
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    return str(v).strip() in {"", "None", "none", "nan", "NaN", "NAN", "<NA>", "NaT"}
+
+
+def _clean_display_df(df: pd.DataFrame, keep_cols: list[str] | None = None, drop_empty_cols: bool = True) -> pd.DataFrame:
+    """
+    推薦清單畫面專用：
+    1. 移除重複欄位
+    2. 把 None / NaN / nan 字串改成空白
+    3. 整欄都空白的欄位自動隱藏，但保留 keep_cols
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    x = df.copy()
+    x = x.loc[:, ~x.columns.duplicated()].copy()
+    keep = set(keep_cols or [])
+
+    for c in x.columns:
+        x[c] = x[c].map(lambda v: "" if _is_blank_value(v) else v)
+
+    if drop_empty_cols:
+        cols = []
+        for c in x.columns:
+            if c in keep:
+                cols.append(c)
+                continue
+            try:
+                if not x[c].map(lambda v: _is_blank_value(v)).all():
+                    cols.append(c)
+            except Exception:
+                cols.append(c)
+        x = x[cols].copy()
+    return x
+
+
+def _safe_dataframe(df: pd.DataFrame, *, keep_cols: list[str] | None = None, drop_empty_cols: bool = True, **kwargs) -> None:
+    """避免 Streamlit 表格顯示 None 與整排空欄位。"""
+    out = _clean_display_df(df, keep_cols=keep_cols, drop_empty_cols=drop_empty_cols)
+    if out is None or out.empty:
+        st.info("目前沒有可顯示的有效資料。")
+        return
+    st.dataframe(out, **kwargs)
+
+
 def _normalize_code(v: Any) -> str:
     s = _safe_str(v)
     if not s:
@@ -1252,18 +1306,18 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦�
                 return pd.DataFrame()
             rows = []
             for key, g in x.groupby(group_col, dropna=False):
-                row = {group_col: key if str(key).strip() else "未分類", "筆數": len(g)}
+                row = {group_col: "未分類" if _is_blank_value(key) else key, "筆數": len(g)}
                 for col in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]:
                     if col in g.columns:
                         s = pd.to_numeric(g[col], errors="coerce").dropna()
-                        row[f"平均{col}"] = round(float(s.mean()), 2) if not s.empty else None
-                        row[f"{col.replace('%','')}勝率"] = round(float((s > 0).mean() * 100), 1) if not s.empty else None
+                        row[f"平均{col}"] = round(float(s.mean()), 2) if not s.empty else ""
+                        row[f"{col.replace('%','')}勝率"] = round(float((s > 0).mean() * 100), 1) if not s.empty else ""
                 if "推薦後最大漲幅%" in g.columns:
                     s1 = pd.to_numeric(g["推薦後最大漲幅%"], errors="coerce").dropna()
-                    row["平均最大漲幅%"] = round(float(s1.mean()), 2) if not s1.empty else None
+                    row["平均最大漲幅%"] = round(float(s1.mean()), 2) if not s1.empty else ""
                 if "推薦後最大回撤%" in g.columns:
                     s2 = pd.to_numeric(g["推薦後最大回撤%"], errors="coerce").dropna()
-                    row["平均最大回撤%"] = round(float(s2.mean()), 2) if not s2.empty else None
+                    row["平均最大回撤%"] = round(float(s2.mean()), 2) if not s2.empty else ""
                 rows.append(row)
             out = pd.DataFrame(rows)
             sort_col = "平均推薦後20日%" if "平均推薦後20日%" in out.columns else ("平均推薦後10日%" if "平均推薦後10日%" in out.columns else None)
@@ -1273,15 +1327,15 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦�
 
         tabs_v50 = st.tabs(["依推薦模式", "依推薦等級", "依類別", "依大盤風控", "弱勢檢討清單"])
         with tabs_v50[0]:
-            st.dataframe(_group_table("推薦模式"), use_container_width=True, hide_index=True)
+            _safe_dataframe(_group_table("推薦模式"), keep_cols=["推薦模式", "筆數"], use_container_width=True, hide_index=True)
         with tabs_v50[1]:
-            st.dataframe(_group_table("推薦等級"), use_container_width=True, hide_index=True)
+            _safe_dataframe(_group_table("推薦等級"), keep_cols=["推薦等級", "筆數"], use_container_width=True, hide_index=True)
         with tabs_v50[2]:
-            st.dataframe(_group_table("類別"), use_container_width=True, hide_index=True)
+            _safe_dataframe(_group_table("類別"), keep_cols=["類別", "筆數"], use_container_width=True, hide_index=True)
         with tabs_v50[3]:
             mcol = "大盤橋接風控" if "大盤橋接風控" in x.columns else ("大盤橋接狀態" if "大盤橋接狀態" in x.columns else "大盤趨勢")
             if mcol in x.columns:
-                st.dataframe(_group_table(mcol), use_container_width=True, hide_index=True)
+                _safe_dataframe(_group_table(mcol), keep_cols=[mcol, "筆數"], use_container_width=True, hide_index=True)
             else:
                 st.info("尚無大盤風控欄位可分群。")
         with tabs_v50[4]:
@@ -1303,7 +1357,7 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦�
     "實戰操作建議",
     "V76買點防呆版本",
   "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  weak_col, "推薦後最大回撤%", "命中結果", "績效評語", "推薦日期", "推薦理由摘要", "風險說明"] if c in weak.columns]
-                st.dataframe(weak[cols], use_container_width=True, hide_index=True)
+                _safe_dataframe(weak[cols], keep_cols=["股票代號", "股票名稱", weak_col], use_container_width=True, hide_index=True)
             else:
                 st.info("尚無 5日/10日績效欄位可列弱勢檢討清單。")
 
