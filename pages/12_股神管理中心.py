@@ -15,7 +15,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v22 完整資訊檢查修正版"
+PAGE_TITLE = "股神管理中心｜v23 型別安全完整檢查修正版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RECOMMEND_FILES = [
@@ -111,10 +111,40 @@ def _extract_rows(obj: Any) -> List[Dict[str, Any]]:
     return []
 
 
+
+
+def _dedupe_columns_keep_first_valid(df: pd.DataFrame) -> pd.DataFrame:
+    """v23：處理 JSON 合併後可能出現的重複欄位，避免 pandas / Streamlit 型別錯誤。"""
+    if df is None or df.empty:
+        return df
+    if not df.columns.duplicated().any():
+        return df
+    out = pd.DataFrame(index=df.index)
+    seen: List[str] = []
+    for col in list(df.columns):
+        if col in seen:
+            continue
+        seen.append(col)
+        block = df.loc[:, df.columns == col]
+        if block.shape[1] == 1:
+            out[col] = block.iloc[:, 0]
+        else:
+            # 同名欄位多個時，逐列取第一個非空值
+            vals = []
+            for _, row in block.iterrows():
+                val = ""
+                for x in row.tolist():
+                    if not _is_blank_value(x):
+                        val = x
+                        break
+                vals.append(val)
+            out[col] = vals
+    return out
+
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    df = df.copy()
+    df = _dedupe_columns_keep_first_valid(df.copy())
     alias = {
         "code": "股票代號", "stock_code": "股票代號", "symbol": "股票代號", "股票": "股票代號",
         "name": "股票名稱", "stock_name": "股票名稱", "market": "市場別",
@@ -179,17 +209,30 @@ def _is_blank_value(v: Any) -> bool:
     try:
         if v is None:
             return True
+        if isinstance(v, (list, tuple, set, dict)):
+            return len(v) == 0
         if pd.isna(v):
             return True
     except Exception:
         pass
     s = str(v).strip()
-    return s == "" or s.lower() in {"none", "nan", "nat", "null", "<na>", "--", "-"}
+    return s == "" or s.lower() in {"none", "nan", "nat", "null", "<na>", "--", "-", "[]", "{}"}
 
 
 def _clean_text_value(v: Any) -> str:
     if _is_blank_value(v):
         return ""
+    if isinstance(v, (list, tuple, set)):
+        vals = [_clean_text_value(x) for x in list(v)]
+        vals = [x for x in vals if x]
+        return "、".join(vals)
+    if isinstance(v, dict):
+        vals = []
+        for k, x in v.items():
+            sx = _clean_text_value(x)
+            if sx:
+                vals.append(f"{k}:{sx}")
+        return "；".join(vals)
     return str(v).strip()
 
 
@@ -201,20 +244,32 @@ def _first_existing_value(row: pd.Series, cols: List[str], default: str = "") ->
 
 
 def _fill_text_col(df: pd.DataFrame, target: str, sources: List[str], default: str = "") -> pd.DataFrame:
+    # v23：文字欄位一律轉 object，避免原欄位是 float / category 時塞入文字造成 TypeError。
+    df = _dedupe_columns_keep_first_valid(df)
     if target not in df.columns:
         df[target] = ""
+    else:
+        try:
+            df[target] = df[target].astype("object")
+        except Exception:
+            df[target] = df[target].map(_clean_text_value).astype("object")
+    safe_sources = [s for s in sources if s in df.columns and s != target]
+    if target in sources:
+        safe_sources.append(target)
     for idx, row in df.iterrows():
         if _is_blank_value(row.get(target)):
-            df.at[idx, target] = _first_existing_value(row, sources, default)
+            df.at[idx, target] = _first_existing_value(row, safe_sources, default)
+    df[target] = df[target].map(_clean_text_value).astype("object")
     return df
 
 
 def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: Any = None) -> pd.DataFrame:
+    df = _dedupe_columns_keep_first_valid(df)
     if target not in df.columns:
         df[target] = default
     cur = pd.to_numeric(df[target].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
     for s in sources:
-        if s in df.columns:
+        if s in df.columns and s != target:
             src = pd.to_numeric(df[s].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
             cur = cur.fillna(src)
     df[target] = cur
@@ -222,10 +277,10 @@ def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: An
 
 
 def _backfill_management_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """v22：把 7/8/10 不同版本的欄位名稱統一回管理中心要顯示的欄位。"""
+    """v23：把 7/8/10 不同版本的欄位名稱統一回管理中心要顯示的欄位。"""
     if df is None or df.empty:
         return df
-    out = df.copy()
+    out = _dedupe_columns_keep_first_valid(df.copy())
 
     # 數值欄位回補
     out = _fill_num_col(out, "推薦分數", ["推薦總分", "股神決策分數", "實戰買點分數", "交易可行分數", "score", "total_score"])
@@ -737,13 +792,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v22｜完整資訊檢查修正版：欄位回補、None清理、空欄自動隱藏、7/8/10資料串聯")
+            render_pro_hero("股神管理中心", "v23｜完整資訊檢查修正版：欄位回補、None清理、空欄自動隱藏、7/8/10資料串聯")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v22 修正：自動回補 7/8/10 不同版本欄位、清除 None/nan、隱藏整欄空白，避免資訊看起來沒跑出來。")
+    st.caption("v23 修正：自動回補 7/8/10 不同版本欄位、清除 None/nan、隱藏整欄空白，避免資訊看起來沒跑出來。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
