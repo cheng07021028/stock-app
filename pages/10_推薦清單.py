@@ -664,6 +664,18 @@ def _backfill_v10_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in v10_cols:
         if c not in x.columns:
             x[c] = ""
+
+    # v16 型別安全修正：
+    # 這些欄位有些原本被 pandas 判斷為 float / bool / category，
+    # 但補值時會寫入「拉回布局、等待回測」等文字；若不先轉 object，
+    # Streamlit Cloud 會在 x.at[idx, c] = v 時噴 TypeError。
+    for c in v10_cols:
+        if c in x.columns:
+            try:
+                x[c] = x[c].astype("object")
+            except Exception:
+                pass
+
     for idx, row in x.iterrows():
         need = any(_safe_str(row.get(c)) in ["", "None", "nan", "NaN"] for c in ["股神決策模式", "股神進場建議", "推薦分層"])
         if not need:
@@ -671,7 +683,12 @@ def _backfill_v10_columns(df: pd.DataFrame) -> pd.DataFrame:
         fill = _derive_v5_from_legacy_row(row)
         for c, v in fill.items():
             if c in x.columns and _safe_str(x.at[idx, c]) in ["", "None", "nan", "NaN"]:
-                x.at[idx, c] = v
+                try:
+                    x.at[idx, c] = v
+                except Exception:
+                    # 保底：再次轉 object 後寫入，避免 dtype 衝突讓整頁掛掉。
+                    x[c] = x[c].astype("object")
+                    x.at[idx, c] = v
     for c in x.columns:
         if x[c].dtype == object:
             x[c] = x[c].replace(["None", "nan", "NaN"], "")
