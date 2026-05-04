@@ -15,7 +15,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v23 型別安全完整檢查修正版"
+PAGE_TITLE = "股神管理中心｜v24 欄位統一修正版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RECOMMEND_FILES = [
@@ -58,6 +58,31 @@ GROUP_FIELDS = [
     "推薦模式", "推薦型態", "機會型態", "進場時機", "追高風險等級", "單檔風險等級",
     "大盤策略模式", "強勢族群等級", "族群輪動狀態", "類別", "產業",
 ]
+
+
+# v24：管理中心統一欄位。這組欄位會同時套用在「推薦清單 / 目前追蹤」與「股神推薦紀錄 / 歷史全部」，避免切換資料來源時欄位不同。
+UNIFIED_MANAGEMENT_COLUMNS = [
+    "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
+    "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦時間",
+    "推薦模式", "推薦型態", "機會型態", "進場時機", "建議動作", "等待條件",
+    "推薦分數", "股神決策分數", "買點分級", "上漲機率%", "上漲機率信心",
+    "建議倉位%", "動態建議倉位%", "建議投入等級", "第一筆進場%", "分批策略", "第二筆加碼條件",
+    "建議價位", "股神進場區間", "推薦價格", "最新價", "近端支撐", "近端壓力", "突破確認價",
+    "停損參考", "停損價", "賣出目標1", "賣出目標2", "停利策略", "停損策略",
+    "追高風險等級", "單檔風險等級", "最大風險%", "風險說明", "股神推論", "推薦理由", "推薦原因",
+    "大盤策略模式", "大盤策略建議", "大盤情境分桶", "大盤橋接狀態", "大盤橋接風控", "大盤情境調權說明",
+    "族群集中警示", "組合配置建議", "強勢族群等級", "族群輪動狀態", "族群策略建議", "族群資金流分數", "族群資金流說明",
+    "K線驗證標記", "K線檢視提示", "雷達訊號", "籌碼訊號", "量能訊號",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
+    "推薦後最大漲幅%", "推薦後最大回撤%", "命中結果", "績效評語", "狀態", "資料來源檔",
+]
+
+NUMERIC_MANAGEMENT_COLUMNS = {
+    "推薦分數", "股神決策分數", "上漲機率%", "建議倉位%", "動態建議倉位%", "第一筆進場%",
+    "建議價位", "推薦價格", "最新價", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+    "最大風險%", "族群資金流分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
+    "推薦後最大漲幅%", "推薦後最大回撤%",
+}
 
 
 def _safe_load_json(path: Path) -> Any:
@@ -184,7 +209,7 @@ def _load_many(paths: List[Path], dedupe_latest: bool = False) -> Tuple[pd.DataF
         df["_seq"] = range(len(df))
         df = df.sort_values(["股票代號", "_dt", "_seq"]).drop_duplicates("股票代號", keep="last")
         df = df.drop(columns=["_dt", "_seq"], errors="ignore")
-    return df.reset_index(drop=True), notes
+    return _ensure_unified_management_schema(df).reset_index(drop=True), notes
 
 
 def _num(val: Any, default: float = 0.0) -> float:
@@ -283,7 +308,16 @@ def _backfill_management_fields(df: pd.DataFrame) -> pd.DataFrame:
     out = _dedupe_columns_keep_first_valid(df.copy())
 
     # 數值欄位回補
-    out = _fill_num_col(out, "推薦分數", ["推薦總分", "股神決策分數", "實戰買點分數", "交易可行分數", "score", "total_score"])
+    out = _fill_num_col(out, "推薦分數", ["推薦總分", "推薦分數", "股神決策分數", "實戰買點分數", "交易可行分數", "score", "total_score", "final_score"])
+    out = _fill_num_col(out, "股神決策分數", ["股神決策分數", "推薦總分", "推薦分數", "實戰買點分數", "交易可行分數"])
+    out = _fill_num_col(out, "上漲機率%", ["上漲機率%", "上漲機率", "預估上漲機率", "勝率", "命中機率%"])
+    out = _fill_num_col(out, "最新價", ["最新價", "現價", "收盤價", "推薦價格"])
+    out = _fill_num_col(out, "推薦價格", ["推薦價格", "推薦價", "建議價位", "最新價", "現價", "收盤價"])
+    out = _fill_num_col(out, "建議價位", ["建議價位", "推薦價格", "推薦價", "股神進場區間", "最新價"])
+    out = _fill_num_col(out, "突破確認價", ["突破確認價", "近端壓力", "賣出目標1", "目標價"])
+    out = _fill_num_col(out, "停損價", ["停損價", "停損參考", "失效價位"])
+    out = _fill_num_col(out, "賣出目標1", ["賣出目標1", "第一停利", "目標價", "近端壓力"])
+    out = _fill_num_col(out, "賣出目標2", ["賣出目標2", "第二停利", "目標價2"])
     out = _fill_num_col(out, "建議倉位%", ["建議部位%", "建議倉位%", "動態建議倉位%"])
     out = _fill_num_col(out, "動態建議倉位%", ["動態建議倉位%", "建議倉位%", "建議部位%"])
     out = _fill_num_col(out, "近端支撐", ["近端支撐", "主要支撐", "支撐價", "停損價"])
@@ -297,28 +331,47 @@ def _backfill_management_fields(df: pd.DataFrame) -> pd.DataFrame:
         "市場別": ["市場別", "market"],
         "類別": ["類別", "正式產業別", "主題類別", "category", "industry", "產業"],
         "產業": ["產業", "類別", "正式產業別", "主題類別", "category", "industry"],
-        "推薦日期": ["推薦日期", "date", "recommend_date", "建立時間", "created_at"],
-        "推薦模式": ["推薦模式", "模式", "推薦分桶", "股神決策模式"],
-        "推薦型態": ["推薦型態", "買點狀態", "進場型態", "起漲等級", "推薦分桶"],
-        "機會型態": ["機會型態", "機會股說明", "起漲摘要", "推薦理由摘要", "股神推論", "股神推論邏輯"],
-        "進場時機": ["進場時機", "股神進場區間", "股神進場建議", "操作區間", "K線驗證標記", "K線檢視提示"],
-        "建議動作": ["建議動作", "股神建議動作", "股神進場建議", "實戰操作建議", "隔日操作建議"],
-        "等待條件": ["等待條件", "第二筆加碼條件", "轉弱條件", "K線檢視提示"],
+        "推薦日期": ["推薦日期", "推薦日", "date", "recommend_date", "建立時間", "created_at", "加入時間"],
+        "推薦時間": ["推薦時間", "time", "created_time", "建立時間", "加入時間"],
+        "推薦模式": ["推薦模式", "模式", "推薦分桶", "股神決策模式", "策略模式"],
+        "推薦型態": ["推薦型態", "買點狀態", "進場型態", "起漲等級", "推薦分桶", "股神型態", "型態"],
+        "機會型態": ["機會型態", "機會股說明", "起漲摘要", "推薦理由摘要", "股神推論", "股神推論邏輯", "機會型態說明"],
+        "進場時機": ["進場時機", "進場時機說明", "股神進場區間", "股神進場建議", "操作區間", "K線驗證標記", "K線檢視提示"],
+        "建議動作": ["建議動作", "股神建議動作", "股神進場建議", "實戰操作建議", "隔日操作建議", "操作建議", "股神建議"],
+        "等待條件": ["等待條件", "等待條件說明", "第二筆加碼條件", "轉弱條件", "K線檢視提示", "條件說明"],
         "建議投入等級": ["建議投入等級", "股神信心", "上漲機率信心", "信心等級", "推薦等級"],
+        "上漲機率信心": ["上漲機率信心", "股神信心", "信心等級"],
+        "買點分級": ["買點分級", "推薦等級", "起漲等級", "買點等級"],
         "第一筆進場%": ["第一筆進場%"],
         "分批策略": ["分批策略", "組合配置建議", "最佳操作劇本"],
         "第二筆加碼條件": ["第二筆加碼條件", "等待條件"],
         "追高風險等級": ["追高風險等級", "單檔風險等級", "風險說明", "風險扣分原因"],
         "單檔風險等級": ["單檔風險等級", "追高風險等級", "風險說明", "風險扣分原因"],
         "最大風險%": ["最大風險%", "停損距離%"],
-        "停利策略": ["停利策略", "賣出目標1", "賣出目標2", "目標報酬%"],
+        "停利策略": ["停利策略", "賣出目標1", "賣出目標2", "目標報酬%", "停利建議"],
         "停損策略": ["停損策略", "停損價", "停損參考", "失效價位"],
-        "族群集中警示": ["族群集中警示", "族群策略建議", "族群資金流說明"],
+        "族群集中警示": ["族群集中警示", "族群策略建議", "族群資金流說明", "族群集中說明"],
         "組合配置建議": ["組合配置建議", "分批策略", "資金風險說明"],
-        "大盤策略模式": ["大盤策略模式", "大盤情境分桶", "大盤橋接狀態", "大盤橋接風控"],
+        "大盤策略模式": ["大盤策略模式", "大盤情境分桶", "大盤橋接狀態", "大盤橋接風控", "大盤模式"],
         "大盤策略建議": ["大盤策略建議", "大盤風控建議", "市場策略調整說明", "大盤影響說明", "大盤情境調權說明"],
+        "大盤情境分桶": ["大盤情境分桶", "大盤策略模式", "大盤橋接狀態"],
+        "大盤橋接狀態": ["大盤橋接狀態", "大盤橋接風控", "大盤策略模式"],
+        "大盤橋接風控": ["大盤橋接風控", "大盤風控建議", "大盤策略建議"],
+        "大盤情境調權說明": ["大盤情境調權說明", "大盤策略建議", "市場策略調整說明"],
         "強勢族群等級": ["強勢族群等級", "族群輪動狀態", "類別"],
         "族群輪動狀態": ["族群輪動狀態", "族群策略建議", "族群資金流說明"],
+        "族群策略建議": ["族群策略建議", "族群集中警示", "族群資金流說明"],
+        "族群資金流說明": ["族群資金流說明", "族群策略建議"],
+        "K線驗證標記": ["K線驗證標記", "K線檢視提示", "進場時機"],
+        "K線檢視提示": ["K線檢視提示", "K線驗證標記", "等待條件"],
+        "雷達訊號": ["雷達訊號", "雷達訊號說明"],
+        "籌碼訊號": ["籌碼訊號", "籌碼訊號說明"],
+        "量能訊號": ["量能訊號", "量能訊號說明"],
+        "股神進場區間": ["股神進場區間", "建議價位", "進場時機", "操作區間"],
+        "股神推論": ["股神推論", "股神推論邏輯", "推薦理由", "推薦原因", "機會型態"],
+        "推薦理由": ["推薦理由", "推薦原因", "股神推論", "股神推論邏輯"],
+        "推薦原因": ["推薦原因", "推薦理由", "股神推論", "股神推論邏輯"],
+        "風險說明": ["風險說明", "風險扣分原因", "追高風險等級", "單檔風險等級"],
         "命中結果": ["命中結果", "績效評語", "是否達標_回測", "是否停損_回測"],
         "狀態": ["狀態", "目前狀態"],
     }
@@ -370,6 +423,68 @@ def _safe_display_table(df: pd.DataFrame, keep_cols: Optional[List[str]] = None)
     for c in out.columns:
         if not pd.api.types.is_numeric_dtype(out[c]) and not pd.api.types.is_bool_dtype(out[c]):
             out[c] = out[c].map(_clean_text_value)
+    return out
+
+
+
+def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """v24：確保推薦清單與推薦紀錄進入管理中心後，擁有相同欄位、相同欄序與安全型別。"""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
+    out = _backfill_management_fields(_dedupe_columns_keep_first_valid(df.copy()))
+    for col in UNIFIED_MANAGEMENT_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA if col in NUMERIC_MANAGEMENT_COLUMNS else ""
+    for col in NUMERIC_MANAGEMENT_COLUMNS:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
+    for col in out.columns:
+        if col not in NUMERIC_MANAGEMENT_COLUMNS:
+            out[col] = out[col].map(_clean_text_value).astype("object")
+    # 若推薦時間被塞在推薦日期裡，盡量拆出 HH:MM:SS，畫面更一致。
+    if "推薦日期" in out.columns:
+        dt = pd.to_datetime(out["推薦日期"], errors="coerce")
+        if "推薦時間" in out.columns:
+            time_from_dt = dt.dt.strftime("%H:%M:%S").replace("NaT", "")
+            out["推薦時間"] = out["推薦時間"].where(out["推薦時間"].map(lambda x: not _is_blank_value(x)), time_from_dt)
+        out["推薦日期"] = dt.dt.strftime("%Y-%m-%d").where(dt.notna(), out["推薦日期"].astype(str))
+    ordered = [c for c in UNIFIED_MANAGEMENT_COLUMNS if c in out.columns]
+    extras = [c for c in out.columns if c not in ordered and not str(c).startswith("_")]
+    return out[ordered + extras].reset_index(drop=True)
+
+
+def _unified_display_cols(df: pd.DataFrame, preferred: Optional[List[str]] = None, include_extra: bool = False) -> List[str]:
+    """v24：兩種資料來源共用同一套欄位順序；空欄不顯示，但核心欄位固定保留。"""
+    if df is None or df.empty:
+        return []
+    core_keep = {
+        "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
+        "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦時間",
+        "推薦模式", "推薦型態", "機會型態", "進場時機", "建議動作", "等待條件", "推薦分數",
+        "建議倉位%", "動態建議倉位%", "建議價位", "股神進場區間", "推薦價格", "最新價",
+        "停損參考", "停損價", "賣出目標1", "賣出目標2", "停利策略", "停損策略",
+        "追高風險等級", "單檔風險等級", "風險說明", "大盤策略模式", "大盤策略建議",
+        "族群策略建議", "K線驗證標記", "股神推論", "狀態", "資料來源檔",
+    }
+    base = preferred or UNIFIED_MANAGEMENT_COLUMNS
+    cols: List[str] = []
+    for c in base:
+        if c in df.columns and c not in cols:
+            if c in core_keep or any(not _is_blank_value(v) for v in df[c].tolist()):
+                cols.append(c)
+    if include_extra:
+        for c in df.columns:
+            if c not in cols and not str(c).startswith("_") and any(not _is_blank_value(v) for v in df[c].tolist()):
+                cols.append(c)
+    return cols
+
+
+def _clean_count_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    for c in out.columns:
+        out[c] = out[c].map(_clean_text_value) if not pd.api.types.is_numeric_dtype(out[c]) else out[c]
     return out
 
 def _risk_rank(value: Any) -> int:
@@ -616,15 +731,19 @@ def render_portfolio_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: Lis
     st.caption("整合原 v18 投資組合功能：檢查建議倉位、族群集中、風險標的與操作優先順序。")
     _render_source_status(notes)
     source = st.radio("分析資料來源", ["推薦清單 / 目前追蹤", "股神推薦紀錄 / 歷史全部"], horizontal=True, key="v21_port_src")
+    # v24：欄位基準用兩個資料來源的聯集，讓「推薦清單 / 目前追蹤」與「股神推薦紀錄 / 歷史全部」切換時欄位一致。
+    schema_basis = _ensure_unified_management_schema(pd.concat([rec_df, hist_df], ignore_index=True, sort=False)) if (not rec_df.empty or not hist_df.empty) else pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
     df = rec_df.copy() if source.startswith("推薦清單") else hist_df.copy()
+    df = _ensure_unified_management_schema(df)
     if df.empty:
         st.warning("目前沒有可分析資料。請先在 7_股神推薦 匯入 10_推薦清單，或在 8_股神推薦紀錄建立紀錄。")
         return
-    df = _filter_df(df, "v21_port")
+    df = _filter_df(_ensure_unified_management_schema(df), "v21_port")
     if df.empty:
         st.warning("篩選後沒有資料。")
         return
     df["v21操作優先順序"] = df.apply(_allocation_action, axis=1)
+    df = _ensure_unified_management_schema(df)
     alloc_col = "動態建議倉位%" if "動態建議倉位%" in df.columns else ("建議倉位%" if "建議倉位%" in df.columns else None)
     avg_score = _to_num(df["推薦分數"]).mean() if "推薦分數" in df.columns else 0
     total_alloc = _to_num(df[alloc_col]).sum() if alloc_col else 0
@@ -645,43 +764,46 @@ def render_portfolio_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: Lis
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("#### 操作優先順序")
-        st.dataframe(df["v21操作優先順序"].value_counts().rename_axis("建議").reset_index(name="檔數"), use_container_width=True, hide_index=True)
+        st.dataframe(_clean_count_table(df["v21操作優先順序"].value_counts().rename_axis("建議").reset_index(name="檔數")), use_container_width=True, hide_index=True)
     with c2:
         sector_col = "類別" if "類別" in df.columns else ("產業" if "產業" in df.columns else None)
         st.markdown("#### 族群集中")
         if sector_col:
-            st.dataframe(df[sector_col].fillna("未分類").astype(str).value_counts().rename_axis(sector_col).reset_index(name="檔數"), use_container_width=True, hide_index=True)
+            st.dataframe(_clean_count_table(df[sector_col].map(_clean_text_value).replace({"":"未分類"}).value_counts().rename_axis(sector_col).reset_index(name="檔數")), use_container_width=True, hide_index=True)
         else:
             st.info("缺少類別 / 產業欄位。")
     with c3:
         type_col = "推薦型態" if "推薦型態" in df.columns else ("機會型態" if "機會型態" in df.columns else None)
         st.markdown("#### 推薦型態")
         if type_col:
-            st.dataframe(df[type_col].fillna("未分類").astype(str).value_counts().rename_axis(type_col).reset_index(name="檔數"), use_container_width=True, hide_index=True)
+            st.dataframe(_clean_count_table(df[type_col].map(_clean_text_value).replace({"":"未分類"}).value_counts().rename_axis(type_col).reset_index(name="檔數")), use_container_width=True, hide_index=True)
         else:
             st.info("缺少推薦型態欄位。")
-    display_cols = _display_cols(df, PORTFOLIO_COLUMNS)
+    display_cols = _unified_display_cols(schema_basis, UNIFIED_MANAGEMENT_COLUMNS)
+    # 若兩個來源都沒有某欄資料，仍會自動排除；若另一個來源有資料，當前來源會保留該欄但顯示空白，確保欄位一致。
     st.markdown("#### 投資組合明細")
-    st.dataframe(_safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]), use_container_width=True, hide_index=True, height=520)
-    st.download_button("下載投資組合分析 CSV", _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]).to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_management_portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+    table_df = _safe_display_table(df[display_cols], keep_cols=display_cols)
+    st.dataframe(table_df, use_container_width=True, hide_index=True, height=520)
+    st.download_button("下載投資組合分析 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_management_portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
 
 def render_daily_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: List[str]) -> None:
     st.subheader("每日追蹤報告")
     st.caption("整合原 v19 每日追蹤功能：今日操作重點、優先觀察、避免追高、風險處理與追蹤清單匯出。")
     _render_source_status(notes)
-    df = rec_df.copy()
+    df = _ensure_unified_management_schema(rec_df.copy())
     if df.empty:
-        df = hist_df.copy()
+        df = _ensure_unified_management_schema(hist_df.copy())
     if df.empty:
         st.warning("目前沒有推薦清單或推薦紀錄可追蹤。")
         return
-    df = _filter_df(df, "v21_daily")
+    df = _filter_df(_ensure_unified_management_schema(df), "v21_daily")
     if df.empty:
         st.warning("篩選後沒有資料。")
         return
     df["今日操作建議"] = df.apply(_daily_action, axis=1)
     df["追蹤分級"] = df.apply(_tracking_grade, axis=1)
+    df = _ensure_unified_management_schema(df)
     high_risk = df["今日操作建議"].astype(str).str.contains("避免追高|風險處理|停損", na=False).sum()
     priority = df["追蹤分級"].astype(str).str.startswith("A").sum()
     alloc_col = "動態建議倉位%" if "動態建議倉位%" in df.columns else ("建議倉位%" if "建議倉位%" in df.columns else None)
@@ -695,18 +817,19 @@ def render_daily_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: List[st
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 今日操作重點")
-        st.dataframe(df["今日操作建議"].value_counts().rename_axis("操作建議").reset_index(name="檔數"), use_container_width=True, hide_index=True)
+        st.dataframe(_clean_count_table(df["今日操作建議"].value_counts().rename_axis("操作建議").reset_index(name="檔數")), use_container_width=True, hide_index=True)
     with c2:
         st.markdown("#### 追蹤分級")
-        st.dataframe(df["追蹤分級"].value_counts().rename_axis("追蹤分級").reset_index(name="檔數"), use_container_width=True, hide_index=True)
+        st.dataframe(_clean_count_table(df["追蹤分級"].value_counts().rename_axis("追蹤分級").reset_index(name="檔數")), use_container_width=True, hide_index=True)
     st.markdown("#### 今日追蹤明細")
     sort_cols = [c for c in ["追蹤分級", "推薦分數"] if c in df.columns]
     if sort_cols:
         ascending = [True if c == "追蹤分級" else False for c in sort_cols]
         df = df.sort_values(sort_cols, ascending=ascending)
-    display_cols = _display_cols(df, DAILY_COLUMNS)
-    st.dataframe(_safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]), use_container_width=True, hide_index=True, height=560)
-    st.download_button("下載每日追蹤報告 CSV", _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]).to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_daily_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+    display_cols = _unified_display_cols(df, DAILY_COLUMNS)
+    table_df = _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
+    st.dataframe(table_df, use_container_width=True, hide_index=True, height=560)
+    st.download_button("下載每日追蹤報告 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_daily_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
 
 def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
@@ -716,12 +839,13 @@ def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
     if all_df.empty:
         st.warning("目前沒有推薦紀錄或推薦清單可分析。請先建立紀錄，並在 8_股神推薦紀錄執行推薦後績效更新。")
         return
-    df = _filter_df(all_df.copy(), "v21_quality")
+    df = _filter_df(_ensure_unified_management_schema(all_df.copy()), "v21_quality")
     if df.empty:
         st.warning("篩選後沒有資料。")
         return
     df["品質分級"] = df.apply(_quality_grade, axis=1)
     df["品質建議"] = df.apply(_quality_advice, axis=1)
+    df = _ensure_unified_management_schema(df)
     hits = int(df.apply(_hit_flag, axis=1).sum())
     fails = int(df.apply(_fail_flag, axis=1).sum())
     perf_col = "推薦後5日%" if "推薦後5日%" in df.columns else ("推薦後10日%" if "推薦後10日%" in df.columns else ("推薦後20日%" if "推薦後20日%" in df.columns else None))
@@ -753,11 +877,12 @@ def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
     if fail_df.empty:
         st.success("目前沒有明確失敗案例。")
     else:
-        st.dataframe(fail_df[_display_cols(fail_df, QUALITY_COLUMNS)], use_container_width=True, hide_index=True, height=300)
+        st.dataframe(_safe_display_table(fail_df[_unified_display_cols(fail_df, QUALITY_COLUMNS)]), use_container_width=True, hide_index=True, height=300)
     st.markdown("#### 品質明細")
-    display_cols = _display_cols(df, QUALITY_COLUMNS)
-    st.dataframe(_safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"]), use_container_width=True, hide_index=True, height=520)
-    st.download_button("下載品質分析 CSV", df[display_cols].to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+    display_cols = _unified_display_cols(df, QUALITY_COLUMNS)
+    table_df = _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
+    st.dataframe(table_df, use_container_width=True, hide_index=True, height=520)
+    st.download_button("下載品質分析 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
     if not group_df.empty:
         st.download_button("下載分組校正建議 CSV", group_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_group_tune_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
@@ -792,13 +917,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v23｜完整資訊檢查修正版：欄位回補、None清理、空欄自動隱藏、7/8/10資料串聯")
+            render_pro_hero("股神管理中心", "v24｜欄位統一修正版：推薦清單/目前追蹤 與 股神推薦紀錄/歷史全部 同欄位顯示")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v23 修正：自動回補 7/8/10 不同版本欄位、清除 None/nan、隱藏整欄空白，避免資訊看起來沒跑出來。")
+    st.caption("v24 修正：統一 推薦清單/目前追蹤 與 股神推薦紀錄/歷史全部 的欄位、欄位順序、別名回補與空值顯示。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
