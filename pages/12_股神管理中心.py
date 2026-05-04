@@ -1670,6 +1670,12 @@ pages/14_#U80a1#U795e#U63a8#U85a6#U54c1#U8cea#U5100#U8868#U677f.py""")
 
 def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    # v32：啟用與 12_股神管理中心相同的全表格欄位管理方式
+    try:
+    from godpick_column_manager import install_auto_column_manager
+    install_auto_column_manager("第12_股神管理中心")
+    except Exception:
+    pass
     if inject_pro_theme:
         try:
             inject_pro_theme()

@@ -1411,6 +1411,12 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦�
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    # v32：啟用與 12_股神管理中心相同的全表格欄位管理方式
+    try:
+    from godpick_column_manager import install_auto_column_manager
+    install_auto_column_manager("第10_推薦清單")
+    except Exception:
+    pass
     inject_pro_theme()
 
     render_pro_hero(
