@@ -24,6 +24,22 @@ except Exception:
     credentials = None
     firestore = None
 
+
+try:
+    from godpick_column_schema import (
+        UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
+        UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
+        normalize_godpick_dataframe,
+        unified_display_columns,
+        dedupe_keep_order as shared_dedupe_keep_order,
+    )
+except Exception:
+    UNIFIED_RECOMMEND_DISPLAY_COLUMNS = []
+    SHARED_UNIFIED_MANAGEMENT_COLUMNS = []
+    normalize_godpick_dataframe = None
+    unified_display_columns = None
+    shared_dedupe_keep_order = None
+
 from utils import (
     compute_radar_scores,
     compute_signal_snapshot,
@@ -72,6 +88,14 @@ SCAN_MAX_WORKERS = 32         # V35：提高平行掃描上限；不做低成本
 V22_CHECKPOINT_EVERY = 500    # V35：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 HISTORY_DEBUG_ON_FAIL = False  # V35：掃描中失敗股票不再即時跑慢速 debug，失敗原因彙總到除錯摘要
+
+
+# v26 欄位統一：讓 7_股神推薦匯出 / 匯入 8 / 匯入 10 使用共用欄位集合。
+try:
+    if UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
+        GODPICK_RECORD_COLUMNS = shared_dedupe_keep_order((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)) if shared_dedupe_keep_order else list(dict.fromkeys((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)))
+except Exception:
+    pass
 
 GODPICK_DEFAULT_SCORE_WEIGHTS = {
     "市場環境": 10,
@@ -8929,6 +8953,14 @@ def main():
         rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
         hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
 
+    # v26 欄位統一：推薦結果進入畫面/匯出/寫入前先標準化，確保 7/8/10/12 欄位一致。
+    try:
+        if normalize_godpick_dataframe is not None:
+            rec_df = normalize_godpick_dataframe(rec_df, add_missing=True)
+            hot_pick_df = normalize_godpick_dataframe(hot_pick_df, add_missing=False)
+    except Exception:
+        pass
+
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
 
@@ -9436,14 +9468,10 @@ def main():
     tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
 
     with tabs[0]:
-        full_default_cols = [
-            "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "買點狀態", "進場型態", "高分禁買旗標", "高分禁買原因", "實戰買點分數", "實戰操作建議", "股神決策模式", "股神進場建議", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "第一筆進場%", "第二筆加碼條件", "停利策略", "停損策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "風險報酬比", "追價風險分", "大盤加權分", "大盤參考等級", "大盤可參考分數", "大盤操作風格", "大盤橋接分數", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略",
-            "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
-            "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
-            "同類股領先幅度", "是否領先同類股", "建議切入區", "最新價",
-            "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2",
-            "推薦標籤", "推薦理由摘要"
-        ]
+        # v26 欄位統一：完整推薦表使用與 8_股神推薦紀錄 / 10_推薦清單 / 12_股神管理中心一致的標準欄位順序。
+        full_default_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(rec_df.columns)) if c in rec_df.columns]
+        if not full_default_cols:
+            full_default_cols = [c for c in list(rec_df.columns) if c != "勾選"]
         full_available_cols = list(rec_df.columns)
         full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
         full_show_cols = [c for c in full_order if c in rec_df.columns]
