@@ -8445,6 +8445,12 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
     return fixed_cols + st.session_state.get(applied_key, applied_order)
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    # v32：啟用與 12_股神管理中心相同的全表格欄位管理方式
+    try:
+    from godpick_column_manager import install_auto_column_manager
+    install_auto_column_manager("第07_股神推薦")
+    except Exception:
+    pass
     inject_pro_theme()
 
     watchlist_map = _load_watchlist_map()
