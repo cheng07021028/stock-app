@@ -22,6 +22,22 @@ except Exception:
     credentials = None
     firestore = None
 
+
+try:
+    from godpick_column_schema import (
+        UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
+        UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
+        normalize_godpick_dataframe,
+        unified_display_columns,
+        dedupe_keep_order as shared_dedupe_keep_order,
+    )
+except Exception:
+    UNIFIED_RECOMMEND_DISPLAY_COLUMNS = []
+    SHARED_UNIFIED_MANAGEMENT_COLUMNS = []
+    normalize_godpick_dataframe = None
+    unified_display_columns = None
+    shared_dedupe_keep_order = None
+
 from utils import (
     format_number,
     get_history_data,
@@ -152,6 +168,18 @@ UI_CONFIG_DEFAULT = {
     },
     "updated_at": "",
 }
+
+
+# v74 欄位統一：覆蓋標準/進階欄位，讓 8_股神推薦紀錄與 7_股神推薦完整推薦表一致。
+try:
+    if UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
+        GODPICK_RECORD_COLUMNS = shared_dedupe_keep_order((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)) if shared_dedupe_keep_order else list(dict.fromkeys((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)))
+        DEFAULT_STANDARD_COLS = [c for c in UNIFIED_RECOMMEND_DISPLAY_COLUMNS if c in GODPICK_RECORD_COLUMNS]
+        DEFAULT_ADVANCED_COLS = [c for c in GODPICK_RECORD_COLUMNS if c not in []]
+        UI_CONFIG_DEFAULT["profiles"]["標準"] = DEFAULT_STANDARD_COLS.copy()
+        UI_CONFIG_DEFAULT["profiles"]["進階"] = DEFAULT_ADVANCED_COLS.copy()
+except Exception:
+    pass
 
 
 def _dedupe_keep_order(seq):
@@ -622,8 +650,15 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
                 _safe_str(x.at[idx, "推薦模式"]),
             )
 
+    # v74 欄位統一：共用 schema 回補不同模組欄位別名，避免 7/8/10/12 顯示不一致。
+    try:
+        if normalize_godpick_dataframe is not None:
+            x = normalize_godpick_dataframe(x, add_missing=True)
+    except Exception:
+        pass
+
     # v73：GODPICK_RECORD_COLUMNS 內歷史整合後有重複欄名，回傳前統一去重，避免 data_editor / arrow 顯示異常。
-    ordered_cols = _dedupe_keep_order_v73([c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
+    ordered_cols = _dedupe_keep_order_v73([c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or GODPICK_RECORD_COLUMNS) if c in x.columns] + [c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
     x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
     return x[ordered_cols].copy()
 
