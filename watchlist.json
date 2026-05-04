@@ -344,62 +344,53 @@
     {
       "code": "1595",
       "name": "川寶",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "2342",
       "name": "茂矽",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "2374",
       "name": "佳能",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "2449",
       "name": "京元電子",
-      "market": "上市",
-      "category": "封測"
+      "market": "上市"
     },
     {
       "code": "3605",
       "name": "宏致",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "3707",
       "name": "漢磊",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "4950",
       "name": "金耘國際",
-      "market": "上櫃",
-      "category": "鋼鐵"
+      "market": "上櫃"
     },
     {
       "code": "4951",
       "name": "精拓科",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6207",
       "name": "雷科",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "6953",
       "name": "家碩",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0505": []
 }
