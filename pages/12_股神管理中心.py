@@ -9,6 +9,22 @@ from typing import Any, Dict, List, Tuple, Optional
 import pandas as pd
 import streamlit as st
 
+
+try:
+    from godpick_column_schema import (
+        UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
+        UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
+        normalize_godpick_dataframe,
+        unified_display_columns,
+        dedupe_keep_order as shared_dedupe_keep_order,
+    )
+except Exception:
+    UNIFIED_RECOMMEND_DISPLAY_COLUMNS = []
+    SHARED_UNIFIED_MANAGEMENT_COLUMNS = []
+    normalize_godpick_dataframe = None
+    unified_display_columns = None
+    shared_dedupe_keep_order = None
+
 try:
     from utils import inject_pro_theme, render_pro_hero
 except Exception:
@@ -83,6 +99,22 @@ NUMERIC_MANAGEMENT_COLUMNS = {
     "最大風險%", "族群資金流分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
     "推薦後最大漲幅%", "推薦後最大回撤%",
 }
+
+
+# v26 欄位統一：管理中心改用共用 schema，與 7_股神推薦、8_股神推薦紀錄、10_推薦清單共用欄序。
+try:
+    if SHARED_UNIFIED_MANAGEMENT_COLUMNS:
+        UNIFIED_MANAGEMENT_COLUMNS = list(SHARED_UNIFIED_MANAGEMENT_COLUMNS)
+        NUMERIC_MANAGEMENT_COLUMNS = set(NUMERIC_MANAGEMENT_COLUMNS) | {
+            "推薦總分", "推薦分數", "股神決策分數", "上漲機率估計%", "上漲機率%", "推薦價格", "推薦日價格", "最新價", "建議價位",
+            "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+            "建議倉位%", "動態建議倉位%", "建議部位%", "第一筆進場%", "最大風險%", "風險報酬比", "追價風險分",
+            "大盤橋接分數", "大盤影響加減分", "族群資金流分數", "同類股領先幅度", "類股熱度分數", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "交易可行分數", "自動因子總分", "爆發力分數",
+            "實際買進價", "實際賣出價", "實際報酬%", "損益金額", "損益幅%", "損益%", "持有天數",
+            "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        }
+except Exception:
+    pass
 
 
 def _safe_load_json(path: Path) -> Any:
@@ -187,6 +219,12 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if "推薦日期" in df.columns:
         df["推薦日期"] = df["推薦日期"].astype(str).replace({"NaT": "", "nan": "", "None": ""})
     df = _backfill_management_fields(df)
+    # v26 欄位統一：共用 schema 回補欄位別名。
+    try:
+        if normalize_godpick_dataframe is not None:
+            df = normalize_godpick_dataframe(df, add_missing=True)
+    except Exception:
+        pass
     return df.reset_index(drop=True)
 
 
@@ -752,6 +790,12 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
     out = _backfill_management_fields(_dedupe_columns_keep_first_valid(df.copy()))
+    # v26 欄位統一：再次套用共用 schema，確保兩種資料來源欄位完全一致。
+    try:
+        if normalize_godpick_dataframe is not None:
+            out = normalize_godpick_dataframe(out, add_missing=True)
+    except Exception:
+        pass
     for col in UNIFIED_MANAGEMENT_COLUMNS:
         if col not in out.columns:
             out[col] = pd.NA if col in NUMERIC_MANAGEMENT_COLUMNS else ""
