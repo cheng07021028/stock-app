@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""股神推薦欄位標準化共用模組 v26
+"""股神推薦欄位標準化共用模組 v29
 
 用途：
 - 讓 7_股神推薦、8_股神推薦紀錄、10_推薦清單、12_股神管理中心使用同一套核心欄位與欄位順序。
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 import math
+import json
 import pandas as pd
 
 BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -186,3 +187,111 @@ def unified_display_columns(df: pd.DataFrame | None = None, *, include_extras: b
     if include_extras:
         cols += [c for c in df.columns if c not in cols and not str(c).startswith("_")]
     return dedupe_keep_order(cols)
+
+
+# ------------------------------
+# v29 storage / display safety helpers
+# ------------------------------
+def safe_for_json(v: Any) -> Any:
+    """把 pandas/numpy/list/dict/NaN 轉成 JSON 可安全寫入的值。"""
+    if is_blank(v):
+        return ""
+    try:
+        import numpy as np  # type: ignore
+        if isinstance(v, (np.integer,)):
+            return int(v)
+        if isinstance(v, (np.floating,)):
+            f = float(v)
+            return "" if math.isnan(f) else f
+        if isinstance(v, (np.bool_,)):
+            return bool(v)
+    except Exception:
+        pass
+    if isinstance(v, (pd.Timestamp,)):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(v, (dict, list, tuple, set)):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    return v
+
+
+def standardize_records_for_storage(df: pd.DataFrame | None, *, keep_extras: bool = True) -> pd.DataFrame:
+    """寫入 JSON / GitHub / Firestore 前使用：統一欄位、保留資料、不讓 NaN 進 JSON。"""
+    x = normalize_godpick_dataframe(df, add_missing=True, clean_none=True)
+    if x is None:
+        x = pd.DataFrame(columns=UNIFIED_RECOMMEND_DISPLAY_COLUMNS)
+    cols = [c for c in UNIFIED_RECOMMEND_DISPLAY_COLUMNS if c in x.columns]
+    if keep_extras:
+        cols += [c for c in x.columns if c not in cols and not str(c).startswith("_")]
+    x = x.loc[:, dedupe_keep_order(cols)].copy()
+    for c in x.columns:
+        x[c] = x[c].map(safe_for_json)
+    return x.reset_index(drop=True)
+
+
+def smart_backfill_management_fields(df: pd.DataFrame | None) -> pd.DataFrame:
+    """讓舊資料在 8/10/12 顯示時有一致的管理欄位。只補畫面欄位，不改推薦分數邏輯。"""
+    x = normalize_godpick_dataframe(df, add_missing=True, clean_none=True)
+    if x.empty:
+        return x
+    def score(row, *names):
+        for n in names:
+            v = row.get(n, "")
+            try:
+                if not is_blank(v):
+                    return float(v)
+            except Exception:
+                continue
+        return 0.0
+    def text(row, *names):
+        for n in names:
+            v = row.get(n, "")
+            if not is_blank(v):
+                return str(v).strip()
+        return ""
+    for idx, row in x.iterrows():
+        s = score(row, "推薦總分", "推薦分數", "股神決策分數")
+        action = text(row, "建議動作", "股神建議動作", "今日操作建議")
+        buy_grade = text(row, "買點分級", "起漲等級", "推薦等級")
+        risk = text(row, "風險說明", "單檔風險等級", "追高風險等級")
+        entry = text(row, "股神進場區間", "建議切入區", "操作區間")
+        if is_blank(row.get("v21操作優先順序", "")):
+            x.at[idx, "v21操作優先順序"] = action or ("拉回可布局" if s >= 85 else "觀察等待")
+        if is_blank(row.get("追蹤分級", "")):
+            x.at[idx, "追蹤分級"] = "A｜優先追蹤" if s >= 88 else ("B｜觀察確認" if s >= 80 else "C｜風險控管")
+        if is_blank(row.get("今日操作建議", "")):
+            x.at[idx, "今日操作建議"] = action or ("拉回可布局" if s >= 85 else "等待確認")
+        if is_blank(row.get("品質分級", "")):
+            x.at[idx, "品質分級"] = "A｜高分待驗證" if s >= 88 else ("B｜中高分待驗證" if s >= 80 else "C｜風險待驗證")
+        if is_blank(row.get("品質建議", "")):
+            if risk:
+                x.at[idx, "品質建議"] = risk
+            elif entry:
+                x.at[idx, "品質建議"] = f"依等待條件進場：{entry}"
+            else:
+                x.at[idx, "品質建議"] = "依趨勢與量能確認後再操作"
+        if is_blank(row.get("建議倉位%", "")):
+            x.at[idx, "建議倉位%"] = 15 if s >= 90 else (10 if s >= 85 else (8 if s >= 80 else 5))
+        if is_blank(row.get("動態建議倉位%", "")):
+            x.at[idx, "動態建議倉位%"] = x.at[idx, "建議倉位%"]
+        if is_blank(row.get("第一筆進場%", "")):
+            try:
+                x.at[idx, "第一筆進場%"] = round(float(x.at[idx, "建議倉位%"] or 0) * 0.5, 2)
+            except Exception:
+                x.at[idx, "第一筆進場%"] = ""
+        if is_blank(row.get("建議投入等級", "")):
+            x.at[idx, "建議投入等級"] = "高" if s >= 90 else ("中高" if s >= 85 else "中")
+        if is_blank(row.get("分批策略", "")):
+            x.at[idx, "分批策略"] = "先小部位試單，突破確認再加碼" if "突破" in (entry + action + buy_grade) else "分批低接，跌破支撐停止加碼"
+        if is_blank(row.get("第二筆加碼條件", "")):
+            x.at[idx, "第二筆加碼條件"] = "站穩突破價且量能續強" if s >= 85 else "等待量價轉強再評估"
+        if is_blank(row.get("族群策略建議", "")):
+            cat = text(row, "類別", "產業") or "同族群"
+            x.at[idx, "族群策略建議"] = f"觀察{cat}族群強弱與資金延續性"
+        if is_blank(row.get("K線驗證標記", "")):
+            x.at[idx, "K線驗證標記"] = "待K線確認"
+        if is_blank(row.get("K線檢視提示", "")):
+            x.at[idx, "K線檢視提示"] = "檢查支撐、壓力、量能與長上影風險"
+    return standardize_records_for_storage(x, keep_extras=True)
