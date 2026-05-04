@@ -15,7 +15,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v24 欄位統一修正版"
+PAGE_TITLE = "股神管理中心｜v25 歷史資料智慧補值版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 RECOMMEND_FILES = [
@@ -60,7 +60,7 @@ GROUP_FIELDS = [
 ]
 
 
-# v24：管理中心統一欄位。這組欄位會同時套用在「推薦清單 / 目前追蹤」與「股神推薦紀錄 / 歷史全部」，避免切換資料來源時欄位不同。
+# v25：管理中心統一欄位。這組欄位會同時套用在「推薦清單 / 目前追蹤」與「股神推薦紀錄 / 歷史全部」，並對歷史舊資料進行智慧補值。
 UNIFIED_MANAGEMENT_COLUMNS = [
     "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
     "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦時間",
@@ -301,6 +301,323 @@ def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: An
     return df
 
 
+
+# =========================================================
+# v25：歷史資料智慧補值
+# 目的：舊版「股神推薦紀錄 / 歷史全部」缺少追蹤、品質、倉位、族群策略等新欄位時，
+#      以既有推薦分數、買點、風險、建議動作、等待條件等欄位推導管理用資訊。
+# 注意：本頁只做畫面與匯出補值，不寫回 JSON，不覆蓋 7/8/10 原始資料。
+# =========================================================
+
+def _contains_any(text: Any, keywords: List[str]) -> bool:
+    s = _clean_text_value(text)
+    return any(k in s for k in keywords)
+
+
+def _score_bucket(score: float) -> str:
+    if score >= 90:
+        return "S｜超高分"
+    if score >= 85:
+        return "A｜高分"
+    if score >= 80:
+        return "B｜中高分"
+    if score >= 70:
+        return "C｜可觀察"
+    return "D｜低分"
+
+
+def _infer_risk_text(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["單檔風險等級", "追高風險等級"])
+    if existing:
+        return existing
+    text = " ".join(_clean_text_value(row.get(c)) for c in ["風險說明", "建議動作", "等待條件", "推薦型態", "進場時機", "大盤策略模式"] if c in row.index)
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    if any(k in text for k in ["追高", "風險偏高", "高風險", "不建議", "空頭", "過熱", "轉弱"]):
+        return "高風險"
+    if any(k in text for k in ["止跌", "低接", "拉回", "觀察", "確認", "等待"]):
+        return "中"
+    if score >= 85:
+        return "中低"
+    if score >= 75:
+        return "中"
+    return "中高"
+
+
+def _infer_chase_risk_text(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["追高風險等級", "單檔風險等級"])
+    if existing:
+        return existing
+    text = " ".join(_clean_text_value(row.get(c)) for c in ["建議動作", "等待條件", "進場時機", "推薦型態", "風險說明"] if c in row.index)
+    if any(k in text for k in ["突破", "追價", "追高", "急漲", "過熱"]):
+        return "偏高"
+    if any(k in text for k in ["拉回", "低接", "止跌", "不追價", "等待"]):
+        return "低"
+    return "中"
+
+
+def _infer_alloc_percent(row: pd.Series) -> float:
+    explicit = _num(row.get("建議倉位%", None), default=-1)
+    if explicit > 0:
+        return round(explicit, 1)
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    risk = _risk_rank(_infer_risk_text(row))
+    action_text = _clean_text_value(row.get("建議動作")) + _clean_text_value(row.get("進場時機")) + _clean_text_value(row.get("推薦型態"))
+    if score >= 90:
+        base = 12.0
+    elif score >= 85:
+        base = 10.0
+    elif score >= 80:
+        base = 8.0
+    elif score >= 75:
+        base = 6.0
+    elif score >= 70:
+        base = 4.0
+    else:
+        base = 2.0
+    if any(k in action_text for k in ["拉回", "分批", "可布局", "低接"]):
+        base += 1.0
+    if any(k in action_text for k in ["等待", "觀察", "確認", "不追價"]):
+        base -= 1.0
+    if risk >= 4:
+        base = min(base, 3.0)
+    elif risk == 3:
+        base *= 0.75
+    return round(max(0.0, min(base, 12.0)), 1)
+
+
+def _infer_dynamic_alloc_percent(row: pd.Series) -> float:
+    explicit = _num(row.get("動態建議倉位%", None), default=-1)
+    if explicit > 0:
+        return round(explicit, 1)
+    base = _infer_alloc_percent(row)
+    market_text = " ".join(_clean_text_value(row.get(c)) for c in ["大盤策略模式", "大盤策略建議", "大盤橋接風控", "大盤情境分桶"] if c in row.index)
+    if any(k in market_text for k in ["空頭", "偏空", "防守", "高風險", "降權"]):
+        base *= 0.65
+    elif any(k in market_text for k in ["多頭", "偏多", "強勢", "加權"]):
+        base *= 1.1
+    return round(max(0.0, min(base, 12.0)), 1)
+
+
+def _infer_entry_pct(row: pd.Series) -> float:
+    explicit = _num(row.get("第一筆進場%", None), default=-1)
+    if explicit > 0:
+        return round(explicit, 1)
+    alloc = _infer_dynamic_alloc_percent(row)
+    risk = _risk_rank(_infer_risk_text(row))
+    if alloc <= 0:
+        return 0.0
+    if risk >= 4:
+        return 30.0
+    if alloc >= 10:
+        return 50.0
+    return 40.0
+
+
+def _infer_invest_level(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["建議投入等級", "股神信心", "信心等級", "推薦等級", "上漲機率信心"])
+    if existing:
+        return existing
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    risk = _risk_rank(_infer_risk_text(row))
+    if score >= 88 and risk <= 2:
+        return "高｜可分批"
+    if score >= 80 and risk <= 3:
+        return "中｜等待確認"
+    if risk >= 4:
+        return "低｜僅觀察"
+    return "低中｜觀察"
+
+
+def _infer_batch_strategy(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["分批策略", "組合配置建議", "最佳操作劇本"])
+    if existing:
+        return existing
+    action = _clean_text_value(row.get("建議動作"))
+    timing = _clean_text_value(row.get("進場時機"))
+    wait = _clean_text_value(row.get("等待條件"))
+    entry_pct = _infer_entry_pct(row)
+    if _contains_any(action + timing, ["等待", "觀察", "確認", "不追價"]):
+        return f"先觀察，確認訊號後再進第一筆 {entry_pct:.0f}%；條件：{wait or '守支撐、量價轉強'}。"
+    if _contains_any(action + timing, ["拉回", "低接", "分批", "可布局", "止跌"]):
+        return f"分兩到三筆；第一筆 {entry_pct:.0f}%，拉回守支撐再加碼，跌破停損區不加碼。"
+    return f"小量試單 {entry_pct:.0f}%，不追高，依支撐/壓力分批調整。"
+
+
+def _infer_second_entry_condition(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["第二筆加碼條件", "等待條件"])
+    if existing:
+        return existing
+    support = _clean_text_value(row.get("近端支撐"))
+    pressure = _clean_text_value(row.get("近端壓力"))
+    if support or pressure:
+        return f"守住支撐 {support or '區間低點'} 並放量突破 {pressure or '壓力區'} 後再加碼。"
+    return "放量轉強且未跌破前低，再考慮第二筆。"
+
+
+def _infer_daily_action_v25(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["今日操作建議"])
+    if existing:
+        return existing
+    action = _first_existing_value(row, ["建議動作", "股神建議動作", "操作建議"])
+    wait = _first_existing_value(row, ["等待條件", "K線檢視提示"])
+    risk = _risk_rank(_infer_risk_text(row))
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    if risk >= 4:
+        return "減碼 / 僅觀察"
+    if action:
+        return action
+    if score >= 85:
+        return "優先觀察 / 等回測支撐"
+    if wait:
+        return f"等待確認：{wait}"
+    return "觀察等待訊號"
+
+
+def _infer_tracking_grade_v25(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["追蹤分級"])
+    if existing:
+        return existing
+    priority = _first_existing_value(row, ["v21操作優先順序"])
+    if priority:
+        if "可分批" in priority or "優先" in priority:
+            return "A｜優先追蹤"
+        if "觀察" in priority:
+            return "B｜觀察確認"
+        if "減碼" in priority or "風險" in priority:
+            return "C｜風險控管"
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    risk = _risk_rank(_infer_risk_text(row))
+    if risk >= 4:
+        return "C｜風險控管"
+    if score >= 85 and risk <= 2:
+        return "A｜優先追蹤"
+    if score >= 78:
+        return "B｜觀察確認"
+    return "D｜低優先"
+
+
+def _infer_quality_grade_v25(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["品質分級"])
+    if existing:
+        return existing
+    # 有績效欄位時才用命中/失敗語意；沒有績效時只做管理品質分級，避免誤判成已命中。
+    has_perf = any(_num(row.get(c, None), default=0) != 0 for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%"] if c in row.index)
+    if has_perf:
+        return _quality_grade(row)
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    risk = _risk_rank(_infer_risk_text(row))
+    if risk >= 4:
+        return "C｜高風險待驗證"
+    if score >= 88 and risk <= 2:
+        return "A｜高分待驗證"
+    if score >= 80:
+        return "B｜中高分待驗證"
+    return "C｜待觀察"
+
+
+def _infer_quality_advice_v25(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["品質建議"])
+    if existing:
+        return existing
+    risk_text = _infer_risk_text(row)
+    wait = _first_existing_value(row, ["等待條件", "K線檢視提示"])
+    action = _first_existing_value(row, ["建議動作", "今日操作建議"])
+    if _risk_rank(risk_text) >= 4:
+        return "高風險標的，僅能小部位觀察，未突破或未守支撐前不建議加碼。"
+    if wait:
+        return f"依等待條件追蹤：{wait}"
+    if action:
+        return f"依操作建議追蹤：{action}"
+    return "資料尚未完成後續績效追蹤，先以分數、風險與買點條件觀察。"
+
+
+def _infer_sector_strategy_v25(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["族群策略建議", "族群資金流說明", "族群集中警示"])
+    if existing:
+        return existing
+    cat = _first_existing_value(row, ["類別", "產業"], default="未分類族群")
+    typ = _first_existing_value(row, ["推薦型態", "機會型態"], default="觀察型態")
+    score = _num(row.get("推薦分數", row.get("股神決策分數", 0)))
+    if score >= 85:
+        return f"{cat} 族群中分數偏強，屬 {typ}；可列入族群領先觀察，但需避免同族群過度集中。"
+    return f"{cat} 族群屬 {typ}，先觀察族群輪動與量能是否延續。"
+
+
+def _infer_market_strategy_v25(row: pd.Series) -> str:
+    existing = _first_existing_value(row, ["大盤策略建議", "大盤風控建議", "大盤情境調權說明"])
+    if existing:
+        return existing
+    mode = _first_existing_value(row, ["大盤策略模式", "大盤情境分桶", "大盤橋接狀態"])
+    if not mode:
+        return "未串接大盤資料；以個股風險控管為主，勿一次滿倉。"
+    if _contains_any(mode, ["空", "弱", "防守", "風險"]):
+        return "大盤偏弱，降低追價，分批小倉位，跌破支撐先退出。"
+    if _contains_any(mode, ["多", "強"]):
+        return "大盤偏多，可提高優質強勢股追蹤，但仍需分批。"
+    return "大盤中性，依個股支撐壓力與量價訊號操作。"
+
+
+def _apply_v25_smart_backfill(out: pd.DataFrame) -> pd.DataFrame:
+    """v25：補齊歷史紀錄缺失的管理欄位，只補空值，不覆蓋原本已有內容。"""
+    if out is None or out.empty:
+        return out
+    for col in [
+        "追蹤分級", "今日操作建議", "品質分級", "品質建議", "建議投入等級", "第一筆進場%",
+        "分批策略", "第二筆加碼條件", "追高風險等級", "單檔風險等級", "族群策略建議",
+        "大盤策略建議", "大盤策略模式", "大盤橋接狀態", "大盤橋接風控", "族群輪動狀態",
+        "族群集中警示", "組合配置建議", "K線驗證標記", "K線檢視提示"
+    ]:
+        if col not in out.columns:
+            out[col] = ""
+    for col in ["建議倉位%", "動態建議倉位%"]:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    for idx, row in out.iterrows():
+        if _is_blank_value(row.get("單檔風險等級")):
+            out.at[idx, "單檔風險等級"] = _infer_risk_text(row)
+        if _is_blank_value(row.get("追高風險等級")):
+            out.at[idx, "追高風險等級"] = _infer_chase_risk_text(row)
+        if _is_blank_value(row.get("建議倉位%")) or _num(row.get("建議倉位%"), default=0) <= 0:
+            out.at[idx, "建議倉位%"] = _infer_alloc_percent(row)
+        if _is_blank_value(row.get("動態建議倉位%")) or _num(row.get("動態建議倉位%"), default=0) <= 0:
+            # 重新取一次 row，讓剛補好的建議倉位可被使用
+            tmp = out.loc[idx]
+            out.at[idx, "動態建議倉位%"] = _infer_dynamic_alloc_percent(tmp)
+        if _is_blank_value(row.get("第一筆進場%")) or _num(row.get("第一筆進場%"), default=0) <= 0:
+            out.at[idx, "第一筆進場%"] = _infer_entry_pct(out.loc[idx])
+        if _is_blank_value(row.get("建議投入等級")):
+            out.at[idx, "建議投入等級"] = _infer_invest_level(out.loc[idx])
+        if _is_blank_value(row.get("分批策略")):
+            out.at[idx, "分批策略"] = _infer_batch_strategy(out.loc[idx])
+        if _is_blank_value(row.get("第二筆加碼條件")):
+            out.at[idx, "第二筆加碼條件"] = _infer_second_entry_condition(out.loc[idx])
+        if _is_blank_value(row.get("今日操作建議")):
+            out.at[idx, "今日操作建議"] = _infer_daily_action_v25(out.loc[idx])
+        if _is_blank_value(row.get("追蹤分級")):
+            out.at[idx, "追蹤分級"] = _infer_tracking_grade_v25(out.loc[idx])
+        if _is_blank_value(row.get("品質分級")):
+            out.at[idx, "品質分級"] = _infer_quality_grade_v25(out.loc[idx])
+        if _is_blank_value(row.get("品質建議")):
+            out.at[idx, "品質建議"] = _infer_quality_advice_v25(out.loc[idx])
+        if _is_blank_value(row.get("族群策略建議")):
+            out.at[idx, "族群策略建議"] = _infer_sector_strategy_v25(out.loc[idx])
+        if _is_blank_value(row.get("大盤策略建議")):
+            out.at[idx, "大盤策略建議"] = _infer_market_strategy_v25(out.loc[idx])
+        if _is_blank_value(row.get("族群輪動狀態")):
+            cat = _first_existing_value(out.loc[idx], ["類別", "產業"], "未分類")
+            out.at[idx, "族群輪動狀態"] = f"{cat} 族群觀察"
+        if _is_blank_value(row.get("族群集中警示")):
+            out.at[idx, "族群集中警示"] = "請檢查同族群持股比例，避免過度集中。"
+        if _is_blank_value(row.get("組合配置建議")):
+            out.at[idx, "組合配置建議"] = f"建議單檔動態倉位 {out.at[idx, '動態建議倉位%']}%，分批執行。"
+        if _is_blank_value(row.get("K線驗證標記")):
+            timing = _first_existing_value(out.loc[idx], ["進場時機", "等待條件"], "等待K線確認")
+            out.at[idx, "K線驗證標記"] = timing
+        if _is_blank_value(row.get("K線檢視提示")):
+            out.at[idx, "K線檢視提示"] = _first_existing_value(out.loc[idx], ["等待條件", "K線驗證標記"], "觀察量價與支撐是否有效")
+    return out
+
 def _backfill_management_fields(df: pd.DataFrame) -> pd.DataFrame:
     """v23：把 7/8/10 不同版本的欄位名稱統一回管理中心要顯示的欄位。"""
     if df is None or df.empty:
@@ -393,9 +710,12 @@ def _backfill_management_fields(df: pd.DataFrame) -> pd.DataFrame:
         if _is_blank_value(row.get("狀態")):
             out.at[idx, "狀態"] = "觀察"
 
+    # v25：歷史資料智慧補值，只補空欄，不覆蓋既有資料。
+    out = _apply_v25_smart_backfill(out)
+
     # 統一清掉畫面上的 None / nan 字串
     for c in out.columns:
-        if c not in ["推薦分數", "建議倉位%", "動態建議倉位%", "近端支撐", "近端壓力", "停損參考", "族群資金流分數"]:
+        if c not in ["推薦分數", "建議倉位%", "動態建議倉位%", "第一筆進場%", "近端支撐", "近端壓力", "停損參考", "族群資金流分數"]:
             out[c] = out[c].map(_clean_text_value)
     return out
 
@@ -917,13 +1237,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v24｜欄位統一修正版：推薦清單/目前追蹤 與 股神推薦紀錄/歷史全部 同欄位顯示")
+            render_pro_hero("股神管理中心", "v25｜歷史資料智慧補值版：推薦清單/目前追蹤 與 股神推薦紀錄/歷史全部 欄位與內容統一")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v24 修正：統一 推薦清單/目前追蹤 與 股神推薦紀錄/歷史全部 的欄位、欄位順序、別名回補與空值顯示。")
+    st.caption("v25 修正：除統一欄位外，針對歷史全部缺少的追蹤分級、今日操作建議、品質建議、倉位、分批策略與族群策略進行智慧補值。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
