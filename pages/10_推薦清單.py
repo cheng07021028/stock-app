@@ -13,6 +13,22 @@ import requests
 import streamlit as st
 
 try:
+    from godpick_column_schema import (
+        UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
+        UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
+        normalize_godpick_dataframe,
+        unified_display_columns,
+        dedupe_keep_order as shared_dedupe_keep_order,
+    )
+except Exception:
+    UNIFIED_RECOMMEND_DISPLAY_COLUMNS = []
+    SHARED_UNIFIED_MANAGEMENT_COLUMNS = []
+    normalize_godpick_dataframe = None
+    unified_display_columns = None
+    shared_dedupe_keep_order = None
+
+
+try:
     import firebase_admin
     from firebase_admin import credentials, firestore
 except Exception:
@@ -193,6 +209,14 @@ GODPICK_RECORD_COLUMNS = [
 def _k(key: str) -> str:
     return f"{PFX}{key}"
 
+
+
+# v15 欄位統一：推薦清單欄位與 7_股神推薦、8_股神推薦紀錄、12_股神管理中心一致。
+try:
+    if UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
+        GODPICK_RECORD_COLUMNS = shared_dedupe_keep_order((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)) if shared_dedupe_keep_order else list(dict.fromkeys((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)))
+except Exception:
+    pass
 
 def _safe_str(v: Any) -> str:
     if v is None:
@@ -719,6 +743,12 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     x["股票代號"] = x["股票代號"].map(_normalize_code)
     x["股票名稱"] = x["股票名稱"].fillna("").astype(str)
     x = _backfill_v10_columns(x)
+    # v15 欄位統一：共用 schema 回補 7/8/10/12 不同版本欄位名稱。
+    try:
+        if normalize_godpick_dataframe is not None:
+            x = normalize_godpick_dataframe(x, add_missing=True)
+    except Exception:
+        pass
     x = x.loc[:, ~x.columns.duplicated()].copy()
     for c in GODPICK_RECORD_COLUMNS:
         if c not in x.columns:
@@ -1446,12 +1476,10 @@ def main():
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
 
     render_pro_section("推薦清單明細")
-    show_cols = [
-        "資料來源", "推薦日期", "推薦時間", "股票代號", "股票名稱", "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  "大盤橋接分數", "大盤橋接狀態", "大盤橋接風控", "大盤交易時段", "大盤資料品質", "大盤影響加減分", "大盤影響說明", "大盤資料診斷摘要", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "股神決策模式", "股神進場建議", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "追高風險等級", "是否建議追價", "推薦分層", "建議部位%", "建議倉位%", "建議投入等級", "分批策略", "最大風險%", "單檔風險等級", "族群集中警示", "組合配置建議", "大盤策略模式", "大盤多空分數", "推薦積極度係數", "適合推薦型態", "大盤策略建議", "大盤風控建議", "市場策略調整說明", "動態建議倉位%", "風險報酬比", "追價風險分", "飆股起漲分數", "起漲等級", "起漲摘要",
-        "買點分級", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", 
-        "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "最新價", "目前狀態", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "命中結果", "績效評語", "追蹤更新時間",
-        "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要", "備註"
-    ]
+    # v15 欄位統一：推薦清單明細使用與 7/8/12 一致的欄位順序。
+    show_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(filtered_df.columns)) if c in filtered_df.columns]
+    if not show_cols:
+        show_cols = list(filtered_df.columns)
     existing_cols = []
     for c in show_cols:
         if c in filtered_df.columns and c not in existing_cols:
