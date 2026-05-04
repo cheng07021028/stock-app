@@ -1,0 +1,188 @@
+# -*- coding: utf-8 -*-
+"""股神推薦欄位標準化共用模組 v26
+
+用途：
+- 讓 7_股神推薦、8_股神推薦紀錄、10_推薦清單、12_股神管理中心使用同一套核心欄位與欄位順序。
+- 不修改推薦分數邏輯，只處理欄位名稱、欄位順序、缺欄補值與 None/nan 顯示問題。
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable
+import math
+import pandas as pd
+
+BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
+
+# 7 完整推薦表、8 推薦紀錄、10 推薦清單、12 管理中心共用的標準顯示順序。
+# 特殊操作欄位如「勾選 / 匯入自選 / 刪除」由各頁自行放最前面，不放在這裡。
+UNIFIED_RECOMMEND_DISPLAY_COLUMNS = [
+    "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
+    "資料來源", "資料來源檔", "record_id",
+    "推薦日期", "推薦時間", "股票代號", "股票名稱", "市場別", "類別", "產業",
+    "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "推薦分數", "股神決策分數",
+    "起漲等級", "買點分級", "推薦分桶", "信心等級", "上漲機率估計%", "上漲機率%", "上漲機率等級", "上漲機率信心",
+    "進場時機", "建議動作", "股神建議動作", "股神信心", "等待條件", "股神進場區間", "建議切入區", "操作區間",
+    "推薦價格", "推薦日價格", "最新價", "建議價位", "推薦買點_拉回", "推薦買點_突破",
+    "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+    "建議倉位%", "動態建議倉位%", "建議部位%", "建議投入等級", "第一筆進場%", "分批策略", "第二筆加碼條件",
+    "停利策略", "停損策略", "最大風險%", "單檔風險等級", "風險報酬比", "追價風險分", "追高風險等級", "是否建議追價",
+    "大盤策略模式", "大盤策略建議", "大盤風控建議", "大盤情境分桶", "大盤情境調權說明",
+    "大盤橋接分數", "大盤橋接狀態", "大盤橋接風控", "大盤橋接策略", "大盤交易時段", "大盤資料品質", "大盤影響加減分", "大盤影響說明",
+    "強勢族群等級", "族群輪動狀態", "族群資金流分數", "族群資金流說明", "族群策略建議", "族群集中警示", "組合配置建議",
+    "同類股領先幅度", "是否領先同類股", "類股內排名", "類股前3強", "類股熱度分數",
+    "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲摘要", "交易可行分數", "自動因子總分", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
+    "K線驗證標記", "K線檢視提示", "推薦日支撐壓力摘要", "K線查詢參數", "雷達訊號", "籌碼訊號", "量能訊號",
+    "風險說明", "股神推論", "股神推論邏輯", "推薦理由", "推薦原因", "推薦理由摘要", "推薦標籤", "備註",
+    "目前狀態", "狀態", "是否已實際買進", "是否已買進", "實際買進價", "實際賣出價", "實際報酬%", "損益金額", "損益幅%", "損益%", "持有天數",
+    "是否達停損", "是否達目標1", "是否達目標2", "命中結果", "績效評語", "追蹤更新時間", "最新更新時間",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測",
+    "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+]
+
+UNIFIED_MANAGEMENT_COLUMNS = UNIFIED_RECOMMEND_DISPLAY_COLUMNS.copy()
+
+# 回補規則：target 欄空白時，從 sources 依序取第一個有值欄位。
+ALIASES: dict[str, list[str]] = {
+    "股票代號": ["code", "stock_code", "symbol", "股票"],
+    "股票名稱": ["name", "stock_name"],
+    "市場別": ["market"],
+    "類別": ["category", "產業", "industry", "sector"],
+    "產業": ["類別", "category", "industry", "sector"],
+    "推薦日期": ["date", "recommend_date", "created_at", "建立時間"],
+    "推薦時間": ["time", "recommend_time"],
+    "推薦分數": ["推薦總分", "total_score", "score", "final_score"],
+    "推薦總分": ["推薦分數", "total_score", "score", "final_score"],
+    "股神決策分數": ["推薦總分", "推薦分數"],
+    "上漲機率%": ["上漲機率估計%"],
+    "上漲機率估計%": ["上漲機率%"],
+    "股神建議動作": ["建議動作", "實戰操作建議", "股神進場建議", "今日操作建議"],
+    "建議動作": ["股神建議動作", "實戰操作建議", "股神進場建議", "今日操作建議"],
+    "今日操作建議": ["股神建議動作", "建議動作", "v21操作優先順序"],
+    "股神信心": ["信心等級", "上漲機率信心"],
+    "信心等級": ["股神信心", "上漲機率信心"],
+    "股神進場區間": ["建議切入區", "操作區間", "股神進場建議", "股神進場區間"],
+    "建議切入區": ["股神進場區間", "操作區間"],
+    "推薦價格": ["推薦日價格", "最新價", "建議價位"],
+    "推薦日價格": ["推薦價格", "最新價", "建議價位"],
+    "建議價位": ["推薦價格", "推薦日價格", "最新價"],
+    "目前狀態": ["狀態", "status"],
+    "狀態": ["目前狀態", "status"],
+    "是否已實際買進": ["是否已買進"],
+    "是否已買進": ["是否已實際買進"],
+    "損益幅%": ["損益%"],
+    "損益%": ["損益幅%"],
+    "股神推論": ["股神推論邏輯", "推薦理由摘要", "推薦理由", "推薦原因"],
+    "股神推論邏輯": ["股神推論", "推薦理由摘要", "推薦理由", "推薦原因"],
+    "推薦理由": ["推薦原因", "推薦理由摘要", "股神推論", "股神推論邏輯"],
+    "推薦原因": ["推薦理由", "推薦理由摘要", "股神推論", "股神推論邏輯"],
+    "族群策略建議": ["族群資金流說明"],
+    "族群資金流說明": ["族群策略建議"],
+    "K線驗證標記": ["K線檢視提示"],
+    "K線檢視提示": ["K線驗證標記"],
+    "停損價": ["停損參考"],
+    "停損參考": ["停損價"],
+}
+
+NUMERIC_LIKE_COLUMNS = {
+    "推薦總分", "推薦分數", "股神決策分數", "上漲機率估計%", "上漲機率%", "推薦價格", "推薦日價格", "最新價", "建議價位",
+    "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+    "建議倉位%", "動態建議倉位%", "建議部位%", "第一筆進場%", "最大風險%", "風險報酬比", "追價風險分",
+    "大盤橋接分數", "大盤影響加減分", "族群資金流分數", "同類股領先幅度", "類股熱度分數", "技術結構分數", "起漲前兆分數", "飆股起漲分數", "交易可行分數", "自動因子總分", "爆發力分數",
+    "實際買進價", "實際賣出價", "實際報酬%", "損益金額", "損益幅%", "損益%", "持有天數",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+}
+
+
+def dedupe_keep_order(seq: Iterable[Any]) -> list[Any]:
+    out: list[Any] = []
+    seen: set[str] = set()
+    for x in seq:
+        k = str(x)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+    return out
+
+
+def is_blank(v: Any) -> bool:
+    try:
+        if v is None:
+            return True
+        if isinstance(v, float) and math.isnan(v):
+            return True
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    s = str(v).strip()
+    return s.lower() in BLANK_TEXTS
+
+
+def clean_value(v: Any) -> Any:
+    if is_blank(v):
+        return ""
+    if isinstance(v, (dict, list, tuple, set)):
+        try:
+            import json
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    return v
+
+
+def _coalesce_series(target: pd.Series, source: pd.Series) -> pd.Series:
+    mask = target.map(is_blank)
+    if mask.any():
+        target = target.copy()
+        target.loc[mask] = source.loc[mask]
+    return target
+
+
+def normalize_godpick_dataframe(df: pd.DataFrame | None, *, add_missing: bool = True, clean_none: bool = True) -> pd.DataFrame:
+    """回補欄位別名、去除重複欄、清理 None/nan，並依共用欄位排序。"""
+    if df is None:
+        return pd.DataFrame(columns=UNIFIED_RECOMMEND_DISPLAY_COLUMNS if add_missing else [])
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    x = df.copy()
+    x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
+
+    # 先補標準欄位，確保後續 alias target 存在。
+    if add_missing:
+        for col in UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
+            if col not in x.columns:
+                x[col] = ""
+
+    for target, sources in ALIASES.items():
+        if target not in x.columns:
+            x[target] = ""
+        for src in sources:
+            if src in x.columns:
+                x[target] = _coalesce_series(x[target], x[src])
+
+    if "股票代號" in x.columns:
+        x["股票代號"] = x["股票代號"].map(lambda v: str(v).strip().replace(".0", "") if not is_blank(v) else "")
+
+    if clean_none:
+        for col in x.columns:
+            if col not in NUMERIC_LIKE_COLUMNS:
+                x[col] = x[col].map(clean_value).astype("object")
+            else:
+                # 數值欄保留數字；空值顯示時再由各頁 format 函式處理。
+                pass
+
+    ordered = [c for c in UNIFIED_RECOMMEND_DISPLAY_COLUMNS if c in x.columns]
+    extras = [c for c in x.columns if c not in ordered and not str(c).startswith("_")]
+    return x[ordered + extras].reset_index(drop=True)
+
+
+def unified_display_columns(df: pd.DataFrame | None = None, *, include_extras: bool = True, prefix: list[str] | None = None) -> list[str]:
+    base = list(prefix or []) + UNIFIED_RECOMMEND_DISPLAY_COLUMNS
+    base = dedupe_keep_order(base)
+    if df is None or not isinstance(df, pd.DataFrame):
+        return base
+    cols = [c for c in base if c in df.columns]
+    if include_extras:
+        cols += [c for c in df.columns if c not in cols and not str(c).startswith("_")]
+    return dedupe_keep_order(cols)
