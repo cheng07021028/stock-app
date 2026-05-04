@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 import json
+import base64
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
+
+try:
+    import requests
+except Exception:
+    requests = None
 
 
 try:
@@ -31,8 +37,9 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v25 歷史資料智慧補值版"
+PAGE_TITLE = "股神管理中心｜v28 欄位管理永久記錄版"
 BASE_DIR = Path(__file__).resolve().parents[1]
+MANAGEMENT_UI_CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
 
 RECOMMEND_FILES = [
     BASE_DIR / "godpick_recommend_list.json",
@@ -128,6 +135,390 @@ def _safe_load_json(path: Path) -> Any:
     except Exception:
         return []
 
+
+
+# =========================================================
+# v28 欄位管理永久記錄：投資組合 / 每日追蹤 / 推薦品質共用
+# - 本機 JSON + GitHub JSON 雙寫
+# - 欄位顯示、隱藏、順序、預設模板都可永久保存
+# =========================================================
+
+COLUMN_CONFIG_VERSION = "v28"
+
+COLUMN_PRESETS: Dict[str, List[str]] = {
+    "核心推薦欄位": [
+        "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
+        "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦時間",
+        "推薦模式", "推薦型態", "機會型態", "進場時機", "建議動作", "等待條件",
+        "推薦分數", "股神決策分數", "買點分級", "上漲機率%", "股神信心", "股神進場區間", "最新價",
+    ],
+    "操作與倉位欄位": [
+        "v21操作優先順序", "股票代號", "股票名稱", "類別", "產業", "推薦日期", "推薦分數",
+        "進場時機", "建議動作", "等待條件", "建議倉位%", "動態建議倉位%", "建議投入等級",
+        "第一筆進場%", "分批策略", "第二筆加碼條件", "建議價位", "股神進場區間", "最新價",
+    ],
+    "風控停利停損欄位": [
+        "股票代號", "股票名稱", "推薦日期", "推薦分數", "建議動作", "等待條件", "股神進場區間", "最新價",
+        "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
+        "停利策略", "停損策略", "追高風險等級", "單檔風險等級", "最大風險%", "風險說明",
+    ],
+    "族群大盤欄位": [
+        "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數",
+        "大盤策略模式", "大盤策略建議", "大盤情境分桶", "大盤橋接狀態", "大盤橋接風控", "大盤情境調權說明",
+        "族群集中警示", "組合配置建議", "強勢族群等級", "族群輪動狀態", "族群策略建議", "族群資金流分數", "族群資金流說明",
+    ],
+    "績效追蹤欄位": [
+        "股票代號", "股票名稱", "推薦日期", "推薦時間", "推薦分數", "推薦價格", "最新價", "狀態",
+        "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
+        "推薦後最大漲幅%", "推薦後最大回撤%", "命中結果", "績效評語", "實際買進價", "實際賣出價", "實際報酬%",
+    ],
+}
+
+COLUMN_PROFILE_LABELS: Dict[str, str] = {
+    "portfolio_detail": "投資組合明細",
+    "daily_detail": "今日追蹤明細",
+    "quality_detail": "品質明細",
+    "fail_detail": "失敗案例檢討",
+}
+
+
+def _now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _config_ts(payload: Any) -> str:
+    if isinstance(payload, dict):
+        return str(payload.get("updated_at", ""))
+    return ""
+
+
+def _default_column_config() -> Dict[str, Any]:
+    return {
+        "version": COLUMN_CONFIG_VERSION,
+        "updated_at": "",
+        "profiles": {},
+    }
+
+
+def _safe_json_read_local_config(path: Path, default: Any) -> Any:
+    try:
+        if path.exists():
+            txt = path.read_text(encoding="utf-8")
+            if txt.strip():
+                return json.loads(txt)
+    except Exception:
+        pass
+    return default
+
+
+def _safe_json_write_local_config(path: Path, payload: Any) -> Tuple[bool, str]:
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, f"本機已儲存：{path.name}"
+    except Exception as exc:
+        return False, f"本機儲存失敗：{exc}"
+
+
+def _management_config_github_config() -> Dict[str, str]:
+    return {
+        "token": str(st.secrets.get("GITHUB_TOKEN", "")) if hasattr(st, "secrets") else "",
+        "owner": str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028")) if hasattr(st, "secrets") else "cheng07021028",
+        "repo": str(st.secrets.get("GITHUB_REPO_NAME", "stock-app")) if hasattr(st, "secrets") else "stock-app",
+        "branch": str(st.secrets.get("GITHUB_REPO_BRANCH", "main")) if hasattr(st, "secrets") else "main",
+        "path": str(st.secrets.get("GODPICK_MANAGEMENT_UI_CONFIG_GITHUB_PATH", "godpick_management_ui_config.json")) if hasattr(st, "secrets") else "godpick_management_ui_config.json",
+    }
+
+
+def _github_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_contents_url(owner: str, repo: str, path: str) -> str:
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+
+def _read_management_config_from_github() -> Tuple[Dict[str, Any], str]:
+    cfg = _management_config_github_config()
+    token = cfg.get("token", "")
+    if not token or requests is None:
+        return _default_column_config(), "未設定 GITHUB_TOKEN，欄位設定只會儲存在本機。"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return _default_column_config(), "GitHub 尚未建立欄位設定檔，套用後會自動建立。"
+        if resp.status_code >= 400:
+            return _default_column_config(), f"GitHub 讀取欄位設定失敗：{resp.status_code}"
+        data = resp.json()
+        content = base64.b64decode(data.get("content", "")).decode("utf-8")
+        payload = json.loads(content) if content.strip() else _default_column_config()
+        return _normalize_column_config(payload), "GitHub 欄位設定讀取成功。"
+    except Exception as exc:
+        return _default_column_config(), f"GitHub 欄位設定讀取例外：{exc}"
+
+
+def _get_github_file_sha(path_name: str) -> Tuple[str, str]:
+    cfg = _management_config_github_config()
+    token = cfg.get("token", "")
+    if not token or requests is None:
+        return "", "缺少 GITHUB_TOKEN"
+    try:
+        resp = requests.get(
+            _github_contents_url(cfg["owner"], cfg["repo"], path_name),
+            headers=_github_headers(token),
+            params={"ref": cfg["branch"]},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return "", "GitHub 設定檔尚未存在"
+        if resp.status_code >= 400:
+            return "", f"取得 SHA 失敗：{resp.status_code}"
+        return resp.json().get("sha", ""), "OK"
+    except Exception as exc:
+        return "", f"取得 SHA 例外：{exc}"
+
+
+def _write_management_config_to_github(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    cfg = _management_config_github_config()
+    token = cfg.get("token", "")
+    if not token or requests is None:
+        return False, "未設定 GITHUB_TOKEN，已跳過 GitHub 永久寫入。"
+    try:
+        path_name = cfg["path"]
+        sha, _ = _get_github_file_sha(path_name)
+        body = {
+            "message": f"Update godpick management column config {payload.get('updated_at', '')}",
+            "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+            "branch": cfg["branch"],
+        }
+        if sha:
+            body["sha"] = sha
+        resp = requests.put(
+            _github_contents_url(cfg["owner"], cfg["repo"], path_name),
+            headers=_github_headers(token),
+            json=body,
+            timeout=25,
+        )
+        if resp.status_code in (200, 201):
+            return True, f"GitHub 已永久儲存：{path_name}"
+        return False, f"GitHub 寫入失敗：{resp.status_code} {resp.text[:200]}"
+    except Exception as exc:
+        return False, f"GitHub 寫入例外：{exc}"
+
+
+def _normalize_column_config(payload: Any) -> Dict[str, Any]:
+    cfg = _default_column_config()
+    if isinstance(payload, dict):
+        cfg.update({k: v for k, v in payload.items() if k != "profiles"})
+        profiles = payload.get("profiles", {}) if isinstance(payload.get("profiles", {}), dict) else {}
+        fixed_profiles: Dict[str, Any] = {}
+        for key, prof in profiles.items():
+            if not isinstance(prof, dict):
+                continue
+            fixed_profiles[str(key)] = {
+                "label": str(prof.get("label", COLUMN_PROFILE_LABELS.get(str(key), str(key)))),
+                "columns": [str(x) for x in prof.get("columns", []) if str(x).strip()],
+                "hidden": [str(x) for x in prof.get("hidden", []) if str(x).strip()],
+                "updated_at": str(prof.get("updated_at", "")),
+            }
+        cfg["profiles"] = fixed_profiles
+    cfg["version"] = COLUMN_CONFIG_VERSION
+    return cfg
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def _load_management_column_config_cached(_refresh_seq: int = 0) -> Tuple[Dict[str, Any], str]:
+    github_payload, github_msg = _read_management_config_from_github()
+    local_payload = _safe_json_read_local_config(MANAGEMENT_UI_CONFIG_PATH, _default_column_config())
+    local_payload = _normalize_column_config(local_payload)
+    if _config_ts(local_payload) >= _config_ts(github_payload):
+        return local_payload, f"使用本機欄位設定。{github_msg}"
+    return github_payload, github_msg
+
+
+def _load_management_column_config() -> Tuple[Dict[str, Any], str]:
+    seq = int(st.session_state.get("v28_column_config_refresh_seq", 0))
+    return _load_management_column_config_cached(seq)
+
+
+def _save_management_column_config(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    payload = _normalize_column_config(payload)
+    payload["version"] = COLUMN_CONFIG_VERSION
+    payload["updated_at"] = _now_text()
+    local_ok, local_msg = _safe_json_write_local_config(MANAGEMENT_UI_CONFIG_PATH, payload)
+    github_ok, github_msg = _write_management_config_to_github(payload)
+    st.session_state["v28_column_config_refresh_seq"] = int(st.session_state.get("v28_column_config_refresh_seq", 0)) + 1
+    try:
+        _load_management_column_config_cached.clear()
+    except Exception:
+        pass
+    return (local_ok or github_ok), f"{local_msg}｜{github_msg}"
+
+
+def _columns_non_empty(df: pd.DataFrame, cols: List[str]) -> List[str]:
+    out: List[str] = []
+    if df is None or df.empty:
+        return [c for c in cols]
+    for c in cols:
+        if c in df.columns and any(not _is_blank_value(v) for v in df[c].tolist()):
+            out.append(c)
+    return out
+
+
+def _column_candidates(schema_df: pd.DataFrame, default_cols: List[str]) -> List[str]:
+    cols: List[str] = []
+    for source in [default_cols, UNIFIED_MANAGEMENT_COLUMNS, list(schema_df.columns) if schema_df is not None else []]:
+        for c in source:
+            if c and c not in cols and not str(c).startswith("_"):
+                cols.append(str(c))
+    return cols
+
+
+def _profile_columns_from_config(table_key: str, candidates: List[str], default_cols: List[str]) -> List[str]:
+    cfg, _ = _load_management_column_config()
+    prof = cfg.get("profiles", {}).get(table_key, {}) if isinstance(cfg, dict) else {}
+    saved_cols = [c for c in prof.get("columns", []) if c in candidates]
+    hidden = set([c for c in prof.get("hidden", []) if c in candidates])
+    if saved_cols:
+        selected = [c for c in saved_cols if c not in hidden]
+        # 新欄位自動接在後面，但不破壞既有順序。
+        for c in default_cols:
+            if c in candidates and c not in saved_cols and c not in hidden:
+                selected.append(c)
+        return selected
+    return [c for c in default_cols if c in candidates]
+
+
+def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataFrame, default_cols: List[str]) -> List[str]:
+    """顯示欄位管理器並回傳目前套用欄位。"""
+    candidates = _column_candidates(schema_df, default_cols)
+    cfg, cfg_msg = _load_management_column_config()
+    current_cols = _profile_columns_from_config(table_key, candidates, default_cols)
+    if not current_cols:
+        current_cols = candidates[:]
+
+    with st.expander(f"🧩 {table_label} 欄位管理 / 永久記錄", expanded=False):
+        st.caption("可調整顯示、隱藏與順序；按下『套用並永久記錄』後會寫入 godpick_management_ui_config.json，重新整理或重開頁面仍會保留。")
+        st.caption(cfg_msg)
+
+        k_prefix = f"v28_colmgr_{table_key}"
+        c0, c1, c2, c3 = st.columns([1.1, 1.1, 1.1, 1.4])
+        with c0:
+            preset = st.selectbox(
+                "快速模板",
+                ["目前設定", "全部欄位", "只保留有資料欄位"] + list(COLUMN_PRESETS.keys()),
+                key=f"{k_prefix}_preset",
+            )
+        with c1:
+            keyword = st.text_input("搜尋欄位", key=f"{k_prefix}_kw", placeholder="輸入欄位關鍵字")
+        with c2:
+            show_only_selected = st.toggle("只看已顯示", value=False, key=f"{k_prefix}_selected_only")
+        with c3:
+            st.write("")
+            st.write(f"目前顯示 **{len(current_cols)}** 欄 / 可用 **{len(candidates)}** 欄")
+
+        if preset == "全部欄位":
+            base_cols = candidates[:]
+        elif preset == "只保留有資料欄位":
+            base_cols = _columns_non_empty(schema_df, candidates)
+        elif preset in COLUMN_PRESETS:
+            base_cols = [c for c in COLUMN_PRESETS[preset] if c in candidates]
+            for c in current_cols:
+                if c in candidates and c not in base_cols:
+                    base_cols.append(c)
+        else:
+            base_cols = current_cols[:]
+
+        # 所有候選欄位都放進管理表，未選欄位排在後面。
+        ordered_all: List[str] = []
+        for c in base_cols + current_cols + candidates:
+            if c in candidates and c not in ordered_all:
+                ordered_all.append(c)
+
+        rows: List[Dict[str, Any]] = []
+        non_empty_cols = set(_columns_non_empty(schema_df, candidates))
+        selected_set = set(base_cols)
+        for i, col in enumerate(ordered_all, start=1):
+            if keyword and keyword not in col:
+                continue
+            if show_only_selected and col not in selected_set:
+                continue
+            rows.append({
+                "顯示": col in selected_set,
+                "順序": i if col in selected_set else 9999,
+                "欄位名稱": col,
+                "有資料": "是" if col in non_empty_cols else "否",
+            })
+        edit_df = pd.DataFrame(rows)
+        edited = st.data_editor(
+            edit_df,
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+            disabled=["欄位名稱", "有資料"],
+            column_config={
+                "顯示": st.column_config.CheckboxColumn("顯示"),
+                "順序": st.column_config.NumberColumn("順序", min_value=1, step=1),
+                "欄位名稱": st.column_config.TextColumn("欄位名稱", width="large"),
+                "有資料": st.column_config.TextColumn("有資料", width="small"),
+            },
+            key=f"{k_prefix}_editor",
+        )
+
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            apply_btn = st.button("✅ 套用並永久記錄", type="primary", use_container_width=True, key=f"{k_prefix}_apply")
+        with b2:
+            reset_btn = st.button("↩️ 恢復系統預設", use_container_width=True, key=f"{k_prefix}_reset")
+        with b3:
+            all_btn = st.button("📋 全部欄位顯示", use_container_width=True, key=f"{k_prefix}_all")
+        with b4:
+            nonempty_btn = st.button("🧹 隱藏全空欄位", use_container_width=True, key=f"{k_prefix}_nonempty")
+
+        if reset_btn:
+            final_cols = [c for c in default_cols if c in candidates]
+        elif all_btn:
+            final_cols = candidates[:]
+        elif nonempty_btn:
+            final_cols = _columns_non_empty(schema_df, candidates)
+        else:
+            work = edited.copy()
+            if "顯示" in work.columns and "欄位名稱" in work.columns:
+                work = work[work["顯示"].astype(bool)].copy()
+                if "順序" in work.columns:
+                    work["順序"] = pd.to_numeric(work["順序"], errors="coerce").fillna(9999)
+                    work = work.sort_values(["順序", "欄位名稱"], ascending=[True, True])
+                final_cols = [str(x) for x in work["欄位名稱"].tolist() if str(x) in candidates]
+            else:
+                final_cols = current_cols[:]
+
+        if apply_btn or reset_btn or all_btn or nonempty_btn:
+            if not final_cols:
+                st.error("至少要保留 1 個欄位。")
+            else:
+                cfg = _normalize_column_config(cfg)
+                cfg.setdefault("profiles", {})[table_key] = {
+                    "label": table_label,
+                    "columns": final_cols,
+                    "hidden": [c for c in candidates if c not in final_cols],
+                    "updated_at": _now_text(),
+                }
+                ok, msg = _save_management_column_config(cfg)
+                if ok:
+                    st.success(f"{table_label} 欄位設定已套用並永久記錄。{msg}")
+                else:
+                    st.warning(f"{table_label} 欄位設定已嘗試儲存，但可能未完全寫入。{msg}")
+                st.rerun()
+
+    return [c for c in current_cols if c in candidates]
 
 
 def _file_status_rows(paths: List[Path]) -> pd.DataFrame:
@@ -1143,10 +1534,11 @@ def render_portfolio_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: Lis
             st.dataframe(_clean_count_table(df[type_col].map(_clean_text_value).replace({"":"未分類"}).value_counts().rename_axis(type_col).reset_index(name="檔數")), use_container_width=True, hide_index=True)
         else:
             st.info("缺少推薦型態欄位。")
-    display_cols = _unified_display_cols(schema_basis, UNIFIED_MANAGEMENT_COLUMNS)
-    # 若兩個來源都沒有某欄資料，仍會自動排除；若另一個來源有資料，當前來源會保留該欄但顯示空白，確保欄位一致。
+    display_cols_default = _unified_display_cols(schema_basis, UNIFIED_MANAGEMENT_COLUMNS)
+    # v28：欄位管理器會保存使用者調整後的顯示欄位與順序。
     st.markdown("#### 投資組合明細")
-    table_df = _safe_display_table(df[display_cols], keep_cols=display_cols)
+    display_cols = _render_column_manager("portfolio_detail", "投資組合明細", schema_basis, display_cols_default)
+    table_df = _safe_display_table(df[[c for c in display_cols if c in df.columns]], keep_cols=display_cols)
     st.dataframe(table_df, use_container_width=True, hide_index=True, height=520)
     st.download_button("下載投資組合分析 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_management_portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
@@ -1190,8 +1582,9 @@ def render_daily_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: List[st
     if sort_cols:
         ascending = [True if c == "追蹤分級" else False for c in sort_cols]
         df = df.sort_values(sort_cols, ascending=ascending)
-    display_cols = _unified_display_cols(df, DAILY_COLUMNS)
-    table_df = _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
+    display_cols_default = _unified_display_cols(df, DAILY_COLUMNS)
+    display_cols = _render_column_manager("daily_detail", "今日追蹤明細", df, display_cols_default)
+    table_df = _safe_display_table(df[[c for c in display_cols if c in df.columns]], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
     st.dataframe(table_df, use_container_width=True, hide_index=True, height=560)
     st.download_button("下載每日追蹤報告 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_daily_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
 
@@ -1241,10 +1634,13 @@ def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
     if fail_df.empty:
         st.success("目前沒有明確失敗案例。")
     else:
-        st.dataframe(_safe_display_table(fail_df[_unified_display_cols(fail_df, QUALITY_COLUMNS)]), use_container_width=True, hide_index=True, height=300)
+        fail_default_cols = _unified_display_cols(fail_df, QUALITY_COLUMNS)
+        fail_cols = _render_column_manager("fail_detail", "失敗案例檢討", fail_df, fail_default_cols)
+        st.dataframe(_safe_display_table(fail_df[[c for c in fail_cols if c in fail_df.columns]]), use_container_width=True, hide_index=True, height=300)
     st.markdown("#### 品質明細")
-    display_cols = _unified_display_cols(df, QUALITY_COLUMNS)
-    table_df = _safe_display_table(df[display_cols], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
+    display_cols_default = _unified_display_cols(df, QUALITY_COLUMNS)
+    display_cols = _render_column_manager("quality_detail", "品質明細", df, display_cols_default)
+    table_df = _safe_display_table(df[[c for c in display_cols if c in df.columns]], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
     st.dataframe(table_df, use_container_width=True, hide_index=True, height=520)
     st.download_button("下載品質分析 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
     if not group_df.empty:
@@ -1281,13 +1677,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v25｜歷史資料智慧補值版：推薦清單/目前追蹤 與 股神推薦紀錄/歷史全部 欄位與內容統一")
+            render_pro_hero("股神管理中心", "v28｜欄位管理永久記錄版：投資組合 / 追蹤 / 品質欄位可調整並永久保存")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v25 修正：除統一欄位外，針對歷史全部缺少的追蹤分級、今日操作建議、品質建議、倉位、分批策略與族群策略進行智慧補值。")
+    st.caption("v28 修正：新增完整欄位管理，可調整欄位顯示、隱藏、順序與模板；套用後寫入 godpick_management_ui_config.json，並可同步 GitHub 永久保存。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
