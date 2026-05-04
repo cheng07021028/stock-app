@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v36：全頁面全表格欄位管理共用工具（防遞迴修正版）
+v38：全頁面欄位管理效能優化版（預設靜默套用，需手動開啟管理模式）
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v36"
+CONFIG_VERSION = "v38"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -150,21 +150,17 @@ def _github_headers(token: str) -> Dict[str, str]:
 
 
 def _read_github_config() -> Tuple[Dict[str, Any], str]:
-    cfg = _github_cfg()
-    token = cfg.get("token", "")
-    if not token or requests is None:
-        return _default_config(), "未設定 GITHUB_TOKEN，欄位設定只會儲存在本機。"
-    try:
-        resp = requests.get(_github_url(cfg["owner"], cfg["repo"], cfg["path"]), headers=_github_headers(token), params={"ref": cfg["branch"]}, timeout=12)
-        if resp.status_code == 404:
-            return _default_config(), "GitHub 尚未建立欄位設定檔，套用後會自動建立。"
-        if resp.status_code >= 400:
-            return _default_config(), f"GitHub 讀取欄位設定失敗：{resp.status_code}"
-        data = resp.json()
-        txt = base64.b64decode(data.get("content", "")).decode("utf-8")
-        return _normalize_config(json.loads(txt) if txt.strip() else {}), "GitHub 欄位設定讀取成功。"
-    except Exception as exc:
-        return _default_config(), f"GitHub 讀取例外：{exc}"
+    """v38：頁面載入時不主動讀 GitHub。
+
+    原因：7/8/10/11/12 每個頁面都有多張表，如果每次 rerun 都向 GitHub
+    讀取欄位設定，Streamlit Cloud 會明顯變慢。
+
+    正確流程：
+    - 平常讀取 repo 內的 godpick_management_ui_config.json，本機/雲端都很快。
+    - 使用者按「套用並永久記錄」時，才寫入 GitHub。
+    - GitHub 重新部署後，設定檔會跟著 repo 進來。
+    """
+    return _default_config(), "v38：頁面載入不讀 GitHub，避免每頁卡頓；套用欄位設定時才寫回 GitHub。"
 
 
 def _write_github_config(payload: Dict[str, Any]) -> Tuple[bool, str]:
@@ -198,13 +194,11 @@ def _config_ts(payload: Dict[str, Any]) -> str:
     return str(payload.get("updated_at", "")) if isinstance(payload, dict) else ""
 
 
-@st.cache_data(show_spinner=False, ttl=30)
+@st.cache_data(show_spinner=False, ttl=300)
 def _load_config_cached(_seq: int = 0) -> Tuple[Dict[str, Any], str]:
     local = _read_local_config()
-    gh, gh_msg = _read_github_config()
-    if _config_ts(local) >= _config_ts(gh):
-        return local, f"使用本機欄位設定。{gh_msg}"
-    return gh, gh_msg
+    _, gh_msg = _read_github_config()
+    return local, f"使用 repo 內欄位設定。{gh_msg}"
 
 
 def load_column_config() -> Dict[str, Any]:
@@ -302,6 +296,11 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
     current = get_table_columns(table_key, default_cols, clean)
     if not current:
         current = candidates[:]
+
+    # v38 效能優化：預設只「靜默套用」已儲存欄位，不渲染每一張表的欄位管理器。
+    # 需要調整欄位時，先在側邊欄開啟「欄位管理模式」。
+    if not bool(st.session_state.get("godpick_column_manager_edit_mode", False)):
+        return [c for c in current if c in candidates]
 
     cfg, cfg_msg = _load_config_cached(int(st.session_state.get("godpick_column_config_refresh_seq", 0)))
     with st.expander(f"🧩 {table_label} 欄位管理 / 永久記錄", expanded=False):
@@ -442,21 +441,46 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
 
 
 def install_auto_column_manager(page_key: str) -> None:
-    """自動攔截當前頁面所有 st.dataframe / st.data_editor，統一套用欄位管理。
+    """v38：安全、輕量版全頁面欄位管理。
 
-    v36 修正：
-    - 保留真正原始的 Streamlit 函式。
-    - 欄位管理器內部的設定表一律呼叫原始 data_editor。
-    - 避免重複包裝造成遞迴與瀏覽器 STATUS_STACK_OVERFLOW。
+    重點：
+    - 不再每張表都直接展開欄位管理 UI。
+    - 預設只套用已儲存欄位順序，所以頁面載入速度接近原本狀態。
+    - 使用者需要調欄位時，在側邊欄開啟「欄位管理模式」。
+    - 不主動讀 GitHub，避免每次 rerun 卡在網路 I/O。
+    - 保留 data_editor 回傳完整資料，隱藏欄位不會影響匯入/刪除/同步。
     """
-    current_df = st.dataframe
-    current_de = st.data_editor
-    if not hasattr(st, "_godpick_original_dataframe") or getattr(current_df, "__name__", "") != "_wrapped_dataframe":
-        if getattr(current_df, "__name__", "") != "_wrapped_dataframe":
-            st._godpick_original_dataframe = current_df  # type: ignore[attr-defined]
-    if not hasattr(st, "_godpick_original_data_editor") or getattr(current_de, "__name__", "") != "_wrapped_data_editor":
-        if getattr(current_de, "__name__", "") != "_wrapped_data_editor":
-            st._godpick_original_data_editor = current_de  # type: ignore[attr-defined]
+    # 保留 Streamlit 原始函式，避免重複包裝與遞迴。
+    if not hasattr(st, "_godpick_original_dataframe"):
+        st._godpick_original_dataframe = st.dataframe  # type: ignore[attr-defined]
+    if not hasattr(st, "_godpick_original_data_editor"):
+        st._godpick_original_data_editor = st.data_editor  # type: ignore[attr-defined]
+
+    # 每次頁面 rerun 只初始化一次；若已是 v38 wrapper，就不重複包裝。
+    if getattr(st.dataframe, "_godpick_v38_wrapped", False) and getattr(st.data_editor, "_godpick_v38_wrapped", False):
+        return
+
+    # 側邊欄管理模式，預設關閉。關閉時不會產生大量 expander / data_editor。
+    try:
+        with st.sidebar.expander("🧩 欄位管理", expanded=False):
+            edit_mode = st.toggle(
+                "啟用欄位管理模式",
+                value=bool(st.session_state.get("godpick_column_manager_edit_mode", False)),
+                help="平常請關閉以加速頁面。需要調整欄位顯示/順序時再打開。",
+                key=f"{page_key}_column_manager_edit_mode_toggle",
+            )
+            st.caption("關閉：快速載入，只套用已儲存欄位。開啟：顯示每張表的欄位管理器。")
+            if st.button("🔄 重新讀取欄位設定", use_container_width=True, key=f"{page_key}_column_cfg_reload"):
+                st.session_state["godpick_column_config_refresh_seq"] = int(st.session_state.get("godpick_column_config_refresh_seq", 0)) + 1
+                try:
+                    _load_config_cached.clear()
+                except Exception:
+                    pass
+                st.rerun()
+            st.session_state["godpick_column_manager_edit_mode"] = bool(edit_mode)
+    except Exception:
+        st.session_state["godpick_column_manager_edit_mode"] = False
+
     st.session_state["godpick_column_manager_page_key"] = page_key
     st.session_state["godpick_column_manager_call_index"] = 0
 
@@ -469,20 +493,31 @@ def install_auto_column_manager(page_key: str) -> None:
         key = f"auto::{page_key}::{kind}_{idx:02d}"
         return key, label
 
+    def _should_manage(data: Any) -> bool:
+        return isinstance(data, pd.DataFrame) and len(data.columns) >= 2 and not data.empty
+
     def _wrapped_dataframe(data=None, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(data, pd.DataFrame) and len(data.columns) >= 2:
+        if _should_manage(data):
             key, label = _next_key("dataframe", data)
-            cols = render_column_manager(key, label, data, list(data.columns))
-            show = apply_columns(data, key, cols or list(data.columns), hide_empty_columns=False)
+            default_cols = list(data.columns)
+            if bool(st.session_state.get("godpick_column_manager_edit_mode", False)):
+                cols = render_column_manager(key, label, data, default_cols)
+            else:
+                cols = get_table_columns(key, default_cols, data)
+            show = apply_columns(data, key, cols or default_cols, hide_empty_columns=False)
             return st._godpick_original_dataframe(show, *args, **kwargs)  # type: ignore[attr-defined]
         return st._godpick_original_dataframe(data, *args, **kwargs)  # type: ignore[attr-defined]
 
     def _wrapped_data_editor(data=None, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(data, pd.DataFrame) and len(data.columns) >= 2:
+        if _should_manage(data):
             key, label = _next_key("data_editor", data)
             original = data.copy()
-            cols = render_column_manager(key, label, original, list(original.columns))
-            show = apply_columns(original, key, cols or list(original.columns), hide_empty_columns=False)
+            default_cols = list(original.columns)
+            if bool(st.session_state.get("godpick_column_manager_edit_mode", False)):
+                cols = render_column_manager(key, label, original, default_cols)
+            else:
+                cols = get_table_columns(key, default_cols, original)
+            show = apply_columns(original, key, cols or default_cols, hide_empty_columns=False)
             cfg = kwargs.get("column_config")
             if isinstance(cfg, dict):
                 kwargs["column_config"] = {k: v for k, v in cfg.items() if k in show.columns}
@@ -495,5 +530,7 @@ def install_auto_column_manager(page_key: str) -> None:
             return edited
         return st._godpick_original_data_editor(data, *args, **kwargs)  # type: ignore[attr-defined]
 
+    _wrapped_dataframe._godpick_v38_wrapped = True  # type: ignore[attr-defined]
+    _wrapped_data_editor._godpick_v38_wrapped = True  # type: ignore[attr-defined]
     st.dataframe = _wrapped_dataframe  # type: ignore[assignment]
     st.data_editor = _wrapped_data_editor  # type: ignore[assignment]
