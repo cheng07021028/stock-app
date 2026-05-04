@@ -392,5 +392,66 @@
       "market": "上櫃"
     }
   ],
-  "0505": []
+  "0505": [
+    {
+      "code": "1560",
+      "name": "中砂",
+      "market": "上市",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "2337",
+      "name": "旺宏",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2449",
+      "name": "京元電子",
+      "market": "上市",
+      "category": "封測"
+    },
+    {
+      "code": "3016",
+      "name": "嘉晶",
+      "market": "上市",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "3033",
+      "name": "威健",
+      "market": "上市",
+      "category": "電子通路業"
+    },
+    {
+      "code": "3135",
+      "name": "凌航",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "3567",
+      "name": "逸昌",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3711",
+      "name": "日月光投控",
+      "market": "上市",
+      "category": "封測"
+    },
+    {
+      "code": "5443",
+      "name": "均豪",
+      "market": "上櫃",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "8131",
+      "name": "福懋科",
+      "market": "上市",
+      "category": "半導體業"
+    }
+  ]
 }
