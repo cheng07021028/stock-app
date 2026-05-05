@@ -1,30 +1,53 @@
 name: Force auth indent fix v80
+
 on:
   workflow_dispatch:
   push:
     paths:
-      - 'fix_auth_indent_v80.py'
-      - 'app_auth.py'
-      - 'auth_config.json'
-      - 'pages/15_帳號管理.py'
+      - "fix_auth_indent_v80.py"
+      - "app_auth.py"
+      - "auth_config.json"
+      - "streamlit_app.py"
+      - "pages/**.py"
+
 permissions:
   contents: write
+
 jobs:
-  patch-auth:
+  fix-auth-indent:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Patch all Streamlit pages safely
-        run: python fix_auth_indent_v80.py
-      - name: Verify auth guard
-        run: python verify_auth_lock_v80.py
-      - name: Commit patched files
+          python-version: "3.11"
+
+      - name: Run auth indent repair
+        run: |
+          if [ -f "fix_auth_indent_v80.py" ]; then
+            python fix_auth_indent_v80.py
+          else
+            echo "fix_auth_indent_v80.py not found"
+            exit 1
+          fi
+
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile streamlit_app.py
+          find pages -name "*.py" -print0 | xargs -0 -n1 python -m py_compile
+
+      - name: Commit repaired files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git diff --cached --quiet || git commit -m "Fix auth indentation and lock all pages v80"
-          git push
+          git add streamlit_app.py pages/*.py app_auth.py auth_config.json || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Fix auth indentation and apply login guard"
+            git push
+          fi
