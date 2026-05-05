@@ -2,7 +2,7 @@
   "enabled": true,
   "users": {
     "admin": {
-      "password_hash": "9af15b336e6a9619928537df30b2e5c90c6be0e93db079207fd7c9ea3f552c3d",
+      "password_hash": "0000",
       "role": "admin",
       "enabled": true,
       "display_name": "系統管理員",
