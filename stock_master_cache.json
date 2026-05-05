@@ -31108,6 +31108,20 @@
     "待修原因": ""
   },
   {
+    "code": "7784",
+    "name": "安邦生技*",
+    "market": "興櫃",
+    "official_industry_raw": "22",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "生技醫療",
+    "theme_category": "生技醫療",
+    "category": "生技醫療",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "7785",
     "name": "北祥科服",
     "market": "興櫃",
