@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v44：欄位管理免即時重算＋套用免整頁重跑版
+v46：推薦清單主表欄位管理修正版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v44"
+CONFIG_VERSION = "v47"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -311,13 +311,13 @@ def _parse_column_text(raw: str, candidates: List[str]) -> List[str]:
 
 
 def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, default_cols: Optional[Iterable[str]] = None) -> List[str]:
-    """v44：欄位管理免即時重算＋套用免整頁重跑版。
+    """v47：統一為 12_股神管理中心欄位管理樣式。
 
-    核心修正：
-    - 欄位順序文字框、搜尋、模板選擇全部放入 st.form。
-    - 使用者輸入欄位順序時，不會即時 rerun / 不會即時重排表格。
-    - 只有按「套用並永久記錄」或「套用到本次畫面」時，才解析欄位與重繪表格。
-    - 避免 60~100 欄大表在每次鍵入、每次移動欄位時重新運算造成卡頓。
+    設計原則：
+    - 平常只讀取已保存欄位，不顯示管理 UI，避免拖慢頁面。
+    - 開啟側邊欄「欄位管理模式」後，才顯示與 12_股神管理中心一致的表單式欄位管理。
+    - 欄位順序、搜尋、模板、隱藏空欄全部放在 st.form 裡。
+    - 輸入/剪貼欄位順序時不解析、不保存；只有按按鈕才套用。
     """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return []
@@ -326,116 +326,76 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
     candidates = list(clean.columns)
     default_cols = list(default_cols or candidates)
     current = get_table_columns(table_key, default_cols, clean)
-    if not current:
-        current = candidates[:]
-    current = [c for c in current if c in candidates]
-    if not current:
-        current = candidates[:]
+    current = [c for c in current if c in candidates] or candidates[:]
 
     safe_key = _key_safe(table_key)
+    preview_key = f"{safe_key}_preview_cols_v47"
+    text_key = f"{safe_key}_order_text_v47"
 
-    # 平常模式：只套用已儲存 / 本次預覽欄位，不渲染管理 UI。
-    preview_cols = st.session_state.get(f"{safe_key}_preview_cols_v44")
+    preview_cols = st.session_state.get(preview_key)
     if isinstance(preview_cols, list) and preview_cols:
         current = [c for c in preview_cols if c in candidates] or current
 
+    # 平常模式：只套用設定，不顯示欄位管理器。
     if not bool(st.session_state.get("godpick_column_manager_edit_mode", False)):
         return current
 
-    active_key = st.session_state.get("godpick_column_manager_active_table", "")
+    with st.expander(f"🧩 {table_label} 欄位管理 / v47 統一樣式", expanded=False):
+        st.caption("與股神管理中心相同方式：欄位順序一行一欄；輸入過程不運算，只有按『套用』才解析、重排與保存。")
+        st.caption(f"目前顯示 **{len(current)}** 欄 / 可用 **{len(candidates)}** 欄。")
 
-    # 管理模式下也不一次展開所有表格，只顯示輕量入口。
-    with st.expander(f"🧩 {table_label} 欄位管理｜v44 表單套用版", expanded=(active_key == table_key)):
-        c_left, c_mid, c_right = st.columns([1.4, 1.0, 1.2])
-        with c_left:
-            st.caption(f"目前顯示 {len(current)} 欄 / 可用 {len(candidates)} 欄。")
-        with c_mid:
-            if st.button("🎯 管理這張表", use_container_width=True, key=f"{safe_key}_activate_v44"):
-                st.session_state["godpick_column_manager_active_table"] = table_key
-                st.rerun()
-        with c_right:
-            if active_key == table_key and st.button("收合管理", use_container_width=True, key=f"{safe_key}_deactivate_v44"):
-                st.session_state["godpick_column_manager_active_table"] = ""
-                st.rerun()
-
-        if active_key != table_key:
-            st.info("v44 高速模式：只在按『管理這張表』後載入欄位設定；套用後不強制整頁重跑。")
-            return current
-
-        cfg, cfg_msg = _load_config_cached(int(st.session_state.get("godpick_column_config_refresh_seq", 0)))
-        st.caption(cfg_msg)
-        st.caption("重點：欄位順序文字框已改成表單模式，輸入 / 貼上 / 調整時不會立即重算；按下方按鈕才會套用。")
-
-        templates = column_templates(candidates)
-        text_key = f"{safe_key}_order_text_v44"
         if text_key not in st.session_state:
             st.session_state[text_key] = "\n".join(current)
 
-        # v44：所有會造成大量 rerun 的控制項放進 form，避免每輸入一個字就重算整頁。
-        with st.form(key=f"{safe_key}_column_form_v44", clear_on_submit=False):
-            c0, c1, c2, c3 = st.columns([1.2, 1.4, 1.0, 1.0])
+        templates = column_templates(candidates)
+        with st.form(key=f"{safe_key}_column_form_v47", clear_on_submit=False):
+            c0, c1, c2 = st.columns([1.2, 1.3, 1.0])
             with c0:
                 preset = st.selectbox(
                     "快速模板",
                     ["目前設定", "全部欄位", "只保留有資料欄位"] + [k for k in templates.keys() if k not in ("全部欄位",)],
-                    key=f"{safe_key}_preset_v44",
+                    key=f"{safe_key}_preset_v47",
                 )
             with c1:
-                keyword = st.text_input("欄位搜尋", key=f"{safe_key}_kw_v44", placeholder="輸入關鍵字快速找欄位")
+                keyword = st.text_input("欄位搜尋", key=f"{safe_key}_kw_v47", placeholder="輸入欄位關鍵字")
             with c2:
-                hide_empty_choice = st.checkbox("套用時隱藏全空欄", value=False, key=f"{safe_key}_hide_empty_v44")
-            with c3:
-                st.write("")
-                st.write(f"可用欄位：**{len(candidates)}**")
+                hide_empty_choice = st.checkbox("套用時隱藏全空欄", value=False, key=f"{safe_key}_hide_empty_v47")
 
-            # 只顯示搜尋後的候選欄位；在表單內不會即時觸發整頁重算。
-            options = [c for c in candidates if (not keyword or keyword in c)]
-            default_visible = [c for c in current if c in options]
+            visible_options = [c for c in candidates if (not keyword or keyword in c)]
+            selected_default = [c for c in current if c in visible_options]
             selected_cols = st.multiselect(
-                "顯示欄位（勾選顯示；順序以下方文字框為準）",
-                options=options,
-                default=default_visible,
-                key=f"{safe_key}_visible_cols_v44",
-                help="欄位很多時請用搜尋縮小範圍；實際順序請調整下方文字框。",
+                "顯示欄位（可用搜尋縮小範圍；實際順序以下方文字框為準）",
+                options=visible_options,
+                default=selected_default,
+                key=f"{safe_key}_selected_cols_v47",
             )
-
             order_text = st.text_area(
                 "欄位順序（一行一欄；可直接剪下貼上調整）",
                 key=text_key,
-                height=260,
-                help="v44：輸入與貼上不會立即重算；只有按套用按鈕才解析與更新表格。",
+                height=320,
+                help="v47：輸入時不即時計算；按套用後才重排欄位。",
             )
 
-            p1, p2, p3, p4 = st.columns(4)
-            apply_btn = p1.form_submit_button("✅ 套用並永久記錄", type="primary", use_container_width=True)
-            preview_btn = p2.form_submit_button("👁️ 套用到本次畫面", use_container_width=True)
-            reset_btn = p3.form_submit_button("↩️ 恢復系統預設", use_container_width=True)
-            nonempty_btn = p4.form_submit_button("🧹 只保留有資料欄", use_container_width=True)
+            b1, b2, b3, b4 = st.columns(4)
+            apply_btn = b1.form_submit_button("✅ 套用並永久記錄", type="primary", use_container_width=True)
+            preview_btn = b2.form_submit_button("👁️ 套用到本次畫面", use_container_width=True)
+            reset_btn = b3.form_submit_button("↩️ 恢復系統預設", use_container_width=True)
+            nonempty_btn = b4.form_submit_button("🧹 只保留有資料欄", use_container_width=True)
 
-        # form 外才開始解析，表示只有按 submit 後才進行欄位計算。
         submitted = apply_btn or preview_btn or reset_btn or nonempty_btn
         if not submitted:
-            st.caption("目前尚未套用新的欄位順序；調整完請按『套用並永久記錄』。")
+            st.info("調整完欄位順序後，請按『套用並永久記錄』；輸入過程不會觸發表格重算。")
             return current
 
         if reset_btn:
             final_cols = [c for c in default_cols if c in candidates] or candidates[:]
-            st.session_state[f"{safe_key}_preview_cols_v44"] = final_cols
-            st.success("已恢復系統預設並套用到本次畫面；未強制整頁重跑。")
-            return final_cols
-
         elif nonempty_btn:
             final_cols = _non_empty_columns(clean, candidates) or current[:]
-            st.session_state[f"{safe_key}_preview_cols_v44"] = final_cols
-            st.success("已產生有資料欄位清單並套用到本次畫面；未強制整頁重跑。")
-            return final_cols
-
         else:
-            # 依提交時的模板決定基準欄位，再與文字框 / 勾選欄位合併。
             if preset == "全部欄位":
                 base_cols = candidates[:]
             elif preset == "只保留有資料欄位":
-                base_cols = _non_empty_columns(clean, candidates)
+                base_cols = _non_empty_columns(clean, candidates) or current[:]
             elif preset in templates:
                 base_cols = [c for c in templates[preset] if c in candidates]
                 for c in current:
@@ -446,9 +406,7 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
 
             if hide_empty_choice:
                 non_empty = set(_non_empty_columns(clean, candidates))
-                base_cols = [c for c in base_cols if c in non_empty]
-                if not base_cols:
-                    base_cols = current[:1] or candidates[:1]
+                base_cols = [c for c in base_cols if c in non_empty] or current[:1] or candidates[:1]
 
             parsed_order = _parse_column_text(order_text, candidates)
             selected_set = set(selected_cols) if selected_cols else set(parsed_order or base_cols)
@@ -456,33 +414,34 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
             for c in selected_cols:
                 if c in candidates and c not in final_cols:
                     final_cols.append(c)
-            # 若文字框為空，使用模板 / 目前設定作為保底。
             if not final_cols:
-                final_cols = [c for c in base_cols if c in candidates] or current[:]
+                final_cols = [c for c in base_cols if c in candidates] or current[:1] or candidates[:1]
 
-            if preview_btn:
-                st.session_state[f"{safe_key}_preview_cols_v44"] = final_cols
-                st.success("已套用到本次畫面，尚未永久儲存；未強制整頁重跑。")
-                return final_cols
+        if not final_cols:
+            st.error("至少要保留 1 個欄位。")
+            return current
 
-            if apply_btn:
-                if not final_cols:
-                    st.error("至少要保留 1 個欄位。")
-                else:
-                    cfg = _normalize_config(cfg)
-                    cfg.setdefault("profiles", {})[table_key] = {
-                        "label": table_label,
-                        "columns": final_cols,
-                        "hidden": [c for c in candidates if c not in final_cols],
-                        "updated_at": _now_text(),
-                    }
-                    ok = save_column_config(cfg)
-                    st.session_state[f"{safe_key}_preview_cols_v44"] = final_cols
-                    if ok:
-                        st.success(f"{table_label} 欄位設定已套用並永久記錄；未強制整頁重跑。")
-                    else:
-                        st.warning(f"{table_label} 欄位設定已嘗試儲存，但可能未完全寫入；未強制整頁重跑。")
-                    return final_cols
+        st.session_state[preview_key] = final_cols
+
+        if preview_btn or reset_btn or nonempty_btn:
+            st.success("已套用到本次畫面；未強制整頁重跑。若要永久保存，請再按『套用並永久記錄』。")
+            return final_cols
+
+        if apply_btn:
+            cfg = load_column_config()
+            cfg = _normalize_config(cfg)
+            cfg.setdefault("profiles", {})[table_key] = {
+                "label": table_label,
+                "columns": final_cols,
+                "hidden": [c for c in candidates if c not in final_cols],
+                "updated_at": _now_text(),
+            }
+            ok = save_column_config(cfg)
+            if ok:
+                st.success(f"{table_label} 欄位設定已套用並永久記錄；未強制整頁重跑。")
+            else:
+                st.warning(f"{table_label} 欄位設定已嘗試儲存，但可能未完全寫入；未強制整頁重跑。")
+            return final_cols
 
     return current
 
@@ -500,12 +459,12 @@ def apply_columns(df: pd.DataFrame, table_key: str, default_cols: Iterable[str],
 def managed_dataframe(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> None:
     cols = render_column_manager(table_key, table_label, df, default_cols or (list(df.columns) if isinstance(df, pd.DataFrame) else []))
     show = apply_columns(df, table_key, cols or (list(df.columns) if isinstance(df, pd.DataFrame) else []), hide_empty_columns=hide_empty_columns)
-    return st._godpick_original_dataframe(show, **kwargs)  # type: ignore[attr-defined]
+    return st.dataframe(show, **kwargs)
 
 
 def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> Any:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return st._godpick_original_data_editor(df, **kwargs)  # type: ignore[attr-defined]
+        return st.data_editor(df, **kwargs)
     original = df.copy()
     cols = render_column_manager(table_key, table_label, original, default_cols or list(original.columns))
     show = apply_columns(original, table_key, cols or list(original.columns), hide_empty_columns=hide_empty_columns)
@@ -513,7 +472,7 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
     cfg = kwargs.get("column_config")
     if isinstance(cfg, dict):
         kwargs["column_config"] = {k: v for k, v in cfg.items() if k in show.columns}
-    edited = st._godpick_original_data_editor(show, **kwargs)  # type: ignore[attr-defined]
+    edited = st.data_editor(show, **kwargs)
     # 回傳完整資料：把顯示欄位的修改寫回原始表，隱藏欄位仍保留，避免後續按鈕功能壞掉。
     if isinstance(edited, pd.DataFrame) and len(edited) == len(original):
         full = original.copy()
@@ -525,25 +484,22 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
 
 
 def install_auto_column_manager(page_key: str) -> None:
-    """v40：欄位管理極速精簡版。
+    """v47：統一欄位管理入口。
 
-    重要修正：
-    - 不再全域攔截 st.dataframe / st.data_editor。
-    - 避免每一張小表、統計表、診斷表都建立欄位管理器。
-    - 避免頁面互動時所有表格反覆重排，降低開頁與調欄位等待時間。
-    - 已存在於各頁面的主表欄位管理功能仍保留。
-
-    使用原則：
-    - 7_股神推薦：保留完整推薦表原本欄位管理。
-    - 8_股神推薦紀錄：保留推薦紀錄總表原本欄位管理。
-    - 12_股神管理中心：保留投資組合 / 今日追蹤 / 品質明細欄位管理。
-    - 10_推薦清單與 11_資料診斷：不再自動套所有表格，避免慢與卡住。
+    - 不全域攔截 st.dataframe / st.data_editor。
+    - 側邊欄只提供欄位管理模式開關與重讀設定。
+    - 各頁主表使用 managed_dataframe / managed_data_editor / render_column_manager 才顯示統一樣式。
     """
     try:
-        with st.sidebar.expander("🧩 欄位管理｜v44 免即時重算模式", expanded=False):
-            st.caption("已停用全頁表格自動攔截；欄位順序調整改成表單提交，套用後不強制整頁重跑。")
-            st.caption("只保留各頁主表欄位管理；按「套用並永久記錄」後才解析欄位順序與永久保存。")
-            if st.button("🔄 重新讀取欄位設定", use_container_width=True, key=f"{page_key}_column_cfg_reload_v40"):
+        with st.sidebar.expander("🧩 欄位管理｜v47 統一樣式", expanded=False):
+            st.caption("樣式已統一為股神管理中心：一行一欄、表單套用、輸入不即時計算。")
+            st.toggle(
+                "啟用欄位管理模式",
+                value=bool(st.session_state.get("godpick_column_manager_edit_mode", False)),
+                key="godpick_column_manager_edit_mode",
+                help="關閉時只快速套用已保存欄位；開啟後各主表才顯示欄位管理器。",
+            )
+            if st.button("🔄 重新讀取欄位設定", use_container_width=True, key=f"{page_key}_column_cfg_reload_v47"):
                 st.session_state["godpick_column_config_refresh_seq"] = int(st.session_state.get("godpick_column_config_refresh_seq", 0)) + 1
                 try:
                     _load_config_cached.clear()
@@ -552,5 +508,5 @@ def install_auto_column_manager(page_key: str) -> None:
                 st.rerun()
     except Exception:
         pass
-    # v40：刻意不覆寫 st.dataframe / st.data_editor。
     return None
+
