@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """
 godpick_weight_calibration.py
-v70 Pro：因子代理樣本＋績效欄位自動偵測＋防過擬合
+v71 Pro：績效代理樣本＋多來源防卡＋防過擬合
 
 設計原則：
 - 不連外，不重新推薦，只讀既有推薦紀錄 / 推薦清單。
@@ -53,7 +53,7 @@ FACTOR_COLUMNS: Dict[str, List[str]] = {
 }
 
 PERF_COLUMNS: Dict[int, List[str]] = {
-    1: ["推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%"],
+    1: ["推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "損益幅%"],
     3: ["推薦後3日報酬%", "推薦後3日%", "3日報酬%", "3日漲跌%", "3日績效%", "3日後報酬%"],
     5: ["推薦後5日報酬%", "推薦後5日%", "5日報酬%", "5日漲跌%", "5日績效%", "5日後報酬%"],
     10: ["推薦後10日報酬%", "推薦後10日%", "10日報酬%", "10日漲跌%", "10日績效%", "10日後報酬%"],
@@ -611,7 +611,7 @@ def filter_by_market(df: pd.DataFrame, mode: str) -> pd.DataFrame:
 
 def calc_profile_bundle(df: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 10, 20), current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     bundle: Dict[str, Any] = {
-        "version": "v70_factor_proxy_perf_col_auto_detect_antioverfit",
+        "version": "v71_perf_proxy_multisource_antioverfit",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "base_weights": current_weights or DEFAULT_WEIGHTS,
         "profiles": {},
