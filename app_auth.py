@@ -1,186 +1,185 @@
 # -*- coding: utf-8 -*-
-"""
-app_auth.py｜Streamlit 全站帳號密碼登入鎖
-- 預設帳密：admin / 0000
-- 可用 auth_config.json 管理多帳號
-- 可用 Streamlit secrets 覆蓋單一帳密：APP_USERNAME / APP_PASSWORD / APP_AUTH_ENABLED
-"""
 from __future__ import annotations
 
 import json
-import os
 import hashlib
-import hmac
 from pathlib import Path
-from datetime import datetime
 from typing import Any, Dict
 
 import streamlit as st
 
-AUTH_FILE = Path("auth_config.json")
-
-DEFAULT_CONFIG = {
-    "enabled": True,
-    "users": {
-        "admin": {
-            "password_hash": "",
-            "role": "admin",
-            "enabled": True,
-            "display_name": "系統管理員",
-            "created_at": "",
-            "updated_at": "",
-        }
-    },
-}
+AUTH_CONFIG_FILE = Path(__file__).resolve().parent / "auth_config.json"
 
 
-def _hash_password(password: str) -> str:
-    raw = (password or "").encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+def _sha256(text: str) -> str:
+    return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
-def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _get_secret(name: str, default: str | None = None) -> str | None:
-    try:
-        return st.secrets.get(name, default)  # type: ignore[attr-defined]
-    except Exception:
-        return os.environ.get(name, default)
-
-
-def _default_config() -> Dict[str, Any]:
-    cfg = json.loads(json.dumps(DEFAULT_CONFIG, ensure_ascii=False))
-    cfg["users"]["admin"]["password_hash"] = _hash_password("0000")
-    cfg["users"]["admin"]["created_at"] = _now()
-    cfg["users"]["admin"]["updated_at"] = _now()
-    return cfg
-
-
-def load_auth_config() -> Dict[str, Any]:
-    cfg = _default_config()
-    if AUTH_FILE.exists():
-        try:
-            data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                cfg.update({k: v for k, v in data.items() if k != "users"})
-                if isinstance(data.get("users"), dict):
-                    cfg["users"] = data["users"]
-        except Exception:
-            pass
-
-    # Streamlit Secrets 單帳號覆蓋，適合正式部署
-    enabled_secret = str(_get_secret("APP_AUTH_ENABLED", "true")).strip().lower()
-    if enabled_secret in {"false", "0", "no", "off"}:
-        cfg["enabled"] = False
-
-    sec_user = _get_secret("APP_USERNAME")
-    sec_pass = _get_secret("APP_PASSWORD")
-    if sec_user and sec_pass:
-        cfg["enabled"] = True
-        cfg["users"] = {
-            str(sec_user): {
-                "password_hash": _hash_password(str(sec_pass)),
+def _load_auth_config() -> Dict[str, Any]:
+    default = {
+        "auth_enabled": True,
+        "users": {
+            "admin": {
+                "password_hash": _sha256("0000"),
                 "role": "admin",
                 "enabled": True,
-                "display_name": str(sec_user),
-                "created_at": _now(),
-                "updated_at": _now(),
+                "display_name": "系統管理員",
             }
-        }
-    return cfg
+        },
+    }
 
-
-def save_auth_config(cfg: Dict[str, Any]) -> bool:
     try:
-        AUTH_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        if AUTH_CONFIG_FILE.exists():
+            data = json.loads(AUTH_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("users"):
+                return data
+    except Exception:
+        pass
+
+    return default
+
+
+def _save_auth_config(cfg: Dict[str, Any]) -> bool:
+    try:
+        AUTH_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
     except Exception:
         return False
+
+
+def _verify_password(user: Dict[str, Any], password: str) -> bool:
+    password = str(password)
+
+    # 新版：SHA256 hash
+    ph = str(user.get("password_hash", "") or "")
+    if ph and _sha256(password) == ph:
+        return True
+
+    # 舊版相容：明文 password
+    plain = user.get("password", None)
+    if plain is not None and str(plain) == password:
+        return True
+
+    # 舊版相容：pwd
+    plain2 = user.get("pwd", None)
+    if plain2 is not None and str(plain2) == password:
+        return True
+
+    return False
 
 
 def is_logged_in() -> bool:
     return bool(st.session_state.get("auth_logged_in"))
 
 
-def current_user() -> Dict[str, Any]:
-    return {
-        "username": st.session_state.get("auth_username", ""),
-        "role": st.session_state.get("auth_role", ""),
-        "display_name": st.session_state.get("auth_display_name", ""),
-    }
+def current_user() -> str:
+    return str(st.session_state.get("auth_username", ""))
 
 
-def logout_button(location: str = "sidebar") -> None:
-    box = st.sidebar if location == "sidebar" else st
-    if is_logged_in():
-        user = current_user()
-        box.caption(f"登入：{user.get('display_name') or user.get('username')}｜{user.get('role')}")
-        if box.button("登出", key=f"auth_logout_{location}"):
-            for k in ["auth_logged_in", "auth_username", "auth_role", "auth_display_name"]:
-                st.session_state.pop(k, None)
-            st.rerun()
+def current_role() -> str:
+    return str(st.session_state.get("auth_role", ""))
 
 
-def require_login(required_role: str | None = None) -> bool:
-    cfg = load_auth_config()
-    if not bool(cfg.get("enabled", True)):
+def logout() -> None:
+    for k in ["auth_logged_in", "auth_username", "auth_role", "auth_display_name"]:
+        st.session_state.pop(k, None)
+    st.rerun()
+
+
+def require_login() -> bool:
+    cfg = _load_auth_config()
+    if str(cfg.get("auth_enabled", True)).lower() in ("false", "0", "no", "off"):
         return True
 
     if is_logged_in():
-        if required_role:
-            role = str(st.session_state.get("auth_role", ""))
-            if role != required_role and role != "admin":
-                st.error("權限不足，請使用具備權限的帳號登入。")
-                st.stop()
-        logout_button("sidebar")
+        try:
+            with st.sidebar:
+                user = current_user()
+                role = current_role()
+                st.caption(f"登入帳號：{user}｜{role}")
+                if st.button("登出", key="auth_logout_sidebar"):
+                    logout()
+        except Exception:
+            pass
         return True
 
-    st.markdown("## 系統登入")
+    st.title("系統登入")
     st.info("請先輸入帳號密碼，登入後才能使用系統。")
-    with st.form("auth_login_form", clear_on_submit=False):
-        username = st.text_input("帳號", value="")
-        password = st.text_input("密碼", type="password", value="")
+
+    with st.form("auth_login_form_v85"):
+        username = st.text_input("帳號", value="admin")
+        password = st.text_input("密碼", value="", type="password")
         submitted = st.form_submit_button("登入", use_container_width=True)
 
     if submitted:
-        users = cfg.get("users", {}) if isinstance(cfg.get("users"), dict) else {}
-        user = users.get(username)
-        if not user or not user.get("enabled", True):
-            st.error("帳號不存在或已停用。")
-            st.stop()
-        expected = str(user.get("password_hash", ""))
-        actual = _hash_password(password)
-        if hmac.compare_digest(expected, actual):
+        users = cfg.get("users", {})
+        user = users.get(str(username).strip())
+
+        if user and bool(user.get("enabled", True)) and _verify_password(user, password):
             st.session_state["auth_logged_in"] = True
-            st.session_state["auth_username"] = username
-            st.session_state["auth_role"] = user.get("role", "user")
-            st.session_state["auth_display_name"] = user.get("display_name", username)
+            st.session_state["auth_username"] = str(username).strip()
+            st.session_state["auth_role"] = str(user.get("role", "user"))
+            st.session_state["auth_display_name"] = str(user.get("display_name", username))
+            st.success("登入成功")
             st.rerun()
         else:
             st.error("密碼錯誤。")
-            st.stop()
 
     st.stop()
 
 
-def require_admin() -> bool:
-    return require_login("admin")
+def require_role(roles) -> bool:
+    require_login()
+    if isinstance(roles, str):
+        roles = [roles]
+    if current_role() not in roles:
+        st.error("你的帳號沒有權限使用此功能。")
+        st.stop()
+    return True
 
 
-def create_or_update_user(username: str, password: str, role: str = "user", enabled: bool = True, display_name: str = "") -> bool:
-    cfg = load_auth_config()
+def change_password(username: str, old_password: str, new_password: str) -> tuple[bool, str]:
+    cfg = _load_auth_config()
     users = cfg.setdefault("users", {})
+    user = users.get(username)
+    if not user:
+        return False, "找不到帳號。"
+    if not _verify_password(user, old_password):
+        return False, "原密碼錯誤。"
+    if not new_password or len(str(new_password)) < 4:
+        return False, "新密碼至少 4 碼。"
+    user.pop("password", None)
+    user.pop("pwd", None)
+    user["password_hash"] = _sha256(new_password)
+    return (_save_auth_config(cfg), "密碼已更新。")
+
+
+def admin_set_user(username: str, password: str, role: str = "user", enabled: bool = True, display_name: str = "") -> tuple[bool, str]:
+    if current_role() != "admin":
+        return False, "只有 admin 可以管理帳號。"
+    username = str(username).strip()
     if not username:
-        return False
-    old = users.get(username, {}) if isinstance(users.get(username), dict) else {}
+        return False, "帳號不可空白。"
+    if not password or len(str(password)) < 4:
+        return False, "密碼至少 4 碼。"
+    cfg = _load_auth_config()
+    users = cfg.setdefault("users", {})
     users[username] = {
-        "password_hash": _hash_password(password) if password else old.get("password_hash", _hash_password("0000")),
-        "role": role or old.get("role", "user"),
+        "password_hash": _sha256(password),
+        "role": role or "user",
         "enabled": bool(enabled),
         "display_name": display_name or username,
-        "created_at": old.get("created_at", _now()),
-        "updated_at": _now(),
     }
-    return save_auth_config(cfg)
+    return (_save_auth_config(cfg), "帳號已儲存。")
+
+
+def reset_admin_password_to_0000() -> bool:
+    cfg = _load_auth_config()
+    users = cfg.setdefault("users", {})
+    users["admin"] = {
+        "password_hash": _sha256("0000"),
+        "role": "admin",
+        "enabled": True,
+        "display_name": "系統管理員",
+    }
+    return _save_auth_config(cfg)
