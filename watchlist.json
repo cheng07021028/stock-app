@@ -444,5 +444,84 @@
       "market": "上市"
     }
   ],
-  "0506": []
+  "0506": [
+    {
+      "code": "2337",
+      "name": "旺宏",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2344",
+      "name": "華邦電",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2408",
+      "name": "南亞科",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2421",
+      "name": "建準",
+      "market": "上市",
+      "category": "散熱"
+    },
+    {
+      "code": "2451",
+      "name": "創見",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "2492",
+      "name": "華新科",
+      "market": "上市",
+      "category": "被動元件"
+    },
+    {
+      "code": "3016",
+      "name": "嘉晶",
+      "market": "上市",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "3264",
+      "name": "欣銓",
+      "market": "上櫃",
+      "category": "封測"
+    },
+    {
+      "code": "4979",
+      "name": "華星光",
+      "market": "上櫃",
+      "category": "光通訊"
+    },
+    {
+      "code": "6182",
+      "name": "合晶",
+      "market": "上櫃",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "6274",
+      "name": "台燿",
+      "market": "上櫃",
+      "category": "PCB載板"
+    },
+    {
+      "code": "6488",
+      "name": "環球晶",
+      "market": "上櫃",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "8131",
+      "name": "福懋科",
+      "market": "上市",
+      "category": "半導體業"
+    }
+  ]
 }
