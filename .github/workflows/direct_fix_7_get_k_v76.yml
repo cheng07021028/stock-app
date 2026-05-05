@@ -1,0 +1,34 @@
+name: Direct fix 7 godpick get_k v76
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  direct-fix-7-get-k:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Direct fix pages/7_股神推薦.py
+        run: python direct_fix_7_get_k_v76.py
+
+      - name: Commit fixed 7 page
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pages/7_股神推薦.py direct_fix_7_get_k_v76.py || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Direct fix 7 godpick session_state get_k v76"
+            git push
+          fi
