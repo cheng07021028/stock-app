@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v47"
+CONFIG_VERSION = "v48"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -311,7 +311,7 @@ def _parse_column_text(raw: str, candidates: List[str]) -> List[str]:
 
 
 def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, default_cols: Optional[Iterable[str]] = None) -> List[str]:
-    """v47：統一為 12_股神管理中心欄位管理樣式。
+    """v48：統一操作樣式，但各模組 / 各主表獨立保存欄位設定。
 
     設計原則：
     - 平常只讀取已保存欄位，不顯示管理 UI，避免拖慢頁面。
@@ -340,7 +340,7 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
     if not bool(st.session_state.get("godpick_column_manager_edit_mode", False)):
         return current
 
-    with st.expander(f"🧩 {table_label} 欄位管理 / v47 統一樣式", expanded=False):
+    with st.expander(f"🧩 {table_label} 欄位管理 / v48 個別模組設定", expanded=False):
         st.caption("與股神管理中心相同方式：欄位順序一行一欄；輸入過程不運算，只有按『套用』才解析、重排與保存。")
         st.caption(f"目前顯示 **{len(current)}** 欄 / 可用 **{len(candidates)}** 欄。")
 
@@ -373,7 +373,7 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
                 "欄位順序（一行一欄；可直接剪下貼上調整）",
                 key=text_key,
                 height=320,
-                help="v47：輸入時不即時計算；按套用後才重排欄位。",
+                help="v48：輸入時不即時計算；按套用後才重排欄位；每個模組獨立保存。",
             )
 
             b1, b2, b3, b4 = st.columns(4)
@@ -491,8 +491,8 @@ def install_auto_column_manager(page_key: str) -> None:
     - 各頁主表使用 managed_dataframe / managed_data_editor / render_column_manager 才顯示統一樣式。
     """
     try:
-        with st.sidebar.expander("🧩 欄位管理｜v47 統一樣式", expanded=False):
-            st.caption("樣式已統一為股神管理中心：一行一欄、表單套用、輸入不即時計算。")
+        with st.sidebar.expander("🧩 欄位管理｜v48 個別模組設定", expanded=False):
+            st.caption("統一使用股神管理中心樣式；但每個模組 / 每張主表使用獨立欄位設定，不會互相覆蓋。")
             st.toggle(
                 "啟用欄位管理模式",
                 value=bool(st.session_state.get("godpick_column_manager_edit_mode", False)),

@@ -947,3 +947,166 @@ def run_full_integration_check(base_dir: Path) -> Dict[str, Any]:
             all_rows.append(merged)
     summary = build_summary(all_rows)
     return {"summary": summary, "file_rows": file_rows, "market_rows": market_rows, "bridge_rows": bridge_rows, "recommendation_rows": rec_rows, "page_rows": page_rows, "v45_rows": v45_rows, "v47_rows": v47_rows, "v48_rows": v48_rows, "v49_rows": v49_rows, "performance_rows": perf_rows, "all_rows": all_rows, "market_snapshot": market_snapshot, "v42_repair_available": True, "v54_repair_available": True}
+
+
+# =========================================================
+# v49/v58 相容補丁：大盤空快照修復
+# =========================================================
+def _is_empty_bridge_payload(value: Any) -> bool:
+    """判斷 market_snapshot / macro bridge 是否屬於空資料。"""
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        meaningful = [k for k, v in value.items() if str(v).strip() not in {"", "None", "nan", "NaN", "—", "-"}]
+        return len(meaningful) == 0
+    if isinstance(value, list):
+        return len(value) == 0
+    return str(value).strip() in {"", "None", "nan", "NaN", "—", "-"}
+
+
+def _extract_latest_market_record_from_history(history_data: Any) -> Dict[str, Any]:
+    """從 macro_trend_records.json 取最後一筆有效大盤資料。支援 list 或 dict 包 list。"""
+    candidates: List[Dict[str, Any]] = []
+
+    if isinstance(history_data, list):
+        candidates = [x for x in history_data if isinstance(x, dict)]
+    elif isinstance(history_data, dict):
+        for key in ["records", "data", "items", "history", "macro_trend_records"]:
+            val = history_data.get(key)
+            if isinstance(val, list):
+                candidates = [x for x in val if isinstance(x, dict)]
+                if candidates:
+                    break
+        if not candidates:
+            candidates = [history_data]
+
+    if not candidates:
+        return {}
+
+    # 優先取最後一筆欄位較完整的資料，不重新抓網路、不偽造行情。
+    for rec in reversed(candidates):
+        if not isinstance(rec, dict):
+            continue
+        meaningful_keys = [k for k, v in rec.items() if str(v).strip() not in {"", "None", "nan", "NaN", "—", "-"}]
+        if len(meaningful_keys) >= 3:
+            return dict(rec)
+    return dict(candidates[-1]) if isinstance(candidates[-1], dict) else {}
+
+
+def _normalize_market_snapshot_from_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """把歷史大盤紀錄整理成 market_snapshot/macro bridge 可用的欄位。"""
+    if not isinstance(record, dict) or not record:
+        return {}
+
+    # 保留原始欄位，再補常用標準欄位別名。
+    snap = dict(record)
+
+    alias_map = {
+        "market_score": ["market_score", "大盤分數", "大盤綜合分數", "score", "綜合分數"],
+        "market_trend": ["market_trend", "大盤趨勢", "趨勢", "trend", "多空方向"],
+        "market_risk_level": ["market_risk_level", "大盤風險", "風險等級", "risk_level"],
+        "risk_gate": ["risk_gate", "風控", "風控狀態", "大盤風控"],
+        "position_hint": ["position_hint", "建議倉位", "倉位建議"],
+        "recommendation_adjustment": ["recommendation_adjustment", "推薦調整", "推薦加減分", "大盤影響加減分"],
+        "volume_status": ["volume_status", "量能狀態", "成交量狀態"],
+        "data_quality": ["data_quality", "資料品質", "大盤資料品質"],
+        "freshness": ["freshness", "資料新鮮度", "更新時間", "timestamp", "time", "日期"],
+        "market_session": ["market_session", "交易時段", "session"],
+        "market_session_label": ["market_session_label", "交易時段說明", "session_label"],
+        "godpick_market_effect": ["godpick_market_effect", "股神大盤影響", "大盤影響說明"],
+    }
+
+    def pick(keys: List[str], default: Any = "") -> Any:
+        for k in keys:
+            if k in snap and str(snap.get(k)).strip() not in {"", "None", "nan", "NaN", "—", "-"}:
+                return snap.get(k)
+        return default
+
+    for std_key, keys in alias_map.items():
+        if std_key not in snap or str(snap.get(std_key)).strip() in {"", "None", "nan", "NaN", "—", "-"}:
+            snap[std_key] = pick(keys, "")
+
+    # 必要欄位給安全預設，但不偽造行情價格，只避免下游 KeyError。
+    safe_defaults = {
+        "market_score": snap.get("market_score") or 50,
+        "market_trend": snap.get("market_trend") or "中性 / 待確認",
+        "market_risk_level": snap.get("market_risk_level") or "中",
+        "risk_gate": snap.get("risk_gate") or "資料恢復 / 請人工確認",
+        "position_hint": snap.get("position_hint") or "保守觀察",
+        "recommendation_adjustment": snap.get("recommendation_adjustment") or 0,
+        "volume_status": snap.get("volume_status") or "未判定",
+        "data_quality": snap.get("data_quality") or "由 macro_trend_records 恢復",
+        "freshness": snap.get("freshness") or now_text(),
+        "market_session": snap.get("market_session") or "restored",
+        "market_session_label": snap.get("market_session_label") or "由歷史紀錄恢復",
+        "market_session_usable": snap.get("market_session_usable") if "market_session_usable" in snap else False,
+        "godpick_market_effect": snap.get("godpick_market_effect") or "大盤快照曾為空，已由歷史大盤紀錄恢復；請重新更新 0_大盤趨勢取得最新資料。",
+        "data_diagnostics": snap.get("data_diagnostics") if isinstance(snap.get("data_diagnostics"), (list, dict)) else [],
+        "restored_from": snap.get("restored_from") or "macro_trend_records.json",
+        "restored_at": now_text(),
+    }
+    snap.update(safe_defaults)
+    return snap
+
+
+def repair_empty_market_bridge_files(base_dir: Path) -> Dict[str, Any]:
+    """
+    修復 market_snapshot.json / macro_mode_bridge.json 空 dict 或缺檔問題。
+
+    原則：
+    - 不連外抓資料。
+    - 優先從 macro_trend_records.json 最後一筆有效紀錄恢復。
+    - 只修復空白/缺檔橋接檔；若原檔已有資料則不覆蓋。
+    - 不刪除任何既有 JSON。
+    """
+    base_dir = Path(base_dir)
+    rows: List[Dict[str, Any]] = []
+
+    hist_path = base_dir / "macro_trend_records.json"
+    ok_hist, hist_data, hist_err = safe_read_json(hist_path)
+    if not ok_hist:
+        return {
+            "ok": False,
+            "message": f"無法恢復：macro_trend_records.json 不可用（{hist_err}）。請先到 0_大盤趨勢按立即寫入股神橋接 / market_snapshot。",
+            "rows": [{"檔案": "macro_trend_records.json", "動作": "讀取歷史大盤紀錄", "結果": "失敗", "說明": hist_err}],
+            "restored_snapshot_keys": [],
+        }
+
+    latest = _extract_latest_market_record_from_history(hist_data)
+    if not latest:
+        return {
+            "ok": False,
+            "message": "無法恢復：macro_trend_records.json 沒有可用的大盤紀錄。請先到 0_大盤趨勢重新更新並寫入橋接檔。",
+            "rows": [{"檔案": "macro_trend_records.json", "動作": "尋找最後有效紀錄", "結果": "失敗", "說明": json_shape(hist_data)}],
+            "restored_snapshot_keys": [],
+        }
+
+    restored = _normalize_market_snapshot_from_record(latest)
+    if not restored:
+        return {
+            "ok": False,
+            "message": "無法恢復：最後一筆大盤紀錄格式不可用。",
+            "rows": [{"檔案": "macro_trend_records.json", "動作": "標準化快照", "結果": "失敗", "說明": str(type(latest))}],
+            "restored_snapshot_keys": [],
+        }
+
+    targets = ["market_snapshot.json", "macro_mode_bridge.json"]
+    fixed_count = 0
+    for name in targets:
+        path = base_dir / name
+        ok, current, err = safe_read_json(path)
+        should_fix = (not ok) or _is_empty_bridge_payload(current)
+        if not should_fix:
+            rows.append({"檔案": name, "動作": "略過", "結果": "已有資料", "說明": json_shape(current)})
+            continue
+        w_ok, msg = safe_write_json(path, restored)
+        rows.append({"檔案": name, "動作": "由 macro_trend_records 恢復", "結果": "OK" if w_ok else "寫入失敗", "說明": msg})
+        if w_ok:
+            fixed_count += 1
+
+    return {
+        "ok": True,
+        "message": f"v58 大盤橋接檔修復完成：已修復 {fixed_count} 個檔案。若要最新行情，仍建議到 0_大盤趨勢重新更新。",
+        "rows": rows,
+        "restored_snapshot_keys": list(restored.keys()),
+    }
