@@ -426,7 +426,7 @@ V73_MESSAGE_TEXT_FIELDS = [
     "起漲摘要", "強勢族群等級", "族群輪動狀態", "族群策略建議", "族群資金流說明",
     "是否領先同類股", "推薦標籤", "推薦理由摘要", "K線驗證標記", "推薦日支撐壓力摘要",
     "K線查詢參數", "K線檢視提示", "建立時間", "更新時間", "目前狀態", "最新更新時間",
-    "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+    "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "績效資料型態", "績效資料來源", "備註",
     "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間",
 ]
 
@@ -442,7 +442,7 @@ V73_NUMERIC_FIELDS = [
     "同族群平均量能分", "同類股領先幅度", "推薦價格", "推薦日價格", "實際買進價", "實際賣出價",
     "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數", "股神決策分數",
     "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%",
-    "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "即時追蹤報酬%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
 
 
@@ -596,7 +596,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     text_cols = [
         "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦標籤", "推薦理由摘要", "大盤橋接狀態", "大盤橋接加權", "大盤橋接風控", "大盤橋接策略", "大盤橋接更新時間", "大盤交易時段", "大盤交易時段可用", "大盤資料品質", "大盤影響說明", "大盤資料診斷摘要",
-        "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
+        "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "績效資料型態", "績效資料來源", "備註",
     ]
     # v73：把所有常用說明欄納入文字欄處理，並從原始 df 回補被舊版誤轉掉的訊息。
     for c in _dedupe_keep_order_v73(text_cols + V73_MESSAGE_TEXT_FIELDS):
@@ -1483,7 +1483,7 @@ def _get_forward_metrics(
 # =========================================================
 
 PERF_HISTORY_CACHE_FILE = "godpick_perf_history_cache.json"
-PERF_FAIL_RETRY_HOURS = 0.25
+PERF_FAIL_RETRY_HOURS = 0.02
 PERF_CACHE_MAX_STOCKS = 180
 
 
@@ -1776,6 +1776,38 @@ def _get_perf_history_bundle_v71(
     cache["fail"] = fail_map
     _perf_cache_save(cache)
     return pd.DataFrame(), used_market or market, hist_msg or "無歷史資料", "ONLINE_FAIL"
+
+
+def _calc_proxy_perf_metrics_v71(payload: dict[str, Any], reason: str = "") -> dict[str, Any]:
+    """v71：歷史K線抓取失敗時的低成本代理績效。
+    只用推薦價/推薦日價格與最新價估算「即時追蹤報酬%」，並保留資料型態標記。
+    為了讓短期權重校正可先觀察，若推薦已超過 1 天且推薦後1日% 尚無資料，會同步寫入推薦後1日% 但標記為代理。
+    """
+    if not isinstance(payload, dict):
+        return {}
+    rec_px = _safe_float(payload.get("推薦價格")) or _safe_float(payload.get("推薦日價格")) or _safe_float(payload.get("建議價位"))
+    latest = _safe_float(payload.get("最新價")) or _safe_float(payload.get("最新價格"))
+    if rec_px in [None, 0] or latest in [None, 0]:
+        return {}
+    rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
+    age_days = 0
+    if pd.notna(rec_date):
+        try:
+            age_days = max((date.today() - rec_date.date()).days, 0)
+        except Exception:
+            age_days = 0
+    ret = round((latest - rec_px) / rec_px * 100, 2)
+    out = {
+        "即時追蹤報酬%": ret,
+        "績效資料型態": "即時代理",
+        "績效資料來源": "推薦價_vs_最新價",
+        "績效評語": f"歷史K線暫不可用，先以最新價代理追蹤報酬；原因：{_safe_str(reason)[:80]}",
+        "追蹤更新時間": _now_text(),
+    }
+    if age_days >= 1 and _safe_float(payload.get("推薦後1日%")) is None:
+        out["推薦後1日%"] = ret
+    # 只有代理，不補 3/5/10/20，避免把未成熟資料偽裝成完整回測。
+    return out
 
 
 def _calc_forward_metrics_from_history(
@@ -2217,7 +2249,7 @@ def _backfill_perf_columns(
             "待更新總數": len(candidates), "本次更新上限": max_rows, "本次處理": 0,
             "成功": 0, "略過或失敗": 0, "剩餘": 0, "時間防呆觸發": False,
             "時間防呆略過": 0, "單批秒數上限": max_seconds, "更新時間": _now_text(),
-            "加速模式": "V72 快取防卡＋Yahoo直接備援版", "本批抓取股票數": 0, "快取命中估計": 0,
+            "加速模式": "V71 防卡＋Yahoo/TWSE/TPEX＋即時代理版", "本批抓取股票數": 0, "快取命中估計": 0,
             "等待交易日": wait_count, "單批股票上限": max_stocks,
         }
         return _ensure_godpick_record_columns(pd.DataFrame(rows))
@@ -2293,25 +2325,36 @@ def _backfill_perf_columns(
             if metrics:
                 ok_count += 1
                 payload["市場別"] = used_market or payload.get("市場別")
+                payload["績效資料型態"] = payload.get("績效資料型態") or "歷史K線"
+                payload["績效資料來源"] = source
                 for k, v in metrics.items():
-                    if k in payload or k in GODPICK_RECORD_COLUMNS:
-                        payload[k] = v
-                for d in [3, 5, 10, 20]:
+                    payload[k] = v
+                for d in [1, 3, 5, 10, 20]:
                     old_key = f"{d}日績效%"
                     new_key = f"推薦後{d}日%"
                     if _safe_float(payload.get(old_key)) is None and _safe_float(payload.get(new_key)) is not None:
                         payload[old_key] = payload.get(new_key)
             else:
-                fail_count += 1
-                payload["績效評語"] = f"V71 本批略過：{hist_msg}"
-                payload["追蹤更新時間"] = _now_text()
+                proxy_metrics = _calc_proxy_perf_metrics_v71(payload, hist_msg)
+                if proxy_metrics:
+                    ok_count += 1
+                    for k, v in proxy_metrics.items():
+                        payload[k] = v
+                    if _safe_float(payload.get("1日績效%")) is None and _safe_float(payload.get("推薦後1日%")) is not None:
+                        payload["1日績效%"] = payload.get("推薦後1日%")
+                else:
+                    fail_count += 1
+                    payload["績效評語"] = f"V71 本批略過：{hist_msg}"
+                    payload["績效資料型態"] = "抓取失敗"
+                    payload["績效資料來源"] = source
+                    payload["追蹤更新時間"] = _now_text()
 
             rows[i] = _recalc_row(payload)
             done += 1
             if prog is not None and (done == total or done % 5 == 0):
                 prog.progress(
                     min(1.0, done / max(total, 1)),
-                    text=f"V68：快取防卡更新 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}｜{source}",
+                    text=f"V71：防卡更新 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}｜{source}",
                 )
             if status_box is not None and (done == total or done % 20 == 0):
                 status_box.caption(
@@ -2329,7 +2372,7 @@ def _backfill_perf_columns(
         "待更新總數": len(candidates), "本次更新上限": max_rows, "本次處理": done,
         "成功": ok_count, "略過或失敗": fail_count, "剩餘": remaining_count,
         "時間防呆觸發": bool(stopped_by_time_guard), "時間防呆略過": int(time_guard_skip_count),
-        "單批秒數上限": max_seconds, "更新時間": _now_text(), "加速模式": "V72 快取防卡＋Yahoo直接備援版",
+        "單批秒數上限": max_seconds, "更新時間": _now_text(), "加速模式": "V71 防卡＋Yahoo/TWSE/TPEX＋即時代理版",
         "本批抓取股票數": stock_fetch_count, "快取命中估計": cache_hit_count,
         "單批股票上限": max_stocks, "失敗快取略過": fail_cache_skip_count,
         "線上失敗股票數": online_fail_count, "等待交易日": wait_count,
@@ -3372,7 +3415,7 @@ def main():
         max_stock_n = st.number_input("單批股票上限", min_value=3, max_value=30, value=10, step=1, key=_k("perf_update_stock_limit"))
         st.caption("V68：有效樣本不偽裝0＋Yahoo備援版。建議 80 筆 / 60 秒 / 10 檔；比單純拉高筆數更穩，不會一直重抓失敗股票。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            with st.spinner("V72：快取防卡＋Yahoo直接備援批次更新中，限制單批股票數並使用歷史K線快取..."):
+            with st.spinner("V71：防卡＋多來源備援批次更新中，限制單批股票數並使用歷史K線快取..."):
                 updated = _backfill_perf_columns(
                     _get_state_df(),
                     max_rows=int(batch_n),

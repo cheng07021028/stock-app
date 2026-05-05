@@ -1023,7 +1023,7 @@ def _format_show_df(df: pd.DataFrame, drop_empty_cols: bool = True) -> pd.DataFr
         "推薦總分", "上漲機率估計%", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分",
         "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群輪動狀態",
         "同類股領先幅度", "實際報酬%", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%",
-        "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "大盤橋接分數", "大盤影響加減分",
+        "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "即時追蹤報酬%", "大盤橋接分數", "大盤影響加減分",
         "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "進場時機分數",
         "建議部位%", "建議倉位%", "最大風險%", "大盤多空分數", "推薦積極度係數", "動態建議倉位%",
         "風險報酬比", "追價風險分", "飆股起漲分數"
@@ -1143,6 +1143,32 @@ def _fetch_history_for_backtest(stock_no: str, stock_name: str, market_type: str
     return pd.DataFrame()
 
 
+def _calc_proxy_perf_metrics_v71(src: dict[str, Any], reason: str = "") -> dict[str, Any]:
+    """v71：推薦清單歷史K線失敗時，用推薦價與最新價產生即時代理績效。"""
+    rec_px = _safe_float(src.get("推薦價格")) or _safe_float(src.get("推薦日價格")) or _safe_float(src.get("建議價位"))
+    latest = _safe_float(src.get("最新價")) or _safe_float(src.get("最新價格"))
+    if rec_px in [None, 0] or latest in [None, 0]:
+        return {}
+    rec_date = pd.to_datetime(_safe_str(src.get("推薦日期")), errors="coerce")
+    age_days = 0
+    if pd.notna(rec_date):
+        try:
+            age_days = max((date.today() - rec_date.date()).days, 0)
+        except Exception:
+            age_days = 0
+    ret = round((latest - rec_px) / rec_px * 100, 2)
+    out = {
+        "即時追蹤報酬%": ret,
+        "績效資料型態": "即時代理",
+        "績效資料來源": "推薦價_vs_最新價",
+        "績效評語": f"歷史K線暫不可用，先以最新價代理追蹤報酬；原因：{_safe_str(reason)[:80]}",
+        "追蹤更新時間": _now_text(),
+    }
+    if age_days >= 1 and _safe_float(src.get("推薦後1日%")) is None:
+        out["推薦後1日%"] = ret
+    return out
+
+
 def _calc_backtest_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src = dict(row)
     rec_date = pd.to_datetime(_safe_str(src.get("推薦日期")), errors="coerce")
@@ -1153,7 +1179,7 @@ def _calc_backtest_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     market = _safe_str(src.get("市場別"))
     df = _fetch_history_for_backtest(code, name, market, _safe_str(src.get("推薦日期")))
     if df.empty:
-        return {}
+        return _calc_proxy_perf_metrics_v71(src, "ONLINE_FAIL / 無歷史K線")
     temp = df.copy()
     rename_map = {}
     for c in temp.columns:
@@ -1169,7 +1195,7 @@ def _calc_backtest_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     if rename_map:
         temp = temp.rename(columns=rename_map)
     if "日期" not in temp.columns or "收盤價" not in temp.columns:
-        return {}
+        return _calc_proxy_perf_metrics_v71(src, "歷史K線欄位不足")
     temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
     for c in ["收盤價", "最高價", "最低價"]:
         if c in temp.columns:
@@ -1177,10 +1203,10 @@ def _calc_backtest_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
     window = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
     if window.empty:
-        return {}
+        return _calc_proxy_perf_metrics_v71(src, "推薦日之後無K線資料")
     base_px = _safe_float(window.iloc[0].get("收盤價"))
     if base_px in [None, 0]:
-        return {}
+        return _calc_proxy_perf_metrics_v71(src, "基準價異常")
     out: dict[str, Any] = {}
     for d in [1, 3, 5, 10, 20]:
         if len(window) > d:
@@ -1257,7 +1283,7 @@ def _row_needs_backtest_update(payload: dict[str, Any]) -> bool:
 
 
 def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress: bool = True) -> pd.DataFrame:
-    """V51：分批更新推薦清單績效，避免一次全表連外造成一直跑。"""
+    """V71：多來源防卡更新推薦清單績效，避免一次全表連外造成一直跑。"""
     if df is None or df.empty:
         return _ensure_record_columns(pd.DataFrame())
     work = _ensure_record_columns(df.copy()).reset_index(drop=True)
@@ -1270,7 +1296,7 @@ def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress
     rows = []
     done = ok_count = fail_count = 0
     total = len(targets)
-    prog = st.progress(0, text="V53：準備更新推薦清單績效...") if show_progress and total else None
+    prog = st.progress(0, text="V71：準備多來源防卡更新推薦清單績效...") if show_progress and total else None
     status_box = st.empty() if show_progress and total else None
     max_seconds = 28
     started_ts = time.time()
@@ -1298,8 +1324,12 @@ def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress
         if metrics:
             ok_count += 1
             for k, v in metrics.items():
-                if k in GODPICK_RECORD_COLUMNS:
-                    payload[k] = v
+                payload[k] = v
+            for d in [1, 3, 5, 10, 20]:
+                old_key = f"{d}日績效%"
+                new_key = f"推薦後{d}日%"
+                if _safe_float(payload.get(old_key)) is None and _safe_float(payload.get(new_key)) is not None:
+                    payload[old_key] = payload.get(new_key)
         else:
             fail_count += 1
             if not _safe_str(payload.get("績效評語")):
@@ -1308,7 +1338,7 @@ def _update_backtest_metrics(df: pd.DataFrame, max_rows: int = 30, show_progress
         rows.append(payload)
         done += 1
         if prog is not None:
-            prog.progress(min(1.0, done / max(total, 1)), text=f"V53：更新推薦清單績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
+            prog.progress(min(1.0, done / max(total, 1)), text=f"V71：更新推薦清單績效 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}")
         if status_box is not None and (done == total or done % 5 == 0):
             status_box.caption(f"本次分批上限 {max_rows} 筆；本批時間防呆 {max_seconds} 秒；剩餘待更新約 {max(0, len(candidates)-done)} 筆。")
     st.session_state[_k("v51_perf_update_summary")] = {

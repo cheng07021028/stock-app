@@ -3,7 +3,7 @@ from __future__ import annotations
 
 # =========================================================
 # 14_股神權重校正.py
-# v66 Pro：績效回測＋期望值＋分層校正＋防過擬合版
+# v71 Pro：績效代理樣本＋多來源防卡＋防過擬合版
 # =========================================================
 
 import json
@@ -30,6 +30,7 @@ from godpick_weight_calibration import (
     first_existing_col,
     load_recommendation_records,
     perf_sample_diagnostics,
+    best_perf_col,
     numeric_series,
     probability_calibration,
     profile_name_by_horizon,
@@ -41,9 +42,9 @@ from godpick_weight_calibration import (
     PERF_COLUMNS,
 )
 
-st.set_page_config(page_title="14 股神權重校正｜v66 Pro", layout="wide")
+st.set_page_config(page_title="14 股神權重校正｜v71 Pro", layout="wide")
 
-APP_VERSION = "v66_pro_expectancy_layered_antioverfit"
+APP_VERSION = "v71_perf_proxy_multisource_antioverfit"
 
 
 def _ensure_sidebar_numbers_for_this_page() -> None:
@@ -91,13 +92,13 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14 股神權重校正｜v68 Pro 績效欄位自動偵測版")
+    st.title("14 股神權重校正｜v71 Pro 多來源防卡修正版")
     st.caption("績效回測＋期望值＋分層權重＋防過擬合。只讀取既有推薦紀錄，不連外、不重跑推薦；套用權重需人工確認。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；單次調整設上限，避免短期過擬合。")
 
 
 def _render_quality(df: pd.DataFrame, horizon: int, current_weights: Dict[str, int]) -> None:
-    perf_col = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+    perf_col = best_perf_col(df, horizon)
     ret = numeric_series(df, perf_col) if perf_col else pd.Series(dtype="float64")
     stat = summarize_returns(ret) if perf_col else {"樣本數": 0, "勝率%": None, "期望值%": None, "平均報酬%": None}
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -142,7 +143,7 @@ def main() -> None:
     current_weights = current_weight_map()
 
     with st.sidebar:
-        st.header("v66 校正設定")
+        st.header("v71 校正設定")
         horizon = st.selectbox("主要校正週期", [1, 3, 5, 10, 20], index=2, help="短線看 1/3 日，波段看 5/10 日，趨勢看 20 日。")
         st.caption("建議：先用 5 日或 10 日，不要用樣本太少的週期直接調權重。")
         st.divider()
@@ -151,7 +152,7 @@ def main() -> None:
 
     _render_quality(df, horizon, current_weights)
 
-    perf_col = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+    perf_col = best_perf_col(df, horizon)
     if not perf_col:
         st.stop()
 
@@ -286,7 +287,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v66 Pro：此頁只做績效回測與建議權重。套用權重需人工打開安全鎖並按下套用，不會自動覆蓋。")
+    st.caption("v71 Pro：此頁只做績效回測與建議權重，支援有效績效與即時代理樣本。套用權重需人工打開安全鎖並按下套用，不會自動覆蓋。")
 
 
 if __name__ == "__main__":
