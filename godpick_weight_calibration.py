@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """
 godpick_weight_calibration.py
-v68 Pro：績效欄位自動偵測＋有效樣本診斷＋防過擬合
+v70 Pro：因子代理樣本＋績效欄位自動偵測＋防過擬合
 
 設計原則：
 - 不連外，不重新推薦，只讀既有推薦紀錄 / 推薦清單。
@@ -207,6 +207,160 @@ def perf_sample_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+
+# v70：因子代理樣本修正
+# 說明：績效樣本來自 8/10 更新後績效；因子樣本來自 7 推薦輸出的分數欄。
+# 舊資料常缺少單一因子分數，或因子分數與績效列不重疊，會導致「有效樣本 0」。
+# 因此這裡加入「代理因子」：先用原生分數，若與績效列無交集，再用文字/總分欄位保守估算。
+
+GENERIC_SCORE_COLUMNS = [
+    "推薦分數", "推薦總分", "股神決策分數", "股神總分", "總分", "score"
+]
+
+
+def _first_numeric_series(df: pd.DataFrame, candidates: Iterable[str]) -> Tuple[pd.Series, str]:
+    """回傳第一個有數值的欄位；沒有則回傳全 NaN。"""
+    best = pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
+    best_name = ""
+    best_n = 0
+    for c in candidates:
+        if c not in df.columns:
+            continue
+        s = numeric_series(df, c)
+        n = int(s.notna().sum())
+        if n > best_n:
+            best = s
+            best_name = c
+            best_n = n
+    return best, best_name
+
+
+def _score_text_value(v: Any, factor: str = "") -> Optional[float]:
+    s = safe_str(v)
+    if not s:
+        return None
+    # 等級式文字
+    if "A" in s or "優先" in s or "股神級" in s or "高分" in s or "強烈" in s:
+        return 88.0
+    if "B" in s or "確認" in s or "拉回可" in s or "可布局" in s or "中高" in s:
+        return 76.0
+    if "C" in s or "觀察" in s or "等待" in s or "中性" in s:
+        return 58.0
+    if "D" in s or "尚未" in s or "減碼" in s or "風險" in s or "不追" in s:
+        return 42.0
+    # 大盤/市場字眼
+    if factor == "市場環境":
+        if any(k in s for k in ["多頭", "偏多", "強", "進攻", "風險低"]):
+            return 82.0
+        if any(k in s for k in ["盤整", "震盪", "中性", "觀望"]):
+            return 58.0
+        if any(k in s for k in ["空頭", "偏空", "弱", "防守", "風險高"]):
+            return 36.0
+    if factor == "型態突破":
+        if any(k in s for k in ["突破", "轉強", "主升", "平台整理突破"]):
+            return 86.0
+        if any(k in s for k in ["整理", "接近", "回測"]):
+            return 63.0
+    if factor == "爆發力":
+        if any(k in s for k in ["爆發", "主升", "強勢", "放量", "熱門"]):
+            return 85.0
+        if any(k in s for k in ["量縮", "整理", "觀察"]):
+            return 58.0
+    return None
+
+
+def _text_score_series(df: pd.DataFrame, columns: Iterable[str], factor: str) -> Tuple[pd.Series, str]:
+    vals = []
+    used = []
+    for c in columns:
+        if c not in df.columns:
+            continue
+        ser = df[c].map(lambda x: _score_text_value(x, factor))
+        if int(pd.Series(ser).notna().sum()) > 0:
+            vals.append(pd.to_numeric(ser, errors="coerce"))
+            used.append(c)
+    if not vals:
+        return pd.Series([math.nan] * len(df), index=df.index, dtype="float64"), ""
+    out = pd.concat(vals, axis=1).mean(axis=1, skipna=True)
+    return out, "文字代理:" + "/".join(used[:3])
+
+
+def _category_density_series(df: pd.DataFrame) -> Tuple[pd.Series, str]:
+    col = first_existing_col(df, CATEGORY_COLUMNS)
+    if not col or col not in df.columns or len(df) == 0:
+        return pd.Series([math.nan] * len(df), index=df.index, dtype="float64"), ""
+    s = df[col].map(lambda x: safe_str(x, "未分類"))
+    counts = s.value_counts()
+    max_n = max(int(counts.max()), 1) if not counts.empty else 1
+    # 類股集中度代理：同族群樣本越集中，代表族群熱度越高。限制在 45~85。
+    out = s.map(lambda x: 45 + 40 * (counts.get(x, 0) / max_n))
+    return pd.to_numeric(out, errors="coerce"), f"類股集中代理:{col}"
+
+
+def factor_candidate_sources(df: pd.DataFrame, factor: str) -> List[Tuple[pd.Series, str, str]]:
+    """產生某因子的候選資料源：(series, source_name, quality)。"""
+    out: List[Tuple[pd.Series, str, str]] = []
+
+    # 1) 原生因子欄：最可靠。
+    native_vals = []
+    native_cols = []
+    for c in FACTOR_COLUMNS.get(factor, []):
+        if c in df.columns:
+            ser = numeric_series(df, c)
+            if int(ser.notna().sum()) > 0:
+                native_vals.append(ser)
+                native_cols.append(c)
+    if native_vals:
+        out.append((pd.concat(native_vals, axis=1).mean(axis=1, skipna=True), "原生分數:" + "/".join(native_cols[:3]), "原生"))
+
+    # 2) 因子文字代理：適合舊資料只有文字標籤沒有分數。
+    text_cols_map = {
+        "市場環境": MARKET_COLUMNS + ["大盤情境調權說明", "大盤橋接狀態", "大盤風控說明"],
+        "技術結構": ["技術結構", "技術型態", "型態名稱", "K線驗證標記", "買點分級"],
+        "起漲前兆": ["起漲等級", "買點分級", "進場時機", "推薦型態", "機會型態"],
+        "類股熱度": ["族群策略建議", "族群資金流說明", "類別", "產業"],
+        "自動因子": ["推薦等級", "推薦型態", "機會型態", "買點分級"],
+        "交易可行": ["建議動作", "等待條件", "進場時機", "股神信心", "買點分級"],
+        "型態突破": ["型態名稱", "型態突破", "K線驗證標記", "進場時機", "推薦型態"],
+        "爆發力": ["爆發力", "型態突破", "推薦等級", "推薦型態", "機會型態"],
+    }
+    ts, ts_name = _text_score_series(df, text_cols_map.get(factor, []), factor)
+    if int(ts.notna().sum()) > 0:
+        out.append((ts, ts_name, "文字代理"))
+
+    # 3) 類股熱度可用類別集中度代理。
+    if factor == "類股熱度":
+        cs, cs_name = _category_density_series(df)
+        if int(cs.notna().sum()) > 0:
+            out.append((cs, cs_name, "類股代理"))
+
+    # 4) 最後保底：總分代理。這不是單一因子，僅避免舊資料完全無法校正。
+    gs, gs_name = _first_numeric_series(df, GENERIC_SCORE_COLUMNS)
+    if int(gs.notna().sum()) > 0:
+        out.append((gs, "總分代理:" + gs_name, "總分代理"))
+    return out
+
+
+def choose_factor_source(df: pd.DataFrame, factor: str, ret: pd.Series) -> Tuple[pd.Series, str, str, int, float]:
+    """選擇與績效列重疊最多的因子來源，避免畫面出現樣本 0。"""
+    best_series = pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
+    best_source = "缺少可用因子欄"
+    best_quality = "缺欄"
+    best_overlap = 0
+    best_coverage = 0.0
+    for ser, source, quality in factor_candidate_sources(df, factor):
+        ser = pd.to_numeric(ser, errors="coerce")
+        overlap = int(pd.DataFrame({"f": ser, "ret": ret}).dropna().shape[0])
+        coverage = float(ser.notna().mean() * 100) if len(ser) else 0.0
+        # 先看與績效列重疊，再看資料品質。
+        quality_rank = {"原生": 4, "文字代理": 3, "類股代理": 2, "總分代理": 1, "缺欄": 0}.get(quality, 0)
+        best_rank = {"原生": 4, "文字代理": 3, "類股代理": 2, "總分代理": 1, "缺欄": 0}.get(best_quality, 0)
+        if overlap > best_overlap or (overlap == best_overlap and quality_rank > best_rank and coverage >= best_coverage):
+            best_series, best_source, best_quality, best_overlap, best_coverage = ser, source, quality, overlap, coverage
+    return best_series, best_source, best_quality, best_overlap, round(best_coverage, 2)
+
+
 def factor_series(df: pd.DataFrame, factor: str) -> pd.Series:
     vals = []
     for c in FACTOR_COLUMNS.get(factor, []):
@@ -271,19 +425,29 @@ def calc_factor_effectiveness(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     if not perf_col:
         return pd.DataFrame()
     ret = numeric_series(df, perf_col)
-    base = summarize_returns(ret)
     rows: List[dict] = []
     for factor in DEFAULT_WEIGHTS:
-        f = factor_series(df, factor)
+        f, source_name, source_quality, overlap_n, coverage_pct = choose_factor_source(df, factor, ret)
         work = pd.DataFrame({"factor": f, "ret": ret}).dropna()
         if len(work) < 8:
             rows.append({
-                "因子": factor, "有效樣本": int(len(work)), "目前權重%": DEFAULT_WEIGHTS[factor],
-                "高分組勝率%": None, "低分組勝率%": None, "勝率差%": None,
-                "高分組平均報酬%": None, "低分組平均報酬%": None, "報酬差%": None,
-                "高分組期望值%": None, "低分組期望值%": None, "期望值差%": None,
-                "資料覆蓋率%": round(float(f.notna().mean() * 100), 2) if len(df) else 0,
-                "樣本信心": confidence_label(len(work)), "建議": "樣本不足，暫不調整",
+                "因子": factor,
+                "有效樣本": int(len(work)),
+                "目前權重%": DEFAULT_WEIGHTS[factor],
+                "因子資料來源": source_name,
+                "資料品質": source_quality,
+                "高分組勝率%": None,
+                "低分組勝率%": None,
+                "勝率差%": None,
+                "高分組平均報酬%": None,
+                "低分組平均報酬%": None,
+                "報酬差%": None,
+                "高分組期望值%": None,
+                "低分組期望值%": None,
+                "期望值差%": None,
+                "資料覆蓋率%": coverage_pct,
+                "樣本信心": confidence_label(len(work)),
+                "建議": "樣本不足，暫不調整" if len(work) < 8 else "先觀察",
             })
             continue
         q70 = work["factor"].quantile(0.70)
@@ -295,7 +459,9 @@ def calc_factor_effectiveness(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
         win_gap = None if hs["勝率%"] is None or ls["勝率%"] is None else round(hs["勝率%"] - ls["勝率%"], 2)
         avg_gap = None if hs["平均報酬%"] is None or ls["平均報酬%"] is None else round(hs["平均報酬%"] - ls["平均報酬%"], 2)
         exp_gap = None if hs["期望值%"] is None or ls["期望值%"] is None else round(hs["期望值%"] - ls["期望值%"], 2)
-        if len(work) < 30:
+        if source_quality != "原生" and len(work) < 50:
+            advice = "代理樣本，先觀察"
+        elif len(work) < 30:
             advice = "樣本偏少，先觀察"
         elif (exp_gap or 0) >= 1.5 and (win_gap or 0) >= 6:
             advice = "建議加權"
@@ -307,7 +473,9 @@ def calc_factor_effectiveness(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
             "因子": factor,
             "有效樣本": int(len(work)),
             "目前權重%": DEFAULT_WEIGHTS[factor],
-            "資料覆蓋率%": round(float(f.notna().mean() * 100), 2) if len(df) else 0,
+            "因子資料來源": source_name,
+            "資料品質": source_quality,
+            "資料覆蓋率%": coverage_pct,
             "高分組樣本": int(len(high)),
             "低分組樣本": int(len(low)),
             "高分組勝率%": hs["勝率%"],
@@ -323,7 +491,6 @@ def calc_factor_effectiveness(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
             "建議": advice,
         })
     return pd.DataFrame(rows)
-
 
 def normalize_weights(weights: Dict[str, float], min_w: int = 5, max_w: int = 25) -> Dict[str, int]:
     vals = {k: max(min_w, min(max_w, float(weights.get(k, DEFAULT_WEIGHTS.get(k, min_w))))) for k in DEFAULT_WEIGHTS}
@@ -444,7 +611,7 @@ def filter_by_market(df: pd.DataFrame, mode: str) -> pd.DataFrame:
 
 def calc_profile_bundle(df: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 10, 20), current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     bundle: Dict[str, Any] = {
-        "version": "v68_perf_col_auto_detect_antioverfit",
+        "version": "v70_factor_proxy_perf_col_auto_detect_antioverfit",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "base_weights": current_weights or DEFAULT_WEIGHTS,
         "profiles": {},
