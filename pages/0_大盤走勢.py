@@ -4893,6 +4893,11 @@ def _v70_render_one_click_control(target_date: date):
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
     inject_pro_theme()
 
     render_pro_hero(

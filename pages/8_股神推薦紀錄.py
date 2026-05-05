@@ -3336,6 +3336,11 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V68 推薦�
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
     # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
     try:
         from godpick_column_manager import install_auto_column_manager

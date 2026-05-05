@@ -159,6 +159,11 @@ def _diag_dataframe(df: pd.DataFrame, *args, **kwargs):
         return st.dataframe(df, *args, **kwargs)
 
 st.set_page_config(page_title="資料診斷", layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
 # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
 try:
     from godpick_column_manager import install_auto_column_manager

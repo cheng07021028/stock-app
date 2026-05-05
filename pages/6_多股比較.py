@@ -700,6 +700,11 @@ def _build_radar_avg_chart(df: pd.DataFrame) -> go.Figure:
 # =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
     inject_pro_theme()
 
     group_map = _build_group_stock_map()

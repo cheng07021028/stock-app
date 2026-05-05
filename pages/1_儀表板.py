@@ -381,6 +381,11 @@ def render_overnight_risk_dashboard_v75():
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
     _init_page_state()
 
     apply_font_scale(st.session_state.font_scale)

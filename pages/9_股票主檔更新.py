@@ -20,6 +20,11 @@ from stock_master_service import (
 )
 
 st.set_page_config(page_title="股票主檔更新", layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
 inject_pro_theme()
 st.title("股票主檔更新")
 

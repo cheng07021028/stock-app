@@ -6,6 +6,11 @@ import streamlit as st
 
 st.set_page_config(page_title="帳號管理", layout="wide")
 
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
+
 from app_auth import require_admin, load_auth_config, save_auth_config, create_or_update_user, current_user
 
 require_admin()

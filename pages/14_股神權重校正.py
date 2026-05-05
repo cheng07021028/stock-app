@@ -46,6 +46,11 @@ from godpick_weight_calibration import (
 
 st.set_page_config(page_title="14 股神權重校正｜v71 Pro", layout="wide")
 
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
+
 APP_VERSION = "v71_perf_proxy_multisource_antioverfit"
 
 

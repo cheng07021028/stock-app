@@ -750,6 +750,11 @@ def _top_table(df: pd.DataFrame, metric: str, ascending: bool, top_n: int) -> pd
 # =========================================================
 def main():
     st.set_page_config(page_title=PAGE_TITLE, page_icon="🏆", layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
     inject_pro_theme()
 
     group_map = _load_watchlist_map()

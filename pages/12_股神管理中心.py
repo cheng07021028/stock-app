@@ -1693,6 +1693,11 @@ pages/14_#U80a1#U795e#U63a8#U85a6#U54c1#U8cea#U5100#U8868#U677f.py""")
 
 def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+
+# >>> APP_AUTH_GUARD_V76
+from app_auth import require_login
+require_login()
+# <<< APP_AUTH_GUARD_V76
     # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
     try:
         from godpick_column_manager import install_auto_column_manager
