@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+from app_auth import require_login
 
 from utils import (
     format_number,
@@ -952,11 +953,9 @@ def _render_home_page():
 
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
-
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
+    # >>> APP_AUTH_GUARD_V77
+    require_login()
+    # <<< APP_AUTH_GUARD_V77
     st.caption(f"首頁股神決策V5串聯版：{HOME_V5_LINK_VERSION}")
     inject_pro_theme()
     _init_state()
