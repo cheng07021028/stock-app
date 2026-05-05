@@ -14,6 +14,9 @@ import time
 import pandas as pd
 import requests
 import streamlit as st
+from godpick_history_sources import fetch_multi_source_history
+from app_auth import require_login
+require_login()
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
@@ -1735,7 +1738,17 @@ def _get_perf_history_bundle(
     except Exception as e:
         last_err = (last_err + " | YahooDirect: " + str(e)[:120])[:220]
 
-    return pd.DataFrame(), _safe_str(primary or "未知"), last_err or "無歷史資料 / YahooDirect 亦無資料"
+    # V72：第二層備援，加入 Stooq CSV + TWSE/TPEx 官方日行情逐日補抓。
+    try:
+        alt_df, alt_msg = fetch_multi_source_history(stock_no, stock_name, primary, start_date.date(), end_date.date())
+        alt_df = _normalize_history_df_for_perf(alt_df)
+        if isinstance(alt_df, pd.DataFrame) and not alt_df.empty:
+            return alt_df, _safe_str(primary or "未知"), f"OK(MultiSource:{alt_msg})"
+        last_err = (last_err + " | MultiSource: " + str(alt_msg)[:120])[:260]
+    except Exception as e:
+        last_err = (last_err + " | MultiSource: " + str(e)[:120])[:260]
+
+    return pd.DataFrame(), _safe_str(primary or "未知"), last_err or "無歷史資料 / YahooDirect / MultiSource 皆無資料"
 
 
 def _get_perf_history_bundle_v71(

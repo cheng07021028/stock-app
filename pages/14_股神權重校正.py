@@ -13,6 +13,8 @@ from typing import Any, Dict
 
 import pandas as pd
 import streamlit as st
+from app_auth import require_login
+require_login()
 
 try:
     from utils import inject_pro_theme

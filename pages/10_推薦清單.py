@@ -11,6 +11,9 @@ import time
 import pandas as pd
 import requests
 import streamlit as st
+from godpick_history_sources import fetch_multi_source_history
+from app_auth import require_login
+require_login()
 
 try:
     from godpick_column_schema import (
@@ -1140,6 +1143,14 @@ def _fetch_history_for_backtest(stock_no: str, stock_name: str, market_type: str
         df = _fetch_yahoo_history_direct_v72(stock_no, mk or primary, start_date, end_date)
         if isinstance(df, pd.DataFrame) and not df.empty:
             return df
+
+    # V72：第二層備援，加入 Stooq CSV + TWSE/TPEx 官方日行情逐日補抓。
+    try:
+        alt_df, alt_msg = fetch_multi_source_history(stock_no, stock_name, primary, start_date, end_date)
+        if isinstance(alt_df, pd.DataFrame) and not alt_df.empty:
+            return alt_df
+    except Exception:
+        pass
     return pd.DataFrame()
 
 

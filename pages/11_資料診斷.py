@@ -12,6 +12,8 @@ import traceback
 
 import pandas as pd
 import streamlit as st
+from app_auth import require_login
+require_login()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"

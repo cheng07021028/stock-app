@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
+from app_auth import require_login
+require_login()
 
 try:
     import requests
