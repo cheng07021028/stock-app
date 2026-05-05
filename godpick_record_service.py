@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_FACTOR_FIELDS
 
 from datetime import datetime, date, timedelta
 from typing import Any
@@ -88,6 +89,18 @@ if UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
 # ------------------------------
 # 基本工具
 # ------------------------------
+
+# >>> V72_FACTOR_ENRICH_HELPER
+def _v72_enrich_recommendation_df_safe(df):
+    try:
+        return enrich_dataframe(df)
+    except Exception:
+        try:
+            return ensure_factor_columns(df)
+        except Exception:
+            return df
+# <<< V72_FACTOR_ENRICH_HELPER
+
 def _safe_str(v: Any) -> str:
     if v is None:
         return ""

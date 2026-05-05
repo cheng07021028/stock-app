@@ -9,6 +9,7 @@
 
 
 from __future__ import annotations
+from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_FACTOR_FIELDS
 
 # >>> APP_AUTH_GUARD_V84
 try:
@@ -65,6 +66,18 @@ st.set_page_config(page_title="14 股神權重校正｜v71 Pro", layout="wide")
 
 APP_VERSION = "v71_perf_proxy_multisource_antioverfit"
 
+
+
+# >>> V72_FACTOR_ENRICH_HELPER
+def _v72_enrich_recommendation_df_safe(df):
+    try:
+        return enrich_dataframe(df)
+    except Exception:
+        try:
+            return ensure_factor_columns(df)
+        except Exception:
+            return df
+# <<< V72_FACTOR_ENRICH_HELPER
 
 def _ensure_sidebar_numbers_for_this_page() -> None:
     if inject_pro_theme:
