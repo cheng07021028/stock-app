@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
+
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
 
 import streamlit as st
 
