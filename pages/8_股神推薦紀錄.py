@@ -34,6 +34,7 @@ import time
 import pandas as pd
 import requests
 import streamlit as st
+from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
 from godpick_history_sources import fetch_multi_source_history
 try:
     import firebase_admin
@@ -3457,33 +3458,34 @@ def main():
         batch_n = st.number_input("每次更新筆數", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
         max_stock_n = st.number_input("單批股票上限", min_value=3, max_value=30, value=10, step=1, key=_k("perf_update_stock_limit"))
-        st.caption("V68：有效樣本不偽裝0＋Yahoo備援版。建議 80 筆 / 60 秒 / 10 檔；比單純拉高筆數更穩，不會一直重抓失敗股票。")
+        st.caption("V77：快速防卡更新。建議 80 筆 / 60 秒 / 30 檔；只更新缺資料或過期資料，ONLINE_FAIL 不拖住整批。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            with st.spinner("V71：防卡＋多來源備援批次更新中，限制單批股票數並使用歷史K線快取..."):
-                updated = _backfill_perf_columns(
-                    _get_state_df(),
-                    max_rows=int(batch_n),
-                    show_progress=True,
-                    only_active=bool(st.session_state.get(_k("only_active_update"), True)),
-                    max_seconds=int(perf_seconds),
-                    max_stocks=int(max_stock_n),
+            with st.spinner("V77：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
+                summary = update_recommendation_perf_fast_v77(
+                    json_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
+                    max_records=int(batch_n),
+                    batch_limit=int(max_stock_n),
+                    max_workers=12,
+                    stale_minutes=60,
                 )
-                updated = _apply_mode_labels(updated)
-                _save_state_df(updated)
-            summary = st.session_state.get(_k("v51_perf_update_summary"), {})
+                try:
+                    refreshed = _load_records()
+                    if refreshed is not None and not refreshed.empty:
+                        refreshed = _apply_mode_labels(refreshed)
+                        _save_state_df(refreshed)
+                except Exception as _v77_reload_e:
+                    st.warning(f"V77 已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}")
+
             st.success(
-                f"V72 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，"
-                f"剩餘約 {summary.get('剩餘', 0)} 筆；線上抓取 {summary.get('本批抓取股票數', 0)} 檔；"
-                f"快取命中 {summary.get('快取命中估計', 0)} 檔；尚未同步。"
+                f"V77 已完成快速績效更新：候選 {summary.get('candidates', 0)} 筆，"
+                f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
+                f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。"
             )
-            if summary.get("失敗快取略過", 0):
-                st.info(f"V72 已啟用失敗快取保護：{summary.get('失敗快取略過', 0)} 檔近期失敗股票本批不重試，避免頁面一直卡住。")
-            if summary.get("等待交易日", 0):
-                st.info(f"有 {summary.get('等待交易日', 0)} 筆推薦日期太近，已標記等待交易日，不浪費線上抓取。")
-            if summary.get("剩餘", 0):
-                if summary.get("時間防呆觸發"):
-                    st.warning(f"V72 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 60)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
-                st.info("仍有紀錄待補績效，可再次按更新；V72 會優先使用歷史K線快取、Yahoo直接備援與失敗保護，穩定度會比單純拉高筆數更好。")
+            if summary.get("messages"):
+                st.info("；".join(summary.get("messages", [])))
+            if summary.get("fail", 0):
+                st.warning("部分股票線上抓取失敗，V77 已略過並保留原資料，不會拖住整批。")
+            st.rerun()
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
     with top_cols[6]:
