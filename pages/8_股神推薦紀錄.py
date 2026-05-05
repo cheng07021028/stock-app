@@ -2436,6 +2436,24 @@ def _clean_none_for_display(df: pd.DataFrame, *, drop_empty_cols: bool = False, 
     return out
 
 
+
+
+def _is_blank_value(v: Any) -> bool:
+    """判斷空白值，避免分群表遇到 None/NaN/空字串時 NameError 或顯示異常。"""
+    try:
+        if v is None:
+            return True
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    try:
+        text = str(v).strip()
+    except Exception:
+        return True
+    return text == "" or text.lower() in {"none", "nan", "null", "nat", "—", "-"}
+
+
 def _safe_display_df(df: pd.DataFrame) -> pd.DataFrame:
     """Remove duplicated dataframe columns before Streamlit Arrow conversion and clean None text."""
     return _clean_none_for_display(df, drop_empty_cols=True)
