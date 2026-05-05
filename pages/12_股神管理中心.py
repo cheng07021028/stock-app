@@ -37,7 +37,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v43 欄位管理免即時重算版"
+PAGE_TITLE = "股神管理中心｜v44 欄位管理免即時重算版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 MANAGEMENT_UI_CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
 
@@ -415,7 +415,7 @@ def _parse_column_order_text_v42(raw: str, candidates: List[str]) -> List[str]:
 
 
 def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataFrame, default_cols: List[str]) -> List[str]:
-    """v43：欄位管理免即時重算＋套用免整頁重跑版。
+    """v44：欄位管理免即時重算＋套用免整頁重跑版。
 
     修正重點：
     - 不再使用 st.data_editor 調欄位順序，避免每改一格就整頁 rerun。
@@ -430,7 +430,7 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
         current_cols = candidates[:]
     current_cols = [c for c in current_cols if c in candidates] or candidates[:]
 
-    k_prefix = f"v43_colmgr_{table_key}"
+    k_prefix = f"v44_colmgr_{table_key}"
     preview_key = f"{k_prefix}_preview_cols"
     text_key = f"{k_prefix}_order_text"
 
@@ -438,7 +438,7 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
     if isinstance(preview_cols, list) and preview_cols:
         current_cols = [c for c in preview_cols if c in candidates] or current_cols
 
-    with st.expander(f"🧩 {table_label} 欄位管理 / v43 免即時重算", expanded=False):
+    with st.expander(f"🧩 {table_label} 欄位管理 / v44 免即時重算", expanded=False):
         st.caption("調整欄位順序時不會立即重算；只有按『套用並永久記錄』或『套用到本次畫面』才套用。")
         st.caption(cfg_msg)
         st.caption(f"目前顯示 **{len(current_cols)}** 欄 / 可用 **{len(candidates)}** 欄。")
@@ -471,7 +471,7 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
                 "欄位順序（一行一欄；可直接剪下貼上調整）",
                 key=text_key,
                 height=320,
-                help="v43：在這裡輸入不會立即運算；按套用後不強制整頁重跑。",
+                help="v44：在這裡輸入不會立即運算；按套用後不強制整頁重跑。",
             )
 
             b1, b2, b3, b4 = st.columns(4)
@@ -520,10 +520,6 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
             return [c for c in current_cols if c in candidates]
 
         st.session_state[preview_key] = final_cols
-        st.session_state[text_key] = "\n".join(final_cols)
-
-        st.session_state[preview_key] = final_cols
-        st.session_state[text_key] = "\n".join(final_cols)
 
         if preview_btn or reset_btn or nonempty_btn:
             st.success("已套用到本次畫面；未強制整頁重跑。若要永久保存，請再按『套用並永久記錄』。")
@@ -1708,13 +1704,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v43｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
+            render_pro_hero("股神管理中心", "v44｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v43 修正：欄位管理表單模式，輸入欄位順序時不重算；按套用後不強制整頁重跑。")
+    st.caption("v44 修正：欄位管理表單模式，輸入欄位順序時不重算；按套用後不強制整頁重跑。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
