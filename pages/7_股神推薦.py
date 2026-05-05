@@ -9478,9 +9478,23 @@ def main():
         full_default_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(rec_df.columns)) if c in rec_df.columns]
         if not full_default_cols:
             full_default_cols = [c for c in list(rec_df.columns) if c != "勾選"]
-        full_available_cols = list(rec_df.columns)
-        full_order = _render_column_order_manager("full_table", "完整推薦表欄位順序設定", full_available_cols, full_default_cols)
-        full_show_cols = [c for c in full_order if c in rec_df.columns]
+        # v47：完整推薦表改用與 12_股神管理中心相同的欄位管理樣式。
+        full_for_manager = rec_df.copy()
+        if "勾選" not in full_for_manager.columns:
+            full_for_manager.insert(0, "勾選", False)
+        try:
+            from godpick_column_manager import render_column_manager
+            full_order = render_column_manager(
+                "godpick_recommend_full",
+                "完整推薦表",
+                full_for_manager,
+                ["勾選"] + full_default_cols,
+            )
+        except Exception:
+            full_order = ["勾選"] + full_default_cols
+        full_show_cols = [c for c in full_order if c in rec_df.columns and c != "勾選"]
+        if not full_show_cols:
+            full_show_cols = full_default_cols
 
         # v78：確保完整推薦表的 DataFrame 實體欄位順序完全依 full_show_cols 建立。
         # 注意：直接在表格前端拖曳欄位不會寫回 Python；需使用上方欄位順序設定後按「套用」。
@@ -9506,7 +9520,7 @@ def main():
         st.session_state[full_editor_code_map_key] = [
             _normalize_code(x) for x in full_work_df["股票代號"].astype(str).tolist()
         ]
-        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v81：批次欄位快速管理並即時保存。")
+        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v47：欄位管理樣式已與股神管理中心統一。")
 
         full_editor_df = st.data_editor(
             _format_df(full_work_df),

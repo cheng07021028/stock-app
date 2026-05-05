@@ -3361,90 +3361,20 @@ def main():
             sort_asc=sort_asc,
         )
 
-        # 欄位順序修正：以 view_df 實際欄位為可用欄位，避免推薦日期/新欄位被預設清單重新插回。
+        # v47：推薦紀錄總表欄位管理改用與 12_股神管理中心相同的表單式管理。
         available_cols = [c for c in view_df.columns if c not in ["匯入自選", "刪除"]]
-        applied_cols = _get_saved_col_profile(show_cols_mode, available_cols)
-        use_cols = applied_cols
-
-        if st.session_state.get(_k("show_column_manager"), False):
-            with st.expander("欄位順序管理", expanded=True):
-                draft_cols = _get_stage_col_profile(show_cols_mode, applied_cols, available_cols)
-
-                mgr_cols = st.columns([2.0, 0.9, 0.9, 0.9, 0.9, 1.2])
-                with mgr_cols[0]:
-                    selected_col = st.selectbox(
-                        "選擇要移動的欄位",
-                        options=draft_cols,
-                        index=0 if draft_cols else None,
-                        key=_k("selected_col_to_move"),
-                    )
-                with mgr_cols[1]:
-                    if st.button("⬆ 上移", use_container_width=True, disabled=not draft_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "up"), available_cols)
-                        st.rerun()
-                with mgr_cols[2]:
-                    if st.button("⬇ 下移", use_container_width=True, disabled=not draft_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "down"), available_cols)
-                        st.rerun()
-                with mgr_cols[3]:
-                    if st.button("⏫ 置頂", use_container_width=True, disabled=not draft_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "top"), available_cols)
-                        st.rerun()
-                with mgr_cols[4]:
-                    if st.button("⏬ 置底", use_container_width=True, disabled=not draft_cols):
-                        _stage_col_profile(show_cols_mode, _move_col(draft_cols, selected_col, "bottom"), available_cols)
-                        st.rerun()
-                with mgr_cols[5]:
-                    if st.button("↩ 還原原始設定", use_container_width=True):
-                        _restore_original_col_profile_to_stage(show_cols_mode, available_cols)
-                        st.rerun()
-
-                st.markdown("**目前欄位順序**")
-                st.code(" | ".join(draft_cols), language=None)
-
-                apply_cols = st.columns([1.2, 1.2, 3.0])
-                with apply_cols[0]:
-                    if st.button("✅ 套用設定並永久記錄", use_container_width=True, type="primary"):
-                        _save_col_profile(show_cols_mode, draft_cols)
-                        st.session_state[_k(f"staged_col_profile_{show_cols_mode}")] = _get_saved_col_profile(show_cols_mode, available_cols)
-                        st.success("欄位順序已套用並永久記錄；下次切換頁面或重新整理不會恢復原始設定。")
-                        st.rerun()
-                with apply_cols[1]:
-                    if st.button("取消暫存", use_container_width=True):
-                        st.session_state[_k(f"staged_col_profile_{show_cols_mode}")] = applied_cols.copy()
-                        st.rerun()
-                with apply_cols[2]:
-                    if draft_cols != applied_cols:
-                        st.warning("欄位順序已有暫存變更，按『套用設定並永久記錄』後才會正式保存。")
-                    else:
-                        st.caption("目前欄位順序已套用並永久保存。")
-
-                st.markdown("**快速欄位方案**")
-                preset_cols = st.columns(4)
-                with preset_cols[0]:
-                    if st.button("方案A：交易核心", use_container_width=True):
-                        preset = [c for c in [
-                            "record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價",
-                            "損益幅%", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "備註"
-                        ] if c in available_cols]
-                        _stage_col_profile(show_cols_mode, preset, available_cols)
-                        st.rerun()
-                with preset_cols[1]:
-                    if st.button("方案B：績效核心", use_container_width=True):
-                        preset = [c for c in [
-                            "record_id", "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分",
-                            "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "損益幅%", "模式績效標籤"
-                        ] if c in available_cols]
-                        _stage_col_profile(show_cols_mode, preset, available_cols)
-                        st.rerun()
-                with preset_cols[2]:
-                    if st.button("方案C：完整預設", use_container_width=True):
-                        _restore_original_col_profile_to_stage(show_cols_mode, available_cols)
-                        st.rerun()
-                with preset_cols[3]:
-                    st.caption(f"最後保存：{_safe_str(st.session_state.get(_k('ui_last_saved_at'), '未保存'))}")
-
-                use_cols = _get_saved_col_profile(show_cols_mode, available_cols)
+        default_profile_cols = _get_saved_col_profile(show_cols_mode, available_cols)
+        try:
+            from godpick_column_manager import render_column_manager
+            use_cols = render_column_manager(
+                f"godpick_record_total_{show_cols_mode}",
+                "推薦紀錄總表",
+                view_df[available_cols].copy() if available_cols else view_df.copy(),
+                default_profile_cols or available_cols,
+            )
+        except Exception:
+            use_cols = default_profile_cols or available_cols
+        use_cols = [c for c in use_cols if c in available_cols] or available_cols
 
         editor_df, total_rows, truncated = _get_editor_df(
             view_df=view_df,

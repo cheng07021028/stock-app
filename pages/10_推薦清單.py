@@ -1425,7 +1425,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V13 空白欄位清理版：{BACKTEST_V12_VERSION}")
+    st.caption(f"推薦清單 V46 主表欄位管理修正版：{BACKTEST_V12_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -1508,7 +1508,22 @@ def main():
         if c in filtered_df.columns and c not in existing_cols:
             existing_cols.append(c)
     filtered_show_df = filtered_df.loc[:, ~filtered_df.columns.duplicated()].copy()
-    st.dataframe(_format_show_df(filtered_show_df[existing_cols]), use_container_width=True, height=620)
+    # v46：推薦清單明細正式加入欄位管理。
+    # 重點：只管理這張主表，不再全頁攔截所有 dataframe，避免每個模組變慢。
+    detail_show_df = _format_show_df(filtered_show_df[existing_cols])
+    try:
+        from godpick_column_manager import managed_dataframe
+        managed_dataframe(
+            detail_show_df,
+            table_key="recommend_list_detail",
+            table_label="推薦清單明細",
+            default_cols=list(detail_show_df.columns),
+            use_container_width=True,
+            height=620,
+        )
+    except Exception as exc:
+        st.warning(f"欄位管理載入失敗，已改用一般表格顯示：{exc}")
+        st.dataframe(detail_show_df, use_container_width=True, height=620)
 
     ex1, ex2 = st.columns(2)
     with ex1:

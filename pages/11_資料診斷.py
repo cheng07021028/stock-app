@@ -132,6 +132,30 @@ except Exception:
             st.caption(subtitle)
 
 
+
+
+# v47：資料診斷頁表格欄位管理統一為股神管理中心樣式。
+# 平常只套用已保存欄位；側邊欄開啟欄位管理模式後，才顯示每張診斷表的欄位管理器。
+_DIAG_TABLE_COUNTER = 0
+def _diag_dataframe(df: pd.DataFrame, *args, **kwargs):
+    global _DIAG_TABLE_COUNTER
+    if df is None or not isinstance(df, pd.DataFrame):
+        return st.dataframe(df, *args, **kwargs)
+    _DIAG_TABLE_COUNTER += 1
+    table_key = f"diagnostic_table_{_DIAG_TABLE_COUNTER:02d}"
+    table_label = f"資料診斷表 {_DIAG_TABLE_COUNTER:02d}"
+    try:
+        from godpick_column_manager import managed_dataframe
+        return managed_dataframe(
+            df,
+            table_key=table_key,
+            table_label=table_label,
+            default_cols=list(df.columns),
+            **kwargs,
+        )
+    except Exception:
+        return st.dataframe(df, *args, **kwargs)
+
 st.set_page_config(page_title="資料診斷", layout="wide")
 # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
 try:
@@ -194,7 +218,7 @@ file_rows = [
     _file_row("requirements.txt", BASE_DIR / "requirements.txt"),
 ]
 file_rows += [_file_row(name, path, must) for name, path, must in json_files]
-st.dataframe(pd.DataFrame(file_rows), use_container_width=True, hide_index=True)
+_diag_dataframe(pd.DataFrame(file_rows), use_container_width=True, hide_index=True)
 
 st.subheader("2. JSON 讀取檢查")
 json_rows = []
@@ -210,7 +234,7 @@ for name, path, _must in json_files:
         "錯誤訊息": err,
         "路徑": str(path),
     })
-st.dataframe(pd.DataFrame(json_rows), use_container_width=True, hide_index=True)
+_diag_dataframe(pd.DataFrame(json_rows), use_container_width=True, hide_index=True)
 
 bad_json = [r for r in json_rows if r["狀態"] != "OK" and r["檔案"] in {"stock_master_cache.json", "watchlist.json"}]
 if bad_json:
@@ -230,14 +254,14 @@ if pages_dir.exists():
             "路徑": str(p),
         })
 page_df = pd.DataFrame(page_rows)
-st.dataframe(page_df, use_container_width=True, hide_index=True)
+_diag_dataframe(page_df, use_container_width=True, hide_index=True)
 
 if not page_df.empty:
     duplicated_no = page_df["檔名"].str.extract(r"^(\d+)_")[0].dropna().value_counts()
     duplicated_no = duplicated_no[duplicated_no > 1]
     if not duplicated_no.empty:
         st.warning("偵測到相同頁碼可能重複，Streamlit 側邊欄可能出現兩個相近頁面，請確認是否同時存在中文檔名與 #U 編碼檔名。")
-        st.dataframe(duplicated_no.rename("重複數").reset_index().rename(columns={"index": "頁碼"}), hide_index=True)
+        _diag_dataframe(duplicated_no.rename("重複數").reset_index().rename(columns={"index": "頁碼"}), hide_index=True)
 
 st.subheader("4. 共用模組匯入檢查")
 module_rows = []
@@ -250,7 +274,7 @@ for name, mod, err in [("utils", utils_mod, utils_err), ("stock_master_service",
         "錯誤": err,
         "檔案": getattr(mod, "__file__", "") if mod is not None else "",
     })
-st.dataframe(pd.DataFrame(module_rows), use_container_width=True, hide_index=True)
+_diag_dataframe(pd.DataFrame(module_rows), use_container_width=True, hide_index=True)
 
 expected_utils_funcs = [
     "safe_read_json", "safe_write_json", "load_watchlist", "save_watchlist", "get_normalized_watchlist",
@@ -268,7 +292,7 @@ if stock_mod is not None:
     for fn in expected_master_funcs:
         func_rows.append({"模組": "stock_master_service", "函式": fn, "是否存在": hasattr(stock_mod, fn)})
 if func_rows:
-    st.dataframe(pd.DataFrame(func_rows), use_container_width=True, hide_index=True)
+    _diag_dataframe(pd.DataFrame(func_rows), use_container_width=True, hide_index=True)
 
 st.subheader("5. 股票主檔診斷")
 if stock_mod is None:
@@ -288,13 +312,13 @@ else:
             with c2:
                 if "市場別" in master.columns:
                     st.caption("市場別分布")
-                    st.dataframe(master["市場別"].astype(str).value_counts().reset_index().rename(columns={"index": "市場別", "市場別": "筆數"}), hide_index=True, use_container_width=True)
+                    _diag_dataframe(master["市場別"].astype(str).value_counts().reset_index().rename(columns={"index": "市場別", "市場別": "筆數"}), hide_index=True, use_container_width=True)
             with c3:
                 cat_col = "主題類別" if "主題類別" in master.columns else ("產業別" if "產業別" in master.columns else "")
                 if cat_col:
                     st.caption(f"{cat_col} 前 15")
-                    st.dataframe(master[cat_col].astype(str).value_counts().head(15).reset_index().rename(columns={"index": cat_col, cat_col: "筆數"}), hide_index=True, use_container_width=True)
-            st.dataframe(master.head(80), use_container_width=True, hide_index=True)
+                    _diag_dataframe(master[cat_col].astype(str).value_counts().head(15).reset_index().rename(columns={"index": cat_col, cat_col: "筆數"}), hide_index=True, use_container_width=True)
+            _diag_dataframe(master.head(80), use_container_width=True, hide_index=True)
         else:
             st.warning("主檔為空，請先到 9_股票主檔更新 重新建立。")
     except Exception as e:
@@ -316,7 +340,7 @@ else:
                     rows.append({"群組": group, "股票數": "格式異常", "內容預覽": _safe_str(items)[:120]})
         elif isinstance(watch_data, list):
             rows.append({"群組": "list", "股票數": len(watch_data), "內容預覽": ", ".join([_safe_str(x) for x in watch_data[:8]])})
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     except Exception as e:
         st.error(f"自選股解析失敗：{e}")
 
@@ -326,7 +350,7 @@ else:
             st.caption("get_normalized_watchlist() 回傳")
             if isinstance(normalized, dict):
                 norm_rows = [{"群組": k, "股票數": len(v) if isinstance(v, list) else "非 list"} for k, v in normalized.items()]
-                st.dataframe(pd.DataFrame(norm_rows), hide_index=True, use_container_width=True)
+                _diag_dataframe(pd.DataFrame(norm_rows), hide_index=True, use_container_width=True)
             else:
                 st.write(type(normalized).__name__)
                 st.write(normalized)
@@ -374,7 +398,7 @@ if run_history:
             if isinstance(hist, pd.DataFrame) and not hist.empty:
                 st.success("歷史資料函式已回應且有資料。")
                 st.caption(f"欄位：{', '.join([str(c) for c in hist.columns])}")
-                st.dataframe(hist.tail(80), use_container_width=True, hide_index=True)
+                _diag_dataframe(hist.tail(80), use_container_width=True, hide_index=True)
                 if "成交股數" in hist.columns:
                     vol = pd.to_numeric(hist["成交股數"], errors="coerce")
                     if vol.max(skipna=True) is not None and vol.max(skipna=True) < 10000:
@@ -409,7 +433,7 @@ for name in record_files:
         "欄位預覽": cols,
         "錯誤": err,
     })
-st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
+_diag_dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
 
 with st.expander("查看 JSON 內容預覽", expanded=False):
     pick = st.selectbox("選擇 JSON", [name for name, _, _ in json_files], key=_k("json_preview_pick"))
@@ -453,10 +477,10 @@ try:
         _render_metric_card('總項目', str(_v41_summary.get('總項目', 0)), 'v54 串聯檢查項目數', 'info')
 
     with st.expander('v54 橋接檔檢查：market_snapshot / macro bridge', expanded=True):
-        st.dataframe(pd.DataFrame(_v41_report.get('bridge_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('bridge_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 大盤快照欄位檢查：0 大盤趨勢 -> 7 股神推薦', expanded=True):
-        st.dataframe(pd.DataFrame(_v41_report.get('market_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('market_rows', [])), use_container_width=True, hide_index=True)
         _snap = _v41_report.get('market_snapshot', {}) or {}
         if isinstance(_snap, dict) and _snap:
             s1, s2, s3, s4 = st.columns(4)
@@ -472,37 +496,37 @@ try:
                 st.json(_snap)
 
     with st.expander('v54 推薦結果大盤欄位檢查：7 -> 8 / 10', expanded=True):
-        st.dataframe(pd.DataFrame(_v41_report.get('recommendation_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('recommendation_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 關鍵 JSON 檔案矩陣', expanded=False):
-        st.dataframe(pd.DataFrame(_v41_report.get('file_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('file_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 頁面檔案檢查', expanded=False):
-        st.dataframe(pd.DataFrame(_v41_report.get('page_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('page_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 大盤功能管理中心檢查：v45 欄位', expanded=True):
-        st.dataframe(pd.DataFrame(_v41_report.get('v45_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('v45_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 資料源診斷檢查：utils.py v47', expanded=True):
-        st.dataframe(pd.DataFrame(_v41_report.get('v47_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('v47_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 推薦速度監控檢查：7_股神推薦 v48', expanded=False):
-        st.dataframe(pd.DataFrame(_v41_report.get('v48_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('v48_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 自選股同步檢查：4_自選股中心 v49', expanded=False):
-        st.dataframe(pd.DataFrame(_v41_report.get('v49_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('v49_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 推薦後績效欄位檢查：8 / 10 v50-v53', expanded=True):
-        st.dataframe(pd.DataFrame(_v41_report.get('performance_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('performance_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 全部檢查明細', expanded=False):
-        st.dataframe(pd.DataFrame(_v41_report.get('all_rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v41_report.get('all_rows', [])), use_container_width=True, hide_index=True)
 
     st.markdown('#### v54 修復工具')
     st.caption('缺檔修復只會建立不存在的空白 JSON；欄位修復會把 market_snapshot.json 的大盤欄位補到舊推薦結果 / 紀錄 / 推薦清單，不刪除既有資料、不覆蓋已有非空值。')
     if st.button('建立缺少的空白 JSON（不覆蓋既有檔）', use_container_width=True):
         _created = ensure_missing_json_files(BASE_DIR)
-        st.dataframe(pd.DataFrame(_created), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_created), use_container_width=True, hide_index=True)
         st.success('已完成缺檔建立檢查；請重新整理本頁再次驗證。')
 
 
@@ -514,7 +538,7 @@ try:
             st.success(_v58_repair.get('message', '已完成'))
         else:
             st.error(_v58_repair.get('message', '修復失敗'))
-        st.dataframe(pd.DataFrame(_v58_repair.get('rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v58_repair.get('rows', [])), use_container_width=True, hide_index=True)
         with st.expander('v58 恢復欄位', expanded=False):
             st.json(_v58_repair.get('restored_snapshot_keys', []))
         st.info('請重新整理本頁；若仍無法恢復，請到 0_大盤趨勢按立即寫入股神橋接 / market_snapshot。')
@@ -527,7 +551,7 @@ try:
             st.success(_repair.get('message', '已完成'))
         else:
             st.error(_repair.get('message', '修復失敗'))
-        st.dataframe(pd.DataFrame(_repair.get('rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_repair.get('rows', [])), use_container_width=True, hide_index=True)
         with st.expander('本次補入欄位預設值', expanded=False):
             st.json(_repair.get('defaults', {}))
         st.info('請重新整理本頁，再看異常數是否下降。')
@@ -540,7 +564,7 @@ try:
             st.success(_perf_repair.get('message', '已完成'))
         else:
             st.error(_perf_repair.get('message', '修復失敗'))
-        st.dataframe(pd.DataFrame(_perf_repair.get('rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_perf_repair.get('rows', [])), use_container_width=True, hide_index=True)
         st.info('請重新整理本頁，再看 v50-v53 推薦後績效欄位檢查是否下降。')
 
     st.markdown('##### v55 runtime 診斷檔初始化')
@@ -551,14 +575,14 @@ try:
             st.success(_v55_init.get('message', '已完成'))
         else:
             st.error(_v55_init.get('message', '初始化失敗'))
-        st.dataframe(pd.DataFrame(_v55_init.get('rows', [])), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_v55_init.get('rows', [])), use_container_width=True, hide_index=True)
         st.info('請重新整理本頁，再看 v47 / v49 檢查是否轉為 OK。')
 
     st.markdown('##### v54 JSON 備份工具')
     st.caption('會把關鍵 JSON 備份到 backups/v54_health_backup_時間戳，不覆蓋原檔。')
     if st.button('v54 一鍵備份關鍵 JSON', use_container_width=True):
         _backup_rows = backup_json_files(BASE_DIR)
-        st.dataframe(pd.DataFrame(_backup_rows), use_container_width=True, hide_index=True)
+        _diag_dataframe(pd.DataFrame(_backup_rows), use_container_width=True, hide_index=True)
         st.success('已完成備份檢查。')
 
 except Exception as _v41_e:
@@ -593,7 +617,7 @@ def _v71_render_macro_one_click_health():
     for k in ["overnight_score", "overnight_risk_level", "overnight_comment"]:
         rows.append({"檢查項目": f"snapshot.{k}", "狀態": "OK" if isinstance(snapshot, dict) and k in snapshot else "缺少", "說明": snapshot.get(k) if isinstance(snapshot, dict) else ""})
         rows.append({"檢查項目": f"bridge.{k}", "狀態": "OK" if isinstance(bridge, dict) and k in bridge else "缺少", "說明": bridge.get(k) if isinstance(bridge, dict) else ""})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    _diag_dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     if isinstance(status, dict) and status.get("all_required_updated") and status.get("all_required_written"):
         st.success("v71：01 大盤趨勢已完成一鍵更新與完整寫入。")
     else:
@@ -634,7 +658,7 @@ def _v74_render_overnight_taifex_fallback_health():
     rows.append({"來源": "overnight_cache", "檢查欄位": "tw_night_future", "狀態": "OK" if isinstance(tw_item, dict) and tw_item.get("ok") else "注意", "值": tw_item.get("source") if isinstance(tw_item, dict) else ""})
     if isinstance(tw_item, dict) and tw_item.get("error"):
         rows.append({"來源": "overnight_cache", "檢查欄位": "tw_night_future.error", "狀態": "注意", "值": tw_item.get("error")})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    _diag_dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     if isinstance(tw_item, dict) and tw_item.get("ok"):
         st.success("v74：台指夜盤參考已有可用資料或 TAIFEX 備援資料。")
     else:
@@ -685,7 +709,7 @@ def _v75_render_final_stable_health():
         {"群組":"隔夜快取", "檢查項目":"overnight_global_market_cache.json", "狀態":"OK" if isinstance(overnight_cache, dict) and bool(overnight_cache) else "注意", "值":overnight_cache.get("updated_at") if isinstance(overnight_cache, dict) else ""},
     ])
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    _diag_dataframe(df, use_container_width=True, hide_index=True)
     bad = df[~df["狀態"].isin(["OK"])] if not df.empty else pd.DataFrame()
     if bad.empty:
         st.success("v75：隔夜風控、橋接檔、一鍵更新狀態與欄位順序檢查皆正常。")
@@ -808,7 +832,7 @@ def _v79_render_final_sync_health():
     rows.extend(_v79_check_record_fields(samples, practical_fields + overnight_record_fields))
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    _diag_dataframe(df, use_container_width=True, hide_index=True)
 
     if not df.empty:
         ok_count = int((df["狀態"] == "OK").sum())
