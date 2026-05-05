@@ -3361,13 +3361,13 @@ def main():
             sort_asc=sort_asc,
         )
 
-        # v47：推薦紀錄總表欄位管理改用與 12_股神管理中心相同的表單式管理。
+        # v48：推薦紀錄總表欄位管理改用與 12_股神管理中心相同的表單式管理。
         available_cols = [c for c in view_df.columns if c not in ["匯入自選", "刪除"]]
         default_profile_cols = _get_saved_col_profile(show_cols_mode, available_cols)
         try:
             from godpick_column_manager import render_column_manager
             use_cols = render_column_manager(
-                f"godpick_record_total_{show_cols_mode}",
+                f"page08_godpick_record_total_{show_cols_mode}",
                 "推薦紀錄總表",
                 view_df[available_cols].copy() if available_cols else view_df.copy(),
                 default_profile_cols or available_cols,

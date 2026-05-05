@@ -37,7 +37,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v44 欄位管理免即時重算版"
+PAGE_TITLE = "股神管理中心｜v48 欄位管理免即時重算版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 MANAGEMENT_UI_CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
 
@@ -175,10 +175,10 @@ COLUMN_PRESETS: Dict[str, List[str]] = {
 }
 
 COLUMN_PROFILE_LABELS: Dict[str, str] = {
-    "portfolio_detail": "投資組合明細",
-    "daily_detail": "今日追蹤明細",
-    "quality_detail": "品質明細",
-    "fail_detail": "失敗案例檢討",
+    "page12_portfolio_detail": "投資組合明細",
+    "page12_daily_detail": "今日追蹤明細",
+    "page12_quality_detail": "品質明細",
+    "page12_fail_detail": "失敗案例檢討",
 }
 
 
@@ -415,7 +415,7 @@ def _parse_column_order_text_v42(raw: str, candidates: List[str]) -> List[str]:
 
 
 def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataFrame, default_cols: List[str]) -> List[str]:
-    """v44：欄位管理免即時重算＋套用免整頁重跑版。
+    """v48：欄位管理免即時重算＋套用免整頁重跑版。
 
     修正重點：
     - 不再使用 st.data_editor 調欄位順序，避免每改一格就整頁 rerun。
@@ -430,7 +430,7 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
         current_cols = candidates[:]
     current_cols = [c for c in current_cols if c in candidates] or candidates[:]
 
-    k_prefix = f"v44_colmgr_{table_key}"
+    k_prefix = f"v48_colmgr_{table_key}"
     preview_key = f"{k_prefix}_preview_cols"
     text_key = f"{k_prefix}_order_text"
 
@@ -438,7 +438,7 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
     if isinstance(preview_cols, list) and preview_cols:
         current_cols = [c for c in preview_cols if c in candidates] or current_cols
 
-    with st.expander(f"🧩 {table_label} 欄位管理 / v44 免即時重算", expanded=False):
+    with st.expander(f"🧩 {table_label} 欄位管理 / v48 免即時重算", expanded=False):
         st.caption("調整欄位順序時不會立即重算；只有按『套用並永久記錄』或『套用到本次畫面』才套用。")
         st.caption(cfg_msg)
         st.caption(f"目前顯示 **{len(current_cols)}** 欄 / 可用 **{len(candidates)}** 欄。")
@@ -471,7 +471,7 @@ def _render_column_manager(table_key: str, table_label: str, schema_df: pd.DataF
                 "欄位順序（一行一欄；可直接剪下貼上調整）",
                 key=text_key,
                 height=320,
-                help="v44：在這裡輸入不會立即運算；按套用後不強制整頁重跑。",
+                help="v48：在這裡輸入不會立即運算；按套用後不強制整頁重跑。",
             )
 
             b1, b2, b3, b4 = st.columns(4)
@@ -1558,7 +1558,7 @@ def render_portfolio_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: Lis
     display_cols_default = _unified_display_cols(schema_basis, UNIFIED_MANAGEMENT_COLUMNS)
     # v28：欄位管理器會保存使用者調整後的顯示欄位與順序。
     st.markdown("#### 投資組合明細")
-    display_cols = _render_column_manager("portfolio_detail", "投資組合明細", schema_basis, display_cols_default)
+    display_cols = _render_column_manager("page12_portfolio_detail", "投資組合明細", schema_basis, display_cols_default)
     table_df = _safe_display_table(df[[c for c in display_cols if c in df.columns]], keep_cols=display_cols)
     st.dataframe(table_df, use_container_width=True, hide_index=True, height=520)
     st.download_button("下載投資組合分析 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_management_portfolio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
@@ -1604,7 +1604,7 @@ def render_daily_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: List[st
         ascending = [True if c == "追蹤分級" else False for c in sort_cols]
         df = df.sort_values(sort_cols, ascending=ascending)
     display_cols_default = _unified_display_cols(df, DAILY_COLUMNS)
-    display_cols = _render_column_manager("daily_detail", "今日追蹤明細", df, display_cols_default)
+    display_cols = _render_column_manager("page12_daily_detail", "今日追蹤明細", df, display_cols_default)
     table_df = _safe_display_table(df[[c for c in display_cols if c in df.columns]], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
     st.dataframe(table_df, use_container_width=True, hide_index=True, height=560)
     st.download_button("下載每日追蹤報告 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_daily_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
@@ -1656,11 +1656,11 @@ def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
         st.success("目前沒有明確失敗案例。")
     else:
         fail_default_cols = _unified_display_cols(fail_df, QUALITY_COLUMNS)
-        fail_cols = _render_column_manager("fail_detail", "失敗案例檢討", fail_df, fail_default_cols)
+        fail_cols = _render_column_manager("page12_fail_detail", "失敗案例檢討", fail_df, fail_default_cols)
         st.dataframe(_safe_display_table(fail_df[[c for c in fail_cols if c in fail_df.columns]]), use_container_width=True, hide_index=True, height=300)
     st.markdown("#### 品質明細")
     display_cols_default = _unified_display_cols(df, QUALITY_COLUMNS)
-    display_cols = _render_column_manager("quality_detail", "品質明細", df, display_cols_default)
+    display_cols = _render_column_manager("page12_quality_detail", "品質明細", df, display_cols_default)
     table_df = _safe_display_table(df[[c for c in display_cols if c in df.columns]], keep_cols=["股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦分數"])
     st.dataframe(table_df, use_container_width=True, hide_index=True, height=520)
     st.download_button("下載品質分析 CSV", table_df.to_csv(index=False).encode("utf-8-sig"), file_name=f"godpick_quality_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
@@ -1704,13 +1704,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v44｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
+            render_pro_hero("股神管理中心", "v48｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v44 修正：欄位管理表單模式，輸入欄位順序時不重算；按套用後不強制整頁重跑。")
+    st.caption("v48 修正：欄位管理表單模式，輸入欄位順序時不重算；按套用後不強制整頁重跑。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:

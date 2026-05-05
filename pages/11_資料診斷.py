@@ -134,7 +134,7 @@ except Exception:
 
 
 
-# v47：資料診斷頁表格欄位管理統一為股神管理中心樣式。
+# v48：資料診斷頁表格欄位管理統一為股神管理中心樣式。
 # 平常只套用已保存欄位；側邊欄開啟欄位管理模式後，才顯示每張診斷表的欄位管理器。
 _DIAG_TABLE_COUNTER = 0
 def _diag_dataframe(df: pd.DataFrame, *args, **kwargs):
@@ -142,7 +142,7 @@ def _diag_dataframe(df: pd.DataFrame, *args, **kwargs):
     if df is None or not isinstance(df, pd.DataFrame):
         return st.dataframe(df, *args, **kwargs)
     _DIAG_TABLE_COUNTER += 1
-    table_key = f"diagnostic_table_{_DIAG_TABLE_COUNTER:02d}"
+    table_key = f"page11_diagnostic_table_{_DIAG_TABLE_COUNTER:02d}"
     table_label = f"資料診斷表 {_DIAG_TABLE_COUNTER:02d}"
     try:
         from godpick_column_manager import managed_dataframe
@@ -164,7 +164,7 @@ try:
 except Exception:
     pass
 inject_pro_theme()
-render_pro_hero("資料診斷｜v55 全系統健康檢查", "檢查 v45 大盤、v47 資料源、v48 推薦速度、v49 自選股同步、v50-v53 推薦績效與 JSON 串聯狀態；v55 可一鍵產生 runtime 診斷檔。")
+render_pro_hero("資料診斷｜v55 全系統健康檢查", "檢查 v45 大盤、v48 資料源、v48 推薦速度、v49 自選股同步、v50-v53 推薦績效與 JSON 串聯狀態；v55 可一鍵產生 runtime 診斷檔。")
 
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -460,7 +460,30 @@ st.subheader('9. v54 全系統串聯驗證與欄位修復')
 st.caption('檢查 0_大盤趨勢、7_股神推薦、8_股神推薦紀錄、10_推薦清單、首頁 / 儀表板之間的 JSON 串聯。此區塊只讀本機檔案，不重新抓網路資料；v54 可補齊舊推薦紀錄缺少的大盤欄位。')
 
 try:
-    from system_integration_health import run_full_integration_check, ensure_missing_json_files, repair_recommendation_market_fields, repair_v54_missing_fields, backup_json_files, initialize_v55_runtime_diagnostics, repair_empty_market_bridge_files
+    import system_integration_health as _sih
+
+    run_full_integration_check = getattr(_sih, "run_full_integration_check")
+    ensure_missing_json_files = getattr(_sih, "ensure_missing_json_files")
+    repair_recommendation_market_fields = getattr(_sih, "repair_recommendation_market_fields")
+    repair_v54_missing_fields = getattr(_sih, "repair_v54_missing_fields")
+    backup_json_files = getattr(_sih, "backup_json_files")
+    initialize_v55_runtime_diagnostics = getattr(_sih, "initialize_v55_runtime_diagnostics")
+
+    # v50 防呆：舊版 system_integration_health.py 若尚未包含此函式，本頁不再因 ImportError 整段爆掉。
+    def _repair_empty_market_bridge_files_fallback(base_dir: Path) -> Dict[str, Any]:
+        return {
+            "ok": False,
+            "message": "system_integration_health.py 尚未包含 repair_empty_market_bridge_files()；請覆蓋 v50 package 內的 system_integration_health.py 後再執行。",
+            "rows": [{"項目": "repair_empty_market_bridge_files", "狀態": "缺少函式", "建議": "覆蓋 system_integration_health.py"}],
+            "restored_snapshot_keys": [],
+        }
+
+    repair_empty_market_bridge_files = getattr(
+        _sih,
+        "repair_empty_market_bridge_files",
+        _repair_empty_market_bridge_files_fallback,
+    )
+
     _v41_report = run_full_integration_check(BASE_DIR)
     _v41_summary = _v41_report.get('summary', {})
 
@@ -507,8 +530,8 @@ try:
     with st.expander('v54 大盤功能管理中心檢查：v45 欄位', expanded=True):
         _diag_dataframe(pd.DataFrame(_v41_report.get('v45_rows', [])), use_container_width=True, hide_index=True)
 
-    with st.expander('v54 資料源診斷檢查：utils.py v47', expanded=True):
-        _diag_dataframe(pd.DataFrame(_v41_report.get('v47_rows', [])), use_container_width=True, hide_index=True)
+    with st.expander('v54 資料源診斷檢查：utils.py v48', expanded=True):
+        _diag_dataframe(pd.DataFrame(_v41_report.get('v48_rows', [])), use_container_width=True, hide_index=True)
 
     with st.expander('v54 推薦速度監控檢查：7_股神推薦 v48', expanded=False):
         _diag_dataframe(pd.DataFrame(_v41_report.get('v48_rows', [])), use_container_width=True, hide_index=True)
@@ -576,7 +599,7 @@ try:
         else:
             st.error(_v55_init.get('message', '初始化失敗'))
         _diag_dataframe(pd.DataFrame(_v55_init.get('rows', [])), use_container_width=True, hide_index=True)
-        st.info('請重新整理本頁，再看 v47 / v49 檢查是否轉為 OK。')
+        st.info('請重新整理本頁，再看 v48 / v49 檢查是否轉為 OK。')
 
     st.markdown('##### v54 JSON 備份工具')
     st.caption('會把關鍵 JSON 備份到 backups/v54_health_backup_時間戳，不覆蓋原檔。')

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 # =========================================================
 # 14_股神權重校正.py
-# v64：v60～v63 準確度強化整合版
+# v65：v60～v63 準確度強化整合版＋側邊欄編號修正
 #
 # 整合內容：
 # - v60：上漲機率回測校正
@@ -29,10 +29,56 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+try:
+    from utils import inject_pro_theme
+except Exception:
+    inject_pro_theme = None
 
-st.set_page_config(page_title="14 股神權重校正｜v64", layout="wide")
 
-APP_VERSION = "v64_accuracy_calibration_full"
+def _ensure_sidebar_numbers_for_this_page() -> None:
+    """確保 14_股神權重校正頁也載入側邊欄編號樣式。
+
+    Streamlit 會隱藏 pages/14_ 前綴；多數頁面透過 utils.inject_pro_theme() 補上編號。
+    本頁過去沒有載入共用主題，所以點入 14 後側欄編號會消失。
+    """
+    if inject_pro_theme:
+        try:
+            inject_pro_theme()
+            return
+        except Exception:
+            pass
+
+    # 保底 CSS：即使 utils 載入失敗，也維持側邊欄 00~14 編號。
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebarNav"] ul li span::before {
+            display:inline-block; min-width:2.8em; font-weight:800; color:#334155;
+        }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(1) span::before { content:"00. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(2) span::before { content:"01. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(3) span::before { content:"02. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(4) span::before { content:"03. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(5) span::before { content:"04. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(6) span::before { content:"05. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(7) span::before { content:"06. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(8) span::before { content:"07. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(9) span::before { content:"08. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(10) span::before { content:"09. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(11) span::before { content:"10. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(12) span::before { content:"11. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(13) span::before { content:"12. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(14) span::before { content:"13. "; }
+        [data-testid="stSidebarNav"] ul li:nth-of-type(15) span::before { content:"14. "; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+st.set_page_config(page_title="14 股神權重校正｜v65", layout="wide")
+
+APP_VERSION = "v65_accuracy_calibration_sidebar_fix"
 
 DATA_FILES = [
     Path("godpick_records.json"),
@@ -514,7 +560,7 @@ def build_weight_suggestions(effect_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_intro():
-    st.title("14 股神權重校正｜v64 準確度強化整合版")
+    st.title("14 股神權重校正｜v65 準確度強化整合版")
     st.caption("整合 v60 上漲機率回測校正、v61 分數組成透明化、v62 風險報酬比、v63 自動權重校正建議。")
     st.info("此頁只讀取既有推薦紀錄，不連外、不重跑推薦、不自動覆蓋權重；所有建議都需要人工確認後再套用。")
 
@@ -569,7 +615,7 @@ def main():
         return
 
     with st.sidebar:
-        st.header("v64 校正設定")
+        st.header("v65 校正設定")
         horizon = st.selectbox("校正週期", [1, 3, 5, 10, 20], index=2, help="建議優先看 5日 或 10日。")
         min_sample = st.slider("有效樣本提醒門檻", 5, 200, 30, step=5)
         st.caption("樣本太少時只給觀察，不建議直接調權重。")
@@ -674,7 +720,7 @@ def main():
     render_download_buttons(payloads)
 
     st.markdown("---")
-    st.caption("v64 安全聲明：此頁只產生校正建議，不會修改 7_股神推薦 的權重設定，也不會刪除任何 JSON 紀錄。")
+    st.caption("v65 安全聲明：此頁只產生校正建議，不會修改 7_股神推薦 的權重設定，也不會刪除任何 JSON 紀錄。")
 
 
 if __name__ == "__main__":

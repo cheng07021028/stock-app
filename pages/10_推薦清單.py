@@ -1515,7 +1515,7 @@ def main():
         from godpick_column_manager import managed_dataframe
         managed_dataframe(
             detail_show_df,
-            table_key="recommend_list_detail",
+            table_key="page10_recommend_list_detail",
             table_label="推薦清單明細",
             default_cols=list(detail_show_df.columns),
             use_container_width=True,

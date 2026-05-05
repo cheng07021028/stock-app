@@ -3433,7 +3433,7 @@ def _render_debug_scan_summary():
                     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
             if data.get("data_source_diagnostics_available"):
-                st.caption("已讀取 utils.py v47 data_source_diagnostics，可用於判斷 Yahoo / TWSE / TPEx 哪個資料源較慢或失敗。")
+                st.caption("已讀取 utils.py v48 data_source_diagnostics，可用於判斷 Yahoo / TWSE / TPEx 哪個資料源較慢或失敗。")
                 diag = data.get("data_source_diagnostics", {}) or {}
                 if isinstance(diag, dict):
                     # 避免整包診斷太大，畫面只顯示摘要與前幾筆。
@@ -7158,7 +7158,7 @@ def _build_recommend_df(
         debug_summary["status_elapsed_summary"] = status_summary
         debug_summary["history_success_rate_pct"] = round((debug_summary.get("analyzed_ok", 0) / max(total_count, 1)) * 100, 2)
         debug_summary["scan_finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # v47 utils.py 若有提供資料源診斷，推薦頁會在除錯摘要顯示。
+        # v48 utils.py 若有提供資料源診斷，推薦頁會在除錯摘要顯示。
         try:
             from utils import get_data_source_diagnostics  # type: ignore
             diag = get_data_source_diagnostics()
@@ -9478,14 +9478,14 @@ def main():
         full_default_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(rec_df.columns)) if c in rec_df.columns]
         if not full_default_cols:
             full_default_cols = [c for c in list(rec_df.columns) if c != "勾選"]
-        # v47：完整推薦表改用與 12_股神管理中心相同的欄位管理樣式。
+        # v48：完整推薦表改用與 12_股神管理中心相同的欄位管理樣式。
         full_for_manager = rec_df.copy()
         if "勾選" not in full_for_manager.columns:
             full_for_manager.insert(0, "勾選", False)
         try:
             from godpick_column_manager import render_column_manager
             full_order = render_column_manager(
-                "godpick_recommend_full",
+                "page07_godpick_recommend_full",
                 "完整推薦表",
                 full_for_manager,
                 ["勾選"] + full_default_cols,
@@ -9520,7 +9520,7 @@ def main():
         st.session_state[full_editor_code_map_key] = [
             _normalize_code(x) for x in full_work_df["股票代號"].astype(str).tolist()
         ]
-        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v47：欄位管理樣式已與股神管理中心統一。")
+        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v48：欄位管理樣式已與股神管理中心統一。")
 
         full_editor_df = st.data_editor(
             _format_df(full_work_df),
