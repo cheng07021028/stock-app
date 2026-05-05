@@ -9031,7 +9031,7 @@ def main():
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
     if saved_at:
-        strategy_label = _safe_str(st.session_state.get_k('pick_strategy'), '結合版')
+        strategy_label = _safe_str(st.session_state.get('pick_strategy', '結合版'))
         st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{strategy_label}")
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
