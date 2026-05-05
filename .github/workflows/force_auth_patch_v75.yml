@@ -1,1 +1,10 @@
-
+name: Force Streamlit auth lock v75 DISABLED
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "v75 auto patch disabled. Use v78 fixed files only."
