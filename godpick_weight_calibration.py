@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """
 godpick_weight_calibration.py
-v66 Pro：績效回測＋期望值＋分層權重＋防過擬合
+v68 Pro：績效欄位自動偵測＋有效樣本診斷＋防過擬合
 
 設計原則：
 - 不連外，不重新推薦，只讀既有推薦紀錄 / 推薦清單。
@@ -175,6 +175,38 @@ def numeric_series(df: pd.DataFrame, col: Optional[str]) -> pd.Series:
     return pd.to_numeric(df[col].map(safe_float), errors="coerce")
 
 
+def best_perf_col(df: pd.DataFrame, horizon: int) -> Optional[str]:
+    """選擇指定週期中實際有效數值最多的績效欄位，避免先遇到空欄就判定無樣本。"""
+    best_col = None
+    best_n = 0
+    for c in PERF_COLUMNS.get(horizon, []):
+        if c not in df.columns:
+            continue
+        s = numeric_series(df, c)
+        n = int(s.notna().sum())
+        if n > best_n:
+            best_n = n
+            best_col = c
+    return best_col if best_n > 0 else None
+
+
+def perf_sample_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
+    """回傳各績效週期的欄位偵測與有效樣本，用於 14 頁判斷有效樣本為 0 的原因。"""
+    rows = []
+    for h, candidates in PERF_COLUMNS.items():
+        found_cols = [c for c in candidates if c in df.columns]
+        best = best_perf_col(df, h)
+        valid = int(numeric_series(df, best).notna().sum()) if best else 0
+        rows.append({
+            "週期": f"推薦後{h}日",
+            "可辨識欄位": "、".join(found_cols) if found_cols else "缺欄",
+            "採用欄位": best or "—",
+            "有效樣本": valid,
+            "狀態": "可校正" if valid > 0 else ("欄位存在但無數值" if found_cols else "缺績效欄"),
+        })
+    return pd.DataFrame(rows)
+
+
 def factor_series(df: pd.DataFrame, factor: str) -> pd.Series:
     vals = []
     for c in FACTOR_COLUMNS.get(factor, []):
@@ -235,7 +267,7 @@ def profile_name_by_horizon(horizon: int) -> str:
 
 
 def calc_factor_effectiveness(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
-    perf_col = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+    perf_col = best_perf_col(df, horizon)
     if not perf_col:
         return pd.DataFrame()
     ret = numeric_series(df, perf_col)
@@ -412,7 +444,7 @@ def filter_by_market(df: pd.DataFrame, mode: str) -> pd.DataFrame:
 
 def calc_profile_bundle(df: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 10, 20), current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     bundle: Dict[str, Any] = {
-        "version": "v66_pro_expectancy_layered_antioverfit",
+        "version": "v68_perf_col_auto_detect_antioverfit",
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "base_weights": current_weights or DEFAULT_WEIGHTS,
         "profiles": {},
@@ -420,7 +452,7 @@ def calc_profile_bundle(df: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 10
         "quality": {},
     }
     for horizon in horizons:
-        perf_col = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+        perf_col = best_perf_col(df, horizon)
         if not perf_col:
             bundle["quality"][str(horizon)] = {"status": "missing_perf_col", "message": f"缺少{horizon}日績效欄"}
             continue
@@ -464,7 +496,7 @@ def calc_category_bundles(df: pd.DataFrame, horizon: int, current_weights: Optio
     col = first_existing_col(df, CATEGORY_COLUMNS)
     if not col:
         return {"status": "缺少類別/產業欄位"}
-    ret_col = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+    ret_col = best_perf_col(df, horizon)
     if not ret_col:
         return {"status": f"缺少{horizon}日績效欄"}
     work = df.copy()
@@ -491,7 +523,7 @@ def calc_category_bundles(df: pd.DataFrame, horizon: int, current_weights: Optio
 
 def probability_calibration(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     pcol = first_existing_col(df, PROB_COLUMNS)
-    rcol = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+    rcol = best_perf_col(df, horizon)
     if not pcol or not rcol:
         return pd.DataFrame()
     prob = numeric_series(df, pcol)
@@ -516,7 +548,7 @@ def probability_calibration(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 def rr_analysis(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     rr_col = first_existing_col(df, RR_COLUMNS)
-    ret_col = first_existing_col(df, PERF_COLUMNS.get(horizon, []))
+    ret_col = best_perf_col(df, horizon)
     if not rr_col or not ret_col:
         return pd.DataFrame()
     rr = numeric_series(df, rr_col)
