@@ -1,6 +1,17 @@
+from __future__ import annotations
+
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
+
 # pages/7_股神推薦.py
 # -*- coding: utf-8 -*-
-from __future__ import annotations
 
 from datetime import date, timedelta, datetime
 from typing import Any
@@ -16,8 +27,6 @@ import hashlib
 import pandas as pd
 import requests
 import streamlit as st
-from app_auth import require_login
-require_login()
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
@@ -8448,10 +8457,6 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
     # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
     try:
         from godpick_column_manager import install_auto_column_manager
@@ -9005,7 +9010,8 @@ require_login()
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))
     if saved_at:
-        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{_safe_str(st.session_state.get(_k("pick_strategy"), "結合版"))}")
+        strategy_label = _safe_str(st.session_state.get_k('pick_strategy'), '結合版')
+        st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{strategy_label}")
 
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.iloc[:top_n].copy()

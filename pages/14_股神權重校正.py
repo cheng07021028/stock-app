@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
+
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
 
 # =========================================================
 # 14_股神權重校正.py
@@ -13,9 +24,6 @@ from typing import Any, Dict
 
 import pandas as pd
 import streamlit as st
-from app_auth import require_login
-require_login()
-
 try:
     from utils import inject_pro_theme
 except Exception:
@@ -46,10 +54,6 @@ from godpick_weight_calibration import (
 
 st.set_page_config(page_title="14 股神權重校正｜v71 Pro", layout="wide")
 
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
 
 APP_VERSION = "v71_perf_proxy_multisource_antioverfit"
 

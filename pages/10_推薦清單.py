@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
+
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -12,9 +23,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from godpick_history_sources import fetch_multi_source_history
-from app_auth import require_login
-require_login()
-
 try:
     from godpick_column_schema import (
         UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
@@ -1544,10 +1552,6 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V68 推薦�
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
     # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
     try:
         from godpick_column_manager import install_auto_column_manager

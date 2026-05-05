@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import annotations
+
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -12,9 +23,6 @@ import traceback
 
 import pandas as pd
 import streamlit as st
-from app_auth import require_login
-require_login()
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 PFX = "diag_"
@@ -160,10 +168,6 @@ def _diag_dataframe(df: pd.DataFrame, *args, **kwargs):
 
 st.set_page_config(page_title="資料診斷", layout="wide")
 
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
 # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
 try:
     from godpick_column_manager import install_auto_column_manager

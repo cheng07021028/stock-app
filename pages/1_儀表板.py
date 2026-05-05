@@ -1,3 +1,13 @@
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
+
 from datetime import date
 import json
 from pathlib import Path
@@ -382,10 +392,6 @@ def render_overnight_risk_dashboard_v75():
 def main():
     st.set_page_config(page_title=PAGE_TITLE, page_icon="📊", layout="wide")
 
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
     _init_page_state()
 
     apply_font_scale(st.session_state.font_scale)

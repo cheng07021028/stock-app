@@ -1,4 +1,15 @@
+
 from __future__ import annotations
+
+# >>> APP_AUTH_GUARD_V84
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+# <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -1949,10 +1960,6 @@ def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapsho
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
-# >>> APP_AUTH_GUARD_V76
-from app_auth import require_login
-require_login()
-# <<< APP_AUTH_GUARD_V76
     inject_pro_theme()
 
     group_map = _build_group_stock_map()
