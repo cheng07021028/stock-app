@@ -1520,6 +1520,78 @@ def _normalize_history_df_for_perf(df: pd.DataFrame) -> pd.DataFrame:
     return temp
 
 
+
+
+def _fetch_yahoo_history_direct_v72(stock_no: str, market_type: str, start_date_value: date, end_date_value: date) -> pd.DataFrame:
+    """V72：推薦後績效專用 Yahoo 直接備援。
+    不依賴 utils.get_history_data，避免該函式或官方來源暫時失效時導致整批 ONLINE_FAIL。
+    """
+    code = _normalize_code(stock_no)
+    if not code:
+        return pd.DataFrame()
+    mk = _safe_str(market_type)
+    suffix_candidates = []
+    if mk in ["上櫃", "興櫃", "OTC", "TPEX"]:
+        suffix_candidates = ["TWO", "TW"]
+    else:
+        suffix_candidates = ["TW", "TWO"]
+    try:
+        p1 = int(pd.Timestamp(start_date_value).timestamp())
+        # Yahoo period2 是 exclusive，往後加一天，避免最後一日漏掉。
+        p2 = int((pd.Timestamp(end_date_value) + pd.Timedelta(days=1)).timestamp())
+    except Exception:
+        return pd.DataFrame()
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for suffix in suffix_candidates:
+        symbol = f"{code}.{suffix}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {
+            "period1": p1,
+            "period2": p2,
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        }
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            if r.status_code != 200:
+                continue
+            js = r.json()
+            result = (((js or {}).get("chart") or {}).get("result") or [])
+            if not result:
+                continue
+            item = result[0]
+            ts = item.get("timestamp") or []
+            quote = (((item.get("indicators") or {}).get("quote") or [{}])[0])
+            if not ts or not isinstance(quote, dict):
+                continue
+            rows = []
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+            vols = quote.get("volume") or []
+            for i, t in enumerate(ts):
+                close = closes[i] if i < len(closes) else None
+                if close is None:
+                    continue
+                rows.append({
+                    "日期": pd.to_datetime(int(t), unit="s").tz_localize("UTC").tz_convert("Asia/Taipei").tz_localize(None).date(),
+                    "開盤價": opens[i] if i < len(opens) else None,
+                    "最高價": highs[i] if i < len(highs) else None,
+                    "最低價": lows[i] if i < len(lows) else None,
+                    "收盤價": close,
+                    "成交量": vols[i] if i < len(vols) else None,
+                })
+            df = _normalize_history_df_for_perf(pd.DataFrame(rows))
+            if not df.empty:
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
 def _perf_cache_load() -> dict[str, Any]:
     """讀取 V71 歷史K線快取；session 優先，本機 JSON 備援。"""
     key = _k("v71_perf_history_cache")
@@ -1648,11 +1720,22 @@ def _get_perf_history_bundle(
                     df = get_history_data(code=stock_no, start_date=start_date.date(), end_date=end_date.date())
             temp = _normalize_history_df_for_perf(df)
             if not temp.empty:
-                return temp, _safe_str(mk or primary or "未知"), "OK"
+                return temp, _safe_str(mk or primary or "未知"), "OK(utils)"
         except Exception as e:
             last_err = str(e)[:120]
             continue
-    return pd.DataFrame(), _safe_str(primary or "未知"), last_err or "無歷史資料"
+
+    # V72：utils / 官方來源都失敗時，改走 Yahoo chart 直接備援。
+    # 這可大幅降低 ONLINE_FAIL，讓 14 權重校正能取得有效績效樣本。
+    try:
+        for mk in tried:
+            direct_df = _fetch_yahoo_history_direct_v72(stock_no, mk or primary, start_date.date(), end_date.date())
+            if isinstance(direct_df, pd.DataFrame) and not direct_df.empty:
+                return direct_df, _safe_str(mk or primary or "未知"), "OK(YahooDirectV72)"
+    except Exception as e:
+        last_err = (last_err + " | YahooDirect: " + str(e)[:120])[:220]
+
+    return pd.DataFrame(), _safe_str(primary or "未知"), last_err or "無歷史資料 / YahooDirect 亦無資料"
 
 
 def _get_perf_history_bundle_v71(
@@ -2134,7 +2217,7 @@ def _backfill_perf_columns(
             "待更新總數": len(candidates), "本次更新上限": max_rows, "本次處理": 0,
             "成功": 0, "略過或失敗": 0, "剩餘": 0, "時間防呆觸發": False,
             "時間防呆略過": 0, "單批秒數上限": max_seconds, "更新時間": _now_text(),
-            "加速模式": "V71 快取防卡版", "本批抓取股票數": 0, "快取命中估計": 0,
+            "加速模式": "V72 快取防卡＋Yahoo直接備援版", "本批抓取股票數": 0, "快取命中估計": 0,
             "等待交易日": wait_count, "單批股票上限": max_stocks,
         }
         return _ensure_godpick_record_columns(pd.DataFrame(rows))
@@ -2160,7 +2243,7 @@ def _backfill_perf_columns(
     selected_indices = {idx for _, grp in selected_groups for idx in grp.get("indices", [])}
     total = len(selected_indices)
 
-    prog = st.progress(0, text="V71：準備快取防卡更新推薦後績效...") if show_progress and total else None
+    prog = st.progress(0, text="V72：準備快取防卡＋Yahoo直接備援更新推薦後績效...") if show_progress and total else None
     status_box = st.empty() if show_progress and total else None
     started_ts = time.time()
     stopped_by_time_guard = False
@@ -2228,7 +2311,7 @@ def _backfill_perf_columns(
             if prog is not None and (done == total or done % 5 == 0):
                 prog.progress(
                     min(1.0, done / max(total, 1)),
-                    text=f"V71：快取防卡更新 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}｜{source}",
+                    text=f"V72：快取防卡更新 {done}/{total}｜成功 {ok_count}｜略過/失敗 {fail_count}｜目前 {code} {name}｜{source}",
                 )
             if status_box is not None and (done == total or done % 20 == 0):
                 status_box.caption(
@@ -2246,7 +2329,7 @@ def _backfill_perf_columns(
         "待更新總數": len(candidates), "本次更新上限": max_rows, "本次處理": done,
         "成功": ok_count, "略過或失敗": fail_count, "剩餘": remaining_count,
         "時間防呆觸發": bool(stopped_by_time_guard), "時間防呆略過": int(time_guard_skip_count),
-        "單批秒數上限": max_seconds, "更新時間": _now_text(), "加速模式": "V71 快取防卡版",
+        "單批秒數上限": max_seconds, "更新時間": _now_text(), "加速模式": "V72 快取防卡＋Yahoo直接備援版",
         "本批抓取股票數": stock_fetch_count, "快取命中估計": cache_hit_count,
         "單批股票上限": max_stocks, "失敗快取略過": fail_cache_skip_count,
         "線上失敗股票數": online_fail_count, "等待交易日": wait_count,
@@ -3221,9 +3304,9 @@ def main():
         batch_n = st.number_input("每次更新筆數", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
         max_stock_n = st.number_input("單批股票上限", min_value=3, max_value=30, value=10, step=1, key=_k("perf_update_stock_limit"))
-        st.caption("V71：快取防卡版。建議 80 筆 / 60 秒 / 10 檔；比單純拉高筆數更穩，不會一直重抓失敗股票。")
+        st.caption("V72：快取防卡＋Yahoo直接備援版。建議 80 筆 / 60 秒 / 10 檔；比單純拉高筆數更穩，不會一直重抓失敗股票。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            with st.spinner("V71：快取防卡批次更新中，限制單批股票數並使用歷史K線快取..."):
+            with st.spinner("V72：快取防卡＋Yahoo直接備援批次更新中，限制單批股票數並使用歷史K線快取..."):
                 updated = _backfill_perf_columns(
                     _get_state_df(),
                     max_rows=int(batch_n),
@@ -3236,18 +3319,18 @@ def main():
                 _save_state_df(updated)
             summary = st.session_state.get(_k("v51_perf_update_summary"), {})
             st.success(
-                f"V71 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，"
+                f"V72 已完成本批績效更新：處理 {summary.get('本次處理', 0)} 筆，成功 {summary.get('成功', 0)} 筆，"
                 f"剩餘約 {summary.get('剩餘', 0)} 筆；線上抓取 {summary.get('本批抓取股票數', 0)} 檔；"
                 f"快取命中 {summary.get('快取命中估計', 0)} 檔；尚未同步。"
             )
             if summary.get("失敗快取略過", 0):
-                st.info(f"V71 已啟用失敗快取保護：{summary.get('失敗快取略過', 0)} 檔近期失敗股票本批不重試，避免頁面一直卡住。")
+                st.info(f"V72 已啟用失敗快取保護：{summary.get('失敗快取略過', 0)} 檔近期失敗股票本批不重試，避免頁面一直卡住。")
             if summary.get("等待交易日", 0):
                 st.info(f"有 {summary.get('等待交易日', 0)} 筆推薦日期太近，已標記等待交易日，不浪費線上抓取。")
             if summary.get("剩餘", 0):
                 if summary.get("時間防呆觸發"):
-                    st.warning(f"V71 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 60)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
-                st.info("仍有紀錄待補績效，可再次按更新；V71 會優先使用歷史K線快取與失敗保護，穩定度會比單純拉高筆數更好。")
+                    st.warning(f"V72 時間防呆已啟動：本批超過 {summary.get('單批秒數上限', 60)} 秒，自動保留剩餘資料，請再按一次更新下一批。")
+                st.info("仍有紀錄待補績效，可再次按更新；V72 會優先使用歷史K線快取、Yahoo直接備援與失敗保護，穩定度會比單純拉高筆數更好。")
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
     with top_cols[6]:

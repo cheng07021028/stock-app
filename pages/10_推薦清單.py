@@ -1059,6 +1059,56 @@ def _format_show_df(df: pd.DataFrame, drop_empty_cols: bool = True) -> pd.DataFr
     return show
 
 
+
+
+def _fetch_yahoo_history_direct_v72(stock_no: str, market_type: str, start_date_value: date, end_date_value: date) -> pd.DataFrame:
+    """V72：推薦清單績效更新專用 Yahoo 直接備援。"""
+    code = _normalize_code(stock_no)
+    if not code:
+        return pd.DataFrame()
+    mk = _safe_str(market_type)
+    suffix_candidates = ["TWO", "TW"] if mk in ["上櫃", "興櫃", "OTC", "TPEX"] else ["TW", "TWO"]
+    try:
+        p1 = int(pd.Timestamp(start_date_value).timestamp())
+        p2 = int((pd.Timestamp(end_date_value) + pd.Timedelta(days=1)).timestamp())
+    except Exception:
+        return pd.DataFrame()
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for suffix in suffix_candidates:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{suffix}"
+            r = requests.get(url, params={"period1": p1, "period2": p2, "interval": "1d", "events": "history", "includeAdjustedClose": "true"}, headers=headers, timeout=8)
+            if r.status_code != 200:
+                continue
+            js = r.json()
+            result = (((js or {}).get("chart") or {}).get("result") or [])
+            if not result:
+                continue
+            item = result[0]
+            ts = item.get("timestamp") or []
+            quote = (((item.get("indicators") or {}).get("quote") or [{}])[0])
+            if not ts or not isinstance(quote, dict):
+                continue
+            rows = []
+            for i, t in enumerate(ts):
+                close = (quote.get("close") or [None])[i] if i < len(quote.get("close") or []) else None
+                if close is None:
+                    continue
+                rows.append({
+                    "日期": pd.to_datetime(int(t), unit="s").tz_localize("UTC").tz_convert("Asia/Taipei").tz_localize(None).date(),
+                    "開盤價": (quote.get("open") or [None])[i] if i < len(quote.get("open") or []) else None,
+                    "最高價": (quote.get("high") or [None])[i] if i < len(quote.get("high") or []) else None,
+                    "最低價": (quote.get("low") or [None])[i] if i < len(quote.get("low") or []) else None,
+                    "收盤價": close,
+                    "成交量": (quote.get("volume") or [None])[i] if i < len(quote.get("volume") or []) else None,
+                })
+            df = pd.DataFrame(rows)
+            if not df.empty:
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame()
+
 def _fetch_history_for_backtest(stock_no: str, stock_name: str, market_type: str, rec_date_text: str) -> pd.DataFrame:
     rec_date = pd.to_datetime(rec_date_text, errors="coerce")
     if pd.isna(rec_date):
@@ -1085,6 +1135,11 @@ def _fetch_history_for_backtest(stock_no: str, stock_name: str, market_type: str
                 return df
         except Exception:
             pass
+    # V72：utils 失敗時用 Yahoo chart 直接備援，避免績效更新全部失敗。
+    for mk in tried:
+        df = _fetch_yahoo_history_direct_v72(stock_no, mk or primary, start_date, end_date)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
     return pd.DataFrame()
 
 
