@@ -9352,28 +9352,44 @@ def main():
         _normalize_code(x) for x in top_show_df["股票代號"].astype(str).tolist()
     ]
 
-    edited_top_df = st.data_editor(
-        _format_df(top_show_df),
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        key=top_editor_key,
-        on_change=_stable_checkbox_editor_on_change,
-        args=(top_editor_key, top_editor_code_map_key, _k("top_table_selected_codes")),
-        disabled=[c for c in top_show_df.columns if c != "勾選"],
-        column_config={
-            "勾選": st.column_config.CheckboxColumn("勾選", help="v44 穩定勾選：點選後會立即寫入 session_state，不會因頁面 rerun 跳回。"),
-            "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
+    # v87：勾選免跳列模式。
+    # 原本 data_editor 每點一次 checkbox 就會觸發整頁 rerun，表格視窗會回到第一列。
+    # 放進 form 後，勾選時不重跑；按「套用勾選」才更新 session_state。
+    with st.form(_k("top_pick_editor_form_v87"), clear_on_submit=False):
+        edited_top_df = st.data_editor(
+            _format_df(top_show_df),
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key=top_editor_key,
+            disabled=[c for c in top_show_df.columns if c != "勾選"],
+            column_config={
+                "勾選": st.column_config.CheckboxColumn("勾選", help="v87：可連續勾選，表格不會每點一次就跳回第一列；勾完請按下方套用。"),
+                "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
                 "風險說明": st.column_config.TextColumn("風險說明", width="large"),
                 "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
-        }
-    )
+            },
+        )
+        top_apply_selection = st.form_submit_button(
+            "✅ 套用本輪精華推薦勾選",
+            use_container_width=True,
+        )
 
-    picked_codes_from_top = _extract_checked_codes_from_editor_state(
-        _k("top_pick_editor"),
-        edited_top_df,
-        _k("top_table_selected_codes"),
-    )
+    if top_apply_selection:
+        picked_codes_from_top = _extract_checked_codes_from_editor_state(
+            _k("top_pick_editor"),
+            edited_top_df,
+            _k("top_table_selected_codes"),
+        )
+        st.session_state[_k("top_table_selected_codes")] = picked_codes_from_top
+        st.session_state[_k("top_pick_codes_next")] = picked_codes_from_top
+        st.success(f"已套用本輪精華推薦勾選：{len(picked_codes_from_top)} 檔。")
+    else:
+        picked_codes_from_top = [
+            _normalize_code(x)
+            for x in st.session_state.get(_k("top_table_selected_codes"), [])
+            if _normalize_code(x)
+        ]
 
     current_pick_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_pick_codes"), []) if _normalize_code(x)]
     current_record_codes = [_normalize_code(x) for x in st.session_state.get(_k("rec_record_codes"), []) if _normalize_code(x)]
@@ -9556,33 +9572,45 @@ def main():
         ]
         st.caption(f"完整推薦表欄位順序版本：{full_order_hash}｜v48：欄位管理樣式已與股神管理中心統一。")
 
-        full_editor_df = st.data_editor(
-            _format_df(full_work_df),
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            key=full_editor_key,
-            on_change=_stable_checkbox_editor_on_change,
-            args=(full_editor_key, full_editor_code_map_key, _k("full_table_selected_codes")),
-            disabled=[c for c in full_work_df.columns if c != "勾選"],
-            column_config={
-                "勾選": st.column_config.CheckboxColumn("勾選", help="v44 穩定勾選：點選後會立即寫入 session_state，不會因頁面 rerun 跳回。"),
-                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
-                "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
-                "風險說明": st.column_config.TextColumn("風險說明", width="large"),
-            },
-        )
+        # v87：完整推薦表勾選免跳列模式。
+        # 放進 form 後，點 checkbox 不會即時 rerun，因此不會跳回第一列。
+        with st.form(_k("full_table_editor_form_v87"), clear_on_submit=False):
+            full_editor_df = st.data_editor(
+                _format_df(full_work_df),
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key=full_editor_key,
+                disabled=[c for c in full_work_df.columns if c != "勾選"],
+                column_config={
+                    "勾選": st.column_config.CheckboxColumn("勾選", help="v87：可連續勾選，表格不會每點一次就跳回第一列；勾完請按下方套用。"),
+                    "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large"),
+                    "股神推論邏輯": st.column_config.TextColumn("股神推論邏輯", width="large"),
+                    "風險說明": st.column_config.TextColumn("風險說明", width="large"),
+                },
+            )
+            full_apply_selection = st.form_submit_button(
+                "✅ 套用完整推薦表勾選",
+                use_container_width=True,
+            )
 
         # v25.8：同時讀取 data_editor 回傳值與 widget edited_rows，避免勾選要點兩次才生效。
-        full_picked_codes = _extract_checked_codes_from_editor_state(
-            full_editor_key,
-            full_editor_df,
-            _k("full_table_selected_codes"),
-        )
-
-        # 去重但保留表格順序。
-        full_picked_codes = list(dict.fromkeys(full_picked_codes))
-        st.session_state[_k("full_table_selected_codes")] = full_picked_codes
+        if full_apply_selection:
+            full_picked_codes = _extract_checked_codes_from_editor_state(
+                full_editor_key,
+                full_editor_df,
+                _k("full_table_selected_codes"),
+            )
+            # 去重但保留表格順序。
+            full_picked_codes = list(dict.fromkeys(full_picked_codes))
+            st.session_state[_k("full_table_selected_codes")] = full_picked_codes
+            st.success(f"已套用完整推薦表勾選：{len(full_picked_codes)} 檔。")
+        else:
+            full_picked_codes = [
+                _normalize_code(x)
+                for x in st.session_state.get(_k("full_table_selected_codes"), [])
+                if _normalize_code(x)
+            ]
 
         selected_snapshot_full = rec_df[rec_df["股票代號"].astype(str).isin([str(x) for x in full_picked_codes])].copy()
         if full_picked_codes:
