@@ -29,6 +29,7 @@ from godpick_weight_calibration import (
     current_weight_map,
     first_existing_col,
     load_recommendation_records,
+    perf_sample_diagnostics,
     numeric_series,
     probability_calibration,
     profile_name_by_horizon,
@@ -90,7 +91,7 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14 股神權重校正｜v66 Pro 準確度強化版")
+    st.title("14 股神權重校正｜v68 Pro 績效欄位自動偵測版")
     st.caption("績效回測＋期望值＋分層權重＋防過擬合。只讀取既有推薦紀錄，不連外、不重跑推薦；套用權重需人工確認。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；單次調整設上限，避免短期過擬合。")
 

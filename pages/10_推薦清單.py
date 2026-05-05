@@ -1336,51 +1336,68 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ============================================================
 # V50：推薦後績效追蹤總控
 # ============================================================
-def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦後績效追蹤總控") -> None:
-    """顯示推薦後 1/3/5/10/20 日績效、達標/停損、最大漲幅/回撤與分群勝率。"""
+def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V68 推薦後績效追蹤總控") -> None:
+    """V68：只用真正有績效數值的樣本計算 KPI；避免空白績效被顯示成 0%。"""
     if df is None or df.empty:
-        st.info("V50：目前沒有資料可做推薦後績效追蹤。")
+        st.info("V68：目前沒有資料可做推薦後績效追蹤。")
         return
 
     x = df.copy()
     x = x.loc[:, ~x.columns.duplicated()].copy()
+    perf_base_cols = ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]
+    perf_cols = [c for c in perf_base_cols if c in x.columns]
+    if not perf_cols:
+        st.info("V68：目前尚未產生推薦後績效欄位，請先按『更新推薦後績效』。")
+        return
 
     def _num_col(col: str) -> pd.Series:
         if col not in x.columns:
-            return pd.Series([float('nan')] * len(x))
-        return pd.to_numeric(x[col], errors="coerce")
+            return pd.Series([float('nan')] * len(x), index=x.index)
+        s = pd.to_numeric(x[col], errors="coerce")
+        return s
 
-    def _bool_rate(col: str) -> float:
+    def _valid_mask_for(col: str) -> pd.Series:
+        # 只要該週期有數值就算該週期有效樣本；空白不再被當 0。
+        return _num_col(col).notna()
+
+    any_perf_mask = pd.Series(False, index=x.index)
+    for c in perf_cols:
+        any_perf_mask = any_perf_mask | _valid_mask_for(c)
+
+    def _avg(col: str):
+        s = _num_col(col).dropna()
+        return None if s.empty else float(s.mean())
+
+    def _wr(col: str):
+        s = _num_col(col).dropna()
+        return None if s.empty else float((s > 0).mean() * 100)
+
+    def _fmt_pct(v, digits=1):
+        return "—" if v is None or pd.isna(v) else f"{v:.{digits}f}%"
+
+    def _bool_rate(col: str) -> float | None:
         if col not in x.columns or len(x) == 0:
-            return 0.0
-        s = x[col]
+            return None
+        base = x.loc[any_perf_mask, col] if any_perf_mask.any() else pd.Series([], dtype=object)
+        if base.empty:
+            return None
         def _b(v):
             if isinstance(v, bool):
                 return v
             return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "達標", "停損"}
-        return float(s.map(_b).mean() * 100)
-
-    def _avg(col: str) -> float:
-        s = _num_col(col).dropna()
-        return float(s.mean()) if not s.empty else 0.0
-
-    def _wr(col: str) -> float:
-        s = _num_col(col).dropna()
-        return float((s > 0).mean() * 100) if not s.empty else 0.0
-
-    perf_cols = [c for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"] if c in x.columns]
-    if not perf_cols:
-        st.info("V50：目前尚未產生推薦後績效欄位，請先按『更新推薦後績效』。")
-        return
+        return float(base.map(_b).mean() * 100)
 
     with st.expander(title, expanded=True):
         kpi_payload = []
-        for col in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]:
+        for col in perf_base_cols:
             if col in x.columns:
+                wr = _wr(col)
+                avg = _avg(col)
+                n = int(_valid_mask_for(col).sum())
                 kpi_payload.append({
                     "label": f"{col.replace('%','')} 勝率",
-                    "value": f"{_wr(col):.1f}%",
-                    "delta": f"平均 {_avg(col):.2f}%",
+                    "value": _fmt_pct(wr),
+                    "delta": f"有效樣本 {n}｜平均 {_fmt_pct(avg, 2)}",
                     "delta_class": "pro-kpi-delta-flat",
                 })
         if 'render_pro_kpi_row' in globals() and callable(globals().get('render_pro_kpi_row')):
@@ -1395,21 +1412,36 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦�
             for c, item in zip(cols, kpi_payload):
                 c.metric(item["label"], item["value"], item["delta"])
 
+        valid_n = int(any_perf_mask.sum())
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("追蹤樣本數", int(len(x)))
-        k2.metric("達標率", f"{_bool_rate('是否達標_回測') or _bool_rate('是否達目標1'):.1f}%")
-        k3.metric("停損率", f"{_bool_rate('是否停損_回測') or _bool_rate('是否達停損'):.1f}%")
-        k4.metric("平均最大回撤", f"{_avg('推薦後最大回撤%'):.2f}%")
+        k1.metric("追蹤總筆數", int(len(x)))
+        k2.metric("有效績效樣本", valid_n)
+        target_rate = _bool_rate('是否達標_回測')
+        if target_rate is None:
+            target_rate = _bool_rate('是否達目標1')
+        stop_rate = _bool_rate('是否停損_回測')
+        if stop_rate is None:
+            stop_rate = _bool_rate('是否達停損')
+        k3.metric("達標率", _fmt_pct(target_rate))
+        dd = _avg('推薦後最大回撤%') if '推薦後最大回撤%' in x.columns else None
+        k4.metric("平均最大回撤", _fmt_pct(dd, 2))
 
-        st.caption("此區只做績效追蹤與驗證，不改變推薦結果。若欄位空白，請先更新推薦後績效。")
+        if valid_n == 0:
+            st.warning("目前沒有真正可用的推薦後績效數值。請先更新推薦後績效；若曾出現 ONLINE_FAIL，請清除績效快取後重跑。")
+        else:
+            st.caption("V68：此區只用有實際績效數值的樣本計算，不再把空白績效偽裝成 0%。")
 
         def _group_table(group_col: str) -> pd.DataFrame:
             if group_col not in x.columns:
                 return pd.DataFrame()
             rows = []
             for key, g in x.groupby(group_col, dropna=False):
-                row = {group_col: "未分類" if _is_blank_value(key) else key, "筆數": len(g)}
-                for col in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]:
+                row = {group_col: "未分類" if _is_blank_value(key) else key, "總筆數": len(g)}
+                g_any = pd.Series(False, index=g.index)
+                for col in perf_cols:
+                    g_any = g_any | pd.to_numeric(g[col], errors="coerce").notna()
+                row["有效績效樣本"] = int(g_any.sum())
+                for col in perf_base_cols:
                     if col in g.columns:
                         s = pd.to_numeric(g[col], errors="coerce").dropna()
                         row[f"平均{col}"] = round(float(s.mean()), 2) if not s.empty else ""
@@ -1422,46 +1454,50 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V50 推薦�
                     row["平均最大回撤%"] = round(float(s2.mean()), 2) if not s2.empty else ""
                 rows.append(row)
             out = pd.DataFrame(rows)
-            sort_col = "平均推薦後20日%" if "平均推薦後20日%" in out.columns else ("平均推薦後10日%" if "平均推薦後10日%" in out.columns else None)
+            sort_col = "有效績效樣本" if "有效績效樣本" in out.columns else None
             if sort_col:
                 out = out.sort_values(sort_col, ascending=False, na_position="last")
             return out
 
         tabs_v50 = st.tabs(["依推薦模式", "依推薦等級", "依類別", "依大盤風控", "弱勢檢討清單"])
         with tabs_v50[0]:
-            _safe_dataframe(_group_table("推薦模式"), keep_cols=["推薦模式", "筆數"], use_container_width=True, hide_index=True)
+            try:
+                _safe_dataframe(_group_table("推薦模式"), keep_cols=["推薦模式", "總筆數", "有效績效樣本"], use_container_width=True, hide_index=True)
+            except Exception:
+                st.dataframe(_group_table("推薦模式"), use_container_width=True, hide_index=True)
         with tabs_v50[1]:
-            _safe_dataframe(_group_table("推薦等級"), keep_cols=["推薦等級", "筆數"], use_container_width=True, hide_index=True)
+            try:
+                _safe_dataframe(_group_table("推薦等級"), keep_cols=["推薦等級", "總筆數", "有效績效樣本"], use_container_width=True, hide_index=True)
+            except Exception:
+                st.dataframe(_group_table("推薦等級"), use_container_width=True, hide_index=True)
         with tabs_v50[2]:
-            _safe_dataframe(_group_table("類別"), keep_cols=["類別", "筆數"], use_container_width=True, hide_index=True)
+            try:
+                _safe_dataframe(_group_table("類別"), keep_cols=["類別", "總筆數", "有效績效樣本"], use_container_width=True, hide_index=True)
+            except Exception:
+                st.dataframe(_group_table("類別"), use_container_width=True, hide_index=True)
         with tabs_v50[3]:
             mcol = "大盤橋接風控" if "大盤橋接風控" in x.columns else ("大盤橋接狀態" if "大盤橋接狀態" in x.columns else "大盤趨勢")
             if mcol in x.columns:
-                _safe_dataframe(_group_table(mcol), keep_cols=[mcol, "筆數"], use_container_width=True, hide_index=True)
+                try:
+                    _safe_dataframe(_group_table(mcol), keep_cols=[mcol, "總筆數", "有效績效樣本"], use_container_width=True, hide_index=True)
+                except Exception:
+                    st.dataframe(_group_table(mcol), use_container_width=True, hide_index=True)
             else:
                 st.info("尚無大盤風控欄位可分群。")
         with tabs_v50[4]:
             weak_col = "推薦後10日%" if "推薦後10日%" in x.columns else ("推薦後5日%" if "推薦後5日%" in x.columns else None)
-            if weak_col:
+            if weak_col and _valid_mask_for(weak_col).any():
                 weak = x.copy()
                 weak[weak_col] = pd.to_numeric(weak[weak_col], errors="coerce")
-                weak = weak.sort_values(weak_col, ascending=True).head(30)
-                cols = [c for c in ["股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "買點狀態", "進場型態", "高分禁買旗標", "高分禁買原因", "實戰買點分數", "實戰操作建議", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",
-    "買點狀態",
-    "進場型態",
-    "高分禁買旗標",
-    "高分禁買原因",
-    "實戰買點分數",
-    "支撐距離%",
-    "壓力空間%",
-    "近5日漲幅%",
-    "長上影風險",
-    "實戰操作建議",
-    "V76買點防呆版本",
-  "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  weak_col, "推薦後最大回撤%", "命中結果", "績效評語", "推薦日期", "推薦理由摘要", "風險說明"] if c in weak.columns]
-                _safe_dataframe(weak[cols], keep_cols=["股票代號", "股票名稱", weak_col], use_container_width=True, hide_index=True)
+                weak = weak.dropna(subset=[weak_col]).sort_values(weak_col, ascending=True).head(30)
+                candidate_cols = ["股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "推薦總分", weak_col, "推薦後最大回撤%", "命中結果", "績效評語", "推薦日期", "推薦理由摘要", "風險說明"]
+                cols = [c for c in candidate_cols if c in weak.columns]
+                try:
+                    st.dataframe(_safe_display_df(weak[cols]), use_container_width=True, hide_index=True)
+                except Exception:
+                    st.dataframe(weak[cols], use_container_width=True, hide_index=True)
             else:
-                st.info("尚無 5日/10日績效欄位可列弱勢檢討清單。")
+                st.info("尚無 5日/10日有效績效可列弱勢檢討清單。")
 
 
 def main():
