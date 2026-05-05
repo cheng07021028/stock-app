@@ -164,7 +164,7 @@ try:
 except Exception:
     pass
 inject_pro_theme()
-render_pro_hero("資料診斷｜v55 全系統健康檢查", "檢查 v45 大盤、v48 資料源、v48 推薦速度、v49 自選股同步、v50-v53 推薦績效與 JSON 串聯狀態；v55 可一鍵產生 runtime 診斷檔。")
+render_pro_hero("資料診斷｜v56 全系統健康檢查", "檢查 v45 大盤、v48 資料源、v48 推薦速度、v49 自選股同步、v50-v53 推薦績效與 JSON 串聯狀態；v55 可一鍵產生 runtime 診斷檔。")
 
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -647,6 +647,13 @@ def _v71_render_macro_one_click_health():
         st.warning("v71：建議回 01 大盤趨勢按『一鍵更新全部並寫入』，再回本頁重新檢查。")
     with st.expander("macro_v70_one_click_status.json 完整內容", expanded=False):
         st.json(status)
+
+
+# v51：資料診斷頁本體是 top-level script，舊版後段用 main wrapper 追加檢查區塊。
+# 若前面沒有定義 main，這裡先建立空 main，避免頁尾 if __name__ == "__main__": main() 產生 NameError。
+if "main" not in globals():
+    def main():
+        return None
 
 try:
     _v71_old_main = main

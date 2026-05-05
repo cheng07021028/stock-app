@@ -3,7 +3,7 @@ from __future__ import annotations
 
 # =========================================================
 # 14_股神權重校正.py
-# v65：v60～v63 準確度強化整合版＋側邊欄編號修正
+# v66：v60～v63 準確度強化整合版＋側邊欄編號啟動修正
 #
 # 整合內容：
 # - v60：上漲機率回測校正
@@ -76,9 +76,9 @@ def _ensure_sidebar_numbers_for_this_page() -> None:
     )
 
 
-st.set_page_config(page_title="14 股神權重校正｜v65", layout="wide")
+st.set_page_config(page_title="14 股神權重校正｜v66", layout="wide")
 
-APP_VERSION = "v65_accuracy_calibration_sidebar_fix"
+APP_VERSION = "v66_accuracy_calibration_sidebar_fix"
 
 DATA_FILES = [
     Path("godpick_records.json"),
@@ -607,6 +607,8 @@ def render_download_buttons(payloads: Dict[str, Any]):
 
 
 def main():
+    # v51：14 頁進入時主動載入共用主題 / 側邊欄編號樣式，避免點入本頁後左側編號消失。
+    _ensure_sidebar_numbers_for_this_page()
     render_intro()
 
     df = load_recommendation_records()
@@ -720,7 +722,7 @@ def main():
     render_download_buttons(payloads)
 
     st.markdown("---")
-    st.caption("v65 安全聲明：此頁只產生校正建議，不會修改 7_股神推薦 的權重設定，也不會刪除任何 JSON 紀錄。")
+    st.caption("v66 安全聲明：此頁只產生校正建議，不會修改 7_股神推薦 的權重設定，也不會刪除任何 JSON 紀錄。")
 
 
 if __name__ == "__main__":
