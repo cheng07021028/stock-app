@@ -307,9 +307,33 @@ def _install_v105_table_manager() -> None:
         pass
 
 
+def _ensure_macro_startup_update_v109() -> None:
+    """v109：登入後啟動大盤走勢資料更新。
+
+    目的：不用等使用者點進 0/1 大盤走勢頁，其他模組也能讀到
+    market_snapshot.json / macro_mode_bridge.json。
+    原則：
+    - 不阻塞重型頁面：有舊快照時走背景更新。
+    - 缺快照時做一次快速同步補底；失敗也不停止登入與頁面。
+    - 同一個 session 不重複啟動。
+    """
+    try:
+        from macro_startup_service import ensure_macro_startup_update
+        status = ensure_macro_startup_update()
+        if isinstance(status, dict):
+            st.session_state["macro_startup_status_v109"] = status
+    except Exception as _macro_e:
+        # 大盤啟動更新不能影響登入、推薦、紀錄等主功能
+        try:
+            st.session_state["macro_startup_status_v109"] = {"ok": False, "message": f"v109 大盤啟動更新略過：{_macro_e}"}
+        except Exception:
+            pass
+
+
 def require_login() -> bool:
     cfg = _load_auth_config()
     if str(cfg.get("auth_enabled", True)).lower() in ("false", "0", "no", "off"):
+        _ensure_macro_startup_update_v109()
         _install_v105_table_manager()
         return True
 
@@ -320,10 +344,16 @@ def require_login() -> bool:
                 src = _safe_str(st.session_state.get("auth_config_source"))
                 if src:
                     st.caption(f"帳號設定來源：{src}")
+                macro_status = st.session_state.get("macro_startup_status_v109")
+                if isinstance(macro_status, dict):
+                    msg = _safe_str(macro_status.get("short_message") or macro_status.get("message"))
+                    if msg:
+                        st.caption(f"大盤啟動更新：{msg}")
                 if st.button("登出", key="auth_logout_sidebar"):
                     logout()
         except Exception:
             pass
+        _ensure_macro_startup_update_v109()
         _install_v105_table_manager()
         return True
 
