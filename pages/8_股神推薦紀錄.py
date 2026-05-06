@@ -30,6 +30,8 @@ import io
 import hashlib
 import copy
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 import pandas as pd
 import requests
@@ -2176,36 +2178,147 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     return src
 
 
-def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
-    if df is None or df.empty:
-        return _ensure_godpick_record_columns(pd.DataFrame())
+def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
+    """V100：更新最新價專用快速查價。
 
-    rows = []
-    active_status = {"觀察", "已買進", "持有", "追蹤"}
+    只打即時行情，不在按鈕流程內回補 60 日歷史 K，避免單筆失敗拖住整批。
+    歷史資料回補仍保留在績效更新流程，不混在「更新最新價」。
+    """
+    stock_no = _normalize_code(stock_no)
+    stock_name = _safe_str(stock_name)
+    market_type = _safe_str(market_type) or "上市"
+    if not stock_no:
+        return None, market_type, "NO_CODE"
 
-    for _, row in df.iterrows():
-        payload = dict(row)
-        status = _safe_str(payload.get("目前狀態")) or "觀察"
+    tried = []
+    if market_type:
+        tried.append(market_type)
+    for mk in ["上市", "上櫃", "興櫃"]:
+        if mk not in tried:
+            tried.append(mk)
 
-        if only_active and status not in active_status:
-            rows.append(_recalc_row(payload))
+    token = f"record_latest_v100_{datetime.now():%Y%m%d%H%M}"
+    for mk in tried:
+        try:
+            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=token)
+            if not isinstance(info, dict):
+                continue
+            price = _safe_float(info.get("price") or info.get("現價") or info.get("最新價"))
+            if price is not None and price > 0:
+                src = _safe_str(info.get("price_source") or info.get("來源") or "realtime_fast")
+                return float(price), _safe_str(info.get("market") or mk), src
+        except Exception:
             continue
+    return None, market_type, "ONLINE_FAIL"
 
-        stock_no = _normalize_code(payload.get("股票代號"))
-        stock_name = _safe_str(payload.get("股票名稱"))
-        market = _safe_str(payload.get("市場別"))
 
-        latest, used_market, price_src = _get_latest_close(stock_no, stock_name, market)
-        if latest is not None:
-            payload["最新價"] = latest
-            payload["市場別"] = used_market or market
-            payload["最新更新時間"] = _now_text()
-            payload["備註"] = (_safe_str(payload.get("備註")) + f"｜最新價來源:{price_src}").strip("｜")
+def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
+    """V100：最新價快速防卡版。
 
-        payload = _recalc_row(payload)
-        rows.append(payload)
+    修正舊版逐筆「即時失敗後再抓歷史 K」造成 Streamlit Cloud 卡很久。
+    本函式只更新目前批次的最新價；失敗保留原資料並標記，不阻塞整批。
+    """
+    if df is None or df.empty:
+        out = _ensure_godpick_record_columns(pd.DataFrame())
+        out.attrs["latest_refresh_summary"] = {"target": 0, "success": 0, "fail": 0, "skipped": 0, "limited": 0}
+        return out
 
-    return _ensure_godpick_record_columns(pd.DataFrame(rows))
+    active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "強烈關注"}
+    rows = [dict(row) for _, row in df.iterrows()]
+
+    max_records = int(st.session_state.get(_k("latest_price_batch_size"), st.session_state.get(_k("perf_update_batch_size"), 80)) or 80)
+    max_workers = int(st.session_state.get(_k("latest_price_workers"), 8) or 8)
+    max_records = max(10, min(max_records, 300))
+    max_workers = max(2, min(max_workers, 16))
+
+    target_indexes = []
+    skipped = 0
+    for i, payload in enumerate(rows):
+        status = _safe_str(payload.get("目前狀態")) or "觀察"
+        if only_active and status not in active_status:
+            skipped += 1
+            rows[i] = _recalc_row(payload)
+            continue
+        if not _normalize_code(payload.get("股票代號")):
+            skipped += 1
+            rows[i] = _recalc_row(payload)
+            continue
+        target_indexes.append(i)
+
+    limited = max(0, len(target_indexes) - max_records)
+    target_indexes = target_indexes[:max_records]
+
+    success = 0
+    fail = 0
+    futures = {}
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        for i in target_indexes:
+            payload = rows[i]
+            futures[executor.submit(
+                _fast_latest_quote,
+                _normalize_code(payload.get("股票代號")),
+                _safe_str(payload.get("股票名稱")),
+                _safe_str(payload.get("市場別")),
+            )] = i
+
+        for fut in as_completed(futures, timeout=45):
+            i = futures[fut]
+            payload = rows[i]
+            try:
+                latest, used_market, price_src = fut.result(timeout=1)
+            except Exception:
+                latest, used_market, price_src = None, _safe_str(payload.get("市場別")), "ONLINE_FAIL"
+
+            if latest is not None and latest > 0:
+                payload["最新價"] = latest
+                payload["市場別"] = used_market or _safe_str(payload.get("市場別"))
+                payload["最新更新時間"] = _now_text()
+                old_note = _safe_str(payload.get("備註"))
+                note = f"最新價來源:{price_src}"
+                payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
+                success += 1
+            else:
+                old_note = _safe_str(payload.get("備註"))
+                note = "最新價來源:ONLINE_FAIL"
+                payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
+                fail += 1
+            rows[i] = _recalc_row(payload)
+    except Exception:
+        # as_completed timeout 或線上來源卡住時，不等待剩餘工作，直接保留原資料。
+        done_indexes = set(futures.get(f) for f in futures if f.done())
+        pending_indexes = [futures.get(f) for f in futures if not f.done()]
+        fail += len([x for x in pending_indexes if x is not None])
+        for i in pending_indexes:
+            if i is not None:
+                payload = rows[i]
+                old_note = _safe_str(payload.get("備註"))
+                note = "最新價來源:TIMEOUT_SKIP"
+                payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
+                rows[i] = _recalc_row(payload)
+    finally:
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    # 未納入本批的列仍重算狀態，但不連線抓價。
+    processed = set(target_indexes)
+    for i, payload in enumerate(rows):
+        if i not in processed:
+            rows[i] = _recalc_row(payload)
+
+    out = _ensure_godpick_record_columns(pd.DataFrame(rows))
+    out.attrs["latest_refresh_summary"] = {
+        "target": len(target_indexes),
+        "success": success,
+        "fail": fail,
+        "skipped": skipped,
+        "limited": limited,
+        "max_records": max_records,
+        "max_workers": max_workers,
+    }
+    return out
 
 
 
@@ -3424,12 +3537,18 @@ def main():
         if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
             before_sig = _df_signature(df)
-            df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
+            with st.spinner("V100：快速更新最新價中；只查即時價，失敗不抓歷史K，避免卡住..."):
+                df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
             after_sig = _df_signature(df)
             if before_sig != after_sig:
                 df = _apply_mode_labels(df)
             _save_state_df(df)
-            st.success("已更新最新價，尚未同步")
+            summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
+            _set_status(
+                f"V100 最新價更新完成：本批 {summary.get('target', 0)} 筆，成功 {summary.get('success', 0)} 筆，失敗/逾時 {summary.get('fail', 0)} 筆，未納入本批 {summary.get('limited', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
+                "success" if int(summary.get('success', 0) or 0) > 0 else "warning",
+            )
+            st.rerun()
     with top_cols[2]:
         if st.button("💾 儲存同步", use_container_width=True):
             latest_df = _get_state_df()
@@ -3488,6 +3607,7 @@ def main():
             st.rerun()
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
+        st.number_input("最新價單批上限", min_value=20, max_value=300, value=80, step=10, key=_k("latest_price_batch_size"))
     with top_cols[6]:
         st.caption(
             f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
