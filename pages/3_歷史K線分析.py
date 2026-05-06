@@ -184,17 +184,21 @@ def _persist_hk_chart_setting_change(**changes: Any) -> tuple[bool, str]:
 
 def _render_persistent_chart_range_buttons() -> None:
     """
-    v122：穩定版永久區間按鈕。
-    修正 v121 按下 1M / 3M / 6M / 1Y / 全部 後，因 st.rerun() 在圖表產生前中斷，
-    造成部分環境出現主圖空白或按鈕狀態遺失的問題。
+    v124：圖表區間改為「先選擇、再套用並永久記錄」。
 
-    新邏輯：
-    - 按鈕點擊只更新 session_state + JSON。
-    - 不在按鈕函式內強制 st.rerun()。
-    - 讓同一次 script run 繼續往下重算 focus_df 並繪圖。
+    目的：
+    - 1M / 3M / 6M / 1Y / 全部 不再點一下就立即重繪。
+    - 使用者選好區間後，必須按「套用區間並永久記錄」才會更新正式設定。
+    - 避免 Streamlit widget key 回寫造成 APIException。
     """
     current = _normalize_chart_setting_value("focus_window", st.session_state.get(_k("focus_window"), "全部"))
-    labels = [("30", "1M"), ("60", "3M"), ("120", "6M"), ("240", "1Y"), ("全部", "全部")]
+    options = ["1M", "3M", "6M", "1Y", "全部"]
+    current_label = _focus_window_label(current)
+    draft_key = _k("quick_focus_window_draft")
+
+    # 只在 widget 建立前初始化草稿 key；建立後不回寫，避免 StreamlitAPIException。
+    if draft_key not in st.session_state or st.session_state.get(draft_key) not in options:
+        st.session_state[draft_key] = current_label
 
     st.markdown(
         """
@@ -209,29 +213,36 @@ def _render_persistent_chart_range_buttons() -> None:
         unsafe_allow_html=True,
     )
 
-    cols = st.columns([0.42, 0.42, 0.42, 0.42, 0.55, 2.5])
-    applied_label = None
-    applied_msg = ""
+    st.caption("圖表區間設定：先選擇 1M / 3M / 6M / 1Y / 全部，再按『套用區間並永久記錄』才會重繪與保存。")
+    c1, c2, c3 = st.columns([2.3, 1.2, 2.4])
+    with c1:
+        st.radio(
+            "選擇圖表區間",
+            options=options,
+            key=draft_key,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+    with c2:
+        apply_range = st.button(
+            "✅ 套用區間並永久記錄",
+            key=_k("apply_quick_focus_window"),
+            use_container_width=True,
+            type="primary",
+        )
+    with c3:
+        draft_label = st.session_state.get(draft_key, current_label)
+        st.caption(f"目前永久區間：{current_label}｜待套用：{draft_label}｜v124")
 
-    for i, (value, label) in enumerate(labels):
-        active = current == value
-        with cols[i]:
-            if st.button(label, key=_k(f"quick_focus_{value}"), use_container_width=True, type="primary" if active else "secondary"):
-                ok, msg = _persist_hk_chart_setting_change(focus_window=value)
-                applied_label = label
-                applied_msg = msg
-                current = _normalize_chart_setting_value("focus_window", value)
-                # 不使用 st.rerun()：避免按下後主圖區塊被中斷成空白。
-                if ok:
-                    st.toast(f"已套用並永久記錄圖表區間：{label}")
-                else:
-                    st.warning(msg)
-
-    with cols[-1]:
-        st.caption(f"目前永久區間：{_focus_window_label(current)}｜v123：點選後只更新正式設定，不回寫草稿 widget，避免報錯。")
-
-    if applied_label:
-        st.info(f"已切換為 {applied_label}，設定已記錄；下方圖表會以此區間重新顯示。")
+    if apply_range:
+        selected_label = str(st.session_state.get(draft_key, current_label))
+        selected_value = _normalize_chart_setting_value("focus_window", selected_label)
+        ok, msg = _persist_hk_chart_setting_change(focus_window=selected_value)
+        if ok:
+            st.success(f"已套用並永久記錄圖表區間：{_focus_window_label(selected_value)}")
+        else:
+            st.error(msg)
+        # 不使用 st.rerun；同一次 run 會用新正式值往下計算 focus_df。
 
 
 def _safe_str(v: Any) -> str:
@@ -2404,8 +2415,8 @@ def main():
     if isinstance(_pending_chart_draft, dict):
         _apply_hk_chart_settings_to_state(_pending_chart_draft, draft=True)
 
-    with st.expander("📈 圖表設定｜套用並永久記錄 v123", expanded=False):
-        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 也會永久保存，且不再造成主圖空白。")
+    with st.expander("📈 圖表設定｜套用並永久記錄 v124", expanded=False):
+        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 已改為先選擇、再套用保存。")
         s1, s2, s3 = st.columns([1.2, 1.2, 1.2])
         with s1:
             st.selectbox("圖表顯示模式", ["清晰模式", "完整模式"], key=_k("chart_display_mode_draft"))
@@ -2547,7 +2558,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v122：圖表區間 1M / 3M / 6M / 1Y / 全部 已改為穩定永久套用；按下後不會先清空主圖，會在同次執行安全重算並保存。")
+        st.caption("v124：圖表區間 1M / 3M / 6M / 1Y / 全部 已改為先選擇、再按「套用區間並永久記錄」；不會點一下就重繪，也會永久保存。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
