@@ -2260,15 +2260,21 @@ def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tupl
 
 
 def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tuple[float | None, str, str]]:
-    """V101：主執行緒批次查即時價，避免 ThreadPool + st.cache_data 全失敗。
+    """V103：快速批次查最新價。
 
-    回傳 dict：股票代號 -> (最新價, 市場別, 來源)
+    原 v101/v102 會在批次來源失敗後，對每一檔股票逐檔走 Yahoo / 歷史備援；
+    這在 Streamlit Cloud 很容易變成 100~300 次連線，造成「看起來卡住」。
+
+    V103 原則：
+    1. 主要使用 utils.get_realtime_stock_info_batch，一次查一批。
+    2. 市場別錯誤時只做上市 / 上櫃 / 興櫃三輪批次補查。
+    3. 預設不逐檔慢查；失敗股票直接保留舊價。
+    4. 若真的需要補缺口，可開啟「慢速備援補缺口」，且有筆數上限。
     """
     result: dict[str, tuple[float | None, str, str]] = {}
     if not target_payloads:
         return result
 
-    # 先用各列原始市場別批次查；失敗再依上市/上櫃/興櫃補查。
     code_meta: dict[str, dict[str, str]] = {}
     for payload in target_payloads:
         code = _normalize_code(payload.get("股票代號"))
@@ -2281,22 +2287,20 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
         }
 
     unresolved = set(code_meta.keys())
-    token = f"record_latest_v101_batch_{datetime.now():%Y%m%d%H%M%S}"
+    # 同一分鐘共用 token，讓 Streamlit cache 與遠端來源都能吃到快取。
+    token = f"record_latest_v103_batch_{datetime.now():%Y%m%d%H%M}"
 
     def _run_batch(items: list[dict[str, str]], source_tag: str) -> None:
         nonlocal result, unresolved
-        if not items:
-            return
-        if _rt_batch_fetch is None:
+        if not items or _rt_batch_fetch is None:
             return
         try:
             batch_map = _rt_batch_fetch(items, refresh_token=token + source_tag)
         except Exception as e:
-            # 批次來源掛掉時，保留給單檔備援，不在這裡判定整批失敗。
             for it in items:
                 code = _normalize_code(it.get("code"))
                 if code and code not in result:
-                    result[code] = (None, _safe_str(it.get("market")), f"BATCH_EXCEPTION:{str(e)[:60]}")
+                    result[code] = (None, _safe_str(it.get("market")), f"BATCH_EXCEPTION:{str(e)[:80]}")
             return
         if not isinstance(batch_map, dict):
             return
@@ -2310,35 +2314,43 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
                 result[code] = (price, used_market or _safe_str(it.get("market")), src or f"batch_{source_tag}")
                 unresolved.discard(code)
 
-    # 第一輪：原市場別
-    first_items = list(code_meta.values())
-    _run_batch(first_items, "_origin")
+    # 第一輪：原始市場別。
+    _run_batch(list(code_meta.values()), "_origin")
 
-    # 後續：市場別補查，避免上市/上櫃寫錯造成查無。
+    # 第二輪：市場別批次補查。這仍是批次，不是逐檔慢查。
     for mk in ["上市", "上櫃", "興櫃"]:
         if not unresolved:
             break
-        items = []
-        for code in list(unresolved):
-            meta = code_meta.get(code, {})
-            items.append({"code": code, "name": meta.get("name", ""), "market": mk})
+        items = [
+            {"code": code, "name": code_meta.get(code, {}).get("name", ""), "market": mk}
+            for code in list(unresolved)
+        ]
         _run_batch(items, f"_{mk}")
 
-    # 批次仍失敗者，只針對少量逐檔用 Yahoo 日線備援，避免全表 0。
+    # 第三輪：可選的慢速備援補缺口。預設關閉，避免整頁卡住。
+    allow_slow = bool(st.session_state.get(_k("enable_slow_price_fallback"), False))
+    slow_limit = int(st.session_state.get(_k("slow_price_fallback_limit"), 20) or 20)
+    if allow_slow and unresolved:
+        for code in list(unresolved)[:max(0, slow_limit)]:
+            meta = code_meta.get(code, {})
+            latest, used_market, src = _fast_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
+            if latest is not None and latest > 0:
+                result[code] = (latest, used_market or meta.get("market", "上市"), src or "single_slow_fallback")
+                unresolved.discard(code)
+            else:
+                result[code] = (None, meta.get("market", "上市"), src or "ONLINE_FAIL")
+
+    # 未成功者不再慢查，交給 _refresh_latest_prices 保留舊價。
     for code in list(unresolved):
         meta = code_meta.get(code, {})
-        latest, used_market, src = _fast_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
-        if latest is not None and latest > 0:
-            result[code] = (latest, used_market or meta.get("market", "上市"), src or "single_fallback")
-        else:
-            old = result.get(code)
-            if old is None or old[0] is None:
-                result[code] = (None, meta.get("market", "上市"), src or "ONLINE_FAIL")
+        old = result.get(code)
+        if old is None or old[0] is None:
+            result[code] = (None, meta.get("market", "上市"), "BATCH_FAIL_KEEP_OLD")
     return result
 
 
 def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
-    """V102：更新完整份推薦紀錄，批次大小只當「每批處理筆數」，不是總筆數上限。
+    """V103：更新完整份推薦紀錄，批次大小只當「每批處理筆數」，不是總筆數上限。
 
     之前 v100/v101 為了防卡，將「最新價單批上限」誤設成總更新上限，
     造成使用者設定 80 就只處理 80 筆。V102 改為：
@@ -2428,6 +2440,8 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
         "batches": batches,
         "preserved_old_price": preserved_old_price,
         "source_counts": source_counts,
+        "fast_mode": not bool(st.session_state.get(_k("enable_slow_price_fallback"), False)),
+        "slow_fallback_enabled": bool(st.session_state.get(_k("enable_slow_price_fallback"), False)),
     }
     return out
 
@@ -3646,7 +3660,7 @@ def main():
         if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
             before_sig = _df_signature(df)
-            with st.spinner("V102：更新完整份最新價中；每批處理完成會自動接續下一批..."):
+            with st.spinner("V103：快速批次更新完整份最新價中；失敗股票保留舊價，不逐檔慢查..."):
                 df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
             after_sig = _df_signature(df)
             if before_sig != after_sig:
@@ -3654,7 +3668,7 @@ def main():
             _save_state_df(df)
             summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
             _set_status(
-                f"V102 最新價更新完成：符合條件共 {summary.get('target', 0)} 筆，分 {summary.get('batches', 0)} 批處理，每批 {summary.get('batch_size', 0)} 筆；成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
+                f"V103 最新價更新完成：符合條件共 {summary.get('target', 0)} 筆，分 {summary.get('batches', 0)} 批處理，每批 {summary.get('batch_size', 0)} 筆；成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
                 "success" if int(summary.get('success', 0) or 0) > 0 else "warning",
             )
             st.rerun()
@@ -3686,7 +3700,7 @@ def main():
         batch_n = st.number_input("績效每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
         max_stock_n = st.number_input("績效每批股票數", min_value=3, max_value=80, value=30, step=1, key=_k("perf_update_stock_limit"))
-        st.caption("V102：這些數字是每批處理量，不是總上限；按下後會跑完整份符合條件的資料。ONLINE_FAIL 不拖住整批。")
+        st.caption("V103：這些數字是每批處理量，不是總上限；按下後會跑完整份符合條件的資料。ONLINE_FAIL 不拖住整批。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
             with st.spinner("V77：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
                 summary = update_recommendation_perf_fast_v77(
@@ -3717,8 +3731,10 @@ def main():
             st.rerun()
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
-        st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("latest_price_batch_size"))
-        st.caption("V102：這是每批處理筆數，不是總上限；按更新最新價會跑完整份符合條件紀錄。")
+        st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=120, step=10, key=_k("latest_price_batch_size"))
+        st.caption("V103：這是每批處理筆數，不是總上限；預設只跑批次來源，失敗保留舊價，避免逐檔慢查卡住。")
+        st.toggle("慢速備援補缺口（Yahoo/歷史逐檔，較慢）", value=False, key=_k("enable_slow_price_fallback"), help="只有批次來源抓不到、又真的要補缺口時才開。預設關閉，避免 Streamlit Cloud 卡很久。")
+        st.number_input("慢速備援最多補幾檔 / 每批", min_value=0, max_value=100, value=20, step=5, key=_k("slow_price_fallback_limit"))
     with top_cols[6]:
         st.caption(
             f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
