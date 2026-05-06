@@ -494,9 +494,6 @@ def _init_state(group_map: dict[str, list[dict[str, str]]]):
     if _k("left_panel_limit") not in st.session_state:
         st.session_state[_k("left_panel_limit")] = 12
 
-    if _k("last_stock_code") not in st.session_state:
-        st.session_state[_k("last_stock_code")] = _safe_str(st.session_state.get(_k("stock_code"), ""))
-
     st.session_state[_k("start_date")] = _to_date(st.session_state.get(_k("start_date")), default_start)
     st.session_state[_k("end_date")] = _to_date(st.session_state.get(_k("end_date")), default_end)
 
@@ -551,26 +548,7 @@ def _on_group_change(group_map: dict[str, list[dict[str, str]]]):
     current_group = _safe_str(st.session_state.get(_k("group"), ""))
     items = group_map.get(current_group, [])
     st.session_state[_k("stock_code")] = items[0]["code"] if items else ""
-    _reset_stock_view_state()
-
-
-def _reset_stock_view_state():
-    """換股時重置事件焦點與圖表重繪狀態。
-
-    修正重點：
-    Streamlit selectbox 換股只會更新 stock_code，不會自動清掉上一檔股票的
-    focus_event_idx / event_filter / focus_window。舊焦點套到新股票後，會造成
-    主圖只剩局部資料，起漲 / 起跌標記與事件資訊看起來像是消失。
-    """
     st.session_state[_k("focus_event_idx")] = -1
-    st.session_state[_k("event_filter")] = "全部"
-    st.session_state[_k("focus_window")] = "全部"
-    st.session_state[_k("show_pivots")] = True
-    st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
-
-
-def _on_stock_change():
-    _reset_stock_view_state()
 
 
 def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -1270,6 +1248,68 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
 
 
+def _calc_initial_display_bars(total_bars: int) -> int:
+    """依資料量決定初始顯示 K 棒數，避免天數越多越擁擠。"""
+    if total_bars <= 110:
+        return total_bars
+    if total_bars <= 180:
+        return 90
+    if total_bars <= 260:
+        return 110
+    if total_bars <= 420:
+        return 130
+    return 150
+
+
+def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: int, preferred_window: int) -> list[int]:
+    """
+    壓縮起漲 / 起跌標記密度：
+    - 保留代表性訊號，不因天數增加而把整張圖塞滿。
+    - 永遠優先保留最後一筆與近期訊號。
+    """
+    if not indices:
+        return []
+
+    valid = sorted({int(i) for i in indices if 0 <= int(i) < total_bars})
+    if not valid:
+        return []
+
+    if total_bars <= 110:
+        target_count = 18
+    elif total_bars <= 180:
+        target_count = 16
+    elif total_bars <= 260:
+        target_count = 14
+    elif total_bars <= 420:
+        target_count = 12
+    else:
+        target_count = 10
+
+    preferred_gap = max(4, preferred_window // max(6, target_count - 2))
+    global_gap = max(6, total_bars // max(8, target_count))
+
+    compressed: list[int] = []
+    last_kept = None
+    recent_boundary = max(0, total_bars - preferred_window)
+
+    for idx in valid:
+        gap = preferred_gap if idx >= recent_boundary else global_gap
+        if last_kept is None or idx - last_kept >= gap:
+            compressed.append(idx)
+            last_kept = idx
+
+    # 一定保留最後一筆訊號，並控制總數不爆量。
+    if valid[-1] not in compressed:
+        compressed.append(valid[-1])
+
+    if len(compressed) > target_count:
+        head_keep = max(2, target_count // 3)
+        tail_keep = max(5, target_count - head_keep)
+        compressed = compressed[:head_keep] + compressed[-tail_keep:]
+
+    return sorted(set(compressed))
+
+
 def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]) -> go.Figure:
     """專業版 K 線圖。
 
@@ -1405,11 +1445,13 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
     marker_offset = span * 0.035
 
     if show_pivots:
-        # 避免過多標記拖慢，只顯示圖上最後 35 個起漲 / 起跌訊號。
-        max_marker_count = 35
+        display_bars = _calc_initial_display_bars(len(work))
+        view_start_idx = max(0, len(work) - display_bars)
+        view_start = work["日期"].iloc[view_start_idx]
+        view_end = work["日期"].iloc[-1]
 
         if trough_idx:
-            idxs = [int(i) for i in trough_idx if 0 <= int(i) < len(work)][-max_marker_count:]
+            idxs = _compress_signal_indices(trough_idx, len(work), display_bars)
             if idxs:
                 sub = work.iloc[idxs].copy()
                 y_mark = sub["最低價"] - marker_offset
@@ -1444,7 +1486,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                     )
 
         if peak_idx:
-            idxs = [int(i) for i in peak_idx if 0 <= int(i) < len(work)][-max_marker_count:]
+            idxs = _compress_signal_indices(peak_idx, len(work), display_bars)
             if idxs:
                 sub = work.iloc[idxs].copy()
                 y_mark = sub["最高價"] + marker_offset
@@ -1477,6 +1519,11 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                         line=dict(color="rgba(124,58,237,0.48)", width=1.4, dash="dot"),
                         row=1, col=1,
                     )
+
+    display_bars = _calc_initial_display_bars(len(work))
+    view_start_idx = max(0, len(work) - display_bars)
+    view_start = work["日期"].iloc[view_start_idx]
+    view_end = work["日期"].iloc[-1]
 
     latest_close = float(work["收盤價"].iloc[-1])
     latest_date = work["日期"].iloc[-1]
@@ -1526,7 +1573,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         margin=dict(l=20, r=145, t=72, b=34),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
-        hovermode="x",
+        hovermode="x unified",
         hoverlabel=dict(bgcolor="rgba(15,23,42,0.92)", font_size=13, font_color="#ffffff"),
         legend=dict(
             orientation="v",
@@ -1539,6 +1586,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             borderwidth=1,
         ),
         xaxis_rangeslider_visible=False,
+        bargap=0.10,
         uirevision=f"kline_{stock_label}",
         dragmode="pan",
     )
@@ -1551,12 +1599,26 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         spikethickness=1,
         showgrid=False,
         tickformat="%Y-%m-%d",
+        range=[pd.to_datetime(view_start) - pd.Timedelta(days=2), pd.to_datetime(view_end) + pd.Timedelta(days=2)],
+        rangebreaks=[dict(bounds=["sat", "mon"])],
+        rangeselector=dict(
+            buttons=[
+                dict(count=1, label="1M", step="month", stepmode="backward"),
+                dict(count=3, label="3M", step="month", stepmode="backward"),
+                dict(count=6, label="6M", step="month", stepmode="backward"),
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(step="all", label="全部"),
+            ]
+        ),
+        nticks=min(12, max(6, display_bars // 10)),
         row=1,
         col=1,
     )
     fig.update_xaxes(
         showgrid=False,
         tickformat="%Y-%m-%d",
+        rangebreaks=[dict(bounds=["sat", "mon"])],
+        nticks=min(12, max(6, display_bars // 10)),
         title_text="日期",
         row=2,
         col=1,
@@ -2031,8 +2093,7 @@ def main():
             if target:
                 st.session_state[_k("group")] = target["group"]
                 st.session_state[_k("stock_code")] = target["code"]
-                st.session_state[_k("last_stock_code")] = target["code"]
-                _reset_stock_view_state()
+                st.session_state[_k("focus_event_idx")] = -1
                 save_last_query_state(
                     quick_group=target["group"],
                     quick_stock_code=target["code"],
@@ -2063,7 +2124,6 @@ def main():
             options=code_options if code_options else [""],
             key=_k("stock_code"),
             format_func=lambda code: code_to_item.get(code, {}).get("label", code),
-            on_change=_on_stock_change,
         )
 
     with c3:
@@ -2074,15 +2134,6 @@ def main():
 
     selected_group = _safe_str(st.session_state.get(_k("group"), ""))
     selected_code = _safe_str(st.session_state.get(_k("stock_code"), ""))
-
-    # 雙保險：即使瀏覽器/Streamlit 沒有正常觸發 selectbox on_change，
-    # 只要偵測到股票代號變更，就重置上一檔股票留下的事件焦點，
-    # 避免換股後起漲、起跌、焦點事件與主圖標記消失。
-    last_stock_code = _safe_str(st.session_state.get(_k("last_stock_code"), ""))
-    if selected_code and selected_code != last_stock_code:
-        _reset_stock_view_state()
-        st.session_state[_k("last_stock_code")] = selected_code
-
     start_date = _to_date(st.session_state.get(_k("start_date")), date.today() - timedelta(days=365))
     end_date = _to_date(st.session_state.get(_k("end_date")), date.today())
 
@@ -2215,8 +2266,8 @@ def main():
         )
         try:
             _main_fig.update_layout(
-                datarevision=f"{_normalize_code(selected_code)}_{len(focus_df)}_{len(focus_peak_idx)}_{len(focus_trough_idx)}_{_chart_seq}",
-                uirevision=f"{_normalize_code(selected_code)}_{len(focus_df)}_{len(focus_peak_idx)}_{len(focus_trough_idx)}_{_chart_seq}",
+                datarevision=f"{_normalize_code(stock_code)}_{len(focus_df)}_{len(focus_peak_idx)}_{len(focus_trough_idx)}_{_chart_seq}",
+                uirevision=f"{_normalize_code(stock_code)}_{len(focus_df)}_{len(focus_peak_idx)}_{len(focus_trough_idx)}_{_chart_seq}",
             )
         except Exception:
             pass
@@ -2232,7 +2283,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v73：主圖已改為完整 hover，滑鼠移到 K 棒可顯示開高低收、成交量、漲跌、漲跌幅與振幅；右上角固定顯示最新交易日完整資訊。")
+        st.caption("v118：K 線圖已升級為自適應清晰顯示模式。資料天數變多時，預設只聚焦最新一段區間，並提供 1M / 3M / 6M / 1Y / 全部 快速切換；起漲 / 起跌標記也會自動降密，避免圖面過度擁擠。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
