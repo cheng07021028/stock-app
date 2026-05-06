@@ -275,6 +275,19 @@ def logout() -> None:
 
 
 
+
+def _detect_current_page_key_for_table_manager() -> str:
+    """v108：抓目前 Streamlit 頁面檔名，讓所有重型模組可套用防卡模式。"""
+    try:
+        import inspect
+        for frame in inspect.stack()[1:30]:
+            fn = str(getattr(frame, "filename", "") or "").replace("\\", "/")
+            if "/pages/" in fn and fn.endswith(".py"):
+                return Path(fn).stem
+    except Exception:
+        pass
+    return "global"
+
 def _install_v105_table_manager() -> None:
     """登入後自動啟用全系統表格管理。
 
@@ -284,11 +297,11 @@ def _install_v105_table_manager() -> None:
     - 不因輸入欄位或勾選而重跑推薦 / 重新抓資料
     """
     try:
-        # v106：每次頁面 rerun / require_login 時先重置側邊欄去重旗標，
+        # v108：每次頁面 rerun / require_login 時先重置側邊欄去重旗標，
         # 確保本次 rerun 只顯示一次「表格管理」，下一次 rerun 仍會正常顯示。
-        st.session_state["_godpick_table_sidebar_rendered_this_run_v106"] = False
+        st.session_state["_godpick_table_sidebar_rendered_this_run_v108"] = False
         from godpick_column_manager import install_auto_column_manager
-        install_auto_column_manager("global")
+        install_auto_column_manager(_detect_current_page_key_for_table_manager())
     except Exception:
         # 表格管理不可影響登入與主功能
         pass

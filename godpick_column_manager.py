@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v106：全系統表格篩選排序 + 勾選延後套用 + 側邊欄去重 + 全域設定永久套用版
+v108：全系統重型頁面進頁防卡 + 自動攔截復原版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v106"
+CONFIG_VERSION = "v108"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -592,7 +592,7 @@ def _candidate_filter_columns(df: pd.DataFrame, max_cols: int = 80) -> List[str]
 
 
 def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame) -> Dict[str, Any]:
-    """v105：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
+    """v108：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return _default_table_view(df)
     if not bool(st.session_state.get("godpick_table_filter_sort_enabled", True)):
@@ -603,7 +603,7 @@ def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame
     cols = list(clean.columns)
     current = get_table_view_config(table_key, clean)
 
-    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v105", expanded=False):
+    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v108", expanded=False):
         st.caption("輸入篩選、排序或勾選條件時不重算資料；只有按『套用並永久記錄』後，才套用到目前表格顯示。")
         with st.form(key=f"{safe_key}_table_view_form_v105", clear_on_submit=False):
             c1, c2, c3, c4 = st.columns([1.3, 1.4, 1.1, 0.8])
@@ -752,7 +752,7 @@ def install_global_table_patch(page_key: str = "global") -> None:
                 data = apply_table_view(data, table_key)
             except Exception as exc:
                 try:
-                    st.caption(f"v105 表格篩選排序略過：{exc}")
+                    st.caption(f"v108 表格篩選排序略過：{exc}")
                 except Exception:
                     pass
         return original_dataframe(data, *args, **kwargs)
@@ -800,6 +800,34 @@ def install_global_table_patch(page_key: str = "global") -> None:
     st._godpick_table_patch_v105 = True
 
 
+def uninstall_global_table_patch() -> bool:
+    """v108：重型頁面進入時，若上一頁已安裝全域 st.dataframe/data_editor 攔截，立即還原。
+
+    v108 只是不再安裝新攔截；但 Streamlit 同一個 session 內，上一頁的 monkey patch
+    會殘留到 0/3/7/8/10/14 等頁，造成進頁仍出現「表格 X｜篩選排序」並拖慢。
+    """
+    restored = False
+    try:
+        original_dataframe = getattr(st, "_godpick_original_dataframe_v105", None)
+        if original_dataframe is not None:
+            st.dataframe = original_dataframe
+            restored = True
+    except Exception:
+        pass
+    try:
+        original_data_editor = getattr(st, "_godpick_original_data_editor_v105", None)
+        if original_data_editor is not None:
+            st.data_editor = original_data_editor
+            restored = True
+    except Exception:
+        pass
+    try:
+        st._godpick_table_patch_v105 = False
+    except Exception:
+        pass
+    return restored
+
+
 def managed_dataframe(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> None:
     render_table_view_manager(table_key, table_label, df)
     filtered = apply_table_view(df, table_key)
@@ -828,8 +856,73 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
 
 
 
+
+
 # =========================================================
-# v106：全域表格管理設定（永久保存）
+# v108：重型頁面防卡設定
+# =========================================================
+# 這些頁面通常包含大量資料抓取、K線圖、推薦掃描、績效回補或 GitHub/Firestore 同步。
+# 全域 monkey patch 表格管理若在進頁時自動攔截，會讓尚未按「推薦 / 更新 / 套用」就開始建立大量 widget，
+# 甚至上一頁殘留的 patch 也會讓本頁繼續卡住。v108 對這些頁面預設先復原攔截。
+HEAVY_AUTO_PATCH_PAGE_MARKERS = [
+    "0_大盤趨勢", "00_大盤趨勢", "大盤趨勢",
+    "1_儀表板", "01_儀表板", "儀表板",
+    "2_行情查詢", "02_行情查詢", "行情查詢",
+    "3_歷史K線分析", "03_歷史K線分析", "歷史K線分析",
+    "4_自選股中心", "04_自選股中心", "自選股中心",
+    "5_排行榜", "05_排行榜", "排行榜",
+    "6_多股比較", "06_多股比較", "多股比較",
+    "7_股神推薦", "07_股神推薦", "股神推薦.py",
+    "8_股神推薦紀錄", "08_股神推薦紀錄", "股神推薦紀錄",
+    "9_股票主檔更新", "09_股票主檔更新", "股票主檔更新",
+    "10_推薦清單", "推薦清單",
+    "11_資料診斷", "資料診斷",
+    "12_股神管理中心", "股神管理中心",
+    "14_股神權重校正", "股神權重校正",
+]
+
+def _is_heavy_auto_patch_page(page_key: str = "") -> bool:
+    text = str(page_key or "")
+    try:
+        import inspect
+        for frame in inspect.stack()[1:24]:
+            fn = str(getattr(frame, "filename", "") or "")
+            text += "|" + fn.replace("\\", "/")
+    except Exception:
+        pass
+    return any(m in text for m in HEAVY_AUTO_PATCH_PAGE_MARKERS)
+
+def _heavy_page_force_enabled(page_key: str = "") -> bool:
+    safe = _key_safe(page_key or "global")
+    return bool(st.session_state.get(f"godpick_force_auto_table_patch_{safe}", False))
+
+def _render_heavy_page_guard(page_key: str = "") -> bool:
+    """回傳 True 代表本頁允許安裝全域攔截；False 代表防卡暫停並復原舊攔截。"""
+    if not _is_heavy_auto_patch_page(page_key):
+        return True
+    safe = _key_safe(page_key or "global")
+    if _heavy_page_force_enabled(page_key):
+        return True
+
+    restored = uninstall_global_table_patch()
+    label = str(page_key or "本頁")
+    try:
+        with st.sidebar.expander("⚡ 重型模組防卡模式｜v108", expanded=False):
+            st.caption(f"{label} 已停用全域表格自動攔截，避免一進頁就大量建立篩選/排序 widget 或沿用上一頁 patch。")
+            if restored:
+                st.success("已復原上一頁殘留的表格攔截；本頁不會再出現多餘『表格 X｜篩選排序』。")
+            else:
+                st.info("目前未偵測到殘留攔截；本頁維持防卡模式。")
+            st.caption("表格管理仍可在需要時手動啟用；建議等本頁資料更新完成後再開啟。")
+            if st.button("本次手動啟用全域表格管理", key=f"{safe}_force_auto_table_patch_v108", use_container_width=True):
+                st.session_state[f"godpick_force_auto_table_patch_{safe}"] = True
+                st.rerun()
+    except Exception:
+        pass
+    return False
+
+# =========================================================
+# v108：全域表格管理設定（永久保存）
 # =========================================================
 def _default_global_options() -> Dict[str, Any]:
     return {
@@ -875,7 +968,7 @@ def hydrate_global_table_options_once() -> Dict[str, Any]:
     return opts
 
 def install_auto_column_manager(page_key: str) -> None:
-    """v106：統一表格管理入口。
+    """v108：統一表格管理入口。
 
     修正重點：
     - 同一頁被 app_auth 與頁面本身重複呼叫時，側邊欄只顯示一次。
@@ -884,26 +977,30 @@ def install_auto_column_manager(page_key: str) -> None:
     - 每張表格仍各自保存篩選 / 排序 / 欄位設定。
     """
     try:
-        install_global_table_patch(page_key)
-    except Exception:
-        pass
-
-    try:
         hydrate_global_table_options_once()
     except Exception:
         pass
 
+    # v108：所有重型頁面預設不自動攔截所有 st.dataframe / st.data_editor，並復原上一頁殘留 patch。
+    # 避免使用者只是點進頁面，尚未按「推薦 / 更新 / 套用」就因全域表格管理產生大量 widget 而卡住。
+    allow_auto_patch = _render_heavy_page_guard(page_key)
+    if allow_auto_patch:
+        try:
+            install_global_table_patch(page_key)
+        except Exception:
+            pass
+
     # v106：避免同一頁面出現兩個一模一樣的「表格管理」區塊。
     # app_auth 會在每次 require_login() 時重置此旗標；同一次 rerun 內第二次呼叫會被跳過。
-    if bool(st.session_state.get("_godpick_table_sidebar_rendered_this_run_v106", False)):
+    if bool(st.session_state.get("_godpick_table_sidebar_rendered_this_run_v108", False)):
         return None
-    st.session_state["_godpick_table_sidebar_rendered_this_run_v106"] = True
+    st.session_state["_godpick_table_sidebar_rendered_this_run_v108"] = True
 
     try:
         opts = get_global_table_options()
-        with st.sidebar.expander("🧩 表格管理｜v106 篩選排序＋欄位＋勾選延後", expanded=False):
+        with st.sidebar.expander("🧩 表格管理｜v108 篩選排序＋欄位＋勾選延後", expanded=False):
             st.caption("每個模組 / 每張表格獨立保存；勾選、篩選、排序、欄位設定都要按套用才生效。")
-            with st.form(key=f"{page_key}_global_table_options_form_v106", clear_on_submit=False):
+            with st.form(key=f"{page_key}_global_table_options_form_v108", clear_on_submit=False):
                 filter_enabled = st.checkbox(
                     "啟用表格篩選 / 排序",
                     value=bool(st.session_state.get("godpick_table_filter_sort_enabled", opts.get("table_filter_sort_enabled", True))),
@@ -945,7 +1042,7 @@ def install_auto_column_manager(page_key: str) -> None:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-            st.caption("v106：此區塊已防重複顯示；各表格自己的篩選 / 排序 / 欄位順序仍在表格上方的展開區永久套用。")
+            st.caption("v108：重型頁面預設防卡並復原上一頁殘留攔截；其他輕量頁仍自動套用。各表格自己的篩選 / 排序 / 欄位順序仍可永久套用。")
     except Exception:
         pass
     return None
