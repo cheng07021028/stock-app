@@ -726,6 +726,73 @@ def filter_by_market(df: pd.DataFrame, mode: str) -> pd.DataFrame:
     return df[regime == mode].copy()
 
 
+
+# >>> V95_RESTORE_PROFILE_BUNDLE_IMPORT_FIX
+def calc_profile_bundle(df: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 10, 20), current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """建立多週期權重校正建議包。
+
+    v94 曾移除這個函式但 pages/14_股神權重校正.py 仍會匯入，
+    造成 ImportError。此函式只讀取既有推薦/績效紀錄，不連外、不重跑推薦。
+    """
+    base_weights = current_weights or DEFAULT_WEIGHTS
+    bundle: Dict[str, Any] = {
+        "version": "v95_restore_calc_profile_bundle",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "base_weights": base_weights,
+        "profiles": {},
+        "factor_effectiveness": {},
+        "quality": {},
+    }
+
+    if df is None or df.empty:
+        for horizon in horizons:
+            bundle["quality"][str(horizon)] = {
+                "status": "empty_records",
+                "message": "目前沒有推薦紀錄可校正",
+            }
+        return bundle
+
+    for horizon in horizons:
+        perf_col = best_perf_col(df, horizon)
+        if not perf_col:
+            bundle["quality"][str(horizon)] = {
+                "status": "missing_perf_col",
+                "message": f"缺少{horizon}日績效欄；請先到 10_推薦清單 更新推薦後績效",
+            }
+            continue
+
+        ret = numeric_series(df, perf_col)
+        valid_n = int(ret.notna().sum())
+        if valid_n <= 0:
+            bundle["quality"][str(horizon)] = {
+                "status": "empty_perf_sample",
+                "message": f"{horizon}日績效欄存在但沒有有效數值",
+                "performance_col": perf_col,
+            }
+            continue
+
+        base_stat = summarize_returns(ret)
+        effect = calc_factor_effectiveness(df, horizon)
+        weights = suggest_weights(effect, base_weights)
+        name = profile_name_by_horizon(horizon)
+
+        bundle["profiles"][name] = {
+            "horizon": horizon,
+            "performance_col": perf_col,
+            "base_stat": base_stat,
+            "weights": dict(zip(weights["因子"], weights["建議新權重%"])),
+            "table": weights.to_dict(orient="records"),
+            "note": "權重依勝率差、期望值差、覆蓋率、樣本數保守校正；單次調整有限制。",
+        }
+        bundle["factor_effectiveness"][str(horizon)] = effect.to_dict(orient="records") if not effect.empty else []
+        bundle["quality"][str(horizon)] = {
+            "status": "ok",
+            "performance_col": perf_col,
+            **base_stat,
+        }
+    return bundle
+# <<< V95_RESTORE_PROFILE_BUNDLE_IMPORT_FIX
+
 def calc_market_bundles(df: pd.DataFrame, horizon: int, current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """v93：大盤分層加入全市場保底、分層來源、樣本分布，避免多/空樣本為 0 時誤判成錯誤。"""
     out: Dict[str, Any] = {}
