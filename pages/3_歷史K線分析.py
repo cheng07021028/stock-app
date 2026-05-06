@@ -1248,8 +1248,10 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
 
 
-def _calc_initial_display_bars(total_bars: int) -> int:
+def _calc_initial_display_bars(total_bars: int, clarity_mode: str = "清晰模式") -> int:
     """依資料量決定初始顯示 K 棒數，避免天數越多越擁擠。"""
+    if str(clarity_mode).strip() == "完整模式":
+        return total_bars
     if total_bars <= 110:
         return total_bars
     if total_bars <= 180:
@@ -1261,7 +1263,7 @@ def _calc_initial_display_bars(total_bars: int) -> int:
     return 150
 
 
-def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: int, preferred_window: int) -> list[int]:
+def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: int, preferred_window: int, max_signals: int | None = None, clarity_mode: str = "清晰模式") -> list[int]:
     """
     壓縮起漲 / 起跌標記密度：
     - 保留代表性訊號，不因天數增加而把整張圖塞滿。
@@ -1274,7 +1276,9 @@ def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: i
     if not valid:
         return []
 
-    if total_bars <= 110:
+    if max_signals is not None and int(max_signals) > 0:
+        target_count = int(max_signals)
+    elif total_bars <= 110:
         target_count = 18
     elif total_bars <= 180:
         target_count = 16
@@ -1284,6 +1288,10 @@ def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: i
         target_count = 12
     else:
         target_count = 10
+
+    if str(clarity_mode).strip() == "完整模式":
+        # 完整模式仍避免幾百個訊號塞滿畫面；保留最近 N 個。
+        return valid[-target_count:]
 
     preferred_gap = max(4, preferred_window // max(6, target_count - 2))
     global_gap = max(6, total_bars // max(8, target_count))
@@ -1310,7 +1318,7 @@ def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: i
     return sorted(set(compressed))
 
 
-def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]) -> go.Figure:
+def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...], clarity_mode: str = "清晰模式", pivot_limit: int = 18, auto_ma: bool = True) -> go.Figure:
     """專業版 K 線圖。
 
     設計重點：
@@ -1418,7 +1426,19 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             120: dict(color="#22c55e", width=1.9),
             240: dict(color="#a855f7", width=1.8),
         }
-        for n in [5, 10, 20, 60, 120, 240]:
+        if auto_ma:
+            if str(clarity_mode).strip() == "完整模式":
+                ma_list = [5, 10, 20, 60, 120, 240]
+            elif len(work) <= 90:
+                ma_list = [5, 10, 20]
+            elif len(work) <= 180:
+                ma_list = [5, 10, 20, 60]
+            else:
+                ma_list = [10, 20, 60, 120]
+        else:
+            ma_list = [5, 10, 20, 60, 120, 240]
+
+        for n in ma_list:
             col = f"MA{n}"
             if col in work.columns:
                 y = pd.to_numeric(work[col], errors="coerce")
@@ -1445,13 +1465,13 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
     marker_offset = span * 0.035
 
     if show_pivots:
-        display_bars = _calc_initial_display_bars(len(work))
+        display_bars = _calc_initial_display_bars(len(work), clarity_mode)
         view_start_idx = max(0, len(work) - display_bars)
         view_start = work["日期"].iloc[view_start_idx]
         view_end = work["日期"].iloc[-1]
 
         if trough_idx:
-            idxs = _compress_signal_indices(trough_idx, len(work), display_bars)
+            idxs = _compress_signal_indices(trough_idx, len(work), display_bars, pivot_limit, clarity_mode)
             if idxs:
                 sub = work.iloc[idxs].copy()
                 y_mark = sub["最低價"] - marker_offset
@@ -1486,7 +1506,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                     )
 
         if peak_idx:
-            idxs = _compress_signal_indices(peak_idx, len(work), display_bars)
+            idxs = _compress_signal_indices(peak_idx, len(work), display_bars, pivot_limit, clarity_mode)
             if idxs:
                 sub = work.iloc[idxs].copy()
                 y_mark = sub["最高價"] + marker_offset
@@ -1520,7 +1540,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                         row=1, col=1,
                     )
 
-    display_bars = _calc_initial_display_bars(len(work))
+    display_bars = _calc_initial_display_bars(len(work), clarity_mode)
     view_start_idx = max(0, len(work) - display_bars)
     view_start = work["日期"].iloc[view_start_idx]
     view_end = work["日期"].iloc[-1]
@@ -2255,6 +2275,36 @@ def main():
         _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
         _render_key_price_bar(df, sr_snapshot)
 
+        with st.expander("📈 圖表清晰度設定｜v119", expanded=False):
+            c1, c2, c3 = st.columns([1.2, 1.1, 1.1])
+            with c1:
+                chart_clarity_mode = st.radio(
+                    "顯示模式",
+                    ["清晰模式", "完整模式"],
+                    index=0,
+                    horizontal=True,
+                    key=_k("chart_clarity_mode"),
+                    help="清晰模式會自動聚焦最新區間並降低訊號密度；完整模式可看全部歷史資料。",
+                )
+            with c2:
+                pivot_limit = st.slider(
+                    "起漲 / 起跌最近 N 個",
+                    min_value=6,
+                    max_value=40,
+                    value=int(st.session_state.get(_k("pivot_limit"), 18)),
+                    step=2,
+                    key=_k("pivot_limit"),
+                    help="控制圖上起漲、起跌標記數量，避免天數多時畫面太擠。",
+                )
+            with c3:
+                auto_ma = st.checkbox(
+                    "均線依天數自動顯示",
+                    value=bool(st.session_state.get(_k("auto_ma"), True)),
+                    key=_k("auto_ma"),
+                    help="天數較多時自動隱藏過短或過多均線，提升圖面清晰度。",
+                )
+            st.caption("調整這裡只影響圖表呈現，不重新抓資料、不改變起漲起跌演算法。")
+
         _chart_seq = int(st.session_state.get(_k("chart_redraw_seq"), 0))
         _main_fig = _build_candlestick_chart(
             focus_df,
@@ -2263,6 +2313,9 @@ def main():
             show_pivots=bool(st.session_state.get(_k("show_pivots"), True)),
             peak_idx=tuple(focus_peak_idx),
             trough_idx=tuple(focus_trough_idx),
+            clarity_mode=chart_clarity_mode,
+            pivot_limit=int(pivot_limit),
+            auto_ma=bool(auto_ma),
         )
         try:
             _main_fig.update_layout(
@@ -2283,7 +2336,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v118：K 線圖已升級為自適應清晰顯示模式。資料天數變多時，預設只聚焦最新一段區間，並提供 1M / 3M / 6M / 1Y / 全部 快速切換；起漲 / 起跌標記也會自動降密，避免圖面過度擁擠。")
+        st.caption("v119：K 線圖已加入清晰模式 / 完整模式、起漲起跌最近 N 個控制、均線依天數自動顯示；天數變多時仍可保持圖面清楚。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
