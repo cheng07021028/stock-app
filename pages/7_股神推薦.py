@@ -8522,18 +8522,33 @@ def main():
     }
     persistent_settings = _load_persistent_settings()
     persisted_weights = _normalize_weight_map(persistent_settings.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
+    persisted_weight_ts = _safe_str(persistent_settings.get("updated_at"))
 
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
             st.session_state[_k(name)] = value
 
-    if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
+    # v96：修正 14_股神權重校正套用後，回到 7_股神推薦仍顯示舊權重的問題。
+    # 原因：7 頁 session_state 已存在時，不會重新讀 godpick_user_settings.json。
+    # 現在只要設定檔 updated_at 變更，就在 widget 建立前同步正式權重與編輯權重。
+    last_loaded_weight_ts = _safe_str(st.session_state.get(_k("persistent_weight_updated_at_loaded")))
+    should_sync_external_weights = bool(persisted_weight_ts and persisted_weight_ts != last_loaded_weight_ts)
+    if should_sync_external_weights:
         st.session_state[_k("score_weights")] = persisted_weights.copy()
-    if _k("score_weights_edit") not in st.session_state or st.session_state.get(_k("score_weights_edit")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
         st.session_state[_k("score_weights_edit")] = persisted_weights.copy()
+        st.session_state[_k("persistent_weight_updated_at_loaded")] = persisted_weight_ts
+        st.session_state[_k("external_weight_sync_msg")] = f"已同步 14_權重校正套用權重：{_weight_text(persisted_weights)}"
+    else:
+        if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
+            st.session_state[_k("score_weights")] = persisted_weights.copy()
+        if _k("score_weights_edit") not in st.session_state or st.session_state.get(_k("score_weights_edit")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
+            st.session_state[_k("score_weights_edit")] = persisted_weights.copy()
 
     if _k("selected_rec_snapshot") not in st.session_state:
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
+
+    if st.session_state.get(_k("external_weight_sync_msg")):
+        st.success(st.session_state.pop(_k("external_weight_sync_msg")))
 
     _ensure_ui_pref("universe_mode", st.session_state.get(_k("universe_mode"), "自選群組"))
     _ensure_ui_pref("group", st.session_state.get(_k("group"), list(watchlist_map.keys())[0] if watchlist_map else ""))
