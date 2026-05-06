@@ -46,6 +46,8 @@ def _default_auth_config() -> Dict[str, Any]:
                 "role": "admin",
                 "enabled": True,
                 "display_name": "系統管理員",
+                "password_plain": "0000",
+                "password_note": "預設密碼，可由管理員修改",
                 "created_at": _now_text(),
                 "updated_at": _now_text(),
             }
@@ -370,6 +372,11 @@ def change_password(username: str, old_password: str, new_password: str) -> Tupl
     user.pop("password", None)
     user.pop("pwd", None)
     user["password_hash"] = _sha256(new_password)
+    # v87：依使用者需求，帳號管理頁需可檢視已建立帳號密碼。
+    # 注意：這會把密碼明文寫入 auth_config.json / GitHub，僅建議內部封閉系統使用。
+    user["password_plain"] = str(new_password)
+    user["password_note"] = "v87 起由系統保存明文，供管理員查閱"
+    user["password_visible_updated_at"] = _now_text()
     user["updated_at"] = _now_text()
 
     return _save_auth_config(cfg)
@@ -403,6 +410,11 @@ def admin_set_user(
         new_user.pop("password", None)
         new_user.pop("pwd", None)
         new_user["password_hash"] = _sha256(password)
+        # v87：新建 / 重設密碼時同步保存明文，讓帳號管理頁可以看到已建立帳密。
+        # 既有舊帳號若沒有 password_plain，無法從 SHA256 反解，請在帳號管理頁重設一次。
+        new_user["password_plain"] = str(password)
+        new_user["password_note"] = "v87 起由系統保存明文，供管理員查閱"
+        new_user["password_visible_updated_at"] = _now_text()
 
     new_user["role"] = role or old_user.get("role") or "user"
     new_user["enabled"] = bool(enabled)
@@ -440,6 +452,9 @@ def reset_admin_password_to_0000() -> bool:
         "role": "admin",
         "enabled": True,
         "display_name": "系統管理員",
+        "password_plain": "0000",
+        "password_note": "緊急重設密碼",
+        "password_visible_updated_at": _now_text(),
         "updated_at": _now_text(),
         "created_at": users.get("admin", {}).get("created_at", _now_text()) if isinstance(users.get("admin"), dict) else _now_text(),
     }
