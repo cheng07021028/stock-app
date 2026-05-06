@@ -9360,6 +9360,32 @@ def main():
         ]
     ].copy()
 
+    # v113：本輪精華推薦加入表格管理。
+    # 說明：重型頁面預設不啟用全域表格攔截，避免進頁卡住；
+    # 但本表是核心推薦結果，需要手動掛上篩選 / 排序 / 欄位順序管理。
+    # 這裡只處理目前已產生的 top_show_df，不重新掃描、不重新抓資料。
+    try:
+        from godpick_column_manager import render_table_view_manager, apply_table_view, render_column_manager
+        _top_table_key_v113 = "page07_top_essence_recommend"
+        render_table_view_manager(_top_table_key_v113, "本輪精華推薦", top_show_df)
+        top_show_df = apply_table_view(top_show_df, _top_table_key_v113)
+        _top_cols_v113 = render_column_manager(
+            _top_table_key_v113,
+            "本輪精華推薦",
+            top_show_df,
+            list(top_show_df.columns),
+        )
+        _essential_top_cols_v113 = ["勾選", "股票代號", "股票名稱"]
+        _final_top_cols_v113 = [c for c in _top_cols_v113 if c in top_show_df.columns]
+        # 勾選與股票代號屬於後續匯入 / 寫入紀錄必要欄位，不允許被欄位管理隱藏到表格之外。
+        for _c in reversed(_essential_top_cols_v113):
+            if _c in top_show_df.columns and _c not in _final_top_cols_v113:
+                _final_top_cols_v113.insert(0, _c)
+        if _final_top_cols_v113:
+            top_show_df = top_show_df[_final_top_cols_v113].copy()
+    except Exception as _table_mgr_e:
+        st.caption(f"v113 本輪精華推薦表格管理略過：{_table_mgr_e}")
+
     # v44：先建立 row_index → 股票代號 對照表，讓 on_change callback 可在 rerun 前保存勾選狀態。
     top_editor_key = _k("top_pick_editor")
     top_editor_code_map_key = _k("top_pick_editor_code_map")
@@ -9543,21 +9569,26 @@ def main():
         full_default_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(rec_df.columns)) if c in rec_df.columns]
         if not full_default_cols:
             full_default_cols = [c for c in list(rec_df.columns) if c != "勾選"]
-        # v48：完整推薦表改用與 12_股神管理中心相同的欄位管理樣式。
+        # v113：完整推薦表也加入表格管理。
+        # 篩選 / 排序只套用目前 rec_df，不重新掃描；欄位順序仍永久保存。
         full_for_manager = rec_df.copy()
         if "勾選" not in full_for_manager.columns:
             full_for_manager.insert(0, "勾選", False)
         try:
-            from godpick_column_manager import render_column_manager
+            from godpick_column_manager import render_table_view_manager, apply_table_view, render_column_manager
+            _full_table_key_v113 = "page07_godpick_recommend_full"
+            render_table_view_manager(_full_table_key_v113, "完整推薦表", full_for_manager)
+            full_for_manager = apply_table_view(full_for_manager, _full_table_key_v113)
             full_order = render_column_manager(
-                "page07_godpick_recommend_full",
+                _full_table_key_v113,
                 "完整推薦表",
                 full_for_manager,
                 ["勾選"] + full_default_cols,
             )
-        except Exception:
+        except Exception as _full_mgr_e:
+            st.caption(f"v113 完整推薦表格管理略過：{_full_mgr_e}")
             full_order = ["勾選"] + full_default_cols
-        full_show_cols = [c for c in full_order if c in rec_df.columns and c != "勾選"]
+        full_show_cols = [c for c in full_order if c in full_for_manager.columns and c != "勾選"]
         if not full_show_cols:
             full_show_cols = full_default_cols
 
@@ -9571,7 +9602,7 @@ def main():
             if _normalize_code(x)
         }
 
-        full_work_df = rec_df[full_show_cols].copy()
+        full_work_df = full_for_manager[full_show_cols].copy()
         if "勾選" not in full_work_df.columns:
             full_work_df.insert(0, "勾選", False)
         full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)
