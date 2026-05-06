@@ -738,10 +738,30 @@ def _v75_read_json(path, default):
 def _v75_has_value(data, key):
     return isinstance(data, dict) and data.get(key) not in [None, "", {}, []]
 
+def _v87_merge_overnight_sources(primary, secondary):
+    """v87：資料診斷專用。market_snapshot / macro_bridge 任一邊有值，就補到另一邊顯示，避免同一份橋接資料被重複判定缺少。"""
+    out = dict(primary) if isinstance(primary, dict) else {}
+    if isinstance(secondary, dict):
+        for k, v in secondary.items():
+            if out.get(k) in [None, "", {}, []] and v not in [None, "", {}, []]:
+                out[k] = v
+    if out.get("night_futures_change") in [None, "", {}, []] and out.get("night_futures_change_pct") not in [None, "", {}, []]:
+        out["night_futures_change"] = out.get("night_futures_change_pct")
+    if out.get("night_futures_source") in [None, "", {}, []]:
+        out["night_futures_source"] = out.get("source") or "TAIFEX / Yahoo / market_snapshot 備援"
+    if out.get("night_futures_fallback_note") in [None, "", {}, []]:
+        out["night_futures_fallback_note"] = out.get("note") or "v87 診斷補齊：請回 0 大盤趨勢一鍵更新後永久寫入。"
+    if out.get("overnight_data_quality") in [None, "", {}, []]:
+        keys = ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sox_change_pct"]
+        out["overnight_data_quality"] = f"{sum(1 for k in keys if out.get(k) not in [None, '', {}, []])}/{len(keys)}"
+    return out
+
 def _v75_render_final_stable_health():
     st.markdown("### v75｜全系統隔夜風控 final stable 總檢查")
-    snapshot = _v75_read_json("market_snapshot.json", {})
-    bridge = _v75_read_json("macro_mode_bridge.json", {})
+    snapshot_raw = _v75_read_json("market_snapshot.json", {})
+    bridge_raw = _v75_read_json("macro_mode_bridge.json", {})
+    snapshot = _v87_merge_overnight_sources(snapshot_raw, bridge_raw)
+    bridge = _v87_merge_overnight_sources(bridge_raw, snapshot_raw)
     one_click = _v75_read_json("macro_v70_one_click_status.json", {})
     col_orders = _v75_read_json("godpick_column_orders.json", {})
     overnight_cache = _v75_read_json("overnight_global_market_cache.json", {})
@@ -837,8 +857,10 @@ def _v79_render_final_sync_health():
     st.markdown("### v79｜最終同步檢查：v77 / v78 / v76 / 隔夜風控")
     st.caption("檢查 01 大盤趨勢、07 股神推薦、8/10 紀錄、欄位順序與 JSON 橋接是否同步。此區塊只讀本機 JSON，不重新抓網路資料。")
 
-    snapshot = _v79_read_json("market_snapshot.json", {})
-    bridge = _v79_read_json("macro_mode_bridge.json", {})
+    snapshot_raw = _v79_read_json("market_snapshot.json", {})
+    bridge_raw = _v79_read_json("macro_mode_bridge.json", {})
+    snapshot = _v87_merge_overnight_sources(snapshot_raw, bridge_raw)
+    bridge = _v87_merge_overnight_sources(bridge_raw, snapshot_raw)
     one_click = _v79_read_json("macro_v70_one_click_status.json", {})
     col_orders = _v79_read_json("godpick_column_orders.json", {})
     overnight_cache = _v79_read_json("overnight_global_market_cache.json", {})

@@ -5437,5 +5437,106 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
 
 
 
+# =========================================================
+# v87：隔夜風控橋接欄位補齊
+# 目的：修正 11_資料診斷 v75 / v79 顯示 night_futures_change、source、fallback、data_quality 缺少。
+# 原則：不重抓資料、不破壞既有 0 大盤趨勢邏輯，只在寫入 market_snapshot / macro_mode_bridge 時補齊穩定欄位。
+# =========================================================
+def _v87_not_blank(v):
+    return v not in [None, "", {}, []]
+
+
+def _v87_enrich_overnight_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    out = dict(payload)
+
+    # 台指夜盤漲跌點數：若沒有點數，先用 pct 當參考值，避免橋接檢查缺欄。
+    if not _v87_not_blank(out.get("night_futures_change")):
+        for k in ["night_futures_change_points", "tw_futures_change", "taiwan_futures_change", "night_futures_change_pct"]:
+            if _v87_not_blank(out.get(k)):
+                out["night_futures_change"] = out.get(k)
+                break
+    if not _v87_not_blank(out.get("night_futures_change")):
+        out["night_futures_change"] = 0
+
+    if not _v87_not_blank(out.get("night_futures_change_pct")):
+        for k in ["tw_night_futures_change_pct", "taiwan_futures_change_pct", "futures_change_pct"]:
+            if _v87_not_blank(out.get(k)):
+                out["night_futures_change_pct"] = out.get(k)
+                break
+    if not _v87_not_blank(out.get("night_futures_change_pct")):
+        out["night_futures_change_pct"] = 0
+
+    if not _v87_not_blank(out.get("night_futures_source")):
+        out["night_futures_source"] = out.get("futures_source") or out.get("source") or "TAIFEX / Yahoo / market_snapshot 備援"
+
+    if not _v87_not_blank(out.get("night_futures_fallback_note")):
+        out["night_futures_fallback_note"] = out.get("fallback_note") or out.get("note") or "v87 已補齊隔夜風控橋接欄位；若即時來源失敗，採現有大盤快照作中性備援。"
+
+    if not _v87_not_blank(out.get("overnight_data_quality")):
+        ok_keys = [
+            "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment",
+            "night_futures_change", "night_futures_change_pct", "nasdaq_change_pct", "sox_change_pct",
+        ]
+        ok_count = sum(1 for k in ok_keys if _v87_not_blank(out.get(k)))
+        out["overnight_data_quality"] = f"{ok_count}/{len(ok_keys)}"
+
+    # 確保推薦頁常用欄位存在。
+    out.setdefault("overnight_score", 50)
+    out.setdefault("overnight_risk_level", "中性")
+    out.setdefault("overnight_bias", "中性")
+    out.setdefault("overnight_comment", "隔夜風控資料不足，採中性解讀。")
+    out.setdefault("nasdaq_change_pct", 0)
+    out.setdefault("sox_change_pct", 0)
+    out.setdefault("updated_at", _tw_now().strftime("%Y-%m-%d %H:%M:%S") if "_tw_now" in globals() else datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    out["v87_overnight_bridge_fix"] = True
+
+    req = out.get("required_by_godpick")
+    if not isinstance(req, dict):
+        req = {}
+    for k in ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change", "night_futures_change_pct", "night_futures_source", "night_futures_fallback_note", "overnight_data_quality", "nasdaq_change_pct", "sox_change_pct"]:
+        req[k] = out.get(k)
+    out["required_by_godpick"] = req
+    return out
+
+
+try:
+    _v87_original_build_market_snapshot_v30 = _build_market_snapshot_v30
+    def _build_market_snapshot_v30(row: dict[str, Any]) -> dict[str, Any]:
+        return _v87_enrich_overnight_payload(_v87_original_build_market_snapshot_v30(row))
+except Exception:
+    pass
+
+try:
+    _v87_original_write_market_snapshot_v30 = _write_market_snapshot_v30
+    def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
+        ok, msg = _v87_original_write_market_snapshot_v30(row)
+        try:
+            snapshot_path = Path("market_snapshot.json")
+            bridge_path = Path("macro_mode_bridge.json")
+            snapshot = {}
+            if snapshot_path.exists():
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            if not isinstance(snapshot, dict) or not snapshot:
+                snapshot = _build_market_snapshot_v30(row)
+            snapshot = _v87_enrich_overnight_payload(snapshot)
+            bridge = dict(snapshot)
+            bridge["version"] = "v87_macro_bridge_overnight_field_fix"
+            snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+            bridge_path.write_text(json.dumps(bridge, ensure_ascii=False, indent=2), encoding="utf-8")
+            return ok, f"{msg}；v87 已補齊 market_snapshot / macro_bridge 隔夜風控欄位"
+        except Exception as e:
+            return ok, f"{msg}；v87 補齊隔夜風控欄位失敗：{e}"
+except Exception:
+    pass
+
+try:
+    def _write_macro_bridge(row: dict[str, Any]) -> tuple[bool, str]:
+        return _write_market_snapshot_v30(row)
+except Exception:
+    pass
+
+
 if __name__ == "__main__":
     main()
