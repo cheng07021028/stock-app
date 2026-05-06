@@ -1,5 +1,23 @@
 [
   {
+    "updated_at": "2026-05-06 16:10:42",
+    "market_score": 70.3,
+    "market_trend": "中性偏多",
+    "market_risk_level": "中低",
+    "risk_gate": "normal",
+    "twse_index": 41138.85,
+    "twse_change": 370.9875483103756,
+    "twse_change_pct": 0.91,
+    "otc_index": 407.44000244140625,
+    "otc_change": 9.19000244140625,
+    "otc_change_pct": 2.3075963443581293,
+    "futures_index": 31357.0,
+    "futures_change": -21.0,
+    "futures_change_pct": null,
+    "data_quality": "良好",
+    "version": "v68_overnight_global_market_bridge"
+  },
+  {
     "record_id": "4363a55a130a4879402f9c58b9352317",
     "推估日期": "2026-04-21",
     "建立時間": "2026-04-22 10:12:31",
@@ -1721,6 +1739,19 @@
   {
     "version": "v109_startup_macro_autoupdate",
     "updated_at": "2026-05-06 16:09:39",
+    "data_date": "2026-05-06",
+    "market_score": 81.1,
+    "market_trend": "多頭",
+    "market_risk_level": "低",
+    "risk_gate": "可進場",
+    "twse_index": 41138.85,
+    "twse_change_pct": 0.9065,
+    "otc_change_pct": 2.3076,
+    "source": "startup Yahoo batch + cache fallback"
+  },
+  {
+    "version": "v109_startup_macro_autoupdate",
+    "updated_at": "2026-05-06 16:13:15",
     "data_date": "2026-05-06",
     "market_score": 81.1,
     "market_trend": "多頭",
