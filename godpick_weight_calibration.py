@@ -18,6 +18,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import json
 import math
 import os
+import base64
+
+try:
+    import requests
+except Exception:
+    requests = None
 
 import pandas as pd
 
@@ -901,6 +907,74 @@ def rr_analysis(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+# >>> V96_WEIGHT_APPLY_GITHUB_SYNC_FIX
+def _github_weight_cfg() -> Dict[str, str]:
+    """讀取 GitHub 設定，讓 14_權重校正可直接永久回寫 7_股神推薦使用的設定檔。"""
+    try:
+        import streamlit as st
+        secrets = st.secrets
+    except Exception:
+        secrets = {}
+    def _get(name: str, default: str = "") -> str:
+        try:
+            return str(secrets.get(name, default) or default)
+        except Exception:
+            return default
+    return {
+        "token": _get("GITHUB_TOKEN", ""),
+        "owner": _get("GITHUB_REPO_OWNER", "cheng07021028"),
+        "repo": _get("GITHUB_REPO_NAME", "stock-app"),
+        "branch": _get("GITHUB_REPO_BRANCH", "main"),
+        "path": _get("GODPICK_USER_SETTINGS_GITHUB_PATH", str(SETTINGS_FILE)),
+    }
+
+
+def _github_url(owner: str, repo: str, path: str) -> str:
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+
+
+def _github_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _write_settings_to_github(payload: Dict[str, Any]) -> Tuple[bool, str]:
+    """v96：14 套用權重時同步寫 GitHub，避免只寫 Cloud 暫存檔導致 7 頁讀不到。"""
+    cfg = _github_weight_cfg()
+    token = cfg.get("token", "")
+    if not token:
+        return False, "未設定 GITHUB_TOKEN，已只寫入本機暫存；重新部署後可能消失。"
+    if requests is None:
+        return False, "requests 套件不可用，無法寫入 GitHub。"
+    try:
+        url = _github_url(cfg["owner"], cfg["repo"], cfg["path"])
+        headers = _github_headers(token)
+        sha = ""
+        get_resp = requests.get(url, headers=headers, params={"ref": cfg["branch"]}, timeout=15)
+        if get_resp.status_code == 200:
+            sha = str(get_resp.json().get("sha", "") or "")
+        elif get_resp.status_code not in (404,):
+            # 仍允許嘗試 PUT；若檔案存在且缺 sha，GitHub 會回報錯誤。
+            pass
+        body: Dict[str, Any] = {
+            "message": f"Update godpick_user_settings from weight calibration @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+            "branch": cfg["branch"],
+        }
+        if sha:
+            body["sha"] = sha
+        put_resp = requests.put(url, headers=headers, json=body, timeout=25)
+        if put_resp.status_code in (200, 201):
+            return True, f"GitHub 已永久寫入：{cfg['owner']}/{cfg['repo']}@{cfg['branch']}:{cfg['path']}"
+        return False, f"GitHub 寫入失敗：{put_resp.status_code} / {put_resp.text[:300]}"
+    except Exception as exc:
+        return False, f"GitHub 寫入例外：{exc}"
+# <<< V96_WEIGHT_APPLY_GITHUB_SYNC_FIX
+
 def load_current_settings() -> Dict[str, Any]:
     payload = read_json(SETTINGS_FILE, {})
     if not isinstance(payload, dict):
@@ -920,15 +994,25 @@ def save_applied_weights(weights: Dict[str, int], profile_name: str = "manual") 
     existing = load_current_settings()
     if not isinstance(existing, dict):
         existing = {}
+    applied = normalize_weights(weights, min_w=3, max_w=30)
     payload = {
         **existing,
         "original_default_weights": existing.get("original_default_weights", DEFAULT_WEIGHTS),
-        "applied_weights": normalize_weights(weights, min_w=3, max_w=30),
+        "applied_weights": applied,
+        # v96：同步保留 7_股神推薦容易讀取的欄位，並用 updated_at 觸發 7 頁重新載入。
+        "score_weights": applied,
+        "weight_source": "14_股神權重校正",
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "godpick_v66_weight_calibration_applied",
+        "version": "godpick_v96_weight_calibration_github_sync",
         "last_weight_calibration_profile": profile_name,
     }
-    return write_json(SETTINGS_FILE, payload)
+    local_ok, local_msg = write_json(SETTINGS_FILE, payload)
+    gh_ok, gh_msg = _write_settings_to_github(payload)
+    ok = bool(local_ok or gh_ok)
+    detail = "；".join([str(local_msg), str(gh_msg)])
+    if ok:
+        return True, f"權重已套用到 7_股神推薦設定檔。{detail}"
+    return False, f"權重套用失敗。{detail}"
 
 
 def save_suggestion_bundle(bundle: Dict[str, Any]) -> Tuple[bool, str]:
