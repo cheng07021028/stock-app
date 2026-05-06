@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v110：重型防卡去重 + 單一表格管理面板版
+v111：重型防卡單一顯示 + 表格管理面板版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v110"
+CONFIG_VERSION = "v111"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -592,7 +592,7 @@ def _candidate_filter_columns(df: pd.DataFrame, max_cols: int = 80) -> List[str]
 
 
 def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame) -> Dict[str, Any]:
-    """v110：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
+    """v111：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return _default_table_view(df)
     if not bool(st.session_state.get("godpick_table_filter_sort_enabled", True)):
@@ -603,7 +603,7 @@ def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame
     cols = list(clean.columns)
     current = get_table_view_config(table_key, clean)
 
-    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v110", expanded=False):
+    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v111", expanded=False):
         st.caption("輸入篩選、排序或勾選條件時不重算資料；只有按『套用並永久記錄』後，才套用到目前表格顯示。")
         with st.form(key=f"{safe_key}_table_view_form_v105", clear_on_submit=False):
             c1, c2, c3, c4 = st.columns([1.3, 1.4, 1.1, 0.8])
@@ -752,7 +752,7 @@ def install_global_table_patch(page_key: str = "global") -> None:
                 data = apply_table_view(data, table_key)
             except Exception as exc:
                 try:
-                    st.caption(f"v110 表格篩選排序略過：{exc}")
+                    st.caption(f"v111 表格篩選排序略過：{exc}")
                 except Exception:
                     pass
         return original_dataframe(data, *args, **kwargs)
@@ -859,7 +859,7 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
 
 
 # =========================================================
-# v110：重型頁面防卡設定
+# v111：重型頁面防卡設定
 # =========================================================
 # 這些頁面通常包含大量資料抓取、K線圖、推薦掃描、績效回補或 GitHub/Firestore 同步。
 # 全域 monkey patch 表格管理若在進頁時自動攔截，會讓尚未按「推薦 / 更新 / 套用」就開始建立大量 widget，
@@ -899,9 +899,8 @@ def _heavy_page_force_enabled(page_key: str = "") -> bool:
 def _render_heavy_page_guard(page_key: str = "") -> bool:
     """回傳 True 代表本頁允許安裝全域攔截；False 代表防卡暫停並復原舊攔截。
 
-    v110：不再於這裡單獨顯示「重型模組防卡模式」expander。
-    之前 app_auth / 頁面本身重複呼叫 install_auto_column_manager() 時，
-    會出現兩個重型防卡區塊。現在只在單一「表格管理」面板內顯示狀態。
+    v111：防卡邏輯與顯示分離。這裡只負責判斷與還原 monkey patch；
+    側邊欄只由 _render_heavy_guard_sidebar_once() 顯示一次，避免完全消失或重複出現。
     """
     if not _is_heavy_auto_patch_page(page_key):
         st.session_state["_godpick_heavy_guard_status_v110"] = {"heavy": False, "restored": False, "page_key": str(page_key or "global")}
@@ -916,8 +915,44 @@ def _render_heavy_page_guard(page_key: str = "") -> bool:
     st.session_state["_godpick_heavy_guard_status_v110"] = {"heavy": True, "enabled": False, "restored": bool(restored), "page_key": str(page_key or "global")}
     return False
 
+
+
+def _render_heavy_guard_sidebar_once(page_key: str = "") -> None:
+    """v111：側邊欄只顯示一個「重型模組防卡模式」。
+
+    v110 把防卡狀態整合進表格管理，使用者會以為防卡模式消失；
+    v111 改回獨立面板，但用 session flag 去重，避免 v108 那種重複兩個區塊。
+    """
+    try:
+        if bool(st.session_state.get("_godpick_heavy_guard_sidebar_rendered_this_run_v111", False)):
+            return
+        guard_status = st.session_state.get("_godpick_heavy_guard_status_v110", {})
+        if not isinstance(guard_status, dict) or not guard_status.get("heavy"):
+            return
+        st.session_state["_godpick_heavy_guard_sidebar_rendered_this_run_v111"] = True
+        safe_guard = _key_safe(str(guard_status.get("page_key") or page_key or "global"))
+        with st.sidebar.expander("⚡ 重型模組防卡模式｜v111", expanded=False):
+            st.caption("重型頁面預設不自動攔截所有表格，避免進頁就卡住；需要表格篩選排序時，可本次手動啟用。")
+            if guard_status.get("enabled"):
+                st.warning("本頁已手動啟用全域表格管理；若進頁或操作變慢，請恢復防卡。")
+                if st.button("恢復防卡並重新整理", key=f"{safe_guard}_restore_heavy_guard_v111", use_container_width=True):
+                    st.session_state[f"godpick_force_auto_table_patch_{safe_guard}"] = False
+                    uninstall_global_table_patch()
+                    st.rerun()
+            else:
+                st.success("防卡已啟用：本頁不會自動攔截所有 st.dataframe / st.data_editor。")
+                if guard_status.get("restored"):
+                    st.info("已清除上一頁殘留的表格攔截。")
+                if st.button("本次手動啟用全域表格管理", key=f"{safe_guard}_force_auto_table_patch_v111", use_container_width=True):
+                    st.session_state[f"godpick_force_auto_table_patch_{safe_guard}"] = True
+                    st.rerun()
+            st.caption("說明：重型防卡只影響全域表格攔截，不會停用各頁本身的更新、推薦、績效或同步功能。")
+    except Exception:
+        return
+
+
 # =========================================================
-# v110：全域表格管理設定（永久保存）
+# v111：全域表格管理設定（永久保存）
 # =========================================================
 def _default_global_options() -> Dict[str, Any]:
     return {
@@ -963,7 +998,7 @@ def hydrate_global_table_options_once() -> Dict[str, Any]:
     return opts
 
 def install_auto_column_manager(page_key: str) -> None:
-    """v110：統一表格管理入口。
+    """v111：統一表格管理入口。
 
     修正重點：
     - 同一頁被 app_auth 與頁面本身重複呼叫時，側邊欄只顯示一次。
@@ -976,7 +1011,7 @@ def install_auto_column_manager(page_key: str) -> None:
     except Exception:
         pass
 
-    # v110：所有重型頁面預設不自動攔截所有 st.dataframe / st.data_editor，並復原上一頁殘留 patch。
+    # v111：所有重型頁面預設不自動攔截所有 st.dataframe / st.data_editor，並復原上一頁殘留 patch。
     # 避免使用者只是點進頁面，尚未按「推薦 / 更新 / 套用」就因全域表格管理產生大量 widget 而卡住。
     allow_auto_patch = _render_heavy_page_guard(page_key)
     if allow_auto_patch:
@@ -987,13 +1022,16 @@ def install_auto_column_manager(page_key: str) -> None:
 
     # v106：避免同一頁面出現兩個一模一樣的「表格管理」區塊。
     # app_auth 會在每次 require_login() 時重置此旗標；同一次 rerun 內第二次呼叫會被跳過。
+    # v111：重型防卡模式獨立顯示一次；不是拿掉，也不重複。
+    _render_heavy_guard_sidebar_once(page_key)
+
     if bool(st.session_state.get("_godpick_table_sidebar_rendered_this_run_v110", False)):
         return None
     st.session_state["_godpick_table_sidebar_rendered_this_run_v110"] = True
 
     try:
         opts = get_global_table_options()
-        with st.sidebar.expander("🧩 表格管理｜v110 篩選排序＋欄位＋勾選延後", expanded=False):
+        with st.sidebar.expander("🧩 表格管理｜v111 篩選排序＋欄位＋勾選延後", expanded=False):
             st.caption("每個模組 / 每張表格獨立保存；勾選、篩選、排序、欄位設定都要按套用才生效。")
             guard_status = st.session_state.get("_godpick_heavy_guard_status_v110", {})
             if isinstance(guard_status, dict) and guard_status.get("heavy"):
@@ -1049,7 +1087,7 @@ def install_auto_column_manager(page_key: str) -> None:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-            st.caption("v110：重型防卡狀態整合在本面板，不再另外出現重複的『重型模組防卡模式』。各表格自己的篩選 / 排序 / 欄位順序仍可永久套用。")
+            st.caption("v111：表格管理只管篩選 / 排序 / 欄位 / 勾選延後；重型防卡狀態改由單一『重型模組防卡模式』面板顯示。")
     except Exception:
         pass
     return None

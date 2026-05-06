@@ -300,6 +300,7 @@ def _install_v105_table_manager() -> None:
         # v110：每次頁面 rerun / require_login 時先重置側邊欄去重旗標，
         # 確保本次 rerun 只顯示一次「表格管理」，下一次 rerun 仍會正常顯示。
         st.session_state["_godpick_table_sidebar_rendered_this_run_v110"] = False
+        st.session_state["_godpick_heavy_guard_sidebar_rendered_this_run_v111"] = False
         from godpick_column_manager import install_auto_column_manager
         install_auto_column_manager(_detect_current_page_key_for_table_manager())
     except Exception:
