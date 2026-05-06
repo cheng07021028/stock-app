@@ -306,6 +306,7 @@ def update_recommendation_perf_fast_v77(
     max_workers: int = 16,
     stale_minutes: int = 60,
     track_days: List[int] | None = None,
+    process_all: bool = False,
 ) -> Dict[str, Any]:
     """
     直接更新專案根目錄 JSON 紀錄。
@@ -326,6 +327,8 @@ def update_recommendation_perf_fast_v77(
         "fail": 0,
         "updated_files": [],
         "messages": [],
+        "process_all": bool(process_all),
+        "batches": 0,
     }
 
     root = Path(".")
@@ -340,9 +343,10 @@ def update_recommendation_perf_fast_v77(
         summary["processed_files"].append(fn)
         summary["total_records"] += len(records)
 
-        # 從最新的資料開始處理，避免一次跑太久
+        # V102：process_all=True 時掃描整份資料；max_records 僅在非完整更新模式下當掃描上限。
         indexed = list(enumerate(records))
-        indexed = indexed[-int(max_records):] if max_records else indexed
+        if (not process_all) and max_records:
+            indexed = indexed[-int(max_records):]
 
         for idx, row in indexed:
             if _needs_update(row, stale_minutes=stale_minutes):
@@ -350,12 +354,20 @@ def update_recommendation_perf_fast_v77(
                 if code:
                     all_work_items.append((fn, idx, code))
 
-    # 去重並限制本次抓取數量
-    all_work_items = all_work_items[: int(batch_limit or 60)]
+    # V102：batch_limit 是每批股票數，不是總上限；process_all=False 時仍保留舊防卡限制。
+    if not process_all:
+        all_work_items = all_work_items[: int(batch_limit or 60)]
     summary["candidates"] = len(all_work_items)
 
-    codes = [x[2] for x in all_work_items]
-    quotes = fetch_latest_quotes_fast_v77(codes, max_workers=max_workers)
+    codes = sorted(set(x[2] for x in all_work_items))
+    quotes = {}
+    chunk_size = max(1, int(batch_limit or 60))
+    for start_i in range(0, len(codes), chunk_size):
+        chunk = codes[start_i:start_i + chunk_size]
+        if not chunk:
+            continue
+        summary["batches"] += 1
+        quotes.update(fetch_latest_quotes_fast_v77(chunk, max_workers=max_workers))
 
     # 回寫各檔
     by_file: Dict[str, List[Tuple[int, str]]] = {}
