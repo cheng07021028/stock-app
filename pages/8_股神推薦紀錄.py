@@ -333,6 +333,43 @@ def _set_status(msg: str, level: str = "info"):
     st.session_state[_k("status_type")] = level
 
 
+def _add_action_result(action: str, ok: bool, message: str, detail: str = ""):
+    """v104：五個主操作按鈕都要留下明確結果，成功/失敗都顯示。"""
+    try:
+        rows = st.session_state.get(_k("action_results"), [])
+        if not isinstance(rows, list):
+            rows = []
+        rows.insert(0, {
+            "時間": _now_text(),
+            "操作": _safe_str(action),
+            "結果": "成功" if ok else "失敗",
+            "訊息": _safe_str(message),
+            "明細": _safe_str(detail),
+        })
+        st.session_state[_k("action_results")] = rows[:10]
+    except Exception:
+        pass
+
+
+def _render_action_results():
+    """v104：固定顯示最近操作結果，避免按鈕失敗時使用者不知道原因。"""
+    rows = st.session_state.get(_k("action_results"), [])
+    if not rows:
+        st.info("v104：主操作結果會顯示在這裡：重新載入、更新最新價、儲存同步、清除快取、更新推薦後績效。")
+        return
+    latest = rows[0]
+    msg = f"{latest.get('操作', '')}｜{latest.get('結果', '')}｜{latest.get('訊息', '')}"
+    if latest.get("結果") == "成功":
+        st.success(msg)
+    else:
+        st.error(msg)
+    with st.expander("最近主操作結果明細（成功 / 失敗都保留）", expanded=False):
+        try:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        except Exception:
+            st.write(rows)
+
+
 def _github_config() -> dict[str, str]:
     return {
         "token": _safe_str(st.secrets.get("GITHUB_TOKEN", "")),
@@ -3634,7 +3671,7 @@ def main():
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
-    st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION}")
+    st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V104 主操作結果顯示版")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -3651,88 +3688,138 @@ def main():
     top_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.2, 1.4, 2.0])
     with top_cols[0]:
         if st.button("🔄 重新載入", use_container_width=True):
-            df = _load_records()
-            _save_state_df(df)
-            _load_ui_config_once()
-            _set_status("推薦紀錄已重新載入", "success")
+            try:
+                df = _load_records()
+                _save_state_df(df)
+                _load_ui_config_once()
+                msg = f"推薦紀錄已重新載入，共 {len(df) if df is not None else 0} 筆。"
+                _set_status(msg, "success")
+                _add_action_result("重新載入", True, msg)
+            except Exception as e:
+                msg = f"重新載入失敗：{e}"
+                _set_status(msg, "error")
+                _add_action_result("重新載入", False, msg)
             st.rerun()
     with top_cols[1]:
         if st.button("📈 更新最新價", use_container_width=True):
-            df = _get_state_df()
-            before_sig = _df_signature(df)
-            with st.spinner("V103：快速批次更新完整份最新價中；失敗股票保留舊價，不逐檔慢查..."):
-                df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
-            after_sig = _df_signature(df)
-            if before_sig != after_sig:
-                df = _apply_mode_labels(df)
-            _save_state_df(df)
-            summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
-            _set_status(
-                f"V103 最新價更新完成：符合條件共 {summary.get('target', 0)} 筆，分 {summary.get('batches', 0)} 批處理，每批 {summary.get('batch_size', 0)} 筆；成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
-                "success" if int(summary.get('success', 0) or 0) > 0 else "warning",
-            )
+            try:
+                df = _get_state_df()
+                before_sig = _df_signature(df)
+                with st.spinner("V104：快速批次更新完整份最新價中；失敗股票保留舊價，不逐檔慢查..."):
+                    df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
+                after_sig = _df_signature(df)
+                if before_sig != after_sig:
+                    df = _apply_mode_labels(df)
+                _save_state_df(df)
+                summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
+                msg = (
+                    f"V104 最新價更新完成：符合條件共 {summary.get('target', 0)} 筆，"
+                    f"分 {summary.get('batches', 0)} 批，每批 {summary.get('batch_size', 0)} 筆；"
+                    f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，"
+                    f"保留舊價 {summary.get('preserved_old_price', 0)} 筆。尚未同步，確認後請按『儲存同步』。"
+                )
+                ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('target', 0) or 0) == 0
+                _set_status(msg, "success" if ok else "warning")
+                _add_action_result("更新最新價", ok, msg, str(summary))
+            except Exception as e:
+                msg = f"更新最新價失敗：{e}"
+                _set_status(msg, "error")
+                _add_action_result("更新最新價", False, msg)
             st.rerun()
     with top_cols[2]:
         if st.button("💾 儲存同步", use_container_width=True):
-            latest_df = _get_state_df()
-            latest_df = _apply_mode_labels(latest_df)
-            _save_state_df(latest_df)
-            ok = _save_records_dual(latest_df)
-            if ok:
-                st.rerun()
+            try:
+                latest_df = _get_state_df()
+                latest_df = _apply_mode_labels(latest_df)
+                _save_state_df(latest_df)
+                ok = _save_records_dual(latest_df)
+                msg = f"儲存同步{'成功' if ok else '失敗'}：目前資料 {len(latest_df) if latest_df is not None else 0} 筆。"
+                _set_status(msg, "success" if ok else "error")
+                _add_action_result("儲存同步", bool(ok), msg)
+            except Exception as e:
+                msg = f"儲存同步失敗：{e}"
+                _set_status(msg, "error")
+                _add_action_result("儲存同步", False, msg)
+            st.rerun()
     with top_cols[3]:
         if st.button("🧹 清除快取", use_container_width=True):
             try:
-                _get_latest_close.clear()
-                _get_forward_return.clear()
-                _get_forward_metrics.clear()
-                _get_perf_history_bundle.clear()
-            except Exception:
-                pass
-            try:
-                st.session_state.pop(_k("v71_perf_history_cache"), None)
-                _safe_json_write_local(PERF_HISTORY_CACHE_FILE, {"version": "v71", "history": {}, "fail": {}, "updated_at": _now_text()})
-            except Exception:
-                pass
-            _invalidate_analysis_cache()
-            st.success("快取已清除")
+                cleared = []
+                try:
+                    _get_latest_close.clear(); cleared.append("最新收盤價")
+                except Exception as e:
+                    cleared.append(f"最新收盤價清除失敗:{e}")
+                try:
+                    _get_forward_return.clear(); cleared.append("推薦後報酬")
+                except Exception as e:
+                    cleared.append(f"推薦後報酬清除失敗:{e}")
+                try:
+                    _get_forward_metrics.clear(); cleared.append("推薦後績效指標")
+                except Exception as e:
+                    cleared.append(f"推薦後績效指標清除失敗:{e}")
+                try:
+                    _get_perf_history_bundle.clear(); cleared.append("歷史績效包")
+                except Exception as e:
+                    cleared.append(f"歷史績效包清除失敗:{e}")
+                try:
+                    st.session_state.pop(_k("v71_perf_history_cache"), None)
+                    _safe_json_write_local(PERF_HISTORY_CACHE_FILE, {"version": "v71", "history": {}, "fail": {}, "updated_at": _now_text()})
+                    cleared.append("本機績效快取檔")
+                except Exception as e:
+                    cleared.append(f"本機績效快取檔清除失敗:{e}")
+                _invalidate_analysis_cache()
+                msg = "快取已清除：" + "、".join(cleared)
+                _set_status(msg, "success")
+                _add_action_result("清除快取", True, msg)
+            except Exception as e:
+                msg = f"清除快取失敗：{e}"
+                _set_status(msg, "error")
+                _add_action_result("清除快取", False, msg)
+            st.rerun()
     with top_cols[4]:
         batch_n = st.number_input("績效每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
         max_stock_n = st.number_input("績效每批股票數", min_value=3, max_value=80, value=30, step=1, key=_k("perf_update_stock_limit"))
         st.caption("V103：這些數字是每批處理量，不是總上限；按下後會跑完整份符合條件的資料。ONLINE_FAIL 不拖住整批。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
-            with st.spinner("V77：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
-                summary = update_recommendation_perf_fast_v77(
-                    json_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
-                    max_records=0,
-                    batch_limit=int(max_stock_n),
-                    max_workers=12,
-                    stale_minutes=60,
-                    process_all=True,
-                )
-                try:
-                    refreshed = _load_records()
-                    if refreshed is not None and not refreshed.empty:
-                        refreshed = _apply_mode_labels(refreshed)
-                        _save_state_df(refreshed)
-                except Exception as _v77_reload_e:
-                    st.warning(f"V77 已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}")
+            try:
+                with st.spinner("V104：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
+                    summary = update_recommendation_perf_fast_v77(
+                        json_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
+                        max_records=0,
+                        batch_limit=int(max_stock_n),
+                        max_workers=12,
+                        stale_minutes=60,
+                        process_all=True,
+                    )
+                    reload_msg = ""
+                    try:
+                        refreshed = _load_records()
+                        if refreshed is not None and not refreshed.empty:
+                            refreshed = _apply_mode_labels(refreshed)
+                            _save_state_df(refreshed)
+                            reload_msg = f"重新載入 {len(refreshed)} 筆。"
+                    except Exception as _v77_reload_e:
+                        reload_msg = f"已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}"
 
-            st.success(
-                f"V102 已完成完整份績效更新：候選 {summary.get('candidates', 0)} 筆，"
-                f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
-                f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。"
-            )
-            if summary.get("messages"):
-                st.info("；".join(summary.get("messages", [])))
-            if summary.get("fail", 0):
-                st.warning("部分股票線上抓取失敗，V77 已略過並保留原資料，不會拖住整批。")
+                msg = (
+                    f"V104 已完成完整份績效更新：候選 {summary.get('candidates', 0)} 筆，"
+                    f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
+                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}"
+                )
+                detail = "；".join(summary.get("messages", [])) if summary.get("messages") else str(summary)
+                ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('fail', 0) or 0) == 0
+                _set_status(msg, "success" if ok else "warning")
+                _add_action_result("更新推薦後績效", ok, msg, detail)
+            except Exception as e:
+                msg = f"更新推薦後績效失敗：{e}"
+                _set_status(msg, "error")
+                _add_action_result("更新推薦後績效", False, msg)
             st.rerun()
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
         st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=120, step=10, key=_k("latest_price_batch_size"))
-        st.caption("V103：這是每批處理筆數，不是總上限；預設只跑批次來源，失敗保留舊價，避免逐檔慢查卡住。")
+        st.caption("V104：這是每批處理筆數，不是總上限；預設只跑批次來源，失敗保留舊價；五個主按鈕成功/失敗都會顯示結果。")
         st.toggle("慢速備援補缺口（Yahoo/歷史逐檔，較慢）", value=False, key=_k("enable_slow_price_fallback"), help="只有批次來源抓不到、又真的要補缺口時才開。預設關閉，避免 Streamlit Cloud 卡很久。")
         st.number_input("慢速備援最多補幾檔 / 每批", min_value=0, max_value=100, value=20, step=5, key=_k("slow_price_fallback_limit"))
     with top_cols[6]:
@@ -3742,6 +3829,8 @@ def main():
             f"自選股：{'✅' if _safe_str(_watchlist_github_config().get('token')) else '❌'} ｜ "
             f"UI設定：{'✅' if _safe_str(_ui_config_github_config().get('token')) else '❌'}"
         )
+
+    _render_action_results()
 
     df = _get_state_df()
     if df.empty:
