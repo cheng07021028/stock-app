@@ -566,5 +566,30 @@
       "market": "上市"
     }
   ],
-  "0507": []
+  "0507": [
+    {
+      "code": "3023",
+      "name": "信邦",
+      "market": "上市",
+      "category": "連接器"
+    },
+    {
+      "code": "3034",
+      "name": "聯詠",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
+      "code": "3122",
+      "name": "笙泉",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6526",
+      "name": "達發",
+      "market": "上市",
+      "category": "半導體業"
+    }
+  ]
 }
