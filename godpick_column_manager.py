@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v112：欄位順序管理明確顯示 + 重型頁套用後啟用版
+v114：表格管理全選 / 取消全選 + 勾選延後套用版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v112"
+CONFIG_VERSION = "v114"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -592,7 +592,7 @@ def _candidate_filter_columns(df: pd.DataFrame, max_cols: int = 80) -> List[str]
 
 
 def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame) -> Dict[str, Any]:
-    """v112：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
+    """v114：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return _default_table_view(df)
     if not bool(st.session_state.get("godpick_table_filter_sort_enabled", True)):
@@ -603,7 +603,7 @@ def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame
     cols = list(clean.columns)
     current = get_table_view_config(table_key, clean)
 
-    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v112", expanded=False):
+    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v114", expanded=False):
         st.caption("輸入篩選、排序或勾選條件時不重算資料；只有按『套用並永久記錄』後，才套用到目前表格顯示。")
         with st.form(key=f"{safe_key}_table_view_form_v105", clear_on_submit=False):
             c1, c2, c3, c4 = st.columns([1.3, 1.4, 1.1, 0.8])
@@ -691,19 +691,114 @@ def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame
     return current
 
 
-def _has_checkbox_like_column(df: pd.DataFrame) -> bool:
+def _checkbox_like_columns(df: pd.DataFrame) -> List[str]:
+    """找出可批次全選 / 取消全選的欄位。
+
+    v114 原則：
+    - bool 欄位可批次處理。
+    - 欄名含「勾選 / 選取 / 匯入 / 刪除 / 加入 / check / select」也可處理。
+    - 不會直接回傳給主程式；只改本表格草稿，按「套用勾選 / 編輯結果」後才生效。
+    """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return False
+        return []
+    out: List[str] = []
     for c in df.columns:
         name = str(c)
+        is_bool = False
         try:
-            if str(df[c].dtype) == "bool":
-                return True
+            is_bool = str(df[c].dtype) == "bool"
         except Exception:
-            pass
-        if any(k in name for k in ["勾選", "選取", "匯入", "刪除", "加入", "check", "select"]):
-            return True
-    return False
+            is_bool = False
+        name_hit = any(k in name for k in ["勾選", "選取", "匯入", "刪除", "加入", "check", "select"])
+        if is_bool or name_hit:
+            out.append(c)
+    return out
+
+
+def _has_checkbox_like_column(df: pd.DataFrame) -> bool:
+    return bool(_checkbox_like_columns(df))
+
+
+def _default_checkbox_column(cols: List[str]) -> str:
+    if not cols:
+        return ""
+    priority = ["勾選", "選取", "匯入", "加入", "刪除", "check", "select"]
+    for p in priority:
+        for c in cols:
+            if p in str(c):
+                return c
+    return cols[0]
+
+
+def _same_table_shape(a: Any, b: pd.DataFrame) -> bool:
+    if not isinstance(a, pd.DataFrame) or not isinstance(b, pd.DataFrame):
+        return False
+    try:
+        return list(a.columns) == list(b.columns) and list(a.index) == list(b.index)
+    except Exception:
+        return False
+
+
+def render_checkbox_bulk_controls(table_key: str, table_label: str, df: pd.DataFrame) -> pd.DataFrame:
+    """v114：在含勾選欄位的表格上方加入全選 / 取消全選。
+
+    只操作目前表格顯示的 df 草稿，不執行匯入 / 刪除 / 同步 / 推薦重算。
+    真正回傳給原頁面，仍要按 data_editor 下方的「套用勾選 / 編輯結果」。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    checkbox_cols = _checkbox_like_columns(df)
+    if not checkbox_cols:
+        return df
+
+    safe_key = _key_safe(table_key)
+    draft_key = f"{safe_key}_checkbox_draft_df_v114"
+    col_key = f"{safe_key}_checkbox_target_col_v114"
+
+    working = df.copy()
+    draft = st.session_state.get(draft_key)
+    if _same_table_shape(draft, working):
+        # 只帶回勾選欄位，避免把舊草稿中的其他欄位覆蓋新資料。
+        for c in checkbox_cols:
+            if c in draft.columns and c in working.columns:
+                working[c] = draft[c].values
+
+    default_col = st.session_state.get(col_key, _default_checkbox_column(checkbox_cols))
+    if default_col not in checkbox_cols:
+        default_col = _default_checkbox_column(checkbox_cols)
+
+    with st.container():
+        c0, c1, c2, c3 = st.columns([1.5, 1, 1, 2])
+        with c0:
+            if len(checkbox_cols) > 1:
+                target_col = st.selectbox(
+                    "批次勾選欄位",
+                    options=checkbox_cols,
+                    index=checkbox_cols.index(default_col) if default_col in checkbox_cols else 0,
+                    key=col_key,
+                    help="選擇要全選 / 取消全選的勾選欄位；此動作只改草稿，不會立即匯入或刪除。",
+                )
+            else:
+                target_col = checkbox_cols[0]
+                st.caption(f"批次勾選欄位：{target_col}")
+        with c1:
+            select_all = st.button("✅ 勾選全選", key=f"{safe_key}_select_all_v114", use_container_width=True)
+        with c2:
+            clear_all = st.button("⬜ 全部取消", key=f"{safe_key}_clear_all_v114", use_container_width=True)
+        with c3:
+            st.caption("v114：全選/取消只修改目前顯示草稿；仍需按下方『套用勾選 / 編輯結果』才生效。")
+
+    if select_all or clear_all:
+        try:
+            working[target_col] = bool(select_all)
+            st.session_state[draft_key] = working.copy()
+            st.success(f"{table_label}：{target_col} 已{'全選' if select_all else '全部取消'}；尚未觸發主流程，請再按『套用勾選 / 編輯結果』。")
+        except Exception as exc:
+            st.warning(f"批次勾選失敗：{exc}")
+    else:
+        st.session_state[draft_key] = working.copy()
+
+    return working
 
 
 def _merge_edited_subset(original: pd.DataFrame, edited_subset: pd.DataFrame) -> pd.DataFrame:
@@ -752,7 +847,7 @@ def install_global_table_patch(page_key: str = "global") -> None:
                 data = apply_table_view(data, table_key)
             except Exception as exc:
                 try:
-                    st.caption(f"v112 表格篩選排序略過：{exc}")
+                    st.caption(f"v114 表格篩選排序略過：{exc}")
                 except Exception:
                     pass
         return original_dataframe(data, *args, **kwargs)
@@ -771,11 +866,13 @@ def install_global_table_patch(page_key: str = "global") -> None:
         except Exception:
             show_df = original_df
 
-        # 有勾選 / 選取欄位時，放入 form：勾選過程不回傳給主程式，按套用後才生效。
+        # 有勾選 / 選取欄位時，加入全選 / 取消全選，並放入 form：
+        # 勾選過程不回傳給主程式，按套用後才生效。
         if _has_checkbox_like_column(show_df):
-            applied_key = f"{table_key}_applied_editor_df_v105"
-            form_key = f"{table_key}_deferred_editor_form_v105"
+            applied_key = f"{table_key}_applied_editor_df_v114"
+            form_key = f"{table_key}_deferred_editor_form_v114"
             try:
+                show_df = render_checkbox_bulk_controls(table_key, table_label, show_df)
                 with st.form(form_key, clear_on_submit=False):
                     edited_show = original_data_editor(show_df, *args, **kwargs)
                     submitted = st.form_submit_button("✅ 套用勾選 / 編輯結果", type="primary", use_container_width=True)
@@ -789,7 +886,11 @@ def install_global_table_patch(page_key: str = "global") -> None:
                     return saved
                 return original_df
             except Exception:
-                # 若原頁面已在 form 中，避免 nested form 錯誤，退回普通 editor。
+                # 若原頁面已在 form 中，避免 nested form 錯誤，退回普通 editor；仍保留全選草稿後的顯示。
+                try:
+                    show_df = render_checkbox_bulk_controls(table_key, table_label, show_df)
+                except Exception:
+                    pass
                 edited_show = original_data_editor(show_df, *args, **kwargs)
                 return _merge_edited_subset(original_df, edited_show)
         edited_show = original_data_editor(show_df, *args, **kwargs)
@@ -850,6 +951,30 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
     if isinstance(cfg, dict):
         kwargs["column_config"] = {k: v for k, v in cfg.items() if k in show.columns}
     kwargs["_godpick_bypass"] = True
+
+    if _has_checkbox_like_column(show):
+        safe_key = _key_safe(table_key)
+        applied_key = f"{safe_key}_managed_applied_editor_df_v114"
+        form_key = f"{safe_key}_managed_deferred_editor_form_v114"
+        show = render_checkbox_bulk_controls(table_key, table_label, show)
+        try:
+            with st.form(form_key, clear_on_submit=False):
+                edited = st.data_editor(show, **kwargs)
+                submitted = st.form_submit_button("✅ 套用勾選 / 編輯結果", type="primary", use_container_width=True)
+            if submitted and isinstance(edited, pd.DataFrame):
+                merged = _merge_edited_subset(original, edited)
+                st.session_state[applied_key] = merged
+                st.success(f"{table_label} 勾選 / 編輯結果已套用；套用前不會觸發匯入、刪除或重算。")
+                return merged
+            saved = st.session_state.get(applied_key)
+            if isinstance(saved, pd.DataFrame) and list(saved.columns) == list(original.columns):
+                return saved
+            return original
+        except Exception:
+            # 原頁若已經包在 form 內，不能再巢狀 form；退回普通 editor，但全選/取消草稿仍可顯示。
+            edited = st.data_editor(show, **kwargs)
+            return _merge_edited_subset(original, edited) if isinstance(edited, pd.DataFrame) else edited
+
     edited = st.data_editor(show, **kwargs)
     return _merge_edited_subset(original, edited) if isinstance(edited, pd.DataFrame) else edited
 
@@ -1104,7 +1229,7 @@ def install_auto_column_manager(page_key: str) -> None:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-            st.caption("v112：欄位順序管理沒有移除；需先勾選「啟用欄位順序管理模式」並按套用，才會在各表格上方顯示欄位順序調整器。")
+            st.caption("v114：欄位順序管理沒有移除；勾選欄位表格新增「全選 / 取消全選」，但仍需按套用才回傳給主程式。")
     except Exception:
         pass
     return None
