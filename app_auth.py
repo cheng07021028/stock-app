@@ -46,8 +46,6 @@ def _default_auth_config() -> Dict[str, Any]:
                 "role": "admin",
                 "enabled": True,
                 "display_name": "系統管理員",
-                "password_plain": "0000",
-                "password_note": "預設密碼，可由管理員修改",
                 "created_at": _now_text(),
                 "updated_at": _now_text(),
             }
@@ -277,69 +275,30 @@ def logout() -> None:
 
 
 
-# =========================================================
-# v90：自訂側邊欄導覽
-# 說明：Streamlit 預設多頁導覽會把 15_帳號管理.py 的數字前綴隱藏，
-#       造成側邊欄只顯示「帳號管理」。本段會隱藏預設導覽，改用
-#       st.page_link 顯示固定編號，檔名仍維持 pages/15_帳號管理.py。
-# =========================================================
-def _inject_hide_default_streamlit_nav() -> None:
-    try:
-        st.markdown(
-            """
-            <style>
-            [data-testid="stSidebarNav"] {display: none !important;}
-            section[data-testid="stSidebar"] div[data-testid="stSidebarNav"] {display: none !important;}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    except Exception:
-        pass
+def _install_v105_table_manager() -> None:
+    """登入後自動啟用全系統表格管理。
 
-
-def render_numbered_sidebar_nav() -> None:
-    """顯示帶編號的固定側邊欄，避免 Streamlit 自動移除檔名前綴。"""
-    _inject_hide_default_streamlit_nav()
-    pages = [
-        ("streamlit_app.py", "首頁"),
-        ("pages/0_大盤走勢.py", "00. 大盤走勢"),
-        ("pages/1_儀表板.py", "01. 儀表板"),
-        ("pages/2_行情查詢.py", "02. 行情查詢"),
-        ("pages/3_歷史K線分析.py", "03. 歷史K線分析"),
-        ("pages/4_自選股中心.py", "04. 自選股中心"),
-        ("pages/5_排行榜.py", "05. 排行榜"),
-        ("pages/6_多股比較.py", "06. 多股比較"),
-        ("pages/7_股神推薦.py", "07. 股神推薦"),
-        ("pages/8_股神推薦紀錄.py", "08. 股神推薦紀錄"),
-        ("pages/9_股票主檔更新.py", "09. 股票主檔更新"),
-        ("pages/10_推薦清單.py", "10. 推薦清單"),
-        ("pages/11_資料診斷.py", "11. 資料診斷"),
-        ("pages/12_股神管理中心.py", "12. 股神管理中心"),
-        ("pages/14_股神權重校正.py", "14. 股神權重校正"),
-        ("pages/15_帳號管理.py", "15. 帳號管理"),
-    ]
+    目的：不逐頁改程式，也能讓所有 st.dataframe / st.data_editor 具備：
+    - 篩選 / 排序 / 顯示筆數永久記錄
+    - 勾選欄位延後套用
+    - 不因輸入欄位或勾選而重跑推薦 / 重新抓資料
+    """
     try:
-        st.sidebar.markdown("### 功能選單")
-        for target, label in pages:
-            try:
-                st.sidebar.page_link(target, label=label)
-            except Exception:
-                # 若某頁在當前部署尚未存在，不讓整個帳號系統中斷。
-                continue
-        st.sidebar.markdown("---")
+        from godpick_column_manager import install_auto_column_manager
+        install_auto_column_manager("global")
     except Exception:
+        # 表格管理不可影響登入與主功能
         pass
 
 
 def require_login() -> bool:
     cfg = _load_auth_config()
     if str(cfg.get("auth_enabled", True)).lower() in ("false", "0", "no", "off"):
+        _install_v105_table_manager()
         return True
 
     if is_logged_in():
         try:
-            render_numbered_sidebar_nav()
             with st.sidebar:
                 st.caption(f"登入帳號：{current_user()}｜{current_role()}")
                 src = _safe_str(st.session_state.get("auth_config_source"))
@@ -349,6 +308,7 @@ def require_login() -> bool:
                     logout()
         except Exception:
             pass
+        _install_v105_table_manager()
         return True
 
     st.title("系統登入")
@@ -430,11 +390,6 @@ def change_password(username: str, old_password: str, new_password: str) -> Tupl
     user.pop("password", None)
     user.pop("pwd", None)
     user["password_hash"] = _sha256(new_password)
-    # v87：依使用者需求，帳號管理頁需可檢視已建立帳號密碼。
-    # 注意：這會把密碼明文寫入 auth_config.json / GitHub，僅建議內部封閉系統使用。
-    user["password_plain"] = str(new_password)
-    user["password_note"] = "v87 起由系統保存明文，供管理員查閱"
-    user["password_visible_updated_at"] = _now_text()
     user["updated_at"] = _now_text()
 
     return _save_auth_config(cfg)
@@ -468,11 +423,6 @@ def admin_set_user(
         new_user.pop("password", None)
         new_user.pop("pwd", None)
         new_user["password_hash"] = _sha256(password)
-        # v87：新建 / 重設密碼時同步保存明文，讓帳號管理頁可以看到已建立帳密。
-        # 既有舊帳號若沒有 password_plain，無法從 SHA256 反解，請在帳號管理頁重設一次。
-        new_user["password_plain"] = str(password)
-        new_user["password_note"] = "v87 起由系統保存明文，供管理員查閱"
-        new_user["password_visible_updated_at"] = _now_text()
 
     new_user["role"] = role or old_user.get("role") or "user"
     new_user["enabled"] = bool(enabled)
@@ -510,9 +460,6 @@ def reset_admin_password_to_0000() -> bool:
         "role": "admin",
         "enabled": True,
         "display_name": "系統管理員",
-        "password_plain": "0000",
-        "password_note": "緊急重設密碼",
-        "password_visible_updated_at": _now_text(),
         "updated_at": _now_text(),
         "created_at": users.get("admin", {}).get("created_at", _now_text()) if isinstance(users.get("admin"), dict) else _now_text(),
     }

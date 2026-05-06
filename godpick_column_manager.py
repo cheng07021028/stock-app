@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v46：推薦清單主表欄位管理修正版
+v105：全系統表格篩選排序 + 勾選延後套用版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v48"
+CONFIG_VERSION = "v105"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -456,50 +456,405 @@ def apply_columns(df: pd.DataFrame, table_key: str, default_cols: Iterable[str],
     return out
 
 
+
+# =========================================================
+# v105：全系統表格篩選 / 排序 / 勾選延後套用
+# =========================================================
+def _view_profiles(config: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    views = config.setdefault("table_views", {})
+    if not isinstance(views, dict):
+        config["table_views"] = {}
+        views = config["table_views"]
+    return views
+
+
+def _default_table_view(df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    cols = list(df.columns) if isinstance(df, pd.DataFrame) else []
+    return {
+        "keyword": "",
+        "keyword_columns": [],
+        "filters": {},
+        "sort_column": "",
+        "sort_ascending": False,
+        "limit_rows": 0,
+        "updated_at": "",
+    }
+
+
+def get_table_view_config(table_key: str, df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    cfg = load_column_config()
+    views = cfg.get("table_views", {}) if isinstance(cfg.get("table_views", {}), dict) else {}
+    raw = views.get(table_key, {}) if isinstance(views, dict) else {}
+    view = _default_table_view(df)
+    if isinstance(raw, dict):
+        view.update(raw)
+    # 清掉不存在欄位，避免舊設定造成錯誤。
+    if isinstance(df, pd.DataFrame):
+        available = set(map(str, df.columns))
+        view["keyword_columns"] = [c for c in view.get("keyword_columns", []) if c in available]
+        if view.get("sort_column") not in available:
+            view["sort_column"] = ""
+        filters = view.get("filters", {}) if isinstance(view.get("filters", {}), dict) else {}
+        view["filters"] = {k: v for k, v in filters.items() if k in available}
+    return view
+
+
+def save_table_view_config(table_key: str, view: Dict[str, Any], label: str = "") -> bool:
+    cfg = load_column_config()
+    cfg = _normalize_config(cfg)
+    views = _view_profiles(cfg)
+    payload = dict(view or {})
+    payload["label"] = label or table_key
+    payload["updated_at"] = _now_text()
+    views[table_key] = payload
+    return save_column_config(cfg)
+
+
+def _series_as_text(s: pd.Series) -> pd.Series:
+    try:
+        return s.map(lambda x: "" if _is_empty_value(x) else str(x))
+    except Exception:
+        return pd.Series([""] * len(s), index=s.index)
+
+
+def _safe_to_numeric(s: pd.Series) -> pd.Series:
+    try:
+        return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False).str.replace("%", "", regex=False), errors="coerce")
+    except Exception:
+        return pd.to_numeric(s, errors="coerce")
+
+
+def apply_table_view(df: pd.DataFrame, table_key: str) -> pd.DataFrame:
+    """只對目前已存在的 DataFrame 做輕量篩選 / 排序，不重新抓資料、不重跑推薦。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame() if df is None else df
+    out = df.copy()
+    view = get_table_view_config(table_key, out)
+
+    keyword = safe_text(view.get("keyword", "")).strip()
+    if keyword:
+        kw_cols = [c for c in view.get("keyword_columns", []) if c in out.columns]
+        if not kw_cols:
+            kw_cols = list(out.columns)
+        mask = pd.Series(False, index=out.index)
+        for c in kw_cols:
+            try:
+                mask = mask | _series_as_text(out[c]).str.contains(keyword, case=False, na=False, regex=False)
+            except Exception:
+                pass
+        out = out.loc[mask].copy()
+
+    filters = view.get("filters", {}) if isinstance(view.get("filters", {}), dict) else {}
+    for c, vals in filters.items():
+        if c not in out.columns:
+            continue
+        if not isinstance(vals, list) or not vals:
+            continue
+        wanted = set(str(v) for v in vals)
+        out = out[_series_as_text(out[c]).isin(wanted)].copy()
+
+    sort_col = safe_text(view.get("sort_column", "")).strip()
+    if sort_col and sort_col in out.columns:
+        asc = bool(view.get("sort_ascending", False))
+        try:
+            numeric = _safe_to_numeric(out[sort_col])
+            if numeric.notna().sum() >= max(1, int(len(out) * 0.6)):
+                out = out.assign(_godpick_sort_tmp_=numeric).sort_values("_godpick_sort_tmp_", ascending=asc, na_position="last").drop(columns=["_godpick_sort_tmp_"])
+            else:
+                out = out.sort_values(sort_col, ascending=asc, na_position="last")
+        except Exception:
+            try:
+                out = out.sort_values(sort_col, ascending=asc, na_position="last")
+            except Exception:
+                pass
+
+    try:
+        limit = int(view.get("limit_rows", 0) or 0)
+    except Exception:
+        limit = 0
+    if limit > 0:
+        out = out.head(limit).copy()
+    return out
+
+
+def _candidate_filter_columns(df: pd.DataFrame, max_cols: int = 80) -> List[str]:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    preferred = []
+    for c in df.columns:
+        name = str(c)
+        if any(k in name for k in ["群組", "市場", "類別", "產業", "狀態", "等級", "模式", "成功", "訊息", "來源", "日期", "股票代號", "股票名稱"]):
+            preferred.append(c)
+    others = [c for c in df.columns if c not in preferred]
+    return (preferred + others)[:max_cols]
+
+
+def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame) -> Dict[str, Any]:
+    """v105：所有表格共用的篩選 / 排序表單；只有按套用才永久記錄。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return _default_table_view(df)
+    if not bool(st.session_state.get("godpick_table_filter_sort_enabled", True)):
+        return get_table_view_config(table_key, df)
+
+    safe_key = _key_safe(table_key)
+    clean = clean_display_df(df, hide_empty_columns=False)
+    cols = list(clean.columns)
+    current = get_table_view_config(table_key, clean)
+
+    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v105", expanded=False):
+        st.caption("輸入篩選、排序或勾選條件時不重算資料；只有按『套用並永久記錄』後，才套用到目前表格顯示。")
+        with st.form(key=f"{safe_key}_table_view_form_v105", clear_on_submit=False):
+            c1, c2, c3, c4 = st.columns([1.3, 1.4, 1.1, 0.8])
+            with c1:
+                keyword = st.text_input("關鍵字篩選", value=safe_text(current.get("keyword", "")), key=f"{safe_key}_view_kw_v105")
+            with c2:
+                kw_cols = st.multiselect(
+                    "關鍵字搜尋欄位（空白=全部欄）",
+                    options=cols,
+                    default=[c for c in current.get("keyword_columns", []) if c in cols],
+                    key=f"{safe_key}_view_kw_cols_v105",
+                )
+            with c3:
+                sort_col = st.selectbox(
+                    "排序欄位",
+                    options=[""] + cols,
+                    index=([""] + cols).index(current.get("sort_column", "")) if current.get("sort_column", "") in cols else 0,
+                    key=f"{safe_key}_view_sort_col_v105",
+                )
+            with c4:
+                sort_mode = st.selectbox(
+                    "排序方式",
+                    options=["大到小 / 新到舊", "小到大 / 舊到新"],
+                    index=1 if bool(current.get("sort_ascending", False)) else 0,
+                    key=f"{safe_key}_view_sort_mode_v105",
+                )
+
+            filter_cols = st.multiselect(
+                "要啟用的欄位篩選（最多建議 5 欄，避免畫面太長）",
+                options=_candidate_filter_columns(clean),
+                default=[c for c in current.get("filters", {}).keys() if c in clean.columns],
+                key=f"{safe_key}_view_filter_cols_v105",
+            )
+            new_filters: Dict[str, List[str]] = {}
+            for c in filter_cols[:8]:
+                try:
+                    vals = _series_as_text(clean[c]).replace("", pd.NA).dropna().value_counts().head(200).index.tolist()
+                except Exception:
+                    vals = []
+                old_vals = current.get("filters", {}).get(c, []) if isinstance(current.get("filters", {}), dict) else []
+                old_vals = [v for v in old_vals if v in vals]
+                selected = st.multiselect(
+                    f"{c} 篩選值",
+                    options=vals,
+                    default=old_vals,
+                    key=f"{safe_key}_filter_{_key_safe(c)}_v105",
+                )
+                if selected:
+                    new_filters[c] = [str(x) for x in selected]
+
+            limit_default = int(current.get("limit_rows", 0) or 0) if str(current.get("limit_rows", 0)).isdigit() else 0
+            limit_rows = st.number_input("顯示前 N 筆（0=全部）", min_value=0, max_value=20000, value=limit_default, step=50, key=f"{safe_key}_limit_v105")
+
+            b1, b2, b3 = st.columns([1, 1, 2])
+            apply_btn = b1.form_submit_button("✅ 套用並永久記錄", type="primary", use_container_width=True)
+            clear_btn = b2.form_submit_button("🧹 清除篩選排序", use_container_width=True)
+
+        if clear_btn:
+            new_view = _default_table_view(clean)
+            ok = save_table_view_config(table_key, new_view, table_label)
+            st.success("已清除本表格篩選 / 排序設定並永久記錄。" if ok else "已嘗試清除設定，但永久寫入可能失敗。")
+            return new_view
+
+        if apply_btn:
+            new_view = {
+                "keyword": keyword,
+                "keyword_columns": [str(c) for c in kw_cols],
+                "filters": new_filters,
+                "sort_column": sort_col,
+                "sort_ascending": sort_mode.startswith("小到大"),
+                "limit_rows": int(limit_rows or 0),
+            }
+            ok = save_table_view_config(table_key, new_view, table_label)
+            st.success("篩選 / 排序已套用並永久記錄；只重排目前表格，不重跑推薦或重新抓資料。" if ok else "已套用，但永久寫入可能失敗。")
+            return new_view
+
+        active_msg = []
+        if current.get("keyword"):
+            active_msg.append(f"關鍵字：{current.get('keyword')}")
+        if current.get("sort_column"):
+            active_msg.append(f"排序：{current.get('sort_column')}")
+        if current.get("filters"):
+            active_msg.append(f"篩選欄位：{len(current.get('filters', {}))}")
+        st.caption("目前已套用：" + ("；".join(active_msg) if active_msg else "無"))
+    return current
+
+
+def _has_checkbox_like_column(df: pd.DataFrame) -> bool:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+    for c in df.columns:
+        name = str(c)
+        try:
+            if str(df[c].dtype) == "bool":
+                return True
+        except Exception:
+            pass
+        if any(k in name for k in ["勾選", "選取", "匯入", "刪除", "加入", "check", "select"]):
+            return True
+    return False
+
+
+def _merge_edited_subset(original: pd.DataFrame, edited_subset: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(original, pd.DataFrame) or not isinstance(edited_subset, pd.DataFrame):
+        return edited_subset
+    full = original.copy()
+    try:
+        common_cols = [c for c in edited_subset.columns if c in full.columns]
+        for idx in edited_subset.index:
+            if idx in full.index:
+                for c in common_cols:
+                    full.at[idx, c] = edited_subset.at[idx, c]
+        return full
+    except Exception:
+        return edited_subset
+
+
+def install_global_table_patch(page_key: str = "global") -> None:
+    """v105：全域攔截 st.dataframe / st.data_editor，讓所有表格都有篩選排序，勾選延後套用。"""
+    if getattr(st, "_godpick_table_patch_v105", False):
+        return
+    try:
+        original_dataframe = st.dataframe
+        original_data_editor = st.data_editor
+        st._godpick_original_dataframe_v105 = original_dataframe
+        st._godpick_original_data_editor_v105 = original_data_editor
+    except Exception:
+        return
+
+    def _auto_key(kind: str, user_key: Any = None) -> str:
+        if user_key:
+            return f"{page_key}_{kind}_{_key_safe(str(user_key))}"
+        counter_key = f"_godpick_{page_key}_{kind}_counter_v105"
+        n = int(st.session_state.get(counter_key, 0)) + 1
+        st.session_state[counter_key] = n
+        return f"{page_key}_{kind}_{n}"
+
+    def patched_dataframe(data=None, *args, **kwargs):
+        if kwargs.pop("_godpick_bypass", False):
+            return original_dataframe(data, *args, **kwargs)
+        if isinstance(data, pd.DataFrame) and not data.empty:
+            table_key = _auto_key("dataframe", kwargs.get("key"))
+            table_label = str(kwargs.get("key") or f"表格 {table_key.split('_')[-1]}")
+            try:
+                render_table_view_manager(table_key, table_label, data)
+                data = apply_table_view(data, table_key)
+            except Exception as exc:
+                try:
+                    st.caption(f"v105 表格篩選排序略過：{exc}")
+                except Exception:
+                    pass
+        return original_dataframe(data, *args, **kwargs)
+
+    def patched_data_editor(data=None, *args, **kwargs):
+        if kwargs.pop("_godpick_bypass", False):
+            return original_data_editor(data, *args, **kwargs)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            return original_data_editor(data, *args, **kwargs)
+        table_key = _auto_key("editor", kwargs.get("key"))
+        table_label = str(kwargs.get("key") or f"可編輯表格 {table_key.split('_')[-1]}")
+        original_df = data.copy()
+        try:
+            render_table_view_manager(table_key, table_label, original_df)
+            show_df = apply_table_view(original_df, table_key)
+        except Exception:
+            show_df = original_df
+
+        # 有勾選 / 選取欄位時，放入 form：勾選過程不回傳給主程式，按套用後才生效。
+        if _has_checkbox_like_column(show_df):
+            applied_key = f"{table_key}_applied_editor_df_v105"
+            form_key = f"{table_key}_deferred_editor_form_v105"
+            try:
+                with st.form(form_key, clear_on_submit=False):
+                    edited_show = original_data_editor(show_df, *args, **kwargs)
+                    submitted = st.form_submit_button("✅ 套用勾選 / 編輯結果", type="primary", use_container_width=True)
+                if submitted and isinstance(edited_show, pd.DataFrame):
+                    merged = _merge_edited_subset(original_df, edited_show)
+                    st.session_state[applied_key] = merged
+                    st.success("已套用本表格勾選 / 編輯結果；套用前不會觸發後續匯入、刪除或重算。")
+                    return merged
+                saved = st.session_state.get(applied_key)
+                if isinstance(saved, pd.DataFrame) and list(saved.columns) == list(original_df.columns):
+                    return saved
+                return original_df
+            except Exception:
+                # 若原頁面已在 form 中，避免 nested form 錯誤，退回普通 editor。
+                edited_show = original_data_editor(show_df, *args, **kwargs)
+                return _merge_edited_subset(original_df, edited_show)
+        edited_show = original_data_editor(show_df, *args, **kwargs)
+        return _merge_edited_subset(original_df, edited_show)
+
+    st.dataframe = patched_dataframe
+    st.data_editor = patched_data_editor
+    st._godpick_table_patch_v105 = True
+
+
 def managed_dataframe(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> None:
-    cols = render_column_manager(table_key, table_label, df, default_cols or (list(df.columns) if isinstance(df, pd.DataFrame) else []))
-    show = apply_columns(df, table_key, cols or (list(df.columns) if isinstance(df, pd.DataFrame) else []), hide_empty_columns=hide_empty_columns)
+    render_table_view_manager(table_key, table_label, df)
+    filtered = apply_table_view(df, table_key)
+    cols = render_column_manager(table_key, table_label, filtered, default_cols or (list(filtered.columns) if isinstance(filtered, pd.DataFrame) else []))
+    show = apply_columns(filtered, table_key, cols or (list(filtered.columns) if isinstance(filtered, pd.DataFrame) else []), hide_empty_columns=hide_empty_columns)
+    kwargs["_godpick_bypass"] = True
     return st.dataframe(show, **kwargs)
 
 
 def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> Any:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        kwargs["_godpick_bypass"] = True
         return st.data_editor(df, **kwargs)
     original = df.copy()
-    cols = render_column_manager(table_key, table_label, original, default_cols or list(original.columns))
-    show = apply_columns(original, table_key, cols or list(original.columns), hide_empty_columns=hide_empty_columns)
-    # data_editor 的 column_config 只保留正在顯示的欄位，避免 Streamlit 因 hidden 欄位設定報錯。
+    render_table_view_manager(table_key, table_label, original)
+    filtered = apply_table_view(original, table_key)
+    cols = render_column_manager(table_key, table_label, filtered, default_cols or list(filtered.columns))
+    show = apply_columns(filtered, table_key, cols or list(filtered.columns), hide_empty_columns=hide_empty_columns)
     cfg = kwargs.get("column_config")
     if isinstance(cfg, dict):
         kwargs["column_config"] = {k: v for k, v in cfg.items() if k in show.columns}
+    kwargs["_godpick_bypass"] = True
     edited = st.data_editor(show, **kwargs)
-    # 回傳完整資料：把顯示欄位的修改寫回原始表，隱藏欄位仍保留，避免後續按鈕功能壞掉。
-    if isinstance(edited, pd.DataFrame) and len(edited) == len(original):
-        full = original.copy()
-        for c in edited.columns:
-            full[c] = edited[c].values
-        return full
-    return edited
+    return _merge_edited_subset(original, edited) if isinstance(edited, pd.DataFrame) else edited
 
 
 
 def install_auto_column_manager(page_key: str) -> None:
-    """v47：統一欄位管理入口。
+    """v105：統一表格管理入口。
 
-    - 不全域攔截 st.dataframe / st.data_editor。
-    - 側邊欄只提供欄位管理模式開關與重讀設定。
-    - 各頁主表使用 managed_dataframe / managed_data_editor / render_column_manager 才顯示統一樣式。
+    - 自動攔截本頁所有 st.dataframe / st.data_editor。
+    - 所有表格都有篩選 / 排序 / 筆數限制，設定永久保存。
+    - data_editor 內有勾選欄時，勾選不立即套用；按「套用勾選 / 編輯結果」後才回傳給主程式。
+    - 欄位管理仍維持既有邏輯：只有按「套用並永久記錄」才重排欄位。
     """
     try:
-        with st.sidebar.expander("🧩 欄位管理｜v48 個別模組設定", expanded=False):
-            st.caption("統一使用股神管理中心樣式；但每個模組 / 每張主表使用獨立欄位設定，不會互相覆蓋。")
+        install_global_table_patch(page_key)
+    except Exception:
+        pass
+    try:
+        with st.sidebar.expander("🧩 表格管理｜v105 篩選排序＋欄位＋勾選延後", expanded=False):
+            st.caption("每個模組 / 每張表格獨立保存；輸入篩選、排序、勾選時不重算，按套用才生效。")
+            st.toggle(
+                "啟用表格篩選 / 排序",
+                value=bool(st.session_state.get("godpick_table_filter_sort_enabled", True)),
+                key="godpick_table_filter_sort_enabled",
+                help="只處理目前 DataFrame，不重新抓資料、不重跑推薦。",
+            )
             st.toggle(
                 "啟用欄位管理模式",
                 value=bool(st.session_state.get("godpick_column_manager_edit_mode", False)),
                 key="godpick_column_manager_edit_mode",
                 help="關閉時只快速套用已保存欄位；開啟後各主表才顯示欄位管理器。",
             )
-            if st.button("🔄 重新讀取欄位設定", use_container_width=True, key=f"{page_key}_column_cfg_reload_v47"):
+            if st.button("🔄 重新讀取表格設定", use_container_width=True, key=f"{page_key}_table_cfg_reload_v105"):
                 st.session_state["godpick_column_config_refresh_seq"] = int(st.session_state.get("godpick_column_config_refresh_seq", 0)) + 1
                 try:
                     _load_config_cached.clear()
