@@ -47,6 +47,12 @@ from utils import (
     save_last_query_state,
 )
 
+try:
+    from godpick_font_manager import render_home_font_size_manager, inject_global_font_css
+except Exception:
+    render_home_font_size_manager = None
+    inject_global_font_css = None
+
 PAGE_TITLE = "股票分析系統首頁｜升級完整版"
 PFX = "home_"
 
@@ -798,6 +804,9 @@ def _render_home_page():
         subtitle="首頁總控面板｜串接自選股、股神推薦紀錄、快速入口與最近查詢狀態。",
     )
 
+    if render_home_font_size_manager is not None:
+        render_home_font_size_manager()
+
     _render_market_snapshot_home_v39()
     _render_overnight_snapshot_home_v75()
 
@@ -975,6 +984,8 @@ def main():
     
     st.caption(f"首頁股神決策V5串聯版：{HOME_V5_LINK_VERSION}")
     inject_pro_theme()
+    if inject_global_font_css is not None:
+        inject_global_font_css()
     _init_state()
     _render_home_page()
 

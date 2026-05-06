@@ -276,6 +276,17 @@ def logout() -> None:
 
 
 
+
+
+def _apply_global_font_size_v117() -> None:
+    """v117：所有模組套用首頁設定的全系統字體大小。"""
+    try:
+        from godpick_font_manager import inject_global_font_css
+        inject_global_font_css()
+    except Exception:
+        # 字體功能不可影響登入、推薦、查價等主功能
+        pass
+
 def _detect_current_page_key_for_table_manager() -> str:
     """v110：抓目前 Streamlit 頁面檔名，讓所有重型模組可套用防卡模式。"""
     try:
@@ -333,6 +344,7 @@ def _ensure_macro_startup_update_v109() -> None:
 
 def require_login() -> bool:
     cfg = _load_auth_config()
+    _apply_global_font_size_v117()
     if str(cfg.get("auth_enabled", True)).lower() in ("false", "0", "no", "off"):
         _ensure_macro_startup_update_v109()
         _install_v105_table_manager()
