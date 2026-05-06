@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v71 Pro', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v94 Pro', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -69,7 +69,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v92_factor_autofill_market_prob_rr"
+APP_VERSION = "v94_perf_tracking_fallback_fix"
 
 
 
@@ -228,8 +228,8 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v92 Pro 欄位自動補齊版")
-    st.caption("績效回測＋期望值＋分層權重＋防過擬合。自動補齊大盤分層、上漲機率、R/R 與 v72 因子欄位；不連外、不重跑推薦。")
+    st.title("14_股神權重校正｜v93 Pro 大盤分層修正版")
+    st.caption("績效回測＋期望值＋分層權重＋防過擬合。修正多頭/空頭樣本為 0 時的誤判，加入全市場保底與分層來源診斷；不連外、不重跑推薦。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；單次調整設上限，避免短期過擬合。")
 
 
@@ -349,10 +349,19 @@ def main() -> None:
 
     with tab4:
         st.subheader("大盤環境分層權重")
+        st.caption("v93：多頭/空頭如果樣本數為 0，通常代表目前推薦紀錄都落在同一種大盤情境；不是錯誤。此版會顯示全市場保底建議與分層來源。")
+        first_item = next(iter(market_bundle.values()), {}) if isinstance(market_bundle, dict) and market_bundle else {}
+        source = first_item.get("分層來源", "未偵測")
+        dist = first_item.get("分層樣本分布", {})
+        if dist:
+            st.info("分層來源：" + str(source))
+            st.dataframe(pd.DataFrame([{ "大盤分層": k, "樣本數": v } for k, v in dist.items()]), use_container_width=True, hide_index=True)
         for mode, item in market_bundle.items():
-            with st.expander(f"{mode} 權重建議", expanded=(mode == "多頭")):
+            with st.expander(f"{mode} 權重建議", expanded=(mode in ["全市場", "盤整"])):
                 if item.get("status") != "ok":
                     st.warning(f"{item.get('status')}｜樣本數：{item.get('樣本數', 0)}")
+                    if mode in ["多頭", "空頭"]:
+                        st.caption("這通常是推薦紀錄裡缺少該大盤情境，不代表程式壞掉；等未來累積到多頭/空頭推薦績效後，這區會自動產生權重建議。")
                 else:
                     st.write(f"樣本數：{item.get('樣本數')}")
                     st.dataframe(pd.DataFrame(item.get("table", [])), use_container_width=True, hide_index=True)
@@ -424,7 +433,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v92 Pro：此頁只做績效回測與建議權重，會自動補齊大盤分層、上漲機率、R/R 與 v72 因子欄位；不重跑推薦、不連外。")
+    st.caption("v93 Pro：此頁只做績效回測與建議權重，會自動補齊大盤分層、上漲機率、R/R 與 v72 因子欄位；大盤分層新增全市場保底與分層來源診斷；不重跑推薦、不連外。")
 
 
 if __name__ == "__main__":

@@ -79,6 +79,7 @@ except Exception:
         return pd.DataFrame()
 
 PAGE_TITLE = "推薦清單"
+PERF_TRACKING_VERSION = "v94_perf_tracking_fallback_fix"
 PFX = "godpick_list_"
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "recommend_list_v53_perf_guard_20260429"
@@ -1669,8 +1670,13 @@ def main():
     with k4:
         st.metric("達停損筆數", int(filtered_df["是否達停損"].fillna(False).sum()) if not filtered_df.empty else 0)
     with k5:
-        avg20 = pd.to_numeric(filtered_df.get("推薦後20日%"), errors="coerce").dropna().mean() if not filtered_df.empty and "推薦後20日%" in filtered_df.columns else 0
-        st.metric("平均推薦後20日%", format_number(avg20, 2) if pd.notna(avg20) else "0")
+        avg20 = pd.to_numeric(filtered_df.get("推薦後20日%"), errors="coerce").dropna().mean() if not filtered_df.empty and "推薦後20日%" in filtered_df.columns else None
+        if avg20 is None or pd.isna(avg20):
+            fb_col = next((c for c in ["目前損益幅%", "損益幅%", "即時追蹤報酬%", "目前追蹤報酬%"] if c in filtered_df.columns and pd.to_numeric(filtered_df[c], errors="coerce").notna().sum() > 0), None)
+            avg_fb = pd.to_numeric(filtered_df.get(fb_col), errors="coerce").dropna().mean() if fb_col else None
+            st.metric("平均目前績效%", format_number(avg_fb, 2) if avg_fb is not None and pd.notna(avg_fb) else "—")
+        else:
+            st.metric("平均推薦後20日%", format_number(avg20, 2))
 
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
 
