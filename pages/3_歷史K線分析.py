@@ -161,13 +161,23 @@ def _current_hk_chart_settings_from_state(draft: bool = False) -> dict[str, Any]
 
 
 def _persist_hk_chart_setting_change(**changes: Any) -> tuple[bool, str]:
-    """v121：單項圖表設定快速套用並永久記錄。"""
+    """
+    v123：單項圖表設定快速套用並永久記錄。
+
+    重要修正：
+    Streamlit 不允許在 widget 建立後，再寫入同一個 widget key。
+    1M / 3M / 6M / 1Y / 全部 快速按鈕位於圖表設定面板下方，
+    此時 focus_window_draft 這類草稿 widget 可能已經建立；
+    因此快速按鈕只更新正式設定 key 與 JSON，不再回寫 *_draft key，
+    避免 StreamlitAPIException。
+    """
     current = _current_hk_chart_settings_from_state(draft=False)
     for key, value in changes.items():
         if key in HK_CHART_DEFAULT_SETTINGS:
             current[key] = _normalize_chart_setting_value(key, value)
+
+    # 只同步正式生效值；不要在這裡寫入 *_draft widget key。
     _apply_hk_chart_settings_to_state(current, draft=False)
-    _apply_hk_chart_settings_to_state(current, draft=True)
     st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
     return _save_hk_chart_settings(current)
 
@@ -218,7 +228,7 @@ def _render_persistent_chart_range_buttons() -> None:
                     st.warning(msg)
 
     with cols[-1]:
-        st.caption(f"目前永久區間：{_focus_window_label(current)}｜v122：點選後同次重繪，不會再先清空主圖。")
+        st.caption(f"目前永久區間：{_focus_window_label(current)}｜v123：點選後只更新正式設定，不回寫草稿 widget，避免報錯。")
 
     if applied_label:
         st.info(f"已切換為 {applied_label}，設定已記錄；下方圖表會以此區間重新顯示。")
@@ -2388,7 +2398,13 @@ def main():
 
     render_pro_section("互動控制")
 
-    with st.expander("📈 圖表設定｜套用並永久記錄 v122", expanded=False):
+    # v123：若上一輪按了「還原目前設定 / 恢復預設值」，在 widget 建立前套入草稿 key，
+    # 避免 StreamlitAPIException。
+    _pending_chart_draft = st.session_state.pop(_k("pending_chart_draft_settings"), None)
+    if isinstance(_pending_chart_draft, dict):
+        _apply_hk_chart_settings_to_state(_pending_chart_draft, draft=True)
+
+    with st.expander("📈 圖表設定｜套用並永久記錄 v123", expanded=False):
         st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 也會永久保存，且不再造成主圖空白。")
         s1, s2, s3 = st.columns([1.2, 1.2, 1.2])
         with s1:
@@ -2421,12 +2437,13 @@ def main():
                 st.rerun()
         with a2:
             if st.button("↩️ 還原目前設定", key=_k("reload_chart_settings"), use_container_width=True):
-                current = _current_hk_chart_settings_from_state(draft=False)
-                _apply_hk_chart_settings_to_state(current, draft=True)
+                # v123：避免 widget 建立後直接改 *_draft key。先暫存，下次 run 開頭套入。
+                st.session_state[_k("pending_chart_draft_settings")] = _current_hk_chart_settings_from_state(draft=False)
                 st.rerun()
         with a3:
             if st.button("🔄 恢復預設值", key=_k("reset_chart_settings"), use_container_width=True):
-                _apply_hk_chart_settings_to_state(HK_CHART_DEFAULT_SETTINGS.copy(), draft=True)
+                # v123：避免 widget 建立後直接改 *_draft key。先暫存，下次 run 開頭套入。
+                st.session_state[_k("pending_chart_draft_settings")] = HK_CHART_DEFAULT_SETTINGS.copy()
                 st.rerun()
 
     # 正式生效值只讀取已套用設定；草稿輸入不會直接影響圖表。
@@ -2435,7 +2452,7 @@ def main():
     st.session_state[_k("show_ma")] = bool(st.session_state.get(_k("show_ma"), True))
     st.session_state[_k("show_pivots")] = bool(st.session_state.get(_k("show_pivots"), True))
 
-    # v122：區間按鈕必須在 focus_df 計算前渲染；點選後同次 run 立即以新區間重算圖表，避免主圖空白。
+    # v123：區間按鈕必須在 focus_df 計算前渲染；點選後同次 run 立即以新區間重算圖表，且不回寫草稿 widget key。
     _render_persistent_chart_range_buttons()
 
     filtered_event_df = event_df.copy()
