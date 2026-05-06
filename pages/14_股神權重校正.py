@@ -69,7 +69,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v71_perf_proxy_multisource_antioverfit"
+APP_VERSION = "v92_factor_autofill_market_prob_rr"
 
 
 
@@ -122,6 +122,105 @@ def _json_download(data: Any) -> bytes:
     return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+
+
+def _is_blank_value(v: Any) -> bool:
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    s = str(v).strip()
+    return s == "" or s.lower() in {"nan", "none", "null", "--", "—"}
+
+
+def _first_nonblank(row: pd.Series, cols: list[str], default: Any = "") -> Any:
+    for c in cols:
+        if c in row.index and not _is_blank_value(row.get(c)):
+            return row.get(c)
+    return default
+
+
+def _prepare_calibration_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    v92：修正 14 權重校正頁常見缺欄問題。
+    只用既有 JSON 紀錄補欄，不連外、不重跑 7_股神推薦。
+    補齊重點：大盤分層 / 上漲機率 / R/R / v72 因子分數。
+    """
+    if raw_df is None or raw_df.empty:
+        return raw_df
+    df = _v72_enrich_recommendation_df_safe(raw_df.copy())
+
+    # 大盤分層：14 頁的大盤分層權重需要可被 MARKET_COLUMNS 辨識的欄位。
+    if "大盤分層" in df.columns:
+        if "大盤情境" not in df.columns:
+            df["大盤情境"] = df["大盤分層"]
+        else:
+            df["大盤情境"] = df.apply(
+                lambda r: r.get("大盤分層") if _is_blank_value(r.get("大盤情境")) else r.get("大盤情境"),
+                axis=1,
+            )
+    if "大盤狀態" not in df.columns and "大盤情境" in df.columns:
+        df["大盤狀態"] = df["大盤情境"]
+
+    # 上漲機率：優先保留原生欄，沒有才用推薦總分/股神分數代理。
+    prob_sources = ["上漲機率估計%", "上漲機率%", "預估上漲機率", "上漲機率"]
+    if "上漲機率估計%" not in df.columns:
+        df["上漲機率估計%"] = ""
+    for idx, row in df.iterrows():
+        if _is_blank_value(row.get("上漲機率估計%")):
+            v = _first_nonblank(row, prob_sources[1:], "")
+            if _is_blank_value(v):
+                base = _first_nonblank(row, ["推薦總分", "推薦分數", "股神決策分數", "訊號分數"], 70)
+                try:
+                    base_f = float(str(base).replace("%", "").replace(",", ""))
+                    v = max(35, min(85, 45 + (base_f - 60) * 0.55))
+                except Exception:
+                    v = 55
+            df.at[idx, "上漲機率估計%"] = v
+
+    # R/R：優先使用原生風險報酬比；沒有時用風險報酬_拉回 / 突破 或 R/R分數保守代理。
+    if "風險報酬比" not in df.columns:
+        df["風險報酬比"] = ""
+    rr_sources = ["風險報酬比_決策", "R/R", "RR", "風險報酬_拉回", "風險報酬_突破"]
+    for idx, row in df.iterrows():
+        if _is_blank_value(row.get("風險報酬比")):
+            v = _first_nonblank(row, rr_sources, "")
+            if _is_blank_value(v) and not _is_blank_value(row.get("R/R分數")):
+                try:
+                    # R/R分數是 0~100 分，不是倍數；換算成保守倍數，避免全部落在 >=3。
+                    score = float(str(row.get("R/R分數")).replace("%", "").replace(",", ""))
+                    v = round(max(0.5, min(3.5, score / 35)), 2)
+                except Exception:
+                    v = ""
+            df.at[idx, "風險報酬比"] = v
+
+    return df
+
+
+def _render_v92_field_diagnostics(df: pd.DataFrame, horizon: int) -> None:
+    try:
+        perf_diag = perf_sample_diagnostics(df)
+        market_col = first_existing_col(df, ["大盤情境", "大盤狀態", "大盤分層", "大盤橋接風控", "市場狀態", "大盤模式"]) or "缺少"
+        prob_col = first_existing_col(df, ["上漲機率估計%", "上漲機率%", "預估上漲機率", "上漲機率"]) or "缺少"
+        rr_col = first_existing_col(df, ["風險報酬比", "風險報酬比_決策", "R/R", "RR", "風險報酬_拉回", "風險報酬_突破"]) or "缺少"
+        v72_ok = sum(1 for c in V72_FACTOR_FIELDS if c in df.columns)
+        with st.expander("v92 欄位補齊檢查", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("大盤分層欄", market_col)
+            c2.metric("上漲機率欄", prob_col)
+            c3.metric("R/R 欄", rr_col)
+            c4.metric("v72 因子欄", f"{v72_ok}/{len(V72_FACTOR_FIELDS)}")
+            st.dataframe(perf_diag, use_container_width=True, hide_index=True)
+            if market_col != "缺少" and prob_col != "缺少" and rr_col != "缺少":
+                st.success("大盤分層、上漲機率、R/R 欄位已可供權重校正使用。")
+            else:
+                st.warning("仍有欄位缺少；請先回 7 股神推薦或 8/10 紀錄補齊資料。")
+    except Exception as e:
+        st.caption(f"欄位診斷略過：{e}")
+
 def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
     if table is None or table.empty:
         return DEFAULT_WEIGHTS.copy()
@@ -129,8 +228,8 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v71 Pro 多來源防卡修正版")
-    st.caption("績效回測＋期望值＋分層權重＋防過擬合。只讀取既有推薦紀錄，不連外、不重跑推薦；套用權重需人工確認。")
+    st.title("14_股神權重校正｜v92 Pro 欄位自動補齊版")
+    st.caption("績效回測＋期望值＋分層權重＋防過擬合。自動補齊大盤分層、上漲機率、R/R 與 v72 因子欄位；不連外、不重跑推薦。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；單次調整設上限，避免短期過擬合。")
 
 
@@ -172,7 +271,7 @@ def main() -> None:
     _ensure_sidebar_numbers_for_this_page()
     _render_header()
 
-    df = load_recommendation_records()
+    df = _prepare_calibration_df(load_recommendation_records())
     if df.empty:
         st.error("目前沒有讀到推薦紀錄。請先從 7_股神推薦 匯入 8_股神推薦紀錄 或 10_推薦清單。")
         return
@@ -188,6 +287,7 @@ def main() -> None:
         st.caption("套用後會寫入 godpick_user_settings.json，7_股神推薦 會讀取 applied_weights。")
 
     _render_quality(df, horizon, current_weights)
+    _render_v92_field_diagnostics(df, horizon)
 
     perf_col = best_perf_col(df, horizon)
     if not perf_col:
@@ -324,7 +424,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v71 Pro：此頁只做績效回測與建議權重，支援有效績效與即時代理樣本。套用權重需人工打開安全鎖並按下套用，不會自動覆蓋。")
+    st.caption("v92 Pro：此頁只做績效回測與建議權重，會自動補齊大盤分層、上漲機率、R/R 與 v72 因子欄位；不重跑推薦、不連外。")
 
 
 if __name__ == "__main__":
