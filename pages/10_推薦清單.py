@@ -79,7 +79,7 @@ except Exception:
         return pd.DataFrame()
 
 PAGE_TITLE = "推薦清單"
-PERF_TRACKING_VERSION = "v97_perf_tracking_current_return_fix"
+PERF_TRACKING_VERSION = "v98_formal_n_day_perf_backfill"
 PFX = "godpick_list_"
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "recommend_list_v53_perf_guard_20260429"
@@ -1293,6 +1293,217 @@ def _calc_backtest_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
 
 
 
+
+# >>> V98_FORMAL_N_DAY_PERF_BACKFILL
+FORMAL_N_DAY_COLUMNS_V98 = ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]
+
+
+def _calc_formal_n_day_metrics_v98(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
+    """V98：正式 N 日績效回補。
+
+    原則：
+    1. 只用歷史K線計算正式 N 日績效，不用即時損益偽裝正式績效。
+    2. 推薦價 / 推薦日價格優先作為基準價；若沒有，才用推薦日後第一根收盤價。
+    3. 未滿期的 N 日欄位保持空白，避免把尚未發生的績效寫成 0。
+    4. 失敗不阻塞整批，保留原資料並寫入績效評語。
+    """
+    src = dict(row)
+    rec_date = pd.to_datetime(_safe_str(src.get("推薦日期")), errors="coerce")
+    if pd.isna(rec_date):
+        return {"績效評語": "V98 正式N日回補略過：缺推薦日期", "追蹤更新時間": _now_text()}
+
+    code = _normalize_code(src.get("股票代號"))
+    name = _safe_str(src.get("股票名稱"))
+    market = _safe_str(src.get("市場別"))
+    if not code:
+        return {"績效評語": "V98 正式N日回補略過：缺股票代號", "追蹤更新時間": _now_text()}
+
+    df = _fetch_history_for_backtest(code, name, market, _safe_str(src.get("推薦日期")))
+    if df is None or df.empty:
+        old_msg = _safe_str(src.get("績效評語"))
+        msg = "V98 正式N日回補：歷史K線不足，保留即時暫行績效"
+        return {"績效評語": (old_msg + "｜" + msg).strip("｜") if old_msg else msg, "追蹤更新時間": _now_text()}
+
+    temp = df.copy()
+    rename_map = {}
+    for c in temp.columns:
+        low = str(c).lower().strip()
+        if low in {"date", "日期", "datetime", "time"}:
+            rename_map[c] = "日期"
+        elif low in {"close", "收盤價", "收盤", "收盤價(元)"}:
+            rename_map[c] = "收盤價"
+        elif low in {"high", "最高價", "最高"}:
+            rename_map[c] = "最高價"
+        elif low in {"low", "最低價", "最低"}:
+            rename_map[c] = "最低價"
+    if rename_map:
+        temp = temp.rename(columns=rename_map)
+    if "日期" not in temp.columns or "收盤價" not in temp.columns:
+        old_msg = _safe_str(src.get("績效評語"))
+        msg = "V98 正式N日回補：K線缺日期或收盤價欄位"
+        return {"績效評語": (old_msg + "｜" + msg).strip("｜") if old_msg else msg, "追蹤更新時間": _now_text()}
+
+    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+    for c in ["收盤價", "最高價", "最低價"]:
+        if c in temp.columns:
+            temp[c] = pd.to_numeric(temp[c], errors="coerce")
+    temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").reset_index(drop=True)
+    window = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
+    if window.empty:
+        old_msg = _safe_str(src.get("績效評語"))
+        msg = "V98 正式N日回補：推薦日之後無K線資料"
+        return {"績效評語": (old_msg + "｜" + msg).strip("｜") if old_msg else msg, "追蹤更新時間": _now_text()}
+
+    rec_px = _safe_float(src.get("推薦價格")) or _safe_float(src.get("推薦日價格")) or _safe_float(src.get("建議價位"))
+    base_px = rec_px or _safe_float(window.iloc[0].get("收盤價"))
+    if base_px in [None, 0]:
+        old_msg = _safe_str(src.get("績效評語"))
+        msg = "V98 正式N日回補：基準價異常"
+        return {"績效評語": (old_msg + "｜" + msg).strip("｜") if old_msg else msg, "追蹤更新時間": _now_text()}
+
+    out: dict[str, Any] = {}
+    periods = [1, 3, 5, 10, 20]
+    for d in periods:
+        # N 代表推薦日後第 N 個交易日；未滿 N 根K線就不寫入。
+        if len(window) > d:
+            px = _safe_float(window.iloc[d].get("收盤價"))
+            if px not in [None, 0]:
+                out[f"推薦後{d}日%"] = round((px - base_px) / base_px * 100, 2)
+
+    use_window = window.head(min(len(window), 21)).copy()
+    high_col = "最高價" if "最高價" in use_window.columns else "收盤價"
+    low_col = "最低價" if "最低價" in use_window.columns else "收盤價"
+    max_high = _safe_float(use_window[high_col].max())
+    min_low = _safe_float(use_window[low_col].min())
+    if max_high not in [None, 0]:
+        out["推薦後最大漲幅%"] = round((max_high - base_px) / base_px * 100, 2)
+    if min_low not in [None, 0]:
+        out["推薦後最大回撤%"] = round((min_low - base_px) / base_px * 100, 2)
+
+    target = _safe_float(src.get("賣出目標1")) or _safe_float(src.get("近端壓力"))
+    stop = _safe_float(src.get("停損參考")) or _safe_float(src.get("停損價"))
+    max_gain = _safe_float(out.get("推薦後最大漲幅%"))
+    max_drawdown = _safe_float(out.get("推薦後最大回撤%"))
+    target_hit = bool(target not in [None, 0] and max_high is not None and max_high >= target) if target not in [None, 0] else bool(max_gain is not None and max_gain >= 8)
+    stop_hit = bool(stop not in [None, 0] and min_low is not None and min_low <= stop) if stop not in [None, 0] else bool(max_drawdown is not None and max_drawdown <= -6)
+    out["是否達標_回測"] = target_hit
+    out["是否停損_回測"] = stop_hit
+
+    benchmark = None
+    for c in ["推薦後20日%", "推薦後10日%", "推薦後5日%", "推薦後3日%", "推薦後1日%"]:
+        if _safe_float(out.get(c)) is not None:
+            benchmark = _safe_float(out.get(c))
+            break
+    if target_hit and not stop_hit:
+        hit = "達標"
+    elif stop_hit and not target_hit:
+        hit = "停損"
+    elif benchmark is not None and benchmark >= 5:
+        hit = "有效"
+    elif benchmark is not None and benchmark <= -5:
+        hit = "偏弱"
+    elif benchmark is not None:
+        hit = "觀察中"
+    else:
+        hit = _safe_str(src.get("命中結果")) or "觀察中"
+    out["命中結果"] = hit
+    out["績效評語"] = {
+        "達標": "V98 正式N日回補：推薦後已達標，型態有效",
+        "停損": "V98 正式N日回補：推薦後觸及停損，需檢討風險",
+        "有效": "V98 正式N日回補：推薦後報酬為正，持續觀察",
+        "偏弱": "V98 正式N日回補：推薦後轉弱，需檢討等待條件",
+        "觀察中": "V98 正式N日回補：已回補可用正式N日績效，持續觀察",
+    }.get(hit, "V98 正式N日回補完成")
+    out["追蹤更新時間"] = _now_text()
+    return out
+
+
+def _row_needs_formal_n_day_update_v98(payload: dict[str, Any]) -> bool:
+    """V98：判斷是否需要正式 N 日績效回補。"""
+    code = _normalize_code(payload.get("股票代號"))
+    if not code:
+        return False
+    rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
+    if pd.isna(rec_date):
+        return False
+    age_days = (date.today() - rec_date.date()).days
+    if age_days < 1:
+        return False
+    due_map = [(1, "推薦後1日%"), (3, "推薦後3日%"), (5, "推薦後5日%"), (10, "推薦後10日%"), (20, "推薦後20日%")]
+    for d, col in due_map:
+        if age_days >= d and _safe_float(payload.get(col)) is None:
+            return True
+    # 已有即時損益但沒有命中結果，也可以補正式回測欄位。
+    if _safe_str(payload.get("命中結果")) == "" and any(_safe_float(payload.get(c)) is not None for c in FORMAL_N_DAY_COLUMNS_V98):
+        return True
+    return False
+
+
+def _update_formal_n_day_metrics_v98(df: pd.DataFrame, max_rows: int = 80, show_progress: bool = True) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """V98：正式 N 日績效回補批次處理。"""
+    if df is None or df.empty:
+        return _ensure_record_columns(pd.DataFrame()), {"candidates": 0, "processed": 0, "success": 0, "fail": 0, "messages": ["無資料可回補"]}
+    work = _ensure_record_columns(df.copy()).reset_index(drop=True)
+    candidates = [i for i, row in work.iterrows() if _row_needs_formal_n_day_update_v98(dict(row))]
+    max_rows = int(max(1, min(max_rows or 80, 300)))
+    targets = set(candidates[:max_rows])
+    rows = []
+    done = ok_count = fail_count = 0
+    max_seconds = 35
+    started_ts = time.time()
+    stopped_by_time_guard = False
+    prog = st.progress(0, text="V98：準備正式 N 日績效回補...") if show_progress and targets else None
+    status_box = st.empty() if show_progress and targets else None
+
+    for i, row in work.iterrows():
+        payload = dict(row)
+        if i not in targets:
+            rows.append(payload)
+            continue
+        if time.time() - started_ts > max_seconds:
+            stopped_by_time_guard = True
+            rows.append(payload)
+            continue
+
+        code = _normalize_code(payload.get("股票代號"))
+        name = _safe_str(payload.get("股票名稱"))
+        try:
+            metrics = _calc_formal_n_day_metrics_v98(payload)
+        except Exception as e:
+            metrics = {"績效評語": f"V98 正式N日回補失敗：{str(e)[:80]}", "追蹤更新時間": _now_text()}
+        if metrics:
+            for k, v in metrics.items():
+                payload[k] = v
+            if any(_safe_float(metrics.get(c)) is not None for c in FORMAL_N_DAY_COLUMNS_V98):
+                ok_count += 1
+            else:
+                fail_count += 1
+        else:
+            fail_count += 1
+            payload["績效評語"] = "V98 正式N日回補：本次未取得足夠K線資料"
+            payload["追蹤更新時間"] = _now_text()
+        rows.append(payload)
+        done += 1
+        if prog is not None:
+            prog.progress(min(1.0, done / max(len(targets), 1)), text=f"V98：正式N日績效回補 {done}/{len(targets)}｜成功 {ok_count}｜略過/不足 {fail_count}｜目前 {code} {name}")
+        if status_box is not None and (done == len(targets) or done % 5 == 0):
+            status_box.caption(f"本次上限 {max_rows} 筆；時間防呆 {max_seconds} 秒；總待回補 {len(candidates)} 筆。")
+
+    out_df = _ensure_record_columns(pd.DataFrame(rows))
+    summary = {
+        "candidates": len(candidates),
+        "batch_limit": max_rows,
+        "processed": done,
+        "success": ok_count,
+        "fail": fail_count,
+        "remaining": max(0, len(candidates) - done),
+        "time_guard": bool(stopped_by_time_guard),
+        "updated_at": _now_text(),
+    }
+    st.session_state[_k("v98_formal_n_day_update_summary")] = summary
+    return out_df, summary
+# <<< V98_FORMAL_N_DAY_PERF_BACKFILL
+
 def _row_needs_backtest_update(payload: dict[str, Any]) -> bool:
     code = _normalize_code(payload.get("股票代號"))
     if not code:
@@ -1408,7 +1619,7 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ============================================================
 # V50：推薦後績效追蹤總控
 # ============================================================
-def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V97 推薦後績效追蹤總控") -> None:
+def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V98 推薦後績效追蹤總控") -> None:
     """V97：正式 N 日績效 + 即時損益雙軌統計。
 
     修正點：
@@ -1417,7 +1628,7 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V97 推薦�
     - 本版把「即時追蹤損益」列為暫行有效績效，不偽裝成正式 N 日績效。
     """
     if df is None or df.empty:
-        st.info("V97：目前沒有資料可做推薦後績效追蹤。")
+        st.info("V98：目前沒有資料可做推薦後績效追蹤。")
         return
 
     x = df.copy()
@@ -1545,9 +1756,9 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V97 推薦�
         if valid_n == 0:
             st.warning("目前沒有可用績效數值。請先按『更新推薦後績效』，或確認推薦清單已有最新價 / 損益幅%。")
         elif period_valid_n == 0 and current_valid_n > 0:
-            st.info("V97：目前只有即時損益可用，尚無正式 1/3/5/10/20 日到期績效；權重校正會先採暫行績效，之後再由正式 N 日績效取代。")
+            st.info("V98：目前只有即時損益可用，尚無正式 1/3/5/10/20 日到期績效；請按左側「正式N日績效回補」產生正式績效。")
         else:
-            st.caption("V97：正式 N 日績效優先；尚未到期時才使用即時損益作暫行統計，不把空白績效偽裝成 0%。")
+            st.caption("V98：正式 N 日績效優先；尚未到期時才使用即時損益作暫行統計，不把空白績效偽裝成 0%。")
 
         def _row_effective_perf(g: pd.DataFrame) -> pd.Series:
             # 每列優先取最長可用 N 日績效，再退回即時損益。
@@ -1653,7 +1864,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V97 績效統計修正版：{PERF_TRACKING_VERSION}")
+    st.caption(f"推薦清單 V98 正式N日績效回補版：{PERF_TRACKING_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -1691,6 +1902,29 @@ def main():
                 st.info("；".join(summary.get("messages", [])))
             if summary.get("fail", 0):
                 st.warning("部分股票線上抓取失敗，V77 已略過並保留原資料，不會拖住整批。")
+            st.rerun()
+
+        if st.button("📅 正式N日績效回補", use_container_width=True):
+            with st.spinner("V98：正式 N 日績效回補中，只補已到期且缺欄位的資料..."):
+                formal_df, formal_summary = _update_formal_n_day_metrics_v98(df, max_rows=int(batch_n), show_progress=True)
+                ok, msgs = _sync_records(formal_df)
+                st.session_state[_k("records_df")] = formal_df
+                _load_records_cached(force=True)
+            if ok:
+                st.success(
+                    f"V98 正式N日績效回補完成：待回補 {formal_summary.get('candidates', 0)} 筆，"
+                    f"本次處理 {formal_summary.get('processed', 0)} 筆，成功 {formal_summary.get('success', 0)} 筆，"
+                    f"不足/略過 {formal_summary.get('fail', 0)} 筆，剩餘 {formal_summary.get('remaining', 0)} 筆。"
+                )
+            else:
+                st.warning(
+                    f"V98 已在畫面資料中完成回補，但 GitHub/Firestore 寫回未成功；"
+                    f"本次處理 {formal_summary.get('processed', 0)} 筆。"
+                )
+            if msgs:
+                st.info("；".join(msgs))
+            if formal_summary.get("time_guard"):
+                st.warning("本次觸發時間防呆，請再按一次『正式N日績效回補』繼續補剩餘資料。")
             st.rerun()
         load_msg = _safe_str(st.session_state.get(_k("load_msg"), ""))
         if load_msg:
