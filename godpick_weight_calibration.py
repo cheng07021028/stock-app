@@ -53,18 +53,35 @@ FACTOR_COLUMNS: Dict[str, List[str]] = {
 }
 
 PERF_COLUMNS: Dict[int, List[str]] = {
-    1: ["推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "損益幅%"],
+    1: ["推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "目前損益幅%", "損益幅%", "實際報酬%"],
     3: ["推薦後3日報酬%", "推薦後3日%", "3日報酬%", "3日漲跌%", "3日績效%", "3日後報酬%"],
     5: ["推薦後5日報酬%", "推薦後5日%", "5日報酬%", "5日漲跌%", "5日績效%", "5日後報酬%"],
     10: ["推薦後10日報酬%", "推薦後10日%", "10日報酬%", "10日漲跌%", "10日績效%", "10日後報酬%"],
     20: ["推薦後20日報酬%", "推薦後20日%", "20日報酬%", "20日漲跌%", "20日績效%", "20日後報酬%"],
 }
 
+# v94：績效保底欄。
+# 說明：10_推薦清單有時已經有「損益幅% / 目前損益幅% / 即時追蹤報酬%」，
+# 但 5日/10日欄位尚未產生，會造成 14_權重校正顯示有效樣本 0。
+# 這裡允許 14 頁在指定週期缺樣本時，改用目前追蹤損益做「暫行績效統計」，
+# 避免畫面誤判成完全沒有統計。正式回測仍以推薦後 N 日欄位為優先。
+PERF_FALLBACK_COLUMNS: List[str] = ["目前損益幅%", "損益幅%", "即時追蹤報酬%", "目前追蹤報酬%", "實際報酬%"]
+
 MARKET_COLUMNS = ["大盤情境", "大盤狀態", "大盤分層", "大盤策略模式", "大盤橋接風控", "大盤橋接狀態", "市場狀態", "大盤模式"]
 CATEGORY_COLUMNS = ["類別", "產業", "族群", "主題類別", "正式產業別"]
 DATE_COLUMNS = ["推薦日期", "建立日期", "建立時間", "推薦時間"]
 PROB_COLUMNS = ["上漲機率估計%", "上漲機率%", "預估上漲機率", "上漲機率", "上漲機率估計"]
 RR_COLUMNS = ["風險報酬比", "風險報酬比_決策", "R/R", "RR", "風險報酬_拉回", "風險報酬_突破"]
+
+# v93：大盤分層校正用欄位。先吃文字欄，沒有文字分層時再吃分數/海外盤代理。
+MARKET_SCORE_COLUMNS = [
+    "市場環境分數", "大盤風控分數", "大盤橋接分數", "大盤可參考分數",
+    "大盤推薦同步分數", "大盤情境分數", "macro_score", "overnight_score",
+]
+MARKET_RETURN_PROXY_COLUMNS = [
+    "台指期漲跌幅%", "夜盤漲跌幅%", "night_futures_change_pct",
+    "nasdaq_change_pct", "sox_change_pct", "sp500_change_pct",
+]
 
 
 def safe_float(v: Any, default: Optional[float] = None) -> Optional[float]:
@@ -176,17 +193,38 @@ def numeric_series(df: pd.DataFrame, col: Optional[str]) -> pd.Series:
 
 
 def best_perf_col(df: pd.DataFrame, horizon: int) -> Optional[str]:
-    """選擇指定週期中實際有效數值最多的績效欄位，避免先遇到空欄就判定無樣本。"""
+    """
+    選擇指定週期中實際有效數值最多的績效欄位。
+    v94：若指定週期尚無有效 N 日績效，允許回退到「目前損益 / 即時追蹤報酬」做暫行統計，
+    讓權重校正知道目前已經有追蹤績效，而不是顯示有效樣本 0。
+    """
     best_col = None
     best_n = 0
-    for c in PERF_COLUMNS.get(horizon, []):
-        if c not in df.columns:
+
+    def _scan(cols: Iterable[str]) -> tuple[Optional[str], int]:
+        local_col = None
+        local_n = 0
+        for c in cols:
+            if c not in df.columns:
+                continue
+            n = int(numeric_series(df, c).notna().sum())
+            if n > local_n:
+                local_n = n
+                local_col = c
+        return local_col, local_n
+
+    best_col, best_n = _scan(PERF_COLUMNS.get(horizon, []))
+    if best_n > 0:
+        return best_col
+
+    # 指定週期沒有資料時，先掃較短週期，再掃目前損益。
+    fallback_cols: List[str] = []
+    for h in [1, 3, 5, 10, 20]:
+        if h == horizon:
             continue
-        s = numeric_series(df, c)
-        n = int(s.notna().sum())
-        if n > best_n:
-            best_n = n
-            best_col = c
+        fallback_cols.extend(PERF_COLUMNS.get(h, []))
+    fallback_cols.extend(PERF_FALLBACK_COLUMNS)
+    best_col, best_n = _scan(fallback_cols)
     return best_col if best_n > 0 else None
 
 
@@ -202,7 +240,7 @@ def perf_sample_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
             "可辨識欄位": "、".join(found_cols) if found_cols else "缺欄",
             "採用欄位": best or "—",
             "有效樣本": valid,
-            "狀態": "可校正" if valid > 0 else ("欄位存在但無數值" if found_cols else "缺績效欄"),
+            "狀態": ("可校正" if valid > 0 and best in found_cols else ("可暫行校正：採用目前損益/較短週期" if valid > 0 else ("欄位存在但無數值" if found_cols else "缺績效欄"))),
         })
     return pd.DataFrame(rows)
 
@@ -591,68 +629,128 @@ def suggest_weights(effect_df: pd.DataFrame, current_weights: Optional[Dict[str,
     return out[["因子", "目前權重%", "建議新權重%", "實際差異%", "建議調整%", "調整理由", "樣本數", "樣本信心", "勝率差%", "期望值差%", "資料覆蓋率%"]]
 
 
-def filter_by_market(df: pd.DataFrame, mode: str) -> pd.DataFrame:
-    if mode == "全部":
-        return df
-    col = first_existing_col(df, MARKET_COLUMNS)
-    if not col:
-        return pd.DataFrame()
-    s = df[col].astype(str)
-    if mode == "多頭":
-        mask = s.str.contains("多|強|偏多|風險低|進攻", na=False)
-    elif mode == "盤整":
-        mask = s.str.contains("盤|震|中性|觀望", na=False)
-    elif mode == "空頭":
-        mask = s.str.contains("空|弱|風險高|防守", na=False)
+def _classify_market_text(v: Any) -> str:
+    """把各版本的大盤文字欄統一成：多頭 / 盤整 / 空頭 / 未分層。"""
+    s = safe_str(v)
+    if not s:
+        return "未分層"
+    if any(k in s for k in ["空頭", "偏空", "轉弱", "弱勢", "風險高", "防守", "保守", "下跌", "破線"]):
+        return "空頭"
+    if any(k in s for k in ["多頭", "偏多", "轉強", "強勢", "風險低", "進攻", "上攻", "突破"]):
+        return "多頭"
+    if any(k in s for k in ["盤整", "震盪", "中性", "觀望", "區間", "整理"]):
+        return "盤整"
+    return "未分層"
+
+
+def market_regime_series(df: pd.DataFrame) -> Tuple[pd.Series, str]:
+    """
+    v93：大盤分層不再只靠單一文字欄。
+    來源優先序：
+    1) 大盤情境/大盤狀態等文字欄。
+    2) 大盤/隔夜風控分數欄，>=65 多頭，<=45 空頭，其餘盤整。
+    3) 海外盤/期貨漲跌幅代理，平均 >1 多頭，<-1 空頭，其餘盤整。
+    4) 都沒有才標示未分層。
+    """
+    if df is None or df.empty:
+        return pd.Series(dtype="object"), "無資料"
+
+    out = pd.Series(["未分層"] * len(df), index=df.index, dtype="object")
+
+    text_col = first_existing_col(df, MARKET_COLUMNS)
+    if text_col:
+        classified = df[text_col].map(_classify_market_text)
+        mask = classified != "未分層"
+        out.loc[mask] = classified.loc[mask]
+        if int(mask.sum()) > 0:
+            # 如果文字欄已經有有效分層，優先採用；未分層列再用分數補。
+            source = f"文字欄:{text_col}"
+        else:
+            source = "文字欄無法辨識"
     else:
-        mask = pd.Series([False] * len(df), index=df.index)
-    return df[mask].copy()
+        source = "缺文字欄"
+
+    blank = out == "未分層"
+    score_cols = [c for c in MARKET_SCORE_COLUMNS if c in df.columns]
+    best_score_col = ""
+    best_score_valid = 0
+    best_score = None
+    for c in score_cols:
+        s = numeric_series(df, c)
+        n = int(s.notna().sum())
+        if n > best_score_valid:
+            best_score_col, best_score_valid, best_score = c, n, s
+    if blank.any() and best_score is not None and best_score_valid > 0:
+        def by_score(x: Any) -> str:
+            v = safe_float(x)
+            if v is None:
+                return "未分層"
+            if v >= 65:
+                return "多頭"
+            if v <= 45:
+                return "空頭"
+            return "盤整"
+        score_class = best_score.map(by_score)
+        mask = blank & (score_class != "未分層")
+        out.loc[mask] = score_class.loc[mask]
+        source += f" + 分數欄:{best_score_col}"
+
+    blank = out == "未分層"
+    proxy_cols = [c for c in MARKET_RETURN_PROXY_COLUMNS if c in df.columns]
+    if blank.any() and proxy_cols:
+        proxy_df = pd.DataFrame({c: numeric_series(df, c) for c in proxy_cols})
+        avg = proxy_df.mean(axis=1, skipna=True)
+        def by_proxy(x: Any) -> str:
+            v = safe_float(x)
+            if v is None:
+                return "未分層"
+            if v > 1:
+                return "多頭"
+            if v < -1:
+                return "空頭"
+            return "盤整"
+        proxy_class = avg.map(by_proxy)
+        mask = blank & (proxy_class != "未分層")
+        out.loc[mask] = proxy_class.loc[mask]
+        source += f" + 海外/期貨代理:{','.join(proxy_cols[:3])}"
+
+    return out.fillna("未分層"), source
 
 
-def calc_profile_bundle(df: pd.DataFrame, horizons: Iterable[int] = (1, 3, 5, 10, 20), current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
-    bundle: Dict[str, Any] = {
-        "version": "v71_perf_proxy_multisource_antioverfit",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "base_weights": current_weights or DEFAULT_WEIGHTS,
-        "profiles": {},
-        "factor_effectiveness": {},
-        "quality": {},
-    }
-    for horizon in horizons:
-        perf_col = best_perf_col(df, horizon)
-        if not perf_col:
-            bundle["quality"][str(horizon)] = {"status": "missing_perf_col", "message": f"缺少{horizon}日績效欄"}
-            continue
-        ret = numeric_series(df, perf_col)
-        base_stat = summarize_returns(ret)
-        effect = calc_factor_effectiveness(df, horizon)
-        weights = suggest_weights(effect, current_weights)
-        name = profile_name_by_horizon(horizon)
-        bundle["profiles"][name] = {
-            "horizon": horizon,
-            "performance_col": perf_col,
-            "base_stat": base_stat,
-            "weights": dict(zip(weights["因子"], weights["建議新權重%"])),
-            "table": weights.to_dict(orient="records"),
-            "note": "權重依勝率差、期望值差、覆蓋率、樣本數保守校正；單次調整有限制。",
-        }
-        bundle["factor_effectiveness"][str(horizon)] = effect.to_dict(orient="records") if not effect.empty else []
-        bundle["quality"][str(horizon)] = {"status": "ok", **base_stat}
-    return bundle
+def filter_by_market(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    if mode in {"全部", "全市場"}:
+        return df.copy()
+    regime, _source = market_regime_series(df)
+    if regime.empty:
+        return pd.DataFrame()
+    return df[regime == mode].copy()
 
 
 def calc_market_bundles(df: pd.DataFrame, horizon: int, current_weights: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    """v93：大盤分層加入全市場保底、分層來源、樣本分布，避免多/空樣本為 0 時誤判成錯誤。"""
     out: Dict[str, Any] = {}
-    for mode in ["多頭", "盤整", "空頭"]:
-        sub = filter_by_market(df, mode)
-        if sub.empty or len(sub) < 12:
-            out[mode] = {"status": "樣本不足或缺少大盤情境欄", "樣本數": int(len(sub))}
+    regime, source = market_regime_series(df)
+    counts = regime.value_counts(dropna=False).to_dict() if not regime.empty else {}
+    modes = ["全市場", "多頭", "盤整", "空頭"]
+    for mode in modes:
+        sub = df.copy() if mode == "全市場" else df[regime == mode].copy()
+        sample_n = int(len(sub))
+        base_payload = {
+            "樣本數": sample_n,
+            "分層來源": source,
+            "分層樣本分布": {str(k): int(v) for k, v in counts.items()},
+        }
+        if sample_n < 8:
+            out[mode] = {**base_payload, "status": "樣本不足，暫不調整（不是程式錯誤）"}
             continue
         effect = calc_factor_effectiveness(sub, horizon)
+        if effect.empty:
+            out[mode] = {**base_payload, "status": f"缺少{horizon}日績效欄或因子欄，暫不調整"}
+            continue
         weights = suggest_weights(effect, current_weights)
         out[mode] = {
+            **base_payload,
             "status": "ok",
-            "樣本數": int(len(sub)),
             "weights": dict(zip(weights["因子"], weights["建議新權重%"])),
             "table": weights.to_dict(orient="records"),
         }
