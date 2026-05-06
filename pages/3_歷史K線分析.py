@@ -174,25 +174,54 @@ def _persist_hk_chart_setting_change(**changes: Any) -> tuple[bool, str]:
 
 def _render_persistent_chart_range_buttons() -> None:
     """
-    v121：取代 Plotly 內建 range selector。
-    Plotly 內建 1M/3M/6M/1Y/全部屬於前端互動，Streamlit 無法可靠取得並寫入 JSON；
-    因此改用本頁按鈕，按下即套用且永久保存。
+    v122：穩定版永久區間按鈕。
+    修正 v121 按下 1M / 3M / 6M / 1Y / 全部 後，因 st.rerun() 在圖表產生前中斷，
+    造成部分環境出現主圖空白或按鈕狀態遺失的問題。
+
+    新邏輯：
+    - 按鈕點擊只更新 session_state + JSON。
+    - 不在按鈕函式內強制 st.rerun()。
+    - 讓同一次 script run 繼續往下重算 focus_df 並繪圖。
     """
     current = _normalize_chart_setting_value("focus_window", st.session_state.get(_k("focus_window"), "全部"))
     labels = [("30", "1M"), ("60", "3M"), ("120", "6M"), ("240", "1Y"), ("全部", "全部")]
-    cols = st.columns([0.32, 0.32, 0.32, 0.32, 0.42, 3.2])
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stHorizontalBlock"] .stButton > button {
+            min-height: 2.25rem;
+            border-radius: 0.55rem;
+            font-weight: 700;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns([0.42, 0.42, 0.42, 0.42, 0.55, 2.5])
+    applied_label = None
+    applied_msg = ""
+
     for i, (value, label) in enumerate(labels):
         active = current == value
         with cols[i]:
             if st.button(label, key=_k(f"quick_focus_{value}"), use_container_width=True, type="primary" if active else "secondary"):
                 ok, msg = _persist_hk_chart_setting_change(focus_window=value)
+                applied_label = label
+                applied_msg = msg
+                current = _normalize_chart_setting_value("focus_window", value)
+                # 不使用 st.rerun()：避免按下後主圖區塊被中斷成空白。
                 if ok:
                     st.toast(f"已套用並永久記錄圖表區間：{label}")
                 else:
                     st.warning(msg)
-                st.rerun()
+
     with cols[-1]:
-        st.caption(f"目前永久區間：{_focus_window_label(current)}｜圖上方區間按鈕已改為可永久記錄，不再使用 Plotly 暫存按鈕。")
+        st.caption(f"目前永久區間：{_focus_window_label(current)}｜v122：點選後同次重繪，不會再先清空主圖。")
+
+    if applied_label:
+        st.info(f"已切換為 {applied_label}，設定已記錄；下方圖表會以此區間重新顯示。")
 
 
 def _safe_str(v: Any) -> str:
@@ -2359,8 +2388,8 @@ def main():
 
     render_pro_section("互動控制")
 
-    with st.expander("📈 圖表設定｜套用並永久記錄 v121", expanded=False):
-        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 也會永久保存。")
+    with st.expander("📈 圖表設定｜套用並永久記錄 v122", expanded=False):
+        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 也會永久保存，且不再造成主圖空白。")
         s1, s2, s3 = st.columns([1.2, 1.2, 1.2])
         with s1:
             st.selectbox("圖表顯示模式", ["清晰模式", "完整模式"], key=_k("chart_display_mode_draft"))
@@ -2405,6 +2434,9 @@ def main():
     st.session_state[_k("focus_window")] = _normalize_chart_setting_value("focus_window", st.session_state.get(_k("focus_window"), "全部"))
     st.session_state[_k("show_ma")] = bool(st.session_state.get(_k("show_ma"), True))
     st.session_state[_k("show_pivots")] = bool(st.session_state.get(_k("show_pivots"), True))
+
+    # v122：區間按鈕必須在 focus_df 計算前渲染；點選後同次 run 立即以新區間重算圖表，避免主圖空白。
+    _render_persistent_chart_range_buttons()
 
     filtered_event_df = event_df.copy()
     selected_filter = st.session_state.get(_k("event_filter"))
@@ -2465,7 +2497,6 @@ def main():
     with right:
         _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
         _render_key_price_bar(df, sr_snapshot)
-        _render_persistent_chart_range_buttons()
 
         _chart_seq = int(st.session_state.get(_k("chart_redraw_seq"), 0))
         _main_fig = _build_candlestick_chart(
@@ -2499,7 +2530,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v121：圖表區間 1M / 3M / 6M / 1Y / 全部 已改為 Streamlit 永久套用按鈕；按下後會寫入 hk_chart_settings.json，下次進頁、換股、重新整理都會沿用。")
+        st.caption("v122：圖表區間 1M / 3M / 6M / 1Y / 全部 已改為穩定永久套用；按下後不會先清空主圖，會在同次執行安全重算並保存。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
