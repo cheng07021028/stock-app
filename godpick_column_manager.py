@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v114：表格管理全選 / 取消全選 + 勾選延後套用版
+v116：全系統表格全選 / 取消全選 + 重型頁輕量勾選工具版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v114"
+CONFIG_VERSION = "v116"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -603,7 +603,7 @@ def render_table_view_manager(table_key: str, table_label: str, df: pd.DataFrame
     cols = list(clean.columns)
     current = get_table_view_config(table_key, clean)
 
-    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v114", expanded=False):
+    with st.expander(f"🔎 {table_label}｜篩選 / 排序 / 永久記錄 v116", expanded=False):
         st.caption("輸入篩選、排序或勾選條件時不重算資料；只有按『套用並永久記錄』後，才套用到目前表格顯示。")
         with st.form(key=f"{safe_key}_table_view_form_v105", clear_on_submit=False):
             c1, c2, c3, c4 = st.columns([1.3, 1.4, 1.1, 0.8])
@@ -739,8 +739,25 @@ def _same_table_shape(a: Any, b: pd.DataFrame) -> bool:
         return False
 
 
+
+
+def _action_button_any_context(label: str, key: str, use_container_width: bool = True) -> bool:
+    """v116：表格全選/取消按鈕可在一般頁面或既有 st.form 內使用。
+
+    Streamlit 在 st.form 內不允許 st.button；此函式先嘗試一般 button，
+    若遇到 form 限制，改用 form_submit_button，避免自訂表格被包在 form 時
+    全選功能消失或造成錯誤。
+    """
+    try:
+        return bool(st.button(label, key=key, use_container_width=use_container_width))
+    except Exception:
+        try:
+            return bool(st.form_submit_button(label, use_container_width=use_container_width))
+        except Exception:
+            return False
+
 def render_checkbox_bulk_controls(table_key: str, table_label: str, df: pd.DataFrame) -> pd.DataFrame:
-    """v114：在含勾選欄位的表格上方加入全選 / 取消全選。
+    """v116：在含勾選欄位的表格上方加入全選 / 取消全選。
 
     只操作目前表格顯示的 df 草稿，不執行匯入 / 刪除 / 同步 / 推薦重算。
     真正回傳給原頁面，仍要按 data_editor 下方的「套用勾選 / 編輯結果」。
@@ -782,11 +799,11 @@ def render_checkbox_bulk_controls(table_key: str, table_label: str, df: pd.DataF
                 target_col = checkbox_cols[0]
                 st.caption(f"批次勾選欄位：{target_col}")
         with c1:
-            select_all = st.button("✅ 勾選全選", key=f"{safe_key}_select_all_v114", use_container_width=True)
+            select_all = _action_button_any_context("✅ 勾選全選", key=f"{safe_key}_select_all_v116", use_container_width=True)
         with c2:
-            clear_all = st.button("⬜ 全部取消", key=f"{safe_key}_clear_all_v114", use_container_width=True)
+            clear_all = _action_button_any_context("⬜ 全部取消", key=f"{safe_key}_clear_all_v116", use_container_width=True)
         with c3:
-            st.caption("v114：全選/取消只修改目前顯示草稿；仍需按下方『套用勾選 / 編輯結果』才生效。")
+            st.caption("v116：全選/取消只修改目前顯示草稿；仍需按下方『套用勾選 / 編輯結果』才生效。")
 
     if select_all or clear_all:
         try:
@@ -847,7 +864,7 @@ def install_global_table_patch(page_key: str = "global") -> None:
                 data = apply_table_view(data, table_key)
             except Exception as exc:
                 try:
-                    st.caption(f"v114 表格篩選排序略過：{exc}")
+                    st.caption(f"v116 表格篩選排序略過：{exc}")
                 except Exception:
                     pass
         return original_dataframe(data, *args, **kwargs)
@@ -902,11 +919,7 @@ def install_global_table_patch(page_key: str = "global") -> None:
 
 
 def uninstall_global_table_patch() -> bool:
-    """v110：重型頁面進入時，若上一頁已安裝全域 st.dataframe/data_editor 攔截，立即還原。
-
-    v110 只是不再安裝新攔截；但 Streamlit 同一個 session 內，上一頁的 monkey patch
-    會殘留到 0/3/7/8/10/14 等頁，造成進頁仍出現「表格 X｜篩選排序」並拖慢。
-    """
+    """v116：復原完整表格管理攔截，但保留後續可安裝輕量勾選補丁。"""
     restored = False
     try:
         original_dataframe = getattr(st, "_godpick_original_dataframe_v105", None)
@@ -927,6 +940,66 @@ def uninstall_global_table_patch() -> bool:
     except Exception:
         pass
     return restored
+
+
+def uninstall_light_checkbox_patch() -> bool:
+    """v116：切回完整全域表格管理前，先移除輕量勾選補丁，避免重複顯示。"""
+    restored = False
+    try:
+        original = getattr(st, "_godpick_original_data_editor_v116_light", None)
+        if original is not None and getattr(st, "_godpick_light_checkbox_patch_v116", False):
+            st.data_editor = original
+            restored = True
+    except Exception:
+        pass
+    try:
+        st._godpick_light_checkbox_patch_v116 = False
+    except Exception:
+        pass
+    return restored
+
+
+def install_light_checkbox_patch(page_key: str = "global") -> None:
+    """v116：重型頁也要有『全選 / 全部取消』，但不啟動完整表格篩選排序攔截。
+
+    用途：
+    - 0/3/7/8/10/14 這類重型頁，完整表格管理會拖慢進頁。
+    - 但使用者仍要求所有勾選表格都有全選 / 取消。
+    - 因此只輕量攔截 st.data_editor：有勾選欄才顯示全選工具，不做篩選排序、不做欄位管理、不重跑資料。
+    """
+    if getattr(st, "_godpick_table_patch_v105", False):
+        return
+    if getattr(st, "_godpick_light_checkbox_patch_v116", False):
+        return
+    try:
+        original_data_editor = st.data_editor
+        st._godpick_original_data_editor_v116_light = original_data_editor
+    except Exception:
+        return
+
+    def _auto_key(user_key: Any = None) -> str:
+        if user_key:
+            return f"{page_key}_light_editor_{_key_safe(str(user_key))}"
+        counter_key = f"_godpick_{page_key}_light_editor_counter_v116"
+        n = int(st.session_state.get(counter_key, 0)) + 1
+        st.session_state[counter_key] = n
+        return f"{page_key}_light_editor_{n}"
+
+    def patched_data_editor(data=None, *args, **kwargs):
+        if kwargs.pop("_godpick_bypass", False):
+            return original_data_editor(data, *args, **kwargs)
+        if not isinstance(data, pd.DataFrame) or data.empty or not _has_checkbox_like_column(data):
+            return original_data_editor(data, *args, **kwargs)
+        table_key = _auto_key(kwargs.get("key"))
+        table_label = str(kwargs.get("key") or f"勾選表格 {table_key.split('_')[-1]}")
+        try:
+            show_df = render_checkbox_bulk_controls(table_key, table_label, data.copy())
+        except Exception:
+            show_df = data
+        return original_data_editor(show_df, *args, **kwargs)
+
+    st.data_editor = patched_data_editor
+    st._godpick_light_checkbox_patch_v116 = True
 
 
 def managed_dataframe(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> None:
@@ -1056,7 +1129,7 @@ def _render_heavy_guard_sidebar_once(page_key: str = "") -> None:
             return
         st.session_state["_godpick_heavy_guard_sidebar_rendered_this_run_v111"] = True
         safe_guard = _key_safe(str(guard_status.get("page_key") or page_key or "global"))
-        with st.sidebar.expander("⚡ 重型模組防卡模式｜v112", expanded=False):
+        with st.sidebar.expander("⚡ 重型模組防卡模式｜v116", expanded=False):
             st.caption("重型頁面預設不自動攔截所有表格，避免進頁就卡住；需要表格篩選排序時，可本次手動啟用。")
             if guard_status.get("enabled"):
                 st.warning("本頁已手動啟用全域表格管理；若進頁或操作變慢，請恢復防卡。")
@@ -1141,7 +1214,18 @@ def install_auto_column_manager(page_key: str) -> None:
     allow_auto_patch = _render_heavy_page_guard(page_key)
     if allow_auto_patch:
         try:
+            uninstall_light_checkbox_patch()
+        except Exception:
+            pass
+        try:
             install_global_table_patch(page_key)
+        except Exception:
+            pass
+    else:
+        # v116：重型頁不啟動完整表格管理，但仍要讓所有有勾選欄位的 data_editor
+        # 顯示「勾選全選 / 全部取消」。這個輕量補丁不做篩選排序、不重算資料。
+        try:
+            install_light_checkbox_patch(page_key)
         except Exception:
             pass
 
@@ -1156,7 +1240,7 @@ def install_auto_column_manager(page_key: str) -> None:
 
     try:
         opts = get_global_table_options()
-        with st.sidebar.expander("🧩 表格管理｜v112 篩選排序＋欄位順序＋勾選延後", expanded=False):
+        with st.sidebar.expander("🧩 表格管理｜v116 篩選排序＋欄位順序＋勾選全選/取消", expanded=False):
             st.caption("每個模組 / 每張表格獨立保存；勾選、篩選、排序、欄位設定都要按套用才生效。")
             if bool(st.session_state.get("godpick_column_manager_edit_mode", False)):
                 st.success("欄位順序管理：已啟用。請在表格上方的『欄位管理』區塊調整順序，並按套用保存。")
@@ -1229,7 +1313,7 @@ def install_auto_column_manager(page_key: str) -> None:
                     st.session_state.pop(k, None)
                 st.rerun()
 
-            st.caption("v114：欄位順序管理沒有移除；勾選欄位表格新增「全選 / 取消全選」，但仍需按套用才回傳給主程式。")
+            st.caption("v116：所有 data_editor 只要有勾選欄位，都會提供『全選 / 全部取消』；重型頁使用輕量補丁，不啟動完整表格攔截。")
     except Exception:
         pass
     return None
