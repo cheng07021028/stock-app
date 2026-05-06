@@ -79,7 +79,7 @@ except Exception:
         return pd.DataFrame()
 
 PAGE_TITLE = "推薦清單"
-PERF_TRACKING_VERSION = "v98_formal_n_day_perf_backfill"
+PERF_TRACKING_VERSION = "v99_main_button_formal_backfill_fix"
 PFX = "godpick_list_"
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "recommend_list_v53_perf_guard_20260429"
@@ -1756,7 +1756,7 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V98 推薦�
         if valid_n == 0:
             st.warning("目前沒有可用績效數值。請先按『更新推薦後績效』，或確認推薦清單已有最新價 / 損益幅%。")
         elif period_valid_n == 0 and current_valid_n > 0:
-            st.info("V98：目前只有即時損益可用，尚無正式 1/3/5/10/20 日到期績效；請按左側「正式N日績效回補」產生正式績效。")
+            st.info("V99：目前只有即時損益可用，尚無正式 1/3/5/10/20 日到期績效；請按上方或側邊「正式N日績效回補」產生正式績效。")
         else:
             st.caption("V98：正式 N 日績效優先；尚未到期時才使用即時損益作暫行統計，不把空白績效偽裝成 0%。")
 
@@ -1864,7 +1864,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V98 正式N日績效回補版：{PERF_TRACKING_VERSION}")
+    st.caption(f"推薦清單 V99 正式N日績效主畫面回補版：{PERF_TRACKING_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -1977,6 +1977,68 @@ def main():
             st.metric("平均推薦後20日%", format_number(avg20, 2))
 
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
+
+    # >>> V99_MAIN_FORMAL_BACKFILL_BUTTON
+    # v99 修正：v98 只把正式 N 日回補放在 sidebar，使用者容易看不到，
+    # 導致畫面一直維持「正式樣本 0」。此區直接放在績效總控下方，
+    # 且只處理既有推薦清單，不重跑 7_股神推薦、不重新推薦。
+    try:
+        formal_candidates_v99 = sum(1 for _, _r in df.iterrows() if _row_needs_formal_n_day_update_v98(dict(_r)))
+    except Exception:
+        formal_candidates_v99 = 0
+    if formal_candidates_v99 > 0:
+        st.warning(
+            f"偵測到 {formal_candidates_v99} 筆推薦紀錄尚未產生正式 N 日績效。"
+            "請按下方按鈕回補，回補後 1/3/5/10/20 日勝率才會從暫行績效改成正式績效。"
+        )
+    else:
+        st.info("目前沒有待回補的正式 N 日績效候選；若仍顯示正式樣本 0，代表篩選區間尚未到期或歷史K線來源不足。")
+
+    b1, b2, b3 = st.columns([1.2, 1.2, 2])
+    with b1:
+        run_formal_backfill_main_v99 = st.button(
+            "📅 正式N日績效回補",
+            key=_k("formal_backfill_main_v99"),
+            use_container_width=True,
+            type="primary",
+            disabled=(formal_candidates_v99 <= 0),
+        )
+    with b2:
+        run_formal_backfill_force_v99 = st.button(
+            "🔁 強制重新檢查正式績效",
+            key=_k("formal_backfill_force_main_v99"),
+            use_container_width=True,
+        )
+    with b3:
+        st.caption("v99：此按鈕只回補 10_推薦清單既有資料並寫回 GitHub/Firestore，不會重跑股神推薦。")
+
+    if run_formal_backfill_main_v99 or run_formal_backfill_force_v99:
+        with st.spinner("V99：正式 N 日績效回補中，只補已到期且缺欄位的資料..."):
+            formal_df, formal_summary = _update_formal_n_day_metrics_v98(
+                df,
+                max_rows=int(st.session_state.get(_k("perf_update_batch_size"), 80)),
+                show_progress=True,
+            )
+            ok, msgs = _sync_records(formal_df)
+            st.session_state[_k("records_df")] = formal_df
+            _load_records_cached(force=True)
+        if ok:
+            st.success(
+                f"V99 正式N日績效回補完成：待回補 {formal_summary.get('candidates', 0)} 筆，"
+                f"本次處理 {formal_summary.get('processed', 0)} 筆，成功 {formal_summary.get('success', 0)} 筆，"
+                f"不足/略過 {formal_summary.get('fail', 0)} 筆，剩餘 {formal_summary.get('remaining', 0)} 筆。"
+            )
+        else:
+            st.warning(
+                f"V99 已在畫面資料中完成回補，但 GitHub/Firestore 寫回未成功；"
+                f"本次處理 {formal_summary.get('processed', 0)} 筆。"
+            )
+        if msgs:
+            st.info("；".join(msgs))
+        if formal_summary.get("time_guard"):
+            st.warning("本次觸發時間防呆，請再按一次『正式N日績效回補』繼續補剩餘資料。")
+        st.rerun()
+    # <<< V99_MAIN_FORMAL_BACKFILL_BUTTON
 
     render_pro_section("推薦清單明細")
     # v15 欄位統一：推薦清單明細使用與 7/8/12 一致的欄位順序。
