@@ -9386,34 +9386,6 @@ def main():
     except Exception as _table_mgr_e:
         st.caption(f"v113 本輪精華推薦表格管理略過：{_table_mgr_e}")
 
-    # v115：本輪精華推薦明確加入「勾選全選 / 全部取消勾選」。
-    # 放在 form 外面，按下後只更新 session_state 與目前表格勾選草稿，不執行匯入、不重跑推薦。
-    try:
-        _top_visible_codes_v115 = [
-            _normalize_code(x)
-            for x in top_show_df.get("股票代號", pd.Series(dtype=str)).astype(str).tolist()
-            if _normalize_code(x)
-        ]
-        _top_c1_v115, _top_c2_v115, _top_c3_v115 = st.columns([1, 1, 3])
-        with _top_c1_v115:
-            if st.button("✅ 本輪精華全選", key=_k("top_select_all_v115"), use_container_width=True):
-                st.session_state[_k("top_table_selected_codes")] = list(dict.fromkeys(_top_visible_codes_v115))
-                st.session_state[_k("top_pick_codes_next")] = list(dict.fromkeys(_top_visible_codes_v115))
-                if "勾選" in top_show_df.columns:
-                    top_show_df["勾選"] = top_show_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in set(_top_visible_codes_v115))
-                st.success(f"已全選本輪精華推薦目前顯示的 {len(set(_top_visible_codes_v115))} 檔；尚未匯入，請再按『套用本輪精華推薦勾選』。")
-        with _top_c2_v115:
-            if st.button("⬜ 本輪精華全取消", key=_k("top_clear_all_v115"), use_container_width=True):
-                st.session_state[_k("top_table_selected_codes")] = []
-                st.session_state[_k("top_pick_codes_next")] = []
-                if "勾選" in top_show_df.columns:
-                    top_show_df["勾選"] = False
-                st.success("已取消本輪精華推薦目前勾選；尚未匯入，請再按『套用本輪精華推薦勾選』。")
-        with _top_c3_v115:
-            st.caption("v115：全選 / 全取消只處理目前篩選後顯示的表格，不會立即匯入、不會重跑股神推薦。")
-    except Exception as _top_bulk_e_v115:
-        st.caption(f"v115 本輪精華批次勾選略過：{_top_bulk_e_v115}")
-
     # v44：先建立 row_index → 股票代號 對照表，讓 on_change callback 可在 rerun 前保存勾選狀態。
     top_editor_key = _k("top_pick_editor")
     top_editor_code_map_key = _k("top_pick_editor_code_map")
@@ -9634,30 +9606,6 @@ def main():
         if "勾選" not in full_work_df.columns:
             full_work_df.insert(0, "勾選", False)
         full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)
-
-        # v115：完整推薦表明確加入「勾選全選 / 全部取消勾選」。
-        # 只改目前篩選後 full_work_df 的勾選狀態，必須再按「套用完整推薦表勾選」才會進入匯入流程。
-        try:
-            _full_visible_codes_v115 = [
-                _normalize_code(x)
-                for x in full_work_df.get("股票代號", pd.Series(dtype=str)).astype(str).tolist()
-                if _normalize_code(x)
-            ]
-            _full_c1_v115, _full_c2_v115, _full_c3_v115 = st.columns([1, 1, 3])
-            with _full_c1_v115:
-                if st.button("✅ 完整推薦表全選", key=_k("full_select_all_v115"), use_container_width=True):
-                    st.session_state[_k("full_table_selected_codes")] = list(dict.fromkeys(_full_visible_codes_v115))
-                    full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in set(_full_visible_codes_v115))
-                    st.success(f"已全選完整推薦表目前顯示的 {len(set(_full_visible_codes_v115))} 檔；尚未匯入，請再按『套用完整推薦表勾選』。")
-            with _full_c2_v115:
-                if st.button("⬜ 完整推薦表全取消", key=_k("full_clear_all_v115"), use_container_width=True):
-                    st.session_state[_k("full_table_selected_codes")] = []
-                    full_work_df["勾選"] = False
-                    st.success("已取消完整推薦表目前勾選；尚未匯入，請再按『套用完整推薦表勾選』。")
-            with _full_c3_v115:
-                st.caption("v115：全選 / 全取消只處理目前篩選後顯示的表格，不會立即匯入、不會重跑推薦。")
-        except Exception as _full_bulk_e_v115:
-            st.caption(f"v115 完整推薦表批次勾選略過：{_full_bulk_e_v115}")
 
         # v78：完整推薦表 key 依欄位順序指紋重建。
         # 原因：Streamlit data_editor 會保留前端 column layout；若 key 固定，即使 Python 欄位順序改了，畫面仍可能沿用舊位置。
