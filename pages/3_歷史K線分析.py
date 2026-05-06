@@ -20,9 +20,7 @@ except Exception as _auth_e:
 # <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Any
-import json
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -55,194 +53,6 @@ PFX = "hk_"
 
 def _k(key: str) -> str:
     return f"{PFX}{key}"
-
-
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-HK_CHART_SETTINGS_FILE = "hk_chart_settings.json"
-HK_CHART_DEFAULT_SETTINGS = {
-    "chart_display_mode": "清晰模式",
-    "ma_display_mode": "自動",
-    "show_ma": True,
-    "show_pivots": True,
-    "pivot_display_limit": 18,
-    "focus_window": "全部",
-    "event_filter": "全部",
-    "chart_height": 900,
-}
-
-# v121：圖上區間按鈕改由 Streamlit 控制並永久保存。
-# 這些值代表交易日數：1M≈30、3M≈60、6M≈120、1Y≈240。
-HK_FOCUS_WINDOW_LABELS = {
-    "30": "1M",
-    "60": "3M",
-    "120": "6M",
-    "240": "1Y",
-    "全部": "全部",
-}
-HK_FOCUS_WINDOW_BY_LABEL = {v: k for k, v in HK_FOCUS_WINDOW_LABELS.items()}
-
-
-def _focus_window_label(value: Any) -> str:
-    v = str(value or "全部")
-    return HK_FOCUS_WINDOW_LABELS.get(v, HK_FOCUS_WINDOW_LABELS.get(HK_FOCUS_WINDOW_BY_LABEL.get(v, "全部"), "全部"))
-
-
-def _load_hk_chart_settings() -> dict[str, Any]:
-    """讀取歷史K線圖表永久設定。失敗時回傳預設值，不影響頁面。"""
-    data = HK_CHART_DEFAULT_SETTINGS.copy()
-    p = _project_root() / HK_CHART_SETTINGS_FILE
-    try:
-        if p.exists():
-            raw = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                data.update({k: raw.get(k, v) for k, v in HK_CHART_DEFAULT_SETTINGS.items()})
-    except Exception:
-        pass
-    return data
-
-
-def _save_hk_chart_settings(settings: dict[str, Any]) -> tuple[bool, str]:
-    """儲存歷史K線圖表永久設定。"""
-    p = _project_root() / HK_CHART_SETTINGS_FILE
-    try:
-        clean = HK_CHART_DEFAULT_SETTINGS.copy()
-        clean.update({k: settings.get(k, v) for k, v in HK_CHART_DEFAULT_SETTINGS.items()})
-        clean["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        p.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True, f"已永久記錄圖表設定：{p.name}"
-    except Exception as e:
-        return False, f"圖表設定儲存失敗：{e}"
-
-
-def _normalize_chart_setting_value(key: str, value: Any) -> Any:
-    if key in {"show_ma", "show_pivots"}:
-        return bool(value)
-    if key == "pivot_display_limit":
-        try:
-            return max(6, min(40, int(value)))
-        except Exception:
-            return 18
-    if key == "chart_height":
-        try:
-            return max(650, min(1200, int(value)))
-        except Exception:
-            return 900
-    if key == "chart_display_mode" and value not in {"清晰模式", "完整模式"}:
-        return "清晰模式"
-    if key == "ma_display_mode" and value not in {"自動", "精簡", "完整"}:
-        return "自動"
-    if key == "focus_window":
-        raw = str(value or "全部")
-        mapped = HK_FOCUS_WINDOW_BY_LABEL.get(raw, raw)
-        if mapped not in {"全部", "30", "60", "120", "240"}:
-            return "全部"
-        return mapped
-    if key == "event_filter" and str(value) not in {"全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"}:
-        return "全部"
-    return value
-
-
-def _apply_hk_chart_settings_to_state(settings: dict[str, Any], draft: bool = False) -> None:
-    """把永久設定或草稿設定放入 session_state。"""
-    suffix = "_draft" if draft else ""
-    for key, default in HK_CHART_DEFAULT_SETTINGS.items():
-        st.session_state[_k(key + suffix)] = _normalize_chart_setting_value(key, settings.get(key, default))
-
-
-def _current_hk_chart_settings_from_state(draft: bool = False) -> dict[str, Any]:
-    suffix = "_draft" if draft else ""
-    out = {}
-    for key, default in HK_CHART_DEFAULT_SETTINGS.items():
-        out[key] = _normalize_chart_setting_value(key, st.session_state.get(_k(key + suffix), default))
-    return out
-
-
-def _persist_hk_chart_setting_change(**changes: Any) -> tuple[bool, str]:
-    """
-    v123：單項圖表設定快速套用並永久記錄。
-
-    重要修正：
-    Streamlit 不允許在 widget 建立後，再寫入同一個 widget key。
-    1M / 3M / 6M / 1Y / 全部 快速按鈕位於圖表設定面板下方，
-    此時 focus_window_draft 這類草稿 widget 可能已經建立；
-    因此快速按鈕只更新正式設定 key 與 JSON，不再回寫 *_draft key，
-    避免 StreamlitAPIException。
-    """
-    current = _current_hk_chart_settings_from_state(draft=False)
-    for key, value in changes.items():
-        if key in HK_CHART_DEFAULT_SETTINGS:
-            current[key] = _normalize_chart_setting_value(key, value)
-
-    # 只同步正式生效值；不要在這裡寫入 *_draft widget key。
-    _apply_hk_chart_settings_to_state(current, draft=False)
-    st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
-    return _save_hk_chart_settings(current)
-
-
-def _render_persistent_chart_range_buttons() -> None:
-    """
-    v124：圖表區間改為「先選擇、再套用並永久記錄」。
-
-    目的：
-    - 1M / 3M / 6M / 1Y / 全部 不再點一下就立即重繪。
-    - 使用者選好區間後，必須按「套用區間並永久記錄」才會更新正式設定。
-    - 避免 Streamlit widget key 回寫造成 APIException。
-    """
-    current = _normalize_chart_setting_value("focus_window", st.session_state.get(_k("focus_window"), "全部"))
-    options = ["1M", "3M", "6M", "1Y", "全部"]
-    current_label = _focus_window_label(current)
-    draft_key = _k("quick_focus_window_draft")
-
-    # 只在 widget 建立前初始化草稿 key；建立後不回寫，避免 StreamlitAPIException。
-    if draft_key not in st.session_state or st.session_state.get(draft_key) not in options:
-        st.session_state[draft_key] = current_label
-
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stHorizontalBlock"] .stButton > button {
-            min-height: 2.25rem;
-            border-radius: 0.55rem;
-            font-weight: 700;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.caption("圖表區間設定：先選擇 1M / 3M / 6M / 1Y / 全部，再按『套用區間並永久記錄』才會重繪與保存。")
-    c1, c2, c3 = st.columns([2.3, 1.2, 2.4])
-    with c1:
-        st.radio(
-            "選擇圖表區間",
-            options=options,
-            key=draft_key,
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-    with c2:
-        apply_range = st.button(
-            "✅ 套用區間並永久記錄",
-            key=_k("apply_quick_focus_window"),
-            use_container_width=True,
-            type="primary",
-        )
-    with c3:
-        draft_label = st.session_state.get(draft_key, current_label)
-        st.caption(f"目前永久區間：{current_label}｜待套用：{draft_label}｜v124")
-
-    if apply_range:
-        selected_label = str(st.session_state.get(draft_key, current_label))
-        selected_value = _normalize_chart_setting_value("focus_window", selected_label)
-        ok, msg = _persist_hk_chart_setting_change(focus_window=selected_value)
-        if ok:
-            st.success(f"已套用並永久記錄圖表區間：{_focus_window_label(selected_value)}")
-        else:
-            st.error(msg)
-        # 不使用 st.rerun；同一次 run 會用新正式值往下計算 focus_df。
 
 
 def _safe_str(v: Any) -> str:
@@ -666,38 +476,20 @@ def _init_state(group_map: dict[str, list[dict[str, str]]]):
     if _k("end_date") not in st.session_state:
         st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
 
-    chart_settings = _load_hk_chart_settings()
-    if _k("chart_settings_loaded") not in st.session_state:
-        _apply_hk_chart_settings_to_state(chart_settings, draft=False)
-        _apply_hk_chart_settings_to_state(chart_settings, draft=True)
-        st.session_state[_k("chart_settings_loaded")] = True
-
     if _k("event_filter") not in st.session_state:
-        st.session_state[_k("event_filter")] = _normalize_chart_setting_value("event_filter", chart_settings.get("event_filter", "全部"))
+        st.session_state[_k("event_filter")] = "全部"
 
     if _k("focus_event_idx") not in st.session_state:
         st.session_state[_k("focus_event_idx")] = -1
 
     if _k("focus_window") not in st.session_state:
-        st.session_state[_k("focus_window")] = _normalize_chart_setting_value("focus_window", chart_settings.get("focus_window", "全部"))
+        st.session_state[_k("focus_window")] = "全部"
 
     if _k("show_ma") not in st.session_state:
-        st.session_state[_k("show_ma")] = bool(chart_settings.get("show_ma", True))
+        st.session_state[_k("show_ma")] = True
 
     if _k("show_pivots") not in st.session_state:
-        st.session_state[_k("show_pivots")] = bool(chart_settings.get("show_pivots", True))
-
-    if _k("chart_display_mode") not in st.session_state:
-        st.session_state[_k("chart_display_mode")] = _normalize_chart_setting_value("chart_display_mode", chart_settings.get("chart_display_mode", "清晰模式"))
-
-    if _k("ma_display_mode") not in st.session_state:
-        st.session_state[_k("ma_display_mode")] = _normalize_chart_setting_value("ma_display_mode", chart_settings.get("ma_display_mode", "自動"))
-
-    if _k("pivot_display_limit") not in st.session_state:
-        st.session_state[_k("pivot_display_limit")] = _normalize_chart_setting_value("pivot_display_limit", chart_settings.get("pivot_display_limit", 18))
-
-    if _k("chart_height") not in st.session_state:
-        st.session_state[_k("chart_height")] = _normalize_chart_setting_value("chart_height", chart_settings.get("chart_height", 900))
+        st.session_state[_k("show_pivots")] = True
 
     if _k("left_panel_limit") not in st.session_state:
         st.session_state[_k("left_panel_limit")] = 12
@@ -1456,74 +1248,7 @@ def _event_direction_meta(event_name: str, event_type: str) -> dict[str, str]:
     return {"arrow": "→", "label": "觀察", "bg": "#e2e8f0", "color": "#334155"}
 
 
-def _calc_initial_display_bars(total_bars: int) -> int:
-    """依資料量決定初始顯示 K 棒數，避免天數越多越擁擠。"""
-    if total_bars <= 110:
-        return total_bars
-    if total_bars <= 180:
-        return 90
-    if total_bars <= 260:
-        return 110
-    if total_bars <= 420:
-        return 130
-    return 150
-
-
-def _compress_signal_indices(indices: tuple[int, ...] | list[int], total_bars: int, preferred_window: int, max_count: int | None = None) -> list[int]:
-    """
-    壓縮起漲 / 起跌標記密度：
-    - 保留代表性訊號，不因天數增加而把整張圖塞滿。
-    - 永遠優先保留最後一筆與近期訊號。
-    """
-    if not indices:
-        return []
-
-    valid = sorted({int(i) for i in indices if 0 <= int(i) < total_bars})
-    if not valid:
-        return []
-
-    if max_count is not None:
-        try:
-            target_count = max(6, min(40, int(max_count)))
-        except Exception:
-            target_count = 18
-    elif total_bars <= 110:
-        target_count = 18
-    elif total_bars <= 180:
-        target_count = 16
-    elif total_bars <= 260:
-        target_count = 14
-    elif total_bars <= 420:
-        target_count = 12
-    else:
-        target_count = 10
-
-    preferred_gap = max(4, preferred_window // max(6, target_count - 2))
-    global_gap = max(6, total_bars // max(8, target_count))
-
-    compressed: list[int] = []
-    last_kept = None
-    recent_boundary = max(0, total_bars - preferred_window)
-
-    for idx in valid:
-        gap = preferred_gap if idx >= recent_boundary else global_gap
-        if last_kept is None or idx - last_kept >= gap:
-            compressed.append(idx)
-            last_kept = idx
-
-    # 一定保留最後一筆訊號，並控制總數不爆量。
-    if valid[-1] not in compressed:
-        compressed.append(valid[-1])
-
-    if len(compressed) > target_count:
-        head_keep = max(2, target_count // 3)
-        tail_keep = max(5, target_count - head_keep)
-        compressed = compressed[:head_keep] + compressed[-tail_keep:]
-
-    return sorted(set(compressed))
-
-
-def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...], chart_display_mode: str = "清晰模式", pivot_display_limit: int = 18, ma_display_mode: str = "自動", chart_height: int = 900) -> go.Figure:
+def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, show_pivots: bool, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]) -> go.Figure:
     """專業版 K 線圖。
 
     設計重點：
@@ -1546,11 +1271,6 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
 
     if work.empty:
         return go.Figure()
-
-    chart_display_mode = _normalize_chart_setting_value("chart_display_mode", chart_display_mode)
-    ma_display_mode = _normalize_chart_setting_value("ma_display_mode", ma_display_mode)
-    pivot_display_limit = _normalize_chart_setting_value("pivot_display_limit", pivot_display_limit)
-    chart_height = _normalize_chart_setting_value("chart_height", chart_height)
 
     has_volume = "成交股數" in work.columns
     if has_volume:
@@ -1636,22 +1356,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             120: dict(color="#22c55e", width=1.9),
             240: dict(color="#a855f7", width=1.8),
         }
-        display_bars_for_ma = len(work) if chart_display_mode == "完整模式" else _calc_initial_display_bars(len(work))
-        if ma_display_mode == "完整":
-            ma_list = [5, 10, 20, 60, 120, 240]
-        elif ma_display_mode == "精簡":
-            ma_list = [10, 20, 60]
-        else:
-            if chart_display_mode == "完整模式" or display_bars_for_ma >= 260:
-                ma_list = [10, 20, 60, 120, 240]
-            elif display_bars_for_ma >= 150:
-                ma_list = [5, 10, 20, 60, 120]
-            elif display_bars_for_ma >= 80:
-                ma_list = [5, 10, 20, 60]
-            else:
-                ma_list = [5, 10, 20]
-
-        for n in ma_list:
+        for n in [5, 10, 20, 60, 120, 240]:
             col = f"MA{n}"
             if col in work.columns:
                 y = pd.to_numeric(work[col], errors="coerce")
@@ -1678,13 +1383,11 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
     marker_offset = span * 0.035
 
     if show_pivots:
-        display_bars = len(work) if chart_display_mode == "完整模式" else _calc_initial_display_bars(len(work))
-        view_start_idx = max(0, len(work) - display_bars)
-        view_start = work["日期"].iloc[view_start_idx]
-        view_end = work["日期"].iloc[-1]
+        # 避免過多標記拖慢，只顯示圖上最後 35 個起漲 / 起跌訊號。
+        max_marker_count = 35
 
         if trough_idx:
-            idxs = _compress_signal_indices(trough_idx, len(work), display_bars, pivot_display_limit)
+            idxs = [int(i) for i in trough_idx if 0 <= int(i) < len(work)][-max_marker_count:]
             if idxs:
                 sub = work.iloc[idxs].copy()
                 y_mark = sub["最低價"] - marker_offset
@@ -1719,7 +1422,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                     )
 
         if peak_idx:
-            idxs = _compress_signal_indices(peak_idx, len(work), display_bars, pivot_display_limit)
+            idxs = [int(i) for i in peak_idx if 0 <= int(i) < len(work)][-max_marker_count:]
             if idxs:
                 sub = work.iloc[idxs].copy()
                 y_mark = sub["最高價"] + marker_offset
@@ -1752,11 +1455,6 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
                         line=dict(color="rgba(124,58,237,0.48)", width=1.4, dash="dot"),
                         row=1, col=1,
                     )
-
-    display_bars = len(work) if chart_display_mode == "完整模式" else _calc_initial_display_bars(len(work))
-    view_start_idx = max(0, len(work) - display_bars)
-    view_start = work["日期"].iloc[view_start_idx]
-    view_end = work["日期"].iloc[-1]
 
     latest_close = float(work["收盤價"].iloc[-1])
     latest_date = work["日期"].iloc[-1]
@@ -1802,11 +1500,11 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             xanchor="left",
             font=dict(size=20, color="#0f172a"),
         ),
-        height=chart_height,
+        height=900,
         margin=dict(l=20, r=145, t=72, b=34),
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
-        hovermode="x unified",
+        hovermode="x",
         hoverlabel=dict(bgcolor="rgba(15,23,42,0.92)", font_size=13, font_color="#ffffff"),
         legend=dict(
             orientation="v",
@@ -1819,7 +1517,6 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             borderwidth=1,
         ),
         xaxis_rangeslider_visible=False,
-        bargap=0.10,
         uirevision=f"kline_{stock_label}",
         dragmode="pan",
     )
@@ -1832,17 +1529,12 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         spikethickness=1,
         showgrid=False,
         tickformat="%Y-%m-%d",
-        range=[pd.to_datetime(view_start) - pd.Timedelta(days=2), pd.to_datetime(view_end) + pd.Timedelta(days=2)],
-        rangebreaks=[dict(bounds=["sat", "mon"])],
-        nticks=min(12, max(6, display_bars // 10)),
         row=1,
         col=1,
     )
     fig.update_xaxes(
         showgrid=False,
         tickformat="%Y-%m-%d",
-        rangebreaks=[dict(bounds=["sat", "mon"])],
-        nticks=min(12, max(6, display_bars // 10)),
         title_text="日期",
         row=2,
         col=1,
@@ -1870,22 +1562,167 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _build_kd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
+    work = df.copy()
+    work["日期"] = pd.to_datetime(work["日期"])
+    k = pd.to_numeric(work["K"], errors="coerce")
+    d = pd.to_numeric(work["D"], errors="coerce")
+
+    kd_cross_up = (k > d) & (k.shift(1) <= d.shift(1))
+    kd_cross_dn = (k < d) & (k.shift(1) >= d.shift(1))
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["日期"], y=df["K"], mode="lines", name="K"))
-    fig.add_trace(go.Scatter(x=df["日期"], y=df["D"], mode="lines", name="D"))
-    fig.add_trace(go.Scatter(x=df["日期"], y=[80] * len(df), mode="lines", name="80", line=dict(dash="dot")))
-    fig.add_trace(go.Scatter(x=df["日期"], y=[20] * len(df), mode="lines", name="20", line=dict(dash="dot")))
-    fig.update_layout(title=f"{stock_label}｜KD", height=320, margin=dict(l=20, r=20, t=50, b=20))
+
+    # 超買 / 超賣區間底色
+    fig.add_hrect(y0=80, y1=100, fillcolor="rgba(239,68,68,0.07)", line_width=0)
+    fig.add_hrect(y0=0, y1=20, fillcolor="rgba(34,197,94,0.08)", line_width=0)
+    fig.add_hrect(y0=20, y1=80, fillcolor="rgba(148,163,184,0.03)", line_width=0)
+
+    fig.add_trace(go.Scatter(
+        x=work["日期"], y=k, mode="lines", name="K",
+        line=dict(color="#1d4ed8", width=2.4),
+        hovertemplate="日期 %{x|%Y-%m-%d}<br>K：%{y:.2f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=work["日期"], y=d, mode="lines", name="D",
+        line=dict(color="#60a5fa", width=2.1),
+        hovertemplate="日期 %{x|%Y-%m-%d}<br>D：%{y:.2f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=work["日期"], y=[80] * len(work), mode="lines", name="超買80",
+        line=dict(color="#ef4444", width=1.3, dash="dot"), opacity=0.9,
+        hoverinfo="skip"
+    ))
+    fig.add_trace(go.Scatter(
+        x=work["日期"], y=[20] * len(work), mode="lines", name="超賣20",
+        line=dict(color="#fca5a5", width=1.3, dash="dot"), opacity=0.9,
+        hoverinfo="skip"
+    ))
+
+    up_points = work.loc[kd_cross_up.fillna(False)]
+    dn_points = work.loc[kd_cross_dn.fillna(False)]
+    if not up_points.empty:
+        fig.add_trace(go.Scatter(
+            x=up_points["日期"], y=up_points["K"], mode="markers", name="黃金交叉",
+            marker=dict(symbol="triangle-up", size=9, color="#16a34a", line=dict(color="white", width=1)),
+            hovertemplate="日期 %{x|%Y-%m-%d}<br>KD黃金交叉<br>K：%{y:.2f}<extra></extra>"
+        ))
+    if not dn_points.empty:
+        fig.add_trace(go.Scatter(
+            x=dn_points["日期"], y=dn_points["K"], mode="markers", name="死亡交叉",
+            marker=dict(symbol="triangle-down", size=9, color="#dc2626", line=dict(color="white", width=1)),
+            hovertemplate="日期 %{x|%Y-%m-%d}<br>KD死亡交叉<br>K：%{y:.2f}<extra></extra>"
+        ))
+
+    latest_k = float(k.dropna().iloc[-1]) if not k.dropna().empty else float('nan')
+    latest_d = float(d.dropna().iloc[-1]) if not d.dropna().empty else float('nan')
+    kd_state = "偏多" if latest_k >= latest_d else "偏弱"
+    kd_state_color = "#16a34a" if latest_k >= latest_d else "#dc2626"
+
+    fig.add_annotation(
+        x=1, y=1.12, xref="paper", yref="paper", xanchor="right", yanchor="bottom",
+        text=f"<b>K</b> {latest_k:.1f} ｜ <b>D</b> {latest_d:.1f} ｜ <b style='color:{kd_state_color}'>{kd_state}</b>",
+        showarrow=False, bgcolor="rgba(255,255,255,0.92)", bordercolor="#e2e8f0", borderwidth=1,
+        font=dict(size=12, color="#0f172a"), borderpad=6
+    )
+
+    fig.update_layout(
+        title=dict(text=f"{stock_label}｜KD", x=0.02, font=dict(size=16)),
+        height=340,
+        margin=dict(l=24, r=20, t=58, b=28),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        bargap=0.18,
+    )
+    fig.update_xaxes(
+        showgrid=False, tickformat="%b %d<br>%Y", rangebreaks=[dict(bounds=["sat", "mon"])],
+        showline=True, linecolor="rgba(148,163,184,0.35)"
+    )
+    fig.update_yaxes(
+        title_text="KD值", range=[0, 100], dtick=20,
+        showgrid=True, gridcolor="rgba(148,163,184,0.16)", zeroline=False,
+        showline=True, linecolor="rgba(148,163,184,0.35)"
+    )
     return fig
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _build_macd_chart(df: pd.DataFrame, stock_label: str) -> go.Figure:
+    work = df.copy()
+    work["日期"] = pd.to_datetime(work["日期"])
+    work["DIF"] = pd.to_numeric(work["DIF"], errors="coerce")
+    work["DEA"] = pd.to_numeric(work["DEA"], errors="coerce")
+    work["MACD_HIST"] = pd.to_numeric(work["MACD_HIST"], errors="coerce")
+
+    macd_cross_up = (work["DIF"] > work["DEA"]) & (work["DIF"].shift(1) <= work["DEA"].shift(1))
+    macd_cross_dn = (work["DIF"] < work["DEA"]) & (work["DIF"].shift(1) >= work["DEA"].shift(1))
+    hist_colors = ["rgba(34,197,94,0.85)" if v >= 0 else "rgba(239,68,68,0.85)" for v in work["MACD_HIST"].fillna(0)]
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["日期"], y=df["DIF"], mode="lines", name="DIF"))
-    fig.add_trace(go.Scatter(x=df["日期"], y=df["DEA"], mode="lines", name="DEA"))
-    fig.add_trace(go.Bar(x=df["日期"], y=df["MACD_HIST"], name="MACD柱"))
-    fig.update_layout(title=f"{stock_label}｜MACD", height=340, margin=dict(l=20, r=20, t=50, b=20))
+    fig.add_hline(y=0, line=dict(color="rgba(100,116,139,0.65)", width=1.1, dash="dot"))
+    fig.add_trace(go.Bar(
+        x=work["日期"], y=work["MACD_HIST"], name="MACD柱",
+        marker_color=hist_colors, opacity=0.95,
+        hovertemplate="日期 %{x|%Y-%m-%d}<br>MACD柱：%{y:.3f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=work["日期"], y=work["DIF"], mode="lines", name="DIF",
+        line=dict(color="#1d4ed8", width=2.4),
+        hovertemplate="日期 %{x|%Y-%m-%d}<br>DIF：%{y:.3f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=work["日期"], y=work["DEA"], mode="lines", name="DEA",
+        line=dict(color="#60a5fa", width=2.1),
+        hovertemplate="日期 %{x|%Y-%m-%d}<br>DEA：%{y:.3f}<extra></extra>"
+    ))
+
+    up_points = work.loc[macd_cross_up.fillna(False)]
+    dn_points = work.loc[macd_cross_dn.fillna(False)]
+    if not up_points.empty:
+        fig.add_trace(go.Scatter(
+            x=up_points["日期"], y=up_points["DIF"], mode="markers", name="黃金交叉",
+            marker=dict(symbol="triangle-up", size=9, color="#16a34a", line=dict(color="white", width=1)),
+            hovertemplate="日期 %{x|%Y-%m-%d}<br>MACD黃金交叉<br>DIF：%{y:.3f}<extra></extra>"
+        ))
+    if not dn_points.empty:
+        fig.add_trace(go.Scatter(
+            x=dn_points["日期"], y=dn_points["DIF"], mode="markers", name="死亡交叉",
+            marker=dict(symbol="triangle-down", size=9, color="#dc2626", line=dict(color="white", width=1)),
+            hovertemplate="日期 %{x|%Y-%m-%d}<br>MACD死亡交叉<br>DIF：%{y:.3f}<extra></extra>"
+        ))
+
+    latest_dif = float(work["DIF"].dropna().iloc[-1]) if not work["DIF"].dropna().empty else float('nan')
+    latest_dea = float(work["DEA"].dropna().iloc[-1]) if not work["DEA"].dropna().empty else float('nan')
+    latest_hist = float(work["MACD_HIST"].dropna().iloc[-1]) if not work["MACD_HIST"].dropna().empty else float('nan')
+    macd_state = "柱體翻紅" if latest_hist >= 0 else "柱體翻黑"
+    macd_state_color = "#16a34a" if latest_hist >= 0 else "#dc2626"
+
+    fig.add_annotation(
+        x=1, y=1.12, xref="paper", yref="paper", xanchor="right", yanchor="bottom",
+        text=f"<b>DIF</b> {latest_dif:.2f} ｜ <b>DEA</b> {latest_dea:.2f} ｜ <b style='color:{macd_state_color}'>{macd_state}</b>",
+        showarrow=False, bgcolor="rgba(255,255,255,0.92)", bordercolor="#e2e8f0", borderwidth=1,
+        font=dict(size=12, color="#0f172a"), borderpad=6
+    )
+
+    fig.update_layout(
+        title=dict(text=f"{stock_label}｜MACD", x=0.02, font=dict(size=16)),
+        height=340,
+        margin=dict(l=24, r=20, t=58, b=28),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        bargap=0.18,
+    )
+    fig.update_xaxes(
+        showgrid=False, tickformat="%b %d<br>%Y", rangebreaks=[dict(bounds=["sat", "mon"])],
+        showline=True, linecolor="rgba(148,163,184,0.35)"
+    )
+    fig.update_yaxes(
+        title_text="MACD", showgrid=True, gridcolor="rgba(148,163,184,0.16)",
+        zeroline=False, showline=True, linecolor="rgba(148,163,184,0.35)"
+    )
     return fig
 
 
@@ -2408,63 +2245,16 @@ def main():
     trough_idx = bundle["trough_idx"]
 
     render_pro_section("互動控制")
+    i1, i2, i3, i4 = st.columns([2, 2, 2, 2])
 
-    # v123：若上一輪按了「還原目前設定 / 恢復預設值」，在 widget 建立前套入草稿 key，
-    # 避免 StreamlitAPIException。
-    _pending_chart_draft = st.session_state.pop(_k("pending_chart_draft_settings"), None)
-    if isinstance(_pending_chart_draft, dict):
-        _apply_hk_chart_settings_to_state(_pending_chart_draft, draft=True)
-
-    with st.expander("📈 圖表設定｜套用並永久記錄 v124", expanded=False):
-        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 已改為先選擇、再套用保存。")
-        s1, s2, s3 = st.columns([1.2, 1.2, 1.2])
-        with s1:
-            st.selectbox("圖表顯示模式", ["清晰模式", "完整模式"], key=_k("chart_display_mode_draft"))
-            st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter_draft"))
-        with s2:
-            st.selectbox("均線顯示模式", ["自動", "精簡", "完整"], key=_k("ma_display_mode_draft"))
-            st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], format_func=_focus_window_label, key=_k("focus_window_draft"))
-        with s3:
-            st.number_input("起漲/起跌最近 N 個", min_value=6, max_value=40, step=1, key=_k("pivot_display_limit_draft"))
-            st.number_input("圖表高度", min_value=650, max_value=1200, step=50, key=_k("chart_height_draft"))
-
-        cma, cpv = st.columns(2)
-        with cma:
-            st.checkbox("顯示均線", key=_k("show_ma_draft"))
-        with cpv:
-            st.checkbox("顯示起漲起跌點", key=_k("show_pivots_draft"))
-
-        a1, a2, a3 = st.columns([1.2, 1.2, 1.2])
-        with a1:
-            if st.button("✅ 套用並永久記錄", key=_k("apply_chart_settings"), use_container_width=True, type="primary"):
-                new_settings = _current_hk_chart_settings_from_state(draft=True)
-                _apply_hk_chart_settings_to_state(new_settings, draft=False)
-                ok, msg = _save_hk_chart_settings(new_settings)
-                st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-                st.rerun()
-        with a2:
-            if st.button("↩️ 還原目前設定", key=_k("reload_chart_settings"), use_container_width=True):
-                # v123：避免 widget 建立後直接改 *_draft key。先暫存，下次 run 開頭套入。
-                st.session_state[_k("pending_chart_draft_settings")] = _current_hk_chart_settings_from_state(draft=False)
-                st.rerun()
-        with a3:
-            if st.button("🔄 恢復預設值", key=_k("reset_chart_settings"), use_container_width=True):
-                # v123：避免 widget 建立後直接改 *_draft key。先暫存，下次 run 開頭套入。
-                st.session_state[_k("pending_chart_draft_settings")] = HK_CHART_DEFAULT_SETTINGS.copy()
-                st.rerun()
-
-    # 正式生效值只讀取已套用設定；草稿輸入不會直接影響圖表。
-    st.session_state[_k("event_filter")] = _normalize_chart_setting_value("event_filter", st.session_state.get(_k("event_filter"), "全部"))
-    st.session_state[_k("focus_window")] = _normalize_chart_setting_value("focus_window", st.session_state.get(_k("focus_window"), "全部"))
-    st.session_state[_k("show_ma")] = bool(st.session_state.get(_k("show_ma"), True))
-    st.session_state[_k("show_pivots")] = bool(st.session_state.get(_k("show_pivots"), True))
-
-    # v123：區間按鈕必須在 focus_df 計算前渲染；點選後同次 run 立即以新區間重算圖表，且不回寫草稿 widget key。
-    _render_persistent_chart_range_buttons()
+    with i1:
+        st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter"))
+    with i2:
+        st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], key=_k("focus_window"))
+    with i3:
+        st.checkbox("顯示均線", key=_k("show_ma"))
+    with i4:
+        st.checkbox("顯示起漲起跌點", key=_k("show_pivots"))
 
     filtered_event_df = event_df.copy()
     selected_filter = st.session_state.get(_k("event_filter"))
@@ -2534,10 +2324,6 @@ def main():
             show_pivots=bool(st.session_state.get(_k("show_pivots"), True)),
             peak_idx=tuple(focus_peak_idx),
             trough_idx=tuple(focus_trough_idx),
-            chart_display_mode=str(st.session_state.get(_k("chart_display_mode"), "清晰模式")),
-            pivot_display_limit=int(st.session_state.get(_k("pivot_display_limit"), 18)),
-            ma_display_mode=str(st.session_state.get(_k("ma_display_mode"), "自動")),
-            chart_height=int(st.session_state.get(_k("chart_height"), 900)),
         )
         try:
             _main_fig.update_layout(
@@ -2558,7 +2344,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v124：圖表區間 1M / 3M / 6M / 1Y / 全部 已改為先選擇、再按「套用區間並永久記錄」；不會點一下就重繪，也會永久保存。")
+        st.caption("v73：主圖已改為完整 hover，滑鼠移到 K 棒可顯示開高低收、成交量、漲跌、漲跌幅與振幅；右上角固定顯示最新交易日完整資訊。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
