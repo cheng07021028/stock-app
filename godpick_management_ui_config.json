@@ -1,6 +1,6 @@
 {
   "version": "v114",
-  "updated_at": "2026-05-06 09:03:43",
+  "updated_at": "2026-05-06 09:04:05",
   "profiles": {
     "page07_godpick_recommend_full": {
       "label": "完整推薦表",
@@ -235,9 +235,9 @@
       "filters": {},
       "sort_column": "",
       "sort_ascending": false,
-      "limit_rows": 1,
+      "limit_rows": 0,
       "label": "完整推薦表",
-      "updated_at": "2026-05-06 09:03:43"
+      "updated_at": "2026-05-06 09:04:05"
     }
   }
 }
