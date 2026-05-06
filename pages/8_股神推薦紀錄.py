@@ -74,6 +74,16 @@ from utils import (
     get_normalized_watchlist,
 )
 
+try:
+    from utils import get_realtime_stock_info_batch as _rt_batch_fetch
+except Exception:
+    _rt_batch_fetch = None
+
+try:
+    from utils import _get_realtime_yahoo_history_fallback as _rt_yahoo_fallback
+except Exception:
+    _rt_yahoo_fallback = None
+
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
@@ -2178,58 +2188,175 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     return src
 
 
-def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
-    """V100：更新最新價專用快速查價。
 
-    只打即時行情，不在按鈕流程內回補 60 日歷史 K，避免單筆失敗拖住整批。
-    歷史資料回補仍保留在績效更新流程，不混在「更新最新價」。
+def _quote_price_from_info(info: Any) -> tuple[float | None, str, str]:
+    """V101：統一解析即時/備援行情回傳。
+
+    utils 不同版本可能回傳 price / 現價 / 最新價，本頁只需要可用價格。
+    """
+    if not isinstance(info, dict):
+        return None, "", "NO_INFO"
+    price = _safe_float(
+        info.get("price")
+        or info.get("現價")
+        or info.get("最新價")
+        or info.get("close")
+        or info.get("收盤價")
+    )
+    market = _safe_str(info.get("market") or info.get("市場別"))
+    src = _safe_str(info.get("price_source") or info.get("來源") or info.get("message") or "realtime")
+    if price is not None and price > 0:
+        return float(price), market, src
+    return None, market, src or "NO_PRICE"
+
+
+def _market_candidates(market_type: Any) -> list[str]:
+    mk0 = _safe_str(market_type) or "上市"
+    out = []
+    for mk in [mk0, "上市", "上櫃", "興櫃"]:
+        if mk and mk not in out:
+            out.append(mk)
+    return out
+
+
+def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
+    """V101：單檔備援查價。
+
+    注意：V100 在 ThreadPool 內呼叫 st.cache_data 包裝的 get_realtime_stock_info，
+    Streamlit Cloud 容易全部失敗或逾時。V101 主流程改用批次查價；本函式只作
+    少量失敗股票的安全備援。
     """
     stock_no = _normalize_code(stock_no)
     stock_name = _safe_str(stock_name)
-    market_type = _safe_str(market_type) or "上市"
     if not stock_no:
-        return None, market_type, "NO_CODE"
+        return None, _safe_str(market_type), "NO_CODE"
 
-    tried = []
-    if market_type:
-        tried.append(market_type)
-    for mk in ["上市", "上櫃", "興櫃"]:
-        if mk not in tried:
-            tried.append(mk)
-
-    token = f"record_latest_v100_{datetime.now():%Y%m%d%H%M}"
-    for mk in tried:
+    token = f"record_latest_v101_{datetime.now():%Y%m%d%H%M}"
+    last_src = "ONLINE_FAIL"
+    for mk in _market_candidates(market_type):
         try:
             info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=token)
-            if not isinstance(info, dict):
-                continue
-            price = _safe_float(info.get("price") or info.get("現價") or info.get("最新價"))
+            price, used_market, src = _quote_price_from_info(info)
+            last_src = src or last_src
             if price is not None and price > 0:
-                src = _safe_str(info.get("price_source") or info.get("來源") or "realtime_fast")
-                return float(price), _safe_str(info.get("market") or mk), src
-        except Exception:
+                return price, used_market or mk, src or "realtime_single"
+        except Exception as e:
+            last_src = f"REALTIME_EXCEPTION:{str(e)[:60]}"
             continue
-    return None, market_type, "ONLINE_FAIL"
+
+    # 第二層：Yahoo 日線備援。這不是正式歷史績效回補，只是避免最新價整批 0。
+    if _rt_yahoo_fallback is not None:
+        for mk in _market_candidates(market_type):
+            try:
+                info = _rt_yahoo_fallback(stock_no, stock_name, mk, refresh_day=date.today().isoformat())
+                price, used_market, src = _quote_price_from_info(info)
+                last_src = src or last_src
+                if price is not None and price > 0:
+                    return price, used_market or mk, src or "yahoo_daily_fallback"
+            except Exception as e:
+                last_src = f"YAHOO_EXCEPTION:{str(e)[:60]}"
+                continue
+    return None, _safe_str(market_type), last_src or "ONLINE_FAIL"
+
+
+def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tuple[float | None, str, str]]:
+    """V101：主執行緒批次查即時價，避免 ThreadPool + st.cache_data 全失敗。
+
+    回傳 dict：股票代號 -> (最新價, 市場別, 來源)
+    """
+    result: dict[str, tuple[float | None, str, str]] = {}
+    if not target_payloads:
+        return result
+
+    # 先用各列原始市場別批次查；失敗再依上市/上櫃/興櫃補查。
+    code_meta: dict[str, dict[str, str]] = {}
+    for payload in target_payloads:
+        code = _normalize_code(payload.get("股票代號"))
+        if not code:
+            continue
+        code_meta[code] = {
+            "code": code,
+            "name": _safe_str(payload.get("股票名稱")),
+            "market": _safe_str(payload.get("市場別")) or "上市",
+        }
+
+    unresolved = set(code_meta.keys())
+    token = f"record_latest_v101_batch_{datetime.now():%Y%m%d%H%M%S}"
+
+    def _run_batch(items: list[dict[str, str]], source_tag: str) -> None:
+        nonlocal result, unresolved
+        if not items:
+            return
+        if _rt_batch_fetch is None:
+            return
+        try:
+            batch_map = _rt_batch_fetch(items, refresh_token=token + source_tag)
+        except Exception as e:
+            # 批次來源掛掉時，保留給單檔備援，不在這裡判定整批失敗。
+            for it in items:
+                code = _normalize_code(it.get("code"))
+                if code and code not in result:
+                    result[code] = (None, _safe_str(it.get("market")), f"BATCH_EXCEPTION:{str(e)[:60]}")
+            return
+        if not isinstance(batch_map, dict):
+            return
+        for it in items:
+            code = _normalize_code(it.get("code"))
+            if not code or code not in unresolved:
+                continue
+            info = batch_map.get(code) or batch_map.get(str(code))
+            price, used_market, src = _quote_price_from_info(info)
+            if price is not None and price > 0:
+                result[code] = (price, used_market or _safe_str(it.get("market")), src or f"batch_{source_tag}")
+                unresolved.discard(code)
+
+    # 第一輪：原市場別
+    first_items = list(code_meta.values())
+    _run_batch(first_items, "_origin")
+
+    # 後續：市場別補查，避免上市/上櫃寫錯造成查無。
+    for mk in ["上市", "上櫃", "興櫃"]:
+        if not unresolved:
+            break
+        items = []
+        for code in list(unresolved):
+            meta = code_meta.get(code, {})
+            items.append({"code": code, "name": meta.get("name", ""), "market": mk})
+        _run_batch(items, f"_{mk}")
+
+    # 批次仍失敗者，只針對少量逐檔用 Yahoo 日線備援，避免全表 0。
+    for code in list(unresolved):
+        meta = code_meta.get(code, {})
+        latest, used_market, src = _fast_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
+        if latest is not None and latest > 0:
+            result[code] = (latest, used_market or meta.get("market", "上市"), src or "single_fallback")
+        else:
+            old = result.get(code)
+            if old is None or old[0] is None:
+                result[code] = (None, meta.get("market", "上市"), src or "ONLINE_FAIL")
+    return result
 
 
 def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
-    """V100：最新價快速防卡版。
+    """V101：最新價批次修正版。
 
-    修正舊版逐筆「即時失敗後再抓歷史 K」造成 Streamlit Cloud 卡很久。
-    本函式只更新目前批次的最新價；失敗保留原資料並標記，不阻塞整批。
+    V100 為了防卡改成多執行緒逐檔查價，但 Streamlit Cloud 上 st.cache_data +
+    ThreadPool 很容易全部失敗。V101 改成：
+    1. 主執行緒批次查 TWSE/TPEX MIS。
+    2. 市場別錯誤時自動上市/上櫃/興櫃補查。
+    3. 仍失敗時用 Yahoo 日線備援補最新收盤價。
+    4. 失敗保留舊價並標記，不把原本可用價格清空。
     """
     if df is None or df.empty:
         out = _ensure_godpick_record_columns(pd.DataFrame())
         out.attrs["latest_refresh_summary"] = {"target": 0, "success": 0, "fail": 0, "skipped": 0, "limited": 0}
         return out
 
-    active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "強烈關注"}
+    active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "強烈關注", ""}
     rows = [dict(row) for _, row in df.iterrows()]
 
     max_records = int(st.session_state.get(_k("latest_price_batch_size"), st.session_state.get(_k("perf_update_batch_size"), 80)) or 80)
-    max_workers = int(st.session_state.get(_k("latest_price_workers"), 8) or 8)
     max_records = max(10, min(max_records, 300))
-    max_workers = max(2, min(max_workers, 16))
 
     target_indexes = []
     skipped = 0
@@ -2247,62 +2374,43 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
 
     limited = max(0, len(target_indexes) - max_records)
     target_indexes = target_indexes[:max_records]
+    target_payloads = [rows[i] for i in target_indexes]
+
+    quote_map = _batch_latest_quotes(target_payloads)
 
     success = 0
     fail = 0
-    futures = {}
-    executor = ThreadPoolExecutor(max_workers=max_workers)
-    try:
-        for i in target_indexes:
-            payload = rows[i]
-            futures[executor.submit(
-                _fast_latest_quote,
-                _normalize_code(payload.get("股票代號")),
-                _safe_str(payload.get("股票名稱")),
-                _safe_str(payload.get("市場別")),
-            )] = i
+    preserved_old_price = 0
+    source_counts: dict[str, int] = {}
 
-        for fut in as_completed(futures, timeout=45):
-            i = futures[fut]
-            payload = rows[i]
-            try:
-                latest, used_market, price_src = fut.result(timeout=1)
-            except Exception:
-                latest, used_market, price_src = None, _safe_str(payload.get("市場別")), "ONLINE_FAIL"
+    for i in target_indexes:
+        payload = rows[i]
+        code = _normalize_code(payload.get("股票代號"))
+        latest, used_market, price_src = quote_map.get(code, (None, _safe_str(payload.get("市場別")), "ONLINE_FAIL"))
+        old_latest = _safe_float(payload.get("最新價"))
 
-            if latest is not None and latest > 0:
-                payload["最新價"] = latest
-                payload["市場別"] = used_market or _safe_str(payload.get("市場別"))
-                payload["最新更新時間"] = _now_text()
-                old_note = _safe_str(payload.get("備註"))
-                note = f"最新價來源:{price_src}"
-                payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
-                success += 1
+        if latest is not None and latest > 0:
+            payload["最新價"] = latest
+            payload["市場別"] = used_market or _safe_str(payload.get("市場別"))
+            payload["最新更新時間"] = _now_text()
+            payload["追蹤更新時間"] = _now_text()
+            note = f"最新價來源:{price_src}"
+            success += 1
+        else:
+            # 重要：失敗時不清空舊價；若原本有最新價，仍保留可用追蹤績效。
+            if old_latest is not None and old_latest > 0:
+                payload["最新價"] = old_latest
+                preserved_old_price += 1
+                note = f"最新價來源:保留舊價({price_src})"
             else:
-                old_note = _safe_str(payload.get("備註"))
-                note = "最新價來源:ONLINE_FAIL"
-                payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
                 fail += 1
-            rows[i] = _recalc_row(payload)
-    except Exception:
-        # as_completed timeout 或線上來源卡住時，不等待剩餘工作，直接保留原資料。
-        done_indexes = set(futures.get(f) for f in futures if f.done())
-        pending_indexes = [futures.get(f) for f in futures if not f.done()]
-        fail += len([x for x in pending_indexes if x is not None])
-        for i in pending_indexes:
-            if i is not None:
-                payload = rows[i]
-                old_note = _safe_str(payload.get("備註"))
-                note = "最新價來源:TIMEOUT_SKIP"
-                payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
-                rows[i] = _recalc_row(payload)
-    finally:
-        try:
-            executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
+                note = f"最新價來源:{price_src or 'ONLINE_FAIL'}"
 
-    # 未納入本批的列仍重算狀態，但不連線抓價。
+        source_counts[_safe_str(price_src) or "UNKNOWN"] = source_counts.get(_safe_str(price_src) or "UNKNOWN", 0) + 1
+        old_note = _safe_str(payload.get("備註"))
+        payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
+        rows[i] = _recalc_row(payload)
+
     processed = set(target_indexes)
     for i, payload in enumerate(rows):
         if i not in processed:
@@ -2316,10 +2424,10 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
         "skipped": skipped,
         "limited": limited,
         "max_records": max_records,
-        "max_workers": max_workers,
+        "preserved_old_price": preserved_old_price,
+        "source_counts": source_counts,
     }
     return out
-
 
 
 def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
@@ -3537,7 +3645,7 @@ def main():
         if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
             before_sig = _df_signature(df)
-            with st.spinner("V100：快速更新最新價中；只查即時價，失敗不抓歷史K，避免卡住..."):
+            with st.spinner("V101：批次更新最新價中；會自動上市/上櫃補查，失敗時保留舊價..."):
                 df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
             after_sig = _df_signature(df)
             if before_sig != after_sig:
@@ -3545,7 +3653,7 @@ def main():
             _save_state_df(df)
             summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
             _set_status(
-                f"V100 最新價更新完成：本批 {summary.get('target', 0)} 筆，成功 {summary.get('success', 0)} 筆，失敗/逾時 {summary.get('fail', 0)} 筆，未納入本批 {summary.get('limited', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
+                f"V101 最新價更新完成：本批 {summary.get('target', 0)} 筆，成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆，未納入本批 {summary.get('limited', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
                 "success" if int(summary.get('success', 0) or 0) > 0 else "warning",
             )
             st.rerun()
@@ -3608,6 +3716,7 @@ def main():
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
         st.number_input("最新價單批上限", min_value=20, max_value=300, value=80, step=10, key=_k("latest_price_batch_size"))
+        st.caption("V101：最新價改用主執行緒批次查價；不再用多執行緒逐檔查，避免 Streamlit Cloud 全部失敗。")
     with top_cols[6]:
         st.caption(
             f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
