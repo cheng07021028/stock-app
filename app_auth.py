@@ -275,6 +275,63 @@ def logout() -> None:
     st.rerun()
 
 
+
+
+# =========================================================
+# v90：自訂側邊欄導覽
+# 說明：Streamlit 預設多頁導覽會把 15_帳號管理.py 的數字前綴隱藏，
+#       造成側邊欄只顯示「帳號管理」。本段會隱藏預設導覽，改用
+#       st.page_link 顯示固定編號，檔名仍維持 pages/15_帳號管理.py。
+# =========================================================
+def _inject_hide_default_streamlit_nav() -> None:
+    try:
+        st.markdown(
+            """
+            <style>
+            [data-testid="stSidebarNav"] {display: none !important;}
+            section[data-testid="stSidebar"] div[data-testid="stSidebarNav"] {display: none !important;}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
+
+def render_numbered_sidebar_nav() -> None:
+    """顯示帶編號的固定側邊欄，避免 Streamlit 自動移除檔名前綴。"""
+    _inject_hide_default_streamlit_nav()
+    pages = [
+        ("streamlit_app.py", "首頁"),
+        ("pages/0_大盤走勢.py", "00. 大盤走勢"),
+        ("pages/1_儀表板.py", "01. 儀表板"),
+        ("pages/2_行情查詢.py", "02. 行情查詢"),
+        ("pages/3_歷史K線分析.py", "03. 歷史K線分析"),
+        ("pages/4_自選股中心.py", "04. 自選股中心"),
+        ("pages/5_排行榜.py", "05. 排行榜"),
+        ("pages/6_多股比較.py", "06. 多股比較"),
+        ("pages/7_股神推薦.py", "07. 股神推薦"),
+        ("pages/8_股神推薦紀錄.py", "08. 股神推薦紀錄"),
+        ("pages/9_股票主檔更新.py", "09. 股票主檔更新"),
+        ("pages/10_推薦清單.py", "10. 推薦清單"),
+        ("pages/11_資料診斷.py", "11. 資料診斷"),
+        ("pages/12_股神管理中心.py", "12. 股神管理中心"),
+        ("pages/14_股神權重校正.py", "14. 股神權重校正"),
+        ("pages/15_帳號管理.py", "15. 帳號管理"),
+    ]
+    try:
+        st.sidebar.markdown("### 功能選單")
+        for target, label in pages:
+            try:
+                st.sidebar.page_link(target, label=label)
+            except Exception:
+                # 若某頁在當前部署尚未存在，不讓整個帳號系統中斷。
+                continue
+        st.sidebar.markdown("---")
+    except Exception:
+        pass
+
+
 def require_login() -> bool:
     cfg = _load_auth_config()
     if str(cfg.get("auth_enabled", True)).lower() in ("false", "0", "no", "off"):
@@ -282,6 +339,7 @@ def require_login() -> bool:
 
     if is_logged_in():
         try:
+            render_numbered_sidebar_nav()
             with st.sidebar:
                 st.caption(f"登入帳號：{current_user()}｜{current_role()}")
                 src = _safe_str(st.session_state.get("auth_config_source"))
