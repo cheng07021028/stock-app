@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v105：全系統表格篩選排序 + 勾選延後套用版
+v106：全系統表格篩選排序 + 勾選延後套用 + 側邊欄去重 + 全域設定永久套用版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v105"
+CONFIG_VERSION = "v106"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -827,40 +827,125 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
 
 
 
-def install_auto_column_manager(page_key: str) -> None:
-    """v105：統一表格管理入口。
 
-    - 自動攔截本頁所有 st.dataframe / st.data_editor。
-    - 所有表格都有篩選 / 排序 / 筆數限制，設定永久保存。
-    - data_editor 內有勾選欄時，勾選不立即套用；按「套用勾選 / 編輯結果」後才回傳給主程式。
-    - 欄位管理仍維持既有邏輯：只有按「套用並永久記錄」才重排欄位。
+# =========================================================
+# v106：全域表格管理設定（永久保存）
+# =========================================================
+def _default_global_options() -> Dict[str, Any]:
+    return {
+        "table_filter_sort_enabled": True,
+        "column_manager_edit_mode": False,
+        "auto_sidebar_enabled": True,
+        "updated_at": "",
+    }
+
+
+def get_global_table_options() -> Dict[str, Any]:
+    cfg = load_column_config()
+    raw = cfg.get("global_options", {}) if isinstance(cfg, dict) else {}
+    opts = _default_global_options()
+    if isinstance(raw, dict):
+        opts.update(raw)
+    return opts
+
+
+def save_global_table_options(options: Dict[str, Any]) -> bool:
+    cfg = load_column_config()
+    cfg = _normalize_config(cfg)
+    opts = _default_global_options()
+    if isinstance(options, dict):
+        opts.update(options)
+    opts["updated_at"] = _now_text()
+    cfg["global_options"] = opts
+    ok = save_column_config(cfg)
+    st.session_state["godpick_table_filter_sort_enabled"] = bool(opts.get("table_filter_sort_enabled", True))
+    st.session_state["godpick_column_manager_edit_mode"] = bool(opts.get("column_manager_edit_mode", False))
+    st.session_state["godpick_table_auto_sidebar_enabled"] = bool(opts.get("auto_sidebar_enabled", True))
+    return ok
+
+
+def hydrate_global_table_options_once() -> Dict[str, Any]:
+    opts = get_global_table_options()
+    if "godpick_table_filter_sort_enabled" not in st.session_state:
+        st.session_state["godpick_table_filter_sort_enabled"] = bool(opts.get("table_filter_sort_enabled", True))
+    if "godpick_column_manager_edit_mode" not in st.session_state:
+        st.session_state["godpick_column_manager_edit_mode"] = bool(opts.get("column_manager_edit_mode", False))
+    if "godpick_table_auto_sidebar_enabled" not in st.session_state:
+        st.session_state["godpick_table_auto_sidebar_enabled"] = bool(opts.get("auto_sidebar_enabled", True))
+    return opts
+
+def install_auto_column_manager(page_key: str) -> None:
+    """v106：統一表格管理入口。
+
+    修正重點：
+    - 同一頁被 app_auth 與頁面本身重複呼叫時，側邊欄只顯示一次。
+    - 側邊欄開關改成表單式，勾選不立即套用；按「套用並永久記錄」後才保存。
+    - 全域開關永久保存到 godpick_management_ui_config.json。
+    - 每張表格仍各自保存篩選 / 排序 / 欄位設定。
     """
     try:
         install_global_table_patch(page_key)
     except Exception:
         pass
+
     try:
-        with st.sidebar.expander("🧩 表格管理｜v105 篩選排序＋欄位＋勾選延後", expanded=False):
-            st.caption("每個模組 / 每張表格獨立保存；輸入篩選、排序、勾選時不重算，按套用才生效。")
-            st.toggle(
-                "啟用表格篩選 / 排序",
-                value=bool(st.session_state.get("godpick_table_filter_sort_enabled", True)),
-                key="godpick_table_filter_sort_enabled",
-                help="只處理目前 DataFrame，不重新抓資料、不重跑推薦。",
-            )
-            st.toggle(
-                "啟用欄位管理模式",
-                value=bool(st.session_state.get("godpick_column_manager_edit_mode", False)),
-                key="godpick_column_manager_edit_mode",
-                help="關閉時只快速套用已保存欄位；開啟後各主表才顯示欄位管理器。",
-            )
-            if st.button("🔄 重新讀取表格設定", use_container_width=True, key=f"{page_key}_table_cfg_reload_v105"):
+        hydrate_global_table_options_once()
+    except Exception:
+        pass
+
+    # v106：避免同一頁面出現兩個一模一樣的「表格管理」區塊。
+    # app_auth 會在每次 require_login() 時重置此旗標；同一次 rerun 內第二次呼叫會被跳過。
+    if bool(st.session_state.get("_godpick_table_sidebar_rendered_this_run_v106", False)):
+        return None
+    st.session_state["_godpick_table_sidebar_rendered_this_run_v106"] = True
+
+    try:
+        opts = get_global_table_options()
+        with st.sidebar.expander("🧩 表格管理｜v106 篩選排序＋欄位＋勾選延後", expanded=False):
+            st.caption("每個模組 / 每張表格獨立保存；勾選、篩選、排序、欄位設定都要按套用才生效。")
+            with st.form(key=f"{page_key}_global_table_options_form_v106", clear_on_submit=False):
+                filter_enabled = st.checkbox(
+                    "啟用表格篩選 / 排序",
+                    value=bool(st.session_state.get("godpick_table_filter_sort_enabled", opts.get("table_filter_sort_enabled", True))),
+                    help="只處理目前 DataFrame，不重新抓資料、不重跑推薦。",
+                )
+                column_enabled = st.checkbox(
+                    "啟用欄位管理模式",
+                    value=bool(st.session_state.get("godpick_column_manager_edit_mode", opts.get("column_manager_edit_mode", False))),
+                    help="關閉時只快速套用已保存欄位；開啟後各主表才顯示欄位管理器。",
+                )
+                auto_sidebar = st.checkbox(
+                    "顯示本表格管理面板",
+                    value=bool(st.session_state.get("godpick_table_auto_sidebar_enabled", opts.get("auto_sidebar_enabled", True))),
+                    help="只控制側邊欄管理面板；不影響已保存的各表格設定。",
+                )
+                c1, c2 = st.columns(2)
+                apply_global = c1.form_submit_button("✅ 套用並永久記錄", type="primary", use_container_width=True)
+                reload_global = c2.form_submit_button("🔄 重新讀取設定", use_container_width=True)
+
+            if apply_global:
+                ok = save_global_table_options({
+                    "table_filter_sort_enabled": bool(filter_enabled),
+                    "column_manager_edit_mode": bool(column_enabled),
+                    "auto_sidebar_enabled": bool(auto_sidebar),
+                })
+                if ok:
+                    st.success("表格管理全域設定已套用並永久記錄。")
+                else:
+                    st.warning("已套用到本次畫面，但永久寫入可能失敗，請確認 GitHub Token 權限。")
+                st.rerun()
+
+            if reload_global:
                 st.session_state["godpick_column_config_refresh_seq"] = int(st.session_state.get("godpick_column_config_refresh_seq", 0)) + 1
                 try:
                     _load_config_cached.clear()
                 except Exception:
                     pass
+                for k in ["godpick_table_filter_sort_enabled", "godpick_column_manager_edit_mode", "godpick_table_auto_sidebar_enabled"]:
+                    st.session_state.pop(k, None)
                 st.rerun()
+
+            st.caption("v106：此區塊已防重複顯示；各表格自己的篩選 / 排序 / 欄位順序仍在表格上方的展開區永久套用。")
     except Exception:
         pass
     return None

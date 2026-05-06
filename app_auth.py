@@ -284,6 +284,9 @@ def _install_v105_table_manager() -> None:
     - 不因輸入欄位或勾選而重跑推薦 / 重新抓資料
     """
     try:
+        # v106：每次頁面 rerun / require_login 時先重置側邊欄去重旗標，
+        # 確保本次 rerun 只顯示一次「表格管理」，下一次 rerun 仍會正常顯示。
+        st.session_state["_godpick_table_sidebar_rendered_this_run_v106"] = False
         from godpick_column_manager import install_auto_column_manager
         install_auto_column_manager("global")
     except Exception:
