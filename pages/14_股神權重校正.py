@@ -11,6 +11,11 @@
 from __future__ import annotations
 from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_FACTOR_FIELDS
 
+# >>> PAGE_CONFIG_ALREADY_SET_V86
+import streamlit as st
+st.set_page_config(page_title='14_股神權重校正｜v71 Pro', layout="wide")
+# <<< PAGE_CONFIG_ALREADY_SET_V86
+
 # >>> APP_AUTH_GUARD_V84
 try:
     from app_auth import require_login
@@ -61,7 +66,7 @@ from godpick_weight_calibration import (
     PERF_COLUMNS,
 )
 
-st.set_page_config(page_title="14 股神權重校正｜v71 Pro", layout="wide")
+
 
 
 APP_VERSION = "v71_perf_proxy_multisource_antioverfit"
@@ -124,7 +129,7 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14 股神權重校正｜v71 Pro 多來源防卡修正版")
+    st.title("14_股神權重校正｜v71 Pro 多來源防卡修正版")
     st.caption("績效回測＋期望值＋分層權重＋防過擬合。只讀取既有推薦紀錄，不連外、不重跑推薦；套用權重需人工確認。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；單次調整設上限，避免短期過擬合。")
 
@@ -175,7 +180,7 @@ def main() -> None:
     current_weights = current_weight_map()
 
     with st.sidebar:
-        st.header("v71 校正設定")
+        st.header("14_權重校正設定")
         horizon = st.selectbox("主要校正週期", [1, 3, 5, 10, 20], index=2, help="短線看 1/3 日，波段看 5/10 日，趨勢看 20 日。")
         st.caption("建議：先用 5 日或 10 日，不要用樣本太少的週期直接調權重。")
         st.divider()

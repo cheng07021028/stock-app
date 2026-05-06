@@ -10,6 +10,11 @@
 
 from __future__ import annotations
 
+# >>> PAGE_CONFIG_ALREADY_SET_V86
+import streamlit as st
+st.set_page_config(page_title='12_股神管理中心｜v48 欄位管理免即時重算版', layout="wide")
+# <<< PAGE_CONFIG_ALREADY_SET_V86
+
 # >>> APP_AUTH_GUARD_V84
 try:
     from app_auth import require_login
@@ -55,7 +60,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "股神管理中心｜v48 欄位管理免即時重算版"
+PAGE_TITLE = "12_股神管理中心｜v48 欄位管理免即時重算版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 MANAGEMENT_UI_CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
 
@@ -1708,8 +1713,7 @@ pages/14_#U80a1#U795e#U63a8#U85a6#U54c1#U8cea#U5100#U8868#U677f.py""")
 
 
 def main() -> None:
-    st.set_page_config(page_title=PAGE_TITLE, layout="wide")
-
+    # st.set_page_config 已於檔案最前方執行，避免登入檢查後才設定造成 Streamlit 錯誤。
     # v40：啟用欄位管理極速模式；不再全頁攔截所有表格
     try:
         from godpick_column_manager import install_auto_column_manager
@@ -1723,7 +1727,7 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("股神管理中心", "v48｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
+            render_pro_hero("12_股神管理中心", "v48｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
         except Exception:
             st.title(PAGE_TITLE)
     else:
