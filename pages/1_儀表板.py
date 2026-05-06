@@ -79,6 +79,73 @@ def _dashboard_force_fix_watchlist_data(data):
 
 PAGE_TITLE = "儀表板"
 PFX = "dash_"
+DASHBOARD_TABLE_SETTINGS_FILE = Path("dashboard_table_settings.json")
+DASHBOARD_TABLE_PAGE_KEY = "page_1_dashboard_realtime_table"
+
+
+def _load_dashboard_table_settings() -> dict:
+    """讀取儀表板表格篩選 / 排序設定。
+    只讀本機 JSON，不觸發即時資料重抓。
+    """
+    default = {
+        "keyword": "",
+        "groups": [],
+        "markets": [],
+        "success_mode": "全部",
+        "trend_mode": "全部",
+        "sort_by": "群組",
+        "ascending": False,
+        "row_limit": 500,
+        "height": 760,
+    }
+    try:
+        if not DASHBOARD_TABLE_SETTINGS_FILE.exists():
+            return default
+        data = json.loads(DASHBOARD_TABLE_SETTINGS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return default
+        page_data = data.get(DASHBOARD_TABLE_PAGE_KEY, {})
+        if not isinstance(page_data, dict):
+            return default
+        merged = dict(default)
+        merged.update(page_data)
+        return merged
+    except Exception:
+        return default
+
+
+def _save_dashboard_table_settings(settings: dict) -> bool:
+    """永久保存儀表板表格篩選 / 排序設定。"""
+    try:
+        data = {}
+        if DASHBOARD_TABLE_SETTINGS_FILE.exists():
+            try:
+                old = json.loads(DASHBOARD_TABLE_SETTINGS_FILE.read_text(encoding="utf-8"))
+                if isinstance(old, dict):
+                    data = old
+            except Exception:
+                data = {}
+        data[DASHBOARD_TABLE_PAGE_KEY] = settings
+        DASHBOARD_TABLE_SETTINGS_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception as e:
+        st.warning(f"儀表板表格設定儲存失敗：{e}")
+        return False
+
+
+def _get_dashboard_table_settings() -> dict:
+    key = _k("table_settings")
+    if key not in st.session_state:
+        st.session_state[key] = _load_dashboard_table_settings()
+    return dict(st.session_state[key])
+
+
+def _set_dashboard_table_settings(settings: dict):
+    st.session_state[_k("table_settings")] = settings
+    _save_dashboard_table_settings(settings)
 
 
 def _k(key: str) -> str:
@@ -298,11 +365,237 @@ def render_dashboard_summary(df: pd.DataFrame):
     ])
 
 
+
+def _unique_options(df: pd.DataFrame, col: str) -> list[str]:
+    if df is None or df.empty or col not in df.columns:
+        return []
+    vals = []
+    for v in df[col].dropna().astype(str).tolist():
+        v = v.strip()
+        if v and v not in vals:
+            vals.append(v)
+    return vals
+
+
+def _normalize_selected_options(selected, available: list[str]) -> list[str]:
+    if not isinstance(selected, list):
+        return []
+    return [str(v) for v in selected if str(v) in available]
+
+
+def render_dashboard_table_controls(display_df: pd.DataFrame) -> dict:
+    """表格篩選 / 排序控制列。
+    使用 form，避免輸入時就立即套用；只有按下「套用並永久保存」才更新正式設定。
+    """
+    settings = _get_dashboard_table_settings()
+
+    group_opts = _unique_options(display_df, "群組")
+    market_opts = _unique_options(display_df, "市場別")
+    sortable_cols = list(display_df.columns)
+
+    # 舊設定若欄位不存在，自動回到安全預設。
+    saved_sort = settings.get("sort_by", "群組")
+    if saved_sort not in sortable_cols:
+        saved_sort = "漲跌幅(%)" if "漲跌幅(%)" in sortable_cols else (sortable_cols[0] if sortable_cols else "")
+
+    saved_groups = _normalize_selected_options(settings.get("groups", []), group_opts)
+    saved_markets = _normalize_selected_options(settings.get("markets", []), market_opts)
+
+    with st.expander("篩選 / 排序設定（按套用後永久保存）", expanded=False):
+        with st.form(_k("table_filter_sort_form"), clear_on_submit=False):
+            c1, c2, c3, c4 = st.columns([1.4, 1.2, 1, 1])
+            with c1:
+                keyword = st.text_input(
+                    "關鍵字（代號 / 名稱 / 群組 / 訊息）",
+                    value=str(settings.get("keyword", "")),
+                    key=_k("table_keyword_draft"),
+                )
+            with c2:
+                groups = st.multiselect(
+                    "群組篩選",
+                    options=group_opts,
+                    default=saved_groups,
+                    key=_k("table_groups_draft"),
+                    help="空白代表全部群組。",
+                )
+            with c3:
+                markets = st.multiselect(
+                    "市場別",
+                    options=market_opts,
+                    default=saved_markets,
+                    key=_k("table_markets_draft"),
+                    help="空白代表全部市場。",
+                )
+            with c4:
+                success_mode = st.selectbox(
+                    "資料狀態",
+                    options=["全部", "成功", "失敗"],
+                    index=["全部", "成功", "失敗"].index(settings.get("success_mode", "全部")) if settings.get("success_mode", "全部") in ["全部", "成功", "失敗"] else 0,
+                    key=_k("table_success_draft"),
+                )
+
+            c5, c6, c7, c8 = st.columns([1, 1, 1, 1])
+            with c5:
+                trend_mode = st.selectbox(
+                    "漲跌方向",
+                    options=["全部", "上漲", "下跌", "平盤"],
+                    index=["全部", "上漲", "下跌", "平盤"].index(settings.get("trend_mode", "全部")) if settings.get("trend_mode", "全部") in ["全部", "上漲", "下跌", "平盤"] else 0,
+                    key=_k("table_trend_draft"),
+                )
+            with c6:
+                sort_by = st.selectbox(
+                    "排序欄位",
+                    options=sortable_cols,
+                    index=sortable_cols.index(saved_sort) if saved_sort in sortable_cols else 0,
+                    key=_k("table_sort_by_draft"),
+                )
+            with c7:
+                ascending_label = st.radio(
+                    "排序方式",
+                    options=["大到小", "小到大"],
+                    index=1 if bool(settings.get("ascending", False)) else 0,
+                    horizontal=True,
+                    key=_k("table_sort_dir_draft"),
+                )
+            with c8:
+                row_limit = st.number_input(
+                    "顯示筆數上限",
+                    min_value=10,
+                    max_value=5000,
+                    value=int(settings.get("row_limit", 500) or 500),
+                    step=10,
+                    key=_k("table_row_limit_draft"),
+                )
+
+            b1, b2, b3 = st.columns([1, 1, 4])
+            with b1:
+                apply_btn = st.form_submit_button("套用並永久保存", type="primary", use_container_width=True)
+            with b2:
+                reset_btn = st.form_submit_button("恢復預設", use_container_width=True)
+            with b3:
+                st.caption("設定會寫入 dashboard_table_settings.json；排序 / 篩選只作用於目前已抓到的資料，不會重新抓股價。")
+
+        if apply_btn:
+            new_settings = {
+                "keyword": str(keyword or "").strip(),
+                "groups": list(groups or []),
+                "markets": list(markets or []),
+                "success_mode": success_mode,
+                "trend_mode": trend_mode,
+                "sort_by": sort_by,
+                "ascending": True if ascending_label == "小到大" else False,
+                "row_limit": int(row_limit),
+                "height": int(settings.get("height", 760) or 760),
+            }
+            _set_dashboard_table_settings(new_settings)
+            st.success("儀表板篩選 / 排序設定已永久保存。")
+            settings = new_settings
+
+        if reset_btn:
+            new_settings = {
+                "keyword": "",
+                "groups": [],
+                "markets": [],
+                "success_mode": "全部",
+                "trend_mode": "全部",
+                "sort_by": "漲跌幅(%)" if "漲跌幅(%)" in sortable_cols else (sortable_cols[0] if sortable_cols else "群組"),
+                "ascending": False,
+                "row_limit": 500,
+                "height": 760,
+            }
+            _set_dashboard_table_settings(new_settings)
+            st.success("已恢復儀表板表格預設設定。")
+            settings = new_settings
+
+    return settings
+
+
+def apply_dashboard_table_settings(display_df: pd.DataFrame, settings: dict) -> pd.DataFrame:
+    """套用篩選 / 排序。
+    僅處理目前 DataFrame，不呼叫任何即時資料 API。
+    """
+    if display_df is None or display_df.empty:
+        return pd.DataFrame()
+
+    work = display_df.copy()
+
+    keyword = str(settings.get("keyword", "")).strip()
+    if keyword:
+        search_cols = [c for c in ["群組", "股票代號", "股票名稱", "市場別", "價格來源", "漲跌來源", "訊息"] if c in work.columns]
+        if search_cols:
+            mask = pd.Series(False, index=work.index)
+            for c in search_cols:
+                mask = mask | work[c].astype(str).str.contains(keyword, case=False, na=False)
+            work = work[mask]
+
+    groups = settings.get("groups", [])
+    if groups and "群組" in work.columns:
+        work = work[work["群組"].astype(str).isin([str(x) for x in groups])]
+
+    markets = settings.get("markets", [])
+    if markets and "市場別" in work.columns:
+        work = work[work["市場別"].astype(str).isin([str(x) for x in markets])]
+
+    success_mode = settings.get("success_mode", "全部")
+    if success_mode != "全部" and "是否成功" in work.columns:
+        success_series = work["是否成功"]
+        if success_mode == "成功":
+            work = work[success_series.astype(str).str.lower().isin(["true", "1", "yes", "y", "成功"])]
+        elif success_mode == "失敗":
+            work = work[~success_series.astype(str).str.lower().isin(["true", "1", "yes", "y", "成功"])]
+
+    trend_mode = settings.get("trend_mode", "全部")
+    if trend_mode != "全部" and "漲跌" in work.columns:
+        change = pd.to_numeric(work["漲跌"], errors="coerce")
+        if trend_mode == "上漲":
+            work = work[change > 0]
+        elif trend_mode == "下跌":
+            work = work[change < 0]
+        elif trend_mode == "平盤":
+            work = work[change == 0]
+
+    sort_by = settings.get("sort_by")
+    ascending = bool(settings.get("ascending", False))
+    if sort_by in work.columns:
+        try:
+            sort_key = pd.to_numeric(work[sort_by], errors="ignore")
+            work = work.assign(__sort_key__=sort_key).sort_values(
+                by="__sort_key__",
+                ascending=ascending,
+                na_position="last",
+            ).drop(columns=["__sort_key__"])
+        except Exception:
+            work = work.sort_values(by=sort_by, ascending=ascending, na_position="last")
+
+    row_limit = int(settings.get("row_limit", 500) or 500)
+    if row_limit > 0:
+        work = work.head(row_limit)
+
+    return work.reset_index(drop=True)
+
+
 def render_dashboard_table(df: pd.DataFrame, height: int = 720):
-    display_df = _prepare_dashboard_table(df)
+    base_df = _prepare_dashboard_table(df)
+
+    if base_df.empty:
+        st.info("目前沒有可顯示的即時資料。")
+        return
+
+    settings = render_dashboard_table_controls(base_df)
+    display_df = apply_dashboard_table_settings(base_df, settings)
+
+    c1, c2, c3 = st.columns([1, 1, 3])
+    with c1:
+        st.metric("篩選後筆數", f"{len(display_df):,}")
+    with c2:
+        st.metric("原始筆數", f"{len(base_df):,}")
+    with c3:
+        sort_label = settings.get("sort_by", "—")
+        sort_dir = "小到大" if settings.get("ascending", False) else "大到小"
+        st.caption(f"目前排序：{sort_label}｜{sort_dir}｜設定已永久保存於 dashboard_table_settings.json")
 
     if display_df.empty:
-        st.info("目前沒有可顯示的即時資料。")
+        st.info("目前篩選條件下沒有資料。請調整篩選條件後按『套用並永久保存』。")
         return
 
     format_dict = {}
