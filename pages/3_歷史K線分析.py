@@ -21,6 +21,8 @@ except Exception as _auth_e:
 
 from datetime import date, datetime, timedelta
 from typing import Any
+from pathlib import Path
+import json
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -53,6 +55,50 @@ PFX = "hk_"
 
 def _k(key: str) -> str:
     return f"{PFX}{key}"
+
+
+HK_CHART_SETTINGS_FILE = Path("hk_chart_settings.json")
+HK_RANGE_OPTIONS = ["1M", "3M", "6M", "1Y", "全部"]
+HK_DEFAULT_CHART_SETTINGS = {
+    "event_filter": "全部",
+    "focus_window": "6M",
+    "show_ma": True,
+    "show_pivots": True,
+}
+
+
+def _load_hk_chart_settings() -> dict[str, Any]:
+    try:
+        if HK_CHART_SETTINGS_FILE.exists():
+            with HK_CHART_SETTINGS_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                out = HK_DEFAULT_CHART_SETTINGS.copy()
+                out.update(data)
+                if out.get("focus_window") not in HK_RANGE_OPTIONS + ["30", "60", "120", "240"]:
+                    out["focus_window"] = HK_DEFAULT_CHART_SETTINGS["focus_window"]
+                return out
+    except Exception:
+        pass
+    return HK_DEFAULT_CHART_SETTINGS.copy()
+
+
+def _save_hk_chart_settings(settings: dict[str, Any]) -> tuple[bool, str]:
+    try:
+        payload = HK_DEFAULT_CHART_SETTINGS.copy()
+        payload.update({k: settings.get(k, v) for k, v in HK_DEFAULT_CHART_SETTINGS.items()})
+        payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with HK_CHART_SETTINGS_FILE.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return True, f"已寫入 {HK_CHART_SETTINGS_FILE.name}"
+    except Exception as e:
+        return False, str(e)
+
+
+def _apply_hk_chart_settings_to_state(settings: dict[str, Any], draft: bool = False) -> None:
+    suffix = "_draft" if draft else ""
+    for key, default in HK_DEFAULT_CHART_SETTINGS.items():
+        st.session_state[_k(key + suffix)] = settings.get(key, default)
 
 
 def _safe_str(v: Any) -> str:
@@ -476,20 +522,15 @@ def _init_state(group_map: dict[str, list[dict[str, str]]]):
     if _k("end_date") not in st.session_state:
         st.session_state[_k("end_date")] = parse_date_safe(saved.get("home_end"), default_end)
 
-    if _k("event_filter") not in st.session_state:
-        st.session_state[_k("event_filter")] = "全部"
+    _hk_saved_settings = _load_hk_chart_settings()
+    for _hk_key, _hk_default in HK_DEFAULT_CHART_SETTINGS.items():
+        if _k(_hk_key) not in st.session_state:
+            st.session_state[_k(_hk_key)] = _hk_saved_settings.get(_hk_key, _hk_default)
+        if _k(_hk_key + "_draft") not in st.session_state:
+            st.session_state[_k(_hk_key + "_draft")] = st.session_state.get(_k(_hk_key), _hk_saved_settings.get(_hk_key, _hk_default))
 
     if _k("focus_event_idx") not in st.session_state:
         st.session_state[_k("focus_event_idx")] = -1
-
-    if _k("focus_window") not in st.session_state:
-        st.session_state[_k("focus_window")] = "全部"
-
-    if _k("show_ma") not in st.session_state:
-        st.session_state[_k("show_ma")] = True
-
-    if _k("show_pivots") not in st.session_state:
-        st.session_state[_k("show_pivots")] = True
 
     if _k("left_panel_limit") not in st.session_state:
         st.session_state[_k("left_panel_limit")] = 12
@@ -1208,14 +1249,10 @@ def _slice_by_focus(df: pd.DataFrame, event_df: pd.DataFrame, focus_event_idx: i
             if not focus_df.empty:
                 return focus_df.reset_index(drop=True)
 
-    if focus_window == "30":
-        return df.tail(30).reset_index(drop=True)
-    if focus_window == "60":
-        return df.tail(60).reset_index(drop=True)
-    if focus_window == "120":
-        return df.tail(120).reset_index(drop=True)
-    if focus_window == "240":
-        return df.tail(240).reset_index(drop=True)
+    fw = _safe_str(focus_window).upper()
+    tail_map = {"1M": 22, "3M": 66, "6M": 132, "1Y": 264, "30": 30, "60": 60, "120": 120, "240": 240}
+    if fw in tail_map:
+        return df.tail(tail_map[fw]).reset_index(drop=True)
 
     return df.reset_index(drop=True)
 
@@ -2245,16 +2282,47 @@ def main():
     trough_idx = bundle["trough_idx"]
 
     render_pro_section("互動控制")
-    i1, i2, i3, i4 = st.columns([2, 2, 2, 2])
+    with st.expander("📈 圖表區間與顯示設定｜v128 保留套用並永久記錄", expanded=True):
+        st.caption("先調整草稿設定，按『套用並永久記錄』後才重繪與保存；下次進頁、換股、重新整理都會沿用。")
+        with st.form(_k("chart_settings_form")):
+            i1, i2, i3, i4 = st.columns([2, 3, 1.5, 1.8])
+            with i1:
+                st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter_draft"))
+            with i2:
+                st.radio("顯示區間", options=HK_RANGE_OPTIONS, horizontal=True, key=_k("focus_window_draft"))
+            with i3:
+                st.checkbox("顯示均線", key=_k("show_ma_draft"))
+            with i4:
+                st.checkbox("顯示起漲起跌點", key=_k("show_pivots_draft"))
+            c_apply, c_reload = st.columns([2, 1])
+            with c_apply:
+                apply_chart_settings = st.form_submit_button("✅ 套用並永久記錄", use_container_width=True, type="primary")
+            with c_reload:
+                reload_chart_settings = st.form_submit_button("↩️ 還原已保存設定", use_container_width=True)
 
-    with i1:
-        st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter"))
-    with i2:
-        st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], key=_k("focus_window"))
-    with i3:
-        st.checkbox("顯示均線", key=_k("show_ma"))
-    with i4:
-        st.checkbox("顯示起漲起跌點", key=_k("show_pivots"))
+        if apply_chart_settings:
+            _new_settings = {
+                "event_filter": st.session_state.get(_k("event_filter_draft"), "全部"),
+                "focus_window": st.session_state.get(_k("focus_window_draft"), "6M"),
+                "show_ma": bool(st.session_state.get(_k("show_ma_draft"), True)),
+                "show_pivots": bool(st.session_state.get(_k("show_pivots_draft"), True)),
+            }
+            _apply_hk_chart_settings_to_state(_new_settings, draft=False)
+            ok, msg = _save_hk_chart_settings(_new_settings)
+            st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
+            if ok:
+                st.success(f"圖表設定已套用並永久記錄：{msg}")
+            else:
+                st.warning(f"圖表設定已套用，但永久記錄失敗：{msg}")
+
+        if reload_chart_settings:
+            _saved = _load_hk_chart_settings()
+            _apply_hk_chart_settings_to_state(_saved, draft=False)
+            _apply_hk_chart_settings_to_state(_saved, draft=True)
+            st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
+            st.info("已還原已保存圖表設定。")
+
+        st.caption(f"目前套用：區間 {st.session_state.get(_k('focus_window'), '6M')}｜事件 {st.session_state.get(_k('event_filter'), '全部')}｜均線 {'開' if st.session_state.get(_k('show_ma'), True) else '關'}｜起漲起跌 {'開' if st.session_state.get(_k('show_pivots'), True) else '關'}")
 
     filtered_event_df = event_df.copy()
     selected_filter = st.session_state.get(_k("event_filter"))
