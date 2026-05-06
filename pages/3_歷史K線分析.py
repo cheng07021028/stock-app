@@ -73,6 +73,22 @@ HK_CHART_DEFAULT_SETTINGS = {
     "chart_height": 900,
 }
 
+# v121：圖上區間按鈕改由 Streamlit 控制並永久保存。
+# 這些值代表交易日數：1M≈30、3M≈60、6M≈120、1Y≈240。
+HK_FOCUS_WINDOW_LABELS = {
+    "30": "1M",
+    "60": "3M",
+    "120": "6M",
+    "240": "1Y",
+    "全部": "全部",
+}
+HK_FOCUS_WINDOW_BY_LABEL = {v: k for k, v in HK_FOCUS_WINDOW_LABELS.items()}
+
+
+def _focus_window_label(value: Any) -> str:
+    v = str(value or "全部")
+    return HK_FOCUS_WINDOW_LABELS.get(v, HK_FOCUS_WINDOW_LABELS.get(HK_FOCUS_WINDOW_BY_LABEL.get(v, "全部"), "全部"))
+
 
 def _load_hk_chart_settings() -> dict[str, Any]:
     """讀取歷史K線圖表永久設定。失敗時回傳預設值，不影響頁面。"""
@@ -118,8 +134,12 @@ def _normalize_chart_setting_value(key: str, value: Any) -> Any:
         return "清晰模式"
     if key == "ma_display_mode" and value not in {"自動", "精簡", "完整"}:
         return "自動"
-    if key == "focus_window" and str(value) not in {"全部", "30", "60", "120", "240"}:
-        return "全部"
+    if key == "focus_window":
+        raw = str(value or "全部")
+        mapped = HK_FOCUS_WINDOW_BY_LABEL.get(raw, raw)
+        if mapped not in {"全部", "30", "60", "120", "240"}:
+            return "全部"
+        return mapped
     if key == "event_filter" and str(value) not in {"全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"}:
         return "全部"
     return value
@@ -138,6 +158,41 @@ def _current_hk_chart_settings_from_state(draft: bool = False) -> dict[str, Any]
     for key, default in HK_CHART_DEFAULT_SETTINGS.items():
         out[key] = _normalize_chart_setting_value(key, st.session_state.get(_k(key + suffix), default))
     return out
+
+
+def _persist_hk_chart_setting_change(**changes: Any) -> tuple[bool, str]:
+    """v121：單項圖表設定快速套用並永久記錄。"""
+    current = _current_hk_chart_settings_from_state(draft=False)
+    for key, value in changes.items():
+        if key in HK_CHART_DEFAULT_SETTINGS:
+            current[key] = _normalize_chart_setting_value(key, value)
+    _apply_hk_chart_settings_to_state(current, draft=False)
+    _apply_hk_chart_settings_to_state(current, draft=True)
+    st.session_state[_k("chart_redraw_seq")] = int(st.session_state.get(_k("chart_redraw_seq"), 0)) + 1
+    return _save_hk_chart_settings(current)
+
+
+def _render_persistent_chart_range_buttons() -> None:
+    """
+    v121：取代 Plotly 內建 range selector。
+    Plotly 內建 1M/3M/6M/1Y/全部屬於前端互動，Streamlit 無法可靠取得並寫入 JSON；
+    因此改用本頁按鈕，按下即套用且永久保存。
+    """
+    current = _normalize_chart_setting_value("focus_window", st.session_state.get(_k("focus_window"), "全部"))
+    labels = [("30", "1M"), ("60", "3M"), ("120", "6M"), ("240", "1Y"), ("全部", "全部")]
+    cols = st.columns([0.32, 0.32, 0.32, 0.32, 0.42, 3.2])
+    for i, (value, label) in enumerate(labels):
+        active = current == value
+        with cols[i]:
+            if st.button(label, key=_k(f"quick_focus_{value}"), use_container_width=True, type="primary" if active else "secondary"):
+                ok, msg = _persist_hk_chart_setting_change(focus_window=value)
+                if ok:
+                    st.toast(f"已套用並永久記錄圖表區間：{label}")
+                else:
+                    st.warning(msg)
+                st.rerun()
+    with cols[-1]:
+        st.caption(f"目前永久區間：{_focus_window_label(current)}｜圖上方區間按鈕已改為可永久記錄，不再使用 Plotly 暫存按鈕。")
 
 
 def _safe_str(v: Any) -> str:
@@ -1729,15 +1784,6 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
         tickformat="%Y-%m-%d",
         range=[pd.to_datetime(view_start) - pd.Timedelta(days=2), pd.to_datetime(view_end) + pd.Timedelta(days=2)],
         rangebreaks=[dict(bounds=["sat", "mon"])],
-        rangeselector=dict(
-            buttons=[
-                dict(count=1, label="1M", step="month", stepmode="backward"),
-                dict(count=3, label="3M", step="month", stepmode="backward"),
-                dict(count=6, label="6M", step="month", stepmode="backward"),
-                dict(count=1, label="1Y", step="year", stepmode="backward"),
-                dict(step="all", label="全部"),
-            ]
-        ),
         nticks=min(12, max(6, display_bars // 10)),
         row=1,
         col=1,
@@ -2313,15 +2359,15 @@ def main():
 
     render_pro_section("互動控制")
 
-    with st.expander("📈 圖表設定｜套用並永久記錄 v120", expanded=False):
-        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；設定會保存到下次進入頁面，不會因換股或重新整理消失。")
+    with st.expander("📈 圖表設定｜套用並永久記錄 v121", expanded=False):
+        st.caption("調整圖表顯示設定後，請按『套用並永久記錄』；圖表區間 1M / 3M / 6M / 1Y / 全部 也會永久保存。")
         s1, s2, s3 = st.columns([1.2, 1.2, 1.2])
         with s1:
             st.selectbox("圖表顯示模式", ["清晰模式", "完整模式"], key=_k("chart_display_mode_draft"))
             st.selectbox("事件篩選", options=["全部", "起漲點", "起跌點", "MA", "KD", "MACD", "突破", "跌破"], key=_k("event_filter_draft"))
         with s2:
             st.selectbox("均線顯示模式", ["自動", "精簡", "完整"], key=_k("ma_display_mode_draft"))
-            st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], key=_k("focus_window_draft"))
+            st.selectbox("顯示區間", options=["全部", "30", "60", "120", "240"], format_func=_focus_window_label, key=_k("focus_window_draft"))
         with s3:
             st.number_input("起漲/起跌最近 N 個", min_value=6, max_value=40, step=1, key=_k("pivot_display_limit_draft"))
             st.number_input("圖表高度", min_value=650, max_value=1200, step=50, key=_k("chart_height_draft"))
@@ -2419,6 +2465,7 @@ def main():
     with right:
         _render_focus_summary_bar(filtered_event_df, signal_snapshot, sr_snapshot, badge_text)
         _render_key_price_bar(df, sr_snapshot)
+        _render_persistent_chart_range_buttons()
 
         _chart_seq = int(st.session_state.get(_k("chart_redraw_seq"), 0))
         _main_fig = _build_candlestick_chart(
@@ -2452,7 +2499,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v120：圖表設定已支援套用並永久記錄。清晰/完整模式、均線模式、起漲起跌顯示數、圖表高度、事件篩選與顯示區間都會保存到下次設定。")
+        st.caption("v121：圖表區間 1M / 3M / 6M / 1Y / 全部 已改為 Streamlit 永久套用按鈕；按下後會寫入 hk_chart_settings.json，下次進頁、換股、重新整理都會沿用。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
