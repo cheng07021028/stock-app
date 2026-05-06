@@ -87,7 +87,7 @@ except Exception:
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "record_v53_perf_guard_20260429"
+BACKTEST_V12_VERSION = "record_v102_full_update_batch_guard_20260506"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -2338,25 +2338,24 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
 
 
 def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
-    """V101：最新價批次修正版。
+    """V102：更新完整份推薦紀錄，批次大小只當「每批處理筆數」，不是總筆數上限。
 
-    V100 為了防卡改成多執行緒逐檔查價，但 Streamlit Cloud 上 st.cache_data +
-    ThreadPool 很容易全部失敗。V101 改成：
-    1. 主執行緒批次查 TWSE/TPEX MIS。
-    2. 市場別錯誤時自動上市/上櫃/興櫃補查。
-    3. 仍失敗時用 Yahoo 日線備援補最新收盤價。
-    4. 失敗保留舊價並標記，不把原本可用價格清空。
+    之前 v100/v101 為了防卡，將「最新價單批上限」誤設成總更新上限，
+    造成使用者設定 80 就只處理 80 筆。V102 改為：
+    1. 會掃描並更新所有符合條件的紀錄。
+    2. 最新價每批筆數只控制每一輪查價大小，跑完一批會繼續下一批。
+    3. 失敗保留舊價，不會清空原資料。
     """
     if df is None or df.empty:
         out = _ensure_godpick_record_columns(pd.DataFrame())
-        out.attrs["latest_refresh_summary"] = {"target": 0, "success": 0, "fail": 0, "skipped": 0, "limited": 0}
+        out.attrs["latest_refresh_summary"] = {"target": 0, "success": 0, "fail": 0, "skipped": 0, "limited": 0, "batches": 0}
         return out
 
     active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "強烈關注", ""}
     rows = [dict(row) for _, row in df.iterrows()]
 
-    max_records = int(st.session_state.get(_k("latest_price_batch_size"), st.session_state.get(_k("perf_update_batch_size"), 80)) or 80)
-    max_records = max(10, min(max_records, 300))
+    batch_size = int(st.session_state.get(_k("latest_price_batch_size"), st.session_state.get(_k("perf_update_batch_size"), 80)) or 80)
+    batch_size = max(10, min(batch_size, 500))
 
     target_indexes = []
     skipped = 0
@@ -2372,44 +2371,46 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
             continue
         target_indexes.append(i)
 
-    limited = max(0, len(target_indexes) - max_records)
-    target_indexes = target_indexes[:max_records]
-    target_payloads = [rows[i] for i in target_indexes]
-
-    quote_map = _batch_latest_quotes(target_payloads)
-
     success = 0
     fail = 0
     preserved_old_price = 0
     source_counts: dict[str, int] = {}
+    batches = 0
 
-    for i in target_indexes:
-        payload = rows[i]
-        code = _normalize_code(payload.get("股票代號"))
-        latest, used_market, price_src = quote_map.get(code, (None, _safe_str(payload.get("市場別")), "ONLINE_FAIL"))
-        old_latest = _safe_float(payload.get("最新價"))
+    for start_i in range(0, len(target_indexes), batch_size):
+        batch_indexes = target_indexes[start_i:start_i + batch_size]
+        if not batch_indexes:
+            continue
+        batches += 1
+        target_payloads = [rows[i] for i in batch_indexes]
+        quote_map = _batch_latest_quotes(target_payloads)
 
-        if latest is not None and latest > 0:
-            payload["最新價"] = latest
-            payload["市場別"] = used_market or _safe_str(payload.get("市場別"))
-            payload["最新更新時間"] = _now_text()
-            payload["追蹤更新時間"] = _now_text()
-            note = f"最新價來源:{price_src}"
-            success += 1
-        else:
-            # 重要：失敗時不清空舊價；若原本有最新價，仍保留可用追蹤績效。
-            if old_latest is not None and old_latest > 0:
-                payload["最新價"] = old_latest
-                preserved_old_price += 1
-                note = f"最新價來源:保留舊價({price_src})"
+        for i in batch_indexes:
+            payload = rows[i]
+            code = _normalize_code(payload.get("股票代號"))
+            latest, used_market, price_src = quote_map.get(code, (None, _safe_str(payload.get("市場別")), "ONLINE_FAIL"))
+            old_latest = _safe_float(payload.get("最新價"))
+
+            if latest is not None and latest > 0:
+                payload["最新價"] = latest
+                payload["市場別"] = used_market or _safe_str(payload.get("市場別"))
+                payload["最新更新時間"] = _now_text()
+                payload["追蹤更新時間"] = _now_text()
+                note = f"最新價來源:{price_src}"
+                success += 1
             else:
-                fail += 1
-                note = f"最新價來源:{price_src or 'ONLINE_FAIL'}"
+                if old_latest is not None and old_latest > 0:
+                    payload["最新價"] = old_latest
+                    preserved_old_price += 1
+                    note = f"最新價來源:保留舊價({price_src})"
+                else:
+                    fail += 1
+                    note = f"最新價來源:{price_src or 'ONLINE_FAIL'}"
 
-        source_counts[_safe_str(price_src) or "UNKNOWN"] = source_counts.get(_safe_str(price_src) or "UNKNOWN", 0) + 1
-        old_note = _safe_str(payload.get("備註"))
-        payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
-        rows[i] = _recalc_row(payload)
+            source_counts[_safe_str(price_src) or "UNKNOWN"] = source_counts.get(_safe_str(price_src) or "UNKNOWN", 0) + 1
+            old_note = _safe_str(payload.get("備註"))
+            payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
+            rows[i] = _recalc_row(payload)
 
     processed = set(target_indexes)
     for i, payload in enumerate(rows):
@@ -2422,13 +2423,13 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
         "success": success,
         "fail": fail,
         "skipped": skipped,
-        "limited": limited,
-        "max_records": max_records,
+        "limited": 0,
+        "batch_size": batch_size,
+        "batches": batches,
         "preserved_old_price": preserved_old_price,
         "source_counts": source_counts,
     }
     return out
-
 
 def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
     """V51：判斷是否真的需要抓歷史資料，避免每次全表重跑。"""
@@ -3645,7 +3646,7 @@ def main():
         if st.button("📈 更新最新價", use_container_width=True):
             df = _get_state_df()
             before_sig = _df_signature(df)
-            with st.spinner("V101：批次更新最新價中；會自動上市/上櫃補查，失敗時保留舊價..."):
+            with st.spinner("V102：更新完整份最新價中；每批處理完成會自動接續下一批..."):
                 df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
             after_sig = _df_signature(df)
             if before_sig != after_sig:
@@ -3653,7 +3654,7 @@ def main():
             _save_state_df(df)
             summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
             _set_status(
-                f"V101 最新價更新完成：本批 {summary.get('target', 0)} 筆，成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆，未納入本批 {summary.get('limited', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
+                f"V102 最新價更新完成：符合條件共 {summary.get('target', 0)} 筆，分 {summary.get('batches', 0)} 批處理，每批 {summary.get('batch_size', 0)} 筆；成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆。尚未同步，確認後請按『儲存同步』。",
                 "success" if int(summary.get('success', 0) or 0) > 0 else "warning",
             )
             st.rerun()
@@ -3682,18 +3683,19 @@ def main():
             _invalidate_analysis_cache()
             st.success("快取已清除")
     with top_cols[4]:
-        batch_n = st.number_input("每次更新筆數", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
+        batch_n = st.number_input("績效每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
-        max_stock_n = st.number_input("單批股票上限", min_value=3, max_value=30, value=10, step=1, key=_k("perf_update_stock_limit"))
-        st.caption("V77：快速防卡更新。建議 80 筆 / 60 秒 / 30 檔；只更新缺資料或過期資料，ONLINE_FAIL 不拖住整批。")
+        max_stock_n = st.number_input("績效每批股票數", min_value=3, max_value=80, value=30, step=1, key=_k("perf_update_stock_limit"))
+        st.caption("V102：這些數字是每批處理量，不是總上限；按下後會跑完整份符合條件的資料。ONLINE_FAIL 不拖住整批。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
             with st.spinner("V77：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
                 summary = update_recommendation_perf_fast_v77(
                     json_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
-                    max_records=int(batch_n),
+                    max_records=0,
                     batch_limit=int(max_stock_n),
                     max_workers=12,
                     stale_minutes=60,
+                    process_all=True,
                 )
                 try:
                     refreshed = _load_records()
@@ -3704,7 +3706,7 @@ def main():
                     st.warning(f"V77 已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}")
 
             st.success(
-                f"V77 已完成快速績效更新：候選 {summary.get('candidates', 0)} 筆，"
+                f"V102 已完成完整份績效更新：候選 {summary.get('candidates', 0)} 筆，"
                 f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
                 f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。"
             )
@@ -3715,8 +3717,8 @@ def main():
             st.rerun()
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
-        st.number_input("最新價單批上限", min_value=20, max_value=300, value=80, step=10, key=_k("latest_price_batch_size"))
-        st.caption("V101：最新價改用主執行緒批次查價；不再用多執行緒逐檔查，避免 Streamlit Cloud 全部失敗。")
+        st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("latest_price_batch_size"))
+        st.caption("V102：這是每批處理筆數，不是總上限；按更新最新價會跑完整份符合條件紀錄。")
     with top_cols[6]:
         st.caption(
             f"GitHub紀錄：{'✅' if _safe_str(_github_config().get('token')) else '❌'} ｜ "
