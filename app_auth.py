@@ -277,7 +277,7 @@ def logout() -> None:
 
 
 def _detect_current_page_key_for_table_manager() -> str:
-    """v108：抓目前 Streamlit 頁面檔名，讓所有重型模組可套用防卡模式。"""
+    """v110：抓目前 Streamlit 頁面檔名，讓所有重型模組可套用防卡模式。"""
     try:
         import inspect
         for frame in inspect.stack()[1:30]:
@@ -297,9 +297,9 @@ def _install_v105_table_manager() -> None:
     - 不因輸入欄位或勾選而重跑推薦 / 重新抓資料
     """
     try:
-        # v108：每次頁面 rerun / require_login 時先重置側邊欄去重旗標，
+        # v110：每次頁面 rerun / require_login 時先重置側邊欄去重旗標，
         # 確保本次 rerun 只顯示一次「表格管理」，下一次 rerun 仍會正常顯示。
-        st.session_state["_godpick_table_sidebar_rendered_this_run_v108"] = False
+        st.session_state["_godpick_table_sidebar_rendered_this_run_v110"] = False
         from godpick_column_manager import install_auto_column_manager
         install_auto_column_manager(_detect_current_page_key_for_table_manager())
     except Exception:
