@@ -242,24 +242,41 @@ _diag_dataframe(pd.DataFrame(file_rows), use_container_width=True, hide_index=Tr
 st.subheader("2. JSON 讀取檢查")
 json_rows = []
 json_data_map: dict[str, Any] = {}
+_optional_missing_count = 0
+_required_bad_count = 0
 for name, path, _must in json_files:
     ok, data, err = _read_json_safe(path)
     if ok:
         json_data_map[name] = data
+    if ok:
+        status = "OK"
+        err_msg = ""
+    else:
+        if _must:
+            status = "錯誤 / 不存在"
+            err_msg = err
+            _required_bad_count += 1
+        else:
+            status = "尚未產生（可修復）"
+            err_msg = "可用下方修復工具自動建立，占位檔 / runtime 檔不影響主流程。"
+            _optional_missing_count += 1
     json_rows.append({
         "檔案": name,
-        "狀態": "OK" if ok else "錯誤 / 不存在",
+        "狀態": status,
         "型態與筆數": _json_count(data) if ok else "",
-        "錯誤訊息": err,
+        "錯誤訊息": err_msg,
         "路徑": str(path),
     })
 _diag_dataframe(pd.DataFrame(json_rows), use_container_width=True, hide_index=True)
 
-bad_json = [r for r in json_rows if r["狀態"] != "OK" and r["檔案"] in {"stock_master_cache.json", "watchlist.json"}]
+bad_json = [r for r in json_rows if r["狀態"] not in {"OK", "尚未產生（可修復）"} and r["檔案"] in {"stock_master_cache.json", "watchlist.json"}]
 if bad_json:
     st.error("主檔或自選股 JSON 有異常，可能造成行情、歷史K線、股神推薦、推薦清單串聯失敗。")
 else:
     st.success("主檔與自選股 JSON 基本讀取正常。")
+
+if _optional_missing_count:
+    st.info(f"目前有 {_optional_missing_count} 個選配 / runtime JSON 尚未產生，這類缺少通常可直接修復，不代表專案主流程壞掉。")
 
 st.subheader("3. 頁面檔案與重複頁檢查")
 pages_dir = BASE_DIR / "pages"
@@ -566,6 +583,56 @@ try:
 
     st.markdown('#### v54 修復工具')
     st.caption('缺檔修復只會建立不存在的空白 JSON；欄位修復會把 market_snapshot.json 的大盤欄位補到舊推薦結果 / 紀錄 / 推薦清單，不刪除既有資料、不覆蓋已有非空值。')
+
+    st.markdown('##### v126 一鍵修復本頁缺少項目')
+    st.caption('適用你截圖中的 3 類問題：1. 選配 / runtime JSON 缺少、2. 7 → 8 / 10 推薦資料缺少大盤 / 隔夜欄位、3. 8 / 10 缺少推薦後績效欄位。此按鈕會依序執行缺檔建立、runtime 初始化、大盤欄位補齊、績效欄位補齊與空橋接修復。')
+    if st.button('v126 一鍵修復缺少項目（JSON + runtime + 大盤欄位 + 績效欄位）', use_container_width=True, type='primary'):
+        _combo_rows = []
+        try:
+            _created = ensure_missing_json_files(BASE_DIR)
+            for r in (_created or []):
+                _row = dict(r)
+                _row['修復模組'] = '缺少 JSON 建立'
+                _combo_rows.append(_row)
+        except Exception as _e1:
+            _combo_rows.append({'修復模組': '缺少 JSON 建立', '狀態': '失敗', '訊息': str(_e1)})
+        try:
+            _v55_init = initialize_v55_runtime_diagnostics(BASE_DIR)
+            for r in (_v55_init.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = 'runtime 診斷初始化'
+                _combo_rows.append(_row)
+        except Exception as _e2:
+            _combo_rows.append({'修復模組': 'runtime 診斷初始化', '狀態': '失敗', '訊息': str(_e2)})
+        try:
+            _repair = repair_recommendation_market_fields(BASE_DIR)
+            for r in (_repair.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = '推薦資料大盤欄位補齊'
+                _combo_rows.append(_row)
+        except Exception as _e3:
+            _combo_rows.append({'修復模組': '推薦資料大盤欄位補齊', '狀態': '失敗', '訊息': str(_e3)})
+        try:
+            _perf_repair = repair_v54_missing_fields(BASE_DIR)
+            for r in (_perf_repair.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = '推薦後績效欄位補齊'
+                _combo_rows.append(_row)
+        except Exception as _e4:
+            _combo_rows.append({'修復模組': '推薦後績效欄位補齊', '狀態': '失敗', '訊息': str(_e4)})
+        try:
+            _v58_repair = repair_empty_market_bridge_files(BASE_DIR)
+            for r in (_v58_repair.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = '大盤空快照修復'
+                _combo_rows.append(_row)
+        except Exception as _e5:
+            _combo_rows.append({'修復模組': '大盤空快照修復', '狀態': '失敗', '訊息': str(_e5)})
+
+        if _combo_rows:
+            _diag_dataframe(pd.DataFrame(_combo_rows), use_container_width=True, hide_index=True)
+        st.success('v126 缺少項目修復流程已執行完成。請按一次重新整理 / 重新讀入，再回本頁確認缺少是否下降。')
+        st.info('若 7 → 8 / 10 仍有少數欄位顯示缺少，通常代表你需要再跑一次 7_股神推薦 或 8_股神推薦紀錄 的同步 / 更新流程，讓新欄位正式寫回資料。')
     if st.button('建立缺少的空白 JSON（不覆蓋既有檔）', use_container_width=True):
         _created = ensure_missing_json_files(BASE_DIR)
         _diag_dataframe(pd.DataFrame(_created), use_container_width=True, hide_index=True)
@@ -738,30 +805,10 @@ def _v75_read_json(path, default):
 def _v75_has_value(data, key):
     return isinstance(data, dict) and data.get(key) not in [None, "", {}, []]
 
-def _v87_merge_overnight_sources(primary, secondary):
-    """v87：資料診斷專用。market_snapshot / macro_bridge 任一邊有值，就補到另一邊顯示，避免同一份橋接資料被重複判定缺少。"""
-    out = dict(primary) if isinstance(primary, dict) else {}
-    if isinstance(secondary, dict):
-        for k, v in secondary.items():
-            if out.get(k) in [None, "", {}, []] and v not in [None, "", {}, []]:
-                out[k] = v
-    if out.get("night_futures_change") in [None, "", {}, []] and out.get("night_futures_change_pct") not in [None, "", {}, []]:
-        out["night_futures_change"] = out.get("night_futures_change_pct")
-    if out.get("night_futures_source") in [None, "", {}, []]:
-        out["night_futures_source"] = out.get("source") or "TAIFEX / Yahoo / market_snapshot 備援"
-    if out.get("night_futures_fallback_note") in [None, "", {}, []]:
-        out["night_futures_fallback_note"] = out.get("note") or "v87 診斷補齊：請回 0 大盤趨勢一鍵更新後永久寫入。"
-    if out.get("overnight_data_quality") in [None, "", {}, []]:
-        keys = ["overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sox_change_pct"]
-        out["overnight_data_quality"] = f"{sum(1 for k in keys if out.get(k) not in [None, '', {}, []])}/{len(keys)}"
-    return out
-
 def _v75_render_final_stable_health():
     st.markdown("### v75｜全系統隔夜風控 final stable 總檢查")
-    snapshot_raw = _v75_read_json("market_snapshot.json", {})
-    bridge_raw = _v75_read_json("macro_mode_bridge.json", {})
-    snapshot = _v87_merge_overnight_sources(snapshot_raw, bridge_raw)
-    bridge = _v87_merge_overnight_sources(bridge_raw, snapshot_raw)
+    snapshot = _v75_read_json("market_snapshot.json", {})
+    bridge = _v75_read_json("macro_mode_bridge.json", {})
     one_click = _v75_read_json("macro_v70_one_click_status.json", {})
     col_orders = _v75_read_json("godpick_column_orders.json", {})
     overnight_cache = _v75_read_json("overnight_global_market_cache.json", {})
@@ -857,10 +904,8 @@ def _v79_render_final_sync_health():
     st.markdown("### v79｜最終同步檢查：v77 / v78 / v76 / 隔夜風控")
     st.caption("檢查 01 大盤趨勢、07 股神推薦、8/10 紀錄、欄位順序與 JSON 橋接是否同步。此區塊只讀本機 JSON，不重新抓網路資料。")
 
-    snapshot_raw = _v79_read_json("market_snapshot.json", {})
-    bridge_raw = _v79_read_json("macro_mode_bridge.json", {})
-    snapshot = _v87_merge_overnight_sources(snapshot_raw, bridge_raw)
-    bridge = _v87_merge_overnight_sources(bridge_raw, snapshot_raw)
+    snapshot = _v79_read_json("market_snapshot.json", {})
+    bridge = _v79_read_json("macro_mode_bridge.json", {})
     one_click = _v79_read_json("macro_v70_one_click_status.json", {})
     col_orders = _v79_read_json("godpick_column_orders.json", {})
     overnight_cache = _v79_read_json("overnight_global_market_cache.json", {})
