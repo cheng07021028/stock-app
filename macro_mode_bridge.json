@@ -1,6 +1,6 @@
 {
   "version": "v109_startup_macro_autoupdate",
-  "updated_at": "2026-05-07 17:29:53",
+  "updated_at": "2026-05-07 17:54:09",
   "data_date": "2026-05-07",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
