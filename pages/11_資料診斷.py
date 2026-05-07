@@ -229,6 +229,74 @@ json_files = [
     ("last_query_state.json", BASE_DIR / "last_query_state.json", False),
 ]
 
+def _render_v127_quick_repair_top():
+    st.markdown("### v127｜一鍵修復本頁缺少項目 + 自動重新檢查")
+    st.caption("適用你截圖中的 3 類問題：1. 選配 / runtime JSON 缺少、2. 7 → 8 / 10 推薦資料缺少大盤 / 隔夜欄位、3. 8 / 10 缺少推薦後績效欄位。此按鈕會依序執行缺檔建立、runtime 初始化、大盤欄位補齊、績效欄位補齊與空橋接修復；完成後會自動重新載入本頁檢查結果。")
+
+    _last_v127_result = st.session_state.get(_k('v127_last_repair_result'))
+    if isinstance(_last_v127_result, dict) and _last_v127_result.get('rows'):
+        st.success(f"v127 上次修復完成，已自動重新檢查。修復時間：{_last_v127_result.get('finished_at', '—')}")
+        with st.expander('v127 上次修復結果明細', expanded=False):
+            _diag_dataframe(pd.DataFrame(_last_v127_result.get('rows', [])), use_container_width=True, hide_index=True)
+        if st.button('清除 v127 修復結果提示', use_container_width=True, key=_k('v127_clear_top')):
+            st.session_state.pop(_k('v127_last_repair_result'), None)
+            st.rerun()
+
+    if st.button('v127 一鍵修復缺少項目並自動重新檢查', use_container_width=True, type='primary', key=_k('v127_repair_top')):
+        _combo_rows = []
+        try:
+            _created = ensure_missing_json_files(BASE_DIR)
+            for r in (_created or []):
+                _row = dict(r)
+                _row['修復模組'] = '缺少 JSON 建立'
+                _combo_rows.append(_row)
+        except Exception as _e1:
+            _combo_rows.append({'修復模組': '缺少 JSON 建立', '狀態': '失敗', '訊息': str(_e1)})
+        try:
+            _v55_init = initialize_v55_runtime_diagnostics(BASE_DIR)
+            for r in (_v55_init.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = 'runtime 診斷初始化'
+                _combo_rows.append(_row)
+        except Exception as _e2:
+            _combo_rows.append({'修復模組': 'runtime 診斷初始化', '狀態': '失敗', '訊息': str(_e2)})
+        try:
+            _repair = repair_recommendation_market_fields(BASE_DIR)
+            for r in (_repair.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = '推薦資料大盤欄位補齊'
+                _combo_rows.append(_row)
+        except Exception as _e3:
+            _combo_rows.append({'修復模組': '推薦資料大盤欄位補齊', '狀態': '失敗', '訊息': str(_e3)})
+        try:
+            _perf_repair = repair_v54_missing_fields(BASE_DIR)
+            for r in (_perf_repair.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = '推薦後績效欄位補齊'
+                _combo_rows.append(_row)
+        except Exception as _e4:
+            _combo_rows.append({'修復模組': '推薦後績效欄位補齊', '狀態': '失敗', '訊息': str(_e4)})
+        try:
+            _v58_repair = repair_empty_market_bridge_files(BASE_DIR)
+            for r in (_v58_repair.get('rows', []) or []):
+                _row = dict(r)
+                _row['修復模組'] = '大盤空快照修復'
+                _combo_rows.append(_row)
+        except Exception as _e5:
+            _combo_rows.append({'修復模組': '大盤空快照修復', '狀態': '失敗', '訊息': str(_e5)})
+
+        st.session_state[_k('v127_last_repair_result')] = {
+            'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'rows': _combo_rows,
+        }
+        st.success('v127 缺少項目修復流程已執行完成，正在自動重新檢查。')
+        st.rerun()
+
+    st.markdown("---")
+
+
+_render_v127_quick_repair_top()
+
 st.subheader("1. 關鍵檔案存在狀態")
 file_rows = [
     _file_row("utils.py", BASE_DIR / "utils.py"),
@@ -583,71 +651,6 @@ try:
 
     st.markdown('#### v54 修復工具')
     st.caption('缺檔修復只會建立不存在的空白 JSON；欄位修復會把 market_snapshot.json 的大盤欄位補到舊推薦結果 / 紀錄 / 推薦清單，不刪除既有資料、不覆蓋已有非空值。')
-
-    st.markdown('##### v127 一鍵修復本頁缺少項目 + 自動重新檢查')
-    st.caption('適用你截圖中的 3 類問題：1. 選配 / runtime JSON 缺少、2. 7 → 8 / 10 推薦資料缺少大盤 / 隔夜欄位、3. 8 / 10 缺少推薦後績效欄位。此按鈕會依序執行缺檔建立、runtime 初始化、大盤欄位補齊、績效欄位補齊與空橋接修復；完成後會自動重新載入本頁檢查結果。')
-
-    _last_v127_result = st.session_state.get(_k('v127_last_repair_result'))
-    if isinstance(_last_v127_result, dict) and _last_v127_result.get('rows'):
-        st.success(f"v127 上次修復完成，已自動重新檢查。修復時間：{_last_v127_result.get('finished_at', '—')}")
-        with st.expander('v127 上次修復結果明細', expanded=False):
-            _diag_dataframe(pd.DataFrame(_last_v127_result.get('rows', [])), use_container_width=True, hide_index=True)
-        if st.button('清除 v127 修復結果提示', use_container_width=True):
-            st.session_state.pop(_k('v127_last_repair_result'), None)
-            st.rerun()
-    if st.button('v127 一鍵修復缺少項目並自動重新檢查', use_container_width=True, type='primary'):
-        _combo_rows = []
-        try:
-            _created = ensure_missing_json_files(BASE_DIR)
-            for r in (_created or []):
-                _row = dict(r)
-                _row['修復模組'] = '缺少 JSON 建立'
-                _combo_rows.append(_row)
-        except Exception as _e1:
-            _combo_rows.append({'修復模組': '缺少 JSON 建立', '狀態': '失敗', '訊息': str(_e1)})
-        try:
-            _v55_init = initialize_v55_runtime_diagnostics(BASE_DIR)
-            for r in (_v55_init.get('rows', []) or []):
-                _row = dict(r)
-                _row['修復模組'] = 'runtime 診斷初始化'
-                _combo_rows.append(_row)
-        except Exception as _e2:
-            _combo_rows.append({'修復模組': 'runtime 診斷初始化', '狀態': '失敗', '訊息': str(_e2)})
-        try:
-            _repair = repair_recommendation_market_fields(BASE_DIR)
-            for r in (_repair.get('rows', []) or []):
-                _row = dict(r)
-                _row['修復模組'] = '推薦資料大盤欄位補齊'
-                _combo_rows.append(_row)
-        except Exception as _e3:
-            _combo_rows.append({'修復模組': '推薦資料大盤欄位補齊', '狀態': '失敗', '訊息': str(_e3)})
-        try:
-            _perf_repair = repair_v54_missing_fields(BASE_DIR)
-            for r in (_perf_repair.get('rows', []) or []):
-                _row = dict(r)
-                _row['修復模組'] = '推薦後績效欄位補齊'
-                _combo_rows.append(_row)
-        except Exception as _e4:
-            _combo_rows.append({'修復模組': '推薦後績效欄位補齊', '狀態': '失敗', '訊息': str(_e4)})
-        try:
-            _v58_repair = repair_empty_market_bridge_files(BASE_DIR)
-            for r in (_v58_repair.get('rows', []) or []):
-                _row = dict(r)
-                _row['修復模組'] = '大盤空快照修復'
-                _combo_rows.append(_row)
-        except Exception as _e5:
-            _combo_rows.append({'修復模組': '大盤空快照修復', '狀態': '失敗', '訊息': str(_e5)})
-
-        st.session_state[_k('v127_last_repair_result')] = {
-            'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'rows': _combo_rows,
-        }
-        st.success('v127 缺少項目修復流程已執行完成，正在自動重新檢查。')
-        st.rerun()
-    if st.button('建立缺少的空白 JSON（不覆蓋既有檔）', use_container_width=True):
-        _created = ensure_missing_json_files(BASE_DIR)
-        _diag_dataframe(pd.DataFrame(_created), use_container_width=True, hide_index=True)
-        st.success('已完成缺檔建立檢查；請重新整理本頁再次驗證。')
 
 
     st.markdown('##### v58 大盤空快照修復')
