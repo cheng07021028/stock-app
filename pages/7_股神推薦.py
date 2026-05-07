@@ -15,6 +15,18 @@ try:
     require_login()
 except Exception as _auth_e:
     import streamlit as st
+
+try:
+    from godpick_bi_theme import inject_bi_theme, render_bi_banner, render_bi_note, enhance_plotly_figure
+except Exception:
+    def inject_bi_theme():
+        return None
+    def render_bi_banner(title: str, subtitle: str = "", chips=None):
+        return None
+    def render_bi_note(title: str, body: str, tone: str = "blue"):
+        return None
+    def enhance_plotly_figure(fig, **kwargs):
+        return fig
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
 # <<< APP_AUTH_GUARD_V84
@@ -8485,6 +8497,7 @@ def main():
     except Exception:
         pass
     inject_pro_theme()
+    inject_bi_theme()
 
     watchlist_map = _load_watchlist_map()
     master_df = _load_master_df()
@@ -8587,8 +8600,13 @@ def main():
         title="股神推薦｜V4 加速記憶版",
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
+    render_bi_banner(
+        "07 股神推薦｜BI 決策雷達頁",
+        "把推薦掃描、權重、買點等級、風險、類股與大盤風控整理成決策型 BI；保留勾選延後套用、欄位順序、推薦匯入與紀錄功能。",
+        chips=["推薦決策", "權重模型", "風控摘要", "類股分布", "表格管理"],
+    )
 
-    st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
+    st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}｜v133 BI視覺升級")
     st.caption("勾選欄位穩定版：v44 data_editor callback fix")
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
