@@ -36,6 +36,54 @@ DATA_DIR = BASE_DIR / "data"
 PFX = "diag_"
 
 
+# ============================================================
+# v132：最上方快速修復區塊前先安全載入 system_integration_health
+# 修正 v131 移到上方後，函式尚未匯入造成 name is not defined。
+# ============================================================
+def _v132_not_ready_result(func_name: str):
+    def _inner(*args, **kwargs):
+        return {
+            "ok": False,
+            "message": f"{func_name} 尚未載入；請確認 system_integration_health.py 是否存在。",
+            "rows": [{"修復模組": func_name, "狀態": "失敗", "訊息": "system_integration_health.py 尚未載入"}],
+        }
+    return _inner
+
+
+def _v132_not_ready_list(func_name: str):
+    def _inner(*args, **kwargs):
+        return [{"修復模組": func_name, "狀態": "失敗", "訊息": "system_integration_health.py 尚未載入"}]
+    return _inner
+
+
+def _repair_empty_market_bridge_files_fallback(base_dir: Path):
+    return {
+        "ok": False,
+        "message": "system_integration_health.py 尚未包含 repair_empty_market_bridge_files()。",
+        "rows": [{"項目": "repair_empty_market_bridge_files", "狀態": "缺少函式", "建議": "覆蓋新版 system_integration_health.py"}],
+        "restored_snapshot_keys": [],
+    }
+
+
+try:
+    import system_integration_health as _sih_top
+    run_full_integration_check = getattr(_sih_top, "run_full_integration_check", _v132_not_ready_result("run_full_integration_check"))
+    ensure_missing_json_files = getattr(_sih_top, "ensure_missing_json_files", _v132_not_ready_list("ensure_missing_json_files"))
+    repair_recommendation_market_fields = getattr(_sih_top, "repair_recommendation_market_fields", _v132_not_ready_result("repair_recommendation_market_fields"))
+    repair_v54_missing_fields = getattr(_sih_top, "repair_v54_missing_fields", _v132_not_ready_result("repair_v54_missing_fields"))
+    backup_json_files = getattr(_sih_top, "backup_json_files", _v132_not_ready_list("backup_json_files"))
+    initialize_v55_runtime_diagnostics = getattr(_sih_top, "initialize_v55_runtime_diagnostics", _v132_not_ready_result("initialize_v55_runtime_diagnostics"))
+    repair_empty_market_bridge_files = getattr(_sih_top, "repair_empty_market_bridge_files", _repair_empty_market_bridge_files_fallback)
+except Exception as _v132_sih_err:
+    run_full_integration_check = _v132_not_ready_result("run_full_integration_check")
+    ensure_missing_json_files = _v132_not_ready_list("ensure_missing_json_files")
+    repair_recommendation_market_fields = _v132_not_ready_result("repair_recommendation_market_fields")
+    repair_v54_missing_fields = _v132_not_ready_result("repair_v54_missing_fields")
+    backup_json_files = _v132_not_ready_list("backup_json_files")
+    initialize_v55_runtime_diagnostics = _v132_not_ready_result("initialize_v55_runtime_diagnostics")
+    repair_empty_market_bridge_files = _repair_empty_market_bridge_files_fallback
+
+
 def _k(key: str) -> str:
     return f"{PFX}{key}"
 
