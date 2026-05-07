@@ -1,6 +1,6 @@
 {
   "version": "v116",
-  "updated_at": "2026-05-07 06:38:21",
+  "updated_at": "2026-05-07 06:38:44",
   "profiles": {
     "page07_godpick_recommend_full": {
       "label": "完整推薦表",
@@ -739,11 +739,11 @@
       "keyword": "",
       "keyword_columns": [],
       "filters": {},
-      "sort_column": "",
+      "sort_column": "技術結構分數",
       "sort_ascending": false,
       "limit_rows": 0,
       "label": "完整推薦表",
-      "updated_at": "2026-05-06 09:04:05"
+      "updated_at": "2026-05-07 06:38:44"
     }
   }
 }
