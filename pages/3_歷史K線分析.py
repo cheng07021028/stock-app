@@ -1419,6 +1419,15 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
     span = max(price_max - price_min, abs(price_max) * 0.06, 1.0)
     marker_offset = span * 0.035
 
+    # v136 BI：用淡色價格區間提示相對高低位，避免主圖只有線條、不易判讀位置。
+    try:
+        low_zone_top = price_min + span * 0.22
+        high_zone_bottom = price_max - span * 0.22
+        fig.add_hrect(y0=price_min - marker_offset, y1=low_zone_top, fillcolor="rgba(16,185,129,0.045)", line_width=0, layer="below", row=1, col=1)
+        fig.add_hrect(y0=high_zone_bottom, y1=price_max + marker_offset, fillcolor="rgba(239,68,68,0.040)", line_width=0, layer="below", row=1, col=1)
+    except Exception:
+        pass
+
     if show_pivots:
         # 避免過多標記拖慢，只顯示圖上最後 35 個起漲 / 起跌訊號。
         max_marker_count = 35
@@ -1503,7 +1512,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
     latest_pct = _safe_float(work["_漲跌幅"].iloc[-1], 0) or 0
     fig.add_hline(
         y=latest_close,
-        line=dict(color="rgba(15,23,42,0.55)", width=1.2, dash="dot"),
+        line=dict(color="rgba(37,99,235,0.62)", width=1.4, dash="dot"),
         annotation_text=f"最新 {latest_close:,.2f}",
         annotation_position="right",
         row=1,
@@ -1535,7 +1544,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             text=f"{stock_label}｜歷史K線分析",
             x=0.01,
             xanchor="left",
-            font=dict(size=20, color="#0f172a"),
+            font=dict(size=22, color="#0f172a"),
         ),
         height=900,
         margin=dict(l=20, r=145, t=72, b=34),
@@ -1554,7 +1563,7 @@ def _build_candlestick_chart(df: pd.DataFrame, stock_label: str, show_ma: bool, 
             y=0.98,
             xanchor="left",
             x=1.02,
-            bgcolor="rgba(255,255,255,0.88)",
+            bgcolor="rgba(255,255,255,0.94)",
             bordercolor="rgba(148,163,184,0.35)",
             borderwidth=1,
         ),
@@ -2150,7 +2159,99 @@ def _build_master_commentary(df: pd.DataFrame, signal_snapshot: dict, sr_snapsho
         action_text = "多空混合，最佳策略通常不是猜，而是等關鍵位表態後再跟。"
     views.append(("股神操作觀點", action_text, ""))
 
+
     return views
+
+
+def _inject_history_bi_css():
+    st.markdown(
+        """
+        <style>
+        .hk-bi-wrap{margin:12px 0 18px 0;}
+        .hk-bi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:10px 0 12px 0;}
+        .hk-bi-card{
+          background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);
+          border:1px solid #e2e8f0;border-radius:18px;padding:14px 16px;
+          box-shadow:0 10px 26px rgba(15,23,42,0.06);min-height:92px;
+        }
+        .hk-bi-card .label{font-size:12px;color:#64748b;font-weight:900;letter-spacing:.02em;}
+        .hk-bi-card .value{font-size:26px;color:#0f172a;font-weight:950;line-height:1.25;margin-top:4px;}
+        .hk-bi-card .sub{font-size:12px;color:#64748b;font-weight:750;margin-top:4px;}
+        .hk-bi-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;font-size:12px;font-weight:900;margin:2px 4px 2px 0;}
+        .hk-bi-up{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;}
+        .hk-bi-down{background:#ecfdf5;color:#047857;border:1px solid #bbf7d0;}
+        .hk-bi-neutral{background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;}
+        .hk-bi-blue{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;}
+        .hk-bi-panel{
+          background:linear-gradient(135deg,#0f172a 0%,#1e293b 55%,#0f766e 130%);
+          border:1px solid rgba(148,163,184,.35);border-radius:22px;padding:16px 18px;
+          color:#fff;box-shadow:0 14px 34px rgba(15,23,42,.18);margin:8px 0 16px 0;
+        }
+        .hk-bi-panel-title{font-weight:950;font-size:18px;margin-bottom:6px;}
+        .hk-bi-panel-sub{color:#cbd5e1;font-size:13px;line-height:1.65;}
+        @media(max-width:1100px){.hk-bi-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+        @media(max-width:720px){.hk-bi-grid{grid-template-columns:1fr;}}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _fmt_pct_bi(v):
+    val = _safe_float(v)
+    return "—" if val is None else f"{val:+.2f}%"
+
+
+def _render_history_bi_dashboard(df: pd.DataFrame, focus_df: pd.DataFrame, stock_label: str, signal_snapshot: dict, sr_snapshot: dict, radar: dict, badge_text: str, actual_market: str, data_source: str, peak_idx: tuple[int, ...], trough_idx: tuple[int, ...]):
+    if df is None or df.empty:
+        return
+    _inject_history_bi_css()
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
+    close_now = _safe_float(last.get("收盤價"), 0) or 0
+    prev_close = _safe_float(prev.get("收盤價"), close_now) or close_now
+    change = close_now - prev_close
+    change_pct = (change / prev_close * 100) if prev_close else 0
+    volume_now = _safe_float(last.get("成交股數"), 0) or 0
+    vol_ma20 = pd.to_numeric(df.get("成交股數", pd.Series(dtype=float)), errors="coerce").tail(20).mean()
+    vol_ratio = (volume_now / vol_ma20) if vol_ma20 and vol_ma20 > 0 else None
+    score = _safe_float(signal_snapshot.get("score"), 0) or 0
+    trend_score = _safe_float(radar.get("trend"), 50) or 50
+    momentum_score = _safe_float(radar.get("momentum"), 50) or 50
+    pressure = _safe_float(sr_snapshot.get("res_20")) or _safe_float(sr_snapshot.get("res_60"))
+    support = _safe_float(sr_snapshot.get("sup_20")) or _safe_float(sr_snapshot.get("sup_60"))
+    rr_text = "—"
+    if pressure and support and close_now and close_now > support:
+        risk = max(close_now - support, 0.01)
+        reward = max(pressure - close_now, 0)
+        rr_text = f"{reward / risk:.2f}"
+    tone = "hk-bi-up" if change_pct > 0 else ("hk-bi-down" if change_pct < 0 else "hk-bi-neutral")
+    trend_tone = "hk-bi-up" if score >= 3 else ("hk-bi-down" if score <= -3 else "hk-bi-blue")
+    vol_text = "—" if vol_ratio is None else f"{vol_ratio:.2f}x"
+    action = "偏多觀察：等回測支撐不破或放量突破" if score >= 3 else ("風險優先：弱勢反彈不追價" if score <= -3 else "盤整觀察：等待關鍵位表態")
+
+    st.markdown(
+        f"""
+        <div class="hk-bi-wrap">
+          <div class="hk-bi-panel">
+            <div class="hk-bi-panel-title">{stock_label}｜BI 技術決策摘要</div>
+            <div class="hk-bi-panel-sub">
+              <span class="hk-bi-pill {trend_tone}">訊號：{badge_text}｜分數 {score:g}</span>
+              <span class="hk-bi-pill hk-bi-blue">市場：{actual_market}</span>
+              <span class="hk-bi-pill hk-bi-neutral">資料源：{data_source}</span>
+              <br>{action}；支撐 {format_number(support,2)} / 壓力 {format_number(pressure,2)} / R:R {rr_text}。
+            </div>
+          </div>
+          <div class="hk-bi-grid">
+            <div class="hk-bi-card"><div class="label">最新價格</div><div class="value">{format_number(close_now,2)}</div><div class="sub"><span class="hk-bi-pill {tone}">{change:+.2f}｜{change_pct:+.2f}%</span></div></div>
+            <div class="hk-bi-card"><div class="label">量能強度</div><div class="value">{vol_text}</div><div class="sub">今日量 {_fmt_volume(volume_now)}｜20日均量 {_fmt_volume(vol_ma20 or 0)}</div></div>
+            <div class="hk-bi-card"><div class="label">趨勢 / 動能</div><div class="value">{trend_score:.0f} / {momentum_score:.0f}</div><div class="sub">雷達五維：趨勢、動能、量能、位置、結構</div></div>
+            <div class="hk-bi-card"><div class="label">轉折訊號</div><div class="value">{len(trough_idx)} / {len(peak_idx)}</div><div class="sub">起漲 / 起跌，依目前區間重新計算</div></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def main():
@@ -2360,6 +2461,20 @@ def main():
     close_first = _safe_float(first.get("收盤價"))
     interval_pct = ((close_now / close_first) - 1) * 100 if close_first not in [None, 0] else None
 
+    _render_history_bi_dashboard(
+        df=df,
+        focus_df=focus_df,
+        stock_label=stock_label,
+        signal_snapshot=signal_snapshot,
+        sr_snapshot=sr_snapshot,
+        radar=radar,
+        badge_text=badge_text,
+        actual_market=actual_market,
+        data_source=data_source,
+        peak_idx=tuple(focus_peak_idx),
+        trough_idx=tuple(focus_trough_idx),
+    )
+
     render_pro_kpi_row(
         [
             {
@@ -2426,7 +2541,7 @@ def main():
                 "modeBarButtonsToRemove": ["lasso2d", "select2d"],
             },
         )
-        st.caption("v73：主圖已改為完整 hover，滑鼠移到 K 棒可顯示開高低收、成交量、漲跌、漲跌幅與振幅；右上角固定顯示最新交易日完整資訊。")
+        st.caption("v136 BI：主圖已套用決策視覺層、淺色 hover、最新價標線、區間永久記錄與轉折降噪；KD / MACD 保留專業化顯示。")
 
     # 版面修正：
     # 最近事件摘要原本放在左側事件面板下方，會被左欄寬度限制，造成卡片互相擠壓或覆蓋。
@@ -2438,7 +2553,7 @@ def main():
 
     render_pro_info_card("最近事件摘要", recent_pairs, chips=[badge_text, actual_market])
 
-    tabs = st.tabs(["KD / MACD", "雷達 / 訊號", "策略區", "最近事件", "原始資料"])
+    tabs = st.tabs(["📈 KD / MACD", "🧭 雷達 / 訊號", "🎯 策略區", "🗓️ 最近事件", "📄 原始資料"])
 
     with tabs[0]:
         c_kd, c_macd = st.columns(2)
