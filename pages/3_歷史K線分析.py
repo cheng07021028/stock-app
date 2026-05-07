@@ -15,18 +15,6 @@ try:
     require_login()
 except Exception as _auth_e:
     import streamlit as st
-
-try:
-    from godpick_bi_theme import inject_bi_theme, render_bi_banner, render_bi_note, enhance_plotly_figure
-except Exception:
-    def inject_bi_theme():
-        return None
-    def render_bi_banner(title: str, subtitle: str = "", chips=None):
-        return None
-    def render_bi_note(title: str, body: str, tone: str = "blue"):
-        return None
-    def enhance_plotly_figure(fig, **kwargs):
-        return fig
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
 # <<< APP_AUTH_GUARD_V84
@@ -2169,7 +2157,14 @@ def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
     inject_pro_theme()
-    inject_bi_theme()
+
+    # >>> GODPICK_BI_V135_REAL_CHART_STYLE
+    try:
+        from godpick_bi_theme import install_bi_dashboard_style
+        install_bi_dashboard_style("3_history")
+    except Exception:
+        pass
+    # <<< GODPICK_BI_V135_REAL_CHART_STYLE
 
     group_map = _build_group_stock_map()
     flat_rows = _flatten_group_map(group_map)
@@ -2183,11 +2178,6 @@ def main():
     render_pro_hero(
         title="歷史K線分析｜策略區可執行版 + 效能優化版",
         subtitle="保留完整功能，補上自選股真同步、偏多/偏空進場位、失效位、目標位與風險報酬概念。",
-    )
-    render_bi_banner(
-        "03 歷史K線分析｜BI 技術決策頁",
-        "整合 K 線、均線、起漲/起跌、KD、MACD、支撐壓力與策略觀點；保留 1M / 3M / 6M / 1Y / 全部 套用並永久記錄。",
-        chips=["K線清晰模式", "區間永久記錄", "KD/MACD 專業圖", "支撐壓力", "策略事件"],
     )
 
     watchlist_version = st.session_state.get("watchlist_version", 0)

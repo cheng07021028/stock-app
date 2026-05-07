@@ -15,18 +15,6 @@ try:
     require_login()
 except Exception as _auth_e:
     import streamlit as st
-
-try:
-    from godpick_bi_theme import inject_bi_theme, render_bi_banner, render_bi_note, enhance_plotly_figure
-except Exception:
-    def inject_bi_theme():
-        return None
-    def render_bi_banner(title: str, subtitle: str = "", chips=None):
-        return None
-    def render_bi_note(title: str, body: str, tone: str = "blue"):
-        return None
-    def enhance_plotly_figure(fig, **kwargs):
-        return fig
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
 # <<< APP_AUTH_GUARD_V84
@@ -8497,7 +8485,14 @@ def main():
     except Exception:
         pass
     inject_pro_theme()
-    inject_bi_theme()
+
+    # >>> GODPICK_BI_V135_REAL_CHART_STYLE
+    try:
+        from godpick_bi_theme import install_bi_dashboard_style
+        install_bi_dashboard_style("7_recommend")
+    except Exception:
+        pass
+    # <<< GODPICK_BI_V135_REAL_CHART_STYLE
 
     watchlist_map = _load_watchlist_map()
     master_df = _load_master_df()
@@ -8535,33 +8530,18 @@ def main():
     }
     persistent_settings = _load_persistent_settings()
     persisted_weights = _normalize_weight_map(persistent_settings.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
-    persisted_weight_ts = _safe_str(persistent_settings.get("updated_at"))
 
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
             st.session_state[_k(name)] = value
 
-    # v96：修正 14_股神權重校正套用後，回到 7_股神推薦仍顯示舊權重的問題。
-    # 原因：7 頁 session_state 已存在時，不會重新讀 godpick_user_settings.json。
-    # 現在只要設定檔 updated_at 變更，就在 widget 建立前同步正式權重與編輯權重。
-    last_loaded_weight_ts = _safe_str(st.session_state.get(_k("persistent_weight_updated_at_loaded")))
-    should_sync_external_weights = bool(persisted_weight_ts and persisted_weight_ts != last_loaded_weight_ts)
-    if should_sync_external_weights:
+    if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
         st.session_state[_k("score_weights")] = persisted_weights.copy()
+    if _k("score_weights_edit") not in st.session_state or st.session_state.get(_k("score_weights_edit")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
         st.session_state[_k("score_weights_edit")] = persisted_weights.copy()
-        st.session_state[_k("persistent_weight_updated_at_loaded")] = persisted_weight_ts
-        st.session_state[_k("external_weight_sync_msg")] = f"已同步 14_權重校正套用權重：{_weight_text(persisted_weights)}"
-    else:
-        if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
-            st.session_state[_k("score_weights")] = persisted_weights.copy()
-        if _k("score_weights_edit") not in st.session_state or st.session_state.get(_k("score_weights_edit")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
-            st.session_state[_k("score_weights_edit")] = persisted_weights.copy()
 
     if _k("selected_rec_snapshot") not in st.session_state:
         st.session_state[_k("selected_rec_snapshot")] = pd.DataFrame()
-
-    if st.session_state.get(_k("external_weight_sync_msg")):
-        st.success(st.session_state.pop(_k("external_weight_sync_msg")))
 
     _ensure_ui_pref("universe_mode", st.session_state.get(_k("universe_mode"), "自選群組"))
     _ensure_ui_pref("group", st.session_state.get(_k("group"), list(watchlist_map.keys())[0] if watchlist_map else ""))
@@ -8600,13 +8580,8 @@ def main():
         title="股神推薦｜V4 加速記憶版",
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
-    render_bi_banner(
-        "07 股神推薦｜BI 決策雷達頁",
-        "把推薦掃描、權重、買點等級、風險、類股與大盤風控整理成決策型 BI；保留勾選延後套用、欄位順序、推薦匯入與紀錄功能。",
-        chips=["推薦決策", "權重模型", "風控摘要", "類股分布", "表格管理"],
-    )
 
-    st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}｜v133 BI視覺升級")
+    st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
     st.caption("勾選欄位穩定版：v44 data_editor callback fix")
     st.caption(f"重複確認版：{DUPLICATE_CONFIRM_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
@@ -9378,32 +9353,6 @@ def main():
         ]
     ].copy()
 
-    # v113：本輪精華推薦加入表格管理。
-    # 說明：重型頁面預設不啟用全域表格攔截，避免進頁卡住；
-    # 但本表是核心推薦結果，需要手動掛上篩選 / 排序 / 欄位順序管理。
-    # 這裡只處理目前已產生的 top_show_df，不重新掃描、不重新抓資料。
-    try:
-        from godpick_column_manager import render_table_view_manager, apply_table_view, render_column_manager
-        _top_table_key_v113 = "page07_top_essence_recommend"
-        render_table_view_manager(_top_table_key_v113, "本輪精華推薦", top_show_df)
-        top_show_df = apply_table_view(top_show_df, _top_table_key_v113)
-        _top_cols_v113 = render_column_manager(
-            _top_table_key_v113,
-            "本輪精華推薦",
-            top_show_df,
-            list(top_show_df.columns),
-        )
-        _essential_top_cols_v113 = ["勾選", "股票代號", "股票名稱"]
-        _final_top_cols_v113 = [c for c in _top_cols_v113 if c in top_show_df.columns]
-        # 勾選與股票代號屬於後續匯入 / 寫入紀錄必要欄位，不允許被欄位管理隱藏到表格之外。
-        for _c in reversed(_essential_top_cols_v113):
-            if _c in top_show_df.columns and _c not in _final_top_cols_v113:
-                _final_top_cols_v113.insert(0, _c)
-        if _final_top_cols_v113:
-            top_show_df = top_show_df[_final_top_cols_v113].copy()
-    except Exception as _table_mgr_e:
-        st.caption(f"v113 本輪精華推薦表格管理略過：{_table_mgr_e}")
-
     # v44：先建立 row_index → 股票代號 對照表，讓 on_change callback 可在 rerun 前保存勾選狀態。
     top_editor_key = _k("top_pick_editor")
     top_editor_code_map_key = _k("top_pick_editor_code_map")
@@ -9587,26 +9536,21 @@ def main():
         full_default_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(rec_df.columns)) if c in rec_df.columns]
         if not full_default_cols:
             full_default_cols = [c for c in list(rec_df.columns) if c != "勾選"]
-        # v113：完整推薦表也加入表格管理。
-        # 篩選 / 排序只套用目前 rec_df，不重新掃描；欄位順序仍永久保存。
+        # v48：完整推薦表改用與 12_股神管理中心相同的欄位管理樣式。
         full_for_manager = rec_df.copy()
         if "勾選" not in full_for_manager.columns:
             full_for_manager.insert(0, "勾選", False)
         try:
-            from godpick_column_manager import render_table_view_manager, apply_table_view, render_column_manager
-            _full_table_key_v113 = "page07_godpick_recommend_full"
-            render_table_view_manager(_full_table_key_v113, "完整推薦表", full_for_manager)
-            full_for_manager = apply_table_view(full_for_manager, _full_table_key_v113)
+            from godpick_column_manager import render_column_manager
             full_order = render_column_manager(
-                _full_table_key_v113,
+                "page07_godpick_recommend_full",
                 "完整推薦表",
                 full_for_manager,
                 ["勾選"] + full_default_cols,
             )
-        except Exception as _full_mgr_e:
-            st.caption(f"v113 完整推薦表格管理略過：{_full_mgr_e}")
+        except Exception:
             full_order = ["勾選"] + full_default_cols
-        full_show_cols = [c for c in full_order if c in full_for_manager.columns and c != "勾選"]
+        full_show_cols = [c for c in full_order if c in rec_df.columns and c != "勾選"]
         if not full_show_cols:
             full_show_cols = full_default_cols
 
@@ -9620,7 +9564,7 @@ def main():
             if _normalize_code(x)
         }
 
-        full_work_df = full_for_manager[full_show_cols].copy()
+        full_work_df = rec_df[full_show_cols].copy()
         if "勾選" not in full_work_df.columns:
             full_work_df.insert(0, "勾選", False)
         full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)

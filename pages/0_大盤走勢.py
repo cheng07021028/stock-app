@@ -16,18 +16,6 @@ try:
     require_login()
 except Exception as _auth_e:
     import streamlit as st
-
-try:
-    from godpick_bi_theme import inject_bi_theme, render_bi_banner, render_bi_note, enhance_plotly_figure
-except Exception:
-    def inject_bi_theme():
-        return None
-    def render_bi_banner(title: str, subtitle: str = "", chips=None):
-        return None
-    def render_bi_note(title: str, body: str, tone: str = "blue"):
-        return None
-    def enhance_plotly_figure(fig, **kwargs):
-        return fig
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
 # <<< APP_AUTH_GUARD_V84
@@ -4926,19 +4914,21 @@ def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
     inject_pro_theme()
-    inject_bi_theme()
+
+    # >>> GODPICK_BI_V135_REAL_CHART_STYLE
+    try:
+        from godpick_bi_theme import install_bi_dashboard_style
+        install_bi_dashboard_style("0_macro")
+    except Exception:
+        pass
+    # <<< GODPICK_BI_V135_REAL_CHART_STYLE
 
     render_pro_hero(
         title="01 大盤趨勢｜v70一鍵更新寫入版",
         subtitle="加權、櫃買、期貨、外盤、法人、夜盤、美盤與美國期貨可一鍵更新、一鍵寫入，並通知是否全部完成。",
     )
-    render_bi_banner(
-        "01 大盤趨勢｜BI 市場戰情總覽",
-        "把大盤、櫃買、期貨、外盤、法人、夜盤與美股期貨整理成決策看板；保留一鍵更新 / 一鍵寫入，並強化視覺層級與圖表一致性。",
-        chips=["市場總覽", "風控橋接", "國際盤", "法人籌碼", "股神推薦串接"],
-    )
 
-    st.info("v133 BI：保留 v70 一鍵更新全部必要數據並寫入股神橋接檔；新增 BI 視覺規範、KPI 卡片與圖表樣式統一。")
+    st.info("v70：新增一鍵更新全部必要數據並寫入股神橋接檔；完成後會明確通知是否全部更新、全部寫入完成。")
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:
