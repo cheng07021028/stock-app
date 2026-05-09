@@ -552,98 +552,83 @@
     {
       "code": "1785",
       "name": "光洋科",
-      "market": "上櫃",
-      "category": "櫃其他電子"
+      "market": "上櫃"
     },
     {
       "code": "2107",
       "name": "厚生",
-      "market": "上市",
-      "category": "橡膠工業"
+      "market": "上市"
     },
     {
       "code": "2327",
       "name": "國巨*",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "2342",
       "name": "茂矽",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "3026",
       "name": "禾伸堂",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "3122",
       "name": "笙泉",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "3135",
       "name": "凌航",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "3268",
       "name": "海德威",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "3528",
       "name": "安馳",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "3532",
       "name": "台勝科",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6113",
       "name": "亞矽",
-      "market": "上櫃",
-      "category": "電子通路業"
+      "market": "上櫃"
     },
     {
       "code": "6182",
       "name": "合晶",
-      "market": "上櫃",
-      "category": "矽晶圓"
+      "market": "上櫃"
     },
     {
       "code": "6274",
       "name": "台燿",
-      "market": "上櫃",
-      "category": "PCB載板"
+      "market": "上櫃"
     },
     {
       "code": "6707",
       "name": "富基電通",
-      "market": "興櫃",
-      "category": "電子通路業"
+      "market": "興櫃"
     },
     {
       "code": "6756",
       "name": "威鋒電子",
-      "market": "上市",
-      "category": "高速傳輸"
+      "market": "上市"
     },
     {
       "code": "6770",
       "name": "力積電",
-      "market": "上市",
-      "category": "晶圓代工"
+      "market": "上市"
     }
-  ]
+  ],
+  "0511": []
 }
