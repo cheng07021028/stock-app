@@ -1,6 +1,6 @@
 {
   "version": "v116",
-  "updated_at": "2026-05-09 13:50:34",
+  "updated_at": "2026-05-09 13:51:36",
   "profiles": {
     "page07_godpick_recommend_full": {
       "label": "完整推薦表",
@@ -750,10 +750,10 @@
       "keyword_columns": [],
       "filters": {},
       "sort_column": "損益幅%",
-      "sort_ascending": false,
+      "sort_ascending": true,
       "limit_rows": 0,
       "label": "godpick_record_record_editor_標準",
-      "updated_at": "2026-05-09 13:50:34"
+      "updated_at": "2026-05-09 13:51:36"
     }
   }
 }
