@@ -1,6 +1,6 @@
 {
   "version": "v116",
-  "updated_at": "2026-05-09 13:49:21",
+  "updated_at": "2026-05-09 13:50:34",
   "profiles": {
     "page07_godpick_recommend_full": {
       "label": "完整推薦表",
@@ -744,6 +744,16 @@
       "limit_rows": 0,
       "label": "完整推薦表",
       "updated_at": "2026-05-07 06:38:44"
+    },
+    "8_股神推薦紀錄_editor_godpick_record_record_editor_標準": {
+      "keyword": "",
+      "keyword_columns": [],
+      "filters": {},
+      "sort_column": "損益幅%",
+      "sort_ascending": false,
+      "limit_rows": 0,
+      "label": "godpick_record_record_editor_標準",
+      "updated_at": "2026-05-09 13:50:34"
     }
   }
 }
