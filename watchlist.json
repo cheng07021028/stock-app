@@ -634,68 +634,58 @@
     {
       "code": "2379",
       "name": "瑞昱",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "3014",
       "name": "聯陽",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "3026",
       "name": "禾伸堂",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "3276",
       "name": "宇環",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "3592",
       "name": "瑞鼎",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "4749",
       "name": "新應材",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6020",
       "name": "大展證",
-      "market": "上櫃",
-      "category": "金融保險"
+      "market": "上櫃"
     },
     {
       "code": "6026",
       "name": "福邦證",
-      "market": "上櫃",
-      "category": "金融保險"
+      "market": "上櫃"
     },
     {
       "code": "6237",
       "name": "驊訊",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6651",
       "name": "全宇昕",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6695",
       "name": "芯鼎",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     }
-  ]
+  ],
+  "0511-可分批": []
 }
