@@ -251,18 +251,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-10 07:20:56",
-  "version": "godpick_v96_weight_calibration_github_sync",
-  "score_weights": {
-    "市場環境": 22,
-    "技術結構": 6,
-    "起漲前兆": 22,
-    "類股熱度": 15,
-    "自動因子": 6,
-    "交易可行": 5,
-    "型態突破": 19,
-    "爆發力": 5
-  },
-  "weight_source": "14_股神權重校正",
-  "last_weight_calibration_profile": "主校正建議"
+  "updated_at": "2026-05-10 07:21:06",
+  "version": "godpick_v5_persistent_settings"
 }
