@@ -878,14 +878,50 @@
       "category": "半導體業"
     },
     {
+      "code": "2362",
+      "name": "藍天",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
       "code": "2364",
       "name": "倫飛",
       "market": "上市",
       "category": "電腦及週邊設備業"
     },
     {
+      "code": "2420",
+      "name": "新巨",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2428",
+      "name": "興勤",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3014",
+      "name": "聯陽",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
+      "code": "3034",
+      "name": "聯詠",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
       "code": "3046",
       "name": "建碁",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "3416",
+      "name": "融程電",
       "market": "上市",
       "category": "電腦及週邊設備業"
     },
@@ -914,8 +950,38 @@
       "category": "汽車"
     },
     {
+      "code": "5483",
+      "name": "中美晶",
+      "market": "上櫃",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "6026",
+      "name": "福邦證",
+      "market": "上櫃",
+      "category": "金融保險"
+    },
+    {
+      "code": "6138",
+      "name": "茂達",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6161",
+      "name": "捷波",
+      "market": "上櫃",
+      "category": "電腦及週邊設備業"
+    },
+    {
       "code": "6203",
       "name": "海韻電",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6642",
+      "name": "富致",
       "market": "上櫃",
       "category": "電子零組件業"
     },
@@ -924,6 +990,30 @@
       "name": "廣積",
       "market": "上櫃",
       "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "8076",
+      "name": "伍豐",
+      "market": "上櫃",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "8284",
+      "name": "三竹",
+      "market": "上櫃",
+      "category": "資訊服務業"
+    },
+    {
+      "code": "8477",
+      "name": "創業家",
+      "market": "上櫃",
+      "category": "運動休閒"
+    },
+    {
+      "code": "9944",
+      "name": "新麗",
+      "market": "上市",
+      "category": "其他_主題未映射"
     }
   ]
 }
