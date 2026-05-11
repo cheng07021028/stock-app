@@ -235,7 +235,7 @@
   },
   "scan_settings": {
     "universe_mode": "自選群組",
-    "group": "0508",
+    "group": "庫存",
     "days": 240,
     "top_n": 10,
     "manual_codes": "",
@@ -251,6 +251,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-11 14:19:28",
+  "updated_at": "2026-05-11 14:22:41",
   "version": "godpick_v5_persistent_settings"
 }
