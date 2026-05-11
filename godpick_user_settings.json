@@ -243,7 +243,7 @@
     "selected_categories": [
       "全部"
     ],
-    "min_total_score": 90.0,
+    "min_total_score": 50.0,
     "min_signal_score": -2.0,
     "min_prelaunch_score": 50.0,
     "min_trade_score": 45.0,
@@ -251,6 +251,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-11 14:18:50",
+  "updated_at": "2026-05-11 14:19:28",
   "version": "godpick_v5_persistent_settings"
 }
