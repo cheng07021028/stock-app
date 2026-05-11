@@ -2296,6 +2296,205 @@ def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tupl
     return None, _safe_str(market_type), last_src or "ONLINE_FAIL"
 
 
+def _quote_request_json(url: str, params: dict[str, Any] | None = None, timeout: float = 4.0) -> Any:
+    """V137：輕量 HTTP JSON 讀取，避免最新價來源失敗時整頁卡死。"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    resp = requests.get(url, params=params or {}, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _quote_from_twse_mis(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
+    """V137：TWSE MIS 即時行情。上市 tse_，上櫃 otc_。"""
+    code = _normalize_code(stock_no)
+    if not code:
+        return None, _safe_str(market_type), "TWSE_MIS_NO_CODE"
+    prefixes = []
+    mk = _safe_str(market_type)
+    if mk == "上櫃":
+        prefixes = ["otc", "tse"]
+    elif mk == "興櫃":
+        prefixes = ["otc", "tse"]
+    else:
+        prefixes = ["tse", "otc"]
+    last_src = "TWSE_MIS_NO_DATA"
+    for pref in prefixes:
+        try:
+            url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+            data = _quote_request_json(url, {"ex_ch": f"{pref}_{code}.tw", "json": "1", "delay": "0"}, timeout=3.5)
+            arr = data.get("msgArray") if isinstance(data, dict) else None
+            if not arr:
+                last_src = f"TWSE_MIS_EMPTY:{pref}"
+                continue
+            row = arr[0] if isinstance(arr, list) and arr else {}
+            # z=成交價；若盤中無 z，y=昨收、a/b 為委買委賣。這裡只接受 z 或最近可用的 pz。
+            raw = row.get("z") or row.get("pz") or row.get("y")
+            if isinstance(raw, str):
+                raw = raw.replace(",", "").replace("-", "").strip()
+            price = _safe_float(raw)
+            if price is not None and price > 0:
+                used_market = "上櫃" if pref == "otc" else "上市"
+                return float(price), used_market, f"TWSE_MIS_{pref}"
+            last_src = f"TWSE_MIS_NO_PRICE:{pref}"
+        except Exception as e:
+            last_src = f"TWSE_MIS_EXCEPTION:{str(e)[:60]}"
+            continue
+    return None, _safe_str(market_type), last_src
+
+
+def _yahoo_symbol_candidates(stock_no: str, market_type: str) -> list[str]:
+    code = _normalize_code(stock_no)
+    if not code:
+        return []
+    mk = _safe_str(market_type)
+    if mk == "上櫃":
+        suffixes = ["TWO", "TW"]
+    elif mk == "興櫃":
+        suffixes = ["TWO", "TW"]
+    else:
+        suffixes = ["TW", "TWO"]
+    out = []
+    for s in suffixes:
+        sym = f"{code}.{s}"
+        if sym not in out:
+            out.append(sym)
+    return out
+
+
+def _quote_from_yahoo_chart(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
+    """V137：Yahoo chart API 備援。取得 regularMarketPrice 或最近日線 close。"""
+    last_src = "YAHOO_CHART_NO_DATA"
+    for symbol in _yahoo_symbol_candidates(stock_no, market_type):
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+            data = _quote_request_json(url, {"range": "7d", "interval": "1d"}, timeout=4.0)
+            result = (((data or {}).get("chart") or {}).get("result") or [])
+            if not result:
+                last_src = f"YAHOO_CHART_EMPTY:{symbol}"
+                continue
+            r0 = result[0]
+            meta = r0.get("meta") or {}
+            price = _safe_float(meta.get("regularMarketPrice") or meta.get("previousClose"))
+            if price is None or price <= 0:
+                q = (((r0.get("indicators") or {}).get("quote") or [{}])[0])
+                closes = q.get("close") or []
+                vals = [_safe_float(x) for x in closes]
+                vals = [x for x in vals if x is not None and x > 0]
+                price = vals[-1] if vals else None
+            if price is not None and price > 0:
+                used_market = "上櫃" if symbol.endswith(".TWO") else "上市"
+                return float(price), used_market, f"YAHOO_CHART:{symbol}"
+            last_src = f"YAHOO_CHART_NO_PRICE:{symbol}"
+        except Exception as e:
+            last_src = f"YAHOO_CHART_EXCEPTION:{str(e)[:60]}"
+            continue
+    return None, _safe_str(market_type), last_src
+
+
+def _quote_from_finmind_daily(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
+    """V137：FinMind TaiwanStockPrice 日線 close 備援。"""
+    code = _normalize_code(stock_no)
+    if not code:
+        return None, _safe_str(market_type), "FINMIND_NO_CODE"
+    try:
+        start_date = (date.today() - timedelta(days=14)).isoformat()
+        url = "https://api.finmindtrade.com/api/v4/data"
+        data = _quote_request_json(url, {"dataset": "TaiwanStockPrice", "data_id": code, "start_date": start_date}, timeout=5.0)
+        rows = data.get("data") if isinstance(data, dict) else None
+        if not rows:
+            return None, _safe_str(market_type), "FINMIND_EMPTY"
+        closes = []
+        for r in rows:
+            px = _safe_float((r or {}).get("close"))
+            if px is not None and px > 0:
+                closes.append(px)
+        if closes:
+            return float(closes[-1]), _safe_str(market_type), "FINMIND_DAILY_CLOSE"
+        return None, _safe_str(market_type), "FINMIND_NO_PRICE"
+    except Exception as e:
+        return None, _safe_str(market_type), f"FINMIND_EXCEPTION:{str(e)[:60]}"
+
+
+def _quote_from_stooq_daily(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
+    """V137：Stooq CSV 日線備援。部分台股可能不支援，失敗時快速跳過。"""
+    code = _normalize_code(stock_no)
+    if not code:
+        return None, _safe_str(market_type), "STOOQ_NO_CODE"
+    # Stooq 台股符號覆蓋不一定完整，仍作為最後免費備援。
+    candidates = [f"{code}.tw", f"{code}.two"]
+    last_src = "STOOQ_NO_DATA"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for symbol in candidates:
+        try:
+            url = "https://stooq.com/q/l/"
+            resp = requests.get(url, params={"s": symbol, "f": "sd2t2ohlcv", "h": "", "e": "csv"}, headers=headers, timeout=4.0)
+            resp.raise_for_status()
+            lines = [ln.strip() for ln in resp.text.splitlines() if ln.strip()]
+            if len(lines) < 2:
+                last_src = f"STOOQ_EMPTY:{symbol}"
+                continue
+            # Symbol,Date,Time,Open,High,Low,Close,Volume
+            parts = lines[-1].split(",")
+            if len(parts) < 7:
+                last_src = f"STOOQ_BAD_CSV:{symbol}"
+                continue
+            price = _safe_float(parts[6])
+            if price is not None and price > 0:
+                used_market = "上櫃" if symbol.endswith(".two") else _safe_str(market_type)
+                return float(price), used_market, f"STOOQ_DAILY:{symbol}"
+            last_src = f"STOOQ_NO_PRICE:{symbol}"
+        except Exception as e:
+            last_src = f"STOOQ_EXCEPTION:{str(e)[:60]}"
+            continue
+    return None, _safe_str(market_type), last_src
+
+
+def _quote_from_local_history(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
+    """V137：最後本地/既有歷史函式備援。只取最近收盤，避免整頁空白。"""
+    code = _normalize_code(stock_no)
+    if not code:
+        return None, _safe_str(market_type), "LOCAL_HISTORY_NO_CODE"
+    try:
+        end_dt = date.today()
+        start_dt = end_dt - timedelta(days=14)
+        hist = get_history_data(code, _safe_str(stock_name), _safe_str(market_type), start_dt, end_dt)
+        if isinstance(hist, pd.DataFrame) and not hist.empty:
+            for col in ["收盤價", "close", "Close", "收盤"]:
+                if col in hist.columns:
+                    vals = pd.to_numeric(hist[col], errors="coerce").dropna()
+                    vals = vals[vals > 0]
+                    if not vals.empty:
+                        return float(vals.iloc[-1]), _safe_str(market_type), "LOCAL_HISTORY_CLOSE"
+        return None, _safe_str(market_type), "LOCAL_HISTORY_EMPTY"
+    except Exception as e:
+        return None, _safe_str(market_type), f"LOCAL_HISTORY_EXCEPTION:{str(e)[:60]}"
+
+
+def _alternative_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
+    """V137：替代來源鏈。依序：TWSE MIS → Yahoo chart → FinMind → Stooq → local history。"""
+    chain = [
+        lambda: _quote_from_twse_mis(stock_no, market_type),
+        lambda: _quote_from_yahoo_chart(stock_no, market_type),
+        lambda: _quote_from_finmind_daily(stock_no, market_type),
+        lambda: _quote_from_stooq_daily(stock_no, market_type),
+        lambda: _quote_from_local_history(stock_no, stock_name, market_type),
+    ]
+    last_src = "ALT_ALL_FAIL"
+    for fn in chain:
+        try:
+            price, used_market, src = fn()
+            last_src = src or last_src
+            if price is not None and price > 0:
+                return float(price), used_market or _safe_str(market_type), src or "ALT_SOURCE"
+        except Exception as e:
+            last_src = f"ALT_EXCEPTION:{str(e)[:60]}"
+            continue
+    return None, _safe_str(market_type), last_src
+
+
 def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tuple[float | None, str, str]]:
     """V103：快速批次查最新價。
 
@@ -2364,7 +2563,32 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
         ]
         _run_batch(items, f"_{mk}")
 
-    # 第三輪：可選的慢速備援補缺口。預設關閉，避免整頁卡住。
+    # 第三輪：替代來源鏈。預設開啟，但有每批上限，避免 Streamlit Cloud 卡住。
+    allow_alt = bool(st.session_state.get(_k("enable_alt_price_sources"), True))
+    alt_limit = int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60)
+    alt_workers = int(st.session_state.get(_k("alt_price_workers"), 6) or 6)
+    alt_workers = max(1, min(10, alt_workers))
+    if allow_alt and unresolved and alt_limit > 0:
+        alt_codes = list(unresolved)[:max(0, alt_limit)]
+        def _alt_job(code: str):
+            meta = code_meta.get(code, {})
+            latest, used_market, src = _alternative_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
+            return code, latest, used_market, src
+        with ThreadPoolExecutor(max_workers=min(alt_workers, max(1, len(alt_codes)))) as ex:
+            futs = [ex.submit(_alt_job, code) for code in alt_codes]
+            for fut in as_completed(futs):
+                try:
+                    code, latest, used_market, src = fut.result(timeout=8)
+                except Exception as e:
+                    continue
+                meta = code_meta.get(code, {})
+                if latest is not None and latest > 0:
+                    result[code] = (latest, used_market or meta.get("market", "上市"), src or "alt_source")
+                    unresolved.discard(code)
+                else:
+                    result[code] = (None, meta.get("market", "上市"), src or "ALT_FAIL")
+
+    # 第四輪：可選的慢速備援補缺口。預設關閉，避免整頁卡住。
     allow_slow = bool(st.session_state.get(_k("enable_slow_price_fallback"), False))
     slow_limit = int(st.session_state.get(_k("slow_price_fallback_limit"), 20) or 20)
     if allow_slow and unresolved:
@@ -2478,6 +2702,9 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
         "preserved_old_price": preserved_old_price,
         "source_counts": source_counts,
         "fast_mode": not bool(st.session_state.get(_k("enable_slow_price_fallback"), False)),
+        "alt_sources_enabled": bool(st.session_state.get(_k("enable_alt_price_sources"), True)),
+        "alt_source_limit": int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60),
+        "alt_workers": int(st.session_state.get(_k("alt_price_workers"), 6) or 6),
         "slow_fallback_enabled": bool(st.session_state.get(_k("enable_slow_price_fallback"), False)),
     }
     return out
@@ -3705,7 +3932,7 @@ def main():
             try:
                 df = _get_state_df()
                 before_sig = _df_signature(df)
-                with st.spinner("V104：快速批次更新完整份最新價中；失敗股票保留舊價，不逐檔慢查..."):
+                with st.spinner("V137：批次來源 + 替代來源鏈更新最新價中；失敗股票保留舊價..."):
                     df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
                 after_sig = _df_signature(df)
                 if before_sig != after_sig:
@@ -3819,8 +4046,11 @@ def main():
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
         st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=120, step=10, key=_k("latest_price_batch_size"))
-        st.caption("V104：這是每批處理筆數，不是總上限；預設只跑批次來源，失敗保留舊價；五個主按鈕成功/失敗都會顯示結果。")
-        st.toggle("慢速備援補缺口（Yahoo/歷史逐檔，較慢）", value=False, key=_k("enable_slow_price_fallback"), help="只有批次來源抓不到、又真的要補缺口時才開。預設關閉，避免 Streamlit Cloud 卡很久。")
+        st.caption("V137：每批處理筆數，不是總上限；批次來源失敗後，可走替代來源鏈 TWSE MIS → Yahoo chart → FinMind → Stooq → 本地歷史。")
+        st.toggle("啟用替代來源補價（建議開啟）", value=True, key=_k("enable_alt_price_sources"), help="批次來源抓不到時，依序使用 TWSE MIS、Yahoo chart、FinMind、Stooq、本地歷史收盤價補缺口。")
+        st.number_input("替代來源最多補幾檔 / 每批", min_value=0, max_value=300, value=60, step=10, key=_k("alt_price_source_limit"))
+        st.number_input("替代來源並行數", min_value=1, max_value=10, value=6, step=1, key=_k("alt_price_workers"))
+        st.toggle("慢速備援補缺口（utils/Yahoo/歷史逐檔，較慢）", value=False, key=_k("enable_slow_price_fallback"), help="替代來源仍抓不到時才開。預設關閉，避免 Streamlit Cloud 卡很久。")
         st.number_input("慢速備援最多補幾檔 / 每批", min_value=0, max_value=100, value=20, step=5, key=_k("slow_price_fallback_limit"))
     with top_cols[6]:
         st.caption(
