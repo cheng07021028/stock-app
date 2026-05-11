@@ -234,7 +234,7 @@
     ]
   },
   "scan_settings": {
-    "universe_mode": "手動輸入",
+    "universe_mode": "自選群組",
     "group": "0511",
     "days": 240,
     "top_n": 10,
@@ -251,6 +251,6 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-11 14:16:25",
+  "updated_at": "2026-05-11 14:16:40",
   "version": "godpick_v5_persistent_settings"
 }
