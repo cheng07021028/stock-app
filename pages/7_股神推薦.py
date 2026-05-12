@@ -1276,6 +1276,53 @@ def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, li
     github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
     return (local_ok or github_ok), [local_msg, github_msg]
 
+def _apply_persisted_weights_to_state(payload: dict[str, Any] | None = None, *, force_widget_sync: bool = True) -> tuple[bool, str]:
+    """v138：把 godpick_user_settings.json 的 applied_weights 立即套回 7_股神推薦。
+
+    用途：14_股神權重校正寫入權重後，不必 Ctrl+F5；進入本頁或按重新載入即可更新。
+    此函式必須在權重 number_input 建立前執行，才不會觸發 StreamlitAPIException。
+    """
+    if payload is None:
+        payload = _load_persistent_settings()
+    if not isinstance(payload, dict):
+        return False, "設定檔格式異常，無法重新載入權重。"
+    weights = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
+    updated_at = _safe_str(payload.get("updated_at"))
+    profile = _safe_str(payload.get("last_weight_calibration_profile") or payload.get("weight_profile") or "")
+
+    st.session_state[_k("score_weights")] = weights.copy()
+    st.session_state[_k("score_weights_edit")] = weights.copy()
+    st.session_state[_k("weight_settings_loaded_at")] = updated_at
+    st.session_state[_k("weight_settings_loaded_profile")] = profile
+
+    if force_widget_sync:
+        for _name, _val in weights.items():
+            st.session_state[_k(f"weight_edit_{_name}")] = int(_val)
+
+    detail = " / ".join([f"{k}{v}%" for k, v in weights.items()])
+    suffix = f"｜校正組合：{profile}" if profile else ""
+    stamp = f"｜設定時間：{updated_at}" if updated_at else ""
+    return True, f"已重新載入 14_股神權重校正套用權重：{detail}{suffix}{stamp}"
+
+
+def _maybe_auto_reload_weight_settings() -> None:
+    """v138：偵測 godpick_user_settings.json 已更新時，自動同步權重到本頁 session_state。"""
+    payload = _load_persistent_settings()
+    updated_at = _safe_str(payload.get("updated_at")) if isinstance(payload, dict) else ""
+    loaded_at = _safe_str(st.session_state.get(_k("weight_settings_loaded_at")))
+
+    should_reload = False
+    if not st.session_state.get(_k("weight_settings_auto_loaded_once"), False):
+        should_reload = True
+        st.session_state[_k("weight_settings_auto_loaded_once")] = True
+    elif updated_at and updated_at != loaded_at:
+        should_reload = True
+
+    if should_reload:
+        ok, msg = _apply_persisted_weights_to_state(payload, force_widget_sync=True)
+        if ok and updated_at and loaded_at and updated_at != loaded_at:
+            st.session_state[_k("weight_reload_notice")] = "偵測到 14_股神權重校正已更新，已自動重新載入權重。"
+
 
 def _load_column_order_shadow_payload() -> dict[str, Any]:
     """v72：欄位順序獨立檔，避免套用後被 GitHub 舊設定覆蓋。"""
@@ -1462,6 +1509,22 @@ def _weight_total(weights: dict[str, int]) -> int:
 def _render_score_weight_panel():
     """股神評分權重控制台：必須總和 100 才能套用，避免誤調造成推薦結果失真。"""
     render_pro_section("股神權重設定", "可調整推薦評分邏輯；只有總和等於 100% 時才能套用。")
+
+    if st.session_state.get(_k("weight_reload_notice")):
+        st.success(st.session_state.pop(_k("weight_reload_notice")))
+
+    r1, r2 = st.columns([2, 3])
+    with r1:
+        reload_from_14 = st.button("重新載入 14_股神權重校正", use_container_width=True, help="14_股神權重校正套用後，按這裡即可讀取最新 godpick_user_settings.json，不必 Ctrl+F5。")
+    with r2:
+        _loaded_at = _safe_str(st.session_state.get(_k("weight_settings_loaded_at"))) or "尚未載入"
+        _profile = _safe_str(st.session_state.get(_k("weight_settings_loaded_profile")))
+        st.caption(f"目前權重來源時間：{_loaded_at}" + (f"｜組合：{_profile}" if _profile else ""))
+
+    if reload_from_14:
+        ok, msg = _apply_persisted_weights_to_state(force_widget_sync=True)
+        st.session_state[_k("weight_reload_notice")] = msg if ok else f"重新載入失敗：{msg}"
+        st.rerun()
 
     if _k("score_weights") not in st.session_state:
         st.session_state[_k("score_weights")] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
@@ -8534,6 +8597,10 @@ def main():
     for name, value in defaults.items():
         if _k(name) not in st.session_state:
             st.session_state[_k(name)] = value
+
+    # v138：進入 7_股神推薦時自動偵測 14_股神權重校正是否有新套用權重。
+    # 這段在任何權重 widget 建立前執行，因此可安全同步 number_input 的 widget key。
+    _maybe_auto_reload_weight_settings()
 
     if _k("score_weights") not in st.session_state or st.session_state.get(_k("score_weights")) == GODPICK_DEFAULT_SCORE_WEIGHTS:
         st.session_state[_k("score_weights")] = persisted_weights.copy()
