@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v99 夜間隔日同步版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v104 夜間準確率回饋版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -49,6 +49,8 @@ from godpick_weight_calibration import (
     calc_factor_effectiveness,
     calc_market_bundles,
     calc_profile_bundle,
+    calc_night_accuracy_bundle,
+    apply_night_accuracy_feedback,
     confidence_label,
     current_weight_map,
     first_existing_col,
@@ -69,7 +71,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v99_night_battle_weight_sync"
+APP_VERSION = "v104_night_accuracy_feedback"
 
 
 
@@ -258,6 +260,38 @@ def _render_v99_night_field_diagnostics(df: pd.DataFrame) -> None:
     except Exception as e:
         st.caption(f"夜間欄位診斷略過：{e}")
 
+
+def _render_v104_accuracy_diagnostics(df: pd.DataFrame, horizon: int) -> None:
+    """顯示 10/8 命中追蹤欄位是否可供 14 權重校正參考。"""
+    try:
+        hit_cols = [
+            "作戰追蹤狀態", "進場點命中", "突破價命中", "停損價觸發", "第一壓力命中",
+            "隔日最高漲幅%", "3日最高漲幅%", "5日最高漲幅%", "10日最高漲幅%",
+            "隔日最低回撤%", "3日最低回撤%", "5日最低回撤%", "10日最低回撤%",
+            "作戰命中摘要", "作戰追蹤更新時間",
+        ]
+        rows = []
+        for c in hit_cols:
+            exists = c in df.columns
+            valid = int(df[c].notna().sum()) if exists else 0
+            rows.append({"命中追蹤欄位": c, "是否存在": "有" if exists else "缺", "有效筆數": valid})
+        exists_n = sum(1 for r in rows if r["是否存在"] == "有")
+        bundle = calc_night_accuracy_bundle(df, horizon=horizon)
+        summary = bundle.get("summary", {}) if isinstance(bundle, dict) else {}
+        with st.expander("v104 夜間準確率/命中追蹤檢查", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("命中欄位存在", f"{exists_n}/{len(hit_cols)}")
+            c2.metric("採用績效欄", summary.get("績效欄", "缺"))
+            c3.metric("進場點命中率", "—" if summary.get("進場點命中率%") is None else f"{summary.get('進場點命中率%')}%")
+            c4.metric("停損觸發率", "—" if summary.get("停損觸發率%") is None else f"{summary.get('停損觸發率%')}%")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            if exists_n >= 4:
+                st.success("已讀到 V101/V102 命中追蹤資料，可作為權重校正參考。")
+            else:
+                st.warning("命中追蹤欄位仍不足；請先到 10_推薦清單按『更新隔日命中追蹤』，或到 8_股神推薦紀錄更新績效。")
+    except Exception as e:
+        st.caption(f"v104 命中追蹤診斷略過：{e}")
+
 def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
     if table is None or table.empty:
         return DEFAULT_WEIGHTS.copy()
@@ -265,9 +299,9 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v99 夜間隔日同步版")
-    st.caption("績效回測＋期望值＋分層權重＋防過擬合；已同步 07/08/10 夜間隔日股神欄位，不連外、不重跑推薦。")
-    st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；夜間欄位會被併入原本 8 大權重因子，套用後 07 可直接讀取，不需要新增不相容權重名稱。")
+    st.title("14_股神權重校正｜v104 夜間準確率回饋版")
+    st.caption("績效回測＋命中追蹤＋分層權重＋防過擬合；已同步 07/08/10 夜間隔日股神欄位與 V101/V102 命中追蹤，不連外、不重跑推薦。")
+    st.info("核心邏輯：不只看勝率，也看平均報酬、命中率、停損率、期望值、樣本數、資料覆蓋率；夜間欄位與命中追蹤會回饋到原本 8 大權重因子，套用後 07 可直接讀取，不需要新增不相容權重名稱。")
 
 
 def _render_quality(df: pd.DataFrame, horizon: int, current_weights: Dict[str, int]) -> None:
@@ -326,6 +360,7 @@ def main() -> None:
     _render_quality(df, horizon, current_weights)
     _render_v92_field_diagnostics(df, horizon)
     _render_v99_night_field_diagnostics(df)
+    _render_v104_accuracy_diagnostics(df, horizon)
 
     perf_col = best_perf_col(df, horizon)
     if not perf_col:
@@ -333,6 +368,8 @@ def main() -> None:
 
     effect_df = calc_factor_effectiveness(df, horizon)
     weight_df = suggest_weights(effect_df, current_weights)
+    night_accuracy_bundle = calc_night_accuracy_bundle(df, horizon=horizon)
+    weight_df = apply_night_accuracy_feedback(weight_df, night_accuracy_bundle)
     bundle = calc_profile_bundle(df, horizons=(1, 3, 5, 10, 20), current_weights=current_weights)
     market_bundle = calc_market_bundles(df, horizon, current_weights)
     category_bundle = calc_category_bundles(df, horizon, current_weights)
@@ -341,10 +378,11 @@ def main() -> None:
 
     bundle["market_profiles"] = market_bundle
     bundle["category_profiles"] = category_bundle
+    bundle["night_accuracy_feedback"] = night_accuracy_bundle
     bundle["main_horizon"] = horizon
     bundle["main_weight_table"] = weight_df.to_dict(orient="records") if not weight_df.empty else []
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "總覽建議",
         "因子有效性",
         "短線/波段/趨勢",
@@ -352,6 +390,7 @@ def main() -> None:
         "類股分層",
         "機率/RR校正",
         "夜間隔日欄位",
+        "夜間準確率回饋",
         "輸出/套用",
     ])
 
@@ -449,6 +488,40 @@ def main() -> None:
         _render_v99_night_field_diagnostics(df)
 
     with tab8:
+        st.subheader("V104 夜間隔日股神準確率回饋")
+        st.caption("讀取 10_推薦清單 V101 命中追蹤與 8_股神推薦紀錄 V102/V103 績效欄位；本頁不連外、不重新抓 K 線。")
+        summary = night_accuracy_bundle.get("summary", {}) if isinstance(night_accuracy_bundle, dict) else {}
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("採用績效欄", summary.get("績效欄", "缺"))
+        c2.metric("進場命中", "—" if summary.get("進場點命中率%") is None else f"{summary.get('進場點命中率%')}%")
+        c3.metric("突破命中", "—" if summary.get("突破價命中率%") is None else f"{summary.get('突破價命中率%')}%")
+        c4.metric("壓力命中", "—" if summary.get("第一壓力命中率%") is None else f"{summary.get('第一壓力命中率%')}%")
+        c5.metric("停損觸發", "—" if summary.get("停損觸發率%") is None else f"{summary.get('停損觸發率%')}%")
+
+        base_stat = summary.get("績效統計", {}) if isinstance(summary.get("績效統計"), dict) else {}
+        st.markdown("#### 夜間績效統計")
+        st.dataframe(pd.DataFrame([base_stat]) if base_stat else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+        tables = night_accuracy_bundle.get("tables", {}) if isinstance(night_accuracy_bundle, dict) else {}
+        if not tables:
+            st.warning("尚無可分層的命中追蹤資料。請先到 10_推薦清單更新隔日命中追蹤。")
+        else:
+            for name, table in tables.items():
+                with st.expander(f"{name} 準確率分層", expanded=(name in ["進場型態_隔日", "隔日建議動作"])):
+                    if isinstance(table, pd.DataFrame) and not table.empty:
+                        st.dataframe(table, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("此分層目前樣本不足。")
+
+        weak = night_accuracy_bundle.get("weak", pd.DataFrame()) if isinstance(night_accuracy_bundle, dict) else pd.DataFrame()
+        st.markdown("#### 高分失敗 / 停損檢討清單")
+        if isinstance(weak, pd.DataFrame) and not weak.empty:
+            st.dataframe(weak, use_container_width=True, hide_index=True)
+            st.caption("用途：找出夜間高分但隔日表現不佳的樣本，避免後續權重過度偏向單一因子。")
+        else:
+            st.info("目前沒有足夠的高分失敗樣本，或尚未更新命中追蹤。")
+
+    with tab9:
         st.subheader("輸出與人工套用")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -459,7 +532,7 @@ def main() -> None:
             st.download_button(
                 "下載權重建議 JSON",
                 data=_json_download(bundle),
-                file_name=f"godpick_weight_suggestions_v66_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"godpick_weight_suggestions_v104_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
                 use_container_width=True,
             )
@@ -487,7 +560,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v99 Pro：此頁只做績效回測與建議權重；已同步夜間隔日股神欄位、大盤分層、上漲機率、R/R 與 v72 因子；不重跑推薦、不連外。")
+    st.caption("v104 Pro：此頁只做績效回測、命中追蹤與建議權重；已同步夜間隔日股神欄位、大盤分層、上漲機率、R/R、v72 因子與 V101/V102 命中追蹤；不重跑推薦、不連外。")
 
 
 if __name__ == "__main__":
