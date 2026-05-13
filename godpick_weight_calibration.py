@@ -192,11 +192,57 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _json_safe_value(obj: Any) -> Any:
+    """
+    v105：將 pandas / numpy / DataFrame / Series / Timestamp / NA 等不可直接 JSON 化物件
+    轉成可安全輸出的 Python 原生型別，避免 Streamlit Cloud 下載或寫檔時 TypeError。
+    """
+    try:
+        if obj is None:
+            return None
+        if obj is pd.NA:
+            return None
+        try:
+            if pd.isna(obj) and not isinstance(obj, (list, tuple, dict, pd.Series, pd.DataFrame)):
+                return None
+        except Exception:
+            pass
+        if isinstance(obj, pd.DataFrame):
+            return [_json_safe_value(x) for x in obj.to_dict(orient="records")]
+        if isinstance(obj, pd.Series):
+            return {str(k): _json_safe_value(v) for k, v in obj.to_dict().items()}
+        if isinstance(obj, pd.Index):
+            return [_json_safe_value(x) for x in obj.tolist()]
+        if isinstance(obj, (pd.Timestamp, datetime)):
+            try:
+                return obj.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(obj)
+        if isinstance(obj, dict):
+            return {str(_json_safe_value(k)): _json_safe_value(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [_json_safe_value(x) for x in obj]
+        if hasattr(obj, "item"):
+            try:
+                return _json_safe_value(obj.item())
+            except Exception:
+                pass
+        if isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None
+            return obj
+        if isinstance(obj, (str, int, bool)):
+            return obj
+        return str(obj)
+    except Exception:
+        return str(obj)
+
+
 def write_json(path: Path, data: Any) -> Tuple[bool, str]:
     try:
         tmp = path.with_suffix(path.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(_json_safe_value(data), f, ensure_ascii=False, indent=2)
         tmp.replace(path)
         return True, f"已寫入 {path}"
     except Exception as e:
@@ -1206,7 +1252,7 @@ def _write_settings_to_github(payload: Dict[str, Any]) -> Tuple[bool, str]:
             pass
         body: Dict[str, Any] = {
             "message": f"Update godpick_user_settings from weight calibration @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "content": base64.b64encode(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+            "content": base64.b64encode(json.dumps(_json_safe_value(payload), ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
             "branch": cfg["branch"],
         }
         if sha:
