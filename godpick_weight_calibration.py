@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """
 godpick_weight_calibration.py
-v99 Pro：夜間隔日股神欄位同步＋績效代理樣本＋多來源防卡＋防過擬合
+v104 Pro：夜間隔日準確率回饋＋績效代理樣本＋多來源防卡＋防過擬合
 
 設計原則：
 - 不連外，不重新推薦，只讀既有推薦紀錄 / 推薦清單。
@@ -93,10 +93,10 @@ for _factor_name, _cols in NIGHT_SCORE_COLUMNS.items():
             FACTOR_COLUMNS[_factor_name].insert(0, _col)
 
 PERF_COLUMNS: Dict[int, List[str]] = {
-    1: ["推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "目前損益幅%", "損益幅%", "實際報酬%"],
-    3: ["推薦後3日報酬%", "推薦後3日%", "3日報酬%", "3日漲跌%", "3日績效%", "3日後報酬%"],
-    5: ["推薦後5日報酬%", "推薦後5日%", "5日報酬%", "5日漲跌%", "5日績效%", "5日後報酬%"],
-    10: ["推薦後10日報酬%", "推薦後10日%", "10日報酬%", "10日漲跌%", "10日績效%", "10日後報酬%"],
+    1: ["隔日最高漲幅%", "推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "目前損益幅%", "損益幅%", "實際報酬%"],
+    3: ["3日最高漲幅%", "推薦後3日報酬%", "推薦後3日%", "3日報酬%", "3日漲跌%", "3日績效%", "3日後報酬%"],
+    5: ["5日最高漲幅%", "推薦後5日報酬%", "推薦後5日%", "5日報酬%", "5日漲跌%", "5日績效%", "5日後報酬%"],
+    10: ["10日最高漲幅%", "推薦後10日報酬%", "推薦後10日%", "10日報酬%", "10日漲跌%", "10日績效%", "10日後報酬%"],
     20: ["推薦後20日報酬%", "推薦後20日%", "20日報酬%", "20日漲跌%", "20日績效%", "20日後報酬%"],
 }
 
@@ -122,6 +122,29 @@ MARKET_RETURN_PROXY_COLUMNS = [
     "台指期漲跌幅%", "夜盤漲跌幅%", "night_futures_change_pct",
     "nasdaq_change_pct", "sox_change_pct", "sp500_change_pct",
 ]
+
+# v104：10_推薦清單 V101 與 8_股神推薦紀錄 V102/V103 產出的夜間隔日命中欄位。
+# 14 不連外、不重新抓 K 線，只讀這些欄位做準確率回饋與權重校正參考。
+NIGHT_HIT_COLUMNS: Dict[str, List[str]] = {
+    "進場點命中": ["進場點命中", "預估進場點命中"],
+    "突破價命中": ["突破價命中", "隔日突破價命中", "突破確認價命中"],
+    "停損觸發": ["停損價觸發", "隔日停損觸發", "停損觸發"],
+    "第一壓力命中": ["第一壓力命中", "壓力價命中"],
+}
+
+NIGHT_HIT_RETURN_COLUMNS: Dict[int, List[str]] = {
+    1: ["隔日最高漲幅%", "推薦後1日報酬%", "1日報酬%"],
+    3: ["3日最高漲幅%", "推薦後3日報酬%", "3日報酬%"],
+    5: ["5日最高漲幅%", "推薦後5日報酬%", "5日報酬%"],
+    10: ["10日最高漲幅%", "推薦後10日報酬%", "10日報酬%"],
+}
+
+NIGHT_DRAWDOWN_COLUMNS: Dict[int, List[str]] = {
+    1: ["隔日最低回撤%"],
+    3: ["3日最低回撤%"],
+    5: ["5日最低回撤%"],
+    10: ["10日最低回撤%"],
+}
 
 
 def safe_float(v: Any, default: Optional[float] = None) -> Optional[float]:
@@ -946,6 +969,188 @@ def rr_analysis(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _bool_hit_series(df: pd.DataFrame, candidates: Iterable[str]) -> Tuple[pd.Series, str]:
+    """把命中/觸發欄位轉成 0/1。可接受 True/False、是/否、命中/未命中。"""
+    col = first_existing_col(df, candidates)
+    if not col:
+        return pd.Series([math.nan] * len(df), index=df.index, dtype="float64"), ""
+    def conv(v: Any) -> Optional[float]:
+        if isinstance(v, bool):
+            return 1.0 if v else 0.0
+        s = safe_str(v)
+        if not s:
+            return None
+        if any(k in s for k in ["是", "Y", "y", "true", "True", "TRUE", "命中", "觸發", "達成", "到價"]):
+            if any(k in s for k in ["未命中", "未觸發", "未達", "沒有"]):
+                return 0.0
+            return 1.0
+        if any(k in s for k in ["否", "N", "n", "false", "False", "FALSE", "未", "無"]):
+            return 0.0
+        num = safe_float(v)
+        if num is not None:
+            return 1.0 if num > 0 else 0.0
+        return None
+    return pd.to_numeric(df[col].map(conv), errors="coerce"), col
+
+
+def _score_bucket_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(["缺欄"] * len(df), index=df.index, dtype="object")
+    s = numeric_series(df, col)
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None:
+            return "無資料"
+        if x >= 90:
+            return "90+"
+        if x >= 85:
+            return "85-89"
+        if x >= 80:
+            return "80-84"
+        if x >= 75:
+            return "75-79"
+        if x >= 70:
+            return "70-74"
+        return "<70"
+    return s.map(bucket)
+
+
+def _group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int = 5, min_n: int = 3) -> pd.DataFrame:
+    """依進場型態/建議動作/分數級距產生夜間隔日準確率。"""
+    if df is None or df.empty or group_col not in df.columns:
+        return pd.DataFrame()
+    ret_col = first_existing_col(df, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(df, horizon)
+    ret = numeric_series(df, ret_col) if ret_col else pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
+    entry_hit, entry_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["進場點命中"])
+    break_hit, break_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["突破價命中"])
+    stop_hit, stop_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["停損觸發"])
+    target_hit, target_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    work = pd.DataFrame({
+        "grp": df[group_col].map(lambda x: safe_str(x, "未分類")),
+        "ret": ret,
+        "entry": entry_hit,
+        "breakout": break_hit,
+        "stop": stop_hit,
+        "target": target_hit,
+    })
+    rows: List[dict] = []
+    for grp, g in work.groupby("grp", dropna=False):
+        if safe_str(grp) == "":
+            grp = "未分類"
+        n = int(len(g))
+        if n < min_n:
+            continue
+        stat = summarize_returns(g["ret"])
+        def hit_rate(c: str) -> Any:
+            s = pd.to_numeric(g[c], errors="coerce").dropna()
+            if s.empty:
+                return None
+            return round(float(s.mean() * 100), 2)
+        rows.append({
+            "分組欄位": group_col,
+            "分組": grp,
+            "樣本數": n,
+            "績效欄": ret_col or "缺績效欄",
+            "勝率%": stat.get("勝率%"),
+            "平均報酬%": stat.get("平均報酬%"),
+            "期望值%": stat.get("期望值%"),
+            "進場點命中率%": hit_rate("entry"),
+            "突破價命中率%": hit_rate("breakout"),
+            "第一壓力命中率%": hit_rate("target"),
+            "停損觸發率%": hit_rate("stop"),
+            "樣本信心": confidence_label(n),
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        sort_cols = [c for c in ["期望值%", "勝率%", "進場點命中率%"] if c in out.columns]
+        if sort_cols:
+            out = out.sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
+    return out
+
+
+def calc_night_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> Dict[str, Any]:
+    """v104：把 10/8 已產生的命中追蹤與 V102 準確率欄位轉成 14 可讀的校正包。"""
+    if df is None or df.empty:
+        return {"status": "empty", "message": "沒有推薦紀錄", "tables": {}, "summary": {}}
+    work = df.copy()
+    # 分數級距是衍生欄，不回寫檔案，只供本頁分層顯示。
+    for score_col, bucket_col in [("夜間股神總分", "夜間分數級距"), ("隔日進場分數", "隔日分數級距"), ("隔日實戰排序分", "實戰排序級距")]:
+        if score_col in work.columns and bucket_col not in work.columns:
+            work[bucket_col] = _score_bucket_series(work, score_col)
+
+    ret_col = first_existing_col(work, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(work, horizon)
+    ret = numeric_series(work, ret_col) if ret_col else pd.Series([math.nan] * len(work), index=work.index, dtype="float64")
+    base_stat = summarize_returns(ret)
+
+    entry_hit, entry_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["進場點命中"])
+    break_hit, break_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["突破價命中"])
+    stop_hit, stop_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["停損觸發"])
+    target_hit, target_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["第一壓力命中"])
+
+    def rate(s: pd.Series) -> Any:
+        v = pd.to_numeric(s, errors="coerce").dropna()
+        if v.empty:
+            return None
+        return round(float(v.mean() * 100), 2)
+
+    group_cols = [
+        "進場型態_隔日", "隔日建議動作", "夜間分數級距", "隔日分數級距", "實戰排序級距", "類別", "正式產業別"
+    ]
+    tables = {c: _group_accuracy_table(work, c, horizon=horizon) for c in group_cols if c in work.columns}
+
+    # 弱勢檢討：高分但績效/命中不佳，提供權重調整時參考。
+    weak = pd.DataFrame()
+    try:
+        night_score = numeric_series(work, "夜間股神總分") if "夜間股神總分" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
+        entry_score = numeric_series(work, "隔日進場分數") if "隔日進場分數" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
+        mask = ((night_score >= 80) | (entry_score >= 80)) & ((ret < 0) | (stop_hit == 1))
+        cols = [c for c in ["股票代號", "股票名稱", "推薦日期", "推薦時間", "夜間股神總分", "隔日進場分數", "進場型態_隔日", "隔日建議動作", ret_col, "停損價觸發", "作戰命中摘要", "風險說明"] if c and c in work.columns]
+        weak = work.loc[mask, cols].head(50).copy() if cols else pd.DataFrame()
+    except Exception:
+        weak = pd.DataFrame()
+
+    summary = {
+        "版本": "v104_night_accuracy_feedback",
+        "樣本數": int(len(work)),
+        "績效欄": ret_col or "缺績效欄",
+        "績效統計": base_stat,
+        "進場點命中欄": entry_col or "缺欄",
+        "突破價命中欄": break_col or "缺欄",
+        "停損觸發欄": stop_col or "缺欄",
+        "第一壓力命中欄": target_col or "缺欄",
+        "進場點命中率%": rate(entry_hit),
+        "突破價命中率%": rate(break_hit),
+        "第一壓力命中率%": rate(target_hit),
+        "停損觸發率%": rate(stop_hit),
+        "弱勢檢討筆數": int(len(weak)),
+    }
+    return {"status": "ok", "summary": summary, "tables": tables, "weak": weak}
+
+
+def apply_night_accuracy_feedback(weight_df: pd.DataFrame, accuracy_bundle: Dict[str, Any]) -> pd.DataFrame:
+    """v104：用命中率/停損率產生權重建議旁註。為避免過擬合，不直接大幅改權重。"""
+    if weight_df is None or weight_df.empty or not isinstance(accuracy_bundle, dict):
+        return weight_df
+    out = weight_df.copy()
+    summary = accuracy_bundle.get("summary", {}) if isinstance(accuracy_bundle.get("summary"), dict) else {}
+    entry_rate = safe_float(summary.get("進場點命中率%"))
+    breakout_rate = safe_float(summary.get("突破價命中率%"))
+    stop_rate = safe_float(summary.get("停損觸發率%"))
+    weak_n = int(safe_float(summary.get("弱勢檢討筆數"), 0) or 0)
+    notes: List[str] = []
+    if entry_rate is not None and entry_rate >= 60:
+        notes.append("進場點命中率佳，交易可行/起漲前兆可維持或小幅加權")
+    if breakout_rate is not None and breakout_rate >= 55:
+        notes.append("突破價命中率佳，型態突破因子有效")
+    if stop_rate is not None and stop_rate >= 35:
+        notes.append("停損觸發率偏高，交易可行與爆發力需保守")
+    if weak_n >= 10:
+        notes.append("高分失敗樣本偏多，避免一次大幅提高單一因子")
+    note_text = "；".join(notes) if notes else "命中追蹤樣本仍在累積，暫不額外調權"
+    out["v104命中追蹤回饋"] = note_text
+    return out
+
+
 
 # >>> V96_WEIGHT_APPLY_GITHUB_SYNC_FIX
 def _github_weight_cfg() -> Dict[str, str]:
@@ -1042,7 +1247,7 @@ def save_applied_weights(weights: Dict[str, int], profile_name: str = "manual") 
         "score_weights": applied,
         "weight_source": "14_股神權重校正",
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "godpick_v99_night_weight_calibration_sync",
+        "version": "godpick_v104_night_accuracy_feedback_sync",
         "last_weight_calibration_profile": profile_name,
     }
     local_ok, local_msg = write_json(SETTINGS_FILE, payload)
