@@ -92,6 +92,36 @@ for _factor_name, _cols in NIGHT_SCORE_COLUMNS.items():
         if _col not in FACTOR_COLUMNS[_factor_name]:
             FACTOR_COLUMNS[_factor_name].insert(0, _col)
 
+# v111：官方因子快取欄位納入 14 權重校正。
+# 來源為 16_官方因子快取中心產生、07/10/8 保存的 official_factors_cache.json 欄位；
+# 14 只讀既有紀錄，不連外、不即時抓官方網站。
+OFFICIAL_SCORE_COLUMNS: Dict[str, List[str]] = {
+    "起漲前兆": ["官方基本面成長分數", "營收成長官方分數", "EPS成長分數", "月營收YoY%", "累計營收YoY%"],
+    "自動因子": ["官方因子總分", "官方資料完整度"],
+    "交易可行": ["官方估值風險分數", "PER本益比", "PBR股價淨值比", "股利殖利率%"],
+    "爆發力": ["法人籌碼官方分數", "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數"],
+}
+
+OFFICIAL_GROUP_COLUMNS: List[str] = [
+    "官方因子資料狀態", "官方資料狀態", "官方資料完整度級距", "官方因子級距",
+    "法人官方級距", "營收官方級距", "EPS官方級距", "估值官方級距", "PER級距",
+    "正式產業別", "類別",
+]
+
+OFFICIAL_DISPLAY_COLUMNS: List[str] = [
+    "股票代號", "股票名稱", "推薦日期", "推薦時間",
+    "官方因子總分", "官方資料完整度", "官方因子資料狀態",
+    "法人籌碼官方分數", "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
+    "月營收YoY%", "月營收MoM%", "累計營收YoY%", "營收成長官方分數",
+    "EPS成長分數", "官方基本面成長分數", "PER本益比", "PBR股價淨值比", "估算EPS", "官方估值風險分數",
+]
+
+for _factor_name, _cols in OFFICIAL_SCORE_COLUMNS.items():
+    FACTOR_COLUMNS.setdefault(_factor_name, [])
+    for _col in reversed(_cols):
+        if _col not in FACTOR_COLUMNS[_factor_name]:
+            FACTOR_COLUMNS[_factor_name].insert(0, _col)
+
 PERF_COLUMNS: Dict[int, List[str]] = {
     1: ["隔日最高漲幅%", "推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "目前損益幅%", "損益幅%", "實際報酬%"],
     3: ["3日最高漲幅%", "推薦後3日報酬%", "推薦後3日%", "3日報酬%", "3日漲跌%", "3日績效%", "3日後報酬%"],
@@ -1196,6 +1226,218 @@ def apply_night_accuracy_feedback(weight_df: pd.DataFrame, accuracy_bundle: Dict
     out["v104命中追蹤回饋"] = note_text
     return out
 
+
+
+def _numeric_bucket_series(df: pd.DataFrame, col: str, buckets: Optional[List[Tuple[float, str]]] = None) -> pd.Series:
+    """v111：一般數值級距，供官方因子/PER 分層用。"""
+    if df is None or df.empty or col not in df.columns:
+        return pd.Series(["缺欄"] * (0 if df is None else len(df)), index=(None if df is None else df.index), dtype="object")
+    s = numeric_series(df, col)
+    default_buckets = buckets or [(90, "90+"), (80, "80-89"), (70, "70-79"), (60, "60-69"), (40, "40-59")]
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None:
+            return "無資料"
+        for threshold, label in default_buckets:
+            if x >= threshold:
+                return label
+        return f"<{default_buckets[-1][0]:g}"
+    return s.map(bucket)
+
+
+def _per_bucket_series(df: pd.DataFrame, col: str = "PER本益比") -> pd.Series:
+    if df is None or df.empty or col not in df.columns:
+        return pd.Series(["缺欄"] * (0 if df is None else len(df)), index=(None if df is None else df.index), dtype="object")
+    s = numeric_series(df, col)
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None or x <= 0:
+            return "無資料/虧損"
+        if x < 10:
+            return "PER<10"
+        if x < 15:
+            return "PER10-15"
+        if x < 20:
+            return "PER15-20"
+        if x < 30:
+            return "PER20-30"
+        if x < 50:
+            return "PER30-50"
+        return "PER50+"
+    return s.map(bucket)
+
+
+def _official_group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int = 5, min_n: int = 3) -> pd.DataFrame:
+    """v111：官方因子分層命中/績效表。"""
+    if df is None or df.empty or group_col not in df.columns:
+        return pd.DataFrame()
+    ret_col = first_existing_col(df, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(df, horizon)
+    ret = numeric_series(df, ret_col) if ret_col else pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
+    entry_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["進場點命中"])
+    break_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["突破價命中"])
+    stop_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["停損觸發"])
+    target_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    work = pd.DataFrame({
+        "grp": df[group_col].map(lambda x: safe_str(x, "未分類")),
+        "ret": ret,
+        "entry": entry_hit,
+        "breakout": break_hit,
+        "stop": stop_hit,
+        "target": target_hit,
+    })
+    rows: List[dict] = []
+    for grp, g in work.groupby("grp", dropna=False):
+        n = int(len(g))
+        if n < min_n:
+            continue
+        stat = summarize_returns(g["ret"])
+        def rate(c: str) -> Any:
+            ss = pd.to_numeric(g[c], errors="coerce").dropna()
+            if ss.empty:
+                return None
+            return round(float(ss.mean() * 100), 2)
+        rows.append({
+            "分組欄位": group_col,
+            "分組": grp if safe_str(grp) else "未分類",
+            "樣本數": n,
+            "績效欄": ret_col or "缺績效欄",
+            "勝率%": stat.get("勝率%"),
+            "平均報酬%": stat.get("平均報酬%"),
+            "期望值%": stat.get("期望值%"),
+            "進場點命中率%": rate("entry"),
+            "突破價命中率%": rate("breakout"),
+            "第一壓力命中率%": rate("target"),
+            "停損觸發率%": rate("stop"),
+            "樣本信心": confidence_label(n),
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        sort_cols = [c for c in ["期望值%", "勝率%", "進場點命中率%"] if c in out.columns]
+        if sort_cols:
+            out = out.sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
+    return out
+
+
+def calc_official_factor_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> Dict[str, Any]:
+    """v111：官方法人/營收/EPS/PER 因子準確率分析包。"""
+    if df is None or df.empty:
+        return {"status": "empty", "message": "沒有推薦紀錄", "tables": {}, "summary": {}}
+    work = df.copy()
+
+    # 衍生級距欄位只供本頁分析，不回寫資料檔。
+    bucket_specs = [
+        ("官方因子總分", "官方因子級距"),
+        ("官方資料完整度", "官方資料完整度級距"),
+        ("法人籌碼官方分數", "法人官方級距"),
+        ("營收成長官方分數", "營收官方級距"),
+        ("EPS成長分數", "EPS官方級距"),
+        ("官方估值風險分數", "估值官方級距"),
+    ]
+    for src, dst in bucket_specs:
+        if src in work.columns and dst not in work.columns:
+            work[dst] = _numeric_bucket_series(work, src)
+    if "PER本益比" in work.columns and "PER級距" not in work.columns:
+        work["PER級距"] = _per_bucket_series(work, "PER本益比")
+
+    ret_col = first_existing_col(work, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(work, horizon)
+    ret = numeric_series(work, ret_col) if ret_col else pd.Series([math.nan] * len(work), index=work.index, dtype="float64")
+    base_stat = summarize_returns(ret)
+    completeness = numeric_series(work, "官方資料完整度") if "官方資料完整度" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
+    official_score = numeric_series(work, "官方因子總分") if "官方因子總分" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
+
+    usable_mask = completeness >= 60
+    high_mask = (completeness >= 60) & (official_score >= 70)
+    low_mask = (completeness >= 60) & (official_score < 50)
+
+    entry_hit, entry_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["進場點命中"])
+    break_hit, break_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["突破價命中"])
+    stop_hit, stop_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["停損觸發"])
+    target_hit, target_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["第一壓力命中"])
+
+    tables = {c: _official_group_accuracy_table(work, c, horizon=horizon) for c in OFFICIAL_GROUP_COLUMNS if c in work.columns}
+
+    def _stat_for(mask: pd.Series) -> Dict[str, Any]:
+        try:
+            return summarize_returns(ret.loc[mask.fillna(False)])
+        except Exception:
+            return {"樣本數": 0}
+
+    def _rate(s: pd.Series, mask: Optional[pd.Series] = None) -> Any:
+        try:
+            vv = pd.to_numeric(s.loc[mask.fillna(False)] if mask is not None else s, errors="coerce").dropna()
+            if vv.empty:
+                return None
+            return round(float(vv.mean() * 100), 2)
+        except Exception:
+            return None
+
+    high_fail = pd.DataFrame()
+    low_success = pd.DataFrame()
+    try:
+        fail_mask = high_mask & ((ret < 0) | (stop_hit == 1))
+        success_mask = low_mask & (ret >= 3)
+        cols = [c for c in OFFICIAL_DISPLAY_COLUMNS + [ret_col, "停損價觸發", "進場型態_隔日", "隔日建議動作", "作戰命中摘要", "風險說明"] if c and c in work.columns]
+        high_fail = work.loc[fail_mask, cols].head(50).copy() if cols else pd.DataFrame()
+        low_success = work.loc[success_mask, cols].head(50).copy() if cols else pd.DataFrame()
+    except Exception:
+        high_fail = pd.DataFrame()
+        low_success = pd.DataFrame()
+
+    summary = {
+        "版本": "v111_official_factor_accuracy_feedback",
+        "樣本數": int(len(work)),
+        "績效欄": ret_col or "缺績效欄",
+        "績效統計": base_stat,
+        "官方可用樣本": int(usable_mask.fillna(False).sum()),
+        "官方高分樣本": int(high_mask.fillna(False).sum()),
+        "官方低分樣本": int(low_mask.fillna(False).sum()),
+        "平均官方因子總分": round(float(pd.to_numeric(official_score, errors="coerce").dropna().mean()), 2) if pd.to_numeric(official_score, errors="coerce").dropna().size else None,
+        "平均官方完整度": round(float(pd.to_numeric(completeness, errors="coerce").dropna().mean()), 2) if pd.to_numeric(completeness, errors="coerce").dropna().size else None,
+        "官方可用績效": _stat_for(usable_mask),
+        "官方高分績效": _stat_for(high_mask),
+        "官方低分績效": _stat_for(low_mask),
+        "進場點命中欄": entry_col or "缺欄",
+        "突破價命中欄": break_col or "缺欄",
+        "停損觸發欄": stop_col or "缺欄",
+        "第一壓力命中欄": target_col or "缺欄",
+        "官方可用進場點命中率%": _rate(entry_hit, usable_mask),
+        "官方可用突破價命中率%": _rate(break_hit, usable_mask),
+        "官方可用第一壓力命中率%": _rate(target_hit, usable_mask),
+        "官方可用停損觸發率%": _rate(stop_hit, usable_mask),
+        "官方高分失敗筆數": int(len(high_fail)),
+        "官方低分成功筆數": int(len(low_success)),
+    }
+    return {"status": "ok", "summary": summary, "tables": tables, "high_fail": high_fail, "low_success": low_success}
+
+
+def apply_official_factor_feedback(weight_df: pd.DataFrame, official_bundle: Dict[str, Any]) -> pd.DataFrame:
+    """v111：官方因子命中回饋。保守處理，只加註建議，不直接大幅改權重。"""
+    if weight_df is None or weight_df.empty or not isinstance(official_bundle, dict):
+        return weight_df
+    out = weight_df.copy()
+    summary = official_bundle.get("summary", {}) if isinstance(official_bundle.get("summary"), dict) else {}
+    usable = int(safe_float(summary.get("官方可用樣本"), 0) or 0)
+    high_stat = summary.get("官方高分績效", {}) if isinstance(summary.get("官方高分績效"), dict) else {}
+    low_stat = summary.get("官方低分績效", {}) if isinstance(summary.get("官方低分績效"), dict) else {}
+    high_expect = safe_float(high_stat.get("期望值%"))
+    low_expect = safe_float(low_stat.get("期望值%"))
+    stop_rate = safe_float(summary.get("官方可用停損觸發率%"))
+    high_fail = int(safe_float(summary.get("官方高分失敗筆數"), 0) or 0)
+    notes: List[str] = []
+    if usable < 30:
+        notes.append("官方因子可用樣本仍少，先觀察不大幅調權")
+    else:
+        if high_expect is not None and low_expect is not None and high_expect > low_expect:
+            notes.append("官方高分績效優於低分，法人/基本面/估值因子可納入加權參考")
+        if high_expect is not None and high_expect <= 0:
+            notes.append("官方高分期望值未轉正，避免過度提高基本面或籌碼權重")
+        if stop_rate is not None and stop_rate >= 35:
+            notes.append("官方可用樣本停損偏高，估值風險與交易可行需保守")
+        if high_fail >= 10:
+            notes.append("官方高分失敗樣本偏多，需檢查是否追高或產業輪動失真")
+    note_text = "；".join(notes) if notes else "官方因子樣本正常累積中，暫不額外調權"
+    out["v111官方因子回饋"] = note_text
+    return out
 
 
 # >>> V96_WEIGHT_APPLY_GITHUB_SYNC_FIX
