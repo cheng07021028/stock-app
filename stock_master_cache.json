@@ -32354,6 +32354,20 @@
     "待修原因": ""
   },
   {
+    "code": "7918",
+    "name": "創鉅材料",
+    "market": "興櫃",
+    "official_industry_raw": "24",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "半導體業",
+    "theme_category": "半導體業",
+    "category": "半導體業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "8058",
     "name": "耐特",
     "market": "興櫃",
