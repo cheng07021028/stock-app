@@ -1,0 +1,42 @@
+name: V112 Update Official Factors Cache
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Taiwan 23:00 = UTC 15:00. Monday-Friday by default.
+    - cron: "0 15 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  update-official-factors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Update official factors cache
+        run: python tools/update_official_factors_scheduled.py
+
+      - name: Commit official factors cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add official_factors_cache.json official_factors_update_log.json data/config/official_factor_schedule_settings.json || true
+          if git diff --cached --quiet; then
+            echo "No official factor cache changes to commit."
+          else
+            git commit -m "V112 scheduled update official factors cache"
+            git push
+          fi
