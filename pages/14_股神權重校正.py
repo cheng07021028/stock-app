@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v94 Pro', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v99 夜間隔日同步版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -69,7 +69,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v94_perf_tracking_fallback_fix"
+APP_VERSION = "v99_night_battle_weight_sync"
 
 
 
@@ -221,6 +221,43 @@ def _render_v92_field_diagnostics(df: pd.DataFrame, horizon: int) -> None:
     except Exception as e:
         st.caption(f"欄位診斷略過：{e}")
 
+
+
+def _render_v99_night_field_diagnostics(df: pd.DataFrame) -> None:
+    """顯示夜間隔日股神欄位是否已進入 14 權重校正資料池。"""
+    try:
+        night_cols = [
+            "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+            "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "營收成長分數",
+            "EPS成長分數", "估值風險分數", "進場型態_隔日", "隔日建議動作",
+            "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日",
+            "第一壓力價", "夜間股神建議", "隔日作戰策略", "資料完整度",
+        ]
+        rows = []
+        for c in night_cols:
+            exists = c in df.columns
+            valid = 0
+            if exists:
+                try:
+                    valid = int(df[c].notna().sum())
+                except Exception:
+                    valid = 0
+            rows.append({"夜間欄位": c, "是否存在": "有" if exists else "缺", "有效筆數": valid})
+        exists_n = sum(1 for r in rows if r["是否存在"] == "有")
+        score_n = sum(1 for c in ["夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數"] if c in df.columns)
+        with st.expander("v99 夜間隔日欄位同步檢查", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("夜間欄位存在", f"{exists_n}/{len(night_cols)}")
+            c2.metric("核心分數欄", f"{score_n}/4")
+            c3.metric("資料來源筆數", f"{len(df):,}")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            if score_n >= 2:
+                st.success("夜間隔日股神分數已納入權重校正資料池，可用來產生 07 權重建議。")
+            else:
+                st.warning("目前夜間核心分數欄不足；可先回 07 重新推薦，或從 10/8 累積夜間欄位資料後再校正。")
+    except Exception as e:
+        st.caption(f"夜間欄位診斷略過：{e}")
+
 def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
     if table is None or table.empty:
         return DEFAULT_WEIGHTS.copy()
@@ -228,9 +265,9 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v93 Pro 大盤分層修正版")
-    st.caption("績效回測＋期望值＋分層權重＋防過擬合。修正多頭/空頭樣本為 0 時的誤判，加入全市場保底與分層來源診斷；不連外、不重跑推薦。")
-    st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；單次調整設上限，避免短期過擬合。")
+    st.title("14_股神權重校正｜v99 夜間隔日同步版")
+    st.caption("績效回測＋期望值＋分層權重＋防過擬合；已同步 07/08/10 夜間隔日股神欄位，不連外、不重跑推薦。")
+    st.info("核心邏輯：不只看勝率，也看平均報酬、平均虧損、期望值、樣本數、資料覆蓋率；夜間欄位會被併入原本 8 大權重因子，套用後 07 可直接讀取，不需要新增不相容權重名稱。")
 
 
 def _render_quality(df: pd.DataFrame, horizon: int, current_weights: Dict[str, int]) -> None:
@@ -288,6 +325,7 @@ def main() -> None:
 
     _render_quality(df, horizon, current_weights)
     _render_v92_field_diagnostics(df, horizon)
+    _render_v99_night_field_diagnostics(df)
 
     perf_col = best_perf_col(df, horizon)
     if not perf_col:
@@ -306,13 +344,14 @@ def main() -> None:
     bundle["main_horizon"] = horizon
     bundle["main_weight_table"] = weight_df.to_dict(orient="records") if not weight_df.empty else []
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "總覽建議",
         "因子有效性",
         "短線/波段/趨勢",
         "大盤分層",
         "類股分層",
         "機率/RR校正",
+        "夜間隔日欄位",
         "輸出/套用",
     ])
 
@@ -396,6 +435,20 @@ def main() -> None:
                 st.dataframe(rr_df, use_container_width=True, hide_index=True)
 
     with tab7:
+        st.subheader("夜間隔日股神欄位校正來源")
+        st.caption("這裡只顯示 07/08/10 新增夜間欄位如何進入原本 8 大權重。實際套用仍寫回原權重名稱，避免 07 頁不相容。")
+        mapping_rows = [
+            {"07 權重因子": "技術結構", "夜間來源": "技術趨勢分數 / 夜間股神總分", "用途": "判斷結構是否轉強"},
+            {"07 權重因子": "起漲前兆", "夜間來源": "隔日進場分數 / 波段潛力 / 營收與 EPS 成長", "用途": "校正剛起漲與隔日機會"},
+            {"07 權重因子": "自動因子", "夜間來源": "夜間股神總分 / 隔日實戰排序分", "用途": "校正整體夜間股神排序"},
+            {"07 權重因子": "交易可行", "夜間來源": "隔日進場分數 / 估值風險 / R/R", "用途": "校正是否能實戰進場"},
+            {"07 權重因子": "爆發力", "夜間來源": "量價動能 / 法人籌碼 / 大戶鎖碼", "用途": "校正資金推升力"},
+            {"07 權重因子": "型態突破", "夜間來源": "進場型態_隔日 / 隔日作戰策略", "用途": "校正突破或回測型態"},
+        ]
+        st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+        _render_v99_night_field_diagnostics(df)
+
+    with tab8:
         st.subheader("輸出與人工套用")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -434,7 +487,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v93 Pro：此頁只做績效回測與建議權重，會自動補齊大盤分層、上漲機率、R/R 與 v72 因子欄位；大盤分層新增全市場保底與分層來源診斷；不重跑推薦、不連外。")
+    st.caption("v99 Pro：此頁只做績效回測與建議權重；已同步夜間隔日股神欄位、大盤分層、上漲機率、R/R 與 v72 因子；不重跑推薦、不連外。")
 
 
 if __name__ == "__main__":
