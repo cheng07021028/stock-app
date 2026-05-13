@@ -2311,6 +2311,55 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     return x
 
 
+def _recalc_night_strategy_after_macro_v100(df: pd.DataFrame | None) -> pd.DataFrame:
+    """V100：大盤橋接欄位寫入後，重新計算夜間隔日股神欄位。
+
+    V90~V99 的夜間分數會讀取「大盤橋接分數」，但 07 原流程是先算夜間欄位、
+    再補大盤橋接欄位，導致夜間隔日分數可能只吃到預設 50 分。
+    這裡只在大盤欄位補齊後快速重算夜間層，不改原推薦總分、不刪股票。
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    try:
+        if callable(enrich_night_strategy):
+            out = enrich_night_strategy(out)
+            if "資料完整度" in out.columns:
+                try:
+                    macro_state = out.get("大盤橋接狀態", "")
+                    macro_score = out.get("大盤橋接分數", "")
+                    has_macro = pd.Series(macro_state, index=out.index).astype(str).str.strip().ne("") | pd.Series(macro_score, index=out.index).astype(str).str.strip().ne("")
+                except Exception:
+                    has_macro = pd.Series([True] * len(out), index=out.index)
+                try:
+                    base = out["資料完整度"].astype(str)
+                    suffix = "｜已套用大盤橋接重算夜間分數"
+                    mask = has_macro & ~base.str.contains("大盤橋接重算", na=False)
+                    out.loc[mask, "資料完整度"] = base[mask].map(lambda s: (s if s and s != "nan" else "夜間資料") + suffix)
+                except Exception:
+                    pass
+        else:
+            for c in list(GODPICK_NIGHT_COLUMNS or []):
+                if c not in out.columns:
+                    out[c] = ""
+            if "資料完整度" not in out.columns:
+                out["資料完整度"] = "夜間策略模組未載入"
+    except Exception as e:
+        for c in list(GODPICK_NIGHT_COLUMNS or []):
+            if c not in out.columns:
+                out[c] = ""
+        if "資料完整度" not in out.columns:
+            out["資料完整度"] = ""
+        try:
+            msg = f"大盤橋接後夜間重算失敗：{e}"
+            out["資料完整度"] = out["資料完整度"].astype(str).map(lambda s: (s if s and s != "nan" else "") + ("｜" if s and s != "nan" else "") + msg)
+        except Exception:
+            pass
+    return out
+
+
 def _derive_buy_point_grade(row: pd.Series) -> str:
     score = _safe_float(row.get("推薦總分"), 0) or 0
     pre = _safe_float(row.get("起漲前兆分數"), 0) or 0
@@ -9205,6 +9254,9 @@ def main():
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
         rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
         hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
+        # V100：大盤橋接欄位補上後，重新計算夜間隔日策略，讓隔日進場分數真正吃到大盤風控。
+        rec_df = _recalc_night_strategy_after_macro_v100(rec_df)
+        hot_pick_df = _recalc_night_strategy_after_macro_v100(hot_pick_df)
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
@@ -9212,6 +9264,9 @@ def main():
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
         rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
         hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
+        # V100：舊 session_state / 舊快取資料載入後，也重新同步夜間隔日策略與大盤風控。
+        rec_df = _recalc_night_strategy_after_macro_v100(rec_df)
+        hot_pick_df = _recalc_night_strategy_after_macro_v100(hot_pick_df)
 
     # v26 欄位統一：推薦結果進入畫面/匯出/寫入前先標準化，確保 7/8/10/12 欄位一致。
     try:
