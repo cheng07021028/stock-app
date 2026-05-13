@@ -79,8 +79,36 @@ except Exception:
         return pd.DataFrame()
 
 PAGE_TITLE = "推薦清單"
-PERF_TRACKING_VERSION = "v99_main_button_formal_backfill_fix"
+PERF_TRACKING_VERSION = "v100_night_battle_list_sync_v94"
 PFX = "godpick_list_"
+NIGHT_BATTLE_LIST_VERSION = "V94_20260513_night_battle_list_sync"
+
+# V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
+# 不重算 07 推薦核心，避免拖慢頁面。
+NIGHT_GODPICK_COLUMNS = [
+    "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+    "技術趨勢分數", "量價動能分數", "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數",
+    "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "估算EPS",
+    "外資近1日買賣超", "投信近1日買賣超", "自營商近1日買賣超", "三大法人近1日合計", "法人買超占量比%",
+    "法人連買推估", "籌碼資料來源", "籌碼資料日期", "基本面資料來源", "基本面資料日期", "資料完整度",
+    "進場型態_隔日", "隔日建議動作", "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日",
+    "第一壓力價", "觀察週期", "夜間股神建議", "隔日作戰策略", "進場條件說明", "不追高條件", "夜間風險提醒",
+]
+
+NIGHT_BATTLE_DISPLAY_COLUMNS = [
+    "推薦日期", "推薦時間", "股票代號", "股票名稱", "類別", "推薦總分",
+    "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+    "進場型態_隔日", "隔日建議動作", "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價",
+    "夜間股神建議", "隔日作戰策略", "資料完整度", "最新價", "目前狀態",
+]
+
+NIGHT_NUMERIC_COLUMNS = [
+    "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+    "技術趨勢分數", "量價動能分數", "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數",
+    "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "估算EPS",
+    "外資近1日買賣超", "投信近1日買賣超", "自營商近1日買賣超", "三大法人近1日合計", "法人買超占量比%",
+    "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價",
+]
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "recommend_list_v53_perf_guard_20260429"
 DUPLICATE_COLUMN_FIX_VERSION = "recommend_list_duplicate_column_fix_v1_20260427"
@@ -249,6 +277,14 @@ def _k(key: str) -> str:
 try:
     if UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
         GODPICK_RECORD_COLUMNS = shared_dedupe_keep_order((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)) if shared_dedupe_keep_order else list(dict.fromkeys((GODPICK_RECORD_COLUMNS or []) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS)))
+except Exception:
+    pass
+
+# V94：在 main() 執行前即補入夜間隔日欄位，避免舊推薦清單 / 舊快取缺欄導致 KeyError。
+try:
+    for _c in NIGHT_GODPICK_COLUMNS:
+        if _c not in GODPICK_RECORD_COLUMNS:
+            GODPICK_RECORD_COLUMNS.append(_c)
 except Exception:
     pass
 
@@ -729,6 +765,163 @@ def _backfill_v10_columns(df: pd.DataFrame) -> pd.DataFrame:
     return x
 
 
+def _first_available_value(row: Any, cols: list[str], default: Any = "") -> Any:
+    for c in cols:
+        try:
+            if c in row.index:
+                v = row.get(c)
+            elif isinstance(row, dict):
+                v = row.get(c)
+            else:
+                continue
+            if not _is_blank_value(v):
+                return v
+        except Exception:
+            continue
+    return default
+
+
+def _classify_night_action(row: pd.Series) -> str:
+    """V94：推薦清單端只做安全補字串，不取代 07 的核心策略判斷。"""
+    direct = _first_available_value(row, ["隔日建議動作", "股神建議動作", "建議動作", "今日操作建議"], "")
+    if not _is_blank_value(direct):
+        return str(direct)
+    entry = _safe_float(_first_available_value(row, ["隔日進場分數", "交易可行分數", "進場時機分數"], None), None)
+    nscore = _safe_float(_first_available_value(row, ["夜間股神總分", "隔日實戰排序分", "推薦總分", "推薦分數"], None), None)
+    risk = str(_first_available_value(row, ["追高風險等級", "單檔風險等級", "夜間風險提醒", "風險說明"], ""))
+    if entry is not None and entry >= 82:
+        return "隔日高度關注，符合條件可分批"
+    if entry is not None and entry >= 72:
+        return "等待突破或回測確認"
+    if nscore is not None and nscore >= 80:
+        return "列入觀察，不追高"
+    if "高" in risk or "過熱" in risk:
+        return "風險偏高，等拉回"
+    return "觀察"
+
+
+def _classify_night_pattern(row: pd.Series) -> str:
+    direct = _first_available_value(row, ["進場型態_隔日", "進場型態", "機會型態", "推薦型態"], "")
+    if not _is_blank_value(direct):
+        return str(direct)
+    entry = _safe_float(_first_available_value(row, ["隔日進場分數", "交易可行分數", "進場時機分數"], None), None)
+    pull = _safe_float(_first_available_value(row, ["拉回承接分數", "支撐回測分數"], None), None)
+    pre = _safe_float(_first_available_value(row, ["起漲前兆分數", "飆股起漲分數", "機會股分數"], None), None)
+    if entry is not None and entry >= 82:
+        return "隔日突破型"
+    if pull is not None and pull >= 70:
+        return "回測承接型"
+    if pre is not None and pre >= 70:
+        return "剛起漲型"
+    return "夜間觀察型"
+
+
+def _backfill_night_battle_columns(x: pd.DataFrame) -> pd.DataFrame:
+    """V94：讓 10_推薦清單完整承接 07 夜間隔日股神欄位。"""
+    if x is None:
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+    x = x.copy()
+    x = x.loc[:, ~x.columns.duplicated()].copy()
+    for c in NIGHT_GODPICK_COLUMNS:
+        if c not in x.columns:
+            x[c] = None
+
+    # 分數欄位相容舊資料：舊推薦只有推薦總分時，至少讓夜間追蹤表可排序與顯示。
+    alias_pairs = {
+        "夜間股神總分": ["隔日實戰排序分", "股神決策分數", "推薦總分", "推薦分數"],
+        "隔日實戰排序分": ["夜間股神總分", "股神決策分數", "推薦總分", "推薦分數"],
+        "隔日進場分數": ["交易可行分數", "進場時機分數", "股神決策分數", "推薦總分"],
+        "波段潛力分數": ["起漲前兆分數", "技術結構分數", "飆股起漲分數", "推薦總分"],
+        "技術趨勢分數": ["技術結構分數", "型態突破分數", "推薦總分"],
+        "量價動能分數": ["起漲前兆分數", "量能訊號", "推薦總分"],
+        "預估進場點": ["股神進場區間", "建議切入區", "操作區間", "推薦價格", "推薦日價格", "最新價"],
+        "回測承接價": ["推薦買點_拉回", "近端支撐", "主要支撐", "推薦價格"],
+        "突破確認價_隔日": ["突破確認價", "推薦買點_突破", "近端壓力"],
+        "停損價_隔日": ["停損價", "停損參考", "失效價位"],
+        "第一壓力價": ["近端壓力", "賣出目標1", "突破確認價"],
+        "夜間股神建議": ["股神進場建議", "股神建議動作", "今日操作建議", "建議動作"],
+        "隔日作戰策略": ["最佳操作劇本", "隔日操作建議", "決策說明", "股神推論邏輯"],
+        "夜間風險提醒": ["風險說明", "風險扣分原因", "不建議買進原因"],
+        "資料完整度": ["資料完整度", "大盤資料品質", "隔夜資料品質"],
+    }
+    for target, sources in alias_pairs.items():
+        if target not in x.columns:
+            x[target] = None
+        srcs = [c for c in sources if c in x.columns and c != target]
+        if not srcs:
+            continue
+        mask = x[target].map(_is_blank_value)
+        if mask.any():
+            def _pick(row):
+                return _first_available_value(row, srcs, row.get(target, ""))
+            x.loc[mask, target] = x.loc[mask].apply(_pick, axis=1)
+
+    if "進場型態_隔日" in x.columns:
+        mask = x["進場型態_隔日"].map(_is_blank_value)
+        if mask.any():
+            x.loc[mask, "進場型態_隔日"] = x.loc[mask].apply(_classify_night_pattern, axis=1)
+    if "隔日建議動作" in x.columns:
+        mask = x["隔日建議動作"].map(_is_blank_value)
+        if mask.any():
+            x.loc[mask, "隔日建議動作"] = x.loc[mask].apply(_classify_night_action, axis=1)
+    if "資料完整度" in x.columns:
+        mask = x["資料完整度"].map(_is_blank_value)
+        if mask.any():
+            x.loc[mask, "資料完整度"] = "舊資料相容補欄"
+
+    for c in NIGHT_NUMERIC_COLUMNS:
+        if c in x.columns:
+            # 價格區間字串不要硬轉掉；只有純數字欄位轉數值。
+            if c in {"預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價"}:
+                continue
+            x[c] = pd.to_numeric(x[c], errors="coerce")
+    return x
+
+
+def _render_night_battle_tracker(filtered_df: pd.DataFrame) -> None:
+    """V94：10_推薦清單新增夜間隔日作戰追蹤區，不影響主表欄位管理。"""
+    render_pro_section("夜間隔日作戰追蹤｜承接 07 股神推薦")
+    if filtered_df is None or filtered_df.empty:
+        st.info("目前篩選條件下沒有資料可追蹤。")
+        return
+    x = _backfill_night_battle_columns(filtered_df)
+    score = pd.to_numeric(x.get("隔日實戰排序分"), errors="coerce")
+    entry = pd.to_numeric(x.get("隔日進場分數"), errors="coerce")
+    potential = pd.to_numeric(x.get("波段潛力分數"), errors="coerce")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("隔日作戰筆數", len(x))
+    with c2:
+        st.metric("平均隔日分", format_number(entry.dropna().mean(), 1) if entry.notna().any() else "—")
+    with c3:
+        st.metric("高度關注", int((entry >= 80).sum()) if entry.notna().any() else 0)
+    with c4:
+        st.metric("波段潛力>=80", int((potential >= 80).sum()) if potential.notna().any() else 0)
+    with c5:
+        st.metric("夜間均分", format_number(score.dropna().mean(), 1) if score.notna().any() else "—")
+
+    left, right = st.columns([1, 1])
+    with left:
+        type_options = ["全部"] + sorted([v for v in x.get("進場型態_隔日", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist() if v])
+        type_filter = st.selectbox("進場型態", type_options, key=_k("night_type_filter"))
+    with right:
+        action_options = ["全部"] + sorted([v for v in x.get("隔日建議動作", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist() if v])
+        action_filter = st.selectbox("隔日建議動作", action_options, key=_k("night_action_filter"))
+    if type_filter != "全部":
+        x = x[x["進場型態_隔日"].astype(str) == str(type_filter)].copy()
+    if action_filter != "全部":
+        x = x[x["隔日建議動作"].astype(str) == str(action_filter)].copy()
+
+    sort_col = "隔日實戰排序分" if "隔日實戰排序分" in x.columns else "推薦總分"
+    x[sort_col] = pd.to_numeric(x[sort_col], errors="coerce")
+    x = x.sort_values(sort_col, ascending=False, na_position="last").copy()
+    show_cols = [c for c in NIGHT_BATTLE_DISPLAY_COLUMNS if c in x.columns]
+    if not show_cols:
+        show_cols = list(x.columns[:25])
+    _safe_dataframe(_format_show_df(x[show_cols]), keep_cols=show_cols, use_container_width=True, height=360)
+    st.caption("V94：此區只追蹤與顯示 07 已產生的夜間隔日欄位；若資料來源是舊快取，會以既有欄位安全補值，不會重新推薦、不會拖慢頁面。")
+
+
 def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -800,6 +993,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
             x = normalize_godpick_dataframe(x, add_missing=True)
     except Exception:
         pass
+    x = _backfill_night_battle_columns(x)
     x = x.loc[:, ~x.columns.duplicated()].copy()
     for c in GODPICK_RECORD_COLUMNS:
         if c not in x.columns:
@@ -1864,7 +2058,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V99 正式N日績效主畫面回補版：{PERF_TRACKING_VERSION}")
+    st.caption(f"推薦清單 V100 夜間隔日作戰追蹤版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -1975,6 +2169,8 @@ def main():
             st.metric("平均目前績效%", format_number(avg_fb, 2) if avg_fb is not None and pd.notna(avg_fb) else "—")
         else:
             st.metric("平均推薦後20日%", format_number(avg20, 2))
+
+    _render_night_battle_tracker(filtered_df)
 
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
 
