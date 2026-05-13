@@ -529,6 +529,226 @@ V73_NUMERIC_FIELDS = [
 ]
 
 
+
+
+# >>> V98_NIGHT_BATTLE_RECORD_SYNC
+# V98：同步 07/10 夜間隔日股神欄位到 8_股神推薦紀錄。
+# 採安全補欄，不改舊主流程，避免舊 GitHub/JSON 紀錄因混合型資料造成頁面錯誤。
+V98_NIGHT_NUMERIC_FIELDS = [
+    "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+    "技術趨勢分數", "量價動能分數", "法人籌碼分數", "大戶鎖碼分數",
+    "基本面成長分數", "營收成長分數", "EPS成長分數", "估值風險分數",
+    "PER本益比", "估算EPS", "預估進場點", "回測承接價",
+    "突破確認價_隔日", "停損價_隔日", "第一壓力價",
+]
+V98_NIGHT_TEXT_FIELDS = [
+    "進場型態_隔日", "隔日建議動作", "夜間股神建議", "隔日作戰策略",
+    "資料完整度", "觀察週期", "進場條件說明", "不追高條件", "夜間風險提醒",
+    "法人籌碼摘要", "基本面摘要", "估值風險摘要",
+]
+V98_NIGHT_DISPLAY_COLS = [
+    "推薦日期", "推薦時間", "股票代號", "股票名稱", "類別", "推薦總分",
+    "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+    "進場型態_隔日", "隔日建議動作", "預估進場點", "回測承接價",
+    "突破確認價_隔日", "停損價_隔日", "第一壓力價", "夜間股神建議", "隔日作戰策略", "資料完整度",
+]
+for _v98_c in V98_NIGHT_NUMERIC_FIELDS:
+    if _v98_c not in V73_NUMERIC_FIELDS:
+        V73_NUMERIC_FIELDS.append(_v98_c)
+    if _v98_c not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v98_c)
+for _v98_c in V98_NIGHT_TEXT_FIELDS:
+    if _v98_c not in V73_MESSAGE_TEXT_FIELDS:
+        V73_MESSAGE_TEXT_FIELDS.append(_v98_c)
+    if _v98_c not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v98_c)
+for _v98_c in V98_NIGHT_DISPLAY_COLS:
+    if _v98_c not in DEFAULT_STANDARD_COLS:
+        DEFAULT_STANDARD_COLS.append(_v98_c)
+    if _v98_c not in DEFAULT_ADVANCED_COLS:
+        DEFAULT_ADVANCED_COLS.append(_v98_c)
+
+
+def _v98_scalar_text(v: Any) -> str:
+    """把舊紀錄的 list/dict/Series/array 轉成穩定文字，避免 pandas 指派或顯示爆錯。"""
+    try:
+        if isinstance(v, pd.Series):
+            vals = [_v98_scalar_text(x) for x in v.tolist()]
+            vals = [x for x in vals if x]
+            return " / ".join(vals[:5])
+    except Exception:
+        pass
+    if isinstance(v, dict):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    if isinstance(v, (list, tuple, set)):
+        vals = [_v98_scalar_text(x) for x in list(v)]
+        vals = [x for x in vals if x]
+        return " / ".join(vals[:5])
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    s = str(v).strip()
+    if s.lower() in {"none", "nan", "nat", "null", "<na>"}:
+        return ""
+    return s
+
+
+def _v98_scalar_float(v: Any, default=None):
+    if isinstance(v, pd.Series):
+        for item in v.tolist():
+            got = _v98_scalar_float(item, None)
+            if got is not None:
+                return got
+        return default
+    if isinstance(v, dict):
+        return default
+    if isinstance(v, (list, tuple, set)):
+        for item in list(v):
+            got = _v98_scalar_float(item, None)
+            if got is not None:
+                return got
+        return default
+    s = _v98_scalar_text(v).replace("%", "").replace(",", "")
+    if not s:
+        return default
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
+def _v98_first_text(row: pd.Series, cols: list[str], default: str = "") -> str:
+    for c in cols:
+        if c not in row.index:
+            continue
+        s = _v98_scalar_text(row.get(c))
+        if s:
+            return s
+    return default
+
+
+def _v98_first_num(row: pd.Series, cols: list[str], default=None):
+    for c in cols:
+        if c not in row.index:
+            continue
+        n = _v98_scalar_float(row.get(c), None)
+        if n is not None:
+            return n
+    return default
+
+
+def _v98_derive_entry_type(row: pd.Series) -> str:
+    existing = _v98_first_text(row, ["進場型態_隔日", "進場型態", "推薦型態", "買點分級", "起漲等級"])
+    if existing:
+        return existing
+    entry = _v98_first_num(row, ["隔日進場分數", "進場時機分數", "實戰買點分數", "推薦總分"], 0) or 0
+    score = _v98_first_num(row, ["夜間股神總分", "隔日實戰排序分", "推薦總分"], 0) or 0
+    support = _v98_first_num(row, ["回測承接價", "近端支撐", "主要支撐"], None)
+    breakout = _v98_first_num(row, ["突破確認價_隔日", "突破確認價", "近端壓力"], None)
+    if entry >= 82 and breakout is not None:
+        return "隔日突破型"
+    if support is not None and entry >= 68:
+        return "回測承接型"
+    if score >= 80:
+        return "剛起漲型"
+    return "夜間觀察型"
+
+
+def _v98_derive_action(row: pd.Series) -> str:
+    existing = _v98_first_text(row, ["隔日建議動作", "股神建議動作", "建議動作", "實戰操作建議", "隔日操作建議"])
+    if existing:
+        return existing
+    entry = _v98_first_num(row, ["隔日進場分數", "進場時機分數", "實戰買點分數", "推薦總分"], 0) or 0
+    typ = _v98_derive_entry_type(row)
+    if entry >= 82:
+        return "隔日高度關注，符合條件可小量分批"
+    if "突破" in typ:
+        return "等突破確認"
+    if "回測" in typ:
+        return "等拉回承接"
+    if entry >= 65:
+        return "觀察確認後再進場"
+    return "先觀察，不追高"
+
+
+def _v98_backfill_night_battle_record_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+    if df.empty:
+        out = df.copy()
+        for c in V98_NIGHT_NUMERIC_FIELDS + V98_NIGHT_TEXT_FIELDS:
+            if c not in out.columns:
+                out[c] = pd.NA if c in V98_NIGHT_NUMERIC_FIELDS else ""
+        return out
+
+    out = df.loc[:, ~pd.Index(df.columns).duplicated()].copy()
+    for c in V98_NIGHT_NUMERIC_FIELDS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    for c in V98_NIGHT_TEXT_FIELDS:
+        if c not in out.columns:
+            out[c] = ""
+
+    rows = list(out.iterrows())
+    numeric_aliases = {
+        "夜間股神總分": ["夜間股神總分", "隔日實戰排序分", "股神決策分數", "推薦總分", "推薦分數"],
+        "隔日實戰排序分": ["隔日實戰排序分", "夜間股神總分", "股神決策分數", "推薦總分", "推薦分數"],
+        "隔日進場分數": ["隔日進場分數", "進場時機分數", "實戰買點分數", "交易可行分數", "推薦總分"],
+        "波段潛力分數": ["波段潛力分數", "推薦總分", "技術結構分數", "起漲前兆分數"],
+        "預估進場點": ["預估進場點", "推薦價格", "推薦日價格", "最新價", "建議價位"],
+        "回測承接價": ["回測承接價", "近端支撐", "主要支撐", "推薦買點_拉回"],
+        "突破確認價_隔日": ["突破確認價_隔日", "突破確認價", "推薦買點_突破", "近端壓力"],
+        "停損價_隔日": ["停損價_隔日", "停損價", "停損參考"],
+        "第一壓力價": ["第一壓力價", "近端壓力", "賣出目標1"],
+    }
+    text_aliases = {
+        "進場型態_隔日": ["進場型態_隔日", "進場型態", "推薦型態", "買點分級", "起漲等級"],
+        "隔日建議動作": ["隔日建議動作", "股神建議動作", "建議動作", "實戰操作建議", "隔日操作建議"],
+        "夜間股神建議": ["夜間股神建議", "股神推論邏輯", "股神推論", "推薦理由摘要", "決策說明"],
+        "隔日作戰策略": ["隔日作戰策略", "隔日操作建議", "最佳操作劇本", "股神進場建議", "操作區間"],
+        "資料完整度": ["資料完整度", "大盤資料品質", "績效資料來源"],
+        "觀察週期": ["觀察週期", "進場時機", "等待條件"],
+        "進場條件說明": ["進場條件說明", "等待條件", "K線檢視提示"],
+        "不追高條件": ["不追高條件", "不建議買進原因", "風險扣分原因"],
+        "夜間風險提醒": ["夜間風險提醒", "風險說明", "大盤風控建議", "轉弱條件"],
+        "法人籌碼摘要": ["法人籌碼摘要", "族群資金流說明"],
+        "基本面摘要": ["基本面摘要", "推薦理由摘要"],
+        "估值風險摘要": ["估值風險摘要", "風險說明", "不建議買進原因"],
+    }
+
+    for target, aliases in numeric_aliases.items():
+        vals = []
+        for _, row in rows:
+            current = _v98_scalar_float(row.get(target), None)
+            vals.append(current if current is not None else _v98_first_num(row, aliases, pd.NA))
+        out[target] = vals
+    for target, aliases in text_aliases.items():
+        vals = []
+        for _, row in rows:
+            current = _v98_scalar_text(row.get(target))
+            vals.append(current or _v98_first_text(row, aliases, ""))
+        out[target] = vals
+
+    # 進一步推導主欄位，讓舊紀錄也能直接進行夜間追蹤。
+    out["進場型態_隔日"] = [_v98_scalar_text(v) or _v98_derive_entry_type(row) for (_, row), v in zip(rows, out["進場型態_隔日"].tolist())]
+    out["隔日建議動作"] = [_v98_scalar_text(v) or _v98_derive_action(row) for (_, row), v in zip(rows, out["隔日建議動作"].tolist())]
+    out["資料完整度"] = [_v98_scalar_text(v) or "舊紀錄補欄" for v in out["資料完整度"].tolist()]
+    out["夜間股神建議"] = [_v98_scalar_text(v) or "已保留原推薦紀錄，夜間欄位由 V98 相容層補齊。" for v in out["夜間股神建議"].tolist()]
+    out["隔日作戰策略"] = [_v98_scalar_text(v) or _v98_derive_action(row) for (_, row), v in zip(rows, out["隔日作戰策略"].tolist())]
+
+    for c in V98_NIGHT_NUMERIC_FIELDS:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    for c in V98_NIGHT_TEXT_FIELDS:
+        out[c] = out[c].map(_v98_scalar_text)
+    return out
+# <<< V98_NIGHT_BATTLE_RECORD_SYNC
+
+
 def _restore_text_fields_from_raw_v73(x: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     """v73：修正舊版把文字訊息欄誤轉成數值後，畫面大量空白 / None 的問題。"""
     if x is None or x.empty or raw is None or raw.empty:
@@ -737,6 +957,12 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     try:
         if normalize_godpick_dataframe is not None:
             x = normalize_godpick_dataframe(x, add_missing=True)
+    except Exception:
+        pass
+
+    # V98：補齊 07/10 夜間隔日股神欄位，讓歷史紀錄也能追蹤進場點/突破/停損/壓力。
+    try:
+        x = _v98_backfill_night_battle_record_columns(x)
     except Exception:
         pass
 
@@ -4106,6 +4332,54 @@ def main():
         if not low_df.empty:
             st.warning("下列欄位缺資料較多：" + "、".join(low_df["欄位"].astype(str).head(12).tolist()))
         st.info("本版已修正：文字訊息欄不再被誤轉數值、主表 None 清理、常用說明欄自動從替代欄位回補。")
+
+
+    with st.expander("🌙 V98 夜間隔日股神紀錄追蹤", expanded=False):
+        st.caption("同步 07 股神推薦與 10 推薦清單的夜間隔日欄位；舊紀錄會自動補欄，不影響原始推薦紀錄。")
+        night_df = _v98_backfill_night_battle_record_columns(live_df.copy()) if not live_df.empty else pd.DataFrame(columns=V98_NIGHT_DISPLAY_COLS)
+        if night_df.empty:
+            st.info("目前沒有推薦紀錄。")
+        else:
+            n1, n2, n3, n4 = st.columns(4)
+            night_score = pd.to_numeric(night_df.get("夜間股神總分"), errors="coerce")
+            entry_score = pd.to_numeric(night_df.get("隔日進場分數"), errors="coerce")
+            swing_score = pd.to_numeric(night_df.get("波段潛力分數"), errors="coerce")
+            with n1:
+                st.metric("夜間紀錄筆數", len(night_df))
+            with n2:
+                st.metric("平均夜間分", "-" if night_score.dropna().empty else f"{night_score.mean():.2f}")
+            with n3:
+                st.metric("隔日高關注", int((entry_score >= 80).sum()))
+            with n4:
+                st.metric("波段潛力>=80", int((swing_score >= 80).sum()))
+
+            f1, f2, f3 = st.columns([1.2, 1.2, 1.6])
+            with f1:
+                type_opts = [x for x in sorted(night_df.get("進場型態_隔日", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if x]
+                type_sel = st.selectbox("進場型態", ["全部"] + type_opts, key=_k("v98_night_type_filter"))
+            with f2:
+                action_opts = [x for x in sorted(night_df.get("隔日建議動作", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if x]
+                action_sel = st.selectbox("隔日建議", ["全部"] + action_opts, key=_k("v98_night_action_filter"))
+            with f3:
+                night_kw = st.text_input("搜尋代號 / 名稱 / 策略", value="", key=_k("v98_night_kw"))
+
+            view_night = night_df.copy()
+            if type_sel != "全部" and "進場型態_隔日" in view_night.columns:
+                view_night = view_night[view_night["進場型態_隔日"].astype(str) == type_sel]
+            if action_sel != "全部" and "隔日建議動作" in view_night.columns:
+                view_night = view_night[view_night["隔日建議動作"].astype(str) == action_sel]
+            if night_kw:
+                kw = str(night_kw).strip().lower()
+                mask = pd.Series(False, index=view_night.index)
+                for c in ["股票代號", "股票名稱", "夜間股神建議", "隔日作戰策略"]:
+                    if c in view_night.columns:
+                        mask = mask | view_night[c].astype(str).str.lower().str.contains(kw, na=False)
+                view_night = view_night[mask]
+            show_night_cols = [c for c in V98_NIGHT_DISPLAY_COLS if c in view_night.columns]
+            if "隔日實戰排序分" in view_night.columns:
+                view_night = view_night.sort_values("隔日實戰排序分", ascending=False, na_position="last")
+            st.dataframe(_safe_display_df(view_night[show_night_cols].head(500)), use_container_width=True, hide_index=True)
+            st.caption(f"顯示 {min(len(view_night), 500)} / {len(night_df)} 筆；如要永久保存欄位，請使用上方『儲存同步』。")
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
