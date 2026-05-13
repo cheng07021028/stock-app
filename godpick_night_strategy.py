@@ -36,7 +36,7 @@ except Exception:  # pragma: no cover
 
 CACHE_FILE = Path("godpick_night_strategy_cache.json")
 CACHE_TTL_SECONDS = 18 * 3600
-ENGINE_VERSION = "night_next_entry_v1_20260513"
+ENGINE_VERSION = "night_next_entry_v109_official_factor_cache_20260513"
 
 NIGHT_COLUMNS = [
     "夜間股神版本",
@@ -57,6 +57,19 @@ NIGHT_COLUMNS = [
     "投信近1日買賣超",
     "自營商近1日買賣超",
     "三大法人近1日合計",
+    "外資近5日買賣超",
+    "投信近5日買賣超",
+    "三大法人近5日合計",
+    "法人連買天數",
+    "官方因子總分",
+    "官方資料完整度",
+    "官方因子資料狀態",
+    "月營收YoY%",
+    "月營收MoM%",
+    "累計營收YoY%",
+    "PBR股價淨值比",
+    "股利殖利率%",
+    "官方因子更新時間",
     "法人買超占量比%",
     "法人連買推估",
     "籌碼資料來源",
@@ -325,14 +338,97 @@ def _fetch_twse_valuation(cache: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _institution_score(row: pd.Series, inst: dict[str, Any] | None) -> tuple[float, dict[str, Any]]:
+    """法人籌碼分數。
+
+    V109 優先使用 16_官方因子快取中心產生的官方快取欄位；若沒有，才使用
+    godpick_night_strategy 的舊快取/代理資料。這樣 07 不會即時連官方網站。
+    """
     proxy = _safe_float(row.get("法人連買代理分數"), 50) or 50
     volume_base = _safe_float(row.get("VOL20"), None) or _safe_float(row.get("成交量"), None)
+
+    official_complete = _safe_float(row.get("官方資料完整度"), 0) or 0
+    official_chip_score = _safe_float(row.get("法人籌碼官方分數"), None)
+    official_total_5 = _safe_float(row.get("三大法人近5日合計"), None)
+    official_foreign_5 = _safe_float(row.get("外資近5日買賣超"), None)
+    official_trust_5 = _safe_float(row.get("投信近5日買賣超"), None)
+    official_total_1 = _safe_float(row.get("三大法人近1日合計"), None)
+    official_foreign_1 = _safe_float(row.get("外資近1日買賣超"), None)
+    official_trust_1 = _safe_float(row.get("投信近1日買賣超"), None)
+    official_dealer_1 = _safe_float(row.get("自營商近1日買賣超"), None)
+    official_days = _safe_float(row.get("法人連買天數"), None)
+
+    has_official = official_complete >= 35 or official_chip_score is not None or any(x is not None for x in [official_total_5, official_foreign_5, official_trust_5])
+    if has_official and official_complete < 60:
+        return proxy, {
+            "外資近1日買賣超": official_foreign_1 if official_foreign_1 is not None else "",
+            "投信近1日買賣超": official_trust_1 if official_trust_1 is not None else "",
+            "自營商近1日買賣超": official_dealer_1 if official_dealer_1 is not None else "",
+            "三大法人近1日合計": official_total_1 if official_total_1 is not None else "",
+            "外資近5日買賣超": official_foreign_5 if official_foreign_5 is not None else "",
+            "投信近5日買賣超": official_trust_5 if official_trust_5 is not None else "",
+            "三大法人近5日合計": official_total_5 if official_total_5 is not None else "",
+            "法人連買天數": official_days if official_days is not None else "",
+            "官方因子總分": _safe_float(row.get("官方因子總分"), "") or "",
+            "官方資料完整度": official_complete,
+            "官方因子資料狀態": _safe_str(row.get("官方因子資料狀態")),
+            "官方因子更新時間": _safe_str(row.get("官方因子更新時間")),
+            "法人買超占量比%": "",
+            "法人連買推估": "官方資料完整度<60，僅顯示不加分",
+            "籌碼資料來源": "official_factors_cache_display_only",
+            "籌碼資料日期": _safe_str(row.get("官方資料日期")),
+        }
+    if has_official:
+        foreign = official_foreign_5 if official_foreign_5 is not None else (official_foreign_1 or 0)
+        trust = official_trust_5 if official_trust_5 is not None else (official_trust_1 or 0)
+        dealer = official_dealer_1 or 0
+        total = official_total_5 if official_total_5 is not None else (official_total_1 if official_total_1 is not None else foreign + trust + dealer)
+        buy_ratio = None
+        if volume_base not in [None, 0]:
+            buy_ratio = total / abs(volume_base) * 100
+        if official_chip_score is not None and official_complete >= 45:
+            score = official_chip_score
+        else:
+            score = 50.0
+            score += max(min((total or 0) / 3000.0, 18), -18)
+            score += max(min((foreign or 0) / 3500.0, 10), -10)
+            score += max(min((trust or 0) / 1200.0, 16), -12)
+            if official_days is not None:
+                score += max(min(official_days * 3.0, 12), -6)
+            if buy_ratio is not None:
+                score += max(min(buy_ratio * 1.2, 12), -12)
+        return _clip(score), {
+            "外資近1日買賣超": official_foreign_1 if official_foreign_1 is not None else "",
+            "投信近1日買賣超": official_trust_1 if official_trust_1 is not None else "",
+            "自營商近1日買賣超": official_dealer_1 if official_dealer_1 is not None else "",
+            "三大法人近1日合計": official_total_1 if official_total_1 is not None else "",
+            "外資近5日買賣超": foreign,
+            "投信近5日買賣超": trust,
+            "三大法人近5日合計": total,
+            "法人連買天數": official_days if official_days is not None else "",
+            "官方因子總分": _safe_float(row.get("官方因子總分"), "") or "",
+            "官方資料完整度": official_complete,
+            "官方因子資料狀態": _safe_str(row.get("官方因子資料狀態")),
+            "官方因子更新時間": _safe_str(row.get("官方因子更新時間")),
+            "法人買超占量比%": round(buy_ratio, 2) if buy_ratio is not None else "",
+            "法人連買推估": "官方法人偏買" if (total or 0) > 0 else ("官方法人偏賣" if (total or 0) < 0 else "官方中性"),
+            "籌碼資料來源": "official_factors_cache",
+            "籌碼資料日期": _safe_str(row.get("官方資料日期")),
+        }
+
     if not inst:
         return proxy, {
             "外資近1日買賣超": "",
             "投信近1日買賣超": "",
             "自營商近1日買賣超": "",
             "三大法人近1日合計": "",
+            "外資近5日買賣超": "",
+            "投信近5日買賣超": "",
+            "三大法人近5日合計": "",
+            "法人連買天數": "",
+            "官方因子總分": _safe_float(row.get("官方因子總分"), "") or "",
+            "官方資料完整度": official_complete if official_complete else "",
+            "官方因子資料狀態": _safe_str(row.get("官方因子資料狀態")),
+            "官方因子更新時間": _safe_str(row.get("官方因子更新時間")),
             "法人買超占量比%": "",
             "法人連買推估": "代理",
             "籌碼資料來源": "技術量價代理",
@@ -361,6 +457,14 @@ def _institution_score(row: pd.Series, inst: dict[str, Any] | None) -> tuple[flo
         "投信近1日買賣超": trust,
         "自營商近1日買賣超": dealer,
         "三大法人近1日合計": total,
+        "外資近5日買賣超": "",
+        "投信近5日買賣超": "",
+        "三大法人近5日合計": "",
+        "法人連買天數": "",
+        "官方因子總分": _safe_float(row.get("官方因子總分"), "") or "",
+        "官方資料完整度": official_complete if official_complete else "",
+        "官方因子資料狀態": _safe_str(row.get("官方因子資料狀態")),
+        "官方因子更新時間": _safe_str(row.get("官方因子更新時間")),
         "法人買超占量比%": round(buy_ratio, 2) if buy_ratio is not None else "",
         "法人連買推估": "法人偏買" if total > 0 else ("法人偏賣" if total < 0 else "中性"),
         "籌碼資料來源": inst.get("source") or "TWSE",
@@ -372,15 +476,35 @@ def _valuation_score(row: pd.Series, val: dict[str, Any] | None) -> tuple[float,
     close = _safe_float(row.get("最新價") or row.get("推薦價格") or row.get("推薦日價格"))
     proxy_eps = _safe_float(row.get("EPS代理分數"), 50) or 50
     proxy_profit = _safe_float(row.get("獲利代理分數"), 50) or 50
-    pe = _safe_float(val.get("pe"), None) if val else None
-    est_eps = None
-    if pe not in [None, 0] and close not in [None, 0]:
+
+    official_complete = _safe_float(row.get("官方資料完整度"), 0) or 0
+    official_val_score = _safe_float(row.get("官方估值風險分數"), None)
+    pe = _safe_float(row.get("PER本益比"), None)
+    pb = _safe_float(row.get("PBR股價淨值比"), None)
+    yld = _safe_float(row.get("股利殖利率%"), None)
+    est_eps = _safe_float(row.get("估算EPS"), None)
+
+    if pe is None and val:
+        pe = _safe_float(val.get("pe"), None)
+    if est_eps is None and pe not in [None, 0] and close not in [None, 0]:
         est_eps = close / pe
+
+    if official_val_score is not None and official_complete >= 60:
+        return _clip(official_val_score), {
+            "PER本益比": round(pe, 2) if pe is not None else "",
+            "PBR股價淨值比": round(pb, 2) if pb is not None else "",
+            "股利殖利率%": round(yld, 2) if yld is not None else "",
+            "估算EPS": round(est_eps, 2) if est_eps is not None else "",
+            "基本面資料來源": "official_factors_cache",
+            "基本面資料日期": _safe_str(row.get("官方資料日期")),
+        }
 
     if pe is None:
         score = _clip(35 + proxy_eps * 0.35 + proxy_profit * 0.25)
         return score, {
             "PER本益比": "",
+            "PBR股價淨值比": round(pb, 2) if pb is not None else "",
+            "股利殖利率%": round(yld, 2) if yld is not None else "",
             "估算EPS": "",
             "基本面資料來源": "技術獲利代理",
             "基本面資料日期": "",
@@ -402,9 +526,11 @@ def _valuation_score(row: pd.Series, val: dict[str, Any] | None) -> tuple[float,
     score += (proxy_profit - 50) * 0.16
     return _clip(score), {
         "PER本益比": round(pe, 2) if pe is not None else "",
+        "PBR股價淨值比": round(pb, 2) if pb is not None else "",
+        "股利殖利率%": round(yld, 2) if yld is not None else "",
         "估算EPS": round(est_eps, 2) if est_eps is not None else "",
-        "基本面資料來源": val.get("source") or "TWSE_BWIBBU",
-        "基本面資料日期": val.get("date") or "",
+        "基本面資料來源": (val.get("source") if val else "TWSE_BWIBBU") or "TWSE_BWIBBU",
+        "基本面資料日期": (val.get("date") if val else "") or "",
     }
 
 
@@ -435,9 +561,19 @@ def _row_strategy(row: pd.Series, inst_map: dict[str, Any], val_map: dict[str, A
 
     inst_score, inst_fields = _institution_score(row, inst_map.get(code))
     valuation_score, val_fields = _valuation_score(row, val_map.get(code))
-    revenue_score = _clip(35 + revenue_proxy * 0.55 + max(min((sector - 50) * 0.15, 8), -8))
-    eps_score = _clip(30 + eps_proxy * 0.44 + profit_proxy * 0.32 + max(min((valuation_score - 50) * 0.12, 8), -8))
-    fundamental = _clip(revenue_score * 0.42 + eps_score * 0.40 + valuation_score * 0.18)
+    official_revenue_score = _safe_float(row.get("營收成長官方分數"), None)
+    official_basic_score = _safe_float(row.get("官方基本面成長分數"), None)
+    official_complete = _safe_float(row.get("官方資料完整度"), 0) or 0
+    if official_revenue_score is not None and official_complete >= 60:
+        revenue_score = _clip(official_revenue_score)
+    else:
+        revenue_score = _clip(35 + revenue_proxy * 0.55 + max(min((sector - 50) * 0.15, 8), -8))
+    if official_basic_score is not None and official_complete >= 60:
+        fundamental = _clip(official_basic_score)
+        eps_score = _clip(fundamental * 0.55 + valuation_score * 0.20 + eps_proxy * 0.25)
+    else:
+        eps_score = _clip(30 + eps_proxy * 0.44 + profit_proxy * 0.32 + max(min((valuation_score - 50) * 0.12, 8), -8))
+        fundamental = _clip(revenue_score * 0.42 + eps_score * 0.40 + valuation_score * 0.18)
     lock_score = _clip(lock_proxy * 0.70 + (100 - chase) * 0.15 + tech * 0.15)
     trend_score = _clip(tech * 0.50 + prelaunch * 0.28 + opportunity * 0.12 + sector * 0.10)
     momentum_score = _clip(volume * 0.45 + prelaunch * 0.28 + sector * 0.15 + max(min(ret5 * 1.8, 10), -10))
@@ -577,7 +713,10 @@ def _row_strategy(row: pd.Series, inst_map: dict[str, Any], val_map: dict[str, A
         "估值風險分數": round(valuation_score, 2),
         **inst_fields,
         **val_fields,
-        "資料完整度": completeness,
+        "月營收YoY%": _safe_float(row.get("月營收YoY%"), "") or "",
+        "月營收MoM%": _safe_float(row.get("月營收MoM%"), "") or "",
+        "累計營收YoY%": _safe_float(row.get("累計營收YoY%"), "") or "",
+        "資料完整度": ("官方快取" + str(int(official_complete)) + "%" if official_complete >= 60 else completeness),
         "進場型態_隔日": pattern,
         "隔日建議動作": action,
         "預估進場點": entry_text,
