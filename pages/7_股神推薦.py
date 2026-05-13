@@ -105,8 +105,8 @@ SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
-NIGHT_NEXT_ENTRY_VERSION = "night_next_entry_v1_20260513"
-PAGE_TITLE = "股神推薦 V90｜夜間隔日進場股神版"
+NIGHT_NEXT_ENTRY_VERSION = "night_next_entry_v92_compat_20260513"
+PAGE_TITLE = "股神推薦 V92｜夜間隔日進場股神版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -1429,6 +1429,53 @@ def _records_to_df_for_json(records: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _ensure_v92_night_compat_df(df: pd.DataFrame | None, *, source: str = "") -> pd.DataFrame:
+    """V92：舊推薦快取 / 舊推薦清單相容。
+
+    V90 之後新增夜間隔日欄位，但使用者可能已經有舊的
+    godpick_latest_recommendations.json 或 session_state。
+    這裡只在缺欄時做一次快速補齊，避免後續 data_editor / 欄位管理 / 本輪精華推薦 KeyError。
+    若 enrich_night_strategy 可用，會用既有價量欄位推估隔日作戰策略；否則只補空欄。
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+
+    out = df.copy()
+    # 先用共用欄位標準化補別名與去重，避免舊資料欄位名不一致。
+    try:
+        if callable(normalize_godpick_dataframe):
+            out = normalize_godpick_dataframe(out, add_missing=False, clean_none=True)
+    except Exception:
+        pass
+
+    night_cols = list(GODPICK_NIGHT_COLUMNS or [])
+    need_night = bool(night_cols) and any(c not in out.columns for c in night_cols)
+    if need_night and callable(enrich_night_strategy):
+        try:
+            out = enrich_night_strategy(out)
+        except Exception as e:
+            for c in night_cols:
+                if c not in out.columns:
+                    out[c] = ""
+            out["資料完整度"] = out.get("資料完整度", "")
+            mask = out["資料完整度"].astype(str).str.strip().eq("") if "資料完整度" in out.columns else pd.Series([True] * len(out), index=out.index)
+            out.loc[mask, "資料完整度"] = f"舊快取補欄；夜間策略未重算：{e}"
+    elif need_night:
+        for c in night_cols:
+            if c not in out.columns:
+                out[c] = ""
+        if "資料完整度" not in out.columns:
+            out["資料完整度"] = "舊快取補欄；夜間策略模組未載入"
+
+    # V92：幾個跨頁必用欄位一定存在。
+    for c in ["股票代號", "股票名稱", "推薦總分", "推薦等級", "資料完整度"]:
+        if c not in out.columns:
+            out[c] = ""
+    return out
+
+
 def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> tuple[bool, list[str]]:
     payload = {
         "saved_at": _now_text(),
@@ -1479,9 +1526,9 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     if not isinstance(payload, dict) or not payload:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), msg
 
-    rec_df = _records_to_df_for_json(payload.get("recommendations", []))
+    rec_df = _ensure_v92_night_compat_df(_records_to_df_for_json(payload.get("recommendations", [])), source="latest_recommendations")
     cat_df = _records_to_df_for_json(payload.get("category_strength", []))
-    hot_df = _records_to_df_for_json(payload.get("hot_pick", []))
+    hot_df = _ensure_v92_night_compat_df(_records_to_df_for_json(payload.get("hot_pick", [])), source="latest_hot_pick")
     return rec_df, cat_df, hot_df, _safe_str(payload.get("saved_at", ""))
 
 
@@ -7581,6 +7628,31 @@ def _stable_checkbox_editor_on_change(editor_key: str, code_map_key: str, persis
         # callback 不能讓主頁掛掉
         return
 
+def _format_percent_value(x: Any, digits: int = 2) -> str:
+    """V93：百分比欄位安全格式化。
+
+    舊版快取/匯出資料有時已經是字串，例如 "12.30%"、"--"、"資料不足"。
+    直接用 f"{x:,.2f}%" 會在 Streamlit Cloud 造成 ValueError。
+    這裡統一轉數字；無法轉換時保留原文字，避免整頁中斷。
+    """
+    try:
+        if x is None or pd.isna(x):
+            return ""
+    except Exception:
+        if x is None:
+            return ""
+    try:
+        if isinstance(x, str):
+            s = x.strip()
+            if not s or s in {"—", "-", "--", "nan", "NaN", "None", "資料不足"}:
+                return "" if s in {"nan", "NaN", "None"} else s
+            s_num = s.replace("%", "").replace(",", "")
+            return f"{float(s_num):,.{digits}f}%"
+        return f"{float(x):,.{digits}f}%"
+    except Exception:
+        return str(x)
+
+
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "突破確認價_隔日", "回測承接價", "停損參考", "停損價", "停損價_隔日", "第一壓力價", "賣出目標1", "賣出目標2", "PER本益比", "估算EPS"]
@@ -7605,7 +7677,7 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
             show[c] = show[c].apply(lambda x: format_number(x, 2) if pd.notna(x) else "")
     for c in pct_cols:
         if c in show.columns:
-            show[c] = show[c].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
+            show[c] = show[c].apply(lambda x: _format_percent_value(x, 2))
     for c in score_cols:
         if c in show.columns:
             show[c] = show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
@@ -7627,12 +7699,21 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
     hot_df = st.session_state.get(_k("hot_pick_store"))
 
     if isinstance(rec_df, pd.DataFrame) and isinstance(cat_df, pd.DataFrame) and not rec_df.empty:
+        rec_df = _ensure_v92_night_compat_df(rec_df, source="session_rec_df")
         if not isinstance(hot_df, pd.DataFrame):
             hot_df = pd.DataFrame()
+        else:
+            hot_df = _ensure_v92_night_compat_df(hot_df, source="session_hot_pick")
+        # 寫回 session，避免同一輪頁面重繪反覆補欄。
+        st.session_state[_k("rec_df_store")] = rec_df.copy()
+        st.session_state[_k("hot_pick_store")] = hot_df.copy()
         return rec_df.copy(), cat_df.copy(), hot_df.copy()
 
     rec_df, cat_df, hot_df, saved_at = _load_latest_recommendation_pack()
     if isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
+        rec_df = _ensure_v92_night_compat_df(rec_df, source="loaded_rec_df")
+        if isinstance(hot_df, pd.DataFrame) and not hot_df.empty:
+            hot_df = _ensure_v92_night_compat_df(hot_df, source="loaded_hot_pick")
         st.session_state[_k("rec_df_store")] = rec_df.copy()
         st.session_state[_k("category_strength_store")] = cat_df.copy()
         st.session_state[_k("hot_pick_store")] = hot_df.copy()
@@ -9956,7 +10037,7 @@ def main():
         for c in ["類股平均總分", "類股平均訊號", "類股平均漲幅", "類股平均雷達", "類股平均自動因子", "類股平均起漲前兆", "類股平均交易可行", "類股熱度分數", "類股加速度"]:
             if c in category_show.columns:
                 if c == "類股平均漲幅":
-                    category_show[c] = category_show[c].apply(lambda x: f"{x:,.2f}%" if pd.notna(x) else "")
+                    category_show[c] = category_show[c].apply(lambda x: _format_percent_value(x, 2))
                 else:
                     category_show[c] = category_show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
         st.dataframe(category_show, use_container_width=True, hide_index=True)
