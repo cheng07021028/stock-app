@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v105 JSON熱修正版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v106 設定永久保存版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -71,7 +71,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v105_json_serializable_hotfix"
+APP_VERSION = "v106_weight_calibration_setting_persist"
 
 
 
@@ -398,11 +398,37 @@ def main() -> None:
 
     with st.sidebar:
         st.header("14_權重校正設定")
-        horizon = st.selectbox("主要校正週期", [1, 3, 5, 10, 20], index=2, help="短線看 1/3 日，波段看 5/10 日，趨勢看 20 日。")
+        saved_calib_setting = get_weight_calibration_page_settings()
+        horizon_options = [1, 3, 5, 10, 20]
+        saved_horizon = int(saved_calib_setting.get("main_horizon", 5) or 5)
+        if saved_horizon not in horizon_options:
+            saved_horizon = 5
+        horizon = st.selectbox(
+            "主要校正週期",
+            horizon_options,
+            index=horizon_options.index(saved_horizon),
+            help="短線看 1/3 日，波段看 5/10 日，趨勢看 20 日。",
+            key="v106_weight_calibration_main_horizon",
+        )
         st.caption("建議：先用 5 日或 10 日，不要用樣本太少的週期直接調權重。")
         st.divider()
-        allow_apply = st.checkbox("允許從本頁套用權重", value=False, help="安全機制：預設只看建議，不覆蓋 7_股神推薦 權重。")
+        allow_apply = st.checkbox(
+            "允許從本頁套用權重",
+            value=bool(saved_calib_setting.get("allow_apply_from_page", False)),
+            help="安全機制：預設只看建議，不覆蓋 7_股神推薦 權重。",
+            key="v106_weight_calibration_allow_apply",
+        )
         st.caption("套用後會寫入 godpick_user_settings.json，7_股神推薦 會讀取 applied_weights。")
+        if st.button("套用 14_權重校正設定（永久設定）", use_container_width=True, type="primary"):
+            ok, msg = save_weight_calibration_page_settings(horizon, allow_apply)
+            if ok:
+                st.success(msg)
+                st.info("已保存主要校正週期與『允許從本頁套用權重』設定；重新整理或換頁後仍會沿用。")
+            else:
+                st.error(msg)
+        updated_at = str(saved_calib_setting.get("updated_at", "") or "")
+        if updated_at:
+            st.caption(f"目前永久設定更新時間：{updated_at}")
 
     _render_quality(df, horizon, current_weights)
     _render_v92_field_diagnostics(df, horizon)
