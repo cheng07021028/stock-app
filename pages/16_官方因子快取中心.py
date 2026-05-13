@@ -34,7 +34,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V108｜法人 / 月營收 / EPS / PER 快取中心｜供後續 07 股神推薦讀取，不直接拖慢推薦頁")
+st.caption("V108A｜法人 / 月營收 / EPS / PER 快取中心｜SSL 備援修正版｜供後續 07 讀取快取")
 
 
 def _fmt(v):
@@ -54,18 +54,24 @@ def _display_status() -> None:
     c3.metric("檔案大小 KB", s.get("size_kb", 0.0))
     c4.metric("快取存在", "是" if s.get("exists") else "否")
     c5.metric("更新時間", s.get("updated_at") or "未更新")
+    complete = int(s.get("complete_count", 0) or 0)
+    records = int(s.get("record_count", 0) or 0)
+    if records and complete == 0:
+        st.warning("目前官方因子完整度>=60 為 0；代表官方資料尚未抓成功或仍不足，暫不建議接進 07 推薦分數。")
+    elif complete > 0:
+        st.success(f"官方因子已有可用完整資料：{complete} 筆。")
     with st.expander("快取狀態 / 診斷", expanded=False):
         st.write(f"路徑：`{s.get('path', '')}`")
         diagnostics = s.get("diagnostics", []) or []
         if diagnostics:
-            for msg in diagnostics[-20:]:
+            for msg in diagnostics[-25:]:
                 st.write(f"- {msg}")
         else:
             st.write("目前沒有診斷訊息。")
 
 
 with st.sidebar:
-    st.header("V108 更新設定")
+    st.header("V108A 更新設定")
     market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=0)
     scan_limit = st.selectbox("測試/更新筆數", [0, 50, 200, 500, 1000, 1500, 2000], index=0, help="0 = 使用股票主檔全部股票。")
     include_institutional = st.checkbox("更新法人買賣超", value=True)
@@ -78,7 +84,7 @@ with st.sidebar:
 
 st.info(
     "建議流程：先在本頁更新官方因子快取，確認資料筆數與完整度，再同步到 GitHub。"
-    "後續 07 只讀快取，不會每次推薦都連官方網站。"
+    "V108A 已加入 TWSE/TPEX SSL 備援與舊快取保護；後續 07 只讀快取，不會每次推薦都連官方網站。"
 )
 
 if do_pull:
@@ -97,7 +103,10 @@ if do_update:
             save=True,
         )
     if meta.get("ok"):
-        st.success(f"官方因子快取已更新：{len(df)} 筆。")
+        if meta.get("preserved_old_cache"):
+            st.warning(f"本次抓取完成 {len(df)} 筆，但完整度偏低，已保留舊有效快取。")
+        else:
+            st.success(f"官方因子快取已更新：{len(df)} 筆；完整度>=60：{meta.get('complete_count', 0)} 筆。")
     else:
         st.error("官方因子快取更新失敗，請查看診斷訊息。")
     for msg in meta.get("diagnostics", [])[-20:]:
@@ -153,12 +162,14 @@ if logs:
 else:
     st.caption("尚無更新紀錄。")
 
-with st.expander("V108 說明", expanded=False):
+with st.expander("V108A 說明", expanded=False):
     st.markdown(
         """
 - 本頁是官方因子資料層，不會取代 07 股神推薦。
 - 慢的官方資料更新集中在本頁；07 後續只讀 `official_factors_cache.json`。
 - 官方來源失敗時會保留診斷訊息，不會讓 07、10、8、14 主線中斷。
+- V108A 修正 Streamlit Cloud 連 TWSE/TPEX 時可能發生的 SSL 憑證驗證失敗。
+- 若本次抓取完整度低於舊快取，會保留舊有效快取，不會用壞資料覆蓋。
 - 下一版 V109 才會把這些官方因子讀入 07 夜間隔日股神分數。
         """
     )
