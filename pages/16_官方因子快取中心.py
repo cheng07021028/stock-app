@@ -1,0 +1,164 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+try:
+    from app_auth import require_login
+    require_login()
+except Exception as _auth_e:
+    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
+
+import pandas as pd
+import streamlit as st
+
+try:
+    from utils import inject_pro_theme
+except Exception:
+    def inject_pro_theme() -> None:  # type: ignore
+        return None
+
+from official_factor_service import (
+    FACTOR_COLUMNS,
+    build_official_factor_cache,
+    cache_status,
+    export_cache_csv_bytes,
+    load_factor_frame,
+    load_stock_universe,
+    load_update_logs,
+    push_cache_to_github,
+    read_cache_from_github,
+)
+
+st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
+inject_pro_theme()
+
+st.title("16_官方因子快取中心")
+st.caption("V108｜法人 / 月營收 / EPS / PER 快取中心｜供後續 07 股神推薦讀取，不直接拖慢推薦頁")
+
+
+def _fmt(v):
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return v
+
+
+def _display_status() -> None:
+    s = cache_status()
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("快取筆數", s.get("record_count", 0))
+    c2.metric("完整度 >= 60", s.get("complete_count", 0))
+    c3.metric("檔案大小 KB", s.get("size_kb", 0.0))
+    c4.metric("快取存在", "是" if s.get("exists") else "否")
+    c5.metric("更新時間", s.get("updated_at") or "未更新")
+    with st.expander("快取狀態 / 診斷", expanded=False):
+        st.write(f"路徑：`{s.get('path', '')}`")
+        diagnostics = s.get("diagnostics", []) or []
+        if diagnostics:
+            for msg in diagnostics[-20:]:
+                st.write(f"- {msg}")
+        else:
+            st.write("目前沒有診斷訊息。")
+
+
+with st.sidebar:
+    st.header("V108 更新設定")
+    market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=0)
+    scan_limit = st.selectbox("測試/更新筆數", [0, 50, 200, 500, 1000, 1500, 2000], index=0, help="0 = 使用股票主檔全部股票。")
+    include_institutional = st.checkbox("更新法人買賣超", value=True)
+    include_revenue = st.checkbox("更新月營收", value=True)
+    include_valuation = st.checkbox("更新 PER / PBR / 估算 EPS", value=True)
+    st.divider()
+    do_update = st.button("更新官方因子快取", type="primary", use_container_width=True)
+    do_pull = st.button("從 GitHub 讀取快取", use_container_width=True)
+    do_push = st.button("同步快取到 GitHub", use_container_width=True)
+
+st.info(
+    "建議流程：先在本頁更新官方因子快取，確認資料筆數與完整度，再同步到 GitHub。"
+    "後續 07 只讀快取，不會每次推薦都連官方網站。"
+)
+
+if do_pull:
+    ok, msg = read_cache_from_github()
+    (st.success if ok else st.warning)(msg)
+
+if do_update:
+    limit = int(scan_limit) if int(scan_limit) > 0 else None
+    with st.spinner("正在更新官方因子快取；官方網站若較慢，請稍候..."):
+        df, meta = build_official_factor_cache(
+            limit=limit,
+            market_filter=market_filter,
+            include_institutional=include_institutional,
+            include_revenue=include_revenue,
+            include_valuation=include_valuation,
+            save=True,
+        )
+    if meta.get("ok"):
+        st.success(f"官方因子快取已更新：{len(df)} 筆。")
+    else:
+        st.error("官方因子快取更新失敗，請查看診斷訊息。")
+    for msg in meta.get("diagnostics", [])[-20:]:
+        st.write(f"- {msg}")
+
+if do_push:
+    ok, msg = push_cache_to_github()
+    (st.success if ok else st.warning)(msg)
+
+_display_status()
+
+st.subheader("資料預覽")
+df = load_factor_frame()
+if df.empty:
+    st.warning("尚無官方因子快取。請先按左側「更新官方因子快取」。")
+    universe = load_stock_universe(limit=20)
+    if not universe.empty:
+        with st.expander("股票主檔前 20 筆檢查", expanded=False):
+            st.dataframe(universe, use_container_width=True, hide_index=True)
+else:
+    search = st.text_input("搜尋股票代號 / 名稱 / 產業", "")
+    show_df = df.copy()
+    if search.strip():
+        kw = search.strip()
+        mask = pd.Series(False, index=show_df.index)
+        for col in ["股票代號", "股票名稱", "正式產業別", "市場別"]:
+            if col in show_df.columns:
+                mask = mask | show_df[col].astype(str).str.contains(kw, case=False, na=False)
+        show_df = show_df[mask]
+
+    priority_cols = [
+        "股票代號", "股票名稱", "市場別", "正式產業別",
+        "官方因子總分", "官方資料完整度", "官方因子資料狀態",
+        "法人籌碼官方分數", "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
+        "營收成長官方分數", "月營收YoY%", "月營收MoM%", "累計營收YoY%", "營收年月",
+        "官方估值風險分數", "PER本益比", "估算EPS", "PBR股價淨值比", "股利殖利率%",
+        "官方因子更新時間", "官方因子資料源",
+    ]
+    cols = [c for c in priority_cols if c in show_df.columns] + [c for c in show_df.columns if c not in priority_cols]
+    st.dataframe(show_df[cols].map(_fmt) if hasattr(show_df, "map") else show_df[cols].applymap(_fmt), use_container_width=True, hide_index=True)
+    st.download_button(
+        "下載 official_factors_cache.csv",
+        data=export_cache_csv_bytes(),
+        file_name="official_factors_cache.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+st.subheader("更新紀錄")
+logs = load_update_logs()
+if logs:
+    st.dataframe(pd.DataFrame(logs[:50]), use_container_width=True, hide_index=True)
+else:
+    st.caption("尚無更新紀錄。")
+
+with st.expander("V108 說明", expanded=False):
+    st.markdown(
+        """
+- 本頁是官方因子資料層，不會取代 07 股神推薦。
+- 慢的官方資料更新集中在本頁；07 後續只讀 `official_factors_cache.json`。
+- 官方來源失敗時會保留診斷訊息，不會讓 07、10、8、14 主線中斷。
+- 下一版 V109 才會把這些官方因子讀入 07 夜間隔日股神分數。
+        """
+    )
