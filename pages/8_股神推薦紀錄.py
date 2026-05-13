@@ -148,7 +148,7 @@ GODPICK_RECORD_COLUMNS = [
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
     "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
     "模式績效標籤", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
-    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
 
 STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
@@ -173,7 +173,7 @@ DEFAULT_STANDARD_COLS = [
     "大盤情境分桶",
     "買點分級", "風險說明", "股神推論邏輯",
     "股神決策分數", "股神建議動作", "股神信心", "股神進場區間",
-    "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
 ]
 
@@ -193,7 +193,7 @@ DEFAULT_ADVANCED_COLS = [
     "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
     "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作",
     "股神信心", "股神進場區間", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
-    "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
+    "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
     "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
     "推薦日期", "推薦時間", "模式績效標籤", "股神推論", "機會股說明", "推薦理由摘要", "備註"
 ]
@@ -1347,7 +1347,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦總分", "上漲機率估計%", "大盤橋接分數", "大盤可參考分數", "大盤加權分", "大盤影響加減分", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "進場時機分數", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "風險報酬比_決策", "追高風險分數_決策", "飆股起漲分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", 
         "同類股領先幅度", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
-        "持有天數", "股神決策分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        "持有天數", "股神決策分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     ]
     # v46 修正：舊紀錄或 Firestore 回補資料可能沒有部分數值欄。
     # 先補欄再轉型，避免 x[c] 觸發 KeyError 造成整頁無法開啟。
@@ -2606,14 +2606,16 @@ def _calc_forward_metrics_from_history(
     recommended_price: float | None = None,
     latest_price: float | None = None,
 ) -> dict[str, Any]:
-    """V114：用已抓好的單股K線計算推薦後績效。
+    """V115：用已抓好的單股K線計算推薦後績效。
 
     修正重點：
-    1. N日績效以「推薦價格 / 推薦日價格」作為基準，而不是推薦日收盤價。
-       這樣才符合 07 晚上跑推薦、隔日觀察的實戰邏輯。
-    2. 推薦後績效從推薦日之後的交易日開始計算，不把推薦日盤中高低價拿來誤判達標/停損。
-    3. 達標/停損判斷改為事件順序：先停損、先達標、達標後回落、同日觸及都分開處理。
-    4. 若歷史K線尚未包含最新一日，但最新價已跌破停損，仍視為風控觸發。
+    1. N日績效仍以「推薦價格 / 推薦日價格」作為基準。
+    2. 推薦後績效從推薦日之後的交易日開始算，不拿推薦當天高低價判斷達標/停損。
+    3. 把「曾經碰到目標價」與「仍可視為達標成功」拆開：
+       - 是否曾達標_回測：日K最高價曾碰到目標價，代表有成交機會。
+       - 是否達標_回測：需曾碰到目標價，且最新價/期末價仍站上或接近目標，才列為成功。
+       這可避免只是一度沖高碰價，後面跌回來，卻被統計成單純達標。
+    4. 命中結果新增「曾達標回落 / 達標後回落」，讓準確率分析不再虛高。
     """
     rec_date = pd.to_datetime(rec_date_text, errors="coerce")
     if pd.isna(rec_date) or not isinstance(hist_df, pd.DataFrame) or hist_df.empty:
@@ -2623,14 +2625,12 @@ def _calc_forward_metrics_from_history(
     if temp.empty:
         return {}
 
-    # 推薦後 N 日：只看推薦日之後的交易日。
     forward = temp[temp["日期"].dt.date > rec_date.date()].reset_index(drop=True)
     if forward.empty:
         return {}
 
     base_px = _safe_float(recommended_price)
     if base_px in [None, 0]:
-        # 若舊資料沒有推薦價，才退回推薦日當天或之後第一筆收盤價。
         base_candidates = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
         if base_candidates.empty:
             return {}
@@ -2647,12 +2647,14 @@ def _calc_forward_metrics_from_history(
         else:
             result[key_new] = None
 
-    # 事件與最大漲跌幅最多先看推薦後 20 個交易日；不足則用目前可得資料。
     use_window = forward.head(min(len(forward), 20)).copy()
     high_col = "最高價" if "最高價" in use_window.columns else "收盤價"
     low_col = "最低價" if "最低價" in use_window.columns else "收盤價"
+    close_col = "收盤價" if "收盤價" in use_window.columns else high_col
+
     max_high = _safe_float(use_window[high_col].max())
     min_low = _safe_float(use_window[low_col].min())
+    ending_close = _safe_float(use_window.iloc[-1].get(close_col)) if not use_window.empty else None
     max_gain = None if max_high in [None, 0] else round((max_high - base_px) / base_px * 100, 2)
     max_drawdown = None if min_low in [None, 0] else round((min_low - base_px) / base_px * 100, 2)
     result["推薦後最大漲幅%"] = max_gain
@@ -2683,16 +2685,30 @@ def _calc_forward_metrics_from_history(
             stop_date = hit_rows.iloc[0].get("日期")
 
     latest_stop_hit = bool(stop not in [None, 0] and latest not in [None, 0] and latest <= stop)
-    target_hit = target_date is not None
+    target_touched = target_date is not None
     stop_hit = stop_date is not None or latest_stop_hit
-    result["是否達標_回測"] = bool(target_hit)
-    result["是否停損_回測"] = bool(stop_hit)
 
     ret20 = result.get("推薦後20日%")
     ret10 = result.get("推薦後10日%")
     ret5 = result.get("推薦後5日%")
     ret3 = result.get("推薦後3日%")
     benchmark = ret20 if ret20 is not None else (ret10 if ret10 is not None else (ret5 if ret5 is not None else ret3))
+
+    target_return_pct = None
+    if tgt not in [None, 0] and base_px not in [None, 0]:
+        target_return_pct = (float(tgt) - float(base_px)) / float(base_px) * 100
+
+    still_above_target = False
+    if target_touched and tgt not in [None, 0]:
+        if latest not in [None, 0]:
+            still_above_target = latest >= float(tgt) * 0.995
+        elif ending_close not in [None, 0]:
+            still_above_target = ending_close >= float(tgt) * 0.995
+        elif benchmark is not None and target_return_pct is not None:
+            still_above_target = benchmark >= target_return_pct * 0.8
+
+    if target_touched and tgt in [None, 0] and benchmark is not None:
+        still_above_target = benchmark >= 5
 
     same_day = False
     if target_date is not None and stop_date is not None:
@@ -2701,30 +2717,65 @@ def _calc_forward_metrics_from_history(
         except Exception:
             same_day = False
 
+    target_confirmed = bool(target_touched and still_above_target and not same_day and not (stop_date is not None and pd.to_datetime(stop_date) <= pd.to_datetime(target_date)))
+
+    result["是否曾達標_回測"] = bool(target_touched)
+    result["是否達標_回測"] = bool(target_confirmed)
+    result["是否停損_回測"] = bool(stop_hit)
+    if target_touched and target_confirmed:
+        result["達標確認狀態"] = "確認達標"
+    elif target_touched:
+        result["達標確認狀態"] = "曾觸及但回落"
+    elif stop_hit:
+        result["達標確認狀態"] = "未達標且觸發停損"
+    else:
+        result["達標確認狀態"] = "未達標"
+
+    target_date_text = ""
+    stop_date_text = ""
+    try:
+        target_date_text = pd.to_datetime(target_date).strftime("%Y-%m-%d") if target_date is not None else ""
+    except Exception:
+        target_date_text = str(target_date or "")
+    try:
+        stop_date_text = pd.to_datetime(stop_date).strftime("%Y-%m-%d") if stop_date is not None else ""
+    except Exception:
+        stop_date_text = str(stop_date or "")
+    result["回測事件摘要"] = (
+        f"曾觸目標:{'是' if target_touched else '否'}"
+        + (f"({target_date_text})" if target_date_text else "")
+        + f"｜確認達標:{'是' if target_confirmed else '否'}"
+        + f"｜停損:{'是' if stop_hit else '否'}"
+        + (f"({stop_date_text})" if stop_date_text else "")
+    )
+
     if same_day:
         hit_result = "同日觸及"
-        comment = "V114：達標與停損同日觸及，日K無法判斷先後，需人工檢視盤中走勢。"
+        comment = "V115：達標與停損同日觸及，日K無法判斷先後，需人工檢視盤中走勢；不列入單純達標。"
     elif stop_date is not None and (target_date is None or pd.to_datetime(stop_date) < pd.to_datetime(target_date)):
         hit_result = "停損"
-        comment = "V114：推薦後先觸及停損，需檢討追高、支撐或大盤風險。"
-    elif target_date is not None and stop_hit:
+        comment = "V115：推薦後先觸及停損，需檢討追高、支撐或大盤風險。"
+    elif target_touched and stop_hit:
         hit_result = "達標後回落"
-        comment = "V114：推薦後曾達標，但後續回落或最新價跌破停損；績效不可再視為單純達標。"
-    elif target_date is not None:
+        comment = "V115：推薦後曾碰到目標價，但後續回落或最新價跌破停損，不再列為單純達標。"
+    elif target_confirmed:
         hit_result = "達標"
-        comment = "V114：推薦後先達標且未觸發停損，型態有效。"
+        comment = "V115：推薦後觸及目標且目前/期末仍站上目標附近，型態有效。"
+    elif target_touched:
+        hit_result = "曾達標回落"
+        comment = "V115：推薦後曾碰到目標價，但目前/期末已跌回目標價下方，準確率不列入單純成功。"
     elif latest_stop_hit or stop_date is not None:
         hit_result = "停損"
-        comment = "V114：最新價或推薦後低點已觸及停損，需檢討風控。"
+        comment = "V115：最新價或推薦後低點已觸及停損，需檢討風控。"
     elif benchmark is not None and benchmark >= 5:
         hit_result = "有效"
-        comment = "V114：推薦後報酬為正，持續觀察是否擴大漲幅。"
+        comment = "V115：推薦後報酬為正，持續觀察是否擴大漲幅。"
     elif benchmark is not None and benchmark <= -5:
         hit_result = "偏弱"
-        comment = "V114：推薦後轉弱，需檢討等待條件與停損設定。"
+        comment = "V115：推薦後轉弱，需檢討等待條件與停損設定。"
     else:
         hit_result = "觀察中"
-        comment = "V114：尚未形成明確績效，持續追蹤。"
+        comment = "V115：尚未形成明確績效，持續追蹤。"
 
     result["命中結果"] = hit_result
     result["績效評語"] = comment
@@ -2957,7 +3008,7 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src["是否已實際買進"] = buy_flag
     src["損益金額"] = pnl_amt
     src["損益幅%"] = pnl_pct
-    # V114：損益% 與損益幅% 定義統一；若有完整實際買賣價，才用實際報酬%，否則用推薦/買進成本對最新價的追蹤報酬。
+    # V115：損益% 與損益幅% 定義統一；若有完整實際買賣價，才用實際報酬%，否則用推薦/買進成本對最新價的追蹤報酬。
     src["損益%"] = actual_ret if actual_ret is not None else pnl_pct
     src["實際報酬%"] = actual_ret
     src["是否達停損"] = hit_stop
@@ -3468,6 +3519,27 @@ def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
     age_days = (date.today() - rec_date.date()).days
     if age_days < 1:
         return False
+    # V115：舊版 V115 會把「盤中一度碰到目標價」直接列為達標。
+    # 若資料仍是 V115 或達標判斷疑似虛高，必須強制重算，不受 12 小時快取保護限制。
+    perf_comment = _safe_str(payload.get("績效評語"))
+    hit_result_now = _safe_str(payload.get("命中結果"))
+    target_px_now = (
+        _safe_float(payload.get("賣出目標1"))
+        or _safe_float(payload.get("第一壓力價"))
+        or _safe_float(payload.get("突破確認價_隔日"))
+        or _safe_float(payload.get("近端壓力"))
+    )
+    latest_px_now = _safe_float(payload.get("最新價"))
+    old_target_success = _normalize_bool(payload.get("是否達標_回測"))
+    if "V115" in perf_comment:
+        return True
+    if "是否曾達標_回測" not in payload:
+        return True
+    if old_target_success and target_px_now not in [None, 0] and latest_px_now not in [None, 0] and latest_px_now < target_px_now * 0.995:
+        return True
+    if hit_result_now == "達標" and target_px_now not in [None, 0] and latest_px_now not in [None, 0] and latest_px_now < target_px_now * 0.995:
+        return True
+
     # 已有 20 日績效且最近 12 小時更新過，就不重複抓。
     has_any = any(_safe_float(payload.get(c)) is not None for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"])
     last = pd.to_datetime(_safe_str(payload.get("追蹤更新時間")), errors="coerce")
@@ -3608,7 +3680,12 @@ def _backfill_perf_columns(
 
             rec_date_text = _safe_str(payload.get("推薦日期"))
             stop_price = _safe_float(payload.get("停損參考")) or _safe_float(payload.get("停損價"))
-            target_price = _safe_float(payload.get("賣出目標1")) or _safe_float(payload.get("近端壓力"))
+            target_price = (
+                _safe_float(payload.get("賣出目標1"))
+                or _safe_float(payload.get("第一壓力價"))
+                or _safe_float(payload.get("突破確認價_隔日"))
+                or _safe_float(payload.get("近端壓力"))
+            )
             metrics = _calc_forward_metrics_from_history(
                 hist_df,
                 rec_date_text,
@@ -5119,7 +5196,7 @@ def main():
                         continue
                     src = edit_map[rec_id]
                     for c in [c for c in master.columns if c in src]:
-                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
+                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
                             continue
                         master.at[idx, c] = src.get(c)
                     recalc = _recalc_row(master.loc[idx].to_dict())
@@ -5201,7 +5278,7 @@ def main():
             st.dataframe(
                 _safe_display_df(show_god[_unique_existing_cols(show_god, [
                     "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分", "上漲機率估計%", "上漲機率等級", "買點分級", "風險說明", "股神推論邏輯",
-                    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "停損價", "賣出目標1", "賣出目標2", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
+                    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "停損價", "賣出目標1", "賣出目標2", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
                 ])]),
                 use_container_width=True,
                 hide_index=True,
@@ -5318,7 +5395,7 @@ def main():
         with sub_tabs[3]:
             detail_cols = [c for c in [
                 "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
-                "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益金額", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+                "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益金額", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
                 "是否達停損", "是否達目標1", "是否達目標2", "推薦日期", "持有天數", "推薦理由摘要"
             ] if c in live_df.columns]
             st.dataframe(_safe_display_df(_format_df(live_df[_unique_existing_cols(live_df, detail_cols)])), use_container_width=True, hide_index=True)
