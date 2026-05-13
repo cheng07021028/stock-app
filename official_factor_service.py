@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""V108 官方因子快取服務
+"""V108B 官方因子快取服務
 
 目的：
 - 把法人、營收、PER/EPS 類資料集中在獨立服務層，不直接塞進 07 股神推薦。
@@ -42,9 +42,9 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
-CACHE_VERSION = "v108a_official_factor_ssl_fallback"
+CACHE_VERSION = "v108b_official_factor_endpoint_parse_fallback"
 REQUEST_TIMEOUT = 12
-USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V108A; official-factor-cache)"
+USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V108B; official-factor-cache)"
 
 FACTOR_COLUMNS = [
     "股票代號",
@@ -91,6 +91,8 @@ TWSE_BWIBBU_ALL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
 TWSE_MONTHLY_REVENUE_L = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
 TPEX_MONTHLY_REVENUE_O = "https://openapi.twse.com.tw/v1/opendata/t187ap05_O"
 TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
+TWSE_T86_OLD = "https://www.twse.com.tw/fund/T86"
+MOPS_REVENUE_HTML = "https://mops.twse.com.tw/nas/t21/{market}/t21sc03_{roc_year}_{month}_0.html"
 
 # V108A: collect concise data-source diagnostics instead of printing repeated SSL tracebacks.
 _REQUEST_NOTES: list[str] = []
@@ -206,11 +208,42 @@ def _json_safe(obj: Any) -> Any:
 
 
 def _response_to_json(resp: requests.Response) -> Any:
+    """Parse official response as JSON and fail with useful diagnostics.
+
+    Some TWSE/TPEX endpoints can return HTTP 200 with an empty body, HTML gateway
+    text, or text/plain JSON.  V108A counted the SSL fallback as success before
+    parse, so users saw "SSL fallback success" followed by "Expecting value".
+    V108B only treats a source as usable after the body is non-empty and JSON can
+    actually be parsed.
+    """
+    text = (resp.text or "").strip("\ufeff \n\r\t")
+    if not text:
+        raise RuntimeError(f"官方回傳空內容 HTTP {getattr(resp, 'status_code', '')}")
     try:
         return resp.json()
     except Exception:
-        text = resp.text.strip("\ufeff \n\r\t")
+        pass
+    if text.startswith("<"):
+        title = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.I | re.S)
+        brief = re.sub(r"\s+", " ", title.group(1)).strip() if title else text[:80]
+        raise RuntimeError(f"官方回傳 HTML，非 JSON：{brief}")
+    try:
         return json.loads(text)
+    except Exception as exc:
+        snippet = re.sub(r"\s+", " ", text[:120]).strip()
+        raise RuntimeError(f"JSON 解析失敗：{exc}; 內容片段={snippet}")
+
+
+def _response_to_text(resp: requests.Response) -> str:
+    if not getattr(resp, "encoding", None):
+        try:
+            resp.encoding = resp.apparent_encoding or "utf-8"
+        except Exception:
+            resp.encoding = "utf-8"
+    text = (resp.text or "").strip("\ufeff \n\r\t")
+    if not text:
+        raise RuntimeError(f"官方回傳空內容 HTTP {getattr(resp, 'status_code', '')}")
+    return text
 
 
 def _compact_error(exc: Exception) -> str:
@@ -222,17 +255,14 @@ def _compact_error(exc: Exception) -> str:
     return text
 
 
-def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
-    """Fetch JSON with certificate fallback for TWSE public endpoints.
-
-    Streamlit Cloud / Python 3.14 can fail TWSE certificates with
-    `Missing Subject Key Identifier`.  We first try normal verification,
-    then certifi, and only for known TWSE/TPEX public read-only endpoints
-    use `verify=False` as last-resort fallback.
-    """
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json,text/plain,*/*"}
+def _request_with_fallback(url: str, params: dict[str, Any] | None = None) -> tuple[requests.Response, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json,text/plain,text/html,*/*",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
     last_exc: Exception | None = None
-
     attempts: list[tuple[str, Any]] = [("SSL正常", True)]
     if certifi is not None:
         attempts.append(("certifi憑證", certifi.where()))
@@ -248,13 +278,34 @@ def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
                     pass
             r = requests.get(url, params=params or {}, headers=headers, timeout=REQUEST_TIMEOUT, verify=verify_arg)
             r.raise_for_status()
-            if mode != "SSL正常":
-                _note_once(f"{mode}成功：{url.split('?')[0]}")
-            return _response_to_json(r)
+            return r, mode
         except Exception as exc:
             last_exc = exc
             continue
     raise RuntimeError(_compact_error(last_exc or Exception("unknown request error")))
+
+
+def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
+    """Fetch JSON with certificate and body-parse fallback for TWSE public endpoints."""
+    try:
+        r, mode = _request_with_fallback(url, params=params)
+        data = _response_to_json(r)
+        if mode != "SSL正常":
+            _note_once(f"{mode}成功且JSON可解析：{url.split('?')[0]}")
+        return data
+    except Exception as exc:
+        raise RuntimeError(_compact_error(exc))
+
+
+def _get_text(url: str, params: dict[str, Any] | None = None) -> str:
+    try:
+        r, mode = _request_with_fallback(url, params=params)
+        text = _response_to_text(r)
+        if mode != "SSL正常":
+            _note_once(f"{mode}成功且內容可讀：{url.split('?')[0]}")
+        return text
+    except Exception as exc:
+        raise RuntimeError(_compact_error(exc))
 
 
 def _extract_first(row: dict[str, Any], keys: Iterable[str]) -> Any:
@@ -492,6 +543,86 @@ def fetch_twse_bwibbu_all() -> tuple[pd.DataFrame, str]:
         return pd.DataFrame(), f"TWSE PER/PBR 取得失敗：{exc}"
 
 
+def _recent_revenue_months(n: int = 4) -> list[tuple[int, int]]:
+    today = dt.date.today().replace(day=1)
+    out: list[tuple[int, int]] = []
+    cur_year = today.year
+    cur_month = today.month - 1
+    if cur_month <= 0:
+        cur_year -= 1
+        cur_month = 12
+    for _ in range(n):
+        out.append((cur_year - 1911, cur_month))
+        cur_month -= 1
+        if cur_month <= 0:
+            cur_year -= 1
+            cur_month = 12
+    return out
+
+
+def _fetch_mops_monthly_revenue_html() -> tuple[pd.DataFrame, str]:
+    """Fallback parser for MOPS monthly revenue HTML.
+
+    OpenAPI may return an empty body on some Streamlit Cloud routes.  This fallback
+    reads official MOPS HTML tables for the latest few months and extracts a
+    conservative subset.
+    """
+    msgs: list[str] = []
+    out: list[dict[str, Any]] = []
+    market_map = [("上市", "sii"), ("上櫃", "otc")]
+    for roc_year, month in _recent_revenue_months(4):
+        got_any = False
+        for market_name, market_key in market_map:
+            url = MOPS_REVENUE_HTML.format(market=market_key, roc_year=roc_year, month=month)
+            try:
+                html = _get_text(url)
+                tables = pd.read_html(html)
+                cnt = 0
+                for tb in tables:
+                    if tb is None or tb.empty:
+                        continue
+                    flat_cols = []
+                    for c in tb.columns:
+                        if isinstance(c, tuple):
+                            flat_cols.append("_".join(_safe_str(x) for x in c if _safe_str(x)))
+                        else:
+                            flat_cols.append(_safe_str(c))
+                    tb = tb.copy()
+                    tb.columns = flat_cols
+                    code_col = next((c for c in tb.columns if "公司代號" in c or "代號" == c), "")
+                    if not code_col:
+                        continue
+                    for _, r in tb.iterrows():
+                        code = _normalize_code(r.get(code_col, ""))
+                        if not code:
+                            continue
+                        row = {str(k): r.get(k) for k in tb.columns}
+                        revenue = _extract_first(row, ["當月營收", "營業收入_當月營收", "營業收入-當月營收", "本月營收"])
+                        mom = _extract_first(row, ["上月比較增減(%)", "上月比較增減％", "上月比較增減", "營收月增率"])
+                        yoy = _extract_first(row, ["去年同月增減(%)", "去年同月增減％", "去年同月增減", "營收年增率"])
+                        acc_yoy = _extract_first(row, ["前期比較增減(%)", "前期比較增減％", "累計營收年增率", "累計增減(%)"])
+                        out.append({
+                            "股票代號": code,
+                            "當月營收": _to_float(revenue),
+                            "月營收MoM%": _to_float(mom),
+                            "月營收YoY%": _to_float(yoy),
+                            "累計營收YoY%": _to_float(acc_yoy),
+                            "營收年月": f"{roc_year + 1911}{month:02d}",
+                            "營收資料源": f"MOPS_HTML_{market_name}",
+                        })
+                        cnt += 1
+                if cnt:
+                    got_any = True
+                    msgs.append(f"MOPS HTML {market_name} {roc_year}/{month} 取得 {cnt} 筆。")
+            except Exception as exc:
+                msgs.append(f"MOPS HTML {market_name} {roc_year}/{month} 失敗：{exc}")
+        if got_any:
+            break
+    if not out:
+        return pd.DataFrame(), " / ".join(msgs[-8:])
+    return pd.DataFrame(out).drop_duplicates("股票代號", keep="first"), " / ".join(msgs[-8:])
+
+
 def fetch_monthly_revenue() -> tuple[pd.DataFrame, str]:
     """上市/上櫃月營收，使用 TWSE OpenAPI MOPS opendata 類資料。"""
     endpoints = [("上市", TWSE_MONTHLY_REVENUE_L), ("上櫃", TPEX_MONTHLY_REVENUE_O)]
@@ -528,7 +659,10 @@ def fetch_monthly_revenue() -> tuple[pd.DataFrame, str]:
         except Exception as exc:
             msgs.append(f"{market}月營收取得失敗：{exc}")
     if not out:
-        return pd.DataFrame(), " / ".join(msgs)
+        fb_df, fb_msg = _fetch_mops_monthly_revenue_html()
+        if fb_df is not None and not fb_df.empty:
+            return fb_df, " / ".join(msgs + ["OpenAPI 月營收失敗，改用 MOPS HTML 備援。", fb_msg])
+        return pd.DataFrame(), " / ".join(msgs + ([fb_msg] if fb_msg else []))
     df = pd.DataFrame(out).drop_duplicates("股票代號", keep="first")
     return df, " / ".join(msgs)
 
@@ -555,12 +689,20 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
     msgs: list[str] = []
     for date_text in _recent_weekdays(max(days, 3)):
         try:
-            params = {"date": date_text, "selectType": "ALLBUT0999", "response": "json"}
-            data = _get_json(TWSE_T86, params=params)
+            params = {"date": date_text, "selectType": "ALLBUT0999", "response": "json", "_": int(time.time() * 1000)}
+            data = None
+            last_t86_error = ""
+            for endpoint in [TWSE_T86, TWSE_T86_OLD]:
+                try:
+                    data = _get_json(endpoint, params=params)
+                    break
+                except Exception as exc:
+                    last_t86_error = _compact_error(exc)
+                    data = None
             fields = data.get("fields") if isinstance(data, dict) else None
             rows = data.get("data") if isinstance(data, dict) else None
             if not fields or not rows:
-                msgs.append(f"{date_text} T86 無資料。")
+                msgs.append(f"{date_text} T86 無資料或格式不可用。{last_t86_error}")
                 continue
             field_map = {str(f).strip(): i for i, f in enumerate(fields)}
 
@@ -812,6 +954,8 @@ def build_official_factor_cache(
         "market_filter": market_filter,
         "limit": limit or 0,
         "ssl_fallback_supported": True,
+        "endpoint_parse_fallback_supported": True,
+        "mops_html_revenue_fallback_supported": True,
     }
     if save and should_save:
         save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
