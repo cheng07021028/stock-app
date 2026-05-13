@@ -81,7 +81,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PERF_TRACKING_VERSION = "v100_night_battle_list_sync_v94"
 PFX = "godpick_list_"
-NIGHT_BATTLE_LIST_VERSION = "V96_20260513_recommend_list_scalar_assign_hotfix"
+NIGHT_BATTLE_LIST_VERSION = "V97_20260513_recommend_list_final_safe_hotfix"
 
 # V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
 # 不重算 07 推薦核心，避免拖慢頁面。
@@ -323,6 +323,89 @@ def _is_blank_value(v: Any) -> bool:
     except Exception:
         pass
     return str(v).strip() in {"", "None", "none", "nan", "NaN", "NAN", "<NA>", "NaT"}
+
+
+def _cell_safe_value(v: Any) -> Any:
+    """V97：寫入 DataFrame 單一儲存格前，先把 list/dict/Series/array 轉成安全字串。
+    Streamlit Cloud / pandas 3.x 對 object 欄位寫入 list-like 值時，可能把它當成多欄展開，
+    導致 TypeError。本函式確保推薦清單舊 JSON 欄位不會把整頁打掛。
+    """
+    try:
+        if isinstance(v, pd.Series):
+            vals = [x for x in v.tolist() if not _is_blank_value(x)]
+            if not vals:
+                return ""
+            return vals[0] if len(vals) == 1 else " / ".join(str(x) for x in vals)
+    except Exception:
+        pass
+    try:
+        if isinstance(v, pd.DataFrame):
+            return v.to_json(force_ascii=False)
+    except Exception:
+        pass
+    if isinstance(v, dict):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    if isinstance(v, (list, tuple, set)):
+        vals = []
+        for item in list(v):
+            if not _is_blank_value(item):
+                vals.append(str(item))
+        return " / ".join(vals)
+    try:
+        # numpy array / pandas ExtensionArray 等 list-like 物件保底處理。
+        if hasattr(v, "tolist") and not isinstance(v, (str, bytes)):
+            vv = v.tolist()
+            if isinstance(vv, list):
+                vals = [str(item) for item in vv if not _is_blank_value(item)]
+                return " / ".join(vals)
+            return vv
+    except Exception:
+        pass
+    return v
+
+
+def _safe_set_cell(df: pd.DataFrame, row_label: Any, col_name: str, value: Any) -> None:
+    """V97：最保守單格寫入，避免 pandas 對舊 JSON 混合型欄位報 TypeError。"""
+    if df is None or col_name not in df.columns:
+        return
+    try:
+        if str(df[col_name].dtype) != "object":
+            df[col_name] = df[col_name].astype("object")
+    except Exception:
+        pass
+    val = _cell_safe_value(value)
+    try:
+        rpos = df.index.get_loc(row_label)
+        cpos = df.columns.get_loc(col_name)
+        if isinstance(rpos, slice):
+            rpos = rpos.start
+        elif not isinstance(rpos, int):
+            try:
+                rpos = int(list(rpos)[0])
+            except Exception:
+                rpos = 0
+        if isinstance(cpos, slice):
+            cpos = cpos.start
+        elif not isinstance(cpos, int):
+            try:
+                cpos = int(list(cpos)[0])
+            except Exception:
+                cpos = 0
+        df.iat[rpos, cpos] = val
+        return
+    except Exception:
+        pass
+    try:
+        df.loc[row_label, col_name] = val
+    except Exception:
+        try:
+            df[col_name] = df[col_name].astype("object")
+            df.loc[row_label, col_name] = str(val)
+        except Exception:
+            pass
 
 
 def _clean_display_df(df: pd.DataFrame, keep_cols: list[str] | None = None, drop_empty_cols: bool = True) -> pd.DataFrame:
@@ -738,7 +821,7 @@ def _backfill_v10_columns(df: pd.DataFrame) -> pd.DataFrame:
     # v16 型別安全修正：
     # 這些欄位有些原本被 pandas 判斷為 float / bool / category，
     # 但補值時會寫入「拉回布局、等待回測」等文字；若不先轉 object，
-    # Streamlit Cloud 會在 x.at[idx, c] = v 時噴 TypeError。
+    # Streamlit Cloud 會在 _safe_set_cell(x, idx, c, v) 時噴 TypeError。
     for c in v10_cols:
         if c in x.columns:
             try:
@@ -754,11 +837,11 @@ def _backfill_v10_columns(df: pd.DataFrame) -> pd.DataFrame:
         for c, v in fill.items():
             if c in x.columns and _safe_str(x.at[idx, c]) in ["", "None", "nan", "NaN"]:
                 try:
-                    x.at[idx, c] = v
+                    _safe_set_cell(x, idx, c, v)
                 except Exception:
                     # 保底：再次轉 object 後寫入，避免 dtype 衝突讓整頁掛掉。
                     x[c] = x[c].astype("object")
-                    x.at[idx, c] = v
+                    _safe_set_cell(x, idx, c, v)
     for c in x.columns:
         if x[c].dtype == object:
             x[c] = x[c].replace(["None", "nan", "NaN"], "")
@@ -817,7 +900,7 @@ def _classify_night_pattern(row: pd.Series) -> str:
 
 
 def _backfill_night_battle_columns(x: pd.DataFrame) -> pd.DataFrame:
-    """V94：讓 10_推薦清單完整承接 07 夜間隔日股神欄位。"""
+    """V97：讓 10_推薦清單完整承接 07 夜間隔日股神欄位，並安全相容舊 JSON 混合型資料。"""
     if x is None:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
     x = x.copy()
@@ -862,25 +945,25 @@ def _backfill_night_battle_columns(x: pd.DataFrame) -> pd.DataFrame:
             # V96 hotfix：用逐列 at 指派，避免 pandas 在 object/list/字串混合資料時
             # 將 list 當成可展開陣列而觸發 TypeError。
             for _idx, _val in zip(x.index[mask], vals):
-                x.at[_idx, target] = _val
+                _safe_set_cell(x, _idx, target, _val)
 
     if "進場型態_隔日" in x.columns:
         mask = x["進場型態_隔日"].map(_is_blank_value)
         if mask.any():
             vals = x.loc[mask].apply(_classify_night_pattern, axis=1).tolist()
             for _idx, _val in zip(x.index[mask], vals):
-                x.at[_idx, "進場型態_隔日"] = _val
+                _safe_set_cell(x, _idx, "進場型態_隔日", _val)
     if "隔日建議動作" in x.columns:
         mask = x["隔日建議動作"].map(_is_blank_value)
         if mask.any():
             vals = x.loc[mask].apply(_classify_night_action, axis=1).tolist()
             for _idx, _val in zip(x.index[mask], vals):
-                x.at[_idx, "隔日建議動作"] = _val
+                _safe_set_cell(x, _idx, "隔日建議動作", _val)
     if "資料完整度" in x.columns:
         mask = x["資料完整度"].map(_is_blank_value)
         if mask.any():
             for _idx in x.index[mask]:
-                x.at[_idx, "資料完整度"] = "舊資料相容補欄"
+                _safe_set_cell(x, _idx, "資料完整度", "舊資料相容補欄")
 
     for c in NIGHT_NUMERIC_COLUMNS:
         if c in x.columns:
@@ -953,7 +1036,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         if mask.any():
             _vals = x.loc[mask].apply(_derive_list_prelaunch_grade, axis=1).tolist()
             for _idx, _val in zip(x.index[mask], _vals):
-                x.at[_idx, "起漲等級"] = _val
+                _safe_set_cell(x, _idx, "起漲等級", _val)
 
     if "買點分級" in x.columns:
         x["買點分級"] = x["買點分級"].fillna("").astype(str)
@@ -961,7 +1044,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         if mask.any():
             _vals = x.loc[mask].apply(_derive_list_buy_grade, axis=1).tolist()
             for _idx, _val in zip(x.index[mask], _vals):
-                x.at[_idx, "買點分級"] = _val
+                _safe_set_cell(x, _idx, "買點分級", _val)
 
     if "風險說明" in x.columns:
         x["風險說明"] = x["風險說明"].fillna("").astype(str)
@@ -969,7 +1052,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         if mask.any():
             _vals = x.loc[mask].apply(_derive_list_risk, axis=1).tolist()
             for _idx, _val in zip(x.index[mask], _vals):
-                x.at[_idx, "風險說明"] = _val
+                _safe_set_cell(x, _idx, "風險說明", _val)
 
     if "股神推論邏輯" in x.columns:
         x["股神推論邏輯"] = x["股神推論邏輯"].fillna("").astype(str)
@@ -977,7 +1060,7 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         if mask.any():
             _vals = x.loc[mask].apply(_derive_list_logic, axis=1).tolist()
             for _idx, _val in zip(x.index[mask], _vals):
-                x.at[_idx, "股神推論邏輯"] = _val
+                _safe_set_cell(x, _idx, "股神推論邏輯", _val)
     num_cols = [
         "推薦總分", "上漲機率估計%", "大盤橋接分數", "大盤可參考分數", "大盤加權分", "大盤影響加減分", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", 
         "同類股領先幅度", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
