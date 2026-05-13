@@ -27,6 +27,7 @@ import base64
 import io
 import json
 import time
+import re
 
 import pandas as pd
 import requests
@@ -81,7 +82,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PERF_TRACKING_VERSION = "v100_night_battle_list_sync_v94"
 PFX = "godpick_list_"
-NIGHT_BATTLE_LIST_VERSION = "V97_20260513_recommend_list_final_safe_hotfix"
+NIGHT_BATTLE_LIST_VERSION = "V101_20260513_night_hit_tracking"
 
 # V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
 # 不重算 07 推薦核心，避免拖慢頁面。
@@ -255,6 +256,21 @@ GODPICK_RECORD_COLUMNS = [
     "模式績效標籤",
     "備註",
 ]
+
+# V101：隔日作戰命中追蹤欄位。
+# 只在使用者按下「更新隔日命中追蹤」時抓歷史K線，不在頁面載入時自動抓，避免拖慢顯示。
+NIGHT_HIT_TRACKING_COLUMNS = [
+    "作戰追蹤狀態", "進場點命中", "進場點命中日期",
+    "突破價命中", "突破價命中日期",
+    "停損價觸發", "停損價觸發日期",
+    "第一壓力命中", "第一壓力命中日期",
+    "隔日最高漲幅%", "3日最高漲幅%", "5日最高漲幅%", "10日最高漲幅%",
+    "隔日最低回撤%", "3日最低回撤%", "5日最低回撤%", "10日最低回撤%",
+    "作戰命中摘要", "作戰追蹤資料源", "作戰追蹤更新時間",
+]
+for _v101_col in NIGHT_HIT_TRACKING_COLUMNS:
+    if _v101_col not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v101_col)
 
 
 # >>> V72_FACTOR_ENRICH_HELPER
@@ -1016,6 +1032,234 @@ def _render_night_battle_tracker(filtered_df: pd.DataFrame) -> None:
         show_cols = list(x.columns[:25])
     _safe_dataframe(_format_show_df(x[show_cols]), keep_cols=show_cols, use_container_width=True, height=360)
     st.caption("V94：此區只追蹤與顯示 07 已產生的夜間隔日欄位；若資料來源是舊快取，會以既有欄位安全補值，不會重新推薦、不會拖慢頁面。")
+
+
+# =========================================================
+# V101：夜間隔日作戰命中追蹤
+# =========================================================
+def _extract_price_range_v101(value: Any) -> tuple[float | None, float | None]:
+    """從 50.5～51.2 / 50.5-51.2 / 約50.5 這類文字擷取價格區間。"""
+    try:
+        if value is None or _is_blank_value(value):
+            return None, None
+        text = str(value).replace(",", "").replace("－", "-").replace("—", "-").replace("～", "-").replace("~", "-")
+        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)]
+        if not nums:
+            return None, None
+        if len(nums) == 1:
+            return nums[0], nums[0]
+        return min(nums[:2]), max(nums[:2])
+    except Exception:
+        return None, None
+
+
+def _row_recommend_date_v101(row: Any) -> date | None:
+    for c in ["推薦日期", "推薦時間", "建立時間", "更新時間"]:
+        try:
+            v = row.get(c) if hasattr(row, "get") else None
+            d = pd.to_datetime(v, errors="coerce")
+            if pd.notna(d):
+                return d.date()
+        except Exception:
+            continue
+    return None
+
+
+def _base_price_v101(row: Any) -> float | None:
+    for c in ["推薦價格", "推薦日價格", "預估進場點", "最新價", "收盤價"]:
+        try:
+            lo, hi = _extract_price_range_v101(row.get(c) if hasattr(row, "get") else None)
+            if lo is not None and hi is not None and hi > 0:
+                return (lo + hi) / 2
+        except Exception:
+            continue
+    return None
+
+
+def _first_hit_date_v101(hist: pd.DataFrame, low_bound: float | None = None, high_bound: float | None = None, mode: str = "range") -> str:
+    """回傳第一個觸價日期。mode=range / break_high / break_low。"""
+    if hist is None or hist.empty:
+        return ""
+    try:
+        for _, r in hist.iterrows():
+            high = _safe_float(r.get("最高價"), None)
+            low = _safe_float(r.get("最低價"), None)
+            d = r.get("日期")
+            if high is None or low is None:
+                continue
+            hit = False
+            if mode == "break_high" and high_bound is not None:
+                hit = high >= float(high_bound)
+            elif mode == "break_low" and low_bound is not None:
+                hit = low <= float(low_bound)
+            else:
+                if low_bound is not None and high_bound is not None:
+                    hit = (low <= float(high_bound)) and (high >= float(low_bound))
+            if hit:
+                return pd.to_datetime(d).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+    return ""
+
+
+def _horizon_perf_v101(hist: pd.DataFrame, base_price: float | None, n: int) -> tuple[float | None, float | None]:
+    if hist is None or hist.empty or base_price is None or base_price <= 0:
+        return None, None
+    try:
+        h = hist.head(int(n)).copy()
+        if h.empty:
+            return None, None
+        max_high = pd.to_numeric(h.get("最高價"), errors="coerce").max()
+        min_low = pd.to_numeric(h.get("最低價"), errors="coerce").min()
+        up = ((float(max_high) - float(base_price)) / float(base_price)) * 100 if pd.notna(max_high) else None
+        dd = ((float(min_low) - float(base_price)) / float(base_price)) * 100 if pd.notna(min_low) else None
+        return up, dd
+    except Exception:
+        return None, None
+
+
+def _calc_night_hit_for_row_v101(row: Any, timeout: int = 7) -> dict[str, Any]:
+    code = _normalize_code(row.get("股票代號") if hasattr(row, "get") else "")
+    if not code:
+        return {"作戰追蹤狀態": "缺股票代號", "作戰追蹤更新時間": _now_text()}
+    rec_d = _row_recommend_date_v101(row)
+    if rec_d is None:
+        return {"作戰追蹤狀態": "缺推薦日期", "作戰追蹤更新時間": _now_text()}
+    # 推薦當日不算命中，從隔一個日曆日開始抓，實際交易日由資料源決定。
+    start = rec_d + timedelta(days=1)
+    end = date.today()
+    if end < start:
+        return {"作戰追蹤狀態": "尚未到隔日", "作戰追蹤更新時間": _now_text()}
+    market = _safe_str(row.get("市場別") if hasattr(row, "get") else "")
+    name = _safe_str(row.get("股票名稱") if hasattr(row, "get") else "")
+    hist, source = fetch_multi_source_history(code, name, market, start_date=start, end_date=end, timeout=timeout)
+    if hist is None or hist.empty:
+        return {"作戰追蹤狀態": "歷史K線不足", "作戰追蹤資料源": source, "作戰追蹤更新時間": _now_text()}
+    hist = hist.copy()
+    hist["日期"] = pd.to_datetime(hist["日期"], errors="coerce")
+    hist = hist.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+    base = _base_price_v101(row)
+    entry_lo, entry_hi = _extract_price_range_v101(_first_available_value(row, ["預估進場點", "股神進場區間", "推薦價格", "推薦日價格", "最新價"], ""))
+    pull_lo, pull_hi = _extract_price_range_v101(_first_available_value(row, ["回測承接價", "近端支撐", "主要支撐"], ""))
+    break_lo, break_hi = _extract_price_range_v101(_first_available_value(row, ["突破確認價_隔日", "突破確認價", "近端壓力"], ""))
+    stop_lo, stop_hi = _extract_price_range_v101(_first_available_value(row, ["停損價_隔日", "停損價", "停損參考", "失效價位"], ""))
+    pressure_lo, pressure_hi = _extract_price_range_v101(_first_available_value(row, ["第一壓力價", "賣出目標1", "近端壓力"], ""))
+    # 進場點若沒有明確區間，用回測承接價補；仍沒有才用推薦價。
+    if entry_lo is None and pull_lo is not None:
+        entry_lo, entry_hi = pull_lo, pull_hi
+    entry_date = _first_hit_date_v101(hist, entry_lo, entry_hi, mode="range") if entry_lo is not None else ""
+    break_date = _first_hit_date_v101(hist, high_bound=break_hi, mode="break_high") if break_hi is not None else ""
+    stop_date = _first_hit_date_v101(hist, low_bound=stop_lo, mode="break_low") if stop_lo is not None else ""
+    pressure_date = _first_hit_date_v101(hist, high_bound=pressure_hi, mode="break_high") if pressure_hi is not None else ""
+    result: dict[str, Any] = {
+        "進場點命中": "是" if entry_date else "否",
+        "進場點命中日期": entry_date,
+        "突破價命中": "是" if break_date else "否",
+        "突破價命中日期": break_date,
+        "停損價觸發": "是" if stop_date else "否",
+        "停損價觸發日期": stop_date,
+        "第一壓力命中": "是" if pressure_date else "否",
+        "第一壓力命中日期": pressure_date,
+        "作戰追蹤資料源": source,
+        "作戰追蹤更新時間": _now_text(),
+    }
+    for n, label in [(1, "隔日"), (3, "3日"), (5, "5日"), (10, "10日")]:
+        up, dd = _horizon_perf_v101(hist, base, n)
+        result[f"{label}最高漲幅%"] = round(up, 2) if up is not None else None
+        result[f"{label}最低回撤%"] = round(dd, 2) if dd is not None else None
+    if stop_date:
+        status = "已觸發停損"
+    elif pressure_date:
+        status = "第一壓力命中"
+    elif break_date:
+        status = "突破價命中"
+    elif entry_date:
+        status = "進場點命中"
+    else:
+        status = "追蹤中"
+    result["作戰追蹤狀態"] = status
+    result["作戰命中摘要"] = f"進場:{result['進場點命中']}｜突破:{result['突破價命中']}｜停損:{result['停損價觸發']}｜壓力:{result['第一壓力命中']}"
+    return result
+
+
+def _update_night_hit_tracking_v101(df: pd.DataFrame, max_rows: int = 60, show_progress: bool = True) -> tuple[pd.DataFrame, dict[str, Any]]:
+    x = _ensure_record_columns(df).copy() if df is not None else pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+    for c in NIGHT_HIT_TRACKING_COLUMNS:
+        if c not in x.columns:
+            x[c] = ""
+    if x.empty:
+        return x, {"processed": 0, "success": 0, "fail": 0, "messages": ["無推薦清單資料"]}
+    # 優先更新尚未追蹤、有夜間欄位或近期推薦的資料。
+    work = x.copy()
+    work["_rec_dt"] = pd.to_datetime(work.get("推薦日期"), errors="coerce")
+    needs = work["作戰追蹤更新時間"].map(_is_blank_value) if "作戰追蹤更新時間" in work.columns else pd.Series([True] * len(work), index=work.index)
+    candidates = work[needs].sort_values("_rec_dt", ascending=False, na_position="last").head(int(max_rows))
+    if candidates.empty:
+        candidates = work.sort_values("_rec_dt", ascending=False, na_position="last").head(int(max_rows))
+    bar = st.progress(0.0, text="準備更新隔日命中追蹤...") if show_progress else None
+    processed = success = fail = 0
+    errors: list[str] = []
+    total = max(len(candidates), 1)
+    for i, (idx, row) in enumerate(candidates.iterrows(), start=1):
+        try:
+            if bar is not None:
+                bar.progress(min(i / total, 1.0), text=f"更新 {i}/{total}：{row.get('股票代號', '')} {row.get('股票名稱', '')}")
+            res = _calc_night_hit_for_row_v101(row, timeout=7)
+            for c, v in res.items():
+                if c not in x.columns:
+                    x[c] = ""
+                _safe_set_cell(x, idx, c, v)
+            processed += 1
+            if str(res.get("作戰追蹤狀態", "")).strip() in {"歷史K線不足", "缺股票代號", "缺推薦日期"}:
+                fail += 1
+            else:
+                success += 1
+            # Streamlit Cloud 防卡：每批最多跑 max_rows，不在這裡長時間休眠。
+        except Exception as e:
+            processed += 1
+            fail += 1
+            errors.append(f"{row.get('股票代號', '')}:{str(e)[:80]}")
+    if bar is not None:
+        bar.empty()
+    x = x.drop(columns=[c for c in ["_rec_dt"] if c in x.columns], errors="ignore")
+    return _ensure_record_columns(x), {"processed": processed, "success": success, "fail": fail, "messages": errors[:8]}
+
+
+def _render_night_hit_tracker_v101(filtered_df: pd.DataFrame) -> None:
+    render_pro_section("隔日命中追蹤｜進場點 / 突破價 / 停損價")
+    if filtered_df is None or filtered_df.empty:
+        st.info("目前篩選條件下沒有資料可追蹤。")
+        return
+    x = _ensure_record_columns(filtered_df).copy()
+    for c in NIGHT_HIT_TRACKING_COLUMNS:
+        if c not in x.columns:
+            x[c] = ""
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("已追蹤", int((~x["作戰追蹤更新時間"].map(_is_blank_value)).sum()))
+    with c2:
+        st.metric("進場命中", int((x["進場點命中"].astype(str) == "是").sum()))
+    with c3:
+        st.metric("突破命中", int((x["突破價命中"].astype(str) == "是").sum()))
+    with c4:
+        st.metric("壓力命中", int((x["第一壓力命中"].astype(str) == "是").sum()))
+    with c5:
+        st.metric("停損觸發", int((x["停損價觸發"].astype(str) == "是").sum()))
+    show_cols = [
+        "推薦日期", "股票代號", "股票名稱", "進場型態_隔日", "隔日建議動作",
+        "預估進場點", "突破確認價_隔日", "停損價_隔日", "第一壓力價",
+        "作戰追蹤狀態", "進場點命中", "突破價命中", "第一壓力命中", "停損價觸發",
+        "隔日最高漲幅%", "3日最高漲幅%", "5日最高漲幅%", "10日最高漲幅%",
+        "作戰命中摘要", "作戰追蹤更新時間",
+    ]
+    show_cols = [c for c in show_cols if c in x.columns]
+    try:
+        sort_col = "作戰追蹤更新時間" if "作戰追蹤更新時間" in x.columns else "推薦日期"
+        x = x.sort_values(sort_col, ascending=False, na_position="last")
+    except Exception:
+        pass
+    _safe_dataframe(_format_show_df(x[show_cols]), keep_cols=show_cols, use_container_width=True, height=330)
+    st.caption("V101：此區只顯示已追蹤結果；只有按下『更新隔日命中追蹤』才會抓歷史K線並寫回，避免影響 10_推薦清單開啟速度。")
 
 
 def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -2162,7 +2406,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V100 夜間隔日作戰追蹤版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
+    st.caption(f"推薦清單 V101 夜間隔日命中追蹤版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -2224,6 +2468,28 @@ def main():
             if formal_summary.get("time_guard"):
                 st.warning("本次觸發時間防呆，請再按一次『正式N日績效回補』繼續補剩餘資料。")
             st.rerun()
+
+        if st.button("🎯 更新隔日命中追蹤", use_container_width=True):
+            with st.spinner("V101：更新進場點 / 突破價 / 停損價 / 壓力價命中追蹤中..."):
+                hit_df, hit_summary = _update_night_hit_tracking_v101(
+                    df,
+                    max_rows=int(batch_stock_n),
+                    show_progress=True,
+                )
+                ok, msgs = _sync_records(hit_df)
+                st.session_state[_k("records_df")] = hit_df
+                _load_records_cached(force=True)
+            if ok:
+                st.success(
+                    f"V101 隔日命中追蹤完成：處理 {hit_summary.get('processed', 0)} 筆，"
+                    f"成功 {hit_summary.get('success', 0)} 筆，失敗/不足 {hit_summary.get('fail', 0)} 筆。"
+                )
+            else:
+                st.warning("V101 已完成畫面資料更新，但寫回 GitHub/Firestore 未完全成功。")
+            all_msgs = (hit_summary.get("messages") or []) + (msgs or [])
+            if all_msgs:
+                st.info("；".join([str(m) for m in all_msgs[:8]]))
+            st.rerun()
         load_msg = _safe_str(st.session_state.get(_k("load_msg"), ""))
         if load_msg:
             st.caption(load_msg)
@@ -2275,6 +2541,8 @@ def main():
             st.metric("平均推薦後20日%", format_number(avg20, 2))
 
     _render_night_battle_tracker(filtered_df)
+
+    _render_night_hit_tracker_v101(filtered_df)
 
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
 
