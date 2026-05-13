@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """
 godpick_weight_calibration.py
-v71 Pro：績效代理樣本＋多來源防卡＋防過擬合
+v99 Pro：夜間隔日股神欄位同步＋績效代理樣本＋多來源防卡＋防過擬合
 
 設計原則：
 - 不連外，不重新推薦，只讀既有推薦紀錄 / 推薦清單。
@@ -36,6 +36,32 @@ DATA_FILES = [
 SETTINGS_FILE = Path("godpick_user_settings.json")
 SUGGESTION_FILE = Path("godpick_weight_suggestions.json")
 
+
+# v99：07/8/10 夜間隔日股神新增欄位。
+# 14_股神權重校正仍維持 7_股神推薦原本 8 大權重，不新增不相容權重名稱；
+# 但校正時會把夜間股神總分、隔日進場分數、法人籌碼、基本面、估值等欄位納入各因子來源。
+NIGHT_SCORE_COLUMNS: Dict[str, List[str]] = {
+    "市場環境": ["市場環境分數", "大盤環境分數", "大盤風控分數"],
+    "技術結構": ["技術趨勢分數", "技術面分數", "趨勢分數", "夜間股神總分"],
+    "起漲前兆": ["隔日進場分數", "波段潛力分數", "營收成長分數", "EPS成長分數", "基本面成長分數"],
+    "類股熱度": ["類股熱度分數", "類股強度分數", "產業強度分數"],
+    "自動因子": ["夜間股神總分", "隔日實戰排序分", "推薦總分"],
+    "交易可行": ["隔日進場分數", "估值風險分數", "波段潛力分數", "R/R分數"],
+    "型態突破": ["技術趨勢分數", "隔日進場分數", "型態突破分數"],
+    "爆發力": ["量價動能分數", "法人籌碼分數", "大戶鎖碼分數", "夜間股神總分"],
+}
+
+NIGHT_TEXT_COLUMNS: Dict[str, List[str]] = {
+    "市場環境": ["大盤情境", "大盤狀態", "大盤分層"],
+    "技術結構": ["進場型態_隔日", "夜間股神建議", "隔日作戰策略", "買點分級"],
+    "起漲前兆": ["進場型態_隔日", "隔日建議動作", "夜間股神建議", "隔日作戰策略"],
+    "類股熱度": ["類別", "產業", "族群", "主題類別", "正式產業別"],
+    "自動因子": ["資料完整度", "夜間股神建議", "股神推論邏輯"],
+    "交易可行": ["隔日建議動作", "夜間股神建議", "隔日作戰策略", "風險說明"],
+    "型態突破": ["進場型態_隔日", "隔日建議動作", "隔日作戰策略"],
+    "爆發力": ["進場型態_隔日", "夜間股神建議", "股神推論邏輯"],
+}
+
 DEFAULT_WEIGHTS: Dict[str, int] = {
     "市場環境": 10,
     "技術結構": 15,
@@ -57,6 +83,14 @@ FACTOR_COLUMNS: Dict[str, List[str]] = {
     "型態突破": ["型態突破分數", "技術型態分數", "突破分數", "K線驗證分數", "型態分數"],
     "爆發力": ["爆發力分數", "量能因子分數", "量能分數", "量價分數", "主升段分數"],
 }
+
+
+# v99：把夜間隔日股神分數合併到原本 8 大權重因子來源，讓 14 校正結果可直接回寫 7_股神推薦。
+for _factor_name, _cols in NIGHT_SCORE_COLUMNS.items():
+    FACTOR_COLUMNS.setdefault(_factor_name, [])
+    for _col in _cols:
+        if _col not in FACTOR_COLUMNS[_factor_name]:
+            FACTOR_COLUMNS[_factor_name].insert(0, _col)
 
 PERF_COLUMNS: Dict[int, List[str]] = {
     1: ["推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "目前損益幅%", "損益幅%", "實際報酬%"],
@@ -285,13 +319,13 @@ def _score_text_value(v: Any, factor: str = "") -> Optional[float]:
     if not s:
         return None
     # 等級式文字
-    if "A" in s or "優先" in s or "股神級" in s or "高分" in s or "強烈" in s:
+    if "A" in s or "優先" in s or "股神級" in s or "高分" in s or "強烈" in s or "隔日突破型" in s or "剛起漲型" in s:
         return 88.0
-    if "B" in s or "確認" in s or "拉回可" in s or "可布局" in s or "中高" in s:
+    if "B" in s or "確認" in s or "拉回可" in s or "可布局" in s or "中高" in s or "回測承接型" in s or "小量" in s:
         return 76.0
-    if "C" in s or "觀察" in s or "等待" in s or "中性" in s:
+    if "C" in s or "觀察" in s or "等待" in s or "中性" in s or "夜間觀察型" in s or "波段潛伏型" in s:
         return 58.0
-    if "D" in s or "尚未" in s or "減碼" in s or "風險" in s or "不追" in s:
+    if "D" in s or "尚未" in s or "減碼" in s or "風險" in s or "不追" in s or "過熱等待型" in s or "暫不進場" in s:
         return 42.0
     # 大盤/市場字眼
     if factor == "市場環境":
@@ -369,7 +403,12 @@ def factor_candidate_sources(df: pd.DataFrame, factor: str) -> List[Tuple[pd.Ser
         "型態突破": ["型態名稱", "型態突破", "K線驗證標記", "進場時機", "推薦型態"],
         "爆發力": ["爆發力", "型態突破", "推薦等級", "推薦型態", "機會型態"],
     }
-    ts, ts_name = _text_score_series(df, text_cols_map.get(factor, []), factor)
+    # v99：補入 07/8/10 夜間隔日作戰文字欄位，舊紀錄也可用文字代理校正。
+    merged_text_cols = list(text_cols_map.get(factor, []))
+    for _c in NIGHT_TEXT_COLUMNS.get(factor, []):
+        if _c not in merged_text_cols:
+            merged_text_cols.insert(0, _c)
+    ts, ts_name = _text_score_series(df, merged_text_cols, factor)
     if int(ts.notna().sum()) > 0:
         out.append((ts, ts_name, "文字代理"))
 
@@ -999,11 +1038,11 @@ def save_applied_weights(weights: Dict[str, int], profile_name: str = "manual") 
         **existing,
         "original_default_weights": existing.get("original_default_weights", DEFAULT_WEIGHTS),
         "applied_weights": applied,
-        # v96：同步保留 7_股神推薦容易讀取的欄位，並用 updated_at 觸發 7 頁重新載入。
+        # v99：同步保留 7_股神推薦容易讀取的欄位，並用 updated_at 觸發 7 頁重新載入；夜間欄位仍回寫原本 8 大權重，避免 7 頁不相容。
         "score_weights": applied,
         "weight_source": "14_股神權重校正",
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "godpick_v96_weight_calibration_github_sync",
+        "version": "godpick_v99_night_weight_calibration_sync",
         "last_weight_calibration_profile": profile_name,
     }
     local_ok, local_msg = write_json(SETTINGS_FILE, payload)
