@@ -1002,19 +1002,58 @@ def install_light_checkbox_patch(page_key: str = "global") -> None:
     st._godpick_light_checkbox_patch_v116 = True
 
 
+def _call_streamlit_dataframe_bypass_safe(data: Any, **kwargs: Any) -> Any:
+    """V116 hotfix: safely render dataframe even when global table patch is not installed.
+
+    Earlier managed_dataframe always passed _godpick_bypass=True. That keyword is only
+    understood by our patched st.dataframe wrapper. On pages where the global patch is
+    disabled/uninstalled for performance, Streamlit's native dataframe receives the
+    private keyword and raises: rowMixin.dataframe() got an unexpected keyword argument.
+    """
+    try:
+        if getattr(st, "_godpick_table_patch_v105", False):
+            kw = dict(kwargs)
+            kw["_godpick_bypass"] = True
+            return st.dataframe(data, **kw)
+    except Exception:
+        pass
+    # Prefer the saved original renderer when available; otherwise use current native renderer.
+    renderer = getattr(st, "_godpick_original_dataframe_v105", None) or st.dataframe
+    clean_kwargs = dict(kwargs)
+    clean_kwargs.pop("_godpick_bypass", None)
+    return renderer(data, **clean_kwargs)
+
+
+def _call_streamlit_data_editor_bypass_safe(data: Any, **kwargs: Any) -> Any:
+    """V116 hotfix companion for st.data_editor private bypass keyword."""
+    try:
+        if getattr(st, "_godpick_table_patch_v105", False) or getattr(st, "_godpick_light_checkbox_patch_v116", False):
+            kw = dict(kwargs)
+            kw["_godpick_bypass"] = True
+            return st.data_editor(data, **kw)
+    except Exception:
+        pass
+    renderer = (
+        getattr(st, "_godpick_original_data_editor_v105", None)
+        or getattr(st, "_godpick_original_data_editor_v116_light", None)
+        or st.data_editor
+    )
+    clean_kwargs = dict(kwargs)
+    clean_kwargs.pop("_godpick_bypass", None)
+    return renderer(data, **clean_kwargs)
+
+
 def managed_dataframe(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> None:
     render_table_view_manager(table_key, table_label, df)
     filtered = apply_table_view(df, table_key)
     cols = render_column_manager(table_key, table_label, filtered, default_cols or (list(filtered.columns) if isinstance(filtered, pd.DataFrame) else []))
     show = apply_columns(filtered, table_key, cols or (list(filtered.columns) if isinstance(filtered, pd.DataFrame) else []), hide_empty_columns=hide_empty_columns)
-    kwargs["_godpick_bypass"] = True
-    return st.dataframe(show, **kwargs)
+    return _call_streamlit_dataframe_bypass_safe(show, **kwargs)
 
 
 def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> Any:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        kwargs["_godpick_bypass"] = True
-        return st.data_editor(df, **kwargs)
+        return _call_streamlit_data_editor_bypass_safe(df, **kwargs)
     original = df.copy()
     render_table_view_manager(table_key, table_label, original)
     filtered = apply_table_view(original, table_key)
@@ -1023,7 +1062,6 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
     cfg = kwargs.get("column_config")
     if isinstance(cfg, dict):
         kwargs["column_config"] = {k: v for k, v in cfg.items() if k in show.columns}
-    kwargs["_godpick_bypass"] = True
 
     if _has_checkbox_like_column(show):
         safe_key = _key_safe(table_key)
@@ -1032,7 +1070,7 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
         show = render_checkbox_bulk_controls(table_key, table_label, show)
         try:
             with st.form(form_key, clear_on_submit=False):
-                edited = st.data_editor(show, **kwargs)
+                edited = _call_streamlit_data_editor_bypass_safe(show, **kwargs)
                 submitted = st.form_submit_button("✅ 套用勾選 / 編輯結果", type="primary", use_container_width=True)
             if submitted and isinstance(edited, pd.DataFrame):
                 merged = _merge_edited_subset(original, edited)
