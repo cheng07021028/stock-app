@@ -25,6 +25,16 @@ import pandas as pd
 import requests
 
 try:
+    import certifi
+except Exception:  # pragma: no cover
+    certifi = None  # type: ignore
+
+try:
+    import urllib3
+except Exception:  # pragma: no cover
+    urllib3 = None  # type: ignore
+
+try:
     import streamlit as st
 except Exception:  # pragma: no cover
     st = None  # type: ignore
@@ -32,9 +42,9 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
-CACHE_VERSION = "v108_official_factor_cache_center"
+CACHE_VERSION = "v108a_official_factor_ssl_fallback"
 REQUEST_TIMEOUT = 12
-USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V108; official-factor-cache)"
+USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V108A; official-factor-cache)"
 
 FACTOR_COLUMNS = [
     "股票代號",
@@ -81,6 +91,23 @@ TWSE_BWIBBU_ALL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
 TWSE_MONTHLY_REVENUE_L = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
 TPEX_MONTHLY_REVENUE_O = "https://openapi.twse.com.tw/v1/opendata/t187ap05_O"
 TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
+
+# V108A: collect concise data-source diagnostics instead of printing repeated SSL tracebacks.
+_REQUEST_NOTES: list[str] = []
+
+
+def _note_once(msg: str) -> None:
+    if msg and msg not in _REQUEST_NOTES:
+        _REQUEST_NOTES.append(msg)
+
+
+def _is_twse_public_url(url: str) -> bool:
+    return any(host in str(url).lower() for host in [
+        "openapi.twse.com.tw",
+        "www.twse.com.tw",
+        "www.tpex.org.tw",
+        "mops.twse.com.tw",
+    ])
 
 
 def _now_text() -> str:
@@ -178,15 +205,56 @@ def _json_safe(obj: Any) -> Any:
     return _safe_str(obj)
 
 
-def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json,text/plain,*/*"}
-    r = requests.get(url, params=params or {}, headers=headers, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
+def _response_to_json(resp: requests.Response) -> Any:
     try:
-        return r.json()
+        return resp.json()
     except Exception:
-        text = r.text.strip("\ufeff \n\r\t")
+        text = resp.text.strip("\ufeff \n\r\t")
         return json.loads(text)
+
+
+def _compact_error(exc: Exception) -> str:
+    text = str(exc)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("HTTPSConnectionPool", "HTTPS")
+    if len(text) > 240:
+        text = text[:240] + "..."
+    return text
+
+
+def _get_json(url: str, params: dict[str, Any] | None = None) -> Any:
+    """Fetch JSON with certificate fallback for TWSE public endpoints.
+
+    Streamlit Cloud / Python 3.14 can fail TWSE certificates with
+    `Missing Subject Key Identifier`.  We first try normal verification,
+    then certifi, and only for known TWSE/TPEX public read-only endpoints
+    use `verify=False` as last-resort fallback.
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json,text/plain,*/*"}
+    last_exc: Exception | None = None
+
+    attempts: list[tuple[str, Any]] = [("SSL正常", True)]
+    if certifi is not None:
+        attempts.append(("certifi憑證", certifi.where()))
+    if _is_twse_public_url(url):
+        attempts.append(("SSL備援", False))
+
+    for mode, verify_arg in attempts:
+        try:
+            if verify_arg is False and urllib3 is not None:
+                try:
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                except Exception:
+                    pass
+            r = requests.get(url, params=params or {}, headers=headers, timeout=REQUEST_TIMEOUT, verify=verify_arg)
+            r.raise_for_status()
+            if mode != "SSL正常":
+                _note_once(f"{mode}成功：{url.split('?')[0]}")
+            return _response_to_json(r)
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(_compact_error(last_exc or Exception("unknown request error")))
 
 
 def _extract_first(row: dict[str, Any], keys: Iterable[str]) -> Any:
@@ -231,17 +299,47 @@ def load_factor_cache() -> dict[str, Any]:
     return {"version": CACHE_VERSION, "updated_at": "", "records": [], "diagnostics": ["快取格式不明。"]}
 
 
+def _summarize_diagnostics(diagnostics: list[str] | None, max_items: int = 40) -> list[str]:
+    out: list[str] = []
+    for msg in diagnostics or []:
+        text = re.sub(r"\s+", " ", _safe_str(msg)).strip()
+        text = text.replace("HTTPSConnectionPool", "HTTPS")
+        text = text.replace("Max retries exceeded with url:", "連線重試失敗:")
+        if len(text) > 360:
+            text = text[:360] + "..."
+        if text and text not in out:
+            out.append(text)
+    return out[-max_items:]
+
+
+def _complete_count_from_records(records: list[dict[str, Any]]) -> int:
+    cnt = 0
+    for r in records or []:
+        try:
+            if _to_float(r.get("官方資料完整度"), 0) >= 60:
+                cnt += 1
+        except Exception:
+            pass
+    return cnt
+
+
+def _existing_complete_count() -> int:
+    cache = load_factor_cache()
+    records = cache.get("records", [])
+    return _complete_count_from_records(records if isinstance(records, list) else [])
+
+
 def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = {
         "version": CACHE_VERSION,
         "updated_at": _now_text(),
         "record_count": len(records),
         "records": _json_safe(records),
-        "diagnostics": diagnostics or [],
-        "meta": meta or {},
+        "diagnostics": _summarize_diagnostics(diagnostics or []),
+        "meta": _json_safe(meta or {}),
     }
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    _append_log("success", len(records), diagnostics or [])
+    _append_log("success", len(records), _summarize_diagnostics(diagnostics or []))
     return payload
 
 
@@ -634,6 +732,8 @@ def build_official_factor_cache(
     include_valuation: bool = True,
     save: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    global _REQUEST_NOTES
+    _REQUEST_NOTES = []
     diagnostics: list[str] = []
     universe = load_stock_universe(limit=limit, market_filter=market_filter)
     if universe.empty:
@@ -685,16 +785,38 @@ def build_official_factor_cache(
             out[c] = ""
     out = out[FACTOR_COLUMNS + [c for c in out.columns if c not in FACTOR_COLUMNS]].copy()
 
+    if _REQUEST_NOTES:
+        diagnostics = _REQUEST_NOTES + diagnostics
+    complete_count = 0
+    try:
+        complete_count = int((pd.to_numeric(out.get("官方資料完整度", pd.Series([], dtype=float)), errors="coerce") >= 60).sum())
+    except Exception:
+        complete_count = 0
+    existing_complete = _existing_complete_count() if save else 0
+    should_save = True
+    preserve_msg = ""
+    if save and existing_complete > complete_count and complete_count < max(5, int(existing_complete * 0.5)):
+        should_save = False
+        preserve_msg = f"本次完整度>=60 僅 {complete_count} 筆，低於既有快取 {existing_complete} 筆，已保留舊有效快取，不覆蓋。"
+        diagnostics.append(preserve_msg)
+
     meta = {
         "ok": True,
         "updated_at": update_time,
         "record_count": int(len(out)),
-        "diagnostics": diagnostics,
+        "complete_count": complete_count,
+        "existing_complete_count": existing_complete,
+        "saved": bool(should_save),
+        "preserved_old_cache": bool(not should_save),
+        "diagnostics": _summarize_diagnostics(diagnostics),
         "market_filter": market_filter,
         "limit": limit or 0,
+        "ssl_fallback_supported": True,
     }
-    if save:
+    if save and should_save:
         save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
+    elif save and not should_save:
+        _append_log("preserved_old_cache", int(len(out)), _summarize_diagnostics(diagnostics))
     return out, meta
 
 
