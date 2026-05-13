@@ -749,6 +749,225 @@ def _v98_backfill_night_battle_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 # <<< V98_NIGHT_BATTLE_RECORD_SYNC
 
 
+# >>> V102_NIGHT_ACCURACY_ANALYSIS
+# V102：夜間隔日股神準確率分析。只讀既有推薦紀錄欄位，不自動抓資料，避免拖慢頁面。
+V102_ACCURACY_GROUP_COLS = [
+    "進場型態_隔日", "隔日建議動作", "資料完整度", "類別", "推薦模式", "推薦等級"
+]
+V102_ACCURACY_RETURN_COLS = [
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
+    "1日績效%", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "隔日最高漲幅%", "3日最高漲幅%", "5日最高漲幅%", "10日最高漲幅%",
+]
+
+
+def _v102_num_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if df is None or col not in df.columns:
+        return pd.Series(dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce")
+
+
+def _v102_bool_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if df is None or col not in df.columns:
+        return pd.Series(False, index=df.index if isinstance(df, pd.DataFrame) else None)
+    def _b(v):
+        s = _v98_scalar_text(v).lower()
+        if s in {"true", "1", "yes", "y", "是", "命中", "已命中", "觸發", "達標", "✅", "成功"}:
+            return True
+        try:
+            return bool(_normalize_bool(v))
+        except Exception:
+            return False
+    return df[col].map(_b).fillna(False)
+
+
+def _v102_primary_return(df: pd.DataFrame, prefer: str = "10日") -> pd.Series:
+    """依使用者選擇的週期挑主要績效；缺值時依序用相近欄位補。"""
+    if df is None or df.empty:
+        return pd.Series(dtype="float64")
+    candidates = {
+        "隔日": ["推薦後1日%", "1日績效%", "隔日最高漲幅%", "損益幅%"],
+        "3日": ["推薦後3日%", "3日績效%", "3日最高漲幅%", "推薦後1日%", "損益幅%"],
+        "5日": ["推薦後5日%", "5日績效%", "5日最高漲幅%", "推薦後3日%", "損益幅%"],
+        "10日": ["推薦後10日%", "10日績效%", "10日最高漲幅%", "推薦後5日%", "損益幅%"],
+        "20日": ["推薦後20日%", "20日績效%", "推薦後10日%", "損益幅%"],
+    }.get(prefer, ["推薦後10日%", "10日績效%", "損益幅%"])
+    out = pd.Series(pd.NA, index=df.index, dtype="float64")
+    for c in candidates:
+        if c in df.columns:
+            s = pd.to_numeric(df[c], errors="coerce")
+            out = out.where(out.notna(), s)
+    return pd.to_numeric(out, errors="coerce")
+
+
+def _v102_bucket_score(v: Any) -> str:
+    n = _v98_scalar_float(v, None)
+    if n is None:
+        return "未分級"
+    if n >= 90:
+        return "90以上"
+    if n >= 85:
+        return "85-89"
+    if n >= 80:
+        return "80-84"
+    if n >= 75:
+        return "75-79"
+    if n >= 70:
+        return "70-74"
+    return "70以下"
+
+
+def _v102_make_group_accuracy(df: pd.DataFrame, group_col: str, prefer: str = "10日") -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    x = _v98_backfill_night_battle_record_columns(df.copy())
+    if group_col not in x.columns:
+        return pd.DataFrame()
+    ret = _v102_primary_return(x, prefer)
+    valid = ret.notna()
+    entry_hit = _v102_bool_series(x, "進場點命中")
+    breakout_hit = _v102_bool_series(x, "突破價命中")
+    stop_hit = _v102_bool_series(x, "停損價觸發")
+    pressure_hit = _v102_bool_series(x, "第一壓力命中")
+    work = x.copy()
+    work["_v102_ret"] = ret
+    work["_v102_valid"] = valid
+    work["_v102_entry_hit"] = entry_hit
+    work["_v102_breakout_hit"] = breakout_hit
+    work["_v102_stop_hit"] = stop_hit
+    work["_v102_pressure_hit"] = pressure_hit
+    rows = []
+    for key, g in work.groupby(group_col, dropna=False):
+        label = _v98_scalar_text(key) or "未分類"
+        r = pd.to_numeric(g["_v102_ret"], errors="coerce")
+        rv = r.dropna()
+        total = int(len(g))
+        n = int(len(rv))
+        win = float((rv > 0).mean() * 100) if n else 0.0
+        avg = float(rv.mean()) if n else 0.0
+        med = float(rv.median()) if n else 0.0
+        best = float(rv.max()) if n else 0.0
+        worst = float(rv.min()) if n else 0.0
+        rows.append({
+            group_col: label,
+            "總筆數": total,
+            "有效績效樣本": n,
+            f"{prefer}勝率%": round(win, 2),
+            f"平均{prefer}績效%": round(avg, 2),
+            f"中位數{prefer}績效%": round(med, 2),
+            "最佳績效%": round(best, 2),
+            "最差績效%": round(worst, 2),
+            "進場點命中率%": round(float(g["_v102_entry_hit"].mean() * 100), 2) if "_v102_entry_hit" in g else 0.0,
+            "突破價命中率%": round(float(g["_v102_breakout_hit"].mean() * 100), 2) if "_v102_breakout_hit" in g else 0.0,
+            "第一壓力命中率%": round(float(g["_v102_pressure_hit"].mean() * 100), 2) if "_v102_pressure_hit" in g else 0.0,
+            "停損觸發率%": round(float(g["_v102_stop_hit"].mean() * 100), 2) if "_v102_stop_hit" in g else 0.0,
+            "校正分數": round(avg + win * 0.18 - (float(g["_v102_stop_hit"].mean() * 100) if "_v102_stop_hit" in g else 0.0) * 0.12 + min(n, 50) * 0.05, 2),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["校正分數", "有效績效樣本", f"{prefer}勝率%"], ascending=[False, False, False])
+
+
+def _v102_build_accuracy_pack(df: pd.DataFrame, prefer: str = "10日") -> dict[str, pd.DataFrame]:
+    if df is None or df.empty:
+        return {"summary": pd.DataFrame(), "type": pd.DataFrame(), "action": pd.DataFrame(), "score": pd.DataFrame(), "review": pd.DataFrame()}
+    x = _v98_backfill_night_battle_record_columns(df.copy())
+    ret = _v102_primary_return(x, prefer)
+    x["_v102_ret"] = ret
+    x["夜間分數級距"] = x.get("夜間股神總分", pd.Series(index=x.index, dtype=object)).map(_v102_bucket_score)
+    x["隔日分數級距"] = x.get("隔日進場分數", pd.Series(index=x.index, dtype=object)).map(_v102_bucket_score)
+    valid_ret = ret.dropna()
+    entry_hit = _v102_bool_series(x, "進場點命中")
+    breakout_hit = _v102_bool_series(x, "突破價命中")
+    stop_hit = _v102_bool_series(x, "停損價觸發")
+    pressure_hit = _v102_bool_series(x, "第一壓力命中")
+    summary = pd.DataFrame([{
+        "總紀錄筆數": int(len(x)),
+        "有效績效樣本": int(len(valid_ret)),
+        f"{prefer}勝率%": round(float((valid_ret > 0).mean() * 100), 2) if len(valid_ret) else 0.0,
+        f"平均{prefer}績效%": round(float(valid_ret.mean()), 2) if len(valid_ret) else 0.0,
+        "進場點命中率%": round(float(entry_hit.mean() * 100), 2) if len(x) else 0.0,
+        "突破價命中率%": round(float(breakout_hit.mean() * 100), 2) if len(x) else 0.0,
+        "第一壓力命中率%": round(float(pressure_hit.mean() * 100), 2) if len(x) else 0.0,
+        "停損觸發率%": round(float(stop_hit.mean() * 100), 2) if len(x) else 0.0,
+    }])
+    # 弱勢檢討清單：高夜間/隔日分但績效弱或停損觸發，用來調權。
+    review = x.copy()
+    night_score = pd.to_numeric(review.get("夜間股神總分"), errors="coerce") if "夜間股神總分" in review.columns else pd.Series(index=review.index, dtype="float64")
+    entry_score = pd.to_numeric(review.get("隔日進場分數"), errors="coerce") if "隔日進場分數" in review.columns else pd.Series(index=review.index, dtype="float64")
+    review_mask = ((night_score >= 80) | (entry_score >= 80)) & ((ret <= 0) | stop_hit)
+    review = review.loc[review_mask].copy()
+    if not review.empty:
+        review["主要績效%"] = ret.loc[review.index]
+        review["檢討原因"] = [
+            "停損觸發" if bool(stop_hit.loc[i]) else "高分但績效未轉正" for i in review.index
+        ]
+        keep = [c for c in [
+            "推薦日期", "股票代號", "股票名稱", "類別", "夜間股神總分", "隔日進場分數", "波段潛力分數",
+            "進場型態_隔日", "隔日建議動作", "主要績效%", "檢討原因", "夜間股神建議", "隔日作戰策略"
+        ] if c in review.columns]
+        review = review[keep].sort_values(["主要績效%", "夜間股神總分"], ascending=[True, False], na_position="last").head(100)
+    return {
+        "summary": summary,
+        "type": _v102_make_group_accuracy(x, "進場型態_隔日", prefer),
+        "action": _v102_make_group_accuracy(x, "隔日建議動作", prefer),
+        "night_score": _v102_make_group_accuracy(x, "夜間分數級距", prefer),
+        "entry_score": _v102_make_group_accuracy(x, "隔日分數級距", prefer),
+        "sector": _v102_make_group_accuracy(x, "類別", prefer),
+        "review": review,
+    }
+
+
+def _render_v102_night_accuracy_panel(df: pd.DataFrame):
+    render_pro_section("V102 夜間隔日股神準確率分析", "統計夜間分數、隔日進場型態、建議動作與後續績效的命中率，作為 14 權重校正依據。")
+    if df is None or df.empty:
+        st.info("目前沒有推薦紀錄可分析。")
+        return
+    c1, c2, c3 = st.columns([1.1, 1.1, 2.8])
+    with c1:
+        prefer = st.selectbox("主要績效週期", ["隔日", "3日", "5日", "10日", "20日"], index=3, key=_k("v102_accuracy_prefer"))
+    with c2:
+        min_samples = st.number_input("分組最少樣本", min_value=1, max_value=100, value=3, step=1, key=_k("v102_accuracy_min_samples"))
+    with c3:
+        st.caption("此頁只分析既有紀錄，不自動抓 K 線；請先在 8 頁更新推薦後績效，或在 10 頁更新隔日命中追蹤。")
+    pack = _v102_build_accuracy_pack(df, prefer)
+    summary = pack.get("summary", pd.DataFrame())
+    if not summary.empty:
+        s = summary.iloc[0]
+        render_pro_kpi_row([
+            {"label": "有效樣本", "value": int(s.get("有效績效樣本", 0)), "delta": f"總筆數 {int(s.get('總紀錄筆數', 0))}", "delta_class": "pro-kpi-delta-flat"},
+            {"label": f"{prefer}勝率", "value": f"{_safe_float(s.get(f'{prefer}勝率%'), 0):.2f}%", "delta": "績效>0", "delta_class": "pro-kpi-delta-flat"},
+            {"label": f"平均{prefer}績效", "value": f"{_safe_float(s.get(f'平均{prefer}績效%'), 0):.2f}%", "delta": "主評估週期", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "進場點命中", "value": f"{_safe_float(s.get('進場點命中率%'), 0):.2f}%", "delta": "10頁追蹤欄位", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "突破價命中", "value": f"{_safe_float(s.get('突破價命中率%'), 0):.2f}%", "delta": "10頁追蹤欄位", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "停損觸發", "value": f"{_safe_float(s.get('停損觸發率%'), 0):.2f}%", "delta": "越低越好", "delta_class": "pro-kpi-delta-flat"},
+        ])
+    def _filter_min(t: pd.DataFrame) -> pd.DataFrame:
+        if t is None or t.empty or "有效績效樣本" not in t.columns:
+            return t
+        return t[pd.to_numeric(t["有效績效樣本"], errors="coerce").fillna(0) >= int(min_samples)].copy()
+    sub = st.tabs(["進場型態", "隔日建議", "夜間分數級距", "隔日分數級距", "類別", "弱勢檢討"])
+    with sub[0]:
+        st.dataframe(_safe_display_df(_filter_min(pack.get("type", pd.DataFrame()))), use_container_width=True, hide_index=True)
+    with sub[1]:
+        st.dataframe(_safe_display_df(_filter_min(pack.get("action", pd.DataFrame()))), use_container_width=True, hide_index=True)
+    with sub[2]:
+        st.dataframe(_safe_display_df(_filter_min(pack.get("night_score", pd.DataFrame()))), use_container_width=True, hide_index=True)
+    with sub[3]:
+        st.dataframe(_safe_display_df(_filter_min(pack.get("entry_score", pd.DataFrame()))), use_container_width=True, hide_index=True)
+    with sub[4]:
+        st.dataframe(_safe_display_df(_filter_min(pack.get("sector", pd.DataFrame()))), use_container_width=True, hide_index=True)
+    with sub[5]:
+        review = pack.get("review", pd.DataFrame())
+        if review is None or review.empty:
+            st.success("目前沒有明顯高分低績效的弱勢檢討樣本。")
+        else:
+            st.warning("下列資料是高分但後續績效弱或停損觸發的樣本，建議後續提供給 14 權重校正參考。")
+            st.dataframe(_safe_display_df(review), use_container_width=True, hide_index=True)
+# <<< V102_NIGHT_ACCURACY_ANALYSIS
+
+
 def _restore_text_fields_from_raw_v73(x: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     """v73：修正舊版把文字訊息欄誤轉成數值後，畫面大量空白 / None 的問題。"""
     if x is None or x.empty or raw is None or raw.empty:
@@ -4380,6 +4599,9 @@ def main():
                 view_night = view_night.sort_values("隔日實戰排序分", ascending=False, na_position="last")
             st.dataframe(_safe_display_df(view_night[show_night_cols].head(500)), use_container_width=True, hide_index=True)
             st.caption(f"顯示 {min(len(view_night), 500)} / {len(night_df)} 筆；如要永久保存欄位，請使用上方『儲存同步』。")
+
+    with st.expander("🎯 V102 夜間隔日股神準確率分析", expanded=False):
+        _render_v102_night_accuracy_panel(live_df.copy())
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
