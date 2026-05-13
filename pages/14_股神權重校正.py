@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v106 設定永久保存版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v107 設定函式匯入修正版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -63,6 +63,8 @@ from godpick_weight_calibration import (
     rr_analysis,
     save_applied_weights,
     save_suggestion_bundle,
+    get_weight_calibration_page_settings,
+    save_weight_calibration_page_settings,
     summarize_returns,
     suggest_weights,
     PERF_COLUMNS,
@@ -71,7 +73,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v106_weight_calibration_setting_persist"
+APP_VERSION = "v107_weight_calibration_setting_import_hotfix"
 
 
 
