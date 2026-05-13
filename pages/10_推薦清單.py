@@ -822,6 +822,10 @@ def _backfill_night_battle_columns(x: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
     x = x.copy()
     x = x.loc[:, ~x.columns.duplicated()].copy()
+    # V95 hotfix：GitHub/JSON 舊紀錄可能帶有重複或非連續 index，
+    # 直接用 loc 指派 apply 結果時會觸發 pandas TypeError。
+    # 推薦清單本區塊只需要列資料，不依賴原始 index，因此先重建 index。
+    x = x.reset_index(drop=True)
     for c in NIGHT_GODPICK_COLUMNS:
         if c not in x.columns:
             x[c] = None
@@ -854,16 +858,19 @@ def _backfill_night_battle_columns(x: pd.DataFrame) -> pd.DataFrame:
         if mask.any():
             def _pick(row):
                 return _first_available_value(row, srcs, row.get(target, ""))
-            x.loc[mask, target] = x.loc[mask].apply(_pick, axis=1)
+            vals = x.loc[mask].apply(_pick, axis=1).tolist()
+            x.loc[mask, target] = vals
 
     if "進場型態_隔日" in x.columns:
         mask = x["進場型態_隔日"].map(_is_blank_value)
         if mask.any():
-            x.loc[mask, "進場型態_隔日"] = x.loc[mask].apply(_classify_night_pattern, axis=1)
+            vals = x.loc[mask].apply(_classify_night_pattern, axis=1).tolist()
+            x.loc[mask, "進場型態_隔日"] = vals
     if "隔日建議動作" in x.columns:
         mask = x["隔日建議動作"].map(_is_blank_value)
         if mask.any():
-            x.loc[mask, "隔日建議動作"] = x.loc[mask].apply(_classify_night_action, axis=1)
+            vals = x.loc[mask].apply(_classify_night_action, axis=1).tolist()
+            x.loc[mask, "隔日建議動作"] = vals
     if "資料完整度" in x.columns:
         mask = x["資料完整度"].map(_is_blank_value)
         if mask.any():
