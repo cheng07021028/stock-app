@@ -1089,33 +1089,121 @@ def _apply_display_backfill_v73(x: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _data_completeness_report_v73(df: pd.DataFrame) -> pd.DataFrame:
-    """v73：檢查 8頁常用訊息欄位是否有資料，方便判斷是顯示問題還是 7頁匯入時未產生。"""
+def _v113_record_age_days(df: pd.DataFrame) -> pd.Series:
+    """V113：估算推薦紀錄已經過幾個日曆天，用來判斷績效欄位是缺資料還是尚未成熟。"""
     if df is None or df.empty:
-        return pd.DataFrame(columns=["欄位", "有資料筆數", "總筆數", "完整率%", "狀態"])
+        return pd.Series([], dtype="float64")
+    date_col = None
+    for c in ["推薦日期", "推薦時間", "建立時間", "紀錄時間", "匯入時間"]:
+        if c in df.columns:
+            date_col = c
+            break
+    if not date_col:
+        return pd.Series([pd.NA] * len(df), index=df.index, dtype="float64")
+    dt = pd.to_datetime(df[date_col], errors="coerce")
+    today = pd.Timestamp.today().normalize()
+    return (today - dt.dt.normalize()).dt.days
+
+
+def _data_completeness_report_v73(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    V113：資料完整度診斷升級。
+    目的不是把所有空欄都視為錯誤，而是分辨：
+    1. 主檔必備欄位真的缺漏。
+    2. 文字說明/族群/K線屬於可補強欄位。
+    3. 3/5/10/20日績效欄位常因推薦日期還沒滿足天數，所以應顯示「待追蹤」而非錯誤。
+    """
+    columns = ["欄位", "欄位類型", "有資料筆數", "應有筆數", "總筆數", "完整率%", "狀態", "判讀", "建議動作"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
     total = len(df)
-    check_cols = [
-        "推薦日期", "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "推薦總分",
-        "推薦型態", "機會型態", "股神建議動作", "股神信心", "股神進場區間", "股神推論",
-        "買點分級", "風險說明", "大盤情境調權說明", "大盤情境分桶", "大盤橋接狀態", "大盤資料品質",
-        "強勢族群等級", "族群策略建議", "K線驗證標記", "推薦價格", "最新價",
-        "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態",
+    ages = _v113_record_age_days(df)
+
+    check_items = [
+        ("推薦日期", "主檔必備", None), ("股票代號", "主檔必備", None), ("股票名稱", "主檔必備", None),
+        ("類別", "主檔必備", None), ("推薦模式", "主檔必備", None), ("推薦等級", "主檔必備", None), ("推薦總分", "主檔必備", None),
+        ("推薦型態", "策略說明", None), ("機會型態", "策略說明", None), ("股神建議動作", "策略說明", None),
+        ("股神信心", "策略說明", None), ("股神進場區間", "策略說明", None), ("股神推論", "策略說明", None),
+        ("買點分級", "策略說明", None), ("風險說明", "策略說明", None),
+        ("大盤情境調權說明", "大盤橋接", None), ("大盤情境分桶", "大盤橋接", None), ("大盤橋接狀態", "大盤橋接", None), ("大盤資料品質", "大盤橋接", None),
+        ("強勢族群等級", "族群輔助", None), ("族群策略建議", "族群輔助", None),
+        ("K線驗證標記", "K線驗證", None),
+        ("推薦價格", "價格追蹤", None), ("最新價", "價格追蹤", None),
+        ("3日績效%", "績效成熟", 3), ("5日績效%", "績效成熟", 5), ("10日績效%", "績效成熟", 10), ("20日績效%", "績效成熟", 20),
+        ("目前狀態", "狀態追蹤", None),
     ]
     rows = []
-    for c in check_cols:
+    for c, kind, mature_days in check_items:
+        if mature_days is not None:
+            eligible_mask = ages >= mature_days
+            eligible = int(eligible_mask.fillna(False).sum()) if len(ages) else 0
+            if c in df.columns and eligible > 0:
+                filled = int((~df.loc[eligible_mask, c].map(_is_empty_display_value)).sum())
+            else:
+                filled = 0
+            denom = eligible
+            rate = round(filled / denom * 100, 1) if denom else 0
+            pending = total - eligible
+            if eligible == 0:
+                status = "待追蹤"
+                note = f"目前沒有滿 {mature_days} 日的樣本，這不是錯誤。"
+                action = "等推薦紀錄累積到期，或到 10/8 更新推薦後績效。"
+            elif rate >= 70:
+                status = "OK"
+                note = f"已滿 {mature_days} 日樣本大多有績效資料。"
+                action = "OK"
+            elif rate >= 30:
+                status = "部分資料"
+                note = f"滿 {mature_days} 日樣本已有部分績效；尚未滿期樣本 {pending} 筆。"
+                action = "可在 8 頁執行更新推薦後績效，或先累積更多交易日。"
+            else:
+                status = "待更新"
+                note = f"已有 {eligible} 筆滿 {mature_days} 日樣本，但績效欄位尚未更新。"
+                action = "建議執行 8 頁更新推薦後績效，或確認歷史K線資料來源。"
+            rows.append({"欄位": c, "欄位類型": kind, "有資料筆數": filled, "應有筆數": denom, "總筆數": total, "完整率%": rate, "狀態": status, "判讀": note, "建議動作": action})
+            continue
+
         if c not in df.columns:
             filled = 0
         else:
             filled = int((~df[c].map(_is_empty_display_value)).sum())
         rate = round(filled / total * 100, 1) if total else 0
-        if rate >= 80:
-            status = "OK"
-        elif rate >= 30:
-            status = "部分資料"
+        if kind == "主檔必備":
+            if rate >= 95:
+                status = "OK"
+            elif rate >= 70:
+                status = "需補強"
+            else:
+                status = "異常"
+            note = "主檔欄位會影響列表辨識與後續回測。"
+            action = "若異常，請回 07 重新匯入或用 17 系統健康檢查修復缺欄。"
+        elif kind in {"策略說明", "大盤橋接", "族群輔助", "K線驗證"}:
+            if rate >= 80:
+                status = "OK"
+            elif rate >= 30:
+                status = "部分資料"
+            else:
+                status = "可補強"
+            note = "屬於說明/輔助欄位，缺少時通常不影響推薦紀錄本體。"
+            action = "可重新從 07 匯入新版推薦，或保留為舊紀錄。"
+            if kind == "K線驗證":
+                note = "K線驗證需有對應的K線分析/回測更新流程；舊紀錄沒有是正常情況之一。"
+                action = "需要時再執行 K線/推薦後績效更新，不建議視為錯誤。"
+        elif kind == "價格追蹤":
+            if rate >= 80:
+                status = "OK"
+            elif rate >= 30:
+                status = "部分資料"
+            else:
+                status = "待更新"
+            note = "價格欄位需由 07 匯入或後續行情更新補入。"
+            action = "可執行即時行情/績效更新；若是舊資料可先不處理。"
         else:
-            status = "缺很多"
-        rows.append({"欄位": c, "有資料筆數": filled, "總筆數": total, "完整率%": rate, "狀態": status})
-    return pd.DataFrame(rows)
+            status = "OK" if rate >= 80 else ("部分資料" if rate >= 30 else "可補強")
+            note = "一般追蹤欄位。"
+            action = "視需求補齊。"
+        rows.append({"欄位": c, "欄位類型": kind, "有資料筆數": filled, "應有筆數": total, "總筆數": total, "完整率%": rate, "狀態": status, "判讀": note, "建議動作": action})
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _v110_is_blank(v: Any) -> bool:
@@ -4704,14 +4792,18 @@ def main():
         {"label": "平均20日績效%", "value": "-" if pd.isna(avg_20) else f"{avg_20:.2f}%", "delta": "-" if pd.isna(avg_real) else f"平均實際 {avg_real:.2f}%", "delta_class": "pro-kpi-delta-flat"},
     ])
 
-    with st.expander("v73 資料完整度檢查 / 欄位訊息診斷", expanded=False):
-        st.caption("用來確認 8頁訊息沒出來的原因：若完整率很低，代表 7_股神推薦 匯入時該欄本來就沒產生；若完整率正常但主表沒顯示，代表是欄位管理或顯示模式問題。")
+    with st.expander("v113 資料完整度檢查 / 欄位訊息診斷", expanded=False):
+        st.caption("V113 已把診斷分成主檔必備、策略說明、K線驗證、價格追蹤、績效成熟。3/5/10/20日績效若推薦時間尚未滿期，會顯示待追蹤，不再誤判成系統錯誤。")
         diag_df = _data_completeness_report_v73(live_df)
         st.dataframe(_safe_display_df(diag_df), use_container_width=True, hide_index=True)
-        low_df = diag_df[diag_df["狀態"] == "缺很多"].copy() if not diag_df.empty else pd.DataFrame()
-        if not low_df.empty:
-            st.warning("下列欄位缺資料較多：" + "、".join(low_df["欄位"].astype(str).head(12).tolist()))
-        st.info("本版已修正：文字訊息欄不再被誤轉數值、主表 None 清理、常用說明欄自動從替代欄位回補。")
+        if not diag_df.empty:
+            hard_df = diag_df[diag_df["狀態"].isin(["異常", "需補強", "待更新"])].copy()
+            wait_df = diag_df[diag_df["狀態"].isin(["待追蹤", "可補強", "部分資料"])].copy()
+            if not hard_df.empty:
+                st.warning("需要優先處理的欄位：" + "、".join(hard_df["欄位"].astype(str).head(12).tolist()))
+            if not wait_df.empty:
+                st.info("可觀察或等待資料成熟的欄位：" + "、".join(wait_df["欄位"].astype(str).head(12).tolist()))
+        st.success("判讀重點：K線驗證與 3/5/10/20日績效多半需要另外更新或等待交易日成熟；不是 07、8、10、14 串接壞掉。")
 
 
     with st.expander("🌙 V98 夜間隔日股神紀錄追蹤", expanded=False):
