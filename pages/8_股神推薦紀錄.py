@@ -792,7 +792,7 @@ def _v102_primary_return(df: pd.DataFrame, prefer: str = "10日") -> pd.Series:
         "10日": ["推薦後10日%", "10日績效%", "10日最高漲幅%", "推薦後5日%", "損益幅%"],
         "20日": ["推薦後20日%", "20日績效%", "推薦後10日%", "損益幅%"],
     }.get(prefer, ["推薦後10日%", "10日績效%", "損益幅%"])
-    out = pd.Series(pd.NA, index=df.index, dtype="float64")
+    out = pd.Series(float("nan"), index=df.index, dtype="float64")
     for c in candidates:
         if c in df.columns:
             s = pd.to_numeric(df[c], errors="coerce")
