@@ -34,7 +34,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V108A｜法人 / 月營收 / EPS / PER 快取中心｜SSL 備援修正版｜供後續 07 讀取快取")
+st.caption("V108B｜法人 / 月營收 / EPS / PER 快取中心｜端點解析與 MOPS 備援修正版｜供後續 07 讀取快取")
 
 
 def _fmt(v):
@@ -71,7 +71,7 @@ def _display_status() -> None:
 
 
 with st.sidebar:
-    st.header("V108A 更新設定")
+    st.header("V108B 更新設定")
     market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=0)
     scan_limit = st.selectbox("測試/更新筆數", [0, 50, 200, 500, 1000, 1500, 2000], index=0, help="0 = 使用股票主檔全部股票。")
     include_institutional = st.checkbox("更新法人買賣超", value=True)
@@ -84,7 +84,7 @@ with st.sidebar:
 
 st.info(
     "建議流程：先在本頁更新官方因子快取，確認資料筆數與完整度，再同步到 GitHub。"
-    "V108A 已加入 TWSE/TPEX SSL 備援與舊快取保護；後續 07 只讀快取，不會每次推薦都連官方網站。"
+    "V108B 已加入 JSON 空回應偵測、TWSE 舊端點與 MOPS HTML 備援；後續 07 只讀快取，不會每次推薦都連官方網站。"
 )
 
 if do_pull:
@@ -162,13 +162,14 @@ if logs:
 else:
     st.caption("尚無更新紀錄。")
 
-with st.expander("V108A 說明", expanded=False):
+with st.expander("V108B 說明", expanded=False):
     st.markdown(
         """
 - 本頁是官方因子資料層，不會取代 07 股神推薦。
 - 慢的官方資料更新集中在本頁；07 後續只讀 `official_factors_cache.json`。
 - 官方來源失敗時會保留診斷訊息，不會讓 07、10、8、14 主線中斷。
 - V108A 修正 Streamlit Cloud 連 TWSE/TPEX 時可能發生的 SSL 憑證驗證失敗。
+- V108B 修正 SSL 備援成功但內容為空/HTML/非 JSON 時誤判成功的問題，並增加 TWSE 舊端點與 MOPS 月營收 HTML 備援。
 - 若本次抓取完整度低於舊快取，會保留舊有效快取，不會用壞資料覆蓋。
 - 下一版 V109 才會把這些官方因子讀入 07 夜間隔日股神分數。
         """
