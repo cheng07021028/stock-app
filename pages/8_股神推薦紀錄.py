@@ -2597,37 +2597,58 @@ def _calc_proxy_perf_metrics_v71(payload: dict[str, Any], reason: str = "") -> d
     return out
 
 
+
 def _calc_forward_metrics_from_history(
     hist_df: pd.DataFrame,
     rec_date_text: str,
     stop_price: float | None,
     target_price: float | None,
+    recommended_price: float | None = None,
+    latest_price: float | None = None,
 ) -> dict[str, Any]:
-    """V71：用已抓好的單股K線快速計算單筆推薦後績效。"""
+    """V114：用已抓好的單股K線計算推薦後績效。
+
+    修正重點：
+    1. N日績效以「推薦價格 / 推薦日價格」作為基準，而不是推薦日收盤價。
+       這樣才符合 07 晚上跑推薦、隔日觀察的實戰邏輯。
+    2. 推薦後績效從推薦日之後的交易日開始計算，不把推薦日盤中高低價拿來誤判達標/停損。
+    3. 達標/停損判斷改為事件順序：先停損、先達標、達標後回落、同日觸及都分開處理。
+    4. 若歷史K線尚未包含最新一日，但最新價已跌破停損，仍視為風控觸發。
+    """
     rec_date = pd.to_datetime(rec_date_text, errors="coerce")
     if pd.isna(rec_date) or not isinstance(hist_df, pd.DataFrame) or hist_df.empty:
         return {}
+
     temp = _normalize_history_df_for_perf(hist_df)
     if temp.empty:
         return {}
 
-    window = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
-    if window.empty:
+    # 推薦後 N 日：只看推薦日之後的交易日。
+    forward = temp[temp["日期"].dt.date > rec_date.date()].reset_index(drop=True)
+    if forward.empty:
         return {}
-    base_px = _safe_float(window.iloc[0].get("收盤價"))
+
+    base_px = _safe_float(recommended_price)
+    if base_px in [None, 0]:
+        # 若舊資料沒有推薦價，才退回推薦日當天或之後第一筆收盤價。
+        base_candidates = temp[temp["日期"].dt.date >= rec_date.date()].reset_index(drop=True)
+        if base_candidates.empty:
+            return {}
+        base_px = _safe_float(base_candidates.iloc[0].get("收盤價"))
     if base_px in [None, 0]:
         return {}
 
     result: dict[str, Any] = {}
     for d in [1, 3, 5, 10, 20]:
         key_new = f"推薦後{d}日%"
-        if len(window) > d:
-            target_px = _safe_float(window.iloc[d].get("收盤價"))
+        if len(forward) >= d:
+            target_px = _safe_float(forward.iloc[d - 1].get("收盤價"))
             result[key_new] = None if target_px in [None, 0] else round((target_px - base_px) / base_px * 100, 2)
         else:
             result[key_new] = None
 
-    use_window = window.head(min(len(window), 21)).copy()
+    # 事件與最大漲跌幅最多先看推薦後 20 個交易日；不足則用目前可得資料。
+    use_window = forward.head(min(len(forward), 20)).copy()
     high_col = "最高價" if "最高價" in use_window.columns else "收盤價"
     low_col = "最低價" if "最低價" in use_window.columns else "收盤價"
     max_high = _safe_float(use_window[high_col].max())
@@ -2639,48 +2660,76 @@ def _calc_forward_metrics_from_history(
 
     tgt = _safe_float(target_price)
     stop = _safe_float(stop_price)
-    target_hit = False
-    stop_hit = False
-    if tgt not in [None, 0] and max_high is not None:
-        target_hit = max_high >= tgt
-    elif max_gain is not None:
-        target_hit = max_gain >= 8
-    if stop not in [None, 0] and min_low is not None:
-        stop_hit = min_low <= stop
-    elif max_drawdown is not None:
-        stop_hit = max_drawdown <= -6
+    latest = _safe_float(latest_price)
 
+    target_date = None
+    stop_date = None
+    if tgt not in [None, 0] and high_col in use_window.columns:
+        hit_rows = use_window[pd.to_numeric(use_window[high_col], errors="coerce") >= float(tgt)]
+        if not hit_rows.empty:
+            target_date = hit_rows.iloc[0].get("日期")
+    elif max_gain is not None and max_gain >= 8:
+        hit_rows = use_window[pd.to_numeric(use_window[high_col], errors="coerce") >= base_px * 1.08]
+        if not hit_rows.empty:
+            target_date = hit_rows.iloc[0].get("日期")
+
+    if stop not in [None, 0] and low_col in use_window.columns:
+        hit_rows = use_window[pd.to_numeric(use_window[low_col], errors="coerce") <= float(stop)]
+        if not hit_rows.empty:
+            stop_date = hit_rows.iloc[0].get("日期")
+    elif max_drawdown is not None and max_drawdown <= -6:
+        hit_rows = use_window[pd.to_numeric(use_window[low_col], errors="coerce") <= base_px * 0.94]
+        if not hit_rows.empty:
+            stop_date = hit_rows.iloc[0].get("日期")
+
+    latest_stop_hit = bool(stop not in [None, 0] and latest not in [None, 0] and latest <= stop)
+    target_hit = target_date is not None
+    stop_hit = stop_date is not None or latest_stop_hit
     result["是否達標_回測"] = bool(target_hit)
     result["是否停損_回測"] = bool(stop_hit)
+
     ret20 = result.get("推薦後20日%")
     ret10 = result.get("推薦後10日%")
     ret5 = result.get("推薦後5日%")
-    benchmark = ret20 if ret20 is not None else (ret10 if ret10 is not None else ret5)
-    if target_hit and not stop_hit:
-        hit_result = "達標"
-    elif stop_hit and not target_hit:
+    ret3 = result.get("推薦後3日%")
+    benchmark = ret20 if ret20 is not None else (ret10 if ret10 is not None else (ret5 if ret5 is not None else ret3))
+
+    same_day = False
+    if target_date is not None and stop_date is not None:
+        try:
+            same_day = pd.to_datetime(target_date).date() == pd.to_datetime(stop_date).date()
+        except Exception:
+            same_day = False
+
+    if same_day:
+        hit_result = "同日觸及"
+        comment = "V114：達標與停損同日觸及，日K無法判斷先後，需人工檢視盤中走勢。"
+    elif stop_date is not None and (target_date is None or pd.to_datetime(stop_date) < pd.to_datetime(target_date)):
         hit_result = "停損"
+        comment = "V114：推薦後先觸及停損，需檢討追高、支撐或大盤風險。"
+    elif target_date is not None and stop_hit:
+        hit_result = "達標後回落"
+        comment = "V114：推薦後曾達標，但後續回落或最新價跌破停損；績效不可再視為單純達標。"
+    elif target_date is not None:
+        hit_result = "達標"
+        comment = "V114：推薦後先達標且未觸發停損，型態有效。"
+    elif latest_stop_hit or stop_date is not None:
+        hit_result = "停損"
+        comment = "V114：最新價或推薦後低點已觸及停損，需檢討風控。"
     elif benchmark is not None and benchmark >= 5:
         hit_result = "有效"
+        comment = "V114：推薦後報酬為正，持續觀察是否擴大漲幅。"
     elif benchmark is not None and benchmark <= -5:
         hit_result = "偏弱"
+        comment = "V114：推薦後轉弱，需檢討等待條件與停損設定。"
     else:
         hit_result = "觀察中"
+        comment = "V114：尚未形成明確績效，持續追蹤。"
+
     result["命中結果"] = hit_result
-    if hit_result == "達標":
-        comment = "推薦後已達標，型態有效，可納入權重正向校正"
-    elif hit_result == "停損":
-        comment = "推薦後觸及停損，需檢討追高、支撐或大盤風險"
-    elif hit_result == "有效":
-        comment = "推薦後報酬為正，持續觀察是否擴大漲幅"
-    elif hit_result == "偏弱":
-        comment = "推薦後轉弱，需檢討等待條件與停損設定"
-    else:
-        comment = "尚未形成明確績效，持續追蹤"
     result["績效評語"] = comment
     result["追蹤更新時間"] = _now_text()
     return result
-
 
 def _clip(v: float | None, low: float, high: float, default: float = 0.0) -> float:
     if v is None:
@@ -2908,6 +2957,8 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src["是否已實際買進"] = buy_flag
     src["損益金額"] = pnl_amt
     src["損益幅%"] = pnl_pct
+    # V114：損益% 與損益幅% 定義統一；若有完整實際買賣價，才用實際報酬%，否則用推薦/買進成本對最新價的追蹤報酬。
+    src["損益%"] = actual_ret if actual_ret is not None else pnl_pct
     src["實際報酬%"] = actual_ret
     src["是否達停損"] = hit_stop
     src["是否達目標1"] = hit_t1
@@ -3558,7 +3609,14 @@ def _backfill_perf_columns(
             rec_date_text = _safe_str(payload.get("推薦日期"))
             stop_price = _safe_float(payload.get("停損參考")) or _safe_float(payload.get("停損價"))
             target_price = _safe_float(payload.get("賣出目標1")) or _safe_float(payload.get("近端壓力"))
-            metrics = _calc_forward_metrics_from_history(hist_df, rec_date_text, stop_price, target_price)
+            metrics = _calc_forward_metrics_from_history(
+                hist_df,
+                rec_date_text,
+                stop_price,
+                target_price,
+                _safe_float(payload.get("推薦價格")) or _safe_float(payload.get("推薦日價格")) or _safe_float(payload.get("建議價位")),
+                _safe_float(payload.get("最新價")),
+            )
 
             if metrics:
                 ok_count += 1
