@@ -81,7 +81,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PERF_TRACKING_VERSION = "v100_night_battle_list_sync_v94"
 PFX = "godpick_list_"
-NIGHT_BATTLE_LIST_VERSION = "V94_20260513_night_battle_list_sync"
+NIGHT_BATTLE_LIST_VERSION = "V96_20260513_recommend_list_scalar_assign_hotfix"
 
 # V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
 # 不重算 07 推薦核心，避免拖慢頁面。
@@ -859,22 +859,28 @@ def _backfill_night_battle_columns(x: pd.DataFrame) -> pd.DataFrame:
             def _pick(row):
                 return _first_available_value(row, srcs, row.get(target, ""))
             vals = x.loc[mask].apply(_pick, axis=1).tolist()
-            x.loc[mask, target] = vals
+            # V96 hotfix：用逐列 at 指派，避免 pandas 在 object/list/字串混合資料時
+            # 將 list 當成可展開陣列而觸發 TypeError。
+            for _idx, _val in zip(x.index[mask], vals):
+                x.at[_idx, target] = _val
 
     if "進場型態_隔日" in x.columns:
         mask = x["進場型態_隔日"].map(_is_blank_value)
         if mask.any():
             vals = x.loc[mask].apply(_classify_night_pattern, axis=1).tolist()
-            x.loc[mask, "進場型態_隔日"] = vals
+            for _idx, _val in zip(x.index[mask], vals):
+                x.at[_idx, "進場型態_隔日"] = _val
     if "隔日建議動作" in x.columns:
         mask = x["隔日建議動作"].map(_is_blank_value)
         if mask.any():
             vals = x.loc[mask].apply(_classify_night_action, axis=1).tolist()
-            x.loc[mask, "隔日建議動作"] = vals
+            for _idx, _val in zip(x.index[mask], vals):
+                x.at[_idx, "隔日建議動作"] = _val
     if "資料完整度" in x.columns:
         mask = x["資料完整度"].map(_is_blank_value)
         if mask.any():
-            x.loc[mask, "資料完整度"] = "舊資料相容補欄"
+            for _idx in x.index[mask]:
+                x.at[_idx, "資料完整度"] = "舊資料相容補欄"
 
     for c in NIGHT_NUMERIC_COLUMNS:
         if c in x.columns:
@@ -945,25 +951,33 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         x["起漲等級"] = x["起漲等級"].fillna("").astype(str)
         mask = x["起漲等級"].str.strip() == ""
         if mask.any():
-            x.loc[mask, "起漲等級"] = x.loc[mask].apply(_derive_list_prelaunch_grade, axis=1)
+            _vals = x.loc[mask].apply(_derive_list_prelaunch_grade, axis=1).tolist()
+            for _idx, _val in zip(x.index[mask], _vals):
+                x.at[_idx, "起漲等級"] = _val
 
     if "買點分級" in x.columns:
         x["買點分級"] = x["買點分級"].fillna("").astype(str)
         mask = x["買點分級"].str.strip() == ""
         if mask.any():
-            x.loc[mask, "買點分級"] = x.loc[mask].apply(_derive_list_buy_grade, axis=1)
+            _vals = x.loc[mask].apply(_derive_list_buy_grade, axis=1).tolist()
+            for _idx, _val in zip(x.index[mask], _vals):
+                x.at[_idx, "買點分級"] = _val
 
     if "風險說明" in x.columns:
         x["風險說明"] = x["風險說明"].fillna("").astype(str)
         mask = x["風險說明"].str.strip() == ""
         if mask.any():
-            x.loc[mask, "風險說明"] = x.loc[mask].apply(_derive_list_risk, axis=1)
+            _vals = x.loc[mask].apply(_derive_list_risk, axis=1).tolist()
+            for _idx, _val in zip(x.index[mask], _vals):
+                x.at[_idx, "風險說明"] = _val
 
     if "股神推論邏輯" in x.columns:
         x["股神推論邏輯"] = x["股神推論邏輯"].fillna("").astype(str)
         mask = x["股神推論邏輯"].str.strip() == ""
         if mask.any():
-            x.loc[mask, "股神推論邏輯"] = x.loc[mask].apply(_derive_list_logic, axis=1)
+            _vals = x.loc[mask].apply(_derive_list_logic, axis=1).tolist()
+            for _idx, _val in zip(x.index[mask], _vals):
+                x.at[_idx, "股神推論邏輯"] = _val
     num_cols = [
         "推薦總分", "上漲機率估計%", "大盤橋接分數", "大盤可參考分數", "大盤加權分", "大盤影響加減分", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", 
         "同類股領先幅度", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
