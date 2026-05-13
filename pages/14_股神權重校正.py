@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v107 設定函式匯入修正版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v111 官方因子回饋版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -51,6 +51,8 @@ from godpick_weight_calibration import (
     calc_profile_bundle,
     calc_night_accuracy_bundle,
     apply_night_accuracy_feedback,
+    calc_official_factor_accuracy_bundle,
+    apply_official_factor_feedback,
     confidence_label,
     current_weight_map,
     first_existing_col,
@@ -73,7 +75,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v107_weight_calibration_setting_import_hotfix"
+APP_VERSION = "v111_official_factor_accuracy_feedback"
 
 
 
@@ -348,7 +350,7 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v104 夜間準確率回饋版")
+    st.title("14_股神權重校正｜v111 官方因子準確率回饋版")
     st.caption("績效回測＋命中追蹤＋分層權重＋防過擬合；已同步 07/08/10 夜間隔日股神欄位與 V101/V102 命中追蹤，不連外、不重跑推薦。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、命中率、停損率、期望值、樣本數、資料覆蓋率；夜間欄位與命中追蹤會回饋到原本 8 大權重因子，套用後 07 可直接讀取，不需要新增不相容權重名稱。")
 
@@ -445,6 +447,8 @@ def main() -> None:
     weight_df = suggest_weights(effect_df, current_weights)
     night_accuracy_bundle = calc_night_accuracy_bundle(df, horizon=horizon)
     weight_df = apply_night_accuracy_feedback(weight_df, night_accuracy_bundle)
+    official_factor_bundle = calc_official_factor_accuracy_bundle(df, horizon=horizon)
+    weight_df = apply_official_factor_feedback(weight_df, official_factor_bundle)
     bundle = calc_profile_bundle(df, horizons=(1, 3, 5, 10, 20), current_weights=current_weights)
     market_bundle = calc_market_bundles(df, horizon, current_weights)
     category_bundle = calc_category_bundles(df, horizon, current_weights)
@@ -454,10 +458,11 @@ def main() -> None:
     bundle["market_profiles"] = market_bundle
     bundle["category_profiles"] = category_bundle
     bundle["night_accuracy_feedback"] = night_accuracy_bundle
+    bundle["official_factor_feedback"] = official_factor_bundle
     bundle["main_horizon"] = horizon
     bundle["main_weight_table"] = weight_df.to_dict(orient="records") if not weight_df.empty else []
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
         "總覽建議",
         "因子有效性",
         "短線/波段/趨勢",
@@ -466,6 +471,7 @@ def main() -> None:
         "機率/RR校正",
         "夜間隔日欄位",
         "夜間準確率回饋",
+        "官方因子回饋",
         "輸出/套用",
     ])
 
@@ -597,6 +603,62 @@ def main() -> None:
             st.info("目前沒有足夠的高分失敗樣本，或尚未更新命中追蹤。")
 
     with tab9:
+        st.subheader("V111 官方因子準確率回饋")
+        st.caption("讀取 16_官方因子快取中心、07、10、8 已保存的法人 / 營收 / EPS / PER 欄位；本頁不連外、不更新官方網站。")
+        summary = official_factor_bundle.get("summary", {}) if isinstance(official_factor_bundle, dict) else {}
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("官方可用樣本", summary.get("官方可用樣本", 0))
+        c2.metric("平均官方分", "—" if summary.get("平均官方因子總分") is None else summary.get("平均官方因子總分"))
+        c3.metric("平均完整度", "—" if summary.get("平均官方完整度") is None else summary.get("平均官方完整度"))
+        c4.metric("官方高分樣本", summary.get("官方高分樣本", 0))
+        c5.metric("高分失敗", summary.get("官方高分失敗筆數", 0))
+
+        stat_cols = st.columns(3)
+        with stat_cols[0]:
+            st.markdown("#### 官方可用績效")
+            st.dataframe(pd.DataFrame([summary.get("官方可用績效", {})]), use_container_width=True, hide_index=True)
+        with stat_cols[1]:
+            st.markdown("#### 官方高分績效")
+            st.dataframe(pd.DataFrame([summary.get("官方高分績效", {})]), use_container_width=True, hide_index=True)
+        with stat_cols[2]:
+            st.markdown("#### 官方低分績效")
+            st.dataframe(pd.DataFrame([summary.get("官方低分績效", {})]), use_container_width=True, hide_index=True)
+
+        st.markdown("#### 命中率摘要")
+        hit_row = {
+            "績效欄": summary.get("績效欄", "缺"),
+            "進場點命中率%": summary.get("官方可用進場點命中率%"),
+            "突破價命中率%": summary.get("官方可用突破價命中率%"),
+            "第一壓力命中率%": summary.get("官方可用第一壓力命中率%"),
+            "停損觸發率%": summary.get("官方可用停損觸發率%"),
+        }
+        st.dataframe(pd.DataFrame([hit_row]), use_container_width=True, hide_index=True)
+
+        tables = official_factor_bundle.get("tables", {}) if isinstance(official_factor_bundle, dict) else {}
+        if not tables:
+            st.warning("尚無官方因子分層資料。請先到 16_官方因子快取中心更新快取，再由 07/10/8 保存推薦紀錄。")
+        else:
+            for name, table in tables.items():
+                with st.expander(f"{name} 官方因子分層", expanded=(name in ["官方因子級距", "官方資料完整度級距", "法人官方級距"])):
+                    if isinstance(table, pd.DataFrame) and not table.empty:
+                        st.dataframe(table, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("此分層目前樣本不足。")
+
+        high_fail = official_factor_bundle.get("high_fail", pd.DataFrame()) if isinstance(official_factor_bundle, dict) else pd.DataFrame()
+        low_success = official_factor_bundle.get("low_success", pd.DataFrame()) if isinstance(official_factor_bundle, dict) else pd.DataFrame()
+        st.markdown("#### 官方高分失敗檢討")
+        if isinstance(high_fail, pd.DataFrame) and not high_fail.empty:
+            st.dataframe(high_fail, use_container_width=True, hide_index=True)
+        else:
+            st.info("目前沒有足夠的官方高分失敗樣本。")
+        st.markdown("#### 官方低分但成功樣本")
+        if isinstance(low_success, pd.DataFrame) and not low_success.empty:
+            st.dataframe(low_success, use_container_width=True, hide_index=True)
+        else:
+            st.info("目前沒有足夠的官方低分成功樣本。")
+
+    with tab10:
         st.subheader("輸出與人工套用")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -635,7 +697,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v104 Pro：此頁只做績效回測、命中追蹤與建議權重；已同步夜間隔日股神欄位、大盤分層、上漲機率、R/R、v72 因子與 V101/V102 命中追蹤；不重跑推薦、不連外。")
+    st.caption("v111 Pro：此頁只做績效回測、命中追蹤、官方因子回饋與建議權重；已同步夜間隔日股神、大盤分層、V101/V102 命中追蹤與 V108B/V109/V110 官方因子；不重跑推薦、不連外。")
 
 
 if __name__ == "__main__":
