@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v104 夜間準確率回饋版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v105 JSON熱修正版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -71,7 +71,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v104_night_accuracy_feedback"
+APP_VERSION = "v105_json_serializable_hotfix"
 
 
 
@@ -120,8 +120,55 @@ def _ensure_sidebar_numbers_for_this_page() -> None:
     )
 
 
+def _json_safe_value_for_download(obj: Any) -> Any:
+    """v105：下載 JSON 前先轉安全型別，避免 DataFrame/Series/NA 造成 TypeError。"""
+    try:
+        if obj is None:
+            return None
+        if obj is pd.NA:
+            return None
+        try:
+            if pd.isna(obj) and not isinstance(obj, (list, tuple, dict, pd.Series, pd.DataFrame)):
+                return None
+        except Exception:
+            pass
+        if isinstance(obj, pd.DataFrame):
+            return [_json_safe_value_for_download(x) for x in obj.to_dict(orient="records")]
+        if isinstance(obj, pd.Series):
+            return {str(k): _json_safe_value_for_download(v) for k, v in obj.to_dict().items()}
+        if isinstance(obj, pd.Index):
+            return [_json_safe_value_for_download(x) for x in obj.tolist()]
+        if isinstance(obj, (pd.Timestamp, datetime)):
+            try:
+                return obj.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(obj)
+        if isinstance(obj, dict):
+            return {str(_json_safe_value_for_download(k)): _json_safe_value_for_download(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [_json_safe_value_for_download(x) for x in obj]
+        if hasattr(obj, "item"):
+            try:
+                return _json_safe_value_for_download(obj.item())
+            except Exception:
+                pass
+        if isinstance(obj, float):
+            try:
+                import math
+                if math.isnan(obj) or math.isinf(obj):
+                    return None
+            except Exception:
+                pass
+            return obj
+        if isinstance(obj, (str, int, bool)):
+            return obj
+        return str(obj)
+    except Exception:
+        return str(obj)
+
+
 def _json_download(data: Any) -> bytes:
-    return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    return json.dumps(_json_safe_value_for_download(data), ensure_ascii=False, indent=2).encode("utf-8")
 
 
 
@@ -532,7 +579,7 @@ def main() -> None:
             st.download_button(
                 "下載權重建議 JSON",
                 data=_json_download(bundle),
-                file_name=f"godpick_weight_suggestions_v104_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"godpick_weight_suggestions_v105_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
                 use_container_width=True,
             )
