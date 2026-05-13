@@ -1305,5 +1305,56 @@ def save_applied_weights(weights: Dict[str, int], profile_name: str = "manual") 
     return False, f"權重套用失敗。{detail}"
 
 
+
+
+def get_weight_calibration_page_settings() -> Dict[str, Any]:
+    """v106：讀取 14_權重校正設定的永久設定。"""
+    payload = load_current_settings()
+    raw = payload.get("weight_calibration_page_settings", {}) if isinstance(payload, dict) else {}
+    if not isinstance(raw, dict):
+        raw = {}
+    try:
+        horizon = int(raw.get("main_horizon", 5) or 5)
+    except Exception:
+        horizon = 5
+    if horizon not in (1, 3, 5, 10, 20):
+        horizon = 5
+    return {
+        "main_horizon": horizon,
+        "allow_apply_from_page": bool(raw.get("allow_apply_from_page", False)),
+        "updated_at": str(raw.get("updated_at", "") or ""),
+    }
+
+
+def save_weight_calibration_page_settings(horizon: int, allow_apply_from_page: bool) -> Tuple[bool, str]:
+    """v106：永久保存 14_權重校正設定，並同步 GitHub。"""
+    existing = load_current_settings()
+    if not isinstance(existing, dict):
+        existing = {}
+    try:
+        horizon = int(horizon)
+    except Exception:
+        horizon = 5
+    if horizon not in (1, 3, 5, 10, 20):
+        horizon = 5
+    payload = {
+        **existing,
+        "weight_calibration_page_settings": {
+            "main_horizon": horizon,
+            "allow_apply_from_page": bool(allow_apply_from_page),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "version": "v106_weight_calibration_setting_persist",
+        },
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version": "godpick_v106_weight_calibration_setting_persist",
+    }
+    local_ok, local_msg = write_json(SETTINGS_FILE, payload)
+    gh_ok, gh_msg = _write_settings_to_github(payload)
+    ok = bool(local_ok or gh_ok)
+    detail = "；".join([str(local_msg), str(gh_msg)])
+    if ok:
+        return True, f"14_權重校正設定已永久保存。{detail}"
+    return False, f"14_權重校正設定保存失敗。{detail}"
+
 def save_suggestion_bundle(bundle: Dict[str, Any]) -> Tuple[bool, str]:
     return write_json(SUGGESTION_FILE, bundle)
