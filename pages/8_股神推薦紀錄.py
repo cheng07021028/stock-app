@@ -39,6 +39,12 @@ import streamlit as st
 from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
 from godpick_history_sources import fetch_multi_source_history
 try:
+    from official_factor_service import FACTOR_COLUMNS as OFFICIAL_FACTOR_SERVICE_COLUMNS, load_factor_frame as _load_official_factor_frame
+except Exception:
+    OFFICIAL_FACTOR_SERVICE_COLUMNS = []
+    _load_official_factor_frame = None
+
+try:
     import firebase_admin
     from firebase_admin import credentials, firestore
 except Exception:
@@ -87,7 +93,7 @@ except Exception:
 PAGE_TITLE = "股神推薦紀錄"
 PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
-BACKTEST_V12_VERSION = "record_v102_full_update_batch_guard_20260506"
+BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -748,6 +754,36 @@ def _v98_backfill_night_battle_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 # <<< V98_NIGHT_BATTLE_RECORD_SYNC
 
+# >>> V110_OFFICIAL_FACTOR_RECORD_SYNC
+# V110：8_股神推薦紀錄保存 16_官方因子快取中心欄位；只讀快取，不連官方網站。
+OFFICIAL_FACTOR_COLUMNS_V110 = list(OFFICIAL_FACTOR_SERVICE_COLUMNS or [
+    "官方資料日期", "外資近1日買賣超", "外資近3日買賣超", "外資近5日買賣超",
+    "投信近1日買賣超", "投信近3日買賣超", "投信近5日買賣超",
+    "自營商近1日買賣超", "自營商近3日買賣超", "自營商近5日買賣超",
+    "三大法人近1日合計", "三大法人近3日合計", "三大法人近5日合計",
+    "法人連買天數", "法人籌碼官方分數", "當月營收", "月營收MoM%", "月營收YoY%",
+    "累計營收YoY%", "營收年月", "營收成長官方分數", "PER本益比", "PBR股價淨值比",
+    "股利殖利率%", "估算EPS", "官方估值風險分數", "官方基本面成長分數",
+    "官方因子總分", "官方資料完整度", "官方因子資料狀態", "官方因子更新時間", "官方因子資料源",
+])
+OFFICIAL_FACTOR_COLUMNS_V110 = [c for c in OFFICIAL_FACTOR_COLUMNS_V110 if c not in {"股票代號", "股票名稱", "市場別", "正式產業別"}]
+OFFICIAL_FACTOR_NUMERIC_FIELDS_V110 = [
+    "外資近1日買賣超", "外資近3日買賣超", "外資近5日買賣超",
+    "投信近1日買賣超", "投信近3日買賣超", "投信近5日買賣超",
+    "自營商近1日買賣超", "自營商近3日買賣超", "自營商近5日買賣超",
+    "三大法人近1日合計", "三大法人近3日合計", "三大法人近5日合計",
+    "法人連買天數", "法人籌碼官方分數", "當月營收", "月營收MoM%", "月營收YoY%",
+    "累計營收YoY%", "營收成長官方分數", "PER本益比", "PBR股價淨值比",
+    "股利殖利率%", "估算EPS", "官方估值風險分數", "官方基本面成長分數",
+    "官方因子總分", "官方資料完整度",
+]
+for _v110_c in OFFICIAL_FACTOR_COLUMNS_V110:
+    if _v110_c not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v110_c)
+    if _v110_c in OFFICIAL_FACTOR_NUMERIC_FIELDS_V110 and _v110_c not in V73_NUMERIC_FIELDS:
+        V73_NUMERIC_FIELDS.append(_v110_c)
+# <<< V110_OFFICIAL_FACTOR_RECORD_SYNC
+
 
 # >>> V102_NIGHT_ACCURACY_ANALYSIS
 # V102：夜間隔日股神準確率分析。只讀既有推薦紀錄欄位，不自動抓資料，避免拖慢頁面。
@@ -1081,6 +1117,125 @@ def _data_completeness_report_v73(df: pd.DataFrame) -> pd.DataFrame:
         rows.append({"欄位": c, "有資料筆數": filled, "總筆數": total, "完整率%": rate, "狀態": status})
     return pd.DataFrame(rows)
 
+
+def _v110_is_blank(v: Any) -> bool:
+    try:
+        if v is None or pd.isna(v):
+            return True
+    except Exception:
+        pass
+    if isinstance(v, str):
+        return v.strip() in {"", "None", "nan", "NaN", "<NA>"}
+    return False
+
+
+def _v110_cell_safe(v: Any) -> Any:
+    if _v110_is_blank(v):
+        return None
+    if isinstance(v, (list, tuple, set)):
+        return "、".join(_safe_str(x) for x in v if _safe_str(x))
+    if isinstance(v, dict):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    return v
+
+
+def _load_official_factor_map_v110() -> dict[str, dict[str, Any]]:
+    if _load_official_factor_frame is None:
+        return {}
+    try:
+        fdf = _load_official_factor_frame()
+    except Exception:
+        return {}
+    if fdf is None or fdf.empty or "股票代號" not in fdf.columns:
+        return {}
+    fdf = fdf.copy()
+    fdf["股票代號"] = fdf["股票代號"].map(_normalize_code)
+    keep_cols = [c for c in OFFICIAL_FACTOR_COLUMNS_V110 if c in fdf.columns]
+    out: dict[str, dict[str, Any]] = {}
+    for _, r in fdf.drop_duplicates("股票代號", keep="last").iterrows():
+        code = _normalize_code(r.get("股票代號"))
+        if code:
+            out[code] = {c: _v110_cell_safe(r.get(c)) for c in keep_cols}
+    return out
+
+
+def _apply_official_factor_backfill_v110(df: pd.DataFrame) -> pd.DataFrame:
+    """V110：把官方因子快取安全補進推薦紀錄；只補空欄，不覆蓋歷史紀錄原值。"""
+    if df is None or df.empty:
+        return df
+    x = df.copy()
+    x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
+    for c in OFFICIAL_FACTOR_COLUMNS_V110:
+        if c not in x.columns:
+            x[c] = None
+    fmap = _load_official_factor_map_v110()
+    if not fmap:
+        if "官方因子資料狀態" in x.columns:
+            mask = x["官方因子資料狀態"].map(_v110_is_blank)
+            x.loc[mask, "官方因子資料狀態"] = "未讀到官方快取"
+        return x
+    if "股票代號" not in x.columns:
+        return x
+    for idx, row in x.iterrows():
+        code = _normalize_code(row.get("股票代號"))
+        rec = fmap.get(code)
+        if not rec:
+            continue
+        for c, v in rec.items():
+            if c not in x.columns:
+                x[c] = None
+            try:
+                if _v110_is_blank(x.at[idx, c]):
+                    x.at[idx, c] = v
+            except Exception:
+                pass
+    for c in OFFICIAL_FACTOR_NUMERIC_FIELDS_V110:
+        if c in x.columns:
+            x[c] = pd.to_numeric(x[c], errors="coerce")
+    return x
+
+
+def _render_v110_official_factor_record_panel(df: pd.DataFrame) -> None:
+    render_pro_section("官方因子紀錄追蹤｜法人 / 營收 / EPS / PER")
+    if df is None or df.empty:
+        st.info("目前沒有推薦紀錄可分析官方因子。")
+        return
+    x = _apply_official_factor_backfill_v110(df.copy())
+    if x.empty:
+        st.info("目前沒有官方因子資料。")
+        return
+    comp = pd.to_numeric(x.get("官方資料完整度"), errors="coerce") if "官方資料完整度" in x.columns else pd.Series([], dtype="float64")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("紀錄筆數", len(x))
+    with c2:
+        st.metric("完整度>=60", int((comp >= 60).sum()) if not comp.empty else 0)
+    with c3:
+        avg = pd.to_numeric(x.get("官方因子總分"), errors="coerce").dropna().mean() if "官方因子總分" in x.columns else None
+        st.metric("平均官方分", format_number(avg, 1) if avg == avg else "—")
+    with c4:
+        pos = int((pd.to_numeric(x.get("三大法人近5日合計"), errors="coerce") > 0).sum()) if "三大法人近5日合計" in x.columns else 0
+        st.metric("法人5日買超", pos)
+    with c5:
+        yoy_pos = int((pd.to_numeric(x.get("月營收YoY%"), errors="coerce") > 0).sum()) if "月營收YoY%" in x.columns else 0
+        st.metric("營收YoY正成長", yoy_pos)
+    show_cols = [
+        "推薦日期", "股票代號", "股票名稱", "推薦總分", "夜間股神總分", "官方因子總分", "官方資料完整度", "官方因子資料狀態",
+        "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
+        "月營收YoY%", "月營收MoM%", "累計營收YoY%", "PER本益比", "PBR股價淨值比", "估算EPS", "官方因子更新時間",
+    ]
+    show_cols = [c for c in show_cols if c in x.columns]
+    if show_cols:
+        try:
+            x = x.sort_values(["官方資料完整度", "官方因子總分"], ascending=[False, False], na_position="last")
+        except Exception:
+            pass
+        st.dataframe(_safe_display_df(x[show_cols].head(500)), use_container_width=True, hide_index=True)
+    st.caption("V110：此區只讀 official_factors_cache.json，不會在 8 頁即時抓官方網站。")
+
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -1093,6 +1248,12 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in GODPICK_RECORD_COLUMNS:
         if c not in x.columns:
             x[c] = None
+
+    # V110：補入官方因子快取欄位，只補空值，不連外、不覆蓋歷史紀錄原值。
+    try:
+        x = _apply_official_factor_backfill_v110(x)
+    except Exception:
+        pass
 
     numeric_cols = [
         "推薦總分", "上漲機率估計%", "大盤橋接分數", "大盤可參考分數", "大盤加權分", "大盤影響加減分", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "進場時機分數", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "風險報酬比_決策", "追高風險分數_決策", "飆股起漲分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", 
@@ -4602,6 +4763,9 @@ def main():
 
     with st.expander("🎯 V102 夜間隔日股神準確率分析", expanded=False):
         _render_v102_night_accuracy_panel(live_df.copy())
+
+    with st.expander("🏛️ V110 官方因子紀錄追蹤", expanded=False):
+        _render_v110_official_factor_record_panel(live_df.copy())
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 

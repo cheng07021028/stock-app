@@ -35,6 +35,12 @@ import streamlit as st
 from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
 from godpick_history_sources import fetch_multi_source_history
 try:
+    from official_factor_service import FACTOR_COLUMNS as OFFICIAL_FACTOR_SERVICE_COLUMNS, load_factor_frame as _load_official_factor_frame
+except Exception:
+    OFFICIAL_FACTOR_SERVICE_COLUMNS = []
+    _load_official_factor_frame = None
+
+try:
     from godpick_column_schema import (
         UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
         UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
@@ -80,9 +86,9 @@ except Exception:
         return pd.DataFrame()
 
 PAGE_TITLE = "推薦清單"
-PERF_TRACKING_VERSION = "v100_night_battle_list_sync_v94"
+PERF_TRACKING_VERSION = "v110_official_factor_list_sync"
 PFX = "godpick_list_"
-NIGHT_BATTLE_LIST_VERSION = "V101_20260513_night_hit_tracking"
+NIGHT_BATTLE_LIST_VERSION = "V110_20260513_official_factor_sync"
 
 # V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
 # 不重算 07 推薦核心，避免拖慢頁面。
@@ -271,6 +277,33 @@ NIGHT_HIT_TRACKING_COLUMNS = [
 for _v101_col in NIGHT_HIT_TRACKING_COLUMNS:
     if _v101_col not in GODPICK_RECORD_COLUMNS:
         GODPICK_RECORD_COLUMNS.append(_v101_col)
+
+# V110：10_推薦清單保存 16_官方因子快取中心欄位。
+# 僅讀 official_factors_cache.json，不在本頁即時連官方網站，避免拖慢顯示。
+OFFICIAL_FACTOR_COLUMNS_V110 = list(OFFICIAL_FACTOR_SERVICE_COLUMNS or [
+    "官方資料日期", "外資近1日買賣超", "外資近3日買賣超", "外資近5日買賣超",
+    "投信近1日買賣超", "投信近3日買賣超", "投信近5日買賣超",
+    "自營商近1日買賣超", "自營商近3日買賣超", "自營商近5日買賣超",
+    "三大法人近1日合計", "三大法人近3日合計", "三大法人近5日合計",
+    "法人連買天數", "法人籌碼官方分數", "當月營收", "月營收MoM%", "月營收YoY%",
+    "累計營收YoY%", "營收年月", "營收成長官方分數", "PER本益比", "PBR股價淨值比",
+    "股利殖利率%", "估算EPS", "官方估值風險分數", "官方基本面成長分數",
+    "官方因子總分", "官方資料完整度", "官方因子資料狀態", "官方因子更新時間", "官方因子資料源",
+])
+OFFICIAL_FACTOR_COLUMNS_V110 = [c for c in OFFICIAL_FACTOR_COLUMNS_V110 if c not in {"股票代號", "股票名稱", "市場別", "正式產業別"}]
+OFFICIAL_FACTOR_NUMERIC_COLUMNS_V110 = [
+    "外資近1日買賣超", "外資近3日買賣超", "外資近5日買賣超",
+    "投信近1日買賣超", "投信近3日買賣超", "投信近5日買賣超",
+    "自營商近1日買賣超", "自營商近3日買賣超", "自營商近5日買賣超",
+    "三大法人近1日合計", "三大法人近3日合計", "三大法人近5日合計",
+    "法人連買天數", "法人籌碼官方分數", "當月營收", "月營收MoM%", "月營收YoY%",
+    "累計營收YoY%", "營收成長官方分數", "PER本益比", "PBR股價淨值比",
+    "股利殖利率%", "估算EPS", "官方估值風險分數", "官方基本面成長分數",
+    "官方因子總分", "官方資料完整度",
+]
+for _v110_col in OFFICIAL_FACTOR_COLUMNS_V110:
+    if _v110_col not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v110_col)
 
 
 # >>> V72_FACTOR_ENRICH_HELPER
@@ -1262,6 +1295,105 @@ def _render_night_hit_tracker_v101(filtered_df: pd.DataFrame) -> None:
     st.caption("V101：此區只顯示已追蹤結果；只有按下『更新隔日命中追蹤』才會抓歷史K線並寫回，避免影響 10_推薦清單開啟速度。")
 
 
+
+def _load_official_factor_map_v110() -> dict[str, dict[str, Any]]:
+    """V110：載入 16_官方因子快取中心產生的 official_factors_cache.json。"""
+    if _load_official_factor_frame is None:
+        return {}
+    try:
+        fdf = _load_official_factor_frame()
+    except Exception:
+        return {}
+    if fdf is None or fdf.empty or "股票代號" not in fdf.columns:
+        return {}
+    fdf = fdf.copy()
+    fdf["股票代號"] = fdf["股票代號"].map(_normalize_code)
+    out: dict[str, dict[str, Any]] = {}
+    keep_cols = [c for c in OFFICIAL_FACTOR_COLUMNS_V110 if c in fdf.columns]
+    for _, r in fdf.drop_duplicates("股票代號", keep="last").iterrows():
+        code = _normalize_code(r.get("股票代號"))
+        if not code:
+            continue
+        out[code] = {c: _cell_safe_value(r.get(c)) for c in keep_cols}
+    return out
+
+
+def _apply_official_factor_backfill_v110(df: pd.DataFrame) -> pd.DataFrame:
+    """V110：把官方因子快取安全補進推薦清單；只補空欄，不覆蓋 07 已寫入的值。"""
+    if df is None or df.empty:
+        return df
+    x = df.copy()
+    x = x.loc[:, ~x.columns.duplicated()].copy()
+    for c in OFFICIAL_FACTOR_COLUMNS_V110:
+        if c not in x.columns:
+            x[c] = None
+    fmap = _load_official_factor_map_v110()
+    if not fmap:
+        if "官方因子資料狀態" in x.columns:
+            mask = x["官方因子資料狀態"].map(_is_blank_value)
+            for idx in x.index[mask]:
+                _safe_set_cell(x, idx, "官方因子資料狀態", "未讀到官方快取")
+        return x
+    if "股票代號" not in x.columns:
+        return x
+    for idx, row in x.iterrows():
+        code = _normalize_code(row.get("股票代號"))
+        rec = fmap.get(code)
+        if not rec:
+            continue
+        for c, v in rec.items():
+            if c not in x.columns:
+                x[c] = None
+            try:
+                if _is_blank_value(x.at[idx, c]):
+                    _safe_set_cell(x, idx, c, v)
+            except Exception:
+                pass
+    for c in OFFICIAL_FACTOR_NUMERIC_COLUMNS_V110:
+        if c in x.columns:
+            x[c] = pd.to_numeric(x[c], errors="coerce")
+    return x
+
+
+def _render_official_factor_tracker_v110(filtered_df: pd.DataFrame) -> None:
+    """V110：推薦清單官方因子保存狀態，僅讀快取後顯示，不連外。"""
+    render_pro_section("官方因子追蹤｜法人 / 營收 / EPS / PER")
+    if filtered_df is None or filtered_df.empty:
+        st.info("目前篩選條件下沒有官方因子資料可顯示。")
+        return
+    x = _apply_official_factor_backfill_v110(filtered_df.copy())
+    if x.empty:
+        st.info("目前沒有資料。")
+        return
+    completeness = pd.to_numeric(x.get("官方資料完整度"), errors="coerce") if "官方資料完整度" in x.columns else pd.Series([], dtype="float64")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.metric("官方因子筆數", len(x))
+    with k2:
+        st.metric("完整度>=60", int((completeness >= 60).sum()) if not completeness.empty else 0)
+    with k3:
+        avg_score = pd.to_numeric(x.get("官方因子總分"), errors="coerce").dropna().mean() if "官方因子總分" in x.columns else None
+        st.metric("平均官方分", format_number(avg_score, 1) if avg_score == avg_score else "—")
+    with k4:
+        avg_foreign = pd.to_numeric(x.get("外資近5日買賣超"), errors="coerce").dropna().mean() if "外資近5日買賣超" in x.columns else None
+        st.metric("外資5日均買超", format_number(avg_foreign, 0) if avg_foreign == avg_foreign else "—")
+    with k5:
+        avg_rev = pd.to_numeric(x.get("月營收YoY%"), errors="coerce").dropna().mean() if "月營收YoY%" in x.columns else None
+        st.metric("月營收YoY均值", format_number(avg_rev, 1) if avg_rev == avg_rev else "—")
+    show_cols = [
+        "推薦日期", "股票代號", "股票名稱", "官方因子總分", "官方資料完整度", "官方因子資料狀態",
+        "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
+        "月營收YoY%", "月營收MoM%", "累計營收YoY%", "PER本益比", "PBR股價淨值比", "估算EPS", "官方因子更新時間",
+    ]
+    show_cols = [c for c in show_cols if c in x.columns]
+    if show_cols:
+        try:
+            x = x.sort_values(["官方資料完整度", "官方因子總分"], ascending=[False, False], na_position="last")
+        except Exception:
+            pass
+        _safe_dataframe(_format_show_df(x[show_cols].head(300)), keep_cols=show_cols, use_container_width=True, height=320)
+    st.caption("V110：此區只讀 16_官方因子快取中心的 official_factors_cache.json，不會在 10 頁即時連官方網站。")
+
 def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -1272,6 +1404,12 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     for c in GODPICK_RECORD_COLUMNS:
         if c not in x.columns:
             x[c] = None
+
+    # V110：補入官方因子快取欄位，只補空值，不連外、不覆蓋既有推薦值。
+    try:
+        x = _apply_official_factor_backfill_v110(x)
+    except Exception:
+        pass
 
 
     if "起漲等級" in x.columns:
@@ -2543,6 +2681,8 @@ def main():
     _render_night_battle_tracker(filtered_df)
 
     _render_night_hit_tracker_v101(filtered_df)
+
+    _render_official_factor_tracker_v110(filtered_df)
 
     _render_v50_performance_tracker(filtered_df, "V50 推薦後績效追蹤總控｜10_推薦清單")
 
