@@ -1185,5 +1185,78 @@
       "market": "上市"
     }
   ],
-  "0515": []
+  "0515": [
+    {
+      "code": "1714",
+      "name": "和桐",
+      "market": "上市",
+      "category": "塑化"
+    },
+    {
+      "code": "2027",
+      "name": "大成鋼",
+      "market": "上市",
+      "category": "鋼鐵"
+    },
+    {
+      "code": "2420",
+      "name": "新巨",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2423",
+      "name": "固緯",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
+      "code": "3003",
+      "name": "健和興",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3592",
+      "name": "瑞鼎",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
+      "code": "4127",
+      "name": "天良",
+      "market": "上櫃",
+      "category": "生技醫療"
+    },
+    {
+      "code": "4155",
+      "name": "訊映",
+      "market": "上市",
+      "category": "生技醫療業"
+    },
+    {
+      "code": "5381",
+      "name": "光譜",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "5493",
+      "name": "三聯",
+      "market": "上櫃",
+      "category": "其他電子業"
+    },
+    {
+      "code": "7777",
+      "name": "能率亞洲",
+      "market": "上櫃",
+      "category": "其他_主題未映射"
+    },
+    {
+      "code": "8415",
+      "name": "大國鋼",
+      "market": "上櫃",
+      "category": "鋼鐵"
+    }
+  ]
 }
