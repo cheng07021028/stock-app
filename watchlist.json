@@ -1097,8 +1097,7 @@
     {
       "code": "1714",
       "name": "和桐",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "1817",
@@ -1113,20 +1112,17 @@
     {
       "code": "2027",
       "name": "大成鋼",
-      "market": "上市",
-      "category": "鋼鐵"
+      "market": "上市"
     },
     {
       "code": "2420",
       "name": "新巨",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2423",
       "name": "固緯",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "2762",
@@ -1136,14 +1132,12 @@
     {
       "code": "3003",
       "name": "健和興",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "3592",
       "name": "瑞鼎",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "3716",
@@ -1163,8 +1157,7 @@
     {
       "code": "5493",
       "name": "三聯",
-      "market": "上櫃",
-      "category": "其他電子業"
+      "market": "上櫃"
     },
     {
       "code": "6498",
@@ -1184,13 +1177,13 @@
     {
       "code": "8415",
       "name": "大國鋼",
-      "market": "上櫃",
-      "category": "鋼鐵"
+      "market": "上櫃"
     },
     {
       "code": "9944",
       "name": "新麗",
       "market": "上市"
     }
-  ]
+  ],
+  "0515": []
 }
