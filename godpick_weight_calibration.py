@@ -122,6 +122,35 @@ for _factor_name, _cols in OFFICIAL_SCORE_COLUMNS.items():
         if _col not in FACTOR_COLUMNS[_factor_name]:
             FACTOR_COLUMNS[_factor_name].insert(0, _col)
 
+# v121：V118 實戰品質防呆欄位納入 14 權重校正。
+# 來源為 07 產生、10/8 保存的量能/趨勢/防呆降分欄位；本模組只讀既有紀錄，不連外、不重跑推薦。
+QUALITY_SCORE_COLUMNS: Dict[str, List[str]] = {
+    "技術結構": ["實戰品質分", "均線轉強分", "動能翻多分", "收盤距MA20%", "收盤距MA60%"],
+    "交易可行": ["實戰品質分", "支撐防守分", "量能啟動分"],
+    "爆發力": ["量能啟動分", "均量比", "突破準備分", "實戰品質分"],
+    "型態突破": ["突破準備分", "均線轉強分", "動能翻多分", "支撐防守分"],
+    "自動因子": ["實戰品質分"],
+}
+
+QUALITY_GROUP_COLUMNS: List[str] = [
+    "實戰品質級距", "量能狀態", "趨勢狀態", "實戰降分級距",
+    "量能啟動級距", "均量比級距", "MA20距離級距", "MA60距離級距",
+    "進場型態_隔日", "隔日建議動作", "正式產業別", "類別",
+]
+
+QUALITY_DISPLAY_COLUMNS: List[str] = [
+    "股票代號", "股票名稱", "推薦日期", "推薦時間",
+    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
+]
+
+for _factor_name, _cols in QUALITY_SCORE_COLUMNS.items():
+    FACTOR_COLUMNS.setdefault(_factor_name, [])
+    for _col in reversed(_cols):
+        if _col not in FACTOR_COLUMNS[_factor_name]:
+            FACTOR_COLUMNS[_factor_name].insert(0, _col)
+
 PERF_COLUMNS: Dict[int, List[str]] = {
     1: ["隔日最高漲幅%", "推薦後1日報酬%", "推薦後1日%", "1日報酬%", "1日漲跌%", "1日績效%", "1日後報酬%", "即時追蹤報酬%", "目前追蹤報酬%", "目前損益幅%", "損益幅%", "實際報酬%"],
     3: ["3日最高漲幅%", "推薦後3日報酬%", "推薦後3日%", "3日報酬%", "3日漲跌%", "3日績效%", "3日後報酬%"],
@@ -1437,6 +1466,235 @@ def apply_official_factor_feedback(weight_df: pd.DataFrame, official_bundle: Dic
             notes.append("官方高分失敗樣本偏多，需檢查是否追高或產業輪動失真")
     note_text = "；".join(notes) if notes else "官方因子樣本正常累積中，暫不額外調權"
     out["v111官方因子回饋"] = note_text
+    return out
+
+
+def _quality_bucket_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """v121：實戰品質分數級距。"""
+    s = numeric_series(df, col)
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None:
+            return "缺資料"
+        if x >= 80:
+            return "A 高品質>=80"
+        if x >= 70:
+            return "B 可操作70-79"
+        if x >= 60:
+            return "C 觀察60-69"
+        return "D 低品質<60"
+    return s.map(bucket)
+
+
+def _risk_bucket_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """v121：實戰降分級距，分數越高代表越需要檢討。"""
+    s = numeric_series(df, col)
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None:
+            return "缺資料"
+        if x <= 0:
+            return "無降分"
+        if x <= 5:
+            return "輕微降分1-5"
+        if x <= 15:
+            return "中度降分6-15"
+        return "重度降分>15"
+    return s.map(bucket)
+
+
+def _ratio_bucket_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """v121：均量比級距。"""
+    s = numeric_series(df, col)
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None:
+            return "缺資料"
+        if x >= 2:
+            return "量能強>=2"
+        if x >= 1.2:
+            return "量能啟動1.2-2"
+        if x >= 0.8:
+            return "量能普通0.8-1.2"
+        return "量能不足<0.8"
+    return s.map(bucket)
+
+
+def _ma_distance_bucket_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """v121：收盤距均線級距。"""
+    s = numeric_series(df, col)
+    def bucket(v: Any) -> str:
+        x = safe_float(v)
+        if x is None:
+            return "缺資料"
+        if x >= 8:
+            return "乖離偏高>=8%"
+        if x >= 0:
+            return "站上均線0-8%"
+        if x >= -5:
+            return "小幅跌破0~-5%"
+        return "跌破偏弱<-5%"
+    return s.map(bucket)
+
+
+def _quality_group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int = 5, min_n: int = 3) -> pd.DataFrame:
+    """v121：實戰品質分層命中/績效表。"""
+    if df is None or df.empty or group_col not in df.columns:
+        return pd.DataFrame()
+    ret_col = first_existing_col(df, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(df, horizon)
+    ret = numeric_series(df, ret_col) if ret_col else pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
+    stop_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["停損觸發"])
+    target_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    entry_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["進場點命中"])
+    work = pd.DataFrame({
+        "grp": df[group_col].map(lambda x: safe_str(x, "未分類")),
+        "ret": ret,
+        "stop": stop_hit,
+        "target": target_hit,
+        "entry": entry_hit,
+    })
+    rows: List[dict] = []
+    for grp, g in work.groupby("grp", dropna=False):
+        n = int(len(g))
+        if n < min_n:
+            continue
+        stat = summarize_returns(g["ret"])
+        def rate(c: str) -> Any:
+            ss = pd.to_numeric(g[c], errors="coerce").dropna()
+            if ss.empty:
+                return None
+            return round(float(ss.mean() * 100), 2)
+        rows.append({
+            "分組欄位": group_col,
+            "分組": grp if safe_str(grp) else "未分類",
+            "樣本數": n,
+            "績效欄": ret_col or "缺績效欄",
+            "勝率%": stat.get("勝率%"),
+            "平均報酬%": stat.get("平均報酬%"),
+            "期望值%": stat.get("期望值%"),
+            "進場點命中率%": rate("entry"),
+            "第一壓力命中率%": rate("target"),
+            "停損觸發率%": rate("stop"),
+            "樣本信心": confidence_label(n),
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        sort_cols = [c for c in ["期望值%", "勝率%", "第一壓力命中率%"] if c in out.columns]
+        if sort_cols:
+            out = out.sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
+    return out
+
+
+def calc_quality_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> Dict[str, Any]:
+    """v121：實戰品質防呆欄位準確率分析包。"""
+    if df is None or df.empty:
+        return {"status": "empty", "message": "沒有推薦紀錄", "tables": {}, "summary": {}}
+    work = df.copy()
+    if "實戰品質分" in work.columns and "實戰品質級距" not in work.columns:
+        work["實戰品質級距"] = _quality_bucket_series(work, "實戰品質分")
+    if "實戰降分" in work.columns and "實戰降分級距" not in work.columns:
+        work["實戰降分級距"] = _risk_bucket_series(work, "實戰降分")
+    if "量能啟動分" in work.columns and "量能啟動級距" not in work.columns:
+        work["量能啟動級距"] = _numeric_bucket_series(work, "量能啟動分")
+    if "均量比" in work.columns and "均量比級距" not in work.columns:
+        work["均量比級距"] = _ratio_bucket_series(work, "均量比")
+    if "收盤距MA20%" in work.columns and "MA20距離級距" not in work.columns:
+        work["MA20距離級距"] = _ma_distance_bucket_series(work, "收盤距MA20%")
+    if "收盤距MA60%" in work.columns and "MA60距離級距" not in work.columns:
+        work["MA60距離級距"] = _ma_distance_bucket_series(work, "收盤距MA60%")
+
+    ret_col = first_existing_col(work, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(work, horizon)
+    ret = numeric_series(work, ret_col) if ret_col else pd.Series([math.nan] * len(work), index=work.index, dtype="float64")
+    quality = numeric_series(work, "實戰品質分") if "實戰品質分" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
+    penalty = numeric_series(work, "實戰降分") if "實戰降分" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
+
+    usable_mask = quality.notna()
+    high_mask = quality >= 70
+    low_mask = quality < 60
+    penalty_mask = penalty >= 10
+
+    stop_hit, stop_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["停損觸發"])
+    target_hit, target_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    entry_hit, entry_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["進場點命中"])
+
+    tables = {c: _quality_group_accuracy_table(work, c, horizon=horizon) for c in QUALITY_GROUP_COLUMNS if c in work.columns}
+
+    def _stat_for(mask: pd.Series) -> Dict[str, Any]:
+        try:
+            return summarize_returns(ret.loc[mask.fillna(False)])
+        except Exception:
+            return {"樣本數": 0}
+
+    def _rate(s: pd.Series, mask: Optional[pd.Series] = None) -> Any:
+        try:
+            vv = pd.to_numeric(s.loc[mask.fillna(False)] if mask is not None else s, errors="coerce").dropna()
+            if vv.empty:
+                return None
+            return round(float(vv.mean() * 100), 2)
+        except Exception:
+            return None
+
+    weak = pd.DataFrame()
+    try:
+        fail_mask = high_mask & ((ret < 0) | (stop_hit == 1))
+        cols = [c for c in QUALITY_DISPLAY_COLUMNS + [ret_col, "進場型態_隔日", "隔日建議動作", "作戰命中摘要", "風險說明"] if c and c in work.columns]
+        weak = work.loc[fail_mask, cols].head(50).copy() if cols else pd.DataFrame()
+    except Exception:
+        weak = pd.DataFrame()
+
+    summary = {
+        "版本": "v121_quality_accuracy_feedback",
+        "樣本數": int(len(work)),
+        "績效欄": ret_col or "缺績效欄",
+        "績效統計": summarize_returns(ret),
+        "實戰品質可用樣本": int(usable_mask.fillna(False).sum()),
+        "高品質樣本": int(high_mask.fillna(False).sum()),
+        "低品質樣本": int(low_mask.fillna(False).sum()),
+        "高降分樣本": int(penalty_mask.fillna(False).sum()),
+        "平均實戰品質分": round(float(pd.to_numeric(quality, errors="coerce").dropna().mean()), 2) if pd.to_numeric(quality, errors="coerce").dropna().size else None,
+        "平均實戰降分": round(float(pd.to_numeric(penalty, errors="coerce").dropna().mean()), 2) if pd.to_numeric(penalty, errors="coerce").dropna().size else None,
+        "高品質績效": _stat_for(high_mask),
+        "低品質績效": _stat_for(low_mask),
+        "高降分績效": _stat_for(penalty_mask),
+        "進場點命中欄": entry_col or "缺欄",
+        "停損觸發欄": stop_col or "缺欄",
+        "第一壓力命中欄": target_col or "缺欄",
+        "高品質進場點命中率%": _rate(entry_hit, high_mask),
+        "高品質第一壓力命中率%": _rate(target_hit, high_mask),
+        "高品質停損觸發率%": _rate(stop_hit, high_mask),
+        "高品質失敗筆數": int(len(weak)),
+    }
+    return {"status": "ok", "summary": summary, "tables": tables, "weak": weak}
+
+
+def apply_quality_feedback(weight_df: pd.DataFrame, quality_bundle: Dict[str, Any]) -> pd.DataFrame:
+    """v121：實戰品質回饋。僅加註建議，維持原本 8 大權重名稱。"""
+    if weight_df is None or weight_df.empty or not isinstance(quality_bundle, dict):
+        return weight_df
+    out = weight_df.copy()
+    summary = quality_bundle.get("summary", {}) if isinstance(quality_bundle.get("summary"), dict) else {}
+    usable = int(safe_float(summary.get("實戰品質可用樣本"), 0) or 0)
+    high_stat = summary.get("高品質績效", {}) if isinstance(summary.get("高品質績效"), dict) else {}
+    low_stat = summary.get("低品質績效", {}) if isinstance(summary.get("低品質績效"), dict) else {}
+    penalty_stat = summary.get("高降分績效", {}) if isinstance(summary.get("高降分績效"), dict) else {}
+    high_expect = safe_float(high_stat.get("期望值%"))
+    low_expect = safe_float(low_stat.get("期望值%"))
+    penalty_expect = safe_float(penalty_stat.get("期望值%"))
+    high_stop = safe_float(summary.get("高品質停損觸發率%"))
+    notes: List[str] = []
+    if usable < 30:
+        notes.append("實戰品質樣本仍少，先觀察不大幅調權")
+    else:
+        if high_expect is not None and low_expect is not None and high_expect > low_expect:
+            notes.append("高實戰品質績效優於低品質，建議維持或提高技術結構/交易可行/爆發力")
+        if high_expect is not None and high_expect <= 0:
+            notes.append("高實戰品質期望值未轉正，需檢查進場條件或停損設定")
+        if penalty_expect is not None and penalty_expect < 0:
+            notes.append("高降分樣本績效偏弱，應提高交易可行與量能趨勢防呆權重")
+        if high_stop is not None and high_stop >= 30:
+            notes.append("高品質樣本停損仍偏高，需強化風險/交易可行因子")
+    note_text = "；".join(notes) if notes else "實戰品質樣本正常累積中，暫不額外調權"
+    out["v121實戰品質回饋"] = note_text
     return out
 
 
