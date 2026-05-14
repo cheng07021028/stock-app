@@ -299,6 +299,12 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-14 02:27:15",
-  "version": "godpick_v5_persistent_settings"
+  "updated_at": "2026-05-14 02:27:40",
+  "version": "godpick_v106_weight_calibration_setting_persist",
+  "weight_calibration_page_settings": {
+    "main_horizon": 5,
+    "allow_apply_from_page": false,
+    "updated_at": "2026-05-14 02:27:40",
+    "version": "v106_weight_calibration_setting_persist"
+  }
 }
