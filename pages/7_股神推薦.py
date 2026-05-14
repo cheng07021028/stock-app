@@ -93,6 +93,13 @@ except Exception:
     enrich_night_strategy = None
     GODPICK_NIGHT_COLUMNS = []
 
+try:
+    from official_factor_service import merge_official_factors, load_factor_cache
+except Exception:
+    merge_official_factors = None
+    load_factor_cache = None
+
+
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
@@ -105,8 +112,8 @@ SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
-NIGHT_NEXT_ENTRY_VERSION = "night_next_entry_v92_compat_20260513"
-PAGE_TITLE = "股神推薦 V92｜夜間隔日進場股神版"
+NIGHT_NEXT_ENTRY_VERSION = "night_next_entry_v109_official_factor_cache_20260513"
+PAGE_TITLE = "股神推薦 V109｜官方因子快取夜間股神版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -145,6 +152,7 @@ GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
 GODPICK_LIST_FILE = "godpick_recommend_list.json"
 MACRO_MODE_BRIDGE_FILE = "macro_mode_bridge.json"
 MARKET_SNAPSHOT_FILE = "market_snapshot.json"
+OFFICIAL_FACTORS_CACHE_FILE = "official_factors_cache.json"
 
 
 GODPICK_RECORD_COLUMNS = [
@@ -153,6 +161,25 @@ GODPICK_RECORD_COLUMNS = [
     "股票名稱",
     "市場別",
     "類別",
+    "官方因子總分",
+    "官方資料完整度",
+    "官方因子資料狀態",
+    "官方資料日期",
+    "外資近5日買賣超",
+    "投信近5日買賣超",
+    "三大法人近5日合計",
+    "法人連買天數",
+    "法人籌碼官方分數",
+    "月營收YoY%",
+    "月營收MoM%",
+    "累計營收YoY%",
+    "營收成長官方分數",
+    "PBR股價淨值比",
+    "股利殖利率%",
+    "官方估值風險分數",
+    "官方基本面成長分數",
+    "官方因子更新時間",
+    "官方因子資料源",
     "推薦模式",
     "推薦型態",
     "機會型態",
@@ -2309,6 +2336,48 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
             )
 
     return x
+
+
+def _apply_official_factor_cache_v109(df: pd.DataFrame | None) -> pd.DataFrame:
+    """V109：只讀 official_factors_cache.json，把官方法人/營收/EPS/PER 因子併入推薦結果。
+
+    安全原則：
+    - 不在 07 即時連官方網站，避免拖慢推薦。
+    - 快取不存在或欄位缺失時只補提示，不中斷頁面。
+    - 官方資料完整度 < 60 只顯示，不強行改分；夜間策略會保守採用。
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    try:
+        if callable(merge_official_factors):
+            out = merge_official_factors(out)
+            if "官方資料完整度" in out.columns:
+                comp = pd.to_numeric(out["官方資料完整度"], errors="coerce").fillna(0)
+                usable = int((comp >= 60).sum())
+                total = int(len(out))
+                tag = f"官方因子快取已合併：{usable}/{total} 筆完整度≥60"
+            else:
+                tag = "官方因子快取已合併，但未取得完整度欄位"
+        else:
+            tag = "官方因子服務未載入，07 僅使用既有技術量價因子"
+
+        if "資料完整度" not in out.columns:
+            out["資料完整度"] = ""
+        base = out["資料完整度"].astype(str)
+        mask = ~base.str.contains("官方因子快取", na=False)
+        out.loc[mask, "資料完整度"] = base[mask].map(lambda x: (x if x and x != "nan" else "夜間資料") + "｜" + tag)
+    except Exception as e:
+        if "資料完整度" not in out.columns:
+            out["資料完整度"] = ""
+        try:
+            msg = f"官方因子快取合併失敗：{e}"
+            out["資料完整度"] = out["資料完整度"].astype(str).map(lambda x: (x if x and x != "nan" else "") + ("｜" if x and x != "nan" else "") + msg)
+        except Exception:
+            pass
+    return out
 
 
 def _recalc_night_strategy_after_macro_v100(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -6589,6 +6658,20 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
         close_now = _safe_float(last.get("收盤價"))
         close_first = _safe_float(first.get("收盤價"))
+        volume_last = _safe_float(last.get("成交股數"), _safe_float(last.get("成交量")))
+        volume_5 = _safe_float(last.get("VOL5"))
+        volume_20 = _safe_float(last.get("VOL20"))
+        volume_ratio = None
+        if volume_5 not in [None, 0] and volume_20 not in [None, 0]:
+            volume_ratio = volume_5 / volume_20
+        ma20_now = _safe_float(last.get("MA20"))
+        ma60_now = _safe_float(last.get("MA60"))
+        close_vs_ma20_pct = None
+        close_vs_ma60_pct = None
+        if close_now not in [None, 0] and ma20_now not in [None, 0]:
+            close_vs_ma20_pct = (close_now - ma20_now) / ma20_now * 100
+        if close_now not in [None, 0] and ma60_now not in [None, 0]:
+            close_vs_ma60_pct = (close_now - ma60_now) / ma60_now * 100
         period_pct = None
         if close_now is not None and close_first not in [None, 0]:
             period_pct = ((close_now / close_first) - 1) * 100
@@ -6641,6 +6724,12 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "support_dist": support_dist,
             "radar_avg": radar_avg,
             "technical_score": technical_score,
+            "volume_last": volume_last,
+            "volume_5": volume_5,
+            "volume_20": volume_20,
+            "volume_ratio": volume_ratio,
+            "close_vs_ma20_pct": close_vs_ma20_pct,
+            "close_vs_ma60_pct": close_vs_ma60_pct,
         }
     except Exception as e:
         return {
@@ -6815,6 +6904,12 @@ def _analyze_one_stock_for_recommend(
             "突破準備分": _safe_float(bundle["prelaunch"].get("突破準備分"), 0) or 0,
             "動能翻多分": _safe_float(bundle["prelaunch"].get("動能翻多分"), 0) or 0,
             "支撐防守分": _safe_float(bundle["prelaunch"].get("支撐防守分"), 0) or 0,
+            "最新成交量": _safe_float(bundle.get("volume_last"), 0) or 0,
+            "5日均量": _safe_float(bundle.get("volume_5"), 0) or 0,
+            "20日均量": _safe_float(bundle.get("volume_20"), 0) or 0,
+            "均量比": _safe_float(bundle.get("volume_ratio"), 0) or 0,
+            "收盤距MA20%": _safe_float(bundle.get("close_vs_ma20_pct"), 0) or 0,
+            "收盤距MA60%": _safe_float(bundle.get("close_vs_ma60_pct"), 0) or 0,
             "推薦模式": mode,
         },
         "history_debug": bundle.get("history_debug", {}),
@@ -7140,6 +7235,102 @@ def _v22_checkpoint_status() -> dict[str, Any]:
         }
     except Exception as e:
         return {"exists": True, "path": str(path), "processed_count": 0, "total_count": 0, "updated_at": "", "error": str(e)}
+
+
+
+# =========================================================
+# V118 實戰品質防呆：避免冷門低量、無趨勢股票排到前面
+# =========================================================
+def _apply_v118_liquidity_trend_guard(df: pd.DataFrame | None) -> pd.DataFrame:
+    """降低冷門低量 / 無趨勢股票排序與分數。
+
+    不刪股票，避免漏掉潛伏股；但低量與無趨勢個股會被降分、降排序，
+    並在表格中標示量能狀態 / 趨勢狀態 / 實戰品質提醒。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    out = df.copy()
+
+    def n(col: str, default: float = 0.0) -> pd.Series:
+        if col in out.columns:
+            return pd.to_numeric(out[col], errors="coerce").fillna(default)
+        return pd.Series([default] * len(out), index=out.index, dtype="float64")
+
+    volume_score = n("量能啟動分", 0)
+    volume_ratio = n("均量比", 0)
+    vol20 = n("20日均量", 0)
+    tech = n("技術結構分數", 0)
+    trend = n("均線轉強分", 0)
+    momentum = n("動能翻多分", 0)
+    prelaunch = n("起漲前兆分數", 0)
+    period_pct = n("區間漲跌幅%", 0)
+    ma20_pct = n("收盤距MA20%", 0)
+    ma60_pct = n("收盤距MA60%", 0)
+    official_complete = n("官方資料完整度", 0)
+    inst_score = n("法人籌碼分數", 50)
+    official_score = n("官方因子總分", 50)
+
+    very_low_liquidity = ((vol20 > 0) & (vol20 < 300000)) | ((volume_score < 35) & (volume_ratio < 0.75))
+    low_liquidity = very_low_liquidity | ((volume_score < 45) & (volume_ratio < 0.90))
+
+    weak_trend = (
+        (tech < 55)
+        & (trend < 52)
+        & (momentum < 52)
+        & (prelaunch < 58)
+        & (period_pct <= 0)
+        & (ma20_pct <= 0)
+    )
+    no_uptrend = weak_trend | ((ma20_pct < -3) & (ma60_pct < -3) & (period_pct <= 3))
+
+    official_buffer = ((official_complete >= 60) & (official_score >= 76) & (inst_score >= 60))
+
+    penalty = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    penalty += very_low_liquidity.astype(float) * 14
+    penalty += (low_liquidity & ~very_low_liquidity).astype(float) * 8
+    penalty += no_uptrend.astype(float) * 12
+    penalty += (low_liquidity & no_uptrend).astype(float) * 8
+    penalty -= official_buffer.astype(float) * 4
+    penalty = penalty.clip(lower=0, upper=28)
+
+    quality = (100 - penalty - low_liquidity.astype(float) * 8 - no_uptrend.astype(float) * 10).clip(lower=0, upper=100)
+
+    out["實戰品質分"] = quality.round(1)
+    out["量能狀態"] = [
+        "極低量/冷門" if bool(vl) else ("量能不足" if bool(ll) else "量能可接受")
+        for vl, ll in zip(very_low_liquidity.tolist(), low_liquidity.tolist())
+    ]
+    out["趨勢狀態"] = ["無明確上升趨勢" if bool(nt) else "趨勢可接受" for nt in no_uptrend.tolist()]
+    out["實戰降分"] = penalty.round(1)
+
+    reasons = []
+    for i in out.index:
+        r = []
+        if bool(very_low_liquidity.loc[i]):
+            r.append("20日均量偏低或量能明顯不足")
+        elif bool(low_liquidity.loc[i]):
+            r.append("量能未確認")
+        if bool(no_uptrend.loc[i]):
+            r.append("尚未形成上升趨勢")
+        if bool(official_buffer.loc[i]) and r:
+            r.append("官方因子佳但僅緩衝，不取代量價確認")
+        reasons.append("；".join(r) if r else "OK")
+    out["實戰品質提醒"] = reasons
+
+    for col, ratio in [("推薦總分", 1.00), ("夜間股神總分", 0.90), ("隔日進場分數", 1.00), ("隔日實戰排序分", 1.15), ("波段潛力分數", 0.70)]:
+        if col in out.columns:
+            out[col] = (pd.to_numeric(out[col], errors="coerce").fillna(0) - penalty * ratio).clip(lower=0, upper=100).round(2)
+
+    if "推薦理由摘要" in out.columns:
+        base = out["推薦理由摘要"].astype(str)
+        out["推薦理由摘要"] = [b if reason == "OK" else (b + "｜" + reason if b and b != "nan" else reason) for b, reason in zip(base.tolist(), reasons)]
+    if "夜間風險提醒" in out.columns:
+        base = out["夜間風險提醒"].astype(str)
+        out["夜間風險提醒"] = [b if reason == "OK" else (b + "；" + reason if b and b != "nan" else reason) for b, reason in zip(base.tolist(), reasons)]
+
+    return out
+
 
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
@@ -7504,6 +7695,13 @@ def _build_recommend_df(
         base_df["資料完整度"] = "夜間策略計算失敗"
         base_df["夜間風險提醒"] = f"夜間隔日策略未套用：{night_err}"
 
+    # V118：實戰品質防呆。降低冷門低量 / 無上升趨勢股票的分數與排序，
+    # 避免官方因子或型態分數把沒有量、沒有趨勢的冷門股推到前面。
+    try:
+        base_df = _apply_v118_liquidity_trend_guard(base_df)
+    except Exception as quality_err:
+        base_df["實戰品質提醒"] = f"V118實戰品質檢查失敗：{quality_err}"
+
 
     def _reason_builder(r):
         reason_parts = []
@@ -7780,7 +7978,7 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價", "觀察週期",
         "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "資料完整度",
         "夜間股神建議", "隔日作戰策略", "夜間風險提醒",
@@ -8076,7 +8274,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "推薦總分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+        "推薦模式", "推薦等級", "推薦總分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "突破確認價_隔日", "回測承接價", "停損價_隔日", "第一壓力價", "資料完整度",
         "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦分桶", "起漲等級", "信心等級",
         "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
@@ -9254,7 +9452,10 @@ def main():
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
         rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
         hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
-        # V100：大盤橋接欄位補上後，重新計算夜間隔日策略，讓隔日進場分數真正吃到大盤風控。
+        # V109：官方因子快取只讀合併；推薦頁不即時連官方網站。
+        rec_df = _apply_official_factor_cache_v109(rec_df)
+        hot_pick_df = _apply_official_factor_cache_v109(hot_pick_df)
+        # V100/V109：大盤橋接與官方因子欄位補上後，重新計算夜間隔日策略。
         rec_df = _recalc_night_strategy_after_macro_v100(rec_df)
         hot_pick_df = _recalc_night_strategy_after_macro_v100(hot_pick_df)
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
@@ -9264,7 +9465,9 @@ def main():
         hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
         rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
         hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
-        # V100：舊 session_state / 舊快取資料載入後，也重新同步夜間隔日策略與大盤風控。
+        # V109：舊 session_state / 舊快取資料載入後，也重新同步官方因子與夜間策略。
+        rec_df = _apply_official_factor_cache_v109(rec_df)
+        hot_pick_df = _apply_official_factor_cache_v109(hot_pick_df)
         rec_df = _recalc_night_strategy_after_macro_v100(rec_df)
         hot_pick_df = _recalc_night_strategy_after_macro_v100(hot_pick_df)
 
