@@ -86,9 +86,9 @@ except Exception:
         return pd.DataFrame()
 
 PAGE_TITLE = "推薦清單"
-PERF_TRACKING_VERSION = "v110_official_factor_list_sync"
+PERF_TRACKING_VERSION = "v119_v118_quality_sync"
 PFX = "godpick_list_"
-NIGHT_BATTLE_LIST_VERSION = "V110_20260513_official_factor_sync"
+NIGHT_BATTLE_LIST_VERSION = "V119_20260513_quality_sync"
 
 # V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
 # 不重算 07 推薦核心，避免拖慢頁面。
@@ -115,6 +115,24 @@ NIGHT_NUMERIC_COLUMNS = [
     "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "估算EPS",
     "外資近1日買賣超", "投信近1日買賣超", "自營商近1日買賣超", "三大法人近1日合計", "法人買超占量比%",
     "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價",
+]
+
+# V119：同步 07 V118 實戰品質防呆欄位到 10_推薦清單。
+# 用途：保留 07 因低量、無趨勢而降分的原因，方便隔日追蹤與人工判斷。
+PRACTICAL_QUALITY_COLUMNS_V119 = [
+    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
+]
+PRACTICAL_QUALITY_NUMERIC_COLUMNS_V119 = [
+    "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
+    "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
+]
+PRACTICAL_QUALITY_DISPLAY_COLUMNS_V119 = [
+    "推薦日期", "股票代號", "股票名稱", "推薦總分", "夜間股神總分", "隔日進場分數",
+    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "進場型態_隔日", "隔日建議動作", "資料完整度", "官方資料完整度",
 ]
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "recommend_list_v53_perf_guard_20260429"
@@ -277,6 +295,11 @@ NIGHT_HIT_TRACKING_COLUMNS = [
 for _v101_col in NIGHT_HIT_TRACKING_COLUMNS:
     if _v101_col not in GODPICK_RECORD_COLUMNS:
         GODPICK_RECORD_COLUMNS.append(_v101_col)
+
+# V119：讓 10_推薦清單可保存 07 V118 實戰品質欄位。
+for _v119_col in PRACTICAL_QUALITY_COLUMNS_V119:
+    if _v119_col not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v119_col)
 
 # V110：10_推薦清單保存 16_官方因子快取中心欄位。
 # 僅讀 official_factors_cache.json，不在本頁即時連官方網站，避免拖慢顯示。
@@ -1394,6 +1417,132 @@ def _render_official_factor_tracker_v110(filtered_df: pd.DataFrame) -> None:
         _safe_dataframe(_format_show_df(x[show_cols].head(300)), keep_cols=show_cols, use_container_width=True, height=320)
     st.caption("V110：此區只讀 16_官方因子快取中心的 official_factors_cache.json，不會在 10 頁即時連官方網站。")
 
+
+def _derive_practical_quality_v119(df: pd.DataFrame) -> pd.DataFrame:
+    """V119：舊資料缺少 V118 欄位時，做安全補欄與輕量推估。
+
+    不重算 07 推薦核心；只用現有欄位回填狀態，避免舊推薦清單顯示空白或 KeyError。
+    """
+    if df is None or df.empty:
+        return df
+    x = df.copy()
+    for c in PRACTICAL_QUALITY_COLUMNS_V119:
+        if c not in x.columns:
+            x[c] = None
+
+    def num(col: str, default=0.0):
+        if col in x.columns:
+            return pd.to_numeric(x[col], errors="coerce").fillna(default)
+        return pd.Series([default] * len(x), index=x.index, dtype="float64")
+
+    vol20 = num("20日均量", 0)
+    ratio = num("均量比", 0)
+    vol_score = num("量能啟動分", 0)
+    tech = num("技術結構分數", 0)
+    trend = num("均線轉強分", 0)
+    momentum = num("動能翻多分", 0)
+    ma20 = num("收盤距MA20%", 0)
+    ma60 = num("收盤距MA60%", 0)
+    rec_score = num("推薦總分", 0)
+
+    # 只在欄位空白時補，不覆蓋 07 已產生的 V118 判斷。
+    for idx in x.index:
+        try:
+            low_liq = ((vol20.loc[idx] > 0 and vol20.loc[idx] < 300000) or (vol_score.loc[idx] < 45 and ratio.loc[idx] < 0.9))
+            no_trend = ((tech.loc[idx] < 55 and trend.loc[idx] < 52 and momentum.loc[idx] < 52 and ma20.loc[idx] <= 0) or (ma20.loc[idx] < -3 and ma60.loc[idx] < -3))
+            if _is_blank_value(x.at[idx, "量能狀態"]):
+                _safe_set_cell(x, idx, "量能狀態", "量能不足" if low_liq else "量能可接受")
+            if _is_blank_value(x.at[idx, "趨勢狀態"]):
+                _safe_set_cell(x, idx, "趨勢狀態", "無明確上升趨勢" if no_trend else "趨勢可接受")
+            if _is_blank_value(x.at[idx, "實戰降分"]):
+                penalty = (10 if low_liq else 0) + (12 if no_trend else 0) + (6 if low_liq and no_trend else 0)
+                _safe_set_cell(x, idx, "實戰降分", float(min(penalty, 28)))
+            if _is_blank_value(x.at[idx, "實戰品質分"]):
+                penalty_val = pd.to_numeric(pd.Series([x.at[idx, "實戰降分"]]), errors="coerce").fillna(0).iloc[0]
+                base = 100 - float(penalty_val)
+                if rec_score.loc[idx] and rec_score.loc[idx] < 55:
+                    base -= 5
+                _safe_set_cell(x, idx, "實戰品質分", round(max(0, min(100, base)), 1))
+            if _is_blank_value(x.at[idx, "實戰品質提醒"]):
+                notes = []
+                if low_liq:
+                    notes.append("量能未確認")
+                if no_trend:
+                    notes.append("尚未形成上升趨勢")
+                _safe_set_cell(x, idx, "實戰品質提醒", "；".join(notes) if notes else "OK")
+        except Exception:
+            continue
+
+    for c in PRACTICAL_QUALITY_NUMERIC_COLUMNS_V119:
+        if c in x.columns:
+            x[c] = pd.to_numeric(x[c], errors="coerce")
+    return x
+
+
+def _render_practical_quality_tracker_v119(filtered_df: pd.DataFrame) -> None:
+    """V119：推薦清單實戰品質追蹤區。"""
+    render_pro_section("實戰品質追蹤｜量能 / 趨勢 / 防呆降分")
+    if filtered_df is None or filtered_df.empty:
+        st.info("目前篩選條件下沒有實戰品質資料可顯示。")
+        return
+    x = _derive_practical_quality_v119(_ensure_record_columns(filtered_df).copy())
+    if x is None or x.empty:
+        st.info("目前沒有資料。")
+        return
+
+    q = pd.to_numeric(x.get("實戰品質分"), errors="coerce") if "實戰品質分" in x.columns else pd.Series([], dtype="float64")
+    penalty = pd.to_numeric(x.get("實戰降分"), errors="coerce") if "實戰降分" in x.columns else pd.Series([], dtype="float64")
+    vol_bad = x.get("量能狀態", pd.Series([], dtype="object")).astype(str).str.contains("不足|低量|冷門", na=False) if "量能狀態" in x.columns else pd.Series([], dtype="bool")
+    trend_bad = x.get("趨勢狀態", pd.Series([], dtype="object")).astype(str).str.contains("無明確|弱|未", na=False) if "趨勢狀態" in x.columns else pd.Series([], dtype="bool")
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        st.metric("平均實戰品質", format_number(q.dropna().mean(), 1) if not q.dropna().empty else "—")
+    with k2:
+        st.metric("品質>=70", int((q >= 70).sum()) if not q.empty else 0)
+    with k3:
+        st.metric("量能警示", int(vol_bad.sum()) if not vol_bad.empty else 0)
+    with k4:
+        st.metric("趨勢警示", int(trend_bad.sum()) if not trend_bad.empty else 0)
+    with k5:
+        st.metric("平均降分", format_number(penalty.dropna().mean(), 1) if not penalty.dropna().empty else "—")
+
+    c1, c2, c3 = st.columns([1, 1, 1.4])
+    with c1:
+        quality_filter = st.selectbox(
+            "實戰品質篩選",
+            ["全部", "品質>=70", "品質<70", "量能警示", "趨勢警示", "有降分"],
+            key=_k("v119_quality_filter"),
+        )
+    with c2:
+        min_quality = st.slider("最低實戰品質分", 0, 100, 0, 5, key=_k("v119_min_quality"))
+    with c3:
+        st.caption("V119：此區承接 07 V118 實戰品質防呆欄位，不重新推薦、不即時抓資料。")
+
+    show = x.copy()
+    if min_quality > 0 and "實戰品質分" in show.columns:
+        show = show[pd.to_numeric(show["實戰品質分"], errors="coerce").fillna(0) >= min_quality]
+    if quality_filter == "品質>=70" and "實戰品質分" in show.columns:
+        show = show[pd.to_numeric(show["實戰品質分"], errors="coerce").fillna(0) >= 70]
+    elif quality_filter == "品質<70" and "實戰品質分" in show.columns:
+        show = show[pd.to_numeric(show["實戰品質分"], errors="coerce").fillna(0) < 70]
+    elif quality_filter == "量能警示" and "量能狀態" in show.columns:
+        show = show[show["量能狀態"].astype(str).str.contains("不足|低量|冷門", na=False)]
+    elif quality_filter == "趨勢警示" and "趨勢狀態" in show.columns:
+        show = show[show["趨勢狀態"].astype(str).str.contains("無明確|弱|未", na=False)]
+    elif quality_filter == "有降分" and "實戰降分" in show.columns:
+        show = show[pd.to_numeric(show["實戰降分"], errors="coerce").fillna(0) > 0]
+
+    show_cols = [c for c in PRACTICAL_QUALITY_DISPLAY_COLUMNS_V119 if c in show.columns]
+    if show_cols:
+        try:
+            show = show.sort_values(["實戰品質分", "推薦總分"], ascending=[False, False], na_position="last")
+        except Exception:
+            pass
+        _safe_dataframe(_format_show_df(show[show_cols].head(300)), keep_cols=show_cols, use_container_width=True, height=340)
+    if show.empty:
+        st.info("目前篩選後沒有符合條件的實戰品質資料。")
+
 def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -1408,6 +1557,12 @@ def _ensure_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     # V110：補入官方因子快取欄位，只補空值，不連外、不覆蓋既有推薦值。
     try:
         x = _apply_official_factor_backfill_v110(x)
+    except Exception:
+        pass
+
+    # V119：同步 / 輕量補齊 07 V118 實戰品質欄位。
+    try:
+        x = _derive_practical_quality_v119(x)
     except Exception:
         pass
 
@@ -2544,7 +2699,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V101 夜間隔日命中追蹤版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
+    st.caption(f"推薦清單 V119 實戰品質追蹤同步版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -2681,6 +2836,8 @@ def main():
     _render_night_battle_tracker(filtered_df)
 
     _render_night_hit_tracker_v101(filtered_df)
+
+    _render_practical_quality_tracker_v119(filtered_df)
 
     _render_official_factor_tracker_v110(filtered_df)
 
