@@ -785,6 +785,256 @@ for _v110_c in OFFICIAL_FACTOR_COLUMNS_V110:
 # <<< V110_OFFICIAL_FACTOR_RECORD_SYNC
 
 
+# >>> V120_REAL_QUALITY_RECORD_SYNC
+# V120：同步 07/V118 實戰品質防呆欄位到 8_股神推薦紀錄，並提供品質分層準確率分析。
+V120_QUALITY_NUMERIC_FIELDS = [
+    "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
+    "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
+]
+V120_QUALITY_TEXT_FIELDS = [
+    "量能狀態", "趨勢狀態", "實戰品質提醒",
+]
+V120_QUALITY_COLUMNS = V120_QUALITY_NUMERIC_FIELDS + V120_QUALITY_TEXT_FIELDS
+V120_QUALITY_DISPLAY_COLS = [
+    "推薦日期", "股票代號", "股票名稱", "推薦總分", "夜間股神總分", "隔日進場分數",
+    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "命中結果", "達標確認狀態",
+]
+for _v120_c in V120_QUALITY_COLUMNS:
+    if _v120_c not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v120_c)
+    if _v120_c in V120_QUALITY_NUMERIC_FIELDS and _v120_c not in V73_NUMERIC_FIELDS:
+        V73_NUMERIC_FIELDS.append(_v120_c)
+
+def _v120_blank(v: Any) -> bool:
+    try:
+        return _is_empty_display_value(v)
+    except Exception:
+        if v is None:
+            return True
+        s = str(v).strip()
+        return s == "" or s.lower() in {"nan", "none", "null", "<na>"}
+
+def _v120_num(row: Any, names: list[str], default: Any = pd.NA) -> Any:
+    try:
+        for c in names:
+            val = row.get(c, pd.NA)
+            if not _v120_blank(val):
+                n = pd.to_numeric(pd.Series([val]), errors="coerce").iloc[0]
+                if pd.notna(n):
+                    return float(n)
+    except Exception:
+        pass
+    return default
+
+def _v120_text(row: Any, names: list[str], default: str = "") -> str:
+    try:
+        for c in names:
+            val = row.get(c, "")
+            if not _v120_blank(val):
+                return str(val).strip()
+    except Exception:
+        pass
+    return default
+
+def _v120_derive_volume_state(row: Any) -> str:
+    if _v120_text(row, ["量能狀態"]):
+        return _v120_text(row, ["量能狀態"])
+    ratio = _v120_num(row, ["均量比", "量比", "成交量比"], None)
+    vol20 = _v120_num(row, ["20日均量", "20日平均量", "月均量"], None)
+    vol_score = _v120_num(row, ["量能啟動分", "交易可行分數"], None)
+    if ratio is not None and ratio >= 1.2:
+        return "量能轉強"
+    if vol_score is not None and vol_score >= 70:
+        return "量能可用"
+    if vol20 is not None and vol20 < 300:
+        return "低量警示"
+    if ratio is not None and ratio < 0.8:
+        return "量能不足"
+    return "待觀察"
+
+def _v120_derive_trend_state(row: Any) -> str:
+    if _v120_text(row, ["趨勢狀態"]):
+        return _v120_text(row, ["趨勢狀態"])
+    ma20 = _v120_num(row, ["收盤距MA20%"], None)
+    ma60 = _v120_num(row, ["收盤距MA60%"], None)
+    tech = _v120_num(row, ["技術結構分數", "均線轉強分", "動能翻多分"], None)
+    if tech is not None and tech >= 70 and (ma20 is None or ma20 >= 0):
+        return "趨勢轉強"
+    if ma20 is not None and ma20 < 0 and (ma60 is not None and ma60 < 0):
+        return "均線偏弱"
+    if tech is not None and tech < 50:
+        return "趨勢不足"
+    return "待確認"
+
+def _v120_quality_bucket(v: Any) -> str:
+    n = _v98_scalar_float(v, None)
+    if n is None or pd.isna(n):
+        return "未分層"
+    if n >= 80:
+        return "A 高品質>=80"
+    if n >= 70:
+        return "B 可操作70-79"
+    if n >= 60:
+        return "C 觀察60-69"
+    return "D 低品質<60"
+
+def _v120_backfill_quality_record_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+    out = df.copy()
+    if out.empty:
+        for c in V120_QUALITY_COLUMNS:
+            if c not in out.columns:
+                out[c] = pd.NA if c in V120_QUALITY_NUMERIC_FIELDS else ""
+        return out
+    for c in V120_QUALITY_COLUMNS:
+        if c not in out.columns:
+            out[c] = pd.NA if c in V120_QUALITY_NUMERIC_FIELDS else ""
+    rows = list(out.iterrows())
+    num_aliases = {
+        "實戰品質分": ["實戰品質分", "交易可行分數", "技術結構分數", "推薦總分"],
+        "實戰降分": ["實戰降分", "品質降分", "風險扣分", "追高風險分數_決策"],
+        "最新成交量": ["最新成交量", "成交量", "今日成交量"],
+        "5日均量": ["5日均量", "5日平均量", "週均量"],
+        "20日均量": ["20日均量", "20日平均量", "月均量"],
+        "均量比": ["均量比", "量比", "成交量比"],
+        "收盤距MA20%": ["收盤距MA20%", "距月線%", "MA20乖離%"],
+        "收盤距MA60%": ["收盤距MA60%", "距季線%", "MA60乖離%"],
+        "量能啟動分": ["量能啟動分", "交易可行分數", "爆發力分數"],
+        "均線轉強分": ["均線轉強分", "技術結構分數"],
+        "動能翻多分": ["動能翻多分", "起漲前兆分數", "飆股起漲分數"],
+        "突破準備分": ["突破準備分", "型態突破分數", "突破分數"],
+        "支撐防守分": ["支撐防守分", "支撐回測分數", "拉回承接分數"],
+    }
+    for target, aliases in num_aliases.items():
+        vals = []
+        for _, row in rows:
+            cur = _v120_num(row, [target], None)
+            vals.append(cur if cur is not None else _v120_num(row, aliases, pd.NA))
+        out[target] = pd.to_numeric(pd.Series(vals, index=out.index), errors="coerce")
+    # 若沒有實戰品質分，用技術 / 量能 / 起漲分保守估算，只作歷史分析，不回推 07 分數。
+    if "實戰品質分" in out.columns:
+        q = pd.to_numeric(out["實戰品質分"], errors="coerce")
+        need = q.isna()
+        if need.any():
+            parts = []
+            for c in ["量能啟動分", "均線轉強分", "動能翻多分", "交易可行分數", "技術結構分數"]:
+                if c in out.columns:
+                    parts.append(pd.to_numeric(out[c], errors="coerce"))
+            if parts:
+                est = pd.concat(parts, axis=1).mean(axis=1, skipna=True)
+                out.loc[need, "實戰品質分"] = est.loc[need]
+    for c in ["量能狀態", "趨勢狀態", "實戰品質提醒"]:
+        out[c] = out[c].map(lambda v: "" if _v120_blank(v) else str(v).strip())
+    out["量能狀態"] = [v or _v120_derive_volume_state(row) for (_, row), v in zip(rows, out["量能狀態"].tolist())]
+    out["趨勢狀態"] = [v or _v120_derive_trend_state(row) for (_, row), v in zip(rows, out["趨勢狀態"].tolist())]
+    alerts = []
+    for _, row in out.iterrows():
+        existing = _v120_text(row, ["實戰品質提醒"])
+        if existing:
+            alerts.append(existing)
+            continue
+        q = _v120_num(row, ["實戰品質分"], None)
+        vol_state = _v120_text(row, ["量能狀態"])
+        trend_state = _v120_text(row, ["趨勢狀態"])
+        notes = []
+        if q is not None and q < 60:
+            notes.append("品質分偏低")
+        if any(k in vol_state for k in ["低量", "不足"]):
+            notes.append("量能不足")
+        if any(k in trend_state for k in ["偏弱", "不足"]):
+            notes.append("趨勢未確認")
+        alerts.append("、".join(notes) if notes else "實戰品質可追蹤")
+    out["實戰品質提醒"] = alerts
+    return out
+
+def _v120_primary_return(df: pd.DataFrame, prefer: str = "10日") -> pd.Series:
+    try:
+        return _v102_primary_return(df, prefer)
+    except Exception:
+        if df is None or df.empty:
+            return pd.Series(dtype="float64")
+        return pd.to_numeric(df.get("損益幅%", pd.Series(index=df.index, dtype="float64")), errors="coerce")
+
+def _v120_quality_summary_table(df: pd.DataFrame, prefer: str = "10日") -> pd.DataFrame:
+    if df is None or df.empty or "實戰品質分" not in df.columns:
+        return pd.DataFrame()
+    x = _v120_backfill_quality_record_columns(df.copy())
+    x["_quality_bucket"] = x["實戰品質分"].map(_v120_quality_bucket)
+    x["_ret"] = _v120_primary_return(x, prefer)
+    x["_hit"] = x["_ret"] > 0
+    rows = []
+    for key, g in x.groupby("_quality_bucket", dropna=False):
+        ret = pd.to_numeric(g["_ret"], errors="coerce").dropna()
+        rows.append({
+            "實戰品質級距": key,
+            "樣本數": int(len(g)),
+            "有效績效樣本": int(ret.count()),
+            "平均績效%": None if ret.empty else round(float(ret.mean()), 2),
+            "勝率%": None if ret.empty else round(float((ret > 0).mean() * 100), 1),
+            "平均品質分": round(float(pd.to_numeric(g["實戰品質分"], errors="coerce").mean()), 2) if pd.to_numeric(g["實戰品質分"], errors="coerce").notna().any() else None,
+        })
+    return pd.DataFrame(rows).sort_values("實戰品質級距")
+
+def _render_v120_quality_accuracy_panel(df: pd.DataFrame) -> None:
+    render_pro_section("V120 實戰品質準確率分析", "分析 V118 量能 / 趨勢 / 實戰降分是否真的改善後續績效，供 14 權重校正參考。")
+    if df is None or df.empty:
+        st.info("目前沒有推薦紀錄可分析實戰品質。")
+        return
+    x = _v120_backfill_quality_record_columns(df.copy())
+    ret_prefer = st.selectbox("主要績效週期", ["3日", "5日", "10日", "20日", "隔日"], index=2, key=_k("v120_quality_period"))
+    qscore = pd.to_numeric(x.get("實戰品質分"), errors="coerce")
+    ret = _v120_primary_return(x, ret_prefer)
+    high = x[qscore >= 70]
+    low = x[qscore < 60]
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("有品質欄位筆數", int(qscore.notna().sum()))
+    with c2:
+        st.metric("平均品質分", "-" if qscore.dropna().empty else f"{qscore.mean():.1f}")
+    with c3:
+        st.metric("品質>=70", int((qscore >= 70).sum()))
+    with c4:
+        st.metric("品質<60", int((qscore < 60).sum()))
+    st.dataframe(_safe_display_df(_v120_quality_summary_table(x, ret_prefer)), use_container_width=True, hide_index=True)
+
+    f1, f2, f3 = st.columns([1,1,1.4])
+    with f1:
+        vol_opts = [v for v in sorted(x.get("量能狀態", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if v]
+        vol_sel = st.selectbox("量能狀態", ["全部"] + vol_opts, key=_k("v120_vol_filter"))
+    with f2:
+        trend_opts = [v for v in sorted(x.get("趨勢狀態", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if v]
+        trend_sel = st.selectbox("趨勢狀態", ["全部"] + trend_opts, key=_k("v120_trend_filter"))
+    with f3:
+        quality_mode = st.selectbox("品質篩選", ["全部", "品質>=70", "品質<60", "有實戰降分", "量能/趨勢警示"], key=_k("v120_quality_filter"))
+    view = x.copy()
+    if vol_sel != "全部" and "量能狀態" in view.columns:
+        view = view[view["量能狀態"].astype(str) == vol_sel]
+    if trend_sel != "全部" and "趨勢狀態" in view.columns:
+        view = view[view["趨勢狀態"].astype(str) == trend_sel]
+    if quality_mode == "品質>=70":
+        view = view[pd.to_numeric(view.get("實戰品質分"), errors="coerce") >= 70]
+    elif quality_mode == "品質<60":
+        view = view[pd.to_numeric(view.get("實戰品質分"), errors="coerce") < 60]
+    elif quality_mode == "有實戰降分":
+        view = view[pd.to_numeric(view.get("實戰降分"), errors="coerce").fillna(0) > 0]
+    elif quality_mode == "量能/趨勢警示":
+        txt = (view.get("量能狀態", pd.Series("", index=view.index)).astype(str) + " " + view.get("趨勢狀態", pd.Series("", index=view.index)).astype(str) + " " + view.get("實戰品質提醒", pd.Series("", index=view.index)).astype(str))
+        view = view[txt.str.contains("低量|不足|偏弱|警示|未確認", na=False)]
+    if "實戰品質分" in view.columns:
+        view = view.sort_values(["實戰品質分", "推薦日期"], ascending=[False, False], na_position="last")
+    cols = [c for c in V120_QUALITY_DISPLAY_COLS if c in view.columns]
+    st.dataframe(_safe_display_df(view[cols].head(500)), use_container_width=True, hide_index=True)
+    if not low.empty and not high.empty:
+        high_ret = _v120_primary_return(high, ret_prefer).dropna()
+        low_ret = _v120_primary_return(low, ret_prefer).dropna()
+        if not high_ret.empty and not low_ret.empty:
+            st.caption(f"品質>=70 平均{ret_prefer}績效 {high_ret.mean():.2f}%；品質<60 平均{ret_prefer}績效 {low_ret.mean():.2f}%。若低品質仍勝率偏高，後續可調低防呆降分。")
+# <<< V120_REAL_QUALITY_RECORD_SYNC
+
+
 # >>> V102_NIGHT_ACCURACY_ANALYSIS
 # V102：夜間隔日股神準確率分析。只讀既有推薦紀錄欄位，不自動抓資料，避免拖慢頁面。
 V102_ACCURACY_GROUP_COLS = [
@@ -1431,6 +1681,12 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     # V98：補齊 07/10 夜間隔日股神欄位，讓歷史紀錄也能追蹤進場點/突破/停損/壓力。
     try:
         x = _v98_backfill_night_battle_record_columns(x)
+    except Exception:
+        pass
+
+    # V120：補齊 V118 實戰品質欄位，讓 8 頁能保存並分析量能 / 趨勢 / 防呆降分。
+    try:
+        x = _v120_backfill_quality_record_columns(x)
     except Exception:
         pass
 
@@ -4993,6 +5249,9 @@ def main():
 
     with st.expander("🏛️ V110 官方因子紀錄追蹤", expanded=False):
         _render_v110_official_factor_record_panel(live_df.copy())
+
+    with st.expander("🧪 V120 實戰品質紀錄 / 準確率分析", expanded=False):
+        _render_v120_quality_accuracy_panel(live_df.copy())
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
 
