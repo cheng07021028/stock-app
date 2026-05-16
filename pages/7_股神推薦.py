@@ -7465,7 +7465,7 @@ def _apply_v122_practical_godpick_gate(df: pd.DataFrame | None) -> pd.DataFrame:
         if bool(low_price_cold.loc[i]):
             reasons.append("低價冷門風險")
             penalty += 15
-        if bool(bear_market.loc[i]) and not bool(bear_pass.loc[i]):
+        if bool(bear_market.loc[i]) and not bool(bear_candidate_pass.loc[i]):
             reasons.append("大盤空頭需更嚴格")
             penalty += 18
         if bool(low_official.loc[i]):
