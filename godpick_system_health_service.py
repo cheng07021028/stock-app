@@ -63,6 +63,14 @@ HIT_TRACK_FIELDS = [
     "作戰命中摘要", "作戰追蹤資料源", "作戰追蹤更新時間",
 ]
 
+
+PRACTICAL_MAIN_FIELDS_V122 = [
+    "主推薦資格", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因",
+    "實戰分區", "實戰排除原因", "V122股神實戰建議",
+    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+]
+
 OFFICIAL_FACTOR_FIELDS = [
     "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
     "法人籌碼官方分數", "月營收YoY%", "月營收MoM%", "累計營收YoY%",
@@ -72,9 +80,9 @@ OFFICIAL_FACTOR_FIELDS = [
 ]
 
 SCHEMA_TARGETS: dict[str, list[str]] = {
-    "godpick_latest_recommendations.json": NIGHT_FIELDS + OFFICIAL_FACTOR_FIELDS,
-    "godpick_recommend_list.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS,
-    "godpick_records.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS,
+    "godpick_latest_recommendations.json": NIGHT_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122,
+    "godpick_recommend_list.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122,
+    "godpick_records.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122,
 }
 
 DEFAULT_SCHEDULE_SETTINGS: dict[str, Any] = {
