@@ -788,15 +788,16 @@ for _v110_c in OFFICIAL_FACTOR_COLUMNS_V110:
 # >>> V120_REAL_QUALITY_RECORD_SYNC
 # V120：同步 07/V118 實戰品質防呆欄位到 8_股神推薦紀錄，並提供品質分層準確率分析。
 V120_QUALITY_NUMERIC_FIELDS = [
-    "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
+    "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
     "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 V120_QUALITY_TEXT_FIELDS = [
+    "主推薦資格", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議",
     "量能狀態", "趨勢狀態", "實戰品質提醒",
 ]
 V120_QUALITY_COLUMNS = V120_QUALITY_NUMERIC_FIELDS + V120_QUALITY_TEXT_FIELDS
 V120_QUALITY_DISPLAY_COLS = [
-    "推薦日期", "股票代號", "股票名稱", "推薦總分", "夜間股神總分", "隔日進場分數",
+    "推薦日期", "股票代號", "股票名稱", "主推薦資格", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "推薦總分", "夜間股神總分", "隔日進場分數",
     "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
     "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
     "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "命中結果", "達標確認狀態",
@@ -5250,7 +5251,7 @@ def main():
     with st.expander("🏛️ V110 官方因子紀錄追蹤", expanded=False):
         _render_v110_official_factor_record_panel(live_df.copy())
 
-    with st.expander("🧪 V120 實戰品質紀錄 / 準確率分析", expanded=False):
+    with st.expander("🧪 V122 實戰主推薦品質紀錄 / 準確率分析", expanded=False):
         _render_v120_quality_accuracy_panel(live_df.copy())
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])

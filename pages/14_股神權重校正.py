@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v121 實戰品質回饋版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜v122 實戰主推薦回饋版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -352,7 +352,7 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v121 實戰品質準確率回饋版")
+    st.title("14_股神權重校正｜v122 實戰主推薦準確率回饋版")
     st.caption("績效回測＋命中追蹤＋分層權重＋防過擬合；已同步 07/08/10 夜間隔日股神欄位與 V101/V102 命中追蹤，不連外、不重跑推薦。")
     st.info("核心邏輯：不只看勝率，也看平均報酬、命中率、停損率、期望值、樣本數、資料覆蓋率；夜間欄位與命中追蹤會回饋到原本 8 大權重因子，套用後 07 可直接讀取，不需要新增不相容權重名稱。")
 
@@ -477,7 +477,7 @@ def main() -> None:
         "夜間隔日欄位",
         "夜間準確率回饋",
         "官方因子回饋",
-        "實戰品質回饋",
+        "實戰主推薦回饋",
         "輸出/套用",
     ])
 
@@ -754,7 +754,7 @@ def main() -> None:
                 st.error(msg)
 
     st.markdown("---")
-    st.caption("v121 Pro：此頁只做績效回測、命中追蹤、官方因子回饋、實戰品質回饋與建議權重；已同步 V118/V119/V120 量能趨勢防呆欄位；不重跑推薦、不連外。")
+    st.caption("v121 Pro：此頁只做績效回測、命中追蹤、官方因子回饋、實戰主推薦回饋與建議權重；已同步 V118/V119/V120 量能趨勢防呆欄位；不重跑推薦、不連外。")
 
 
 if __name__ == "__main__":
