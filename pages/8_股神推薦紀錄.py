@@ -792,7 +792,7 @@ V120_QUALITY_NUMERIC_FIELDS = [
     "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 V120_QUALITY_TEXT_FIELDS = [
-    "主推薦資格", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議",
+    "主推薦資格", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議",
     "量能狀態", "趨勢狀態", "實戰品質提醒",
 ]
 V120_QUALITY_COLUMNS = V120_QUALITY_NUMERIC_FIELDS + V120_QUALITY_TEXT_FIELDS
@@ -5251,7 +5251,7 @@ def main():
     with st.expander("🏛️ V110 官方因子紀錄追蹤", expanded=False):
         _render_v110_official_factor_record_panel(live_df.copy())
 
-    with st.expander("🧪 V122 實戰主推薦品質紀錄 / 準確率分析", expanded=False):
+    with st.expander("🧪 V123 實戰雙層推薦品質紀錄 / 準確率分析", expanded=False):
         _render_v120_quality_accuracy_panel(live_df.copy())
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
