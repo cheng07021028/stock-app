@@ -88,7 +88,7 @@ except Exception:
 PAGE_TITLE = "推薦清單"
 PERF_TRACKING_VERSION = "v119_v118_quality_sync"
 PFX = "godpick_list_"
-NIGHT_BATTLE_LIST_VERSION = "V125_20260517_main_candidate_split_sync"
+NIGHT_BATTLE_LIST_VERSION = "V126_20260517_main_candidate_split_sync"
 
 # V94：07 夜間隔日股神欄位。推薦清單負責保存、顯示、篩選、匯出，
 # 不重算 07 推薦核心，避免拖慢頁面。
@@ -120,13 +120,13 @@ NIGHT_NUMERIC_COLUMNS = [
 # V119：同步 07 V118 實戰品質防呆欄位到 10_推薦清單。
 # 用途：保留 07 因低量、無趨勢而降分的原因，方便隔日追蹤與人工判斷。
 PRACTICAL_QUALITY_COLUMNS_V119 = [
-    "主推薦資格", "V125推薦層級", "V125推薦層級排序", "股神主推薦狀態", "V125股神實戰建議", "V125主推薦說明", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議",
+    "主推薦資格", "V126推薦層級", "原始推薦總分", "實戰調整推薦分", "V126實戰排序分", "V126推薦層級排序", "股神主推薦狀態", "V126股神實戰建議", "V126主推薦說明", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議",
     "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
     "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
     "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 PRACTICAL_QUALITY_NUMERIC_COLUMNS_V119 = [
-    "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
+    "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
     "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 PRACTICAL_QUALITY_DISPLAY_COLUMNS_V119 = [
@@ -2700,7 +2700,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V125 主推薦與候補分流追蹤同步版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
+    st.caption(f"推薦清單 V126 主推薦與候補分流追蹤同步版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []

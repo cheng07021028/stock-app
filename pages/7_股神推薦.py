@@ -7252,6 +7252,11 @@ def _apply_v118_liquidity_trend_guard(df: pd.DataFrame | None) -> pd.DataFrame:
 
     out = df.copy()
 
+    # V126：推薦總分是原始選股分數，不能被實戰門檻扣到 0。
+    # 實戰風控另寫入「實戰調整推薦分 / V126實戰排序分」，避免畫面誤以為推薦演算法全部 0 分。
+    if "推薦總分" in out.columns and "原始推薦總分" not in out.columns:
+        out["原始推薦總分"] = pd.to_numeric(out["推薦總分"], errors="coerce").fillna(0).round(2)
+
     def n(col: str, default: float = 0.0) -> pd.Series:
         if col in out.columns:
             return pd.to_numeric(out[col], errors="coerce").fillna(default)
@@ -7318,7 +7323,15 @@ def _apply_v118_liquidity_trend_guard(df: pd.DataFrame | None) -> pd.DataFrame:
         reasons.append("；".join(r) if r else "OK")
     out["實戰品質提醒"] = reasons
 
-    for col, ratio in [("推薦總分", 1.00), ("夜間股神總分", 0.90), ("隔日進場分數", 1.00), ("隔日實戰排序分", 1.15), ("波段潛力分數", 0.70)]:
+    # V126：不要再直接改寫「推薦總分」。推薦總分保留原始選股分；
+    # 實戰扣分只反映在排序/警示欄位，避免候補或觀察股全部顯示 0 分。
+    if "推薦總分" in out.columns:
+        base_score = pd.to_numeric(out.get("原始推薦總分", out["推薦總分"]), errors="coerce").fillna(0)
+        out["推薦總分"] = base_score.clip(lower=0, upper=100).round(2)
+        out["實戰調整推薦分"] = (base_score - penalty).clip(lower=0, upper=100).round(2)
+        out["V126實戰排序分"] = out["實戰調整推薦分"]
+
+    for col, ratio in [("夜間股神總分", 0.90), ("隔日進場分數", 1.00), ("隔日實戰排序分", 1.15), ("波段潛力分數", 0.70)]:
         if col in out.columns:
             out[col] = (pd.to_numeric(out[col], errors="coerce").fillna(0) - penalty * ratio).clip(lower=0, upper=100).round(2)
 
@@ -7349,6 +7362,10 @@ def _apply_v122_practical_godpick_gate(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
     out = df.copy()
+
+    # V126：保留原始推薦總分；主推薦/候補只調整排序與分流，不再把總分扣成 0。
+    if "推薦總分" in out.columns and "原始推薦總分" not in out.columns:
+        out["原始推薦總分"] = pd.to_numeric(out["推薦總分"], errors="coerce").fillna(0).round(2)
 
     def num(col: str, default: float = 0.0) -> pd.Series:
         if col in out.columns:
@@ -7545,8 +7562,19 @@ def _apply_v122_practical_godpick_gate(df: pd.DataFrame | None) -> pd.DataFrame:
     main_s = pd.Series(main_ok, index=out.index).astype(bool)
     candidate_s = pd.Series(candidate_ok, index=out.index).astype(bool)
     observe_s = pd.Series(observe_ok, index=out.index).astype(bool)
+    # V126：推薦總分保留原始分，候補/觀察扣分另存到實戰調整欄位。
+    if "推薦總分" in out.columns:
+        base_score = pd.to_numeric(out.get("原始推薦總分", out["推薦總分"]), errors="coerce").fillna(0)
+        out["推薦總分"] = base_score.clip(lower=0, upper=100).round(2)
+        cand_adjusted = (base_score - penalty_s * 1.15).clip(lower=0, upper=100)
+        obs_adjusted = (base_score - penalty_s * 1.35).clip(lower=0, upper=100)
+        adjusted_score = base_score.where(main_s, cand_adjusted)
+        adjusted_score = adjusted_score.where(~observe_s, obs_adjusted)
+        out["實戰調整推薦分"] = adjusted_score.round(2)
+        # 舊名相容：排序與 10/8/14 可讀這個欄位，但畫面總分不再顯示 0。
+        out["V126實戰排序分"] = (out["主推薦排序分"] * 0.70 + out["實戰調整推薦分"] * 0.30).clip(0, 100).round(2)
+
     for col, main_ratio, cand_ratio, obs_ratio in [
-        ("推薦總分", 0.90, 1.15, 1.35),
         ("夜間股神總分", 1.00, 1.10, 1.25),
         ("隔日實戰排序分", 1.15, 1.30, 1.45),
         ("隔日進場分數", 0.80, 1.00, 1.20),
@@ -7608,7 +7636,7 @@ def _filter_v122_main_recommendations(df: pd.DataFrame | None) -> pd.DataFrame:
     keep = x[x["主推薦資格"].astype(str).isin(["主推薦", "實戰候補", "觀察等待"])].copy()
     if keep.empty:
         keep = x.copy()
-    sort_cols = [c for c in ["V125推薦層級排序", "主推薦排序分", "實戰主推薦分", "隔日進場分數", "夜間股神總分", "推薦總分"] if c in keep.columns]
+    sort_cols = [c for c in ["V125推薦層級排序", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "隔日進場分數", "夜間股神總分", "推薦總分"] if c in keep.columns]
     if sort_cols:
         ascending = [True] + [False] * (len(sort_cols) - 1) if sort_cols[0] == "V125推薦層級排序" else [False] * len(sort_cols)
         keep = keep.sort_values(sort_cols, ascending=ascending, na_position="last")
@@ -8076,7 +8104,7 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    sort_cols = ["V125推薦層級排序", "V123推薦層級排序", "主推薦排序分", "實戰主推薦分", "隔日實戰排序分", "夜間股神總分", "隔日進場分數", "推薦總分", "波段潛力分數", "進場時機分數", "族群資金流分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
+    sort_cols = ["V125推薦層級排序", "V123推薦層級排序", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "隔日實戰排序分", "夜間股神總分", "隔日進場分數", "推薦總分", "波段潛力分數", "進場時機分數", "族群資金流分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
     active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     if active_sort_cols:
         ascending = [True] + [False] * (len(active_sort_cols) - 1) if active_sort_cols[0] in {"V125推薦層級排序", "V123推薦層級排序"} else [False] * len(active_sort_cols)
@@ -8313,7 +8341,7 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦型態", "機會型態", "推薦等級", "主推薦資格", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "推薦總分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "主推薦資格", "原始推薦總分", "推薦總分", "實戰調整推薦分", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價", "觀察週期",
         "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "資料完整度",
         "夜間股神建議", "隔日作戰策略", "夜間風險提醒",
@@ -8609,7 +8637,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "主推薦資格", "V125推薦層級", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "V125股神實戰建議", "推薦總分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+        "推薦模式", "推薦等級", "主推薦資格", "V125推薦層級", "原始推薦總分", "推薦總分", "實戰調整推薦分", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "V125股神實戰建議", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "突破確認價_隔日", "回測承接價", "停損價_隔日", "第一壓力價", "資料完整度",
         "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦分桶", "起漲等級", "信心等級",
         "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
