@@ -1496,158 +1496,138 @@
     {
       "code": "1268",
       "name": "漢來美食",
-      "market": "上櫃",
-      "category": "航空觀光"
+      "market": "上櫃"
     },
     {
       "code": "1537",
       "name": "廣隆",
-      "market": "上市",
-      "category": "電機機械"
+      "market": "上市"
     },
     {
       "code": "1726",
       "name": "永記",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "1817",
       "name": "凱撒衛",
-      "market": "上市",
-      "category": "玻璃陶瓷"
+      "market": "上市"
     },
     {
       "code": "2027",
       "name": "大成鋼",
-      "market": "上市",
-      "category": "鋼鐵"
+      "market": "上市"
     },
     {
       "code": "2364",
       "name": "倫飛",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "2412",
       "name": "中華電",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "2420",
       "name": "新巨",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2727",
       "name": "王品",
-      "market": "上市",
-      "category": "航空觀光"
+      "market": "上市"
     },
     {
       "code": "3045",
       "name": "台灣大",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "3130",
       "name": "一零四",
-      "market": "上市",
-      "category": "數位雲端"
+      "market": "上市"
     },
     {
       "code": "3558",
       "name": "神準",
-      "market": "上櫃",
-      "category": "通信網路業"
+      "market": "上櫃"
     },
     {
       "code": "4305",
       "name": "世坤",
-      "market": "上櫃",
-      "category": "塑化"
+      "market": "上櫃"
     },
     {
       "code": "4419",
       "name": "皇家美食",
-      "market": "上櫃",
-      "category": "航空觀光"
+      "market": "上櫃"
     },
     {
       "code": "4754",
       "name": "國碳科",
-      "market": "上櫃",
-      "category": "塑化"
+      "market": "上櫃"
     },
     {
       "code": "4904",
       "name": "遠傳",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "4916",
       "name": "事欣科",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "4961",
       "name": "天鈺",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "4976",
       "name": "佳凌",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "5484",
       "name": "慧友",
+      "market": "上市"
+    },
+    {
+      "code": "6491",
+      "name": "晶碩",
       "market": "上市",
-      "category": "光電業"
+      "category": "生技醫療"
     },
     {
       "code": "6558",
       "name": "興能高",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "6799",
       "name": "來頡",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6844",
       "name": "諾貝兒",
-      "market": "上櫃",
-      "category": "生技醫療"
+      "market": "上櫃"
     },
     {
       "code": "8415",
       "name": "大國鋼",
-      "market": "上櫃",
-      "category": "鋼鐵"
+      "market": "上櫃"
     },
     {
       "code": "8931",
       "name": "大汽電",
-      "market": "上櫃",
-      "category": "油電燃氣"
+      "market": "上櫃"
     },
     {
       "code": "9958",
       "name": "世紀鋼",
-      "market": "上市",
-      "category": "鋼鐵"
+      "market": "上市"
     }
   ]
 }
