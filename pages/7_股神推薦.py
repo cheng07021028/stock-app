@@ -8000,10 +8000,29 @@ def _filter_v129_primary_output(df: pd.DataFrame | None, *, max_when_no_main: in
 
 
 def _v128_force_front_columns(cols: list[str], available_cols: list[str]) -> list[str]:
-    front = [c for c in V128_FRONT_COLUMNS if c in available_cols]
-    rest = [c for c in cols if c in available_cols and c not in front]
-    tail = [c for c in available_cols if c not in front and c not in rest]
-    return front + rest + tail
+    """v131：尊重使用者在欄位管理中的實際排序。
+
+    v128/v129 曾為了讓新欄位一定看得到，強制把 V127~V129 欄位推到最前面；
+    但這會覆蓋「完整推薦表欄位管理」中使用者手動移動欄位的位置。
+
+    v131 改為：
+    - 已存在於使用者順序中的欄位：完全照使用者順序顯示。
+    - 新增但尚未進入設定的欄位：只補到最後。
+    - 不再把 V129 / V128 / V127 欄位強制置頂。
+    """
+    available = [c for c in available_cols if c]
+    ordered = []
+    seen = set()
+    for c in cols or []:
+        if c in available and c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    # 補上尚未寫入欄位管理的新欄位，但只補在最後，避免覆蓋使用者排序。
+    for c in available:
+        if c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    return ordered
 
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
@@ -10769,10 +10788,11 @@ def main():
         full_show_cols = [c for c in full_order if c in rec_df.columns and c != "勾選"]
         if not full_show_cols:
             full_show_cols = full_default_cols
-        # V128：即使使用者永久欄位順序仍是舊版，也強制把主推薦/A/B/C候補欄位放到前面。
+        # V131：欄位順序完全尊重欄位管理設定；新欄位只補在最後，不再強制置頂。
         full_show_cols = _v128_force_front_columns(full_show_cols, list(rec_df.columns))
 
-        # v78：確保完整推薦表的 DataFrame 實體欄位順序完全依 full_show_cols 建立。
+        # v78/v131：確保完整推薦表的 DataFrame 實體欄位順序完全依 full_show_cols 建立；
+        # 若使用者剛剛套用新欄位順序，必須刷新 data_editor key，否則 Streamlit 前端會沿用舊欄位位置。
         # 注意：直接在表格前端拖曳欄位不會寫回 Python；需使用上方欄位順序設定後按「套用」。
 
         # v25.6：完整推薦表直接勾選，並可匯入 05_自選股中心 / 09_股神推薦紀錄。
@@ -10790,6 +10810,14 @@ def main():
         # v78：完整推薦表 key 依欄位順序指紋重建。
         # 原因：Streamlit data_editor 會保留前端 column layout；若 key 固定，即使 Python 欄位順序改了，畫面仍可能沿用舊位置。
         full_order_hash = _column_order_fingerprint(list(full_work_df.columns))
+        full_order_hash_key = _k("full_table_order_hash_v131")
+        if st.session_state.get(full_order_hash_key) != full_order_hash:
+            try:
+                _clear_full_table_editor_widget_states()
+            except Exception:
+                pass
+            st.session_state[full_order_hash_key] = full_order_hash
+            st.session_state[_k("full_table_layout_version")] = full_order_hash + "_" + str(int(time.time() * 1000))
         full_layout_version = st.session_state.get(_k("full_table_layout_version"), full_order_hash)
         full_editor_key = _k(f"full_table_editor_{full_layout_version}")
         full_editor_code_map_key = _k(f"full_table_editor_code_map_{full_order_hash}")
@@ -10892,6 +10920,7 @@ def main():
             # v25.7：完整推薦表直接匯出 Excel。
             export_target_df = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()
             export_target_df = _ensure_v128_v127_runtime_columns(export_target_df, source="excel_export_full_table")
+            # V131：Excel 匯出同樣尊重完整推薦表欄位管理順序，不再把 V129 等欄位強制移到前面。
             full_show_cols = _v128_force_front_columns(full_show_cols, list(export_target_df.columns))
             export_target_cols = ["勾選"] + [c for c in full_show_cols if c != "勾選"]
             if "勾選" not in export_target_df.columns:
