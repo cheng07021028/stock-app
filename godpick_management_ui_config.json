@@ -1,6 +1,6 @@
 {
   "version": "v116",
-  "updated_at": "2026-05-17 09:46:56",
+  "updated_at": "2026-05-17 09:48:42",
   "profiles": {
     "page07_godpick_recommend_full": {
       "label": "完整推薦表",
@@ -347,7 +347,7 @@
         "官方因子資料源",
         "V128實戰分流版本"
       ],
-      "updated_at": "2026-05-17 09:46:56"
+      "updated_at": "2026-05-17 09:48:42"
     },
     "page08_godpick_record_total_標準": {
       "label": "推薦紀錄總表",
