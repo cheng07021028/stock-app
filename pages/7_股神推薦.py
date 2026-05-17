@@ -7750,10 +7750,13 @@ def _render_v125_recommend_tier_panel(rec_df: pd.DataFrame | None) -> None:
         c3.metric("B級候補", b_n)
         c4.metric("C級候補", c_n)
         c5.metric("觀察等待", obs_n)
+        if "V129顯示分區" in rec_df.columns:
+            v129s = rec_df["V129顯示分區"].astype(str)
+            st.caption("V129 精簡輸出：" + "｜".join([f"{k} {int((v129s == k).sum())}" for k in ["股神主推薦", "A級候補｜優先觀察", "B級候補｜等確認", "高品質觀察股", "冷門觀察區"] if int((v129s == k).sum()) > 0]))
         if main_n == 0:
-            st.warning("V127 判斷：今日沒有通過『股神級主推薦』的股票。若有 A/B/C 候補，僅能作觀察與等待確認，不是直接買進訊號。")
+            st.warning("V129 判斷：今日沒有通過『股神級主推薦』的股票。主畫面已精簡，只保留少數高品質觀察；A/B/C 候補不是直接買進訊號。")
         else:
-            st.success(f"V127 判斷：今日有 {main_n} 檔通過股神主推薦門檻；候補已依 A/B/C 再分級。")
+            st.success(f"V129 判斷：今日有 {main_n} 檔通過股神主推薦門檻；候補與冷門觀察已分流。")
         with st.expander("V127 分流規則說明", expanded=False):
             st.write("主推薦：交易可行、隔日進場、實戰品質、量能、趨勢、買點分級同時達標。")
             st.write("A級候補：可優先觀察，但仍需隔日突破或回測確認。")
@@ -7770,6 +7773,8 @@ def _render_v125_recommend_tier_panel(rec_df: pd.DataFrame | None) -> None:
 # V128 執行期保護：確保 V127 分流欄位真的進入畫面、快取與匯出
 # =========================================================
 V128_FRONT_COLUMNS = [
+    "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區",
+    "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版",
     "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序",
     "V127候補排序分", "V127候補限制原因", "V127冷門股壓後",
     "V127股神實戰建議", "V127主推薦說明", "股神主推薦狀態",
@@ -7826,6 +7831,172 @@ def _ensure_v128_v127_runtime_columns(df: pd.DataFrame | None, *, source: str = 
                 out[c] = [v] * n
     out["V128實戰分流版本"] = "V128｜強制確認 V127 主推薦/A/B/C候補欄位已套用"
     return out
+
+
+# =========================================================
+# V129：無主推薦時精簡輸出 + 冷門觀察區
+# =========================================================
+V129_FRONT_COLUMNS = [
+    "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區",
+    "V129輸出限制原因", "V129股神輸出建議",
+]
+
+
+def _apply_v129_compact_output_tags(df: pd.DataFrame | None) -> pd.DataFrame:
+    """V129：把候補清單再做顯示分區，避免無主推薦時仍列出一大串冷門股。
+
+    設計原則：
+    1. 有主推薦時：主推薦與 A/B 候補優先顯示，C 級只保留少數高品質觀察。
+    2. 無主推薦且無 A/B 候補時：明確視為「今日無股神級主推薦」，主表只保留少數高品質觀察股。
+    3. 極低量 / 冷門、隔日分太低、交易可行偏低者，放入冷門觀察或一般觀察，不再干擾主畫面。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    out = df.copy()
+    try:
+        if "V127推薦層級" not in out.columns:
+            out = _ensure_v128_v127_runtime_columns(out, source="v129")
+    except Exception:
+        pass
+
+    layer = out.get("V127推薦層級", out.get("主推薦資格", pd.Series([""] * len(out), index=out.index))).astype(str)
+    volume_state = out.get("量能狀態", pd.Series([""] * len(out), index=out.index)).astype(str)
+    cold = volume_state.str.contains("極低量|冷門", na=False) | out.get("V127冷門股壓後", pd.Series(["否"] * len(out), index=out.index)).astype(str).eq("是")
+    entry = pd.to_numeric(out.get("隔日進場分數", 0), errors="coerce").fillna(0)
+    trade = pd.to_numeric(out.get("交易可行分數", 0), errors="coerce").fillna(0)
+    quality = pd.to_numeric(out.get("實戰品質分", 0), errors="coerce").fillna(0)
+    cand_score = pd.to_numeric(out.get("V127候補排序分", out.get("V126實戰排序分", 0)), errors="coerce").fillna(0)
+    main_sort = pd.to_numeric(out.get("主推薦排序分", cand_score), errors="coerce").fillna(0)
+    bear = out.get("大盤橋接狀態", pd.Series([""] * len(out), index=out.index)).astype(str).str.contains("空頭|偏空", na=False)
+
+    has_main = bool((layer == "主推薦").any())
+    has_ab = bool(layer.isin(["A級候補", "B級候補"]).any())
+
+    display_zone = []
+    main_display = []
+    cold_zone = []
+    restrict_reason = []
+    advice = []
+    order = []
+
+    for i in out.index:
+        z = str(layer.loc[i])
+        is_cold = bool(cold.loc[i])
+        e = float(entry.loc[i])
+        t = float(trade.loc[i])
+        q = float(quality.loc[i])
+        cs = float(cand_score.loc[i])
+        ms = float(main_sort.loc[i])
+        reasons = []
+        cold_flag = "是" if is_cold else "否"
+
+        # 基礎分區
+        if z == "主推薦":
+            dz = "股神主推薦"
+            show = "是"
+            od = 0
+            adv = "主推薦：可列入隔日作戰清單，但仍需依突破/回測條件執行。"
+        elif z == "A級候補":
+            dz = "A級候補｜優先觀察"
+            show = "是"
+            od = 1
+            adv = "A級候補：條件接近主推薦，等待突破或回測確認，不直接追價。"
+        elif z == "B級候補":
+            dz = "B級候補｜等確認"
+            show = "是"
+            od = 2
+            adv = "B級候補：有雛形但尚未確認，等量價轉強。"
+        elif is_cold:
+            dz = "冷門觀察區"
+            show = "否"
+            od = 7
+            reasons.append("極低量/冷門，預設不進主要推薦表")
+            adv = "冷門觀察：流動性不足，不列主要候補。"
+        elif z == "C級候補":
+            # C 級候補只有在交易/隔日/品質至少像樣時，才可進主畫面的高品質觀察。
+            if e >= 20 and t >= 55 and q >= 70 and cs >= 28:
+                dz = "高品質觀察股"
+                show = "是"
+                od = 3
+                adv = "高品質觀察：可列少量追蹤，不是買進訊號。"
+            else:
+                dz = "C級低順位候補"
+                show = "否"
+                od = 5
+                if e < 20:
+                    reasons.append(f"隔日進場分數{e:.0f}<20")
+                if t < 55:
+                    reasons.append(f"交易可行分數{t:.0f}<55")
+                if q < 70:
+                    reasons.append(f"實戰品質分{q:.0f}<70")
+                adv = "C級候補：低順位追蹤，預設不列主畫面。"
+        elif z == "觀察等待":
+            dz = "觀察等待"
+            show = "否"
+            od = 6
+            reasons.append("僅觀察等待，不列主要推薦")
+            adv = "觀察等待：條件不足，勿視為進場訊號。"
+        else:
+            dz = "排除觀察"
+            show = "否"
+            od = 9
+            reasons.append("不符合實戰推薦條件")
+            adv = "排除觀察：暫不操作。"
+
+        if bool(bear.loc[i]) and z != "主推薦":
+            reasons.append("大盤偏空，候補輸出壓縮")
+
+        display_zone.append(dz)
+        main_display.append(show)
+        cold_zone.append(cold_flag)
+        restrict_reason.append("；".join(reasons) if reasons else "V129：可列主要表")
+        advice.append(adv)
+        # 層級排序 + 分數反向排序用。越小越前；分數透過後面 sort_cols 仍可排序。
+        order.append(od)
+
+    out["V129顯示分區"] = display_zone
+    out["V129主要表顯示"] = main_display
+    out["V129精簡輸出排序"] = order
+    out["V129冷門觀察區"] = cold_zone
+    out["V129輸出限制原因"] = restrict_reason
+    out["V129股神輸出建議"] = advice
+    out["V129精簡輸出版"] = "V129｜無主推薦時精簡主表；冷門/低量移至冷門觀察區"
+    return out
+
+
+def _filter_v129_primary_output(df: pd.DataFrame | None, *, max_when_no_main: int = 15) -> pd.DataFrame:
+    """V129：主畫面/完整推薦表預設只保留主推薦與高品質觀察。
+    若完全沒有主推薦與 A/B 候補，只顯示前 10~15 檔高品質觀察，不再硬列一大串冷門股。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    x = _apply_v129_compact_output_tags(df)
+    layer = x.get("V127推薦層級", pd.Series([""] * len(x), index=x.index)).astype(str)
+    has_main = bool((layer == "主推薦").any())
+    has_ab = bool(layer.isin(["A級候補", "B級候補"]).any())
+
+    # 先排好，後面 head 才會保留品質較佳者。
+    sort_cols = [c for c in [
+        "V129精簡輸出排序", "V127推薦層級排序", "V127候補排序分",
+        "V126實戰排序分", "主推薦排序分", "實戰主推薦分",
+        "隔日進場分數", "交易可行分數", "實戰品質分", "推薦總分"
+    ] if c in x.columns]
+    if sort_cols:
+        asc = [True] + [False] * (len(sort_cols) - 1)
+        x = x.sort_values(sort_cols, ascending=asc, na_position="last").reset_index(drop=True)
+
+    if has_main or has_ab:
+        keep = x[x["V129主要表顯示"].astype(str).eq("是")].copy()
+        # 有主推薦/AB 時，C 級高品質觀察最多補到 30 檔；冷門觀察不進主表。
+        return keep.head(30).reset_index(drop=True) if not keep.empty else x.head(max_when_no_main).reset_index(drop=True)
+
+    # 沒有主推薦也沒有 A/B：只保留非冷門、高品質觀察的前 10~15 檔。
+    primary = x[x["V129主要表顯示"].astype(str).eq("是")].copy()
+    if primary.empty:
+        # 如果沒有任何高品質觀察，退而求其次保留非冷門、交易可行較高者，不超過 10 檔。
+        cold = x.get("V129冷門觀察區", pd.Series(["否"] * len(x), index=x.index)).astype(str).eq("是")
+        primary = x[~cold].copy().head(10)
+    return primary.head(max_when_no_main).reset_index(drop=True)
 
 
 def _v128_force_front_columns(cols: list[str], available_cols: list[str]) -> list[str]:
@@ -8207,9 +8378,10 @@ def _build_recommend_df(
     # V122：實戰主推薦門檻，避免冷門低量、無趨勢、僅觀察股混入主推薦。
     try:
         base_df = _apply_v122_practical_godpick_gate(base_df)
+        base_df = _apply_v129_compact_output_tags(base_df)
     except Exception as v122_err:
         base_df["主推薦資格"] = "待確認"
-        base_df["主推薦不合格原因"] = f"V122實戰主推薦檢查失敗：{v122_err}"
+        base_df["主推薦不合格原因"] = f"V122/V129實戰主推薦檢查失敗：{v122_err}"
 
 
     def _reason_builder(r):
@@ -8246,16 +8418,12 @@ def _build_recommend_df(
         if c not in base_df.columns:
             base_df[c] = pd.NA
 
-    # V125：不要再用「推薦總分」決定能不能顯示。
-    # 先分流主推薦/候補/觀察，再依主推薦排序分排序；候補不能偽裝成主推薦。
-    if "主推薦資格" in base_df.columns:
-        tier = base_df["主推薦資格"].astype(str)
-        main_part = base_df[tier == "主推薦"].copy()
-        candidate_part = base_df[tier == "實戰候補"].copy()
-        observe_part = base_df[tier == "觀察等待"].copy()
-        final_df = pd.concat([main_part, candidate_part, observe_part], ignore_index=True)
+    # V129：不要在無主推薦時硬湊一大串候補。
+    # 主畫面只顯示主推薦 / A-B 候補 / 少數高品質觀察；冷門低量與低隔日分放入觀察區，不干擾判斷。
+    if "主推薦資格" in base_df.columns or "V127推薦層級" in base_df.columns:
+        final_df = _filter_v129_primary_output(base_df, max_when_no_main=15)
         if final_df.empty:
-            final_df = base_df[base_df["主推薦排序分"].fillna(0) >= 25].copy() if "主推薦排序分" in base_df.columns else base_df.head(50).copy()
+            final_df = base_df.head(10).copy()
     else:
         final_df = base_df[base_df["推薦總分"] >= min_total_score].copy()
 
@@ -8269,10 +8437,10 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    sort_cols = ["V127推薦層級排序", "V125推薦層級排序", "V123推薦層級排序", "V126實戰排序分", "V127候補排序分", "主推薦排序分", "實戰主推薦分", "隔日實戰排序分", "夜間股神總分", "隔日進場分數", "推薦總分", "波段潛力分數", "進場時機分數", "族群資金流分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
+    sort_cols = ["V129精簡輸出排序", "V127推薦層級排序", "V125推薦層級排序", "V123推薦層級排序", "V126實戰排序分", "V127候補排序分", "主推薦排序分", "實戰主推薦分", "隔日實戰排序分", "夜間股神總分", "隔日進場分數", "推薦總分", "波段潛力分數", "進場時機分數", "族群資金流分數", "機會股分數", "市場環境分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "訊號分數", "區間漲跌幅%"]
     active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     if active_sort_cols:
-        ascending = [True] + [False] * (len(active_sort_cols) - 1) if active_sort_cols[0] in {"V127推薦層級排序", "V125推薦層級排序", "V123推薦層級排序"} else [False] * len(active_sort_cols)
+        ascending = [True] + [False] * (len(active_sort_cols) - 1) if active_sort_cols[0] in {"V129精簡輸出排序", "V127推薦層級排序", "V125推薦層級排序", "V123推薦層級排序"} else [False] * len(active_sort_cols)
         final_df = final_df.sort_values(active_sort_cols, ascending=ascending).reset_index(drop=True)
     else:
         final_df = final_df.reset_index(drop=True)
@@ -8510,7 +8678,7 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
-        "推薦模式", "推薦型態", "機會型態", "推薦等級", "主推薦資格", "V127推薦層級", "V127候補等級", "原始推薦總分", "推薦總分", "實戰調整推薦分", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "原始推薦總分", "推薦總分", "實戰調整推薦分", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價", "觀察週期",
         "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "資料完整度",
         "夜間股神建議", "隔日作戰策略", "夜間風險提醒",
@@ -8807,7 +8975,7 @@ def _render_selected_export_block():
     want_cols = [
         "股票代號", "股票名稱", "市場別", "類別",
         "類股內排名", "類股前3強",
-        "推薦模式", "推薦等級", "主推薦資格", "V127推薦層級", "V127候補等級", "V125推薦層級", "原始推薦總分", "推薦總分", "實戰調整推薦分", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V125股神實戰建議", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+        "推薦模式", "推薦型態", "機會型態", "推薦等級", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V125推薦層級", "原始推薦總分", "推薦總分", "實戰調整推薦分", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V125股神實戰建議", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "突破確認價_隔日", "回測承接價", "停損價_隔日", "第一壓力價", "資料完整度",
         "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦分桶", "起漲等級", "信心等級",
         "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
