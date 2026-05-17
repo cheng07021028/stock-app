@@ -7765,6 +7765,75 @@ def _render_v125_recommend_tier_panel(rec_df: pd.DataFrame | None) -> None:
         return
 
 
+
+# =========================================================
+# V128 執行期保護：確保 V127 分流欄位真的進入畫面、快取與匯出
+# =========================================================
+V128_FRONT_COLUMNS = [
+    "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序",
+    "V127候補排序分", "V127候補限制原因", "V127冷門股壓後",
+    "V127股神實戰建議", "V127主推薦說明", "股神主推薦狀態",
+    "主推薦排序分", "實戰主推薦分", "V126實戰排序分", "實戰調整推薦分",
+    "原始推薦總分", "推薦總分", "隔日進場分數", "交易可行分數",
+    "實戰品質分", "量能狀態", "趨勢狀態", "主推薦不合格原因",
+    "V128實戰分流版本",
+]
+
+
+def _ensure_v128_v127_runtime_columns(df: pd.DataFrame | None, *, source: str = "") -> pd.DataFrame:
+    """V128：保護舊 session/cache/欄位管理造成 V127 欄位沒有進入結果表。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    out = df.copy()
+    required = [
+        "V127推薦層級", "V127候補等級", "V127候補排序分", "V127候補限制原因",
+        "V127冷門股壓後", "V127股神實戰建議", "股神主推薦狀態",
+        "主推薦排序分", "實戰主推薦分", "實戰品質分", "量能狀態", "趨勢狀態",
+    ]
+    valid_layers = {"主推薦", "A級候補", "B級候補", "C級候補", "觀察等待", "排除觀察"}
+    need_recalc = any(c not in out.columns for c in required)
+    if not need_recalc and "V127推薦層級" in out.columns:
+        s = out["V127推薦層級"].astype(str)
+        need_recalc = not bool(s.isin(valid_layers).any())
+    if need_recalc:
+        try:
+            out = _apply_v118_liquidity_trend_guard(out)
+        except Exception as e:
+            if "實戰品質提醒" not in out.columns:
+                out["實戰品質提醒"] = f"V128補欄時 V118 失敗：{e}"
+        try:
+            out = _apply_v122_practical_godpick_gate(out)
+            out = _filter_v122_main_recommendations(out)
+        except Exception as e:
+            # 不讓頁面掛掉；至少把欄位補出來，避免匯出/串接缺欄。
+            n = len(out)
+            fallback = {
+                "主推薦資格": "待確認",
+                "V127推薦層級": "觀察等待",
+                "V127候補等級": "",
+                "V127推薦層級排序": 4,
+                "V127候補排序分": 0.0,
+                "V127候補限制原因": f"V128補欄失敗：{e}",
+                "V127冷門股壓後": "待確認",
+                "V127股神實戰建議": "資料需重新推薦後確認",
+                "V127主推薦說明": "資料需重新推薦後確認",
+                "股神主推薦狀態": "非主推",
+                "主推薦排序分": 0.0,
+                "實戰主推薦分": 0.0,
+                "主推薦不合格原因": f"V128補欄失敗：{e}",
+            }
+            for c, v in fallback.items():
+                out[c] = [v] * n
+    out["V128實戰分流版本"] = "V128｜強制確認 V127 主推薦/A/B/C候補欄位已套用"
+    return out
+
+
+def _v128_force_front_columns(cols: list[str], available_cols: list[str]) -> list[str]:
+    front = [c for c in V128_FRONT_COLUMNS if c in available_cols]
+    rest = [c for c in cols if c in available_cols and c not in front]
+    tail = [c for c in available_cols if c not in front and c not in rest]
+    return front + rest + tail
+
 def _build_recommend_df(
     universe_items: list[dict[str, str]],
     master_df: pd.DataFrame,
@@ -8410,7 +8479,11 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
             hot_df = pd.DataFrame()
         else:
             hot_df = _ensure_v92_night_compat_df(hot_df, source="session_hot_pick")
+        rec_df = _ensure_v128_v127_runtime_columns(rec_df, source="session_rec_df")
+        hot_df = _ensure_v128_v127_runtime_columns(hot_df, source="session_hot_pick") if isinstance(hot_df, pd.DataFrame) and not hot_df.empty else hot_df
         # 寫回 session，避免同一輪頁面重繪反覆補欄。
+        rec_df = _ensure_v128_v127_runtime_columns(rec_df, source="loaded_rec_df")
+        hot_df = _ensure_v128_v127_runtime_columns(hot_df, source="loaded_hot_pick") if isinstance(hot_df, pd.DataFrame) and not hot_df.empty else hot_df
         st.session_state[_k("rec_df_store")] = rec_df.copy()
         st.session_state[_k("hot_pick_store")] = hot_df.copy()
         return rec_df.copy(), cat_df.copy(), hot_df.copy()
@@ -8465,6 +8538,7 @@ def _get_full_table_order_for_export(rec_df: pd.DataFrame) -> list[str]:
     default_cols = _get_full_table_default_cols()
     saved_order = _load_persistent_column_order("full_table")
     full_order = _normalize_column_order(saved_order if saved_order else default_cols, available_cols, default_cols)
+    full_order = _v128_force_front_columns(full_order, available_cols)
     return [c for c in full_order if c in rec_df.columns]
 
 
@@ -9950,6 +10024,12 @@ def main():
     except Exception:
         pass
 
+    # V128：標準化後再次確認 V127 分流欄位，避免欄位管理或舊快取造成匯出缺欄。
+    rec_df = _ensure_v128_v127_runtime_columns(rec_df, source="main_after_normalize")
+    hot_pick_df = _ensure_v128_v127_runtime_columns(hot_pick_df, source="hot_after_normalize") if isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty else hot_pick_df
+    st.session_state[_k("rec_df_store")] = rec_df.copy()
+    st.session_state[_k("hot_pick_store")] = hot_pick_df.copy() if isinstance(hot_pick_df, pd.DataFrame) else hot_pick_df
+
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
     _render_v125_recommend_tier_panel(rec_df)
@@ -10521,6 +10601,8 @@ def main():
         full_show_cols = [c for c in full_order if c in rec_df.columns and c != "勾選"]
         if not full_show_cols:
             full_show_cols = full_default_cols
+        # V128：即使使用者永久欄位順序仍是舊版，也強制把主推薦/A/B/C候補欄位放到前面。
+        full_show_cols = _v128_force_front_columns(full_show_cols, list(rec_df.columns))
 
         # v78：確保完整推薦表的 DataFrame 實體欄位順序完全依 full_show_cols 建立。
         # 注意：直接在表格前端拖曳欄位不會寫回 Python；需使用上方欄位順序設定後按「套用」。
@@ -10641,6 +10723,8 @@ def main():
         with full_b2:
             # v25.7：完整推薦表直接匯出 Excel。
             export_target_df = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()
+            export_target_df = _ensure_v128_v127_runtime_columns(export_target_df, source="excel_export_full_table")
+            full_show_cols = _v128_force_front_columns(full_show_cols, list(export_target_df.columns))
             export_target_cols = ["勾選"] + [c for c in full_show_cols if c != "勾選"]
             if "勾選" not in export_target_df.columns:
                 if "股票代號" in export_target_df.columns:
