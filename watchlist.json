@@ -1,6 +1,12 @@
 {
   "庫存": [
     {
+      "code": "1319",
+      "name": "東陽",
+      "market": "上市",
+      "category": "車用電子"
+    },
+    {
       "code": "1434",
       "name": "福懋",
       "market": "上市"
@@ -9,6 +15,24 @@
       "code": "1504",
       "name": "東元",
       "market": "上市"
+    },
+    {
+      "code": "1726",
+      "name": "永記",
+      "market": "上市",
+      "category": "塑化"
+    },
+    {
+      "code": "1817",
+      "name": "凱撒衛",
+      "market": "上市",
+      "category": "玻璃陶瓷"
+    },
+    {
+      "code": "2027",
+      "name": "大成鋼",
+      "market": "上市",
+      "category": "鋼鐵"
     },
     {
       "code": "2302",
@@ -26,6 +50,12 @@
       "market": "上市"
     },
     {
+      "code": "2412",
+      "name": "中華電",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
       "code": "2492",
       "name": "華新科",
       "market": "上市"
@@ -36,6 +66,12 @@
       "market": "上市"
     },
     {
+      "code": "3045",
+      "name": "台灣大",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
       "code": "3548",
       "name": "兆利科技工業股份有限公司",
       "market": "上櫃"
@@ -44,6 +80,12 @@
       "code": "3583",
       "name": "辛耘",
       "market": "上市"
+    },
+    {
+      "code": "4305",
+      "name": "世坤",
+      "market": "上櫃",
+      "category": "塑化"
     },
     {
       "code": "4961",
@@ -81,9 +123,39 @@
       "market": "上市"
     },
     {
+      "code": "6558",
+      "name": "興能高",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
+      "code": "6613",
+      "name": "朋億*",
+      "market": "上櫃",
+      "category": "其他電子業"
+    },
+    {
+      "code": "6698",
+      "name": "旭暉應材",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
       "code": "6770",
       "name": "力積電",
       "market": "上市"
+    },
+    {
+      "code": "6844",
+      "name": "諾貝兒",
+      "market": "上櫃",
+      "category": "生技醫療"
+    },
+    {
+      "code": "8415",
+      "name": "大國鋼",
+      "market": "上櫃",
+      "category": "鋼鐵"
     }
   ],
   "0422": [
