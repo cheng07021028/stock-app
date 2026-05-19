@@ -296,8 +296,8 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-19 03:21:27",
-  "version": "godpick_v104_night_accuracy_feedback_sync",
+  "updated_at": "2026-05-19 03:21:30",
+  "version": "godpick_v106_weight_calibration_setting_persist",
   "score_weights": {
     "市場環境": 15,
     "技術結構": 14,
@@ -309,5 +309,11 @@
     "爆發力": 19
   },
   "weight_source": "14_股神權重校正",
-  "last_weight_calibration_profile": "主校正建議"
+  "last_weight_calibration_profile": "主校正建議",
+  "weight_calibration_page_settings": {
+    "main_horizon": 10,
+    "allow_apply_from_page": true,
+    "updated_at": "2026-05-19 03:21:30",
+    "version": "v106_weight_calibration_setting_persist"
+  }
 }
