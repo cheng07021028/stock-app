@@ -1034,17 +1034,28 @@ def _apply_v25_smart_backfill(out: pd.DataFrame) -> pd.DataFrame:
     """v25：補齊歷史紀錄缺失的管理欄位，只補空值，不覆蓋原本已有內容。"""
     if out is None or out.empty:
         return out
-    for col in [
-        "追蹤分級", "今日操作建議", "品質分級", "品質建議", "建議投入等級", "第一筆進場%",
+    text_backfill_cols = [
+        "追蹤分級", "今日操作建議", "品質分級", "品質建議", "建議投入等級",
         "分批策略", "第二筆加碼條件", "追高風險等級", "單檔風險等級", "族群策略建議",
         "大盤策略建議", "大盤策略模式", "大盤橋接狀態", "大盤橋接風控", "族群輪動狀態",
         "族群集中警示", "組合配置建議", "K線驗證標記", "K線檢視提示"
-    ]:
+    ]
+    numeric_backfill_cols = ["建議倉位%", "動態建議倉位%", "第一筆進場%"]
+
+    for col in text_backfill_cols:
         if col not in out.columns:
             out[col] = ""
-    for col in ["建議倉位%", "動態建議倉位%"]:
+        # pandas 3.x 不再允許把字串寫入 int/float/bool 欄位；先統一成 object，避免 Streamlit Cloud TypeError。
+        try:
+            out[col] = out[col].astype("object")
+        except Exception:
+            out[col] = out[col].map(_clean_text_value).astype("object")
+
+    for col in numeric_backfill_cols:
         if col not in out.columns:
-            out[col] = pd.NA
+            out[col] = float("nan")
+        # 這幾欄後續會寫入 2.0、6.5 之類浮點倉位，必須先轉 float64；否則 pandas 3.x 會因 int 欄位 upcast 失敗而中斷。
+        out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
 
     for idx, row in out.iterrows():
         if _is_blank_value(row.get("單檔風險等級")):
