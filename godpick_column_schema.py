@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""股神推薦欄位標準化共用模組 v29
+"""股神推薦欄位標準化共用模組 v135
 
 用途：
 - 讓 7_股神推薦、8_股神推薦紀錄、10_推薦清單、12_股神管理中心使用同一套核心欄位與欄位順序。
@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Iterable
 import math
 import json
+import re
 import pandas as pd
 
 BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -20,7 +21,7 @@ UNIFIED_RECOMMEND_DISPLAY_COLUMNS = [
     "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
     "資料來源", "資料來源檔", "record_id",
     "推薦日期", "推薦時間", "股票代號", "股票名稱", "市場別", "類別", "產業",
-    "推薦模式", "推薦型態", "機會型態", "推薦等級", "V132主流族群資格", "V132熱門族群池", "V132族群實戰分", "V132非主流限制", "V132冷門封鎖", "V132顯示分區", "V132主要表顯示", "V132輸出排序", "V132股神實戰建議", "V132主流族群版", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序", "V127候補排序分", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V127主推薦說明", "原始推薦總分", "實戰調整推薦分", "V126實戰排序分", "V125推薦層級", "V125推薦層級排序", "股神主推薦狀態", "V125股神實戰建議", "V125主推薦說明", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議", "推薦總分", "推薦分數", "股神決策分數",
+    "推薦模式", "推薦型態", "機會型態", "推薦等級", "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分", "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數", "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式", "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本", "V134動態族群名稱", "V134資金流熱門族群", "V134族群熱度排名", "V134族群資金流分數", "V134族群流動性分數", "V134族群樣本數", "V134族群判斷依據", "V134大盤趨勢模式", "V134主表篩選", "V134顯示分區", "V134主要表顯示", "V134輸出排序", "V134限制原因", "V134股神實戰建議", "V134動態資金流版", "V133成交額百萬", "V133二十日均成交額百萬", "V133流動性等級", "V133真正熱門族群", "V133主表篩選", "V133顯示分區", "V133主要表顯示", "V133輸出排序", "V133限制原因", "V133股神實戰建議", "V133熱門流動性版", "V132主流族群資格", "V132熱門族群池", "V132族群實戰分", "V132非主流限制", "V132冷門封鎖", "V132顯示分區", "V132主要表顯示", "V132輸出排序", "V132股神實戰建議", "V132主流族群版", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序", "V127候補排序分", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V127主推薦說明", "原始推薦總分", "實戰調整推薦分", "V126實戰排序分", "V125推薦層級", "V125推薦層級排序", "股神主推薦狀態", "V125股神實戰建議", "V125主推薦說明", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議", "推薦總分", "推薦分數", "股神決策分數",
     "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒", "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
     "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
     "技術趨勢分數", "量價動能分數", "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數",
@@ -51,6 +52,24 @@ UNIFIED_MANAGEMENT_COLUMNS = UNIFIED_RECOMMEND_DISPLAY_COLUMNS.copy()
 
 # 回補規則：target 欄空白時，從 sources 依序取第一個有值欄位。
 ALIASES: dict[str, list[str]] = {
+    "股神推薦層級": ["V134顯示分區", "V133顯示分區", "V132顯示分區", "V129顯示分區", "V127推薦層級", "主推薦資格"],
+    "是否主要顯示": ["V134主要表顯示", "V133主要表顯示", "V132主要表顯示", "V129主要表顯示"],
+    "主表篩選": ["V134主表篩選", "V133主表篩選"],
+    "股神輸出排序": ["V134輸出排序", "V133輸出排序", "V132輸出排序", "V129精簡輸出排序", "V127推薦層級排序"],
+    "候補排序分": ["V127候補排序分", "V126實戰排序分"],
+    "股神實戰建議": ["V134股神實戰建議", "V133股神實戰建議", "V132股神實戰建議", "V129股神輸出建議", "V127股神實戰建議"],
+    "限制原因": ["V134限制原因", "V133限制原因", "V132非主流限制", "V129輸出限制原因", "V127候補限制原因"],
+    "族群名稱": ["V134動態族群名稱", "類別", "產業", "正式產業別"],
+    "資金流熱門族群": ["V134資金流熱門族群", "V133真正熱門族群", "V132主流族群資格"],
+    "族群熱度排名": ["V134族群熱度排名"],
+    "族群流動性分數": ["V134族群流動性分數"],
+    "族群樣本數": ["V134族群樣本數"],
+    "族群判斷依據": ["V134族群判斷依據"],
+    "大盤趨勢模式": ["V134大盤趨勢模式", "大盤策略模式", "大盤橋接狀態"],
+    "成交額百萬": ["V133成交額百萬"],
+    "20日均成交額百萬": ["V133二十日均成交額百萬"],
+    "流動性等級": ["V133流動性等級", "量能狀態"],
+    "實戰版本": ["V134動態資金流版", "V133熱門流動性版", "V132主流族群版", "V129精簡輸出版", "V128實戰分流版本"],
     "股票代號": ["code", "stock_code", "symbol", "股票"],
     "股票名稱": ["name", "stock_name"],
     "市場別": ["market"],
@@ -125,6 +144,130 @@ def dedupe_keep_order(seq: Iterable[Any]) -> list[Any]:
     return out
 
 
+# =========================================================
+# V135：有效欄位統一層
+# =========================================================
+# 目的：後續版本不再把 V127/V128/V129/V132/V133/V134... 這類版本欄位
+#       直接放進各模組預設欄位清單。版本欄位仍保留在資料內以利追蹤，
+#       但畫面與欄位管理預設只使用下列「有效欄位」。
+# V136：版本欄位不再逐版加入欄位管理。
+# 只要是 V100+ / v100+ 形式，都視為歷史版本欄位；
+# 但保留 v21操作優先順序 這類業務欄位，不誤判。
+LEGACY_VERSION_PREFIXES = tuple(f"V{i}" for i in range(100, 200))
+LEGACY_VERSION_PREFIXES += tuple(f"v{i}" for i in range(100, 200))
+
+V135_EFFECTIVE_COLUMNS = [
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
+    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名",
+    "族群資金流分數", "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式",
+    "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本",
+]
+
+V135_NUMERIC_COLUMNS = {
+    "股神輸出排序", "候補排序分", "族群熱度排名", "族群資金流分數", "族群流動性分數",
+    "族群樣本數", "成交額百萬", "20日均成交額百萬",
+}
+
+
+def is_legacy_version_column(col: Any) -> bool:
+    """判斷是否為歷代版本欄位。
+
+    V136 原則：
+    - V127推薦層級、V134資金流熱門族群、V135xxx、V199xxx 這類都隱藏。
+    - v21操作優先順序 不是版本欄位，必須保留。
+    - 實戰版本 是統一有效欄位，必須保留。
+    """
+    s = str(col or "").strip()
+    if not s or s == "實戰版本":
+        return False
+    # 大寫 V + 三位數以上，例如 V127推薦層級
+    if re.match(r"^V\d{3,}", s):
+        return True
+    # 小寫 v + 三位數以上，例如 v130欄位；避免 v21 被誤判。
+    if re.match(r"^v\d{3,}", s):
+        return True
+    return False
+
+
+def filter_effective_columns(cols: Iterable[Any], *, keep_legacy: bool = False) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in cols or []:
+        name = str(c).strip()
+        if not name or name in seen:
+            continue
+        if (not keep_legacy) and is_legacy_version_column(name):
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _first_series(df: pd.DataFrame, sources: list[str], default: Any = "") -> pd.Series:
+    if not isinstance(df, pd.DataFrame):
+        return pd.Series(dtype="object")
+    # 先用空值接來源，最後才填 default；避免 default 不是空字串時阻擋來源回補。
+    out = pd.Series([""] * len(df), index=df.index, dtype="object")
+    for src in sources:
+        if src not in df.columns:
+            continue
+        s = df[src]
+        mask = out.map(is_blank)
+        if mask.any():
+            out.loc[mask] = s.loc[mask]
+    if default != "":
+        mask = out.map(is_blank)
+        if mask.any():
+            out.loc[mask] = default
+    return out
+
+
+def consolidate_effective_columns(df: pd.DataFrame | None) -> pd.DataFrame:
+    """把歷代版本欄位彙整成穩定有效欄位。保留舊欄位，但預設顯示不再依賴舊欄位。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    x = df.copy()
+    def fill(target: str, sources: list[str], default: Any = "") -> None:
+        if target not in x.columns:
+            x[target] = _first_series(x, sources, default)
+        else:
+            base = x[target].copy()
+            src = _first_series(x, sources, default)
+            mask = base.map(is_blank)
+            if mask.any():
+                base.loc[mask] = src.loc[mask]
+            x[target] = base
+
+    fill("股神推薦層級", ["V134顯示分區", "V133顯示分區", "V132顯示分區", "V129顯示分區", "V127推薦層級", "V125推薦層級", "主推薦資格"], "觀察等待")
+    fill("候補等級", ["V127候補等級", "V134顯示分區", "V133顯示分區", "V132顯示分區", "V129顯示分區"], "")
+    fill("是否主要顯示", ["V134主要表顯示", "V133主要表顯示", "V132主要表顯示", "V129主要表顯示"], "否")
+    fill("主表篩選", ["V134主表篩選", "V133主表篩選"], "")
+    fill("股神輸出排序", ["V134輸出排序", "V133輸出排序", "V132輸出排序", "V129精簡輸出排序", "V127推薦層級排序", "V126實戰排序分"], "")
+    fill("候補排序分", ["V127候補排序分", "V126實戰排序分", "實戰主推薦分", "主推薦排序分"], "")
+    fill("股神實戰建議", ["V134股神實戰建議", "V133股神實戰建議", "V132股神實戰建議", "V129股神輸出建議", "V127股神實戰建議", "V125股神實戰建議", "隔日作戰策略", "夜間股神建議"], "")
+    fill("限制原因", ["V134限制原因", "V133限制原因", "V132非主流限制", "V129輸出限制原因", "V127候補限制原因", "主推薦不合格原因", "實戰排除原因"], "")
+    fill("族群名稱", ["V134動態族群名稱", "V132熱門族群池", "類別", "產業", "正式產業別"], "")
+    fill("資金流熱門族群", ["V134資金流熱門族群", "V133真正熱門族群", "V132主流族群資格"], "否")
+    fill("族群熱度排名", ["V134族群熱度排名", "類股內排名"], "")
+    fill("族群資金流分數", ["V134族群資金流分數", "V132族群實戰分", "族群資金流分數", "類股熱度分數"], "")
+    fill("族群流動性分數", ["V134族群流動性分數"], "")
+    fill("族群樣本數", ["V134族群樣本數"], "")
+    fill("族群判斷依據", ["V134族群判斷依據", "族群資金流說明"], "")
+    fill("大盤趨勢模式", ["V134大盤趨勢模式", "大盤策略模式", "大盤橋接狀態"], "")
+    fill("成交額百萬", ["V133成交額百萬"], "")
+    fill("20日均成交額百萬", ["V133二十日均成交額百萬"], "")
+    fill("流動性等級", ["V133流動性等級", "量能狀態"], "")
+    fill("實戰版本", ["V134動態資金流版", "V133熱門流動性版", "V132主流族群版", "V129精簡輸出版", "V128實戰分流版本", "V122實戰主推薦版"], "V135｜有效欄位統一版")
+    return x
+
+
+# 重建預設欄位順序：移除歷代版本欄位，保留有效欄位。
+_base_cols_v135 = [c for c in UNIFIED_RECOMMEND_DISPLAY_COLUMNS if not is_legacy_version_column(c)]
+UNIFIED_RECOMMEND_DISPLAY_COLUMNS = dedupe_keep_order(_base_cols_v135)
+UNIFIED_MANAGEMENT_COLUMNS = UNIFIED_RECOMMEND_DISPLAY_COLUMNS.copy()
+NUMERIC_LIKE_COLUMNS.update(V135_NUMERIC_COLUMNS)
+
+
 def is_blank(v: Any) -> bool:
     try:
         if v is None:
@@ -167,6 +310,11 @@ def normalize_godpick_dataframe(df: pd.DataFrame | None, *, add_missing: bool = 
         df = pd.DataFrame(df)
     x = df.copy()
     x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
+    # V135：先把歷代版本欄位彙整為有效欄位，避免欄位越改越多。
+    try:
+        x = consolidate_effective_columns(x)
+    except Exception:
+        pass
 
     # 先補標準欄位，確保後續 alias target 存在。
     if add_missing:
@@ -197,15 +345,38 @@ def normalize_godpick_dataframe(df: pd.DataFrame | None, *, add_missing: bool = 
     return x[ordered + extras].reset_index(drop=True)
 
 
-def unified_display_columns(df: pd.DataFrame | None = None, *, include_extras: bool = True, prefix: list[str] | None = None) -> list[str]:
-    base = list(prefix or []) + UNIFIED_RECOMMEND_DISPLAY_COLUMNS
+def unified_display_columns(df: pd.DataFrame | None = None, *, include_extras: bool = True, prefix: list[str] | None = None, keep_legacy: bool = False) -> list[str]:
+    base = filter_effective_columns(list(prefix or []) + UNIFIED_RECOMMEND_DISPLAY_COLUMNS, keep_legacy=keep_legacy)
     base = dedupe_keep_order(base)
     if df is None or not isinstance(df, pd.DataFrame):
         return base
     cols = [c for c in base if c in df.columns]
     if include_extras:
-        cols += [c for c in df.columns if c not in cols and not str(c).startswith("_")]
+        cols += [c for c in df.columns if c not in cols and not str(c).startswith("_") and (keep_legacy or not is_legacy_version_column(c))]
     return dedupe_keep_order(cols)
+
+
+def effective_display_dataframe(df: pd.DataFrame | None, *, add_missing: bool = True, keep_extras: bool = True, keep_legacy: bool = False) -> pd.DataFrame:
+    """V136：跨 07/08/10/11/14/17 共用的有效欄位輸出。
+
+    - 先把 V127/V134 等歷史版本欄位彙整成統一欄位。
+    - 預設隱藏所有 V100+ 版本欄位。
+    - 保留非版本 extras，避免其他模組自訂資料遺失。
+    """
+    x = normalize_godpick_dataframe(df, add_missing=add_missing, clean_none=True)
+    if x is None or not isinstance(x, pd.DataFrame):
+        return pd.DataFrame()
+    cols = unified_display_columns(x, include_extras=keep_extras, keep_legacy=keep_legacy)
+    return x.loc[:, [c for c in cols if c in x.columns]].copy()
+
+
+V136_EFFECTIVE_REQUIRED_COLUMNS = dedupe_keep_order(V135_EFFECTIVE_COLUMNS + [
+    "推薦日期", "推薦時間", "股票代號", "股票名稱", "市場別", "類別", "產業",
+    "推薦總分", "原始推薦總分", "實戰調整推薦分", "實戰品質分", "交易可行分數", "隔日進場分數",
+    "夜間股神總分", "官方因子總分", "官方資料完整度", "量能狀態", "趨勢狀態",
+    "最新價", "推薦價格", "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價",
+    "命中結果", "績效評語", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
+])
 
 
 # ------------------------------

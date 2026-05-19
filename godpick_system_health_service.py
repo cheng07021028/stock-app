@@ -20,6 +20,12 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+try:
+    from godpick_column_schema import V136_EFFECTIVE_REQUIRED_COLUMNS, filter_effective_columns
+except Exception:
+    V136_EFFECTIVE_REQUIRED_COLUMNS = []
+    filter_effective_columns = None
+
 BASE_DIR = Path(__file__).resolve().parent
 BACKUP_DIR = BASE_DIR / "backups" / "system_health"
 SCHEDULE_SETTINGS_PATH = BASE_DIR / "data" / "config" / "official_factor_schedule_settings.json"
@@ -64,10 +70,11 @@ HIT_TRACK_FIELDS = [
 ]
 
 
-PRACTICAL_MAIN_FIELDS_V122 = [
-    "V132主流族群資格", "V132熱門族群池", "V132族群實戰分", "V132非主流限制", "V132冷門封鎖", "V132顯示分區", "V132主要表顯示", "V132輸出排序", "V132股神實戰建議", "V132主流族群版", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序", "V127候補排序分", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V127主推薦說明", "V125推薦層級", "原始推薦總分", "實戰調整推薦分", "V126實戰排序分", "V125推薦層級排序", "股神主推薦狀態", "V125股神實戰建議", "V125主推薦說明", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因",
-    "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議",
-    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
+PRACTICAL_MAIN_FIELDS_V122: List[str] = [
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
+    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數",
+    "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式", "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本",
+    "原始推薦總分", "實戰調整推薦分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
     "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
 ]
 
@@ -80,9 +87,9 @@ OFFICIAL_FACTOR_FIELDS = [
 ]
 
 SCHEMA_TARGETS: dict[str, list[str]] = {
-    "godpick_latest_recommendations.json": NIGHT_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122,
-    "godpick_recommend_list.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122,
-    "godpick_records.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122,
+    "godpick_latest_recommendations.json": NIGHT_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122 + list(V136_EFFECTIVE_REQUIRED_COLUMNS or []),
+    "godpick_recommend_list.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122 + list(V136_EFFECTIVE_REQUIRED_COLUMNS or []),
+    "godpick_records.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122 + list(V136_EFFECTIVE_REQUIRED_COLUMNS or []),
 }
 
 DEFAULT_SCHEDULE_SETTINGS: dict[str, Any] = {

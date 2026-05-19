@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 godpick_column_manager.py
-v116：全系統表格全選 / 取消全選 + 重型頁輕量勾選工具版
+v136：全模組有效欄位統一與舊版欄位隱藏版
 
 用途：
 - 讓 07 股神推薦、08 股神推薦紀錄、10 推薦清單、11 資料診斷、12 股神管理中心
@@ -22,13 +22,20 @@ import pandas as pd
 import streamlit as st
 
 try:
+    from godpick_column_schema import is_legacy_version_column, V135_EFFECTIVE_COLUMNS, filter_effective_columns
+except Exception:  # pragma: no cover
+    def is_legacy_version_column(col):
+        return str(col).startswith(tuple(f"V{i}" for i in range(122, 135)))
+    V135_EFFECTIVE_COLUMNS = []
+
+try:
     import requests
 except Exception:  # pragma: no cover
     requests = None
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
-CONFIG_VERSION = "v116"
+CONFIG_VERSION = "v136"
 EMPTY_VALUES = {"", "None", "none", "nan", "NaN", "null", "NULL", "<NA>"}
 
 
@@ -57,6 +64,31 @@ def safe_text(v: Any, blank: str = "") -> str:
 def _safe_col_name(c: Any) -> str:
     s = str(c).strip()
     return s if s else "未命名欄位"
+
+
+def _is_legacy_col(c: Any) -> bool:
+    try:
+        return bool(is_legacy_version_column(c))
+    except Exception:
+        return False
+
+
+def _filter_legacy_columns(cols: Iterable[str], *, keep_if_explicit: bool = False) -> List[str]:
+    # V136：所有 V100+ / v100+ 版本欄位預設不再出現在欄位管理與文字框。
+    try:
+        return list(filter_effective_columns(cols, keep_legacy=False))
+    except Exception:
+        out: List[str] = []
+        seen = set()
+        for c in cols or []:
+            c = str(c)
+            if not c.strip() or c in seen:
+                continue
+            if _is_legacy_col(c):
+                continue
+            seen.add(c)
+            out.append(c)
+        return out
 
 
 def clean_display_df(df: pd.DataFrame, hide_empty_columns: bool = False) -> pd.DataFrame:
@@ -249,12 +281,13 @@ def _non_empty_columns(df: pd.DataFrame, cols: List[str]) -> List[str]:
 
 
 def column_templates(all_cols: Iterable[str]) -> Dict[str, List[str]]:
-    all_cols = list(all_cols or [])
+    all_cols = _filter_legacy_columns(list(all_cols or []))
     return {
         "核心推薦欄位": ["勾選", "匯入自選", "刪除", "推薦日期", "推薦時間", "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦模式", "推薦等級", "推薦分數", "股神決策分數", "買點分級", "最新價", "推薦價格"],
         "操作與倉位欄位": ["v21操作優先順序", "追蹤分級", "今日操作建議", "建議動作", "股神建議動作", "股神信心", "進場時機", "股神進場區間", "等待條件", "建議倉位%", "動態建議倉位%", "第一筆進場%", "分批策略"],
         "風控停利停損欄位": ["高風險狀態", "品質分級", "品質建議", "風險說明", "停損價", "停損參考", "停利目標", "賣出目標1", "賣出目標2", "最大回撤%", "風險報酬比", "R/R", "等待條件"],
-        "族群大盤欄位": ["類別", "產業", "族群資金說明", "族群策略建議", "族群資金流分數", "族群資金流說明", "族群輪動狀態", "大盤情境分析", "大盤情境調權說明", "大盤策略建議", "大盤風控", "大盤交易時段"],
+        "族群大盤欄位": ["類別", "產業", "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數", "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式", "大盤情境分析", "大盤策略建議", "大盤風控", "大盤交易時段"],
+        "統一有效欄位": list(V135_EFFECTIVE_COLUMNS),
         "績效追蹤欄位": ["推薦後1日%", "推薦後1日勝率", "推薦後3日%", "推薦後3日勝率", "推薦後5日%", "推薦後5日勝率", "推薦後10日%", "推薦後10日勝率", "推薦後20日%", "推薦後20日勝率", "最大漲幅%", "最大回撤%", "目前績效%"],
         "全部欄位": all_cols,
     }
@@ -264,9 +297,12 @@ def get_table_columns(table_key: str, default_cols: Iterable[str], df: Optional[
     cfg = load_column_config()
     prof = cfg.get("profiles", {}).get(table_key, {}) if isinstance(cfg.get("profiles", {}), dict) else {}
     saved = prof.get("columns", []) if isinstance(prof, dict) else []
-    candidates = list(df.columns) if isinstance(df, pd.DataFrame) else list(default_cols or [])
+    raw_candidates = list(df.columns) if isinstance(df, pd.DataFrame) else list(default_cols or [])
+    candidates = _filter_legacy_columns(raw_candidates)
+    default_cols = _filter_legacy_columns(default_cols or candidates)
     if saved:
-        cols = [c for c in saved if c in candidates]
+        # V136：舊設定裡保存過的 Vxxx 版本欄位自動移除，避免每版新增欄位越來越多。
+        cols = [c for c in _filter_legacy_columns(saved) if c in candidates]
         for c in default_cols or []:
             if c in candidates and c not in cols:
                 cols.append(c)
@@ -310,6 +346,40 @@ def _parse_column_text(raw: str, candidates: List[str]) -> List[str]:
     return valid
 
 
+
+
+def _sync_column_order_text(text_key: str, current: List[str], candidates: List[str]) -> None:
+    """v130：欄位管理文字框自動同步新欄位。
+
+    舊版問題：使用者保存過欄位順序後，後續 07/08/10/14 新增欄位
+    雖然表格候選欄位已出現，但 text_area 仍保留舊 session 內容，
+    看起來像「欄位順序沒有同步新增欄位」。
+
+    修正方式：保留使用者既有排序，把目前應顯示但文字框缺少的新欄位
+    自動補到最後；不會打亂已保存順序。
+    """
+    cand = list(dict.fromkeys([str(c) for c in candidates if str(c).strip()]))
+    cur = [str(c) for c in current if str(c).strip() and str(c) in cand]
+    raw = st.session_state.get(text_key, "")
+
+    if raw is None or not str(raw).strip():
+        st.session_state[text_key] = "\n".join(cur)
+        return
+
+    parsed = _parse_column_text(str(raw), cand)
+    if not parsed:
+        st.session_state[text_key] = "\n".join(cur)
+        return
+
+    # 保留使用者文字框既有順序，補上 current 中已顯示但未列入文字框的欄位。
+    merged = [c for c in parsed if c in cand]
+    seen = set(merged)
+    missing_from_current = [c for c in cur if c not in seen]
+    if missing_from_current:
+        merged.extend(missing_from_current)
+        st.session_state[text_key] = "\n".join(merged)
+
+
 def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, default_cols: Optional[Iterable[str]] = None) -> List[str]:
     """v48：統一操作樣式，但各模組 / 各主表獨立保存欄位設定。
 
@@ -323,8 +393,8 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
         return []
 
     clean = clean_display_df(df, hide_empty_columns=False)
-    candidates = list(clean.columns)
-    default_cols = list(default_cols or candidates)
+    candidates = _filter_legacy_columns(list(clean.columns))
+    default_cols = _filter_legacy_columns(list(default_cols or candidates))
     current = get_table_columns(table_key, default_cols, clean)
     current = [c for c in current if c in candidates] or candidates[:]
 
@@ -344,8 +414,8 @@ def render_column_manager(table_key: str, table_label: str, df: pd.DataFrame, de
         st.caption("與股神管理中心相同方式：欄位順序一行一欄；輸入過程不運算，只有按『套用』才解析、重排與保存。")
         st.caption(f"目前顯示 **{len(current)}** 欄 / 可用 **{len(candidates)}** 欄。")
 
-        if text_key not in st.session_state:
-            st.session_state[text_key] = "\n".join(current)
+        # v130：舊欄位順序文字框若缺少新版本欄位，自動補到最後。
+        _sync_column_order_text(text_key, current, candidates)
 
         templates = column_templates(candidates)
         with st.form(key=f"{safe_key}_column_form_v47", clear_on_submit=False):
@@ -1002,58 +1072,19 @@ def install_light_checkbox_patch(page_key: str = "global") -> None:
     st._godpick_light_checkbox_patch_v116 = True
 
 
-def _call_streamlit_dataframe_bypass_safe(data: Any, **kwargs: Any) -> Any:
-    """V116 hotfix: safely render dataframe even when global table patch is not installed.
-
-    Earlier managed_dataframe always passed _godpick_bypass=True. That keyword is only
-    understood by our patched st.dataframe wrapper. On pages where the global patch is
-    disabled/uninstalled for performance, Streamlit's native dataframe receives the
-    private keyword and raises: rowMixin.dataframe() got an unexpected keyword argument.
-    """
-    try:
-        if getattr(st, "_godpick_table_patch_v105", False):
-            kw = dict(kwargs)
-            kw["_godpick_bypass"] = True
-            return st.dataframe(data, **kw)
-    except Exception:
-        pass
-    # Prefer the saved original renderer when available; otherwise use current native renderer.
-    renderer = getattr(st, "_godpick_original_dataframe_v105", None) or st.dataframe
-    clean_kwargs = dict(kwargs)
-    clean_kwargs.pop("_godpick_bypass", None)
-    return renderer(data, **clean_kwargs)
-
-
-def _call_streamlit_data_editor_bypass_safe(data: Any, **kwargs: Any) -> Any:
-    """V116 hotfix companion for st.data_editor private bypass keyword."""
-    try:
-        if getattr(st, "_godpick_table_patch_v105", False) or getattr(st, "_godpick_light_checkbox_patch_v116", False):
-            kw = dict(kwargs)
-            kw["_godpick_bypass"] = True
-            return st.data_editor(data, **kw)
-    except Exception:
-        pass
-    renderer = (
-        getattr(st, "_godpick_original_data_editor_v105", None)
-        or getattr(st, "_godpick_original_data_editor_v116_light", None)
-        or st.data_editor
-    )
-    clean_kwargs = dict(kwargs)
-    clean_kwargs.pop("_godpick_bypass", None)
-    return renderer(data, **clean_kwargs)
-
-
 def managed_dataframe(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> None:
     render_table_view_manager(table_key, table_label, df)
     filtered = apply_table_view(df, table_key)
     cols = render_column_manager(table_key, table_label, filtered, default_cols or (list(filtered.columns) if isinstance(filtered, pd.DataFrame) else []))
     show = apply_columns(filtered, table_key, cols or (list(filtered.columns) if isinstance(filtered, pd.DataFrame) else []), hide_empty_columns=hide_empty_columns)
-    return _call_streamlit_dataframe_bypass_safe(show, **kwargs)
+    kwargs["_godpick_bypass"] = True
+    return st.dataframe(show, **kwargs)
 
 
 def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, default_cols: Optional[Iterable[str]] = None, hide_empty_columns: bool = False, **kwargs: Any) -> Any:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return _call_streamlit_data_editor_bypass_safe(df, **kwargs)
+        kwargs["_godpick_bypass"] = True
+        return st.data_editor(df, **kwargs)
     original = df.copy()
     render_table_view_manager(table_key, table_label, original)
     filtered = apply_table_view(original, table_key)
@@ -1062,6 +1093,7 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
     cfg = kwargs.get("column_config")
     if isinstance(cfg, dict):
         kwargs["column_config"] = {k: v for k, v in cfg.items() if k in show.columns}
+    kwargs["_godpick_bypass"] = True
 
     if _has_checkbox_like_column(show):
         safe_key = _key_safe(table_key)
@@ -1070,7 +1102,7 @@ def managed_data_editor(df: pd.DataFrame, table_key: str, table_label: str, defa
         show = render_checkbox_bulk_controls(table_key, table_label, show)
         try:
             with st.form(form_key, clear_on_submit=False):
-                edited = _call_streamlit_data_editor_bypass_safe(show, **kwargs)
+                edited = st.data_editor(show, **kwargs)
                 submitted = st.form_submit_button("✅ 套用勾選 / 編輯結果", type="primary", use_container_width=True)
             if submitted and isinstance(edited, pd.DataFrame):
                 merged = _merge_edited_subset(original, edited)
