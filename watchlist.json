@@ -1693,38 +1693,33 @@
     {
       "code": "2364",
       "name": "倫飛",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "2404",
       "name": "漢唐",
-      "market": "上市",
-      "category": "半導體設備材料"
+      "market": "上市"
     },
     {
       "code": "3003",
       "name": "健和興",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "3005",
       "name": "神基",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "4961",
       "name": "天鈺",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "6411",
       "name": "晶焱",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0520": []
 }
