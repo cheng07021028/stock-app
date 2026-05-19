@@ -288,14 +288,14 @@
       "面板",
       "高速傳輸"
     ],
-    "min_total_score": 75.0,
+    "min_total_score": 70.0,
     "min_signal_score": -2.0,
-    "min_prelaunch_score": 50.0,
-    "min_trade_score": 50.0,
+    "min_prelaunch_score": 45.0,
+    "min_trade_score": 45.0,
     "recommend_mode": "飆股模式",
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-05-19 03:22:19",
+  "updated_at": "2026-05-19 03:25:07",
   "version": "godpick_v5_persistent_settings"
 }
