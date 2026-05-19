@@ -45,14 +45,20 @@ try:
         UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
         UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
         normalize_godpick_dataframe,
+        effective_display_dataframe,
         unified_display_columns,
+        filter_effective_columns,
+        V136_EFFECTIVE_REQUIRED_COLUMNS,
         dedupe_keep_order as shared_dedupe_keep_order,
     )
 except Exception:
     UNIFIED_RECOMMEND_DISPLAY_COLUMNS = []
     SHARED_UNIFIED_MANAGEMENT_COLUMNS = []
     normalize_godpick_dataframe = None
+    effective_display_dataframe = None
     unified_display_columns = None
+    filter_effective_columns = None
+    V136_EFFECTIVE_REQUIRED_COLUMNS = []
     shared_dedupe_keep_order = None
 
 
@@ -120,19 +126,27 @@ NIGHT_NUMERIC_COLUMNS = [
 # V119：同步 07 V118 實戰品質防呆欄位到 10_推薦清單。
 # 用途：保留 07 因低量、無趨勢而降分的原因，方便隔日追蹤與人工判斷。
 PRACTICAL_QUALITY_COLUMNS_V119 = [
-    "V132主流族群資格", "V132熱門族群池", "V132族群實戰分", "V132非主流限制", "V132冷門封鎖", "V132顯示分區", "V132主要表顯示", "V132輸出排序", "V132股神實戰建議", "V132主流族群版", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序", "V127候補排序分", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V127主推薦說明", "V126推薦層級", "原始推薦總分", "實戰調整推薦分", "V126實戰排序分", "V126推薦層級排序", "股神主推薦狀態", "V126股神實戰建議", "V126主推薦說明", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議",
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
+    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名",
+    "族群資金流分數", "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式",
+    "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本",
+    "原始推薦總分", "實戰調整推薦分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因",
     "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
     "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
     "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 PRACTICAL_QUALITY_NUMERIC_COLUMNS_V119 = [
-    "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
-    "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
+    "股神輸出排序", "候補排序分", "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 PRACTICAL_QUALITY_DISPLAY_COLUMNS_V119 = [
-    "推薦日期", "股票代號", "股票名稱", "推薦總分", "夜間股神總分", "隔日進場分數",
-    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
-    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "推薦日期", "推薦時間", "股票代號", "股票名稱", "類別", "產業",
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
+    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數",
+    "成交額百萬", "20日均成交額百萬", "流動性等級",
+    "推薦總分", "夜間股神總分", "隔日進場分數", "實戰品質分", "量能狀態", "趨勢狀態",
+    "實戰降分", "實戰品質提醒", "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
     "進場型態_隔日", "隔日建議動作", "資料完整度", "官方資料完整度",
 ]
 GOD_DECISION_V10_LINK_VERSION = "recommend_list_v10_entry_decision_v1_20260428"
@@ -2700,7 +2714,7 @@ def main():
         chips=["日期篩選", "批次刪除", "推薦分數", "推薦後績效", "GitHub 同步"],
     )
 
-    st.caption(f"推薦清單 V127 候補分級追蹤同步版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
+    st.caption(f"推薦清單 V136 統一有效欄位版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []
@@ -2909,6 +2923,8 @@ def main():
     render_pro_section("推薦清單明細")
     # v15 欄位統一：推薦清單明細使用與 7/8/12 一致的欄位順序。
     show_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(filtered_df.columns)) if c in filtered_df.columns]
+    if callable(filter_effective_columns):
+        show_cols = filter_effective_columns(show_cols)
     if not show_cols:
         show_cols = list(filtered_df.columns)
     existing_cols = []

@@ -1036,3 +1036,60 @@ except Exception:
 
 if __name__ == "__main__":
     main()
+
+
+# =========================================================
+# V136｜全模組欄位統一檢查
+# =========================================================
+try:
+    from godpick_column_schema import (
+        is_legacy_version_column as _v136_is_legacy_col,
+        V136_EFFECTIVE_REQUIRED_COLUMNS as _v136_effective_required,
+        normalize_godpick_dataframe as _v136_normalize_df,
+    )
+    import json as _v136_json
+    import pandas as _v136_pd
+
+    st.markdown("---")
+    st.markdown("### V136｜全模組欄位統一檢查")
+    st.caption("檢查 07 / 10 / 8 / 14 / 17 是否已改用統一有效欄位；V127～V134 版本欄位只保留在原始資料，不再作為預設顯示與分析欄位。")
+
+    _v136_files = [
+        ("07 最新推薦", BASE_DIR / "godpick_latest_recommendations.json"),
+        ("10 推薦清單", BASE_DIR / "godpick_recommend_list.json"),
+        ("8 推薦紀錄", BASE_DIR / "godpick_records.json"),
+    ]
+    _v136_rows = []
+    for _label, _path in _v136_files:
+        try:
+            if not _path.exists():
+                _v136_rows.append({"模組": _label, "檔案": _path.name, "狀態": "缺檔", "有效欄位數": 0, "版本欄位數": 0, "建議": "先執行對應模組產生資料"})
+                continue
+            _obj = _v136_json.loads(_path.read_text(encoding="utf-8-sig"))
+            if isinstance(_obj, dict):
+                _records = _obj.get("records") or _obj.get("data") or _obj.get("items") or _obj.get("recommendations") or []
+            else:
+                _records = _obj if isinstance(_obj, list) else []
+            _df = _v136_pd.DataFrame([r for r in _records if isinstance(r, dict)])
+            if _df.empty:
+                _v136_rows.append({"模組": _label, "檔案": _path.name, "狀態": "無資料", "有效欄位數": 0, "版本欄位數": 0, "建議": "資料為空，先重新推薦或匯入紀錄"})
+                continue
+            _norm = _v136_normalize_df(_df, add_missing=False) if callable(_v136_normalize_df) else _df
+            _effective_count = len([c for c in (_v136_effective_required or []) if c in _norm.columns])
+            _legacy_count = len([c for c in _norm.columns if _v136_is_legacy_col(c)])
+            _v136_rows.append({
+                "模組": _label,
+                "檔案": _path.name,
+                "狀態": "OK" if _effective_count >= 10 else "注意",
+                "有效欄位數": _effective_count,
+                "版本欄位數": _legacy_count,
+                "建議": "OK：畫面預設應讀統一有效欄位" if _effective_count >= 10 else "請覆蓋 V136 修改檔並重新產生資料",
+            })
+        except Exception as _exc:
+            _v136_rows.append({"模組": _label, "檔案": _path.name, "狀態": "異常", "有效欄位數": 0, "版本欄位數": 0, "建議": str(_exc)})
+    st.dataframe(_v136_pd.DataFrame(_v136_rows), use_container_width=True, hide_index=True)
+except Exception as _v136_exc:
+    try:
+        st.caption(f"V136 欄位統一檢查略過：{_v136_exc}")
+    except Exception:
+        pass

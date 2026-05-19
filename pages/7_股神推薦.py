@@ -113,7 +113,7 @@ OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
 NIGHT_NEXT_ENTRY_VERSION = "night_next_entry_v109_official_factor_cache_20260513"
-PAGE_TITLE = "股神推薦 V132｜主流族群優先實戰版"
+PAGE_TITLE = "股神推薦 V136｜全模組欄位統一版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -7750,7 +7750,10 @@ def _render_v125_recommend_tier_panel(rec_df: pd.DataFrame | None) -> None:
         c3.metric("B級候補", b_n)
         c4.metric("C級候補", c_n)
         c5.metric("觀察等待", obs_n)
-        if "V132顯示分區" in rec_df.columns:
+        if "股神推薦層級" in rec_df.columns:
+            levels = rec_df["股神推薦層級"].astype(str)
+            st.caption("V135 統一推薦分區：" + "｜".join([f"{k} {int((levels == k).sum())}" for k in levels.dropna().unique()[:8] if str(k).strip()]))
+        elif "V132顯示分區" in rec_df.columns:
             v132s = rec_df["V132顯示分區"].astype(str)
             st.caption("V132 主流族群輸出：" + "｜".join([f"{k} {int((v132s == k).sum())}" for k in ["股神主推薦", "A級候補｜主流優先", "B級候補｜主流等確認", "主流觀察股", "冷門/非主流觀察區"] if int((v132s == k).sum()) > 0]))
         elif "V129顯示分區" in rec_df.columns:
@@ -8251,8 +8254,522 @@ def _filter_v132_mainstream_primary_output(df: pd.DataFrame | None, *, max_when_
         return primary
     return primary.head(max_when_no_main).reset_index(drop=True)
 
+
+# =========================================================
+# V133：真正熱門族群 + 成交金額門檻；主表不再顯示低量觀察股
+# =========================================================
+V133_TRUE_HOT_THEME_KEYWORDS = [
+    "AI", "人工智慧", "伺服器", "資料中心", "GPU", "HPC", "高速運算", "雲端",
+    "CoWoS", "HBM", "ASIC", "矽光子", "CPO", "800G", "光收發", "光通訊",
+    "PCB", "CCL", "ABF", "載板", "高頻", "高速傳輸", "銅箔",
+    "散熱", "水冷", "液冷", "電源", "UPS", "機器人", "自動化", "軍工", "無人機", "航太",
+    "半導體設備", "設備材料", "先進封裝", "IC設計", "矽智財", "IP", "SoC",
+]
+V133_BROAD_ONLY_INDUSTRY_KEYWORDS = [
+    "半導體業", "半導體", "電腦及週邊", "電腦週邊", "電子零組件", "IC設計", "通信網路", "其他電子",
+]
+
+
+def _apply_v133_true_hot_liquidity_gate(df: pd.DataFrame | None) -> pd.DataFrame:
+    """V133：修正 V132 過度寬鬆的熱門族群判斷。
+
+    主要修正：
+    1. 不能只因為產業是「半導體 / 電腦週邊 / 電子零組件」就列為核心熱門族群。
+    2. 必須具備「真正熱門題材」或「族群資金明顯轉強」才可進主表。
+    3. 成交額 / 20日均量不足時，不得進主表；只能到冷門觀察區。
+    4. 沒有 A/B 級候補時，不再顯示 C 級或主流觀察股湊數。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    out = _apply_v132_mainstream_sector_guard(df).copy()
+
+    def num(col: str, default: float = 0.0) -> pd.Series:
+        if col in out.columns:
+            return pd.to_numeric(out[col].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(default)
+        return pd.Series([default] * len(out), index=out.index, dtype="float64")
+
+    def text(col: str) -> pd.Series:
+        if col in out.columns:
+            return out[col].astype(str).fillna("")
+        return pd.Series([""] * len(out), index=out.index, dtype="object")
+
+    latest_price = num("最新價", num("推薦價格", 0))
+    latest_vol = num("最新成交量", 0)
+    avg20_vol = num("20日均量", 0)
+    avg5_vol = num("5日均量", 0)
+    turnover_m = (latest_price * latest_vol / 1_000_000).replace([float("inf"), float("-inf")], 0).fillna(0)
+    avg20_turnover_m = (latest_price * avg20_vol / 1_000_000).replace([float("inf"), float("-inf")], 0).fillna(0)
+
+    entry = num("隔日進場分數", 0)
+    trade = num("交易可行分數", 0)
+    quality = num("實戰品質分", 0)
+    group_flow = num("族群資金流分數", 0)
+    group_heat = num("類股熱度分數", 0)
+    group_vol = num("同族群平均量能分", 0)
+    group_strong_ratio = num("同族群強勢比例", 0)
+    cand_score = num("V127候補排序分", num("V126實戰排序分", 0))
+    rec_score = num("推薦總分", 0)
+
+    theme_text = (
+        text("主題類別") + " " + text("推薦標籤") + " " + text("起漲摘要") + " " +
+        text("族群策略建議") + " " + text("族群資金流說明") + " " + text("推薦理由摘要") + " " + text("股神推論邏輯")
+    )
+    industry_text = text("類別") + " " + text("正式產業別") + " " + text("產業") + " " + text("股票名稱")
+    true_hot_pat = "|".join([k.replace("+", "\\+") for k in V133_TRUE_HOT_THEME_KEYWORDS])
+    broad_pat = "|".join([k.replace("+", "\\+") for k in V133_BROAD_ONLY_INDUSTRY_KEYWORDS])
+    true_hot_theme = theme_text.str.contains(true_hot_pat, case=False, regex=True, na=False)
+    broad_industry = industry_text.str.contains(broad_pat, case=False, regex=True, na=False)
+
+    # 不要只靠產業名稱；若是廣義電子/半導體，還要族群資金與量價真正轉強。
+    strong_sector_momentum = (
+        (group_flow >= 75) & (group_vol >= 68) & ((group_strong_ratio >= 45) | (group_heat >= 72)) &
+        (trade >= 60) & (quality >= 70)
+    )
+    true_mainstream = true_hot_theme | (broad_industry & strong_sector_momentum)
+
+    volume_state = text("量能狀態")
+    trend_state = text("趨勢狀態")
+    cold_by_text = volume_state.str.contains("極低量|冷門|量能不足", regex=True, na=False)
+    trend_weak = trend_state.str.contains("弱|未確認|跌破|空頭", regex=True, na=False)
+    # 台股換算：latest_vol/avg20_vol 多數來源是「股數」，100萬股約 1000 張。
+    liquid_ok = (
+        (avg20_vol >= 1_000_000) & (latest_vol >= 600_000) & (avg20_turnover_m >= 60)
+    ) | (
+        (latest_vol >= 1_500_000) & (turnover_m >= 80)
+    )
+    liquid_watch_ok = (
+        (avg20_vol >= 800_000) & (latest_vol >= 400_000) & (avg20_turnover_m >= 35)
+    ) | (turnover_m >= 60)
+    low_liquidity = (~liquid_watch_ok) | cold_by_text
+
+    bear = (text("大盤橋接狀態") + " " + text("大盤橋接風控") + " " + text("大盤策略模式")).str.contains(
+        "空頭|偏空|保守|高風險", regex=True, na=False
+    )
+
+    v133_liq_grade = []
+    v133_true_hot = []
+    v133_main_filter = []
+    v133_display = []
+    v133_show = []
+    v133_order = []
+    v133_reason = []
+    v133_advice = []
+
+    for i in out.index:
+        e = float(entry.loc[i]); t = float(trade.loc[i]); q = float(quality.loc[i])
+        gf = float(group_flow.loc[i]); gh = float(group_heat.loc[i]); gv = float(group_vol.loc[i]); gs = float(group_strong_ratio.loc[i])
+        cs = float(cand_score.loc[i]); rs = float(rec_score.loc[i])
+        liq = bool(liquid_ok.loc[i]); liq_watch = bool(liquid_watch_ok.loc[i])
+        th = bool(true_hot_theme.loc[i]); br = bool(broad_industry.loc[i]); stm = bool(strong_sector_momentum.loc[i])
+        tm = bool(true_mainstream.loc[i]); cold = bool(low_liquidity.loc[i]); weak = bool(trend_weak.loc[i]); is_bear = bool(bear.loc[i])
+        reasons = []
+        if not th and br:
+            reasons.append("只有廣義產業標籤，非明確熱門題材")
+        if not tm:
+            reasons.append("未達真正主流族群條件")
+        if not liq_watch:
+            reasons.append(f"流動性不足：20日均量{avg20_vol.loc[i]/1000:.0f}張／20日均成交額{avg20_turnover_m.loc[i]:.0f}百萬")
+        if e < 40:
+            reasons.append(f"隔日進場{e:.0f}<40")
+        if t < 60:
+            reasons.append(f"交易可行{t:.0f}<60")
+        if weak:
+            reasons.append("趨勢仍未確認")
+        if is_bear:
+            reasons.append("大盤偏空，僅保留真正主流且有量標的")
+
+        if liq and avg20_turnover_m.loc[i] >= 120:
+            liq_grade = "高流動性"
+        elif liq_watch:
+            liq_grade = "可交易"
+        else:
+            liq_grade = "低量/冷門"
+
+        # V133 主表只允許 A/B 品質；C級/主流觀察不再放主表。
+        if tm and liq and not weak and e >= 58 and t >= 65 and q >= 75 and ((th and gf >= 68) or stm) and not is_bear:
+            zone = "股神主推薦"
+            show = "是"
+            order = 0
+            adv = "主推薦：真正熱門族群、有量有趨勢，仍依突破/回測紀律進場。"
+        elif tm and liq and not weak and e >= 50 and t >= 62 and q >= 72 and ((th and gf >= 65) or stm):
+            zone = "A級候補｜熱門族群優先"
+            show = "是"
+            order = 1
+            adv = "A級候補：熱門題材與流動性合格，等突破/回測確認，不追高。"
+        elif tm and liq_watch and not weak and e >= 42 and t >= 60 and q >= 70 and (gf >= 70 or th or stm):
+            zone = "B級候補｜等量價確認"
+            show = "是"
+            order = 2
+            adv = "B級候補：族群與量價有雛形，仍需隔日量價確認。"
+        elif tm and liq_watch and not weak and e >= 35 and t >= 58 and q >= 68 and not is_bear:
+            zone = "高品質觀察｜不進主表"
+            show = "否"
+            order = 5
+            adv = "高品質觀察：尚未達進場條件，只追蹤不買進。"
+        elif low_liquidity.loc[i] or not tm:
+            zone = "冷門/非主流封鎖區"
+            show = "否"
+            order = 9
+            adv = "封鎖：低量、非真正主流或僅廣義產業標籤，不列股神推薦。"
+        else:
+            zone = "一般觀察等待"
+            show = "否"
+            order = 7
+            adv = "觀察等待：條件不足，不列股神推薦。"
+
+        if is_bear and zone in {"B級候補｜等量價確認", "高品質觀察｜不進主表"}:
+            show = "否"
+            if zone == "B級候補｜等量價確認" and e < 50:
+                zone = "高品質觀察｜不進主表"
+                order = 5
+                adv = "大盤偏空：不列主要推薦，等更明確量價確認。"
+
+        v133_liq_grade.append(liq_grade)
+        v133_true_hot.append("是" if tm else "否")
+        v133_main_filter.append("通過" if show == "是" else "未通過")
+        v133_display.append(zone)
+        v133_show.append(show)
+        v133_order.append(order)
+        v133_reason.append("；".join(reasons) if reasons else "V133：真正熱門族群、流動性與買點條件通過")
+        v133_advice.append(adv)
+
+    out["V133成交額百萬"] = turnover_m.round(1)
+    out["V133二十日均成交額百萬"] = avg20_turnover_m.round(1)
+    out["V133流動性等級"] = v133_liq_grade
+    out["V133真正熱門族群"] = v133_true_hot
+    out["V133主表篩選"] = v133_main_filter
+    out["V133顯示分區"] = v133_display
+    out["V133主要表顯示"] = v133_show
+    out["V133輸出排序"] = v133_order
+    out["V133限制原因"] = v133_reason
+    out["V133股神實戰建議"] = v133_advice
+    out["V133熱門流動性版"] = "V133｜真正熱門題材 + 成交金額/均量門檻；無 A/B 候補時主表可空白，不再用觀察股湊數"
+
+    # 同步覆蓋前版顯示區，讓 10/8/14 不再把觀察股當候補。
+    out["V132顯示分區"] = out["V133顯示分區"]
+    out["V132主要表顯示"] = out["V133主要表顯示"]
+    out["V132輸出排序"] = out["V133輸出排序"]
+    out["V132非主流限制"] = out["V133限制原因"]
+    out["V132股神實戰建議"] = out["V133股神實戰建議"]
+    out["V132主流族群版"] = out["V133熱門流動性版"]
+    out["V129顯示分區"] = out["V133顯示分區"]
+    out["V129主要表顯示"] = out["V133主要表顯示"]
+    out["V129精簡輸出排序"] = out["V133輸出排序"]
+    out["V129輸出限制原因"] = out["V133限制原因"]
+    out["V129股神輸出建議"] = out["V133股神實戰建議"]
+    out["V129精簡輸出版"] = out["V133熱門流動性版"]
+
+    out["V127推薦層級"] = [
+        "主推薦" if z == "股神主推薦" else (
+            "A級候補" if z.startswith("A級候補") else (
+                "B級候補" if z.startswith("B級候補") else (
+                    "觀察等待" if "觀察" in z else "排除觀察"
+                )
+            )
+        ) for z in v133_display
+    ]
+    out["V127候補等級"] = [x if "候補" in x else "" for x in out["V127推薦層級"].astype(str)]
+    order_map = {"主推薦": 0, "A級候補": 1, "B級候補": 2, "觀察等待": 4, "排除觀察": 9}
+    out["V127推薦層級排序"] = out["V127推薦層級"].map(order_map).fillna(8).astype(int)
+    out["V127冷門股壓後"] = ["是" if z in {"冷門/非主流封鎖區", "一般觀察等待"} else "否" for z in v133_display]
+    out["V127候補限制原因"] = out["V133限制原因"]
+    out["V127股神實戰建議"] = out["V133股神實戰建議"]
+    out["V127主推薦說明"] = out["V133股神實戰建議"]
+    return out
+
+
+def _filter_v133_true_hot_primary_output(df: pd.DataFrame | None, *, max_when_no_main: int = 10) -> pd.DataFrame:
+    """V133：主畫面只顯示真正主推薦與 A/B 候補；沒有就回空表。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    x = _apply_v133_true_hot_liquidity_gate(df)
+    sort_cols = [c for c in [
+        "V133輸出排序", "V127推薦層級排序", "V133二十日均成交額百萬", "V133成交額百萬",
+        "V132族群實戰分", "V127候補排序分", "V126實戰排序分", "隔日進場分數", "交易可行分數", "推薦總分"
+    ] if c in x.columns]
+    if sort_cols:
+        x = x.sort_values(sort_cols, ascending=[True] + [False] * (len(sort_cols) - 1), na_position="last").reset_index(drop=True)
+    primary = x[x.get("V133主要表顯示", pd.Series(["否"] * len(x), index=x.index)).astype(str).eq("是")].copy()
+    return primary.head(max_when_no_main).reset_index(drop=True)
+
+
+
+# =========================================================
+# V134：動態資金流熱門族群，不再使用固定熱門題材白名單
+# =========================================================
+def _apply_v134_dynamic_capital_hot_group_gate(df: pd.DataFrame | None) -> pd.DataFrame:
+    """V134：依當前推薦池與大盤環境，自動抓資金流入的熱門族群。
+
+    設計原則：
+    - 不再用固定題材白名單把 AI/半導體/PCB 等硬塞成熱門。
+    - 先用大盤橋接狀態決定保守/一般門檻。
+    - 再依「族群資金流、類股熱度、同族群量能、強勢比例、成交金額」動態找熱門族群。
+    - 沒有真正資金流族群時，主表可以空白，不用冷門股或廣義產業湊名單。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    out = _apply_v133_true_hot_liquidity_gate(df).copy()
+
+    def num(col: str, default: float = 0.0) -> pd.Series:
+        if col in out.columns:
+            return pd.to_numeric(out[col].astype(str).str.replace(',', '', regex=False).str.replace('%', '', regex=False), errors='coerce').fillna(default)
+        return pd.Series([default] * len(out), index=out.index, dtype='float64')
+
+    def text(col: str) -> pd.Series:
+        if col in out.columns:
+            return out[col].astype(str).replace('nan', '').fillna('')
+        return pd.Series([''] * len(out), index=out.index, dtype='object')
+
+    def first_nonempty(*cols: str) -> pd.Series:
+        res = pd.Series([''] * len(out), index=out.index, dtype='object')
+        for c in cols:
+            if c not in out.columns:
+                continue
+            v = text(c).str.strip()
+            mask = res.str.len().eq(0) & v.str.len().gt(0) & ~v.str.contains('nan|None|無資料', case=False, regex=True, na=False)
+            res.loc[mask] = v.loc[mask]
+        return res.replace('', '未分類')
+
+    sector_key = first_nonempty('主題類別', '類別', '正式產業別', '產業')
+    # 避免過細的雜訊標籤，將多重題材取第一段作為動態族群。
+    sector_key = sector_key.astype(str).str.replace('｜', '/', regex=False).str.replace('|', '/', regex=False)
+    sector_key = sector_key.str.split('/').str[0].str.strip().replace('', '未分類')
+
+    price = num('最新價', num('推薦價格', 0))
+    latest_vol = num('最新成交量', 0)
+    avg20_vol = num('20日均量', 0)
+    turnover_m = num('V133成交額百萬', (price * latest_vol / 1_000_000))
+    avg20_turnover_m = num('V133二十日均成交額百萬', (price * avg20_vol / 1_000_000))
+
+    entry = num('隔日進場分數', 0)
+    trade = num('交易可行分數', 0)
+    quality = num('實戰品質分', 0)
+    group_flow = num('族群資金流分數', 0)
+    group_heat = num('類股熱度分數', 0)
+    group_vol = num('同族群平均量能分', 0)
+    strong_ratio = num('同族群強勢比例', 0)
+    rel_perf = num('區間漲跌幅%', num('類股平均漲幅', 0))
+
+    market_text = text('大盤橋接狀態') + ' ' + text('大盤橋接風控') + ' ' + text('大盤策略模式')
+    is_bear = market_text.str.contains('空頭|偏空|保守|高風險', regex=True, na=False)
+    is_bull = market_text.str.contains('多頭|偏多|攻擊|風險偏低', regex=True, na=False)
+    market_mode = pd.Series(['震盪/中性'] * len(out), index=out.index, dtype='object')
+    market_mode.loc[is_bear] = '空頭/保守'
+    market_mode.loc[is_bull] = '多頭/攻擊'
+
+    tmp = pd.DataFrame({
+        '族群': sector_key,
+        '族群資金流': group_flow,
+        '類股熱度': group_heat,
+        '同族群量能': group_vol,
+        '強勢比例': strong_ratio,
+        '成交額': turnover_m,
+        '二十日均成交額': avg20_turnover_m,
+        '區間表現': rel_perf,
+        '交易可行': trade,
+        '實戰品質': quality,
+    })
+    grp = tmp.groupby('族群', dropna=False).agg(
+        樣本數=('族群', 'size'),
+        族群資金流=('族群資金流', 'mean'),
+        類股熱度=('類股熱度', 'mean'),
+        同族群量能=('同族群量能', 'mean'),
+        強勢比例=('強勢比例', 'mean'),
+        平均成交額=('成交額', 'mean'),
+        平均20日成交額=('二十日均成交額', 'mean'),
+        區間表現=('區間表現', 'mean'),
+        交易可行=('交易可行', 'mean'),
+        實戰品質=('實戰品質', 'mean'),
+    ).reset_index()
+    if grp.empty:
+        hot_map = {}
+        rank_map = {}
+        score_map = {}
+        sample_map = {}
+        basis_map = {}
+    else:
+        liq_score = (grp['平均20日成交額'].clip(lower=0, upper=250) / 250 * 100).fillna(0)
+        perf_score = (50 + grp['區間表現'].clip(lower=-10, upper=10) * 3).clip(lower=0, upper=100).fillna(50)
+        confidence = (grp['樣本數'].clip(lower=1, upper=8) / 8).fillna(0.2)
+        raw_score = (
+            grp['族群資金流'].fillna(0) * 0.27 +
+            grp['類股熱度'].fillna(0) * 0.20 +
+            grp['同族群量能'].fillna(0) * 0.16 +
+            grp['強勢比例'].fillna(0) * 0.14 +
+            liq_score * 0.13 +
+            perf_score * 0.06 +
+            grp['交易可行'].fillna(0) * 0.04
+        )
+        grp['V134動態族群分'] = (raw_score * (0.82 + confidence * 0.18)).round(2)
+        grp['V134族群流動性分'] = liq_score.round(2)
+        grp = grp.sort_values(['V134動態族群分', '平均20日成交額', '樣本數'], ascending=[False, False, False]).reset_index(drop=True)
+        grp['V134族群熱度排名'] = range(1, len(grp) + 1)
+        # 依目前資金流動態產生熱門族群池；不是固定題材名單。
+        grp['V134資金流熱門族群'] = (
+            (grp['V134族群熱度排名'] <= 8) &
+            (grp['V134動態族群分'] >= 64) &
+            (
+                (grp['平均20日成交額'] >= 45) |
+                (grp['同族群量能'] >= 62) |
+                ((grp['樣本數'] >= 3) & (grp['族群資金流'] >= 70))
+            )
+        )
+        hot_map = grp.set_index('族群')['V134資金流熱門族群'].to_dict()
+        rank_map = grp.set_index('族群')['V134族群熱度排名'].to_dict()
+        score_map = grp.set_index('族群')['V134動態族群分'].to_dict()
+        liq_map = grp.set_index('族群')['V134族群流動性分'].to_dict()
+        sample_map = grp.set_index('族群')['樣本數'].to_dict()
+        basis_map = {
+            r['族群']: f"資金流{r['族群資金流']:.0f}／熱度{r['類股熱度']:.0f}／量能{r['同族群量能']:.0f}／強勢{r['強勢比例']:.0f}／20日成交額{r['平均20日成交額']:.0f}百萬／樣本{int(r['樣本數'])}"
+            for _, r in grp.iterrows()
+        }
+
+    sector_score = sector_key.map(score_map).fillna(0).astype(float)
+    sector_liq_score = sector_key.map(locals().get('liq_map', {})).fillna(0).astype(float)
+    sector_rank = sector_key.map(rank_map).fillna(999).astype(int)
+    sector_sample = sector_key.map(sample_map).fillna(0).astype(int)
+    sector_basis = sector_key.map(basis_map).fillna('無動態族群資料')
+    dynamic_hot = sector_key.map(hot_map).fillna(False).astype(bool)
+
+    volume_state = text('量能狀態')
+    trend_state = text('趨勢狀態')
+    cold = volume_state.str.contains('極低量|冷門|量能不足', regex=True, na=False)
+    weak_trend = trend_state.str.contains('弱|未確認|跌破|空頭', regex=True, na=False)
+    liquid_ok = (avg20_turnover_m >= 60) & (turnover_m >= 45) & (latest_vol >= 500_000) & ~cold
+    liquid_watch = ((avg20_turnover_m >= 35) | (turnover_m >= 60)) & (latest_vol >= 300_000) & ~cold
+
+    v134_hot = []
+    v134_zone = []
+    v134_show = []
+    v134_order = []
+    v134_reason = []
+    v134_advice = []
+
+    for i in out.index:
+        hot = bool(dynamic_hot.loc[i]); bear = bool(is_bear.loc[i]); liq = bool(liquid_ok.loc[i]); liq_w = bool(liquid_watch.loc[i]); weak = bool(weak_trend.loc[i])
+        e = float(entry.loc[i]); t = float(trade.loc[i]); q = float(quality.loc[i]); ss = float(sector_score.loc[i])
+        reasons = []
+        if not hot:
+            reasons.append(f"非目前資金流熱門族群：族群分{ss:.0f}／排名{int(sector_rank.loc[i]) if sector_rank.loc[i] < 999 else '無'}")
+        if not liq_w:
+            reasons.append(f"流動性不足：成交額{turnover_m.loc[i]:.0f}百萬／20日均成交額{avg20_turnover_m.loc[i]:.0f}百萬")
+        if weak:
+            reasons.append('趨勢未確認')
+        if e < 40:
+            reasons.append(f'隔日進場{e:.0f}<40')
+        if t < 58:
+            reasons.append(f'交易可行{t:.0f}<58')
+        if bear:
+            reasons.append('大盤偏空，熱門族群門檻提高')
+
+        if hot and liq and not weak and e >= (60 if bear else 56) and t >= 64 and q >= 74 and ss >= (72 if bear else 68):
+            zone = '股神主推薦｜動態資金流'
+            show = '是'
+            order = 0
+            advice = '主推薦：目前資金流熱門族群，且量能/趨勢/隔日分數達標；仍須依突破或回測紀律進場。'
+        elif hot and liq and not weak and e >= (52 if bear else 48) and t >= 60 and q >= 70 and ss >= (70 if bear else 65):
+            zone = 'A級候補｜資金流熱門'
+            show = '是'
+            order = 1
+            advice = 'A級候補：目前資金流熱門族群且流動性合格，等隔日量價確認。'
+        elif hot and liq_w and not weak and e >= 40 and t >= 58 and q >= 68 and ss >= 64:
+            zone = 'B級候補｜等量價確認'
+            show = '是'
+            order = 2
+            advice = 'B級候補：資金流族群有熱度，但買點或量價仍需確認。'
+        elif hot:
+            zone = '資金流觀察｜不進主表'
+            show = '否'
+            order = 5
+            advice = '觀察：族群有資金流，但個股量價/買點不足，不列主推薦。'
+        else:
+            zone = '非資金主流/冷門封鎖'
+            show = '否'
+            order = 9
+            advice = '封鎖：非目前資金流熱門族群，不用固定題材或冷門股湊推薦。'
+
+        v134_hot.append('是' if hot else '否')
+        v134_zone.append(zone)
+        v134_show.append(show)
+        v134_order.append(order)
+        v134_reason.append('；'.join(reasons) if reasons else 'V134：動態資金流熱門族群、流動性與買點條件通過')
+        v134_advice.append(advice)
+
+    out['V134動態族群名稱'] = sector_key
+    out['V134資金流熱門族群'] = v134_hot
+    out['V134族群熱度排名'] = sector_rank
+    out['V134族群資金流分數'] = sector_score.round(2)
+    out['V134族群流動性分數'] = sector_liq_score.round(2)
+    out['V134族群樣本數'] = sector_sample
+    out['V134族群判斷依據'] = sector_basis
+    out['V134大盤趨勢模式'] = market_mode
+    out['V134主表篩選'] = ['通過' if x == '是' else '未通過' for x in v134_show]
+    out['V134顯示分區'] = v134_zone
+    out['V134主要表顯示'] = v134_show
+    out['V134輸出排序'] = v134_order
+    out['V134限制原因'] = v134_reason
+    out['V134股神實戰建議'] = v134_advice
+    out['V134動態資金流版'] = 'V134｜依大盤趨勢與目前族群資金流動態挑熱門族群；不使用固定熱門題材白名單'
+
+    # 覆蓋 V133/V132/V129 相容欄位，讓 07/10/8/14/17 串接都以動態資金流結果為準。
+    out['V133真正熱門族群'] = out['V134資金流熱門族群']
+    out['V133主表篩選'] = out['V134主表篩選']
+    out['V133顯示分區'] = out['V134顯示分區']
+    out['V133主要表顯示'] = out['V134主要表顯示']
+    out['V133輸出排序'] = out['V134輸出排序']
+    out['V133限制原因'] = out['V134限制原因']
+    out['V133股神實戰建議'] = out['V134股神實戰建議']
+    out['V133熱門流動性版'] = out['V134動態資金流版']
+    out['V132顯示分區'] = out['V134顯示分區']
+    out['V132主要表顯示'] = out['V134主要表顯示']
+    out['V132輸出排序'] = out['V134輸出排序']
+    out['V132非主流限制'] = out['V134限制原因']
+    out['V132股神實戰建議'] = out['V134股神實戰建議']
+    out['V129顯示分區'] = out['V134顯示分區']
+    out['V129主要表顯示'] = out['V134主要表顯示']
+    out['V129精簡輸出排序'] = out['V134輸出排序']
+    out['V129輸出限制原因'] = out['V134限制原因']
+    out['V129股神輸出建議'] = out['V134股神實戰建議']
+
+    out['V127推薦層級'] = [
+        '主推薦' if z.startswith('股神主推薦') else (
+            'A級候補' if z.startswith('A級候補') else (
+                'B級候補' if z.startswith('B級候補') else (
+                    '觀察等待' if '觀察' in z else '排除觀察'
+                )
+            )
+        ) for z in v134_zone
+    ]
+    out['V127候補等級'] = [x if '候補' in x else '' for x in out['V127推薦層級'].astype(str)]
+    order_map = {'主推薦': 0, 'A級候補': 1, 'B級候補': 2, '觀察等待': 4, '排除觀察': 9}
+    out['V127推薦層級排序'] = out['V127推薦層級'].map(order_map).fillna(8).astype(int)
+    out['V127冷門股壓後'] = ['否' if z in {'股神主推薦｜動態資金流', 'A級候補｜資金流熱門', 'B級候補｜等量價確認'} else '是' for z in v134_zone]
+    out['V127候補限制原因'] = out['V134限制原因']
+    out['V127股神實戰建議'] = out['V134股神實戰建議']
+    out['V127主推薦說明'] = out['V134股神實戰建議']
+    return out
+
+
+def _filter_v134_dynamic_hot_primary_output(df: pd.DataFrame | None, *, max_when_no_main: int = 10) -> pd.DataFrame:
+    """V134：主畫面只顯示動態資金流主推薦/A/B 候補；沒有就回空表。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    x = _apply_v134_dynamic_capital_hot_group_gate(df)
+    sort_cols = [c for c in [
+        'V134輸出排序', 'V127推薦層級排序', 'V134族群資金流分數', 'V134族群流動性分數',
+        'V133二十日均成交額百萬', 'V133成交額百萬', 'V127候補排序分', 'V126實戰排序分',
+        '隔日進場分數', '交易可行分數', '推薦總分'
+    ] if c in x.columns]
+    if sort_cols:
+        x = x.sort_values(sort_cols, ascending=[True] + [False] * (len(sort_cols) - 1), na_position='last').reset_index(drop=True)
+    primary = x[x.get('V134主要表顯示', pd.Series(['否'] * len(x), index=x.index)).astype(str).eq('是')].copy()
+    return primary.head(max_when_no_main).reset_index(drop=True)
+
+def _v135_is_legacy_version_col(c: str) -> bool:
+    return str(c).startswith(tuple(f"V{i}" for i in range(122, 135)))
+
 def _v128_force_front_columns(cols: list[str], available_cols: list[str]) -> list[str]:
-    """v131：尊重使用者在欄位管理中的實際排序。
+    """v135：尊重使用者排序，並預設隱藏歷代 Vxxx 欄位。
 
     v128/v129 曾為了讓新欄位一定看得到，強制把 V127~V129 欄位推到最前面；
     但這會覆蓋「完整推薦表欄位管理」中使用者手動移動欄位的位置。
@@ -8262,7 +8779,7 @@ def _v128_force_front_columns(cols: list[str], available_cols: list[str]) -> lis
     - 新增但尚未進入設定的欄位：只補到最後。
     - 不再把 V129 / V128 / V127 欄位強制置頂。
     """
-    available = [c for c in available_cols if c]
+    available = [c for c in available_cols if c and not _v135_is_legacy_version_col(c)]
     ordered = []
     seen = set()
     for c in cols or []:
@@ -8650,7 +9167,7 @@ def _build_recommend_df(
     try:
         base_df = _apply_v122_practical_godpick_gate(base_df)
         base_df = _apply_v129_compact_output_tags(base_df)
-        base_df = _apply_v132_mainstream_sector_guard(base_df)
+        base_df = _apply_v134_dynamic_capital_hot_group_gate(base_df)
     except Exception as v122_err:
         base_df["主推薦資格"] = "待確認"
         base_df["主推薦不合格原因"] = f"V122/V129實戰主推薦檢查失敗：{v122_err}"
@@ -8693,7 +9210,7 @@ def _build_recommend_df(
     # V129：不要在無主推薦時硬湊一大串候補。
     # 主畫面只顯示主推薦 / A-B 候補 / 少數高品質觀察；冷門低量與低隔日分放入觀察區，不干擾判斷。
     if "主推薦資格" in base_df.columns or "V127推薦層級" in base_df.columns:
-        final_df = _filter_v132_mainstream_primary_output(base_df, max_when_no_main=12)
+        final_df = _filter_v134_dynamic_hot_primary_output(base_df, max_when_no_main=10)
         if final_df.empty:
             # V132：沒有主流族群與量價條件時，不硬湊冷門股；保留空表與警示。
             final_df = base_df.iloc[0:0].copy()
@@ -10468,12 +10985,12 @@ def main():
     # V128：標準化後再次確認 V127 分流欄位，避免欄位管理或舊快取造成匯出缺欄。
     rec_df = _ensure_v128_v127_runtime_columns(rec_df, source="main_after_normalize")
     try:
-        rec_df = _apply_v132_mainstream_sector_guard(rec_df)
+        rec_df = _apply_v134_dynamic_capital_hot_group_gate(rec_df)
     except Exception:
         pass
     hot_pick_df = _ensure_v128_v127_runtime_columns(hot_pick_df, source="hot_after_normalize") if isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty else hot_pick_df
     try:
-        hot_pick_df = _apply_v132_mainstream_sector_guard(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty else hot_pick_df
+        hot_pick_df = _apply_v134_dynamic_capital_hot_group_gate(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty else hot_pick_df
     except Exception:
         pass
     st.session_state[_k("rec_df_store")] = rec_df.copy()
@@ -11183,7 +11700,7 @@ def main():
             export_target_df = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()
             export_target_df = _ensure_v128_v127_runtime_columns(export_target_df, source="excel_export_full_table")
             try:
-                export_target_df = _apply_v132_mainstream_sector_guard(export_target_df)
+                export_target_df = _apply_v134_dynamic_capital_hot_group_gate(export_target_df)
             except Exception:
                 pass
             # V131：Excel 匯出同樣尊重完整推薦表欄位管理順序，不再把 V129 等欄位強制移到前面。

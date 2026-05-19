@@ -58,14 +58,20 @@ try:
         UNIFIED_RECOMMEND_DISPLAY_COLUMNS,
         UNIFIED_MANAGEMENT_COLUMNS as SHARED_UNIFIED_MANAGEMENT_COLUMNS,
         normalize_godpick_dataframe,
+        effective_display_dataframe,
         unified_display_columns,
+        filter_effective_columns,
+        V136_EFFECTIVE_REQUIRED_COLUMNS,
         dedupe_keep_order as shared_dedupe_keep_order,
     )
 except Exception:
     UNIFIED_RECOMMEND_DISPLAY_COLUMNS = []
     SHARED_UNIFIED_MANAGEMENT_COLUMNS = []
     normalize_godpick_dataframe = None
+    effective_display_dataframe = None
     unified_display_columns = None
+    filter_effective_columns = None
+    V136_EFFECTIVE_REQUIRED_COLUMNS = []
     shared_dedupe_keep_order = None
 
 from utils import (
@@ -788,16 +794,25 @@ for _v110_c in OFFICIAL_FACTOR_COLUMNS_V110:
 # >>> V120_REAL_QUALITY_RECORD_SYNC
 # V120：同步 07/V118 實戰品質防呆欄位到 8_股神推薦紀錄，並提供品質分層準確率分析。
 V120_QUALITY_NUMERIC_FIELDS = [
-    "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分", "最新成交量", "5日均量", "20日均量", "均量比",
-    "收盤距MA20%", "收盤距MA60%", "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
+    "股神輸出排序", "候補排序分", "主推薦排序分", "實戰主推薦分", "實戰品質分", "實戰降分",
+    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
+    "量能啟動分", "均線轉強分", "動能翻多分", "突破準備分", "支撐防守分",
 ]
 V120_QUALITY_TEXT_FIELDS = [
-    "V132主流族群資格", "V132熱門族群池", "V132族群實戰分", "V132非主流限制", "V132冷門封鎖", "V132顯示分區", "V132主要表顯示", "V132輸出排序", "V132股神實戰建議", "V132主流族群版", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序", "V127候補排序分", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V127主推薦說明", "V125推薦層級", "原始推薦總分", "實戰調整推薦分", "V126實戰排序分", "V125推薦層級排序", "股神主推薦狀態", "V125股神實戰建議", "V125主推薦說明", "主推薦不合格原因", "實戰分區", "實戰排除原因", "V122股神實戰建議", "V123推薦層級", "V123推薦層級排序", "V123股神實戰建議",
-    "量能狀態", "趨勢狀態", "實戰品質提醒",
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
+    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名",
+    "族群資金流分數", "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式",
+    "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本",
+    "原始推薦總分", "實戰調整推薦分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因",
+    "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
 ]
 V120_QUALITY_COLUMNS = V120_QUALITY_NUMERIC_FIELDS + V120_QUALITY_TEXT_FIELDS
 V120_QUALITY_DISPLAY_COLS = [
-    "推薦日期", "股票代號", "股票名稱", "V132主流族群資格", "V132熱門族群池", "V132族群實戰分", "V132非主流限制", "V132冷門封鎖", "V132顯示分區", "V132主要表顯示", "V132輸出排序", "V132股神實戰建議", "V132主流族群版", "V129顯示分區", "V129主要表顯示", "V129精簡輸出排序", "V129冷門觀察區", "V129輸出限制原因", "V129股神輸出建議", "V129精簡輸出版", "主推薦資格", "V127推薦層級", "V127候補等級", "V127推薦層級排序", "V127候補排序分", "V127候補限制原因", "V127冷門股壓後", "V127股神實戰建議", "V127主推薦說明", "V125推薦層級", "V125推薦層級排序", "股神主推薦狀態", "V125股神實戰建議", "V125主推薦說明", "V126實戰排序分", "主推薦排序分", "實戰主推薦分", "主推薦不合格原因", "推薦總分", "夜間股神總分", "隔日進場分數",
+    "推薦日期", "推薦時間", "股票代號", "股票名稱", "類別", "產業",
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
+    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數", "族群流動性分數",
+    "成交額百萬", "20日均成交額百萬", "流動性等級", "大盤趨勢模式",
+    "推薦總分", "原始推薦總分", "實戰調整推薦分", "夜間股神總分", "隔日進場分數",
     "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
     "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
     "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "命中結果", "達標確認狀態",
@@ -1693,6 +1708,8 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # v73：GODPICK_RECORD_COLUMNS 內歷史整合後有重複欄名，回傳前統一去重，避免 data_editor / arrow 顯示異常。
     ordered_cols = _dedupe_keep_order_v73([c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or GODPICK_RECORD_COLUMNS) if c in x.columns] + [c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
+    if callable(filter_effective_columns):
+        ordered_cols = filter_effective_columns(ordered_cols)
     x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
     return x[ordered_cols].copy()
 
@@ -5251,7 +5268,7 @@ def main():
     with st.expander("🏛️ V110 官方因子紀錄追蹤", expanded=False):
         _render_v110_official_factor_record_panel(live_df.copy())
 
-    with st.expander("🧪 V127 主推薦與候補分級品質紀錄 / 準確率分析", expanded=False):
+    with st.expander("🧪 統一欄位｜實戰品質紀錄 / 準確率分析", expanded=False):
         _render_v120_quality_accuracy_panel(live_df.copy())
 
     tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
