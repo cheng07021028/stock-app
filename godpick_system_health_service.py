@@ -20,12 +20,6 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-try:
-    from godpick_column_schema import V136_EFFECTIVE_REQUIRED_COLUMNS, filter_effective_columns
-except Exception:
-    V136_EFFECTIVE_REQUIRED_COLUMNS = []
-    filter_effective_columns = None
-
 BASE_DIR = Path(__file__).resolve().parent
 BACKUP_DIR = BASE_DIR / "backups" / "system_health"
 SCHEDULE_SETTINGS_PATH = BASE_DIR / "data" / "config" / "official_factor_schedule_settings.json"
@@ -69,15 +63,6 @@ HIT_TRACK_FIELDS = [
     "作戰命中摘要", "作戰追蹤資料源", "作戰追蹤更新時間",
 ]
 
-
-PRACTICAL_MAIN_FIELDS_V122: List[str] = [
-    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序", "候補排序分",
-    "股神實戰建議", "限制原因", "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數",
-    "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式", "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本",
-    "原始推薦總分", "實戰調整推薦分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "實戰品質提醒",
-    "最新成交量", "5日均量", "20日均量", "均量比", "收盤距MA20%", "收盤距MA60%",
-]
-
 OFFICIAL_FACTOR_FIELDS = [
     "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
     "法人籌碼官方分數", "月營收YoY%", "月營收MoM%", "累計營收YoY%",
@@ -86,10 +71,20 @@ OFFICIAL_FACTOR_FIELDS = [
     "官方因子資料狀態", "官方因子更新時間",
 ]
 
+
+V139_DYNAMIC_FIELDS = [
+    "股神推薦層級", "候補等級", "是否主要顯示", "主表篩選", "股神輸出排序",
+    "候補排序分", "股神實戰建議", "限制原因", "主表篩選說明",
+    "族群名稱", "資金流熱門族群", "族群熱度排名", "族群資金流分數",
+    "族群流動性分數", "族群樣本數", "族群判斷依據", "大盤趨勢模式",
+    "成交額百萬", "20日均成交額百萬", "流動性等級", "實戰版本",
+    "V139顯示分區", "V139主升起漲候選", "V139動態熱門族群版",
+]
+
 SCHEMA_TARGETS: dict[str, list[str]] = {
-    "godpick_latest_recommendations.json": NIGHT_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122 + list(V136_EFFECTIVE_REQUIRED_COLUMNS or []),
-    "godpick_recommend_list.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122 + list(V136_EFFECTIVE_REQUIRED_COLUMNS or []),
-    "godpick_records.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + PRACTICAL_MAIN_FIELDS_V122 + list(V136_EFFECTIVE_REQUIRED_COLUMNS or []),
+    "godpick_latest_recommendations.json": NIGHT_FIELDS + OFFICIAL_FACTOR_FIELDS + V139_DYNAMIC_FIELDS,
+    "godpick_recommend_list.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + V139_DYNAMIC_FIELDS,
+    "godpick_records.json": NIGHT_FIELDS + HIT_TRACK_FIELDS + OFFICIAL_FACTOR_FIELDS + V139_DYNAMIC_FIELDS,
 }
 
 DEFAULT_SCHEDULE_SETTINGS: dict[str, Any] = {
