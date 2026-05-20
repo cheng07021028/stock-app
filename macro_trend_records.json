@@ -3582,5 +3582,18 @@
     "twse_change_pct": -0.3852,
     "otc_change_pct": -2.7952,
     "source": "startup Yahoo batch + cache fallback"
+  },
+  {
+    "version": "v109_startup_macro_autoupdate",
+    "updated_at": "2026-05-20 22:06:03",
+    "data_date": "2026-05-20",
+    "market_score": 44.6,
+    "market_trend": "偏空",
+    "market_risk_level": "中",
+    "risk_gate": "保守選股",
+    "twse_index": 40020.82,
+    "twse_change_pct": -0.3852,
+    "otc_change_pct": -2.7952,
+    "source": "startup Yahoo batch + cache fallback"
   }
 ]
