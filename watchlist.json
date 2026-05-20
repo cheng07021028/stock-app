@@ -1727,5 +1727,168 @@
     }
   ],
   "0520": [],
-  "0521": []
+  "0521": [
+    {
+      "code": "2313",
+      "name": "華通",
+      "market": "上市",
+      "category": "PCB載板"
+    },
+    {
+      "code": "2355",
+      "name": "敬鵬",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2412",
+      "name": "中華電",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "2413",
+      "name": "環科",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2420",
+      "name": "新巨",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2458",
+      "name": "義隆",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
+      "code": "3045",
+      "name": "台灣大",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "3362",
+      "name": "先進光",
+      "market": "上櫃",
+      "category": "光電業"
+    },
+    {
+      "code": "3406",
+      "name": "玉晶光",
+      "market": "上市",
+      "category": "光學鏡頭"
+    },
+    {
+      "code": "3491",
+      "name": "昇達科",
+      "market": "上櫃",
+      "category": "通信網路業"
+    },
+    {
+      "code": "3545",
+      "name": "敦泰",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
+      "code": "3663",
+      "name": "鑫科",
+      "market": "上櫃",
+      "category": "其他電子業"
+    },
+    {
+      "code": "3704",
+      "name": "合勤控",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "5236",
+      "name": "凌陽創新",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5291",
+      "name": "邑昇",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "5309",
+      "name": "系統電",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6126",
+      "name": "信音",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6127",
+      "name": "九豪",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6189",
+      "name": "豐藝",
+      "market": "上市",
+      "category": "電子通路業"
+    },
+    {
+      "code": "6284",
+      "name": "佳邦",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6411",
+      "name": "晶焱",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6558",
+      "name": "興能高",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
+      "code": "6719",
+      "name": "力智",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "7788",
+      "name": "松川精密",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "8081",
+      "name": "致新",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "8147",
+      "name": "正淩",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "8249",
+      "name": "菱光",
+      "market": "上市",
+      "category": "電子零組件業"
+    }
+  ]
 }
