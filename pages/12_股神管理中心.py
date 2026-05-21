@@ -698,6 +698,10 @@ def _num(val: Any, default: float = 0.0) -> float:
 
 
 def _to_num(series: pd.Series, default: float = 0.0) -> pd.Series:
+    # V141：相容 DataFrame / 重複欄名回傳值。
+    if isinstance(series, pd.DataFrame):
+        tmp = _dedupe_columns_keep_first_valid(series.copy())
+        series = tmp.iloc[:, 0] if not tmp.empty else pd.Series([], dtype="object")
     return pd.to_numeric(series.astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce").fillna(default)
 
 
@@ -734,6 +738,36 @@ def _clean_text_value(v: Any) -> str:
     return str(v).strip()
 
 
+
+
+def _safe_column_series(df: pd.DataFrame, col: str, default: Any = "") -> pd.Series:
+    """V141：安全取得單一欄位 Series。
+    pandas 3.x 遇到重複欄名時 df[col] 可能回傳 DataFrame，
+    後續 .astype(...).str 會觸發 AttributeError；此函式會先合併同名欄位，
+    逐列取第一個非空值，確保回傳 Series。
+    """
+    if df is None or col not in getattr(df, "columns", []):
+        return pd.Series([default] * (0 if df is None else len(df)), index=None if df is None else df.index)
+    obj = df.loc[:, df.columns == col]
+    if isinstance(obj, pd.Series):
+        return obj
+    if getattr(obj, "shape", (0, 0))[1] == 1:
+        return obj.iloc[:, 0]
+    vals = []
+    for _, row in obj.iterrows():
+        val = default
+        for x in row.tolist():
+            if not _is_blank_value(x):
+                val = x
+                break
+        vals.append(val)
+    return pd.Series(vals, index=df.index)
+
+def _safe_numeric_series(df: pd.DataFrame, col: str, default: float = 0.0, fill: bool = False) -> pd.Series:
+    ser = _safe_column_series(df, col, default="")
+    out = pd.to_numeric(ser.astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
+    return out.fillna(default) if fill else out
+
 def _first_existing_value(row: pd.Series, cols: List[str], default: str = "") -> str:
     for c in cols:
         if c in row.index and not _is_blank_value(row.get(c)):
@@ -765,10 +799,10 @@ def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: An
     df = _dedupe_columns_keep_first_valid(df)
     if target not in df.columns:
         df[target] = default
-    cur = pd.to_numeric(df[target].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
+    cur = _safe_numeric_series(df, target, default=default if default is not None else 0.0, fill=False)
     for s in sources:
         if s in df.columns and s != target:
-            src = pd.to_numeric(df[s].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
+            src = _safe_numeric_series(df, s, default=default if default is not None else 0.0, fill=False)
             cur = cur.fillna(src)
     df[target] = cur
     return df
@@ -1034,28 +1068,17 @@ def _apply_v25_smart_backfill(out: pd.DataFrame) -> pd.DataFrame:
     """v25：補齊歷史紀錄缺失的管理欄位，只補空值，不覆蓋原本已有內容。"""
     if out is None or out.empty:
         return out
-    text_backfill_cols = [
-        "追蹤分級", "今日操作建議", "品質分級", "品質建議", "建議投入等級",
+    for col in [
+        "追蹤分級", "今日操作建議", "品質分級", "品質建議", "建議投入等級", "第一筆進場%",
         "分批策略", "第二筆加碼條件", "追高風險等級", "單檔風險等級", "族群策略建議",
         "大盤策略建議", "大盤策略模式", "大盤橋接狀態", "大盤橋接風控", "族群輪動狀態",
         "族群集中警示", "組合配置建議", "K線驗證標記", "K線檢視提示"
-    ]
-    numeric_backfill_cols = ["建議倉位%", "動態建議倉位%", "第一筆進場%"]
-
-    for col in text_backfill_cols:
+    ]:
         if col not in out.columns:
             out[col] = ""
-        # pandas 3.x 不再允許把字串寫入 int/float/bool 欄位；先統一成 object，避免 Streamlit Cloud TypeError。
-        try:
-            out[col] = out[col].astype("object")
-        except Exception:
-            out[col] = out[col].map(_clean_text_value).astype("object")
-
-    for col in numeric_backfill_cols:
+    for col in ["建議倉位%", "動態建議倉位%"]:
         if col not in out.columns:
-            out[col] = float("nan")
-        # 這幾欄後續會寫入 2.0、6.5 之類浮點倉位，必須先轉 float64；否則 pandas 3.x 會因 int 欄位 upcast 失敗而中斷。
-        out[col] = pd.to_numeric(out[col], errors="coerce").astype("float64")
+            out[col] = pd.NA
 
     for idx, row in out.iterrows():
         if _is_blank_value(row.get("單檔風險等級")):
@@ -1240,17 +1263,21 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
     try:
         if normalize_godpick_dataframe is not None:
             out = normalize_godpick_dataframe(out, add_missing=True)
+            out = _dedupe_columns_keep_first_valid(out)
     except Exception:
         pass
+    out = _dedupe_columns_keep_first_valid(out)
     for col in UNIFIED_MANAGEMENT_COLUMNS:
         if col not in out.columns:
             out[col] = pd.NA if col in NUMERIC_MANAGEMENT_COLUMNS else ""
     for col in NUMERIC_MANAGEMENT_COLUMNS:
         if col in out.columns:
-            out[col] = pd.to_numeric(out[col].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce")
-    for col in out.columns:
+            out[col] = _safe_numeric_series(out, col, default=0.0, fill=False).astype("float64")
+    out = _dedupe_columns_keep_first_valid(out)
+    for col in list(out.columns):
         if col not in NUMERIC_MANAGEMENT_COLUMNS:
-            out[col] = out[col].map(_clean_text_value).astype("object")
+            out[col] = _safe_column_series(out, col, default="").map(_clean_text_value).astype("object")
+    out = _dedupe_columns_keep_first_valid(out)
     # 若推薦時間被塞在推薦日期裡，盡量拆出 HH:MM:SS，畫面更一致。
     if "推薦日期" in out.columns:
         dt = pd.to_datetime(out["推薦日期"], errors="coerce")
