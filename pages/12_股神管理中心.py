@@ -1558,6 +1558,42 @@ def _portfolio_warnings(df: pd.DataFrame) -> List[str]:
     return warnings
 
 
+
+def _safe_management_concat(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """V142：concat 前先去除每個 DataFrame 的重複欄位，避免 pandas InvalidIndexError。"""
+    safe_frames: List[pd.DataFrame] = []
+    for frame in frames:
+        if frame is None or getattr(frame, "empty", True):
+            continue
+        try:
+            tmp = _dedupe_columns_keep_first_valid(frame.copy())
+        except Exception:
+            tmp = frame.copy()
+            try:
+                tmp = tmp.loc[:, ~tmp.columns.duplicated()].copy()
+            except Exception:
+                pass
+        try:
+            tmp = tmp.reset_index(drop=True)
+        except Exception:
+            pass
+        safe_frames.append(tmp)
+    if not safe_frames:
+        return pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
+    try:
+        out = pd.concat(safe_frames, ignore_index=True, sort=False)
+    except Exception:
+        # 最保守 fallback：逐筆轉 dict 重建，完全避開重複欄位 indexer。
+        rows: List[Dict[str, Any]] = []
+        for frame in safe_frames:
+            try:
+                frame = _dedupe_columns_keep_first_valid(frame.copy())
+                rows.extend(frame.to_dict("records"))
+            except Exception:
+                pass
+        out = pd.DataFrame(rows) if rows else pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
+    return _dedupe_columns_keep_first_valid(out)
+
 def _render_source_status(notes: List[str]) -> None:
     with st.expander("資料來源狀態", expanded=False):
         st.code("\n".join(notes) if notes else "無資料來源")
@@ -1569,7 +1605,7 @@ def render_portfolio_tab(rec_df: pd.DataFrame, hist_df: pd.DataFrame, notes: Lis
     _render_source_status(notes)
     source = st.radio("分析資料來源", ["推薦清單 / 目前追蹤", "股神推薦紀錄 / 歷史全部"], horizontal=True, key="v21_port_src")
     # v24：欄位基準用兩個資料來源的聯集，讓「推薦清單 / 目前追蹤」與「股神推薦紀錄 / 歷史全部」切換時欄位一致。
-    schema_basis = _ensure_unified_management_schema(pd.concat([rec_df, hist_df], ignore_index=True, sort=False)) if (not rec_df.empty or not hist_df.empty) else pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
+    schema_basis = _ensure_unified_management_schema(_safe_management_concat([rec_df, hist_df])) if (not rec_df.empty or not hist_df.empty) else pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
     df = rec_df.copy() if source.startswith("推薦清單") else hist_df.copy()
     df = _ensure_unified_management_schema(df)
     if df.empty:
@@ -1765,13 +1801,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("12_股神管理中心", "v48｜欄位管理免即時重算版：輸入不即時重算，套用不強制整頁重跑")
+            render_pro_hero("12_股神管理中心", "v49｜管理中心重複欄位 concat 安全版")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v48 修正：欄位管理表單模式，輸入欄位順序時不重算；按套用後不強制整頁重跑。")
+    st.caption("v49 修正：推薦清單與歷史紀錄合併前會先去除重複欄位，避免 pandas InvalidIndexError。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
