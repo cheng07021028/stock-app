@@ -13,7 +13,7 @@ from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_F
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='14_股神權重校正｜v122 實戰主推薦回饋版', layout="wide")
+st.set_page_config(page_title='14_股神權重校正｜專業績效補值版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -77,7 +77,7 @@ from godpick_weight_calibration import (
 
 
 
-APP_VERSION = "v121_quality_accuracy_feedback"
+APP_VERSION = "professional_perf_fallback"
 
 
 
@@ -352,9 +352,9 @@ def _weights_from_table(table: pd.DataFrame) -> Dict[str, int]:
 
 
 def _render_header() -> None:
-    st.title("14_股神權重校正｜v122 實戰主推薦準確率回饋版")
-    st.caption("績效回測＋命中追蹤＋分層權重＋防過擬合；已同步 07/08/10 夜間隔日股神欄位與 V101/V102 命中追蹤，不連外、不重跑推薦。")
-    st.info("核心邏輯：不只看勝率，也看平均報酬、命中率、停損率、期望值、樣本數、資料覆蓋率；夜間欄位與命中追蹤會回饋到原本 8 大權重因子，套用後 07 可直接讀取，不需要新增不相容權重名稱。")
+    st.title("14_股神權重校正｜專業績效補值版")
+    st.caption("績效回測＋命中追蹤＋分層權重＋防過擬合；自動避開全空白績效欄，優先採用實際有效績效，不連外、不重跑推薦。")
+    st.info("核心邏輯：不只看勝率，也看平均報酬、命中率、停損率、期望值、樣本數、資料覆蓋率；若尚未產生明確命中欄，會以實際報酬建立保守代理命中率，避免畫面誤顯示整片 None。")
 
 
 def _render_quality(df: pd.DataFrame, horizon: int, current_weights: Dict[str, int]) -> None:
@@ -575,7 +575,7 @@ def main() -> None:
         _render_v99_night_field_diagnostics(df)
 
     with tab8:
-        st.subheader("V104 夜間隔日股神準確率回饋")
+        st.subheader("夜間隔日股神準確率回饋")
         st.caption("讀取 10_推薦清單 V101 命中追蹤與 8_股神推薦紀錄 V102/V103 績效欄位；本頁不連外、不重新抓 K 線。")
         summary = night_accuracy_bundle.get("summary", {}) if isinstance(night_accuracy_bundle, dict) else {}
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -609,7 +609,7 @@ def main() -> None:
             st.info("目前沒有足夠的高分失敗樣本，或尚未更新命中追蹤。")
 
     with tab9:
-        st.subheader("V111 官方因子準確率回饋")
+        st.subheader("官方因子準確率回饋")
         st.caption("讀取 16_官方因子快取中心、07、10、8 已保存的法人 / 營收 / EPS / PER 欄位；本頁不連外、不更新官方網站。")
         summary = official_factor_bundle.get("summary", {}) if isinstance(official_factor_bundle, dict) else {}
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -666,7 +666,7 @@ def main() -> None:
 
 
     with tab10:
-        st.subheader("V121 實戰品質準確率回饋")
+        st.subheader("實戰品質準確率回饋")
         st.caption("讀取 07 V118、10 V119、8 V120 已保存的量能 / 趨勢 / 實戰降分欄位；本頁不連外、不重跑推薦。")
         summary = quality_bundle.get("summary", {}) if isinstance(quality_bundle, dict) else {}
         c1, c2, c3, c4, c5 = st.columns(5)

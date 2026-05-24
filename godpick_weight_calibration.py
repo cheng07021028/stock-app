@@ -376,6 +376,84 @@ def numeric_series(df: pd.DataFrame, col: Optional[str]) -> pd.Series:
         return pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
     return pd.to_numeric(df[col].map(safe_float), errors="coerce")
 
+def _valid_numeric_count(df: pd.DataFrame, col: Optional[str]) -> int:
+    """回傳指定欄位可轉成數值的有效筆數；用於避免選到存在但全空白的績效欄。"""
+    if df is None or df.empty or not col or col not in df.columns:
+        return 0
+    try:
+        return int(numeric_series(df, col).notna().sum())
+    except Exception:
+        return 0
+
+
+def _best_valid_col(df: pd.DataFrame, candidates: Iterable[str], min_count: int = 1) -> Optional[str]:
+    """從候選欄位中挑有效數值最多的欄位，而不是只挑第一個存在的欄位。"""
+    best_col: Optional[str] = None
+    best_n = 0
+    for c in candidates or []:
+        n = _valid_numeric_count(df, c)
+        if n > best_n:
+            best_col, best_n = c, n
+    return best_col if best_n >= min_count else None
+
+
+def _best_return_col(df: pd.DataFrame, horizon: int, prefer_night: bool = False) -> Optional[str]:
+    """績效欄位專用選擇器。
+
+    修正重點：有些資料表已存在「5日最高漲幅%」等欄位，但內容全是空白；
+    舊邏輯會因欄位存在而直接採用，導致畫面整片 None。
+    新邏輯改成必須有有效數值，否則自動回退到 best_perf_col，例如損益幅% / 實際報酬%。
+    """
+    if df is None or df.empty:
+        return None
+    ordered: List[str] = []
+    if prefer_night:
+        ordered.extend(NIGHT_HIT_RETURN_COLUMNS.get(horizon, []))
+    ordered.extend(PERF_COLUMNS.get(horizon, []))
+    # 同週期沒有數字時，允許使用已追蹤損益做暫行統計，避免誤判成無資料。
+    ordered.extend(PERF_FALLBACK_COLUMNS)
+    col = _best_valid_col(df, ordered)
+    if col:
+        return col
+    return best_perf_col(df, horizon)
+
+
+def _proxy_hit_series_from_return(ret: pd.Series, kind: str) -> pd.Series:
+    """當 10/8 尚未產生明確命中欄時，用績效欄建立保守代理命中率。
+
+    代理規則只供統計參考，不回寫資料：
+    - entry：報酬 > 0，視為進場後方向正確
+    - breakout：報酬 >= 3%，視為突破/續強有效
+    - target：報酬 >= 5%，視為第一壓力或短線目標達成
+    - stop：報酬 <= -5%，視為停損風險觸發
+    """
+    v = pd.to_numeric(ret, errors="coerce")
+    if kind == "stop":
+        return (v <= -5).where(v.notna()).astype("float64")
+    if kind == "target":
+        return (v >= 5).where(v.notna()).astype("float64")
+    if kind == "breakout":
+        return (v >= 3).where(v.notna()).astype("float64")
+    return (v > 0).where(v.notna()).astype("float64")
+
+
+def _bool_hit_series_or_proxy(df: pd.DataFrame, candidates: Iterable[str], ret: pd.Series, kind: str) -> Tuple[pd.Series, str]:
+    """優先使用真實命中欄；沒有有效資料時，自動改用績效代理，避免命中率全顯示 None。"""
+    s, col = _bool_hit_series(df, candidates)
+    try:
+        if pd.to_numeric(s, errors="coerce").dropna().size > 0:
+            return s, col
+    except Exception:
+        pass
+    proxy = _proxy_hit_series_from_return(ret, kind)
+    label_map = {
+        "entry": "績效代理：報酬>0",
+        "breakout": "績效代理：報酬>=3%",
+        "target": "績效代理：報酬>=5%",
+        "stop": "績效代理：報酬<=-5%",
+    }
+    return proxy, label_map.get(kind, "績效代理")
+
 
 def best_perf_col(df: pd.DataFrame, horizon: int) -> Optional[str]:
     """
@@ -1141,12 +1219,12 @@ def _group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int = 5, mi
     """依進場型態/建議動作/分數級距產生夜間隔日準確率。"""
     if df is None or df.empty or group_col not in df.columns:
         return pd.DataFrame()
-    ret_col = first_existing_col(df, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(df, horizon)
+    ret_col = _best_return_col(df, horizon, prefer_night=True)
     ret = numeric_series(df, ret_col) if ret_col else pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
-    entry_hit, entry_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["進場點命中"])
-    break_hit, break_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["突破價命中"])
-    stop_hit, stop_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["停損觸發"])
-    target_hit, target_col = _bool_hit_series(df, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    entry_hit, entry_col = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["進場點命中"], ret, "entry")
+    break_hit, break_col = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["突破價命中"], ret, "breakout")
+    stop_hit, stop_col = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["停損觸發"], ret, "stop")
+    target_hit, target_col = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["第一壓力命中"], ret, "target")
     work = pd.DataFrame({
         "grp": df[group_col].map(lambda x: safe_str(x, "未分類")),
         "ret": ret,
@@ -1159,12 +1237,13 @@ def _group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int = 5, mi
     for grp, g in work.groupby("grp", dropna=False):
         if safe_str(grp) == "":
             grp = "未分類"
-        n = int(len(g))
+        g_eff = g[pd.to_numeric(g["ret"], errors="coerce").notna()].copy()
+        n = int(len(g_eff))
         if n < min_n:
             continue
-        stat = summarize_returns(g["ret"])
+        stat = summarize_returns(g_eff["ret"])
         def hit_rate(c: str) -> Any:
-            s = pd.to_numeric(g[c], errors="coerce").dropna()
+            s = pd.to_numeric(g_eff[c], errors="coerce").dropna()
             if s.empty:
                 return None
             return round(float(s.mean() * 100), 2)
@@ -1200,14 +1279,14 @@ def calc_night_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> Dict[str, 
         if score_col in work.columns and bucket_col not in work.columns:
             work[bucket_col] = _score_bucket_series(work, score_col)
 
-    ret_col = first_existing_col(work, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(work, horizon)
+    ret_col = _best_return_col(work, horizon, prefer_night=True)
     ret = numeric_series(work, ret_col) if ret_col else pd.Series([math.nan] * len(work), index=work.index, dtype="float64")
     base_stat = summarize_returns(ret)
 
-    entry_hit, entry_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["進場點命中"])
-    break_hit, break_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["突破價命中"])
-    stop_hit, stop_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["停損觸發"])
-    target_hit, target_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    entry_hit, entry_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["進場點命中"], ret, "entry")
+    break_hit, break_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["突破價命中"], ret, "breakout")
+    stop_hit, stop_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["停損觸發"], ret, "stop")
+    target_hit, target_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["第一壓力命中"], ret, "target")
 
     def rate(s: pd.Series) -> Any:
         v = pd.to_numeric(s, errors="coerce").dropna()
@@ -1317,12 +1396,12 @@ def _official_group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: in
     """v111：官方因子分層命中/績效表。"""
     if df is None or df.empty or group_col not in df.columns:
         return pd.DataFrame()
-    ret_col = first_existing_col(df, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(df, horizon)
+    ret_col = _best_return_col(df, horizon, prefer_night=True)
     ret = numeric_series(df, ret_col) if ret_col else pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
-    entry_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["進場點命中"])
-    break_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["突破價命中"])
-    stop_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["停損觸發"])
-    target_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    entry_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["進場點命中"], ret, "entry")
+    break_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["突破價命中"], ret, "breakout")
+    stop_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["停損觸發"], ret, "stop")
+    target_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["第一壓力命中"], ret, "target")
     work = pd.DataFrame({
         "grp": df[group_col].map(lambda x: safe_str(x, "未分類")),
         "ret": ret,
@@ -1333,12 +1412,13 @@ def _official_group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: in
     })
     rows: List[dict] = []
     for grp, g in work.groupby("grp", dropna=False):
-        n = int(len(g))
+        g_eff = g[pd.to_numeric(g["ret"], errors="coerce").notna()].copy()
+        n = int(len(g_eff))
         if n < min_n:
             continue
-        stat = summarize_returns(g["ret"])
+        stat = summarize_returns(g_eff["ret"])
         def rate(c: str) -> Any:
-            ss = pd.to_numeric(g[c], errors="coerce").dropna()
+            ss = pd.to_numeric(g_eff[c], errors="coerce").dropna()
             if ss.empty:
                 return None
             return round(float(ss.mean() * 100), 2)
@@ -1385,7 +1465,7 @@ def calc_official_factor_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> 
     if "PER本益比" in work.columns and "PER級距" not in work.columns:
         work["PER級距"] = _per_bucket_series(work, "PER本益比")
 
-    ret_col = first_existing_col(work, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(work, horizon)
+    ret_col = _best_return_col(work, horizon, prefer_night=True)
     ret = numeric_series(work, ret_col) if ret_col else pd.Series([math.nan] * len(work), index=work.index, dtype="float64")
     base_stat = summarize_returns(ret)
     completeness = numeric_series(work, "官方資料完整度") if "官方資料完整度" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
@@ -1395,10 +1475,10 @@ def calc_official_factor_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> 
     high_mask = (completeness >= 60) & (official_score >= 70)
     low_mask = (completeness >= 60) & (official_score < 50)
 
-    entry_hit, entry_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["進場點命中"])
-    break_hit, break_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["突破價命中"])
-    stop_hit, stop_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["停損觸發"])
-    target_hit, target_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["第一壓力命中"])
+    entry_hit, entry_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["進場點命中"], ret, "entry")
+    break_hit, break_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["突破價命中"], ret, "breakout")
+    stop_hit, stop_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["停損觸發"], ret, "stop")
+    target_hit, target_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["第一壓力命中"], ret, "target")
 
     tables = {c: _official_group_accuracy_table(work, c, horizon=horizon) for c in OFFICIAL_GROUP_COLUMNS if c in work.columns}
 
@@ -1558,11 +1638,11 @@ def _quality_group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int
     """v121：實戰品質分層命中/績效表。"""
     if df is None or df.empty or group_col not in df.columns:
         return pd.DataFrame()
-    ret_col = first_existing_col(df, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(df, horizon)
+    ret_col = _best_return_col(df, horizon, prefer_night=True)
     ret = numeric_series(df, ret_col) if ret_col else pd.Series([math.nan] * len(df), index=df.index, dtype="float64")
-    stop_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["停損觸發"])
-    target_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["第一壓力命中"])
-    entry_hit, _ = _bool_hit_series(df, NIGHT_HIT_COLUMNS["進場點命中"])
+    stop_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["停損觸發"], ret, "stop")
+    target_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["第一壓力命中"], ret, "target")
+    entry_hit, _ = _bool_hit_series_or_proxy(df, NIGHT_HIT_COLUMNS["進場點命中"], ret, "entry")
     work = pd.DataFrame({
         "grp": df[group_col].map(lambda x: safe_str(x, "未分類")),
         "ret": ret,
@@ -1572,12 +1652,13 @@ def _quality_group_accuracy_table(df: pd.DataFrame, group_col: str, horizon: int
     })
     rows: List[dict] = []
     for grp, g in work.groupby("grp", dropna=False):
-        n = int(len(g))
+        g_eff = g[pd.to_numeric(g["ret"], errors="coerce").notna()].copy()
+        n = int(len(g_eff))
         if n < min_n:
             continue
-        stat = summarize_returns(g["ret"])
+        stat = summarize_returns(g_eff["ret"])
         def rate(c: str) -> Any:
-            ss = pd.to_numeric(g[c], errors="coerce").dropna()
+            ss = pd.to_numeric(g_eff[c], errors="coerce").dropna()
             if ss.empty:
                 return None
             return round(float(ss.mean() * 100), 2)
@@ -1620,19 +1701,21 @@ def calc_quality_accuracy_bundle(df: pd.DataFrame, horizon: int = 5) -> Dict[str
     if "收盤距MA60%" in work.columns and "MA60距離級距" not in work.columns:
         work["MA60距離級距"] = _ma_distance_bucket_series(work, "收盤距MA60%")
 
-    ret_col = first_existing_col(work, NIGHT_HIT_RETURN_COLUMNS.get(horizon, [])) or best_perf_col(work, horizon)
+    ret_col = _best_return_col(work, horizon, prefer_night=True)
     ret = numeric_series(work, ret_col) if ret_col else pd.Series([math.nan] * len(work), index=work.index, dtype="float64")
     quality = numeric_series(work, "實戰品質分") if "實戰品質分" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
     penalty = numeric_series(work, "實戰降分") if "實戰降分" in work.columns else pd.Series([math.nan] * len(work), index=work.index)
 
-    usable_mask = quality.notna()
-    high_mask = quality >= 70
-    low_mask = quality < 60
-    penalty_mask = penalty >= 10
+    # 「可用樣本」必須同時具備實戰品質欄與績效欄，避免畫面顯示有樣本但績效全 None。
+    ret_valid_mask = pd.to_numeric(ret, errors="coerce").notna()
+    usable_mask = quality.notna() & ret_valid_mask
+    high_mask = (quality >= 70) & ret_valid_mask
+    low_mask = (quality < 60) & ret_valid_mask
+    penalty_mask = (penalty >= 10) & ret_valid_mask
 
-    stop_hit, stop_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["停損觸發"])
-    target_hit, target_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["第一壓力命中"])
-    entry_hit, entry_col = _bool_hit_series(work, NIGHT_HIT_COLUMNS["進場點命中"])
+    stop_hit, stop_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["停損觸發"], ret, "stop")
+    target_hit, target_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["第一壓力命中"], ret, "target")
+    entry_hit, entry_col = _bool_hit_series_or_proxy(work, NIGHT_HIT_COLUMNS["進場點命中"], ret, "entry")
 
     tables = {c: _quality_group_accuracy_table(work, c, horizon=horizon) for c in QUALITY_GROUP_COLUMNS if c in work.columns}
 

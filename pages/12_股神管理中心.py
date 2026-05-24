@@ -60,6 +60,12 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
+try:
+    from godpick_weight_calibration import best_perf_col as _gp_best_perf_col, numeric_series as _gp_numeric_series
+except Exception:
+    _gp_best_perf_col = None
+    _gp_numeric_series = None
+
 PAGE_TITLE = "12_股神管理中心｜v145 極速載入修正版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 MANAGEMENT_UI_CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
@@ -735,6 +741,58 @@ def _to_num(series: pd.Series, default: float = 0.0) -> pd.Series:
         series = tmp.iloc[:, 0] if not tmp.empty else pd.Series([], dtype="object")
     return pd.to_numeric(series.astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False), errors="coerce").fillna(default)
 
+
+
+PAGE12_PERF_CANDIDATES = [
+    "推薦後5日%", "推薦後5日報酬%", "5日最高漲幅%", "5日績效%", "5日報酬%",
+    "推薦後10日%", "10日績效%", "推薦後20日%", "20日績效%",
+    "目前損益幅%", "損益幅%", "即時追蹤報酬%", "目前追蹤報酬%", "實際報酬%",
+]
+
+def _management_perf_col(df: pd.DataFrame, horizon: int = 5) -> str:
+    """12 管理中心績效欄位選擇：只採用有有效數值的欄位。"""
+    if df is None or df.empty:
+        return ""
+    try:
+        if _gp_best_perf_col is not None:
+            col = _gp_best_perf_col(df, horizon)
+            if col:
+                return str(col)
+    except Exception:
+        pass
+    best_col, best_n = "", 0
+    for c in PAGE12_PERF_CANDIDATES:
+        if c not in df.columns:
+            continue
+        try:
+            n = int(pd.to_numeric(df[c].map(lambda x: _num(x, default=float("nan"))), errors="coerce").notna().sum())
+        except Exception:
+            n = 0
+        if n > best_n:
+            best_col, best_n = c, n
+    return best_col
+
+def _management_return_series(df: pd.DataFrame, horizon: int = 5) -> pd.Series:
+    col = _management_perf_col(df, horizon)
+    if not col:
+        return pd.Series([float("nan")] * len(df), index=df.index, dtype="float64")
+    try:
+        if _gp_numeric_series is not None:
+            return _gp_numeric_series(df, col)
+    except Exception:
+        pass
+    return pd.to_numeric(df[col].map(lambda x: _num(x, default=float("nan"))), errors="coerce")
+
+def _row_perf_value(row: pd.Series) -> float:
+    for c in PAGE12_PERF_CANDIDATES:
+        if c in row.index:
+            v = _num(row.get(c, None), default=float("nan"))
+            try:
+                if not pd.isna(v):
+                    return float(v)
+            except Exception:
+                pass
+    return float("nan")
 
 
 
@@ -1416,19 +1474,25 @@ def _hit_flag(row: pd.Series) -> bool:
     result = str(row.get("命中結果", "")) + str(row.get("是否達標_回測", "")) + str(row.get("績效評語", ""))
     if any(x in result for x in ["達標", "命中", "成功", "有效", "偏強"]):
         return True
-    perf = _num(row.get("推薦後5日%", row.get("推薦後10日%", row.get("推薦後20日%", 0))))
-    max_gain = _num(row.get("推薦後最大漲幅%", 0))
+    perf = _row_perf_value(row)
+    max_gain = _num(row.get("推薦後最大漲幅%", row.get("5日最高漲幅%", 0)))
     max_dd = _num(row.get("推薦後最大回撤%", 0))
-    return perf >= 3 or max_gain >= 6 or (perf > 0 and max_dd > -4)
+    try:
+        return (not pd.isna(perf) and perf >= 3) or max_gain >= 6 or (not pd.isna(perf) and perf > 0 and max_dd > -4)
+    except Exception:
+        return False
 
 
 def _fail_flag(row: pd.Series) -> bool:
     result = str(row.get("命中結果", "")) + str(row.get("是否停損_回測", "")) + str(row.get("績效評語", ""))
     if any(x in result for x in ["停損", "失敗", "回撤過大", "不佳"]):
         return True
-    perf = _num(row.get("推薦後5日%", row.get("推薦後10日%", row.get("推薦後20日%", 0))))
+    perf = _row_perf_value(row)
     max_dd = _num(row.get("推薦後最大回撤%", 0))
-    return perf <= -3 or max_dd <= -6
+    try:
+        return (not pd.isna(perf) and perf <= -3) or max_dd <= -6
+    except Exception:
+        return False
 
 
 def _display_cols(df: pd.DataFrame, preferred: List[str], limit_extra: int = 25) -> List[str]:
@@ -1576,8 +1640,8 @@ def _group_quality(df: pd.DataFrame, field: str) -> pd.DataFrame:
     work[field] = work[field].fillna("未分類").astype(str)
     work["_hit"] = work.apply(_hit_flag, axis=1)
     work["_fail"] = work.apply(_fail_flag, axis=1)
-    work["_perf5"] = work.apply(lambda r: _num(r.get("推薦後5日%", r.get("推薦後10日%", r.get("推薦後20日%", 0)))), axis=1)
-    work["_gain"] = work.apply(lambda r: _num(r.get("推薦後最大漲幅%", 0)), axis=1)
+    work["_perf5"] = work.apply(_row_perf_value, axis=1)
+    work["_gain"] = work.apply(lambda r: _num(r.get("推薦後最大漲幅%", r.get("5日最高漲幅%", 0))), axis=1)
     work["_dd"] = work.apply(lambda r: _num(r.get("推薦後最大回撤%", 0)), axis=1)
     g = work.groupby(field, dropna=False).agg(
         樣本數=(field, "size"),
@@ -1805,8 +1869,8 @@ def render_quality_tab(all_df: pd.DataFrame, notes: List[str]) -> None:
     df = _ensure_unified_management_schema(df)
     hits = int(df.apply(_hit_flag, axis=1).sum())
     fails = int(df.apply(_fail_flag, axis=1).sum())
-    perf_col = "推薦後5日%" if "推薦後5日%" in df.columns else ("推薦後10日%" if "推薦後10日%" in df.columns else ("推薦後20日%" if "推薦後20日%" in df.columns else None))
-    avg_perf = _to_num(df[perf_col]).mean() if perf_col else 0
+    perf_col = _management_perf_col(df, 5)
+    avg_perf = _management_return_series(df, 5).mean() if perf_col else 0
     avg_gain = _to_num(df["推薦後最大漲幅%"]).mean() if "推薦後最大漲幅%" in df.columns else 0
     avg_dd = _to_num(df["推薦後最大回撤%"]).mean() if "推薦後最大回撤%" in df.columns else 0
     hit_rate = hits / len(df) * 100 if len(df) else 0
