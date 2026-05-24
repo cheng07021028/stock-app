@@ -2011,5 +2011,186 @@
       "market": "上櫃"
     }
   ],
-  "0525": []
+  "0525": [
+    {
+      "code": "2332",
+      "name": "友訊",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "2338",
+      "name": "光罩",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "2353",
+      "name": "宏碁",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "2362",
+      "name": "藍天",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "2405",
+      "name": "輔信",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "2409",
+      "name": "友達",
+      "market": "上市",
+      "category": "面板"
+    },
+    {
+      "code": "2419",
+      "name": "仲琦",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "2439",
+      "name": "美律",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "2457",
+      "name": "飛宏",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2484",
+      "name": "希華",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3005",
+      "name": "神基",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "3138",
+      "name": "耀登",
+      "market": "上市",
+      "category": "通信網路業"
+    },
+    {
+      "code": "3169",
+      "name": "亞信",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3213",
+      "name": "茂訊",
+      "market": "上櫃",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "3406",
+      "name": "玉晶光",
+      "market": "上市",
+      "category": "光學鏡頭"
+    },
+    {
+      "code": "3416",
+      "name": "融程電",
+      "market": "上市",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "3558",
+      "name": "神準",
+      "market": "上櫃",
+      "category": "通信網路業"
+    },
+    {
+      "code": "3563",
+      "name": "牧德",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "3596",
+      "name": "智易",
+      "market": "上市",
+      "category": "網通交換器"
+    },
+    {
+      "code": "5309",
+      "name": "系統電",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6120",
+      "name": "達運",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "6126",
+      "name": "信音",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6245",
+      "name": "立端",
+      "market": "上櫃",
+      "category": "通信網路業"
+    },
+    {
+      "code": "6462",
+      "name": "神盾",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6799",
+      "name": "來頡",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "7788",
+      "name": "松川精密",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "8054",
+      "name": "安國",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8081",
+      "name": "致新",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "8109",
+      "name": "博大",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "8249",
+      "name": "菱光",
+      "market": "上市",
+      "category": "電子零組件業"
+    }
+  ]
 }
