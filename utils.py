@@ -7,6 +7,7 @@ import threading
 from collections import defaultdict
 from pathlib import Path
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import pandas as pd
 import requests

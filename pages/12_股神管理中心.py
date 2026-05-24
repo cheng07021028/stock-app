@@ -606,32 +606,53 @@ def _extract_rows(obj: Any) -> List[Dict[str, Any]]:
 
 
 def _dedupe_columns_keep_first_valid(df: pd.DataFrame) -> pd.DataFrame:
-    """v23：處理 JSON 合併後可能出現的重複欄位，避免 pandas / Streamlit 型別錯誤。"""
-    if df is None or df.empty:
+    """V143：合併同名欄位，避免 pandas concat / reindex 發生 InvalidIndexError。
+
+    來源 JSON 可能同時存在「推薦分數」與 normalize 後又產生同名欄位；pandas 在 concat、
+    df[col] 指派或 Streamlit dataframe 渲染時會因欄名不唯一而報錯。這裡改為逐欄合併，
+    每列保留第一個非空值，並把欄名轉為字串，確保後續 schema / concat 都是唯一欄位。
+    """
+    if df is None:
         return df
-    if not df.columns.duplicated().any():
-        return df
+    try:
+        if not isinstance(df, pd.DataFrame):
+            return pd.DataFrame(df)
+    except Exception:
+        return pd.DataFrame()
+
     out = pd.DataFrame(index=df.index)
     seen: List[str] = []
-    for col in list(df.columns):
+    for raw_col in list(df.columns):
+        col = str(raw_col)
         if col in seen:
             continue
         seen.append(col)
-        block = df.loc[:, df.columns == col]
-        if block.shape[1] == 1:
-            out[col] = block.iloc[:, 0]
-        else:
-            # 同名欄位多個時，逐列取第一個非空值
-            vals = []
-            for _, row in block.iterrows():
-                val = ""
-                for x in row.tolist():
-                    if not _is_blank_value(x):
-                        val = x
-                        break
-                vals.append(val)
-            out[col] = vals
-    return out
+        try:
+            same_mask = [str(c) == col for c in list(df.columns)]
+            block = df.loc[:, same_mask]
+        except Exception:
+            try:
+                block = df[[raw_col]]
+            except Exception:
+                continue
+
+        if isinstance(block, pd.Series):
+            out[col] = block
+            continue
+        if block.shape[1] <= 1:
+            out[col] = block.iloc[:, 0] if block.shape[1] == 1 else ""
+            continue
+
+        vals = []
+        for _, row in block.iterrows():
+            val = ""
+            for x in row.tolist():
+                if not _is_blank_value(x):
+                    val = x
+                    break
+            vals.append(val)
+        out[col] = vals
+    return out.reset_index(drop=True)
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -1285,9 +1306,16 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
             time_from_dt = dt.dt.strftime("%H:%M:%S").replace("NaT", "")
             out["推薦時間"] = out["推薦時間"].where(out["推薦時間"].map(lambda x: not _is_blank_value(x)), time_from_dt)
         out["推薦日期"] = dt.dt.strftime("%Y-%m-%d").where(dt.notna(), out["推薦日期"].astype(str))
-    ordered = [c for c in UNIFIED_MANAGEMENT_COLUMNS if c in out.columns]
-    extras = [c for c in out.columns if c not in ordered and not str(c).startswith("_")]
-    return out[ordered + extras].reset_index(drop=True)
+    ordered: List[str] = []
+    seen_ordered: set[str] = set()
+    for c in UNIFIED_MANAGEMENT_COLUMNS:
+        c = str(c)
+        if c in out.columns and c not in seen_ordered:
+            ordered.append(c)
+            seen_ordered.add(c)
+    extras = [str(c) for c in out.columns if str(c) not in seen_ordered and not str(c).startswith("_")]
+    final_cols = ordered + extras
+    return _dedupe_columns_keep_first_valid(out[final_cols]).reset_index(drop=True)
 
 
 def _unified_display_cols(df: pd.DataFrame, preferred: Optional[List[str]] = None, include_extra: bool = False) -> List[str]:
@@ -1560,39 +1588,44 @@ def _portfolio_warnings(df: pd.DataFrame) -> List[str]:
 
 
 def _safe_management_concat(frames: List[pd.DataFrame]) -> pd.DataFrame:
-    """V142：concat 前先去除每個 DataFrame 的重複欄位，避免 pandas InvalidIndexError。"""
+    """V143：管理中心專用安全 concat。
+
+    修正 pandas.errors.InvalidIndexError：任何來源在 concat 前都先壓成唯一欄位、重建 index；
+    若 pandas 仍因舊資料異常失敗，改用 records 重建，保留資料但避開重複欄位 indexer。
+    """
     safe_frames: List[pd.DataFrame] = []
     for frame in frames:
         if frame is None or getattr(frame, "empty", True):
             continue
         try:
-            tmp = _dedupe_columns_keep_first_valid(frame.copy())
+            tmp = _dedupe_columns_keep_first_valid(frame.copy()).reset_index(drop=True)
         except Exception:
-            tmp = frame.copy()
             try:
-                tmp = tmp.loc[:, ~tmp.columns.duplicated()].copy()
+                tmp = pd.DataFrame(frame).reset_index(drop=True)
+                tmp = tmp.loc[:, ~tmp.columns.astype(str).duplicated()].copy()
+                tmp.columns = [str(c) for c in tmp.columns]
             except Exception:
-                pass
-        try:
-            tmp = tmp.reset_index(drop=True)
-        except Exception:
-            pass
+                continue
         safe_frames.append(tmp)
+
     if not safe_frames:
         return pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
+
     try:
-        out = pd.concat(safe_frames, ignore_index=True, sort=False)
+        out = pd.concat(safe_frames, ignore_index=True, sort=False, copy=False)
     except Exception:
-        # 最保守 fallback：逐筆轉 dict 重建，完全避開重複欄位 indexer。
         rows: List[Dict[str, Any]] = []
         for frame in safe_frames:
             try:
-                frame = _dedupe_columns_keep_first_valid(frame.copy())
-                rows.extend(frame.to_dict("records"))
+                tmp = _dedupe_columns_keep_first_valid(frame.copy())
+                rows.extend(tmp.to_dict("records"))
             except Exception:
-                pass
+                try:
+                    rows.extend(pd.DataFrame(frame).to_dict("records"))
+                except Exception:
+                    pass
         out = pd.DataFrame(rows) if rows else pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
-    return _dedupe_columns_keep_first_valid(out)
+    return _dedupe_columns_keep_first_valid(out).reset_index(drop=True)
 
 def _render_source_status(notes: List[str]) -> None:
     with st.expander("資料來源狀態", expanded=False):
@@ -1801,13 +1834,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("12_股神管理中心", "v49｜管理中心重複欄位 concat 安全版")
+            render_pro_hero("12_股神管理中心", "v50｜管理中心重複欄位 schema 安全版")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
     st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v49 修正：推薦清單與歷史紀錄合併前會先去除重複欄位，避免 pandas InvalidIndexError。")
+    st.caption("v50 修正：推薦清單與歷史紀錄合併前後都會去除重複欄位，避免 pandas InvalidIndexError。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:

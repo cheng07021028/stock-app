@@ -748,6 +748,8 @@ def main() -> None:
         if apply_btn:
             ok, msg = save_applied_weights(weights_to_apply, chosen_profile)
             if ok:
+                # V143：同一個 Streamlit session 換到 07 時可偵測這個提示；權威資料仍以 godpick_user_settings.json 為準。
+                st.session_state["godpick_weight_reload_notice"] = "14_股神權重校正剛套用新權重，07_股神推薦將自動重新載入。"
                 st.success(f"{msg}。已寫入 godpick_user_settings.json；回到 7_股神推薦後會自動偵測，或按『重新載入 14_股神權重校正』立即帶入，不需要 Ctrl+F5。")
                 st.info("建議流程：套用成功 → 切到 7_股神推薦 → 確認權重來源時間已更新 → 再按開始推薦。")
             else:

@@ -1276,24 +1276,49 @@ def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
         return False, f"GitHub 寫入 {path_name} 例外：{e}"
 
 
-def _load_persistent_settings() -> dict[str, Any]:
+def _settings_ts_value(payload: dict[str, Any]) -> datetime:
+    raw = _safe_str(payload.get("updated_at")) or _safe_str(payload.get("weight_settings_updated_at"))
+    try:
+        return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.min
+
+
+def _weight_stamp_from_payload(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    # 優先使用權重專屬時間，避免欄位設定 / 掃描設定更新誤判成權重更新。
+    return _safe_str(payload.get("weight_settings_updated_at")) or _safe_str(payload.get("updated_at"))
+
+
+def _load_persistent_settings(local_first: bool = False) -> dict[str, Any]:
     """讀取股神推薦永久設定。
 
-    修正重點：舊版只要 GitHub 有舊資料就會直接採用，導致本機 JSON 已保存的新權重/掃描條件
-    在換頁或重新整理後又被 GitHub 舊值覆蓋。這版會同時讀 GitHub 與本機，依 updated_at 較新的為準；
-    若無法判斷時間，優先採用本機，避免使用者剛套用的設定消失。
+    V143 重點：14_股神權重校正剛套用後，7_股神推薦優先讀本機 JSON，
+    避免 GitHub API 尚未同步或舊快取造成必須 Ctrl+F5 才會更新。一般情況仍可用
+    updated_at / weight_settings_updated_at 比較 GitHub 與本機的新舊。
     """
     default_payload = {
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "applied_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
+        "score_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
         "column_orders": {},
         "scan_settings": {},
         "updated_at": "",
+        "weight_settings_updated_at": "",
+        "weight_update_seq": 0,
+        "weight_source": "",
+        "last_weight_calibration_profile": "",
         "version": "godpick_v5_persistent_settings",
     }
 
-    github_payload, github_msg = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
     local_payload = _safe_json_read_local(GODPICK_SETTINGS_FILE, {})
+    github_payload: dict[str, Any] = {}
+    github_msg = ""
+    if local_first and isinstance(local_payload, dict) and local_payload:
+        github_msg = "本次重新載入採本機優先，未等待 GitHub。"
+    else:
+        github_payload, github_msg = _read_json_from_github_path(GODPICK_SETTINGS_FILE, {})
 
     candidates: list[tuple[str, dict[str, Any]]] = []
     if isinstance(github_payload, dict) and github_payload:
@@ -1303,22 +1328,32 @@ def _load_persistent_settings() -> dict[str, Any]:
 
     if not candidates:
         payload = default_payload.copy()
+    elif local_first and isinstance(local_payload, dict) and local_payload:
+        payload = local_payload
     elif len(candidates) == 1:
         payload = candidates[0][1]
     else:
-        def _ts(item: tuple[str, dict[str, Any]]):
+        def _candidate_ts(item: tuple[str, dict[str, Any]]):
             source, data = item
-            raw = _safe_str(data.get("updated_at"))
-            try:
-                return datetime.strptime(raw[:19], "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                # 無時間戳時，本機優先，避免 GitHub 舊值覆蓋剛剛套用的設定
-                return datetime.min if source == "github" else datetime.max
+            ts = _settings_ts_value(data)
+            if ts == datetime.min and source == "local":
+                return datetime.max
+            return ts
 
-        payload = sorted(candidates, key=_ts, reverse=True)[0][1]
+        payload = sorted(candidates, key=_candidate_ts, reverse=True)[0][1]
 
     payload = {**default_payload, **payload}
-    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights"))
+    raw_weights = payload.get("applied_weights")
+    if not isinstance(raw_weights, dict):
+        raw_weights = payload.get("score_weights")
+    payload["applied_weights"] = _normalize_weight_map(raw_weights)
+    payload["score_weights"] = payload["applied_weights"].copy()
+    if not _safe_str(payload.get("weight_settings_updated_at")):
+        payload["weight_settings_updated_at"] = _safe_str(payload.get("updated_at"))
+    try:
+        payload["weight_update_seq"] = int(payload.get("weight_update_seq", 0) or 0)
+    except Exception:
+        payload["weight_update_seq"] = 0
     if not isinstance(payload.get("column_orders"), dict):
         payload["column_orders"] = {}
     if not isinstance(payload.get("scan_settings"), dict):
@@ -1328,36 +1363,49 @@ def _load_persistent_settings() -> dict[str, Any]:
 
 
 def _save_persistent_settings(applied_weights: dict[str, int]) -> tuple[bool, list[str]]:
-    old_payload = _load_persistent_settings()
+    old_payload = _load_persistent_settings(local_first=True)
+    now = _now_text()
+    try:
+        old_seq = int(old_payload.get("weight_update_seq", 0) or 0) if isinstance(old_payload, dict) else 0
+    except Exception:
+        old_seq = 0
+    normalized = _normalize_weight_map(applied_weights)
     payload = {
         "original_default_weights": GODPICK_DEFAULT_SCORE_WEIGHTS.copy(),
-        "applied_weights": _normalize_weight_map(applied_weights),
+        "applied_weights": normalized,
+        "score_weights": normalized.copy(),
         "column_orders": old_payload.get("column_orders", {}) if isinstance(old_payload, dict) else {},
         "scan_settings": old_payload.get("scan_settings", {}) if isinstance(old_payload, dict) else {},
-        "updated_at": _now_text(),
-        "version": "godpick_v5_persistent_settings",
+        "updated_at": now,
+        "weight_settings_updated_at": now,
+        "weight_update_seq": old_seq + 1,
+        "weight_source": "7_股神推薦",
+        "last_weight_calibration_profile": "7_股神推薦手動套用",
+        "version": "godpick_v143_weight_reload_sync",
     }
     local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
     return (local_ok or github_ok), [local_msg, github_msg]
 
 def _apply_persisted_weights_to_state(payload: dict[str, Any] | None = None, *, force_widget_sync: bool = True) -> tuple[bool, str]:
-    """v138：把 godpick_user_settings.json 的 applied_weights 立即套回 7_股神推薦。
-
-    用途：14_股神權重校正寫入權重後，不必 Ctrl+F5；進入本頁或按重新載入即可更新。
-    此函式必須在權重 number_input 建立前執行，才不會觸發 StreamlitAPIException。
-    """
+    """V143：把 godpick_user_settings.json 的 applied_weights 立即套回 7_股神推薦。"""
     if payload is None:
-        payload = _load_persistent_settings()
+        payload = _load_persistent_settings(local_first=True)
     if not isinstance(payload, dict):
         return False, "設定檔格式異常，無法重新載入權重。"
-    weights = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
-    updated_at = _safe_str(payload.get("updated_at"))
-    profile = _safe_str(payload.get("last_weight_calibration_profile") or payload.get("weight_profile") or "")
+    raw_weights = payload.get("applied_weights") if isinstance(payload.get("applied_weights"), dict) else payload.get("score_weights")
+    weights = _normalize_weight_map(raw_weights)
+    weight_stamp = _weight_stamp_from_payload(payload)
+    profile = _safe_str(payload.get("last_weight_calibration_profile") or payload.get("weight_profile") or payload.get("weight_source") or "")
+    try:
+        weight_seq = int(payload.get("weight_update_seq", 0) or 0)
+    except Exception:
+        weight_seq = 0
 
     st.session_state[_k("score_weights")] = weights.copy()
     st.session_state[_k("score_weights_edit")] = weights.copy()
-    st.session_state[_k("weight_settings_loaded_at")] = updated_at
+    st.session_state[_k("weight_settings_loaded_at")] = weight_stamp
+    st.session_state[_k("weight_settings_loaded_seq")] = weight_seq
     st.session_state[_k("weight_settings_loaded_profile")] = profile
 
     if force_widget_sync:
@@ -1365,27 +1413,38 @@ def _apply_persisted_weights_to_state(payload: dict[str, Any] | None = None, *, 
             st.session_state[_k(f"weight_edit_{_name}")] = int(_val)
 
     detail = " / ".join([f"{k}{v}%" for k, v in weights.items()])
-    suffix = f"｜校正組合：{profile}" if profile else ""
-    stamp = f"｜設定時間：{updated_at}" if updated_at else ""
-    return True, f"已重新載入 14_股神權重校正套用權重：{detail}{suffix}{stamp}"
+    suffix = f"｜來源/組合：{profile}" if profile else ""
+    stamp = f"｜權重時間：{weight_stamp}" if weight_stamp else ""
+    seq_text = f"｜版本序號：{weight_seq}" if weight_seq else ""
+    return True, f"已重新載入 14_股神權重校正套用權重：{detail}{suffix}{stamp}{seq_text}"
 
 
 def _maybe_auto_reload_weight_settings() -> None:
-    """v138：偵測 godpick_user_settings.json 已更新時，自動同步權重到本頁 session_state。"""
-    payload = _load_persistent_settings()
-    updated_at = _safe_str(payload.get("updated_at")) if isinstance(payload, dict) else ""
+    """V143：偵測 14_股神權重校正已更新時，自動同步權重到本頁 session_state。"""
+    payload = _load_persistent_settings(local_first=True)
+    weight_stamp = _weight_stamp_from_payload(payload) if isinstance(payload, dict) else ""
     loaded_at = _safe_str(st.session_state.get(_k("weight_settings_loaded_at")))
+    try:
+        weight_seq = int(payload.get("weight_update_seq", 0) or 0) if isinstance(payload, dict) else 0
+    except Exception:
+        weight_seq = 0
+    try:
+        loaded_seq = int(st.session_state.get(_k("weight_settings_loaded_seq"), 0) or 0)
+    except Exception:
+        loaded_seq = 0
 
     should_reload = False
     if not st.session_state.get(_k("weight_settings_auto_loaded_once"), False):
         should_reload = True
         st.session_state[_k("weight_settings_auto_loaded_once")] = True
-    elif updated_at and updated_at != loaded_at:
+    elif weight_seq and weight_seq != loaded_seq:
+        should_reload = True
+    elif weight_stamp and weight_stamp != loaded_at:
         should_reload = True
 
     if should_reload:
         ok, msg = _apply_persisted_weights_to_state(payload, force_widget_sync=True)
-        if ok and updated_at and loaded_at and updated_at != loaded_at:
+        if ok and ((weight_stamp and loaded_at and weight_stamp != loaded_at) or (weight_seq and weight_seq != loaded_seq)):
             st.session_state[_k("weight_reload_notice")] = "偵測到 14_股神權重校正已更新，已自動重新載入權重。"
 
 
@@ -1634,7 +1693,8 @@ def _render_score_weight_panel():
         st.caption(f"目前權重來源時間：{_loaded_at}" + (f"｜組合：{_profile}" if _profile else ""))
 
     if reload_from_14:
-        ok, msg = _apply_persisted_weights_to_state(force_widget_sync=True)
+        payload = _load_persistent_settings(local_first=True)
+        ok, msg = _apply_persisted_weights_to_state(payload, force_widget_sync=True)
         st.session_state[_k("weight_reload_notice")] = msg if ok else f"重新載入失敗：{msg}"
         st.rerun()
 

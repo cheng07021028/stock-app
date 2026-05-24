@@ -1802,21 +1802,28 @@ def save_applied_weights(weights: Dict[str, int], profile_name: str = "manual") 
     if not isinstance(existing, dict):
         existing = {}
     applied = normalize_weights(weights, min_w=3, max_w=30)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        old_seq = int(existing.get("weight_update_seq", 0) or 0)
+    except Exception:
+        old_seq = 0
     payload = {
         **existing,
         "original_default_weights": existing.get("original_default_weights", DEFAULT_WEIGHTS),
         "applied_weights": applied,
-        # v99：同步保留 7_股神推薦容易讀取的欄位，並用 updated_at 觸發 7 頁重新載入；夜間欄位仍回寫原本 8 大權重，避免 7 頁不相容。
+        # V143：7_股神推薦會優先讀 applied_weights / score_weights，並用權重專屬時間戳與序號判斷是否要自動重載。
         "score_weights": applied,
         "weight_source": "14_股神權重校正",
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "version": "godpick_v104_night_accuracy_feedback_sync",
+        "updated_at": now,
+        "weight_settings_updated_at": now,
+        "weight_update_seq": old_seq + 1,
+        "version": "godpick_v143_weight_reload_sync",
         "last_weight_calibration_profile": profile_name,
     }
     local_ok, local_msg = write_json(SETTINGS_FILE, payload)
     gh_ok, gh_msg = _write_settings_to_github(payload)
     ok = bool(local_ok or gh_ok)
-    detail = "；".join([str(local_msg), str(gh_msg)])
+    detail = "；".join([str(local_msg), str(gh_msg), f"權重版本序號：{old_seq + 1}"])
     if ok:
         return True, f"權重已套用到 7_股神推薦設定檔。{detail}"
     return False, f"權重套用失敗。{detail}"
