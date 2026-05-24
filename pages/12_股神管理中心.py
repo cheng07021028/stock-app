@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # >>> PAGE_CONFIG_ALREADY_SET_V86
 import streamlit as st
-st.set_page_config(page_title='12_股神管理中心｜v48 欄位管理免即時重算版', layout="wide")
+st.set_page_config(page_title='12_股神管理中心｜v145 極速載入修正版', layout="wide")
 # <<< PAGE_CONFIG_ALREADY_SET_V86
 
 # >>> APP_AUTH_GUARD_V84
@@ -60,7 +60,7 @@ except Exception:
     inject_pro_theme = None
     render_pro_hero = None
 
-PAGE_TITLE = "12_股神管理中心｜v48 欄位管理免即時重算版"
+PAGE_TITLE = "12_股神管理中心｜v145 極速載入修正版"
 BASE_DIR = Path(__file__).resolve().parents[1]
 MANAGEMENT_UI_CONFIG_PATH = BASE_DIR / "godpick_management_ui_config.json"
 
@@ -606,53 +606,63 @@ def _extract_rows(obj: Any) -> List[Dict[str, Any]]:
 
 
 def _dedupe_columns_keep_first_valid(df: pd.DataFrame) -> pd.DataFrame:
-    """V143：合併同名欄位，避免 pandas concat / reindex 發生 InvalidIndexError。
+    """V145：高速合併同名欄位。
 
-    來源 JSON 可能同時存在「推薦分數」與 normalize 後又產生同名欄位；pandas 在 concat、
-    df[col] 指派或 Streamlit dataframe 渲染時會因欄名不唯一而報錯。這裡改為逐欄合併，
-    每列保留第一個非空值，並把欄名轉為字串，確保後續 schema / concat 都是唯一欄位。
+    前一版逐欄 out[col] = ... 會讓 DataFrame 嚴重 fragmentation，
+    12_股神管理中心進頁時需重複 schema 正規化，資料稍多就會長時間運轉。
+    本版改成：欄位已唯一時直接返回；只有真的重複欄位才針對重複群組合併，
+    並用一次性 concat 建表，避免頁面卡住。
     """
     if df is None:
-        return df
-    try:
-        if not isinstance(df, pd.DataFrame):
-            return pd.DataFrame(df)
-    except Exception:
         return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        try:
+            df = pd.DataFrame(df)
+        except Exception:
+            return pd.DataFrame()
+    if df.empty:
+        out = df.copy()
+        out.columns = [str(c) for c in out.columns]
+        return out.reset_index(drop=True)
 
-    out = pd.DataFrame(index=df.index)
-    seen: List[str] = []
-    for raw_col in list(df.columns):
-        col = str(raw_col)
+    tmp = df.copy()
+    tmp.columns = [str(c) for c in tmp.columns]
+    if pd.Index(tmp.columns).is_unique:
+        return tmp.reset_index(drop=True)
+
+    pieces: List[pd.Series] = []
+    seen: set[str] = set()
+    for col in list(tmp.columns):
         if col in seen:
             continue
-        seen.append(col)
-        try:
-            same_mask = [str(c) == col for c in list(df.columns)]
-            block = df.loc[:, same_mask]
-        except Exception:
-            try:
-                block = df[[raw_col]]
-            except Exception:
-                continue
-
+        seen.add(col)
+        block = tmp.loc[:, [c == col for c in tmp.columns]]
         if isinstance(block, pd.Series):
-            out[col] = block
+            pieces.append(block.rename(col))
             continue
         if block.shape[1] <= 1:
-            out[col] = block.iloc[:, 0] if block.shape[1] == 1 else ""
+            pieces.append(block.iloc[:, 0].rename(col))
             continue
-
-        vals = []
-        for _, row in block.iterrows():
-            val = ""
-            for x in row.tolist():
-                if not _is_blank_value(x):
-                    val = x
-                    break
-            vals.append(val)
-        out[col] = vals
-    return out.reset_index(drop=True)
+        # 只在重複欄位群組做空值遮罩，避免整張表 applymap。
+        b = block.astype("object")
+        try:
+            blank_mask = b.apply(lambda s: s.map(_is_blank_value))
+            b = b.mask(blank_mask)
+            ser = b.bfill(axis=1).iloc[:, 0].fillna("").rename(col)
+        except Exception:
+            vals: List[Any] = []
+            for _, row in block.iterrows():
+                val = ""
+                for x in row.tolist():
+                    if not _is_blank_value(x):
+                        val = x
+                        break
+                vals.append(val)
+            ser = pd.Series(vals, index=tmp.index, name=col)
+        pieces.append(ser)
+    if not pieces:
+        return pd.DataFrame(index=tmp.index).reset_index(drop=True)
+    return pd.concat(pieces, axis=1).reset_index(drop=True)
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -797,27 +807,55 @@ def _first_existing_value(row: pd.Series, cols: List[str], default: str = "") ->
 
 
 def _fill_text_col(df: pd.DataFrame, target: str, sources: List[str], default: str = "") -> pd.DataFrame:
-    # v23：文字欄位一律轉 object，避免原欄位是 float / category 時塞入文字造成 TypeError。
-    df = _dedupe_columns_keep_first_valid(df)
+    """V145：文字欄位高速回補，只補空值、不覆蓋既有內容。"""
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    if not pd.Index(df.columns).is_unique:
+        df = _dedupe_columns_keep_first_valid(df)
     if target not in df.columns:
         df[target] = ""
-    else:
-        try:
-            df[target] = df[target].astype("object")
-        except Exception:
-            df[target] = df[target].map(_clean_text_value).astype("object")
-    safe_sources = [s for s in sources if s in df.columns and s != target]
-    if target in sources:
+    try:
+        cur = df[target].astype("object")
+    except Exception:
+        cur = df[target].map(_clean_text_value).astype("object")
+
+    safe_sources = []
+    for s in sources:
+        if s in df.columns and s != target and s not in safe_sources:
+            safe_sources.append(s)
+    if target in sources and target not in safe_sources:
         safe_sources.append(target)
-    for idx, row in df.iterrows():
-        if _is_blank_value(row.get(target)):
-            df.at[idx, target] = _first_existing_value(row, safe_sources, default)
-    df[target] = df[target].map(_clean_text_value).astype("object")
+
+    for s in safe_sources:
+        try:
+            mask = cur.map(_is_blank_value)
+            if not bool(mask.any()):
+                break
+            src = df[s].map(_clean_text_value).astype("object")
+            cur = cur.where(~mask, src)
+        except Exception:
+            continue
+    if default:
+        try:
+            mask = cur.map(_is_blank_value)
+            if bool(mask.any()):
+                cur = cur.where(~mask, default)
+        except Exception:
+            pass
+    df[target] = cur.map(_clean_text_value).astype("object")
     return df
 
 
 def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: Any = None) -> pd.DataFrame:
-    df = _dedupe_columns_keep_first_valid(df)
+    """V145：數值欄位高速回補，只補 NaN。"""
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    if not pd.Index(df.columns).is_unique:
+        df = _dedupe_columns_keep_first_valid(df)
     if target not in df.columns:
         df[target] = default
     cur = _safe_numeric_series(df, target, default=default if default is not None else 0.0, fill=False)
@@ -825,6 +863,8 @@ def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: An
         if s in df.columns and s != target:
             src = _safe_numeric_series(df, s, default=default if default is not None else 0.0, fill=False)
             cur = cur.fillna(src)
+    if default is not None:
+        cur = cur.fillna(default)
     df[target] = cur
     return df
 
@@ -1276,10 +1316,11 @@ def _safe_display_table(df: pd.DataFrame, keep_cols: Optional[List[str]] = None)
 
 
 def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """v24：確保推薦清單與推薦紀錄進入管理中心後，擁有相同欄位、相同欄序與安全型別。"""
-    if df is None or df.empty:
+    """v145：確保管理中心欄位一致，並避免逐欄 insert 造成進頁長時間運轉。"""
+    if df is None or getattr(df, "empty", True):
         return pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
-    out = _backfill_management_fields(_dedupe_columns_keep_first_valid(df.copy()))
+    out = _dedupe_columns_keep_first_valid(df)
+    out = _backfill_management_fields(out)
     # v26 欄位統一：再次套用共用 schema，確保兩種資料來源欄位完全一致。
     try:
         if normalize_godpick_dataframe is not None:
@@ -1288,17 +1329,24 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
     out = _dedupe_columns_keep_first_valid(out)
-    for col in UNIFIED_MANAGEMENT_COLUMNS:
-        if col not in out.columns:
-            out[col] = pd.NA if col in NUMERIC_MANAGEMENT_COLUMNS else ""
-    for col in NUMERIC_MANAGEMENT_COLUMNS:
-        if col in out.columns:
-            out[col] = _safe_numeric_series(out, col, default=0.0, fill=False).astype("float64")
-    out = _dedupe_columns_keep_first_valid(out)
-    for col in list(out.columns):
-        if col not in NUMERIC_MANAGEMENT_COLUMNS:
+
+    missing_cols = [col for col in UNIFIED_MANAGEMENT_COLUMNS if col not in out.columns]
+    if missing_cols:
+        missing_data = {
+            col: (pd.NA if col in NUMERIC_MANAGEMENT_COLUMNS else "")
+            for col in missing_cols
+        }
+        out = pd.concat([out, pd.DataFrame(missing_data, index=out.index)], axis=1)
+
+    numeric_cols = [col for col in NUMERIC_MANAGEMENT_COLUMNS if col in out.columns]
+    for col in numeric_cols:
+        out[col] = _safe_numeric_series(out, col, default=0.0, fill=False).astype("float64")
+
+    text_cols = [col for col in out.columns if col not in NUMERIC_MANAGEMENT_COLUMNS]
+    if text_cols:
+        for col in text_cols:
             out[col] = _safe_column_series(out, col, default="").map(_clean_text_value).astype("object")
-    out = _dedupe_columns_keep_first_valid(out)
+
     # 若推薦時間被塞在推薦日期裡，盡量拆出 HH:MM:SS，畫面更一致。
     if "推薦日期" in out.columns:
         dt = pd.to_datetime(out["推薦日期"], errors="coerce")
@@ -1306,6 +1354,7 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
             time_from_dt = dt.dt.strftime("%H:%M:%S").replace("NaT", "")
             out["推薦時間"] = out["推薦時間"].where(out["推薦時間"].map(lambda x: not _is_blank_value(x)), time_from_dt)
         out["推薦日期"] = dt.dt.strftime("%Y-%m-%d").where(dt.notna(), out["推薦日期"].astype(str))
+
     ordered: List[str] = []
     seen_ordered: set[str] = set()
     for c in UNIFIED_MANAGEMENT_COLUMNS:
@@ -1315,7 +1364,7 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
             seen_ordered.add(c)
     extras = [str(c) for c in out.columns if str(c) not in seen_ordered and not str(c).startswith("_")]
     final_cols = ordered + extras
-    return _dedupe_columns_keep_first_valid(out[final_cols]).reset_index(drop=True)
+    return _dedupe_columns_keep_first_valid(out.loc[:, final_cols]).reset_index(drop=True)
 
 
 def _unified_display_cols(df: pd.DataFrame, preferred: Optional[List[str]] = None, include_extra: bool = False) -> List[str]:
@@ -1834,13 +1883,13 @@ def main() -> None:
             pass
     if render_pro_hero:
         try:
-            render_pro_hero("12_股神管理中心", "v50｜管理中心重複欄位 schema 安全版")
+            render_pro_hero("12_股神管理中心", "v145｜極速載入與 schema 安全版")
         except Exception:
             st.title(PAGE_TITLE)
     else:
         st.title(PAGE_TITLE)
-    st.caption("本頁整合 v18 投資組合、v19 每日追蹤、v20 推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
-    st.caption("v50 修正：推薦清單與歷史紀錄合併前後都會去除重複欄位，避免 pandas InvalidIndexError。")
+    st.caption("本頁整合投資組合、每日追蹤、推薦品質儀表板；不修改推薦邏輯、不寫入 JSON、不影響掃描速度。")
+    st.caption("v145 修正：避免 st.tabs 一次運算全部頁籤，並把欄位回補改為高速處理，解決 12 頁一直運轉進不了頁面。")
 
     c_refresh, c_status = st.columns([1.2, 4])
     with c_refresh:
@@ -1856,17 +1905,21 @@ def main() -> None:
 
     rec_df, rec_notes = _load_many(RECOMMEND_FILES, dedupe_latest=True)
     hist_df, hist_notes = _load_many(RECORD_FILES, dedupe_latest=False)
-    all_df, all_notes = _load_many(ALL_DATA_FILES, dedupe_latest=False)
     notes = ["推薦清單："] + rec_notes + ["推薦紀錄："] + hist_notes
 
-    tabs = st.tabs(["投資組合", "每日追蹤", "推薦品質", "側邊欄整理"])
-    with tabs[0]:
+    # v145：Streamlit tabs 會一次執行所有頁籤內容；12 頁資料補值與品質分析較重，
+    # 因此改成單頁選單，只運算目前選到的功能，避免進頁一直運轉。
+    section_options = ["投資組合", "每日追蹤", "推薦品質", "側邊欄整理"]
+    section = st.radio("管理中心功能", section_options, horizontal=True, key="page12_active_section_v145")
+    if section == "投資組合":
         render_portfolio_tab(rec_df, hist_df, notes)
-    with tabs[1]:
+    elif section == "每日追蹤":
         render_daily_tab(rec_df, hist_df, notes)
-    with tabs[2]:
-        render_quality_tab(all_df, all_notes)
-    with tabs[3]:
+    elif section == "推薦品質":
+        all_df = _safe_management_concat([rec_df, hist_df])
+        all_df = _ensure_unified_management_schema(all_df) if not all_df.empty else pd.DataFrame(columns=UNIFIED_MANAGEMENT_COLUMNS)
+        render_quality_tab(all_df, notes)
+    else:
         render_cleanup_tab()
 
 
