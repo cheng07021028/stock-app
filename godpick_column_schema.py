@@ -14,6 +14,24 @@ import pandas as pd
 
 BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
 
+# 不應出現在資料表/匯出/管理中心的內部或過時欄位。
+# 版本資訊只能放在程式註解或頁面說明，不可再生成資料欄位，避免欄位越來越多。
+HIDDEN_INTERNAL_COLUMNS = {
+    "V144專業決策版本",
+}
+
+
+def drop_hidden_internal_columns(df: pd.DataFrame | None) -> pd.DataFrame:
+    """移除不應顯示或保存的內部欄位，並保留其他既有資料欄位。"""
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    hidden = [c for c in df.columns if str(c) in HIDDEN_INTERNAL_COLUMNS or str(c).startswith("_internal_")]
+    if hidden:
+        df = df.drop(columns=hidden, errors="ignore")
+    return df
+
 # 7 完整推薦表、8 推薦紀錄、10 推薦清單、12 管理中心共用的標準顯示順序。
 # 特殊操作欄位如「勾選 / 匯入自選 / 刪除」由各頁自行放最前面，不放在這裡。
 UNIFIED_RECOMMEND_DISPLAY_COLUMNS = [
@@ -21,7 +39,7 @@ UNIFIED_RECOMMEND_DISPLAY_COLUMNS = [
     "資料來源", "資料來源檔", "record_id",
     '股神推薦層級', '候補等級', '是否主要顯示', '主表篩選', '股神輸出排序', '候補排序分', '股神實戰建議', '限制原因', '主表篩選說明', '族群名稱', '資金流熱門族群', '族群熱度排名', '族群流動性分數', '族群樣本數', '族群判斷依據', '大盤趨勢模式', '成交額百萬', '20日均成交額百萬', '流動性等級', '實戰版本', 'V139顯示分區', 'V139主升起漲候選', 'V139動態熱門族群版',
     "推薦日期", "推薦時間", "股票代號", "股票名稱", "市場別", "類別", "產業",
-    "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "推薦分數", '股神輸出排序', '候補排序分', '族群熱度排名', '族群資金流分數', '族群流動性分數', '族群樣本數', '成交額百萬', '20日均成交額百萬', "股神決策分數",
+    "推薦模式", "推薦型態", "機會型態", "推薦等級", "推薦總分", "推薦分數", "推薦用途", "買進分數", "是否可直接買進", "盤中確認條件", "專業決策摘要", '股神輸出排序', '候補排序分', '族群熱度排名', '族群資金流分數', '族群流動性分數', '族群樣本數', '成交額百萬', '20日均成交額百萬', "股神決策分數",
     "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
     "技術趨勢分數", "量價動能分數", "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數",
     "營收成長分數", "EPS成長分數", "估值風險分數", "PER本益比", "估算EPS",
@@ -81,6 +99,11 @@ ALIASES: dict[str, list[str]] = {
     "推薦分數": ["推薦總分", "total_score", "score", "final_score"],
     "推薦總分": ["推薦分數", "total_score", "score", "final_score"],
     "股神決策分數": ["夜間股神總分", "隔日實戰排序分", "推薦總分", "推薦分數", '股神輸出排序', '候補排序分', '族群熱度排名', '族群資金流分數', '族群流動性分數', '族群樣本數', '成交額百萬', '20日均成交額百萬'],
+    "買進分數": ["實戰買點分數", "隔日進場分數", "交易可行分數"],
+    "推薦用途": ["推薦分層", "買點狀態", "股神進場建議"],
+    "是否可直接買進": ["股神進場建議", "買點狀態"],
+    "盤中確認條件": ["隔日作戰策略", "最佳操作劇本", "實戰操作建議"],
+    "專業決策摘要": ["股神實戰建議", "股神推論邏輯", "實戰操作建議"],
     "夜間股神總分": ["隔日實戰排序分", "推薦總分"],
     "隔日實戰排序分": ["夜間股神總分", "推薦總分"],
     "股神建議動作": ["隔日建議動作", "建議動作", "實戰操作建議", "股神進場建議", "今日操作建議"],
@@ -120,7 +143,7 @@ ALIASES: dict[str, list[str]] = {
 }
 
 NUMERIC_LIKE_COLUMNS = {
-    "推薦總分", "推薦分數", '股神輸出排序', '候補排序分', '族群熱度排名', '族群資金流分數', '族群流動性分數', '族群樣本數', '成交額百萬', '20日均成交額百萬', "股神決策分數", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
+    "推薦總分", "推薦分數", "買進分數", '股神輸出排序', '候補排序分', '族群熱度排名', '族群資金流分數', '族群流動性分數', '族群樣本數', '成交額百萬', '20日均成交額百萬', "股神決策分數", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
     "技術趨勢分數", "量價動能分數", "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "營收成長分數", "EPS成長分數", "估值風險分數",
     "PER本益比", "估算EPS", "外資近1日買賣超", "投信近1日買賣超", "自營商近1日買賣超", "三大法人近1日合計", "法人買超占量比%",
     "上漲機率估計%", "上漲機率%", "推薦價格", "推薦日價格", "最新價", "建議價位", "回測承接價",
@@ -184,14 +207,16 @@ def normalize_godpick_dataframe(df: pd.DataFrame | None, *, add_missing: bool = 
         return pd.DataFrame(columns=UNIFIED_RECOMMEND_DISPLAY_COLUMNS if add_missing else [])
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
-    x = df.copy()
+    x = drop_hidden_internal_columns(df.copy())
     x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
 
     # 先補標準欄位，確保後續 alias target 存在。
+    # V144：一次性 concat 補欄，避免逐欄 insert 造成 DataFrame fragmentation 與頁面變慢。
     if add_missing:
-        for col in UNIFIED_RECOMMEND_DISPLAY_COLUMNS:
-            if col not in x.columns:
-                x[col] = ""
+        missing_cols = [col for col in UNIFIED_RECOMMEND_DISPLAY_COLUMNS if col not in x.columns]
+        if missing_cols:
+            missing_df = pd.DataFrame("", index=x.index, columns=missing_cols)
+            x = pd.concat([x, missing_df], axis=1)
 
     for target, sources in ALIASES.items():
         if target not in x.columns:
@@ -223,7 +248,7 @@ def unified_display_columns(df: pd.DataFrame | None = None, *, include_extras: b
         return base
     cols = [c for c in base if c in df.columns]
     if include_extras:
-        cols += [c for c in df.columns if c not in cols and not str(c).startswith("_")]
+        cols += [c for c in df.columns if c not in cols and not str(c).startswith("_") and str(c) not in HIDDEN_INTERNAL_COLUMNS]
     return dedupe_keep_order(cols)
 
 
@@ -262,7 +287,7 @@ def standardize_records_for_storage(df: pd.DataFrame | None, *, keep_extras: boo
         x = pd.DataFrame(columns=UNIFIED_RECOMMEND_DISPLAY_COLUMNS)
     cols = [c for c in UNIFIED_RECOMMEND_DISPLAY_COLUMNS if c in x.columns]
     if keep_extras:
-        cols += [c for c in x.columns if c not in cols and not str(c).startswith("_")]
+        cols += [c for c in x.columns if c not in cols and not str(c).startswith("_") and str(c) not in HIDDEN_INTERNAL_COLUMNS]
     x = x.loc[:, dedupe_keep_order(cols)].copy()
     for c in x.columns:
         x[c] = x[c].map(safe_for_json)

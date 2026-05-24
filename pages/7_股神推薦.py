@@ -208,6 +208,11 @@ GODPICK_RECORD_COLUMNS = [
     "決策說明",
     "推薦等級",
     "推薦總分",
+    "推薦用途",
+    "買進分數",
+    "是否可直接買進",
+    "盤中確認條件",
+    "專業決策摘要",
     "上漲機率估計%",
     "上漲機率等級",
     "上漲機率信心",
@@ -3120,6 +3125,124 @@ def _derive_v76_action_note(row: pd.Series) -> str:
     return "｜".join([p for p in parts if p])
 
 
+
+
+# =========================================================
+# V144：專業決策層 - 區分「推薦分數」與「買進分數」
+# 目的：推薦總分只代表候選強度；買進分數才判斷當下價位是否接近可操作。
+# 不刪除原欄位、不硬篩股票，只補上更清楚的實戰判讀。
+# =========================================================
+def _derive_v144_buy_score(row: pd.Series) -> float:
+    base = _safe_float(row.get("實戰買點分數"))
+    if base is None:
+        base = _derive_v76_practical_score(row)
+    rec_score = _safe_float(row.get("推薦總分"), 0) or 0
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    chase = _safe_float(row.get("追價風險分"), 50) or 50
+    stop_dist = _safe_float(row.get("停損距離%"), 0) or 0
+    reasons = _safe_str(row.get("高分禁買原因"))
+    macro_bucket = _safe_str(row.get("大盤情境分桶"))
+    buy_score = float(base)
+
+    # 推薦分高但買點風險高時，不讓買進分數誤導成「直接買」。
+    if rec_score >= 85 and reasons:
+        buy_score = min(buy_score, 72.0)
+    if chase >= 78:
+        buy_score = min(buy_score, 62.0)
+    elif chase >= 70:
+        buy_score -= 4
+    if rr and rr < 1.25:
+        buy_score = min(buy_score, 65.0)
+    elif rr >= 2.0:
+        buy_score += 4
+    elif rr >= 1.6:
+        buy_score += 2
+    if stop_dist >= 8:
+        buy_score = min(buy_score, 66.0)
+    if macro_bucket.startswith("D") and rec_score < 88:
+        buy_score = min(buy_score, 60.0)
+    return round(_score_clip(buy_score, 0, 100), 1)
+
+
+def _derive_v144_recommend_use(row: pd.Series) -> str:
+    rec_score = _safe_float(row.get("推薦總分"), 0) or 0
+    buy_score = _safe_float(row.get("買進分數"), _safe_float(row.get("實戰買點分數"), 0)) or 0
+    no_buy = _safe_str(row.get("高分禁買原因"))
+    if rec_score >= 88 and buy_score >= 82 and not no_buy:
+        return "隔日作戰候選｜可小量試單"
+    if rec_score >= 85 and no_buy:
+        return "高分追蹤候選｜等拉回不追高"
+    if rec_score >= 80 and buy_score >= 68:
+        return "優先追蹤候選｜等突破/回測確認"
+    if rec_score >= 70:
+        return "觀察名單｜等待訊號補強"
+    return "候補觀察｜暫不列主攻"
+
+
+def _derive_v144_direct_buy_flag(row: pd.Series) -> str:
+    buy_score = _safe_float(row.get("買進分數"), 0) or 0
+    rec_score = _safe_float(row.get("推薦總分"), 0) or 0
+    no_buy = _safe_str(row.get("高分禁買原因"))
+    rr = _safe_float(row.get("風險報酬比"), 0) or 0
+    if no_buy:
+        return "否｜高分但需等拉回/確認"
+    if rec_score >= 88 and buy_score >= 82 and rr >= 1.5:
+        return "可小量試單｜仍需盤中確認"
+    if buy_score >= 72:
+        return "待確認｜突破或回測成功再評估"
+    return "否｜僅列追蹤"
+
+
+def _derive_v144_intraday_checks(row: pd.Series) -> str:
+    breakout = _safe_float(row.get("突破確認價"), _safe_float(row.get("推薦買點_突破")))
+    pullback = _safe_float(row.get("回測承接價"), _safe_float(row.get("推薦買點_拉回")))
+    support = _safe_float(row.get("近端支撐"), _safe_float(row.get("主要支撐")))
+    stop = _safe_float(row.get("停損價"), _safe_float(row.get("停損參考")))
+    parts = []
+    parts.append("開盤跳空超過3%不追")
+    if breakout:
+        parts.append(f"突破{breakout:.2f}需量能延續")
+    if pullback:
+        parts.append(f"拉回{pullback:.2f}附近守穩才加分")
+    elif support:
+        parts.append(f"支撐{support:.2f}附近守穩才加分")
+    if stop:
+        parts.append(f"跌破{stop:.2f}取消作戰")
+    parts.append("開高走低或量縮不進場")
+    return "｜".join(parts)
+
+
+def _derive_v144_professional_summary(row: pd.Series) -> str:
+    rec_score = _safe_float(row.get("推薦總分"), 0) or 0
+    buy_score = _safe_float(row.get("買進分數"), 0) or 0
+    use = _safe_str(row.get("推薦用途"))
+    direct = _safe_str(row.get("是否可直接買進"))
+    rr = _safe_float(row.get("風險報酬比"))
+    no_buy = _safe_str(row.get("高分禁買原因"))
+    pieces = [f"推薦分數{rec_score:.1f}=候選強度", f"買進分數{buy_score:.1f}=當下買點品質"]
+    if rr is not None:
+        pieces.append(f"R/R {rr:.2f}")
+    if use:
+        pieces.append(use)
+    if direct:
+        pieces.append(direct)
+    if no_buy:
+        pieces.append("限制：" + no_buy)
+    return "｜".join(pieces)
+
+
+def _apply_v144_professional_decision_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    out["買進分數"] = out.apply(_derive_v144_buy_score, axis=1)
+    out["推薦用途"] = out.apply(_derive_v144_recommend_use, axis=1)
+    out["是否可直接買進"] = out.apply(_derive_v144_direct_buy_flag, axis=1)
+    out["盤中確認條件"] = out.apply(_derive_v144_intraday_checks, axis=1)
+    out["專業決策摘要"] = out.apply(_derive_v144_professional_summary, axis=1)
+    return out
+
+
 def _apply_v76_practical_entry_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -3135,6 +3258,7 @@ def _apply_v76_practical_entry_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["實戰買點分數"] = out.apply(_derive_v76_practical_score, axis=1)
     out["實戰操作建議"] = out.apply(_derive_v76_action_note, axis=1)
     out["V76買點防呆版本"] = "v76_practical_entry_guard"
+    out = _apply_v144_professional_decision_columns(out)
     return out
 
 def _derive_best_trade_script_v5(row: pd.Series) -> str:
@@ -8870,7 +8994,7 @@ def _render_recommendation_scoring_guide():
             <div class="gp-guide-grid">
                 <div class="gp-guide-card">
                     <h4>評分是怎麼算的？</h4>
-                    <p>系統依多個面向加總評分，分數越高，代表技術面、趨勢面、量價面與風險報酬條件越完整。</p>
+                    <p>系統依多個面向加總評分，推薦總分代表「候選強度」；買進分數代表「當下價格是否接近可操作」。兩者必須分開判斷。</p>
                     <ul>
                         <li><b>趨勢強度：</b>均線多頭、突破型態、是否站穩關鍵價位</li>
                         <li><b>量價結構：</b>量能放大、價量配合、是否有主力進場跡象</li>
@@ -8882,32 +9006,32 @@ def _render_recommendation_scoring_guide():
                 <div class="gp-guide-card">
                     <h4>分數代表什麼？</h4>
                     <div class="gp-score-list">
-                        <div class="gp-score-row"><span class="gp-badge green">90 分以上</span><div><b>強勢買進區：</b>條件完整，可優先關注</div></div>
-                        <div class="gp-score-row"><span class="gp-badge green2">80–89 分</span><div><b>偏多觀察區：</b>適合逢回找買點</div></div>
-                        <div class="gp-score-row"><span class="gp-badge yellow">70–79 分</span><div><b>觀察等待區：</b>條件尚可，需搭配突破或量能確認</div></div>
-                        <div class="gp-score-row"><span class="gp-badge orange">60–69 分</span><div><b>保守區：</b>有題材但訊號不足，先觀察</div></div>
-                        <div class="gp-score-row"><span class="gp-badge red">60 分以下</span><div><b>不建議進場：</b>風險較高，勝率不足</div></div>
+                        <div class="gp-score-row"><span class="gp-badge green">90 分以上</span><div><b>高優先作戰候選：</b>條件完整，但仍需買進分數與盤中確認</div></div>
+                        <div class="gp-score-row"><span class="gp-badge green2">80–89 分</span><div><b>優先追蹤候選：</b>適合找回測、突破與風險報酬比</div></div>
+                        <div class="gp-score-row"><span class="gp-badge yellow">70–79 分</span><div><b>觀察等待區：</b>條件尚可，需等突破、量能或支撐確認</div></div>
+                        <div class="gp-score-row"><span class="gp-badge orange">60–69 分</span><div><b>弱候選區：</b>有題材但訊號不足，只保留觀察</div></div>
+                        <div class="gp-score-row"><span class="gp-badge red">60 分以下</span><div><b>不列主推薦：</b>條件不足，不建議追價</div></div>
                     </div>
                 </div>
                 <div class="gp-guide-card">
-                    <h4>何時適合買入？</h4>
+                    <h4>何時才接近可操作？</h4>
                     <ul>
-                        <li>建議 <b>80 分以上</b> 再優先考慮進場</li>
-                        <li>若達 <b>90 分以上</b>，且量價配合、風險報酬佳，可列為高優先名單</li>
-                        <li><b>70–79 分</b> 可列入觀察名單，等待突破、放量或回測支撐成功</li>
-                        <li>低於 <b>70 分</b> 原則上不追價</li>
+                        <li><b>推薦總分</b>只代表值得追蹤，不等於直接買進</li>
+                        <li>需同時看 <b>買進分數、風險報酬比、追價風險、盤中確認條件</b></li>
+                        <li><b>高分禁買</b>代表股票可追蹤，但目前價位不適合追</li>
+                        <li>盤中若跳空過高、開高走低、量能不足或跌破失效價，取消作戰</li>
                     </ul>
                 </div>
                 <div class="gp-guide-card">
                     <h4>使用提醒</h4>
                     <ul>
-                        <li>本分數為輔助判斷，不等於保證獲利</li>
+                        <li>本分數為輔助判斷，不等於保證獲利，也不是自動買進訊號</li>
                         <li>建議搭配停損、部位控管與大盤方向一起判讀</li>
                         <li>短線、波段、領頭羊模式的標準會略有不同</li>
                     </ul>
                 </div>
             </div>
-            <div class="gp-guide-foot">提醒：市場隨時變化，請搭配最新資訊與自身交易策略，謹慎評估風險。</div>
+            <div class="gp-guide-foot">提醒：推薦分數＝候選強度；買進分數＝當下買點品質；真正進場仍須等待盤中確認與停損控管。</div>
         </div>
         """,
         unsafe_allow_html=True,
