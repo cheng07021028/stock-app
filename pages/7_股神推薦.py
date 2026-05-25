@@ -7990,8 +7990,32 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
 
     tier_rank = {"主推薦": 1, "A級候補": 2, "B級候補": 3, "高品質觀察": 4, "觀察等待": 5}
     out["_hot_money_tier_rank"] = [tier_rank.get(x, 9) for x in level]
+
+    # v147 hot-money safety: some legacy recommendation rows do not carry every
+    # ranking column.  sort_values requires all keys to exist, so we backfill the
+    # ranking columns from the local calculation series before sorting.  This keeps
+    # the liquidity/hot-money upgrade without crashing on older saved data or
+    # lighter scan modes.
+    sort_defaults = {
+        "候補排序分": out.get("候補排序分", practical_score),
+        "股神輸出排序": out.get("股神輸出排序", practical_score),
+        "人氣量能分": out.get("人氣量能分", pd.Series([0] * len(out), index=out.index)),
+        "近20日漲幅%": ret20,
+        "隔日進場分數": entry_score,
+        "交易可行分數": trade_score,
+        "推薦總分": total_score,
+    }
+    for _col, _default in sort_defaults.items():
+        if _col not in out.columns:
+            if isinstance(_default, pd.Series):
+                out[_col] = _default.reindex(out.index).fillna(0)
+            else:
+                out[_col] = _default
+        out[_col] = pd.to_numeric(out[_col], errors="coerce").fillna(0)
+
+    _sort_cols = ["_hot_money_tier_rank", "候補排序分", "股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"]
     out = out.sort_values(
-        ["_hot_money_tier_rank", "候補排序分", "股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"],
+        _sort_cols,
         ascending=[True, False, False, False, False, False, False, False],
     ).drop(columns=["_hot_money_tier_rank"], errors="ignore").reset_index(drop=True)
 
@@ -8425,10 +8449,15 @@ def _build_recommend_df(
             & (base_df.get("近期強勢狀態", pd.Series([""] * len(base_df), index=base_df.index)).astype(str).isin(["近期轉強", "強勢主升"]))
             & ~base_df.get("量能狀態", pd.Series([""] * len(base_df), index=base_df.index)).astype(str).str.contains("極低量|冷門|量能不足", na=False)
         )
-        final_df = base_df[watch_mask].sort_values(
-            ["股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"],
-            ascending=[False, False, False, False, False, False],
-        ).head(10).copy()
+        _watch_sort_cols = ["股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"]
+        _active_watch_sort_cols = [c for c in _watch_sort_cols if c in base_df.columns]
+        final_df = base_df[watch_mask].copy()
+        if _active_watch_sort_cols:
+            final_df = final_df.sort_values(
+                _active_watch_sort_cols,
+                ascending=[False] * len(_active_watch_sort_cols),
+            )
+        final_df = final_df.head(10).copy()
 
     debug_summary["final_score_filtered"] = max(len(base_df) - len(final_df), 0)
     debug_summary["passed_final"] = len(final_df)
