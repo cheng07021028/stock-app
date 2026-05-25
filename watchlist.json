@@ -2163,5 +2163,54 @@
       "market": "上市"
     }
   ],
-  "0526": []
+  "0526": [
+    {
+      "code": "3041",
+      "name": "揚智",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "3317",
+      "name": "尼克森",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3413",
+      "name": "京鼎",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "3596",
+      "name": "智易",
+      "market": "上市",
+      "category": "網通交換器"
+    },
+    {
+      "code": "4952",
+      "name": "凌通",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "5388",
+      "name": "中磊",
+      "market": "上市",
+      "category": "網通交換器"
+    },
+    {
+      "code": "6962",
+      "name": "奕力-KY",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "8088",
+      "name": "品安",
+      "market": "上櫃",
+      "category": "半導體業"
+    }
+  ]
 }
