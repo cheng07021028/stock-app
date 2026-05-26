@@ -7647,7 +7647,10 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
     out["成交額百萬"] = turnover_m.round(1)
     out["20日均成交額百萬"] = avg20_turnover_m.round(1)
 
-    # 使用近期漲幅，而不是只看長區間漲幅，避免挑到有一點漲但沒人氣的股票。
+    # V148：四層實戰分流。
+    # 核心觀念：主推薦不等於「分數高」，而是必須同時通過
+    # 主流資金、成交量/成交金額、近期強勢與買點品質。
+    # 低量股保留在觀察區，避免完全漏掉剛起漲；但不再進主要推薦。
     recent_momentum = (
         (ret5 >= 3.0)
         | (ret20 >= 7.0)
@@ -7660,28 +7663,41 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         | ((ret5 >= 3.0) & (ret20 >= 8.0) & (vol_ratio >= 1.30))
         | ((period_pct >= 12.0) & (ret5 >= 2.0))
     )
+    # 「剛起漲」可以不要求已大漲，但必須有放量、突破/起漲分數與不是低量冷門。
+    early_breakout_momentum = (
+        ((ret5 >= 1.0) | (ret20 >= 3.0) | (breakout_score >= 62) | (prelaunch_score >= 65))
+        & ((vol_ratio >= 1.25) | (volume_score >= 64))
+        & (ret20 <= 22)
+    )
 
     # 流動性門檻改用「張數 + 成交金額」雙條件，避免幾百張冷門股因百分比漂亮而進主推薦。
+    # 一般可交易：可列觀察；主流作戰：才能進主推薦。
     liquidity_ok = (
-        ((turnover_m >= 80) & (latest_lot >= 1200))
-        | ((avg20_turnover_m >= 55) & (avg20_lot >= 1200) & (vol_ratio >= 1.08))
-        | ((latest_lot >= 3000) & (price >= 15) & (vol_ratio >= 1.05))
+        ((turnover_m >= 100) & (latest_lot >= 1500))
+        | ((avg20_turnover_m >= 70) & (avg20_lot >= 1500) & (vol_ratio >= 1.08))
+        | ((latest_lot >= 3500) & (price >= 15) & (vol_ratio >= 1.05))
     )
     strong_liquidity = (
-        ((turnover_m >= 180) & (latest_lot >= 2000))
-        | ((avg20_turnover_m >= 120) & (avg20_lot >= 2500) & (vol_ratio >= 1.12))
-        | ((latest_lot >= 6000) & (turnover_m >= 100))
+        ((turnover_m >= 220) & (latest_lot >= 2500))
+        | ((avg20_turnover_m >= 150) & (avg20_lot >= 3000) & (vol_ratio >= 1.10))
+        | ((latest_lot >= 7000) & (turnover_m >= 130))
     )
     hot_liquidity = (
-        ((turnover_m >= 120) & (latest_lot >= 1800))
-        | ((latest_lot >= 4000) & (vol_ratio >= 1.15))
-        | ((avg20_turnover_m >= 90) & (avg20_lot >= 1800))
+        ((turnover_m >= 160) & (latest_lot >= 2500))
+        | ((latest_lot >= 5000) & (vol_ratio >= 1.15))
+        | ((avg20_turnover_m >= 120) & (avg20_lot >= 2500))
     )
     cold_stock = (
-        (latest_lot < 800)
-        | (turnover_m < 45)
-        | ((avg20_turnover_m < 35) & (avg20_lot < 1000) & (vol_ratio < 1.35))
+        (latest_lot < 1000)
+        | (turnover_m < 60)
+        | ((avg20_turnover_m < 45) & (avg20_lot < 1200) & (vol_ratio < 1.45))
         | s("量能狀態").str.contains("極低量|冷門|量能不足", na=False)
+    )
+    # 主推薦專用門檻，比一般 liquidity_ok 更硬。
+    main_liquidity_gate = (
+        ((turnover_m >= 180) & (latest_lot >= 3000))
+        | ((turnover_m >= 280) & (latest_lot >= 1800))
+        | ((avg20_turnover_m >= 160) & (avg20_lot >= 3000) & (vol_ratio >= 1.10))
     )
 
     trend_ok = (
@@ -7837,7 +7853,14 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
     dynamic_group_size = group.map(lambda g: int(group_size_map.get(g, 0))).astype("int64")
     dynamic_hot_group = group.map(lambda g: "是" if str(g) in hot_groups else "否")
 
-    out["資金流熱門族群"] = dynamic_hot_group
+    individual_hot_flow = (
+        (strong_liquidity & strong_recent_momentum & (out["人氣量能分"] >= 68))
+        | ((turnover_m >= 350) & (latest_lot >= 4000) & strong_recent_momentum)
+        | ((turnover_m >= 500) & (ret5 >= 3.0) & (ret20 >= 8.0))
+    )
+    hot_flow_pass = dynamic_hot_group.eq("是") | individual_hot_flow
+
+    out["資金流熱門族群"] = ["是" if bool(x) else "否" for x in hot_flow_pass.tolist()]
     out["族群熱度排名"] = dynamic_group_rank
     out["族群資金流分數"] = dynamic_group_score.round(1)
     out["族群流動性分數"] = dynamic_group_liq.round(1)
@@ -7881,49 +7904,55 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         + strong_liquidity.astype(float) * 5
         + strong_recent_momentum.astype(float) * 6
         - cold_stock.astype(float) * 25
-        - (~dynamic_hot_group.eq("是")).astype(float) * 12
+        - (~hot_flow_pass).astype(float) * 12
         - (~recent_momentum).astype(float) * 12
         - bearish.astype(float) * 3
     ).clip(0, 100).round(1)
 
     main_pass = (
-        dynamic_hot_group.eq("是")
+        hot_flow_pass
+        & main_liquidity_gate
         & strong_liquidity
         & hot_liquidity
         & strong_trend
         & strong_recent_momentum
-        & (trade_score >= 62)
-        & (entry_score >= (55 if market_text != "空頭防守" else 62))
-        & (quality_score >= 72)
+        & ((dynamic_group_score >= (70 if market_text != "空頭防守" else 76)) | individual_hot_flow)
+        & ((dynamic_group_liq >= (68 if market_text != "空頭防守" else 74)) | individual_hot_flow)
+        & (trade_score >= 64)
+        & (entry_score >= (58 if market_text != "空頭防守" else 66))
+        & (quality_score >= 74)
         & ~cold_stock
     )
-    a_pass = (
-        dynamic_hot_group.eq("是")
+    early_watch = (
+        hot_flow_pass
         & liquidity_ok
-        & recent_momentum
+        & early_breakout_momentum
         & hidden_breakout
+        & trend_ok
         & (trade_score >= 56)
-        & (entry_score >= (40 if market_text != "空頭防守" else 48))
-        & (quality_score >= 68)
+        & (entry_score >= (40 if market_text != "空頭防守" else 50))
+        & (quality_score >= 66)
         & ~cold_stock
     )
-    b_pass = (
-        dynamic_hot_group.eq("是")
-        & liquidity_ok
-        & recent_momentum
-        & trend_ok
-        & ((entry_score >= 32) | (hidden_breakout & (entry_score >= 24)))
-        & (trade_score >= 50)
-        & (quality_score >= 62)
+    defensive_watch = (
+        liquidity_ok
+        & strong_liquidity
+        & (quality_score >= 72)
+        & (trade_score >= 60)
+        & (trend_ok | strong_trend)
         & ~cold_stock
+        & ~main_pass
+        & ~early_watch
     )
     hq_watch = (
-        dynamic_hot_group.eq("是")
-        & liquidity_ok
+        liquidity_ok
         & trend_ok
-        & recent_momentum
+        & (recent_momentum | early_breakout_momentum)
         & (practical_score >= 58)
         & ~cold_stock
+        & ~main_pass
+        & ~early_watch
+        & ~defensive_watch
     )
 
     level = []
@@ -7934,8 +7963,8 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
     advice_list = []
     for i in out.index:
         reasons = []
-        if dynamic_hot_group.loc[i] != "是":
-            reasons.append("非目前資金流熱門族群")
+        if not bool(hot_flow_pass.loc[i]):
+            reasons.append("非目前資金流熱門族群/個股資金未達門檻")
         if bool(cold_stock.loc[i]):
             reasons.append("低量/冷門，封鎖主要推薦")
         if not bool(liquidity_ok.loc[i]):
@@ -7944,6 +7973,12 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
             reasons.append("近期未形成主升/突破動能")
         if not bool(trend_ok.loc[i]):
             reasons.append("趨勢尚未確認")
+        if not bool(main_liquidity_gate.loc[i]):
+            reasons.append("未達主推薦成交量/成交金額門檻")
+        if not bool(strong_recent_momentum.loc[i]):
+            reasons.append("未達主推薦近期強勢門檻")
+        if (float(dynamic_group_score.loc[i]) < (70 if market_text != "空頭防守" else 76)) and not bool(individual_hot_flow.loc[i]):
+            reasons.append("族群資金流未達主推薦門檻")
         if float(entry_score.loc[i]) < 32:
             reasons.append("隔日進場分數不足")
         if float(trade_score.loc[i]) < 50:
@@ -7952,19 +7987,19 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
             reasons.append("大盤偏空，進場條件加嚴")
 
         if bool(main_pass.loc[i]):
-            lv, cg, show, zone = "主推薦", "主推薦", "是", "主推薦"
-            advice = "主流資金族群＋高流動性＋近期強勢；可列隔日作戰清單，仍需依突破/回測價執行。"
-        elif bool(a_pass.loc[i]):
-            lv, cg, show, zone = "A級候補", "A級候補", "是", "A級候補"
-            advice = "近期量價轉強；等突破或回測確認，不直接追高。"
-        elif bool(b_pass.loc[i]):
-            lv, cg, show, zone = "B級候補", "B級候補", "是", "B級候補"
-            advice = "族群有資金流且個股有近期動能；等量價續強。"
+            lv, cg, show, zone = "主流強勢作戰股", "主推薦", "是", "主流強勢作戰"
+            advice = "主流資金族群＋高流動性＋近期強勢；可列主要作戰清單，但仍依突破/回測價執行，不開高追價。"
+        elif bool(early_watch.loc[i]):
+            lv, cg, show, zone = "剛起漲觀察股", "觀察", "否", "剛起漲觀察"
+            advice = "有放量與起漲訊號，但尚未通過主推薦流動性/強勢門檻；等放量突破或回測承接確認。"
+        elif bool(defensive_watch.loc[i]):
+            lv, cg, show, zone = "穩健防守觀察股", "觀察", "否", "穩健防守觀察"
+            advice = "流動性與品質尚可，但短線主升動能不足；只適合追蹤，不列主推薦。"
         elif bool(hq_watch.loc[i]):
-            lv, cg, show, zone = "高品質觀察", "觀察", "否", "高品質觀察"
-            advice = "可觀察但尚未達主要推薦門檻。"
+            lv, cg, show, zone = "高品質觀察股", "觀察", "否", "高品質觀察"
+            advice = "具備部分條件但尚未達主要推薦門檻。"
         else:
-            lv, cg, show, zone = "觀察等待", "觀察", "否", "低量觀察" if bool(cold_stock.loc[i]) else "觀察等待"
+            lv, cg, show, zone = "排除/低量觀察股", "排除觀察", "否", "低量/弱勢排除" if bool(cold_stock.loc[i]) else "觀察等待"
             advice = "未達主流資金、近期強勢或成交量門檻；不列主要推薦。"
 
         level.append(lv)
@@ -7984,11 +8019,11 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
     out["顯示分區"] = display_zone
     out["主升起漲候選"] = ["是" if bool(x) else "否" for x in hidden_breakout.tolist()]
     out["主表篩選說明"] = [
-        "主要顯示" if show == "是" else "隱藏於觀察區：非主流資金/成交量不足/近期強勢不足/進場分數不足"
+        "主流強勢作戰股：主要顯示" if show == "是" else "不列主推薦：保留於觀察/排除分區"
         for show in main_show
     ]
 
-    tier_rank = {"主推薦": 1, "A級候補": 2, "B級候補": 3, "高品質觀察": 4, "觀察等待": 5}
+    tier_rank = {"主流強勢作戰股": 1, "剛起漲觀察股": 2, "穩健防守觀察股": 3, "高品質觀察股": 4, "排除/低量觀察股": 5, "觀察等待": 6}
     out["_hot_money_tier_rank"] = [tier_rank.get(x, 9) for x in level]
 
     # v147 hot-money safety: some legacy recommendation rows do not carry every
@@ -8442,7 +8477,7 @@ def _build_recommend_df(
     if final_df.empty:
         # 不再用低量股硬湊名單。若主推薦為空，只補少量「有成交量 + 近期轉強」的觀察股。
         watch_mask = (
-            base_df.get("股神推薦層級", pd.Series([""] * len(base_df), index=base_df.index)).astype(str).isin(["高品質觀察"])
+            base_df.get("股神推薦層級", pd.Series([""] * len(base_df), index=base_df.index)).astype(str).isin(["剛起漲觀察股", "高品質觀察股"])
             & (pd.to_numeric(base_df.get("股神輸出排序", 0), errors="coerce").fillna(0) >= 58)
             & (pd.to_numeric(base_df.get("成交額百萬", 0), errors="coerce").fillna(0) >= 80)
             & (pd.to_numeric(base_df.get("最新成交量_張", 0), errors="coerce").fillna(0) >= 1200)
