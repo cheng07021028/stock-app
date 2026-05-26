@@ -2205,5 +2205,66 @@
       "market": "上櫃"
     }
   ],
-  "0527": []
+  "0527": [
+    {
+      "code": "1513",
+      "name": "中興電",
+      "market": "上市",
+      "category": "綠能儲能"
+    },
+    {
+      "code": "2324",
+      "name": "仁寶",
+      "market": "上市",
+      "category": "EMS代工"
+    },
+    {
+      "code": "2344",
+      "name": "華邦電",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2356",
+      "name": "英業達",
+      "market": "上市",
+      "category": "AI伺服器"
+    },
+    {
+      "code": "2375",
+      "name": "凱美",
+      "market": "上市",
+      "category": "被動元件"
+    },
+    {
+      "code": "2421",
+      "name": "建準",
+      "market": "上市",
+      "category": "散熱"
+    },
+    {
+      "code": "2449",
+      "name": "京元電子",
+      "market": "上市",
+      "category": "封測"
+    },
+    {
+      "code": "2472",
+      "name": "立隆電",
+      "market": "上市",
+      "category": "被動元件"
+    },
+    {
+      "code": "5285",
+      "name": "界霖",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "6116",
+      "name": "彩晶",
+      "market": "上市",
+      "category": "面板"
+    }
+  ]
 }
