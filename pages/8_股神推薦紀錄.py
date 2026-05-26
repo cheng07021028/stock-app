@@ -5001,7 +5001,7 @@ def main():
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
-    st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V104 主操作結果顯示版")
+    st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V149 單頁籤運算加速版")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -5192,7 +5192,21 @@ def main():
                 st.write(f"- 保存：{ui_save_detail}")
 
     live_df = _ensure_godpick_record_columns(_get_state_df().copy())
-    ana_tables, summary, avg_20, avg_real = _get_analysis_cache(live_df)
+
+    # V149：首頁只計算 KPI 必要摘要；大型分群分析表改到對應頁籤/面板才運算。
+    # 舊版每次按任何按鈕都會先建立所有 analysis tables，造成「重新載入 / 更新最新價 / 儲存同步」後畫面等待很久。
+    summary = _build_summary(live_df)
+    avg_20 = pd.to_numeric(live_df.get("推薦後20日%", live_df.get("20日績效%")), errors="coerce").dropna().mean() if not live_df.empty else None
+    avg_real = pd.to_numeric(live_df.loc[live_df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if (not live_df.empty and "是否已實際買進" in live_df.columns and "實際報酬%" in live_df.columns) else None
+    ana_tables = None
+
+    def _get_ana_tables_v149() -> dict[str, pd.DataFrame]:
+        nonlocal ana_tables
+        if ana_tables is None:
+            ana_tables, _, _, _ = _get_analysis_cache(live_df)
+        return ana_tables
+
+    st.caption("V149 加速：診斷 / 夜間追蹤 / 官方因子 / 品質分析 / 分析頁籤改為需要時才運算；一般按鈕不再拖著全部報表重算。")
 
     render_pro_kpi_row([
         {"label": "總筆數", "value": summary["count"], "delta": "推薦紀錄", "delta_class": "pro-kpi-delta-flat"},
@@ -5202,78 +5216,101 @@ def main():
     ])
 
     with st.expander("v113 資料完整度檢查 / 欄位訊息診斷", expanded=False):
-        st.caption("V113 已把診斷分成主檔必備、策略說明、K線驗證、價格追蹤、績效成熟。3/5/10/20日績效若推薦時間尚未滿期，會顯示待追蹤，不再誤判成系統錯誤。")
-        diag_df = _data_completeness_report_v73(live_df)
-        st.dataframe(_safe_display_df(diag_df), use_container_width=True, hide_index=True)
-        if not diag_df.empty:
-            hard_df = diag_df[diag_df["狀態"].isin(["異常", "需補強", "待更新"])].copy()
-            wait_df = diag_df[diag_df["狀態"].isin(["待追蹤", "可補強", "部分資料"])].copy()
-            if not hard_df.empty:
-                st.warning("需要優先處理的欄位：" + "、".join(hard_df["欄位"].astype(str).head(12).tolist()))
-            if not wait_df.empty:
-                st.info("可觀察或等待資料成熟的欄位：" + "、".join(wait_df["欄位"].astype(str).head(12).tolist()))
-        st.success("判讀重點：K線驗證與 3/5/10/20日績效多半需要另外更新或等待交易日成熟；不是 07、8、10、14 串接壞掉。")
+        if st.toggle("啟動本區運算 / 顯示", value=False, key=_k("lazy_v113_diag")):
+            st.caption("V113 已把診斷分成主檔必備、策略說明、K線驗證、價格追蹤、績效成熟。3/5/10/20日績效若推薦時間尚未滿期，會顯示待追蹤，不再誤判成系統錯誤。")
+            diag_df = _data_completeness_report_v73(live_df)
+            st.dataframe(_safe_display_df(diag_df), use_container_width=True, hide_index=True)
+            if not diag_df.empty:
+                hard_df = diag_df[diag_df["狀態"].isin(["異常", "需補強", "待更新"])].copy()
+                wait_df = diag_df[diag_df["狀態"].isin(["待追蹤", "可補強", "部分資料"])].copy()
+                if not hard_df.empty:
+                    st.warning("需要優先處理的欄位：" + "、".join(hard_df["欄位"].astype(str).head(12).tolist()))
+                if not wait_df.empty:
+                    st.info("可觀察或等待資料成熟的欄位：" + "、".join(wait_df["欄位"].astype(str).head(12).tolist()))
+            st.success("判讀重點：K線驗證與 3/5/10/20日績效多半需要另外更新或等待交易日成熟；不是 07、8、10、14 串接壞掉。")
 
 
-    with st.expander("🌙 V98 夜間隔日股神紀錄追蹤", expanded=False):
-        st.caption("同步 07 股神推薦與 10 推薦清單的夜間隔日欄位；舊紀錄會自動補欄，不影響原始推薦紀錄。")
-        night_df = _v98_backfill_night_battle_record_columns(live_df.copy()) if not live_df.empty else pd.DataFrame(columns=V98_NIGHT_DISPLAY_COLS)
-        if night_df.empty:
-            st.info("目前沒有推薦紀錄。")
         else:
-            n1, n2, n3, n4 = st.columns(4)
-            night_score = pd.to_numeric(night_df.get("夜間股神總分"), errors="coerce")
-            entry_score = pd.to_numeric(night_df.get("隔日進場分數"), errors="coerce")
-            swing_score = pd.to_numeric(night_df.get("波段潛力分數"), errors="coerce")
-            with n1:
-                st.metric("夜間紀錄筆數", len(night_df))
-            with n2:
-                st.metric("平均夜間分", "-" if night_score.dropna().empty else f"{night_score.mean():.2f}")
-            with n3:
-                st.metric("隔日高關注", int((entry_score >= 80).sum()))
-            with n4:
-                st.metric("波段潛力>=80", int((swing_score >= 80).sum()))
+            st.caption("為加速，預設不運算資料完整度診斷；需要檢查欄位時再開啟。")
+    with st.expander("🌙 V98 夜間隔日股神紀錄追蹤", expanded=False):
+        if st.toggle("啟動本區運算 / 顯示", value=False, key=_k("lazy_v98_night")):
+            st.caption("同步 07 股神推薦與 10 推薦清單的夜間隔日欄位；舊紀錄會自動補欄，不影響原始推薦紀錄。")
+            night_df = _v98_backfill_night_battle_record_columns(live_df.copy()) if not live_df.empty else pd.DataFrame(columns=V98_NIGHT_DISPLAY_COLS)
+            if night_df.empty:
+                st.info("目前沒有推薦紀錄。")
+            else:
+                n1, n2, n3, n4 = st.columns(4)
+                night_score = pd.to_numeric(night_df.get("夜間股神總分"), errors="coerce")
+                entry_score = pd.to_numeric(night_df.get("隔日進場分數"), errors="coerce")
+                swing_score = pd.to_numeric(night_df.get("波段潛力分數"), errors="coerce")
+                with n1:
+                    st.metric("夜間紀錄筆數", len(night_df))
+                with n2:
+                    st.metric("平均夜間分", "-" if night_score.dropna().empty else f"{night_score.mean():.2f}")
+                with n3:
+                    st.metric("隔日高關注", int((entry_score >= 80).sum()))
+                with n4:
+                    st.metric("波段潛力>=80", int((swing_score >= 80).sum()))
 
-            f1, f2, f3 = st.columns([1.2, 1.2, 1.6])
-            with f1:
-                type_opts = [x for x in sorted(night_df.get("進場型態_隔日", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if x]
-                type_sel = st.selectbox("進場型態", ["全部"] + type_opts, key=_k("v98_night_type_filter"))
-            with f2:
-                action_opts = [x for x in sorted(night_df.get("隔日建議動作", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if x]
-                action_sel = st.selectbox("隔日建議", ["全部"] + action_opts, key=_k("v98_night_action_filter"))
-            with f3:
-                night_kw = st.text_input("搜尋代號 / 名稱 / 策略", value="", key=_k("v98_night_kw"))
+                f1, f2, f3 = st.columns([1.2, 1.2, 1.6])
+                with f1:
+                    type_opts = [x for x in sorted(night_df.get("進場型態_隔日", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if x]
+                    type_sel = st.selectbox("進場型態", ["全部"] + type_opts, key=_k("v98_night_type_filter"))
+                with f2:
+                    action_opts = [x for x in sorted(night_df.get("隔日建議動作", pd.Series(dtype=str)).fillna("").astype(str).unique().tolist()) if x]
+                    action_sel = st.selectbox("隔日建議", ["全部"] + action_opts, key=_k("v98_night_action_filter"))
+                with f3:
+                    night_kw = st.text_input("搜尋代號 / 名稱 / 策略", value="", key=_k("v98_night_kw"))
 
-            view_night = night_df.copy()
-            if type_sel != "全部" and "進場型態_隔日" in view_night.columns:
-                view_night = view_night[view_night["進場型態_隔日"].astype(str) == type_sel]
-            if action_sel != "全部" and "隔日建議動作" in view_night.columns:
-                view_night = view_night[view_night["隔日建議動作"].astype(str) == action_sel]
-            if night_kw:
-                kw = str(night_kw).strip().lower()
-                mask = pd.Series(False, index=view_night.index)
-                for c in ["股票代號", "股票名稱", "夜間股神建議", "隔日作戰策略"]:
-                    if c in view_night.columns:
-                        mask = mask | view_night[c].astype(str).str.lower().str.contains(kw, na=False)
-                view_night = view_night[mask]
-            show_night_cols = [c for c in V98_NIGHT_DISPLAY_COLS if c in view_night.columns]
-            if "隔日實戰排序分" in view_night.columns:
-                view_night = view_night.sort_values("隔日實戰排序分", ascending=False, na_position="last")
-            st.dataframe(_safe_display_df(view_night[show_night_cols].head(500)), use_container_width=True, hide_index=True)
-            st.caption(f"顯示 {min(len(view_night), 500)} / {len(night_df)} 筆；如要永久保存欄位，請使用上方『儲存同步』。")
+                view_night = night_df.copy()
+                if type_sel != "全部" and "進場型態_隔日" in view_night.columns:
+                    view_night = view_night[view_night["進場型態_隔日"].astype(str) == type_sel]
+                if action_sel != "全部" and "隔日建議動作" in view_night.columns:
+                    view_night = view_night[view_night["隔日建議動作"].astype(str) == action_sel]
+                if night_kw:
+                    kw = str(night_kw).strip().lower()
+                    mask = pd.Series(False, index=view_night.index)
+                    for c in ["股票代號", "股票名稱", "夜間股神建議", "隔日作戰策略"]:
+                        if c in view_night.columns:
+                            mask = mask | view_night[c].astype(str).str.lower().str.contains(kw, na=False)
+                    view_night = view_night[mask]
+                show_night_cols = [c for c in V98_NIGHT_DISPLAY_COLS if c in view_night.columns]
+                if "隔日實戰排序分" in view_night.columns:
+                    view_night = view_night.sort_values("隔日實戰排序分", ascending=False, na_position="last")
+                st.dataframe(_safe_display_df(view_night[show_night_cols].head(500)), use_container_width=True, hide_index=True)
+                st.caption(f"顯示 {min(len(view_night), 500)} / {len(night_df)} 筆；如要永久保存欄位，請使用上方『儲存同步』。")
 
+        else:
+            st.caption("為加速，夜間隔日股神紀錄追蹤改為手動啟動，不影響資料保存。")
     with st.expander("🎯 V102 夜間隔日股神準確率分析", expanded=False):
-        _render_v102_night_accuracy_panel(live_df.copy())
+        if st.toggle("啟動本區運算 / 顯示", value=False, key=_k("lazy_v102_accuracy")):
+            _render_v102_night_accuracy_panel(live_df.copy())
 
+        else:
+            st.caption("為加速，夜間隔日準確率分析改為手動啟動。")
     with st.expander("🏛️ V110 官方因子紀錄追蹤", expanded=False):
-        _render_v110_official_factor_record_panel(live_df.copy())
+        if st.toggle("啟動本區運算 / 顯示", value=False, key=_k("lazy_v110_official")):
+            _render_v110_official_factor_record_panel(live_df.copy())
 
+        else:
+            st.caption("為加速，官方因子紀錄追蹤改為手動啟動。")
     with st.expander("🧪 統一欄位｜實戰品質紀錄 / 準確率分析", expanded=False):
-        _render_v120_quality_accuracy_panel(live_df.copy())
+        if st.toggle("啟動本區運算 / 顯示", value=False, key=_k("lazy_v120_quality")):
+            _render_v120_quality_accuracy_panel(live_df.copy())
 
-    tabs = st.tabs(["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"])
+        else:
+            st.caption("為加速，實戰品質紀錄 / 準確率分析改為手動啟動。")
+    tab_options = ["📋 總表管理", "🧠 股神決策", "➕ 手動新增", "📊 系統績效分析", "💹 實際交易分析", "📤 Excel 匯出", "⚙️ 同步檢查"]
+    active_tab = st.radio(
+        "功能區｜V149 單頁籤運算",
+        tab_options,
+        index=tab_options.index(st.session_state.get(_k("active_tab"), "📋 總表管理")) if st.session_state.get(_k("active_tab"), "📋 總表管理") in tab_options else 0,
+        horizontal=True,
+        key=_k("active_tab"),
+    )
+    st.caption("V149：只運算目前選到的功能區，避免 st.tabs 一次執行全部頁面造成按鈕等待過久。")
 
-    with tabs[0]:
+    if active_tab == "📋 總表管理":
         render_pro_section("推薦紀錄總表", "先篩選再編輯，減少 data_editor 負擔。支援欄位順序永久保存、重新整理不還原。")
         if st.session_state.get(_k("last_delete_msg")):
             st.success(st.session_state.pop(_k("last_delete_msg")))
@@ -5518,7 +5555,7 @@ def main():
         with action_cols[5]:
             st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 更新價格 / 更新績效 → 儲存同步")
 
-    with tabs[1]:
+    if active_tab == "🧠 股神決策":
         render_pro_section("股神模式進出場決策", "將 7_股神推薦 的分數欄位，結合最新價、停損距離、歷史績效與模式標籤，轉成可操作建議。")
         god_df = live_df.copy()
         if god_df.empty:
@@ -5561,7 +5598,7 @@ def main():
                 hide_index=True,
             )
 
-    with tabs[2]:
+    if active_tab == "➕ 手動新增":
         render_pro_section("手動新增推薦紀錄")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -5628,7 +5665,7 @@ def main():
                     st.success("已加入並同步成功")
                     st.rerun()
 
-    with tabs[3]:
+    if active_tab == "📊 系統績效分析":
         render_pro_section("系統推薦績效分析", "以推薦價格對照最新價與推薦後 1/3/5/10/20 日、最大漲幅、最大回撤做回測校正")
         valid_sys = pd.to_numeric(live_df["損益幅%"], errors="coerce").dropna()
         win_rate_sys = float((valid_sys > 0).mean() * 100) if not valid_sys.empty else 0.0
@@ -5651,24 +5688,25 @@ def main():
         _render_v50_performance_tracker(live_df, "V50 推薦後績效追蹤總控｜8_股神推薦紀錄")
         best_cols = st.columns(2)
         with best_cols[0]:
-            if not ana_tables["best_mode"].empty:
-                top_mode = ana_tables["best_mode"].iloc[0]
+            ana_tables_v149 = _get_ana_tables_v149()
+            if not ana_tables_v149["best_mode"].empty:
+                top_mode = ana_tables_v149["best_mode"].iloc[0]
                 st.info(f"最強模式：{_safe_str(top_mode.get('推薦模式'))} ｜ 平均20日績效 {(_safe_float(top_mode.get('平均20日績效'), 0) or 0):.2f}% ｜ 20日勝率 {(_safe_float(top_mode.get('20日勝率'), 0) or 0):.2f}%")
             else:
                 st.info("最強模式：暫無資料")
         with best_cols[1]:
-            if not ana_tables["best_category"].empty:
-                top_cat = ana_tables["best_category"].iloc[0]
+            if not ana_tables_v149["best_category"].empty:
+                top_cat = ana_tables_v149["best_category"].iloc[0]
                 st.info(f"最強類別：{_safe_str(top_cat.get('類別'))} ｜ 平均20日績效 {(_safe_float(top_cat.get('平均20日績效'), 0) or 0):.2f}% ｜ 20日勝率 {(_safe_float(top_cat.get('20日勝率'), 0) or 0):.2f}%")
             else:
                 st.info("最強類別：暫無資料")
         sub_tabs = st.tabs(["模式分析", "類別分析", "等級分析", "明細表"])
         with sub_tabs[0]:
-            st.dataframe(_safe_display_df(ana_tables["mode"]), use_container_width=True, hide_index=True)
+            st.dataframe(_safe_display_df(ana_tables_v149["mode"]), use_container_width=True, hide_index=True)
         with sub_tabs[1]:
-            st.dataframe(_safe_display_df(ana_tables["category"]), use_container_width=True, hide_index=True)
+            st.dataframe(_safe_display_df(ana_tables_v149["category"]), use_container_width=True, hide_index=True)
         with sub_tabs[2]:
-            st.dataframe(_safe_display_df(ana_tables["grade"]), use_container_width=True, hide_index=True)
+            st.dataframe(_safe_display_df(ana_tables_v149["grade"]), use_container_width=True, hide_index=True)
         with sub_tabs[3]:
             detail_cols = [c for c in [
                 "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
@@ -5680,7 +5718,7 @@ def main():
         st.divider()
         _render_v15_auto_tune_panel(live_df)
 
-    with tabs[4]:
+    if active_tab == "💹 實際交易分析":
         render_pro_section("實際交易分析", "只統計有實際買進資料的紀錄")
         trade_df = live_df[live_df["是否已實際買進"].fillna(False).map(_normalize_bool)].copy()
         if trade_df.empty:
@@ -5695,11 +5733,13 @@ def main():
                 {"label": "平均實際報酬%", "value": f"{real_avg:.2f}%", "delta": "", "delta_class": "pro-kpi-delta-flat"},
             ])
             st.dataframe(_safe_display_df(trade_df[_unique_existing_cols(trade_df, ["股票代號", "股票名稱", "推薦模式", "推薦價格", "實際買進價", "實際賣出價", "實際報酬%", "目前狀態", "備註"])]), use_container_width=True, hide_index=True)
-            st.dataframe(_safe_display_df(ana_tables["trade_mode"]), use_container_width=True, hide_index=True)
+            ana_tables_v149 = _get_ana_tables_v149()
+            st.dataframe(_safe_display_df(ana_tables_v149["trade_mode"]), use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    if active_tab == "📤 Excel 匯出":
         render_pro_section("Excel 匯出")
-        excel_bytes = _build_export_bytes(live_df, ana_tables)
+        ana_tables_v149 = _get_ana_tables_v149()
+        excel_bytes = _build_export_bytes(live_df, ana_tables_v149)
         st.download_button(
             "📥 下載 Excel（推薦紀錄 / 模式分析 / 類別分析 / 等級分析 / 實際交易分析 / 最強模式 / 最強類別）",
             data=excel_bytes,
@@ -5708,7 +5748,7 @@ def main():
             use_container_width=True,
         )
 
-    with tabs[6]:
+    if active_tab == "⚙️ 同步檢查":
         render_pro_info_card(
             "同步 / 欄位完整性",
             [
