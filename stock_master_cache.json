@@ -13748,6 +13748,20 @@
     "待修原因": ""
   },
   {
+    "code": "7818",
+    "name": "溢泰實業",
+    "market": "上市",
+    "official_industry_raw": "綠能環保",
+    "official_industry_raw_col": "Yahoo_產業類別",
+    "official_industry": "綠能環保",
+    "theme_category": "綠能環保",
+    "category": "綠能環保",
+    "source": "yahoo_profile_primary",
+    "source_api": "yahoo_profile_TWO",
+    "source_rank": 1,
+    "待修原因": ""
+  },
+  {
     "code": "7821",
     "name": "神數",
     "market": "上市",
@@ -25382,6 +25396,20 @@
     "待修原因": ""
   },
   {
+    "code": "6983",
+    "name": "華洋精機",
+    "market": "上櫃",
+    "official_industry_raw": "櫃其他電子",
+    "official_industry_raw_col": "Yahoo_產業類別",
+    "official_industry": "櫃其他電子",
+    "theme_category": "其他",
+    "category": "其他",
+    "source": "yahoo_profile_primary",
+    "source_api": "yahoo_profile_TWO",
+    "source_rank": 1,
+    "待修原因": ""
+  },
+  {
     "code": "6996",
     "name": "力領科技",
     "market": "上櫃",
@@ -30282,20 +30310,6 @@
     "待修原因": ""
   },
   {
-    "code": "6983",
-    "name": "華洋精機",
-    "market": "興櫃",
-    "official_industry_raw": "31",
-    "official_industry_raw_col": "SecuritiesIndustryCode",
-    "official_industry": "其他電子業",
-    "theme_category": "其他",
-    "category": "其他",
-    "source": "tpex_興櫃_base",
-    "source_api": "tpex_興櫃",
-    "source_rank": 3,
-    "待修原因": ""
-  },
-  {
     "code": "6984",
     "name": "ACpay",
     "market": "興櫃",
@@ -31332,20 +31346,6 @@
     "待修原因": ""
   },
   {
-    "code": "7818",
-    "name": "溢泰實業",
-    "market": "興櫃",
-    "official_industry_raw": "20",
-    "official_industry_raw_col": "SecuritiesIndustryCode",
-    "official_industry": "其他",
-    "theme_category": "其他",
-    "category": "其他",
-    "source": "tpex_興櫃_base",
-    "source_api": "tpex_興櫃",
-    "source_rank": 3,
-    "待修原因": ""
-  },
-  {
     "code": "7819",
     "name": "精誠金融",
     "market": "興櫃",
@@ -32340,6 +32340,20 @@
     "待修原因": ""
   },
   {
+    "code": "7913",
+    "name": "通寶半導體",
+    "market": "興櫃",
+    "official_industry_raw": "24",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "半導體業",
+    "theme_category": "半導體業",
+    "category": "半導體業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "7915",
     "name": "廌家",
     "market": "興櫃",
@@ -32362,6 +32376,48 @@
     "official_industry": "半導體業",
     "theme_category": "半導體業",
     "category": "半導體業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
+    "code": "7919",
+    "name": "禾蒼",
+    "market": "興櫃",
+    "official_industry_raw": "26",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "光電業",
+    "theme_category": "光電業",
+    "category": "光電業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
+    "code": "7920",
+    "name": "瀚陽*",
+    "market": "興櫃",
+    "official_industry_raw": "07",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "07",
+    "theme_category": "07",
+    "category": "07",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
+    "code": "7922",
+    "name": "源點*",
+    "market": "興櫃",
+    "official_industry_raw": "35",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "數位雲端",
+    "theme_category": "數位雲端",
+    "category": "數位雲端",
     "source": "tpex_興櫃_base",
     "source_api": "tpex_興櫃",
     "source_rank": 3,
