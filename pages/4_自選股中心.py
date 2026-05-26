@@ -304,72 +304,199 @@ def _godpick_records_github_config() -> dict[str, str]:
     }
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _load_godpick_records_df() -> pd.DataFrame:
+GODPICK_REC_SOURCE_FILES = [
+    "godpick_records.json",
+    "godpick_recommend_list.json",
+    "godpick_latest_recommendations.json",
+]
+
+GODPICK_WATCHLIST_REC_COLS = [
+    "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
+    "買點分級", "型態名稱", "爆發等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "目前狀態",
+    "是否已實際買進", "推薦標籤", "推薦型態", "機會型態", "進場型態", "進場型態_隔日",
+    "夜間股神總分", "隔日實戰排序分", "股神輸出排序", "訊號分數", "起漲等級",
+]
+
+
+def _first_valid_from_row(row: Any, keys: list[str], default: Any = "") -> Any:
+    for key in keys:
+        try:
+            val = row.get(key)
+        except Exception:
+            val = None
+        if not _is_blank_like(val):
+            return val
+    return default
+
+
+def _is_blank_like(v: Any) -> bool:
+    try:
+        if v is None or pd.isna(v):
+            return True
+    except Exception:
+        pass
+    text = str(v).strip()
+    return text == "" or text.lower() in {"none", "nan", "nat", "null", "<na>", "—", "-"}
+
+
+def _records_source_signature() -> str:
+    """用本機 JSON 的 mtime/size 做快取簽章，檔案更新後不用手動重新載入。"""
+    parts: list[str] = []
+    for fn in GODPICK_REC_SOURCE_FILES:
+        try:
+            stt = os.stat(fn)
+            parts.append(f"{fn}:{int(stt.st_mtime)}:{stt.st_size}")
+        except Exception:
+            parts.append(f"{fn}:missing")
+    return "|".join(parts)
+
+
+def _read_local_recommendation_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for fn in GODPICK_REC_SOURCE_FILES:
+        try:
+            if not os.path.exists(fn):
+                continue
+            with open(fn, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and isinstance(payload.get("recommendations"), list):
+                saved_at = _safe_str(payload.get("saved_at"))
+                for item in payload.get("recommendations", []):
+                    if isinstance(item, dict):
+                        r = dict(item)
+                        r.setdefault("更新時間", saved_at)
+                        r.setdefault("資料來源", fn)
+                        rows.append(r)
+            elif isinstance(payload, list):
+                for item in payload:
+                    if isinstance(item, dict):
+                        r = dict(item)
+                        r.setdefault("資料來源", fn)
+                        rows.append(r)
+        except Exception:
+            continue
+    return rows
+
+
+def _normalize_watch_rec_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=GODPICK_WATCHLIST_REC_COLS)
+    x = df.loc[:, ~pd.Index(df.columns).duplicated()].copy()
+    for c in GODPICK_WATCHLIST_REC_COLS:
+        if c not in x.columns:
+            x[c] = None
+    x["股票代號"] = x["股票代號"].map(_normalize_code)
+    # 自選中心只需要最近推薦摘要，分數可由多個新舊欄位回補。
+    score_source_cols = ["推薦總分", "夜間股神總分", "隔日實戰排序分", "股神輸出排序", "訊號分數"]
+    score = pd.Series([None] * len(x), index=x.index, dtype="object")
+    for c in score_source_cols:
+        if c in x.columns:
+            score = score.where(pd.to_numeric(score, errors="coerce").notna(), pd.to_numeric(x[c], errors="coerce"))
+    x["推薦總分"] = pd.to_numeric(score, errors="coerce")
+    x["買點分級"] = x.apply(lambda r: _first_valid_from_row(r, ["買點分級", "推薦型態", "進場型態_隔日", "進場型態", "建議動作"]), axis=1)
+    x["型態名稱"] = x.apply(lambda r: _first_valid_from_row(r, ["型態名稱", "機會型態", "推薦型態", "起漲摘要", "推薦分層"]), axis=1)
+    x["爆發等級"] = x.apply(lambda r: _first_valid_from_row(r, ["爆發等級", "起漲等級", "推薦等級", "上漲機率等級"]), axis=1)
+    x["推薦模式"] = x.apply(lambda r: _first_valid_from_row(r, ["推薦模式", "股神決策模式", "推薦分桶"]), axis=1)
+    x["推薦日期"] = x["推薦日期"].fillna("").astype(str)
+    x["推薦時間"] = x["推薦時間"].fillna("").astype(str)
+    x["建立時間"] = x["建立時間"].fillna("").astype(str)
+    x["更新時間"] = x["更新時間"].fillna("").astype(str)
+    x = x[x["股票代號"].astype(str).str.strip() != ""].copy()
+    return x[GODPICK_WATCHLIST_REC_COLS].copy()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_godpick_records_df(source_sig: str = "") -> pd.DataFrame:
+    """讀取股神推薦摘要給自選股中心使用。
+
+    V150 修正：先讀本機三個推薦檔，不再只依賴 GitHub API。
+    這樣 7/8/10 寫入 JSON 後，自選中心不用按重新載入也能顯示最新推薦分數/買點/型態。
+    """
+    cols = GODPICK_WATCHLIST_REC_COLS
+    local_rows = _read_local_recommendation_rows()
+    frames: list[pd.DataFrame] = []
+    if local_rows:
+        frames.append(pd.DataFrame(local_rows))
+
     cfg = _godpick_records_github_config()
     token = cfg["token"]
-    cols = [
-        "record_id", "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦等級", "推薦總分",
-        "買點分級", "型態名稱", "爆發等級", "推薦日期", "推薦時間", "更新時間", "目前狀態",
-        "是否已實際買進", "推薦標籤"
-    ]
-    if not token:
+    if token:
+        try:
+            resp = requests.get(
+                _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+                headers=_github_headers(token),
+                params={"ref": cfg["branch"]},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                content = resp.json().get("content", "")
+                if content:
+                    payload = json.loads(base64.b64decode(content).decode("utf-8"))
+                    if isinstance(payload, list) and payload:
+                        frames.append(pd.DataFrame(payload))
+        except Exception:
+            pass
+
+    if not frames:
         return pd.DataFrame(columns=cols)
     try:
-        resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
-            headers=_github_headers(token),
-            params={"ref": cfg["branch"]},
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return pd.DataFrame(columns=cols)
-        content = resp.json().get("content", "")
-        if not content:
-            return pd.DataFrame(columns=cols)
-        payload = json.loads(base64.b64decode(content).decode("utf-8"))
-        df = pd.DataFrame(payload if isinstance(payload, list) else [])
-        for c in cols:
-            if c not in df.columns:
-                df[c] = None
-        df["股票代號"] = df["股票代號"].map(_normalize_code)
-        df["推薦總分"] = pd.to_numeric(df["推薦總分"], errors="coerce")
-        df["推薦日期"] = df["推薦日期"].fillna("").astype(str)
-        df["推薦時間"] = df["推薦時間"].fillna("").astype(str)
-        df["更新時間"] = df["更新時間"].fillna("").astype(str)
-        return df[cols].copy()
+        df = pd.concat(frames, ignore_index=True, sort=False)
     except Exception:
-        return pd.DataFrame(columns=cols)
+        rows: list[dict[str, Any]] = []
+        for f in frames:
+            rows.extend(f.to_dict(orient="records"))
+        df = pd.DataFrame(rows)
+    return _normalize_watch_rec_df(df)
 
 
 def _build_latest_rec_map(rec_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     if rec_df is None or rec_df.empty:
         return {}
-    work = rec_df.copy()
-    work["_sort_dt"] = pd.to_datetime(
-        work["推薦日期"].fillna("").astype(str) + " " + work["推薦時間"].fillna("").astype(str),
-        errors="coerce"
-    )
-    work["_upd_dt"] = pd.to_datetime(work["更新時間"], errors="coerce")
-    work = work.sort_values(["股票代號", "_sort_dt", "_upd_dt"], ascending=[True, False, False], na_position="last")
+    work = _normalize_watch_rec_df(rec_df).copy()
+    if work.empty:
+        return {}
+
+    # 同一代號可能同時存在於 godpick_records、推薦清單、latest recommendations。
+    # 以推薦日期/推薦時間/建立時間/更新時間擇最新，避免自選中心一直顯示舊資料或 None。
+    sort_text = (
+        work.get("推薦日期", pd.Series("", index=work.index)).fillna("").astype(str) + " " +
+        work.get("推薦時間", pd.Series("", index=work.index)).fillna("").astype(str)
+    ).str.strip()
+    work["_sort_dt"] = pd.to_datetime(sort_text, errors="coerce")
+    work["_created_dt"] = pd.to_datetime(work.get("建立時間", ""), errors="coerce")
+    work["_upd_dt"] = pd.to_datetime(work.get("更新時間", ""), errors="coerce")
+    # 若推薦日期缺失，用建立/更新時間回補排序。
+    work["_final_dt"] = work["_sort_dt"].fillna(work["_created_dt"]).fillna(work["_upd_dt"])
+    work = work.sort_values(["股票代號", "_final_dt", "推薦總分"], ascending=[True, False, False], na_position="last")
     work = work.drop_duplicates(subset=["股票代號"], keep="first")
-    out = {}
+
+    out: dict[str, dict[str, Any]] = {}
     for _, r in work.iterrows():
         code = _normalize_code(r.get("股票代號"))
         if code:
+            rec_date = _safe_str(r.get("推薦日期"))
+            rec_time = _safe_str(r.get("推薦時間"))
+            # 推薦清單常只有建立/更新時間，沒有分開的推薦日期/時間。
+            if (not rec_date) and _safe_str(r.get("建立時間")):
+                dt = _safe_str(r.get("建立時間"))
+                rec_date = dt[:10]
+                rec_time = dt[11:19] if len(dt) >= 19 else ""
+            if (not rec_date) and _safe_str(r.get("更新時間")):
+                dt = _safe_str(r.get("更新時間"))
+                rec_date = dt[:10]
+                rec_time = dt[11:19] if len(dt) >= 19 else ""
             out[code] = {
                 "最近推薦模式": _safe_str(r.get("推薦模式")),
                 "最近推薦總分": r.get("推薦總分"),
                 "買點分級": _safe_str(r.get("買點分級")),
                 "型態名稱": _safe_str(r.get("型態名稱")),
                 "爆發等級": _safe_str(r.get("爆發等級")),
-                "最近推薦日期": _safe_str(r.get("推薦日期")),
-                "最近推薦時間": _safe_str(r.get("推薦時間")),
+                "最近推薦日期": rec_date,
+                "最近推薦時間": rec_time,
                 "最近推薦狀態": _safe_str(r.get("目前狀態")),
                 "是否已寫入推薦紀錄": "是",
             }
     return out
-
 
 def _enrich_watchlist_rows(rows_df: pd.DataFrame, rec_map: dict[str, dict[str, Any]]) -> pd.DataFrame:
     if rows_df is None or rows_df.empty:
@@ -618,7 +745,7 @@ def _reload_watchlist_master_records():
 
     fresh_watchlist = _load_watchlist_data()
     fresh_master = _load_stock_master()
-    fresh_rec_df = _load_godpick_records_df()
+    fresh_rec_df = _load_godpick_records_df(_records_source_signature())
 
     st.session_state[_k("watchlist")] = copy.deepcopy(fresh_watchlist)
     st.session_state[_k("master_df")] = fresh_master.copy() if isinstance(fresh_master, pd.DataFrame) else pd.DataFrame()
@@ -1112,7 +1239,7 @@ def main():
 
     watchlist = st.session_state[_k("watchlist")]
     master_df = st.session_state[_k("master_df")]
-    rec_df = _load_godpick_records_df()
+    rec_df = _load_godpick_records_df(_records_source_signature())
     rec_map = _build_latest_rec_map(rec_df)
     _repair_selected_group()
 

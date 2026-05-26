@@ -30,6 +30,7 @@ import io
 import hashlib
 import copy
 import time
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -1796,6 +1797,54 @@ def _read_records_from_github() -> tuple[pd.DataFrame, str]:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), f"GitHub 讀取例外：{e}"
 
 
+LOCAL_RECORD_SOURCE_FILES = ["godpick_records.json"]
+
+
+def _records_local_signature() -> str:
+    """V150：用本機紀錄檔 mtime/size 判斷是否有新資料，不必手動重新載入。"""
+    parts: list[str] = []
+    for fn in LOCAL_RECORD_SOURCE_FILES:
+        try:
+            stt = os.stat(fn)
+            parts.append(f"{fn}:{int(stt.st_mtime)}:{stt.st_size}")
+        except Exception:
+            parts.append(f"{fn}:missing")
+    return "|".join(parts)
+
+
+def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
+    rows: list[dict[str, Any]] = []
+    messages: list[str] = []
+    for fn in LOCAL_RECORD_SOURCE_FILES:
+        try:
+            if not os.path.exists(fn):
+                messages.append(f"{fn}: 不存在")
+                continue
+            with open(fn, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, list):
+                rows.extend([dict(x) for x in payload if isinstance(x, dict)])
+                messages.append(f"{fn}: OK {len(payload)}筆")
+            else:
+                messages.append(f"{fn}: 格式不是 list")
+        except Exception as e:
+            messages.append(f"{fn}: 讀取失敗 {e}")
+    if not rows:
+        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "；".join(messages)
+    return _ensure_godpick_record_columns(pd.DataFrame(rows)), "；".join(messages)
+
+
+def _write_records_to_local_file(df: pd.DataFrame) -> tuple[bool, str]:
+    """V150：儲存同步時也寫回本機 JSON，讓頁面下次進入可直接讀最新資料。"""
+    try:
+        path = _github_config().get("path", "godpick_records.json") or "godpick_records.json"
+        clean_df = _ensure_godpick_record_columns(df)
+        ok, msg = _safe_json_write_local(path, clean_df.to_dict(orient="records"))
+        return ok, msg.replace("UI 設定", "推薦紀錄")
+    except Exception as e:
+        return False, f"本機推薦紀錄寫入失敗：{e}"
+
+
 def _get_records_sha() -> tuple[str, str]:
     cfg = _github_config()
     token = cfg["token"]
@@ -1898,17 +1947,23 @@ def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
 
 def _save_records_dual(df: pd.DataFrame) -> bool:
     clean_df = _ensure_godpick_record_columns(df)
+    ok0, msg0 = _write_records_to_local_file(clean_df)
     ok1, msg1 = _write_records_to_github(clean_df)
     ok2, msg2 = _write_records_to_firestore(clean_df)
+    try:
+        st.session_state[_k("records_source_sig")] = _records_local_signature()
+    except Exception:
+        pass
     st.session_state[_k("last_sync_detail")] = [
+        f"本機: {'成功' if ok0 else '失敗'} | {msg0}",
         f"GitHub: {'成功' if ok1 else '失敗'} | {msg1}",
         f"Firestore: {'成功' if ok2 else '失敗'} | {msg2}",
     ]
-    if ok1 and ok2:
-        _set_status("推薦紀錄 GitHub + Firestore 同步成功", "success")
+    if ok0 and ok1 and ok2:
+        _set_status("推薦紀錄本機 + GitHub + Firestore 同步成功", "success")
         return True
-    if ok1 or ok2:
-        _set_status("推薦紀錄部分同步成功", "warning")
+    if ok0 or ok1 or ok2:
+        _set_status("推薦紀錄部分同步成功；本機資料已優先保留最新狀態" if ok0 else "推薦紀錄部分同步成功", "warning")
         return True
     _set_status("推薦紀錄同步失敗", "error")
     return False
@@ -4027,24 +4082,37 @@ def _backfill_perf_columns(
     return _ensure_godpick_record_columns(pd.DataFrame(rows))
 
 
-def _load_records() -> pd.DataFrame:
+def _load_records(force_remote: bool = False) -> pd.DataFrame:
+    """讀取推薦紀錄。
+
+    V150：預設優先讀本機 godpick_records.json，讓頁面秒開；只有按「重新載入」時才合併 GitHub / Firestore。
+    這保留原本雙寫/同步功能，但避免每次進頁都等待遠端 API。
+    """
+    local_df, local_err = _read_records_from_local_files()
+    if not force_remote and not local_df.empty:
+        st.session_state[_k("load_detail")] = [f"本機: {local_err}", "遠端: 快速模式未讀取；按重新載入可強制合併 GitHub / Firestore"]
+        return _ensure_godpick_record_columns(local_df)
+
     gh_df, gh_err = _read_records_from_github()
     fs_df, fs_err = _read_records_from_firestore()
 
     base_df = pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+    if not local_df.empty:
+        base_df = local_df.copy()
     if not gh_df.empty:
-        base_df = gh_df.copy()
+        base_df = _append_records_dedup_by_business_key(base_df, gh_df)
     if not fs_df.empty:
         base_df = _append_records_dedup_by_business_key(base_df, fs_df)
 
     st.session_state[_k("load_detail")] = [
+        f"本機: {local_err}",
         f"GitHub: {'OK' if not gh_err else gh_err}",
         f"Firestore: {'OK' if not fs_err else fs_err}",
     ]
     if not base_df.empty:
-        base_df = _ensure_godpick_record_columns(pd.DataFrame([_recalc_row(r) for _, r in base_df.iterrows()]))
+        # 避免 iterrows 逐筆處理拖慢進頁；_ensure 已會補欄，_recalc 僅在價格/績效更新後需要。
+        base_df = _ensure_godpick_record_columns(base_df)
     return _ensure_godpick_record_columns(base_df)
-
 
 def _save_state_df(df: pd.DataFrame):
     st.session_state[_k("records_df")] = _ensure_godpick_record_columns(df)
@@ -5019,7 +5087,7 @@ def main():
     with top_cols[0]:
         if st.button("🔄 重新載入", use_container_width=True):
             try:
-                df = _load_records()
+                df = _load_records(force_remote=True)
                 _save_state_df(df)
                 _load_ui_config_once()
                 msg = f"推薦紀錄已重新載入，共 {len(df) if df is not None else 0} 筆。"
@@ -5166,9 +5234,12 @@ def main():
     _render_action_results()
 
     df = _get_state_df()
-    if df.empty:
-        df = _load_records()
+    current_record_sig = _records_local_signature()
+    last_record_sig = _safe_str(st.session_state.get(_k("records_source_sig"), ""))
+    if df.empty or (current_record_sig and current_record_sig != last_record_sig):
+        df = _load_records(force_remote=False)
         _save_state_df(df)
+        st.session_state[_k("records_source_sig")] = current_record_sig
 
     load_detail = st.session_state.get(_k("load_detail"), [])
     if load_detail:
