@@ -7909,6 +7909,39 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         - bearish.astype(float) * 3
     ).clip(0, 100).round(1)
 
+    # V151：主推薦硬門檻。
+    # 推薦總分只代表「候選強度」；能不能進主推薦，必須再通過買進分數、
+    # 風險報酬比、隔日進場、交易可行與追價風險檢查。
+    # 這層只調整分流與排序，不刪除候選股，避免漏掉可觀察標的。
+    buy_score = n("買進分數", 0)
+    buy_alt = n("實戰買點分數", 0)
+    buy_score = buy_score.where(buy_score > 0, buy_alt)
+    buy_score = buy_score.where(buy_score > 0, entry_score)
+
+    rr_score = n("風險報酬比", 0)
+    rr_alt = n("風險報酬比_決策", 0)
+    rr_score = rr_score.where(rr_score > 0, rr_alt)
+
+    chase_score = n("追價風險分", 0)
+    chase_alt = n("追高風險分數_決策", 0)
+    chase_score = chase_score.where(chase_score > 0, chase_alt)
+    chase_level = s("追高風險等級")
+    no_buy_reason = s("高分禁買原因")
+    direct_buy_text = s("是否可直接買進")
+    chase_advice = s("是否建議追價")
+
+    high_chase_risk = (
+        (chase_score >= 70)
+        | chase_level.str.contains("高|過熱|不追", na=False)
+        | no_buy_reason.str.strip().ne("")
+        | direct_buy_text.str.contains("否|不適合|等拉回", na=False)
+        | chase_advice.str.contains("否|不追|禁止", na=False)
+    )
+    strict_buy_gate = buy_score >= 65
+    strict_rr_gate = rr_score >= 1.5
+    strict_entry_gate = entry_score >= 60
+    strict_trade_gate = trade_score >= 60
+
     main_pass = (
         hot_flow_pass
         & main_liquidity_gate
@@ -7923,6 +7956,16 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         & (quality_score >= 74)
         & ~cold_stock
     )
+    hard_main_gate = (
+        main_pass
+        & strict_buy_gate
+        & strict_rr_gate
+        & strict_entry_gate
+        & strict_trade_gate
+        & ~high_chase_risk
+    )
+    waiting_pullback = main_pass & ~hard_main_gate
+
     early_watch = (
         hot_flow_pass
         & liquidity_ok
@@ -7941,7 +7984,7 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         & (trade_score >= 60)
         & (trend_ok | strong_trend)
         & ~cold_stock
-        & ~main_pass
+        & ~hard_main_gate
         & ~early_watch
     )
     hq_watch = (
@@ -7950,7 +7993,7 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         & (recent_momentum | early_breakout_momentum)
         & (practical_score >= 58)
         & ~cold_stock
-        & ~main_pass
+        & ~hard_main_gate
         & ~early_watch
         & ~defensive_watch
     )
@@ -7979,16 +8022,25 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
             reasons.append("未達主推薦近期強勢門檻")
         if (float(dynamic_group_score.loc[i]) < (70 if market_text != "空頭防守" else 76)) and not bool(individual_hot_flow.loc[i]):
             reasons.append("族群資金流未達主推薦門檻")
-        if float(entry_score.loc[i]) < 32:
-            reasons.append("隔日進場分數不足")
-        if float(trade_score.loc[i]) < 50:
-            reasons.append("交易可行分數不足")
-        if market_text == "空頭防守" and float(entry_score.loc[i]) < 48:
+        if float(buy_score.loc[i]) < 65:
+            reasons.append(f"買進分數不足({float(buy_score.loc[i]):.1f}<65)")
+        if float(rr_score.loc[i]) < 1.5:
+            reasons.append(f"風險報酬比不足({float(rr_score.loc[i]):.2f}<1.5)")
+        if float(entry_score.loc[i]) < 60:
+            reasons.append(f"隔日進場分數不足({float(entry_score.loc[i]):.1f}<60)")
+        if float(trade_score.loc[i]) < 60:
+            reasons.append(f"交易可行分數不足({float(trade_score.loc[i]):.1f}<60)")
+        if bool(high_chase_risk.loc[i]):
+            reasons.append("追價/過熱風險過高，等待拉回或盤中確認")
+        if market_text == "空頭防守" and float(entry_score.loc[i]) < 66:
             reasons.append("大盤偏空，進場條件加嚴")
 
-        if bool(main_pass.loc[i]):
-            lv, cg, show, zone = "主流強勢作戰股", "主推薦", "是", "主流強勢作戰"
-            advice = "主流資金族群＋高流動性＋近期強勢；可列主要作戰清單，但仍依突破/回測價執行，不開高追價。"
+        if bool(hard_main_gate.loc[i]):
+            lv, cg, show, zone = "主流強勢作戰股", "主推薦", "是", "今日主推薦"
+            advice = "通過主推薦硬門檻：主流資金＋高流動性＋近期強勢＋買點/RR合格；仍依突破/回測價執行，不開高追價。"
+        elif bool(waiting_pullback.loc[i]):
+            lv, cg, show, zone = "高分等待拉回股", "等待拉回", "否", "等待拉回候選"
+            advice = "候選強度高，但買進分數、R/R或追價風險未通過主推薦硬門檻；只列觀察，等拉回/盤中確認。"
         elif bool(early_watch.loc[i]):
             lv, cg, show, zone = "剛起漲觀察股", "觀察", "否", "剛起漲觀察"
             advice = "有放量與起漲訊號，但尚未通過主推薦流動性/強勢門檻；等放量突破或回測承接確認。"
@@ -8006,7 +8058,10 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         candidate_grade.append(cg)
         main_show.append(show)
         display_zone.append(zone)
-        reason_list.append("；".join(reasons) if reasons else "OK")
+        if show == "是":
+            reason_list.append("OK｜通過主推薦硬門檻")
+        else:
+            reason_list.append("不列主推薦：" + ("；".join(reasons) if reasons else "未通過主推薦硬門檻"))
         advice_list.append(advice)
 
     out["股神推薦層級"] = level
@@ -8022,8 +8077,16 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         "主流強勢作戰股：主要顯示" if show == "是" else "不列主推薦：保留於觀察/排除分區"
         for show in main_show
     ]
+    out["是否可直接買進"] = [
+        "可小量試單｜仍需盤中確認" if show == "是" else "否｜僅列觀察/等待拉回"
+        for show in main_show
+    ]
+    out["推薦用途"] = [
+        "今日主推薦｜主流強勢作戰" if show == "是" else ("高分追蹤候選｜等拉回不追高" if lv == "高分等待拉回股" else "觀察候選｜等待訊號補強")
+        for show, lv in zip(main_show, level)
+    ]
 
-    tier_rank = {"主流強勢作戰股": 1, "剛起漲觀察股": 2, "穩健防守觀察股": 3, "高品質觀察股": 4, "排除/低量觀察股": 5, "觀察等待": 6}
+    tier_rank = {"主流強勢作戰股": 1, "高分等待拉回股": 2, "剛起漲觀察股": 3, "穩健防守觀察股": 4, "高品質觀察股": 5, "排除/低量觀察股": 6, "觀察等待": 7}
     out["_hot_money_tier_rank"] = [tier_rank.get(x, 9) for x in level]
 
     # v147 hot-money safety: some legacy recommendation rows do not carry every
@@ -8035,6 +8098,8 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
         "候補排序分": out.get("候補排序分", practical_score),
         "股神輸出排序": out.get("股神輸出排序", practical_score),
         "人氣量能分": out.get("人氣量能分", pd.Series([0] * len(out), index=out.index)),
+        "買進分數": buy_score,
+        "風險報酬比": rr_score,
         "近20日漲幅%": ret20,
         "隔日進場分數": entry_score,
         "交易可行分數": trade_score,
@@ -8048,10 +8113,10 @@ def _apply_v139_dynamic_hot_money_breakout_rules(df: pd.DataFrame | None) -> pd.
                 out[_col] = _default
         out[_col] = pd.to_numeric(out[_col], errors="coerce").fillna(0)
 
-    _sort_cols = ["_hot_money_tier_rank", "候補排序分", "股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"]
+    _sort_cols = ["_hot_money_tier_rank", "買進分數", "風險報酬比", "隔日進場分數", "交易可行分數", "候補排序分", "股神輸出排序", "人氣量能分", "近20日漲幅%", "推薦總分"]
     out = out.sort_values(
         _sort_cols,
-        ascending=[True, False, False, False, False, False, False, False],
+        ascending=[True, False, False, False, False, False, False, False, False, False],
     ).drop(columns=["_hot_money_tier_rank"], errors="ignore").reset_index(drop=True)
 
     return out
@@ -8796,6 +8861,49 @@ def _safe_sort_export_df(df: pd.DataFrame, sort_cols: list[str], ascending: list
     return work.sort_values(real_cols, ascending=real_asc).reset_index(drop=True)
 
 
+
+
+def _v151_split_main_observe_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """V151 Excel 分頁：今日主推薦 / 高分觀察 / 等待拉回 / 排除原因。
+
+    不改原完整推薦表，只在匯出時多切四個實戰分頁，避免高分但不能買的股票
+    被誤認為今日主買進名單。
+    """
+    if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    work = rec_export.copy()
+
+    def _text_col(col: str) -> pd.Series:
+        if col in work.columns:
+            return work[col].fillna("").astype(str)
+        return pd.Series([""] * len(work), index=work.index, dtype="object")
+
+    def _num_col(col: str) -> pd.Series:
+        if col in work.columns:
+            return pd.to_numeric(work[col], errors="coerce").fillna(0)
+        return pd.Series([0] * len(work), index=work.index, dtype="float64")
+
+    main_mask = _text_col("是否主要顯示").eq("是") | _text_col("主表篩選").eq("是")
+    level = _text_col("股神推薦層級") + "｜" + _text_col("顯示分區") + "｜" + _text_col("推薦用途") + "｜" + _text_col("限制原因")
+    pullback_mask = (~main_mask) & (
+        level.str.contains("等待拉回|追高|過熱|風險報酬比不足|買進分數不足|高分", na=False)
+        | ((_num_col("推薦總分") >= 85) & (_num_col("買進分數") < 65))
+        | ((_num_col("推薦總分") >= 85) & (_num_col("風險報酬比") < 1.5))
+    )
+    exclude_mask = (~main_mask) & (
+        level.str.contains("排除|低量|冷門|成交額或成交張數不足|不列主推薦", na=False)
+        & ~pullback_mask
+    )
+    observe_mask = (~main_mask) & (~pullback_mask) & (~exclude_mask)
+
+    sort_cols = ["買進分數", "風險報酬比", "隔日進場分數", "交易可行分數", "推薦總分", "成交額百萬"]
+    main_df = _safe_sort_export_df(work.loc[main_mask].copy(), sort_cols, [False, False, False, False, False, False])
+    observe_df = _safe_sort_export_df(work.loc[observe_mask].copy(), ["推薦總分", "買進分數", "隔日進場分數", "成交額百萬"], [False, False, False, False])
+    pullback_df = _safe_sort_export_df(work.loc[pullback_mask].copy(), ["推薦總分", "買進分數", "風險報酬比", "近5日漲幅%"], [False, False, False, False])
+    exclude_df = _safe_sort_export_df(work.loc[exclude_mask].copy(), ["推薦總分", "成交額百萬", "最新成交量_張"], [False, False, False])
+    return main_df, observe_df, pullback_df, exclude_df
+
+
 def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int, full_order: list[str] | None = None):
     if rec_df is None or rec_df.empty:
         empty = pd.DataFrame()
@@ -8979,12 +9087,22 @@ def _build_excel_bytes(
     except Exception:
         pass
 
+    main_export, observe_export, pullback_export, exclude_export = _v151_split_main_observe_views(rec_export)
+
+    _write_df_to_ws(wb, "今日主推薦", main_export, "今日無符合主推薦硬門檻股票；多數候選需等拉回、買點改善或風險報酬比提高。")
+    _write_df_to_ws(wb, "高分觀察候選", observe_export, "目前沒有高分觀察候選。")
+    _write_df_to_ws(wb, "等待拉回候選", pullback_export, "目前沒有等待拉回候選。")
+    _write_df_to_ws(wb, "排除原因清單", exclude_export, "目前沒有排除/低量候選。")
     _write_df_to_ws(wb, "完整推薦表", rec_export, "完整推薦表沒有取得資料，請重新跑一次股神推薦後再匯出。")
     _write_df_to_ws(wb, "類股強度榜", cat_export, "類股強度榜沒有取得資料，請確認推薦結果內有類別/推薦總分欄位。")
     _write_df_to_ws(wb, "同類股領先榜", leader_export, "同類股領先榜沒有取得資料，請確認推薦結果內有類別/推薦總分欄位。")
     _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
     diag = pd.DataFrame([
+        {"分頁": "今日主推薦", "列數": 0 if main_export is None else len(main_export), "欄數": 0 if main_export is None else len(main_export.columns)},
+        {"分頁": "高分觀察候選", "列數": 0 if observe_export is None else len(observe_export), "欄數": 0 if observe_export is None else len(observe_export.columns)},
+        {"分頁": "等待拉回候選", "列數": 0 if pullback_export is None else len(pullback_export), "欄數": 0 if pullback_export is None else len(pullback_export.columns)},
+        {"分頁": "排除原因清單", "列數": 0 if exclude_export is None else len(exclude_export), "欄數": 0 if exclude_export is None else len(exclude_export.columns)},
         {"分頁": "完整推薦表", "列數": 0 if rec_export is None else len(rec_export), "欄數": 0 if rec_export is None else len(rec_export.columns)},
         {"分頁": "類股強度榜", "列數": 0 if cat_export is None else len(cat_export), "欄數": 0 if cat_export is None else len(cat_export.columns)},
         {"分頁": "同類股領先榜", "列數": 0 if leader_export is None else len(leader_export), "欄數": 0 if leader_export is None else len(leader_export.columns)},
@@ -9021,7 +9139,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("匯出內容：完整推薦表會與畫面欄位順序一致，另含類股強度榜、同類股領先榜、自動因子榜。")
+        st.caption("匯出內容：今日主推薦、高分觀察候選、等待拉回候選、排除原因清單、完整推薦表、類股強度榜、同類股領先榜、自動因子榜。")
 
 
 def _render_selected_export_block():
@@ -10283,17 +10401,22 @@ def main():
     strong_count = int((rec_df["推薦等級"].isin(["股神級", "強烈關注"])).sum())
     avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
     leader_count = int((rec_df["是否領先同類股"] == "是").sum())
+    main_count = int((rec_df.get("是否主要顯示", pd.Series(["否"] * len(rec_df), index=rec_df.index)).astype(str) == "是").sum())
+    pullback_count = int(rec_df.get("股神推薦層級", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("等待拉回|高分等待", na=False).sum())
+    direct_count = int(rec_df.get("是否可直接買進", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("可小量試單|可直接|是", na=False).sum())
 
     hot_count = len(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) else 0
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
-            {"label": "強勢推薦", "value": strong_count, "delta": "最高等級群", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "領先同類股", "value": leader_count, "delta": "類股相對強勢", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "補抓名單", "value": hot_count, "delta": "起漲補抓", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "今日主推薦", "value": main_count, "delta": "通過硬門檻", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "可小量試單", "value": direct_count, "delta": "仍需盤中確認", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "等待拉回", "value": pullback_count, "delta": "高分但不追", "delta_class": "pro-kpi-delta-flat"},
             {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
     )
+    if main_count <= 0:
+        st.warning("今日沒有股票通過『主推薦硬門檻』。完整推薦表仍保留高分觀察股，但不代表可直接買進；請優先看買進分數、R/R、追價風險與盤中確認。")
 
     render_pro_section("推薦股票加入自選股中心")
     st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")
