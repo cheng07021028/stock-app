@@ -18,8 +18,7 @@
     {
       "code": "1513",
       "name": "中興電",
-      "market": "上市",
-      "category": "綠能儲能"
+      "market": "上市"
     },
     {
       "code": "1726",
@@ -44,8 +43,7 @@
     {
       "code": "2324",
       "name": "仁寶",
-      "market": "上市",
-      "category": "EMS代工"
+      "market": "上市"
     },
     {
       "code": "2330",
@@ -60,14 +58,12 @@
     {
       "code": "2375",
       "name": "凱美",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "2401",
       "name": "凌陽",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "2412",
@@ -77,14 +73,12 @@
     {
       "code": "2421",
       "name": "建準",
-      "market": "上市",
-      "category": "散熱"
+      "market": "上市"
     },
     {
       "code": "2472",
       "name": "立隆電",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "2492",
@@ -94,8 +88,7 @@
     {
       "code": "3013",
       "name": "晟銘電",
-      "market": "上市",
-      "category": "機殼"
+      "market": "上市"
     },
     {
       "code": "3014",
@@ -110,8 +103,7 @@
     {
       "code": "3231",
       "name": "緯創",
-      "market": "上市",
-      "category": "AI伺服器"
+      "market": "上市"
     },
     {
       "code": "3548",
@@ -2304,5 +2296,6 @@
       "name": "彩晶",
       "market": "上市"
     }
-  ]
+  ],
+  "0528": []
 }
