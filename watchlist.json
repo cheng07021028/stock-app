@@ -16,6 +16,12 @@
       "market": "上市"
     },
     {
+      "code": "1513",
+      "name": "中興電",
+      "market": "上市",
+      "category": "綠能儲能"
+    },
+    {
       "code": "1726",
       "name": "永記",
       "market": "上市"
@@ -36,6 +42,12 @@
       "market": "上市"
     },
     {
+      "code": "2324",
+      "name": "仁寶",
+      "market": "上市",
+      "category": "EMS代工"
+    },
+    {
       "code": "2330",
       "name": "台積電",
       "market": "上市"
@@ -46,14 +58,44 @@
       "market": "上市"
     },
     {
+      "code": "2375",
+      "name": "凱美",
+      "market": "上市",
+      "category": "被動元件"
+    },
+    {
+      "code": "2401",
+      "name": "凌陽",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
       "code": "2412",
       "name": "中華電",
       "market": "上市"
     },
     {
+      "code": "2421",
+      "name": "建準",
+      "market": "上市",
+      "category": "散熱"
+    },
+    {
+      "code": "2472",
+      "name": "立隆電",
+      "market": "上市",
+      "category": "被動元件"
+    },
+    {
       "code": "2492",
       "name": "華新科",
       "market": "上市"
+    },
+    {
+      "code": "3013",
+      "name": "晟銘電",
+      "market": "上市",
+      "category": "機殼"
     },
     {
       "code": "3014",
@@ -64,6 +106,12 @@
       "code": "3045",
       "name": "台灣大",
       "market": "上市"
+    },
+    {
+      "code": "3231",
+      "name": "緯創",
+      "market": "上市",
+      "category": "AI伺服器"
     },
     {
       "code": "3548",
@@ -2209,62 +2257,52 @@
     {
       "code": "1513",
       "name": "中興電",
-      "market": "上市",
-      "category": "綠能儲能"
+      "market": "上市"
     },
     {
       "code": "2324",
       "name": "仁寶",
-      "market": "上市",
-      "category": "EMS代工"
+      "market": "上市"
     },
     {
       "code": "2344",
       "name": "華邦電",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     },
     {
       "code": "2356",
       "name": "英業達",
-      "market": "上市",
-      "category": "AI伺服器"
+      "market": "上市"
     },
     {
       "code": "2375",
       "name": "凱美",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "2421",
       "name": "建準",
-      "market": "上市",
-      "category": "散熱"
+      "market": "上市"
     },
     {
       "code": "2449",
       "name": "京元電子",
-      "market": "上市",
-      "category": "封測"
+      "market": "上市"
     },
     {
       "code": "2472",
       "name": "立隆電",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "5285",
       "name": "界霖",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6116",
       "name": "彩晶",
-      "market": "上市",
-      "category": "面板"
+      "market": "上市"
     }
   ]
 }
