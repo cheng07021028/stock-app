@@ -1,5 +1,23 @@
 [
   {
+    "updated_at": "2026-05-29 10:36:57",
+    "market_score": 48.5,
+    "market_trend": "震盪",
+    "market_risk_level": "中",
+    "risk_gate": "selective",
+    "twse_index": 44678.83,
+    "twse_change": 1042.3899999999994,
+    "twse_change_pct": 2.3888062362557516,
+    "otc_index": 432.4800109863281,
+    "otc_change": -7.709991455078126,
+    "otc_change_pct": -1.7515144397456877,
+    "futures_index": 20819.0,
+    "futures_change": -952.0,
+    "futures_change_pct": null,
+    "data_quality": "良好",
+    "version": "v68_overnight_global_market_bridge"
+  },
+  {
     "updated_at": "2026-05-25 19:13:49",
     "market_score": 79.0,
     "market_trend": "偏多",
@@ -4171,14 +4189,14 @@
   },
   {
     "version": "v109_startup_macro_autoupdate",
-    "updated_at": "2026-05-29 10:36:44",
+    "updated_at": "2026-05-29 23:04:16",
     "data_date": "2026-05-29",
-    "market_score": 69.3,
+    "market_score": 66.4,
     "market_trend": "偏多",
     "market_risk_level": "中低",
     "risk_gate": "選股進場",
-    "twse_index": 44681.01,
-    "twse_change_pct": 2.3938,
+    "twse_index": 44732.94,
+    "twse_change_pct": 2.5128,
     "otc_change_pct": -1.7515,
     "source": "startup Yahoo batch + cache fallback"
   }
