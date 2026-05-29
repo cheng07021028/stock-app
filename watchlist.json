@@ -2401,5 +2401,66 @@
       "market": "上市"
     }
   ],
-  "0601": []
+  "0601": [
+    {
+      "code": "2317",
+      "name": "鴻海",
+      "market": "上市",
+      "category": "AI伺服器"
+    },
+    {
+      "code": "2324",
+      "name": "仁寶",
+      "market": "上市",
+      "category": "EMS代工"
+    },
+    {
+      "code": "2356",
+      "name": "英業達",
+      "market": "上市",
+      "category": "AI伺服器"
+    },
+    {
+      "code": "2382",
+      "name": "廣達",
+      "market": "上市",
+      "category": "AI伺服器"
+    },
+    {
+      "code": "2449",
+      "name": "京元電子",
+      "market": "上市",
+      "category": "封測"
+    },
+    {
+      "code": "3016",
+      "name": "嘉晶",
+      "market": "上市",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "3231",
+      "name": "緯創",
+      "market": "上市",
+      "category": "AI伺服器"
+    },
+    {
+      "code": "3537",
+      "name": "堡達",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "4938",
+      "name": "和碩",
+      "market": "上市",
+      "category": "EMS代工"
+    },
+    {
+      "code": "6116",
+      "name": "彩晶",
+      "market": "上市",
+      "category": "面板"
+    }
+  ]
 }
