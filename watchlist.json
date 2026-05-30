@@ -2401,5 +2401,66 @@
       "market": "上市"
     }
   ],
-  "0601": []
+  "0601": [
+    {
+      "code": "2207",
+      "name": "和泰車",
+      "market": "上市",
+      "category": "汽車"
+    },
+    {
+      "code": "2328",
+      "name": "廣宇",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2330",
+      "name": "台積電",
+      "market": "上市",
+      "category": "晶圓代工"
+    },
+    {
+      "code": "2383",
+      "name": "台光電",
+      "market": "上市",
+      "category": "其他電子"
+    },
+    {
+      "code": "2385",
+      "name": "群光",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2610",
+      "name": "華航",
+      "market": "上市",
+      "category": "航空觀光"
+    },
+    {
+      "code": "2618",
+      "name": "長榮航",
+      "market": "上市",
+      "category": "航運"
+    },
+    {
+      "code": "4991",
+      "name": "環宇-KY",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5452",
+      "name": "佶優",
+      "market": "上櫃",
+      "category": "其他電子業"
+    },
+    {
+      "code": "6443",
+      "name": "元晶",
+      "market": "上市",
+      "category": "光電業"
+    }
+  ]
 }
