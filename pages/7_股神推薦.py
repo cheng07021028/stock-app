@@ -100,6 +100,21 @@ except Exception:
     merge_official_factors = None
     load_factor_cache = None
 
+try:
+    from godpick_performance_feedback import (
+        PERFORMANCE_FEEDBACK_VERSION,
+        FEEDBACK_COLUMNS as GODPICK_PERFORMANCE_FEEDBACK_COLUMNS,
+        apply_performance_feedback,
+        load_godpick_performance_profile,
+        performance_feedback_summary,
+    )
+except Exception:
+    PERFORMANCE_FEEDBACK_VERSION = "performance_feedback_unavailable"
+    GODPICK_PERFORMANCE_FEEDBACK_COLUMNS = []
+    apply_performance_feedback = None
+    load_godpick_performance_profile = None
+    performance_feedback_summary = None
+
 
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
@@ -114,7 +129,7 @@ OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
 NIGHT_NEXT_ENTRY_VERSION = "night_next_entry_v109_official_factor_cache_20260513"
-PAGE_TITLE = "股神推薦 V109｜官方因子快取夜間股神版"
+PAGE_TITLE = "股神推薦 VNext｜績效回饋校正版"
 PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
@@ -208,6 +223,21 @@ GODPICK_RECORD_COLUMNS = [
     "決策說明",
     "推薦等級",
     "推薦總分",
+    "股神實戰總分",
+    "選股潛力分",
+    "進場買點分",
+    "風控安全分",
+    "績效校正分",
+    "績效校正說明",
+    "新買點分級",
+    "推薦角色",
+    "過熱原因",
+    "小量試單建議",
+    "加碼條件",
+    "失效條件_績效回饋",
+    "績效回饋建議",
+    "績效樣本數",
+    "績效回饋版本",
     "推薦用途",
     "買進分數",
     "是否可直接買進",
@@ -3654,6 +3684,61 @@ def _apply_god_decision_v5_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = _apply_v76_practical_entry_columns(out)
     return out
 
+
+# =========================================================
+# VNext：股神推薦績效回饋校正版
+# 讀取 8_股神推薦紀錄 / godpick_records.json 的歷史績效，新增實戰總分與 A/B/C+/C-/D 分級。
+# 不刪除舊欄位；推薦總分仍保留，股神實戰總分用於新版排序與說明。
+# =========================================================
+def _load_performance_feedback_profile_safe() -> dict[str, Any]:
+    cache_key = _k("performance_feedback_profile_cache")
+    if cache_key in st.session_state and isinstance(st.session_state.get(cache_key), dict):
+        return st.session_state[cache_key]
+    if callable(load_godpick_performance_profile):
+        try:
+            profile = load_godpick_performance_profile("godpick_records.json")
+        except Exception as e:
+            profile = {"available": False, "message": f"績效回饋載入失敗：{e}", "baseline": {}}
+    else:
+        profile = {"available": False, "message": "godpick_performance_feedback.py 未載入", "baseline": {}}
+    st.session_state[cache_key] = profile
+    return profile
+
+
+def _apply_vnext_performance_feedback_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if callable(apply_performance_feedback):
+        try:
+            return apply_performance_feedback(out, _load_performance_feedback_profile_safe())
+        except Exception as e:
+            out["績效回饋建議"] = f"績效回饋校正失敗：{e}"
+            out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
+            for _c in list(GODPICK_PERFORMANCE_FEEDBACK_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
+            return out
+    for _c in list(GODPICK_PERFORMANCE_FEEDBACK_COLUMNS or []):
+        if _c not in out.columns:
+            out[_c] = ""
+    out["績效回饋建議"] = "績效回饋模組未載入，沿用原推薦邏輯。"
+    out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
+    return out
+
+
+def _render_vnext_performance_feedback_panel() -> None:
+    profile = _load_performance_feedback_profile_safe()
+    try:
+        rows = performance_feedback_summary(profile) if callable(performance_feedback_summary) else []
+    except Exception as e:
+        rows = [("績效回饋", f"摘要產生失敗：{e}", "")]
+    render_pro_info_card(
+        "VNext 績效回饋校正版",
+        rows or [("績效回饋", "未取得摘要", "")],
+        chips=["歷史績效", "C+早期潛伏", "過熱降級", "實戰總分"],
+    )
+
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
     """補齊進階欄位，不破壞舊欄位與既有紀錄格式。"""
     if df is None or df.empty:
@@ -3699,6 +3784,7 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = tracking_df[c] if c in tracking_df.columns else ""
 
     out = _apply_god_decision_v5_columns(out)
+    out = _apply_vnext_performance_feedback_columns(out)
     return out
 
 
@@ -8534,9 +8620,17 @@ def _build_recommend_df(
     except Exception as v139_err:
         base_df["股神實戰建議"] = f"動態資金流檢查失敗：{v139_err}"
 
+    # VNext：套用歷史績效回饋校正；保留原推薦總分，新增股神實戰總分與新買點分級。
+    base_df = _apply_vnext_performance_feedback_columns(base_df)
+
     base_score = pd.to_numeric(base_df.get("推薦總分", 0), errors="coerce").fillna(0)
+    practical_score = pd.to_numeric(base_df.get("股神實戰總分", base_score), errors="coerce").fillna(base_score)
     main_mask = base_df.get("是否主要顯示", pd.Series(["否"] * len(base_df), index=base_df.index)).astype(str).eq("是")
-    final_df = base_df[(base_score >= min_total_score) & main_mask].copy()
+    role_text = base_df.get("推薦角色", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    feedback_main_mask = role_text.str.contains("股神主推薦", na=False) & (practical_score >= 82)
+    early_potential_mask = role_text.str.contains("早期潛伏", na=False) & (practical_score >= max(68, float(min_total_score)))
+    confirm_mask = role_text.str.contains("等突破確認", na=False) & (practical_score >= 80)
+    final_df = base_df[(base_score >= min_total_score) & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask)].copy()
 
     # 若沒有主要推薦，不用冷門股硬湊；只保留少數高品質觀察作為輔助參考。
     if final_df.empty:
@@ -8549,7 +8643,7 @@ def _build_recommend_df(
             & (base_df.get("近期強勢狀態", pd.Series([""] * len(base_df), index=base_df.index)).astype(str).isin(["近期轉強", "強勢主升"]))
             & ~base_df.get("量能狀態", pd.Series([""] * len(base_df), index=base_df.index)).astype(str).str.contains("極低量|冷門|量能不足", na=False)
         )
-        _watch_sort_cols = ["股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"]
+        _watch_sort_cols = ["股神實戰總分", "選股潛力分", "股神輸出排序", "人氣量能分", "近20日漲幅%", "隔日進場分數", "交易可行分數", "推薦總分"]
         _active_watch_sort_cols = [c for c in _watch_sort_cols if c in base_df.columns]
         final_df = base_df[watch_mask].copy()
         if _active_watch_sort_cols:
@@ -8563,7 +8657,7 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    sort_cols = ["股神輸出排序", "候補排序分", "人氣量能分", "成交額百萬", "最新成交量_張", "近20日漲幅%", "近5日漲幅%", "族群資金流分數", "族群流動性分數", "隔日進場分數", "交易可行分數", "實戰品質分", "夜間股神總分", "推薦總分", "區間漲跌幅%"]
+    sort_cols = ["股神實戰總分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "股神輸出排序", "候補排序分", "人氣量能分", "成交額百萬", "最新成交量_張", "近20日漲幅%", "近5日漲幅%", "族群資金流分數", "族群流動性分數", "隔日進場分數", "交易可行分數", "實戰品質分", "夜間股神總分", "推薦總分", "區間漲跌幅%"]
     active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     if active_sort_cols:
         final_df = final_df.sort_values(
@@ -9662,6 +9756,12 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 
     def _preset_columns(preset_name: str) -> list[str]:
         presets = {
+            "VNext績效回饋校正版": [
+                "股票代號", "股票名稱", "市場別", "類別", "推薦角色", "新買點分級", "股神實戰總分",
+                "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "績效校正說明",
+                "推薦總分", "推薦型態", "買點分級", "小量試單建議", "績效回饋建議",
+                "過熱原因", "加碼條件", "失效條件_績效回饋", "最新價", "近5日漲幅%", "追價風險分", "風險報酬比",
+            ],
             "夜間隔日股神版": [
                 "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分", "夜間股神總分",
                 "隔日實戰排序分", "隔日進場分數", "波段潛力分數", "進場型態_隔日", "隔日建議動作",
@@ -10363,6 +10463,7 @@ def main():
 
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
+    _render_vnext_performance_feedback_panel()
 
     render_pro_info_card(
         "股神交易決策升級",
@@ -10399,11 +10500,13 @@ def main():
     top_df = rec_df.iloc[:top_n].copy()
 
     strong_count = int((rec_df["推薦等級"].isin(["股神級", "強烈關注"])).sum())
-    avg_score = _avg_safe([_safe_float(x) for x in rec_df["推薦總分"].tolist()], 0)
+    avg_score = _avg_safe([_safe_float(x) for x in rec_df.get("股神實戰總分", rec_df["推薦總分"]).tolist()], 0)
     leader_count = int((rec_df["是否領先同類股"] == "是").sum())
-    main_count = int((rec_df.get("是否主要顯示", pd.Series(["否"] * len(rec_df), index=rec_df.index)).astype(str) == "是").sum())
-    pullback_count = int(rec_df.get("股神推薦層級", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("等待拉回|高分等待", na=False).sum())
-    direct_count = int(rec_df.get("是否可直接買進", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("可小量試單|可直接|是", na=False).sum())
+    role_series = rec_df.get("推薦角色", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str)
+    main_count = int(((rec_df.get("是否主要顯示", pd.Series(["否"] * len(rec_df), index=rec_df.index)).astype(str) == "是") | role_series.str.contains("股神主推薦", na=False)).sum())
+    early_count = int(role_series.str.contains("早期潛伏", na=False).sum())
+    pullback_count = int((rec_df.get("股神推薦層級", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("等待拉回|高分等待", na=False) | role_series.str.contains("等突破確認", na=False)).sum())
+    direct_count = int((rec_df.get("是否可直接買進", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("可小量試單|可直接|是", na=False) | rec_df.get("小量試單建議", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("可小量", na=False)).sum())
 
     hot_count = len(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) else 0
     render_pro_kpi_row(
@@ -10411,8 +10514,9 @@ def main():
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "今日主推薦", "value": main_count, "delta": "通過硬門檻", "delta_class": "pro-kpi-delta-flat"},
             {"label": "可小量試單", "value": direct_count, "delta": "仍需盤中確認", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "等待拉回", "value": pullback_count, "delta": "高分但不追", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均總分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
+            {"label": "早期潛伏", "value": early_count, "delta": "C+剛起漲", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "等待確認", "value": pullback_count, "delta": "等突破/拉回", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "平均實戰分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
         ]
     )
     if main_count <= 0:
@@ -10455,7 +10559,7 @@ def main():
         st.session_state[_k("rec_pick_group")] = saved_pick_group
 
     rec_code_to_label = {
-        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
+        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{_safe_str(r.get('新買點分級')) or r['推薦等級']}｜實戰{format_number(r.get('股神實戰總分', r.get('推薦總分')),1)}"
         for _, r in rec_df.iterrows()
     }
     rec_all_codes = rec_df["股票代號"].astype(str).tolist()
@@ -10567,7 +10671,7 @@ def main():
 
     render_pro_section("寫入 8_股神推薦紀錄")
     record_code_to_label = {
-        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{r['推薦等級']}｜{format_number(r['推薦總分'],1)}"
+        str(r["股票代號"]): f"{r['股票代號']} {r['股票名稱']}｜{_safe_str(r.get('新買點分級')) or r['推薦等級']}｜實戰{format_number(r.get('股神實戰總分', r.get('推薦總分')),1)}"
         for _, r in rec_df.iterrows()
     }
     record_all_codes = rec_df["股票代號"].astype(str).tolist()
