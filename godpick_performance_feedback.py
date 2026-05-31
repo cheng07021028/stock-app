@@ -16,11 +16,15 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "vnext_performance_feedback_20260530"
+PERFORMANCE_FEEDBACK_VERSION = "vnext_performance_feedback_20260531_phase1"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 
 FEEDBACK_COLUMNS = [
     "股神實戰總分",
+    "Alpha選股潛力分",
+    "Entry進場買點分",
+    "Risk風控安全分",
+    "Feedback績效校正分",
     "選股潛力分",
     "進場買點分",
     "風控安全分",
@@ -29,12 +33,17 @@ FEEDBACK_COLUMNS = [
     "新買點分級",
     "推薦角色",
     "過熱原因",
+    "建議動作",
+    "建議倉位",
+    "建議倉位%",
     "小量試單建議",
     "加碼條件",
+    "失效條件",
     "失效條件_績效回饋",
     "績效回饋建議",
     "績效樣本數",
     "績效回饋版本",
+    "決策版本",
 ]
 
 
@@ -303,6 +312,73 @@ def _text(out: pd.DataFrame, col: str) -> pd.Series:
     return out[col].map(_safe_str)
 
 
+def _sync_phase1_feedback_columns(out: pd.DataFrame) -> pd.DataFrame:
+    """補齊 Phase 1 決策欄位別名；不刪欄、不寫檔。"""
+    if out is None:
+        return pd.DataFrame()
+    if out.empty:
+        for c in FEEDBACK_COLUMNS:
+            if c not in out.columns:
+                out[c] = ""
+        return out
+
+    def _ensure_numeric_alias(target: str, source: str, default: float = 0.0) -> None:
+        if target not in out.columns:
+            out[target] = pd.to_numeric(out[source], errors="coerce").fillna(default) if source in out.columns else default
+        elif source in out.columns:
+            blank = out[target].map(lambda v: _safe_str(v) == "")
+            if blank.any():
+                out.loc[blank, target] = pd.to_numeric(out.loc[blank, source], errors="coerce").fillna(default)
+
+    _ensure_numeric_alias("Alpha選股潛力分", "選股潛力分", 0.0)
+    _ensure_numeric_alias("Entry進場買點分", "進場買點分", 0.0)
+    _ensure_numeric_alias("Risk風控安全分", "風控安全分", 0.0)
+
+    corr_src = out["績效校正分"] if "績效校正分" in out.columns else pd.Series([0] * len(out), index=out.index)
+    corr = pd.to_numeric(corr_src, errors="coerce").fillna(0).clip(-15, 15)
+    feedback_score = (50 + corr * 3).clip(0, 100).round(1)
+    if "Feedback績效校正分" not in out.columns:
+        out["Feedback績效校正分"] = feedback_score
+    else:
+        feedback_now = pd.to_numeric(out["Feedback績效校正分"], errors="coerce")
+        blank = out["Feedback績效校正分"].map(lambda v: _safe_str(v) == "") | feedback_now.fillna(0).eq(0)
+        if blank.any():
+            out.loc[blank, "Feedback績效校正分"] = feedback_score.loc[blank]
+
+    if "建議動作" not in out.columns:
+        out["建議動作"] = out.get("績效回饋建議", "")
+    else:
+        src = out.get("績效回饋建議", "")
+        if isinstance(src, pd.Series):
+            blank = out["建議動作"].map(lambda v: _safe_str(v) == "")
+            out.loc[blank, "建議動作"] = src.loc[blank]
+
+    if "建議倉位" not in out.columns:
+        if "建議倉位%" in out.columns:
+            out["建議倉位"] = out["建議倉位%"].map(lambda v: f"{_safe_float(v, 0) or 0:.0f}%")
+        elif "建議部位%" in out.columns:
+            out["建議倉位"] = out["建議部位%"].map(lambda v: f"{_safe_float(v, 0) or 0:.0f}%")
+        else:
+            out["建議倉位"] = ""
+
+    if "失效條件" not in out.columns:
+        out["失效條件"] = out.get("失效條件_績效回饋", "")
+    else:
+        src = out.get("失效條件_績效回饋", "")
+        if isinstance(src, pd.Series):
+            blank = out["失效條件"].map(lambda v: _safe_str(v) == "")
+            out.loc[blank, "失效條件"] = src.loc[blank]
+
+    if "失效條件_績效回饋" not in out.columns:
+        out["失效條件_績效回饋"] = out.get("失效條件", "")
+    if "決策版本" not in out.columns:
+        out["決策版本"] = PERFORMANCE_FEEDBACK_VERSION
+    else:
+        blank = out["決策版本"].map(lambda v: _safe_str(v) == "")
+        out.loc[blank, "決策版本"] = PERFORMANCE_FEEDBACK_VERSION
+    return out
+
+
 def _ret5_score(ret5: pd.Series) -> pd.Series:
     # 0~8% 視為健康起漲；過高視為追高風險，負值則降低買點。
     s = pd.Series([55.0] * len(ret5), index=ret5.index)
@@ -482,10 +558,10 @@ def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] 
     if not profile or not profile.get("available"):
         for c in FEEDBACK_COLUMNS:
             if c not in out.columns:
-                out[c] = "" if c not in {"股神實戰總分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "績效樣本數"} else 0
+                out[c] = "" if c not in {"股神實戰總分", "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "績效樣本數", "建議倉位%"} else 0
         out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
         out["績效校正說明"] = (profile or {}).get("message", "未載入績效回饋")
-        return out
+        return _sync_phase1_feedback_columns(out)
 
     tech = _num(out, "技術結構分數", 50)
     pre = _num(out, "起漲前兆分數", 0)
@@ -540,7 +616,7 @@ def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] 
         base = out["股神推論邏輯"].map(_safe_str)
         add = out["績效回饋建議"].map(_safe_str)
         out["股神推論邏輯"] = [b + ("｜績效回饋：" + a if a and a not in b else "") for b, a in zip(base, add)]
-    return out
+    return _sync_phase1_feedback_columns(out)
 
 
 def performance_feedback_summary(profile: dict[str, Any] | None) -> list[tuple[str, str, str]]:
