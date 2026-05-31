@@ -116,6 +116,20 @@ except Exception:
     performance_feedback_summary = None
 
 
+try:
+    from godpick_decision_engine import (
+        DECISION_ENGINE_VERSION as GODPICK_DECISION_ENGINE_VERSION,
+        DECISION_ENGINE_COLUMNS as GODPICK_DECISION_ENGINE_COLUMNS,
+        DECISION_ROLE_VALUES as GODPICK_DECISION_ROLE_VALUES,
+        apply_godpick_decision_engine,
+    )
+except Exception:
+    GODPICK_DECISION_ENGINE_VERSION = "decision_engine_unavailable"
+    GODPICK_DECISION_ENGINE_COLUMNS = []
+    GODPICK_DECISION_ROLE_VALUES = []
+    apply_godpick_decision_engine = None
+
+
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
 PRELAUNCH_789_VERSION = "prelaunch_789_v1_20260425"
@@ -224,6 +238,10 @@ GODPICK_RECORD_COLUMNS = [
     "推薦等級",
     "推薦總分",
     "股神實戰總分",
+    "Alpha選股潛力分",
+    "Entry進場買點分",
+    "Risk風控安全分",
+    "Feedback績效校正分",
     "選股潛力分",
     "進場買點分",
     "風控安全分",
@@ -232,12 +250,16 @@ GODPICK_RECORD_COLUMNS = [
     "新買點分級",
     "推薦角色",
     "過熱原因",
+    "建議動作",
+    "建議倉位",
     "小量試單建議",
     "加碼條件",
+    "失效條件",
     "失效條件_績效回饋",
     "績效回饋建議",
     "績效樣本數",
     "績效回饋版本",
+    "決策版本",
     "推薦用途",
     "買進分數",
     "是否可直接買進",
@@ -427,6 +449,12 @@ GODPICK_RECORD_COLUMNS = [
     "模式績效標籤",
     "備註",
 ]
+
+try:
+    _phase1_record_cols = list(GODPICK_RECORD_COLUMNS) + list(GODPICK_DECISION_ENGINE_COLUMNS or [])
+    GODPICK_RECORD_COLUMNS = list(dict.fromkeys(_phase1_record_cols))
+except Exception:
+    pass
 
 
 # =========================================================
@@ -3709,21 +3737,39 @@ def _apply_vnext_performance_feedback_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     out = df.copy()
+    profile = _load_performance_feedback_profile_safe()
+
     if callable(apply_performance_feedback):
         try:
-            return apply_performance_feedback(out, _load_performance_feedback_profile_safe())
+            out = apply_performance_feedback(out, profile)
         except Exception as e:
             out["績效回饋建議"] = f"績效回饋校正失敗：{e}"
             out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
             for _c in list(GODPICK_PERFORMANCE_FEEDBACK_COLUMNS or []):
                 if _c not in out.columns:
                     out[_c] = ""
-            return out
-    for _c in list(GODPICK_PERFORMANCE_FEEDBACK_COLUMNS or []):
-        if _c not in out.columns:
-            out[_c] = ""
-    out["績效回饋建議"] = "績效回饋模組未載入，沿用原推薦邏輯。"
-    out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
+    else:
+        for _c in list(GODPICK_PERFORMANCE_FEEDBACK_COLUMNS or []):
+            if _c not in out.columns:
+                out[_c] = ""
+        out["績效回饋建議"] = "績效回饋模組未載入，沿用原推薦邏輯。"
+        out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
+
+    # VNext Phase 1：最小侵入串接決策引擎；不改掃描架構、不讀寫 JSON。
+    if callable(apply_godpick_decision_engine):
+        try:
+            out = apply_godpick_decision_engine(out, profile)
+        except Exception as e:
+            out["建議動作"] = f"決策引擎套用失敗：{e}"
+            out["決策版本"] = GODPICK_DECISION_ENGINE_VERSION
+            for _c in list(GODPICK_DECISION_ENGINE_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
+    else:
+        for _c in list(GODPICK_DECISION_ENGINE_COLUMNS or []):
+            if _c not in out.columns:
+                out[_c] = ""
+        out["決策版本"] = GODPICK_DECISION_ENGINE_VERSION
     return out
 
 
@@ -3734,9 +3780,9 @@ def _render_vnext_performance_feedback_panel() -> None:
     except Exception as e:
         rows = [("績效回饋", f"摘要產生失敗：{e}", "")]
     render_pro_info_card(
-        "VNext 績效回饋校正版",
+        "VNext Phase 1｜股神推薦決策引擎",
         rows or [("績效回饋", "未取得摘要", "")],
-        chips=["歷史績效", "C+早期潛伏", "過熱降級", "實戰總分"],
+        chips=["Alpha/Entry/Risk/Feedback", "A/B/C+/C-/D", "過熱禁買", "實戰總分"],
     )
 
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -9758,9 +9804,11 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
         presets = {
             "VNext績效回饋校正版": [
                 "股票代號", "股票名稱", "市場別", "類別", "推薦角色", "新買點分級", "股神實戰總分",
+                "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分",
                 "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "績效校正說明",
+                "建議動作", "建議倉位", "加碼條件", "失效條件", "過熱原因", "決策版本",
                 "推薦總分", "推薦型態", "買點分級", "小量試單建議", "績效回饋建議",
-                "過熱原因", "加碼條件", "失效條件_績效回饋", "最新價", "近5日漲幅%", "追價風險分", "風險報酬比",
+                "失效條件_績效回饋", "最新價", "近5日漲幅%", "追價風險分", "風險報酬比",
             ],
             "夜間隔日股神版": [
                 "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分", "夜間股神總分",
