@@ -2473,5 +2473,66 @@
       "market": "上市"
     }
   ],
-  "0602": []
+  "0602": [
+    {
+      "code": "2308",
+      "name": "台達電",
+      "market": "上市",
+      "category": "電源供應"
+    },
+    {
+      "code": "2337",
+      "name": "旺宏",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2641",
+      "name": "正德",
+      "market": "上櫃",
+      "category": "航運"
+    },
+    {
+      "code": "3011",
+      "name": "今皓",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3015",
+      "name": "全漢",
+      "market": "上市",
+      "category": "電源供應"
+    },
+    {
+      "code": "3323",
+      "name": "加百裕",
+      "market": "上櫃",
+      "category": "電腦及週邊設備業"
+    },
+    {
+      "code": "4989",
+      "name": "榮科",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "5203",
+      "name": "訊連",
+      "market": "上市",
+      "category": "資訊服務業"
+    },
+    {
+      "code": "6126",
+      "name": "信音",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6584",
+      "name": "南俊國際",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    }
+  ]
 }
