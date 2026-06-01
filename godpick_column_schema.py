@@ -227,10 +227,13 @@ def clean_value(v: Any) -> Any:
 
 
 def _coalesce_series(target: pd.Series, source: pd.Series) -> pd.Series:
-    mask = target.map(is_blank)
+    # Pandas 3.x 不再允許把字串 / 混合型別別名直接塞進 float/int 欄位。
+    # 只在 target 空白且 source 有值時回補，並在需要回補時轉成 object，避免 dtype upcast 例外。
+    source = source.reindex(target.index)
+    mask = target.map(is_blank) & source.map(lambda v: not is_blank(v))
     if mask.any():
-        target = target.copy()
-        target.loc[mask] = source.loc[mask]
+        target = target.astype("object").copy()
+        target.loc[mask] = source.astype("object").loc[mask]
     return target
 
 

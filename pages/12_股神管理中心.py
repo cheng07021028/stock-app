@@ -923,7 +923,9 @@ def _fill_num_col(df: pd.DataFrame, target: str, sources: List[str], default: An
             cur = cur.fillna(src)
     if default is not None:
         cur = cur.fillna(default)
-    df[target] = cur
+    # Pandas 3.x 對 int 欄位寫入 float 會直接 TypeError；管理中心後續會以百分比小數回填，
+    # 這裡統一轉成 float64，避免 Streamlit Cloud 新版 pandas 在智慧補值時中斷。
+    df[target] = pd.to_numeric(cur, errors="coerce").astype("float64")
     return df
 
 
@@ -1195,9 +1197,16 @@ def _apply_v25_smart_backfill(out: pd.DataFrame) -> pd.DataFrame:
     ]:
         if col not in out.columns:
             out[col] = ""
-    for col in ["建議倉位%", "動態建議倉位%"]:
+    for col in ["建議倉位%", "動態建議倉位%", "第一筆進場%"]:
         if col not in out.columns:
             out[col] = pd.NA
+        try:
+            out[col] = _safe_numeric_series(out, col, default=0.0, fill=False).astype("float64")
+        except Exception:
+            out[col] = pd.to_numeric(
+                out[col].astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).astype("float64")
 
     for idx, row in out.iterrows():
         if _is_blank_value(row.get("單檔風險等級")):
