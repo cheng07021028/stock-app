@@ -3755,7 +3755,7 @@ def _apply_vnext_performance_feedback_columns(df: pd.DataFrame) -> pd.DataFrame:
         out["績效回饋建議"] = "績效回饋模組未載入，沿用原推薦邏輯。"
         out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
 
-    # VNext Phase 1：最小侵入串接決策引擎；不改掃描架構、不讀寫 JSON。
+    # VNext Phase 2：最小侵入串接決策引擎；不改掃描架構、不讀寫 JSON。
     if callable(apply_godpick_decision_engine):
         try:
             out = apply_godpick_decision_engine(out, profile)
@@ -3780,9 +3780,9 @@ def _render_vnext_performance_feedback_panel() -> None:
     except Exception as e:
         rows = [("績效回饋", f"摘要產生失敗：{e}", "")]
     render_pro_info_card(
-        "VNext Phase 1｜股神推薦決策引擎",
+        "VNext Phase 2｜股神實戰過濾與硬否決",
         rows or [("績效回饋", "未取得摘要", "")],
-        chips=["Alpha/Entry/Risk/Feedback", "A/B/C+/C-/D", "過熱禁買", "實戰總分"],
+        chips=["硬否決", "Entry/Risk門檻", "A/B/C+/C-/D", "過熱禁買"],
     )
 
 def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -8673,10 +8673,18 @@ def _build_recommend_df(
     practical_score = pd.to_numeric(base_df.get("股神實戰總分", base_score), errors="coerce").fillna(base_score)
     main_mask = base_df.get("是否主要顯示", pd.Series(["否"] * len(base_df), index=base_df.index)).astype(str).eq("是")
     role_text = base_df.get("推薦角色", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
-    feedback_main_mask = role_text.str.contains("股神主推薦", na=False) & (practical_score >= 82)
+    filter_state = base_df.get("實戰過濾狀態", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    hard_veto_text = base_df.get("硬否決原因", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    blocked_decision_mask = (
+        role_text.str.contains("過熱禁買|硬否決", na=False)
+        | filter_state.str.contains("BLOCK", na=False)
+        | hard_veto_text.str.strip().ne("")
+    )
+    feedback_main_mask = role_text.str.contains("股神主推薦", na=False) & (practical_score >= 84)
     early_potential_mask = role_text.str.contains("早期潛伏", na=False) & (practical_score >= max(68, float(min_total_score)))
-    confirm_mask = role_text.str.contains("等突破確認", na=False) & (practical_score >= 80)
-    final_df = base_df[(base_score >= min_total_score) & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask)].copy()
+    confirm_mask = role_text.str.contains("等突破確認", na=False) & (practical_score >= 76)
+    allowed_decision_mask = ~blocked_decision_mask & ~role_text.str.contains("弱勢觀察", na=False)
+    final_df = base_df[(base_score >= min_total_score) & allowed_decision_mask & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask)].copy()
 
     # 若沒有主要推薦，不用冷門股硬湊；只保留少數高品質觀察作為輔助參考。
     if final_df.empty:

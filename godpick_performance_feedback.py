@@ -16,7 +16,7 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "vnext_performance_feedback_20260531_phase1"
+PERFORMANCE_FEEDBACK_VERSION = "vnext_performance_feedback_20260602_phase2_hard_veto"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 
 FEEDBACK_COLUMNS = [
@@ -33,6 +33,10 @@ FEEDBACK_COLUMNS = [
     "新買點分級",
     "推薦角色",
     "過熱原因",
+    "硬否決原因",
+    "實戰過濾狀態",
+    "主推薦降級原因",
+    "冷卻提示",
     "建議動作",
     "建議倉位",
     "建議倉位%",
