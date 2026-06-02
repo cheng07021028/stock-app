@@ -2482,14 +2482,12 @@
     {
       "code": "2328",
       "name": "廣宇",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2330",
       "name": "台積電",
-      "market": "上市",
-      "category": "晶圓代工"
+      "market": "上市"
     },
     {
       "code": "2337",
@@ -2499,32 +2497,27 @@
     {
       "code": "2356",
       "name": "英業達",
-      "market": "上市",
-      "category": "AI伺服器"
+      "market": "上市"
     },
     {
       "code": "2362",
       "name": "藍天",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "2419",
       "name": "仲琦",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "2610",
       "name": "華航",
-      "market": "上市",
-      "category": "航空觀光"
+      "market": "上市"
     },
     {
       "code": "2618",
       "name": "長榮航",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "2641",
@@ -2549,8 +2542,7 @@
     {
       "code": "3706",
       "name": "神達",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "4989",
@@ -2575,14 +2567,13 @@
     {
       "code": "8112",
       "name": "至上",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "8271",
       "name": "宇瞻",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     }
-  ]
+  ],
+  "0603": []
 }
