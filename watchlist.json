@@ -2579,62 +2579,53 @@
     {
       "code": "1608",
       "name": "華榮",
-      "market": "上市",
-      "category": "電器電纜"
+      "market": "上市"
     },
     {
       "code": "2105",
       "name": "正新",
-      "market": "上市",
-      "category": "橡膠工業"
+      "market": "上市"
     },
     {
       "code": "2330",
       "name": "台積電",
-      "market": "上市",
-      "category": "晶圓代工"
+      "market": "上市"
     },
     {
       "code": "2412",
       "name": "中華電",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "2603",
       "name": "長榮",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "2618",
       "name": "長榮航",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "2637",
       "name": "慧洋-KY",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "3015",
       "name": "全漢",
-      "market": "上市",
-      "category": "電源供應"
+      "market": "上市"
     },
     {
       "code": "4915",
       "name": "致伸",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6190",
       "name": "萬泰科",
-      "market": "上櫃",
-      "category": "通信網路業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0604": []
 }
