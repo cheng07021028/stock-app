@@ -2631,62 +2631,53 @@
     {
       "code": "1612",
       "name": "宏泰",
-      "market": "上市",
-      "category": "電器電纜"
+      "market": "上市"
     },
     {
       "code": "2105",
       "name": "正新",
-      "market": "上市",
-      "category": "橡膠工業"
+      "market": "上市"
     },
     {
       "code": "2337",
       "name": "旺宏",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     },
     {
       "code": "2347",
       "name": "聯強",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "2609",
       "name": "陽明",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "2637",
       "name": "慧洋-KY",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "6150",
       "name": "撼訊",
-      "market": "上櫃",
-      "category": "電腦及週邊設備業"
+      "market": "上櫃"
     },
     {
       "code": "6244",
       "name": "茂迪",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "6443",
       "name": "元晶",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "8271",
       "name": "宇瞻",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     }
-  ]
+  ],
+  "0605": []
 }
