@@ -303,10 +303,10 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-06-04 21:58:56",
-  "weight_settings_updated_at": "2026-06-04 21:58:56",
-  "weight_update_seq": 25,
-  "weight_source": "14_股神權重校正",
-  "last_weight_calibration_profile": "主校正建議",
+  "updated_at": "2026-06-04 21:59:10",
+  "weight_settings_updated_at": "2026-06-04 21:59:10",
+  "weight_update_seq": 26,
+  "weight_source": "7_股神推薦",
+  "last_weight_calibration_profile": "7_股神推薦手動套用",
   "version": "godpick_v143_weight_reload_sync"
 }
