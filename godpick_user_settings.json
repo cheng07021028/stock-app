@@ -301,9 +301,9 @@
     "min_trade_score": 45.0,
     "recommend_mode": "飆股模式",
     "risk_strictness": "標準",
-    "pick_strategy": "結合版"
+    "pick_strategy": "精準版"
   },
-  "updated_at": "2026-06-05 11:55:50",
+  "updated_at": "2026-06-05 12:06:59",
   "weight_settings_updated_at": "2026-06-05 10:33:40",
   "weight_update_seq": 28,
   "weight_source": "14_股神權重校正",
