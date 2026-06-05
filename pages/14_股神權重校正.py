@@ -408,7 +408,7 @@ def main() -> None:
         horizon_options = [1, 3, 5, 10, 20]
         saved_horizon = int(saved_calib_setting.get("main_horizon", 5) or 5)
         if saved_horizon not in horizon_options:
-            saved_horizon = 5
+            saved_horizon = 20
         horizon = st.selectbox(
             "主要校正週期",
             horizon_options,
