@@ -1,5 +1,16 @@
 [
   {
+    "time": "2026-06-05 17:17:21",
+    "status": "preserved_old_cache",
+    "row_count": 2326,
+    "diagnostics": [
+      "TWSE PER/PBR 取得失敗：HTTPS(host='openapi.twse.com.tw', port=443): 連線重試失敗: /v1/exchangeReport/BWIBBU_ALL (Caused by ConnectTimeoutError(<HTTPSConnection(host='openapi.twse.com.tw', port=443) at 0x7ff756824b90>, 'Connection to openapi.twse....",
+      "上市月營收取得失敗：HTTPS(host='openapi.twse.com.tw', port=443): 連線重試失敗: /v1/opendata/t187ap05_L (Caused by ConnectTimeoutError(<HTTPSConnection(host='openapi.twse.com.tw', port=443) at 0x7ff756825f90>, 'Connection to openapi.twse.com.tw... / 上櫃月營收取得失敗：HTTPS(host='openapi.twse.com.tw', port=443): 連線重試失敗: /v1/opendata/t187ap05_O (Caused by ConnectTimeoutError(<HTTPSCon...",
+      "20260605 T86 取得 1320 筆。 / 20260604 T86 取得 1320 筆。 / 20260603 T86 取得 1325 筆。 / 20260602 T86 取得 1320 筆。 / 20260601 T86 取得 1326 筆。 / 20260529 T86 取得 1320 筆。 / 20260528 T86 取得 1320 筆。",
+      "本次完整度>=60 僅 0 筆，低於既有快取 831 筆，已保留舊有效快取，不覆蓋。"
+    ]
+  },
+  {
     "time": "2026-06-04 17:40:57",
     "status": "success",
     "row_count": 2326,
