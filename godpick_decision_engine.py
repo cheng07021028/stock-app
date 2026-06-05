@@ -22,7 +22,7 @@ except Exception:
     PHASE4_COLUMNS = []
     apply_limitup_hunter_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase4_1_week_battle_split_20260605"
+DECISION_ENGINE_VERSION = "vnext_phase4_2_mainstream_money_filter_20260605"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -85,6 +85,18 @@ DECISION_ENGINE_COLUMNS = [
     "大戶承接分",
     "籌碼續航分",
     "資金攻擊摘要",
+    "主流資金分",
+    "資金攻擊有效分",
+    "成交額等級",
+    "冷門股警示",
+    "主流股判定",
+    "資金攻擊有效性",
+    "主流資金角色",
+    "主流資金說明",
+    "主流資金引擎版本",
+    "主流作戰分區",
+    "主流作戰說明",
+    "主流操作動作",
     "飆股攻擊分",
     "隔日大漲機率分",
     "漲停獵人觀察",
@@ -126,6 +138,8 @@ NUMERIC_DECISION_COLUMNS = {
     "主力點火分",
     "大戶承接分",
     "籌碼續航分",
+    "主流資金分",
+    "資金攻擊有效分",
     "飆股攻擊分",
     "隔日大漲機率分",
     "盤中轉強觸發價",
@@ -387,6 +401,37 @@ def _row_breakout_distance(row: pd.Series) -> float:
 
 def _has_breakout_reference(row: pd.Series) -> bool:
     return _row_breakout_price(row) > 0 or bool(_first_text(row, ["突破確認價", "突破確認價_隔日", "近端壓力", "第一壓力價"]))
+
+
+def _mainstream_score(row: pd.Series) -> float:
+    return _safe_float(row.get("主流資金分"), 50) or 50
+
+
+def _money_effective_score(row: pd.Series) -> float:
+    return _safe_float(row.get("資金攻擊有效分"), 50) or 50
+
+
+def _amount_m(row: pd.Series) -> float:
+    return _safe_float(row.get("成交額百萬", row.get("20日均成交額百萬", 0)), 0) or 0
+
+
+def _is_cold_stock(row: pd.Series) -> bool:
+    warn = _safe_str(row.get("冷門股警示"))
+    label = _safe_str(row.get("主流股判定"))
+    role = _safe_str(row.get("主流資金角色"))
+    if warn:
+        return True
+    return any(k in f"{label}｜{role}" for k in ["冷門", "低流動性排除", "冷門禁追"])
+
+
+def _is_mainstream_attackable(row: pd.Series) -> bool:
+    ms = _mainstream_score(row)
+    ef = _money_effective_score(row)
+    amount = _amount_m(row)
+    label = _safe_str(row.get("主流股判定"))
+    if _is_cold_stock(row):
+        return False
+    return bool((ms >= 65 and ef >= 52 and amount >= 250) or any(k in label for k in ["主流攻擊股", "主流輪動股"]))
 
 
 def _has_pullback_only_signal(row: pd.Series) -> bool:
@@ -665,7 +710,28 @@ def _decide_role(row: pd.Series) -> str:
     sector_attack = _safe_float(row.get("族群攻擊強度"), 50) or 50
     money_score = _safe_float(row.get("籌碼續航分", row.get("法人攻擊分")), 50) or 50
     hunter_role = _safe_str(row.get("飆股獵人角色"))
-    is_phase4_attack = ("飆股攻擊候選" in hunter_role or attack_score >= 82) and big_score >= 72 and market_attack >= 56 and sector_attack >= 66 and money_score >= 58 and risk >= 42 and entry >= 42
+    mainstream = _mainstream_score(row)
+    money_effective = _money_effective_score(row)
+    cold_stock = _is_cold_stock(row)
+    mainstream_ok = _is_mainstream_attackable(row)
+    is_phase4_attack = (
+        ("飆股攻擊候選" in hunter_role or attack_score >= 82)
+        and big_score >= 72
+        and market_attack >= 56
+        and sector_attack >= 66
+        and money_score >= 58
+        and mainstream >= 68
+        and money_effective >= 54
+        and risk >= 42
+        and entry >= 42
+        and not cold_stock
+    )
+
+    # Phase 4.2：冷門低流動性股不列 S/A/B 主流追蹤。最多 C+ 潛伏或 C- 觀察。
+    if cold_stock:
+        if early and total >= 62 and alpha >= 62 and entry >= 38 and risk >= 38 and _amount_m(row) >= 50:
+            return ROLE_EARLY
+        return ROLE_WEAK
 
     # Phase 3/4：硬否決不再一律 D。先分辨真過熱；若非真D且具資金攻擊，優先分流為 S。
     if hard_veto:
@@ -683,18 +749,18 @@ def _decide_role(row: pd.Series) -> str:
         return ROLE_ATTACK
 
     # A 主推薦維持嚴格；只有買點與風控都過門檻才給倉位。
-    if total >= 84 and alpha >= 76 and entry >= 70 and risk >= 70 and not main_blocks:
+    if total >= 84 and alpha >= 76 and entry >= 70 and risk >= 70 and mainstream_ok and not main_blocks:
         return ROLE_MAIN
 
     # 高 Alpha 但買點或風控未完全通過時，進 B，不進 D。
-    if total >= 66 and alpha >= 68 and risk >= 38 and (entry >= 42 or feedback >= 35 or _has_breakout_reference(row)):
+    if total >= 66 and alpha >= 68 and risk >= 38 and mainstream >= 55 and money_effective >= 48 and (entry >= 42 or feedback >= 35 or _has_breakout_reference(row)):
         return ROLE_CONFIRM
 
     # 早期潛伏只給小量追蹤；止跌反彈只能觀察，不直接主推。
     if early and not pullback_only and total >= 60 and alpha >= 64 and risk >= 42 and entry >= 38:
         return ROLE_EARLY
 
-    if total >= 64 and alpha >= 70 and risk >= 38 and entry < 58:
+    if total >= 64 and alpha >= 70 and risk >= 38 and entry < 58 and mainstream >= 55:
         return ROLE_CONFIRM
 
     return ROLE_WEAK
@@ -704,7 +770,7 @@ def _position_pct(role: str, row: pd.Series) -> int:
     total = _safe_float(row.get("股神實戰總分"), 0) or 0
     entry = _safe_float(row.get("Entry進場買點分"), 0) or 0
     risk = _safe_float(row.get("Risk風控安全分"), 0) or 0
-    if role == ROLE_OVERHEAT:
+    if role == ROLE_OVERHEAT or _is_cold_stock(row):
         return 0
     if role == ROLE_ATTACK:
         pct = 5 if total >= 76 and entry >= 55 and risk >= 50 else 3
@@ -785,6 +851,51 @@ def _invalid_condition_for(row: pd.Series) -> str:
     pieces.append("量縮跌破MA20")
     pieces.append("大盤風控轉弱")
     return "；".join(pieces) + "，取消推薦。"
+
+
+def _mainstream_bucket_for(row: pd.Series, role: str) -> str:
+    if _is_cold_stock(row):
+        if "低流動性排除" in _safe_str(row.get("主流資金角色")) or "冷門禁追" in _safe_str(row.get("主流股判定")):
+            return "低流動性排除"
+        return "冷門潛伏觀察"
+    if role in {ROLE_ATTACK, ROLE_MAIN}:
+        return "主流攻擊候選"
+    if role == ROLE_CONFIRM:
+        return "主流突破追蹤"
+    if role == ROLE_EARLY:
+        return "早期潛伏觀察"
+    if role == ROLE_OVERHEAT:
+        return "禁止買進排除"
+    return "弱勢觀察"
+
+
+def _mainstream_desc_for(row: pd.Series, role: str) -> str:
+    ms = _mainstream_score(row)
+    amount = _amount_m(row)
+    label = _safe_str(row.get("主流股判定")) or "未分類"
+    if _is_cold_stock(row):
+        return f"冷門隔離：{label}，成交額約{amount:.1f}百萬，不能放在主流推薦；只可觀察不可追高。"
+    if role in {ROLE_ATTACK, ROLE_MAIN}:
+        return f"主流資金通過：主流資金分{ms:.1f}，可列主流攻擊候選，但仍需觸發價與風控。"
+    if role == ROLE_CONFIRM:
+        return f"主流突破追蹤：主流資金分{ms:.1f}，突破前不買，站上觸發價才評估。"
+    return f"非主攻：主流資金分{ms:.1f}，等待族群與買點改善。"
+
+
+def _mainstream_action_for(row: pd.Series, role: str) -> str:
+    if _is_cold_stock(row):
+        return "冷門股隔離；禁止追高，不列主流買進清單。"
+    if role == ROLE_ATTACK:
+        return "主流攻擊候選；盤中放量突破觸發價後小量試單。"
+    if role == ROLE_MAIN:
+        return "主流主推薦；分批進場並嚴守失效條件。"
+    if role == ROLE_CONFIRM:
+        return "主流突破追蹤；突破確認後再轉進攻。"
+    if role == ROLE_EARLY:
+        return "早期潛伏；最多小量觀察。"
+    if role == ROLE_OVERHEAT:
+        return "禁止新倉。"
+    return "僅觀察。"
 
 
 def _decision_summary(row: pd.Series) -> str:
@@ -982,7 +1093,10 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
         ROLE_WEAK: "否",
         ROLE_OVERHEAT: "否",
     }).fillna("否")
-    out["下週作戰版本"] = "phase4_1_week_plan_20260605"
+    out["下週作戰版本"] = "phase4_2_week_plan_mainstream_20260605"
+    out["主流作戰分區"] = out.apply(lambda r: _mainstream_bucket_for(r, _safe_str(r.get("推薦角色"))), axis=1)
+    out["主流作戰說明"] = out.apply(lambda r: _mainstream_desc_for(r, _safe_str(r.get("推薦角色"))), axis=1)
+    out["主流操作動作"] = out.apply(lambda r: _mainstream_action_for(r, _safe_str(r.get("推薦角色"))), axis=1)
 
     position_pct = out.apply(lambda r: _position_pct(_safe_str(r.get("推薦角色")), r), axis=1).astype(int)
     out["建議倉位%"] = position_pct

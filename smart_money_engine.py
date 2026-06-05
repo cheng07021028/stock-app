@@ -8,11 +8,17 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-SMART_MONEY_VERSION = "phase4_smart_money_20260605"
+try:
+    from mainstream_money_engine import MAINSTREAM_MONEY_COLUMNS, apply_mainstream_money_engine
+except Exception:
+    MAINSTREAM_MONEY_COLUMNS = []
+    apply_mainstream_money_engine = None
+
+SMART_MONEY_VERSION = "phase4_2_smart_money_mainstream_20260605"
 SMART_MONEY_COLUMNS = [
     "法人攻擊分", "投信鎖碼分", "主力點火分", "大戶承接分", "籌碼續航分", "資金攻擊摘要", "籌碼引擎版本",
-]
-NUMERIC_SMART_MONEY_COLUMNS = {"法人攻擊分", "投信鎖碼分", "主力點火分", "大戶承接分", "籌碼續航分"}
+] + list(MAINSTREAM_MONEY_COLUMNS or [])
+NUMERIC_SMART_MONEY_COLUMNS = {"法人攻擊分", "投信鎖碼分", "主力點火分", "大戶承接分", "籌碼續航分", "主流資金分", "資金攻擊有效分"}
 
 
 def _blank(v: Any) -> bool:
@@ -77,4 +83,11 @@ def apply_smart_money_engine(df: pd.DataFrame | None) -> pd.DataFrame:
         for la, tl, ig, bh, co in zip(out["法人攻擊分"], out["投信鎖碼分"], out["主力點火分"], out["大戶承接分"], out["籌碼續航分"])
     ]
     out["籌碼引擎版本"] = SMART_MONEY_VERSION
+
+    # Phase 4.2：集中套用主流資金/冷門股濾網，避免 7_股神推薦、匯出與飆股獵人各算一套。
+    if callable(apply_mainstream_money_engine):
+        try:
+            out = apply_mainstream_money_engine(out)
+        except Exception as _mainstream_err:
+            out["主流資金引擎版本"] = f"phase4_2_mainstream_failed:{_mainstream_err}"
     return out
