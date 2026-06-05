@@ -13,8 +13,18 @@ import math
 
 import pandas as pd
 
-DECISION_ENGINE_VERSION = "vnext_phase2_hard_veto_20260602"
+try:
+    from limitup_hunter_engine import (
+        PHASE4_COLUMNS,
+        apply_limitup_hunter_engine,
+    )
+except Exception:
+    PHASE4_COLUMNS = []
+    apply_limitup_hunter_engine = None
 
+DECISION_ENGINE_VERSION = "vnext_phase4_market_sector_smart_money_limitup_20260605"
+
+ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
 ROLE_CONFIRM = "B｜等突破確認"
 ROLE_EARLY = "C+｜早期潛伏"
@@ -22,6 +32,7 @@ ROLE_WEAK = "C-｜弱勢觀察"
 ROLE_OVERHEAT = "D｜過熱禁買"
 
 DECISION_ROLE_VALUES = [
+    ROLE_ATTACK,
     ROLE_MAIN,
     ROLE_CONFIRM,
     ROLE_EARLY,
@@ -43,6 +54,39 @@ DECISION_ENGINE_COLUMNS = [
     "推薦角色",
     "過熱原因",
     "硬否決原因",
+    "真禁買原因",
+    "等待突破原因",
+    "突破確認狀態",
+    "突破確認條件",
+    "假陰性檢討",
+    "今日決策結論",
+    "候選強度分",
+    "大盤攻擊模式",
+    "飆股適合度",
+    "今日可追強度",
+    "中小型股風險",
+    "今日大盤結論",
+    "大盤風險燈號",
+    "族群輪動分",
+    "族群攻擊強度",
+    "族群續航力",
+    "族群內領頭羊",
+    "族群內補漲股",
+    "資金輪動角色",
+    "族群攻擊說明",
+    "法人攻擊分",
+    "投信鎖碼分",
+    "主力點火分",
+    "大戶承接分",
+    "籌碼續航分",
+    "資金攻擊摘要",
+    "飆股攻擊分",
+    "隔日大漲機率分",
+    "漲停獵人觀察",
+    "飆股獵人角色",
+    "盤中轉強觸發價",
+    "追漲許可",
+    "攻擊候選原因",
     "實戰過濾狀態",
     "主推薦降級原因",
     "冷卻提示",
@@ -64,7 +108,22 @@ NUMERIC_DECISION_COLUMNS = {
     "進場買點分",
     "風控安全分",
     "績效校正分",
+    "候選強度分",
     "建議倉位%",
+    "飆股適合度",
+    "今日可追強度",
+    "中小型股風險",
+    "族群輪動分",
+    "族群攻擊強度",
+    "族群續航力",
+    "法人攻擊分",
+    "投信鎖碼分",
+    "主力點火分",
+    "大戶承接分",
+    "籌碼續航分",
+    "飆股攻擊分",
+    "隔日大漲機率分",
+    "盤中轉強觸發價",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -305,13 +364,38 @@ def _row_pressure_space(row: pd.Series) -> float:
     return _safe_float(row.get("_phase2_壓力空間%", row.get("壓力空間%", row.get("目標報酬%", 0))), 0) or 0
 
 
+def _row_price(row: pd.Series) -> float:
+    return _safe_float(row.get("最新價", row.get("推薦價格", row.get("推薦日價格", row.get("建議價位", 0)))), 0) or 0
+
+
+def _row_breakout_price(row: pd.Series) -> float:
+    return _safe_float(row.get("突破確認價", row.get("突破確認價_隔日", row.get("近端壓力", row.get("第一壓力價", 0)))), 0) or 0
+
+
+def _row_breakout_distance(row: pd.Series) -> float:
+    price = _row_price(row)
+    breakout = _row_breakout_price(row)
+    if price <= 0 or breakout <= 0:
+        return 999.0
+    return ((breakout - price) / price) * 100.0
+
+
+def _has_breakout_reference(row: pd.Series) -> bool:
+    return _row_breakout_price(row) > 0 or bool(_first_text(row, ["突破確認價", "突破確認價_隔日", "近端壓力", "第一壓力價"]))
+
+
 def _has_pullback_only_signal(row: pd.Series) -> bool:
     blob = _text_blob(row, ["推薦型態", "機會型態", "推薦分層", "買點分級", "進場型態", "股神進場建議"])
     return any(k in blob for k in ["止跌反彈", "跌深反彈", "弱勢反彈", "反彈觀察"])
 
 
 def _collect_hard_veto_reasons(row: pd.Series) -> list[str]:
-    """Phase 2：真正阻擋不該被主推薦的條件。"""
+    """Phase 3：收集會阻擋 A 主推薦的硬風控原因。
+
+    注意：這裡仍保留「阻擋 A」的原因，但後續會再區分：
+    - 真 D：確定過熱禁買。
+    - 假 D：高 Alpha 但買點/風控暫不合格，改列 B 等突破確認。
+    """
     text_blob = _text_blob(row, [
         "推薦分層", "股神推薦層級", "高分禁買原因", "不建議買進原因", "風險扣分原因",
         "過熱原因", "過熱風險", "風險說明", "股神實戰建議", "專業決策摘要",
@@ -394,6 +478,132 @@ def _collect_main_block_reasons(row: pd.Series) -> list[str]:
     return out[:6]
 
 
+def _is_true_overheat_veto(row: pd.Series, reasons: list[str] | None = None) -> bool:
+    reasons = reasons if reasons is not None else _collect_hard_veto_reasons(row)
+    blob = _text_blob(row, [
+        "推薦分層", "股神推薦層級", "高分禁買原因", "不建議買進原因", "風險扣分原因",
+        "過熱原因", "風險說明", "是否建議追價",
+    ])
+    chase = _row_chase(row)
+    ret5 = _row_ret5(row)
+    ret20 = _row_ret20(row)
+    stop_dist = _row_stop_distance(row)
+    entry = _safe_float(row.get("Entry進場買點分", row.get("進場買點分")), 0) or 0
+    risk = _safe_float(row.get("Risk風控安全分", row.get("風控安全分")), 0) or 0
+    total = _safe_float(row.get("股神實戰總分", row.get("推薦總分")), 0) or 0
+
+    if chase >= 84:
+        return True
+    if ret5 >= 16 or ret20 >= 38:
+        return True
+    if stop_dist >= 22:
+        return True
+    if total >= 88 and entry < 40 and risk < 40:
+        return True
+    if any(k in blob for k in ["過熱禁買", "高分但過熱", "禁買"]) and (chase >= 76 or ret5 >= 8 or stop_dist >= 15):
+        return True
+    if any("追價風險" in r for r in reasons) and (chase >= 80 or ret5 >= 10):
+        return True
+    return False
+
+
+def _is_breakout_wait_candidate(row: pd.Series, reasons: list[str] | None = None) -> bool:
+    """判斷 Phase 2 被打成 D 的標的，是否其實應該分流到 B 等突破確認。"""
+    reasons = reasons if reasons is not None else _collect_hard_veto_reasons(row)
+    if _is_true_overheat_veto(row, reasons):
+        return False
+    total = _safe_float(row.get("股神實戰總分", row.get("推薦總分")), 0) or 0
+    base_total = _safe_float(row.get("推薦總分", total), 0) or 0
+    alpha = _safe_float(row.get("Alpha選股潛力分", row.get("選股潛力分")), 0) or 0
+    entry = _safe_float(row.get("Entry進場買點分", row.get("進場買點分")), 0) or 0
+    risk = _safe_float(row.get("Risk風控安全分", row.get("風控安全分")), 0) or 0
+    feedback = _safe_float(row.get("Feedback績效校正分", row.get("績效校正分")), 50) or 50
+    rr = _row_rr(row)
+    stop_dist = _row_stop_distance(row)
+    chase = _row_chase(row)
+    ret5 = _row_ret5(row)
+    pressure_space = _row_pressure_space(row)
+    breakout_dist = _row_breakout_distance(row)
+    has_breakout = _has_breakout_reference(row)
+    strong_text = _text_blob(row, ["推薦型態", "機會型態", "近期強勢狀態", "股神推薦層級", "推薦分層", "買點分級"])
+    has_turning_signal = any(k in strong_text for k in ["初步轉強", "剛起漲", "主升", "突破", "轉強", "強勢", "尚未起漲"])
+
+    alpha_ok = alpha >= 68 or base_total >= 86 or total >= 66
+    entry_near = entry >= 42 or (has_breakout and -1.0 <= breakout_dist <= 5.5) or pressure_space >= 2.0 or has_turning_signal
+    risk_survivable = risk >= 34 and chase < 82 and ret5 < 14 and stop_dist < 22
+    rr_not_fatal = rr == 0 or rr >= 0.18 or pressure_space >= 2.0 or has_breakout
+    feedback_ok = feedback >= 24
+    return bool(alpha_ok and entry_near and risk_survivable and rr_not_fatal and feedback_ok)
+
+
+def _true_veto_reason_text(row: pd.Series) -> str:
+    reasons = _collect_hard_veto_reasons(row)
+    if not reasons:
+        return ""
+    if _is_true_overheat_veto(row, reasons):
+        return "、".join(reasons)
+    return ""
+
+
+def _wait_breakout_reason_text(row: pd.Series) -> str:
+    reasons = _collect_hard_veto_reasons(row)
+    if not reasons:
+        return ""
+    if _is_breakout_wait_candidate(row, reasons):
+        return "高Alpha但買點/風控尚未通過A門檻；Phase3改列B等突破確認：" + "、".join(reasons[:4])
+    if _safe_str(row.get("推薦角色")) == ROLE_CONFIRM:
+        return "高潛力但尚未達主推薦買點，需等突破或回測支撐確認。"
+    return ""
+
+
+def _breakout_status_for(row: pd.Series, role: str) -> str:
+    if role == ROLE_ATTACK:
+        return "ATTACK｜飆股攻擊候選，等盤中觸發"
+    if role == ROLE_MAIN:
+        return "已通過主推薦門檻"
+    if role == ROLE_CONFIRM:
+        dist = _row_breakout_distance(row)
+        if dist == 999.0:
+            return "WAIT｜等放量突破或回測支撐"
+        if dist <= 0:
+            return "WAIT｜已接近/碰觸突破價，需收盤站穩確認"
+        if dist <= 3:
+            return f"WAIT｜距突破確認約{dist:.1f}%"
+        if dist <= 6:
+            return f"WAIT｜距突破確認約{dist:.1f}%，需量能放大"
+        return "WAIT｜距突破仍遠，先列觀察"
+    if role == ROLE_EARLY:
+        return "EARLY｜潛伏期，等量價轉強"
+    if role == ROLE_OVERHEAT:
+        return "BLOCK｜真過熱/風控失衡"
+    return "WATCH｜訊號不足"
+
+
+def _today_conclusion_for(row: pd.Series, role: str) -> str:
+    if role == ROLE_ATTACK:
+        return "盤中攻擊候選｜觸發價與量能確認後小量試單"
+    if role == ROLE_MAIN:
+        return "可進攻｜小倉分批，嚴守失效條件"
+    if role == ROLE_CONFIRM:
+        return "不先買｜等突破確認後再轉進攻"
+    if role == ROLE_EARLY:
+        return "可潛伏觀察｜最多小量試單"
+    if role == ROLE_OVERHEAT:
+        return "不開新倉｜過熱禁買"
+    return "僅觀察｜訊號不足"
+
+
+def _false_negative_review_for(row: pd.Series) -> str:
+    reasons = _collect_hard_veto_reasons(row)
+    if not reasons:
+        return ""
+    if _is_breakout_wait_candidate(row, reasons):
+        return "Phase2可能假陰性：有硬風控原因但未達真過熱，改列B等突破確認。"
+    if _is_true_overheat_veto(row, reasons):
+        return "真D：追價/過熱/風控條件未解除前不追。"
+    return "保守降級：需等買點與風控修復。"
+
+
 def _cooldown_hint(row: pd.Series) -> str:
     blob = _text_blob(row, ["連續推薦", "推薦次數", "冷卻提示", "突破風險", "假突破風險", "近期強勢狀態"])
     if any(k in blob for k in ["假突破", "突破後量價無法延續", "未突破", "弱勢"]):
@@ -404,6 +614,8 @@ def _cooldown_hint(row: pd.Series) -> str:
 
 
 def _status_for_role(role: str) -> str:
+    if role == ROLE_ATTACK:
+        return "ATTACK｜盤中攻擊候選"
     if role == ROLE_MAIN:
         return "PASS｜可列主推薦"
     if role == ROLE_CONFIRM:
@@ -442,23 +654,42 @@ def _decide_role(row: pd.Series) -> str:
     main_blocks = _collect_main_block_reasons(row)
     early = _is_early_candidate(row)
     pullback_only = _has_pullback_only_signal(row)
+    attack_score = _safe_float(row.get("飆股攻擊分"), 0) or 0
+    big_score = _safe_float(row.get("隔日大漲機率分"), 0) or 0
+    market_attack = _safe_float(row.get("飆股適合度", row.get("今日可追強度")), 50) or 50
+    sector_attack = _safe_float(row.get("族群攻擊強度"), 50) or 50
+    money_score = _safe_float(row.get("籌碼續航分", row.get("法人攻擊分")), 50) or 50
+    hunter_role = _safe_str(row.get("飆股獵人角色"))
+    is_phase4_attack = ("飆股攻擊候選" in hunter_role or attack_score >= 82) and big_score >= 72 and market_attack >= 56 and sector_attack >= 66 and money_score >= 58 and risk >= 42 and entry >= 42
 
+    # Phase 3/4：硬否決不再一律 D。先分辨真過熱；若非真D且具資金攻擊，優先分流為 S。
     if hard_veto:
-        return ROLE_OVERHEAT
+        if _is_true_overheat_veto(row, hard_veto):
+            return ROLE_OVERHEAT
+        if is_phase4_attack:
+            return ROLE_ATTACK
+        if _is_breakout_wait_candidate(row, hard_veto):
+            return ROLE_CONFIRM
+        # 有硬風控但未達突破確認，先弱勢觀察，不再直接包裝為禁買。
+        return ROLE_WEAK
 
-    # Phase 2：A 主推薦必須同時通過 Entry / Risk / 停損 / RR / 買點確認。
+    # Phase 4：真正要補的是隔日/盤中大漲候選。S 不等於無腦買，必須等觸發價與量能確認。
+    if is_phase4_attack:
+        return ROLE_ATTACK
+
+    # A 主推薦維持嚴格；只有買點與風控都過門檻才給倉位。
     if total >= 84 and alpha >= 76 and entry >= 70 and risk >= 70 and not main_blocks:
         return ROLE_MAIN
 
-    # 高 Alpha 但買點或風控未完全通過時，先等突破確認，不再包裝成主推薦。
-    if total >= 72 and alpha >= 70 and risk >= 56 and (entry >= 54 or feedback >= 56):
+    # 高 Alpha 但買點或風控未完全通過時，進 B，不進 D。
+    if total >= 66 and alpha >= 68 and risk >= 38 and (entry >= 42 or feedback >= 35 or _has_breakout_reference(row)):
         return ROLE_CONFIRM
 
     # 早期潛伏只給小量追蹤；止跌反彈只能觀察，不直接主推。
-    if early and not pullback_only and total >= 64 and alpha >= 66 and risk >= 50 and entry >= 42:
+    if early and not pullback_only and total >= 60 and alpha >= 64 and risk >= 42 and entry >= 38:
         return ROLE_EARLY
 
-    if total >= 68 and alpha >= 72 and risk >= 50 and entry < 58:
+    if total >= 64 and alpha >= 70 and risk >= 38 and entry < 58:
         return ROLE_CONFIRM
 
     return ROLE_WEAK
@@ -470,7 +701,9 @@ def _position_pct(role: str, row: pd.Series) -> int:
     risk = _safe_float(row.get("Risk風控安全分"), 0) or 0
     if role == ROLE_OVERHEAT:
         return 0
-    if role == ROLE_MAIN:
+    if role == ROLE_ATTACK:
+        pct = 5 if total >= 76 and entry >= 55 and risk >= 50 else 3
+    elif role == ROLE_MAIN:
         pct = 15
         if total >= 92 and entry >= 78 and risk >= 78:
             pct = 25
@@ -491,17 +724,34 @@ def _position_pct(role: str, row: pd.Series) -> int:
 
 def _action_for(role: str) -> str:
     return {
+        ROLE_ATTACK: "飆股攻擊候選；不可預先追高，只在盤中觸發價放量站上後小量試單。",
         ROLE_MAIN: "主推薦；只依支撐/突破條件分批進場，嚴禁開高追滿倉。",
-        ROLE_CONFIRM: "等待突破確認；目前不主動買，放量站上壓力或回測支撐守穩後再評估。",
+        ROLE_CONFIRM: "等待突破確認；突破前不主動買，放量站上確認價或回測支撐守穩後再轉進攻。",
         ROLE_EARLY: "早期潛伏；只允許小量試單，未放量前不追高。",
         ROLE_WEAK: "弱勢觀察；保留追蹤，不主動買進。",
-        ROLE_OVERHEAT: "硬否決/過熱禁買；不追價，等待拉回降溫或重新整理。",
+        ROLE_OVERHEAT: "真過熱禁買；不追價，等待拉回降溫或重新整理。",
     }.get(role, "觀察；等待條件確認。")
 
 
 def _add_condition_for(row: pd.Series, role: str) -> str:
     if role == ROLE_OVERHEAT:
         return "無；需先解除過熱、追高風險下降後再重新評估。"
+    if role == ROLE_ATTACK:
+        trigger = _first_text(row, ["盤中轉強觸發價", "突破確認價", "突破確認價_隔日", "近端壓力"]);
+        ttxt = _price_text("觸發價", trigger);
+        return (f"盤中放量站上{ttxt}且同族群仍強；第一筆只試單，跌回觸發價下方立即撤退。" if ttxt else "盤中放量突破且族群攻擊延續，才允許小量試單。")
+    if role == ROLE_CONFIRM:
+        breakout = _first_text(row, ["突破確認價", "突破確認價_隔日", "近端壓力", "第一壓力價"])
+        support = _first_text(row, ["近端支撐", "主要支撐", "回測承接價", "推薦買點_拉回"])
+        pieces: list[str] = []
+        btxt = _price_text("突破確認價", breakout)
+        stxt = _price_text("支撐", support)
+        if btxt:
+            pieces.append(f"盤中放量站上{btxt}且收盤不跌破")
+        if stxt:
+            pieces.append(f"或回測{stxt}守穩後轉強")
+        pieces.append("Entry/Risk 分數同步改善後才升級")
+        return "；".join(pieces[:3]) + "。"
     breakout = _first_text(row, ["突破確認價", "突破確認價_隔日", "近端壓力", "第一壓力價"])
     support = _first_text(row, ["近端支撐", "主要支撐", "回測承接價", "推薦買點_拉回"])
     pieces: list[str] = []
@@ -559,6 +809,18 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     else:
         out = df.copy()
     out = out.loc[:, ~pd.Index(out.columns).duplicated()].copy()
+
+    # Phase 4：先集中套用大盤、族群輪動、籌碼與飆股獵人引擎。
+    # 這些引擎只做 DataFrame 欄位補強，不連網、不讀寫 JSON，避免各頁重複計算。
+    if callable(apply_limitup_hunter_engine):
+        try:
+            out = apply_limitup_hunter_engine(out)
+        except Exception as _phase4_err:
+            out["飆股引擎版本"] = f"Phase4引擎套用失敗：{_phase4_err}"
+            for _c in list(PHASE4_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
+
     if out.empty:
         for col in DECISION_ENGINE_COLUMNS:
             if col not in out.columns:
@@ -569,9 +831,10 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     tech = _first_numeric(out, ["技術結構分數", "技術趨勢分數", "均線轉強分", "動能翻多分", "推薦總分"], 50, prefer_positive=True).clip(0, 100)
     pre = _first_numeric(out, ["起漲前兆分數", "飆股起漲分數", "突破準備分", "型態突破分數"], 50, prefer_positive=True).clip(0, 100)
     volume = _first_numeric(out, ["量價動能分數", "量能啟動分", "人氣量能分", "量能人氣分"], 50, prefer_positive=True).clip(0, 100)
-    group = _first_numeric(out, ["類股熱度分數", "族群資金流分數", "族群流動性分數", "強勢族群分數"], 50, prefer_positive=True).clip(0, 100)
-    factor = _first_numeric(out, ["官方因子總分", "自動因子總分", "基本面成長分數", "營收成長分數"], 50, prefer_positive=True).clip(0, 100)
+    group = _first_numeric(out, ["族群攻擊強度", "族群輪動分", "族群續航力", "類股熱度分數", "族群資金流分數", "族群流動性分數", "強勢族群分數"], 50, prefer_positive=True).clip(0, 100)
+    factor = _first_numeric(out, ["籌碼續航分", "法人攻擊分", "主力點火分", "官方因子總分", "自動因子總分", "基本面成長分數", "營收成長分數"], 50, prefer_positive=True).clip(0, 100)
     leader = _first_numeric(out, ["同類股領先幅度", "類股內排名分數"], 50, prefer_positive=True).clip(0, 100)
+    limitup = _first_numeric(out, ["飆股攻擊分", "隔日大漲機率分"], 50, prefer_positive=True).clip(0, 100)
 
     lead_bonus = pd.Series([0.0] * len(out), index=out.index)
     if "是否領先同類股" in out.columns:
@@ -579,7 +842,7 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     if "類股前3強" in out.columns:
         lead_bonus += out["類股前3強"].map(lambda v: 3.0 if _safe_str(v) == "是" else 0.0)
 
-    computed_alpha = (tech * 0.24 + pre * 0.22 + volume * 0.17 + group * 0.18 + factor * 0.12 + leader * 0.07 + lead_bonus).clip(0, 100)
+    computed_alpha = (tech * 0.21 + pre * 0.20 + volume * 0.15 + group * 0.18 + factor * 0.12 + limitup * 0.09 + leader * 0.05 + lead_bonus).clip(0, 100)
     alpha = _blend_existing(out, "選股潛力分", computed_alpha, weight=0.55)
 
     buy_score = _first_numeric(out, ["買進分數", "進場時機分數", "實戰買點分數", "交易可行分數", "隔日進場分數"], 50, prefer_positive=True).clip(0, 100)
@@ -660,6 +923,7 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     out["風控安全分"] = risk
     out["績效校正分"] = correction_delta.round(1)
     out["股神實戰總分"] = practical
+    out["候選強度分"] = pd.to_numeric(base_total, errors="coerce").fillna(0).round(1)
 
     roles = out.apply(_decide_role, axis=1)
     out["推薦角色"] = roles
@@ -668,8 +932,14 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     main_block_text = out.apply(lambda r: "、".join(_collect_main_block_reasons(r)), axis=1)
     overheat_text = out.apply(lambda r: "、".join(_collect_overheat_reasons(r)), axis=1)
     out["硬否決原因"] = hard_veto_text
+    out["真禁買原因"] = out.apply(_true_veto_reason_text, axis=1)
+    out["等待突破原因"] = out.apply(_wait_breakout_reason_text, axis=1)
     out["主推薦降級原因"] = main_block_text
-    out["過熱原因"] = hard_veto_text.where(hard_veto_text.map(lambda x: bool(_safe_str(x))), overheat_text)
+    out["過熱原因"] = out["真禁買原因"].where(out["真禁買原因"].map(lambda x: bool(_safe_str(x))), overheat_text)
+    out["突破確認狀態"] = out.apply(lambda r: _breakout_status_for(r, _safe_str(r.get("推薦角色"))), axis=1)
+    out["突破確認條件"] = out.apply(lambda r: _add_condition_for(r, _safe_str(r.get("推薦角色"))), axis=1)
+    out["假陰性檢討"] = out.apply(_false_negative_review_for, axis=1)
+    out["今日決策結論"] = out.apply(lambda r: _today_conclusion_for(r, _safe_str(r.get("推薦角色"))), axis=1)
     out["實戰過濾狀態"] = roles.map(_status_for_role)
     out["冷卻提示"] = out.apply(_cooldown_hint, axis=1)
     out["建議動作"] = roles.map(_action_for)
@@ -698,5 +968,5 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     else:
         out["專業決策摘要"] = out.apply(_decision_summary, axis=1)
 
-    out = out.drop(columns=[c for c in out.columns if str(c).startswith("_phase2_")], errors="ignore")
+    out = out.drop(columns=[c for c in out.columns if str(c).startswith("_phase2_") or str(c).startswith("_phase3_")], errors="ignore")
     return out
