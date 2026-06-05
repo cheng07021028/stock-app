@@ -46,7 +46,7 @@ with st.sidebar:
     st.subheader("官方因子自動更新排程")
     cfg = load_schedule_settings()
     enabled = st.checkbox("啟用官方因子自動更新", value=bool(cfg.get("enabled", True)))
-    schedule_time = st.selectbox("預計更新時間（台灣）", ["21:30", "22:00", "22:30", "23:00", "23:30"], index=["21:30", "22:00", "22:30", "23:00", "23:30"].index((cfg.get("times") or ["23:00"])[0] if (cfg.get("times") or ["23:00"])[0] in ["21:30", "22:00", "22:30", "23:00", "23:30"] else "23:00"))
+    schedule_time = st.selectbox("預計更新時間（台灣）", ["21:00", "22:00", "22:30", "23:00", "23:30"], index=["21:30", "22:00", "22:30", "23:00", "23:30"].index((cfg.get("times") or ["21:00"])[0] if (cfg.get("times") or ["23:00"])[0] in ["21:30", "22:00", "22:30", "23:00", "23:30"] else "23:00"))
     weekdays_only = st.checkbox("僅週一至週五", value=bool(cfg.get("weekdays_only", True)))
     market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=["全部", "上市", "上櫃"].index(cfg.get("market_filter", "全部") if cfg.get("market_filter", "全部") in ["全部", "上市", "上櫃"] else "全部"))
     limit = st.selectbox("更新筆數限制", [0, 200, 500, 1000, 1500, 2000], index=[0, 200, 500, 1000, 1500, 2000].index(int(cfg.get("limit") or 0) if int(cfg.get("limit") or 0) in [0, 200, 500, 1000, 1500, 2000] else 0), help="0 = 全部股票")
