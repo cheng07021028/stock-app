@@ -9018,14 +9018,13 @@ def _safe_sort_export_df(df: pd.DataFrame, sort_cols: list[str], ascending: list
 
 
 
-def _v151_split_main_observe_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """V151 Excel 分頁：今日主推薦 / 高分觀察 / 等待拉回 / 排除原因。
+def _phase41_apply_week_battle_columns(rec_export: pd.DataFrame) -> pd.DataFrame:
+    """Phase 4.1：集中產生下週作戰分區，避免匯出與畫面各自重複判斷。
 
-    不改原完整推薦表，只在匯出時多切四個實戰分頁，避免高分但不能買的股票
-    被誤認為今日主買進名單。
+    注意：完整推薦表不是買進清單。本函式只做分流欄位，不改原本分數、不寫 JSON。
     """
     if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
     work = rec_export.copy()
 
     def _text_col(col: str) -> pd.Series:
@@ -9033,44 +9032,123 @@ def _v151_split_main_observe_views(rec_export: pd.DataFrame) -> tuple[pd.DataFra
             return work[col].fillna("").astype(str)
         return pd.Series([""] * len(work), index=work.index, dtype="object")
 
-    def _num_col(col: str) -> pd.Series:
-        if col in work.columns:
-            return pd.to_numeric(work[col], errors="coerce").fillna(0)
-        return pd.Series([0] * len(work), index=work.index, dtype="float64")
-
     role = _text_col("推薦角色")
     hunter_role = _text_col("飆股獵人角色")
     state = _text_col("實戰過濾狀態")
-    true_veto = _text_col("真禁買原因")
-    wait_reason = _text_col("等待突破原因")
-    breakout_state = _text_col("突破確認狀態")
     level = _text_col("股神推薦層級") + "｜" + _text_col("顯示分區") + "｜" + _text_col("推薦用途") + "｜" + _text_col("限制原因")
 
-    blocked_mask = role.str.contains("過熱禁買", na=False) | state.str.contains("BLOCK", na=False) | true_veto.str.strip().ne("")
-    attack_mask = (role.str.contains("飆股攻擊候選", na=False) | hunter_role.str.contains("飆股攻擊候選|盤中突破可追", na=False)) & ~blocked_mask
-    main_mask = role.str.contains("股神主推薦", na=False) & ~blocked_mask
-    confirm_mask = (role.str.contains("等突破確認", na=False) | breakout_state.str.contains("WAIT", na=False) | wait_reason.str.strip().ne("")) & ~blocked_mask
-    early_mask = role.str.contains("早期潛伏", na=False) & ~blocked_mask
-    legacy_main_mask = (_text_col("是否主要顯示").eq("是") | _text_col("主表篩選").eq("是")) & ~blocked_mask & ~confirm_mask & ~early_mask
-    main_mask = (main_mask | legacy_main_mask) & ~attack_mask
+    # Phase 4.1 修正：不能再因為「真禁買原因 / 硬否決原因」有文字就整列丟排除。
+    # B / C+ / C- 本來就會保留風控限制文字，真正排除只看角色 D 或 BLOCK 狀態。
+    true_block = role.str.contains("D｜過熱禁買|過熱禁買", na=False) | state.str.contains("BLOCK", na=False)
+    role_attack = role.str.contains("S｜飆股攻擊候選|飆股攻擊候選", na=False)
+    role_main = role.str.contains("A｜股神主推薦|股神主推薦", na=False)
+    role_breakout = role.str.contains("B｜等突破確認|等突破確認", na=False)
+    role_early = role.str.contains("C\\+｜早期潛伏|早期潛伏", na=False) | state.str.contains("EARLY", na=False)
+    role_weak = role.str.contains("C-｜弱勢觀察|弱勢觀察", na=False) | state.str.contains("WATCH", na=False)
+    hunter_breakout = hunter_role.str.contains("B\\+｜盤中突破可追|盤中突破可追|B｜等突破確認|等突破確認", na=False)
 
-    pullback_mask = (~main_mask) & (~attack_mask) & (~blocked_mask) & (
-        confirm_mask
-        | level.str.contains("等待拉回|追高|風險報酬比不足|買進分數不足|高分", na=False)
-        | ((_num_col("候選強度分") >= 85) & (_num_col("買進分數") < 65))
-        | ((_num_col("推薦總分") >= 85) & (_num_col("風險報酬比") < 1.5))
+    # 以決策角色為主，獵人角色只補沒有明確 B/C 角色的股票，避免 C+/C- 被錯誤升級成可追。
+    attack = role_attack & ~true_block
+    main = role_main & ~true_block
+    early = role_early & ~true_block & ~attack & ~main
+    weak = role_weak & ~true_block & ~attack & ~main & ~early
+    breakout = (
+        role_breakout
+        | state.str.contains("WAIT", na=False)
+        | _text_col("突破確認狀態").str.contains("WAIT", na=False)
+        | (hunter_breakout & ~role_early & ~role_weak)
+    ) & ~true_block & ~attack & ~main & ~early & ~weak
+    exclude = true_block | ((~attack) & (~main) & (~breakout) & (~early) & (~weak) & level.str.contains("排除|禁買|成交額或成交張數不足|低量", na=False))
+    weak = weak & ~exclude
+
+    bucket = pd.Series("觀察名單｜等待條件補強", index=work.index, dtype="object")
+    action = pd.Series("只觀察，不主動買進", index=work.index, dtype="object")
+    desc = pd.Series("條件尚未完整，等待買點、量能、族群或風控改善。", index=work.index, dtype="object")
+
+    bucket.loc[attack | main] = "下週可進攻名單"
+    action.loc[attack] = "盤中觸發後可小量進攻"
+    action.loc[main] = "可依條件分批進攻"
+    desc.loc[attack] = "S 飆股攻擊候選：不是開盤直接買，需站上觸發價且量能確認。"
+    desc.loc[main] = "A 股神主推薦：買點、風控與分數通過，仍需分批與嚴守失效條件。"
+
+    bucket.loc[breakout] = "盤中突破追蹤名單"
+    action.loc[breakout] = "突破前不買，站上觸發價再評估"
+    desc.loc[breakout] = "B / B+：有題材或族群/資金訊號，但買點未確認；只做盤中突破追蹤。"
+
+    bucket.loc[early] = "早期潛伏觀察名單"
+    action.loc[early] = "最多小量潛伏，不追高"
+    desc.loc[early] = "C+：早期轉強或低檔潛伏，尚未達主攻條件，需等量價續強。"
+
+    bucket.loc[weak] = "弱勢觀察清單"
+    action.loc[weak] = "不買，僅追蹤是否轉強"
+    desc.loc[weak] = "C-：訊號不足或風控尚未修復，僅保留觀察。"
+
+    bucket.loc[exclude] = "禁止買進／排除名單"
+    action.loc[exclude] = "禁止新倉"
+    desc.loc[exclude] = "D / BLOCK：過熱、風控失衡或條件不足，未解除前不進場。"
+
+    work["下週作戰分區"] = bucket
+    work["下週作戰說明"] = desc
+    work["下週操作動作"] = action
+    work["下週是否可進攻"] = pd.Series("否", index=work.index, dtype="object")
+    work.loc[attack | main, "下週是否可進攻"] = "是｜但仍需觸發/分批"
+    work.loc[breakout, "下週是否可進攻"] = "突破確認後才可"
+    work.loc[early, "下週是否可進攻"] = "僅小量潛伏"
+    work["下週作戰版本"] = "phase4_1_week_plan_20260605"
+    return work
+
+
+def _phase41_split_week_battle_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Phase 4.1 Excel 分頁：下週可進攻 / 盤中突破 / 早期潛伏 / 弱勢觀察 / 禁止買進。"""
+    if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    work = _phase41_apply_week_battle_columns(rec_export)
+
+    def _text_col(col: str) -> pd.Series:
+        if col in work.columns:
+            return work[col].fillna("").astype(str)
+        return pd.Series([""] * len(work), index=work.index, dtype="object")
+
+    bucket = _text_col("下週作戰分區")
+    attack_main_mask = bucket.eq("下週可進攻名單")
+    breakout_mask = bucket.eq("盤中突破追蹤名單")
+    early_mask = bucket.eq("早期潛伏觀察名單")
+    weak_mask = bucket.eq("弱勢觀察清單")
+    exclude_mask = bucket.eq("禁止買進／排除名單")
+
+    attack_main_df = _safe_sort_export_df(
+        work.loc[attack_main_mask].copy(),
+        ["飆股攻擊分", "股神實戰總分", "Entry進場買點分", "Risk風控安全分", "隔日大漲機率分", "風險報酬比"],
+        [False, False, False, False, False, False],
     )
-    exclude_mask = blocked_mask | ((~main_mask) & (~attack_mask) & (~pullback_mask) & level.str.contains("排除|低量|冷門|成交額或成交張數不足|不列主推薦", na=False))
-    observe_mask = (~main_mask) & (~attack_mask) & (~pullback_mask) & (~exclude_mask)
+    breakout_df = _safe_sort_export_df(
+        work.loc[breakout_mask].copy(),
+        ["飆股攻擊分", "隔日大漲機率分", "族群攻擊強度", "籌碼續航分", "盤中轉強觸發價"],
+        [False, False, False, False, True],
+    )
+    early_df = _safe_sort_export_df(
+        work.loc[early_mask].copy(),
+        ["股神實戰總分", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "候選強度分"],
+        [False, False, False, False, False],
+    )
+    weak_df = _safe_sort_export_df(
+        work.loc[weak_mask].copy(),
+        ["候選強度分", "股神實戰總分", "Entry進場買點分", "Risk風控安全分"],
+        [False, False, False, False],
+    )
+    exclude_df = _safe_sort_export_df(
+        work.loc[exclude_mask].copy(),
+        ["候選強度分", "推薦總分", "成交額百萬", "最新成交量_張"],
+        [False, False, False, False],
+    )
+    return attack_main_df, breakout_df, early_df, weak_df, exclude_df, work
 
-    sort_cols = ["股神實戰總分", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "推薦總分", "成交額百萬"]
-    attack_df = _safe_sort_export_df(work.loc[attack_mask].copy(), ["飆股攻擊分", "隔日大漲機率分", "族群攻擊強度", "籌碼續航分", "今日可追強度"], [False, False, False, False, False])
-    main_df = _safe_sort_export_df(work.loc[main_mask].copy(), sort_cols, [False, False, False, False, False, False])
-    observe_df = _safe_sort_export_df(work.loc[observe_mask].copy(), ["股神實戰總分", "候選強度分", "Entry進場買點分", "成交額百萬"], [False, False, False, False])
-    pullback_df = _safe_sort_export_df(work.loc[pullback_mask].copy(), ["股神實戰總分", "候選強度分", "Entry進場買點分", "風險報酬比", "近5日漲幅%"], [False, False, False, False, False])
-    exclude_df = _safe_sort_export_df(work.loc[exclude_mask].copy(), ["候選強度分", "推薦總分", "成交額百萬", "最新成交量_張"], [False, False, False, False])
-    return attack_df, main_df, observe_df, pullback_df, exclude_df
 
+# 相容舊函式名稱：避免其他舊流程仍呼叫 v151 split 時失效。
+def _v151_split_main_observe_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    attack_main_df, breakout_df, early_df, weak_df, exclude_df, _ = _phase41_split_week_battle_views(rec_export)
+    # 舊版第二個回傳值是今日主推薦；Phase 4.1 將 S/A 合併成下週可進攻名單。
+    return attack_main_df, attack_main_df, early_df, breakout_df, pd.concat([weak_df, exclude_df], ignore_index=True)
 
 def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int, full_order: list[str] | None = None):
     if rec_df is None or rec_df.empty:
@@ -9260,35 +9338,35 @@ def _build_excel_bytes(
     except Exception:
         pass
 
-    attack_export, main_export, observe_export, pullback_export, exclude_export = _v151_split_main_observe_views(rec_export)
+    attack_main_export, breakout_export, early_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
 
     try:
         if callable(prune_empty_recommendation_columns):
-            attack_export = prune_empty_recommendation_columns(attack_export)
-            main_export = prune_empty_recommendation_columns(main_export)
-            observe_export = prune_empty_recommendation_columns(observe_export)
-            pullback_export = prune_empty_recommendation_columns(pullback_export)
+            attack_main_export = prune_empty_recommendation_columns(attack_main_export)
+            breakout_export = prune_empty_recommendation_columns(breakout_export)
+            early_export = prune_empty_recommendation_columns(early_export)
+            weak_export = prune_empty_recommendation_columns(weak_export)
             exclude_export = prune_empty_recommendation_columns(exclude_export)
             rec_export = prune_empty_recommendation_columns(rec_export)
     except Exception:
         pass
 
-    _write_df_to_ws(wb, "飆股攻擊候選", attack_export, "目前沒有符合 S / B+ 飆股攻擊條件的候選。")
-    _write_df_to_ws(wb, "今日主推薦", main_export, "今日無符合主推薦硬門檻股票；多數候選需等拉回、買點改善或風險報酬比提高。")
-    _write_df_to_ws(wb, "高分觀察候選", observe_export, "目前沒有高分觀察候選。")
-    _write_df_to_ws(wb, "等待拉回候選", pullback_export, "目前沒有等待拉回候選。")
-    _write_df_to_ws(wb, "排除原因清單", exclude_export, "目前沒有排除/低量候選。")
+    _write_df_to_ws(wb, "下週可進攻名單", attack_main_export, "目前沒有符合 S / A 可進攻條件的股票；不是失敗，是系統判斷不宜硬買。")
+    _write_df_to_ws(wb, "盤中突破追蹤名單", breakout_export, "目前沒有 B / B+ 等突破追蹤候選。")
+    _write_df_to_ws(wb, "早期潛伏觀察名單", early_export, "目前沒有 C+ 早期潛伏候選。")
+    _write_df_to_ws(wb, "弱勢觀察清單", weak_export, "目前沒有 C- 弱勢觀察候選。")
+    _write_df_to_ws(wb, "禁止買進排除名單", exclude_export, "目前沒有 D / BLOCK 禁止買進候選。")
     _write_df_to_ws(wb, "完整推薦表", rec_export, "完整推薦表沒有取得資料，請重新跑一次股神推薦後再匯出。")
     _write_df_to_ws(wb, "類股強度榜", cat_export, "類股強度榜沒有取得資料，請確認推薦結果內有類別/推薦總分欄位。")
     _write_df_to_ws(wb, "同類股領先榜", leader_export, "同類股領先榜沒有取得資料，請確認推薦結果內有類別/推薦總分欄位。")
     _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
     diag = pd.DataFrame([
-        {"分頁": "飆股攻擊候選", "列數": 0 if attack_export is None else len(attack_export), "欄數": 0 if attack_export is None else len(attack_export.columns)},
-        {"分頁": "今日主推薦", "列數": 0 if main_export is None else len(main_export), "欄數": 0 if main_export is None else len(main_export.columns)},
-        {"分頁": "高分觀察候選", "列數": 0 if observe_export is None else len(observe_export), "欄數": 0 if observe_export is None else len(observe_export.columns)},
-        {"分頁": "等待拉回候選", "列數": 0 if pullback_export is None else len(pullback_export), "欄數": 0 if pullback_export is None else len(pullback_export.columns)},
-        {"分頁": "排除原因清單", "列數": 0 if exclude_export is None else len(exclude_export), "欄數": 0 if exclude_export is None else len(exclude_export.columns)},
+        {"分頁": "下週可進攻名單", "列數": 0 if attack_main_export is None else len(attack_main_export), "欄數": 0 if attack_main_export is None else len(attack_main_export.columns)},
+        {"分頁": "盤中突破追蹤名單", "列數": 0 if breakout_export is None else len(breakout_export), "欄數": 0 if breakout_export is None else len(breakout_export.columns)},
+        {"分頁": "早期潛伏觀察名單", "列數": 0 if early_export is None else len(early_export), "欄數": 0 if early_export is None else len(early_export.columns)},
+        {"分頁": "弱勢觀察清單", "列數": 0 if weak_export is None else len(weak_export), "欄數": 0 if weak_export is None else len(weak_export.columns)},
+        {"分頁": "禁止買進排除名單", "列數": 0 if exclude_export is None else len(exclude_export), "欄數": 0 if exclude_export is None else len(exclude_export.columns)},
         {"分頁": "完整推薦表", "列數": 0 if rec_export is None else len(rec_export), "欄數": 0 if rec_export is None else len(rec_export.columns)},
         {"分頁": "類股強度榜", "列數": 0 if cat_export is None else len(cat_export), "欄數": 0 if cat_export is None else len(cat_export.columns)},
         {"分頁": "同類股領先榜", "列數": 0 if leader_export is None else len(leader_export), "欄數": 0 if leader_export is None else len(leader_export.columns)},
@@ -9325,7 +9403,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("匯出內容：飆股攻擊候選、今日主推薦、高分觀察候選、等待拉回候選、排除原因清單、完整推薦表、類股強度榜、同類股領先榜、自動因子榜。全空白欄位會自動移除，避免 Excel 顯示過慢。")
+        st.caption("Phase 4.1 匯出內容：下週可進攻名單、盤中突破追蹤名單、早期潛伏觀察名單、弱勢觀察清單、禁止買進排除名單、完整推薦表與三個輔助榜單。完整推薦表不是買進清單，需看下週作戰分區。")
 
 
 def _render_selected_export_block():
@@ -10591,31 +10669,34 @@ def main():
         strategy_label = _safe_str(st.session_state.get('pick_strategy', '結合版'))
         st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{strategy_label}")
 
+    try:
+        rec_df = _phase41_apply_week_battle_columns(rec_df)
+    except Exception:
+        pass
+
     top_n = int(st.session_state.get(_k("top_n"), 20))
     top_df = rec_df.iloc[:top_n].copy()
 
-    strong_count = int((rec_df["推薦等級"].isin(["股神級", "強烈關注"])).sum())
-    avg_score = _avg_safe([_safe_float(x) for x in rec_df.get("股神實戰總分", rec_df["推薦總分"]).tolist()], 0)
-    leader_count = int((rec_df["是否領先同類股"] == "是").sum())
-    role_series = rec_df.get("推薦角色", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str)
-    main_count = int(((rec_df.get("是否主要顯示", pd.Series(["否"] * len(rec_df), index=rec_df.index)).astype(str) == "是") | role_series.str.contains("股神主推薦", na=False)).sum())
-    early_count = int(role_series.str.contains("早期潛伏", na=False).sum())
-    pullback_count = int((rec_df.get("股神推薦層級", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("等待拉回|高分等待", na=False) | role_series.str.contains("等突破確認", na=False)).sum())
-    direct_count = int((rec_df.get("是否可直接買進", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("可小量試單|可直接|是", na=False) | rec_df.get("小量試單建議", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str).str.contains("可小量", na=False)).sum())
+    avg_score = _avg_safe([_safe_float(x) for x in rec_df.get("股神實戰總分", rec_df.get("推薦總分", pd.Series([0] * len(rec_df), index=rec_df.index))).tolist()], 0)
+    bucket_series = rec_df.get("下週作戰分區", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str)
+    attack_count = int(bucket_series.eq("下週可進攻名單").sum())
+    breakout_count = int(bucket_series.eq("盤中突破追蹤名單").sum())
+    early_count = int(bucket_series.eq("早期潛伏觀察名單").sum())
+    weak_count = int(bucket_series.eq("弱勢觀察清單").sum())
+    exclude_count = int(bucket_series.eq("禁止買進／排除名單").sum())
 
-    hot_count = len(hot_pick_df) if isinstance(hot_pick_df, pd.DataFrame) else 0
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
-            {"label": "今日主推薦", "value": main_count, "delta": "通過硬門檻", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "可小量試單", "value": direct_count, "delta": "仍需盤中確認", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "早期潛伏", "value": early_count, "delta": "C+剛起漲", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "等待確認", "value": pullback_count, "delta": "等突破/拉回", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "平均實戰分", "value": format_number(avg_score, 1), "delta": _safe_str(st.session_state.get(_k("recommend_mode"), "")), "delta_class": "pro-kpi-delta-flat"},
+            {"label": "下週可進攻", "value": attack_count, "delta": "S/A 才可列", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "盤中突破", "value": breakout_count, "delta": "B/B+ 盯觸發價", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "早期潛伏", "value": early_count, "delta": "C+ 小量觀察", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "弱勢觀察", "value": weak_count, "delta": "C- 不買", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "禁買排除", "value": exclude_count, "delta": "D/BLOCK", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
-    if main_count <= 0:
-        st.warning("今日沒有股票通過『主推薦硬門檻』。完整推薦表仍保留高分觀察股，但不代表可直接買進；請優先看買進分數、R/R、追價風險與盤中確認。")
+    if attack_count <= 0:
+        st.warning("本輪沒有 S/A『下週可進攻名單』。完整推薦表仍可能有 B/C 觀察股，但不是下週一直接買進名單；請優先看『下週作戰分區』與盤中觸發價。")
 
     render_pro_section("推薦股票加入自選股中心")
     st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")

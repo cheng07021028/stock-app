@@ -22,7 +22,7 @@ except Exception:
     PHASE4_COLUMNS = []
     apply_limitup_hunter_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase4_market_sector_smart_money_limitup_20260605"
+DECISION_ENGINE_VERSION = "vnext_phase4_1_week_battle_split_20260605"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -52,6 +52,11 @@ DECISION_ENGINE_COLUMNS = [
     "績效校正分",
     "新買點分級",
     "推薦角色",
+    "下週作戰分區",
+    "下週作戰說明",
+    "下週操作動作",
+    "下週是否可進攻",
+    "下週作戰版本",
     "過熱原因",
     "硬否決原因",
     "真禁買原因",
@@ -932,7 +937,9 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     main_block_text = out.apply(lambda r: "、".join(_collect_main_block_reasons(r)), axis=1)
     overheat_text = out.apply(lambda r: "、".join(_collect_overheat_reasons(r)), axis=1)
     out["硬否決原因"] = hard_veto_text
-    out["真禁買原因"] = out.apply(_true_veto_reason_text, axis=1)
+    # Phase 4.1：真禁買原因只給 D / BLOCK 使用；B/C 觀察股可保留硬否決原因，但不能因此被匯出分頁誤丟排除名單。
+    true_veto_series = out.apply(_true_veto_reason_text, axis=1)
+    out["真禁買原因"] = true_veto_series.where(roles.eq(ROLE_OVERHEAT), "")
     out["等待突破原因"] = out.apply(_wait_breakout_reason_text, axis=1)
     out["主推薦降級原因"] = main_block_text
     out["過熱原因"] = out["真禁買原因"].where(out["真禁買原因"].map(lambda x: bool(_safe_str(x))), overheat_text)
@@ -943,6 +950,39 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     out["實戰過濾狀態"] = roles.map(_status_for_role)
     out["冷卻提示"] = out.apply(_cooldown_hint, axis=1)
     out["建議動作"] = roles.map(_action_for)
+    out["下週作戰分區"] = roles.map({
+        ROLE_ATTACK: "下週可進攻名單",
+        ROLE_MAIN: "下週可進攻名單",
+        ROLE_CONFIRM: "盤中突破追蹤名單",
+        ROLE_EARLY: "早期潛伏觀察名單",
+        ROLE_WEAK: "弱勢觀察清單",
+        ROLE_OVERHEAT: "禁止買進／排除名單",
+    }).fillna("觀察名單｜等待條件補強")
+    out["下週作戰說明"] = roles.map({
+        ROLE_ATTACK: "S 飆股攻擊候選：需盤中站上觸發價且量能確認，才可小量試單。",
+        ROLE_MAIN: "A 股神主推薦：買點、風控與分數通過，仍需分批與嚴守失效條件。",
+        ROLE_CONFIRM: "B 等突破確認：突破前不買，盤中放量站上觸發價後再評估。",
+        ROLE_EARLY: "C+ 早期潛伏：最多小量觀察，不追高。",
+        ROLE_WEAK: "C- 弱勢觀察：訊號不足，不主動買進。",
+        ROLE_OVERHEAT: "D 過熱禁買：過熱或風控失衡，未解除前禁止新倉。",
+    }).fillna("條件尚未完整，僅觀察。")
+    out["下週操作動作"] = roles.map({
+        ROLE_ATTACK: "盤中觸發後可小量進攻",
+        ROLE_MAIN: "可依條件分批進攻",
+        ROLE_CONFIRM: "突破前不買，站上觸發價再評估",
+        ROLE_EARLY: "最多小量潛伏，不追高",
+        ROLE_WEAK: "不買，僅追蹤是否轉強",
+        ROLE_OVERHEAT: "禁止新倉",
+    }).fillna("只觀察")
+    out["下週是否可進攻"] = roles.map({
+        ROLE_ATTACK: "是｜但需盤中觸發",
+        ROLE_MAIN: "是｜分批且嚴守風控",
+        ROLE_CONFIRM: "突破確認後才可",
+        ROLE_EARLY: "僅小量潛伏",
+        ROLE_WEAK: "否",
+        ROLE_OVERHEAT: "否",
+    }).fillna("否")
+    out["下週作戰版本"] = "phase4_1_week_plan_20260605"
 
     position_pct = out.apply(lambda r: _position_pct(_safe_str(r.get("推薦角色")), r), axis=1).astype(int)
     out["建議倉位%"] = position_pct
