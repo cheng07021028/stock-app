@@ -2683,62 +2683,53 @@
     {
       "code": "1519",
       "name": "華城",
-      "market": "上市",
-      "category": "綠能儲能"
+      "market": "上市"
     },
     {
       "code": "1612",
       "name": "宏泰",
-      "market": "上市",
-      "category": "電器電纜"
+      "market": "上市"
     },
     {
       "code": "1618",
       "name": "合機",
-      "market": "上市",
-      "category": "電器電纜"
+      "market": "上市"
     },
     {
       "code": "1709",
       "name": "和益",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "2105",
       "name": "正新",
-      "market": "上市",
-      "category": "橡膠工業"
+      "market": "上市"
     },
     {
       "code": "2330",
       "name": "台積電",
-      "market": "上市",
-      "category": "晶圓代工"
+      "market": "上市"
     },
     {
       "code": "2347",
       "name": "聯強",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "3290",
       "name": "東浦",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "4967",
       "name": "十銓",
-      "market": "上市",
-      "category": "記憶體"
+      "market": "上市"
     },
     {
       "code": "5475",
       "name": "德宏",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0608": []
 }
