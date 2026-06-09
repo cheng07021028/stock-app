@@ -2735,116 +2735,98 @@
     {
       "code": "1307",
       "name": "三芳",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "1722",
       "name": "台肥",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "2440",
       "name": "太空梭",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2486",
       "name": "一詮",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "2615",
       "name": "萬海",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "2637",
       "name": "慧洋-KY",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "3023",
       "name": "信邦",
-      "market": "上市",
-      "category": "連接器"
+      "market": "上市"
     },
     {
       "code": "3207",
       "name": "耀勝",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "3290",
       "name": "東浦",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "3555",
       "name": "博士旺",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "4720",
       "name": "德淵",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "5225",
       "name": "東科-KY",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "5452",
       "name": "佶優",
-      "market": "上櫃",
-      "category": "其他電子業"
+      "market": "上櫃"
     },
     {
       "code": "6121",
       "name": "新普",
-      "market": "上櫃",
-      "category": "電腦及週邊設備業"
+      "market": "上櫃"
     },
     {
       "code": "6189",
       "name": "豐藝",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "6414",
       "name": "樺漢",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "6442",
       "name": "光聖",
-      "market": "上市",
-      "category": "光通訊"
+      "market": "上市"
     },
     {
       "code": "6505",
       "name": "台塑化",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "6693",
       "name": "廣閎科",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0610": []
 }
