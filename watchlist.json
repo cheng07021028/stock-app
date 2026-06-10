@@ -2832,32 +2832,28 @@
     {
       "code": "1618",
       "name": "合機",
-      "market": "上市",
-      "category": "電器電纜"
+      "market": "上市"
     },
     {
       "code": "2347",
       "name": "聯強",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "3023",
       "name": "信邦",
-      "market": "上市",
-      "category": "連接器"
+      "market": "上市"
     },
     {
       "code": "6112",
       "name": "邁達特",
-      "market": "上市",
-      "category": "資訊服務業"
+      "market": "上市"
     },
     {
       "code": "6153",
       "name": "嘉聯益",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     }
-  ]
+  ],
+  "0611": []
 }
