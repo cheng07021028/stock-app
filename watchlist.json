@@ -2855,5 +2855,48 @@
       "market": "上市"
     }
   ],
-  "0611": []
+  "0611": [
+    {
+      "code": "1709",
+      "name": "和益",
+      "market": "上市",
+      "category": "塑化"
+    },
+    {
+      "code": "2347",
+      "name": "聯強",
+      "market": "上市",
+      "category": "電子通路業"
+    },
+    {
+      "code": "2368",
+      "name": "金像電",
+      "market": "上市",
+      "category": "PCB載板"
+    },
+    {
+      "code": "4721",
+      "name": "美琪瑪",
+      "market": "上櫃",
+      "category": "電池材料"
+    },
+    {
+      "code": "4938",
+      "name": "和碩",
+      "market": "上市",
+      "category": "EMS代工"
+    },
+    {
+      "code": "6788",
+      "name": "華景電",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8422",
+      "name": "可寧衛*",
+      "market": "上市",
+      "category": "數位雲端"
+    }
+  ]
 }
