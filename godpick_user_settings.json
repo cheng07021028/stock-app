@@ -295,7 +295,7 @@
       "面板",
       "高速傳輸"
     ],
-    "min_total_score": 80.0,
+    "min_total_score": 70.0,
     "min_signal_score": -2.0,
     "min_prelaunch_score": 45.0,
     "min_trade_score": 45.0,
@@ -303,7 +303,7 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-06-11 15:11:55",
+  "updated_at": "2026-06-11 15:15:30",
   "weight_settings_updated_at": "2026-06-11 15:11:00",
   "weight_update_seq": 42,
   "weight_source": "7_股神推薦",
