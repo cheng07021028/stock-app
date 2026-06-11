@@ -12,11 +12,11 @@ import pandas as pd
 
 from godpick_runtime_cache import cache_key, get_or_compute
 
-MARKET_REGIME_VERSION = "phase4_market_regime_20260605"
+MARKET_REGIME_VERSION = "phase5_market_fire_seed_20260611"
 MARKET_REGIME_COLUMNS = [
-    "大盤攻擊模式", "飆股適合度", "今日可追強度", "中小型股風險", "今日大盤結論", "大盤風險燈號", "大盤情境版本",
+    "大盤攻擊模式", "飆股適合度", "今日可追強度", "中小型股風險", "局部題材火種分", "市場火種狀態", "今日大盤結論", "大盤風險燈號", "大盤情境版本",
 ]
-NUMERIC_MARKET_REGIME_COLUMNS = {"飆股適合度", "今日可追強度", "中小型股風險"}
+NUMERIC_MARKET_REGIME_COLUMNS = {"飆股適合度", "今日可追強度", "中小型股風險", "局部題材火種分"}
 
 
 def _blank(v: Any) -> bool:
@@ -81,6 +81,13 @@ def _score_frame(df: pd.DataFrame) -> pd.DataFrame:
     suitability = round(max(0, min(100, suitability)), 1)
     chase_strength = round(max(0, min(100, chase_strength)), 1)
     small_cap_risk = round(max(0, min(100, small_cap_risk)), 1)
+    # Phase 5：大盤弱不代表沒有飆股；另算局部題材火種，供飆股雷達保留追蹤。
+    fire_seed = 48 + strong_ratio * 34 - weak_ratio * 12 + (volume_avg - 50) * 0.38 + max(0, ret5_avg) * 1.8 + max(0, ret20_avg) * 0.25
+    if amount_med >= 500:
+        fire_seed += 4
+    elif 0 < amount_med < 80:
+        fire_seed -= 6
+    fire_seed = round(max(0, min(100, fire_seed)), 1)
 
     joined_macro = "｜".join(macro_text.astype(str).head(80).tolist())
     if suitability >= 72 and chase_strength >= 70 and small_cap_risk <= 62:
@@ -105,6 +112,16 @@ def _score_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["飆股適合度"] = suitability
     out["今日可追強度"] = chase_strength
     out["中小型股風險"] = small_cap_risk
+    out["局部題材火種分"] = fire_seed
+    if fire_seed >= 72:
+        fire_state = "局部題材有火種｜指數弱也可追蹤飆股雷達"
+    elif fire_seed >= 60:
+        fire_state = "局部輪動火種｜只看盤中點火"
+    else:
+        fire_state = "題材火種不足｜優先防守"
+    out["市場火種狀態"] = fire_state
+    if mode == "防守盤" and fire_seed >= 60:
+        conclusion = conclusion + " 但仍有局部題材火種，飆股雷達可保留高異動追蹤。"
     out["今日大盤結論"] = conclusion
     out["大盤風險燈號"] = light
     out["大盤情境版本"] = MARKET_REGIME_VERSION

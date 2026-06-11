@@ -22,7 +22,7 @@ except Exception:
     PHASE4_COLUMNS = []
     apply_limitup_hunter_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase4_2_mainstream_money_filter_20260605"
+DECISION_ENGINE_VERSION = "vnext_phase5_explosive_dual_engine_20260611"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -104,6 +104,17 @@ DECISION_ENGINE_COLUMNS = [
     "盤中轉強觸發價",
     "追漲許可",
     "攻擊候選原因",
+    "爆發雷達分",
+    "隔日爆發分",
+    "局部題材火種分",
+    "漏網回補分",
+    "飆股雷達角色",
+    "飆股雷達分區",
+    "盤中點火條件",
+    "飆股雷達原因",
+    "飆股雷達風險",
+    "雙引擎決策",
+    "穩健推薦角色",
     "實戰過濾狀態",
     "主推薦降級原因",
     "冷卻提示",
@@ -143,6 +154,10 @@ NUMERIC_DECISION_COLUMNS = {
     "飆股攻擊分",
     "隔日大漲機率分",
     "盤中轉強觸發價",
+    "爆發雷達分",
+    "隔日爆發分",
+    "局部題材火種分",
+    "漏網回補分",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -694,6 +709,38 @@ def _is_early_candidate(row: pd.Series) -> bool:
     return any(k in blob for k in keywords)
 
 
+def _radar_role(row: pd.Series) -> str:
+    return _safe_str(row.get("飆股雷達角色"))
+
+
+def _radar_score(row: pd.Series) -> float:
+    return _safe_float(row.get("爆發雷達分"), 0) or 0
+
+
+def _is_radar_attack(row: pd.Series) -> bool:
+    role = _radar_role(row)
+    score = _radar_score(row)
+    amount = _amount_m(row)
+    if role.startswith("S+") and score >= 84 and amount >= 250:
+        return True
+    if role.startswith("S｜") and score >= 78 and amount >= 200:
+        return True
+    return False
+
+
+def _dual_engine_summary_for(row: pd.Series, role: str) -> str:
+    radar = _radar_role(row)
+    rscore = _radar_score(row)
+    stable = role or ROLE_WEAK
+    if radar.startswith("S+") or radar.startswith("S｜"):
+        return f"穩健引擎={stable}；飆股雷達={radar}({rscore:.1f})。可列飆股雷達，但仍需盤中觸發。"
+    if radar.startswith("B+"):
+        return f"穩健引擎={stable}；飆股雷達=B+({rscore:.1f})。突破點火追蹤，未觸發不買。"
+    if radar.startswith("R"):
+        return f"穩健引擎={stable}；飆股雷達=高風險觀察({rscore:.1f})。保留漏網檢查，不給主推薦倉位。"
+    return f"穩健引擎={stable}；飆股雷達未通過。"
+
+
 def _decide_role(row: pd.Series) -> str:
     total = _safe_float(row.get("股神實戰總分"), 0) or 0
     alpha = _safe_float(row.get("Alpha選股潛力分"), 0) or 0
@@ -715,15 +762,15 @@ def _decide_role(row: pd.Series) -> str:
     cold_stock = _is_cold_stock(row)
     mainstream_ok = _is_mainstream_attackable(row)
     is_phase4_attack = (
-        ("飆股攻擊候選" in hunter_role or attack_score >= 82)
-        and big_score >= 72
-        and market_attack >= 56
-        and sector_attack >= 66
-        and money_score >= 58
-        and mainstream >= 68
-        and money_effective >= 54
-        and risk >= 42
-        and entry >= 42
+        ("飆股攻擊候選" in hunter_role or attack_score >= 82 or _is_radar_attack(row))
+        and max(big_score, _safe_float(row.get("隔日爆發分"), 0) or 0) >= 70
+        and market_attack >= 46
+        and sector_attack >= 64
+        and money_score >= 52
+        and mainstream >= 62
+        and money_effective >= 50
+        and risk >= 34
+        and entry >= 34
         and not cold_stock
     )
 
@@ -1042,8 +1089,10 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     out["候選強度分"] = pd.to_numeric(base_total, errors="coerce").fillna(0).round(1)
 
     roles = out.apply(_decide_role, axis=1)
+    out["穩健推薦角色"] = roles
     out["推薦角色"] = roles
     out["新買點分級"] = roles
+    out["雙引擎決策"] = out.apply(lambda r: _dual_engine_summary_for(r, _safe_str(r.get("推薦角色"))), axis=1)
     hard_veto_text = out.apply(lambda r: "、".join(_collect_hard_veto_reasons(r)), axis=1)
     main_block_text = out.apply(lambda r: "、".join(_collect_main_block_reasons(r)), axis=1)
     overheat_text = out.apply(lambda r: "、".join(_collect_overheat_reasons(r)), axis=1)

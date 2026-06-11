@@ -7411,6 +7411,32 @@ def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, m
     if work.empty:
         return pd.DataFrame()
 
+    # Phase 5：先用獨立飆股雷達做「漏網回補」。
+    # 這裡不要求 Entry/Risk 完全通過，避免可能隔日點火的股票被穩健風控提前刪掉；
+    # 但仍保留角色/風險欄位，讓它只出現在飆股雷達或高風險觀察，不混成主推薦。
+    if "爆發雷達分" in work.columns or "飆股雷達角色" in work.columns:
+        radar_score = pd.to_numeric(work.get("爆發雷達分", 0), errors="coerce").fillna(0)
+        radar_role = work.get("飆股雷達角色", pd.Series([""] * len(work), index=work.index)).astype(str)
+        radar_bucket = work.get("飆股雷達分區", pd.Series([""] * len(work), index=work.index)).astype(str)
+        radar_mask = (
+            (radar_score >= 62)
+            & radar_role.str.contains(r"S\+｜漲停雷達|S｜飆股攻擊候選|B\+｜盤中點火追蹤|R｜高風險爆發觀察", na=False)
+            & ~radar_role.str.contains("X｜假強排除", na=False)
+            & ~radar_bucket.str.contains("假強排除", na=False)
+        )
+        radar_df = work[radar_mask].copy()
+        if not radar_df.empty:
+            if "補抓原因" not in radar_df.columns:
+                radar_df["補抓原因"] = ""
+            radar_df["補抓原因"] = radar_df.apply(
+                lambda r: _safe_str(r.get("補抓原因")) or f"Phase5飆股雷達漏網回補：{_safe_str(r.get('飆股雷達角色'))}｜{_safe_str(r.get('飆股雷達原因'))}",
+                axis=1,
+            )
+            sort_cols = [c for c in ["爆發雷達分", "隔日爆發分", "局部題材火種分", "飆股攻擊分", "族群攻擊強度", "主流資金分", "成交額百萬"] if c in radar_df.columns]
+            if sort_cols:
+                radar_df = radar_df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+            return radar_df.reset_index(drop=True).head(30)
+
     score_floor = max(float(min_total_score) - 10.0, 45.0)
     hot_mask = (
         (pd.to_numeric(work.get("推薦總分"), errors="coerce").fillna(0) >= score_floor)
@@ -8690,8 +8716,28 @@ def _build_recommend_df(
     early_potential_mask = role_text.str.contains("早期潛伏", na=False) & (practical_score >= max(60, min(68, float(min_total_score))))
     confirm_mask = role_text.str.contains("等突破確認", na=False) & (practical_score >= 60)
     breakout_wait_mask = breakout_status.str.contains("WAIT", na=False) & (practical_score >= 58)
+    radar_role_text = base_df.get("飆股雷達角色", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    radar_bucket_text = base_df.get("飆股雷達分區", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    radar_score = pd.to_numeric(base_df.get("爆發雷達分", 0), errors="coerce").fillna(0)
+    amount_m = pd.to_numeric(base_df.get("成交額百萬", 0), errors="coerce").fillna(0)
+    # Phase 5：穩健推薦與飆股雷達雙引擎分流。
+    # 飆股雷達候選不因 Entry/Risk/RR 先被刪掉，但它只進雷達/高風險分頁，不當成無腦買進清單。
+    explosive_radar_mask = (
+        (
+            radar_role_text.str.contains(r"S\+｜漲停雷達|S｜飆股攻擊候選|B\+｜盤中點火追蹤", na=False)
+            & (radar_score >= 66)
+            & (amount_m >= 80)
+        )
+        | (
+            radar_role_text.str.contains("R｜高風險爆發觀察", na=False)
+            & (radar_score >= 70)
+            & (amount_m >= 120)
+        )
+    )
+    explosive_radar_mask = explosive_radar_mask & ~radar_role_text.str.contains("X｜假強排除", na=False) & ~radar_bucket_text.str.contains("假強排除", na=False)
     allowed_decision_mask = ~blocked_decision_mask & ~role_text.str.contains("弱勢觀察", na=False)
-    final_df = base_df[(base_score >= min_total_score) & allowed_decision_mask & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask | breakout_wait_mask)].copy()
+    stable_final_mask = (base_score >= min_total_score) & allowed_decision_mask & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask | breakout_wait_mask)
+    final_df = base_df[stable_final_mask | explosive_radar_mask].copy()
 
     # 若沒有主要推薦，不用冷門股硬湊；只保留少數高品質觀察作為輔助參考。
     if final_df.empty:
@@ -9371,6 +9417,53 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
     return ws
 
 
+
+
+def _phase5_split_explosive_radar_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Phase 5 Excel 分頁：飆股雷達 / 高風險爆發觀察 / 假強排除。
+
+    這是獨立於穩健推薦的第二條路，不把 R 類股票混進主流攻擊候選。
+    """
+    if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    try:
+        work = _phase41_apply_week_battle_columns(rec_export)
+    except Exception:
+        work = rec_export.copy()
+
+    def _txt(col: str) -> pd.Series:
+        if col in work.columns:
+            return work[col].fillna("").astype(str)
+        return pd.Series([""] * len(work), index=work.index, dtype="object")
+
+    role = _txt("飆股雷達角色")
+    bucket = _txt("飆股雷達分區")
+    score = pd.to_numeric(work.get("爆發雷達分", 0), errors="coerce").fillna(0)
+
+    radar_mask = (
+        (bucket.eq("飆股雷達") | role.str.contains(r"S\+｜漲停雷達|S｜飆股攻擊候選|B\+｜盤中點火追蹤", na=False))
+        & (score >= 62)
+    )
+    risk_mask = bucket.eq("高風險爆發觀察") | role.str.contains("R｜高風險爆發觀察", na=False)
+    fake_mask = bucket.eq("假強排除") | role.str.contains("X｜假強排除", na=False)
+
+    radar_df = _safe_sort_export_df(
+        work.loc[radar_mask].copy(),
+        ["爆發雷達分", "隔日爆發分", "局部題材火種分", "漏網回補分", "飆股攻擊分", "族群攻擊強度", "主流資金分", "成交額百萬"],
+        [False, False, False, False, False, False, False, False],
+    )
+    risk_df = _safe_sort_export_df(
+        work.loc[risk_mask & ~radar_mask].copy(),
+        ["爆發雷達分", "隔日爆發分", "局部題材火種分", "漏網回補分", "族群攻擊強度", "成交額百萬"],
+        [False, False, False, False, False, False],
+    )
+    fake_df = _safe_sort_export_df(
+        work.loc[fake_mask].copy(),
+        ["爆發雷達分", "隔日爆發分", "成交額百萬"],
+        [False, False, False],
+    )
+    return radar_df, risk_df, fake_df
+
 def _build_excel_bytes(
     rec_export: pd.DataFrame,
     cat_export: pd.DataFrame,
@@ -9393,9 +9486,13 @@ def _build_excel_bytes(
         pass
 
     attack_main_export, breakout_export, early_export, cold_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
+    radar_export, radar_risk_export, radar_fake_export = _phase5_split_explosive_radar_views(rec_export)
 
     try:
         if callable(prune_empty_recommendation_columns):
+            radar_export = prune_empty_recommendation_columns(radar_export)
+            radar_risk_export = prune_empty_recommendation_columns(radar_risk_export)
+            radar_fake_export = prune_empty_recommendation_columns(radar_fake_export)
             attack_main_export = prune_empty_recommendation_columns(attack_main_export)
             breakout_export = prune_empty_recommendation_columns(breakout_export)
             early_export = prune_empty_recommendation_columns(early_export)
@@ -9406,6 +9503,9 @@ def _build_excel_bytes(
     except Exception:
         pass
 
+    _write_df_to_ws(wb, "飆股雷達", radar_export, "目前沒有 S+/S/B+ 飆股雷達候選。")
+    _write_df_to_ws(wb, "高風險爆發觀察", radar_risk_export, "目前沒有 R 高風險爆發觀察候選。")
+    _write_df_to_ws(wb, "假強排除", radar_fake_export, "目前沒有 X 假強排除候選。")
     _write_df_to_ws(wb, "主流攻擊候選", attack_main_export, "目前沒有符合 S / A 且通過主流資金門檻的股票。")
     _write_df_to_ws(wb, "主流突破追蹤", breakout_export, "目前沒有 B / B+ 且通過主流資金門檻的突破追蹤候選。")
     _write_df_to_ws(wb, "早期潛伏觀察", early_export, "目前沒有 C+ 早期潛伏候選。")
@@ -9418,6 +9518,9 @@ def _build_excel_bytes(
     _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
     diag = pd.DataFrame([
+        {"分頁": "飆股雷達", "列數": 0 if radar_export is None else len(radar_export), "欄數": 0 if radar_export is None else len(radar_export.columns)},
+        {"分頁": "高風險爆發觀察", "列數": 0 if radar_risk_export is None else len(radar_risk_export), "欄數": 0 if radar_risk_export is None else len(radar_risk_export.columns)},
+        {"分頁": "假強排除", "列數": 0 if radar_fake_export is None else len(radar_fake_export), "欄數": 0 if radar_fake_export is None else len(radar_fake_export.columns)},
         {"分頁": "主流攻擊候選", "列數": 0 if attack_main_export is None else len(attack_main_export), "欄數": 0 if attack_main_export is None else len(attack_main_export.columns)},
         {"分頁": "主流突破追蹤", "列數": 0 if breakout_export is None else len(breakout_export), "欄數": 0 if breakout_export is None else len(breakout_export.columns)},
         {"分頁": "早期潛伏觀察", "列數": 0 if early_export is None else len(early_export), "欄數": 0 if early_export is None else len(early_export.columns)},
@@ -9460,7 +9563,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 4.2 匯出內容：主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與三個輔助榜單。完整推薦表不是買進清單，需看主流作戰分區。")
+        st.caption("Phase 5 匯出內容：飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看飆股雷達分區與主流作戰分區。")
 
 
 def _render_selected_export_block():
@@ -10742,19 +10845,22 @@ def main():
     cold_count = int(bucket_series.eq("冷門潛伏觀察").sum())
     weak_count = int(bucket_series.eq("弱勢觀察").sum())
     exclude_count = int(bucket_series.isin(["低流動性排除", "禁止買進排除"]).sum())
+    radar_bucket = rec_df.get("飆股雷達分區", pd.Series([""] * len(rec_df), index=rec_df.index)).astype(str)
+    radar_count = int(radar_bucket.eq("飆股雷達").sum())
+    radar_risk_count = int(radar_bucket.eq("高風險爆發觀察").sum())
 
     render_pro_kpi_row(
         [
             {"label": "掃描股票數", "value": len(rec_df), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
-            {"label": "主流攻擊", "value": attack_count, "delta": "S/A 且資金通過", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "主流突破", "value": breakout_count, "delta": "B/B+ 盯觸發價", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "早期潛伏", "value": early_count, "delta": "非冷門 C+", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "冷門隔離", "value": cold_count, "delta": "不可追高", "delta_class": "pro-kpi-delta-flat"},
-            {"label": "排除/弱勢", "value": exclude_count + weak_count, "delta": "不買", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "飆股雷達", "value": radar_count, "delta": "S+/S/B+ 盤中觸發", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "高風險爆發", "value": radar_risk_count, "delta": "R 只追蹤不預買", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "主流攻擊", "value": attack_count, "delta": "穩健 S/A", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "主流突破", "value": breakout_count, "delta": "B 盯觸發價", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "排除/弱勢", "value": exclude_count + weak_count + cold_count, "delta": "不買/冷門隔離", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
-    if attack_count <= 0:
-        st.warning("本輪沒有『主流攻擊候選』。完整推薦表仍可能有 B/C 或冷門觀察股，但不是直接買進名單；請優先看『主流作戰分區』、主流資金分與盤中觸發價。")
+    if attack_count <= 0 and radar_count <= 0:
+        st.warning("本輪沒有『主流攻擊候選』或『飆股雷達』。完整推薦表仍可能有 B/C/R 或冷門觀察股，但不是直接買進名單；請優先看『飆股雷達分區』、主流作戰分區與盤中觸發價。")
 
     render_pro_section("推薦股票加入自選股中心")
     st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")

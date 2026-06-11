@@ -13,13 +13,24 @@ from market_regime_engine import apply_market_regime_engine, MARKET_REGIME_COLUM
 from sector_rotation_engine import apply_sector_rotation_engine, SECTOR_ROTATION_COLUMNS
 from smart_money_engine import apply_smart_money_engine, SMART_MONEY_COLUMNS
 
-LIMITUP_HUNTER_VERSION = "phase4_2_limitup_mainstream_filter_20260605"
+try:
+    from explosive_radar_engine import (
+        EXPLOSIVE_RADAR_COLUMNS,
+        NUMERIC_EXPLOSIVE_RADAR_COLUMNS,
+        apply_explosive_radar_engine,
+    )
+except Exception:
+    EXPLOSIVE_RADAR_COLUMNS = []
+    NUMERIC_EXPLOSIVE_RADAR_COLUMNS = set()
+    apply_explosive_radar_engine = None
+
+LIMITUP_HUNTER_VERSION = "phase5_limitup_dual_engine_bridge_20260611"
 LIMITUP_HUNTER_COLUMNS = [
     "飆股攻擊分", "隔日大漲機率分", "漲停獵人觀察", "飆股獵人角色", "盤中轉強觸發價", "追漲許可", "攻擊候選原因", "飆股引擎版本",
 ]
 NUMERIC_LIMITUP_HUNTER_COLUMNS = {"飆股攻擊分", "隔日大漲機率分", "盤中轉強觸發價"}
-PHASE4_COLUMNS = MARKET_REGIME_COLUMNS + SECTOR_ROTATION_COLUMNS + SMART_MONEY_COLUMNS + LIMITUP_HUNTER_COLUMNS
-PHASE4_NUMERIC_COLUMNS = set(NUMERIC_LIMITUP_HUNTER_COLUMNS)
+PHASE4_COLUMNS = MARKET_REGIME_COLUMNS + SECTOR_ROTATION_COLUMNS + SMART_MONEY_COLUMNS + LIMITUP_HUNTER_COLUMNS + list(EXPLOSIVE_RADAR_COLUMNS or [])
+PHASE4_NUMERIC_COLUMNS = set(NUMERIC_LIMITUP_HUNTER_COLUMNS) | set(NUMERIC_EXPLOSIVE_RADAR_COLUMNS or set())
 
 
 def _blank(v: Any) -> bool:
@@ -164,4 +175,15 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     out["追漲許可"] = allow
     out["攻擊候選原因"] = reason
     out["飆股引擎版本"] = LIMITUP_HUNTER_VERSION
+
+    # Phase 5：最後套用獨立飆股雷達雙引擎。
+    # 注意這條路不取代穩健推薦，只把可能被 Risk/RR 早殺的爆發股保留下來分頁追蹤。
+    if callable(apply_explosive_radar_engine):
+        try:
+            out = apply_explosive_radar_engine(out)
+        except Exception as _radar_err:
+            out["飆股雷達版本"] = f"phase5_radar_failed:{_radar_err}"
+            for _c in list(EXPLOSIVE_RADAR_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
     return out
