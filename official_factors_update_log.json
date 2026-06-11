@@ -1,5 +1,16 @@
 [
   {
+    "time": "2026-06-11 18:10:06",
+    "status": "preserved_old_cache",
+    "row_count": 2326,
+    "diagnostics": [
+      "TWSE PER/PBR 取得失敗：HTTPS(host='openapi.twse.com.tw', port=443): 連線重試失敗: /v1/exchangeReport/BWIBBU_ALL (Caused by ConnectTimeoutError(<HTTPSConnection(host='openapi.twse.com.tw', port=443) at 0x7fe926205610>, 'Connection to openapi.twse....",
+      "上市月營收取得失敗：HTTPS(host='openapi.twse.com.tw', port=443): 連線重試失敗: /v1/opendata/t187ap05_L (Caused by ConnectTimeoutError(<HTTPSConnection(host='openapi.twse.com.tw', port=443) at 0x7fe925f5b710>, 'Connection to openapi.twse.com.tw... / 上櫃月營收取得失敗：官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / MOPS HTML 上市 115/...",
+      "20260611 T86 無資料或格式不可用。官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / 20260610 T86 無資料或格式不可用。官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / 20260609 T86 無資料或格式不可用。官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=...",
+      "本次完整度>=60 僅 0 筆，低於既有快取 831 筆，已保留舊有效快取，不覆蓋。"
+    ]
+  },
+  {
     "time": "2026-06-10 17:54:01",
     "status": "success",
     "row_count": 2326,
