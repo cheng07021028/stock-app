@@ -1707,6 +1707,15 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
+    # >>> PHASE61_RECORD_SYNC
+    # 只用現有欄位補 Phase 6.1 同步分區，不重跑推薦、不連網、不寫 JSON。
+    try:
+        from godpick_signal_hub import add_phase61_signal_columns
+        x = add_phase61_signal_columns(x)
+    except Exception:
+        pass
+    # <<< PHASE61_RECORD_SYNC
+
     # v73：GODPICK_RECORD_COLUMNS 內歷史整合後有重複欄名，回傳前統一去重，避免 data_editor / arrow 顯示異常。
     ordered_cols = _dedupe_keep_order_v73([c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or GODPICK_RECORD_COLUMNS) if c in x.columns] + [c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
     if callable(filter_effective_columns):

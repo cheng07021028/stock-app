@@ -207,6 +207,14 @@ def _prepare_calibration_df(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df is None or raw_df.empty:
         return raw_df
     df = _v72_enrich_recommendation_df_safe(raw_df.copy())
+    # >>> PHASE61_CALIBRATION_SYNC
+    # 只補 Phase 6.1 同步分區，讓權重校正能觀察 S/L/T/R 角色績效；不重跑推薦。
+    try:
+        from godpick_signal_hub import add_phase61_signal_columns
+        df = add_phase61_signal_columns(df)
+    except Exception:
+        pass
+    # <<< PHASE61_CALIBRATION_SYNC
 
     # 大盤分層：14 頁的大盤分層權重需要可被 MARKET_COLUMNS 辨識的欄位。
     if "大盤分層" in df.columns:
@@ -408,7 +416,7 @@ def main() -> None:
         horizon_options = [1, 3, 5, 10, 20]
         saved_horizon = int(saved_calib_setting.get("main_horizon", 5) or 5)
         if saved_horizon not in horizon_options:
-            saved_horizon = 20
+            saved_horizon = 5
         horizon = st.selectbox(
             "主要校正週期",
             horizon_options,

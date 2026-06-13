@@ -72,6 +72,46 @@ def _k(key: str) -> str:
     return f"{PFX}{key}"
 
 
+# >>> PHASE61_GODPICK_SIGNAL_SYNC
+@st.cache_data(ttl=300, show_spinner=False)
+def _phase61_load_signal_summary_cached() -> tuple[dict[str, Any], pd.DataFrame]:
+    try:
+        from godpick_signal_hub import load_latest_godpick_frame, apply_phase61_signal_hub, build_phase61_summary, compact_signal_table
+        src = load_latest_godpick_frame(".", max_rows=500)
+        if src.empty:
+            return {"rows": 0, "bucket_counts": {}, "top_sectors": [], "market_mode": "無推薦資料"}, pd.DataFrame()
+        synced = apply_phase61_signal_hub(src, compute_missing=False)
+        summary = build_phase61_summary(synced)
+        table = compact_signal_table(synced, max_rows=12)
+        return summary, table
+    except Exception as e:
+        return {"rows": 0, "bucket_counts": {}, "top_sectors": [], "market_mode": f"同步失敗：{e}"}, pd.DataFrame()
+
+
+def _phase61_render_godpick_signal_panel() -> None:
+    summary, table = _phase61_load_signal_summary_cached()
+    rows = int(summary.get("rows", 0) or 0)
+    if rows <= 0:
+        st.info("Phase 6.1 股神訊號同步：尚未讀到 7_股神推薦結果；先執行推薦後，本區會顯示大盤/飆股雷達/領漲回補同步摘要。")
+        return
+    counts = summary.get("bucket_counts", {}) if isinstance(summary, dict) else {}
+    st.markdown("### Phase 6.1｜股神大盤 × 飆股雷達同步摘要")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("同步股票數", rows)
+    c2.metric("大盤模式", summary.get("market_mode", "未同步"))
+    c3.metric("領漲/題材回補", int(counts.get("領漲回補雷達", 0)) + int(counts.get("題材轉強追蹤", 0)))
+    c4.metric("飆股雷達", int(counts.get("飆股雷達", 0)) + int(counts.get("高風險爆發觀察", 0)))
+    sectors = summary.get("top_sectors", []) if isinstance(summary, dict) else []
+    if sectors:
+        st.caption("主流族群火種：" + "、".join([f"{x.get('族群')}({x.get('平均強度')})" for x in sectors[:5]]))
+    with st.expander("查看股神同步前 12 檔", expanded=False):
+        if isinstance(table, pd.DataFrame) and not table.empty:
+            st.dataframe(table, use_container_width=True, hide_index=True)
+        else:
+            st.caption("目前沒有可顯示的同步表。")
+# <<< PHASE61_GODPICK_SIGNAL_SYNC
+
+
 def _tw_now() -> datetime:
     # Streamlit Cloud 常是 UTC，這裡轉台灣時間。
     return datetime.utcnow() + timedelta(hours=8)
@@ -4929,6 +4969,8 @@ def main():
     )
 
     st.info("v70：新增一鍵更新全部必要數據並寫入股神橋接檔；完成後會明確通知是否全部更新、全部寫入完成。")
+
+    _phase61_render_godpick_signal_panel()
 
     c1, c2, c3, c4, c5 = st.columns([1.25, 1.25, 1.35, 1.2, 2.1])
     with c1:

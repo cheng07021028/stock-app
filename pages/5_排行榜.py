@@ -53,6 +53,49 @@ def _k(key: str) -> str:
     return f"{PFX}{key}"
 
 
+# >>> PHASE61_RANK_SIGNAL_SYNC
+def _phase61_rank_to_signal_frame(rank_df: pd.DataFrame) -> pd.DataFrame:
+    if rank_df is None or rank_df.empty:
+        return pd.DataFrame()
+    x = rank_df.copy()
+    rename_map = {
+        "代號": "股票代號",
+        "名稱": "股票名稱",
+        "成交金額": "成交額百萬",
+        "飆股起漲分數": "爆發雷達分",
+        "訊號分數": "推薦總分",
+        "漲跌幅%": "近5日漲幅%",
+    }
+    for src, dst in rename_map.items():
+        if src in x.columns and dst not in x.columns:
+            x[dst] = x[src]
+    if "成交額百萬" in x.columns:
+        x["成交額百萬"] = pd.to_numeric(x["成交額百萬"], errors="coerce") / 1000000.0 if pd.to_numeric(x["成交額百萬"], errors="coerce").max(skipna=True) and pd.to_numeric(x["成交額百萬"], errors="coerce").max(skipna=True) > 100000 else pd.to_numeric(x["成交額百萬"], errors="coerce")
+    return x
+
+
+def _phase61_render_rank_signal_panel(rank_df: pd.DataFrame, top_n: int) -> None:
+    try:
+        from godpick_signal_hub import apply_phase61_signal_hub, build_phase61_summary, compact_signal_table
+        source = _phase61_rank_to_signal_frame(rank_df)
+        synced = apply_phase61_signal_hub(source, compute_missing=True)
+        summary = build_phase61_summary(synced)
+        counts = summary.get("bucket_counts", {}) if isinstance(summary, dict) else {}
+        st.markdown("### Phase 6.1｜排行榜 → 股神飆股雷達同步")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("排行樣本", int(summary.get("rows", 0) or 0))
+        c2.metric("領漲/題材", int(counts.get("領漲回補雷達", 0)) + int(counts.get("題材轉強追蹤", 0)))
+        c3.metric("飆股雷達", int(counts.get("飆股雷達", 0)) + int(counts.get("高風險爆發觀察", 0)))
+        c4.metric("低流動性排除", int(counts.get("低流動性排除", 0)))
+        table = compact_signal_table(synced, max_rows=min(int(top_n), 30))
+        if not table.empty:
+            st.dataframe(table, use_container_width=True, hide_index=True)
+        st.caption("本區只用排行榜現有資料即時計算，不寫 JSON；7_股神推薦會使用相同引擎判斷，避免排行榜與推薦邏輯各算一套。")
+    except Exception as e:
+        st.caption(f"Phase 6.1 排行榜同步摘要暫不可用：{e}")
+# <<< PHASE61_RANK_SIGNAL_SYNC
+
+
 def _safe_str(v: Any) -> str:
     if v is None:
         return ""
@@ -892,6 +935,8 @@ def main():
 
     metric = _safe_str(st.session_state.get(_k("sort_metric"), "訊號分數"))
     top_n = int(st.session_state.get(_k("top_n"), 20))
+
+    _phase61_render_rank_signal_panel(rank_df, top_n)
 
     render_pro_section("重點排行")
     t1, t2 = st.columns(2)

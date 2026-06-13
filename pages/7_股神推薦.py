@@ -3772,6 +3772,15 @@ def _apply_vnext_performance_feedback_columns(df: pd.DataFrame) -> pd.DataFrame:
             if _c not in out.columns:
                 out[_c] = ""
         out["決策版本"] = GODPICK_DECISION_ENGINE_VERSION
+
+    # >>> PHASE61_PAGE7_SIGNAL_SYNC
+    # 統一補股神同步分區，畫面/Excel/8/12 共用同一套分流欄位。
+    try:
+        from godpick_signal_hub import add_phase61_signal_columns
+        out = add_phase61_signal_columns(out)
+    except Exception:
+        pass
+    # <<< PHASE61_PAGE7_SIGNAL_SYNC
     return out
 
 

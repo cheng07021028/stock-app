@@ -99,6 +99,7 @@ DAILY_COLUMNS = [
 ]
 
 QUALITY_COLUMNS = [
+    "股神同步分區", "股神同步說明", "飆股雷達角色", "領漲回補角色", "雙引擎決策",
     "品質分級", "品質建議", "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦模式",
     "推薦型態", "機會型態", "進場時機", "建議動作", "推薦分數", "買點分級", "追高風險等級", "單檔風險等級",
     "建議倉位%", "動態建議倉位%", "大盤策略模式", "強勢族群等級", "族群輪動狀態",
@@ -107,6 +108,7 @@ QUALITY_COLUMNS = [
 ]
 
 GROUP_FIELDS = [
+    "股神同步分區", "飆股雷達角色", "領漲回補角色", "主流作戰分區",
     "推薦模式", "推薦型態", "機會型態", "進場時機", "追高風險等級", "單檔風險等級",
     "大盤策略模式", "強勢族群等級", "族群輪動狀態", "類別", "產業",
 ]
@@ -114,6 +116,7 @@ GROUP_FIELDS = [
 
 # v25：管理中心統一欄位。這組欄位會同時套用在「推薦清單 / 目前追蹤」與「股神推薦紀錄 / 歷史全部」，並對歷史舊資料進行智慧補值。
 UNIFIED_MANAGEMENT_COLUMNS = [
+    "股神同步分區", "股神同步優先序", "股神同步說明", "股神同步版本",
     "v21操作優先順序", "追蹤分級", "今日操作建議", "品質分級", "品質建議",
     "股票代號", "股票名稱", "市場別", "類別", "產業", "推薦日期", "推薦時間",
     "推薦模式", "推薦型態", "機會型態", "進場時機", "建議動作", "等待條件",
@@ -130,6 +133,7 @@ UNIFIED_MANAGEMENT_COLUMNS = [
 ]
 
 NUMERIC_MANAGEMENT_COLUMNS = {
+    "股神同步優先序", "爆發雷達分", "主流領漲回補分", "市場領漲相似分", "漲停族群相似度", "主流資金分", "資金攻擊有效分",
     "推薦分數", "股神決策分數", "上漲機率%", "建議倉位%", "動態建議倉位%", "第一筆進場%",
     "建議價位", "推薦價格", "最新價", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
     "最大風險%", "族群資金流分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%",
@@ -697,6 +701,14 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             df = normalize_godpick_dataframe(df, add_missing=True)
     except Exception:
         pass
+    # >>> PHASE61_MANAGEMENT_SYNC
+    # 管理中心只補分區與統計欄位，不重跑引擎，避免進頁重複計算。
+    try:
+        from godpick_signal_hub import add_phase61_signal_columns
+        df = add_phase61_signal_columns(df)
+    except Exception:
+        pass
+    # <<< PHASE61_MANAGEMENT_SYNC
     return df.reset_index(drop=True)
 
 
@@ -1393,6 +1405,11 @@ def _ensure_unified_management_schema(df: pd.DataFrame) -> pd.DataFrame:
         if normalize_godpick_dataframe is not None:
             out = normalize_godpick_dataframe(out, add_missing=True)
             out = _dedupe_columns_keep_first_valid(out)
+    except Exception:
+        pass
+    try:
+        from godpick_signal_hub import add_phase61_signal_columns
+        out = add_phase61_signal_columns(out)
     except Exception:
         pass
     out = _dedupe_columns_keep_first_valid(out)

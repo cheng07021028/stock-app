@@ -16,7 +16,7 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "vnext_performance_feedback_20260602_phase2_hard_veto"
+PERFORMANCE_FEEDBACK_VERSION = "phase6_1_performance_feedback_leader_radar_20260613"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 
 FEEDBACK_COLUMNS = [
@@ -34,6 +34,13 @@ FEEDBACK_COLUMNS = [
     "推薦角色",
     "過熱原因",
     "硬否決原因",
+    "真禁買原因",
+    "等待突破原因",
+    "突破確認狀態",
+    "突破確認條件",
+    "假陰性檢討",
+    "今日決策結論",
+    "候選強度分",
     "實戰過濾狀態",
     "主推薦降級原因",
     "冷卻提示",
@@ -47,6 +54,11 @@ FEEDBACK_COLUMNS = [
     "績效回饋建議",
     "績效樣本數",
     "績效回饋版本",
+    "飆股雷達績效分",
+    "領漲回補績效分",
+    "主流族群回饋分",
+    "漏選修正提醒",
+    "Phase6_1回饋說明",
     "決策版本",
 ]
 
@@ -548,6 +560,50 @@ def _decide_grade_and_role(row: pd.Series) -> tuple[str, str, str, str, str, str
     return grade, role, "、".join(overheat_reasons), trial, add_condition, suggestion + "｜" + invalid_condition
 
 
+
+def _sync_phase61_feedback_columns(out: pd.DataFrame) -> pd.DataFrame:
+    """Phase 6.1：讓績效回饋看懂飆股雷達與領漲回補角色。
+
+    這裡只補回饋欄位，不重算推薦、不寫 JSON。
+    """
+    if out is None or out.empty:
+        return out
+    radar = _num(out, "爆發雷達分", 0).clip(0, 100)
+    next_exp = _num(out, "隔日爆發分", 0).clip(0, 100)
+    leader = _num(out, "主流領漲回補分", 0).clip(0, 100)
+    theme = _num(out, "漲停族群相似度", 0).clip(0, 100)
+    sector = _num(out, "族群攻擊強度", 50).clip(0, 100)
+    money = _num(out, "主流資金分", 50).clip(0, 100)
+    actual_short = _num(out, "推薦後1日%", 0)
+    actual_short = actual_short.where(actual_short.ne(0), _num(out, "推薦後3日%", 0))
+    actual_short = actual_short.where(actual_short.ne(0), _num(out, "即時追蹤報酬%", 0))
+    miss_boost = actual_short.clip(lower=0, upper=10) * 3.0
+    out["飆股雷達績效分"] = (radar * 0.42 + next_exp * 0.30 + miss_boost * 0.28).clip(0, 100).round(1)
+    out["領漲回補績效分"] = (leader * 0.52 + theme * 0.22 + sector * 0.16 + money * 0.10).clip(0, 100).round(1)
+    out["主流族群回饋分"] = (sector * 0.42 + money * 0.28 + theme * 0.18 + radar * 0.12).clip(0, 100).round(1)
+
+    notes = []
+    for _, row in out.iterrows():
+        rr = _safe_str(row.get("飆股雷達角色"))
+        lr = _safe_str(row.get("領漲回補角色"))
+        perf = _safe_float(row.get("推薦後1日%"), None)
+        if perf is None:
+            perf = _safe_float(row.get("推薦後3日%"), None)
+        parts = []
+        if rr:
+            parts.append(f"雷達={rr}")
+        if lr:
+            parts.append(f"回補={lr}")
+        if perf is not None:
+            parts.append(f"短線績效={perf:.2f}%")
+        notes.append("｜".join(parts) if parts else "尚無 Phase6.1 雷達績效樣本")
+    out["漏選修正提醒"] = [
+        "若實際強勢股未進 S/L/T，下一輪提高主流族群/成交額/量能回補權重。" if (_safe_float(v, 0) or 0) >= 70 else "維持觀察；樣本不足不過度校正。"
+        for v in out["領漲回補績效分"]
+    ]
+    out["Phase6_1回饋說明"] = notes
+    return out
+
 def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] | None = None) -> pd.DataFrame:
     """將歷史績效回饋欄位補到推薦結果。
 
@@ -562,10 +618,10 @@ def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] 
     if not profile or not profile.get("available"):
         for c in FEEDBACK_COLUMNS:
             if c not in out.columns:
-                out[c] = "" if c not in {"股神實戰總分", "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "績效樣本數", "建議倉位%"} else 0
+                out[c] = "" if c not in {"股神實戰總分", "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "候選強度分", "績效樣本數", "建議倉位%"} else 0
         out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
         out["績效校正說明"] = (profile or {}).get("message", "未載入績效回饋")
-        return _sync_phase1_feedback_columns(out)
+        return _sync_phase61_feedback_columns(_sync_phase1_feedback_columns(out))
 
     tech = _num(out, "技術結構分數", 50)
     pre = _num(out, "起漲前兆分數", 0)
@@ -620,7 +676,7 @@ def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] 
         base = out["股神推論邏輯"].map(_safe_str)
         add = out["績效回饋建議"].map(_safe_str)
         out["股神推論邏輯"] = [b + ("｜績效回饋：" + a if a and a not in b else "") for b, a in zip(base, add)]
-    return _sync_phase1_feedback_columns(out)
+    return _sync_phase61_feedback_columns(_sync_phase1_feedback_columns(out))
 
 
 def performance_feedback_summary(profile: dict[str, Any] | None) -> list[tuple[str, str, str]]:
