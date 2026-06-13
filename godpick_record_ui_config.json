@@ -1,6 +1,6 @@
 {
   "fast_mode": true,
-  "visible_limit": 100,
+  "visible_limit": 300,
   "profiles": {
     "標準": [
       "v21操作優先順序",
@@ -615,5 +615,5 @@
       "實戰版本"
     ]
   },
-  "updated_at": "2026-06-13 14:44:04"
+  "updated_at": "2026-06-13 15:59:15"
 }
