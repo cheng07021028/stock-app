@@ -22,7 +22,7 @@ except Exception:
     PHASE4_COLUMNS = []
     apply_limitup_hunter_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase6_leader_replay_20260612"
+DECISION_ENGINE_VERSION = "vnext_phase6_2_miss_replay_20260613"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"

@@ -15,7 +15,7 @@ import math
 
 import pandas as pd
 
-PHASE61_SIGNAL_VERSION = "phase6_1_signal_hub_20260613"
+PHASE61_SIGNAL_VERSION = "phase6_2_signal_hub_miss_replay_20260613"
 
 PHASE61_SIGNAL_COLUMNS = [
     "股神同步分區",
@@ -25,6 +25,9 @@ PHASE61_SIGNAL_COLUMNS = [
 ]
 
 ROLE_PRIORITY = {
+    "漏選回放校正": 5,
+    "漏選原因診斷": 8,
+    "已覆蓋雷達": 9,
     "領漲回補雷達": 10,
     "題材轉強追蹤": 20,
     "飆股雷達": 30,
@@ -119,6 +122,10 @@ def add_phase61_signal_columns(df: pd.DataFrame | None) -> pd.DataFrame:
     leader_score = _series_num(out, "主流領漲回補分", 0)
     radar_score = _series_num(out, "爆發雷達分", 0)
     attack_score = _series_num(out, "飆股攻擊分", 0)
+    miss_role = _series_text(out, "回放校正角色")
+    miss_bucket = _series_text(out, "回放校正分區")
+    miss_score = _series_num(out, "漲停回放分", 0)
+    miss_risk = _series_num(out, "強勢股漏選風險分", 0)
 
     buckets: list[str] = []
     priorities: list[int] = []
@@ -128,9 +135,20 @@ def add_phase61_signal_columns(df: pd.DataFrame | None) -> pd.DataFrame:
         rr = str(radar_role.loc[idx]); rb = str(radar_bucket.loc[idx])
         mb = str(main_bucket.loc[idx]); wb = str(week_bucket.loc[idx]); role = str(rec_role.loc[idx])
         cold = str(cold_warning.loc[idx]); mrole = str(mainstream_role.loc[idx])
+        mr_role = str(miss_role.loc[idx]); mr_bucket = str(miss_bucket.loc[idx])
         ls = float(leader_score.loc[idx]); rs = float(radar_score.loc[idx]); atk = float(attack_score.loc[idx])
+        ms = float(miss_score.loc[idx]); mrisk = float(miss_risk.loc[idx])
 
-        if "L+｜領漲回補雷達" in lr or "L｜主流強勢回補" in lr or lb == "領漲回補雷達" or ls >= 78:
+        if "M+｜漲停漏選回放" in mr_role or mr_bucket == "漏選回放校正" or (ms >= 82 and mrisk >= 78):
+            b = "漏選回放校正"
+            n = f"漲停回放 {ms:.1f} / 漏選風險 {mrisk:.1f}；需檢查候選池、風控、族群與盤前重掃，不等同直接買進。"
+        elif "M｜強勢漏選追蹤" in mr_role or mr_bucket == "漏選原因診斷" or (ms >= 72 and mrisk >= 70):
+            b = "漏選原因診斷"
+            n = f"強勢漏選風險 {mrisk:.1f}；保留於回放診斷，避免下次同型態被早刪。"
+        elif "K｜已納入雷達" in mr_role or mr_bucket == "已覆蓋雷達":
+            b = "已覆蓋雷達"
+            n = f"已由飆股/領漲雷達覆蓋；回放分 {ms:.1f}，後續檢查真強或假強。"
+        elif "L+｜領漲回補雷達" in lr or "L｜主流強勢回補" in lr or lb == "領漲回補雷達" or ls >= 78:
             b = "領漲回補雷達"
             n = f"主流領漲回補 {ls:.1f}；盤前/盤中需重掃，不因穩健風控提前刪除。"
         elif "T｜題材轉強追蹤" in lr or lb == "題材轉強追蹤" or (ls >= 66 and "N｜非領漲回補" not in lr):
@@ -227,6 +245,11 @@ def apply_phase61_signal_hub(df: pd.DataFrame | None, *, compute_missing: bool =
             engine_calls.append(("飆股雷達版本", apply_explosive_radar_engine))
         except Exception:
             pass
+        try:
+            from godpick_miss_replay_engine import apply_godpick_miss_replay_engine
+            engine_calls.append(("回放校正版本", apply_godpick_miss_replay_engine))
+        except Exception:
+            pass
 
         for version_col, func in engine_calls:
             # 若版本欄與核心輸出已有資料，視為同一資料流已處理，避免 7/匯出/管理中心重複套算。
@@ -244,6 +267,7 @@ def split_phase61_signal_views(df: pd.DataFrame | None) -> dict[str, pd.DataFram
     work = add_phase61_signal_columns(df)
     views: dict[str, pd.DataFrame] = {}
     order = [
+        "漏選回放校正", "漏選原因診斷", "已覆蓋雷達",
         "領漲回補雷達", "題材轉強追蹤", "飆股雷達", "高風險爆發觀察", "主流攻擊候選", "主流突破追蹤",
         "早期潛伏觀察", "冷門潛伏觀察", "低流動性排除", "弱勢觀察", "禁止買進", "一般觀察",
     ]
@@ -341,11 +365,11 @@ def compact_signal_table(df: pd.DataFrame | None, *, max_rows: int = 30) -> pd.D
     if work.empty:
         return work
     cols = [
-        "股神同步分區", "股票代號", "股票名稱", "類別", "產業", "推薦角色", "飆股雷達角色", "領漲回補角色",
-        "主流作戰分區", "推薦總分", "股神實戰總分", "爆發雷達分", "主流領漲回補分", "族群攻擊強度", "主流資金分", "成交額百萬", "盤中轉強觸發價", "股神同步說明",
+        "股神同步分區", "股票代號", "股票名稱", "類別", "產業", "推薦角色", "飆股雷達角色", "領漲回補角色", "回放校正角色",
+        "主流作戰分區", "推薦總分", "股神實戰總分", "爆發雷達分", "主流領漲回補分", "漲停回放分", "強勢股漏選風險分", "族群攻擊強度", "主流資金分", "成交額百萬", "盤中轉強觸發價", "股神同步說明",
     ]
     cols = [c for c in cols if c in work.columns]
-    sort_cols = [c for c in ["股神同步優先序", "主流領漲回補分", "爆發雷達分", "推薦總分"] if c in work.columns]
+    sort_cols = [c for c in ["股神同步優先序", "漲停回放分", "強勢股漏選風險分", "主流領漲回補分", "爆發雷達分", "推薦總分"] if c in work.columns]
     if sort_cols:
         try:
             work = work.sort_values(sort_cols, ascending=[True] + [False] * (len(sort_cols) - 1), kind="mergesort")

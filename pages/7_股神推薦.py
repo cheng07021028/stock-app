@@ -9511,6 +9511,42 @@ def _phase6_split_market_leader_replay_views(rec_export: pd.DataFrame) -> tuple[
     return leader_df, theme_df
 
 
+
+def _phase62_split_miss_replay_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Phase 6.2 Excel 分頁：漲停漏選回放 / 漏選原因診斷 / 已覆蓋雷達。
+
+    這是回放檢討，不等同買進清單。目的是找出「明明像強勢/漲停股，卻被風控、流動性或族群判斷提前降級」的股票。
+    """
+    if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    work = rec_export.copy()
+    try:
+        if "回放校正版本" not in work.columns or work.get("回放校正版本", pd.Series(dtype="object")).astype(str).str.strip().eq("").all():
+            from godpick_miss_replay_engine import apply_godpick_miss_replay_engine
+            work = apply_godpick_miss_replay_engine(work)
+    except Exception:
+        pass
+
+    def _txt(col: str) -> pd.Series:
+        if col not in work.columns:
+            return pd.Series([""] * len(work), index=work.index, dtype="object")
+        return work[col].fillna("").astype(str).str.strip()
+
+    role = _txt("回放校正角色")
+    bucket = _txt("回放校正分區")
+    score = pd.to_numeric(work.get("漲停回放分", 0), errors="coerce").fillna(0)
+    risk = pd.to_numeric(work.get("強勢股漏選風險分", 0), errors="coerce").fillna(0)
+
+    miss_mask = bucket.eq("漏選回放校正") | role.str.contains(r"M\+｜漲停漏選回放", na=False) | ((score >= 82) & (risk >= 78))
+    diag_mask = bucket.eq("漏選原因診斷") | role.str.contains(r"M｜強勢漏選追蹤", na=False) | ((score >= 72) & (risk >= 70))
+    covered_mask = bucket.eq("已覆蓋雷達") | role.str.contains(r"K｜已納入雷達", na=False)
+
+    sort_cols = ["漲停回放分", "強勢股漏選風險分", "主流領漲回補分", "爆發雷達分", "族群攻擊強度", "成交額百萬"]
+    miss_df = _safe_sort_export_df(work.loc[miss_mask].copy(), sort_cols, [False] * len(sort_cols))
+    diag_df = _safe_sort_export_df(work.loc[diag_mask & ~miss_mask].copy(), sort_cols, [False] * len(sort_cols))
+    covered_df = _safe_sort_export_df(work.loc[covered_mask & ~miss_mask & ~diag_mask].copy(), sort_cols, [False] * len(sort_cols))
+    return miss_df, diag_df, covered_df
+
 def _phase5_split_explosive_radar_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Phase 5 Excel 分頁：飆股雷達 / 高風險爆發觀察 / 假強排除。
 
@@ -9582,12 +9618,16 @@ def _build_excel_bytes(
 
     attack_main_export, breakout_export, early_export, cold_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
     leader_replay_export, theme_follow_export = _phase6_split_market_leader_replay_views(rec_export)
+    miss_replay_export, miss_diag_export, miss_covered_export = _phase62_split_miss_replay_views(rec_export)
     radar_export, radar_risk_export, radar_fake_export = _phase5_split_explosive_radar_views(rec_export)
 
     try:
         if callable(prune_empty_recommendation_columns):
             leader_replay_export = prune_empty_recommendation_columns(leader_replay_export)
             theme_follow_export = prune_empty_recommendation_columns(theme_follow_export)
+            miss_replay_export = prune_empty_recommendation_columns(miss_replay_export)
+            miss_diag_export = prune_empty_recommendation_columns(miss_diag_export)
+            miss_covered_export = prune_empty_recommendation_columns(miss_covered_export)
             radar_export = prune_empty_recommendation_columns(radar_export)
             radar_risk_export = prune_empty_recommendation_columns(radar_risk_export)
             radar_fake_export = prune_empty_recommendation_columns(radar_fake_export)
@@ -9603,6 +9643,9 @@ def _build_excel_bytes(
 
     _write_df_to_ws(wb, "領漲回補雷達", leader_replay_export, "目前沒有 6/12 類型領漲回補候選。")
     _write_df_to_ws(wb, "題材轉強追蹤", theme_follow_export, "目前沒有題材轉強追蹤候選。")
+    _write_df_to_ws(wb, "漲停漏選回放", miss_replay_export, "目前沒有需要升級檢討的漲停漏選回放候選。")
+    _write_df_to_ws(wb, "漏選原因診斷", miss_diag_export, "目前沒有強勢漏選追蹤候選。")
+    _write_df_to_ws(wb, "已覆蓋雷達", miss_covered_export, "目前沒有已覆蓋雷達的回放樣本。")
     _write_df_to_ws(wb, "飆股雷達", radar_export, "目前沒有 S+/S/B+ 飆股雷達候選。")
     _write_df_to_ws(wb, "高風險爆發觀察", radar_risk_export, "目前沒有 R 高風險爆發觀察候選。")
     _write_df_to_ws(wb, "假強排除", radar_fake_export, "目前沒有 X 假強排除候選。")
@@ -9620,6 +9663,9 @@ def _build_excel_bytes(
     diag = pd.DataFrame([
         {"分頁": "領漲回補雷達", "列數": 0 if leader_replay_export is None else len(leader_replay_export), "欄數": 0 if leader_replay_export is None else len(leader_replay_export.columns)},
         {"分頁": "題材轉強追蹤", "列數": 0 if theme_follow_export is None else len(theme_follow_export), "欄數": 0 if theme_follow_export is None else len(theme_follow_export.columns)},
+        {"分頁": "漲停漏選回放", "列數": 0 if miss_replay_export is None else len(miss_replay_export), "欄數": 0 if miss_replay_export is None else len(miss_replay_export.columns)},
+        {"分頁": "漏選原因診斷", "列數": 0 if miss_diag_export is None else len(miss_diag_export), "欄數": 0 if miss_diag_export is None else len(miss_diag_export.columns)},
+        {"分頁": "已覆蓋雷達", "列數": 0 if miss_covered_export is None else len(miss_covered_export), "欄數": 0 if miss_covered_export is None else len(miss_covered_export.columns)},
         {"分頁": "飆股雷達", "列數": 0 if radar_export is None else len(radar_export), "欄數": 0 if radar_export is None else len(radar_export.columns)},
         {"分頁": "高風險爆發觀察", "列數": 0 if radar_risk_export is None else len(radar_risk_export), "欄數": 0 if radar_risk_export is None else len(radar_risk_export.columns)},
         {"分頁": "假強排除", "列數": 0 if radar_fake_export is None else len(radar_fake_export), "欄數": 0 if radar_fake_export is None else len(radar_fake_export.columns)},
@@ -9665,7 +9711,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 6 匯出內容：領漲回補雷達、題材轉強追蹤、飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看領漲回補/飆股雷達分區與主流作戰分區。")
+        st.caption("Phase 6.2 匯出內容：領漲回補雷達、題材轉強追蹤、漲停漏選回放、漏選原因診斷、已覆蓋雷達、飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看領漲回補/飆股雷達分區與主流作戰分區。")
 
 
 def _render_selected_export_block():

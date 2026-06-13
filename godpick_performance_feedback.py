@@ -16,7 +16,7 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "phase6_1_performance_feedback_leader_radar_20260613"
+PERFORMANCE_FEEDBACK_VERSION = "phase6_2_performance_feedback_miss_replay_20260613"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 
 FEEDBACK_COLUMNS = [
@@ -59,6 +59,16 @@ FEEDBACK_COLUMNS = [
     "主流族群回饋分",
     "漏選修正提醒",
     "Phase6_1回饋說明",
+    "漲停回放分",
+    "強勢股漏選風險分",
+    "候選池覆蓋診斷",
+    "漲停漏選原因",
+    "漏選原因分類",
+    "漏選修正動作",
+    "回放校正角色",
+    "回放校正分區",
+    "回放校正版本",
+    "Phase6_2回放說明",
     "決策版本",
 ]
 
@@ -618,7 +628,7 @@ def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] 
     if not profile or not profile.get("available"):
         for c in FEEDBACK_COLUMNS:
             if c not in out.columns:
-                out[c] = "" if c not in {"股神實戰總分", "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "候選強度分", "績效樣本數", "建議倉位%"} else 0
+                out[c] = "" if c not in {"股神實戰總分", "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "候選強度分", "績效樣本數", "建議倉位%", "漲停回放分", "強勢股漏選風險分"} else 0
         out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
         out["績效校正說明"] = (profile or {}).get("message", "未載入績效回饋")
         return _sync_phase61_feedback_columns(_sync_phase1_feedback_columns(out))
@@ -670,6 +680,9 @@ def apply_performance_feedback(df: pd.DataFrame | None, profile: dict[str, Any] 
     out["績效回饋建議"] = [x[5] for x in decisions]
     out["失效條件_績效回饋"] = "跌破停損價/近端支撐或量縮跌破MA20，取消推薦。"
     out["績效回饋版本"] = PERFORMANCE_FEEDBACK_VERSION
+    # Phase 6.2 欄位若已由決策/雷達引擎補齊，回饋層只補文字摘要，不重算。
+    if "Phase6_2回放說明" not in out.columns:
+        out["Phase6_2回放說明"] = "漲停/強勢股回放由 godpick_miss_replay_engine 統一診斷；此處只保留欄位供 8/12/14 做績效回饋。"
 
     # 不覆蓋原始推論，僅補充績效回饋摘要。
     if "股神推論邏輯" in out.columns:

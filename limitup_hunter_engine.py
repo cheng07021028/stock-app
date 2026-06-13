@@ -35,13 +35,24 @@ except Exception:
     NUMERIC_EXPLOSIVE_RADAR_COLUMNS = set()
     apply_explosive_radar_engine = None
 
-LIMITUP_HUNTER_VERSION = "phase6_leader_replay_bridge_20260612"
+try:
+    from godpick_miss_replay_engine import (
+        MISS_REPLAY_COLUMNS,
+        NUMERIC_MISS_REPLAY_COLUMNS,
+        apply_godpick_miss_replay_engine,
+    )
+except Exception:
+    MISS_REPLAY_COLUMNS = []
+    NUMERIC_MISS_REPLAY_COLUMNS = set()
+    apply_godpick_miss_replay_engine = None
+
+LIMITUP_HUNTER_VERSION = "phase6_2_miss_replay_bridge_20260613"
 LIMITUP_HUNTER_COLUMNS = [
     "飆股攻擊分", "隔日大漲機率分", "漲停獵人觀察", "飆股獵人角色", "盤中轉強觸發價", "追漲許可", "攻擊候選原因", "飆股引擎版本",
 ]
 NUMERIC_LIMITUP_HUNTER_COLUMNS = {"飆股攻擊分", "隔日大漲機率分", "盤中轉強觸發價"}
-PHASE4_COLUMNS = MARKET_REGIME_COLUMNS + SECTOR_ROTATION_COLUMNS + SMART_MONEY_COLUMNS + list(MARKET_LEADER_REPLAY_COLUMNS or []) + LIMITUP_HUNTER_COLUMNS + list(EXPLOSIVE_RADAR_COLUMNS or [])
-PHASE4_NUMERIC_COLUMNS = set(NUMERIC_LIMITUP_HUNTER_COLUMNS) | set(NUMERIC_MARKET_LEADER_REPLAY_COLUMNS or set()) | set(NUMERIC_EXPLOSIVE_RADAR_COLUMNS or set())
+PHASE4_COLUMNS = MARKET_REGIME_COLUMNS + SECTOR_ROTATION_COLUMNS + SMART_MONEY_COLUMNS + list(MARKET_LEADER_REPLAY_COLUMNS or []) + LIMITUP_HUNTER_COLUMNS + list(EXPLOSIVE_RADAR_COLUMNS or []) + list(MISS_REPLAY_COLUMNS or [])
+PHASE4_NUMERIC_COLUMNS = set(NUMERIC_LIMITUP_HUNTER_COLUMNS) | set(NUMERIC_MARKET_LEADER_REPLAY_COLUMNS or set()) | set(NUMERIC_EXPLOSIVE_RADAR_COLUMNS or set()) | set(NUMERIC_MISS_REPLAY_COLUMNS or set())
 
 
 def _blank(v: Any) -> bool:
@@ -211,6 +222,16 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
         except Exception as _radar_err:
             out["飆股雷達版本"] = f"phase5_radar_failed:{_radar_err}"
             for _c in list(EXPLOSIVE_RADAR_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
+
+    # Phase 6.2：集中補漲停/強勢股回放診斷，避免 7/8/12 各頁自行重算漏選原因。
+    if callable(apply_godpick_miss_replay_engine):
+        try:
+            out = apply_godpick_miss_replay_engine(out)
+        except Exception as _miss_err:
+            out["回放校正版本"] = f"phase6_2_miss_replay_failed:{_miss_err}"
+            for _c in list(MISS_REPLAY_COLUMNS or []):
                 if _c not in out.columns:
                     out[_c] = ""
     return out
