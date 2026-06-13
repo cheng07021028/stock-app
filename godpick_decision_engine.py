@@ -22,7 +22,7 @@ except Exception:
     PHASE4_COLUMNS = []
     apply_limitup_hunter_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase5_explosive_dual_engine_20260611"
+DECISION_ENGINE_VERSION = "vnext_phase6_leader_replay_20260612"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -113,6 +113,15 @@ DECISION_ENGINE_COLUMNS = [
     "盤中點火條件",
     "飆股雷達原因",
     "飆股雷達風險",
+    "市場領漲相似分",
+    "漲停族群相似度",
+    "主流領漲回補分",
+    "錯失飆股警示",
+    "錯失原因診斷",
+    "領漲回補角色",
+    "領漲回補分區",
+    "隔夜催化需求",
+    "市場領漲檢討版本",
     "雙引擎決策",
     "穩健推薦角色",
     "實戰過濾狀態",
@@ -158,6 +167,9 @@ NUMERIC_DECISION_COLUMNS = {
     "隔日爆發分",
     "局部題材火種分",
     "漏網回補分",
+    "市場領漲相似分",
+    "漲停族群相似度",
+    "主流領漲回補分",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -732,12 +744,17 @@ def _dual_engine_summary_for(row: pd.Series, role: str) -> str:
     radar = _radar_role(row)
     rscore = _radar_score(row)
     stable = role or ROLE_WEAK
+    leader_role = _safe_str(row.get("領漲回補角色"))
+    leader_score = _safe_float(row.get("主流領漲回補分"), 0) or 0
+    leader_note = f"；領漲回補={leader_role}({leader_score:.1f})" if leader_score >= 65 or leader_role else ""
     if radar.startswith("S+") or radar.startswith("S｜"):
-        return f"穩健引擎={stable}；飆股雷達={radar}({rscore:.1f})。可列飆股雷達，但仍需盤中觸發。"
+        return f"穩健引擎={stable}；飆股雷達={radar}({rscore:.1f}){leader_note}。可列飆股雷達，但仍需盤中觸發。"
     if radar.startswith("B+"):
-        return f"穩健引擎={stable}；飆股雷達=B+({rscore:.1f})。突破點火追蹤，未觸發不買。"
+        return f"穩健引擎={stable}；飆股雷達=B+({rscore:.1f}){leader_note}。突破點火追蹤，未觸發不買。"
     if radar.startswith("R"):
-        return f"穩健引擎={stable}；飆股雷達=高風險觀察({rscore:.1f})。保留漏網檢查，不給主推薦倉位。"
+        return f"穩健引擎={stable}；飆股雷達=高風險觀察({rscore:.1f}){leader_note}。保留漏網檢查，不給主推薦倉位。"
+    if leader_score >= 72:
+        return f"穩健引擎={stable}；飆股雷達未通過{leader_note}。列入 6/12 類型領漲回補檢討，不直接給倉位。"
     return f"穩健引擎={stable}；飆股雷達未通過。"
 
 
@@ -761,17 +778,32 @@ def _decide_role(row: pd.Series) -> str:
     money_effective = _money_effective_score(row)
     cold_stock = _is_cold_stock(row)
     mainstream_ok = _is_mainstream_attackable(row)
-    is_phase4_attack = (
-        ("飆股攻擊候選" in hunter_role or attack_score >= 82 or _is_radar_attack(row))
-        and max(big_score, _safe_float(row.get("隔日爆發分"), 0) or 0) >= 70
-        and market_attack >= 46
-        and sector_attack >= 64
-        and money_score >= 52
-        and mainstream >= 62
-        and money_effective >= 50
-        and risk >= 34
-        and entry >= 34
+    leader_replay = _safe_float(row.get("主流領漲回補分"), 0) or 0
+    leader_theme = _safe_float(row.get("漲停族群相似度"), 0) or 0
+    leader_role = _safe_str(row.get("領漲回補角色"))
+    amount_m = _amount_m(row)
+    leader_replay_attack = (
+        leader_replay >= 78
+        and leader_theme >= 68
+        and amount_m >= 150
+        and sector_attack >= 56
         and not cold_stock
+        and not ("低流動性" in _safe_str(row.get("主流作戰分區")) or "低流動性" in _safe_str(row.get("領漲回補分區")))
+    )
+    is_phase4_attack = (
+        (
+            ("飆股攻擊候選" in hunter_role or attack_score >= 82 or _is_radar_attack(row))
+            and max(big_score, _safe_float(row.get("隔日爆發分"), 0) or 0) >= 70
+            and market_attack >= 46
+            and sector_attack >= 64
+            and money_score >= 52
+            and mainstream >= 62
+            and money_effective >= 50
+            and risk >= 34
+            and entry >= 34
+            and not cold_stock
+        )
+        or leader_replay_attack
     )
 
     # Phase 4.2：冷門低流動性股不列 S/A/B 主流追蹤。最多 C+ 潛伏或 C- 觀察。

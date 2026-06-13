@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-EXPLOSIVE_RADAR_VERSION = "phase5_explosive_dual_engine_20260611"
+EXPLOSIVE_RADAR_VERSION = "phase6_explosive_leader_replay_20260612"
 
 EXPLOSIVE_RADAR_COLUMNS = [
     "爆發雷達分",
@@ -102,6 +102,9 @@ def apply_explosive_radar_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     mainstream = _num(out, ["主流資金分", "族群流動性分數", "成交額百萬"], 50).clip(0, 100)
     market = _num(out, ["飆股適合度", "今日可追強度", "市場環境分數", "大盤橋接分數"], 50).clip(0, 100)
     old_attack = _num(out, ["飆股攻擊分", "隔日大漲機率分"], 50).clip(0, 100)
+    leader_replay = _num(out, ["主流領漲回補分", "市場領漲相似分"], 50).clip(0, 100)
+    leader_theme = _num(out, ["漲停族群相似度"], 50).clip(0, 100)
+    leader_role = _txt(out, "領漲回補角色")
     entry = _num(out, ["Entry進場買點分", "進場買點分", "隔日進場分數", "買進分數"], 50).clip(0, 100)
     risk = _num(out, ["Risk風控安全分", "風控安全分", "交易可行分數", "實戰品質分"], 50).clip(0, 100)
     chase = _num(out, ["追價風險分", "追高風險分數_決策"], 50).clip(0, 100)
@@ -140,32 +143,40 @@ def apply_explosive_radar_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     exhaustion_guard = (100 - (ret20 - 28).clip(lower=0) * 1.35 - (chase - 78).clip(lower=0) * 1.1).clip(22, 100)
 
     radar = (
-        old_attack * 0.16
-        + prelaunch * 0.17
-        + pattern * 0.13
-        + volume_score * 0.13
-        + sector * 0.15
-        + money * 0.10
-        + mainstream * 0.07
-        + local_fire * 0.07
+        old_attack * 0.12
+        + prelaunch * 0.14
+        + pattern * 0.11
+        + volume_score * 0.11
+        + sector * 0.13
+        + money * 0.08
+        + mainstream * 0.06
+        + local_fire * 0.06
         + early_momentum * 0.02
+        + leader_replay * 0.13
+        + leader_theme * 0.04
         + leader_bonus
     ).clip(0, 100)
 
     rescue = (
-        prelaunch * 0.22
-        + pattern * 0.18
-        + sector * 0.18
-        + volume_score * 0.14
-        + money * 0.10
-        + base * 0.08
-        + local_fire * 0.10
+        prelaunch * 0.18
+        + pattern * 0.15
+        + sector * 0.15
+        + volume_score * 0.12
+        + money * 0.08
+        + base * 0.06
+        + local_fire * 0.08
+        + leader_replay * 0.14
+        + leader_theme * 0.04
     ).clip(0, 100)
 
     # Phase 5：飆股雷達不被 Risk/RR 直接殺掉，但仍要揭露風險與限制低流動性假強。
+    # Phase 6：若符合 6/12 類型的主流領漲族群，不因舊風控/Entry 提前消失；
+    # 但低流動性仍保持上限，避免冷門股被包裝成主流飆股。
+    leader_floor = (leader_replay * 0.58 + leader_theme * 0.18 + sector * 0.12 + volume_score * 0.08 + mainstream * 0.04).clip(0, 100)
+    radar = radar.where(leader_replay < 76, radar.combine(leader_floor, max))
     radar = radar.where(~severe_cold, radar.clip(upper=52))
     radar = radar.where(~(cold & (amount < 100)), radar.clip(upper=60))
-    next_explosion = (radar * 0.46 + rescue * 0.24 + old_attack * 0.12 + local_fire * 0.10 + exhaustion_guard * 0.08).clip(0, 100)
+    next_explosion = (radar * 0.42 + rescue * 0.20 + old_attack * 0.10 + local_fire * 0.08 + exhaustion_guard * 0.06 + leader_replay * 0.14).clip(0, 100)
 
     trigger = _trigger_price(out)
     roles: list[str] = []
@@ -178,6 +189,7 @@ def apply_explosive_radar_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     for idx in out.index:
         rd = float(radar.loc[idx]); nx = float(next_explosion.loc[idx]); fire = float(local_fire.loc[idx]); rsq = float(rescue.loc[idx])
         sc = float(sector.loc[idx]); ms = float(mainstream.loc[idx]); mn = float(money.loc[idx]); am = float(amount.loc[idx]); vr = float(vol_ratio.loc[idx])
+        lr = float(leader_replay.loc[idx]); lt = float(leader_theme.loc[idx]); lrole = str(leader_role.loc[idx])
         ch = float(chase.loc[idx]); sd = float(stop_dist.loc[idx]); rr_v = float(rr.loc[idx]); r5 = float(ret5.loc[idx]); r20 = float(ret20.loc[idx])
         is_severe_cold = bool(severe_cold.loc[idx]); is_cold = bool(cold.loc[idx])
         risk_parts: list[str] = []
@@ -197,19 +209,19 @@ def apply_explosive_radar_engine(df: pd.DataFrame | None) -> pd.DataFrame:
             role = "X｜假強排除"
             bucket = "假強排除"
             action = "低流動性或假突破風險，不列飆股追蹤。"
-        elif rd >= 88 and nx >= 80 and fire >= 66 and sc >= 72 and ms >= 68 and am >= 500 and ch < 84:
+        elif (rd >= 88 and nx >= 80 and fire >= 66 and sc >= 72 and ms >= 68 and am >= 500 and ch < 84) or (lr >= 90 and lt >= 82 and sc >= 66 and am >= 700 and ch < 88):
             role = "S+｜漲停雷達"
             bucket = "飆股雷達"
             action = "盤中放量站上觸發價，且族群同步攻擊時才小量試單。"
-        elif rd >= 80 and nx >= 72 and fire >= 62 and sc >= 66 and am >= 250 and ch < 86:
+        elif (rd >= 80 and nx >= 72 and fire >= 62 and sc >= 66 and am >= 250 and ch < 86) or (lr >= 82 and lt >= 74 and sc >= 60 and am >= 250 and ch < 90):
             role = "S｜飆股攻擊候選"
             bucket = "飆股雷達"
             action = "不可開盤無腦買；等觸發價與量能確認。"
-        elif rd >= 70 and nx >= 64 and (sc >= 62 or fire >= 65) and am >= 100:
+        elif (rd >= 70 and nx >= 64 and (sc >= 62 or fire >= 65) and am >= 100) or (lr >= 74 and lt >= 68 and am >= 120 and (sc >= 56 or "題材轉強" in lrole)):
             role = "B+｜盤中點火追蹤"
             bucket = "飆股雷達"
             action = "突破前不追，點火後只小量試單。"
-        elif rd >= 62 or (rsq >= 70 and sc >= 65):
+        elif rd >= 62 or (rsq >= 70 and sc >= 65) or (lr >= 66 and lt >= 62 and am >= 80):
             role = "R｜高風險爆發觀察"
             bucket = "高風險爆發觀察"
             action = "可能有爆發，但風險未解；只觀察觸發，不預先買。"
@@ -221,7 +233,7 @@ def apply_explosive_radar_engine(df: pd.DataFrame | None) -> pd.DataFrame:
         roles.append(role)
         buckets.append(bucket)
         triggers.append(f"站上{float(trigger.loc[idx]):.2f}且量比>1.5、同族群續強；跌回觸發價或量縮立即取消。")
-        reasons.append(f"雷達{rd:.1f}｜隔日{nx:.1f}｜火種{fire:.1f}｜回補{rsq:.1f}｜族群{sc:.1f}｜資金{mn:.1f}｜主流{ms:.1f}｜成交額{am:.1f}百萬｜量比{vr:.2f}")
+        reasons.append(f"雷達{rd:.1f}｜隔日{nx:.1f}｜火種{fire:.1f}｜回補{rsq:.1f}｜領漲回補{lr:.1f}｜漲停族群{lt:.1f}｜族群{sc:.1f}｜資金{mn:.1f}｜主流{ms:.1f}｜成交額{am:.1f}百萬｜量比{vr:.2f}")
         risks.append("、".join(risk_parts) if risk_parts else "未見重大雷達風險；仍需盤中確認")
         if role.startswith("X"):
             dual.append("穩健推薦與飆股雷達皆不通過")

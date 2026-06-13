@@ -12,7 +12,7 @@ import pandas as pd
 
 from godpick_runtime_cache import cache_key, get_or_compute
 
-MARKET_REGIME_VERSION = "phase5_market_fire_seed_20260611"
+MARKET_REGIME_VERSION = "phase6_market_leader_replay_20260612"
 MARKET_REGIME_COLUMNS = [
     "大盤攻擊模式", "飆股適合度", "今日可追強度", "中小型股風險", "局部題材火種分", "市場火種狀態", "今日大盤結論", "大盤風險燈號", "大盤情境版本",
 ]
@@ -82,7 +82,12 @@ def _score_frame(df: pd.DataFrame) -> pd.DataFrame:
     chase_strength = round(max(0, min(100, chase_strength)), 1)
     small_cap_risk = round(max(0, min(100, small_cap_risk)), 1)
     # Phase 5：大盤弱不代表沒有飆股；另算局部題材火種，供飆股雷達保留追蹤。
+    # Phase 6：若資料內已經有主流領漲回補/漲停族群相似分，代表有盤前/盤後主流族群線索，
+    # 大盤即使偏防守，也不能直接把飆股雷達關掉。
+    leader_replay_avg = float(_num_series(work, ["主流領漲回補分", "市場領漲相似分"], 50).mean()) if len(work) else 50.0
+    leader_theme_avg = float(_num_series(work, ["漲停族群相似度"], 50).mean()) if len(work) else 50.0
     fire_seed = 48 + strong_ratio * 34 - weak_ratio * 12 + (volume_avg - 50) * 0.38 + max(0, ret5_avg) * 1.8 + max(0, ret20_avg) * 0.25
+    fire_seed += max(0, leader_replay_avg - 65) * 0.20 + max(0, leader_theme_avg - 65) * 0.16
     if amount_med >= 500:
         fire_seed += 4
     elif 0 < amount_med < 80:
@@ -116,7 +121,7 @@ def _score_frame(df: pd.DataFrame) -> pd.DataFrame:
     if fire_seed >= 72:
         fire_state = "局部題材有火種｜指數弱也可追蹤飆股雷達"
     elif fire_seed >= 60:
-        fire_state = "局部輪動火種｜只看盤中點火"
+        fire_state = "局部輪動火種｜只看盤中點火與領漲回補"
     else:
         fire_state = "題材火種不足｜優先防守"
     out["市場火種狀態"] = fire_state

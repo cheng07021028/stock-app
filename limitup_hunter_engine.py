@@ -14,6 +14,17 @@ from sector_rotation_engine import apply_sector_rotation_engine, SECTOR_ROTATION
 from smart_money_engine import apply_smart_money_engine, SMART_MONEY_COLUMNS
 
 try:
+    from market_leader_replay_engine import (
+        MARKET_LEADER_REPLAY_COLUMNS,
+        NUMERIC_MARKET_LEADER_REPLAY_COLUMNS,
+        apply_market_leader_replay_engine,
+    )
+except Exception:
+    MARKET_LEADER_REPLAY_COLUMNS = []
+    NUMERIC_MARKET_LEADER_REPLAY_COLUMNS = set()
+    apply_market_leader_replay_engine = None
+
+try:
     from explosive_radar_engine import (
         EXPLOSIVE_RADAR_COLUMNS,
         NUMERIC_EXPLOSIVE_RADAR_COLUMNS,
@@ -24,13 +35,13 @@ except Exception:
     NUMERIC_EXPLOSIVE_RADAR_COLUMNS = set()
     apply_explosive_radar_engine = None
 
-LIMITUP_HUNTER_VERSION = "phase5_limitup_dual_engine_bridge_20260611"
+LIMITUP_HUNTER_VERSION = "phase6_leader_replay_bridge_20260612"
 LIMITUP_HUNTER_COLUMNS = [
     "飆股攻擊分", "隔日大漲機率分", "漲停獵人觀察", "飆股獵人角色", "盤中轉強觸發價", "追漲許可", "攻擊候選原因", "飆股引擎版本",
 ]
 NUMERIC_LIMITUP_HUNTER_COLUMNS = {"飆股攻擊分", "隔日大漲機率分", "盤中轉強觸發價"}
-PHASE4_COLUMNS = MARKET_REGIME_COLUMNS + SECTOR_ROTATION_COLUMNS + SMART_MONEY_COLUMNS + LIMITUP_HUNTER_COLUMNS + list(EXPLOSIVE_RADAR_COLUMNS or [])
-PHASE4_NUMERIC_COLUMNS = set(NUMERIC_LIMITUP_HUNTER_COLUMNS) | set(NUMERIC_EXPLOSIVE_RADAR_COLUMNS or set())
+PHASE4_COLUMNS = MARKET_REGIME_COLUMNS + SECTOR_ROTATION_COLUMNS + SMART_MONEY_COLUMNS + list(MARKET_LEADER_REPLAY_COLUMNS or []) + LIMITUP_HUNTER_COLUMNS + list(EXPLOSIVE_RADAR_COLUMNS or [])
+PHASE4_NUMERIC_COLUMNS = set(NUMERIC_LIMITUP_HUNTER_COLUMNS) | set(NUMERIC_MARKET_LEADER_REPLAY_COLUMNS or set()) | set(NUMERIC_EXPLOSIVE_RADAR_COLUMNS or set())
 
 
 def _blank(v: Any) -> bool:
@@ -90,6 +101,14 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     out = apply_market_regime_engine(out)
     out = apply_sector_rotation_engine(out)
     out = apply_smart_money_engine(out)
+    if callable(apply_market_leader_replay_engine):
+        try:
+            out = apply_market_leader_replay_engine(out)
+        except Exception as _leader_err:
+            out["市場領漲檢討版本"] = f"phase6_leader_replay_failed:{_leader_err}"
+            for _c in list(MARKET_LEADER_REPLAY_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
 
     score = _num(out, ["推薦總分", "候選強度分", "股神實戰總分"], 50)
     entry = _num(out, ["Entry進場買點分", "進場買點分", "買進分數"], 50)
@@ -105,6 +124,9 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     mainstream = _num(out, ["主流資金分"], 50)
     money_effective = _num(out, ["資金攻擊有效分"], 50)
     amount = _num(out, ["成交額百萬", "20日均成交額百萬"], 0)
+    leader_replay = _num(out, ["主流領漲回補分", "市場領漲相似分"], 50).clip(0, 100)
+    leader_theme = _num(out, ["漲停族群相似度"], 50).clip(0, 100)
+    leader_replay_role = out.get("領漲回補角色", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
     cold_warning = out.get("冷門股警示", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
     mainstream_label = out.get("主流股判定", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
     is_cold = cold_warning.str.strip().ne("") | mainstream_label.str.contains("冷門|低流動性", na=False)
@@ -115,24 +137,29 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     not_exhausted = (100 - (ret20 - 22).clip(lower=0) * 2.0).clip(25, 100)
     leader_bonus = leader.eq("是").astype(float) * 5 + catchup.eq("是").astype(float) * 4
     attack = (
-        sector_attack * 0.20
-        + money * 0.14
-        + money_effective * 0.10
-        + mainstream * 0.18
-        + volume * 0.13
-        + score * 0.11
-        + market * 0.08
-        + early_window * 0.04
+        sector_attack * 0.18
+        + money * 0.12
+        + money_effective * 0.09
+        + mainstream * 0.14
+        + volume * 0.12
+        + score * 0.09
+        + market * 0.07
+        + early_window * 0.03
         + not_exhausted * 0.02
+        + leader_replay * 0.10
+        + leader_theme * 0.04
         + leader_bonus
     ).clip(0, 100)
+    # Phase 6：若命中 06/12 型主流領漲結構，不能只因短線風控或舊 RR 直接壓低飆股候選。
+    leader_boost_floor = (leader_replay * 0.58 + leader_theme * 0.18 + sector_attack * 0.14 + volume * 0.10).clip(0, 100)
+    attack = attack.where(leader_replay < 76, attack.combine(leader_boost_floor, max))
 
     # Phase 4.2：冷門股爆量常是低基期錯覺，不可被均量比推成 S/B+。
     attack = attack.where(~is_cold, attack.clip(upper=66))
     attack = attack.where(amount >= 50, attack.clip(upper=58))
     attack = attack.where(amount >= 100, attack.clip(upper=64))
     attack = attack.round(1)
-    next_big = (attack * 0.50 + entry * 0.13 + (100 - chase).clip(0, 100) * 0.10 + sector_cont * 0.08 + risk * 0.07 + mainstream * 0.12).clip(0, 100).round(1)
+    next_big = (attack * 0.44 + entry * 0.10 + (100 - chase).clip(0, 100) * 0.08 + sector_cont * 0.07 + risk * 0.05 + mainstream * 0.10 + leader_replay * 0.16).clip(0, 100).round(1)
 
     trigger = _trigger_price(out)
     role = []
@@ -140,17 +167,17 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     allow = []
     reason = []
     for idx in out.index:
-        a = float(attack.loc[idx]); nb = float(next_big.loc[idx]); r5 = float(ret5.loc[idx]); ch = float(chase.loc[idx]); m = float(market.loc[idx]); sa = float(sector_attack.loc[idx]); sm = float(money.loc[idx]); ms = float(mainstream.loc[idx]); ef = float(money_effective.loc[idx]); am = float(amount.loc[idx])
+        a = float(attack.loc[idx]); nb = float(next_big.loc[idx]); r5 = float(ret5.loc[idx]); ch = float(chase.loc[idx]); m = float(market.loc[idx]); sa = float(sector_attack.loc[idx]); sm = float(money.loc[idx]); ms = float(mainstream.loc[idx]); ef = float(money_effective.loc[idx]); am = float(amount.loc[idx]); lr = float(leader_replay.loc[idx]); lt = float(leader_theme.loc[idx]); lrole = str(leader_replay_role.loc[idx])
         cold = bool(is_cold.loc[idx])
         if cold:
             rr = "冷門潛伏觀察" if am >= 50 else "低流動性排除"
             ob = "冷門隔離｜低成交額不視為主流攻擊"
             al = "不追價"
-        elif a >= 82 and nb >= 74 and m >= 58 and sa >= 68 and sm >= 60 and ms >= 70 and ef >= 58 and ch < 78 and r5 < 13:
+        elif (a >= 82 and nb >= 74 and m >= 58 and sa >= 68 and sm >= 60 and ms >= 70 and ef >= 58 and ch < 82 and r5 < 18) or (lr >= 86 and lt >= 76 and am >= 500 and sa >= 62):
             rr = "S｜飆股攻擊候選"
             ob = "主流高爆發觀察｜等盤中量價確認"
             al = "允許盤中觸發後小量追強"
-        elif a >= 72 and nb >= 66 and sa >= 62 and ms >= 58 and ef >= 52:
+        elif (a >= 72 and nb >= 66 and sa >= 62 and ms >= 58 and ef >= 52) or (lr >= 76 and lt >= 70 and am >= 200 and (sa >= 58 or '主流強勢回補' in lrole)):
             rr = "B+｜盤中突破可追"
             ob = "主流突破觀察｜不可預先追高"
             al = "僅突破確認後試單"
@@ -165,7 +192,7 @@ def apply_limitup_hunter_engine(df: pd.DataFrame | None) -> pd.DataFrame:
         role.append(rr)
         observe.append(ob)
         allow.append(al)
-        reason.append(f"攻擊{a:.1f}｜隔日大漲{nb:.1f}｜族群{sa:.1f}｜籌碼{sm:.1f}｜主流{ms:.1f}｜有效{ef:.1f}｜成交額{am:.1f}百萬｜大盤{m:.1f}")
+        reason.append(f"攻擊{a:.1f}｜隔日大漲{nb:.1f}｜領漲回補{lr:.1f}｜漲停族群{lt:.1f}｜族群{sa:.1f}｜籌碼{sm:.1f}｜主流{ms:.1f}｜有效{ef:.1f}｜成交額{am:.1f}百萬｜大盤{m:.1f}")
 
     out["飆股攻擊分"] = attack
     out["隔日大漲機率分"] = next_big

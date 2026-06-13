@@ -7411,6 +7411,36 @@ def _build_hot_stock_candidates(base_df: pd.DataFrame, final_df: pd.DataFrame, m
     if work.empty:
         return pd.DataFrame()
 
+    # Phase 6：市場領漲回補雷達。
+    # 針對 6/12 類型的「隔夜催化 + 主流族群全面攻擊」漏網股，
+    # 先保留到領漲回補分頁，不讓 RR/停損距離在盤前就把它刪掉。
+    if "主流領漲回補分" in work.columns or "領漲回補角色" in work.columns:
+        leader_score = pd.to_numeric(work.get("主流領漲回補分", 0), errors="coerce").fillna(0)
+        leader_theme = pd.to_numeric(work.get("漲停族群相似度", 0), errors="coerce").fillna(0)
+        leader_role = work.get("領漲回補角色", pd.Series([""] * len(work), index=work.index)).astype(str)
+        leader_bucket = work.get("領漲回補分區", pd.Series([""] * len(work), index=work.index)).astype(str)
+        amount_m = pd.to_numeric(work.get("成交額百萬", 0), errors="coerce").fillna(0)
+        leader_mask = (
+            (leader_score >= 70)
+            & (leader_theme >= 62)
+            & (amount_m >= 80)
+            & leader_role.str.contains(r"L\+｜領漲回補雷達|L｜主流強勢回補|T｜題材轉強追蹤", na=False)
+            & ~leader_role.str.contains("N｜非領漲回補", na=False)
+            & ~leader_bucket.str.contains("低流動性排除", na=False)
+        )
+        leader_df = work[leader_mask].copy()
+        if not leader_df.empty:
+            if "補抓原因" not in leader_df.columns:
+                leader_df["補抓原因"] = ""
+            leader_df["補抓原因"] = leader_df.apply(
+                lambda r: _safe_str(r.get("補抓原因")) or f"Phase6市場領漲回補：{_safe_str(r.get('領漲回補角色'))}｜{_safe_str(r.get('錯失原因診斷'))}",
+                axis=1,
+            )
+            sort_cols = [c for c in ["主流領漲回補分", "市場領漲相似分", "漲停族群相似度", "爆發雷達分", "族群攻擊強度", "成交額百萬"] if c in leader_df.columns]
+            if sort_cols:
+                leader_df = leader_df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+            return leader_df.reset_index(drop=True).head(30)
+
     # Phase 5：先用獨立飆股雷達做「漏網回補」。
     # 這裡不要求 Entry/Risk 完全通過，避免可能隔日點火的股票被穩健風控提前刪掉；
     # 但仍保留角色/風險欄位，讓它只出現在飆股雷達或高風險觀察，不混成主推薦。
@@ -8720,6 +8750,20 @@ def _build_recommend_df(
     radar_bucket_text = base_df.get("飆股雷達分區", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
     radar_score = pd.to_numeric(base_df.get("爆發雷達分", 0), errors="coerce").fillna(0)
     amount_m = pd.to_numeric(base_df.get("成交額百萬", 0), errors="coerce").fillna(0)
+    leader_role_text = base_df.get("領漲回補角色", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    leader_bucket_text = base_df.get("領漲回補分區", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    leader_score = pd.to_numeric(base_df.get("主流領漲回補分", 0), errors="coerce").fillna(0)
+    leader_theme = pd.to_numeric(base_df.get("漲停族群相似度", 0), errors="coerce").fillna(0)
+    # Phase 6：領漲回補候選是「檢討 6/12 漏網強勢股」的第三條路，
+    # 不混成 A 主推薦，但要出現在匯出雷達，避免只剩弱勢觀察。
+    leader_replay_mask = (
+        (leader_score >= 70)
+        & (leader_theme >= 62)
+        & (amount_m >= 80)
+        & leader_role_text.str.contains(r"L\+｜領漲回補雷達|L｜主流強勢回補|T｜題材轉強追蹤", na=False)
+        & ~leader_role_text.str.contains("N｜非領漲回補", na=False)
+        & ~leader_bucket_text.str.contains("低流動性排除", na=False)
+    )
     # Phase 5：穩健推薦與飆股雷達雙引擎分流。
     # 飆股雷達候選不因 Entry/Risk/RR 先被刪掉，但它只進雷達/高風險分頁，不當成無腦買進清單。
     explosive_radar_mask = (
@@ -8737,7 +8781,7 @@ def _build_recommend_df(
     explosive_radar_mask = explosive_radar_mask & ~radar_role_text.str.contains("X｜假強排除", na=False) & ~radar_bucket_text.str.contains("假強排除", na=False)
     allowed_decision_mask = ~blocked_decision_mask & ~role_text.str.contains("弱勢觀察", na=False)
     stable_final_mask = (base_score >= min_total_score) & allowed_decision_mask & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask | breakout_wait_mask)
-    final_df = base_df[stable_final_mask | explosive_radar_mask].copy()
+    final_df = base_df[stable_final_mask | explosive_radar_mask | leader_replay_mask].copy()
 
     # 若沒有主要推薦，不用冷門股硬湊；只保留少數高品質觀察作為輔助參考。
     if final_df.empty:
@@ -9419,6 +9463,45 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
 
 
 
+def _phase6_split_market_leader_replay_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Phase 6 Excel 分頁：領漲回補雷達 / 題材轉強追蹤。
+
+    專門檢討 6/12 類型的漏網股：記憶體、半導體、PCB、被動元件、面板/太陽能等主流領漲族群。
+    """
+    if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    work = rec_export.copy()
+
+    def _txt(col: str) -> pd.Series:
+        if col in work.columns:
+            return work[col].fillna("").astype(str)
+        return pd.Series([""] * len(work), index=work.index, dtype="object")
+
+    role = _txt("領漲回補角色")
+    bucket = _txt("領漲回補分區")
+    score = pd.to_numeric(work.get("主流領漲回補分", 0), errors="coerce").fillna(0)
+    theme = pd.to_numeric(work.get("漲停族群相似度", 0), errors="coerce").fillna(0)
+    amount_m = pd.to_numeric(work.get("成交額百萬", 0), errors="coerce").fillna(0)
+
+    leader_mask = (
+        (bucket.eq("領漲回補雷達") | role.str.contains(r"L\+｜領漲回補雷達|L｜主流強勢回補", na=False))
+        & (score >= 72)
+        & (theme >= 62)
+        & (amount_m >= 80)
+    )
+    theme_mask = (
+        (bucket.eq("題材轉強追蹤") | role.str.contains("T｜題材轉強追蹤", na=False))
+        & (score >= 64)
+        & (theme >= 58)
+        & (amount_m >= 50)
+        & ~leader_mask
+    )
+    sort_cols = ["主流領漲回補分", "市場領漲相似分", "漲停族群相似度", "爆發雷達分", "隔日爆發分", "族群攻擊強度", "成交額百萬"]
+    leader_df = _safe_sort_export_df(work.loc[leader_mask].copy(), sort_cols, [False] * len(sort_cols))
+    theme_df = _safe_sort_export_df(work.loc[theme_mask].copy(), sort_cols, [False] * len(sort_cols))
+    return leader_df, theme_df
+
+
 def _phase5_split_explosive_radar_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Phase 5 Excel 分頁：飆股雷達 / 高風險爆發觀察 / 假強排除。
 
@@ -9426,10 +9509,13 @@ def _phase5_split_explosive_radar_views(rec_export: pd.DataFrame) -> tuple[pd.Da
     """
     if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    try:
-        work = _phase41_apply_week_battle_columns(rec_export)
-    except Exception:
+    if any(c in rec_export.columns for c in ["下週作戰版本", "主流作戰分區", "飆股雷達分區", "領漲回補分區"]):
         work = rec_export.copy()
+    else:
+        try:
+            work = _phase41_apply_week_battle_columns(rec_export)
+        except Exception:
+            work = rec_export.copy()
 
     def _txt(col: str) -> pd.Series:
         if col in work.columns:
@@ -9486,10 +9572,13 @@ def _build_excel_bytes(
         pass
 
     attack_main_export, breakout_export, early_export, cold_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
+    leader_replay_export, theme_follow_export = _phase6_split_market_leader_replay_views(rec_export)
     radar_export, radar_risk_export, radar_fake_export = _phase5_split_explosive_radar_views(rec_export)
 
     try:
         if callable(prune_empty_recommendation_columns):
+            leader_replay_export = prune_empty_recommendation_columns(leader_replay_export)
+            theme_follow_export = prune_empty_recommendation_columns(theme_follow_export)
             radar_export = prune_empty_recommendation_columns(radar_export)
             radar_risk_export = prune_empty_recommendation_columns(radar_risk_export)
             radar_fake_export = prune_empty_recommendation_columns(radar_fake_export)
@@ -9503,6 +9592,8 @@ def _build_excel_bytes(
     except Exception:
         pass
 
+    _write_df_to_ws(wb, "領漲回補雷達", leader_replay_export, "目前沒有 6/12 類型領漲回補候選。")
+    _write_df_to_ws(wb, "題材轉強追蹤", theme_follow_export, "目前沒有題材轉強追蹤候選。")
     _write_df_to_ws(wb, "飆股雷達", radar_export, "目前沒有 S+/S/B+ 飆股雷達候選。")
     _write_df_to_ws(wb, "高風險爆發觀察", radar_risk_export, "目前沒有 R 高風險爆發觀察候選。")
     _write_df_to_ws(wb, "假強排除", radar_fake_export, "目前沒有 X 假強排除候選。")
@@ -9518,6 +9609,8 @@ def _build_excel_bytes(
     _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
     diag = pd.DataFrame([
+        {"分頁": "領漲回補雷達", "列數": 0 if leader_replay_export is None else len(leader_replay_export), "欄數": 0 if leader_replay_export is None else len(leader_replay_export.columns)},
+        {"分頁": "題材轉強追蹤", "列數": 0 if theme_follow_export is None else len(theme_follow_export), "欄數": 0 if theme_follow_export is None else len(theme_follow_export.columns)},
         {"分頁": "飆股雷達", "列數": 0 if radar_export is None else len(radar_export), "欄數": 0 if radar_export is None else len(radar_export.columns)},
         {"分頁": "高風險爆發觀察", "列數": 0 if radar_risk_export is None else len(radar_risk_export), "欄數": 0 if radar_risk_export is None else len(radar_risk_export.columns)},
         {"分頁": "假強排除", "列數": 0 if radar_fake_export is None else len(radar_fake_export), "欄數": 0 if radar_fake_export is None else len(radar_fake_export.columns)},
@@ -9563,7 +9656,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 5 匯出內容：飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看飆股雷達分區與主流作戰分區。")
+        st.caption("Phase 6 匯出內容：領漲回補雷達、題材轉強追蹤、飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看領漲回補/飆股雷達分區與主流作戰分區。")
 
 
 def _render_selected_export_block():
