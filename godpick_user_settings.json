@@ -246,7 +246,7 @@
   "scan_settings": {
     "universe_mode": "全市場",
     "group": "庫存",
-    "days": 180,
+    "days": 240,
     "top_n": 10,
     "manual_codes": "",
     "scan_limit": "全部",
@@ -303,10 +303,10 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-06-13 15:05:47",
+  "updated_at": "2026-06-13 15:06:04",
   "weight_settings_updated_at": "2026-06-13 15:05:47",
   "weight_update_seq": 44,
   "weight_source": "7_股神推薦",
   "last_weight_calibration_profile": "7_股神推薦手動套用",
-  "version": "godpick_v143_weight_reload_sync"
+  "version": "godpick_v5_persistent_settings"
 }
