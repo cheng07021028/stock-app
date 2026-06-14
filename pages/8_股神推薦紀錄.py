@@ -4585,6 +4585,45 @@ def _record_editor_checkbox_on_change_v70(editor_key: str, id_map_key: str, chec
         return
 
 
+
+def _record_editor_nonce_key(show_cols_mode: str) -> str:
+    """v74：推薦紀錄總表 editor 版本鍵。
+
+    批次全選 / 取消刪除時，需要換一個 data_editor key，避免 Streamlit 保留舊 edited_rows，
+    導致按下取消後舊勾選又被 sticky checkbox 邏輯帶回來。
+    """
+    return _k(f"record_editor_nonce_{show_cols_mode}")
+
+
+def _record_editor_key_for_mode(show_cols_mode: str) -> str:
+    nonce_key = _record_editor_nonce_key(show_cols_mode)
+    try:
+        nonce = int(st.session_state.get(nonce_key, 0) or 0)
+    except Exception:
+        nonce = 0
+    return _k(f"record_editor_{show_cols_mode}_{nonce}")
+
+
+def _reset_record_editor_for_bulk_delete(
+    show_cols_mode: str,
+    delete_ids: list[str] | None = None,
+    import_ids: list[str] | None = None,
+) -> str:
+    """v74：重建推薦紀錄 data_editor，並指定下一輪刪除勾選狀態。"""
+    nonce_key = _record_editor_nonce_key(show_cols_mode)
+    try:
+        next_nonce = int(st.session_state.get(nonce_key, 0) or 0) + 1
+    except Exception:
+        next_nonce = 1
+    st.session_state[nonce_key] = next_nonce
+
+    next_editor_key = _k(f"record_editor_{show_cols_mode}_{next_nonce}")
+    clean_delete_ids = [_safe_str(x) for x in (delete_ids or []) if _safe_str(x)]
+    clean_import_ids = [_safe_str(x) for x in (import_ids or []) if _safe_str(x)]
+    st.session_state[_k(f"sticky_{next_editor_key}_刪除_ids")] = clean_delete_ids
+    st.session_state[_k(f"sticky_{next_editor_key}_匯入自選_ids")] = clean_import_ids
+    return next_editor_key
+
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
         return {"count": 0, "buy_count": 0, "sold_count": 0, "avg_ret": 0, "win_rate": 0}
@@ -5473,7 +5512,7 @@ def main():
         else:
             st.caption(f"目前顯示 {len(view_df)} / {len(live_df)} 筆")
 
-        editor_key = _k(f"record_editor_{show_cols_mode}")
+        editor_key = _record_editor_key_for_mode(show_cols_mode)
         editor_df = _apply_sticky_editor_checkboxes(editor_key, editor_df, "record_id", ["匯入自選", "刪除"])
 
         # v70：建立畫面列序 → record_id 對照，供 on_change 在 rerun 前立即保存 checkbox 狀態。
@@ -5566,7 +5605,7 @@ def main():
         except Exception:
             pass
 
-        action_cols = st.columns([1.6, 1.2, 1.2, 1.2, 1.2, 2.6])
+        action_cols = st.columns([1.6, 1.2, 1.2, 1.15, 1.15, 1.2, 1.2, 2.6])
         with action_cols[0]:
             target_group = st.text_input("匯入自選群組", value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"), key=_k("watchlist_target_group"))
         with action_cols[1]:
@@ -5600,7 +5639,35 @@ def main():
                 master = _apply_mode_labels(master)
                 _save_state_df(master)
                 st.success("已套用，尚未同步")
+        def _current_import_ids_from_editor() -> list[str]:
+            if "匯入自選" not in edited_df.columns or "record_id" not in edited_df.columns:
+                return []
+            import_df = edited_df[edited_df["匯入自選"].fillna(False).astype(bool)].copy()
+            return [_safe_str(x) for x in import_df["record_id"].astype(str).tolist() if _safe_str(x)]
+
         with action_cols[3]:
+            if st.button("☑️ 刪除全選", use_container_width=True, help="全選目前畫面顯示的紀錄為待刪除；不會立即刪除，仍需再按「刪除勾選」。"):
+                if "record_id" not in edited_df.columns or edited_df.empty:
+                    st.warning("目前畫面沒有可全選的紀錄。")
+                else:
+                    visible_delete_ids = [_safe_str(x) for x in edited_df["record_id"].astype(str).tolist() if _safe_str(x)]
+                    _reset_record_editor_for_bulk_delete(
+                        show_cols_mode,
+                        delete_ids=visible_delete_ids,
+                        import_ids=_current_import_ids_from_editor(),
+                    )
+                    st.session_state[_k("last_delete_msg")] = f"已勾選目前顯示 {len(visible_delete_ids)} 筆為待刪除；確認後請按「刪除勾選」。"
+                    st.rerun()
+        with action_cols[4]:
+            if st.button("↩️ 刪除取消", use_container_width=True, help="取消目前所有刪除勾選，不影響匯入自選勾選。"):
+                _reset_record_editor_for_bulk_delete(
+                    show_cols_mode,
+                    delete_ids=[],
+                    import_ids=_current_import_ids_from_editor(),
+                )
+                st.session_state[_k("last_delete_msg")] = "已取消所有刪除勾選。"
+                st.rerun()
+        with action_cols[5]:
             if st.button("🗑️ 刪除勾選", use_container_width=True):
                 if "刪除" not in edited_df.columns:
                     st.warning("目前表格缺少刪除欄位，請重新載入後再試。")
@@ -5620,10 +5687,14 @@ def main():
                         deleted_n = max(before_n - after_n, 0)
 
                         _save_state_df(new_df)
-                        st.session_state[_k(f"sticky_{editor_key}_刪除_ids")] = []
+                        _reset_record_editor_for_bulk_delete(
+                            show_cols_mode,
+                            delete_ids=[],
+                            import_ids=_current_import_ids_from_editor(),
+                        )
                         st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，尚未同步；若要永久寫回，請按「儲存同步」。"
                         st.rerun()
-        with action_cols[4]:
+        with action_cols[6]:
             if st.button("🧼 清空目前篩選", use_container_width=True):
                 source_df = view_df if not truncated else view_df.head(int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)))
                 if source_df.empty:
@@ -5631,9 +5702,11 @@ def main():
                 else:
                     new_df = _clear_filtered_records(live_df, source_df)
                     _save_state_df(new_df)
+                    _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
                     st.success(f"已清空 {len(source_df)} 筆，尚未同步")
-        with action_cols[5]:
-            st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 更新價格 / 更新績效 → 儲存同步")
+                    st.rerun()
+        with action_cols[7]:
+            st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 刪除全選 / 取消 → 更新價格 / 更新績效 → 儲存同步")
 
     if active_tab == "🧠 股神決策":
         render_pro_section("股神模式進出場決策", "將 7_股神推薦 的分數欄位，結合最新價、停損距離、歷史績效與模式標籤，轉成可操作建議。")
