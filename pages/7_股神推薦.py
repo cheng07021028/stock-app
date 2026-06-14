@@ -9395,6 +9395,33 @@ def _build_export_views(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame
     return rec_export, cat_export, leader_export, factor_export
 
 
+def _apply_phase64_precision_output_filter(rec_df: pd.DataFrame, min_total_score: float, top_n: int, include_risk_radar: bool = True) -> pd.DataFrame:
+    """Phase 6.4：讓「推薦總分下限」與「輸出 Top N」真正套用到最後輸出。
+
+    這裡只做最後輸出精選，不重新抓資料、不重算歷史、不寫 JSON。
+    目的：避免正式排除、低流動性、過熱禁買、弱勢觀察或回放診斷股票
+    混在推薦結果裡，被誤認為下週推薦。
+    """
+    if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
+        return pd.DataFrame() if rec_df is None else rec_df
+    try:
+        from godpick_precision_filter_engine import apply_precision_topn_filter
+        filtered = apply_precision_topn_filter(
+            rec_df,
+            min_total_score=float(min_total_score),
+            top_n=int(top_n),
+            include_risk_radar=bool(include_risk_radar),
+        )
+        return filtered if isinstance(filtered, pd.DataFrame) else rec_df
+    except Exception as precision_err:
+        out = rec_df.copy()
+        try:
+            out["精選輸出資格"] = f"Phase6.4精選篩選失敗：{precision_err}"
+        except Exception:
+            pass
+        return out
+
+
 def _excel_safe_value(v):
     """Excel 匯出專用：把 pandas/numpy 型別轉成 openpyxl 可寫入型別。"""
     try:
@@ -9770,7 +9797,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 6.2 匯出內容：領漲回補雷達、題材轉強追蹤、漲停漏選回放、漏選原因診斷、已覆蓋雷達、飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看領漲回補/飆股雷達分區與主流作戰分區。")
+        st.caption("Phase 6.4 匯出內容已套用『推薦總分下限』與『輸出 Top N』：最多只輸出最精選候選，正式排除、低流動性、過熱禁買與弱勢觀察不再混入完整推薦表。若沒有達標股票，會明確顯示 0 檔，不硬湊名單。")
 
 
 def _render_selected_export_block():
@@ -11001,6 +11028,33 @@ def main():
     except Exception:
         pass
 
+    # Phase 6.4：最終輸出精選。
+    # 使用者設定的「推薦總分下限」必須套用到所有最後顯示/匯出結果；
+    # 「輸出 Top N」代表最多輸出 N 檔，不再把正式排除、低流動性、過熱禁買或弱勢觀察塞進完整推薦表。
+    _phase64_min_total_score = float(st.session_state.get(_k("min_total_score"), 55.0))
+    _phase64_top_n = int(st.session_state.get(_k("top_n"), 10))
+    _phase64_before_count = len(rec_df) if isinstance(rec_df, pd.DataFrame) else 0
+    rec_df = _apply_phase64_precision_output_filter(
+        rec_df,
+        min_total_score=_phase64_min_total_score,
+        top_n=_phase64_top_n,
+        include_risk_radar=True,
+    )
+    if isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
+        try:
+            _hot_score = pd.to_numeric(hot_pick_df.get("推薦總分", hot_pick_df.get("候選強度分", 0)), errors="coerce").fillna(0)
+            hot_pick_df = hot_pick_df.loc[_hot_score >= _phase64_min_total_score].copy().head(_phase64_top_n)
+        except Exception:
+            hot_pick_df = hot_pick_df.head(_phase64_top_n).copy()
+    st.session_state[_k("phase64_precision_summary")] = {
+        "before": int(_phase64_before_count),
+        "after": int(len(rec_df) if isinstance(rec_df, pd.DataFrame) else 0),
+        "min_total_score": float(_phase64_min_total_score),
+        "top_n": int(_phase64_top_n),
+    }
+    if submit_recommend or submit_refresh or resume_scan_btn:
+        _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
+
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
     _render_vnext_performance_feedback_panel()
@@ -11068,6 +11122,14 @@ def main():
     )
     if attack_count <= 0 and radar_count <= 0:
         st.warning("本輪沒有『主流攻擊候選』或『飆股雷達』。完整推薦表仍可能有 B/C/R 或冷門觀察股，但不是直接買進名單；請優先看『飆股雷達分區』、主流作戰分區與盤中觸發價。")
+
+    _phase64_summary = st.session_state.get(_k("phase64_precision_summary"), {})
+    if isinstance(_phase64_summary, dict) and _phase64_summary:
+        st.caption(
+            f"Phase 6.4 精選輸出：原候選 {_phase64_summary.get('before', 0)} 檔 → "
+            f"符合推薦總分下限 {_phase64_summary.get('min_total_score', 0):.1f} 且通過精選邏輯 "
+            f"{_phase64_summary.get('after', 0)} 檔；輸出 Top N = {_phase64_summary.get('top_n', 10)}。"
+        )
 
     render_pro_section("推薦股票加入自選股中心")
     st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")
