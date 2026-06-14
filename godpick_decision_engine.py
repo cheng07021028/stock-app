@@ -22,7 +22,18 @@ except Exception:
     PHASE4_COLUMNS = []
     apply_limitup_hunter_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase6_2_miss_replay_20260613"
+try:
+    from godpick_formal_recommendation_engine import (
+        FORMAL_RECOMMENDATION_COLUMNS,
+        NUMERIC_FORMAL_RECOMMENDATION_COLUMNS,
+        apply_formal_recommendation_engine,
+    )
+except Exception:
+    FORMAL_RECOMMENDATION_COLUMNS = []
+    NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = set()
+    apply_formal_recommendation_engine = None
+
+DECISION_ENGINE_VERSION = "vnext_phase6_3_formal_purifier_20260613"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -133,6 +144,7 @@ DECISION_ENGINE_COLUMNS = [
     "加碼條件",
     "失效條件",
     "決策版本",
+    *list(FORMAL_RECOMMENDATION_COLUMNS or []),
 ]
 
 NUMERIC_DECISION_COLUMNS = {
@@ -170,6 +182,7 @@ NUMERIC_DECISION_COLUMNS = {
     "市場領漲相似分",
     "漲停族群相似度",
     "主流領漲回補分",
+    *set(NUMERIC_FORMAL_RECOMMENDATION_COLUMNS or set()),
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -1202,6 +1215,18 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
         out.loc[blank, "專業決策摘要"] = out.loc[blank].apply(_decision_summary, axis=1)
     else:
         out["專業決策摘要"] = out.apply(_decision_summary, axis=1)
+
+    # Phase 6.3：正式推薦名單淨化。
+    # 將「可直接買 / 盤中雷達 / 高風險觀察 / 正式排除」集中在共用引擎，
+    # 避免 7 頁、8 頁、12 頁各自重複判斷造成混亂與顯示緩慢。
+    if callable(apply_formal_recommendation_engine):
+        try:
+            out = apply_formal_recommendation_engine(out)
+        except Exception as _formal_err:
+            out["正式推薦版本"] = f"Phase6.3正式推薦淨化失敗：{_formal_err}"
+            for _c in list(FORMAL_RECOMMENDATION_COLUMNS or []):
+                if _c not in out.columns:
+                    out[_c] = ""
 
     out = out.drop(columns=[c for c in out.columns if str(c).startswith("_phase2_") or str(c).startswith("_phase3_")], errors="ignore")
     return out

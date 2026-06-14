@@ -9595,6 +9595,49 @@ def _phase5_split_explosive_radar_views(rec_export: pd.DataFrame) -> tuple[pd.Da
     )
     return radar_df, risk_df, fake_df
 
+
+def _phase63_split_formal_recommendation_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Phase 6.3 Excel 分頁：正式推薦 / 盤中雷達 / 高風險觀察 / 不可直接買 / 正式排除。
+
+    目的：避免完整推薦表、D 禁買、弱勢觀察、高風險雷達混在一起，被誤解為下週可買清單。
+    不重算選股，只讀 godpick_formal_recommendation_engine 產生的共用欄位。
+    """
+    if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    work = rec_export.copy()
+    if "正式推薦分區" not in work.columns:
+        try:
+            from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+            work = apply_formal_recommendation_engine(work)
+        except Exception:
+            work["正式推薦分區"] = "不可直接買觀察"
+            work["正式推薦資格"] = "WATCH｜觀察不買"
+            work["下週是否可直接買"] = "不可"
+            work["可操作分"] = 0
+            work["正式推薦排序分"] = 0
+            work["正式推薦動作"] = "只觀察，不主動買進。"
+
+    def _txt(col: str) -> pd.Series:
+        if col in work.columns:
+            return work[col].fillna("").astype(str)
+        return pd.Series([""] * len(work), index=work.index, dtype="object")
+
+    bucket = _txt("正式推薦分區")
+    formal_mask = bucket.eq("正式下週主推薦")
+    intraday_mask = bucket.eq("盤中雷達追蹤")
+    risk_mask = bucket.eq("高風險雷達觀察")
+    watch_mask = bucket.isin(["不可直接買觀察", "早期潛伏觀察"])
+    exclude_mask = bucket.eq("正式排除清單")
+
+    sort_cols = ["正式推薦排序分", "可操作分", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "主流資金分", "成交額百萬"]
+    radar_sort = ["正式推薦排序分", "爆發雷達分", "隔日爆發分", "主流領漲回補分", "漲停回放分", "族群攻擊強度", "成交額百萬"]
+    formal_df = _safe_sort_export_df(work.loc[formal_mask].copy(), sort_cols, [False] * len(sort_cols))
+    intraday_df = _safe_sort_export_df(work.loc[intraday_mask].copy(), radar_sort, [False] * len(radar_sort))
+    risk_df = _safe_sort_export_df(work.loc[risk_mask].copy(), radar_sort, [False] * len(radar_sort))
+    watch_df = _safe_sort_export_df(work.loc[watch_mask].copy(), ["可操作分", "正式推薦排序分", "股神實戰總分", "主流資金分"], [False, False, False, False])
+    exclude_df = _safe_sort_export_df(work.loc[exclude_mask].copy(), ["正式推薦排序分", "可操作分", "追價風險分", "成交額百萬"], [False, False, False, False])
+    return formal_df, intraday_df, risk_df, watch_df, exclude_df
+
 def _build_excel_bytes(
     rec_export: pd.DataFrame,
     cat_export: pd.DataFrame,
@@ -9617,12 +9660,18 @@ def _build_excel_bytes(
         pass
 
     attack_main_export, breakout_export, early_export, cold_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
+    formal_export, intraday_formal_export, formal_risk_export, formal_watch_export, formal_exclude_export = _phase63_split_formal_recommendation_views(rec_export)
     leader_replay_export, theme_follow_export = _phase6_split_market_leader_replay_views(rec_export)
     miss_replay_export, miss_diag_export, miss_covered_export = _phase62_split_miss_replay_views(rec_export)
     radar_export, radar_risk_export, radar_fake_export = _phase5_split_explosive_radar_views(rec_export)
 
     try:
         if callable(prune_empty_recommendation_columns):
+            formal_export = prune_empty_recommendation_columns(formal_export)
+            intraday_formal_export = prune_empty_recommendation_columns(intraday_formal_export)
+            formal_risk_export = prune_empty_recommendation_columns(formal_risk_export)
+            formal_watch_export = prune_empty_recommendation_columns(formal_watch_export)
+            formal_exclude_export = prune_empty_recommendation_columns(formal_exclude_export)
             leader_replay_export = prune_empty_recommendation_columns(leader_replay_export)
             theme_follow_export = prune_empty_recommendation_columns(theme_follow_export)
             miss_replay_export = prune_empty_recommendation_columns(miss_replay_export)
@@ -9641,6 +9690,11 @@ def _build_excel_bytes(
     except Exception:
         pass
 
+    _write_df_to_ws(wb, "正式下週主推薦", formal_export, "目前沒有符合買點、風控、RR 與主流資金門檻的正式下週主推薦。")
+    _write_df_to_ws(wb, "盤中雷達追蹤", intraday_formal_export, "目前沒有符合盤中觸發追蹤條件的候選。")
+    _write_df_to_ws(wb, "高風險雷達觀察", formal_risk_export, "目前沒有高風險飆股雷達觀察候選。")
+    _write_df_to_ws(wb, "不可直接買觀察", formal_watch_export, "目前沒有只觀察不買的候選。")
+    _write_df_to_ws(wb, "正式排除清單", formal_exclude_export, "目前沒有正式排除候選。")
     _write_df_to_ws(wb, "領漲回補雷達", leader_replay_export, "目前沒有 6/12 類型領漲回補候選。")
     _write_df_to_ws(wb, "題材轉強追蹤", theme_follow_export, "目前沒有題材轉強追蹤候選。")
     _write_df_to_ws(wb, "漲停漏選回放", miss_replay_export, "目前沒有需要升級檢討的漲停漏選回放候選。")
@@ -9661,6 +9715,11 @@ def _build_excel_bytes(
     _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
     diag = pd.DataFrame([
+        {"分頁": "正式下週主推薦", "列數": 0 if formal_export is None else len(formal_export), "欄數": 0 if formal_export is None else len(formal_export.columns)},
+        {"分頁": "盤中雷達追蹤", "列數": 0 if intraday_formal_export is None else len(intraday_formal_export), "欄數": 0 if intraday_formal_export is None else len(intraday_formal_export.columns)},
+        {"分頁": "高風險雷達觀察", "列數": 0 if formal_risk_export is None else len(formal_risk_export), "欄數": 0 if formal_risk_export is None else len(formal_risk_export.columns)},
+        {"分頁": "不可直接買觀察", "列數": 0 if formal_watch_export is None else len(formal_watch_export), "欄數": 0 if formal_watch_export is None else len(formal_watch_export.columns)},
+        {"分頁": "正式排除清單", "列數": 0 if formal_exclude_export is None else len(formal_exclude_export), "欄數": 0 if formal_exclude_export is None else len(formal_exclude_export.columns)},
         {"分頁": "領漲回補雷達", "列數": 0 if leader_replay_export is None else len(leader_replay_export), "欄數": 0 if leader_replay_export is None else len(leader_replay_export.columns)},
         {"分頁": "題材轉強追蹤", "列數": 0 if theme_follow_export is None else len(theme_follow_export), "欄數": 0 if theme_follow_export is None else len(theme_follow_export.columns)},
         {"分頁": "漲停漏選回放", "列數": 0 if miss_replay_export is None else len(miss_replay_export), "欄數": 0 if miss_replay_export is None else len(miss_replay_export.columns)},
