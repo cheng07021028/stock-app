@@ -102,7 +102,7 @@ PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
-DELETE_FIX_VERSION = "record_delete_hidden_id_fix_v1_20260425"
+DELETE_FIX_VERSION = "record_delete_persist_sync_fix_v2_20260614"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 MARKET_TREND_V38_LINK_VERSION = "record_market_trend_v76_practical_entry_fields_20260430"
 
@@ -1591,6 +1591,17 @@ def _render_v110_official_factor_record_panel(df: pd.DataFrame) -> None:
         st.dataframe(_safe_display_df(x[show_cols].head(500)), use_container_width=True, hide_index=True)
     st.caption("V110：此區只讀 official_factors_cache.json，不會在 8 頁即時抓官方網站。")
 
+def _add_missing_columns_bulk_v156(df: pd.DataFrame, cols: list[str], default: Any = None) -> pd.DataFrame:
+    """V156：一次補齊缺欄，避免 df[c] 逐欄插入造成 DataFrame fragmentation 與頁面變慢。"""
+    if df is None:
+        df = pd.DataFrame()
+    missing = [c for c in _dedupe_keep_order_v73(cols or []) if c not in df.columns]
+    if not missing:
+        return df
+    fill = pd.DataFrame({c: [default] * len(df) for c in missing}, index=df.index)
+    return pd.concat([df, fill], axis=1)
+
+
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
@@ -1600,9 +1611,8 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "record_id" not in x.columns and "rec_id" in x.columns:
         x["record_id"] = x["rec_id"]
 
-    for c in GODPICK_RECORD_COLUMNS:
-        if c not in x.columns:
-            x[c] = None
+    # V156：避免逐欄 x[c] = None 造成 pandas fragmentation，進頁/刪除後重繪會慢。
+    x = _add_missing_columns_bulk_v156(x, GODPICK_RECORD_COLUMNS, None)
 
     # V110：補入官方因子快取欄位，只補空值，不連外、不覆蓋歷史紀錄原值。
     try:
@@ -1621,15 +1631,13 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     # v73：舊版 numeric_cols 曾誤放多個文字訊息欄，會把「族群策略建議 / K線驗證 / 大盤說明」轉成 NaN。
     # 這裡改用白名單數值欄，文字欄後續再由 raw_src_v73 回補。
     numeric_cols = _dedupe_keep_order_v73(V73_NUMERIC_FIELDS)
+    x = _add_missing_columns_bulk_v156(x, numeric_cols, None)
     for c in numeric_cols:
-        if c not in x.columns:
-            x[c] = None
         x[c] = pd.to_numeric(x[c], errors="coerce")
 
     bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2"]
+    x = _add_missing_columns_bulk_v156(x, bool_cols, False)
     for c in bool_cols:
-        if c not in x.columns:
-            x[c] = False
         x[c] = x[c].fillna(False).map(_normalize_bool)
 
     text_cols = [
@@ -1637,9 +1645,9 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦分桶", "起漲等級", "信心等級", "推薦日期", "推薦時間", "建立時間", "更新時間", "最新更新時間", "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "績效資料型態", "績效資料來源", "備註",
     ]
     # v73：把所有常用說明欄納入文字欄處理，並從原始 df 回補被舊版誤轉掉的訊息。
-    for c in _dedupe_keep_order_v73(text_cols + V73_MESSAGE_TEXT_FIELDS):
-        if c not in x.columns:
-            x[c] = ""
+    text_cols_all = _dedupe_keep_order_v73(text_cols + V73_MESSAGE_TEXT_FIELDS)
+    x = _add_missing_columns_bulk_v156(x, text_cols_all, "")
+    for c in text_cols_all:
         x[c] = x[c].map(lambda v: "" if _is_empty_display_value(v) else str(v))
     x = _restore_text_fields_from_raw_v73(x, raw_src_v73)
     x = _apply_display_backfill_v73(x)
@@ -4624,6 +4632,53 @@ def _reset_record_editor_for_bulk_delete(
     st.session_state[_k(f"sticky_{next_editor_key}_匯入自選_ids")] = clean_import_ids
     return next_editor_key
 
+
+def _collect_editor_selected_ids(
+    editor_key: str,
+    edited_df: pd.DataFrame,
+    id_col: str = "record_id",
+    checkbox_col: str = "刪除",
+) -> list[str]:
+    """V156：同時讀取 data_editor 當前值與 sticky session，避免按下刪除時漏掉剛勾選的列。"""
+    ids: list[str] = []
+    seen: set[str] = set()
+
+    def _add(v: Any) -> None:
+        rid = _safe_str(v)
+        if rid and rid not in seen:
+            seen.add(rid)
+            ids.append(rid)
+
+    try:
+        if edited_df is not None and not edited_df.empty and id_col in edited_df.columns and checkbox_col in edited_df.columns:
+            mask = edited_df[checkbox_col].fillna(False).map(_normalize_bool)
+            for rid in edited_df.loc[mask, id_col].astype(str).tolist():
+                _add(rid)
+    except Exception:
+        pass
+
+    try:
+        sticky_key = _k(f"sticky_{editor_key}_{checkbox_col}_ids")
+        for rid in st.session_state.get(sticky_key, []) or []:
+            _add(rid)
+    except Exception:
+        pass
+
+    return ids
+
+
+def _remove_ids_from_list(values: list[str] | None, remove_ids: set[str]) -> list[str]:
+    """V156：刪除後同步清掉 sticky 匯入/刪除選取，避免已刪資料殘留。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values or []:
+        rid = _safe_str(v)
+        if not rid or rid in remove_ids or rid in seen:
+            continue
+        seen.add(rid)
+        out.append(rid)
+    return out
+
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
         return {"count": 0, "buy_count": 0, "sold_count": 0, "avg_ret": 0, "win_rate": 0}
@@ -5672,11 +5727,7 @@ def main():
                 if "刪除" not in edited_df.columns:
                     st.warning("目前表格缺少刪除欄位，請重新載入後再試。")
                 else:
-                    checked_df = edited_df[edited_df["刪除"].fillna(False).astype(bool)].copy()
-
-                    delete_ids = []
-                    if not checked_df.empty and "record_id" in checked_df.columns:
-                        delete_ids = [_safe_str(x) for x in checked_df["record_id"].astype(str).tolist() if _safe_str(x)]
+                    delete_ids = _collect_editor_selected_ids(editor_key, edited_df, "record_id", "刪除")
 
                     if not delete_ids:
                         st.warning("請先勾選要刪除的紀錄。")
@@ -5685,14 +5736,20 @@ def main():
                         new_df = _delete_records_by_ids(live_df, delete_ids)
                         after_n = len(new_df)
                         deleted_n = max(before_n - after_n, 0)
+                        remove_set = {_safe_str(x) for x in delete_ids if _safe_str(x)}
+                        keep_import_ids = _remove_ids_from_list(_current_import_ids_from_editor(), remove_set)
 
                         _save_state_df(new_df)
+                        sync_ok = _save_records_dual(new_df)
                         _reset_record_editor_for_bulk_delete(
                             show_cols_mode,
                             delete_ids=[],
-                            import_ids=_current_import_ids_from_editor(),
+                            import_ids=keep_import_ids,
                         )
-                        st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，尚未同步；若要永久寫回，請按「儲存同步」。"
+                        if deleted_n <= 0:
+                            st.session_state[_k("last_delete_msg")] = "沒有刪到資料：畫面勾選的 record_id 與目前紀錄不一致，請按重新載入後再試。"
+                        else:
+                            st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，並已{'完成' if sync_ok else '嘗試'}同步到本機/GitHub/Firestore。"
                         st.rerun()
         with action_cols[6]:
             if st.button("🧼 清空目前篩選", use_container_width=True):
@@ -5701,9 +5758,13 @@ def main():
                     st.warning("目前篩選結果沒有資料可清空。")
                 else:
                     new_df = _clear_filtered_records(live_df, source_df)
+                    before_n = len(live_df)
+                    after_n = len(new_df)
+                    deleted_n = max(before_n - after_n, 0)
                     _save_state_df(new_df)
+                    sync_ok = _save_records_dual(new_df)
                     _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
-                    st.success(f"已清空 {len(source_df)} 筆，尚未同步")
+                    st.success(f"已清空 {deleted_n} 筆，並已{'完成' if sync_ok else '嘗試'}同步到本機/GitHub/Firestore。")
                     st.rerun()
         with action_cols[7]:
             st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 刪除全選 / 取消 → 更新價格 / 更新績效 → 儲存同步")
