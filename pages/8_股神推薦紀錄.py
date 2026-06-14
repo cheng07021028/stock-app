@@ -103,6 +103,7 @@ GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_persist_sync_fix_v2_20260614"
+RECORD_SPEED_FIX_VERSION = "record_v157_fast_state_normalize_v1_20260614"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 MARKET_TREND_V38_LINK_VERSION = "record_market_trend_v76_practical_entry_fields_20260430"
 
@@ -1602,9 +1603,59 @@ def _add_missing_columns_bulk_v156(df: pd.DataFrame, cols: list[str], default: A
     return pd.concat([df, fill], axis=1)
 
 
+_NORMALIZED_RECORD_ATTR_V157 = "godpick_record_columns_normalized_version"
+_NORMALIZED_RECORD_VERSION_V157 = "v157_fast_state_normalize"
+_NORMALIZED_RECORD_REQUIRED_V157 = ("record_id", "股票代號", "股票名稱", "推薦日期", "目前狀態")
+
+
+def _mark_normalized_records_v157(df: pd.DataFrame) -> pd.DataFrame:
+    """V157：標記已完成重欄位正規化，避免同一份資料在每次 rerun 重跑完整 backfill。"""
+    try:
+        if isinstance(df, pd.DataFrame):
+            df.attrs[_NORMALIZED_RECORD_ATTR_V157] = _NORMALIZED_RECORD_VERSION_V157
+    except Exception:
+        pass
+    return df
+
+
+def _is_normalized_records_v157(df: pd.DataFrame) -> bool:
+    """V157：快速判斷 session_state 內資料是否已正規化。
+
+    8_股神推薦紀錄原本在 _get_state_df() / live_df 建立 / 儲存 / 分析前反覆呼叫
+    _ensure_godpick_record_columns()。該函式會補官方因子、統一 schema、夜間欄位、品質欄位與
+    Phase 6.1 分區；506 筆、數百欄時，每次 Streamlit rerun 都重做會明顯拖慢。
+    """
+    try:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return False
+        if df.attrs.get(_NORMALIZED_RECORD_ATTR_V157) != _NORMALIZED_RECORD_VERSION_V157:
+            return False
+        if pd.Index(df.columns).duplicated().any():
+            return False
+        return all(c in df.columns for c in _NORMALIZED_RECORD_REQUIRED_V157)
+    except Exception:
+        return False
+
+
+def _copy_records_frame_v157(df: pd.DataFrame) -> pd.DataFrame:
+    """V157：回傳淺拷貝供頁面讀取，避免不必要的深拷貝與完整欄位重算。"""
+    try:
+        out = df.copy(deep=False)
+        if isinstance(df, pd.DataFrame):
+            out.attrs.update(getattr(df, "attrs", {}) or {})
+        return out
+    except Exception:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+
 def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
-        return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+        return _mark_normalized_records_v157(pd.DataFrame(columns=GODPICK_RECORD_COLUMNS))
+
+    # V157：同一份 session_state 資料已正規化時直接回傳淺拷貝。
+    # 這是 8_股神推薦紀錄運算變慢的主因之一：舊版每次 rerun 都會重跑 schema / 官方因子 / 夜間 / 品質 / Phase6.1 backfill。
+    if _is_normalized_records_v157(df):
+        return _copy_records_frame_v157(df)
 
     x = df.copy()
     raw_src_v73 = df.copy()
@@ -1729,7 +1780,8 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     if callable(filter_effective_columns):
         ordered_cols = filter_effective_columns(ordered_cols)
     x = x.loc[:, ~pd.Index(x.columns).duplicated()].copy()
-    return x[ordered_cols].copy()
+    out_v157 = x[ordered_cols].copy()
+    return _mark_normalized_records_v157(out_v157)
 
 
 def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
@@ -4126,13 +4178,14 @@ def _load_records(force_remote: bool = False) -> pd.DataFrame:
         f"GitHub: {'OK' if not gh_err else gh_err}",
         f"Firestore: {'OK' if not fs_err else fs_err}",
     ]
-    if not base_df.empty:
-        # 避免 iterrows 逐筆處理拖慢進頁；_ensure 已會補欄，_recalc 僅在價格/績效更新後需要。
-        base_df = _ensure_godpick_record_columns(base_df)
+    # V157：合併來源後只做一次完整正規化；舊版這裡會 _ensure 兩次。
     return _ensure_godpick_record_columns(base_df)
 
 def _save_state_df(df: pd.DataFrame):
-    st.session_state[_k("records_df")] = _ensure_godpick_record_columns(df)
+    # V157：只在資料進入 session_state 時正規化一次，後續讀取用淺拷貝。
+    normalized = _ensure_godpick_record_columns(df)
+    normalized = _mark_normalized_records_v157(normalized)
+    st.session_state[_k("records_df")] = normalized
     st.session_state[_k("records_saved_at")] = _now_text()
     _invalidate_analysis_cache()
 
@@ -4140,8 +4193,12 @@ def _save_state_df(df: pd.DataFrame):
 def _get_state_df() -> pd.DataFrame:
     df = st.session_state.get(_k("records_df"))
     if isinstance(df, pd.DataFrame):
-        return _ensure_godpick_record_columns(df)
-    return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
+        if _is_normalized_records_v157(df):
+            return _copy_records_frame_v157(df)
+        normalized = _ensure_godpick_record_columns(df)
+        st.session_state[_k("records_df")] = normalized
+        return _copy_records_frame_v157(normalized)
+    return _mark_normalized_records_v157(pd.DataFrame(columns=GODPICK_RECORD_COLUMNS))
 
 
 
@@ -5170,9 +5227,10 @@ def main():
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
+    st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
-    st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V149 單頁籤運算加速版")
+    st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V149 單頁籤運算加速版 ｜ V157 狀態正規化快取")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -5365,7 +5423,8 @@ def main():
             if ui_save_detail:
                 st.write(f"- 保存：{ui_save_detail}")
 
-    live_df = _ensure_godpick_record_columns(_get_state_df().copy())
+    # V157：_get_state_df() 已確保 session_state 資料完成正規化，不再每次 rerun 重跑完整 _ensure。
+    live_df = _get_state_df().copy(deep=False)
 
     # V149：首頁只計算 KPI 必要摘要；大型分群分析表改到對應頁籤/面板才運算。
     # 舊版每次按任何按鈕都會先建立所有 analysis tables，造成「重新載入 / 更新最新價 / 儲存同步」後畫面等待很久。
