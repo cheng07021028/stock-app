@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase6_3_formal_purifier_20260613"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase6_8_nextday_review_trigger_20260617"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "可操作分",
@@ -23,12 +23,21 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "盤中雷達動作",
     "正式推薦排除原因",
     "正式推薦排序分",
+    "原始觸發價",
+    "實戰觸發價",
+    "觸發價偏離%",
+    "觸發價修正原因",
+    "隔日雷達回測判斷",
+    "股神觸發修正建議",
     "正式推薦版本",
 ]
 
 NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "可操作分",
     "正式推薦排序分",
+    "原始觸發價",
+    "實戰觸發價",
+    "觸發價偏離%",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -79,6 +88,100 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
         return max(lo, min(hi, float(x)))
     except Exception:
         return lo
+
+
+def _first_price(row: pd.Series, cols: list[str], default: float = 0.0) -> float:
+    for c in cols:
+        v = _safe_float(row.get(c), 0.0)
+        if v and v > 0:
+            return float(v)
+    return float(default)
+
+
+def _tw_tick(price: float) -> float:
+    if price < 10:
+        return 0.01
+    if price < 50:
+        return 0.05
+    if price < 100:
+        return 0.1
+    if price < 500:
+        return 0.5
+    if price < 1000:
+        return 1.0
+    return 5.0
+
+
+def _round_up_to_tick(price: float) -> float:
+    try:
+        import math as _math
+        tick = _tw_tick(float(price))
+        return round(_math.ceil(float(price) / tick) * tick, 2)
+    except Exception:
+        return round(float(price or 0), 2)
+
+
+def _trigger_cap_pct(row: pd.Series) -> float:
+    """實戰觸發價偏離上限。
+
+    6/17 回放發現：原本常用第一壓力/遠端突破價，導致華通、台光電、健鼎這類
+    盤中轉強股被放在雷達卻觸發價太遠。這裡只下修「觀察觸發價」，不把它升級成
+    直接買進，仍要求放量站上與族群同步。
+    """
+    radar = max(
+        _num(row, "爆發雷達分", 0),
+        _num(row, "隔日爆發分", 0),
+        _num(row, "飆股攻擊分", 0),
+        _num(row, "主流領漲回補分", 0),
+        _num(row, "漲停回放分", 0),
+    )
+    amount = _num(row, "成交額百萬", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    chase = _num(row, "追價風險分", 60)
+    # 主流高成交額且族群同步時，盤中確認價不應離昨晚價太遠。
+    if amount >= 5000 and radar >= 76 and sector >= 70 and chase <= 62:
+        return 0.035
+    if amount >= 800 and radar >= 72 and sector >= 65 and chase <= 68:
+        return 0.045
+    if radar >= 70 and sector >= 60:
+        return 0.055
+    return 0.065
+
+
+def _trigger_info(row: pd.Series) -> dict[str, Any]:
+    price = _first_price(row, ["最新價", "推薦價格", "推薦日價格", "建議價位"], 0.0)
+    raw = _first_price(row, ["盤中轉強觸發價", "突破確認價", "推薦買點_突破", "突破確認價_隔日", "近端壓力", "第一壓力價"], 0.0)
+    if price <= 0:
+        return {"raw": raw, "final": raw, "dist": 0.0, "reason": "缺少有效價格，沿用原觸發價"}
+    if raw <= price * 1.005:
+        raw = price * 1.018
+    dist = (raw / price - 1.0) * 100.0 if raw > 0 else 0.0
+    cap = _trigger_cap_pct(row)
+    final = raw
+    reason = "沿用原觸發價"
+    if raw <= 0:
+        final = price * (1.0 + cap)
+        reason = f"缺少原觸發價，依雷達強度建立{cap*100:.1f}%實戰觸發價"
+    elif dist > cap * 100.0:
+        final = price * (1.0 + cap)
+        reason = f"原觸發價偏離{dist:.1f}%，改用{cap*100:.1f}%實戰確認價"
+    final = _round_up_to_tick(final)
+    final_dist = (final / price - 1.0) * 100.0 if price > 0 else 0.0
+    return {"raw": round(float(raw or 0), 2), "final": final, "dist": round(final_dist, 2), "reason": reason}
+
+
+def _review_text_for(row: pd.Series, bucket: str, trig: dict[str, Any]) -> str:
+    strength = _num(row, "強勢股漏選風險分", 0)
+    replay = _num(row, "漲停回放分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    amount = _num(row, "成交額百萬", 0)
+    if bucket == "盤中雷達追蹤" and strength >= 90 and replay >= 70:
+        return "昨晚雷達具隔日強勢股特徵，保留追蹤；重點改為實戰觸發價，不再等遠端壓力。"
+    if bucket == "正式排除清單" and strength >= 90 and sector >= 70 and amount >= 300:
+        return "有強勢漏選風險但風控/買點仍不足；保留在回放檢討，不得列正式推薦。"
+    if trig.get("reason", "").startswith("原觸發價偏離"):
+        return "原觸發價過遠，容易錯過隔日轉強；已下修為盤中確認價。"
+    return "依正式推薦淨化規則分流。"
 
 
 def _compute_operability_score(row: pd.Series) -> float:
@@ -215,18 +318,36 @@ def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) ->
         _num(row, "漲停回放分", 0),
     )
     has_attack_role = _contains_any(role_blob, ["B+｜盤中點火追蹤", "S｜飆股攻擊候選", "M｜強勢漏選追蹤", "M+｜漲停漏選回放", "L｜主流強勢回補", "T｜題材轉強追蹤", "B｜等突破確認"])
-    return (
-        has_attack_role
-        and amount >= 150
-        and mainstream >= 55
+    strength = _num(row, "強勢股漏選風險分", 0)
+    replay = _num(row, "漲停回放分", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    strong_replay_radar = (
+        strength >= 92
+        and replay >= 70
+        and amount >= 300
+        and mainstream >= 60
+        and sector >= 68
         and radar >= 68
-        and sector >= 48
-        and op_score >= 48
-        and entry >= 40
-        and risk >= 36
-        and buy >= 25
-        and chase <= 76
-        and (rr >= 0.45 or buy >= 45 or entry >= 55)
+        and chase <= 70
+        and ret5 <= 12
+        and op_score >= 42
+        and has_attack_role
+    )
+    return (
+        (
+            has_attack_role
+            and amount >= 150
+            and mainstream >= 55
+            and radar >= 68
+            and sector >= 48
+            and op_score >= 48
+            and entry >= 40
+            and risk >= 36
+            and buy >= 25
+            and chase <= 76
+            and (rr >= 0.45 or buy >= 45 or entry >= 55)
+        )
+        or strong_replay_radar
     )
 
 
@@ -237,17 +358,19 @@ def _risk_radar_ok(row: pd.Series, op_score: float) -> bool:
     return amount >= 100 and radar >= 65 and op_score >= 38 and _contains_any(role_blob, ["R｜高風險爆發觀察", "B+｜盤中點火追蹤", "S｜飆股攻擊候選", "T｜題材轉強追蹤", "L｜主流強勢回補", "M｜強勢漏選追蹤"])
 
 
-def _trigger_text(row: pd.Series) -> str:
-    for c in ["盤中轉強觸發價", "突破確認價", "突破確認價_隔日", "近端壓力", "第一壓力價"]:
-        v = _safe_str(row.get(c))
-        if v:
-            return f"放量站上 {v} 且同族群維持強勢"
+def _trigger_text(row: pd.Series, trig: dict[str, Any] | None = None) -> str:
+    if trig is None:
+        trig = _trigger_info(row)
+    v = trig.get("final", 0)
+    if v:
+        return f"放量站上實戰觸發價 {v} 且同族群維持強勢"
     return "放量突破前高/壓力並站穩，未觸發前不買"
 
 
 def _classify(row: pd.Series) -> dict[str, Any]:
     op = _compute_operability_score(row)
     reasons = _exclusion_reasons(row)
+    trig = _trigger_info(row)
     direct = _direct_ok(row, op, reasons)
     intraday = _intraday_radar_ok(row, op, reasons)
     risk_radar = _risk_radar_ok(row, op)
@@ -265,7 +388,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         bucket = "盤中雷達追蹤"
         qual = "WAIT｜未觸發不可買"
         direct_buy = "不可｜等盤中觸發"
-        action = f"{_trigger_text(row)}；未觸發前只盯盤，不預先買。"
+        action = f"{_trigger_text(row, trig)}；未觸發前只盯盤，不預先買。"
         radar_level = "B+｜盤中點火追蹤"
         radar_action = "只在量價/族群同步確認後小量試單"
         exclude_text = ""
@@ -321,6 +444,12 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "盤中雷達動作": radar_action,
         "正式推薦排除原因": exclude_text,
         "正式推薦排序分": round(_clamp(sort_score, 0, 120), 1),
+        "原始觸發價": trig.get("raw", 0),
+        "實戰觸發價": trig.get("final", 0),
+        "觸發價偏離%": trig.get("dist", 0),
+        "觸發價修正原因": trig.get("reason", ""),
+        "隔日雷達回測判斷": _review_text_for(row, bucket, trig),
+        "股神觸發修正建議": "正式推薦仍以 Entry/Risk/RR 為準；盤中雷達只在實戰觸發價放量站上後小量試單。",
         "正式推薦版本": FORMAL_RECOMMENDATION_VERSION,
     }
 
