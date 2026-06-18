@@ -3397,524 +3397,438 @@
     {
       "code": "1102",
       "name": "亞泥",
-      "market": "上市",
-      "category": "水泥工業"
+      "market": "上市"
     },
     {
       "code": "1560",
       "name": "中砂",
-      "market": "上市",
-      "category": "半導體設備材料"
+      "market": "上市"
     },
     {
       "code": "1714",
       "name": "和桐",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "1722",
       "name": "台肥",
-      "market": "上市",
-      "category": "塑化"
+      "market": "上市"
     },
     {
       "code": "2103",
       "name": "台橡",
-      "market": "上市",
-      "category": "橡膠工業"
+      "market": "上市"
     },
     {
       "code": "2105",
       "name": "正新",
-      "market": "上市",
-      "category": "橡膠工業"
+      "market": "上市"
     },
     {
       "code": "2241",
       "name": "艾姆勒",
-      "market": "上市",
-      "category": "汽車"
+      "market": "上市"
     },
     {
       "code": "2313",
       "name": "華通",
-      "market": "上市",
-      "category": "PCB載板"
+      "market": "上市"
     },
     {
       "code": "2327",
       "name": "國巨*",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "2330",
       "name": "台積電",
-      "market": "上市",
-      "category": "晶圓代工"
+      "market": "上市"
     },
     {
       "code": "2375",
       "name": "凱美",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "2383",
       "name": "台光電",
-      "market": "上市",
-      "category": "其他電子"
+      "market": "上市"
     },
     {
       "code": "2393",
       "name": "億光",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "2406",
       "name": "國碩",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "2412",
       "name": "中華電",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "2413",
       "name": "環科",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2425",
       "name": "承啟",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "2457",
       "name": "飛宏",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2476",
       "name": "鉅祥",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2483",
       "name": "百容",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2484",
       "name": "希華",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2493",
       "name": "揚博",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "2610",
       "name": "華航",
-      "market": "上市",
-      "category": "航空觀光"
+      "market": "上市"
     },
     {
       "code": "2618",
       "name": "長榮航",
-      "market": "上市",
-      "category": "航運"
+      "market": "上市"
     },
     {
       "code": "3008",
       "name": "大立光",
-      "market": "上市",
-      "category": "光學鏡頭"
+      "market": "上市"
     },
     {
       "code": "3014",
       "name": "聯陽",
-      "market": "上市",
-      "category": "IC設計"
+      "market": "上市"
     },
     {
       "code": "3019",
       "name": "亞光",
-      "market": "上市",
-      "category": "光學鏡頭"
+      "market": "上市"
     },
     {
       "code": "3026",
       "name": "禾伸堂",
-      "market": "上市",
-      "category": "被動元件"
+      "market": "上市"
     },
     {
       "code": "3044",
       "name": "健鼎",
-      "market": "上市",
-      "category": "PCB載板"
+      "market": "上市"
     },
     {
       "code": "3045",
       "name": "台灣大",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "3048",
       "name": "益登",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "3060",
       "name": "銘異",
-      "market": "上市",
-      "category": "電腦及週邊設備業"
+      "market": "上市"
     },
     {
       "code": "3090",
       "name": "日電貿",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "3213",
       "name": "茂訊",
-      "market": "上櫃",
-      "category": "電腦及週邊設備業"
+      "market": "上櫃"
     },
     {
       "code": "3221",
       "name": "台嘉碩",
-      "market": "上櫃",
-      "category": "通信網路業"
+      "market": "上櫃"
     },
     {
       "code": "3236",
       "name": "千如",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "3303",
       "name": "岱稜",
-      "market": "上櫃",
-      "category": "其他電子業"
+      "market": "上櫃"
     },
     {
       "code": "3362",
       "name": "先進光",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "3406",
       "name": "玉晶光",
-      "market": "上市",
-      "category": "光學鏡頭"
+      "market": "上市"
     },
     {
       "code": "3532",
       "name": "台勝科",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "3596",
       "name": "智易",
-      "market": "上市",
-      "category": "網通交換器"
+      "market": "上市"
     },
     {
       "code": "3624",
       "name": "光頡",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "4551",
       "name": "智伸科",
-      "market": "上市",
-      "category": "汽車"
+      "market": "上市"
     },
     {
       "code": "4721",
       "name": "美琪瑪",
-      "market": "上櫃",
-      "category": "電池材料"
+      "market": "上櫃"
     },
     {
       "code": "4739",
       "name": "康普",
-      "market": "上市",
-      "category": "電池材料"
+      "market": "上市"
     },
     {
       "code": "4763",
       "name": "材料*-KY",
-      "market": "上市",
-      "category": "半導體設備材料"
+      "market": "上市"
     },
     {
       "code": "4904",
       "name": "遠傳",
-      "market": "上市",
-      "category": "通信網路業"
+      "market": "上市"
     },
     {
       "code": "4915",
       "name": "致伸",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "4939",
       "name": "亞電",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "4973",
       "name": "廣穎電通",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "5289",
       "name": "宜鼎",
-      "market": "上櫃",
-      "category": "電腦及週邊設備業"
+      "market": "上櫃"
     },
     {
       "code": "5351",
       "name": "鈺創",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "5434",
       "name": "崇越",
-      "market": "上市",
-      "category": "半導體設備材料"
+      "market": "上市"
     },
     {
       "code": "5457",
       "name": "宣德",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "5469",
       "name": "瀚宇博",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "5498",
       "name": "凱崴",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "6139",
       "name": "亞翔",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "6153",
       "name": "嘉聯益",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6155",
       "name": "鈞寶",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6173",
       "name": "信昌電",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "6189",
       "name": "豐藝",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "6191",
       "name": "精成科",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6223",
       "name": "旺矽",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6239",
       "name": "力成",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6244",
       "name": "茂迪",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "6269",
       "name": "台郡",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6409",
       "name": "旭隼",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "6443",
       "name": "元晶",
-      "market": "上市",
-      "category": "光電業"
+      "market": "上市"
     },
     {
       "code": "6449",
       "name": "鈺邦",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "6510",
       "name": "精測",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6515",
       "name": "穎崴",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6517",
       "name": "保勝光學",
-      "market": "上櫃",
-      "category": "光學鏡頭"
+      "market": "上櫃"
     },
     {
       "code": "6525",
       "name": "捷敏-KY",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "6672",
       "name": "騰輝電子-KY",
-      "market": "上市",
-      "category": "其他電子"
+      "market": "上市"
     },
     {
       "code": "6691",
       "name": "洋基工程",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "6693",
       "name": "廣閎科",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6788",
       "name": "華景電",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6862",
       "name": "三集瑞-KY",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "7788",
       "name": "松川精密",
-      "market": "上市",
-      "category": "電子零組件業"
+      "market": "上市"
     },
     {
       "code": "8021",
       "name": "尖點",
-      "market": "上市",
-      "category": "其他電子業"
+      "market": "上市"
     },
     {
       "code": "8042",
       "name": "金山電",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "8096",
       "name": "擎亞",
-      "market": "上櫃",
-      "category": "電子通路業"
+      "market": "上櫃"
     },
     {
       "code": "8112",
       "name": "至上",
-      "market": "上市",
-      "category": "電子通路業"
+      "market": "上市"
     },
     {
       "code": "8121",
       "name": "越峰",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "8131",
       "name": "福懋科",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "8150",
       "name": "南茂",
-      "market": "上市",
-      "category": "半導體業"
+      "market": "上市"
     },
     {
       "code": "8289",
       "name": "泰藝",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0622": []
 }
