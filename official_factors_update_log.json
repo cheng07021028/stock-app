@@ -1,5 +1,16 @@
 [
   {
+    "time": "2026-06-18 17:56:59",
+    "status": "preserved_old_cache",
+    "row_count": 2327,
+    "diagnostics": [
+      "TWSE PER/PBR 取得失敗：官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"",
+      "上市月營收取得失敗：官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / 上櫃月營收取得失敗：官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / MOPS HTML 上市 115/5 失敗：`Import lxml` failed. Use pip or conda to install the lxml package. / MOPS HTML 上櫃 115/5 失敗：`Import lxml` failed. Use ...",
+      "20260618 T86 無資料或格式不可用。官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / 20260617 T86 無資料或格式不可用。官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" / 20260616 T86 無資料或格式不可用。官方回傳 HTML，非 JSON：<html> <head> <meta http-equiv=\"Content-Type\" content=\"text/html; charset=...",
+      "本次完整度>=60 僅 0 筆，低於既有快取 831 筆，已保留舊有效快取，不覆蓋。"
+    ]
+  },
+  {
     "time": "2026-06-17 17:47:58",
     "status": "success",
     "row_count": 2327,
