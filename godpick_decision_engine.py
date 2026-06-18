@@ -33,7 +33,7 @@ except Exception:
     NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = set()
     apply_formal_recommendation_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase6_8_nextday_review_trigger_20260617"
+DECISION_ENGINE_VERSION = "vnext_phase6_9_nextday_hit_guardrail_20260618"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"

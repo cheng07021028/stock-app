@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase6_8_nextday_review_trigger_20260617"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase6_9_nextday_hit_guardrail_20260618"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "可操作分",
@@ -29,6 +29,11 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "觸發價修正原因",
     "隔日雷達回測判斷",
     "股神觸發修正建議",
+    "觸發後守價",
+    "盤中觸發確認條件",
+    "開盤跳空處理",
+    "隔日命中修正標籤",
+    "高風險雷達保留原因",
     "正式推薦版本",
 ]
 
@@ -38,6 +43,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "原始觸發價",
     "實戰觸發價",
     "觸發價偏離%",
+    "觸發後守價",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -119,6 +125,23 @@ def _round_up_to_tick(price: float) -> float:
         return round(_math.ceil(float(price) / tick) * tick, 2)
     except Exception:
         return round(float(price or 0), 2)
+
+
+def _round_down_to_tick(price: float) -> float:
+    try:
+        import math as _math
+        tick = _tw_tick(float(price))
+        return round(_math.floor(float(price) / tick) * tick, 2)
+    except Exception:
+        return round(float(price or 0), 2)
+
+
+def _support_after_trigger(trigger: float) -> float:
+    if not trigger or trigger <= 0:
+        return 0.0
+    # 6/18 回放：華通盤中觸發後回落，不能只看「碰到觸發價」。
+    # 觸發後需守住約 98.5% 的確認價，否則視為假突破，不追。
+    return _round_down_to_tick(float(trigger) * 0.985)
 
 
 def _trigger_cap_pct(row: pd.Series) -> float:
@@ -358,6 +381,68 @@ def _risk_radar_ok(row: pd.Series, op_score: float) -> bool:
     return amount >= 100 and radar >= 65 and op_score >= 38 and _contains_any(role_blob, ["R｜高風險爆發觀察", "B+｜盤中點火追蹤", "S｜飆股攻擊候選", "T｜題材轉強追蹤", "L｜主流強勢回補", "M｜強勢漏選追蹤"])
 
 
+def _strategic_replay_radar_ok(row: pd.Series, op_score: float, reasons: list[str]) -> bool:
+    """把「過熱但主流資金/族群仍強」的股票留在高風險雷達，而不是直接消失。
+
+    6/18 回放：南茂前一晚被正式排除，但隔日漲約 9.6%。原因是角色帶有
+    過熱/禁買字樣後直接進排除，沒有再保留到高風險雷達。此函式只讓它
+    回到「高風險雷達觀察」，不升級成正式推薦，也不給直接買進。
+    """
+    role_blob = _text_blob(row, ["飆股雷達角色", "領漲回補角色", "回放校正角色", "主流作戰分區", "推薦角色", "穩健推薦角色"])
+    if not _contains_any(role_blob, ["S+｜漲停雷達", "S｜飆股攻擊候選", "L+｜領漲回補雷達", "L｜主流強勢回補", "M+｜漲停漏選回放", "M｜強勢漏選追蹤"]):
+        return False
+    amount = _num(row, "成交額百萬", 0)
+    buy = _num(row, "買進分數", 0)
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    chase = _num(row, "追價風險分", 100)
+    rr = _num(row, "風險報酬比", 0)
+    mainstream = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    strength = _num(row, "強勢股漏選風險分", 0)
+    replay = _num(row, "漲停回放分", 0)
+    radar = max(_num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0), _num(row, "主流領漲回補分", 0), replay)
+    # 嚴重假強仍應排除：買進/Entry/Risk 太差、追價過高、RR 極差。
+    if buy < 25 or entry < 38 or risk < 39 or chase >= 78 or rr < 0.18:
+        return False
+    if amount < 250 or mainstream < 62 or sector < 70 or radar < 76:
+        return False
+    if strength < 92 and replay < 74:
+        return False
+    # 只允許被「角色/過熱字樣」擋掉的強勢雷達回到觀察；低流動性/買點崩壞不救。
+    severe = [r for r in reasons if any(k in r for k in ["低流動性", "成交額不足", "買進分數過低", "Entry/Risk", "追價風險過高", "風險報酬比過低"])]
+    return not severe and op_score >= 43
+
+
+def _trigger_confirm_text(trig: dict[str, Any]) -> str:
+    final = trig.get("final", 0) or 0
+    hold = _support_after_trigger(final)
+    if final and hold:
+        return f"放量站上 {final} 後，至少守住 {hold}；若只碰價後跌回，視為假突破。"
+    return "放量突破後需站穩，不可只因瞬間碰價追買。"
+
+
+def _gap_plan_text(trig: dict[str, Any]) -> str:
+    final = trig.get("final", 0) or 0
+    if final:
+        gap = _round_up_to_tick(float(final) * 1.02)
+        hold = _support_after_trigger(final)
+        return f"若開盤高於 {gap}，不直接追；等回測不破 {hold} 或第二波放量再評估。"
+    return "若開盤跳空急拉，不直接追，等回測守穩或第二波放量。"
+
+
+def _hit_tag_for(bucket: str, row: pd.Series) -> str:
+    strength = _num(row, "強勢股漏選風險分", 0)
+    replay = _num(row, "漲停回放分", 0)
+    if bucket == "盤中雷達追蹤" and strength >= 92 and replay >= 70:
+        return "命中型雷達｜保留，但要加守價確認"
+    if bucket == "高風險雷達觀察" and (strength >= 92 or replay >= 74):
+        return "錯殺回補型｜不買，列高風險雷達"
+    if bucket == "正式排除清單" and replay >= 80:
+        return "高分排除型｜維持排除但列回放檢討"
+    return "一般分流"
+
+
 def _trigger_text(row: pd.Series, trig: dict[str, Any] | None = None) -> str:
     if trig is None:
         trig = _trigger_info(row)
@@ -392,6 +477,14 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         radar_level = "B+｜盤中點火追蹤"
         radar_action = "只在量價/族群同步確認後小量試單"
         exclude_text = ""
+    elif _strategic_replay_radar_ok(row, op, reasons):
+        bucket = "高風險雷達觀察"
+        qual = "RISK｜錯殺回補雷達"
+        direct_buy = "不可｜高風險觀察"
+        action = f"有隔日強勢回放特徵，但仍非正式買點；{_trigger_text(row, trig)}，且需守價確認。"
+        radar_level = "R+｜錯殺回補雷達"
+        radar_action = "只做盤中盯盤，不可開盤追價"
+        exclude_text = "原本因過熱/風控文字被排除，Phase 6.9 改列高風險雷達觀察"
     elif reasons:
         bucket = "正式排除清單"
         qual = "BLOCK｜不列推薦"
@@ -449,7 +542,12 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "觸發價偏離%": trig.get("dist", 0),
         "觸發價修正原因": trig.get("reason", ""),
         "隔日雷達回測判斷": _review_text_for(row, bucket, trig),
-        "股神觸發修正建議": "正式推薦仍以 Entry/Risk/RR 為準；盤中雷達只在實戰觸發價放量站上後小量試單。",
+        "股神觸發修正建議": "正式推薦仍以 Entry/Risk/RR 為準；盤中雷達只在實戰觸發價放量站上、守住觸發後守價後小量試單。",
+        "觸發後守價": _support_after_trigger(trig.get("final", 0)),
+        "盤中觸發確認條件": _trigger_confirm_text(trig),
+        "開盤跳空處理": _gap_plan_text(trig),
+        "隔日命中修正標籤": _hit_tag_for(bucket, row),
+        "高風險雷達保留原因": exclude_text if bucket == "高風險雷達觀察" else "",
         "正式推薦版本": FORMAL_RECOMMENDATION_VERSION,
     }
 
