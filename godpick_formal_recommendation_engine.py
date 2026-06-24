@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase6_9_nextday_hit_guardrail_20260618"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase7_battle_dashboard_a_minus_20260624"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "可操作分",
@@ -19,6 +19,11 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "正式推薦資格",
     "正式推薦動作",
     "下週是否可直接買",
+    "準主推薦等級",
+    "股神作戰區",
+    "股神作戰優先序",
+    "股神作戰提示",
+    "主要依據工作表",
     "盤中雷達等級",
     "盤中雷達動作",
     "正式推薦排除原因",
@@ -40,6 +45,7 @@ FORMAL_RECOMMENDATION_COLUMNS = [
 NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "可操作分",
     "正式推薦排序分",
+    "股神作戰優先序",
     "原始觸發價",
     "實戰觸發價",
     "觸發價偏離%",
@@ -319,6 +325,50 @@ def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     )
 
 
+def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+    """A- 準主推薦：比盤中雷達更接近可操作，但仍不能當正式直接買進。
+
+    Phase 7 目的：正式 A 長期空白時，不硬放寬 A；改把買點/資金/族群已接近、
+    但 RR 或 Risk 尚未完全達標的股票放進「準主推薦小量試單」。
+    """
+    severe_words = ["過熱", "禁買", "低流動性", "冷門", "成交額不足", "買進分數過低", "追價風險過高", "Entry/Risk 同時偏弱"]
+    if any(any(k in r for k in severe_words) for r in exclusion):
+        return False
+    role_blob = _text_blob(row, ["推薦角色", "飆股雷達角色", "領漲回補角色", "回放校正角色", "主流作戰分區"])
+    amount = _num(row, "成交額百萬", 0)
+    buy = _num(row, "買進分數", 0)
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    rr = _num(row, "風險報酬比", 0)
+    chase = _num(row, "追價風險分", 100)
+    mainstream = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    radar = max(
+        _num(row, "爆發雷達分", 0),
+        _num(row, "隔日爆發分", 0),
+        _num(row, "飆股攻擊分", 0),
+        _num(row, "主流領漲回補分", 0),
+        _num(row, "漲停回放分", 0),
+    )
+    has_attack_role = _contains_any(role_blob, [
+        "A｜股神主推薦", "S｜飆股攻擊候選", "B+｜盤中點火追蹤", "L｜主流強勢回補",
+        "T｜題材轉強追蹤", "B｜等突破確認", "主流突破追蹤", "主流攻擊候選",
+    ])
+    return (
+        has_attack_role
+        and op_score >= 55
+        and buy >= 45
+        and entry >= 52
+        and risk >= 44
+        and rr >= 0.70
+        and chase <= 72
+        and mainstream >= 58
+        and sector >= 55
+        and radar >= 66
+        and amount >= 180
+    )
+
+
 def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     if any("過熱" in r or "禁買" in r for r in exclusion):
         return False
@@ -452,11 +502,26 @@ def _trigger_text(row: pd.Series, trig: dict[str, Any] | None = None) -> str:
     return "放量突破前高/壓力並站穩，未觸發前不買"
 
 
+def _battle_meta_for(bucket: str) -> dict[str, Any]:
+    if bucket == "正式下週主推薦":
+        return {"zone": "1｜正式主推薦", "prio": 10, "hint": "可作為第一優先清單；仍須分批、觸發價與停損紀律。", "sheet": "正式下週主推薦"}
+    if bucket == "A-｜準主推薦小量試單":
+        return {"zone": "2｜A-準主推薦", "prio": 20, "hint": "接近正式推薦但尚未完全過關；只允許小量試單，必須盤中觸發並守價。", "sheet": "準主推薦小量試單"}
+    if bucket == "盤中雷達追蹤":
+        return {"zone": "3｜盤中觸發追蹤", "prio": 30, "hint": "不是預先買進清單；只在實戰觸發價放量站上且守價後評估。", "sheet": "盤中雷達追蹤"}
+    if bucket == "高風險雷達觀察":
+        return {"zone": "4｜高風險觀察", "prio": 40, "hint": "有爆發訊號但風險偏高；只看不追，等待下一次買點修復。", "sheet": "高風險雷達觀察"}
+    if bucket == "正式排除清單":
+        return {"zone": "9｜禁止買進/排除", "prio": 90, "hint": "過熱、低流動、買點或風控不足；不得列入作戰買進。", "sheet": "正式排除清單"}
+    return {"zone": "5｜不可直接買觀察", "prio": 50, "hint": "資料保留觀察，非下週作戰主軸。", "sheet": "不可直接買觀察"}
+
+
 def _classify(row: pd.Series) -> dict[str, Any]:
     op = _compute_operability_score(row)
     reasons = _exclusion_reasons(row)
     trig = _trigger_info(row)
     direct = _direct_ok(row, op, reasons)
+    a_minus = False if direct else _a_minus_ok(row, op, reasons)
     intraday = _intraday_radar_ok(row, op, reasons)
     risk_radar = _risk_radar_ok(row, op)
     role_blob = _text_blob(row, ["推薦角色", "飆股雷達角色", "主流作戰分區"])
@@ -469,6 +534,14 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         radar_level = "主攻"
         radar_action = "正式推薦優先追蹤"
         exclude_text = ""
+    elif a_minus:
+        bucket = "A-｜準主推薦小量試單"
+        qual = "A-｜接近主推薦，待盤中觸發"
+        direct_buy = "小量｜需觸發與守價"
+        action = f"只允許小量試單；{_trigger_text(row, trig)}，且必須守住觸發後守價。未觸發前不買。"
+        radar_level = "A-｜準主推薦"
+        radar_action = "小量試單優先追蹤，不可重倉"
+        exclude_text = "未完全通過正式主推薦 RR/Risk 門檻，降為 A- 準主推薦"
     elif intraday:
         bucket = "盤中雷達追蹤"
         qual = "WAIT｜未觸發不可買"
@@ -521,18 +594,26 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     sort_score = op
     if bucket == "正式下週主推薦":
         sort_score += 20
+    elif bucket == "A-｜準主推薦小量試單":
+        sort_score += 14
     elif bucket == "盤中雷達追蹤":
         sort_score += 10
     elif bucket == "高風險雷達觀察":
         sort_score += 4
     elif bucket == "正式排除清單":
         sort_score -= 20
+    battle = _battle_meta_for(bucket)
     return {
         "可操作分": round(op, 1),
         "正式推薦分區": bucket,
         "正式推薦資格": qual,
         "正式推薦動作": action,
         "下週是否可直接買": direct_buy,
+        "準主推薦等級": "A-｜準主推薦" if bucket == "A-｜準主推薦小量試單" else "",
+        "股神作戰區": battle["zone"],
+        "股神作戰優先序": battle["prio"],
+        "股神作戰提示": battle["hint"],
+        "主要依據工作表": battle["sheet"],
         "盤中雷達等級": radar_level,
         "盤中雷達動作": radar_action,
         "正式推薦排除原因": exclude_text,

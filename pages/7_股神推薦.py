@@ -9596,14 +9596,14 @@ def _phase5_split_explosive_radar_views(rec_export: pd.DataFrame) -> tuple[pd.Da
     return radar_df, risk_df, fake_df
 
 
-def _phase63_split_formal_recommendation_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _phase63_split_formal_recommendation_views(rec_export: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Phase 6.3 Excel 分頁：正式推薦 / 盤中雷達 / 高風險觀察 / 不可直接買 / 正式排除。
 
     目的：避免完整推薦表、D 禁買、弱勢觀察、高風險雷達混在一起，被誤解為下週可買清單。
     不重算選股，只讀 godpick_formal_recommendation_engine 產生的共用欄位。
     """
     if rec_export is None or not isinstance(rec_export, pd.DataFrame) or rec_export.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     work = rec_export.copy()
     if "正式推薦分區" not in work.columns:
         try:
@@ -9624,6 +9624,7 @@ def _phase63_split_formal_recommendation_views(rec_export: pd.DataFrame) -> tupl
 
     bucket = _txt("正式推薦分區")
     formal_mask = bucket.eq("正式下週主推薦")
+    a_minus_mask = bucket.eq("A-｜準主推薦小量試單")
     intraday_mask = bucket.eq("盤中雷達追蹤")
     risk_mask = bucket.eq("高風險雷達觀察")
     watch_mask = bucket.isin(["不可直接買觀察", "早期潛伏觀察"])
@@ -9632,11 +9633,68 @@ def _phase63_split_formal_recommendation_views(rec_export: pd.DataFrame) -> tupl
     sort_cols = ["正式推薦排序分", "可操作分", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "主流資金分", "成交額百萬"]
     radar_sort = ["正式推薦排序分", "爆發雷達分", "隔日爆發分", "主流領漲回補分", "漲停回放分", "族群攻擊強度", "成交額百萬"]
     formal_df = _safe_sort_export_df(work.loc[formal_mask].copy(), sort_cols, [False] * len(sort_cols))
+    a_minus_df = _safe_sort_export_df(work.loc[a_minus_mask].copy(), sort_cols, [False] * len(sort_cols))
     intraday_df = _safe_sort_export_df(work.loc[intraday_mask].copy(), radar_sort, [False] * len(radar_sort))
     risk_df = _safe_sort_export_df(work.loc[risk_mask].copy(), radar_sort, [False] * len(radar_sort))
     watch_df = _safe_sort_export_df(work.loc[watch_mask].copy(), ["可操作分", "正式推薦排序分", "股神實戰總分", "主流資金分"], [False, False, False, False])
     exclude_df = _safe_sort_export_df(work.loc[exclude_mask].copy(), ["正式推薦排序分", "可操作分", "追價風險分", "成交額百萬"], [False, False, False, False])
-    return formal_df, intraday_df, risk_df, watch_df, exclude_df
+    return formal_df, a_minus_df, intraday_df, risk_df, watch_df, exclude_df
+
+
+def _phase70_build_battle_dashboard(
+    formal_df: pd.DataFrame,
+    a_minus_df: pd.DataFrame,
+    intraday_df: pd.DataFrame,
+    risk_df: pd.DataFrame,
+    exclude_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Phase 7：Excel 第一張「股神作戰總表」。
+
+    目的：讓使用者不用在十幾張診斷分頁中找主要依據；
+    正式推薦、A- 準主推薦、盤中雷達、高風險觀察、禁止買進統一放到第一張總表。
+    """
+    parts: list[pd.DataFrame] = []
+    for zone, df in [
+        ("1｜正式主推薦", formal_df),
+        ("2｜A-準主推薦", a_minus_df),
+        ("3｜盤中觸發追蹤", intraday_df),
+        ("4｜高風險觀察", risk_df),
+        ("9｜禁止買進/排除", exclude_df),
+    ]:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            tmp = df.copy()
+            if "股神作戰區" not in tmp.columns:
+                tmp["股神作戰區"] = zone
+            parts.append(tmp)
+    if not parts:
+        return pd.DataFrame()
+    work = pd.concat(parts, ignore_index=True, sort=False)
+    if "股神作戰優先序" not in work.columns:
+        zone_rank = {
+            "正式下週主推薦": 10,
+            "A-｜準主推薦小量試單": 20,
+            "盤中雷達追蹤": 30,
+            "高風險雷達觀察": 40,
+            "正式排除清單": 90,
+        }
+        work["股神作戰優先序"] = work.get("正式推薦分區", pd.Series([""] * len(work))).map(zone_rank).fillna(50)
+    cols = [
+        "股神作戰區", "主要依據工作表", "股票代號", "股票名稱", "類別", "產業",
+        "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
+        "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
+        "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
+        "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
+        "盤中雷達動作", "正式推薦排除原因", "股神作戰提示",
+    ]
+    use = [c for c in cols if c in work.columns]
+    if use:
+        work = work[use + [c for c in work.columns if c not in use]].copy()
+    return _safe_sort_export_df(
+        work,
+        ["股神作戰優先序", "正式推薦排序分", "可操作分", "爆發雷達分", "成交額百萬"],
+        [True, False, False, False, False],
+    )
+
 
 def _build_excel_bytes(
     rec_export: pd.DataFrame,
@@ -9660,7 +9718,8 @@ def _build_excel_bytes(
         pass
 
     attack_main_export, breakout_export, early_export, cold_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
-    formal_export, intraday_formal_export, formal_risk_export, formal_watch_export, formal_exclude_export = _phase63_split_formal_recommendation_views(rec_export)
+    formal_export, a_minus_export, intraday_formal_export, formal_risk_export, formal_watch_export, formal_exclude_export = _phase63_split_formal_recommendation_views(rec_export)
+    battle_dashboard_export = _phase70_build_battle_dashboard(formal_export, a_minus_export, intraday_formal_export, formal_risk_export, formal_exclude_export)
     leader_replay_export, theme_follow_export = _phase6_split_market_leader_replay_views(rec_export)
     miss_replay_export, miss_diag_export, miss_covered_export = _phase62_split_miss_replay_views(rec_export)
     radar_export, radar_risk_export, radar_fake_export = _phase5_split_explosive_radar_views(rec_export)
@@ -9668,8 +9727,10 @@ def _build_excel_bytes(
     try:
         if callable(prune_empty_recommendation_columns):
             formal_export = prune_empty_recommendation_columns(formal_export)
+            a_minus_export = prune_empty_recommendation_columns(a_minus_export)
             intraday_formal_export = prune_empty_recommendation_columns(intraday_formal_export)
             formal_risk_export = prune_empty_recommendation_columns(formal_risk_export)
+            battle_dashboard_export = prune_empty_recommendation_columns(battle_dashboard_export)
             formal_watch_export = prune_empty_recommendation_columns(formal_watch_export)
             formal_exclude_export = prune_empty_recommendation_columns(formal_exclude_export)
             leader_replay_export = prune_empty_recommendation_columns(leader_replay_export)
@@ -9690,7 +9751,9 @@ def _build_excel_bytes(
     except Exception:
         pass
 
-    _write_df_to_ws(wb, "正式下週主推薦", formal_export, "目前沒有符合買點、風控、RR 與主流資金門檻的正式下週主推薦。")
+    _write_df_to_ws(wb, "股神作戰總表", battle_dashboard_export, "目前沒有可列入作戰總表的正式推薦、準主推薦或盤中雷達候選。")
+    _write_df_to_ws(wb, "正式下週主推薦", formal_export, "目前沒有完全符合買點、風控、RR 與主流資金門檻的正式下週主推薦。請改看『股神作戰總表』與『A-準主推薦小量試單』。")
+    _write_df_to_ws(wb, "A-準主推薦小量試單", a_minus_export, "目前沒有接近正式主推薦、可小量試單的 A- 準主推薦。")
     _write_df_to_ws(wb, "盤中雷達追蹤", intraday_formal_export, "目前沒有符合盤中觸發追蹤條件的候選。")
     _write_df_to_ws(wb, "高風險雷達觀察", formal_risk_export, "目前沒有高風險飆股雷達觀察候選。")
     _write_df_to_ws(wb, "不可直接買觀察", formal_watch_export, "目前沒有只觀察不買的候選。")
@@ -9715,7 +9778,9 @@ def _build_excel_bytes(
     _write_df_to_ws(wb, "自動因子榜", factor_export, "自動因子榜沒有取得資料，請確認推薦結果內有自動因子或推薦總分欄位。")
 
     diag = pd.DataFrame([
+        {"分頁": "股神作戰總表", "列數": 0 if battle_dashboard_export is None else len(battle_dashboard_export), "欄數": 0 if battle_dashboard_export is None else len(battle_dashboard_export.columns)},
         {"分頁": "正式下週主推薦", "列數": 0 if formal_export is None else len(formal_export), "欄數": 0 if formal_export is None else len(formal_export.columns)},
+        {"分頁": "A-準主推薦小量試單", "列數": 0 if a_minus_export is None else len(a_minus_export), "欄數": 0 if a_minus_export is None else len(a_minus_export.columns)},
         {"分頁": "盤中雷達追蹤", "列數": 0 if intraday_formal_export is None else len(intraday_formal_export), "欄數": 0 if intraday_formal_export is None else len(intraday_formal_export.columns)},
         {"分頁": "高風險雷達觀察", "列數": 0 if formal_risk_export is None else len(formal_risk_export), "欄數": 0 if formal_risk_export is None else len(formal_risk_export.columns)},
         {"分頁": "不可直接買觀察", "列數": 0 if formal_watch_export is None else len(formal_watch_export), "欄數": 0 if formal_watch_export is None else len(formal_watch_export.columns)},
@@ -9770,7 +9835,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 6.2 匯出內容：領漲回補雷達、題材轉強追蹤、漲停漏選回放、漏選原因診斷、已覆蓋雷達、飆股雷達、高風險爆發觀察、假強排除、主流攻擊候選、主流突破追蹤、早期潛伏觀察、冷門潛伏觀察、低流動性排除、弱勢觀察、完整推薦表與輔助榜單。完整推薦表不是買進清單，需看領漲回補/飆股雷達分區與主流作戰分區。")
+        st.caption("Phase 7 匯出內容：第一張「股神作戰總表」是主要依據；若正式下週主推薦空白，依序看 A-準主推薦小量試單、盤中雷達追蹤。完整推薦表只作後台總表，不是買進清單。")
 
 
 def _render_selected_export_block():
