@@ -268,10 +268,7 @@
       "數位雲端",
       "晶圓代工",
       "機殼",
-      "橡膠工業",
-      "汽車",
       "油電燃氣",
-      "水泥工業",
       "生技醫療",
       "矽晶圓",
       "綠能儲能",
@@ -303,10 +300,10 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-06-24 16:06:19",
+  "updated_at": "2026-06-24 16:08:09",
   "weight_settings_updated_at": "2026-06-24 16:06:19",
   "weight_update_seq": 55,
   "weight_source": "7_股神推薦",
   "last_weight_calibration_profile": "7_股神推薦手動套用",
-  "version": "godpick_v143_weight_reload_sync"
+  "version": "godpick_v5_persistent_settings"
 }
