@@ -303,10 +303,16 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-06-22 12:11:34",
+  "updated_at": "2026-06-24 16:05:41",
   "weight_settings_updated_at": "2026-06-22 11:34:53",
   "weight_update_seq": 53,
   "weight_source": "14_股神權重校正",
   "last_weight_calibration_profile": "主校正建議",
-  "version": "godpick_v5_persistent_settings"
+  "version": "godpick_v106_weight_calibration_setting_persist",
+  "weight_calibration_page_settings": {
+    "main_horizon": 20,
+    "allow_apply_from_page": true,
+    "updated_at": "2026-06-24 16:05:41",
+    "version": "v106_weight_calibration_setting_persist"
+  }
 }
