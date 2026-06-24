@@ -9641,6 +9641,41 @@ def _phase63_split_formal_recommendation_views(rec_export: pd.DataFrame) -> tupl
     return formal_df, a_minus_df, intraday_df, risk_df, watch_df, exclude_df
 
 
+def _phase71_split_intraday_radar_layers(intraday_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Phase 7.1：盤中雷達分層。
+
+    39 檔雷達資料可以保留，但人工盯盤主清單必須收斂。
+    - 盤中核心雷達：R1，約 10~12 檔，放第一眼主表。
+    - 盤中備援雷達：R2，保留輪動機會。
+    - 盤中低優先觀察：R3，資料保留但不作為主盯盤清單。
+    """
+    if intraday_df is None or not isinstance(intraday_df, pd.DataFrame) or intraday_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    work = intraday_df.copy()
+    if "盤中雷達優先級" not in work.columns or "盤中盯盤順序" not in work.columns:
+        try:
+            from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+            work = apply_formal_recommendation_engine(work)
+            work = work.loc[work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).eq("盤中雷達追蹤")].copy()
+        except Exception:
+            work["盤中雷達優先級"] = "R2｜備援雷達"
+            work["盤中盯盤順序"] = range(1, len(work) + 1)
+            work["盤中雷達分層"] = "盤中備援雷達"
+            work["盤中雷達分層說明"] = "備援輪動名單。"
+    def _txt(col: str) -> pd.Series:
+        if col in work.columns:
+            return work[col].fillna("").astype(str)
+        return pd.Series([""] * len(work), index=work.index, dtype="object")
+    pri = _txt("盤中雷達優先級")
+    sort_cols = ["盤中盯盤順序", "正式推薦排序分", "可操作分", "爆發雷達分", "主流資金分", "成交額百萬"]
+    asc = [True, False, False, False, False, False]
+    core = _safe_sort_export_df(work.loc[pri.str.startswith("R1")].copy(), sort_cols, asc)
+    backup = _safe_sort_export_df(work.loc[pri.str.startswith("R2")].copy(), sort_cols, asc)
+    low = _safe_sort_export_df(work.loc[pri.str.startswith("R3")].copy(), sort_cols, asc)
+    full = _safe_sort_export_df(work.copy(), sort_cols, asc)
+    return core, backup, low, full
+
+
 def _phase70_build_battle_dashboard(
     formal_df: pd.DataFrame,
     a_minus_df: pd.DataFrame,
@@ -9684,6 +9719,7 @@ def _phase70_build_battle_dashboard(
         "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
         "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
         "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
+        "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明",
         "盤中雷達動作", "正式推薦排除原因", "股神作戰提示",
     ]
     use = [c for c in cols if c in work.columns]
@@ -9719,7 +9755,8 @@ def _build_excel_bytes(
 
     attack_main_export, breakout_export, early_export, cold_export, weak_export, exclude_export, rec_export = _phase41_split_week_battle_views(rec_export)
     formal_export, a_minus_export, intraday_formal_export, formal_risk_export, formal_watch_export, formal_exclude_export = _phase63_split_formal_recommendation_views(rec_export)
-    battle_dashboard_export = _phase70_build_battle_dashboard(formal_export, a_minus_export, intraday_formal_export, formal_risk_export, formal_exclude_export)
+    intraday_core_export, intraday_backup_export, intraday_low_export, intraday_full_export = _phase71_split_intraday_radar_layers(intraday_formal_export)
+    battle_dashboard_export = _phase70_build_battle_dashboard(formal_export, a_minus_export, intraday_core_export, formal_risk_export, formal_exclude_export)
     leader_replay_export, theme_follow_export = _phase6_split_market_leader_replay_views(rec_export)
     miss_replay_export, miss_diag_export, miss_covered_export = _phase62_split_miss_replay_views(rec_export)
     radar_export, radar_risk_export, radar_fake_export = _phase5_split_explosive_radar_views(rec_export)
@@ -9729,6 +9766,10 @@ def _build_excel_bytes(
             formal_export = prune_empty_recommendation_columns(formal_export)
             a_minus_export = prune_empty_recommendation_columns(a_minus_export)
             intraday_formal_export = prune_empty_recommendation_columns(intraday_formal_export)
+            intraday_core_export = prune_empty_recommendation_columns(intraday_core_export)
+            intraday_backup_export = prune_empty_recommendation_columns(intraday_backup_export)
+            intraday_low_export = prune_empty_recommendation_columns(intraday_low_export)
+            intraday_full_export = prune_empty_recommendation_columns(intraday_full_export)
             formal_risk_export = prune_empty_recommendation_columns(formal_risk_export)
             battle_dashboard_export = prune_empty_recommendation_columns(battle_dashboard_export)
             formal_watch_export = prune_empty_recommendation_columns(formal_watch_export)
@@ -9754,7 +9795,11 @@ def _build_excel_bytes(
     _write_df_to_ws(wb, "股神作戰總表", battle_dashboard_export, "目前沒有可列入作戰總表的正式推薦、準主推薦或盤中雷達候選。")
     _write_df_to_ws(wb, "正式下週主推薦", formal_export, "目前沒有完全符合買點、風控、RR 與主流資金門檻的正式下週主推薦。請改看『股神作戰總表』與『A-準主推薦小量試單』。")
     _write_df_to_ws(wb, "A-準主推薦小量試單", a_minus_export, "目前沒有接近正式主推薦、可小量試單的 A- 準主推薦。")
-    _write_df_to_ws(wb, "盤中雷達追蹤", intraday_formal_export, "目前沒有符合盤中觸發追蹤條件的候選。")
+    _write_df_to_ws(wb, "盤中核心雷達", intraday_core_export, "目前沒有符合 R1 核心盤中雷達條件的候選。")
+    _write_df_to_ws(wb, "盤中雷達追蹤", intraday_core_export, "目前沒有符合 R1 核心盤中雷達條件的候選；此分頁已收斂為核心 10~12 檔。")
+    _write_df_to_ws(wb, "盤中備援雷達", intraday_backup_export, "目前沒有 R2 備援盤中雷達候選。")
+    _write_df_to_ws(wb, "盤中低優先觀察", intraday_low_export, "目前沒有 R3 低優先盤中雷達候選。")
+    _write_df_to_ws(wb, "盤中雷達完整名單", intraday_full_export, "目前沒有盤中雷達完整名單資料。")
     _write_df_to_ws(wb, "高風險雷達觀察", formal_risk_export, "目前沒有高風險飆股雷達觀察候選。")
     _write_df_to_ws(wb, "不可直接買觀察", formal_watch_export, "目前沒有只觀察不買的候選。")
     _write_df_to_ws(wb, "正式排除清單", formal_exclude_export, "目前沒有正式排除候選。")
@@ -9781,7 +9826,11 @@ def _build_excel_bytes(
         {"分頁": "股神作戰總表", "列數": 0 if battle_dashboard_export is None else len(battle_dashboard_export), "欄數": 0 if battle_dashboard_export is None else len(battle_dashboard_export.columns)},
         {"分頁": "正式下週主推薦", "列數": 0 if formal_export is None else len(formal_export), "欄數": 0 if formal_export is None else len(formal_export.columns)},
         {"分頁": "A-準主推薦小量試單", "列數": 0 if a_minus_export is None else len(a_minus_export), "欄數": 0 if a_minus_export is None else len(a_minus_export.columns)},
-        {"分頁": "盤中雷達追蹤", "列數": 0 if intraday_formal_export is None else len(intraday_formal_export), "欄數": 0 if intraday_formal_export is None else len(intraday_formal_export.columns)},
+        {"分頁": "盤中核心雷達", "列數": 0 if intraday_core_export is None else len(intraday_core_export), "欄數": 0 if intraday_core_export is None else len(intraday_core_export.columns)},
+        {"分頁": "盤中雷達追蹤", "列數": 0 if intraday_core_export is None else len(intraday_core_export), "欄數": 0 if intraday_core_export is None else len(intraday_core_export.columns)},
+        {"分頁": "盤中備援雷達", "列數": 0 if intraday_backup_export is None else len(intraday_backup_export), "欄數": 0 if intraday_backup_export is None else len(intraday_backup_export.columns)},
+        {"分頁": "盤中低優先觀察", "列數": 0 if intraday_low_export is None else len(intraday_low_export), "欄數": 0 if intraday_low_export is None else len(intraday_low_export.columns)},
+        {"分頁": "盤中雷達完整名單", "列數": 0 if intraday_full_export is None else len(intraday_full_export), "欄數": 0 if intraday_full_export is None else len(intraday_full_export.columns)},
         {"分頁": "高風險雷達觀察", "列數": 0 if formal_risk_export is None else len(formal_risk_export), "欄數": 0 if formal_risk_export is None else len(formal_risk_export.columns)},
         {"分頁": "不可直接買觀察", "列數": 0 if formal_watch_export is None else len(formal_watch_export), "欄數": 0 if formal_watch_export is None else len(formal_watch_export.columns)},
         {"分頁": "正式排除清單", "列數": 0 if formal_exclude_export is None else len(formal_exclude_export), "欄數": 0 if formal_exclude_export is None else len(formal_exclude_export.columns)},
@@ -9835,7 +9884,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 7 匯出內容：第一張「股神作戰總表」是主要依據；若正式下週主推薦空白，依序看 A-準主推薦小量試單、盤中雷達追蹤。完整推薦表只作後台總表，不是買進清單。")
+        st.caption("Phase 7.1 匯出內容：第一張「股神作戰總表」是主要依據；盤中雷達已分成核心/備援/低優先，人工盯盤先看「盤中核心雷達」，完整名單只作後台雷達資料。")
 
 
 def _render_selected_export_block():

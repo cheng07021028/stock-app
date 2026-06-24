@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase7_battle_dashboard_a_minus_20260624"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase7_1_intraday_radar_tiers_20260624"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "可操作分",
@@ -26,6 +26,10 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "主要依據工作表",
     "盤中雷達等級",
     "盤中雷達動作",
+    "盤中雷達優先級",
+    "盤中盯盤順序",
+    "盤中雷達分層",
+    "盤中雷達分層說明",
     "正式推薦排除原因",
     "正式推薦排序分",
     "原始觸發價",
@@ -46,6 +50,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "可操作分",
     "正式推薦排序分",
     "股神作戰優先序",
+    "盤中盯盤順序",
     "原始觸發價",
     "實戰觸發價",
     "觸發價偏離%",
@@ -616,6 +621,10 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "主要依據工作表": battle["sheet"],
         "盤中雷達等級": radar_level,
         "盤中雷達動作": radar_action,
+        "盤中雷達優先級": "",
+        "盤中盯盤順序": 0,
+        "盤中雷達分層": "",
+        "盤中雷達分層說明": "",
         "正式推薦排除原因": exclude_text,
         "正式推薦排序分": round(_clamp(sort_score, 0, 120), 1),
         "原始觸發價": trig.get("raw", 0),
@@ -631,6 +640,137 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "高風險雷達保留原因": exclude_text if bucket == "高風險雷達觀察" else "",
         "正式推薦版本": FORMAL_RECOMMENDATION_VERSION,
     }
+
+
+def _sector_key_for_row(row: pd.Series) -> str:
+    """盤中雷達分層用族群 key，避免同族群塞爆核心盯盤清單。"""
+    for c in ["主題族群", "次族群", "類別", "產業", "正式產業別", "族群"]:
+        v = _safe_str(row.get(c))
+        if v:
+            return v
+    return "未分類"
+
+
+def _intraday_priority_score(row: pd.Series) -> float:
+    """Phase 7.1 盤中雷達優先分。
+
+    目的：盤中雷達可保留較多資料，但人工盯盤只看前 10~12 檔。
+    這個分數比單純推薦總分更偏向「盤中可操作性、主流資金、族群同步、爆發雷達」。
+    """
+    op = _num(row, "可操作分", 0)
+    formal_sort = _num(row, "正式推薦排序分", op)
+    buy = _num(row, "買進分數", 0)
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    rr = _num(row, "風險報酬比", 0)
+    chase = _num(row, "追價風險分", 65)
+    mainstream = _num(row, "主流資金分", 50)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    radar = max(
+        _num(row, "爆發雷達分", 0),
+        _num(row, "隔日爆發分", 0),
+        _num(row, "飆股攻擊分", 0),
+        _num(row, "主流領漲回補分", 0),
+        _num(row, "漲停回放分", 0),
+    )
+    amount = _num(row, "成交額百萬", 0)
+    amount_score = 100 if amount >= 5000 else 88 if amount >= 2000 else 76 if amount >= 800 else 62 if amount >= 300 else 45 if amount >= 100 else 20
+    rr_score = _clamp(rr * 50.0, 0, 100)
+    score = (
+        formal_sort * 0.18
+        + op * 0.16
+        + radar * 0.18
+        + mainstream * 0.14
+        + sector * 0.12
+        + buy * 0.08
+        + entry * 0.06
+        + risk * 0.04
+        + rr_score * 0.02
+        + amount_score * 0.02
+    )
+    # 追價風險過高、買進分數過低時不要進核心盯盤，保留到備援或低優先。
+    if chase >= 76:
+        score -= 8
+    elif chase >= 70:
+        score -= 4
+    if buy < 30:
+        score -= 6
+    if rr and rr < 0.30:
+        score -= 3
+    return round(_clamp(score, 0, 120), 1)
+
+
+def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
+    """Phase 7.1：將盤中雷達分成核心 / 備援 / 低優先。
+
+    - R1 核心雷達：最多 12 檔，且同族群最多 3 檔，給人工盯盤主清單。
+    - R2 備援雷達：保留輪動機會，避免砍太少造成漏選。
+    - R3 低優先觀察：資料保留，不放第一眼主表。
+    """
+    if out is None or out.empty or "正式推薦分區" not in out.columns:
+        return out
+    for c in ["盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明"]:
+        if c not in out.columns:
+            out[c] = "" if c != "盤中盯盤順序" else 0
+
+    mask = out["正式推薦分區"].fillna("").astype(str).eq("盤中雷達追蹤")
+    if not bool(mask.any()):
+        return out
+
+    tmp = out.loc[mask].copy()
+    tmp["__priority"] = tmp.apply(_intraday_priority_score, axis=1)
+    tmp["__sector"] = tmp.apply(_sector_key_for_row, axis=1)
+    tmp = tmp.sort_values(
+        ["__priority", "可操作分", "爆發雷達分", "主流資金分", "成交額百萬"],
+        ascending=[False, False, False, False, False],
+        kind="mergesort",
+    )
+
+    core_limit = 12
+    backup_limit = 24
+    sector_cap_core = 3
+    core: list[Any] = []
+    backup: list[Any] = []
+    sector_count: dict[str, int] = {}
+
+    for idx, row in tmp.iterrows():
+        sector = _safe_str(row.get("__sector")) or "未分類"
+        can_core = len(core) < core_limit and sector_count.get(sector, 0) < sector_cap_core and _safe_float(row.get("__priority"), 0) >= 58
+        if can_core:
+            core.append(idx)
+            sector_count[sector] = sector_count.get(sector, 0) + 1
+        elif len(backup) < backup_limit:
+            backup.append(idx)
+
+    # 若族群限制導致核心不足，從高分備援依序補滿，避免核心太少。
+    if len(core) < min(core_limit, len(tmp)):
+        for idx in list(backup):
+            if len(core) >= min(core_limit, len(tmp)):
+                break
+            core.append(idx)
+            backup.remove(idx)
+
+    core_set = set(core)
+    backup_set = set(backup)
+    order_map = {idx: i + 1 for i, idx in enumerate(list(core) + list(backup))}
+
+    for idx in tmp.index:
+        pr = _safe_float(tmp.at[idx, "__priority"], 0)
+        out.at[idx, "盤中盯盤順序"] = int(order_map.get(idx, 999))
+        if idx in core_set:
+            out.at[idx, "盤中雷達優先級"] = "R1｜核心雷達"
+            out.at[idx, "盤中雷達分層"] = "盤中核心雷達"
+            out.at[idx, "盤中雷達分層說明"] = f"核心盯盤名單，優先分 {pr:.1f}；最多約 10~12 檔，需實戰觸發價與守價確認。"
+        elif idx in backup_set:
+            out.at[idx, "盤中雷達優先級"] = "R2｜備援雷達"
+            out.at[idx, "盤中雷達分層"] = "盤中備援雷達"
+            out.at[idx, "盤中雷達分層說明"] = f"備援輪動名單，優先分 {pr:.1f}；盤中族群轉強時再提高關注。"
+        else:
+            out.at[idx, "盤中雷達優先級"] = "R3｜低優先觀察"
+            out.at[idx, "盤中雷達分層"] = "盤中低優先觀察"
+            out.at[idx, "盤中雷達分層說明"] = f"保留資料但不放主盯盤，優先分 {pr:.1f}；避免 30~40 檔清單造成失焦。"
+
+    return out
 
 
 def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -649,4 +789,5 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     rows = out.apply(_classify, axis=1, result_type="expand")
     for c in FORMAL_RECOMMENDATION_COLUMNS:
         out[c] = rows[c].values if c in rows.columns else ""
+    out = _apply_intraday_radar_tiers(out)
     return out
