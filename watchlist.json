@@ -4319,5 +4319,270 @@
   ],
   "0624": [],
   "0623": [],
-  "0626": []
+  "0626": [
+    {
+      "code": "2061",
+      "name": "風青",
+      "market": "上櫃",
+      "category": "電器電纜"
+    },
+    {
+      "code": "3105",
+      "name": "穩懋",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3131",
+      "name": "弘塑",
+      "market": "上櫃",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "3227",
+      "name": "原相",
+      "market": "上櫃",
+      "category": "IC設計"
+    },
+    {
+      "code": "3230",
+      "name": "錦明",
+      "market": "上櫃",
+      "category": "光電業"
+    },
+    {
+      "code": "3236",
+      "name": "千如",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "3264",
+      "name": "欣銓",
+      "market": "上櫃",
+      "category": "封測"
+    },
+    {
+      "code": "3317",
+      "name": "尼克森",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3360",
+      "name": "尚立",
+      "market": "上櫃",
+      "category": "電子通路業"
+    },
+    {
+      "code": "3372",
+      "name": "典範",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3374",
+      "name": "精材",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3675",
+      "name": "德微",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3680",
+      "name": "家登",
+      "market": "上櫃",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "3707",
+      "name": "漢磊",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "4923",
+      "name": "力士",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5274",
+      "name": "信驊",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5347",
+      "name": "世界",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5351",
+      "name": "鈺創",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5371",
+      "name": "中光電",
+      "market": "上櫃",
+      "category": "其他電子"
+    },
+    {
+      "code": "5425",
+      "name": "台半",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "5483",
+      "name": "中美晶",
+      "market": "上櫃",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "6138",
+      "name": "茂達",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6156",
+      "name": "松上",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6175",
+      "name": "立敦",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6187",
+      "name": "萬潤",
+      "market": "上櫃",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "6208",
+      "name": "日揚",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6217",
+      "name": "中探針",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6223",
+      "name": "旺矽",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6274",
+      "name": "台燿",
+      "market": "上櫃",
+      "category": "PCB載板"
+    },
+    {
+      "code": "6275",
+      "name": "元山",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6411",
+      "name": "晶焱",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6435",
+      "name": "大中",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6488",
+      "name": "環球晶",
+      "market": "上櫃",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "6510",
+      "name": "精測",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6684",
+      "name": "安格",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6693",
+      "name": "廣閎科",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "6907",
+      "name": "雅特力-KY",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "7712",
+      "name": "博盛半導體",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "7828",
+      "name": "創新服務",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8054",
+      "name": "安國",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8088",
+      "name": "品安",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8091",
+      "name": "翔名",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "8096",
+      "name": "擎亞",
+      "market": "上櫃",
+      "category": "電子通路業"
+    },
+    {
+      "code": "8358",
+      "name": "金居",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    }
+  ]
 }
