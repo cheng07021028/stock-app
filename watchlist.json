@@ -5358,5 +5358,222 @@
       "market": "上市"
     }
   ],
-  "0630": []
+  "0630": [
+    {
+      "code": "1560",
+      "name": "中砂",
+      "market": "上市",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "2344",
+      "name": "華邦電",
+      "market": "上市",
+      "category": "記憶體"
+    },
+    {
+      "code": "2369",
+      "name": "菱生",
+      "market": "上市",
+      "category": "半導體業"
+    },
+    {
+      "code": "2404",
+      "name": "漢唐",
+      "market": "上市",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "2409",
+      "name": "友達",
+      "market": "上市",
+      "category": "面板"
+    },
+    {
+      "code": "2458",
+      "name": "義隆",
+      "market": "上市",
+      "category": "IC設計"
+    },
+    {
+      "code": "2472",
+      "name": "立隆電",
+      "market": "上市",
+      "category": "被動元件"
+    },
+    {
+      "code": "2483",
+      "name": "百容",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "2618",
+      "name": "長榮航",
+      "market": "上市",
+      "category": "航運"
+    },
+    {
+      "code": "2633",
+      "name": "台灣高鐵",
+      "market": "上市",
+      "category": "航運"
+    },
+    {
+      "code": "2634",
+      "name": "漢翔",
+      "market": "上市",
+      "category": "航運"
+    },
+    {
+      "code": "3149",
+      "name": "正達",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "3227",
+      "name": "原相",
+      "market": "上櫃",
+      "category": "IC設計"
+    },
+    {
+      "code": "3230",
+      "name": "錦明",
+      "market": "上櫃",
+      "category": "光電業"
+    },
+    {
+      "code": "3374",
+      "name": "精材",
+      "market": "上櫃",
+      "category": "半導體業"
+    },
+    {
+      "code": "3711",
+      "name": "日月光投控",
+      "market": "上市",
+      "category": "封測"
+    },
+    {
+      "code": "4532",
+      "name": "瑞智",
+      "market": "上市",
+      "category": "電機機械"
+    },
+    {
+      "code": "4707",
+      "name": "磐亞",
+      "market": "上櫃",
+      "category": "塑化"
+    },
+    {
+      "code": "4716",
+      "name": "大立",
+      "market": "上櫃",
+      "category": "塑化"
+    },
+    {
+      "code": "4763",
+      "name": "材料*-KY",
+      "market": "上市",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "5230",
+      "name": "雷笛克光學",
+      "market": "上櫃",
+      "category": "光學鏡頭"
+    },
+    {
+      "code": "5328",
+      "name": "華容",
+      "market": "上櫃",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "5371",
+      "name": "中光電",
+      "market": "上櫃",
+      "category": "其他電子"
+    },
+    {
+      "code": "5392",
+      "name": "能率",
+      "market": "上櫃",
+      "category": "光電業"
+    },
+    {
+      "code": "5434",
+      "name": "崇越",
+      "market": "上市",
+      "category": "半導體設備材料"
+    },
+    {
+      "code": "5469",
+      "name": "瀚宇博",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6116",
+      "name": "彩晶",
+      "market": "上市",
+      "category": "面板"
+    },
+    {
+      "code": "6139",
+      "name": "亞翔",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
+      "code": "6182",
+      "name": "合晶",
+      "market": "上櫃",
+      "category": "矽晶圓"
+    },
+    {
+      "code": "6191",
+      "name": "精成科",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "6226",
+      "name": "光鼎",
+      "market": "上市",
+      "category": "光電業"
+    },
+    {
+      "code": "6505",
+      "name": "台塑化",
+      "market": "上市",
+      "category": "塑化"
+    },
+    {
+      "code": "6696",
+      "name": "仁新",
+      "market": "興櫃",
+      "category": "生技醫療"
+    },
+    {
+      "code": "6770",
+      "name": "力積電",
+      "market": "上市",
+      "category": "晶圓代工"
+    },
+    {
+      "code": "7795",
+      "name": "長廣",
+      "market": "上市",
+      "category": "電子零組件業"
+    },
+    {
+      "code": "8046",
+      "name": "南電",
+      "market": "上市",
+      "category": "PCB載板"
+    }
+  ]
 }
