@@ -5544,104 +5544,88 @@
     {
       "code": "1815",
       "name": "富喬",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "3227",
       "name": "原相",
-      "market": "上櫃",
-      "category": "IC設計"
+      "market": "上櫃"
     },
     {
       "code": "3230",
       "name": "錦明",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "3360",
       "name": "尚立",
-      "market": "上櫃",
-      "category": "電子通路業"
+      "market": "上櫃"
     },
     {
       "code": "4707",
       "name": "磐亞",
-      "market": "上櫃",
-      "category": "塑化"
+      "market": "上櫃"
     },
     {
       "code": "4716",
       "name": "大立",
-      "market": "上櫃",
-      "category": "塑化"
+      "market": "上櫃"
     },
     {
       "code": "5371",
       "name": "中光電",
-      "market": "上櫃",
-      "category": "其他電子"
+      "market": "上櫃"
     },
     {
       "code": "6138",
       "name": "茂達",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6156",
       "name": "松上",
-      "market": "上櫃",
-      "category": "電子零組件業"
+      "market": "上櫃"
     },
     {
       "code": "6291",
       "name": "沛亨",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "6696",
       "name": "仁新",
-      "market": "興櫃",
-      "category": "生技醫療"
+      "market": "興櫃"
     },
     {
       "code": "6829",
       "name": "千附精密",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "7402",
       "name": "邑錡",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "8040",
       "name": "九暘",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "8069",
       "name": "元太",
-      "market": "上櫃",
-      "category": "光電業"
+      "market": "上櫃"
     },
     {
       "code": "8227",
       "name": "巨有科技",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     },
     {
       "code": "8383",
       "name": "千附",
-      "market": "上櫃",
-      "category": "半導體業"
+      "market": "上櫃"
     }
-  ]
+  ],
+  "0702": []
 }
