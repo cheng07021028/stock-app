@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -19,6 +20,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+
+try:
+    import requests
+except Exception:  # GitHub 永久保存不是必要功能；未安裝 requests 時仍保留本機保存
+    requests = None  # type: ignore
 
 BASE_DIR = Path(__file__).resolve().parent
 BACKUP_DIR = BASE_DIR / "backups" / "system_health"
@@ -362,22 +368,150 @@ def full_safe_repair(base_dir: Path | None = None) -> dict[str, Any]:
     return {"ok": True, "time": now_text(), "backup_rows": backup_rows, "core_rows": core_rows, "schema_rows": schema_rows}
 
 
-def load_schedule_settings() -> dict[str, Any]:
-    if not SCHEDULE_SETTINGS_PATH.exists():
-        return dict(DEFAULT_SCHEDULE_SETTINGS)
-    ok, data, _ = read_json(SCHEDULE_SETTINGS_PATH)
+
+# =========================================================
+# 官方因子排程設定：本機 + GitHub 永久保存
+# =========================================================
+def _safe_secret(name: str, default: str = "") -> str:
+    """讀取 Streamlit secrets；在 GitHub Actions / 本機腳本環境沒有 Streamlit 時安全略過。"""
+    try:
+        import streamlit as st  # type: ignore
+        return str(st.secrets.get(name, default) or default).strip()
+    except Exception:
+        return str(os.getenv(name, default) or default).strip()
+
+
+def _github_schedule_config() -> dict[str, str]:
+    return {
+        "token": _safe_secret("GITHUB_TOKEN", ""),
+        "owner": _safe_secret("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028",
+        "repo": _safe_secret("GITHUB_REPO_NAME", "stock-app") or "stock-app",
+        "branch": _safe_secret("GITHUB_REPO_BRANCH", "main") or "main",
+        "path": _safe_secret(
+            "OFFICIAL_FACTOR_SCHEDULE_SETTINGS_GITHUB_PATH",
+            "data/config/official_factor_schedule_settings.json",
+        ) or "data/config/official_factor_schedule_settings.json",
+    }
+
+
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_contents_url(owner: str, repo: str, path_name: str) -> str:
+    return f"https://api.github.com/repos/{owner}/{repo}/contents/{path_name}"
+
+
+def _read_schedule_settings_from_github() -> tuple[dict[str, Any] | None, str, str]:
+    """回傳：(payload, sha, message)。未設定 token 時不視為錯誤。"""
+    cfg = _github_schedule_config()
+    token = cfg.get("token", "")
+    if not token or requests is None:
+        return None, "", "未設定 GITHUB_TOKEN，排程設定只會保存到目前執行環境。"
+    try:
+        url = _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"])
+        r = requests.get(url, headers=_github_headers(token), params={"ref": cfg["branch"]}, timeout=12)
+        if r.status_code == 404:
+            return None, "", f"GitHub 尚未建立設定檔：{cfg['path']}"
+        if r.status_code != 200:
+            return None, "", f"GitHub 讀取排程設定失敗 HTTP {r.status_code}: {r.text[:180]}"
+        data = r.json()
+        content = base64.b64decode(data.get("content", "")).decode("utf-8")
+        payload = json.loads(content)
+        if not isinstance(payload, dict):
+            return None, data.get("sha", ""), "GitHub 排程設定格式不是 JSON object。"
+        return payload, data.get("sha", ""), f"GitHub 已讀取排程設定：{cfg['path']}"
+    except Exception as exc:
+        return None, "", f"GitHub 讀取排程設定例外：{type(exc).__name__}: {exc}"
+
+
+def _write_schedule_settings_to_github(payload: dict[str, Any]) -> tuple[bool, str]:
+    cfg = _github_schedule_config()
+    token = cfg.get("token", "")
+    if not token or requests is None:
+        return False, "未設定 GITHUB_TOKEN，已完成本機保存；若部署在 Streamlit Cloud，重新部署後可能還原。"
+    try:
+        url = _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"])
+        headers = _github_headers(token)
+        sha = ""
+        get_resp = requests.get(url, headers=headers, params={"ref": cfg["branch"]}, timeout=12)
+        if get_resp.status_code == 200:
+            sha = str(get_resp.json().get("sha", "") or "")
+        elif get_resp.status_code not in (404,):
+            return False, f"GitHub 取得設定檔 SHA 失敗 HTTP {get_resp.status_code}: {get_resp.text[:180]}"
+        body: dict[str, Any] = {
+            "message": f"Update official factor schedule settings {payload.get('last_saved_at', '')}",
+            "content": base64.b64encode(json.dumps(json_safe(payload), ensure_ascii=False, indent=2).encode("utf-8")).decode("ascii"),
+            "branch": cfg["branch"],
+        }
+        if sha:
+            body["sha"] = sha
+        put_resp = requests.put(url, headers=headers, json=body, timeout=20)
+        if put_resp.status_code in (200, 201):
+            return True, f"GitHub 已永久保存排程設定：{cfg['path']}"
+        return False, f"GitHub 寫入排程設定失敗 HTTP {put_resp.status_code}: {put_resp.text[:220]}"
+    except Exception as exc:
+        return False, f"GitHub 寫入排程設定例外：{type(exc).__name__}: {exc}"
+
+
+def _merge_schedule_settings(data: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(DEFAULT_SCHEDULE_SETTINGS)
     if isinstance(data, dict):
-        merged = dict(DEFAULT_SCHEDULE_SETTINGS)
         merged.update(data)
+    # 防呆：times 必須是 list[str]，避免 selectbox 讀取失敗
+    times = merged.get("times")
+    if isinstance(times, str):
+        merged["times"] = [times]
+    elif not isinstance(times, list) or not times:
+        merged["times"] = list(DEFAULT_SCHEDULE_SETTINGS.get("times", ["23:00"]))
+    return merged
+
+
+def _ts_value(payload: dict[str, Any] | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("last_saved_at") or payload.get("updated_at") or "")
+
+
+def load_schedule_settings() -> dict[str, Any]:
+    """載入官方因子排程設定。
+
+    優先使用 GitHub 內較新的設定，解決 Streamlit Cloud 重新部署後本機檔案還原的問題。
+    如果沒有 GITHUB_TOKEN，則退回讀取 repo / 本機檔案。
+    """
+    local_data: dict[str, Any] | None = None
+    if SCHEDULE_SETTINGS_PATH.exists():
+        _ok, data, _msg = read_json(SCHEDULE_SETTINGS_PATH)
+        if isinstance(data, dict):
+            local_data = data
+    gh_data, _sha, _gh_msg = _read_schedule_settings_from_github()
+    if isinstance(gh_data, dict) and (_ts_value(gh_data) >= _ts_value(local_data)):
+        merged = _merge_schedule_settings(gh_data)
+        # 同步回本機，讓同一次工作階段後續讀取不必依賴 GitHub
+        write_json(SCHEDULE_SETTINGS_PATH, merged)
         return merged
-    return dict(DEFAULT_SCHEDULE_SETTINGS)
+    return _merge_schedule_settings(local_data)
 
 
 def save_schedule_settings(settings: dict[str, Any]) -> tuple[bool, str]:
-    payload = dict(DEFAULT_SCHEDULE_SETTINGS)
-    payload.update(settings or {})
+    """保存官方因子排程設定。
+
+    先寫本機，再嘗試寫 GitHub。回傳訊息會明確告知是否真正永久保存。
+    """
+    payload = _merge_schedule_settings(settings or {})
     payload["last_saved_at"] = now_text()
-    return write_json(SCHEDULE_SETTINGS_PATH, payload)
+    payload["updated_at"] = payload["last_saved_at"]
+    local_ok, local_msg = write_json(SCHEDULE_SETTINGS_PATH, payload)
+    gh_ok, gh_msg = _write_schedule_settings_to_github(payload)
+    if local_ok and gh_ok:
+        return True, f"本機保存成功；{gh_msg}"
+    if local_ok and not gh_ok:
+        return True, f"本機保存成功；{gh_msg}"
+    return False, f"本機保存失敗：{local_msg}；{gh_msg}"
 
 
 def run_official_factor_update_once(settings: dict[str, Any] | None = None, push_github: bool = False) -> dict[str, Any]:
