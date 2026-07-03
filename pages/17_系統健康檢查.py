@@ -42,7 +42,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V140｜新增全模組空白資料檢查、股神推薦前置資料一鍵依序更新、永久設定檢查。")
+st.caption("V141｜修正官方因子排程設定永久保存：加入 widget key、本機 + GitHub 寫回與 GitHub Actions 動態時間檢查。")
 
 with st.sidebar:
     st.header("V112 操作")
@@ -52,33 +52,71 @@ with st.sidebar:
     st.divider()
     st.subheader("官方因子自動更新排程")
     cfg = load_schedule_settings()
-    enabled = st.checkbox("啟用官方因子自動更新", value=bool(cfg.get("enabled", True)))
     schedule_options = ["21:00", "21:30", "22:00", "22:30", "23:00", "23:30"]
-    saved_schedule_time = (cfg.get("times") or ["23:00"])[0]
-    if saved_schedule_time not in schedule_options:
-        saved_schedule_time = "23:00"
-    schedule_time = st.selectbox("預計更新時間（台灣）", schedule_options, index=schedule_options.index(saved_schedule_time))
-    weekdays_only = st.checkbox("僅週一至週五", value=bool(cfg.get("weekdays_only", True)))
-    market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=["全部", "上市", "上櫃"].index(cfg.get("market_filter", "全部") if cfg.get("market_filter", "全部") in ["全部", "上市", "上櫃"] else "全部"))
-    limit = st.selectbox("更新筆數限制", [0, 200, 500, 1000, 1500, 2000], index=[0, 200, 500, 1000, 1500, 2000].index(int(cfg.get("limit") or 0) if int(cfg.get("limit") or 0) in [0, 200, 500, 1000, 1500, 2000] else 0), help="0 = 全部股票")
-    include_institutional = st.checkbox("更新法人", value=bool(cfg.get("include_institutional", True)))
-    include_revenue = st.checkbox("更新營收", value=bool(cfg.get("include_revenue", True)))
-    include_valuation = st.checkbox("更新 PER / PBR / EPS", value=bool(cfg.get("include_valuation", True)))
-    if st.button("💾 套用官方因子排程設定（永久設定）", use_container_width=True):
+    limit_options = [0, 200, 500, 1000, 1500, 2000]
+    market_options = ["全部", "上市", "上櫃"]
+
+    def _first_valid_time(value):
+        try:
+            t = (value or ["23:00"])[0]
+        except Exception:
+            t = "23:00"
+        return t if t in schedule_options else "23:00"
+
+    def _valid_limit(value):
+        try:
+            v = int(value or 0)
+        except Exception:
+            v = 0
+        return v if v in limit_options else 0
+
+    def _valid_market(value):
+        v = str(value or "全部")
+        return v if v in market_options else "全部"
+
+    widget_defaults = {
+        "official_schedule_enabled": bool(cfg.get("enabled", True)),
+        "official_schedule_time": _first_valid_time(cfg.get("times")),
+        "official_schedule_weekdays_only": bool(cfg.get("weekdays_only", True)),
+        "official_schedule_market_filter": _valid_market(cfg.get("market_filter", "全部")),
+        "official_schedule_limit": _valid_limit(cfg.get("limit", 0)),
+        "official_schedule_include_institutional": bool(cfg.get("include_institutional", True)),
+        "official_schedule_include_revenue": bool(cfg.get("include_revenue", True)),
+        "official_schedule_include_valuation": bool(cfg.get("include_valuation", True)),
+    }
+    for _k, _v in widget_defaults.items():
+        if _k not in st.session_state:
+            st.session_state[_k] = _v
+
+    enabled = st.checkbox("啟用官方因子自動更新", key="official_schedule_enabled")
+    schedule_time = st.selectbox("預計更新時間（台灣）", schedule_options, key="official_schedule_time")
+    weekdays_only = st.checkbox("僅週一至週五", key="official_schedule_weekdays_only")
+    market_filter = st.selectbox("更新市場", market_options, key="official_schedule_market_filter")
+    limit = st.selectbox("更新筆數限制", limit_options, key="official_schedule_limit", help="0 = 全部股票")
+    include_institutional = st.checkbox("更新法人", key="official_schedule_include_institutional")
+    include_revenue = st.checkbox("更新營收", key="official_schedule_include_revenue")
+    include_valuation = st.checkbox("更新 PER / PBR / EPS", key="official_schedule_include_valuation")
+
+    saved_time = (cfg.get("last_saved_at") or cfg.get("updated_at") or "尚未保存")
+    st.caption(f"目前讀取設定：{_first_valid_time(cfg.get('times'))}｜最後保存：{saved_time}")
+
+    if st.button("💾 套用官方因子排程設定（本機 + GitHub 永久保存）", use_container_width=True):
         new_cfg = dict(DEFAULT_SCHEDULE_SETTINGS)
         new_cfg.update({
-            "enabled": enabled,
-            "times": [schedule_time],
-            "weekdays_only": weekdays_only,
-            "market_filter": market_filter,
-            "limit": limit,
-            "include_institutional": include_institutional,
-            "include_revenue": include_revenue,
-            "include_valuation": include_valuation,
+            "enabled": bool(st.session_state["official_schedule_enabled"]),
+            "times": [str(st.session_state["official_schedule_time"])],
+            "weekdays_only": bool(st.session_state["official_schedule_weekdays_only"]),
+            "market_filter": str(st.session_state["official_schedule_market_filter"]),
+            "limit": int(st.session_state["official_schedule_limit"]),
+            "include_institutional": bool(st.session_state["official_schedule_include_institutional"]),
+            "include_revenue": bool(st.session_state["official_schedule_include_revenue"]),
+            "include_valuation": bool(st.session_state["official_schedule_include_valuation"]),
         })
         ok, msg = save_schedule_settings(new_cfg)
         if ok:
             st.success("已保存官方因子排程設定。")
+            if "未設定 GITHUB_TOKEN" in msg or "GitHub" in msg:
+                st.info(msg)
         else:
             st.error(msg)
     if st.button("⚡ 立即手動更新官方因子快取", use_container_width=True):
