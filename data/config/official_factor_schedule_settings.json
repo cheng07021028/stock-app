@@ -2,7 +2,7 @@
   "enabled": true,
   "timezone": "Asia/Taipei",
   "times": [
-    "23:00"
+    "21:00"
   ],
   "weekdays_only": true,
   "market_filter": "全部",
@@ -12,6 +12,7 @@
   "include_valuation": true,
   "preserve_old_cache": true,
   "auto_commit_github_actions": true,
-  "last_saved_at": "",
-  "note": "GitHub Actions workflow 使用 UTC 15:00，約等於台灣 23:00。"
+  "last_saved_at": "2026-07-03 15:44:42",
+  "note": "GitHub Actions workflow 使用 UTC 15:00，約等於台灣 23:00。",
+  "updated_at": "2026-07-03 15:44:42"
 }
