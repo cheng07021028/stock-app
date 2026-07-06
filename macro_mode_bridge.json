@@ -1,10 +1,10 @@
 {
   "version": "v109_startup_macro_autoupdate",
-  "updated_at": "2026-07-06 21:56:16",
+  "updated_at": "2026-07-06 21:58:59",
   "data_date": "2026-07-06",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
-  "market_score": 71.8,
+  "market_score": 71.5,
   "market_trend": "偏多",
   "market_risk_level": "低",
   "risk_gate": "可進場",
@@ -18,15 +18,15 @@
   "otc_index": 445.38,
   "otc_change": 5.87,
   "otc_change_pct": 1.3356,
-  "nasdaq_change_pct": 0.9657,
-  "sox_change_pct": 4.4822,
+  "nasdaq_change_pct": 0.8868,
+  "sox_change_pct": 3.9216,
   "futures_index": null,
   "futures_change": null,
   "futures_change_pct": null,
-  "overnight_score": 71.8,
+  "overnight_score": 71.5,
   "overnight_risk_level": "低",
   "overnight_bias": "偏多",
-  "overnight_comment": "NASDAQ 0.9657% / SOX 4.4822% / 台指期 —%",
+  "overnight_comment": "NASDAQ 0.8868% / SOX 3.9216% / 台指期 —%",
   "event_factor": "startup_auto",
   "macro_mode_estimate": "偏多",
   "feature_center_version": "v109_startup_macro_autoupdate",
@@ -35,7 +35,7 @@
     "bias": "偏多",
     "risk_level": "低",
     "position_hint": "可進場",
-    "score": 71.8
+    "score": 71.5
   },
   "source_status": {
     "twse": {
