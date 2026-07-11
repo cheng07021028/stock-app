@@ -1,0 +1,56 @@
+name: Fix Streamlit startup redeploy loop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix_streamlit_startup_loop.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch macro startup service
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('macro_startup_service.py')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace(
+              'VERSION = "v109_startup_macro_autoupdate"\nDEFAULT_TTL_SECONDS = 30 * 60\nLOCK_TTL_SECONDS = 8 * 60\n\n\ndef _tw_now() -> datetime:\n    return datetime.now(timezone.utc) + timedelta(hours=8)\n',
+              '''VERSION = "v109_1_startup_macro_no_redeploy_loop"\nDEFAULT_TTL_SECONDS = 30 * 60\nLOCK_TTL_SECONDS = 8 * 60\nTAIPEI_TZ = timezone(timedelta(hours=8))\n\n\ndef _tw_now() -> datetime:\n    return datetime.now(TAIPEI_TZ)\n\n\ndef _startup_github_sync_enabled() -> bool:\n    # Default off: committing runtime snapshots to the deployment branch\n    # makes Streamlit Cloud redeploy itself repeatedly.\n    if st is None:\n        return False\n    try:\n        raw = _safe_str(st.secrets.get("MACRO_STARTUP_GITHUB_SYNC", "false")).lower()\n        return raw in {"1", "true", "yes", "y", "on"}\n    except Exception:\n        return False\n'''
+          )
+
+          s = s.replace(
+              '_run_fast_update(sync_github=True)',
+              '_run_fast_update(sync_github=_startup_github_sync_enabled())'
+          )
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Validate Python
+        run: python -m py_compile macro_startup_service.py
+
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add macro_startup_service.py
+          if git diff --cached --quiet; then
+            echo 'No changes needed.'
+          else
+            git commit -m 'Stop Streamlit startup GitHub redeploy loop'
+            git push
+          fi
