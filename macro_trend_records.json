@@ -1,6 +1,6 @@
 [
   {
-    "updated_at": "2026-07-11 23:44:31",
+    "updated_at": "2026-07-12 00:47:19",
     "market_score": 53.1,
     "market_trend": "震盪",
     "market_risk_level": "中",
@@ -5363,7 +5363,20 @@
   },
   {
     "version": "v109_2_startup_macro_github_sync_hard_off",
-    "updated_at": "2026-07-11 23:45:48",
+    "updated_at": "2026-07-12 00:46:58",
+    "data_date": "2026-07-09",
+    "market_score": 49.0,
+    "market_trend": "盤整",
+    "market_risk_level": "中",
+    "risk_gate": "保守選股",
+    "twse_index": 45354.61,
+    "twse_change_pct": -0.8304,
+    "otc_change_pct": 1.3356,
+    "source": "startup Yahoo batch + cache fallback"
+  },
+  {
+    "version": "v109_2_startup_macro_github_sync_hard_off",
+    "updated_at": "2026-07-12 00:48:53",
     "data_date": "2026-07-09",
     "market_score": 49.0,
     "market_trend": "盤整",
