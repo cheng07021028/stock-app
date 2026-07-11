@@ -170,16 +170,33 @@ def _to_numeric_series(df: pd.DataFrame, col: str, default: float | None = None)
 def _tracking_return_series(df: pd.DataFrame) -> pd.Series:
     """建立回饋用報酬欄。
 
-    優先用系統追蹤報酬；若該筆已有實際買進/實際報酬，則改用實際報酬，
-    讓人工買進紀錄也能反饋到模型。
+    V158 實戰校正：績效回饋不可優先使用「損益幅%」。
+    該欄是目前最新價相對推薦價的即時損益，會讓尚未滿觀察期的新紀錄、
+    單日價格跳動與保留舊價一起灌進模型，造成權重過度追短線或被舊價污染。
+
+    正確順序：
+    1. 使用者實際買進且已有實際報酬時，優先用實際報酬。
+    2. 其他紀錄使用已存在的固定追蹤週期，優先 20/10/5/3/1 日。
+    3. 只有完全沒有固定週期績效時，才 fallback 到即時追蹤/損益幅。
     """
     base = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
-    for col in ["損益幅%", "損益%", "即時追蹤報酬%", "推薦後20日%", "推薦後10日%", "推薦後最大漲幅%"]:
+
+    # 固定週期優先，避免把每次更新最新價的浮動損益當成模型真實績效。
+    for col in ["推薦後20日%", "20日績效%", "推薦後10日%", "10日績效%", "推薦後5日%", "5日績效%", "推薦後3日%", "3日績效%", "推薦後1日%"]:
         if col not in df.columns:
             continue
         s = _to_numeric_series(df, col)
         mask = base.isna() & s.notna()
         base.loc[mask] = s.loc[mask]
+
+    # 盤中/未滿期資料只做最後 fallback。
+    for col in ["即時追蹤報酬%", "損益幅%", "損益%", "推薦後最大漲幅%"]:
+        if col not in df.columns:
+            continue
+        s = _to_numeric_series(df, col)
+        mask = base.isna() & s.notna()
+        base.loc[mask] = s.loc[mask]
+
     actual = _to_numeric_series(df, "實際報酬%")
     if "是否已實際買進" in df.columns:
         actual_mask = df["是否已實際買進"].map(_boolish) & actual.notna()
@@ -206,6 +223,25 @@ def _score_bucket(score: Any) -> str:
     return "<75"
 
 
+def _numeric_score_bucket(v: Any, *, prefix: str = "") -> str:
+    x = _safe_float(v, None)
+    if x is None:
+        return f"{prefix}未分類" if prefix else "未分類"
+    if x >= 90:
+        b = "90+"
+    elif x >= 80:
+        b = "80-89"
+    elif x >= 70:
+        b = "70-79"
+    elif x >= 60:
+        b = "60-69"
+    elif x >= 50:
+        b = "50-59"
+    else:
+        b = "<50"
+    return f"{prefix}{b}" if prefix else b
+
+
 def _truth_rate(df: pd.DataFrame, col: str) -> float:
     if col not in df.columns or df.empty:
         return 0.0
@@ -218,29 +254,48 @@ def _segment_stats(df: pd.DataFrame, col: str, baseline: dict[str, float], *, mi
     out: dict[str, dict[str, Any]] = {}
     tmp = df.copy()
     tmp[col] = tmp[col].map(_safe_str).replace("", "未分類")
+    base_avg = float(baseline.get("avg_return", 0.0) or 0.0)
+    base_med = float(baseline.get("median_return", 0.0) or 0.0)
+    base_win = float(baseline.get("win_rate", 0.5) or 0.5)
     for key, g in tmp.groupby(col, dropna=False):
         ret = pd.to_numeric(g.get("_feedback_return_pct"), errors="coerce").dropna()
         sample = int(len(ret))
         if sample <= 0:
             continue
+        ret_clip = ret.clip(lower=-25, upper=35)
         avg = float(ret.mean())
         med = float(ret.median())
+        avg_clip = float(ret_clip.mean())
+        med_clip = float(ret_clip.median())
         win = float((ret > 0).mean())
+        hit5 = float((ret >= 5).mean())
+        loss5 = float((ret <= -5).mean())
         t1 = _truth_rate(g, "是否達目標1")
         t2 = _truth_rate(g, "是否達目標2")
         stop = _truth_rate(g, "是否達停損")
         if sample < min_sample:
             boost = 0.0
         else:
-            raw = ((avg - baseline.get("avg_return", 0.0)) / 3.0)
-            raw += (win - baseline.get("win_rate", 0.5)) * 8.0
-            raw += (t1 - baseline.get("target1_rate", 0.0)) * 4.0
-            raw += (t2 - baseline.get("target2_rate", 0.0)) * 2.0
-            raw -= max(0.0, stop - baseline.get("stop_rate", 0.0)) * 8.0
-            shrink = min(1.0, sample / 20.0)
+            # V158：用中位數 + winsorized 平均，降低單一飆股 100%+ 對權重的污染。
+            raw = ((avg_clip - base_avg) / 4.0)
+            raw += ((med_clip - base_med) / 3.0)
+            raw += (win - base_win) * 7.0
+            raw += hit5 * 2.0
+            raw -= loss5 * 3.0
+            raw += (t1 - baseline.get("target1_rate", 0.0)) * 3.0
+            raw += (t2 - baseline.get("target2_rate", 0.0)) * 1.5
+            raw -= max(0.0, stop - baseline.get("stop_rate", 0.0)) * 7.0
+            shrink = min(1.0, sample / 30.0)
             boost = max(-8.0, min(8.0, raw * shrink))
         stat = SegmentStat(sample, avg, med, win, t1, t2, stop, boost)
-        out[_safe_str(key)] = stat.as_dict()
+        row = stat.as_dict()
+        row.update({
+            "avg_clip": round(avg_clip, 4),
+            "median_clip": round(med_clip, 4),
+            "hit5_rate": round(hit5, 4),
+            "loss5_rate": round(loss5, 4),
+        })
+        out[_safe_str(key)] = row
     return out
 
 
@@ -253,16 +308,24 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
     df = df.loc[:, ~df.columns.duplicated()].copy()
     df["_feedback_return_pct"] = _tracking_return_series(df)
     df["_score_bucket"] = df.get("推薦總分", pd.Series([0] * len(df), index=df.index)).map(_score_bucket)
+    for _c in ["股神決策分數", "起漲前兆分數", "追價風險分", "Entry進場買點分", "Risk風控安全分", "可操作分"]:
+        if _c in df.columns:
+            df[f"_{_c}_bucket"] = df[_c].map(lambda v, _p=_c: _numeric_score_bucket(v, prefix=f"{_p}："))
     valid = df[df["_feedback_return_pct"].notna()].copy()
     if valid.empty:
         return _empty_profile("股神推薦紀錄缺少可計算報酬欄位")
 
     ret = pd.to_numeric(valid["_feedback_return_pct"], errors="coerce").dropna()
+    ret_clip = ret.clip(lower=-25, upper=35)
     baseline = {
         "sample": int(len(ret)),
-        "avg_return": float(ret.mean()),
-        "median_return": float(ret.median()),
+        "avg_return": float(ret_clip.mean()),
+        "raw_avg_return": float(ret.mean()),
+        "median_return": float(ret_clip.median()),
+        "raw_median_return": float(ret.median()),
         "win_rate": float((ret > 0).mean()),
+        "hit5_rate": float((ret >= 5).mean()),
+        "loss5_rate": float((ret <= -5).mean()),
         "target1_rate": _truth_rate(valid, "是否達目標1"),
         "target2_rate": _truth_rate(valid, "是否達目標2"),
         "stop_rate": _truth_rate(valid, "是否達停損"),
@@ -272,11 +335,22 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         "available": True,
         "message": "ok",
         "baseline": {k: round(v, 4) if isinstance(v, float) else v for k, v in baseline.items()},
-        "by_recommend_type": _segment_stats(valid, "推薦型態", baseline, min_sample=3),
-        "by_category": _segment_stats(valid, "類別", baseline, min_sample=4),
-        "by_score_bucket": _segment_stats(valid, "_score_bucket", baseline, min_sample=5),
-        "by_buy_grade": _segment_stats(valid, "買點分級", baseline, min_sample=3),
+        "by_recommend_type": _segment_stats(valid, "推薦型態", baseline, min_sample=5),
+        "by_category": _segment_stats(valid, "類別", baseline, min_sample=8),
+        "by_score_bucket": _segment_stats(valid, "_score_bucket", baseline, min_sample=8),
+        "by_buy_grade": _segment_stats(valid, "買點分級", baseline, min_sample=5),
+        # V158：增加真正影響可操作性的分群，避免只靠類別/總分校正。
+        "by_recommend_layer": _segment_stats(valid, "推薦分層", baseline, min_sample=8),
+        "by_recommend_bucket": _segment_stats(valid, "推薦分桶", baseline, min_sample=8),
+        "by_nextday_action": _segment_stats(valid, "隔日建議動作", baseline, min_sample=8),
+        "by_nextday_entry_type": _segment_stats(valid, "進場型態_隔日", baseline, min_sample=8),
+        "by_market_guard": _segment_stats(valid, "大盤橋接風控", baseline, min_sample=8),
+        "by_market_bucket": _segment_stats(valid, "大盤情境分桶", baseline, min_sample=8),
     }
+    for _c in ["股神決策分數", "起漲前兆分數", "追價風險分", "Entry進場買點分", "Risk風控安全分", "可操作分"]:
+        _b = f"_{_c}_bucket"
+        if _b in valid.columns:
+            profile[f"by_{_c}_bucket"] = _segment_stats(valid, _b, baseline, min_sample=8)
     profile["top_categories"] = _top_keys(profile["by_category"], positive=True)
     profile["weak_categories"] = _top_keys(profile["by_category"], positive=False)
     profile["top_recommend_types"] = _top_keys(profile["by_recommend_type"], positive=True)
@@ -449,61 +523,122 @@ def _build_correction_for_row(row: pd.Series, profile: dict[str, Any]) -> tuple[
     category = _safe_str(row.get("類別")) or _safe_str(row.get("產業"))
     score = _safe_float(row.get("推薦總分"), 0) or 0
     buy_grade = _safe_str(row.get("買點分級"))
-    layer = _safe_str(row.get("推薦分層")) + _safe_str(row.get("股神推薦層級"))
+    layer = _safe_str(row.get("推薦分層"))
+    rec_bucket = _safe_str(row.get("推薦分桶"))
+    next_action = _safe_str(row.get("隔日建議動作"))
+    next_entry = _safe_str(row.get("進場型態_隔日"))
+    market_guard = _safe_str(row.get("大盤橋接風控"))
+    market_bucket = _safe_str(row.get("大盤情境分桶"))
     chase = _safe_float(row.get("追價風險分"), _safe_float(row.get("追高風險分數_決策"), 50)) or 50
     ret5 = _safe_float(row.get("近5日漲幅%"), 0) or 0
     no_buy = _safe_str(row.get("高分禁買原因"))
+    gd_score = _safe_float(row.get("股神決策分數"), None)
+    pre_score = _safe_float(row.get("起漲前兆分數"), _safe_float(row.get("飆股起漲分數"), None))
+    entry_score = _safe_float(row.get("Entry進場買點分"), _safe_float(row.get("進場買點分"), None))
+    risk_score = _safe_float(row.get("Risk風控安全分"), _safe_float(row.get("風控安全分"), None))
 
     score_bucket = _score_bucket(score)
     type_boost, type_n = _lookup_boost(profile, "by_recommend_type", rec_type)
     cat_boost, cat_n = _lookup_boost(profile, "by_category", category)
     bucket_boost, bucket_n = _lookup_boost(profile, "by_score_bucket", score_bucket)
     buy_boost, buy_n = _lookup_boost(profile, "by_buy_grade", buy_grade)
+    layer_boost, layer_n = _lookup_boost(profile, "by_recommend_layer", layer)
+    rec_bucket_boost, rec_bucket_n = _lookup_boost(profile, "by_recommend_bucket", rec_bucket)
+    next_action_boost, next_action_n = _lookup_boost(profile, "by_nextday_action", next_action)
+    next_entry_boost, next_entry_n = _lookup_boost(profile, "by_nextday_entry_type", next_entry)
+    market_guard_boost, market_guard_n = _lookup_boost(profile, "by_market_guard", market_guard)
+    market_bucket_boost, market_bucket_n = _lookup_boost(profile, "by_market_bucket", market_bucket)
 
-    corr = type_boost * 0.35 + cat_boost * 0.25 + bucket_boost * 0.25 + buy_boost * 0.15
+    gd_boost, gd_n = _lookup_boost(profile, "by_股神決策分數_bucket", _numeric_score_bucket(gd_score, prefix="股神決策分數：")) if gd_score is not None else (0.0, 0)
+    pre_boost, pre_n = _lookup_boost(profile, "by_起漲前兆分數_bucket", _numeric_score_bucket(pre_score, prefix="起漲前兆分數：")) if pre_score is not None else (0.0, 0)
+    chase_boost, chase_n = _lookup_boost(profile, "by_追價風險分_bucket", _numeric_score_bucket(chase, prefix="追價風險分："))
+    entry_boost, entry_n = _lookup_boost(profile, "by_Entry進場買點分_bucket", _numeric_score_bucket(entry_score, prefix="Entry進場買點分：")) if entry_score is not None else (0.0, 0)
+    risk_boost, risk_n = _lookup_boost(profile, "by_Risk風控安全分_bucket", _numeric_score_bucket(risk_score, prefix="Risk風控安全分：")) if risk_score is not None else (0.0, 0)
+
+    # V158：校正改為「績效分群 + 可操作分群」雙軌，不讓單一類別或舊總分主導。
+    corr = (
+        type_boost * 0.18
+        + cat_boost * 0.14
+        + bucket_boost * 0.08
+        + buy_boost * 0.10
+        + layer_boost * 0.10
+        + rec_bucket_boost * 0.08
+        + next_action_boost * 0.10
+        + next_entry_boost * 0.10
+        + market_guard_boost * 0.05
+        + market_bucket_boost * 0.03
+        + gd_boost * 0.08
+        + pre_boost * 0.08
+        + chase_boost * 0.06
+        + entry_boost * 0.05
+        + risk_boost * 0.05
+    )
     reasons: list[str] = []
     if type_n:
         reasons.append(f"型態{rec_type}校正{type_boost:+.1f}/樣本{type_n}")
     if cat_n:
         reasons.append(f"類別{category}校正{cat_boost:+.1f}/樣本{cat_n}")
-    if bucket_n:
-        reasons.append(f"分數區間{score_bucket}校正{bucket_boost:+.1f}/樣本{bucket_n}")
-    if buy_n:
-        reasons.append(f"原買點{buy_grade}校正{buy_boost:+.1f}/樣本{buy_n}")
+    if layer_n:
+        reasons.append(f"分層{layer}校正{layer_boost:+.1f}/樣本{layer_n}")
+    if rec_bucket_n:
+        reasons.append(f"分桶{rec_bucket}校正{rec_bucket_boost:+.1f}/樣本{rec_bucket_n}")
+    if next_action_n:
+        reasons.append(f"隔日動作{next_action}校正{next_action_boost:+.1f}/樣本{next_action_n}")
+    if gd_n:
+        reasons.append(f"股神決策分數桶校正{gd_boost:+.1f}/樣本{gd_n}")
+    if pre_n:
+        reasons.append(f"起漲分數桶校正{pre_boost:+.1f}/樣本{pre_n}")
+    if chase_n:
+        reasons.append(f"追價風險桶校正{chase_boost:+.1f}/樣本{chase_n}")
 
-    # 固定專業規則：從本次績效檢討得到的硬邏輯。
-    if "C" in rec_type and "初步轉強" in rec_type:
-        corr += 4.0
-        reasons.append("C初步轉強歷史勝率佳 +4")
-    if "D" in rec_type and "尚未起漲" in rec_type:
-        corr += 2.0
-        reasons.append("D尚未起漲保留潛伏 +2")
+    # 本次 20260711 紀錄檢查得到的保守實戰規則：
+    # B轉強確認/拉回承接比 D尚未起漲與止跌反彈更適合操作；高分過熱仍要降級。
     if "B" in rec_type and "轉強確認" in rec_type:
-        corr += 1.0
-        reasons.append("B轉強確認 +1")
+        corr += 3.0
+        reasons.append("B轉強確認歷史中位績效較佳 +3")
+    if "拉回承接" in rec_type:
+        corr += 2.5
+        reasons.append("拉回承接歷史表現穩定 +2.5")
+    if "C" in rec_type and "初步轉強" in rec_type:
+        corr += 1.5
+        reasons.append("C初步轉強保留但不過度加權 +1.5")
+    if "D" in rec_type and "尚未起漲" in rec_type:
+        corr -= 2.0
+        reasons.append("D尚未起漲勝率/中位數偏弱 -2")
     if any(k in rec_type + layer for k in ["止跌反彈"]):
         corr -= 5.0
         reasons.append("止跌反彈績效較弱 -5")
-    if score >= 90 and score < 95:
-        corr += 3.0
-        reasons.append("90-95分為歷史最佳區間 +3")
+    if buy_grade.startswith("B"):
+        corr += 2.0
+        reasons.append("B買點歷史風險較佳 +2")
+    elif buy_grade.startswith("C"):
+        corr -= 1.5
+        reasons.append("C買點僅列觀察 -1.5")
+    if "高分但過熱" in layer or _safe_str(row.get("高分禁買旗標")) == "是":
+        corr -= 7.0
+        reasons.append("高分但過熱硬降級 -7")
     if score >= 95 and ("高分但過熱" in layer or no_buy or chase >= 75 or ret5 >= 12):
         corr -= 8.0
         reasons.append("95分以上且過熱/追高風險 -8")
-    if "高分但過熱" in layer or _safe_str(row.get("高分禁買旗標")) == "是":
-        corr -= 6.0
-        reasons.append("高分但過熱硬降級 -6")
+    elif 90 <= score < 95 and chase < 70 and ret5 < 10:
+        corr += 1.5
+        reasons.append("90-95且未過熱 +1.5")
     if chase >= 78:
-        corr -= 6.0
-        reasons.append("追高風險高 -6")
+        corr -= 8.0
+        reasons.append("追高風險高 -8")
     elif chase >= 70:
-        corr -= 3.0
-        reasons.append("追高風險中 -3")
+        corr -= 4.0
+        reasons.append("追高風險中 -4")
+    if pre_score is not None and pre_score < 55:
+        corr -= 2.0
+        reasons.append("起漲前兆不足 -2")
+    elif pre_score is not None and 60 <= pre_score < 80:
+        corr += 1.5
+        reasons.append("起漲前兆有效區間 +1.5")
 
     corr = max(-15.0, min(15.0, corr))
-    total_sample = int(max(type_n, cat_n, bucket_n, buy_n))
-    return round(corr, 2), "｜".join(reasons[:8]) if reasons else "無足夠歷史分群資料，採保守校正", total_sample
-
+    total_sample = int(max(type_n, cat_n, bucket_n, buy_n, layer_n, rec_bucket_n, next_action_n, next_entry_n, market_guard_n, market_bucket_n, gd_n, pre_n, chase_n, entry_n, risk_n))
+    return round(corr, 2), "｜".join(reasons[:10]) if reasons else "無足夠歷史分群資料，採保守校正", total_sample
 
 def _decide_grade_and_role(row: pd.Series) -> tuple[str, str, str, str, str, str]:
     final_score = _safe_float(row.get("股神實戰總分"), 0) or 0

@@ -1754,6 +1754,14 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
+    # V158：8頁紀錄/匯出同步正式推薦分區、可操作分與盤中雷達欄位。
+    # 只用既有欄位離線補算，不連網、不重跑推薦掃描、不寫 JSON，避免 7/8/10/14 欄位不同步。
+    try:
+        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+        x = apply_formal_recommendation_engine(x)
+    except Exception:
+        pass
+
     # V98：補齊 07/10 夜間隔日股神欄位，讓歷史紀錄也能追蹤進場點/突破/停損/壓力。
     try:
         x = _v98_backfill_night_battle_record_columns(x)
