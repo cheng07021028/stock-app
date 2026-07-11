@@ -1,6 +1,6 @@
 {
-  "version": "v109_1_startup_macro_no_redeploy_loop",
-  "updated_at": "2026-07-11 23:01:10",
+  "version": "v109_2_startup_macro_github_sync_hard_off",
+  "updated_at": "2026-07-11 23:41:00",
   "data_date": "2026-07-09",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
@@ -29,7 +29,7 @@
   "overnight_comment": "NASDAQ 0.2851% / SOX 0.0552% / 台指期 —%",
   "event_factor": "startup_auto",
   "macro_mode_estimate": "盤整",
-  "feature_center_version": "v109_1_startup_macro_no_redeploy_loop",
+  "feature_center_version": "v109_2_startup_macro_github_sync_hard_off",
   "required_by_godpick": true,
   "recommendation_bias": {
     "bias": "盤整",
