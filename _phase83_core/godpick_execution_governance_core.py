@@ -1,0 +1,346 @@
+# -*- coding: utf-8 -*-
+"""Phase 8.2 execution governance for the GodPick system.
+
+This module separates four concepts that were previously mixed together:
+
+1. Full scan coverage (did the system actually analyse the requested universe?)
+2. Candidate strength (is the stock technically/structurally interesting?)
+3. Final trading permission (may it be traded now, under what conditions?)
+4. Diagnostic signals (why an engine noticed the stock; never a buy permission)
+
+The functions are DataFrame-only and do not read/write JSON or call the network.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable
+import math
+
+import pandas as pd
+
+EXECUTION_GOVERNANCE_VERSION = "phase8_2_execution_governance_20260712"
+
+FINAL_BUCKET_ORDER = {
+    "正式下週主推薦": 10,
+    "A-｜準主推薦小量試單": 20,
+    "盤中雷達追蹤": 30,
+    "高風險雷達觀察": 40,
+    "早期潛伏觀察": 50,
+    "不可直接買觀察": 60,
+    "正式排除清單": 90,
+}
+
+ACTIONABLE_BUCKETS = {
+    "正式下週主推薦",
+    "A-｜準主推薦小量試單",
+    "盤中雷達追蹤",
+}
+
+FORMAL_RECORD_BUCKETS = {
+    "正式下週主推薦",
+    "A-｜準主推薦小量試單",
+}
+
+_SCAN_TERMINAL_KEYS = (
+    "analyzed_ok",
+    "invalid_code",
+    "category_filtered",
+    "no_history",
+    "analysis_error",
+    "signal_filtered",
+    "risk_filtered",
+    "prelaunch_filtered",
+    "trade_filtered",
+)
+
+_DIAGNOSTIC_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("正式主推薦訊號", ("A｜股神主推薦", "正式下週主推薦", "主流攻擊候選")),
+    ("準主推薦訊號", ("A-｜準主推薦", "A-｜準主推薦小量試單")),
+    ("盤中點火訊號", ("B+｜盤中點火追蹤", "盤中雷達追蹤", "飆股雷達")),
+    ("突破確認訊號", ("B｜等突破確認", "主流突破追蹤", "盤中突破追蹤名單")),
+    ("領漲回補訊號", ("L+｜領漲回補雷達", "L｜主流強勢回補", "領漲回補雷達")),
+    ("題材轉強訊號", ("T｜題材轉強追蹤", "題材轉強追蹤")),
+    ("漲停回放訊號", ("M+｜漲停漏選回放", "漏選回放校正")),
+    ("已覆蓋雷達訊號", ("K｜已納入雷達", "已覆蓋雷達")),
+    ("早期潛伏訊號", ("C+｜早期潛伏", "早期潛伏觀察")),
+    ("高風險爆發訊號", ("R｜高風險爆發觀察", "高風險雷達觀察")),
+    ("假強排除訊號", ("X｜假強排除", "假強排除")),
+    ("過熱禁買訊號", ("D｜過熱禁買", "過熱禁買", "BLOCK")),
+    ("低流動性訊號", ("低流動性排除", "冷門禁追", "成交額不足")),
+)
+
+CANDIDATE_DIAGNOSIS_COLUMNS = [
+    "股票代號", "股票名稱", "市場別", "類別", "產業",
+    "最終操作結論", "正式推薦分區", "是否正式推薦", "操作許可", "正式推薦等級",
+    "風控否決旗標", "決策一致性", "候選性質", "正式推薦排除原因",
+    "候選強度分", "推薦總分", "股神實戰總分", "可操作分", "實戰操作品質分",
+    "推薦可信度分", "資料完整度評分", "資料完整度", "官方資料完整度",
+    "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
+    "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
+    "主流資金分", "族群攻擊強度", "資金攻擊有效分", "成交額百萬", "流動性等級",
+    "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
+    "類股內排名", "類股前3強", "是否領先同類股", "同類股領先幅度",
+    "自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數",
+    "爆發雷達分", "隔日爆發分", "飆股攻擊分", "主流領漲回補分", "漲停回放分",
+    "強勢股漏選風險分", "推薦角色", "飆股雷達角色", "領漲回補角色", "回放校正角色",
+    "主流作戰分區", "下週作戰分區", "飆股雷達分區", "領漲回補分區", "回放校正分區",
+    "引擎輔助訊號", "訊號用途", "分區互斥檢查", "最終分區唯一鍵",
+    "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
+    "建議倉位上限%", "正式推薦動作", "失效條件", "開盤跳空處理",
+]
+
+ACTION_TABLE_COLUMNS = [
+    "最終操作結論", "股票代號", "股票名稱", "類別", "產業",
+    "是否正式推薦", "操作許可", "正式推薦等級", "候選性質",
+    "可操作分", "實戰操作品質分", "推薦可信度分", "候選強度分",
+    "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
+    "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
+    "建議倉位上限%", "正式推薦動作", "失效條件", "開盤跳空處理",
+]
+
+
+def _safe_str(value: Any) -> str:
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except Exception:
+        if value is None:
+            return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"", "nan", "none", "null", "nat", "<na>"} else text
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("%", "").strip()
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return float(default)
+        return number
+    except Exception:
+        return float(default)
+
+
+def _series_text(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series([""] * len(df), index=df.index, dtype="object")
+    return df[col].map(_safe_str).astype("object")
+
+
+def _normalise_code(value: Any) -> str:
+    text = _safe_str(value).replace(".0", "")
+    return text.zfill(4) if text.isdigit() and len(text) < 4 else text
+
+
+def build_scan_quality_report(
+    summary: dict[str, Any] | None,
+    *,
+    universe_size: int | None = None,
+    candidate_count: int = 0,
+    final_count: int = 0,
+) -> dict[str, Any]:
+    """Build a conservative scan-completeness report.
+
+    ``candidate_count`` is the full analysed pool, not the filtered action list.
+    A low action-list count is allowed; a low analysed-success count is not.
+    """
+    data = summary if isinstance(summary, dict) else {}
+    expected = int(_safe_float(data.get("total_count"), universe_size or 0))
+    analyzed = int(_safe_float(data.get("analyzed_ok"), candidate_count or 0))
+    processed = 0
+    for key in _SCAN_TERMINAL_KEYS:
+        processed += max(0, int(_safe_float(data.get(key), 0)))
+    if expected > 0:
+        processed = min(max(processed, analyzed), expected)
+    else:
+        processed = max(processed, analyzed)
+
+    coverage = (processed / expected * 100.0) if expected > 0 else 0.0
+    success = (analyzed / expected * 100.0) if expected > 0 else 0.0
+    result_ratio = (final_count / analyzed * 100.0) if analyzed > 0 else 0.0
+
+    if expected <= 0:
+        status = "未知｜舊資料未記錄掃描完整性"
+        level = "unknown"
+        usable = False
+        reason = "缺少掃描總數與成功分析數，不能用目前結果推論全市場。"
+    elif expected <= 10:
+        complete = processed == expected and analyzed == expected
+        status = "完整" if complete else "不完整"
+        level = "complete" if complete else "invalid"
+        usable = complete
+        reason = "小範圍/手動掃描必須每檔成功分析。" if not complete else "小範圍掃描已逐檔完成。"
+    elif coverage >= 99.0 and success >= 85.0:
+        status = "完整"
+        level = "complete"
+        usable = True
+        reason = "掃描覆蓋率與歷史資料成功率均達正式推薦標準。"
+    elif coverage >= 95.0 and success >= 70.0:
+        status = "可用但需注意"
+        level = "warning"
+        usable = True
+        reason = "掃描大致完成，但資料成功率未達最佳標準；正式倉位應降級。"
+    else:
+        status = "不完整｜禁止作為正式推薦"
+        level = "invalid"
+        usable = False
+        reason = "掃描覆蓋率或歷史資料成功率不足，不能以少量結果代表全市場。"
+
+    return {
+        "掃描品質狀態": status,
+        "掃描品質等級": level,
+        "正式推薦可用": bool(usable),
+        "預計掃描數": expected,
+        "已處理數": processed,
+        "成功分析數": analyzed,
+        "完整候選診斷數": int(candidate_count or 0),
+        "最終作戰候選數": int(final_count or 0),
+        "掃描覆蓋率%": round(coverage, 2),
+        "歷史資料成功率%": round(success, 2),
+        "作戰候選率%": round(result_ratio, 2),
+        "掃描品質說明": reason,
+        "版本": EXECUTION_GOVERNANCE_VERSION,
+    }
+
+
+def apply_scan_quality_to_frame(df: pd.DataFrame | None, report: dict[str, Any] | None) -> pd.DataFrame:
+    out = pd.DataFrame() if df is None else (df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df))
+    if out.empty:
+        return out
+    data = report if isinstance(report, dict) else {}
+    for col in [
+        "掃描品質狀態", "正式推薦可用", "預計掃描數", "成功分析數",
+        "掃描覆蓋率%", "歷史資料成功率%", "掃描品質說明",
+    ]:
+        out[col] = data.get(col, "")
+    return out
+
+
+def _build_signal_tags_for_row(row: pd.Series) -> str:
+    blob = "｜".join(
+        _safe_str(row.get(col))
+        for col in [
+            "推薦角色", "穩健推薦角色", "正式推薦分區", "正式推薦資格",
+            "主流作戰分區", "下週作戰分區", "飆股雷達角色", "飆股雷達分區",
+            "領漲回補角色", "領漲回補分區", "回放校正角色", "回放校正分區",
+            "真禁買原因", "過熱原因", "正式推薦排除原因", "冷門股警示",
+        ]
+    )
+    tags: list[str] = []
+    for label, keys in _DIAGNOSTIC_FIELD_GROUPS:
+        if any(key and key in blob for key in keys):
+            tags.append(label)
+    return "、".join(tags) if tags else "一般候選訊號"
+
+
+def canonicalize_final_partition(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Ensure each stock has exactly one final operational bucket."""
+    out = pd.DataFrame() if df is None else (df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df))
+    if out.empty:
+        return out
+    if "正式推薦分區" not in out.columns:
+        try:
+            from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+            out = apply_formal_recommendation_engine(out)
+        except Exception:
+            out["正式推薦分區"] = "不可直接買觀察"
+            out["正式推薦資格"] = "WATCH｜分流模組未載入"
+            out["操作許可"] = "不可直接買"
+
+    bucket = _series_text(out, "正式推薦分區")
+    bucket = bucket.where(bucket.isin(FINAL_BUCKET_ORDER), "不可直接買觀察")
+    out["正式推薦分區"] = bucket
+    if "候選強度分" not in out.columns:
+        out["候選強度分"] = pd.to_numeric(out.get("推薦總分", 0), errors="coerce").fillna(0)
+    out["引擎輔助訊號"] = out.apply(_build_signal_tags_for_row, axis=1)
+    out["訊號用途"] = "診斷用途｜不等於買進許可；以正式推薦分區與操作許可為唯一依據"
+    codes = _series_text(out, "股票代號").map(_normalise_code)
+    out["最終分區唯一鍵"] = codes + "｜" + bucket
+    out["分區互斥檢查"] = "PASS｜每檔僅一個最終操作分區"
+    out["最終分區優先序"] = bucket.map(FINAL_BUCKET_ORDER).fillna(999).astype(int)
+
+    if "股票代號" in out.columns:
+        # Same code can occur more than once after old merges. Keep the row with the
+        # strongest final-priority/operation score, never duplicate it across final views.
+        op = pd.to_numeric(out.get("可操作分", 0), errors="coerce").fillna(0)
+        confidence = pd.to_numeric(out.get("推薦可信度分", 0), errors="coerce").fillna(0)
+        out["_governance_sort"] = op * 0.7 + confidence * 0.3
+        out = out.sort_values(
+            ["最終分區優先序", "_governance_sort"],
+            ascending=[True, False],
+            kind="mergesort",
+        ).drop_duplicates(subset=["股票代號"], keep="first")
+        out = out.drop(columns=["_governance_sort"], errors="ignore")
+    return out.reset_index(drop=True)
+
+
+def build_candidate_diagnosis(df: pd.DataFrame | None, *, max_rows: int = 3000) -> pd.DataFrame:
+    out = canonicalize_final_partition(df)
+    if out.empty:
+        return out
+    existing = [col for col in CANDIDATE_DIAGNOSIS_COLUMNS if col in out.columns]
+    extra = [
+        col for col in ["掃描品質狀態", "正式推薦可用", "掃描覆蓋率%", "歷史資料成功率%"]
+        if col in out.columns and col not in existing
+    ]
+    out = out[existing + extra].copy()
+    sort_cols = [col for col in ["最終分區優先序", "可操作分", "推薦可信度分", "候選強度分"] if col in out.columns]
+    if sort_cols:
+        ascending = [True if col == "最終分區優先序" else False for col in sort_cols]
+        out = out.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    return out.head(max(1, int(max_rows))).reset_index(drop=True)
+
+
+def build_action_table(df: pd.DataFrame | None, *, include_intraday: bool = True) -> pd.DataFrame:
+    out = canonicalize_final_partition(df)
+    if out.empty:
+        return out
+    allowed = {"正式下週主推薦", "A-｜準主推薦小量試單"}
+    if include_intraday:
+        allowed.add("盤中雷達追蹤")
+    out = out[out["正式推薦分區"].isin(allowed)].copy()
+    if "正式推薦分區" in out.columns and "盤中雷達優先級" in out.columns:
+        radar_mask = out["正式推薦分區"].eq("盤中雷達追蹤")
+        out = out[~radar_mask | _series_text(out, "盤中雷達優先級").str.startswith("R1")].copy()
+    cols = [col for col in ACTION_TABLE_COLUMNS if col in out.columns]
+    if cols:
+        out = out[cols].copy()
+    return out.reset_index(drop=True)
+
+
+def build_engine_diagnostic_table(df: pd.DataFrame | None) -> pd.DataFrame:
+    out = canonicalize_final_partition(df)
+    if out.empty:
+        return out
+    cols = [
+        "股票代號", "股票名稱", "類別", "正式推薦分區", "最終操作結論", "操作許可",
+        "引擎輔助訊號", "訊號用途", "正式推薦排除原因", "候選強度分", "可操作分",
+        "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分", "成交額百萬",
+        "分區互斥檢查",
+    ]
+    return out[[col for col in cols if col in out.columns]].copy().reset_index(drop=True)
+
+
+def govern_recommend_list(df: pd.DataFrame | None, *, include_r1: bool = True) -> pd.DataFrame:
+    out = canonicalize_final_partition(df)
+    if out.empty:
+        return out
+    bucket = _series_text(out, "正式推薦分區")
+    allowed = bucket.isin(FORMAL_RECORD_BUCKETS)
+    if include_r1:
+        radar_priority = _series_text(out, "盤中雷達優先級")
+        allowed = allowed | (bucket.eq("盤中雷達追蹤") & radar_priority.str.startswith("R1"))
+    return out.loc[allowed].copy().reset_index(drop=True)
+
+
+def govern_recommend_records(df: pd.DataFrame | None) -> pd.DataFrame:
+    out = canonicalize_final_partition(df)
+    if out.empty:
+        return out
+    return out.loc[_series_text(out, "正式推薦分區").isin(FORMAL_RECORD_BUCKETS)].copy().reset_index(drop=True)
+
+
+def report_allows_formal_action(report: dict[str, Any] | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    return bool(report.get("正式推薦可用", False))
