@@ -1,0 +1,178 @@
+name: Migrate runtime data writes off main
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/migrate_runtime_data_branch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure runtime-data branch exists
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --heads origin runtime-data >/dev/null 2>&1; then
+            echo 'runtime-data branch already exists.'
+          else
+            git push origin HEAD:refs/heads/runtime-data
+          fi
+
+      - name: Redirect every runtime GitHub read/write to runtime-data
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+          changed = []
+
+          # All these are runtime state, not deployable source code:
+          # watchlists, recommendation records/lists, UI config, weights,
+          # accounts/auth config, stock master cache, official factor cache,
+          # macro bridge/snapshots, health state, and management settings.
+          patterns = [
+              re.compile(r'(?:st\.)?secrets\.get\(\s*["\']GITHUB_REPO_BRANCH["\']\s*,\s*["\']main["\']\s*\)'),
+              re.compile(r'_get\(\s*["\']GITHUB_REPO_BRANCH["\']\s*,\s*["\']main["\']\s*\)'),
+          ]
+
+          for path in sorted(root.rglob('*.py')):
+              if '.git' in path.parts or any(part.startswith('patch_backup') for part in path.parts):
+                  continue
+              try:
+                  old = path.read_text(encoding='utf-8-sig')
+              except Exception:
+                  continue
+              new = old
+              for pat in patterns:
+                  new = pat.sub('"runtime-data"', new)
+
+              # Catch unusual direct references without allowing the old deploy-branch key.
+              new = new.replace('GITHUB_REPO_BRANCH', 'GITHUB_RUNTIME_DATA_BRANCH')
+
+              # Clean conditional/default tails left after replacing the secret call.
+              fixed_lines = []
+              for line in new.splitlines(keepends=True):
+                  if 'runtime-data' in line or 'GITHUB_RUNTIME_DATA_BRANCH' in line:
+                      line = line.replace(' or "main"', ' or "runtime-data"')
+                      line = line.replace(" or 'main'", " or 'runtime-data'")
+                      line = line.replace(' else "main"', ' else "runtime-data"')
+                      line = line.replace(" else 'main'", " else 'runtime-data'")
+                      line = re.sub(
+                          r'(["\']GITHUB_RUNTIME_DATA_BRANCH["\']\s*,\s*)["\']main["\']',
+                          r'\1"runtime-data"',
+                          line,
+                      )
+                  fixed_lines.append(line)
+              new = ''.join(fixed_lines)
+
+              if new != old:
+                  path.write_text(new, encoding='utf-8')
+                  changed.append(str(path))
+
+          print('Changed files:')
+          for item in changed:
+              print(' -', item)
+
+          # Hard fail if any Python module can still select the deployment branch key.
+          leftovers = []
+          unsafe_defaults = []
+          for path in sorted(root.rglob('*.py')):
+              if '.git' in path.parts:
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8-sig')
+              except Exception:
+                  continue
+              if 'GITHUB_REPO_BRANCH' in text:
+                  leftovers.append(str(path))
+              for no, line in enumerate(text.splitlines(), 1):
+                  if 'GITHUB_RUNTIME_DATA_BRANCH' in line and ('"main"' in line or "'main'" in line):
+                      unsafe_defaults.append(f'{path}:{no}:{line.strip()}')
+
+          if leftovers or unsafe_defaults:
+              raise SystemExit(
+                  'Unsafe runtime branch references remain:\n' +
+                  '\n'.join(leftovers + unsafe_defaults)
+              )
+          PY
+
+      - name: Install and compile-check Python
+        shell: bash
+        run: |
+          python -m compileall -q .
+
+      - name: Install permanent runtime-branch guard
+        shell: bash
+        run: |
+          cat > .github/workflows/runtime_branch_guard.yml <<'YAML'
+          name: Runtime branch safety guard
+
+          on:
+            push:
+              branches: [main]
+            pull_request:
+              branches: [main]
+
+          permissions:
+            contents: read
+
+          jobs:
+            guard:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - name: Reject runtime writes to deployment branch
+                  run: |
+                    python - <<'PY'
+                    from pathlib import Path
+
+                    problems = []
+                    for p in Path('.').rglob('*.py'):
+                        if '.git' in p.parts:
+                            continue
+                        try:
+                            text = p.read_text(encoding='utf-8-sig')
+                        except Exception:
+                            continue
+                        if 'GITHUB_REPO_BRANCH' in text:
+                            problems.append(f'{p}: legacy GITHUB_REPO_BRANCH is forbidden')
+                        for n, line in enumerate(text.splitlines(), 1):
+                            if 'GITHUB_RUNTIME_DATA_BRANCH' in line and ('"main"' in line or "'main'" in line):
+                                problems.append(f'{p}:{n}: runtime branch must not default to main')
+                    if problems:
+                        raise SystemExit('\n'.join(problems))
+                    print('Runtime GitHub branch guard passed.')
+                    PY
+                    python -m compileall -q .
+          YAML
+
+      - name: Remove one-time repair workflows
+        shell: bash
+        run: |
+          rm -f .github/workflows/fix_streamlit_startup_loop.yml
+          rm -f .github/workflows/migrate_runtime_data_branch.yml
+
+      - name: Commit migration
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No changes needed.'
+          else
+            git commit -m 'Move all Streamlit runtime persistence to runtime-data branch'
+            git push origin HEAD:main
+          fi
