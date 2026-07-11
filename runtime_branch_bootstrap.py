@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """Global runtime safety guards for the Streamlit stock app.
 
-This module is imported before the real app and page modules. It provides two
+This module is imported before the real app and page modules. It provides three
 independent protections:
 
 1. Runtime JSON/cache/UI state is forced to the non-deployment ``runtime-data``
    branch so normal user operations do not redeploy Streamlit Cloud.
-2. Daemon threads started by ``pages/0_大盤走勢.py`` are executed safely in the
-   current Streamlit script thread. The original page starts several pandas /
-   NumPy / PyArrow workers while Streamlit is rerunning; on Python 3.14 this was
-   observed to terminate the whole process with SIGSEGV (segmentation fault).
+2. pandas string inference is forced to Python/object storage. This prevents the
+   pandas 3 / PyArrow string constructor path from crashing the whole process
+   while the macro page reads wide recommendation JSON records.
+3. Daemon threads started by ``pages/0_大盤走勢.py`` are executed safely in the
+   current Streamlit script thread.
 """
 from __future__ import annotations
 
@@ -26,6 +27,31 @@ _MACRO_PAGE_FILENAMES = {
     "0_大盤走勢.py",
     "0_#U5927#U76e4#U8d70#U52e2.py",
 }
+
+
+def install_pandas_string_stability_guard() -> bool:
+    """Keep recommendation JSON string columns off the PyArrow string backend.
+
+    The macro page builds a wide DataFrame from recommendation JSON. On the
+    failing deployment the process died inside pandas ``string_arrow.py`` before
+    Python could raise a normal exception. The production dependency is pinned
+    to pandas 2.3.3, and these options provide a second layer of protection.
+    """
+    os.environ.setdefault("PANDAS_COPY_ON_WRITE", "0")
+    try:
+        import pandas as pd
+    except Exception:
+        return False
+
+    try:
+        pd.options.future.infer_string = False
+    except Exception:
+        pass
+    try:
+        pd.options.mode.string_storage = "python"
+    except Exception:
+        pass
+    return True
 
 
 def install_runtime_branch_guard() -> bool:
@@ -84,11 +110,8 @@ def install_macro_page_stability_guard() -> bool:
 
     The page's update functions are preserved. Only their execution mode is
     changed: a daemon worker created from the macro page runs synchronously in
-    the active Streamlit script thread. This avoids pandas/NumPy/PyArrow work
-    continuing after a rerun has invalidated the script context.
+    the active Streamlit script thread.
     """
-    # Reduce native BLAS/Arrow/gRPC worker contention before application modules
-    # import pandas, NumPy, PyArrow or Firebase.
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -101,7 +124,6 @@ def install_macro_page_stability_guard() -> bool:
     except Exception:
         pass
 
-    # Do not auto-launch the legacy background refresh on first page load.
     try:
         import streamlit as st
         if "macro_safe_auto_bg_update" not in st.session_state:
@@ -119,8 +141,6 @@ def install_macro_page_stability_guard() -> bool:
             if getattr(self, "_stock_app_macro_sync_started", False):
                 return None
             self._stock_app_macro_sync_started = True
-            # Thread.run() invokes the original target with its args/kwargs but
-            # keeps all native work inside Streamlit's current script context.
             return self.run()
         return original_start(self)
 
@@ -130,5 +150,6 @@ def install_macro_page_stability_guard() -> bool:
     return True
 
 
+install_pandas_string_stability_guard()
 install_runtime_branch_guard()
 install_macro_page_stability_guard()
