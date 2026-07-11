@@ -1,27 +1,35 @@
 # -*- coding: utf-8 -*-
-"""Global safety guard for Streamlit runtime GitHub persistence.
+"""Global runtime safety guards for the Streamlit stock app.
 
-All runtime state must be read/written from the non-deployment ``runtime-data``
-branch. Streamlit Community Cloud watches ``main``; committing JSON/cache/UI
-state to ``main`` disconnects active sessions with HTTP 503 and redeploys the
-app. This guard intercepts both the legacy and new branch secret names so an
-old Streamlit secret cannot accidentally point runtime writes back to main.
+This module is imported before the real app and page modules. It provides two
+independent protections:
+
+1. Runtime JSON/cache/UI state is forced to the non-deployment ``runtime-data``
+   branch so normal user operations do not redeploy Streamlit Cloud.
+2. Daemon threads started by ``pages/0_大盤走勢.py`` are executed safely in the
+   current Streamlit script thread. The original page starts several pandas /
+   NumPy / PyArrow workers while Streamlit is rerunning; on Python 3.14 this was
+   observed to terminate the whole process with SIGSEGV (segmentation fault).
 """
 from __future__ import annotations
 
+import faulthandler
+import inspect
 import os
+import threading
+from pathlib import Path
 from typing import Any
 
 RUNTIME_DATA_BRANCH = "runtime-data"
 _BRANCH_KEYS = {"GITHUB_REPO_BRANCH", "GITHUB_RUNTIME_DATA_BRANCH"}
+_MACRO_PAGE_FILENAMES = {
+    "0_大盤走勢.py",
+    "0_#U5927#U76e4#U8d70#U52e2.py",
+}
 
 
 def install_runtime_branch_guard() -> bool:
-    """Force every Streamlit secret branch lookup to ``runtime-data``.
-
-    The patch is process-wide and idempotent. Non-branch secrets retain their
-    normal behavior; missing optional secrets safely return the caller default.
-    """
+    """Force every Streamlit secret branch lookup to ``runtime-data``."""
     os.environ["GITHUB_REPO_BRANCH"] = RUNTIME_DATA_BRANCH
     os.environ["GITHUB_RUNTIME_DATA_BRANCH"] = RUNTIME_DATA_BRANCH
 
@@ -57,4 +65,70 @@ def install_runtime_branch_guard() -> bool:
     return True
 
 
+def _called_from_macro_page() -> bool:
+    """Return True only when Thread.start() was called by the macro page."""
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            filename = Path(frame.f_code.co_filename).name
+            if filename in _MACRO_PAGE_FILENAMES:
+                return True
+            frame = frame.f_back
+    finally:
+        del frame
+    return False
+
+
+def install_macro_page_stability_guard() -> bool:
+    """Prevent native-library crashes caused by macro-page daemon threads.
+
+    The page's update functions are preserved. Only their execution mode is
+    changed: a daemon worker created from the macro page runs synchronously in
+    the active Streamlit script thread. This avoids pandas/NumPy/PyArrow work
+    continuing after a rerun has invalidated the script context.
+    """
+    # Reduce native BLAS/Arrow/gRPC worker contention before application modules
+    # import pandas, NumPy, PyArrow or Firebase.
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("ARROW_NUM_THREADS", "1")
+    os.environ.setdefault("GRPC_POLL_STRATEGY", "poll")
+    os.environ.setdefault("PYTHONFAULTHANDLER", "1")
+    try:
+        faulthandler.enable()
+    except Exception:
+        pass
+
+    # Do not auto-launch the legacy background refresh on first page load.
+    try:
+        import streamlit as st
+        if "macro_safe_auto_bg_update" not in st.session_state:
+            st.session_state["macro_safe_auto_bg_update"] = False
+    except Exception:
+        pass
+
+    if getattr(threading.Thread, "_stock_app_macro_guard_installed", False):
+        return True
+
+    original_start = threading.Thread.start
+
+    def guarded_start(self: threading.Thread) -> Any:
+        if bool(getattr(self, "daemon", False)) and _called_from_macro_page():
+            if getattr(self, "_stock_app_macro_sync_started", False):
+                return None
+            self._stock_app_macro_sync_started = True
+            # Thread.run() invokes the original target with its args/kwargs but
+            # keeps all native work inside Streamlit's current script context.
+            return self.run()
+        return original_start(self)
+
+    threading.Thread._stock_app_original_start = original_start
+    threading.Thread.start = guarded_start
+    threading.Thread._stock_app_macro_guard_installed = True
+    return True
+
+
 install_runtime_branch_guard()
+install_macro_page_stability_guard()
