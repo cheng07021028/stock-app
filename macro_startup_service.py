@@ -40,13 +40,26 @@ MACRO_RECORDS_FILE = BASE_DIR / "macro_trend_records.json"
 STATUS_FILE = BASE_DIR / "macro_startup_status.json"
 LOCK_FILE = BASE_DIR / "macro_startup_update.lock"
 
-VERSION = "v109_startup_macro_autoupdate"
+VERSION = "v109_1_startup_macro_no_redeploy_loop"
 DEFAULT_TTL_SECONDS = 30 * 60
 LOCK_TTL_SECONDS = 8 * 60
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 
 def _tw_now() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=8)
+    return datetime.now(TAIPEI_TZ)
+
+
+def _startup_github_sync_enabled() -> bool:
+    # Default off: committing runtime snapshots to the deployment branch
+    # makes Streamlit Cloud redeploy itself repeatedly.
+    if st is None:
+        return False
+    try:
+        raw = _safe_str(st.secrets.get("MACRO_STARTUP_GITHUB_SYNC", "false")).lower()
+        return raw in {"1", "true", "yes", "y", "on"}
+    except Exception:
+        return False
 
 
 def _now_text() -> str:
@@ -471,7 +484,7 @@ def _run_fast_update(sync_github: bool = True) -> Dict[str, Any]:
 def _background_worker() -> None:
     try:
         _set_lock()
-        _run_fast_update(sync_github=True)
+        _run_fast_update(sync_github=_startup_github_sync_enabled())
     except Exception as e:
         _write_status(False, f"背景大盤啟動更新例外：{e}")
     finally:
@@ -522,7 +535,7 @@ def ensure_macro_startup_update(ttl_seconds: int = DEFAULT_TTL_SECONDS) -> Dict[
     if not _has_usable_snapshot():
         try:
             _set_lock()
-            return _run_fast_update(sync_github=True)
+            return _run_fast_update(sync_github=_startup_github_sync_enabled())
         finally:
             _clear_lock()
 
