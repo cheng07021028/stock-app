@@ -1,0 +1,614 @@
+name: Phase 8 actionable GodPick recommendations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/phase8_actionable_recommendations.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply Phase 8 recommendation governance
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+          formal = root / 'godpick_formal_recommendation_engine.py'
+          page7 = root / 'pages/7_股神推薦.py'
+          schema = root / 'godpick_column_schema.py'
+
+          def replace_def(text: str, name: str, new_block: str) -> str:
+              pattern = re.compile(rf'^def {re.escape(name)}\(.*?(?=^def |\Z)', re.M | re.S)
+              match = pattern.search(text)
+              if not match:
+                  raise RuntimeError(f'Function not found: {name}')
+              return text[:match.start()] + new_block.rstrip() + '\n\n\n' + text[match.end():]
+
+          # ---- formal recommendation engine ----
+          s = formal.read_text(encoding='utf-8-sig')
+          s = s.replace(
+              'FORMAL_RECOMMENDATION_VERSION = "vnext_phase7_1_intraday_radar_tiers_20260624"',
+              'FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_0_actionable_governance_20260712"',
+          )
+          old_cols = '''FORMAL_RECOMMENDATION_COLUMNS = [
+              "可操作分",
+              "正式推薦分區",
+              "正式推薦資格",
+              "正式推薦動作",
+              "下週是否可直接買",
+          '''
+          new_cols = '''FORMAL_RECOMMENDATION_COLUMNS = [
+              "最終操作結論",
+              "是否正式推薦",
+              "操作許可",
+              "正式推薦等級",
+              "推薦可信度分",
+              "建議倉位上限%",
+              "風控否決旗標",
+              "決策一致性",
+              "候選性質",
+              "可操作分",
+              "正式推薦分區",
+              "正式推薦資格",
+              "正式推薦動作",
+              "下週是否可直接買",
+          '''
+          if old_cols not in s:
+              raise RuntimeError('formal columns anchor not found')
+          s = s.replace(old_cols, new_cols, 1)
+          s = s.replace(
+              'NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {\n    "可操作分",',
+              'NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {\n    "推薦可信度分",\n    "建議倉位上限%",\n    "可操作分",',
+              1,
+          )
+
+          helper_anchor = '''def _first_price(row: pd.Series, cols: list[str], default: float = 0.0) -> float:
+              for c in cols:
+                  v = _safe_float(row.get(c), 0.0)
+                  if v and v > 0:
+                      return float(v)
+              return float(default)
+          '''
+          helpers = helper_anchor + '''
+
+
+          def _stop_distance_pct(row: pd.Series) -> float:
+              direct = _num(row, "停損距離%", 0.0)
+              if direct > 0:
+                  return round(direct, 2)
+              price = _first_price(row, ["最新價", "推薦價格", "推薦日價格", "建議價位"], 0.0)
+              stop = _first_price(row, ["停損價", "停損價_隔日", "停損參考", "失效價位"], 0.0)
+              if price <= 0 or stop <= 0 or stop >= price:
+                  return 0.0
+              return round((price - stop) / price * 100.0, 2)
+
+
+          def _upside_space_pct(row: pd.Series) -> float:
+              direct = _num(row, "壓力空間%", 0.0)
+              if direct > 0:
+                  return round(direct, 2)
+              price = _first_price(row, ["最新價", "推薦價格", "推薦日價格", "建議價位"], 0.0)
+              target = _first_price(row, ["賣出目標1", "第一壓力價", "近端壓力", "突破確認價"], 0.0)
+              if price <= 0 or target <= price:
+                  return 0.0
+              return round((target - price) / price * 100.0, 2)
+
+
+          def _market_risk_info(row: pd.Series) -> dict[str, Any]:
+              blob = _text_blob(row, [
+                  "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
+                  "大盤風控建議", "今日大盤結論", "大盤橋接狀態",
+              ])
+              score = max(_num(row, "大盤橋接分數", 0), _num(row, "大盤多空分數", 0))
+              severe = _contains_any(blob, ["紅燈", "空方", "全面防守", "禁止進攻", "風險急升"])
+              defensive = severe or _contains_any(blob, ["防守", "保守", "震盪控風險", "不宜全面追價"])
+              if score > 0 and score < 42:
+                  severe = True
+                  defensive = True
+              return {"blob": blob, "score": score, "severe": severe, "defensive": defensive}
+
+
+          def _data_quality_score(row: pd.Series) -> float:
+              for c in ["官方資料完整度", "資料完整度分數", "實戰品質分"]:
+                  value = _num(row, c, -1)
+                  if value >= 0:
+                      return _clamp(value)
+              blob = _text_blob(row, ["資料完整度", "大盤資料品質", "官方因子資料狀態"])
+              if _contains_any(blob, ["完整", "良好", "高"]):
+                  return 85.0
+              if _contains_any(blob, ["中", "部分"]):
+                  return 65.0
+              if _contains_any(blob, ["低", "缺", "失敗", "未串聯"]):
+                  return 35.0
+              return 60.0
+
+
+          def _confidence_score(row: pd.Series, op_score: float, bucket: str) -> float:
+              practical = _num(row, "股神實戰總分", _num(row, "股神決策分數", 50))
+              feedback = _num(row, "Feedback績效校正分", _num(row, "績效校正分", 0))
+              feedback_norm = _clamp(50.0 + feedback * 2.0)
+              quality = _data_quality_score(row)
+              score = op_score * 0.58 + practical * 0.22 + quality * 0.12 + feedback_norm * 0.08
+              if bucket == "正式下週主推薦":
+                  score += 5
+              elif bucket == "A-｜準主推薦小量試單":
+                  score += 2
+              elif bucket in {"高風險雷達觀察", "正式排除清單"}:
+                  score -= 12
+              return round(_clamp(score), 1)
+
+
+          def _position_cap_pct(row: pd.Series, bucket: str) -> float:
+              if bucket == "正式下週主推薦":
+                  existing = max(
+                      _num(row, "動態建議倉位%", 0),
+                      _num(row, "建議倉位%", 0),
+                      _num(row, "建議部位%", 0),
+                  )
+                  risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 50))
+                  cap = 15.0 if risk >= 68 else 10.0
+                  if _market_risk_info(row)["defensive"]:
+                      cap = min(cap, 8.0)
+                  if existing > 0:
+                      cap = min(cap, existing)
+                  return round(max(3.0, cap), 1)
+              if bucket == "A-｜準主推薦小量試單":
+                  return 5.0
+              return 0.0
+
+
+          def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_text: str) -> dict[str, Any]:
+              strength = max(
+                  _num(row, "推薦總分", 0),
+                  _num(row, "候選強度分", 0),
+                  _num(row, "Alpha選股潛力分", 0),
+              )
+              if bucket == "正式下週主推薦":
+                  conclusion = "A｜正式推薦：可依進場條件分批進場"
+                  formal_flag, permit, grade, nature, veto = "是", "可分批進場", "A｜正式主推薦", "正式推薦", "否"
+                  consistency = "一致｜選股、買點、風控與風險報酬同步通過"
+              elif bucket == "A-｜準主推薦小量試單":
+                  conclusion = "A-｜準主推薦：盤中確認後只允許小量試單"
+                  formal_flag, permit, grade, nature, veto = "否｜準主推薦", "觸發且守價後小量試單", "A-｜條件推薦", "條件推薦", "否"
+                  consistency = "一致｜接近主推薦，但仍有一項以上門檻未完全通過"
+              elif bucket == "盤中雷達追蹤":
+                  conclusion = "B+｜盤中雷達：未觸發前不可買"
+                  formal_flag, permit, grade, nature, veto = "否", "僅盤中觸發後評估", "B+｜盤中條件雷達", "盤中雷達", "否"
+                  consistency = "一致｜保留爆發機會，但未達正式推薦門檻"
+              elif bucket == "高風險雷達觀察":
+                  conclusion = "R｜高風險觀察：禁止追價"
+                  formal_flag, permit, grade, nature, veto = "否", "禁止新倉｜只觀察", "R｜高風險觀察", "高風險觀察", "是"
+                  consistency = "一致｜有爆發訊號但風控不足，已與正式推薦隔離"
+              elif bucket == "正式排除清單":
+                  conclusion = "D｜正式排除：禁止新倉"
+                  formal_flag, permit, grade, nature, veto = "否", "禁止買進", "D｜禁止買進", "正式排除", "是"
+                  consistency = "一致｜候選強度高但買點/風控不合格，已隔離而非推薦" if strength >= 80 else "一致｜未通過正式推薦風控門檻"
+              elif bucket == "早期潛伏觀察":
+                  conclusion = "C+｜早期觀察：不列正式推薦"
+                  formal_flag, permit, grade, nature, veto = "否", "不可直接買｜等待轉強", "C+｜早期觀察", "早期觀察", "否"
+                  consistency = "一致｜保留早期訊號，等待 Entry/Risk 改善"
+              else:
+                  conclusion = "C｜觀察：不列正式推薦"
+                  formal_flag, permit, grade, nature, veto = "否", "不可直接買", "C｜一般觀察", "後台觀察", "否"
+                  consistency = "一致｜條件不足，僅保留診斷"
+              if exclusion_text and bucket not in {"正式下週主推薦", "A-｜準主推薦小量試單"}:
+                  consistency += f"｜原因：{exclusion_text}"
+              return {
+                  "最終操作結論": conclusion,
+                  "是否正式推薦": formal_flag,
+                  "操作許可": permit,
+                  "正式推薦等級": grade,
+                  "推薦可信度分": _confidence_score(row, op_score, bucket),
+                  "建議倉位上限%": _position_cap_pct(row, bucket),
+                  "風控否決旗標": veto,
+                  "決策一致性": consistency,
+                  "候選性質": nature,
+              }
+          '''
+          if helper_anchor not in s:
+              raise RuntimeError('helper anchor not found')
+          s = s.replace(helper_anchor, helpers, 1)
+
+          new_exclusion = '''def _exclusion_reasons(row: pd.Series) -> list[str]:
+              """正式推薦硬否決原因。"""
+              reasons: list[str] = []
+              role_blob = _text_blob(row, ["推薦角色", "穩健推薦角色", "實戰過濾狀態", "主流作戰分區", "飆股雷達角色"])
+              veto_blob = _text_blob(row, ["真禁買原因", "過熱原因", "正式推薦排除原因", "硬否決原因", "主推薦降級原因"])
+              liquidity_blob = _text_blob(row, ["主流作戰分區", "冷門股警示", "主流股判定", "主流資金角色", "流動性等級"])
+              buy = _num(row, "買進分數", 0)
+              entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+              risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+              rr = _num(row, "風險報酬比", 0)
+              chase = _num(row, "追價風險分", 0)
+              amount = _num(row, "成交額百萬", 0)
+              stop_dist = _stop_distance_pct(row)
+              upside = _upside_space_pct(row)
+              if _contains_any(role_blob, ["D｜過熱禁買", "過熱禁買", "BLOCK", "禁止買進排除"]): reasons.append("角色已判定過熱/禁買")
+              if _contains_any(veto_blob, ["過熱", "追價", "停損距離過大", "風控失衡", "禁買", "假強"]): reasons.append("存在硬風控、過熱或假強原因")
+              if _contains_any(liquidity_blob, ["低流動性排除", "冷門禁追", "極低量"]): reasons.append("低流動性或冷門禁追")
+              if amount < 80: reasons.append("成交額不足，易滑價或假突破")
+              if buy < 30: reasons.append("買進分數過低")
+              if entry < 35 and risk < 42: reasons.append("Entry/Risk 同時偏弱")
+              if chase >= 78: reasons.append("追價風險過高")
+              if rr < 0.25: reasons.append("風險報酬比過低")
+              if stop_dist > 15: reasons.append(f"停損距離{stop_dist:.1f}%過大")
+              if 0 < upside < 3: reasons.append(f"上方空間僅{upside:.1f}%")
+              out: list[str] = []
+              for reason in reasons:
+                  if reason and reason not in out: out.append(reason)
+              return out
+          '''
+          s = replace_def(s, '_exclusion_reasons', new_exclusion)
+
+          new_direct = '''def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+              if exclusion:
+                  return False
+              role_blob = _text_blob(row, ["推薦角色", "飆股雷達角色", "領漲回補角色", "主流作戰分區"])
+              amount = _num(row, "成交額百萬", 0)
+              buy = _num(row, "買進分數", 0)
+              entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+              risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+              rr = _num(row, "風險報酬比", 0)
+              chase = _num(row, "追價風險分", 100)
+              mainstream = _num(row, "主流資金分", 0)
+              sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+              practical = _num(row, "股神實戰總分", 0)
+              candidate = max(_num(row, "推薦總分", 0), _num(row, "候選強度分", 0), _num(row, "Alpha選股潛力分", 0))
+              stop_dist, upside, market = _stop_distance_pct(row), _upside_space_pct(row), _market_risk_info(row)
+              strong_role = _contains_any(role_blob, ["A｜股神主推薦", "S｜飆股攻擊候選", "主流攻擊候選", "B+｜盤中點火追蹤", "L｜主流強勢回補"])
+              metric_override = candidate >= 78 and practical >= 70 and entry >= 68 and risk >= 64
+              return (
+                  op_score >= 68 and practical >= 64 and buy >= 55 and entry >= 62 and risk >= 58
+                  and rr >= 1.20 and chase <= 62 and (stop_dist <= 10.5 or stop_dist == 0)
+                  and upside >= 7 and mainstream >= 58 and sector >= 50 and amount >= 200
+                  and not market["severe"] and (strong_role or metric_override)
+              )
+          '''
+          s = replace_def(s, '_direct_ok', new_direct)
+
+          new_aminus = '''def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+              """A- 準主推薦：只允許盤中觸發後小量試單，不可當成直接買進。"""
+              severe_words = ["過熱", "禁買", "低流動性", "冷門", "成交額不足", "買進分數過低", "追價風險過高", "Entry/Risk 同時偏弱", "停損距離", "上方空間", "假強"]
+              if any(any(key in reason for key in severe_words) for reason in exclusion):
+                  return False
+              role_blob = _text_blob(row, ["推薦角色", "飆股雷達角色", "領漲回補角色", "回放校正角色", "主流作戰分區"])
+              amount = _num(row, "成交額百萬", 0)
+              buy = _num(row, "買進分數", 0)
+              entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+              risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+              rr = _num(row, "風險報酬比", 0)
+              chase = _num(row, "追價風險分", 100)
+              mainstream = _num(row, "主流資金分", 0)
+              sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+              radar = max(_num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0), _num(row, "飆股攻擊分", 0), _num(row, "主流領漲回補分", 0), _num(row, "漲停回放分", 0))
+              stop_dist, upside, market = _stop_distance_pct(row), _upside_space_pct(row), _market_risk_info(row)
+              has_attack_role = _contains_any(role_blob, ["A｜股神主推薦", "S｜飆股攻擊候選", "B+｜盤中點火追蹤", "L｜主流強勢回補", "T｜題材轉強追蹤", "B｜等突破確認", "主流突破追蹤", "主流攻擊候選"])
+              return (
+                  has_attack_role and op_score >= 55 and buy >= 45 and entry >= 52 and risk >= 44
+                  and rr >= 0.70 and chase <= 72 and (stop_dist <= 12.5 or stop_dist == 0)
+                  and upside >= 5 and mainstream >= 56 and sector >= 52 and radar >= 64
+                  and amount >= 150 and not market["severe"]
+              )
+          '''
+          s = replace_def(s, '_a_minus_ok', new_aminus)
+
+          classify_anchor = '''    battle = _battle_meta_for(bucket)
+              return {
+                  "可操作分": round(op, 1),
+          '''
+          classify_new = '''    battle = _battle_meta_for(bucket)
+              action_meta = _final_action_meta(row, bucket, op, exclude_text)
+              return {
+                  **action_meta,
+                  "可操作分": round(op, 1),
+          '''
+          if classify_anchor not in s:
+              raise RuntimeError('classify return anchor not found')
+          s = s.replace(classify_anchor, classify_new, 1)
+          formal.write_text(s, encoding='utf-8')
+
+          # ---- shared column schema ----
+          s = schema.read_text(encoding='utf-8-sig')
+          anchor = '''    "推薦角色",
+              "飆股雷達角色",
+          '''
+          replacement = '''    "推薦角色",
+              "最終操作結論",
+              "是否正式推薦",
+              "操作許可",
+              "正式推薦等級",
+              "推薦可信度分",
+              "建議倉位上限%",
+              "風控否決旗標",
+              "決策一致性",
+              "候選性質",
+              "飆股雷達角色",
+          '''
+          if anchor not in s:
+              raise RuntimeError('schema field anchor not found')
+          s = s.replace(anchor, replacement, 1)
+          alias_anchor = '''    "推薦角色": ["推薦角色", "策略角色"],
+          '''
+          alias_replacement = alias_anchor + '''    "最終操作結論": ["最終操作結論", "最終結論", "操作結論"],
+              "是否正式推薦": ["是否正式推薦", "正式推薦旗標"],
+              "操作許可": ["操作許可", "買進許可"],
+              "正式推薦等級": ["正式推薦等級", "最終推薦等級"],
+              "推薦可信度分": ["推薦可信度分", "可信度分"],
+              "建議倉位上限%": ["建議倉位上限%", "倉位上限%"],
+              "風控否決旗標": ["風控否決旗標", "風控否決"],
+              "決策一致性": ["決策一致性", "決策一致性說明"],
+              "候選性質": ["候選性質", "推薦性質"],
+          '''
+          if alias_anchor not in s:
+              raise RuntimeError('schema alias anchor not found')
+          s = s.replace(alias_anchor, alias_replacement, 1)
+          numeric_anchor = '''    "可操作分",
+              "正式推薦排序分",
+          '''
+          numeric_replacement = '''    "推薦可信度分",
+              "建議倉位上限%",
+              "可操作分",
+              "正式推薦排序分",
+          '''
+          if numeric_anchor not in s:
+              raise RuntimeError('schema numeric anchor not found')
+          s = s.replace(numeric_anchor, numeric_replacement, 1)
+          schema.write_text(s, encoding='utf-8')
+
+          # ---- page 7 ----
+          s = page7.read_text(encoding='utf-8-sig')
+          battle_def = '''def _phase70_build_battle_dashboard(
+              formal_df: pd.DataFrame,
+              a_minus_df: pd.DataFrame,
+              intraday_df: pd.DataFrame,
+              risk_df: pd.DataFrame,
+              exclude_df: pd.DataFrame,
+          ) -> pd.DataFrame:
+              """Phase 8：真正可操作的股神作戰總表。
+
+              第一張作戰表只允許：正式主推薦、A- 準主推薦、R1 盤中核心雷達。
+              高風險觀察與正式排除只能留在診斷分頁，絕不可混入主推薦總表。
+              ``risk_df`` / ``exclude_df`` 保留參數相容性，但故意不併入主表。
+              """
+              parts: list[pd.DataFrame] = []
+              for zone, df in [
+                  ("1｜正式主推薦", formal_df),
+                  ("2｜A-準主推薦", a_minus_df),
+                  ("3｜盤中核心雷達", intraday_df),
+              ]:
+                  if isinstance(df, pd.DataFrame) and not df.empty:
+                      tmp = df.copy()
+                      if "股神作戰區" not in tmp.columns:
+                          tmp["股神作戰區"] = zone
+                      parts.append(tmp)
+              if not parts:
+                  return pd.DataFrame()
+              work = pd.concat(parts, ignore_index=True, sort=False)
+              if "股神作戰優先序" not in work.columns:
+                  zone_rank = {"正式下週主推薦": 10, "A-｜準主推薦小量試單": 20, "盤中雷達追蹤": 30}
+                  work["股神作戰優先序"] = work.get("正式推薦分區", pd.Series([""] * len(work))).map(zone_rank).fillna(50)
+              cols = [
+                  "最終操作結論", "是否正式推薦", "操作許可", "正式推薦等級", "候選性質",
+                  "推薦可信度分", "建議倉位上限%", "風控否決旗標", "決策一致性",
+                  "股神作戰區", "主要依據工作表", "股票代號", "股票名稱", "類別", "產業",
+                  "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
+                  "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
+                  "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
+                  "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
+                  "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明",
+                  "盤中雷達動作", "正式推薦排除原因", "股神作戰提示",
+              ]
+              use = [c for c in cols if c in work.columns]
+              if use:
+                  work = work[use + [c for c in work.columns if c not in use]].copy()
+              return _safe_sort_export_df(work, ["股神作戰優先序", "正式推薦排序分", "可操作分", "推薦可信度分", "爆發雷達分", "成交額百萬"], [True, False, False, False, False, False])
+
+
+          def _phase80_build_recommendation_summary(formal_df, a_minus_df, intraday_core_df, risk_df, exclude_df, total_candidates: int) -> pd.DataFrame:
+              formal_n = len(formal_df) if isinstance(formal_df, pd.DataFrame) else 0
+              a_minus_n = len(a_minus_df) if isinstance(a_minus_df, pd.DataFrame) else 0
+              intraday_n = len(intraday_core_df) if isinstance(intraday_core_df, pd.DataFrame) else 0
+              risk_n = len(risk_df) if isinstance(risk_df, pd.DataFrame) else 0
+              exclude_n = len(exclude_df) if isinstance(exclude_df, pd.DataFrame) else 0
+              if formal_n > 0:
+                  conclusion, status = f"本輪有 {formal_n} 檔正式推薦；只依進場區、觸發價與停損分批操作。", "有正式推薦"
+              elif a_minus_n > 0:
+                  conclusion, status = f"本輪沒有可直接買進標的；僅有 {a_minus_n} 檔 A- 準主推薦，可在盤中觸發且守價後小量試單。", "無直接買進｜僅準主推薦"
+              elif intraday_n > 0:
+                  conclusion, status = f"本輪沒有正式推薦；保留 {intraday_n} 檔盤中核心雷達，未觸發前不可買。", "無正式推薦｜只看盤中雷達"
+              else:
+                  conclusion, status = "本輪沒有符合買點、風控與風險報酬門檻的股票；系統選擇空手等待，不用排除股硬湊推薦。", "空手等待"
+              return pd.DataFrame([{"本輪結論": status, "正式推薦檔數": formal_n, "A-準主推薦檔數": a_minus_n, "盤中核心雷達檔數": intraday_n, "高風險觀察檔數": risk_n, "正式排除檔數": exclude_n, "候選診斷總數": int(total_candidates or 0), "操作說明": conclusion, "核心紀律": "候選總分不等於買進許可；正式推薦必須同時通過 Entry、Risk、RR、追價風險、流動性與大盤風控。", "版本": "phase8_0_actionable_recommendation_governance_20260712"}])
+
+
+          def _phase80_allowed_codes(rec_df: pd.DataFrame, selected_codes: list[str], target: str) -> tuple[list[str], list[str]]:
+              """防止正式排除/高風險觀察被寫成推薦紀錄或推薦清單。"""
+              selected = [_normalize_code(x) for x in selected_codes if _normalize_code(x)]
+              if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty or not selected:
+                  return [], selected
+              work = rec_df[rec_df["股票代號"].astype(str).map(_normalize_code).isin(set(selected))].copy()
+              if "正式推薦分區" not in work.columns:
+                  try:
+                      from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+                      work = apply_formal_recommendation_engine(work)
+                  except Exception:
+                      return [], selected
+              bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+              if target == "record":
+                  allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+              elif target == "list":
+                  radar_pri = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+                  allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1"))
+              else:
+                  allowed_mask = pd.Series([True] * len(work), index=work.index)
+              allowed = work.loc[allowed_mask, "股票代號"].astype(str).map(_normalize_code).tolist()
+              allowed = list(dict.fromkeys([x for x in allowed if x]))
+              rejected = [x for x in selected if x not in set(allowed)]
+              return allowed, rejected
+
+
+          def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
+              if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
+                  return
+              formal, a_minus, intraday, risk, watch, excluded = _phase63_split_formal_recommendation_views(rec_df)
+              core, _, _, _ = _phase71_split_intraday_radar_layers(intraday)
+              battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
+              summary = _phase80_build_recommendation_summary(formal, a_minus, core, risk, excluded, len(rec_df))
+              render_pro_section("股神正式推薦作戰表")
+              row = summary.iloc[0]
+              render_pro_kpi_row([
+                  {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
+                  {"label": "正式推薦", "value": str(int(row.get("正式推薦檔數", 0))), "delta": "檔"},
+                  {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": "檔"},
+                  {"label": "盤中核心雷達", "value": str(int(row.get("盤中核心雷達檔數", 0))), "delta": "檔"},
+              ])
+              if len(formal) == 0: st.warning(_safe_str(row.get("操作說明")))
+              else: st.success(_safe_str(row.get("操作說明")))
+              st.caption(_safe_str(row.get("核心紀律")))
+              if isinstance(battle, pd.DataFrame) and not battle.empty:
+                  show_cols = [c for c in ["最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可", "正式推薦等級", "推薦可信度分", "建議倉位上限%", "可操作分", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "實戰觸發價", "觸發後守價", "正式推薦動作"] if c in battle.columns]
+                  st.dataframe(_format_df(battle[show_cols]), use_container_width=True, hide_index=True)
+              else:
+                  st.info("本輪沒有可列入作戰表的正式推薦、A-準主推薦或盤中核心雷達；正式排除股不會再出現在主推薦表。")
+          '''
+          s = replace_def(s, '_phase70_build_battle_dashboard', battle_def)
+
+          excel_anchor = '''    formal_df, a_minus_df, intraday_df, risk_df, watch_df, formal_exclude_df = _phase63_split_formal_recommendation_views(rec_export)
+              intraday_core_df, intraday_backup_df, intraday_low_df, intraday_full_df = _phase71_split_intraday_radar_layers(intraday_df)
+              battle_dashboard_df = _phase70_build_battle_dashboard(formal_df, a_minus_df, intraday_core_df, risk_df, formal_exclude_df)
+          '''
+          excel_replacement = excel_anchor + '''    formal_summary_export = _phase80_build_recommendation_summary(formal_df, a_minus_df, intraday_core_df, risk_df, formal_exclude_df, len(rec_export) if isinstance(rec_export, pd.DataFrame) else 0)
+          '''
+          if excel_anchor not in s:
+              raise RuntimeError('excel split anchor not found')
+          s = s.replace(excel_anchor, excel_replacement, 1)
+          s = s.replace('''    _write_df_to_ws(wb, "股神作戰總表", battle_export, "本輪沒有可列入股神作戰總表的股票。")
+          ''', '''    _write_df_to_ws(wb, "股神正式推薦摘要", formal_summary_export, "本輪沒有正式推薦摘要資料。")
+              _write_df_to_ws(wb, "股神作戰總表", battle_export, "本輪沒有可操作的正式推薦、A-準主推薦或盤中核心雷達；請空手等待。")
+          ''', 1)
+          s = s.replace('''    _write_df_to_ws(wb, "完整推薦表", rec_export, "完整推薦表沒有取得資料，請重新跑一次股神推薦後再匯出。")
+          ''', '''    _write_df_to_ws(wb, "完整推薦表", battle_export, "本輪沒有可操作推薦；所有候選與排除原因請查看『候選診斷總表』。")
+              _write_df_to_ws(wb, "候選診斷總表", rec_export, "候選診斷總表沒有取得資料，請重新跑一次股神推薦後再匯出。")
+          ''', 1)
+          s = s.replace('''        {"分頁": "股神作戰總表", "列數": 0 if battle_export is None else len(battle_export), "欄數": 0 if battle_export is None else len(battle_export.columns)},
+          ''', '''        {"分頁": "股神正式推薦摘要", "列數": 0 if formal_summary_export is None else len(formal_summary_export), "欄數": 0 if formal_summary_export is None else len(formal_summary_export.columns)},
+                  {"分頁": "股神作戰總表", "列數": 0 if battle_export is None else len(battle_export), "欄數": 0 if battle_export is None else len(battle_export.columns)},
+          ''', 1)
+          s = s.replace('''        {"分頁": "完整推薦表", "列數": 0 if rec_export is None else len(rec_export), "欄數": 0 if rec_export is None else len(rec_export.columns)},
+          ''', '''        {"分頁": "完整推薦表", "列數": 0 if battle_export is None else len(battle_export), "欄數": 0 if battle_export is None else len(battle_export.columns)},
+                  {"分頁": "候選診斷總表", "列數": 0 if rec_export is None else len(rec_export), "欄數": 0 if rec_export is None else len(rec_export.columns)},
+          ''', 1)
+
+          tabs_anchor = '''    tabs = st.tabs(["完整推薦表", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
+          '''
+          if tabs_anchor not in s:
+              raise RuntimeError('tabs anchor not found')
+          s = s.replace(tabs_anchor, '''    _phase80_render_actionable_panel(rec_df)
+
+              tabs = st.tabs(["候選診斷總表（非買進清單）", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
+          ''', 1)
+          s = s.replace('''                "完整推薦表",
+          ''', '''                "候選診斷總表（非買進清單）",
+          ''', 1)
+          s = s.replace('''        st.caption(f"完整推薦表欄位順序版本：{full_order_hash}")
+          ''', '''        st.caption(f"候選診斷總表欄位順序版本：{full_order_hash}｜此表保留所有候選與排除原因，不等於正式買進清單。")
+          ''', 1)
+          s = s.replace('''            export_name = f"股神推薦_完整推薦表_{'勾選' if len(full_picked_codes) > 0 else '全部'}_{export_ts}.xlsx"
+          ''', '''            export_name = f"股神正式推薦作戰表_{'勾選' if len(full_picked_codes) > 0 else '全部'}_{export_ts}.xlsx"
+          ''', 1)
+          s = s.replace('''            st.caption("可勾選後一次加入 05_自選股中心、09_股神推薦紀錄、10_推薦清單，或一鍵同步三個模組。")
+          ''', '''            st.caption("Phase 8：候選診斷表可加入 05 自選股；09/10 會自動攔截正式排除與高風險觀察，避免把非推薦股寫成正式推薦。")
+          ''', 1)
+
+          record_anchor = '''        if full_add_record:
+              record_rows = _build_record_rows_from_rec_df(rec_df, full_picked_codes)
+          '''
+          record_replace = '''        if full_add_record:
+              record_allowed_codes, record_rejected_codes = _phase80_allowed_codes(rec_df, full_picked_codes, "record")
+              if record_rejected_codes:
+                  st.warning(f"已攔截 {len(record_rejected_codes)} 檔非正式/A-推薦，未寫入推薦紀錄：{', '.join(record_rejected_codes[:20])}")
+              record_rows = _build_record_rows_from_rec_df(rec_df, record_allowed_codes)
+          '''
+          if record_anchor not in s:
+              raise RuntimeError('record action anchor not found')
+          s = s.replace(record_anchor, record_replace, 1)
+          s = s.replace('selected_count=len(full_picked_codes),\n                messages=record_msgs,', 'selected_count=len(record_allowed_codes),\n                messages=record_msgs,', 1)
+
+          list_anchor = '''        if full_add_list:
+              added_list_count, list_msgs = _append_recommend_list_from_full_table(rec_df, full_picked_codes)
+          '''
+          list_replace = '''        if full_add_list:
+              list_allowed_codes, list_rejected_codes = _phase80_allowed_codes(rec_df, full_picked_codes, "list")
+              if list_rejected_codes:
+                  st.warning(f"已攔截 {len(list_rejected_codes)} 檔非正式/A-/R1核心雷達，未寫入推薦清單：{', '.join(list_rejected_codes[:20])}")
+              added_list_count, list_msgs = _append_recommend_list_from_full_table(rec_df, list_allowed_codes)
+          '''
+          if list_anchor not in s:
+              raise RuntimeError('list action anchor not found')
+          s = s.replace(list_anchor, list_replace, 1)
+          s = s.replace('selected_count=len(full_picked_codes),\n                messages=list_msgs,', 'selected_count=len(list_allowed_codes),\n                messages=list_msgs,', 1)
+
+          sync_anchor = '''            added_wl, msg_wl = _append_multiple_stocks_to_watchlist(full_target_group, picked_rows)
+              record_rows = _build_record_rows_from_rec_df(rec_df, full_picked_codes)
+              added_rec, msg_rec = _append_godpick_records(record_rows, force_duplicate=False)
+              added_list, msg_list = _append_recommend_list_from_full_table(rec_df, full_picked_codes)
+          '''
+          sync_replace = '''            added_wl, msg_wl = _append_multiple_stocks_to_watchlist(full_target_group, picked_rows)
+              record_allowed_codes, record_rejected_codes = _phase80_allowed_codes(rec_df, full_picked_codes, "record")
+              list_allowed_codes, list_rejected_codes = _phase80_allowed_codes(rec_df, full_picked_codes, "list")
+              record_rows = _build_record_rows_from_rec_df(rec_df, record_allowed_codes)
+              added_rec, msg_rec = _append_godpick_records(record_rows, force_duplicate=False)
+              added_list, msg_list = _append_recommend_list_from_full_table(rec_df, list_allowed_codes)
+              blocked_union = list(dict.fromkeys(record_rejected_codes + list_rejected_codes))
+              if blocked_union:
+                  st.warning(f"一鍵同步已攔截 {len(blocked_union)} 檔非正式推薦資料寫入 09/10；仍可保留在 05 自選股觀察。")
+          '''
+          if sync_anchor not in s:
+              raise RuntimeError('sync action anchor not found')
+          s = s.replace(sync_anchor, sync_replace, 1)
+          page7.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Compile and regression-test
+        shell: bash
+        run: |
+          python -m compileall -q .
+          python - <<'PY'
+          import pandas as pd
+          from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+          hot = pd.DataFrame([{
+              '股票代號':'6907','股票名稱':'過熱測試','推薦角色':'D｜過熱禁買','過熱原因':'近5日急漲',
+              '推薦總分':92,'股神實戰總分':88,'買進分數':4,'Entry進場買點分':22,
+              'Risk風控安全分':35,'風險報酬比':0.03,'追價風險分':78,'主流資金分':80,
+              '族群攻擊強度':75,'成交額百萬':1000,'最新價':100,'停損參考':65,'第一壓力價':101,
+          }])
+          out = apply_formal_recommendation_engine(hot)
+          assert out.iloc[0]['正式推薦分區'] == '正式排除清單'
+          assert out.iloc[0]['是否正式推薦'] == '否'
+          assert float(out.iloc[0]['建議倉位上限%']) == 0.0
+          print('Phase 8 regression passed.')
+          PY
+
+      - name: Commit Phase 8 and remove one-time workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/phase8_actionable_recommendations.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add godpick_formal_recommendation_engine.py godpick_column_schema.py pages/7_股神推薦.py .github/workflows/phase8_actionable_recommendations.yml
+          git commit -m 'Phase 8: make GodPick recommendations truly actionable'
+          git push origin HEAD:main
