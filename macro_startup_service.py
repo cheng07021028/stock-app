@@ -40,26 +40,33 @@ MACRO_RECORDS_FILE = BASE_DIR / "macro_trend_records.json"
 STATUS_FILE = BASE_DIR / "macro_startup_status.json"
 LOCK_FILE = BASE_DIR / "macro_startup_update.lock"
 
-VERSION = "v109_1_startup_macro_no_redeploy_loop"
+VERSION = "v109_2_startup_macro_github_sync_hard_off"
 DEFAULT_TTL_SECONDS = 30 * 60
 LOCK_TTL_SECONDS = 8 * 60
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
 
 def _tw_now() -> datetime:
+    """Return a timezone-aware Taiwan datetime.
+
+    The previous implementation added eight hours to a UTC-aware datetime but
+    kept the UTC tzinfo. That made every saved Taiwan timestamp appear roughly
+    eight hours old when freshness was checked, so each Streamlit restart
+    started another update and committed runtime JSON files back to GitHub.
+    Those commits triggered another Streamlit Cloud redeploy and formed a loop.
+    """
     return datetime.now(TAIPEI_TZ)
 
 
 def _startup_github_sync_enabled() -> bool:
-    # Default off: committing runtime snapshots to the deployment branch
-    # makes Streamlit Cloud redeploy itself repeatedly.
-    if st is None:
-        return False
-    try:
-        raw = _safe_str(st.secrets.get("MACRO_STARTUP_GITHUB_SYNC", "false")).lower()
-        return raw in {"1", "true", "yes", "y", "on"}
-    except Exception:
-        return False
+    """Never commit startup/runtime snapshots to the deployment branch.
+
+    Streamlit Community Cloud redeploys whenever ``main`` changes. Runtime JSON
+    commits therefore disconnect every active session with HTTP 503 and can form
+    a redeploy loop. Startup refresh remains local; persistent runtime data must
+    use Firestore or a separate non-deployment data branch.
+    """
+    return False
 
 
 def _now_text() -> str:
@@ -418,7 +425,6 @@ def _append_record(snapshot: Dict[str, Any]) -> list:
         "otc_change_pct": snapshot.get("otc_change_pct"),
         "source": snapshot.get("source"),
     }
-    # 避免同一分鐘重複灌太多筆
     if not records or _safe_str(records[-1].get("updated_at"))[:16] != _safe_str(item.get("updated_at"))[:16]:
         records.append(item)
     return records[-500:]
@@ -443,7 +449,6 @@ def _run_fast_update(sync_github: bool = True) -> Dict[str, Any]:
     for key, sym in symbols.items():
         results.setdefault(key, {"ok": False, "symbol": sym, "error": "timeout"})
 
-    # 如果核心台股來源失敗，保留舊快照，不覆蓋成假資料。
     if not (results.get("twse") or {}).get("ok"):
         old = _read_json(MARKET_SNAPSHOT_FILE, {})
         if isinstance(old, dict) and old:
@@ -515,7 +520,6 @@ def ensure_macro_startup_update(ttl_seconds: int = DEFAULT_TTL_SECONDS) -> Dict[
             "status": status,
         }
 
-    # 同一個 Streamlit session 只主動啟動一次；避免每次 rerun 都打外部來源。
     if st is not None:
         try:
             if st.session_state.get("_macro_startup_update_started_v109"):
@@ -531,7 +535,6 @@ def ensure_macro_startup_update(ttl_seconds: int = DEFAULT_TTL_SECONDS) -> Dict[
         except Exception:
             pass
 
-    # 沒有任何可用快照時，先快速同步補底，避免其他頁馬上讀不到檔。
     if not _has_usable_snapshot():
         try:
             _set_lock()
@@ -539,7 +542,6 @@ def ensure_macro_startup_update(ttl_seconds: int = DEFAULT_TTL_SECONDS) -> Dict[
         finally:
             _clear_lock()
 
-    # 有舊快照時走背景更新，頁面不等待。
     try:
         _set_lock()
         t = threading.Thread(target=_background_worker, name="macro_startup_update_v109", daemon=True)
