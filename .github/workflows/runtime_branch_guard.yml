@@ -1,0 +1,50 @@
+name: Runtime branch safety guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify runtime persistence isolation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          required = {
+              "runtime_branch_bootstrap.py": [
+                  'RUNTIME_DATA_BRANCH = "runtime-data"',
+                  '"GITHUB_REPO_BRANCH"',
+                  '"GITHUB_RUNTIME_DATA_BRANCH"',
+              ],
+              "app_auth.py": ["install_runtime_branch_guard"],
+              "streamlit_app.py": ["install_runtime_branch_guard"],
+              "streamlit_app_oauth.py": ["install_runtime_branch_guard"],
+          }
+          problems = []
+          for name, markers in required.items():
+              path = Path(name)
+              if not path.exists():
+                  problems.append(f"missing {name}")
+                  continue
+              text = path.read_text(encoding="utf-8-sig")
+              for marker in markers:
+                  if marker not in text:
+                      problems.append(f"{name}: missing {marker}")
+          if problems:
+              raise SystemExit("\n".join(problems))
+          print("Runtime branch bootstrap is installed and protected.")
+          PY
+          git ls-remote --exit-code --heads origin runtime-data
+          python -m compileall -q .
