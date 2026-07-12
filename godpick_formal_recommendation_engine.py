@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_4_practical_rr_20260712"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_5_actionable_recovery_20260712"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -54,6 +54,8 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "開盤跳空處理",
     "隔日命中修正標籤",
     "高風險雷達保留原因",
+    "正式推薦判定來源",
+    "流動性參考成交額百萬",
     "正式推薦版本",
 ]
 
@@ -70,6 +72,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "實戰觸發價",
     "觸發價偏離%",
     "觸發後守價",
+    "流動性參考成交額百萬",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -105,6 +108,41 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 def _num(row: pd.Series, col: str, default: float = 0.0) -> float:
     return _safe_float(row.get(col), default)
+
+
+def _first_numeric_value(row: pd.Series, cols: list[str], default: float = 0.0, prefer_positive: bool = False) -> float:
+    fallback = None
+    for col in cols:
+        if col not in row.index:
+            continue
+        raw = row.get(col)
+        try:
+            value = pd.to_numeric(raw, errors="coerce")
+            if pd.isna(value):
+                continue
+            value = float(value)
+        except Exception:
+            continue
+        if fallback is None:
+            fallback = value
+        if not prefer_positive or value > 0:
+            return value
+    return float(default if fallback is None else fallback)
+
+
+def _chase_risk_score(row: pd.Series, default: float = 55.0) -> float:
+    # 決策引擎正式輸出、Phase2 暫存欄與舊版欄名都相容。
+    return _clamp(_first_numeric_value(
+        row,
+        ["追價風險分", "_phase2_追價風險分", "追高風險分數_決策", "追價風險分數", "追高風險分_機會"],
+        default,
+        prefer_positive=True,
+    ))
+
+
+def _reference_turnover_m(row: pd.Series) -> float:
+    # 最新成交額為 0（休市/末列空值）時，必須回退 20 日均成交額。
+    return max(0.0, _first_numeric_value(row, ["成交額百萬", "20日均成交額百萬"], 0.0, prefer_positive=True))
 
 
 def _text_blob(row: pd.Series, cols: list[str]) -> str:
@@ -249,7 +287,7 @@ def _execution_quality_score(row: pd.Series, op_score: float) -> float:
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     buy = _num(row, "買進分數", 0)
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 100)
+    chase = _chase_risk_score(row, 55)
     stop_dist = _stop_distance_pct(row)
     upside = _upside_space_pct(row)
     rr_score = _clamp(rr * 45.0)
@@ -298,6 +336,11 @@ def _position_cap_pct(row: pd.Series, bucket: str) -> float:
             cap = min(cap, existing)
         return round(max(3.0, cap), 1)
     if bucket == "A-｜準主推薦小量試單":
+        market = _market_risk_info(row)
+        if market["severe"]:
+            return 0.0
+        if market["defensive"]:
+            return 3.0
         return 5.0
     return 0.0
 
@@ -441,7 +484,7 @@ def _trigger_cap_pct(row: pd.Series) -> float:
     )
     amount = _num(row, "成交額百萬", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
-    chase = _num(row, "追價風險分", 60)
+    chase = _chase_risk_score(row, 55)
     # 主流高成交額且族群同步時，盤中確認價不應離昨晚價太遠。
     if amount >= 5000 and radar >= 76 and sector >= 70 and chase <= 62:
         return 0.035
@@ -494,7 +537,7 @@ def _compute_operability_score(row: pd.Series) -> float:
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 45))
     buy = _num(row, "買進分數", 45)
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 60)
+    chase = _chase_risk_score(row, 55)
     mainstream = _num(row, "主流資金分", 50)
     money = _num(row, "資金攻擊有效分", _num(row, "籌碼續航分", 50))
     sector = _num(row, "族群攻擊強度", _num(row, "族群輪動分", 50))
@@ -535,20 +578,22 @@ def _exclusion_reasons(row: pd.Series) -> list[str]:
     """Formal-action veto reasons with missing-data/true-risk separation."""
     reasons: list[str] = []
     role_blob = _text_blob(row, ["推薦角色", "穩健推薦角色", "實戰過濾狀態", "主流作戰分區", "飆股雷達角色"])
-    veto_blob = _text_blob(row, ["真禁買原因", "過熱原因", "正式推薦排除原因", "硬否決原因", "主推薦降級原因"])
+    veto_blob = _text_blob(row, ["真禁買原因", "過熱原因", "硬否決原因", "主推薦降級原因", "高分禁買原因"])
     buy = _num(row, "買進分數", 0)
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 60)
+    chase = _chase_risk_score(row, 55)
     stop_dist = _stop_distance_pct(row)
     upside = _upside_space_pct(row)
     liq = _liquidity_info(row)
 
     if _contains_any(role_blob, ["D｜過熱禁買", "過熱禁買", "BLOCK", "禁止買進排除"]):
         reasons.append("角色已判定過熱/禁買")
-    if _contains_any(veto_blob, ["過熱", "追價", "停損距離過大", "風控失衡", "禁買", "假強"]):
-        reasons.append("存在硬風控、過熱或假強原因")
+    if _contains_any(veto_blob, ["過熱", "追價", "停損距離過大", "風控失衡", "禁買"]):
+        reasons.append("存在硬風控或過熱原因")
+    if "假強" in veto_blob and (liq["explicit_low"] or buy < 45 or entry < 45 or chase >= 75):
+        reasons.append("量價證據仍符合假強風險")
     if liq["missing"]:
         reasons.append("流動性資料缺失，待補成交額/成交量後重評")
     elif liq["explicit_low"] or (liq["amount"] > 0 and liq["amount"] < 80):
@@ -583,7 +628,7 @@ def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 100)
+    chase = _chase_risk_score(row, 55)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
     practical = _num(row, "股神實戰總分", 0)
@@ -627,7 +672,7 @@ def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 100)
+    chase = _chase_risk_score(row, 55)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
     radar = max(
@@ -673,7 +718,7 @@ def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) ->
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     buy = _num(row, "買進分數", 0)
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 100)
+    chase = _chase_risk_score(row, 55)
     mainstream = _num(row, "主流資金分", 0)
     sector = _num(row, "族群攻擊強度", 0)
     radar = max(
@@ -718,6 +763,87 @@ def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) ->
     )
 
 
+def _official_factor_limited(row: pd.Series) -> bool:
+    score = max(
+        _num(row, "官方資料完整度", 0),
+        _num(row, "官方因子完整度", 0),
+        _num(row, "官方因子覆蓋率", 0),
+    )
+    blob = _text_blob(row, ["資料完整度", "官方因子資料狀態", "官方資料狀態", "流動性資料來源"])
+    if score >= 50 or _contains_any(blob, ["官方完整", "官方資料成功", "完整串聯"]):
+        return False
+    return score <= 0 or _contains_any(blob, ["代理估算", "未串聯", "缺少", "部分", "待補"])
+
+
+def _objective_metrics(row: pd.Series) -> dict[str, float]:
+    return {
+        "buy": _num(row, "買進分數", 0),
+        "entry": _num(row, "Entry進場買點分", _num(row, "進場買點分", 0)),
+        "risk": _num(row, "Risk風控安全分", _num(row, "風控安全分", 0)),
+        "practical": _num(row, "股神實戰總分", 0),
+        "rr": _risk_reward_ratio(row),
+        "stop": _stop_distance_pct(row),
+        "upside": _upside_space_pct(row),
+        "amount": _reference_turnover_m(row),
+        "ret5": _num(row, "近5日漲幅%", 0),
+        "ret20": _num(row, "近20日漲幅%", 0),
+        "tech": _num(row, "技術結構分數", 0),
+        "pre": _num(row, "起漲前兆分數", 0),
+        "trade": _num(row, "交易可行分數", 0),
+        "radar": max(_num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0)),
+        "chase": _chase_risk_score(row, 55),
+    }
+
+
+def _objective_severe_block(exclusion: list[str]) -> bool:
+    severe = ["過熱", "禁買", "低流動性", "買進分數過低", "Entry/Risk", "追價風險", "停損距離", "上方空間", "假強"]
+    return any(any(key in reason for key in severe) for reason in exclusion)
+
+
+def _objective_direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+    if exclusion or _market_risk_info(row)["severe"] or not _official_factor_limited(row):
+        return False
+    if _safe_str(row.get("市場別")) in {"興櫃", "Emerging"}:
+        return False
+    m = _objective_metrics(row)
+    return (
+        op_score >= 66 and m["buy"] >= 80 and m["entry"] >= 70 and m["risk"] >= 64
+        and m["practical"] >= 62 and m["rr"] >= 2.0 and 0 < m["stop"] <= 7.0
+        and m["upside"] >= 8.0 and m["amount"] >= 300 and -4 <= m["ret5"] <= 6
+        and -2 <= m["ret20"] <= 18 and m["trade"] >= 54 and m["chase"] <= 65
+    )
+
+
+def _objective_a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+    # 大盤紅燈時仍保留「可參考股票」，但只列條件式 A-，不得升級直接買進。
+    if _objective_severe_block(exclusion):
+        return False
+    if _safe_str(row.get("市場別")) in {"興櫃", "Emerging"}:
+        return False
+    m = _objective_metrics(row)
+    return (
+        op_score >= 61 and m["buy"] >= 74 and m["entry"] >= 67.5 and m["risk"] >= 60
+        and m["practical"] >= 58 and m["rr"] >= 1.30 and 0 < m["stop"] <= 8.0
+        and m["upside"] >= 5.0 and m["amount"] >= 150 and -5 <= m["ret5"] <= 8
+        and -5 <= m["ret20"] <= 22 and m["trade"] >= 50 and m["chase"] <= 70
+        and (m["tech"] >= 45 or m["pre"] >= 55)
+    )
+
+
+def _objective_intraday_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+    # 防守市場也需要有精簡盯盤名單；市場風險由動作/倉位約束，不以空名單處理。
+    if _objective_severe_block(exclusion):
+        return False
+    m = _objective_metrics(row)
+    return (
+        op_score >= 57 and m["buy"] >= 70 and m["entry"] >= 65 and m["risk"] >= 56
+        and m["practical"] >= 53 and m["rr"] >= 1.0 and 0 < m["stop"] <= 9.5
+        and m["upside"] >= 4.0 and m["amount"] >= 100 and -6 <= m["ret5"] <= 9
+        and -8 <= m["ret20"] <= 25 and m["trade"] >= 48 and m["chase"] <= 74
+        and (m["tech"] >= 48 or m["pre"] >= 55 or m["radar"] >= 55)
+    )
+
+
 def _risk_radar_ok(row: pd.Series, op_score: float) -> bool:
     role_blob = _text_blob(row, ["飆股雷達角色", "領漲回補角色", "回放校正角色", "主流作戰分區"])
     radar = max(_num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0), _num(row, "主流領漲回補分", 0), _num(row, "漲停回放分", 0))
@@ -741,7 +867,7 @@ def _strategic_replay_radar_ok(row: pd.Series, op_score: float, reasons: list[st
     buy = _num(row, "買進分數", 0)
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
-    chase = _num(row, "追價風險分", 100)
+    chase = _chase_risk_score(row, 55)
     rr = _risk_reward_ratio(row)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
@@ -816,15 +942,31 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     op = _compute_operability_score(row)
     reasons = _exclusion_reasons(row)
     trig = _trigger_info(row)
-    direct = _direct_ok(row, op, reasons)
-    a_minus = False if direct else _a_minus_ok(row, op, reasons)
-    intraday = _intraday_radar_ok(row, op, reasons)
+    direct_primary = _direct_ok(row, op, reasons)
+    direct_objective = False if direct_primary else _objective_direct_ok(row, op, reasons)
+    direct = direct_primary or direct_objective
+    a_primary = False if direct else _a_minus_ok(row, op, reasons)
+    a_objective = False if (direct or a_primary) else _objective_a_minus_ok(row, op, reasons)
+    a_minus = a_primary or a_objective
+    intraday_primary = _intraday_radar_ok(row, op, reasons)
+    intraday_objective = False if (direct or a_minus or intraday_primary) else _objective_intraday_ok(row, op, reasons)
+    intraday = intraday_primary or intraday_objective
+    market_info = _market_risk_info(row)
+    decision_source = (
+        "完整因子正式門檻" if direct_primary else
+        "客觀量價備援正式門檻" if direct_objective else
+        "完整因子A-門檻" if a_primary else
+        ("防守市場客觀量價A-" if a_objective and market_info["severe"] else "客觀量價備援A-門檻") if a_objective else
+        "完整因子盤中雷達" if intraday_primary else
+        ("防守市場客觀量價雷達" if intraday_objective and market_info["severe"] else "客觀量價備援盤中雷達") if intraday_objective else
+        "一般風控分流"
+    )
     risk_radar = _risk_radar_ok(row, op)
     role_blob = _text_blob(row, ["推薦角色", "飆股雷達角色", "主流作戰分區"])
 
     if direct:
         bucket = "正式下週主推薦"
-        qual = "PASS｜可列正式推薦"
+        qual = "PASS｜可列正式推薦" if direct_primary else "PASS-Q｜客觀量價條件通過"
         direct_buy = "可｜但仍需分批與停損"
         action = "可依觸發價/支撐分批進攻；第一筆不超過建議倉位，跌破失效條件立即退出。"
         radar_level = "主攻"
@@ -832,17 +974,25 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         exclude_text = ""
     elif a_minus:
         bucket = "A-｜準主推薦小量試單"
-        qual = "A-｜接近主推薦，待盤中觸發"
-        direct_buy = "小量｜需觸發與守價"
-        action = f"只允許小量試單；{_trigger_text(row, trig)}，且必須守住觸發後守價。未觸發前不買。"
+        qual = "A-｜接近主推薦，待盤中觸發" if a_primary else ("A-QD｜防守市場條件式參考" if market_info["severe"] else "A-Q｜客觀量價備援，待盤中觸發")
+        direct_buy = "不可｜等大盤解除紅燈" if (a_objective and market_info["severe"]) else "小量｜需觸發與守價"
+        action = (
+            f"防守市場條件式參考；大盤紅燈未解除前不建立新倉。待大盤改善後，{_trigger_text(row, trig)}且守住觸發後守價，才可重新評估小量試單。"
+            if (a_objective and market_info["severe"])
+            else f"只允許小量試單；{_trigger_text(row, trig)}，且必須守住觸發後守價。未觸發前不買。"
+        )
         radar_level = "A-｜準主推薦"
         radar_action = "小量試單優先追蹤，不可重倉"
         exclude_text = "未完全通過正式主推薦 RR/Risk 門檻，降為 A- 準主推薦"
     elif intraday:
         bucket = "盤中雷達追蹤"
-        qual = "WAIT｜未觸發不可買"
-        direct_buy = "不可｜等盤中觸發"
-        action = f"{_trigger_text(row, trig)}；未觸發前只盯盤，不預先買。"
+        qual = "WAIT｜未觸發不可買" if intraday_primary else ("WAIT-QD｜防守市場精選雷達" if market_info["severe"] else "WAIT-Q｜量價條件式雷達")
+        direct_buy = "不可｜防守市場只盯盤" if (intraday_objective and market_info["severe"]) else "不可｜等盤中觸發"
+        action = (
+            f"防守市場只列精選雷達；大盤未改善前不買。{_trigger_text(row, trig)}，且大盤同步轉強後才重新評估。"
+            if (intraday_objective and market_info["severe"])
+            else f"{_trigger_text(row, trig)}；未觸發前只盯盤，不預先買。"
+        )
         radar_level = "B+｜盤中點火追蹤"
         radar_action = "只在量價/族群同步確認後小量試單"
         exclude_text = ""
@@ -939,6 +1089,8 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "開盤跳空處理": _gap_plan_text(trig),
         "隔日命中修正標籤": _hit_tag_for(bucket, row),
         "高風險雷達保留原因": exclude_text if bucket == "高風險雷達觀察" else "",
+        "正式推薦判定來源": decision_source,
+        "流動性參考成交額百萬": round(_reference_turnover_m(row), 1),
         "正式推薦版本": FORMAL_RECOMMENDATION_VERSION,
     }
 
@@ -964,7 +1116,7 @@ def _intraday_priority_score(row: pd.Series) -> float:
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     rr = _risk_reward_ratio(row)
-    chase = _num(row, "追價風險分", 65)
+    chase = _chase_risk_score(row, 55)
     mainstream = _num(row, "主流資金分", 50)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
     radar = max(

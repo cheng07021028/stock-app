@@ -33,7 +33,7 @@ except Exception:
     NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = set()
     apply_formal_recommendation_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase8_4_actionable_risk_metrics_20260712"
+DECISION_ENGINE_VERSION = "vnext_phase8_5_recommendation_recovery_20260712"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -1150,12 +1150,32 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     original_stop_dist = original_stop_dist.where(original_stop_dist.notna(), derived_stop)
 
     practical_metrics = _derive_practical_trade_metrics(out, price)
-    for _metric_col in ["實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比", "實戰風控來源"]:
-        out[_metric_col] = practical_metrics[_metric_col]
     practical_valid = practical_metrics["_實戰風控有效"].fillna(False).astype(bool)
-    stop_dist = practical_metrics["實戰停損距離%"].where(practical_valid, original_stop_dist)
-    rr = practical_metrics["實戰風險報酬比"].where(practical_valid, original_rr)
-    resistance_space = practical_metrics["實戰壓力空間%"].where(practical_valid, resistance_space)
+    # 決策引擎可能被頁面、匯出或舊快取重複套用。若本輪因精簡欄位缺少
+    # 價格/支撐而無法重算，不可用 0 覆蓋上一輪已有效的實戰風控資料。
+    for _metric_col in ["實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比"]:
+        derived_metric = pd.to_numeric(practical_metrics[_metric_col], errors="coerce")
+        if _metric_col in out.columns:
+            existing_metric = pd.to_numeric(out[_metric_col], errors="coerce")
+        else:
+            existing_metric = pd.Series([float("nan")] * len(out), index=out.index, dtype="float64")
+        out[_metric_col] = derived_metric.where(practical_valid & derived_metric.gt(0), existing_metric).fillna(0).round(2)
+    derived_source = practical_metrics["實戰風控來源"].fillna("").astype(str)
+    if "實戰風控來源" in out.columns:
+        existing_source = out["實戰風控來源"].fillna("").astype(str)
+    else:
+        existing_source = pd.Series([""] * len(out), index=out.index, dtype="object")
+    out["實戰風控來源"] = derived_source.where(practical_valid & derived_source.str.strip().ne(""), existing_source)
+
+    stop_dist = pd.to_numeric(out["實戰停損距離%"], errors="coerce").where(
+        pd.to_numeric(out["實戰停損距離%"], errors="coerce").gt(0), original_stop_dist
+    )
+    rr = pd.to_numeric(out["實戰風險報酬比"], errors="coerce").where(
+        pd.to_numeric(out["實戰風險報酬比"], errors="coerce").gt(0), original_rr
+    )
+    resistance_space = pd.to_numeric(out["實戰壓力空間%"], errors="coerce").where(
+        pd.to_numeric(out["實戰壓力空間%"], errors="coerce").gt(0), resistance_space
+    )
 
     liquidity = _first_numeric(out, ["流動性分數", "族群流動性分數", "人氣量能分"], 60, prefer_positive=True).clip(0, 100)
     market = _first_numeric(out, ["大盤橋接分數", "大盤影響加減分"], 55, prefer_positive=True).clip(0, 100)
@@ -1211,6 +1231,10 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     out["績效校正分"] = correction_delta.round(1)
     out["股神實戰總分"] = practical
     out["候選強度分"] = pd.to_numeric(base_total, errors="coerce").fillna(0).round(1)
+    # 正式推薦引擎會在本函式結尾再次套用。必須先公開追價風險欄位，
+    # 否則只存在 _phase2 暫存欄時，正式/A-/雷達門檻會用預設 100 分，
+    # 導致全部候選被錯誤排除。
+    out["追價風險分"] = pd.to_numeric(chase, errors="coerce").fillna(50).round(1)
 
     roles = out.apply(_decide_role, axis=1)
     out["穩健推薦角色"] = roles

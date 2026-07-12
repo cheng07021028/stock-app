@@ -174,7 +174,7 @@ PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 100  # V35：再降低前端重繪頻率，避免 Streamlit 每檔刷新拖慢
-SCAN_MAX_WORKERS = 32         # V35：提高平行掃描上限；不做低成本預篩，不漏股票
+SCAN_MAX_WORKERS = 12         # V35：提高平行掃描上限；不做低成本預篩，不漏股票
 V22_CHECKPOINT_EVERY = 500    # V35：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 HISTORY_DEBUG_ON_FAIL = False  # V35：掃描中失敗股票不再即時跑慢速 debug，失敗原因彙總到除錯摘要
@@ -6722,7 +6722,6 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
     return temp
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_date: date, end_date: date) -> tuple[pd.DataFrame, str, dict[str, Any]]:
     primary = _safe_str(market_type) or "上市"
     attempt_summary: list[dict[str, Any]] = []
@@ -7255,7 +7254,6 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
     }
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date, risk_strictness: str) -> dict[str, Any]:
     try:
         hist_df, used_market, history_debug = _get_history_smart(
@@ -7306,13 +7304,17 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         # treated as zero liquidity, which previously excluded most candidates.
         volume_series = _history_numeric_series(["成交股數", "成交量", "Volume", "volume", "總量", "成交量(股)"])
         amount_series = _history_numeric_series(["成交金額", "成交額", "成交值", "Amount", "amount", "成交金額(元)"])
-        volume_last = _safe_float(volume_series.iloc[-1]) if not volume_series.empty else None
+        positive_volume = volume_series.where(volume_series > 0).dropna() if not volume_series.empty else pd.Series(dtype="float64")
+        positive_amount = amount_series.where(amount_series > 0).dropna() if not amount_series.empty else pd.Series(dtype="float64")
+        # 週末、休市日或供應商最後一列常會是 0；使用最近一筆有效交易日，
+        # 不可把 20 日均成交額正常的股票誤判成零成交、低流動性。
+        volume_last = _safe_float(positive_volume.iloc[-1]) if not positive_volume.empty else None
         volume_5 = _safe_float(last.get("VOL5"))
         volume_20 = _safe_float(last.get("VOL20"))
-        if volume_5 in [None, 0] and not volume_series.empty:
-            volume_5 = _safe_float(volume_series.tail(5).mean())
-        if volume_20 in [None, 0] and not volume_series.empty:
-            volume_20 = _safe_float(volume_series.tail(20).mean())
+        if volume_5 in [None, 0] and not positive_volume.empty:
+            volume_5 = _safe_float(positive_volume.tail(5).mean())
+        if volume_20 in [None, 0] and not positive_volume.empty:
+            volume_20 = _safe_float(positive_volume.tail(20).mean())
         volume_ratio = None
         if volume_5 not in [None, 0] and volume_20 not in [None, 0]:
             volume_ratio = volume_5 / volume_20
@@ -7322,10 +7324,10 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         liquidity_source = "缺少成交額/成交量"
         # Direct turnover has the most reliable unit. Only fall back to
         # price × shares when no direct turnover field is available.
-        if not amount_series.empty and (_safe_float(amount_series.iloc[-1], 0) or 0) > 0:
-            turnover_m = (_safe_float(amount_series.iloc[-1], 0) or 0) / 1_000_000
-            avg20_turnover_m = (_safe_float(amount_series.tail(20).mean(), 0) or 0) / 1_000_000
-            liquidity_source = "歷史K線成交金額"
+        if not positive_amount.empty:
+            turnover_m = (_safe_float(positive_amount.iloc[-1], 0) or 0) / 1_000_000
+            avg20_turnover_m = (_safe_float(positive_amount.tail(20).mean(), 0) or 0) / 1_000_000
+            liquidity_source = "最近有效交易日K線成交金額"
         elif close_now not in [None, 0] and volume_last not in [None, 0]:
             turnover_m = close_now * volume_last / 1_000_000
             if volume_20 not in [None, 0]:
@@ -8679,7 +8681,7 @@ def _build_recommend_df(
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     total_count = len(universe_items)
-    worker_count = min(SCAN_MAX_WORKERS, max(12, total_count // 25 if total_count >= 120 else 12))
+    worker_count = min(SCAN_MAX_WORKERS, max(6, total_count // 80 if total_count >= 240 else 6))
     master_lookup = _build_master_lookup(master_df)
 
     progress_wrap = st.container()
@@ -10279,8 +10281,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(battle, pd.DataFrame) and not battle.empty:
         show_cols = [c for c in [
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
-            "正式推薦等級", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
-            "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+            "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
+            "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分", "流動性參考成交額百萬",
             "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",
         ] if c in battle.columns]
@@ -10296,11 +10298,11 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
     work["分頁用途"] = purpose
     common = [
         "分頁用途", "最終操作結論", "股票代號", "股票名稱", "市場別", "類別", "產業",
-        "正式推薦分區", "是否正式推薦", "操作許可", "正式推薦等級", "候選性質",
+        "正式推薦分區", "是否正式推薦", "操作許可", "正式推薦等級", "正式推薦判定來源", "候選性質",
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
-        "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
+        "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",
         "引擎輔助訊號", "分區互斥檢查", "掃描品質狀態", "正式推薦可用",

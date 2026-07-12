@@ -27,7 +27,7 @@ WATCHLIST_CANDIDATES = [
 
 STATE_FILE = "last_query_state.json"
 
-REQUEST_TIMEOUT_FAST = 2
+REQUEST_TIMEOUT_FAST = 5
 REQUEST_TIMEOUT_NORMAL = 4
 REALTIME_BATCH_SIZE = 50
 
@@ -153,10 +153,10 @@ def get_requests_session():
     session = requests.Session()
 
     retry = Retry(
-        total=0,
-        read=0,
-        connect=0,
-        backoff_factor=0.0,
+        total=1,
+        read=1,
+        connect=1,
+        backoff_factor=0.25,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
     )
@@ -1554,7 +1554,6 @@ def _get_realtime_yahoo_history_fallback(stock_no, stock_name="", market_type="�
 
     for suffix in suffix_candidates:
         symbol = f"{stock_no}.{suffix}"
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         params = {
             "range": "3mo",
             "interval": "1d",
@@ -2342,14 +2341,11 @@ def _history_yahoo_range_param(start_ts, end_ts) -> str:
     return "5y"
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, end_date=None):
     """Yahoo Finance 台股日線高速來源。
 
-    設計原則：
-    1. 掃描速度優先：通常 1 檔股票只需 1 次請求，不再逐月抓 TWSE/TPEx。
-    2. 不漏股票：此函式失敗會回傳空表，由 get_history_data 自動 fallback 官方月資料。
-    3. 不偽裝資料：價格欄無效或有效筆數不足時，直接回空表。
+    成功資料交由 disk cache 保存；失敗與空資料不做 Streamlit 快取，避免
+    一次限流或逾時讓同一股票在 30~60 分鐘內永遠被判定為沒有歷史資料。
     """
     stock_no = str(stock_no).strip()
     market_type = str(market_type).strip() or "上市"
@@ -2363,15 +2359,7 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
 
     start_ts = pd.to_datetime(start_date)
     end_ts = pd.to_datetime(end_date)
-
-    suffix_candidates = []
-    if market_type in ["上櫃", "興櫃", "TPEX", "OTC"]:
-        suffix_candidates = ["TWO", "TW"]
-    elif market_type == "上市":
-        suffix_candidates = ["TW", "TWO"]
-    else:
-        suffix_candidates = ["TW", "TWO"]
-
+    suffix_candidates = ["TWO", "TW"] if market_type in ["上櫃", "興櫃", "TPEX", "OTC"] else ["TW", "TWO"]
     range_param = _history_yahoo_range_param(start_ts, end_ts)
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -2380,80 +2368,74 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
 
     for suffix in suffix_candidates:
         symbol = f"{stock_no}.{suffix}"
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         params = {
             "range": range_param,
             "interval": "1d",
             "includePrePost": "false",
             "events": "history",
         }
-
-        t0 = time.perf_counter()
-        try:
-            resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
-            if resp.status_code != 200:
-                _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} HTTP {resp.status_code}", time.perf_counter() - t0, code=stock_no)
-                continue
-            payload = resp.json()
-            result = (((payload or {}).get("chart") or {}).get("result") or [])
-            if not result:
-                continue
-
-            node = result[0] or {}
-            timestamps = node.get("timestamp") or []
-            quote = (((node.get("indicators") or {}).get("quote") or [{}])[0]) or {}
-
-            opens = quote.get("open") or []
-            highs = quote.get("high") or []
-            lows = quote.get("low") or []
-            closes = quote.get("close") or []
-            volumes = quote.get("volume") or []
-
-            rows = []
-            for i, ts in enumerate(timestamps):
-                close_v = closes[i] if i < len(closes) else None
-                if close_v is None:
+        for yahoo_host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+            url = f"https://{yahoo_host}/v8/finance/chart/{symbol}"
+            t0 = time.perf_counter()
+            try:
+                resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
+                if resp.status_code != 200:
+                    _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {yahoo_host} HTTP {resp.status_code}", time.perf_counter() - t0, code=stock_no)
                     continue
-                try:
-                    dt = pd.to_datetime(datetime.fromtimestamp(int(ts)).date())
-                except Exception:
-                    continue
-                if dt < start_ts or dt > end_ts:
+                payload = resp.json()
+                result = (((payload or {}).get("chart") or {}).get("result") or [])
+                if not result:
                     continue
 
-                rows.append({
-                    "日期": dt,
-                    "成交股數": volumes[i] if i < len(volumes) else None,
-                    "成交金額": None,
-                    "開盤價": opens[i] if i < len(opens) else None,
-                    "最高價": highs[i] if i < len(highs) else None,
-                    "最低價": lows[i] if i < len(lows) else None,
-                    "收盤價": close_v,
-                    "成交筆數": None,
-                })
+                node = result[0] or {}
+                timestamps = node.get("timestamp") or []
+                quote = (((node.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+                opens = quote.get("open") or []
+                highs = quote.get("high") or []
+                lows = quote.get("low") or []
+                closes = quote.get("close") or []
+                volumes = quote.get("volume") or []
 
-            if len(rows) < 20:
+                rows = []
+                for i, ts in enumerate(timestamps):
+                    close_v = closes[i] if i < len(closes) else None
+                    if close_v is None:
+                        continue
+                    try:
+                        dt = pd.to_datetime(datetime.fromtimestamp(int(ts)).date())
+                    except Exception:
+                        continue
+                    if dt < start_ts or dt > end_ts:
+                        continue
+                    rows.append({
+                        "日期": dt,
+                        "成交股數": volumes[i] if i < len(volumes) else None,
+                        "成交金額": None,
+                        "開盤價": opens[i] if i < len(opens) else None,
+                        "最高價": highs[i] if i < len(highs) else None,
+                        "最低價": lows[i] if i < len(lows) else None,
+                        "收盤價": close_v,
+                        "成交筆數": None,
+                    })
+                if len(rows) < 20:
+                    continue
+
+                df = pd.DataFrame(rows)
+                for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = df.dropna(subset=["收盤價"])
+                df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
+                if df.empty:
+                    continue
+                df["資料源"] = f"yahoo_chart_{suffix}"
+                _diag_add_event("history", f"Yahoo_{suffix}", True, f"{symbol} {yahoo_host} rows={len(df)}", time.perf_counter() - t0, rows=len(df), code=stock_no)
+                return df[["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數", "資料源"]].copy()
+            except Exception as e:
+                _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {yahoo_host} {e}", time.perf_counter() - t0, rows=0, code=stock_no)
                 continue
-
-            df = pd.DataFrame(rows)
-            for col in ["成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數"]:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-            df = df.dropna(subset=["收盤價"])
-            df = df.sort_values("日期").drop_duplicates(subset=["日期"], keep="last").reset_index(drop=True)
-            if df.empty:
-                continue
-            df["資料源"] = f"yahoo_chart_{suffix}"
-            _diag_add_event("history", f"Yahoo_{suffix}", True, f"{symbol} rows={len(df)}", time.perf_counter() - t0, rows=len(df), code=stock_no)
-            return df[["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "成交筆數", "資料源"]].copy()
-        except Exception as e:
-            _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {e}", time.perf_counter() - t0, rows=0, code=stock_no)
-            continue
-
     return pd.DataFrame()
 
-
-@st.cache_data(ttl=1800, show_spinner=False)
 def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     """取得歷史日線資料。
 
