@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Phase 6.3 formal recommendation purifier.
 
 目的：把「推薦候選 / 雷達 / 回放 / 排除」重新分成可操作清單，避免
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_3_liquidity_recovery_20260712"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_4_practical_rr_20260712"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -132,6 +132,9 @@ def _first_price(row: pd.Series, cols: list[str], default: float = 0.0) -> float
 
 
 def _stop_distance_pct(row: pd.Series) -> float:
+    practical = _num(row, "實戰停損距離%", 0.0)
+    if practical > 0:
+        return round(practical, 2)
     direct = _num(row, "停損距離%", 0.0)
     if direct > 0:
         return round(direct, 2)
@@ -143,6 +146,9 @@ def _stop_distance_pct(row: pd.Series) -> float:
 
 
 def _upside_space_pct(row: pd.Series) -> float:
+    practical = _num(row, "實戰壓力空間%", 0.0)
+    if practical > 0:
+        return round(practical, 2)
     direct = _num(row, "壓力空間%", 0.0)
     if direct > 0:
         return round(direct, 2)
@@ -151,6 +157,13 @@ def _upside_space_pct(row: pd.Series) -> float:
     if price <= 0 or target <= price:
         return 0.0
     return round((target - price) / price * 100.0, 2)
+
+
+def _risk_reward_ratio(row: pd.Series) -> float:
+    practical = _num(row, "實戰風險報酬比", 0.0)
+    if practical > 0:
+        return practical
+    return _num(row, "風險報酬比", _num(row, "風險報酬比_決策", 0.0))
 
 
 
@@ -235,7 +248,7 @@ def _execution_quality_score(row: pd.Series, op_score: float) -> float:
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     buy = _num(row, "買進分數", 0)
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 100)
     stop_dist = _stop_distance_pct(row)
     upside = _upside_space_pct(row)
@@ -480,7 +493,7 @@ def _compute_operability_score(row: pd.Series) -> float:
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 45))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 45))
     buy = _num(row, "買進分數", 45)
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 60)
     mainstream = _num(row, "主流資金分", 50)
     money = _num(row, "資金攻擊有效分", _num(row, "籌碼續航分", 50))
@@ -526,7 +539,7 @@ def _exclusion_reasons(row: pd.Series) -> list[str]:
     buy = _num(row, "買進分數", 0)
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 60)
     stop_dist = _stop_distance_pct(row)
     upside = _upside_space_pct(row)
@@ -569,7 +582,7 @@ def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     buy = _num(row, "買進分數", 0)
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 100)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
@@ -613,7 +626,7 @@ def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     buy = _num(row, "買進分數", 0)
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 100)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
@@ -659,7 +672,7 @@ def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) ->
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     buy = _num(row, "買進分數", 0)
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 100)
     mainstream = _num(row, "主流資金分", 0)
     sector = _num(row, "族群攻擊強度", 0)
@@ -729,7 +742,7 @@ def _strategic_replay_radar_ok(row: pd.Series, op_score: float, reasons: list[st
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
     chase = _num(row, "追價風險分", 100)
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
     strength = _num(row, "強勢股漏選風險分", 0)
@@ -950,7 +963,7 @@ def _intraday_priority_score(row: pd.Series) -> float:
     buy = _num(row, "買進分數", 0)
     entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
     risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
-    rr = _num(row, "風險報酬比", 0)
+    rr = _risk_reward_ratio(row)
     chase = _num(row, "追價風險分", 65)
     mainstream = _num(row, "主流資金分", 50)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))

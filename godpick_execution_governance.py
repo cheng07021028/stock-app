@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Phase 8.3 execution governance for the GodPick system.
 
 This module separates four concepts that were previously mixed together:
@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase8_3_liquidity_recovery_20260712"
+EXECUTION_GOVERNANCE_VERSION = "phase8_4_actionable_list_fix_20260712"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -76,6 +76,7 @@ CANDIDATE_DIAGNOSIS_COLUMNS = [
     "候選強度分", "推薦總分", "股神實戰總分", "可操作分", "實戰操作品質分",
     "推薦可信度分", "資料完整度評分", "資料完整度", "官方資料完整度",
     "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
+    "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比", "實戰風控來源",
     "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
     "主流資金分", "族群攻擊強度", "資金攻擊有效分", "成交額百萬", "20日均成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
     "技術結構分數", "起漲前兆分數", "交易可行分數", "類股熱度分數",
@@ -93,7 +94,8 @@ ACTION_TABLE_COLUMNS = [
     "最終操作結論", "股票代號", "股票名稱", "類別", "產業",
     "是否正式推薦", "操作許可", "正式推薦等級", "候選性質",
     "可操作分", "實戰操作品質分", "推薦可信度分", "候選強度分",
-    "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
+    "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+    "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風控來源",
     "成交額百萬", "流動性等級", "流動性資料狀態",
     "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
     "建議倉位上限%", "正式推薦動作", "失效條件", "開盤跳空處理",
@@ -127,6 +129,18 @@ def _series_text(df: pd.DataFrame, col: str) -> pd.Series:
     if col not in df.columns:
         return pd.Series([""] * len(df), index=df.index, dtype="object")
     return df[col].map(_safe_str).astype("object")
+
+
+def _numeric_series(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+    """Return an index-aligned numeric Series even when an optional column is absent.
+
+    Older recommendation caches do not contain every Phase 8 field.  Using
+    ``DataFrame.get(col, 0)`` returned a scalar and then crashed on ``fillna``;
+    page 7 swallowed that exception, leaving exclusions mixed into the buy list.
+    """
+    if col not in df.columns:
+        return pd.Series([float(default)] * len(df), index=df.index, dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce").fillna(float(default)).astype(float)
 
 
 def _normalise_code(value: Any) -> str:
@@ -339,7 +353,7 @@ def canonicalize_final_partition(df: pd.DataFrame | None) -> pd.DataFrame:
     bucket = bucket.where(bucket.isin(FINAL_BUCKET_ORDER), "不可直接買觀察")
     out["正式推薦分區"] = bucket
     if "候選強度分" not in out.columns:
-        out["候選強度分"] = pd.to_numeric(out.get("推薦總分", 0), errors="coerce").fillna(0)
+        out["候選強度分"] = _numeric_series(out, "推薦總分", 0)
     out["引擎輔助訊號"] = out.apply(_build_signal_tags_for_row, axis=1)
     out["訊號用途"] = "診斷用途｜不等於買進許可；以正式推薦分區與操作許可為唯一依據"
     codes = _series_text(out, "股票代號").map(_normalise_code)
@@ -350,8 +364,8 @@ def canonicalize_final_partition(df: pd.DataFrame | None) -> pd.DataFrame:
     if "股票代號" in out.columns:
         # Same code can occur more than once after old merges. Keep the row with the
         # strongest final-priority/operation score, never duplicate it across final views.
-        op = pd.to_numeric(out.get("可操作分", 0), errors="coerce").fillna(0)
-        confidence = pd.to_numeric(out.get("推薦可信度分", 0), errors="coerce").fillna(0)
+        op = _numeric_series(out, "可操作分", 0)
+        confidence = _numeric_series(out, "推薦可信度分", 0)
         out["_governance_sort"] = op * 0.7 + confidence * 0.3
         out = out.sort_values(
             ["最終分區優先序", "_governance_sort"],

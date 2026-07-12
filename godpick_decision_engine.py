@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """VNext Phase 1 股神推薦決策引擎。
 
 此模組只負責把既有推薦結果轉成可執行決策欄位：
@@ -33,7 +33,7 @@ except Exception:
     NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = set()
     apply_formal_recommendation_engine = None
 
-DECISION_ENGINE_VERSION = "vnext_phase6_9_nextday_hit_guardrail_20260618"
+DECISION_ENGINE_VERSION = "vnext_phase8_4_actionable_risk_metrics_20260712"
 
 ROLE_ATTACK = "S｜飆股攻擊候選"
 ROLE_MAIN = "A｜股神主推薦"
@@ -57,6 +57,11 @@ DECISION_ENGINE_COLUMNS = [
     "Entry進場買點分",
     "Risk風控安全分",
     "Feedback績效校正分",
+    "實戰停損參考",
+    "實戰停損距離%",
+    "實戰壓力空間%",
+    "實戰風險報酬比",
+    "實戰風控來源",
     "選股潛力分",
     "進場買點分",
     "風控安全分",
@@ -153,6 +158,10 @@ NUMERIC_DECISION_COLUMNS = {
     "Entry進場買點分",
     "Risk風控安全分",
     "Feedback績效校正分",
+    "實戰停損參考",
+    "實戰停損距離%",
+    "實戰壓力空間%",
+    "實戰風險報酬比",
     "選股潛力分",
     "進場買點分",
     "風控安全分",
@@ -238,6 +247,67 @@ def _first_numeric(out: pd.DataFrame, names: Iterable[str], default: float = 0.0
         if mask.any():
             result.loc[mask] = s.loc[mask]
     return result.fillna(default).astype(float)
+
+
+def _derive_practical_trade_metrics(out: pd.DataFrame, price: pd.Series) -> pd.DataFrame:
+    """Derive an executable stop/target pair from the nearest valid levels.
+
+    Historical caches often carried a distant major-support stop (10%~25% away),
+    even when a much closer retest/support level existed.  That made otherwise
+    useful breakout candidates look untradeable.  The original columns are kept;
+    these new fields are an execution reference used only when both support and
+    target evidence are valid.
+    """
+    idx = out.index
+    price = pd.to_numeric(price, errors="coerce").fillna(0).astype(float)
+    support = pd.Series(float("nan"), index=idx, dtype="float64")
+    target = pd.Series(float("nan"), index=idx, dtype="float64")
+    support_source = pd.Series([""] * len(out), index=idx, dtype="object")
+    target_source = pd.Series([""] * len(out), index=idx, dtype="object")
+
+    for col in ["近端支撐", "回測承接價", "推薦買點_拉回", "主要支撐"]:
+        if col not in out.columns:
+            continue
+        values = pd.to_numeric(out[col], errors="coerce")
+        valid = values.gt(0) & price.gt(0) & values.lt(price)
+        replace = valid & (support.isna() | values.gt(support))
+        support.loc[replace] = values.loc[replace]
+        support_source.loc[replace] = col
+
+    for col in ["第一壓力價", "近端壓力", "賣出目標1", "突破確認價", "突破確認價_隔日"]:
+        if col not in out.columns:
+            continue
+        values = pd.to_numeric(out[col], errors="coerce")
+        valid = values.gt(0) & price.gt(0) & values.gt(price)
+        replace = valid & (target.isna() | values.lt(target))
+        target.loc[replace] = values.loc[replace]
+        target_source.loc[replace] = col
+
+    # Put the stop slightly below support, and never closer than 2.5% below price.
+    buffered_support = support * 0.985
+    minimum_room_stop = price * 0.975
+    practical_stop = pd.concat([buffered_support, minimum_room_stop], axis=1).min(axis=1, skipna=True)
+    stop_distance = ((price - practical_stop) / price * 100.0).where(price.gt(0), float("nan"))
+    upside = ((target - price) / price * 100.0).where(price.gt(0), float("nan"))
+    rr = (upside / stop_distance).replace([float("inf"), float("-inf")], float("nan"))
+
+    valid = (
+        price.gt(0)
+        & support.notna()
+        & target.notna()
+        & stop_distance.between(2.0, 12.0, inclusive="both")
+        & upside.ge(3.0)
+        & rr.gt(0)
+    )
+    source = ("支撐：" + support_source + "｜目標：" + target_source).where(valid, "")
+    return pd.DataFrame({
+        "實戰停損參考": practical_stop.where(valid, 0).round(2),
+        "實戰停損距離%": stop_distance.where(valid, 0).round(2),
+        "實戰壓力空間%": upside.where(valid, 0).round(2),
+        "實戰風險報酬比": rr.where(valid, 0).round(2),
+        "實戰風控來源": source,
+        "_實戰風控有效": valid,
+    }, index=idx)
 
 
 def _first_text(row: pd.Series, names: Iterable[str]) -> str:
@@ -412,15 +482,15 @@ def _row_ret20(row: pd.Series) -> float:
 
 
 def _row_stop_distance(row: pd.Series) -> float:
-    return _safe_float(row.get("_phase2_停損距離%", row.get("停損距離%", row.get("最大風險%", 0))), 0) or 0
+    return _safe_float(row.get("_phase2_停損距離%", row.get("實戰停損距離%", row.get("停損距離%", row.get("最大風險%", 0)))), 0) or 0
 
 
 def _row_rr(row: pd.Series) -> float:
-    return _safe_float(row.get("_phase2_風險報酬比", row.get("風險報酬比", row.get("風險報酬比_決策", 0))), 0) or 0
+    return _safe_float(row.get("_phase2_風險報酬比", row.get("實戰風險報酬比", row.get("風險報酬比", row.get("風險報酬比_決策", 0)))), 0) or 0
 
 
 def _row_pressure_space(row: pd.Series) -> float:
-    return _safe_float(row.get("_phase2_壓力空間%", row.get("壓力空間%", row.get("目標報酬%", 0))), 0) or 0
+    return _safe_float(row.get("_phase2_壓力空間%", row.get("實戰壓力空間%", row.get("壓力空間%", row.get("目標報酬%", 0)))), 0) or 0
 
 
 def _row_price(row: pd.Series) -> float:
@@ -1073,11 +1143,20 @@ def apply_godpick_decision_engine(df: pd.DataFrame | None, feedback_profile: dic
     ).clip(0, 100)
     entry = _blend_existing(out, "進場買點分", computed_entry, weight=0.55)
 
-    rr = _first_numeric(out, ["風險報酬比", "風險報酬比_決策"], 0)
-    stop_dist = _first_numeric(out, ["停損距離%", "最大風險%"], float("nan"))
+    original_rr = _first_numeric(out, ["風險報酬比", "風險報酬比_決策"], 0)
+    original_stop_dist = _first_numeric(out, ["停損距離%", "最大風險%"], float("nan"))
     stop_price = _first_numeric(out, ["停損價", "停損參考", "停損價_隔日"], 0, prefer_positive=True)
     derived_stop = _distance_pct(price, stop_price, kind="support", default=6.0)
-    stop_dist = stop_dist.where(stop_dist.notna(), derived_stop)
+    original_stop_dist = original_stop_dist.where(original_stop_dist.notna(), derived_stop)
+
+    practical_metrics = _derive_practical_trade_metrics(out, price)
+    for _metric_col in ["實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比", "實戰風控來源"]:
+        out[_metric_col] = practical_metrics[_metric_col]
+    practical_valid = practical_metrics["_實戰風控有效"].fillna(False).astype(bool)
+    stop_dist = practical_metrics["實戰停損距離%"].where(practical_valid, original_stop_dist)
+    rr = practical_metrics["實戰風險報酬比"].where(practical_valid, original_rr)
+    resistance_space = practical_metrics["實戰壓力空間%"].where(practical_valid, resistance_space)
+
     liquidity = _first_numeric(out, ["流動性分數", "族群流動性分數", "人氣量能分"], 60, prefer_positive=True).clip(0, 100)
     market = _first_numeric(out, ["大盤橋接分數", "大盤影響加減分"], 55, prefer_positive=True).clip(0, 100)
     no_buy_text = out.apply(lambda r: _first_text(r, ["高分禁買原因", "不建議買進原因", "風險扣分原因"]), axis=1)

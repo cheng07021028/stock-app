@@ -1,4 +1,4 @@
-
+﻿
 
 
 
@@ -1652,6 +1652,51 @@ def _ensure_v92_night_compat_df(df: pd.DataFrame | None, *, source: str = "") ->
     return out
 
 
+def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decision: bool = False) -> pd.DataFrame:
+    """Return only the rows that are genuinely useful as an action/reference list.
+
+    Formal/A- recommendations and R1 core intraday radar are retained.  High-risk,
+    weak, early-observation and formal-exclusion rows stay in candidate diagnosis
+    and must never be mixed into the primary recommendation list.
+    """
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df or [])
+    if work.empty:
+        return work
+    if refresh_decision and callable(apply_godpick_decision_engine):
+        try:
+            work = apply_godpick_decision_engine(work, None)
+        except Exception:
+            pass
+    if callable(canonicalize_final_partition):
+        try:
+            work = canonicalize_final_partition(work)
+        except Exception:
+            pass
+    governed = pd.DataFrame()
+    if callable(govern_recommend_list):
+        try:
+            governed = govern_recommend_list(work, include_r1=True)
+        except Exception:
+            governed = pd.DataFrame()
+    if governed.empty and "正式推薦分區" in work.columns:
+        bucket = work["正式推薦分區"].fillna("").astype(str)
+        radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+        allowed = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1"))
+        governed = work.loc[allowed].copy()
+    if governed.empty:
+        return governed
+    if "股票代號" in governed.columns:
+        governed["股票代號"] = governed["股票代號"].astype(str).map(_normalize_code)
+        governed = governed[governed["股票代號"].astype(str).str.strip().ne("")].copy()
+        governed = governed.drop_duplicates(subset=["股票代號"], keep="first")
+    bucket_order = {"正式下週主推薦": 10, "A-｜準主推薦小量試單": 20, "盤中雷達追蹤": 30}
+    governed["__action_order"] = governed.get("正式推薦分區", pd.Series([""] * len(governed), index=governed.index)).map(bucket_order).fillna(99)
+    sort_cols = ["__action_order"] + [c for c in ["正式推薦排序分", "可操作分", "推薦可信度分", "實戰操作品質分", "候選強度分"] if c in governed.columns]
+    ascending = [True] + [False] * (len(sort_cols) - 1)
+    governed = governed.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    return governed.drop(columns=["__action_order"], errors="ignore").reset_index(drop=True)
+
+
 def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> tuple[bool, list[str]]:
     """Persist action results, compact full-candidate diagnosis and scan quality.
 
@@ -1659,12 +1704,7 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     radar rows may enter module 10.  Observation and exclusion rows remain in the
     candidate diagnosis, not in the operational recommendation list.
     """
-    action_df = rec_df.copy() if isinstance(rec_df, pd.DataFrame) else pd.DataFrame()
-    if callable(canonicalize_final_partition):
-        try:
-            action_df = canonicalize_final_partition(action_df)
-        except Exception:
-            pass
+    action_df = _operational_recommendation_rows(rec_df, refresh_decision=False)
 
     candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
     if not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
@@ -1690,12 +1730,7 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     local_ok, local_msg = _safe_json_write_local(GODPICK_LATEST_FILE, payload)
     github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
 
-    governed_list_df = action_df.copy()
-    if callable(govern_recommend_list):
-        try:
-            governed_list_df = govern_recommend_list(action_df, include_r1=True)
-        except Exception:
-            governed_list_df = pd.DataFrame()
+    governed_list_df = _operational_recommendation_rows(action_df, refresh_decision=False)
     list_payload = _df_to_records_for_json(governed_list_df)
     if isinstance(list_payload, list):
         fixed_rows = []
@@ -1738,23 +1773,58 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     if not isinstance(payload, dict) or not payload:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), msg
 
-    rec_df = _ensure_v92_night_compat_df(_records_to_df_for_json(payload.get("recommendations", [])), source="latest_recommendations")
+    raw_rec_df = _ensure_v92_night_compat_df(
+        _records_to_df_for_json(payload.get("recommendations", [])),
+        source="latest_recommendations",
+    )
+    # Re-evaluate old caches locally (no network) so practical stop/RR and the
+    # final partition are immediately available after this patch is installed.
+    full_rec_df = raw_rec_df.copy()
+    if callable(apply_godpick_decision_engine) and not full_rec_df.empty:
+        try:
+            full_rec_df = apply_godpick_decision_engine(full_rec_df, None)
+        except Exception:
+            pass
+    if callable(canonicalize_final_partition) and not full_rec_df.empty:
+        try:
+            full_rec_df = canonicalize_final_partition(full_rec_df)
+        except Exception:
+            pass
+    rec_df = _operational_recommendation_rows(full_rec_df, refresh_decision=False)
+
     cat_df = _records_to_df_for_json(payload.get("category_strength", []))
     hot_df = _ensure_v92_night_compat_df(_records_to_df_for_json(payload.get("hot_pick", [])), source="latest_hot_pick")
 
     candidate_df = _records_to_df_for_json(payload.get("candidate_diagnosis", []))
-    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
-        st.session_state[_k("candidate_diagnosis_store")] = candidate_df.copy()
-    elif isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
+    if candidate_df.empty:
+        candidate_df = full_rec_df.copy()
+    elif callable(apply_godpick_decision_engine):
         try:
-            fallback = build_candidate_diagnosis(rec_df) if callable(build_candidate_diagnosis) else rec_df.copy()
-            st.session_state[_k("candidate_diagnosis_store")] = fallback
+            candidate_df = apply_godpick_decision_engine(candidate_df, None)
+            if callable(canonicalize_final_partition):
+                candidate_df = canonicalize_final_partition(candidate_df)
         except Exception:
             pass
+    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+        try:
+            st.session_state[_k("candidate_diagnosis_store")] = (
+                build_candidate_diagnosis(candidate_df) if callable(build_candidate_diagnosis) else candidate_df.copy()
+            )
+        except Exception:
+            st.session_state[_k("candidate_diagnosis_store")] = candidate_df.copy()
 
     scan_report = payload.get("scan_quality", {})
-    if isinstance(scan_report, dict) and scan_report:
-        st.session_state[_k("scan_quality_report")] = scan_report
+    if not isinstance(scan_report, dict) or not scan_report:
+        scan_report = {
+            "掃描品質狀態": "舊快取已重新分流｜請更新最新價後再正式執行",
+            "掃描品質等級": "legacy_cache",
+            "正式推薦可用": False,
+            "推薦適用範圍": "舊快取條件式參考",
+            "完整候選診斷數": len(candidate_df),
+            "正式推薦結果數": len(rec_df),
+            "掃描品質說明": "已排除弱勢、正式排除與高風險觀察股；目前清單可作條件式參考，但下單前仍需更新最新價並重新推薦。",
+        }
+    st.session_state[_k("scan_quality_report")] = scan_report
     return rec_df, cat_df, hot_df, _safe_str(payload.get("saved_at", ""))
 
 
@@ -8969,8 +9039,12 @@ def _build_recommend_df(
                 if "股票代號" in final_df.columns:
                     final_df["股票代號"] = final_df["股票代號"].astype(str).map(_normalize_code)
                     final_df = final_df.drop_duplicates(subset=["股票代號"], keep="first").reset_index(drop=True)
+            # Primary output is now an action/reference list, not the full radar
+            # pool.  Exclusions and high-risk observations remain diagnosable.
+            final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
         else:
             governed_candidate_df = base_df.copy()
+            final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
         candidate_diagnosis_df = (
             build_candidate_diagnosis(governed_candidate_df)
             if callable(build_candidate_diagnosis)
@@ -10034,29 +10108,28 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     scan_usable = bool(scan_report.get("正式推薦可用", False)) if isinstance(scan_report, dict) else False
     if not scan_usable:
-        st.error(_safe_str(row.get("操作說明")))
+        st.warning(_safe_str(row.get("操作說明")) or "目前為條件式參考清單；下單前請更新最新價並重新推薦。")
         if _safe_str(row.get("掃描品質說明")):
             st.caption(_safe_str(row.get("掃描品質說明")))
-        battle = pd.DataFrame()
     else:
         if len(formal) > 0:
             st.success(_safe_str(row.get("操作說明")))
         else:
             st.warning(_safe_str(row.get("操作說明")))
-        battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
-        if callable(build_action_table):
-            try:
-                battle = build_action_table(battle, include_intraday=True)
-            except Exception:
-                pass
+    battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
+    if callable(build_action_table):
+        try:
+            battle = build_action_table(battle, include_intraday=True)
+        except Exception:
+            pass
     st.caption(_safe_str(row.get("核心紀律")))
 
     if isinstance(battle, pd.DataFrame) and not battle.empty:
         show_cols = [c for c in [
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
             "正式推薦等級", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
-            "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
-            "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
+            "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+            "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",
         ] if c in battle.columns]
         st.dataframe(_format_df(battle[show_cols]), use_container_width=True, hide_index=True)
@@ -11531,8 +11604,12 @@ def main():
             {"label": "排除/弱勢", "value": exclude_count + weak_count + cold_count, "delta": "不買/冷門隔離", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
-    if isinstance(scan_report_now, dict) and not bool(scan_report_now.get("正式推薦可用", False)):
-        st.error(_safe_str(scan_report_now.get("掃描品質說明")) or "本輪掃描或資料品質不足；禁止把局部結果解讀成全市場正式推薦。")
+    if isinstance(scan_report_now, dict) and scan_report_now and not bool(scan_report_now.get("正式推薦可用", False)):
+        _quality_text = _safe_str(scan_report_now.get("掃描品質說明")) or "本輪掃描或資料品質不足；目前僅作條件式參考。"
+        if _safe_str(scan_report_now.get("掃描品質等級")) == "legacy_cache":
+            st.warning(_quality_text)
+        else:
+            st.error(_quality_text)
     elif _safe_str(scan_report_now.get("掃描品質等級")) in {"limited", "warning"}:
         st.warning(f"本輪只代表『{_safe_str(scan_report_now.get('推薦適用範圍'))}』，建議倉位已自動乘上 {float(scan_report_now.get('倉位折減係數', 1) or 1):.1f}。")
     if attack_count <= 0 and radar_count <= 0:
@@ -11808,6 +11885,13 @@ def main():
         "類別",
         "類股內排名",
         "類股前3強",
+        "最終操作結論",
+        "正式推薦分區",
+        "操作許可",
+        "正式推薦等級",
+        "可操作分",
+        "實戰操作品質分",
+        "推薦可信度分",
         "推薦模式",
         "推薦等級",
         "推薦總分",
@@ -11816,6 +11900,13 @@ def main():
         "進場型態_隔日",
         "隔日建議動作",
         "預估進場點",
+        "實戰觸發價",
+        "觸發後守價",
+        "實戰停損參考",
+        "實戰停損距離%",
+        "實戰壓力空間%",
+        "實戰風險報酬比",
+        "正式推薦動作",
         "停損價_隔日",
         "資料完整度",
         "買點分級",
@@ -11842,7 +11933,7 @@ def main():
         if _missing_col not in top_df.columns:
             if _missing_col == "勾選":
                 top_df[_missing_col] = False
-            elif _missing_col in {"夜間股神總分", "隔日進場分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "最新價", "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2"}:
+            elif _missing_col in {"夜間股神總分", "隔日進場分數", "型態突破分數", "爆發力分數", "起漲前兆分數", "交易可行分數", "類股熱度分數", "最新價", "推薦買點_拉回", "推薦買點_突破", "停損價", "賣出目標1", "賣出目標2", "可操作分", "實戰操作品質分", "推薦可信度分", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比"}:
                 top_df[_missing_col] = pd.NA
             elif _missing_col == "資料完整度":
                 top_df[_missing_col] = "舊版快取，未含夜間欄位；請按一次重新推薦更新"
