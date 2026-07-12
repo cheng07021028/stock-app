@@ -7070,18 +7070,46 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
         close_now = _safe_float(last.get("收盤價"))
         close_first = _safe_float(first.get("收盤價"))
-        volume_last = _safe_float(last.get("成交股數"), _safe_float(last.get("成交量")))
+
+        def _history_numeric_series(names: list[str]) -> pd.Series:
+            for col in names:
+                if col not in hist_df.columns:
+                    continue
+                values = pd.to_numeric(hist_df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+                if values.notna().any():
+                    return values.astype(float)
+            return pd.Series(dtype="float64")
+
+        # Providers use different aliases. Missing volume must not be silently
+        # treated as zero liquidity, which previously excluded most candidates.
+        volume_series = _history_numeric_series(["成交股數", "成交量", "Volume", "volume", "總量", "成交量(股)"])
+        amount_series = _history_numeric_series(["成交金額", "成交額", "成交值", "Amount", "amount", "成交金額(元)"])
+        volume_last = _safe_float(volume_series.iloc[-1]) if not volume_series.empty else None
         volume_5 = _safe_float(last.get("VOL5"))
         volume_20 = _safe_float(last.get("VOL20"))
+        if volume_5 in [None, 0] and not volume_series.empty:
+            volume_5 = _safe_float(volume_series.tail(5).mean())
+        if volume_20 in [None, 0] and not volume_series.empty:
+            volume_20 = _safe_float(volume_series.tail(20).mean())
         volume_ratio = None
         if volume_5 not in [None, 0] and volume_20 not in [None, 0]:
             volume_ratio = volume_5 / volume_20
+
         turnover_m = None
         avg20_turnover_m = None
-        if close_now not in [None, 0] and volume_last not in [None, 0]:
+        liquidity_source = "缺少成交額/成交量"
+        # Direct turnover has the most reliable unit. Only fall back to
+        # price × shares when no direct turnover field is available.
+        if not amount_series.empty and (_safe_float(amount_series.iloc[-1], 0) or 0) > 0:
+            turnover_m = (_safe_float(amount_series.iloc[-1], 0) or 0) / 1_000_000
+            avg20_turnover_m = (_safe_float(amount_series.tail(20).mean(), 0) or 0) / 1_000_000
+            liquidity_source = "歷史K線成交金額"
+        elif close_now not in [None, 0] and volume_last not in [None, 0]:
             turnover_m = close_now * volume_last / 1_000_000
-        if close_now not in [None, 0] and volume_20 not in [None, 0]:
-            avg20_turnover_m = close_now * volume_20 / 1_000_000
+            if volume_20 not in [None, 0]:
+                avg20_turnover_m = close_now * volume_20 / 1_000_000
+            liquidity_source = "收盤價×成交股數回推"
+        liquidity_status = "有效" if any((_safe_float(v, 0) or 0) > 0 for v in [turnover_m, avg20_turnover_m, volume_last, volume_20]) else "缺失"
         ma20_now = _safe_float(last.get("MA20"))
         ma60_now = _safe_float(last.get("MA60"))
         close_vs_ma20_pct = None
@@ -7156,6 +7184,8 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "volume_5": volume_5,
             "volume_20": volume_20,
             "volume_ratio": volume_ratio,
+            "liquidity_status": liquidity_status,
+            "liquidity_source": liquidity_source,
             "close_vs_ma20_pct": close_vs_ma20_pct,
             "close_vs_ma60_pct": close_vs_ma60_pct,
         }
@@ -7339,6 +7369,8 @@ def _analyze_one_stock_for_recommend(
             "20日均量_張": round((_safe_float(bundle.get("volume_20"), 0) or 0) / 1000, 1),
             "成交額百萬": _safe_float(bundle.get("turnover_m"), 0) or 0,
             "20日均成交額百萬": _safe_float(bundle.get("avg20_turnover_m"), 0) or 0,
+            "流動性資料狀態": _safe_str(bundle.get("liquidity_status")) or "缺失",
+            "流動性資料來源": _safe_str(bundle.get("liquidity_source")) or "缺少成交額/成交量",
             "均量比": _safe_float(bundle.get("volume_ratio"), 0) or 0,
             "近5日漲幅%": _safe_float(bundle.get("ret5"), 0) or 0,
             "近20日漲幅%": _safe_float(bundle.get("ret20"), 0) or 0,
@@ -8922,6 +8954,21 @@ def _build_recommend_df(
         if callable(canonicalize_final_partition):
             final_df = canonicalize_final_partition(final_df)
             governed_candidate_df = canonicalize_final_partition(base_df)
+            # The legacy score/Top-N filter is only a display filter.  It must
+            # never remove a stock that the final execution engine classifies as
+            # A, A-, intraday radar, high-risk radar or early observation.
+            priority_buckets = {
+                "正式下週主推薦", "A-｜準主推薦小量試單", "盤中雷達追蹤",
+                "高風險雷達觀察", "早期潛伏觀察",
+            }
+            priority_from_full = governed_candidate_df[
+                governed_candidate_df.get("正式推薦分區", pd.Series([""] * len(governed_candidate_df), index=governed_candidate_df.index)).isin(priority_buckets)
+            ].copy()
+            if not priority_from_full.empty:
+                final_df = pd.concat([priority_from_full, final_df], ignore_index=True, sort=False)
+                if "股票代號" in final_df.columns:
+                    final_df["股票代號"] = final_df["股票代號"].astype(str).map(_normalize_code)
+                    final_df = final_df.drop_duplicates(subset=["股票代號"], keep="first").reset_index(drop=True)
         else:
             governed_candidate_df = base_df.copy()
         candidate_diagnosis_df = (
@@ -8935,6 +8982,7 @@ def _build_recommend_df(
                 universe_size=total_count,
                 candidate_count=len(governed_candidate_df),
                 final_count=len(final_df),
+                candidate_frame=governed_candidate_df,
             )
             if callable(build_scan_quality_report)
             else {}
@@ -9882,24 +9930,27 @@ def _phase80_build_recommendation_summary(
     quality = _safe_str(report.get("掃描品質狀態")) or "未知｜舊資料未記錄掃描完整性"
     usable = bool(report.get("正式推薦可用", False))
 
+    limited = usable and _safe_str(report.get("掃描品質等級")) in {"limited", "warning"}
+    scope = _safe_str(report.get("推薦適用範圍"))
+    prefix = f"{scope}：" if limited and scope else ""
     if not usable:
-        status = "資料不完整｜禁止正式推薦" if "不完整" in quality else "掃描完整性未知"
+        status = quality or "資料品質不足｜禁止正式推薦"
         conclusion = (
-            "本輪掃描覆蓋率或歷史資料成功率不足，現在看到的少量股票不能代表全市場；"
-            "系統已禁止輸出正式買進結論，請先重新完整掃描或修復資料來源。"
+            "掃描或資料品質未達正式操作標準。系統已禁止輸出正式買進結論；"
+            "資料缺失不會再被當成低流動性，請先補齊成交額/成交量或修復K線來源。"
         )
     elif formal_n > 0:
-        conclusion = f"本輪有 {formal_n} 檔正式推薦；只依進場區、觸發價與停損分批操作。"
-        status = "有正式推薦"
+        conclusion = f"{prefix}本輪有 {formal_n} 檔正式推薦；只依進場區、觸發價與停損分批操作。"
+        status = "限定資料池｜有正式推薦" if limited else "有正式推薦"
     elif a_minus_n > 0:
-        conclusion = f"本輪沒有可直接買進標的；僅有 {a_minus_n} 檔 A- 準主推薦，可在盤中觸發且守價後小量試單。"
-        status = "無直接買進｜僅準主推薦"
+        conclusion = f"{prefix}本輪沒有可直接買進標的；有 {a_minus_n} 檔 A- 準主推薦，只能在盤中觸發且守價後小量試單。"
+        status = "限定資料池｜僅準主推薦" if limited else "無直接買進｜僅準主推薦"
     elif intraday_n > 0:
-        conclusion = f"本輪沒有正式推薦；保留 {intraday_n} 檔盤中核心雷達，未觸發前不可買。"
-        status = "無正式推薦｜只看盤中雷達"
+        conclusion = f"{prefix}本輪沒有正式推薦；保留 {intraday_n} 檔盤中核心雷達，未觸發前不可買。"
+        status = "限定資料池｜只看盤中雷達" if limited else "無正式推薦｜只看盤中雷達"
     else:
-        conclusion = "完整掃描已完成，但沒有股票同時通過買點、風控與風險報酬門檻；系統選擇空手等待。"
-        status = "完整掃描｜空手等待"
+        conclusion = f"{prefix}沒有股票同時通過買點、風控與風險報酬門檻；系統選擇空手等待。"
+        status = "限定資料池｜空手等待" if limited else "完整掃描｜空手等待"
 
     return pd.DataFrame([{
         "本輪結論": status,
@@ -9909,6 +9960,11 @@ def _phase80_build_recommendation_summary(
         "成功分析數": int(report.get("成功分析數", 0) or 0),
         "掃描覆蓋率%": float(report.get("掃描覆蓋率%", 0) or 0),
         "歷史資料成功率%": float(report.get("歷史資料成功率%", 0) or 0),
+        "有效K線資料率%": float(report.get("有效K線資料率%", report.get("歷史資料成功率%", 0)) or 0),
+        "流動性資料覆蓋率%": float(report.get("流動性資料覆蓋率%", 0) or 0),
+        "官方因子覆蓋率%": float(report.get("官方因子覆蓋率%", 0) or 0),
+        "推薦適用範圍": scope,
+        "倉位折減係數": float(report.get("倉位折減係數", 0) or 0),
         "完整候選診斷數": int(report.get("完整候選診斷數", total_candidates) or total_candidates or 0),
         "正式推薦檔數": formal_n,
         "A-準主推薦檔數": a_minus_n,
@@ -9919,7 +9975,7 @@ def _phase80_build_recommendation_summary(
         "操作說明": conclusion,
         "掃描品質說明": _safe_str(report.get("掃描品質說明")),
         "核心紀律": "候選強度不等於買進許可；正式推薦必須同時通過掃描完整性、Entry、Risk、RR、追價風險、流動性與大盤風控。",
-        "版本": "phase8_2_execution_governance_20260712",
+        "版本": "phase8_3_liquidity_recovery_20260712",
     }])
 
 
@@ -9970,7 +10026,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     render_pro_kpi_row([
         {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
         {"label": "預計掃描", "value": str(int(row.get("預計掃描數", 0))), "delta": "檔"},
-        {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('歷史資料成功率%', 0)):.1f}%"},
+        {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('有效K線資料率%', 0)):.1f}%"},
+        {"label": "流動性覆蓋", "value": f"{float(row.get('流動性資料覆蓋率%', 0)):.1f}%", "delta": _safe_str(row.get("推薦適用範圍"))},
         {"label": "正式推薦", "value": str(int(row.get("正式推薦檔數", 0))), "delta": "檔"},
         {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": "檔"},
     ])
@@ -10018,7 +10075,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
-        "主流資金分", "族群攻擊強度", "成交額百萬", "流動性等級",
+        "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",
         "引擎輔助訊號", "分區互斥檢查", "掃描品質狀態", "正式推薦可用",
@@ -10036,7 +10093,7 @@ def _build_excel_bytes(
     candidate_diagnosis_export: pd.DataFrame | None = None,
     scan_report: dict[str, Any] | None = None,
 ) -> bytes:
-    """Phase 8.2 practical workbook.
+    """Phase 8.3 practical workbook with evidence-aware liquidity recovery.
 
     Operational lists are mutually exclusive.  Raw multi-engine signals are
     consolidated into one diagnostic sheet instead of duplicating the same stock
@@ -11466,7 +11523,8 @@ def main():
     render_pro_kpi_row(
         [
             {"label": "預計掃描", "value": int(scan_report_now.get("預計掃描數", len(universe_items)) or len(universe_items)), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
-            {"label": "成功分析", "value": int(scan_report_now.get("成功分析數", candidate_count_now) or candidate_count_now), "delta": f"{float(scan_report_now.get('歷史資料成功率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "成功分析", "value": int(scan_report_now.get("成功分析數", candidate_count_now) or candidate_count_now), "delta": f"有效K線 {float(scan_report_now.get('有效K線資料率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "流動性覆蓋", "value": f"{float(scan_report_now.get('流動性資料覆蓋率%', 0) or 0):.1f}%", "delta": _safe_str(scan_report_now.get("推薦適用範圍")), "delta_class": "pro-kpi-delta-flat"},
             {"label": "完整候選池", "value": candidate_count_now, "delta": "非買進清單", "delta_class": "pro-kpi-delta-flat"},
             {"label": "作戰候選", "value": len(rec_df), "delta": "完成最終分流", "delta_class": "pro-kpi-delta-flat"},
             {"label": "主流攻擊/突破", "value": attack_count + breakout_count, "delta": "仍需最終操作許可", "delta_class": "pro-kpi-delta-flat"},
@@ -11474,7 +11532,9 @@ def main():
         ]
     )
     if isinstance(scan_report_now, dict) and not bool(scan_report_now.get("正式推薦可用", False)):
-        st.error("本輪掃描完整性不足或未知；禁止把目前少量結果解讀成全市場正式推薦。請重新完整掃描。")
+        st.error(_safe_str(scan_report_now.get("掃描品質說明")) or "本輪掃描或資料品質不足；禁止把局部結果解讀成全市場正式推薦。")
+    elif _safe_str(scan_report_now.get("掃描品質等級")) in {"limited", "warning"}:
+        st.warning(f"本輪只代表『{_safe_str(scan_report_now.get('推薦適用範圍'))}』，建議倉位已自動乘上 {float(scan_report_now.get('倉位折減係數', 1) or 1):.1f}。")
     if attack_count <= 0 and radar_count <= 0:
         st.warning("本輪沒有『主流攻擊候選』或『飆股雷達』。完整推薦表仍可能有 B/C/R 或冷門觀察股，但不是直接買進名單；請優先看『飆股雷達分區』、主流作戰分區與盤中觸發價。")
 
