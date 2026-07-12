@@ -1,10 +1,10 @@
 {
   "version": "v109_2_startup_macro_github_sync_hard_off",
-  "updated_at": "2026-07-12 00:48:53",
+  "updated_at": "2026-07-12 20:11:35",
   "data_date": "2026-07-09",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
-  "market_score": 49.0,
+  "market_score": 47.5,
   "market_trend": "盤整",
   "market_risk_level": "中",
   "risk_gate": "保守選股",
@@ -15,15 +15,15 @@
   "twse_change_pct": -0.8304,
   "twse_ma5": 45981.03,
   "twse_ma20": 45868.71,
-  "otc_index": 445.38,
-  "otc_change": 5.87,
-  "otc_change_pct": 1.3356,
+  "otc_index": 424.99,
+  "otc_change": 3.6,
+  "otc_change_pct": 0.8543,
   "nasdaq_change_pct": 0.2851,
   "sox_change_pct": 0.0552,
   "futures_index": null,
   "futures_change": null,
   "futures_change_pct": null,
-  "overnight_score": 49.0,
+  "overnight_score": 47.5,
   "overnight_risk_level": "中",
   "overnight_bias": "盤整",
   "overnight_comment": "NASDAQ 0.2851% / SOX 0.0552% / 台指期 —%",
@@ -35,7 +35,7 @@
     "bias": "盤整",
     "risk_level": "中",
     "position_hint": "保守選股",
-    "score": 49.0
+    "score": 47.5
   },
   "source_status": {
     "twse": {
