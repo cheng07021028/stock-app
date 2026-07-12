@@ -1,4 +1,4 @@
-import io
+﻿import io
 import json
 import os
 import time
@@ -868,33 +868,34 @@ def render_pro_info_card(title, info_pairs, chips=None):
                 clean_chips.append(f'<span class="pro-chip">{tx}</span>')
         chips_html = "".join(clean_chips)
     normalized = _normalize_items(info_pairs)
-    items_html = ""
+    # Streamlit/Markdown may split multiline raw HTML blocks at blank lines and
+    # render a closing tag such as ``</div>`` as a visible card.  Build one
+    # compact HTML fragment with no Markdown block breaks.
+    item_fragments = []
     for safe_label, safe_value, safe_css in normalized:
-        items_html += f"""
-        <div class="pro-info-item">
-            <div class="pro-info-label">{safe_label}</div>
-            <div class="pro-info-value {safe_css}">{safe_value}</div>
-        </div>
-        """
-    if not items_html.strip():
-        items_html = """
-        <div class="pro-info-item">
-            <div class="pro-info-label">狀態</div>
-            <div class="pro-info-value pro-flat">—</div>
-        </div>
-        """
-    st.markdown(
-        f"""
-        <div class="pro-card">
-            <div class="pro-card-title">{safe_title}</div>
-            <div style="margin-bottom:10px;">{chips_html}</div>
-            <div class="pro-info-grid">
-                {items_html}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        css_suffix = f" {safe_css}" if safe_css else ""
+        item_fragments.append(
+            f'<div class="pro-info-item">'
+            f'<div class="pro-info-label">{safe_label}</div>'
+            f'<div class="pro-info-value{css_suffix}">{safe_value}</div>'
+            f'</div>'
+        )
+    if not item_fragments:
+        item_fragments.append(
+            '<div class="pro-info-item">'
+            '<div class="pro-info-label">狀態</div>'
+            '<div class="pro-info-value pro-flat">—</div>'
+            '</div>'
+        )
+    items_html = "".join(item_fragments)
+    card_html = (
+        f'<div class="pro-card">'
+        f'<div class="pro-card-title">{safe_title}</div>'
+        f'<div style="margin-bottom:10px;">{chips_html}</div>'
+        f'<div class="pro-info-grid">{items_html}</div>'
+        f'</div>'
     )
+    st.markdown(card_html, unsafe_allow_html=True)
 
 def _safe_text(value):
     if value is None:

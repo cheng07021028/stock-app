@@ -1652,12 +1652,163 @@ def _ensure_v92_night_compat_df(df: pd.DataFrame | None, *, source: str = "") ->
     return out
 
 
-def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decision: bool = False) -> pd.DataFrame:
-    """Return only the rows that are genuinely useful as an action/reference list.
+def _conditional_reference_rows(df: pd.DataFrame | None, *, max_rows: int = 8) -> pd.DataFrame:
+    """Build a small, explicitly non-buy conditional reference list.
 
-    Formal/A- recommendations and R1 core intraday radar are retained.  High-risk,
-    weak, early-observation and formal-exclusion rows stay in candidate diagnosis
-    and must never be mixed into the primary recommendation list.
+    This fallback is used only when the formal/A-/R1 action list is empty.  It
+    never promotes exclusion, high-risk, over-heated or low-liquidity stocks.
+    Every returned row remains a *reference* candidate and is marked as
+    "未觸發不可買" so the UI can still provide useful names without fabricating a
+    formal recommendation.
+    """
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df or [])
+    if work.empty:
+        return work
+    if callable(canonicalize_final_partition):
+        try:
+            work = canonicalize_final_partition(work)
+        except Exception:
+            pass
+
+    def _text_series(col: str) -> pd.Series:
+        if col not in work.columns:
+            return pd.Series([""] * len(work), index=work.index, dtype="object")
+        return work[col].fillna("").astype(str).str.strip()
+
+    def _num_series(col: str, default: float = 0.0) -> pd.Series:
+        if col not in work.columns:
+            return pd.Series([float(default)] * len(work), index=work.index, dtype="float64")
+        return pd.to_numeric(work[col], errors="coerce").fillna(float(default))
+
+    bucket = _text_series("正式推薦分區")
+    role_blob = (
+        _text_series("正式推薦資格") + "｜" + _text_series("操作許可") + "｜"
+        + _text_series("正式推薦排除原因") + "｜" + _text_series("真禁買原因") + "｜"
+        + _text_series("硬否決原因") + "｜" + _text_series("過熱原因") + "｜"
+        + _text_series("流動性等級") + "｜" + _text_series("冷門股警示")
+    )
+    hard_block = (
+        bucket.isin(["正式排除清單", "高風險雷達觀察"])
+        | role_blob.str.contains("BLOCK|禁止買進|過熱禁買|假強排除|低流動性排除|冷門禁追|極低量", na=False)
+    )
+
+    amount = _num_series("成交額百萬")
+    avg_amount = _num_series("20日均成交額百萬")
+    volume = _num_series("最新成交量_張")
+    avg_volume = _num_series("20日均量_張")
+    liquid = amount.ge(80) | avg_amount.ge(80) | volume.ge(1000) | avg_volume.ge(1000)
+
+    latest_price = _num_series("最新價")
+    strength = pd.concat(
+        [
+            _num_series("候選強度分"),
+            _num_series("推薦總分"),
+            _num_series("股神實戰總分"),
+            _num_series("Alpha選股潛力分"),
+        ],
+        axis=1,
+    ).max(axis=1)
+    operability = _num_series("可操作分")
+    entry = pd.concat([_num_series("Entry進場買點分"), _num_series("進場買點分")], axis=1).max(axis=1)
+    risk = pd.concat([_num_series("Risk風控安全分"), _num_series("風控安全分")], axis=1).max(axis=1)
+    rr = pd.concat([_num_series("實戰風險報酬比"), _num_series("風險報酬比"), _num_series("風險報酬比_決策")], axis=1).max(axis=1)
+    chase = pd.concat([_num_series("追價風險分"), _num_series("追高風險分數_決策")], axis=1).max(axis=1)
+    rise5 = _num_series("近5日漲幅%")
+    rise20 = _num_series("近20日漲幅%")
+
+    reference_bucket = bucket.isin(["盤中雷達追蹤", "早期潛伏觀察", "不可直接買觀察"])
+    strict_mask = (
+        reference_bucket & ~hard_block & liquid & latest_price.gt(0)
+        & strength.ge(60) & operability.ge(48) & entry.ge(48) & risk.ge(48)
+        & chase.le(72) & rr.ge(0.80) & rise5.le(18) & rise20.le(35)
+    )
+    candidates = work.loc[strict_mask].copy()
+
+    # A second, still conservative pass prevents a completely blank page when
+    # one optional score is slightly below the strict line.  Hard vetoes,
+    # liquidity, price and over-heating checks remain mandatory.
+    if candidates.empty:
+        relaxed_mask = (
+            reference_bucket & ~hard_block & liquid & latest_price.gt(0)
+            & strength.ge(58) & operability.ge(42) & entry.ge(42) & risk.ge(42)
+            & chase.le(76) & rr.ge(0.50) & rise5.le(20) & rise20.le(40)
+        )
+        candidates = work.loc[relaxed_mask].copy()
+
+    if candidates.empty:
+        return candidates
+
+    # Build an execution-oriented rank; this is only for ordering conditional
+    # references and never upgrades their formal recommendation permission.
+    idx = candidates.index
+    cand_strength = strength.loc[idx]
+    cand_op = operability.loc[idx]
+    cand_entry = entry.loc[idx]
+    cand_risk = risk.loc[idx]
+    cand_rr = rr.loc[idx].clip(lower=0, upper=4)
+    cand_chase = chase.loc[idx]
+    candidates["__conditional_reference_score"] = (
+        cand_strength * 0.30
+        + cand_op * 0.25
+        + cand_entry * 0.15
+        + cand_risk * 0.15
+        + (cand_rr * 25).clip(upper=100) * 0.10
+        + (100 - cand_chase).clip(lower=0, upper=100) * 0.05
+    ).round(2)
+    candidates = candidates.sort_values("__conditional_reference_score", ascending=False, kind="mergesort")
+
+    # Avoid filling the fallback with one single industry/theme.
+    selected_indices: list[Any] = []
+    sector_counts: dict[str, int] = {}
+    for row_idx, row in candidates.iterrows():
+        sector = _safe_str(row.get("類別")) or _safe_str(row.get("產業")) or "未分類"
+        if sector_counts.get(sector, 0) >= 2:
+            continue
+        selected_indices.append(row_idx)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if len(selected_indices) >= max(1, int(max_rows)):
+            break
+    if not selected_indices:
+        selected_indices = candidates.index[: max(1, int(max_rows))].tolist()
+    candidates = candidates.loc[selected_indices].copy()
+
+    def _reference_reason(row: pd.Series) -> str:
+        parts = []
+        op_v = _safe_float(row.get("可操作分"), 0) or 0
+        entry_v = max(_safe_float(row.get("Entry進場買點分"), 0) or 0, _safe_float(row.get("進場買點分"), 0) or 0)
+        risk_v = max(_safe_float(row.get("Risk風控安全分"), 0) or 0, _safe_float(row.get("風控安全分"), 0) or 0)
+        rr_v = max(_safe_float(row.get("實戰風險報酬比"), 0) or 0, _safe_float(row.get("風險報酬比"), 0) or 0)
+        if op_v >= 55:
+            parts.append("可操作性尚可")
+        if entry_v >= 55:
+            parts.append("買點接近確認")
+        if risk_v >= 55:
+            parts.append("風控條件尚可")
+        if rr_v >= 1.2:
+            parts.append(f"風報比 {rr_v:.2f}")
+        if _safe_float(row.get("成交額百萬"), 0) >= 100:
+            parts.append("流動性可交易")
+        return "、".join(parts[:4]) or "條件接近，但尚未達正式推薦門檻"
+
+    candidates["推薦用途"] = "條件式參考名單"
+    candidates["條件式參考原因"] = candidates.apply(_reference_reason, axis=1)
+    candidates["最終操作結論"] = "B｜條件式參考：等待盤中量價、觸發價與守價確認"
+    candidates["是否正式推薦"] = "否"
+    candidates["操作許可"] = "未觸發不可買｜僅供條件式參考"
+    candidates["正式推薦等級"] = "B｜條件式參考"
+    candidates["建議倉位上限%"] = 0.0
+    candidates["正式推薦動作"] = "只加入觀察；放量站上實戰觸發價並守穩後才重新評估，未觸發不得買進。"
+    candidates["條件式參考排序分"] = candidates["__conditional_reference_score"]
+    return candidates.drop(columns=["__conditional_reference_score"], errors="ignore").reset_index(drop=True)
+
+
+def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decision: bool = False) -> pd.DataFrame:
+    """Return a useful action/reference list without mixing in bad stocks.
+
+    Formal/A- recommendations and R1 core intraday radar are preferred.  When
+    none exist, a small conditional-reference fallback is built from the full
+    governed candidate pool.  Formal exclusions and high-risk observations are
+    never allowed into that fallback.
     """
     work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df or [])
     if work.empty:
@@ -1684,18 +1835,19 @@ def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decisio
         allowed = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1"))
         governed = work.loc[allowed].copy()
     if governed.empty:
+        governed = _conditional_reference_rows(work, max_rows=8)
+    if governed.empty:
         return governed
     if "股票代號" in governed.columns:
         governed["股票代號"] = governed["股票代號"].astype(str).map(_normalize_code)
         governed = governed[governed["股票代號"].astype(str).str.strip().ne("")].copy()
         governed = governed.drop_duplicates(subset=["股票代號"], keep="first")
     bucket_order = {"正式下週主推薦": 10, "A-｜準主推薦小量試單": 20, "盤中雷達追蹤": 30}
-    governed["__action_order"] = governed.get("正式推薦分區", pd.Series([""] * len(governed), index=governed.index)).map(bucket_order).fillna(99)
-    sort_cols = ["__action_order"] + [c for c in ["正式推薦排序分", "可操作分", "推薦可信度分", "實戰操作品質分", "候選強度分"] if c in governed.columns]
+    governed["__action_order"] = governed.get("正式推薦分區", pd.Series([""] * len(governed), index=governed.index)).map(bucket_order).fillna(80)
+    sort_cols = ["__action_order"] + [c for c in ["正式推薦排序分", "條件式參考排序分", "可操作分", "推薦可信度分", "實戰操作品質分", "候選強度分"] if c in governed.columns]
     ascending = [True] + [False] * (len(sort_cols) - 1)
     governed = governed.sort_values(sort_cols, ascending=ascending, kind="mergesort")
     return governed.drop(columns=["__action_order"], errors="ignore").reset_index(drop=True)
-
 
 def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> tuple[bool, list[str]]:
     """Persist action results, compact full-candidate diagnosis and scan quality.
@@ -9024,24 +9176,11 @@ def _build_recommend_df(
         if callable(canonicalize_final_partition):
             final_df = canonicalize_final_partition(final_df)
             governed_candidate_df = canonicalize_final_partition(base_df)
-            # The legacy score/Top-N filter is only a display filter.  It must
-            # never remove a stock that the final execution engine classifies as
-            # A, A-, intraday radar, high-risk radar or early observation.
-            priority_buckets = {
-                "正式下週主推薦", "A-｜準主推薦小量試單", "盤中雷達追蹤",
-                "高風險雷達觀察", "早期潛伏觀察",
-            }
-            priority_from_full = governed_candidate_df[
-                governed_candidate_df.get("正式推薦分區", pd.Series([""] * len(governed_candidate_df), index=governed_candidate_df.index)).isin(priority_buckets)
-            ].copy()
-            if not priority_from_full.empty:
-                final_df = pd.concat([priority_from_full, final_df], ignore_index=True, sort=False)
-                if "股票代號" in final_df.columns:
-                    final_df["股票代號"] = final_df["股票代號"].astype(str).map(_normalize_code)
-                    final_df = final_df.drop_duplicates(subset=["股票代號"], keep="first").reset_index(drop=True)
-            # Primary output is now an action/reference list, not the full radar
-            # pool.  Exclusions and high-risk observations remain diagnosable.
-            final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
+            # Build the primary action/reference list from the complete governed
+            # candidate pool.  The old score/Top-N display filter must not erase
+            # A/A-/R1 rows; when none exist, the helper returns a small, clearly
+            # labelled conditional-reference list instead of a blank page.
+            final_df = _operational_recommendation_rows(governed_candidate_df, refresh_decision=False)
         else:
             governed_candidate_df = base_df.copy()
             final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
@@ -9257,12 +9396,25 @@ def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     return show
 
 
-def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame):
+def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> bool:
+    """Save only a non-empty usable/reference result.
+
+    A failed scan or a zero-row final filter must not erase the last valid
+    recommendation JSON/session result.  The new scan diagnostics remain in
+    session_state, while the last non-empty list stays available for reference.
+    """
+    if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
+        st.session_state[_k("empty_scan_preserved_previous")] = True
+        st.session_state[_k("empty_scan_notice")] = "本輪沒有產生可用名單，已保留上一輪非空推薦結果，未覆蓋 JSON。"
+        return False
+    st.session_state[_k("empty_scan_preserved_previous")] = False
+    st.session_state[_k("empty_scan_notice")] = ""
     st.session_state[_k("rec_df_store")] = rec_df.copy()
     st.session_state[_k("category_strength_store")] = category_strength_df.copy()
     st.session_state[_k("hot_pick_store")] = hot_pick_df.copy()
     st.session_state[_k("result_saved_at")] = _now_text()
     _save_latest_recommendation_pack(rec_df, category_strength_df, hot_pick_df)
+    return True
 
 
 def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -11485,6 +11637,7 @@ def main():
     hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh or resume_scan_btn:
+        previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
             universe_items=universe_items,
             master_df=master_df,
@@ -11512,6 +11665,27 @@ def main():
         # V139：最後再依當下資金流/成交額/趨勢分流，確保保存與匯出一致。
         rec_df = _apply_v139_dynamic_hot_money_breakout_rules(rec_df)
         hot_pick_df = _apply_v139_dynamic_hot_money_breakout_rules(hot_pick_df)
+
+        # Final safety net: first try the complete candidate diagnosis, then keep
+        # the previous non-empty result.  Never replace a useful list with 0 rows.
+        if rec_df.empty:
+            candidate_source = st.session_state.get(_k("candidate_diagnosis_store"))
+            conditional_df = _conditional_reference_rows(candidate_source, max_rows=8) if isinstance(candidate_source, pd.DataFrame) else pd.DataFrame()
+            if not conditional_df.empty:
+                rec_df = conditional_df
+                st.session_state[_k("result_fallback_notice")] = "本輪沒有正式推薦，改顯示通過流動性、買點與風控底線的條件式參考名單；未觸發不可買。"
+            elif isinstance(previous_rec_df, pd.DataFrame) and not previous_rec_df.empty:
+                rec_df = previous_rec_df.copy()
+                category_strength_df = previous_category_df.copy() if isinstance(previous_category_df, pd.DataFrame) else pd.DataFrame()
+                hot_pick_df = previous_hot_df.copy() if isinstance(previous_hot_df, pd.DataFrame) else pd.DataFrame()
+                st.session_state[_k("result_fallback_notice")] = "本輪掃描沒有可用結果，已保留上一輪非空推薦；本輪未覆蓋 JSON。請依保存時間判斷資料新鮮度。"
+            else:
+                st.session_state[_k("result_fallback_notice")] = "本輪沒有任何通過資料、流動性與風控底線的股票；系統未硬塞弱股，也未覆蓋既有 JSON。"
+        else:
+            if "推薦用途" in rec_df.columns and rec_df["推薦用途"].astype(str).eq("條件式參考名單").any():
+                st.session_state[_k("result_fallback_notice")] = "本輪沒有正式推薦，顯示條件式參考名單；未觸發不可買，且建議倉位上限為 0%。"
+            else:
+                st.session_state[_k("result_fallback_notice")] = ""
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
@@ -11557,9 +11731,13 @@ def main():
             for msg in st.session_state.get(_k("latest_recommendation_sync_msgs"), []):
                 st.write(f"- {msg}")
 
+    fallback_notice = _safe_str(st.session_state.get(_k("result_fallback_notice"), ""))
+    if fallback_notice:
+        st.warning(fallback_notice)
+
     if rec_df.empty:
         if submit_recommend or submit_refresh:
-            st.warning("本輪條件篩選後為 0 檔。可能不是門檻太高，也可能是歷史資料抓不到或分析函式出錯。")
+            st.warning("本輪沒有任何股票通過資料、流動性、買點與風控的最低參考底線。系統不會硬塞弱股，也不會用 0 檔覆蓋上一輪結果。")
             st.info("先看上方『推薦除錯摘要』：若抓不到歷史資料或分析錯誤很多，先修資料模組，不要只調低門檻。")
         else:
             st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
