@@ -5345,7 +5345,20 @@
   },
   {
     "version": "v109_2_startup_macro_github_sync_hard_off",
-    "updated_at": "2026-07-12 20:11:35",
+    "updated_at": "2026-07-12 21:47:15",
+    "data_date": "2026-07-09",
+    "market_score": 47.5,
+    "market_trend": "盤整",
+    "market_risk_level": "中",
+    "risk_gate": "保守選股",
+    "twse_index": 45354.61,
+    "twse_change_pct": -0.8304,
+    "otc_change_pct": 0.8543,
+    "source": "startup Yahoo batch + cache fallback"
+  },
+  {
+    "version": "v109_2_startup_macro_github_sync_hard_off",
+    "updated_at": "2026-07-12 21:48:38",
     "data_date": "2026-07-09",
     "market_score": 47.5,
     "market_trend": "盤整",
