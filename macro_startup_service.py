@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 macro_startup_service.py
 v109：專案開啟即更新 0/1 大盤走勢橋接資料。
@@ -394,6 +394,24 @@ def _build_snapshot(results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         },
         "source_status": {k: {"ok": bool(v.get("ok")), "source": v.get("source"), "error": v.get("error", "")} for k, v in results.items()},
     }
+    # v80：啟動快抓完成後同步產生隔日大盤預測，避免登入背景更新覆蓋 01 頁已寫入的預測欄位。
+    try:
+        from market_nextday_forecast_engine import build_nextday_market_forecast, flatten_forecast_for_bridge
+        forecast = build_nextday_market_forecast(snapshot, None)
+        snapshot.update(flatten_forecast_for_bridge(forecast))
+        req = snapshot.get("required_by_godpick") if isinstance(snapshot.get("required_by_godpick"), dict) else {}
+        for key in [
+            "next_day_forecast_date", "next_day_market_direction", "next_day_market_score",
+            "next_day_confidence", "next_day_confidence_score", "next_day_up_probability_pct",
+            "next_day_flat_probability_pct", "next_day_down_probability_pct",
+            "next_day_expected_return_pct", "next_day_godpick_score_delta",
+            "next_day_market_weight_delta", "next_day_position_cap_pct",
+            "next_day_preferred_style", "next_day_avoid_style", "next_day_effect_mode",
+        ]:
+            req[key] = snapshot.get(key)
+        snapshot["required_by_godpick"] = req
+    except Exception as e:
+        snapshot["next_day_forecast_warning"] = str(e)
     return snapshot
 
 
@@ -424,6 +442,13 @@ def _append_record(snapshot: Dict[str, Any]) -> list:
         "twse_change_pct": snapshot.get("twse_change_pct"),
         "otc_change_pct": snapshot.get("otc_change_pct"),
         "source": snapshot.get("source"),
+        "next_day_forecast_date": snapshot.get("next_day_forecast_date"),
+        "next_day_market_direction": snapshot.get("next_day_market_direction"),
+        "next_day_market_score": snapshot.get("next_day_market_score"),
+        "next_day_confidence": snapshot.get("next_day_confidence"),
+        "next_day_up_probability_pct": snapshot.get("next_day_up_probability_pct"),
+        "next_day_down_probability_pct": snapshot.get("next_day_down_probability_pct"),
+        "next_day_expected_return_pct": snapshot.get("next_day_expected_return_pct"),
     }
     if not records or _safe_str(records[-1].get("updated_at"))[:16] != _safe_str(item.get("updated_at"))[:16]:
         records.append(item)

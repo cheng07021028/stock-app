@@ -377,6 +377,20 @@ GODPICK_RECORD_COLUMNS = [
     "Nasdaq期貨偏向",
     "S&P期貨偏向",
     "匯率風險等級",
+    "隔日大盤預測日期",
+    "隔日大盤方向",
+    "隔日大盤分數",
+    "隔日大盤信心",
+    "隔日上漲機率%",
+    "隔日震盪機率%",
+    "隔日下跌機率%",
+    "隔日預估漲跌%",
+    "隔日大盤預測加減分",
+    "隔日大盤權重校正",
+    "隔日建議總部位上限%",
+    "隔日偏好選股風格",
+    "隔日應避免風格",
+    "隔日大盤預測理由",
     "股神決策模式",
     "股神進場建議",
     "建議部位%",
@@ -2290,6 +2304,27 @@ def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
         "overnight_data_quality": snapshot.get("overnight_data_quality"),
         "overnight_updated_at": snapshot.get("overnight_updated_at"),
         "data_diagnostics": snapshot.get("data_diagnostics"),
+        "next_day_forecast": snapshot.get("next_day_forecast"),
+        "next_day_forecast_version": snapshot.get("next_day_forecast_version"),
+        "next_day_forecast_date": snapshot.get("next_day_forecast_date"),
+        "next_day_market_direction": snapshot.get("next_day_market_direction"),
+        "next_day_market_score": snapshot.get("next_day_market_score"),
+        "next_day_confidence": snapshot.get("next_day_confidence"),
+        "next_day_confidence_score": snapshot.get("next_day_confidence_score"),
+        "next_day_up_probability_pct": snapshot.get("next_day_up_probability_pct"),
+        "next_day_flat_probability_pct": snapshot.get("next_day_flat_probability_pct"),
+        "next_day_down_probability_pct": snapshot.get("next_day_down_probability_pct"),
+        "next_day_expected_return_pct": snapshot.get("next_day_expected_return_pct"),
+        "next_day_expected_low": snapshot.get("next_day_expected_low"),
+        "next_day_expected_high": snapshot.get("next_day_expected_high"),
+        "next_day_data_coverage_pct": snapshot.get("next_day_data_coverage_pct"),
+        "next_day_forecast_rationale": snapshot.get("next_day_forecast_rationale"),
+        "next_day_godpick_score_delta": snapshot.get("next_day_godpick_score_delta"),
+        "next_day_market_weight_delta": snapshot.get("next_day_market_weight_delta"),
+        "next_day_position_cap_pct": snapshot.get("next_day_position_cap_pct"),
+        "next_day_preferred_style": snapshot.get("next_day_preferred_style"),
+        "next_day_avoid_style": snapshot.get("next_day_avoid_style"),
+        "next_day_effect_mode": snapshot.get("next_day_effect_mode"),
         "_source": "market_snapshot.json",
     }
 
@@ -2357,6 +2392,74 @@ def _normalize_int_weight_total(weights: dict[str, int], total: int = 100) -> di
     return out
 
 
+def _nextday_forecast_summary_v80(bridge: dict[str, Any]) -> dict[str, Any]:
+    """Normalize page-01 next-session forecast and enforce confidence/data guards."""
+    if not isinstance(bridge, dict):
+        bridge = {}
+    nested = bridge.get("next_day_forecast") if isinstance(bridge.get("next_day_forecast"), dict) else {}
+    effect = nested.get("godpick_effect") if isinstance(nested.get("godpick_effect"), dict) else {}
+
+    def pick(name: str, fallback: Any = None):
+        val = bridge.get(name)
+        if val not in [None, "", []]:
+            return val
+        aliases = {
+            "next_day_forecast_date": "forecast_for_date",
+            "next_day_market_direction": "direction",
+            "next_day_market_score": "direction_score",
+            "next_day_confidence": "confidence",
+            "next_day_confidence_score": "confidence_score",
+            "next_day_up_probability_pct": "up_probability_pct",
+            "next_day_flat_probability_pct": "flat_probability_pct",
+            "next_day_down_probability_pct": "down_probability_pct",
+            "next_day_expected_return_pct": "expected_return_pct",
+            "next_day_expected_low": "expected_low",
+            "next_day_expected_high": "expected_high",
+            "next_day_data_coverage_pct": "data_coverage_pct",
+            "next_day_forecast_rationale": "rationale",
+        }
+        key = aliases.get(name)
+        return nested.get(key, fallback) if key else fallback
+
+    confidence = _safe_str(pick("next_day_confidence")) or "低"
+    confidence_score = _safe_float(pick("next_day_confidence_score"), 0) or 0
+    coverage = _safe_float(pick("next_day_data_coverage_pct"), 0) or 0
+    weight_delta = _safe_float(bridge.get("next_day_market_weight_delta"), None)
+    if weight_delta is None:
+        weight_delta = _safe_float(effect.get("market_weight_delta"), 0) or 0
+    score_delta = _safe_float(bridge.get("next_day_godpick_score_delta"), None)
+    if score_delta is None:
+        score_delta = _safe_float(effect.get("score_delta"), 0) or 0
+    # Low confidence/coverage must not influence recommendation weights.
+    usable = confidence in {"高", "中"} and confidence_score >= 50 and coverage >= 52
+    if not usable:
+        weight_delta = 0.0
+        score_delta = 0.0
+    return {
+        "forecast_date": _safe_str(pick("next_day_forecast_date")),
+        "direction": _safe_str(pick("next_day_market_direction")) or "資料不足",
+        "score": _safe_float(pick("next_day_market_score"), 50) or 50,
+        "confidence": confidence,
+        "confidence_score": confidence_score,
+        "coverage": coverage,
+        "up": _safe_float(pick("next_day_up_probability_pct")),
+        "flat": _safe_float(pick("next_day_flat_probability_pct")),
+        "down": _safe_float(pick("next_day_down_probability_pct")),
+        "expected_return": _safe_float(pick("next_day_expected_return_pct")),
+        "expected_low": _safe_float(pick("next_day_expected_low")),
+        "expected_high": _safe_float(pick("next_day_expected_high")),
+        "rationale": _safe_str(pick("next_day_forecast_rationale")),
+        "weight_delta": int(round(weight_delta)),
+        "score_delta": round(float(score_delta), 1),
+        "position_cap": _safe_float(bridge.get("next_day_position_cap_pct"), _safe_float(effect.get("position_cap_pct"))),
+        "preferred_style": _safe_str(bridge.get("next_day_preferred_style") or effect.get("preferred_style")),
+        "avoid_style": _safe_str(bridge.get("next_day_avoid_style") or effect.get("avoid_style")),
+        "effect_mode": _safe_str(bridge.get("next_day_effect_mode") or effect.get("mode")),
+        "usable": usable,
+        "raw": nested,
+    }
+
+
 def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, Any], enabled: bool = True) -> dict[str, int]:
     """
     v27.3：把大盤橋接檔轉成權重微調。
@@ -2411,6 +2514,34 @@ def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, An
             cut_pattern = min(cut - cut_burst, max(0, out.get("型態突破", 0) - 3))
             out["型態突破"] = out.get("型態突破", 0) - cut_pattern
             out["技術結構"] = out.get("技術結構", 0) + cut_pattern
+
+    # v80：隔日大盤預測只做小幅、信心感知的權重校正。
+    nextday = _nextday_forecast_summary_v80(bridge)
+    nd = int(nextday.get("weight_delta", 0) or 0)
+    if nd > 0:
+        add = min(nd, 4)
+        out["市場環境"] = out.get("市場環境", 0) + add
+        # 偏多預測增加市場/型態確認，但不提高盲目爆發追價。
+        if add >= 2:
+            out["型態突破"] = out.get("型態突破", 0) + 1
+        remain = add + (1 if add >= 2 else 0)
+        for k in ["自動因子", "爆發力"]:
+            if remain <= 0:
+                break
+            take = min(remain, max(0, out.get(k, 0) - 2))
+            out[k] = out.get(k, 0) - take
+            remain -= take
+    elif nd < 0:
+        cut = min(abs(nd), 5)
+        # 偏空預測不刪逆勢強股；把追價權重轉到交易可行與技術防守。
+        for k in ["爆發力", "型態突破"]:
+            if cut <= 0:
+                break
+            take = min(cut, max(0, out.get(k, 0) - 2))
+            out[k] = out.get(k, 0) - take
+            out["交易可行"] = out.get("交易可行", 0) + (take + 1) // 2
+            out["技術結構"] = out.get("技術結構", 0) + take // 2
+            cut -= take
 
     return _normalize_int_weight_total(out, 100)
 
@@ -2622,6 +2753,21 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     with c13:
         st.metric("費半 / Nasdaq", f"{_safe_signed_pct_text_v69(overnight_info.get('sox'))} / {_safe_signed_pct_text_v69(overnight_info.get('nasdaq'))}")
 
+    nextday_info = _nextday_forecast_summary_v80(bridge)
+    n1, n2, n3, n4, n5 = st.columns([1.15, 1.0, 1.0, 1.15, 1.3])
+    with n1:
+        st.metric("隔日大盤預測", nextday_info.get("direction") or "資料不足")
+    with n2:
+        st.metric("上漲機率", "—" if nextday_info.get("up") is None else f"{nextday_info.get('up'):.1f}%")
+    with n3:
+        st.metric("下跌機率", "—" if nextday_info.get("down") is None else f"{nextday_info.get('down'):.1f}%")
+    with n4:
+        st.metric("預測信心", f"{nextday_info.get('confidence')}｜{nextday_info.get('confidence_score', 0):.1f}")
+    with n5:
+        st.metric("推薦權重校正", f"{nextday_info.get('weight_delta', 0):+d}｜{nextday_info.get('effect_mode') or '中性'}")
+    if not nextday_info.get("usable"):
+        st.caption("隔日預測目前信心或資料覆蓋不足，系統已自動採資料保護：顯示預測但不影響推薦權重。")
+
     adjusted = _apply_macro_bridge_to_weights(applied_weights, bridge, enabled=enabled)
     if enabled:
         st.caption("已套用大盤橋接後權重：" + _weight_text(adjusted))
@@ -2637,6 +2783,9 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
         st.write(f"**隔夜風控：** {overnight_info.get('risk') or '未標示'}｜{overnight_info.get('bias') or '未標示'}｜加減 {overnight_info.get('delta', 0):+.1f} 分")
         st.write(f"**隔夜解讀：** {overnight_info.get('comment') or '—'}")
         st.write(f"**美盤重點：** Nasdaq {_safe_signed_pct_text_v69(overnight_info.get('nasdaq'))}｜S&P500 {_safe_signed_pct_text_v69(overnight_info.get('sp500'))}｜費半 {_safe_signed_pct_text_v69(overnight_info.get('sox'))}｜台指夜盤 {_safe_signed_num_text_v69(overnight_info.get('night_tx'))}")
+        st.write(f"**隔日大盤預測：** {nextday_info.get('direction')}｜上漲 {nextday_info.get('up') if nextday_info.get('up') is not None else '—'}%｜震盪 {nextday_info.get('flat') if nextday_info.get('flat') is not None else '—'}%｜下跌 {nextday_info.get('down') if nextday_info.get('down') is not None else '—'}%")
+        st.write(f"**隔日推薦校正：** 權重 {nextday_info.get('weight_delta', 0):+d}｜總部位上限 {nextday_info.get('position_cap') if nextday_info.get('position_cap') is not None else '—'}%｜偏好 {nextday_info.get('preferred_style') or '—'}")
+        st.write(f"**隔日預測理由：** {nextday_info.get('rationale') or '—'}")
         st.write(f"**資料日期：** {_safe_str(bridge.get('market_date')) or '—'}")
         st.write(f"**部位建議：** {position_hint or '—'}")
         st.write(f"**大盤解讀：** {_safe_str(bridge.get('trend_comment')) or _safe_str(bridge.get('market_bias')) or '—'}")
@@ -2686,6 +2835,20 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         x["Nasdaq期貨偏向"] = ""
         x["S&P期貨偏向"] = ""
         x["匯率風險等級"] = ""
+        x["隔日大盤預測日期"] = ""
+        x["隔日大盤方向"] = ""
+        x["隔日大盤分數"] = ""
+        x["隔日大盤信心"] = ""
+        x["隔日上漲機率%"] = ""
+        x["隔日震盪機率%"] = ""
+        x["隔日下跌機率%"] = ""
+        x["隔日預估漲跌%"] = ""
+        x["隔日大盤預測加減分"] = ""
+        x["隔日大盤權重校正"] = ""
+        x["隔日建議總部位上限%"] = ""
+        x["隔日偏好選股風格"] = ""
+        x["隔日應避免風格"] = ""
+        x["隔日大盤預測理由"] = ""
         return x
 
     score = _safe_float(bridge.get("market_score"), 50)
@@ -2700,6 +2863,7 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     effect_info = _market_effect_summary_v37(bridge.get("godpick_market_effect"))
     diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
     overnight_info = _overnight_effect_summary_v69(bridge)
+    nextday_info = _nextday_forecast_summary_v80(bridge)
 
     x["大盤橋接分數"] = score
     x["大盤橋接狀態"] = state
@@ -2728,6 +2892,20 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     x["Nasdaq期貨偏向"] = overnight_info.get("us_bias") or _safe_signed_pct_text_v69(overnight_info.get("nasdaq_futures"))
     x["S&P期貨偏向"] = overnight_info.get("us_bias") or _safe_signed_pct_text_v69(overnight_info.get("sp500_futures"))
     x["匯率風險等級"] = overnight_info.get("fx_risk")
+    x["隔日大盤預測日期"] = nextday_info.get("forecast_date")
+    x["隔日大盤方向"] = nextday_info.get("direction")
+    x["隔日大盤分數"] = nextday_info.get("score")
+    x["隔日大盤信心"] = f"{nextday_info.get('confidence')}｜{nextday_info.get('confidence_score', 0):.1f}"
+    x["隔日上漲機率%"] = nextday_info.get("up")
+    x["隔日震盪機率%"] = nextday_info.get("flat")
+    x["隔日下跌機率%"] = nextday_info.get("down")
+    x["隔日預估漲跌%"] = nextday_info.get("expected_return")
+    x["隔日大盤預測加減分"] = nextday_info.get("score_delta")
+    x["隔日大盤權重校正"] = nextday_info.get("weight_delta")
+    x["隔日建議總部位上限%"] = nextday_info.get("position_cap")
+    x["隔日偏好選股風格"] = nextday_info.get("preferred_style")
+    x["隔日應避免風格"] = nextday_info.get("avoid_style")
+    x["隔日大盤預測理由"] = nextday_info.get("rationale")
 
     # 同步到原本大盤欄位，讓舊頁面/紀錄頁也可讀。
     if "大盤可參考分數" in x.columns:

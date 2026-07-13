@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 
 
@@ -4753,6 +4753,9 @@ def _v70_required_snapshot_keys() -> list[str]:
         "futures_index", "futures_change", "futures_change_pct",
         "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment",
         "event_factor", "macro_mode_estimate", "feature_center_version",
+        "next_day_forecast", "next_day_market_direction", "next_day_market_score",
+        "next_day_confidence", "next_day_up_probability_pct", "next_day_down_probability_pct",
+        "next_day_godpick_score_delta", "next_day_market_weight_delta",
     ]
 
 
@@ -4950,6 +4953,80 @@ def _v70_render_one_click_control(target_date: date):
     with st.expander("v70 上次一鍵更新 / 寫入結果", expanded=False):
         _v70_render_completion_notice()
 
+# =========================================================
+# v80：隔日大盤機率預測與股神推薦橋接
+# =========================================================
+def _build_nextday_forecast_for_page(row: dict[str, Any], snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        from market_nextday_forecast_engine import build_nextday_market_forecast
+        base_snapshot = snapshot if isinstance(snapshot, dict) else _build_market_snapshot_v30(row)
+        history = _cache_to_market_df() if "_cache_to_market_df" in globals() else pd.DataFrame()
+        return build_nextday_market_forecast(base_snapshot, history)
+    except Exception as e:
+        return {
+            "direction": "資料不足",
+            "direction_score": 50.0,
+            "confidence": "低",
+            "confidence_score": 0.0,
+            "up_probability_pct": 0.0,
+            "flat_probability_pct": 100.0,
+            "down_probability_pct": 0.0,
+            "rationale": f"隔日預測引擎載入失敗：{e}",
+            "godpick_effect": {"mode": "資料保護", "score_delta": 0, "market_weight_delta": 0, "position_cap_pct": 0},
+            "disclaimer": "資料不足時不對股神推薦加減分。",
+        }
+
+
+def _render_nextday_forecast_panel(row: dict[str, Any]) -> None:
+    st.markdown("### v80 隔日大盤專業機率預測")
+    st.caption("以加權技術趨勢、櫃買廣度、台指期、隔夜美盤、法人與事件風控做可解釋的機率預測；不是保證漲跌。")
+    forecast = _build_nextday_forecast_for_page(row)
+    effect = forecast.get("godpick_effect") if isinstance(forecast.get("godpick_effect"), dict) else {}
+    c1, c2, c3, c4, c5 = st.columns([1.15, 1.0, 1.0, 1.0, 1.25])
+    with c1:
+        st.metric("隔日方向", _safe_str(forecast.get("direction")) or "資料不足")
+    with c2:
+        st.metric("方向分數", f"{_safe_float(forecast.get('direction_score'), 50):.1f}")
+    with c3:
+        st.metric("上漲機率", f"{_safe_float(forecast.get('up_probability_pct'), 0):.1f}%")
+    with c4:
+        st.metric("震盪 / 下跌", f"{_safe_float(forecast.get('flat_probability_pct'), 0):.1f}% / {_safe_float(forecast.get('down_probability_pct'), 0):.1f}%")
+    with c5:
+        st.metric("模型信心", f"{_safe_str(forecast.get('confidence')) or '低'}｜{_safe_float(forecast.get('confidence_score'), 0):.1f}")
+
+    r1, r2, r3, r4 = st.columns(4)
+    with r1:
+        expected = _safe_float(forecast.get("expected_return_pct"))
+        st.metric("預估中心漲跌", "—" if expected is None else f"{expected:+.2f}%")
+    with r2:
+        low = _safe_float(forecast.get("expected_low"))
+        high = _safe_float(forecast.get("expected_high"))
+        st.metric("預估波動區間", "—" if low is None or high is None else f"{low:,.0f} ～ {high:,.0f}")
+    with r3:
+        st.metric("股神校正", f"{_safe_float(effect.get('score_delta'), 0):+.1f} 分｜權重 {_safe_float(effect.get('market_weight_delta'), 0):+.0f}")
+    with r4:
+        cap = _safe_float(effect.get("position_cap_pct"))
+        st.metric("建議總部位上限", "—" if cap is None else f"{cap:.0f}%")
+
+    rationale = _safe_str(forecast.get("rationale"))
+    if rationale:
+        st.info(rationale)
+    st.write(f"**隔日偏好：** {_safe_str(effect.get('preferred_style')) or '低位階、量價同步與風報比完整標的'}")
+    st.write(f"**應避免：** {_safe_str(effect.get('avoid_style')) or '高乖離與無量追價'}")
+    calibration = forecast.get("performance_calibration") if isinstance(forecast.get("performance_calibration"), dict) else {}
+    evaluated = int(_safe_float(calibration.get("evaluated_count"), 0) or 0)
+    hit = _safe_float(calibration.get("direction_hit_rate_pct"))
+    if evaluated > 0:
+        st.caption(f"歷史校正：已評估 {evaluated} 次｜方向命中率 {'—' if hit is None else f'{hit:.1f}%'}｜{_safe_str(calibration.get('status'))}")
+    else:
+        st.caption("歷史校正：尚無足夠隔日預測紀錄，模型會自動降低信心，不會放大多空訊號。")
+    with st.expander("隔日預測因子明細 / JSON", expanded=False):
+        details = forecast.get("factor_contributions")
+        if isinstance(details, list) and details:
+            st.dataframe(pd.DataFrame(details), use_container_width=True, hide_index=True)
+        st.json(forecast)
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
@@ -4964,11 +5041,11 @@ def main():
     # <<< GODPICK_BI_V135_REAL_CHART_STYLE
 
     render_pro_hero(
-        title="01 大盤趨勢｜v70一鍵更新寫入版",
-        subtitle="加權、櫃買、期貨、外盤、法人、夜盤、美盤與美國期貨可一鍵更新、一鍵寫入，並通知是否全部完成。",
+        title="01 大盤趨勢｜v80隔日預測決策版",
+        subtitle="整合加權、櫃買、期貨、法人、隔夜美盤與多因子隔日機率預測，並同步校正股神推薦。",
     )
 
-    st.info("v70：新增一鍵更新全部必要數據並寫入股神橋接檔；完成後會明確通知是否全部更新、全部寫入完成。")
+    st.info("v80：一鍵更新後會產生隔日大盤上漲／震盪／下跌機率、預估區間與信心度，並以小幅、可解釋的方式帶入股神推薦；低信心時不加減分。")
 
     _phase61_render_godpick_signal_panel()
 
@@ -5089,6 +5166,7 @@ def main():
     _render_us_market_block(target_date)
     _v68_render_overnight_risk_panel(row)
     _render_taifex_block(target_date)
+    _render_nextday_forecast_panel(row)
     _render_market_cache_chart()
     _render_market_snapshot_block(row)
     _v32_render_godpick_bridge_summary(row)
@@ -5202,15 +5280,50 @@ def _v71_enrich_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     snapshot["required_by_godpick"] = req
     snapshot["one_click_sync_version"] = MACRO_V71_SYNC_VERSION
     snapshot["one_click_sync_at"] = _v71_now_text()
+
+    # v80：隔日預測只讀本機快取，不在推薦頁連外。低資料覆蓋時維持中性。
+    try:
+        from market_nextday_forecast_engine import build_nextday_market_forecast, flatten_forecast_for_bridge
+        forecast = snapshot.get("next_day_forecast") if isinstance(snapshot.get("next_day_forecast"), dict) else None
+        if not forecast:
+            history = _cache_to_market_df() if "_cache_to_market_df" in globals() else pd.DataFrame()
+            forecast = build_nextday_market_forecast(snapshot, history)
+        snapshot.update(flatten_forecast_for_bridge(forecast))
+        req = _v71_get_dict(snapshot.get("required_by_godpick"))
+        for k in [
+            "next_day_forecast_date", "next_day_market_direction", "next_day_market_score",
+            "next_day_confidence", "next_day_confidence_score", "next_day_up_probability_pct",
+            "next_day_flat_probability_pct", "next_day_down_probability_pct",
+            "next_day_expected_return_pct", "next_day_expected_low", "next_day_expected_high",
+            "next_day_godpick_score_delta", "next_day_market_weight_delta",
+            "next_day_position_cap_pct", "next_day_preferred_style", "next_day_avoid_style",
+            "next_day_effect_mode",
+        ]:
+            req[k] = snapshot.get(k)
+        req["next_day_forecast_version"] = snapshot.get("next_day_forecast_version")
+        snapshot["required_by_godpick"] = req
+    except Exception as e:
+        snapshot["next_day_forecast_warning"] = str(e)
     return snapshot
 
 def _v71_build_bridge_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     snapshot = _v71_enrich_snapshot(snapshot)
-    keys = ["updated_at", "version", "v71_sync_version", "one_click_sync_version", "one_click_sync_at", "market_score", "market_score_raw", "market_trend", "market_risk_level", "market_bias", "risk_gate", "position_hint", "recommendation_adjustment", "volume_status", "trend_comment", "required_by_godpick", "godpick_market_effect", "market_session", "market_session_label", "market_session_usable", "data_source_health", "data_quality", "freshness", "data_guard_notes", "data_diagnostics", "event_factor", "macro_mode_estimate", "feature_center_version", "twse_index", "twse_change", "twse_change_pct", "otc_index", "otc_change", "otc_change_pct", "futures_index", "futures_change", "futures_change_pct", "mini_futures_index", "mini_futures_change", "mini_futures_change_pct", "overnight_factor", "overnight_cache_updated_at", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "dow_change_pct", "sox_change_pct", "nasdaq_futures_change_pct", "sp500_futures_change_pct", "dxy_change_pct", "usdtwd_change_pct", "us_futures_bias", "fx_risk_level", "overnight_version"]
+    keys = ["updated_at", "version", "v71_sync_version", "one_click_sync_version", "one_click_sync_at", "market_score", "market_score_raw", "market_trend", "market_risk_level", "market_bias", "risk_gate", "position_hint", "recommendation_adjustment", "volume_status", "trend_comment", "required_by_godpick", "godpick_market_effect", "market_session", "market_session_label", "market_session_usable", "data_source_health", "data_quality", "freshness", "data_guard_notes", "data_diagnostics", "event_factor", "macro_mode_estimate", "feature_center_version", "twse_index", "twse_change", "twse_change_pct", "otc_index", "otc_change", "otc_change_pct", "futures_index", "futures_change", "futures_change_pct", "mini_futures_index", "mini_futures_change", "mini_futures_change_pct", "overnight_factor", "overnight_cache_updated_at", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "night_futures_change_pct", "nasdaq_change_pct", "sp500_change_pct", "dow_change_pct", "sox_change_pct", "nasdaq_futures_change_pct", "sp500_futures_change_pct", "dxy_change_pct", "usdtwd_change_pct", "us_futures_bias", "fx_risk_level", "overnight_version", "next_day_forecast", "next_day_forecast_version", "next_day_forecast_date", "next_day_market_direction", "next_day_market_score", "next_day_confidence", "next_day_confidence_score", "next_day_up_probability_pct", "next_day_flat_probability_pct", "next_day_down_probability_pct", "next_day_expected_return_pct", "next_day_expected_low", "next_day_expected_high", "next_day_data_coverage_pct", "next_day_forecast_rationale", "next_day_godpick_score_delta", "next_day_market_weight_delta", "next_day_position_cap_pct", "next_day_preferred_style", "next_day_avoid_style", "next_day_effect_mode"]
     return {k: snapshot.get(k) for k in keys}
 
 def _write_market_snapshot_v30(row: dict[str, Any]) -> tuple[bool, str]:
     snapshot = _v71_enrich_snapshot(_build_market_snapshot_v30(row))
+    try:
+        from market_nextday_forecast_engine import evaluate_and_store_forecast, flatten_forecast_for_bridge
+        forecast = snapshot.get("next_day_forecast") if isinstance(snapshot.get("next_day_forecast"), dict) else {}
+        if forecast:
+            history = _cache_to_market_df() if "_cache_to_market_df" in globals() else pd.DataFrame()
+            performance = evaluate_and_store_forecast(forecast, history)
+            forecast = dict(forecast)
+            forecast["performance_calibration"] = performance
+            snapshot.update(flatten_forecast_for_bridge(forecast))
+    except Exception as e:
+        snapshot["next_day_forecast_record_warning"] = str(e)
     bridge = _v71_build_bridge_from_snapshot(snapshot)
     ok1 = _v30_write_json_dict(MARKET_SNAPSHOT_FILE, snapshot)
     ok2 = _v30_write_json_dict(BRIDGE_FILE, bridge)
@@ -5234,7 +5347,7 @@ def _v70_check_written_files() -> dict[str, Any]:
     bridge_ok = isinstance(bridge, dict) and len(bridge.keys()) > 0
     records_ok = isinstance(records, list) and len(records) > 0
     missing_snapshot = [k for k in _v70_required_snapshot_keys() if not (isinstance(snapshot, dict) and k in snapshot)]
-    missing_bridge = [k for k in ["market_score", "market_trend", "risk_gate", "position_hint", "required_by_godpick", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "event_factor", "macro_mode_estimate", "feature_center_version"] if not (isinstance(bridge, dict) and k in bridge)]
+    missing_bridge = [k for k in ["market_score", "market_trend", "risk_gate", "position_hint", "required_by_godpick", "overnight_score", "overnight_risk_level", "overnight_bias", "overnight_comment", "event_factor", "macro_mode_estimate", "feature_center_version", "next_day_forecast", "next_day_market_direction", "next_day_market_score", "next_day_confidence", "next_day_godpick_score_delta"] if not (isinstance(bridge, dict) and k in bridge)]
     all_written = snap_ok and bridge_ok and records_ok and not missing_snapshot and not missing_bridge
     return {"market_snapshot_ok": snap_ok, "macro_mode_bridge_ok": bridge_ok, "macro_trend_records_ok": records_ok, "missing_snapshot_keys": missing_snapshot, "missing_bridge_keys": missing_bridge, "all_written": all_written, "snapshot_updated_at": snapshot.get("updated_at") if isinstance(snapshot, dict) else "", "bridge_updated_at": bridge.get("updated_at") if isinstance(bridge, dict) else "", "records_count": len(records) if isinstance(records, list) else 0, "v71_sync_version": MACRO_V71_SYNC_VERSION}
 
