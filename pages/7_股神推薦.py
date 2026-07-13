@@ -175,6 +175,11 @@ PFX = "godpick_"
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 100  # V35：再降低前端重繪頻率，避免 Streamlit 每檔刷新拖慢
 SCAN_MAX_WORKERS = 8          # V48.1：資料源穩定優先；配合每執行緒 Session / Yahoo 併發閘門，避免 429 大量漏股
+
+# V48.2：資料品質統計必須把「K線成功」與「通過推薦前置篩選」分開。
+# signal/risk/prelaunch/trade_filtered 都已成功取得並完成 K 線分析，不能誤算成無有效K線。
+_KLINE_VALID_STATUSES = {"ok", "signal_filtered", "risk_filtered", "prelaunch_filtered", "trade_filtered"}
+_RETRYABLE_SCAN_STATUSES = {"no_history", "analysis_error", "future_exception"}
 V22_CHECKPOINT_EVERY = 500    # V35：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 HISTORY_DEBUG_ON_FAIL = False  # V35：掃描中失敗股票不再即時跑慢速 debug，失敗原因彙總到除錯摘要
@@ -4476,7 +4481,7 @@ def _render_debug_scan_summary():
     with c1:
         st.metric("預計掃描", int(data.get("total_count", 0)))
     with c2:
-        st.metric("成功分析", int(data.get("analyzed_ok", 0)))
+        st.metric("有效K線", int(data.get("history_ok", data.get("analyzed_ok", 0))))
     with c3:
         st.metric("完整候選池", int(data.get("candidate_diagnosis_count", data.get("analyzed_ok", 0))))
     with c4:
@@ -8913,6 +8918,9 @@ def _build_recommend_df(
     base_rows = []
     debug_summary = {
         "total_count": total_count,
+        # history_ok：成功取得並完成 K 線/指標分析；即使之後被訊號、風控、起漲或交易門檻篩掉，仍屬有效K線。
+        # analyzed_ok：通過推薦前置篩選並進入完整候選池。兩者不可混用。
+        "history_ok": 0,
         "analyzed_ok": 0,
         "passed_final": 0,
         "invalid_code": 0,
@@ -8927,7 +8935,8 @@ def _build_recommend_df(
         "history_debug_samples": [],
         "error_samples": [],
         "worker_count": worker_count,
-        "speed_version": "v48_speed_monitor_with_slowest_stock_diagnostics",
+        "checkpoint_retryable_count": 0,
+        "speed_version": "v48_2_kline_validity_and_retryable_checkpoint_fix",
         "scan_started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "scan_elapsed_sec": 0.0,
         "avg_sec_per_stock": 0.0,
@@ -8962,8 +8971,15 @@ def _build_recommend_df(
         code = _safe_str(result.get("code"))
         if not code and isinstance(result.get("row"), dict):
             code = _safe_str(result.get("row", {}).get("股票代號"))
-        if code:
+
+        # 只有真正完成或確定性排除才可視為斷點已完成。
+        # no_history / analysis_error 必須在「斷點續掃」時重新補抓，不能永久被舊失敗結果跳過。
+        if code and status not in _RETRYABLE_SCAN_STATUSES:
             processed_codes.add(code)
+
+        history_valid = bool(result.get("history_ok", False)) or status in _KLINE_VALID_STATUSES
+        if history_valid:
+            debug_summary["history_ok"] = int(debug_summary.get("history_ok", 0)) + 1
 
         if status == "ok":
             row = result.get("row")
@@ -8990,11 +9006,37 @@ def _build_recommend_df(
         checkpoint_payload = _v22_load_checkpoint(scan_signature)
         checkpoint_results = checkpoint_payload.get("processed_results", []) if isinstance(checkpoint_payload, dict) else []
         if isinstance(checkpoint_results, list) and checkpoint_results:
+            # 同一股票只保留斷點內最後一筆結果；舊的 no_history / analysis_error 不載入完成集合，
+            # 讓本次續掃真正只補抓失敗股票，而不是顯示「已完成」後永遠不重試。
+            latest_by_code: dict[str, dict[str, Any]] = {}
+            no_code_results: list[dict[str, Any]] = []
             for old_result in checkpoint_results:
-                if isinstance(old_result, dict):
-                    processed_results.append(old_result)
-                    _consume_scan_result(old_result, from_checkpoint=True)
-            progress_text.caption(f"已載入斷點續掃：{len(processed_results)} / {total_count} 檔，將只補掃未完成股票。")
+                if not isinstance(old_result, dict):
+                    continue
+                old_code = _normalize_code(old_result.get("code"))
+                if not old_code and isinstance(old_result.get("row"), dict):
+                    old_code = _normalize_code(old_result.get("row", {}).get("股票代號"))
+                if old_code:
+                    latest_by_code[old_code] = old_result
+                else:
+                    no_code_results.append(old_result)
+
+            retryable_count = 0
+            retained_results: list[dict[str, Any]] = []
+            for old_result in list(latest_by_code.values()) + no_code_results:
+                old_status = _safe_str(old_result.get("status")) or "analysis_error"
+                if old_status in _RETRYABLE_SCAN_STATUSES:
+                    retryable_count += 1
+                    continue
+                retained_results.append(old_result)
+                _consume_scan_result(old_result, from_checkpoint=True)
+
+            processed_results.extend(retained_results)
+            debug_summary["checkpoint_retryable_count"] = retryable_count
+            progress_text.caption(
+                f"已載入斷點有效結果：{len(retained_results)} / {total_count} 檔；"
+                f"本次將重新補抓 {retryable_count} 檔舊失敗股票及其他未完成股票。"
+            )
 
     pending_items = []
     for item in universe_items:
@@ -9124,7 +9166,8 @@ def _build_recommend_df(
         debug_summary["scan_speed_samples"] = all_speed_samples[:200]
         debug_summary["slowest_stocks"] = slowest
         debug_summary["status_elapsed_summary"] = status_summary
-        debug_summary["history_success_rate_pct"] = round((debug_summary.get("analyzed_ok", 0) / max(total_count, 1)) * 100, 2)
+        debug_summary["history_success_rate_pct"] = round((debug_summary.get("history_ok", 0) / max(total_count, 1)) * 100, 2)
+        debug_summary["candidate_success_rate_pct"] = round((debug_summary.get("analyzed_ok", 0) / max(total_count, 1)) * 100, 2)
         debug_summary["scan_finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # v48 utils.py 若有提供資料源診斷，推薦頁會在除錯摘要顯示。
         try:

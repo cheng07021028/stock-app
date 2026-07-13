@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase8_5_daily_performance_quality_gate_20260713"
+EXECUTION_GOVERNANCE_VERSION = "phase8_6_kline_validity_metric_fix_20260713"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -168,18 +168,32 @@ def build_scan_quality_report(
     """
     data = summary if isinstance(summary, dict) else {}
     expected = int(_safe_float(data.get("total_count"), universe_size or 0))
-    analyzed = int(_safe_float(data.get("analyzed_ok"), candidate_count or 0))
+    candidate_passed = int(_safe_float(data.get("analyzed_ok"), candidate_count or 0))
+
+    # 「有效K線」不是只有最後進入候選池的股票。signal/risk/prelaunch/trade_filtered
+    # 都已完成 K 線與指標分析，只是後續條件不合格。舊版誤用 analyzed_ok 當分子，
+    # 會把正常被門檻淘汰的股票誤判成抓不到K線，造成 483/1766 這類假性低覆蓋。
+    inferred_history_ok = candidate_passed + sum(
+        max(0, int(_safe_float(data.get(key), 0)))
+        for key in ("signal_filtered", "risk_filtered", "prelaunch_filtered", "trade_filtered")
+    )
+    history_ok = int(_safe_float(data.get("history_ok"), inferred_history_ok))
+    if expected > 0:
+        history_ok = min(max(history_ok, 0), expected)
+    else:
+        history_ok = max(history_ok, 0)
+
     processed = 0
     for key in _SCAN_TERMINAL_KEYS:
         processed += max(0, int(_safe_float(data.get(key), 0)))
     if expected > 0:
-        processed = min(max(processed, analyzed), expected)
+        processed = min(max(processed, history_ok), expected)
     else:
-        processed = max(processed, analyzed)
+        processed = max(processed, history_ok)
 
     coverage = (processed / expected * 100.0) if expected > 0 else 0.0
-    usable_history = (analyzed / expected * 100.0) if expected > 0 else 0.0
-    result_ratio = (final_count / analyzed * 100.0) if analyzed > 0 else 0.0
+    usable_history = (history_ok / expected * 100.0) if expected > 0 else 0.0
+    result_ratio = (final_count / candidate_passed * 100.0) if candidate_passed > 0 else 0.0
 
     liquidity_coverage = 0.0
     official_coverage = 0.0
@@ -222,25 +236,25 @@ def build_scan_quality_report(
         status, level, usable, factor = "掃描未完成｜禁止正式推薦", "invalid", False, 0.0
         scope = "未完成掃描"
         reason = "仍有大量股票未完成處理，不能以局部結果代表市場。"
-    elif analyzed < minimum_pool or usable_history < 10.0:
+    elif history_ok < minimum_pool or usable_history < 10.0:
         status, level, usable, factor = "有效資料池過小｜禁止正式推薦", "invalid", False, 0.0
-        scope = f"僅{analyzed}檔有效資料"
+        scope = f"僅{history_ok}檔有效K線資料"
         reason = "成功分析樣本過少，無法形成具代表性的選股池。"
     elif data_rows > 0 and liquidity_coverage < 60.0:
         status, level, usable, factor = "流動性資料異常｜禁止正式推薦", "invalid", False, 0.0
-        scope = f"有效K線{analyzed}檔，但流動性覆蓋不足"
+        scope = f"有效K線{history_ok}檔，但流動性覆蓋不足"
         reason = "多數候選缺少成交額/成交量，不能把資料缺失誤判為低流動性，也不能產生正式買進結論。"
     elif coverage >= 99.0 and usable_history >= 80.0 and (liquidity_coverage >= 90.0 or data_rows == 0):
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
         reason = "掃描、K線與流動性資料均達正式推薦標準。"
-    elif coverage >= 99.0 and usable_history >= 60.0 and analyzed >= minimum_pool and (liquidity_coverage >= 80.0 or data_rows == 0):
+    elif coverage >= 99.0 and usable_history >= 60.0 and history_ok >= minimum_pool and (liquidity_coverage >= 80.0 or data_rows == 0):
         status, level, usable, factor = "掃描完成｜限定有效資料池", "limited", True, 0.5
-        scope = f"僅適用於{analyzed}檔有效資料股票"
+        scope = f"僅適用於{history_ok}檔有效K線股票"
         reason = "全體股票已處理且有效K線達六成；推薦只代表有效資料池，倉位上限自動減半。"
-    elif coverage >= 99.0 and analyzed >= minimum_pool and usable_history >= 20.0:
+    elif coverage >= 99.0 and history_ok >= minimum_pool and usable_history >= 20.0:
         status, level, usable, factor = "有效K線不足｜只供診斷雷達", "invalid", False, 0.0
-        scope = f"僅{analyzed}檔有效K線，不足以形成正式作戰母體"
+        scope = f"僅{history_ok}檔有效K線，不足以形成正式作戰母體"
         reason = "全體股票雖已處理，但有效K線未達60%；只能檢視隔日優勢型態與雷達，不得宣稱正式推薦可用。"
     elif coverage >= 95.0 and usable_history >= 50.0 and (liquidity_coverage >= 75.0 or data_rows == 0):
         status, level, usable, factor = "可用但需注意", "warning", True, 0.7
@@ -259,7 +273,8 @@ def build_scan_quality_report(
         "倉位折減係數": float(factor),
         "預計掃描數": expected,
         "已處理數": processed,
-        "成功分析數": analyzed,
+        "成功分析數": history_ok,
+        "通過推薦前置篩選數": candidate_passed,
         "完整候選診斷數": int(candidate_count or 0),
         "最終作戰候選數": int(final_count or 0),
         "掃描覆蓋率%": round(coverage, 2),
