@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase8_4_actionable_list_fix_20260712"
+EXECUTION_GOVERNANCE_VERSION = "phase8_5_daily_performance_quality_gate_20260713"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -76,6 +76,7 @@ CANDIDATE_DIAGNOSIS_COLUMNS = [
     "候選強度分", "推薦總分", "股神實戰總分", "可操作分", "實戰操作品質分",
     "推薦可信度分", "資料完整度評分", "資料完整度", "官方資料完整度",
     "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
+    "隔日可參考分", "隔日優勢型態", "隔日風險標記", "隔日參考判定", "觸發距離%", "停損距離_隔日%",
     "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比", "實戰風控來源",
     "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
     "主流資金分", "族群攻擊強度", "資金攻擊有效分", "成交額百萬", "20日均成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
@@ -95,6 +96,7 @@ ACTION_TABLE_COLUMNS = [
     "是否正式推薦", "操作許可", "正式推薦等級", "候選性質",
     "可操作分", "實戰操作品質分", "推薦可信度分", "候選強度分",
     "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+    "隔日可參考分", "隔日優勢型態", "隔日風險標記", "隔日參考判定", "觸發距離%", "停損距離_隔日%",
     "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風控來源",
     "成交額百萬", "流動性等級", "流動性資料狀態",
     "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
@@ -232,10 +234,14 @@ def build_scan_quality_report(
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
         reason = "掃描、K線與流動性資料均達正式推薦標準。"
-    elif coverage >= 99.0 and analyzed >= minimum_pool and (liquidity_coverage >= 80.0 or data_rows == 0):
+    elif coverage >= 99.0 and usable_history >= 60.0 and analyzed >= minimum_pool and (liquidity_coverage >= 80.0 or data_rows == 0):
         status, level, usable, factor = "掃描完成｜限定有效資料池", "limited", True, 0.5
         scope = f"僅適用於{analyzed}檔有效資料股票"
-        reason = "全體股票已處理，但部分股票缺少可用K線；推薦只代表有效資料池，倉位上限自動減半。"
+        reason = "全體股票已處理且有效K線達六成；推薦只代表有效資料池，倉位上限自動減半。"
+    elif coverage >= 99.0 and analyzed >= minimum_pool and usable_history >= 20.0:
+        status, level, usable, factor = "有效K線不足｜只供診斷雷達", "invalid", False, 0.0
+        scope = f"僅{analyzed}檔有效K線，不足以形成正式作戰母體"
+        reason = "全體股票雖已處理，但有效K線未達60%；只能檢視隔日優勢型態與雷達，不得宣稱正式推薦可用。"
     elif coverage >= 95.0 and usable_history >= 50.0 and (liquidity_coverage >= 75.0 or data_rows == 0):
         status, level, usable, factor = "可用但需注意", "warning", True, 0.7
         scope = "接近完整的有效資料池"

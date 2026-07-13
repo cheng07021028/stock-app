@@ -174,7 +174,7 @@ PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 100  # V35：再降低前端重繪頻率，避免 Streamlit 每檔刷新拖慢
-SCAN_MAX_WORKERS = 12         # V35：提高平行掃描上限；不做低成本預篩，不漏股票
+SCAN_MAX_WORKERS = 8          # V48.1：資料源穩定優先；配合每執行緒 Session / Yahoo 併發閘門，避免 429 大量漏股
 V22_CHECKPOINT_EVERY = 500    # V35：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 HISTORY_DEBUG_ON_FAIL = False  # V35：掃描中失敗股票不再即時跑慢速 debug，失敗原因彙總到除錯摘要
@@ -6794,6 +6794,48 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         "source": "history_fetch_empty_v34_single_call",
         "error": "",
     })
+
+    # V48.1：第一次空資料通常是 Yahoo/官方瞬間限流，不應立刻永久判成 no_history。
+    # 僅對失敗股票做一次錯峰重試；成功就寫入既有 disk cache，後續掃描直接命中。
+    try:
+        delay_seed = sum(ord(ch) for ch in str(stock_no)) % 7
+        time.sleep(0.12 + delay_seed * 0.025)
+        retry_df = get_history_data(
+            stock_no=stock_no,
+            stock_name=stock_name,
+            market_type=primary,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        retry_prepared = _prepare_history_df(retry_df)
+        if not retry_prepared.empty:
+            attempt_summary.append({
+                "market_type": primary,
+                "rows": int(len(retry_prepared)),
+                "source": "history_fetch_ok_v48_1_staggered_retry",
+                "error": "",
+            })
+            return retry_prepared, primary, {
+                "ok": True,
+                "stock_no": stock_no,
+                "stock_name": stock_name,
+                "used_market": primary,
+                "attempts": attempt_summary,
+                "rows": len(retry_prepared),
+            }
+        attempt_summary.append({
+            "market_type": primary,
+            "rows": 0,
+            "source": "history_fetch_empty_v48_1_staggered_retry",
+            "error": "",
+        })
+    except Exception as retry_error:
+        attempt_summary.append({
+            "market_type": primary,
+            "rows": 0,
+            "source": "history_fetch_retry_exception_v48_1",
+            "error": str(retry_error),
+        })
 
     # V35：掃描時失敗股票不再立即跑慢速 debug。
     # 原本 no_history 會再跑 get_history_data_debug，等於失敗股票又多打一輪官方資料源，

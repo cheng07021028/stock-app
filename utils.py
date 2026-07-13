@@ -27,9 +27,15 @@ WATCHLIST_CANDIDATES = [
 
 STATE_FILE = "last_query_state.json"
 
-REQUEST_TIMEOUT_FAST = 5
-REQUEST_TIMEOUT_NORMAL = 4
+REQUEST_TIMEOUT_FAST = 7
+REQUEST_TIMEOUT_NORMAL = 8
 REALTIME_BATCH_SIZE = 50
+
+# V48.1：大量掃描時避免 12~40 條執行緒同時共用同一個 requests.Session。
+# requests.Session 並非保證 thread-safe；Yahoo/官方端點也會因瞬間併發過高而 429/逾時。
+_REQUESTS_THREAD_LOCAL = threading.local()
+_YAHOO_HISTORY_SEMAPHORE = threading.BoundedSemaphore(4)
+_OFFICIAL_HISTORY_SEMAPHORE = threading.BoundedSemaphore(3)
 
 # V47：資料源穩定診斷。只記錄摘要，不保存個資；供 7_股神推薦 / 11_資料診斷讀取。
 DATA_SOURCE_DIAG_FILE = Path("data_source_diagnostics.json")
@@ -148,27 +154,31 @@ def clear_data_source_diagnostics() -> bool:
 
 
 
-@st.cache_resource(show_spinner=False)
 def get_requests_session():
-    session = requests.Session()
+    """每條掃描執行緒各自持有 Session，避免共用連線狀態互相污染。"""
+    session = getattr(_REQUESTS_THREAD_LOCAL, "session", None)
+    if isinstance(session, requests.Session):
+        return session
 
+    session = requests.Session()
     retry = Retry(
-        total=1,
-        read=1,
-        connect=1,
-        backoff_factor=0.25,
+        total=2,
+        read=2,
+        connect=2,
+        backoff_factor=0.40,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"],
+        respect_retry_after_header=True,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=80, pool_maxsize=80)
-
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=16, pool_maxsize=16)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
-
     session.headers.update({
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json,text/plain,*/*",
+        "Connection": "keep-alive",
     })
+    _REQUESTS_THREAD_LOCAL.session = session
     return session
 
 
@@ -2074,6 +2084,30 @@ def _load_history_disk_cache(stock_no, market_type, start_date, end_date) -> pd.
     try:
         path = _history_disk_cache_path(stock_no, market_type, start_date, end_date)
         if not path.exists():
+            # 每天 end_date 改變時，舊版 exact-key 會全部 miss。改找同股最近成功快取，
+            # 切回本次日期區間；只接受至少 20 根且末筆距 end_date 不超過 10 天。
+            code = str(stock_no).strip() or "unknown"
+            candidates = sorted(
+                HISTORY_DISK_CACHE_DIR.glob(f"{code}_*.pkl"),
+                key=lambda f: f.stat().st_mtime if f.exists() else 0,
+                reverse=True,
+            ) if HISTORY_DISK_CACHE_DIR.exists() else []
+            for candidate in candidates[:8]:
+                try:
+                    cached = pd.read_pickle(candidate)
+                    if not isinstance(cached, pd.DataFrame) or cached.empty or "收盤價" not in cached.columns or "日期" not in cached.columns:
+                        continue
+                    temp = cached.copy()
+                    temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+                    temp = temp[(temp["日期"] >= pd.to_datetime(start_date)) & (temp["日期"] <= pd.to_datetime(end_date))]
+                    temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").drop_duplicates("日期", keep="last")
+                    if len(temp) < 20:
+                        continue
+                    lag_days = max((pd.to_datetime(end_date).normalize() - temp["日期"].max().normalize()).days, 0)
+                    if lag_days <= 5:
+                        return temp.reset_index(drop=True)
+                except Exception:
+                    continue
             return pd.DataFrame()
         age_hours = max((time.time() - path.stat().st_mtime) / 3600, 0)
         end_day = pd.to_datetime(end_date).date()
@@ -2280,7 +2314,8 @@ def _fetch_twse_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame,
     month_str = pd.to_datetime(month_start).strftime("%Y%m01")
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     params = {"response": "json", "date": month_str, "stockNo": stock_no}
-    data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST)
+    with _OFFICIAL_HISTORY_SEMAPHORE:
+        data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST)
     stat = _safe_text(data.get("stat"))
     fields, rows = _extract_table_from_payload(data)
     if stat != "OK" or not fields or not rows:
@@ -2309,7 +2344,8 @@ def _fetch_tpex_history_month(stock_no: str, month_start) -> tuple[pd.DataFrame,
     last_msg = ""
     for url, params, name in endpoints:
         try:
-            data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST)
+            with _OFFICIAL_HISTORY_SEMAPHORE:
+                data = _json_get(url, params=params, timeout=REQUEST_TIMEOUT_FAST)
             fields, rows = _extract_table_from_payload(data)
             stat = _safe_text(data.get("stat") or data.get("statCode") or data.get("code"))
             if fields and rows:
@@ -2378,7 +2414,8 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
             url = f"https://{yahoo_host}/v8/finance/chart/{symbol}"
             t0 = time.perf_counter()
             try:
-                resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
+                with _YAHOO_HISTORY_SEMAPHORE:
+                    resp = get_requests_session().get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT_FAST)
                 if resp.status_code != 200:
                     _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {yahoo_host} HTTP {resp.status_code}", time.perf_counter() - t0, code=stock_no)
                     continue

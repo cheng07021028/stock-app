@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_5_actionable_recovery_20260712"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_6_daily_performance_repair_20260713"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -56,6 +56,12 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "高風險雷達保留原因",
     "正式推薦判定來源",
     "流動性參考成交額百萬",
+    "隔日可參考分",
+    "隔日優勢型態",
+    "隔日風險標記",
+    "隔日參考判定",
+    "觸發距離%",
+    "停損距離_隔日%",
     "正式推薦版本",
 ]
 
@@ -73,6 +79,9 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "觸發價偏離%",
     "觸發後守價",
     "流動性參考成交額百萬",
+    "隔日可參考分",
+    "觸發距離%",
+    "停損距離_隔日%",
 }
 
 _BLANK_TEXTS = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -198,10 +207,14 @@ def _upside_space_pct(row: pd.Series) -> float:
 
 
 def _risk_reward_ratio(row: pd.Series) -> float:
+    """採保守風報比，不讓近端停損重算值把原始風險失真地放大。"""
     practical = _num(row, "實戰風險報酬比", 0.0)
-    if practical > 0:
-        return practical
-    return _num(row, "風險報酬比", _num(row, "風險報酬比_決策", 0.0))
+    raw = _first_numeric_value(row, ["風險報酬比", "風險報酬比_決策"], 0.0, prefer_positive=True)
+    if practical > 0 and raw > 0:
+        return min(practical, raw)
+    if raw > 0:
+        return raw
+    return practical
 
 
 
@@ -588,6 +601,8 @@ def _exclusion_reasons(row: pd.Series) -> list[str]:
     upside = _upside_space_pct(row)
     liq = _liquidity_info(row)
 
+    if _safe_str(row.get("市場別")).replace(" ", "") in {"興櫃", "Emerging"}:
+        reasons.append("興櫃股票不列正式作戰推薦")
     if _contains_any(role_blob, ["D｜過熱禁買", "過熱禁買", "BLOCK", "禁止買進排除"]):
         reasons.append("角色已判定過熱/禁買")
     if _contains_any(veto_blob, ["過熱", "追價", "停損距離過大", "風控失衡", "禁買"]):
@@ -618,8 +633,108 @@ def _exclusion_reasons(row: pd.Series) -> list[str]:
     return out
 
 
+def _next_session_profile(row: pd.Series) -> dict[str, Any]:
+    """隔日可參考品質層。
+
+    這一層不是用單日績效反推答案，而是把本次 2026-07-13 檢討暴露出的
+    結構問題固定化：興櫃混入、短線已加速仍追、停損過深、沒有明確隔日型態，
+    以及雷達為了湊足固定檔數把低品質標的塞進核心名單。
+    """
+    market = _safe_str(row.get("市場別")).replace(" ", "")
+    price = _first_price(row, ["最新價", "推薦價格", "推薦日價格", "建議價位"], 0.0)
+    trig = _trigger_info(row)
+    trigger = _safe_float(trig.get("final"), 0.0)
+    trigger_dist = max(0.0, (trigger / price - 1.0) * 100.0) if price > 0 and trigger > 0 else 99.0
+    stop_dist = _stop_distance_pct(row)
+    buy = _num(row, "買進分數", 0)
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    practical = _num(row, "股神實戰總分", 0)
+    rr = _risk_reward_ratio(row)
+    chase = _chase_risk_score(row, 55)
+    amount = _reference_turnover_m(row)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    ret20 = _num(row, "近20日漲幅%", 0)
+    mainstream = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+
+    pullback_reset = (
+        4 <= ret20 <= 18 and -6 <= ret5 <= 0.5 and rr >= 0.90
+        and entry >= 66 and risk >= 59 and amount >= 100 and (0 < stop_dist <= 14.5)
+    )
+    steady_continuation = (
+        0.5 <= ret5 <= 4.5 and 0 <= ret20 <= 13 and rr >= 1.00
+        and entry >= 69 and risk >= 60 and amount >= 180 and chase <= 45
+        and (0 < stop_dist <= 12.5)
+    )
+    event_breakout = (
+        trigger_dist <= 2.8 and 2 <= ret5 <= 6.5 and 6 <= ret20 <= 18
+        and mainstream >= 70 and sector >= 70 and amount >= 500
+        and entry >= 58 and risk >= 54
+    )
+    early_reversal = (
+        1 <= ret5 <= 5 and -5 <= ret20 <= 2 and entry >= 72 and risk >= 61
+        and amount >= 400 and chase <= 25 and trigger_dist <= 6.0
+    )
+
+    if pullback_reset:
+        pattern = "P｜中期多頭拉回重置"
+        pattern_bonus = 18.0
+    elif steady_continuation:
+        pattern = "C｜穩健續強"
+        pattern_bonus = 15.0
+    elif event_breakout:
+        pattern = "E｜事件型近觸發突破"
+        pattern_bonus = 17.0
+    elif early_reversal:
+        pattern = "R｜早期反轉修復"
+        pattern_bonus = 13.0
+    else:
+        pattern = "N｜尚無明確隔日優勢型態"
+        pattern_bonus = 0.0
+
+    hard: list[str] = []
+    if market in {"興櫃", "Emerging"}:
+        hard.append("興櫃波動/流動性制度不同，不列正式作戰清單")
+    if ret5 >= 6 and ret20 >= 5 and trigger_dist > 3:
+        hard.append("近5日已加速且仍離觸發價偏遠，隔日追高風險")
+    if stop_dist > 15:
+        hard.append(f"隔日停損距離{stop_dist:.1f}%過深")
+    if ret20 < -8:
+        hard.append("20日趨勢仍明顯受損")
+    if rr < 0.55 and not (event_breakout or early_reversal):
+        hard.append("風險報酬比不足")
+    if trigger_dist > 8:
+        hard.append("實戰觸發價距現價過遠")
+
+    rr_score = _clamp(rr * 45.0, 0, 100)
+    amount_score = 100 if amount >= 2000 else 88 if amount >= 800 else 75 if amount >= 300 else 62 if amount >= 150 else 45 if amount >= 100 else 20
+    trigger_score = 90 if trigger_dist <= 2.5 else 78 if trigger_dist <= 4 else 66 if trigger_dist <= 6.8 else 40
+    stop_score = 88 if 0 < stop_dist <= 7 else 74 if stop_dist <= 10 else 62 if stop_dist <= 13.5 else 38
+    score = (
+        entry * 0.22 + risk * 0.18 + buy * 0.12 + practical * 0.10
+        + rr_score * 0.10 + amount_score * 0.08 + trigger_score * 0.07
+        + stop_score * 0.06 + (100 - chase) * 0.07 + pattern_bonus
+    )
+    if hard:
+        score -= min(32.0, 10.0 + 7.0 * len(hard))
+    score = round(_clamp(score), 1)
+    reference_ok = bool(pattern_bonus > 0 and not hard and score >= 64)
+    strong_ok = bool(reference_ok and score >= 72 and (rr >= 1.0 or event_breakout or early_reversal))
+    return {
+        "score": score,
+        "pattern": pattern,
+        "risk": "、".join(hard),
+        "reference_ok": reference_ok,
+        "strong_ok": strong_ok,
+        "trigger_dist": round(trigger_dist, 2),
+        "stop_dist": round(stop_dist, 2),
+    }
+
+
 def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
-    if exclusion:
+    profile = _next_session_profile(row)
+    if exclusion or not profile["strong_ok"]:
         return False
     role_blob = _text_blob(row, ["推薦角色", "飆股雷達角色", "領漲回補角色", "主流作戰分區"])
     liq = _liquidity_info(row)
@@ -659,6 +774,9 @@ def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
 
 def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     """A- 準主推薦：只允許盤中觸發後小量試單，不可當成直接買進。"""
+    profile = _next_session_profile(row)
+    if not profile["reference_ok"] or profile["score"] < 68:
+        return False
     severe_words = [
         "過熱", "禁買", "低流動性", "冷門", "成交額不足", "買進分數過低",
         "追價風險過高", "Entry/Risk 同時偏弱", "停損距離", "上方空間", "假強",
@@ -707,6 +825,11 @@ def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
 
 
 def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+    profile = _next_session_profile(row)
+    if not profile["reference_ok"]:
+        return False
+    if _safe_str(row.get("市場別")).replace(" ", "") in {"興櫃", "Emerging"}:
+        return False
     if any("過熱" in r or "禁買" in r for r in exclusion):
         return False
     if any("低流動性" in r for r in exclusion):
@@ -801,7 +924,8 @@ def _objective_severe_block(exclusion: list[str]) -> bool:
 
 
 def _objective_direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
-    if exclusion or _market_risk_info(row)["severe"] or not _official_factor_limited(row):
+    profile = _next_session_profile(row)
+    if exclusion or not profile["strong_ok"] or _market_risk_info(row)["severe"] or not _official_factor_limited(row):
         return False
     if _safe_str(row.get("市場別")) in {"興櫃", "Emerging"}:
         return False
@@ -815,7 +939,10 @@ def _objective_direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) 
 
 
 def _objective_a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
-    # 大盤紅燈時仍保留「可參考股票」，但只列條件式 A-，不得升級直接買進。
+    # 大盤紅燈時只保留真正具有隔日優勢型態的少數 A-，不可用高總分硬湊。
+    profile = _next_session_profile(row)
+    if not profile["reference_ok"] or profile["score"] < (72 if _market_risk_info(row)["severe"] else 68):
+        return False
     if _objective_severe_block(exclusion):
         return False
     if _safe_str(row.get("市場別")) in {"興櫃", "Emerging"}:
@@ -831,7 +958,12 @@ def _objective_a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str])
 
 
 def _objective_intraday_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
-    # 防守市場也需要有精簡盯盤名單；市場風險由動作/倉位約束，不以空名單處理。
+    # 雷達不再固定湊滿；只保留具有明確隔日型態且風險可量化者。
+    profile = _next_session_profile(row)
+    if not profile["reference_ok"] or profile["score"] < 64:
+        return False
+    if _safe_str(row.get("市場別")).replace(" ", "") in {"興櫃", "Emerging"}:
+        return False
     if _objective_severe_block(exclusion):
         return False
     m = _objective_metrics(row)
@@ -940,6 +1072,7 @@ def _battle_meta_for(bucket: str) -> dict[str, Any]:
 
 def _classify(row: pd.Series) -> dict[str, Any]:
     op = _compute_operability_score(row)
+    next_profile = _next_session_profile(row)
     reasons = _exclusion_reasons(row)
     trig = _trigger_info(row)
     direct_primary = _direct_ok(row, op, reasons)
@@ -1045,7 +1178,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         radar_action = "等待條件補強"
         exclude_text = "買點、風控或資金條件不足"
 
-    sort_score = op
+    sort_score = op + next_profile["score"] * 0.18
     if bucket == "正式下週主推薦":
         sort_score += 20
     elif bucket == "A-｜準主推薦小量試單":
@@ -1091,6 +1224,12 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "高風險雷達保留原因": exclude_text if bucket == "高風險雷達觀察" else "",
         "正式推薦判定來源": decision_source,
         "流動性參考成交額百萬": round(_reference_turnover_m(row), 1),
+        "隔日可參考分": next_profile["score"],
+        "隔日優勢型態": next_profile["pattern"],
+        "隔日風險標記": next_profile["risk"],
+        "隔日參考判定": "PASS｜可列隔日參考" if next_profile["reference_ok"] else "BLOCK｜不列核心參考",
+        "觸發距離%": next_profile["trigger_dist"],
+        "停損距離_隔日%": next_profile["stop_dist"],
         "正式推薦版本": FORMAL_RECOMMENDATION_VERSION,
     }
 
@@ -1127,6 +1266,7 @@ def _intraday_priority_score(row: pd.Series) -> float:
         _num(row, "漲停回放分", 0),
     )
     amount = _num(row, "成交額百萬", 0)
+    next_score = _num(row, "隔日可參考分", _next_session_profile(row)["score"])
     amount_score = 100 if amount >= 5000 else 88 if amount >= 2000 else 76 if amount >= 800 else 62 if amount >= 300 else 45 if amount >= 100 else 20
     rr_score = _clamp(rr * 50.0, 0, 100)
     score = (
@@ -1140,6 +1280,7 @@ def _intraday_priority_score(row: pd.Series) -> float:
         + risk * 0.04
         + rr_score * 0.02
         + amount_score * 0.02
+        + next_score * 0.18
     )
     # 追價風險過高、買進分數過低時不要進核心盯盤，保留到備援或低優先。
     if chase >= 76:
@@ -1179,29 +1320,27 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         kind="mergesort",
     )
 
-    core_limit = 12
-    backup_limit = 24
-    sector_cap_core = 3
+    core_limit = 8
+    backup_limit = 16
+    sector_cap_core = 2
     core: list[Any] = []
     backup: list[Any] = []
     sector_count: dict[str, int] = {}
 
     for idx, row in tmp.iterrows():
         sector = _safe_str(row.get("__sector")) or "未分類"
-        can_core = len(core) < core_limit and sector_count.get(sector, 0) < sector_cap_core and _safe_float(row.get("__priority"), 0) >= 58
+        can_core = (
+            len(core) < core_limit
+            and sector_count.get(sector, 0) < sector_cap_core
+            and _safe_float(row.get("__priority"), 0) >= 66
+            and _safe_float(row.get("隔日可參考分"), 0) >= 64
+            and _safe_str(row.get("隔日參考判定")).startswith("PASS")
+        )
         if can_core:
             core.append(idx)
             sector_count[sector] = sector_count.get(sector, 0) + 1
         elif len(backup) < backup_limit:
             backup.append(idx)
-
-    # 若族群限制導致核心不足，從高分備援依序補滿，避免核心太少。
-    if len(core) < min(core_limit, len(tmp)):
-        for idx in list(backup):
-            if len(core) >= min(core_limit, len(tmp)):
-                break
-            core.append(idx)
-            backup.remove(idx)
 
     core_set = set(core)
     backup_set = set(backup)
@@ -1213,7 +1352,7 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         if idx in core_set:
             out.at[idx, "盤中雷達優先級"] = "R1｜核心雷達"
             out.at[idx, "盤中雷達分層"] = "盤中核心雷達"
-            out.at[idx, "盤中雷達分層說明"] = f"核心盯盤名單，優先分 {pr:.1f}；最多約 10~12 檔，需實戰觸發價與守價確認。"
+            out.at[idx, "盤中雷達分層說明"] = f"核心盯盤名單，優先分 {pr:.1f}；最多 8 檔且不再為湊數補滿，需實戰觸發價與守價確認。"
         elif idx in backup_set:
             out.at[idx, "盤中雷達優先級"] = "R2｜備援雷達"
             out.at[idx, "盤中雷達分層"] = "盤中備援雷達"
