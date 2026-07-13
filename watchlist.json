@@ -7529,5 +7529,42 @@
       "market": "上櫃"
     }
   ],
-  "0715": []
+  "0715": [
+    {
+      "code": "1536",
+      "name": "和大",
+      "market": "上市",
+      "category": "車用電子"
+    },
+    {
+      "code": "1609",
+      "name": "大亞",
+      "market": "上市",
+      "category": "電器電纜"
+    },
+    {
+      "code": "2208",
+      "name": "台船",
+      "market": "上市",
+      "category": "航運"
+    },
+    {
+      "code": "2354",
+      "name": "鴻準",
+      "market": "上市",
+      "category": "其他電子業"
+    },
+    {
+      "code": "3551",
+      "name": "世禾",
+      "market": "上櫃",
+      "category": "數位雲端"
+    },
+    {
+      "code": "8131",
+      "name": "福懋科",
+      "market": "上市",
+      "category": "半導體業"
+    }
+  ]
 }
