@@ -1,7 +1,7 @@
 [
   {
-    "updated_at": "2026-07-13 23:01:37",
-    "market_score": 51.5,
+    "updated_at": "2026-07-14 00:00:30",
+    "market_score": 51.0,
     "market_trend": "震盪",
     "market_risk_level": "中",
     "risk_gate": "selective",
@@ -5363,15 +5363,22 @@
   },
   {
     "version": "v109_2_startup_macro_github_sync_hard_off",
-    "updated_at": "2026-07-13 23:04:28",
-    "data_date": "2026-07-13",
-    "market_score": 35.4,
+    "updated_at": "2026-07-14 00:02:34",
+    "data_date": "2026-07-09",
+    "market_score": 37.1,
     "market_trend": "偏空",
     "market_risk_level": "高",
     "risk_gate": "保守觀望",
-    "twse_index": 45380.52,
-    "twse_change_pct": 0.0571,
+    "twse_index": 45354.61,
+    "twse_change_pct": -0.8304,
     "otc_change_pct": 0.8543,
-    "source": "startup Yahoo batch + cache fallback"
+    "source": "startup Yahoo batch + cache fallback",
+    "next_day_forecast_date": "2026-07-14",
+    "next_day_market_direction": "震盪偏空",
+    "next_day_market_score": 41.4,
+    "next_day_confidence": "中",
+    "next_day_up_probability_pct": 10.8,
+    "next_day_down_probability_pct": 56.1,
+    "next_day_expected_return_pct": -0.3
   }
 ]
