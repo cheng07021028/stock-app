@@ -7596,9 +7596,19 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             volume_5 = _safe_float(positive_volume.tail(5).mean())
         if volume_20 in [None, 0] and not positive_volume.empty:
             volume_20 = _safe_float(positive_volume.tail(20).mean())
-        volume_ratio = None
+        # 「均量比」必須反映最新一日點火量，而不是 5 日均量 / 20 日均量。
+        # 後者反應太慢，會讓剛放量突破或漲停的股票在前置篩選階段被漏掉。
+        volume_5_20_ratio = None
         if volume_5 not in [None, 0] and volume_20 not in [None, 0]:
-            volume_ratio = volume_5 / volume_20
+            volume_5_20_ratio = volume_5 / volume_20
+        daily_volume_ratio = None
+        if not positive_volume.empty:
+            latest_valid_volume = _safe_float(positive_volume.iloc[-1], 0) or 0
+            prior20_volume = positive_volume.iloc[:-1].tail(20)
+            prior20_mean = _safe_float(prior20_volume.mean(), 0) if not prior20_volume.empty else 0
+            if latest_valid_volume > 0 and prior20_mean not in [None, 0]:
+                daily_volume_ratio = latest_valid_volume / prior20_mean
+        volume_ratio = daily_volume_ratio if daily_volume_ratio not in [None, 0] else volume_5_20_ratio
 
         turnover_m = None
         avg20_turnover_m = None
@@ -7631,6 +7641,39 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         ret5_now = _safe_float(last.get("RET5"), 0) or 0
         ret20_now = _safe_float(last.get("RET20"), 0) or 0
         ret60_now = _safe_float(last.get("RET60"), 0) or 0
+
+        # Phase 8.8：補上「當日點火 / 漲停續強」專用量價欄位。
+        # 過去只看 5/20 日均線與靜態 RR，會把剛出現價格發現、放量突破的
+        # 強勢股在 limit-up / explosive engines 執行前就刪掉。
+        close_series = _history_numeric_series(["收盤價", "Close", "close"])
+        open_series = _history_numeric_series(["開盤價", "Open", "open"])
+        high_series = _history_numeric_series(["最高價", "High", "high"])
+        low_series = _history_numeric_series(["最低價", "Low", "low"])
+        valid_close = close_series.dropna()
+        prior_close = _safe_float(valid_close.iloc[-2], 0) if len(valid_close) >= 2 else 0
+        open_now = _safe_float(open_series.dropna().iloc[-1], 0) if not open_series.dropna().empty else (_safe_float(last.get("開盤價"), 0) or close_now or 0)
+        high_now = _safe_float(high_series.dropna().iloc[-1], 0) if not high_series.dropna().empty else (_safe_float(last.get("最高價"), 0) or close_now or 0)
+        low_now = _safe_float(low_series.dropna().iloc[-1], 0) if not low_series.dropna().empty else (_safe_float(last.get("最低價"), 0) or close_now or 0)
+        day_gain_pct = ((close_now / prior_close) - 1.0) * 100.0 if close_now not in [None, 0] and prior_close > 0 else 0.0
+        opening_gap_pct = ((open_now / prior_close) - 1.0) * 100.0 if open_now > 0 and prior_close > 0 else 0.0
+        day_range = max(0.0, (high_now or 0) - (low_now or 0))
+        close_location_pct = ((close_now - low_now) / day_range * 100.0) if close_now not in [None, 0] and day_range > 0 else 50.0
+        upper_shadow_pct = ((high_now - max(open_now, close_now)) / day_range * 100.0) if close_now not in [None, 0] and day_range > 0 else 0.0
+        prior20_high = 0.0
+        valid_high = high_series.dropna()
+        if len(valid_high) >= 2:
+            prior20_high = _safe_float(valid_high.iloc[:-1].tail(20).max(), 0) or 0
+        breakout20_pct = ((close_now / prior20_high) - 1.0) * 100.0 if close_now not in [None, 0] and prior20_high > 0 else 0.0
+        distance_to_20d_high_pct = max(0.0, ((prior20_high - close_now) / prior20_high) * 100.0) if close_now not in [None, 0] and prior20_high > 0 else 0.0
+        consecutive_up_days = 0
+        if len(valid_close) >= 2:
+            vals = valid_close.tail(8).tolist()
+            for i in range(len(vals) - 1, 0, -1):
+                if vals[i] > vals[i - 1]:
+                    consecutive_up_days += 1
+                else:
+                    break
+        strong_close_flag = bool(close_location_pct >= 75 and day_gain_pct >= 2.0 and upper_shadow_pct <= 35)
 
         res20 = _safe_float(sr_snapshot.get("res_20"))
         sup20 = _safe_float(sr_snapshot.get("sup_20"))
@@ -7690,6 +7733,17 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "volume_5": volume_5,
             "volume_20": volume_20,
             "volume_ratio": volume_ratio,
+            "daily_volume_ratio": daily_volume_ratio,
+            "volume_5_20_ratio": volume_5_20_ratio,
+            "day_gain_pct": day_gain_pct,
+            "opening_gap_pct": opening_gap_pct,
+            "close_location_pct": close_location_pct,
+            "upper_shadow_pct": upper_shadow_pct,
+            "breakout20_pct": breakout20_pct,
+            "distance_to_20d_high_pct": distance_to_20d_high_pct,
+            "consecutive_up_days": consecutive_up_days,
+            "strong_close_flag": strong_close_flag,
+            "prior20_high": prior20_high,
             "liquidity_status": liquidity_status,
             "liquidity_source": liquidity_source,
             "close_vs_ma20_pct": close_vs_ma20_pct,
@@ -7703,6 +7757,74 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "used_market": _safe_str(market_type) or "未知",
             "history_debug": {},
         }
+
+
+def _bundle_momentum_rescue_profile(bundle: dict[str, Any], market_type: str = "") -> dict[str, Any]:
+    """前置篩選的強勢動能救援層。
+
+    目的不是把漲停股直接宣稱為可買，而是避免它們在訊號 / RR / 過熱等
+    傳統波段條件前置階段就被永久刪除。只要量價、流動性與收盤結構成立，
+    先保留到後段飆股、漲停回放、主流資金與正式風控引擎，再決定是否列入
+    R1-M 強勢動能條件雷達。
+    """
+    market = _safe_str(market_type or bundle.get("used_market")).replace(" ", "")
+    day_gain = _safe_float(bundle.get("day_gain_pct"), 0) or 0
+    close_loc = _safe_float(bundle.get("close_location_pct"), 50) or 50
+    day_vol = _safe_float(bundle.get("daily_volume_ratio"), 0) or 0
+    breakout20 = _safe_float(bundle.get("breakout20_pct"), -99) or -99
+    upper_shadow = _safe_float(bundle.get("upper_shadow_pct"), 0) or 0
+    turnover = max(_safe_float(bundle.get("turnover_m"), 0) or 0, _safe_float(bundle.get("avg20_turnover_m"), 0) or 0)
+    ret5 = _safe_float(bundle.get("ret5"), 0) or 0
+    close_ma20 = _safe_float(bundle.get("close_vs_ma20_pct"), 0) or 0
+
+    gain_score = 98 if day_gain >= 9.0 else 92 if day_gain >= 6.5 else 82 if day_gain >= 4.0 else 68 if day_gain >= 2.0 else 35
+    volume_score = 100 if day_vol >= 2.0 else 88 if day_vol >= 1.5 else 76 if day_vol >= 1.2 else 62 if day_vol >= 1.0 else 35
+    breakout_score = 96 if breakout20 >= 0 else 84 if breakout20 >= -1.0 else 68 if breakout20 >= -3.0 else 35
+    liquidity_score = 100 if turnover >= 2000 else 90 if turnover >= 800 else 78 if turnover >= 300 else 65 if turnover >= 150 else 48 if turnover >= 100 else 15
+    score = gain_score * 0.25 + close_loc * 0.22 + volume_score * 0.20 + breakout_score * 0.18 + liquidity_score * 0.15
+    if upper_shadow > 45:
+        score -= 18
+    elif upper_shadow > 35:
+        score -= 8
+    if ret5 > 35 or close_ma20 > 28:
+        score -= 15
+    score = round(max(0.0, min(100.0, score)), 1)
+
+    reasons: list[str] = []
+    if day_gain >= 9.0:
+        reasons.append("接近漲停/漲停型強勢收盤")
+    elif day_gain >= 4.0:
+        reasons.append("單日價格動能明顯")
+    if close_loc >= 80:
+        reasons.append("收盤位於當日高檔")
+    if day_vol >= 1.2:
+        reasons.append(f"當日量比{day_vol:.2f}倍")
+    if breakout20 >= 0:
+        reasons.append("收盤突破前20日高點")
+    elif breakout20 >= -1.0:
+        reasons.append("接近前20日高點")
+    if turnover >= 300:
+        reasons.append("成交額具可交易性")
+
+    eligible = bool(
+        market not in {"興櫃", "Emerging"}
+        and turnover >= 100
+        and 2.5 <= day_gain <= 10.3
+        and close_loc >= 68
+        and (day_vol >= 1.15 or turnover >= 500)
+        and (breakout20 >= -1.5 or day_gain >= 6.0)
+        and upper_shadow <= 42
+        and ret5 <= 38
+        and close_ma20 <= 30
+        and score >= 68
+    )
+    kind = "LIMITUP_MOMENTUM" if eligible and day_gain >= 8.5 else "BREAKOUT_MOMENTUM" if eligible else ""
+    return {
+        "eligible": eligible,
+        "kind": kind,
+        "score": score,
+        "reason": "、".join(reasons) if reasons else "未達強勢動能救援條件",
+    }
 
 
 def _analyze_one_stock_for_recommend(
@@ -7756,6 +7878,8 @@ def _analyze_one_stock_for_recommend(
 
     signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
     opportunity_info = bundle.get("opportunity_info", {}) or {}
+    momentum_rescue = _bundle_momentum_rescue_profile(bundle, market_type)
+    rescued_stages: list[str] = []
     opportunity_score = _safe_float(opportunity_info.get("機會股分數"), 0) or 0
     opportunity_core = max(
         _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0,
@@ -7767,25 +7891,37 @@ def _analyze_one_stock_for_recommend(
     if signal_score < min_signal_score:
         relaxed_signal_floor = max(0.0, float(min_signal_score) - (35.0 if opportunity_mode else 0.0))
         if not (opportunity_mode and signal_score >= relaxed_signal_floor and opportunity_core >= 60):
-            return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
+            if momentum_rescue["eligible"]:
+                rescued_stages.append("訊號")
+            else:
+                return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
 
     risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
     opportunity_chase = _safe_float(opportunity_info.get("追高風險分_機會"), 50) or 50
     if not risk_pass:
         if not (opportunity_mode and opportunity_score >= 62 and opportunity_chase <= 72):
-            return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
+            if momentum_rescue["eligible"]:
+                rescued_stages.append("傳統風控")
+            else:
+                return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
 
     prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
     if prelaunch_score < min_prelaunch_score:
         relaxed_prelaunch_floor = max(0.0, float(min_prelaunch_score) - (35.0 if opportunity_mode else 0.0))
         if not (opportunity_mode and (opportunity_score >= 62 or opportunity_core >= 66) and prelaunch_score >= relaxed_prelaunch_floor):
-            return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
+            if momentum_rescue["eligible"]:
+                rescued_stages.append("起漲前兆")
+            else:
+                return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
 
     trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
     if trade_score < min_trade_score:
         relaxed_trade_floor = max(0.0, float(min_trade_score) - (25.0 if opportunity_mode else 0.0))
         if not (opportunity_mode and opportunity_score >= 60 and trade_score >= relaxed_trade_floor):
-            return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
+            if momentum_rescue["eligible"]:
+                rescued_stages.append("交易可行")
+            else:
+                return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
 
     auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
     technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
@@ -7881,6 +8017,19 @@ def _analyze_one_stock_for_recommend(
             "流動性資料狀態": _safe_str(bundle.get("liquidity_status")) or "缺失",
             "流動性資料來源": _safe_str(bundle.get("liquidity_source")) or "缺少成交額/成交量",
             "均量比": _safe_float(bundle.get("volume_ratio"), 0) or 0,
+            "當日量比": _safe_float(bundle.get("daily_volume_ratio"), 0) or 0,
+            "5日20日量比": _safe_float(bundle.get("volume_5_20_ratio"), 0) or 0,
+            "今日漲幅%": _safe_float(bundle.get("day_gain_pct"), 0) or 0,
+            "開盤跳空%": _safe_float(bundle.get("opening_gap_pct"), 0) or 0,
+            "當日收盤位置%": _safe_float(bundle.get("close_location_pct"), 50) or 50,
+            "突破20日高點%": _safe_float(bundle.get("breakout20_pct"), 0) or 0,
+            "距20日高點%": _safe_float(bundle.get("distance_to_20d_high_pct"), 0) or 0,
+            "上影線比例%": _safe_float(bundle.get("upper_shadow_pct"), 0) or 0,
+            "連續上漲天數": int(_safe_float(bundle.get("consecutive_up_days"), 0) or 0),
+            "強勢收盤旗標": "是" if bool(bundle.get("strong_close_flag")) else "否",
+            "盤後動能救援分": _safe_float(momentum_rescue.get("score"), 0) or 0,
+            "前置保留類型": momentum_rescue.get("kind", "") if rescued_stages else "",
+            "前置保留原因": (f"強勢動能救援通過：{momentum_rescue.get('reason', '')}；原本會被過濾：{'、'.join(rescued_stages)}" if rescued_stages else ""),
             "近5日漲幅%": _safe_float(bundle.get("ret5"), 0) or 0,
             "近20日漲幅%": _safe_float(bundle.get("ret20"), 0) or 0,
             "近60日漲幅%": _safe_float(bundle.get("ret60"), 0) or 0,
@@ -7958,11 +8107,40 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
         ])
 
     work = base_df.copy()
-    for c in ["個股原始總分", "訊號分數", "區間漲跌幅%", "雷達均分", "自動因子總分", "起漲前兆分數", "交易可行分數", "型態突破分數", "爆發力分數", "量能啟動分"]:
-        if c in work.columns:
-            work[c] = pd.to_numeric(work[c], errors="coerce")
-        else:
-            work[c] = 0
+
+    def _numeric_col(name: str) -> pd.Series:
+        if name not in work.columns:
+            return pd.Series([np.nan] * len(work), index=work.index, dtype="float64")
+        return pd.to_numeric(work[name], errors="coerce")
+
+    def _fill_alias(target: str, aliases: list[str], scale: float = 1.0) -> None:
+        base = _numeric_col(target)
+        for alias in aliases:
+            alt = _numeric_col(alias) * scale
+            base = base.where(base.notna() & (base.abs() > 1e-9), alt)
+        work[target] = base.fillna(0.0)
+
+    # 類股榜過去在欄位經過決策引擎改名後直接補 0，導致所有族群都顯示
+    # 「弱勢 / 資金退潮」。這裡改用同義欄位回補，且只有真缺值才補。
+    _fill_alias("個股原始總分", ["推薦總分", "候選強度分", "股神實戰總分", "可操作分"])
+    _fill_alias("訊號分數", [])
+    if (work["訊號分數"].abs() <= 1e-9).all():
+        work["訊號分數"] = _numeric_col("買進分數").fillna(_numeric_col("起漲前兆分數")).fillna(0) / 10.0
+    _fill_alias("區間漲跌幅%", ["近5日漲幅%", "今日漲幅%"])
+    _fill_alias("雷達均分", ["爆發雷達分", "隔日爆發分", "飆股攻擊分", "主流領漲回補分", "漲停回放分"])
+    _fill_alias("自動因子總分", ["Alpha選股潛力分", "股神實戰總分"])
+    _fill_alias("起漲前兆分數", ["盤後動能救援分", "隔日爆發分"])
+    _fill_alias("交易可行分數", ["進場可執行分", "Entry進場買點分"])
+    _fill_alias("型態突破分數", ["飆股攻擊分", "突破準備分"])
+    _fill_alias("爆發力分數", ["爆發雷達分", "隔日爆發分", "盤後動能救援分"])
+    _fill_alias("量能啟動分", [])
+    if (work["量能啟動分"].abs() <= 1e-9).all():
+        vr = _numeric_col("當日量比").fillna(_numeric_col("均量比")).fillna(0)
+        work["量能啟動分"] = np.select(
+            [vr >= 2.0, vr >= 1.5, vr >= 1.2, vr >= 1.0],
+            [100.0, 88.0, 75.0, 60.0],
+            default=35.0,
+        )
 
     work["_sector_strong_flag"] = (
         (work["個股原始總分"].fillna(0) >= 70)
@@ -10456,6 +10634,7 @@ def _phase70_build_battle_dashboard(
         "股神作戰區", "主要依據工作表", "股票代號", "股票名稱", "類別", "產業",
         "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
         "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
+        "強勢動能分", "強勢動能判定", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
         "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
         "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明",
@@ -10533,8 +10712,8 @@ def _phase80_build_recommendation_summary(
         "候選診斷總數": int(total_candidates or 0),
         "操作說明": conclusion,
         "掃描品質說明": _safe_str(report.get("掃描品質說明")),
-        "核心紀律": "候選強度不等於買進許可；正式推薦必須同時通過掃描完整性、Entry、Risk、RR、追價風險、流動性與大盤風控。",
-        "版本": "phase8_3_liquidity_recovery_20260712",
+        "核心紀律": "採雙路徑：波段型仍需 Entry/Risk/RR；強勢動能型以當日放量、突破、收盤強度與流動性進 R1-M 條件雷達，兩者都不得開盤盲目追價。",
+        "版本": "phase8_8_dual_path_momentum_and_entry_20260714",
     }])
 
 
@@ -10614,6 +10793,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
             "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
             "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分", "流動性參考成交額百萬",
+            "強勢動能分", "強勢動能判定", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制",
             "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",
         ] if c in battle.columns]
@@ -10633,6 +10813,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
+        "強勢動能分", "強勢動能判定", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",
