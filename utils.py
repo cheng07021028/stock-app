@@ -8,6 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -2064,7 +2065,30 @@ def render_realtime_table(df, height=520):
 # V22 歷史資料本機快取：加速全量掃描，不做預篩、不漏股票
 # =========================================================
 HISTORY_DISK_CACHE_DIR = Path("cache") / "history"
-HISTORY_DISK_CACHE_MAX_AGE_HOURS = 18
+HISTORY_DISK_CACHE_MAX_AGE_HOURS = 12
+
+
+def _history_cache_allowed_business_lag(end_date) -> int:
+    """依台灣收盤時間決定快取可容許落後交易日。
+
+    當日 14:15 後應已有收盤資料，不再接受前一交易日快取；盤中、週末或
+    查詢歷史日期則容許 1 個工作日，由推薦頁再以大盤資料日期交叉驗證。
+    """
+    try:
+        target = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(target):
+            return 1
+        target = target.normalize()
+        now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+        if (
+            target.date() == now_tw.date()
+            and target.weekday() < 5
+            and (now_tw.hour, now_tw.minute) >= (14, 15)
+        ):
+            return 0
+    except Exception:
+        pass
+    return 1
 
 
 def _history_disk_cache_key(stock_no, market_type, start_date, end_date) -> str:
@@ -2103,8 +2127,17 @@ def _load_history_disk_cache(stock_no, market_type, start_date, end_date) -> pd.
                     temp = temp.dropna(subset=["日期", "收盤價"]).sort_values("日期").drop_duplicates("日期", keep="last")
                     if len(temp) < 20:
                         continue
-                    lag_days = max((pd.to_datetime(end_date).normalize() - temp["日期"].max().normalize()).days, 0)
-                    if lag_days <= 5:
+                    # 相容快取最多只接受落後 1 個工作日。舊版允許 5 個日曆日，
+                    # 會讓不同股票混用不同交易日收盤價，進而扭曲觸發距離、RR 與排序。
+                    last_day = temp["日期"].max().normalize()
+                    target_day = pd.to_datetime(end_date).normalize()
+                    if last_day > target_day:
+                        temp = temp[temp["日期"] <= target_day]
+                        if temp.empty:
+                            continue
+                        last_day = temp["日期"].max().normalize()
+                    business_lag = max(len(pd.bdate_range(last_day + pd.Timedelta(days=1), target_day)), 0)
+                    if business_lag <= _history_cache_allowed_business_lag(end_date):
                         return temp.reset_index(drop=True)
                 except Exception:
                     continue
@@ -2117,7 +2150,26 @@ def _load_history_disk_cache(stock_no, market_type, start_date, end_date) -> pd.
             return pd.DataFrame()
         df = pd.read_pickle(path)
         if isinstance(df, pd.DataFrame) and not df.empty and "收盤價" in df.columns:
-            return df.copy()
+            temp = df.copy()
+            if "日期" in temp.columns:
+                temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
+                temp["收盤價"] = pd.to_numeric(temp["收盤價"], errors="coerce")
+                temp = temp.dropna(subset=["日期", "收盤價"])
+                temp = temp[temp["收盤價"] > 0].sort_values("日期").drop_duplicates("日期", keep="last")
+                if temp.empty:
+                    return pd.DataFrame()
+                target_day = pd.to_datetime(end_date).normalize()
+                temp = temp[temp["日期"] <= target_day]
+                if temp.empty:
+                    return pd.DataFrame()
+                last_day = temp["日期"].max().normalize()
+                business_lag = max(len(pd.bdate_range(last_day + pd.Timedelta(days=1), target_day)), 0)
+                # 精確 key 也不能無限信任；最多容許一個工作日，最終是否可進場
+                # 仍由推薦頁依全市場共同最新交易日再次驗證。
+                if business_lag > _history_cache_allowed_business_lag(end_date):
+                    return pd.DataFrame()
+                return temp.reset_index(drop=True)
+            return temp.copy()
     except Exception:
         return pd.DataFrame()
     return pd.DataFrame()

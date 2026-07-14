@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """股神推薦績效回饋校正服務 vNext 2026-05-30.
 
 設計原則：
@@ -16,7 +16,7 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "phase6_2_performance_feedback_miss_replay_20260613"
+PERFORMANCE_FEEDBACK_VERSION = "phase8_7_trusted_horizon_feedback_20260714"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 
 FEEDBACK_COLUMNS = [
@@ -167,46 +167,89 @@ def _to_numeric_series(df: pd.DataFrame, col: str, default: float | None = None)
     return pd.to_numeric(s, errors="coerce")
 
 
+def _parse_record_date_series(df: pd.DataFrame, cols: list[str]) -> pd.Series:
+    out = pd.Series([pd.NaT] * len(df), index=df.index, dtype="datetime64[ns]")
+    for col in cols:
+        if col not in df.columns:
+            continue
+        parsed = pd.to_datetime(df[col], errors="coerce")
+        mask = out.isna() & parsed.notna()
+        out.loc[mask] = parsed.loc[mask]
+    return out
+
+
+def _business_age_series(df: pd.DataFrame) -> pd.Series:
+    rec = _parse_record_date_series(df, ["推薦日期", "推薦日", "建立時間", "推薦建立時間"])
+    updated = _parse_record_date_series(df, ["績效更新時間", "追蹤更新時間", "更新時間", "最後更新時間"])
+    updated = updated.fillna(pd.Timestamp.today().normalize())
+    ages: list[float] = []
+    for r, u in zip(rec, updated):
+        if pd.isna(r) or pd.isna(u) or u < r:
+            ages.append(float("nan"))
+            continue
+        try:
+            ages.append(float(max(len(pd.bdate_range(r.normalize() + pd.Timedelta(days=1), u.normalize())), 0)))
+        except Exception:
+            ages.append(float("nan"))
+    return pd.Series(ages, index=df.index, dtype="float64")
+
+
+def _suspicious_horizon_mask(df: pd.DataFrame) -> pd.Series:
+    """辨識把『目前損益』回填到所有固定週期的污染紀錄。"""
+    horizon_cols = [c for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"] if c in df.columns]
+    if len(horizon_cols) < 3:
+        return pd.Series([False] * len(df), index=df.index)
+    vals = pd.DataFrame({c: _to_numeric_series(df, c) for c in horizon_cols}, index=df.index)
+    counts = vals.notna().sum(axis=1)
+    spreads = vals.max(axis=1, skipna=True) - vals.min(axis=1, skipna=True)
+    source = df.get("績效資料來源", pd.Series([""] * len(df), index=df.index)).map(_safe_str).str.lower()
+    proxy_source = source.str.contains("proxy|代理|即時|目前|最新價|current", regex=True, na=False)
+    return ((counts >= 3) & (spreads.abs() < 1e-9)) | proxy_source
+
+
 def _tracking_return_series(df: pd.DataFrame) -> pd.Series:
-    """建立回饋用報酬欄。
+    """建立可信任的績效回饋報酬。
 
-    V158 實戰校正：績效回饋不可優先使用「損益幅%」。
-    該欄是目前最新價相對推薦價的即時損益，會讓尚未滿觀察期的新紀錄、
-    單日價格跳動與保留舊價一起灌進模型，造成權重過度追短線或被舊價污染。
-
-    正確順序：
-    1. 使用者實際買進且已有實際報酬時，優先用實際報酬。
-    2. 其他紀錄使用已存在的固定追蹤週期，優先 20/10/5/3/1 日。
-    3. 只有完全沒有固定週期績效時，才 fallback 到即時追蹤/損益幅。
+    固定週期績效只有在紀錄已滿該交易日數、數值落在合理區間，且不是把
+    目前損益代理回填到 1/3/5/10/20 日欄位時才可餵給模型。未滿期或可疑
+    紀錄只留在追蹤畫面，不參與權重學習，避免錯誤績效把推薦邏輯帶偏。
     """
     base = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
+    age = _business_age_series(df)
+    suspicious = _suspicious_horizon_mask(df)
 
-    # 固定週期優先，避免把每次更新最新價的浮動損益當成模型真實績效。
-    for col in ["推薦後20日%", "20日績效%", "推薦後10日%", "10日績效%", "推薦後5日%", "5日績效%", "推薦後3日%", "3日績效%", "推薦後1日%"]:
-        if col not in df.columns:
-            continue
-        s = _to_numeric_series(df, col)
-        mask = base.isna() & s.notna()
-        base.loc[mask] = s.loc[mask]
+    horizon_specs = [
+        (20, ["推薦後20日%", "20日績效%"], -70.0, 100.0),
+        (10, ["推薦後10日%", "10日績效%"], -55.0, 80.0),
+        (5, ["推薦後5日%", "5日績效%"], -45.0, 65.0),
+        (3, ["推薦後3日%", "3日績效%"], -35.0, 50.0),
+        (1, ["推薦後1日%", "1日績效%"], -22.0, 25.0),
+    ]
+    for horizon, cols, low, high in horizon_specs:
+        for col in cols:
+            if col not in df.columns:
+                continue
+            values = _to_numeric_series(df, col)
+            valid = (
+                base.isna()
+                & values.notna()
+                & age.ge(float(horizon))
+                & values.between(low, high, inclusive="both")
+                & ~suspicious
+            )
+            base.loc[valid] = values.loc[valid]
 
-    # 盤中/未滿期資料只做最後 fallback。
-    for col in ["即時追蹤報酬%", "損益幅%", "損益%", "推薦後最大漲幅%"]:
-        if col not in df.columns:
-            continue
-        s = _to_numeric_series(df, col)
-        mask = base.isna() & s.notna()
-        base.loc[mask] = s.loc[mask]
-
+    # 真正有實際買進紀錄者，實際報酬可覆蓋固定週期；未買進的浮動損益不得餵模型。
     actual = _to_numeric_series(df, "實際報酬%")
     if "是否已實際買進" in df.columns:
         actual_mask = df["是否已實際買進"].map(_boolish) & actual.notna()
     elif "是否已買進" in df.columns:
         actual_mask = df["是否已買進"].map(_boolish) & actual.notna()
     else:
-        actual_mask = actual.notna() & actual.ne(0)
+        actual_mask = pd.Series([False] * len(df), index=df.index)
+    actual_mask &= actual.between(-80.0, 200.0, inclusive="both")
     base.loc[actual_mask] = actual.loc[actual_mask]
     return pd.to_numeric(base, errors="coerce")
-
 
 def _score_bucket(score: Any) -> str:
     x = _safe_float(score, 0) or 0
@@ -307,6 +350,8 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         return _empty_profile("沒有可用股神推薦紀錄")
     df = df.loc[:, ~df.columns.duplicated()].copy()
     df["_feedback_return_pct"] = _tracking_return_series(df)
+    df["_feedback_suspicious"] = _suspicious_horizon_mask(df)
+    df["_feedback_business_age"] = _business_age_series(df)
     df["_score_bucket"] = df.get("推薦總分", pd.Series([0] * len(df), index=df.index)).map(_score_bucket)
     for _c in ["股神決策分數", "起漲前兆分數", "追價風險分", "Entry進場買點分", "Risk風控安全分", "可操作分"]:
         if _c in df.columns:
@@ -335,6 +380,12 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         "available": True,
         "message": "ok",
         "baseline": {k: round(v, 4) if isinstance(v, float) else v for k, v in baseline.items()},
+        "data_quality": {
+            "total_records": int(len(df)),
+            "trusted_records": int(len(valid)),
+            "suspicious_proxy_records": int(df["_feedback_suspicious"].fillna(False).sum()),
+            "trusted_ratio_pct": round(float(len(valid) / max(len(df), 1) * 100.0), 2),
+        },
         "by_recommend_type": _segment_stats(valid, "推薦型態", baseline, min_sample=5),
         "by_category": _segment_stats(valid, "類別", baseline, min_sample=8),
         "by_score_bucket": _segment_stats(valid, "_score_bucket", baseline, min_sample=8),

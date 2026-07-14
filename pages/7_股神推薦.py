@@ -174,7 +174,7 @@ PFX = "godpick_"
 
 HISTORY_DEBUG_EAGER = False  # False: 只有抓不到歷史資料時才補跑 debug，避免每檔雙重抓取拖慢速度
 PROGRESS_UPDATE_EVERY = 100  # V35：再降低前端重繪頻率，避免 Streamlit 每檔刷新拖慢
-SCAN_MAX_WORKERS = 8          # V48.1：資料源穩定優先；配合每執行緒 Session / Yahoo 併發閘門，避免 429 大量漏股
+SCAN_MAX_WORKERS = 8          # V48.3：資料源穩定優先；配合每執行緒 Session / Yahoo 併發閘門，避免 429 大量漏股
 
 # V48.2：資料品質統計必須把「K線成功」與「通過推薦前置篩選」分開。
 # signal/risk/prelaunch/trade_filtered 都已成功取得並完成 K 線分析，不能誤算成無有效K線。
@@ -6836,7 +6836,7 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
             return pd.DataFrame()
 
     temp["日期"] = pd.to_datetime(temp["日期"], errors="coerce")
-    temp = temp.dropna(subset=["日期"]).sort_values("日期").reset_index(drop=True)
+    temp = temp.dropna(subset=["日期"]).sort_values("日期").drop_duplicates("日期", keep="last").reset_index(drop=True)
 
     rename_map = {}
     for c in temp.columns:
@@ -6861,6 +6861,8 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     temp = temp.dropna(subset=["收盤價"]).copy()
+    # 供應商偶爾會回傳 0 元或重複日期的占位列；這些列不可作為最新價。
+    temp = temp[pd.to_numeric(temp["收盤價"], errors="coerce") > 0].copy()
     if temp.empty:
         return pd.DataFrame()
 
@@ -7479,6 +7481,55 @@ def _build_trade_plan(df: pd.DataFrame, sr_snapshot: dict, signal_snapshot: dict
     }
 
 
+
+def _annotate_kline_freshness(frame: pd.DataFrame) -> pd.DataFrame:
+    """以本輪全市場共同最新交易日驗證每檔 K 線日期。
+
+    這種做法不需要硬編台灣休市日：春節、颱風停市或週末時，全市場的共同
+    最新交易日本身就是正確基準；個別股票若仍停在更早日期，才標記為落後。
+    """
+    if frame is None or frame.empty:
+        return frame
+    out = frame.copy()
+    if "K線最後交易日" not in out.columns:
+        out["K線最後交易日"] = ""
+    dates = pd.to_datetime(out["K線最後交易日"], errors="coerce").dt.normalize()
+    stock_latest = dates.dropna().max() if dates.notna().any() else pd.NaT
+
+    # 全市場股票若剛好都命中同一份舊快取，只用 max(K線日期) 仍會把舊資料
+    # 誤判成最新。再與 01 大盤走勢已保存的市場資料日期交叉驗證。
+    macro_latest = pd.NaT
+    try:
+        macro_ref = _load_latest_macro_reference()
+        macro_text = _safe_str(macro_ref.get("大盤資料日期")) if isinstance(macro_ref, dict) else ""
+        macro_latest = pd.to_datetime(macro_text, errors="coerce")
+        if not pd.isna(macro_latest):
+            macro_latest = macro_latest.normalize()
+    except Exception:
+        macro_latest = pd.NaT
+
+    reference_dates = [d for d in [stock_latest, macro_latest] if not pd.isna(d)]
+    market_latest = max(reference_dates) if reference_dates else pd.NaT
+    reference_source = "K線全市場共同日期"
+    if not pd.isna(macro_latest) and (pd.isna(stock_latest) or macro_latest > stock_latest):
+        reference_source = "01大盤資料日期"
+
+    lags: list[int] = []
+    states: list[str] = []
+    for dt in dates:
+        if pd.isna(dt) or pd.isna(market_latest):
+            lags.append(999)
+            states.append("未知｜無法驗證K線日期")
+            continue
+        lag = max(len(pd.bdate_range(dt + pd.Timedelta(days=1), market_latest)), 0)
+        lags.append(int(lag))
+        states.append("最新交易日" if lag == 0 else f"落後{lag}個交易日")
+    out["K線落後交易日"] = lags
+    out["K線資料新鮮度"] = states
+    out["本輪市場最新交易日"] = market_latest.strftime("%Y-%m-%d") if not pd.isna(market_latest) else ""
+    out["K線日期驗證基準"] = reference_source if not pd.isna(market_latest) else "無法驗證"
+    return out
+
 def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, start_dt: date, end_dt: date, risk_strictness: str) -> dict[str, Any]:
     try:
         hist_df, used_market, history_debug = _get_history_smart(
@@ -7512,6 +7563,11 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
 
         last = hist_df.iloc[-1]
         first = hist_df.iloc[0]
+        last_kline_date = ""
+        try:
+            last_kline_date = pd.to_datetime(last.get("日期"), errors="coerce").strftime("%Y-%m-%d")
+        except Exception:
+            last_kline_date = ""
 
         close_now = _safe_float(last.get("收盤價"))
         close_first = _safe_float(first.get("收盤價"))
@@ -7619,6 +7675,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "trade_feasibility": trade_feasibility,
             "entry_decision": entry_decision,
             "close_now": close_now,
+            "history_last_date": last_kline_date,
             "period_pct": period_pct,
             "ret5": ret5_now,
             "ret20": ret20_now,
@@ -7743,6 +7800,9 @@ def _analyze_one_stock_for_recommend(
             "市場別": bundle["used_market"],
             "類別": category or _infer_category_from_record(stock_name, category),
             "最新價": bundle["close_now"],
+            "K線最後交易日": _safe_str(bundle.get("history_last_date")),
+            "K線落後交易日": 999,
+            "K線資料新鮮度": "待全市場比對",
             "區間漲跌幅%": bundle["period_pct"],
             "訊號分數": signal_score,
             "雷達均分": bundle["radar_avg"],
@@ -8936,7 +8996,7 @@ def _build_recommend_df(
         "error_samples": [],
         "worker_count": worker_count,
         "checkpoint_retryable_count": 0,
-        "speed_version": "v48_2_kline_validity_and_retryable_checkpoint_fix",
+        "speed_version": "v48_3_price_date_integrity_and_entry_readiness",
         "scan_started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "scan_elapsed_sec": 0.0,
         "avg_sec_per_stock": 0.0,
@@ -9191,6 +9251,14 @@ def _build_recommend_df(
     base_df = pd.DataFrame(base_rows)
     if base_df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # 正式評分前先以本輪市場共同最新日期驗證每檔行情，避免不同日期價格混算。
+    base_df = _annotate_kline_freshness(base_df)
+    try:
+        debug_summary["market_latest_kline_date"] = _safe_str(base_df.get("本輪市場最新交易日", pd.Series([""])).iloc[0])
+        debug_summary["stale_kline_count"] = int(pd.to_numeric(base_df.get("K線落後交易日", 999), errors="coerce").fillna(999).gt(0).sum())
+    except Exception:
+        pass
 
     category_strength_df = _compute_category_strength(base_df)
     if category_strength_df.empty:

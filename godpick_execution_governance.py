@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase8_6_kline_validity_metric_fix_20260713"
+EXECUTION_GOVERNANCE_VERSION = "phase8_7_entry_readiness_price_integrity_20260714"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -77,6 +77,8 @@ CANDIDATE_DIAGNOSIS_COLUMNS = [
     "推薦可信度分", "資料完整度評分", "資料完整度", "官方資料完整度",
     "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分",
     "隔日可參考分", "隔日優勢型態", "隔日風險標記", "隔日參考判定", "觸發距離%", "停損距離_隔日%",
+    "進場可執行分", "進場可執行判定", "進場路徑", "距最近可執行買點%", "進場阻擋原因",
+    "K線最後交易日", "K線落後交易日", "K線資料新鮮度", "本輪市場最新交易日", "K線日期驗證基準",
     "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風險報酬比", "實戰風控來源",
     "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
     "主流資金分", "族群攻擊強度", "資金攻擊有效分", "成交額百萬", "20日均成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
@@ -97,6 +99,8 @@ ACTION_TABLE_COLUMNS = [
     "可操作分", "實戰操作品質分", "推薦可信度分", "候選強度分",
     "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
     "隔日可參考分", "隔日優勢型態", "隔日風險標記", "隔日參考判定", "觸發距離%", "停損距離_隔日%",
+    "進場可執行分", "進場可執行判定", "進場路徑", "距最近可執行買點%", "進場阻擋原因",
+    "K線最後交易日", "K線落後交易日", "K線資料新鮮度", "本輪市場最新交易日", "K線日期驗證基準",
     "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "實戰風控來源",
     "成交額百萬", "流動性等級", "流動性資料狀態",
     "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
@@ -169,6 +173,7 @@ def build_scan_quality_report(
     data = summary if isinstance(summary, dict) else {}
     expected = int(_safe_float(data.get("total_count"), universe_size or 0))
     candidate_passed = int(_safe_float(data.get("analyzed_ok"), candidate_count or 0))
+    analyzed = candidate_passed
 
     # 「有效K線」不是只有最後進入候選池的股票。signal/risk/prelaunch/trade_filtered
     # 都已完成 K 線與指標分析，只是後續條件不合格。舊版誤用 analyzed_ok 當分子，
