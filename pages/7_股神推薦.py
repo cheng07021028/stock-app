@@ -10482,6 +10482,23 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
     try:
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
+        if safe_name == "股神推薦總排名":
+            from openpyxl.styles import PatternFill, Font
+            from openpyxl.formatting.rule import ColorScaleRule
+            ws.sheet_properties.tabColor = "00A6A6"
+            header_map = {str(cell.value): cell.column for cell in ws[1]}
+            score_col = header_map.get("股神推薦優先分")
+            rank_col = header_map.get("股神推薦總排名")
+            if score_col and ws.max_row >= 2:
+                letter = ws.cell(row=1, column=score_col).column_letter
+                ws.conditional_formatting.add(
+                    f"{letter}2:{letter}{ws.max_row}",
+                    ColorScaleRule(start_type="num", start_value=50, start_color="FECACA", mid_type="num", mid_value=70, mid_color="FEF3C7", end_type="num", end_value=90, end_color="BBF7D0"),
+                )
+            if rank_col:
+                for row_idx in range(2, min(ws.max_row, 4) + 1):
+                    ws.cell(row=row_idx, column=rank_col).font = Font(bold=True)
+                    ws.cell(row=row_idx, column=rank_col).fill = PatternFill("solid", fgColor=("FFD966" if row_idx == 2 else "D9EAF7"))
         for col_cells in ws.columns:
             max_len = 0
             col_letter = col_cells[0].column_letter
@@ -10739,6 +10756,7 @@ def _phase70_build_battle_dashboard(
         "推薦可信度分", "建議倉位上限%", "風控否決旗標", "決策一致性",
         "股神作戰區", "主要依據工作表", "股票代號", "股票名稱", "類別", "產業",
         "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
+        "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
         "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
@@ -11072,6 +11090,81 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tup
     return added, messages
 
 
+
+def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: int = 30) -> pd.DataFrame:
+    """建立唯一第一優先的「股神推薦總排名」。
+
+    保留原本正式/A-/R1/R2/觀察分頁，但使用者不必在多張表間自行比較。
+    排名只採 ``股神推薦優先分``；此分數已同時納入候選強度、買點、風控、
+    強勢動能/前兆、主流資金、族群、流動性與大盤校正。正式排除永不進榜。
+    """
+    if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty:
+        return pd.DataFrame()
+    try:
+        work = canonicalize_final_partition(source_df) if callable(canonicalize_final_partition) else source_df.copy()
+    except Exception:
+        work = source_df.copy()
+    try:
+        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+        required = {"股神推薦優先分", "股神推薦總排名", "股神推薦等級", "股神推薦用途"}
+        if not required.issubset(set(work.columns)):
+            work = apply_formal_recommendation_engine(work)
+    except Exception:
+        pass
+    if work.empty or "股票代號" not in work.columns:
+        return pd.DataFrame()
+
+    bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    score = pd.to_numeric(work.get("股神推薦優先分", 0), errors="coerce").fillna(0.0)
+    freshness = work.get("K線資料新鮮度", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    # 正式排除不進主排名；資料過期只留在診斷表，不應占用第一眼名單。
+    keep = ~bucket.eq("正式排除清單")
+    keep &= score.ge(50.0)
+    keep &= ~freshness.str.contains("過期|落後|待更新", regex=True, na=False)
+    rank = work.loc[keep].copy()
+    if rank.empty:
+        return pd.DataFrame()
+
+    sort_cols = [
+        "股神推薦優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
+        "強勢前兆分", "主流資金分", "族群攻擊強度", "流動性參考成交額百萬",
+    ]
+    for col in sort_cols:
+        if col not in rank.columns:
+            rank[col] = 0.0
+        rank[col] = pd.to_numeric(rank[col], errors="coerce").fillna(0.0)
+    rank = rank.sort_values(sort_cols, ascending=[False] * len(sort_cols), kind="mergesort")
+    rank["股票代號"] = rank["股票代號"].astype(str).map(_normalize_code)
+    rank = rank.loc[rank["股票代號"].ne("")].drop_duplicates(subset=["股票代號"], keep="first")
+    rank = rank.head(max(1, int(top_n or 30))).copy().reset_index(drop=True)
+    rank["股神推薦總排名"] = range(1, len(rank) + 1)
+
+    cols = [
+        "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+        "股票代號", "股票名稱", "市場別", "類別", "產業",
+        "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "盤中雷達優先級",
+        "推薦總分", "候選強度分", "實戰操作品質分", "進場可執行分", "買進分數",
+        "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
+        "主流資金分", "族群攻擊強度", "今日漲幅%", "當日量比", "當日收盤位置%",
+        "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
+        "建議倉位上限%", "正式推薦動作", "盤中觸發確認條件", "失效條件",
+        "股神推薦分數說明", "正式推薦排除原因",
+    ]
+    use = [c for c in cols if c in rank.columns]
+    return rank[use + [c for c in rank.columns if c not in use]].copy()
+
+
+def _phase90_navigation_table() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"優先序": 1, "活頁/表格": "股神推薦總排名", "真正用途": "唯一第一優先；依股神推薦優先分由高到低看最值得推薦與觀察的股票", "是否買進清單": "否，仍須看操作許可與觸發條件"},
+        {"優先序": 2, "活頁/表格": "正式下週主推薦", "真正用途": "已通過買點、風控與風報比，可依條件分批操作", "是否買進清單": "是，仍須盤中確認"},
+        {"優先序": 3, "活頁/表格": "A-準主推薦小量試單", "真正用途": "接近正式門檻，只能觸發且守價後小量試單", "是否買進清單": "條件式"},
+        {"優先序": 4, "活頁/表格": "強勢動能核心雷達", "真正用途": "已發動強勢股；只等回測守住或再突破放量", "是否買進清單": "不是，禁止開盤盲追"},
+        {"優先序": 5, "活頁/表格": "強勢前兆核心雷達", "真正用途": "尚未發動但主流、族群與前兆較完整的股票", "是否買進清單": "不是，等待觸發"},
+        {"優先序": 6, "活頁/表格": "候選診斷總表", "真正用途": "模型檢討、漏選原因與所有候選證據", "是否買進清單": "絕對不是"},
+    ])
+
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
         return
@@ -11084,7 +11177,31 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     summary = _phase80_build_recommendation_summary(
         formal, a_minus, core, risk, excluded, candidate_n, scan_report=scan_report
     )
-    render_pro_section("股神正式推薦作戰表")
+
+    rank_source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else governed
+    master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
+    render_pro_section("股神推薦總排名｜真正第一優先")
+    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。分數整合候選強度、買點、風控、動能/前兆、主流資金與族群；但分數不會取代操作許可與盤中觸發。")
+    if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
+        top_row = master_rank.iloc[0]
+        render_pro_kpi_row([
+            {"label": "第一名", "value": f"{_safe_str(top_row.get('股票代號'))} {_safe_str(top_row.get('股票名稱'))}", "delta": _safe_str(top_row.get("股神推薦用途"))},
+            {"label": "股神推薦優先分", "value": format_number(top_row.get("股神推薦優先分"), 1), "delta": _safe_str(top_row.get("股神推薦等級"))},
+            {"label": "操作許可", "value": _safe_str(top_row.get("操作許可")) or _safe_str(top_row.get("下週是否可直接買")), "delta": "先看許可再看分數"},
+            {"label": "前20名", "value": str(len(master_rank)), "delta": "依分數排序"},
+        ])
+        master_cols = [c for c in [
+            "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+            "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
+            "推薦總分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
+            "強勢動能分", "強勢前兆分", "主流資金分", "族群攻擊強度",
+            "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
+        ] if c in master_rank.columns]
+        st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
+    else:
+        st.info("目前沒有資料新鮮且分數達 50 分的推薦/觀察候選；請先完成最新行情掃描。")
+
+    render_pro_section("分區作戰明細｜正式／A-／核心雷達")
     row = summary.iloc[0]
     render_pro_kpi_row([
         {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
@@ -11116,6 +11233,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(battle, pd.DataFrame) and not battle.empty:
         show_cols = [c for c in [
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
+            "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
             "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分", "流動性參考成交額百萬",
             "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控",
@@ -11135,6 +11253,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
     common = [
         "分頁用途", "最終操作結論", "股票代號", "股票名稱", "市場別", "類別", "產業",
         "正式推薦分區", "是否正式推薦", "操作許可", "正式推薦等級", "正式推薦判定來源", "候選性質",
+        "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
@@ -11232,6 +11351,8 @@ def _build_excel_bytes(
         "正式推薦可用": False,
         "掃描品質說明": "請重新執行完整掃描後再判斷正式推薦。",
     }])
+    master_rank_df = _phase90_build_master_recommendation_rank(candidate_source, top_n=30)
+    navigation_df = _phase90_navigation_table()
 
     # Compact ranking pages also use the full candidate pool whenever available.
     if (cat_export is None or not isinstance(cat_export, pd.DataFrame) or cat_export.empty) and isinstance(candidate_source, pd.DataFrame):
@@ -11241,6 +11362,8 @@ def _build_excel_bytes(
             pass
 
     sheets = [
+        ("股神推薦總排名", master_rank_df, "目前沒有資料新鮮且達排名門檻的推薦/觀察候選。"),
+        ("使用導航", navigation_df, "使用導航無資料。"),
         ("股神正式推薦摘要", summary_df, "本輪沒有摘要資料。"),
         ("掃描完整性", scan_df, "缺少掃描完整性資料；請重新掃描。"),
         ("股神作戰總表", battle_df, "本輪沒有可操作推薦；若掃描不完整，請先重新掃描。"),
@@ -11270,7 +11393,7 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達", "強勢動能核心雷達", "強勢前兆核心雷達", "強勢動能完整雷達", "強勢前兆完整雷達"} else "診斷/管理",
+            "用途": ("第一優先" if sheet_name == "股神推薦總排名" else "使用說明" if sheet_name == "使用導航" else "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達", "強勢動能核心雷達", "強勢前兆核心雷達", "強勢動能完整雷達", "強勢前兆完整雷達"} else "診斷/管理"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
@@ -11312,7 +11435,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 7.1 匯出內容：第一張「股神作戰總表」是主要依據；盤中雷達已分成核心/備援/低優先；已發動看「強勢動能核心雷達」，尚未發動的主流前兆看「強勢前兆核心雷達」；需要完整候選時看對應的「完整雷達」。所有雷達皆須盤中觸發，不是開盤直接買進清單。")
+        st.caption("Excel 第一張『股神推薦總排名』是唯一第一優先，依股神推薦優先分由高到低；第二張『使用導航』說明其他分頁用途。要真正進場再看正式主推薦/A-；已發動看強勢動能核心雷達，尚未發動看強勢前兆核心雷達。候選診斷總表不是買進清單。")
 
 
 def _render_selected_export_block():
@@ -11506,7 +11629,7 @@ def _render_recommendation_scoring_guide():
                     </ul>
                 </div>
             </div>
-            <div class="gp-guide-foot">提醒：推薦分數＝候選強度；買進分數＝當下買點品質；真正進場仍須等待盤中確認與停損控管。</div>
+            <div class="gp-guide-foot">第一優先看「股神推薦優先分」與總排名；原推薦總分只代表候選強度。真正進場仍須看操作許可、盤中觸發與停損控管。</div>
         </div>
         """,
         unsafe_allow_html=True,

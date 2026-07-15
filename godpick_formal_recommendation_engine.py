@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_9_profit_recall_20260715"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_0_unified_priority_rank_20260715"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -19,6 +19,11 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "操作許可",
     "正式推薦等級",
     "推薦可信度分",
+    "股神推薦優先分",
+    "股神推薦總排名",
+    "股神推薦等級",
+    "股神推薦用途",
+    "股神推薦分數說明",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -84,6 +89,8 @@ FORMAL_RECOMMENDATION_COLUMNS = [
 
 NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "推薦可信度分",
+    "股神推薦優先分",
+    "股神推薦總排名",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -1709,6 +1716,172 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     }
 
 
+
+def _priority_bucket_meta(row: pd.Series) -> tuple[str, float, float]:
+    """Return (use label, bonus, score cap) for the unified recommendation ranking.
+
+    The score compares different routes on one scale while keeping action permission
+    separate.  A high-scoring watch candidate therefore remains a watch candidate;
+    it cannot outrank a formal recommendation by bypassing its risk classification.
+    """
+    bucket = _safe_str(row.get("正式推薦分區"))
+    radar = _safe_str(row.get("盤中雷達優先級"))
+    if bucket == "正式下週主推薦":
+        return "1｜正式主推薦", 7.0, 100.0
+    if bucket == "A-｜準主推薦小量試單":
+        return "2｜A-準主推薦", 4.0, 94.0
+    if bucket == "盤中雷達追蹤":
+        if radar.startswith("R1-M"):
+            return "3｜強勢動能核心雷達", 3.0, 90.0
+        if radar.startswith("R1-P"):
+            return "4｜強勢前兆核心雷達", 2.5, 89.0
+        if radar.startswith("R1"):
+            return "5｜盤中核心雷達", 2.0, 88.0
+        if radar.startswith("R2"):
+            return "6｜盤中備援雷達", 0.0, 79.0
+        return "7｜低優先雷達", -3.0, 69.0
+    if bucket == "高風險雷達觀察":
+        return "8｜高風險只看不買", -8.0, 64.0
+    if bucket == "早期潛伏觀察":
+        return "9｜早期觀察", -4.0, 68.0
+    if bucket == "不可直接買觀察":
+        return "10｜一般觀察", -6.0, 63.0
+    if bucket == "正式排除清單":
+        return "11｜正式排除", -25.0, 39.0
+    return "10｜一般觀察", -7.0, 60.0
+
+
+def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, str, str]:
+    """Build one comparable score for formal picks, radar picks and observations.
+
+    Existing ``推薦總分`` remains the candidate-strength score.  This new score is
+    the only default ranking score shown to users because it additionally includes
+    entry quality, risk, route strength, liquidity and market context.
+    """
+    candidate = _clamp(max(
+        _num(row, "推薦總分", 0),
+        _num(row, "候選強度分", 0),
+        _num(row, "Alpha選股潛力分", 0),
+        _num(row, "股神實戰總分", 0),
+    ))
+    execution = _clamp(max(
+        _num(row, "實戰操作品質分", 0),
+        _num(row, "可操作分", 0),
+        _num(row, "進場可執行分", 0),
+    ))
+    entry = _clamp(max(
+        _num(row, "Entry進場買點分", 0),
+        _num(row, "進場買點分", 0),
+        _num(row, "買進分數", 0),
+    ))
+    risk = _clamp(max(_num(row, "Risk風控安全分", 0), _num(row, "風控安全分", 0)))
+    route = _clamp(max(
+        _num(row, "強勢動能分", 0),
+        _num(row, "強勢前兆分", 0),
+        _num(row, "隔日可參考分", 0),
+        _num(row, "爆發雷達分", 0),
+        _num(row, "隔日爆發分", 0),
+    ))
+    mainstream = _clamp(_num(row, "主流資金分", 50))
+    sector = _clamp(max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0), _num(row, "類股熱度分數", 0)))
+    rr = _risk_reward_ratio(row)
+    rr_score = _clamp(rr * 45.0)
+    quality = _data_quality_score(row)
+    amount = _reference_turnover_m(row)
+    liquidity_score = 100.0 if amount >= 3000 else 90.0 if amount >= 1200 else 80.0 if amount >= 500 else 68.0 if amount >= 200 else 55.0 if amount >= 100 else 30.0 if amount > 0 else 15.0
+
+    score = (
+        candidate * 0.20
+        + execution * 0.20
+        + entry * 0.12
+        + risk * 0.10
+        + route * 0.16
+        + mainstream * 0.08
+        + sector * 0.06
+        + rr_score * 0.04
+        + liquidity_score * 0.02
+        + quality * 0.02
+    )
+
+    use_label, bucket_bonus, score_cap = _priority_bucket_meta(row)
+    score += bucket_bonus
+    score += _clamp(_num(row, "隔日大盤預測加減分", 0), -6.0, 6.0)
+
+    chase = _chase_risk_score(row, 55)
+    if chase > 60:
+        score -= min(8.0, (chase - 60.0) * 0.18)
+    stop_dist = _stop_distance_pct(row)
+    if stop_dist > 12:
+        score -= min(8.0, (stop_dist - 12.0) * 0.55)
+    elif stop_dist > 8:
+        score -= min(3.0, (stop_dist - 8.0) * 0.45)
+
+    freshness = _safe_str(row.get("K線資料新鮮度"))
+    lag = _num(row, "K線落後交易日", 0)
+    freshness_unknown = (not freshness) or _contains_any(freshness, ["未知", "未驗證"]) or lag >= 999
+    freshness_stale = _contains_any(freshness, ["過期", "落後", "待更新"]) or (1 <= lag < 999)
+    if freshness_stale:
+        score_cap = min(score_cap, 35.0)
+        use_label = "12｜資料待更新"
+    elif freshness_unknown:
+        # 舊快取或舊欄位仍可列入觀察排名，但不得被誤認為正式可買。
+        score_cap = min(score_cap, 65.0)
+        use_label = f"{use_label}｜資料待驗證"
+
+    score = round(_clamp(min(score, score_cap)), 1)
+    if score >= 90:
+        grade = "S+"
+    elif score >= 85:
+        grade = "S"
+    elif score >= 80:
+        grade = "A+"
+    elif score >= 75:
+        grade = "A"
+    elif score >= 70:
+        grade = "B+"
+    elif score >= 65:
+        grade = "B"
+    elif score >= 60:
+        grade = "C+"
+    else:
+        grade = "C"
+
+    explain = (
+        f"候選{candidate:.0f}｜操作{execution:.0f}｜買點{entry:.0f}｜風控{risk:.0f}｜"
+        f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜RR {rr:.2f}"
+    )
+    return score, grade, use_label, explain
+
+
+def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
+    """Attach the single score/rank users should use as their first view."""
+    if out is None or not isinstance(out, pd.DataFrame) or out.empty:
+        return out
+    score_rows = out.apply(_unified_recommendation_priority_score, axis=1)
+    out["股神推薦優先分"] = [x[0] for x in score_rows]
+    out["股神推薦等級"] = [x[1] for x in score_rows]
+    out["股神推薦用途"] = [x[2] for x in score_rows]
+    out["股神推薦分數說明"] = [x[3] for x in score_rows]
+    out["股神推薦總排名"] = 0
+
+    eligible = ~out.get("正式推薦分區", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str).eq("正式排除清單")
+    eligible &= pd.to_numeric(out["股神推薦優先分"], errors="coerce").fillna(0).ge(50)
+    ranked = out.loc[eligible].copy()
+    if not ranked.empty:
+        for col in ["股神推薦優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"]:
+            if col not in ranked.columns:
+                ranked[col] = 0.0
+            ranked[col] = pd.to_numeric(ranked[col], errors="coerce").fillna(0.0)
+        ranked = ranked.sort_values(
+            ["股神推薦優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"],
+            ascending=[False, False, False, False, False, False],
+            kind="mergesort",
+        )
+        rank_map = {idx: pos for pos, idx in enumerate(ranked.index, start=1)}
+        out.loc[list(rank_map.keys()), "股神推薦總排名"] = [rank_map[idx] for idx in rank_map]
+    out["股神推薦總排名"] = pd.to_numeric(out["股神推薦總排名"], errors="coerce").fillna(0).astype(int)
+    return out
+
 def _sector_key_for_row(row: pd.Series) -> str:
     """盤中雷達分層用族群 key，避免同族群塞爆核心盯盤清單。"""
     for c in ["主題族群", "次族群", "類別", "產業", "正式產業別", "族群"]:
@@ -1899,4 +2072,5 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     for c in FORMAL_RECOMMENDATION_COLUMNS:
         out[c] = rows[c].values if c in rows.columns else ""
     out = _apply_intraday_radar_tiers(out)
+    out = _apply_unified_recommendation_ranking(out)
     return out
