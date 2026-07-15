@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """股神推薦欄位標準化共用模組 v29
 
 用途：
@@ -76,6 +76,24 @@ UNIFIED_RECOMMEND_DISPLAY_COLUMNS = [
 
 # 欄位集合可能從多版規則累積；統一去重，避免 pandas 選欄時產生重複欄。
 UNIFIED_RECOMMEND_DISPLAY_COLUMNS = list(dict.fromkeys(UNIFIED_RECOMMEND_DISPLAY_COLUMNS))
+
+# V159：推薦紀錄追蹤欄位。07 自動記錄、08 紀錄頁、績效回饋共用；
+# 保留正式/A-/R1/R1-M 的原始分區、動能證據與資料新鮮度，避免紀錄後只剩舊版基本欄位。
+GODPICK_RECORD_TRACE_COLUMNS = [
+    "紀錄來源", "自動記錄", "紀錄層級", "本輪推薦版本",
+    "正式推薦分區", "正式推薦資格", "正式推薦等級", "正式推薦判定來源",
+    "是否正式推薦", "操作許可", "正式推薦動作", "正式推薦排除原因",
+    "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明",
+    "進場可執行分", "進場可執行判定", "進場路徑", "距最近可執行買點%", "進場阻擋原因",
+    "今日漲幅%", "開盤跳空%", "當日量比", "5日20日量比", "當日收盤位置%",
+    "突破20日高點%", "距20日高點%", "上影線比例%", "連續上漲天數", "強勢收盤旗標",
+    "盤後動能救援分", "前置保留類型", "前置保留原因", "強勢動能分", "強勢動能判定",
+    "動能進場條件", "動能風險控制",
+    "K線最後交易日", "K線落後交易日", "K線資料新鮮度", "本輪市場最新交易日", "K線日期驗證基準",
+]
+UNIFIED_RECOMMEND_DISPLAY_COLUMNS = list(dict.fromkeys(
+    list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS) + GODPICK_RECORD_TRACE_COLUMNS
+))
 UNIFIED_MANAGEMENT_COLUMNS = UNIFIED_RECOMMEND_DISPLAY_COLUMNS.copy()
 
 # 回補規則：target 欄空白時，從 sources 依序取第一個有值欄位。

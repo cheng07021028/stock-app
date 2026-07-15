@@ -501,6 +501,15 @@ try:
 except Exception:
     pass
 
+# V159：原程式在 GODPICK_RECORD_COLUMNS 尚未宣告前就嘗試合併共用欄位，
+# 因例外被靜默略過，造成正式分區、R1-M、進場可執行性及 K 線新鮮度在寫入紀錄時被截掉。
+try:
+    GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
+        list(GODPICK_RECORD_COLUMNS) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS or [])
+    ))
+except Exception:
+    pass
+
 
 # =========================================================
 # 基礎工具
@@ -10734,10 +10743,14 @@ def _phase80_allowed_codes(rec_df: pd.DataFrame, selected_codes: list[str], targ
         except Exception:
             return [], selected
     bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    radar_pri = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     if target == "record":
-        allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+        # V159：推薦紀錄是模型績效資料庫，正式/A- 與 R1（含 R1-M 強勢動能）都必須留下；
+        # 以「正式推薦分區 / 盤中雷達優先級」區分，不把雷達冒充正式買進推薦。
+        allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (
+            bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1")
+        )
     elif target == "list":
-        radar_pri = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
         allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1"))
     else:
         allowed_mask = pd.Series([True] * len(work), index=work.index)
@@ -10746,6 +10759,162 @@ def _phase80_allowed_codes(rec_df: pd.DataFrame, selected_codes: list[str], targ
     rejected = [x for x in selected if x not in set(allowed)]
     return allowed, rejected
 
+
+
+# =========================================================
+# V159 推薦紀錄完整保存 + 每輪自動記錄
+# =========================================================
+def _v159_record_level_from_row(row: pd.Series | dict[str, Any]) -> str:
+    bucket = _safe_str(row.get("正式推薦分區"))
+    radar = _safe_str(row.get("盤中雷達優先級"))
+    if bucket == "正式下週主推薦":
+        return "正式主推薦"
+    if bucket == "A-｜準主推薦小量試單":
+        return "A-準主推薦"
+    if bucket == "盤中雷達追蹤" and radar.startswith("R1-M"):
+        return "R1-M強勢動能雷達"
+    if bucket == "盤中雷達追蹤" and radar.startswith("R1"):
+        return "R1核心雷達"
+    return bucket or radar or "未分層"
+
+
+def _normalize_godpick_record(row: dict[str, Any]) -> dict[str, Any]:
+    """V159：保留推薦列全部共用欄位，再補齊紀錄控制欄位。
+
+    舊版由固定小字典重建資料，會把正式推薦分區、R1-M、進場可執行性、
+    強勢動能證據與 K 線日期全部丟掉；推薦紀錄因此無法還原當天決策。
+    """
+    raw = dict(row or {})
+    rec_price = _safe_float(raw.get("推薦價格"), _safe_float(raw.get("最新價")))
+    latest_price = _safe_float(raw.get("最新價"), rec_price)
+    stop_price = _safe_float(raw.get("停損價"), _safe_float(raw.get("實戰停損參考"), _safe_float(raw.get("停損參考"))))
+    target1 = _safe_float(raw.get("賣出目標1"), _safe_float(raw.get("第一壓力價")))
+    target2 = _safe_float(raw.get("賣出目標2"))
+    rec_date = _safe_str(raw.get("推薦日期")) or _now_date_text()
+    rec_time = _safe_str(raw.get("推薦時間")) or _now_time_text()
+    mode = _safe_str(raw.get("推薦模式")) or "股神推薦"
+
+    pnl_amt = None
+    pnl_pct = None
+    if rec_price not in [None, 0] and latest_price is not None:
+        pnl_amt = latest_price - rec_price
+        pnl_pct = pnl_amt / rec_price * 100
+
+    raw.update({
+        "record_id": _safe_str(raw.get("record_id")) or _safe_str(raw.get("rec_id")) or _create_record_id(
+            _normalize_code(raw.get("股票代號")), rec_date, rec_time, mode
+        ),
+        "股票代號": _normalize_code(raw.get("股票代號")),
+        "股票名稱": _safe_str(raw.get("股票名稱")),
+        "市場別": _safe_str(raw.get("市場別")) or "上市",
+        "類別": _normalize_category(raw.get("類別")),
+        "推薦模式": mode,
+        "推薦日期": rec_date,
+        "推薦時間": rec_time,
+        "建立時間": _safe_str(raw.get("建立時間")) or _now_text(),
+        "更新時間": _now_text(),
+        "目前狀態": _safe_str(raw.get("目前狀態")) or ("雷達觀察" if "R1" in _safe_str(raw.get("紀錄層級")) else "觀察"),
+        "推薦價格": rec_price,
+        "最新價": latest_price,
+        "停損價": stop_price,
+        "賣出目標1": target1,
+        "賣出目標2": target2,
+        "損益金額": pnl_amt if raw.get("損益金額") in [None, ""] else raw.get("損益金額"),
+        "損益幅%": pnl_pct if raw.get("損益幅%") in [None, ""] else raw.get("損益幅%"),
+        "是否已實際買進": _safe_str(raw.get("是否已實際買進")) in {"是", "True", "true", "1"},
+        "是否達停損": bool(stop_price is not None and latest_price is not None and latest_price <= stop_price),
+        "是否達目標1": bool(target1 is not None and latest_price is not None and latest_price >= target1),
+        "是否達目標2": bool(target2 is not None and latest_price is not None and latest_price >= target2),
+    })
+    return _ensure_godpick_record_columns(pd.DataFrame([raw])).iloc[0].to_dict()
+
+
+def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[str]) -> list[dict[str, Any]]:
+    """V159：直接保存完整推薦列，不再用舊版固定欄位字典截斷新引擎證據。"""
+    if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty or "股票代號" not in rec_df.columns:
+        return []
+    codes = {_normalize_code(x) for x in (selected_codes or []) if _normalize_code(x)}
+    if not codes:
+        return []
+    work = rec_df[rec_df["股票代號"].astype(str).map(_normalize_code).isin(codes)].copy()
+    rec_date = _now_date_text()
+    rec_time = _now_time_text()
+    build_time = _now_text()
+    rows: list[dict[str, Any]] = []
+    for _, r in work.iterrows():
+        raw = r.to_dict()
+        code = _normalize_code(raw.get("股票代號"))
+        if not code:
+            continue
+        level = _v159_record_level_from_row(raw)
+        latest = _safe_float(raw.get("最新價"), _safe_float(raw.get("推薦價格")))
+        stop = _safe_float(raw.get("實戰停損參考"), _safe_float(raw.get("停損參考"), _safe_float(raw.get("停損價"))))
+        raw.update({
+            "record_id": _create_record_id(code, rec_date, rec_time, _safe_str(raw.get("推薦模式")) or "股神推薦"),
+            "股票代號": code,
+            "股票名稱": _safe_str(raw.get("股票名稱")),
+            "市場別": _safe_str(raw.get("市場別")) or "上市",
+            "類別": _normalize_category(raw.get("類別")),
+            "推薦模式": _safe_str(raw.get("推薦模式")) or "股神推薦",
+            "推薦日期": rec_date,
+            "推薦時間": rec_time,
+            "建立時間": build_time,
+            "更新時間": build_time,
+            "最新更新時間": build_time,
+            "紀錄來源": _safe_str(raw.get("紀錄來源")) or "07_股神推薦",
+            "自動記錄": _safe_str(raw.get("自動記錄")) or "否",
+            "紀錄層級": level,
+            "本輪推薦版本": _safe_str(raw.get("正式推薦版本")) or _safe_str(raw.get("決策版本")) or "V159",
+            "目前狀態": "雷達觀察" if level.startswith("R1") else "新推薦",
+            "推薦價格": latest,
+            "推薦日價格": latest,
+            "最新價": latest,
+            "停損價": stop,
+            "K線驗證標記": "已建立K線驗證資料",
+            "K線查詢參數": f"stock_code={code}&source=godpick",
+            "K線檢視提示": "至 3_歷史K線分析，對照推薦價、支撐、壓力、停損與後續走勢。",
+            "是否已實際買進": False,
+            "損益金額": None,
+            "損益幅%": None,
+            "是否達停損": False,
+            "是否達目標1": False,
+            "是否達目標2": False,
+            "備註": _safe_str(raw.get("備註")),
+        })
+        rows.append(_normalize_godpick_record(raw))
+    return rows
+
+
+def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tuple[int, list[str]]:
+    """每次完成新推薦後，自動保存正式/A-/R1/R1-M；同日同股同模式更新、不重複新增。"""
+    report = st.session_state.get(_k("scan_quality_report"), {})
+    if not isinstance(report, dict) or not bool(report.get("正式推薦可用", False)):
+        return 0, ["掃描品質未達正式可用，本輪不自動寫入推薦紀錄。"]
+    if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty or "股票代號" not in source_df.columns:
+        return 0, ["本輪沒有可自動記錄的推薦資料。"]
+    try:
+        work = canonicalize_final_partition(source_df) if callable(canonicalize_final_partition) else source_df.copy()
+    except Exception:
+        work = source_df.copy()
+    if "正式推薦分區" not in work.columns:
+        try:
+            work = apply_formal_recommendation_engine(work)
+        except Exception as e:
+            return 0, [f"正式分區重算失敗，未自動記錄：{e}"]
+    bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    allowed = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (
+        bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
+    )
+    action = work.loc[allowed].copy()
+    if action.empty:
+        return 0, ["本輪沒有正式、A-、R1 或 R1-M 名單，不建立空白推薦紀錄。"]
+    action["紀錄來源"] = "07_股神推薦｜推薦完成自動記錄"
+    action["自動記錄"] = "是"
+    action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
+    codes = action["股票代號"].astype(str).map(_normalize_code).tolist()
+    rows = _build_record_rows_from_rec_df(action, codes)
+    return _append_godpick_records(rows, force_duplicate=False)
 
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
@@ -12223,6 +12392,21 @@ def main():
     except Exception:
         pass
 
+    # V159：只有按下開始/重新推薦/斷點續掃完成的新結果才自動記錄；
+    # 一般換頁 rerun 不重寫。使用同日 business key，因此重跑只更新同一筆，不會重複膨脹。
+    if submit_recommend or submit_refresh or resume_scan_btn:
+        try:
+            auto_source = st.session_state.get(_k("candidate_diagnosis_store"))
+            if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
+                auto_source = rec_df
+            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source)
+            st.session_state[_k("auto_record_detail")] = [
+                f"自動新增/更新判定：{auto_added} 筆新增",
+                *[str(x) for x in (auto_msgs or [])],
+            ]
+        except Exception as e:
+            st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
+
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
     _render_vnext_performance_feedback_panel()
@@ -12309,6 +12493,11 @@ def main():
 
     render_pro_section("推薦股票加入自選股中心")
     st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")
+    auto_record_detail = st.session_state.get(_k("auto_record_detail"), [])
+    if auto_record_detail:
+        with st.expander("8_股神推薦紀錄｜本輪自動寫入明細", expanded=False):
+            for line in auto_record_detail:
+                st.write(f"- {line}")
     watchlist_map = _load_watchlist_map()
 
     g1, g2, g3 = st.columns([3, 2, 1])
@@ -12926,7 +13115,7 @@ def main():
             st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_full
             st.session_state["godpick_rec_selected_df"] = selected_snapshot_full
 
-        st.caption(f"候選診斷表目前勾選：{len(full_picked_codes)} 檔。05 自選股可收觀察股；09 推薦紀錄只接受正式/A-推薦；10 推薦清單只接受正式/A-/R1核心雷達。")
+        st.caption(f"候選診斷表目前勾選：{len(full_picked_codes)} 檔。05 自選股可收觀察股；8 推薦紀錄接受正式/A-/R1核心雷達（含 R1-M）並保留分層；10 推薦清單接受正式/A-/R1核心雷達。")
 
         full_a1, full_a2, full_a3, full_a4 = st.columns([1.4, 1.3, 1.3, 1.6])
         with full_a1:
@@ -13061,7 +13250,7 @@ def main():
         if full_add_record:
             record_allowed_codes, record_rejected_codes = _phase80_allowed_codes(diagnosis_df, full_picked_codes, "record")
             if record_rejected_codes:
-                st.warning(f"已攔截 {len(record_rejected_codes)} 檔非正式/A-推薦，未寫入推薦紀錄：{', '.join(record_rejected_codes[:20])}")
+                st.warning(f"已攔截 {len(record_rejected_codes)} 檔非正式/A-/R1推薦，未寫入推薦紀錄：{', '.join(record_rejected_codes[:20])}")
             record_rows = _build_record_rows_from_rec_df(diagnosis_df, record_allowed_codes)
             # v25.9：完整推薦表匯入推薦紀錄加入防呆。
             # 同一天 + 同股票代號 + 同推薦模式 已存在時，不再重複新增。
