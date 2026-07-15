@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
@@ -33,6 +33,7 @@ import requests
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
 DEFAULT_JSON_FILES = [
     "godpick_records.json",
+    "godpick_calibration_samples.json",
     "godpick_recommend_list.json",
     "godpick_latest_recommendations.json",
 ]

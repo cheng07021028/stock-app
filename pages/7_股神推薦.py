@@ -119,6 +119,18 @@ except Exception:
 
 
 try:
+    from godpick_calibration_sample_service import (
+        CALIBRATION_SAMPLE_VERSION,
+        assess_individual_sample_quality,
+        save_calibration_samples,
+    )
+except Exception:
+    CALIBRATION_SAMPLE_VERSION = "calibration_sample_unavailable"
+    assess_individual_sample_quality = None
+    save_calibration_samples = None
+
+
+try:
     from godpick_decision_engine import (
         DECISION_ENGINE_VERSION as GODPICK_DECISION_ENGINE_VERSION,
         DECISION_ENGINE_COLUMNS as GODPICK_DECISION_ENGINE_COLUMNS,
@@ -10730,8 +10742,9 @@ def _phase80_allowed_codes(rec_df: pd.DataFrame, selected_codes: list[str], targ
     """防止正式排除/高風險觀察被寫成推薦紀錄或推薦清單。"""
     selected = [_normalize_code(x) for x in selected_codes if _normalize_code(x)]
     scan_report = st.session_state.get(_k("scan_quality_report"), {})
-    if not isinstance(scan_report, dict) or not bool(scan_report.get("正式推薦可用", False)):
-        # 沒有完整掃描證據時，禁止把候選寫入正式紀錄/推薦清單。
+    formal_scan_ok = bool(isinstance(scan_report, dict) and scan_report.get("正式推薦可用", False))
+    if target != "record" and not formal_scan_ok:
+        # 推薦清單仍需完整掃描；推薦紀錄可保留個股資料合格的R1研究雷達。
         return [], selected
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty or not selected:
         return [], selected
@@ -10747,9 +10760,12 @@ def _phase80_allowed_codes(rec_df: pd.DataFrame, selected_codes: list[str], targ
     if target == "record":
         # V159：推薦紀錄是模型績效資料庫，正式/A- 與 R1（含 R1-M 強勢動能）都必須留下；
         # 以「正式推薦分區 / 盤中雷達優先級」區分，不把雷達冒充正式買進推薦。
-        allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (
-            bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1")
-        )
+        formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+        radar_mask = bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1")
+        allowed_mask = (formal_mask if formal_scan_ok else pd.Series([False] * len(work), index=work.index)) | radar_mask
+        if callable(assess_individual_sample_quality):
+            quality_mask = work.apply(lambda r: bool(assess_individual_sample_quality(r)[0]), axis=1)
+            allowed_mask &= quality_mask
     elif target == "list":
         allowed_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1"))
     else:
@@ -10886,10 +10902,13 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
 
 
 def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tuple[int, list[str]]:
-    """每次完成新推薦後，自動保存正式/A-/R1/R1-M；同日同股同模式更新、不重複新增。"""
+    """保存正式/A-/R1/R1-M；整體掃描不足時仍保留個股資料合格的雷達樣本。
+
+    正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
+    K線、價格與成交資料完整即可保存，避免全域覆蓋率讓校正資料整批歸零。
+    """
     report = st.session_state.get(_k("scan_quality_report"), {})
-    if not isinstance(report, dict) or not bool(report.get("正式推薦可用", False)):
-        return 0, ["掃描品質未達正式可用，本輪不自動寫入推薦紀錄。"]
+    formal_scan_ok = bool(isinstance(report, dict) and report.get("正式推薦可用", False))
     if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty or "股票代號" not in source_df.columns:
         return 0, ["本輪沒有可自動記錄的推薦資料。"]
     try:
@@ -10901,20 +10920,68 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tup
             work = apply_formal_recommendation_engine(work)
         except Exception as e:
             return 0, [f"正式分區重算失敗，未自動記錄：{e}"]
+
     bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    allowed = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) | (
-        bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
-    )
+    formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+    radar_mask = bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
+    allowed = (formal_mask if formal_scan_ok else pd.Series([False] * len(work), index=work.index)) | radar_mask
     action = work.loc[allowed].copy()
     if action.empty:
-        return 0, ["本輪沒有正式、A-、R1 或 R1-M 名單，不建立空白推薦紀錄。"]
+        note = "；整體掃描未達正式可用，正式/A-不寫入" if not formal_scan_ok else ""
+        return 0, [f"本輪沒有正式、A-、R1 或 R1-M 名單，不建立空白推薦紀錄{note}。"]
+
+    quality_keep: list[bool] = []
+    quality_notes: dict[str, tuple[str, str]] = {}
+    for _, row in action.iterrows():
+        code = _normalize_code(row.get("股票代號"))
+        if callable(assess_individual_sample_quality):
+            eligible, reason, confidence = assess_individual_sample_quality(row)
+        else:
+            eligible, reason, confidence = True, "未載入個股品質服務，沿用既有判定", "中"
+        quality_keep.append(bool(eligible))
+        quality_notes[code] = (reason, confidence)
+    action = action.loc[pd.Series(quality_keep, index=action.index)].copy()
+    if action.empty:
+        return 0, ["本輪入選分區的個股資料品質均不足，未寫入績效紀錄。"]
+
     action["紀錄來源"] = "07_股神推薦｜推薦完成自動記錄"
     action["自動記錄"] = "是"
     action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
+
+    def _sample_meta(row: pd.Series) -> pd.Series:
+        level = _safe_str(row.get("紀錄層級"))
+        code = _normalize_code(row.get("股票代號"))
+        _, confidence = quality_notes.get(code, ("", "中"))
+        if level == "正式主推薦":
+            sample_type, weight, formal_perf = "A｜正式交易樣本", 1.00, "是"
+        elif level == "A-準主推薦":
+            sample_type, weight, formal_perf = "A-｜準主推薦樣本", 0.90, "是"
+        elif level.startswith("R1-M"):
+            sample_type, weight, formal_perf = "B｜R1-M強勢動能雷達", 0.75, "否"
+        else:
+            sample_type, weight, formal_perf = "B｜R1核心雷達", 0.75, "否"
+        return pd.Series({
+            "校正樣本類型": sample_type,
+            "校正樣本用途": "正式推薦績效與權重校正" if formal_perf == "是" else "雷達觸發、動能延續與失效條件校正",
+            "校正樣本權重": weight,
+            "是否納入正式推薦績效": formal_perf,
+            "是否納入權重校正": "是",
+            "個股資料品質": "可追蹤",
+            "樣本可信度": confidence,
+            "校正樣本建立版本": CALIBRATION_SAMPLE_VERSION,
+        })
+
+    meta_df = action.apply(_sample_meta, axis=1)
+    for col in meta_df.columns:
+        action[col] = meta_df[col]
     codes = action["股票代號"].astype(str).map(_normalize_code).tolist()
     rows = _build_record_rows_from_rec_df(action, codes)
-    return _append_godpick_records(rows, force_duplicate=False)
+    added, messages = _append_godpick_records(rows, force_duplicate=False)
+    if not formal_scan_ok:
+        messages = ["整體掃描未達正式可用：本輪僅保存個股資料合格的R1/R1-M研究雷達，不宣稱正式推薦。", *messages]
+    return added, messages
+
 
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
@@ -12400,9 +12467,21 @@ def main():
             if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
                 auto_source = rec_df
             auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source)
+            calibration_added = 0
+            calibration_msgs: list[str] = []
+            calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
+            if callable(save_calibration_samples):
+                calibration_added, calibration_msgs, calibration_summary = save_calibration_samples(
+                    auto_source, max_near=24, max_missed=20
+                )
+            else:
+                calibration_msgs = ["校正研究樣本服務未載入。"]
             st.session_state[_k("auto_record_detail")] = [
-                f"自動新增/更新判定：{auto_added} 筆新增",
+                f"正式/A-/雷達紀錄新增或更新：{auto_added} 筆",
                 *[str(x) for x in (auto_msgs or [])],
+                f"校正研究樣本新增：{calibration_added} 筆｜近門檻 {calibration_summary.get('near', 0)}｜市場漏選強勢 {calibration_summary.get('missed', 0)}",
+                *[str(x) for x in (calibration_msgs or [])],
+                "正式推薦績效與校正研究樣本分檔保存，不會把觀察股冒充正式推薦。",
             ]
         except Exception as e:
             st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
@@ -12415,7 +12494,7 @@ def main():
         "股神交易決策升級",
         [
             ("推薦分桶", "把結果分為立即觀察、等拉回、等突破、高分但過熱、假突破風險等交易情境。", ""),
-            ("起漲等級串聯", "會同步寫入本輪推薦、股神推薦紀錄與推薦清單，避免頁面間欄位不一致。", ""),
+            ("分層績效資料庫", "正式/A-/R1維持推薦紀錄；近門檻與漏選強勢另存校正研究樣本，避免每天零樣本與選擇偏誤。", ""),
             ("信心等級", "依總分、起漲、交易可行、類股熱度、過熱與假突破風險綜合分級。", ""),
             ("買點劇本", "自動整理現價、拉回買點、突破買點、停損、目標價。", ""),
             ("失效條件", "明確標示跌破何處或量價不延續時應降級。", ""),
@@ -12495,7 +12574,7 @@ def main():
     st.caption("本輪推薦完成後已同步寫入 godpick_recommend_list.json，10_推薦清單.py 可直接讀取。下次重新推薦會覆蓋本輪清單。")
     auto_record_detail = st.session_state.get(_k("auto_record_detail"), [])
     if auto_record_detail:
-        with st.expander("8_股神推薦紀錄｜本輪自動寫入明細", expanded=False):
+        with st.expander("推薦紀錄＋校正研究樣本｜本輪自動寫入明細", expanded=False):
             for line in auto_record_detail:
                 st.write(f"- {line}")
     watchlist_map = _load_watchlist_map()

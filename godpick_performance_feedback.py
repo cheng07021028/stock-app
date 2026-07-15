@@ -16,8 +16,9 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "phase8_7_trusted_horizon_feedback_20260714"
+PERFORMANCE_FEEDBACK_VERSION = "phase8_9_layered_calibration_feedback_20260715"
 DEFAULT_RECORD_PATH = "godpick_records.json"
+DEFAULT_CALIBRATION_PATH = "godpick_calibration_samples.json"
 
 FEEDBACK_COLUMNS = [
     "股神實戰總分",
@@ -251,6 +252,68 @@ def _tracking_return_series(df: pd.DataFrame) -> pd.Series:
     base.loc[actual_mask] = actual.loc[actual_mask]
     return pd.to_numeric(base, errors="coerce")
 
+def _load_feedback_records() -> list[dict[str, Any]]:
+    """合併正式推薦紀錄與獨立校正研究樣本。
+
+    同日同股若正式紀錄與研究樣本重複，優先保留正式紀錄；研究樣本只補充
+    近門檻與市場漏選資料，不污染正式推薦績效。
+    """
+    formal = _load_records_payload(DEFAULT_RECORD_PATH)
+    research = _load_records_payload(DEFAULT_CALIBRATION_PATH)
+    merged: dict[str, dict[str, Any]] = {}
+    for row in research + formal:
+        rec_date = _safe_str(row.get("推薦日期"))[:10]
+        code = _safe_str(row.get("股票代號"))
+        sample_type = _safe_str(row.get("校正樣本類型")) or _safe_str(row.get("紀錄層級"))
+        is_formal_source = _safe_str(row.get("推薦模式")) != "股神校正研究"
+        key = f"{rec_date}|{code}" if is_formal_source else f"{rec_date}|{code}|{sample_type}"
+        merged[key] = dict(row)
+    return list(merged.values())
+
+
+def _infer_feedback_sample_type(row: pd.Series | dict[str, Any]) -> str:
+    explicit = _safe_str(row.get("校正樣本類型"))
+    if explicit:
+        return explicit
+    level = _safe_str(row.get("紀錄層級"))
+    bucket = _safe_str(row.get("正式推薦分區"))
+    radar = _safe_str(row.get("盤中雷達優先級"))
+    if "正式主推薦" in level or bucket == "正式下週主推薦":
+        return "A｜正式交易樣本"
+    if "A-" in level or bucket == "A-｜準主推薦小量試單":
+        return "A-｜準主推薦樣本"
+    if "R1-M" in level or radar.startswith("R1-M"):
+        return "B｜R1-M強勢動能雷達"
+    if "R1" in level or radar.startswith("R1"):
+        return "B｜R1核心雷達"
+    return level or "舊版推薦樣本"
+
+
+def _infer_feedback_weight(row: pd.Series | dict[str, Any]) -> float:
+    explicit = _safe_float(row.get("校正樣本權重"), None)
+    if explicit is not None:
+        return max(0.0, min(1.0, float(explicit)))
+    sample_type = _infer_feedback_sample_type(row)
+    if sample_type.startswith("D"):
+        return 0.0
+    if sample_type.startswith("C"):
+        return 0.45
+    if sample_type.startswith("A-"):
+        return 0.90
+    if sample_type.startswith("A"):
+        return 1.00
+    if "R1" in sample_type or sample_type.startswith("B"):
+        return 0.75
+    return 0.70
+
+
+def _feedback_weight_eligible(row: pd.Series | dict[str, Any]) -> bool:
+    explicit = _safe_str(row.get("是否納入權重校正"))
+    if explicit:
+        return _boolish(explicit)
+    return _infer_feedback_weight(row) > 0
+
+
 def _score_bucket(score: Any) -> str:
     x = _safe_float(score, 0) or 0
     if x >= 95:
@@ -285,10 +348,35 @@ def _numeric_score_bucket(v: Any, *, prefix: str = "") -> str:
     return f"{prefix}{b}" if prefix else b
 
 
-def _truth_rate(df: pd.DataFrame, col: str) -> float:
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    v = pd.to_numeric(values, errors="coerce")
+    w = pd.to_numeric(weights, errors="coerce").fillna(0.0).clip(lower=0.0)
+    mask = v.notna() & w.gt(0)
+    if not mask.any():
+        return 0.0
+    return float((v.loc[mask] * w.loc[mask]).sum() / w.loc[mask].sum())
+
+
+def _weighted_median(values: pd.Series, weights: pd.Series) -> float:
+    v = pd.to_numeric(values, errors="coerce")
+    w = pd.to_numeric(weights, errors="coerce").fillna(0.0).clip(lower=0.0)
+    mask = v.notna() & w.gt(0)
+    if not mask.any():
+        return 0.0
+    order = v.loc[mask].sort_values().index
+    vv = v.loc[order]
+    ww = w.loc[order]
+    cutoff = ww.sum() * 0.5
+    return float(vv.loc[ww.cumsum().ge(cutoff)].iloc[0])
+
+
+def _truth_rate(df: pd.DataFrame, col: str, weights: pd.Series | None = None) -> float:
     if col not in df.columns or df.empty:
         return 0.0
-    return float(df[col].map(_boolish).mean())
+    vals = df[col].map(_boolish).astype(float)
+    if weights is None:
+        return float(vals.mean())
+    return _weighted_mean(vals, weights.reindex(df.index).fillna(0.0))
 
 
 def _segment_stats(df: pd.DataFrame, col: str, baseline: dict[str, float], *, min_sample: int = 3) -> dict[str, dict[str, Any]]:
@@ -297,29 +385,35 @@ def _segment_stats(df: pd.DataFrame, col: str, baseline: dict[str, float], *, mi
     out: dict[str, dict[str, Any]] = {}
     tmp = df.copy()
     tmp[col] = tmp[col].map(_safe_str).replace("", "未分類")
+    if "_feedback_weight" not in tmp.columns:
+        tmp["_feedback_weight"] = 1.0
     base_avg = float(baseline.get("avg_return", 0.0) or 0.0)
     base_med = float(baseline.get("median_return", 0.0) or 0.0)
     base_win = float(baseline.get("win_rate", 0.5) or 0.5)
     for key, g in tmp.groupby(col, dropna=False):
-        ret = pd.to_numeric(g.get("_feedback_return_pct"), errors="coerce").dropna()
+        ret = pd.to_numeric(g.get("_feedback_return_pct"), errors="coerce")
+        weights = pd.to_numeric(g.get("_feedback_weight"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+        mask = ret.notna() & weights.gt(0)
+        ret = ret.loc[mask]
+        weights = weights.loc[mask]
         sample = int(len(ret))
-        if sample <= 0:
+        effective_sample = float(weights.sum())
+        if sample <= 0 or effective_sample <= 0:
             continue
         ret_clip = ret.clip(lower=-25, upper=35)
-        avg = float(ret.mean())
-        med = float(ret.median())
-        avg_clip = float(ret_clip.mean())
-        med_clip = float(ret_clip.median())
-        win = float((ret > 0).mean())
-        hit5 = float((ret >= 5).mean())
-        loss5 = float((ret <= -5).mean())
-        t1 = _truth_rate(g, "是否達目標1")
-        t2 = _truth_rate(g, "是否達目標2")
-        stop = _truth_rate(g, "是否達停損")
-        if sample < min_sample:
+        avg = _weighted_mean(ret, weights)
+        med = _weighted_median(ret, weights)
+        avg_clip = _weighted_mean(ret_clip, weights)
+        med_clip = _weighted_median(ret_clip, weights)
+        win = _weighted_mean((ret > 0).astype(float), weights)
+        hit5 = _weighted_mean((ret >= 5).astype(float), weights)
+        loss5 = _weighted_mean((ret <= -5).astype(float), weights)
+        t1 = _truth_rate(g.loc[mask], "是否達目標1", weights)
+        t2 = _truth_rate(g.loc[mask], "是否達目標2", weights)
+        stop = _truth_rate(g.loc[mask], "是否達停損", weights)
+        if sample < min_sample or effective_sample < max(2.0, min_sample * 0.45):
             boost = 0.0
         else:
-            # V158：用中位數 + winsorized 平均，降低單一飆股 100%+ 對權重的污染。
             raw = ((avg_clip - base_avg) / 4.0)
             raw += ((med_clip - base_med) / 3.0)
             raw += (win - base_win) * 7.0
@@ -328,11 +422,12 @@ def _segment_stats(df: pd.DataFrame, col: str, baseline: dict[str, float], *, mi
             raw += (t1 - baseline.get("target1_rate", 0.0)) * 3.0
             raw += (t2 - baseline.get("target2_rate", 0.0)) * 1.5
             raw -= max(0.0, stop - baseline.get("stop_rate", 0.0)) * 7.0
-            shrink = min(1.0, sample / 30.0)
+            shrink = min(1.0, effective_sample / 30.0)
             boost = max(-8.0, min(8.0, raw * shrink))
         stat = SegmentStat(sample, avg, med, win, t1, t2, stop, boost)
         row = stat.as_dict()
         row.update({
+            "effective_sample": round(effective_sample, 2),
             "avg_clip": round(avg_clip, 4),
             "median_clip": round(med_clip, 4),
             "hit5_rate": round(hit5, 4),
@@ -344,7 +439,7 @@ def _segment_stats(df: pd.DataFrame, col: str, baseline: dict[str, float], *, mi
 
 def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFrame | None = None) -> dict[str, Any]:
     if records is None:
-        records = _load_records_payload(DEFAULT_RECORD_PATH)
+        records = _load_feedback_records()
     df = records.copy() if isinstance(records, pd.DataFrame) else pd.DataFrame(records or [])
     if df.empty:
         return _empty_profile("沒有可用股神推薦紀錄")
@@ -352,28 +447,37 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
     df["_feedback_return_pct"] = _tracking_return_series(df)
     df["_feedback_suspicious"] = _suspicious_horizon_mask(df)
     df["_feedback_business_age"] = _business_age_series(df)
+    df["_feedback_sample_type"] = df.apply(_infer_feedback_sample_type, axis=1)
+    df["_feedback_weight"] = df.apply(_infer_feedback_weight, axis=1)
+    df["_feedback_weight_eligible"] = df.apply(_feedback_weight_eligible, axis=1)
     df["_score_bucket"] = df.get("推薦總分", pd.Series([0] * len(df), index=df.index)).map(_score_bucket)
     for _c in ["股神決策分數", "起漲前兆分數", "追價風險分", "Entry進場買點分", "Risk風控安全分", "可操作分"]:
         if _c in df.columns:
             df[f"_{_c}_bucket"] = df[_c].map(lambda v, _p=_c: _numeric_score_bucket(v, prefix=f"{_p}："))
-    valid = df[df["_feedback_return_pct"].notna()].copy()
+    valid = df[
+        df["_feedback_return_pct"].notna()
+        & df["_feedback_weight_eligible"].fillna(False)
+        & pd.to_numeric(df["_feedback_weight"], errors="coerce").fillna(0.0).gt(0)
+    ].copy()
     if valid.empty:
         return _empty_profile("股神推薦紀錄缺少可計算報酬欄位")
 
-    ret = pd.to_numeric(valid["_feedback_return_pct"], errors="coerce").dropna()
+    ret = pd.to_numeric(valid["_feedback_return_pct"], errors="coerce")
+    weights = pd.to_numeric(valid["_feedback_weight"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
     ret_clip = ret.clip(lower=-25, upper=35)
     baseline = {
-        "sample": int(len(ret)),
-        "avg_return": float(ret_clip.mean()),
-        "raw_avg_return": float(ret.mean()),
-        "median_return": float(ret_clip.median()),
-        "raw_median_return": float(ret.median()),
-        "win_rate": float((ret > 0).mean()),
-        "hit5_rate": float((ret >= 5).mean()),
-        "loss5_rate": float((ret <= -5).mean()),
-        "target1_rate": _truth_rate(valid, "是否達目標1"),
-        "target2_rate": _truth_rate(valid, "是否達目標2"),
-        "stop_rate": _truth_rate(valid, "是否達停損"),
+        "sample": int(ret.notna().sum()),
+        "effective_sample": float(weights.loc[ret.notna()].sum()),
+        "avg_return": _weighted_mean(ret_clip, weights),
+        "raw_avg_return": _weighted_mean(ret, weights),
+        "median_return": _weighted_median(ret_clip, weights),
+        "raw_median_return": _weighted_median(ret, weights),
+        "win_rate": _weighted_mean((ret > 0).astype(float), weights),
+        "hit5_rate": _weighted_mean((ret >= 5).astype(float), weights),
+        "loss5_rate": _weighted_mean((ret <= -5).astype(float), weights),
+        "target1_rate": _truth_rate(valid, "是否達目標1", weights),
+        "target2_rate": _truth_rate(valid, "是否達目標2", weights),
+        "stop_rate": _truth_rate(valid, "是否達停損", weights),
     }
     profile = {
         "version": PERFORMANCE_FEEDBACK_VERSION,
@@ -383,8 +487,14 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         "data_quality": {
             "total_records": int(len(df)),
             "trusted_records": int(len(valid)),
+            "effective_weighted_samples": round(float(pd.to_numeric(valid["_feedback_weight"], errors="coerce").fillna(0.0).sum()), 2),
+            "formal_or_radar_records": int((~df["_feedback_sample_type"].astype(str).str.startswith(("C", "D"))).sum()),
+            "near_threshold_samples": int(df["_feedback_sample_type"].astype(str).str.startswith("C").sum()),
+            "missed_strong_samples": int(df["_feedback_sample_type"].astype(str).str.startswith("D").sum()),
+            "weight_eligible_records": int(df["_feedback_weight_eligible"].fillna(False).sum()),
             "suspicious_proxy_records": int(df["_feedback_suspicious"].fillna(False).sum()),
             "trusted_ratio_pct": round(float(len(valid) / max(len(df), 1) * 100.0), 2),
+            "sample_type_counts": {str(k): int(v) for k, v in df["_feedback_sample_type"].value_counts(dropna=False).to_dict().items()},
         },
         "by_recommend_type": _segment_stats(valid, "推薦型態", baseline, min_sample=5),
         "by_category": _segment_stats(valid, "類別", baseline, min_sample=8),
@@ -402,6 +512,19 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         _b = f"_{_c}_bucket"
         if _b in valid.columns:
             profile[f"by_{_c}_bucket"] = _segment_stats(valid, _b, baseline, min_sample=8)
+    profile["by_calibration_sample_type"] = _segment_stats(valid, "_feedback_sample_type", baseline, min_sample=5)
+    missed = df[df["_feedback_sample_type"].astype(str).str.startswith("D") & df["_feedback_return_pct"].notna()].copy()
+    if not missed.empty:
+        missed_ret = pd.to_numeric(missed["_feedback_return_pct"], errors="coerce").dropna()
+        profile["missed_strong_diagnostics"] = {
+            "sample": int(len(missed_ret)),
+            "avg_return": round(float(missed_ret.mean()), 4) if not missed_ret.empty else 0.0,
+            "median_return": round(float(missed_ret.median()), 4) if not missed_ret.empty else 0.0,
+            "positive_rate": round(float((missed_ret > 0).mean()), 4) if not missed_ret.empty else 0.0,
+            "note": "市場漏選強勢樣本只用於召回率與誤殺診斷，不直接調整獲利權重。",
+        }
+    else:
+        profile["missed_strong_diagnostics"] = {"sample": 0, "avg_return": 0.0, "median_return": 0.0, "positive_rate": 0.0, "note": "尚無成熟市場漏選樣本"}
     profile["top_categories"] = _top_keys(profile["by_category"], positive=True)
     profile["weak_categories"] = _top_keys(profile["by_category"], positive=False)
     profile["top_recommend_types"] = _top_keys(profile["by_recommend_type"], positive=True)
@@ -444,6 +567,8 @@ def _top_keys(stats: dict[str, dict[str, Any]], *, positive: bool) -> list[str]:
 
 
 def load_godpick_performance_profile(path: str | Path = DEFAULT_RECORD_PATH) -> dict[str, Any]:
+    if str(path) == DEFAULT_RECORD_PATH:
+        return build_godpick_performance_profile(_load_feedback_records())
     return build_godpick_performance_profile(_load_records_payload(path))
 
 

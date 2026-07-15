@@ -1,4 +1,4 @@
-
+﻿
 
 
 
@@ -39,6 +39,10 @@ import requests
 import streamlit as st
 from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
 from godpick_history_sources import fetch_multi_source_history
+try:
+    from godpick_calibration_sample_service import sync_existing_calibration_samples
+except Exception:
+    sync_existing_calibration_samples = None
 try:
     from official_factor_service import FACTOR_COLUMNS as OFFICIAL_FACTOR_SERVICE_COLUMNS, load_factor_frame as _load_official_factor_frame
 except Exception:
@@ -5347,18 +5351,25 @@ def main():
         batch_n = st.number_input("績效每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
         max_stock_n = st.number_input("績效每批股票數", min_value=3, max_value=80, value=30, step=1, key=_k("perf_update_stock_limit"))
-        st.caption("V103：這些數字是每批處理量，不是總上限；按下後會跑完整份符合條件的資料。ONLINE_FAIL 不拖住整批。")
+        st.caption("V160：會同步更新正式推薦紀錄與獨立校正研究樣本；數字是每批處理量，不是總上限。市場漏選樣本只做召回率診斷，不混入正式績效。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
             try:
                 with st.spinner("V104：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
                     summary = update_recommendation_perf_fast_v77(
-                        json_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
+                        json_files=["godpick_records.json", "godpick_calibration_samples.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
                         max_records=0,
                         batch_limit=int(max_stock_n),
                         max_workers=12,
                         stale_minutes=60,
                         process_all=True,
                     )
+                    calibration_sync_msg = ""
+                    if callable(sync_existing_calibration_samples):
+                        try:
+                            _, calibration_sync_msgs = sync_existing_calibration_samples()
+                            calibration_sync_msg = " 校正樣本同步：" + "；".join(str(x) for x in calibration_sync_msgs)
+                        except Exception as _cal_sync_e:
+                            calibration_sync_msg = f" 校正樣本遠端同步失敗：{_cal_sync_e}"
                     reload_msg = ""
                     try:
                         refreshed = _load_records()
@@ -5372,7 +5383,7 @@ def main():
                 msg = (
                     f"V104 已完成完整份績效更新：候選 {summary.get('candidates', 0)} 筆，"
                     f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
-                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}"
+                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{calibration_sync_msg}"
                 )
                 detail = "；".join(summary.get("messages", [])) if summary.get("messages") else str(summary)
                 ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('fail', 0) or 0) == 0
