@@ -2456,11 +2456,16 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
 
     for suffix in suffix_candidates:
         symbol = f"{stock_no}.{suffix}"
+        # 使用明確 period1/period2，不只使用 range。Yahoo 的 range 查詢在台灣
+        # 收盤後短時間內偶爾仍回傳到前一交易日，造成整批股票被誤標為落後。
+        # period2 採 end_date + 2 日（Yahoo 為排他上界），再由下方日期區間切回。
         params = {
-            "range": range_param,
+            "period1": int((start_ts - pd.Timedelta(days=3)).timestamp()),
+            "period2": int((end_ts + pd.Timedelta(days=2)).timestamp()),
             "interval": "1d",
             "includePrePost": "false",
             "events": "history",
+            "includeAdjustedClose": "true",
         }
         for yahoo_host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
             url = f"https://{yahoo_host}/v8/finance/chart/{symbol}"
@@ -2491,7 +2496,10 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
                     if close_v is None:
                         continue
                     try:
-                        dt = pd.to_datetime(datetime.fromtimestamp(int(ts)).date())
+                        dt = pd.to_datetime(
+                            datetime.fromtimestamp(int(ts), tz=ZoneInfo("UTC"))
+                            .astimezone(ZoneInfo("Asia/Taipei")).date()
+                        )
                     except Exception:
                         continue
                     if dt < start_ts or dt > end_ts:
@@ -2524,6 +2532,30 @@ def _fetch_yahoo_history_fast(stock_no, market_type="上市", start_date=None, e
                 _diag_add_event("history", f"Yahoo_{suffix}", False, f"{symbol} {yahoo_host} {e}", time.perf_counter() - t0, rows=0, code=stock_no)
                 continue
     return pd.DataFrame()
+
+
+def _history_frame_business_lag(df: pd.DataFrame, end_date) -> int:
+    """Return business-day lag of the frame's last valid K-line."""
+    try:
+        if df is None or df.empty or "日期" not in df.columns:
+            return 999
+        dates = pd.to_datetime(df["日期"], errors="coerce").dropna()
+        if dates.empty:
+            return 999
+        last_day = dates.max().normalize()
+        target_day = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(target_day):
+            return 999
+        target_day = target_day.normalize()
+        if last_day >= target_day:
+            return 0
+        return max(len(pd.bdate_range(last_day + pd.Timedelta(days=1), target_day)), 0)
+    except Exception:
+        return 999
+
+
+def _history_frame_is_fresh_enough(df: pd.DataFrame, end_date) -> bool:
+    return _history_frame_business_lag(df, end_date) <= _history_cache_allowed_business_lag(end_date)
 
 def get_history_data(stock_no, stock_name="", market_type="上市", start_date=None, end_date=None):
     """取得歷史日線資料。
@@ -2563,19 +2595,55 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
         _diag_add_event("history", "DiskCache", False, f"cache error: {e}", time.perf_counter() - scan_t0, rows=0, code=stock_no)
 
     # 第二來源：Yahoo 高速日線。失敗不代表該股票沒資料，必須 fallback 官方來源。
+    stale_fast_df = pd.DataFrame()
     try:
         fast_df = _fetch_yahoo_history_fast(stock_no, market_type=market_type, start_date=start_ts, end_date=end_ts)
         if fast_df is not None and not fast_df.empty:
-            _save_history_disk_cache(stock_no, market_type, start_ts, end_ts, fast_df)
-            _diag_add_event("history", "YahooFastTotal", True, f"rows={len(fast_df)}", time.perf_counter() - scan_t0, rows=len(fast_df), code=stock_no)
-            return fast_df
-        _diag_add_event("history", "YahooFastTotal", False, "empty or insufficient rows", time.perf_counter() - scan_t0, rows=0, code=stock_no)
+            yahoo_lag = _history_frame_business_lag(fast_df, end_ts)
+            if _history_frame_is_fresh_enough(fast_df, end_ts):
+                _save_history_disk_cache(stock_no, market_type, start_ts, end_ts, fast_df)
+                _diag_add_event("history", "YahooFastTotal", True, f"rows={len(fast_df)} lag={yahoo_lag}", time.perf_counter() - scan_t0, rows=len(fast_df), code=stock_no)
+                return fast_df
+            # 關鍵修正：Yahoo 有 20 根以上不代表最新交易日已到齊。收盤後若仍少一天，
+            # 不可直接回傳舊收盤價，必須繼續走 TWSE/TPEx 官方來源。
+            stale_fast_df = fast_df.copy()
+            _diag_add_event("history", "YahooFastStale", False, f"rows={len(fast_df)} business_lag={yahoo_lag}; patch latest month from official", time.perf_counter() - scan_t0, rows=len(fast_df), code=stock_no)
+        else:
+            _diag_add_event("history", "YahooFastTotal", False, "empty or insufficient rows", time.perf_counter() - scan_t0, rows=0, code=stock_no)
     except Exception as e:
         _diag_add_event("history", "YahooFastTotal", False, str(e), time.perf_counter() - scan_t0, rows=0, code=stock_no)
 
-    # 第二來源：官方 TWSE / TPEx 月資料。保留完整 fallback，避免漏股票。
-    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
+    # Yahoo 只有末日缺一根時，先只抓「當月」官方資料補尾端，避免為 1 根日線
+    # 重抓整段 6 個月。這是無損加速：歷史主體沿用 Yahoo，末月由 TWSE/TPEx 校正。
     market_candidates = _history_market_candidates(market_type)
+    if isinstance(stale_fast_df, pd.DataFrame) and not stale_fast_df.empty:
+        current_month = end_ts.replace(day=1)
+        for mk in market_candidates:
+            try:
+                if mk in ["上櫃", "興櫃", "TPEX", "OTC"]:
+                    raw_current, _msg = _fetch_tpex_history_month(stock_no, current_month)
+                    current_source = "tpex_daily_patch"
+                else:
+                    raw_current, _msg = _fetch_twse_history_month(stock_no, current_month)
+                    current_source = "twse_stock_day_patch"
+                current_df = _normalize_history_df(raw_current, current_source, current_month, end_ts) if raw_current is not None and not raw_current.empty else pd.DataFrame()
+                if current_df.empty:
+                    continue
+                patched = pd.concat([stale_fast_df, current_df], ignore_index=True, sort=False)
+                patched["日期"] = pd.to_datetime(patched["日期"], errors="coerce")
+                patched = patched.dropna(subset=["日期", "收盤價"]).sort_values("日期").drop_duplicates("日期", keep="last")
+                patched = patched[(patched["日期"] >= start_ts) & (patched["日期"] <= end_ts)].reset_index(drop=True)
+                patch_lag = _history_frame_business_lag(patched, end_ts)
+                if _history_frame_is_fresh_enough(patched, end_ts):
+                    _save_history_disk_cache(stock_no, mk, start_ts, end_ts, patched)
+                    _diag_add_event("history", current_source, True, f"{mk} patched rows={len(patched)} lag={patch_lag}", time.perf_counter() - scan_t0, rows=len(patched), code=stock_no)
+                    return patched
+                _diag_add_event("history", f"{current_source}_stale", False, f"{mk} patched lag={patch_lag}", time.perf_counter() - scan_t0, rows=len(patched), code=stock_no)
+            except Exception as e:
+                _diag_add_event("history", "OfficialCurrentMonthPatch", False, f"{mk} {e}", time.perf_counter() - scan_t0, rows=0, code=stock_no)
+
+    # 官方 TWSE / TPEx 完整月資料 fallback。只在 Yahoo 與當月補尾都失敗時使用。
+    month_starts = pd.date_range(start=start_ts.replace(day=1), end=end_ts, freq="MS")
 
     for mk in market_candidates:
         frames = []
@@ -2595,9 +2663,12 @@ def get_history_data(stock_no, stock_name="", market_type="上市", start_date=N
             raw_df = pd.concat(frames, ignore_index=True)
             df = _normalize_history_df(raw_df, source, start_ts, end_ts)
             if not df.empty:
-                _save_history_disk_cache(stock_no, mk, start_ts, end_ts, df)
-                _diag_add_event("history", source, True, f"{mk} rows={len(df)}", time.perf_counter() - scan_t0, rows=len(df), code=stock_no)
-                return df
+                official_lag = _history_frame_business_lag(df, end_ts)
+                if _history_frame_is_fresh_enough(df, end_ts):
+                    _save_history_disk_cache(stock_no, mk, start_ts, end_ts, df)
+                    _diag_add_event("history", source, True, f"{mk} rows={len(df)} lag={official_lag}", time.perf_counter() - scan_t0, rows=len(df), code=stock_no)
+                    return df
+                _diag_add_event("history", f"{source}_stale", False, f"{mk} rows={len(df)} business_lag={official_lag}", time.perf_counter() - scan_t0, rows=len(df), code=stock_no)
 
     _diag_add_event("history", "OfficialFallback", False, "TWSE / TPEx 都沒有抓到有效歷史資料", time.perf_counter() - scan_t0, rows=0, code=stock_no)
     return pd.DataFrame()

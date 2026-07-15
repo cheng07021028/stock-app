@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_8_dual_path_momentum_and_entry_20260714"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase8_9_profit_recall_20260715"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -71,6 +71,10 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "強勢動能判定",
     "動能進場條件",
     "動能風險控制",
+    "強勢前兆分",
+    "強勢前兆判定",
+    "強勢前兆進場條件",
+    "強勢前兆風控",
     "K線最後交易日",
     "K線落後交易日",
     "K線資料新鮮度",
@@ -98,6 +102,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "進場可執行分",
     "距最近可執行買點%",
     "強勢動能分",
+    "強勢前兆分",
     "K線落後交易日",
 }
 
@@ -751,6 +756,104 @@ def _momentum_profile(row: pd.Series) -> dict[str, Any]:
     }
 
 
+
+def _prebreakout_profile(row: pd.Series) -> dict[str, Any]:
+    """第三條路徑：強勢前兆／主流領漲召回。
+
+    目的不是預測所有漲停，而是避免「尚未大漲、但主流資金＋族群＋爆發回放
+    已同步」的股票被傳統 RR、靜態停損或 Entry/Risk 一票否決。這類股票只列
+    R1-P 條件雷達，不直接升級正式推薦；盤中必須突破/回測確認。
+    """
+    market_type = _safe_str(row.get("市場別")).replace(" ", "")
+    amount = _reference_turnover_m(row)
+    missed = _num(row, "強勢股漏選風險分", 0)
+    radar = max(
+        _num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0),
+        _num(row, "飆股攻擊分", 0), _num(row, "主流領漲回補分", 0),
+        _num(row, "漲停回放分", 0), _num(row, "盤前強勢前兆分", 0),
+    )
+    mainstream = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "類股熱度分數", 0), _num(row, "族群輪動分", 0))
+    candidate = max(_num(row, "候選強度分", 0), _num(row, "推薦總分", 0))
+    prelaunch = _num(row, "起漲前兆分數", 0)
+    trade = _num(row, "交易可行分數", 0)
+    technical = _num(row, "技術結構分數", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    ret20 = _num(row, "近20日漲幅%", 0)
+    chase = _chase_risk_score(row, 55)
+    freshness = _history_freshness_info(row)
+    market = _market_risk_info(row)
+
+    liquidity_score = 100 if amount >= 2000 else 92 if amount >= 800 else 82 if amount >= 300 else 72 if amount >= 150 else 58 if amount >= 100 else 20
+    score = (
+        missed * 0.27 + radar * 0.20 + mainstream * 0.14 + sector * 0.11
+        + candidate * 0.10 + prelaunch * 0.07 + technical * 0.04 + trade * 0.03
+        + liquidity_score * 0.04
+    )
+    if ret5 > 28 or ret20 > 105:
+        score -= 13
+    elif ret5 > 20 or ret20 > 80:
+        score -= 6
+    # 追價風險不能把領漲股從「研究/觸發雷達」直接刪除；它只限制是否可進場。
+    # 因此僅做溫和降分，真正的禁追條件放在 status / entry / risk 中。
+    if chase >= 92:
+        score -= 8
+    elif chase >= 84:
+        score -= 4
+    score = round(_clamp(score), 1)
+
+    blockers: list[str] = []
+    if market_type in {"興櫃", "Emerging"}:
+        blockers.append("興櫃不列強勢前兆作戰")
+    if amount < 100:
+        blockers.append("成交額不足1億元")
+    if missed < 72:
+        blockers.append("強勢漏選風險尚低")
+    if radar < 64:
+        blockers.append("爆發/回放證據不足")
+    if mainstream < 56:
+        blockers.append("主流資金不足")
+    if sector < 45:
+        blockers.append("族群同步不足")
+    if max(candidate, prelaunch, technical) < 58:
+        blockers.append("技術/前兆結構不足")
+    if ret5 > 35 or ret20 > 125:
+        blockers.append("短中期漲幅過度延伸")
+    hot_risk = bool(chase >= 88 or ret5 > 20 or ret20 > 80)
+
+    eligible = bool(not blockers and score >= 68)
+    radar_ready = bool(
+        eligible and score >= 72 and amount >= 150 and missed >= 78 and radar >= 68
+        and (mainstream >= 60 or sector >= 66)
+    )
+    if radar_ready and not freshness["fresh"]:
+        status = "DATA-WAIT-P｜強勢前兆成立但K線待更新"
+    elif radar_ready and market["severe"]:
+        status = "MARKET-WAIT-P｜強勢前兆成立但大盤禁止追價"
+    elif radar_ready and hot_risk:
+        status = "HOT-WAIT-P｜領漲證據成立但禁止追價"
+    elif radar_ready:
+        status = "READY-P｜強勢前兆條件雷達"
+    else:
+        status = "BLOCK-P｜未達強勢前兆門檻"
+
+    return {
+        "score": score,
+        "eligible": eligible,
+        "radar_ready": radar_ready,
+        "status": status,
+        "blockers": "、".join(blockers),
+        "amount": round(amount, 1),
+        "missed": round(missed, 1),
+        "radar": round(radar, 1),
+        "mainstream": round(mainstream, 1),
+        "sector": round(sector, 1),
+        "fresh": bool(freshness["fresh"]),
+        "hot_risk": hot_risk,
+        "entry": "不預掛追價；開盤漲幅宜低於3.5%，只在放量突破前高/觸發價，或首波回測量縮且守住觸發後守價時小量進場。高熱候選只接受充分回測後再突破，不接開盤急拉。",
+        "risk": "開高逾5%不追；跌破觸發後守價、點火K低點或進場價約5%即取消。採分批與移動停利，不用舊壓力價的靜態RR否決趨勢股。",
+    }
+
 def _next_session_profile(row: pd.Series) -> dict[str, Any]:
     """隔日可參考品質層。
 
@@ -908,6 +1011,7 @@ def _entry_readiness_profile(row: pd.Series) -> dict[str, Any]:
     market = _market_risk_info(row)
     freshness = _history_freshness_info(row)
     momentum = _momentum_profile(row)
+    prebreak = _prebreakout_profile(row)
 
     pullback_setup = (
         not pullback_broken and pullback_gap <= 2.25 and -5.0 <= ret5 <= 3.0
@@ -923,6 +1027,9 @@ def _entry_readiness_profile(row: pd.Series) -> dict[str, Any]:
     if momentum["radar_ready"]:
         path = "動能突破確認"
         nearest_gap = max(0.0, -momentum["breakout20"])
+    elif prebreak["radar_ready"]:
+        path = "強勢前兆待觸發"
+        nearest_gap = max(0.0, _num(row, "觸發距離%", _num(row, "距20日高點%", 3.0)))
     elif pullback_setup and pullback_gap <= breakout_gap:
         path = "回測承接"
         nearest_gap = pullback_gap
@@ -955,8 +1062,9 @@ def _entry_readiness_profile(row: pd.Series) -> dict[str, Any]:
         and 0 < stop <= 6.8 and entry >= 68 and risk >= 59 and amount >= 150 and chase <= 60
     )
     momentum_ready = bool(momentum["radar_ready"] and freshness["fresh"])
+    prebreak_ready = bool(prebreak["radar_ready"])
 
-    if not momentum_ready:
+    if not momentum_ready and not prebreak_ready:
         if not (pullback_setup or breakout_setup):
             if nearest_gap > 2.5:
                 blockers.append(f"距最近可執行買點仍有{nearest_gap:.1f}%")
@@ -991,6 +1099,17 @@ def _entry_readiness_profile(row: pd.Series) -> dict[str, Any]:
     elif momentum_ready:
         status = "READY-M｜強勢動能條件進場"
         ready = False  # 不升成正式/A-，只進 R1-M 條件雷達。
+    elif prebreak_ready and not freshness["fresh"]:
+        status = "DATA-WAIT-P｜強勢前兆成立但K線待更新"
+        blockers.append("強勢前兆保留；更新最新K線後才可判斷進場")
+        ready = False
+    elif prebreak_ready and market["severe"]:
+        status = "MARKET-WAIT-P｜強勢前兆成立但大盤禁止追價"
+        blockers.append("大盤紅燈：只列強勢前兆雷達")
+        ready = False
+    elif prebreak_ready:
+        status = "READY-P｜強勢前兆條件雷達"
+        ready = False
     elif freshness["fresh"] and (pullback_gap <= 4.0 or breakout_gap <= 4.0) and rr >= 1.15 and stop <= 8.5:
         status = "WATCH｜接近買點但條件未齊"
         ready = False
@@ -1004,7 +1123,7 @@ def _entry_readiness_profile(row: pd.Series) -> dict[str, Any]:
         score -= 8.0
     return {
         "score": round(_clamp(score), 1), "status": status, "ready": ready,
-        "momentum_ready": momentum_ready, "path": path,
+        "momentum_ready": momentum_ready, "prebreak_ready": prebreak_ready, "path": path,
         "nearest_gap": round(nearest_gap, 2), "breakout_gap": round(breakout_gap, 2),
         "pullback_gap": round(pullback_gap, 2), "reasons": "、".join(dict.fromkeys(blockers)),
         "freshness": freshness,
@@ -1108,13 +1227,14 @@ def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) ->
     profile = _next_session_profile(row)
     readiness = _entry_readiness_profile(row)
     momentum = _momentum_profile(row)
-    if readiness["status"].startswith("BLOCK") and not momentum["radar_ready"]:
+    prebreak = _prebreakout_profile(row)
+    if readiness["status"].startswith("BLOCK") and not momentum["radar_ready"] and not prebreak["radar_ready"]:
         return False
-    if not (profile["reference_ok"] or readiness["score"] >= 68 or momentum["radar_ready"]):
+    if not (profile["reference_ok"] or readiness["score"] >= 68 or momentum["radar_ready"] or prebreak["radar_ready"]):
         return False
     if _safe_str(row.get("市場別")).replace(" ", "") in {"興櫃", "Emerging"}:
         return False
-    if any("過熱" in r or "禁買" in r for r in exclusion) and not momentum["radar_ready"]:
+    if any("過熱" in r or "禁買" in r for r in exclusion) and not momentum["radar_ready"] and not prebreak["radar_ready"]:
         return False
     if any("低流動性" in r for r in exclusion):
         return False
@@ -1172,6 +1292,7 @@ def _intraday_radar_ok(row: pd.Series, op_score: float, exclusion: list[str]) ->
         )
         or strong_replay_radar
         or momentum_radar
+        or (prebreak["radar_ready"] and liq["tradable"] and amount >= 100 and op_score >= 30)
     )
 
 
@@ -1374,6 +1495,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     next_profile = _next_session_profile(row)
     readiness = _entry_readiness_profile(row)
     momentum = _momentum_profile(row)
+    prebreak = _prebreakout_profile(row)
     reasons = _exclusion_reasons(row)
     trig = _trigger_info(row)
     direct_primary = _direct_ok(row, op, reasons)
@@ -1392,6 +1514,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "完整因子A-門檻" if a_primary else
         ("防守市場客觀量價A-" if a_objective and market_info["severe"] else "客觀量價備援A-門檻") if a_objective else
         "強勢動能條件雷達" if intraday and momentum["radar_ready"] else
+        "強勢前兆召回雷達" if intraday and prebreak["radar_ready"] else
         "完整因子盤中雷達" if intraday_primary else
         ("防守市場客觀量價雷達" if intraday_objective and market_info["severe"] else "客觀量價備援盤中雷達") if intraday_objective else
         "一般風控分流"
@@ -1427,6 +1550,26 @@ def _classify(row: pd.Series) -> dict[str, Any]:
             action = momentum["entry"] if not market_info["severe"] else f"大盤紅燈只保留強勢股雷達；{momentum['entry']}"
             radar_level = momentum["role"]
             radar_action = "首波回測守住或再突破放量才小量試單；開高急拉不追"
+            exclude_text = ""
+        elif prebreak["radar_ready"]:
+            if not prebreak["fresh"]:
+                qual = "DATA-WAIT-P｜強勢前兆成立但行情待更新"
+                direct_buy = "不可｜先更新最新K線"
+                action = f"列入強勢前兆雷達，但目前K線非最新交易日；先更新資料。更新後僅接受：{prebreak['entry']}"
+            elif market_info["severe"]:
+                qual = "WAIT-PD｜防守市場強勢前兆"
+                direct_buy = "不可｜大盤紅燈只盯盤"
+                action = f"大盤紅燈只保留前兆雷達；{prebreak['entry']}"
+            elif prebreak.get("hot_risk"):
+                qual = "HOT-WAIT-P｜高熱領漲監控，禁止直接追價"
+                direct_buy = "不可追價｜只等充分回測後再突破"
+                action = prebreak["entry"]
+            else:
+                qual = "WAIT-P｜強勢前兆條件雷達"
+                direct_buy = "條件式｜突破/回測確認"
+                action = prebreak["entry"]
+            radar_level = "P+｜強勢前兆召回"
+            radar_action = "不預買；突破前高或回測守價後才小量試單"
             exclude_text = ""
         else:
             qual = "WAIT｜未觸發不可買" if intraday_primary else ("WAIT-QD｜防守市場精選雷達" if market_info["severe"] else "WAIT-Q｜量價條件式雷達")
@@ -1554,6 +1697,10 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "強勢動能判定": ("PASS｜" + momentum["role"]) if momentum["radar_ready"] else ("BLOCK｜" + (momentum["blockers"] or "未達動能門檻")),
         "動能進場條件": momentum["entry"],
         "動能風險控制": momentum["risk"],
+        "強勢前兆分": prebreak["score"],
+        "強勢前兆判定": prebreak["status"],
+        "強勢前兆進場條件": prebreak["entry"],
+        "強勢前兆風控": prebreak["risk"],
         "K線最後交易日": readiness["freshness"]["last_date"],
         "K線落後交易日": readiness["freshness"]["lag"] if readiness["freshness"]["known"] else 999,
         "K線資料新鮮度": readiness["freshness"]["status"],
@@ -1597,6 +1744,7 @@ def _intraday_priority_score(row: pd.Series) -> float:
     next_score = _num(row, "隔日可參考分", _next_session_profile(row)["score"])
     readiness_score = _num(row, "進場可執行分", _entry_readiness_profile(row)["score"])
     momentum_score = _num(row, "強勢動能分", _momentum_profile(row)["score"])
+    prebreak_score = _num(row, "強勢前兆分", _prebreakout_profile(row)["score"])
     amount_score = 100 if amount >= 5000 else 88 if amount >= 2000 else 76 if amount >= 800 else 62 if amount >= 300 else 45 if amount >= 100 else 20
     rr_score = _clamp(rr * 50.0, 0, 100)
     score = (
@@ -1613,6 +1761,7 @@ def _intraday_priority_score(row: pd.Series) -> float:
         + next_score * 0.08
         + readiness_score * 0.12
         + momentum_score * 0.16
+        + prebreak_score * 0.14
     )
     # 追價風險過高、買進分數過低時不要進核心盯盤，保留到備援或低優先。
     if chase >= 76:
@@ -1678,17 +1827,23 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
             and 0 < _stop_distance_pct(row) <= 6.8
         )
         momentum = _momentum_profile(row)
+        prebreak = _prebreakout_profile(row)
         momentum_core = bool(
             momentum["radar_ready"] and momentum["score"] >= 74
             and momentum["close_loc"] >= 72 and momentum["amount"] >= 100
             and (momentum["day_vol"] >= 1.15 or momentum["amount"] >= 500)
             and momentum["upper_shadow"] <= 42
         )
+        prebreak_core = bool(
+            prebreak["radar_ready"] and prebreak["score"] >= 72
+            and prebreak["amount"] >= 150 and prebreak["missed"] >= 78
+            and prebreak["radar"] >= 68
+        )
         can_core = (
             len(core) < core_limit
             and sector_count.get(sector, 0) < sector_cap_core
             and _safe_float(row.get("__priority"), 0) >= 64
-            and (normal_core or momentum_core)
+            and (normal_core or momentum_core or prebreak_core)
         )
         if can_core:
             core.append(idx)
@@ -1708,6 +1863,9 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
             if momentum["radar_ready"]:
                 out.at[idx, "盤中雷達優先級"] = "R1-M｜強勢動能核心雷達"
                 out.at[idx, "盤中雷達分層說明"] = f"強勢動能核心盯盤，優先分 {pr:.1f}；不可開盤追價，只接受回測守住或再突破放量。"
+            elif _prebreakout_profile(tmp.loc[idx])["radar_ready"]:
+                out.at[idx, "盤中雷達優先級"] = "R1-P｜強勢前兆核心雷達"
+                out.at[idx, "盤中雷達分層說明"] = f"強勢前兆召回，優先分 {pr:.1f}；不預買，只在突破/回測確認後小量試單。"
             else:
                 out.at[idx, "盤中雷達優先級"] = "R1｜核心雷達"
                 out.at[idx, "盤中雷達分層說明"] = f"傳統買點核心盯盤，優先分 {pr:.1f}；需實戰觸發價與守價確認。"

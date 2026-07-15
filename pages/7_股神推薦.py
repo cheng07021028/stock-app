@@ -7848,6 +7848,87 @@ def _bundle_momentum_rescue_profile(bundle: dict[str, Any], market_type: str = "
     }
 
 
+def _bundle_prebreakout_rescue_profile(bundle: dict[str, Any], market_type: str = "") -> dict[str, Any]:
+    """前置篩選的強勢前兆救援層。
+
+    與已經發動的 R1-M 不同，本層找的是「尚未大漲，但主流/族群、技術前兆、
+    交易可行性與流動性已同步」的候選。它只負責讓股票通過前置資料管線，
+    後段仍須由正式引擎判定為 R1-P；絕不因此直接升級成正式推薦。
+    """
+    market = _safe_str(market_type or bundle.get("used_market")).replace(" ", "")
+    auto_factor = bundle.get("auto_factor", {}) or {}
+    prelaunch = bundle.get("prelaunch", {}) or {}
+    trade = bundle.get("trade_feasibility", {}) or {}
+    opportunity = bundle.get("opportunity_info", {}) or {}
+    signal = bundle.get("signal_snapshot", {}) or {}
+
+    turnover = max(
+        _safe_float(bundle.get("turnover_m"), 0) or 0,
+        _safe_float(bundle.get("avg20_turnover_m"), 0) or 0,
+    )
+    technical = _safe_float(bundle.get("technical_score"), 0) or 0
+    prelaunch_score = _safe_float(prelaunch.get("起漲前兆分數"), 0) or 0
+    trade_score = _safe_float(trade.get("交易可行分數"), 0) or 0
+    signal_score = _safe_float(signal.get("score"), 0) or 0
+    opportunity_score = _safe_float(opportunity.get("機會股分數"), 0) or 0
+    auto_total = _safe_float(auto_factor.get("auto_factor_total"), 0) or 0
+    ret5 = _safe_float(bundle.get("ret5"), 0) or 0
+    ret20 = _safe_float(bundle.get("ret20"), 0) or 0
+    volume_ratio = max(
+        _safe_float(bundle.get("daily_volume_ratio"), 0) or 0,
+        _safe_float(bundle.get("volume_5_20_ratio"), 0) or 0,
+        _safe_float(bundle.get("volume_ratio"), 0) or 0,
+    )
+    pressure_dist = _safe_float(bundle.get("pressure_dist"), 99) or 99
+    support_dist = _safe_float(bundle.get("support_dist"), 99) or 99
+
+    liquidity_score = 100 if turnover >= 2000 else 92 if turnover >= 800 else 82 if turnover >= 300 else 72 if turnover >= 150 else 58 if turnover >= 100 else 20
+    proximity_score = 92 if 0 <= pressure_dist <= 3.0 else 78 if pressure_dist <= 5.0 else 62 if support_dist <= 3.5 else 35
+    volume_score = 92 if volume_ratio >= 1.5 else 82 if volume_ratio >= 1.2 else 70 if volume_ratio >= 1.0 else 55 if volume_ratio >= 0.8 else 30
+    score = (
+        technical * 0.19 + prelaunch_score * 0.22 + trade_score * 0.12
+        + signal_score * 0.10 + opportunity_score * 0.10 + auto_total * 0.08
+        + liquidity_score * 0.09 + proximity_score * 0.06 + volume_score * 0.04
+    )
+    if ret5 > 22 or ret20 > 90:
+        score -= 10
+    if ret5 < -14 or ret20 < -25:
+        score -= 10
+    score = round(max(0.0, min(100.0, score)), 1)
+
+    reasons: list[str] = []
+    if prelaunch_score >= 62:
+        reasons.append(f"起漲前兆{prelaunch_score:.0f}")
+    if technical >= 62:
+        reasons.append(f"技術結構{technical:.0f}")
+    if trade_score >= 55:
+        reasons.append(f"交易可行{trade_score:.0f}")
+    if turnover >= 150:
+        reasons.append("成交額具可交易性")
+    if pressure_dist <= 5:
+        reasons.append("接近壓力/突破觸發區")
+    if volume_ratio >= 1.0:
+        reasons.append(f"量能比{volume_ratio:.2f}")
+
+    eligible = bool(
+        market not in {"興櫃", "Emerging"}
+        and turnover >= 100
+        and score >= 60
+        and max(prelaunch_score, technical, opportunity_score) >= 58
+        and trade_score >= 42
+        and signal_score >= 30
+        and -14 <= ret5 <= 26
+        and -25 <= ret20 <= 100
+        and (pressure_dist <= 6.0 or support_dist <= 4.0 or volume_ratio >= 1.0)
+    )
+    return {
+        "eligible": eligible,
+        "kind": "PREBREAKOUT_LEADER" if eligible else "",
+        "score": score,
+        "reason": "、".join(reasons) if reasons else "未達強勢前兆救援條件",
+    }
+
+
 def _analyze_one_stock_for_recommend(
     item: dict[str, str],
     master_lookup: dict[str, dict[str, str]],
@@ -7900,6 +7981,9 @@ def _analyze_one_stock_for_recommend(
     signal_score = _safe_float(bundle["signal_snapshot"].get("score"), 0) or 0
     opportunity_info = bundle.get("opportunity_info", {}) or {}
     momentum_rescue = _bundle_momentum_rescue_profile(bundle, market_type)
+    prebreak_rescue = _bundle_prebreakout_rescue_profile(bundle, market_type)
+    rescue_eligible = bool(momentum_rescue.get("eligible") or prebreak_rescue.get("eligible"))
+    rescue_profile = momentum_rescue if momentum_rescue.get("eligible") else prebreak_rescue
     rescued_stages: list[str] = []
     opportunity_score = _safe_float(opportunity_info.get("機會股分數"), 0) or 0
     opportunity_core = max(
@@ -7912,7 +7996,7 @@ def _analyze_one_stock_for_recommend(
     if signal_score < min_signal_score:
         relaxed_signal_floor = max(0.0, float(min_signal_score) - (35.0 if opportunity_mode else 0.0))
         if not (opportunity_mode and signal_score >= relaxed_signal_floor and opportunity_core >= 60):
-            if momentum_rescue["eligible"]:
+            if rescue_eligible:
                 rescued_stages.append("訊號")
             else:
                 return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
@@ -7921,7 +8005,7 @@ def _analyze_one_stock_for_recommend(
     opportunity_chase = _safe_float(opportunity_info.get("追高風險分_機會"), 50) or 50
     if not risk_pass:
         if not (opportunity_mode and opportunity_score >= 62 and opportunity_chase <= 72):
-            if momentum_rescue["eligible"]:
+            if rescue_eligible:
                 rescued_stages.append("傳統風控")
             else:
                 return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
@@ -7930,7 +8014,7 @@ def _analyze_one_stock_for_recommend(
     if prelaunch_score < min_prelaunch_score:
         relaxed_prelaunch_floor = max(0.0, float(min_prelaunch_score) - (35.0 if opportunity_mode else 0.0))
         if not (opportunity_mode and (opportunity_score >= 62 or opportunity_core >= 66) and prelaunch_score >= relaxed_prelaunch_floor):
-            if momentum_rescue["eligible"]:
+            if rescue_eligible:
                 rescued_stages.append("起漲前兆")
             else:
                 return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
@@ -7939,7 +8023,7 @@ def _analyze_one_stock_for_recommend(
     if trade_score < min_trade_score:
         relaxed_trade_floor = max(0.0, float(min_trade_score) - (25.0 if opportunity_mode else 0.0))
         if not (opportunity_mode and opportunity_score >= 60 and trade_score >= relaxed_trade_floor):
-            if momentum_rescue["eligible"]:
+            if rescue_eligible:
                 rescued_stages.append("交易可行")
             else:
                 return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
@@ -8049,8 +8133,9 @@ def _analyze_one_stock_for_recommend(
             "連續上漲天數": int(_safe_float(bundle.get("consecutive_up_days"), 0) or 0),
             "強勢收盤旗標": "是" if bool(bundle.get("strong_close_flag")) else "否",
             "盤後動能救援分": _safe_float(momentum_rescue.get("score"), 0) or 0,
-            "前置保留類型": momentum_rescue.get("kind", "") if rescued_stages else "",
-            "前置保留原因": (f"強勢動能救援通過：{momentum_rescue.get('reason', '')}；原本會被過濾：{'、'.join(rescued_stages)}" if rescued_stages else ""),
+            "盤前強勢前兆分": _safe_float(prebreak_rescue.get("score"), 0) or 0,
+            "前置保留類型": rescue_profile.get("kind", "") if rescued_stages else "",
+            "前置保留原因": (f"前置救援通過：{rescue_profile.get('reason', '')}；原本會被過濾：{'、'.join(rescued_stages)}" if rescued_stages else ""),
             "近5日漲幅%": _safe_float(bundle.get("ret5"), 0) or 0,
             "近20日漲幅%": _safe_float(bundle.get("ret20"), 0) or 0,
             "近60日漲幅%": _safe_float(bundle.get("ret60"), 0) or 0,
@@ -10655,7 +10740,7 @@ def _phase70_build_battle_dashboard(
         "股神作戰區", "主要依據工作表", "股票代號", "股票名稱", "類別", "產業",
         "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
         "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
-        "強勢動能分", "強勢動能判定", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "前置保留類型", "前置保留原因",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
         "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
         "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明",
@@ -10733,8 +10818,8 @@ def _phase80_build_recommendation_summary(
         "候選診斷總數": int(total_candidates or 0),
         "操作說明": conclusion,
         "掃描品質說明": _safe_str(report.get("掃描品質說明")),
-        "核心紀律": "採雙路徑：波段型仍需 Entry/Risk/RR；強勢動能型以當日放量、突破、收盤強度與流動性進 R1-M 條件雷達，兩者都不得開盤盲目追價。",
-        "版本": "phase8_8_dual_path_momentum_and_entry_20260714",
+        "核心紀律": "採三路徑：波段型看 Entry/Risk/RR；R1-M 看已發動量價；R1-P 看主流資金、族群與起漲前兆。R1-M/R1-P 都是條件雷達，不可開盤盲目追價。",
+        "版本": "phase8_9_profit_recall_20260715",
     }])
 
 
@@ -10758,7 +10843,7 @@ def _phase80_allowed_codes(rec_df: pd.DataFrame, selected_codes: list[str], targ
     bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     radar_pri = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     if target == "record":
-        # V159：推薦紀錄是模型績效資料庫，正式/A- 與 R1（含 R1-M 強勢動能）都必須留下；
+        # V159：推薦紀錄是模型績效資料庫，正式/A- 與 R1（含 R1-M 強勢動能、R1-P 強勢前兆）都必須留下；
         # 以「正式推薦分區 / 盤中雷達優先級」區分，不把雷達冒充正式買進推薦。
         formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
         radar_mask = bucket.eq("盤中雷達追蹤") & radar_pri.str.startswith("R1")
@@ -10789,6 +10874,8 @@ def _v159_record_level_from_row(row: pd.Series | dict[str, Any]) -> str:
         return "A-準主推薦"
     if bucket == "盤中雷達追蹤" and radar.startswith("R1-M"):
         return "R1-M強勢動能雷達"
+    if bucket == "盤中雷達追蹤" and radar.startswith("R1-P"):
+        return "R1-P強勢前兆雷達"
     if bucket == "盤中雷達追蹤" and radar.startswith("R1"):
         return "R1核心雷達"
     return bucket or radar or "未分層"
@@ -10902,7 +10989,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
 
 
 def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tuple[int, list[str]]:
-    """保存正式/A-/R1/R1-M；整體掃描不足時仍保留個股資料合格的雷達樣本。
+    """保存正式/A-/R1/R1-M/R1-P；整體掃描不足時仍保留個股資料合格的雷達樣本。
 
     正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
     K線、價格與成交資料完整即可保存，避免全域覆蓋率讓校正資料整批歸零。
@@ -10929,7 +11016,7 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tup
     action = work.loc[allowed].copy()
     if action.empty:
         note = "；整體掃描未達正式可用，正式/A-不寫入" if not formal_scan_ok else ""
-        return 0, [f"本輪沒有正式、A-、R1 或 R1-M 名單，不建立空白推薦紀錄{note}。"]
+        return 0, [f"本輪沒有正式、A-、R1、R1-M 或 R1-P 名單，不建立空白推薦紀錄{note}。"]
 
     quality_keep: list[bool] = []
     quality_notes: dict[str, tuple[str, str]] = {}
@@ -10959,6 +11046,8 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tup
             sample_type, weight, formal_perf = "A-｜準主推薦樣本", 0.90, "是"
         elif level.startswith("R1-M"):
             sample_type, weight, formal_perf = "B｜R1-M強勢動能雷達", 0.75, "否"
+        elif level.startswith("R1-P"):
+            sample_type, weight, formal_perf = "B｜R1-P強勢前兆雷達", 0.70, "否"
         else:
             sample_type, weight, formal_perf = "B｜R1核心雷達", 0.75, "否"
         return pd.Series({
@@ -11029,7 +11118,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
             "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
             "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分", "流動性參考成交額百萬",
-            "強勢動能分", "強勢動能判定", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制",
+            "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控",
             "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",
         ] if c in battle.columns]
@@ -11049,7 +11138,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
-        "強勢動能分", "強勢動能判定", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "前置保留類型", "前置保留原因",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",
@@ -11109,9 +11198,24 @@ def _build_excel_bytes(
     formal_compact = _phase82_compact_operational_view(formal_df if usable else pd.DataFrame(), "正式主推薦｜可依進場條件分批操作")
     a_minus_compact = _phase82_compact_operational_view(a_minus_df if usable else pd.DataFrame(), "A-準主推薦｜觸發且守價後小量試單")
     core_compact = _phase82_compact_operational_view(core_df if usable else pd.DataFrame(), "R1盤中核心雷達｜未觸發前不可買")
+    if not core_compact.empty and "盤中雷達優先級" in core_compact.columns:
+        _core_priority = core_compact["盤中雷達優先級"].fillna("").astype(str)
+        momentum_core_compact = core_compact.loc[_core_priority.str.startswith("R1-M")].copy()
+        prebreak_core_compact = core_compact.loc[_core_priority.str.startswith("R1-P")].copy()
+    else:
+        momentum_core_compact = pd.DataFrame()
+        prebreak_core_compact = pd.DataFrame()
     backup_compact = _phase82_compact_operational_view(backup_df if usable else pd.DataFrame(), "R2盤中備援雷達｜只做輪動備援")
     low_compact = _phase82_compact_operational_view(low_df if usable else pd.DataFrame(), "R3低優先｜不列主要盯盤")
     intraday_full_compact = _phase82_compact_operational_view(intraday_full_df if usable else pd.DataFrame(), "盤中雷達完整診斷｜非預先買進清單")
+    if not intraday_full_compact.empty:
+        _momentum_status = intraday_full_compact.get("強勢動能判定", pd.Series([""] * len(intraday_full_compact), index=intraday_full_compact.index)).fillna("").astype(str)
+        _prebreak_status = intraday_full_compact.get("強勢前兆判定", pd.Series([""] * len(intraday_full_compact), index=intraday_full_compact.index)).fillna("").astype(str)
+        momentum_full_compact = intraday_full_compact.loc[~_momentum_status.str.startswith("BLOCK") & _momentum_status.ne("")].copy()
+        prebreak_full_compact = intraday_full_compact.loc[~_prebreak_status.str.startswith("BLOCK") & _prebreak_status.ne("")].copy()
+    else:
+        momentum_full_compact = pd.DataFrame()
+        prebreak_full_compact = pd.DataFrame()
     risk_compact = _phase82_compact_operational_view(risk_df, "高風險觀察｜禁止追價")
     watch_compact = _phase82_compact_operational_view(watch_df, "一般/早期觀察｜不列正式推薦")
     exclude_compact = _phase82_compact_operational_view(exclude_df, "正式排除｜禁止新倉")
@@ -11144,6 +11248,10 @@ def _build_excel_bytes(
         ("正式下週主推薦", formal_compact, "目前沒有正式主推薦。"),
         ("A-準主推薦小量試單", a_minus_compact, "目前沒有 A- 準主推薦。"),
         ("盤中核心雷達", core_compact, "目前沒有 R1 盤中核心雷達。"),
+        ("強勢動能核心雷達", momentum_core_compact, "本輪沒有 R1-M 強勢動能核心雷達。"),
+        ("強勢前兆核心雷達", prebreak_core_compact, "本輪沒有 R1-P 強勢前兆核心雷達。"),
+        ("強勢動能完整雷達", momentum_full_compact, "本輪沒有強勢動能條件雷達。"),
+        ("強勢前兆完整雷達", prebreak_full_compact, "本輪沒有強勢前兆條件雷達。"),
         ("盤中備援雷達", backup_compact, "目前沒有 R2 備援雷達。"),
         ("盤中低優先觀察", low_compact, "目前沒有 R3 低優先觀察。"),
         ("盤中雷達完整名單", intraday_full_compact, "目前沒有盤中雷達資料。"),
@@ -11162,7 +11270,7 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達"} else "診斷/管理",
+            "用途": "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達", "強勢動能核心雷達", "強勢前兆核心雷達", "強勢動能完整雷達", "強勢前兆完整雷達"} else "診斷/管理",
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
@@ -11204,7 +11312,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             use_container_width=True,
         )
     with c2:
-        st.caption("Phase 7.1 匯出內容：第一張「股神作戰總表」是主要依據；盤中雷達已分成核心/備援/低優先，人工盯盤先看「盤中核心雷達」，完整名單只作後台雷達資料。")
+        st.caption("Phase 7.1 匯出內容：第一張「股神作戰總表」是主要依據；盤中雷達已分成核心/備援/低優先；已發動看「強勢動能核心雷達」，尚未發動的主流前兆看「強勢前兆核心雷達」；需要完整候選時看對應的「完整雷達」。所有雷達皆須盤中觸發，不是開盤直接買進清單。")
 
 
 def _render_selected_export_block():
@@ -13194,7 +13302,7 @@ def main():
             st.session_state[_k("selected_rec_snapshot")] = selected_snapshot_full
             st.session_state["godpick_rec_selected_df"] = selected_snapshot_full
 
-        st.caption(f"候選診斷表目前勾選：{len(full_picked_codes)} 檔。05 自選股可收觀察股；8 推薦紀錄接受正式/A-/R1核心雷達（含 R1-M）並保留分層；10 推薦清單接受正式/A-/R1核心雷達。")
+        st.caption(f"候選診斷表目前勾選：{len(full_picked_codes)} 檔。05 自選股可收觀察股；8 推薦紀錄接受正式/A-/R1核心雷達（含 R1-M、R1-P）並保留分層；10 推薦清單接受正式/A-/R1核心雷達。")
 
         full_a1, full_a2, full_a3, full_a4 = st.columns([1.4, 1.3, 1.3, 1.6])
         with full_a1:
