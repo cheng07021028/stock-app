@@ -7,6 +7,9 @@
 
 
 from __future__ import annotations
+
+import streamlit as st
+
 from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_FACTOR_FIELDS
 
 # >>> APP_AUTH_GUARD_V84
@@ -14,7 +17,8 @@ try:
     from app_auth import require_login
     require_login()
 except Exception as _auth_e:
-    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
 
 
 try:
@@ -29,8 +33,6 @@ except Exception:
     save_watchlist_permanent = None
     durable_github_config = None
     durable_firebase_configured = None
-    st.error(f"登入系統載入失敗：{_auth_e}")
-    st.stop()
 # <<< APP_AUTH_GUARD_V84
 
 # pages/7_股神推薦.py
