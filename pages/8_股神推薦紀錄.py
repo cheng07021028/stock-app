@@ -7,6 +7,9 @@
 
 
 from __future__ import annotations
+
+import streamlit as st
+
 from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_FACTOR_FIELDS
 
 # >>> APP_AUTH_GUARD_V84
@@ -14,7 +17,8 @@ try:
     from app_auth import require_login
     require_login()
 except Exception as _auth_e:
-    import streamlit as st
+    st.error(f"登入系統載入失敗：{_auth_e}")
+    st.stop()
 
 
 try:
@@ -54,8 +58,6 @@ try:
     from stock_master_service import upsert_stock_master_rows
 except Exception:
     upsert_stock_master_rows = None
-    st.error(f"登入系統載入失敗：{_auth_e}")
-    st.stop()
 # <<< APP_AUTH_GUARD_V84
 
 # pages/8_股神推薦紀錄.py
@@ -75,7 +77,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import requests
-import streamlit as st
 from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
 from godpick_history_sources import fetch_multi_source_history
 try:
