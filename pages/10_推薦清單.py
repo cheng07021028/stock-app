@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 
 
@@ -9,6 +9,8 @@
 
 
 from __future__ import annotations
+
+import streamlit as st
 from godpick_factor_schema import enrich_dataframe, ensure_factor_columns, V72_FACTOR_FIELDS
 
 # >>> APP_AUTH_GUARD_V84
@@ -16,9 +18,23 @@ try:
     from app_auth import require_login
     require_login()
 except Exception as _auth_e:
-    import streamlit as st
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
+
+try:
+    from godpick_persistence_service import (
+        load_module_sync_state,
+        load_named_json_permanent,
+        load_records_permanent,
+        save_named_json_permanent,
+        save_records_permanent,
+    )
+except Exception:
+    load_module_sync_state = None
+    load_named_json_permanent = None
+    load_records_permanent = None
+    save_named_json_permanent = None
+    save_records_permanent = None
 # <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
@@ -1804,44 +1820,99 @@ def _write_records_to_github(df: pd.DataFrame) -> tuple[bool, str]:
 
 
 def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
-    github_ok, github_msg = _write_records_to_github(df)
-    fs_ok, fs_msg = _write_records_to_firestore(_ensure_record_columns(df).to_dict(orient="records"))
-    st.session_state[_k("last_sync_msgs")] = [
-        f"GitHub: {'成功' if github_ok else '失敗'} | {github_msg}",
-        f"Firestore: {'成功' if fs_ok else '失敗'} | {fs_msg}",
-    ]
-    return (github_ok or fs_ok), st.session_state[_k("last_sync_msgs")]
+    work = _ensure_record_columns(df)
+    messages: list[str] = []
+    if not callable(save_records_permanent) or not callable(save_named_json_permanent):
+        messages.append("永久保存服務未載入")
+        st.session_state[_k("last_sync_msgs")] = messages
+        return False, messages
+
+    rec_report = save_records_permanent(work)
+    messages.extend(["推薦紀錄｜" + x for x in rec_report.messages()])
+
+    # 10 頁同時顯示歷史紀錄與本輪清單；永久回寫清單時不可把全部歷史紀錄灌入。
+    list_df = work.copy()
+    if "資料來源" in list_df.columns:
+        current_mask = list_df["資料來源"].astype(str).isin(["本輪推薦清單", "最新推薦快照"])
+        if current_mask.any():
+            list_df = list_df[current_mask].copy()
+    if not list_df.empty and "推薦日期" in list_df.columns:
+        date_s = pd.to_datetime(list_df["推薦日期"], errors="coerce")
+        if date_s.notna().any():
+            list_df = list_df[date_s.dt.date == date_s.max().date()].copy()
+    list_rows = list_df.drop(columns=["資料來源"], errors="ignore").to_dict(orient="records")
+
+    list_report = save_named_json_permanent("godpick_recommend_list.json", list_rows)
+    messages.extend(["推薦清單｜" + x for x in list_report.messages()])
+    latest_payload, _ = load_named_json_permanent("godpick_latest_recommendations.json", {})
+    latest_payload = dict(latest_payload) if isinstance(latest_payload, dict) else {}
+    latest_payload["saved_at"] = _now_text()
+    latest_payload["recommendations"] = list_rows
+    latest_report = save_named_json_permanent("godpick_latest_recommendations.json", latest_payload)
+    messages.extend(["最新推薦快照｜" + x for x in latest_report.messages()])
+    st.session_state[_k("last_sync_msgs")] = messages
+    return bool(rec_report.permanent_ok and list_report.permanent_ok and latest_report.permanent_ok), messages
+
+
 
 
 def _load_records_cached(force: bool = False) -> pd.DataFrame:
     if force or _k("records_df") not in st.session_state:
-        df, msg = _read_records_from_github()
-        latest_df, latest_msg = _read_recommend_list_from_latest()
-
         frames = []
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            df = df.copy()
-            df["資料來源"] = "股神推薦紀錄"
-            frames.append(df)
-        if isinstance(latest_df, pd.DataFrame) and not latest_df.empty:
-            latest_df = latest_df.copy()
-            latest_df["資料來源"] = "本輪推薦清單"
-            frames.append(latest_df)
-
+        details = []
+        if callable(load_records_permanent):
+            try:
+                records, d0 = load_records_permanent()
+                details.extend(d0)
+                if records:
+                    rdf = pd.DataFrame(records)
+                    rdf["資料來源"] = "股神推薦紀錄"
+                    frames.append(rdf)
+            except Exception as exc:
+                details.append(f"推薦紀錄永久來源失敗：{exc}")
+        if callable(load_named_json_permanent):
+            for path_name, label, default in [
+                ("godpick_recommend_list.json", "本輪推薦清單", []),
+                ("godpick_latest_recommendations.json", "最新推薦快照", {}),
+            ]:
+                try:
+                    payload, dd = load_named_json_permanent(path_name, default)
+                    details.extend(dd)
+                    if isinstance(payload, dict):
+                        rows = payload.get("recommendations") or payload.get("data") or payload.get("rows") or []
+                    else:
+                        rows = payload
+                    if isinstance(rows, list) and rows:
+                        temp = pd.DataFrame(rows)
+                        temp["資料來源"] = label
+                        frames.append(temp)
+                except Exception as exc:
+                    details.append(f"{label}讀取失敗：{exc}")
         if frames:
-            merged = pd.concat(frames, ignore_index=True)
-            if "record_id" in merged.columns:
-                merged = merged.drop_duplicates(subset=["record_id"], keep="last")
-            else:
-                merged = merged.drop_duplicates(subset=["股票代號", "推薦日期", "推薦時間", "推薦模式"], keep="last")
+            merged = pd.concat(frames, ignore_index=True, sort=False)
+            def _merge_key(row):
+                rid = _safe_str(row.get("record_id"))
+                if rid:
+                    return "id:" + rid
+                return "biz:" + "|".join([
+                    _safe_str(row.get("股票代號")),
+                    _safe_str(row.get("推薦日期")),
+                    _safe_str(row.get("推薦時間")),
+                    _safe_str(row.get("推薦模式")),
+                    _safe_str(row.get("正式推薦分區")),
+                ])
+            merged["_merge_key"] = merged.apply(_merge_key, axis=1)
+            merged = merged.drop_duplicates(subset=["_merge_key"], keep="last").drop(columns=["_merge_key"], errors="ignore")
         else:
             merged = pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
-
         st.session_state[_k("records_df")] = _ensure_record_columns(merged).copy()
-        st.session_state[_k("load_msg")] = f"{msg}｜{latest_msg}"
+        st.session_state[_k("load_msg")] = "｜".join(details)
+        st.session_state[_k("load_detail")] = details
         st.session_state[_k("loaded_at")] = _now_text()
     rec = st.session_state.get(_k("records_df"), pd.DataFrame(columns=GODPICK_RECORD_COLUMNS))
     return _ensure_record_columns(rec)
+
+
 
 
 def _filter_df(df: pd.DataFrame, start_date: date, end_date: date, mode: str, status: str, kw: str) -> pd.DataFrame:
@@ -2715,6 +2786,17 @@ def main():
     )
 
     st.caption(f"推薦清單 V136 統一有效欄位版：{PERF_TRACKING_VERSION}｜{NIGHT_BATTLE_LIST_VERSION}")
+    if callable(load_module_sync_state):
+        try:
+            _sync_state, _sync_detail = load_module_sync_state()
+            _module10 = (_sync_state.get("modules") or {}).get("10推薦清單", {}) if isinstance(_sync_state, dict) else {}
+            if _sync_state:
+                if _module10.get("ok"):
+                    st.success(f"08 一鍵同步最近狀態｜{_sync_state.get('finished_at') or _sync_state.get('updated_at') or '—'}｜10推薦清單已永久同步 {_module10.get('count', 0)} 筆")
+                else:
+                    st.warning(f"08 一鍵同步最近狀態｜10推薦清單未完成；請到 08 的同步檢查查看明細。")
+        except Exception as _sync_e:
+            st.caption(f"08 一鍵同步狀態暫無法載入：{_sync_e}")
 
     if _k("last_sync_msgs") not in st.session_state:
         st.session_state[_k("last_sync_msgs")] = []

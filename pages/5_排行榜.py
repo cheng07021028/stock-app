@@ -1,4 +1,4 @@
-
+﻿
 
 
 
@@ -9,14 +9,20 @@
 
 from __future__ import annotations
 
+import streamlit as st
+
 # >>> APP_AUTH_GUARD_V84
 try:
     from app_auth import require_login
     require_login()
 except Exception as _auth_e:
-    import streamlit as st
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
+
+try:
+    from godpick_persistence_service import load_watchlist_permanent
+except Exception:
+    load_watchlist_permanent = None
 # <<< APP_AUTH_GUARD_V84
 
 from datetime import date, timedelta
@@ -337,9 +343,29 @@ def _build_watchlist_map_cached(raw_items: tuple) -> dict[str, list[dict[str, st
 
 
 def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
-    raw = st.session_state.get("watchlist_data")
-    if not isinstance(raw, dict) or not raw:
-        raw = get_normalized_watchlist()
+    raw = None
+    if callable(load_watchlist_permanent) and not st.session_state.get(_k("durable_watchlist_loaded"), False):
+        try:
+            raw, details = load_watchlist_permanent()
+            st.session_state[_k("watchlist_load_detail")] = details
+            st.session_state[_k("durable_watchlist_loaded")] = True
+            st.session_state["watchlist_data"] = raw if isinstance(raw, dict) else {}
+        except Exception as exc:
+            st.session_state[_k("watchlist_load_detail")] = [f"永久自選股載入失敗：{exc}"]
+            st.session_state[_k("durable_watchlist_loaded")] = False
+
+    if raw is None:
+        session_raw = st.session_state.get("watchlist_data")
+        if isinstance(session_raw, dict):
+            raw = session_raw
+
+    if raw is None:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+        if isinstance(raw, dict):
+            st.session_state["watchlist_data"] = raw
 
     packed = []
     if isinstance(raw, dict):
@@ -349,16 +375,10 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    temp.append(
-                        (
-                            _safe_str(item.get("code")),
-                            _safe_str(item.get("name")),
-                            _safe_str(item.get("market")),
-                        )
-                    )
+                    temp.append((_safe_str(item.get("code")), _safe_str(item.get("name")), _safe_str(item.get("market"))))
             packed.append((group_name, tuple(temp)))
-
     return _build_watchlist_map_cached(tuple(packed))
+
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -837,6 +857,11 @@ def main():
                 else ""
             )
         )
+    _watch_load_detail = st.session_state.get(_k("watchlist_load_detail"), [])
+    if _watch_load_detail:
+        with st.expander("05 自選股群組來源明細", expanded=False):
+            for _line in _watch_load_detail:
+                st.write(f"- {_line}")
 
     render_pro_section("查詢條件")
 

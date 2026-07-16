@@ -24,6 +24,7 @@ except Exception as _auth_e:
 try:
     from godpick_persistence_service import (
         append_export_history,
+        load_export_history,
         load_export_sync_settings,
         load_module_sync_state,
         load_named_json_permanent,
@@ -40,6 +41,7 @@ try:
     )
 except Exception:
     append_export_history = None
+    load_export_history = None
     load_export_sync_settings = None
     load_module_sync_state = None
     load_named_json_permanent = None
@@ -5089,6 +5091,73 @@ def _build_export_bytes(df: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> by
     return output.getvalue()
 
 
+def _persist_export_action(excel_bytes: bytes, filename: str, record_count: int, source: str) -> dict[str, Any]:
+    """Persist export metadata on every browser/server export action.
+
+    The browser download itself is not a durable audit record.  This helper also
+    writes a server-side copy when possible and always appends a remote-capable
+    history row, including failed folder writes, so the user can see what happened
+    after an APP reboot.
+    """
+    settings = dict(st.session_state.get(_k("export_sync_settings"), {}) or {})
+    folder = _safe_str(settings.get("export_folder")) or "exports/godpick"
+    file_ok = False
+    file_msg = "永久匯出服務未載入"
+    path = ""
+    if callable(write_export_file):
+        file_ok, file_msg, path = write_export_file(folder, filename, excel_bytes)
+
+    event = {
+        "file_name": filename,
+        "path": path,
+        "configured_folder": folder,
+        "record_count": int(record_count),
+        "source": source,
+        "file_write_ok": bool(file_ok),
+        "file_write_message": file_msg,
+        "download_requested": True,
+    }
+    history_ok = False
+    history_messages: list[str] = []
+    if callable(append_export_history):
+        try:
+            report = append_export_history(event)
+            history_ok = bool(report.permanent_ok)
+            history_messages = report.messages()
+        except Exception as exc:
+            history_messages = [f"匯出紀錄寫入例外：{exc}"]
+    else:
+        history_messages = ["匯出紀錄永久服務未載入"]
+
+    result = {
+        "ok": bool(history_ok),
+        "file_ok": bool(file_ok),
+        "history_ok": bool(history_ok),
+        "file_message": file_msg,
+        "history_messages": history_messages,
+        "path": path,
+        "file_name": filename,
+        "source": source,
+    }
+    st.session_state[_k("last_export_action")] = result
+    st.session_state[_k("export_history_detail")] = history_messages
+    return result
+
+
+def _record_browser_export(excel_bytes: bytes, filename: str, record_count: int) -> None:
+    result = _persist_export_action(excel_bytes, filename, record_count, "08瀏覽器下載")
+    if result.get("history_ok"):
+        level = "success" if result.get("file_ok") else "warning"
+        msg = "Excel 下載已建立永久匯出紀錄。"
+        if result.get("file_ok"):
+            msg += f" 伺服器副本：{result.get('path')}"
+        else:
+            msg += f" 伺服器副本未完成：{result.get('file_message')}"
+        _set_status(msg, level)
+    else:
+        _set_status("Excel 可下載，但匯出永久紀錄寫入失敗；請查看匯出明細。", "error")
+
+
 # ============================================================
 # V50：推薦後績效追蹤總控
 # ============================================================
@@ -6262,27 +6331,30 @@ def main():
         render_pro_section("Excel 匯出")
         ana_tables_v149 = _get_ana_tables_v149()
         excel_bytes = _build_export_bytes(live_df, ana_tables_v149)
+        _download_filename = f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         st.download_button(
-            "📥 下載 Excel（推薦紀錄 / 模式分析 / 類別分析 / 等級分析 / 實際交易分析 / 最強模式 / 最強類別）",
+            "📥 下載 Excel（下載時同步建立永久匯出紀錄）",
             data=excel_bytes,
-            file_name=f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            file_name=_download_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+            on_click=_record_browser_export,
+            args=(excel_bytes, _download_filename, len(live_df)),
         )
         _export_settings = st.session_state.get(_k("export_sync_settings"), {})
         st.caption(f"永久匯出資料夾：{_safe_str(_export_settings.get('export_folder')) or 'exports/godpick'}")
         if st.button("💾 匯出到設定資料夾並永久記錄", use_container_width=True, key=_k("export_to_saved_folder")):
-            if callable(write_export_file):
-                _fn = f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                _ok, _msg, _path = write_export_file(_safe_str(_export_settings.get("export_folder")), _fn, excel_bytes)
-                if _ok and callable(append_export_history):
-                    _hr = append_export_history({"file_name": _fn, "path": _path, "record_count": len(live_df), "source": "08手動永久匯出"})
-                    _ok = bool(_ok and _hr.permanent_ok)
-                    st.session_state[_k("export_history_detail")] = _hr.messages()
-                (_set_status(_msg, "success") if _ok else _set_status(_msg, "error"))
-                st.rerun()
+            _fn = f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            _result = _persist_export_action(excel_bytes, _fn, len(live_df), "08手動永久匯出")
+            if _result.get("history_ok"):
+                _level = "success" if _result.get("file_ok") else "warning"
+                _set_status(
+                    f"匯出紀錄已永久保存｜{_result.get('file_message')}",
+                    _level,
+                )
             else:
-                st.error("永久匯出服務未載入")
+                _set_status("匯出檔案或永久紀錄未完整保存，請查看匯出明細。", "error")
+            st.rerun()
 
     if active_tab == "⚙️ 同步檢查":
         render_pro_info_card(
@@ -6361,12 +6433,12 @@ def main():
                             st.write(f"- {_line}")
 
         st.markdown("### 推薦匯出永久紀錄")
-        if callable(load_named_json_permanent):
+        if callable(load_export_history):
             try:
-                _export_history, _export_history_detail = load_named_json_permanent("godpick_export_history.json", [])
+                _export_history, _export_history_detail = load_export_history()
                 if isinstance(_export_history, list) and _export_history:
                     _hist_df = pd.DataFrame(_export_history[:50])
-                    _hist_cols = [c for c in ["created_at", "file_name", "path", "target_group", "record_count", "recommendation_count", "source"] if c in _hist_df.columns]
+                    _hist_cols = [c for c in ["created_at", "file_name", "path", "configured_folder", "file_write_ok", "target_group", "record_count", "recommendation_count", "source"] if c in _hist_df.columns]
                     st.dataframe(_hist_df[_hist_cols], use_container_width=True, hide_index=True)
                 else:
                     st.info("尚未建立永久匯出紀錄。請使用『匯出到設定資料夾並永久記錄』或一鍵同步。")

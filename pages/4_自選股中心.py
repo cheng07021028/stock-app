@@ -1,4 +1,4 @@
-
+﻿
 
 
 
@@ -9,14 +9,28 @@
 
 from __future__ import annotations
 
+import streamlit as st
+
 # >>> APP_AUTH_GUARD_V84
 try:
     from app_auth import require_login
     require_login()
 except Exception as _auth_e:
-    import streamlit as st
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
+
+try:
+    from godpick_persistence_service import (
+        load_watchlist_permanent,
+        save_watchlist_permanent,
+        github_config as durable_github_config,
+        firebase_configured as durable_firebase_configured,
+    )
+except Exception:
+    load_watchlist_permanent = None
+    save_watchlist_permanent = None
+    durable_github_config = None
+    durable_firebase_configured = None
 # <<< APP_AUTH_GUARD_V84
 
 from datetime import datetime
@@ -520,15 +534,43 @@ def _send_group_to_other_pages(group_name: str, codes: list[str]):
     st.session_state["godpick_last_watch_group"] = _safe_str(group_name)
     st.session_state["godpick_last_watch_codes"] = [str(_normalize_code(x)) for x in codes if _normalize_code(x)]
     st.session_state["godpick_last_watch_sent_at"] = _now_text()
-def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
-    raw = get_normalized_watchlist()
-    result: dict[str, list[dict[str, str]]] = {}
+def _load_watchlist_data(force_permanent: bool = False) -> dict[str, list[dict[str, str]]]:
+    """Load the authoritative watchlist once per session.
 
+    A generic ``watchlist_data`` session key may have been filled by an older page
+    before this page opens.  On a cold start we therefore query the durable source
+    first instead of treating any non-empty session value as authoritative.
+    """
+    raw: Any = None
+    durable_loaded = bool(st.session_state.get(_k("durable_loaded"), False))
+
+    if callable(load_watchlist_permanent) and (force_permanent or not durable_loaded):
+        try:
+            raw, details = load_watchlist_permanent()
+            st.session_state[_k("durable_load_detail")] = details
+            st.session_state[_k("durable_loaded")] = True
+            st.session_state[_k("durable_hash")] = _payload_hash(_normalize_watchlist_payload(raw if isinstance(raw, dict) else {}))
+        except Exception as exc:
+            st.session_state[_k("durable_load_detail")] = [f"永久來源載入失敗：{exc}"]
+            st.session_state[_k("durable_loaded")] = False
+            raw = None
+
+    if raw is None:
+        session_raw = st.session_state.get("watchlist_data")
+        if isinstance(session_raw, dict):
+            raw = session_raw
+
+    if raw is None:
+        try:
+            raw = get_normalized_watchlist()
+        except Exception:
+            raw = {}
+
+    result: dict[str, list[dict[str, str]]] = {}
     if isinstance(raw, dict):
         for group_name, items in raw.items():
             g = _safe_str(group_name) or "未分組"
             result[g] = []
-
             if isinstance(items, list):
                 for item in items:
                     if not isinstance(item, dict):
@@ -536,15 +578,16 @@ def _load_watchlist_data() -> dict[str, list[dict[str, str]]]:
                     code = _normalize_code(item.get("code"))
                     name = _safe_str(item.get("name")) or code
                     market = _safe_str(item.get("market")) or "上市"
+                    category = _safe_str(item.get("category"))
                     if code:
-                        result[g].append(
-                            {
-                                "code": code,
-                                "name": name,
-                                "market": market,
-                            }
-                        )
+                        row = {"code": code, "name": name, "market": market}
+                        if category:
+                            row["category"] = category
+                        result[g].append(row)
+    st.session_state["watchlist_data"] = copy.deepcopy(result)
+    st.session_state["watchlist_last_saved_hash"] = _payload_hash(_normalize_watchlist_payload(result))
     return result
+
 
 
 def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
@@ -565,6 +608,7 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
             code = _normalize_code(item.get("code"))
             name = _safe_str(item.get("name")) or code
             market = _safe_str(item.get("market")) or "上市"
+            category = _safe_str(item.get("category"))
 
             if not code:
                 continue
@@ -574,13 +618,10 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
                 continue
             seen.add(key)
 
-            normalized_items.append(
-                {
-                    "code": code,
-                    "name": name,
-                    "market": market,
-                }
-            )
+            row = {"code": code, "name": name, "market": market}
+            if category:
+                row["category"] = category
+            normalized_items.append(row)
 
         payload[g] = sorted(
             normalized_items,
@@ -591,40 +632,46 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
 
 
 def _force_write_watchlist_github(data: dict[str, list[dict[str, str]]]) -> bool:
-    """強制儲存自選股。
-
-    v3 修正重點：
-    1. 先寫本機 watchlist.json，確保換頁 / 重新整理 / 其他模組一定讀得到。
-    2. GitHub API 只當遠端同步；未設定 token 或 API 失敗時，不視為整體失敗。
-    3. 寫入後同步 session_state 並清除 get_normalized_watchlist cache。
-    """
+    """永久保存自選股與空群組；不可再以本機暫存成功冒充跨 Reboot 成功。"""
     payload = _normalize_watchlist_payload(data)
-
-    local_path = _local_watchlist_path()
-    local_ok, local_msg = _safe_write_json_local(local_path, payload)
-
-    verify_ok, verify_msg = _verify_local_watchlist(local_path, payload) if local_ok else (False, "本機未寫入，略過回讀驗證")
-    bridge_ok, bridge_msg = _write_watchlist_bridge_files(payload) if local_ok and verify_ok else (False, "本機驗證未通過，略過橋接檔")
-
+    if not callable(save_watchlist_permanent):
+        _set_status("永久保存服務未載入，本次不寫入以避免假成功。", "error")
+        return False
+    report = save_watchlist_permanent(payload)
+    version = int(st.session_state.get(_k("version"), 0)) + 1
+    saved_at = report.updated_at or _now_text()
+    st.session_state[_k("watchlist")] = copy.deepcopy(payload)
+    st.session_state[_k("version")] = version
+    st.session_state[_k("last_saved_at")] = saved_at
+    st.session_state[_k("payload_hash")] = report.payload_hash
+    st.session_state[_k("last_sync_detail")] = report.messages()
+    st.session_state["watchlist_data"] = copy.deepcopy(payload)
+    st.session_state["watchlist_version"] = version
+    st.session_state["watchlist_last_saved_at"] = saved_at
+    st.session_state["watchlist_last_saved_hash"] = report.payload_hash
+    st.session_state[_k("durable_loaded")] = True
+    st.session_state[_k("durable_hash")] = report.payload_hash
+    st.session_state[_k("last_local_msg")] = report.local_message
+    st.session_state[_k("last_github_msg")] = report.github_message
+    st.session_state[_k("last_verify_msg")] = "｜".join(report.messages())
     _clear_watchlist_cache_safely()
 
-    github_ok, github_msg = _push_watchlist_to_github(payload)
+    remote_configured = False
+    try:
+        remote_configured = bool(
+            (callable(durable_github_config) and durable_github_config().get("token"))
+            or (callable(durable_firebase_configured) and durable_firebase_configured())
+        )
+    except Exception:
+        pass
+    if report.permanent_ok:
+        level = "success" if remote_configured else "warning"
+        msg = "自選股與群組已通過永久保存回讀驗證。" if remote_configured else "已保存到專案固定路徑；未設定遠端備份，主機重建仍可能遺失。"
+        _set_status(msg, level)
+        return True
+    _set_status("自選股／群組未完成永久保存，請查看同步明細。", "error")
+    return False
 
-    version = int(st.session_state.get(_k("version"), 0)) + 1
-    saved_at = _now_text()
-    _sync_runtime_watchlist_state(payload, version, saved_at, local_msg, github_msg, verify_msg)
-    st.session_state[_k("last_bridge_msg")] = bridge_msg
-
-    if local_ok and verify_ok and bridge_ok and github_ok:
-        _set_status(f"{local_msg}｜{verify_msg}｜{bridge_msg}｜{github_msg}｜版本 v{version}｜{saved_at}", "success")
-    elif local_ok and verify_ok and bridge_ok and not github_ok:
-        _set_status(f"本機已完成：{local_msg}｜{verify_msg}｜{bridge_msg}｜GitHub 未同步：{github_msg}｜版本 v{version}｜{saved_at}", "warning")
-    elif local_ok and verify_ok and not bridge_ok:
-        _set_status(f"本機已完成但橋接檔未完成：{local_msg}｜{verify_msg}｜{bridge_msg}｜版本 v{version}", "warning")
-    else:
-        _set_status(f"本機儲存異常：{local_msg}｜{verify_msg}｜GitHub：{github_msg}", "error")
-
-    return bool(local_ok and verify_ok)
 
 def _persist_watchlist(success_msg: str) -> bool:
     ok = _force_write_watchlist_github(st.session_state[_k("watchlist")])
@@ -671,7 +718,7 @@ def _sync_watchlist_from_shared_or_source(force_reload: bool = False) -> tuple[b
         except Exception:
             pass
 
-        fresh = _load_watchlist_data()
+        fresh = _load_watchlist_data(force_permanent=True)
         fresh_hash = _payload_hash(_normalize_watchlist_payload(fresh))
 
         st.session_state[_k("watchlist")] = copy.deepcopy(fresh)
@@ -743,7 +790,7 @@ def _reload_watchlist_master_records():
     except Exception:
         pass
 
-    fresh_watchlist = _load_watchlist_data()
+    fresh_watchlist = _load_watchlist_data(force_permanent=True)
     fresh_master = _load_stock_master()
     fresh_rec_df = _load_godpick_records_df(_records_source_signature())
 
@@ -1251,7 +1298,7 @@ def main():
         title="自選股中心｜升級完整版",
         subtitle="保留 GitHub 強制回寫，並串接股神推薦紀錄，顯示最近推薦分數 / 買點分級 / 推薦模式 / 推薦時間。",
     )
-    st.caption("股票主檔來源已統一改由 stock_master_service.py 提供；自選股變更會先寫入本機 watchlist.json，再嘗試同步 GitHub。")
+    st.caption("股票主檔來源已統一改由 stock_master_service.py 提供；自選股與群組會寫入專案固定路徑，並同步 GitHub／Firestore 後回讀驗證。")
 
     overview_df = _build_overview_df(watchlist, rec_map)
     group_summary_df = _build_group_summary_df(watchlist, rec_map)
@@ -1278,6 +1325,12 @@ def main():
             st.error(status_msg)
         else:
             st.info(status_msg)
+
+    _durable_details = list(st.session_state.get(_k("durable_load_detail"), []) or []) + list(st.session_state.get(_k("last_sync_detail"), []) or [])
+    if _durable_details:
+        with st.expander("自選股／群組永久保存明細", expanded=False):
+            for _line in _durable_details:
+                st.write(f"- {_line}")
 
     render_pro_section("資料重新帶入 / 加速")
     reload_cols = st.columns([1.2, 1.2, 2.6])
