@@ -209,15 +209,62 @@ def _suspicious_horizon_mask(df: pd.DataFrame) -> pd.Series:
 
 
 def _tracking_return_series(df: pd.DataFrame) -> pd.Series:
-    """建立可信任的績效回饋報酬。
+    """建立可用於模型學習的「可執行績效」。
 
-    固定週期績效只有在紀錄已滿該交易日數、數值落在合理區間，且不是把
-    目前損益代理回填到 1/3/5/10/20 日欄位時才可餵給模型。未滿期或可疑
-    紀錄只留在追蹤畫面，不參與權重學習，避免錯誤績效把推薦邏輯帶偏。
+    正式/A-/核心雷達若有明確觸發規則，只有實際觸發且守價後的報酬才可
+    參與獲利權重；未觸發、假突破與回測跌破只保留在診斷，不可拿推薦日
+    收盤漲跌誤當交易勝負。C/D 研究樣本仍使用候選報酬，以校正召回率。
+    舊紀錄沒有觸發欄位時維持原相容邏輯。
     """
     base = pd.Series([pd.NA] * len(df), index=df.index, dtype="object")
-    age = _business_age_series(df)
+    rec_age = _business_age_series(df)
     suspicious = _suspicious_horizon_mask(df)
+
+    status = df.get("進場觸發狀態", pd.Series([""] * len(df), index=df.index)).map(_safe_str)
+    trigger_known = status.ne("")
+    executable = df.get("是否納入可執行績效", pd.Series([False] * len(df), index=df.index)).map(_boolish)
+
+    # 可執行績效的成熟度要從觸發日計算，不是從推薦日計算。
+    trigger_date = _parse_record_date_series(df, ["進場觸發日期"])
+    updated = _parse_record_date_series(df, ["績效更新時間", "追蹤更新時間", "更新時間", "最後更新時間"])
+    updated = updated.fillna(pd.Timestamp.today().normalize())
+    trigger_age_values: list[float] = []
+    for t, u, fallback in zip(trigger_date, updated, rec_age):
+        if pd.isna(t) or pd.isna(u) or u < t:
+            trigger_age_values.append(float(fallback) if pd.notna(fallback) else float("nan"))
+            continue
+        try:
+            trigger_age_values.append(float(max(len(pd.bdate_range(t.normalize() + pd.Timedelta(days=1), u.normalize())), 0)))
+        except Exception:
+            trigger_age_values.append(float(fallback) if pd.notna(fallback) else float("nan"))
+    trigger_age = pd.Series(trigger_age_values, index=df.index, dtype="float64")
+
+    exec_specs = [
+        (20, "可執行交易20日%", -70.0, 100.0),
+        (10, "可執行交易10日%", -55.0, 80.0),
+        (5, "可執行交易5日%", -45.0, 65.0),
+        (3, "可執行交易3日%", -35.0, 50.0),
+        (1, "可執行交易1日%", -22.0, 25.0),
+    ]
+    for horizon, col, low, high in exec_specs:
+        if col not in df.columns:
+            continue
+        values = _to_numeric_series(df, col)
+        valid = (
+            base.isna() & executable & values.notna()
+            & trigger_age.ge(float(horizon))
+            & values.between(low, high, inclusive="both")
+        )
+        base.loc[valid] = values.loc[valid]
+
+    # C/D 校正研究樣本的目的在衡量漏選與門檻，不要求真的進場。
+    sample_text = pd.Series([""] * len(df), index=df.index, dtype="object")
+    for col in ["校正樣本類型", "紀錄層級", "推薦模式"]:
+        if col in df.columns:
+            sample_text = sample_text.str.cat(df[col].map(_safe_str), sep="|")
+    research_mask = sample_text.str.contains("C｜|D｜|近門檻|漏選|校正研究|對照", regex=True, na=False)
+    # 舊資料完全沒有觸發狀態，仍允許候選報酬，維持向下相容。
+    candidate_allowed = (~trigger_known) | research_mask
 
     horizon_specs = [
         (20, ["推薦後20日%", "20日績效%"], -70.0, 100.0),
@@ -232,15 +279,14 @@ def _tracking_return_series(df: pd.DataFrame) -> pd.Series:
                 continue
             values = _to_numeric_series(df, col)
             valid = (
-                base.isna()
-                & values.notna()
-                & age.ge(float(horizon))
+                base.isna() & candidate_allowed & values.notna()
+                & rec_age.ge(float(horizon))
                 & values.between(low, high, inclusive="both")
                 & ~suspicious
             )
             base.loc[valid] = values.loc[valid]
 
-    # 真正有實際買進紀錄者，實際報酬可覆蓋固定週期；未買進的浮動損益不得餵模型。
+    # 真正有實際買進紀錄者永遠優先，以使用者實際交易結果覆蓋模型值。
     actual = _to_numeric_series(df, "實際報酬%")
     if "是否已實際買進" in df.columns:
         actual_mask = df["是否已實際買進"].map(_boolish) & actual.notna()

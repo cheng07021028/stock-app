@@ -15,6 +15,20 @@ try:
     require_login()
 except Exception as _auth_e:
     import streamlit as st
+
+
+try:
+    from godpick_persistence_service import (
+        load_watchlist_permanent,
+        save_watchlist_permanent,
+        github_config as durable_github_config,
+        firebase_configured as durable_firebase_configured,
+    )
+except Exception:
+    load_watchlist_permanent = None
+    save_watchlist_permanent = None
+    durable_github_config = None
+    durable_firebase_configured = None
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
 # <<< APP_AUTH_GUARD_V84
@@ -5008,31 +5022,42 @@ def _write_watchlist_local(payload: dict[str, list[dict[str, str]]], path: str =
 
 
 def _force_write_watchlist_dual(data: dict[str, list[dict[str, str]]]) -> bool:
+    """以本機原子寫入 + GitHub/Firestore 驗證保存自選股與空群組。"""
     payload = _normalize_watchlist_payload(data)
+    if not callable(save_watchlist_permanent):
+        _set_status("永久保存服務未載入，為避免假成功，本次不寫入。", "error")
+        return False
 
-    ok_local, msg_local = _write_watchlist_local(payload)
-    ok_github, msg_github = _push_watchlist_to_github(payload)
-    ok_firestore, msg_firestore = _push_watchlist_to_firestore(payload)
-
+    report = save_watchlist_permanent(payload)
     st.session_state["watchlist_data"] = copy.deepcopy(payload)
     st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0)) + 1
-    st.session_state["watchlist_last_saved_at"] = _now_text()
+    st.session_state["watchlist_last_saved_at"] = report.updated_at or _now_text()
+    st.session_state["watchlist_last_saved_hash"] = report.payload_hash
+    st.session_state[_k("last_dual_write_detail")] = report.messages()
+    try:
+        get_normalized_watchlist.clear()
+    except Exception:
+        pass
 
-    st.session_state[_k("last_dual_write_detail")] = [
-        f"本機: {'成功' if ok_local else '失敗'} | {msg_local}",
-        f"GitHub: {'成功' if ok_github else '失敗'} | {msg_github}",
-        f"Firestore: {'成功' if ok_firestore else '失敗'} | {msg_firestore}",
-    ]
+    remote_configured = False
+    try:
+        remote_configured = bool(
+            (callable(durable_github_config) and durable_github_config().get("token"))
+            or (callable(durable_firebase_configured) and durable_firebase_configured())
+        )
+    except Exception:
+        remote_configured = False
 
-    if ok_local and ok_github and ok_firestore:
-        _set_status("本機 + GitHub + Firestore 同步成功", "success")
+    if report.permanent_ok:
+        if remote_configured:
+            _set_status("自選股／群組已完成本機與遠端永久保存，並通過回讀驗證。", "success")
+        else:
+            _set_status("自選股／群組已保存至專案固定路徑；目前未設定遠端備份，主機重建時仍可能遺失。", "warning")
         return True
-    if ok_local or ok_github or ok_firestore:
-        _set_status("自選股已保存；部分同步來源失敗，請查看同步明細。", "warning")
-        return True
 
-    _set_status("本機 / GitHub / Firestore 都寫入失敗", "error")
+    _set_status("自選股雖可能寫入部分來源，但未通過永久保存條件；請查看同步明細。", "error")
     return False
+
 
 
 # =========================================================
@@ -6145,10 +6170,20 @@ def _load_master_df() -> pd.DataFrame:
 def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
-        try:
-            raw = get_normalized_watchlist()
-        except Exception:
-            raw = {}
+        if callable(load_watchlist_permanent):
+            try:
+                raw, details = load_watchlist_permanent()
+                st.session_state[_k("watchlist_load_detail")] = details
+            except Exception as exc:
+                st.session_state[_k("watchlist_load_detail")] = [f"永久來源載入失敗：{exc}"]
+                raw = {}
+        if not isinstance(raw, dict) or not raw:
+            try:
+                raw = get_normalized_watchlist()
+            except Exception:
+                raw = {}
+        if isinstance(raw, dict):
+            st.session_state["watchlist_data"] = copy.deepcopy(raw)
 
     result: dict[str, list[dict[str, str]]] = {}
     if isinstance(raw, dict):
@@ -6156,10 +6191,8 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
             g = _safe_str(group_name)
             if not g:
                 continue
-
             rows = []
             seen = set()
-
             if isinstance(items, list):
                 for item in items:
                     if isinstance(item, dict):
@@ -6172,22 +6205,13 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
                         name = code
                         market = "上市"
                         category = ""
-
                     if not code or code in seen:
                         continue
                     seen.add(code)
-
-                    rows.append(
-                        {
-                            "code": code,
-                            "name": name,
-                            "market": market,
-                            "category": category,
-                            "label": f"{code} {name}",
-                        }
-                    )
+                    rows.append({"code": code, "name": name, "market": market, "category": category, "label": f"{code} {name}"})
             result[g] = rows
     return result
+
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -6417,7 +6441,9 @@ def _find_existing_watchlist_codes(group_name: str, codes: list[str]) -> list[st
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
         try:
-            raw = get_normalized_watchlist()
+            raw, details = load_watchlist_permanent() if callable(load_watchlist_permanent) else (get_normalized_watchlist(), [])
+            st.session_state[_k("watchlist_load_detail")] = details
+            st.session_state["watchlist_data"] = copy.deepcopy(raw)
         except Exception:
             raw = {}
 
@@ -6501,7 +6527,9 @@ def _append_stock_to_watchlist(group_name: str, code: str, name: str, market: st
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
         try:
-            raw = get_normalized_watchlist()
+            raw, details = load_watchlist_permanent() if callable(load_watchlist_permanent) else (get_normalized_watchlist(), [])
+            st.session_state[_k("watchlist_load_detail")] = details
+            st.session_state["watchlist_data"] = copy.deepcopy(raw)
         except Exception:
             raw = {}
 
@@ -6531,7 +6559,9 @@ def _append_multiple_stocks_to_watchlist(group_name: str, rows: list[dict[str, s
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
         try:
-            raw = get_normalized_watchlist()
+            raw, details = load_watchlist_permanent() if callable(load_watchlist_permanent) else (get_normalized_watchlist(), [])
+            st.session_state[_k("watchlist_load_detail")] = details
+            st.session_state["watchlist_data"] = copy.deepcopy(raw)
         except Exception:
             raw = {}
 
@@ -6580,7 +6610,9 @@ def _create_watchlist_group(group_name: str) -> tuple[bool, str]:
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or raw is None:
         try:
-            raw = get_normalized_watchlist()
+            raw, details = load_watchlist_permanent() if callable(load_watchlist_permanent) else (get_normalized_watchlist(), [])
+            st.session_state[_k("watchlist_load_detail")] = details
+            st.session_state["watchlist_data"] = copy.deepcopy(raw)
         except Exception:
             raw = {}
 
@@ -10758,6 +10790,7 @@ def _phase70_build_battle_dashboard(
         "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
         "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
+        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
         "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
@@ -11126,7 +11159,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         return pd.DataFrame()
 
     sort_cols = [
-        "股神推薦優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
+        "股神推薦優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
         "強勢前兆分", "主流資金分", "族群攻擊強度", "流動性參考成交額百萬",
     ]
     for col in sort_cols:
@@ -11145,6 +11178,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "盤中雷達優先級",
         "推薦總分", "候選強度分", "實戰操作品質分", "進場可執行分", "買進分數",
         "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
         "主流資金分", "族群攻擊強度", "今日漲幅%", "當日量比", "當日收盤位置%",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
@@ -11193,8 +11227,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         master_cols = [c for c in [
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
-            "推薦總分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
-            "強勢動能分", "強勢前兆分", "主流資金分", "族群攻擊強度",
+            "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
+            "主要進場路徑", "主要進場參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分", "主流資金分", "族群攻擊強度",
             "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
         ] if c in master_rank.columns]
         st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
@@ -11235,7 +11269,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
-            "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分", "流動性參考成交額百萬",
+            "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
+        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑", "流動性參考成交額百萬",
             "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控",
             "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",
@@ -11256,6 +11291,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
+        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",

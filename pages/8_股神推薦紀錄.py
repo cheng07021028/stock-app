@@ -15,6 +15,45 @@ try:
     require_login()
 except Exception as _auth_e:
     import streamlit as st
+
+
+try:
+    from godpick_persistence_service import (
+        append_export_history,
+        load_export_sync_settings,
+        load_module_sync_state,
+        load_named_json_permanent,
+        load_records_permanent,
+        load_watchlist_permanent,
+        save_export_sync_settings,
+        save_module_sync_state,
+        save_named_json_permanent,
+        save_records_permanent,
+        save_watchlist_permanent,
+        write_export_file,
+        project_path,
+        read_local_json,
+    )
+except Exception:
+    append_export_history = None
+    load_export_sync_settings = None
+    load_module_sync_state = None
+    load_named_json_permanent = None
+    load_records_permanent = None
+    load_watchlist_permanent = None
+    save_export_sync_settings = None
+    save_module_sync_state = None
+    save_named_json_permanent = None
+    save_records_permanent = None
+    save_watchlist_permanent = None
+    write_export_file = None
+    project_path = None
+    read_local_json = None
+
+try:
+    from stock_master_service import upsert_stock_master_rows
+except Exception:
+    upsert_stock_master_rows = None
     st.error(f"登入系統載入失敗：{_auth_e}")
     st.stop()
 # <<< APP_AUTH_GUARD_V84
@@ -160,7 +199,7 @@ GODPICK_RECORD_COLUMNS = [
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
     "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
     "模式績效標籤", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
-    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
 
 STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
@@ -185,7 +224,7 @@ DEFAULT_STANDARD_COLS = [
     "大盤情境分桶",
     "買點分級", "風險說明", "股神推論邏輯",
     "股神決策分數", "股神建議動作", "股神信心", "股神進場區間",
-    "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+    "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "推薦日期", "推薦時間", "模式績效標籤", "備註"
 ]
 
@@ -205,7 +244,7 @@ DEFAULT_ADVANCED_COLS = [
     "買點分級", "風險說明", "股神推論邏輯", "權重設定", "推薦分桶", "起漲等級", "信心等級",
     "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作",
     "股神信心", "股神進場區間", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
-    "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
+    "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "目前狀態", "是否已實際買進",
     "實際買進價", "實際賣出價", "實際報酬%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
     "推薦日期", "推薦時間", "模式績效標籤", "股神推論", "機會股說明", "推薦理由摘要", "備註"
 ]
@@ -1679,7 +1718,7 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦總分", "上漲機率估計%", "大盤橋接分數", "大盤可參考分數", "大盤加權分", "大盤影響加減分", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "進場時機分數", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "停損參考", "風險報酬比_決策", "追高風險分數_決策", "飆股起漲分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", 
         "同類股領先幅度", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2",
         "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%",
-        "持有天數", "股神決策分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        "持有天數", "股神決策分數", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
     ]
     # v46 修正：舊紀錄或 Firestore 回補資料可能沒有部分數值欄。
     # 先補欄再轉型，避免 x[c] 觸發 KeyError 造成整頁無法開啟。
@@ -1882,15 +1921,17 @@ LOCAL_RECORD_SOURCE_FILES = ["godpick_records.json"]
 
 
 def _records_local_signature() -> str:
-    """V150：用本機紀錄檔 mtime/size 判斷是否有新資料，不必手動重新載入。"""
+    """用專案根目錄固定路徑的 mtime/size 判斷是否有新資料。"""
     parts: list[str] = []
     for fn in LOCAL_RECORD_SOURCE_FILES:
         try:
-            stt = os.stat(fn)
-            parts.append(f"{fn}:{int(stt.st_mtime)}:{stt.st_size}")
+            path = project_path(fn) if callable(project_path) else fn
+            stt = os.stat(path)
+            parts.append(f"{path}:{int(stt.st_mtime)}:{stt.st_size}")
         except Exception:
             parts.append(f"{fn}:missing")
     return "|".join(parts)
+
 
 
 def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
@@ -1898,14 +1939,19 @@ def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
     messages: list[str] = []
     for fn in LOCAL_RECORD_SOURCE_FILES:
         try:
-            if not os.path.exists(fn):
-                messages.append(f"{fn}: 不存在")
-                continue
-            with open(fn, "r", encoding="utf-8") as f:
-                payload = json.load(f)
+            if callable(read_local_json):
+                payload, msg, _ = read_local_json(fn, [])
+                messages.append(msg)
+            else:
+                path = project_path(fn) if callable(project_path) else fn
+                if not os.path.exists(path):
+                    messages.append(f"{path}: 不存在")
+                    continue
+                with open(path, "r", encoding="utf-8-sig") as f:
+                    payload = json.load(f)
+                messages.append(f"{path}: 已讀取")
             if isinstance(payload, list):
                 rows.extend([dict(x) for x in payload if isinstance(x, dict)])
-                messages.append(f"{fn}: OK {len(payload)}筆")
             else:
                 messages.append(f"{fn}: 格式不是 list")
         except Exception as e:
@@ -1913,6 +1959,7 @@ def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
     if not rows:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "；".join(messages)
     return _ensure_godpick_record_columns(pd.DataFrame(rows)), "；".join(messages)
+
 
 
 def _write_records_to_local_file(df: pd.DataFrame) -> tuple[bool, str]:
@@ -2028,26 +2075,24 @@ def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
 
 def _save_records_dual(df: pd.DataFrame) -> bool:
     clean_df = _ensure_godpick_record_columns(df)
-    ok0, msg0 = _write_records_to_local_file(clean_df)
-    ok1, msg1 = _write_records_to_github(clean_df)
-    ok2, msg2 = _write_records_to_firestore(clean_df)
+    if not callable(save_records_permanent):
+        _set_status("永久紀錄服務未載入，為避免假成功，本次不寫入。", "error")
+        return False
+    report = save_records_permanent(clean_df)
     try:
         st.session_state[_k("records_source_sig")] = _records_local_signature()
     except Exception:
         pass
-    st.session_state[_k("last_sync_detail")] = [
-        f"本機: {'成功' if ok0 else '失敗'} | {msg0}",
-        f"GitHub: {'成功' if ok1 else '失敗'} | {msg1}",
-        f"Firestore: {'成功' if ok2 else '失敗'} | {msg2}",
-    ]
-    if ok0 and ok1 and ok2:
-        _set_status("推薦紀錄本機 + GitHub + Firestore 同步成功", "success")
+    st.session_state[_k("last_sync_detail")] = report.messages()
+    st.session_state[_k("last_sync_report")] = report.to_dict()
+    if report.permanent_ok:
+        level = "success" if (report.github_ok or report.firestore_ok) else "warning"
+        msg = "推薦紀錄已完成本機與遠端永久保存。" if level == "success" else "推薦紀錄已保存至專案固定路徑；目前沒有可用遠端備份。"
+        _set_status(msg, level)
         return True
-    if ok0 or ok1 or ok2:
-        _set_status("推薦紀錄部分同步成功；本機資料已優先保留最新狀態" if ok0 else "推薦紀錄部分同步成功", "warning")
-        return True
-    _set_status("推薦紀錄同步失敗", "error")
+    _set_status("推薦紀錄只寫入部分來源，未通過永久保存條件；請查看同步明細。", "error")
     return False
+
 
 
 def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[str, list[dict[str, str]]]:
@@ -2064,13 +2109,17 @@ def _normalize_watchlist_payload(data: dict[str, list[dict[str, str]]]) -> dict[
             code = _normalize_code(item.get("code"))
             name = _safe_str(item.get("name")) or code
             market = _safe_str(item.get("market")) or "上市"
+            category = _safe_str(item.get("category"))
             if not code:
                 continue
             key = (g, code)
             if key in seen:
                 continue
             seen.add(key)
-            normalized_items.append({"code": code, "name": name, "market": market})
+            row = {"code": code, "name": name, "market": market}
+            if category:
+                row["category"] = category
+            normalized_items.append(row)
         payload[g] = sorted(normalized_items, key=lambda x: (_normalize_code(x.get("code")), _safe_str(x.get("name"))))
     return payload
 
@@ -2105,9 +2154,20 @@ def _read_watchlist_from_github() -> tuple[dict[str, list[dict[str, str]]], str]
 
 
 def _load_watchlist_payload() -> dict[str, list[dict[str, str]]]:
-    payload, err = _read_watchlist_from_github()
-    st.session_state[_k("watchlist_import_detail")] = err or "GitHub watchlist 讀取成功"
+    if callable(load_watchlist_permanent):
+        try:
+            payload, details = load_watchlist_permanent()
+            st.session_state[_k("watchlist_import_detail")] = "｜".join(details)
+            st.session_state["watchlist_data"] = copy.deepcopy(payload)
+            return _normalize_watchlist_payload(payload)
+        except Exception as exc:
+            st.session_state[_k("watchlist_import_detail")] = f"永久自選股載入失敗：{exc}"
+    try:
+        payload = get_normalized_watchlist()
+    except Exception:
+        payload = {}
     return _normalize_watchlist_payload(payload)
+
 
 
 def _get_watchlist_sha() -> tuple[str, str]:
@@ -2172,47 +2232,46 @@ def _export_records_to_watchlist(records_df: pd.DataFrame, selected_ids: list[st
         return False, "目前沒有推薦紀錄可匯出"
     if not ids:
         return False, "請先勾選要匯入自選股中心的股票"
-
     chosen = records_df[records_df["record_id"].astype(str).isin(ids)].copy()
     if chosen.empty:
         return False, "找不到要匯入的推薦紀錄"
-
     payload = _load_watchlist_payload()
     target_group = _safe_str(target_group) or "股神推薦"
-    if target_group not in payload:
-        payload[target_group] = []
-
-    existing_codes = {_normalize_code(x.get("code")) for x in payload.get(target_group, [])}
+    payload.setdefault(target_group, [])
+    existing_codes = {_normalize_code(x.get("code")) for x in payload.get(target_group, []) if isinstance(x, dict)}
     add_count = 0
     skip_count = 0
-
     for _, row in chosen.iterrows():
         code = _normalize_code(row.get("股票代號"))
         name = _safe_str(row.get("股票名稱")) or code
         market = _safe_str(row.get("市場別")) or "上市"
-        if not code:
+        category = _safe_str(row.get("類別")) or _safe_str(row.get("產業"))
+        if not code or code in existing_codes:
             skip_count += 1
             continue
-        if code in existing_codes:
-            skip_count += 1
-            continue
-        payload[target_group].append({"code": code, "name": name, "market": market})
+        item = {"code": code, "name": name, "market": market}
+        if category:
+            item["category"] = category
+        payload[target_group].append(item)
         existing_codes.add(code)
         add_count += 1
-
     payload = _normalize_watchlist_payload(payload)
-    ok, msg = _write_watchlist_to_github(payload)
-    if ok:
+    if not callable(save_watchlist_permanent):
+        return False, "永久自選股服務未載入"
+    report = save_watchlist_permanent(payload)
+    st.session_state[_k("watchlist_import_sync_detail")] = report.messages()
+    if report.permanent_ok:
         try:
             get_normalized_watchlist.clear()
         except Exception:
             pass
         st.session_state["watchlist_data"] = copy.deepcopy(payload)
         st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
-        st.session_state["watchlist_last_saved_at"] = _now_text()
+        st.session_state["watchlist_last_saved_at"] = report.updated_at or _now_text()
         st.session_state[_k("watchlist_import_detail")] = f"目標群組：{target_group}｜新增 {add_count} 檔｜略過 {skip_count} 檔"
-        return True, f"{msg}｜匯入 {add_count} 檔，略過 {skip_count} 檔"
-    return False, msg
+        return True, f"自選股永久保存完成｜匯入 {add_count} 檔，略過 {skip_count} 檔"
+    return False, "自選股只寫入部分來源，未通過永久保存條件｜" + "；".join(report.messages())
+
 
 
 def _safe_json_read_local(path_name: str, default):
@@ -4164,34 +4223,22 @@ def _backfill_perf_columns(
 
 
 def _load_records(force_remote: bool = False) -> pd.DataFrame:
-    """讀取推薦紀錄。
-
-    V150：預設優先讀本機 godpick_records.json，讓頁面秒開；只有按「重新載入」時才合併 GitHub / Firestore。
-    這保留原本雙寫/同步功能，但避免每次進頁都等待遠端 API。
-    """
+    """以專案固定路徑秒開；重新載入時從最新本機/GitHub/Firestore權威來源還原。"""
+    if not force_remote:
+        local_df, local_err = _read_records_from_local_files()
+        if not local_df.empty:
+            st.session_state[_k("load_detail")] = [f"本機固定路徑：{local_err}", "遠端：快速模式未讀取；按重新載入可驗證遠端權威來源"]
+            return _ensure_godpick_record_columns(local_df)
+    if callable(load_records_permanent):
+        try:
+            rows, details = load_records_permanent()
+            st.session_state[_k("load_detail")] = details
+            return _ensure_godpick_record_columns(pd.DataFrame(rows))
+        except Exception as exc:
+            st.session_state[_k("load_detail")] = [f"永久來源讀取失敗：{exc}"]
     local_df, local_err = _read_records_from_local_files()
-    if not force_remote and not local_df.empty:
-        st.session_state[_k("load_detail")] = [f"本機: {local_err}", "遠端: 快速模式未讀取；按重新載入可強制合併 GitHub / Firestore"]
-        return _ensure_godpick_record_columns(local_df)
+    return _ensure_godpick_record_columns(local_df)
 
-    gh_df, gh_err = _read_records_from_github()
-    fs_df, fs_err = _read_records_from_firestore()
-
-    base_df = pd.DataFrame(columns=GODPICK_RECORD_COLUMNS)
-    if not local_df.empty:
-        base_df = local_df.copy()
-    if not gh_df.empty:
-        base_df = _append_records_dedup_by_business_key(base_df, gh_df)
-    if not fs_df.empty:
-        base_df = _append_records_dedup_by_business_key(base_df, fs_df)
-
-    st.session_state[_k("load_detail")] = [
-        f"本機: {local_err}",
-        f"GitHub: {'OK' if not gh_err else gh_err}",
-        f"Firestore: {'OK' if not fs_err else fs_err}",
-    ]
-    # V157：合併來源後只做一次完整正規化；舊版這裡會 _ensure 兩次。
-    return _ensure_godpick_record_columns(base_df)
 
 def _save_state_df(df: pd.DataFrame):
     # V157：只在資料進入 session_state 時正規化一次，後續讀取用淺拷貝。
@@ -4305,10 +4352,10 @@ def _safe_display_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
     show = df.copy()
-    pct_cols = ["實際報酬%", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
+    pct_cols = ["實際報酬%", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     num_cols = [
         "推薦總分", "上漲機率估計%", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "同類股領先幅度",
-        "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額", "持有天數",
+        "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "實際買進價", "實際賣出價", "最新價", "損益金額", "持有天數", "執行基準價", "觸發訊號品質分", "還原價格調整係數",
     ]
     for c in pct_cols:
         if c in show.columns:
@@ -5208,6 +5255,176 @@ def _render_v50_performance_tracker(df: pd.DataFrame, title: str = "V68 推薦�
                 st.info("尚無 5日/10日有效績效可列弱勢檢討清單。")
 
 
+
+def _extract_recommendation_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [dict(x) for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        for key in ["recommendations", "data", "rows", "items", "records", "股票清單"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [dict(x) for x in value if isinstance(x, dict)]
+    return []
+
+
+def _latest_recommendation_rows(records_df: pd.DataFrame) -> tuple[list[dict[str, Any]], list[str]]:
+    details: list[str] = []
+    rows: list[dict[str, Any]] = []
+    if callable(load_named_json_permanent):
+        try:
+            payload, d1 = load_named_json_permanent("godpick_recommend_list.json", [])
+            rows = _extract_recommendation_rows(payload)
+            details.extend(d1)
+        except Exception as exc:
+            details.append(f"推薦清單讀取失敗：{exc}")
+        if not rows:
+            try:
+                payload, d2 = load_named_json_permanent("godpick_latest_recommendations.json", {})
+                rows = _extract_recommendation_rows(payload)
+                details.extend(d2)
+            except Exception as exc:
+                details.append(f"最新推薦讀取失敗：{exc}")
+    if not rows and isinstance(records_df, pd.DataFrame) and not records_df.empty:
+        work = records_df.copy()
+        date_s = pd.to_datetime(work.get("推薦日期"), errors="coerce")
+        if date_s.notna().any():
+            latest_date = date_s.max().date()
+            work = work[date_s.dt.date == latest_date]
+        rows = work.to_dict(orient="records")
+        details.append(f"以推薦紀錄最新日期備援：{len(rows)} 筆")
+
+    # 推薦清單可能混有數個日期；只同步其中最新的一輪，避免舊股票重新灌回 05/09/10。
+    parsed_dates = []
+    for row in rows:
+        date_text = _safe_str(row.get("推薦日期"))
+        if not date_text:
+            date_text = _safe_str(row.get("建立時間"))[:10] or _safe_str(row.get("更新時間"))[:10]
+        parsed_dates.append(pd.to_datetime(date_text, errors="coerce"))
+    valid_dates = [x for x in parsed_dates if not pd.isna(x)]
+    if valid_dates:
+        max_date = max(x.date() for x in valid_dates)
+        filtered = []
+        for row, dt in zip(rows, parsed_dates):
+            if not pd.isna(dt) and dt.date() == max_date:
+                filtered.append(row)
+        if filtered:
+            rows = filtered
+            details.append(f"只同步最新推薦日期 {max_date}：{len(rows)} 筆")
+
+    out = []
+    seen = set()
+    for raw in rows:
+        row = dict(raw)
+        code = _normalize_code(_safe_str(row.get("股票代號")) or _safe_str(row.get("code")))
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        row["股票代號"] = code
+        if not _safe_str(row.get("股票名稱")):
+            row["股票名稱"] = _safe_str(row.get("name")) or code
+        if not _safe_str(row.get("市場別")):
+            row["市場別"] = _safe_str(row.get("market")) or "上市"
+        out.append(row)
+    return out, details
+
+
+
+def _run_one_click_sync_05_09_10(records_df: pd.DataFrame, settings: dict[str, Any], excel_bytes: bytes | None = None) -> dict[str, Any]:
+    """08 真正執行 05 自選股、09 主檔、10 推薦清單與紀錄永久同步。"""
+    started = _now_text()
+    result: dict[str, Any] = {"started_at": started, "modules": {}, "overall_ok": False}
+    rows, source_details = _latest_recommendation_rows(records_df)
+    result["latest_rows"] = len(rows)
+    result["source_details"] = source_details
+    target_group = _safe_str(settings.get("target_group")) or "股神推薦"
+
+    if callable(save_records_permanent):
+        rec_report = save_records_permanent(records_df)
+        result["modules"]["08推薦紀錄"] = {"ok": rec_report.permanent_ok, "details": rec_report.messages(), "count": len(records_df)}
+    else:
+        result["modules"]["08推薦紀錄"] = {"ok": False, "details": ["永久紀錄服務未載入"]}
+
+    # 05 群組即使本輪沒有股票也要永久建立；有股票時只增不重複。
+    if callable(load_watchlist_permanent) and callable(save_watchlist_permanent):
+        watchlist, load_detail = load_watchlist_permanent()
+        watchlist.setdefault(target_group, [])
+        existing = {_normalize_code(x.get("code")) for x in watchlist[target_group] if isinstance(x, dict)}
+        added = 0
+        for row in rows:
+            code = _normalize_code(row.get("股票代號"))
+            if not code or code in existing:
+                continue
+            item = {"code": code, "name": _safe_str(row.get("股票名稱")) or code, "market": _safe_str(row.get("市場別")) or "上市"}
+            category = _safe_str(row.get("類別")) or _safe_str(row.get("產業"))
+            if category:
+                item["category"] = category
+            watchlist[target_group].append(item)
+            existing.add(code)
+            added += 1
+        w_report = save_watchlist_permanent(watchlist)
+        st.session_state["watchlist_data"] = copy.deepcopy(watchlist)
+        st.session_state["watchlist_version"] = int(st.session_state.get("watchlist_version", 0) or 0) + 1
+        st.session_state["watchlist_last_saved_at"] = w_report.updated_at or _now_text()
+        try:
+            get_normalized_watchlist.clear()
+        except Exception:
+            pass
+        result["modules"]["05排行榜/自選股群組"] = {"ok": w_report.permanent_ok, "details": load_detail + w_report.messages(), "group": target_group, "added": added, "count": len(watchlist.get(target_group, []))}
+    else:
+        result["modules"]["05排行榜/自選股群組"] = {"ok": False, "details": ["永久自選股服務未載入"], "group": target_group}
+
+    if rows and callable(upsert_stock_master_rows):
+        master_result = upsert_stock_master_rows(rows)
+        result["modules"]["09股票主檔"] = {
+            "ok": bool(master_result.get("permanent_ok")),
+            "details": list(master_result.get("details", []) or []) + [master_result.get("message", "")],
+            "added": master_result.get("added", 0),
+            "updated": master_result.get("updated", 0),
+            "count": master_result.get("row_count", 0),
+        }
+    elif not rows:
+        result["modules"]["09股票主檔"] = {"ok": True, "details": ["本輪推薦清單為空，09 無需新增或補值"], "added": 0, "updated": 0}
+    else:
+        result["modules"]["09股票主檔"] = {"ok": False, "details": ["主檔同步服務未載入"]}
+
+    if callable(save_named_json_permanent):
+        # 清單為空也要保存空清單，避免 10 頁繼續顯示上一輪資料。
+        list_report = save_named_json_permanent("godpick_recommend_list.json", rows)
+        old_latest, _ = load_named_json_permanent("godpick_latest_recommendations.json", {})
+        latest_payload = dict(old_latest) if isinstance(old_latest, dict) else {}
+        latest_payload["saved_at"] = _now_text()
+        latest_payload["recommendations"] = rows
+        latest_report = save_named_json_permanent("godpick_latest_recommendations.json", latest_payload)
+        result["modules"]["10推薦清單"] = {"ok": bool(list_report.permanent_ok and latest_report.permanent_ok), "details": list_report.messages() + latest_report.messages(), "count": len(rows)}
+    else:
+        result["modules"]["10推薦清單"] = {"ok": False, "details": ["永久清單服務未載入"]}
+
+    export_required = bool(settings.get("auto_export_excel", True))
+    if export_required and excel_bytes and callable(write_export_file):
+        filename = f"股神推薦紀錄_一鍵同步_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        ok, msg, path = write_export_file(_safe_str(settings.get("export_folder")), filename, excel_bytes)
+        history_ok = True
+        history_details = []
+        if ok and callable(append_export_history):
+            h_report = append_export_history({"file_name": filename, "path": path, "target_group": target_group, "record_count": len(records_df), "recommendation_count": len(rows), "source": "08一鍵同步05+09+10"})
+            history_ok = h_report.permanent_ok
+            history_details = h_report.messages()
+        result["modules"]["匯出資料夾/紀錄"] = {"ok": bool(ok and history_ok), "details": [msg] + history_details, "path": path}
+    elif export_required:
+        result["modules"]["匯出資料夾/紀錄"] = {"ok": False, "details": ["已啟用自動匯出，但 Excel 內容或匯出服務不可用"]}
+    else:
+        result["modules"]["匯出資料夾/紀錄"] = {"ok": True, "details": ["設定為不自動匯出 Excel"]}
+
+    required = ["08推薦紀錄", "05排行榜/自選股群組", "09股票主檔", "10推薦清單", "匯出資料夾/紀錄"]
+    result["overall_ok"] = all(bool(result["modules"].get(k, {}).get("ok")) for k in required)
+    result["finished_at"] = _now_text()
+    if callable(save_module_sync_state):
+        audit_report = save_module_sync_state(result)
+        result["audit"] = {"ok": audit_report.permanent_ok, "details": audit_report.messages()}
+        result["overall_ok"] = bool(result["overall_ok"] and audit_report.permanent_ok)
+    return result
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
@@ -5230,6 +5447,18 @@ def main():
         st.session_state[_k("selected_col_to_move")] = ""
     if _k("ui_auto_save_flag") not in st.session_state:
         st.session_state[_k("ui_auto_save_flag")] = False
+    if _k("export_sync_settings") not in st.session_state:
+        if callable(load_export_sync_settings):
+            try:
+                _settings, _settings_detail = load_export_sync_settings()
+                st.session_state[_k("export_sync_settings")] = _settings
+                st.session_state[_k("export_settings_detail")] = _settings_detail
+            except Exception as _settings_e:
+                st.session_state[_k("export_sync_settings")] = {"export_folder": "exports/godpick", "target_group": "股神推薦", "auto_export_excel": True, "sync_latest_only": True}
+                st.session_state[_k("export_settings_detail")] = [f"匯出設定載入失敗：{_settings_e}"]
+        else:
+            st.session_state[_k("export_sync_settings")] = {"export_folder": "exports/godpick", "target_group": "股神推薦", "auto_export_excel": True, "sync_latest_only": True}
+    st.session_state[_k("watchlist_target_group")] = _safe_str(st.session_state[_k("export_sync_settings")].get("target_group")) or st.session_state.get(_k("watchlist_target_group"), "股神推薦")
 
     _load_ui_config_once()
 
@@ -5762,7 +5991,7 @@ def main():
                         continue
                     src = edit_map[rec_id]
                     for c in [c for c in master.columns if c in src]:
-                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
+                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
                             continue
                         master.at[idx, c] = src.get(c)
                     recalc = _recalc_row(master.loc[idx].to_dict())
@@ -5884,7 +6113,7 @@ def main():
             st.dataframe(
                 _safe_display_df(show_god[_unique_existing_cols(show_god, [
                     "股票代號", "股票名稱", "類別", "推薦模式", "推薦總分", "上漲機率估計%", "上漲機率等級", "買點分級", "風險說明", "股神推論邏輯",
-                    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "停損價", "賣出目標1", "賣出目標2", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
+                    "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "停損價", "賣出目標1", "賣出目標2", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "模式績效標籤", "股神推論"
                 ])]),
                 use_container_width=True,
                 hide_index=True,
@@ -6002,7 +6231,7 @@ def main():
         with sub_tabs[3]:
             detail_cols = [c for c in [
                 "股票代號", "股票名稱", "類別", "推薦模式", "推薦等級", "模式績效標籤",
-                "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益金額", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+                "進場時機", "進場時機分數", "建議動作", "等待條件", "操作區間", "近端支撐", "近端壓力", "突破確認價", "停損參考", "追高風險等級", "是否建議追價", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "最新價", "損益金額", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
                 "是否達停損", "是否達目標1", "是否達目標2", "推薦日期", "持有天數", "推薦理由摘要"
             ] if c in live_df.columns]
             st.dataframe(_safe_display_df(_format_df(live_df[_unique_existing_cols(live_df, detail_cols)])), use_container_width=True, hide_index=True)
@@ -6039,6 +6268,20 @@ def main():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+        _export_settings = st.session_state.get(_k("export_sync_settings"), {})
+        st.caption(f"永久匯出資料夾：{_safe_str(_export_settings.get('export_folder')) or 'exports/godpick'}")
+        if st.button("💾 匯出到設定資料夾並永久記錄", use_container_width=True, key=_k("export_to_saved_folder")):
+            if callable(write_export_file):
+                _fn = f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                _ok, _msg, _path = write_export_file(_safe_str(_export_settings.get("export_folder")), _fn, excel_bytes)
+                if _ok and callable(append_export_history):
+                    _hr = append_export_history({"file_name": _fn, "path": _path, "record_count": len(live_df), "source": "08手動永久匯出"})
+                    _ok = bool(_ok and _hr.permanent_ok)
+                    st.session_state[_k("export_history_detail")] = _hr.messages()
+                (_set_status(_msg, "success") if _ok else _set_status(_msg, "error"))
+                st.rerun()
+            else:
+                st.error("永久匯出服務未載入")
 
     if active_tab == "⚙️ 同步檢查":
         render_pro_info_card(
@@ -6058,6 +6301,79 @@ def main():
             ],
             chips=["完整版", "不可缺功能", "雙寫同步", "匯入自選股", "推薦後績效", "回測校正", "最強模式", "最強類別", "權重回饋V15", "UI永久記錄"],
         )
+
+        _sync_settings = dict(st.session_state.get(_k("export_sync_settings"), {}))
+        st.markdown("### 永久資料夾／群組設定")
+        with st.form(_k("export_sync_settings_form")):
+            _folder = st.text_input("推薦紀錄永久匯出資料夾", value=_safe_str(_sync_settings.get("export_folder")) or "exports/godpick", help="可填絕對路徑；相對路徑固定以專案根目錄為基準。")
+            _group = st.text_input("05 自選股同步目標群組", value=_safe_str(_sync_settings.get("target_group")) or "股神推薦")
+            _auto_export = st.checkbox("一鍵同步時自動匯出 Excel 並保存匯出紀錄", value=bool(_sync_settings.get("auto_export_excel", True)))
+            _save_setting = st.form_submit_button("💾 永久保存資料夾與群組設定", use_container_width=True)
+        if _save_setting:
+            if callable(save_export_sync_settings):
+                _new_settings = {"export_folder": _folder, "target_group": _group, "auto_export_excel": _auto_export, "sync_latest_only": True}
+                _sr = save_export_sync_settings(_new_settings)
+                st.session_state[_k("export_settings_save_detail")] = _sr.messages()
+                if _sr.permanent_ok:
+                    st.session_state[_k("export_sync_settings")] = _new_settings
+                    st.session_state[_k("watchlist_target_group")] = _group
+                    _set_status("資料夾與群組設定已永久保存並回讀驗證。", "success" if (_sr.github_ok or _sr.firestore_ok) else "warning")
+                else:
+                    _set_status("設定只寫入部分來源，未通過永久保存條件。", "error")
+                st.rerun()
+            else:
+                st.error("永久設定服務未載入")
+
+        _settings_detail = st.session_state.get(_k("export_settings_detail"), [])
+        _settings_save_detail = st.session_state.get(_k("export_settings_save_detail"), [])
+        if _settings_detail or _settings_save_detail:
+            with st.expander("資料夾／群組設定來源明細", expanded=False):
+                for _line in list(_settings_detail or []) + list(_settings_save_detail or []):
+                    st.write(f"- {_line}")
+
+        st.markdown("### 08 一鍵同步 05 + 09 + 10")
+        st.caption("此按鈕會真正逐項執行：08推薦紀錄永久保存 → 05目標群組 → 09股票主檔 → 10推薦清單／最新快照 → 設定資料夾Excel與匯出紀錄。任一項失敗都不會顯示全部成功。")
+        if st.button("🔁 一鍵同步 05 + 09 + 10（永久驗證）", type="primary", use_container_width=True, key=_k("one_click_sync_05_09_10")):
+            with st.spinner("正在逐項同步並回讀驗證 05、08、09、10..."):
+                _excel = _build_export_bytes(live_df, _get_ana_tables_v149()) if bool(_sync_settings.get("auto_export_excel", True)) else None
+                _sync_result = _run_one_click_sync_05_09_10(live_df, _sync_settings, _excel)
+                st.session_state[_k("last_one_click_sync")] = _sync_result
+                _ok = bool(_sync_result.get("overall_ok"))
+                _set_status("一鍵同步 05+09+10 全部完成並驗證。" if _ok else "一鍵同步有項目失敗；請查看逐項明細。", "success" if _ok else "error")
+            st.rerun()
+
+        _last_sync = st.session_state.get(_k("last_one_click_sync"))
+        if not isinstance(_last_sync, dict) and callable(load_module_sync_state):
+            try:
+                _last_sync, _audit_detail = load_module_sync_state()
+                st.session_state[_k("module_sync_load_detail")] = _audit_detail
+            except Exception:
+                _last_sync = {}
+        if isinstance(_last_sync, dict) and _last_sync:
+            st.write(f"最近一鍵同步：{_last_sync.get('finished_at') or _last_sync.get('updated_at') or '—'}｜整體：{'成功' if _last_sync.get('overall_ok') else '有失敗'}")
+            for _module, _info in (_last_sync.get("modules") or {}).items():
+                _icon = "✅" if _info.get("ok") else "❌"
+                st.write(f"{_icon} {_module}｜{_info.get('count', '')} {_info.get('group', '')}")
+                with st.expander(f"{_module} 明細", expanded=not bool(_info.get("ok"))):
+                    for _line in _info.get("details", []) or []:
+                        if _line:
+                            st.write(f"- {_line}")
+
+        st.markdown("### 推薦匯出永久紀錄")
+        if callable(load_named_json_permanent):
+            try:
+                _export_history, _export_history_detail = load_named_json_permanent("godpick_export_history.json", [])
+                if isinstance(_export_history, list) and _export_history:
+                    _hist_df = pd.DataFrame(_export_history[:50])
+                    _hist_cols = [c for c in ["created_at", "file_name", "path", "target_group", "record_count", "recommendation_count", "source"] if c in _hist_df.columns]
+                    st.dataframe(_hist_df[_hist_cols], use_container_width=True, hide_index=True)
+                else:
+                    st.info("尚未建立永久匯出紀錄。請使用『匯出到設定資料夾並永久記錄』或一鍵同步。")
+                with st.expander("匯出紀錄來源明細", expanded=False):
+                    for _line in _export_history_detail:
+                        st.write(f"- {_line}")
+            except Exception as _hist_e:
+                st.warning(f"匯出永久紀錄讀取失敗：{_hist_e}")
 
 
 # =========================================================

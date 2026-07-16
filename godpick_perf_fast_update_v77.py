@@ -21,13 +21,18 @@ godpick_perf_fast_update_v77.py
 import json
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import requests
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
@@ -140,6 +145,11 @@ def _needs_update(row: Dict[str, Any], stale_minutes: int = 60) -> bool:
     if _safe_float(row.get("最新價")) is None:
         return True
 
+    # V103：舊紀錄沒有觸發/還原績效欄位時必須回補，否則模型仍會把
+    # 未觸發候選的收盤漲跌誤當成可交易績效。
+    if not _safe_str(row.get("進場觸發狀態")) or not _safe_str(row.get("績效計算口徑")):
+        return True
+
     # 追蹤績效欄位缺值就更新
     for c in ["推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%"]:
         if c in row and _safe_float(row.get(c)) is None:
@@ -149,19 +159,27 @@ def _needs_update(row: Dict[str, Any], stale_minutes: int = 60) -> bool:
 
 
 def _fetch_yahoo_chart_one(code: str, timeout: float = 5.0) -> Tuple[str, Dict[str, Any]]:
+    """抓取可回放的 OHLC 與還原收盤價。
+
+    以前只保存 close，無法判斷「盤中是否觸價、收盤是否守價」，也會把
+    除權息造成的價格跳空誤算成選股虧損。新版保留 OHLC/adjusted close，
+    讓候選績效與真正可執行交易績效分開計算。
+    """
     code = _normalize_code(code)
     if not code:
         return code, {"ok": False, "error": "empty code"}
 
     symbols = [f"{code}.TW", f"{code}.TWO"]
     last_error = ""
+    taipei_tz = ZoneInfo("Asia/Taipei") if ZoneInfo is not None else None
 
     for sym in symbols:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
         params = {
-            "range": "1mo",
+            "range": "6mo",
             "interval": "1d",
-            "events": "history",
+            "events": "div,splits,history",
+            "includeAdjustedClose": "true",
         }
         try:
             r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
@@ -175,23 +193,42 @@ def _fetch_yahoo_chart_one(code: str, timeout: float = 5.0) -> Tuple[str, Dict[s
                 continue
 
             meta = result.get("meta") or {}
-            quote = ((result.get("indicators") or {}).get("quote") or [{}])[0]
+            indicators = result.get("indicators") or {}
+            quote = (indicators.get("quote") or [{}])[0]
+            adj_block = (indicators.get("adjclose") or [{}])[0]
             timestamps = result.get("timestamp") or []
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
             closes = quote.get("close") or []
+            volumes = quote.get("volume") or []
+            adjcloses = adj_block.get("adjclose") or []
 
-            pairs = []
-            for ts, close in zip(timestamps, closes):
+            history: list[dict[str, Any]] = []
+            for i, ts in enumerate(timestamps):
+                close = closes[i] if i < len(closes) else None
                 if close is None:
                     continue
                 try:
-                    pairs.append((datetime.fromtimestamp(ts).strftime("%Y-%m-%d"), float(close)))
+                    dt_utc = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                    dt_local = dt_utc.astimezone(taipei_tz) if taipei_tz is not None else dt_utc
+                    raw_close = float(close)
+                    adj = adjcloses[i] if i < len(adjcloses) else None
+                    adj = float(adj) if adj is not None else raw_close
+                    history.append({
+                        "日期": dt_local.strftime("%Y-%m-%d"),
+                        "開盤價": _safe_float(opens[i] if i < len(opens) else None),
+                        "最高價": _safe_float(highs[i] if i < len(highs) else None),
+                        "最低價": _safe_float(lows[i] if i < len(lows) else None),
+                        "收盤價": raw_close,
+                        "還原收盤價": adj,
+                        "成交量": _safe_float(volumes[i] if i < len(volumes) else None, 0.0),
+                    })
                 except Exception:
-                    pass
+                    continue
+            history.sort(key=lambda x: _safe_str(x.get("日期")))
 
-            latest = _safe_float(meta.get("regularMarketPrice"))
-            if latest is None and pairs:
-                latest = pairs[-1][1]
-
+            latest = history[-1]["收盤價"] if history else _safe_float(meta.get("regularMarketPrice"))
             if latest is None:
                 last_error = "latest none"
                 continue
@@ -199,9 +236,10 @@ def _fetch_yahoo_chart_one(code: str, timeout: float = 5.0) -> Tuple[str, Dict[s
             return code, {
                 "ok": True,
                 "symbol": sym,
-                "latest": latest,
-                "history": pairs,
-                "source": "Yahoo",
+                "latest": float(latest),
+                "latest_date": history[-1]["日期"] if history else "",
+                "history": history,
+                "source": "Yahoo adjusted OHLC",
                 "fetched_at": _now_str(),
             }
 
@@ -209,7 +247,6 @@ def _fetch_yahoo_chart_one(code: str, timeout: float = 5.0) -> Tuple[str, Dict[s
             last_error = str(e)
 
     return code, {"ok": False, "error": last_error or "fetch failed"}
-
 
 def fetch_latest_quotes_fast_v77(codes: List[str], max_workers: int = 16, timeout: float = 5.0) -> Dict[str, Dict[str, Any]]:
     codes = sorted(set(_normalize_code(c) for c in codes if _normalize_code(c)))
@@ -238,20 +275,196 @@ def _calc_return(latest: float, base_price: Any):
     return round((float(latest) - base) / base * 100, 2)
 
 
-def _price_on_or_after(history: List[Tuple[str, float]], start_date: str, days: int):
-    if not history or not start_date:
+def _parse_date(value: Any) -> datetime | None:
+    s = _safe_str(value)[:10].replace("/", "-")
+    if not s:
         return None
     try:
-        sd = datetime.strptime(start_date[:10].replace("/", "-"), "%Y-%m-%d")
+        return datetime.strptime(s, "%Y-%m-%d")
     except Exception:
         return None
 
-    target = sd + timedelta(days=int(days))
-    target_s = target.strftime("%Y-%m-%d")
-    for d, p in history:
-        if d >= target_s:
-            return p
+
+def _history_rows(history: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in history or []:
+        if isinstance(item, dict):
+            date_s = _safe_str(item.get("日期") or item.get("date"))[:10]
+            close = _safe_float(item.get("收盤價") if "收盤價" in item else item.get("close"))
+            if not date_s or close is None:
+                continue
+            adj = _safe_float(item.get("還原收盤價") if "還原收盤價" in item else item.get("adjclose"), close)
+            rows.append({
+                "日期": date_s,
+                "開盤價": _safe_float(item.get("開盤價") if "開盤價" in item else item.get("open"), close),
+                "最高價": _safe_float(item.get("最高價") if "最高價" in item else item.get("high"), close),
+                "最低價": _safe_float(item.get("最低價") if "最低價" in item else item.get("low"), close),
+                "收盤價": close,
+                "還原收盤價": adj,
+                "成交量": _safe_float(item.get("成交量") if "成交量" in item else item.get("volume"), 0.0),
+            })
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            date_s = _safe_str(item[0])[:10]
+            close = _safe_float(item[1])
+            if date_s and close is not None:
+                rows.append({"日期": date_s, "開盤價": close, "最高價": close, "最低價": close,
+                             "收盤價": close, "還原收盤價": close, "成交量": 0.0})
+    rows.sort(key=lambda x: x["日期"])
+    # 同日重複時保留最後一筆。
+    return list({row["日期"]: row for row in rows}.values())
+
+
+def _row_factor(row: dict[str, Any] | None) -> float:
+    if not row:
+        return 1.0
+    raw = _safe_float(row.get("收盤價"), 0.0) or 0.0
+    adj = _safe_float(row.get("還原收盤價"), raw) or raw
+    if raw <= 0 or adj <= 0:
+        return 1.0
+    return float(adj / raw)
+
+
+def _recommendation_row(history: list[dict[str, Any]], rec_date: str) -> dict[str, Any] | None:
+    if not history:
+        return None
+    key = _safe_str(rec_date)[:10].replace("/", "-")
+    exact = [r for r in history if r["日期"] == key]
+    if exact:
+        return exact[-1]
+    previous = [r for r in history if r["日期"] <= key]
+    return previous[-1] if previous else None
+
+
+def _trading_rows_after(history: list[dict[str, Any]], start_date: str) -> list[dict[str, Any]]:
+    key = _safe_str(start_date)[:10].replace("/", "-")
+    return [r for r in history if r["日期"] > key]
+
+
+def _price_after_sessions(history: list[dict[str, Any]], start_date: str, sessions: int, adjusted: bool = True):
+    rows = _trading_rows_after(history, start_date)
+    index = int(sessions) - 1
+    if index < 0 or index >= len(rows):
+        return None
+    col = "還原收盤價" if adjusted else "收盤價"
+    return _safe_float(rows[index].get(col))
+
+
+def _level_for_row(level: float, rec_factor: float, target_row: dict[str, Any]) -> float:
+    """將推薦日未還原價位換算到目標交易日的可比較價位。"""
+    target_factor = _row_factor(target_row)
+    if target_factor <= 0:
+        target_factor = 1.0
+    return float(level) * float(rec_factor or 1.0) / target_factor
+
+
+def _first_positive(row: Dict[str, Any], names: list[str]) -> float | None:
+    for name in names:
+        value = _safe_float(row.get(name))
+        if value is not None and value > 0:
+            return float(value)
     return None
+
+
+def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], rec_date: str,
+                            base_price: float, rec_factor: float) -> dict[str, Any]:
+    after = _trading_rows_after(history, rec_date)
+    result: dict[str, Any] = {
+        "status": "未觸發｜不計交易勝負", "path": "等待條件", "date": "", "executable": False,
+        "entry_price": None, "entry_adj": None, "quality": 50.0, "trigger_row": None,
+    }
+    if not after:
+        return result
+
+    path_text = _safe_str(out.get("主要進場路徑") or out.get("進場路徑") or out.get("進場時機"))
+    breakout = _first_positive(out, ["突破確認參考價", "實戰觸發價", "突破確認價", "盤中轉強觸發價"])
+    hold = _first_positive(out, ["觸發後守價", "突破後守價"])
+    pullback = _first_positive(out, ["回測承接參考價", "回測承接價", "推薦買點_拉回", "預估進場點_拉回", "近端支撐"])
+    if pullback is None and "回測" in _safe_str(out.get("預估進場點")):
+        pullback = _first_positive(out, ["預估進場點", "支撐參考"])
+
+    def breakout_event():
+        if breakout is None:
+            return None
+        for session in after:
+            high = _safe_float(session.get("最高價"), 0.0) or 0.0
+            close = _safe_float(session.get("收盤價"), 0.0) or 0.0
+            trig = _level_for_row(breakout, rec_factor, session)
+            guard = _level_for_row(hold if hold is not None else breakout * 0.985, rec_factor, session)
+            if high + 1e-9 >= trig:
+                if close + 1e-9 >= guard:
+                    factor = _row_factor(session)
+                    return {"status": "觸發且守價｜納入可執行績效", "path": "突破確認", "date": session["日期"],
+                            "executable": True, "entry_price": trig, "entry_adj": trig * factor,
+                            "quality": 90.0 if close >= trig else 82.0, "trigger_row": session}
+                return {"status": "假突破失守｜取消交易", "path": "突破確認", "date": session["日期"],
+                        "executable": False, "entry_price": trig, "entry_adj": None,
+                        "quality": 28.0, "trigger_row": session}
+        return None
+
+    def pullback_event():
+        if pullback is None:
+            return None
+        for session in after:
+            low = _safe_float(session.get("最低價"), 0.0) or 0.0
+            close = _safe_float(session.get("收盤價"), 0.0) or 0.0
+            ref = _level_for_row(pullback, rec_factor, session)
+            # 觸碰參考價上方 1.5% 內，即進入承接檢查。
+            if low <= ref * 1.015:
+                if low >= ref * 0.975 and close >= ref:
+                    factor = _row_factor(session)
+                    return {"status": "回測承接成立｜納入可執行績效", "path": "回測承接", "date": session["日期"],
+                            "executable": True, "entry_price": ref, "entry_adj": ref * factor,
+                            "quality": 88.0 if close >= ref * 1.01 else 80.0, "trigger_row": session}
+                return {"status": "回測跌破｜取消交易", "path": "回測承接", "date": session["日期"],
+                        "executable": False, "entry_price": ref, "entry_adj": None,
+                        "quality": 25.0, "trigger_row": session}
+        return None
+
+    first_fn, second_fn = (pullback_event, breakout_event) if "回測" in path_text else (breakout_event, pullback_event)
+    primary = first_fn()
+    if primary:
+        return primary
+    # 備用路徑只在真正成立時採用；不能因非主要路徑跌破，就把尚未觸發的
+    # 主要策略誤判成失敗交易。
+    alternate = second_fn()
+    if alternate and alternate.get("executable"):
+        return alternate
+    return result
+
+
+def _execution_returns(history: list[dict[str, Any]], event: dict[str, Any], track_days: list[int]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if not event.get("executable") or not event.get("date") or not event.get("entry_adj"):
+        return out
+    entry_adj = float(event["entry_adj"])
+    future = _trading_rows_after(history, event["date"])
+    trigger_row = event.get("trigger_row") or {}
+    trigger_close_adj = (_safe_float(trigger_row.get("還原收盤價")) or 0.0)
+    if trigger_close_adj > 0:
+        out["觸發後收盤績效%"] = _calc_return(trigger_close_adj, entry_adj)
+    for d in track_days:
+        idx = int(d) - 1
+        if 0 <= idx < len(future):
+            px = _safe_float(future[idx].get("還原收盤價"))
+            ret = _calc_return(px, entry_adj) if px is not None else None
+            if ret is not None:
+                out[f"可執行交易{d}日%"] = ret
+    replay_rows = [trigger_row] + future
+    highs_adj: list[float] = []
+    lows_adj: list[float] = []
+    for r in replay_rows:
+        factor = _row_factor(r)
+        hi = _safe_float(r.get("最高價"))
+        lo = _safe_float(r.get("最低價"))
+        if hi is not None:
+            highs_adj.append(hi * factor)
+        if lo is not None:
+            lows_adj.append(lo * factor)
+    if highs_adj:
+        out["可執行交易最大漲幅%"] = _calc_return(max(highs_adj), entry_adj)
+    if lows_adj:
+        out["可執行交易最大回撤%"] = _calc_return(min(lows_adj), entry_adj)
+    return out
 
 
 def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: List[int] | None = None) -> Dict[str, Any]:
@@ -263,42 +476,58 @@ def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: L
         out["績效更新錯誤"] = _safe_str((quote or {}).get("error"))
         return out
 
-    latest = _safe_float(quote.get("latest"))
+    history = _history_rows(quote.get("history") or [])
+    latest_row = history[-1] if history else None
+    latest = _safe_float(latest_row.get("收盤價") if latest_row else quote.get("latest"))
     if latest is None:
         out["績效更新狀態"] = "ONLINE_FAIL"
         out["績效更新錯誤"] = "latest none"
         return out
 
-    base_price = (
-        out.get("推薦價格")
-        or out.get("推薦日價格")
-        or out.get("買進價")
-        or out.get("最新價")
-    )
+    base_price = _first_positive(out, ["推薦價格", "推薦日價格", "買進價", "最新價"])
+    if base_price is None:
+        out["績效更新狀態"] = "BASE_PRICE_MISSING"
+        out["績效更新錯誤"] = "base price missing"
+        return out
+
+    rec_date = _safe_str(out.get("推薦日期") or out.get("建立日期") or out.get("建立時間"))
+    rec_row = _recommendation_row(history, rec_date)
+    rec_factor = _row_factor(rec_row)
+    base_adjusted = float(base_price) * rec_factor
+    latest_adj = _safe_float(latest_row.get("還原收盤價") if latest_row else None, latest) or latest
 
     out["最新價"] = latest
     out["最新更新時間"] = quote.get("fetched_at") or _now_str()
-    out["資料來源"] = out.get("資料來源") or quote.get("source", "Yahoo")
+    out["追蹤更新時間"] = quote.get("fetched_at") or _now_str()
+    out["資料來源"] = out.get("資料來源") or quote.get("source", "Yahoo adjusted OHLC")
+    out["績效資料來源"] = "Yahoo adjusted OHLC｜候選與觸發績效分流"
     out["績效更新狀態"] = "OK"
     out["績效更新錯誤"] = ""
+    out["績效行情日期"] = _safe_str((latest_row or {}).get("日期"))
+    out["還原價格調整係數"] = round(rec_factor, 8)
+    out["除權息調整旗標"] = "是｜已用還原價" if abs(rec_factor - 1.0) >= 0.002 else "否"
+    out["績效計算口徑"] = "還原收盤價候選績效＋觸發後可執行交易績效"
 
-    total_ret = _calc_return(latest, base_price)
+    total_ret = _calc_return(latest_adj, base_adjusted)
     if total_ret is not None:
         out["目前損益幅%"] = total_ret
         out["損益幅%"] = total_ret
 
-    rec_date = _safe_str(out.get("推薦日期") or out.get("建立日期") or out.get("建立時間"))
-    history = quote.get("history") or []
-
     for d in track_days:
-        col = f"推薦後{d}日%"
-        px = _price_on_or_after(history, rec_date, d)
-        ret = _calc_return(px, base_price) if px is not None else None
+        px = _price_after_sessions(history, rec_date, d, adjusted=True)
+        ret = _calc_return(px, base_adjusted) if px is not None else None
         if ret is not None:
-            out[col] = ret
+            out[f"推薦後{d}日%"] = ret
 
+    event = _evaluate_entry_trigger(out, history, rec_date, float(base_price), rec_factor)
+    out["進場觸發狀態"] = event.get("status")
+    out["進場觸發日期"] = event.get("date")
+    out["進場評估路徑"] = event.get("path")
+    out["是否納入可執行績效"] = bool(event.get("executable"))
+    out["執行基準價"] = round(float(event["entry_price"]), 4) if event.get("entry_price") else None
+    out["觸發訊號品質分"] = round(float(event.get("quality", 50.0)), 1)
+    out.update(_execution_returns(history, event, track_days))
     return out
-
 
 def update_recommendation_perf_fast_v77(
     json_files: List[str] | None = None,
