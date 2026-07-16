@@ -1,0 +1,10 @@
+{
+  "version": "watchlist_durable_v2",
+  "updated_at": "2026-07-16 16:25:52",
+  "updated_at_utc": "2026-07-16T16:25:52Z",
+  "updated_at_epoch": 1784219152.515381,
+  "revision": 1784219152515423112,
+  "payload_hash": "f9e505ee714092e3f4572ba5ea11d37883fc6468e401778ed4fc0e3852d7cff4",
+  "group_count": 64,
+  "stock_count": 2389
+}
