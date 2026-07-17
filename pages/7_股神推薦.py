@@ -10792,7 +10792,9 @@ def _phase70_build_battle_dashboard(
         "正式推薦分區", "正式推薦資格", "下週是否可直接買", "正式推薦動作",
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
         "可操作分", "正式推薦排序分", "推薦總分", "買進分數", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
-        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
+        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價",
+        "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
+        "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
         "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
@@ -11180,7 +11182,9 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "盤中雷達優先級",
         "推薦總分", "候選強度分", "實戰操作品質分", "進場可執行分", "買進分數",
         "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
-        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
+        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價",
+        "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
+        "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
         "主流資金分", "族群攻擊強度", "今日漲幅%", "當日量比", "當日收盤位置%",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
@@ -11200,6 +11204,87 @@ def _phase90_navigation_table() -> pd.DataFrame:
         {"優先序": 5, "活頁/表格": "強勢前兆核心雷達", "真正用途": "尚未發動但主流、族群與前兆較完整的股票", "是否買進清單": "不是，等待觸發"},
         {"優先序": 6, "活頁/表格": "候選診斷總表", "真正用途": "模型檢討、漏選原因與所有候選證據", "是否買進清單": "絕對不是"},
     ])
+
+def _phase92_render_zero_formal_diagnostics(source_df: pd.DataFrame) -> None:
+    """正式與 A- 同時為 0 時，顯示真正的門檻阻擋與最接近升級候選。
+
+    這張診斷不會硬湊推薦數量；它用來辨識是資料、大盤、流動性、
+    買點、風報比或風控哪一層把候選全部擋下，避免使用者只看到 0。
+    """
+    if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty:
+        return
+    try:
+        work = canonicalize_final_partition(source_df) if callable(canonicalize_final_partition) else source_df.copy()
+    except Exception:
+        work = source_df.copy()
+    try:
+        required = {"推薦升級判定路徑", "路徑風險報酬比", "正式與A近門檻說明"}
+        if not required.issubset(set(work.columns)):
+            from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+            work = apply_formal_recommendation_engine(work)
+    except Exception:
+        pass
+    if work.empty:
+        return
+
+    reason_cols = [c for c in [
+        "正式與A近門檻說明", "進場阻擋原因", "正式推薦排除原因", "真禁買原因",
+        "不可直接買原因", "隔日風險標記", "前置保留原因",
+    ] if c in work.columns]
+    if reason_cols:
+        reason_text = work[reason_cols].fillna("").astype(str).agg("｜".join, axis=1)
+    else:
+        reason_text = pd.Series([""] * len(work), index=work.index)
+
+    blocker_rules = [
+        ("資料/K線未更新", r"K線|資料待更新|資料缺失|非最新"),
+        ("大盤風控禁止", r"大盤|紅燈|全面防守|禁止進攻"),
+        ("流動性不足", r"低流動性|冷門|成交額.*不足|流動性資料"),
+        ("離買點過遠", r"距可執行買點|距買點|觸發距離"),
+        ("風險報酬不足", r"路徑RR|風報比|上方空間"),
+        ("停損距離過大", r"停損距離|停損過遠"),
+        ("Entry買點不足", r"Entry"),
+        ("Risk風控不足", r"Risk"),
+        ("追價/過熱", r"追價|過熱|禁買|耗竭"),
+    ]
+    blocker_rows = []
+    for label, pattern in blocker_rules:
+        count = int(reason_text.str.contains(pattern, regex=True, na=False).sum())
+        if count > 0:
+            blocker_rows.append({"主要阻擋層": label, "候選檔數": count})
+    if blocker_rows:
+        blocker_df = pd.DataFrame(blocker_rows).sort_values("候選檔數", ascending=False, kind="mergesort")
+    else:
+        blocker_df = pd.DataFrame([{"主要阻擋層": "尚無結構化阻擋原因", "候選檔數": len(work)}])
+
+    st.warning(
+        "正式推薦與 A- 同時為 0，不代表市場沒有強勢股；代表目前沒有股票通過對應的可執行路徑。"
+        "下方會列出阻擋層與最接近升級候選，系統不會為了湊數把弱股包裝成正式推薦。"
+    )
+    with st.expander("為什麼正式／A- 都是 0？｜門檻阻擋與近門檻候選", expanded=True):
+        st.dataframe(blocker_df, use_container_width=True, hide_index=True)
+
+        score_cols = [c for c in [
+            "股神推薦優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分",
+            "Entry進場買點分", "Risk風控安全分", "路徑風險報酬比", "主流資金分", "族群攻擊強度",
+        ] if c in work.columns]
+        for col in score_cols:
+            work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
+        if score_cols:
+            work = work.sort_values(score_cols, ascending=[False] * len(score_cols), kind="mergesort")
+        if "股票代號" in work.columns:
+            work["股票代號"] = work["股票代號"].astype(str).map(_normalize_code)
+            work = work.loc[work["股票代號"].ne("")].drop_duplicates("股票代號", keep="first")
+        near_cols = [c for c in [
+            "股票代號", "股票名稱", "股神推薦優先分", "正式推薦分區", "推薦升級判定路徑",
+            "進場可執行判定", "進場可執行分", "路徑風險報酬比", "風報比計算口徑",
+            "距最近可執行買點%", "Entry進場買點分", "Risk風控安全分", "追價風險分",
+            "流動性參考成交額百萬", "正式與A近門檻說明",
+        ] if c in work.columns]
+        if near_cols:
+            st.caption("以下只是最接近升級的診斷候選；是否可買仍以操作許可、觸發價與守價條件為準。")
+            st.dataframe(_format_df(work.head(12)[near_cols]), use_container_width=True, hide_index=True)
+
 
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
@@ -11230,7 +11315,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
             "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
-            "主要進場路徑", "主要進場參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分", "主流資金分", "族群攻擊強度",
+            "主要進場路徑", "主要進場參考價", "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
+            "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分", "主流資金分", "族群攻擊強度",
             "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
         ] if c in master_rank.columns]
         st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
@@ -11258,6 +11344,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             st.success(_safe_str(row.get("操作說明")))
         else:
             st.warning(_safe_str(row.get("操作說明")))
+    if scan_usable and len(formal) == 0 and len(a_minus) == 0:
+        _phase92_render_zero_formal_diagnostics(rank_source)
     battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
     if callable(build_action_table):
         try:
@@ -11272,7 +11360,9 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
             "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
-        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑", "流動性參考成交額百萬",
+            "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價",
+            "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
+            "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑", "流動性參考成交額百萬",
             "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控",
             "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",

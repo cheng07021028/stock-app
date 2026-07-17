@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_1_trigger_aware_profit_20260716"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_2_path_aware_actionable_20260717"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -80,6 +80,10 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "隔日耗竭風險等級",
     "隔日可執行優先分",
     "進場績效計算口徑",
+    "推薦升級判定路徑",
+    "路徑風險報酬比",
+    "風報比計算口徑",
+    "正式與A近門檻說明",
     "強勢動能分",
     "強勢動能判定",
     "動能進場條件",
@@ -121,6 +125,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "突破確認參考價",
     "隔日耗竭風險分",
     "隔日可執行優先分",
+    "路徑風險報酬比",
     "強勢動能分",
     "強勢前兆分",
     "K線落後交易日",
@@ -257,6 +262,179 @@ def _risk_reward_ratio(row: pd.Series) -> float:
     if raw > 0:
         return raw
     return practical
+
+
+def _path_risk_reward_profile(row: pd.Series) -> dict[str, Any]:
+    """依交易路徑提供風報比。
+
+    傳統拉回／箱型突破仍使用保守風報比；強勢動能與強勢前兆若已突破舊壓力，
+    原始靜態 RR 可能失真，因此改以「實戰壓力空間 ÷ 實戰停損距離」評估，
+    但仍設上限，避免極小停損把數值無限放大。
+    """
+    conservative = _risk_reward_ratio(row)
+    practical = _num(row, "實戰風險報酬比", 0.0)
+    upside = _upside_space_pct(row)
+    stop = _stop_distance_pct(row)
+    derived = (upside / stop) if upside > 0 and stop > 0 else 0.0
+    trend = max(practical, derived)
+    trend = min(trend, 4.0) if trend > 0 else 0.0
+    return {
+        "conservative": round(max(0.0, conservative), 2),
+        "practical": round(max(0.0, practical), 2),
+        "derived": round(max(0.0, derived), 2),
+        "trend": round(max(0.0, trend), 2),
+        "upside": round(max(0.0, upside), 2),
+        "stop": round(max(0.0, stop), 2),
+    }
+
+
+def _hard_veto_reasons(exclusion: list[str]) -> list[str]:
+    """只保留真正不能升級的硬否決。
+
+    「舊壓力造成 RR 偏低」與「上方空間偏小」對價格發現型股票不一定是硬否決；
+    低流動性、興櫃、明確禁買、假強、極端追價與停損失衡則仍不可放寬。
+    """
+    hard_keys = [
+        "興櫃", "低流動性", "冷門", "買進分數過低", "Entry/Risk 同時偏弱",
+        "追價風險過高", "停損距離", "角色已判定過熱/禁買", "硬風控或過熱",
+        "假強風險", "流動性資料缺失",
+    ]
+    return [reason for reason in exclusion if any(key in reason for key in hard_keys)]
+
+
+def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) -> dict[str, Any]:
+    """正式／A- 的路徑化升級判斷。
+
+    舊版正式與 A- 共用同一組 RR>=1.45、買點距離<=2.5%、Entry>=68 的硬閘門，
+    使 A- 並非「近門檻」，而是另一個更難通過的正式推薦，長期自然維持 0。
+    這裡拆成：穩健拉回、強勢動能、強勢前兆三條可稽核路徑。
+    """
+    readiness = _entry_readiness_profile(row)
+    momentum = _momentum_profile(row)
+    prebreak = _prebreakout_profile(row)
+    market = _market_risk_info(row)
+    liq = _liquidity_info(row)
+    hard = _hard_veto_reasons(exclusion)
+    rr = _path_risk_reward_profile(row)
+
+    fresh = bool(readiness["freshness"].get("fresh"))
+    gap = _safe_float(readiness.get("nearest_gap"), 99.0)
+    stop = rr["stop"]
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    buy = _num(row, "買進分數", 0)
+    chase = _chase_risk_score(row, 55)
+    amount = _reference_turnover_m(row)
+    mainstream = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+
+    base_ok = fresh and not market["severe"] and not hard and liq["tradable"]
+
+    # 正式主推薦：允許極少數高品質拉回候選在距離 3.5% 內升級，
+    # 仍維持高流動性、低追價、停損與風報比要求，不做固定湊數。
+    formal_pullback = bool(
+        base_ok and "回測" in _safe_str(readiness.get("path"))
+        and gap <= 3.5 and rr["conservative"] >= 1.60
+        and 0 < stop <= 6.0 and entry >= 62 and risk >= 64 and buy >= 65
+        and amount >= 250 and chase <= 45 and op_score >= 70
+        and mainstream >= 60 and sector >= 50
+    )
+
+    # 已發動型只有在「非末端加速」且風控十分完整時，才可升正式；
+    # 一般強勢股仍留在 R1-M，不會因為漲得快就直接變買進清單。
+    formal_momentum = bool(
+        base_ok and momentum.get("core_ready") and momentum["score"] >= 82
+        and momentum.get("exhaustion_score", 100) < 30
+        and gap <= 5.0 and rr["trend"] >= 1.35
+        and 0 < stop <= 7.0 and risk >= 64 and buy >= 60
+        and amount >= 500 and chase <= 52 and op_score >= 72
+    )
+
+    formal = formal_pullback or formal_momentum
+
+    # A- 是「近門檻條件推薦」，不再要求先完整通過正式推薦的 strict-ready。
+    a_pullback = bool(
+        base_ok and not formal and "回測" in _safe_str(readiness.get("path"))
+        and gap <= 4.2 and rr["conservative"] >= 1.05
+        and 0 < stop <= 8.2 and entry >= 62 and risk >= 55 and buy >= 55
+        and amount >= 150 and chase <= 65 and op_score >= 62
+        and mainstream >= 55 and sector >= 45
+    )
+    a_momentum = bool(
+        base_ok and not formal and momentum["radar_ready"] and momentum["score"] >= 78
+        and momentum.get("exhaustion_score", 100) < 45
+        and gap <= 6.0 and rr["trend"] >= 1.15
+        and 0 < stop <= 7.5 and risk >= 58 and buy >= 55
+        and amount >= 300 and chase <= 60 and op_score >= 65
+    )
+    a_prebreak = bool(
+        base_ok and not formal and prebreak["radar_ready"] and prebreak["score"] >= 78
+        and not prebreak.get("hot_risk") and gap <= 4.8 and rr["trend"] >= 1.15
+        and 0 < stop <= 7.5 and risk >= 58 and buy >= 60
+        and amount >= 300 and chase <= 60 and op_score >= 62
+    )
+    a_minus = a_pullback or a_momentum or a_prebreak
+
+    if formal_pullback:
+        route = "正式｜穩健回測承接"
+        rr_used = rr["conservative"]
+        rr_basis = "保守風報比"
+    elif formal_momentum:
+        route = "正式｜非過熱動能續強"
+        rr_used = rr["trend"]
+        rr_basis = "實戰壓力/停損路徑風報比"
+    elif a_pullback:
+        route = "A-｜近買點回測承接"
+        rr_used = rr["conservative"]
+        rr_basis = "保守風報比"
+    elif a_momentum:
+        route = "A-｜非過熱動能條件進場"
+        rr_used = rr["trend"]
+        rr_basis = "實戰壓力/停損路徑風報比"
+    elif a_prebreak:
+        route = "A-｜強勢前兆待觸發"
+        rr_used = rr["trend"]
+        rr_basis = "實戰壓力/停損路徑風報比"
+    else:
+        route = "未達正式/A-升級"
+        rr_used = rr["conservative"]
+        rr_basis = "保守風報比"
+
+    near_reasons: list[str] = []
+    if market["severe"]:
+        near_reasons.append("大盤紅燈/全面防守")
+    if not fresh:
+        near_reasons.append("K線非最新交易日")
+    near_reasons.extend(hard)
+    if gap > 4.8:
+        near_reasons.append(f"距可執行買點{gap:.1f}%")
+    if rr_used < 1.05:
+        near_reasons.append(f"路徑RR僅{rr_used:.2f}")
+    if stop <= 0 or stop > 8.2:
+        near_reasons.append(f"停損距離{stop:.1f}%")
+    if entry < 62:
+        near_reasons.append(f"Entry {entry:.1f}<62")
+    if risk < 55:
+        near_reasons.append(f"Risk {risk:.1f}<55")
+    if amount < 150:
+        near_reasons.append(f"成交額{amount:.0f}百萬不足")
+    if chase > 65:
+        near_reasons.append(f"追價風險{chase:.0f}>65")
+
+    return {
+        "formal": formal,
+        "a_minus": a_minus,
+        "formal_pullback": formal_pullback,
+        "formal_momentum": formal_momentum,
+        "a_pullback": a_pullback,
+        "a_momentum": a_momentum,
+        "a_prebreak": a_prebreak,
+        "route": route,
+        "rr_used": round(rr_used, 2),
+        "rr_basis": rr_basis,
+        "near_reasons": "、".join(dict.fromkeys(near_reasons[:8])),
+        "hard_veto": "、".join(dict.fromkeys(hard)),
+    }
 
 
 
@@ -1247,7 +1425,10 @@ def _entry_readiness_profile(row: pd.Series) -> dict[str, Any]:
         "breakout_reference": round(breakout, 4) if breakout else 0.0,
     }
 
-def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str], promotion: dict[str, Any] | None = None) -> bool:
+    promotion = promotion or _promotion_profile(row, op_score, exclusion)
+    if promotion["formal"]:
+        return True
     profile = _next_session_profile(row)
     readiness = _entry_readiness_profile(row)
     if exclusion or not readiness["ready"] or readiness["score"] < 82 or not (profile["strong_ok"] or readiness["score"] >= 86):
@@ -1288,8 +1469,11 @@ def _direct_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
     )
 
 
-def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str]) -> bool:
+def _a_minus_ok(row: pd.Series, op_score: float, exclusion: list[str], promotion: dict[str, Any] | None = None) -> bool:
     """A- 準主推薦：只允許盤中觸發後小量試單，不可當成直接買進。"""
+    promotion = promotion or _promotion_profile(row, op_score, exclusion)
+    if promotion["a_minus"]:
+        return True
     profile = _next_session_profile(row)
     readiness = _entry_readiness_profile(row)
     if not readiness["ready"] or readiness["score"] < 74:
@@ -1629,10 +1813,11 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     prebreak = _prebreakout_profile(row)
     reasons = _exclusion_reasons(row)
     trig = _trigger_info(row)
-    direct_primary = _direct_ok(row, op, reasons)
+    promotion = _promotion_profile(row, op, reasons)
+    direct_primary = _direct_ok(row, op, reasons, promotion)
     direct_objective = False if direct_primary else _objective_direct_ok(row, op, reasons)
     direct = direct_primary or direct_objective
-    a_primary = False if direct else _a_minus_ok(row, op, reasons)
+    a_primary = False if direct else _a_minus_ok(row, op, reasons, promotion)
     a_objective = False if (direct or a_primary) else _objective_a_minus_ok(row, op, reasons)
     a_minus = a_primary or a_objective
     intraday_primary = _intraday_radar_ok(row, op, reasons)
@@ -1640,8 +1825,10 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     intraday = intraday_primary or intraday_objective
     market_info = _market_risk_info(row)
     decision_source = (
+        promotion["route"] if direct_primary and promotion["formal"] else
         "完整因子正式門檻" if direct_primary else
         "客觀量價備援正式門檻" if direct_objective else
+        promotion["route"] if a_primary and promotion["a_minus"] else
         "完整因子A-門檻" if a_primary else
         ("防守市場客觀量價A-" if a_objective and market_info["severe"] else "客觀量價備援A-門檻") if a_objective else
         "強勢動能條件雷達" if intraday and momentum["radar_ready"] else
@@ -1657,7 +1844,10 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         bucket = "正式下週主推薦"
         qual = "PASS｜可列正式推薦" if direct_primary else "PASS-Q｜客觀量價條件通過"
         direct_buy = "可｜但仍需分批與停損"
-        action = "可依觸發價/支撐分批進攻；第一筆不超過建議倉位，跌破失效條件立即退出。"
+        if promotion.get("formal_momentum"):
+            action = f"正式動能條件推薦；{momentum['entry']} 第一筆不超過建議倉位，跌破點火結構或失效條件立即退出。"
+        else:
+            action = _entry_action_text(readiness, trig, small=False)
         radar_level = "主攻"
         radar_action = "正式推薦優先追蹤"
         exclude_text = ""
@@ -1668,6 +1858,8 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         action = (
             f"防守市場條件式參考；大盤紅燈未解除前不建立新倉。待大盤改善後，{_trigger_text(row, trig)}且守住觸發後守價，才可重新評估小量試單。"
             if (a_objective and market_info["severe"])
+            else momentum["entry"] if promotion.get("a_momentum")
+            else prebreak["entry"] if promotion.get("a_prebreak")
             else _entry_action_text(readiness, trig, small=True)
         )
         radar_level = "A-｜準主推薦"
@@ -1780,6 +1972,17 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         sort_score -= 20
     battle = _battle_meta_for(bucket)
     final_meta = _final_action_meta(row, bucket, op, exclude_text)
+    effective_readiness_score = readiness["score"]
+    effective_readiness_status = readiness["status"]
+    effective_readiness_reasons = readiness["reasons"]
+    if bucket == "正式下週主推薦" and promotion["formal"]:
+        effective_readiness_score = max(float(effective_readiness_score), 84.0)
+        effective_readiness_status = "READY-F｜正式條件可執行"
+        effective_readiness_reasons = ""
+    elif bucket == "A-｜準主推薦小量試單" and promotion["a_minus"]:
+        effective_readiness_score = max(float(effective_readiness_score), 76.0)
+        effective_readiness_status = "READY-A｜A-條件可執行"
+        effective_readiness_reasons = ""
     return {
         **final_meta,
         "可操作分": round(op, 1),
@@ -1819,19 +2022,23 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "隔日參考判定": "PASS｜可列隔日參考" if next_profile["reference_ok"] else "BLOCK｜不列核心參考",
         "觸發距離%": next_profile["trigger_dist"],
         "停損距離_隔日%": next_profile["stop_dist"],
-        "進場可執行分": readiness["score"],
-        "進場可執行判定": readiness["status"],
+        "進場可執行分": round(effective_readiness_score, 1),
+        "進場可執行判定": effective_readiness_status,
         "進場路徑": readiness["path"],
         "距最近可執行買點%": readiness["nearest_gap"],
-        "進場阻擋原因": readiness["reasons"],
+        "進場阻擋原因": effective_readiness_reasons,
         "主要進場路徑": readiness["path"],
         "主要進場參考價": readiness["primary_reference"],
         "回測承接參考價": readiness["pullback_reference"],
         "突破確認參考價": readiness["breakout_reference"],
         "隔日耗竭風險分": momentum["exhaustion_score"],
         "隔日耗竭風險等級": momentum["exhaustion_level"],
-        "隔日可執行優先分": round(_clamp(readiness["score"] * 0.62 + next_profile["score"] * 0.23 + (100 - momentum["exhaustion_score"]) * 0.15), 1),
+        "隔日可執行優先分": round(_clamp(effective_readiness_score * 0.62 + next_profile["score"] * 0.23 + (100 - momentum["exhaustion_score"]) * 0.15), 1),
         "進場績效計算口徑": "突破需觸價且收盤守價；回測需觸及承接區後收回支撐。未觸發不計交易勝負。",
+        "推薦升級判定路徑": promotion["route"],
+        "路徑風險報酬比": promotion["rr_used"],
+        "風報比計算口徑": promotion["rr_basis"],
+        "正式與A近門檻說明": promotion["near_reasons"],
         "強勢動能分": momentum["score"],
         "強勢動能判定": ("PASS｜" + momentum["role"]) if momentum["radar_ready"] else ("BLOCK｜" + (momentum["blockers"] or "未達動能門檻")),
         "動能進場條件": momentum["entry"],
