@@ -2086,14 +2086,31 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
         st.session_state[_k("records_source_sig")] = _records_local_signature()
     except Exception:
         pass
-    st.session_state[_k("last_sync_detail")] = report.messages()
+    details = report.messages()
+    st.session_state[_k("last_sync_detail")] = details
     st.session_state[_k("last_sync_report")] = report.to_dict()
+    st.session_state[_k("last_sync_failed")] = not bool(report.permanent_ok)
+
+    source_state = (
+        f"本機{'成功' if report.local_ok else '失敗'}、"
+        f"GitHub{'成功' if report.github_ok else '失敗'}、"
+        f"Firestore{'成功' if report.firestore_ok else '失敗'}"
+    )
     if report.permanent_ok:
-        level = "success" if (report.github_ok or report.firestore_ok) else "warning"
-        msg = "推薦紀錄已完成本機與遠端永久保存。" if level == "success" else "推薦紀錄已保存至專案固定路徑；目前沒有可用遠端備份。"
-        _set_status(msg, level)
+        if report.github_ok and report.firestore_ok:
+            msg = f"推薦紀錄已完成三層永久保存（{source_state}）。"
+        elif report.github_ok or report.firestore_ok:
+            msg = f"推薦紀錄已完成本機＋至少一個遠端永久保存（{source_state}）。"
+        else:
+            msg = f"推薦紀錄已保存至專案固定路徑（{source_state}）。"
+        _set_status(msg, "success" if (report.github_ok or report.firestore_ok) else "warning")
         return True
-    _set_status("推薦紀錄只寫入部分來源，未通過永久保存條件；請查看同步明細。", "error")
+
+    if report.local_ok:
+        msg = f"推薦紀錄本機寫入成功，但遠端永久備份失敗（{source_state}）；請展開同步明細。"
+    else:
+        msg = f"推薦紀錄本機與遠端均未完成（{source_state}）；請展開同步明細。"
+    _set_status(msg, "error")
     return False
 
 
@@ -5603,9 +5620,18 @@ def main():
                 latest_df = _apply_mode_labels(latest_df)
                 _save_state_df(latest_df)
                 ok = _save_records_dual(latest_df)
-                msg = f"儲存同步{'成功' if ok else '失敗'}：目前資料 {len(latest_df) if latest_df is not None else 0} 筆。"
+                report = st.session_state.get(_k("last_sync_report"), {}) or {}
+                source_summary = (
+                    f"本機{'✓' if report.get('local_ok') else '✗'} / "
+                    f"GitHub{'✓' if report.get('github_ok') else '✗'} / "
+                    f"Firestore{'✓' if report.get('firestore_ok') else '✗'}"
+                )
+                msg = (
+                    f"儲存同步{'成功' if ok else '未完成'}：目前資料 "
+                    f"{len(latest_df) if latest_df is not None else 0} 筆｜{source_summary}。"
+                )
                 _set_status(msg, "success" if ok else "error")
-                _add_action_result("儲存同步", bool(ok), msg)
+                _add_action_result("儲存同步", bool(ok), msg, "\n".join(st.session_state.get(_k("last_sync_detail"), [])))
             except Exception as e:
                 msg = f"儲存同步失敗：{e}"
                 _set_status(msg, "error")
@@ -5728,9 +5754,12 @@ def main():
 
     sync_detail = st.session_state.get(_k("last_sync_detail"), [])
     if sync_detail:
-        with st.expander("同步明細", expanded=False):
+        sync_failed = bool(st.session_state.get(_k("last_sync_failed"), False))
+        with st.expander("同步明細｜本機 / GitHub / Firestore", expanded=sync_failed):
             for line in sync_detail:
                 st.write(f"- {line}")
+            if sync_failed:
+                st.caption("只要 GitHub 或 Firestore 至少一項遠端回讀驗證成功，且本機寫入成功，就會判定為永久同步完成。")
 
     ui_detail = _safe_str(st.session_state.get(_k("ui_config_detail"), ""))
     ui_save_detail = _safe_str(st.session_state.get(_k("ui_save_detail"), ""))

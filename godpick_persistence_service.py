@@ -13,6 +13,7 @@ import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -62,6 +63,48 @@ def _safe_str(value: Any) -> str:
     except Exception:
         pass
     return str(value).strip()
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Convert pandas/numpy values into JSON/Firestore-safe native values.
+
+    Recommendation records contain many pandas scalar values.  Local JSON
+    serialization previously hid those types through ``default=str``, while
+    Firestore rejected the same rows and made the whole permanent sync fail.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, (pd.Timestamp, datetime)):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, pd.Timedelta):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+    # numpy scalar support without requiring numpy as a hard dependency.
+    if hasattr(value, "item") and callable(getattr(value, "item", None)):
+        try:
+            native = value.item()
+            if native is not value:
+                return _json_safe_value(native)
+        except Exception:
+            pass
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    return str(value)
 
 
 def _now_text() -> str:
@@ -211,6 +254,33 @@ def _github_url(path_name: str) -> str:
     return f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/contents/{clean_path}"
 
 
+def _github_raw_bytes(path_name: str, timeout: int = 120) -> tuple[bytes | None, str]:
+    """Read a GitHub file in raw mode, including files larger than 1 MB.
+
+    GitHub's contents API returns ``encoding: none`` and an empty ``content``
+    field for 1-100 MB files.  The previous implementation treated that as an
+    empty file, so a successful 20+ MB record upload was always reported as a
+    failed verification.
+    """
+    cfg = github_config()
+    headers = _github_headers(cfg["token"])
+    headers["Accept"] = "application/vnd.github.raw+json"
+    try:
+        response = requests.get(
+            _github_url(path_name),
+            headers=headers,
+            params={"ref": cfg["branch"], "_": int(time.time() * 1000)},
+            timeout=(15, timeout),
+        )
+        if response.status_code == 404:
+            return None, f"GitHub 尚未建立：{path_name}"
+        if response.status_code != 200:
+            return None, f"GitHub raw 讀取失敗：{path_name}｜HTTP {response.status_code}｜{response.text[:300]}"
+        return response.content, f"已使用 GitHub raw 模式讀取：{path_name}"
+    except Exception as exc:
+        return None, f"GitHub raw 讀取例外：{path_name}｜{exc}"
+
+
 def read_github_json(path_name: str, default: Any) -> tuple[Any, str]:
     cfg = github_config()
     if not cfg["token"]:
@@ -220,17 +290,30 @@ def read_github_json(path_name: str, default: Any) -> tuple[Any, str]:
             _github_url(path_name),
             headers=_github_headers(cfg["token"]),
             params={"ref": cfg["branch"]},
-            timeout=25,
+            timeout=(15, 45),
         )
         if response.status_code == 404:
             return copy.deepcopy(default), f"GitHub 尚未建立：{path_name}"
         if response.status_code != 200:
             return copy.deepcopy(default), f"GitHub 讀取失敗：{path_name}｜HTTP {response.status_code}｜{response.text[:300]}"
-        content = response.json().get("content", "")
-        if not content:
-            return copy.deepcopy(default), f"GitHub 內容空白：{path_name}"
-        decoded = base64.b64decode(content).decode("utf-8-sig")
-        return json.loads(decoded), f"已讀取 GitHub：{path_name}"
+
+        meta = response.json() if response.content else {}
+        content = meta.get("content", "") if isinstance(meta, dict) else ""
+        encoding = _safe_str(meta.get("encoding")) if isinstance(meta, dict) else ""
+        if content:
+            decoded = base64.b64decode(content).decode("utf-8-sig")
+            return json.loads(decoded), f"已讀取 GitHub：{path_name}"
+
+        # Files larger than 1 MB are returned with encoding=none/content empty.
+        # Re-read the same path with GitHub's raw media type instead of falsely
+        # treating the file as blank.
+        raw, raw_msg = _github_raw_bytes(path_name, timeout=150)
+        if raw is None:
+            return copy.deepcopy(default), f"GitHub 內容無法取得：{path_name}｜encoding={encoding or 'unknown'}｜{raw_msg}"
+        try:
+            return json.loads(raw.decode("utf-8-sig")), raw_msg
+        except Exception as exc:
+            return copy.deepcopy(default), f"GitHub raw JSON 解析失敗：{path_name}｜{exc}"
     except Exception as exc:
         return copy.deepcopy(default), f"GitHub 讀取例外：{path_name}｜{exc}"
 
@@ -240,25 +323,31 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
     if not cfg["token"]:
         return False, "未設定 GITHUB_TOKEN"
 
-    encoded = base64.b64encode(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-    ).decode("utf-8")
+    safe_payload = _json_safe_value(payload)
+    # Compact JSON substantially reduces the 20+ MB recommendation-record file
+    # and therefore upload time, without changing its data structure.
+    raw = json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii")
+    size_mb = len(raw) / (1024 * 1024)
+    upload_timeout = max(90, min(300, int(75 + size_mb * 8)))
+    attempts = 2 if size_mb >= 5 else 3
 
     last_error = ""
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
             current = requests.get(
                 _github_url(path_name),
                 headers=_github_headers(cfg["token"]),
                 params={"ref": cfg["branch"], "_": int(time.time() * 1000)},
-                timeout=25,
+                timeout=(15, 60),
             )
             sha = ""
             if current.status_code == 200:
-                sha = _safe_str(current.json().get("sha"))
+                meta = current.json() if current.content else {}
+                sha = _safe_str(meta.get("sha")) if isinstance(meta, dict) else ""
             elif current.status_code != 404:
                 last_error = f"取得 SHA 失敗 HTTP {current.status_code}｜{current.text[:250]}"
-                time.sleep(0.4 * (attempt + 1))
+                time.sleep(0.6 * (attempt + 1))
                 continue
 
             body: dict[str, Any] = {
@@ -272,21 +361,21 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
                 _github_url(path_name),
                 headers=_github_headers(cfg["token"]),
                 json=body,
-                timeout=35,
+                timeout=(20, upload_timeout),
             )
             if response.status_code in (200, 201):
                 verify, verify_msg = read_github_json(path_name, None)
-                if verify is not None and _json_hash(verify) == _json_hash(payload):
-                    return True, f"GitHub 寫入並回讀驗證：{path_name}"
+                if verify is not None and _json_hash(verify) == _json_hash(safe_payload):
+                    return True, f"GitHub 寫入並以 raw 模式回讀驗證：{path_name}｜{size_mb:.1f} MB"
                 last_error = f"GitHub 寫入成功但回讀不一致：{verify_msg}"
             elif response.status_code in (409, 422):
-                last_error = f"GitHub 版本衝突 HTTP {response.status_code}"
+                last_error = f"GitHub 版本衝突 HTTP {response.status_code}｜{response.text[:220]}"
             else:
                 last_error = f"GitHub 寫入失敗 HTTP {response.status_code}｜{response.text[:350]}"
         except Exception as exc:
             last_error = f"GitHub 寫入例外：{exc}"
-        time.sleep(0.6 * (attempt + 1))
-    return False, f"{path_name}｜{last_error or '未知錯誤'}"
+        time.sleep(0.8 * (attempt + 1))
+    return False, f"{path_name}｜{last_error or '未知錯誤'}｜資料大小 {size_mb:.1f} MB"
 
 
 def _firebase_config() -> dict[str, str]:
@@ -644,7 +733,9 @@ def normalize_records(payload: Any) -> list[dict[str, Any]]:
     for raw in rows:
         if not isinstance(raw, dict):
             continue
-        row = {str(k): v for k, v in raw.items()}
+        # Sanitize before Firestore/GitHub persistence.  NaN, pd.NA and numpy
+        # scalars were the main reason a large record batch failed remotely.
+        row = {str(k): _json_safe_value(v) for k, v in raw.items()}
         key = _record_id(row)
         if not key.strip("|"):
             continue
@@ -655,7 +746,7 @@ def normalize_records(payload: Any) -> list[dict[str, Any]]:
                 merged[k] = v
         if not _safe_str(merged.get("record_id")):
             merged["record_id"] = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
-        out[key] = merged
+        out[key] = _json_safe_value(merged)
     return sorted(
         out.values(),
         key=lambda row: (
@@ -753,22 +844,25 @@ def write_records_firestore(records: list[dict[str, Any]], state: dict[str, Any]
 
 def save_records_permanent(payload: Any) -> PersistenceReport:
     records = normalize_records(payload)
-    state = _new_state("godpick_records_durable_v2", records, count=len(records))
+    state = _new_state("godpick_records_durable_v3", records, count=len(records))
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
+
     ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
     ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
     report.local_ok = bool(ok1 and ok2)
     report.local_message = f"{msg1}｜{msg2}"
+
+    # Firestore is written before the large GitHub file so one slow GitHub
+    # request cannot prevent the primary remote backup from completing.
+    fs_ok, fs_msg = write_records_firestore(records, state)
+    report.firestore_ok = fs_ok
+    report.firestore_message = fs_msg
 
     gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
     gh1, ghm1 = write_github_json(gh_path, records, "persist godpick records")
     gh2, ghm2 = write_github_json(RECORDS_STATE_FILE, state, "persist godpick records state") if gh1 else (False, "records 未寫入，略過狀態")
     report.github_ok = bool(gh1 and gh2)
     report.github_message = f"{ghm1}｜{ghm2}"
-
-    fs_ok, fs_msg = write_records_firestore(records, state)
-    report.firestore_ok = fs_ok
-    report.firestore_message = fs_msg
 
     if _configured_remote_exists():
         report.permanent_ok = bool(report.local_ok and (report.github_ok or report.firestore_ok))
