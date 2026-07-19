@@ -1,10 +1,10 @@
 {
   "version": "v109_2_startup_macro_github_sync_hard_off",
-  "updated_at": "2026-07-18 23:39:08",
+  "updated_at": "2026-07-19 21:26:15",
   "data_date": "2026-07-17",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
-  "market_score": 18.5,
+  "market_score": 3.9,
   "market_trend": "空頭",
   "market_risk_level": "高",
   "risk_gate": "保守觀望",
@@ -15,15 +15,15 @@
   "twse_change_pct": -6.4739,
   "twse_ma5": 44809.26,
   "twse_ma20": 45850.92,
-  "otc_index": 424.99,
-  "otc_change": 3.6,
-  "otc_change_pct": 0.8543,
+  "otc_index": 378.44,
+  "otc_change": -28.57,
+  "otc_change_pct": -7.0195,
   "nasdaq_change_pct": -1.3975,
   "sox_change_pct": -1.6314,
   "futures_index": null,
   "futures_change": null,
   "futures_change_pct": null,
-  "overnight_score": 18.5,
+  "overnight_score": 3.9,
   "overnight_risk_level": "高",
   "overnight_bias": "空頭",
   "overnight_comment": "NASDAQ -1.3975% / SOX -1.6314% / 台指期 —%",
@@ -35,7 +35,7 @@
     "bias": "空頭",
     "risk_level": "高",
     "position_hint": "保守觀望",
-    "score": 18.5
+    "score": 3.9
   },
   "source_status": {
     "twse": {
@@ -66,54 +66,52 @@
   },
   "next_day_forecast": {
     "version": "nextday_market_forecast_v1_20260713",
-    "created_at": "2026-07-18 15:39:08",
+    "created_at": "2026-07-19 13:26:15",
     "data_date": "2026-07-17",
     "forecast_for_date": "2026-07-20",
     "forecast_scope": "下一個台股交易時段（機率參考，非保證）",
     "direction": "偏空下跌",
-    "direction_score": 34.1,
-    "raw_direction_score": 30.6,
+    "direction_score": 26.9,
+    "raw_direction_score": 21.8,
     "confidence": "中",
     "confidence_score": 58.0,
-    "up_probability_pct": 3.9,
-    "flat_probability_pct": 14.9,
-    "down_probability_pct": 81.2,
-    "expected_return_pct": -0.56,
+    "up_probability_pct": 1.1,
+    "flat_probability_pct": 5.5,
+    "down_probability_pct": 93.4,
+    "expected_return_pct": -0.81,
     "expected_range_pct": 1.4,
     "base_index": 42671.27,
-    "expected_low": 41835.77,
-    "expected_high": 43030.57,
+    "expected_low": 41728.79,
+    "expected_high": 42923.58,
     "estimated_volatility_pct": 1.25,
     "data_coverage_pct": 90.0,
     "history_rows": 0,
-    "data_age_days": 1,
-    "rationale": "市場廣度與櫃買強弱偏多(71.1)；台股技術趨勢偏弱(6.0)；美股與半導體風向偏弱(29.6)；事件與風控環境偏弱(30.0)",
-    "positive_factors": [
-      "市場廣度與櫃買強弱偏多(71.1)"
-    ],
+    "data_age_days": 2,
+    "rationale": "台股技術趨勢偏弱(0.9)；美股與半導體風向偏弱(29.6)；市場廣度與櫃買強弱偏弱(31.2)",
+    "positive_factors": [],
     "risk_factors": [
-      "台股技術趨勢偏弱(6.0)",
+      "台股技術趨勢偏弱(0.9)",
       "美股與半導體風向偏弱(29.6)",
-      "事件與風控環境偏弱(30.0)"
+      "市場廣度與櫃買強弱偏弱(31.2)"
     ],
     "factor_details": {
       "technical_trend": {
         "label": "台股技術趨勢",
-        "score": 5.98,
+        "score": 0.87,
         "weight": 0.3,
         "available": true,
         "source": "加權收盤、MA5/MA20、近端動能"
       },
       "market_breadth": {
         "label": "市場廣度與櫃買強弱",
-        "score": 71.13,
+        "score": 31.18,
         "weight": 0.14,
         "available": true,
         "source": "櫃買相對加權"
       },
       "futures_overnight": {
         "label": "台指期與隔夜風險",
-        "score": 41.18,
+        "score": 37.09,
         "weight": 0.18,
         "available": true,
         "source": "台指期、夜盤、隔夜分數"
@@ -144,9 +142,9 @@
       {
         "factor": "technical_trend",
         "label": "台股技術趨勢",
-        "score": 5.98,
+        "score": 0.87,
         "weight": 0.3,
-        "impact": -13.21,
+        "impact": -14.74,
         "source": "加權收盤、MA5/MA20、近端動能"
       },
       {
@@ -160,9 +158,9 @@
       {
         "factor": "market_breadth",
         "label": "市場廣度與櫃買強弱",
-        "score": 71.13,
+        "score": 31.18,
         "weight": 0.14,
-        "impact": 2.96,
+        "impact": -2.63,
         "source": "櫃買相對加權"
       },
       {
@@ -176,9 +174,9 @@
       {
         "factor": "futures_overnight",
         "label": "台指期與隔夜風險",
-        "score": 41.18,
+        "score": 37.09,
         "weight": 0.18,
-        "impact": -1.59,
+        "impact": -2.32,
         "source": "台指期、夜盤、隔夜分數"
       }
     ],
@@ -205,17 +203,17 @@
   "next_day_forecast_version": "nextday_market_forecast_v1_20260713",
   "next_day_forecast_date": "2026-07-20",
   "next_day_market_direction": "偏空下跌",
-  "next_day_market_score": 34.1,
+  "next_day_market_score": 26.9,
   "next_day_confidence": "中",
   "next_day_confidence_score": 58.0,
-  "next_day_up_probability_pct": 3.9,
-  "next_day_flat_probability_pct": 14.9,
-  "next_day_down_probability_pct": 81.2,
-  "next_day_expected_return_pct": -0.56,
-  "next_day_expected_low": 41835.77,
-  "next_day_expected_high": 43030.57,
+  "next_day_up_probability_pct": 1.1,
+  "next_day_flat_probability_pct": 5.5,
+  "next_day_down_probability_pct": 93.4,
+  "next_day_expected_return_pct": -0.81,
+  "next_day_expected_low": 41728.79,
+  "next_day_expected_high": 42923.58,
   "next_day_data_coverage_pct": 90.0,
-  "next_day_forecast_rationale": "市場廣度與櫃買強弱偏多(71.1)；台股技術趨勢偏弱(6.0)；美股與半導體風向偏弱(29.6)；事件與風控環境偏弱(30.0)",
+  "next_day_forecast_rationale": "台股技術趨勢偏弱(0.9)；美股與半導體風向偏弱(29.6)；市場廣度與櫃買強弱偏弱(31.2)",
   "next_day_godpick_score_delta": -3.0,
   "next_day_market_weight_delta": -3,
   "next_day_position_cap_pct": 20,
