@@ -1,6 +1,6 @@
 {
   "version": "v109_2_startup_macro_github_sync_hard_off",
-  "updated_at": "2026-07-19 21:26:15",
+  "updated_at": "2026-07-19 22:37:43",
   "data_date": "2026-07-17",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
@@ -66,7 +66,7 @@
   },
   "next_day_forecast": {
     "version": "nextday_market_forecast_v1_20260713",
-    "created_at": "2026-07-19 13:26:15",
+    "created_at": "2026-07-19 14:37:43",
     "data_date": "2026-07-17",
     "forecast_for_date": "2026-07-20",
     "forecast_scope": "下一個台股交易時段（機率參考，非保證）",
