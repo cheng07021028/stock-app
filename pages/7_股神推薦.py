@@ -10822,6 +10822,13 @@ def _phase80_build_recommendation_summary(
 ) -> pd.DataFrame:
     formal_n = len(formal_df) if isinstance(formal_df, pd.DataFrame) else 0
     a_minus_n = len(a_minus_df) if isinstance(a_minus_df, pd.DataFrame) else 0
+    if isinstance(a_minus_df, pd.DataFrame) and not a_minus_df.empty:
+        _a_permit = a_minus_df.get("操作許可", pd.Series([""] * len(a_minus_df), index=a_minus_df.index)).fillna("").astype(str)
+        _a_cap = pd.to_numeric(a_minus_df.get("建議倉位上限%", 0), errors="coerce").fillna(0)
+        a_blocked_n = int((_a_permit.str.contains("禁止|等大盤|封鎖", regex=True, na=False) | _a_cap.le(0)).sum())
+    else:
+        a_blocked_n = 0
+    a_actionable_n = max(0, a_minus_n - a_blocked_n)
     intraday_n = len(intraday_core_df) if isinstance(intraday_core_df, pd.DataFrame) else 0
     risk_n = len(risk_df) if isinstance(risk_df, pd.DataFrame) else 0
     exclude_n = len(exclude_df) if isinstance(exclude_df, pd.DataFrame) else 0
@@ -10842,8 +10849,18 @@ def _phase80_build_recommendation_summary(
         conclusion = f"{prefix}本輪有 {formal_n} 檔正式推薦；只依進場區、觸發價與停損分批操作。"
         status = "限定資料池｜有正式推薦" if limited else "有正式推薦"
     elif a_minus_n > 0:
-        conclusion = f"{prefix}本輪沒有可直接買進標的；有 {a_minus_n} 檔 A- 準主推薦，只能在盤中觸發且守價後小量試單。"
-        status = "限定資料池｜僅準主推薦" if limited else "無直接買進｜僅準主推薦"
+        if a_blocked_n == a_minus_n:
+            conclusion = (
+                f"{prefix}本輪有 {a_minus_n} 檔個股達 A-／正式候選資格，但目前全數受大盤紅燈封鎖；"
+                "建議倉位0%，等待大盤解除風控後再做盤中觸發確認。"
+            )
+            status = "A-資格候選｜大盤封鎖"
+        else:
+            conclusion = (
+                f"{prefix}本輪有 {a_minus_n} 檔 A- 準主推薦，其中 {a_actionable_n} 檔可等待盤中觸發，"
+                f"{a_blocked_n} 檔受大盤風控封鎖。"
+            )
+            status = "限定資料池｜僅準主推薦" if limited else "無直接買進｜僅準主推薦"
     elif intraday_n > 0:
         conclusion = f"{prefix}本輪沒有正式推薦；保留 {intraday_n} 檔盤中核心雷達，未觸發前不可買。"
         status = "限定資料池｜只看盤中雷達" if limited else "無正式推薦｜只看盤中雷達"
@@ -10867,6 +10884,8 @@ def _phase80_build_recommendation_summary(
         "完整候選診斷數": int(report.get("完整候選診斷數", total_candidates) or total_candidates or 0),
         "正式推薦檔數": formal_n,
         "A-準主推薦檔數": a_minus_n,
+        "A-可操作檔數": a_actionable_n,
+        "A-大盤封鎖檔數": a_blocked_n,
         "盤中核心雷達檔數": intraday_n,
         "高風險觀察檔數": risk_n,
         "正式排除檔數": exclude_n,
@@ -10874,7 +10893,7 @@ def _phase80_build_recommendation_summary(
         "操作說明": conclusion,
         "掃描品質說明": _safe_str(report.get("掃描品質說明")),
         "核心紀律": "採三路徑：波段型看 Entry/Risk/RR；R1-M 看已發動量價；R1-P 看主流資金、族群與起漲前兆。R1-M/R1-P 都是條件雷達，不可開盤盲目追價。",
-        "版本": "phase8_9_profit_recall_20260715",
+        "版本": "phase9_3_single_source_market_sync_20260719",
     }])
 
 
@@ -11286,23 +11305,99 @@ def _phase92_render_zero_formal_diagnostics(source_df: pd.DataFrame) -> None:
             st.dataframe(_format_df(work.head(12)[near_cols]), use_container_width=True, hide_index=True)
 
 
+
+_PHASE93_MARKET_CONTEXT_COLUMNS = [
+    "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
+    "大盤風控建議", "今日大盤結論", "大盤橋接狀態", "大盤橋接分數",
+    "大盤多空分數", "大盤資料品質", "大盤交易時段", "大盤交易時段可用",
+    "隔日大盤方向", "隔日大盤分數", "隔日大盤信心", "隔日大盤預測加減分",
+    "隔日建議總部位上限%", "隔日大盤預測理由",
+]
+
+
+def _phase93_single_source_decision_frame(
+    rec_df: pd.DataFrame | None,
+    candidate_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """以同一份完整候選池重建最終分區，供畫面、排名、摘要與 Excel 共用。
+
+    舊版主排名使用 candidate_diagnosis_store，但該診斷表已裁掉大盤欄位；
+    排名函式再次套用正式推薦引擎時，便把紅燈市場誤當成中性，產生 A-；
+    摘要與作戰表卻使用保留大盤欄位的 rec_df，因此統計仍為 0。
+    Phase 9.3 先把目前大盤情境補回完整候選池，再只執行一次最終引擎，
+    之後所有 UI/Excel 分頁一律從同一份 decision frame 分流。
+    """
+    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+        source = candidate_df.copy()
+    elif isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
+        source = rec_df.copy()
+    else:
+        return pd.DataFrame()
+
+    context = rec_df.copy() if isinstance(rec_df, pd.DataFrame) and not rec_df.empty else pd.DataFrame()
+
+    # 全市場大盤欄位屬於同一輪的全域情境。候選診斷表若已裁欄，
+    # 由原始推薦結果第一個有效值回填，避免重新分類時失去市場風控。
+    if not context.empty:
+        for col in _PHASE93_MARKET_CONTEXT_COLUMNS:
+            if col not in context.columns:
+                continue
+            values = context[col].dropna()
+            values = values.loc[values.astype(str).str.strip().ne("")]
+            if values.empty:
+                continue
+            current_missing = col not in source.columns
+            if not current_missing:
+                current_text = source[col].fillna("").astype(str).str.strip()
+                current_missing = bool(current_text.eq("").all())
+            if current_missing:
+                source[col] = values.iloc[0]
+
+    # 若原始結果也沒有大盤欄位，再讀 01 大盤走勢的永久橋接檔補齊。
+    market_evidence = False
+    for col in ["大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤橋接狀態"]:
+        if col in source.columns and source[col].fillna("").astype(str).str.strip().ne("").any():
+            market_evidence = True
+            break
+    if not market_evidence:
+        try:
+            bridge = _read_macro_mode_bridge()
+            if isinstance(bridge, dict) and bridge:
+                source = _apply_macro_bridge_columns(source, bridge, enabled=True)
+        except Exception:
+            pass
+
+    try:
+        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+        source = apply_formal_recommendation_engine(source)
+    except Exception:
+        # 若正式引擎暫時載入失敗，仍使用既有欄位，不讓整頁崩潰。
+        pass
+    try:
+        source = canonicalize_final_partition(source) if callable(canonicalize_final_partition) else source
+    except Exception:
+        pass
+    return source.reset_index(drop=True)
+
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
         return
-    governed = canonicalize_final_partition(rec_df) if callable(canonicalize_final_partition) else rec_df.copy()
-    formal, a_minus, intraday, risk, watch, excluded = _phase63_split_formal_recommendation_views(governed)
-    core, _, _, _ = _phase71_split_intraday_radar_layers(intraday)
     scan_report = st.session_state.get(_k("scan_quality_report"), {})
     candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
-    candidate_n = len(candidate_df) if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else len(governed)
+    decision_source = _phase93_single_source_decision_frame(rec_df, candidate_df)
+    if decision_source.empty:
+        return
+    formal, a_minus, intraday, risk, watch, excluded = _phase63_split_formal_recommendation_views(decision_source)
+    core, _, _, _ = _phase71_split_intraday_radar_layers(intraday)
+    candidate_n = len(decision_source)
     summary = _phase80_build_recommendation_summary(
         formal, a_minus, core, risk, excluded, candidate_n, scan_report=scan_report
     )
 
-    rank_source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else governed
+    rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
     render_pro_section("股神推薦總排名｜真正第一優先")
-    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。分數整合候選強度、買點、風控、動能/前兆、主流資金與族群；但分數不會取代操作許可與盤中觸發。")
+    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。Phase 9.3 起，總排名、正式/A-卡片、作戰明細與 Excel 全部使用同一份最終分流資料；分數不會取代操作許可與盤中觸發。")
     if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
         top_row = master_rank.iloc[0]
         render_pro_kpi_row([
@@ -11331,7 +11426,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('有效K線資料率%', 0)):.1f}%"},
         {"label": "流動性覆蓋", "value": f"{float(row.get('流動性資料覆蓋率%', 0)):.1f}%", "delta": _safe_str(row.get("推薦適用範圍"))},
         {"label": "正式推薦", "value": str(int(row.get("正式推薦檔數", 0))), "delta": "檔"},
-        {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": "檔"},
+        {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": f"可操作{int(row.get('A-可操作檔數', 0))}／封鎖{int(row.get('A-大盤封鎖檔數', 0))}"},
     ])
 
     scan_usable = bool(scan_report.get("正式推薦可用", False)) if isinstance(scan_report, dict) else False
@@ -11420,13 +11515,9 @@ def _build_excel_bytes(
     except Exception:
         pass
 
-    governed = canonicalize_final_partition(rec_export) if callable(canonicalize_final_partition) else (rec_export.copy() if isinstance(rec_export, pd.DataFrame) else pd.DataFrame())
-    candidate_source = candidate_diagnosis_export if isinstance(candidate_diagnosis_export, pd.DataFrame) and not candidate_diagnosis_export.empty else governed.copy()
-    if callable(canonicalize_final_partition):
-        try:
-            candidate_source = canonicalize_final_partition(candidate_source)
-        except Exception:
-            pass
+    raw_candidate_source = candidate_diagnosis_export if isinstance(candidate_diagnosis_export, pd.DataFrame) and not candidate_diagnosis_export.empty else None
+    governed = _phase93_single_source_decision_frame(rec_export, raw_candidate_source)
+    candidate_source = governed.copy()
     report = scan_report if isinstance(scan_report, dict) else st.session_state.get(_k("scan_quality_report"), {})
     if not isinstance(report, dict):
         report = {}

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_2_path_aware_actionable_20260717"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_3_single_source_market_sync_20260719"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -305,9 +305,12 @@ def _hard_veto_reasons(exclusion: list[str]) -> list[str]:
 def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) -> dict[str, Any]:
     """正式／A- 的路徑化升級判斷。
 
-    舊版正式與 A- 共用同一組 RR>=1.45、買點距離<=2.5%、Entry>=68 的硬閘門，
-    使 A- 並非「近門檻」，而是另一個更難通過的正式推薦，長期自然維持 0。
-    這裡拆成：穩健拉回、強勢動能、強勢前兆三條可稽核路徑。
+    Phase 9.3 將「個股資格」與「市場操作許可」拆開：
+    - 個股可先取得正式候選或 A- 候選資格；
+    - 大盤紅燈時，正式候選會降為 A-MD，A- 候選仍保留 A-MD 資格，
+      但倉位固定 0%，不得建立新倉；
+    - 因此畫面、總排名、摘要與 Excel 不再出現同一檔一邊顯示 A-、
+      另一邊又統計為 0 的不同步情況。
     """
     readiness = _entry_readiness_profile(row)
     momentum = _momentum_profile(row)
@@ -328,81 +331,90 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
 
-    base_ok = fresh and not market["severe"] and not hard and liq["tradable"]
+    # 個股資料與交易品質先獨立判斷；大盤只決定是否可以執行，
+    # 不再把已達標個股直接從 A-/正式候選名單抹除。
+    base_data_ok = fresh and not hard and liq["tradable"]
 
-    # 正式主推薦：允許極少數高品質拉回候選在距離 3.5% 內升級，
-    # 仍維持高流動性、低追價、停損與風報比要求，不做固定湊數。
     formal_pullback = bool(
-        base_ok and "回測" in _safe_str(readiness.get("path"))
-        and gap <= 3.5 and rr["conservative"] >= 1.60
+        base_data_ok and "回測" in _safe_str(readiness.get("path"))
+        and gap <= 4.0 and rr["conservative"] >= 1.60
         and 0 < stop <= 6.0 and entry >= 62 and risk >= 64 and buy >= 65
         and amount >= 250 and chase <= 45 and op_score >= 70
         and mainstream >= 60 and sector >= 50
     )
-
-    # 已發動型只有在「非末端加速」且風控十分完整時，才可升正式；
-    # 一般強勢股仍留在 R1-M，不會因為漲得快就直接變買進清單。
     formal_momentum = bool(
-        base_ok and momentum.get("core_ready") and momentum["score"] >= 82
+        base_data_ok and momentum.get("core_ready") and momentum["score"] >= 82
         and momentum.get("exhaustion_score", 100) < 30
         and gap <= 5.0 and rr["trend"] >= 1.35
         and 0 < stop <= 7.0 and risk >= 64 and buy >= 60
         and amount >= 500 and chase <= 52 and op_score >= 72
     )
+    formal_candidate = formal_pullback or formal_momentum
 
-    formal = formal_pullback or formal_momentum
-
-    # A- 是「近門檻條件推薦」，不再要求先完整通過正式推薦的 strict-ready。
     a_pullback = bool(
-        base_ok and not formal and "回測" in _safe_str(readiness.get("path"))
+        base_data_ok and not formal_candidate and "回測" in _safe_str(readiness.get("path"))
         and gap <= 4.2 and rr["conservative"] >= 1.05
         and 0 < stop <= 8.2 and entry >= 62 and risk >= 55 and buy >= 55
         and amount >= 150 and chase <= 65 and op_score >= 62
         and mainstream >= 55 and sector >= 45
     )
     a_momentum = bool(
-        base_ok and not formal and momentum["radar_ready"] and momentum["score"] >= 78
+        base_data_ok and not formal_candidate and momentum["radar_ready"] and momentum["score"] >= 78
         and momentum.get("exhaustion_score", 100) < 45
         and gap <= 6.0 and rr["trend"] >= 1.15
         and 0 < stop <= 7.5 and risk >= 58 and buy >= 55
         and amount >= 300 and chase <= 60 and op_score >= 65
     )
     a_prebreak = bool(
-        base_ok and not formal and prebreak["radar_ready"] and prebreak["score"] >= 78
+        base_data_ok and not formal_candidate and prebreak["radar_ready"] and prebreak["score"] >= 78
         and not prebreak.get("hot_risk") and gap <= 4.8 and rr["trend"] >= 1.15
         and 0 < stop <= 7.5 and risk >= 58 and buy >= 60
         and amount >= 300 and chase <= 60 and op_score >= 62
     )
-    a_minus = a_pullback or a_momentum or a_prebreak
+    a_minus_candidate = a_pullback or a_momentum or a_prebreak
+
+    # 正式主推薦仍禁止在紅燈市場執行；達標者改列 A-MD 市場封鎖候選。
+    formal = bool(formal_candidate and not market["severe"])
+    market_blocked = bool(market["severe"] and (formal_candidate or a_minus_candidate))
+    a_minus = bool((a_minus_candidate and not market["severe"]) or market_blocked)
 
     if formal_pullback:
-        route = "正式｜穩健回測承接"
+        base_route = "正式｜穩健回測承接"
         rr_used = rr["conservative"]
         rr_basis = "保守風報比"
     elif formal_momentum:
-        route = "正式｜非過熱動能續強"
+        base_route = "正式｜非過熱動能續強"
         rr_used = rr["trend"]
         rr_basis = "實戰壓力/停損路徑風報比"
     elif a_pullback:
-        route = "A-｜近買點回測承接"
+        base_route = "A-｜近買點回測承接"
         rr_used = rr["conservative"]
         rr_basis = "保守風報比"
     elif a_momentum:
-        route = "A-｜非過熱動能條件進場"
+        base_route = "A-｜非過熱動能條件進場"
         rr_used = rr["trend"]
         rr_basis = "實戰壓力/停損路徑風報比"
     elif a_prebreak:
-        route = "A-｜強勢前兆待觸發"
+        base_route = "A-｜強勢前兆待觸發"
         rr_used = rr["trend"]
         rr_basis = "實戰壓力/停損路徑風報比"
     else:
-        route = "未達正式/A-升級"
+        base_route = "未達正式/A-升級"
         rr_used = rr["conservative"]
         rr_basis = "保守風報比"
 
+    if market_blocked:
+        route = (
+            f"A-MD｜正式候選受大盤封鎖｜{base_route}"
+            if formal_candidate
+            else f"A-MD｜A-候選受大盤封鎖｜{base_route}"
+        )
+    else:
+        route = base_route
+
     near_reasons: list[str] = []
     if market["severe"]:
-        near_reasons.append("大盤紅燈/全面防守")
+        near_reasons.append("大盤紅燈/全面防守：保留資格但倉位0%")
     if not fresh:
         near_reasons.append("K線非最新交易日")
     near_reasons.extend(hard)
@@ -424,18 +436,22 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     return {
         "formal": formal,
         "a_minus": a_minus,
+        "formal_candidate": formal_candidate,
+        "a_minus_candidate": a_minus_candidate,
+        "market_blocked": market_blocked,
+        "market_blocked_from": "正式候選" if formal_candidate and market_blocked else "A-候選" if market_blocked else "",
         "formal_pullback": formal_pullback,
         "formal_momentum": formal_momentum,
         "a_pullback": a_pullback,
         "a_momentum": a_momentum,
         "a_prebreak": a_prebreak,
+        "base_route": base_route,
         "route": route,
         "rr_used": round(rr_used, 2),
         "rr_basis": rr_basis,
         "near_reasons": "、".join(dict.fromkeys(near_reasons[:8])),
         "hard_veto": "、".join(dict.fromkeys(hard)),
     }
-
 
 
 def _liquidity_info(row: pd.Series) -> dict[str, Any]:
@@ -593,13 +609,21 @@ def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_t
         veto = "否"
         consistency = "一致｜選股、買點、風控與風險報酬同步通過"
     elif bucket == "A-｜準主推薦小量試單":
-        conclusion = "A-｜準主推薦：盤中確認後只允許小量試單"
+        market = _market_risk_info(row)
         formal = "否｜準主推薦"
-        permit = "觸發且守價後小量試單"
-        grade = "A-｜條件推薦"
-        nature = "條件推薦"
         veto = "否"
-        consistency = "一致｜接近主推薦，但仍有一項以上門檻未完全通過"
+        if market["severe"]:
+            conclusion = "A-MD｜準主推薦候選：大盤紅燈，等待解除封鎖"
+            permit = "禁止新倉｜等大盤解除紅燈"
+            grade = "A-｜市場封鎖候選"
+            nature = "條件推薦候選"
+            consistency = "一致｜個股路徑達標，但大盤風控封鎖；建議倉位0%"
+        else:
+            conclusion = "A-｜準主推薦：盤中確認後只允許小量試單"
+            permit = "觸發且守價後小量試單"
+            grade = "A-｜條件推薦"
+            nature = "條件推薦"
+            consistency = "一致｜接近主推薦，但仍有一項以上門檻未完全通過"
     elif bucket == "盤中雷達追蹤":
         conclusion = "B+｜盤中雷達：未觸發前不可買"
         formal = "否"
@@ -1853,18 +1877,32 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         exclude_text = ""
     elif a_minus:
         bucket = "A-｜準主推薦小量試單"
-        qual = "A-｜接近主推薦，待盤中觸發" if a_primary else ("A-QD｜防守市場條件式參考" if market_info["severe"] else "A-Q｜客觀量價備援，待盤中觸發")
-        direct_buy = "不可｜等大盤解除紅燈" if (a_objective and market_info["severe"]) else "小量｜需觸發與守價"
-        action = (
-            f"防守市場條件式參考；大盤紅燈未解除前不建立新倉。待大盤改善後，{_trigger_text(row, trig)}且守住觸發後守價，才可重新評估小量試單。"
-            if (a_objective and market_info["severe"])
-            else momentum["entry"] if promotion.get("a_momentum")
-            else prebreak["entry"] if promotion.get("a_prebreak")
-            else _entry_action_text(readiness, trig, small=True)
-        )
-        radar_level = "A-｜準主推薦"
-        radar_action = "小量試單優先追蹤，不可重倉"
-        exclude_text = "未完全通過正式主推薦 RR/Risk 門檻，降為 A- 準主推薦"
+        if market_info["severe"]:
+            qual = "A-MD｜個股達標但大盤封鎖"
+            direct_buy = "不可｜等大盤解除紅燈"
+            underlying_action = (
+                momentum["entry"] if promotion.get("formal_momentum") or promotion.get("a_momentum")
+                else prebreak["entry"] if promotion.get("a_prebreak")
+                else _entry_action_text(readiness, trig, small=True)
+            )
+            action = (
+                f"個股已達{promotion.get('market_blocked_from') or 'A-候選'}資格，但大盤紅燈/全面防守；"
+                f"目前建議倉位0%，不得建立新倉。待大盤解除封鎖後再依下列條件重新確認：{underlying_action}"
+            )
+            radar_level = "A-｜大盤解禁候選"
+            radar_action = "保留A-資格，等待大盤解除紅燈後再做盤中觸發確認"
+            exclude_text = "大盤紅燈/全面防守：個股保留A-資格，但目前禁止建立新倉"
+        else:
+            qual = "A-｜接近主推薦，待盤中觸發" if a_primary else "A-Q｜客觀量價備援，待盤中觸發"
+            direct_buy = "小量｜需觸發與守價"
+            action = (
+                momentum["entry"] if promotion.get("a_momentum")
+                else prebreak["entry"] if promotion.get("a_prebreak")
+                else _entry_action_text(readiness, trig, small=True)
+            )
+            radar_level = "A-｜準主推薦"
+            radar_action = "小量試單優先追蹤，不可重倉"
+            exclude_text = "未完全通過正式主推薦 RR/Risk 門檻，降為 A- 準主推薦"
     elif intraday:
         bucket = "盤中雷達追蹤"
         if momentum["radar_ready"]:
