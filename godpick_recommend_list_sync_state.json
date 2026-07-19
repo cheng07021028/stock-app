@@ -1,0 +1,9 @@
+{
+  "version": "named_json_durable_v2",
+  "updated_at": "2026-07-19 14:47:38",
+  "updated_at_utc": "2026-07-19T14:47:38Z",
+  "updated_at_epoch": 1784472458.9969277,
+  "revision": 1784472458996978849,
+  "payload_hash": "5f7a03f79088981ac433bc38e0f9090476a2f1e168b74d60418f80b823037c00",
+  "path": "godpick_recommend_list.json"
+}
