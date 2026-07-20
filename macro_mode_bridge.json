@@ -1,10 +1,10 @@
 {
   "version": "v109_2_startup_macro_github_sync_hard_off",
-  "updated_at": "2026-07-20 20:19:28",
+  "updated_at": "2026-07-20 22:39:03",
   "data_date": "2026-07-20",
   "source": "startup Yahoo batch + cache fallback",
   "startup_auto_update": true,
-  "market_score": 19.6,
+  "market_score": 30.5,
   "market_trend": "空頭",
   "market_risk_level": "高",
   "risk_gate": "保守觀望",
@@ -18,15 +18,15 @@
   "otc_index": 378.44,
   "otc_change": -28.57,
   "otc_change_pct": -7.0195,
-  "nasdaq_change_pct": -1.3975,
-  "sox_change_pct": -1.6314,
+  "nasdaq_change_pct": 0.5229,
+  "sox_change_pct": 1.8783,
   "futures_index": null,
   "futures_change": null,
   "futures_change_pct": null,
-  "overnight_score": 19.6,
+  "overnight_score": 30.5,
   "overnight_risk_level": "高",
   "overnight_bias": "空頭",
-  "overnight_comment": "NASDAQ -1.3975% / SOX -1.6314% / 台指期 —%",
+  "overnight_comment": "NASDAQ 0.5229% / SOX 1.8783% / 台指期 —%",
   "event_factor": "startup_auto",
   "macro_mode_estimate": "空頭",
   "feature_center_version": "v109_2_startup_macro_github_sync_hard_off",
@@ -35,7 +35,7 @@
     "bias": "空頭",
     "risk_level": "高",
     "position_hint": "保守觀望",
-    "score": 19.6
+    "score": 30.5
   },
   "source_status": {
     "twse": {
@@ -66,38 +66,40 @@
   },
   "next_day_forecast": {
     "version": "nextday_market_forecast_v1_20260713",
-    "created_at": "2026-07-20 12:19:28",
+    "created_at": "2026-07-20 14:39:03",
     "data_date": "2026-07-20",
     "forecast_for_date": "2026-07-21",
     "forecast_scope": "下一個台股交易時段（機率參考，非保證）",
     "direction": "偏空下跌",
-    "direction_score": 29.2,
-    "raw_direction_score": 24.6,
+    "direction_score": 36.0,
+    "raw_direction_score": 32.9,
     "confidence": "中",
     "confidence_score": 58.0,
-    "up_probability_pct": 1.7,
-    "flat_probability_pct": 7.6,
-    "down_probability_pct": 90.7,
-    "expected_return_pct": -0.73,
+    "up_probability_pct": 5.3,
+    "flat_probability_pct": 18.9,
+    "down_probability_pct": 75.9,
+    "expected_return_pct": -0.49,
     "expected_range_pct": 1.4,
     "base_index": 42449.7,
-    "expected_low": 41546.09,
-    "expected_high": 42734.68,
+    "expected_low": 41647.11,
+    "expected_high": 42835.7,
     "estimated_volatility_pct": 1.25,
     "data_coverage_pct": 90.0,
     "history_rows": 0,
     "data_age_days": 0,
-    "rationale": "台股技術趨勢偏弱(12.3)；市場廣度與櫃買強弱偏弱(19.0)；美股與半導體風向偏弱(29.6)",
-    "positive_factors": [],
+    "rationale": "美股與半導體風向偏多(65.7)；台股技術趨勢偏弱(16.1)；市場廣度與櫃買強弱偏弱(19.0)；事件與風控環境偏弱(30.0)",
+    "positive_factors": [
+      "美股與半導體風向偏多(65.7)"
+    ],
     "risk_factors": [
-      "台股技術趨勢偏弱(12.3)",
+      "台股技術趨勢偏弱(16.1)",
       "市場廣度與櫃買強弱偏弱(19.0)",
-      "美股與半導體風向偏弱(29.6)"
+      "事件與風控環境偏弱(30.0)"
     ],
     "factor_details": {
       "technical_trend": {
         "label": "台股技術趨勢",
-        "score": 12.28,
+        "score": 16.1,
         "weight": 0.3,
         "available": true,
         "source": "加權收盤、MA5/MA20、近端動能"
@@ -111,14 +113,14 @@
       },
       "futures_overnight": {
         "label": "台指期與隔夜風險",
-        "score": 41.49,
+        "score": 44.54,
         "weight": 0.18,
         "available": true,
         "source": "台指期、夜盤、隔夜分數"
       },
       "overseas": {
         "label": "美股與半導體風向",
-        "score": 29.61,
+        "score": 65.66,
         "weight": 0.16,
         "available": true,
         "source": "NASDAQ、S&P500、SOX、VIX"
@@ -142,9 +144,9 @@
       {
         "factor": "technical_trend",
         "label": "台股技術趨勢",
-        "score": 12.28,
+        "score": 16.1,
         "weight": 0.3,
-        "impact": -11.32,
+        "impact": -10.17,
         "source": "加權收盤、MA5/MA20、近端動能"
       },
       {
@@ -158,9 +160,9 @@
       {
         "factor": "overseas",
         "label": "美股與半導體風向",
-        "score": 29.61,
+        "score": 65.66,
         "weight": 0.16,
-        "impact": -3.26,
+        "impact": 2.51,
         "source": "NASDAQ、S&P500、SOX、VIX"
       },
       {
@@ -174,9 +176,9 @@
       {
         "factor": "futures_overnight",
         "label": "台指期與隔夜風險",
-        "score": 41.49,
+        "score": 44.54,
         "weight": 0.18,
-        "impact": -1.53,
+        "impact": -0.98,
         "source": "台指期、夜盤、隔夜分數"
       }
     ],
@@ -189,10 +191,10 @@
       "status": "尚無足夠歷史預測績效，先採保守信心。"
     },
     "godpick_effect": {
-      "mode": "高風險防守",
-      "score_delta": -3.0,
-      "market_weight_delta": -3,
-      "position_cap_pct": 20,
+      "mode": "偏空降權",
+      "score_delta": -2.0,
+      "market_weight_delta": -2,
+      "position_cap_pct": 35,
       "preferred_style": "大型權值、低波動、支撐明確與法人防守股",
       "avoid_style": "高乖離、無量突破、短線已加速的小型題材股",
       "hard_filter": false,
@@ -203,23 +205,23 @@
   "next_day_forecast_version": "nextday_market_forecast_v1_20260713",
   "next_day_forecast_date": "2026-07-21",
   "next_day_market_direction": "偏空下跌",
-  "next_day_market_score": 29.2,
+  "next_day_market_score": 36.0,
   "next_day_confidence": "中",
   "next_day_confidence_score": 58.0,
-  "next_day_up_probability_pct": 1.7,
-  "next_day_flat_probability_pct": 7.6,
-  "next_day_down_probability_pct": 90.7,
-  "next_day_expected_return_pct": -0.73,
-  "next_day_expected_low": 41546.09,
-  "next_day_expected_high": 42734.68,
+  "next_day_up_probability_pct": 5.3,
+  "next_day_flat_probability_pct": 18.9,
+  "next_day_down_probability_pct": 75.9,
+  "next_day_expected_return_pct": -0.49,
+  "next_day_expected_low": 41647.11,
+  "next_day_expected_high": 42835.7,
   "next_day_data_coverage_pct": 90.0,
-  "next_day_forecast_rationale": "台股技術趨勢偏弱(12.3)；市場廣度與櫃買強弱偏弱(19.0)；美股與半導體風向偏弱(29.6)",
-  "next_day_godpick_score_delta": -3.0,
-  "next_day_market_weight_delta": -3,
-  "next_day_position_cap_pct": 20,
+  "next_day_forecast_rationale": "美股與半導體風向偏多(65.7)；台股技術趨勢偏弱(16.1)；市場廣度與櫃買強弱偏弱(19.0)；事件與風控環境偏弱(30.0)",
+  "next_day_godpick_score_delta": -2.0,
+  "next_day_market_weight_delta": -2,
+  "next_day_position_cap_pct": 35,
   "next_day_preferred_style": "大型權值、低波動、支撐明確與法人防守股",
   "next_day_avoid_style": "高乖離、無量突破、短線已加速的小型題材股",
-  "next_day_effect_mode": "高風險防守",
+  "next_day_effect_mode": "偏空降權",
   "bridge_source": "market_snapshot.json",
   "_source": "startup macro auto update"
 }
