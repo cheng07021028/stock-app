@@ -35,6 +35,7 @@ try:
         save_module_sync_state,
         save_named_json_permanent,
         save_records_permanent,
+        save_records_sync_fast,
         save_records_mutation_fast,
         save_watchlist_permanent,
         write_export_file,
@@ -54,6 +55,7 @@ except Exception:
     save_module_sync_state = None
     save_named_json_permanent = None
     save_records_permanent = None
+    save_records_sync_fast = None
     save_records_mutation_fast = None
     save_watchlist_permanent = None
     write_export_file = None
@@ -2082,10 +2084,13 @@ def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
 
 def _save_records_dual(df: pd.DataFrame) -> bool:
     clean_df = _ensure_godpick_record_columns(df)
-    if not callable(save_records_permanent):
+    sync_func = save_records_sync_fast if callable(save_records_sync_fast) else save_records_permanent
+    if not callable(sync_func):
         _set_status("永久紀錄服務未載入，為避免假成功，本次不寫入。", "error")
         return False
-    report = save_records_permanent(clean_df)
+    started = time.perf_counter()
+    report = sync_func(clean_df, reason="page8 explicit save sync") if sync_func is save_records_sync_fast else sync_func(clean_df)
+    elapsed = time.perf_counter() - started
     try:
         st.session_state[_k("records_source_sig")] = _records_local_signature()
     except Exception:
@@ -2097,17 +2102,17 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
 
     source_state = (
         f"本機{'成功' if report.local_ok else '失敗'}、"
-        f"GitHub{'成功' if report.github_ok else '失敗'}、"
+        f"GitHub{'成功' if report.github_ok else ('背景同步中' if getattr(report, 'github_pending', False) else '失敗')}、"
         f"Firestore{'成功' if report.firestore_ok else '失敗'}"
     )
     if report.permanent_ok:
         if report.github_ok and report.firestore_ok:
-            msg = f"推薦紀錄已完成三層永久保存（{source_state}）。"
-        elif report.github_ok or report.firestore_ok:
-            msg = f"推薦紀錄已完成本機＋至少一個遠端永久保存（{source_state}）。"
+            msg = f"推薦紀錄已完成三層永久保存（{source_state}），前台耗時 {elapsed:.2f} 秒。"
+        elif report.github_ok or report.firestore_ok or getattr(report, "github_pending", False):
+            msg = f"推薦紀錄已完成本機保存，遠端已驗證或排入背景同步（{source_state}），前台耗時 {elapsed:.2f} 秒。"
         else:
-            msg = f"推薦紀錄已保存至專案固定路徑（{source_state}）。"
-        _set_status(msg, "success" if (report.github_ok or report.firestore_ok) else "warning")
+            msg = f"推薦紀錄已保存至專案固定路徑（{source_state}），前台耗時 {elapsed:.2f} 秒。"
+        _set_status(msg, "success" if (report.github_ok or report.firestore_ok or getattr(report, "github_pending", False)) else "warning")
         return True
 
     if report.local_ok:
@@ -5662,7 +5667,7 @@ def main():
                 report = st.session_state.get(_k("last_sync_report"), {}) or {}
                 source_summary = (
                     f"本機{'✓' if report.get('local_ok') else '✗'} / "
-                    f"GitHub{'✓' if report.get('github_ok') else '✗'} / "
+                    f"GitHub{'✓' if report.get('github_ok') else ('背景中' if report.get('github_pending') else '✗')} / "
                     f"Firestore{'✓' if report.get('firestore_ok') else '✗'}"
                 )
                 msg = (
@@ -5797,7 +5802,7 @@ def main():
         with st.expander("同步明細｜本機 / GitHub / Firestore", expanded=sync_failed):
             for line in sync_detail:
                 st.write(f"- {line}")
-            st.caption("刪除／編輯採本機＋Firestore增量保存，GitHub大型檔案在背景合併同步；上方『儲存同步』仍可執行三層完整驗證。")
+            st.caption("刪除／編輯採本機＋Firestore增量保存；『儲存同步』也已改為內容比對＋差異同步，未變更時不再重寫 1,800 多筆，GitHub 大型備份在背景合併上傳。")
 
     if callable(load_records_github_sync_status):
         try:

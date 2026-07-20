@@ -46,6 +46,7 @@ EXPORT_SETTINGS_FILE = "godpick_export_sync_settings.json"
 EXPORT_HISTORY_FILE = "godpick_export_history.json"
 MODULE_SYNC_STATE_FILE = "godpick_module_sync_state.json"
 RECORDS_GITHUB_SYNC_STATUS_FILE = "godpick_records_github_sync_status.json"
+RECORDS_MANIFEST_FILE = "godpick_records_manifest.json"
 
 _RECORDS_GITHUB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-records-github")
 _RECORDS_GITHUB_LOCK = threading.Lock()
@@ -955,6 +956,43 @@ def schedule_records_github_sync(records: Any, state: dict[str, Any], reason: st
     return True, f"GitHub 大型備份已排入背景同步：{len(normalized)} 筆"
 
 
+
+
+def _record_payload_hash(row: dict[str, Any]) -> str:
+    """Stable per-record hash used by explicit sync to avoid 1,800+ full rewrites."""
+    return hashlib.sha256(
+        json.dumps(_json_safe_value(row), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _records_manifest(records: list[dict[str, Any]], payload_hash: str = "") -> dict[str, Any]:
+    rows: dict[str, str] = {}
+    for row in records:
+        rec_id = _safe_str(row.get("record_id"))
+        if not rec_id:
+            continue
+        rows[rec_id] = _record_payload_hash(row)
+    return {
+        "version": "godpick_records_manifest_v1",
+        "count": len(records),
+        "payload_hash": payload_hash or _json_hash(records),
+        "row_hashes": rows,
+        "updated_at": _now_text(),
+    }
+
+
+def _read_records_firestore_summary() -> tuple[dict[str, Any], str]:
+    """Read only the small summary document; never stream the whole collection."""
+    if not firebase_configured():
+        return {}, "Firebase 未設定"
+    try:
+        _init_firebase_app()
+        db = firestore.client()
+        snap = db.collection("system").document("godpick_records_summary").get()
+        return (snap.to_dict() or {}) if snap.exists else {}, "已讀取 Firestore 推薦紀錄摘要"
+    except Exception as exc:
+        return {}, f"Firestore 摘要讀取失敗：{exc}"
+
 def load_records_github_sync_status() -> tuple[dict[str, Any], str]:
     payload, message, _ = read_local_json(RECORDS_GITHUB_SYNC_STATUS_FILE, {})
     return (payload if isinstance(payload, dict) else {}), message
@@ -1124,6 +1162,105 @@ def save_records_mutation_fast(
         # Firestore is already verified, or GitHub has accepted the newest full
         # snapshot into the coalescing background queue.  The report explicitly
         # exposes github_pending so the UI never labels it as a completed upload.
+        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok or report.github_pending))
+    else:
+        report.permanent_ok = report.local_ok
+    return report
+
+
+def save_records_sync_fast(payload: Any, reason: str = "explicit record sync") -> PersistenceReport:
+    """Content-aware explicit sync for the large recommendation record file.
+
+    The old ``儲存同步`` rewrote every Firestore document and synchronously
+    uploaded a 20+ MB GitHub JSON even when not one cell changed.  This version
+    writes local data atomically, applies only changed/deleted Firestore rows,
+    and coalesces the large GitHub snapshot in the background.  Repeated syncs
+    with identical content return after a small summary verification.
+    """
+    records = normalize_records(payload)
+    state = _new_state("godpick_records_durable_v5_fast_sync", records, count=len(records), sync_reason=_safe_str(reason))
+    report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
+
+    old_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
+    old_manifest, _, _ = read_local_json(RECORDS_MANIFEST_FILE, {})
+    old_hash = _safe_str((old_state or {}).get("payload_hash")) if isinstance(old_state, dict) else ""
+    unchanged = bool(old_hash and old_hash == state["payload_hash"] and (BASE_DIR / RECORDS_FILE).exists())
+
+    if unchanged:
+        report.local_ok = True
+        report.local_message = f"內容未變更，略過 {len(records)} 筆本機大型 JSON 重寫"
+    else:
+        ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
+        ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
+        report.local_ok = bool(ok1 and ok2)
+        report.local_message = f"{msg1}｜{msg2}"
+        if not report.local_ok:
+            report.github_message = "本機原子寫入失敗，未排入 GitHub"
+            report.firestore_message = "本機原子寫入失敗，未執行 Firestore"
+            return report
+
+    new_manifest = _records_manifest(records, state["payload_hash"])
+    old_rows = (old_manifest or {}).get("row_hashes", {}) if isinstance(old_manifest, dict) else {}
+    if not isinstance(old_rows, dict):
+        old_rows = {}
+    new_rows = new_manifest["row_hashes"]
+    by_id = {_safe_str(row.get("record_id")): row for row in records if _safe_str(row.get("record_id"))}
+    changed_ids = [rid for rid, row_hash in new_rows.items() if _safe_str(old_rows.get(rid)) != row_hash]
+    deleted_ids = [rid for rid in old_rows if rid not in new_rows]
+
+    fs_summary, fs_summary_msg = _read_records_firestore_summary()
+    remote_hash = _safe_str(fs_summary.get("payload_hash")) if isinstance(fs_summary, dict) else ""
+    
+    try:
+        remote_count = int((fs_summary or {}).get("count") if isinstance(fs_summary, dict) else -1)
+    except Exception:
+        remote_count = -1
+    if firebase_configured() and remote_hash == state["payload_hash"] and remote_count == len(records):
+        report.firestore_ok = True
+        report.firestore_message = f"Firestore 摘要一致，略過 {len(records)} 筆全量回寫"
+    elif firebase_configured():
+        # If a legacy install has no manifest, only the first explicit sync is
+        # allowed to perform a full write.  Thereafter all syncs are incremental.
+        if not old_rows and not unchanged:
+            fs_ok, fs_msg = write_records_firestore(records, state)
+        else:
+            fs_ok, fs_msg = write_records_firestore_mutation(
+                records, state,
+                deleted_ids=deleted_ids,
+                upsert_rows=[by_id[rid] for rid in changed_ids if rid in by_id],
+                expected_previous_count=(int((old_manifest or {}).get("count") or 0) if isinstance(old_manifest, dict) else None),
+            )
+        report.firestore_ok = bool(fs_ok)
+        report.firestore_message = fs_msg
+    else:
+        report.firestore_ok = False
+        report.firestore_message = fs_summary_msg
+
+    # Persist the manifest only after the local snapshot exists.  It is a local
+    # acceleration index, not a new source of truth.
+    manifest_ok, manifest_msg = write_local_json_atomic(RECORDS_MANIFEST_FILE, new_manifest)
+    if manifest_ok:
+        report.local_message += f"｜增量索引：{manifest_msg}"
+    else:
+        report.local_message += f"｜增量索引失敗：{manifest_msg}"
+
+    gh_status, _, _ = read_local_json(RECORDS_GITHUB_SYNC_STATUS_FILE, {})
+    gh_same = isinstance(gh_status, dict) and _safe_str(gh_status.get("status")) == "success" and _safe_str(gh_status.get("payload_hash")) == state["payload_hash"]
+    if gh_same:
+        report.github_ok = True
+        report.github_pending = False
+        report.github_message = "GitHub 背景備份內容已一致，略過重傳"
+    elif github_config()["token"]:
+        queued, queue_msg = schedule_records_github_sync(records, state, reason)
+        report.github_ok = False
+        report.github_pending = bool(queued)
+        report.github_message = queue_msg
+    else:
+        report.github_ok = False
+        report.github_pending = False
+        report.github_message = "GitHub 未設定"
+
+    if _configured_remote_exists():
         report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok or report.github_pending))
     else:
         report.permanent_ok = report.local_ok

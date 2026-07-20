@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_3_single_source_market_sync_20260719"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_4_trigger_first_red_market_reversal_20260720"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -92,6 +92,11 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "強勢前兆判定",
     "強勢前兆進場條件",
     "強勢前兆風控",
+    "紅燈逆勢反轉分",
+    "紅燈逆勢反轉判定",
+    "大盤風控層級",
+    "大盤條件覆寫",
+    "逆勢操作限制",
     "K線最後交易日",
     "K線落後交易日",
     "K線資料新鮮度",
@@ -128,6 +133,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "路徑風險報酬比",
     "強勢動能分",
     "強勢前兆分",
+    "紅燈逆勢反轉分",
     "K線落後交易日",
 }
 
@@ -319,6 +325,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     liq = _liquidity_info(row)
     hard = _hard_veto_reasons(exclusion)
     rr = _path_risk_reward_profile(row)
+    red_reversal = _red_market_reversal_profile(row, op_score, hard, market=market, prebreak=prebreak)
 
     fresh = bool(readiness["freshness"].get("fresh"))
     gap = _safe_float(readiness.get("nearest_gap"), 99.0)
@@ -373,10 +380,12 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     )
     a_minus_candidate = a_pullback or a_momentum or a_prebreak
 
-    # 正式主推薦仍禁止在紅燈市場執行；達標者改列 A-MD 市場封鎖候選。
+    # 一般紅燈不再一律把所有股票封鎖為 0%。只有嚴格的「洗盤後反轉」
+    # 路徑可取得 A-R 資格；極端風險仍全面禁買。其餘候選維持 A-MD。
     formal = bool(formal_candidate and not market["severe"])
-    market_blocked = bool(market["severe"] and (formal_candidate or a_minus_candidate))
-    a_minus = bool((a_minus_candidate and not market["severe"]) or market_blocked)
+    red_override = bool(red_reversal["eligible"])
+    market_blocked = bool(market["severe"] and (formal_candidate or a_minus_candidate) and not red_override)
+    a_minus = bool((a_minus_candidate and not market["severe"]) or red_override or market_blocked)
 
     if formal_pullback:
         base_route = "正式｜穩健回測承接"
@@ -403,7 +412,9 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         rr_used = rr["conservative"]
         rr_basis = "保守風報比"
 
-    if market_blocked:
+    if red_override:
+        route = f"A-R｜紅燈逆勢反轉條件推薦｜{base_route}"
+    elif market_blocked:
         route = (
             f"A-MD｜正式候選受大盤封鎖｜{base_route}"
             if formal_candidate
@@ -414,7 +425,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
 
     near_reasons: list[str] = []
     if market["severe"]:
-        near_reasons.append("大盤紅燈/全面防守：保留資格但倉位0%")
+        near_reasons.append("大盤紅燈：一般候選封鎖；只有嚴格反轉路徑可極小量")
     if not fresh:
         near_reasons.append("K線非最新交易日")
     near_reasons.extend(hard)
@@ -439,6 +450,8 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         "formal_candidate": formal_candidate,
         "a_minus_candidate": a_minus_candidate,
         "market_blocked": market_blocked,
+        "red_override": red_override,
+        "red_reversal": red_reversal,
         "market_blocked_from": "正式候選" if formal_candidate and market_blocked else "A-候選" if market_blocked else "",
         "formal_pullback": formal_pullback,
         "formal_momentum": formal_momentum,
@@ -506,13 +519,94 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
         "大盤風控建議", "今日大盤結論", "大盤橋接狀態",
     ])
-    score = max(_num(row, "大盤橋接分數", 0), _num(row, "大盤多空分數", 0))
+    raw_scores = [_num(row, "大盤橋接分數", 0), _num(row, "大盤多空分數", 0)]
+    positive_scores = [x for x in raw_scores if x > 0]
+    score = min(positive_scores) if positive_scores else 0.0
     severe = _contains_any(blob, ["紅燈", "空方", "全面防守", "禁止進攻", "風險急升"])
     defensive = severe or _contains_any(blob, ["防守", "保守", "震盪控風險", "不宜全面追價"])
+    panic = _contains_any(blob, ["崩盤", "極端風險", "系統性風險", "禁止所有新倉", "全面停買", "流動性危機"])
     if score > 0 and score < 42:
         severe = True
         defensive = True
-    return {"blob": blob, "score": score, "severe": severe, "defensive": defensive}
+    if score > 0 and score < 25:
+        panic = True
+    level = "極端風險｜全面禁買" if panic else "紅燈｜只准條件逆勢" if severe else "防守｜縮小倉位" if defensive else "一般｜依個股條件"
+    return {"blob": blob, "score": score, "severe": severe, "defensive": defensive, "panic": panic, "level": level}
+
+
+def _red_market_reversal_profile(
+    row: pd.Series,
+    op_score: float,
+    hard_veto: list[str] | None = None,
+    *,
+    market: dict[str, Any] | None = None,
+    prebreak: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strict trigger-first exception for high-quality leaders in a red market.
+
+    A red index must reduce position size, but it must not erase every stock.
+    This path only keeps liquid leaders that suffered a one-day washout while
+    their 5-day structure, sector support and pre-breakout evidence remain
+    intact.  They are never bought at the close: the next session must break
+    the trigger and hold the guard price.
+    """
+    market = market or _market_risk_info(row)
+    prebreak = prebreak or _prebreakout_profile(row)
+    hard_veto = list(hard_veto or [])
+    fresh = _history_freshness_info(row)
+    liq = _liquidity_info(row)
+    ret1 = _num(row, "今日漲幅%", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    ret20 = _num(row, "近20日漲幅%", 0)
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    buy = _num(row, "買進分數", 0)
+    candidate = max(_num(row, "候選強度分", 0), _num(row, "推薦總分", 0), _num(row, "Alpha選股潛力分", 0))
+    mainstream = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    amount = _reference_turnover_m(row)
+    chase = _chase_risk_score(row, 55)
+    pre_score = _safe_float(prebreak.get("score"), 0)
+    washout = -10.5 <= ret1 <= -5.0
+    structure_ok = -3.0 <= ret5 <= 12.0 and -8.0 <= ret20 <= 35.0
+    score = (
+        candidate * 0.18 + op_score * 0.12 + entry * 0.13 + risk * 0.10 + buy * 0.10
+        + pre_score * 0.15 + mainstream * 0.09 + sector * 0.08 + min(100.0, amount / 20.0) * 0.05
+    )
+    if washout:
+        score += 8.0
+    if structure_ok:
+        score += 4.0
+    if ret5 < -3.0:
+        score -= min(18.0, abs(ret5 + 3.0) * 2.0)
+    if hard_veto:
+        score -= 25.0
+    score = round(_clamp(score), 1)
+    data_ok = bool(fresh.get("fresh") and liq.get("tradable") and not hard_veto)
+    eligible = bool(
+        market.get("severe") and not market.get("panic") and data_ok
+        and washout and structure_ok and score >= 72
+        and candidate >= 76 and pre_score >= 72 and entry >= 65 and risk >= 57 and buy >= 68
+        and mainstream >= 62 and sector >= 62 and amount >= 250 and chase <= 72 and op_score >= 62
+    )
+    radar_override = bool(
+        market.get("severe") and not market.get("panic") and data_ok
+        and prebreak.get("radar_ready") and pre_score >= 78 and candidate >= 76
+        and entry >= 64 and risk >= 52 and buy >= 68 and amount >= 250 and chase <= 72 and op_score >= 55
+    )
+    if market.get("panic"):
+        status = "BLOCK-R｜極端市場全面禁買"
+    elif eligible:
+        status = "READY-R｜紅燈逆勢反轉，僅觸發後極小量"
+    elif radar_override:
+        status = "WATCH-R｜紅燈強勢雷達，觸發守價後才評估"
+    else:
+        status = "BLOCK-R｜未達紅燈逆勢條件"
+    return {
+        "score": score, "eligible": eligible, "radar_override": radar_override, "status": status,
+        "washout": washout, "ret1": round(ret1, 2), "ret5": round(ret5, 2),
+        "restriction": "不可預掛追價；只在突破實戰觸發價且守住守價、大盤跌勢未惡化時進場。單檔上限3%，跌破守價立即取消。",
+    }
 
 
 def _data_quality_score(row: pd.Series) -> float:
@@ -570,7 +664,7 @@ def _confidence_score(row: pd.Series, op_score: float, bucket: str) -> float:
     return round(_clamp(score), 1)
 
 
-def _position_cap_pct(row: pd.Series, bucket: str) -> float:
+def _position_cap_pct(row: pd.Series, bucket: str, promotion: dict[str, Any] | None = None) -> float:
     if bucket == "正式下週主推薦":
         existing = max(
             _num(row, "動態建議倉位%", 0),
@@ -586,15 +680,26 @@ def _position_cap_pct(row: pd.Series, bucket: str) -> float:
         return round(max(3.0, cap), 1)
     if bucket == "A-｜準主推薦小量試單":
         market = _market_risk_info(row)
+        promotion = promotion or {}
+        if market["panic"]:
+            return 0.0
+        if market["severe"] and promotion.get("red_override"):
+            return 3.0
         if market["severe"]:
             return 0.0
         if market["defensive"]:
             return 3.0
         return 5.0
+    if bucket == "盤中雷達追蹤":
+        market = _market_risk_info(row)
+        promotion = promotion or {}
+        red_profile = promotion.get("red_reversal") or {}
+        if market.get("severe") and not market.get("panic") and red_profile.get("radar_override"):
+            return 2.0
     return 0.0
 
 
-def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_text: str) -> dict[str, Any]:
+def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_text: str, promotion: dict[str, Any] | None = None) -> dict[str, Any]:
     strength = max(
         _num(row, "推薦總分", 0),
         _num(row, "候選強度分", 0),
@@ -612,7 +717,13 @@ def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_t
         market = _market_risk_info(row)
         formal = "否｜準主推薦"
         veto = "否"
-        if market["severe"]:
+        if market["severe"] and (promotion or {}).get("red_override"):
+            conclusion = "A-R｜紅燈逆勢反轉：觸發守價後極小量"
+            permit = "條件式極小量｜觸發＋守價＋大盤未惡化"
+            grade = "A-R｜紅燈逆勢條件推薦"
+            nature = "紅燈逆勢條件推薦"
+            consistency = "一致｜大盤紅燈但個股符合嚴格洗盤反轉路徑；單檔上限3%"
+        elif market["severe"]:
             conclusion = "A-MD｜準主推薦候選：大盤紅燈，等待解除封鎖"
             permit = "禁止新倉｜等大盤解除紅燈"
             grade = "A-｜市場封鎖候選"
@@ -625,13 +736,22 @@ def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_t
             nature = "條件推薦"
             consistency = "一致｜接近主推薦，但仍有一項以上門檻未完全通過"
     elif bucket == "盤中雷達追蹤":
-        conclusion = "B+｜盤中雷達：未觸發前不可買"
+        red_profile = (promotion or {}).get("red_reversal") or {}
+        market = _market_risk_info(row)
         formal = "否"
-        permit = "僅盤中觸發後評估"
-        grade = "B+｜盤中條件雷達"
-        nature = "盤中雷達"
         veto = "否"
-        consistency = "一致｜保留爆發機會，但未達正式推薦門檻"
+        if market.get("severe") and not market.get("panic") and red_profile.get("radar_override"):
+            conclusion = "R1-R｜紅燈逆勢雷達：觸發守價後才可極小量"
+            permit = "條件式極小量｜未觸發不交易"
+            grade = "R1-R｜紅燈逆勢條件雷達"
+            nature = "紅燈逆勢雷達"
+            consistency = "一致｜只保留強勢前兆，單檔上限2%，未觸發不計交易"
+        else:
+            conclusion = "B+｜盤中雷達：未觸發前不可買"
+            permit = "僅盤中觸發後評估"
+            grade = "B+｜盤中條件雷達"
+            nature = "盤中雷達"
+            consistency = "一致｜保留爆發機會，但未達正式推薦門檻"
     elif bucket == "高風險雷達觀察":
         conclusion = "R｜高風險觀察：禁止追價"
         formal = "否"
@@ -678,7 +798,7 @@ def _final_action_meta(row: pd.Series, bucket: str, op_score: float, exclusion_t
         "推薦可信度分": _confidence_score(row, op_score, bucket),
         "實戰操作品質分": _execution_quality_score(row, op_score),
         "資料完整度評分": _data_quality_score(row),
-        "建議倉位上限%": _position_cap_pct(row, bucket),
+        "建議倉位上限%": _position_cap_pct(row, bucket, promotion),
         "風控否決旗標": veto,
         "決策一致性": consistency,
         "候選性質": nature,
@@ -1877,7 +1997,17 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         exclude_text = ""
     elif a_minus:
         bucket = "A-｜準主推薦小量試單"
-        if market_info["severe"]:
+        if market_info["severe"] and promotion.get("red_override"):
+            qual = "A-R｜紅燈逆勢反轉條件推薦"
+            direct_buy = "極小量｜觸發、守價且大盤跌勢未惡化"
+            action = (
+                "不可開盤追價或預掛買進；只在實戰觸發價被放量突破、收盤/盤中守住觸發後守價，"
+                "且大盤跌幅未持續擴大時，單檔最多3%試單。跌破守價立即取消。"
+            )
+            radar_level = "A-R｜紅燈逆勢反轉"
+            radar_action = "觸發與守價同時成立才極小量；未觸發視為沒有交易"
+            exclude_text = ""
+        elif market_info["severe"]:
             qual = "A-MD｜個股達標但大盤封鎖"
             direct_buy = "不可｜等大盤解除紅燈"
             underlying_action = (
@@ -1917,6 +2047,10 @@ def _classify(row: pd.Series) -> dict[str, Any]:
                 qual = "DATA-WAIT-P｜強勢前兆成立但行情待更新"
                 direct_buy = "不可｜先更新最新K線"
                 action = f"列入強勢前兆雷達，但目前K線非最新交易日；先更新資料。更新後僅接受：{prebreak['entry']}"
+            elif market_info["severe"] and promotion.get("red_reversal", {}).get("radar_override") and not market_info.get("panic"):
+                qual = "WAIT-RD｜紅燈逆勢條件雷達"
+                direct_buy = "極小量條件式｜觸發且守價"
+                action = "紅燈市場不可預買；只有放量突破實戰觸發價、守住守價且大盤跌勢未惡化時，最多2%試單。"
             elif market_info["severe"]:
                 qual = "WAIT-PD｜防守市場強勢前兆"
                 direct_buy = "不可｜大盤紅燈只盯盤"
@@ -2009,7 +2143,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     elif bucket == "正式排除清單":
         sort_score -= 20
     battle = _battle_meta_for(bucket)
-    final_meta = _final_action_meta(row, bucket, op, exclude_text)
+    final_meta = _final_action_meta(row, bucket, op, exclude_text, promotion)
     effective_readiness_score = readiness["score"]
     effective_readiness_status = readiness["status"]
     effective_readiness_reasons = readiness["reasons"]
@@ -2085,6 +2219,11 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "強勢前兆判定": prebreak["status"],
         "強勢前兆進場條件": prebreak["entry"],
         "強勢前兆風控": prebreak["risk"],
+        "紅燈逆勢反轉分": promotion.get("red_reversal", {}).get("score", 0),
+        "紅燈逆勢反轉判定": promotion.get("red_reversal", {}).get("status", ""),
+        "大盤風控層級": market_info.get("level", ""),
+        "大盤條件覆寫": "是｜嚴格觸發後極小量" if promotion.get("red_override") else "雷達條件式" if promotion.get("red_reversal", {}).get("radar_override") else "否",
+        "逆勢操作限制": promotion.get("red_reversal", {}).get("restriction", ""),
         "K線最後交易日": readiness["freshness"]["last_date"],
         "K線落後交易日": readiness["freshness"]["lag"] if readiness["freshness"]["known"] else 999,
         "K線資料新鮮度": readiness["freshness"]["status"],
