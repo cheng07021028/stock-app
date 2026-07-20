@@ -17,6 +17,8 @@ import math
 import os
 import tempfile
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +45,12 @@ RECORDS_STATE_FILE = "godpick_records_sync_state.json"
 EXPORT_SETTINGS_FILE = "godpick_export_sync_settings.json"
 EXPORT_HISTORY_FILE = "godpick_export_history.json"
 MODULE_SYNC_STATE_FILE = "godpick_module_sync_state.json"
+RECORDS_GITHUB_SYNC_STATUS_FILE = "godpick_records_github_sync_status.json"
+
+_RECORDS_GITHUB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-records-github")
+_RECORDS_GITHUB_LOCK = threading.Lock()
+_RECORDS_GITHUB_PENDING: tuple[list[dict[str, Any]], dict[str, Any], str] | None = None
+_RECORDS_GITHUB_RUNNING = False
 
 NAMED_FIRESTORE_DOCS = {
     "godpick_recommend_list.json": "godpick_recommend_list",
@@ -205,7 +213,12 @@ def write_local_json_atomic(path_name: str, payload: Any) -> tuple[bool, str]:
     path = project_path(path_name)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        # Large recommendation-record snapshots are written compactly.  This
+        # reduces disk I/O and JSON verification time without changing data.
+        if isinstance(payload, list) and len(payload) >= 500:
+            text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        else:
+            text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
@@ -580,6 +593,7 @@ class PersistenceReport:
     local_ok: bool = False
     github_ok: bool = False
     firestore_ok: bool = False
+    github_pending: bool = False
     permanent_ok: bool = False
     local_message: str = ""
     github_message: str = ""
@@ -593,7 +607,7 @@ class PersistenceReport:
     def messages(self) -> list[str]:
         return [
             f"本機：{'成功' if self.local_ok else '失敗'}｜{self.local_message}",
-            f"GitHub：{'成功' if self.github_ok else '失敗'}｜{self.github_message}",
+            f"GitHub：{'成功' if self.github_ok else ('同步中' if self.github_pending else '失敗')}｜{self.github_message}",
             f"Firestore：{'成功' if self.firestore_ok else '失敗'}｜{self.firestore_message}",
         ]
 
@@ -715,6 +729,40 @@ def _record_id(row: dict[str, Any]) -> str:
             _safe_str(row.get("推薦模式") or row.get("mode")),
         ]
     )
+
+
+
+def records_as_rows_exact(payload: Any) -> list[dict[str, Any]]:
+    """Convert records to JSON-safe rows without business-key de-duplication.
+
+    Mutation actions must delete only the selected record_ids.  The historical
+    full-sync normalizer merges duplicate business keys; using it during a
+    single-row delete could silently remove unrelated legacy rows.  This helper
+    preserves row count and order while still sanitizing pandas/numpy values.
+    """
+    if isinstance(payload, pd.DataFrame):
+        rows = payload.loc[:, ~payload.columns.duplicated()].to_dict(orient="records")
+    elif isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        rows = next(
+            (payload.get(k) for k in ["records", "data", "items", "recommendations", "rows"] if isinstance(payload.get(k), list)),
+            [],
+        )
+    else:
+        rows = []
+    out: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = {str(k): _json_safe_value(v) for k, v in raw.items()}
+        rid = _record_id(row)
+        if not rid.strip("|"):
+            continue
+        if not _safe_str(row.get("record_id")):
+            row["record_id"] = rid
+        out.append(row)
+    return out
 
 
 def normalize_records(payload: Any) -> list[dict[str, Any]]:
@@ -840,6 +888,236 @@ def write_records_firestore(records: list[dict[str, Any]], state: dict[str, Any]
         return True, f"Firestore records 分批寫入 {len(normalized)} 筆並驗證"
     except Exception as exc:
         return False, f"Firestore records 寫入失敗：{exc}"
+
+
+
+
+def _records_github_sync_worker() -> None:
+    """Coalescing background uploader for the large records JSON.
+
+    Streamlit reruns do not terminate the Python process, so the single worker
+    can finish the GitHub backup after the UI has returned.  New mutations
+    replace the pending snapshot; after the current upload completes, the
+    worker immediately uploads the newest snapshot instead of every
+    intermediate version.
+    """
+    global _RECORDS_GITHUB_PENDING, _RECORDS_GITHUB_RUNNING
+    while True:
+        with _RECORDS_GITHUB_LOCK:
+            job = _RECORDS_GITHUB_PENDING
+            _RECORDS_GITHUB_PENDING = None
+            if job is None:
+                _RECORDS_GITHUB_RUNNING = False
+                return
+        records, state, reason = job
+        write_local_json_atomic(
+            RECORDS_GITHUB_SYNC_STATUS_FILE,
+            {
+                "status": "running",
+                "reason": reason,
+                "count": len(records),
+                "payload_hash": state.get("payload_hash"),
+                "started_at": _now_text(),
+            },
+        )
+        gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
+        gh1, ghm1 = write_github_json(gh_path, records, f"{reason}: persist godpick records")
+        gh2, ghm2 = write_github_json(RECORDS_STATE_FILE, state, f"{reason}: persist godpick records state") if gh1 else (False, "records 未寫入，略過狀態")
+        ok = bool(gh1 and gh2)
+        write_local_json_atomic(
+            RECORDS_GITHUB_SYNC_STATUS_FILE,
+            {
+                "status": "success" if ok else "failed",
+                "reason": reason,
+                "count": len(records),
+                "payload_hash": state.get("payload_hash"),
+                "finished_at": _now_text(),
+                "message": f"{ghm1}｜{ghm2}",
+            },
+        )
+
+
+def schedule_records_github_sync(records: Any, state: dict[str, Any], reason: str = "record mutation") -> tuple[bool, str]:
+    """Queue the newest full records snapshot for one background GitHub upload."""
+    global _RECORDS_GITHUB_PENDING, _RECORDS_GITHUB_RUNNING
+    cfg = github_config()
+    if not cfg["token"]:
+        return False, "GitHub 未設定"
+    normalized = records_as_rows_exact(records)
+    safe_state = dict(state)
+    with _RECORDS_GITHUB_LOCK:
+        _RECORDS_GITHUB_PENDING = (normalized, safe_state, _safe_str(reason) or "record mutation")
+        if not _RECORDS_GITHUB_RUNNING:
+            _RECORDS_GITHUB_RUNNING = True
+            _RECORDS_GITHUB_EXECUTOR.submit(_records_github_sync_worker)
+    return True, f"GitHub 大型備份已排入背景同步：{len(normalized)} 筆"
+
+
+def load_records_github_sync_status() -> tuple[dict[str, Any], str]:
+    payload, message, _ = read_local_json(RECORDS_GITHUB_SYNC_STATUS_FILE, {})
+    return (payload if isinstance(payload, dict) else {}), message
+
+
+def write_records_firestore_mutation(
+    records: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    deleted_ids: Iterable[str] | None = None,
+    upsert_rows: Iterable[dict[str, Any]] | None = None,
+    expected_previous_count: int | None = None,
+) -> tuple[bool, str]:
+    """Persist a small record mutation without rewriting the whole collection.
+
+    The recommendation record file can exceed 20 MB.  A delete/edit used to
+    rewrite every Firestore document and then upload the entire GitHub JSON in
+    the Streamlit button callback, which made the page appear to run forever.
+    This helper verifies that Firestore already contains the previous snapshot,
+    applies only the affected document operations, and refreshes the summary
+    hash.  If the previous snapshot cannot be verified it safely falls back to
+    the full writer instead of claiming success.
+    """
+    if not firebase_configured():
+        return False, "Firebase 未設定"
+    try:
+        _init_firebase_app()
+        db = firestore.client()
+        normalized = records_as_rows_exact(records)
+        summary_ref = db.collection("system").document("godpick_records_summary")
+        summary = summary_ref.get()
+        summary_data = summary.to_dict() or {} if summary.exists else {}
+        if expected_previous_count is not None:
+            try:
+                old_count = int(summary_data.get("count"))
+            except Exception:
+                old_count = -1
+            if old_count != int(expected_previous_count):
+                return write_records_firestore(normalized, state)
+
+        records_ref = db.collection("godpick_records")
+        delete_set = {_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)}
+        normalized_upserts = records_as_rows_exact(list(upsert_rows or []))
+        operations: list[tuple[str, Any, Any]] = []
+        now = firestore.SERVER_TIMESTAMP
+
+        for rec_id in sorted(delete_set):
+            operations.append(("delete", records_ref.document(rec_id), None))
+        for row in normalized_upserts:
+            rec_id = _safe_str(row.get("record_id"))
+            if not rec_id:
+                continue
+            payload = dict(row)
+            payload["updated_at"] = now
+            operations.append(("set", records_ref.document(rec_id), payload))
+
+        operations.append(
+            (
+                "set",
+                summary_ref,
+                {
+                    "count": len(normalized),
+                    "payload_hash": state["payload_hash"],
+                    "revision": state.get("revision"),
+                    "updated_at_epoch": state.get("updated_at_epoch"),
+                    "updated_at_utc": state.get("updated_at_utc"),
+                    "updated_at": now,
+                    "updated_at_text": state["updated_at"],
+                    "source": "godpick_persistence_service_mutation",
+                },
+            )
+        )
+        _commit_operations(db, operations)
+
+        verify = summary_ref.get()
+        verify_data = verify.to_dict() or {}
+        if _safe_str(verify_data.get("payload_hash")) != state["payload_hash"]:
+            return False, "Firestore mutation 摘要回讀驗證不一致"
+        if int(verify_data.get("count") or -1) != len(normalized):
+            return False, "Firestore mutation 筆數回讀驗證不一致"
+
+        # Verify the actual removed documents for delete operations.  This is a
+        # tiny bounded read and avoids downloading the whole collection.
+        if delete_set:
+            refs = [records_ref.document(x) for x in sorted(delete_set)]
+            remaining = [snap.id for snap in db.get_all(refs) if snap.exists]
+            if remaining:
+                return False, f"Firestore mutation 刪除回讀仍存在：{','.join(remaining[:10])}"
+
+        return True, (
+            f"Firestore 增量同步完成：刪除 {len(delete_set)} 筆、"
+            f"更新 {len(normalized_upserts)} 筆、目前 {len(normalized)} 筆"
+        )
+    except Exception as exc:
+        return False, f"Firestore records 增量寫入失敗：{exc}"
+
+
+def save_records_mutation_fast(
+    payload: Any,
+    *,
+    deleted_ids: Iterable[str] | None = None,
+    upsert_rows: Iterable[dict[str, Any]] | None = None,
+    previous_count: int | None = None,
+    reason: str = "record mutation",
+) -> PersistenceReport:
+    """Fast durable save for delete/edit/add actions.
+
+    Local JSON is committed atomically first.  When Firestore is configured we
+    apply a verified incremental mutation and defer the very large GitHub file
+    to the explicit ``儲存同步`` button.  If Firestore is unavailable but
+    GitHub is configured, the function falls back to a full GitHub write so a
+    cloud reboot cannot silently restore deleted rows.
+    """
+    records = records_as_rows_exact(payload)
+    state = _new_state(
+        "godpick_records_durable_v4_mutation",
+        records,
+        count=len(records),
+        github_pending=True,
+        mutation_reason=_safe_str(reason),
+    )
+    report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
+
+    ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
+    ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
+    report.local_ok = bool(ok1 and ok2)
+    report.local_message = f"{msg1}｜{msg2}"
+    if not report.local_ok:
+        report.github_message = "本機原子寫入失敗，未執行遠端 mutation"
+        report.firestore_message = "本機原子寫入失敗，未執行遠端 mutation"
+        report.permanent_ok = False
+        return report
+
+    fs_ok = False
+    fs_msg = "Firebase 未設定"
+    if firebase_configured():
+        fs_ok, fs_msg = write_records_firestore_mutation(
+            records,
+            state,
+            deleted_ids=deleted_ids,
+            upsert_rows=upsert_rows,
+            expected_previous_count=previous_count,
+        )
+    report.firestore_ok = bool(fs_ok)
+    report.firestore_message = fs_msg
+
+    cfg = github_config()
+    if cfg["token"]:
+        queued, queue_msg = schedule_records_github_sync(records, state, reason)
+        report.github_ok = False
+        report.github_pending = bool(queued)
+        report.github_message = queue_msg
+    else:
+        report.github_ok = False
+        report.github_pending = False
+        report.github_message = "GitHub 未設定；沒有待上傳的遠端備份"
+
+    if _configured_remote_exists():
+        # Firestore is already verified, or GitHub has accepted the newest full
+        # snapshot into the coalescing background queue.  The report explicitly
+        # exposes github_pending so the UI never labels it as a completed upload.
+        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok or report.github_pending))
+    else:
+        report.permanent_ok = report.local_ok
+    return report
 
 
 def save_records_permanent(payload: Any) -> PersistenceReport:

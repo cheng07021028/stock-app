@@ -29,11 +29,13 @@ try:
         load_module_sync_state,
         load_named_json_permanent,
         load_records_permanent,
+        load_records_github_sync_status,
         load_watchlist_permanent,
         save_export_sync_settings,
         save_module_sync_state,
         save_named_json_permanent,
         save_records_permanent,
+        save_records_mutation_fast,
         save_watchlist_permanent,
         write_export_file,
         project_path,
@@ -46,11 +48,13 @@ except Exception:
     load_module_sync_state = None
     load_named_json_permanent = None
     load_records_permanent = None
+    load_records_github_sync_status = None
     load_watchlist_permanent = None
     save_export_sync_settings = None
     save_module_sync_state = None
     save_named_json_permanent = None
     save_records_permanent = None
+    save_records_mutation_fast = None
     save_watchlist_permanent = None
     write_export_file = None
     project_path = None
@@ -2112,6 +2116,88 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
         msg = f"推薦紀錄本機與遠端均未完成（{source_state}）；請展開同步明細。"
     _set_status(msg, "error")
     return False
+
+
+
+def _apply_persistence_report(report: Any, *, action_name: str, github_deferred_ok: bool = False) -> bool:
+    """Store a persistence report in the shared status panel without blocking UI logic."""
+    if report is None:
+        _set_status(f"{action_name}失敗：沒有取得儲存結果。", "error")
+        return False
+    try:
+        details = report.messages()
+        report_dict = report.to_dict()
+        permanent_ok = bool(report.permanent_ok)
+        local_ok = bool(report.local_ok)
+        github_ok = bool(report.github_ok)
+        github_pending = bool(getattr(report, "github_pending", False))
+        firestore_ok = bool(report.firestore_ok)
+    except Exception as exc:
+        _set_status(f"{action_name}失敗：儲存結果格式異常｜{exc}", "error")
+        return False
+
+    st.session_state[_k("last_sync_detail")] = details
+    st.session_state[_k("last_sync_report")] = report_dict
+    st.session_state[_k("last_sync_failed")] = not permanent_ok
+    try:
+        st.session_state[_k("records_source_sig")] = _records_local_signature()
+    except Exception:
+        pass
+
+    if permanent_ok:
+        if github_pending:
+            remote_text = "Firestore已驗證＋GitHub背景同步中" if firestore_ok else "GitHub背景同步中"
+            _set_status(
+                f"{action_name}已完成本機保存｜{remote_text}；不再阻塞刪除/編輯按鈕。",
+                "success" if firestore_ok else "warning",
+            )
+        elif github_deferred_ok and firestore_ok and not github_ok:
+            _set_status(
+                f"{action_name}已完成本機＋Firestore永久保存；大型 GitHub 備份待同步。",
+                "success",
+            )
+        else:
+            _set_status(
+                f"{action_name}已保存｜本機{'✓' if local_ok else '✗'}／GitHub{'✓' if github_ok else '✗'}／Firestore{'✓' if firestore_ok else '✗'}。",
+                "success" if (github_ok or firestore_ok) else "warning",
+            )
+        return True
+
+    _set_status(
+        f"{action_name}未完成永久保存｜本機{'✓' if local_ok else '✗'}／GitHub{'✓' if github_ok else '✗'}／Firestore{'✓' if firestore_ok else '✗'}；請查看同步明細。",
+        "error",
+    )
+    return False
+
+
+def _save_records_mutation_fast_ui(
+    df: pd.DataFrame,
+    *,
+    action_name: str,
+    deleted_ids: list[str] | None = None,
+    upsert_rows: list[dict[str, Any]] | None = None,
+    previous_count: int | None = None,
+) -> bool:
+    """Fast durable path for table mutations.
+
+    Delete/edit/add actions no longer upload the entire 20+ MB GitHub JSON in
+    the button callback.  They atomically save locally and perform a verified
+    Firestore incremental mutation; the explicit ``儲存同步`` button remains
+    the full GitHub backup path.
+    """
+    clean_df = _ensure_godpick_record_columns(df)
+    if callable(save_records_mutation_fast):
+        report = save_records_mutation_fast(
+            clean_df,
+            deleted_ids=deleted_ids or [],
+            upsert_rows=upsert_rows or [],
+            previous_count=previous_count,
+            reason=action_name,
+        )
+        return _apply_persistence_report(report, action_name=action_name, github_deferred_ok=True)
+    # Compatibility fallback for deployments that did not yet load the new
+    # persistence helper.  This can be slower but must never pretend success.
+    return _save_records_dual(clean_df)
 
 
 
@@ -4601,141 +4687,98 @@ def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, 
     return src, total_rows, truncated
 
 
+def _record_selection_key(checkbox_col: str) -> str:
+    """Stable selection storage independent of data_editor key/nonces."""
+    return _k(f"record_selection_{checkbox_col}_ids")
+
+
+def _selection_ids(checkbox_col: str) -> list[str]:
+    values = st.session_state.get(_record_selection_key(checkbox_col), []) or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        rid = _safe_str(value)
+        if rid and rid not in seen:
+            seen.add(rid)
+            out.append(rid)
+    return out
+
+
+def _set_selection_ids(checkbox_col: str, values: list[str] | None, visible_ids: list[str] | None = None) -> list[str]:
+    visible = {_safe_str(x) for x in (visible_ids or []) if _safe_str(x)} if visible_ids is not None else None
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        rid = _safe_str(value)
+        if not rid or rid in seen:
+            continue
+        if visible is not None and rid not in visible:
+            continue
+        seen.add(rid)
+        out.append(rid)
+    st.session_state[_record_selection_key(checkbox_col)] = out
+    return out
+
+
 def _apply_sticky_editor_checkboxes(editor_key: str, edited_df: pd.DataFrame, id_col: str = "record_id", checkbox_cols: list[str] | None = None) -> pd.DataFrame:
-    """v40：修正推薦紀錄 data_editor 勾選欄位跳回未勾選。"""
+    """Apply stable checkbox selections by record_id before rendering.
+
+    Previous versions keyed selections by the changing data_editor nonce and
+    parsed ``edited_rows`` by row index.  Sorting/filtering/reruns could map the
+    click to another row or make it disappear.  Selection is now stored only by
+    the immutable record_id and survives a normal rerun.
+    """
     if checkbox_cols is None:
         checkbox_cols = ["匯入自選", "刪除"]
     if edited_df is None or edited_df.empty or id_col not in edited_df.columns:
         return edited_df
-
     out = edited_df.copy()
-    base_df = out.reset_index(drop=True)
-
-    def _is_true(v: Any) -> bool:
-        if isinstance(v, bool):
-            return bool(v)
-        return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "勾選", "checked"}
-
-    raw_state = st.session_state.get(editor_key, {})
-    edited_rows = raw_state.get("edited_rows", {}) if isinstance(raw_state, dict) else {}
-    visible_ids = [_safe_str(x) for x in base_df[id_col].astype(str).tolist() if _safe_str(x)]
-    visible_id_set = set(visible_ids)
-
+    visible_ids = [_safe_str(x) for x in out[id_col].astype(str).tolist() if _safe_str(x)]
+    visible_set = set(visible_ids)
     for col in checkbox_cols:
         if col not in out.columns:
             continue
-        state_key = _k(f"sticky_{editor_key}_{col}_ids")
-        selected = {_safe_str(x) for x in st.session_state.get(state_key, []) if _safe_str(x)}
-
-        for _, row in base_df.iterrows():
-            rec_id = _safe_str(row.get(id_col))
-            if rec_id and _is_true(row.get(col, False)):
-                selected.add(rec_id)
-
-        if isinstance(edited_rows, dict):
-            for raw_idx, changes in edited_rows.items():
-                try:
-                    idx = int(raw_idx)
-                except Exception:
-                    continue
-                if idx < 0 or idx >= len(base_df):
-                    continue
-                if not isinstance(changes, dict) or col not in changes:
-                    continue
-                rec_id = _safe_str(base_df.iloc[idx].get(id_col))
-                if not rec_id:
-                    continue
-                if _is_true(changes.get(col)):
-                    selected.add(rec_id)
-                else:
-                    selected.discard(rec_id)
-
-        selected = {x for x in selected if x in visible_id_set}
-        st.session_state[state_key] = [x for x in visible_ids if x in selected]
-        out[col] = out[id_col].astype(str).map(lambda x: _safe_str(x) in selected)
-
+        # Migrate legacy per-editor sticky state once, then use the stable key.
+        legacy_key = _k(f"sticky_{editor_key}_{col}_ids")
+        merged = _selection_ids(col) + [
+            _safe_str(x) for x in st.session_state.get(legacy_key, []) or [] if _safe_str(x)
+        ]
+        selected = _set_selection_ids(col, merged, visible_ids=visible_ids)
+        selected_set = set(selected)
+        out[col] = out[id_col].astype(str).map(lambda x: _safe_str(x) in selected_set)
+        st.session_state.pop(legacy_key, None)
     return out
 
 
-def _record_editor_checkbox_on_change_v70(editor_key: str, id_map_key: str, checkbox_cols: list[str] | None = None) -> None:
-    """v70：推薦紀錄總表 checkbox 單擊即生效。
+def _sync_editor_selections_from_returned(
+    edited_df: pd.DataFrame,
+    id_col: str = "record_id",
+    checkbox_cols: list[str] | None = None,
+) -> None:
+    """Persist the data_editor returned checkbox values by record_id.
 
-    Streamlit data_editor 的 checkbox 在部分雲端環境會出現「點一次只改前端、第二次才寫入」的體感。
-    原因是勾選值尚未被轉進我們自己的 sticky session_state 前，頁面就 rerun 並重建表格。
-    這個 callback 在 rerun 前先讀取 edited_rows / edited_cells，直接把 record_id 寫入 sticky 清單，
-    下一輪重建 editor_df 時就能立即回填，不需要點兩次。
+    No row-index callback is used.  This remains correct after client-side sort,
+    filter, column rearrangement and Streamlit reruns.
     """
-    try:
-        if checkbox_cols is None:
-            checkbox_cols = ["匯入自選", "刪除"]
-
-        id_map = [_safe_str(x) for x in st.session_state.get(id_map_key, []) if _safe_str(x)]
-        if not id_map:
-            return
-
-        raw_state = st.session_state.get(editor_key, {})
-        if not isinstance(raw_state, dict):
-            return
-
-        def _is_true(v: Any) -> bool:
-            if isinstance(v, bool):
-                return bool(v)
-            return str(v).strip().lower() in {"true", "1", "yes", "y", "是", "勾選", "checked"}
-
-        def _apply(idx: Any, col: str, val: Any) -> None:
-            try:
-                i = int(idx)
-            except Exception:
-                return
-            if i < 0 or i >= len(id_map) or col not in checkbox_cols:
-                return
-            rec_id = _safe_str(id_map[i])
-            if not rec_id:
-                return
-            state_key = _k(f"sticky_{editor_key}_{col}_ids")
-            selected = {_safe_str(x) for x in st.session_state.get(state_key, []) if _safe_str(x)}
-            if _is_true(val):
-                selected.add(rec_id)
-            else:
-                selected.discard(rec_id)
-            visible = set(id_map)
-            st.session_state[state_key] = [x for x in id_map if x in selected and x in visible]
-
-        edited_rows = raw_state.get("edited_rows", {})
-        if isinstance(edited_rows, dict):
-            for raw_idx, changes in edited_rows.items():
-                if not isinstance(changes, dict):
-                    continue
-                for col in checkbox_cols:
-                    if col in changes:
-                        _apply(raw_idx, col, changes.get(col))
-
-        # 舊版 Streamlit / 部分 browser state 可能用 edited_cells：{"0:匯入自選": True} 或 {"0:0": True}
-        edited_cells = raw_state.get("edited_cells", {})
-        if isinstance(edited_cells, dict):
-            for raw_key, val in edited_cells.items():
-                parts = str(raw_key).split(":")
-                if not parts:
-                    continue
-                row_idx = parts[0]
-                col_token = parts[1] if len(parts) > 1 else ""
-                if col_token in checkbox_cols:
-                    _apply(row_idx, col_token, val)
-                elif col_token == "0":
-                    _apply(row_idx, "匯入自選", val)
-                elif col_token == "1":
-                    _apply(row_idx, "刪除", val)
-    except Exception:
+    if checkbox_cols is None:
+        checkbox_cols = ["匯入自選", "刪除"]
+    if edited_df is None or edited_df.empty or id_col not in edited_df.columns:
+        for col in checkbox_cols:
+            _set_selection_ids(col, [])
         return
-
+    visible_ids = [_safe_str(x) for x in edited_df[id_col].astype(str).tolist() if _safe_str(x)]
+    for col in checkbox_cols:
+        if col not in edited_df.columns:
+            continue
+        try:
+            mask = edited_df[col].fillna(False).map(_normalize_bool)
+            checked = [_safe_str(x) for x in edited_df.loc[mask, id_col].astype(str).tolist() if _safe_str(x)]
+        except Exception:
+            checked = []
+        _set_selection_ids(col, checked, visible_ids=visible_ids)
 
 
 def _record_editor_nonce_key(show_cols_mode: str) -> str:
-    """v74：推薦紀錄總表 editor 版本鍵。
-
-    批次全選 / 取消刪除時，需要換一個 data_editor key，避免 Streamlit 保留舊 edited_rows，
-    導致按下取消後舊勾選又被 sticky checkbox 邏輯帶回來。
-    """
     return _k(f"record_editor_nonce_{show_cols_mode}")
 
 
@@ -4753,20 +4796,16 @@ def _reset_record_editor_for_bulk_delete(
     delete_ids: list[str] | None = None,
     import_ids: list[str] | None = None,
 ) -> str:
-    """v74：重建推薦紀錄 data_editor，並指定下一輪刪除勾選狀態。"""
+    """Recreate the editor and seed stable selections for the next render."""
+    _set_selection_ids("刪除", delete_ids or [])
+    _set_selection_ids("匯入自選", import_ids or [])
     nonce_key = _record_editor_nonce_key(show_cols_mode)
     try:
         next_nonce = int(st.session_state.get(nonce_key, 0) or 0) + 1
     except Exception:
         next_nonce = 1
     st.session_state[nonce_key] = next_nonce
-
-    next_editor_key = _k(f"record_editor_{show_cols_mode}_{next_nonce}")
-    clean_delete_ids = [_safe_str(x) for x in (delete_ids or []) if _safe_str(x)]
-    clean_import_ids = [_safe_str(x) for x in (import_ids or []) if _safe_str(x)]
-    st.session_state[_k(f"sticky_{next_editor_key}_刪除_ids")] = clean_delete_ids
-    st.session_state[_k(f"sticky_{next_editor_key}_匯入自選_ids")] = clean_import_ids
-    return next_editor_key
+    return _k(f"record_editor_{show_cols_mode}_{next_nonce}")
 
 
 def _collect_editor_selected_ids(
@@ -4775,16 +4814,18 @@ def _collect_editor_selected_ids(
     id_col: str = "record_id",
     checkbox_col: str = "刪除",
 ) -> list[str]:
-    """V156：同時讀取 data_editor 當前值與 sticky session，避免按下刪除時漏掉剛勾選的列。"""
+    """Collect selected IDs from returned data and stable record-id state."""
     ids: list[str] = []
     seen: set[str] = set()
 
-    def _add(v: Any) -> None:
-        rid = _safe_str(v)
+    def _add(value: Any) -> None:
+        rid = _safe_str(value)
         if rid and rid not in seen:
             seen.add(rid)
             ids.append(rid)
 
+    for rid in _selection_ids(checkbox_col):
+        _add(rid)
     try:
         if edited_df is not None and not edited_df.empty and id_col in edited_df.columns and checkbox_col in edited_df.columns:
             mask = edited_df[checkbox_col].fillna(False).map(_normalize_bool)
@@ -4792,28 +4833,20 @@ def _collect_editor_selected_ids(
                 _add(rid)
     except Exception:
         pass
-
-    try:
-        sticky_key = _k(f"sticky_{editor_key}_{checkbox_col}_ids")
-        for rid in st.session_state.get(sticky_key, []) or []:
-            _add(rid)
-    except Exception:
-        pass
-
     return ids
 
 
 def _remove_ids_from_list(values: list[str] | None, remove_ids: set[str]) -> list[str]:
-    """V156：刪除後同步清掉 sticky 匯入/刪除選取，避免已刪資料殘留。"""
     out: list[str] = []
     seen: set[str] = set()
-    for v in values or []:
-        rid = _safe_str(v)
+    for value in values or []:
+        rid = _safe_str(value)
         if not rid or rid in remove_ids or rid in seen:
             continue
         seen.add(rid)
         out.append(rid)
     return out
+
 
 def _build_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
@@ -5554,7 +5587,7 @@ def main():
         subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
-    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}")
+    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜v161 快速永久刪除＋record_id穩定勾選")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
@@ -5758,8 +5791,22 @@ def main():
         with st.expander("同步明細｜本機 / GitHub / Firestore", expanded=sync_failed):
             for line in sync_detail:
                 st.write(f"- {line}")
-            if sync_failed:
-                st.caption("只要 GitHub 或 Firestore 至少一項遠端回讀驗證成功，且本機寫入成功，就會判定為永久同步完成。")
+            st.caption("刪除／編輯採本機＋Firestore增量保存，GitHub大型檔案在背景合併同步；上方『儲存同步』仍可執行三層完整驗證。")
+
+    if callable(load_records_github_sync_status):
+        try:
+            bg_status, _bg_detail = load_records_github_sync_status()
+            if isinstance(bg_status, dict) and bg_status:
+                bg_state = _safe_str(bg_status.get("status"))
+                bg_count = int(bg_status.get("count") or 0)
+                if bg_state == "running":
+                    st.info(f"GitHub 大型推薦紀錄正在背景同步：{bg_count} 筆。可繼續操作，不需停留等待。")
+                elif bg_state == "failed":
+                    st.error(f"GitHub 背景備份失敗：{_safe_str(bg_status.get('message'))}；請按上方『儲存同步』重試。")
+                elif bg_state == "success":
+                    st.caption(f"GitHub 背景備份已完成：{bg_count} 筆｜{_safe_str(bg_status.get('finished_at'))}")
+        except Exception:
+            pass
 
     ui_detail = _safe_str(st.session_state.get(_k("ui_config_detail"), ""))
     ui_save_detail = _safe_str(st.session_state.get(_k("ui_save_detail"), ""))
@@ -5989,8 +6036,6 @@ def main():
             hide_index=True,
             num_rows="fixed",
             key=editor_key,
-            on_change=_record_editor_checkbox_on_change_v70,
-            args=(editor_key, editor_id_map_key, ["匯入自選", "刪除"]),
             column_config={
                 "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
                 "刪除": st.column_config.CheckboxColumn("刪除"),
@@ -6056,25 +6101,22 @@ def main():
             },
         )
 
-        edited_df = _apply_sticky_editor_checkboxes(editor_key, edited_df, "record_id", ["匯入自選", "刪除"])
+        _sync_editor_selections_from_returned(edited_df, "record_id", ["匯入自選", "刪除"])
 
-        # v70：顯示目前 sticky 勾選數，方便確認單擊已生效。
-        try:
-            _import_n = len(st.session_state.get(_k(f"sticky_{editor_key}_匯入自選_ids"), []))
-            _delete_n = len(st.session_state.get(_k(f"sticky_{editor_key}_刪除_ids"), []))
-            st.caption(f"目前勾選：匯入自選 {_import_n} 筆｜刪除 {_delete_n} 筆。v70 單擊穩定版。")
-        except Exception:
-            pass
+        # v161：勾選狀態依 record_id 保存，不再因 rerun / 排序 / editor nonce 跳掉。
+        _import_n = len(_selection_ids("匯入自選"))
+        _delete_n = len(_selection_ids("刪除"))
+        st.caption(f"目前勾選：匯入自選 {_import_n} 筆｜刪除 {_delete_n} 筆。v161 record_id 穩定選取版。")
 
         action_cols = st.columns([1.6, 1.2, 1.2, 1.15, 1.15, 1.2, 1.2, 2.6])
         with action_cols[0]:
             target_group = st.text_input("匯入自選群組", value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"), key=_k("watchlist_target_group"))
         with action_cols[1]:
             if st.button("📥 匯入勾選到4_自選股", use_container_width=True):
-                selected_ids = edited_df.loc[edited_df["匯入自選"] == True, "record_id"].astype(str).tolist()
+                selected_ids = _collect_editor_selected_ids(editor_key, edited_df, "record_id", "匯入自選")
                 ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
                 if ok:
-                    st.session_state[_k(f"sticky_{editor_key}_匯入自選_ids")] = []
+                    _set_selection_ids("匯入自選", [])
                 _set_status(msg, "success" if ok else "warning")
                 st.rerun()
             detail_msg = _safe_str(st.session_state.get(_k("watchlist_import_detail"), ""))
@@ -6098,13 +6140,21 @@ def main():
                         if k2 in master.columns:
                             master.at[idx, k2] = v2
                 master = _apply_mode_labels(master)
-                _save_state_df(master)
-                st.success("已套用，尚未同步")
+                changed_ids = [_safe_str(x) for x in edited_df.get("record_id", pd.Series(dtype=str)).astype(str).tolist() if _safe_str(x)]
+                changed_rows = master[master["record_id"].astype(str).isin(set(changed_ids))].to_dict(orient="records")
+                with st.spinner("正在永久保存本次編輯；大型 GitHub 備份不阻塞此按鈕..."):
+                    ok = _save_records_mutation_fast_ui(
+                        master,
+                        action_name="套用編輯",
+                        upsert_rows=changed_rows,
+                        previous_count=len(live_df),
+                    )
+                if ok:
+                    _save_state_df(master)
+                    st.session_state[_k("last_delete_msg")] = f"已套用並永久保存 {len(changed_rows)} 筆編輯。"
+                    st.rerun()
         def _current_import_ids_from_editor() -> list[str]:
-            if "匯入自選" not in edited_df.columns or "record_id" not in edited_df.columns:
-                return []
-            import_df = edited_df[edited_df["匯入自選"].fillna(False).astype(bool)].copy()
-            return [_safe_str(x) for x in import_df["record_id"].astype(str).tolist() if _safe_str(x)]
+            return _collect_editor_selected_ids(editor_key, edited_df, "record_id", "匯入自選")
 
         with action_cols[3]:
             if st.button("☑️ 刪除全選", use_container_width=True, help="全選目前畫面顯示的紀錄為待刪除；不會立即刪除，仍需再按「刪除勾選」。"):
@@ -6145,18 +6195,32 @@ def main():
                         remove_set = {_safe_str(x) for x in delete_ids if _safe_str(x)}
                         keep_import_ids = _remove_ids_from_list(_current_import_ids_from_editor(), remove_set)
 
-                        _save_state_df(new_df)
-                        sync_ok = _save_records_dual(new_df)
-                        _reset_record_editor_for_bulk_delete(
-                            show_cols_mode,
-                            delete_ids=[],
-                            import_ids=keep_import_ids,
-                        )
                         if deleted_n <= 0:
                             st.session_state[_k("last_delete_msg")] = "沒有刪到資料：畫面勾選的 record_id 與目前紀錄不一致，請按重新載入後再試。"
+                            _set_selection_ids("刪除", [])
+                            st.rerun()
                         else:
-                            st.session_state[_k("last_delete_msg")] = f"已刪除 {deleted_n} 筆，並已{'完成' if sync_ok else '嘗試'}同步到本機/GitHub/Firestore。"
-                        st.rerun()
+                            with st.spinner(f"正在快速刪除 {deleted_n} 筆並永久驗證；不重傳整份大型 GitHub JSON..."):
+                                sync_ok = _save_records_mutation_fast_ui(
+                                    new_df,
+                                    action_name=f"刪除 {deleted_n} 筆紀錄",
+                                    deleted_ids=delete_ids,
+                                    previous_count=before_n,
+                                )
+                            if sync_ok:
+                                _save_state_df(new_df)
+                                _reset_record_editor_for_bulk_delete(
+                                    show_cols_mode,
+                                    delete_ids=[],
+                                    import_ids=keep_import_ids,
+                                )
+                                st.session_state[_k("last_delete_msg")] = (
+                                    f"已刪除 {deleted_n} 筆並完成本機＋遠端永久驗證；"
+                                    "GitHub 大型備份可稍後按『儲存同步』補齊。"
+                                )
+                            else:
+                                st.session_state[_k("last_delete_msg")] = "刪除未通過永久保存驗證，畫面資料未切換；請查看同步明細。"
+                            st.rerun()
         with action_cols[6]:
             if st.button("🧼 清空目前篩選", use_container_width=True):
                 source_df = view_df if not truncated else view_df.head(int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)))
@@ -6167,10 +6231,20 @@ def main():
                     before_n = len(live_df)
                     after_n = len(new_df)
                     deleted_n = max(before_n - after_n, 0)
-                    _save_state_df(new_df)
-                    sync_ok = _save_records_dual(new_df)
-                    _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
-                    st.success(f"已清空 {deleted_n} 筆，並已{'完成' if sync_ok else '嘗試'}同步到本機/GitHub/Firestore。")
+                    delete_ids = [_safe_str(x) for x in source_df["record_id"].astype(str).tolist() if _safe_str(x)] if "record_id" in source_df.columns else []
+                    with st.spinner(f"正在快速清空 {deleted_n} 筆並永久驗證..."):
+                        sync_ok = _save_records_mutation_fast_ui(
+                            new_df,
+                            action_name=f"清空篩選 {deleted_n} 筆",
+                            deleted_ids=delete_ids,
+                            previous_count=before_n,
+                        )
+                    if sync_ok:
+                        _save_state_df(new_df)
+                        _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
+                        st.session_state[_k("last_delete_msg")] = f"已清空 {deleted_n} 筆並永久保存。"
+                    else:
+                        st.session_state[_k("last_delete_msg")] = "清空未通過永久保存驗證，畫面資料未切換。"
                     st.rerun()
         with action_cols[7]:
             st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 刪除全選 / 取消 → 更新價格 / 更新績效 → 儲存同步")
@@ -6279,10 +6353,17 @@ def main():
                 new_df = _append_records_dedup_by_business_key(_get_state_df(), pd.DataFrame([row]))
                 new_df = _backfill_perf_columns(new_df)
                 new_df = _apply_mode_labels(new_df)
-                _save_state_df(new_df)
-                ok = _save_records_dual(new_df)
+                added_rows = new_df[new_df["record_id"].astype(str) == _safe_str(row.get("record_id"))].to_dict(orient="records")
+                with st.spinner("正在新增並永久保存..."):
+                    ok = _save_records_mutation_fast_ui(
+                        new_df,
+                        action_name="手動新增推薦紀錄",
+                        upsert_rows=added_rows,
+                        previous_count=len(_get_state_df()),
+                    )
                 if ok:
-                    st.success("已加入並同步成功")
+                    _save_state_df(new_df)
+                    st.success("已加入並永久保存成功")
                     st.rerun()
 
     if active_tab == "📊 系統績效分析":
