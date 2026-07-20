@@ -943,7 +943,9 @@ def schedule_records_github_sync(records: Any, state: dict[str, Any], reason: st
     cfg = github_config()
     if not cfg["token"]:
         return False, "GitHub 未設定"
-    normalized = records_as_rows_exact(records)
+    # V162：save_records_mutation_fast 已產生 JSON-safe list；不要在按鈕 callback 內再次掃描/清理 20MB 全檔。
+    # 非 list 輸入才走相容正規化。
+    normalized = records if isinstance(records, list) else records_as_rows_exact(records)
     safe_state = dict(state)
     with _RECORDS_GITHUB_LOCK:
         _RECORDS_GITHUB_PENDING = (normalized, safe_state, _safe_str(reason) or "record mutation")
@@ -971,27 +973,34 @@ def write_records_firestore_mutation(
     The recommendation record file can exceed 20 MB.  A delete/edit used to
     rewrite every Firestore document and then upload the entire GitHub JSON in
     the Streamlit button callback, which made the page appear to run forever.
-    This helper verifies that Firestore already contains the previous snapshot,
-    applies only the affected document operations, and refreshes the summary
-    hash.  If the previous snapshot cannot be verified it safely falls back to
-    the full writer instead of claiming success.
+    This helper applies only the affected document operations and refreshes the
+    summary hash.  A stale/missing remote summary is repaired in place; it never
+    falls back to rewriting all recommendation documents inside a delete/edit
+    button callback.
     """
     if not firebase_configured():
         return False, "Firebase 未設定"
     try:
         _init_firebase_app()
         db = firestore.client()
-        normalized = records_as_rows_exact(records)
+        # V162：增量刪除不再因遠端摘要筆數不同而回退成「重寫全部 1800+ 文件」。
+        # 這個回退是刪除按鈕長時間運算的主因。即使摘要落後，仍只執行指定 delete/upsert，
+        # 然後以目前本機筆數修復摘要；完整一致性可由上方「儲存同步」另行驗證。
+        try:
+            normalized_count = len(records)
+        except Exception:
+            normalized_count = len(records_as_rows_exact(records))
         summary_ref = db.collection("system").document("godpick_records_summary")
         summary = summary_ref.get()
         summary_data = summary.to_dict() or {} if summary.exists else {}
+        count_mismatch = False
+        old_count = -1
         if expected_previous_count is not None:
             try:
                 old_count = int(summary_data.get("count"))
             except Exception:
                 old_count = -1
-            if old_count != int(expected_previous_count):
-                return write_records_firestore(normalized, state)
+            count_mismatch = old_count != int(expected_previous_count)
 
         records_ref = db.collection("godpick_records")
         delete_set = {_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)}
@@ -1014,7 +1023,7 @@ def write_records_firestore_mutation(
                 "set",
                 summary_ref,
                 {
-                    "count": len(normalized),
+                    "count": normalized_count,
                     "payload_hash": state["payload_hash"],
                     "revision": state.get("revision"),
                     "updated_at_epoch": state.get("updated_at_epoch"),
@@ -1031,7 +1040,7 @@ def write_records_firestore_mutation(
         verify_data = verify.to_dict() or {}
         if _safe_str(verify_data.get("payload_hash")) != state["payload_hash"]:
             return False, "Firestore mutation 摘要回讀驗證不一致"
-        if int(verify_data.get("count") or -1) != len(normalized):
+        if int(verify_data.get("count") or -1) != normalized_count:
             return False, "Firestore mutation 筆數回讀驗證不一致"
 
         # Verify the actual removed documents for delete operations.  This is a
@@ -1042,9 +1051,10 @@ def write_records_firestore_mutation(
             if remaining:
                 return False, f"Firestore mutation 刪除回讀仍存在：{','.join(remaining[:10])}"
 
+        mismatch_note = "｜已修復遠端摘要筆數落差" if count_mismatch else ""
         return True, (
             f"Firestore 增量同步完成：刪除 {len(delete_set)} 筆、"
-            f"更新 {len(normalized_upserts)} 筆、目前 {len(normalized)} 筆"
+            f"更新 {len(normalized_upserts)} 筆、目前 {normalized_count} 筆{mismatch_note}"
         )
     except Exception as exc:
         return False, f"Firestore records 增量寫入失敗：{exc}"

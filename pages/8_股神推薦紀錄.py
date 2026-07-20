@@ -152,7 +152,7 @@ PFX = "godpick_record_"
 GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
-DELETE_FIX_VERSION = "record_delete_persist_sync_fix_v2_20260614"
+DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
 RECORD_SPEED_FIX_VERSION = "record_v157_fast_state_normalize_v1_20260614"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 MARKET_TREND_V38_LINK_VERSION = "record_market_trend_v76_practical_entry_fields_20260430"
@@ -2194,7 +2194,13 @@ def _save_records_mutation_fast_ui(
             previous_count=previous_count,
             reason=action_name,
         )
-        return _apply_persistence_report(report, action_name=action_name, github_deferred_ok=True)
+        _apply_persistence_report(report, action_name=action_name, github_deferred_ok=True)
+        # V162：表格 mutation 以本機原子寫入是否成功決定畫面是否切換。
+        # 遠端 Firestore/GitHub 失敗或排隊中會在同步明細顯示，但不再讓刪除按鈕無限等待、也不讓已刪資料留在畫面。
+        local_ok = bool(getattr(report, "local_ok", False))
+        st.session_state[_k("last_mutation_local_ok")] = local_ok
+        st.session_state[_k("last_mutation_permanent_ok")] = bool(getattr(report, "permanent_ok", False))
+        return local_ok
     # Compatibility fallback for deployments that did not yet load the new
     # persistence helper.  This can be slower but must never pretend success.
     return _save_records_dual(clean_df)
@@ -5587,7 +5593,7 @@ def main():
         subtitle="追蹤 7_股神推薦 推薦股票，支援 GitHub + Firestore 雙寫、每日更新、實際交易分析、績效統計、Excel 匯出，並可匯入 4_自選股中心。",
     )
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
-    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜v161 快速永久刪除＋record_id穩定勾選")
+    st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜V162 表單批次送出＋本機先行刪除＋遠端不阻塞")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
@@ -6023,231 +6029,270 @@ def main():
         editor_key = _record_editor_key_for_mode(show_cols_mode)
         editor_df = _apply_sticky_editor_checkboxes(editor_key, editor_df, "record_id", ["匯入自選", "刪除"])
 
-        # v70：建立畫面列序 → record_id 對照，供 on_change 在 rerun 前立即保存 checkbox 狀態。
+        # V162：將勾選與欄位編輯放入 form。
+        # 使用者點 checkbox / 修改儲存格時不會觸發整頁 rerun；只有按下表單按鈕才執行。
         editor_id_map_key = _k(f"{editor_key}_record_id_map")
         if "record_id" in editor_df.columns:
             st.session_state[editor_id_map_key] = [_safe_str(x) for x in editor_df["record_id"].astype(str).tolist()]
         else:
             st.session_state[editor_id_map_key] = []
 
-        edited_df = st.data_editor(
-            editor_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            key=editor_key,
-            column_config={
-                "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
-                "刪除": st.column_config.CheckboxColumn("刪除"),
-                "record_id": None,  # 隱藏但保留，供刪除 / 編輯用
-                "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
-                "股票名稱": st.column_config.TextColumn("股票名稱", disabled=True),
-                "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
-                "推薦等級": st.column_config.TextColumn("推薦等級", disabled=True),
-                "推薦總分": st.column_config.NumberColumn("推薦總分", format="%.2f", disabled=True),
-                "股神決策模式": st.column_config.TextColumn("股神決策模式", disabled=True),
-                "股神進場建議": st.column_config.TextColumn("股神進場建議", disabled=True),
-                "推薦分層": st.column_config.TextColumn("推薦分層", disabled=True),
-                "建議部位%": st.column_config.NumberColumn("建議部位%", format="%.1f", disabled=True),
-                "風險報酬比": st.column_config.NumberColumn("風險報酬比", format="%.2f", disabled=True),
-                "追價風險分": st.column_config.NumberColumn("追價風險分", format="%.2f", disabled=True),
-                "停損距離%": st.column_config.NumberColumn("停損距離%", format="%.2f", disabled=True),
-                "目標報酬%": st.column_config.NumberColumn("目標報酬%", format="%.2f", disabled=True),
-                "不建議買進原因": st.column_config.TextColumn("不建議買進原因", disabled=True),
-                "最佳操作劇本": st.column_config.TextColumn("最佳操作劇本", disabled=True),
-                "隔日操作建議": st.column_config.TextColumn("隔日操作建議", disabled=True),
-                "轉弱條件": st.column_config.TextColumn("轉弱條件", disabled=True),
+        record_column_config = {
+            "匯入自選": st.column_config.CheckboxColumn("匯入自選"),
+            "刪除": st.column_config.CheckboxColumn("刪除"),
+            "record_id": None,
+            "股票代號": st.column_config.TextColumn("股票代號", disabled=True),
+            "股票名稱": st.column_config.TextColumn("股票名稱", disabled=True),
+            "推薦模式": st.column_config.TextColumn("推薦模式", disabled=True),
+            "推薦等級": st.column_config.TextColumn("推薦等級", disabled=True),
+            "推薦總分": st.column_config.NumberColumn("推薦總分", format="%.2f", disabled=True),
+            "股神決策模式": st.column_config.TextColumn("股神決策模式", disabled=True),
+            "股神進場建議": st.column_config.TextColumn("股神進場建議", disabled=True),
+            "推薦分層": st.column_config.TextColumn("推薦分層", disabled=True),
+            "建議部位%": st.column_config.NumberColumn("建議部位%", format="%.1f", disabled=True),
+            "風險報酬比": st.column_config.NumberColumn("風險報酬比", format="%.2f", disabled=True),
+            "追價風險分": st.column_config.NumberColumn("追價風險分", format="%.2f", disabled=True),
+            "停損距離%": st.column_config.NumberColumn("停損距離%", format="%.2f", disabled=True),
+            "目標報酬%": st.column_config.NumberColumn("目標報酬%", format="%.2f", disabled=True),
+            "不建議買進原因": st.column_config.TextColumn("不建議買進原因", disabled=True),
+            "最佳操作劇本": st.column_config.TextColumn("最佳操作劇本", disabled=True),
+            "隔日操作建議": st.column_config.TextColumn("隔日操作建議", disabled=True),
+            "轉弱條件": st.column_config.TextColumn("轉弱條件", disabled=True),
+            "股神決策分數": st.column_config.NumberColumn("股神決策分數", format="%.2f", disabled=True),
+            "股神建議動作": st.column_config.TextColumn("股神建議動作", disabled=True),
+            "股神信心": st.column_config.TextColumn("股神信心", disabled=True),
+            "股神進場區間": st.column_config.TextColumn("股神進場區間", disabled=True),
+            "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
+            "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
+            "飆股起漲分數": st.column_config.NumberColumn("飆股起漲分數", format="%.2f", disabled=True),
+            "起漲等級": st.column_config.TextColumn("起漲等級", disabled=True),
+            "起漲摘要": st.column_config.TextColumn("起漲摘要", disabled=True),
+            "交易可行分數": st.column_config.NumberColumn("交易可行分數", format="%.2f", disabled=True),
+            "類股熱度分數": st.column_config.NumberColumn("類股熱度分數", format="%.2f", disabled=True),
+            "強勢族群等級": st.column_config.TextColumn("強勢族群等級", disabled=True),
+            "族群資金流分數": st.column_config.NumberColumn("族群資金流分數", format="%.2f", disabled=True),
+            "族群輪動狀態": st.column_config.TextColumn("族群輪動狀態", disabled=True),
+            "同族群強勢比例": st.column_config.NumberColumn("同族群強勢比例", format="%.2f", disabled=True),
+            "同族群推薦密度": st.column_config.NumberColumn("同族群推薦密度", format="%.2f", disabled=True),
+            "同族群平均量能分": st.column_config.NumberColumn("同族群平均量能分", format="%.2f", disabled=True),
+            "族群策略建議": st.column_config.TextColumn("族群策略建議", disabled=True),
+            "族群資金流說明": st.column_config.TextColumn("族群資金流說明", width="large", disabled=True),
+            "最新價": st.column_config.NumberColumn("最新價", format="%.2f", disabled=True),
+            "損益幅%": st.column_config.NumberColumn("損益幅%", format="%.2f", disabled=True),
+            "3日績效%": st.column_config.NumberColumn("3日績效%", format="%.2f", disabled=True),
+            "5日績效%": st.column_config.NumberColumn("5日績效%", format="%.2f", disabled=True),
+            "10日績效%": st.column_config.NumberColumn("10日績效%", format="%.2f", disabled=True),
+            "20日績效%": st.column_config.NumberColumn("20日績效%", format="%.2f", disabled=True),
+            "目前狀態": st.column_config.SelectboxColumn("目前狀態", options=STATUS_OPTIONS),
+            "是否已實際買進": st.column_config.CheckboxColumn("是否已實際買進"),
+            "實際買進價": st.column_config.NumberColumn("實際買進價", format="%.2f"),
+            "實際賣出價": st.column_config.NumberColumn("實際賣出價", format="%.2f"),
+            "實際報酬%": st.column_config.NumberColumn("實際報酬%", format="%.2f", disabled=True),
+            "是否達停損": st.column_config.CheckboxColumn("是否達停損"),
+            "是否達目標1": st.column_config.CheckboxColumn("是否達目標1"),
+            "是否達目標2": st.column_config.CheckboxColumn("是否達目標2"),
+            "持有天數": st.column_config.NumberColumn("持有天數", format="%d", disabled=True),
+            "推薦日期": st.column_config.TextColumn("推薦日期", disabled=True),
+            "推薦時間": st.column_config.TextColumn("推薦時間", disabled=True),
+            "模式績效標籤": st.column_config.TextColumn("模式績效標籤", disabled=True),
+            "股神推論": st.column_config.TextColumn("股神推論", width="large", disabled=True),
+            "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large", disabled=True),
+            "備註": st.column_config.TextColumn("備註", width="large"),
+        }
 
-                "股神決策分數": st.column_config.NumberColumn("股神決策分數", format="%.2f", disabled=True),
-                "股神建議動作": st.column_config.TextColumn("股神建議動作", disabled=True),
-                "股神信心": st.column_config.TextColumn("股神信心", disabled=True),
-                "股神進場區間": st.column_config.TextColumn("股神進場區間", disabled=True),
-                "技術結構分數": st.column_config.NumberColumn("技術結構分數", format="%.2f", disabled=True),
-                "起漲前兆分數": st.column_config.NumberColumn("起漲前兆分數", format="%.2f", disabled=True),
-                "飆股起漲分數": st.column_config.NumberColumn("飆股起漲分數", format="%.2f", disabled=True),
-                "起漲等級": st.column_config.TextColumn("起漲等級", disabled=True),
-                "起漲摘要": st.column_config.TextColumn("起漲摘要", disabled=True),
-                "交易可行分數": st.column_config.NumberColumn("交易可行分數", format="%.2f", disabled=True),
-                "類股熱度分數": st.column_config.NumberColumn("類股熱度分數", format="%.2f", disabled=True),
-                "強勢族群等級": st.column_config.TextColumn("強勢族群等級", disabled=True),
-                "族群資金流分數": st.column_config.NumberColumn("族群資金流分數", format="%.2f", disabled=True),
-                "族群輪動狀態": st.column_config.TextColumn("族群輪動狀態", disabled=True),
-                "同族群強勢比例": st.column_config.NumberColumn("同族群強勢比例", format="%.2f", disabled=True),
-                "同族群推薦密度": st.column_config.NumberColumn("同族群推薦密度", format="%.2f", disabled=True),
-                "同族群平均量能分": st.column_config.NumberColumn("同族群平均量能分", format="%.2f", disabled=True),
-                "族群策略建議": st.column_config.TextColumn("族群策略建議", disabled=True),
-                "族群資金流說明": st.column_config.TextColumn("族群資金流說明", width="large", disabled=True),
-                "最新價": st.column_config.NumberColumn("最新價", format="%.2f", disabled=True),
-                "損益幅%": st.column_config.NumberColumn("損益幅%", format="%.2f", disabled=True),
-                "3日績效%": st.column_config.NumberColumn("3日績效%", format="%.2f", disabled=True),
-                "5日績效%": st.column_config.NumberColumn("5日績效%", format="%.2f", disabled=True),
-                "10日績效%": st.column_config.NumberColumn("10日績效%", format="%.2f", disabled=True),
-                "20日績效%": st.column_config.NumberColumn("20日績效%", format="%.2f", disabled=True),
-                "目前狀態": st.column_config.SelectboxColumn("目前狀態", options=STATUS_OPTIONS),
-                "是否已實際買進": st.column_config.CheckboxColumn("是否已實際買進"),
-                "實際買進價": st.column_config.NumberColumn("實際買進價", format="%.2f"),
-                "實際賣出價": st.column_config.NumberColumn("實際賣出價", format="%.2f"),
-                "實際報酬%": st.column_config.NumberColumn("實際報酬%", format="%.2f", disabled=True),
-                "是否達停損": st.column_config.CheckboxColumn("是否達停損"),
-                "是否達目標1": st.column_config.CheckboxColumn("是否達目標1"),
-                "是否達目標2": st.column_config.CheckboxColumn("是否達目標2"),
-                "持有天數": st.column_config.NumberColumn("持有天數", format="%d", disabled=True),
-                "推薦日期": st.column_config.TextColumn("推薦日期", disabled=True),
-                "推薦時間": st.column_config.TextColumn("推薦時間", disabled=True),
-                "模式績效標籤": st.column_config.TextColumn("模式績效標籤", disabled=True),
-                "股神推論": st.column_config.TextColumn("股神推論", width="large", disabled=True),
-                "推薦理由摘要": st.column_config.TextColumn("推薦理由摘要", width="large", disabled=True),
-                "備註": st.column_config.TextColumn("備註", width="large"),
-            },
-        )
+        st.info("V162 快速批次模式：勾選與編輯時不會立即重跑；完成選取後再按下方按鈕才執行。")
+        form_key = _k(f"record_batch_form_{show_cols_mode}")
+        with st.form(form_key, clear_on_submit=False, border=True):
+            edited_df = st.data_editor(
+                editor_df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key=editor_key,
+                column_config=record_column_config,
+            )
 
-        _sync_editor_selections_from_returned(edited_df, "record_id", ["匯入自選", "刪除"])
+            _import_n = len(_selection_ids("匯入自選"))
+            _delete_n = len(_selection_ids("刪除"))
+            st.caption(
+                f"上次已送出的勾選：匯入自選 {_import_n} 筆｜刪除 {_delete_n} 筆。"
+                "本次表格勾選尚未按按鈕前，不會啟動任何計算。"
+            )
 
-        # v161：勾選狀態依 record_id 保存，不再因 rerun / 排序 / editor nonce 跳掉。
-        _import_n = len(_selection_ids("匯入自選"))
-        _delete_n = len(_selection_ids("刪除"))
-        st.caption(f"目前勾選：匯入自選 {_import_n} 筆｜刪除 {_delete_n} 筆。v161 record_id 穩定選取版。")
+            action_cols = st.columns([1.6, 1.2, 1.2, 1.15, 1.15, 1.2, 1.2, 2.6])
+            with action_cols[0]:
+                target_group = st.text_input(
+                    "匯入自選群組",
+                    value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"),
+                    key=_k("watchlist_target_group"),
+                )
+            with action_cols[1]:
+                import_clicked = st.form_submit_button("📥 匯入勾選到4_自選股", use_container_width=True)
+            with action_cols[2]:
+                apply_clicked = st.form_submit_button("✅ 套用編輯", use_container_width=True)
+            with action_cols[3]:
+                select_all_clicked = st.form_submit_button(
+                    "☑️ 刪除全選",
+                    use_container_width=True,
+                    help="全選目前畫面顯示的紀錄為待刪除；不會立即刪除。",
+                )
+            with action_cols[4]:
+                cancel_delete_clicked = st.form_submit_button(
+                    "↩️ 刪除取消",
+                    use_container_width=True,
+                    help="取消所有刪除勾選，不影響匯入自選勾選。",
+                )
+            with action_cols[5]:
+                delete_clicked = st.form_submit_button("🗑️ 刪除勾選", use_container_width=True, type="primary")
+            with action_cols[6]:
+                clear_filter_clicked = st.form_submit_button("🧼 清空目前篩選", use_container_width=True)
+            with action_cols[7]:
+                st.caption("勾選/編輯不會重跑；按按鈕後才送出。刪除先本機生效，遠端同步狀態會分開顯示。")
 
-        action_cols = st.columns([1.6, 1.2, 1.2, 1.15, 1.15, 1.2, 1.2, 2.6])
-        with action_cols[0]:
-            target_group = st.text_input("匯入自選群組", value=st.session_state.get(_k("watchlist_target_group"), "股神推薦"), key=_k("watchlist_target_group"))
-        with action_cols[1]:
-            if st.button("📥 匯入勾選到4_自選股", use_container_width=True):
-                selected_ids = _collect_editor_selected_ids(editor_key, edited_df, "record_id", "匯入自選")
-                ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
-                if ok:
-                    _set_selection_ids("匯入自選", [])
-                _set_status(msg, "success" if ok else "warning")
-                st.rerun()
-            detail_msg = _safe_str(st.session_state.get(_k("watchlist_import_detail"), ""))
-            if detail_msg:
-                st.caption(detail_msg)
-        with action_cols[2]:
-            if st.button("✅ 套用編輯", use_container_width=True):
-                master = live_df.copy()
-                edit_map = {str(r["record_id"]): dict(r) for _, r in edited_df.iterrows()}
-                for idx in master.index:
-                    rec_id = _safe_str(master.at[idx, "record_id"])
-                    if rec_id not in edit_map:
-                        continue
-                    src = edit_map[rec_id]
-                    for c in [c for c in master.columns if c in src]:
-                        if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細",  "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要"]:
-                            continue
-                        master.at[idx, c] = src.get(c)
-                    recalc = _recalc_row(master.loc[idx].to_dict())
-                    for k2, v2 in recalc.items():
-                        if k2 in master.columns:
-                            master.at[idx, k2] = v2
-                master = _apply_mode_labels(master)
-                changed_ids = [_safe_str(x) for x in edited_df.get("record_id", pd.Series(dtype=str)).astype(str).tolist() if _safe_str(x)]
-                changed_rows = master[master["record_id"].astype(str).isin(set(changed_ids))].to_dict(orient="records")
-                with st.spinner("正在永久保存本次編輯；大型 GitHub 備份不阻塞此按鈕..."):
-                    ok = _save_records_mutation_fast_ui(
-                        master,
-                        action_name="套用編輯",
-                        upsert_rows=changed_rows,
-                        previous_count=len(live_df),
-                    )
-                if ok:
-                    _save_state_df(master)
-                    st.session_state[_k("last_delete_msg")] = f"已套用並永久保存 {len(changed_rows)} 筆編輯。"
-                    st.rerun()
+        any_form_action = any([
+            import_clicked,
+            apply_clicked,
+            select_all_clicked,
+            cancel_delete_clicked,
+            delete_clicked,
+            clear_filter_clicked,
+        ])
+        if any_form_action:
+            # 只在使用者按下表單按鈕時才把 checkbox 寫入穩定 record_id 狀態。
+            _sync_editor_selections_from_returned(edited_df, "record_id", ["匯入自選", "刪除"])
+
         def _current_import_ids_from_editor() -> list[str]:
             return _collect_editor_selected_ids(editor_key, edited_df, "record_id", "匯入自選")
 
-        with action_cols[3]:
-            if st.button("☑️ 刪除全選", use_container_width=True, help="全選目前畫面顯示的紀錄為待刪除；不會立即刪除，仍需再按「刪除勾選」。"):
-                if "record_id" not in edited_df.columns or edited_df.empty:
-                    st.warning("目前畫面沒有可全選的紀錄。")
-                else:
-                    visible_delete_ids = [_safe_str(x) for x in edited_df["record_id"].astype(str).tolist() if _safe_str(x)]
-                    _reset_record_editor_for_bulk_delete(
-                        show_cols_mode,
-                        delete_ids=visible_delete_ids,
-                        import_ids=_current_import_ids_from_editor(),
-                    )
-                    st.session_state[_k("last_delete_msg")] = f"已勾選目前顯示 {len(visible_delete_ids)} 筆為待刪除；確認後請按「刪除勾選」。"
-                    st.rerun()
-        with action_cols[4]:
-            if st.button("↩️ 刪除取消", use_container_width=True, help="取消目前所有刪除勾選，不影響匯入自選勾選。"):
+        if import_clicked:
+            selected_ids = _collect_editor_selected_ids(editor_key, edited_df, "record_id", "匯入自選")
+            ok, msg = _export_records_to_watchlist(live_df, selected_ids, target_group)
+            if ok:
+                _set_selection_ids("匯入自選", [])
+                _reset_record_editor_for_bulk_delete(
+                    show_cols_mode,
+                    delete_ids=_selection_ids("刪除"),
+                    import_ids=[],
+                )
+            _set_status(msg, "success" if ok else "warning")
+            st.rerun()
+
+        if apply_clicked:
+            master = live_df.copy()
+            edit_map = {str(r["record_id"]): dict(r) for _, r in edited_df.iterrows()}
+            for idx in master.index:
+                rec_id = _safe_str(master.at[idx, "record_id"])
+                if rec_id not in edit_map:
+                    continue
+                src = edit_map[rec_id]
+                for c in [c for c in master.columns if c in src]:
+                    if c in ["record_id", "股票代號", "股票名稱", "推薦模式", "推薦等級", "推薦總分", "上漲機率估計%", "上漲機率等級", "上漲機率信心", "上漲機率說明", "上漲機率因子明細", "族群資金流分數", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "技術結構分數", "起漲前兆分數", "機會股分數", "低檔位置分數", "拉回承接分數", "支撐回測分數", "止跌轉強分數", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群輪動狀態", "族群策略建議", "族群資金流說明", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "最新價", "損益幅%", "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%", "推薦日期", "推薦時間", "推薦理由摘要", "匯入自選", "刪除"]:
+                        continue
+                    master.at[idx, c] = src.get(c)
+                recalc = _recalc_row(master.loc[idx].to_dict())
+                for k2, v2 in recalc.items():
+                    if k2 in master.columns:
+                        master.at[idx, k2] = v2
+            master = _apply_mode_labels(master)
+            changed_ids = [_safe_str(x) for x in edited_df.get("record_id", pd.Series(dtype=str)).astype(str).tolist() if _safe_str(x)]
+            changed_rows = master[master["record_id"].astype(str).isin(set(changed_ids))].to_dict(orient="records")
+            local_ok = _save_records_mutation_fast_ui(
+                master,
+                action_name="套用編輯",
+                upsert_rows=changed_rows,
+                previous_count=len(live_df),
+            )
+            if local_ok:
+                _save_state_df(master)
+                st.session_state[_k("last_delete_msg")] = f"已套用並保存 {len(changed_rows)} 筆編輯；遠端狀態請看同步明細。"
+            st.rerun()
+
+        if select_all_clicked:
+            if "record_id" not in edited_df.columns or edited_df.empty:
+                st.warning("目前畫面沒有可全選的紀錄。")
+            else:
+                visible_delete_ids = [_safe_str(x) for x in edited_df["record_id"].astype(str).tolist() if _safe_str(x)]
+                _reset_record_editor_for_bulk_delete(
+                    show_cols_mode,
+                    delete_ids=visible_delete_ids,
+                    import_ids=_current_import_ids_from_editor(),
+                )
+                st.session_state[_k("last_delete_msg")] = f"已勾選目前顯示 {len(visible_delete_ids)} 筆為待刪除；確認後再按『刪除勾選』。"
+                st.rerun()
+
+        if cancel_delete_clicked:
+            _reset_record_editor_for_bulk_delete(
+                show_cols_mode,
+                delete_ids=[],
+                import_ids=_current_import_ids_from_editor(),
+            )
+            st.session_state[_k("last_delete_msg")] = "已取消所有刪除勾選。"
+            st.rerun()
+
+        if delete_clicked:
+            delete_ids = _collect_editor_selected_ids(editor_key, edited_df, "record_id", "刪除")
+            if not delete_ids:
+                st.session_state[_k("last_delete_msg")] = "請先勾選要刪除的紀錄，再按『刪除勾選』。"
+                _set_status(st.session_state[_k("last_delete_msg")], "warning")
+                st.rerun()
+
+            before_n = len(live_df)
+            new_df = _delete_records_by_ids(live_df, delete_ids)
+            after_n = len(new_df)
+            deleted_n = max(before_n - after_n, 0)
+            remove_set = {_safe_str(x) for x in delete_ids if _safe_str(x)}
+            keep_import_ids = _remove_ids_from_list(_current_import_ids_from_editor(), remove_set)
+
+            if deleted_n <= 0:
+                st.session_state[_k("last_delete_msg")] = "沒有刪到資料：勾選的 record_id 與目前紀錄不一致，請重新載入後再試。"
+                _set_selection_ids("刪除", [])
+                _set_status(st.session_state[_k("last_delete_msg")], "error")
+                st.rerun()
+
+            # 先完成本機原子保存並立即切換畫面；Firestore / GitHub 各自回報，不再因遠端落差阻塞刪除。
+            local_ok = _save_records_mutation_fast_ui(
+                new_df,
+                action_name=f"刪除 {deleted_n} 筆紀錄",
+                deleted_ids=delete_ids,
+                previous_count=before_n,
+            )
+            if local_ok:
+                _save_state_df(new_df)
                 _reset_record_editor_for_bulk_delete(
                     show_cols_mode,
                     delete_ids=[],
-                    import_ids=_current_import_ids_from_editor(),
+                    import_ids=keep_import_ids,
                 )
-                st.session_state[_k("last_delete_msg")] = "已取消所有刪除勾選。"
+                st.session_state[_k("last_delete_msg")] = (
+                    f"已刪除 {deleted_n} 筆並完成本機原子保存；"
+                    "Firestore / GitHub 同步結果請查看『同步明細』，不會再卡住畫面。"
+                )
+            else:
+                st.session_state[_k("last_delete_msg")] = "本機保存失敗，為避免畫面與檔案不一致，本次未切換資料。"
+            st.rerun()
+
+        if clear_filter_clicked:
+            source_df = view_df if not truncated else view_df.head(int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)))
+            if source_df.empty:
+                st.session_state[_k("last_delete_msg")] = "目前篩選結果沒有資料可清空。"
+                _set_status(st.session_state[_k("last_delete_msg")], "warning")
                 st.rerun()
-        with action_cols[5]:
-            if st.button("🗑️ 刪除勾選", use_container_width=True):
-                if "刪除" not in edited_df.columns:
-                    st.warning("目前表格缺少刪除欄位，請重新載入後再試。")
-                else:
-                    delete_ids = _collect_editor_selected_ids(editor_key, edited_df, "record_id", "刪除")
-
-                    if not delete_ids:
-                        st.warning("請先勾選要刪除的紀錄。")
-                    else:
-                        before_n = len(live_df)
-                        new_df = _delete_records_by_ids(live_df, delete_ids)
-                        after_n = len(new_df)
-                        deleted_n = max(before_n - after_n, 0)
-                        remove_set = {_safe_str(x) for x in delete_ids if _safe_str(x)}
-                        keep_import_ids = _remove_ids_from_list(_current_import_ids_from_editor(), remove_set)
-
-                        if deleted_n <= 0:
-                            st.session_state[_k("last_delete_msg")] = "沒有刪到資料：畫面勾選的 record_id 與目前紀錄不一致，請按重新載入後再試。"
-                            _set_selection_ids("刪除", [])
-                            st.rerun()
-                        else:
-                            with st.spinner(f"正在快速刪除 {deleted_n} 筆並永久驗證；不重傳整份大型 GitHub JSON..."):
-                                sync_ok = _save_records_mutation_fast_ui(
-                                    new_df,
-                                    action_name=f"刪除 {deleted_n} 筆紀錄",
-                                    deleted_ids=delete_ids,
-                                    previous_count=before_n,
-                                )
-                            if sync_ok:
-                                _save_state_df(new_df)
-                                _reset_record_editor_for_bulk_delete(
-                                    show_cols_mode,
-                                    delete_ids=[],
-                                    import_ids=keep_import_ids,
-                                )
-                                st.session_state[_k("last_delete_msg")] = (
-                                    f"已刪除 {deleted_n} 筆並完成本機＋遠端永久驗證；"
-                                    "GitHub 大型備份可稍後按『儲存同步』補齊。"
-                                )
-                            else:
-                                st.session_state[_k("last_delete_msg")] = "刪除未通過永久保存驗證，畫面資料未切換；請查看同步明細。"
-                            st.rerun()
-        with action_cols[6]:
-            if st.button("🧼 清空目前篩選", use_container_width=True):
-                source_df = view_df if not truncated else view_df.head(int(st.session_state.get(_k("visible_limit"), FAST_VISIBLE_LIMIT)))
-                if source_df.empty:
-                    st.warning("目前篩選結果沒有資料可清空。")
-                else:
-                    new_df = _clear_filtered_records(live_df, source_df)
-                    before_n = len(live_df)
-                    after_n = len(new_df)
-                    deleted_n = max(before_n - after_n, 0)
-                    delete_ids = [_safe_str(x) for x in source_df["record_id"].astype(str).tolist() if _safe_str(x)] if "record_id" in source_df.columns else []
-                    with st.spinner(f"正在快速清空 {deleted_n} 筆並永久驗證..."):
-                        sync_ok = _save_records_mutation_fast_ui(
-                            new_df,
-                            action_name=f"清空篩選 {deleted_n} 筆",
-                            deleted_ids=delete_ids,
-                            previous_count=before_n,
-                        )
-                    if sync_ok:
-                        _save_state_df(new_df)
-                        _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
-                        st.session_state[_k("last_delete_msg")] = f"已清空 {deleted_n} 筆並永久保存。"
-                    else:
-                        st.session_state[_k("last_delete_msg")] = "清空未通過永久保存驗證，畫面資料未切換。"
-                    st.rerun()
-        with action_cols[7]:
-            st.caption("流程：篩選 → 欄位順序調整 → 編輯 / 匯入自選 → 刪除全選 / 取消 → 更新價格 / 更新績效 → 儲存同步")
+            new_df = _clear_filtered_records(live_df, source_df)
+            before_n = len(live_df)
+            after_n = len(new_df)
+            deleted_n = max(before_n - after_n, 0)
+            delete_ids = [_safe_str(x) for x in source_df["record_id"].astype(str).tolist() if _safe_str(x)] if "record_id" in source_df.columns else []
+            local_ok = _save_records_mutation_fast_ui(
+                new_df,
+                action_name=f"清空篩選 {deleted_n} 筆",
+                deleted_ids=delete_ids,
+                previous_count=before_n,
+            )
+            if local_ok:
+                _save_state_df(new_df)
+                _reset_record_editor_for_bulk_delete(show_cols_mode, delete_ids=[], import_ids=[])
+                st.session_state[_k("last_delete_msg")] = f"已清空 {deleted_n} 筆並完成本機保存；遠端狀態請看同步明細。"
+            st.rerun()
 
     if active_tab == "🧠 股神決策":
         render_pro_section("股神模式進出場決策", "將 7_股神推薦 的分數欄位，結合最新價、停損距離、歷史績效與模式標籤，轉成可操作建議。")
