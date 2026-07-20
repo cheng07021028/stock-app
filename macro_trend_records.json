@@ -1,5 +1,41 @@
 [
   {
+    "updated_at": "2026-07-20 22:37:46",
+    "market_score": 40.6,
+    "market_trend": "中性偏空",
+    "market_risk_level": "中高",
+    "risk_gate": "conservative",
+    "twse_index": 42449.7,
+    "twse_change": -221.8922798552473,
+    "twse_change_pct": -0.52,
+    "otc_index": 378.44000244140625,
+    "otc_change": -28.57000732421875,
+    "otc_change_pct": -7.019485181868296,
+    "futures_index": 41300.0,
+    "futures_change": -2966.0,
+    "futures_change_pct": null,
+    "data_quality": "良好",
+    "version": "v68_overnight_global_market_bridge"
+  },
+  {
+    "updated_at": "2026-07-20 20:20:51",
+    "market_score": 36.2,
+    "market_trend": "中性偏空",
+    "market_risk_level": "中高",
+    "risk_gate": "conservative",
+    "twse_index": 42449.7,
+    "twse_change": -221.8922798552473,
+    "twse_change_pct": -0.52,
+    "otc_index": 378.44000244140625,
+    "otc_change": -28.57000732421875,
+    "otc_change_pct": -7.019485181868296,
+    "futures_index": 41300.0,
+    "futures_change": -2966.0,
+    "futures_change_pct": null,
+    "data_quality": "良好",
+    "version": "v68_overnight_global_market_bridge"
+  },
+  {
     "updated_at": "2026-07-11 22:59:04",
     "market_score": 53.1,
     "market_trend": "震盪",
@@ -5382,5 +5418,25 @@
     "next_day_up_probability_pct": 1.7,
     "next_day_down_probability_pct": 90.7,
     "next_day_expected_return_pct": -0.73
+  },
+  {
+    "version": "v109_2_startup_macro_github_sync_hard_off",
+    "updated_at": "2026-07-20 22:39:03",
+    "data_date": "2026-07-20",
+    "market_score": 30.5,
+    "market_trend": "空頭",
+    "market_risk_level": "高",
+    "risk_gate": "保守觀望",
+    "twse_index": 42449.7,
+    "twse_change_pct": -0.5192,
+    "otc_change_pct": -7.0195,
+    "source": "startup Yahoo batch + cache fallback",
+    "next_day_forecast_date": "2026-07-21",
+    "next_day_market_direction": "偏空下跌",
+    "next_day_market_score": 36.0,
+    "next_day_confidence": "中",
+    "next_day_up_probability_pct": 5.3,
+    "next_day_down_probability_pct": 75.9,
+    "next_day_expected_return_pct": -0.49
   }
 ]
