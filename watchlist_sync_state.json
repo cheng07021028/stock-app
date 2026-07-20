@@ -1,10 +1,1 @@
-{
-  "version": "watchlist_durable_v2",
-  "updated_at": "2026-07-19 15:11:19",
-  "updated_at_utc": "2026-07-19T15:11:19Z",
-  "updated_at_epoch": 1784473879.0723743,
-  "revision": 1784473879072416631,
-  "payload_hash": "1b1f3da2fd4e818110d1b41014463764d9055e9d5dcb5a93a5a68713371fe424",
-  "group_count": 65,
-  "stock_count": 3113
-}
+{"version":"watchlist_durable_v2","updated_at":"2026-07-20 15:01:53","updated_at_utc":"2026-07-20T15:01:53Z","updated_at_epoch":1784559713.4979343,"revision":1784559713497981758,"payload_hash":"46da467557da15a17043c0ff0c73ac663e4627c837d3b73c3cf63bc61a5e702a","group_count":66,"stock_count":3113}
