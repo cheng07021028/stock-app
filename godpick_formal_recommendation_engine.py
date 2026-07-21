@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_4_trigger_first_red_market_reversal_20260720"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_5_panic_rebound_leader_recall_20260721"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -94,6 +94,8 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "強勢前兆風控",
     "紅燈逆勢反轉分",
     "紅燈逆勢反轉判定",
+    "恐慌反彈領漲分",
+    "恐慌反彈領漲判定",
     "大盤風控層級",
     "大盤條件覆寫",
     "逆勢操作限制",
@@ -134,6 +136,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "強勢動能分",
     "強勢前兆分",
     "紅燈逆勢反轉分",
+    "恐慌反彈領漲分",
     "K線落後交易日",
 }
 
@@ -281,6 +284,8 @@ def _path_risk_reward_profile(row: pd.Series) -> dict[str, Any]:
     practical = _num(row, "實戰風險報酬比", 0.0)
     upside = _upside_space_pct(row)
     stop = _stop_distance_pct(row)
+    if stop <= 0:
+        stop = _num(row, "停損距離_隔日%", 0)
     derived = (upside / stop) if upside > 0 and stop > 0 else 0.0
     trend = max(practical, derived)
     trend = min(trend, 4.0) if trend > 0 else 0.0
@@ -337,6 +342,8 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     amount = _reference_turnover_m(row)
     mainstream = _num(row, "主流資金分", 0)
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    ret5 = _num(row, "近5日漲幅%", 0)
+    ret20 = _num(row, "近20日漲幅%", 0)
 
     # 個股資料與交易品質先獨立判斷；大盤只決定是否可以執行，
     # 不再把已達標個股直接從 A-/正式候選名單抹除。
@@ -364,6 +371,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         and 0 < stop <= 8.2 and entry >= 62 and risk >= 55 and buy >= 55
         and amount >= 150 and chase <= 65 and op_score >= 62
         and mainstream >= 55 and sector >= 45
+        and ret5 >= -8.0 and ret20 >= -12.0
     )
     a_momentum = bool(
         base_data_ok and not formal_candidate and momentum["radar_ready"] and momentum["score"] >= 78
@@ -371,12 +379,14 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         and gap <= 6.0 and rr["trend"] >= 1.15
         and 0 < stop <= 7.5 and risk >= 58 and buy >= 55
         and amount >= 300 and chase <= 60 and op_score >= 65
+        and ret5 >= -6.0 and ret20 >= -10.0
     )
     a_prebreak = bool(
         base_data_ok and not formal_candidate and prebreak["radar_ready"] and prebreak["score"] >= 78
         and not prebreak.get("hot_risk") and gap <= 4.8 and rr["trend"] >= 1.15
         and 0 < stop <= 7.5 and risk >= 58 and buy >= 60
         and amount >= 300 and chase <= 60 and op_score >= 62
+        and ret5 >= -8.0 and ret20 >= -12.0
     )
     a_minus_candidate = a_pullback or a_momentum or a_prebreak
 
@@ -443,6 +453,8 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         near_reasons.append(f"成交額{amount:.0f}百萬不足")
     if chase > 65:
         near_reasons.append(f"追價風險{chase:.0f}>65")
+    if ret5 < -8.0:
+        near_reasons.append(f"近5日跌幅{ret5:.1f}%過深，先等反轉確認")
 
     return {
         "formal": formal,
@@ -566,7 +578,7 @@ def _red_market_reversal_profile(
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
     amount = _reference_turnover_m(row)
     chase = _chase_risk_score(row, 55)
-    pre_score = _safe_float(prebreak.get("score"), 0)
+    pre_score = max(_safe_float(prebreak.get("score"), 0), _num(row, "強勢前兆分", 0))
     washout = -10.5 <= ret1 <= -5.0
     structure_ok = -3.0 <= ret5 <= 12.0 and -8.0 <= ret20 <= 35.0
     score = (
@@ -2418,6 +2430,96 @@ def _sector_key_for_row(row: pd.Series) -> str:
     return "未分類"
 
 
+def _panic_rebound_leader_profile(row: pd.Series) -> dict[str, Any]:
+    """紅燈後的恐慌反彈領漲召回。
+
+    7/20 作戰表顯示，既有 R1-P 只要求「前兆高分」，沒有要求隔日
+    可執行優先分、停損品質與買點距離，因此低品質候選會占核心；
+    同時，樺漢、精材、南亞這類在弱勢市場中具備流動性、資金與
+    洗盤後反彈條件的股票，卻沒有專屬排名。這個 profile 只建立
+    條件雷達，不把反彈猜測直接升級為正式買進。
+    """
+    market = _market_risk_info(row)
+    prebreak = _prebreakout_profile(row)
+    fresh = _history_freshness_info(row)
+    liq = _liquidity_info(row)
+    direction = _safe_str(row.get("隔日大盤方向"))
+    down_prob = _num(row, "隔日下跌機率%", 0)
+    forecast_ok = (
+        not _contains_any(direction, ["偏空", "下跌", "空方"])
+        and (down_prob <= 38 or down_prob <= 0 or _contains_any(direction, ["震盪", "偏多", "上漲"]))
+    )
+    next_exec = (
+        _num(row, "隔日可執行優先分", 0)
+        if not _is_blank(row.get("隔日可執行優先分"))
+        else _num(row, "隔日可參考分", 0)
+    )
+    gap = min(99.0, _num(row, "距最近可執行買點%", _num(row, "觸發距離%", 99)))
+    ret1 = _num(row, "今日漲幅%", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    entry = _num(row, "Entry進場買點分", _num(row, "進場買點分", 0))
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    buy = _num(row, "買進分數", 0)
+    funds = _num(row, "主流資金分", 0)
+    sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    amount = _reference_turnover_m(row)
+    stop = _stop_distance_pct(row)
+    if stop <= 0:
+        stop = _num(row, "停損距離_隔日%", 0)
+    chase = _chase_risk_score(row, 55)
+    upper = _num(row, "上影線比例%", 0)
+    close_pos = _num(row, "當日收盤位置%", 50)
+    pre_score = max(_safe_float(prebreak.get("score"), 0), _num(row, "強勢前兆分", 0))
+    hard_blob = _text_blob(row, ["正式推薦排除原因", "排除原因", "風控否決旗標"])
+    hard_block = _contains_any(hard_blob, ["興櫃", "低流動性", "冷門股", "K線過期", "資料待更新", "硬性禁買"])
+
+    standard_rebound = bool(
+        -1.0 <= ret1 <= 4.5 and gap <= 4.5 and next_exec >= 44
+        and pre_score >= 74 and funds >= 68 and sector >= 45
+        and risk >= 54 and entry >= 58 and buy >= 60
+        and amount >= 500 and 0 < stop <= 8.5 and chase <= 78
+        and upper <= 45 and close_pos >= 48
+    )
+    washout_rebound = bool(
+        -8.5 <= ret1 <= -2.0 and -12 <= ret5 <= 10 and gap <= 7.0 and next_exec >= 44
+        and pre_score >= 74 and funds >= 75 and sector >= 45
+        and risk >= 53 and entry >= 53 and buy >= 55
+        and amount >= 500 and 0 < stop <= 8.5 and chase <= 90
+        and upper <= 50 and close_pos >= 40
+    )
+    core_ready = bool(
+        market.get("severe") and not market.get("panic") and forecast_ok
+        and fresh.get("fresh") and liq.get("tradable") and not hard_block
+        and (standard_rebound or washout_rebound)
+    )
+    score = (
+        pre_score * 0.22 + next_exec * 0.20 + funds * 0.16 + sector * 0.10
+        + risk * 0.10 + entry * 0.08 + buy * 0.06
+        + min(100.0, amount / 20.0) * 0.05 + max(0.0, 100.0 - chase) * 0.03
+    )
+    if standard_rebound:
+        score += 5
+    if washout_rebound:
+        score += 8
+    if gap > 5:
+        score -= 2
+    score = round(_clamp(score), 1)
+    if market.get("panic"):
+        status = "BLOCK-RB｜極端市場禁止反彈交易"
+    elif core_ready and washout_rebound:
+        status = "READY-RB｜恐慌洗盤後領漲條件雷達"
+    elif core_ready:
+        status = "READY-RB｜紅燈相對強勢領漲條件雷達"
+    else:
+        status = "BLOCK-RB｜未達恐慌反彈核心條件"
+    return {
+        "score": score, "core_ready": core_ready, "status": status,
+        "standard": standard_rebound, "washout": washout_rebound,
+        "gap": round(gap, 2), "next_exec": round(next_exec, 1),
+        "restriction": "只在大盤止跌、個股突破觸發價並守住守價後小量試單；開高過大不追，跌破守價取消。",
+    }
+
+
 def _intraday_priority_score(row: pd.Series) -> float:
     """Phase 7.1 盤中雷達優先分。
 
@@ -2445,6 +2547,8 @@ def _intraday_priority_score(row: pd.Series) -> float:
     readiness_score = _num(row, "進場可執行分", _entry_readiness_profile(row)["score"])
     momentum_score = _num(row, "強勢動能分", _momentum_profile(row)["score"])
     prebreak_score = _num(row, "強勢前兆分", _prebreakout_profile(row)["score"])
+    rebound = _panic_rebound_leader_profile(row)
+    rebound_score = _safe_float(rebound.get("score"), 0)
     amount_score = 100 if amount >= 5000 else 88 if amount >= 2000 else 76 if amount >= 800 else 62 if amount >= 300 else 45 if amount >= 100 else 20
     rr_score = _clamp(rr * 50.0, 0, 100)
     score = (
@@ -2462,7 +2566,10 @@ def _intraday_priority_score(row: pd.Series) -> float:
         + readiness_score * 0.12
         + momentum_score * 0.16
         + prebreak_score * 0.14
+        + rebound_score * 0.10
     )
+    if rebound.get("core_ready"):
+        score += 8.0
     # 追價風險過高、買進分數過低時不要進核心盯盤，保留到備援或低優先。
     exhaustion = _exhaustion_profile(row)["score"]
     if exhaustion >= 70:
@@ -2486,9 +2593,9 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
     """盤中雷達分層：核心只放可執行路徑，熱股保留但不占核心名額。"""
     if out is None or out.empty or "正式推薦分區" not in out.columns:
         return out
-    for c in ["盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明"]:
+    for c in ["盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明", "恐慌反彈領漲分", "恐慌反彈領漲判定"]:
         if c not in out.columns:
-            out[c] = "" if c != "盤中盯盤順序" else 0
+            out[c] = 0.0 if c in {"盤中盯盤順序", "恐慌反彈領漲分"} else ""
 
     mask = out["正式推薦分區"].fillna("").astype(str).eq("盤中雷達追蹤")
     if not bool(mask.any()):
@@ -2512,6 +2619,9 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         sector = _safe_str(row.get("__sector")) or "未分類"
         momentum = _momentum_profile(row)
         prebreak = _prebreakout_profile(row)
+        rebound = _panic_rebound_leader_profile(row)
+        out.at[idx, "恐慌反彈領漲分"] = _safe_float(rebound.get("score"), 0)
+        out.at[idx, "恐慌反彈領漲判定"] = _safe_str(rebound.get("status"))
         normal_core = (
             _safe_float(row.get("隔日可參考分"), 0) >= 64
             and _safe_str(row.get("隔日參考判定")).startswith("PASS")
@@ -2527,7 +2637,8 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
             and _safe_float(row.get("距最近可執行買點%"), 99) <= 5.0
             and _num(row, "Risk風控安全分", _num(row, "風控安全分", 0)) >= 55
         )
-        # 前兆必須尚未進入末端加速，且中期趨勢至少未嚴重破壞。
+        # 一般前兆核心必須同時具備隔日可執行性，避免 RR 極低、停損過遠、
+        # 上影過長的股票只靠前兆高分占據 R1。紅燈反彈另走 REBOUND 路徑。
         prebreak_core = bool(
             prebreak["radar_ready"] and prebreak["score"] >= 74
             and prebreak["amount"] >= 150 and prebreak["missed"] >= 78 and prebreak["radar"] >= 68
@@ -2535,8 +2646,21 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
             and _num(row, "今日漲幅%", 0) <= 6.5
             and _num(row, "近20日漲幅%", 0) >= -5
             and _exhaustion_profile(row)["score"] < 50
+            and _num(row, "隔日可執行優先分", 0) >= 45
+            and _num(row, "距最近可執行買點%", 99) <= 4.8
+            and _num(row, "Risk風控安全分", _num(row, "風控安全分", 0)) >= 55
+            and 0 < _stop_distance_pct(row) <= 8.0
+            and _risk_reward_ratio(row) >= 0.80
+            and _chase_risk_score(row, 55) <= 75
+            and _num(row, "上影線比例%", 0) <= 45
+            and _num(row, "當日收盤位置%", 50) >= 48
         )
-        selected_route = "NORMAL" if normal_core else "MOMENTUM" if momentum_core else "PREBREAK" if prebreak_core else ""
+        selected_route = (
+            "NORMAL" if normal_core else
+            "REBOUND" if rebound.get("core_ready") else
+            "MOMENTUM" if momentum_core else
+            "PREBREAK" if prebreak_core else ""
+        )
         can_core = (len(core) < core_limit and sector_count.get(sector, 0) < sector_cap_core
                     and _safe_float(row.get("__priority"), 0) >= 66 and bool(selected_route))
         if can_core:
@@ -2554,7 +2678,14 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         out.at[idx, "盤中盯盤順序"] = int(order_map.get(idx, 999))
         if idx in core_set:
             route = route_map.get(idx, "NORMAL")
-            if route == "MOMENTUM":
+            if route == "REBOUND":
+                rb = _panic_rebound_leader_profile(row)
+                out.at[idx, "盤中雷達優先級"] = "R1-RB｜恐慌反彈領漲核心雷達"
+                out.at[idx, "盤中雷達分層說明"] = (
+                    f"紅燈反彈核心，反彈分 {rb['score']:.1f}、優先分 {pr:.1f}；"
+                    "只在大盤止跌且突破觸發後守價成立時小量試單。"
+                )
+            elif route == "MOMENTUM":
                 out.at[idx, "盤中雷達優先級"] = "R1-M｜強勢動能核心雷達"
                 out.at[idx, "盤中雷達分層說明"] = f"動能核心盯盤，優先分 {pr:.1f}；只接受回測守住或再突破放量。"
             elif route == "PREBREAK":
