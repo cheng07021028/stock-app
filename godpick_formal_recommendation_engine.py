@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Phase 6.3 formal recommendation purifier.
 
 目的：把「推薦候選 / 雷達 / 回放 / 排除」重新分成可操作清單，避免
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase9_6_entry_quality_guard_retest_20260722"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_mainstream_mainrise_stale_market_guard_20260722"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -24,6 +24,9 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "股神推薦等級",
     "股神推薦用途",
     "股神推薦分數說明",
+    "主流主升優先分",
+    "主流主升判定",
+    "主流主升操作限制",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -101,6 +104,9 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "恐慌反彈領漲分",
     "恐慌反彈領漲判定",
     "大盤風控層級",
+    "大盤資料日期",
+    "大盤資料落後交易日",
+    "大盤資料新鮮度",
     "大盤條件覆寫",
     "逆勢操作限制",
     "K線最後交易日",
@@ -114,6 +120,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "推薦可信度分",
     "股神推薦優先分",
     "股神推薦總排名",
+    "主流主升優先分",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -143,6 +150,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "強勢前兆分",
     "紅燈逆勢反轉分",
     "恐慌反彈領漲分",
+    "大盤資料落後交易日",
     "K線落後交易日",
 }
 
@@ -532,6 +540,32 @@ def _data_pending_only(reasons: list[str]) -> bool:
     return all(any(key in reason for key in soft) for reason in reasons)
 
 
+def _date_value(row: pd.Series, names: list[str]) -> pd.Timestamp | None:
+    for name in names:
+        value = row.get(name)
+        if _is_blank(value):
+            continue
+        try:
+            ts = pd.to_datetime(value, errors="coerce")
+            if pd.notna(ts):
+                if getattr(ts, "tzinfo", None) is not None:
+                    ts = ts.tz_localize(None)
+                return pd.Timestamp(ts).normalize()
+        except Exception:
+            continue
+    return None
+
+
+def _business_day_lag(newer: pd.Timestamp | None, older: pd.Timestamp | None) -> int:
+    if newer is None or older is None or newer <= older:
+        return 0
+    try:
+        start = older + pd.Timedelta(days=1)
+        return int(len(pd.bdate_range(start=start, end=newer)))
+    except Exception:
+        return max(0, int((newer - older).days))
+
+
 def _market_risk_info(row: pd.Series) -> dict[str, Any]:
     blob = _text_blob(row, [
         "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
@@ -540,6 +574,13 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
     raw_scores = [_num(row, "大盤橋接分數", 0), _num(row, "大盤多空分數", 0)]
     positive_scores = [x for x in raw_scores if x > 0]
     score = min(positive_scores) if positive_scores else 0.0
+
+    market_date = _date_value(row, ["大盤資料日期", "大盤行情日期", "加權資料日期", "大盤橋接資料日期"])
+    stock_date = _date_value(row, ["本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"])
+    lag = _business_day_lag(stock_date, market_date)
+    freshness_text = _text_blob(row, ["大盤資料新鮮度", "大盤資料品質", "大盤資料診斷摘要"])
+    stale = bool(lag >= 2 or _contains_any(freshness_text, ["過期", "落後", "stale"]))
+
     severe = _contains_any(blob, ["紅燈", "空方", "全面防守", "禁止進攻", "風險急升"])
     defensive = severe or _contains_any(blob, ["防守", "保守", "震盪控風險", "不宜全面追價"])
     panic = _contains_any(blob, ["崩盤", "極端風險", "系統性風險", "禁止所有新倉", "全面停買", "流動性危機"])
@@ -548,8 +589,102 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         defensive = True
     if score > 0 and score < 25:
         panic = True
-    level = "極端風險｜全面禁買" if panic else "紅燈｜只准條件逆勢" if severe else "防守｜縮小倉位" if defensive else "一般｜依個股條件"
-    return {"blob": blob, "score": score, "severe": severe, "defensive": defensive, "panic": panic, "level": level}
+
+    # 舊大盤快照不得硬封鎖新一輪個股行情。過期時只保留「縮倉/條件式」提醒，
+    # 排名與雷達改由最新個股 K 線、主流資金、族群廣度決定。
+    raw_severe, raw_panic = severe, panic
+    if stale:
+        severe = False
+        panic = False
+        defensive = True
+        score = 0.0
+        level = "黃燈｜大盤資料過期，主流高流動性條件式"
+    else:
+        level = "極端風險｜全面禁買" if panic else "紅燈｜只准條件逆勢" if severe else "防守｜縮小倉位" if defensive else "一般｜依個股條件"
+    return {
+        "blob": blob,
+        "score": score,
+        "severe": severe,
+        "defensive": defensive,
+        "panic": panic,
+        "level": level,
+        "stale": stale,
+        "market_date": market_date.strftime("%Y-%m-%d") if market_date is not None else "",
+        "stock_date": stock_date.strftime("%Y-%m-%d") if stock_date is not None else "",
+        "lag": lag,
+        "freshness": "過期｜不使用舊大盤硬封鎖" if stale else "最新/可用" if market_date is not None else "日期未驗證",
+        "raw_severe": raw_severe,
+        "raw_panic": raw_panic,
+    }
+
+
+def _mainstream_mainrise_profile(row: pd.Series) -> dict[str, Any]:
+    """辨識主流主升/輪動領漲，排序與買進許可分離。
+
+    高分只代表必須優先看見，不代表可以追價；過熱者仍只能等回測或再次突破守價。
+    """
+    mainstream = _clamp(_num(row, "主流資金分", 50))
+    sector_new = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    sector = _clamp(sector_new if sector_new > 0 else _num(row, "類股熱度分數", 0))
+    breadth = _clamp(_num(row, "族群廣度分", max(0.0, sector - 10.0)))
+    sector_amount = _clamp(_num(row, "族群成交額分", 0))
+    amount = _reference_turnover_m(row)
+    amount_score = 100.0 if amount >= 5000 else 92.0 if amount >= 2000 else 82.0 if amount >= 800 else 70.0 if amount >= 300 else 56.0 if amount >= 100 else 25.0
+    if sector_amount > 0:
+        amount_score = max(amount_score, sector_amount * 0.85)
+
+    ret1 = _num(row, "今日漲幅%", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    ret20 = _num(row, "近20日漲幅%", 0)
+    vol_ratio = max(_num(row, "當日量比", 1), _num(row, "5日20日量比", 1))
+    close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+    route = _clamp(max(
+        _num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0),
+        _num(row, "飆股攻擊分", 0), _num(row, "主流領漲回補分", 0),
+        _num(row, "強勢動能分", 0), _num(row, "強勢前兆分", 0),
+        _num(row, "候選強度分", 0),
+    ))
+    trend_score = _clamp(50.0 + _clamp(ret1, -8, 10) * 3.1 + _clamp(ret5, -10, 12) * 1.15 + _clamp(ret20, -25, 25) * 0.22)
+    volume_score = _clamp(45.0 + (vol_ratio - 1.0) * 34.0)
+    structure_score = _clamp(route * 0.68 + close_pos * 0.32)
+    lead_blob = _text_blob(row, ["族群內領頭羊", "類股前3強", "是否領先同類股", "主流資金角色", "資金輪動角色"])
+    leadership = 90.0 if _contains_any(lead_blob, ["領頭羊", "是", "主流攻擊"]) else 68.0 if _num(row, "類股內排名", 99) <= 3 else 50.0
+
+    score = _clamp(
+        mainstream * 0.25 + sector * 0.18 + breadth * 0.07
+        + amount_score * 0.14 + trend_score * 0.14 + volume_score * 0.07
+        + structure_score * 0.11 + leadership * 0.04
+    )
+    exhaustion = _safe_float(row.get("隔日耗竭風險分"), _exhaustion_profile(row)["score"])
+    chase = _chase_risk_score(row, 55)
+    high_heat = bool(ret1 >= 9.3 or exhaustion >= 55 or chase >= 72)
+    liquid = amount >= 300
+    trend_integrity = ret5 >= -8.0 and ret20 >= -28.0
+    mainstream_ok = mainstream >= 68 and sector >= 55 and liquid and score >= 68 and trend_integrity
+    confirmed = bool(mainstream_ok and score >= 78 and (breadth >= 45 or amount_score >= 88))
+
+    if confirmed and high_heat:
+        status = "LH｜主流主升高熱待回測"
+    elif confirmed:
+        status = "L+｜主流主升領漲"
+    elif mainstream_ok:
+        status = "L｜主流輪動領漲"
+    else:
+        status = "N｜非主攻/尚待確認"
+    if high_heat:
+        restriction = "禁止追價；只等充分回測守價，或整理後再突破並站穩。"
+    elif confirmed:
+        restriction = "優先盯盤；只在觸發價放量站上或回測守價成立後分批。"
+    elif mainstream_ok:
+        restriction = "列主流輪動雷達；需族群同步與量價確認，不預先買進。"
+    else:
+        restriction = "一般條件式觀察。"
+    return {
+        "score": round(score, 1), "status": status, "restriction": restriction,
+        "confirmed": confirmed, "mainstream_ok": mainstream_ok, "high_heat": high_heat,
+        "mainstream": mainstream, "sector": sector, "breadth": breadth,
+        "amount": amount, "amount_score": amount_score,
+    }
 
 
 def _red_market_reversal_profile(
@@ -1985,6 +2120,23 @@ def _strategic_replay_radar_ok(row: pd.Series, op_score: float, reasons: list[st
     return not severe and op_score >= 43
 
 
+def _mainstream_mainrise_radar_ok(row: pd.Series, profile: dict[str, Any], reasons: list[str]) -> bool:
+    """主流主升股票即使買點尚未成熟，也必須留在可見雷達，不得被冷門股淹沒。"""
+    fresh = _history_freshness_info(row)
+    liq = _liquidity_info(row)
+    if not fresh.get("fresh") or not liq.get("tradable"):
+        return False
+    if _safe_str(row.get("市場別")).replace(" ", "") in {"興櫃", "Emerging"}:
+        return False
+    if not profile.get("mainstream_ok") or _safe_float(profile.get("score"), 0) < 72:
+        return False
+    hard_words = ["低流動性", "冷門股", "K線過期", "資料待更新", "硬性禁買", "重大風險", "財務異常"]
+    if any(any(word in reason for word in hard_words) for reason in reasons):
+        return False
+    risk = _num(row, "Risk風控安全分", _num(row, "風控安全分", 0))
+    return bool(risk >= 30 and _safe_float(profile.get("amount"), 0) >= 300)
+
+
 def _trigger_confirm_text(trig: dict[str, Any]) -> str:
     final = trig.get("final", 0) or 0
     hold = _support_after_trigger(final)
@@ -2062,7 +2214,9 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     readiness = _entry_readiness_profile(row)
     momentum = _momentum_profile(row)
     prebreak = _prebreakout_profile(row)
+    mainrise = _mainstream_mainrise_profile(row)
     reasons = _exclusion_reasons(row)
+    mainrise_radar = _mainstream_mainrise_radar_ok(row, mainrise, reasons)
     trig = _trigger_info(row)
     promotion = _promotion_profile(row, op, reasons)
     direct_primary = _direct_ok(row, op, reasons, promotion)
@@ -2189,6 +2343,24 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         radar_level = "資料待更新"
         radar_action = "不列核心雷達，不進場"
         exclude_text = stale_reason
+    elif mainrise_radar:
+        if mainrise.get("high_heat"):
+            bucket = "高風險雷達觀察"
+            qual = "MAIN-HOT｜主流主升高熱待回測"
+            direct_buy = "不可追價｜只等回測/整理後再突破"
+            action = mainrise.get("restriction") or "主流領漲但已過熱，只等回測守價。"
+            radar_level = "LH｜主流主升高熱雷達"
+            radar_action = "優先顯示但禁止追價；等待回測守價或整理後再突破"
+            exclude_text = "主流主升成立，但追價/耗竭風險偏高，改列高熱主流雷達"
+        else:
+            bucket = "盤中雷達追蹤"
+            qual = "MAIN｜主流主升條件雷達"
+            direct_buy = "條件式｜觸發與守價確認"
+            action = mainrise.get("restriction") or _entry_action_text(readiness, trig, small=True)
+            radar_level = "L｜主流主升領漲雷達"
+            radar_action = "主流優先盯盤；量價/族群同步且觸發守價後才小量"
+            exclude_text = ""
+        decision_source = "主流主升可見性召回"
     elif _strategic_replay_radar_ok(row, op, reasons):
         bucket = "高風險雷達觀察"
         qual = "RISK｜錯殺回補雷達"
@@ -2264,6 +2436,9 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         effective_readiness_reasons = ""
     return {
         **final_meta,
+        "主流主升優先分": mainrise.get("score", 0),
+        "主流主升判定": mainrise.get("status", ""),
+        "主流主升操作限制": mainrise.get("restriction", ""),
         "可操作分": round(op, 1),
         "正式推薦分區": bucket,
         "正式推薦資格": qual,
@@ -2333,6 +2508,9 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "紅燈逆勢反轉分": promotion.get("red_reversal", {}).get("score", 0),
         "紅燈逆勢反轉判定": promotion.get("red_reversal", {}).get("status", ""),
         "大盤風控層級": market_info.get("level", ""),
+        "大盤資料日期": market_info.get("market_date", ""),
+        "大盤資料落後交易日": market_info.get("lag", 0),
+        "大盤資料新鮮度": market_info.get("freshness", ""),
         "大盤條件覆寫": "是｜嚴格觸發後極小量" if promotion.get("red_override") else "雷達條件式" if promotion.get("red_reversal", {}).get("radar_override") else "否",
         "逆勢操作限制": promotion.get("red_reversal", {}).get("restriction", ""),
         "K線最後交易日": readiness["freshness"]["last_date"],
@@ -2345,74 +2523,67 @@ def _classify(row: pd.Series) -> dict[str, Any]:
 
 
 def _priority_bucket_meta(row: pd.Series) -> tuple[str, float, float]:
-    """Return (use label, bonus, score cap) for the unified recommendation ranking.
-
-    The score compares different routes on one scale while keeping action permission
-    separate.  A high-scoring watch candidate therefore remains a watch candidate;
-    it cannot outrank a formal recommendation by bypassing its risk classification.
-    """
+    """回傳（用途標籤、加分、分數上限）；買進許可仍由正式分區獨立控制。"""
     bucket = _safe_str(row.get("正式推薦分區"))
     radar = _safe_str(row.get("盤中雷達優先級"))
+    mainrise = _safe_float(row.get("主流主升優先分"), _mainstream_mainrise_profile(row)["score"])
     if bucket == "正式下週主推薦":
-        return "1｜正式主推薦", 7.0, 100.0
+        return "1｜正式主推薦", 6.0, 100.0
     if bucket == "A-｜準主推薦小量試單":
-        return "2｜A-準主推薦", 4.0, 94.0
+        return "2｜A-準主推薦", 2.0, 94.0
     if bucket == "盤中雷達追蹤":
+        if radar.startswith("R1-L"):
+            return "3｜主流主升核心雷達", 4.5, 93.0
         if radar.startswith("R1-M"):
-            return "3｜強勢動能核心雷達", 3.0, 90.0
+            return "4｜強勢動能核心雷達", 3.0, 90.0
         if radar.startswith("R1-P"):
-            return "4｜強勢前兆核心雷達", 2.5, 89.0
+            return "5｜強勢前兆核心雷達", 2.5, 89.0
         if radar.startswith("R1"):
-            return "5｜盤中核心雷達", 2.0, 88.0
+            return "6｜盤中核心雷達", 2.0, 88.0
+        if radar.startswith("R2-HOT") and mainrise >= 72:
+            return "7｜主流高熱待回測", 0.0, 82.0
         if radar.startswith("R2-HOT"):
-            return "7｜高熱動能待回測", -5.0, 70.0
+            return "8｜高熱動能待回測", -4.0, 70.0
         if radar.startswith("R2"):
-            return "6｜盤中備援雷達", 0.0, 79.0
-        return "7｜低優先雷達", -3.0, 69.0
+            return "7｜盤中備援雷達", 0.0, 82.0 if mainrise >= 72 else 79.0
+        return "9｜低優先雷達", -3.0, 72.0 if mainrise >= 72 else 69.0
     if bucket == "高風險雷達觀察":
-        return "8｜高風險只看不買", -8.0, 64.0
+        if mainrise >= 72:
+            return "6｜主流主升高熱雷達", 0.5, 82.0
+        return "10｜高風險只看不買", -8.0, 64.0
     if bucket == "早期潛伏觀察":
-        return "9｜早期觀察", -4.0, 68.0
+        return "11｜早期觀察", -4.0, 68.0
     if bucket == "不可直接買觀察":
-        return "10｜一般觀察", -6.0, 63.0
+        if mainrise >= 72:
+            return "8｜主流條件待修復", -1.0, 76.0
+        return "12｜一般觀察", -6.0, 63.0
     if bucket == "正式排除清單":
-        return "11｜正式排除", -25.0, 39.0
-    return "10｜一般觀察", -7.0, 60.0
+        return "13｜正式排除", -25.0, 39.0
+    return "12｜一般觀察", -7.0, 60.0
 
 
 def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, str, str]:
-    """Build one comparable score for formal picks, radar picks and observations.
-
-    Existing ``推薦總分`` remains the candidate-strength score.  This new score is
-    the only default ranking score shown to users because it additionally includes
-    entry quality, risk, route strength, liquidity and market context.
-    """
+    """單一推薦優先分：提高主流資金、族群廣度與主升領漲的可見性。"""
     candidate = _clamp(max(
-        _num(row, "推薦總分", 0),
-        _num(row, "候選強度分", 0),
-        _num(row, "Alpha選股潛力分", 0),
-        _num(row, "股神實戰總分", 0),
+        _num(row, "推薦總分", 0), _num(row, "候選強度分", 0),
+        _num(row, "Alpha選股潛力分", 0), _num(row, "股神實戰總分", 0),
     ))
     execution = _clamp(max(
-        _num(row, "實戰操作品質分", 0),
-        _num(row, "可操作分", 0),
-        _num(row, "進場可執行分", 0),
+        _num(row, "實戰操作品質分", 0), _num(row, "可操作分", 0), _num(row, "進場可執行分", 0),
     ))
     entry = _clamp(max(
-        _num(row, "Entry進場買點分", 0),
-        _num(row, "進場買點分", 0),
-        _num(row, "買進分數", 0),
+        _num(row, "Entry進場買點分", 0), _num(row, "進場買點分", 0), _num(row, "買進分數", 0),
     ))
     risk = _clamp(max(_num(row, "Risk風控安全分", 0), _num(row, "風控安全分", 0)))
     route = _clamp(max(
-        _num(row, "強勢動能分", 0),
-        _num(row, "強勢前兆分", 0),
-        _num(row, "隔日可參考分", 0),
-        _num(row, "爆發雷達分", 0),
-        _num(row, "隔日爆發分", 0),
+        _num(row, "強勢動能分", 0), _num(row, "強勢前兆分", 0),
+        _num(row, "隔日可參考分", 0), _num(row, "爆發雷達分", 0), _num(row, "隔日爆發分", 0),
     ))
     mainstream = _clamp(_num(row, "主流資金分", 50))
-    sector = _clamp(max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0), _num(row, "類股熱度分數", 0)))
+    sector_new = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
+    sector = _clamp(sector_new if sector_new > 0 else _num(row, "類股熱度分數", 0))
+    mainrise_profile = _mainstream_mainrise_profile(row)
+    mainrise = _clamp(_safe_float(row.get("主流主升優先分"), mainrise_profile["score"]))
     rr = _risk_reward_ratio(row)
     rr_score = _clamp(rr * 45.0)
     quality = _data_quality_score(row)
@@ -2422,37 +2593,40 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     liquidity_score = 100.0 if amount >= 3000 else 90.0 if amount >= 1200 else 80.0 if amount >= 500 else 68.0 if amount >= 200 else 55.0 if amount >= 100 else 30.0 if amount > 0 else 15.0
 
     score = (
-        candidate * 0.17
-        + execution * 0.19
-        + entry * 0.12
-        + risk * 0.10
-        + route * 0.14
-        + mainstream * 0.08
-        + sector * 0.06
-        + rr_score * 0.04
-        + liquidity_score * 0.02
-        + quality * 0.02
-        + actionable * 0.06
+        candidate * 0.13 + execution * 0.15 + entry * 0.09 + risk * 0.08
+        + route * 0.13 + mainstream * 0.13 + sector * 0.10 + mainrise * 0.13
+        + rr_score * 0.02 + liquidity_score * 0.02 + quality * 0.01 + actionable * 0.01
     )
 
     use_label, bucket_bonus, score_cap = _priority_bucket_meta(row)
     score += bucket_bonus
-    score += _clamp(_num(row, "隔日大盤預測加減分", 0), -6.0, 6.0)
+    market_info = _market_risk_info(row)
+    if not market_info.get("stale"):
+        score += _clamp(_num(row, "隔日大盤預測加減分", 0), -6.0, 6.0)
 
+    # 主流主升高熱仍要排前面，但買進許可維持禁止追價；只減少排序懲罰，不取消風控。
+    heat_factor = 0.42 if mainrise >= 78 else 0.68 if mainrise >= 70 else 1.0
     chase = _chase_risk_score(row, 55)
     if exhaustion >= 70:
-        score -= 12.0
+        score -= 12.0 * heat_factor
     elif exhaustion >= 55:
-        score -= 8.0
+        score -= 8.0 * heat_factor
     elif exhaustion >= 35:
-        score -= 3.5
+        score -= 3.5 * heat_factor
     if chase > 60:
-        score -= min(8.0, (chase - 60.0) * 0.18)
+        score -= min(8.0, (chase - 60.0) * 0.18) * heat_factor
+
     stop_dist = _stop_distance_pct(row)
     if stop_dist > 12:
         score -= min(8.0, (stop_dist - 12.0) * 0.55)
     elif stop_dist > 8:
         score -= min(3.0, (stop_dist - 8.0) * 0.45)
+
+    # 冷門/非主流準主推薦不再靠分區加成壓過主流領漲股。
+    if mainstream < 58 and sector < 55 and amount < 300:
+        score -= 7.0
+    elif mainrise < 55 and _safe_str(row.get("正式推薦分區")) == "A-｜準主推薦小量試單":
+        score -= 3.0
 
     freshness = _safe_str(row.get("K線資料新鮮度"))
     lag = _num(row, "K線落後交易日", 0)
@@ -2460,9 +2634,8 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     freshness_stale = _contains_any(freshness, ["過期", "落後", "待更新"]) or (1 <= lag < 999)
     if freshness_stale:
         score_cap = min(score_cap, 35.0)
-        use_label = "12｜資料待更新"
+        use_label = "14｜資料待更新"
     elif freshness_unknown:
-        # 舊快取或舊欄位仍可列入觀察排名，但不得被誤認為正式可買。
         score_cap = min(score_cap, 65.0)
         use_label = f"{use_label}｜資料待驗證"
 
@@ -2486,7 +2659,8 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
 
     explain = (
         f"候選{candidate:.0f}｜操作{execution:.0f}｜買點{entry:.0f}｜風控{risk:.0f}｜"
-        f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}"
+        f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜主升{mainrise:.0f}｜"
+        f"RR {rr:.2f}｜耗竭{exhaustion:.0f}"
     )
     return score, grade, use_label, explain
 
@@ -2506,13 +2680,13 @@ def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
     eligible &= pd.to_numeric(out["股神推薦優先分"], errors="coerce").fillna(0).ge(50)
     ranked = out.loc[eligible].copy()
     if not ranked.empty:
-        for col in ["股神推薦優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"]:
+        for col in ["股神推薦優先分", "主流主升優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"]:
             if col not in ranked.columns:
                 ranked[col] = 0.0
             ranked[col] = pd.to_numeric(ranked[col], errors="coerce").fillna(0.0)
         ranked = ranked.sort_values(
-            ["股神推薦優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"],
-            ascending=[False, False, False, False, False, False],
+            ["股神推薦優先分", "主流主升優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"],
+            ascending=[False, False, False, False, False, False, False],
             kind="mergesort",
         )
         rank_map = {idx: pos for pos, idx in enumerate(ranked.index, start=1)}
@@ -2648,39 +2822,43 @@ def _intraday_priority_score(row: pd.Series) -> float:
     prebreak_score = _num(row, "強勢前兆分", _prebreakout_profile(row)["score"])
     rebound = _panic_rebound_leader_profile(row)
     rebound_score = _safe_float(rebound.get("score"), 0)
+    mainrise = _mainstream_mainrise_profile(row)
+    mainrise_score = _safe_float(mainrise.get("score"), 0)
     amount_score = 100 if amount >= 5000 else 88 if amount >= 2000 else 76 if amount >= 800 else 62 if amount >= 300 else 45 if amount >= 100 else 20
     rr_score = _clamp(rr * 50.0, 0, 100)
     score = (
-        formal_sort * 0.18
-        + op * 0.16
-        + radar * 0.18
-        + mainstream * 0.14
-        + sector * 0.12
-        + buy * 0.08
-        + entry * 0.06
-        + risk * 0.04
+        formal_sort * 0.12
+        + op * 0.10
+        + radar * 0.12
+        + mainstream * 0.12
+        + sector * 0.10
+        + mainrise_score * 0.20
+        + buy * 0.05
+        + entry * 0.04
+        + risk * 0.03
         + rr_score * 0.02
-        + amount_score * 0.02
-        + next_score * 0.08
-        + readiness_score * 0.12
-        + momentum_score * 0.16
-        + prebreak_score * 0.14
-        + rebound_score * 0.10
+        + amount_score * 0.04
+        + next_score * 0.05
+        + readiness_score * 0.05
+        + momentum_score * 0.08
+        + prebreak_score * 0.07
+        + rebound_score * 0.06
     )
     if rebound.get("core_ready"):
         score += 8.0
     # 追價風險過高、買進分數過低時不要進核心盯盤，保留到備援或低優先。
     exhaustion = _exhaustion_profile(row)["score"]
+    heat_factor = 0.38 if mainrise_score >= 78 else 0.65 if mainrise_score >= 70 else 1.0
     if exhaustion >= 70:
-        score -= 16
+        score -= 16 * heat_factor
     elif exhaustion >= 55:
-        score -= 10
+        score -= 10 * heat_factor
     elif exhaustion >= 35:
-        score -= 4
+        score -= 4 * heat_factor
     if chase >= 76:
-        score -= 8
+        score -= 8 * heat_factor
     elif chase >= 70:
-        score -= 4
+        score -= 4 * heat_factor
     if buy < 30:
         score -= 6
     if rr and rr < 0.30 and momentum_score < 70:
@@ -2726,7 +2904,7 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         kind="mergesort",
     )
 
-    core_limit, backup_limit, sector_cap_core = 6, 18, 2
+    core_limit, backup_limit, sector_cap_core = 8, 18, 2
     core: list[Any] = []
     backup: list[Any] = []
     route_map: dict[Any, str] = {}
@@ -2738,6 +2916,7 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         momentum = _momentum_profile(row)
         prebreak = _prebreakout_profile(row)
         rebound = _panic_rebound_leader_profile(row)
+        mainrise = _mainstream_mainrise_profile(row)
         guard = _guard_retest_profile(row)
         freshness = _history_freshness_info(row)
         liq = _liquidity_info(row)
@@ -2783,8 +2962,17 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
             and _num(row, "當日收盤位置%", 50) >= 48
         )
         rebound_core = bool(core_data_ok and rebound.get("core_ready"))
+        mainline_core = bool(
+            core_data_ok and mainrise.get("mainstream_ok")
+            and _safe_float(mainrise.get("score"), 0) >= 72
+            and _safe_float(mainrise.get("amount"), 0) >= 500
+            and risk_score >= 35 and 0 < stop <= 10.5
+            and _num(row, "當日收盤位置%", 50) >= 48
+        )
 
         selected_route = (
+            "MAINHOT" if mainline_core and mainrise.get("high_heat") else
+            "MAIN" if mainline_core else
             "NORMAL" if normal_core else
             "REBOUND" if rebound_core else
             "MOMENTUM" if momentum_core else
@@ -2845,7 +3033,19 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         if idx in core_set:
             route = route_map.get(idx, "NORMAL")
             out.at[idx, "核心雷達降級原因"] = ""
-            if route == "REBOUND":
+            if route == "MAINHOT":
+                out.at[idx, "盤中雷達優先級"] = "R1-LH｜主流主升高熱核心雷達"
+                out.at[idx, "盤中雷達分層說明"] = (
+                    f"主流主升高熱優先顯示，主升分 {mainrise['score']:.1f}、優先分 {pr:.1f}；"
+                    "禁止追價，只等充分回測守價或整理後再突破。"
+                )
+            elif route == "MAIN":
+                out.at[idx, "盤中雷達優先級"] = "R1-L｜主流主升核心雷達"
+                out.at[idx, "盤中雷達分層說明"] = (
+                    f"主流主升核心盯盤，主升分 {mainrise['score']:.1f}、優先分 {pr:.1f}；"
+                    "需量價與族群同步，觸發並守價後才小量。"
+                )
+            elif route == "REBOUND":
                 rb = _panic_rebound_leader_profile(row)
                 out.at[idx, "盤中雷達優先級"] = "R1-RB｜恐慌反彈領漲核心雷達"
                 out.at[idx, "盤中雷達分層說明"] = (
@@ -2911,8 +3111,15 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
                 out[c] = pd.Series(dtype="float64" if c in NUMERIC_FORMAL_RECOMMENDATION_COLUMNS else "object")
         return out
     rows = out.apply(_classify, axis=1, result_type="expand")
-    for c in FORMAL_RECOMMENDATION_COLUMNS:
-        out[c] = rows[c].values if c in rows.columns else ""
+    # 一次性回寫正式推薦欄位，避免逐欄 insert 造成 DataFrame fragmentation 與推薦頁卡頓。
+    classified = rows.reindex(columns=FORMAL_RECOMMENDATION_COLUMNS).copy()
+    for col in FORMAL_RECOMMENDATION_COLUMNS:
+        if col in NUMERIC_FORMAL_RECOMMENDATION_COLUMNS:
+            classified[col] = pd.to_numeric(classified[col], errors="coerce").fillna(0.0)
+        else:
+            classified[col] = classified[col].fillna("").astype("object")
+    out = out.drop(columns=[c for c in FORMAL_RECOMMENDATION_COLUMNS if c in out.columns], errors="ignore")
+    out = pd.concat([out, classified], axis=1)
     out = _apply_intraday_radar_tiers(out)
     out = _apply_unified_recommendation_ranking(out)
     return out

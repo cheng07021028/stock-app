@@ -1,4 +1,4 @@
-﻿
+
 
 
 
@@ -2281,6 +2281,33 @@ def _macro_weight_advice_from_snapshot_v33(snapshot: dict[str, Any]) -> str:
     return "-15%"
 
 
+def _macro_bridge_freshness_v121(bridge: dict[str, Any]) -> dict[str, Any]:
+    """判斷大盤橋接是否落後；過期資料只能顯示，不得調權或硬封鎖。"""
+    if not isinstance(bridge, dict) or not bridge:
+        return {"date": "", "lag": 999, "stale": True, "status": "日期未驗證"}
+    raw = _safe_str(
+        bridge.get("market_date") or bridge.get("twse_data_date") or bridge.get("data_date")
+        or bridge.get("updated_at")
+    )
+    try:
+        market_date = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(market_date):
+            raise ValueError("invalid market date")
+        market_date = pd.Timestamp(market_date).tz_localize(None) if getattr(market_date, "tzinfo", None) is not None else pd.Timestamp(market_date)
+        market_date = market_date.normalize()
+        today = pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None).normalize()
+        lag = int(len(pd.bdate_range(start=market_date + pd.Timedelta(days=1), end=today))) if today > market_date else 0
+        stale = lag >= 2
+        return {
+            "date": market_date.strftime("%Y-%m-%d"),
+            "lag": lag,
+            "stale": stale,
+            "status": f"過期｜落後{lag}個交易日，不作硬封鎖" if stale else "最新/可用",
+        }
+    except Exception:
+        return {"date": raw, "lag": 999, "stale": True, "status": "日期未驗證｜不作硬封鎖"}
+
+
 def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
     """v33：將 market_snapshot.json 正規化成舊版 macro bridge 欄位，保留舊功能不破壞。"""
     if not snapshot:
@@ -2376,16 +2403,23 @@ def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_macro_bridge_v33() -> dict[str, Any]:
-    """v33：優先 market_snapshot.json，並用 macro_mode_bridge.json 補欄位。"""
+    """優先 market_snapshot，並標記新鮮度；舊快照不得影響本輪推薦權重。"""
     snapshot_bridge = _snapshot_to_macro_bridge_v33(_read_market_snapshot_v33())
     legacy_bridge = _read_project_json_file(MACRO_MODE_BRIDGE_FILE)
     if not isinstance(legacy_bridge, dict):
         legacy_bridge = {}
     if snapshot_bridge and legacy_bridge:
-        merged = legacy_bridge.copy()
-        merged.update({k: v for k, v in snapshot_bridge.items() if v not in [None, "", []]})
-        return merged
-    return snapshot_bridge or legacy_bridge or {}
+        result = legacy_bridge.copy()
+        result.update({k: v for k, v in snapshot_bridge.items() if v not in [None, "", []]})
+    else:
+        result = snapshot_bridge or legacy_bridge or {}
+    if result:
+        fresh = _macro_bridge_freshness_v121(result)
+        result["_market_data_date"] = fresh.get("date")
+        result["_market_data_business_lag"] = fresh.get("lag")
+        result["_market_data_stale"] = fresh.get("stale")
+        result["_market_data_freshness_status"] = fresh.get("status")
+    return result
 
 
 def _read_macro_mode_bridge() -> dict[str, Any]:
@@ -2394,6 +2428,8 @@ def _read_macro_mode_bridge() -> dict[str, Any]:
 
 
 def _macro_bridge_weight_delta(bridge: dict[str, Any]) -> int:
+    if isinstance(bridge, dict) and bridge.get("_market_data_stale"):
+        return 0
     raw = _safe_str(bridge.get("godpick_weight_advice"))
     if not raw:
         raw = _macro_weight_advice_from_snapshot_v33(bridge)
@@ -2514,6 +2550,8 @@ def _apply_macro_bridge_to_weights(weights: dict[str, int], bridge: dict[str, An
     """
     base = _normalize_weight_map(weights)
     if not enabled or not bridge:
+        return base
+    if bridge.get("_market_data_stale"):
         return base
 
     delta = _macro_bridge_weight_delta(bridge)
@@ -2765,6 +2803,13 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     market_session_usable = bridge.get("market_session_usable")
     effect_info = _market_effect_summary_v37(bridge.get("godpick_market_effect"))
     diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
+    market_freshness = _macro_bridge_freshness_v121(bridge)
+    if market_freshness.get("stale"):
+        st.warning(
+            f"大盤橋接資料日期 {market_freshness.get('date') or '未驗證'}，"
+            f"已落後 {market_freshness.get('lag')} 個交易日。系統本輪不套用舊大盤調權/紅燈硬封鎖，"
+            "改以最新個股K線、主流資金與族群廣度排序。"
+        )
 
     c1, c2, c3, c4, c5, c6 = st.columns([1.0, 1.0, 1.0, 1.0, 1.15, 1.25])
     with c1:
@@ -2863,6 +2908,10 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         x["大盤橋接風控"] = "未套用"
         x["大盤橋接策略"] = ""
         x["大盤橋接更新時間"] = ""
+        x["大盤資料日期"] = ""
+        x["大盤資料落後交易日"] = ""
+        x["大盤資料新鮮度"] = "未套用"
+        x["大盤原始橋接狀態"] = ""
         x["大盤交易時段"] = ""
         x["大盤交易時段可用"] = ""
         x["大盤資料品質"] = ""
@@ -2899,6 +2948,8 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
 
     score = _safe_float(bridge.get("market_score"), 50)
     state = _safe_str(bridge.get("market_trend") or bridge.get("market_state"))
+    raw_state = state
+    market_freshness = _macro_bridge_freshness_v121(bridge)
     weight = _safe_str(bridge.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(bridge)
     risk = _macro_bridge_risk_text(bridge)
     strategy = _safe_str(bridge.get("position_hint") or bridge.get("strategy") or bridge.get("market_bias"))
@@ -2910,6 +2961,16 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
     overnight_info = _overnight_effect_summary_v69(bridge)
     nextday_info = _nextday_forecast_summary_v80(bridge)
+    if market_freshness.get("stale"):
+        score = 50.0
+        state = "資料過期｜不作紅燈硬封鎖"
+        risk = "資料保護"
+        strategy = "舊大盤只顯示；本輪依最新個股K線、主流資金與族群廣度條件式判斷"
+        effect_info = {"score_delta": 0.0, "summary": "大盤資料過期，本輪不調整個股分數"}
+        nextday_info = dict(nextday_info)
+        nextday_info["score_delta"] = 0
+        nextday_info["weight_delta"] = 0
+        nextday_info["usable"] = False
 
     x["大盤橋接分數"] = score
     x["大盤橋接狀態"] = state
@@ -2917,6 +2978,10 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     x["大盤橋接風控"] = risk
     x["大盤橋接策略"] = strategy
     x["大盤橋接更新時間"] = updated_at
+    x["大盤資料日期"] = market_freshness.get("date") or _safe_str(bridge.get("market_date"))
+    x["大盤資料落後交易日"] = market_freshness.get("lag")
+    x["大盤資料新鮮度"] = market_freshness.get("status")
+    x["大盤原始橋接狀態"] = raw_state
     x["大盤交易時段"] = market_session_label
     x["大盤交易時段可用"] = "是" if market_session_usable is True else "否" if market_session_usable is False else "未標示"
     x["大盤資料品質"] = data_quality
@@ -2962,8 +3027,6 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         x["大盤推薦權重"] = weight
     if "大盤操作風格" in x.columns:
         x["大盤操作風格"] = strategy
-    if "大盤資料日期" in x.columns:
-        x["大盤資料日期"] = _safe_str(bridge.get("market_date"))
 
     # 大盤偏弱時，不剔除股票，只提醒風控與部位。
     if risk in {"偏嚴", "嚴格"}:
@@ -10818,8 +10881,12 @@ def _phase70_build_battle_dashboard(
         "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%",
         "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
         "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
-        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
-        "主流資金分", "族群攻擊強度", "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定",
+        "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤原始橋接狀態",
+        "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
+        "主流主升優先分", "主流主升判定", "主流主升操作限制",
+        "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
+        "爆發雷達分", "隔日爆發分", "漲停回放分", "強勢股漏選風險分",
         "實戰觸發價", "觸發後守價", "盤中觸發確認條件", "開盤跳空處理",
         "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "盤中雷達分層說明", "核心雷達品質檢查", "核心雷達降級原因",
         "盤中雷達動作", "正式推薦排除原因", "股神作戰提示",
@@ -10829,8 +10896,8 @@ def _phase70_build_battle_dashboard(
         work = work[use + [c for c in work.columns if c not in use]].copy()
     return _safe_sort_export_df(
         work,
-        ["股神作戰優先序", "正式推薦排序分", "可操作分", "推薦可信度分", "爆發雷達分", "成交額百萬"],
-        [True, False, False, False, False, False],
+        ["股神作戰優先序", "主流主升優先分", "正式推薦排序分", "可操作分", "推薦可信度分", "爆發雷達分", "成交額百萬"],
+        [True, False, False, False, False, False, False],
     )
 
 
@@ -11179,7 +11246,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
     保留原本正式/A-/R1/R2/觀察分頁，但使用者不必在多張表間自行比較。
     排名只採 ``股神推薦優先分``；此分數已同時納入候選強度、買點、風控、
-    強勢動能/前兆、主流資金、族群、流動性與大盤校正。正式排除永不進榜。
+    強勢動能/前兆、主流主升、族群廣度、族群成交額、流動性與大盤新鮮度校正。
+    正式排除永不進榜；高熱主流股可以優先顯示，但操作許可仍維持禁止追價。
     """
     if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty:
         return pd.DataFrame()
@@ -11209,7 +11277,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         return pd.DataFrame()
 
     sort_cols = [
-        "股神推薦優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
+        "股神推薦優先分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
         "強勢前兆分", "主流資金分", "族群攻擊強度", "流動性參考成交額百萬",
     ]
     for col in sort_cols:
@@ -11224,6 +11292,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
     cols = [
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+        "主流主升優先分", "主流主升判定", "主流主升操作限制",
         "股票代號", "股票名稱", "市場別", "類別", "產業",
         "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "盤中雷達優先級", "核心雷達品質檢查", "核心雷達降級原因",
         "推薦總分", "候選強度分", "實戰操作品質分", "進場可執行分", "買進分數",
@@ -11233,7 +11302,9 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
         "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制",
-        "主流資金分", "族群攻擊強度", "今日漲幅%", "當日量比", "當日收盤位置%",
+        "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤原始橋接狀態",
+        "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
+        "今日漲幅%", "當日量比", "當日收盤位置%",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "守價回測參考價", "守價回測距離%", "實戰停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "盤中觸發確認條件", "失效條件",
         "股神推薦分數說明", "正式推薦排除原因",
@@ -11337,7 +11408,8 @@ def _phase92_render_zero_formal_diagnostics(source_df: pd.DataFrame) -> None:
 _PHASE93_MARKET_CONTEXT_COLUMNS = [
     "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
     "大盤風控建議", "今日大盤結論", "大盤橋接狀態", "大盤橋接分數",
-    "大盤多空分數", "大盤資料品質", "大盤交易時段", "大盤交易時段可用",
+    "大盤多空分數", "大盤資料品質", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度",
+    "大盤橋接更新時間", "大盤原始橋接狀態", "大盤交易時段", "大盤交易時段可用",
     "隔日大盤方向", "隔日大盤分數", "隔日大盤信心", "隔日大盤預測加減分",
     "隔日建議總部位上限%", "隔日大盤預測理由",
 ]
@@ -11425,7 +11497,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
     render_pro_section("股神推薦總排名｜真正第一優先")
-    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。Phase 9.3 起，總排名、正式/A-卡片、作戰明細與 Excel 全部使用同一份最終分流資料；分數不會取代操作許可與盤中觸發。")
+    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。新版已納入主流主升、族群廣度與族群成交額；高熱領漲股會優先顯示，但分數不會取代操作許可，仍禁止開盤盲追。")
     if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
         top_row = master_rank.iloc[0]
         render_pro_kpi_row([
@@ -11436,10 +11508,13 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         ])
         master_cols = [c for c in [
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+            "主流主升優先分", "主流主升判定", "主流主升操作限制",
             "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
             "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
             "主要進場路徑", "主要進場參考價", "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
-            "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分", "主流資金分", "族群攻擊強度",
+            "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分",
+            "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
+            "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度",
             "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
         ] if c in master_rank.columns]
         st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
@@ -11481,12 +11556,16 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         show_cols = [c for c in [
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+            "主流主升優先分", "主流主升判定", "主流主升操作限制",
             "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "候選強度分", "建議倉位上限%",
             "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
             "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%",
             "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
             "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑", "流動性參考成交額百萬",
-            "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控",
+            "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定",
+            "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度",
+            "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
+            "今日漲幅%", "當日量比", "當日收盤位置%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控",
             "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "守價回測參考價", "守價回測距離%", "實戰停損參考", "實戰停損距離%", "實戰壓力空間%", "停損參考", "第一壓力價",
             "正式推薦動作", "失效條件",
         ] if c in battle.columns]
@@ -11505,12 +11584,13 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "正式推薦分區", "是否正式推薦", "操作許可", "正式推薦等級", "正式推薦判定來源", "候選性質",
         "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "核心雷達品質檢查", "核心雷達降級原因",
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
+        "主流主升優先分", "主流主升判定", "主流主升操作限制",
         "候選強度分", "股神實戰總分", "可操作分", "實戰操作品質分", "推薦可信度分",
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
-        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
-        "主流資金分", "族群攻擊強度", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤原始橋接狀態", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
+        "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",
         "引擎輔助訊號", "分區互斥檢查", "掃描品質狀態", "正式推薦可用",
