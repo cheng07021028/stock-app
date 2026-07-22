@@ -381,6 +381,26 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
     pullback = _first_positive(out, ["回測承接參考價", "回測承接價", "推薦買點_拉回", "預估進場點_拉回", "近端支撐"])
     if pullback is None and "回測" in _safe_str(out.get("預估進場點")):
         pullback = _first_positive(out, ["預估進場點", "支撐參考"])
+    guard_retest = _first_positive(out, ["守價回測參考價", "觸發後守價", "突破後守價"])
+
+    def guard_retest_event():
+        if guard_retest is None:
+            return None
+        for session in after:
+            low = _safe_float(session.get("最低價"), 0.0) or 0.0
+            close = _safe_float(session.get("收盤價"), 0.0) or 0.0
+            ref = _level_for_row(guard_retest, rec_factor, session)
+            if low <= ref * 1.015:
+                if low >= ref * 0.975 and close >= ref:
+                    factor = _row_factor(session)
+                    return {"status": "守價回測成立｜納入可執行績效", "path": "觸發守價回測", "date": session["日期"],
+                            "executable": True, "entry_price": ref, "entry_adj": ref * factor,
+                            "quality": 91.0 if close >= ref * 1.01 else 84.0, "trigger_row": session}
+                if low < ref * 0.975 and close < ref:
+                    return {"status": "守價回測跌破｜取消交易", "path": "觸發守價回測", "date": session["日期"],
+                            "executable": False, "entry_price": ref, "entry_adj": None,
+                            "quality": 24.0, "trigger_row": session}
+        return None
 
     def breakout_event():
         if breakout is None:
@@ -420,15 +440,21 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
                         "quality": 25.0, "trigger_row": session}
         return None
 
-    first_fn, second_fn = (pullback_event, breakout_event) if "回測" in path_text else (breakout_event, pullback_event)
-    primary = first_fn()
+    if "守價回測" in path_text:
+        route_fns = [guard_retest_event, breakout_event, pullback_event]
+    elif "回測" in path_text:
+        route_fns = [pullback_event, guard_retest_event, breakout_event]
+    else:
+        route_fns = [breakout_event, guard_retest_event, pullback_event]
+
+    primary = route_fns[0]()
     if primary:
         return primary
-    # 備用路徑只在真正成立時採用；不能因非主要路徑跌破，就把尚未觸發的
-    # 主要策略誤判成失敗交易。
-    alternate = second_fn()
-    if alternate and alternate.get("executable"):
-        return alternate
+    # 備用路徑只採用真正成立的交易；備用途徑失敗不應覆蓋尚未觸發的主策略。
+    for fn in route_fns[1:]:
+        alternate = fn()
+        if alternate and alternate.get("executable"):
+            return alternate
     return result
 
 
