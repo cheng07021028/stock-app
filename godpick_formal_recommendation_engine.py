@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_mainstream_mainrise_stale_market_guard_20260722"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_1_trigger_quality_and_daily_feedback_20260723"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -27,6 +27,8 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "主流主升優先分",
     "主流主升判定",
     "主流主升操作限制",
+    "隔日觸發品質分",
+    "隔日觸發品質判定",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -121,6 +123,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "股神推薦優先分",
     "股神推薦總排名",
     "主流主升優先分",
+    "隔日觸發品質分",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -685,6 +688,52 @@ def _mainstream_mainrise_profile(row: pd.Series) -> dict[str, Any]:
         "mainstream": mainstream, "sector": sector, "breadth": breadth,
         "amount": amount, "amount_score": amount_score,
     }
+
+
+def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
+    """評估隔日條件單是否真的可執行，避免只靠主流/動能把遠端觸發或無停損候選排太前。"""
+    entry = _clamp(max(_num(row, "Entry進場買點分", 0), _num(row, "進場買點分", 0), _num(row, "買進分數", 0)))
+    risk = _clamp(max(_num(row, "Risk風控安全分", 0), _num(row, "風控安全分", 0)))
+    actionable = _clamp(_num(row, "隔日可執行優先分", _num(row, "進場可執行分", 0)))
+    gap = min(99.0, max(0.0, _num(row, "距最近可執行買點%", _num(row, "觸發距離%", 99.0))))
+    stop = _stop_distance_pct(row)
+    if stop <= 0:
+        stop = _num(row, "停損距離_隔日%", 0)
+    exhaustion = _clamp(_num(row, "隔日耗竭風險分", _exhaustion_profile(row)["score"]))
+    chase = _chase_risk_score(row, 55)
+    close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+
+    proximity = 100 if gap <= 0.8 else 90 if gap <= 2.0 else 78 if gap <= 3.5 else 58 if gap <= 5.0 else 38 if gap <= 6.5 else 18
+    stop_score = 96 if 0 < stop <= 4.5 else 86 if stop <= 6.8 else 68 if stop <= 8.5 else 42 if stop <= 10.5 else 15 if stop > 0 else 8
+    score = _clamp(
+        actionable * 0.25 + entry * 0.17 + risk * 0.16 + proximity * 0.18
+        + stop_score * 0.12 + (100 - exhaustion) * 0.06
+        + (100 - chase) * 0.03 + close_pos * 0.03
+    )
+    blockers: list[str] = []
+    if gap > 6.5:
+        blockers.append(f"觸發距離{gap:.1f}%過遠")
+    elif gap > 5.0:
+        blockers.append(f"觸發距離{gap:.1f}%偏遠")
+    if stop <= 0:
+        blockers.append("缺有效停損距離")
+    elif stop > 10.5:
+        blockers.append(f"停損距離{stop:.1f}%過深")
+    if entry < 52:
+        blockers.append(f"Entry {entry:.1f}<52")
+    if risk < 52:
+        blockers.append(f"Risk {risk:.1f}<52")
+    if exhaustion >= 60:
+        blockers.append(f"耗竭風險{exhaustion:.0f}")
+    if score >= 78 and not blockers:
+        status = "Q+｜隔日觸發品質佳"
+    elif score >= 65 and len(blockers) <= 1:
+        status = "Q｜可列條件雷達"
+    elif score >= 52:
+        status = "Q-｜只列備援觀察"
+    else:
+        status = "BLOCK-Q｜隔日執行品質不足"
+    return {"score": round(score, 1), "status": status, "gap": round(gap, 2), "stop": round(stop, 2), "blockers": "、".join(blockers)}
 
 
 def _red_market_reversal_profile(
@@ -2215,6 +2264,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     momentum = _momentum_profile(row)
     prebreak = _prebreakout_profile(row)
     mainrise = _mainstream_mainrise_profile(row)
+    trigger_quality = _nextday_trigger_quality_profile(row)
     reasons = _exclusion_reasons(row)
     mainrise_radar = _mainstream_mainrise_radar_ok(row, mainrise, reasons)
     trig = _trigger_info(row)
@@ -2439,6 +2489,8 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "主流主升優先分": mainrise.get("score", 0),
         "主流主升判定": mainrise.get("status", ""),
         "主流主升操作限制": mainrise.get("restriction", ""),
+        "隔日觸發品質分": trigger_quality.get("score", 0),
+        "隔日觸發品質判定": trigger_quality.get("status", ""),
         "可操作分": round(op, 1),
         "正式推薦分區": bucket,
         "正式推薦資格": qual,
@@ -2589,13 +2641,15 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     quality = _data_quality_score(row)
     exhaustion = _safe_float(row.get("隔日耗竭風險分"), _exhaustion_profile(row)["score"])
     actionable = _safe_float(row.get("隔日可執行優先分"), 0)
+    trigger_quality = _safe_float(row.get("隔日觸發品質分"), _nextday_trigger_quality_profile(row)["score"])
     amount = _reference_turnover_m(row)
     liquidity_score = 100.0 if amount >= 3000 else 90.0 if amount >= 1200 else 80.0 if amount >= 500 else 68.0 if amount >= 200 else 55.0 if amount >= 100 else 30.0 if amount > 0 else 15.0
 
     score = (
-        candidate * 0.13 + execution * 0.15 + entry * 0.09 + risk * 0.08
-        + route * 0.13 + mainstream * 0.13 + sector * 0.10 + mainrise * 0.13
-        + rr_score * 0.02 + liquidity_score * 0.02 + quality * 0.01 + actionable * 0.01
+        candidate * 0.11 + execution * 0.14 + entry * 0.09 + risk * 0.08
+        + route * 0.12 + mainstream * 0.12 + sector * 0.09 + mainrise * 0.11
+        + trigger_quality * 0.08 + rr_score * 0.02 + liquidity_score * 0.02
+        + quality * 0.01 + actionable * 0.01
     )
 
     use_label, bucket_bonus, score_cap = _priority_bucket_meta(row)
@@ -2621,6 +2675,22 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
         score -= min(8.0, (stop_dist - 12.0) * 0.55)
     elif stop_dist > 8:
         score -= min(3.0, (stop_dist - 8.0) * 0.45)
+
+    gap = min(99.0, max(0.0, _num(row, "距最近可執行買點%", _num(row, "觸發距離%", 99))))
+    if gap > 6.5:
+        score -= 5.0
+    elif gap > 5.0:
+        score -= 2.5
+    if trigger_quality < 45:
+        score -= 4.0
+    elif trigger_quality < 55:
+        score -= 2.0
+
+    # 低風報比、深停損、低買點品質的候選只能留在觀察區，
+    # 不得因題材或主流加成排到可執行候選前段。
+    if rr < 0.30 and (stop_dist > 10.0 or risk < 53.0 or entry < 55.0):
+        score -= 5.0
+        score_cap = min(score_cap, 70.0)
 
     # 冷門/非主流準主推薦不再靠分區加成壓過主流領漲股。
     if mainstream < 58 and sector < 55 and amount < 300:
@@ -2660,7 +2730,7 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     explain = (
         f"候選{candidate:.0f}｜操作{execution:.0f}｜買點{entry:.0f}｜風控{risk:.0f}｜"
         f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜主升{mainrise:.0f}｜"
-        f"RR {rr:.2f}｜耗竭{exhaustion:.0f}"
+        f"觸發品質{trigger_quality:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}"
     )
     return score, grade, use_label, explain
 
@@ -2676,17 +2746,21 @@ def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
     out["股神推薦分數說明"] = [x[3] for x in score_rows]
     out["股神推薦總排名"] = 0
 
-    eligible = ~out.get("正式推薦分區", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str).eq("正式排除清單")
-    eligible &= pd.to_numeric(out["股神推薦優先分"], errors="coerce").fillna(0).ge(50)
+    bucket_series = out.get("正式推薦分區", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    score_series = pd.to_numeric(out["股神推薦優先分"], errors="coerce").fillna(0)
+    miss_series = pd.to_numeric(out.get("強勢股漏選風險分", pd.Series([0] * len(out), index=out.index)), errors="coerce").fillna(0)
+    eligible = ~bucket_series.eq("正式排除清單")
+    # 高爆發漏選樣本仍保留在完整排名尾端，但不因此升級買進許可。
+    eligible &= score_series.ge(50) | (score_series.ge(45) & miss_series.ge(75) & bucket_series.isin(["高風險雷達觀察", "不可直接買觀察"]))
     ranked = out.loc[eligible].copy()
     if not ranked.empty:
-        for col in ["股神推薦優先分", "主流主升優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"]:
+        for col in ["股神推薦優先分", "隔日觸發品質分", "主流主升優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"]:
             if col not in ranked.columns:
                 ranked[col] = 0.0
             ranked[col] = pd.to_numeric(ranked[col], errors="coerce").fillna(0.0)
         ranked = ranked.sort_values(
-            ["股神推薦優先分", "主流主升優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"],
-            ascending=[False, False, False, False, False, False, False],
+            ["股神推薦優先分", "隔日觸發品質分", "主流主升優先分", "實戰操作品質分", "強勢動能分", "強勢前兆分", "主流資金分", "成交額百萬"],
+            ascending=[False, False, False, False, False, False, False, False],
             kind="mergesort",
         )
         rank_map = {idx: pos for pos, idx in enumerate(ranked.index, start=1)}

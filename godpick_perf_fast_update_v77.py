@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 
+PERF_FAST_UPDATE_VERSION = "v104_trigger_prerequisite_and_daily_review_20260723"
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
 DEFAULT_JSON_FILES = [
     "godpick_records.json",
@@ -148,6 +149,9 @@ def _needs_update(row: Dict[str, Any], stale_minutes: int = 60) -> bool:
     # V103：舊紀錄沒有觸發/還原績效欄位時必須回補，否則模型仍會把
     # 未觸發候選的收盤漲跌誤當成可交易績效。
     if not _safe_str(row.get("進場觸發狀態")) or not _safe_str(row.get("績效計算口徑")):
+        return True
+    # V104：回補隔日執行檢討欄位，避免只看到候選漲跌、看不到是否真正觸發。
+    if not _safe_str(row.get("隔日執行命中結果")):
         return True
 
     # 追蹤績效欄位缺值就更新
@@ -383,23 +387,54 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
         pullback = _first_positive(out, ["預估進場點", "支撐參考"])
     guard_retest = _first_positive(out, ["守價回測參考價", "觸發後守價", "突破後守價"])
 
+    def _prior_breakout_confirmed() -> bool:
+        # 守價回測必須建立在「此前真的突破且收盤守價」之後。
+        # 只檢查推薦日前最近 5 個交易日，避免把數週前的舊突破誤當成當前有效結構。
+        if breakout is None:
+            return False
+        prior = [r for r in history if r.get("日期", "") <= rec_date][-5:]
+        for prior_row in prior:
+            high = _safe_float(prior_row.get("最高價"), 0.0) or 0.0
+            close = _safe_float(prior_row.get("收盤價"), 0.0) or 0.0
+            trig = _level_for_row(breakout, rec_factor, prior_row)
+            guard = _level_for_row(hold if hold is not None else breakout * 0.985, rec_factor, prior_row)
+            if high + 1e-9 >= trig and close + 1e-9 >= guard:
+                return True
+        return False
+
     def guard_retest_event():
         if guard_retest is None:
             return None
+        confirmed_before = _prior_breakout_confirmed()
         for session in after:
             low = _safe_float(session.get("最低價"), 0.0) or 0.0
+            high = _safe_float(session.get("最高價"), 0.0) or 0.0
             close = _safe_float(session.get("收盤價"), 0.0) or 0.0
             ref = _level_for_row(guard_retest, rec_factor, session)
-            if low <= ref * 1.015:
+            trig = _level_for_row(breakout, rec_factor, session) if breakout is not None else 0.0
+            breakout_attempt = bool(trig > 0 and high + 1e-9 >= trig)
+            # 守價回測只能發生在前一個交易日以前已完成突破後。
+            # 當日同時碰到突破價與守價價時，OHLC 無法知道先後順序，必須交由
+            # breakout_event 以突破價計算，禁止用較低守價價產生回看式漂亮績效。
+            if confirmed_before and low <= ref * 1.015:
                 if low >= ref * 0.975 and close >= ref:
                     factor = _row_factor(session)
                     return {"status": "守價回測成立｜納入可執行績效", "path": "觸發守價回測", "date": session["日期"],
                             "executable": True, "entry_price": ref, "entry_adj": ref * factor,
-                            "quality": 91.0 if close >= ref * 1.01 else 84.0, "trigger_row": session}
+                            "quality": 91.0 if close >= ref * 1.01 else 84.0, "trigger_row": session,
+                            "guard_price": ref, "breakout_price": trig}
                 if low < ref * 0.975 and close < ref:
                     return {"status": "守價回測跌破｜取消交易", "path": "觸發守價回測", "date": session["日期"],
                             "executable": False, "entry_price": ref, "entry_adj": None,
-                            "quality": 24.0, "trigger_row": session}
+                            "quality": 24.0, "trigger_row": session,
+                            "guard_price": ref, "breakout_price": trig}
+            if breakout_attempt:
+                if close + 1e-9 < ref:
+                    return {"status": "假突破失守｜取消交易", "path": "突破確認", "date": session["日期"],
+                            "executable": False, "entry_price": trig, "entry_adj": None,
+                            "quality": 28.0, "trigger_row": session,
+                            "guard_price": ref, "breakout_price": trig}
+                confirmed_before = True
         return None
 
     def breakout_event():
@@ -415,10 +450,12 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
                     factor = _row_factor(session)
                     return {"status": "觸發且守價｜納入可執行績效", "path": "突破確認", "date": session["日期"],
                             "executable": True, "entry_price": trig, "entry_adj": trig * factor,
-                            "quality": 90.0 if close >= trig else 82.0, "trigger_row": session}
+                            "quality": 90.0 if close >= trig else 82.0, "trigger_row": session,
+                            "guard_price": guard, "breakout_price": trig}
                 return {"status": "假突破失守｜取消交易", "path": "突破確認", "date": session["日期"],
                         "executable": False, "entry_price": trig, "entry_adj": None,
-                        "quality": 28.0, "trigger_row": session}
+                        "quality": 28.0, "trigger_row": session,
+                        "guard_price": guard, "breakout_price": trig}
         return None
 
     def pullback_event():
@@ -493,6 +530,58 @@ def _execution_returns(history: list[dict[str, Any]], event: dict[str, Any], tra
     return out
 
 
+def _daily_execution_diagnostics(history: list[dict[str, Any]], rec_date: str, base_adjusted: float, event: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    after = _trading_rows_after(history, rec_date)
+    if not after:
+        return out
+    first = after[0]
+    factor = _row_factor(first)
+    close_adj = (_safe_float(first.get("收盤價"), 0.0) or 0.0) * factor
+    candidate_ret = _calc_return(close_adj, base_adjusted)
+    if candidate_ret is not None:
+        out["隔日候選漲跌%"] = candidate_ret
+
+    status = _safe_str(event.get("status"))
+    trigger_row = event.get("trigger_row") or {}
+    entry = _safe_float(event.get("entry_price"))
+    if trigger_row and entry and entry > 0:
+        row_factor = _row_factor(trigger_row)
+        entry_adj = entry * row_factor
+        high_adj = (_safe_float(trigger_row.get("最高價"), entry) or entry) * row_factor
+        low_adj = (_safe_float(trigger_row.get("最低價"), entry) or entry) * row_factor
+        close_adj_event = (_safe_float(trigger_row.get("收盤價"), entry) or entry) * row_factor
+        out["觸發當日最高報酬%"] = _calc_return(high_adj, entry_adj)
+        out["觸發當日最大回撤%"] = _calc_return(low_adj, entry_adj)
+        out["觸發當日收盤績效%"] = _calc_return(close_adj_event, entry_adj)
+
+    if status.startswith("觸發且守價") or status.startswith("守價回測成立") or status.startswith("回測承接成立"):
+        same_day = _safe_float(out.get("觸發當日收盤績效%"), 0.0) or 0.0
+        if same_day >= 0:
+            result = "有效觸發｜守價成功"
+        else:
+            result = "守價成功｜收盤仍低於執行價"
+        review = "納入可執行績效；持續追蹤後續1/3/5/10/20日。"
+    elif "假突破" in status or "跌破" in status:
+        result = "訊號失敗｜假突破或回測跌破"
+        review = "不納入交易報酬，但必須納入觸發品質與假突破率校正。"
+    else:
+        result = "未觸發｜不計交易勝負"
+        if candidate_ret is not None and candidate_ret >= 3.0:
+            review = "候選上漲但未觸發；列入觸發價過遠/漏選檢討，不可冒充交易獲利。"
+            out["未觸發漏選標記"] = "是｜隔日上漲3%以上"
+        elif candidate_ret is not None and candidate_ret <= -3.0:
+            review = "未觸發並避開明顯下跌；維持不交易紀律。"
+            out["未觸發漏選標記"] = "否｜避開下跌"
+        else:
+            review = "未觸發，維持觀察；不納入交易勝負。"
+            out["未觸發漏選標記"] = "否"
+    out["隔日執行命中結果"] = result
+    out["隔日績效檢討標籤"] = review
+    out["候選與交易分流說明"] = "候選漲跌用於召回檢討；只有觸發且守價後才計入可執行交易績效。"
+    return out
+
+
 def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: List[int] | None = None) -> Dict[str, Any]:
     track_days = track_days or DEFAULT_TRACK_DAYS
     out = dict(row)
@@ -532,7 +621,8 @@ def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: L
     out["績效行情日期"] = _safe_str((latest_row or {}).get("日期"))
     out["還原價格調整係數"] = round(rec_factor, 8)
     out["除權息調整旗標"] = "是｜已用還原價" if abs(rec_factor - 1.0) >= 0.002 else "否"
-    out["績效計算口徑"] = "還原收盤價候選績效＋觸發後可執行交易績效"
+    out["績效計算口徑"] = "還原收盤價候選績效＋觸發前置條件＋觸發後可執行交易績效"
+    out["績效更新版本"] = PERF_FAST_UPDATE_VERSION
 
     total_ret = _calc_return(latest_adj, base_adjusted)
     if total_ret is not None:
@@ -553,6 +643,7 @@ def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: L
     out["執行基準價"] = round(float(event["entry_price"]), 4) if event.get("entry_price") else None
     out["觸發訊號品質分"] = round(float(event.get("quality", 50.0)), 1)
     out.update(_execution_returns(history, event, track_days))
+    out.update(_daily_execution_diagnostics(history, rec_date, base_adjusted, event))
     return out
 
 def update_recommendation_perf_fast_v77(
