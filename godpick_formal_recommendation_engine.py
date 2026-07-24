@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_1_trigger_quality_and_daily_feedback_20260723"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_2_red_market_two_stage_confirmation_20260724"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -29,6 +29,11 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "主流主升操作限制",
     "隔日觸發品質分",
     "隔日觸發品質判定",
+    "隔日有效風控距離%",
+    "隔日風控基準",
+    "紅燈觸發脆弱度分",
+    "紅燈觸發管制",
+    "盤中二段確認要求",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -124,6 +129,8 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "股神推薦總排名",
     "主流主升優先分",
     "隔日觸發品質分",
+    "隔日有效風控距離%",
+    "紅燈觸發脆弱度分",
     "實戰操作品質分",
     "資料完整度評分",
     "建議倉位上限%",
@@ -690,42 +697,143 @@ def _mainstream_mainrise_profile(row: pd.Series) -> dict[str, Any]:
     }
 
 
+def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
+    """紅燈市場下的「碰價即反轉」風險。
+
+    此分數只決定觸發方式與排序，不會把高風險股直接改成買進建議。
+    重點修正：長上影弱收、連續急漲、高耗竭與超深結構停損，
+    在紅燈市場必須採二段確認或只等回測，不能只因盤中碰價就算成功。
+    """
+    market = _market_risk_info(row)
+    red = bool(market.get("severe")) and not bool(market.get("stale"))
+    if not red:
+        return {
+            "score": 0.0, "status": "N/A｜非最新紅燈市場", "requirement": "依一般觸發與守價規則。",
+            "two_stage": False, "block_breakout": False,
+        }
+
+    upper = _clamp(_num(row, "上影線比例%", 0))
+    close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+    ret1 = _num(row, "今日漲幅%", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    ret20 = _num(row, "近20日漲幅%", 0)
+    vol_ratio = max(_num(row, "當日量比", 1), _num(row, "5日20日量比", 1))
+    exhaustion = _clamp(_num(row, "隔日耗竭風險分", _exhaustion_profile(row)["score"]))
+    stop = _stop_distance_pct(row)
+    gap = min(99.0, max(0.0, _num(row, "觸發距離%", _num(row, "距最近可執行買點%", 99))))
+    amount = _reference_turnover_m(row)
+    mainrise = _clamp(_safe_float(row.get("主流主升優先分"), _mainstream_mainrise_profile(row)["score"]))
+
+    score = 10.0
+    score += 26.0 if upper >= 55 else 18.0 if upper >= 40 else 8.0 if upper >= 25 else 0.0
+    score += 18.0 if close_pos < 45 else 10.0 if close_pos < 60 else 0.0
+    score += 18.0 if ret1 >= 9.3 else 8.0 if ret1 >= 6.0 else 0.0
+    score += 14.0 if ret5 >= 12.0 else 7.0 if ret5 >= 8.0 else 0.0
+    score += 12.0 if ret1 >= 8.0 and ret20 <= -10.0 else 0.0
+    score += 22.0 if exhaustion >= 60 else 10.0 if exhaustion >= 40 else 0.0
+    score += 14.0 if stop > 18.0 else 8.0 if stop > 12.0 else 0.0
+    score += 12.0 if stop > 18.0 and vol_ratio >= 3.0 else 0.0
+    score += 10.0 if vol_ratio >= 4.0 and close_pos < 75 else 0.0
+    score += 10.0 if gap > 6.5 else 6.0 if gap > 5.0 else 0.0
+
+    # 主流、高流動性、收盤靠近最高且上影短者，屬於真正逆勢領漲結構；
+    # 只降低「脆弱度」，不取消紅燈市場的觸發與守價要求。
+    resilient_leader = bool(mainrise >= 78 and close_pos >= 72 and upper <= 25 and exhaustion < 45 and amount >= 800)
+    if resilient_leader:
+        score -= 16.0
+    if amount >= 1500:
+        score -= 4.0
+    score = _clamp(score)
+
+    high_heat = bool(ret1 >= 9.3 or exhaustion >= 55 or (ret5 >= 12 and ret1 > 0))
+    block_breakout = bool(score >= 65 or high_heat)
+    two_stage = bool(score >= 40 or block_breakout)
+    if block_breakout:
+        status = "BLOCK-F｜紅燈禁止碰價追突破"
+        requirement = "禁止碰價即買；只接受先回測守價，再重新突破，或連續3根5分K/至少15分鐘站穩觸發價後才評估。"
+    elif two_stage:
+        status = "F-｜紅燈需二段確認"
+        requirement = "觸發價只算第一關；需至少15分鐘站穩、量價未急縮且回測守價不破，才可小量評估。"
+    elif score >= 25:
+        status = "F｜紅燈觸發需加強確認"
+        requirement = "突破後不得立刻追價；需觀察回測守價與收盤位置。"
+    else:
+        status = "F+｜紅燈觸發結構相對穩定"
+        requirement = "仍需觸發、守價與分批，禁止開盤預掛追價。"
+    return {
+        "score": round(score, 1), "status": status, "requirement": requirement,
+        "two_stage": two_stage, "block_breakout": block_breakout,
+        "resilient_leader": resilient_leader,
+    }
+
+
 def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
-    """評估隔日條件單是否真的可執行，避免只靠主流/動能把遠端觸發或無停損候選排太前。"""
+    """評估隔日條件單是否可執行，並區分結構停損與觸發後守價。
+
+    隔日條件單真正的短線風控應優先使用「觸發價→觸發後守價」距離；
+    遠端結構停損仍保留作為總風控，但不得重複壓低主流領漲雷達。
+    """
     entry = _clamp(max(_num(row, "Entry進場買點分", 0), _num(row, "進場買點分", 0), _num(row, "買進分數", 0)))
     risk = _clamp(max(_num(row, "Risk風控安全分", 0), _num(row, "風控安全分", 0)))
     actionable = _clamp(_num(row, "隔日可執行優先分", _num(row, "進場可執行分", 0)))
-    gap = min(99.0, max(0.0, _num(row, "距最近可執行買點%", _num(row, "觸發距離%", 99.0))))
-    stop = _stop_distance_pct(row)
-    if stop <= 0:
-        stop = _num(row, "停損距離_隔日%", 0)
+    gap = min(99.0, max(0.0, _num(row, "觸發距離%", _num(row, "距最近可執行買點%", 99.0))))
+    structural_stop = _stop_distance_pct(row)
+    if structural_stop <= 0:
+        structural_stop = _num(row, "停損距離_隔日%", 0)
+    trigger = max(_num(row, "實戰觸發價", 0), _num(row, "突破確認參考價", 0), _num(row, "突破確認價", 0))
+    guard = max(_num(row, "觸發後守價", 0), _num(row, "守價回測參考價", 0))
+    guard_dist = ((trigger - guard) / trigger * 100.0) if trigger > 0 and 0 < guard < trigger else 0.0
+    if 0.35 <= guard_dist <= 5.0:
+        effective_stop = guard_dist
+        risk_basis = "觸發後守價"
+    else:
+        effective_stop = structural_stop
+        risk_basis = "結構停損"
+
     exhaustion = _clamp(_num(row, "隔日耗竭風險分", _exhaustion_profile(row)["score"]))
     chase = _chase_risk_score(row, 55)
     close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+    upper = _clamp(_num(row, "上影線比例%", 0))
+    fragility = _red_market_trigger_fragility_profile(row)
 
     proximity = 100 if gap <= 0.8 else 90 if gap <= 2.0 else 78 if gap <= 3.5 else 58 if gap <= 5.0 else 38 if gap <= 6.5 else 18
-    stop_score = 96 if 0 < stop <= 4.5 else 86 if stop <= 6.8 else 68 if stop <= 8.5 else 42 if stop <= 10.5 else 15 if stop > 0 else 8
+    stop_score = 96 if 0 < effective_stop <= 2.2 else 90 if effective_stop <= 4.5 else 80 if effective_stop <= 6.8 else 62 if effective_stop <= 8.5 else 38 if effective_stop <= 10.5 else 15 if effective_stop > 0 else 8
     score = _clamp(
         actionable * 0.25 + entry * 0.17 + risk * 0.16 + proximity * 0.18
         + stop_score * 0.12 + (100 - exhaustion) * 0.06
         + (100 - chase) * 0.03 + close_pos * 0.03
     )
+    if fragility.get("two_stage"):
+        score -= max(3.0, (float(fragility.get("score", 0)) - 25.0) * 0.16)
+    if fragility.get("block_breakout"):
+        score = min(score, 48.0)
+    score = _clamp(score)
+
     blockers: list[str] = []
     if gap > 6.5:
         blockers.append(f"觸發距離{gap:.1f}%過遠")
     elif gap > 5.0:
         blockers.append(f"觸發距離{gap:.1f}%偏遠")
-    if stop <= 0:
-        blockers.append("缺有效停損距離")
-    elif stop > 10.5:
-        blockers.append(f"停損距離{stop:.1f}%過深")
+    if effective_stop <= 0:
+        blockers.append("缺有效風控距離")
+    elif effective_stop > 10.5:
+        blockers.append(f"有效風控距離{effective_stop:.1f}%過深")
     if entry < 52:
         blockers.append(f"Entry {entry:.1f}<52")
     if risk < 52:
         blockers.append(f"Risk {risk:.1f}<52")
     if exhaustion >= 60:
         blockers.append(f"耗竭風險{exhaustion:.0f}")
-    if score >= 78 and not blockers:
+    if upper >= 50 and close_pos < 55:
+        blockers.append(f"長上影{upper:.0f}%且收盤位置{close_pos:.0f}%偏弱")
+    if fragility.get("block_breakout"):
+        blockers.append("紅燈高熱/脆弱結構禁止碰價追突破")
+
+    if fragility.get("block_breakout"):
+        status = "BLOCK-F｜紅燈只等回測再突破"
+    elif fragility.get("two_stage"):
+        status = "Q2｜紅燈需二段確認"
+    elif score >= 78 and not blockers:
         status = "Q+｜隔日觸發品質佳"
     elif score >= 65 and len(blockers) <= 1:
         status = "Q｜可列條件雷達"
@@ -733,7 +841,14 @@ def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
         status = "Q-｜只列備援觀察"
     else:
         status = "BLOCK-Q｜隔日執行品質不足"
-    return {"score": round(score, 1), "status": status, "gap": round(gap, 2), "stop": round(stop, 2), "blockers": "、".join(blockers)}
+    return {
+        "score": round(score, 1), "status": status, "gap": round(gap, 2),
+        "stop": round(structural_stop, 2), "effective_stop": round(effective_stop, 2),
+        "risk_basis": risk_basis, "blockers": "、".join(blockers),
+        "fragility_score": fragility.get("score", 0), "fragility_status": fragility.get("status", ""),
+        "requirement": fragility.get("requirement", ""), "two_stage": fragility.get("two_stage", False),
+        "block_breakout": fragility.get("block_breakout", False),
+    }
 
 
 def _red_market_reversal_profile(
@@ -2279,6 +2394,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     intraday_objective = False if (direct or a_minus or intraday_primary) else _objective_intraday_ok(row, op, reasons)
     intraday = intraday_primary or intraday_objective
     market_info = _market_risk_info(row)
+    red_fragility = _red_market_trigger_fragility_profile(row)
     decision_source = (
         promotion["route"] if direct_primary and promotion["formal"] else
         "完整因子正式門檻" if direct_primary else
@@ -2460,6 +2576,20 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         radar_action = "等待條件補強"
         exclude_text = "買點、風控或資金條件不足"
 
+    # 紅燈高熱／脆弱突破不得因盤中碰價就升格；保留在雷達，但只等回測再突破。
+    if red_fragility.get("block_breakout") and market_info.get("severe") and bucket != "正式排除清單":
+        bucket = "高風險雷達觀察"
+        qual = "BLOCK-F｜紅燈禁止碰價追突破"
+        direct_buy = "不可｜只等回測守價後再突破"
+        action = red_fragility.get("requirement") or "紅燈市場只等回測守價後再突破。"
+        radar_level = "F｜紅燈假突破防守雷達"
+        radar_action = "優先觀察但禁止碰價即買；需回測守價與二次確認"
+        exclude_text = "紅燈高熱/脆弱結構：碰價突破容易反轉，改列防守雷達"
+        decision_source = "紅燈假突破防守管制"
+    elif red_fragility.get("two_stage") and market_info.get("severe"):
+        action = f"{action}；{red_fragility.get('requirement', '')}".strip("；")
+        radar_action = f"{radar_action}；需二段確認".strip("；")
+
     sort_score = op + next_profile["score"] * 0.12 + readiness["score"] * 0.18
     if bucket == "正式下週主推薦":
         sort_score += 20
@@ -2491,6 +2621,11 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "主流主升操作限制": mainrise.get("restriction", ""),
         "隔日觸發品質分": trigger_quality.get("score", 0),
         "隔日觸發品質判定": trigger_quality.get("status", ""),
+        "隔日有效風控距離%": trigger_quality.get("effective_stop", 0),
+        "隔日風控基準": trigger_quality.get("risk_basis", ""),
+        "紅燈觸發脆弱度分": trigger_quality.get("fragility_score", red_fragility.get("score", 0)),
+        "紅燈觸發管制": trigger_quality.get("fragility_status", red_fragility.get("status", "")),
+        "盤中二段確認要求": trigger_quality.get("requirement", red_fragility.get("requirement", "")),
         "可操作分": round(op, 1),
         "正式推薦分區": bucket,
         "正式推薦資格": qual,
@@ -2518,7 +2653,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "隔日雷達回測判斷": _review_text_for(row, bucket, trig),
         "股神觸發修正建議": "正式推薦仍以 Entry/Risk/RR 為準；盤中雷達只在實戰觸發價放量站上、守住觸發後守價後小量試單。",
         "觸發後守價": _support_after_trigger(trig.get("final", 0)),
-        "盤中觸發確認條件": _trigger_confirm_text(trig),
+        "盤中觸發確認條件": f"{_trigger_confirm_text(trig)}；{trigger_quality.get('requirement', '')}".strip("；"),
         "開盤跳空處理": _gap_plan_text(trig),
         "隔日命中修正標籤": _hit_tag_for(bucket, row),
         "高風險雷達保留原因": exclude_text if bucket == "高風險雷達觀察" else "",
@@ -2544,7 +2679,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "隔日耗竭風險分": momentum["exhaustion_score"],
         "隔日耗竭風險等級": momentum["exhaustion_level"],
         "隔日可執行優先分": round(_clamp(effective_readiness_score * 0.62 + next_profile["score"] * 0.23 + (100 - momentum["exhaustion_score"]) * 0.15), 1),
-        "進場績效計算口徑": "突破需觸價且收盤守價；一般回測需收回支撐；守價回測以觸發後守價附近承接為基準。未觸發不計交易勝負。",
+        "進場績效計算口徑": "突破需觸價；收盤站上觸發價才算確認成功，僅守住守價屬待確認；收盤跌破守價為假突破。一般回測需收回支撐，未觸發不計交易勝負。",
         "推薦升級判定路徑": promotion["route"],
         "路徑風險報酬比": promotion["rr_used"],
         "風報比計算口徑": promotion["rr_basis"],
@@ -2642,6 +2777,10 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     exhaustion = _safe_float(row.get("隔日耗竭風險分"), _exhaustion_profile(row)["score"])
     actionable = _safe_float(row.get("隔日可執行優先分"), 0)
     trigger_quality = _safe_float(row.get("隔日觸發品質分"), _nextday_trigger_quality_profile(row)["score"])
+    fragility_profile = _red_market_trigger_fragility_profile(row)
+    fragility = _safe_float(row.get("紅燈觸發脆弱度分"), fragility_profile["score"])
+    close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+    upper = _clamp(_num(row, "上影線比例%", 0))
     amount = _reference_turnover_m(row)
     liquidity_score = 100.0 if amount >= 3000 else 90.0 if amount >= 1200 else 80.0 if amount >= 500 else 68.0 if amount >= 200 else 55.0 if amount >= 100 else 30.0 if amount > 0 else 15.0
 
@@ -2657,6 +2796,11 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     market_info = _market_risk_info(row)
     if not market_info.get("stale"):
         score += _clamp(_num(row, "隔日大盤預測加減分", 0), -6.0, 6.0)
+    if market_info.get("severe"):
+        score -= max(0.0, fragility - 25.0) * 0.10
+        if fragility <= 25 and mainrise >= 78 and close_pos >= 72 and upper <= 25 and amount >= 800:
+            score += 4.0
+            use_label = "3｜紅燈逆勢主流領漲雷達"
 
     # 主流主升高熱仍要排前面，但買進許可維持禁止追價；只減少排序懲罰，不取消風控。
     heat_factor = 0.42 if mainrise >= 78 else 0.68 if mainrise >= 70 else 1.0
@@ -2730,7 +2874,7 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     explain = (
         f"候選{candidate:.0f}｜操作{execution:.0f}｜買點{entry:.0f}｜風控{risk:.0f}｜"
         f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜主升{mainrise:.0f}｜"
-        f"觸發品質{trigger_quality:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}"
+        f"觸發品質{trigger_quality:.0f}｜紅燈脆弱{fragility:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}"
     )
     return score, grade, use_label, explain
 

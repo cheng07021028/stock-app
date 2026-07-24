@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 """
@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 
-PERF_FAST_UPDATE_VERSION = "v104_trigger_prerequisite_and_daily_review_20260723"
+PERF_FAST_UPDATE_VERSION = "v105_close_confirmation_and_retention_20260724"
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
 DEFAULT_JSON_FILES = [
     "godpick_records.json",
@@ -369,6 +369,25 @@ def _first_positive(row: Dict[str, Any], names: list[str]) -> float | None:
     return None
 
 
+def _close_retention_ratio(high: float, low: float, close: float) -> float:
+    spread = float(high) - float(low)
+    if spread <= 1e-12:
+        return 1.0 if close >= high else 0.5
+    return max(0.0, min(1.0, (float(close) - float(low)) / spread))
+
+
+def _breakout_confirmation_meta(high: float, low: float, close: float, trigger: float, guard: float) -> dict[str, Any]:
+    retention = _close_retention_ratio(high, low, close)
+    if close + 1e-9 < guard:
+        return {"level": "F｜假突破失守", "quality": max(8.0, 32.0 * retention), "retention": retention}
+    if close + 1e-9 >= trigger:
+        if retention >= 0.55:
+            return {"level": "C+｜收盤站上觸發價", "quality": 94.0 if retention >= 0.70 else 89.0, "retention": retention}
+        return {"level": "C｜突破成立但尾盤偏弱", "quality": 78.0, "retention": retention}
+    # 守價沒有失效，但收盤仍低於真正執行價，不能算成功訊號。
+    return {"level": "H｜守價未失效待確認", "quality": 68.0 if retention >= 0.60 else 58.0 if retention >= 0.45 else 48.0, "retention": retention}
+
+
 def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], rec_date: str,
                             base_price: float, rec_factor: float) -> dict[str, Any]:
     after = _trading_rows_after(history, rec_date)
@@ -442,20 +461,24 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
             return None
         for session in after:
             high = _safe_float(session.get("最高價"), 0.0) or 0.0
+            low = _safe_float(session.get("最低價"), 0.0) or 0.0
             close = _safe_float(session.get("收盤價"), 0.0) or 0.0
             trig = _level_for_row(breakout, rec_factor, session)
             guard = _level_for_row(hold if hold is not None else breakout * 0.985, rec_factor, session)
             if high + 1e-9 >= trig:
+                meta = _breakout_confirmation_meta(high, low, close, trig, guard)
                 if close + 1e-9 >= guard:
                     factor = _row_factor(session)
                     return {"status": "觸發且守價｜納入可執行績效", "path": "突破確認", "date": session["日期"],
                             "executable": True, "entry_price": trig, "entry_adj": trig * factor,
-                            "quality": 90.0 if close >= trig else 82.0, "trigger_row": session,
-                            "guard_price": guard, "breakout_price": trig}
+                            "quality": meta["quality"], "trigger_row": session,
+                            "guard_price": guard, "breakout_price": trig,
+                            "confirmation_level": meta["level"], "close_retention": meta["retention"]}
                 return {"status": "假突破失守｜取消交易", "path": "突破確認", "date": session["日期"],
                         "executable": False, "entry_price": trig, "entry_adj": None,
-                        "quality": 28.0, "trigger_row": session,
-                        "guard_price": guard, "breakout_price": trig}
+                        "quality": meta["quality"], "trigger_row": session,
+                        "guard_price": guard, "breakout_price": trig,
+                        "confirmation_level": meta["level"], "close_retention": meta["retention"]}
         return None
 
     def pullback_event():
@@ -554,13 +577,30 @@ def _daily_execution_diagnostics(history: list[dict[str, Any]], rec_date: str, b
         out["觸發當日最高報酬%"] = _calc_return(high_adj, entry_adj)
         out["觸發當日最大回撤%"] = _calc_return(low_adj, entry_adj)
         out["觸發當日收盤績效%"] = _calc_return(close_adj_event, entry_adj)
+        retention = event.get("close_retention")
+        if retention is None:
+            retention = _close_retention_ratio(high_adj, low_adj, close_adj_event)
+        out["觸發當日收盤保留率%"] = round(float(retention) * 100.0, 2)
+        confirmation = _safe_str(event.get("confirmation_level"))
+        if not confirmation and status.startswith("觸發且守價"):
+            guard_price = (_safe_float(event.get("guard_price"), entry) or entry) * row_factor
+            confirmation = _breakout_confirmation_meta(high_adj, low_adj, close_adj_event, entry_adj, guard_price)["level"]
+        out["觸發收盤確認層級"] = confirmation
 
-    if status.startswith("觸發且守價") or status.startswith("守價回測成立") or status.startswith("回測承接成立"):
-        same_day = _safe_float(out.get("觸發當日收盤績效%"), 0.0) or 0.0
-        if same_day >= 0:
-            result = "有效觸發｜守價成功"
+    if status.startswith("觸發且守價"):
+        confirmation = _safe_str(out.get("觸發收盤確認層級"))
+        if confirmation.startswith("C+"):
+            result = "確認成功｜收盤站上觸發價"
+            review = "正式列為隔日確認成功；納入觸發成功率與後續1/3/5/10/20日績效。"
+        elif confirmation.startswith("C｜"):
+            result = "觸發成立｜但尾盤確認不足"
+            review = "已觸發但尾盤偏弱；納入交易損益，不列為高品質成功訊號。"
         else:
-            result = "守價成功｜收盤仍低於執行價"
+            result = "中性｜守價未失效但未站回觸發價"
+            review = "已觸發且仍在守價之上，但收盤未站回執行價；納入交易損益，成功率暫不計勝。"
+    elif status.startswith("守價回測成立") or status.startswith("回測承接成立"):
+        same_day = _safe_float(out.get("觸發當日收盤績效%"), 0.0) or 0.0
+        result = "回測承接成功" if same_day >= 0 else "回測守價成立｜收盤仍低於執行價"
         review = "納入可執行績效；持續追蹤後續1/3/5/10/20日。"
     elif "假突破" in status or "跌破" in status:
         result = "訊號失敗｜假突破或回測跌破"
@@ -578,7 +618,7 @@ def _daily_execution_diagnostics(history: list[dict[str, Any]], rec_date: str, b
             out["未觸發漏選標記"] = "否"
     out["隔日執行命中結果"] = result
     out["隔日績效檢討標籤"] = review
-    out["候選與交易分流說明"] = "候選漲跌用於召回檢討；只有觸發且守價後才計入可執行交易績效。"
+    out["候選與交易分流說明"] = "候選漲跌只用於召回檢討；碰價不等於成功。收盤站上觸發價才算確認成功，僅守住守價屬中性待確認，跌破守價為假突破。"
     return out
 
 
