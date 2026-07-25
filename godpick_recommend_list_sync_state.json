@@ -1,9 +1,1 @@
-{
-  "version": "named_json_durable_v2",
-  "updated_at": "2026-07-19 14:51:35",
-  "updated_at_utc": "2026-07-19T14:51:35Z",
-  "updated_at_epoch": 1784472695.5056908,
-  "revision": 1784472695505741790,
-  "payload_hash": "5f7a03f79088981ac433bc38e0f9090476a2f1e168b74d60418f80b823037c00",
-  "path": "godpick_recommend_list.json"
-}
+{"version":"named_json_durable_v2","updated_at":"2026-07-25 15:20:37","updated_at_utc":"2026-07-25T15:20:37Z","updated_at_epoch":1784992837.3740594,"revision":1784992837374109203,"payload_hash":"5f7a03f79088981ac433bc38e0f9090476a2f1e168b74d60418f80b823037c00","path":"godpick_recommend_list.json"}
