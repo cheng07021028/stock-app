@@ -191,6 +191,17 @@ except Exception:
     govern_recommend_list = None
     report_allows_formal_action = None
 
+try:
+    from godpick_recommendation_rotation import (
+        ROTATION_GUARD_VERSION,
+        save_rotation_snapshot,
+        rotation_diagnostics,
+    )
+except Exception:
+    ROTATION_GUARD_VERSION = "rotation_guard_unavailable"
+    save_rotation_snapshot = None
+    rotation_diagnostics = None
+
 
 STATE_FIX_VERSION = "widget_state_final_v4_verified_no_direct_rec_record_codes_20260425"
 DUPLICATE_CONFIRM_VERSION = "duplicate_confirm_v1_20260425"
@@ -201,7 +212,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_record_authority_upsert_v174_20260727"
+PAGE07_SPEED_FIX_VERSION = "page07_rotation_quality_guard_v175_20260727"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -11392,9 +11403,14 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tup
     if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty or "股票代號" not in source_df.columns:
         return 0, ["本輪沒有可自動記錄的推薦資料。"]
     try:
-        work = canonicalize_final_partition(source_df) if callable(canonicalize_final_partition) else source_df.copy()
+        # 使用與畫面相同的唯一決策框架，確保重複推薦輪動校正、
+        # 資料新鮮度與正式分區全部先完成，再寫入權威紀錄。
+        work = _phase93_single_source_decision_frame(source_df, source_df)
     except Exception:
-        work = source_df.copy()
+        try:
+            work = canonicalize_final_partition(source_df) if callable(canonicalize_final_partition) else source_df.copy()
+        except Exception:
+            work = source_df.copy()
     if "正式推薦分區" not in work.columns:
         try:
             work = apply_formal_recommendation_engine(work)
@@ -11504,7 +11520,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         return pd.DataFrame()
 
     sort_cols = [
-        "股神推薦優先分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
+        "股神推薦優先分", "今日訊號新鮮分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
         "強勢前兆分", "主流資金分", "族群攻擊強度", "流動性參考成交額百萬",
     ]
     for col in sort_cols:
@@ -11519,6 +11535,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
     cols = [
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+        "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
+        "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化", "重複推薦說明",
         "主流主升優先分", "主流主升判定", "主流主升操作限制",
         "股票代號", "股票名稱", "市場別", "類別", "產業",
         "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "盤中雷達優先級", "核心雷達品質檢查", "核心雷達降級原因",
@@ -11724,7 +11742,24 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
     render_pro_section("股神推薦總排名｜真正第一優先")
-    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。新版已納入主流主升、族群廣度與族群成交額；高熱領漲股會優先顯示，但分數不會取代操作許可，仍禁止開盤盲追。")
+    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。新版除主流主升、族群廣度與成交額外，也檢查近5次是否反覆入榜，以及今天是否真的出現新量價／觸發證據；真正領漲股可以續留，但缺少新訊號的重複名單會降級，不會為了多樣化硬推弱股。")
+    if callable(rotation_diagnostics):
+        try:
+            rotation_info = rotation_diagnostics(decision_source)
+        except Exception:
+            rotation_info = {"available": False}
+        if rotation_info.get("available"):
+            if rotation_info.get("warning"):
+                st.warning(
+                    f"推薦黏著警示：前10名有 {rotation_info.get('top10_repeat3_count', 0)} 檔近5次至少入榜3次，"
+                    f"其中 {rotation_info.get('top10_sticky_without_signal', 0)} 檔缺少今日新訊號。"
+                    "系統已套用輪動校正；請優先看『推薦輪動狀態』與『今日訊號新鮮分』。"
+                )
+            else:
+                st.info(
+                    f"推薦輪動檢查：前10名新進榜 {rotation_info.get('top10_new_count', 0)} 檔，"
+                    f"平均今日訊號新鮮分 {rotation_info.get('top10_average_signal_freshness', 0):.1f}。"
+                )
     if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
         top_row = master_rank.iloc[0]
         render_pro_kpi_row([
@@ -11735,6 +11770,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         ])
         master_cols = [c for c in [
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+            "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
+            "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化",
             "主流主升優先分", "主流主升判定", "主流主升操作限制",
             "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
             "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
@@ -13341,6 +13378,18 @@ def main():
             else:
                 st.session_state[_k("result_fallback_notice")] = ""
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
+        # 每個交易日只保存一份輕量排名快照，供下一輪辨識真正續強與
+        # 「結構分數黏著、但今日沒有新訊號」的重複推薦。此檔不是績效權威檔。
+        if callable(save_rotation_snapshot):
+            try:
+                rotation_source = st.session_state.get(_k("candidate_diagnosis_store"))
+                if not isinstance(rotation_source, pd.DataFrame) or rotation_source.empty:
+                    rotation_source = rec_df
+                rotation_source = _phase93_single_source_decision_frame(rec_df, rotation_source)
+                rotation_ok, rotation_msg = save_rotation_snapshot(rotation_source)
+                st.session_state[_k("rotation_snapshot_message")] = rotation_msg
+            except Exception as rotation_error:
+                st.session_state[_k("rotation_snapshot_message")] = f"推薦輪動快照未保存：{rotation_error}"
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
         rec_df, hot_pick_df, _postprocess_cache_hit_v164 = _postprocess_recommend_result_v164(
@@ -13375,6 +13424,10 @@ def main():
             ]
         except Exception as e:
             st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
+
+    rotation_snapshot_message = _safe_str(st.session_state.get(_k("rotation_snapshot_message")))
+    if rotation_snapshot_message and (submit_recommend or submit_refresh or resume_scan_btn):
+        st.caption(f"推薦輪動紀錄：{rotation_snapshot_message}")
 
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)

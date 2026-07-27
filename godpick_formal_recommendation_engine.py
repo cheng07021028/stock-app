@@ -11,7 +11,12 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_4_full_data_freshness_warning_20260727"
+try:
+    from godpick_recommendation_rotation import apply_recommendation_rotation_guard
+except Exception:
+    apply_recommendation_rotation_guard = None
+
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_5_rotation_quality_guard_20260727"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -3512,4 +3517,10 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     out = pd.concat([out, classified], axis=1)
     out = _apply_intraday_radar_tiers(out)
     out = _apply_unified_recommendation_ranking(out)
+    if callable(apply_recommendation_rotation_guard):
+        try:
+            out = apply_recommendation_rotation_guard(out)
+        except Exception:
+            # 輪動校正是排名防黏著層；失敗時不得讓正式推薦主流程崩潰。
+            pass
     return out

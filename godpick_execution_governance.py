@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase8_9_profit_recall_20260715"
+EXECUTION_GOVERNANCE_VERSION = "phase90_official_factor_coverage_guard_20260727"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -252,6 +252,14 @@ def build_scan_quality_report(
         status, level, usable, factor = "流動性資料異常｜禁止正式推薦", "invalid", False, 0.0
         scope = f"有效K線{history_ok}檔，但流動性覆蓋不足"
         reason = "多數候選缺少成交額/成交量，不能把資料缺失誤判為低流動性，也不能產生正式買進結論。"
+    elif data_rows > 0 and official_coverage < 30.0:
+        status, level, usable, factor = "官方因子缺失｜只供研究雷達", "invalid", False, 0.0
+        scope = f"官方因子覆蓋率僅{official_coverage:.1f}%"
+        reason = "法人、營收、估值等官方因子未形成有效覆蓋；技術面排名可供雷達觀察，但不得宣稱為完整精準正式推薦。"
+    elif data_rows > 0 and official_coverage < 70.0:
+        status, level, usable, factor = "官方因子覆蓋不足｜只供研究雷達", "invalid", False, 0.0
+        scope = f"官方因子覆蓋率{official_coverage:.1f}%"
+        reason = "官方因子覆蓋未達70%；為避免只靠技術面與主流標籤反覆推同一批股票，本輪禁止正式/A-升格。"
     elif coverage >= 99.0 and usable_history >= 80.0 and (liquidity_coverage >= 90.0 or data_rows == 0):
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
