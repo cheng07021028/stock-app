@@ -197,7 +197,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_rerun_lazy_export_freshness_guard_v173_20260727"
+PAGE07_SPEED_FIX_VERSION = "page07_freshness_rescan_ux_v173_1_20260727"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -1999,6 +1999,10 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         list_github_msg,
     ]
     st.session_state[_k("latest_recommendation_sync_msgs")] = msgs
+    try:
+        _project_data_freshness_snapshot_v173.clear()
+    except Exception:
+        pass
     return (local_ok or github_ok or list_local_ok or list_github_ok), msgs
 
 
@@ -2325,12 +2329,18 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     if not isinstance(rows, list):
         rows = []
     rows = [x for x in rows if isinstance(x, dict)]
+    # 正式清單可能只保留少量可操作股票；完整候選診斷更適合驗證本輪 K 線日期。
+    candidate_rows = latest_payload.get("candidate_diagnosis", []) if isinstance(latest_payload, dict) else []
+    if not isinstance(candidate_rows, list):
+        candidate_rows = []
+    candidate_rows = [x for x in candidate_rows if isinstance(x, dict)]
+    scan_rows = rows + candidate_rows
 
-    kline_date = _max_row_date_v173(rows, [
+    kline_date = _max_row_date_v173(scan_rows, [
         "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
     ])
-    row_market_date = _max_row_date_v173(rows, ["大盤資料日期", "大盤行情日期", "加權資料日期"])
-    row_official_date = _max_row_date_v173(rows, [
+    row_market_date = _max_row_date_v173(scan_rows, ["大盤資料日期", "大盤行情日期", "加權資料日期"])
+    row_official_date = _max_row_date_v173(scan_rows, [
         "官方因子資料日期", "官方資料日期", "三大法人資料日期",
         "官方因子更新時間_官方", "官方因子更新時間"
     ])
@@ -2366,7 +2376,10 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
 
     issues: list[str] = []
     if kline_date is None:
-        issues.append("個股K線日期未驗證")
+        if saved_date is not None and scan_lag > 0:
+            issues.append("舊推薦快照未包含個股K線日期，需在本頁重新推薦")
+        else:
+            issues.append("個股K線日期未驗證")
     elif kline_lag > 0:
         issues.append(f"個股K線停在{kline_date:%Y-%m-%d}，落後{kline_lag}交易日")
     if market_date is None:
@@ -2402,23 +2415,52 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
 def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
     snapshot = _project_data_freshness_snapshot_v173()
     issues = snapshot.get("issues", []) if isinstance(snapshot, dict) else []
+    request_rescan = False
+    source_data_ready = bool(
+        snapshot.get("market_date") and snapshot.get("official_date")
+        and int(snapshot.get("market_lag", 999)) <= 0
+        and int(snapshot.get("official_lag", 999)) <= 0
+    )
+    scan_stale = bool(
+        int(snapshot.get("scan_lag", 999)) > 0
+        or not snapshot.get("kline_date")
+    )
     if issues:
         message = "⚠️ 股神推薦資料不是最新：" + "；".join(str(x) for x in issues)
         if snapshot.get("hard_block"):
             st.error(message)
-            st.warning("正式推薦與 A- 準主推薦已暫停升格。請先到 17_系統健康檢查按一鍵更新，再回本頁重新推薦。")
+            if source_data_ready and scan_stale:
+                st.info(
+                    "第 17_系統健康檢查已更新前置資料；目前缺的是第 7 頁重新執行選股模型，"
+                    "不是再次按第 17 頁。"
+                )
+            else:
+                st.warning(
+                    "正式推薦與 A- 準主推薦已暫停升格。請先確認第 17 頁一鍵更新各步驟均成功，"
+                    "再回本頁重新推薦。"
+                )
         else:
             st.warning(message)
         st.caption(
             f"預期最新交易日：{snapshot.get('expected_date') or '未驗證'}｜"
-            f"K線：{snapshot.get('kline_date') or '未驗證'}｜"
+            f"K線：{snapshot.get('kline_date') or '待重新推薦驗證'}｜"
             f"大盤：{snapshot.get('market_date') or '未驗證'}｜"
-            f"官方因子：{snapshot.get('official_date') or '未驗證'}"
+            f"官方因子：{snapshot.get('official_date') or '未驗證'}｜"
+            f"目前推薦保存：{snapshot.get('saved_date') or '未驗證'}"
         )
+        if scan_stale:
+            request_rescan = st.button(
+                "🔄 立即重新推薦（使用第17頁已更新的最新資料）",
+                key="page07_freshness_rescan_now_v173_1",
+                type="primary",
+                use_container_width=True,
+                help="會使用目前已保存的推薦條件重新掃描，完成後覆蓋舊推薦快照。",
+            )
     else:
         st.success(
             f"資料新鮮度通過：K線、大盤與官方因子皆已更新至 {snapshot.get('expected_date')}。"
         )
+    snapshot["request_rescan"] = bool(request_rescan)
     return snapshot
 
 
@@ -13078,6 +13120,12 @@ def main():
         with btn5:
             submit_clear = st.form_submit_button("清空條件", use_container_width=True)
 
+    # 頁首的「立即重新推薦」沿用目前永久保存條件，等同按下本表單的重新推薦。
+    submit_refresh = bool(
+        submit_refresh
+        or (isinstance(data_freshness_snapshot, dict) and data_freshness_snapshot.get("request_rescan"))
+    )
+
     render_pro_section("V34 高速掃描優化與斷點續掃")
     cache_stat = get_history_disk_cache_stats() if callable(get_history_disk_cache_stats) else {}
     cp_stat = _v22_checkpoint_status()
@@ -13385,12 +13433,15 @@ def main():
 
     readiness_v171 = _load_recommendation_readiness_v171()
     readiness_status = _safe_str(readiness_v171.get("status"))
-    if readiness_status.startswith("RESCAN"):
+    freshness_after_scan = _project_data_freshness_snapshot_v173()
+    if readiness_status.startswith("RESCAN") and not bool(freshness_after_scan.get("ready")):
         st.warning(
             f"系統健康檢查的一鍵更新已刷新股神前置資料，但目前畫面仍是舊掃描結果。"
             f"就緒度 {readiness_v171.get('score', 0)}/{readiness_v171.get('full_score', 100)}；請按『重新推薦』後再作正式判斷。"
         )
-    elif readiness_status.startswith("BLOCK"):
+    elif readiness_status.startswith("RESCAN") and bool(freshness_after_scan.get("ready")):
+        st.success("本頁已使用最新前置資料完成重新推薦；第17頁的就緒度檔會在下次健康檢查時同步更新。")
+    elif readiness_status.startswith("BLOCK") and not bool(freshness_after_scan.get("ready")):
         st.error(
             f"股神前置資料尚未達正式推薦標準：{readiness_status}。"
             f"{_safe_str(readiness_v171.get('recommended_action'))}"
