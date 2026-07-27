@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Durable persistence and cross-module synchronization helpers.
 
 This module centralizes local/GitHub/Firestore persistence used by the
@@ -52,6 +52,7 @@ _RECORDS_GITHUB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix=
 _RECORDS_GITHUB_LOCK = threading.Lock()
 _RECORDS_GITHUB_PENDING: tuple[list[dict[str, Any]], dict[str, Any], str] | None = None
 _RECORDS_GITHUB_RUNNING = False
+_RECORDS_LOCAL_LOCK = threading.RLock()
 
 NAMED_FIRESTORE_DOCS = {
     "godpick_recommend_list.json": "godpick_recommend_list",
@@ -212,31 +213,336 @@ def read_local_json(path_name: str, default: Any) -> tuple[Any, str, datetime]:
 
 def write_local_json_atomic(path_name: str, payload: Any) -> tuple[bool, str]:
     path = project_path(path_name)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Large recommendation-record snapshots are written compactly.  This
-        # reduces disk I/O and JSON verification time without changing data.
-        if isinstance(payload, list) and len(payload) >= 500:
-            text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-        else:
-            text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    with _RECORDS_LOCAL_LOCK:
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, path)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
-        verify = json.loads(path.read_text(encoding="utf-8-sig"))
-        if _json_hash(verify) != _json_hash(payload):
-            return False, f"本機回讀驗證失敗：{path.as_posix()}"
-        return True, f"本機原子寫入並驗證：{path.as_posix()}"
-    except Exception as exc:
-        return False, f"本機寫入失敗：{path.as_posix()}｜{exc}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Large recommendation-record snapshots are written compactly.  This
+            # reduces disk I/O and JSON verification time without changing data.
+            if isinstance(payload, list) and len(payload) >= 500:
+                text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+            else:
+                text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+            fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_name, path)
+            finally:
+                if os.path.exists(temp_name):
+                    os.unlink(temp_name)
+            verify = json.loads(path.read_text(encoding="utf-8-sig"))
+            if _json_hash(verify) != _json_hash(payload):
+                return False, f"本機回讀驗證失敗：{path.as_posix()}"
+            return True, f"本機原子寫入並驗證：{path.as_posix()}"
+        except Exception as exc:
+            return False, f"本機寫入失敗：{path.as_posix()}｜{exc}"
 
+def _normalize_record_code(value: Any) -> str:
+    text = _safe_str(value)
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return digits if 4 <= len(digits) <= 6 else text
+
+
+def _record_business_key_authority(row: dict[str, Any]) -> str:
+    return "|".join([
+        _normalize_record_code(row.get("股票代號") or row.get("code")),
+        _safe_str(row.get("推薦日期") or row.get("date"))[:10],
+        _safe_str(row.get("推薦模式") or row.get("mode") or "股神推薦"),
+    ])
+
+
+def _latest_record_recommendation_date(rows: Iterable[dict[str, Any]]) -> str:
+    dates: list[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        text = _safe_str(row.get("推薦日期") or row.get("date"))[:10]
+        if len(text) == 10 and text[4:5] == "-" and text[7:8] == "-":
+            dates.append(text)
+    return max(dates) if dates else ""
+
+
+def records_authority_signature() -> str:
+    """Cheap high-resolution signature without parsing the 20+ MB authority JSON."""
+    path = project_path(RECORDS_FILE)
+    state_path = project_path(RECORDS_STATE_FILE)
+    try:
+        stat = path.stat()
+        file_part = f"{path}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+    except Exception:
+        file_part = f"{path}:missing"
+    state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
+    if isinstance(state, dict):
+        state_part = "|".join([
+            _safe_str(state.get("payload_hash")),
+            str(int(state.get("revision") or 0)),
+            str(int(state.get("count") or 0)),
+            _safe_str(state.get("updated_at")),
+            _safe_str(state.get("latest_recommendation_date")),
+        ])
+    else:
+        state_part = "no-state"
+    try:
+        stt = state_path.stat()
+        state_stat = f"{int(stt.st_mtime_ns)}:{int(stt.st_size)}"
+    except Exception:
+        state_stat = "missing"
+    return f"{file_part}|{state_stat}|{state_part}"
+
+
+def records_authority_status() -> dict[str, Any]:
+    """Return authority metadata without reparsing the 20+ MB JSON when state is valid."""
+    path = project_path(RECORDS_FILE)
+    state, state_msg, _ = read_local_json(RECORDS_STATE_FILE, {})
+    manifest, manifest_msg, _ = read_local_json(RECORDS_MANIFEST_FILE, {})
+    try:
+        stat = path.stat()
+        exists = True
+        size = int(stat.st_size)
+    except Exception:
+        exists = False
+        size = 0
+    state_hash = _safe_str(state.get("payload_hash")) if isinstance(state, dict) else ""
+    manifest_hash = _safe_str(manifest.get("payload_hash")) if isinstance(manifest, dict) else ""
+    count = int((state or {}).get("count") or 0) if isinstance(state, dict) else 0
+    latest_date = _safe_str((state or {}).get("latest_recommendation_date")) if isinstance(state, dict) else ""
+    valid = bool(exists and state_hash and manifest_hash and state_hash == manifest_hash)
+    payload_message = f"本機權威檔存在：{path.as_posix()}｜{size} bytes" if exists else f"本機不存在：{path.as_posix()}"
+
+    # Legacy deployments may not have state/manifest yet. Parse only once for repair/diagnosis.
+    if exists and (not state_hash or count <= 0 or not latest_date):
+        payload, payload_message, _ = read_local_json(RECORDS_FILE, [])
+        rows = records_as_rows_exact(payload)
+        count = len(rows)
+        latest_date = _latest_record_recommendation_date(rows)
+        payload_hash = _json_hash(rows)
+        if not state_hash:
+            state_hash = payload_hash
+        valid = bool(state_hash == payload_hash)
+    return {
+        "path": str(path),
+        "count": count,
+        "latest_recommendation_date": latest_date,
+        "payload_hash": state_hash,
+        "state_hash": state_hash,
+        "revision": int((state or {}).get("revision") or 0) if isinstance(state, dict) else 0,
+        "updated_at": _safe_str((state or {}).get("updated_at")) if isinstance(state, dict) else "",
+        "valid": valid,
+        "signature": records_authority_signature(),
+        "payload_message": payload_message,
+        "state_message": f"{state_msg}｜{manifest_msg}",
+    }
+
+
+def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Restore the local canonical JSON from a newer verified remote source.
+
+    Streamlit Cloud local storage is ephemeral.  A page must not keep showing the
+    repository copy (for example 2026-07-09) when Firestore/GitHub already holds a
+    newer verified snapshot.  This performs cheap summary/state checks first and
+    downloads the large payload only when a remote revision is actually newer.
+    """
+    with _RECORDS_LOCAL_LOCK:
+        local_payload, local_msg, local_mtime = read_local_json(RECORDS_FILE, [])
+        local_rows = records_as_rows_exact(local_payload)
+        local_state, local_state_msg, _ = read_local_json(RECORDS_STATE_FILE, {})
+        local_hash = _json_hash(local_rows)
+        local_valid = bool(isinstance(local_state, dict) and _safe_str(local_state.get("payload_hash")) == local_hash)
+        local_epoch = _state_epoch(local_state, local_mtime) if local_valid else 0.0
+
+        details = [f"本機：{local_msg}｜{local_state_msg}"]
+        candidates: list[tuple[str, float, dict[str, Any]]] = []
+
+        fs_summary: dict[str, Any] = {}
+        if firebase_configured():
+            fs_summary, fs_msg = _read_records_firestore_summary()
+            details.append(f"Firestore摘要：{fs_msg}")
+            if isinstance(fs_summary, dict):
+                fs_epoch = _state_epoch(fs_summary)
+                if _safe_str(fs_summary.get("payload_hash")) and fs_epoch > 0:
+                    candidates.append(("firestore", fs_epoch, fs_summary))
+
+        gh_state: dict[str, Any] = {}
+        if github_config().get("token"):
+            raw_state, gh_state_msg = read_github_json(RECORDS_STATE_FILE, {})
+            details.append(f"GitHub狀態：{gh_state_msg}")
+            if isinstance(raw_state, dict):
+                gh_state = raw_state
+                gh_epoch = _state_epoch(gh_state)
+                if _safe_str(gh_state.get("payload_hash")) and gh_epoch > 0:
+                    candidates.append(("github", gh_epoch, gh_state))
+
+        if local_valid:
+            candidates.append(("local", local_epoch, local_state))
+
+        if not candidates:
+            if not local_valid and local_rows:
+                repaired_state = _new_state("godpick_records_durable_v6_local_repair", local_rows, count=len(local_rows), latest_recommendation_date=_latest_record_recommendation_date(local_rows))
+                write_local_json_atomic(RECORDS_STATE_FILE, repaired_state)
+                write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(local_rows, repaired_state["payload_hash"]))
+                details.append("本機紀錄存在但缺少有效state，已就地補建權威state。")
+                return local_rows, details, True
+            return local_rows, details, False
+
+        source, newest_epoch, newest_state = max(candidates, key=lambda x: (x[1], int((x[2] or {}).get("revision") or 0), {"local": 0, "github": 1, "firestore": 2}.get(x[0], 0)))
+        newest_hash = _safe_str((newest_state or {}).get("payload_hash"))
+        if source == "local" or (local_valid and newest_hash == local_hash and newest_epoch <= local_epoch):
+            return local_rows, details + [f"權威來源：local｜{len(local_rows)}筆"], False
+
+        remote_rows: list[dict[str, Any]] = []
+        remote_state: dict[str, Any] = dict(newest_state or {})
+        if source == "firestore":
+            fs_rows, fs_full_msg, _, fs_full_state = _read_records_firestore_full()
+            details.append(f"Firestore完整資料：{fs_full_msg}")
+            remote_rows = records_as_rows_exact(fs_rows)
+            if isinstance(fs_full_state, dict) and fs_full_state:
+                remote_state.update(fs_full_state)
+        elif source == "github":
+            gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
+            gh_payload, gh_msg = read_github_json(gh_path, [])
+            details.append(f"GitHub完整資料：{gh_msg}")
+            remote_rows = records_as_rows_exact(gh_payload)
+
+        if not remote_rows:
+            details.append(f"遠端 {source} 摘要較新，但完整資料為空；保留本機，不做回退。")
+            return local_rows, details, False
+        remote_hash = _json_hash(remote_rows)
+        if newest_hash and newest_hash != remote_hash:
+            details.append(f"遠端 {source} 完整資料hash與摘要不一致；保留本機。")
+            return local_rows, details, False
+
+        # 舊部署可能已有本機紀錄但尚未建立state。遠端較新時採聯集修復，
+        # 不用遠端整份覆蓋本機，避免任何一邊獨有的日期被回退。
+        if not local_valid and local_rows:
+            merged_by_key: dict[str, dict[str, Any]] = {}
+            for candidate_row in [*local_rows, *remote_rows]:
+                key = _record_business_key_authority(candidate_row) or _record_id(candidate_row)
+                if not key:
+                    continue
+                old = merged_by_key.get(key)
+                if old is None:
+                    merged_by_key[key] = dict(candidate_row)
+                    continue
+                old_time = _parse_time(old.get("更新時間") or old.get("updated_at") or old.get("建立時間"))
+                new_time = _parse_time(candidate_row.get("更新時間") or candidate_row.get("updated_at") or candidate_row.get("建立時間"))
+                primary, secondary = (candidate_row, old) if new_time >= old_time else (old, candidate_row)
+                merged = dict(secondary)
+                for k, v in primary.items():
+                    if v not in (None, "") or k not in merged:
+                        merged[k] = v
+                if _safe_str(old.get("record_id")):
+                    merged["record_id"] = old["record_id"]
+                merged_by_key[key] = merged
+            remote_rows = list(merged_by_key.values())
+            remote_hash = _json_hash(remote_rows)
+            details.append(f"本機缺少有效state，已與較新 {source} 權威資料聯集修復：{len(remote_rows)}筆。")
+
+        restored_state = dict(remote_state)
+        restored_state.update({
+            "version": _safe_str(restored_state.get("version")) or "godpick_records_durable_v6_remote_restore",
+            "payload_hash": remote_hash,
+            "count": len(remote_rows),
+            "restored_from": source,
+            "restored_at": _now_text(),
+        })
+        restored_state.setdefault("updated_at", _now_text())
+        restored_state.setdefault("updated_at_utc", _now_utc_text())
+        restored_state.setdefault("updated_at_epoch", newest_epoch or _now_epoch())
+        restored_state.setdefault("revision", time.time_ns())
+        ok1, msg1 = write_local_json_atomic(RECORDS_FILE, remote_rows)
+        ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, restored_state)
+        if ok1 and ok2:
+            write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(remote_rows, remote_hash))
+            details.extend([f"已自動還原較新權威來源：{source}｜{len(remote_rows)}筆", msg1, msg2])
+            return remote_rows, details, True
+        details.append(f"遠端較新但本機還原失敗：{msg1}｜{msg2}")
+        return local_rows, details, False
+
+
+def upsert_records_authority_fast(
+    upsert_rows: Iterable[dict[str, Any]],
+    *,
+    reason: str = "record authority upsert",
+) -> tuple[PersistenceReport, dict[str, int]]:
+    """Atomically upsert recommendation rows into the current authority file.
+
+    This never starts from a page's stale full DataFrame.  It re-reads the latest
+    canonical JSON under a process lock, merges by business key
+    (code+recommendation date+mode), preserves the existing record_id, then uses
+    the durable mutation path.  It prevents page 7/page 8 concurrent reruns from
+    rolling the authority file back to an older date.
+    """
+    incoming = records_as_rows_exact(list(upsert_rows or []))
+    empty_report = PersistenceReport()
+    if not incoming:
+        empty_report.local_message = "沒有可寫入的推薦紀錄"
+        return empty_report, {"before": 0, "after": 0, "added": 0, "updated": 0, "changed": 0}
+
+    with _RECORDS_LOCAL_LOCK:
+        current_payload, _, _ = read_local_json(RECORDS_FILE, [])
+        current = records_as_rows_exact(current_payload)
+        index_by_key: dict[str, int] = {}
+        for idx, row in enumerate(current):
+            key = _record_business_key_authority(row)
+            if key.strip("|"):
+                index_by_key[key] = idx
+
+        added = 0
+        updated = 0
+        changed_rows: list[dict[str, Any]] = []
+        for raw in incoming:
+            row = {str(k): _json_safe_value(v) for k, v in raw.items()}
+            key = _record_business_key_authority(row)
+            if not key.strip("|"):
+                continue
+            if key in index_by_key:
+                idx = index_by_key[key]
+                old = dict(current[idx])
+                merged = dict(old)
+                for k, v in row.items():
+                    if v not in (None, "") or k not in merged:
+                        merged[k] = v
+                if _safe_str(old.get("record_id")):
+                    merged["record_id"] = old["record_id"]
+                if _json_hash(old) != _json_hash(merged):
+                    current[idx] = merged
+                    changed_rows.append(merged)
+                    updated += 1
+            else:
+                if not _safe_str(row.get("record_id")):
+                    row["record_id"] = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
+                current.append(row)
+                index_by_key[key] = len(current) - 1
+                changed_rows.append(row)
+                added += 1
+
+        if not changed_rows:
+            state = _new_state("godpick_records_durable_v6_nochange", current, count=len(current), latest_recommendation_date=_latest_record_recommendation_date(current), mutation_reason=_safe_str(reason))
+            report = PersistenceReport(
+                local_ok=True,
+                permanent_ok=True,
+                local_message=f"權威檔內容未變更；目前 {len(current)} 筆",
+                payload_hash=state["payload_hash"],
+                updated_at=state["updated_at"],
+            )
+            return report, {"before": len(current), "after": len(current), "added": 0, "updated": 0, "changed": 0}
+
+        report = save_records_mutation_fast(
+            current,
+            deleted_ids=[],
+            upsert_rows=changed_rows,
+            previous_count=len(current) - added,
+            reason=reason,
+        )
+        return report, {
+            "before": len(current) - added,
+            "after": len(current),
+            "added": added,
+            "updated": updated,
+            "changed": added + updated,
+        }
 
 def _secret(name: str, default: str = "") -> str:
     try:
@@ -1101,6 +1407,7 @@ def write_records_firestore_mutation(
 def save_records_mutation_fast(
     payload: Any,
     *,
+    expected_authority_signature: str = "",
     deleted_ids: Iterable[str] | None = None,
     upsert_rows: Iterable[dict[str, Any]] | None = None,
     previous_count: int | None = None,
@@ -1114,11 +1421,19 @@ def save_records_mutation_fast(
     GitHub is configured, the function falls back to a full GitHub write so a
     cloud reboot cannot silently restore deleted rows.
     """
+    if _safe_str(expected_authority_signature):
+        current_signature = records_authority_signature()
+        if current_signature != _safe_str(expected_authority_signature):
+            report = PersistenceReport()
+            report.local_message = "權威檔已被其他頁面更新；已阻止舊畫面覆蓋，請自動重新載入後再操作。"
+            report.updated_at = _now_text()
+            return report
     records = records_as_rows_exact(payload)
     state = _new_state(
         "godpick_records_durable_v4_mutation",
         records,
         count=len(records),
+        latest_recommendation_date=_latest_record_recommendation_date(records),
         github_pending=True,
         mutation_reason=_safe_str(reason),
     )
@@ -1126,8 +1441,9 @@ def save_records_mutation_fast(
 
     ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
     ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
-    report.local_ok = bool(ok1 and ok2)
-    report.local_message = f"{msg1}｜{msg2}"
+    ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(records, state["payload_hash"])) if ok1 and ok2 else (False, "前置寫入失敗，未建立manifest")
+    report.local_ok = bool(ok1 and ok2 and ok3)
+    report.local_message = f"{msg1}｜{msg2}｜{msg3}"
     if not report.local_ok:
         report.github_message = "本機原子寫入失敗，未執行遠端 mutation"
         report.firestore_message = "本機原子寫入失敗，未執行遠端 mutation"
@@ -1168,7 +1484,7 @@ def save_records_mutation_fast(
     return report
 
 
-def save_records_sync_fast(payload: Any, reason: str = "explicit record sync") -> PersistenceReport:
+def save_records_sync_fast(payload: Any, reason: str = "explicit record sync", expected_authority_signature: str = "") -> PersistenceReport:
     """Content-aware explicit sync for the large recommendation record file.
 
     The old ``儲存同步`` rewrote every Firestore document and synchronously
@@ -1177,8 +1493,15 @@ def save_records_sync_fast(payload: Any, reason: str = "explicit record sync") -
     and coalesces the large GitHub snapshot in the background.  Repeated syncs
     with identical content return after a small summary verification.
     """
+    if _safe_str(expected_authority_signature):
+        current_signature = records_authority_signature()
+        if current_signature != _safe_str(expected_authority_signature):
+            report = PersistenceReport()
+            report.local_message = "權威檔已被其他頁面更新；已阻止舊資料整檔回寫。"
+            report.updated_at = _now_text()
+            return report
     records = normalize_records(payload)
-    state = _new_state("godpick_records_durable_v5_fast_sync", records, count=len(records), sync_reason=_safe_str(reason))
+    state = _new_state("godpick_records_durable_v5_fast_sync", records, count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records), sync_reason=_safe_str(reason))
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
 
     old_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
@@ -1269,13 +1592,14 @@ def save_records_sync_fast(payload: Any, reason: str = "explicit record sync") -
 
 def save_records_permanent(payload: Any) -> PersistenceReport:
     records = normalize_records(payload)
-    state = _new_state("godpick_records_durable_v3", records, count=len(records))
+    state = _new_state("godpick_records_durable_v3", records, count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records))
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
 
     ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
     ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state)
-    report.local_ok = bool(ok1 and ok2)
-    report.local_message = f"{msg1}｜{msg2}"
+    ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(records, state["payload_hash"])) if ok1 and ok2 else (False, "前置寫入失敗，未建立manifest")
+    report.local_ok = bool(ok1 and ok2 and ok3)
+    report.local_message = f"{msg1}｜{msg2}｜{msg3}"
 
     # Firestore is written before the large GitHub file so one slow GitHub
     # request cannot prevent the primary remote backup from completing.

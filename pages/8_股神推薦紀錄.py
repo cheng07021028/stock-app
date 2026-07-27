@@ -41,6 +41,10 @@ try:
         write_export_file,
         project_path,
         read_local_json,
+        ensure_records_local_authority_current,
+        records_authority_signature,
+        records_authority_status,
+        upsert_records_authority_fast,
     )
 except Exception:
     append_export_history = None
@@ -61,6 +65,10 @@ except Exception:
     write_export_file = None
     project_path = None
     read_local_json = None
+    ensure_records_local_authority_current = None
+    records_authority_signature = None
+    records_authority_status = None
+    upsert_records_authority_fast = None
 
 try:
     from stock_master_service import upsert_stock_master_rows
@@ -155,7 +163,7 @@ GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
-RECORD_SPEED_FIX_VERSION = "record_v165_persistent_normalized_cache_no_discarded_formal_recalc_20260726"
+RECORD_SPEED_FIX_VERSION = "record_v174_authority_autosync_no_rollback_20260727"
 NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
 NORMALIZED_RECORD_CACHE_VERSION_V165 = "v165_20260726"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -1940,13 +1948,18 @@ LOCAL_RECORD_SOURCE_FILES = ["godpick_records.json"]
 
 
 def _records_local_signature() -> str:
-    """用專案根目錄固定路徑的 mtime/size 判斷是否有新資料。"""
+    """V174：使用奈秒mtime＋state hash/revision判斷權威檔是否更新。"""
+    if callable(records_authority_signature):
+        try:
+            return _safe_str(records_authority_signature())
+        except Exception:
+            pass
     parts: list[str] = []
-    for fn in LOCAL_RECORD_SOURCE_FILES:
+    for fn in [*LOCAL_RECORD_SOURCE_FILES, "godpick_records_sync_state.json"]:
         try:
             path = project_path(fn) if callable(project_path) else fn
             stt = os.stat(path)
-            parts.append(f"{path}:{int(stt.st_mtime)}:{stt.st_size}")
+            parts.append(f"{path}:{int(getattr(stt, 'st_mtime_ns', int(stt.st_mtime * 1_000_000_000)))}:{stt.st_size}")
         except Exception:
             parts.append(f"{fn}:missing")
     return "|".join(parts)
@@ -2186,13 +2199,17 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
         _set_status("永久紀錄服務未載入，為避免假成功，本次不寫入。", "error")
         return False
     started = time.perf_counter()
-    report = sync_func(clean_df, reason="page8 explicit save sync") if sync_func is save_records_sync_fast else sync_func(clean_df)
+    report = sync_func(clean_df, reason="page8 explicit save sync", expected_authority_signature=_safe_str(st.session_state.get(_k("records_source_sig"), ""))) if sync_func is save_records_sync_fast else sync_func(clean_df)
     elapsed = time.perf_counter() - started
     try:
         current_sig_v165 = _records_local_signature()
-        st.session_state[_k("records_source_sig")] = current_sig_v165
         if bool(getattr(report, "local_ok", False)):
+            st.session_state[_k("records_source_sig")] = current_sig_v165
             _save_normalized_record_cache_v165(clean_df, current_sig_v165)
+        elif "權威檔已被" in _safe_str(getattr(report, "local_message", "")):
+            fresh_df_v174 = _load_records(force_remote=False)
+            _save_state_df(fresh_df_v174)
+            st.session_state[_k("records_source_sig")] = current_sig_v165
     except Exception:
         pass
     details = report.messages()
@@ -2245,7 +2262,12 @@ def _apply_persistence_report(report: Any, *, action_name: str, github_deferred_
     st.session_state[_k("last_sync_report")] = report_dict
     st.session_state[_k("last_sync_failed")] = not permanent_ok
     try:
-        st.session_state[_k("records_source_sig")] = _records_local_signature()
+        if local_ok:
+            st.session_state[_k("records_source_sig")] = _records_local_signature()
+        elif "權威檔已被" in _safe_str(getattr(report, "local_message", "")):
+            fresh_df_v174 = _load_records(force_remote=False)
+            _save_state_df(fresh_df_v174)
+            st.session_state[_k("records_source_sig")] = _records_local_signature()
     except Exception:
         pass
 
@@ -2294,6 +2316,7 @@ def _save_records_mutation_fast_ui(
     if callable(save_records_mutation_fast):
         report = save_records_mutation_fast(
             clean_df,
+            expected_authority_signature=_safe_str(st.session_state.get(_k("records_source_sig"), "")),
             deleted_ids=deleted_ids or [],
             upsert_rows=upsert_rows or [],
             previous_count=previous_count,
@@ -4497,6 +4520,128 @@ def _get_state_df() -> pd.DataFrame:
 
 
 
+def _reconcile_latest_snapshot_into_authority_v174(authority_df: pd.DataFrame) -> tuple[bool, list[str]]:
+    """Repair the newest day from the saved page-7 snapshot when authority lags.
+
+    This is a safety net, not the primary write path.  It only imports formal,
+    A- and R1 research rows from ``godpick_latest_recommendations.json`` when
+    that snapshot date is newer than the canonical record file.
+    """
+    details: list[str] = []
+    if not callable(upsert_records_authority_fast) or not callable(read_local_json):
+        return False, details
+    try:
+        latest_path = project_path("godpick_latest_recommendations.json") if callable(project_path) else "godpick_latest_recommendations.json"
+        stt = os.stat(latest_path)
+        snapshot_sig = f"{int(getattr(stt, 'st_mtime_ns', int(stt.st_mtime * 1_000_000_000)))}:{stt.st_size}"
+    except Exception:
+        return False, details
+
+    authority_latest = ""
+    if isinstance(authority_df, pd.DataFrame) and not authority_df.empty and "推薦日期" in authority_df.columns:
+        dates = pd.to_datetime(authority_df["推薦日期"], errors="coerce").dropna()
+        if not dates.empty:
+            authority_latest = dates.max().strftime("%Y-%m-%d")
+    check_key = f"{snapshot_sig}|{authority_latest}"
+    if _safe_str(st.session_state.get(_k("latest_snapshot_reconcile_sig_v174"), "")) == check_key:
+        return False, details
+    st.session_state[_k("latest_snapshot_reconcile_sig_v174")] = check_key
+
+    payload, msg, _ = read_local_json("godpick_latest_recommendations.json", {})
+    details.append(f"最新推薦快照：{msg}")
+    if not isinstance(payload, dict):
+        return False, details
+    saved_at = _safe_str(payload.get("saved_at"))
+    snapshot_date = saved_at[:10] if len(saved_at) >= 10 else ""
+    rows = payload.get("recommendations", [])
+    if not snapshot_date or not isinstance(rows, list) or snapshot_date <= authority_latest:
+        return False, details
+
+    saved_time = saved_at[11:19] if len(saved_at) >= 19 else datetime.now().strftime("%H:%M:%S")
+    actionable: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        bucket = _safe_str(raw.get("正式推薦分區"))
+        radar = _safe_str(raw.get("盤中雷達優先級"))
+        is_actionable = bucket in {"正式下週主推薦", "A-｜準主推薦小量試單"} or (bucket == "盤中雷達追蹤" and radar.startswith("R1"))
+        if not is_actionable:
+            continue
+        row = dict(raw)
+        row["推薦日期"] = snapshot_date
+        row["推薦時間"] = _safe_str(row.get("推薦時間")) or saved_time
+        row["推薦模式"] = _safe_str(row.get("推薦模式")) or "股神推薦"
+        row["紀錄來源"] = "08_股神推薦紀錄｜自動修復07最新快照"
+        row["自動記錄"] = "是"
+        if bucket == "正式下週主推薦":
+            row["紀錄層級"] = "正式主推薦"
+        elif bucket == "A-｜準主推薦小量試單":
+            row["紀錄層級"] = "A-準主推薦"
+        else:
+            row["紀錄層級"] = radar or "R1核心雷達"
+        row["建立時間"] = _safe_str(row.get("建立時間")) or saved_at or _now_text()
+        row["更新時間"] = _now_text()
+        actionable.append(row)
+    if not actionable:
+        details.append(f"快照日期 {snapshot_date} 較新，但沒有正式/A-/R1可修復紀錄。")
+        return False, details
+
+    report, stats = upsert_records_authority_fast(actionable, reason="08 自動修復較新07推薦快照")
+    details.extend(report.messages())
+    if report.permanent_ok and int(stats.get("changed", 0) or 0) > 0:
+        details.append(f"已自動補入權威檔：{snapshot_date}｜新增 {stats.get('added', 0)}｜更新 {stats.get('updated', 0)}。")
+        return True, details
+    if not report.permanent_ok:
+        details.append("較新推薦快照存在，但自動修復權威檔失敗。")
+    return False, details
+
+
+def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[pd.DataFrame, list[str], bool]:
+    """Before any button callback, make page 8 use the newest authority revision."""
+    details: list[str] = []
+    restored = False
+    now_ts = time.time()
+    last_remote_check = float(st.session_state.get(_k("authority_remote_check_ts_v174"), 0.0) or 0.0)
+    remote_due = bool(force_remote_summary or last_remote_check <= 0 or now_ts - last_remote_check >= 60.0)
+
+    if remote_due and callable(ensure_records_local_authority_current):
+        try:
+            rows, remote_details, remote_restored = ensure_records_local_authority_current()
+            details.extend([_safe_str(x) for x in (remote_details or []) if _safe_str(x)])
+            st.session_state[_k("authority_remote_check_ts_v174")] = now_ts
+            if remote_restored:
+                restored_df = _ensure_godpick_record_columns(pd.DataFrame(rows))
+                _save_state_df(restored_df)
+                _remove_normalized_record_cache_v165()
+                restored = True
+        except Exception as exc:
+            details.append(f"權威遠端摘要檢查失敗：{exc}")
+            st.session_state[_k("authority_remote_check_ts_v174")] = now_ts
+
+    current_sig = _records_local_signature()
+    last_sig = _safe_str(st.session_state.get(_k("records_source_sig"), ""))
+    current_df = _get_state_df()
+    if current_df.empty or not last_sig or (current_sig and current_sig != last_sig):
+        current_df = _load_records(force_remote=False)
+        _save_state_df(current_df)
+        st.session_state[_k("records_source_sig")] = current_sig
+        restored = True
+        details.append(f"第8頁已在按鈕執行前自動載入最新權威紀錄：{len(current_df)}筆。")
+
+    reconciled, reconcile_details = _reconcile_latest_snapshot_into_authority_v174(current_df)
+    details.extend(reconcile_details)
+    if reconciled:
+        _remove_normalized_record_cache_v165()
+        current_sig = _records_local_signature()
+        current_df = _load_records(force_remote=False)
+        _save_state_df(current_df)
+        st.session_state[_k("records_source_sig")] = current_sig
+        restored = True
+
+    return current_df, details, restored
+
+
+
 
 def _unique_existing_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
     """Return existing columns only once, preserving order.
@@ -5734,6 +5879,24 @@ def main():
         else:
             st.info(status_msg)
 
+    # V174：任何按鈕執行前，先同步唯一權威檔。舊畫面不得回寫覆蓋新紀錄。
+    _authority_df_v174, _authority_details_v174, _authority_restored_v174 = _sync_authority_before_actions()
+    if _authority_restored_v174:
+        st.success(f"已自動同步最新權威推薦紀錄，共 {len(_authority_df_v174)} 筆；不需再按重新載入。")
+    if _authority_details_v174:
+        st.session_state[_k("authority_auto_sync_details_v174")] = _authority_details_v174
+
+    try:
+        _authority_latest_date_v174 = ""
+        if isinstance(_authority_df_v174, pd.DataFrame) and not _authority_df_v174.empty and "推薦日期" in _authority_df_v174.columns:
+            _dates_v174 = pd.to_datetime(_authority_df_v174["推薦日期"], errors="coerce").dropna()
+            if not _dates_v174.empty:
+                _authority_latest_date_v174 = _dates_v174.max().strftime("%Y-%m-%d")
+        _authority_path_v174 = project_path("godpick_records.json") if callable(project_path) else "godpick_records.json"
+        st.caption(f"唯一權威檔：{_authority_path_v174}｜{len(_authority_df_v174)} 筆｜最新推薦日期：{_authority_latest_date_v174 or '未取得'}")
+    except Exception:
+        pass
+
     top_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.2, 1.4, 2.0])
     with top_cols[0]:
         if st.button("🔄 重新載入", use_container_width=True):
@@ -5902,6 +6065,12 @@ def main():
         )
 
     _render_action_results()
+
+    _authority_auto_details_v174 = st.session_state.get(_k("authority_auto_sync_details_v174"), [])
+    if _authority_auto_details_v174:
+        with st.expander("權威推薦紀錄自動同步明細", expanded=False):
+            for _line_v174 in _authority_auto_details_v174:
+                st.write(f"- {_line_v174}")
 
     df = _get_state_df()
     current_record_sig = _records_local_signature()

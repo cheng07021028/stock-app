@@ -27,6 +27,8 @@ try:
         save_watchlist_permanent,
         load_records_permanent,
         save_records_sync_fast,
+        upsert_records_authority_fast,
+        records_authority_status,
         github_config as durable_github_config,
         firebase_configured as durable_firebase_configured,
     )
@@ -35,6 +37,8 @@ except Exception:
     save_watchlist_permanent = None
     load_records_permanent = None
     save_records_sync_fast = None
+    upsert_records_authority_fast = None
+    records_authority_status = None
     durable_github_config = None
     durable_firebase_configured = None
 # <<< APP_AUTH_GUARD_V84
@@ -197,7 +201,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_freshness_rescan_ux_v173_1_20260727"
+PAGE07_SPEED_FIX_VERSION = "page07_record_authority_upsert_v174_20260727"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -6988,19 +6992,57 @@ def _show_import_result_notice(title: str, added_count: int, selected_count: int
 
 
 def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False) -> tuple[int, list[str]]:
-    """將 07 股神推薦結果寫入永久推薦紀錄。
+    """將 07 股神推薦結果寫入唯一權威紀錄檔。
 
-    V163：不再繞過統一永久保存服務。舊版直接寫相對路徑 JSON，
-    同時以單一 Firestore batch 重寫全部紀錄；大型檔案的 GitHub
-    回讀又會失敗，造成當下看似成功、Reboot 後卻回到舊資料。
-    本版統一使用權威載入、原子本機寫入、Firestore 增量更新與
-    GitHub 背景快照，並同步寫入 state/manifest。
+    V174：一般寫入採鎖定式增量 upsert，直接重讀當下最新
+    ``godpick_records.json`` 後合併，不再先下載整份 GitHub/Firestore，
+    也不再以頁面舊 DataFrame 整檔回寫。這可避免跨頁、多人或
+    Streamlit rerun 將新紀錄回退成舊日期。
     """
     if not record_rows:
         return 0, ["沒有可寫入的推薦紀錄。"]
 
     try:
-        load_details: list[str] = []
+        normalized_rows = [_normalize_godpick_record(x) for x in record_rows if isinstance(x, dict)]
+        new_df = _ensure_godpick_record_columns(pd.DataFrame(normalized_rows))
+        if new_df.empty:
+            return 0, ["匯入資料正規化後沒有有效推薦紀錄。"]
+
+        if not force_duplicate and callable(upsert_records_authority_fast):
+            report, stats = upsert_records_authority_fast(
+                new_df.to_dict(orient="records"),
+                reason="07 股神推薦完成自動紀錄／手動寫入",
+            )
+            authority_detail = ""
+            if callable(records_authority_status):
+                try:
+                    authority = records_authority_status()
+                    authority_detail = (
+                        f"權威檔：{authority.get('path')}｜{authority.get('count', 0)}筆｜"
+                        f"最新推薦日期 {authority.get('latest_recommendation_date') or '未取得'}｜"
+                        f"state {'有效' if authority.get('valid') else '待修復'}"
+                    )
+                except Exception as authority_exc:
+                    authority_detail = f"權威檔驗證失敗：{authority_exc}"
+            save_details = report.messages()
+            details = [
+                f"權威增量保存：{'成功' if report.permanent_ok else '失敗'}｜新增 {stats.get('added', 0)}｜更新 {stats.get('updated', 0)}",
+                authority_detail,
+                *save_details,
+            ]
+            st.session_state[_k("last_record_write_detail")] = [x for x in details if x]
+            changed_count = int(stats.get("changed", 0) or 0)
+            if bool(report.permanent_ok):
+                if changed_count == 0:
+                    return 0, ["相同日期、股票與推薦模式已存在；權威資料未重複新增。", authority_detail, *save_details]
+                return changed_count, [
+                    f"已直接寫入唯一權威檔：新增 {stats.get('added', 0)} 筆、更新 {stats.get('updated', 0)} 筆。",
+                    authority_detail,
+                    *save_details,
+                ]
+            return 0, ["推薦紀錄未寫入權威檔；本輪不得顯示保存成功。", authority_detail, *save_details]
+
+        # 明確允許重複時才走相容完整保存流程。
         if callable(load_records_permanent):
             old_records, load_details = load_records_permanent()
         else:
@@ -7008,92 +7050,34 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
             if not isinstance(old_records, list):
                 old_records = []
             load_details = ["永久保存服務未載入，使用本機相容模式。"]
-
         old_df = _ensure_godpick_record_columns(pd.DataFrame(old_records))
-        if not old_df.empty:
-            old_df = _append_records_dedup_by_business_key(pd.DataFrame(), old_df)
-
-        normalized_rows = [_normalize_godpick_record(x) for x in record_rows if isinstance(x, dict)]
-        new_df = _ensure_godpick_record_columns(pd.DataFrame(normalized_rows))
-        if new_df.empty:
-            return 0, ["匯入資料正規化後沒有有效推薦紀錄。"]
-
-        before_count = len(old_df)
-        before_map: dict[str, str] = {}
-        for _, r in old_df.iterrows():
-            row_dict = r.to_dict()
-            before_map[_record_business_key(row_dict)] = json.dumps(
-                row_dict, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")
+        duplicated = new_df.copy()
+        now_tag = str(int(time.time() * 1000))
+        for idx in duplicated.index:
+            raw = (
+                f"{_safe_str(duplicated.at[idx, '股票代號'])}|"
+                f"{_safe_str(duplicated.at[idx, '推薦日期'])}|"
+                f"{_safe_str(duplicated.at[idx, '推薦時間'])}|"
+                f"{_safe_str(duplicated.at[idx, '推薦模式'])}|duplicate|{now_tag}|{idx}"
             )
-
-        if force_duplicate:
-            new_df = new_df.copy()
-            now_tag = str(int(time.time() * 1000))
-            for idx in new_df.index:
-                raw = (
-                    f"{_safe_str(new_df.at[idx, '股票代號'])}|"
-                    f"{_safe_str(new_df.at[idx, '推薦日期'])}|"
-                    f"{_safe_str(new_df.at[idx, '推薦時間'])}|"
-                    f"{_safe_str(new_df.at[idx, '推薦模式'])}|duplicate|{now_tag}|{idx}"
-                )
-                new_df.at[idx, "record_id"] = hashlib.md5(raw.encode("utf-8")).hexdigest()
-                note = _safe_str(new_df.at[idx, "備註"])
-                new_df.at[idx, "備註"] = (note + "；" if note else "") + "使用者確認重複紀錄"
-                new_df.at[idx, "更新時間"] = _now_text()
-            merged_df = _ensure_godpick_record_columns(pd.concat([old_df, new_df], ignore_index=True))
-        else:
-            merged_df = _append_records_dedup_by_business_key(old_df, new_df)
-
-        after_count = len(merged_df)
-        after_map: dict[str, str] = {}
-        for _, r in merged_df.iterrows():
-            row_dict = r.to_dict()
-            after_map[_record_business_key(row_dict)] = json.dumps(
-                row_dict, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")
-            )
-
-        new_keys = set(after_map) - set(before_map)
-        updated_keys = {k for k in set(after_map) & set(before_map) if after_map[k] != before_map[k]}
-        changed_count = len(new_keys) + len(updated_keys)
-        if force_duplicate:
-            changed_count = max(len(new_df), after_count - before_count)
-
-        merged_records = merged_df.to_dict(orient="records")
+            duplicated.at[idx, "record_id"] = hashlib.md5(raw.encode("utf-8")).hexdigest()
+            note = _safe_str(duplicated.at[idx, "備註"])
+            duplicated.at[idx, "備註"] = (note + "；" if note else "") + "使用者確認重複紀錄"
+            duplicated.at[idx, "更新時間"] = _now_text()
+        merged_df = _ensure_godpick_record_columns(pd.concat([old_df, duplicated], ignore_index=True))
         if callable(save_records_sync_fast):
-            report = save_records_sync_fast(merged_records, reason="07 股神推薦匯入／自動紀錄")
-            save_details = report.messages()
-            permanent_ok = bool(report.permanent_ok)
-            status_line = (
-                f"永久保存：{'成功' if permanent_ok else '失敗'}｜"
-                f"本機 {'✓' if report.local_ok else '✗'}／"
-                f"Firestore {'✓' if report.firestore_ok else '✗'}／"
-                f"GitHub {'✓' if report.github_ok else ('背景中' if report.github_pending else '✗')}"
-            )
-        else:
-            ok_local, msg_local = _safe_json_write_local("godpick_records.json", merged_records)
-            permanent_ok = bool(ok_local)
-            save_details = [f"相容本機保存：{'成功' if ok_local else '失敗'}｜{msg_local}"]
-            status_line = "永久保存服務未載入；僅完成本機相容保存。"
-
-        details = list(load_details) + [
-            status_line,
-            f"本次新增：{len(new_keys)} 筆｜更新：{len(updated_keys)} 筆｜實際異動：{changed_count} 筆",
-            f"保存前：{before_count} 筆｜保存後：{after_count} 筆",
-        ] + list(save_details)
-        st.session_state[_k("last_record_write_detail")] = details
-
-        if permanent_ok:
-            if changed_count == 0:
-                return 0, ["相同日期、股票與推薦模式已存在；永久資料內容未變更。"] + save_details
-            return changed_count, [
-                f"永久推薦紀錄已完成：新增 {len(new_keys)} 筆、更新 {len(updated_keys)} 筆。"
-            ] + save_details
-        return 0, ["推薦紀錄未通過永久保存驗證，請查看同步明細。"] + save_details
-
+            report = save_records_sync_fast(merged_df.to_dict(orient="records"), reason="07 使用者確認重複紀錄")
+            details = list(load_details) + report.messages()
+            st.session_state[_k("last_record_write_detail")] = details
+            if report.permanent_ok:
+                return len(duplicated), [f"已依使用者確認新增重複紀錄 {len(duplicated)} 筆。", *details]
+            return 0, ["重複紀錄未通過永久保存驗證。", *details]
+        ok_local, msg_local = _safe_json_write_local("godpick_records.json", merged_df.to_dict(orient="records"))
+        st.session_state[_k("last_record_write_detail")] = [msg_local]
+        return (len(duplicated), [msg_local]) if ok_local else (0, [msg_local])
     except Exception as exc:
         st.session_state[_k("last_record_write_detail")] = [f"永久推薦紀錄例外：{exc}"]
         return 0, [f"寫入股神推薦紀錄失敗：{exc}"]
-
 
 def _normalize_recommend_list_payload(payload) -> list[dict[str, Any]]:
     """v26：支援 10_推薦清單 的 list / dict 格式。"""
