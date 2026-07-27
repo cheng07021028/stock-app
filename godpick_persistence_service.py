@@ -168,6 +168,52 @@ def _state_epoch(state: Any, fallback: datetime | None = None) -> float:
     return 0.0
 
 
+def _recommendation_date_text(value: Any) -> str:
+    """Normalize a recommendation date for semantic authority comparison."""
+    text = _safe_str(value)
+    if not text:
+        return ""
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return text[:10] if len(text) >= 10 else ""
+
+
+def _authority_freshness_key(source: str, state: Any, *, fallback: datetime | None = None, rows: Any = None) -> tuple[Any, ...]:
+    """Compare authorities by business-data freshness before file/revision time.
+
+    Streamlit Cloud recreates repository files during reboot.  Their filesystem
+    mtime and repaired local state can therefore look newer than Firestore even
+    when the actual latest recommendation is weeks older.  The newest business
+    date is the primary key; count/revision/epoch only break ties.
+    """
+    state_dict = state if isinstance(state, dict) else {}
+    latest = _recommendation_date_text(state_dict.get("latest_recommendation_date"))
+    if not latest and rows is not None:
+        try:
+            latest = _latest_record_recommendation_date(records_as_rows_exact(rows))
+        except Exception:
+            latest = ""
+    try:
+        count = int(state_dict.get("count") or (len(rows) if rows is not None else 0) or 0)
+    except Exception:
+        count = 0
+    try:
+        revision = int(state_dict.get("revision") or 0)
+    except Exception:
+        revision = 0
+    epoch = _state_epoch(state_dict, fallback)
+    # New revisions are time_ns; normalize them to seconds so they can be
+    # compared with legacy epoch metadata without one scale dominating forever.
+    revision_epoch = (revision / 1_000_000_000.0) if revision > 10_000_000_000 else float(revision or 0)
+    activity = max(epoch, revision_epoch)
+    priority = {"local": 0, "github": 1, "firestore": 2}.get(source, 0)
+    return (latest, activity, count, priority)
+
+
 def _new_state(version: str, payload: Any, **extra: Any) -> dict[str, Any]:
     epoch = _now_epoch()
     state = {
@@ -337,58 +383,83 @@ def records_authority_status() -> dict[str, Any]:
 
 
 def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list[str], bool]:
-    """Restore the local canonical JSON from a newer verified remote source.
+    """Restore the local canonical JSON from the freshest verified authority.
 
-    Streamlit Cloud local storage is ephemeral.  A page must not keep showing the
-    repository copy (for example 2026-07-09) when Firestore/GitHub already holds a
-    newer verified snapshot.  This performs cheap summary/state checks first and
-    downloads the large payload only when a remote revision is actually newer.
+    V175 fixes Streamlit Cloud reboot rollback.  Repository files recreated on
+    boot may have a new mtime even though their business data stops at an old
+    date.  We therefore compare latest recommendation date first, then count,
+    revision and epoch.  Legacy Firestore summaries without payload_hash are
+    still eligible; the full collection is downloaded and hashed before use.
     """
     with _RECORDS_LOCAL_LOCK:
         local_payload, local_msg, local_mtime = read_local_json(RECORDS_FILE, [])
         local_rows = records_as_rows_exact(local_payload)
         local_state, local_state_msg, _ = read_local_json(RECORDS_STATE_FILE, {})
         local_hash = _json_hash(local_rows)
-        local_valid = bool(isinstance(local_state, dict) and _safe_str(local_state.get("payload_hash")) == local_hash)
-        local_epoch = _state_epoch(local_state, local_mtime) if local_valid else 0.0
+        local_state = dict(local_state or {}) if isinstance(local_state, dict) else {}
+        local_valid = bool(_safe_str(local_state.get("payload_hash")) == local_hash)
+        local_state.setdefault("count", len(local_rows))
+        local_state.setdefault("latest_recommendation_date", _latest_record_recommendation_date(local_rows))
+        if not local_valid:
+            # Use file mtime only as a tie-breaker.  Never stamp a stale rebooted
+            # repository copy with "now" before checking remote authorities.
+            local_state["payload_hash"] = local_hash
 
-        details = [f"本機：{local_msg}｜{local_state_msg}"]
-        candidates: list[tuple[str, float, dict[str, Any]]] = []
+        details = [
+            f"本機：{local_msg}｜{local_state_msg}｜{len(local_rows)}筆｜"
+            f"最新{local_state.get('latest_recommendation_date') or '未取得'}"
+        ]
+        candidates: list[tuple[str, dict[str, Any], datetime | None, Any]] = [
+            ("local", local_state, local_mtime if local_valid else datetime.min, local_rows)
+        ]
 
         fs_summary: dict[str, Any] = {}
         if firebase_configured():
             fs_summary, fs_msg = _read_records_firestore_summary()
             details.append(f"Firestore摘要：{fs_msg}")
-            if isinstance(fs_summary, dict):
-                fs_epoch = _state_epoch(fs_summary)
-                if _safe_str(fs_summary.get("payload_hash")) and fs_epoch > 0:
-                    candidates.append(("firestore", fs_epoch, fs_summary))
+            if isinstance(fs_summary, dict) and (
+                _safe_str(fs_summary.get("payload_hash"))
+                or _recommendation_date_text(fs_summary.get("latest_recommendation_date"))
+                or int(fs_summary.get("count") or 0) > 0
+                or _state_epoch(fs_summary) > 0
+            ):
+                candidates.append(("firestore", dict(fs_summary), None, None))
 
         gh_state: dict[str, Any] = {}
         if github_config().get("token"):
             raw_state, gh_state_msg = read_github_json(RECORDS_STATE_FILE, {})
             details.append(f"GitHub狀態：{gh_state_msg}")
             if isinstance(raw_state, dict):
-                gh_state = raw_state
-                gh_epoch = _state_epoch(gh_state)
-                if _safe_str(gh_state.get("payload_hash")) and gh_epoch > 0:
-                    candidates.append(("github", gh_epoch, gh_state))
+                gh_state = dict(raw_state)
+                if (
+                    _safe_str(gh_state.get("payload_hash"))
+                    or _recommendation_date_text(gh_state.get("latest_recommendation_date"))
+                    or int(gh_state.get("count") or 0) > 0
+                    or _state_epoch(gh_state) > 0
+                ):
+                    candidates.append(("github", gh_state, None, None))
 
-        if local_valid:
-            candidates.append(("local", local_epoch, local_state))
+        source, newest_state, newest_fallback, newest_rows_hint = max(
+            candidates,
+            key=lambda item: _authority_freshness_key(
+                item[0], item[1], fallback=item[2], rows=item[3]
+            ),
+        )
+        local_key = _authority_freshness_key("local", local_state, fallback=(local_mtime if local_valid else datetime.min), rows=local_rows)
+        newest_key = _authority_freshness_key(source, newest_state, fallback=newest_fallback, rows=newest_rows_hint)
+        details.append(f"新鮮度比較：local={local_key[:4]}｜{source}={newest_key[:4]}")
 
-        if not candidates:
+        if source == "local":
             if not local_valid and local_rows:
-                repaired_state = _new_state("godpick_records_durable_v6_local_repair", local_rows, count=len(local_rows), latest_recommendation_date=_latest_record_recommendation_date(local_rows))
+                repaired_state = _new_state(
+                    "godpick_records_durable_v7_local_repair",
+                    local_rows,
+                    count=len(local_rows),
+                    latest_recommendation_date=_latest_record_recommendation_date(local_rows),
+                )
                 write_local_json_atomic(RECORDS_STATE_FILE, repaired_state)
                 write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(local_rows, repaired_state["payload_hash"]))
-                details.append("本機紀錄存在但缺少有效state，已就地補建權威state。")
-                return local_rows, details, True
-            return local_rows, details, False
-
-        source, newest_epoch, newest_state = max(candidates, key=lambda x: (x[1], int((x[2] or {}).get("revision") or 0), {"local": 0, "github": 1, "firestore": 2}.get(x[0], 0)))
-        newest_hash = _safe_str((newest_state or {}).get("payload_hash"))
-        if source == "local" or (local_valid and newest_hash == local_hash and newest_epoch <= local_epoch):
+                details.append("本機為最新來源；已補建權威state，但未改變資料日期。")
             return local_rows, details + [f"權威來源：local｜{len(local_rows)}筆"], False
 
         remote_rows: list[dict[str, Any]] = []
@@ -408,54 +479,41 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
         if not remote_rows:
             details.append(f"遠端 {source} 摘要較新，但完整資料為空；保留本機，不做回退。")
             return local_rows, details, False
+
         remote_hash = _json_hash(remote_rows)
-        if newest_hash and newest_hash != remote_hash:
-            details.append(f"遠端 {source} 完整資料hash與摘要不一致；保留本機。")
-            return local_rows, details, False
+        summary_hash = _safe_str(remote_state.get("payload_hash"))
+        if summary_hash and summary_hash != remote_hash:
+            # Legacy/partial summaries can lag behind the collection.  A full
+            # reload already proves later rows exist, so compare semantic dates
+            # before rejecting the data outright.
+            remote_latest = _latest_record_recommendation_date(remote_rows)
+            local_latest = _latest_record_recommendation_date(local_rows)
+            if remote_latest <= local_latest:
+                details.append(f"遠端 {source} hash不一致且資料日期未較新；保留本機。")
+                return local_rows, details, False
+            details.append(f"遠端 {source} 摘要hash落後，但完整資料最新至{remote_latest}；採完整資料修復摘要。")
 
-        # 舊部署可能已有本機紀錄但尚未建立state。遠端較新時採聯集修復，
-        # 不用遠端整份覆蓋本機，避免任何一邊獨有的日期被回退。
-        if not local_valid and local_rows:
-            merged_by_key: dict[str, dict[str, Any]] = {}
-            for candidate_row in [*local_rows, *remote_rows]:
-                key = _record_business_key_authority(candidate_row) or _record_id(candidate_row)
-                if not key:
-                    continue
-                old = merged_by_key.get(key)
-                if old is None:
-                    merged_by_key[key] = dict(candidate_row)
-                    continue
-                old_time = _parse_time(old.get("更新時間") or old.get("updated_at") or old.get("建立時間"))
-                new_time = _parse_time(candidate_row.get("更新時間") or candidate_row.get("updated_at") or candidate_row.get("建立時間"))
-                primary, secondary = (candidate_row, old) if new_time >= old_time else (old, candidate_row)
-                merged = dict(secondary)
-                for k, v in primary.items():
-                    if v not in (None, "") or k not in merged:
-                        merged[k] = v
-                if _safe_str(old.get("record_id")):
-                    merged["record_id"] = old["record_id"]
-                merged_by_key[key] = merged
-            remote_rows = list(merged_by_key.values())
-            remote_hash = _json_hash(remote_rows)
-            details.append(f"本機缺少有效state，已與較新 {source} 權威資料聯集修復：{len(remote_rows)}筆。")
-
-        restored_state = dict(remote_state)
-        restored_state.update({
-            "version": _safe_str(restored_state.get("version")) or "godpick_records_durable_v6_remote_restore",
+        remote_state.update({
+            "version": "godpick_records_durable_v7_reboot_restore",
             "payload_hash": remote_hash,
             "count": len(remote_rows),
+            "latest_recommendation_date": _latest_record_recommendation_date(remote_rows),
             "restored_from": source,
             "restored_at": _now_text(),
+            "updated_at": _safe_str(remote_state.get("updated_at_text") or remote_state.get("updated_at")) or _now_text(),
+            "updated_at_utc": _safe_str(remote_state.get("updated_at_utc")) or _now_utc_text(),
+            "updated_at_epoch": _state_epoch(remote_state) or _now_epoch(),
+            "revision": int(remote_state.get("revision") or time.time_ns()),
         })
-        restored_state.setdefault("updated_at", _now_text())
-        restored_state.setdefault("updated_at_utc", _now_utc_text())
-        restored_state.setdefault("updated_at_epoch", newest_epoch or _now_epoch())
-        restored_state.setdefault("revision", time.time_ns())
         ok1, msg1 = write_local_json_atomic(RECORDS_FILE, remote_rows)
-        ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, restored_state)
+        ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, remote_state)
         if ok1 and ok2:
             write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(remote_rows, remote_hash))
-            details.extend([f"已自動還原較新權威來源：{source}｜{len(remote_rows)}筆", msg1, msg2])
+            details.extend([
+                f"已在Reboot後自動還原較新權威來源：{source}｜{len(remote_rows)}筆｜"
+                f"最新{remote_state.get('latest_recommendation_date') or '未取得'}",
+                msg1, msg2,
+            ])
             return remote_rows, details, True
         details.append(f"遠端較新但本機還原失敗：{msg1}｜{msg2}")
         return local_rows, details, False
@@ -474,6 +532,14 @@ def upsert_records_authority_fast(
     the durable mutation path.  It prevents page 7/page 8 concurrent reruns from
     rolling the authority file back to an older date.
     """
+    # Rebooted Streamlit Cloud may start from the old repository JSON.  Always
+    # restore the freshest remote authority before merging a new page-7 record,
+    # otherwise the new write can rebuild a summary from an incomplete local set.
+    if _configured_remote_exists():
+        try:
+            ensure_records_local_authority_current()
+        except Exception:
+            pass
     incoming = records_as_rows_exact(list(upsert_rows or []))
     empty_report = PersistenceReport()
     if not incoming:
@@ -519,11 +585,33 @@ def upsert_records_authority_fast(
                 added += 1
 
         if not changed_rows:
-            state = _new_state("godpick_records_durable_v6_nochange", current, count=len(current), latest_recommendation_date=_latest_record_recommendation_date(current), mutation_reason=_safe_str(reason))
+            state = _new_state("godpick_records_durable_v7_nochange", current, count=len(current), latest_recommendation_date=_latest_record_recommendation_date(current), mutation_reason=_safe_str(reason))
+            fs_verified = False
+            fs_message = "Firebase 未設定"
+            if firebase_configured():
+                fs_summary, fs_message = _read_records_firestore_summary()
+                try:
+                    fs_verified = bool(
+                        _safe_str(fs_summary.get("payload_hash")) == state["payload_hash"]
+                        and int(fs_summary.get("count") or -1) == len(current)
+                    )
+                except Exception:
+                    fs_verified = False
+            gh_status, _, _ = read_local_json(RECORDS_GITHUB_SYNC_STATUS_FILE, {})
+            gh_verified = bool(
+                isinstance(gh_status, dict)
+                and _safe_str(gh_status.get("status")) == "success"
+                and _safe_str(gh_status.get("payload_hash")) == state["payload_hash"]
+            )
+            remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else True
             report = PersistenceReport(
                 local_ok=True,
-                permanent_ok=True,
+                firestore_ok=fs_verified,
+                github_ok=gh_verified,
+                permanent_ok=remote_ok,
                 local_message=f"權威檔內容未變更；目前 {len(current)} 筆",
+                firestore_message=("Firestore已驗證一致" if fs_verified else fs_message),
+                github_message=("GitHub已驗證一致" if gh_verified else "GitHub尚未完成同hash回讀驗證"),
                 payload_hash=state["payload_hash"],
                 updated_at=state["updated_at"],
             )
@@ -1133,12 +1221,22 @@ def _read_records_firestore_full() -> tuple[list[dict[str, Any]], str, datetime,
             latest = max(latest, _firestore_time(summary_data.get("updated_at")))
             state = {
                 "payload_hash": summary_data.get("payload_hash"),
-                "updated_at": summary_data.get("updated_at_text"),
+                "count": summary_data.get("count"),
+                "latest_recommendation_date": summary_data.get("latest_recommendation_date"),
+                "updated_at": summary_data.get("updated_at_text") or summary_data.get("updated_at"),
                 "updated_at_utc": summary_data.get("updated_at_utc"),
                 "updated_at_epoch": summary_data.get("updated_at_epoch"),
                 "revision": summary_data.get("revision"),
             }
-        return normalize_records(rows), "已讀取 Firestore godpick_records", latest, state
+        normalized_rows = normalize_records(rows)
+        if state.get("payload_hash"):
+            state["summary_payload_hash"] = state.get("payload_hash")
+        # The fully streamed collection is authoritative for its own hash/count/date;
+        # a legacy or partially updated summary must not invalidate a successful reload.
+        state["count"] = len(normalized_rows)
+        state["latest_recommendation_date"] = _latest_record_recommendation_date(normalized_rows)
+        state["payload_hash"] = _json_hash(normalized_rows)
+        return normalized_rows, "已讀取 Firestore godpick_records", latest, state
     except Exception as exc:
         return [], f"Firestore records 讀取失敗：{exc}", datetime.min, {}
 
@@ -1177,6 +1275,7 @@ def write_records_firestore(records: list[dict[str, Any]], state: dict[str, Any]
                 {
                     "count": len(normalized),
                     "payload_hash": state["payload_hash"],
+                    "latest_recommendation_date": state.get("latest_recommendation_date") or _latest_record_recommendation_date(normalized),
                     "revision": state.get("revision"),
                     "updated_at_epoch": state.get("updated_at_epoch"),
                     "updated_at_utc": state.get("updated_at_utc"),
@@ -1288,14 +1387,45 @@ def _records_manifest(records: list[dict[str, Any]], payload_hash: str = "") -> 
 
 
 def _read_records_firestore_summary() -> tuple[dict[str, Any], str]:
-    """Read only the small summary document; never stream the whole collection."""
+    """Read the small summary and repair legacy freshness metadata in memory."""
     if not firebase_configured():
         return {}, "Firebase 未設定"
     try:
         _init_firebase_app()
         db = firestore.client()
         snap = db.collection("system").document("godpick_records_summary").get()
-        return (snap.to_dict() or {}) if snap.exists else {}, "已讀取 Firestore 推薦紀錄摘要"
+        data = (snap.to_dict() or {}) if snap.exists else {}
+        messages = ["已讀取 Firestore 推薦紀錄摘要"]
+
+        # Legacy writers stored only count/updated_at.  Query one newest record so
+        # startup can still recognize that Firestore is newer than the 7/9 repo file.
+        if not _recommendation_date_text(data.get("latest_recommendation_date")):
+            try:
+                query_direction = getattr(getattr(firestore, "Query", None), "DESCENDING", "DESCENDING")
+                query = (
+                    db.collection("godpick_records")
+                    .order_by("推薦日期", direction=query_direction)
+                    .limit(1)
+                )
+                newest_docs = list(query.stream())
+                if newest_docs:
+                    newest_data = newest_docs[0].to_dict() or {}
+                    latest_date = _recommendation_date_text(newest_data.get("推薦日期") or newest_data.get("date"))
+                    if latest_date:
+                        data["latest_recommendation_date"] = latest_date
+                        messages.append(f"已探測遠端最新推薦日期 {latest_date}")
+            except Exception as probe_exc:
+                messages.append(f"最新日期探測略過：{probe_exc}")
+
+        # Firestore Timestamp is not JSON text; preserve it as a fallback epoch.
+        if not data.get("updated_at_epoch"):
+            updated = data.get("updated_at")
+            try:
+                if hasattr(updated, "timestamp"):
+                    data["updated_at_epoch"] = float(updated.timestamp())
+            except Exception:
+                pass
+        return data, "｜".join(messages)
     except Exception as exc:
         return {}, f"Firestore 摘要讀取失敗：{exc}"
 
@@ -1369,6 +1499,7 @@ def write_records_firestore_mutation(
                 {
                     "count": normalized_count,
                     "payload_hash": state["payload_hash"],
+                    "latest_recommendation_date": state.get("latest_recommendation_date") or _latest_record_recommendation_date(records),
                     "revision": state.get("revision"),
                     "updated_at_epoch": state.get("updated_at_epoch"),
                     "updated_at_utc": state.get("updated_at_utc"),
@@ -1478,7 +1609,9 @@ def save_records_mutation_fast(
         # Firestore is already verified, or GitHub has accepted the newest full
         # snapshot into the coalescing background queue.  The report explicitly
         # exposes github_pending so the UI never labels it as a completed upload.
-        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok or report.github_pending))
+        # A queued GitHub upload is not a verified permanent write.  Reboot-safe
+        # success is reported only after Firestore or GitHub has confirmed it.
+        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok))
     else:
         report.permanent_ok = report.local_ok
     return report
@@ -1584,7 +1717,9 @@ def save_records_sync_fast(payload: Any, reason: str = "explicit record sync", e
         report.github_message = "GitHub 未設定"
 
     if _configured_remote_exists():
-        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok or report.github_pending))
+        # A queued GitHub upload is not a verified permanent write.  Reboot-safe
+        # success is reported only after Firestore or GitHub has confirmed it.
+        report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok))
     else:
         report.permanent_ok = report.local_ok
     return report
@@ -1642,7 +1777,7 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
     if valid:
         source, chosen, chosen_state, _ = max(
             valid,
-            key=lambda item: (item[3], int((item[2] or {}).get("revision") or 0), {"local": 0, "github": 1, "firestore": 2}.get(item[0], 0)),
+            key=lambda item: _authority_freshness_key(item[0], item[2], fallback=item[3], rows=item[1]),
         )
     else:
         merged: list[dict[str, Any]] = []

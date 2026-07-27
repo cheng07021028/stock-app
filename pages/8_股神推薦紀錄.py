@@ -163,7 +163,7 @@ GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
-RECORD_SPEED_FIX_VERSION = "record_v174_authority_autosync_no_rollback_20260727"
+RECORD_SPEED_FIX_VERSION = "record_v175_reboot_remote_authority_restore_20260727"
 NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
 NORMALIZED_RECORD_CACHE_VERSION_V165 = "v165_20260726"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -4482,11 +4482,11 @@ def _backfill_perf_columns(
 
 
 def _load_records(force_remote: bool = False) -> pd.DataFrame:
-    """以專案固定路徑秒開；重新載入時從最新本機/GitHub/Firestore權威來源還原。"""
+    """以專案固定路徑秒開；啟動時已先比對遠端權威，重新載入僅作人工驗證。"""
     if not force_remote:
         local_df, local_err = _read_records_from_local_files()
         if not local_df.empty:
-            st.session_state[_k("load_detail")] = [f"本機固定路徑：{local_err}", "遠端：快速模式未讀取；按重新載入可驗證遠端權威來源"]
+            st.session_state[_k("load_detail")] = [f"本機固定路徑：{local_err}", "遠端：啟動階段已比對摘要；重新載入僅用於人工完整驗證"]
             return _ensure_godpick_record_columns(local_df)
     if callable(load_records_permanent):
         try:
@@ -5882,7 +5882,7 @@ def main():
     # V174：任何按鈕執行前，先同步唯一權威檔。舊畫面不得回寫覆蓋新紀錄。
     _authority_df_v174, _authority_details_v174, _authority_restored_v174 = _sync_authority_before_actions()
     if _authority_restored_v174:
-        st.success(f"已自動同步最新權威推薦紀錄，共 {len(_authority_df_v174)} 筆；不需再按重新載入。")
+        st.success(f"Reboot 後已自動還原最新遠端權威推薦紀錄，共 {len(_authority_df_v174)} 筆；不需再按重新帶入。")
     if _authority_details_v174:
         st.session_state[_k("authority_auto_sync_details_v174")] = _authority_details_v174
 
