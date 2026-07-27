@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 
-PERF_FAST_UPDATE_VERSION = "v105_close_confirmation_and_retention_20260724"
+PERF_FAST_UPDATE_VERSION = "v171_container_safe_fair_batch_20260727"
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
 DEFAULT_JSON_FILES = [
     "godpick_records.json",
@@ -95,33 +95,70 @@ def _tw_symbol(code: str) -> str:
     return f"{code}.TW"
 
 
-def _read_json_records(path: Path) -> List[Dict[str, Any]]:
+def _read_json_container(path: Path) -> tuple[Any, str | None, List[Dict[str, Any]]]:
+    """讀取 JSON 並保留原始容器格式。
+
+    godpick_latest_recommendations.json 是 dict + recommendations；舊版只取 list
+    並在回寫時把整個 dict 覆蓋成 list，會遺失 saved_at、weights、
+    category_strength、hot_pick。V171 之後一律保存原容器與非紀錄欄位。
+    """
     if not path.exists():
-        return []
+        return None, None, []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
-        return []
-
+        return None, None, []
     if isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
+        return data, None, [x for x in data if isinstance(x, dict)]
     if isinstance(data, dict):
-        # 常見格式相容
-        for k in ["records", "data", "items", "recommendations"]:
-            if isinstance(data.get(k), list):
-                return [x for x in data[k] if isinstance(x, dict)]
-    return []
+        for key in ["records", "data", "items", "recommendations"]:
+            if isinstance(data.get(key), list):
+                return data, key, [x for x in data[key] if isinstance(x, dict)]
+    return data, None, []
 
 
-def _write_json_records(path: Path, records: List[Dict[str, Any]]) -> None:
+def _read_json_records(path: Path) -> List[Dict[str, Any]]:
+    return _read_json_container(path)[2]
+
+
+def _cleanup_old_backups(path: Path, keep: int = 5) -> None:
     try:
-        if path.exists():
-            backup = path.with_suffix(path.suffix + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-            backup.write_text(path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+        backups = sorted(
+            path.parent.glob(path.name + ".bak_*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in backups[max(1, int(keep)):]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
     except Exception:
         pass
 
-    path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _write_json_records(path: Path, records: List[Dict[str, Any]]) -> None:
+    """原子回寫並保留 dict wrapper；備份只保留最近 5 份。"""
+    original, record_key, _ = _read_json_container(path)
+    if isinstance(original, dict) and record_key:
+        payload: Any = dict(original)
+        payload[record_key] = records
+        payload["performance_updated_at"] = _now_str()
+        payload["performance_update_version"] = PERF_FAST_UPDATE_VERSION
+    else:
+        payload = records
+
+    try:
+        if path.exists():
+            backup = path.with_name(path.name + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            backup.write_text(path.read_text(encoding="utf-8-sig", errors="replace"), encoding="utf-8")
+            _cleanup_old_backups(path, keep=5)
+    except Exception:
+        pass
+
+    tmp = path.with_name(path.name + ".tmp_v171")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _is_stale(row: Dict[str, Any], stale_minutes: int = 60) -> bool:
@@ -694,6 +731,7 @@ def update_recommendation_perf_fast_v77(
     stale_minutes: int = 60,
     track_days: List[int] | None = None,
     process_all: bool = False,
+    max_total_records: int | None = None,
 ) -> Dict[str, Any]:
     """
     直接更新專案根目錄 JSON 紀錄。
@@ -716,10 +754,13 @@ def update_recommendation_perf_fast_v77(
         "messages": [],
         "process_all": bool(process_all),
         "batches": 0,
+        "candidate_by_file": {},
+        "max_total_records": 0,
+        "selection_strategy": "all-scan_newest-first_fair-round-robin",
     }
 
     root = Path(".")
-    all_work_items = []
+    work_by_file: Dict[str, List[Tuple[str, int, str]]] = {}
 
     for fn in json_files:
         path = root / fn
@@ -730,20 +771,43 @@ def update_recommendation_perf_fast_v77(
         summary["processed_files"].append(fn)
         summary["total_records"] += len(records)
 
-        # V102：process_all=True 時掃描整份資料；max_records 僅在非完整更新模式下當掃描上限。
+        # V171：候選判斷本身掃描整份 JSON（1,796 筆僅為本機迴圈，成本很低），
+        # 但非完整模式只對 max_records 筆執行外部報價。由最新紀錄往舊紀錄排，
+        # 已更新者會因 stale_minutes 自動略過，後續一鍵更新可逐批追上更舊的缺值，
+        # 不再讓「最近 max_records 筆」以外的歷史資料永遠沒有機會補績效。
         indexed = list(enumerate(records))
-        if (not process_all) and max_records:
-            indexed = indexed[-int(max_records):]
+        if not process_all:
+            indexed.reverse()
 
         for idx, row in indexed:
             if _needs_update(row, stale_minutes=stale_minutes):
                 code = _normalize_code(row.get("股票代號") or row.get("代號"))
                 if code:
-                    all_work_items.append((fn, idx, code))
+                    work_by_file.setdefault(fn, []).append((fn, idx, code))
 
-    # V102：batch_limit 是每批股票數，不是總上限；process_all=False 時仍保留舊防卡限制。
+    # V171：公平輪詢每個檔案，避免 godpick_records.json 先塞滿上限後，
+    # godpick_recommend_list / latest recommendations 永遠得不到更新。
+    all_work_items: List[Tuple[str, int, str]] = []
+    file_names = [fn for fn in json_files if work_by_file.get(fn)]
+    cursor = {fn: 0 for fn in file_names}
+    while file_names:
+        next_names = []
+        for fn in file_names:
+            pos = cursor[fn]
+            items = work_by_file.get(fn, [])
+            if pos < len(items):
+                all_work_items.append(items[pos])
+                cursor[fn] = pos + 1
+            if cursor[fn] < len(items):
+                next_names.append(fn)
+        file_names = next_names
+
     if not process_all:
-        all_work_items = all_work_items[: int(batch_limit or 60)]
+        total_cap = int(max_total_records if max_total_records is not None else (max_records or 0))
+        if total_cap > 0:
+            all_work_items = all_work_items[:total_cap]
+    summary["candidate_by_file"] = {fn: len(items) for fn, items in work_by_file.items()}
+    summary["max_total_records"] = 0 if process_all else int(max_total_records if max_total_records is not None else (max_records or 0))
     summary["candidates"] = len(all_work_items)
 
     codes = sorted(set(x[2] for x in all_work_items))

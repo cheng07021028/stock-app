@@ -197,6 +197,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
+PAGE07_SPEED_FIX_VERSION = "page07_rerun_lazy_export_local_first_v164_20260726"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -246,6 +247,7 @@ GODPICK_LIST_FILE = "godpick_recommend_list.json"
 MACRO_MODE_BRIDGE_FILE = "macro_mode_bridge.json"
 MARKET_SNAPSHOT_FILE = "market_snapshot.json"
 OFFICIAL_FACTORS_CACHE_FILE = "official_factors_cache.json"
+RECOMMENDATION_READINESS_FILE = "godpick_recommendation_readiness.json"
 
 
 GODPICK_RECORD_COLUMNS = [
@@ -1382,19 +1384,20 @@ def _read_json_from_github_path(path_name: str, default):
         return copy.deepcopy(default), f"讀取 GitHub {path_name} 例外：{e}"
 
 
-def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
-    cfg = _generic_github_file_config(path_name)
-    token = cfg["token"]
+def _write_json_to_github_path_sync(cfg: dict[str, str], payload) -> tuple[bool, str]:
+    """真正的 GitHub GET/PUT；只在背景執行，避免 Streamlit 按鈕等待網路。"""
+    token = _safe_str(cfg.get("token"))
+    path_name = _safe_str(cfg.get("path"))
     if not token:
         return False, "未設定 GITHUB_TOKEN"
 
     sha = ""
     try:
         resp = requests.get(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            _github_contents_url(cfg["owner"], cfg["repo"], path_name),
             headers=_github_headers(token),
             params={"ref": cfg["branch"]},
-            timeout=20,
+            timeout=12,
         )
         if resp.status_code == 200:
             sha = _safe_str(resp.json().get("sha"))
@@ -1413,16 +1416,37 @@ def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
 
     try:
         resp = requests.put(
-            _github_contents_url(cfg["owner"], cfg["repo"], cfg["path"]),
+            _github_contents_url(cfg["owner"], cfg["repo"], path_name),
             headers=_github_headers(token),
             json=body,
-            timeout=30,
+            timeout=20,
         )
         if resp.status_code in (200, 201):
             return True, f"已寫入 GitHub：{path_name}"
         return False, f"GitHub 寫入 {path_name} 失敗：{resp.status_code} / {resp.text[:300]}"
     except Exception as e:
         return False, f"GitHub 寫入 {path_name} 例外：{e}"
+
+
+@st.cache_resource(show_spinner=False)
+def _page07_github_write_executor():
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-page07-github")
+
+
+def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
+    """V164：本機先完成，GitHub 改為單執行緒背景排隊。"""
+    cfg = _generic_github_file_config(path_name)
+    if not _safe_str(cfg.get("token")):
+        return False, "未設定 GITHUB_TOKEN"
+    try:
+        _page07_github_write_executor().submit(
+            _write_json_to_github_path_sync,
+            dict(cfg),
+            copy.deepcopy(payload),
+        )
+        return True, f"GitHub 背景同步已排程：{path_name}"
+    except Exception as e:
+        return False, f"GitHub 背景同步排程失敗：{e}"
 
 
 def _settings_ts_value(payload: dict[str, Any]) -> datetime:
@@ -1440,7 +1464,7 @@ def _weight_stamp_from_payload(payload: dict[str, Any]) -> str:
     return _safe_str(payload.get("weight_settings_updated_at")) or _safe_str(payload.get("updated_at"))
 
 
-def _load_persistent_settings(local_first: bool = False) -> dict[str, Any]:
+def _load_persistent_settings(local_first: bool = True) -> dict[str, Any]:
     """讀取股神推薦永久設定。
 
     V143 重點：14_股神權重校正剛套用後，7_股神推薦優先讀本機 JSON，
@@ -2241,6 +2265,17 @@ def _read_project_json_file(file_name: str) -> dict[str, Any]:
         except Exception:
             continue
     return {}
+
+
+def _load_recommendation_readiness_v171() -> dict[str, Any]:
+    try:
+        path = Path(RECOMMENDATION_READINESS_FILE)
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _read_market_snapshot_v33() -> dict[str, Any]:
@@ -11732,38 +11767,64 @@ def _build_excel_bytes(
     return output.getvalue()
 
 
+def _result_export_signature_v164(rec_df: pd.DataFrame, extra: str = "") -> str:
+    stamp = _safe_str(st.session_state.get(_k("result_saved_at")))
+    codes = ""
+    try:
+        if isinstance(rec_df, pd.DataFrame) and "股票代號" in rec_df.columns:
+            codes = ",".join(rec_df["股票代號"].astype(str).map(_normalize_code).tolist())
+    except Exception:
+        codes = ""
+    raw = f"{stamp}|{len(rec_df) if isinstance(rec_df, pd.DataFrame) else 0}|{len(rec_df.columns) if isinstance(rec_df, pd.DataFrame) else 0}|{codes}|{extra}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
+    """V164：Excel 改為按需產生；一般按鈕 rerun 不再重建 20+ 工作表。"""
     if rec_df is None or rec_df.empty:
         return
 
-    full_order = _get_full_table_order_for_export(rec_df)
-    rec_export, cat_export, leader_export, factor_export = _build_export_views(rec_df, category_strength_df, top_n, full_order=full_order)
-
-    # 讓 Excel 內容顯示格式盡量與畫面上的完整推薦表一致。
-    rec_export_for_excel = _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export
-    candidate_export = st.session_state.get(_k("candidate_diagnosis_store"))
-    scan_report = st.session_state.get(_k("scan_quality_report"), {})
-    excel_bytes = _build_excel_bytes(
-        rec_export_for_excel, cat_export, leader_export, factor_export,
-        candidate_diagnosis_export=candidate_export if isinstance(candidate_export, pd.DataFrame) else None,
-        scan_report=scan_report if isinstance(scan_report, dict) else None,
-    )
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_name = f"股神推薦_V2_{ts}.xlsx"
-
     render_pro_section("Excel 匯出")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}")
+    cache_key = _k("main_export_cache_v164")
+    cache = st.session_state.get(cache_key, {})
+    ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
+
     c1, c2 = st.columns([2, 4])
     with c1:
-        st.download_button(
-            label="匯出推薦結果 Excel",
-            data=excel_bytes,
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        if not ready:
+            if st.button("準備推薦結果 Excel", use_container_width=True, key=_k("prepare_main_excel_v164")):
+                with st.spinner("只在這次需要下載時建立 Excel..."):
+                    full_order = _get_full_table_order_for_export(rec_df)
+                    rec_export, cat_export, leader_export, factor_export = _build_export_views(
+                        rec_df, category_strength_df, top_n, full_order=full_order
+                    )
+                    rec_export_for_excel = _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export
+                    candidate_export = st.session_state.get(_k("candidate_diagnosis_store"))
+                    scan_report = st.session_state.get(_k("scan_quality_report"), {})
+                    excel_bytes = _build_excel_bytes(
+                        rec_export_for_excel, cat_export, leader_export, factor_export,
+                        candidate_diagnosis_export=candidate_export if isinstance(candidate_export, pd.DataFrame) else None,
+                        scan_report=scan_report if isinstance(scan_report, dict) else None,
+                    )
+                    cache = {
+                        "sig": sig,
+                        "bytes": excel_bytes,
+                        "name": f"股神推薦_V2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    }
+                    st.session_state[cache_key] = cache
+                    ready = True
+        if ready:
+            st.download_button(
+                label="匯出推薦結果 Excel",
+                data=cache["bytes"],
+                file_name=cache["name"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=_k("main_excel_download_v164"),
+            )
     with c2:
-        st.caption("Excel 第一張『股神推薦總排名』是唯一第一優先，依股神推薦優先分由高到低；第二張『使用導航』說明其他分頁用途。要真正進場再看正式主推薦/A-；已發動看強勢動能核心雷達，尚未發動看強勢前兆核心雷達。候選診斷總表不是買進清單。")
+        st.caption("V164：Excel 只在按『準備』時建立並快取；其他勾選、篩選、匯入、欄位按鈕不再重做整份活頁簿。推薦內容與所有分頁均完整保留。")
 
 
 def _render_selected_export_block():
@@ -11773,38 +11834,35 @@ def _render_selected_export_block():
 
     export_df = selected_df.copy()
     want_cols = [
-        "股票代號", "股票名稱", "市場別", "類別",
-        "類股內排名", "類股前3強",
+        "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
         "推薦模式", "推薦等級", "推薦總分", "實戰品質分", "量能狀態", "趨勢狀態", "實戰降分", "夜間股神總分", "隔日實戰排序分", "隔日進場分數", "波段潛力分數",
         "進場型態_隔日", "隔日建議動作", "預估進場點", "突破確認價_隔日", "回測承接價", "停損價_隔日", "第一壓力價", "資料完整度",
         "上漲機率估計%", "上漲機率等級", "上漲機率信心", "推薦分桶", "起漲等級", "信心等級",
         "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲等級", "起漲摘要", "交易可行分數", "類股熱度分數",
-        "同類股領先幅度", "是否領先同類股",
-        "最新價", "推薦買點_拉回", "推薦買點_突破",
-        "停損價", "賣出目標1", "賣出目標2",
-        "3日績效%", "5日績效%", "10日績效%", "20日績效%",
+        "同類股領先幅度", "是否領先同類股", "最新價", "推薦買點_拉回", "推薦買點_突破",
+        "停損價", "賣出目標1", "賣出目標2", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
         "推薦標籤", "機會股說明", "股神推論邏輯", "風險說明", "推薦理由摘要",
     ]
     export_df = export_df[[c for c in want_cols if c in export_df.columns]].copy()
-
-    selected_bytes = _build_excel_bytes(
-        rec_export=export_df,
-        cat_export=pd.DataFrame(),
-        leader_export=pd.DataFrame(),
-        factor_export=pd.DataFrame(),
-        candidate_diagnosis_export=export_df,
-        scan_report=st.session_state.get(_k("scan_quality_report"), {}),
-    )
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.download_button(
-        label="匯出勾選推薦股 Excel",
-        data=selected_bytes,
-        file_name=f"股神推薦_勾選結果_{ts}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
+    sig = _result_export_signature_v164(export_df, "selected")
+    cache_key = _k("selected_export_cache_v164")
+    cache = st.session_state.get(cache_key, {})
+    ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
+    if not ready and st.button("準備勾選推薦股 Excel", use_container_width=True, key=_k("prepare_selected_excel_v164")):
+        with st.spinner("建立勾選股票 Excel..."):
+            selected_bytes = _build_excel_bytes(
+                rec_export=export_df, cat_export=pd.DataFrame(), leader_export=pd.DataFrame(), factor_export=pd.DataFrame(),
+                candidate_diagnosis_export=export_df, scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+            )
+            cache = {"sig": sig, "bytes": selected_bytes, "name": f"股神推薦_勾選結果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"}
+            st.session_state[cache_key] = cache
+            ready = True
+    if ready:
+        st.download_button(
+            label="匯出勾選推薦股 Excel", data=cache["bytes"], file_name=cache["name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True,
+            key=_k("selected_excel_download_v164"),
+        )
 
 
 def _build_record_export_bytes(record_rows: list[dict[str, Any]]) -> bytes:
@@ -11968,28 +12026,36 @@ def _render_record_export_block(rec_df: pd.DataFrame):
     selected_df = st.session_state.get(_k("selected_rec_snapshot"))
     if not isinstance(selected_df, pd.DataFrame) or selected_df.empty:
         return
-
     selected_codes = [_normalize_code(x) for x in selected_df["股票代號"].astype(str).tolist() if _normalize_code(x)]
     if not selected_codes:
         return
-
     record_rows = _build_record_rows_from_rec_df(rec_df, selected_codes)
     if not record_rows:
         return
 
-    record_bytes = _build_record_export_bytes(record_rows)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
     render_pro_section("匯出到股神推薦紀錄")
-    st.caption("這裡只做匯出，不直接串接 8_股神推薦紀錄。你可以下載後自行備份或匯入。")
-    st.download_button(
-        label="匯出股神推薦紀錄 Excel",
-        data=record_bytes,
-        file_name=f"股神推薦紀錄匯入檔_{ts}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
-
+    st.caption("這裡只做匯出，不直接串接 8_股神推薦紀錄；V164 改為需要下載時才建立檔案。")
+    sig = hashlib.md5((
+        _safe_str(st.session_state.get(_k("result_saved_at"))) + "|" + ",".join(selected_codes)
+    ).encode("utf-8")).hexdigest()[:16]
+    cache_key = _k("record_export_cache_v164")
+    cache = st.session_state.get(cache_key, {})
+    ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
+    if not ready and st.button("準備股神推薦紀錄 Excel", use_container_width=True, key=_k("prepare_record_excel_v164")):
+        with st.spinner("建立推薦紀錄匯入檔..."):
+            cache = {
+                "sig": sig,
+                "bytes": _build_record_export_bytes(record_rows),
+                "name": f"股神推薦紀錄匯入檔_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            }
+            st.session_state[cache_key] = cache
+            ready = True
+    if ready:
+        st.download_button(
+            label="匯出股神推薦紀錄 Excel", data=cache["bytes"], file_name=cache["name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True,
+            key=_k("record_excel_download_v164"),
+        )
 
 
 # =========================================================
@@ -12443,6 +12509,94 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
         st.caption("目前已保存欄位順序：" + " ｜ ".join(preview_order[:24]) + (" ..." if len(preview_order) > 24 else ""))
 
     return fixed_cols + st.session_state.get(applied_key, applied_order)
+def _postprocess_dependency_signature_v164(macro_bridge: dict[str, Any], enabled: bool) -> str:
+    """只在真正依賴資料改變時重算推薦後處理，不因一般 widget rerun 重算。"""
+    file_parts: list[str] = []
+    for name in [
+        GODPICK_SETTINGS_FILE,
+        MACRO_MODE_BRIDGE_FILE,
+        MARKET_SNAPSHOT_FILE,
+        OFFICIAL_FACTORS_CACHE_FILE,
+        "godpick_records.json",
+        "godpick_calibration_samples.json",
+    ]:
+        try:
+            path = Path(name)
+            stat = path.stat()
+            file_parts.append(f"{name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except Exception:
+            file_parts.append(f"{name}:missing")
+    try:
+        bridge_text = json.dumps(macro_bridge or {}, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        bridge_text = str(macro_bridge)
+    try:
+        weight_text = json.dumps(
+            st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    except Exception:
+        weight_text = ""
+    raw = "|".join([PAGE07_SPEED_FIX_VERSION, str(bool(enabled)), bridge_text, weight_text, *file_parts])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _postprocess_recommend_result_v164(
+    rec_df: pd.DataFrame,
+    hot_pick_df: pd.DataFrame,
+    macro_bridge: dict[str, Any],
+    macro_bridge_enabled: bool,
+    *,
+    force: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+    """V164：推薦後處理快取。
+
+    舊版每次任何按鈕 rerun 都重做進階欄位、大盤橋接、官方因子、夜間策略、
+    動態資金流分流與數百欄 schema 正規化。實測 57+30 筆約需 19.5 秒。
+    新版只有新掃描或依賴檔案/權重改變時重算，其餘直接取 session 快取。
+    """
+    dep_sig = _postprocess_dependency_signature_v164(macro_bridge, macro_bridge_enabled)
+    cache_key = _k("postprocess_cache_v164")
+    cache = st.session_state.get(cache_key, {})
+    if (
+        not force
+        and isinstance(cache, dict)
+        and cache.get("dep_sig") == dep_sig
+        and isinstance(cache.get("rec_df"), pd.DataFrame)
+        and not cache.get("rec_df").empty
+    ):
+        cached_hot = cache.get("hot_df") if isinstance(cache.get("hot_df"), pd.DataFrame) else pd.DataFrame()
+        return cache["rec_df"].copy(deep=False), cached_hot.copy(deep=False), True
+
+    rec = rec_df.copy() if isinstance(rec_df, pd.DataFrame) else pd.DataFrame()
+    hot = hot_pick_df.copy() if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()
+    rec = _apply_advanced_godpick_columns(rec)
+    hot = _apply_advanced_godpick_columns(hot)
+    rec = _apply_macro_bridge_columns(rec, macro_bridge, macro_bridge_enabled)
+    hot = _apply_macro_bridge_columns(hot, macro_bridge, macro_bridge_enabled)
+    rec = _apply_official_factor_cache_v109(rec)
+    hot = _apply_official_factor_cache_v109(hot)
+    rec = _recalc_night_strategy_after_macro_v100(rec)
+    hot = _recalc_night_strategy_after_macro_v100(hot)
+    rec = _apply_v139_dynamic_hot_money_breakout_rules(rec)
+    hot = _apply_v139_dynamic_hot_money_breakout_rules(hot)
+    try:
+        if normalize_godpick_dataframe is not None:
+            rec = normalize_godpick_dataframe(rec, add_missing=False)
+            hot = normalize_godpick_dataframe(hot, add_missing=False)
+    except Exception:
+        pass
+    st.session_state[cache_key] = {
+        "dep_sig": dep_sig,
+        "rec_df": rec.copy(deep=False),
+        "hot_df": hot.copy(deep=False),
+        "built_at": _now_text(),
+    }
+    return rec, hot, False
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
@@ -12496,7 +12650,7 @@ def main():
         "top_table_columns": [],
         "full_table_columns": [],
     }
-    persistent_settings = _load_persistent_settings()
+    persistent_settings = _load_persistent_settings(local_first=True)
     persisted_weights = _normalize_weight_map(persistent_settings.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
 
     for name, value in defaults.items():
@@ -12563,6 +12717,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜本機優先、GitHub背景同步、Excel按需產生、單功能區運算")
 
     macro_ref_for_ui = _load_latest_macro_reference()
     with st.expander("大盤走勢串聯狀態", expanded=False):
@@ -12961,19 +13116,9 @@ def main():
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
             resume_scan=bool(resume_scan_btn),
         )
-        rec_df = _apply_advanced_godpick_columns(rec_df)
-        hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
-        rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
-        hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
-        # V109：官方因子快取只讀合併；推薦頁不即時連官方網站。
-        rec_df = _apply_official_factor_cache_v109(rec_df)
-        hot_pick_df = _apply_official_factor_cache_v109(hot_pick_df)
-        # V100/V109：大盤橋接與官方因子欄位補上後，重新計算夜間隔日策略。
-        rec_df = _recalc_night_strategy_after_macro_v100(rec_df)
-        hot_pick_df = _recalc_night_strategy_after_macro_v100(hot_pick_df)
-        # V139：最後再依當下資金流/成交額/趨勢分流，確保保存與匯出一致。
-        rec_df = _apply_v139_dynamic_hot_money_breakout_rules(rec_df)
-        hot_pick_df = _apply_v139_dynamic_hot_money_breakout_rules(hot_pick_df)
+        rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(
+            rec_df, hot_pick_df, macro_bridge, macro_bridge_enabled, force=True
+        )
 
         # Final safety net: first try the complete candidate diagnosis, then keep
         # the previous non-empty result.  Never replace a useful list with 0 rows.
@@ -12998,25 +13143,11 @@ def main():
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
-        rec_df = _apply_advanced_godpick_columns(rec_df)
-        hot_pick_df = _apply_advanced_godpick_columns(hot_pick_df)
-        rec_df = _apply_macro_bridge_columns(rec_df, macro_bridge, macro_bridge_enabled)
-        hot_pick_df = _apply_macro_bridge_columns(hot_pick_df, macro_bridge, macro_bridge_enabled)
-        # V109：舊 session_state / 舊快取資料載入後，也重新同步官方因子與夜間策略。
-        rec_df = _apply_official_factor_cache_v109(rec_df)
-        hot_pick_df = _apply_official_factor_cache_v109(hot_pick_df)
-        rec_df = _recalc_night_strategy_after_macro_v100(rec_df)
-        hot_pick_df = _recalc_night_strategy_after_macro_v100(hot_pick_df)
-        rec_df = _apply_v139_dynamic_hot_money_breakout_rules(rec_df)
-        hot_pick_df = _apply_v139_dynamic_hot_money_breakout_rules(hot_pick_df)
-
-    # v26 欄位統一：推薦結果進入畫面/匯出/寫入前先標準化，確保 7/8/10/12 欄位一致。
-    try:
-        if normalize_godpick_dataframe is not None:
-            rec_df = normalize_godpick_dataframe(rec_df, add_missing=False)
-            hot_pick_df = normalize_godpick_dataframe(hot_pick_df, add_missing=False)
-    except Exception:
-        pass
+        rec_df, hot_pick_df, _postprocess_cache_hit_v164 = _postprocess_recommend_result_v164(
+            rec_df, hot_pick_df, macro_bridge, macro_bridge_enabled, force=False
+        )
+        if _postprocess_cache_hit_v164:
+            st.session_state[_k("postprocess_cache_last_hit_v164")] = _now_text()
 
     # V159：只有按下開始/重新推薦/斷點續掃完成的新結果才自動記錄；
     # 一般換頁 rerun 不重寫。使用同日 business key，因此重跑只更新同一筆，不會重複膨脹。
@@ -13083,6 +13214,19 @@ def main():
     if saved_at:
         strategy_label = _safe_str(st.session_state.get('pick_strategy', '結合版'))
         st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{strategy_label}")
+
+    readiness_v171 = _load_recommendation_readiness_v171()
+    readiness_status = _safe_str(readiness_v171.get("status"))
+    if readiness_status.startswith("RESCAN"):
+        st.warning(
+            f"系統健康檢查的一鍵更新已刷新股神前置資料，但目前畫面仍是舊掃描結果。"
+            f"就緒度 {readiness_v171.get('score', 0)}/{readiness_v171.get('full_score', 100)}；請按『重新推薦』後再作正式判斷。"
+        )
+    elif readiness_status.startswith("BLOCK"):
+        st.error(
+            f"股神前置資料尚未達正式推薦標準：{readiness_status}。"
+            f"{_safe_str(readiness_v171.get('recommended_action'))}"
+        )
 
     try:
         rec_df = _phase41_apply_week_battle_columns(rec_df)
@@ -13657,15 +13801,22 @@ def main():
         [False, False, False, False, False],
     )
 
-    tabs = st.tabs(["候選診斷總表（非買進清單）", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"])
+    detail_sections_v164 = ["候選診斷總表（非買進清單）", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"]
+    active_detail_section_v164 = st.radio(
+        "推薦結果功能區｜V164 單區運算",
+        detail_sections_v164,
+        horizontal=True,
+        key=_k("active_detail_section_v164"),
+    )
+    st.caption("V164：只執行目前選取的功能區，不再讓 st.tabs 在每次 rerun 同時建立六個區塊。")
 
-    with tabs[0]:
+    if active_detail_section_v164 == "候選診斷總表（非買進清單）":
         # v26 欄位統一：完整推薦表使用與 8_股神推薦紀錄 / 10_推薦清單 / 12_股神管理中心一致的標準欄位順序。
         full_default_cols = [c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or list(diagnosis_df.columns)) if c in diagnosis_df.columns]
         if not full_default_cols:
             full_default_cols = [c for c in list(diagnosis_df.columns) if c != "勾選"]
         # v48：完整推薦表改用與 12_股神管理中心相同的欄位管理樣式。
-        full_for_manager = diagnosis_df.copy()
+        full_for_manager = diagnosis_df.head(1).copy()
         if "勾選" not in full_for_manager.columns:
             full_for_manager.insert(0, "勾選", False)
         try:
@@ -13692,7 +13843,18 @@ def main():
             if _normalize_code(x)
         }
 
-        full_work_df = diagnosis_df[full_show_cols].copy()
+        full_opt1, full_opt2, full_opt3 = st.columns([1.2, 1.2, 3.6])
+        with full_opt1:
+            full_fast_mode_v164 = st.toggle("候選表快速模式", value=True, key=_k("full_table_fast_mode_v164"))
+        with full_opt2:
+            full_visible_limit_v164 = st.number_input("候選表顯示上限", min_value=50, max_value=3000, value=150, step=50, key=_k("full_table_visible_limit_v164"))
+        with full_opt3:
+            st.caption("只限制畫面 data_editor 的渲染筆數；完整候選資料、排序、匯出與同步來源都不會被截斷。關閉快速模式即可顯示全部。")
+        full_display_source_v164 = diagnosis_df.head(int(full_visible_limit_v164)) if full_fast_mode_v164 else diagnosis_df
+        if full_fast_mode_v164 and len(diagnosis_df) > len(full_display_source_v164):
+            st.info(f"快速模式：畫面先顯示 {len(full_display_source_v164)} / {len(diagnosis_df)} 筆；完整資料仍保留。")
+
+        full_work_df = full_display_source_v164[full_show_cols].copy()
         if "勾選" not in full_work_df.columns:
             full_work_df.insert(0, "勾選", False)
         full_work_df["勾選"] = full_work_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in full_selected_codes_prev)
@@ -13817,48 +13979,68 @@ def main():
             except Exception:
                 export_target_for_excel = _format_df((selected_snapshot_full.copy() if len(full_picked_codes) > 0 else diagnosis_df.copy()))
 
-            # v71 修正：完整推薦表區塊的「匯出完整 Excel / 匯出勾選 Excel」過去只匯出完整推薦表，
-            # 類股強度榜、同類股領先榜、自動因子榜被傳入空 DataFrame，所以 Excel 分頁會沒有資料。
-            # 這裡改成同時建立三個榜單分頁；若有勾選則依勾選資料輸出，未勾選則依全部推薦結果輸出。
+            # V164：完整/勾選 Excel 改為按需建立並依結果與勾選指紋快取。
             export_source_for_rank = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else diagnosis_df.copy()
             if isinstance(export_source_for_rank, pd.DataFrame) and "勾選" in export_source_for_rank.columns:
                 export_source_for_rank = export_source_for_rank.drop(columns=["勾選"], errors="ignore")
-
-            try:
-                full_export_order = [c for c in export_target_for_excel.columns if c != "勾選"] if isinstance(export_target_for_excel, pd.DataFrame) else None
-                _, cat_export_full, leader_export_full, factor_export_full = _build_export_views(
-                    export_source_for_rank,
-                    category_strength_df if len(full_picked_codes) == 0 else pd.DataFrame(),
-                    top_n=max(int(top_n or 200), len(export_source_for_rank) if isinstance(export_source_for_rank, pd.DataFrame) else 200),
-                    full_order=full_export_order,
-                )
-            except Exception:
-                cat_export_full, leader_export_full, factor_export_full = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-            candidate_store_for_export = st.session_state.get(_k("candidate_diagnosis_store"))
-            if len(full_picked_codes) > 0 and isinstance(candidate_store_for_export, pd.DataFrame) and "股票代號" in candidate_store_for_export.columns:
-                candidate_store_for_export = candidate_store_for_export[
-                    candidate_store_for_export["股票代號"].astype(str).map(_normalize_code).isin(set(full_picked_codes))
-                ].copy()
-            export_bytes_full_table = _build_excel_bytes(
-                rec_export=(selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()),
-                cat_export=cat_export_full,
-                leader_export=leader_export_full,
-                factor_export=factor_export_full,
-                candidate_diagnosis_export=(candidate_store_for_export if isinstance(candidate_store_for_export, pd.DataFrame) else export_target_for_excel),
-                scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+            export_sig_v164 = _result_export_signature_v164(
+                export_source_for_rank,
+                "full-table|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
             )
-            export_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_cache_key_v164 = _k("full_table_export_cache_v164")
+            export_cache_v164 = st.session_state.get(export_cache_key_v164, {})
+            export_ready_v164 = (
+                isinstance(export_cache_v164, dict)
+                and export_cache_v164.get("sig") == export_sig_v164
+                and isinstance(export_cache_v164.get("bytes"), (bytes, bytearray))
+            )
             export_label = "匯出勾選 Excel" if len(full_picked_codes) > 0 else "匯出完整 Excel"
-            export_name = f"股神正式推薦作戰表_{'勾選' if len(full_picked_codes) > 0 else '全部'}_{export_ts}.xlsx"
-            st.download_button(
-                export_label,
-                data=export_bytes_full_table,
-                file_name=export_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key=_k("full_table_excel_download"),
-            )
+            if not export_ready_v164:
+                if st.button(
+                    f"準備{export_label}",
+                    use_container_width=True,
+                    key=_k("prepare_full_table_excel_v164"),
+                ):
+                    with st.spinner("只在需要下載時建立完整 Excel 分頁..."):
+                        try:
+                            full_export_order = [c for c in export_target_for_excel.columns if c != "勾選"] if isinstance(export_target_for_excel, pd.DataFrame) else None
+                            _, cat_export_full, leader_export_full, factor_export_full = _build_export_views(
+                                export_source_for_rank,
+                                category_strength_df if len(full_picked_codes) == 0 else pd.DataFrame(),
+                                top_n=max(int(top_n or 200), len(export_source_for_rank) if isinstance(export_source_for_rank, pd.DataFrame) else 200),
+                                full_order=full_export_order,
+                            )
+                        except Exception:
+                            cat_export_full, leader_export_full, factor_export_full = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+                        candidate_store_for_export = st.session_state.get(_k("candidate_diagnosis_store"))
+                        if len(full_picked_codes) > 0 and isinstance(candidate_store_for_export, pd.DataFrame) and "股票代號" in candidate_store_for_export.columns:
+                            candidate_store_for_export = candidate_store_for_export[
+                                candidate_store_for_export["股票代號"].astype(str).map(_normalize_code).isin(set(full_picked_codes))
+                            ].copy()
+                        export_bytes_full_table = _build_excel_bytes(
+                            rec_export=(selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()),
+                            cat_export=cat_export_full,
+                            leader_export=leader_export_full,
+                            factor_export=factor_export_full,
+                            candidate_diagnosis_export=(candidate_store_for_export if isinstance(candidate_store_for_export, pd.DataFrame) else export_target_for_excel),
+                            scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+                        )
+                        export_cache_v164 = {
+                            "sig": export_sig_v164,
+                            "bytes": export_bytes_full_table,
+                            "name": f"股神正式推薦作戰表_{'勾選' if len(full_picked_codes) > 0 else '全部'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        }
+                        st.session_state[export_cache_key_v164] = export_cache_v164
+                        export_ready_v164 = True
+            if export_ready_v164:
+                st.download_button(
+                    export_label,
+                    data=export_cache_v164["bytes"],
+                    file_name=export_cache_v164["name"],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=_k("full_table_excel_download_v164"),
+                )
         with full_b3:
             st.caption("Phase 8：候選診斷表可加入 05 自選股；09/10 會自動攔截正式排除與高風險觀察，避免把非推薦股寫成正式推薦。")
 
@@ -13946,7 +14128,7 @@ def main():
             _show_import_result_notice("一鍵同步｜09_股神推薦紀錄", added_rec, len(full_picked_codes), msg_rec, "09_股神推薦紀錄")
             _show_import_result_notice("一鍵同步｜10_推薦清單", added_list, len(full_picked_codes), msg_list, "10_推薦清單")
 
-    with tabs[1]:
+    if active_detail_section_v164 == "類股強度榜":
         category_show = category_strength_df.copy()
         for c in ["類股平均總分", "類股平均訊號", "類股平均漲幅", "類股平均雷達", "類股平均自動因子", "類股平均起漲前兆", "類股平均交易可行", "類股熱度分數", "類股加速度"]:
             if c in category_show.columns:
@@ -13956,7 +14138,7 @@ def main():
                     category_show[c] = category_show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
         st.dataframe(category_show, use_container_width=True, hide_index=True)
 
-    with tabs[2]:
+    if active_detail_section_v164 == "同類股領先榜":
         st.dataframe(
             _format_df(
                 leader_df[[c for c in [
@@ -13969,7 +14151,7 @@ def main():
             hide_index=True,
         )
 
-    with tabs[3]:
+    if active_detail_section_v164 == "自動因子榜":
         st.dataframe(
             _format_df(
                 factor_rank[[c for c in [
@@ -13982,13 +14164,13 @@ def main():
             hide_index=True,
         )
 
-    with tabs[4]:
+    if active_detail_section_v164 == "飆股補抓":
         if _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")) == "結合版" and isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
             st.dataframe(_format_df(hot_pick_df), use_container_width=True, hide_index=True)
         else:
             st.info("目前未啟用結合版，或本輪沒有補抓名單。")
 
-    with tabs[5]:
+    if active_detail_section_v164 == "操作說明":
         render_pro_info_card(
             "V2 模組邏輯",
             [

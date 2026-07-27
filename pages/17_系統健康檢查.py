@@ -42,10 +42,10 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V141｜修正官方因子排程設定永久保存：加入 widget key、本機 + GitHub 寫回與 GitHub Actions 動態時間檢查。")
+st.caption("V171｜沿用既有一鍵更新按鈕：智慧略過新鮮資料、更新全模組共用資料、重建績效回饋、清除舊表格快取並檢查推薦就緒度。")
 
 with st.sidebar:
-    st.header("V112 操作")
+    st.header("V171 操作")
     do_check = st.button("🔍 重新健康檢查", use_container_width=True, type="primary")
     do_repair = st.button("🛠 一鍵安全修復缺檔/缺欄", use_container_width=True)
     do_compile = st.button("🧪 執行編譯煙霧測試", use_container_width=True)
@@ -121,7 +121,9 @@ with st.sidebar:
             st.error(msg)
     if st.button("⚡ 立即手動更新官方因子快取", use_container_width=True):
         with st.spinner("正在更新官方因子快取..."):
-            result = run_official_factor_update_once(load_schedule_settings(), push_github=True)
+            _manual_cfg = dict(load_schedule_settings() or {})
+            _manual_cfg["enabled"] = True
+            result = run_official_factor_update_once(_manual_cfg, push_github=True)
         if result.get("ok"):
             st.success(result.get("message"))
             if result.get("github_msg"):
@@ -140,10 +142,13 @@ with st.sidebar:
     g_update_perf = st.checkbox("更新推薦紀錄/清單最新價與績效", value=bool(global_cfg.get("update_performance", True)))
     g_repair_schema = st.checkbox("先安全補缺檔/缺欄", value=bool(global_cfg.get("repair_schema", True)))
     g_process_all_perf = st.checkbox("績效完整更新全部紀錄（較慢）", value=bool(global_cfg.get("process_all_performance", False)))
-    g_max_records = st.selectbox("非完整模式掃描最近筆數", [80, 150, 300, 500, 800, 1200], index=[80, 150, 300, 500, 800, 1200].index(int(global_cfg.get("max_records", 300)) if int(global_cfg.get("max_records", 300)) in [80, 150, 300, 500, 800, 1200] else 300))
+    g_max_records = st.selectbox("智慧增量模式單次最多更新筆數", [80, 150, 300, 500, 800, 1200], index=[80, 150, 300, 500, 800, 1200].index(int(global_cfg.get("max_records", 300)) if int(global_cfg.get("max_records", 300)) in [80, 150, 300, 500, 800, 1200] else 300))
     g_batch_limit = st.selectbox("每批更新股票數", [30, 50, 80, 120, 200], index=[30, 50, 80, 120, 200].index(int(global_cfg.get("batch_limit", 80)) if int(global_cfg.get("batch_limit", 80)) in [30, 50, 80, 120, 200] else 80))
-    g_stale_minutes = st.selectbox("幾分鐘內已更新則略過", [0, 15, 30, 60, 120, 360], index=[0, 15, 30, 60, 120, 360].index(int(global_cfg.get("stale_minutes", 30)) if int(global_cfg.get("stale_minutes", 30)) in [0, 15, 30, 60, 120, 360] else 30))
-    g_push_github = st.checkbox("更新後同步 GitHub（有 token 才會成功）", value=bool(global_cfg.get("push_github", True)))
+    g_stale_minutes = st.selectbox("推薦績效幾分鐘內已更新則略過", [0, 15, 30, 60, 120, 360], index=[0, 15, 30, 60, 120, 360].index(int(global_cfg.get("stale_minutes", 30)) if int(global_cfg.get("stale_minutes", 30)) in [0, 15, 30, 60, 120, 360] else 30))
+    g_force_source_refresh = st.checkbox("強制忽略資料新鮮度重新抓取（通常不必）", value=bool(global_cfg.get("force_source_refresh", False)), help="未勾選時：股票主檔、大盤、官方因子若仍新鮮會安全略過，可大幅縮短一鍵更新時間。")
+    g_rebuild_feedback = st.checkbox("重建績效回饋與精準度摘要", value=bool(global_cfg.get("rebuild_feedback_profile", True)))
+    g_invalidate_cache = st.checkbox("更新後清除所有模組舊表格快取", value=bool(global_cfg.get("invalidate_runtime_caches", True)))
+    g_push_github = st.checkbox("更新後背景同步 GitHub（不阻塞按鈕）", value=bool(global_cfg.get("push_github", True)))
     if st.button("💾 套用全域更新設定（永久保存）", use_container_width=True):
         ok, msg = save_global_update_settings({
             "update_stock_master": g_update_stock_master,
@@ -156,13 +161,16 @@ with st.sidebar:
             "max_records": g_max_records,
             "batch_limit": g_batch_limit,
             "stale_minutes": g_stale_minutes,
+            "force_source_refresh": g_force_source_refresh,
+            "rebuild_feedback_profile": g_rebuild_feedback,
+            "invalidate_runtime_caches": g_invalidate_cache,
             "push_github": g_push_github,
         })
         if ok:
             st.success("已永久保存全域更新設定。")
         else:
             st.error(msg)
-    run_global_update_now = st.button("🚀 一鍵依序更新股神所需資訊", use_container_width=True, type="primary", help="依序更新：核心檔案→主檔→大盤→官方因子→自選股→推薦紀錄/清單績效→全模組檢查。")
+    run_global_update_now = st.button("🚀 一鍵依序更新股神所需資訊", use_container_width=True, type="primary", help="沿用本按鈕依序更新：核心→股票主檔→大盤→官方因子→自選股→最新推薦/清單/紀錄績效→績效回饋→推薦就緒度→全模組表格快取。")
 
 if 'run_global_update_now' in locals() and run_global_update_now:
     global_settings = {
@@ -176,10 +184,27 @@ if 'run_global_update_now' in locals() and run_global_update_now:
         "max_records": g_max_records,
         "batch_limit": g_batch_limit,
         "stale_minutes": g_stale_minutes,
+        "force_source_refresh": g_force_source_refresh,
+        "rebuild_feedback_profile": g_rebuild_feedback,
+        "invalidate_runtime_caches": g_invalidate_cache,
         "push_github": g_push_github,
     }
-    with st.spinner("正在依序更新股神推薦所需資訊，單一步驟失敗不會覆蓋既有有效資料..."):
-        global_result = run_global_update(Path(__file__).resolve().parents[1], global_settings)
+    progress_box = st.empty()
+    progress_table = st.empty()
+    def _on_global_progress(row, all_rows):
+        progress_box.info(f"{row.get('步驟')}｜{row.get('狀態')}｜{row.get('說明')}｜{row.get('耗時秒', 0)} 秒")
+        progress_table.dataframe(pd.DataFrame(all_rows).drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
+    with st.status("正在使用既有一鍵更新按鈕更新全模組資料...", expanded=True) as update_status:
+        global_result = run_global_update(Path(__file__).resolve().parents[1], global_settings, progress_callback=_on_global_progress)
+        if global_result.get("message") and not global_result.get("steps"):
+            update_status.update(label=global_result.get("message"), state="error", expanded=True)
+        else:
+            update_status.update(label="全模組資料更新流程已完成", state="complete", expanded=False)
+    if g_invalidate_cache:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
     steps_df = pd.DataFrame(global_result.get("steps", []))
     ok_count = int((steps_df.get("狀態") == "OK").sum()) if not steps_df.empty and "狀態" in steps_df.columns else 0
     fail_count = int((steps_df.get("狀態") != "OK").sum()) if not steps_df.empty and "狀態" in steps_df.columns else 0
@@ -190,6 +215,14 @@ if 'run_global_update_now' in locals() and run_global_update_now:
     st.dataframe(steps_df.drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
     with st.expander("全域更新詳細明細", expanded=False):
         st.json(global_result)
+    readiness = global_result.get("recommendation_readiness", {}) if isinstance(global_result, dict) else {}
+    if readiness:
+        st.subheader("股神推薦資料就緒度")
+        r1, r2, r3 = st.columns(3)
+        r1.metric("就緒度", f"{readiness.get('score', 0)}/{readiness.get('full_score', 100)}")
+        r2.metric("狀態", readiness.get("status", ""))
+        r3.metric("建議", readiness.get("recommended_action", ""))
+        st.dataframe(pd.DataFrame(readiness.get("checks", [])), use_container_width=True, hide_index=True)
 
 if do_repair:
     with st.spinner("正在備份並安全修復..."):
@@ -231,7 +264,7 @@ else:
     st.info("尚無健康檢查資料。")
 
 st.divider()
-st.subheader("V140 全模組資料填入 / 更新方式 / 永久設定檢查")
+st.subheader("V171 全模組資料填入 / 更新方式 / 永久設定檢查")
 all_status = check_all_module_data_status(Path(__file__).resolve().parents[1])
 asum = all_status.get("summary", {})
 a1, a2, a3, a4 = st.columns(4)

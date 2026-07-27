@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """股神推薦績效回饋校正服務 vNext 2026-05-30.
 
 設計原則：
@@ -19,6 +19,7 @@ import pandas as pd
 PERFORMANCE_FEEDBACK_VERSION = "phase8_9_layered_calibration_feedback_20260715"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 DEFAULT_CALIBRATION_PATH = "godpick_calibration_samples.json"
+DEFAULT_PROFILE_CACHE_PATH = "godpick_performance_profile.json"
 
 FEEDBACK_COLUMNS = [
     "股神實戰總分",
@@ -612,10 +613,60 @@ def _top_keys(stats: dict[str, dict[str, Any]], *, positive: bool) -> list[str]:
     return [k for _, _, k in items[:8]]
 
 
+def _profile_source_signature(path: str | Path = DEFAULT_RECORD_PATH) -> str:
+    p = Path(path)
+    try:
+        stat = p.stat()
+        return f"{p.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{PERFORMANCE_FEEDBACK_VERSION}"
+    except Exception:
+        return f"{p}|missing|{PERFORMANCE_FEEDBACK_VERSION}"
+
+
+def _write_profile_cache(profile: dict[str, Any], source_path: str | Path, cache_path: str | Path = DEFAULT_PROFILE_CACHE_PATH) -> tuple[bool, str]:
+    payload = {
+        "version": PERFORMANCE_FEEDBACK_VERSION,
+        "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_path": str(source_path),
+        "source_signature": _profile_source_signature(source_path),
+        "profile": profile,
+    }
+    try:
+        p = Path(cache_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp.replace(p)
+        return True, f"已更新績效回饋快取：{p}"
+    except Exception as exc:
+        return False, f"績效回饋快取寫入失敗：{type(exc).__name__}: {exc}"
+
+
+def refresh_godpick_performance_profile(
+    path: str | Path = DEFAULT_RECORD_PATH,
+    cache_path: str | Path = DEFAULT_PROFILE_CACHE_PATH,
+) -> tuple[dict[str, Any], tuple[bool, str]]:
+    records = _load_feedback_records() if str(path) == DEFAULT_RECORD_PATH else _load_records_payload(path)
+    profile = build_godpick_performance_profile(records)
+    return profile, _write_profile_cache(profile, path, cache_path)
+
+
 def load_godpick_performance_profile(path: str | Path = DEFAULT_RECORD_PATH) -> dict[str, Any]:
-    if str(path) == DEFAULT_RECORD_PATH:
-        return build_godpick_performance_profile(_load_feedback_records())
-    return build_godpick_performance_profile(_load_records_payload(path))
+    signature = _profile_source_signature(path)
+    cache_path = Path(DEFAULT_PROFILE_CACHE_PATH)
+    try:
+        if cache_path.exists():
+            payload = json.loads(cache_path.read_text(encoding="utf-8-sig"))
+            if (
+                isinstance(payload, dict)
+                and payload.get("version") == PERFORMANCE_FEEDBACK_VERSION
+                and payload.get("source_signature") == signature
+                and isinstance(payload.get("profile"), dict)
+            ):
+                return payload["profile"]
+    except Exception:
+        pass
+    profile, _ = refresh_godpick_performance_profile(path, cache_path)
+    return profile
 
 
 def _lookup_boost(profile: dict[str, Any], section: str, key: Any) -> tuple[float, int]:

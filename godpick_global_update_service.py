@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""股神全模組資料檢查與一鍵更新服務 v140
+"""股神全模組資料檢查與既有健康按鈕一鍵更新服務 v171
 
 設計原則：
 - 只補缺檔、補缺欄、更新必要快取；不刪除既有資料，不用假資料覆蓋。
@@ -13,6 +13,8 @@ import importlib
 import json
 import os
 import time
+import hashlib
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +23,11 @@ from typing import Any, Callable
 BASE_DIR = Path(__file__).resolve().parent
 GLOBAL_UPDATE_STATUS_FILE = BASE_DIR / "godpick_global_update_status.json"
 GLOBAL_UPDATE_SETTINGS_FILE = BASE_DIR / "data" / "config" / "godpick_global_update_settings.json"
+GLOBAL_REFRESH_TOKEN_FILE = BASE_DIR / "godpick_global_refresh_token.json"
+RECOMMENDATION_READINESS_FILE = BASE_DIR / "godpick_recommendation_readiness.json"
+PERFORMANCE_PROFILE_FILE = BASE_DIR / "godpick_performance_profile.json"
+GLOBAL_UPDATE_LOCK_FILE = BASE_DIR / ".godpick_global_update.lock"
+GLOBAL_UPDATE_VERSION = "v171_existing_health_button_full_refresh_20260727"
 
 CORE_REQUIRED_JSON_DEFAULTS: dict[str, Any] = {
     "market_snapshot.json": {},
@@ -42,13 +49,20 @@ CORE_REQUIRED_JSON_DEFAULTS: dict[str, Any] = {
 
 PERSISTENT_SETTING_FILES: dict[str, Any] = {
     "last_query_state.json": {"quick_group": "", "quick_stock_code": "", "home_start": "", "home_end": "", "updated_at": ""},
-    "dashboard_table_settings.json": {"version": "v140", "updated_at": "", "profiles": {}},
-    "hk_chart_settings.json": {"version": "v140", "updated_at": "", "settings": {}},
+    "dashboard_table_settings.json": {"version": GLOBAL_UPDATE_VERSION, "updated_at": "", "profiles": {}},
+    "hk_chart_settings.json": {"version": GLOBAL_UPDATE_VERSION, "updated_at": "", "settings": {}},
     "godpick_user_settings.json": {},
     "godpick_record_ui_config.json": {},
     "godpick_management_ui_config.json": {},
     "godpick_ui_font_settings.json": {},
     str(GLOBAL_UPDATE_SETTINGS_FILE.relative_to(BASE_DIR)): {},
+}
+
+SOURCE_REFRESH_TTL_MINUTES: dict[str, int] = {
+    "stock_master_cache.json": 1440,
+    "market_snapshot.json": 10,
+    "macro_mode_bridge.json": 10,
+    "official_factors_cache.json": 720,
 }
 
 MODULE_UPDATE_PLAN: list[dict[str, Any]] = [
@@ -173,6 +187,26 @@ MODULE_UPDATE_PLAN: list[dict[str, Any]] = [
     },
 ]
 
+MODULE_REFRESH_STRATEGY: dict[str, tuple[str, str, str]] = {
+    "0_大盤走勢": ("一鍵更新直接重建大盤快照/橋接；開頁讀本機快取", "10分鐘新鮮度略過、網路失敗保留舊有效快照", "舊大盤不得硬封鎖新K線；推薦頁另做新鮮度閘門"),
+    "1_儀表板": ("清除全域 st.cache_data，開頁依最新推薦/紀錄/大盤重算", "5秒表格快取只在資料未變時使用", "不把舊推薦包裝成即時結果"),
+    "2_行情查詢": ("股票主檔刷新；單股即時價仍在查詢時抓", "查詢與歷史資料依股票/日期快取", "即時來源失敗不以0價覆蓋"),
+    "3_歷史K線分析": ("主檔與自選股刷新；選定股票開頁重取/命中快取", "歷史K線、分析Bundle依參數快取", "保留多來源與資料新鮮度標記"),
+    "4_自選股中心": ("直接重建 normalized/runtime 檔", "本機永久檔先讀，避免每次遠端同步", "不刪群組、不用主檔空值覆蓋既有名稱"),
+    "5_排行榜": ("清除排行榜運算快取，開頁依最新主檔與K線重算", "不在一鍵更新時全市場預算排行榜，避免長時間阻塞", "排行榜結果依當前日期與資料源重新計算"),
+    "6_多股比較": ("清除比較快取，開頁依目前選取群組重算", "只計算使用者選取股票，不預抓全市場", "比較區間與群組不被一鍵更新改寫"),
+    "7_股神推薦": ("更新主檔/大盤/官方因子/績效回饋；舊掃描標示需重跑", "績效回饋預先快取、推薦後處理依檔案簽章重算", "前置資料不足時禁止宣稱正式推薦"),
+    "8_股神推薦紀錄": ("更新JSON後移除舊正規化pkl；頁面依來源簽章自動重載", "增量績效、批次報價、公平輪詢各資料檔", "候選績效與可執行交易績效分流"),
+    "9_股票主檔更新": ("一鍵更新每日智慧刷新；本頁仍可強制手動重建", "主檔新鮮時略過Yahoo全量補值；本機先保存", "主檔少於100筆視為失敗，不覆蓋有效快取"),
+    "10_推薦清單": ("來源JSON簽章改變後自動重載session表格", "不再依賴手動重新讀取；績效批次共用", "latest dict容器不再被績效更新覆蓋成list"),
+    "11_資料診斷": ("一鍵更新最後自動重跑全模組資料檢查", "診斷只讀摘要，不重做行情", "異常/注意分開，不把尚未成熟績效誤報為錯誤"),
+    "12_股神管理中心": ("清除表格快取，開頁讀最新紀錄/清單", "欄位設定與資料計算分離", "不自動改管理設定或人工狀態"),
+    "14_股神權重校正": ("一鍵先更新績效並重建回饋摘要；開頁直接分析", "20MB紀錄解析結果寫入簽章快取", "只產生校正依據，不自動套用權重避免過擬合"),
+    "15_帳號管理": ("不納入行情一鍵更新", "避免行情更新觸碰權限資料", "帳密/權限只接受本頁人工操作"),
+    "16_官方因子快取中心": ("一鍵更新法人/營收/估值快取", "12小時內新鮮資料略過；GitHub改背景備份", "新抓資料完整度大幅下降時保留舊有效快取"),
+    "17_系統健康檢查": ("現有按鈕為唯一一鍵入口，顯示逐步進度與就緒度", "防重複點擊、失敗隔離、只更新需更新資料", "更新後需7頁重掃時明確警告，不偽造新推薦"),
+}
+
 FILE_TO_MODULES: list[tuple[str, str, str]] = [
     ("market_snapshot.json", "0/7/1/17", "大盤快照與股神大盤分數"),
     ("macro_mode_bridge.json", "0/7/17", "大盤橋接檔"),
@@ -290,19 +324,32 @@ def parse_dt(value: Any) -> datetime | None:
 
 
 def find_updated_at(data: Any) -> str:
+    """取得容器中真正最新的內容時間，不用上傳/複製後的檔案時間冒充資料日期。"""
+    direct_keys = ["updated_at", "saved_at", "last_update", "time", "date", "data_date", "performance_updated_at"]
+    record_keys = [
+        "updated_at", "saved_at", "最新更新時間", "資料更新時間", "官方因子更新時間",
+        "績效更新時間", "追蹤更新時間", "推薦日期", "建立時間", "更新時間",
+    ]
     if isinstance(data, dict):
-        for key in ["updated_at", "saved_at", "last_update", "time", "date", "data_date"]:
+        for key in direct_keys:
             if data.get(key):
                 return str(data.get(key))
-        records = iter_records(data)
-        if records:
-            return find_updated_at(records[0])
+        data = iter_records(data)
     if isinstance(data, list) and data:
-        for item in data[:5]:
-            if isinstance(item, dict):
-                for key in ["updated_at", "saved_at", "最新更新時間", "資料更新時間", "官方因子更新時間", "推薦日期", "建立時間"]:
-                    if item.get(key):
-                        return str(item.get(key))
+        best_dt: datetime | None = None
+        best_text = ""
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            for key in record_keys:
+                value = item.get(key)
+                if not value:
+                    continue
+                parsed = parse_dt(value)
+                if parsed is not None and (best_dt is None or parsed > best_dt):
+                    best_dt = parsed
+                    best_text = str(value)
+        return best_text
     return ""
 
 
@@ -355,6 +402,18 @@ def file_status_row(base: Path, file_name: str, modules: str, meaning: str) -> d
         reason = blank_info
     else:
         reason = "資料存在"
+    if updated:
+        updated_dt = parse_dt(updated)
+    else:
+        updated_dt = None
+    age_minutes = max(0.0, (datetime.now() - updated_dt).total_seconds() / 60.0) if updated_dt is not None else _path_age_minutes(path)
+    ttl = SOURCE_REFRESH_TTL_MINUTES.get(file_name)
+    freshness = "不適用"
+    if age_minutes is not None and ttl is not None:
+        freshness = "新鮮" if age_minutes <= ttl else "過期"
+        if freshness == "過期" and status == "OK":
+            status = "注意"
+            reason = f"資料已超過建議更新週期 {ttl} 分鐘；" + reason
     return {
         "檔案": file_name,
         "使用模組": modules,
@@ -363,6 +422,9 @@ def file_status_row(base: Path, file_name: str, modules: str, meaning: str) -> d
         "型態/筆數": shape_text(data) if ok else "",
         "最後更新": updated,
         "大小KB": round(path.stat().st_size / 1024, 2) if path.exists() else 0,
+        "資料年齡分鐘": round(age_minutes, 1) if age_minutes is not None else None,
+        "建議更新週期分鐘": ttl,
+        "新鮮度": freshness,
         "原因/空白檢查": reason,
         "建議更新方式": suggested_update_for_file(file_name),
     }
@@ -388,7 +450,12 @@ def check_all_module_data_status(base_dir: Path | None = None) -> dict[str, Any]
     file_rows = [file_status_row(base, f, m, desc) for f, m, desc in FILE_TO_MODULES]
     module_rows = []
     for item in MODULE_UPDATE_PLAN:
-        module_rows.append(dict(item))
+        row = dict(item)
+        strategy = MODULE_REFRESH_STRATEGY.get(str(row.get("模組")), ("依原頁面流程", "依頁面快取", "保留既有風控"))
+        row["更新後表格刷新方式"] = strategy[0]
+        row["更新加速策略"] = strategy[1]
+        row["精準度保護"] = strategy[2]
+        module_rows.append(row)
     setting_rows = []
     for name, default in PERSISTENT_SETTING_FILES.items():
         path = base / name
@@ -438,7 +505,7 @@ def ensure_persistent_setting_files(base_dir: Path | None = None) -> list[dict[s
             continue
         payload = dict(default) if isinstance(default, dict) else default
         if isinstance(payload, dict):
-            payload.setdefault("version", "v140")
+            payload.setdefault("version", GLOBAL_UPDATE_VERSION)
             payload.setdefault("updated_at", now_text())
         ok, msg = write_json(path, payload)
         rows.append({"設定檔": name, "動作": "建立", "結果": "OK" if ok else msg})
@@ -483,7 +550,7 @@ def sync_watchlist_runtime_files(base_dir: Path | None = None) -> dict[str, Any]
         return {"ok": False, "message": err, "rows": []}
     normalized = normalize_watchlist_payload(data)
     payload = {
-        "version": "v140",
+        "version": GLOBAL_UPDATE_VERSION,
         "updated_at": now_text(),
         "group_count": len(normalized),
         "stock_count": sum(len(v) for v in normalized.values()),
@@ -516,13 +583,16 @@ def run_step(name: str, func: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         ok = bool(result.get("ok", True))
         msg = str(result.get("message", "完成"))
         detail = result
+        mode = "智慧略過" if bool(result.get("skipped")) else "已執行"
     except Exception as exc:
         ok = False
         msg = f"{type(exc).__name__}: {exc}"
         detail = {"error": msg}
+        mode = "失敗"
     return {
         "步驟": name,
         "狀態": "OK" if ok else "失敗",
+        "執行模式": mode,
         "耗時秒": round(time.time() - start, 2),
         "說明": msg,
         "明細": detail,
@@ -536,41 +606,116 @@ def step_core_files(base: Path) -> dict[str, Any]:
 
 
 def step_repair_schema(base: Path) -> dict[str, Any]:
+    """只在真的缺檔/缺欄時修復，避免每次一鍵更新都備份 20MB 大檔。"""
     try:
         svc = importlib.import_module("godpick_system_health_service")
+        health = svc.run_health_check(base)
+        needs = [
+            row for row in (health.get("rows", []) if isinstance(health, dict) else [])
+            if row.get("群組") in {"核心檔案", "欄位串接"} and row.get("狀態") != "OK"
+        ]
+        if not needs:
+            return {"ok": True, "message": "核心檔案與推薦欄位完整，略過備份/補欄", "skipped": True}
         repair = svc.full_safe_repair(base)
         schema_rows = repair.get("schema_rows", []) if isinstance(repair, dict) else []
-        return {"ok": True, "message": f"安全修復完成，欄位檢查 {len(schema_rows)} 項", "repair": repair}
+        # 系統健康備份每個來源檔只保留最近 3 份，避免長期操作越來越慢。
+        removed = 0
+        backup_dir = Path(getattr(svc, "BACKUP_DIR", base / "backups" / "system_health"))
+        if backup_dir.exists():
+            groups: dict[str, list[Path]] = {}
+            for item in backup_dir.glob("*.bak"):
+                source = item.name.split(".", 1)[0]
+                groups.setdefault(source, []).append(item)
+            for items in groups.values():
+                items.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                for old_file in items[3:]:
+                    try:
+                        old_file.unlink()
+                        removed += 1
+                    except Exception:
+                        pass
+        return {"ok": True, "message": f"安全修復完成，欄位檢查 {len(schema_rows)} 項；清理舊備份 {removed} 份", "repair": repair, "skipped": False}
     except Exception as exc:
         return {"ok": False, "message": f"安全修復失敗：{type(exc).__name__}: {exc}"}
 
 
-def step_stock_master(base: Path) -> dict[str, Any]:
+def _path_age_minutes(path: Path) -> float | None:
+    try:
+        return max(0.0, (time.time() - path.stat().st_mtime) / 60.0)
+    except Exception:
+        return None
+
+
+def _data_age_minutes(base: Path, file_name: str) -> tuple[float | None, str]:
+    path = base / file_name
+    ok, data, _ = read_json(path)
+    if ok:
+        updated_text = find_updated_at(data)
+        updated_dt = parse_dt(updated_text)
+        if updated_dt is not None:
+            return max(0.0, (datetime.now() - updated_dt).total_seconds() / 60.0), f"內容時間 {updated_text}"
+    age = _path_age_minutes(path)
+    return age, "檔案修改時間"
+
+
+def _fresh_files(base: Path, names: list[str], ttl_minutes: int) -> tuple[bool, str]:
+    ages = []
+    for name in names:
+        age, source = _data_age_minutes(base, name)
+        if age is None:
+            return False, f"{name} 不存在"
+        ages.append((name, age, source))
+    fresh = all(age <= max(0, ttl_minutes) for _, age, _ in ages)
+    desc = "、".join(f"{name} {age:.1f}分鐘（{source}）" for name, age, source in ages)
+    return fresh, desc
+
+
+def step_stock_master(base: Path, *, force: bool = False) -> dict[str, Any]:
+    fresh, desc = _fresh_files(base, ["stock_master_cache.json"], SOURCE_REFRESH_TTL_MINUTES["stock_master_cache.json"])
+    if fresh and not force:
+        ok, data, _ = read_json(base / "stock_master_cache.json")
+        count = len(data) if ok and isinstance(data, list) else 0
+        return {"ok": count >= 100, "message": f"股票主檔仍新鮮，略過外部重抓：{count} 筆｜{desc}", "skipped": True, "row_count": count}
     with pushd(base):
         svc = importlib.import_module("stock_master_service")
-        df, logs = svc.refresh_stock_master()
+        try:
+            df, logs = svc.refresh_stock_master(sync_github=False)
+        except TypeError:
+            df, logs = svc.refresh_stock_master()
     row_count = int(len(df)) if df is not None else 0
     ok = row_count >= 100
-    return {"ok": ok, "message": f"股票主檔更新完成：{row_count} 筆" if ok else f"股票主檔更新異常：{row_count} 筆", "logs": logs[-20:] if isinstance(logs, list) else logs, "row_count": row_count}
+    return {"ok": ok, "message": f"股票主檔更新完成：{row_count} 筆" if ok else f"股票主檔更新異常：{row_count} 筆", "logs": logs[-20:] if isinstance(logs, list) else logs, "row_count": row_count, "skipped": False}
 
 
-def step_macro(base: Path) -> dict[str, Any]:
+def step_macro(base: Path, *, force: bool = False) -> dict[str, Any]:
+    fresh, desc = _fresh_files(base, ["market_snapshot.json", "macro_mode_bridge.json"], SOURCE_REFRESH_TTL_MINUTES["market_snapshot.json"])
+    if fresh and not force:
+        return {"ok": True, "message": f"大盤快照仍新鮮，略過網路抓取｜{desc}", "skipped": True}
     with pushd(base):
         svc = importlib.import_module("macro_startup_service")
         if hasattr(svc, "_run_fast_update"):
-            result = svc._run_fast_update(sync_github=True)
+            result = svc._run_fast_update(sync_github=False)
         else:
             result = svc.ensure_macro_startup_update(ttl_seconds=0)
     ok = bool(result.get("ok")) if isinstance(result, dict) else False
     msg = str(result.get("message") or result.get("short_message") or "大盤更新完成") if isinstance(result, dict) else "大盤更新完成"
-    return {"ok": ok, "message": msg, "result": result}
+    return {"ok": ok, "message": msg, "result": result, "skipped": False}
 
 
-def step_official_factors(base: Path, push_github: bool = True) -> dict[str, Any]:
+def step_official_factors(base: Path, push_github: bool = False, *, force: bool = False) -> dict[str, Any]:
+    fresh, desc = _fresh_files(base, ["official_factors_cache.json"], SOURCE_REFRESH_TTL_MINUTES["official_factors_cache.json"])
+    if fresh and not force:
+        ok, data, _ = read_json(base / "official_factors_cache.json")
+        count = len(iter_records(data)) if ok else 0
+        return {"ok": count > 0, "message": f"官方因子仍新鮮，略過外部重抓：{count} 筆｜{desc}", "skipped": True}
     with pushd(base):
         svc = importlib.import_module("godpick_system_health_service")
-        result = svc.run_official_factor_update_once(svc.load_schedule_settings(), push_github=push_github)
-    return {"ok": bool(result.get("ok")), "message": str(result.get("message", "官方因子更新完成")), "result": result}
+        # 手動的一鍵更新不應受「背景排程是否啟用」影響。排程開關只控制 GitHub/排程器，
+        # 使用者按下健康檢查的一鍵更新時，明確要求立即更新。
+        manual_cfg = dict(svc.load_schedule_settings() or {})
+        manual_cfg["enabled"] = True
+        result = svc.run_official_factor_update_once(manual_cfg, push_github=push_github)
+    return {"ok": bool(result.get("ok")), "message": str(result.get("message", "官方因子更新完成")), "result": result, "skipped": False}
 
 
 def step_watchlist(base: Path) -> dict[str, Any]:
@@ -581,16 +726,189 @@ def step_perf(base: Path, *, process_all: bool = False, max_records: int = 300, 
     with pushd(base):
         svc = importlib.import_module("godpick_perf_fast_update_v77")
         result = svc.update_recommendation_perf_fast_v77(
-            json_files=["godpick_records.json", "godpick_recommend_list.json"],
+            json_files=[
+                "godpick_latest_recommendations.json",
+                "godpick_recommend_list.json",
+                "godpick_records.json",
+                "godpick_calibration_samples.json",
+            ],
             max_records=int(max_records),
+            max_total_records=0 if process_all else int(max_records),
             batch_limit=int(batch_limit),
             max_workers=12,
             stale_minutes=int(stale_minutes),
             process_all=bool(process_all),
         )
     ok = isinstance(result, dict) and int(result.get("fail", 0) or 0) == 0
-    msg = f"績效更新：候選 {result.get('candidates', 0)} / 成功 {result.get('success', 0)} / 失敗 {result.get('fail', 0)} / 更新檔 {len(result.get('updated_files', []))}"
+    msg = (
+        f"最新推薦/清單/紀錄績效更新：候選 {result.get('candidates', 0)} / "
+        f"成功 {result.get('success', 0)} / 失敗 {result.get('fail', 0)} / "
+        f"更新檔 {len(result.get('updated_files', []))}"
+    )
     return {"ok": ok or int(result.get("success", 0) or 0) > 0 or int(result.get("candidates", 0) or 0) == 0, "message": msg, "result": result}
+
+
+def step_feedback_profile(base: Path) -> dict[str, Any]:
+    """重建績效回饋快取，讓 7/14 不必每次重新解析 20MB 紀錄。"""
+    with pushd(base):
+        svc = importlib.import_module("godpick_performance_feedback")
+        if hasattr(svc, "refresh_godpick_performance_profile"):
+            profile, cache_result = svc.refresh_godpick_performance_profile(
+                "godpick_records.json", "godpick_performance_profile.json"
+            )
+        else:
+            profile = svc.load_godpick_performance_profile("godpick_records.json")
+            cache_result = (True, "已重建績效回饋摘要")
+    quality = profile.get("data_quality", {}) if isinstance(profile, dict) else {}
+    baseline = profile.get("baseline", {}) if isinstance(profile, dict) else {}
+    sample = int(quality.get("trusted_records", baseline.get("sample", 0)) or 0)
+    win_rate = float(baseline.get("win_rate", 0) or 0) * 100.0
+    return {
+        "ok": bool(profile.get("available")) if isinstance(profile, dict) else False,
+        "message": f"績效回饋摘要完成：可信樣本 {sample} / 勝率 {win_rate:.1f}%｜{cache_result[1]}",
+        "profile_summary": {"可信樣本": sample, "勝率%": round(win_rate, 2), "資料品質": quality},
+    }
+
+
+def _latest_data_time(base: Path, file_name: str) -> datetime | None:
+    ok, data, _ = read_json(base / file_name)
+    if ok:
+        parsed = parse_dt(find_updated_at(data))
+        if parsed is not None:
+            return parsed
+    try:
+        return datetime.fromtimestamp((base / file_name).stat().st_mtime)
+    except Exception:
+        return None
+
+
+def step_recommendation_readiness(base: Path) -> dict[str, Any]:
+    """建立推薦前置資料新鮮度閘門，不偽造或自動覆蓋 7 頁掃描結果。"""
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, score: int, detail: str) -> None:
+        checks.append({"項目": name, "狀態": "OK" if ok else "需更新", "得分": score if ok else 0, "滿分": score, "說明": detail})
+
+    master_ok, master_data, master_err = read_json(base / "stock_master_cache.json")
+    master_count = len(master_data) if master_ok and isinstance(master_data, list) else 0
+    master_age, _ = _data_age_minutes(base, "stock_master_cache.json")
+    add("股票主檔", master_count >= 1000 and (master_age is not None and master_age <= 10080), 15, f"{master_count}筆 / 檔案年齡 {master_age:.0f} 分鐘" if master_age is not None else master_err)
+
+    macro_age, _ = _data_age_minutes(base, "market_snapshot.json")
+    macro_ok = macro_age is not None and macro_age <= 1440
+    add("大盤快照", macro_ok, 20, f"檔案年齡 {macro_age:.0f} 分鐘" if macro_age is not None else "不存在")
+
+    official_ok, official_data, official_err = read_json(base / "official_factors_cache.json")
+    official_rows = iter_records(official_data) if official_ok else []
+    official_age, _ = _data_age_minutes(base, "official_factors_cache.json")
+    add("官方因子", len(official_rows) >= 1000 and official_age is not None and official_age <= 4320, 20, f"{len(official_rows)}筆 / 檔案年齡 {official_age:.0f} 分鐘" if official_age is not None else official_err)
+
+    records_ok, records_data, records_err = read_json(base / "godpick_records.json")
+    records = iter_records(records_data) if records_ok else []
+    perf_ready = 0
+    for row in records[-500:]:
+        if any(not is_blank_value(row.get(c)) for c in ["推薦後1日%", "可執行交易1日%", "隔日執行命中結果"]):
+            perf_ready += 1
+    add("推薦績效樣本", len(records) >= 50 and perf_ready >= 20, 20, f"紀錄 {len(records)}筆 / 近500筆有效績效 {perf_ready}筆" if records_ok else records_err)
+
+    profile_ok, profile_data, profile_err = read_json(base / "godpick_performance_profile.json")
+    profile = profile_data.get("profile", {}) if isinstance(profile_data, dict) else {}
+    trusted = int((profile.get("data_quality") or {}).get("trusted_records", 0) or 0) if isinstance(profile, dict) else 0
+    add("績效回饋模型", profile_ok and bool(profile.get("available")) and trusted >= 10, 15, f"可信樣本 {trusted}" if profile_ok else profile_err)
+
+    latest_ok, latest_data, latest_err = read_json(base / "godpick_latest_recommendations.json")
+    latest_rows = iter_records(latest_data) if latest_ok else []
+    rec_time = parse_dt(find_updated_at(latest_data)) if latest_ok else None
+    dep_times = [x for x in [
+        _latest_data_time(base, "market_snapshot.json"),
+        _latest_data_time(base, "official_factors_cache.json"),
+        _latest_data_time(base, "godpick_records.json"),
+    ] if x is not None]
+    dependency_time = max(dep_times) if dep_times else None
+    scan_current = bool(rec_time and dependency_time and rec_time >= dependency_time)
+    add("最新推薦掃描", bool(latest_rows) and scan_current, 10, f"推薦 {len(latest_rows)}筆 / 保存 {rec_time} / 依賴最新 {dependency_time}" if latest_ok else latest_err)
+
+    total = sum(int(x["得分"]) for x in checks)
+    full = sum(int(x["滿分"]) for x in checks)
+    if total >= 85 and scan_current:
+        status = "READY｜資料與推薦結果皆可用"
+        action = "可直接檢視推薦；下單仍須依觸發價與守價。"
+    elif total >= 70:
+        status = "RESCAN｜前置資料已足夠，需到 7 頁重新推薦"
+        action = "一鍵更新完成後，請在 7_股神推薦按重新推薦，讓新大盤與官方因子重算排名。"
+    else:
+        status = "BLOCK｜前置資料不足，禁止宣稱精準正式推薦"
+        action = "先處理需更新項目；系統只能顯示研究雷達。"
+    payload = {
+        "version": GLOBAL_UPDATE_VERSION,
+        "updated_at": now_text(),
+        "score": total,
+        "full_score": full,
+        "status": status,
+        "recommended_action": action,
+        "checks": checks,
+    }
+    write_json(base / RECOMMENDATION_READINESS_FILE.name, payload)
+    return {"ok": total >= 70, "message": f"推薦就緒度 {total}/{full}｜{status}", "readiness": payload}
+
+
+def step_invalidate_runtime_caches(base: Path, changed_files: list[str] | None = None) -> dict[str, Any]:
+    removed: list[str] = []
+    for rel in [
+        "data/godpick_records_normalized_v165.pkl",
+        "data/godpick_records_normalized_v165.pkl.tmp",
+    ]:
+        path = base / rel
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(rel)
+        except Exception:
+            pass
+    try:
+        cache_mod = importlib.import_module("godpick_runtime_cache")
+        cache_mod.clear_runtime_cache()
+    except Exception:
+        pass
+    token = {
+        "version": GLOBAL_UPDATE_VERSION,
+        "updated_at": now_text(),
+        "token": hashlib.sha256(f"{time.time_ns()}|{changed_files}".encode("utf-8")).hexdigest()[:24],
+        "changed_files": sorted(set(changed_files or [])),
+        "instruction": "各頁 st.cache_data 已由 17 頁清除；頁面開啟後依最新 JSON 重算表格。",
+    }
+    write_json(base / GLOBAL_REFRESH_TOKEN_FILE.name, token)
+    return {"ok": True, "message": f"已刷新全模組運算快取；移除 {len(removed)} 個舊衍生快取", "removed": removed, "token": token}
+
+
+def _background_github_sync(base: Path, include_stock_master: bool, include_official: bool) -> None:
+    def worker() -> None:
+        with pushd(base):
+            if include_stock_master:
+                try:
+                    svc = importlib.import_module("stock_master_service")
+                    df = svc.load_stock_master()
+                    if df is not None and not df.empty and hasattr(svc, "_save_master_cache_to_repo"):
+                        svc._save_master_cache_to_repo(df, sync_github=True)
+                except Exception:
+                    pass
+            if include_official:
+                try:
+                    svc = importlib.import_module("official_factor_service")
+                    svc.push_cache_to_github()
+                except Exception:
+                    pass
+    threading.Thread(target=worker, name="godpick-global-github-sync", daemon=True).start()
+
+
+def step_background_backup(base: Path, *, stock_master: bool, official: bool, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return {"ok": True, "message": "GitHub 背景備份未啟用", "skipped": True}
+    if not stock_master and not official:
+        return {"ok": True, "message": "本次股票主檔與官方因子均未重抓，不需重複 GitHub 備份", "skipped": True}
+    _background_github_sync(base, stock_master, official)
+    targets = "、".join(x for x, enabled_flag in [("股票主檔", stock_master), ("官方因子", official)] if enabled_flag)
+    return {"ok": True, "message": f"本機更新已完成；{targets} GitHub 備份已排入背景，不阻塞按鈕", "queued": True, "targets": targets}
 
 
 def step_health_snapshot(base: Path) -> dict[str, Any]:
@@ -602,7 +920,7 @@ def load_global_update_settings(base_dir: Path | None = None) -> dict[str, Any]:
     base = Path(base_dir or BASE_DIR)
     ok, data, _ = read_json(base / GLOBAL_UPDATE_SETTINGS_FILE.relative_to(BASE_DIR))
     defaults = {
-        "version": "v140",
+        "version": GLOBAL_UPDATE_VERSION,
         "updated_at": "",
         "update_stock_master": True,
         "update_macro": True,
@@ -615,6 +933,9 @@ def load_global_update_settings(base_dir: Path | None = None) -> dict[str, Any]:
         "batch_limit": 80,
         "stale_minutes": 30,
         "push_github": True,
+        "force_source_refresh": False,
+        "rebuild_feedback_profile": True,
+        "invalidate_runtime_caches": True,
     }
     if isinstance(data, dict):
         defaults.update(data)
@@ -629,41 +950,116 @@ def save_global_update_settings(settings: dict[str, Any], base_dir: Path | None 
     return write_json(base / GLOBAL_UPDATE_SETTINGS_FILE.relative_to(BASE_DIR), payload)
 
 
-def run_global_update(base_dir: Path | None = None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_global_update(
+    base_dir: Path | None = None,
+    settings: dict[str, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any], list[dict[str, Any]]], None] | None = None,
+) -> dict[str, Any]:
     base = Path(base_dir or BASE_DIR)
     cfg = load_global_update_settings(base)
     if settings:
         cfg.update(settings)
+
+    # 防止連點造成兩個全域更新同時覆寫相同 JSON。
+    try:
+        if GLOBAL_UPDATE_LOCK_FILE.exists() and time.time() - GLOBAL_UPDATE_LOCK_FILE.stat().st_mtime < 7200:
+            return {
+                "version": GLOBAL_UPDATE_VERSION,
+                "updated_at": now_text(),
+                "settings": cfg,
+                "steps": [],
+                "ok": False,
+                "message": "已有一鍵更新正在執行；請勿重複點擊。若確認沒有執行，可等待鎖定逾時或重新啟動服務。",
+            }
+        GLOBAL_UPDATE_LOCK_FILE.write_text(now_text(), encoding="utf-8")
+    except Exception:
+        pass
+
     steps: list[dict[str, Any]] = []
+    changed_files: list[str] = []
 
-    steps.append(run_step("1. 核心檔案與永久設定檢查", lambda: step_core_files(base)))
-    if cfg.get("repair_schema", True):
-        steps.append(run_step("2. 安全補欄/補缺檔", lambda: step_repair_schema(base)))
-    if cfg.get("update_stock_master", True):
-        steps.append(run_step("3. 股票主檔更新", lambda: step_stock_master(base)))
-    if cfg.get("update_macro", True):
-        steps.append(run_step("4. 大盤快照與股神橋接更新", lambda: step_macro(base)))
-    if cfg.get("update_official_factors", True):
-        steps.append(run_step("5. 官方因子快取更新", lambda: step_official_factors(base, push_github=bool(cfg.get("push_github", True)))))
-    if cfg.get("update_watchlist_runtime", True):
-        steps.append(run_step("6. 自選股 runtime 同步", lambda: step_watchlist(base)))
-    if cfg.get("update_performance", True):
-        steps.append(run_step("7. 推薦紀錄/推薦清單最新價與績效更新", lambda: step_perf(
+    def add(name: str, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        row = run_step(name, fn)
+        steps.append(row)
+        detail = row.get("明細") if isinstance(row.get("明細"), dict) else {}
+        result = detail.get("result") if isinstance(detail, dict) else {}
+        if isinstance(result, dict):
+            changed_files.extend([str(x) for x in result.get("updated_files", [])])
+        if callable(progress_callback):
+            try:
+                progress_callback(row, list(steps))
+            except Exception:
+                pass
+        return row
+
+    force = bool(cfg.get("force_source_refresh", False))
+    stock_master_changed = False
+    official_changed = False
+    try:
+        add("1. 核心檔案與永久設定檢查", lambda: step_core_files(base))
+        if cfg.get("repair_schema", True):
+            add("2. 安全補欄/補缺檔", lambda: step_repair_schema(base))
+        if cfg.get("update_stock_master", True):
+            _row = add("3. 股票主檔智慧更新", lambda: step_stock_master(base, force=force))
+            _detail = _row.get("明細", {}) if isinstance(_row.get("明細"), dict) else {}
+            stock_master_changed = _row.get("狀態") == "OK" and not bool(_detail.get("skipped"))
+            if stock_master_changed:
+                changed_files.append("stock_master_cache.json")
+        if cfg.get("update_macro", True):
+            _row = add("4. 大盤快照與股神橋接智慧更新", lambda: step_macro(base, force=force))
+            _detail = _row.get("明細", {}) if isinstance(_row.get("明細"), dict) else {}
+            if _row.get("狀態") == "OK" and not bool(_detail.get("skipped")):
+                changed_files.extend(["market_snapshot.json", "macro_mode_bridge.json", "macro_trend_records.json"])
+        if cfg.get("update_official_factors", True):
+            _row = add("5. 官方因子快取智慧更新", lambda: step_official_factors(base, push_github=False, force=force))
+            _detail = _row.get("明細", {}) if isinstance(_row.get("明細"), dict) else {}
+            official_changed = _row.get("狀態") == "OK" and not bool(_detail.get("skipped"))
+            if official_changed:
+                changed_files.extend(["official_factors_cache.json", "official_factors_update_log.json"])
+        if cfg.get("update_watchlist_runtime", True):
+            _row = add("6. 自選股 runtime 同步", lambda: step_watchlist(base))
+            if _row.get("狀態") == "OK":
+                changed_files.extend(["watchlist_runtime_snapshot.json", "watchlist_normalized.json"])
+        if cfg.get("update_performance", True):
+            add("7. 最新推薦/推薦清單/推薦紀錄價格與績效更新", lambda: step_perf(
+                base,
+                process_all=bool(cfg.get("process_all_performance", False)),
+                max_records=int(cfg.get("max_records", 300) or 300),
+                batch_limit=int(cfg.get("batch_limit", 80) or 80),
+                stale_minutes=int(cfg.get("stale_minutes", 30) or 30),
+            ))
+        if cfg.get("rebuild_feedback_profile", True):
+            _row = add("8. 重建績效回饋與精準度摘要", lambda: step_feedback_profile(base))
+            if _row.get("狀態") == "OK":
+                changed_files.append("godpick_performance_profile.json")
+        add("9. 股神推薦前置資料就緒度檢查", lambda: step_recommendation_readiness(base))
+        changed_files.append("godpick_recommendation_readiness.json")
+        if cfg.get("invalidate_runtime_caches", True):
+            add("10. 清除舊表格運算快取並發布刷新版本", lambda: step_invalidate_runtime_caches(base, changed_files))
+        add("11. GitHub 非阻塞背景備份", lambda: step_background_backup(
             base,
-            process_all=bool(cfg.get("process_all_performance", False)),
-            max_records=int(cfg.get("max_records", 300) or 300),
-            batch_limit=int(cfg.get("batch_limit", 80) or 80),
-            stale_minutes=int(cfg.get("stale_minutes", 30) or 30),
-        )))
-    steps.append(run_step("8. 全模組資料狀態複檢", lambda: step_health_snapshot(base)))
+            stock_master=stock_master_changed,
+            official=official_changed,
+            enabled=bool(cfg.get("push_github", True)),
+        ))
+        add("12. 全模組資料狀態複檢", lambda: step_health_snapshot(base))
 
-    payload = {
-        "version": "v140",
-        "updated_at": now_text(),
-        "settings": cfg,
-        "steps": steps,
-        "ok": all(s.get("狀態") == "OK" for s in steps if not str(s.get("步驟", "")).startswith("8.")),
-    }
-    write_json(base / GLOBAL_UPDATE_STATUS_FILE.name, payload)
-    save_global_update_settings(cfg, base)
-    return payload
+        payload = {
+            "version": GLOBAL_UPDATE_VERSION,
+            "updated_at": now_text(),
+            "settings": cfg,
+            "steps": steps,
+            "changed_files": sorted(set(changed_files)),
+            "ok": all(s.get("狀態") == "OK" for s in steps if not str(s.get("步驟", "")).startswith("12.")),
+        }
+        readiness_ok, readiness, _ = read_json(base / RECOMMENDATION_READINESS_FILE.name)
+        if readiness_ok:
+            payload["recommendation_readiness"] = readiness
+        write_json(base / GLOBAL_UPDATE_STATUS_FILE.name, payload)
+        save_global_update_settings(cfg, base)
+        return payload
+    finally:
+        try:
+            GLOBAL_UPDATE_LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 
 
@@ -1856,7 +1856,22 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
 
 
 
+def _recommend_sources_signature_v171() -> str:
+    parts = []
+    for name in ["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"]:
+        try:
+            stat = Path(name).stat()
+            parts.append(f"{name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except Exception:
+            parts.append(f"{name}:missing")
+    return "|".join(parts)
+
+
 def _load_records_cached(force: bool = False) -> pd.DataFrame:
+    current_sig = _recommend_sources_signature_v171()
+    last_sig = _safe_str(st.session_state.get(_k("records_source_sig_v171")))
+    if current_sig != last_sig:
+        force = True
     if force or _k("records_df") not in st.session_state:
         frames = []
         details = []
@@ -1909,6 +1924,7 @@ def _load_records_cached(force: bool = False) -> pd.DataFrame:
         st.session_state[_k("load_msg")] = "｜".join(details)
         st.session_state[_k("load_detail")] = details
         st.session_state[_k("loaded_at")] = _now_text()
+        st.session_state[_k("records_source_sig_v171")] = current_sig
     rec = st.session_state.get(_k("records_df"), pd.DataFrame(columns=GODPICK_RECORD_COLUMNS))
     return _ensure_record_columns(rec)
 

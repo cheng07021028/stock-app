@@ -936,11 +936,22 @@ def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
     return _normalize_master_df(work)
 
 
-def _save_master_cache_to_repo(master_df: pd.DataFrame) -> tuple[bool, str]:
+def _save_master_cache_to_repo(master_df: pd.DataFrame, *, sync_github: bool = True) -> tuple[bool, str]:
+    """V171：股票主檔先原子保存本機，再選擇是否同步 GitHub。
+
+    全域一鍵更新使用 local-first，避免使用者等待 GitHub 網路；9_股票主檔更新
+    仍沿用 sync_github=True 的完整永久同步。
+    """
     cfg = _stock_master_config()
     work = _normalize_master_df(master_df)
     payload = work.sort_values(["market", "code"]).to_dict(orient="records")
-    return _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
+    local_ok, local_msg = _write_json_to_local(cfg["master_path"], payload)
+    if not local_ok:
+        return False, local_msg
+    if not sync_github:
+        return True, local_msg + "｜GitHub 改由全域更新背景備份"
+    remote_ok, remote_msg = _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
+    return bool(local_ok and remote_ok), local_msg + "｜" + remote_msg
 
 
 def _save_category_override(code: str, name: str, market: str, category: str) -> tuple[bool, str]:
@@ -1018,7 +1029,7 @@ def _build_live_master_df() -> tuple[pd.DataFrame, list[str], dict[str, Any], di
     return merged, logs, base_info, yahoo_info
 
 
-def refresh_stock_master() -> tuple[pd.DataFrame, list[str]]:
+def refresh_stock_master(*, sync_github: bool = True) -> tuple[pd.DataFrame, list[str]]:
     try:
         _fetch_yahoo_profile_fill.clear()
     except Exception:
@@ -1034,7 +1045,7 @@ def refresh_stock_master() -> tuple[pd.DataFrame, list[str]]:
     fresh_df, logs, _, yahoo_info = _build_live_master_df()
     if fresh_df.empty:
         return fresh_df, logs + ["主檔更新失敗：正式股票清單為空。"]
-    ok, msg = _save_master_cache_to_repo(fresh_df)
+    ok, msg = _save_master_cache_to_repo(fresh_df, sync_github=sync_github)
     logs.append(msg)
     if ok:
         try:
