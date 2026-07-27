@@ -27,7 +27,7 @@ GLOBAL_REFRESH_TOKEN_FILE = BASE_DIR / "godpick_global_refresh_token.json"
 RECOMMENDATION_READINESS_FILE = BASE_DIR / "godpick_recommendation_readiness.json"
 PERFORMANCE_PROFILE_FILE = BASE_DIR / "godpick_performance_profile.json"
 GLOBAL_UPDATE_LOCK_FILE = BASE_DIR / ".godpick_global_update.lock"
-GLOBAL_UPDATE_VERSION = "v171_existing_health_button_full_refresh_20260727"
+GLOBAL_UPDATE_VERSION = "v172_data_content_freshness_gate_20260727"
 
 CORE_REQUIRED_JSON_DEFAULTS: dict[str, Any] = {
     "market_snapshot.json": {},
@@ -320,6 +320,44 @@ def parse_dt(value: Any) -> datetime | None:
             return datetime.strptime(s[:19], fmt)
         except Exception:
             pass
+    return None
+
+
+def parse_content_date(value: Any) -> datetime | None:
+    """解析資料內容日期；支援官方常見 YYYYMMDD，避免被當成 Unix 奈秒。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    if len(text) == 8 and text.isdigit():
+        try:
+            return datetime.strptime(text, "%Y%m%d")
+        except Exception:
+            return None
+    return parse_dt(text)
+
+
+def latest_record_content_date(data: Any, fields: list[str]) -> datetime | None:
+    rows = iter_records(data)
+    best: datetime | None = None
+    for row in rows:
+        for field in fields:
+            parsed = parse_content_date(row.get(field))
+            if parsed is not None and (best is None or parsed > best):
+                best = parsed
+    return best
+
+
+def top_level_content_date(data: Any, fields: list[str]) -> datetime | None:
+    if not isinstance(data, dict):
+        return None
+    for field in fields:
+        parsed = parse_content_date(data.get(field))
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -794,14 +832,40 @@ def step_recommendation_readiness(base: Path) -> dict[str, Any]:
     master_age, _ = _data_age_minutes(base, "stock_master_cache.json")
     add("股票主檔", master_count >= 1000 and (master_age is not None and master_age <= 10080), 15, f"{master_count}筆 / 檔案年齡 {master_age:.0f} 分鐘" if master_age is not None else master_err)
 
+    latest_ok, latest_data, latest_err = read_json(base / "godpick_latest_recommendations.json")
+    latest_rows = iter_records(latest_data) if latest_ok else []
+    kline_date = latest_record_content_date(latest_data, [
+        "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
+    ]) if latest_ok else None
+
+    market_ok, market_data, market_err = read_json(base / "market_snapshot.json")
     macro_age, _ = _data_age_minutes(base, "market_snapshot.json")
-    macro_ok = macro_age is not None and macro_age <= 1440
-    add("大盤快照", macro_ok, 20, f"檔案年齡 {macro_age:.0f} 分鐘" if macro_age is not None else "不存在")
+    market_date = top_level_content_date(market_data, [
+        "data_date", "market_date", "twse_data_date", "otc_data_date"
+    ]) if market_ok else None
+    market_aligned = bool(kline_date is None or (market_date is not None and market_date.date() >= kline_date.date()))
+    macro_ok = bool(market_ok and macro_age is not None and macro_age <= 1440 and market_aligned)
+    add(
+        "大盤快照", macro_ok, 20,
+        f"內容日期 {market_date.date() if market_date else '未驗證'} / 推薦K線 {kline_date.date() if kline_date else '尚無'} / 檔案年齡 {macro_age:.0f} 分鐘"
+        if macro_age is not None else market_err or "不存在",
+    )
 
     official_ok, official_data, official_err = read_json(base / "official_factors_cache.json")
     official_rows = iter_records(official_data) if official_ok else []
     official_age, _ = _data_age_minutes(base, "official_factors_cache.json")
-    add("官方因子", len(official_rows) >= 1000 and official_age is not None and official_age <= 4320, 20, f"{len(official_rows)}筆 / 檔案年齡 {official_age:.0f} 分鐘" if official_age is not None else official_err)
+    official_date = latest_record_content_date(official_data, [
+        "官方資料日期", "官方因子資料日期", "三大法人資料日期", "法人資料日期"
+    ]) if official_ok else None
+    official_aligned = bool(kline_date is None or (official_date is not None and official_date.date() >= kline_date.date()))
+    official_ready = bool(
+        len(official_rows) >= 1000 and official_age is not None and official_age <= 4320 and official_aligned
+    )
+    add(
+        "官方因子", official_ready, 20,
+        f"{len(official_rows)}筆 / 內容日期 {official_date.date() if official_date else '未驗證'} / 推薦K線 {kline_date.date() if kline_date else '尚無'} / 檔案年齡 {official_age:.0f} 分鐘"
+        if official_age is not None else official_err,
+    )
 
     records_ok, records_data, records_err = read_json(base / "godpick_records.json")
     records = iter_records(records_data) if records_ok else []
@@ -816,8 +880,6 @@ def step_recommendation_readiness(base: Path) -> dict[str, Any]:
     trusted = int((profile.get("data_quality") or {}).get("trusted_records", 0) or 0) if isinstance(profile, dict) else 0
     add("績效回饋模型", profile_ok and bool(profile.get("available")) and trusted >= 10, 15, f"可信樣本 {trusted}" if profile_ok else profile_err)
 
-    latest_ok, latest_data, latest_err = read_json(base / "godpick_latest_recommendations.json")
-    latest_rows = iter_records(latest_data) if latest_ok else []
     rec_time = parse_dt(find_updated_at(latest_data)) if latest_ok else None
     dep_times = [x for x in [
         _latest_data_time(base, "market_snapshot.json"),
@@ -846,6 +908,11 @@ def step_recommendation_readiness(base: Path) -> dict[str, Any]:
         "full_score": full,
         "status": status,
         "recommended_action": action,
+        "content_dates": {
+            "推薦K線日期": kline_date.strftime("%Y-%m-%d") if kline_date else "",
+            "大盤內容日期": market_date.strftime("%Y-%m-%d") if market_date else "",
+            "官方因子內容日期": official_date.strftime("%Y-%m-%d") if official_date else "",
+        },
         "checks": checks,
     }
     write_json(base / RECOMMENDATION_READINESS_FILE.name, payload)

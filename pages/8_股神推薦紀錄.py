@@ -155,7 +155,9 @@ GOD_DECISION_V10_LINK_VERSION = "record_v10_entry_decision_v1_20260428"
 BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
-RECORD_SPEED_FIX_VERSION = "record_v157_fast_state_normalize_v1_20260614"
+RECORD_SPEED_FIX_VERSION = "record_v165_persistent_normalized_cache_no_discarded_formal_recalc_20260726"
+NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
+NORMALIZED_RECORD_CACHE_VERSION_V165 = "v165_20260726"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 MARKET_TREND_V38_LINK_VERSION = "record_market_trend_v76_practical_entry_fields_20260430"
 
@@ -1806,13 +1808,21 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
-    # V158：8頁紀錄/匯出同步正式推薦分區、可操作分與盤中雷達欄位。
-    # 只用既有欄位離線補算，不連網、不重跑推薦掃描、不寫 JSON，避免 7/8/10/14 欄位不同步。
-    try:
-        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
-        x = apply_formal_recommendation_engine(x)
-    except Exception:
-        pass
+    # V165：正式推薦引擎會新增一百多個欄位，但目前 8 頁紀錄 schema / 顯示欄位
+    # 並不保留其中任何欄位；舊版仍在每次首次載入 1,796 筆紀錄時完整重算，
+    # 實測單此步約 17 秒，最後又全部被 ordered_cols 丟棄。
+    # 僅當未來紀錄 schema 明確要求正式推薦欄位時才執行，功能需求一旦加入會自動恢復。
+    formal_record_fields_v165 = {
+        "正式推薦分區", "是否正式推薦", "操作許可", "股神推薦優先分",
+        "隔日觸發品質分", "隔日觸發品質判定", "紅燈觸發管制", "紅燈反轉首觸禁買", "大盤與K線對齊狀態",
+    }
+    requested_record_fields_v165 = set(UNIFIED_RECOMMEND_DISPLAY_COLUMNS or []) | set(GODPICK_RECORD_COLUMNS or [])
+    if formal_record_fields_v165 & requested_record_fields_v165:
+        try:
+            from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+            x = apply_formal_recommendation_engine(x)
+        except Exception:
+            pass
 
     # V98：補齊 07/10 夜間隔日股神欄位，讓歷史紀錄也能追蹤進場點/突破/停損/壓力。
     try:
@@ -1943,9 +1953,91 @@ def _records_local_signature() -> str:
 
 
 
+def _normalized_record_cache_path_v165() -> str:
+    try:
+        return project_path(NORMALIZED_RECORD_CACHE_FILE_V165) if callable(project_path) else NORMALIZED_RECORD_CACHE_FILE_V165
+    except Exception:
+        return NORMALIZED_RECORD_CACHE_FILE_V165
+
+
+def _load_normalized_record_cache_v165(source_signature: str) -> tuple[pd.DataFrame, str]:
+    """Load the trusted local runtime cache when the canonical JSON is unchanged.
+
+    JSON remains the authority.  The pickle only stores the already-normalized
+    DataFrame so new Streamlit sessions do not repeat hundreds of column
+    conversions/backfills.  File name includes the schema version, and the
+    canonical JSON mtime/size signature must match exactly.
+    """
+    path = _normalized_record_cache_path_v165()
+    try:
+        if not source_signature or not os.path.exists(path):
+            return pd.DataFrame(), "正規化快取不存在"
+        payload = pd.read_pickle(path)
+        if not isinstance(payload, dict):
+            return pd.DataFrame(), "正規化快取格式不符"
+        if _safe_str(payload.get("version")) != NORMALIZED_RECORD_CACHE_VERSION_V165:
+            return pd.DataFrame(), "正規化快取版本不同"
+        if _safe_str(payload.get("source_signature")) != _safe_str(source_signature):
+            return pd.DataFrame(), "正規化快取已過期"
+        cached_df = payload.get("dataframe")
+        if not isinstance(cached_df, pd.DataFrame) or cached_df.empty:
+            return pd.DataFrame(), "正規化快取無資料"
+        cached_df = _mark_normalized_records_v157(cached_df)
+        if not _is_normalized_records_v157(cached_df):
+            return pd.DataFrame(), "正規化快取驗證失敗"
+        return _copy_records_frame_v157(cached_df), f"正規化快取命中：{len(cached_df)} 筆"
+    except Exception as exc:
+        return pd.DataFrame(), f"正規化快取讀取失敗：{exc}"
+
+
+def _save_normalized_record_cache_v165(df: pd.DataFrame, source_signature: str) -> tuple[bool, str]:
+    """Atomically refresh the disposable local normalized cache."""
+    if not isinstance(df, pd.DataFrame) or df.empty or not source_signature:
+        return False, "正規化快取未寫入：資料或來源簽章為空"
+    path = _normalized_record_cache_path_v165()
+    tmp = f"{path}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        cache_df = _mark_normalized_records_v157(_copy_records_frame_v157(df))
+        pd.to_pickle(
+            {
+                "version": NORMALIZED_RECORD_CACHE_VERSION_V165,
+                "source_signature": _safe_str(source_signature),
+                "saved_at": _now_text(),
+                "dataframe": cache_df,
+            },
+            tmp,
+        )
+        os.replace(tmp, path)
+        return True, f"正規化快取已更新：{len(cache_df)} 筆"
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False, f"正規化快取寫入失敗：{exc}"
+
+
+def _remove_normalized_record_cache_v165() -> tuple[bool, str]:
+    path = _normalized_record_cache_path_v165()
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            return True, "正規化快取檔"
+        return True, "正規化快取檔（原本不存在）"
+    except Exception as exc:
+        return False, f"正規化快取檔清除失敗:{exc}"
+
+
 def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
+    source_signature = _records_local_signature()
+    cached_df, cached_msg = _load_normalized_record_cache_v165(source_signature)
+    if not cached_df.empty:
+        return cached_df, cached_msg
+
     rows: list[dict[str, Any]] = []
-    messages: list[str] = []
+    messages: list[str] = [cached_msg]
     for fn in LOCAL_RECORD_SOURCE_FILES:
         try:
             if callable(read_local_json):
@@ -1967,7 +2059,10 @@ def _read_records_from_local_files() -> tuple[pd.DataFrame, str]:
             messages.append(f"{fn}: 讀取失敗 {e}")
     if not rows:
         return pd.DataFrame(columns=GODPICK_RECORD_COLUMNS), "；".join(messages)
-    return _ensure_godpick_record_columns(pd.DataFrame(rows)), "；".join(messages)
+    normalized_df = _ensure_godpick_record_columns(pd.DataFrame(rows))
+    cache_ok, cache_msg = _save_normalized_record_cache_v165(normalized_df, source_signature)
+    messages.append(cache_msg)
+    return normalized_df, "；".join(messages)
 
 
 
@@ -1977,6 +2072,8 @@ def _write_records_to_local_file(df: pd.DataFrame) -> tuple[bool, str]:
         path = _github_config().get("path", "godpick_records.json") or "godpick_records.json"
         clean_df = _ensure_godpick_record_columns(df)
         ok, msg = _safe_json_write_local(path, clean_df.to_dict(orient="records"))
+        if ok:
+            _save_normalized_record_cache_v165(clean_df, _records_local_signature())
         return ok, msg.replace("UI 設定", "推薦紀錄")
     except Exception as e:
         return False, f"本機推薦紀錄寫入失敗：{e}"
@@ -2092,7 +2189,10 @@ def _save_records_dual(df: pd.DataFrame) -> bool:
     report = sync_func(clean_df, reason="page8 explicit save sync") if sync_func is save_records_sync_fast else sync_func(clean_df)
     elapsed = time.perf_counter() - started
     try:
-        st.session_state[_k("records_source_sig")] = _records_local_signature()
+        current_sig_v165 = _records_local_signature()
+        st.session_state[_k("records_source_sig")] = current_sig_v165
+        if bool(getattr(report, "local_ok", False)):
+            _save_normalized_record_cache_v165(clean_df, current_sig_v165)
     except Exception:
         pass
     details = report.messages()
@@ -2203,6 +2303,11 @@ def _save_records_mutation_fast_ui(
         # V162：表格 mutation 以本機原子寫入是否成功決定畫面是否切換。
         # 遠端 Firestore/GitHub 失敗或排隊中會在同步明細顯示，但不再讓刪除按鈕無限等待、也不讓已刪資料留在畫面。
         local_ok = bool(getattr(report, "local_ok", False))
+        if local_ok:
+            try:
+                _save_normalized_record_cache_v165(clean_df, _records_local_signature())
+            except Exception:
+                pass
         st.session_state[_k("last_mutation_local_ok")] = local_ok
         st.session_state[_k("last_mutation_permanent_ok")] = bool(getattr(report, "permanent_ok", False))
         return local_ok
@@ -2474,8 +2579,8 @@ def _read_ui_config_from_github() -> tuple[dict[str, Any], str]:
         return copy.deepcopy(UI_CONFIG_DEFAULT), f"UI 設定 GitHub 讀取例外：{e}"
 
 
-def _get_ui_config_sha() -> tuple[str, str]:
-    cfg = _ui_config_github_config()
+def _get_ui_config_sha(cfg_override: dict[str, str] | None = None) -> tuple[str, str]:
+    cfg = dict(cfg_override) if isinstance(cfg_override, dict) else _ui_config_github_config()
     token = cfg["token"]
     if not token:
         return "", "缺少 GITHUB_TOKEN"
@@ -2495,13 +2600,13 @@ def _get_ui_config_sha() -> tuple[str, str]:
         return "", f"讀取 UI 設定 SHA 例外：{e}"
 
 
-def _write_ui_config_to_github(payload: dict[str, Any]) -> tuple[bool, str]:
-    cfg = _ui_config_github_config()
+def _write_ui_config_to_github(payload: dict[str, Any], cfg_override: dict[str, str] | None = None) -> tuple[bool, str]:
+    cfg = dict(cfg_override) if isinstance(cfg_override, dict) else _ui_config_github_config()
     token = cfg["token"]
     if not token:
         return False, "未設定 GITHUB_TOKEN，無法回寫 UI 設定"
 
-    sha, err = _get_ui_config_sha()
+    sha, err = _get_ui_config_sha(cfg)
     if err:
         return False, err
 
@@ -2531,23 +2636,36 @@ def _write_ui_config_to_github(payload: dict[str, Any]) -> tuple[bool, str]:
         return False, f"UI 設定 GitHub 寫入例外：{e}"
 
 
+@st.cache_resource(show_spinner=False)
+def _page08_ui_sync_executor():
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-page08-ui")
+
+
+def _queue_ui_config_github_sync(payload: dict[str, Any]) -> tuple[bool, str]:
+    cfg = _ui_config_github_config()
+    if not _safe_str(cfg.get("token")):
+        return False, "未設定 GITHUB_TOKEN，UI 設定已保存在本機"
+    try:
+        _page08_ui_sync_executor().submit(_write_ui_config_to_github, copy.deepcopy(payload), dict(cfg))
+        return True, "GitHub UI 設定背景同步已排程"
+    except Exception as exc:
+        return False, f"GitHub UI 設定背景同步排程失敗：{exc}"
+
+
 def _load_ui_config_once():
     if st.session_state.get(_k("ui_config_loaded"), False):
         return
 
-    github_payload, err = _read_ui_config_from_github()
-    local_payload = _safe_json_read_local(_ui_config_github_config()["path"], {})
-
-    github_payload = _normalize_ui_config(github_payload)
-    local_payload = _normalize_ui_config(local_payload) if isinstance(local_payload, dict) and local_payload else {}
-
-    # GitHub 舊資料不應覆蓋本機剛保存的欄位順序；有時間戳時取較新，無本機才用 GitHub。
-    if local_payload and (_config_ts(local_payload) >= _config_ts(github_payload)):
+    # V164：本機存在時立即使用，不在進頁或任意按鈕 rerun 等待 GitHub GET。
+    local_raw = _safe_json_read_local(_ui_config_github_config()["path"], {})
+    local_payload = _normalize_ui_config(local_raw) if isinstance(local_raw, dict) and local_raw else {}
+    if local_payload:
         payload = local_payload
-        detail = "已讀取本機 UI 設定；" + (err or "GitHub UI 設定也可讀取")
+        detail = "V164 本機優先：已立即讀取 UI 設定，未等待 GitHub。"
     else:
-        payload = github_payload
-        detail = err or "GitHub UI 設定讀取成功"
+        github_payload, err = _read_ui_config_from_github()
+        payload = _normalize_ui_config(github_payload)
+        detail = err or "本機尚無設定，已從 GitHub 初始化 UI 設定"
 
     payload = _normalize_ui_config(payload)
     st.session_state[_k("ui_config_loaded")] = True
@@ -2555,6 +2673,7 @@ def _load_ui_config_once():
     st.session_state[_k("ui_config")] = copy.deepcopy(payload)
     st.session_state[_k("fast_mode")] = bool(payload.get("fast_mode", True))
     st.session_state[_k("visible_limit")] = int(payload.get("visible_limit", FAST_VISIBLE_LIMIT))
+    st.session_state[_k("ui_last_auto_sig")] = f"{bool(payload.get('fast_mode', True))}|{int(payload.get('visible_limit', FAST_VISIBLE_LIMIT))}"
     for mode in ["標準", "進階"]:
         st.session_state[_get_profile_key(mode)] = payload.get("profiles", {}).get(mode, _get_default_col_profile(mode)).copy()
 
@@ -2572,7 +2691,7 @@ def _persist_ui_config() -> tuple[bool, str]:
     payload = _normalize_ui_config(payload)
     st.session_state[_k("ui_config")] = copy.deepcopy(payload)
     local_ok, local_msg = _safe_json_write_local(_ui_config_github_config()["path"], payload)
-    github_ok, github_msg = _write_ui_config_to_github(payload)
+    github_ok, github_msg = _queue_ui_config_github_sync(payload)
     msg = f"{local_msg}｜{github_msg}"
     st.session_state[_k("ui_save_detail")] = msg
     st.session_state[_k("ui_last_saved_at")] = _now_text()
@@ -4602,7 +4721,7 @@ def _build_filtered_view_df(
     sort_by: str,
     sort_asc: bool,
 ) -> pd.DataFrame:
-    view_df = df.copy()
+    view_df = df.copy(deep=False)
 
     if keyword:
         mask = (
@@ -4610,20 +4729,20 @@ def _build_filtered_view_df(
             | view_df["股票名稱"].astype(str).str.contains(keyword, case=False, na=False)
             | view_df["推薦理由摘要"].astype(str).str.contains(keyword, case=False, na=False)
         )
-        view_df = view_df[mask].copy()
+        view_df = view_df.loc[mask]
 
     if mode_filter != "全部":
-        view_df = view_df[view_df["推薦模式"].astype(str) == mode_filter].copy()
+        view_df = view_df.loc[view_df["推薦模式"].astype(str) == mode_filter]
 
     if category_filter != "全部":
-        view_df = view_df[view_df["類別"].astype(str) == category_filter].copy()
+        view_df = view_df.loc[view_df["類別"].astype(str) == category_filter]
 
     if status_filter != "全部":
-        view_df = view_df[view_df["目前狀態"].astype(str) == status_filter].copy()
+        view_df = view_df.loc[view_df["目前狀態"].astype(str) == status_filter]
 
     if bought_filter != "全部":
         target_bool = bought_filter == "是"
-        view_df = view_df[view_df["是否已實際買進"].fillna(False).map(_normalize_bool) == target_bool].copy()
+        view_df = view_df.loc[view_df["是否已實際買進"].fillna(False).map(_normalize_bool) == target_bool]
 
     if sort_by in view_df.columns:
         view_df = view_df.sort_values(sort_by, ascending=sort_asc, na_position="last")
@@ -4673,15 +4792,14 @@ def _get_editor_df(view_df: pd.DataFrame, use_cols: list[str], fast_mode: bool, 
             safe_cols.append(c)
             seen.add(c)
 
-    src = view_df[safe_cols].copy()
+    # V164：先截列、後選欄；舊版先複製 1,796 x 130~150 欄後才 head(500)，
+    # 每次按鈕 rerun 都製造大型暫存 DataFrame。
+    total_rows = len(view_df)
+    truncated = bool(fast_mode and total_rows > visible_limit)
+    row_source = view_df.head(visible_limit) if truncated else view_df
+    src = row_source.loc[:, safe_cols].copy()
     # Streamlit data_editor 不允許重複欄位名稱；這裡再保險清除一次。
     src = src.loc[:, ~src.columns.duplicated()].copy()
-    truncated = False
-    total_rows = len(src)
-
-    if fast_mode and total_rows > visible_limit:
-        src = src.head(visible_limit).copy()
-        truncated = True
 
     # v73：主表畫面不要直接露出 None；修正文字訊息欄被誤轉數值，並自動回補常用說明。
     # 只影響畫面 editor_df，不會刪除 live_df / JSON 內的原始欄位。
@@ -5707,6 +5825,8 @@ def main():
                     cleared.append("本機績效快取檔")
                 except Exception as e:
                     cleared.append(f"本機績效快取檔清除失敗:{e}")
+                cache_ok_v165, cache_msg_v165 = _remove_normalized_record_cache_v165()
+                cleared.append(cache_msg_v165)
                 _invalidate_analysis_cache()
                 msg = "快取已清除：" + "、".join(cleared)
                 _set_status(msg, "success")
@@ -5717,20 +5837,21 @@ def main():
                 _add_action_result("清除快取", False, msg)
             st.rerun()
     with top_cols[4]:
-        batch_n = st.number_input("績效每批筆數（會跑完整份）", min_value=20, max_value=500, value=80, step=10, key=_k("perf_update_batch_size"))
+        batch_n = st.number_input("增量更新最多掃描筆數", min_value=20, max_value=2000, value=300, step=20, key=_k("perf_update_batch_size"))
         perf_seconds = st.number_input("單批秒數上限", min_value=30, max_value=150, value=60, step=15, key=_k("perf_update_seconds"))
         max_stock_n = st.number_input("績效每批股票數", min_value=3, max_value=80, value=30, step=1, key=_k("perf_update_stock_limit"))
-        st.caption("V160：會同步更新正式推薦紀錄與獨立校正研究樣本；數字是每批處理量，不是總上限。市場漏選樣本只做召回率診斷，不混入正式績效。")
+        perf_force_full = st.toggle("完整重算全部紀錄（較慢）", value=False, key=_k("perf_force_full_v164"))
+        st.caption("V164：預設只更新最近範圍內缺資料／過期資料；需要稽核全檔時再開啟完整重算。完整功能保留，但日常按鈕不再每次掃過全部檔案。")
         if st.button("🧮 更新推薦後績效", use_container_width=True):
             try:
                 with st.spinner("V104：快速防卡更新推薦後績效中，只更新缺資料 / 過期資料..."):
                     summary = update_recommendation_perf_fast_v77(
                         json_files=["godpick_records.json", "godpick_calibration_samples.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json"],
-                        max_records=0,
+                        max_records=0 if bool(perf_force_full) else int(batch_n),
                         batch_limit=int(max_stock_n),
                         max_workers=12,
                         stale_minutes=60,
-                        process_all=True,
+                        process_all=bool(perf_force_full),
                     )
                     calibration_sync_msg = ""
                     if callable(sync_existing_calibration_samples):
@@ -5750,7 +5871,7 @@ def main():
                         reload_msg = f"已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}"
 
                 msg = (
-                    f"V104 已完成完整份績效更新：候選 {summary.get('candidates', 0)} 筆，"
+                    f"V164 已完成{'完整' if bool(perf_force_full) else '增量'}績效更新：候選 {summary.get('candidates', 0)} 筆，"
                     f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
                     f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{calibration_sync_msg}"
                 )
@@ -5844,7 +5965,7 @@ def main():
             ana_tables, _, _, _ = _get_analysis_cache(live_df)
         return ana_tables
 
-    st.caption("V149 加速：診斷 / 夜間追蹤 / 官方因子 / 品質分析 / 分析頁籤改為需要時才運算；一般按鈕不再拖著全部報表重算。")
+    st.caption("V165 加速：紀錄 JSON 正規化結果以來源簽章建立本機可拋棄快取；新工作階段約可直接載入，不再重算被丟棄的正式推薦欄位。診斷 / 夜間追蹤 / 官方因子 / 品質分析仍採需要時才運算。")
 
     render_pro_kpi_row([
         {"label": "總筆數", "value": summary["count"], "delta": "推薦紀錄", "delta_class": "pro-kpi-delta-flat"},
@@ -5963,7 +6084,7 @@ def main():
                 st.session_state[_k("show_column_manager")] = not st.session_state.get(_k("show_column_manager"), False)
                 st.rerun()
         with opt_top[3]:
-            st.caption("快速模式開啟時，大表只先渲染前 N 筆；快速模式與顯示筆數也會永久保存到 GitHub。")
+            st.caption("快速模式開啟時，大表只先渲染前 N 筆；設定先存本機並在背景同步 GitHub，不阻塞目前操作。")
 
         auto_sig = f"{bool(fast_mode)}|{int(visible_limit)}"
         last_auto_sig = _safe_str(st.session_state.get(_k("ui_last_auto_sig")))
@@ -6012,7 +6133,7 @@ def main():
             use_cols = render_column_manager(
                 f"page08_godpick_record_total_{show_cols_mode}",
                 "推薦紀錄總表",
-                view_df[available_cols].copy() if available_cols else view_df.copy(),
+                view_df.loc[:, available_cols].head(1).copy() if available_cols else view_df.head(1).copy(),
                 default_profile_cols or available_cols,
             )
         except Exception:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_2_red_market_two_stage_confirmation_20260724"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_4_full_data_freshness_warning_20260727"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -111,9 +111,17 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "恐慌反彈領漲分",
     "恐慌反彈領漲判定",
     "大盤風控層級",
+    "官方因子資料日期",
+    "官方因子落後交易日",
+    "官方因子新鮮度",
     "大盤資料日期",
     "大盤資料落後交易日",
     "大盤資料新鮮度",
+    "大盤與K線對齊狀態",
+    "股神資料總新鮮度",
+    "股神資料警示",
+    "紅燈反轉首觸禁買",
+    "主流強勢替代進場",
     "大盤條件覆寫",
     "逆勢操作限制",
     "K線最後交易日",
@@ -371,7 +379,12 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
 
     # 個股資料與交易品質先獨立判斷；大盤只決定是否可以執行，
     # 不再把已達標個股直接從 A-/正式候選名單抹除。
-    base_data_ok = fresh and not hard and liq["tradable"]
+    official_freshness = _official_factor_freshness_info(row)
+    base_data_ok = (
+        fresh and not hard and liq["tradable"]
+        and bool(market.get("formal_ready"))
+        and bool(official_freshness.get("formal_ready"))
+    )
 
     formal_pullback = bool(
         base_data_ok and "回測" in _safe_str(readiness.get("path"))
@@ -462,6 +475,10 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         near_reasons.append("大盤紅燈：一般候選封鎖；只有嚴格反轉路徑可極小量")
     if not fresh:
         near_reasons.append("K線非最新交易日")
+    if not market.get("formal_ready"):
+        near_reasons.append(f"大盤因子未與K線對齊（落後{market.get('lag', 0)}交易日）")
+    if not official_freshness.get("formal_ready"):
+        near_reasons.append(f"官方因子未與K線對齊（{official_freshness.get('status', '日期未驗證')}）")
     near_reasons.extend(hard)
     if gap > 4.8:
         near_reasons.append(f"距可執行買點{gap:.1f}%")
@@ -576,6 +593,78 @@ def _business_day_lag(newer: pd.Timestamp | None, older: pd.Timestamp | None) ->
         return max(0, int((newer - older).days))
 
 
+def _official_factor_freshness_info(row: pd.Series) -> dict[str, Any]:
+    """檢查官方因子快取是否與本輪個股 K 線對齊。
+
+    只在有可驗證日期時做硬判定；舊版資料沒有日期時保留雷達，
+    但以「日期未驗證」警示，不得宣稱資料完整最新。
+    """
+    stock_date = _date_value(row, [
+        "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
+    ])
+    official_date = _date_value(row, [
+        "官方因子資料日期", "官方資料日期", "三大法人資料日期",
+        "官方因子更新時間_官方", "官方因子更新時間", "官方資料更新時間"
+    ])
+    lag = _business_day_lag(stock_date, official_date)
+    known = official_date is not None and stock_date is not None
+    aligned = bool(known and lag == 0)
+    one_day_lag = bool(known and lag == 1)
+    stale = bool(known and lag >= 2)
+    status_blob = _text_blob(row, ["官方因子資料狀態", "官方資料狀態", "資料完整度"])
+    explicit_stale = _contains_any(status_blob, ["過期", "嚴重落後", "待更新", "stale"])
+    stale = bool(stale or explicit_stale)
+    formal_ready = bool(aligned and not explicit_stale)
+    if aligned:
+        status = "最新/對齊"
+    elif one_day_lag:
+        status = "落後1日｜正式/A-待同步"
+    elif stale:
+        status = f"過期｜落後{lag}交易日" if known else "過期｜日期未驗證"
+    else:
+        status = "日期未驗證｜僅供雷達"
+    return {
+        "known": known,
+        "aligned": aligned,
+        "one_day_lag": one_day_lag,
+        "stale": stale,
+        "formal_ready": formal_ready,
+        "official_date": official_date.strftime("%Y-%m-%d") if official_date is not None else "",
+        "stock_date": stock_date.strftime("%Y-%m-%d") if stock_date is not None else "",
+        "lag": lag if known else 999,
+        "status": status,
+    }
+
+
+def _combined_data_freshness_info(row: pd.Series) -> dict[str, Any]:
+    market = _market_risk_info(row)
+    official = _official_factor_freshness_info(row)
+    kline = _history_freshness_info(row)
+    warnings: list[str] = []
+    if not kline.get("fresh"):
+        warnings.append(f"K線{kline.get('last_date') or '日期未驗證'}不是最新")
+    if not market.get("formal_ready"):
+        warnings.append(
+            f"大盤{market.get('market_date') or '日期未驗證'}／K線{market.get('stock_date') or '未知'}未對齊"
+        )
+    if official.get("known") and not official.get("formal_ready"):
+        warnings.append(
+            f"官方因子{official.get('official_date') or '未知'}落後K線{official.get('stock_date') or '未知'}"
+        )
+    elif not official.get("known"):
+        warnings.append("官方因子日期未驗證")
+    formal_ready = bool(kline.get("fresh") and market.get("formal_ready") and official.get("formal_ready"))
+    status = "READY｜K線/大盤/官方因子同交易日" if formal_ready else "WARNING｜資料未完全對齊，禁止正式/A-"
+    return {
+        "formal_ready": formal_ready,
+        "status": status,
+        "warning": "；".join(warnings),
+        "market": market,
+        "official": official,
+        "kline": kline,
+    }
+
+
 def _market_risk_info(row: pd.Series) -> dict[str, Any]:
     blob = _text_blob(row, [
         "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
@@ -589,7 +678,11 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
     stock_date = _date_value(row, ["本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"])
     lag = _business_day_lag(stock_date, market_date)
     freshness_text = _text_blob(row, ["大盤資料新鮮度", "大盤資料品質", "大盤資料診斷摘要"])
-    stale = bool(lag >= 2 or _contains_any(freshness_text, ["過期", "落後", "stale"]))
+    # 精準推薦必須使用與個股 K 線同一交易日的大盤/官方因子。
+    # 落後 1 個交易日仍可保留雷達，但不得標示「最新/可用」或升格正式/A-。
+    aligned = bool(market_date is not None and stock_date is not None and lag == 0)
+    one_day_lag = bool(lag == 1)
+    stale = bool(lag >= 2 or _contains_any(freshness_text, ["過期", "嚴重落後", "stale"]))
 
     severe = _contains_any(blob, ["紅燈", "空方", "全面防守", "禁止進攻", "風險急升"])
     defensive = severe or _contains_any(blob, ["防守", "保守", "震盪控風險", "不宜全面追價"])
@@ -608,7 +701,10 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         panic = False
         defensive = True
         score = 0.0
-        level = "黃燈｜大盤資料過期，主流高流動性條件式"
+        level = "黃燈｜大盤資料過期，僅保留主流條件雷達"
+    elif one_day_lag:
+        defensive = True
+        level = "資料黃燈｜大盤因子落後1交易日，正式/A-待同步"
     else:
         level = "極端風險｜全面禁買" if panic else "紅燈｜只准條件逆勢" if severe else "防守｜縮小倉位" if defensive else "一般｜依個股條件"
     return {
@@ -619,10 +715,22 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         "panic": panic,
         "level": level,
         "stale": stale,
+        "aligned": aligned,
+        "one_day_lag": one_day_lag,
+        "formal_ready": aligned,
         "market_date": market_date.strftime("%Y-%m-%d") if market_date is not None else "",
         "stock_date": stock_date.strftime("%Y-%m-%d") if stock_date is not None else "",
         "lag": lag,
-        "freshness": "過期｜不使用舊大盤硬封鎖" if stale else "最新/可用" if market_date is not None else "日期未驗證",
+        "freshness": (
+            "過期｜不使用舊大盤硬封鎖" if stale
+            else "落後1日｜正式推薦待同步" if one_day_lag
+            else "最新/對齊" if aligned
+            else "日期未驗證｜正式推薦待同步"
+        ),
+        "alignment_status": (
+            "PASS｜大盤與K線同交易日" if aligned
+            else f"WAIT｜大盤{market_date.strftime('%Y-%m-%d') if market_date is not None else '未知'}／K線{stock_date.strftime('%Y-%m-%d') if stock_date is not None else '未知'}"
+        ),
         "raw_severe": raw_severe,
         "raw_panic": raw_panic,
     }
@@ -718,6 +826,8 @@ def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
     ret5 = _num(row, "近5日漲幅%", 0)
     ret20 = _num(row, "近20日漲幅%", 0)
     vol_ratio = max(_num(row, "當日量比", 1), _num(row, "5日20日量比", 1))
+    washout_day = bool(ret1 <= -5.0)
+    crash_day = bool(ret1 <= -7.0)
     exhaustion = _clamp(_num(row, "隔日耗竭風險分", _exhaustion_profile(row)["score"]))
     stop = _stop_distance_pct(row)
     gap = min(99.0, max(0.0, _num(row, "觸發距離%", _num(row, "距最近可執行買點%", 99))))
@@ -728,6 +838,11 @@ def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
     score += 26.0 if upper >= 55 else 18.0 if upper >= 40 else 8.0 if upper >= 25 else 0.0
     score += 18.0 if close_pos < 45 else 10.0 if close_pos < 60 else 0.0
     score += 18.0 if ret1 >= 9.3 else 8.0 if ret1 >= 6.0 else 0.0
+    # 跌深反轉同樣是首觸高風險，不能因追價分低就被誤判為結構穩定。
+    score += 34.0 if crash_day else 22.0 if washout_day else 0.0
+    score += 18.0 if washout_day and close_pos < 60 else 0.0
+    score += 12.0 if washout_day and upper >= 30 else 0.0
+    score += 12.0 if washout_day and vol_ratio >= 2.2 else 0.0
     score += 14.0 if ret5 >= 12.0 else 7.0 if ret5 >= 8.0 else 0.0
     score += 12.0 if ret1 >= 8.0 and ret20 <= -10.0 else 0.0
     score += 22.0 if exhaustion >= 60 else 10.0 if exhaustion >= 40 else 0.0
@@ -746,9 +861,16 @@ def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
     score = _clamp(score)
 
     high_heat = bool(ret1 >= 9.3 or exhaustion >= 55 or (ret5 >= 12 and ret1 > 0))
-    block_breakout = bool(score >= 65 or high_heat)
+    washout_first_touch_block = bool(
+        washout_day and (crash_day or close_pos < 60 or upper >= 30 or vol_ratio >= 2.2 or gap > 4.5)
+    )
+    block_breakout = bool(score >= 65 or high_heat or washout_first_touch_block)
     two_stage = bool(score >= 40 or block_breakout)
-    if block_breakout:
+    leader_open_drive = bool(mainrise >= 80 and amount >= 500 and close_pos >= 65 and upper <= 35)
+    if washout_first_touch_block:
+        status = "BLOCK-R2｜跌深反轉首觸禁買"
+        requirement = "跌深反轉不得碰價即買；需先站穩觸發價至少15分鐘，再回測守價不破或出現二次突破，才可極小量評估。"
+    elif block_breakout:
         status = "BLOCK-F｜紅燈禁止碰價追突破"
         requirement = "禁止碰價即買；只接受先回測守價，再重新突破，或連續3根5分K/至少15分鐘站穩觸發價後才評估。"
     elif two_stage:
@@ -760,10 +882,14 @@ def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
     else:
         status = "F+｜紅燈觸發結構相對穩定"
         requirement = "仍需觸發、守價與分批，禁止開盤預掛追價。"
+    if leader_open_drive and block_breakout and not washout_day:
+        requirement += " 另可採早盤強勢替代路徑：平高盤開出後，至少15分鐘站穩前收+1.5%、量價同步且第一次回測不破，才可小量；不得追第一根急拉。"
     return {
         "score": round(score, 1), "status": status, "requirement": requirement,
         "two_stage": two_stage, "block_breakout": block_breakout,
         "resilient_leader": resilient_leader,
+        "washout_first_touch_block": washout_first_touch_block,
+        "leader_open_drive": leader_open_drive and not washout_day,
     }
 
 
@@ -795,6 +921,8 @@ def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
     close_pos = _clamp(_num(row, "當日收盤位置%", 50))
     upper = _clamp(_num(row, "上影線比例%", 0))
     fragility = _red_market_trigger_fragility_profile(row)
+    market_info = _market_risk_info(row)
+    official_freshness = _official_factor_freshness_info(row)
 
     proximity = 100 if gap <= 0.8 else 90 if gap <= 2.0 else 78 if gap <= 3.5 else 58 if gap <= 5.0 else 38 if gap <= 6.5 else 18
     stop_score = 96 if 0 < effective_stop <= 2.2 else 90 if effective_stop <= 4.5 else 80 if effective_stop <= 6.8 else 62 if effective_stop <= 8.5 else 38 if effective_stop <= 10.5 else 15 if effective_stop > 0 else 8
@@ -807,9 +935,17 @@ def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
         score -= max(3.0, (float(fragility.get("score", 0)) - 25.0) * 0.16)
     if fragility.get("block_breakout"):
         score = min(score, 48.0)
+    if not market_info.get("formal_ready"):
+        score = min(score, 54.0)
+    if not official_freshness.get("formal_ready"):
+        score = min(score, 56.0)
     score = _clamp(score)
 
     blockers: list[str] = []
+    if not market_info.get("formal_ready"):
+        blockers.append(f"大盤因子落後{market_info.get('lag', 0)}日，正式觸發待同步")
+    if not official_freshness.get("formal_ready"):
+        blockers.append(f"官方因子{official_freshness.get('status', '日期未驗證')}，正式觸發待同步")
     if gap > 6.5:
         blockers.append(f"觸發距離{gap:.1f}%過遠")
     elif gap > 5.0:
@@ -883,6 +1019,10 @@ def _red_market_reversal_profile(
     sector = max(_num(row, "族群攻擊強度", 0), _num(row, "族群輪動分", 0))
     amount = _reference_turnover_m(row)
     chase = _chase_risk_score(row, 55)
+    close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+    upper = _clamp(_num(row, "上影線比例%", 0))
+    vol_ratio = max(_num(row, "當日量比", 1), _num(row, "5日20日量比", 1))
+    gap = min(99.0, max(0.0, _num(row, "觸發距離%", _num(row, "距最近可執行買點%", 99))))
     pre_score = max(_safe_float(prebreak.get("score"), 0), _num(row, "強勢前兆分", 0))
     washout = -10.5 <= ret1 <= -5.0
     structure_ok = -3.0 <= ret5 <= 12.0 and -8.0 <= ret20 <= 35.0
@@ -899,30 +1039,44 @@ def _red_market_reversal_profile(
     if hard_veto:
         score -= 25.0
     score = round(_clamp(score), 1)
-    data_ok = bool(fresh.get("fresh") and liq.get("tradable") and not hard_veto)
+    data_ok = bool(fresh.get("fresh") and liq.get("tradable") and not hard_veto and market.get("formal_ready"))
+    first_touch_fragile = bool(
+        washout and (ret1 <= -7.0 or close_pos < 60 or upper >= 30 or vol_ratio >= 2.2 or gap > 4.5)
+    )
+    reversal_quality_ok = bool(not first_touch_fragile and close_pos >= 60 and upper <= 28 and vol_ratio <= 2.2 and gap <= 4.5)
     eligible = bool(
         market.get("severe") and not market.get("panic") and data_ok
-        and washout and structure_ok and score >= 72
+        and washout and structure_ok and reversal_quality_ok and score >= 72
         and candidate >= 76 and pre_score >= 72 and entry >= 65 and risk >= 57 and buy >= 68
         and mainstream >= 62 and sector >= 62 and amount >= 250 and chase <= 72 and op_score >= 62
     )
+    radar_data_ok = bool(fresh.get("fresh") and liq.get("tradable") and not hard_veto)
     radar_override = bool(
-        market.get("severe") and not market.get("panic") and data_ok
+        market.get("severe") and not market.get("panic") and radar_data_ok
         and prebreak.get("radar_ready") and pre_score >= 78 and candidate >= 76
         and entry >= 64 and risk >= 52 and buy >= 68 and amount >= 250 and chase <= 72 and op_score >= 55
     )
     if market.get("panic"):
         status = "BLOCK-R｜極端市場全面禁買"
+    elif not market.get("formal_ready"):
+        status = "DATA-WAIT-R｜大盤因子未與K線對齊"
+    elif first_touch_fragile:
+        status = "WATCH-R2｜跌深反轉首觸禁買"
     elif eligible:
-        status = "READY-R｜紅燈逆勢反轉，僅觸發後極小量"
+        status = "READY-R｜紅燈逆勢反轉，僅二段確認後極小量"
     elif radar_override:
-        status = "WATCH-R｜紅燈強勢雷達，觸發守價後才評估"
+        status = "WATCH-R｜紅燈強勢雷達，二段確認後才評估"
     else:
         status = "BLOCK-R｜未達紅燈逆勢條件"
     return {
         "score": score, "eligible": eligible, "radar_override": radar_override, "status": status,
         "washout": washout, "ret1": round(ret1, 2), "ret5": round(ret5, 2),
-        "restriction": "不可預掛追價；只在突破實戰觸發價且守住守價、大盤跌勢未惡化時進場。單檔上限3%，跌破守價立即取消。",
+        "first_touch_fragile": first_touch_fragile,
+        "restriction": (
+            "跌深反轉禁止第一觸進場；需站穩觸發價至少15分鐘，再回測守價不破或二次突破。單檔上限2%，跌破守價立即取消。"
+            if first_touch_fragile else
+            "不可預掛追價；只在突破實戰觸發價、至少15分鐘確認且守住守價、大盤跌勢未惡化時進場。單檔上限3%，跌破守價立即取消。"
+        ),
     }
 
 
@@ -2394,6 +2548,8 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     intraday_objective = False if (direct or a_minus or intraday_primary) else _objective_intraday_ok(row, op, reasons)
     intraday = intraday_primary or intraday_objective
     market_info = _market_risk_info(row)
+    official_freshness = _official_factor_freshness_info(row)
+    combined_freshness = _combined_data_freshness_info(row)
     red_fragility = _red_market_trigger_fragility_profile(row)
     decision_source = (
         promotion["route"] if direct_primary and promotion["formal"] else
@@ -2695,10 +2851,21 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         "紅燈逆勢反轉分": promotion.get("red_reversal", {}).get("score", 0),
         "紅燈逆勢反轉判定": promotion.get("red_reversal", {}).get("status", ""),
         "大盤風控層級": market_info.get("level", ""),
+        "官方因子資料日期": official_freshness.get("official_date", ""),
+        "官方因子落後交易日": official_freshness.get("lag", 999),
+        "官方因子新鮮度": official_freshness.get("status", ""),
         "大盤資料日期": market_info.get("market_date", ""),
         "大盤資料落後交易日": market_info.get("lag", 0),
         "大盤資料新鮮度": market_info.get("freshness", ""),
-        "大盤條件覆寫": "是｜嚴格觸發後極小量" if promotion.get("red_override") else "雷達條件式" if promotion.get("red_reversal", {}).get("radar_override") else "否",
+        "大盤與K線對齊狀態": market_info.get("alignment_status", ""),
+        "股神資料總新鮮度": combined_freshness.get("status", ""),
+        "股神資料警示": combined_freshness.get("warning", ""),
+        "紅燈反轉首觸禁買": "是｜需二段確認" if promotion.get("red_reversal", {}).get("first_touch_fragile") else "否",
+        "主流強勢替代進場": (
+            "可｜平高盤後15分鐘站穩前收+1.5%、量價同步且回測不破"
+            if red_fragility.get("leader_open_drive") else "否｜依原觸發/守價"
+        ),
+        "大盤條件覆寫": "是｜嚴格二段確認後極小量" if promotion.get("red_override") else "雷達條件式" if promotion.get("red_reversal", {}).get("radar_override") else "否",
         "逆勢操作限制": promotion.get("red_reversal", {}).get("restriction", ""),
         "K線最後交易日": readiness["freshness"]["last_date"],
         "K線落後交易日": readiness["freshness"]["lag"] if readiness["freshness"]["known"] else 999,
@@ -2793,6 +2960,11 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
 
     use_label, bucket_bonus, score_cap = _priority_bucket_meta(row)
     score += bucket_bonus
+    # 高熱主流領漲只提升「看見順序」，不放寬買進許可。
+    leader_visibility = bool(mainrise >= 80 and mainstream >= 78 and sector >= 75 and amount >= 500)
+    if leader_visibility:
+        score += 8.0
+        use_label = "5｜主流高熱核心雷達"
     market_info = _market_risk_info(row)
     if not market_info.get("stale"):
         score += _clamp(_num(row, "隔日大盤預測加減分", 0), -6.0, 6.0)

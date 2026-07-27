@@ -197,7 +197,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_rerun_lazy_export_local_first_v164_20260726"
+PAGE07_SPEED_FIX_VERSION = "page07_rerun_lazy_export_freshness_guard_v173_20260727"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -2267,6 +2267,161 @@ def _read_project_json_file(file_name: str) -> dict[str, Any]:
     return {}
 
 
+def _expected_latest_trade_date_v173() -> pd.Timestamp:
+    """依台北時間推估目前應有的最新交易日，避免週末/盤前誤報。"""
+    now = pd.Timestamp.now(tz="Asia/Taipei")
+    today = now.tz_localize(None).normalize()
+    after_close = (now.hour, now.minute) >= (14, 30)
+    if today.weekday() < 5 and after_close:
+        return today
+    return (today - pd.tseries.offsets.BDay(1)).normalize()
+
+
+def _parse_date_v173(value: Any) -> pd.Timestamp | None:
+    try:
+        # 官方資料日期常以 20260709 的整數保存；直接交給 pandas 會被誤判成 1970 奈秒。
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            numeric_text = str(int(value))
+            if len(numeric_text) == 8:
+                value = numeric_text
+        ts = pd.to_datetime(value, errors="coerce")
+        if pd.isna(ts):
+            return None
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_localize(None)
+        return pd.Timestamp(ts).normalize()
+    except Exception:
+        return None
+
+
+def _business_lag_v173(newer: pd.Timestamp | None, older: pd.Timestamp | None) -> int:
+    if newer is None or older is None or newer <= older:
+        return 0
+    try:
+        return int(len(pd.bdate_range(start=older + pd.Timedelta(days=1), end=newer)))
+    except Exception:
+        return max(0, int((newer - older).days))
+
+
+def _max_row_date_v173(rows: list[dict[str, Any]], fields: list[str]) -> pd.Timestamp | None:
+    values: list[pd.Timestamp] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in fields:
+            ts = _parse_date_v173(row.get(field))
+            if ts is not None:
+                values.append(ts)
+                break
+    return max(values) if values else None
+
+
+@st.cache_data(show_spinner=False, ttl=20)
+def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
+    """彙整 K 線、大盤、官方因子與推薦保存時間，供頁首警示。"""
+    expected = _expected_latest_trade_date_v173()
+    latest_payload = _read_project_json_file(GODPICK_LATEST_FILE)
+    rows = latest_payload.get("recommendations", []) if isinstance(latest_payload, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    rows = [x for x in rows if isinstance(x, dict)]
+
+    kline_date = _max_row_date_v173(rows, [
+        "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
+    ])
+    row_market_date = _max_row_date_v173(rows, ["大盤資料日期", "大盤行情日期", "加權資料日期"])
+    row_official_date = _max_row_date_v173(rows, [
+        "官方因子資料日期", "官方資料日期", "三大法人資料日期",
+        "官方因子更新時間_官方", "官方因子更新時間"
+    ])
+
+    market_payload = _read_project_json_file(MARKET_SNAPSHOT_FILE)
+    market_date = _parse_date_v173(
+        market_payload.get("market_date") or market_payload.get("twse_data_date")
+        or market_payload.get("otc_data_date") or market_payload.get("data_date")
+        or market_payload.get("updated_at")
+    ) if isinstance(market_payload, dict) else None
+    market_date = max([x for x in [market_date, row_market_date] if x is not None], default=None)
+
+    official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
+    official_rows = official_payload.get("records", []) if isinstance(official_payload, dict) else []
+    if not isinstance(official_rows, list):
+        official_rows = []
+    # 新鮮度必須看官方資料內容日期，不可用「快取檔寫入時間」冒充資料日期。
+    official_content_date = _max_row_date_v173(official_rows, [
+        "官方資料日期", "官方因子資料日期", "三大法人資料日期", "法人資料日期"
+    ])
+    official_top_date = _parse_date_v173(official_payload.get("data_date")) if isinstance(official_payload, dict) else None
+    official_date = max(
+        [x for x in [official_content_date, official_top_date, row_official_date] if x is not None],
+        default=None,
+    )
+    saved_date = _parse_date_v173(latest_payload.get("saved_at")) if isinstance(latest_payload, dict) else None
+
+    kline_lag = _business_lag_v173(expected, kline_date) if kline_date is not None else 999
+    market_ref = kline_date or expected
+    market_lag = _business_lag_v173(market_ref, market_date) if market_date is not None else 999
+    official_lag = _business_lag_v173(market_ref, official_date) if official_date is not None else 999
+    scan_lag = _business_lag_v173(expected, saved_date) if saved_date is not None else 999
+
+    issues: list[str] = []
+    if kline_date is None:
+        issues.append("個股K線日期未驗證")
+    elif kline_lag > 0:
+        issues.append(f"個股K線停在{kline_date:%Y-%m-%d}，落後{kline_lag}交易日")
+    if market_date is None:
+        issues.append("大盤資料日期未驗證")
+    elif market_lag > 0:
+        issues.append(f"大盤資料停在{market_date:%Y-%m-%d}，落後K線{market_lag}交易日")
+    if official_date is None:
+        issues.append("官方因子日期未驗證")
+    elif official_lag > 0:
+        issues.append(f"官方因子停在{official_date:%Y-%m-%d}，落後K線{official_lag}交易日")
+    if saved_date is None:
+        issues.append("推薦保存時間未驗證")
+    elif scan_lag > 0:
+        issues.append(f"最新推薦保存於{saved_date:%Y-%m-%d}，需重新推薦")
+
+    hard_block = bool(
+        kline_lag > 0 or market_lag > 0 or official_lag > 0
+        or market_date is None or official_date is None or kline_date is None
+    )
+    return {
+        "expected_date": expected.strftime("%Y-%m-%d"),
+        "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
+        "market_date": market_date.strftime("%Y-%m-%d") if market_date is not None else "",
+        "official_date": official_date.strftime("%Y-%m-%d") if official_date is not None else "",
+        "saved_date": saved_date.strftime("%Y-%m-%d") if saved_date is not None else "",
+        "kline_lag": kline_lag, "market_lag": market_lag, "official_lag": official_lag, "scan_lag": scan_lag,
+        "issues": issues,
+        "hard_block": hard_block,
+        "ready": not issues,
+    }
+
+
+def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
+    snapshot = _project_data_freshness_snapshot_v173()
+    issues = snapshot.get("issues", []) if isinstance(snapshot, dict) else []
+    if issues:
+        message = "⚠️ 股神推薦資料不是最新：" + "；".join(str(x) for x in issues)
+        if snapshot.get("hard_block"):
+            st.error(message)
+            st.warning("正式推薦與 A- 準主推薦已暫停升格。請先到 17_系統健康檢查按一鍵更新，再回本頁重新推薦。")
+        else:
+            st.warning(message)
+        st.caption(
+            f"預期最新交易日：{snapshot.get('expected_date') or '未驗證'}｜"
+            f"K線：{snapshot.get('kline_date') or '未驗證'}｜"
+            f"大盤：{snapshot.get('market_date') or '未驗證'}｜"
+            f"官方因子：{snapshot.get('official_date') or '未驗證'}"
+        )
+    else:
+        st.success(
+            f"資料新鮮度通過：K線、大盤與官方因子皆已更新至 {snapshot.get('expected_date')}。"
+        )
+    return snapshot
+
+
 def _load_recommendation_readiness_v171() -> dict[str, Any]:
     try:
         path = Path(RECOMMENDATION_READINESS_FILE)
@@ -2330,14 +2485,21 @@ def _macro_bridge_freshness_v121(bridge: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("invalid market date")
         market_date = pd.Timestamp(market_date).tz_localize(None) if getattr(market_date, "tzinfo", None) is not None else pd.Timestamp(market_date)
         market_date = market_date.normalize()
-        today = pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None).normalize()
-        lag = int(len(pd.bdate_range(start=market_date + pd.Timedelta(days=1), end=today))) if today > market_date else 0
+        expected = _expected_latest_trade_date_v173()
+        lag = int(len(pd.bdate_range(start=market_date + pd.Timedelta(days=1), end=expected))) if expected > market_date else 0
         stale = lag >= 2
+        aligned = lag == 0
         return {
             "date": market_date.strftime("%Y-%m-%d"),
             "lag": lag,
             "stale": stale,
-            "status": f"過期｜落後{lag}個交易日，不作硬封鎖" if stale else "最新/可用",
+            "aligned": aligned,
+            "warning": lag >= 1,
+            "status": (
+                f"過期｜落後{lag}個交易日，不作硬封鎖" if stale
+                else "落後1日｜非最新，正式推薦待同步" if lag == 1
+                else "最新/對齊"
+            ),
         }
     except Exception:
         return {"date": raw, "lag": 999, "stale": True, "status": "日期未驗證｜不作硬封鎖"}
@@ -2839,11 +3001,15 @@ def _render_macro_bridge_panel(applied_weights: dict[str, int]) -> tuple[dict[st
     effect_info = _market_effect_summary_v37(bridge.get("godpick_market_effect"))
     diagnostics_summary = _market_diagnostics_summary_v37(bridge.get("data_diagnostics"))
     market_freshness = _macro_bridge_freshness_v121(bridge)
-    if market_freshness.get("stale"):
+    if market_freshness.get("warning") or market_freshness.get("stale"):
         st.warning(
             f"大盤橋接資料日期 {market_freshness.get('date') or '未驗證'}，"
-            f"已落後 {market_freshness.get('lag')} 個交易日。系統本輪不套用舊大盤調權/紅燈硬封鎖，"
-            "改以最新個股K線、主流資金與族群廣度排序。"
+            f"已落後 {market_freshness.get('lag')} 個交易日。"
+            + (
+                "系統本輪不套用舊大盤調權/紅燈硬封鎖，改以最新個股K線、主流資金與族群廣度排序。"
+                if market_freshness.get("stale") else
+                "資料不是最新；仍可保留雷達，但正式推薦與 A- 必須先同步大盤後重新評分。"
+            )
         )
 
     c1, c2, c3, c4, c5, c6 = st.columns([1.0, 1.0, 1.0, 1.0, 1.15, 1.25])
@@ -10917,7 +11083,7 @@ def _phase70_build_battle_dashboard(
         "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
         "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定",
-        "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤原始橋接狀態",
+        "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態", "股神資料總新鮮度", "股神資料警示", "紅燈反轉首觸禁買", "主流強勢替代進場", "大盤原始橋接狀態",
         "今日漲幅%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流主升優先分", "主流主升判定", "主流主升操作限制",
         "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
@@ -11337,7 +11503,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
         "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制",
-        "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤原始橋接狀態",
+        "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態", "股神資料總新鮮度", "股神資料警示", "紅燈反轉首觸禁買", "主流強勢替代進場", "大盤原始橋接狀態",
         "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
         "今日漲幅%", "當日量比", "當日收盤位置%",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "守價回測參考價", "守價回測距離%", "實戰停損參考", "第一壓力價",
@@ -11624,7 +11790,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
-        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤原始橋接狀態", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態", "股神資料總新鮮度", "股神資料警示", "紅燈反轉首觸禁買", "主流強勢替代進場", "大盤原始橋接狀態", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
         "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",
@@ -12718,6 +12884,8 @@ def main():
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
     st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜本機優先、GitHub背景同步、Excel按需產生、單功能區運算")
+
+    data_freshness_snapshot = _render_project_data_freshness_warning_v173()
 
     macro_ref_for_ui = _load_latest_macro_reference()
     with st.expander("大盤走勢串聯狀態", expanded=False):
