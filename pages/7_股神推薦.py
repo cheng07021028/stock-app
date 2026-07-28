@@ -11763,7 +11763,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
-    lockdown_count = int((final_df.get("極端市場LOCKDOWN", pd.Series([], dtype=str)).astype(str) == "是").sum()) if isinstance(final_df, pd.DataFrame) else 0
+    lockdown_count = int((rec_df.get("極端市場LOCKDOWN", pd.Series([], dtype=str)).astype(str) == "是").sum()) if isinstance(rec_df, pd.DataFrame) else 0
     if lockdown_count > 0:
         st.error("🔒 LOCKDOWN｜極端市場全面封鎖：目前排名僅供診斷，所有可交易排名歸零，新倉上限 0%。")
     render_pro_section("股神診斷總排名｜排名不等於可買進")
