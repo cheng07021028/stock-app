@@ -34,7 +34,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V108B｜法人 / 月營收 / EPS / PER 快取中心｜端點解析與 MOPS 備援修正版｜供後續 07 讀取快取")
+st.caption("V108C｜上市＋上櫃法人 / 月營收 / EPS / PER 快取中心｜合併覆蓋率修正版｜供 07/08/10/14 讀取")
 
 
 def _fmt(v):
@@ -48,14 +48,16 @@ def _fmt(v):
 
 def _display_status() -> None:
     s = cache_status()
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("快取筆數", s.get("record_count", 0))
-    c2.metric("完整度 >= 60", s.get("complete_count", 0))
-    c3.metric("檔案大小 KB", s.get("size_kb", 0.0))
-    c4.metric("快取存在", "是" if s.get("exists") else "否")
-    c5.metric("更新時間", s.get("updated_at") or "未更新")
-    complete = int(s.get("complete_count", 0) or 0)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     records = int(s.get("record_count", 0) or 0)
+    complete = int(s.get("complete_count", 0) or 0)
+    coverage = (complete / records * 100.0) if records else 0.0
+    c1.metric("快取筆數", records)
+    c2.metric("完整度 >= 60", complete)
+    c3.metric("快取有效覆蓋率", f"{coverage:.1f}%")
+    c4.metric("檔案大小 KB", s.get("size_kb", 0.0))
+    c5.metric("快取存在", "是" if s.get("exists") else "否")
+    c6.metric("更新時間", s.get("updated_at") or "未更新")
     if records and complete == 0:
         st.warning("目前官方因子完整度>=60 為 0；代表官方資料尚未抓成功或仍不足，暫不建議接進 07 推薦分數。")
     elif complete > 0:
@@ -71,7 +73,7 @@ def _display_status() -> None:
 
 
 with st.sidebar:
-    st.header("V108B 更新設定")
+    st.header("V108C 更新設定")
     market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=0)
     scan_limit = st.selectbox("測試/更新筆數", [0, 50, 200, 500, 1000, 1500, 2000], index=0, help="0 = 使用股票主檔全部股票。")
     include_institutional = st.checkbox("更新法人買賣超", value=True)
@@ -84,7 +86,7 @@ with st.sidebar:
 
 st.info(
     "建議流程：先在本頁更新官方因子快取，確認資料筆數與完整度，再同步到 GitHub。"
-    "V108B 已加入 JSON 空回應偵測、TWSE 舊端點與 MOPS HTML 備援；後續 07 只讀快取，不會每次推薦都連官方網站。"
+    "V108C 已修正「快取有資料但合併後仍顯示0%」，並加入上櫃法人、上櫃估值與缺漏市場月營收備援；後續 07 只讀快取，不會每次推薦都連官方網站。"
 )
 
 if do_pull:
@@ -162,14 +164,16 @@ if logs:
 else:
     st.caption("尚無更新紀錄。")
 
-with st.expander("V108B 說明", expanded=False):
+with st.expander("V108C 說明", expanded=False):
     st.markdown(
         """
 - 本頁是官方因子資料層，不會取代 07 股神推薦。
 - 慢的官方資料更新集中在本頁；07 後續只讀 `official_factors_cache.json`。
 - 官方來源失敗時會保留診斷訊息，不會讓 07、10、8、14 主線中斷。
 - V108A 修正 Streamlit Cloud 連 TWSE/TPEX 時可能發生的 SSL 憑證驗證失敗。
-- V108B 修正 SSL 備援成功但內容為空/HTML/非 JSON 時誤判成功的問題，並增加 TWSE 舊端點與 MOPS 月營收 HTML 備援。
+- V108B 修正 SSL 備援成功但內容為空/HTML/非 JSON 時誤判成功的問題。
+- V108C 修正推薦表已存在空白/0值欄位時，真實快取被寫進 `_官方` 暫存欄卻未回填，導致覆蓋率永遠0%的根因。
+- V108C 新增櫃買中心上櫃法人與估值 best-effort 來源，月營收則針對單一市場失敗時個別啟用 MOPS HTML 備援。
 - 若本次抓取完整度低於舊快取，會保留舊有效快取，不會用壞資料覆蓋。
 - 下一版 V109 才會把這些官方因子讀入 07 夜間隔日股神分數。
         """

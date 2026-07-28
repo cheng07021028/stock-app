@@ -11565,7 +11565,8 @@ def _phase90_navigation_table() -> pd.DataFrame:
         {"優先序": 3, "活頁/表格": "A-準主推薦小量試單", "真正用途": "接近正式門檻，只能觸發且守價後小量試單", "是否買進清單": "條件式"},
         {"優先序": 4, "活頁/表格": "強勢動能核心雷達", "真正用途": "已發動強勢股；只等回測守住或再突破放量", "是否買進清單": "不是，禁止開盤盲追"},
         {"優先序": 5, "活頁/表格": "強勢前兆核心雷達", "真正用途": "尚未發動但主流、族群與前兆較完整的股票", "是否買進清單": "不是，等待觸發"},
-        {"優先序": 6, "活頁/表格": "候選診斷總表", "真正用途": "模型檢討、漏選原因與所有候選證據", "是否買進清單": "絕對不是"},
+        {"優先序": 6, "活頁/表格": "資料待更新雷達", "真正用途": "模型找到候選，但個股K線不是最新；更新資料並重新推薦前不得操作", "是否買進清單": "禁止買進"},
+        {"優先序": 7, "活頁/表格": "候選診斷總表", "真正用途": "模型檢討、漏選原因與所有候選證據", "是否買進清單": "絕對不是"},
     ])
 
 def _phase92_render_zero_formal_diagnostics(source_df: pd.DataFrame) -> None:
@@ -11733,7 +11734,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if decision_source.empty:
         return
     formal, a_minus, intraday, risk, watch, excluded = _phase63_split_formal_recommendation_views(decision_source)
-    core, _, _, _ = _phase71_split_intraday_radar_layers(intraday)
+    live_intraday, stale_intraday = _phase94_split_intraday_by_kline_freshness(intraday)
+    core, _, _, _ = _phase71_split_intraday_radar_layers(live_intraday)
     candidate_n = len(decision_source)
     summary = _phase80_build_recommendation_summary(
         formal, a_minus, core, risk, excluded, candidate_n, scan_report=scan_report
@@ -11783,7 +11785,13 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         ] if c in master_rank.columns]
         st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
     else:
-        st.info("目前沒有資料新鮮且分數達 50 分的推薦/觀察候選；請先完成最新行情掃描。")
+        if isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
+            st.error(
+                f"不是完全沒有候選：模型找到 {len(stale_intraday)} 檔盤中雷達，但其個股K線不是最新交易日，"
+                "因此已封鎖排名與操作。請先更新個股K線後重新推薦；Excel 會列在『資料待更新雷達』。"
+            )
+        else:
+            st.info("目前沒有資料新鮮且分數達 50 分的推薦/觀察候選；請先完成最新行情掃描。")
 
     render_pro_section("分區作戰明細｜正式／A-／核心雷達")
     row = summary.iloc[0]
@@ -11797,6 +11805,11 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     ])
 
     scan_usable = bool(scan_report.get("正式推薦可用", False)) if isinstance(scan_report, dict) else False
+    if isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
+        st.error(
+            f"資料新鮮度封鎖：{len(stale_intraday)} 檔雷達候選使用落後K線，已禁止列入當日作戰表。"
+            "這些股票不是消失，而是被移到『資料待更新雷達』等待重掃。"
+        )
     if not scan_usable:
         st.warning(_safe_str(row.get("操作說明")) or "目前為條件式參考清單；下單前請更新最新價並重新推薦。")
         if _safe_str(row.get("掃描品質說明")):
@@ -11864,6 +11877,58 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
 
 
 
+
+def _phase94_split_intraday_by_kline_freshness(intraday_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """將盤中雷達分成「可用最新 K 線」與「資料待更新」。
+
+    正式推薦可用與研究雷達可顯示是兩個不同層級：官方因子不足時可以
+    顯示研究雷達，但 K 線落後的候選不得冒充當日盤中雷達。
+    """
+    if intraday_df is None or not isinstance(intraday_df, pd.DataFrame) or intraday_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    work = intraday_df.copy()
+    freshness = work.get(
+        "K線資料新鮮度",
+        pd.Series([""] * len(work), index=work.index),
+    ).fillna("").astype(str)
+    fresh_mask = freshness.eq("最新交易日")
+    return work.loc[fresh_mask].copy(), work.loc[~fresh_mask].copy()
+
+
+def _phase94_mark_research_only(frame: pd.DataFrame, reason: str) -> pd.DataFrame:
+    """官方因子不足時保留研究雷達，但明確禁止當成買進清單。"""
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame()
+    out = frame.copy()
+    out["是否正式推薦"] = "否"
+    out["操作許可"] = "僅供研究｜不可直接買進"
+    out["最終操作結論"] = "RESEARCH｜研究雷達：資料補齊後重新評分"
+    out["正式推薦動作"] = "先補齊官方因子，再重新推薦；未完成前禁止下單。"
+    warning = out.get("股神資料警示", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    out["股神資料警示"] = warning.where(warning.ne(""), reason)
+    return out
+
+
+def _phase94_build_stale_radar_export(stale_df: pd.DataFrame) -> pd.DataFrame:
+    """輸出被新鮮度閘門擋下的雷達，避免 Excel 看起來像完全沒有資料。"""
+    if stale_df is None or not isinstance(stale_df, pd.DataFrame) or stale_df.empty:
+        return pd.DataFrame()
+    out = _phase82_compact_operational_view(
+        stale_df,
+        "資料待更新雷達｜只供診斷，更新 K 線後重新推薦",
+    )
+    if out.empty:
+        return out
+    out["是否正式推薦"] = "否"
+    out["操作許可"] = "資料待更新｜禁止買進"
+    out["最終操作結論"] = "DATA-WAIT｜K線落後：更新後重新評分"
+    out["正式推薦動作"] = "先更新個股 K 線，再重新推薦；目前不得依舊價操作。"
+    warning = out.get("股神資料警示", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    fallback = out.get("K線資料新鮮度", pd.Series(["K線日期未驗證"] * len(out), index=out.index)).fillna("K線日期未驗證").astype(str)
+    out["股神資料警示"] = warning.where(warning.ne(""), fallback)
+    return out
+
+
 def _build_excel_bytes(
     rec_export: pd.DataFrame,
     cat_export: pd.DataFrame,
@@ -11896,19 +11961,22 @@ def _build_excel_bytes(
         report = {}
 
     formal_df, a_minus_df, intraday_df, risk_df, watch_df, exclude_df = _phase63_split_formal_recommendation_views(governed)
-    core_df, backup_df, low_df, intraday_full_df = _phase71_split_intraday_radar_layers(intraday_df)
-    usable = bool(report.get("正式推薦可用", False))
+    live_intraday_df, stale_intraday_df = _phase94_split_intraday_by_kline_freshness(intraday_df)
+    core_df, backup_df, low_df, intraday_full_df = _phase71_split_intraday_radar_layers(live_intraday_df)
+    formal_usable = bool(report.get("正式推薦可用", False))
 
-    battle_df = _phase70_build_battle_dashboard(formal_df, a_minus_df, core_df, risk_df, exclude_df) if usable else pd.DataFrame()
+    battle_df = _phase70_build_battle_dashboard(formal_df, a_minus_df, core_df, risk_df, exclude_df) if formal_usable else pd.DataFrame()
     if callable(build_action_table):
         try:
             battle_df = build_action_table(battle_df, include_intraday=True)
         except Exception:
             pass
 
-    formal_compact = _phase82_compact_operational_view(formal_df if usable else pd.DataFrame(), "正式主推薦｜可依進場條件分批操作")
-    a_minus_compact = _phase82_compact_operational_view(a_minus_df if usable else pd.DataFrame(), "A-準主推薦｜觸發且守價後小量試單")
-    core_compact = _phase82_compact_operational_view(core_df if usable else pd.DataFrame(), "R1盤中核心雷達｜未觸發前不可買")
+    formal_compact = _phase82_compact_operational_view(formal_df if formal_usable else pd.DataFrame(), "正式主推薦｜可依進場條件分批操作")
+    a_minus_compact = _phase82_compact_operational_view(a_minus_df if formal_usable else pd.DataFrame(), "A-準主推薦｜觸發且守價後小量試單")
+    core_compact = _phase82_compact_operational_view(core_df, "R1盤中核心雷達｜未觸發前不可買")
+    if not formal_usable:
+        core_compact = _phase94_mark_research_only(core_compact, "官方因子不足｜只供研究雷達")
     if not core_compact.empty and "盤中雷達優先級" in core_compact.columns:
         _core_priority = core_compact["盤中雷達優先級"].fillna("").astype(str)
         momentum_core_compact = core_compact.loc[_core_priority.str.startswith("R1-M")].copy()
@@ -11916,9 +11984,14 @@ def _build_excel_bytes(
     else:
         momentum_core_compact = pd.DataFrame()
         prebreak_core_compact = pd.DataFrame()
-    backup_compact = _phase82_compact_operational_view(backup_df if usable else pd.DataFrame(), "R2盤中備援雷達｜只做輪動備援")
-    low_compact = _phase82_compact_operational_view(low_df if usable else pd.DataFrame(), "R3低優先｜不列主要盯盤")
-    intraday_full_compact = _phase82_compact_operational_view(intraday_full_df if usable else pd.DataFrame(), "盤中雷達完整診斷｜非預先買進清單")
+    backup_compact = _phase82_compact_operational_view(backup_df, "R2盤中備援雷達｜只做輪動備援")
+    low_compact = _phase82_compact_operational_view(low_df, "R3低優先｜不列主要盯盤")
+    intraday_full_compact = _phase82_compact_operational_view(intraday_full_df, "盤中雷達完整診斷｜非預先買進清單")
+    if not formal_usable:
+        backup_compact = _phase94_mark_research_only(backup_compact, "官方因子不足｜只供研究雷達")
+        low_compact = _phase94_mark_research_only(low_compact, "官方因子不足｜只供研究雷達")
+        intraday_full_compact = _phase94_mark_research_only(intraday_full_compact, "官方因子不足｜只供研究雷達")
+    stale_radar_compact = _phase94_build_stale_radar_export(stale_intraday_df)
     if not intraday_full_compact.empty:
         _momentum_status = intraday_full_compact.get("強勢動能判定", pd.Series([""] * len(intraday_full_compact), index=intraday_full_compact.index)).fillna("").astype(str)
         _prebreak_status = intraday_full_compact.get("強勢前兆判定", pd.Series([""] * len(intraday_full_compact), index=intraday_full_compact.index)).fillna("").astype(str)
@@ -11938,6 +12011,21 @@ def _build_excel_bytes(
         len(candidate_diag) if isinstance(candidate_diag, pd.DataFrame) else len(governed),
         scan_report=report,
     )
+    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+        summary_df["最新K線研究雷達檔數"] = int(len(live_intraday_df))
+        summary_df["資料待更新雷達檔數"] = int(len(stale_intraday_df))
+        if len(stale_intraday_df) > 0:
+            summary_df["空白/封鎖原因"] = (
+                f"有 {len(stale_intraday_df)} 檔盤中雷達候選的K線不是最新交易日，已移至『資料待更新雷達』；"
+                "正式與A-維持封鎖，更新K線與官方因子後必須重新推薦。"
+            )
+        elif not formal_usable and len(live_intraday_df) > 0:
+            summary_df["空白/封鎖原因"] = (
+                f"有 {len(live_intraday_df)} 檔最新K線研究雷達，但官方因子不足；"
+                "只供研究，不得當成正式買進清單。"
+            )
+        else:
+            summary_df["空白/封鎖原因"] = "本輪沒有通過資料新鮮度與操作門檻的候選。"
     scan_df = pd.DataFrame([report]) if report else pd.DataFrame([{
         "掃描品質狀態": "未知｜舊資料未記錄掃描完整性",
         "正式推薦可用": False,
@@ -11969,7 +12057,8 @@ def _build_excel_bytes(
         ("強勢前兆完整雷達", prebreak_full_compact, "本輪沒有強勢前兆條件雷達。"),
         ("盤中備援雷達", backup_compact, "目前沒有 R2 備援雷達。"),
         ("盤中低優先觀察", low_compact, "目前沒有 R3 低優先觀察。"),
-        ("盤中雷達完整名單", intraday_full_compact, "目前沒有盤中雷達資料。"),
+        ("盤中雷達完整名單", intraday_full_compact, "目前沒有使用最新K線的盤中雷達資料。"),
+        ("資料待更新雷達", stale_radar_compact, "目前沒有因K線落後而被封鎖的雷達候選。"),
         ("高風險雷達觀察", risk_compact, "目前沒有高風險觀察。"),
         ("不可直接買觀察", watch_compact, "目前沒有一般觀察候選。"),
         ("正式排除清單", exclude_compact, "目前沒有正式排除候選。"),
@@ -11985,7 +12074,7 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("第一優先" if sheet_name == "股神推薦總排名" else "使用說明" if sheet_name == "使用導航" else "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達", "強勢動能核心雷達", "強勢前兆核心雷達", "強勢動能完整雷達", "強勢前兆完整雷達"} else "診斷/管理"),
+            "用途": ("第一優先" if sheet_name == "股神推薦總排名" else "使用說明" if sheet_name == "使用導航" else "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達", "強勢動能核心雷達", "強勢前兆核心雷達", "強勢動能完整雷達", "強勢前兆完整雷達"} else "資料待更新/禁止操作" if sheet_name == "資料待更新雷達" else "診斷/管理"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })

@@ -42,7 +42,7 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
-CACHE_VERSION = "v108b_official_factor_endpoint_parse_fallback"
+CACHE_VERSION = "v108c_official_factor_merge_coalesce_20260728"
 REQUEST_TIMEOUT = 12
 USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V108B; official-factor-cache)"
 
@@ -92,6 +92,8 @@ TWSE_MONTHLY_REVENUE_L = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
 TPEX_MONTHLY_REVENUE_O = "https://openapi.twse.com.tw/v1/opendata/t187ap05_O"
 TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
 TWSE_T86_OLD = "https://www.twse.com.tw/fund/T86"
+TPEX_3ITRADE = "https://www.tpex.org.tw/www/zh-tw/afterTrading/3itrade"
+TPEX_PERATIO = "https://www.tpex.org.tw/www/zh-tw/afterTrading/peratio"
 MOPS_REVENUE_HTML = "https://mops.twse.com.tw/nas/t21/{market}/t21sc03_{roc_year}_{month}_0.html"
 
 # V108A: collect concise data-source diagnostics instead of printing repeated SSL tracebacks.
@@ -658,11 +660,20 @@ def fetch_monthly_revenue() -> tuple[pd.DataFrame, str]:
             msgs.append(f"{market}月營收取得 {cnt} 筆。")
         except Exception as exc:
             msgs.append(f"{market}月營收取得失敗：{exc}")
-    if not out:
+    # A partial OpenAPI success must not suppress the MOPS fallback for the
+    # failed market. Previously listed data succeeded, OTC failed, and the code
+    # skipped fallback entirely; all OTC stocks therefore remained uncovered.
+    failed_market = any("失敗" in msg or "0 筆" in msg or "格式非 list" in msg for msg in msgs)
+    if not out or failed_market:
         fb_df, fb_msg = _fetch_mops_monthly_revenue_html()
         if fb_df is not None and not fb_df.empty:
-            return fb_df, " / ".join(msgs + ["OpenAPI 月營收失敗，改用 MOPS HTML 備援。", fb_msg])
-        return pd.DataFrame(), " / ".join(msgs + ([fb_msg] if fb_msg else []))
+            existing = pd.DataFrame(out) if out else pd.DataFrame()
+            combined = pd.concat([existing, fb_df], ignore_index=True, sort=False)
+            combined = combined.drop_duplicates("股票代號", keep="first")
+            return combined, " / ".join(msgs + ["月營收缺漏市場改用 MOPS HTML 備援。", fb_msg])
+        if not out:
+            return pd.DataFrame(), " / ".join(msgs + ([fb_msg] if fb_msg else []))
+        msgs.append("MOPS HTML 備援未取得額外資料。" + (fb_msg or ""))
     df = pd.DataFrame(out).drop_duplicates("股票代號", keep="first")
     return df, " / ".join(msgs)
 
@@ -771,6 +782,125 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
             "法人資料源": "TWSE_T86",
         })
     return pd.DataFrame(out), " / ".join(msgs)
+
+
+
+def _tpex_tables(data: Any) -> list[tuple[list[str], list[list[Any]]]]:
+    """Extract field/data tables from current and legacy TPEX JSON shapes."""
+    tables: list[tuple[list[str], list[list[Any]]]] = []
+    candidates: list[Any] = []
+    if isinstance(data, dict):
+        candidates.extend(data.get("tables", []) if isinstance(data.get("tables"), list) else [])
+        candidates.append(data)
+    elif isinstance(data, list):
+        candidates.extend(data)
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        fields = item.get("fields") or item.get("columns") or item.get("titles")
+        rows = item.get("data") or item.get("rows")
+        if isinstance(fields, list) and isinstance(rows, list):
+            tables.append(([str(x).strip() for x in fields], rows))
+    return tables
+
+
+def fetch_tpex_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
+    """上櫃三大法人買賣超（櫃買中心官方 JSON，best effort）。"""
+    records_by_code: dict[str, list[dict[str, Any]]] = {}
+    msgs: list[str] = []
+    for date_text in _recent_weekdays(max(days, 3)):
+        date_slash = f"{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}"
+        try:
+            data = _get_json(TPEX_3ITRADE, params={"date": date_slash, "type": "Daily", "response": "json"})
+            cnt = 0
+            for fields, rows in _tpex_tables(data):
+                fmap = {str(f).replace(" ", "").strip(): i for i, f in enumerate(fields)}
+                def pick(row: list[Any], names: list[str]) -> Any:
+                    for n in names:
+                        nn = n.replace(" ", "")
+                        if nn in fmap and fmap[nn] < len(row):
+                            return row[fmap[nn]]
+                    return None
+                for row in rows:
+                    if not isinstance(row, list):
+                        continue
+                    code = _normalize_code(pick(row, ["代號", "證券代號", "股票代號"]))
+                    if not code:
+                        continue
+                    foreign = _to_int(pick(row, ["外資及陸資(不含外資自營商)-買賣超股數", "外資及陸資買賣超股數", "外資買賣超股數"]))
+                    trust = _to_int(pick(row, ["投信-買賣超股數", "投信買賣超股數"]))
+                    dealer = _to_int(pick(row, ["自營商-買賣超股數", "自營商買賣超股數"]))
+                    total = _to_int(pick(row, ["三大法人買賣超股數合計", "三大法人買賣超股數", "合計買賣超股數"]))
+                    if total == 0:
+                        total = foreign + trust + dealer
+                    records_by_code.setdefault(code, []).append({
+                        "date": date_text, "foreign": foreign, "trust": trust,
+                        "dealer": dealer, "total": total,
+                    })
+                    cnt += 1
+            msgs.append(f"{date_text} TPEX 法人取得 {cnt} 筆。")
+            time.sleep(0.12)
+        except Exception as exc:
+            msgs.append(f"{date_text} TPEX 法人取得失敗：{exc}")
+
+    out: list[dict[str, Any]] = []
+    for code, items in records_by_code.items():
+        items = sorted(items, key=lambda x: x.get("date", ""), reverse=True)
+        def total(key: str, n: int) -> int:
+            return int(sum(_to_int(x.get(key)) for x in items[:n]))
+        consecutive = 0
+        for item in items:
+            if _to_int(item.get("total")) > 0:
+                consecutive += 1
+            else:
+                break
+        out.append({
+            "股票代號": code,
+            "官方資料日期": items[0].get("date", "") if items else "",
+            "外資近1日買賣超": total("foreign", 1), "外資近3日買賣超": total("foreign", 3), "外資近5日買賣超": total("foreign", 5),
+            "投信近1日買賣超": total("trust", 1), "投信近3日買賣超": total("trust", 3), "投信近5日買賣超": total("trust", 5),
+            "自營商近1日買賣超": total("dealer", 1), "自營商近3日買賣超": total("dealer", 3), "自營商近5日買賣超": total("dealer", 5),
+            "三大法人近1日合計": total("total", 1), "三大法人近3日合計": total("total", 3), "三大法人近5日合計": total("total", 5),
+            "法人連買天數": consecutive, "法人資料源": "TPEX_3ITRADE",
+        })
+    return pd.DataFrame(out), " / ".join(msgs)
+
+
+def fetch_tpex_valuation() -> tuple[pd.DataFrame, str]:
+    """上櫃本益比／殖利率／股價淨值比（櫃買中心官方 JSON）。"""
+    msgs: list[str] = []
+    for date_text in _recent_weekdays(7):
+        date_slash = f"{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}"
+        try:
+            data = _get_json(TPEX_PERATIO, params={"date": date_slash, "id": "", "response": "json"})
+            out: list[dict[str, Any]] = []
+            for fields, rows in _tpex_tables(data):
+                fmap = {str(f).replace(" ", "").strip(): i for i, f in enumerate(fields)}
+                def pick(row: list[Any], names: list[str]) -> Any:
+                    for n in names:
+                        nn = n.replace(" ", "")
+                        if nn in fmap and fmap[nn] < len(row):
+                            return row[fmap[nn]]
+                    return None
+                for row in rows:
+                    if not isinstance(row, list):
+                        continue
+                    code = _normalize_code(pick(row, ["股票代號", "證券代號", "代號"]))
+                    if not code:
+                        continue
+                    out.append({
+                        "股票代號": code,
+                        "PER本益比": _to_float(pick(row, ["本益比", "本益比(倍)"])),
+                        "PBR股價淨值比": _to_float(pick(row, ["股價淨值比", "股價淨值比(倍)"])),
+                        "股利殖利率%": _to_float(pick(row, ["殖利率(%)", "殖利率％", "殖利率"])),
+                        "估值資料源": "TPEX_PERATIO",
+                    })
+            if out:
+                return pd.DataFrame(out).drop_duplicates("股票代號"), f"{date_text} TPEX PER/PBR/殖利率取得 {len(out)} 筆。"
+            msgs.append(f"{date_text} TPEX 估值無資料。")
+        except Exception as exc:
+            msgs.append(f"{date_text} TPEX 估值取得失敗：{exc}")
+    return pd.DataFrame(), " / ".join(msgs)
 
 
 def _score_range(value: float | None, strong: float, mid: float, bad: float, reverse_bad: bool = False) -> float:
@@ -888,8 +1018,12 @@ def build_official_factor_cache(
     if include_valuation:
         val_df, msg = fetch_twse_bwibbu_all()
         diagnostics.append(msg)
-        if not val_df.empty:
-            df = df.merge(val_df, on="股票代號", how="left")
+        otc_val_df, otc_msg = fetch_tpex_valuation()
+        diagnostics.append(otc_msg)
+        valuation_frames = [x for x in [val_df, otc_val_df] if x is not None and not x.empty]
+        if valuation_frames:
+            all_val = pd.concat(valuation_frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first")
+            df = df.merge(all_val, on="股票代號", how="left")
     if include_revenue:
         rev_df, msg = fetch_monthly_revenue()
         diagnostics.append(msg)
@@ -898,8 +1032,12 @@ def build_official_factor_cache(
     if include_institutional:
         inst_df, msg = fetch_twse_institutional(days=7)
         diagnostics.append(msg)
-        if not inst_df.empty:
-            df = df.merge(inst_df, on="股票代號", how="left")
+        otc_inst_df, otc_msg = fetch_tpex_institutional(days=7)
+        diagnostics.append(otc_msg)
+        institutional_frames = [x for x in [inst_df, otc_inst_df] if x is not None and not x.empty]
+        if institutional_frames:
+            all_inst = pd.concat(institutional_frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first")
+            df = df.merge(all_inst, on="股票代號", how="left")
 
     # Ensure all expected numeric/data columns exist before scoring.
     for c in FACTOR_COLUMNS:
@@ -956,6 +1094,9 @@ def build_official_factor_cache(
         "ssl_fallback_supported": True,
         "endpoint_parse_fallback_supported": True,
         "mops_html_revenue_fallback_supported": True,
+        "tpex_institutional_supported": True,
+        "tpex_valuation_supported": True,
+        "merge_placeholder_coalesce_supported": True,
     }
     if save and should_save:
         save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
@@ -964,8 +1105,33 @@ def build_official_factor_cache(
     return out, meta
 
 
+def _is_missing_factor_value(series: pd.Series, column: str) -> pd.Series:
+    """Return rows whose existing factor value is only a placeholder.
+
+    Recommendation frames are pre-created with zero/blank official-factor columns.
+    A normal pandas merge preserves those placeholder columns and writes the real
+    cache values into ``*_官方`` suffix columns.  Downstream coverage then sees the
+    original zero columns and incorrectly reports 0% even though the cache is valid.
+    """
+    text = series.astype(str).str.strip()
+    missing = series.isna() | text.isin({"", "nan", "None", "null", "--", "-"})
+    if column in {
+        "官方資料完整度", "法人籌碼官方分數", "營收成長官方分數",
+        "官方估值風險分數", "官方基本面成長分數", "官方因子總分",
+    }:
+        numeric = pd.to_numeric(series, errors="coerce")
+        missing = missing | numeric.fillna(0).le(0)
+    return missing
+
+
 def merge_official_factors(base_df: pd.DataFrame, factor_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """供 07/10/8/14 後續使用：把官方因子以股票代號合併到任意表。"""
+    """Merge official factors and coalesce real cache values over placeholders.
+
+    All cache columns are renamed to collision-proof temporary names before merge.
+    This prevents recommendation frames that already contain ``*_官方`` helper
+    columns from producing duplicate labels. Existing non-empty values are kept;
+    blank/zero placeholders are replaced by the cache's authoritative values.
+    """
     if base_df is None or base_df.empty:
         return base_df.copy() if isinstance(base_df, pd.DataFrame) else pd.DataFrame()
     df = base_df.copy()
@@ -977,10 +1143,24 @@ def merge_official_factors(base_df: pd.DataFrame, factor_df: pd.DataFrame | None
     if fdf is None or fdf.empty or "股票代號" not in fdf.columns:
         return df
     fdf["股票代號"] = fdf["股票代號"].map(_normalize_code)
-    use_cols = [c for c in FACTOR_COLUMNS if c in fdf.columns and c not in {"股票名稱", "市場別", "正式產業別"}]
-    merged = df.merge(fdf[use_cols].drop_duplicates("股票代號"), left_on=code_col, right_on="股票代號", how="left", suffixes=("", "_官方"))
-    if code_col != "股票代號" and "股票代號_官方" in merged.columns:
-        merged = merged.drop(columns=["股票代號_官方"])
+    fdf = fdf[fdf["股票代號"].astype(str).str.len().eq(4)].drop_duplicates("股票代號", keep="first")
+
+    value_cols = [c for c in FACTOR_COLUMNS if c in fdf.columns and c not in {"股票代號", "股票名稱", "市場別", "正式產業別"}]
+    temp_map = {c: f"__official_factor__{i}" for i, c in enumerate(value_cols)}
+    right = fdf[["股票代號"] + value_cols].rename(columns=temp_map)
+    merged = df.merge(right, left_on=code_col, right_on="股票代號", how="left")
+
+    for column in value_cols:
+        temp_col = temp_map[column]
+        if column not in merged.columns:
+            merged[column] = merged[temp_col]
+        else:
+            replace_mask = _is_missing_factor_value(merged[column], column)
+            merged.loc[replace_mask, column] = merged.loc[replace_mask, temp_col]
+        merged = merged.drop(columns=[temp_col])
+
+    if code_col != "股票代號" and "股票代號" in merged.columns:
+        merged = merged.drop(columns=["股票代號"])
     return merged
 
 
