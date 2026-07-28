@@ -445,10 +445,16 @@ def build_nextday_market_forecast(
     else:
         confidence = "低"
 
-    if confidence == "低" or coverage < 0.52:
+    extreme_lockdown = bool(tw_pct <= -3.5 or (otc_pct is not None and otc_pct <= -4.5))
+    if extreme_lockdown:
+        effect_delta = -8.0
+        weight_delta = -8
+        position_cap = 0
+        effect_mode = "LOCKDOWN｜極端市場全面封鎖"
+    elif confidence == "低" or coverage < 0.52:
         effect_delta = 0.0
         weight_delta = 0
-        position_cap = 30
+        position_cap = 20
         effect_mode = "資料保護"
     elif adjusted_score >= 65 and probabilities[0] >= 54:
         effect_delta = 3.0 if confidence == "高" else 2.0

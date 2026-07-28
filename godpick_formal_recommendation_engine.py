@@ -691,7 +691,15 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
 
     severe = _contains_any(blob, ["紅燈", "空方", "全面防守", "禁止進攻", "風險急升"])
     defensive = severe or _contains_any(blob, ["防守", "保守", "震盪控風險", "不宜全面追價"])
-    panic = _contains_any(blob, ["崩盤", "極端風險", "系統性風險", "禁止所有新倉", "全面停買", "流動性危機"])
+    panic = _contains_any(blob, ["崩盤", "極端風險", "系統性風險", "禁止所有新倉", "全面停買", "流動性危機", "LOCKDOWN"])
+    twse_pct = _num(row, "加權漲跌%", _num(row, "大盤漲跌幅%", _num(row, "加權指數漲跌幅%", 0)))
+    otc_pct = _num(row, "櫃買漲跌幅%", _num(row, "OTC漲跌%", _num(row, "上櫃指數漲跌幅%", 0)))
+    breadth_pct = _num(row, "市場上漲家數比例%", _num(row, "上漲家數比例%", 50))
+    extreme_lockdown = bool(twse_pct <= -3.5 or otc_pct <= -4.5 or (twse_pct <= -2.5 and breadth_pct <= 15))
+    if extreme_lockdown:
+        severe = True
+        defensive = True
+        panic = True
     if score > 0 and score < 42:
         severe = True
         defensive = True
@@ -738,6 +746,10 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         ),
         "raw_severe": raw_severe,
         "raw_panic": raw_panic,
+        "lockdown": bool(panic),
+        "twse_change_pct": round(twse_pct, 2),
+        "otc_change_pct": round(otc_pct, 2),
+        "new_position_cap_pct": 0 if panic else 5 if severe else 20 if defensive else 45,
     }
 
 
@@ -3066,6 +3078,9 @@ def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
     out["股神推薦用途"] = [x[2] for x in score_rows]
     out["股神推薦分數說明"] = [x[3] for x in score_rows]
     out["股神推薦總排名"] = 0
+    out["可交易總排名"] = 0
+    out["排名用途"] = "診斷排名｜需另看操作許可"
+    out["極端市場LOCKDOWN"] = "否"
 
     bucket_series = out.get("正式推薦分區", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
     score_series = pd.to_numeric(out["股神推薦優先分"], errors="coerce").fillna(0)
@@ -3087,6 +3102,18 @@ def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
         rank_map = {idx: pos for pos, idx in enumerate(ranked.index, start=1)}
         out.loc[list(rank_map.keys()), "股神推薦總排名"] = [rank_map[idx] for idx in rank_map]
     out["股神推薦總排名"] = pd.to_numeric(out["股神推薦總排名"], errors="coerce").fillna(0).astype(int)
+
+    lockdown_mask = out.apply(lambda r: bool(_market_risk_info(r).get("lockdown")), axis=1)
+    out.loc[lockdown_mask, "極端市場LOCKDOWN"] = "是"
+    out.loc[lockdown_mask, "排名用途"] = "LOCKDOWN診斷排名｜禁止新倉"
+    permission = out.get("操作許可", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    formal_bucket = bucket_series.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+    tradable_mask = (~lockdown_mask) & formal_bucket & ~permission.str.contains("禁止|不可|封鎖|等待|僅", regex=True)
+    tradable = out.loc[tradable_mask].sort_values("股神推薦優先分", ascending=False, kind="mergesort")
+    if not tradable.empty:
+        trade_rank = {idx: pos for pos, idx in enumerate(tradable.index, start=1)}
+        out.loc[list(trade_rank.keys()), "可交易總排名"] = [trade_rank[idx] for idx in trade_rank]
+    out["可交易總排名"] = pd.to_numeric(out["可交易總排名"], errors="coerce").fillna(0).astype(int)
     return out
 
 def _sector_key_for_row(row: pd.Series) -> str:

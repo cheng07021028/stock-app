@@ -8590,7 +8590,15 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
     _fill_alias("訊號分數", [])
     if (work["訊號分數"].abs() <= 1e-9).all():
         work["訊號分數"] = _numeric_col("買進分數").fillna(_numeric_col("起漲前兆分數")).fillna(0) / 10.0
-    _fill_alias("區間漲跌幅%", ["近5日漲幅%", "今日漲幅%"])
+    # 類股「當日強弱」必須以今日漲幅為主，不能混用近5日報酬或分數欄位。
+    day_ret = _numeric_col("今日漲幅%")
+    fallback_ret = _numeric_col("區間漲跌幅%")
+    # 防止小數比例或重複乘100：0.05代表5%，114/189等不可能單日報酬視為尺度污染。
+    day_ret = day_ret.where(day_ret.abs() >= 0.20, day_ret * 100.0)
+    day_ret = day_ret.where(day_ret.abs() <= 15.0, np.nan)
+    fallback_ret = fallback_ret.where(fallback_ret.abs() >= 0.20, fallback_ret * 100.0)
+    fallback_ret = fallback_ret.where(fallback_ret.abs() <= 15.0, np.nan)
+    work["區間漲跌幅%"] = day_ret.fillna(fallback_ret).fillna(0.0).clip(-15.0, 15.0)
     _fill_alias("雷達均分", ["爆發雷達分", "隔日爆發分", "飆股攻擊分", "主流領漲回補分", "漲停回放分"])
     _fill_alias("自動因子總分", ["Alpha選股潛力分", "股神實戰總分"])
     _fill_alias("起漲前兆分數", ["盤後動能救援分", "隔日爆發分"])
@@ -8624,6 +8632,7 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
             類股平均總分=("個股原始總分", "mean"),
             類股平均訊號=("訊號分數", "mean"),
             類股平均漲幅=("區間漲跌幅%", "mean"),
+            類股中位數漲幅=("區間漲跌幅%", "median"),
             類股平均雷達=("雷達均分", "mean"),
             類股平均自動因子=("自動因子總分", "mean"),
             類股平均起漲前兆=("起漲前兆分數", "mean"),
@@ -8639,6 +8648,13 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
 
     grp["同族群強勢比例"] = (grp["同族群強勢比例"].fillna(0) * 100).clip(0, 100)
     grp["同族群推薦密度"] = (grp["同族群推薦密度"].fillna(0) * 100).clip(0, 100)
+
+    # 小樣本族群不得因單一強勢股直接成為S級主流。3檔以下大幅降權，4~5檔輕度降權。
+    grp["族群樣本可信係數"] = np.select(
+        [grp["股票數"] >= 8, grp["股票數"] >= 5, grp["股票數"] >= 3],
+        [1.0, 0.90, 0.72],
+        default=0.45,
+    )
 
     grp["類股熱度分數"] = (
         grp["類股平均總分"] * 0.28
@@ -8665,7 +8681,11 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
         + grp["類股平均型態突破"].fillna(0) * 0.05
     ).apply(lambda x: _score_clip(x))
 
+    grp["類股熱度分數"] = (grp["類股熱度分數"] * grp["族群樣本可信係數"]).clip(0, 100)
+    grp["類股加速度"] = (grp["類股加速度"] * grp["族群樣本可信係數"]).clip(0, 100)
+    grp["族群資金流分數"] = (grp["族群資金流分數"] * grp["族群樣本可信係數"]).clip(0, 100)
     grp["強勢族群等級"] = grp["族群資金流分數"].apply(_sector_flow_grade)
+    grp.loc[grp["股票數"] < 3, "強勢族群等級"] = "樣本不足｜不得列主流"
     grp["族群輪動狀態"] = grp.apply(_sector_rotation_state, axis=1)
     grp["族群策略建議"] = grp.apply(_sector_strategy_text, axis=1)
     grp["族群資金流說明"] = grp.apply(_sector_flow_summary, axis=1)
@@ -11743,7 +11763,10 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
-    render_pro_section("股神推薦總排名｜真正第一優先")
+    lockdown_count = int((final_df.get("極端市場LOCKDOWN", pd.Series([], dtype=str)).astype(str) == "是").sum()) if isinstance(final_df, pd.DataFrame) else 0
+    if lockdown_count > 0:
+        st.error("🔒 LOCKDOWN｜極端市場全面封鎖：目前排名僅供診斷，所有可交易排名歸零，新倉上限 0%。")
+    render_pro_section("股神診斷總排名｜排名不等於可買進")
     st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。新版除主流主升、族群廣度與成交額外，也檢查近5次是否反覆入榜，以及今天是否真的出現新量價／觸發證據；真正領漲股可以續留，但缺少新訊號的重複名單會降級，不會為了多樣化硬推弱股。")
     if callable(rotation_diagnostics):
         try:
