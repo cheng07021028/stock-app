@@ -23,6 +23,7 @@ from official_factor_service import (
     build_official_factor_cache,
     cache_status,
     export_cache_csv_bytes,
+    finmind_config_status,
     load_factor_frame,
     load_stock_universe,
     load_update_logs,
@@ -34,7 +35,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V108C｜上市＋上櫃法人 / 月營收 / EPS / PER 快取中心｜合併覆蓋率修正版｜供 07/08/10/14 讀取")
+st.caption("V109｜官方優先＋FinMind可信備援｜法人 / 月營收 / EPS / PER 快取中心｜供 07/08/10/14 讀取")
 
 
 def _fmt(v):
@@ -62,6 +63,21 @@ def _display_status() -> None:
         st.warning("目前官方因子完整度>=60 為 0；代表官方資料尚未抓成功或仍不足，暫不建議接進 07 推薦分數。")
     elif complete > 0:
         st.success(f"官方因子已有可用完整資料：{complete} 筆。")
+    df = load_factor_frame()
+    if df is not None and not df.empty:
+        fallback_rows = 0
+        official_only_rows = 0
+        if "因子備援來源" in df.columns:
+            fallback_rows = int(df["因子備援來源"].astype(str).str.strip().ne("").sum())
+        official_only_rows = max(0, len(df) - fallback_rows)
+        a, b, c = st.columns(3)
+        a.metric("純官方資料列", official_only_rows)
+        b.metric("含 FinMind/快取補值", fallback_rows)
+        if "因子來源可信度" in df.columns:
+            trust = pd.to_numeric(df["因子來源可信度"], errors="coerce").dropna()
+            c.metric("平均來源可信度", f"{trust.mean():.1f}" if not trust.empty else "-")
+        else:
+            c.metric("平均來源可信度", "-")
     with st.expander("快取狀態 / 診斷", expanded=False):
         st.write(f"路徑：`{s.get('path', '')}`")
         diagnostics = s.get("diagnostics", []) or []
@@ -79,15 +95,22 @@ with st.sidebar:
     include_institutional = st.checkbox("更新法人買賣超", value=True)
     include_revenue = st.checkbox("更新月營收", value=True)
     include_valuation = st.checkbox("更新 PER / PBR / 估算 EPS", value=True)
+    fm_status = finmind_config_status()
+    enable_finmind = st.checkbox("官方缺值時啟用 FinMind 備援", value=True, disabled=not fm_status.get("token_configured"))
+    finmind_max_stocks = st.selectbox("FinMind 本輪最多補值股票", [50, 100, 120, 200], index=2, disabled=not fm_status.get("token_configured"), help="避免超過 API 每小時限額；每次更新會增量補值。")
+    st.caption("FinMind Token：" + ("已設定" if fm_status.get("token_configured") else "未設定（請在 Streamlit Secrets 加入 FINMIND_TOKEN）"))
     st.divider()
     do_update = st.button("更新官方因子快取", type="primary", use_container_width=True)
     do_pull = st.button("從 GitHub 讀取快取", use_container_width=True)
     do_push = st.button("同步快取到 GitHub", use_container_width=True)
 
 st.info(
-    "建議流程：先在本頁更新官方因子快取，確認資料筆數與完整度，再同步到 GitHub。"
-    "V108C 已修正「快取有資料但合併後仍顯示0%」，並加入上櫃法人、上櫃估值與缺漏市場月營收備援；後續 07 只讀快取，不會每次推薦都連官方網站。"
+    "建議流程：先用 TWSE／TPEx／MOPS 更新；只有官方缺值時才由 FinMind 補值。"
+    "FinMind 不會覆蓋較新的官方值，每筆都會保存來源、可信度與補值欄位數。"
+    "第 07 頁只讀快取，不會在推薦時即時大量呼叫外部 API。"
 )
+if not finmind_config_status().get("token_configured"):
+    st.warning('FinMind 備援尚未啟用。請在 Streamlit Cloud → App settings → Secrets 加入 `FINMIND_TOKEN = \"你的token\"`，重新啟動後再更新。不要把 token 寫進程式或 GitHub。')
 
 if do_pull:
     ok, msg = read_cache_from_github()
@@ -103,6 +126,8 @@ if do_update:
             include_revenue=include_revenue,
             include_valuation=include_valuation,
             save=True,
+            enable_finmind_fallback=bool(enable_finmind),
+            finmind_max_stocks=int(finmind_max_stocks),
         )
     if meta.get("ok"):
         if meta.get("preserved_old_cache"):
@@ -164,7 +189,7 @@ if logs:
 else:
     st.caption("尚無更新紀錄。")
 
-with st.expander("V108C 說明", expanded=False):
+with st.expander("V109 說明", expanded=False):
     st.markdown(
         """
 - 本頁是官方因子資料層，不會取代 07 股神推薦。
@@ -175,6 +200,8 @@ with st.expander("V108C 說明", expanded=False):
 - V108C 修正推薦表已存在空白/0值欄位時，真實快取被寫進 `_官方` 暫存欄卻未回填，導致覆蓋率永遠0%的根因。
 - V108C 新增櫃買中心上櫃法人與估值 best-effort 來源，月營收則針對單一市場失敗時個別啟用 MOPS HTML 備援。
 - 若本次抓取完整度低於舊快取，會保留舊有效快取，不會用壞資料覆蓋。
-- 下一版 V109 才會把這些官方因子讀入 07 夜間隔日股神分數。
+- V109 新增 FinMind 可信備援：僅補空值，官方值永遠優先，並保存來源可信度與補值數量。
+- 未設定 FINMIND_TOKEN 時不會匿名大量呼叫，避免耗盡額度。
+- 每次補值有安全請求上限，未完成股票會留待下次增量更新。
         """
     )

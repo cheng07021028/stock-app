@@ -16,6 +16,7 @@ import base64
 import datetime as dt
 import json
 import math
+import os
 import re
 import time
 from pathlib import Path
@@ -42,9 +43,10 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
-CACHE_VERSION = "v108c_official_factor_merge_coalesce_20260728"
+CACHE_VERSION = "v109_finmind_trusted_fallback_20260728"
 REQUEST_TIMEOUT = 12
-USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V108B; official-factor-cache)"
+USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V109; official-factor-cache)"
+FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 
 FACTOR_COLUMNS = [
     "股票代號",
@@ -83,6 +85,11 @@ FACTOR_COLUMNS = [
     "官方因子資料狀態",
     "官方因子更新時間",
     "官方因子資料源",
+    "因子主要來源",
+    "因子備援來源",
+    "因子來源可信度",
+    "備援補值欄位數",
+    "FinMind資料日期",
 ]
 
 # TWSE official/public endpoints used as best-effort sources. Some datasets may be rate-limited
@@ -996,6 +1003,258 @@ def _calc_scores(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+
+# =========================================================
+# V109 FinMind trusted fallback
+# =========================================================
+
+def _finmind_token() -> str:
+    """Read FinMind token without ever writing it into cache/log files."""
+    token = _safe_str(os.getenv("FINMIND_TOKEN", ""))
+    if token:
+        return token
+    if st is not None:
+        try:
+            return _safe_str(getattr(st, "secrets", {}).get("FINMIND_TOKEN", ""))
+        except Exception:
+            return ""
+    return ""
+
+
+def finmind_config_status() -> dict[str, Any]:
+    token = _finmind_token()
+    return {
+        "enabled": bool(token),
+        "token_configured": bool(token),
+        "api_url": FINMIND_API_URL,
+        "rate_limit_note": "有 token 建議每小時 600 次；無 token 約 300 次。",
+    }
+
+
+def _finmind_get(dataset: str, start_date: str, end_date: str, data_id: str = "") -> tuple[list[dict[str, Any]], str]:
+    params: dict[str, Any] = {
+        "dataset": dataset,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    if data_id:
+        params["data_id"] = data_id
+    token = _finmind_token()
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        params["token"] = token
+    try:
+        r = requests.get(FINMIND_API_URL, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        payload = _response_to_json(r)
+        if not isinstance(payload, dict):
+            return [], f"FinMind {dataset} 回傳格式非 dict。"
+        status = payload.get("status")
+        data = payload.get("data", [])
+        if status not in (None, 200) and not data:
+            return [], f"FinMind {dataset} 失敗：{_safe_str(payload.get('msg') or payload.get('message') or status)}"
+        if not isinstance(data, list):
+            return [], f"FinMind {dataset} data 格式非 list。"
+        return [x for x in data if isinstance(x, dict)], f"FinMind {dataset} 取得 {len(data)} 筆。"
+    except Exception as exc:
+        return [], f"FinMind {dataset} 取得失敗：{_compact_error(exc)}"
+
+
+def _date_range(days: int = 12) -> tuple[str, str]:
+    end = dt.date.today()
+    start = end - dt.timedelta(days=max(1, int(days)))
+    return start.isoformat(), end.isoformat()
+
+
+def _latest_by_code(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        code = _normalize_code(row.get("stock_id") or row.get("股票代號") or row.get("data_id"))
+        if not code:
+            continue
+        date_text = _safe_str(row.get("date") or row.get("日期") or row.get("create_time"))
+        old = out.get(code)
+        old_date = _safe_str((old or {}).get("date") or (old or {}).get("日期") or (old or {}).get("create_time"))
+        if old is None or date_text >= old_date:
+            out[code] = row
+    return out
+
+
+def _finmind_institutional_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        code = _normalize_code(row.get("stock_id"))
+        if code:
+            grouped.setdefault(code, []).append(row)
+    out: list[dict[str, Any]] = []
+    for code, items in grouped.items():
+        items = sorted(items, key=lambda x: _safe_str(x.get("date")), reverse=True)
+        def net(item: dict[str, Any], buy_keys: list[str], sell_keys: list[str]) -> int:
+            buy = next((_to_int(item.get(k)) for k in buy_keys if k in item), 0)
+            sell = next((_to_int(item.get(k)) for k in sell_keys if k in item), 0)
+            return buy - sell
+        normalized=[]
+        for item in items:
+            foreign = net(item, ["Foreign_Investor_buy", "Foreign_Investor_Buy"], ["Foreign_Investor_sell", "Foreign_Investor_Sell"])
+            trust = net(item, ["Investment_Trust_buy", "Investment_Trust_Buy"], ["Investment_Trust_sell", "Investment_Trust_Sell"])
+            dealer = net(item, ["Dealer_buy", "Dealer_self_buy", "Dealer_Hedging_buy"], ["Dealer_sell", "Dealer_self_sell", "Dealer_Hedging_sell"])
+            normalized.append({"date": _safe_str(item.get("date")), "foreign": foreign, "trust": trust, "dealer": dealer, "total": foreign + trust + dealer})
+        def total(key: str, n: int) -> int:
+            return int(sum(_to_int(x.get(key)) for x in normalized[:n]))
+        consecutive=0
+        for item in normalized:
+            if _to_int(item.get("total")) > 0:
+                consecutive += 1
+            else:
+                break
+        out.append({
+            "股票代號": code, "FinMind資料日期": normalized[0]["date"] if normalized else "",
+            "外資近1日買賣超": total("foreign",1), "外資近3日買賣超": total("foreign",3), "外資近5日買賣超": total("foreign",5),
+            "投信近1日買賣超": total("trust",1), "投信近3日買賣超": total("trust",3), "投信近5日買賣超": total("trust",5),
+            "自營商近1日買賣超": total("dealer",1), "自營商近3日買賣超": total("dealer",3), "自營商近5日買賣超": total("dealer",5),
+            "三大法人近1日合計": total("total",1), "三大法人近3日合計": total("total",3), "三大法人近5日合計": total("total",5),
+            "法人連買天數": consecutive, "FinMind法人資料源": "FinMind_TaiwanStockInstitutionalInvestorsBuySellWide",
+        })
+    return pd.DataFrame(out)
+
+
+def _finmind_revenue_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    latest = _latest_by_code(rows)
+    out=[]
+    for code,row in latest.items():
+        revenue = _to_float(_extract_first(row,["revenue","Revenue","當月營收"]), None)
+        mom = _to_float(_extract_first(row,["revenue_month","revenue_mom","MoM","月營收MoM%"]), None)
+        yoy = _to_float(_extract_first(row,["revenue_year","revenue_yoy","YoY","月營收YoY%"]), None)
+        acc = _to_float(_extract_first(row,["accumulated_revenue_year","acc_revenue_yoy","累計營收YoY%"]), None)
+        month = _safe_str(_extract_first(row,["revenue_month","month","營收年月"]))
+        date_text = _safe_str(row.get("date") or row.get("create_time"))
+        out.append({"股票代號":code,"當月營收":revenue,"月營收MoM%":mom,"月營收YoY%":yoy,"累計營收YoY%":acc,"營收年月":month,"FinMind資料日期":date_text,"FinMind營收資料源":"FinMind_TaiwanStockMonthRevenue"})
+    return pd.DataFrame(out)
+
+
+def _finmind_valuation_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    latest = _latest_by_code(rows)
+    out=[]
+    for code,row in latest.items():
+        per = _to_float(_extract_first(row,["PER","per","本益比"]), None)
+        pbr = _to_float(_extract_first(row,["PBR","pbr","股價淨值比"]), None)
+        yld = _to_float(_extract_first(row,["dividend_yield","DividendYield","殖利率"]), None)
+        eps = _to_float(_extract_first(row,["EPS","eps","估算EPS"]), None)
+        date_text = _safe_str(row.get("date"))
+        out.append({"股票代號":code,"PER本益比":per,"PBR股價淨值比":pbr,"股利殖利率%":yld,"估算EPS":eps,"FinMind資料日期":date_text,"FinMind估值資料源":"FinMind_TaiwanStockPER"})
+    return pd.DataFrame(out)
+
+
+def fetch_finmind_fallback(universe: pd.DataFrame, max_stocks: int = 120, include_institutional: bool = True, include_revenue: bool = True, include_valuation: bool = True) -> tuple[pd.DataFrame, list[str]]:
+    """Fetch bounded FinMind fallback data. Bulk is attempted first; per-code calls are bounded.
+
+    FinMind is never treated as exchange-official data. It only fills missing values and
+    records source/trust metadata. A token is recommended; without it the function is
+    disabled by default to avoid exhausting the anonymous quota.
+    """
+    diagnostics: list[str] = []
+    if not _finmind_token():
+        return pd.DataFrame(), ["FinMind 備援未啟用：請在 Streamlit Secrets 設定 FINMIND_TOKEN。"]
+    codes = universe.get("股票代號", pd.Series([],dtype=str)).astype(str).map(_normalize_code).dropna().tolist()
+    codes = [c for c in codes if c][:max(0,int(max_stocks))]
+    if not codes:
+        return pd.DataFrame(), ["FinMind 備援沒有可查詢股票代號。"]
+    frames: list[pd.DataFrame] = []
+    start12,end = _date_range(14)
+    start550,_ = _date_range(550)
+    datasets=[]
+    if include_institutional:
+        datasets.append(("TaiwanStockInstitutionalInvestorsBuySellWide",start12,end,_finmind_institutional_frame))
+    if include_revenue:
+        datasets.append(("TaiwanStockMonthRevenue",start550,end,_finmind_revenue_frame))
+    if include_valuation:
+        datasets.append(("TaiwanStockPER",start12,end,_finmind_valuation_frame))
+    request_budget = min(260, max(30, len(codes)*len(datasets)))
+    used=0
+    for dataset,start,end_date,parser in datasets:
+        bulk_rows,msg = _finmind_get(dataset,start,end_date)
+        diagnostics.append(msg)
+        used += 1
+        parsed = parser(bulk_rows) if bulk_rows else pd.DataFrame()
+        if parsed is not None and not parsed.empty:
+            parsed = parsed[parsed["股票代號"].isin(codes)]
+            if not parsed.empty:
+                frames.append(parsed)
+                continue
+        per_rows=[]
+        for code in codes:
+            if used >= request_budget:
+                diagnostics.append(f"FinMind 已達本輪安全請求上限 {request_budget}，剩餘股票留待下次增量補值。")
+                break
+            rows,msg2 = _finmind_get(dataset,start,end_date,data_id=code)
+            used += 1
+            if rows:
+                per_rows.extend(rows)
+            if used % 20 == 0:
+                time.sleep(0.15)
+        parsed = parser(per_rows) if per_rows else pd.DataFrame()
+        if parsed is not None and not parsed.empty:
+            frames.append(parsed)
+        diagnostics.append(f"FinMind {dataset} 本輪累計請求 {used} 次。")
+    if not frames:
+        return pd.DataFrame(), diagnostics
+    out=frames[0]
+    for frame in frames[1:]:
+        out=out.merge(frame,on="股票代號",how="outer",suffixes=("","__fmdup"))
+        for c in [x for x in out.columns if x.endswith("__fmdup")]:
+            base=c[:-7]
+            if base in out.columns:
+                mask=_is_missing_factor_value(out[base],base)
+                out.loc[mask,base]=out.loc[mask,c]
+            else:
+                out[base]=out[c]
+            out=out.drop(columns=[c])
+    return out.drop_duplicates("股票代號",keep="first"), diagnostics
+
+
+def _coalesce_fallback(df: pd.DataFrame, fallback: pd.DataFrame, source_name: str, trust_score: int = 82) -> tuple[pd.DataFrame, int]:
+    if fallback is None or fallback.empty or "股票代號" not in fallback.columns:
+        return df, 0
+    left=df.copy()
+    right=fallback.copy()
+    right["股票代號"]=right["股票代號"].map(_normalize_code)
+    value_cols=[c for c in right.columns if c != "股票代號"]
+    temp={c:f"__fallback__{i}" for i,c in enumerate(value_cols)}
+    merged=left.merge(right[["股票代號"]+value_cols].rename(columns=temp),on="股票代號",how="left")
+    filled_total=0
+    filled_by_row=pd.Series(0,index=merged.index,dtype=int)
+    data_cols=[c for c in value_cols if not c.endswith("資料源") and c not in {"FinMind資料日期"}]
+    for c in data_cols:
+        tc=temp[c]
+        if c not in merged.columns:
+            merged[c]=""
+        mask=_is_missing_factor_value(merged[c],c) & ~_is_missing_factor_value(merged[tc],c)
+        if mask.any():
+            merged.loc[mask,c]=merged.loc[mask,tc]
+            filled_by_row.loc[mask]+=1
+            filled_total += int(mask.sum())
+    if "備援補值欄位數" not in merged.columns:
+        merged["備援補值欄位數"]=0
+    merged["備援補值欄位數"]=pd.to_numeric(merged["備援補值欄位數"],errors="coerce").fillna(0).astype(int)+filled_by_row
+    touched=filled_by_row.gt(0)
+    if "因子備援來源" not in merged.columns:
+        merged["因子備援來源"]=""
+    merged.loc[touched,"因子備援來源"]=source_name
+    if "因子來源可信度" not in merged.columns:
+        merged["因子來源可信度"]=100
+    merged.loc[touched,"因子來源可信度"]=trust_score
+    if "FinMind資料日期" in temp:
+        tc=temp["FinMind資料日期"]
+        if "FinMind資料日期" not in merged.columns:
+            merged["FinMind資料日期"]=""
+        mask=touched & merged["FinMind資料日期"].astype(str).str.strip().eq("")
+        merged.loc[mask,"FinMind資料日期"]=merged.loc[mask,tc]
+    merged=merged.drop(columns=list(temp.values()),errors="ignore")
+    return merged, filled_total
+
+
 def build_official_factor_cache(
     limit: int | None = None,
     market_filter: str = "全部",
@@ -1003,6 +1262,8 @@ def build_official_factor_cache(
     include_revenue: bool = True,
     include_valuation: bool = True,
     save: bool = True,
+    enable_finmind_fallback: bool = True,
+    finmind_max_stocks: int = 120,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     global _REQUEST_NOTES
     _REQUEST_NOTES = []
@@ -1039,6 +1300,26 @@ def build_official_factor_cache(
             all_inst = pd.concat(institutional_frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first")
             df = df.merge(all_inst, on="股票代號", how="left")
 
+    # V109: FinMind only fills still-missing fields; exchange/MOPS values always win.
+    finmind_filled = 0
+    if enable_finmind_fallback:
+        fm_df, fm_diag = fetch_finmind_fallback(
+            universe, max_stocks=finmind_max_stocks,
+            include_institutional=include_institutional, include_revenue=include_revenue,
+            include_valuation=include_valuation,
+        )
+        diagnostics.extend(fm_diag)
+        if fm_df is not None and not fm_df.empty:
+            df, finmind_filled = _coalesce_fallback(df, fm_df, "FinMind", trust_score=82)
+            diagnostics.append(f"FinMind 本輪補值 {finmind_filled} 個欄位；官方原值未被覆蓋。")
+
+    # Preserve prior valid cache values for fields still missing this run.
+    old_df = load_factor_frame()
+    if old_df is not None and not old_df.empty:
+        df, old_filled = _coalesce_fallback(df, old_df, "前次有效快取", trust_score=60)
+        if old_filled:
+            diagnostics.append(f"前次有效快取補回 {old_filled} 個仍缺欄位。")
+
     # Ensure all expected numeric/data columns exist before scoring.
     for c in FACTOR_COLUMNS:
         if c not in df.columns:
@@ -1058,6 +1339,9 @@ def build_official_factor_cache(
         item.update(_calc_scores(item))
         item["官方因子更新時間"] = update_time
         item["官方因子資料源"] = ",".join(sources)
+        item["因子主要來源"] = "TWSE/TPEx/MOPS"
+        if not _safe_str(item.get("因子來源可信度")):
+            item["因子來源可信度"] = 100
         score_rows.append(item)
     out = pd.DataFrame(score_rows)
     for c in FACTOR_COLUMNS:
@@ -1097,6 +1381,11 @@ def build_official_factor_cache(
         "tpex_institutional_supported": True,
         "tpex_valuation_supported": True,
         "merge_placeholder_coalesce_supported": True,
+        "finmind_fallback_enabled": bool(enable_finmind_fallback),
+        "finmind_token_configured": bool(_finmind_token()),
+        "finmind_max_stocks": int(finmind_max_stocks),
+        "finmind_filled_fields": int(finmind_filled),
+        "trusted_source_priority": ["TWSE/TPEx/MOPS", "FinMind", "前次有效快取"],
     }
     if save and should_save:
         save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
