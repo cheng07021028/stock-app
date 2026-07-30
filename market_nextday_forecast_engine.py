@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Explainable next-session market forecast for the GodPick system.
 
 The engine is deliberately local and deterministic.  It does not fetch data and
@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-FORECAST_VERSION = "nextday_market_forecast_v1_20260713"
+FORECAST_VERSION = "nextday_market_forecast_v2_1_post_crash_cooldown_20260730"
 DEFAULT_RECORDS_FILE = "market_nextday_forecast_records.json"
 
 
@@ -445,12 +445,41 @@ def build_nextday_market_forecast(
     else:
         confidence = "低"
 
-    extreme_lockdown = bool(tw_pct <= -3.5 or (otc_pct is not None and otc_pct <= -4.5))
+    # Phase 98: 極端崩跌後不能只看隔日單日反彈就解除封鎖。
+    # 2026-07-28 大跌後，7/29 的短暫反彈若未達廣泛且有力的修復，
+    # 隔日仍可能出現第二段下殺。以歷史收盤推算前一交易日報酬，
+    # 並至少要求加權 +1.5%、櫃買 +1.0% 才視為初步修復。
+    prev_tw_pct = None
+    try:
+        if not hist.empty and "收盤" in hist.columns:
+            hist_dates = pd.to_datetime(hist.get("日期"), errors="coerce") if "日期" in hist.columns else None
+            hist_ret = pd.to_numeric(hist["收盤"], errors="coerce").pct_change() * 100.0
+            data_ts = pd.to_datetime(data_date, errors="coerce") if data_date else pd.NaT
+            if hist_dates is not None and pd.notna(data_ts) and len(hist_ret) >= 2:
+                same_day = bool(pd.notna(hist_dates.iloc[-1]) and hist_dates.iloc[-1].date() == data_ts.date())
+                idx = -2 if same_day and len(hist_ret) >= 3 else -1
+                val = hist_ret.iloc[idx]
+            else:
+                val = hist_ret.iloc[-1] if len(hist_ret) else None
+            if val is not None and pd.notna(val):
+                prev_tw_pct = float(val)
+    except Exception:
+        prev_tw_pct = None
+
+    current_extreme = bool(tw_pct <= -3.5 or (otc_pct is not None and otc_pct <= -4.5))
+    previous_crash = bool(prev_tw_pct is not None and prev_tw_pct <= -3.5)
+    broad_recovery = bool(tw_pct >= 1.5 and (otc_pct is None or otc_pct >= 1.0))
+    post_crash_cooldown = bool(previous_crash and not broad_recovery)
+    extreme_lockdown = bool(current_extreme or post_crash_cooldown)
     if extreme_lockdown:
         effect_delta = -8.0
         weight_delta = -8
         position_cap = 0
-        effect_mode = "LOCKDOWN｜極端市場全面封鎖"
+        effect_mode = (
+            "LOCKDOWN-C1｜崩跌後冷卻確認"
+            if post_crash_cooldown and not current_extreme
+            else "LOCKDOWN｜極端市場全面封鎖"
+        )
     elif confidence == "低" or coverage < 0.52:
         effect_delta = 0.0
         weight_delta = 0
@@ -543,8 +572,16 @@ def build_nextday_market_forecast(
             "position_cap_pct": position_cap,
             "preferred_style": style,
             "avoid_style": avoid,
-            "hard_filter": False,
-            "note": "只做小幅權重與風控校正，不直接刪除逆勢強股；低信心時不加減分。",
+            "hard_filter": bool(extreme_lockdown),
+            "previous_tw_return_pct": None if prev_tw_pct is None else round(prev_tw_pct, 2),
+            "post_crash_cooldown": bool(post_crash_cooldown),
+            "broad_recovery_confirmed": bool(broad_recovery),
+            "lockdown_reason": (
+                "前一交易日加權跌幅達-3.5%且本日未完成廣泛修復"
+                if post_crash_cooldown and not current_extreme
+                else "本日加權或櫃買跌幅達極端門檻" if current_extreme else ""
+            ),
+            "note": "極端崩跌與崩跌後冷卻期為硬封鎖；其餘狀態只做權重與風控校正。",
         },
         "disclaimer": "隔日預測為多因子機率模型，應搭配開盤缺口、成交量與個股觸發價確認，不構成獲利保證。",
     }
@@ -575,4 +612,8 @@ def flatten_forecast_for_bridge(forecast: dict[str, Any] | None) -> dict[str, An
         "next_day_preferred_style": effect.get("preferred_style"),
         "next_day_avoid_style": effect.get("avoid_style"),
         "next_day_effect_mode": effect.get("mode"),
+        "next_day_previous_tw_return_pct": effect.get("previous_tw_return_pct"),
+        "next_day_post_crash_cooldown": effect.get("post_crash_cooldown", False),
+        "next_day_broad_recovery_confirmed": effect.get("broad_recovery_confirmed", False),
+        "next_day_lockdown_reason": effect.get("lockdown_reason"),
     }

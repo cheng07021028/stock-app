@@ -16,7 +16,7 @@ try:
 except Exception:
     apply_recommendation_rotation_guard = None
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_5_rotation_quality_guard_20260727"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_6_post_crash_cooldown_guard_20260730"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -705,6 +705,11 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         defensive = True
     if score > 0 and score < 25:
         panic = True
+    # LOCKDOWN/極端風險必然同時屬於 severe 與 defensive，
+    # 避免後續紅燈觸發脆弱度函式因 severe=False 而跳過硬封鎖。
+    if panic:
+        severe = True
+        defensive = True
 
     # 舊大盤快照不得硬封鎖新一輪個股行情。過期時只保留「縮倉/條件式」提醒，
     # 排名與雷達改由最新個股 K 線、主流資金、族群廣度決定。
@@ -881,10 +886,16 @@ def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
     washout_first_touch_block = bool(
         washout_day and (crash_day or close_pos < 60 or upper >= 30 or vol_ratio >= 2.2 or gap > 4.5)
     )
-    block_breakout = bool(score >= 65 or high_heat or washout_first_touch_block)
+    crash_cooldown = bool(market.get("panic") or _contains_any(str(market.get("blob", "")), ["LOCKDOWN", "崩跌後冷卻", "冷卻確認"]))
+    if crash_cooldown:
+        score = max(score, 95.0)
+    block_breakout = bool(score >= 65 or high_heat or washout_first_touch_block or crash_cooldown)
     two_stage = bool(score >= 40 or block_breakout)
     leader_open_drive = bool(mainrise >= 80 and amount >= 500 and close_pos >= 65 and upper <= 35)
-    if washout_first_touch_block:
+    if crash_cooldown:
+        status = "BLOCK-C1｜崩跌後冷卻期禁止觸發"
+        requirement = "前一交易日發生極端崩跌且市場尚未完成廣泛修復；盤中碰觸觸發價一律不算買點，至少等待一個完整交易日止穩，再重新掃描。"
+    elif washout_first_touch_block:
         status = "BLOCK-R2｜跌深反轉首觸禁買"
         requirement = "跌深反轉不得碰價即買；需先站穩觸發價至少15分鐘，再回測守價不破或出現二次突破，才可極小量評估。"
     elif block_breakout:
@@ -899,14 +910,15 @@ def _red_market_trigger_fragility_profile(row: pd.Series) -> dict[str, Any]:
     else:
         status = "F+｜紅燈觸發結構相對穩定"
         requirement = "仍需觸發、守價與分批，禁止開盤預掛追價。"
-    if leader_open_drive and block_breakout and not washout_day:
+    if leader_open_drive and block_breakout and not washout_day and not crash_cooldown:
         requirement += " 另可採早盤強勢替代路徑：平高盤開出後，至少15分鐘站穩前收+1.5%、量價同步且第一次回測不破，才可小量；不得追第一根急拉。"
     return {
         "score": round(score, 1), "status": status, "requirement": requirement,
         "two_stage": two_stage, "block_breakout": block_breakout,
         "resilient_leader": resilient_leader,
         "washout_first_touch_block": washout_first_touch_block,
-        "leader_open_drive": leader_open_drive and not washout_day,
+        "leader_open_drive": leader_open_drive and not washout_day and not crash_cooldown,
+        "crash_cooldown": crash_cooldown,
     }
 
 
@@ -979,7 +991,9 @@ def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
         blockers.append(f"耗竭風險{exhaustion:.0f}")
     if upper >= 50 and close_pos < 55:
         blockers.append(f"長上影{upper:.0f}%且收盤位置{close_pos:.0f}%偏弱")
-    if fragility.get("block_breakout"):
+    if fragility.get("crash_cooldown"):
+        blockers.append("崩跌後冷卻期：任何盤中碰價均不視為有效觸發")
+    elif fragility.get("block_breakout"):
         blockers.append("紅燈高熱/脆弱結構禁止碰價追突破")
 
     if fragility.get("block_breakout"):
