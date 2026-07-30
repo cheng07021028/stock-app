@@ -11,22 +11,22 @@
   },
   "applied_weights": {
     "市場環境": 4,
-    "技術結構": 21,
+    "技術結構": 20,
     "起漲前兆": 4,
     "類股熱度": 4,
     "自動因子": 21,
     "交易可行": 4,
-    "型態突破": 21,
+    "型態突破": 22,
     "爆發力": 21
   },
   "score_weights": {
     "市場環境": 4,
-    "技術結構": 21,
+    "技術結構": 20,
     "起漲前兆": 4,
     "類股熱度": 4,
     "自動因子": 21,
     "交易可行": 4,
-    "型態突破": 21,
+    "型態突破": 22,
     "爆發力": 21
   },
   "column_orders": {
@@ -300,9 +300,9 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-07-29 14:48:10",
-  "weight_settings_updated_at": "2026-07-29 14:23:30",
-  "weight_update_seq": 81,
+  "updated_at": "2026-07-30 15:05:03",
+  "weight_settings_updated_at": "2026-07-11 15:21:43",
+  "weight_update_seq": 80,
   "weight_source": "14_股神權重校正",
   "last_weight_calibration_profile": "主校正建議",
   "version": "godpick_v5_persistent_settings"
