@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 
 
@@ -3098,53 +3098,35 @@ def _default_otc_row(target_date: date) -> dict[str, Any]:
     return {"ok": False, "source": "櫃買快取", "error": "尚無櫃買資料"}
 
 
-def _fetch_otc_with_fallback(target_date: date, timeout: float = 2.2) -> dict[str, Any]:
-    """
-    v30：櫃買指數自動取得。
-    優先使用 Yahoo ^TWOII 備援資料；失敗時保留最近快取，不偽裝今天、不偽裝 0。
-    """
-    tried = []
+def _fetch_otc_with_fallback(target_date: date, timeout: float = 5.0) -> dict[str, Any]:
+    """V110：櫃買指數多來源歷史更新；至少 2 筆歷史資料才算成功。"""
     try:
-        y = _fetch_yahoo_chart("^TWOII", target_date, timeout=timeout)
-        tried.append(f"Yahoo ^TWOII:{y.get('error') if isinstance(y, dict) else 'unknown'}")
-        if isinstance(y, dict) and y.get("ok") and y.get("close") is not None:
-            close_val = _safe_float(y.get("close"))
-            pct_val = _safe_float(y.get("pct"))
-            change_points = None
-            if close_val is not None and pct_val is not None and abs(100 + pct_val) > 1e-9:
-                change_points = close_val * pct_val / (100 + pct_val)
-            row = {
-                "ok": True,
-                "source": "Yahoo ^TWOII 櫃買指數備援",
-                "source_grade": "備援",
-                "date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-                "used_date": _safe_str(y.get("date")) or pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-                "close": close_val,
-                "pct": pct_val,
-                "change_points": change_points,
-                "is_realtime": False,
-                "updated_at": _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            _v29_write_source_status("櫃買", "success", row.get("source"), "備援", "櫃買指數取得成功")
-            return row
+        from market_index_history_service import fetch_market_index_history
+        payload = fetch_market_index_history("otc", days=120, target_date=target_date, timeout=max(3.0, timeout))
     except Exception as e:
-        tried.append(f"Yahoo ^TWOII例外:{e}")
-
+        payload = {"ok": False, "error": f"market_index_history_service 例外：{e}"}
+    if payload.get("ok") and int(payload.get("rows") or 0) >= 2:
+        row = {
+            "ok": True, "source": payload.get("source"),
+            "source_grade": "官方/備援" if "TPEx" in str(payload.get("source")) else "備援",
+            "date": payload.get("date"), "used_date": payload.get("date"),
+            "close": _safe_float(payload.get("close")),
+            "pct": _safe_float(payload.get("change_pct")),
+            "change_points": _safe_float(payload.get("change")),
+            "history": payload.get("history") or [], "history_rows": int(payload.get("rows") or 0),
+            "is_realtime": False, "updated_at": payload.get("updated_at") or _tw_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "diagnostics": payload.get("diagnostics") or [],
+        }
+        _v29_write_source_status("櫃買", "success", row.get("source"), row.get("source_grade"), f"歷史K線 {row['history_rows']} 筆")
+        return row
     cache = _default_otc_row(target_date)
-    if isinstance(cache, dict) and cache.get("close") is not None:
-        cache["ok"] = True
-        cache["source_grade"] = "快取"
-        _v29_write_source_status("櫃買", "cache", cache.get("source"), "快取", "使用最近可用櫃買快取")
+    if isinstance(cache, dict) and cache.get("close") is not None and int(cache.get("history_rows") or len(cache.get("history") or [])) >= 2:
+        cache["ok"] = True; cache["source_grade"] = "快取"
+        _v29_write_source_status("櫃買", "cache", cache.get("source"), "快取", "使用最近有效櫃買歷史快取")
         return cache
-
-    _v29_write_source_status("櫃買", "failed", "Yahoo ^TWOII / 快取", "失敗", " / ".join(tried[-5:]))
-    return {
-        "ok": False,
-        "source": "櫃買多來源備援",
-        "source_grade": "失敗",
-        "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"),
-        "error": "櫃買資料取得失敗：" + " / ".join(tried[-5:]),
-    }
+    err = str(payload.get("error") or "所有來源均未取得至少2筆歷史K線")
+    _v29_write_source_status("櫃買", "failed", "Yahoo雙主機 / TPEx官方 / 歷史快取", "失敗", err)
+    return {"ok": False, "source": "櫃買多來源歷史服務", "source_grade": "失敗", "date": pd.to_datetime(target_date).strftime("%Y-%m-%d"), "history": [], "history_rows": 0, "error": err}
 
 
 def _background_otc_worker(target_date_text: str) -> None:

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 macro_startup_service.py
 v109：專案開啟即更新 0/1 大盤走勢橋接資料。
@@ -473,6 +473,28 @@ def _run_fast_update(sync_github: bool = True) -> Dict[str, Any]:
                 results[key] = {"ok": False, "symbol": symbols[key], "error": str(e)[:120] or "timeout"}
     for key, sym in symbols.items():
         results.setdefault(key, {"ok": False, "symbol": sym, "error": "timeout"})
+
+    # V110：台股兩項必須有至少2筆歷史資料；Yahoo失敗或rows不足時改走多來源服務。
+    try:
+        from market_index_history_service import fetch_market_index_history
+        for key in ("twse", "otc"):
+            current = results.get(key) or {}
+            if not current.get("ok") or int(current.get("rows") or 0) < 2:
+                fixed = fetch_market_index_history(key, days=90, timeout=5.0)
+                if fixed.get("ok") and int(fixed.get("rows") or 0) >= 2:
+                    results[key] = {
+                        "ok": True, "symbol": symbols[key], "date": fixed.get("date"),
+                        "close": fixed.get("close"), "prev_close": fixed.get("prev_close"),
+                        "change": fixed.get("change"), "change_pct": fixed.get("change_pct"),
+                        "ma5": round(sum(x["close"] for x in fixed["history"][-5:]) / min(5, len(fixed["history"])), 2),
+                        "ma20": round(sum(x["close"] for x in fixed["history"][-20:]) / min(20, len(fixed["history"])), 2),
+                        "source": fixed.get("source"), "rows": fixed.get("rows"),
+                        "history": fixed.get("history"), "diagnostics": fixed.get("diagnostics"),
+                    }
+                else:
+                    results[key] = fixed
+    except Exception as e:
+        results.setdefault("index_history_service", {"ok": False, "error": str(e)})
 
     if not (results.get("twse") or {}).get("ok"):
         old = _read_json(MARKET_SNAPSHOT_FILE, {})
