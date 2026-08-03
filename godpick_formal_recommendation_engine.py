@@ -16,7 +16,7 @@ try:
 except Exception:
     apply_recommendation_rotation_guard = None
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_6_post_crash_cooldown_guard_20260730"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_7_probability_calibration_20260803"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -24,6 +24,13 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "操作許可",
     "正式推薦等級",
     "推薦可信度分",
+    "模型隔日上漲機率%",
+    "模型預測信心分",
+    "模型預測等級",
+    "模型預估超額報酬%",
+    "模型下行風險%",
+    "模型預測限制",
+    "崩跌後反彈過熱",
     "股神推薦優先分",
     "股神推薦總排名",
     "股神推薦等級",
@@ -138,6 +145,10 @@ FORMAL_RECOMMENDATION_COLUMNS = [
 
 NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "推薦可信度分",
+    "模型隔日上漲機率%",
+    "模型預測信心分",
+    "模型預估超額報酬%",
+    "模型下行風險%",
     "股神推薦優先分",
     "股神推薦總排名",
     "主流主升優先分",
@@ -2582,6 +2593,7 @@ def _classify(row: pd.Series) -> dict[str, Any]:
     official_freshness = _official_factor_freshness_info(row)
     combined_freshness = _combined_data_freshness_info(row)
     red_fragility = _red_market_trigger_fragility_profile(row)
+    prediction = _prediction_calibration_profile(row)
     decision_source = (
         promotion["route"] if direct_primary and promotion["formal"] else
         "完整因子正式門檻" if direct_primary else
@@ -2777,6 +2789,17 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         action = f"{action}；{red_fragility.get('requirement', '')}".strip("；")
         radar_action = f"{radar_action}；需二段確認".strip("；")
 
+    # 預測校準層：漲停式反彈或低信心資料不得留在可買區。
+    if prediction.get("hard_block") and bucket in ["正式下週主推薦", "A-｜準主推薦小量試單", "盤中雷達追蹤"]:
+        bucket = "高風險雷達觀察"
+        qual = "PRED-BLOCK｜預測校準禁止升格"
+        direct_buy = "不可｜等待整理與重新確認"
+        action = prediction.get("limit", "預測信心不足，只供研究雷達。")
+        radar_level = "PRED｜預測校準觀察"
+        radar_action = "不得因單日急漲或低信心分數追價；至少等待整理/回測後重新掃描"
+        exclude_text = prediction.get("limit", "預測校準限制")
+        decision_source = "隔日機率與信心校準"
+
     sort_score = op + next_profile["score"] * 0.12 + readiness["score"] * 0.18
     if bucket == "正式下週主推薦":
         sort_score += 20
@@ -2803,6 +2826,13 @@ def _classify(row: pd.Series) -> dict[str, Any]:
         effective_readiness_reasons = ""
     return {
         **final_meta,
+        "模型隔日上漲機率%": prediction.get("probability", 50),
+        "模型預測信心分": prediction.get("confidence", 0),
+        "模型預測等級": prediction.get("grade", ""),
+        "模型預估超額報酬%": prediction.get("expected_alpha", 0),
+        "模型下行風險%": prediction.get("downside", 100),
+        "模型預測限制": prediction.get("limit", ""),
+        "崩跌後反彈過熱": "是｜禁止隔日追價" if prediction.get("rebound_heat") else "否",
         "主流主升優先分": mainrise.get("score", 0),
         "主流主升判定": mainrise.get("status", ""),
         "主流主升操作限制": mainrise.get("restriction", ""),
@@ -2947,6 +2977,109 @@ def _priority_bucket_meta(row: pd.Series) -> tuple[str, float, float]:
     return "12｜一般觀察", -7.0, 60.0
 
 
+
+def _prediction_calibration_profile(row: pd.Series) -> dict[str, Any]:
+    """以可解釋、保守方式估計隔日方向與可信度。
+
+    這不是保證報酬的黑箱預言；它把買點、風控、觸發品質、主流結構、
+    歷史回饋與資料品質轉成一致的機率尺度，並對漲停式反彈、耗竭、
+    官方因子缺失與崩跌後首波反彈進行硬性降權。
+    """
+    entry = _clamp(max(_num(row, "Entry進場買點分", 0), _num(row, "進場買點分", 0), _num(row, "買進分數", 0)))
+    risk = _clamp(max(_num(row, "Risk風控安全分", 0), _num(row, "風控安全分", 0)))
+    trigger = _clamp(_safe_float(row.get("隔日觸發品質分"), _nextday_trigger_quality_profile(row)["score"]))
+    mainrise = _clamp(_safe_float(row.get("主流主升優先分"), _mainstream_mainrise_profile(row)["score"]))
+    feedback = _clamp(_num(row, "Feedback績效校正分", 25))
+    quality = _clamp(max(_num(row, "資料完整度評分", 0), _data_quality_score(row)))
+    rr = min(3.0, max(0.0, _risk_reward_ratio(row)))
+    exhaustion = _clamp(_num(row, "隔日耗竭風險分", _exhaustion_profile(row)["score"]))
+    chase = _clamp(_chase_risk_score(row, 55))
+    ret1 = _num(row, "今日漲幅%", 0)
+    ret5 = _num(row, "近5日漲幅%", 0)
+    close_pos = _clamp(_num(row, "當日收盤位置%", 50))
+    upper = _clamp(_num(row, "上影線比例%", 0))
+    market = _market_risk_info(row)
+    official = _official_factor_freshness_info(row)
+
+    rebound_heat = bool(
+        ret1 >= 8.0
+        or (ret1 >= 6.0 and (exhaustion >= 55 or chase >= 70))
+        or (ret5 >= 15.0 and ret1 > 3.0)
+    )
+    crash_rebound = bool(rebound_heat and (market.get("panic") or market.get("lockdown") or market.get("severe")))
+
+    linear = 0.0
+    linear += (entry - 50.0) * 0.030
+    linear += (risk - 50.0) * 0.025
+    linear += (trigger - 50.0) * 0.026
+    linear += (mainrise - 50.0) * 0.018
+    linear += (quality - 50.0) * 0.010
+    linear += (feedback - 25.0) * 0.012
+    linear += (rr - 1.0) * 0.24
+    linear += (close_pos - 50.0) * 0.010
+    linear -= exhaustion * 0.018
+    linear -= max(0.0, chase - 55.0) * 0.018
+    linear -= max(0.0, upper - 25.0) * 0.014
+    linear -= 0.75 if rebound_heat else 0.0
+    linear -= 0.55 if crash_rebound else 0.0
+    linear -= 0.45 if market.get("severe") else 0.0
+
+    # logistic，限制在 18%~82%，避免產生虛假的極端確定性。
+    import math
+    probability = 100.0 / (1.0 + math.exp(-linear))
+    probability = min(82.0, max(18.0, probability))
+
+    confidence = 35.0 + quality * 0.35 + trigger * 0.18 + risk * 0.12
+    if not official.get("fresh", False):
+        confidence -= 18.0
+    if not official.get("known", False):
+        confidence -= 8.0
+    if market.get("stale"):
+        confidence -= 20.0
+    if rebound_heat:
+        confidence -= 10.0
+    confidence = _clamp(confidence)
+
+    # 資料不足時機率必須收斂到中性，不得用技術分數冒充高確定性。
+    if confidence < 55.0:
+        probability = 50.0 + (probability - 50.0) * 0.45
+    if not official.get("fresh", False):
+        probability = min(probability, 58.0)
+    if rebound_heat:
+        probability = min(probability, 54.0)
+
+    expected_alpha = (probability - 50.0) * 0.055 + (rr - 1.0) * 0.12
+    downside = _clamp(100.0 - risk + exhaustion * 0.35 + max(0.0, chase - 55.0) * 0.30)
+
+    hard_block = bool(rebound_heat or confidence < 45.0 or market.get("lockdown"))
+    if hard_block and rebound_heat:
+        limit = "反彈過熱｜隔日禁止追價，需至少一日整理或回測守價後再重新評分"
+    elif confidence < 45.0:
+        limit = "預測信心不足｜資料或官方因子不完整，只供研究雷達"
+    elif not official.get("fresh", False):
+        limit = "官方因子未對齊｜機率已收斂，只供研究，不得作正式買進依據"
+    else:
+        limit = "條件式估計｜仍須觸發、守價與停損，不代表保證上漲"
+
+    if probability >= 65 and confidence >= 70 and not hard_block:
+        grade = "P-A｜高品質條件優勢"
+    elif probability >= 58 and confidence >= 60 and not hard_block:
+        grade = "P-B｜中度條件優勢"
+    elif probability >= 52:
+        grade = "P-C｜輕微優勢/待確認"
+    else:
+        grade = "P-D｜無明顯隔日優勢"
+    return {
+        "probability": round(probability, 1),
+        "confidence": round(confidence, 1),
+        "grade": grade,
+        "expected_alpha": round(expected_alpha, 2),
+        "downside": round(downside, 1),
+        "limit": limit,
+        "rebound_heat": rebound_heat,
+        "hard_block": hard_block,
+    }
+
 def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, str, str]:
     """單一推薦優先分：提高主流資金、族群廣度與主升領漲的可見性。"""
     candidate = _clamp(max(
@@ -2982,12 +3115,22 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     amount = _reference_turnover_m(row)
     liquidity_score = 100.0 if amount >= 3000 else 90.0 if amount >= 1200 else 80.0 if amount >= 500 else 68.0 if amount >= 200 else 55.0 if amount >= 100 else 30.0 if amount > 0 else 15.0
 
+    prediction = _prediction_calibration_profile(row)
+    probability = prediction["probability"]
+    prediction_confidence = prediction["confidence"]
     score = (
         candidate * 0.11 + execution * 0.14 + entry * 0.09 + risk * 0.08
         + route * 0.12 + mainstream * 0.12 + sector * 0.09 + mainrise * 0.11
         + trigger_quality * 0.08 + rr_score * 0.02 + liquidity_score * 0.02
         + quality * 0.01 + actionable * 0.01
     )
+    # 讓歷史/資料校準後的隔日機率與信心影響排序，但不取代硬風控。
+    score += (probability - 50.0) * 0.22
+    score += (prediction_confidence - 50.0) * 0.06
+    if prediction.get("rebound_heat"):
+        score -= 10.0
+    if prediction_confidence < 45.0:
+        score -= 8.0
 
     use_label, bucket_bonus, score_cap = _priority_bucket_meta(row)
     score += bucket_bonus
@@ -3077,7 +3220,7 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     explain = (
         f"候選{candidate:.0f}｜操作{execution:.0f}｜買點{entry:.0f}｜風控{risk:.0f}｜"
         f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜主升{mainrise:.0f}｜"
-        f"觸發品質{trigger_quality:.0f}｜紅燈脆弱{fragility:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}"
+        f"觸發品質{trigger_quality:.0f}｜紅燈脆弱{fragility:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}｜預測{probability:.1f}%/信心{prediction_confidence:.0f}"
     )
     return score, grade, use_label, explain
 
