@@ -16,7 +16,7 @@ try:
 except Exception:
     apply_recommendation_rotation_guard = None
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_7_probability_calibration_20260803"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_8_adaptive_admission_funnel_20260804"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -31,6 +31,11 @@ FORMAL_RECOMMENDATION_COLUMNS = [
     "模型下行風險%",
     "模型預測限制",
     "崩跌後反彈過熱",
+    "推薦資格路徑",
+    "資料受限A-",
+    "A-建議單檔上限%",
+    "推薦漏斗階段",
+    "推薦漏斗阻擋主因",
     "股神推薦優先分",
     "股神推薦總排名",
     "股神推薦等級",
@@ -149,6 +154,7 @@ NUMERIC_FORMAL_RECOMMENDATION_COLUMNS = {
     "模型預測信心分",
     "模型預估超額報酬%",
     "模型下行風險%",
+    "A-建議單檔上限%",
     "股神推薦優先分",
     "股神推薦總排名",
     "主流主升優先分",
@@ -3676,6 +3682,145 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
                 out.at[idx, "核心雷達降級原因"] = reason_map.get(idx, "未達R1/R2最低條件")
     return out
 
+
+def _data_limited_a_minus_candidate(row: pd.Series) -> tuple[bool, float, str]:
+    """官方因子暫時不足時的嚴格條件式 A- 路徑。
+
+    此路徑不是正式推薦，也不放寬市場/價格新鮮度/流動性/停損/過熱等硬風控。
+    只在技術、風控、成交額與預測校準同時達標時，提供最多 1% 的條件試單資格。
+    """
+    market = _market_risk_info(row)
+    readiness = _entry_readiness_profile(row)
+    prediction = _prediction_calibration_profile(row)
+    liq = _liquidity_info(row)
+    official = _official_factor_freshness_info(row)
+    rotation = _safe_str(row.get("推薦輪動狀態"))
+    bucket = _safe_str(row.get("正式推薦分區"))
+    blob = _text_blob(row, [
+        "正式推薦排除原因", "進場阻擋原因", "風控否決旗標", "真禁買原因",
+        "模型預測限制", "紅燈觸發管制", "掃描品質狀態",
+    ])
+    hard_words = [
+        "LOCKDOWN", "極端", "全面禁買", "大盤封鎖", "K線非最新", "行情落後",
+        "低流動性", "冷門", "停損距離", "過熱", "反彈過熱", "假突破", "假強",
+        "禁止升格", "PRED-BLOCK", "STICKY-BLOCK", "興櫃",
+    ]
+    if bucket in {"正式下週主推薦", "A-｜準主推薦小量試單"}:
+        return False, 0.0, "已有正式/A-資格"
+    if market.get("severe") or market.get("panic") or market.get("lockdown") or market.get("stale"):
+        return False, 0.0, "大盤風險或市場資料過期"
+    if not readiness.get("freshness", {}).get("fresh"):
+        return False, 0.0, "K線不是最新交易日"
+    if official.get("formal_ready"):
+        return False, 0.0, "官方因子已完整，應走標準正式/A-路徑"
+    if not liq.get("tradable") or _safe_str(row.get("市場別")).replace(" ", "") in {"興櫃", "Emerging"}:
+        return False, 0.0, "流動性或市場別不合格"
+    if any(word in (blob + "｜" + rotation) for word in hard_words):
+        return False, 0.0, "存在硬風控、過熱或重複缺訊號"
+    if prediction.get("hard_block") or prediction.get("rebound_heat"):
+        return False, 0.0, "預測校準禁止升格"
+
+    m = _objective_metrics(row)
+    op = _num(row, "可操作分", _compute_operability_score(row))
+    probability = _num(row, "模型隔日上漲機率%", prediction.get("probability", 50))
+    confidence = _num(row, "模型預測信心分", prediction.get("confidence", 0))
+    signal = _num(row, "今日訊號新鮮分", 55)
+    repeat_count = _num(row, "近5次入榜次數", 0)
+
+    checks = {
+        "可操作分": op >= 62,
+        "買進分": m["buy"] >= 74,
+        "Entry": m["entry"] >= 70,
+        "Risk": m["risk"] >= 60,
+        "實戰分": m["practical"] >= 55,
+        "RR": m["rr"] >= 0.85,
+        "停損": 0 < m["stop"] <= 5.5,
+        "上方空間": m["upside"] >= 5.0,
+        "成交額": m["amount"] >= 180,
+        "追價": m["chase"] <= 55,
+        "預測機率": probability >= 55,
+        "預測信心": confidence >= 45,
+        "近5日": -5 <= m["ret5"] <= 7,
+        "近20日": -8 <= m["ret20"] <= 20,
+        "訊號新鮮": signal >= 50 or repeat_count <= 1,
+    }
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        return False, 0.0, "、".join(failed[:5])
+
+    quality = (
+        op * 0.18 + m["entry"] * 0.18 + m["risk"] * 0.16 + m["practical"] * 0.12
+        + min(100.0, m["rr"] * 55.0) * 0.10 + probability * 0.12 + confidence * 0.08
+        + min(100.0, signal) * 0.06
+    )
+    return True, round(quality, 2), "官方因子暫缺，但價格、風控、流動性與預測條件同時達標"
+
+
+def _apply_adaptive_admission_funnel(out: pd.DataFrame) -> pd.DataFrame:
+    """保留正式推薦嚴格門檻，為官方資料暫缺建立最多 1 檔的條件式 A-。"""
+    if out is None or out.empty:
+        return out
+    work = out.copy()
+    for col, default in {
+        "推薦資格路徑": "標準分流",
+        "資料受限A-": "否",
+        "A-建議單檔上限%": 0.0,
+        "推薦漏斗階段": "雷達/觀察",
+        "推薦漏斗阻擋主因": "",
+    }.items():
+        if col not in work.columns:
+            work[col] = default
+
+    bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    work.loc[bucket.eq("正式下週主推薦"), "推薦漏斗階段"] = "正式推薦"
+    work.loc[bucket.eq("A-｜準主推薦小量試單"), "推薦漏斗階段"] = "A-準主推薦"
+    work.loc[bucket.eq("盤中雷達追蹤"), "推薦漏斗階段"] = "核心雷達"
+    work.loc[bucket.isin(["高風險雷達觀察", "不可直接買觀察"]), "推薦漏斗階段"] = "觀察/待確認"
+    work.loc[bucket.eq("正式排除清單"), "推薦漏斗階段"] = "正式排除"
+
+    # 已有標準 A-/正式推薦時不硬湊資料受限名額。
+    if bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]).any():
+        return work
+
+    candidates: list[tuple[Any, float, str]] = []
+    for idx, row in work.iterrows():
+        ok, score, reason = _data_limited_a_minus_candidate(row)
+        work.at[idx, "推薦漏斗阻擋主因"] = "" if ok else reason
+        if ok:
+            candidates.append((idx, score, reason))
+    if not candidates:
+        return work
+
+    # 每日最多 1 檔，避免在官方因子失效時把 A- 當成替代正式清單。
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    idx, score, reason = candidates[0]
+    market_info = _market_risk_info(work.loc[idx])
+    position_cap = 1.0 if market_info.get("formal_ready") else 0.5
+    work.at[idx, "正式推薦分區"] = "A-｜準主推薦小量試單"
+    work.at[idx, "正式推薦資格"] = "A-DQ｜資料受限條件A-"
+    work.at[idx, "正式推薦等級"] = "A-｜資料受限條件試單"
+    work.at[idx, "準主推薦等級"] = "A-｜資料受限條件試單"
+    work.at[idx, "是否正式推薦"] = "否"
+    work.at[idx, "操作許可"] = f"條件式{position_cap:.1f}%｜觸發、守價與大盤同步"
+    work.at[idx, "下週是否可直接買"] = f"不可直接買｜盤中確認後最多{position_cap:.1f}%"
+    work.at[idx, "正式推薦動作"] = (
+        "官方因子暫時不足，不得視為正式推薦；僅在放量站上實戰觸發價、守住觸發後守價，"
+        f"且大盤未轉弱時，單檔最多{position_cap:.1f}%試單。未觸發視為沒有交易。"
+    )
+    work.at[idx, "最終操作結論"] = f"A-DQ｜資料受限A-：只允許{position_cap:.1f}%條件試單"
+    work.at[idx, "正式推薦排除原因"] = ""
+    work.at[idx, "推薦資格路徑"] = "官方因子暫缺｜高品質量價風控備援"
+    work.at[idx, "資料受限A-"] = "是"
+    work.at[idx, "A-建議單檔上限%"] = position_cap
+    work.at[idx, "建議倉位上限%"] = min(position_cap, _num(work.loc[idx], "建議倉位上限%", position_cap) or position_cap)
+    work.at[idx, "推薦漏斗階段"] = "A-準主推薦｜資料受限"
+    work.at[idx, "推薦漏斗阻擋主因"] = f"官方因子未完整；已以{position_cap:.1f}%倉位與盤中二段確認限制"
+    work.at[idx, "正式推薦判定來源"] = "資料受限A-安全閥"
+    work.at[idx, "正式推薦排序分"] = max(_num(work.loc[idx], "正式推薦排序分", 0), score + 8.0)
+    work.at[idx, "推薦可信度分"] = min(58.0, max(_num(work.loc[idx], "推薦可信度分", 0), score * 0.75))
+    return work
+
+
 def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None:
         out = pd.DataFrame(columns=FORMAL_RECOMMENDATION_COLUMNS)
@@ -3707,4 +3852,6 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
         except Exception:
             # 輪動校正是排名防黏著層；失敗時不得讓正式推薦主流程崩潰。
             pass
+    out = _apply_adaptive_admission_funnel(out)
+    out = _apply_unified_recommendation_ranking(out)
     return out

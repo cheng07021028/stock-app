@@ -28,7 +28,7 @@ import tempfile
 
 import pandas as pd
 
-ROTATION_GUARD_VERSION = "phase90_rotation_quality_v1_20260727"
+ROTATION_GUARD_VERSION = "phase101_rotation_diversity_v2_20260804"
 ROTATION_HISTORY_FILE = "godpick_rotation_history.json"
 ROTATION_MAX_DATES = 30
 ROTATION_SNAPSHOT_TOP_N = 30
@@ -519,6 +519,36 @@ def apply_recommendation_rotation_guard(df: pd.DataFrame | None, base_dir: str |
                 ranked[col] = 0.0
             ranked[col] = pd.to_numeric(ranked[col], errors="coerce").fillna(0.0)
         ranked = ranked.sort_values(sort_cols, ascending=[False] * len(sort_cols), kind="mergesort")
+
+        # 前10名不再被「反覆入榜但缺乏新證據」完全占滿。只有在有合格新訊號候選時，
+        # 最多保留7檔近5次入榜>=3次的舊名單，至少讓3個新/低重複訊號參與競爭。
+        if len(ranked) >= 10 and "近5次入榜次數" in ranked.columns and "今日訊號新鮮分" in ranked.columns:
+            repeat_n = pd.to_numeric(ranked["近5次入榜次數"], errors="coerce").fillna(0)
+            signal_n = pd.to_numeric(ranked["今日訊號新鮮分"], errors="coerce").fillna(0)
+            repeat_pool = ranked.loc[repeat_n.ge(3)].copy()
+            fresh_pool = ranked.loc[repeat_n.lt(3) & signal_n.ge(50)].copy()
+            if len(fresh_pool) >= 3 and len(repeat_pool) >= 7:
+                selected_top = []
+                repeat_used = 0
+                fresh_used = 0
+                for idx in ranked.index:
+                    is_repeat = bool(repeat_n.loc[idx] >= 3)
+                    is_fresh = bool(repeat_n.loc[idx] < 3 and signal_n.loc[idx] >= 50)
+                    if is_repeat and repeat_used >= 7 and fresh_used < 3:
+                        continue
+                    selected_top.append(idx)
+                    repeat_used += int(is_repeat)
+                    fresh_used += int(is_fresh)
+                    if len(selected_top) == 10:
+                        break
+                for idx in fresh_pool.index:
+                    if len(selected_top) >= 10:
+                        break
+                    if idx not in selected_top:
+                        selected_top.append(idx)
+                remaining = [idx for idx in ranked.index if idx not in selected_top]
+                ranked = ranked.loc[selected_top + remaining]
+
         out["股神推薦總排名"] = 0
         rank_map = {idx: pos for pos, idx in enumerate(ranked.index, start=1)}
         out.loc[list(rank_map.keys()), "股神推薦總排名"] = [rank_map[idx] for idx in rank_map]

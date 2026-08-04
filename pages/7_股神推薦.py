@@ -11775,6 +11775,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
             "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化",
             "主流主升優先分", "主流主升判定", "主流主升操作限制",
+            "推薦資格路徑", "資料受限A-", "A-建議單檔上限%", "推薦漏斗階段",
             "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
             "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
             "主要進場路徑", "主要進場參考價", "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
@@ -11794,6 +11795,21 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             st.info("目前沒有資料新鮮且分數達 50 分的推薦/觀察候選；請先完成最新行情掃描。")
 
     render_pro_section("分區作戰明細｜正式／A-／核心雷達")
+    # 推薦漏斗：明確分辨「市場沒有合格股票」與「資料來源把資格鎖死」。
+    funnel_bucket = decision_source.get("正式推薦分區", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+    fresh_series = decision_source.get("K線資料新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+    official_series = decision_source.get("官方因子新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+    data_limited_series = decision_source.get("資料受限A-", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+    funnel_fresh = int(fresh_series.str.contains("最新", na=False).sum())
+    funnel_official = int(official_series.str.contains("最新|對齊|READY", regex=True, na=False).sum())
+    funnel_a = int(funnel_bucket.eq("A-｜準主推薦小量試單").sum())
+    funnel_formal = int(funnel_bucket.eq("正式下週主推薦").sum())
+    funnel_dq = int(data_limited_series.eq("是").sum())
+    st.caption(
+        f"推薦通過漏斗：候選 {len(decision_source)} → 最新K線 {funnel_fresh} → 官方因子對齊 {funnel_official} "
+        f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 正式推薦 {funnel_formal}。"
+        "資料受限A-每日最多1檔、單檔最多1%，不等同正式推薦。"
+    )
     row = summary.iloc[0]
     render_pro_kpi_row([
         {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
@@ -11834,7 +11850,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "最終操作結論", "股票代號", "股票名稱", "類別", "是否正式推薦", "操作許可",
             "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "主流主升優先分", "主流主升判定", "主流主升操作限制",
-            "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "模型隔日上漲機率%", "模型預測信心分", "模型預測等級", "模型下行風險%", "崩跌後反彈過熱", "候選強度分", "建議倉位上限%",
+            "正式推薦等級", "正式推薦判定來源", "實戰操作品質分", "推薦可信度分", "模型隔日上漲機率%", "模型預測信心分", "模型預測等級", "模型下行風險%", "崩跌後反彈過熱", "推薦資格路徑", "資料受限A-", "A-建議單檔上限%", "推薦漏斗階段", "候選強度分", "建議倉位上限%",
             "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
             "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%",
             "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
