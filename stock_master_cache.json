@@ -18802,20 +18802,6 @@
     "待修原因": ""
   },
   {
-    "code": "4130",
-    "name": "健亞",
-    "market": "上櫃",
-    "official_industry_raw": "22",
-    "official_industry_raw_col": "SecuritiesIndustryCode",
-    "official_industry": "生技醫療",
-    "theme_category": "生技醫療",
-    "category": "生技醫療",
-    "source": "tpex_上櫃_base",
-    "source_api": "tpex_上櫃",
-    "source_rank": 3,
-    "待修原因": ""
-  },
-  {
     "code": "4131",
     "name": "浩泰",
     "market": "上櫃",
@@ -28126,6 +28112,20 @@
     "待修原因": ""
   },
   {
+    "code": "3194",
+    "name": "圓方科技",
+    "market": "興櫃",
+    "official_industry_raw": "30",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "資訊服務業",
+    "theme_category": "資訊服務業",
+    "category": "資訊服務業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "3473",
     "name": "智通聯網",
     "market": "興櫃",
@@ -30716,20 +30716,6 @@
     "待修原因": ""
   },
   {
-    "code": "7575",
-    "name": "安美得",
-    "market": "興櫃",
-    "official_industry_raw": "22",
-    "official_industry_raw_col": "SecuritiesIndustryCode",
-    "official_industry": "生技醫療",
-    "theme_category": "生技醫療",
-    "category": "生技醫療",
-    "source": "tpex_興櫃_base",
-    "source_api": "tpex_興櫃",
-    "source_rank": 3,
-    "待修原因": ""
-  },
-  {
     "code": "7578",
     "name": "利百景",
     "market": "興櫃",
@@ -32452,6 +32438,20 @@
     "待修原因": ""
   },
   {
+    "code": "7917",
+    "name": "源傑科技",
+    "market": "興櫃",
+    "official_industry_raw": "27",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "通信網路業",
+    "theme_category": "通信網路業",
+    "category": "通信網路業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "7918",
     "name": "創鉅材料",
     "market": "興櫃",
@@ -32530,6 +32530,20 @@
     "official_industry": "生技醫療",
     "theme_category": "生技醫療",
     "category": "生技醫療",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
+    "code": "7925",
+    "name": "健生",
+    "market": "興櫃",
+    "official_industry_raw": "05",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "電機機械",
+    "theme_category": "電機機械",
+    "category": "電機機械",
     "source": "tpex_興櫃_base",
     "source_api": "tpex_興櫃",
     "source_rank": 3,
@@ -32656,6 +32670,20 @@
     "official_industry": "電子零組件業",
     "theme_category": "電子零組件業",
     "category": "電子零組件業",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
+    "code": "7939",
+    "name": "技宸",
+    "market": "興櫃",
+    "official_industry_raw": "25",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "電腦及週邊設備業",
+    "theme_category": "電腦及週邊設備業",
+    "category": "電腦及週邊設備業",
     "source": "tpex_興櫃_base",
     "source_api": "tpex_興櫃",
     "source_rank": 3,
