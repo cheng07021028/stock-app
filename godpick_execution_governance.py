@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Phase 8.3 execution governance for the GodPick system.
 
 This module separates four concepts that were previously mixed together:
@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase90_official_factor_coverage_guard_20260727"
+EXECUTION_GOVERNANCE_VERSION = "phase103_official_factor_effective_coverage_20260804"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -152,6 +152,38 @@ def _numeric_series(df: pd.DataFrame, col: str, default: float = 0.0) -> pd.Seri
     return pd.to_numeric(df[col], errors="coerce").fillna(float(default)).astype(float)
 
 
+
+
+def _parse_content_date(value: Any) -> pd.Timestamp | None:
+    """Parse YYYYMMDD numerics and ordinary date strings without ns misreading."""
+    text = _safe_str(value)
+    if not text:
+        return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    try:
+        if len(digits) == 8 and digits.startswith(("19", "20")):
+            ts = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
+        else:
+            ts = pd.to_datetime(text, errors="coerce")
+        return pd.Timestamp(ts).normalize() if pd.notna(ts) else None
+    except Exception:
+        return None
+
+
+def _business_lag(newer: Any, older: Any) -> int:
+    n = _parse_content_date(newer)
+    o = _parse_content_date(older)
+    if n is None or o is None:
+        return 999
+    if n <= o:
+        return 0
+    try:
+        return int(len(pd.bdate_range(start=o + pd.Timedelta(days=1), end=n)))
+    except Exception:
+        return max(0, int((n - o).days))
+
 def _normalise_code(value: Any) -> str:
     text = _safe_str(value).replace(".0", "")
     return text.zfill(4) if text.isdigit() and len(text) < 4 else text
@@ -205,6 +237,12 @@ def build_scan_quality_report(
 
     liquidity_coverage = 0.0
     official_coverage = 0.0
+    official_match_coverage = 0.0
+    official_effective_coverage = 0.0
+    official_trusted_coverage = 0.0
+    official_same_day_coverage = 0.0
+    official_one_day_lag_coverage = 0.0
+    official_missing_date_coverage = 0.0
     data_rows = 0
     if isinstance(candidate_frame, pd.DataFrame) and not candidate_frame.empty:
         frame = candidate_frame
@@ -216,15 +254,44 @@ def build_scan_quality_report(
         known = amount.gt(0) | avg_amount.gt(0) | volume.gt(0) | avg_volume.gt(0)
         liquidity_coverage = float(known.mean() * 100.0) if len(known) else 0.0
         official = pd.to_numeric(frame.get("官方資料完整度", pd.Series([float("nan")] * len(frame), index=frame.index)), errors="coerce")
-        official_coverage = float(official.notna().mean() * 100.0) if len(official) else 0.0
+        official_status = _series_text(frame, "官方因子資料狀態")
+        official_date_raw = frame.get("官方因子資料日期", frame.get("官方資料日期", pd.Series([None] * len(frame), index=frame.index)))
+        stock_date_raw = frame.get("本輪市場最新交易日", frame.get("K線最後交易日", pd.Series([None] * len(frame), index=frame.index)))
+        official_date = official_date_raw.map(_parse_content_date)
+        stock_date = stock_date_raw.map(_parse_content_date)
+        source_trust = pd.to_numeric(frame.get("因子來源可信度", pd.Series([0] * len(frame), index=frame.index)), errors="coerce").fillna(0)
+        matched = official.notna() | official_status.ne("")
+        effective = official.fillna(0).ge(45) | official_status.isin(["完整", "部分資料"])
+        lag_days = pd.Series([999] * len(frame), index=frame.index, dtype="int64")
+        valid_dates = official_date.notna() & stock_date.notna()
+        if bool(valid_dates.any()):
+            lag_days.loc[valid_dates] = [
+                _business_lag(stock_date.loc[idx], official_date.loc[idx]) for idx in frame.index[valid_dates]
+            ]
+        fresh_enough = valid_dates & lag_days.le(1)
+        trusted_source = source_trust.ge(70) | source_trust.eq(0)
+        trusted = effective & fresh_enough & trusted_source
+        official_match_coverage = float(matched.mean() * 100.0) if len(matched) else 0.0
+        official_effective_coverage = float(effective.mean() * 100.0) if len(effective) else 0.0
+        official_trusted_coverage = float(trusted.mean() * 100.0) if len(trusted) else 0.0
+        official_same_day_coverage = float((effective & valid_dates & lag_days.eq(0)).mean() * 100.0) if len(effective) else 0.0
+        official_one_day_lag_coverage = float((effective & valid_dates & lag_days.eq(1)).mean() * 100.0) if len(effective) else 0.0
+        official_missing_date_coverage = float((effective & ~valid_dates).mean() * 100.0) if len(effective) else 0.0
+        official_coverage = official_effective_coverage
     else:
         cached = _LAST_CANDIDATE_QUALITY if isinstance(_LAST_CANDIDATE_QUALITY, dict) else {}
         liquidity_coverage = _safe_float(
             data.get("liquidity_data_coverage_pct"), cached.get("liquidity_coverage", 0.0)
         )
         official_coverage = _safe_float(
-            data.get("official_data_coverage_pct"), cached.get("official_coverage", 0.0)
+            data.get("official_effective_coverage_pct", data.get("official_data_coverage_pct")), cached.get("official_coverage", 0.0)
         )
+        official_match_coverage = _safe_float(data.get("official_match_coverage_pct"), official_coverage)
+        official_effective_coverage = _safe_float(data.get("official_effective_coverage_pct"), official_coverage)
+        official_trusted_coverage = _safe_float(data.get("official_trusted_coverage_pct"), official_effective_coverage)
+        official_same_day_coverage = _safe_float(data.get("official_same_day_coverage_pct"), 0.0)
+        official_one_day_lag_coverage = _safe_float(data.get("official_one_day_lag_coverage_pct"), 0.0)
+        official_missing_date_coverage = _safe_float(data.get("official_missing_date_coverage_pct"), 0.0)
         data_rows = int(_safe_float(cached.get("rows"), 0))
 
     minimum_pool = max(100, min(300, int(expected * 0.15))) if expected > 0 else 100
@@ -252,14 +319,26 @@ def build_scan_quality_report(
         status, level, usable, factor = "流動性資料異常｜禁止正式推薦", "invalid", False, 0.0
         scope = f"有效K線{history_ok}檔，但流動性覆蓋不足"
         reason = "多數候選缺少成交額/成交量，不能把資料缺失誤判為低流動性，也不能產生正式買進結論。"
-    elif data_rows > 0 and official_coverage < 30.0:
-        status, level, usable, factor = "官方因子缺失｜只供研究雷達", "invalid", False, 0.0
-        scope = f"官方因子覆蓋率僅{official_coverage:.1f}%"
-        reason = "法人、營收、估值等官方因子未形成有效覆蓋；技術面排名可供雷達觀察，但不得宣稱為完整精準正式推薦。"
-    elif data_rows > 0 and official_coverage < 70.0:
-        status, level, usable, factor = "官方因子覆蓋不足｜只供研究雷達", "invalid", False, 0.0
-        scope = f"官方因子覆蓋率{official_coverage:.1f}%"
-        reason = "官方因子覆蓋未達70%；為避免只靠技術面與主流標籤反覆推同一批股票，本輪禁止正式/A-升格。"
+    elif data_rows > 0 and official_match_coverage >= 70.0 and official_effective_coverage < 30.0:
+        status, level, usable, factor = "官方紀錄存在但有效內容不足｜只供研究雷達", "invalid", False, 0.0
+        scope = f"紀錄匹配{official_match_coverage:.1f}%／有效因子僅{official_effective_coverage:.1f}%"
+        reason = "官方快取可對應股票，但完整度不足或只含空白占位值；不得把『有紀錄』誤當成有效官方因子。"
+    elif data_rows > 0 and official_effective_coverage < 30.0:
+        status, level, usable, factor = "官方因子有效覆蓋不足｜只供研究雷達", "invalid", False, 0.0
+        scope = f"有效因子覆蓋率僅{official_effective_coverage:.1f}%"
+        reason = "法人、營收、估值等有效欄位未形成足夠覆蓋；技術面排名只能作研究雷達。"
+    elif data_rows > 0 and official_trusted_coverage < 40.0:
+        status, level, usable, factor = "官方因子日期/可信度不足｜正式推薦暫停", "warning", True, 0.35
+        scope = f"有效{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
+        reason = "官方因子有有效內容，但日期未驗證、落後超過1日或來源可信度不足；可保留資料受限A-安全閥，正式推薦暫停。"
+    elif data_rows > 0 and official_effective_coverage < 70.0:
+        status, level, usable, factor = "官方因子有效覆蓋不足｜限定A-", "warning", True, 0.5
+        scope = f"有效因子覆蓋率{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
+        reason = "有效官方因子未達70%；不得升格正式推薦，但可依資料受限A-安全閥做極小量條件評估。"
+    elif data_rows > 0 and official_effective_coverage >= 70.0 and official_same_day_coverage < 40.0 and official_one_day_lag_coverage >= 40.0:
+        status, level, usable, factor = "官方因子有效但落後1日｜正式暫停／A-可評估", "warning", True, 0.5
+        scope = f"有效{official_effective_coverage:.1f}%／同日{official_same_day_coverage:.1f}%／落後1日{official_one_day_lag_coverage:.1f}%"
+        reason = "官方因子並非缺失，而是多數落後最新K線1個交易日；研究雷達與資料受限A-可用，正式推薦待同日資料完成後再升格。"
     elif coverage >= 99.0 and usable_history >= 80.0 and (liquidity_coverage >= 90.0 or data_rows == 0):
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
@@ -297,7 +376,13 @@ def build_scan_quality_report(
         "有效K線資料率%": round(usable_history, 2),
         "歷史資料成功率%": round(usable_history, 2),
         "流動性資料覆蓋率%": round(liquidity_coverage, 2),
-        "官方因子覆蓋率%": round(official_coverage, 2),
+        "官方因子覆蓋率%": round(official_effective_coverage, 2),
+        "官方紀錄匹配率%": round(official_match_coverage, 2),
+        "官方有效因子覆蓋率%": round(official_effective_coverage, 2),
+        "官方最新可信覆蓋率%": round(official_trusted_coverage, 2),
+        "官方同日對齊覆蓋率%": round(official_same_day_coverage, 2),
+        "官方落後1日覆蓋率%": round(official_one_day_lag_coverage, 2),
+        "官方日期未驗證覆蓋率%": round(official_missing_date_coverage, 2),
         "作戰候選率%": round(result_ratio, 2),
         "掃描品質說明": reason,
         "版本": EXECUTION_GOVERNANCE_VERSION,
@@ -312,7 +397,9 @@ def apply_scan_quality_to_frame(df: pd.DataFrame | None, report: dict[str, Any] 
     for col in [
         "掃描品質狀態", "掃描品質等級", "正式推薦可用", "推薦適用範圍", "倉位折減係數",
         "預計掃描數", "成功分析數", "掃描覆蓋率%", "有效K線資料率%",
-        "歷史資料成功率%", "流動性資料覆蓋率%", "官方因子覆蓋率%", "掃描品質說明",
+        "歷史資料成功率%", "流動性資料覆蓋率%", "官方因子覆蓋率%",
+        "官方紀錄匹配率%", "官方有效因子覆蓋率%", "官方最新可信覆蓋率%",
+        "官方同日對齊覆蓋率%", "官方落後1日覆蓋率%", "官方日期未驗證覆蓋率%", "掃描品質說明",
     ]:
         out[col] = data.get(col, "")
 

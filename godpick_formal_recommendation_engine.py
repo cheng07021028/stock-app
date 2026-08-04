@@ -402,21 +402,19 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     # 個股資料與交易品質先獨立判斷；大盤只決定是否可以執行，
     # 不再把已達標個股直接從 A-/正式候選名單抹除。
     official_freshness = _official_factor_freshness_info(row)
-    base_data_ok = (
-        fresh and not hard and liq["tradable"]
-        and bool(market.get("formal_ready"))
-        and bool(official_freshness.get("formal_ready"))
-    )
+    base_market_ok = fresh and not hard and liq["tradable"] and bool(market.get("formal_ready"))
+    base_data_ok_formal = bool(base_market_ok and official_freshness.get("formal_ready"))
+    base_data_ok_a_minus = bool(base_market_ok and official_freshness.get("a_minus_ready"))
 
     formal_pullback = bool(
-        base_data_ok and "回測" in _safe_str(readiness.get("path"))
+        base_data_ok_formal and "回測" in _safe_str(readiness.get("path"))
         and gap <= 4.0 and rr["conservative"] >= 1.60
         and 0 < stop <= 6.0 and entry >= 62 and risk >= 64 and buy >= 65
         and amount >= 250 and chase <= 45 and op_score >= 70
         and mainstream >= 60 and sector >= 50
     )
     formal_momentum = bool(
-        base_data_ok and momentum.get("core_ready") and momentum["score"] >= 82
+        base_data_ok_formal and momentum.get("core_ready") and momentum["score"] >= 82
         and momentum.get("exhaustion_score", 100) < 30
         and gap <= 5.0 and rr["trend"] >= 1.35
         and 0 < stop <= 7.0 and risk >= 64 and buy >= 60
@@ -425,7 +423,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     formal_candidate = formal_pullback or formal_momentum
 
     a_pullback = bool(
-        base_data_ok and not formal_candidate and "回測" in _safe_str(readiness.get("path"))
+        base_data_ok_a_minus and not formal_candidate and "回測" in _safe_str(readiness.get("path"))
         and gap <= 4.2 and rr["conservative"] >= 1.05
         and 0 < stop <= 8.2 and entry >= 62 and risk >= 55 and buy >= 55
         and amount >= 150 and chase <= 65 and op_score >= 62
@@ -433,7 +431,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         and ret5 >= -8.0 and ret20 >= -12.0
     )
     a_momentum = bool(
-        base_data_ok and not formal_candidate and momentum["radar_ready"] and momentum["score"] >= 78
+        base_data_ok_a_minus and not formal_candidate and momentum["radar_ready"] and momentum["score"] >= 78
         and momentum.get("exhaustion_score", 100) < 45
         and gap <= 6.0 and rr["trend"] >= 1.15
         and 0 < stop <= 7.5 and risk >= 58 and buy >= 55
@@ -441,7 +439,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         and ret5 >= -6.0 and ret20 >= -10.0
     )
     a_prebreak = bool(
-        base_data_ok and not formal_candidate and prebreak["radar_ready"] and prebreak["score"] >= 78
+        base_data_ok_a_minus and not formal_candidate and prebreak["radar_ready"] and prebreak["score"] >= 78
         and not prebreak.get("hot_risk") and gap <= 4.8 and rr["trend"] >= 1.15
         and 0 < stop <= 7.5 and risk >= 58 and buy >= 60
         and amount >= 300 and chase <= 60 and op_score >= 62
@@ -499,8 +497,10 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         near_reasons.append("K線非最新交易日")
     if not market.get("formal_ready"):
         near_reasons.append(f"大盤因子未與K線對齊（落後{market.get('lag', 0)}交易日）")
-    if not official_freshness.get("formal_ready"):
-        near_reasons.append(f"官方因子未與K線對齊（{official_freshness.get('status', '日期未驗證')}）")
+    if not official_freshness.get("effective_ready"):
+        near_reasons.append(f"官方因子無法有效驗證（{official_freshness.get('status', '日期未驗證')}）")
+    elif official_freshness.get("one_day_lag"):
+        near_reasons.append("官方因子落後1交易日：正式推薦待同步，A-可條件評估")
     near_reasons.extend(hard)
     if gap > 4.8:
         near_reasons.append(f"距可執行買點{gap:.1f}%")
@@ -595,7 +595,14 @@ def _date_value(row: pd.Series, names: list[str]) -> pd.Timestamp | None:
         if _is_blank(value):
             continue
         try:
-            ts = pd.to_datetime(value, errors="coerce")
+            text = str(value).strip()
+            if text.endswith(".0") and text[:-2].isdigit():
+                text = text[:-2]
+            digits = "".join(ch for ch in text if ch.isdigit())
+            if len(digits) == 8 and digits.startswith(("19", "20")):
+                ts = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
+            else:
+                ts = pd.to_datetime(text, errors="coerce")
             if pd.notna(ts):
                 if getattr(ts, "tzinfo", None) is not None:
                     ts = ts.tz_localize(None)
@@ -636,11 +643,16 @@ def _official_factor_freshness_info(row: pd.Series) -> dict[str, Any]:
     status_blob = _text_blob(row, ["官方因子資料狀態", "官方資料狀態", "資料完整度"])
     explicit_stale = _contains_any(status_blob, ["過期", "嚴重落後", "待更新", "stale"])
     stale = bool(stale or explicit_stale)
+    # 法人/估值等官方資料通常在收盤後分批發布；落後 1 個交易日可視為
+    # 「有效但非最新」，不得誤標成缺失。正式推薦仍優先要求同日對齊，
+    # A-／資料受限安全閥可在其他條件完整時使用落後 1 日資料。
+    effective_ready = bool((aligned or one_day_lag) and not explicit_stale)
     formal_ready = bool(aligned and not explicit_stale)
+    a_minus_ready = bool(effective_ready)
     if aligned:
         status = "最新/對齊"
     elif one_day_lag:
-        status = "落後1日｜正式/A-待同步"
+        status = "有效｜落後1交易日（正式待同步／A-可評估）"
     elif stale:
         status = f"過期｜落後{lag}交易日" if known else "過期｜日期未驗證"
     else:
@@ -651,6 +663,8 @@ def _official_factor_freshness_info(row: pd.Series) -> dict[str, Any]:
         "one_day_lag": one_day_lag,
         "stale": stale,
         "formal_ready": formal_ready,
+        "a_minus_ready": a_minus_ready,
+        "effective_ready": effective_ready,
         "official_date": official_date.strftime("%Y-%m-%d") if official_date is not None else "",
         "stock_date": stock_date.strftime("%Y-%m-%d") if stock_date is not None else "",
         "lag": lag if known else 999,
@@ -669,16 +683,27 @@ def _combined_data_freshness_info(row: pd.Series) -> dict[str, Any]:
         warnings.append(
             f"大盤{market.get('market_date') or '日期未驗證'}／K線{market.get('stock_date') or '未知'}未對齊"
         )
-    if official.get("known") and not official.get("formal_ready"):
+    if official.get("known") and not official.get("effective_ready"):
         warnings.append(
-            f"官方因子{official.get('official_date') or '未知'}落後K線{official.get('stock_date') or '未知'}"
+            f"官方因子{official.get('official_date') or '未知'}明顯落後K線{official.get('stock_date') or '未知'}"
+        )
+    elif official.get("known") and official.get("one_day_lag"):
+        warnings.append(
+            f"官方因子{official.get('official_date')}落後K線1交易日；正式推薦待同步，A-可條件評估"
         )
     elif not official.get("known"):
         warnings.append("官方因子日期未驗證")
     formal_ready = bool(kline.get("fresh") and market.get("formal_ready") and official.get("formal_ready"))
-    status = "READY｜K線/大盤/官方因子同交易日" if formal_ready else "WARNING｜資料未完全對齊，禁止正式/A-"
+    a_minus_ready = bool(kline.get("fresh") and market.get("formal_ready") and official.get("a_minus_ready"))
+    if formal_ready:
+        status = "READY｜K線/大盤/官方因子同交易日"
+    elif a_minus_ready:
+        status = "LIMITED｜官方因子落後1日，正式暫停／A-可條件評估"
+    else:
+        status = "WARNING｜資料未完全對齊，禁止正式推薦"
     return {
         "formal_ready": formal_ready,
+        "a_minus_ready": a_minus_ready,
         "status": status,
         "warning": "；".join(warnings),
         "market": market,
@@ -983,15 +1008,19 @@ def _nextday_trigger_quality_profile(row: pd.Series) -> dict[str, Any]:
         score = min(score, 48.0)
     if not market_info.get("formal_ready"):
         score = min(score, 54.0)
-    if not official_freshness.get("formal_ready"):
+    if not official_freshness.get("effective_ready"):
         score = min(score, 56.0)
+    elif official_freshness.get("one_day_lag"):
+        score = min(score, 62.0)
     score = _clamp(score)
 
     blockers: list[str] = []
     if not market_info.get("formal_ready"):
         blockers.append(f"大盤因子落後{market_info.get('lag', 0)}日，正式觸發待同步")
-    if not official_freshness.get("formal_ready"):
-        blockers.append(f"官方因子{official_freshness.get('status', '日期未驗證')}，正式觸發待同步")
+    if not official_freshness.get("effective_ready"):
+        blockers.append(f"官方因子{official_freshness.get('status', '日期未驗證')}，觸發待資料確認")
+    elif official_freshness.get("one_day_lag"):
+        blockers.append("官方因子落後1交易日，正式觸發待同步／A-可條件確認")
     if gap > 6.5:
         blockers.append(f"觸發距離{gap:.1f}%過遠")
     elif gap > 5.0:
