@@ -1354,10 +1354,19 @@ def _safe_json_read_local(path: str, default):
 
 
 def _safe_json_write_local(path: str, payload) -> tuple[bool, str]:
+    """原子寫入專案根目錄，並立即回讀驗證，避免 Reboot/工作目錄差異。"""
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
-        return True, f"已寫入本機：{path}"
+        target = Path(path)
+        if not target.is_absolute():
+            target = Path(__file__).resolve().parent.parent / target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp.replace(target)
+        verify = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(verify, type(payload)):
+            raise ValueError("回讀型別不一致")
+        return True, f"已原子寫入並回讀驗證：{target}"
     except Exception as e:
         return False, f"本機寫入失敗：{path} / {e}"
 
@@ -1968,17 +1977,35 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     if not isinstance(scan_report, dict):
         scan_report = {}
 
+    saved_at_now = _now_text()
+    candidate_records = _df_to_records_for_json(candidate_df)
+    recommendation_records = _df_to_records_for_json(action_df)
+    kline_date = _max_row_date_v173(candidate_records + recommendation_records, [
+        "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
+    ])
     payload = {
-        "saved_at": _now_text(),
+        "saved_at": saved_at_now,
+        "recommendation_date": saved_at_now[:10],
+        "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
         "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
-        "recommendations": _df_to_records_for_json(action_df),
-        "candidate_diagnosis": _df_to_records_for_json(candidate_df),
+        "recommendations": recommendation_records,
+        "candidate_diagnosis": candidate_records,
         "scan_quality": scan_report,
         "category_strength": _df_to_records_for_json(category_strength_df),
         "hot_pick": _df_to_records_for_json(hot_pick_df),
         "execution_governance_version": EXECUTION_GOVERNANCE_VERSION,
+        "snapshot_version": "phase104_verified_even_when_zero_formal",
     }
     local_ok, local_msg = _safe_json_write_local(GODPICK_LATEST_FILE, payload)
+    verify_payload = _read_project_json_file(GODPICK_LATEST_FILE) if local_ok else {}
+    verified = bool(
+        isinstance(verify_payload, dict)
+        and _safe_str(verify_payload.get("saved_at")) == saved_at_now
+        and isinstance(verify_payload.get("candidate_diagnosis"), list)
+    )
+    if local_ok and not verified:
+        local_ok = False
+        local_msg = f"快照寫入後回讀驗證失敗：{GODPICK_LATEST_FILE}"
     github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
 
     governed_list_df = _operational_recommendation_rows(action_df, refresh_decision=False)
@@ -2009,6 +2036,7 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         local_msg,
         github_msg,
         f"候選診斷保存：{len(candidate_df) if isinstance(candidate_df, pd.DataFrame) else 0} 檔",
+        f"本輪快照回讀驗證：{'成功' if verified else '失敗'}｜日期 {saved_at_now[:10]}｜K線 {payload.get('kline_date') or '未驗證'}",
         f"10推薦清單治理後：{len(list_payload) if isinstance(list_payload, list) else 0} 檔",
         list_local_msg,
         list_github_msg,
@@ -2354,6 +2382,8 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     kline_date = _max_row_date_v173(scan_rows, [
         "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
     ])
+    if kline_date is None and isinstance(latest_payload, dict):
+        kline_date = _parse_date_v173(latest_payload.get("kline_date"))
     row_market_date = _max_row_date_v173(scan_rows, ["大盤資料日期", "大盤行情日期", "加權資料日期"])
     row_official_date = _max_row_date_v173(scan_rows, [
         "官方因子資料日期", "官方資料日期", "三大法人資料日期",
@@ -10159,6 +10189,10 @@ def _build_recommend_df(
         else:
             governed_candidate_df = base_df.copy()
             final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
+        # Phase104：掃描品質必須在官方因子合併後計算。舊版先建立治理報告，
+        # 後續才把 official_factors_cache 併入顯示名單，造成快取明明有 886 筆
+        # 完整度>=60，掃描報告卻永遠看到預設 0。
+        governed_candidate_df = _apply_official_factor_cache_v109(governed_candidate_df)
         candidate_diagnosis_df = (
             build_candidate_diagnosis(governed_candidate_df)
             if callable(build_candidate_diagnosis)
@@ -10379,8 +10413,18 @@ def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: 
     session_state, while the last non-empty list stays available for reference.
     """
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
+        candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+        if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+            st.session_state[_k("empty_scan_preserved_previous")] = False
+            st.session_state[_k("empty_scan_notice")] = "本輪正式/A-為0，但已保存本輪完整候選快照，不再沿用舊日期。"
+            st.session_state[_k("rec_df_store")] = pd.DataFrame()
+            st.session_state[_k("category_strength_store")] = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
+            st.session_state[_k("hot_pick_store")] = hot_pick_df.copy() if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()
+            st.session_state[_k("result_saved_at")] = _now_text()
+            _save_latest_recommendation_pack(pd.DataFrame(), category_strength_df, hot_pick_df)
+            return True
         st.session_state[_k("empty_scan_preserved_previous")] = True
-        st.session_state[_k("empty_scan_notice")] = "本輪沒有產生可用名單，已保留上一輪非空推薦結果，未覆蓋 JSON。"
+        st.session_state[_k("empty_scan_notice")] = "本輪沒有任何候選資料，未覆蓋上一輪快照。"
         return False
     st.session_state[_k("empty_scan_preserved_previous")] = False
     st.session_state[_k("empty_scan_notice")] = ""
