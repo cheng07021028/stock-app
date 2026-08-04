@@ -2459,13 +2459,24 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
                 continue
             val = nums[-1]
             raw_rows.append({"項目": label or joined[:20], "買賣超億元": val})
-            if "外資" in label or "外資" in joined:
+            normalized_label = (label or joined).replace(" ", "")
+            # BFI82U 同時包含「外資及陸資」與「外資自營商」。舊版只要看到
+            # 「外資」就覆寫 foreign，當外資自營商列位於後方且為 0 時，
+            # 會把真正外資買賣超錯誤改成 0。外資自營商屬自營商統計，不得
+            # 覆蓋「外資及陸資（不含外資自營商）」主值。
+            if "外資及陸資" in normalized_label or "外陸資" in normalized_label:
+                # 「外資及陸資(不含外資自營商)」本身含有字串「外資自營商」，
+                # 但仍是外資主列；不可因括號文字而排除。
                 foreign = val
-            elif "投信" in label or "投信" in joined:
+            elif "投信" in normalized_label:
                 invest = val
-            elif "自營商" in label or "自營商" in joined:
-                dealer = val
-            elif "合計" in label or "總計" in label or "三大法人" in joined:
+            elif "外資自營商" in normalized_label:
+                # 官方說明指出外資自營商已計入自營商統計；獨立列只供揭露，
+                # 再加一次會重複計算，故忽略。
+                pass
+            elif "自營商" in normalized_label:
+                dealer = (dealer or 0.0) + val
+            elif "合計" in normalized_label or "總計" in normalized_label or "三大法人" in normalized_label:
                 total = val
         if total is None and any(x is not None for x in [foreign, invest, dealer]):
             total = sum([x for x in [foreign, invest, dealer] if x is not None])
@@ -5423,13 +5434,24 @@ def _fetch_twse_institutional_manual(target_date: date, timeout: float = 2.5) ->
                 continue
             val = nums[-1]
             raw_rows.append({"項目": label or joined[:24], "買賣超億元": val})
-            if "外資" in label or "外資" in joined:
+            normalized_label = (label or joined).replace(" ", "")
+            # BFI82U 同時包含「外資及陸資」與「外資自營商」。舊版只要看到
+            # 「外資」就覆寫 foreign，當外資自營商列位於後方且為 0 時，
+            # 會把真正外資買賣超錯誤改成 0。外資自營商屬自營商統計，不得
+            # 覆蓋「外資及陸資（不含外資自營商）」主值。
+            if "外資及陸資" in normalized_label or "外陸資" in normalized_label:
+                # 「外資及陸資(不含外資自營商)」本身含有字串「外資自營商」，
+                # 但仍是外資主列；不可因括號文字而排除。
                 foreign = val
-            elif "投信" in label or "投信" in joined:
+            elif "投信" in normalized_label:
                 invest = val
-            elif "自營商" in label or "自營商" in joined:
-                dealer = val
-            elif "合計" in label or "總計" in label or "三大法人" in joined:
+            elif "外資自營商" in normalized_label:
+                # 官方說明指出外資自營商已計入自營商統計；獨立列只供揭露，
+                # 再加一次會重複計算，故忽略。
+                pass
+            elif "自營商" in normalized_label:
+                dealer = (dealer or 0.0) + val
+            elif "合計" in normalized_label or "總計" in normalized_label or "三大法人" in normalized_label:
                 total = val
         if total is None and any(x is not None for x in [foreign, invest, dealer]):
             total = sum([x for x in [foreign, invest, dealer] if x is not None])

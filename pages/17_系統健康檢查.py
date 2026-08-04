@@ -42,7 +42,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V171｜沿用既有一鍵更新按鈕：智慧略過新鮮資料、更新全模組共用資料、重建績效回饋、清除舊表格快取並檢查推薦就緒度。")
+st.caption("V173｜內容日期驗證版：只有內容日期、完整度與法人欄位均合格才智慧略過；落後時自動強制重抓，並驗證 7/8 頁完整資料鏈。")
 
 with st.sidebar:
     st.header("V171 操作")
@@ -145,7 +145,7 @@ with st.sidebar:
     g_max_records = st.selectbox("智慧增量模式單次最多更新筆數", [80, 150, 300, 500, 800, 1200], index=[80, 150, 300, 500, 800, 1200].index(int(global_cfg.get("max_records", 300)) if int(global_cfg.get("max_records", 300)) in [80, 150, 300, 500, 800, 1200] else 300))
     g_batch_limit = st.selectbox("每批更新股票數", [30, 50, 80, 120, 200], index=[30, 50, 80, 120, 200].index(int(global_cfg.get("batch_limit", 80)) if int(global_cfg.get("batch_limit", 80)) in [30, 50, 80, 120, 200] else 80))
     g_stale_minutes = st.selectbox("推薦績效幾分鐘內已更新則略過", [0, 15, 30, 60, 120, 360], index=[0, 15, 30, 60, 120, 360].index(int(global_cfg.get("stale_minutes", 30)) if int(global_cfg.get("stale_minutes", 30)) in [0, 15, 30, 60, 120, 360] else 30))
-    g_force_source_refresh = st.checkbox("強制忽略資料新鮮度重新抓取（通常不必）", value=bool(global_cfg.get("force_source_refresh", False)), help="未勾選時：股票主檔、大盤、官方因子若仍新鮮會安全略過，可大幅縮短一鍵更新時間。")
+    g_force_source_refresh = st.checkbox("手動強制全部來源重抓（疑難排除才勾）", value=bool(global_cfg.get("force_source_refresh", False)), help="正常不必勾。新版智慧略過會驗證內容日期、完整度與外資欄位；只要內容落後或異常便自動強制重抓，不會只看檔案時間。")
     g_rebuild_feedback = st.checkbox("重建績效回饋與精準度摘要", value=bool(global_cfg.get("rebuild_feedback_profile", True)))
     g_invalidate_cache = st.checkbox("更新後清除所有模組舊表格快取", value=bool(global_cfg.get("invalidate_runtime_caches", True)))
     g_push_github = st.checkbox("更新後背景同步 GitHub（不阻塞按鈕）", value=bool(global_cfg.get("push_github", True)))
@@ -213,6 +213,15 @@ if 'run_global_update_now' in locals() and run_global_update_now:
     else:
         st.warning(f"全域更新完成：{ok_count} 個步驟成功，{fail_count} 個步驟需檢查。")
     st.dataframe(steps_df.drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
+    try:
+        audit_step = next((x for x in global_result.get("steps", []) if str(x.get("步驟", "")).startswith("9.")), {})
+        audit_detail = audit_step.get("明細", {}) if isinstance(audit_step, dict) else {}
+        audit_rows = audit_detail.get("audit_rows", []) if isinstance(audit_detail, dict) else []
+        if audit_rows:
+            st.subheader("7／8 股神推薦資料鏈實際更新檢查")
+            st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
+    except Exception:
+        pass
     with st.expander("全域更新詳細明細", expanded=False):
         st.json(global_result)
     readiness = global_result.get("recommendation_readiness", {}) if isinstance(global_result, dict) else {}

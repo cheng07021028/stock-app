@@ -27,7 +27,7 @@ GLOBAL_REFRESH_TOKEN_FILE = BASE_DIR / "godpick_global_refresh_token.json"
 RECOMMENDATION_READINESS_FILE = BASE_DIR / "godpick_recommendation_readiness.json"
 PERFORMANCE_PROFILE_FILE = BASE_DIR / "godpick_performance_profile.json"
 GLOBAL_UPDATE_LOCK_FILE = BASE_DIR / ".godpick_global_update.lock"
-GLOBAL_UPDATE_VERSION = "v172_data_content_freshness_gate_20260727"
+GLOBAL_UPDATE_VERSION = "v173_content_date_auto_repair_20260804"
 
 CORE_REQUIRED_JSON_DEFAULTS: dict[str, Any] = {
     "market_snapshot.json": {},
@@ -740,20 +740,123 @@ def step_macro(base: Path, *, force: bool = False) -> dict[str, Any]:
     return {"ok": ok, "message": msg, "result": result, "skipped": False}
 
 
+
+def _latest_expected_trade_date(base: Path) -> datetime | None:
+    """Return the newest content date already known by K-line/market data.
+
+    File mtime is deliberately ignored: Streamlit reboot/redeploy recreates files and
+    makes stale content look new.  Recommendation freshness must compare business
+    content dates instead.
+    """
+    candidates: list[datetime] = []
+    for file_name, fields in [
+        ("godpick_latest_recommendations.json", ["本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"]),
+        ("market_snapshot.json", ["data_date", "market_date", "twse_data_date", "otc_data_date", "資料日期"]),
+    ]:
+        ok, data, _ = read_json(base / file_name)
+        if not ok:
+            continue
+        dtv = latest_record_content_date(data, fields) if file_name.startswith("godpick_") else top_level_content_date(data, fields)
+        if dtv is not None:
+            candidates.append(dtv)
+    return max(candidates) if candidates else None
+
+
+def _official_factor_content_summary(base: Path) -> dict[str, Any]:
+    ok, data, err = read_json(base / "official_factors_cache.json")
+    rows = iter_records(data) if ok else []
+    content_date = latest_record_content_date(data, [
+        "官方資料日期", "官方因子資料日期", "三大法人資料日期", "法人資料日期", "FinMind資料日期"
+    ]) if ok else None
+    complete = 0
+    foreign_nonzero = 0
+    date_rows = 0
+    for row in rows:
+        try:
+            if float(row.get("官方資料完整度") or 0) >= 60:
+                complete += 1
+        except Exception:
+            pass
+        if str(row.get("官方資料日期") or row.get("官方因子資料日期") or "").strip():
+            date_rows += 1
+        try:
+            if abs(float(row.get("外資近1日買賣超") or 0)) > 0:
+                foreign_nonzero += 1
+        except Exception:
+            pass
+    return {
+        "ok": ok, "error": err, "count": len(rows), "complete": complete,
+        "content_date": content_date, "date_rows": date_rows,
+        "foreign_nonzero": foreign_nonzero,
+    }
+
+
+def _official_is_content_fresh(base: Path) -> tuple[bool, str, dict[str, Any]]:
+    summary = _official_factor_content_summary(base)
+    expected = _latest_expected_trade_date(base)
+    actual = summary.get("content_date")
+    aligned = bool(expected is None or (actual is not None and actual.date() >= expected.date()))
+    enough = summary.get("count", 0) >= 1000 and summary.get("complete", 0) >= 100
+    foreign_ok = summary.get("foreign_nonzero", 0) >= 20
+    fresh = bool(summary.get("ok") and aligned and enough and foreign_ok)
+    detail = (
+        f"筆數 {summary.get('count', 0)} / 完整>=60 {summary.get('complete', 0)} / "
+        f"內容日期 {actual.date() if actual else '未驗證'} / 目標 {expected.date() if expected else '未驗證'} / "
+        f"外資非0 {summary.get('foreign_nonzero', 0)}"
+    )
+    summary["expected_date"] = expected
+    summary["aligned"] = aligned
+    summary["enough"] = enough
+    summary["foreign_ok"] = foreign_ok
+    return fresh, detail, summary
+
 def step_official_factors(base: Path, push_github: bool = False, *, force: bool = False) -> dict[str, Any]:
-    fresh, desc = _fresh_files(base, ["official_factors_cache.json"], SOURCE_REFRESH_TTL_MINUTES["official_factors_cache.json"])
-    if fresh and not force:
-        ok, data, _ = read_json(base / "official_factors_cache.json")
-        count = len(iter_records(data)) if ok else 0
-        return {"ok": count > 0, "message": f"官方因子仍新鮮，略過外部重抓：{count} 筆｜{desc}", "skipped": True}
+    # 智慧略過只有在「檔案時間新 + 內容日期已追上最新K線 + 完整度足夠 +
+    # 外資欄位不是整批0」時才成立。只看 mtime 會讓舊內容在 Reboot 後被誤判新鮮。
+    file_fresh, file_desc = _fresh_files(base, ["official_factors_cache.json"], SOURCE_REFRESH_TTL_MINUTES["official_factors_cache.json"])
+    content_fresh, content_desc, before = _official_is_content_fresh(base)
+    if file_fresh and content_fresh and not force:
+        return {
+            "ok": True,
+            "message": f"官方因子內容已對齊，安全智慧略過｜{content_desc}｜{file_desc}",
+            "skipped": True,
+            "content_validation": before,
+        }
+    auto_force_reason = []
+    if not file_fresh:
+        auto_force_reason.append("檔案超過更新週期")
+    if not before.get("aligned"):
+        auto_force_reason.append("內容日期落後最新K線")
+    if not before.get("enough"):
+        auto_force_reason.append("有效完整度不足")
+    if not before.get("foreign_ok"):
+        auto_force_reason.append("外資欄位疑似整批為0")
     with pushd(base):
         svc = importlib.import_module("godpick_system_health_service")
-        # 手動的一鍵更新不應受「背景排程是否啟用」影響。排程開關只控制 GitHub/排程器，
-        # 使用者按下健康檢查的一鍵更新時，明確要求立即更新。
         manual_cfg = dict(svc.load_schedule_settings() or {})
         manual_cfg["enabled"] = True
+        manual_cfg["include_institutional"] = True
+        manual_cfg["include_revenue"] = True
+        manual_cfg["include_valuation"] = True
         result = svc.run_official_factor_update_once(manual_cfg, push_github=push_github)
-    return {"ok": bool(result.get("ok")), "message": str(result.get("message", "官方因子更新完成")), "result": result, "skipped": False}
+    after_fresh, after_desc, after = _official_is_content_fresh(base)
+    raw_ok = bool(result.get("ok"))
+    # 更新函式回報成功但內容仍舊，不能再顯示 OK。
+    ok = bool(raw_ok and after_fresh)
+    msg = str(result.get("message", "官方因子更新完成"))
+    if ok:
+        msg = f"官方因子強制更新並完成內容驗證：{after_desc}"
+    else:
+        msg = (
+            f"官方因子更新後仍未就緒：{after_desc}｜觸發原因："
+            f"{ '、'.join(auto_force_reason) or '手動強制更新' }｜原始結果：{msg}"
+        )
+    return {
+        "ok": ok, "message": msg, "result": result, "skipped": False,
+        "auto_force_reason": auto_force_reason,
+        "content_validation_before": before,
+        "content_validation_after": after,
+    }
 
 
 def step_watchlist(base: Path) -> dict[str, Any]:
@@ -978,6 +1081,50 @@ def step_background_backup(base: Path, *, stock_master: bool, official: bool, en
     return {"ok": True, "message": f"本機更新已完成；{targets} GitHub 備份已排入背景，不阻塞按鈕", "queued": True, "targets": targets}
 
 
+
+def step_godpick_dependency_audit(base: Path) -> dict[str, Any]:
+    """Audit every persistent input used by 7_股神推薦 and 8_股神推薦紀錄."""
+    rows: list[dict[str, Any]] = []
+    def add(name: str, ok: bool, detail: str, critical: bool = True) -> None:
+        rows.append({"資料": name, "狀態": "OK" if ok else ("異常" if critical else "注意"), "說明": detail, "關鍵": critical})
+
+    ok, master, err = read_json(base / "stock_master_cache.json")
+    master_count = len(master) if ok and isinstance(master, list) else 0
+    add("股票主檔", master_count >= 1000, f"{master_count} 筆" if ok else err)
+
+    ok, market, err = read_json(base / "market_snapshot.json")
+    mdate = top_level_content_date(market, ["data_date", "market_date", "twse_data_date", "otc_data_date", "資料日期"]) if ok else None
+    add("大盤快照/櫃買", bool(ok and mdate), f"內容日期 {mdate.date() if mdate else '未驗證'}" if ok else err)
+
+    _, off_desc, off = _official_is_content_fresh(base)
+    add("官方因子", bool(off.get("aligned") and off.get("enough") and off.get("foreign_ok")), off_desc)
+
+    ok, latest, err = read_json(base / "godpick_latest_recommendations.json")
+    latest_rows = iter_records(latest) if ok else []
+    latest_date = latest_record_content_date(latest, ["推薦日期", "本輪市場最新交易日", "K線最後交易日"]) if ok else None
+    add("最新推薦結果", bool(ok), f"{len(latest_rows)} 筆 / 日期 {latest_date.date() if latest_date else '尚未重新推薦'}" if ok else err, critical=False)
+
+    ok, records, err = read_json(base / "godpick_records.json")
+    rec_rows = iter_records(records) if ok else []
+    perf_rows = sum(1 for r in rec_rows[-500:] if any(not is_blank_value(r.get(c)) for c in ["推薦後1日%", "可執行交易1日%", "隔日執行命中結果"]))
+    add("股神推薦紀錄/績效", bool(ok and len(rec_rows) > 0), f"{len(rec_rows)} 筆 / 近500筆已有績效 {perf_rows}")
+
+    ok, rec_list, err = read_json(base / "godpick_recommend_list.json")
+    list_rows = iter_records(rec_list) if ok else []
+    add("推薦清單", bool(ok), f"{len(list_rows)} 筆（0筆可代表目前尚未加入清單）" if ok else err, critical=False)
+
+    ok, profile, err = read_json(base / "godpick_performance_profile.json")
+    profile_data = profile.get("profile", {}) if isinstance(profile, dict) else {}
+    trusted = int((profile_data.get("data_quality") or {}).get("trusted_records", 0) or 0) if isinstance(profile_data, dict) else 0
+    add("績效回饋模型", bool(ok and trusted >= 10), f"可信樣本 {trusted}" if ok else err, critical=False)
+
+    critical_failed = [r for r in rows if r["關鍵"] and r["狀態"] != "OK"]
+    return {
+        "ok": not critical_failed,
+        "message": f"7/8頁資料鏈檢查：關鍵異常 {len(critical_failed)} / 共 {len(rows)} 項",
+        "audit_rows": rows,
+    }
+
 def step_health_snapshot(base: Path) -> dict[str, Any]:
     status = check_all_module_data_status(base)
     return {"ok": int(status.get("summary", {}).get("異常", 0)) == 0, "message": f"全模組資料檢查完成：異常 {status['summary']['異常']} / 注意 {status['summary']['注意']}", "status": status}
@@ -1099,17 +1246,18 @@ def run_global_update(
             _row = add("8. 重建績效回饋與精準度摘要", lambda: step_feedback_profile(base))
             if _row.get("狀態") == "OK":
                 changed_files.append("godpick_performance_profile.json")
-        add("9. 股神推薦前置資料就緒度檢查", lambda: step_recommendation_readiness(base))
+        add("9. 7/8頁股神資料鏈完整性檢查", lambda: step_godpick_dependency_audit(base))
+        add("10. 股神推薦前置資料就緒度檢查", lambda: step_recommendation_readiness(base))
         changed_files.append("godpick_recommendation_readiness.json")
         if cfg.get("invalidate_runtime_caches", True):
-            add("10. 清除舊表格運算快取並發布刷新版本", lambda: step_invalidate_runtime_caches(base, changed_files))
-        add("11. GitHub 非阻塞背景備份", lambda: step_background_backup(
+            add("11. 清除舊表格運算快取並發布刷新版本", lambda: step_invalidate_runtime_caches(base, changed_files))
+        add("12. GitHub 非阻塞背景備份", lambda: step_background_backup(
             base,
             stock_master=stock_master_changed,
             official=official_changed,
             enabled=bool(cfg.get("push_github", True)),
         ))
-        add("12. 全模組資料狀態複檢", lambda: step_health_snapshot(base))
+        add("13. 全模組資料狀態複檢", lambda: step_health_snapshot(base))
 
         payload = {
             "version": GLOBAL_UPDATE_VERSION,
@@ -1117,7 +1265,7 @@ def run_global_update(
             "settings": cfg,
             "steps": steps,
             "changed_files": sorted(set(changed_files)),
-            "ok": all(s.get("狀態") == "OK" for s in steps if not str(s.get("步驟", "")).startswith("12.")),
+            "ok": all(s.get("狀態") == "OK" for s in steps if not str(s.get("步驟", "")).startswith("13.")),
         }
         readiness_ok, readiness, _ = read_json(base / RECOMMENDATION_READINESS_FILE.name)
         if readiness_ok:
