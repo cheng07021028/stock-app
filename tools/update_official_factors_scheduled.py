@@ -89,6 +89,11 @@ def main() -> int:
         include_revenue=bool(cfg.get("include_revenue", True)),
         include_valuation=bool(cfg.get("include_valuation", True)),
         save=True,
+        quick_mode=False,
+        max_runtime_seconds=480,
+        max_requests=260,
+        finmind_bulk_only=False,
+        finmind_max_stocks=200,
     )
     print(f"Updated records={len(df)}, complete_count={meta.get('complete_count', 0)}, saved={meta.get('saved')}")
     for msg in (meta.get("diagnostics") or [])[-20:]:

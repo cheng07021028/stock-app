@@ -5,6 +5,7 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+import time
 
 import requests
 
@@ -65,15 +66,19 @@ def _normalize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [out[k] for k in sorted(out)]
 
 
-def _fetch_yahoo(symbol: str, days: int, timeout: float) -> tuple[list[dict[str, Any]], str]:
+def _fetch_yahoo(symbol: str, days: int, timeout: float, deadline: float | None = None) -> tuple[list[dict[str, Any]], str]:
     now = datetime.now(timezone.utc)
     p2 = int((now + timedelta(days=1)).timestamp())
     p1 = int((now - timedelta(days=max(20, days * 2))).timestamp())
     errors = []
     for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        if deadline is not None and time.monotonic() >= deadline:
+            errors.append("Yahoo 多來源已達時間上限")
+            break
         url = f"https://{host}/v8/finance/chart/{requests.utils.quote(symbol, safe='^=')}"
         try:
-            r = requests.get(url, params={"period1": p1, "period2": p2, "interval": "1d", "includePrePost": "false", "events": "div,splits"}, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=timeout)
+            remaining = max(0.8, deadline - time.monotonic()) if deadline is not None else timeout
+            r = requests.get(url, params={"period1": p1, "period2": p2, "interval": "1d", "includePrePost": "false", "events": "div,splits"}, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=min(timeout, remaining))
             if r.status_code != 200:
                 errors.append(f"{host} HTTP {r.status_code}")
                 continue
@@ -114,7 +119,7 @@ def _walk_tables(obj: Any) -> list[list[Any]]:
     return found
 
 
-def _fetch_tpex_official(target: date, timeout: float) -> tuple[list[dict[str, Any]], str]:
+def _fetch_tpex_official(target: date, timeout: float, deadline: float | None = None) -> tuple[list[dict[str, Any]], str]:
     roc = f"{target.year-1911:03d}/{target.month:02d}"
     urls = [
         f"https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingIndex?date={target:%Y/%m/%d}&response=json",
@@ -124,8 +129,12 @@ def _fetch_tpex_official(target: date, timeout: float) -> tuple[list[dict[str, A
     ]
     errors = []
     for url in urls:
+        if deadline is not None and time.monotonic() >= deadline:
+            errors.append("TPEx 官方備援已達時間上限")
+            break
         try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tpex.org.tw/", "Accept": "application/json,text/plain,*/*"}, timeout=timeout)
+            remaining = max(0.8, deadline - time.monotonic()) if deadline is not None else timeout
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tpex.org.tw/", "Accept": "application/json,text/plain,*/*"}, timeout=min(timeout, remaining))
             if r.status_code != 200:
                 errors.append(f"HTTP {r.status_code} {url.split('/')[-1][:40]}")
                 continue
@@ -171,21 +180,22 @@ def _write_cache(data: dict[str, Any]) -> None:
         pass
 
 
-def fetch_market_index_history(kind: str, days: int = 90, target_date: date | None = None, timeout: float = 5.0) -> dict[str, Any]:
+def fetch_market_index_history(kind: str, days: int = 90, target_date: date | None = None, timeout: float = 3.0, max_seconds: float = 10.0) -> dict[str, Any]:
     kind = "otc" if str(kind).lower() in {"otc", "tpex", "櫃買"} else "twse"
     target_date = target_date or datetime.now(TAIPEI_TZ).date()
     symbols = ["^TWOII", "TWOII"] if kind == "otc" else ["^TWII"]
     diagnostics = []
+    deadline = time.monotonic() + max(1.0, float(max_seconds))
     rows = []
     source = ""
     for symbol in symbols:
-        rows, msg = _fetch_yahoo(symbol, days, timeout)
+        rows, msg = _fetch_yahoo(symbol, days, timeout, deadline=deadline)
         diagnostics.append(msg)
         if len(rows) >= 2:
             source = msg
             break
     if kind == "otc" and len(rows) < 2:
-        rows, msg = _fetch_tpex_official(target_date, timeout)
+        rows, msg = _fetch_tpex_official(target_date, timeout, deadline=deadline)
         diagnostics.append(msg)
         if len(rows) >= 2:
             source = msg

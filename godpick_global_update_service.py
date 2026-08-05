@@ -27,7 +27,7 @@ GLOBAL_REFRESH_TOKEN_FILE = BASE_DIR / "godpick_global_refresh_token.json"
 RECOMMENDATION_READINESS_FILE = BASE_DIR / "godpick_recommendation_readiness.json"
 PERFORMANCE_PROFILE_FILE = BASE_DIR / "godpick_performance_profile.json"
 GLOBAL_UPDATE_LOCK_FILE = BASE_DIR / ".godpick_global_update.lock"
-GLOBAL_UPDATE_VERSION = "v173_content_date_auto_repair_20260804"
+GLOBAL_UPDATE_VERSION = "v174_bounded_sources_20260805"
 
 CORE_REQUIRED_JSON_DEFAULTS: dict[str, Any] = {
     "market_snapshot.json": {},
@@ -725,14 +725,14 @@ def step_stock_master(base: Path, *, force: bool = False) -> dict[str, Any]:
     return {"ok": ok, "message": f"股票主檔更新完成：{row_count} 筆" if ok else f"股票主檔更新異常：{row_count} 筆", "logs": logs[-20:] if isinstance(logs, list) else logs, "row_count": row_count, "skipped": False}
 
 
-def step_macro(base: Path, *, force: bool = False) -> dict[str, Any]:
+def step_macro(base: Path, *, force: bool = False, max_runtime_seconds: int = 35) -> dict[str, Any]:
     fresh, desc = _fresh_files(base, ["market_snapshot.json", "macro_mode_bridge.json"], SOURCE_REFRESH_TTL_MINUTES["market_snapshot.json"])
     if fresh and not force:
         return {"ok": True, "message": f"大盤快照仍新鮮，略過網路抓取｜{desc}", "skipped": True}
     with pushd(base):
         svc = importlib.import_module("macro_startup_service")
         if hasattr(svc, "_run_fast_update"):
-            result = svc._run_fast_update(sync_github=False)
+            result = svc._run_fast_update(sync_github=False, max_runtime_seconds=int(max_runtime_seconds))
         else:
             result = svc.ensure_macro_startup_update(ttl_seconds=0)
     ok = bool(result.get("ok")) if isinstance(result, dict) else False
@@ -810,7 +810,10 @@ def _official_is_content_fresh(base: Path) -> tuple[bool, str, dict[str, Any]]:
     summary["foreign_ok"] = foreign_ok
     return fresh, detail, summary
 
-def step_official_factors(base: Path, push_github: bool = False, *, force: bool = False) -> dict[str, Any]:
+def step_official_factors(
+    base: Path, push_github: bool = False, *, force: bool = False,
+    max_runtime_seconds: int = 75, max_requests: int = 48, quick_mode: bool = True,
+) -> dict[str, Any]:
     # 智慧略過只有在「檔案時間新 + 內容日期已追上最新K線 + 完整度足夠 +
     # 外資欄位不是整批0」時才成立。只看 mtime 會讓舊內容在 Reboot 後被誤判新鮮。
     file_fresh, file_desc = _fresh_files(base, ["official_factors_cache.json"], SOURCE_REFRESH_TTL_MINUTES["official_factors_cache.json"])
@@ -838,13 +841,21 @@ def step_official_factors(base: Path, push_github: bool = False, *, force: bool 
         manual_cfg["include_institutional"] = True
         manual_cfg["include_revenue"] = True
         manual_cfg["include_valuation"] = True
+        manual_cfg["quick_mode"] = bool(quick_mode)
+        manual_cfg["max_runtime_seconds"] = int(max_runtime_seconds)
+        manual_cfg["max_requests"] = int(max_requests)
+        manual_cfg["finmind_bulk_only"] = True
+        manual_cfg["finmind_max_stocks"] = min(30, int(manual_cfg.get("finmind_max_stocks", 30) or 30))
         result = svc.run_official_factor_update_once(manual_cfg, push_github=push_github)
     after_fresh, after_desc, after = _official_is_content_fresh(base)
     raw_ok = bool(result.get("ok"))
     # 更新函式回報成功但內容仍舊，不能再顯示 OK。
     ok = bool(raw_ok and after_fresh)
     msg = str(result.get("message", "官方因子更新完成"))
-    if ok:
+    timed_out = bool(((result.get("meta") or {}) if isinstance(result, dict) else {}).get("timed_out"))
+    if ok and timed_out:
+        msg = f"官方因子已達時間/請求上限並安全停止；目前有效快取仍通過驗證：{after_desc}"
+    elif ok:
         msg = f"官方因子強制更新並完成內容驗證：{after_desc}"
     else:
         msg = (
@@ -1174,6 +1185,10 @@ def load_global_update_settings(base_dir: Path | None = None) -> dict[str, Any]:
         "force_source_refresh": False,
         "rebuild_feedback_profile": True,
         "invalidate_runtime_caches": True,
+        "macro_max_runtime_seconds": 35,
+        "official_max_runtime_seconds": 75,
+        "official_max_requests": 48,
+        "official_quick_mode": True,
     }
     if isinstance(data, dict):
         defaults.update(data)
@@ -1200,16 +1215,19 @@ def run_global_update(
 
     # 防止連點造成兩個全域更新同時覆寫相同 JSON。
     try:
-        if GLOBAL_UPDATE_LOCK_FILE.exists() and time.time() - GLOBAL_UPDATE_LOCK_FILE.stat().st_mtime < 7200:
+        lock_age = time.time() - GLOBAL_UPDATE_LOCK_FILE.stat().st_mtime if GLOBAL_UPDATE_LOCK_FILE.exists() else None
+        if lock_age is not None and lock_age < 15 * 60:
             return {
                 "version": GLOBAL_UPDATE_VERSION,
                 "updated_at": now_text(),
                 "settings": cfg,
                 "steps": [],
                 "ok": False,
-                "message": "已有一鍵更新正在執行；請勿重複點擊。若確認沒有執行，可等待鎖定逾時或重新啟動服務。",
+                "message": "已有一鍵更新正在執行；請勿重複點擊。逾時保護最長約數分鐘，鎖定會在15分鐘內自動失效。",
             }
-        GLOBAL_UPDATE_LOCK_FILE.write_text(now_text(), encoding="utf-8")
+        if GLOBAL_UPDATE_LOCK_FILE.exists() and lock_age is not None and lock_age >= 15 * 60:
+            GLOBAL_UPDATE_LOCK_FILE.unlink(missing_ok=True)
+        GLOBAL_UPDATE_LOCK_FILE.write_text(json.dumps({"started_at": now_text(), "pid": os.getpid(), "version": GLOBAL_UPDATE_VERSION}, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 
@@ -1217,6 +1235,12 @@ def run_global_update(
     changed_files: list[str] = []
 
     def add(name: str, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        if callable(progress_callback):
+            try:
+                running = {"步驟": name, "狀態": "執行中", "執行模式": "有限時執行", "耗時秒": 0, "說明": "已開始，逾時會自動停止並保留舊有效資料"}
+                progress_callback(running, list(steps) + [running])
+            except Exception:
+                pass
         row = run_step(name, fn)
         steps.append(row)
         detail = row.get("明細") if isinstance(row.get("明細"), dict) else {}
@@ -1244,12 +1268,19 @@ def run_global_update(
             if stock_master_changed:
                 changed_files.append("stock_master_cache.json")
         if cfg.get("update_macro", True):
-            _row = add("4. 大盤快照與股神橋接智慧更新", lambda: step_macro(base, force=force))
+            _row = add("4. 大盤快照與股神橋接智慧更新", lambda: step_macro(
+                base, force=force, max_runtime_seconds=int(cfg.get("macro_max_runtime_seconds", 35) or 35)
+            ))
             _detail = _row.get("明細", {}) if isinstance(_row.get("明細"), dict) else {}
             if _row.get("狀態") == "OK" and not bool(_detail.get("skipped")):
                 changed_files.extend(["market_snapshot.json", "macro_mode_bridge.json", "macro_trend_records.json"])
         if cfg.get("update_official_factors", True):
-            _row = add("5. 官方因子快取智慧更新", lambda: step_official_factors(base, push_github=False, force=force))
+            _row = add("5. 官方因子快取智慧更新", lambda: step_official_factors(
+                base, push_github=False, force=force,
+                max_runtime_seconds=int(cfg.get("official_max_runtime_seconds", 75) or 75),
+                max_requests=int(cfg.get("official_max_requests", 48) or 48),
+                quick_mode=bool(cfg.get("official_quick_mode", True)),
+            ))
             _detail = _row.get("明細", {}) if isinstance(_row.get("明細"), dict) else {}
             official_changed = _row.get("狀態") == "OK" and not bool(_detail.get("skipped"))
             if official_changed:

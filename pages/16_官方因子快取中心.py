@@ -98,6 +98,12 @@ with st.sidebar:
     fm_status = finmind_config_status()
     enable_finmind = st.checkbox("官方缺值時啟用 FinMind 備援", value=True, disabled=not fm_status.get("token_configured"))
     finmind_max_stocks = st.selectbox("FinMind 本輪最多補值股票", [50, 100, 120, 200], index=2, disabled=not fm_status.get("token_configured"), help="避免超過 API 每小時限額；每次更新會增量補值。")
+    update_mode = st.selectbox(
+        "更新模式",
+        ["快速安全（90秒，FinMind僅批次）", "完整增量（240秒，FinMind有限逐檔）"],
+        index=0,
+        help="快速模式適合人工操作；完整模式仍有240秒/180次請求上限，不會無限運轉。",
+    )
     st.caption("FinMind Token：" + ("已設定" if fm_status.get("token_configured") else "未設定（請在 Streamlit Secrets 加入 FINMIND_TOKEN）"))
     st.divider()
     do_update = st.button("更新官方因子快取", type="primary", use_container_width=True)
@@ -128,12 +134,18 @@ if do_update:
             save=True,
             enable_finmind_fallback=bool(enable_finmind),
             finmind_max_stocks=int(finmind_max_stocks),
+            quick_mode=str(update_mode).startswith("快速"),
+            max_runtime_seconds=90 if str(update_mode).startswith("快速") else 240,
+            max_requests=60 if str(update_mode).startswith("快速") else 180,
+            finmind_bulk_only=str(update_mode).startswith("快速"),
         )
     if meta.get("ok"):
         if meta.get("preserved_old_cache"):
             st.warning(f"本次抓取完成 {len(df)} 筆，但完整度偏低，已保留舊有效快取。")
         else:
-            st.success(f"官方因子快取已更新：{len(df)} 筆；完整度>=60：{meta.get('complete_count', 0)} 筆。")
+            suffix = "（已達安全上限並保存目前成果）" if meta.get("timed_out") else ""
+            st.success(f"官方因子快取已更新：{len(df)} 筆；完整度>=60：{meta.get('complete_count', 0)} 筆。{suffix}")
+        st.caption(f"本輪耗時 {meta.get('elapsed_seconds', 0)} 秒｜網路請求 {meta.get('request_count', 0)}/{meta.get('request_budget', 0)}")
     else:
         st.error("官方因子快取更新失敗，請查看診斷訊息。")
     for msg in meta.get("diagnostics", [])[-20:]:

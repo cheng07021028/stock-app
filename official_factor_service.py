@@ -43,8 +43,68 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
-CACHE_VERSION = "v109_finmind_trusted_fallback_20260728"
-REQUEST_TIMEOUT = 12
+CACHE_VERSION = "v110_bounded_update_20260805"
+REQUEST_TIMEOUT = 5
+DEFAULT_RUN_TIMEOUT_SECONDS = 75
+DEFAULT_RUN_REQUEST_BUDGET = 48
+
+class OfficialFactorBudgetExceeded(RuntimeError):
+    """Raised when the bounded one-click update reaches its time/request budget."""
+
+_RUN_DEADLINE_MONOTONIC = 0.0
+_RUN_REQUEST_BUDGET = 0
+_RUN_REQUEST_COUNT = 0
+_RUN_TIMED_OUT = False
+_RUN_STARTED_MONOTONIC = 0.0
+
+def _begin_run_budget(max_seconds: int | float | None, max_requests: int | None) -> None:
+    global _RUN_DEADLINE_MONOTONIC, _RUN_REQUEST_BUDGET, _RUN_REQUEST_COUNT, _RUN_TIMED_OUT, _RUN_STARTED_MONOTONIC
+    _RUN_STARTED_MONOTONIC = time.monotonic()
+    seconds = float(max_seconds or 0)
+    _RUN_DEADLINE_MONOTONIC = _RUN_STARTED_MONOTONIC + max(0.0, seconds) if seconds > 0 else 0.0
+    _RUN_REQUEST_BUDGET = max(0, int(max_requests or 0))
+    _RUN_REQUEST_COUNT = 0
+    _RUN_TIMED_OUT = False
+
+def _end_run_budget() -> dict[str, Any]:
+    global _RUN_DEADLINE_MONOTONIC, _RUN_REQUEST_BUDGET, _RUN_REQUEST_COUNT, _RUN_TIMED_OUT, _RUN_STARTED_MONOTONIC
+    elapsed = max(0.0, time.monotonic() - _RUN_STARTED_MONOTONIC) if _RUN_STARTED_MONOTONIC else 0.0
+    status = {
+        "elapsed_seconds": round(elapsed, 2),
+        "request_count": int(_RUN_REQUEST_COUNT),
+        "request_budget": int(_RUN_REQUEST_BUDGET),
+        "timed_out": bool(_RUN_TIMED_OUT),
+    }
+    _RUN_DEADLINE_MONOTONIC = 0.0
+    _RUN_REQUEST_BUDGET = 0
+    _RUN_REQUEST_COUNT = 0
+    _RUN_TIMED_OUT = False
+    _RUN_STARTED_MONOTONIC = 0.0
+    return status
+
+def _remaining_run_seconds() -> float | None:
+    if _RUN_DEADLINE_MONOTONIC <= 0:
+        return None
+    return max(0.0, _RUN_DEADLINE_MONOTONIC - time.monotonic())
+
+def _budget_guard(label: str = "官方因子更新") -> None:
+    global _RUN_TIMED_OUT
+    remaining = _remaining_run_seconds()
+    if remaining is not None and remaining <= 0:
+        _RUN_TIMED_OUT = True
+        raise OfficialFactorBudgetExceeded(f"{label}已達時間上限")
+    if _RUN_REQUEST_BUDGET > 0 and _RUN_REQUEST_COUNT >= _RUN_REQUEST_BUDGET:
+        _RUN_TIMED_OUT = True
+        raise OfficialFactorBudgetExceeded(f"{label}已達請求上限 {_RUN_REQUEST_BUDGET}")
+
+def _consume_request(label: str = "官方資料請求") -> float:
+    global _RUN_REQUEST_COUNT
+    _budget_guard(label)
+    _RUN_REQUEST_COUNT += 1
+    remaining = _remaining_run_seconds()
+    if remaining is None:
+        return float(REQUEST_TIMEOUT)
+    return max(0.8, min(float(REQUEST_TIMEOUT), remaining))
 USER_AGENT = "Mozilla/5.0 (SPT-Godpick-V109; official-factor-cache)"
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 
@@ -265,6 +325,13 @@ def _compact_error(exc: Exception) -> str:
 
 
 def _request_with_fallback(url: str, params: dict[str, Any] | None = None) -> tuple[requests.Response, str]:
+    """Bounded HTTP request. Certificate fallback is only used for SSL errors.
+
+    The prior implementation retried every timeout up to three times. Combined with
+    seven institutional dates and FinMind per-code fallback, one click could run for
+    tens of minutes. This version consumes a shared time/request budget and avoids
+    certificate retries for ordinary timeouts or connection failures.
+    """
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json,text/plain,text/html,*/*",
@@ -273,23 +340,30 @@ def _request_with_fallback(url: str, params: dict[str, Any] | None = None) -> tu
     }
     last_exc: Exception | None = None
     attempts: list[tuple[str, Any]] = [("SSL正常", True)]
-    if certifi is not None:
-        attempts.append(("certifi憑證", certifi.where()))
-    if _is_twse_public_url(url):
-        attempts.append(("SSL備援", False))
-
-    for mode, verify_arg in attempts:
+    index = 0
+    while index < len(attempts):
+        mode, verify_arg = attempts[index]
+        index += 1
         try:
             if verify_arg is False and urllib3 is not None:
                 try:
                     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
                 except Exception:
                     pass
-            r = requests.get(url, params=params or {}, headers=headers, timeout=REQUEST_TIMEOUT, verify=verify_arg)
+            timeout_value = _consume_request(f"{url.split('?')[0]} 請求")
+            r = requests.get(url, params=params or {}, headers=headers, timeout=timeout_value, verify=verify_arg)
             r.raise_for_status()
             return r, mode
+        except OfficialFactorBudgetExceeded:
+            raise
         except Exception as exc:
             last_exc = exc
+            # Only certificate failures benefit from certifi / verify=False.
+            if isinstance(exc, requests.exceptions.SSLError) and index == 1:
+                if certifi is not None:
+                    attempts.append(("certifi憑證", certifi.where()))
+                if _is_twse_public_url(url):
+                    attempts.append(("SSL備援", False))
             continue
     raise RuntimeError(_compact_error(last_exc or Exception("unknown request error")))
 
@@ -707,6 +781,7 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
     msgs: list[str] = []
     for date_text in _recent_weekdays(max(days, 3)):
         try:
+            _budget_guard("TWSE 法人更新")
             params = {"date": date_text, "selectType": "ALLBUT0999", "response": "json", "_": int(time.time() * 1000)}
             data = None
             last_t86_error = ""
@@ -753,6 +828,9 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
                 cnt += 1
             msgs.append(f"{date_text} T86 取得 {cnt} 筆。")
             time.sleep(0.15)
+        except OfficialFactorBudgetExceeded as exc:
+            msgs.append(str(exc))
+            break
         except Exception as exc:
             msgs.append(f"{date_text} T86 取得失敗：{exc}")
 
@@ -816,6 +894,11 @@ def fetch_tpex_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
     records_by_code: dict[str, list[dict[str, Any]]] = {}
     msgs: list[str] = []
     for date_text in _recent_weekdays(max(days, 3)):
+        try:
+            _budget_guard("TPEx 法人更新")
+        except OfficialFactorBudgetExceeded as exc:
+            msgs.append(str(exc))
+            break
         date_slash = f"{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}"
         try:
             data = _get_json(TPEX_3ITRADE, params={"date": date_slash, "type": "Daily", "response": "json"})
@@ -877,6 +960,11 @@ def fetch_tpex_valuation() -> tuple[pd.DataFrame, str]:
     """上櫃本益比／殖利率／股價淨值比（櫃買中心官方 JSON）。"""
     msgs: list[str] = []
     for date_text in _recent_weekdays(7):
+        try:
+            _budget_guard("TPEx 估值更新")
+        except OfficialFactorBudgetExceeded as exc:
+            msgs.append(str(exc))
+            break
         date_slash = f"{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}"
         try:
             data = _get_json(TPEX_PERATIO, params={"date": date_slash, "id": "", "response": "json"})
@@ -1046,7 +1134,8 @@ def _finmind_get(dataset: str, start_date: str, end_date: str, data_id: str = ""
         headers["Authorization"] = f"Bearer {token}"
         params["token"] = token
     try:
-        r = requests.get(FINMIND_API_URL, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        timeout_value = _consume_request(f"FinMind {dataset}")
+        r = requests.get(FINMIND_API_URL, params=params, headers=headers, timeout=timeout_value)
         r.raise_for_status()
         payload = _response_to_json(r)
         if not isinstance(payload, dict):
@@ -1058,6 +1147,8 @@ def _finmind_get(dataset: str, start_date: str, end_date: str, data_id: str = ""
         if not isinstance(data, list):
             return [], f"FinMind {dataset} data 格式非 list。"
         return [x for x in data if isinstance(x, dict)], f"FinMind {dataset} 取得 {len(data)} 筆。"
+    except OfficialFactorBudgetExceeded as exc:
+        return [], f"FinMind {dataset} 已停止：{exc}"
     except Exception as exc:
         return [], f"FinMind {dataset} 取得失敗：{_compact_error(exc)}"
 
@@ -1147,7 +1238,16 @@ def _finmind_valuation_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def fetch_finmind_fallback(universe: pd.DataFrame, max_stocks: int = 120, include_institutional: bool = True, include_revenue: bool = True, include_valuation: bool = True) -> tuple[pd.DataFrame, list[str]]:
+def fetch_finmind_fallback(
+    universe: pd.DataFrame,
+    max_stocks: int = 120,
+    include_institutional: bool = True,
+    include_revenue: bool = True,
+    include_valuation: bool = True,
+    *,
+    bulk_only: bool = False,
+    request_budget_override: int | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
     """Fetch bounded FinMind fallback data. Bulk is attempted first; per-code calls are bounded.
 
     FinMind is never treated as exchange-official data. It only fills missing values and
@@ -1171,7 +1271,8 @@ def fetch_finmind_fallback(universe: pd.DataFrame, max_stocks: int = 120, includ
         datasets.append(("TaiwanStockMonthRevenue",start550,end,_finmind_revenue_frame))
     if include_valuation:
         datasets.append(("TaiwanStockPER",start12,end,_finmind_valuation_frame))
-    request_budget = min(260, max(30, len(codes)*len(datasets)))
+    request_budget = int(request_budget_override or min(260, max(30, len(codes) * len(datasets))))
+    request_budget = max(3, min(request_budget, 260))
     used=0
     for dataset,start,end_date,parser in datasets:
         bulk_rows,msg = _finmind_get(dataset,start,end_date)
@@ -1183,8 +1284,16 @@ def fetch_finmind_fallback(universe: pd.DataFrame, max_stocks: int = 120, includ
             if not parsed.empty:
                 frames.append(parsed)
                 continue
+        if bulk_only:
+            diagnostics.append(f"FinMind {dataset} 批次未取得可用資料；一鍵快速模式不逐檔查詢，留待排程增量補值。")
+            continue
         per_rows=[]
         for code in codes:
+            try:
+                _budget_guard(f"FinMind {dataset}")
+            except OfficialFactorBudgetExceeded as exc:
+                diagnostics.append(str(exc))
+                break
             if used >= request_budget:
                 diagnostics.append(f"FinMind 已達本輪安全請求上限 {request_budget}，剩餘股票留待下次增量補值。")
                 break
@@ -1264,134 +1373,175 @@ def build_official_factor_cache(
     save: bool = True,
     enable_finmind_fallback: bool = True,
     finmind_max_stocks: int = 120,
+    *,
+    quick_mode: bool = False,
+    max_runtime_seconds: int = DEFAULT_RUN_TIMEOUT_SECONDS,
+    max_requests: int = DEFAULT_RUN_REQUEST_BUDGET,
+    finmind_bulk_only: bool | None = None,
+    progress_callback: Any = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Build official factor cache with a hard cooperative budget.
+
+    Quick mode is used by page 17 one-click update. It prioritizes current
+    exchange/MOPS bulk data, limits institutional lookback to three sessions, and
+    never falls into hundreds of FinMind per-stock requests. Partial results are
+    merged with the previous valid cache and saved only when quality is safe.
+    """
     global _REQUEST_NOTES
     _REQUEST_NOTES = []
+    _begin_run_budget(max_runtime_seconds, max_requests)
     diagnostics: list[str] = []
-    universe = load_stock_universe(limit=limit, market_filter=market_filter)
-    if universe.empty:
-        diagnostics.append("股票主檔為空，請先更新 9_股票主檔更新。")
-        df = _empty_factor_df()
-        meta = {"ok": False, "diagnostics": diagnostics}
-        return df, meta
+    progress_events: list[dict[str, Any]] = []
 
-    df = universe.copy()
-    if include_valuation:
-        val_df, msg = fetch_twse_bwibbu_all()
-        diagnostics.append(msg)
-        otc_val_df, otc_msg = fetch_tpex_valuation()
-        diagnostics.append(otc_msg)
-        valuation_frames = [x for x in [val_df, otc_val_df] if x is not None and not x.empty]
-        if valuation_frames:
-            all_val = pd.concat(valuation_frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first")
-            df = df.merge(all_val, on="股票代號", how="left")
-    if include_revenue:
-        rev_df, msg = fetch_monthly_revenue()
-        diagnostics.append(msg)
-        if not rev_df.empty:
-            df = df.merge(rev_df, on="股票代號", how="left")
-    if include_institutional:
-        inst_df, msg = fetch_twse_institutional(days=7)
-        diagnostics.append(msg)
-        otc_inst_df, otc_msg = fetch_tpex_institutional(days=7)
-        diagnostics.append(otc_msg)
-        institutional_frames = [x for x in [inst_df, otc_inst_df] if x is not None and not x.empty]
-        if institutional_frames:
-            all_inst = pd.concat(institutional_frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first")
-            df = df.merge(all_inst, on="股票代號", how="left")
+    def progress(stage: str, message: str) -> None:
+        event = {"stage": stage, "message": message, "elapsed_seconds": round(time.monotonic() - _RUN_STARTED_MONOTONIC, 2)}
+        progress_events.append(event)
+        if callable(progress_callback):
+            try:
+                progress_callback(event)
+            except Exception:
+                pass
 
-    # V109: FinMind only fills still-missing fields; exchange/MOPS values always win.
-    finmind_filled = 0
-    if enable_finmind_fallback:
-        fm_df, fm_diag = fetch_finmind_fallback(
-            universe, max_stocks=finmind_max_stocks,
-            include_institutional=include_institutional, include_revenue=include_revenue,
-            include_valuation=include_valuation,
-        )
-        diagnostics.extend(fm_diag)
-        if fm_df is not None and not fm_df.empty:
-            df, finmind_filled = _coalesce_fallback(df, fm_df, "FinMind", trust_score=82)
-            diagnostics.append(f"FinMind 本輪補值 {finmind_filled} 個欄位；官方原值未被覆蓋。")
-
-    # Preserve prior valid cache values for fields still missing this run.
-    old_df = load_factor_frame()
-    if old_df is not None and not old_df.empty:
-        df, old_filled = _coalesce_fallback(df, old_df, "前次有效快取", trust_score=60)
-        if old_filled:
-            diagnostics.append(f"前次有效快取補回 {old_filled} 個仍缺欄位。")
-
-    # Ensure all expected numeric/data columns exist before scoring.
-    for c in FACTOR_COLUMNS:
-        if c not in df.columns:
-            df[c] = ""
-    update_time = _now_text()
-    sources = []
-    if include_institutional:
-        sources.append("TWSE_T86")
-    if include_revenue:
-        sources.append("TWSE_OpenAPI_MOPS_monthly_revenue")
-    if include_valuation:
-        sources.append("TWSE_BWIBBU_ALL")
-
-    score_rows = []
-    for _, row in df.iterrows():
-        item = {c: row.get(c, "") for c in df.columns}
-        item.update(_calc_scores(item))
-        item["官方因子更新時間"] = update_time
-        item["官方因子資料源"] = ",".join(sources)
-        item["因子主要來源"] = "TWSE/TPEx/MOPS"
-        if not _safe_str(item.get("因子來源可信度")):
-            item["因子來源可信度"] = 100
-        score_rows.append(item)
-    out = pd.DataFrame(score_rows)
-    for c in FACTOR_COLUMNS:
-        if c not in out.columns:
-            out[c] = ""
-    out = out[FACTOR_COLUMNS + [c for c in out.columns if c not in FACTOR_COLUMNS]].copy()
-
-    if _REQUEST_NOTES:
-        diagnostics = _REQUEST_NOTES + diagnostics
-    complete_count = 0
     try:
-        complete_count = int((pd.to_numeric(out.get("官方資料完整度", pd.Series([], dtype=float)), errors="coerce") >= 60).sum())
-    except Exception:
-        complete_count = 0
-    existing_complete = _existing_complete_count() if save else 0
-    should_save = True
-    preserve_msg = ""
-    if save and existing_complete > complete_count and complete_count < max(5, int(existing_complete * 0.5)):
-        should_save = False
-        preserve_msg = f"本次完整度>=60 僅 {complete_count} 筆，低於既有快取 {existing_complete} 筆，已保留舊有效快取，不覆蓋。"
-        diagnostics.append(preserve_msg)
+        universe = load_stock_universe(limit=limit, market_filter=market_filter)
+        if universe.empty:
+            diagnostics.append("股票主檔為空，請先更新 9_股票主檔更新。")
+            return _empty_factor_df(), {"ok": False, "diagnostics": diagnostics, "progress_events": progress_events}
 
-    meta = {
-        "ok": True,
-        "updated_at": update_time,
-        "record_count": int(len(out)),
-        "complete_count": complete_count,
-        "existing_complete_count": existing_complete,
-        "saved": bool(should_save),
-        "preserved_old_cache": bool(not should_save),
-        "diagnostics": _summarize_diagnostics(diagnostics),
-        "market_filter": market_filter,
-        "limit": limit or 0,
-        "ssl_fallback_supported": True,
-        "endpoint_parse_fallback_supported": True,
-        "mops_html_revenue_fallback_supported": True,
-        "tpex_institutional_supported": True,
-        "tpex_valuation_supported": True,
-        "merge_placeholder_coalesce_supported": True,
-        "finmind_fallback_enabled": bool(enable_finmind_fallback),
-        "finmind_token_configured": bool(_finmind_token()),
-        "finmind_max_stocks": int(finmind_max_stocks),
-        "finmind_filled_fields": int(finmind_filled),
-        "trusted_source_priority": ["TWSE/TPEx/MOPS", "FinMind", "前次有效快取"],
-    }
-    if save and should_save:
-        save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
-    elif save and not should_save:
-        _append_log("preserved_old_cache", int(len(out)), _summarize_diagnostics(diagnostics))
-    return out, meta
+        df = universe.copy()
+        institutional_days = 3 if quick_mode else 7
+        if finmind_bulk_only is None:
+            finmind_bulk_only = bool(quick_mode)
+        if quick_mode:
+            finmind_max_stocks = min(max(0, int(finmind_max_stocks)), 30)
+
+        if include_valuation:
+            progress("valuation", "更新上市與上櫃估值")
+            try:
+                _budget_guard("估值更新")
+                val_df, msg = fetch_twse_bwibbu_all()
+                diagnostics.append(msg)
+                otc_val_df, otc_msg = fetch_tpex_valuation()
+                diagnostics.append(otc_msg)
+                frames = [x for x in [val_df, otc_val_df] if x is not None and not x.empty]
+                if frames:
+                    df = df.merge(pd.concat(frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first"), on="股票代號", how="left")
+            except OfficialFactorBudgetExceeded as exc:
+                diagnostics.append(str(exc))
+
+        if include_revenue:
+            progress("revenue", "更新月營收")
+            try:
+                _budget_guard("月營收更新")
+                rev_df, msg = fetch_monthly_revenue()
+                diagnostics.append(msg)
+                if rev_df is not None and not rev_df.empty:
+                    df = df.merge(rev_df, on="股票代號", how="left")
+            except OfficialFactorBudgetExceeded as exc:
+                diagnostics.append(str(exc))
+
+        if include_institutional:
+            progress("institutional", f"更新法人籌碼（近 {institutional_days} 個交易日）")
+            try:
+                _budget_guard("法人更新")
+                inst_df, msg = fetch_twse_institutional(days=institutional_days)
+                diagnostics.append(msg)
+                otc_inst_df, otc_msg = fetch_tpex_institutional(days=institutional_days)
+                diagnostics.append(otc_msg)
+                frames = [x for x in [inst_df, otc_inst_df] if x is not None and not x.empty]
+                if frames:
+                    df = df.merge(pd.concat(frames, ignore_index=True, sort=False).drop_duplicates("股票代號", keep="first"), on="股票代號", how="left")
+            except OfficialFactorBudgetExceeded as exc:
+                diagnostics.append(str(exc))
+
+        finmind_filled = 0
+        if enable_finmind_fallback:
+            progress("finmind", "FinMind 缺值備援（快速模式僅批次）")
+            try:
+                _budget_guard("FinMind 備援")
+                fm_df, fm_diag = fetch_finmind_fallback(
+                    universe, max_stocks=finmind_max_stocks,
+                    include_institutional=include_institutional, include_revenue=include_revenue,
+                    include_valuation=include_valuation, bulk_only=bool(finmind_bulk_only),
+                    request_budget_override=6 if quick_mode else None,
+                )
+                diagnostics.extend(fm_diag)
+                if fm_df is not None and not fm_df.empty:
+                    df, finmind_filled = _coalesce_fallback(df, fm_df, "FinMind", trust_score=82)
+                    diagnostics.append(f"FinMind 本輪補值 {finmind_filled} 個欄位；官方原值未被覆蓋。")
+            except OfficialFactorBudgetExceeded as exc:
+                diagnostics.append(str(exc))
+
+        progress("cache", "合併前次有效快取並計算分數")
+        old_df = load_factor_frame()
+        old_filled = 0
+        if old_df is not None and not old_df.empty:
+            df, old_filled = _coalesce_fallback(df, old_df, "前次有效快取", trust_score=60)
+            if old_filled:
+                diagnostics.append(f"前次有效快取補回 {old_filled} 個仍缺欄位。")
+
+        for c in FACTOR_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+        update_time = _now_text()
+        sources = []
+        if include_institutional:
+            sources.append("TWSE_T86_TPEX_3ITRADE")
+        if include_revenue:
+            sources.append("TWSE_OpenAPI_MOPS_monthly_revenue")
+        if include_valuation:
+            sources.append("TWSE_BWIBBU_TPEX_PERATIO")
+
+        score_rows = []
+        for _, row in df.iterrows():
+            item = {c: row.get(c, "") for c in df.columns}
+            item.update(_calc_scores(item))
+            item["官方因子更新時間"] = update_time
+            item["官方因子資料源"] = ",".join(sources)
+            item["因子主要來源"] = "TWSE/TPEx/MOPS"
+            if not _safe_str(item.get("因子來源可信度")):
+                item["因子來源可信度"] = 100
+            score_rows.append(item)
+        out = pd.DataFrame(score_rows)
+        for c in FACTOR_COLUMNS:
+            if c not in out.columns:
+                out[c] = ""
+        out = out[FACTOR_COLUMNS + [c for c in out.columns if c not in FACTOR_COLUMNS]].copy()
+
+        if _REQUEST_NOTES:
+            diagnostics = _REQUEST_NOTES + diagnostics
+        complete_count = int((pd.to_numeric(out.get("官方資料完整度", pd.Series([], dtype=float)), errors="coerce") >= 60).sum()) if not out.empty else 0
+        existing_complete = _existing_complete_count() if save else 0
+        should_save = True
+        if save and existing_complete > complete_count and complete_count < max(5, int(existing_complete * 0.5)):
+            should_save = False
+            diagnostics.append(f"本次完整度>=60 僅 {complete_count} 筆，低於既有快取 {existing_complete} 筆，已保留舊有效快取，不覆蓋。")
+
+        budget_status = _end_run_budget()
+        meta = {
+            "ok": True, "updated_at": update_time, "record_count": int(len(out)),
+            "complete_count": complete_count, "existing_complete_count": existing_complete,
+            "saved": bool(should_save), "preserved_old_cache": bool(not should_save),
+            "diagnostics": _summarize_diagnostics(diagnostics), "market_filter": market_filter,
+            "limit": limit or 0, "quick_mode": bool(quick_mode),
+            "max_runtime_seconds": int(max_runtime_seconds), "max_requests": int(max_requests),
+            "finmind_bulk_only": bool(finmind_bulk_only), "progress_events": progress_events,
+            "finmind_fallback_enabled": bool(enable_finmind_fallback),
+            "finmind_token_configured": bool(_finmind_token()),
+            "finmind_max_stocks": int(finmind_max_stocks),
+            "finmind_filled_fields": int(finmind_filled),
+            "old_cache_filled_fields": int(old_filled),
+            "trusted_source_priority": ["TWSE/TPEx/MOPS", "FinMind", "前次有效快取"],
+            **budget_status,
+        }
+        if save and should_save:
+            save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
+        elif save and not should_save:
+            _append_log("preserved_old_cache", int(len(out)), _summarize_diagnostics(diagnostics))
+        return out, meta
+    except Exception:
+        _end_run_budget()
+        raise
 
 
 def _is_missing_factor_value(series: pd.Series, column: str) -> pd.Series:

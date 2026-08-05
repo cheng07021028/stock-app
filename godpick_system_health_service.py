@@ -105,6 +105,11 @@ DEFAULT_SCHEDULE_SETTINGS: dict[str, Any] = {
     "include_valuation": True,
     "preserve_old_cache": True,
     "auto_commit_github_actions": True,
+    "quick_mode": True,
+    "max_runtime_seconds": 75,
+    "max_requests": 48,
+    "finmind_bulk_only": True,
+    "finmind_max_stocks": 30,
     "last_saved_at": "",
     "note": "GitHub Actions workflow 使用 UTC 15:00，約等於台灣 23:00。",
 }
@@ -529,12 +534,25 @@ def run_official_factor_update_once(settings: dict[str, Any] | None = None, push
             include_revenue=bool(cfg.get("include_revenue", True)),
             include_valuation=bool(cfg.get("include_valuation", True)),
             save=True,
+            enable_finmind_fallback=bool(cfg.get("enable_finmind_fallback", True)),
+            finmind_max_stocks=int(cfg.get("finmind_max_stocks", 30) or 30),
+            quick_mode=bool(cfg.get("quick_mode", False)),
+            max_runtime_seconds=int(cfg.get("max_runtime_seconds", 75) or 75),
+            max_requests=int(cfg.get("max_requests", 48) or 48),
+            finmind_bulk_only=bool(cfg.get("finmind_bulk_only", False)),
         )
         gh_msg = ""
         gh_ok = None
         if push_github:
             gh_ok, gh_msg = push_cache_to_github()
-        return {"ok": True, "message": f"完成官方因子更新：{len(df)} 筆，完整度>=60：{meta.get('complete_count', 0)}", "meta": meta, "github_ok": gh_ok, "github_msg": gh_msg}
+        bounded_note = ""
+        if meta.get("timed_out"):
+            bounded_note = f"；已達 {meta.get('max_runtime_seconds', 75)} 秒上限，保留目前成果/舊有效快取"
+        return {
+            "ok": True,
+            "message": f"完成官方因子更新：{len(df)} 筆，完整度>=60：{meta.get('complete_count', 0)}{bounded_note}",
+            "meta": meta, "github_ok": gh_ok, "github_msg": gh_msg,
+        }
     except Exception as exc:
         return {"ok": False, "message": f"官方因子更新失敗：{type(exc).__name__}: {exc}", "meta": {}}
 

@@ -40,7 +40,7 @@ MACRO_RECORDS_FILE = BASE_DIR / "macro_trend_records.json"
 STATUS_FILE = BASE_DIR / "macro_startup_status.json"
 LOCK_FILE = BASE_DIR / "macro_startup_update.lock"
 
-VERSION = "v109_2_startup_macro_github_sync_hard_off"
+VERSION = "v110_bounded_macro_update_20260805"
 DEFAULT_TTL_SECONDS = 30 * 60
 LOCK_TTL_SECONDS = 8 * 60
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -455,81 +455,106 @@ def _append_record(snapshot: Dict[str, Any]) -> list:
     return records[-500:]
 
 
-def _run_fast_update(sync_github: bool = True) -> Dict[str, Any]:
-    symbols = {
-        "twse": "^TWII",
-        "otc": "^TWOII",
-        "nasdaq": "^IXIC",
-        "sox": "^SOX",
-        "futures": "TX=F",
-    }
+def _run_fast_update(
+    sync_github: bool = True,
+    *,
+    max_runtime_seconds: int = 35,
+    progress_callback: Any = None,
+) -> Dict[str, Any]:
+    """Bounded macro refresh. Never waits forever for executor shutdown."""
+    started = time.monotonic()
+    deadline = started + max(10, int(max_runtime_seconds))
+    symbols = {"twse": "^TWII", "otc": "^TWOII", "nasdaq": "^IXIC", "sox": "^SOX", "futures": "TX=F"}
     results: Dict[str, Dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        fut_map = {key: ex.submit(_fetch_yahoo_chart, sym) for key, sym in symbols.items()}
-        for key, fut in fut_map.items():
-            try:
-                results[key] = fut.result(timeout=6)
-            except Exception as e:
-                results[key] = {"ok": False, "symbol": symbols[key], "error": str(e)[:120] or "timeout"}
-    for key, sym in symbols.items():
-        results.setdefault(key, {"ok": False, "symbol": sym, "error": "timeout"})
 
-    # V110：台股兩項必須有至少2筆歷史資料；Yahoo失敗或rows不足時改走多來源服務。
+    def progress(stage: str, message: str) -> None:
+        if callable(progress_callback):
+            try:
+                progress_callback({"stage": stage, "message": message, "elapsed_seconds": round(time.monotonic()-started, 2)})
+            except Exception:
+                pass
+
+    progress("yahoo", "平行抓取加權、櫃買、NASDAQ、SOX、台指期")
+    executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="macro_bounded")
+    futures = {executor.submit(_fetch_yahoo_chart, sym, 90, 3.0): key for key, sym in symbols.items()}
+    try:
+        remaining = max(0.5, min(12.0, deadline - time.monotonic()))
+        try:
+            for future in as_completed(futures, timeout=remaining):
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception as exc:
+                    results[key] = {"ok": False, "symbol": symbols[key], "error": str(exc)[:160]}
+        except Exception:
+            pass
+    finally:
+        for future, key in futures.items():
+            if not future.done():
+                future.cancel()
+                results.setdefault(key, {"ok": False, "symbol": symbols[key], "error": "Yahoo 批次逾時"})
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    for key, sym in symbols.items():
+        results.setdefault(key, {"ok": False, "symbol": sym, "error": "未完成"})
+
+    progress("fallback", "台股指數不足時切換多來源/有效快取")
     try:
         from market_index_history_service import fetch_market_index_history
         for key in ("twse", "otc"):
+            if time.monotonic() >= deadline:
+                results[key].setdefault("error", "整體大盤步驟已達時間上限")
+                continue
             current = results.get(key) or {}
             if not current.get("ok") or int(current.get("rows") or 0) < 2:
-                fixed = fetch_market_index_history(key, days=90, timeout=5.0)
+                remaining = max(1.0, deadline - time.monotonic())
+                fixed = fetch_market_index_history(key, days=90, timeout=min(2.5, remaining), max_seconds=min(8.0, remaining))
                 if fixed.get("ok") and int(fixed.get("rows") or 0) >= 2:
+                    history = fixed.get("history") or []
                     results[key] = {
                         "ok": True, "symbol": symbols[key], "date": fixed.get("date"),
                         "close": fixed.get("close"), "prev_close": fixed.get("prev_close"),
                         "change": fixed.get("change"), "change_pct": fixed.get("change_pct"),
-                        "ma5": round(sum(x["close"] for x in fixed["history"][-5:]) / min(5, len(fixed["history"])), 2),
-                        "ma20": round(sum(x["close"] for x in fixed["history"][-20:]) / min(20, len(fixed["history"])), 2),
+                        "ma5": round(sum(x["close"] for x in history[-5:]) / min(5, len(history)), 2),
+                        "ma20": round(sum(x["close"] for x in history[-20:]) / min(20, len(history)), 2),
                         "source": fixed.get("source"), "rows": fixed.get("rows"),
-                        "history": fixed.get("history"), "diagnostics": fixed.get("diagnostics"),
+                        "history": history, "diagnostics": fixed.get("diagnostics"),
                     }
                 else:
                     results[key] = fixed
-    except Exception as e:
-        results.setdefault("index_history_service", {"ok": False, "error": str(e)})
+    except Exception as exc:
+        results.setdefault("index_history_service", {"ok": False, "error": str(exc)[:200]})
 
     if not (results.get("twse") or {}).get("ok"):
         old = _read_json(MARKET_SNAPSHOT_FILE, {})
+        elapsed = round(time.monotonic()-started, 2)
         if isinstance(old, dict) and old:
-            return _write_status(False, "台股大盤快抓失敗，已保留舊 market_snapshot", results=results, kept_old=True)
-        return _write_status(False, "台股大盤快抓失敗，尚無舊快照可保留", results=results, kept_old=False)
+            return _write_status(False, f"大盤更新於 {elapsed} 秒停止；已保留舊 market_snapshot", results=results, kept_old=True, timed_out=time.monotonic() >= deadline)
+        return _write_status(False, f"大盤更新於 {elapsed} 秒停止；尚無舊快照可保留", results=results, kept_old=False, timed_out=time.monotonic() >= deadline)
 
     snapshot = _build_snapshot(results)
     bridge = _build_bridge(snapshot)
     records = _append_record(snapshot)
-
     s_ok, s_msg = _write_json(MARKET_SNAPSHOT_FILE, snapshot)
     b_ok, b_msg = _write_json(MACRO_BRIDGE_FILE, bridge)
     r_ok, r_msg = _write_json(MACRO_RECORDS_FILE, records)
 
     gh_msgs = []
-    if sync_github:
-        for name, data in [
-            ("market_snapshot.json", snapshot),
-            ("macro_mode_bridge.json", bridge),
-            ("macro_trend_records.json", records),
-        ]:
+    if sync_github and time.monotonic() < deadline:
+        for name, data in [("market_snapshot.json", snapshot), ("macro_mode_bridge.json", bridge), ("macro_trend_records.json", records)]:
+            if time.monotonic() >= deadline:
+                gh_msgs.append({"file": name, "ok": False, "message": "已達時間上限，略過同步"})
+                continue
             ok, msg = _write_github_json(name, data)
             gh_msgs.append({"file": name, "ok": ok, "message": msg})
 
     ok = bool(s_ok and b_ok and r_ok)
+    elapsed = round(time.monotonic()-started, 2)
     return _write_status(
-        ok,
-        f"大盤啟動更新完成：{snapshot.get('market_trend')} / {snapshot.get('market_score')}",
-        snapshot_ok=s_ok,
-        bridge_ok=b_ok,
-        records_ok=r_ok,
-        local_messages=[s_msg, b_msg, r_msg],
-        github=gh_msgs,
-        results=results,
+        ok, f"大盤更新完成：{snapshot.get('market_trend')} / {snapshot.get('market_score')}｜{elapsed}秒",
+        snapshot_ok=s_ok, bridge_ok=b_ok, records_ok=r_ok,
+        local_messages=[s_msg, b_msg, r_msg], github=gh_msgs, results=results,
+        elapsed_seconds=elapsed, timed_out=False, max_runtime_seconds=max_runtime_seconds,
     )
 
 

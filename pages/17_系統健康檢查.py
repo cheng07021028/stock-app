@@ -146,6 +146,11 @@ with st.sidebar:
     g_batch_limit = st.selectbox("每批更新股票數", [30, 50, 80, 120, 200], index=[30, 50, 80, 120, 200].index(int(global_cfg.get("batch_limit", 80)) if int(global_cfg.get("batch_limit", 80)) in [30, 50, 80, 120, 200] else 80))
     g_stale_minutes = st.selectbox("推薦績效幾分鐘內已更新則略過", [0, 15, 30, 60, 120, 360], index=[0, 15, 30, 60, 120, 360].index(int(global_cfg.get("stale_minutes", 30)) if int(global_cfg.get("stale_minutes", 30)) in [0, 15, 30, 60, 120, 360] else 30))
     g_force_source_refresh = st.checkbox("手動強制全部來源重抓（疑難排除才勾）", value=bool(global_cfg.get("force_source_refresh", False)), help="正常不必勾。新版智慧略過會驗證內容日期、完整度與外資欄位；只要內容落後或異常便自動強制重抓，不會只看檔案時間。")
+    with st.expander("⏱️ 網路來源逾時保護（建議維持預設）", expanded=False):
+        g_macro_timeout = st.selectbox("大盤快照/橋接最長執行秒數", [20, 30, 35, 45, 60], index=[20, 30, 35, 45, 60].index(int(global_cfg.get("macro_max_runtime_seconds", 35)) if int(global_cfg.get("macro_max_runtime_seconds", 35)) in [20, 30, 35, 45, 60] else 35))
+        g_official_timeout = st.selectbox("官方因子最長執行秒數", [45, 60, 75, 90, 120], index=[45, 60, 75, 90, 120].index(int(global_cfg.get("official_max_runtime_seconds", 75)) if int(global_cfg.get("official_max_runtime_seconds", 75)) in [45, 60, 75, 90, 120] else 75))
+        g_official_requests = st.selectbox("官方/備援本輪最多網路請求", [24, 36, 48, 60, 90], index=[24, 36, 48, 60, 90].index(int(global_cfg.get("official_max_requests", 48)) if int(global_cfg.get("official_max_requests", 48)) in [24, 36, 48, 60, 90] else 48))
+        g_official_quick = st.checkbox("一鍵更新使用快速安全模式（FinMind僅批次、不逐檔）", value=bool(global_cfg.get("official_quick_mode", True)), help="避免120檔×多資料集逐檔請求造成數十分鐘卡住。完整補值交由第16頁或排程分批執行。")
     g_rebuild_feedback = st.checkbox("重建績效回饋與精準度摘要", value=bool(global_cfg.get("rebuild_feedback_profile", True)))
     g_invalidate_cache = st.checkbox("更新後清除所有模組舊表格快取", value=bool(global_cfg.get("invalidate_runtime_caches", True)))
     g_push_github = st.checkbox("更新後背景同步 GitHub（不阻塞按鈕）", value=bool(global_cfg.get("push_github", True)))
@@ -165,12 +170,30 @@ with st.sidebar:
             "rebuild_feedback_profile": g_rebuild_feedback,
             "invalidate_runtime_caches": g_invalidate_cache,
             "push_github": g_push_github,
+            "macro_max_runtime_seconds": g_macro_timeout,
+            "official_max_runtime_seconds": g_official_timeout,
+            "official_max_requests": g_official_requests,
+            "official_quick_mode": g_official_quick,
         })
         if ok:
             st.success("已永久保存全域更新設定。")
         else:
             st.error(msg)
     run_global_update_now = st.button("🚀 一鍵依序更新股神所需資訊", use_container_width=True, type="primary", help="沿用本按鈕依序更新：核心→股票主檔→大盤→官方因子→自選股→最新推薦/清單/紀錄績效→績效回饋→推薦就緒度→全模組表格快取。")
+    if st.button("🧹 解除逾時更新鎖定", use_container_width=True, help="只在畫面長時間卡住且已確認沒有其他人正在更新時使用。"):
+        removed = []
+        for lock_name in [".godpick_global_update.lock", "macro_startup_update.lock"]:
+            lock_path = Path(__file__).resolve().parents[1] / lock_name
+            try:
+                if lock_path.exists():
+                    lock_path.unlink()
+                    removed.append(lock_name)
+            except Exception as exc:
+                st.warning(f"無法移除 {lock_name}：{exc}")
+        if removed:
+            st.success("已解除逾時鎖定：" + "、".join(removed))
+        else:
+            st.info("目前沒有殘留更新鎖定。")
 
 if 'run_global_update_now' in locals() and run_global_update_now:
     global_settings = {
@@ -188,13 +211,17 @@ if 'run_global_update_now' in locals() and run_global_update_now:
         "rebuild_feedback_profile": g_rebuild_feedback,
         "invalidate_runtime_caches": g_invalidate_cache,
         "push_github": g_push_github,
+        "macro_max_runtime_seconds": g_macro_timeout,
+        "official_max_runtime_seconds": g_official_timeout,
+        "official_max_requests": g_official_requests,
+        "official_quick_mode": g_official_quick,
     }
     progress_box = st.empty()
     progress_table = st.empty()
     def _on_global_progress(row, all_rows):
         progress_box.info(f"{row.get('步驟')}｜{row.get('狀態')}｜{row.get('說明')}｜{row.get('耗時秒', 0)} 秒")
         progress_table.dataframe(pd.DataFrame(all_rows).drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
-    with st.status("正在使用既有一鍵更新按鈕更新全模組資料...", expanded=True) as update_status:
+    with st.status("正在更新全模組資料；大盤與官方因子均有硬性逾時保護，不會無限運轉...", expanded=True) as update_status:
         global_result = run_global_update(Path(__file__).resolve().parents[1], global_settings, progress_callback=_on_global_progress)
         if global_result.get("message") and not global_result.get("steps"):
             update_status.update(label=global_result.get("message"), state="error", expanded=True)
