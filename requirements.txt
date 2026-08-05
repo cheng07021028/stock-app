@@ -1,4 +1,9 @@
-streamlit>=1.36.0,<1.60.0
+# Streamlit production dependency lock
+# Streamlit 1.59.2 is incompatible with Starlette 1.4.0's new
+# GZipResponder(thread_minimum_size=...) required parameter.
+streamlit==1.59.2
+starlette==1.3.1
+
 pandas==2.3.3
 numpy>=1.26.0
 requests>=2.31.0
