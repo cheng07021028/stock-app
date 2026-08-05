@@ -192,6 +192,25 @@ except Exception:
     report_allows_formal_action = None
 
 try:
+    from godpick_learning_system import (
+        LEARNING_SYSTEM_VERSION,
+        MODEL_VERSION as GODPICK_AI_MODEL_VERSION,
+        LEARNING_COLUMNS as GODPICK_LEARNING_COLUMNS,
+        apply_daily_learning_overlay,
+        build_learning_summary,
+        load_learning_state,
+        save_learning_run,
+    )
+except Exception:
+    LEARNING_SYSTEM_VERSION = "learning_system_unavailable"
+    GODPICK_AI_MODEL_VERSION = "learning_model_unavailable"
+    GODPICK_LEARNING_COLUMNS = []
+    apply_daily_learning_overlay = None
+    build_learning_summary = None
+    load_learning_state = None
+    save_learning_run = None
+
+try:
     from godpick_recommendation_rotation import (
         ROTATION_GUARD_VERSION,
         save_rotation_snapshot,
@@ -10079,6 +10098,13 @@ def _build_recommend_df(
     # VNext：套用歷史績效回饋校正；保留原推薦總分，新增股神實戰總分與新買點分級。
     base_df = _apply_vnext_performance_feedback_columns(base_df)
 
+    # Phase105：在最終候選篩選之前執行多路召回與四引擎，解決好股票尚未進入作戰候選就被刪除。
+    if callable(apply_daily_learning_overlay):
+        try:
+            base_df = apply_daily_learning_overlay(base_df)
+        except Exception as learning_error:
+            debug_summary["phase105_learning_error"] = str(learning_error)
+
     base_score = pd.to_numeric(base_df.get("推薦總分", 0), errors="coerce").fillna(0)
     practical_score = pd.to_numeric(base_df.get("股神實戰總分", base_score), errors="coerce").fillna(base_score)
     main_mask = base_df.get("是否主要顯示", pd.Series(["否"] * len(base_df), index=base_df.index)).astype(str).eq("是")
@@ -10132,8 +10158,13 @@ def _build_recommend_df(
     )
     explosive_radar_mask = explosive_radar_mask & ~radar_role_text.str.contains("X｜假強排除", na=False) & ~radar_bucket_text.str.contains("假強排除", na=False)
     allowed_decision_mask = ~blocked_decision_mask & ~role_text.str.contains("弱勢觀察", na=False)
+    ai_decision_score = pd.to_numeric(base_df.get("AI綜合決策分", 0), errors="coerce").fillna(0)
+    ai_recall_score = pd.to_numeric(base_df.get("AI召回分", 0), errors="coerce").fillna(0)
+    ai_qualification = base_df.get("AI推薦資格", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    # AI召回只把真正具多證據的股票帶進完整作戰候選；不直接給買進許可。
+    ai_recall_mask = (ai_decision_score >= 66) & (ai_recall_score >= 68) & allowed_decision_mask & ~ai_qualification.str.contains("LOCKDOWN", na=False)
     stable_final_mask = (base_score >= min_total_score) & allowed_decision_mask & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask | breakout_wait_mask)
-    final_df = base_df[stable_final_mask | explosive_radar_mask | leader_replay_mask].copy()
+    final_df = base_df[stable_final_mask | explosive_radar_mask | leader_replay_mask | ai_recall_mask].copy()
 
     # 若沒有主要推薦，不用冷門股硬湊；只保留少數高品質觀察作為輔助參考。
     if final_df.empty:
@@ -10160,7 +10191,7 @@ def _build_recommend_df(
     debug_summary["passed_final"] = len(final_df)
     _save_debug_scan_summary(debug_summary)
 
-    sort_cols = ["股神實戰總分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "股神輸出排序", "候補排序分", "人氣量能分", "成交額百萬", "最新成交量_張", "近20日漲幅%", "近5日漲幅%", "族群資金流分數", "族群流動性分數", "隔日進場分數", "交易可行分數", "實戰品質分", "夜間股神總分", "推薦總分", "區間漲跌幅%"]
+    sort_cols = ["AI綜合決策分", "AI召回分", "AI Alpha品質分", "AI Timing時機分", "AI Risk風控分", "AI Continuation延續分", "股神實戰總分", "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "股神輸出排序", "候補排序分", "人氣量能分", "成交額百萬", "最新成交量_張", "近20日漲幅%", "近5日漲幅%", "族群資金流分數", "族群流動性分數", "隔日進場分數", "交易可行分數", "實戰品質分", "夜間股神總分", "推薦總分", "區間漲跌幅%"]
     active_sort_cols = [c for c in sort_cols if c in final_df.columns]
     if active_sort_cols:
         final_df = final_df.sort_values(
@@ -12981,6 +13012,61 @@ def _postprocess_recommend_result_v164(
     return rec, hot, False
 
 
+def _render_phase105_learning_panel(candidate_df: pd.DataFrame | None = None) -> None:
+    """顯示每日學習型AI狀態；只呈現可驗證統計，不宣稱保證獲利。"""
+    state = {}
+    if callable(load_learning_state):
+        try:
+            state = load_learning_state() or {}
+        except Exception:
+            state = {}
+    summary = state.get("last_run_summary", {}) if isinstance(state, dict) else {}
+    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty and callable(build_learning_summary):
+        try:
+            summary = build_learning_summary(candidate_df)
+        except Exception:
+            pass
+    if not summary:
+        st.info("每日學習型AI尚未建立第一筆決策快照；完成一次重新推薦後會開始累積。")
+        return
+    render_pro_section("每日學習型AI｜Champion / Challenger")
+    render_pro_kpi_row([
+        {"label": "學習樣本", "value": int(summary.get("eligible_samples", 0) or 0), "delta": "只採可驗證績效", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "本輪候選", "value": int(summary.get("candidate_count", 0) or 0), "delta": "多路召回", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "AI正式候選", "value": int(summary.get("formal_ai", 0) or 0), "delta": "仍需正式風控", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "AI A-候選", "value": int(summary.get("a_minus_ai", 0) or 0), "delta": "條件確認", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "好股等買點", "value": int(summary.get("quality_wait", 0) or 0), "delta": "Alpha高/Timing不足", "delta_class": "pro-kpi-delta-flat"},
+        {"label": "平均AI決策", "value": f"{float(summary.get('avg_decision', 0) or 0):.1f}", "delta": GODPICK_AI_MODEL_VERSION, "delta_class": "pro-kpi-delta-flat"},
+    ])
+    route_counts = summary.get("route_counts", {}) if isinstance(summary, dict) else {}
+    if route_counts:
+        st.caption("本輪主要召回路徑：" + "｜".join(f"{k} {v}" for k, v in route_counts.items()))
+    metrics = summary.get("global_metrics", {}) if isinstance(summary, dict) else {}
+    if isinstance(metrics, dict) and metrics:
+        probability_samples = int(metrics.get("probability_samples", 0) or 0)
+        brier = metrics.get("brier_score")
+        metric_text = (
+            f"歷史可驗證樣本平均報酬 {float(metrics.get('mean', 0) or 0):.2f}%｜"
+            f"正報酬率 {float(metrics.get('hit_rate', 0) or 0):.1f}%｜"
+            f"機率校準樣本 {probability_samples}"
+        )
+        if brier is not None:
+            metric_text += f"｜Brier {float(brier):.4f}"
+        else:
+            metric_text += "｜Brier 將自本版推薦開始累積"
+        st.caption(metric_text)
+    error_taxonomy = summary.get("error_taxonomy", {}) if isinstance(summary, dict) else {}
+    if isinstance(error_taxonomy, dict) and error_taxonomy:
+        top_errors = list(error_taxonomy.items())[:3]
+        st.caption("歷史錯誤分類：" + "｜".join(f"{k} {v}" for k, v in top_errors))
+    st.caption("Champion 影響正式排序；Challenger 只做影子比較，未經足夠樣本驗證不會自動取代正式模型。")
+    msgs = st.session_state.get(_k("learning_run_messages"), [])
+    if msgs:
+        with st.expander("本輪AI決策快照與永久保存", expanded=False):
+            for msg in msgs:
+                st.write(f"- {msg}")
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
@@ -13102,6 +13188,7 @@ def main():
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
     st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜本機優先、GitHub背景同步、Excel按需產生、單功能區運算")
+    st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
 
@@ -13545,6 +13632,30 @@ def main():
                 st.session_state[_k("rotation_snapshot_message")] = rotation_msg
             except Exception as rotation_error:
                 st.session_state[_k("rotation_snapshot_message")] = f"推薦輪動快照未保存：{rotation_error}"
+        # Phase105：每次完整掃描保存不可變決策快照。正式/A-為0也照樣保存，供日後漏選與模型校準。
+        if callable(save_learning_run):
+            try:
+                learning_source = st.session_state.get(_k("candidate_diagnosis_store"))
+                if not isinstance(learning_source, pd.DataFrame) or learning_source.empty:
+                    learning_source = rec_df
+                learning_ok, learning_msgs, learning_state = save_learning_run(
+                    learning_source,
+                    rec_df,
+                    scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+                    metadata={
+                        "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"))),
+                        "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"))),
+                        "pick_strategy": _safe_str(st.session_state.get(_k("pick_strategy"))),
+                        "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"))),
+                    },
+                    persist_remote=True,
+                )
+                st.session_state[_k("learning_run_messages")] = learning_msgs
+                st.session_state[_k("learning_state")] = learning_state
+                st.session_state[_k("learning_run_ok")] = bool(learning_ok)
+            except Exception as learning_save_error:
+                st.session_state[_k("learning_run_messages")] = [f"每日學習決策快照保存例外：{learning_save_error}"]
+                st.session_state[_k("learning_run_ok")] = False
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
         rec_df, hot_pick_df, _postprocess_cache_hit_v164 = _postprocess_recommend_result_v164(
@@ -13587,6 +13698,8 @@ def main():
     _render_debug_scan_summary()
     _render_recommend_status_panel(rec_df)
     _render_vnext_performance_feedback_panel()
+    _learning_candidate_now = st.session_state.get(_k("candidate_diagnosis_store"))
+    _render_phase105_learning_panel(_learning_candidate_now if isinstance(_learning_candidate_now, pd.DataFrame) else rec_df)
 
     render_pro_info_card(
         "股神交易決策升級",

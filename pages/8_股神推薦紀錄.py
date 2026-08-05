@@ -100,6 +100,20 @@ try:
 except Exception:
     sync_existing_calibration_samples = None
 try:
+    from godpick_learning_system import (
+        LEARNING_SYSTEM_VERSION,
+        MODEL_VERSION as GODPICK_AI_MODEL_VERSION,
+        LEARNING_COLUMNS as GODPICK_LEARNING_COLUMNS,
+        load_learning_state,
+        refresh_learning_state_from_records,
+    )
+except Exception:
+    LEARNING_SYSTEM_VERSION = "learning_system_unavailable"
+    GODPICK_AI_MODEL_VERSION = "learning_model_unavailable"
+    GODPICK_LEARNING_COLUMNS = []
+    load_learning_state = None
+    refresh_learning_state_from_records = None
+try:
     from official_factor_service import FACTOR_COLUMNS as OFFICIAL_FACTOR_SERVICE_COLUMNS, load_factor_frame as _load_official_factor_frame
 except Exception:
     OFFICIAL_FACTOR_SERVICE_COLUMNS = []
@@ -220,6 +234,8 @@ GODPICK_RECORD_COLUMNS = [
     "模式績效標籤", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
     "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "觸發當日收盤績效%", "觸發當日最高報酬%", "觸發當日最大回撤%", "觸發當日收盤保留率%", "觸發收盤確認層級", "隔日候選漲跌%", "隔日執行命中結果", "隔日績效檢討標籤", "未觸發漏選標記", "候選與交易分流說明", "績效更新版本", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
 ]
+
+GODPICK_RECORD_COLUMNS = list(dict.fromkeys(list(GODPICK_RECORD_COLUMNS) + list(GODPICK_LEARNING_COLUMNS)))
 
 STATUS_OPTIONS = ["觀察", "持有", "已買進", "已賣出", "停損", "達標", "取消", "封存"]
 
@@ -5866,6 +5882,7 @@ def main():
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
     st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V149 單頁籤運算加速版 ｜ V157 狀態正規化快取")
+    st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜績效更新後自動重建經驗校準")
 
     status_msg = _safe_str(st.session_state.get(_k("status_msg"), ""))
     status_type = _safe_str(st.session_state.get(_k("status_type"), "info"))
@@ -5896,6 +5913,18 @@ def main():
         st.caption(f"唯一權威檔：{_authority_path_v174}｜{len(_authority_df_v174)} 筆｜最新推薦日期：{_authority_latest_date_v174 or '未取得'}")
     except Exception:
         pass
+
+    if callable(load_learning_state):
+        try:
+            _learning_state_v105 = load_learning_state() or {}
+            _learning_profile_v105 = _learning_state_v105.get("experience_profile", {}) if isinstance(_learning_state_v105, dict) else {}
+            st.caption(
+                f"AI經驗庫：可驗證樣本 {int(_learning_profile_v105.get('eligible_samples', 0) or 0)}｜"
+                f"最後決策日 {_safe_str(_learning_state_v105.get('last_run_date')) or '尚未建立'}｜"
+                f"模型 {_safe_str(_learning_state_v105.get('model_version')) or GODPICK_AI_MODEL_VERSION}"
+            )
+        except Exception:
+            pass
 
     top_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.2, 1.4, 2.0])
     with top_cols[0]:
@@ -6032,11 +6061,18 @@ def main():
                             reload_msg = f"重新載入 {len(refreshed)} 筆。"
                     except Exception as _v77_reload_e:
                         reload_msg = f"已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}"
+                    learning_refresh_msg = ""
+                    if callable(refresh_learning_state_from_records):
+                        try:
+                            _learning_state, _learning_msgs = refresh_learning_state_from_records(persist_remote=True)
+                            learning_refresh_msg = " AI經驗校準：" + "；".join(str(x) for x in (_learning_msgs or []))
+                        except Exception as _learning_e:
+                            learning_refresh_msg = f" AI經驗校準失敗：{_learning_e}"
 
                 msg = (
                     f"V164 已完成{'完整' if bool(perf_force_full) else '增量'}績效更新：候選 {summary.get('candidates', 0)} 筆，"
                     f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
-                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{calibration_sync_msg}"
+                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{calibration_sync_msg}{learning_refresh_msg}"
                 )
                 detail = "；".join(summary.get("messages", [])) if summary.get("messages") else str(summary)
                 ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('fail', 0) or 0) == 0

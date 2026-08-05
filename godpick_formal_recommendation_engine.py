@@ -16,6 +16,17 @@ try:
 except Exception:
     apply_recommendation_rotation_guard = None
 
+try:
+    from godpick_learning_system import (
+        LEARNING_SYSTEM_VERSION,
+        apply_daily_learning_overlay,
+        apply_learning_admission,
+    )
+except Exception:
+    LEARNING_SYSTEM_VERSION = "learning_system_unavailable"
+    apply_daily_learning_overlay = None
+    apply_learning_admission = None
+
 FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_8_adaptive_admission_funnel_20260804"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
@@ -3162,6 +3173,12 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     # 讓歷史/資料校準後的隔日機率與信心影響排序，但不取代硬風控。
     score += (probability - 50.0) * 0.22
     score += (prediction_confidence - 50.0) * 0.06
+    # Phase105：AI綜合決策分只影響可見排序，不可繞過硬風控。
+    ai_decision = _safe_float(row.get("AI綜合決策分"), 0)
+    ai_recall = _safe_float(row.get("AI召回分"), 0)
+    ai_delta = _safe_float(row.get("AI排名加減分"), 0)
+    if ai_decision > 0:
+        score += (ai_decision - 60.0) * 0.16 + (ai_recall - 65.0) * 0.05 + ai_delta * 0.35
     if prediction.get("rebound_heat"):
         score -= 10.0
     if prediction_confidence < 45.0:
@@ -3255,7 +3272,8 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     explain = (
         f"候選{candidate:.0f}｜操作{execution:.0f}｜買點{entry:.0f}｜風控{risk:.0f}｜"
         f"路徑{route:.0f}｜資金{mainstream:.0f}｜族群{sector:.0f}｜主升{mainrise:.0f}｜"
-        f"觸發品質{trigger_quality:.0f}｜紅燈脆弱{fragility:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}｜預測{probability:.1f}%/信心{prediction_confidence:.0f}"
+        f"觸發品質{trigger_quality:.0f}｜紅燈脆弱{fragility:.0f}｜RR {rr:.2f}｜耗竭{exhaustion:.0f}｜預測{probability:.1f}%/信心{prediction_confidence:.0f}｜"
+        f"AI決策{ai_decision:.0f}/召回{ai_recall:.0f}"
     )
     return score, grade, use_label, explain
 
@@ -3880,6 +3898,18 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
             out = apply_recommendation_rotation_guard(out)
         except Exception:
             # 輪動校正是排名防黏著層；失敗時不得讓正式推薦主流程崩潰。
+            pass
+    # Phase105：每日學習型四引擎。先建立多路召回、Alpha/Timing/Risk/Continuation，
+    # 再以嚴格共振條件決定是否升格；任何失敗都不得中斷原正式引擎。
+    if callable(apply_daily_learning_overlay):
+        try:
+            out = apply_daily_learning_overlay(out)
+        except Exception:
+            pass
+    if callable(apply_learning_admission):
+        try:
+            out = apply_learning_admission(out)
+        except Exception:
             pass
     out = _apply_adaptive_admission_funnel(out)
     out = _apply_unified_recommendation_ranking(out)

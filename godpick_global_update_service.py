@@ -911,6 +911,24 @@ def step_feedback_profile(base: Path) -> dict[str, Any]:
     }
 
 
+def step_learning_profile(base: Path) -> dict[str, Any]:
+    """依最新推薦績效紀錄重建每日學習型AI經驗校準。"""
+    with pushd(base):
+        svc = importlib.import_module("godpick_learning_system")
+        state, messages = svc.refresh_learning_state_from_records(base_dir=base, persist_remote=True)
+    profile = state.get("experience_profile", {}) if isinstance(state, dict) else {}
+    samples = int(profile.get("eligible_samples", 0) or 0)
+    return {
+        "ok": bool(isinstance(state, dict) and state),
+        "message": f"每日學習型AI經驗校準完成：可驗證樣本 {samples}｜" + "；".join(str(x) for x in (messages or [])),
+        "learning_summary": {
+            "可驗證樣本": samples,
+            "模型版本": state.get("model_version", "") if isinstance(state, dict) else "",
+            "最後決策日": state.get("last_run_date", "") if isinstance(state, dict) else "",
+        },
+    }
+
+
 def _latest_data_time(base: Path, file_name: str) -> datetime | None:
     ok, data, _ = read_json(base / file_name)
     if ok:
@@ -1118,6 +1136,12 @@ def step_godpick_dependency_audit(base: Path) -> dict[str, Any]:
     trusted = int((profile_data.get("data_quality") or {}).get("trusted_records", 0) or 0) if isinstance(profile_data, dict) else 0
     add("績效回饋模型", bool(ok and trusted >= 10), f"可信樣本 {trusted}" if ok else err, critical=False)
 
+    ok, learning_state, err = read_json(base / "godpick_learning_state.json")
+    learning_profile = learning_state.get("experience_profile", {}) if isinstance(learning_state, dict) else {}
+    learning_samples = int(learning_profile.get("eligible_samples", 0) or 0) if isinstance(learning_profile, dict) else 0
+    learning_date = str(learning_state.get("last_run_date", "")) if isinstance(learning_state, dict) else ""
+    add("每日學習型AI", bool(ok and learning_samples >= 10), f"可驗證樣本 {learning_samples} / 最後決策日 {learning_date or '尚未完成推薦'}" if ok else err, critical=False)
+
     critical_failed = [r for r in rows if r["關鍵"] and r["狀態"] != "OK"]
     return {
         "ok": not critical_failed,
@@ -1246,18 +1270,21 @@ def run_global_update(
             _row = add("8. 重建績效回饋與精準度摘要", lambda: step_feedback_profile(base))
             if _row.get("狀態") == "OK":
                 changed_files.append("godpick_performance_profile.json")
-        add("9. 7/8頁股神資料鏈完整性檢查", lambda: step_godpick_dependency_audit(base))
-        add("10. 股神推薦前置資料就緒度檢查", lambda: step_recommendation_readiness(base))
+        _learning_row = add("9. 重建每日學習型AI經驗校準", lambda: step_learning_profile(base))
+        if _learning_row.get("狀態") == "OK":
+            changed_files.append("godpick_learning_state.json")
+        add("10. 7/8頁股神資料鏈完整性檢查", lambda: step_godpick_dependency_audit(base))
+        add("11. 股神推薦前置資料就緒度檢查", lambda: step_recommendation_readiness(base))
         changed_files.append("godpick_recommendation_readiness.json")
         if cfg.get("invalidate_runtime_caches", True):
-            add("11. 清除舊表格運算快取並發布刷新版本", lambda: step_invalidate_runtime_caches(base, changed_files))
-        add("12. GitHub 非阻塞背景備份", lambda: step_background_backup(
+            add("12. 清除舊表格運算快取並發布刷新版本", lambda: step_invalidate_runtime_caches(base, changed_files))
+        add("13. GitHub 非阻塞背景備份", lambda: step_background_backup(
             base,
             stock_master=stock_master_changed,
             official=official_changed,
             enabled=bool(cfg.get("push_github", True)),
         ))
-        add("13. 全模組資料狀態複檢", lambda: step_health_snapshot(base))
+        add("14. 全模組資料狀態複檢", lambda: step_health_snapshot(base))
 
         payload = {
             "version": GLOBAL_UPDATE_VERSION,

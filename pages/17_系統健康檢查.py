@@ -42,7 +42,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V173｜內容日期驗證版：只有內容日期、完整度與法人欄位均合格才智慧略過；落後時自動強制重抓，並驗證 7/8 頁完整資料鏈。")
+st.caption("V174｜內容日期驗證＋每日學習型AI：一鍵更新會重建績效回饋、AI經驗校準，並驗證 7/8 頁完整資料鏈。")
 
 with st.sidebar:
     st.header("V171 操作")
@@ -214,7 +214,7 @@ if 'run_global_update_now' in locals() and run_global_update_now:
         st.warning(f"全域更新完成：{ok_count} 個步驟成功，{fail_count} 個步驟需檢查。")
     st.dataframe(steps_df.drop(columns=["明細"], errors="ignore"), use_container_width=True, hide_index=True)
     try:
-        audit_step = next((x for x in global_result.get("steps", []) if str(x.get("步驟", "")).startswith("9.")), {})
+        audit_step = next((x for x in global_result.get("steps", []) if "資料鏈完整性檢查" in str(x.get("步驟", ""))), {})
         audit_detail = audit_step.get("明細", {}) if isinstance(audit_step, dict) else {}
         audit_rows = audit_detail.get("audit_rows", []) if isinstance(audit_detail, dict) else []
         if audit_rows:
