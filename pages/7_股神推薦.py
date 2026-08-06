@@ -10161,10 +10161,20 @@ def _build_recommend_df(
     ai_decision_score = pd.to_numeric(base_df.get("AI綜合決策分", 0), errors="coerce").fillna(0)
     ai_recall_score = pd.to_numeric(base_df.get("AI召回分", 0), errors="coerce").fillna(0)
     ai_qualification = base_df.get("AI推薦資格", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
-    # AI召回只把真正具多證據的股票帶進完整作戰候選；不直接給買進許可。
+    ai_retain_flag = base_df.get("AI召回保留旗標", pd.Series(["否"] * len(base_df), index=base_df.index)).astype(str).eq("是")
+    ai_tactical_text = base_df.get("AI過熱型態", pd.Series([""] * len(base_df), index=base_df.index)).astype(str)
+    ai_absolute_block = (
+        true_veto_text.str.lower().str.contains("lockdown|全面禁買|低流動|興櫃|行情落後|k線落後|資料待更新", regex=True, na=False)
+        | pd.to_numeric(base_df.get("K線落後交易日", 999), errors="coerce").fillna(999).ne(0)
+        | ai_qualification.str.contains("LOCKDOWN", na=False)
+    )
+    # Phase107：一般AI候選仍需通過既有操作許可；跨市場新強股只保證進入診斷／雷達，
+    # 不直接繞過正式推薦風控。健康主升整理不得再因舊版「過熱」字樣被整檔刪除。
     ai_recall_mask = (ai_decision_score >= 66) & (ai_recall_score >= 68) & allowed_decision_mask & ~ai_qualification.str.contains("LOCKDOWN", na=False)
+    ai_emerging_retain_mask = ai_retain_flag & ~ai_absolute_block & ~ai_tactical_text.eq("爆量噴出末升")
+    ai_blowoff_radar_mask = ai_retain_flag & ~ai_absolute_block & ai_tactical_text.eq("爆量噴出末升")
     stable_final_mask = (base_score >= min_total_score) & allowed_decision_mask & (main_mask | feedback_main_mask | early_potential_mask | confirm_mask | breakout_wait_mask)
-    final_df = base_df[stable_final_mask | explosive_radar_mask | leader_replay_mask | ai_recall_mask].copy()
+    final_df = base_df[stable_final_mask | explosive_radar_mask | leader_replay_mask | ai_recall_mask | ai_emerging_retain_mask | ai_blowoff_radar_mask].copy()
 
     # 若沒有主要推薦，不用冷門股硬湊；只保留少數高品質觀察作為輔助參考。
     if final_df.empty:

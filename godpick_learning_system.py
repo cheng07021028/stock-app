@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Phase 105｜每日學習型股神決策核心。
+"""Phase 107｜跨市場新強股召回與戰術風控決策核心。
 
 設計原則：
 1. 多路召回，不讓大型熱門股壟斷候選。
 2. Alpha / Timing / Risk / Continuation 四引擎分離。
 3. 只以已發生的績效紀錄做小幅、收縮後的經驗校正，避免單日過擬合。
 4. 每次完整掃描保存不可變決策快照；正式推薦為 0 也必須記錄。
-5. Champion / Challenger 欄位先建立，Phase 105 只讓 Champion 影響正式結果。
+5. Champion / Challenger 欄位先建立，正式模型只以已驗證規則升格。
+6. 將「結構停損」與「戰術守價」分離，避免主升股被過遠結構停損誤殺。
+7. 以全市場橫斷面排名補回新主升／成長領漲股，但不繞過流動性、K線與市場硬風控。
 """
 from __future__ import annotations
 
@@ -22,9 +24,9 @@ import re
 
 import pandas as pd
 
-LEARNING_SYSTEM_VERSION = "phase105_daily_learning_ai_v1_20260805"
-MODEL_VERSION = "champion_phase105_v1"
-CHALLENGER_VERSION = "challenger_phase105_recall_v1"
+LEARNING_SYSTEM_VERSION = "phase107_dynamic_leader_ai_v1_20260806"
+MODEL_VERSION = "champion_phase107_dynamic_leader_v1"
+CHALLENGER_VERSION = "challenger_phase107_cross_section_v1"
 LEARNING_STATE_FILE = "godpick_learning_state.json"
 LEARNING_ROOT = "data/godpick_learning"
 DEFAULT_RECORD_FILE = "godpick_records.json"
@@ -33,6 +35,9 @@ LEARNING_COLUMNS = [
     "AI市場狀態", "AI召回路徑", "AI主要召回路徑", "AI召回分",
     "AI Alpha品質分", "AI Timing時機分", "AI Risk風控分", "AI Continuation延續分",
     "AI資料信心分", "AI經驗校正分", "AI綜合決策分", "AI排名加減分",
+    "AI跨市場新強股分", "AI新證據分", "AI召回來源數", "AI召回保留旗標", "AI漏選風險分",
+    "AI結構停損距離%", "AI戰術停損距離%", "AI戰術風報比", "AI趨勢延伸目標價",
+    "AI領漲延續狀態", "AI過熱型態", "AI風險口徑", "AI重複證據衰減分",
     "AI預測優勢", "AI推薦資格", "AI推薦理由", "AI反對理由", "AI取消條件",
     "AI學習樣本數", "AI模型版本", "AI Challenger分", "AI Champion勝出",
 ]
@@ -41,6 +46,9 @@ _NUMERIC_COLUMNS = {
     "AI召回分", "AI Alpha品質分", "AI Timing時機分", "AI Risk風控分",
     "AI Continuation延續分", "AI資料信心分", "AI經驗校正分",
     "AI綜合決策分", "AI排名加減分", "AI學習樣本數", "AI Challenger分",
+    "AI跨市場新強股分", "AI新證據分", "AI召回來源數", "AI漏選風險分",
+    "AI結構停損距離%", "AI戰術停損距離%", "AI戰術風報比", "AI趨勢延伸目標價",
+    "AI重複證據衰減分",
 }
 
 
@@ -200,6 +208,110 @@ def _institution_score(row: pd.Series | dict[str, Any]) -> float:
     directional = 50 + (8 if f1 > 0 else -6 if f1 < 0 else 0) + (10 if t1 > 0 else -8 if t1 < 0 else 0) + (8 if total5 > 0 else -6 if total5 < 0 else 0)
     return _clip(score * 0.65 + directional * 0.35)
 
+
+
+def _tactical_path_metrics(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
+    """Separate long-horizon structural protection from an executable tactical guard.
+
+    The previous engine could calculate reward/risk with a distant structural support
+    while the actual trigger plan already had a tight guard.  That systematically
+    erased strong trend leaders.  Phase107 keeps both distances and only uses the
+    tactical guard for entry qualification when it is valid.
+    """
+    latest = _first_num(row, ["最新價", "收盤價", "參考價"], 0, positive=True)
+    trigger = _first_num(row, ["實戰觸發價", "預估進場點", "進場價", "最新價"], latest, positive=True)
+    guard = _first_num(row, ["觸發後守價", "隔日守價", "實戰守價"], 0, positive=True)
+    structural = _first_num(row, ["停損參考", "實戰停損參考", "結構停損價"], 0, positive=True)
+    pressure = _first_num(row, ["第一壓力價", "第一目標價", "壓力價"], 0, positive=True)
+
+    def _distance(stop_price: float) -> float:
+        if trigger <= 0 or stop_price <= 0 or stop_price >= trigger:
+            return 99.0
+        return max(0.0, (trigger - stop_price) / trigger * 100.0)
+
+    guard_dist = _distance(guard)
+    structural_dist = _distance(structural)
+    if 0.20 <= guard_dist <= 8.50:
+        tactical_stop = guard
+        tactical_dist = guard_dist
+        risk_basis = "戰術守價"
+    else:
+        tactical_stop = structural
+        tactical_dist = structural_dist
+        risk_basis = "結構停損"
+
+    main = _first_num(row, ["主流主升優先分", "主流資金分", "族群攻擊強度"], 50)
+    sector = _first_num(row, ["族群攻擊強度", "類股熱度分數"], 50)
+    revenue = _first_num(row, ["營收成長官方分數", "營收動能代理分數", "營收動能代理"], 50)
+    tech = _first_num(row, ["技術結構分數", "強勢動能分", "爆發雷達分"], 50)
+    missed = _first_num(row, ["強勢股漏選風險分", "主流領漲回補分", "隔日爆發分"], 50)
+    amount = _first_num(row, ["成交額百萬", "20日均成交額百萬"], 0)
+    leader_text = _text_blob(row, ["是否領先同類股", "類股前3強", "推薦角色", "領漲回補角色"])
+    leader_evidence = (
+        amount >= 80
+        and max(main, sector) >= 65
+        and max(revenue, tech, missed) >= 65
+        and (_contains(leader_text, ["是", "前3", "領漲", "回補"]) or missed >= 75)
+    )
+
+    risk_abs = max(0.0, trigger - tactical_stop) if trigger > 0 and tactical_stop > 0 else 0.0
+    first_rr = (pressure - trigger) / risk_abs if pressure > trigger and risk_abs > 0 else 0.0
+    runner_target = trigger + risk_abs * 1.60 if trigger > 0 and risk_abs > 0 and leader_evidence else 0.0
+    target = pressure if first_rr >= 1.05 else max(pressure, runner_target)
+    tactical_rr = (target - trigger) / risk_abs if target > trigger and risk_abs > 0 else 0.0
+    # Historical rows and unit tests may carry only distance/RR fields without explicit prices.
+    # Preserve those valid values instead of degrading them to 99% / 0R.
+    fallback_stop = _best_num(row, ["實戰停損距離%", "停損距離_隔日%", "停損距離%"], 99, positive=True, mode="min")
+    fallback_rr = _best_num(row, ["路徑風險報酬比", "實戰風險報酬比", "風險報酬比"], 0, positive=True, mode="max")
+    if structural_dist >= 99 and fallback_stop < 99:
+        structural_dist = fallback_stop
+    if tactical_dist >= 99 and fallback_stop < 99:
+        tactical_dist = fallback_stop
+        risk_basis = "既有實戰風控距離"
+    if tactical_rr <= 0 and fallback_rr > 0:
+        tactical_rr = fallback_rr
+
+    ret1 = _first_num(row, ["今日漲幅%", "區間漲跌幅%"], 0)
+    ret5 = _first_num(row, ["近5日漲幅%"], 0)
+    close_pos = _first_num(row, ["當日收盤位置%"], 50)
+    upper = _first_num(row, ["上影線比例%"], 0)
+    volume = _first_num(row, ["當日量比", "5日20日量比"], 1.0)
+    blowoff = (
+        (ret1 >= 8 and (close_pos < 65 or upper >= 30 or volume >= 2.5))
+        or (ret5 >= 25 and ret1 >= 5 and close_pos < 70)
+    )
+    secondary_entry = (
+        not blowoff
+        and ret5 >= 15
+        and -3.0 <= ret1 <= 4.5
+        and tactical_dist <= 4.5
+        and max(main, sector) >= 65
+        and max(revenue, tech, missed) >= 60
+    )
+    ignition_wait = not blowoff and 3.0 < ret1 < 8.0 and close_pos >= 75
+    if blowoff:
+        heat_type = "爆量噴出末升"
+        continuation_state = "過熱末升｜僅等大幅回測"
+    elif secondary_entry:
+        heat_type = "主升整理二次買點"
+        continuation_state = "主升延續｜等待觸發與守價"
+    elif ignition_wait:
+        heat_type = "當日點火隔日只等回測"
+        continuation_state = "點火有效｜禁止開盤追價"
+    else:
+        heat_type = "正常趨勢"
+        continuation_state = "依觸發與族群同步確認"
+
+    return {
+        "AI結構停損距離%": round(structural_dist, 2),
+        "AI戰術停損距離%": round(tactical_dist, 2),
+        "AI戰術風報比": round(max(0.0, tactical_rr), 2),
+        "AI趨勢延伸目標價": round(max(0.0, target), 4),
+        "AI領漲延續狀態": continuation_state,
+        "AI過熱型態": heat_type,
+        "AI風險口徑": risk_basis,
+        "_AI領漲證據": bool(leader_evidence),
+    }
 
 def _recall_routes(row: pd.Series | dict[str, Any]) -> dict[str, float]:
     tech = _first_num(row, ["技術結構分數", "技術趨勢分數", "Alpha選股潛力分"], 50)
@@ -421,6 +533,7 @@ def _experience_adjustment(row: pd.Series | dict[str, Any], profile: dict[str, A
 
 
 def _score_row(row: pd.Series | dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    tactical = _tactical_path_metrics(row)
     routes = _recall_routes(row)
     ordered = sorted(routes.items(), key=lambda kv: kv[1], reverse=True)
     main_route, recall = ordered[0] if ordered else ("綜合條件", 50.0)
@@ -441,12 +554,20 @@ def _score_row(row: pd.Series | dict[str, Any], profile: dict[str, Any]) -> dict
     close_pos = _first_num(row, ["當日收盤位置%"], 50)
     volume = _first_num(row, ["當日量比", "5日20日量比"], 1.0)
     chase = _first_num(row, ["追價風險分", "隔日耗竭風險分"], 50)
-    heat_penalty = max(0, chase - 55) * .25 + max(0, _first_num(row, ["近5日漲幅%"], 0) - 12) * .6
-    timing = _clip(entry * .25 + early * .18 + breakout * .18 + close_pos * .12 + min(volume, 2.0) / 2.0 * 100 * .10 + recall * .12 + liquidity * .05 - heat_penalty)
+    heat_type = _safe_str(tactical.get("AI過熱型態"))
+    if heat_type == "爆量噴出末升":
+        heat_penalty = max(12.0, max(0, chase - 50) * .30 + max(0, _first_num(row, ["近5日漲幅%"], 0) - 15) * .55)
+    elif heat_type == "主升整理二次買點":
+        heat_penalty = max(0.0, chase - 70) * .10
+    elif heat_type == "當日點火隔日只等回測":
+        heat_penalty = 5.0 + max(0.0, chase - 65) * .12
+    else:
+        heat_penalty = max(0, chase - 60) * .18 + max(0, _first_num(row, ["近5日漲幅%"], 0) - 18) * .28
+    timing = _clip(entry * .23 + early * .18 + breakout * .18 + close_pos * .11 + min(volume, 2.0) / 2.0 * 100 * .09 + recall * .12 + liquidity * .04 + (100 if tactical.get("AI戰術停損距離%", 99) <= 4.5 else 65) * .05 - heat_penalty)
 
     risk_base = _first_num(row, ["Risk風控安全分", "風控安全分", "交易可行分數"], 50)
-    rr = _best_num(row, ["路徑風險報酬比", "實戰風險報酬比", "風險報酬比"], 0, positive=True, mode="max")
-    stop = _best_num(row, ["實戰停損距離%", "停損距離_隔日%", "停損距離%"], 99, positive=True, mode="min")
+    rr = _safe_float(tactical.get("AI戰術風報比"), 0)
+    stop = _safe_float(tactical.get("AI戰術停損距離%"), 99)
     stop_score = 95 if 0 < stop <= 4.5 else 80 if stop <= 6 else 62 if stop <= 8 else 30
     rr_score = _clip(rr * 55)
     market = _market_regime(row)
@@ -457,8 +578,12 @@ def _score_row(row: pd.Series | dict[str, Any], profile: dict[str, Any]) -> dict
     continuation = _clip(main * .20 + sector * .15 + institution * .15 + tech * .14 + breakout * .10 + official * .10 + revenue * .08 + liquidity * .08)
     ret5 = _first_num(row, ["近5日漲幅%"], 0)
     ret20 = _first_num(row, ["近20日漲幅%"], 0)
-    if ret5 > 15 or ret20 > 32:
-        continuation = _clip(continuation - min(16, max(ret5 - 15, 0) * .7 + max(ret20 - 32, 0) * .25))
+    if tactical.get("AI過熱型態") == "爆量噴出末升":
+        continuation = _clip(continuation - min(18, max(ret5 - 15, 0) * .65 + max(ret20 - 32, 0) * .22 + 8))
+    elif tactical.get("AI過熱型態") == "主升整理二次買點":
+        continuation = _clip(continuation + 5)
+    elif ret5 > 20 or ret20 > 40:
+        continuation = _clip(continuation - min(8, max(ret5 - 20, 0) * .25 + max(ret20 - 40, 0) * .10))
 
     data_conf = _data_confidence(row)
     experience, sample_count = _experience_adjustment({**dict(row), "AI主要召回路徑": main_route}, profile)
@@ -477,8 +602,10 @@ def _score_row(row: pd.Series | dict[str, Any], profile: dict[str, Any]) -> dict
     rank_delta = max(-8.0, min(10.0, (decision - 60) * .16 + (recall - 65) * .08 + experience))
     repeat_count = _first_num(row, ["近5次入榜次數", "連續入榜次數"], 0)
     signal_fresh = _first_num(row, ["今日訊號新鮮分"], 50)
+    repeat_decay = 0.0
     if repeat_count >= 3 and signal_fresh < 65:
-        rank_delta -= min(6.0, (repeat_count - 2) * 1.5 + (65 - signal_fresh) * .06)
+        repeat_decay = min(6.0, (repeat_count - 2) * 1.5 + (65 - signal_fresh) * .06)
+        rank_delta -= repeat_decay
     elif repeat_count <= 1 and recall >= 68 and signal_fresh >= 55:
         rank_delta += 2.0
     rank_delta = max(-8.0, min(10.0, rank_delta))
@@ -523,6 +650,19 @@ def _score_row(row: pd.Series | dict[str, Any], profile: dict[str, Any]) -> dict
         "AI經驗校正分": experience,
         "AI綜合決策分": decision,
         "AI排名加減分": round(rank_delta, 2),
+        "AI跨市場新強股分": 0.0,
+        "AI新證據分": 0.0,
+        "AI召回來源數": len(active_routes),
+        "AI召回保留旗標": "否",
+        "AI漏選風險分": 0.0,
+        "AI結構停損距離%": tactical.get("AI結構停損距離%", 99.0),
+        "AI戰術停損距離%": tactical.get("AI戰術停損距離%", 99.0),
+        "AI戰術風報比": tactical.get("AI戰術風報比", 0.0),
+        "AI趨勢延伸目標價": tactical.get("AI趨勢延伸目標價", 0.0),
+        "AI領漲延續狀態": tactical.get("AI領漲延續狀態", ""),
+        "AI過熱型態": tactical.get("AI過熱型態", "正常趨勢"),
+        "AI風險口徑": tactical.get("AI風險口徑", "結構停損"),
+        "AI重複證據衰減分": round(repeat_decay, 2),
         "AI預測優勢": round((decision - 50) / 10, 2),
         "AI推薦資格": qualification,
         "AI推薦理由": "｜".join(reasons),
@@ -534,6 +674,138 @@ def _score_row(row: pd.Series | dict[str, Any], profile: dict[str, Any]) -> dict
         "AI Champion勝出": "是" if decision >= challenger else "否｜Challenger影子領先",
     }
 
+
+
+def _numeric_series(df: pd.DataFrame, names: Iterable[str], default: float = 0.0, *, mode: str = "first") -> pd.Series:
+    series_list: list[pd.Series] = []
+    for name in names:
+        if name in df.columns:
+            series_list.append(pd.to_numeric(df[name], errors="coerce"))
+    if not series_list:
+        return pd.Series([float(default)] * len(df), index=df.index, dtype="float64")
+    work = pd.concat(series_list, axis=1)
+    if mode == "max":
+        out = work.max(axis=1, skipna=True)
+    elif mode == "min":
+        out = work.min(axis=1, skipna=True)
+    else:
+        out = work.bfill(axis=1).iloc[:, 0]
+    return out.fillna(float(default)).astype(float)
+
+
+def _percentile_rank(series: pd.Series, *, higher_is_better: bool = True) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    valid = numeric.notna()
+    if valid.sum() < 2 or numeric[valid].nunique() <= 1:
+        return pd.Series([50.0] * len(series), index=series.index)
+    ranks = numeric.rank(method="average", pct=True) * 100.0
+    if not higher_is_better:
+        ranks = 100.0 - ranks
+    return ranks.fillna(50.0).clip(0, 100)
+
+
+def _apply_cross_sectional_leader_overlay(df: pd.DataFrame) -> pd.DataFrame:
+    """Use market-wide evidence to rescue emerging leaders without granting blind buy permission."""
+    if df.empty:
+        return df
+    out = df.copy()
+    missed = _numeric_series(out, ["強勢股漏選風險分", "主流領漲回補分", "隔日爆發分"], 50, mode="max")
+    revenue = _numeric_series(out, ["營收成長官方分數", "營收動能代理分數", "營收動能代理"], 50, mode="max")
+    eps = _numeric_series(out, ["EPS成長分數", "EPS代理分數", "EPS代理"], 50, mode="max")
+    tech = _numeric_series(out, ["技術結構分數", "強勢動能分", "爆發雷達分"], 50, mode="max")
+    main = _numeric_series(out, ["主流主升優先分", "主流資金分"], 50, mode="max")
+    sector = _numeric_series(out, ["族群攻擊強度", "類股熱度分數"], 50, mode="max")
+    breakout = _numeric_series(out, ["型態突破分數", "強勢動能分", "爆發雷達分"], 50, mode="max")
+    early = _numeric_series(out, ["起漲前兆分數", "強勢前兆分", "盤前強勢前兆分"], 50, mode="max")
+    ret1 = _numeric_series(out, ["今日漲幅%", "區間漲跌幅%"], 0)
+    ret5 = _numeric_series(out, ["近5日漲幅%"], 0)
+    volume = _numeric_series(out, ["當日量比", "5日20日量比"], 1.0, mode="max")
+    close_pos = _numeric_series(out, ["當日收盤位置%"], 50)
+    tactical_rr = _numeric_series(out, ["AI戰術風報比"], 0)
+    tactical_stop = _numeric_series(out, ["AI戰術停損距離%"], 99)
+    amount = _numeric_series(out, ["成交額百萬", "20日均成交額百萬"], 0, mode="max")
+
+    cross = (
+        _percentile_rank(missed) * .18
+        + _percentile_rank(revenue) * .15
+        + _percentile_rank(eps) * .08
+        + _percentile_rank(tech) * .12
+        + _percentile_rank(main) * .10
+        + _percentile_rank(sector) * .08
+        + _percentile_rank(breakout) * .10
+        + _percentile_rank(tactical_rr.clip(upper=3.0)) * .10
+        + _percentile_rank(close_pos) * .04
+        + _percentile_rank(volume.clip(upper=3.0)) * .05
+    ).clip(0, 100)
+    fresh = (
+        _percentile_rank(early) * .20
+        + _percentile_rank(breakout) * .18
+        + _percentile_rank(ret1.clip(-10, 10)) * .16
+        + _percentile_rank(ret5.clip(-30, 30)) * .12
+        + _percentile_rank(volume.clip(upper=3.0)) * .14
+        + _percentile_rank(revenue) * .12
+        + _percentile_rank(missed) * .08
+    ).clip(0, 100)
+
+    old_decision = _numeric_series(out, ["AI綜合決策分"], 0)
+    old_recall = _numeric_series(out, ["AI召回分"], 0)
+    old_rank_delta = _numeric_series(out, ["AI排名加減分"], 0)
+    repeat_decay = _numeric_series(out, ["AI重複證據衰減分"], 0)
+    lag = _numeric_series(out, ["K線落後交易日"], 999)
+    heat = out.get("AI過熱型態", pd.Series([""] * len(out), index=out.index)).astype(str)
+    all_text = (
+        out.get("真禁買原因", pd.Series([""] * len(out), index=out.index)).astype(str)
+        + "｜" + out.get("硬否決原因", pd.Series([""] * len(out), index=out.index)).astype(str)
+        + "｜" + out.get("進場阻擋原因", pd.Series([""] * len(out), index=out.index)).astype(str)
+        + "｜" + out.get("操作許可", pd.Series([""] * len(out), index=out.index)).astype(str)
+    ).str.lower()
+    absolute_block = all_text.str.contains("lockdown|全面禁買|低流動|興櫃|行情落後|k線落後|無歷史|資料待更新", regex=True, na=False) | lag.ne(0)
+    blowoff = heat.eq("爆量噴出末升")
+    retain = (((cross >= 74) & (fresh >= 60)) | (missed >= 82)) & (amount >= 80) & ~absolute_block
+
+    bonus = ((cross - 68).clip(lower=0) * .11 + (fresh - 62).clip(lower=0) * .05).clip(upper=6.0)
+    bonus = bonus.where(~blowoff, 0.0)
+    adjusted_decision = (old_decision + bonus - repeat_decay * .25).clip(0, 100)
+    adjusted_recall = pd.concat([old_recall, cross * .94], axis=1).max(axis=1).clip(0, 100)
+    adjusted_rank = (old_rank_delta + bonus * .65 - repeat_decay * .20).clip(-8, 12)
+    leak_risk = pd.concat([missed, cross], axis=1).max(axis=1)
+    bucket = out.get("正式推薦分區", pd.Series([""] * len(out), index=out.index)).astype(str)
+    leak_risk = (leak_risk + ((adjusted_decision < 60) | bucket.str.contains("排除", na=False)).astype(float) * 6).clip(0, 100)
+
+    out["AI跨市場新強股分"] = cross.round(2)
+    out["AI新證據分"] = fresh.round(2)
+    out["AI漏選風險分"] = leak_risk.round(2)
+    out["AI召回保留旗標"] = retain.map({True: "是", False: "否"})
+    out["AI綜合決策分"] = adjusted_decision.round(2)
+    out["AI召回分"] = adjusted_recall.round(2)
+    out["AI排名加減分"] = adjusted_rank.round(2)
+    out["AI預測優勢"] = ((adjusted_decision - 50) / 10).round(2)
+
+    alpha = _numeric_series(out, ["AI Alpha品質分"], 0)
+    timing = _numeric_series(out, ["AI Timing時機分"], 0)
+    risk = _numeric_series(out, ["AI Risk風控分"], 0)
+    continuation = _numeric_series(out, ["AI Continuation延續分"], 0)
+    data_conf = _numeric_series(out, ["AI資料信心分"], 0)
+    current_q = out.get("AI推薦資格", pd.Series([""] * len(out), index=out.index)).astype(str)
+    confirmation_wait = heat.eq("當日點火隔日只等回測")
+    formal_mask = retain & ~absolute_block & ~blowoff & ~confirmation_wait & (cross >= 84) & (alpha >= 72) & (timing >= 70) & (risk >= 66) & (continuation >= 66) & (data_conf >= 65) & (tactical_rr >= 1.45) & (tactical_stop <= 5.0)
+    a_mask = retain & ~absolute_block & ~blowoff & ~confirmation_wait & (cross >= 76) & (alpha >= 63) & (timing >= 58) & (risk >= 58) & (continuation >= 58) & (data_conf >= 38) & (tactical_rr >= 1.20) & (tactical_stop <= 5.5)
+    current_q = current_q.mask(formal_mask, "AI-A｜跨市場新強股多證據共振")
+    current_q = current_q.mask(~formal_mask & a_mask, "AI-A-｜主升二次買點條件候選")
+    current_q = current_q.mask(retain & confirmation_wait, "AI-R1P｜點火後只等回測確認")
+    current_q = current_q.mask(retain & ~formal_mask & ~a_mask & ~blowoff & ~confirmation_wait, "AI-R1X｜跨市場新強股核心雷達")
+    current_q = current_q.mask(retain & blowoff, "AI-R1B｜爆量過熱只等回測")
+    out["AI推薦資格"] = current_q
+
+    route = out.get("AI召回路徑", pd.Series([""] * len(out), index=out.index)).astype(str)
+    route = route.where(~retain, route.apply(lambda x: x if "跨市場新強股" in x else ("跨市場新強股、" + x if x else "跨市場新強股")))
+    out["AI召回路徑"] = route
+    out.loc[retain & (cross >= out["AI召回分"] - 1), "AI主要召回路徑"] = "跨市場新強股"
+
+    reason = out.get("AI推薦理由", pd.Series([""] * len(out), index=out.index)).astype(str)
+    reason_add = "跨市場分" + cross.round(0).astype(int).astype(str) + "｜新證據" + fresh.round(0).astype(int).astype(str) + "｜戰術RR " + tactical_rr.round(2).astype(str)
+    out["AI推薦理由"] = reason.where(~retain, reason + "｜" + reason_add)
+    return out
 
 def apply_daily_learning_overlay(df: pd.DataFrame | None, profile: dict[str, Any] | None = None, *, base_dir: str | Path | None = None) -> pd.DataFrame:
     if df is None:
@@ -550,12 +822,19 @@ def apply_daily_learning_overlay(df: pd.DataFrame | None, profile: dict[str, Any
         if col not in scored.columns:
             scored[col] = 0.0 if col in _NUMERIC_COLUMNS else ""
     out = out.drop(columns=[c for c in LEARNING_COLUMNS if c in out.columns], errors="ignore")
-    return pd.concat([out, scored[LEARNING_COLUMNS]], axis=1)
+    combined = pd.concat([out, scored[LEARNING_COLUMNS]], axis=1)
+    return _apply_cross_sectional_leader_overlay(combined)
 
 
 def _hard_block(row: pd.Series | dict[str, Any]) -> bool:
     text = _text_blob(row, ["真禁買原因", "硬否決原因", "正式推薦排除原因", "進場阻擋原因", "實戰過濾狀態", "操作許可"])
-    return _contains(text, ["lockdown", "全面禁買", "低流動性", "興櫃", "假突破", "過熱禁買", "行情落後", "k線落後", "禁止新倉"])
+    if _contains(text, ["lockdown", "全面禁買", "低流動性", "興櫃", "假突破", "行情落後", "k線落後", "資料待更新"]):
+        return True
+    # 舊版「過熱禁買」若經 Phase107 判定為健康主升整理，允許進入條件式評估；
+    # 真正爆量末升仍保持硬封鎖。
+    if _contains(text, ["過熱禁買", "禁止新倉"]) and _safe_str(row.get("AI過熱型態")) != "主升整理二次買點":
+        return True
+    return False
 
 
 def apply_learning_admission(df: pd.DataFrame | None, *, max_formal: int = 3, max_a_minus: int = 3) -> pd.DataFrame:
@@ -587,8 +866,8 @@ def apply_learning_admission(df: pd.DataFrame | None, *, max_formal: int = 3, ma
         lag = _first_num(row, ["K線落後交易日"], 999)
         if lag != 0:
             continue
-        rr = _best_num(row, ["路徑風險報酬比", "實戰風險報酬比", "風險報酬比"], 0, positive=True, mode="max")
-        stop = _best_num(row, ["實戰停損距離%", "停損距離_隔日%", "停損距離%"], 99, positive=True, mode="min")
+        rr = _best_num(row, ["AI戰術風報比", "路徑風險報酬比", "實戰風險報酬比", "風險報酬比"], 0, positive=True, mode="max")
+        stop = _best_num(row, ["AI戰術停損距離%", "實戰停損距離%", "停損距離_隔日%", "停損距離%"], 99, positive=True, mode="min")
         if qualification.startswith("AI-A｜") and (rr < 1.35 or stop > 6.0):
             continue
         if qualification.startswith("AI-A-｜") and (rr < 1.05 or stop > 7.2):
@@ -661,8 +940,10 @@ def _condensed_records(df: pd.DataFrame | None, limit: int | None = None) -> lis
         "推薦總分", "股神實戰總分", "Entry進場買點分", "Risk風控安全分", "風險報酬比",
         "實戰觸發價", "觸發後守價", "停損參考", "AI市場狀態", "AI召回路徑", "AI主要召回路徑",
         "AI召回分", "AI Alpha品質分", "AI Timing時機分", "AI Risk風控分", "AI Continuation延續分",
-        "AI資料信心分", "AI經驗校正分", "AI綜合決策分", "AI推薦資格", "AI推薦理由", "AI反對理由",
-        "AI模型版本", "AI Challenger分", "AI Champion勝出",
+        "AI資料信心分", "AI經驗校正分", "AI綜合決策分", "AI跨市場新強股分", "AI新證據分",
+        "AI召回來源數", "AI召回保留旗標", "AI漏選風險分", "AI結構停損距離%", "AI戰術停損距離%",
+        "AI戰術風報比", "AI趨勢延伸目標價", "AI領漲延續狀態", "AI過熱型態", "AI風險口徑",
+        "AI推薦資格", "AI推薦理由", "AI反對理由", "AI模型版本", "AI Challenger分", "AI Champion勝出",
     ]
     use = [c for c in cols if c in df.columns]
     work = df.copy()
