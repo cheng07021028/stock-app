@@ -32690,6 +32690,20 @@
     "待修原因": ""
   },
   {
+    "code": "7942",
+    "name": "東佑達",
+    "market": "興櫃",
+    "official_industry_raw": "05",
+    "official_industry_raw_col": "SecuritiesIndustryCode",
+    "official_industry": "電機機械",
+    "theme_category": "電機機械",
+    "category": "電機機械",
+    "source": "tpex_興櫃_base",
+    "source_api": "tpex_興櫃",
+    "source_rank": 3,
+    "待修原因": ""
+  },
+  {
     "code": "8058",
     "name": "耐特",
     "market": "興櫃",
