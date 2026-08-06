@@ -88,6 +88,7 @@ import hashlib
 import copy
 import time
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -178,6 +179,7 @@ BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
 RECORD_SPEED_FIX_VERSION = "record_v175_reboot_remote_authority_restore_20260727"
+LATEST_PRICE_PNL_FIX_VERSION = "record_v176_verified_quote_pnl_v1_20260806"
 NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
 NORMALIZED_RECORD_CACHE_VERSION_V165 = "v165_20260726"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
@@ -230,6 +232,7 @@ GODPICK_RECORD_COLUMNS = [
     "技術結構分數", "起漲前兆分數", "飆股起漲分數", "起漲摘要", "飆股起漲分數", "起漲摘要", "交易可行分數", "類股熱度分數", "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明",  "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明", "同類股領先幅度", "是否領先同類股",
     "推薦標籤", "推薦理由摘要", "推薦價格", "K線驗證標記", "推薦日價格", "推薦日支撐壓力摘要", "K線查詢參數", "K線檢視提示", "近端支撐", "近端壓力", "突破確認價", "停損參考", "停損價", "賣出目標1", "賣出目標2", "推薦日期", "推薦時間",
     "建立時間", "更新時間", "目前狀態", "是否已實際買進", "實際買進價", "實際賣出價", "實際報酬%", "最新價",
+    "最新價資料日期", "最新價資料時間", "最新價來源", "最新價更新狀態", "推薦基準價來源", "損益計算基準", "損益計算狀態",
     "最新更新時間", "損益金額", "損益幅%", "是否達停損", "是否達目標1", "是否達目標2", "持有天數",
     "模式績效標籤", "股神決策分數", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "備註",
     "推薦後1日%", "推薦後3日%", "推薦後5日%", "推薦後10日%", "推薦後20日%", "推薦後最大漲幅%", "推薦後最大回撤%", "是否曾達標_回測", "達標確認狀態", "回測事件摘要", "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間", "進場觸發狀態", "進場觸發日期", "進場評估路徑", "是否納入可執行績效", "執行基準價", "觸發訊號品質分", "觸發後收盤績效%", "觸發當日收盤績效%", "觸發當日最高報酬%", "觸發當日最大回撤%", "觸發當日收盤保留率%", "觸發收盤確認層級", "隔日候選漲跌%", "隔日執行命中結果", "隔日績效檢討標籤", "未觸發漏選標記", "候選與交易分流說明", "績效更新版本", "可執行交易1日%", "可執行交易3日%", "可執行交易5日%", "可執行交易10日%", "可執行交易20日%", "可執行交易最大漲幅%", "可執行交易最大回撤%", "除權息調整旗標", "績效計算口徑", "3日績效%", "5日績效%", "10日績效%", "20日績效%",
@@ -333,6 +336,22 @@ GODPICK_RECORD_COLUMNS = _dedupe_keep_order(GODPICK_RECORD_COLUMNS)
 DEFAULT_STANDARD_COLS = _dedupe_keep_order(DEFAULT_STANDARD_COLS)
 DEFAULT_ADVANCED_COLS = _dedupe_keep_order(DEFAULT_ADVANCED_COLS)
 
+# V176：最新價與損益必須可稽核。即使共用欄位設定沒有這些新欄，
+# 第 8 頁仍會保存並在標準/進階設定中提供顯示。
+V176_PRICE_AUDIT_COLUMNS = [
+    "推薦價格", "推薦日價格", "最新價", "最新價資料日期", "最新價資料時間",
+    "最新價來源", "最新價更新狀態", "推薦基準價來源",
+    "損益金額", "損益幅%", "損益計算基準", "損益計算狀態",
+]
+for _v176_col in V176_PRICE_AUDIT_COLUMNS:
+    if _v176_col not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v176_col)
+    if _v176_col not in DEFAULT_STANDARD_COLS:
+        DEFAULT_STANDARD_COLS.append(_v176_col)
+    if _v176_col not in DEFAULT_ADVANCED_COLS:
+        DEFAULT_ADVANCED_COLS.append(_v176_col)
+UI_CONFIG_DEFAULT["profiles"]["標準"] = DEFAULT_STANDARD_COLS.copy()
+UI_CONFIG_DEFAULT["profiles"]["進階"] = DEFAULT_ADVANCED_COLS.copy()
 
 
 def _k(key: str) -> str:
@@ -601,6 +620,7 @@ V73_MESSAGE_TEXT_FIELDS = [
     "起漲摘要", "強勢族群等級", "族群輪動狀態", "族群策略建議", "族群資金流說明",
     "是否領先同類股", "推薦標籤", "推薦理由摘要", "K線驗證標記", "推薦日支撐壓力摘要",
     "K線查詢參數", "K線檢視提示", "建立時間", "更新時間", "目前狀態", "最新更新時間",
+    "最新價資料日期", "最新價資料時間", "最新價來源", "最新價更新狀態", "推薦基準價來源", "損益計算基準", "損益計算狀態",
     "模式績效標籤", "股神建議動作", "股神信心", "股神進場區間", "股神推論", "績效資料型態", "績效資料來源", "備註",
     "是否達標_回測", "是否停損_回測", "命中結果", "績效評語", "追蹤更新時間",
 ]
@@ -1425,8 +1445,10 @@ def _apply_display_backfill_v73(x: pd.DataFrame) -> pd.DataFrame:
     _fill_text("K線驗證標記", ["K線檢視提示", "買點狀態"])
     _fill_text("目前狀態", ["狀態"], "觀察")
 
-    _fill_num("推薦價格", ["推薦日價格", "最新價"])
-    _fill_num("推薦日價格", ["推薦價格", "最新價"])
+    # V176：推薦基準價是不可變資料，禁止再由會持續變動的「最新價」反向補值。
+    # 舊版此處會把缺少推薦價的紀錄補成最新價，導致「最新價－最新價＝0」。
+    _fill_num("推薦價格", ["推薦日價格"])
+    _fill_num("推薦日價格", ["推薦價格"])
     _fill_num("股神決策分數", ["推薦總分", "實戰買點分數", "交易可行分數"])
     _fill_num("3日績效%", ["推薦後3日%"])
     _fill_num("5日績效%", ["推薦後5日%"])
@@ -3689,9 +3711,24 @@ def _god_mode_decision(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_recommendation_basis_v176(src: dict[str, Any]) -> tuple[float | None, str]:
+    """Resolve an immutable recommendation basis without ever using latest price.
+
+    The mutable ``最新價`` must never become the historical recommendation price.
+    Only fields that describe the original recommendation/entry snapshot are valid.
+    """
+    for field in [
+        "推薦價格", "推薦日價格", "原始推薦價格", "推薦當下價格", "推薦基準價",
+    ]:
+        value = _safe_float(src.get(field))
+        if value is not None and value > 0:
+            return float(value), field
+    return None, ""
+
+
 def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     src = dict(row)
-    rec_price = _safe_float(src.get("推薦價格"))
+    rec_price, rec_price_source = _resolve_recommendation_basis_v176(src)
     buy_price = _safe_float(src.get("實際買進價"))
     sell_price = _safe_float(src.get("實際賣出價"))
     latest_price = _safe_float(src.get("最新價"))
@@ -3700,8 +3737,18 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     target2 = _safe_float(src.get("賣出目標2"))
     status = _safe_str(src.get("目前狀態")) or "觀察"
 
+    # Safe one-way repair: 推薦日價格/其他 immutable recommendation field may
+    # restore 推薦價格, but 最新價 is explicitly forbidden as a source.
+    if rec_price not in [None, 0]:
+        if _safe_float(src.get("推薦價格")) in [None, 0]:
+            src["推薦價格"] = rec_price
+        if _safe_float(src.get("推薦日價格")) in [None, 0]:
+            src["推薦日價格"] = rec_price
+
     effective_cost = buy_price if buy_price not in [None, 0] else rec_price
+    cost_source = "實際買進價" if buy_price not in [None, 0] else (rec_price_source or "")
     mark_price = sell_price if sell_price not in [None, 0] else latest_price
+    mark_source = "實際賣出價" if sell_price not in [None, 0] else "最新價"
 
     pnl_amt = None
     pnl_pct = None
@@ -3749,7 +3796,27 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     if status == "達標":
         hit_t1 = True
 
+    quote_status = _safe_str(src.get("最新價更新狀態"))
+    if effective_cost in [None, 0]:
+        calc_status = "缺少推薦價／實際買進價，未計算"
+    elif mark_price is None:
+        calc_status = "缺少最新價／實際賣出價，未計算"
+    elif sell_price not in [None, 0]:
+        calc_status = "已依實際買進價與實際賣出價計算"
+    elif quote_status.startswith("保留舊價") or quote_status.startswith("等待新交易日") or quote_status.startswith("行情失敗"):
+        calc_status = f"沿用舊價，損益未更新｜{quote_status}"
+    elif "日期未驗證" in quote_status:
+        calc_status = "已計算，但最新價日期未驗證"
+    elif pnl_amt == 0 and _safe_str(src.get("最新價資料日期")):
+        calc_status = "已驗證最新行情，價格與計算基準相同"
+    else:
+        calc_status = "已計算"
+
     src["是否已實際買進"] = buy_flag
+    src["推薦基準價來源"] = rec_price_source or "缺少推薦基準價"
+    src["損益計算基準"] = f"{cost_source or '缺少成本'} → {mark_source}"
+    src["損益計算狀態"] = calc_status
+    # Existing field name is retained for compatibility; its meaning is per-share price difference.
     src["損益金額"] = pnl_amt
     src["損益幅%"] = pnl_pct
     # V115：損益% 與損益幅% 定義統一；若有完整實際買賣價，才用實際報酬%，否則用推薦/買進成本對最新價的追蹤報酬。
@@ -3766,13 +3833,71 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
 
 
 
-def _quote_price_from_info(info: Any) -> tuple[float | None, str, str]:
-    """V101：統一解析即時/備援行情回傳。
+def _normalize_quote_date_v176(value: Any) -> str:
+    """Normalize quote date to YYYY-MM-DD; empty string means unverifiable."""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        try:
+            n = float(value)
+            if n > 10_000_000_000:
+                n /= 1000.0
+            if n > 1_000_000_000:
+                return datetime.utcfromtimestamp(n).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    text = _safe_str(value)
+    if not text:
+        return ""
+    m = re.search(r"(?<!\d)(20\d{2})[-/]?(\d{2})[-/]?(\d{2})(?!\d)", text)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+        except Exception:
+            pass
+    dt = pd.to_datetime(text, errors="coerce")
+    if pd.notna(dt):
+        try:
+            return dt.date().isoformat()
+        except Exception:
+            return ""
+    return ""
 
-    utils 不同版本可能回傳 price / 現價 / 最新價，本頁只需要可用價格。
+
+def _normalize_quote_time_v176(value: Any) -> str:
+    text = _safe_str(value)
+    if not text:
+        return ""
+    m = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?", text)
+    if m:
+        hh, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+        if 0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59:
+            return f"{hh:02d}:{mm:02d}:{ss:02d}"
+    return ""
+
+
+def _quote_price_from_info(info: Any) -> tuple[float | None, str, str, str, str]:
+    """Parse quote and reject reference-only prices such as previous close.
+
+    ``prev_close`` is useful as a reference but is not a successful latest-price
+    update. Treating it as current quote caused previous-day recommendations to
+    show 0% after the user pressed update.
     """
     if not isinstance(info, dict):
-        return None, "", "NO_INFO"
+        return None, "", "NO_INFO", "", ""
+    market = _safe_str(info.get("market") or info.get("市場別"))
+    src = _safe_str(info.get("price_source") or info.get("來源") or info.get("message") or "realtime")
+    raw = info.get("raw") if isinstance(info.get("raw"), dict) else {}
+    quote_date = _normalize_quote_date_v176(
+        info.get("quote_date") or info.get("date") or info.get("交易日期") or raw.get("d") or info.get("update_time")
+    )
+    quote_time = _normalize_quote_time_v176(info.get("quote_time") or raw.get("t") or info.get("update_time"))
+    src_key = src.strip().lower().replace("-", "_").replace(" ", "_")
+    reference_only = {
+        "prev_close", "previous_close", "previousclose", "yesterday_close", "昨收", "昨收回退",
+    }
+    if src_key in reference_only or "prev_close" in src_key or "昨收" in src:
+        return None, market, f"REFERENCE_ONLY:{src or 'prev_close'}", quote_date, quote_time
     price = _safe_float(
         info.get("price")
         or info.get("現價")
@@ -3780,11 +3905,9 @@ def _quote_price_from_info(info: Any) -> tuple[float | None, str, str]:
         or info.get("close")
         or info.get("收盤價")
     )
-    market = _safe_str(info.get("market") or info.get("市場別"))
-    src = _safe_str(info.get("price_source") or info.get("來源") or info.get("message") or "realtime")
     if price is not None and price > 0:
-        return float(price), market, src
-    return None, market, src or "NO_PRICE"
+        return float(price), market, src or "realtime", quote_date, quote_time
+    return None, market, src or "NO_PRICE", quote_date, quote_time
 
 
 def _market_candidates(market_type: Any) -> list[str]:
@@ -3796,48 +3919,44 @@ def _market_candidates(market_type: Any) -> list[str]:
     return out
 
 
-def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
-    """V101：單檔備援查價。
-
-    注意：V100 在 ThreadPool 內呼叫 st.cache_data 包裝的 get_realtime_stock_info，
-    Streamlit Cloud 容易全部失敗或逾時。V101 主流程改用批次查價；本函式只作
-    少量失敗股票的安全備援。
-    """
+def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str, str, str]:
+    """Single-stock safety fallback; reference-only previous close is rejected."""
     stock_no = _normalize_code(stock_no)
     stock_name = _safe_str(stock_name)
     if not stock_no:
-        return None, _safe_str(market_type), "NO_CODE"
+        return None, _safe_str(market_type), "NO_CODE", "", ""
 
-    token = f"record_latest_v101_{datetime.now():%Y%m%d%H%M}"
+    token = f"record_latest_v176_{datetime.now():%Y%m%d%H%M%S}"
     last_src = "ONLINE_FAIL"
+    last_date = ""
+    last_time = ""
     for mk in _market_candidates(market_type):
         try:
-            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=token)
-            price, used_market, src = _quote_price_from_info(info)
-            last_src = src or last_src
+            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=token + mk)
+            price, used_market, src, qdate, qtime = _quote_price_from_info(info)
+            last_src, last_date, last_time = src or last_src, qdate or last_date, qtime or last_time
             if price is not None and price > 0:
-                return price, used_market or mk, src or "realtime_single"
+                return price, used_market or mk, src or "realtime", qdate, qtime
         except Exception as e:
             last_src = f"REALTIME_EXCEPTION:{str(e)[:60]}"
             continue
 
-    # 第二層：Yahoo 日線備援。這不是正式歷史績效回補，只是避免最新價整批 0。
     if _rt_yahoo_fallback is not None:
         for mk in _market_candidates(market_type):
             try:
                 info = _rt_yahoo_fallback(stock_no, stock_name, mk, refresh_day=date.today().isoformat())
-                price, used_market, src = _quote_price_from_info(info)
-                last_src = src or last_src
+                price, used_market, src, qdate, qtime = _quote_price_from_info(info)
+                last_src, last_date, last_time = src or last_src, qdate or last_date, qtime or last_time
                 if price is not None and price > 0:
-                    return price, used_market or mk, src or "yahoo_daily_fallback"
+                    return price, used_market or mk, src or "yahoo_daily_fallback", qdate, qtime
             except Exception as e:
                 last_src = f"YAHOO_EXCEPTION:{str(e)[:60]}"
                 continue
-    return None, _safe_str(market_type), last_src or "ONLINE_FAIL"
+    return None, _safe_str(market_type), last_src or "ONLINE_FAIL", last_date, last_time
 
 
 def _quote_request_json(url: str, params: dict[str, Any] | None = None, timeout: float = 4.0) -> Any:
-    """V137：輕量 HTTP JSON 讀取，避免最新價來源失敗時整頁卡死。"""
+    """V176：輕量 HTTP JSON 讀取，避免最新價來源失敗時整頁卡死。"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Accept": "application/json,text/plain,*/*",
@@ -3847,42 +3966,40 @@ def _quote_request_json(url: str, params: dict[str, Any] | None = None, timeout:
     return resp.json()
 
 
-def _quote_from_twse_mis(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
-    """V137：TWSE MIS 即時行情。上市 tse_，上櫃 otc_。"""
+def _quote_from_twse_mis(stock_no: str, market_type: str) -> tuple[float | None, str, str, str, str]:
+    """TWSE MIS actual trade/match quote. Previous close is never accepted as latest."""
     code = _normalize_code(stock_no)
     if not code:
-        return None, _safe_str(market_type), "TWSE_MIS_NO_CODE"
-    prefixes = []
+        return None, _safe_str(market_type), "TWSE_MIS_NO_CODE", "", ""
     mk = _safe_str(market_type)
-    if mk == "上櫃":
-        prefixes = ["otc", "tse"]
-    elif mk == "興櫃":
-        prefixes = ["otc", "tse"]
-    else:
-        prefixes = ["tse", "otc"]
+    prefixes = ["otc", "tse"] if mk in {"上櫃", "興櫃"} else ["tse", "otc"]
     last_src = "TWSE_MIS_NO_DATA"
+    last_date = ""
+    last_time = ""
     for pref in prefixes:
         try:
             url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
-            data = _quote_request_json(url, {"ex_ch": f"{pref}_{code}.tw", "json": "1", "delay": "0"}, timeout=3.5)
+            data = _quote_request_json(url, {"ex_ch": f"{pref}_{code}.tw", "json": "1", "delay": "0", "_": str(int(time.time() * 1000))}, timeout=3.5)
             arr = data.get("msgArray") if isinstance(data, dict) else None
             if not arr:
                 last_src = f"TWSE_MIS_EMPTY:{pref}"
                 continue
             row = arr[0] if isinstance(arr, list) and arr else {}
-            # z=成交價；若盤中無 z，y=昨收、a/b 為委買委賣。這裡只接受 z 或最近可用的 pz。
-            raw = row.get("z") or row.get("pz") or row.get("y")
-            if isinstance(raw, str):
-                raw = raw.replace(",", "").replace("-", "").strip()
-            price = _safe_float(raw)
+            last_date = _normalize_quote_date_v176(row.get("d"))
+            last_time = _normalize_quote_time_v176(row.get("t"))
+            # z=成交價, pz=最近撮合；y=昨收 is reference only and must not be used.
+            z_price = _safe_float(str(row.get("z") or "").replace(",", "").replace("-", "").strip())
+            pz_price = _safe_float(str(row.get("pz") or "").replace(",", "").replace("-", "").strip())
+            price = z_price if z_price not in [None, 0] else pz_price
             if price is not None and price > 0:
                 used_market = "上櫃" if pref == "otc" else "上市"
-                return float(price), used_market, f"TWSE_MIS_{pref}"
-            last_src = f"TWSE_MIS_NO_PRICE:{pref}"
+                source_kind = "TRADE" if z_price not in [None, 0] else "MATCH"
+                return float(price), used_market, f"TWSE_MIS_{pref}_{source_kind}", last_date, last_time
+            last_src = f"TWSE_MIS_REFERENCE_ONLY:{pref}"
         except Exception as e:
             last_src = f"TWSE_MIS_EXCEPTION:{str(e)[:60]}"
             continue
-    return None, _safe_str(market_type), last_src
+    return None, _safe_str(market_type), last_src, last_date, last_time
 
 
 def _yahoo_symbol_candidates(stock_no: str, market_type: str) -> list[str]:
@@ -3890,80 +4007,84 @@ def _yahoo_symbol_candidates(stock_no: str, market_type: str) -> list[str]:
     if not code:
         return []
     mk = _safe_str(market_type)
-    if mk == "上櫃":
-        suffixes = ["TWO", "TW"]
-    elif mk == "興櫃":
-        suffixes = ["TWO", "TW"]
-    else:
-        suffixes = ["TW", "TWO"]
+    suffixes = ["TWO", "TW"] if mk in {"上櫃", "興櫃"} else ["TW", "TWO"]
     out = []
-    for s in suffixes:
-        sym = f"{code}.{s}"
+    for suffix in suffixes:
+        sym = f"{code}.{suffix}"
         if sym not in out:
             out.append(sym)
     return out
 
 
-def _quote_from_yahoo_chart(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
-    """V137：Yahoo chart API 備援。取得 regularMarketPrice 或最近日線 close。"""
+def _quote_from_yahoo_chart(stock_no: str, market_type: str) -> tuple[float | None, str, str, str, str]:
+    """Yahoo chart daily close with its actual trading date; previousClose is rejected."""
     last_src = "YAHOO_CHART_NO_DATA"
+    last_date = ""
     for symbol in _yahoo_symbol_candidates(stock_no, market_type):
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            data = _quote_request_json(url, {"range": "7d", "interval": "1d"}, timeout=4.0)
+            data = _quote_request_json(url, {"range": "14d", "interval": "1d", "events": "history"}, timeout=4.0)
             result = (((data or {}).get("chart") or {}).get("result") or [])
             if not result:
                 last_src = f"YAHOO_CHART_EMPTY:{symbol}"
                 continue
             r0 = result[0]
-            meta = r0.get("meta") or {}
-            price = _safe_float(meta.get("regularMarketPrice") or meta.get("previousClose"))
-            if price is None or price <= 0:
-                q = (((r0.get("indicators") or {}).get("quote") or [{}])[0])
-                closes = q.get("close") or []
-                vals = [_safe_float(x) for x in closes]
-                vals = [x for x in vals if x is not None and x > 0]
-                price = vals[-1] if vals else None
-            if price is not None and price > 0:
+            timestamps = r0.get("timestamp") or []
+            quote = (((r0.get("indicators") or {}).get("quote") or [{}])[0]) or {}
+            closes = quote.get("close") or []
+            chosen_price = None
+            chosen_ts = None
+            for i in range(min(len(timestamps), len(closes)) - 1, -1, -1):
+                px = _safe_float(closes[i])
+                if px is not None and px > 0:
+                    chosen_price = float(px)
+                    chosen_ts = timestamps[i]
+                    break
+            if chosen_price is None:
+                meta = r0.get("meta") or {}
+                chosen_price = _safe_float(meta.get("regularMarketPrice"))
+                chosen_ts = meta.get("regularMarketTime")
+            last_date = _normalize_quote_date_v176(chosen_ts)
+            if chosen_price is not None and chosen_price > 0:
                 used_market = "上櫃" if symbol.endswith(".TWO") else "上市"
-                return float(price), used_market, f"YAHOO_CHART:{symbol}"
+                return float(chosen_price), used_market, f"YAHOO_CHART:{symbol}", last_date, ""
             last_src = f"YAHOO_CHART_NO_PRICE:{symbol}"
         except Exception as e:
             last_src = f"YAHOO_CHART_EXCEPTION:{str(e)[:60]}"
             continue
-    return None, _safe_str(market_type), last_src
+    return None, _safe_str(market_type), last_src, last_date, ""
 
 
-def _quote_from_finmind_daily(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
-    """V137：FinMind TaiwanStockPrice 日線 close 備援。"""
+def _quote_from_finmind_daily(stock_no: str, market_type: str) -> tuple[float | None, str, str, str, str]:
     code = _normalize_code(stock_no)
     if not code:
-        return None, _safe_str(market_type), "FINMIND_NO_CODE"
+        return None, _safe_str(market_type), "FINMIND_NO_CODE", "", ""
     try:
-        start_date = (date.today() - timedelta(days=14)).isoformat()
+        start_date = (date.today() - timedelta(days=21)).isoformat()
         url = "https://api.finmindtrade.com/api/v4/data"
         data = _quote_request_json(url, {"dataset": "TaiwanStockPrice", "data_id": code, "start_date": start_date}, timeout=5.0)
         rows = data.get("data") if isinstance(data, dict) else None
         if not rows:
-            return None, _safe_str(market_type), "FINMIND_EMPTY"
-        closes = []
-        for r in rows:
-            px = _safe_float((r or {}).get("close"))
+            return None, _safe_str(market_type), "FINMIND_EMPTY", "", ""
+        valid = []
+        for row in rows:
+            px = _safe_float((row or {}).get("close"))
+            qdate = _normalize_quote_date_v176((row or {}).get("date"))
             if px is not None and px > 0:
-                closes.append(px)
-        if closes:
-            return float(closes[-1]), _safe_str(market_type), "FINMIND_DAILY_CLOSE"
-        return None, _safe_str(market_type), "FINMIND_NO_PRICE"
+                valid.append((qdate, float(px)))
+        if valid:
+            valid.sort(key=lambda x: x[0] or "")
+            qdate, price = valid[-1]
+            return price, _safe_str(market_type), "FINMIND_DAILY_CLOSE", qdate, ""
+        return None, _safe_str(market_type), "FINMIND_NO_PRICE", "", ""
     except Exception as e:
-        return None, _safe_str(market_type), f"FINMIND_EXCEPTION:{str(e)[:60]}"
+        return None, _safe_str(market_type), f"FINMIND_EXCEPTION:{str(e)[:60]}", "", ""
 
 
-def _quote_from_stooq_daily(stock_no: str, market_type: str) -> tuple[float | None, str, str]:
-    """V137：Stooq CSV 日線備援。部分台股可能不支援，失敗時快速跳過。"""
+def _quote_from_stooq_daily(stock_no: str, market_type: str) -> tuple[float | None, str, str, str, str]:
     code = _normalize_code(stock_no)
     if not code:
-        return None, _safe_str(market_type), "STOOQ_NO_CODE"
-    # Stooq 台股符號覆蓋不一定完整，仍作為最後免費備援。
+        return None, _safe_str(market_type), "STOOQ_NO_CODE", "", ""
     candidates = [f"{code}.tw", f"{code}.two"]
     last_src = "STOOQ_NO_DATA"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -3976,45 +4097,56 @@ def _quote_from_stooq_daily(stock_no: str, market_type: str) -> tuple[float | No
             if len(lines) < 2:
                 last_src = f"STOOQ_EMPTY:{symbol}"
                 continue
-            # Symbol,Date,Time,Open,High,Low,Close,Volume
             parts = lines[-1].split(",")
             if len(parts) < 7:
                 last_src = f"STOOQ_BAD_CSV:{symbol}"
                 continue
             price = _safe_float(parts[6])
+            qdate = _normalize_quote_date_v176(parts[1])
+            qtime = _normalize_quote_time_v176(parts[2])
             if price is not None and price > 0:
                 used_market = "上櫃" if symbol.endswith(".two") else _safe_str(market_type)
-                return float(price), used_market, f"STOOQ_DAILY:{symbol}"
+                return float(price), used_market, f"STOOQ_DAILY:{symbol}", qdate, qtime
             last_src = f"STOOQ_NO_PRICE:{symbol}"
         except Exception as e:
             last_src = f"STOOQ_EXCEPTION:{str(e)[:60]}"
             continue
-    return None, _safe_str(market_type), last_src
+    return None, _safe_str(market_type), last_src, "", ""
 
 
-def _quote_from_local_history(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
-    """V137：最後本地/既有歷史函式備援。只取最近收盤，避免整頁空白。"""
+def _history_row_date_v176(hist: pd.DataFrame, idx: Any) -> str:
+    for col in ["日期", "交易日期", "date", "Date", "datetime", "Datetime"]:
+        if col in hist.columns:
+            try:
+                return _normalize_quote_date_v176(hist.loc[idx, col])
+            except Exception:
+                pass
+    return _normalize_quote_date_v176(idx)
+
+
+def _quote_from_local_history(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str, str, str]:
     code = _normalize_code(stock_no)
     if not code:
-        return None, _safe_str(market_type), "LOCAL_HISTORY_NO_CODE"
+        return None, _safe_str(market_type), "LOCAL_HISTORY_NO_CODE", "", ""
     try:
         end_dt = date.today()
-        start_dt = end_dt - timedelta(days=14)
+        start_dt = end_dt - timedelta(days=21)
         hist = get_history_data(code, _safe_str(stock_name), _safe_str(market_type), start_dt, end_dt)
         if isinstance(hist, pd.DataFrame) and not hist.empty:
             for col in ["收盤價", "close", "Close", "收盤"]:
                 if col in hist.columns:
-                    vals = pd.to_numeric(hist[col], errors="coerce").dropna()
-                    vals = vals[vals > 0]
-                    if not vals.empty:
-                        return float(vals.iloc[-1]), _safe_str(market_type), "LOCAL_HISTORY_CLOSE"
-        return None, _safe_str(market_type), "LOCAL_HISTORY_EMPTY"
+                    vals = pd.to_numeric(hist[col], errors="coerce")
+                    valid = vals[(vals.notna()) & (vals > 0)]
+                    if not valid.empty:
+                        idx = valid.index[-1]
+                        return float(valid.iloc[-1]), _safe_str(market_type), "LOCAL_HISTORY_CLOSE", _history_row_date_v176(hist, idx), ""
+        return None, _safe_str(market_type), "LOCAL_HISTORY_EMPTY", "", ""
     except Exception as e:
-        return None, _safe_str(market_type), f"LOCAL_HISTORY_EXCEPTION:{str(e)[:60]}"
+        return None, _safe_str(market_type), f"LOCAL_HISTORY_EXCEPTION:{str(e)[:60]}", "", ""
 
 
-def _alternative_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str]:
-    """V137：替代來源鏈。依序：TWSE MIS → Yahoo chart → FinMind → Stooq → local history。"""
+def _alternative_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tuple[float | None, str, str, str, str]:
+    """Fallback chain with quote-date metadata."""
     chain = [
         lambda: _quote_from_twse_mis(stock_no, market_type),
         lambda: _quote_from_yahoo_chart(stock_no, market_type),
@@ -4022,32 +4154,26 @@ def _alternative_latest_quote(stock_no: str, stock_name: str, market_type: str) 
         lambda: _quote_from_stooq_daily(stock_no, market_type),
         lambda: _quote_from_local_history(stock_no, stock_name, market_type),
     ]
-    last_src = "ALT_ALL_FAIL"
+    last = (None, _safe_str(market_type), "ALT_ALL_FAIL", "", "")
     for fn in chain:
         try:
-            price, used_market, src = fn()
-            last_src = src or last_src
+            result = fn()
+            last = result
+            price, used_market, src, qdate, qtime = result
             if price is not None and price > 0:
-                return float(price), used_market or _safe_str(market_type), src or "ALT_SOURCE"
+                return float(price), used_market or _safe_str(market_type), src or "ALT_SOURCE", qdate, qtime
         except Exception as e:
-            last_src = f"ALT_EXCEPTION:{str(e)[:60]}"
-            continue
-    return None, _safe_str(market_type), last_src
+            last = (None, _safe_str(market_type), f"ALT_EXCEPTION:{str(e)[:60]}", "", "")
+    return last
 
 
-def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tuple[float | None, str, str]]:
-    """V103：快速批次查最新價。
+def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tuple[float | None, str, str, str, str]]:
+    """Batch latest quote with source/date audit metadata.
 
-    原 v101/v102 會在批次來源失敗後，對每一檔股票逐檔走 Yahoo / 歷史備援；
-    這在 Streamlit Cloud 很容易變成 100~300 次連線，造成「看起來卡住」。
-
-    V103 原則：
-    1. 主要使用 utils.get_realtime_stock_info_batch，一次查一批。
-    2. 市場別錯誤時只做上市 / 上櫃 / 興櫃三輪批次補查。
-    3. 預設不逐檔慢查；失敗股票直接保留舊價。
-    4. 若真的需要補缺口，可開啟「慢速備援補缺口」，且有筆數上限。
+    Actual trade/match/daily close is accepted; previous close alone is rejected
+    so the alternative chain can obtain a real newer trading-day close.
     """
-    result: dict[str, tuple[float | None, str, str]] = {}
+    result: dict[str, tuple[float | None, str, str, str, str]] = {}
     if not target_payloads:
         return result
 
@@ -4063,8 +4189,7 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
         }
 
     unresolved = set(code_meta.keys())
-    # 同一分鐘共用 token，讓 Streamlit cache 與遠端來源都能吃到快取。
-    token = f"record_latest_v103_batch_{datetime.now():%Y%m%d%H%M}"
+    token = f"record_latest_v176_batch_{datetime.now():%Y%m%d%H%M%S}"
 
     def _run_batch(items: list[dict[str, str]], source_tag: str) -> None:
         nonlocal result, unresolved
@@ -4073,98 +4198,100 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
         try:
             batch_map = _rt_batch_fetch(items, refresh_token=token + source_tag)
         except Exception as e:
-            for it in items:
-                code = _normalize_code(it.get("code"))
+            for item in items:
+                code = _normalize_code(item.get("code"))
                 if code and code not in result:
-                    result[code] = (None, _safe_str(it.get("market")), f"BATCH_EXCEPTION:{str(e)[:80]}")
+                    result[code] = (None, _safe_str(item.get("market")), f"BATCH_EXCEPTION:{str(e)[:80]}", "", "")
             return
         if not isinstance(batch_map, dict):
             return
-        for it in items:
-            code = _normalize_code(it.get("code"))
+        for item in items:
+            code = _normalize_code(item.get("code"))
             if not code or code not in unresolved:
                 continue
             info = batch_map.get(code) or batch_map.get(str(code))
-            price, used_market, src = _quote_price_from_info(info)
+            price, used_market, src, qdate, qtime = _quote_price_from_info(info)
             if price is not None and price > 0:
-                result[code] = (price, used_market or _safe_str(it.get("market")), src or f"batch_{source_tag}")
+                result[code] = (price, used_market or _safe_str(item.get("market")), src or f"batch_{source_tag}", qdate, qtime)
                 unresolved.discard(code)
+            elif src:
+                result[code] = (None, used_market or _safe_str(item.get("market")), src, qdate, qtime)
 
-    # 第一輪：原始市場別。
     _run_batch(list(code_meta.values()), "_origin")
-
-    # 第二輪：市場別批次補查。這仍是批次，不是逐檔慢查。
-    for mk in ["上市", "上櫃", "興櫃"]:
+    for market in ["上市", "上櫃", "興櫃"]:
         if not unresolved:
             break
-        items = [
-            {"code": code, "name": code_meta.get(code, {}).get("name", ""), "market": mk}
-            for code in list(unresolved)
-        ]
-        _run_batch(items, f"_{mk}")
+        items = [{"code": code, "name": code_meta.get(code, {}).get("name", ""), "market": market} for code in list(unresolved)]
+        _run_batch(items, f"_{market}")
 
-    # 第三輪：替代來源鏈。預設開啟，但有每批上限，避免 Streamlit Cloud 卡住。
     allow_alt = bool(st.session_state.get(_k("enable_alt_price_sources"), True))
     alt_limit = int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60)
-    alt_workers = int(st.session_state.get(_k("alt_price_workers"), 6) or 6)
-    alt_workers = max(1, min(10, alt_workers))
+    alt_workers = max(1, min(10, int(st.session_state.get(_k("alt_price_workers"), 6) or 6)))
     if allow_alt and unresolved and alt_limit > 0:
         alt_codes = list(unresolved)[:max(0, alt_limit)]
+
         def _alt_job(code: str):
             meta = code_meta.get(code, {})
-            latest, used_market, src = _alternative_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
-            return code, latest, used_market, src
-        with ThreadPoolExecutor(max_workers=min(alt_workers, max(1, len(alt_codes)))) as ex:
-            futs = [ex.submit(_alt_job, code) for code in alt_codes]
-            for fut in as_completed(futs):
+            latest, used_market, src, qdate, qtime = _alternative_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
+            return code, latest, used_market, src, qdate, qtime
+
+        with ThreadPoolExecutor(max_workers=min(alt_workers, max(1, len(alt_codes)))) as executor:
+            futures = [executor.submit(_alt_job, code) for code in alt_codes]
+            for future in as_completed(futures):
                 try:
-                    code, latest, used_market, src = fut.result(timeout=8)
-                except Exception as e:
+                    code, latest, used_market, src, qdate, qtime = future.result(timeout=10)
+                except Exception:
                     continue
                 meta = code_meta.get(code, {})
                 if latest is not None and latest > 0:
-                    result[code] = (latest, used_market or meta.get("market", "上市"), src or "alt_source")
+                    result[code] = (latest, used_market or meta.get("market", "上市"), src or "alt_source", qdate, qtime)
                     unresolved.discard(code)
                 else:
-                    result[code] = (None, meta.get("market", "上市"), src or "ALT_FAIL")
+                    result[code] = (None, meta.get("market", "上市"), src or "ALT_FAIL", qdate, qtime)
 
-    # 第四輪：可選的慢速備援補缺口。預設關閉，避免整頁卡住。
     allow_slow = bool(st.session_state.get(_k("enable_slow_price_fallback"), False))
     slow_limit = int(st.session_state.get(_k("slow_price_fallback_limit"), 20) or 20)
     if allow_slow and unresolved:
         for code in list(unresolved)[:max(0, slow_limit)]:
             meta = code_meta.get(code, {})
-            latest, used_market, src = _fast_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
+            latest, used_market, src, qdate, qtime = _fast_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
             if latest is not None and latest > 0:
-                result[code] = (latest, used_market or meta.get("market", "上市"), src or "single_slow_fallback")
+                result[code] = (latest, used_market or meta.get("market", "上市"), src or "single_slow_fallback", qdate, qtime)
                 unresolved.discard(code)
             else:
-                result[code] = (None, meta.get("market", "上市"), src or "ONLINE_FAIL")
+                result[code] = (None, meta.get("market", "上市"), src or "ONLINE_FAIL", qdate, qtime)
 
-    # 未成功者不再慢查，交給 _refresh_latest_prices 保留舊價。
     for code in list(unresolved):
         meta = code_meta.get(code, {})
         old = result.get(code)
         if old is None or old[0] is None:
-            result[code] = (None, meta.get("market", "上市"), "BATCH_FAIL_KEEP_OLD")
+            prior_src = old[2] if old else ""
+            prior_date = old[3] if old else ""
+            prior_time = old[4] if old else ""
+            result[code] = (None, meta.get("market", "上市"), prior_src or "BATCH_FAIL_KEEP_OLD", prior_date, prior_time)
     return result
 
 
 def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.DataFrame:
-    """V103：更新完整份推薦紀錄，批次大小只當「每批處理筆數」，不是總筆數上限。
+    """V176 verified latest-price update and immediate P/L recalculation.
 
-    之前 v100/v101 為了防卡，將「最新價單批上限」誤設成總更新上限，
-    造成使用者設定 80 就只處理 80 筆。V102 改為：
-    1. 會掃描並更新所有符合條件的紀錄。
-    2. 最新價每批筆數只控制每一輪查價大小，跑完一批會繼續下一批。
-    3. 失敗保留舊價，不會清空原資料。
+    - Processes the complete target set; batch size is not a total limit.
+    - Previous close is not counted as a successful latest-price update.
+    - Quote source/date/status is stored per row.
+    - A quote that is not newer than a previous-day recommendation is reported
+      as waiting for a new trading day instead of silently showing false success.
+    - Recommendation price is immutable and is never backfilled from latest price.
     """
     if df is None or df.empty:
         out = _ensure_godpick_record_columns(pd.DataFrame())
-        out.attrs["latest_refresh_summary"] = {"target": 0, "success": 0, "fail": 0, "skipped": 0, "limited": 0, "batches": 0}
+        out.attrs["latest_refresh_summary"] = {
+            "target": 0, "success": 0, "fail": 0, "skipped": 0, "limited": 0, "batches": 0,
+            "preserved_old_price": 0, "waiting_new_trade": 0, "stale_quote": 0,
+            "unverified_date": 0, "pnl_calculated": 0, "missing_basis": 0, "unchanged_price": 0,
+        }
         return out
 
-    active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "強烈關注", ""}
+    active_status = {"觀察", "已買進", "持有", "追蹤", "未出場", "強烈關注", "新推薦", "雷達觀察", ""}
     rows = [dict(row) for _, row in df.iterrows()]
 
     batch_size = int(st.session_state.get(_k("latest_price_batch_size"), st.session_state.get(_k("perf_update_batch_size"), 80)) or 80)
@@ -4180,6 +4307,7 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
             continue
         if not _normalize_code(payload.get("股票代號")):
             skipped += 1
+            payload["最新價更新狀態"] = "行情失敗｜缺少股票代號"
             rows[i] = _recalc_row(payload)
             continue
         target_indexes.append(i)
@@ -4187,43 +4315,100 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
     success = 0
     fail = 0
     preserved_old_price = 0
+    waiting_new_trade = 0
+    stale_quote = 0
+    unverified_date = 0
+    pnl_calculated = 0
+    missing_basis = 0
+    unchanged_price = 0
     source_counts: dict[str, int] = {}
     batches = 0
+    issue_samples: list[dict[str, str]] = []
+    today_text = date.today().isoformat()
 
     for start_i in range(0, len(target_indexes), batch_size):
         batch_indexes = target_indexes[start_i:start_i + batch_size]
         if not batch_indexes:
             continue
         batches += 1
-        target_payloads = [rows[i] for i in batch_indexes]
-        quote_map = _batch_latest_quotes(target_payloads)
+        quote_map = _batch_latest_quotes([rows[i] for i in batch_indexes])
 
         for i in batch_indexes:
             payload = rows[i]
             code = _normalize_code(payload.get("股票代號"))
-            latest, used_market, price_src = quote_map.get(code, (None, _safe_str(payload.get("市場別")), "ONLINE_FAIL"))
+            latest, used_market, price_src, quote_date, quote_time = quote_map.get(
+                code,
+                (None, _safe_str(payload.get("市場別")), "ONLINE_FAIL", "", ""),
+            )
             old_latest = _safe_float(payload.get("最新價"))
+            old_quote_date = _normalize_quote_date_v176(payload.get("最新價資料日期"))
+            rec_date = _normalize_quote_date_v176(payload.get("推薦日期"))
+            source_key = _safe_str(price_src) or "UNKNOWN"
+            source_counts[source_key] = source_counts.get(source_key, 0) + 1
 
-            if latest is not None and latest > 0:
-                payload["最新價"] = latest
+            accept_quote = latest is not None and latest > 0
+            status_text = ""
+            if accept_quote and quote_date and old_quote_date and quote_date < old_quote_date:
+                accept_quote = False
+                stale_quote += 1
+                status_text = f"保留舊價｜來源行情日期 {quote_date} 早於已保存日期 {old_quote_date}"
+            elif accept_quote and quote_date and rec_date and rec_date < today_text and quote_date <= rec_date:
+                accept_quote = False
+                waiting_new_trade += 1
+                status_text = f"等待新交易日｜來源日期 {quote_date} 未晚於推薦日 {rec_date}"
+            elif accept_quote and quote_date and rec_date and quote_date < rec_date:
+                accept_quote = False
+                stale_quote += 1
+                status_text = f"保留舊價｜來源日期 {quote_date} 早於推薦日 {rec_date}"
+
+            if accept_quote:
+                payload["最新價"] = float(latest)
                 payload["市場別"] = used_market or _safe_str(payload.get("市場別"))
+                payload["最新價資料日期"] = quote_date
+                payload["最新價資料時間"] = quote_time
+                payload["最新價來源"] = source_key
+                if quote_date:
+                    status_text = "已更新｜行情日期已驗證"
+                else:
+                    unverified_date += 1
+                    status_text = "已更新｜行情日期未驗證"
+                payload["最新價更新狀態"] = status_text
                 payload["最新更新時間"] = _now_text()
                 payload["追蹤更新時間"] = _now_text()
-                note = f"最新價來源:{price_src}"
                 success += 1
+                if old_latest is not None and abs(float(latest) - old_latest) < 1e-12:
+                    unchanged_price += 1
             else:
+                fail += 1
+                payload["最新價來源"] = source_key
+                if quote_date:
+                    payload["最新價資料日期"] = quote_date
+                if quote_time:
+                    payload["最新價資料時間"] = quote_time
                 if old_latest is not None and old_latest > 0:
                     payload["最新價"] = old_latest
                     preserved_old_price += 1
-                    note = f"最新價來源:保留舊價({price_src})"
+                    if not status_text:
+                        status_text = f"保留舊價｜行情失敗：{source_key}"
                 else:
-                    fail += 1
-                    note = f"最新價來源:{price_src or 'ONLINE_FAIL'}"
+                    if not status_text:
+                        status_text = f"行情失敗｜{source_key}"
+                payload["最新價更新狀態"] = status_text
+                if len(issue_samples) < 30:
+                    issue_samples.append({
+                        "股票代號": code,
+                        "股票名稱": _safe_str(payload.get("股票名稱")),
+                        "狀態": status_text,
+                        "來源": source_key,
+                        "行情日期": quote_date,
+                        "推薦日期": rec_date,
+                    })
 
-            source_counts[_safe_str(price_src) or "UNKNOWN"] = source_counts.get(_safe_str(price_src) or "UNKNOWN", 0) + 1
-            old_note = _safe_str(payload.get("備註"))
-            payload["備註"] = old_note if note in old_note else (old_note + "｜" + note).strip("｜")
             rows[i] = _recalc_row(payload)
+            if _safe_float(rows[i].get("損益幅%")) is not None:
+                pnl_calculated += 1
+            if _safe_str(rows[i].get("推薦基準價來源")) == "缺少推薦基準價":
+                missing_basis += 1
 
     processed = set(target_indexes)
     for i, payload in enumerate(rows):
@@ -4232,6 +4417,7 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
 
     out = _ensure_godpick_record_columns(pd.DataFrame(rows))
     out.attrs["latest_refresh_summary"] = {
+        "version": LATEST_PRICE_PNL_FIX_VERSION,
         "target": len(target_indexes),
         "success": success,
         "fail": fail,
@@ -4240,7 +4426,14 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
         "batch_size": batch_size,
         "batches": batches,
         "preserved_old_price": preserved_old_price,
+        "waiting_new_trade": waiting_new_trade,
+        "stale_quote": stale_quote,
+        "unverified_date": unverified_date,
+        "pnl_calculated": pnl_calculated,
+        "missing_basis": missing_basis,
+        "unchanged_price": unchanged_price,
         "source_counts": source_counts,
+        "issue_samples": issue_samples,
         "fast_mode": not bool(st.session_state.get(_k("enable_slow_price_fallback"), False)),
         "alt_sources_enabled": bool(st.session_state.get(_k("enable_alt_price_sources"), True)),
         "alt_source_limit": int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60),
@@ -5879,6 +6072,7 @@ def main():
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜V162 表單批次送出＋本機先行刪除＋遠端不阻塞")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
+    st.caption(f"最新價／損益修正版：{LATEST_PRICE_PNL_FIX_VERSION}｜拒絕昨收冒充最新價＋保存行情日期／來源／計算狀態")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
     st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V149 單頁籤運算加速版 ｜ V157 狀態正規化快取")
@@ -5946,7 +6140,7 @@ def main():
             try:
                 df = _get_state_df()
                 before_sig = _df_signature(df)
-                with st.spinner("V137：批次來源 + 替代來源鏈更新最新價中；失敗股票保留舊價..."):
+                with st.spinner("V176：驗證行情日期與來源、拒絕昨收冒充最新價，並立即重算損益..."):
                     df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
                 after_sig = _df_signature(df)
                 if before_sig != after_sig:
@@ -5954,14 +6148,24 @@ def main():
                 _save_state_df(df)
                 summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
                 msg = (
-                    f"V104 最新價更新完成：符合條件共 {summary.get('target', 0)} 筆，"
-                    f"分 {summary.get('batches', 0)} 批，每批 {summary.get('batch_size', 0)} 筆；"
-                    f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆，"
-                    f"保留舊價 {summary.get('preserved_old_price', 0)} 筆。尚未同步，確認後請按『儲存同步』。"
+                    f"V176 最新價／損益更新完成：符合條件 {summary.get('target', 0)} 筆，"
+                    f"分 {summary.get('batches', 0)} 批；行情成功 {summary.get('success', 0)} 筆，"
+                    f"失敗或沒有新交易日 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆；"
+                    f"等待新交易日 {summary.get('waiting_new_trade', 0)} 筆，日期未驗證 {summary.get('unverified_date', 0)} 筆；"
+                    f"已算出損益 {summary.get('pnl_calculated', 0)} 筆，缺少推薦基準價 {summary.get('missing_basis', 0)} 筆。"
+                    "尚未同步，確認後請按『儲存同步』。"
                 )
                 ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('target', 0) or 0) == 0
-                _set_status(msg, "success" if ok else "warning")
-                _add_action_result("更新最新價", ok, msg, str(summary))
+                issue_lines = []
+                for item in (summary.get('issue_samples') or [])[:15]:
+                    issue_lines.append(
+                        f"{item.get('股票代號', '')} {item.get('股票名稱', '')}｜{item.get('狀態', '')}｜來源 {item.get('來源', '')}"
+                    )
+                detail = str(summary)
+                if issue_lines:
+                    detail += "\n問題樣本：\n" + "\n".join(issue_lines)
+                _set_status(msg, "success" if ok and int(summary.get('fail', 0) or 0) == 0 else "warning")
+                _add_action_result("更新最新價", ok, msg, detail)
             except Exception as e:
                 msg = f"更新最新價失敗：{e}"
                 _set_status(msg, "error")
@@ -6086,7 +6290,7 @@ def main():
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
         st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=120, step=10, key=_k("latest_price_batch_size"))
-        st.caption("V137：每批處理筆數，不是總上限；批次來源失敗後，可走替代來源鏈 TWSE MIS → Yahoo chart → FinMind → Stooq → 本地歷史。")
+        st.caption("V176：每批處理筆數不是總上限；昨收不再算更新成功，來源會依序走 TWSE MIS → Yahoo chart → FinMind → Stooq → 本地歷史，並保存行情日期。")
         st.toggle("啟用替代來源補價（建議開啟）", value=True, key=_k("enable_alt_price_sources"), help="批次來源抓不到時，依序使用 TWSE MIS、Yahoo chart、FinMind、Stooq、本地歷史收盤價補缺口。")
         st.number_input("替代來源最多補幾檔 / 每批", min_value=0, max_value=300, value=60, step=10, key=_k("alt_price_source_limit"))
         st.number_input("替代來源並行數", min_value=1, max_value=10, value=6, step=1, key=_k("alt_price_workers"))
@@ -6408,8 +6612,18 @@ def main():
             "同族群平均量能分": st.column_config.NumberColumn("同族群平均量能分", format="%.2f", disabled=True),
             "族群策略建議": st.column_config.TextColumn("族群策略建議", disabled=True),
             "族群資金流說明": st.column_config.TextColumn("族群資金流說明", width="large", disabled=True),
+            "推薦價格": st.column_config.NumberColumn("推薦價格", format="%.2f", disabled=True),
+            "推薦日價格": st.column_config.NumberColumn("推薦日價格", format="%.2f", disabled=True),
             "最新價": st.column_config.NumberColumn("最新價", format="%.2f", disabled=True),
+            "最新價資料日期": st.column_config.TextColumn("行情日期", disabled=True),
+            "最新價資料時間": st.column_config.TextColumn("行情時間", disabled=True),
+            "最新價來源": st.column_config.TextColumn("行情來源", disabled=True),
+            "最新價更新狀態": st.column_config.TextColumn("最新價更新狀態", width="large", disabled=True),
+            "推薦基準價來源": st.column_config.TextColumn("推薦基準價來源", disabled=True),
+            "損益金額": st.column_config.NumberColumn("每股損益", format="%.2f", disabled=True, help="未輸入股數時，此欄是每股價差，不是整筆交易金額。"),
             "損益幅%": st.column_config.NumberColumn("損益幅%", format="%.2f", disabled=True),
+            "損益計算基準": st.column_config.TextColumn("損益計算基準", disabled=True),
+            "損益計算狀態": st.column_config.TextColumn("損益計算狀態", width="large", disabled=True),
             "3日績效%": st.column_config.NumberColumn("3日績效%", format="%.2f", disabled=True),
             "5日績效%": st.column_config.NumberColumn("5日績效%", format="%.2f", disabled=True),
             "10日績效%": st.column_config.NumberColumn("10日績效%", format="%.2f", disabled=True),
