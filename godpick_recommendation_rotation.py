@@ -28,7 +28,7 @@ import tempfile
 
 import pandas as pd
 
-ROTATION_GUARD_VERSION = "phase101_rotation_diversity_v2_20260804"
+ROTATION_GUARD_VERSION = "phase108_rotation_event_memory_v1_20260807"
 ROTATION_HISTORY_FILE = "godpick_rotation_history.json"
 ROTATION_MAX_DATES = 30
 ROTATION_SNAPSHOT_TOP_N = 30
@@ -46,6 +46,11 @@ ROTATION_COLUMNS = [
     "重複推薦說明",
     "股神推薦優先分_輪動前",
     "推薦輪動版本",
+    "推薦事件類型",
+    "是否新增推薦事件",
+    "本日新增證據",
+    "類股集中校正分",
+    "類股集中說明",
 ]
 
 _NUMERIC_ROTATION_COLUMNS = {
@@ -57,6 +62,7 @@ _NUMERIC_ROTATION_COLUMNS = {
     "本次分數變化",
     "重複推薦校正分",
     "股神推薦優先分_輪動前",
+    "類股集中校正分",
 }
 
 _BLANKS = {"", "none", "nan", "nat", "null", "<na>", "--", "-"}
@@ -153,6 +159,13 @@ def _normalise_history(payload: Any) -> list[dict[str, Any]]:
                 "今日訊號新鮮分": round(_safe_float(row.get("今日訊號新鮮分"), 0), 1),
                 "最新價": _safe_float(row.get("最新價"), 0),
                 "實戰觸發價": _safe_float(row.get("實戰觸發價"), 0),
+                "AI新證據分": round(_safe_float(row.get("AI新證據分"), 0), 1),
+                "AI跨市場新強股分": round(_safe_float(row.get("AI跨市場新強股分"), 0), 1),
+                "型態突破分數": round(_safe_float(row.get("型態突破分數"), 0), 1),
+                "當日量比": round(_safe_float(row.get("當日量比"), 0), 2),
+                "今日漲幅%": round(_safe_float(row.get("今日漲幅%"), 0), 2),
+                "正式推薦資格": _safe_str(row.get("正式推薦資格")),
+                "推薦事件類型": _safe_str(row.get("推薦事件類型")),
             })
         out.append({"date": scan_date, "saved_at": _safe_str(item.get("saved_at")), "rows": clean_entries})
     dedup: dict[str, dict[str, Any]] = {}
@@ -221,6 +234,13 @@ def _bootstrap_history_from_records(base_dir: str | Path | None = None) -> list[
             "今日訊號新鮮分": round(_safe_float(raw.get("今日訊號新鮮分"), 0), 1),
             "最新價": _safe_float(raw.get("最新價") or raw.get("推薦價格"), 0),
             "實戰觸發價": _safe_float(raw.get("實戰觸發價"), 0),
+            "AI新證據分": round(_safe_float(raw.get("AI新證據分"), 0), 1),
+            "AI跨市場新強股分": round(_safe_float(raw.get("AI跨市場新強股分"), 0), 1),
+            "型態突破分數": round(_safe_float(raw.get("型態突破分數"), 0), 1),
+            "當日量比": round(_safe_float(raw.get("當日量比"), 0), 2),
+            "今日漲幅%": round(_safe_float(raw.get("今日漲幅%"), 0), 2),
+            "正式推薦資格": _safe_str(raw.get("正式推薦資格")),
+            "推薦事件類型": _safe_str(raw.get("推薦事件類型")),
         })
 
     snapshots: list[dict[str, Any]] = []
@@ -250,6 +270,27 @@ def load_rotation_history(base_dir: str | Path | None = None) -> list[dict[str, 
     history = [dict(item) for item in _load_history_cached(str(path), _file_signature(path))]
     if history:
         return history
+
+    # V177：本機快照遺失/重啟時先讀永久層，不再把近期推薦全部誤判為 NEW。
+    # 只在本機無有效 history 時做遠端讀取，避免正常頁面每次 rerun 都打網路。
+    try:
+        from godpick_persistence_service import load_named_json_permanent
+        payload, _messages = load_named_json_permanent(
+            ROTATION_HISTORY_FILE, {}, firestore_doc="godpick_rotation_history"
+        )
+        remote_history = _normalise_history(payload)
+        if remote_history:
+            _atomic_write_json(path, {
+                "version": ROTATION_GUARD_VERSION,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "restored_from_permanent": True,
+                "snapshots": remote_history,
+            })
+            _load_history_cached.cache_clear()
+            return remote_history
+    except Exception:
+        pass
+
     history = _bootstrap_history_from_records(base_dir)
     if history:
         try:
@@ -391,6 +432,36 @@ def _repeat_adjustment(row: pd.Series, appearances: list[dict[str, Any]], prior_
     last_score = _safe_float(last.get("股神推薦優先分"), 0)
     delta = current_score - last_score if last_score > 0 else 0.0
 
+    # V177 Recommendation Event：同一檔股票「仍然很強」不等於今天又是一筆新推薦。
+    # 只有出現可量化的新證據（訊號、新強股分、突破/量價、分數躍升）才視為再確認事件。
+    last_signal = _safe_float(last.get("今日訊號新鮮分"), 0)
+    ai_fresh = _safe_float(row.get("AI新證據分"), signal)
+    last_ai_fresh = _safe_float(last.get("AI新證據分"), 0)
+    cross = _safe_float(row.get("AI跨市場新強股分"), 0)
+    last_cross = _safe_float(last.get("AI跨市場新強股分"), 0)
+    breakout = _safe_float(row.get("型態突破分數"), 0)
+    last_breakout = _safe_float(last.get("型態突破分數"), 0)
+    vol_ratio = _safe_float(row.get("當日量比"), 0)
+    last_price = _safe_float(last.get("最新價"), 0)
+    current_price = _safe_float(row.get("最新價"), 0)
+    price_delta_pct = ((current_price / last_price - 1.0) * 100.0) if last_price > 0 and current_price > 0 else 0.0
+
+    evidence: list[str] = []
+    if signal >= 62 and signal >= last_signal + 10:
+        evidence.append(f"訊號新鮮度+{signal-last_signal:.0f}")
+    if ai_fresh >= 68 and ai_fresh >= last_ai_fresh + 8:
+        evidence.append(f"AI新證據+{ai_fresh-last_ai_fresh:.0f}")
+    if cross >= 78 and cross >= last_cross + 7:
+        evidence.append(f"跨市場強度+{cross-last_cross:.0f}")
+    if breakout >= 72 and breakout >= last_breakout + 8:
+        evidence.append("突破結構升級")
+    if delta >= 4.0:
+        evidence.append(f"推薦優先分+{delta:.1f}")
+    if 1.5 <= price_delta_pct <= 7.5 and vol_ratio >= 1.15:
+        evidence.append(f"價量續強{price_delta_pct:+.1f}%")
+
+    is_new_event = (count == 0) or bool(evidence)
+
     penalty = 0.0
     if count == 3:
         penalty += 1.5
@@ -402,6 +473,8 @@ def _repeat_adjustment(row: pd.Series, appearances: list[dict[str, Any]], prior_
         penalty += min(3.0, float(consecutive - 2))
     if count >= 3 and signal < 50:
         penalty += 3.0
+    if count >= 1 and not is_new_event:
+        penalty += 2.5 if count < 3 else 4.0
     if delta <= -4 and count >= 2:
         penalty += 2.0
     elif delta >= 4:
@@ -412,8 +485,10 @@ def _repeat_adjustment(row: pd.Series, appearances: list[dict[str, Any]], prior_
     sector = _safe_float(row.get("族群攻擊強度"), _safe_float(row.get("族群熱度分數"), 0))
     amount = _safe_float(row.get("成交額百萬"), _safe_float(row.get("流動性參考成交額百萬"), 0))
     true_leader = mainrise >= 78 and mainstream >= 76 and sector >= 72 and amount >= 500 and signal >= 58
-    if true_leader:
+    if true_leader and is_new_event:
         penalty = min(penalty, 2.5)
+    elif true_leader and not is_new_event:
+        penalty = max(penalty, 3.5)
 
     structure_only = mainrise >= 75 and signal < 50
     if structure_only:
@@ -428,14 +503,19 @@ def _repeat_adjustment(row: pd.Series, appearances: list[dict[str, Any]], prior_
     adjustment = round(bonus - min(10.0, penalty), 1)
     if count == 0:
         status = "NEW｜今日新進榜" if signal >= 60 else "NEW-WAIT｜新進但訊號待確認"
-    elif count >= 4 and signal < 50:
-        status = "STICKY-BLOCK｜重複且缺少新訊號"
-    elif true_leader:
-        status = "LEADER-KEEP｜主流領漲續留"
-    elif count >= 3 and adjustment < -2:
-        status = "STICKY-WAIT｜重複推薦需新證據"
+        event_type = "NEW｜新發現"
+    elif is_new_event and true_leader:
+        status = "LEADER-RECONFIRM｜領漲股有新證據"
+        event_type = "RECONFIRM｜新證據再確認"
+    elif is_new_event:
+        status = "RECONFIRM｜重複股但今日有新證據"
+        event_type = "RECONFIRM｜新證據再確認"
+    elif count >= 3:
+        status = "STICKY-BLOCK｜重複且缺少新證據"
+        event_type = "TRACK｜既有邏輯續追"
     else:
-        status = "KEEP｜正常續留"
+        status = "TRACK-ONLY｜既有邏輯續追，非新推薦"
+        event_type = "TRACK｜既有邏輯續追"
 
     reason = (
         f"近5次入榜{count}次、連續{consecutive}次、今日新訊號{signal:.1f}、"
@@ -453,6 +533,11 @@ def _repeat_adjustment(row: pd.Series, appearances: list[dict[str, Any]], prior_
         "今日新進榜": "是" if count == 0 else "否",
         "重複推薦說明": reason,
         "推薦輪動版本": ROTATION_GUARD_VERSION,
+        "推薦事件類型": event_type,
+        "是否新增推薦事件": "是" if is_new_event else "否",
+        "本日新增證據": "、".join(evidence) if evidence else ("首次進榜" if count == 0 else "無足夠新增證據"),
+        "類股集中校正分": 0.0,
+        "類股集中說明": "",
     }
 
 
@@ -480,20 +565,44 @@ def apply_recommendation_rotation_guard(df: pd.DataFrame | None, base_dir: str |
     base_score = pd.to_numeric(out["股神推薦優先分"], errors="coerce").fillna(0.0)
     out["股神推薦優先分_輪動前"] = base_score.round(1)
     adjust = pd.to_numeric(out["重複推薦校正分"], errors="coerce").fillna(0.0)
-    out["股神推薦優先分"] = (base_score + adjust).clip(lower=0, upper=100).round(1)
+
+    # V177 類股相似度懲罰：不是硬性分散，而是第3檔起需有更強的新證據。
+    # 若同族群真的壓倒性領先且有新證據，只做極小校正；不會硬塞弱股。
+    prelim = pd.DataFrame({"score": base_score + adjust}, index=out.index).sort_values("score", ascending=False, kind="mergesort")
+    sector_seen: dict[str, int] = {}
+    concentration = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    concentration_reason = pd.Series([""] * len(out), index=out.index, dtype="object")
+    for pos, idx in enumerate(prelim.index[:40], start=1):
+        sector = _safe_str(out.at[idx, "類別"] if "類別" in out.columns else "") or "未分類"
+        seen = sector_seen.get(sector, 0)
+        if seen >= 2:
+            signal_v = _safe_float(out.at[idx, "今日訊號新鮮分"] if "今日訊號新鮮分" in out.columns else 0)
+            is_event_v = _safe_str(out.at[idx, "是否新增推薦事件"] if "是否新增推薦事件" in out.columns else "否") == "是"
+            raw_penalty = min(4.5, 1.5 * (seen - 1))
+            if signal_v >= 75 and is_event_v:
+                raw_penalty *= 0.30
+            elif is_event_v:
+                raw_penalty *= 0.55
+            concentration.at[idx] = -round(raw_penalty, 1)
+            concentration_reason.at[idx] = f"{sector}已先有{seen}檔｜{'有新證據，輕度校正' if is_event_v else '無新證據，提高相似度懲罰'}"
+        sector_seen[sector] = seen + 1
+    out["類股集中校正分"] = concentration
+    out["類股集中說明"] = concentration_reason
+    out["股神推薦優先分"] = (base_score + adjust + concentration).clip(lower=0, upper=100).round(1)
 
     # A repeated structure-only name must not retain formal/A- status without a
     # fresh trigger.  It remains visible as a radar candidate instead of being
     # deleted from the candidate pool.
     sticky_block = out["推薦輪動狀態"].astype(str).str.startswith("STICKY-BLOCK")
-    if sticky_block.any():
+    repeat_track = (out.get("是否新增推薦事件", pd.Series(["是"] * len(out), index=out.index)).astype(str).eq("否")) & (pd.to_numeric(out.get("近5次入榜次數", 0), errors="coerce").fillna(0) >= 2)
+    if sticky_block.any() or repeat_track.any():
         bucket = out.get("正式推薦分區", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
-        downgrade = sticky_block & bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+        downgrade = (sticky_block | repeat_track) & bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
         if downgrade.any():
             out.loc[downgrade, "正式推薦分區"] = "盤中雷達追蹤"
             out.loc[downgrade, "是否正式推薦"] = "否"
-            out.loc[downgrade, "操作許可"] = "僅盤中二段確認"
-            out.loc[downgrade, "最終操作結論"] = "STICKY-BLOCK｜連續重複但缺少今日新訊號，只保留雷達"
+            out.loc[downgrade, "操作許可"] = "既有持續追蹤｜無新增證據前不新增新倉"
+            out.loc[downgrade, "最終操作結論"] = "TRACK-ONLY｜既有邏輯仍成立，但今天不是新的推薦事件"
 
     if "股神推薦分數說明" in out.columns:
         out["股神推薦分數說明"] = (
@@ -561,6 +670,7 @@ def save_rotation_snapshot(
     base_dir: str | Path | None = None,
     *,
     top_n: int = ROTATION_SNAPSHOT_TOP_N,
+    persist_remote: bool = True,
 ) -> tuple[bool, str]:
     if df is None:
         return False, "沒有推薦資料，未建立輪動快照"
@@ -598,6 +708,13 @@ def save_rotation_snapshot(
             "今日訊號新鮮分": round(_safe_float(row.get("今日訊號新鮮分"), 0), 1),
             "最新價": _safe_float(row.get("最新價"), 0),
             "實戰觸發價": _safe_float(row.get("實戰觸發價"), 0),
+            "AI新證據分": round(_safe_float(row.get("AI新證據分"), 0), 1),
+            "AI跨市場新強股分": round(_safe_float(row.get("AI跨市場新強股分"), 0), 1),
+            "型態突破分數": round(_safe_float(row.get("型態突破分數"), 0), 1),
+            "當日量比": round(_safe_float(row.get("當日量比"), 0), 2),
+            "今日漲幅%": round(_safe_float(row.get("今日漲幅%"), 0), 2),
+            "正式推薦資格": _safe_str(row.get("正式推薦資格")),
+            "推薦事件類型": _safe_str(row.get("推薦事件類型")),
         })
 
     history = load_rotation_history(base_dir)
@@ -618,7 +735,20 @@ def save_rotation_snapshot(
     path = _history_path(base_dir)
     _atomic_write_json(path, payload)
     _load_history_cached.cache_clear()
-    return True, f"已更新推薦輪動快照：{scan_date}｜{len(entries)} 檔｜{path.name}"
+    msg = f"已更新推薦輪動快照：{scan_date}｜{len(entries)} 檔｜{path.name}"
+    if persist_remote:
+        try:
+            from godpick_persistence_service import save_named_json_permanent
+            report = save_named_json_permanent(
+                ROTATION_HISTORY_FILE, payload, firestore_doc="godpick_rotation_history"
+            )
+            if getattr(report, "permanent_ok", False):
+                msg += "｜永久層已驗證"
+            else:
+                msg += "｜本機已保存；遠端永久層待確認"
+        except Exception as exc:
+            msg += f"｜本機已保存；遠端同步略過：{exc}"
+    return True, msg
 
 
 def rotation_diagnostics(df: pd.DataFrame | None) -> dict[str, Any]:
@@ -642,5 +772,7 @@ def rotation_diagnostics(df: pd.DataFrame | None) -> dict[str, Any]:
         "top10_repeat3_count": int((repeat >= 3).sum()),
         "top10_sticky_without_signal": sticky_count,
         "top10_average_signal_freshness": round(float(signal.mean()), 1),
+        "top10_new_event_count": int(top.get("是否新增推薦事件", pd.Series(["否"] * len(top), index=top.index)).astype(str).eq("是").sum()),
+        "top10_track_only_count": int(top.get("是否新增推薦事件", pd.Series(["否"] * len(top), index=top.index)).astype(str).eq("否").sum()),
         "warning": sticky_count >= 3 or (new_count == 0 and int((repeat >= 3).sum()) >= 5),
     }

@@ -211,6 +211,19 @@ except Exception:
     save_learning_run = None
 
 try:
+    from godpick_full_market_discovery import (
+        FULL_MARKET_DISCOVERY_VERSION,
+        SECTOR_SHRINKAGE_VERSION,
+        evaluate_legacy_soft_gates,
+        apply_sector_bayesian_shrinkage,
+    )
+except Exception:
+    FULL_MARKET_DISCOVERY_VERSION = "full_market_discovery_unavailable"
+    SECTOR_SHRINKAGE_VERSION = "sector_shrinkage_unavailable"
+    evaluate_legacy_soft_gates = None
+    apply_sector_bayesian_shrinkage = None
+
+try:
     from godpick_recommendation_rotation import (
         ROTATION_GUARD_VERSION,
         save_rotation_snapshot,
@@ -231,7 +244,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_rotation_quality_guard_v175_20260727"
+PAGE07_SPEED_FIX_VERSION = "page07_full_market_discovery_v177_20260807"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -8391,7 +8404,6 @@ def _analyze_one_stock_for_recommend(
     prebreak_rescue = _bundle_prebreakout_rescue_profile(bundle, market_type)
     rescue_eligible = bool(momentum_rescue.get("eligible") or prebreak_rescue.get("eligible"))
     rescue_profile = momentum_rescue if momentum_rescue.get("eligible") else prebreak_rescue
-    rescued_stages: list[str] = []
     opportunity_score = _safe_float(opportunity_info.get("機會股分數"), 0) or 0
     opportunity_core = max(
         _safe_float(opportunity_info.get("低檔位置分數"), 0) or 0,
@@ -8400,40 +8412,31 @@ def _analyze_one_stock_for_recommend(
         _safe_float(opportunity_info.get("止跌轉強分數"), 0) or 0,
     )
     opportunity_mode = _is_opportunity_mode(mode)
-    if signal_score < min_signal_score:
-        relaxed_signal_floor = max(0.0, float(min_signal_score) - (35.0 if opportunity_mode else 0.0))
-        if not (opportunity_mode and signal_score >= relaxed_signal_floor and opportunity_core >= 60):
-            if rescue_eligible:
-                rescued_stages.append("訊號")
-            else:
-                return {"status": "signal_filtered", "code": code, "message": f"訊號分數 {signal_score} < {min_signal_score}"}
-
     risk_pass = bool(bundle["risk_filter"].get("是否通過風險過濾", False))
     opportunity_chase = _safe_float(opportunity_info.get("追高風險分_機會"), 50) or 50
-    if not risk_pass:
-        if not (opportunity_mode and opportunity_score >= 62 and opportunity_chase <= 72):
-            if rescue_eligible:
-                rescued_stages.append("傳統風控")
-            else:
-                return {"status": "risk_filtered", "code": code, "message": _safe_str(bundle["risk_filter"].get("淘汰原因")) or "風險過濾未通過"}
-
     prelaunch_score = _safe_float(bundle["prelaunch"].get("起漲前兆分數"), 0) or 0
-    if prelaunch_score < min_prelaunch_score:
-        relaxed_prelaunch_floor = max(0.0, float(min_prelaunch_score) - (35.0 if opportunity_mode else 0.0))
-        if not (opportunity_mode and (opportunity_score >= 62 or opportunity_core >= 66) and prelaunch_score >= relaxed_prelaunch_floor):
-            if rescue_eligible:
-                rescued_stages.append("起漲前兆")
-            else:
-                return {"status": "prelaunch_filtered", "code": code, "message": f"起漲前兆 {prelaunch_score:.1f} < {min_prelaunch_score}"}
-
     trade_score = _safe_float(bundle["trade_feasibility"].get("交易可行分數"), 0) or 0
-    if trade_score < min_trade_score:
-        relaxed_trade_floor = max(0.0, float(min_trade_score) - (25.0 if opportunity_mode else 0.0))
-        if not (opportunity_mode and opportunity_score >= 60 and trade_score >= relaxed_trade_floor):
-            if rescue_eligible:
-                rescued_stages.append("交易可行")
-            else:
-                return {"status": "trade_filtered", "code": code, "message": f"交易可行 {trade_score:.1f} < {min_trade_score}"}
+
+    # V177：舊訊號／傳統風控／起漲／交易門檻不再在 AI 之前 return。
+    # 只要 K 線分析成功，就保留到完整全市場 AI 母體；舊門檻改成診斷特徵。
+    # 真正硬風控仍由後段 K 線新鮮度、低流動性、異常價格、LOCKDOWN 與正式治理層把關。
+    if callable(evaluate_legacy_soft_gates):
+        soft_gate = evaluate_legacy_soft_gates(
+            signal_score=signal_score, min_signal_score=min_signal_score,
+            risk_pass=risk_pass, risk_reason=_safe_str(bundle["risk_filter"].get("淘汰原因")) or "傳統風控未通過",
+            prelaunch_score=prelaunch_score, min_prelaunch_score=min_prelaunch_score,
+            trade_score=trade_score, min_trade_score=min_trade_score,
+            opportunity_mode=opportunity_mode, opportunity_score=opportunity_score,
+            opportunity_core=opportunity_core, opportunity_chase=opportunity_chase,
+            rescue_eligible=rescue_eligible,
+        )
+    else:
+        # Fail-open only for discovery visibility; downstream hard controls remain unchanged.
+        soft_gate = {"soft_statuses": [], "soft_stages": [], "soft_reasons": [], "rescued_stages": [], "soft_count": 0, "soft_state": "PASS｜相容模式"}
+    rescued_stages = list(soft_gate.get("rescued_stages", []))
+    soft_filter_stages = list(soft_gate.get("soft_stages", []))
+    soft_filter_reasons = list(soft_gate.get("soft_reasons", []))
+    soft_filter_statuses = list(soft_gate.get("soft_statuses", []))
 
     auto_factor_total = _safe_float(bundle["auto_factor"].get("auto_factor_total"), 0) or 0
     technical_score = _safe_float(bundle.get("technical_score"), 0) or 0
@@ -8541,8 +8544,13 @@ def _analyze_one_stock_for_recommend(
             "強勢收盤旗標": "是" if bool(bundle.get("strong_close_flag")) else "否",
             "盤後動能救援分": _safe_float(momentum_rescue.get("score"), 0) or 0,
             "盤前強勢前兆分": _safe_float(prebreak_rescue.get("score"), 0) or 0,
-            "前置保留類型": rescue_profile.get("kind", "") if rescued_stages else "",
-            "前置保留原因": (f"前置救援通過：{rescue_profile.get('reason', '')}；原本會被過濾：{'、'.join(rescued_stages)}" if rescued_stages else ""),
+            "前置保留類型": (rescue_profile.get("kind", "") if rescued_stages else ("FULL-MARKET-AI" if soft_filter_stages else "")),
+            "前置保留原因": (f"前置救援通過：{rescue_profile.get('reason', '')}；原本會被過濾：{'、'.join(rescued_stages)}" if rescued_stages else ("V177全市場AI保留：" + "、".join(soft_filter_reasons) if soft_filter_reasons else "")),
+            "前置軟篩選狀態": _safe_str(soft_gate.get("soft_state")),
+            "前置軟篩選階段": "、".join(soft_filter_stages),
+            "前置軟篩選原因": "｜".join(soft_filter_reasons),
+            "前置軟篩選數": int(soft_gate.get("soft_count", 0) or 0),
+            "AI發現母體版本": FULL_MARKET_DISCOVERY_VERSION,
             "近5日漲幅%": _safe_float(bundle.get("ret5"), 0) or 0,
             "近20日漲幅%": _safe_float(bundle.get("ret20"), 0) or 0,
             "近60日漲幅%": _safe_float(bundle.get("ret60"), 0) or 0,
@@ -8550,6 +8558,8 @@ def _analyze_one_stock_for_recommend(
             "收盤距MA60%": _safe_float(bundle.get("close_vs_ma60_pct"), 0) or 0,
             "推薦模式": mode,
         },
+        "history_ok": True,
+        "soft_filter_statuses": soft_filter_statuses,
         "history_debug": bundle.get("history_debug", {}),
     }
 
@@ -8688,6 +8698,34 @@ def _compute_category_strength(base_df: pd.DataFrame) -> pd.DataFrame:
 
     grp["同族群強勢比例"] = (grp["同族群強勢比例"].fillna(0) * 100).clip(0, 100)
     grp["同族群推薦密度"] = (grp["同族群推薦密度"].fillna(0) * 100).clip(0, 100)
+
+    # V177：小樣本類股不能因 1/1 或 2/2 就被視為 100% 廣度。
+    # 以全市場先驗做 empirical-Bayes 收縮，樣本越大越接近原始比例。
+    if callable(apply_sector_bayesian_shrinkage):
+        try:
+            global_strong_pct = float(work["_sector_strong_flag"].fillna(0).mean() * 100.0)
+            global_candidate_pct = float(work["_sector_candidate_flag"].fillna(0).mean() * 100.0)
+            global_volume_score = float(pd.to_numeric(work["量能啟動分"], errors="coerce").fillna(0).mean())
+            grp = apply_sector_bayesian_shrinkage(
+                grp,
+                global_strong_pct=global_strong_pct,
+                global_candidate_pct=global_candidate_pct,
+                global_volume_score=global_volume_score,
+            )
+        except Exception:
+            grp["同族群強勢比例_原始"] = grp["同族群強勢比例"]
+            grp["同族群推薦密度_原始"] = grp["同族群推薦密度"]
+            grp["同族群平均量能分_原始"] = grp["同族群平均量能分"]
+            grp["族群樣本可信度"] = 0.0
+            grp["族群樣本校正說明"] = "樣本校正模組失敗，沿用原值"
+            grp["族群樣本校正版本"] = SECTOR_SHRINKAGE_VERSION
+    else:
+        grp["同族群強勢比例_原始"] = grp["同族群強勢比例"]
+        grp["同族群推薦密度_原始"] = grp["同族群推薦密度"]
+        grp["同族群平均量能分_原始"] = grp["同族群平均量能分"]
+        grp["族群樣本可信度"] = 0.0
+        grp["族群樣本校正說明"] = "樣本校正模組未載入"
+        grp["族群樣本校正版本"] = SECTOR_SHRINKAGE_VERSION
 
     grp["類股熱度分數"] = (
         grp["類股平均總分"] * 0.28
@@ -9682,6 +9720,10 @@ def _build_recommend_df(
         "risk_filtered": 0,
         "prelaunch_filtered": 0,
         "trade_filtered": 0,
+        "soft_gate_survivors": 0,
+        "full_market_ai_pool": 0,
+        "ai_pool_share_of_kline_pct": 0.0,
+        "full_market_discovery_version": FULL_MARKET_DISCOVERY_VERSION,
         "final_score_filtered": 0,
         "history_debug_samples": [],
         "error_samples": [],
@@ -9737,6 +9779,12 @@ def _build_recommend_df(
             if isinstance(row, dict):
                 base_rows.append(row)
                 debug_summary["analyzed_ok"] += 1
+                softs = result.get("soft_filter_statuses", []) or []
+                if softs:
+                    debug_summary["soft_gate_survivors"] = int(debug_summary.get("soft_gate_survivors", 0)) + 1
+                    for soft_status in softs:
+                        if soft_status in {"signal_filtered", "risk_filtered", "prelaunch_filtered", "trade_filtered"}:
+                            debug_summary[soft_status] = int(debug_summary.get(soft_status, 0)) + 1
         else:
             debug_summary[status] = int(debug_summary.get(status, 0)) + 1
             msg = _safe_str(result.get("message"))
@@ -9942,7 +9990,11 @@ def _build_recommend_df(
     base_df = pd.DataFrame(base_rows)
     if base_df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    debug_summary["full_market_ai_pool"] = int(len(base_df))
+    debug_summary["ai_pool_share_of_kline_pct"] = round(100.0 * len(base_df) / max(int(debug_summary.get("history_ok", 0)), 1), 2)
 
+    # V177：此處的 base_df 現在是「所有 K 線分析成功股票」的 AI 母體，
+    # 不再只是通過舊訊號/風控/起漲/交易門檻後的殘餘候選。
     # 正式評分前先以本輪市場共同最新日期驗證每檔行情，避免不同日期價格混算。
     base_df = _annotate_kline_freshness(base_df)
     try:
@@ -9967,12 +10019,18 @@ def _build_recommend_df(
         base_df["同族群強勢比例"] = None
         base_df["同族群推薦密度"] = None
         base_df["同族群平均量能分"] = None
+        base_df["同族群強勢比例_原始"] = None
+        base_df["同族群推薦密度_原始"] = None
+        base_df["同族群平均量能分_原始"] = None
+        base_df["族群樣本可信度"] = None
+        base_df["族群樣本校正說明"] = ""
+        base_df["族群樣本校正版本"] = SECTOR_SHRINKAGE_VERSION
         base_df["族群策略建議"] = ""
         base_df["族群資金流說明"] = ""
     else:
         base_df = base_df.merge(
             category_strength_df[
-                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度", "類股平均型態突破", "類股平均爆發力", "族群資金流分數", "強勢族群等級", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "族群策略建議", "族群資金流說明"]
+                ["類別", "類股平均總分", "類股平均訊號", "類股平均漲幅", "類股熱度分數", "類股熱度排名", "類股加速度", "類股平均型態突破", "類股平均爆發力", "族群資金流分數", "強勢族群等級", "族群輪動狀態", "同族群強勢比例", "同族群推薦密度", "同族群平均量能分", "同族群強勢比例_原始", "同族群推薦密度_原始", "同族群平均量能分_原始", "族群樣本可信度", "族群樣本校正說明", "族群樣本校正版本", "族群策略建議", "族群資金流說明"]
             ],
             on="類別",
             how="left",
@@ -11834,7 +11892,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
     render_pro_section("股神推薦總排名｜真正第一優先")
-    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。新版除主流主升、族群廣度與成交額外，也檢查近5次是否反覆入榜，以及今天是否真的出現新量價／觸發證據；真正領漲股可以續留，但缺少新訊號的重複名單會降級，不會為了多樣化硬推弱股。")
+    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。V177 先讓所有K線有效股票進入全市場AI，再由硬風控把關；舊訊號/起漲/交易門檻只作特徵。排名另區分「新推薦事件」與「既有持續追蹤」，並對小樣本類股做收縮校正，避免同一批股票與1檔類股反覆自我強化。")
     if callable(rotation_diagnostics):
         try:
             rotation_info = rotation_diagnostics(decision_source)
@@ -11973,7 +12031,7 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
         "資料完整度評分", "買進分數", "Entry進場買點分", "Risk風控安全分",
         "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%", "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
         "風險報酬比", "追價風險分", "停損距離%", "壓力空間%", "近5日漲幅%", "近20日漲幅%",
-        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態", "股神資料總新鮮度", "股神資料警示", "紅燈反轉首觸禁買", "主流強勢替代進場", "大盤原始橋接狀態", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態", "股神資料總新鮮度", "股神資料警示", "紅燈反轉首觸禁買", "主流強勢替代進場", "大盤原始橋接狀態", "今日漲幅%", "開盤跳空%", "當日量比", "當日收盤位置%", "突破20日高點%", "上影線比例%", "動能進場條件", "動能風險控制", "強勢前兆進場條件", "強勢前兆風控", "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制", "盤前強勢前兆分", "前置保留類型", "前置保留原因", "前置軟篩選狀態", "前置軟篩選階段", "前置軟篩選原因", "前置軟篩選數", "AI發現母體版本",
         "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認", "成交額百萬", "20日均成交額百萬", "流動性參考成交額百萬", "流動性等級", "流動性資料狀態", "流動性資料來源",
         "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "停損參考", "第一壓力價",
         "建議倉位上限%", "正式推薦動作", "正式推薦排除原因", "失效條件", "開盤跳空處理",

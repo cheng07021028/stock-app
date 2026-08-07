@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Phase 107｜跨市場新強股召回與戰術風控決策核心。
+"""Phase 108｜V177 全市場 AI 發現、跨市場新強股召回與戰術風控決策核心。
 
 設計原則：
 1. 多路召回，不讓大型熱門股壟斷候選。
@@ -24,9 +24,9 @@ import re
 
 import pandas as pd
 
-LEARNING_SYSTEM_VERSION = "phase107_dynamic_leader_ai_v1_20260806"
-MODEL_VERSION = "champion_phase107_dynamic_leader_v1"
-CHALLENGER_VERSION = "challenger_phase107_cross_section_v1"
+LEARNING_SYSTEM_VERSION = "phase108_full_market_discovery_ai_v1_20260807"
+MODEL_VERSION = "champion_phase108_full_market_discovery_v1"
+CHALLENGER_VERSION = "challenger_phase108_novelty_diversity_v1"
 LEARNING_STATE_FILE = "godpick_learning_state.json"
 LEARNING_ROOT = "data/godpick_learning"
 DEFAULT_RECORD_FILE = "godpick_records.json"
@@ -40,6 +40,7 @@ LEARNING_COLUMNS = [
     "AI領漲延續狀態", "AI過熱型態", "AI風險口徑", "AI重複證據衰減分",
     "AI預測優勢", "AI推薦資格", "AI推薦理由", "AI反對理由", "AI取消條件",
     "AI學習樣本數", "AI模型版本", "AI Challenger分", "AI Champion勝出",
+    "AI發現母體", "AI舊規則軟篩選數", "AI舊規則救回旗標",
 ]
 
 _NUMERIC_COLUMNS = {
@@ -48,7 +49,7 @@ _NUMERIC_COLUMNS = {
     "AI綜合決策分", "AI排名加減分", "AI學習樣本數", "AI Challenger分",
     "AI跨市場新強股分", "AI新證據分", "AI召回來源數", "AI漏選風險分",
     "AI結構停損距離%", "AI戰術停損距離%", "AI戰術風報比", "AI趨勢延伸目標價",
-    "AI重複證據衰減分",
+    "AI重複證據衰減分", "AI舊規則軟篩選數",
 }
 
 
@@ -823,7 +824,16 @@ def apply_daily_learning_overlay(df: pd.DataFrame | None, profile: dict[str, Any
             scored[col] = 0.0 if col in _NUMERIC_COLUMNS else ""
     out = out.drop(columns=[c for c in LEARNING_COLUMNS if c in out.columns], errors="ignore")
     combined = pd.concat([out, scored[LEARNING_COLUMNS]], axis=1)
-    return _apply_cross_sectional_leader_overlay(combined)
+    combined = _apply_cross_sectional_leader_overlay(combined)
+    soft_count = pd.to_numeric(combined.get("前置軟篩選數", 0), errors="coerce")
+    if not isinstance(soft_count, pd.Series):
+        soft_count = pd.Series([float(soft_count or 0)] * len(combined), index=combined.index)
+    soft_count = soft_count.fillna(0).clip(lower=0)
+    combined["AI發現母體"] = "FULL-MARKET｜所有K線有效股票"
+    combined["AI舊規則軟篩選數"] = soft_count.astype(float)
+    retain = combined.get("AI召回保留旗標", pd.Series(["否"] * len(combined), index=combined.index)).astype(str).eq("是")
+    combined["AI舊規則救回旗標"] = ((soft_count > 0) & retain).map({True: "是｜舊規則原會淘汰", False: "否"})
+    return combined
 
 
 def _hard_block(row: pd.Series | dict[str, Any]) -> bool:
@@ -924,6 +934,8 @@ def build_learning_summary(df: pd.DataFrame | None, profile: dict[str, Any] | No
         "avg_decision": round(pd.to_numeric(out.get("AI綜合決策分", 0), errors="coerce").fillna(0).mean(), 2),
         "avg_data_confidence": round(pd.to_numeric(out.get("AI資料信心分", 0), errors="coerce").fillna(0).mean(), 2),
         "route_counts": route_counts,
+        "full_market_soft_gate_rows": int((pd.to_numeric(out.get("AI舊規則軟篩選數", 0), errors="coerce").fillna(0) > 0).sum()) if "AI舊規則軟篩選數" in out.columns else 0,
+        "legacy_gate_rescued_rows": int(out.get("AI舊規則救回旗標", pd.Series([""] * len(out), index=out.index)).astype(str).str.startswith("是").sum()) if len(out) else 0,
         "eligible_samples": int(profile.get("eligible_samples", 0)),
         "global_metrics": profile.get("global_metrics", {}),
         "error_taxonomy": profile.get("error_taxonomy", {}),
@@ -944,6 +956,7 @@ def _condensed_records(df: pd.DataFrame | None, limit: int | None = None) -> lis
         "AI召回來源數", "AI召回保留旗標", "AI漏選風險分", "AI結構停損距離%", "AI戰術停損距離%",
         "AI戰術風報比", "AI趨勢延伸目標價", "AI領漲延續狀態", "AI過熱型態", "AI風險口徑",
         "AI推薦資格", "AI推薦理由", "AI反對理由", "AI模型版本", "AI Challenger分", "AI Champion勝出",
+        "AI發現母體", "AI舊規則軟篩選數", "AI舊規則救回旗標", "前置軟篩選狀態", "前置軟篩選階段", "前置軟篩選原因",
     ]
     use = [c for c in cols if c in df.columns]
     work = df.copy()
