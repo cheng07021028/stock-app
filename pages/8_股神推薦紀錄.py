@@ -81,6 +81,7 @@ except Exception:
 
 from datetime import datetime, date, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 import json
 import base64
 import io
@@ -96,6 +97,14 @@ import pandas as pd
 import requests
 from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
 from godpick_history_sources import fetch_multi_source_history
+try:
+    from godpick_official_latest_price_service import (
+        SERVICE_VERSION as OFFICIAL_LATEST_PRICE_SERVICE_VERSION,
+        fetch_latest_official_market_snapshot,
+    )
+except Exception:
+    OFFICIAL_LATEST_PRICE_SERVICE_VERSION = "official_latest_snapshot_unavailable"
+    fetch_latest_official_market_snapshot = None
 try:
     from godpick_calibration_sample_service import sync_existing_calibration_samples
 except Exception:
@@ -179,9 +188,10 @@ BACKTEST_V12_VERSION = "record_v110_official_factor_sync_20260513"
 PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
 RECORD_SPEED_FIX_VERSION = "record_v175_reboot_remote_authority_restore_20260727"
-LATEST_PRICE_PNL_FIX_VERSION = "record_v176_verified_quote_pnl_v1_20260806"
+LATEST_PRICE_PNL_FIX_VERSION = "record_v179_official_market_snapshot_price_fix_v1_20260809"
+RECORD_INTEGRITY_FIX_VERSION = "record_v178_record_identity_perf_separation_v1_20260807"
 NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
-NORMALIZED_RECORD_CACHE_VERSION_V165 = "v165_20260726"
+NORMALIZED_RECORD_CACHE_VERSION_V165 = "v178_integrity_20260807"
 RECORD_FIX_VERSION = "record_prelaunch_grade_read_v2_verified_20260425"
 MARKET_TREND_V38_LINK_VERSION = "record_market_trend_v76_practical_entry_fields_20260430"
 
@@ -350,6 +360,19 @@ for _v176_col in V176_PRICE_AUDIT_COLUMNS:
         DEFAULT_STANDARD_COLS.append(_v176_col)
     if _v176_col not in DEFAULT_ADVANCED_COLS:
         DEFAULT_ADVANCED_COLS.append(_v176_col)
+V178_INTEGRITY_COLUMNS = [
+    "原始record_id", "record_id修復狀態", "業務事件重複狀態", "資料完整性狀態",
+    "系統追蹤每股損益", "系統追蹤報酬%", "實際未實現報酬%", "實際已實現報酬%",
+    "績效最新收盤價", "績效行情日期", "績效行情來源",
+]
+for _v178_col in V178_INTEGRITY_COLUMNS:
+    if _v178_col not in GODPICK_RECORD_COLUMNS:
+        GODPICK_RECORD_COLUMNS.append(_v178_col)
+    if _v178_col not in DEFAULT_ADVANCED_COLS:
+        DEFAULT_ADVANCED_COLS.append(_v178_col)
+for _v178_col in ["資料完整性狀態", "系統追蹤每股損益", "系統追蹤報酬%", "實際未實現報酬%", "實際已實現報酬%"]:
+    if _v178_col not in DEFAULT_STANDARD_COLS:
+        DEFAULT_STANDARD_COLS.append(_v178_col)
 UI_CONFIG_DEFAULT["profiles"]["標準"] = DEFAULT_STANDARD_COLS.copy()
 UI_CONFIG_DEFAULT["profiles"]["進階"] = DEFAULT_ADVANCED_COLS.copy()
 
@@ -422,16 +445,31 @@ def _normalize_category(v: Any) -> str:
     return _safe_str(v).replace("　", " ").strip()
 
 
+_TW_TZ = ZoneInfo("Asia/Taipei")
+
+
+def _tw_now() -> datetime:
+    return datetime.now(_TW_TZ)
+
+
+def _tw_today() -> date:
+    return _tw_now().date()
+
+
+def _tw_now_naive() -> datetime:
+    return _tw_now().replace(tzinfo=None)
+
+
 def _now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return _tw_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _now_date_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return _tw_now().strftime("%Y-%m-%d")
 
 
 def _now_time_text() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    return _tw_now().strftime("%H:%M:%S")
 
 
 def _create_record_id(code: str, rec_date: str, rec_time: str, mode: str) -> str:
@@ -812,7 +850,7 @@ def _v98_backfill_night_battle_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "隔日實戰排序分": ["隔日實戰排序分", "夜間股神總分", "股神決策分數", "推薦總分", "推薦分數"],
         "隔日進場分數": ["隔日進場分數", "進場時機分數", "實戰買點分數", "交易可行分數", "推薦總分"],
         "波段潛力分數": ["波段潛力分數", "推薦總分", "技術結構分數", "起漲前兆分數"],
-        "預估進場點": ["預估進場點", "推薦價格", "推薦日價格", "最新價", "建議價位"],
+        "預估進場點": ["預估進場點", "推薦價格", "推薦日價格", "建議價位"],
         "回測承接價": ["回測承接價", "近端支撐", "主要支撐", "推薦買點_拉回"],
         "突破確認價_隔日": ["突破確認價_隔日", "突破確認價", "推薦買點_突破", "近端壓力"],
         "停損價_隔日": ["停損價_隔日", "停損價", "停損參考"],
@@ -1703,8 +1741,110 @@ def _add_missing_columns_bulk_v156(df: pd.DataFrame, cols: list[str], default: A
     return pd.concat([df, fill], axis=1)
 
 
+def _record_identity_seed_v178(row: dict[str, Any], original_id: str = "") -> str:
+    fields = [
+        original_id,
+        _normalize_code(row.get("股票代號")),
+        _safe_str(row.get("推薦日期")),
+        _safe_str(row.get("推薦時間")),
+        _safe_str(row.get("推薦模式")),
+        _safe_str(row.get("建立時間")),
+        _safe_str(row.get("推薦價格") or row.get("推薦日價格")),
+        _safe_str(row.get("推薦理由摘要") or row.get("備註")),
+    ]
+    return "|".join(fields)
+
+
+def _repair_record_ids_v178(df: pd.DataFrame) -> pd.DataFrame:
+    """V178: deterministically repair missing/duplicate record_id without deleting records."""
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    x = df.copy()
+    for col, default in [("record_id", ""), ("原始record_id", ""), ("record_id修復狀態", ""), ("業務事件重複狀態", ""), ("資料完整性狀態", "")]:
+        if col not in x.columns:
+            x[col] = default
+    ids = x["record_id"].fillna("").astype(str).str.strip()
+    dup_mask = ids.ne("") & ids.duplicated(keep=False)
+    miss_mask = ids.eq("")
+    repair_indexes = list(x.index[dup_mask | miss_mask])
+    used = set(ids[~(dup_mask | miss_mask) & ids.ne("")].tolist())
+    for idx in repair_indexes:
+        row = dict(x.loc[idx])
+        old_id = _safe_str(row.get("record_id"))
+        seed = _record_identity_seed_v178(row, old_id)
+        base = hashlib.md5(seed.encode("utf-8")).hexdigest()
+        new_id = base
+        ordinal = 1
+        while new_id in used:
+            ordinal += 1
+            new_id = hashlib.md5(f"{seed}|{ordinal}".encode("utf-8")).hexdigest()
+        used.add(new_id)
+        if old_id:
+            x.at[idx, "原始record_id"] = _safe_str(x.at[idx, "原始record_id"]) or old_id
+            x.at[idx, "record_id修復狀態"] = "V178重建｜原ID重複"
+        else:
+            x.at[idx, "record_id修復狀態"] = "V178建立｜原ID缺失"
+        x.at[idx, "record_id"] = new_id
+    # 同股票＋推薦日＋推薦模式是目前權威 upsert 的業務事件鍵。舊資料若同鍵重複，
+    # 原始列保留供稽核，但統計分析只計一筆，避免勝率／樣本數被重複放大。
+    _biz_keys_v178 = []
+    for idx in x.index:
+        _code = _normalize_code(x.at[idx, "股票代號"] if "股票代號" in x.columns else "")
+        _date = _safe_str(x.at[idx, "推薦日期"] if "推薦日期" in x.columns else "")[:10]
+        _mode = _safe_str(x.at[idx, "推薦模式"] if "推薦模式" in x.columns else "")
+        _biz_keys_v178.append(f"{_code}|{_date}|{_mode}" if _code and _date else f"RID|{_safe_str(x.at[idx, 'record_id'])}")
+    _biz_series_v178 = pd.Series(_biz_keys_v178, index=x.index, dtype="object")
+    _biz_dup_mask_v178 = _biz_series_v178.duplicated(keep=False) & _biz_series_v178.str.contains(r"\|20\d{2}-", regex=True)
+    x["業務事件重複狀態"] = ""
+    x.loc[_biz_dup_mask_v178, "業務事件重複狀態"] = "歷史重複｜統計僅計一次"
+
+    # integrity flags are warnings, not destructive fixes.
+    for idx in x.index:
+        issues = []
+        if not _normalize_code(x.at[idx, "股票代號"] if "股票代號" in x.columns else ""):
+            issues.append("缺股票代號")
+        if not _safe_str(x.at[idx, "推薦日期"] if "推薦日期" in x.columns else ""):
+            issues.append("缺推薦日期")
+        if _safe_str(x.at[idx, "業務事件重複狀態"] if "業務事件重複狀態" in x.columns else ""):
+            issues.append("同日同模式重複事件")
+        if _safe_float(x.at[idx, "推薦價格"] if "推薦價格" in x.columns else None) in [None, 0] and _safe_float(x.at[idx, "推薦日價格"] if "推薦日價格" in x.columns else None) in [None, 0]:
+            issues.append("缺推薦基準價")
+        qd = _safe_str(x.at[idx, "最新價資料日期"] if "最新價資料日期" in x.columns else "")
+        if _safe_float(x.at[idx, "最新價"] if "最新價" in x.columns else None) not in [None, 0] and not qd:
+            issues.append("最新價日期未驗證")
+        x.at[idx, "資料完整性狀態"] = "正常" if not issues else "｜".join(issues)
+    return x
+
+
+def _record_integrity_summary_v178(df: pd.DataFrame) -> dict[str, Any]:
+    if df is None or df.empty:
+        return {"rows": 0, "duplicate_record_ids": 0, "missing_rec_date": 0, "unverified_latest_date": 0, "missing_basis": 0}
+    x = df.copy()
+    ids = x.get("record_id", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str.strip()
+    latest = pd.to_numeric(x.get("最新價", pd.Series([None] * len(x), index=x.index)), errors="coerce")
+    qd = x.get("最新價資料日期", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str.strip()
+    rp = pd.to_numeric(x.get("推薦價格", pd.Series([None] * len(x), index=x.index)), errors="coerce")
+    rdp = pd.to_numeric(x.get("推薦日價格", pd.Series([None] * len(x), index=x.index)), errors="coerce")
+    recd = x.get("推薦日期", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str.strip()
+    _codes_v178 = x.get("股票代號", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).map(_normalize_code)
+    _modes_v178 = x.get("推薦模式", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str.strip()
+    _biz_v178 = pd.Series([f"{c}|{d[:10]}|{m}" if c and d else f"RID|{rid}" for c,d,m,rid in zip(_codes_v178,recd,_modes_v178,ids)], index=x.index)
+    _biz_valid_v178 = _codes_v178.ne("") & recd.ne("")
+    _biz_counts_v178 = _biz_v178[_biz_valid_v178].value_counts()
+    return {
+        "rows": int(len(x)),
+        "duplicate_record_ids": int((ids.ne("") & ids.duplicated(keep=False)).sum()),
+        "duplicate_business_groups": int((_biz_counts_v178 > 1).sum()),
+        "duplicate_business_rows": int(_biz_counts_v178[_biz_counts_v178 > 1].sum()),
+        "missing_rec_date": int(recd.eq("").sum()),
+        "unverified_latest_date": int((latest.gt(0) & qd.eq("")).sum()),
+        "missing_basis": int((~rp.gt(0) & ~rdp.gt(0)).sum()),
+        "repaired_ids": int(x.get("record_id修復狀態", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str.len().gt(0).sum()),
+    }
+
+
 _NORMALIZED_RECORD_ATTR_V157 = "godpick_record_columns_normalized_version"
-_NORMALIZED_RECORD_VERSION_V157 = "v157_fast_state_normalize"
+_NORMALIZED_RECORD_VERSION_V157 = "v178_integrity_normalize"
 _NORMALIZED_RECORD_REQUIRED_V157 = ("record_id", "股票代號", "股票名稱", "推薦日期", "目前狀態")
 
 
@@ -1890,6 +2030,12 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
     # <<< PHASE61_RECORD_SYNC
+
+    # V178：任何缺失／重複 record_id 在進入編輯、刪除、Firestore 前先確定性修復；不刪資料。
+    try:
+        x = _repair_record_ids_v178(x)
+    except Exception:
+        pass
 
     # v73：GODPICK_RECORD_COLUMNS 內歷史整合後有重複欄名，回傳前統一去重，避免 data_editor / arrow 顯示異常。
     ordered_cols = _dedupe_keep_order_v73([c for c in (UNIFIED_RECOMMEND_DISPLAY_COLUMNS or GODPICK_RECORD_COLUMNS) if c in x.columns] + [c for c in GODPICK_RECORD_COLUMNS if c in x.columns])
@@ -2774,15 +2920,16 @@ def _get_latest_close(stock_no: str, stock_name: str, market_type: str) -> tuple
 
     for mk in tried:
         try:
-            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=str(int(datetime.now().timestamp() * 1000)))
-            price = _safe_float(info.get("price"))
+            info = get_realtime_stock_info(stock_no, stock_name, mk, refresh_token=str(int(_tw_now().timestamp() * 1000)))
+            # V178：即使是舊的輔助函式，也只能接受實際成交或有日期的日線收盤；
+            # 不得再讓 bid/ask/mid/pz/昨收繞過最新價品質規則。
+            price, used_market, src, _qdate, _qtime = _quote_price_from_info(info)
             if price is not None and price > 0:
-                src = _safe_str(info.get("price_source")) or "realtime"
-                return float(price), _safe_str(info.get("market") or mk), src
+                return float(price), used_market or mk, src or "verified_quote"
         except Exception:
             pass
 
-    today = date.today()
+    today = _tw_today()
     start_date = today - timedelta(days=60)
     for mk in tried + [""]:
         try:
@@ -3219,7 +3366,7 @@ def _fail_cache_is_blocked(cache: dict[str, Any], key: str) -> tuple[bool, str]:
     if pd.isna(ts):
         return False, ""
     try:
-        age_hr = (datetime.now() - ts.to_pydatetime()).total_seconds() / 3600
+        age_hr = (_tw_now_naive() - ts.to_pydatetime().replace(tzinfo=None)).total_seconds() / 3600
         if age_hr < PERF_FAIL_RETRY_HOURS:
             return True, _safe_str(info.get("reason") or "近期抓取失敗，暫停重試")
     except Exception:
@@ -3332,35 +3479,21 @@ def _get_perf_history_bundle_v71(
 
 
 def _calc_proxy_perf_metrics_v71(payload: dict[str, Any], reason: str = "") -> dict[str, Any]:
-    """v71：歷史K線抓取失敗時的低成本代理績效。
-    只用推薦價/推薦日價格與最新價估算「即時追蹤報酬%」，並保留資料型態標記。
-    為了讓短期權重校正可先觀察，若推薦已超過 1 天且推薦後1日% 尚無資料，會同步寫入推薦後1日% 但標記為代理。
-    """
+    """V178：歷史K線不可用時只提供「即時追蹤報酬」，禁止冒充推薦後1日績效。"""
     if not isinstance(payload, dict):
         return {}
     rec_px = _safe_float(payload.get("推薦價格")) or _safe_float(payload.get("推薦日價格")) or _safe_float(payload.get("建議價位"))
     latest = _safe_float(payload.get("最新價")) or _safe_float(payload.get("最新價格"))
     if rec_px in [None, 0] or latest in [None, 0]:
         return {}
-    rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
-    age_days = 0
-    if pd.notna(rec_date):
-        try:
-            age_days = max((date.today() - rec_date.date()).days, 0)
-        except Exception:
-            age_days = 0
     ret = round((latest - rec_px) / rec_px * 100, 2)
-    out = {
+    return {
         "即時追蹤報酬%": ret,
-        "績效資料型態": "即時代理",
-        "績效資料來源": "推薦價_vs_最新價",
-        "績效評語": f"歷史K線暫不可用，先以最新價代理追蹤報酬；原因：{_safe_str(reason)[:80]}",
+        "績效資料型態": "即時代理｜非N日回測",
+        "績效資料來源": "推薦價_vs_已保存最新價",
+        "績效評語": f"歷史K線暫不可用；僅顯示即時追蹤報酬，未寫入推薦後1/3/5/10/20日績效。原因：{_safe_str(reason)[:80]}",
         "追蹤更新時間": _now_text(),
     }
-    if age_days >= 1 and _safe_float(payload.get("推薦後1日%")) is None:
-        out["推薦後1日%"] = ret
-    # 只有代理，不補 3/5/10/20，避免把未成熟資料偽裝成完整回測。
-    return out
 
 
 
@@ -3727,6 +3860,7 @@ def _resolve_recommendation_basis_v176(src: dict[str, Any]) -> tuple[float | Non
 
 
 def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
+    """V178：分離「系統推薦追蹤」與「實際交易」損益，避免一欄混用兩種成本基準。"""
     src = dict(row)
     rec_price, rec_price_source = _resolve_recommendation_basis_v176(src)
     buy_price = _safe_float(src.get("實際買進價"))
@@ -3737,95 +3871,72 @@ def _recalc_row(row: pd.Series | dict[str, Any]) -> dict[str, Any]:
     target2 = _safe_float(src.get("賣出目標2"))
     status = _safe_str(src.get("目前狀態")) or "觀察"
 
-    # Safe one-way repair: 推薦日價格/其他 immutable recommendation field may
-    # restore 推薦價格, but 最新價 is explicitly forbidden as a source.
     if rec_price not in [None, 0]:
-        if _safe_float(src.get("推薦價格")) in [None, 0]:
-            src["推薦價格"] = rec_price
-        if _safe_float(src.get("推薦日價格")) in [None, 0]:
-            src["推薦日價格"] = rec_price
+        if _safe_float(src.get("推薦價格")) in [None, 0]: src["推薦價格"] = rec_price
+        if _safe_float(src.get("推薦日價格")) in [None, 0]: src["推薦日價格"] = rec_price
 
-    effective_cost = buy_price if buy_price not in [None, 0] else rec_price
-    cost_source = "實際買進價" if buy_price not in [None, 0] else (rec_price_source or "")
-    mark_price = sell_price if sell_price not in [None, 0] else latest_price
-    mark_source = "實際賣出價" if sell_price not in [None, 0] else "最新價"
+    system_amt = system_pct = None
+    if rec_price not in [None, 0] and latest_price not in [None, 0]:
+        system_amt = float(latest_price) - float(rec_price)
+        system_pct = system_amt / float(rec_price) * 100
 
-    pnl_amt = None
-    pnl_pct = None
-    if effective_cost not in [None, 0] and mark_price is not None:
-        pnl_amt = mark_price - effective_cost
-        pnl_pct = (pnl_amt / effective_cost) * 100
-
-    actual_ret = None
+    unrealized_pct = None
+    if buy_price not in [None, 0] and sell_price in [None, 0] and latest_price not in [None, 0]:
+        unrealized_pct = (float(latest_price) - float(buy_price)) / float(buy_price) * 100
+    realized_pct = None
     if buy_price not in [None, 0] and sell_price not in [None, 0]:
-        actual_ret = (sell_price - buy_price) / buy_price * 100
+        realized_pct = (float(sell_price) - float(buy_price)) / float(buy_price) * 100
 
-    buy_flag = src.get("是否已實際買進")
-    buy_flag = _normalize_bool(buy_flag) or buy_price not in [None, 0] or status in {"已買進", "持有"}
-
+    buy_flag = _normalize_bool(src.get("是否已實際買進")) or buy_price not in [None, 0] or status in {"已買進", "持有"}
     hit_stop = _normalize_bool(src.get("是否達停損"))
     hit_t1 = _normalize_bool(src.get("是否達目標1"))
     hit_t2 = _normalize_bool(src.get("是否達目標2"))
     if latest_price is not None:
-        if stop_price is not None and latest_price <= stop_price:
-            hit_stop = True
-        if target1 is not None and latest_price >= target1:
-            hit_t1 = True
-        if target2 is not None and latest_price >= target2:
-            hit_t2 = True
+        if stop_price is not None and latest_price <= stop_price: hit_stop = True
+        if target1 is not None and latest_price >= target1: hit_t1 = True
+        if target2 is not None and latest_price >= target2: hit_t2 = True
 
     rec_date = pd.to_datetime(_safe_str(src.get("推薦日期")), errors="coerce")
-    holding_days = _safe_float(src.get("持有天數"))
+    tracking_days = _safe_float(src.get("持有天數"))
     if pd.notna(rec_date):
-        holding_days = max((date.today() - rec_date.date()).days, 0)
+        # 沒有買賣日期欄位，這裡只能代表「推薦追蹤日數」，不能冒充實際持有日數。
+        if sell_price not in [None, 0] and tracking_days not in [None, 0]:
+            tracking_days = tracking_days
+        else:
+            tracking_days = max((_tw_today() - rec_date.date()).days, 0)
 
     perf_label = _safe_str(src.get("模式績效標籤"))
-    score_for_label = actual_ret if actual_ret is not None else pnl_pct
+    score_for_label = realized_pct if realized_pct is not None else system_pct
     if not perf_label and score_for_label is not None:
-        if score_for_label >= 12:
-            perf_label = "強"
-        elif score_for_label >= 3:
-            perf_label = "中"
-        elif score_for_label > -3:
-            perf_label = "觀察中"
-        else:
-            perf_label = "弱"
-
-    if status == "停損":
-        hit_stop = True
-    if status == "達標":
-        hit_t1 = True
+        perf_label = "強" if score_for_label >= 12 else "中" if score_for_label >= 3 else "觀察中" if score_for_label > -3 else "弱"
+    if status == "停損": hit_stop = True
+    if status == "達標": hit_t1 = True
 
     quote_status = _safe_str(src.get("最新價更新狀態"))
-    if effective_cost in [None, 0]:
-        calc_status = "缺少推薦價／實際買進價，未計算"
-    elif mark_price is None:
-        calc_status = "缺少最新價／實際賣出價，未計算"
-    elif sell_price not in [None, 0]:
-        calc_status = "已依實際買進價與實際賣出價計算"
-    elif quote_status.startswith("保留舊價") or quote_status.startswith("等待新交易日") or quote_status.startswith("行情失敗"):
-        calc_status = f"沿用舊價，損益未更新｜{quote_status}"
-    elif "日期未驗證" in quote_status:
-        calc_status = "已計算，但最新價日期未驗證"
-    elif pnl_amt == 0 and _safe_str(src.get("最新價資料日期")):
-        calc_status = "已驗證最新行情，價格與計算基準相同"
-    else:
-        calc_status = "已計算"
+    if rec_price in [None, 0]: calc_status = "缺少不可變推薦基準價，未計算系統追蹤損益"
+    elif latest_price in [None, 0]: calc_status = "缺少最新價，未計算系統追蹤損益"
+    elif quote_status.startswith(("保留舊價", "等待新交易日", "行情失敗", "舊資料未驗證")): calc_status = f"沿用已保存價格｜{quote_status}"
+    elif "日期未驗證" in quote_status: calc_status = "行情日期未驗證，不視為正式更新"
+    elif system_amt == 0 and _safe_str(src.get("最新價資料日期")): calc_status = "已驗證行情，價格恰與推薦基準相同"
+    else: calc_status = "系統追蹤損益已計算"
 
     src["是否已實際買進"] = buy_flag
     src["推薦基準價來源"] = rec_price_source or "缺少推薦基準價"
-    src["損益計算基準"] = f"{cost_source or '缺少成本'} → {mark_source}"
+    src["損益計算基準"] = f"{rec_price_source or '缺少推薦基準價'} → 最新價"
     src["損益計算狀態"] = calc_status
-    # Existing field name is retained for compatibility; its meaning is per-share price difference.
-    src["損益金額"] = pnl_amt
-    src["損益幅%"] = pnl_pct
-    # V115：損益% 與損益幅% 定義統一；若有完整實際買賣價，才用實際報酬%，否則用推薦/買進成本對最新價的追蹤報酬。
-    src["損益%"] = actual_ret if actual_ret is not None else pnl_pct
-    src["實際報酬%"] = actual_ret
+    src["系統追蹤每股損益"] = system_amt
+    src["系統追蹤報酬%"] = system_pct
+    # 舊欄位保留相容性，但固定代表推薦基準→最新價，不再被實際買賣價改變定義。
+    src["損益金額"] = system_amt
+    src["損益幅%"] = system_pct
+    src["損益%"] = system_pct
+    src["實際未實現報酬%"] = unrealized_pct
+    src["實際已實現報酬%"] = realized_pct
+    src["實際報酬%"] = realized_pct
     src["是否達停損"] = hit_stop
     src["是否達目標1"] = hit_t1
     src["是否達目標2"] = hit_t2
-    src["持有天數"] = holding_days
+    src["持有天數"] = tracking_days
     src["模式績效標籤"] = perf_label
     src.update(_god_mode_decision(src))
     src["更新時間"] = _now_text()
@@ -3843,7 +3954,7 @@ def _normalize_quote_date_v176(value: Any) -> str:
             if n > 10_000_000_000:
                 n /= 1000.0
             if n > 1_000_000_000:
-                return datetime.utcfromtimestamp(n).strftime("%Y-%m-%d")
+                return datetime.fromtimestamp(n, _TW_TZ).strftime("%Y-%m-%d")
         except Exception:
             pass
     text = _safe_str(value)
@@ -3877,37 +3988,32 @@ def _normalize_quote_time_v176(value: Any) -> str:
 
 
 def _quote_price_from_info(info: Any) -> tuple[float | None, str, str, str, str]:
-    """Parse quote and reject reference-only prices such as previous close.
-
-    ``prev_close`` is useful as a reference but is not a successful latest-price
-    update. Treating it as current quote caused previous-day recommendations to
-    show 0% after the user pressed update.
-    """
+    """V178：推薦紀錄只接受「實際成交」或有交易日的日線收盤；bid/ask/mid/match/昨收皆不可當最新價。"""
     if not isinstance(info, dict):
         return None, "", "NO_INFO", "", ""
     market = _safe_str(info.get("market") or info.get("市場別"))
     src = _safe_str(info.get("price_source") or info.get("來源") or info.get("message") or "realtime")
     raw = info.get("raw") if isinstance(info.get("raw"), dict) else {}
-    quote_date = _normalize_quote_date_v176(
-        info.get("quote_date") or info.get("date") or info.get("交易日期") or raw.get("d") or info.get("update_time")
-    )
+    quote_date = _normalize_quote_date_v176(info.get("quote_date") or info.get("date") or info.get("交易日期") or raw.get("d") or info.get("update_time"))
     quote_time = _normalize_quote_time_v176(info.get("quote_time") or raw.get("t") or info.get("update_time"))
     src_key = src.strip().lower().replace("-", "_").replace(" ", "_")
-    reference_only = {
-        "prev_close", "previous_close", "previousclose", "yesterday_close", "昨收", "昨收回退",
-    }
-    if src_key in reference_only or "prev_close" in src_key or "昨收" in src:
-        return None, market, f"REFERENCE_ONLY:{src or 'prev_close'}", quote_date, quote_time
-    price = _safe_float(
-        info.get("price")
-        or info.get("現價")
-        or info.get("最新價")
-        or info.get("close")
-        or info.get("收盤價")
-    )
-    if price is not None and price > 0:
-        return float(price), market, src or "realtime", quote_date, quote_time
-    return None, market, src or "NO_PRICE", quote_date, quote_time
+    unsafe = {"prev_close", "previous_close", "previousclose", "yesterday_close", "昨收", "昨收回退", "mid", "bid", "ask", "match", "pz"}
+    if src_key in unsafe or any(k in src_key for k in ["prev_close", "reference_only", "_mid", "_bid", "_ask", "_match"]):
+        return None, market, f"INDICATIVE_ONLY:{src or 'reference'}", quote_date, quote_time
+    price = _safe_float(info.get("price") or info.get("現價") or info.get("最新價") or info.get("close") or info.get("收盤價"))
+    if price is None or price <= 0:
+        return None, market, src or "NO_PRICE", quote_date, quote_time
+    # utils realtime source: only 'trade' is a final transaction price. Daily fallbacks must carry a date.
+    if src_key == "trade":
+        if not quote_date:
+            return None, market, "UNVERIFIED_TRADE_DATE", "", quote_time
+        return float(price), market, src, quote_date, quote_time
+    daily_markers = ("daily", "history", "close", "yahoo", "finmind", "stooq", "twse_openapi", "tpex_openapi")
+    if any(k in src_key for k in daily_markers):
+        if not quote_date:
+            return None, market, f"UNVERIFIED_DAILY_DATE:{src}", "", quote_time
+        return float(price), market, src, quote_date, quote_time
+    return None, market, f"UNVERIFIED_QUOTE_TYPE:{src}", quote_date, quote_time
 
 
 def _market_candidates(market_type: Any) -> list[str]:
@@ -3926,7 +4032,7 @@ def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tupl
     if not stock_no:
         return None, _safe_str(market_type), "NO_CODE", "", ""
 
-    token = f"record_latest_v176_{datetime.now():%Y%m%d%H%M%S}"
+    token = f"record_latest_v178_{_tw_now():%Y%m%d%H%M%S}"
     last_src = "ONLINE_FAIL"
     last_date = ""
     last_time = ""
@@ -3944,7 +4050,7 @@ def _fast_latest_quote(stock_no: str, stock_name: str, market_type: str) -> tupl
     if _rt_yahoo_fallback is not None:
         for mk in _market_candidates(market_type):
             try:
-                info = _rt_yahoo_fallback(stock_no, stock_name, mk, refresh_day=date.today().isoformat())
+                info = _rt_yahoo_fallback(stock_no, stock_name, mk, refresh_day=_tw_today().isoformat())
                 price, used_market, src, qdate, qtime = _quote_price_from_info(info)
                 last_src, last_date, last_time = src or last_src, qdate or last_date, qtime or last_time
                 if price is not None and price > 0:
@@ -3987,15 +4093,12 @@ def _quote_from_twse_mis(stock_no: str, market_type: str) -> tuple[float | None,
             row = arr[0] if isinstance(arr, list) and arr else {}
             last_date = _normalize_quote_date_v176(row.get("d"))
             last_time = _normalize_quote_time_v176(row.get("t"))
-            # z=成交價, pz=最近撮合；y=昨收 is reference only and must not be used.
+            # V178：z 才是已成交價；pz / bid / ask / 模擬撮合都只供參考，不寫入績效最新價。
             z_price = _safe_float(str(row.get("z") or "").replace(",", "").replace("-", "").strip())
-            pz_price = _safe_float(str(row.get("pz") or "").replace(",", "").replace("-", "").strip())
-            price = z_price if z_price not in [None, 0] else pz_price
-            if price is not None and price > 0:
+            if z_price is not None and z_price > 0 and last_date:
                 used_market = "上櫃" if pref == "otc" else "上市"
-                source_kind = "TRADE" if z_price not in [None, 0] else "MATCH"
-                return float(price), used_market, f"TWSE_MIS_{pref}_{source_kind}", last_date, last_time
-            last_src = f"TWSE_MIS_REFERENCE_ONLY:{pref}"
+                return float(z_price), used_market, f"TWSE_MIS_{pref}_TRADE", last_date, last_time
+            last_src = f"TWSE_MIS_NO_ACTUAL_TRADE:{pref}"
         except Exception as e:
             last_src = f"TWSE_MIS_EXCEPTION:{str(e)[:60]}"
             continue
@@ -4060,7 +4163,7 @@ def _quote_from_finmind_daily(stock_no: str, market_type: str) -> tuple[float | 
     if not code:
         return None, _safe_str(market_type), "FINMIND_NO_CODE", "", ""
     try:
-        start_date = (date.today() - timedelta(days=21)).isoformat()
+        start_date = (_tw_today() - timedelta(days=21)).isoformat()
         url = "https://api.finmindtrade.com/api/v4/data"
         data = _quote_request_json(url, {"dataset": "TaiwanStockPrice", "data_id": code, "start_date": start_date}, timeout=5.0)
         rows = data.get("data") if isinstance(data, dict) else None
@@ -4129,7 +4232,7 @@ def _quote_from_local_history(stock_no: str, stock_name: str, market_type: str) 
     if not code:
         return None, _safe_str(market_type), "LOCAL_HISTORY_NO_CODE", "", ""
     try:
-        end_dt = date.today()
+        end_dt = _tw_today()
         start_dt = end_dt - timedelta(days=21)
         hist = get_history_data(code, _safe_str(stock_name), _safe_str(market_type), start_dt, end_dt)
         if isinstance(hist, pd.DataFrame) and not hist.empty:
@@ -4167,10 +4270,31 @@ def _alternative_latest_quote(stock_no: str, stock_name: str, market_type: str) 
     return last
 
 
+@st.cache_data(ttl=90, show_spinner=False)
+def _official_latest_market_snapshot_v179(as_of_text: str) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """V179: one full-market TWSE/TPEx daily snapshot, cached briefly.
+
+    This is the key weekend/holiday fallback: MIS has no actual `z` trade when the
+    market is closed, so page 8 must use the latest completed official exchange
+    daily close rather than silently retaining recommendation-day prices.
+    """
+    if not callable(fetch_latest_official_market_snapshot):
+        return {}, {"version": OFFICIAL_LATEST_PRICE_SERVICE_VERSION, "error": "service unavailable"}
+    try:
+        rows, diag = fetch_latest_official_market_snapshot(as_of=as_of_text, lookback_days=10, timeout=6.0)
+        return rows if isinstance(rows, dict) else {}, diag if isinstance(diag, dict) else {}
+    except Exception as exc:
+        return {}, {
+            "version": OFFICIAL_LATEST_PRICE_SERVICE_VERSION,
+            "error": f"{type(exc).__name__}:{str(exc)[:160]}",
+            "as_of": as_of_text,
+        }
+
+
 def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tuple[float | None, str, str, str, str]]:
     """Batch latest quote with source/date audit metadata.
 
-    Actual trade/match/daily close is accepted; previous close alone is rejected
+    Only actual trade or dated daily close is accepted; indicative match/bid/ask/previous close are rejected
     so the alternative chain can obtain a real newer trading-day close.
     """
     result: dict[str, tuple[float | None, str, str, str, str]] = {}
@@ -4189,7 +4313,7 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
         }
 
     unresolved = set(code_meta.keys())
-    token = f"record_latest_v176_batch_{datetime.now():%Y%m%d%H%M%S}"
+    token = f"record_latest_v178_batch_{_tw_now():%Y%m%d%H%M%S}"
 
     def _run_batch(items: list[dict[str, str]], source_tag: str) -> None:
         nonlocal result, unresolved
@@ -4218,6 +4342,36 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
                 result[code] = (None, used_market or _safe_str(item.get("market")), src, qdate, qtime)
 
     _run_batch(list(code_meta.values()), "_origin")
+
+    # V179：市場休市／週末時 MIS 通常沒有實際成交 z。此時先用交易所「整個市場」
+    # 最新已完成交易日收盤快照補價，只需少數請求，不再讓每檔逐一依賴 Yahoo/FinMind。
+    official_diag: dict[str, Any] = {}
+    official_matched = 0
+    if unresolved:
+        _official_fn = globals().get("_official_latest_market_snapshot_v179")
+        if callable(_official_fn):
+            try:
+                official_map, official_diag = _official_fn(_tw_today().isoformat())
+                if isinstance(official_map, dict):
+                    for code in list(unresolved):
+                        q = official_map.get(code) or {}
+                        price = _safe_float(q.get("price")) if isinstance(q, dict) else None
+                        qdate = _normalize_quote_date_v176(q.get("date")) if isinstance(q, dict) else ""
+                        if price is None or price <= 0 or not qdate:
+                            continue
+                        qmarket = _safe_str(q.get("market")) or code_meta.get(code, {}).get("market", "上市")
+                        qsrc = _safe_str(q.get("source")) or "OFFICIAL_DAILY_CLOSE"
+                        qtime = _normalize_quote_time_v176(q.get("time"))
+                        result[code] = (float(price), qmarket, qsrc, qdate, qtime)
+                        unresolved.discard(code)
+                        official_matched += 1
+            except Exception as exc:
+                official_diag = {"error": f"{type(exc).__name__}:{str(exc)[:120]}"}
+    try:
+        st.session_state[_k("v179_official_snapshot_diag")] = {**(official_diag or {}), "matched_records": official_matched}
+    except Exception:
+        pass
+
     for market in ["上市", "上櫃", "興櫃"]:
         if not unresolved:
             break
@@ -4225,29 +4379,34 @@ def _batch_latest_quotes(target_payloads: list[dict[str, Any]]) -> dict[str, tup
         _run_batch(items, f"_{market}")
 
     allow_alt = bool(st.session_state.get(_k("enable_alt_price_sources"), True))
-    alt_limit = int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60)
+    alt_chunk_size = max(10, min(300, int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60)))
     alt_workers = max(1, min(10, int(st.session_state.get(_k("alt_price_workers"), 6) or 6)))
-    if allow_alt and unresolved and alt_limit > 0:
-        alt_codes = list(unresolved)[:max(0, alt_limit)]
-
+    if allow_alt and unresolved:
         def _alt_job(code: str):
             meta = code_meta.get(code, {})
             latest, used_market, src, qdate, qtime = _alternative_latest_quote(code, meta.get("name", ""), meta.get("market", "上市"))
             return code, latest, used_market, src, qdate, qtime
 
-        with ThreadPoolExecutor(max_workers=min(alt_workers, max(1, len(alt_codes)))) as executor:
-            futures = [executor.submit(_alt_job, code) for code in alt_codes]
-            for future in as_completed(futures):
-                try:
-                    code, latest, used_market, src, qdate, qtime = future.result(timeout=10)
-                except Exception:
-                    continue
-                meta = code_meta.get(code, {})
-                if latest is not None and latest > 0:
-                    result[code] = (latest, used_market or meta.get("market", "上市"), src or "alt_source", qdate, qtime)
-                    unresolved.discard(code)
-                else:
-                    result[code] = (None, meta.get("market", "上市"), src or "ALT_FAIL", qdate, qtime)
+        # V178：alt_chunk_size 只控制每批，不是總量上限；完整處理所有 unresolved。
+        pending = list(unresolved)
+        for pos in range(0, len(pending), alt_chunk_size):
+            alt_codes = [c for c in pending[pos:pos + alt_chunk_size] if c in unresolved]
+            if not alt_codes:
+                continue
+            with ThreadPoolExecutor(max_workers=min(alt_workers, max(1, len(alt_codes)))) as executor:
+                futures = [executor.submit(_alt_job, code) for code in alt_codes]
+                for future in as_completed(futures):
+                    try:
+                        code, latest, used_market, src, qdate, qtime = future.result(timeout=12)
+                    except Exception:
+                        continue
+                    meta = code_meta.get(code, {})
+                    if latest is not None and latest > 0 and qdate:
+                        # 市場別以既有主檔為優先，避免批次 API meta 對應錯誤把上櫃寫成上市。
+                        result[code] = (latest, used_market or meta.get("market", "上市"), src or "alt_source", qdate, qtime)
+                        unresolved.discard(code)
+                    else:
+                        result[code] = (None, meta.get("market", "上市"), src or "ALT_FAIL", qdate, qtime)
 
     allow_slow = bool(st.session_state.get(_k("enable_slow_price_fallback"), False))
     slow_limit = int(st.session_state.get(_k("slow_price_fallback_limit"), 20) or 20)
@@ -4324,7 +4483,11 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
     source_counts: dict[str, int] = {}
     batches = 0
     issue_samples: list[dict[str, str]] = []
-    today_text = date.today().isoformat()
+    today_text = _tw_today().isoformat()
+    try:
+        st.session_state[_k("v179_official_snapshot_diag")] = {}
+    except Exception:
+        pass
 
     for start_i in range(0, len(target_indexes), batch_size):
         batch_indexes = target_indexes[start_i:start_i + batch_size]
@@ -4346,8 +4509,11 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
             source_key = _safe_str(price_src) or "UNKNOWN"
             source_counts[source_key] = source_counts.get(source_key, 0) + 1
 
-            accept_quote = latest is not None and latest > 0
+            accept_quote = latest is not None and latest > 0 and bool(quote_date)
             status_text = ""
+            if latest is not None and latest > 0 and not quote_date:
+                unverified_date += 1
+                status_text = f"保留舊價｜行情日期未驗證：{source_key}"
             if accept_quote and quote_date and old_quote_date and quote_date < old_quote_date:
                 accept_quote = False
                 stale_quote += 1
@@ -4367,11 +4533,7 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
                 payload["最新價資料日期"] = quote_date
                 payload["最新價資料時間"] = quote_time
                 payload["最新價來源"] = source_key
-                if quote_date:
-                    status_text = "已更新｜行情日期已驗證"
-                else:
-                    unverified_date += 1
-                    status_text = "已更新｜行情日期未驗證"
+                status_text = "已更新｜行情日期已驗證"
                 payload["最新價更新狀態"] = status_text
                 payload["最新更新時間"] = _now_text()
                 payload["追蹤更新時間"] = _now_text()
@@ -4416,6 +4578,11 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
             rows[i] = _recalc_row(payload)
 
     out = _ensure_godpick_record_columns(pd.DataFrame(rows))
+    _official_diag_v179 = dict(st.session_state.get(_k("v179_official_snapshot_diag"), {}) or {})
+    _official_diag_v179["matched_records"] = int(sum(
+        count for src, count in source_counts.items()
+        if _safe_str(src).startswith("TWSE_OFFICIAL_DAILY_CLOSE") or _safe_str(src).startswith("TPEX_OFFICIAL_DAILY_CLOSE")
+    ))
     out.attrs["latest_refresh_summary"] = {
         "version": LATEST_PRICE_PNL_FIX_VERSION,
         "target": len(target_indexes),
@@ -4439,6 +4606,7 @@ def _refresh_latest_prices(df: pd.DataFrame, only_active: bool = False) -> pd.Da
         "alt_source_limit": int(st.session_state.get(_k("alt_price_source_limit"), 60) or 60),
         "alt_workers": int(st.session_state.get(_k("alt_price_workers"), 6) or 6),
         "slow_fallback_enabled": bool(st.session_state.get(_k("enable_slow_price_fallback"), False)),
+        "official_snapshot": _official_diag_v179,
     }
     return out
 
@@ -4453,7 +4621,7 @@ def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
     if pd.isna(rec_date):
         return False
     # 推薦日太近時，1/3/5/10/20 日資料本來就尚未完整，不重複卡住等待。
-    age_days = (date.today() - rec_date.date()).days
+    age_days = (_tw_today() - rec_date.date()).days
     if age_days < 1:
         return False
     # V115：舊版 V115 會把「盤中一度碰到目標價」直接列為達標。
@@ -4482,7 +4650,7 @@ def _row_needs_perf_update(payload: dict[str, Any]) -> bool:
     last = pd.to_datetime(_safe_str(payload.get("追蹤更新時間")), errors="coerce")
     if has_any and not pd.isna(last):
         try:
-            if (datetime.now() - last.to_pydatetime()).total_seconds() < 12 * 3600:
+            if (_tw_now_naive() - last.to_pydatetime().replace(tzinfo=None)).total_seconds() < 12 * 3600:
                 return False
         except Exception:
             pass
@@ -4525,7 +4693,7 @@ def _backfill_perf_columns(
         rec_date = pd.to_datetime(_safe_str(payload.get("推薦日期")), errors="coerce")
         if pd.isna(rec_date):
             continue
-        age_days = (date.today() - rec_date.date()).days
+        age_days = (_tw_today() - rec_date.date()).days
         if age_days < 1:
             # 太新的推薦先標記等待，不浪費線上抓取。
             payload["績效評語"] = "推薦日期太近，尚無足夠交易日，等待下一批更新。"
@@ -4594,7 +4762,7 @@ def _backfill_perf_columns(
             break
 
         start_date = info["min_date"] - timedelta(days=5)
-        max_end = min(date.today(), info["max_date"] + timedelta(days=95))
+        max_end = min(_tw_today(), info["max_date"] + timedelta(days=95))
         hist_df, used_market, hist_msg, source = _get_perf_history_bundle_v71(code, name, market, start_date, max_end)
         if source == "LOCAL_CACHE":
             cache_hit_count += 1
@@ -4766,7 +4934,7 @@ def _reconcile_latest_snapshot_into_authority_v174(authority_df: pd.DataFrame) -
     if not snapshot_date or not isinstance(rows, list) or snapshot_date <= authority_latest:
         return False, details
 
-    saved_time = saved_at[11:19] if len(saved_at) >= 19 else datetime.now().strftime("%H:%M:%S")
+    saved_time = saved_at[11:19] if len(saved_at) >= 19 else _tw_now().strftime("%H:%M:%S")
     actionable: list[dict[str, Any]] = []
     for raw in rows:
         if not isinstance(raw, dict):
@@ -5104,6 +5272,24 @@ def _build_filtered_view_df(
     return view_df.reset_index(drop=True)
 
 
+def _analysis_effective_records_v178(df: pd.DataFrame) -> pd.DataFrame:
+    """One statistical sample per authority business event; raw rows remain visible/auditable."""
+    x = _ensure_godpick_record_columns(df.copy())
+    if x.empty:
+        return x
+    codes = x.get("股票代號", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).map(_normalize_code)
+    dates = x.get("推薦日期", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str[:10]
+    modes = x.get("推薦模式", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str).str.strip()
+    rids = x.get("record_id", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str)
+    x["_v178_business_key"] = [f"{c}|{d}|{m}" if c and d else f"RID|{rid}" for c,d,m,rid in zip(codes,dates,modes,rids)]
+    # 最新一筆代表該日該模式的最終狀態；不修改原始紀錄，只在統計視圖去重。
+    rec_time = x.get("推薦時間", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str)
+    upd_time = x.get("更新時間", pd.Series([""] * len(x), index=x.index)).fillna("").astype(str)
+    x["_v178_sort"] = dates + " " + rec_time + "|" + upd_time
+    x = x.sort_values("_v178_sort", kind="stable").drop_duplicates("_v178_business_key", keep="last")
+    return x.drop(columns=["_v178_business_key", "_v178_sort"], errors="ignore").reset_index(drop=True)
+
+
 def _get_analysis_cache(df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], dict[str, Any], float | None, float | None]:
     sig = _df_signature(df)
     cache_key = _k("analysis_cache")
@@ -5112,10 +5298,11 @@ def _get_analysis_cache(df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], dict
     if cache.get("sig") == sig:
         return cache["ana_tables"], cache["summary"], cache["avg_20"], cache["avg_real"]
 
-    ana_tables = _build_analysis_tables(df)
-    summary = _build_summary(df)
-    avg_20 = pd.to_numeric(df.get("推薦後20日%", df.get("20日績效%")), errors="coerce").dropna().mean() if not df.empty else None
-    avg_real = pd.to_numeric(df.loc[df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if not df.empty else None
+    effective_df = _analysis_effective_records_v178(df)
+    ana_tables = _build_analysis_tables(effective_df)
+    summary = _build_summary(effective_df)
+    avg_20 = pd.to_numeric(effective_df.get("推薦後20日%", effective_df.get("20日績效%")), errors="coerce").dropna().mean() if not effective_df.empty else None
+    avg_real = pd.to_numeric(effective_df.loc[effective_df["是否已實際買進"] == True, "實際報酬%"], errors="coerce").dropna().mean() if not effective_df.empty else None
 
     st.session_state[cache_key] = {
         "sig": sig,
@@ -5351,7 +5538,7 @@ def _win_rate(series) -> float:
 
 
 def _build_analysis_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    local_df = _ensure_godpick_record_columns(df.copy())
+    local_df = _analysis_effective_records_v178(df.copy())
     if local_df.empty:
         return {
             "mode": pd.DataFrame(columns=["推薦模式", "筆數", "平均系統報酬", "系統勝率", "平均3日績效", "平均5日績效", "平均10日績效", "平均20日績效", "3日勝率", "5日勝率", "10日勝率", "20日勝率", "達目標1比率", "停損率", "平均推薦總分"]),
@@ -5475,13 +5662,15 @@ def _apply_mode_labels(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _v15_perf_series(df: pd.DataFrame) -> pd.Series:
-    """V15：依可用欄位自動選擇回測績效基準，不改原始資料。"""
-    for col in ["推薦後20日%", "20日績效%", "推薦後10日%", "10日績效%", "推薦後5日%", "5日績效%", "損益幅%"]:
-        if col in df.columns:
-            s = pd.to_numeric(df[col], errors="coerce")
-            if s.notna().sum() > 0:
-                return s
-    return pd.Series([float("nan")] * len(df), index=df.index, dtype="float64")
+    """V178：逐列選擇已成熟的最長可用績效，避免只因20日欄少量有值就丟掉其餘樣本。"""
+    out = pd.Series([float("nan")] * len(df), index=df.index, dtype="float64")
+    for col in ["推薦後20日%", "20日績效%", "推薦後10日%", "10日績效%", "推薦後5日%", "5日績效%", "推薦後3日%", "3日績效%", "推薦後1日%", "系統追蹤報酬%", "損益幅%"]:
+        if col not in df.columns:
+            continue
+        s2 = pd.to_numeric(df[col], errors="coerce")
+        fill_mask = out.isna() & s2.notna()
+        out.loc[fill_mask] = s2.loc[fill_mask]
+    return out
 
 
 def _build_v15_auto_tune_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
@@ -6004,7 +6193,7 @@ def _run_one_click_sync_05_09_10(records_df: pd.DataFrame, settings: dict[str, A
 
     export_required = bool(settings.get("auto_export_excel", True))
     if export_required and excel_bytes and callable(write_export_file):
-        filename = f"股神推薦紀錄_一鍵同步_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        filename = f"股神推薦紀錄_一鍵同步_{_tw_now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         ok, msg, path = write_export_file(_safe_str(settings.get("export_folder")), filename, excel_bytes)
         history_ok = True
         history_details = []
@@ -6072,7 +6261,7 @@ def main():
     st.caption(f"目前8頁修正版：{RECORD_FIX_VERSION}")
     st.caption(f"刪除修正版：{DELETE_FIX_VERSION}｜V162 表單批次送出＋本機先行刪除＋遠端不阻塞")
     st.caption(f"運算加速修正版：{RECORD_SPEED_FIX_VERSION}")
-    st.caption(f"最新價／損益修正版：{LATEST_PRICE_PNL_FIX_VERSION}｜拒絕昨收冒充最新價＋保存行情日期／來源／計算狀態")
+    st.caption(f"最新價／損益修正版：{LATEST_PRICE_PNL_FIX_VERSION}｜V179 交易所整體盤後快照＋實際成交雙軌｜保存行情日期／來源／計算狀態")
     st.caption(f"7/8/9 起漲欄位版：{PRELAUNCH_789_VERSION}")
     st.caption(f"股神決策V10進場決策版：{GOD_DECISION_V10_LINK_VERSION}")
     st.caption(f"推薦績效追蹤V12回測校正版：{BACKTEST_V12_VERSION} ｜ V149 單頁籤運算加速版 ｜ V157 狀態正規化快取")
@@ -6140,20 +6329,35 @@ def main():
             try:
                 df = _get_state_df()
                 before_sig = _df_signature(df)
-                with st.spinner("V176：驗證行情日期與來源、拒絕昨收冒充最新價，並立即重算損益..."):
+                with st.spinner("V178：驗證實際成交／正式日線日期，拒絕昨收、bid/ask、中間價與模擬撮合，並分離系統／實際損益..."):
                     df = _refresh_latest_prices(df, only_active=bool(st.session_state.get(_k("only_active_update"), True)))
                 after_sig = _df_signature(df)
                 if before_sig != after_sig:
                     df = _apply_mode_labels(df)
                 _save_state_df(df)
                 summary = df.attrs.get("latest_refresh_summary", {}) if hasattr(df, "attrs") else {}
+                # V179：更新最新價不再只停在 session_state。只要有成功行情，立即原子保存本機權威檔，
+                # 並沿用既有快速永久化服務排入 Firestore / GitHub，避免 rerun / reboot 又回到推薦日價格。
+                auto_save_ok = False
+                auto_save_note = "未自動保存（本次沒有成功新行情）"
+                if int(summary.get("success", 0) or 0) > 0:
+                    try:
+                        auto_save_ok = bool(_save_records_dual(df))
+                        auto_save_note = "已自動保存權威紀錄" if auto_save_ok else "自動保存未完成，畫面資料仍保留於本次 session"
+                    except Exception as _auto_save_exc:
+                        auto_save_note = f"自動保存失敗：{_auto_save_exc}"
+                official_diag = summary.get("official_snapshot", {}) if isinstance(summary.get("official_snapshot"), dict) else {}
+                official_note = (
+                    f"官方盤後快照 TWSE {official_diag.get('twse_date') or '未取得'} / "
+                    f"TPEx {official_diag.get('tpex_date') or '未取得'}，命中 {official_diag.get('matched_records', 0)} 筆。"
+                )
                 msg = (
-                    f"V176 最新價／損益更新完成：符合條件 {summary.get('target', 0)} 筆，"
+                    f"V179 最新價／損益更新完成：符合條件 {summary.get('target', 0)} 筆，"
                     f"分 {summary.get('batches', 0)} 批；行情成功 {summary.get('success', 0)} 筆，"
                     f"失敗或沒有新交易日 {summary.get('fail', 0)} 筆，保留舊價 {summary.get('preserved_old_price', 0)} 筆；"
                     f"等待新交易日 {summary.get('waiting_new_trade', 0)} 筆，日期未驗證 {summary.get('unverified_date', 0)} 筆；"
                     f"已算出損益 {summary.get('pnl_calculated', 0)} 筆，缺少推薦基準價 {summary.get('missing_basis', 0)} 筆。"
-                    "尚未同步，確認後請按『儲存同步』。"
+                    f"{official_note}{auto_save_note}。"
                 )
                 ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('target', 0) or 0) == 0
                 issue_lines = []
@@ -6162,6 +6366,8 @@ def main():
                         f"{item.get('股票代號', '')} {item.get('股票名稱', '')}｜{item.get('狀態', '')}｜來源 {item.get('來源', '')}"
                     )
                 detail = str(summary)
+                if official_diag.get("messages"):
+                    detail += "\n官方盤後快照：\n" + "\n".join(str(x) for x in official_diag.get("messages")[-8:])
                 if issue_lines:
                     detail += "\n問題樣本：\n" + "\n".join(issue_lines)
                 _set_status(msg, "success" if ok and int(summary.get('fail', 0) or 0) == 0 else "warning")
@@ -6257,12 +6463,25 @@ def main():
                         except Exception as _cal_sync_e:
                             calibration_sync_msg = f" 校正樣本遠端同步失敗：{_cal_sync_e}"
                     reload_msg = ""
+                    perf_persist_msg = ""
                     try:
                         refreshed = _load_records()
                         if refreshed is not None and not refreshed.empty:
                             refreshed = _apply_mode_labels(refreshed)
                             _save_state_df(refreshed)
                             reload_msg = f"重新載入 {len(refreshed)} 筆。"
+                            # V178：績效更新器會先原子回寫 JSON；此處立即補齊 authority state /
+                            # manifest / Firestore / GitHub 背景同步，避免重啟時被舊權威狀態覆蓋。
+                            if callable(save_records_sync_fast):
+                                try:
+                                    _perf_report = save_records_sync_fast(refreshed, reason="Page8 V178 performance update")
+                                    perf_persist_msg = (
+                                        f" 績效永久化：本機{'✓' if getattr(_perf_report, 'local_ok', False) else '✗'} / "
+                                        f"Firestore{'✓' if getattr(_perf_report, 'firestore_ok', False) else '✗'} / "
+                                        f"GitHub{'✓' if getattr(_perf_report, 'github_ok', False) else ('背景中' if getattr(_perf_report, 'github_pending', False) else '✗')}。"
+                                    )
+                                except Exception as _perf_persist_e:
+                                    perf_persist_msg = f" 績效永久化失敗：{_perf_persist_e}"
                     except Exception as _v77_reload_e:
                         reload_msg = f"已更新 JSON，但重新載入畫面資料失敗：{_v77_reload_e}"
                     learning_refresh_msg = ""
@@ -6276,7 +6495,7 @@ def main():
                 msg = (
                     f"V164 已完成{'完整' if bool(perf_force_full) else '增量'}績效更新：候選 {summary.get('candidates', 0)} 筆，"
                     f"成功 {summary.get('success', 0)} 筆，失敗 {summary.get('fail', 0)} 筆；"
-                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{calibration_sync_msg}{learning_refresh_msg}"
+                    f"更新檔案：{', '.join(summary.get('updated_files', [])) or '無'}。{reload_msg}{perf_persist_msg}{calibration_sync_msg}{learning_refresh_msg}"
                 )
                 detail = "；".join(summary.get("messages", [])) if summary.get("messages") else str(summary)
                 ok = int(summary.get('success', 0) or 0) > 0 or int(summary.get('fail', 0) or 0) == 0
@@ -6290,9 +6509,9 @@ def main():
     with top_cols[5]:
         st.toggle("只更新未出場", value=True, key=_k("only_active_update"))
         st.number_input("最新價每批筆數（會跑完整份）", min_value=20, max_value=500, value=120, step=10, key=_k("latest_price_batch_size"))
-        st.caption("V176：每批處理筆數不是總上限；昨收不再算更新成功，來源會依序走 TWSE MIS → Yahoo chart → FinMind → Stooq → 本地歷史，並保存行情日期。")
-        st.toggle("啟用替代來源補價（建議開啟）", value=True, key=_k("enable_alt_price_sources"), help="批次來源抓不到時，依序使用 TWSE MIS、Yahoo chart、FinMind、Stooq、本地歷史收盤價補缺口。")
-        st.number_input("替代來源最多補幾檔 / 每批", min_value=0, max_value=300, value=60, step=10, key=_k("alt_price_source_limit"))
+        st.caption("V179：交易中優先實際成交價；休市／週末優先抓 TWSE＋TPEx 最新已完成交易日『整體盤後收盤快照』。仍拒絕昨收、bid/ask、中間價與模擬撮合。所有缺口完整跑完，不設總量上限。")
+        st.toggle("啟用替代來源補價（建議開啟）", value=True, key=_k("enable_alt_price_sources"), help="批次來源抓不到時，先用 TWSE/TPEx 官方盤後整體快照，再依序使用 TWSE MIS、Yahoo chart、FinMind、Stooq、本地歷史收盤價補缺口。")
+        st.number_input("替代來源每批補價數（會跑完整缺口）", min_value=10, max_value=300, value=60, step=10, key=_k("alt_price_source_limit"))
         st.number_input("替代來源並行數", min_value=1, max_value=10, value=6, step=1, key=_k("alt_price_workers"))
         st.toggle("慢速備援補缺口（utils/Yahoo/歷史逐檔，較慢）", value=False, key=_k("enable_slow_price_fallback"), help="替代來源仍抓不到時才開。預設關閉，避免 Streamlit Cloud 卡很久。")
         st.number_input("慢速備援最多補幾檔 / 每批", min_value=0, max_value=100, value=20, step=5, key=_k("slow_price_fallback_limit"))
@@ -6319,6 +6538,50 @@ def main():
         df = _load_records(force_remote=False)
         _save_state_df(df)
         st.session_state[_k("records_source_sig")] = current_record_sig
+
+    try:
+        _integrity_v178 = _record_integrity_summary_v178(df)
+        if _integrity_v178.get("duplicate_record_ids", 0) or _integrity_v178.get("duplicate_business_groups", 0) or _integrity_v178.get("missing_rec_date", 0) or _integrity_v178.get("unverified_latest_date", 0) or _integrity_v178.get("missing_basis", 0):
+            st.warning(
+                "V178 資料完整性檢查："
+                f"共 {_integrity_v178.get('rows', 0)} 筆｜"
+                f"重複 record_id {_integrity_v178.get('duplicate_record_ids', 0)} 筆｜"
+                f"同日同模式重複群組 {_integrity_v178.get('duplicate_business_groups', 0)} 組（原始 {_integrity_v178.get('duplicate_business_rows', 0)} 筆，統計僅計一次）｜"
+                f"已自動重建 ID {_integrity_v178.get('repaired_ids', 0)} 筆｜"
+                f"缺推薦日期 {_integrity_v178.get('missing_rec_date', 0)} 筆｜"
+                f"最新價日期未驗證 {_integrity_v178.get('unverified_latest_date', 0)} 筆｜"
+                f"缺推薦基準價 {_integrity_v178.get('missing_basis', 0)} 筆。"
+                "舊價格日期未驗證者不視為本次更新成功；V179 成功更新後會自動保存權威紀錄，『儲存同步』仍保留供人工完整驗證。"
+            )
+        else:
+            st.caption(f"V178 資料完整性：{_integrity_v178.get('rows', 0)} 筆｜record_id 唯一｜推薦基準／最新價日期稽核正常")
+    except Exception:
+        pass
+
+    # V179：不依賴使用者自訂欄位設定，固定提供最近行情稽核表，讓「推薦價＝最新價」
+    # 到底是價格真的沒變、尚未取得新交易日，或更新失敗一眼可辨。
+    try:
+        _audit_cols_v179 = [
+            "推薦日期", "股票代號", "股票名稱", "市場別", "推薦價格", "最新價",
+            "最新價資料日期", "最新價來源", "最新價更新狀態",
+            "系統追蹤每股損益", "系統追蹤報酬%", "損益計算狀態",
+        ]
+        _audit_cols_v179 = [c for c in _audit_cols_v179 if c in df.columns]
+        if _audit_cols_v179:
+            with st.expander("V179｜最新價來源與損益稽核（建議更新後先看這裡）", expanded=False):
+                _audit_v179 = df[_audit_cols_v179].copy()
+                if "推薦日期" in _audit_v179.columns:
+                    _audit_v179["_sort_date"] = pd.to_datetime(_audit_v179["推薦日期"], errors="coerce")
+                    _audit_v179 = _audit_v179.sort_values("_sort_date", ascending=False, na_position="last").drop(columns=["_sort_date"])
+                st.dataframe(_safe_display_df(_audit_v179.head(300)), use_container_width=True, hide_index=True)
+                _od = dict(st.session_state.get(_k("v179_official_snapshot_diag"), {}) or {})
+                st.caption(
+                    f"官方盤後快照：TWSE {_od.get('twse_date') or '未取得'}（{_od.get('twse_count', 0)} 檔）｜"
+                    f"TPEx {_od.get('tpex_date') or '未取得'}（{_od.get('tpex_count', 0)} 檔）｜"
+                    f"本輪命中 {_od.get('matched_records', 0)} 筆。"
+                )
+    except Exception:
+        pass
 
     load_detail = st.session_state.get(_k("load_detail"), [])
     if load_detail:
@@ -7031,7 +7294,7 @@ def main():
         render_pro_section("Excel 匯出")
         ana_tables_v149 = _get_ana_tables_v149()
         excel_bytes = _build_export_bytes(live_df, ana_tables_v149)
-        _download_filename = f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        _download_filename = f"股神推薦紀錄_{_tw_now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         st.download_button(
             "📥 下載 Excel（下載時同步建立永久匯出紀錄）",
             data=excel_bytes,
@@ -7044,7 +7307,7 @@ def main():
         _export_settings = st.session_state.get(_k("export_sync_settings"), {})
         st.caption(f"永久匯出資料夾：{_safe_str(_export_settings.get('export_folder')) or 'exports/godpick'}")
         if st.button("💾 匯出到設定資料夾並永久記錄", use_container_width=True, key=_k("export_to_saved_folder")):
-            _fn = f"股神推薦紀錄_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            _fn = f"股神推薦紀錄_{_tw_now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             _result = _persist_export_action(excel_bytes, _fn, len(live_df), "08手動永久匯出")
             if _result.get("history_ok"):
                 _level = "success" if _result.get("file_ok") else "warning"
