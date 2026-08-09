@@ -16,6 +16,7 @@ eligible.  The history file is intentionally small and is not a replacement for
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -32,6 +33,7 @@ ROTATION_GUARD_VERSION = "phase108_rotation_event_memory_v1_20260807"
 ROTATION_HISTORY_FILE = "godpick_rotation_history.json"
 ROTATION_MAX_DATES = 30
 ROTATION_SNAPSHOT_TOP_N = 30
+_ROTATION_REMOTE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-rotation-remote")
 
 ROTATION_COLUMNS = [
     "今日訊號新鮮分",
@@ -671,6 +673,7 @@ def save_rotation_snapshot(
     *,
     top_n: int = ROTATION_SNAPSHOT_TOP_N,
     persist_remote: bool = True,
+    background_remote: bool = False,
 ) -> tuple[bool, str]:
     if df is None:
         return False, "沒有推薦資料，未建立輪動快照"
@@ -681,14 +684,29 @@ def save_rotation_snapshot(
     if not scan_date:
         return False, "無法取得K線交易日，未建立輪動快照"
 
-    rank = pd.to_numeric(work.get("股神推薦總排名", 0), errors="coerce").fillna(0)
-    score = pd.to_numeric(work.get("股神推薦優先分", 0), errors="coerce").fillna(0)
+    # V180：輪動快照不得因候選資料暫缺單一欄位而讓整個推薦流程例外。
+    rank = (
+        pd.to_numeric(work["股神推薦總排名"], errors="coerce").fillna(0)
+        if "股神推薦總排名" in work.columns
+        else pd.Series([0.0] * len(work), index=work.index)
+    )
+    score = (
+        pd.to_numeric(work["股神推薦優先分"], errors="coerce").fillna(0)
+        if "股神推薦優先分" in work.columns
+        else pd.Series([0.0] * len(work), index=work.index)
+    )
     selected = work.loc[(rank > 0) & (score >= 45)].copy()
     if selected.empty:
         selected = work.loc[score >= 45].copy()
     if selected.empty:
         return False, "沒有可保存的排名資料"
-    selected["_rank"] = pd.to_numeric(selected.get("股神推薦總排名", 9999), errors="coerce").fillna(9999)
+    selected["_rank"] = (
+        pd.to_numeric(selected["股神推薦總排名"], errors="coerce").fillna(9999)
+        if "股神推薦總排名" in selected.columns
+        else pd.Series([9999.0] * len(selected), index=selected.index)
+    )
+    if "股神推薦優先分" not in selected.columns:
+        selected["股神推薦優先分"] = 0.0
     selected = selected.sort_values(["_rank", "股神推薦優先分"], ascending=[True, False], kind="mergesort").head(max(1, int(top_n)))
 
     entries = []
@@ -736,7 +754,16 @@ def save_rotation_snapshot(
     _atomic_write_json(path, payload)
     _load_history_cached.cache_clear()
     msg = f"已更新推薦輪動快照：{scan_date}｜{len(entries)} 檔｜{path.name}"
-    if persist_remote:
+    if persist_remote and background_remote:
+        def _remote_job(snapshot_payload=payload):
+            try:
+                from godpick_persistence_service import save_named_json_permanent
+                save_named_json_permanent(ROTATION_HISTORY_FILE, snapshot_payload, firestore_doc="godpick_rotation_history")
+            except Exception:
+                pass
+        _ROTATION_REMOTE_EXECUTOR.submit(_remote_job)
+        msg += "｜V180遠端永久層背景同步中"
+    elif persist_remote:
         try:
             from godpick_persistence_service import save_named_json_permanent
             report = save_named_json_permanent(

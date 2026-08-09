@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 from typing import Any
 import base64
@@ -33,6 +35,8 @@ except Exception:  # pragma: no cover
 
 CALIBRATION_SAMPLE_VERSION = "godpick_calibration_samples_v1_20260715"
 DEFAULT_CALIBRATION_PATH = "godpick_calibration_samples.json"
+_CALIBRATION_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-calibration-remote")
+_CALIBRATION_SYNC_LOCK = threading.Lock()
 
 CALIBRATION_TRACE_COLUMNS = [
     "校正樣本鍵", "校正樣本類型", "校正樣本用途", "校正樣本權重",
@@ -517,23 +521,46 @@ def _merge_records(old: list[dict[str, Any]], new: list[dict[str, Any]]) -> list
     return sorted(merged.values(), key=lambda r: (_safe_str(r.get("推薦日期")), _safe_str(r.get("股票代號")), _safe_str(r.get("校正樣本類型"))))
 
 
-def save_calibration_samples(candidate_df: pd.DataFrame, *, max_near: int = 24, max_missed: int = 20) -> tuple[int, list[str], dict[str, int]]:
+def _background_calibration_sync() -> None:
+    try:
+        remote_records, _ = _read_github()
+        with _CALIBRATION_SYNC_LOCK:
+            latest_local = _read_local(DEFAULT_CALIBRATION_PATH)
+            merged = _merge_records(remote_records, latest_local)
+            _atomic_write_local(merged, DEFAULT_CALIBRATION_PATH)
+        _sync_github(merged)
+        _sync_firestore(merged)
+    except Exception:
+        pass
+
+
+def save_calibration_samples(
+    candidate_df: pd.DataFrame, *, max_near: int = 24, max_missed: int = 20,
+    background_remote: bool = False,
+) -> tuple[int, list[str], dict[str, int]]:
     samples = build_calibration_samples(candidate_df, max_near=max_near, max_missed=max_missed)
     if samples.empty:
         return 0, ["本輪沒有符合個股資料品質的近門檻或市場漏選強勢樣本。"], {"near": 0, "missed": 0}
     new_records = samples.to_dict(orient="records")
+
+    # V180：先以本機權威檔立即合併並原子保存，UI 不等待 GitHub/Firestore。
     local_records = _read_local(DEFAULT_CALIBRATION_PATH)
-    remote_records, remote_read_msg = _read_github()
-    old_records = _merge_records(local_records, remote_records)
-    before_keys = {_safe_str(r.get("校正樣本鍵")) for r in old_records}
-    merged = _merge_records(old_records, new_records)
+    before_keys = {_safe_str(r.get("校正樣本鍵")) for r in local_records}
+    merged_local = _merge_records(local_records, new_records)
     added = sum(1 for r in new_records if _safe_str(r.get("校正樣本鍵")) not in before_keys)
-    ok_local, msg_local = _atomic_write_local(merged, DEFAULT_CALIBRATION_PATH)
-    messages = [remote_read_msg, msg_local]
-    if ok_local:
+    ok_local, msg_local = _atomic_write_local(merged_local, DEFAULT_CALIBRATION_PATH)
+    messages = [msg_local]
+    if ok_local and background_remote:
+        _CALIBRATION_SYNC_EXECUTOR.submit(_background_calibration_sync)
+        messages.append("V180：校正樣本 GitHub/Firestore 合併同步已排入背景，不阻塞推薦完成。")
+    elif ok_local:
+        remote_records, remote_read_msg = _read_github()
+        merged = _merge_records(remote_records, merged_local)
+        _atomic_write_local(merged, DEFAULT_CALIBRATION_PATH)
         _, gh_msg = _sync_github(merged)
         _, fs_msg = _sync_firestore(merged)
-        messages.extend([gh_msg, fs_msg])
+        messages.extend([remote_read_msg, gh_msg, fs_msg])
+
     type_series = samples.get("校正樣本類型", pd.Series([], dtype="object")).astype(str)
     summary = {
         "near": int(type_series.str.startswith("C").sum()),

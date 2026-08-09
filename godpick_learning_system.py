@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,6 +31,8 @@ CHALLENGER_VERSION = "challenger_phase108_novelty_diversity_v1"
 LEARNING_STATE_FILE = "godpick_learning_state.json"
 LEARNING_ROOT = "data/godpick_learning"
 DEFAULT_RECORD_FILE = "godpick_records.json"
+LEARNING_REMOTE_SYNC_STATUS_FILE = "data/godpick_learning/remote_sync_status.json"
+_LEARNING_REMOTE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-learning-remote")
 
 LEARNING_COLUMNS = [
     "AI市場狀態", "AI召回路徑", "AI主要召回路徑", "AI召回分",
@@ -923,6 +926,20 @@ def build_learning_summary(df: pd.DataFrame | None, profile: dict[str, Any] | No
     q = out.get("AI推薦資格", pd.Series([""] * len(out), index=out.index)).astype(str)
     route = out.get("AI主要召回路徑", pd.Series([""] * len(out), index=out.index)).astype(str)
     route_counts = route.value_counts().head(8).to_dict()
+
+    # V180：摘要函式必須能處理部分欄位尚未生成的候選資料。
+    # DataFrame.get(..., 0) 在欄位不存在時會回傳 scalar，後續 .fillna() 會直接例外。
+    # 改成同 index 的 Series，避免學習快照因單一缺欄而阻塞整個推薦流程。
+    decision_series = (
+        pd.to_numeric(out["AI綜合決策分"], errors="coerce").fillna(0)
+        if "AI綜合決策分" in out.columns
+        else pd.Series([0.0] * len(out), index=out.index)
+    )
+    confidence_series = (
+        pd.to_numeric(out["AI資料信心分"], errors="coerce").fillna(0)
+        if "AI資料信心分" in out.columns
+        else pd.Series([0.0] * len(out), index=out.index)
+    )
     return _plain_json_value({
         "version": LEARNING_SYSTEM_VERSION,
         "model_version": MODEL_VERSION,
@@ -931,8 +948,8 @@ def build_learning_summary(df: pd.DataFrame | None, profile: dict[str, Any] | No
         "a_minus_ai": int(q.str.startswith("AI-A-｜").sum()),
         "quality_wait": int(q.str.startswith("AI-Q").sum()),
         "recall_radar": int(q.str.startswith("AI-R1").sum()),
-        "avg_decision": round(pd.to_numeric(out.get("AI綜合決策分", 0), errors="coerce").fillna(0).mean(), 2),
-        "avg_data_confidence": round(pd.to_numeric(out.get("AI資料信心分", 0), errors="coerce").fillna(0).mean(), 2),
+        "avg_decision": round(float(decision_series.mean()) if len(decision_series) else 0.0, 2),
+        "avg_data_confidence": round(float(confidence_series.mean()) if len(confidence_series) else 0.0, 2),
         "route_counts": route_counts,
         "full_market_soft_gate_rows": int((pd.to_numeric(out.get("AI舊規則軟篩選數", 0), errors="coerce").fillna(0) > 0).sum()) if "AI舊規則軟篩選數" in out.columns else 0,
         "legacy_gate_rescued_rows": int(out.get("AI舊規則救回旗標", pd.Series([""] * len(out), index=out.index)).astype(str).str.startswith("是").sum()) if len(out) else 0,
@@ -971,6 +988,44 @@ def _condensed_records(df: pd.DataFrame | None, limit: int | None = None) -> lis
     return records
 
 
+def _persist_learning_remote_bundle(root: Path, path_name: str, payload: dict[str, Any], run_id: str, state: dict[str, Any]) -> None:
+    status_path = root / LEARNING_REMOTE_SYNC_STATUS_FILE
+    status = {
+        "status": "running", "run_id": run_id, "path": path_name,
+        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        _atomic_write(status_path, status)
+    except Exception:
+        pass
+    messages: list[str] = []
+    ok_run = False
+    ok_state = False
+    try:
+        from godpick_persistence_service import save_named_json_permanent
+        report = save_named_json_permanent(path_name, payload, firestore_doc=f"godpick_learning_run_{run_id}")
+        ok_run = bool(getattr(report, "permanent_ok", False))
+        messages.extend([_safe_str(getattr(report, "firestore_message", "")), _safe_str(getattr(report, "github_message", ""))])
+        state_report = save_named_json_permanent(LEARNING_STATE_FILE, state, firestore_doc="godpick_learning_state")
+        ok_state = bool(getattr(state_report, "permanent_ok", False))
+        messages.extend([_safe_str(getattr(state_report, "firestore_message", "")), _safe_str(getattr(state_report, "github_message", ""))])
+        status.update({
+            "status": "success" if (ok_run and ok_state) else "partial",
+            "run_permanent_ok": ok_run, "state_permanent_ok": ok_state,
+            "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "messages": [m for m in messages if m][-8:],
+        })
+    except Exception as exc:
+        status.update({
+            "status": "failed", "error": str(exc),
+            "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    try:
+        _atomic_write(status_path, status)
+    except Exception:
+        pass
+
+
 def save_learning_run(
     candidates_df: pd.DataFrame | None,
     recommendations_df: pd.DataFrame | None,
@@ -979,14 +1034,24 @@ def save_learning_run(
     metadata: dict[str, Any] | None = None,
     base_dir: str | Path | None = None,
     persist_remote: bool = True,
+    background_remote: bool = False,
+    pre_scored: bool = False,
 ) -> tuple[bool, list[str], dict[str, Any]]:
     root = _root(base_dir)
     now = datetime.now()
     run_date = now.strftime("%Y-%m-%d")
     run_id = now.strftime("%Y%m%d_%H%M%S_%f")
     profile = build_experience_profile(base_dir=root)
-    candidates = apply_daily_learning_overlay(candidates_df, profile=profile, base_dir=root) if isinstance(candidates_df, pd.DataFrame) else pd.DataFrame()
-    recommendations = apply_daily_learning_overlay(recommendations_df, profile=profile, base_dir=root) if isinstance(recommendations_df, pd.DataFrame) else pd.DataFrame()
+
+    def _use_prescored(frame: pd.DataFrame | None) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame):
+            return pd.DataFrame()
+        if pre_scored and {"AI綜合決策分", "AI模型版本", "AI發現母體"}.issubset(frame.columns):
+            return frame.copy()
+        return apply_daily_learning_overlay(frame, profile=profile, base_dir=root)
+
+    candidates = _use_prescored(candidates_df)
+    recommendations = _use_prescored(recommendations_df)
     summary = build_learning_summary(candidates, profile)
     payload = {
         "schema_version": LEARNING_SYSTEM_VERSION,
@@ -1005,24 +1070,6 @@ def save_learning_run(
     path = root / path_name
     _atomic_write(path, payload)
     messages = [f"本機不可變決策快照：{path_name}", f"候選 {len(payload['candidates'])}｜作戰名單 {len(payload['recommendations'])}"]
-    permanent_ok = True
-    if persist_remote:
-        try:
-            from godpick_persistence_service import save_named_json_permanent
-            report = save_named_json_permanent(
-                path_name,
-                payload,
-                firestore_doc=f"godpick_learning_run_{run_id}",
-            )
-            permanent_ok = bool(getattr(report, "permanent_ok", False))
-            messages.extend([
-                f"永久保存：{'成功' if permanent_ok else '待確認'}",
-                _safe_str(getattr(report, "firestore_message", "")),
-                _safe_str(getattr(report, "github_message", "")),
-            ])
-        except Exception as exc:
-            permanent_ok = False
-            messages.append(f"遠端永久保存例外：{exc}")
 
     state = {
         "version": LEARNING_SYSTEM_VERSION,
@@ -1036,13 +1083,28 @@ def save_learning_run(
     }
     state = _plain_json_value(state)
     _atomic_write(root / LEARNING_STATE_FILE, state)
-    if persist_remote:
+
+    permanent_ok = True
+    if persist_remote and background_remote:
+        _LEARNING_REMOTE_EXECUTOR.submit(_persist_learning_remote_bundle, root, path_name, payload, run_id, state)
+        messages.append("V180：AI決策快照已本機原子保存；GitHub/Firestore 永久層改為背景同步，不阻塞推薦畫面。")
+        messages.append(f"背景同步狀態：{LEARNING_REMOTE_SYNC_STATUS_FILE}")
+    elif persist_remote:
         try:
             from godpick_persistence_service import save_named_json_permanent
+            report = save_named_json_permanent(path_name, payload, firestore_doc=f"godpick_learning_run_{run_id}")
+            permanent_ok = bool(getattr(report, "permanent_ok", False))
+            messages.extend([
+                f"永久保存：{'成功' if permanent_ok else '待確認'}",
+                _safe_str(getattr(report, "firestore_message", "")),
+                _safe_str(getattr(report, "github_message", "")),
+            ])
             state_report = save_named_json_permanent(LEARNING_STATE_FILE, state, firestore_doc="godpick_learning_state")
             messages.append(f"學習狀態永久保存：{'成功' if getattr(state_report, 'permanent_ok', False) else '待確認'}")
+            permanent_ok = bool(permanent_ok and getattr(state_report, 'permanent_ok', False))
         except Exception as exc:
-            messages.append(f"學習狀態遠端保存例外：{exc}")
+            permanent_ok = False
+            messages.append(f"遠端永久保存例外：{exc}")
     return bool(permanent_ok), [m for m in messages if m], state
 
 

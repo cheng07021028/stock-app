@@ -47,6 +47,7 @@ except Exception:
 # -*- coding: utf-8 -*-
 
 from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -244,7 +245,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_full_market_discovery_v177_20260807"
+PAGE07_SPEED_FIX_VERSION = "page07_v180_nonblocking_full_market_pipeline_20260809"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -263,6 +264,7 @@ _RETRYABLE_SCAN_STATUSES = {"no_history", "analysis_error", "future_exception"}
 V22_CHECKPOINT_EVERY = 500    # V35：降低寫入斷點頻率，避免 JSON I/O 拖慢掃描
 GODPICK_SCAN_CHECKPOINT_FILE = "godpick_scan_checkpoint.json"
 HISTORY_DEBUG_ON_FAIL = False  # V35：掃描中失敗股票不再即時跑慢速 debug，失敗原因彙總到除錯摘要
+V180_DISABLE_DUPLICATE_HISTORY_RETRY = True  # get_history_data 已含 HTTP retry + Yahoo/TWSE/TPEx fallback；外層不可再整套重跑
 
 
 # v26 欄位統一：讓 7_股神推薦匯出 / 匯入 8 / 匯入 10 使用共用欄位集合。
@@ -7421,47 +7423,45 @@ def _get_history_smart(stock_no: str, stock_name: str, market_type: str, start_d
         "error": "",
     })
 
-    # V48.1：第一次空資料通常是 Yahoo/官方瞬間限流，不應立刻永久判成 no_history。
-    # 僅對失敗股票做一次錯峰重試；成功就寫入既有 disk cache，後續掃描直接命中。
-    try:
-        delay_seed = sum(ord(ch) for ch in str(stock_no)) % 7
-        time.sleep(0.12 + delay_seed * 0.025)
-        retry_df = get_history_data(
-            stock_no=stock_no,
-            stock_name=stock_name,
-            market_type=primary,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        retry_prepared = _prepare_history_df(retry_df)
-        if not retry_prepared.empty:
+    # V180：禁止外層把完整歷史資料管線再跑一輪。
+    # get_history_data 本身已包含 HTTP Retry、Yahoo query1/query2、TWSE/TPEx 當月補尾與完整月份 fallback。
+    # 舊版在所有來源都失敗後又 sleep + 再呼叫 get_history_data，等於慢股/斷網時把最壞耗時放大近 2 倍。
+    # no_history 仍屬 retryable，使用者可按「接續上次掃描」只補失敗股，不會因加速而永久漏股。
+    if V180_DISABLE_DUPLICATE_HISTORY_RETRY:
+        attempt_summary.append({
+            "market_type": primary,
+            "rows": 0,
+            "source": "v180_no_duplicate_full_pipeline_retry",
+            "error": "完整資料源已跑過；留待斷點續掃補抓",
+        })
+    else:
+        try:
+            delay_seed = sum(ord(ch) for ch in str(stock_no)) % 7
+            time.sleep(0.12 + delay_seed * 0.025)
+            retry_df = get_history_data(
+                stock_no=stock_no,
+                stock_name=stock_name,
+                market_type=primary,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            retry_prepared = _prepare_history_df(retry_df)
+            if not retry_prepared.empty:
+                attempt_summary.append({
+                    "market_type": primary,
+                    "rows": int(len(retry_prepared)),
+                    "source": "history_fetch_ok_compat_retry",
+                    "error": "",
+                })
+                return retry_prepared, primary, {
+                    "ok": True, "stock_no": stock_no, "stock_name": stock_name,
+                    "used_market": primary, "attempts": attempt_summary, "rows": len(retry_prepared),
+                }
+        except Exception as retry_error:
             attempt_summary.append({
-                "market_type": primary,
-                "rows": int(len(retry_prepared)),
-                "source": "history_fetch_ok_v48_1_staggered_retry",
-                "error": "",
+                "market_type": primary, "rows": 0,
+                "source": "history_fetch_retry_exception_compat", "error": str(retry_error),
             })
-            return retry_prepared, primary, {
-                "ok": True,
-                "stock_no": stock_no,
-                "stock_name": stock_name,
-                "used_market": primary,
-                "attempts": attempt_summary,
-                "rows": len(retry_prepared),
-            }
-        attempt_summary.append({
-            "market_type": primary,
-            "rows": 0,
-            "source": "history_fetch_empty_v48_1_staggered_retry",
-            "error": "",
-        })
-    except Exception as retry_error:
-        attempt_summary.append({
-            "market_type": primary,
-            "rows": 0,
-            "source": "history_fetch_retry_exception_v48_1",
-            "error": str(retry_error),
-        })
 
     # V35：掃描時失敗股票不再立即跑慢速 debug。
     # 原本 no_history 會再跑 get_history_data_debug，等於失敗股票又多打一輪官方資料源，
@@ -9688,6 +9688,7 @@ def _build_recommend_df(
     min_prelaunch_score: float,
     min_trade_score: float,
     resume_scan: bool = False,
+    reuse_finished_checkpoint: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if not universe_items:
@@ -9738,6 +9739,9 @@ def _build_recommend_df(
         "slowest_stocks": [],
         "status_elapsed_summary": {},
         "data_source_diagnostics_available": False,
+        "v180_checkpoint_reused": False,
+        "v180_checkpoint_reused_count": 0,
+        "v180_postscan_nonblocking": True,
     }
 
     scan_signature = _v22_scan_signature(
@@ -9800,6 +9804,60 @@ def _build_recommend_df(
                 debug_summary["history_debug_samples"].append(f"{code}：{msg}｜" + " / ".join(attempt_lines))
             elif status == "analysis_error":
                 debug_summary["error_samples"].append(f"{code}：{msg}")
+
+    # V180：相同交易日 / 相同條件的「開始推薦」可直接重用已完成斷點，
+    # 避免使用者只是重按開始就重新下載 1000~2000 檔 K 線。
+    # 「重新推薦」不走此路徑，仍會強制抓新資料。盤中 TTL 僅 5 分鐘；收盤後/週末較長。
+    if reuse_finished_checkpoint and not resume_scan:
+        checkpoint_payload = _v22_load_checkpoint(scan_signature)
+        reusable = False
+        if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("finished"):
+            checkpoint_results = checkpoint_payload.get("processed_results", [])
+            try:
+                path = _v22_checkpoint_path()
+                age_sec = max(time.time() - path.stat().st_mtime, 0.0) if path.exists() else 10**9
+            except Exception:
+                age_sec = 10**9
+            try:
+                now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+                during_market = now_tw.weekday() < 5 and (9, 0) <= (now_tw.hour, now_tw.minute) <= (13, 40)
+                ttl_sec = 300 if during_market else (18 * 3600 if now_tw.weekday() < 5 else 36 * 3600)
+            except Exception:
+                ttl_sec = 300
+            reusable = bool(
+                isinstance(checkpoint_results, list)
+                and len(checkpoint_results) >= total_count
+                and age_sec <= ttl_sec
+            )
+            if reusable:
+                latest_by_code: dict[str, dict[str, Any]] = {}
+                for old_result in checkpoint_results:
+                    if not isinstance(old_result, dict):
+                        continue
+                    old_code = _normalize_code(old_result.get("code"))
+                    if not old_code and isinstance(old_result.get("row"), dict):
+                        old_code = _normalize_code(old_result.get("row", {}).get("股票代號"))
+                    if old_code:
+                        latest_by_code[old_code] = old_result
+                # 只重用確定性成功/排除結果；no_history / analysis_error / future_exception
+                # 仍要重新補抓，避免把舊失敗當成有效快取，也避免除錯統計重複計數。
+                reused_results: list[dict[str, Any]] = []
+                retryable_reuse_count = 0
+                for old_result in latest_by_code.values():
+                    old_status = _safe_str(old_result.get("status")) or "analysis_error"
+                    if old_status in _RETRYABLE_SCAN_STATUSES:
+                        retryable_reuse_count += 1
+                        continue
+                    reused_results.append(old_result)
+                    _consume_scan_result(old_result, from_checkpoint=True)
+                processed_results.extend(reused_results)
+                debug_summary["v180_checkpoint_reused"] = True
+                debug_summary["v180_checkpoint_reused_count"] = len(reused_results)
+                debug_summary["checkpoint_retryable_count"] = retryable_reuse_count
+                progress_text.caption(
+                    f"V180 快取命中：沿用同條件有效結果 {len(reused_results)}/{total_count} 檔；"
+                    f"舊失敗待補抓 {retryable_reuse_count} 檔。若要強制更新全部行情，請按『重新推薦』。"
+                )
 
     if resume_scan:
         checkpoint_payload = _v22_load_checkpoint(scan_signature)
@@ -13662,6 +13720,7 @@ def main():
             min_prelaunch_score=float(st.session_state.get(_k("min_prelaunch_score"), 45.0)),
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
             resume_scan=bool(resume_scan_btn),
+            reuse_finished_checkpoint=bool(submit_recommend and not submit_refresh and not resume_scan_btn),
         )
         rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(
             rec_df, hot_pick_df, macro_bridge, macro_bridge_enabled, force=True
@@ -13696,7 +13755,7 @@ def main():
                 if not isinstance(rotation_source, pd.DataFrame) or rotation_source.empty:
                     rotation_source = rec_df
                 rotation_source = _phase93_single_source_decision_frame(rec_df, rotation_source)
-                rotation_ok, rotation_msg = save_rotation_snapshot(rotation_source)
+                rotation_ok, rotation_msg = save_rotation_snapshot(rotation_source, background_remote=True)
                 st.session_state[_k("rotation_snapshot_message")] = rotation_msg
             except Exception as rotation_error:
                 st.session_state[_k("rotation_snapshot_message")] = f"推薦輪動快照未保存：{rotation_error}"
@@ -13717,6 +13776,8 @@ def main():
                         "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"))),
                     },
                     persist_remote=True,
+                    background_remote=True,
+                    pre_scored=True,
                 )
                 st.session_state[_k("learning_run_messages")] = learning_msgs
                 st.session_state[_k("learning_state")] = learning_state
@@ -13745,7 +13806,7 @@ def main():
             calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
             if callable(save_calibration_samples):
                 calibration_added, calibration_msgs, calibration_summary = save_calibration_samples(
-                    auto_source, max_near=24, max_missed=20
+                    auto_source, max_near=24, max_missed=20, background_remote=True
                 )
             else:
                 calibration_msgs = ["校正研究樣本服務未載入。"]
