@@ -17,7 +17,7 @@
   "max_requests": 48,
   "finmind_bulk_only": true,
   "finmind_max_stocks": 30,
-  "last_saved_at": "2026-08-06 10:23:29",
+  "last_saved_at": "2026-08-10 14:24:08",
   "note": "GitHub Actions workflow 使用 UTC 15:00，約等於台灣 23:00。",
-  "updated_at": "2026-08-06 10:23:29"
+  "updated_at": "2026-08-10 14:24:08"
 }
