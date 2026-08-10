@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 from typing import Any
+from functools import lru_cache
+from datetime import datetime
 import pandas as pd
 
 try:
@@ -600,26 +602,50 @@ def _data_pending_only(reasons: list[str]) -> bool:
     return all(any(key in reason for key in soft) for reason in reasons)
 
 
+@lru_cache(maxsize=4096)
+def _parse_date_text_cached(text: str) -> pd.Timestamp | None:
+    """Parse repeated market/factor dates once per distinct text value.
+
+    Formal scoring queries the same market date dozens of times per stock.
+    Caching this pure conversion removes thousands of identical ``pd.to_datetime``
+    calls without changing any date semantics.
+    """
+    try:
+        text = str(text or "").strip()
+        if not text:
+            return None
+        if text.endswith(".0") and text[:-2].isdigit():
+            text = text[:-2]
+        digits = "".join(ch for ch in text if ch.isdigit())
+        # Fast paths for the formats used by the stock app.
+        if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            try:
+                return pd.Timestamp(datetime.strptime(text[:10], "%Y-%m-%d")).normalize()
+            except Exception:
+                pass
+        if len(digits) >= 8 and digits[:4].startswith(("19", "20")):
+            try:
+                return pd.Timestamp(datetime.strptime(digits[:8], "%Y%m%d")).normalize()
+            except Exception:
+                pass
+        ts = pd.to_datetime(text, errors="coerce")
+        if pd.notna(ts):
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.tz_localize(None)
+            return pd.Timestamp(ts).normalize()
+    except Exception:
+        return None
+    return None
+
+
 def _date_value(row: pd.Series, names: list[str]) -> pd.Timestamp | None:
     for name in names:
         value = row.get(name)
         if _is_blank(value):
             continue
-        try:
-            text = str(value).strip()
-            if text.endswith(".0") and text[:-2].isdigit():
-                text = text[:-2]
-            digits = "".join(ch for ch in text if ch.isdigit())
-            if len(digits) == 8 and digits.startswith(("19", "20")):
-                ts = pd.to_datetime(digits, format="%Y%m%d", errors="coerce")
-            else:
-                ts = pd.to_datetime(text, errors="coerce")
-            if pd.notna(ts):
-                if getattr(ts, "tzinfo", None) is not None:
-                    ts = ts.tz_localize(None)
-                return pd.Timestamp(ts).normalize()
-        except Exception:
-            continue
+        parsed = _parse_date_text_cached(str(value).strip())
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -3278,11 +3304,30 @@ def _unified_recommendation_priority_score(row: pd.Series) -> tuple[float, str, 
     return score, grade, use_label, explain
 
 
+class _FastRowMapping(dict):
+    """Lightweight row mapping for hot-path scoring.
+
+    The legacy engines only require ``row.get(...)``, ``key in row.index`` and
+    mapping access.  Passing a pandas Series for every row makes those lookups
+    extremely expensive on a 1,500-2,000 stock universe.  This mapping preserves
+    the same interface used by the scoring helpers without changing any formula.
+    """
+    @property
+    def index(self):
+        return self.keys()
+
+
+def _fast_row_records(frame: pd.DataFrame) -> list[_FastRowMapping]:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return []
+    return [_FastRowMapping(row) for row in frame.to_dict(orient="records")]
+
+
 def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
     """Attach the single score/rank users should use as their first view."""
     if out is None or not isinstance(out, pd.DataFrame) or out.empty:
         return out
-    score_rows = out.apply(_unified_recommendation_priority_score, axis=1)
+    score_rows = [_unified_recommendation_priority_score(row) for row in _fast_row_records(out)]
     out["股神推薦優先分"] = [x[0] for x in score_rows]
     out["股神推薦等級"] = [x[1] for x in score_rows]
     out["股神推薦用途"] = [x[2] for x in score_rows]
@@ -3313,7 +3358,11 @@ def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
         out.loc[list(rank_map.keys()), "股神推薦總排名"] = [rank_map[idx] for idx in rank_map]
     out["股神推薦總排名"] = pd.to_numeric(out["股神推薦總排名"], errors="coerce").fillna(0).astype(int)
 
-    lockdown_mask = out.apply(lambda r: bool(_market_risk_info(r).get("lockdown")), axis=1)
+    lockdown_mask = pd.Series(
+        [bool(_market_risk_info(row).get("lockdown")) for row in _fast_row_records(out)],
+        index=out.index,
+        dtype=bool,
+    )
     out.loc[lockdown_mask, "極端市場LOCKDOWN"] = "是"
     out.loc[lockdown_mask, "排名用途"] = "LOCKDOWN診斷排名｜禁止新倉"
     permission = out.get("操作許可", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
@@ -3528,8 +3577,9 @@ def _apply_intraday_radar_tiers(out: pd.DataFrame) -> pd.DataFrame:
         if numeric_col not in tmp.columns:
             tmp[numeric_col] = 0.0
         tmp[numeric_col] = pd.to_numeric(tmp[numeric_col], errors="coerce").fillna(0.0)
-    tmp["__priority"] = tmp.apply(_intraday_priority_score, axis=1)
-    tmp["__sector"] = tmp.apply(_sector_key_for_row, axis=1)
+    _tmp_rows = _fast_row_records(tmp)
+    tmp["__priority"] = [_intraday_priority_score(row) for row in _tmp_rows]
+    tmp["__sector"] = [_sector_key_for_row(row) for row in _tmp_rows]
     tmp = tmp.sort_values(
         ["__priority", "可操作分", "爆發雷達分", "主流資金分", "成交額百萬"],
         ascending=[False] * 5,
@@ -3881,7 +3931,11 @@ def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:
             if c not in out.columns:
                 out[c] = pd.Series(dtype="float64" if c in NUMERIC_FORMAL_RECOMMENDATION_COLUMNS else "object")
         return out
-    rows = out.apply(_classify, axis=1, result_type="expand")
+    # V181：正式推薦分類是掃描後最重的 CPU 熱點。公式完全不變，只將
+    # pandas Series 逐格存取改成輕量 mapping，避免 1700 檔候選在最後結果
+    # 階段耗費數十秒。
+    classified_rows = [_classify(row) for row in _fast_row_records(out)]
+    rows = pd.DataFrame(classified_rows, index=out.index)
     # 一次性回寫正式推薦欄位，避免逐欄 insert 造成 DataFrame fragmentation 與推薦頁卡頓。
     classified = rows.reindex(columns=FORMAL_RECOMMENDATION_COLUMNS).copy()
     for col in FORMAL_RECOMMENDATION_COLUMNS:

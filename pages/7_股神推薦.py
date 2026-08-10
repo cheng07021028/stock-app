@@ -245,7 +245,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v180_nonblocking_full_market_pipeline_20260809"
+PAGE07_SPEED_FIX_VERSION = "page07_v181_single_pass_final_decision_20260809"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -1489,6 +1489,32 @@ def _write_json_to_github_path_sync(cfg: dict[str, str], payload) -> tuple[bool,
 @st.cache_resource(show_spinner=False)
 def _page07_github_write_executor():
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-page07-github")
+
+
+@st.cache_resource(show_spinner=False)
+def _page07_record_authority_executor_v181():
+    # 推薦紀錄權威恢復可能需讀 GitHub/Firestore 20MB 級資料；絕不能再卡住
+    # 「最後結果運算」與畫面呈現。單執行緒維持寫入順序，business key upsert 防重。
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-page07-records")
+
+
+def _v181_background_record_upsert(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        if not callable(upsert_records_authority_fast):
+            return {"ok": False, "message": "權威增量服務未載入", "count": 0}
+        report, stats = upsert_records_authority_fast(
+            copy.deepcopy(rows),
+            reason="07 V181 推薦完成背景權威紀錄",
+        )
+        return {
+            "ok": bool(getattr(report, "permanent_ok", False)),
+            "message": "；".join([str(x) for x in (report.messages() if hasattr(report, "messages") else [])][:6]),
+            "count": int(stats.get("changed", 0) or 0),
+            "added": int(stats.get("added", 0) or 0),
+            "updated": int(stats.get("updated", 0) or 0),
+        }
+    except Exception as exc:
+        return {"ok": False, "message": f"V181背景權威紀錄例外：{exc}", "count": 0}
 
 
 def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
@@ -4751,7 +4777,7 @@ def _apply_advanced_godpick_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -> tuple[float, str]:
+def _build_final_god_score_row(row: Any, mode: str, market_score: float, weights: dict[str, int] | None = None) -> tuple[float, str]:
     technical_score = _safe_float(row.get("技術結構分數"), 0) or 0
     prelaunch_score = _safe_float(row.get("起漲前兆分數"), 0) or 0
     category_heat_score = _safe_float(row.get("類股熱度分數"), 0) or 0
@@ -4767,7 +4793,7 @@ def _build_final_god_score_row(row: pd.Series, mode: str, market_score: float) -
     rebound_score = _safe_float(row.get("止跌轉強分數"), 0) or 0
     risk_score = _safe_float(row.get("風險分數"), 0) or 0
 
-    weights = _get_active_weight_map()
+    weights = weights or _get_active_weight_map()
     total = (
         market_score * weights["市場環境"] / 100
         + technical_score * weights["技術結構"] / 100
@@ -9756,6 +9782,7 @@ def _build_recommend_df(
         min_prelaunch_score,
         min_trade_score,
     )
+    st.session_state[_k("active_scan_signature_v181")] = scan_signature
     processed_results: list[dict[str, Any]] = []
     processed_codes: set[str] = set()
 
@@ -9988,7 +10015,7 @@ def _build_recommend_df(
                     eta_sec = avg_per_stock * remain_count
                     ratio = done_count / total_count if total_count > 0 else 0
 
-                    progress_bar.progress(min(max(ratio, 0.0), 1.0), text=f"推薦計算中... {done_count}/{total_count} ({ratio*100:.1f}%)")
+                    progress_bar.progress(min(max(ratio * 0.85, 0.0), 0.85), text=f"K線與特徵掃描中... {done_count}/{total_count} ({ratio*100:.1f}%)")
                     progress_text.caption(
                         f"已完成 {done_count}/{total_count}｜"
                         f"已花時間：{_fmt_seconds(elapsed)}｜"
@@ -10000,7 +10027,8 @@ def _build_recommend_df(
 
     _v22_save_checkpoint(scan_signature, processed_results, total_count, finished=True)
 
-    progress_bar.progress(1.0, text=f"推薦完成，共處理 {total_count} 檔")
+    progress_bar.progress(0.86, text=f"K線掃描完成 {total_count} 檔｜正在整理市場、類股與最終決策...")
+    postscan_start_ts = time.time()
     total_elapsed = time.time() - start_ts
 
     # V48：整理速度監控資訊。只做顯示與診斷，不影響推薦結果。
@@ -10040,7 +10068,7 @@ def _build_recommend_df(
         debug_summary["speed_monitor_error"] = str(speed_err)
 
     progress_text.caption(
-        f"推薦完成｜總耗時：{_fmt_seconds(total_elapsed)}｜"
+        f"K線掃描完成｜掃描耗時：{_fmt_seconds(total_elapsed)}｜"
         f"平均每檔：{_fmt_seconds(debug_summary.get('avg_sec_per_stock', 0))}｜"
         f"歷史資料成功率：{debug_summary.get('history_success_rate_pct', 0)}%"
     )
@@ -10103,14 +10131,17 @@ def _build_recommend_df(
     base_df["類股內排名"] = base_df.groupby("類別")["個股原始總分"].rank(method="dense", ascending=False).astype(int)
     base_df["類股前3強"] = base_df["類股內排名"].apply(lambda x: "是" if pd.notna(x) and int(x) <= 3 else "否")
 
-    mode_scores = base_df.apply(
-        lambda r: _build_final_god_score_row(
+    _v181_weight_map = _get_active_weight_map()
+    _v181_market_score = _safe_float(market_info.get("score"), 50) or 50
+    mode_scores = [
+        _build_final_god_score_row(
             row=r,
             mode=_safe_str(mode),
-            market_score=_safe_float(market_info.get("score"), 50) or 50,
-        ),
-        axis=1,
-    )
+            market_score=_v181_market_score,
+            weights=_v181_weight_map,
+        )
+        for r in base_df.to_dict(orient="records")
+    ]
     base_df["推薦總分"] = [x[0] for x in mode_scores]
     base_df["推薦標籤"] = [x[1] for x in mode_scores]
 
@@ -10138,7 +10169,7 @@ def _build_recommend_df(
 
     # V59：加入上漲機率估計。此為條件機率，不等於保證上漲。
     try:
-        upside_estimates = base_df.apply(_estimate_upside_probability_row, axis=1)
+        upside_estimates = [_estimate_upside_probability_row(r) for r in base_df.to_dict(orient="records")]
         base_df["上漲機率估計%"] = [x.get("上漲機率估計%") for x in upside_estimates]
         base_df["上漲機率等級"] = [x.get("上漲機率等級") for x in upside_estimates]
         base_df["上漲機率信心"] = [x.get("上漲機率信心") for x in upside_estimates]
@@ -10198,7 +10229,7 @@ def _build_recommend_df(
             reason_parts.append("結構偏多，列入觀察")
         return "、".join(reason_parts[:6])
 
-    base_df["推薦理由摘要"] = base_df.apply(_build_recommend_reason_v2, axis=1)
+    base_df["推薦理由摘要"] = [_build_recommend_reason_v2(r) for r in base_df.to_dict(orient="records")]
 
     for c in ["3日績效%", "5日績效%", "10日績效%", "20日績效%"]:
         if c not in base_df.columns:
@@ -10211,15 +10242,23 @@ def _build_recommend_df(
     except Exception as v139_err:
         base_df["股神實戰建議"] = f"動態資金流檢查失敗：{v139_err}"
 
-    # VNext：套用歷史績效回饋校正；保留原推薦總分，新增股神實戰總分與新買點分級。
+    # VNext：套用歷史績效回饋校正；其中決策引擎已包含正式推薦引擎與 Phase105/108 AI overlay。
+    progress_bar.progress(0.90, text="市場與類股整理完成｜正在執行最終股神決策引擎...")
+    _v181_decision_started = time.time()
     base_df = _apply_vnext_performance_feedback_columns(base_df)
+    debug_summary["v181_decision_engine_sec"] = round(time.time() - _v181_decision_started, 3)
 
-    # Phase105：在最終候選篩選之前執行多路召回與四引擎，解決好股票尚未進入作戰候選就被刪除。
-    if callable(apply_daily_learning_overlay):
+    # V181：決策引擎內部的正式推薦引擎已呼叫每日學習 overlay；舊版又在 Page7
+    # 立即重算一次 1700 檔，造成「掃描100%後卡很久」。只有 AI 欄位確實不存在時才 fallback。
+    _v181_ai_ready = {"AI綜合決策分", "AI模型版本", "AI發現母體"}.issubset(base_df.columns)
+    if callable(apply_daily_learning_overlay) and not _v181_ai_ready:
         try:
             base_df = apply_daily_learning_overlay(base_df)
+            debug_summary["v181_learning_overlay_fallback"] = True
         except Exception as learning_error:
             debug_summary["phase105_learning_error"] = str(learning_error)
+    else:
+        debug_summary["v181_learning_overlay_fallback"] = False
 
     base_score = pd.to_numeric(base_df.get("推薦總分", 0), errors="coerce").fillna(0)
     practical_score = pd.to_numeric(base_df.get("股神實戰總分", base_score), errors="coerce").fillna(base_score)
@@ -10346,6 +10385,15 @@ def _build_recommend_df(
         else:
             governed_candidate_df = base_df.copy()
             final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
+
+        # V181：保存本輪已完成正式決策的完整候選池。後續畫面、輪動快照、自動紀錄、
+        # Excel 共用此單一來源，禁止再次對 1000~2000 檔執行正式推薦引擎。
+        governed_candidate_df["V181最終決策已完成"] = "是"
+        governed_candidate_df["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
+        st.session_state[_k("decision_frame_store_v181")] = governed_candidate_df.copy()
+        st.session_state[_k("decision_frame_scan_signature_v181")] = scan_signature
+        debug_summary["v181_decision_cache_rows"] = int(len(governed_candidate_df))
+        progress_bar.progress(0.97, text="最終股神決策完成｜正在建立治理、診斷與作戰結果...")
         # Phase104：掃描品質必須在官方因子合併後計算。舊版先建立治理報告，
         # 後續才把 official_factors_cache 併入顯示名單，造成快取明明有 886 筆
         # 完整度>=60，掃描報告卻永遠看到預設 0。
@@ -10384,6 +10432,15 @@ def _build_recommend_df(
         debug_summary["execution_governance_error"] = str(governance_err)
         _save_debug_scan_summary(debug_summary)
 
+    _v181_postscan_sec = time.time() - postscan_start_ts
+    debug_summary["v181_postscan_final_pipeline_sec"] = round(_v181_postscan_sec, 3)
+    debug_summary["v181_total_with_final_sec"] = round(time.time() - start_ts, 3)
+    _save_debug_scan_summary(debug_summary)
+    progress_bar.progress(1.0, text=f"股神推薦完成｜{total_count} 檔掃描與最終決策均已完成")
+    progress_text.caption(
+        f"完成｜K線掃描 {_fmt_seconds(total_elapsed)}｜最終結果運算 {_fmt_seconds(_v181_postscan_sec)}｜"
+        f"總耗時 {_fmt_seconds(time.time() - start_ts)}｜V181 單次決策快取已建立"
+    )
     return final_df, category_strength_df, hot_pick_df
 
 
@@ -11598,7 +11655,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     return rows
 
 
-def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tuple[int, list[str]]:
+def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, background_write: bool = False) -> tuple[int, list[str]]:
     """保存正式/A-/R1/R1-M/R1-P；整體掃描不足時仍保留個股資料合格的雷達樣本。
 
     正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
@@ -11683,7 +11740,27 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame) -> tup
         action[col] = meta_df[col]
     codes = action["股票代號"].astype(str).map(_normalize_code).tolist()
     rows = _build_record_rows_from_rec_df(action, codes)
+    if background_write and rows and callable(upsert_records_authority_fast):
+        try:
+            _page07_record_authority_executor_v181().submit(_v181_background_record_upsert, copy.deepcopy(rows))
+            st.session_state[_k("v181_record_authority_scheduled_at")] = _now_text()
+            messages = [
+                f"V181：{len(rows)} 筆正式/A-/R1紀錄已排程背景權威寫入；畫面不再等待 GitHub/Firestore 權威恢復。",
+                "寫入仍使用 code＋推薦日期＋推薦模式 business key 防重；背景完成後第8頁會自動讀取最新 authority。",
+            ]
+            if not formal_scan_ok:
+                messages.insert(0, "整體掃描未達正式可用：本輪僅保存個股資料合格的R1/R1-M研究雷達，不宣稱正式推薦。")
+            return len(rows), messages
+        except Exception as exc:
+            # 排程失敗才退回同步，不能因此遺失正式推薦紀錄。
+            fallback_note = f"V181背景排程失敗，改同步權威寫入：{exc}"
+        else:
+            fallback_note = ""
+    else:
+        fallback_note = ""
     added, messages = _append_godpick_records(rows, force_duplicate=False)
+    if fallback_note:
+        messages = [fallback_note, *messages]
     if not formal_scan_ok:
         messages = ["整體掃描未達正式可用：本輪僅保存個股資料合格的R1/R1-M研究雷達，不宣稱正式推薦。", *messages]
     return added, messages
@@ -11873,12 +11950,29 @@ def _phase93_single_source_decision_frame(
 ) -> pd.DataFrame:
     """以同一份完整候選池重建最終分區，供畫面、排名、摘要與 Excel 共用。
 
+    V181：完整掃描已在 _build_recommend_df 內完成一次正式決策。若本輪快取存在且
+    scan signature 一致，直接重用完整 decision frame；禁止畫面/快照/自動紀錄再次
+    對 1000~2000 檔執行 apply_formal_recommendation_engine。
+
     舊版主排名使用 candidate_diagnosis_store，但該診斷表已裁掉大盤欄位；
     排名函式再次套用正式推薦引擎時，便把紅燈市場誤當成中性，產生 A-；
     摘要與作戰表卻使用保留大盤欄位的 rec_df，因此統計仍為 0。
     Phase 9.3 先把目前大盤情境補回完整候選池，再只執行一次最終引擎，
     之後所有 UI/Excel 分頁一律從同一份 decision frame 分流。
     """
+    _cached_decision = st.session_state.get(_k("decision_frame_store_v181"))
+    _cached_sig = _safe_str(st.session_state.get(_k("decision_frame_scan_signature_v181")))
+    _active_sig = _safe_str(st.session_state.get(_k("active_scan_signature_v181")))
+    if (
+        isinstance(_cached_decision, pd.DataFrame)
+        and not _cached_decision.empty
+        and _cached_sig
+        and _cached_sig == _active_sig
+        and "正式推薦分區" in _cached_decision.columns
+    ):
+        st.session_state[_k("v181_decision_cache_hits")] = int(st.session_state.get(_k("v181_decision_cache_hits"), 0) or 0) + 1
+        return _cached_decision.copy().reset_index(drop=True)
+
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
         source = candidate_df.copy()
     elif isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
@@ -11921,6 +12015,7 @@ def _phase93_single_source_decision_frame(
 
     try:
         from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+        st.session_state[_k("v181_decision_cache_misses")] = int(st.session_state.get(_k("v181_decision_cache_misses"), 0) or 0) + 1
         source = apply_formal_recommendation_engine(source)
     except Exception:
         # 若正式引擎暫時載入失敗，仍使用既有欄位，不讓整頁崩潰。
@@ -13800,7 +13895,7 @@ def main():
             auto_source = st.session_state.get(_k("candidate_diagnosis_store"))
             if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
                 auto_source = rec_df
-            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source)
+            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source, background_write=True)
             calibration_added = 0
             calibration_msgs: list[str] = []
             calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
@@ -13811,7 +13906,7 @@ def main():
             else:
                 calibration_msgs = ["校正研究樣本服務未載入。"]
             st.session_state[_k("auto_record_detail")] = [
-                f"正式/A-/雷達紀錄新增或更新：{auto_added} 筆",
+                f"正式/A-/雷達紀錄已處理/排程：{auto_added} 筆",
                 *[str(x) for x in (auto_msgs or [])],
                 f"校正研究樣本新增：{calibration_added} 筆｜近門檻 {calibration_summary.get('near', 0)}｜市場漏選強勢 {calibration_summary.get('missed', 0)}",
                 *[str(x) for x in (calibration_msgs or [])],

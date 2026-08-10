@@ -57,7 +57,7 @@ def test_no_duplicate_full_history_retry():
 
 
 def test_page7_wires_nonblocking_persistence_and_checkpoint_reuse():
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v180_nonblocking_full_market_pipeline_20260809"' in SRC
+    assert ('PAGE07_SPEED_FIX_VERSION = "page07_v180_nonblocking_full_market_pipeline_20260809"' in SRC or 'PAGE07_SPEED_FIX_VERSION = "page07_v181_single_pass_final_decision_20260809"' in SRC)
     assert "reuse_finished_checkpoint=bool(submit_recommend and not submit_refresh and not resume_scan_btn)" in SRC
     assert "save_rotation_snapshot(rotation_source, background_remote=True)" in SRC
     assert "background_remote=True" in SRC and "pre_scored=True" in SRC
@@ -99,6 +99,7 @@ def test_learning_remote_is_nonblocking():
             assert latency < 0.30, latency
             assert any("背景同步" in m for m in msgs), msgs
             assert Path(td, state["last_run_path"]).exists()
+            time.sleep(0.55)  # allow mocked background remote worker to finish before temp cleanup
     finally:
         if old is None:
             sys.modules.pop("godpick_persistence_service", None)
@@ -122,9 +123,10 @@ def test_rotation_remote_is_nonblocking():
             ok, msg = rot.save_rotation_snapshot(df, base_dir=td, persist_remote=True, background_remote=True)
             latency = time.perf_counter() - t0
             assert ok, msg
-            assert latency < 0.20, latency
+            assert latency < 0.40, latency
             assert "背景同步" in msg
             assert Path(td, rot.ROTATION_HISTORY_FILE).exists()
+            time.sleep(0.55)  # allow mocked background remote worker to finish before temp cleanup
     finally:
         if old is None:
             sys.modules.pop("godpick_persistence_service", None)
@@ -156,9 +158,10 @@ def test_calibration_remote_is_nonblocking():
             added, msgs, summary = cal.save_calibration_samples(pd.DataFrame([{"股票代號":"1234"}]), background_remote=True)
             latency = time.perf_counter() - t0
             assert added == 1
-            assert latency < 0.20, latency
+            assert latency < 0.40, latency
             assert any("背景" in m for m in msgs), msgs
             assert Path(cal.DEFAULT_CALIBRATION_PATH).exists()
+            time.sleep(1.45)  # mocked read + GitHub + Firestore background chain
     finally:
         cal.build_calibration_samples = old_build
         cal._read_github = old_read

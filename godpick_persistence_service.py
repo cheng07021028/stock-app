@@ -21,6 +21,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -117,8 +118,11 @@ def _json_safe_value(value: Any) -> Any:
     return str(value)
 
 
+_TW_TZ = ZoneInfo("Asia/Taipei")
+
+
 def _now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(_TW_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _parse_time(value: Any) -> datetime:
@@ -1126,6 +1130,51 @@ def _record_id(row: dict[str, Any]) -> str:
     )
 
 
+def _repair_record_ids_rows_v178(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve every record while repairing legacy duplicate/missing record IDs.
+
+    Older files reused one record_id across multiple recommendation dates. A dict
+    keyed by record_id silently merged those rows and Firestore document IDs also
+    collided. V178 creates deterministic per-event IDs and keeps the legacy ID for
+    audit/migration.
+    """
+    clean = [dict(r) for r in rows if isinstance(r, dict)]
+    counts: dict[str, int] = {}
+    for row in clean:
+        rid = _safe_str(row.get("record_id"))
+        if rid:
+            counts[rid] = counts.get(rid, 0) + 1
+    used = {rid for rid, n in counts.items() if n == 1}
+    for row in clean:
+        old_id = _safe_str(row.get("record_id"))
+        if old_id and counts.get(old_id, 0) == 1:
+            continue
+        fields = [
+            old_id,
+            _safe_str(row.get("股票代號") or row.get("code")),
+            _safe_str(row.get("推薦日期") or row.get("date")),
+            _safe_str(row.get("推薦時間") or row.get("time")),
+            _safe_str(row.get("推薦模式") or row.get("mode")),
+            _safe_str(row.get("建立時間") or row.get("created_at")),
+            _safe_str(row.get("推薦價格") or row.get("推薦日價格")),
+            _safe_str(row.get("推薦理由摘要") or row.get("備註")),
+        ]
+        seed = "|".join(fields)
+        new_id = hashlib.md5(seed.encode("utf-8")).hexdigest()
+        ordinal = 1
+        while new_id in used:
+            ordinal += 1
+            new_id = hashlib.md5(f"{seed}|{ordinal}".encode("utf-8")).hexdigest()
+        used.add(new_id)
+        if old_id:
+            row["原始record_id"] = _safe_str(row.get("原始record_id")) or old_id
+            row["record_id修復狀態"] = _safe_str(row.get("record_id修復狀態")) or "V178重建｜原ID重複"
+        else:
+            row["record_id修復狀態"] = _safe_str(row.get("record_id修復狀態")) or "V178建立｜原ID缺失"
+        row["record_id"] = new_id
+    return clean
+
+
 
 def records_as_rows_exact(payload: Any) -> list[dict[str, Any]]:
     """Convert records to JSON-safe rows without business-key de-duplication.
@@ -1157,41 +1206,31 @@ def records_as_rows_exact(payload: Any) -> list[dict[str, Any]]:
         if not _safe_str(row.get("record_id")):
             row["record_id"] = rid
         out.append(row)
-    return out
+    return _repair_record_ids_rows_v178(out)
 
 
 def normalize_records(payload: Any) -> list[dict[str, Any]]:
+    """JSON-safe normalization that never drops rows because record_id collides."""
     if isinstance(payload, pd.DataFrame):
         rows = payload.loc[:, ~payload.columns.duplicated()].to_dict(orient="records")
     elif isinstance(payload, list):
         rows = payload
     elif isinstance(payload, dict):
-        rows = next(
-            (payload.get(k) for k in ["records", "data", "items", "recommendations", "rows"] if isinstance(payload.get(k), list)),
-            [],
-        )
+        rows = next((payload.get(k) for k in ["records", "data", "items", "recommendations", "rows"] if isinstance(payload.get(k), list)), [])
     else:
         rows = []
-    out: dict[str, dict[str, Any]] = {}
+    clean: list[dict[str, Any]] = []
     for raw in rows:
         if not isinstance(raw, dict):
             continue
-        # Sanitize before Firestore/GitHub persistence.  NaN, pd.NA and numpy
-        # scalars were the main reason a large record batch failed remotely.
         row = {str(k): _json_safe_value(v) for k, v in raw.items()}
-        key = _record_id(row)
-        if not key.strip("|"):
+        # Keep business events exact. Missing/duplicate record IDs are repaired below.
+        if not _record_id(row).strip("|"):
             continue
-        old = out.get(key, {})
-        merged = dict(old)
-        for k, v in row.items():
-            if _safe_str(v) or k not in merged:
-                merged[k] = v
-        if not _safe_str(merged.get("record_id")):
-            merged["record_id"] = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
-        out[key] = _json_safe_value(merged)
+        clean.append(row)
+    clean = _repair_record_ids_rows_v178(clean)
     return sorted(
-        out.values(),
+        clean,
         key=lambda row: (
             _safe_str(row.get("推薦日期") or row.get("date")),
             _safe_str(row.get("推薦時間") or row.get("time")),
@@ -1581,14 +1620,30 @@ def save_records_mutation_fast(
         report.permanent_ok = False
         return report
 
+    # V178 legacy-ID migration: if this snapshot contains repaired IDs, make the
+    # Firestore mutation self-contained. Delete collided legacy doc IDs and upsert
+    # every surviving repaired row so a user can safely edit/delete before an
+    # explicit full sync.
+    effective_deleted_ids = {_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)}
+    effective_upsert_rows = [dict(x) for x in (upsert_rows or []) if isinstance(x, dict)]
+    repaired_rows = [row for row in records if _safe_str(row.get("record_id修復狀態"))]
+    for row in repaired_rows:
+        legacy_id = _safe_str(row.get("原始record_id"))
+        if legacy_id:
+            effective_deleted_ids.add(legacy_id)
+        effective_upsert_rows.append(dict(row))
+    # de-duplicate upserts by the now-unique record_id
+    _upsert_map = {_safe_str(r.get("record_id")): r for r in effective_upsert_rows if _safe_str(r.get("record_id"))}
+    effective_upsert_rows = list(_upsert_map.values())
+
     fs_ok = False
     fs_msg = "Firebase 未設定"
     if firebase_configured():
         fs_ok, fs_msg = write_records_firestore_mutation(
             records,
             state,
-            deleted_ids=deleted_ids,
-            upsert_rows=upsert_rows,
+            deleted_ids=effective_deleted_ids,
+            upsert_rows=effective_upsert_rows,
             expected_previous_count=previous_count,
         )
     report.firestore_ok = bool(fs_ok)
@@ -1755,6 +1810,80 @@ def save_records_permanent(payload: Any) -> PersistenceReport:
     return report
 
 
+def _merge_record_sources_v178(source_rows: Iterable[Iterable[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Merge replicated authority sources without tripling identical records.
+
+    This helper is only for recovery when no state file verifies. Normal saves do
+    not business-dedupe records. After V178 repair, record_id is unique per event
+    and stable across identical source copies.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for rows in source_rows:
+        for row in normalize_records(list(rows or [])):
+            rid = _safe_str(row.get("record_id"))
+            if not rid:
+                continue
+            old = merged.get(rid, {})
+            combined = dict(old)
+            for k, v in row.items():
+                if v not in (None, "") or k not in combined:
+                    combined[k] = v
+            merged[rid] = combined
+    return sorted(merged.values(), key=lambda row: (
+        _safe_str(row.get("推薦日期")), _safe_str(row.get("推薦時間")),
+        _safe_str(row.get("股票代號")), _safe_str(row.get("record_id")),
+    ))
+
+
+def restore_records_snapshot(payload: Any, *, source: str = "remote") -> tuple[bool, str]:
+    """V181 compatibility restore for mixed/legacy Streamlit deployments.
+
+    Some deployed V178/V179 revisions call ``restore_records_snapshot`` from
+    ``recover_records_authority``.  A mixed deployment could contain the caller
+    without this helper and crash Page 8 with NameError.  Keep this public helper
+    permanently: restore the exact authority rows locally, repair legacy duplicate
+    record_ids, and atomically refresh state + manifest.  No remote write occurs.
+    """
+    try:
+        rows = normalize_records(payload)
+        if not rows:
+            return False, f"{source} 快照沒有有效推薦紀錄，未覆蓋本機權威檔。"
+        state = _new_state(
+            "godpick_records_durable_v181_restore_compat",
+            rows,
+            count=len(rows),
+            latest_recommendation_date=_latest_record_recommendation_date(rows),
+            restored_from=_safe_str(source) or "remote",
+            restored_at=_now_text(),
+        )
+        manifest = _records_manifest(rows, state["payload_hash"])
+        with _RECORDS_LOCAL_LOCK:
+            ok1, msg1 = write_local_json_atomic(RECORDS_FILE, rows)
+            ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, state) if ok1 else (False, "records 寫入失敗，未更新 state")
+            ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, manifest) if ok1 and ok2 else (False, "records/state 寫入失敗，未更新 manifest")
+        ok = bool(ok1 and ok2 and ok3)
+        if ok:
+            return True, f"已由 {source} 還原推薦紀錄 {len(rows)} 筆並重建 authority state/manifest。"
+        return False, f"{source} 還原未完成｜{msg1}｜{msg2}｜{msg3}"
+    except Exception as exc:
+        return False, f"{source} 還原推薦紀錄例外：{exc}"
+
+
+def recover_records_authority() -> tuple[list[dict[str, Any]], list[str], bool]:
+    """V181 backward-compatible authority recovery entry point.
+
+    Older Page 8 / persistence revisions call this name.  Route them to the
+    current verified authority resolver so a rolling/mixed Streamlit deployment
+    cannot fail only because one module was refreshed before another.
+    """
+    try:
+        return ensure_records_local_authority_current()
+    except Exception as exc:
+        local_payload, local_msg, _ = read_local_json(RECORDS_FILE, [])
+        rows = normalize_records(local_payload)
+        return rows, [f"權威恢復相容層失敗：{exc}", f"本機 fallback：{local_msg}"], False
+
+
 def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
     local_payload, local_msg, local_mtime = read_local_json(RECORDS_FILE, [])
     local_state, local_state_msg, _ = read_local_json(RECORDS_STATE_FILE, {})
@@ -1764,15 +1893,23 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
     gh_state, gh_state_msg = read_github_json(RECORDS_STATE_FILE, {})
 
     fs_payload, fs_msg, fs_mtime, fs_state = _read_records_firestore_full()
-    candidates = [
-        ("local", normalize_records(local_payload), local_state, local_mtime),
-        ("github", normalize_records(gh_payload), gh_state, datetime.min),
-        ("firestore", normalize_records(fs_payload), fs_state, fs_mtime),
+    raw_candidates = [
+        ("local", local_payload, local_state, local_mtime),
+        ("github", gh_payload, gh_state, datetime.min),
+        ("firestore", fs_payload, fs_state, fs_mtime),
     ]
+    candidates = []
     valid = []
-    for source, rows, state, fallback in candidates:
-        if _state_is_valid(rows, state):
-            valid.append((source, rows, state, _state_epoch(state, fallback)))
+    for source, raw_rows, state, fallback in raw_candidates:
+        normalized = normalize_records(raw_rows)
+        candidates.append((source, normalized, state, fallback))
+        # Legacy V177 state hashes were computed before duplicate-ID repair.
+        # Accept either the raw payload hash or the V178 normalized hash, then
+        # rewrite the selected local state to the normalized V178 hash below.
+        raw_valid = _state_is_valid(raw_rows, state)
+        normalized_valid = _state_is_valid(normalized, state)
+        if raw_valid or normalized_valid:
+            valid.append((source, normalized, state, _state_epoch(state, fallback)))
 
     if valid:
         source, chosen, chosen_state, _ = max(
@@ -1780,12 +1917,9 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
             key=lambda item: _authority_freshness_key(item[0], item[2], fallback=item[3], rows=item[1]),
         )
     else:
-        merged: list[dict[str, Any]] = []
-        for _, rows, _, _ in candidates:
-            merged.extend(rows)
-        chosen = normalize_records(merged)
-        source = "legacy_merge"
-        chosen_state = _new_state("godpick_records_durable_v2", chosen, count=len(chosen), migrated_from=source)
+        chosen = _merge_record_sources_v178([rows for _, rows, _, _ in candidates])
+        source = "legacy_merge_v178"
+        chosen_state = _new_state("godpick_records_durable_v178_recovery", chosen, count=len(chosen), migrated_from=source)
 
     restored_state = dict(chosen_state or {})
     restored_state.update({

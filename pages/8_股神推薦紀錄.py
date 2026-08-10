@@ -189,6 +189,7 @@ PRELAUNCH_789_VERSION = "record_prelaunch_789_delete_fix_v1_20260425"
 DELETE_FIX_VERSION = "record_delete_form_atomic_v162_20260720"
 RECORD_SPEED_FIX_VERSION = "record_v175_reboot_remote_authority_restore_20260727"
 LATEST_PRICE_PNL_FIX_VERSION = "record_v179_official_market_snapshot_price_fix_v1_20260809"
+RECORD_AUTHORITY_COMPAT_VERSION = "record_v181_authority_restore_nameerror_compat_20260809"
 RECORD_INTEGRITY_FIX_VERSION = "record_v178_record_identity_perf_separation_v1_20260807"
 NORMALIZED_RECORD_CACHE_FILE_V165 = "data/godpick_records_normalized_v165.pkl"
 NORMALIZED_RECORD_CACHE_VERSION_V165 = "v178_integrity_20260807"
@@ -4871,8 +4872,17 @@ def _load_records(force_remote: bool = False) -> pd.DataFrame:
             st.session_state[_k("load_detail")] = details
             return _ensure_godpick_record_columns(pd.DataFrame(rows))
         except Exception as exc:
-            st.session_state[_k("load_detail")] = [f"永久來源讀取失敗：{exc}"]
+            # V181：即使雲端部署發生 persistence 檔案版本混用（例如舊 caller 找不到
+            # restore_records_snapshot），第8頁也必須先以本機權威檔繼續可用，不讓整頁崩潰。
+            st.session_state[_k("load_detail")] = [
+                f"永久來源讀取失敗：{exc}",
+                f"V181相容層：已改用本機固定權威檔；版本={RECORD_AUTHORITY_COMPAT_VERSION}",
+            ]
     local_df, local_err = _read_records_from_local_files()
+    if local_err:
+        current = list(st.session_state.get(_k("load_detail"), []) or [])
+        current.append(f"本機 fallback：{local_err}")
+        st.session_state[_k("load_detail")] = current
     return _ensure_godpick_record_columns(local_df)
 
 
