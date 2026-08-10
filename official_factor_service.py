@@ -21,6 +21,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -43,7 +44,9 @@ except Exception:  # pragma: no cover
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
-CACHE_VERSION = "v110_bounded_update_20260805"
+INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+CACHE_VERSION = "v182_official_multisource_20260810"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -150,17 +153,30 @@ FACTOR_COLUMNS = [
     "因子來源可信度",
     "備援補值欄位數",
     "FinMind資料日期",
+    "法人資料日期",
+    "法人資料源",
+    "營收資料日期",
+    "營收資料源",
+    "估值資料日期",
+    "估值資料源",
 ]
 
 # TWSE official/public endpoints used as best-effort sources. Some datasets may be rate-limited
 # or delayed. The service always falls back to existing cache.
 TWSE_BWIBBU_ALL = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
 TWSE_MONTHLY_REVENUE_L = "https://openapi.twse.com.tw/v1/opendata/t187ap05_L"
-TPEX_MONTHLY_REVENUE_O = "https://openapi.twse.com.tw/v1/opendata/t187ap05_O"
+TWSE_DAILY_CLOSE_ALL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+# V182: current official endpoints. TPEx legacy routes remain only as last-resort fallbacks.
+TPEX_OPENAPI_BASE = "https://www.tpex.org.tw/openapi/v1"
+TPEX_MONTHLY_REVENUE_O = f"{TPEX_OPENAPI_BASE}/mopsfin_t187ap05_O"
+TPEX_MONTHLY_REVENUE_R = f"{TPEX_OPENAPI_BASE}/t187ap05_R"
+TPEX_PERATIO_OPENAPI = f"{TPEX_OPENAPI_BASE}/tpex_mainboard_peratio_analysis"
+TPEX_3INSTI_OPENAPI = f"{TPEX_OPENAPI_BASE}/tpex_3insti_daily_trading"
+TPEX_DAILY_CLOSE_OPENAPI = f"{TPEX_OPENAPI_BASE}/tpex_mainboard_daily_close_quotes"
 TWSE_T86 = "https://www.twse.com.tw/rwd/zh/fund/T86"
 TWSE_T86_OLD = "https://www.twse.com.tw/fund/T86"
-TPEX_3ITRADE = "https://www.tpex.org.tw/www/zh-tw/afterTrading/3itrade"
-TPEX_PERATIO = "https://www.tpex.org.tw/www/zh-tw/afterTrading/peratio"
+TPEX_3ITRADE_LEGACY = "https://www.tpex.org.tw/www/zh-tw/afterTrading/3itrade"
+TPEX_PERATIO_LEGACY = "https://www.tpex.org.tw/www/zh-tw/afterTrading/peratio"
 MOPS_REVENUE_HTML = "https://mops.twse.com.tw/nas/t21/{market}/t21sc03_{roc_year}_{month}_0.html"
 
 # V108A: collect concise data-source diagnostics instead of printing repeated SSL tracebacks.
@@ -181,12 +197,21 @@ def _is_twse_public_url(url: str) -> bool:
     ])
 
 
+def _now_taipei() -> dt.datetime:
+    return dt.datetime.now(TAIPEI_TZ)
+
+
 def _now_text() -> str:
-    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return _now_taipei().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _today_yyyymmdd() -> str:
-    return dt.datetime.now().strftime("%Y%m%d")
+    return _now_taipei().strftime("%Y%m%d")
+
+
+def _legacy_endpoints_enabled() -> bool:
+    """Obsolete 404-prone HTML/legacy routes are opt-in only in V182."""
+    return _safe_str(os.getenv("OFFICIAL_FACTOR_ENABLE_LEGACY_ENDPOINTS", "")).lower() in {"1", "true", "yes", "on"}
 
 
 def _safe_str(v: Any) -> str:
@@ -315,10 +340,83 @@ def _response_to_text(resp: requests.Response) -> str:
     return text
 
 
+def _redact_sensitive_text(value: Any) -> str:
+    """Remove API tokens/authorization material from UI diagnostics and logs."""
+    text = _safe_str(value)
+    if not text:
+        return ""
+    token = _finmind_token() if "_finmind_token" in globals() else ""
+    if token:
+        text = text.replace(token, "***REDACTED***")
+    text = re.sub(r"([?&](?:token|api[_-]?key|apikey|access[_-]?token)=)[^&\s]+", r"\1***REDACTED***", text, flags=re.I)
+    text = re.sub(r"(Authorization[:=]\s*Bearer\s+)[A-Za-z0-9._~+\-/=]+", r"\1***REDACTED***", text, flags=re.I)
+    return text
+
+
+def _norm_key(value: Any) -> str:
+    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", _safe_str(value)).lower()
+
+
+def _pick_fuzzy(row: dict[str, Any], candidates: Iterable[str]) -> Any:
+    """Pick a value using exact keys first, then normalized key equality/containment."""
+    direct = _extract_first(row, candidates) if "_extract_first" in globals() else None
+    if direct is not None and _safe_str(direct) != "":
+        return direct
+    norm_map = {_norm_key(k): k for k in row.keys()}
+    cand_norms = [_norm_key(x) for x in candidates if _norm_key(x)]
+    for cn in cand_norms:
+        if cn in norm_map:
+            return row.get(norm_map[cn])
+    for cn in cand_norms:
+        for nk, original in norm_map.items():
+            if cn and (cn in nk or nk in cn):
+                return row.get(original)
+    return None
+
+
+def _roc_or_iso_to_yyyymmdd(value: Any) -> str:
+    s = re.sub(r"[^0-9]", "", _safe_str(value))
+    if len(s) == 7:  # ROC yyyMMdd
+        try:
+            return f"{int(s[:3]) + 1911:04d}{s[3:]}"
+        except Exception:
+            return ""
+    if len(s) >= 8:
+        return s[:8]
+    return ""
+
+
+def _normalize_year_month(value: Any) -> str:
+    s = re.sub(r"[^0-9]", "", _safe_str(value))
+    if len(s) == 5:  # ROC yyyMM
+        try:
+            return f"{int(s[:3]) + 1911:04d}{s[3:]}"
+        except Exception:
+            return ""
+    if len(s) >= 6:
+        if len(s) == 7:  # ROC yyyMMdd accidentally provided; keep month only
+            try:
+                return f"{int(s[:3]) + 1911:04d}{s[3:5]}"
+            except Exception:
+                return ""
+        return s[:6]
+    return ""
+
+
+def _pct_change(new_value: Any, old_value: Any) -> float | None:
+    new = _to_float(new_value, None)
+    old = _to_float(old_value, None)
+    if new is None or old in (None, 0):
+        return None
+    return round((new - old) / abs(old) * 100.0, 4)
+
+
 def _compact_error(exc: Exception) -> str:
-    text = str(exc)
+    text = _redact_sensitive_text(exc)
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("HTTPSConnectionPool", "HTTPS")
+    # Do not render full query strings in diagnostics; dataset/source is enough.
+    text = re.sub(r"(https?://[^?\s]+)\?[^\s]+", r"\1?[query-redacted]", text)
     if len(text) > 240:
         text = text[:240] + "..."
     return text
@@ -436,7 +534,7 @@ def load_factor_cache() -> dict[str, Any]:
 def _summarize_diagnostics(diagnostics: list[str] | None, max_items: int = 40) -> list[str]:
     out: list[str] = []
     for msg in diagnostics or []:
-        text = re.sub(r"\s+", " ", _safe_str(msg)).strip()
+        text = re.sub(r"\s+", " ", _redact_sensitive_text(msg)).strip()
         text = text.replace("HTTPSConnectionPool", "HTTPS")
         text = text.replace("Max retries exceeded with url:", "連線重試失敗:")
         if len(text) > 360:
@@ -522,19 +620,27 @@ def cache_status() -> dict[str, Any]:
     size_kb = round(CACHE_FILE.stat().st_size / 1024, 1) if file_exists else 0.0
     df = load_factor_frame()
     complete = 0
-    if not df.empty and "官方資料完整度" in df.columns:
-        vals = pd.to_numeric(df["官方資料完整度"], errors="coerce")
-        complete = int((vals >= 60).sum())
+    eligible_count = 0
+    eligible_complete = 0
+    market_stats: dict[str, Any] = {}
+    if not df.empty:
+        complete_vals = pd.to_numeric(df.get("官方資料完整度", pd.Series(index=df.index, dtype=float)), errors="coerce").fillna(0)
+        complete = int((complete_vals >= 60).sum())
+        markets = df.get("市場別", pd.Series(index=df.index, dtype=str)).astype(str)
+        eligible = markets.str.contains("上市|上櫃", regex=True, na=False)
+        eligible_count = int(eligible.sum())
+        eligible_complete = int(((complete_vals >= 60) & eligible).sum())
+        for market in ["上市", "上櫃", "興櫃"]:
+            mask = markets.eq(market)
+            if mask.any():
+                market_stats[market] = {"rows": int(mask.sum()), "complete": int(((complete_vals >= 60) & mask).sum())}
     return {
-        "exists": file_exists,
-        "path": str(CACHE_FILE),
-        "size_kb": size_kb,
-        "updated_at": _safe_str(cache.get("updated_at")),
-        "record_count": int(len(df)) if df is not None else 0,
-        "complete_count": complete,
-        "diagnostics": cache.get("diagnostics", []),
+        "exists": file_exists, "path": str(CACHE_FILE), "size_kb": size_kb,
+        "updated_at": _safe_str(cache.get("updated_at")), "record_count": int(len(df)) if df is not None else 0,
+        "complete_count": complete, "eligible_count": eligible_count, "eligible_complete_count": eligible_complete,
+        "eligible_coverage": round(eligible_complete / eligible_count * 100.0, 2) if eligible_count else 0.0,
+        "market_stats": market_stats, "diagnostics": cache.get("diagnostics", []),
     }
-
 
 def _load_stock_master_fallback() -> pd.DataFrame:
     """Load stock master without requiring Streamlit, useful for tests and cache-only mode."""
@@ -595,36 +701,77 @@ def load_stock_universe(limit: int | None = None, market_filter: str = "全部")
     return df[["股票代號", "股票名稱", "市場別", "正式產業別"]].reset_index(drop=True)
 
 
+def _official_close_map(url: str, market: str) -> tuple[dict[str, float], str]:
+    """Fetch one latest official all-market close snapshot for EPS estimation.
+
+    This is deliberately a single bulk request, never a per-stock loop. Failure does
+    not make valuation unusable; it only leaves estimated EPS blank.
+    """
+    try:
+        data = _get_json(url)
+        if not isinstance(data, list):
+            return {}, f"{market}官方收盤快照格式非 list"
+        out: dict[str, float] = {}
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            code = _normalize_code(_pick_fuzzy(row, ["Code", "SecuritiesCompanyCode", "SecuritiesCode", "證券代號", "股票代號", "代號"]))
+            close = _to_float(_pick_fuzzy(row, ["ClosingPrice", "Close", "收盤價", "最後成交價"]), None)
+            if code and close is not None and close > 0:
+                out[code] = float(close)
+        return out, f"{market}官方收盤快照取得 {len(out)} 筆"
+    except Exception as exc:
+        return {}, f"{market}官方收盤快照失敗：{_compact_error(exc)}"
+
+
 def fetch_twse_bwibbu_all() -> tuple[pd.DataFrame, str]:
-    """上市 PER/PBR/殖利率。"""
+    """上市 PER/PBR/殖利率（TWSE current OpenAPI）＋官方收盤估算 EPS。"""
     try:
         data = _get_json(TWSE_BWIBBU_ALL)
         if not isinstance(data, list):
             return pd.DataFrame(), "TWSE BWIBBU 回傳格式非 list。"
-        rows = []
+        rows: list[dict[str, Any]] = []
+        dates: list[str] = []
         for r in data:
             if not isinstance(r, dict):
                 continue
-            code = _normalize_code(_extract_first(r, ["Code", "證券代號", "股票代號", "代號"]))
+            code = _normalize_code(_pick_fuzzy(r, ["Code", "證券代號", "股票代號", "代號"]))
             if not code:
                 continue
-            close = _to_float(_extract_first(r, ["ClosingPrice", "收盤價", "Close", "收盤價(元)"]))
-            pe = _to_float(_extract_first(r, ["PEratio", "本益比", "P/E ratio", "PE Ratio"]))
-            eps = None
-            if close is not None and pe and pe > 0:
-                eps = round(close / pe, 4)
+            date_text = _roc_or_iso_to_yyyymmdd(_pick_fuzzy(r, ["Date", "資料日期", "日期"]))
+            if date_text:
+                dates.append(date_text)
+            pe = _to_float(_pick_fuzzy(r, ["PEratio", "PER", "PriceEarningRatio", "本益比"]), None)
+            pbr = _to_float(_pick_fuzzy(r, ["PBratio", "PBR", "PriceBookRatio", "股價淨值比"]), None)
+            yld = _to_float(_pick_fuzzy(r, ["DividendYield", "DividendYieldPercent", "殖利率(%)", "殖利率"]), None)
             rows.append({
-                "股票代號": code,
-                "PER本益比": pe,
-                "PBR股價淨值比": _to_float(_extract_first(r, ["PBratio", "股價淨值比", "P/B ratio", "PB Ratio"])),
-                "股利殖利率%": _to_float(_extract_first(r, ["DividendYield", "殖利率(%)", "殖利率", "Dividend yield"])),
-                "估算EPS": eps,
-                "估值資料源": "TWSE_BWIBBU_ALL",
+                "股票代號": code, "PER本益比": pe, "PBR股價淨值比": pbr,
+                "股利殖利率%": yld, "估算EPS": None,
+                "估值資料日期": date_text, "估值資料源": "TWSE_OPENAPI_BWIBBU_ALL",
             })
-        return pd.DataFrame(rows), f"TWSE PER/PBR/殖利率取得 {len(rows)} 筆。"
+        frame = pd.DataFrame(rows)
+        eps_count = 0
+        close_msg = ""
+        if not frame.empty and pd.to_numeric(frame["PER本益比"], errors="coerce").notna().any():
+            close_map, close_msg = _official_close_map(TWSE_DAILY_CLOSE_ALL, "TWSE")
+            if close_map:
+                eps_values=[]
+                for _, row in frame.iterrows():
+                    pe = _to_float(row.get("PER本益比"), None)
+                    close = close_map.get(_normalize_code(row.get("股票代號")))
+                    eps = round(close / pe, 4) if close is not None and pe not in (None, 0) else None
+                    eps_values.append(eps)
+                    if eps is not None:
+                        eps_count += 1
+                frame["估算EPS"] = eps_values
+        latest = max(dates) if dates else ""
+        suffix = f"｜資料日 {latest}" if latest else ""
+        eps_suffix = f"｜估算EPS {eps_count} 筆" if eps_count else ""
+        if close_msg and not eps_count:
+            eps_suffix += f"｜{close_msg}"
+        return frame, f"TWSE PER/PBR/殖利率取得 {len(frame)} 筆{suffix}{eps_suffix}。"
     except Exception as exc:
-        return pd.DataFrame(), f"TWSE PER/PBR 取得失敗：{exc}"
-
+        return pd.DataFrame(), f"TWSE PER/PBR 取得失敗：{_compact_error(exc)}"
 
 def _recent_revenue_months(n: int = 4) -> list[tuple[int, int]]:
     today = dt.date.today().replace(day=1)
@@ -706,70 +853,108 @@ def _fetch_mops_monthly_revenue_html() -> tuple[pd.DataFrame, str]:
     return pd.DataFrame(out).drop_duplicates("股票代號", keep="first"), " / ".join(msgs[-8:])
 
 
-def fetch_monthly_revenue() -> tuple[pd.DataFrame, str]:
-    """上市/上櫃月營收，使用 TWSE OpenAPI MOPS opendata 類資料。"""
-    endpoints = [("上市", TWSE_MONTHLY_REVENUE_L), ("上櫃", TPEX_MONTHLY_REVENUE_O)]
+def _parse_monthly_revenue_rows(data: Any, market: str, source: str) -> pd.DataFrame:
+    if not isinstance(data, list):
+        return pd.DataFrame()
     out: list[dict[str, Any]] = []
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        code = _normalize_code(_pick_fuzzy(r, ["公司代號", "Code", "股票代號", "出表公司代號", "SecuritiesCompanyCode"]))
+        if not code:
+            continue
+        current = _to_float(_pick_fuzzy(r, ["營業收入-當月營收", "當月營收", "本月營收", "CurrentMonthRevenue", "RevenueCurrentMonth"]), None)
+        prev = _to_float(_pick_fuzzy(r, ["營業收入-上月營收", "上月營收", "PreviousMonthRevenue", "RevenuePreviousMonth"]), None)
+        last_year = _to_float(_pick_fuzzy(r, ["營業收入-去年當月營收", "去年當月營收", "LastYearMonthRevenue", "RevenueLastYearMonth"]), None)
+        current_acc = _to_float(_pick_fuzzy(r, ["累計營業收入-當月累計營收", "當月累計營收", "累計營收", "CurrentAccumulatedRevenue"]), None)
+        last_acc = _to_float(_pick_fuzzy(r, ["累計營業收入-去年累計營收", "去年累計營收", "LastYearAccumulatedRevenue"]), None)
+        mom = _to_float(_pick_fuzzy(r, ["上月比較增減(%)", "上月比較增減％", "上月比較增減百分比", "MoM", "營收月增率"]), None)
+        yoy = _to_float(_pick_fuzzy(r, ["去年同月增減(%)", "去年同月增減％", "去年同月增減百分比", "YoY", "營收年增率"]), None)
+        acc_yoy = _to_float(_pick_fuzzy(r, ["前期比較增減(%)", "前期比較增減％", "累計營收年增率", "累計增減(%)", "AccumulatedYoY"]), None)
+        if mom is None:
+            mom = _pct_change(current, prev)
+        if yoy is None:
+            yoy = _pct_change(current, last_year)
+        if acc_yoy is None:
+            acc_yoy = _pct_change(current_acc, last_acc)
+        year_month = _normalize_year_month(_pick_fuzzy(r, ["資料年月", "營收年月", "年月", "YearMonth", "出表日期"]))
+        out.append({
+            "股票代號": code, "當月營收": current, "月營收MoM%": mom,
+            "月營收YoY%": yoy, "累計營收YoY%": acc_yoy,
+            "營收年月": year_month, "營收資料日期": year_month,
+            "營收資料源": source, "市場別_營收": market,
+        })
+    if not out:
+        return pd.DataFrame()
+    return pd.DataFrame(out).drop_duplicates("股票代號", keep="first")
+
+
+def fetch_monthly_revenue() -> tuple[pd.DataFrame, str]:
+    """上市/上櫃月營收。V182 使用兩市場各自的 current OpenAPI。"""
+    endpoints = [
+        ("上市", TWSE_MONTHLY_REVENUE_L, "TWSE_OPENAPI_t187ap05_L"),
+        ("上櫃", TPEX_MONTHLY_REVENUE_O, "TPEX_OPENAPI_mopsfin_t187ap05_O"),
+    ]
+    frames: list[pd.DataFrame] = []
     msgs: list[str] = []
-    for market, url in endpoints:
+    failed_markets: list[str] = []
+    for market, url, source in endpoints:
         try:
             data = _get_json(url)
-            if not isinstance(data, list):
-                msgs.append(f"{market}月營收回傳格式非 list。")
-                continue
-            cnt = 0
-            for r in data:
-                if not isinstance(r, dict):
-                    continue
-                code = _normalize_code(_extract_first(r, ["公司代號", "Code", "股票代號", "出表公司代號"]))
-                if not code:
-                    continue
-                yoy = _to_float(_extract_first(r, ["去年同月增減(%)", "去年同月增減％", "去年同月增減百分比", "YoY", "營收年增率"]))
-                mom = _to_float(_extract_first(r, ["上月比較增減(%)", "上月比較增減％", "MoM", "營收月增率"]))
-                acc_yoy = _to_float(_extract_first(r, ["前期比較增減(%)", "前期比較增減％", "累計營收年增率", "累計增減(%)"]))
-                year_month = _safe_str(_extract_first(r, ["資料年月", "出表日期", "營收年月", "年月", "YearMonth"]))
-                out.append({
-                    "股票代號": code,
-                    "當月營收": _to_float(_extract_first(r, ["當月營收", "營業收入-當月營收", "本月營收"])),
-                    "月營收MoM%": mom,
-                    "月營收YoY%": yoy,
-                    "累計營收YoY%": acc_yoy,
-                    "營收年月": year_month,
-                    "營收資料源": f"OpenAPI_{market}_monthly_revenue",
-                })
-                cnt += 1
-            msgs.append(f"{market}月營收取得 {cnt} 筆。")
+            frame = _parse_monthly_revenue_rows(data, market, source)
+            if frame.empty:
+                failed_markets.append(market)
+                msgs.append(f"{market}月營收 OpenAPI 0 筆可解析資料。")
+            else:
+                frames.append(frame)
+                ym = frame.get("營收年月", pd.Series([], dtype=str)).astype(str)
+                latest = ym[ym.str.len().ge(6)].max() if not ym.empty else ""
+                msgs.append(f"{market}月營收 OpenAPI 取得 {len(frame)} 筆" + (f"｜資料月 {latest}" if latest else "") + "。")
         except Exception as exc:
-            msgs.append(f"{market}月營收取得失敗：{exc}")
-    # A partial OpenAPI success must not suppress the MOPS fallback for the
-    # failed market. Previously listed data succeeded, OTC failed, and the code
-    # skipped fallback entirely; all OTC stocks therefore remained uncovered.
-    failed_market = any("失敗" in msg or "0 筆" in msg or "格式非 list" in msg for msg in msgs)
-    if not out or failed_market:
-        fb_df, fb_msg = _fetch_mops_monthly_revenue_html()
-        if fb_df is not None and not fb_df.empty:
-            existing = pd.DataFrame(out) if out else pd.DataFrame()
-            combined = pd.concat([existing, fb_df], ignore_index=True, sort=False)
-            combined = combined.drop_duplicates("股票代號", keep="first")
-            return combined, " / ".join(msgs + ["月營收缺漏市場改用 MOPS HTML 備援。", fb_msg])
-        if not out:
-            return pd.DataFrame(), " / ".join(msgs + ([fb_msg] if fb_msg else []))
-        msgs.append("MOPS HTML 備援未取得額外資料。" + (fb_msg or ""))
-    df = pd.DataFrame(out).drop_duplicates("股票代號", keep="first")
-    return df, " / ".join(msgs)
+            failed_markets.append(market)
+            msgs.append(f"{market}月營收 OpenAPI 失敗：{_compact_error(exc)}")
 
+    # Last-resort MOPS HTML is used only for a market that current OpenAPI did not cover.
+    # It is intentionally not queried when both current OpenAPIs succeed, avoiding the
+    # obsolete NAS 404 storm seen in Streamlit Cloud.
+    if failed_markets:
+        if _legacy_endpoints_enabled():
+            try:
+                fb_df, fb_msg = _fetch_mops_monthly_revenue_html()
+                if fb_df is not None and not fb_df.empty:
+                    if "市場別_營收" not in fb_df.columns:
+                        fb_df["市場別_營收"] = ""
+                    frames.append(fb_df)
+                    msgs.append("缺漏市場啟用 legacy MOPS HTML 最後備援：" + _redact_sensitive_text(fb_msg))
+                else:
+                    msgs.append("legacy MOPS HTML 最後備援未取得額外資料。")
+            except Exception as exc:
+                msgs.append(f"legacy MOPS HTML 最後備援失敗：{_compact_error(exc)}")
+        else:
+            msgs.append("缺漏市場未再呼叫已知 404 風險的 legacy MOPS NAS；直接交由 FinMind 缺值備援／前次有效快取。")
+
+    if not frames:
+        return pd.DataFrame(), " / ".join(msgs)
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    # Current OpenAPI frames are first and therefore authoritative over legacy fallback.
+    combined = combined.drop_duplicates("股票代號", keep="first")
+    return combined, " / ".join(msgs)
 
 def _recent_weekdays(days: int = 10) -> list[str]:
-    today = dt.date.today()
-    out = []
+    now = _now_taipei()
+    today = now.date()
+    # Before the exchange's post-close datasets are normally ready, start from
+    # the prior calendar day. This avoids guaranteed 404/no-data noise at 00:xx~15:xx.
+    if now.hour < 16:
+        today = today - dt.timedelta(days=1)
+    out: list[str] = []
     i = 0
-    while len(out) < days and i < days * 3:
+    while len(out) < days and i < days * 4 + 7:
         d = today - dt.timedelta(days=i)
         if d.weekday() < 5:
             out.append(d.strftime("%Y%m%d"))
         i += 1
     return out
-
 
 def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
     """上市三大法人買賣超。
@@ -864,6 +1049,7 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
             "三大法人近3日合計": s("total", three),
             "三大法人近5日合計": s("total", five),
             "法人連買天數": consecutive,
+            "法人資料日期": items[0].get("date", "") if items else "",
             "法人資料源": "TWSE_T86",
         })
     return pd.DataFrame(out), " / ".join(msgs)
@@ -889,19 +1075,152 @@ def _tpex_tables(data: Any) -> list[tuple[list[str], list[list[Any]]]]:
     return tables
 
 
-def fetch_tpex_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
-    """上櫃三大法人買賣超（櫃買中心官方 JSON，best effort）。"""
+def _load_institutional_history() -> dict[str, Any]:
+    try:
+        if INSTITUTIONAL_HISTORY_FILE.exists():
+            raw = json.loads(INSTITUTIONAL_HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                raw.setdefault("days", {})
+                return raw
+    except Exception:
+        pass
+    return {"version": CACHE_VERSION, "updated_at": "", "days": {}}
+
+
+def _save_institutional_daily_snapshot(market: str, date_text: str, rows: list[dict[str, Any]]) -> None:
+    if not date_text or not rows:
+        return
+    payload = _load_institutional_history()
+    days = payload.setdefault("days", {})
+    day = days.setdefault(date_text, {})
+    compact = []
+    for item in rows:
+        code = _normalize_code(item.get("股票代號") or item.get("code"))
+        if not code:
+            continue
+        compact.append({"股票代號": code, "foreign": _to_int(item.get("foreign")),
+                        "trust": _to_int(item.get("trust")), "dealer": _to_int(item.get("dealer")),
+                        "total": _to_int(item.get("total"))})
+    if not compact:
+        return
+    day[market] = compact
+    # retain only the newest 12 market days
+    for old_day in sorted(days.keys(), reverse=True)[12:]:
+        days.pop(old_day, None)
+    payload["version"] = CACHE_VERSION
+    payload["updated_at"] = _now_text()
+    try:
+        INSTITUTIONAL_HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _aggregate_institutional_history(market: str, latest_rows: list[dict[str, Any]] | None = None, latest_date: str = "", days: int = 7) -> pd.DataFrame:
+    payload = _load_institutional_history()
+    if latest_rows and latest_date:
+        _save_institutional_daily_snapshot(market, latest_date, latest_rows)
+        payload = _load_institutional_history()
     records_by_code: dict[str, list[dict[str, Any]]] = {}
+    for date_text in sorted((payload.get("days") or {}).keys(), reverse=True):
+        market_rows = ((payload.get("days") or {}).get(date_text) or {}).get(market, [])
+        for row in market_rows if isinstance(market_rows, list) else []:
+            code = _normalize_code(row.get("股票代號"))
+            if not code:
+                continue
+            records_by_code.setdefault(code, []).append({"date": date_text, "foreign": _to_int(row.get("foreign")),
+                                                          "trust": _to_int(row.get("trust")), "dealer": _to_int(row.get("dealer")),
+                                                          "total": _to_int(row.get("total"))})
+    out: list[dict[str, Any]] = []
+    for code, items in records_by_code.items():
+        items = sorted(items, key=lambda x: x["date"], reverse=True)[:max(days, 5)]
+        def total(key: str, n: int) -> int:
+            return int(sum(_to_int(x.get(key)) for x in items[:n]))
+        consecutive = 0
+        for item in items:
+            if _to_int(item.get("total")) > 0:
+                consecutive += 1
+            else:
+                break
+        out.append({"股票代號": code, "官方資料日期": items[0]["date"] if items else "",
+                    "法人資料日期": items[0]["date"] if items else "",
+                    "外資近1日買賣超": total("foreign", 1), "外資近3日買賣超": total("foreign", 3), "外資近5日買賣超": total("foreign", 5),
+                    "投信近1日買賣超": total("trust", 1), "投信近3日買賣超": total("trust", 3), "投信近5日買賣超": total("trust", 5),
+                    "自營商近1日買賣超": total("dealer", 1), "自營商近3日買賣超": total("dealer", 3), "自營商近5日買賣超": total("dealer", 5),
+                    "三大法人近1日合計": total("total", 1), "三大法人近3日合計": total("total", 3), "三大法人近5日合計": total("total", 5),
+                    "法人連買天數": consecutive, "法人資料源": f"{market}_OFFICIAL_DAILY_HISTORY"})
+    return pd.DataFrame(out)
+
+
+def _parse_tpex_openapi_institutional(data: Any) -> tuple[list[dict[str, Any]], str]:
+    if not isinstance(data, list):
+        return [], ""
+    out: list[dict[str, Any]] = []
+    dates: list[str] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        code = _normalize_code(_pick_fuzzy(row, ["SecuritiesCompanyCode", "SecuritiesCode", "Code", "股票代號", "證券代號", "代號"]))
+        if not code:
+            continue
+        date_text = _roc_or_iso_to_yyyymmdd(_pick_fuzzy(row, ["Date", "資料日期", "日期"]))
+        if date_text:
+            dates.append(date_text)
+        foreign = _to_int(_pick_fuzzy(row, [
+            "ForeignInvestorsIncludeMainlandAreaInvestors-Difference",
+            "Foreign Investors include Mainland Area Investors-Difference",
+            "ForeignInvestorsDifference", "外資及陸資買賣超股數", "外資買賣超股數"
+        ]))
+        trust = _to_int(_pick_fuzzy(row, ["SecuritiesInvestmentTrustCompanies-Difference", "InvestmentTrustDifference", "投信買賣超股數"]))
+        dealer = _to_int(_pick_fuzzy(row, ["Dealers-Difference", "DealerDifference", "自營商買賣超股數"]))
+        total_raw = _pick_fuzzy(row, ["TotalDifference", "Total-Difference", "三大法人買賣超股數合計", "三大法人買賣超股數"])
+        total = _to_int(total_raw)
+        if total_raw is None or _safe_str(total_raw) == "":
+            total = foreign + trust + dealer
+        out.append({"股票代號": code, "foreign": foreign, "trust": trust, "dealer": dealer, "total": total})
+    return out, (max(dates) if dates else "")
+
+
+def fetch_tpex_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
+    """上櫃三大法人。V182 先用 current TPEx OpenAPI，再以本地日快照累積 3/5 日。"""
     msgs: list[str] = []
+    try:
+        data = _get_json(TPEX_3INSTI_OPENAPI)
+        latest_rows, data_date = _parse_tpex_openapi_institutional(data)
+        if latest_rows:
+            if not data_date:
+                # OpenAPI may omit an explicit date; use last completed session candidate.
+                data_date = (_recent_weekdays(1) or [""])[0]
+            _save_institutional_daily_snapshot("上櫃", data_date, latest_rows)
+            agg = _aggregate_institutional_history("上櫃", days=days)
+            if not agg.empty:
+                agg["法人資料源"] = "TPEX_OPENAPI_3INSTI+DAILY_HISTORY"
+                return agg, f"TPEx OpenAPI 三大法人取得 {len(latest_rows)} 筆｜資料日 {data_date}｜歷史快照 {min(days, 5)} 日滾動。"
+            # Even on first day, return 1-day values; revenue+valuation can still satisfy basic completeness.
+            one = []
+            for x in latest_rows:
+                one.append({"股票代號": x["股票代號"], "官方資料日期": data_date, "法人資料日期": data_date,
+                            "外資近1日買賣超": x["foreign"], "投信近1日買賣超": x["trust"], "自營商近1日買賣超": x["dealer"],
+                            "三大法人近1日合計": x["total"], "法人資料源": "TPEX_OPENAPI_3INSTI"})
+            return pd.DataFrame(one), f"TPEx OpenAPI 三大法人取得 {len(one)} 筆｜首日快照已建立。"
+        msgs.append("TPEx OpenAPI 三大法人回傳 0 筆可解析資料。")
+    except Exception as exc:
+        msgs.append(f"TPEx OpenAPI 三大法人失敗：{_compact_error(exc)}")
+
+    # Old /www/zh-tw/afterTrading route is known to 404 on the current site.
+    # V182 does not hammer it by default; opt-in exists only for emergency rollback testing.
+    if not _legacy_endpoints_enabled():
+        agg = _aggregate_institutional_history("上櫃", days=days)
+        if not agg.empty:
+            return agg, " / ".join(msgs + ["TPEx current OpenAPI 暫時失敗；沿用既有官方日快照，跳過 obsolete legacy 404 route。"] )
+        return pd.DataFrame(), " / ".join(msgs + ["TPEx current OpenAPI 暫時失敗；跳過 obsolete legacy 404 route，交由 FinMind/前次有效快取補值。"] )
+
+    # Legacy historical endpoint is opt-in last-resort only.
+    records_by_code: dict[str, list[dict[str, Any]]] = {}
+    failures = 0
     for date_text in _recent_weekdays(max(days, 3)):
-        try:
-            _budget_guard("TPEx 法人更新")
-        except OfficialFactorBudgetExceeded as exc:
-            msgs.append(str(exc))
-            break
         date_slash = f"{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}"
         try:
-            data = _get_json(TPEX_3ITRADE, params={"date": date_slash, "type": "Daily", "response": "json"})
+            data = _get_json(TPEX_3ITRADE_LEGACY, params={"date": date_slash, "type": "Daily", "response": "json"})
             cnt = 0
             for fields, rows in _tpex_tables(data):
                 fmap = {str(f).replace(" ", "").strip(): i for i, f in enumerate(fields)}
@@ -920,54 +1239,78 @@ def fetch_tpex_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
                     foreign = _to_int(pick(row, ["外資及陸資(不含外資自營商)-買賣超股數", "外資及陸資買賣超股數", "外資買賣超股數"]))
                     trust = _to_int(pick(row, ["投信-買賣超股數", "投信買賣超股數"]))
                     dealer = _to_int(pick(row, ["自營商-買賣超股數", "自營商買賣超股數"]))
-                    total = _to_int(pick(row, ["三大法人買賣超股數合計", "三大法人買賣超股數", "合計買賣超股數"]))
-                    if total == 0:
-                        total = foreign + trust + dealer
-                    records_by_code.setdefault(code, []).append({
-                        "date": date_text, "foreign": foreign, "trust": trust,
-                        "dealer": dealer, "total": total,
-                    })
+                    total_raw = pick(row, ["三大法人買賣超股數合計", "三大法人買賣超股數", "合計買賣超股數"])
+                    total = _to_int(total_raw) if total_raw is not None else foreign + trust + dealer
+                    records_by_code.setdefault(code, []).append({"date": date_text, "foreign": foreign, "trust": trust, "dealer": dealer, "total": total})
                     cnt += 1
-            msgs.append(f"{date_text} TPEX 法人取得 {cnt} 筆。")
-            time.sleep(0.12)
-        except Exception as exc:
-            msgs.append(f"{date_text} TPEX 法人取得失敗：{exc}")
-
-    out: list[dict[str, Any]] = []
-    for code, items in records_by_code.items():
-        items = sorted(items, key=lambda x: x.get("date", ""), reverse=True)
-        def total(key: str, n: int) -> int:
-            return int(sum(_to_int(x.get(key)) for x in items[:n]))
-        consecutive = 0
-        for item in items:
-            if _to_int(item.get("total")) > 0:
-                consecutive += 1
-            else:
-                break
-        out.append({
-            "股票代號": code,
-            "官方資料日期": items[0].get("date", "") if items else "",
-            "外資近1日買賣超": total("foreign", 1), "外資近3日買賣超": total("foreign", 3), "外資近5日買賣超": total("foreign", 5),
-            "投信近1日買賣超": total("trust", 1), "投信近3日買賣超": total("trust", 3), "投信近5日買賣超": total("trust", 5),
-            "自營商近1日買賣超": total("dealer", 1), "自營商近3日買賣超": total("dealer", 3), "自營商近5日買賣超": total("dealer", 5),
-            "三大法人近1日合計": total("total", 1), "三大法人近3日合計": total("total", 3), "三大法人近5日合計": total("total", 5),
-            "法人連買天數": consecutive, "法人資料源": "TPEX_3ITRADE",
-        })
-    return pd.DataFrame(out), " / ".join(msgs)
-
+            if cnt:
+                snapshot_rows=[{"股票代號":code, **items[-1]} for code,items in records_by_code.items() if items and items[-1].get("date")==date_text]
+                _save_institutional_daily_snapshot("上櫃", date_text, snapshot_rows)
+        except Exception:
+            failures += 1
+    agg = _aggregate_institutional_history("上櫃", days=days)
+    if not agg.empty:
+        return agg, " / ".join(msgs + [f"TPEx legacy/歷史快照補值成功；legacy失敗 {failures} 個日期。"])
+    return pd.DataFrame(), " / ".join(msgs + [f"TPEx legacy 亦無可用資料；失敗 {failures} 個日期。"] )
 
 def fetch_tpex_valuation() -> tuple[pd.DataFrame, str]:
-    """上櫃本益比／殖利率／股價淨值比（櫃買中心官方 JSON）。"""
+    """上櫃本益比／殖利率／PBR。V182 以 TPEx OpenAPI 為主。"""
     msgs: list[str] = []
-    for date_text in _recent_weekdays(7):
-        try:
-            _budget_guard("TPEx 估值更新")
-        except OfficialFactorBudgetExceeded as exc:
-            msgs.append(str(exc))
-            break
+    try:
+        data = _get_json(TPEX_PERATIO_OPENAPI)
+        if isinstance(data, list):
+            out: list[dict[str, Any]] = []
+            dates: list[str] = []
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                code = _normalize_code(_pick_fuzzy(row, ["SecuritiesCompanyCode", "SecuritiesCode", "Code", "股票代號", "證券代號", "代號"]))
+                if not code:
+                    continue
+                date_text = _roc_or_iso_to_yyyymmdd(_pick_fuzzy(row, ["Date", "資料日期", "日期"]))
+                if date_text:
+                    dates.append(date_text)
+                pe = _to_float(_pick_fuzzy(row, ["PriceEarningRatio", "PER", "PERatio", "本益比", "本益比(倍)"]), None)
+                pbr = _to_float(_pick_fuzzy(row, ["PriceBookRatio", "PBR", "PBRatio", "股價淨值比", "股價淨值比(倍)"]), None)
+                yld = _to_float(_pick_fuzzy(row, ["DividendYield", "DividendYieldPercent", "Yield", "殖利率(%)", "殖利率"]), None)
+                close = _to_float(_pick_fuzzy(row, ["ClosingPrice", "Close", "收盤價"]), None)
+                eps = round(close / pe, 4) if close is not None and pe not in (None, 0) else None
+                out.append({"股票代號": code, "PER本益比": pe, "PBR股價淨值比": pbr,
+                            "股利殖利率%": yld, "估算EPS": eps,
+                            "估值資料日期": date_text, "估值資料源": "TPEX_OPENAPI_peratio_analysis"})
+            if out:
+                frame = pd.DataFrame(out).drop_duplicates("股票代號")
+                eps_count = 0
+                close_map, close_msg = _official_close_map(TPEX_DAILY_CLOSE_OPENAPI, "TPEx")
+                if close_map:
+                    eps_values = []
+                    for _, item in frame.iterrows():
+                        pe = _to_float(item.get("PER本益比"), None)
+                        close = close_map.get(_normalize_code(item.get("股票代號")))
+                        eps = round(close / pe, 4) if close is not None and pe not in (None, 0) else None
+                        eps_values.append(eps)
+                        if eps is not None:
+                            eps_count += 1
+                    frame["估算EPS"] = eps_values
+                latest = max(dates) if dates else ""
+                note = f"TPEx OpenAPI PER/PBR/殖利率取得 {len(frame)} 筆" + (f"｜資料日 {latest}" if latest else "")
+                note += f"｜估算EPS {eps_count} 筆" if eps_count else f"｜{close_msg}"
+                return frame, note + "。"
+            msgs.append("TPEx OpenAPI 估值回傳 0 筆可解析資料。")
+        else:
+            msgs.append("TPEx OpenAPI 估值回傳格式非 list。")
+    except Exception as exc:
+        msgs.append(f"TPEx OpenAPI 估值失敗：{_compact_error(exc)}")
+
+    # Old /www/zh-tw/afterTrading/peratio route is 404-prone on the current site.
+    if not _legacy_endpoints_enabled():
+        return pd.DataFrame(), " / ".join(msgs + ["跳過 obsolete TPEx legacy peratio；交由 FinMind/前次有效快取補值。"] )
+
+    # Opt-in last resort only; do not loop seven dates.
+    for date_text in _recent_weekdays(3):
         date_slash = f"{date_text[:4]}/{date_text[4:6]}/{date_text[6:8]}"
         try:
-            data = _get_json(TPEX_PERATIO, params={"date": date_slash, "id": "", "response": "json"})
+            data = _get_json(TPEX_PERATIO_LEGACY, params={"date": date_slash, "id": "", "response": "json"})
             out: list[dict[str, Any]] = []
             for fields, rows in _tpex_tables(data):
                 fmap = {str(f).replace(" ", "").strip(): i for i, f in enumerate(fields)}
@@ -983,20 +1326,16 @@ def fetch_tpex_valuation() -> tuple[pd.DataFrame, str]:
                     code = _normalize_code(pick(row, ["股票代號", "證券代號", "代號"]))
                     if not code:
                         continue
-                    out.append({
-                        "股票代號": code,
-                        "PER本益比": _to_float(pick(row, ["本益比", "本益比(倍)"])),
-                        "PBR股價淨值比": _to_float(pick(row, ["股價淨值比", "股價淨值比(倍)"])),
-                        "股利殖利率%": _to_float(pick(row, ["殖利率(%)", "殖利率％", "殖利率"])),
-                        "估值資料源": "TPEX_PERATIO",
-                    })
+                    out.append({"股票代號": code,
+                                "PER本益比": _to_float(pick(row, ["本益比", "本益比(倍)"])),
+                                "PBR股價淨值比": _to_float(pick(row, ["股價淨值比", "股價淨值比(倍)"])),
+                                "股利殖利率%": _to_float(pick(row, ["殖利率(%)", "殖利率％", "殖利率"])),
+                                "估值資料日期": date_text, "估值資料源": "TPEX_LEGACY_PERATIO"})
             if out:
-                return pd.DataFrame(out).drop_duplicates("股票代號"), f"{date_text} TPEX PER/PBR/殖利率取得 {len(out)} 筆。"
-            msgs.append(f"{date_text} TPEX 估值無資料。")
+                return pd.DataFrame(out).drop_duplicates("股票代號"), " / ".join(msgs + [f"{date_text} TPEx legacy 估值取得 {len(out)} 筆。"])
         except Exception as exc:
-            msgs.append(f"{date_text} TPEX 估值取得失敗：{exc}")
-    return pd.DataFrame(), " / ".join(msgs)
-
+            msgs.append(f"{date_text} TPEx legacy 估值失敗：{_compact_error(exc)}")
+    return pd.DataFrame(), " / ".join(msgs[-5:])
 
 def _score_range(value: float | None, strong: float, mid: float, bad: float, reverse_bad: bool = False) -> float:
     if value is None:
@@ -1045,6 +1384,8 @@ def _calc_scores(row: dict[str, Any]) -> dict[str, Any]:
 
     per = _to_float(row.get("PER本益比"), None)
     eps = _to_float(row.get("估算EPS"), None)
+    pbr = _to_float(row.get("PBR股價淨值比"), None)
+    dividend_yield = _to_float(row.get("股利殖利率%"), None)
     # PER 合理，不是越低越好：虧損/無 EPS 保守；PER 過高扣分。
     if eps is not None and eps <= 0:
         val_score = 35.0
@@ -1069,7 +1410,7 @@ def _calc_scores(row: dict[str, Any]) -> dict[str, Any]:
         complete += 35
     if rev_weight:
         complete += 40
-    if per is not None or eps is not None:
+    if any(v is not None for v in (per, eps, pbr, dividend_yield)):
         complete += 25
     if complete >= 80:
         status = "完整"
@@ -1116,7 +1457,7 @@ def finmind_config_status() -> dict[str, Any]:
         "enabled": bool(token),
         "token_configured": bool(token),
         "api_url": FINMIND_API_URL,
-        "rate_limit_note": "有 token 建議每小時 600 次；無 token 約 300 次。",
+        "rate_limit_note": "FinMind 僅作最後備援；V182 不再將 token 放進 URL，也不在快速模式做無 data_id 的整批試探。",
     }
 
 
@@ -1131,8 +1472,9 @@ def _finmind_get(dataset: str, start_date: str, end_date: str, data_id: str = ""
     token = _finmind_token()
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if token:
+        # Official FinMind docs support Bearer Authorization. Never duplicate the
+        # token into query params, otherwise requests exceptions can leak it to UI logs.
         headers["Authorization"] = f"Bearer {token}"
-        params["token"] = token
     try:
         timeout_value = _consume_request(f"FinMind {dataset}")
         r = requests.get(FINMIND_API_URL, params=params, headers=headers, timeout=timeout_value)
@@ -1212,18 +1554,32 @@ def _finmind_institutional_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 def _finmind_revenue_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
-    latest = _latest_by_code(rows)
-    out=[]
-    for code,row in latest.items():
-        revenue = _to_float(_extract_first(row,["revenue","Revenue","當月營收"]), None)
-        mom = _to_float(_extract_first(row,["revenue_month","revenue_mom","MoM","月營收MoM%"]), None)
-        yoy = _to_float(_extract_first(row,["revenue_year","revenue_yoy","YoY","月營收YoY%"]), None)
-        acc = _to_float(_extract_first(row,["accumulated_revenue_year","acc_revenue_yoy","累計營收YoY%"]), None)
-        month = _safe_str(_extract_first(row,["revenue_month","month","營收年月"]))
-        date_text = _safe_str(row.get("date") or row.get("create_time"))
-        out.append({"股票代號":code,"當月營收":revenue,"月營收MoM%":mom,"月營收YoY%":yoy,"累計營收YoY%":acc,"營收年月":month,"FinMind資料日期":date_text,"FinMind營收資料源":"FinMind_TaiwanStockMonthRevenue"})
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        code = _normalize_code(row.get("stock_id"))
+        if code:
+            grouped.setdefault(code, []).append(row)
+    out: list[dict[str, Any]] = []
+    for code, items in grouped.items():
+        items = sorted(items, key=lambda x: _safe_str(x.get("date")))
+        latest = items[-1] if items else {}
+        current = _to_float(latest.get("revenue"), None)
+        prev = _to_float(items[-2].get("revenue"), None) if len(items) >= 2 else None
+        latest_month = int(_to_float(latest.get("revenue_month"), 0) or 0)
+        latest_year = int(_to_float(latest.get("revenue_year"), 0) or 0)
+        same_last_year = None
+        for item in reversed(items[:-1]):
+            if int(_to_float(item.get("revenue_month"), -1) or -1) == latest_month and int(_to_float(item.get("revenue_year"), -1) or -1) == latest_year - 1:
+                same_last_year = _to_float(item.get("revenue"), None)
+                break
+        mom = _pct_change(current, prev)
+        yoy = _pct_change(current, same_last_year)
+        date_text = _safe_str(latest.get("date") or latest.get("create_time"))
+        ym = f"{latest_year:04d}{latest_month:02d}" if latest_year and latest_month else _normalize_year_month(date_text)
+        out.append({"股票代號": code, "當月營收": current, "月營收MoM%": mom, "月營收YoY%": yoy,
+                    "營收年月": ym, "FinMind資料日期": date_text, "營收資料日期": ym,
+                    "FinMind營收資料源": "FinMind_TaiwanStockMonthRevenue"})
     return pd.DataFrame(out)
-
 
 def _finmind_valuation_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     latest = _latest_by_code(rows)
@@ -1248,46 +1604,38 @@ def fetch_finmind_fallback(
     bulk_only: bool = False,
     request_budget_override: int | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Fetch bounded FinMind fallback data. Bulk is attempted first; per-code calls are bounded.
+    """Bounded FinMind final fallback.
 
-    FinMind is never treated as exchange-official data. It only fills missing values and
-    records source/trust metadata. A token is recommended; without it the function is
-    disabled by default to avoid exhausting the anonymous quota.
+    V182 deliberately does not issue speculative all-market requests. Current
+    FinMind datasets are safest with data_id for institutional/PER and may reject
+    large bulk ranges depending on dataset/plan. Quick mode therefore skips it;
+    full mode queries only the already-filtered missing stock codes.
     """
     diagnostics: list[str] = []
     if not _finmind_token():
         return pd.DataFrame(), ["FinMind 備援未啟用：請在 Streamlit Secrets 設定 FINMIND_TOKEN。"]
-    codes = universe.get("股票代號", pd.Series([],dtype=str)).astype(str).map(_normalize_code).dropna().tolist()
-    codes = [c for c in codes if c][:max(0,int(max_stocks))]
+    codes = universe.get("股票代號", pd.Series([], dtype=str)).astype(str).map(_normalize_code).tolist()
+    codes = [c for c in codes if c][:max(0, int(max_stocks))]
     if not codes:
-        return pd.DataFrame(), ["FinMind 備援沒有可查詢股票代號。"]
+        return pd.DataFrame(), ["FinMind 備援沒有需要補值的股票。"]
+    if bulk_only:
+        return pd.DataFrame(), [f"V182 快速模式：官方 OpenAPI 優先；FinMind {len(codes)} 檔缺值留待完整增量逐檔補值，避免 400/額度浪費。"]
+
     frames: list[pd.DataFrame] = []
-    start12,end = _date_range(14)
-    start550,_ = _date_range(550)
-    datasets=[]
+    start12, end = _date_range(14)
+    start550, _ = _date_range(550)
+    datasets: list[tuple[str, str, str, Any]] = []
     if include_institutional:
-        datasets.append(("TaiwanStockInstitutionalInvestorsBuySellWide",start12,end,_finmind_institutional_frame))
+        datasets.append(("TaiwanStockInstitutionalInvestorsBuySellWide", start12, end, _finmind_institutional_frame))
     if include_revenue:
-        datasets.append(("TaiwanStockMonthRevenue",start550,end,_finmind_revenue_frame))
+        datasets.append(("TaiwanStockMonthRevenue", start550, end, _finmind_revenue_frame))
     if include_valuation:
-        datasets.append(("TaiwanStockPER",start12,end,_finmind_valuation_frame))
-    request_budget = int(request_budget_override or min(260, max(30, len(codes) * len(datasets))))
-    request_budget = max(3, min(request_budget, 260))
-    used=0
-    for dataset,start,end_date,parser in datasets:
-        bulk_rows,msg = _finmind_get(dataset,start,end_date)
-        diagnostics.append(msg)
-        used += 1
-        parsed = parser(bulk_rows) if bulk_rows else pd.DataFrame()
-        if parsed is not None and not parsed.empty:
-            parsed = parsed[parsed["股票代號"].isin(codes)]
-            if not parsed.empty:
-                frames.append(parsed)
-                continue
-        if bulk_only:
-            diagnostics.append(f"FinMind {dataset} 批次未取得可用資料；一鍵快速模式不逐檔查詢，留待排程增量補值。")
-            continue
-        per_rows=[]
+        datasets.append(("TaiwanStockPER", start12, end, _finmind_valuation_frame))
+    request_budget = int(request_budget_override or min(180, max(12, len(codes) * max(1, len(datasets)))))
+    used = 0
+    for dataset, start, end_date, parser in datasets:
+        per_rows: list[dict[str, Any]] = []
+        dataset_used = 0
         for code in codes:
             try:
                 _budget_guard(f"FinMind {dataset}")
@@ -1295,33 +1643,33 @@ def fetch_finmind_fallback(
                 diagnostics.append(str(exc))
                 break
             if used >= request_budget:
-                diagnostics.append(f"FinMind 已達本輪安全請求上限 {request_budget}，剩餘股票留待下次增量補值。")
+                diagnostics.append(f"FinMind 已達本輪安全請求上限 {request_budget}；其餘缺值保留前次有效快取。")
                 break
-            rows,msg2 = _finmind_get(dataset,start,end_date,data_id=code)
+            rows, _ = _finmind_get(dataset, start, end_date, data_id=code)
             used += 1
+            dataset_used += 1
             if rows:
                 per_rows.extend(rows)
-            if used % 20 == 0:
-                time.sleep(0.15)
         parsed = parser(per_rows) if per_rows else pd.DataFrame()
         if parsed is not None and not parsed.empty:
             frames.append(parsed)
-        diagnostics.append(f"FinMind {dataset} 本輪累計請求 {used} 次。")
+        diagnostics.append(f"FinMind {dataset} 逐檔備援請求 {dataset_used} 次，取得 {0 if parsed is None else len(parsed)} 檔。")
+        if used >= request_budget:
+            break
     if not frames:
         return pd.DataFrame(), diagnostics
-    out=frames[0]
+    out = frames[0]
     for frame in frames[1:]:
-        out=out.merge(frame,on="股票代號",how="outer",suffixes=("","__fmdup"))
+        out = out.merge(frame, on="股票代號", how="outer", suffixes=("", "__fmdup"))
         for c in [x for x in out.columns if x.endswith("__fmdup")]:
-            base=c[:-7]
+            base = c[:-7]
             if base in out.columns:
-                mask=_is_missing_factor_value(out[base],base)
-                out.loc[mask,base]=out.loc[mask,c]
+                mask = _is_missing_factor_value(out[base], base)
+                out.loc[mask, base] = out.loc[mask, c]
             else:
-                out[base]=out[c]
-            out=out.drop(columns=[c])
-    return out.drop_duplicates("股票代號",keep="first"), diagnostics
-
+                out[base] = out[c]
+            out = out.drop(columns=[c])
+    return out.drop_duplicates("股票代號", keep="first"), diagnostics
 
 def _coalesce_fallback(df: pd.DataFrame, fallback: pd.DataFrame, source_name: str, trust_score: int = 82) -> tuple[pd.DataFrame, int]:
     if fallback is None or fallback.empty or "股票代號" not in fallback.columns:
@@ -1456,11 +1804,33 @@ def build_official_factor_cache(
 
         finmind_filled = 0
         if enable_finmind_fallback:
-            progress("finmind", "FinMind 缺值備援（快速模式僅批次）")
+            progress("finmind", "FinMind 最後缺值備援")
             try:
                 _budget_guard("FinMind 備援")
+                # Only query codes that still lack one or more requested domains.
+                fm_need = df[["股票代號"]].copy()
+                need_mask = pd.Series(False, index=df.index)
+                if include_institutional:
+                    inst_cols = [c for c in ["外資近1日買賣超", "三大法人近1日合計", "三大法人近5日合計"] if c in df.columns]
+                    if inst_cols:
+                        need_mask |= df[inst_cols].apply(lambda s: pd.to_numeric(s, errors="coerce")).isna().all(axis=1)
+                    else:
+                        need_mask |= True
+                if include_revenue:
+                    rev_cols = [c for c in ["當月營收", "月營收YoY%"] if c in df.columns]
+                    if rev_cols:
+                        need_mask |= df[rev_cols].apply(lambda s: pd.to_numeric(s, errors="coerce")).isna().all(axis=1)
+                    else:
+                        need_mask |= True
+                if include_valuation:
+                    val_cols = [c for c in ["PER本益比", "PBR股價淨值比", "股利殖利率%"] if c in df.columns]
+                    if val_cols:
+                        need_mask |= df[val_cols].apply(lambda s: pd.to_numeric(s, errors="coerce")).isna().all(axis=1)
+                    else:
+                        need_mask |= True
+                fm_need = df.loc[need_mask, ["股票代號"]].head(max(0, int(finmind_max_stocks))).copy()
                 fm_df, fm_diag = fetch_finmind_fallback(
-                    universe, max_stocks=finmind_max_stocks,
+                    fm_need, max_stocks=finmind_max_stocks,
                     include_institutional=include_institutional, include_revenue=include_revenue,
                     include_valuation=include_valuation, bulk_only=bool(finmind_bulk_only),
                     request_budget_override=6 if quick_mode else None,
@@ -1486,11 +1856,11 @@ def build_official_factor_cache(
         update_time = _now_text()
         sources = []
         if include_institutional:
-            sources.append("TWSE_T86_TPEX_3ITRADE")
+            sources.append("TWSE_T86_TPEX_OPENAPI_3INSTI")
         if include_revenue:
-            sources.append("TWSE_OpenAPI_MOPS_monthly_revenue")
+            sources.append("TWSE_TPEX_OpenAPI_monthly_revenue")
         if include_valuation:
-            sources.append("TWSE_BWIBBU_TPEX_PERATIO")
+            sources.append("TWSE_BWIBBU_TPEX_OPENAPI_PERATIO")
 
         score_rows = []
         for _, row in df.iterrows():
@@ -1510,7 +1880,13 @@ def build_official_factor_cache(
 
         if _REQUEST_NOTES:
             diagnostics = _REQUEST_NOTES + diagnostics
-        complete_count = int((pd.to_numeric(out.get("官方資料完整度", pd.Series([], dtype=float)), errors="coerce") >= 60).sum()) if not out.empty else 0
+        complete_vals = pd.to_numeric(out.get("官方資料完整度", pd.Series(index=out.index, dtype=float)), errors="coerce").fillna(0) if not out.empty else pd.Series([], dtype=float)
+        complete_count = int((complete_vals >= 60).sum()) if not out.empty else 0
+        market_vals = out.get("市場別", pd.Series(index=out.index, dtype=str)).astype(str) if not out.empty else pd.Series([], dtype=str)
+        eligible_mask = market_vals.isin(["上市", "上櫃"]) if not out.empty else pd.Series([], dtype=bool)
+        eligible_count = int(eligible_mask.sum()) if not out.empty else 0
+        eligible_complete_count = int(((complete_vals >= 60) & eligible_mask).sum()) if not out.empty else 0
+        eligible_coverage = round(eligible_complete_count / eligible_count * 100.0, 2) if eligible_count else 0.0
         existing_complete = _existing_complete_count() if save else 0
         should_save = True
         if save and existing_complete > complete_count and complete_count < max(5, int(existing_complete * 0.5)):
@@ -1520,7 +1896,9 @@ def build_official_factor_cache(
         budget_status = _end_run_budget()
         meta = {
             "ok": True, "updated_at": update_time, "record_count": int(len(out)),
-            "complete_count": complete_count, "existing_complete_count": existing_complete,
+            "complete_count": complete_count, "eligible_count": eligible_count,
+            "eligible_complete_count": eligible_complete_count, "eligible_coverage": eligible_coverage,
+            "existing_complete_count": existing_complete,
             "saved": bool(should_save), "preserved_old_cache": bool(not should_save),
             "diagnostics": _summarize_diagnostics(diagnostics), "market_filter": market_filter,
             "limit": limit or 0, "quick_mode": bool(quick_mode),
@@ -1531,7 +1909,7 @@ def build_official_factor_cache(
             "finmind_max_stocks": int(finmind_max_stocks),
             "finmind_filled_fields": int(finmind_filled),
             "old_cache_filled_fields": int(old_filled),
-            "trusted_source_priority": ["TWSE/TPEx/MOPS", "FinMind", "前次有效快取"],
+            "trusted_source_priority": ["TWSE/TPEx current OpenAPI", "TWSE T86 / MOPS official", "FinMind", "前次有效快取"],
             **budget_status,
         }
         if save and should_save:
@@ -1614,7 +1992,7 @@ def export_cache_csv_bytes() -> bytes:
 
 def _github_cfg() -> dict[str, str]:
     if st is None:
-        return {"token": "", "owner": "", "repo": "", "branch": "main", "path": "official_factors_cache.json"}
+        return {"token": "", "owner": "", "repo": "", "branch": "main", "path": "official_factors_cache.json", "history_path": "official_factor_institutional_history.json"}
     secrets = getattr(st, "secrets", {})
     return {
         "token": _safe_str(secrets.get("GITHUB_TOKEN", "")),
@@ -1622,6 +2000,7 @@ def _github_cfg() -> dict[str, str]:
         "repo": _safe_str(secrets.get("GITHUB_REPO_NAME", "stock-app")) or "stock-app",
         "branch": _safe_str(secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
         "path": _safe_str(secrets.get("OFFICIAL_FACTORS_GITHUB_PATH", "official_factors_cache.json")) or "official_factors_cache.json",
+        "history_path": _safe_str(secrets.get("OFFICIAL_FACTORS_HISTORY_GITHUB_PATH", "official_factor_institutional_history.json")) or "official_factor_institutional_history.json",
     }
 
 
@@ -1645,48 +2024,58 @@ def push_cache_to_github() -> tuple[bool, str]:
         return False, "未設定 GITHUB_TOKEN，略過 GitHub 同步。"
     if not CACHE_FILE.exists():
         return False, "official_factors_cache.json 尚未建立。"
-    try:
-        url = _github_url(cfg["owner"], cfg["repo"], cfg["path"])
-        headers = _github_headers(token)
-        sha = ""
+    def push_one(local_path: Path, remote_path: str) -> tuple[bool, str]:
         try:
-            r = requests.get(url, headers=headers, params={"ref": cfg["branch"]}, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 200:
-                sha = r.json().get("sha", "")
-        except Exception:
+            url = _github_url(cfg["owner"], cfg["repo"], remote_path)
+            headers = _github_headers(token)
             sha = ""
-        content = base64.b64encode(CACHE_FILE.read_bytes()).decode("ascii")
-        payload = {
-            "message": f"Update official factors cache {CACHE_VERSION}",
-            "content": content,
-            "branch": cfg["branch"],
-        }
-        if sha:
-            payload["sha"] = sha
-        r = requests.put(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
-        if r.status_code in (200, 201):
-            return True, f"GitHub 同步成功：{cfg['path']}"
-        return False, f"GitHub 同步失敗 HTTP {r.status_code}: {r.text[:200]}"
-    except Exception as exc:
-        return False, f"GitHub 同步失敗：{exc}"
-
+            try:
+                r0 = requests.get(url, headers=headers, params={"ref": cfg["branch"]}, timeout=REQUEST_TIMEOUT)
+                if r0.status_code == 200:
+                    sha = r0.json().get("sha", "")
+            except Exception:
+                sha = ""
+            payload = {"message": f"Update official factors {CACHE_VERSION}",
+                       "content": base64.b64encode(local_path.read_bytes()).decode("ascii"), "branch": cfg["branch"]}
+            if sha:
+                payload["sha"] = sha
+            r = requests.put(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            return (r.status_code in (200, 201), f"{remote_path}: HTTP {r.status_code}")
+        except Exception as exc:
+            return False, f"{remote_path}: {_compact_error(exc)}"
+    ok_cache, msg_cache = push_one(CACHE_FILE, cfg["path"])
+    hist_msg = "history: 尚未建立"
+    ok_hist = True
+    if INSTITUTIONAL_HISTORY_FILE.exists():
+        ok_hist, hist_msg = push_one(INSTITUTIONAL_HISTORY_FILE, cfg["history_path"])
+    ok = bool(ok_cache and ok_hist)
+    return ok, ("GitHub 同步成功：" if ok else "GitHub 同步部分失敗：") + msg_cache + "｜" + hist_msg
 
 def read_cache_from_github() -> tuple[bool, str]:
     cfg = _github_cfg()
     token = cfg.get("token", "")
     if not token:
         return False, "未設定 GITHUB_TOKEN，無法從 GitHub 讀取。"
-    try:
-        url = _github_url(cfg["owner"], cfg["repo"], cfg["path"])
-        r = requests.get(url, headers=_github_headers(token), params={"ref": cfg["branch"]}, timeout=REQUEST_TIMEOUT)
-        if r.status_code != 200:
-            return False, f"GitHub 讀取失敗 HTTP {r.status_code}: {r.text[:200]}"
-        data = r.json()
-        content = base64.b64decode(data.get("content", "")).decode("utf-8")
-        parsed = json.loads(content)
-        if not isinstance(parsed, dict) or "records" not in parsed:
-            return False, "GitHub 快取格式不正確。"
-        CACHE_FILE.write_text(json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True, f"已從 GitHub 讀取 official factors：{len(parsed.get('records', []))} 筆。"
-    except Exception as exc:
-        return False, f"GitHub 讀取失敗：{exc}"
+    def pull_one(remote_path: str, local_path: Path, required: bool) -> tuple[bool, str]:
+        try:
+            url = _github_url(cfg["owner"], cfg["repo"], remote_path)
+            r = requests.get(url, headers=_github_headers(token), params={"ref": cfg["branch"]}, timeout=REQUEST_TIMEOUT)
+            if r.status_code == 404 and not required:
+                return True, f"{remote_path}: 尚未建立"
+            if r.status_code != 200:
+                return False, f"{remote_path}: HTTP {r.status_code}"
+            content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
+            parsed = json.loads(content)
+            if required and (not isinstance(parsed, dict) or "records" not in parsed):
+                return False, f"{remote_path}: 格式不正確"
+            local_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2 if required else None), encoding="utf-8")
+            return True, f"{remote_path}: 已讀取"
+        except Exception as exc:
+            return False, f"{remote_path}: {_compact_error(exc)}"
+    ok_cache, msg_cache = pull_one(cfg["path"], CACHE_FILE, True)
+    if not ok_cache:
+        return False, "GitHub 讀取失敗：" + msg_cache
+    ok_hist, msg_hist = pull_one(cfg["history_path"], INSTITUTIONAL_HISTORY_FILE, False)
+    records = load_factor_cache().get("records", [])
+    return bool(ok_cache and ok_hist), f"已從 GitHub 讀取 official factors：{len(records) if isinstance(records, list) else 0} 筆｜{msg_hist}"
+

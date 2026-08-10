@@ -35,7 +35,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V109｜官方優先＋FinMind可信備援｜法人 / 月營收 / EPS / PER 快取中心｜供 07/08/10/14 讀取")
+st.caption("V182｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援｜法人 / 月營收 / PER / PBR / 殖利率快取中心｜供 07/08/10/14 讀取")
 
 
 def _fmt(v):
@@ -52,17 +52,28 @@ def _display_status() -> None:
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     records = int(s.get("record_count", 0) or 0)
     complete = int(s.get("complete_count", 0) or 0)
-    coverage = (complete / records * 100.0) if records else 0.0
+    eligible = int(s.get("eligible_count", 0) or 0)
+    eligible_complete = int(s.get("eligible_complete_count", 0) or 0)
+    eligible_coverage = float(s.get("eligible_coverage", 0.0) or 0.0)
     c1.metric("快取筆數", records)
-    c2.metric("完整度 >= 60", complete)
-    c3.metric("快取有效覆蓋率", f"{coverage:.1f}%")
-    c4.metric("檔案大小 KB", s.get("size_kb", 0.0))
-    c5.metric("快取存在", "是" if s.get("exists") else "否")
+    c2.metric("上市+上櫃母體", eligible)
+    c3.metric("上市+上櫃完整>=60", eligible_complete)
+    c4.metric("主要市場有效覆蓋率", f"{eligible_coverage:.1f}%")
+    c5.metric("檔案大小 KB", s.get("size_kb", 0.0))
     c6.metric("更新時間", s.get("updated_at") or "未更新")
-    if records and complete == 0:
-        st.warning("目前官方因子完整度>=60 為 0；代表官方資料尚未抓成功或仍不足，暫不建議接進 07 推薦分數。")
-    elif complete > 0:
-        st.success(f"官方因子已有可用完整資料：{complete} 筆。")
+    if eligible and eligible_complete == 0:
+        st.warning("目前上市＋上櫃官方因子完整度>=60 為 0；代表主要市場來源仍未抓成功或資料不足，暫不建議接進 07 推薦分數。")
+    elif eligible_complete > 0:
+        st.success(f"主要市場官方因子已有可用完整資料：{eligible_complete}/{eligible} 筆（{eligible_coverage:.1f}%）。")
+    market_stats = s.get("market_stats", {}) or {}
+    if market_stats:
+        parts = []
+        for market in ["上市", "上櫃", "興櫃"]:
+            item = market_stats.get(market) or {}
+            if item:
+                parts.append(f"{market} {int(item.get('complete', 0) or 0)}/{int(item.get('rows', 0) or 0)}")
+        if parts:
+            st.caption("各市場完整度>=60：" + "｜".join(parts) + "。興櫃目前屬延伸覆蓋，不納入上市＋上櫃主覆蓋率分母。")
     df = load_factor_frame()
     if df is not None and not df.empty:
         fallback_rows = 0
@@ -72,7 +83,7 @@ def _display_status() -> None:
         official_only_rows = max(0, len(df) - fallback_rows)
         a, b, c = st.columns(3)
         a.metric("純官方資料列", official_only_rows)
-        b.metric("含 FinMind/快取補值", fallback_rows)
+        b.metric("含備援/舊快取補值", fallback_rows)
         if "因子來源可信度" in df.columns:
             trust = pd.to_numeric(df["因子來源可信度"], errors="coerce").dropna()
             c.metric("平均來源可信度", f"{trust.mean():.1f}" if not trust.empty else "-")
@@ -89,7 +100,7 @@ def _display_status() -> None:
 
 
 with st.sidebar:
-    st.header("V108C 更新設定")
+    st.header("V182 更新設定")
     market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=0)
     scan_limit = st.selectbox("測試/更新筆數", [0, 50, 200, 500, 1000, 1500, 2000], index=0, help="0 = 使用股票主檔全部股票。")
     include_institutional = st.checkbox("更新法人買賣超", value=True)
@@ -100,9 +111,9 @@ with st.sidebar:
     finmind_max_stocks = st.selectbox("FinMind 本輪最多補值股票", [50, 100, 120, 200], index=2, disabled=not fm_status.get("token_configured"), help="避免超過 API 每小時限額；每次更新會增量補值。")
     update_mode = st.selectbox(
         "更新模式",
-        ["快速安全（90秒，FinMind僅批次）", "完整增量（240秒，FinMind有限逐檔）"],
+        ["快速安全（90秒，官方 OpenAPI 優先）", "完整增量（240秒，FinMind只補缺值）"],
         index=0,
-        help="快速模式適合人工操作；完整模式仍有240秒/180次請求上限，不會無限運轉。",
+        help="快速模式只跑 TWSE/TPEx current OpenAPI 與既有快取；完整模式才對仍缺值股票做有限 FinMind 逐檔補值。兩種模式都有硬性時間/請求上限。",
     )
     st.caption("FinMind Token：" + ("已設定" if fm_status.get("token_configured") else "未設定（請在 Streamlit Secrets 加入 FINMIND_TOKEN）"))
     st.divider()
@@ -111,9 +122,14 @@ with st.sidebar:
     do_push = st.button("同步快取到 GitHub", use_container_width=True)
 
 st.info(
-    "建議流程：先用 TWSE／TPEx／MOPS 更新；只有官方缺值時才由 FinMind 補值。"
-    "FinMind 不會覆蓋較新的官方值，每筆都會保存來源、可信度與補值欄位數。"
+    "V182 來源階梯：① TWSE current OpenAPI/T86 ＋ TPEx current OpenAPI；"
+    "② 已知 404 的舊 TPEx/MOPS 路徑預設停用，不再重複浪費請求；③ 完整增量模式才用 FinMind 對仍缺值股票逐檔補值；"
+    "④ 最後保留前次有效快取。官方值永遠優先，來源、資料日期、可信度與補值欄位數都會保留。"
     "第 07 頁只讀快取，不會在推薦時即時大量呼叫外部 API。"
+)
+st.warning(
+    "安全修正：V182 已停止把 FINMIND_TOKEN 放在 URL query string，也會遮蔽診斷中的 token。"
+    "如果舊版錯誤畫面/截圖曾顯示完整 token，建議在 FinMind 重新產生 token，並只更新 Streamlit Secrets。"
 )
 if not finmind_config_status().get("token_configured"):
     st.warning('FinMind 備援尚未啟用。請在 Streamlit Cloud → App settings → Secrets 加入 `FINMIND_TOKEN = \"你的token\"`，重新啟動後再更新。不要把 token 寫進程式或 GitHub。')
@@ -144,7 +160,11 @@ if do_update:
             st.warning(f"本次抓取完成 {len(df)} 筆，但完整度偏低，已保留舊有效快取。")
         else:
             suffix = "（已達安全上限並保存目前成果）" if meta.get("timed_out") else ""
-            st.success(f"官方因子快取已更新：{len(df)} 筆；完整度>=60：{meta.get('complete_count', 0)} 筆。{suffix}")
+            st.success(
+                f"官方因子快取已更新：{len(df)} 筆；"
+                f"上市+上櫃完整>=60：{meta.get('eligible_complete_count', 0)}/{meta.get('eligible_count', 0)} "
+                f"（{float(meta.get('eligible_coverage', 0) or 0):.1f}%）。{suffix}"
+            )
         st.caption(f"本輪耗時 {meta.get('elapsed_seconds', 0)} 秒｜網路請求 {meta.get('request_count', 0)}/{meta.get('request_budget', 0)}")
     else:
         st.error("官方因子快取更新失敗，請查看診斷訊息。")
@@ -201,19 +221,19 @@ if logs:
 else:
     st.caption("尚無更新紀錄。")
 
-with st.expander("V109 說明", expanded=False):
+with st.expander("V182 說明", expanded=False):
     st.markdown(
         """
-- 本頁是官方因子資料層，不會取代 07 股神推薦。
-- 慢的官方資料更新集中在本頁；07 後續只讀 `official_factors_cache.json`。
-- 官方來源失敗時會保留診斷訊息，不會讓 07、10、8、14 主線中斷。
-- V108A 修正 Streamlit Cloud 連 TWSE/TPEX 時可能發生的 SSL 憑證驗證失敗。
-- V108B 修正 SSL 備援成功但內容為空/HTML/非 JSON 時誤判成功的問題。
-- V108C 修正推薦表已存在空白/0值欄位時，真實快取被寫進 `_官方` 暫存欄卻未回填，導致覆蓋率永遠0%的根因。
-- V108C 新增櫃買中心上櫃法人與估值 best-effort 來源，月營收則針對單一市場失敗時個別啟用 MOPS HTML 備援。
-- 若本次抓取完整度低於舊快取，會保留舊有效快取，不會用壞資料覆蓋。
-- V109 新增 FinMind 可信備援：僅補空值，官方值永遠優先，並保存來源可信度與補值數量。
-- 未設定 FINMIND_TOKEN 時不會匿名大量呼叫，避免耗盡額度。
-- 每次補值有安全請求上限，未完成股票會留待下次增量更新。
+- 本頁是官方因子資料層，不會取代 07 股神推薦；07 只讀快取，不在推薦流程大量打外部 API。
+- V182 將上櫃估值改為 TPEx `tpex_mainboard_peratio_analysis`、上櫃法人改為 `tpex_3insti_daily_trading`、上櫃營收改為 `mopsfin_t187ap05_O` current OpenAPI。
+- 上市估值維持 TWSE `BWIBBU_ALL`；上市營收使用 TWSE OpenAPI；上市法人維持 T86。
+- 舊 TPEx `/www/zh-tw/afterTrading/...` 與 MOPS `/nas/t21/...` 已知有 404 風險，V182 預設完全停用；只有明確設定 `OFFICIAL_FACTOR_ENABLE_LEGACY_ENDPOINTS=1` 才會作緊急回退測試。
+- TPEx 法人 current OpenAPI 若只提供最新日，V182 會保存每日官方快照，逐日累積成 3/5 日法人合計；不會以單日數值冒充 5 日。
+- FinMind 不再先做容易 400 的全市場猜測型查詢；快速模式完全不逐檔打 FinMind，完整增量才對「仍缺值」股票有限逐檔補值。
+- FinMind 月營收 MoM/YoY 已改為由真正營收值計算，不再把 `revenue_month` / `revenue_year` 誤當百分比。
+- V182 不再把 FINMIND_TOKEN 放入 URL，診斷訊息也會遮蔽 token。
+- 完整度計分中，PER 為空但 PBR/殖利率有效的虧損公司，仍可取得估值資料完整度，不再被誤判成整個估值缺失。
+- 首頁主覆蓋率以「上市＋上櫃」計算；興櫃保留延伸資料，但不再用大量尚無同等因子來源的興櫃股票稀釋主要市場覆蓋率。
+- 若本次來源異常、完整度大幅低於舊快取，仍保留舊有效快取，不會用壞資料覆蓋。
         """
     )
