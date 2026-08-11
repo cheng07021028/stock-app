@@ -42,6 +42,7 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
     "official_factor_institutional_history.json": {"critical": True, "purpose": "法人逐日歷史/連買統計"},
     "godpick_records.json": {"critical": True, "purpose": "推薦永久紀錄與績效"},
     "godpick_latest_recommendations.json": {"critical": True, "purpose": "最新正式推薦快照"},
+    "godpick_latest_run_anchor.json": {"critical": True, "purpose": "V185最新推薦永久錨點／防部署回退"},
     "godpick_recommend_list.json": {"critical": True, "purpose": "推薦清單"},
     "godpick_rotation_history.json": {"critical": True, "purpose": "推薦輪動/重複記憶"},
     "godpick_learning_state.json": {"critical": True, "purpose": "AI學習狀態"},

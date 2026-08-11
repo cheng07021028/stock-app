@@ -48,7 +48,7 @@ def main() -> None:
     assert 'and not _v181_ai_ready' in page7, "duplicate learning overlay guard missing"
     assert 'K線掃描完成' in page7 and '最終結果運算' in page7
     assert '_page07_record_authority_executor_v181' in page7
-    assert '_v159_auto_record_actionable_recommendations(auto_source, background_write=True)' in page7
+    assert '_v159_auto_record_actionable_recommendations(auto_source, background_write=False)' in page7, 'V185 requires synchronous permanent authority verification for daily recommendation records'
     print(f"PASS page7 V181 final pipeline｜rows={len(sample)}｜elapsed={elapsed:.3f}s")
 
 

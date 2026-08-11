@@ -262,7 +262,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v184_freshness_diagnostics_20260811"
+PAGE07_SPEED_FIX_VERSION = "page07_v185_durable_latest_authority_20260811"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -309,6 +309,7 @@ GODPICK_ACTIVE_SCORE_WEIGHTS = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
 GODPICK_SETTINGS_FILE = "godpick_user_settings.json"
 GODPICK_COLUMN_ORDER_FILE = "godpick_column_orders.json"  # v72：欄位順序獨立保存，避免權重設定/GitHub 舊值覆蓋
 GODPICK_LATEST_FILE = "godpick_latest_recommendations.json"
+GODPICK_LATEST_ANCHOR_FILE = "godpick_latest_run_anchor.json"  # V185：小型永久錨點，避免重新部署後回退舊快照
 GODPICK_LIST_FILE = "godpick_recommend_list.json"
 MACRO_MODE_BRIDGE_FILE = "macro_mode_bridge.json"
 MARKET_SNAPSHOT_FILE = "market_snapshot.json"
@@ -1395,9 +1396,11 @@ def _build_market_environment(base_df: pd.DataFrame) -> dict[str, Any]:
 def _safe_json_read_local(path: str, default):
     try:
         p = Path(path)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parent.parent / p
         if not p.exists():
             return copy.deepcopy(default)
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         return data if data is not None else copy.deepcopy(default)
     except Exception:
@@ -1548,6 +1551,89 @@ def _write_json_to_github_path(path_name: str, payload) -> tuple[bool, str]:
         return True, f"GitHub 背景同步已排程：{path_name}"
     except Exception as e:
         return False, f"GitHub 背景同步排程失敗：{e}"
+
+
+
+def _payload_authority_stamp_v185(payload: Any) -> tuple[str, str]:
+    if not isinstance(payload, dict):
+        return "", ""
+    date_text = _safe_str(
+        payload.get("recommendation_date") or payload.get("saved_at") or payload.get("kline_date")
+    )
+    try:
+        ts = pd.to_datetime(date_text, errors="coerce")
+        date_key = ts.strftime("%Y-%m-%d") if pd.notna(ts) else date_text[:10]
+    except Exception:
+        date_key = date_text[:10]
+    saved_key = _safe_str(payload.get("saved_at")).replace("T", " ")[:26]
+    return date_key, saved_key
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def _load_latest_recommendation_authority_v185() -> tuple[dict[str, Any], list[str]]:
+    """Load the newest recommendation authority without GitHub-first rollback.
+
+    V184 and earlier could read the repository's bundled 2026-07-09 JSON before a
+    newer local/Firestore copy.  V185 uses a small durable run anchor first, then
+    restores the full snapshot only when needed.  The actual recommendation
+    business timestamp, not deployment/file time, decides which payload is newer.
+    """
+    local_full = _safe_json_read_local(GODPICK_LATEST_FILE, {})
+    details: list[str] = []
+    anchor: dict[str, Any] = {}
+    try:
+        from godpick_persistence_service import load_named_json_permanent
+        anchor_raw, anchor_details = load_named_json_permanent(
+            GODPICK_LATEST_ANCHOR_FILE, {}, firestore_doc="godpick_latest_run_anchor"
+        )
+        if isinstance(anchor_raw, dict):
+            anchor = anchor_raw
+        details.extend([f"錨點｜{x}" for x in (anchor_details or [])])
+    except Exception as exc:
+        details.append(f"錨點永久層讀取例外：{exc}")
+
+    local_stamp = _payload_authority_stamp_v185(local_full)
+    anchor_stamp = _payload_authority_stamp_v185(anchor)
+    full_payload = local_full if isinstance(local_full, dict) else {}
+
+    # If no V185 anchor exists yet, or the anchor proves the repo/local full pack
+    # is older, restore the large full snapshot from the durable authority layer.
+    if not anchor_stamp[0] or anchor_stamp > local_stamp:
+        try:
+            from godpick_persistence_service import load_named_json_permanent
+            remote_full, full_details = load_named_json_permanent(
+                GODPICK_LATEST_FILE, {}, firestore_doc="godpick_latest_recommendations"
+            )
+            if isinstance(remote_full, dict) and remote_full:
+                full_payload = remote_full
+            details.extend([f"完整快照｜{x}" for x in (full_details or [])])
+        except Exception as exc:
+            details.append(f"完整快照永久層讀取例外：{exc}")
+
+    full_stamp = _payload_authority_stamp_v185(full_payload)
+    # A successfully persisted anchor is intentionally sufficient to prevent the
+    # UI from lying that the latest run is still 7/9 while the large candidate
+    # pack is still syncing.  It contains the actionable recommendation rows and
+    # enough scan metadata to reconstruct the latest page safely.
+    if anchor_stamp > full_stamp:
+        recovered = dict(anchor)
+        recovered.setdefault("recommendations", [])
+        recovered.setdefault("candidate_diagnosis", [])
+        recovered.setdefault("category_strength", [])
+        recovered.setdefault("hot_pick", [])
+        recovered["authority_recovery"] = "V185 durable run anchor"
+        recovered["full_snapshot_pending_or_older"] = True
+        details.insert(0, f"V185權威：永久錨點較新（{anchor_stamp[1] or anchor_stamp[0]}），禁止回退舊完整快照。")
+        return recovered, details
+
+    if isinstance(full_payload, dict) and full_payload:
+        details.insert(0, f"V185權威：完整推薦快照（{full_stamp[1] or full_stamp[0] or '日期未驗證'}）。")
+        return full_payload, details
+    if isinstance(anchor, dict) and anchor:
+        details.insert(0, "V185權威：僅有永久錨點。")
+        return anchor, details
+    return {}, details
+
 
 
 def _settings_ts_value(payload: dict[str, Any]) -> datetime:
@@ -2085,13 +2171,56 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     if local_ok and not verified:
         local_ok = False
         local_msg = f"快照寫入後回讀驗證失敗：{GODPICK_LATEST_FILE}"
+    # V185：完整候選快照可達數 MB，遠端同步仍採背景；但「本輪真的發生過」
+    # 不能再只靠背景執行緒。先同步永久保存一份小型 run anchor，內含
+    # actionable 名單、掃描品質與K線日期。即使 Streamlit 立刻 rerun/reboot，
+    # 頁首與最新推薦也不會再從 8/11 回退到 repo 內的 7/9 舊快照。
+    try:
+        full_payload_hash = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        full_payload_hash = ""
+    anchor_payload = {
+        "saved_at": saved_at_now,
+        "recommendation_date": saved_at_now[:10],
+        "scan_run_id": payload.get("scan_run_id", ""),
+        "expected_trade_date": payload.get("expected_trade_date", ""),
+        "kline_date": payload.get("kline_date", ""),
+        "weights": payload.get("weights", {}),
+        "recommendations": recommendation_records,
+        "category_strength": payload.get("category_strength", []),
+        "hot_pick": payload.get("hot_pick", []),
+        "scan_quality": scan_report,
+        "candidate_count": len(candidate_records),
+        "recommendation_count": len(recommendation_records),
+        "full_snapshot_payload_hash": full_payload_hash,
+        "snapshot_version": "V185_durable_run_anchor",
+    }
+    try:
+        from godpick_durability_service import persist_json_permanent as _persist_anchor_v185
+        from godpick_persistence_service import github_config as _anchor_gh_cfg_v185, firebase_configured as _anchor_fs_cfg_v185
+        _anchor_remote_configured_v185 = bool(
+            _safe_str((_anchor_gh_cfg_v185() or {}).get("token")) or bool(_anchor_fs_cfg_v185())
+        )
+        anchor_ok, anchor_msg = _persist_anchor_v185(
+            GODPICK_LATEST_ANCHOR_FILE, anchor_payload,
+            firestore_doc="godpick_latest_run_anchor",
+            reason="V185 synchronous recommendation run anchor",
+        )
+        if not _anchor_remote_configured_v185:
+            anchor_ok = False
+            anchor_msg = f"{anchor_msg}｜未設定 GitHub/Firebase 遠端永久層；僅本機寫入不得宣稱永久保存"
+    except Exception as anchor_exc:
+        anchor_ok, anchor_msg = False, f"V185永久錨點保存例外：{anchor_exc}"
+
     # V184：最新推薦已列入 V183 durability registry；不要再只靠單一路徑
     # GitHub 背景寫入。先本機原子保存，再由 durability outbox 同步
     # runtime-data + Firestore，重啟時才有可稽核的永久化證據。
     try:
         from godpick_durability_service import persist_json_async as _persist_json_async_v184
         durable_ok, durable_msg = _persist_json_async_v184(
-            GODPICK_LATEST_FILE, payload, reason="V184 latest recommendation authority"
+            GODPICK_LATEST_FILE, payload, reason="V185 latest recommendation authority"
         )
         github_ok, github_msg = bool(durable_ok), str(durable_msg)
     except Exception:
@@ -2122,13 +2251,14 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     try:
         from godpick_durability_service import persist_json_async as _persist_list_async_v184
         list_github_ok, list_github_msg = _persist_list_async_v184(
-            GODPICK_LIST_FILE, list_payload, reason="V184 operational recommendation list"
+            GODPICK_LIST_FILE, list_payload, reason="V185 operational recommendation list"
         )
     except Exception:
         list_github_ok, list_github_msg = _write_json_to_github_path(GODPICK_LIST_FILE, list_payload)
 
     msgs = [
         local_msg,
+        f"V185本輪永久錨點：{'成功' if anchor_ok else '失敗'}｜{anchor_msg}",
         github_msg,
         f"候選診斷保存：{len(candidate_df) if isinstance(candidate_df, pd.DataFrame) else 0} 檔",
         f"本輪快照回讀驗證：{'成功' if verified else '失敗'}｜日期 {saved_at_now[:10]}｜K線 {payload.get('kline_date') or '未驗證'}",
@@ -2141,13 +2271,18 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         _project_data_freshness_snapshot_v173.clear()
     except Exception:
         pass
-    return (local_ok or github_ok or list_local_ok or list_github_ok), msgs
+    try:
+        _load_latest_recommendation_authority_v185.clear()
+    except Exception:
+        pass
+    # 本輪保存成功的最低標準改為：本機完整快照 + 永久錨點。
+    # 遠端大型完整快照可繼續背景同步，但不得把 pending 冒充永久完成。
+    return bool(local_ok and anchor_ok), msgs
 
 
 def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
-    payload, msg = _read_json_from_github_path(GODPICK_LATEST_FILE, {})
-    if not isinstance(payload, dict) or not payload:
-        payload = _safe_json_read_local(GODPICK_LATEST_FILE, {})
+    payload, authority_details = _load_latest_recommendation_authority_v185()
+    msg = "｜".join(str(x) for x in (authority_details or [])[:4])
     if not isinstance(payload, dict) or not payload:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), msg
 
@@ -2462,7 +2597,7 @@ def _max_row_date_v173(rows: list[dict[str, Any]], fields: list[str]) -> pd.Time
 def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     """彙整 K 線、大盤、官方因子與推薦保存時間，供頁首警示。"""
     expected = _expected_latest_trade_date_v173()
-    latest_payload = _read_project_json_file(GODPICK_LATEST_FILE)
+    latest_payload, _latest_authority_details_v185 = _load_latest_recommendation_authority_v185()
     rows = latest_payload.get("recommendations", []) if isinstance(latest_payload, dict) else []
     if not isinstance(rows, list):
         rows = []
@@ -10729,8 +10864,13 @@ def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: 
             st.session_state[_k("category_strength_store")] = category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
             st.session_state[_k("hot_pick_store")] = hot_pick_df.copy() if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()
             st.session_state[_k("result_saved_at")] = _now_text()
-            _save_latest_recommendation_pack(pd.DataFrame(), category_strength_df, hot_pick_df)
-            return True
+            save_ok, save_msgs = _save_latest_recommendation_pack(pd.DataFrame(), category_strength_df, hot_pick_df)
+            st.session_state[_k("latest_pack_permanent_ok")] = bool(save_ok)
+            if not save_ok:
+                st.session_state[_k("latest_pack_permanent_error")] = "本輪候選已在本機完成，但最新推薦永久錨點未通過遠端驗證；系統不會把它宣稱為永久保存成功。"
+            else:
+                st.session_state[_k("latest_pack_permanent_error")] = ""
+            return bool(save_ok)
         st.session_state[_k("empty_scan_preserved_previous")] = True
         st.session_state[_k("empty_scan_notice")] = "本輪沒有任何候選資料，未覆蓋上一輪快照。"
         return False
@@ -10740,8 +10880,13 @@ def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: 
     st.session_state[_k("category_strength_store")] = category_strength_df.copy()
     st.session_state[_k("hot_pick_store")] = hot_pick_df.copy()
     st.session_state[_k("result_saved_at")] = _now_text()
-    _save_latest_recommendation_pack(rec_df, category_strength_df, hot_pick_df)
-    return True
+    save_ok, save_msgs = _save_latest_recommendation_pack(rec_df, category_strength_df, hot_pick_df)
+    st.session_state[_k("latest_pack_permanent_ok")] = bool(save_ok)
+    if not save_ok:
+        st.session_state[_k("latest_pack_permanent_error")] = "本輪推薦已在本機完成，但最新推薦永久錨點未通過遠端驗證；請查看『本輪推薦永久保存明細』。"
+    else:
+        st.session_state[_k("latest_pack_permanent_error")] = ""
+    return bool(save_ok)
 
 
 def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -13936,6 +14081,9 @@ def main():
             else:
                 st.session_state[_k("result_fallback_notice")] = ""
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
+        _latest_pack_error_v185 = _safe_str(st.session_state.get(_k("latest_pack_permanent_error")))
+        if _latest_pack_error_v185:
+            st.error(_latest_pack_error_v185)
         # 每個交易日只保存一份輕量排名快照，供下一輪辨識真正續強與
         # 「結構分數黏著、但今日沒有新訊號」的重複推薦。此檔不是績效權威檔。
         if callable(save_rotation_snapshot):
@@ -14010,7 +14158,7 @@ def main():
             auto_source = st.session_state.get(_k("candidate_diagnosis_store"))
             if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
                 auto_source = rec_df
-            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source, background_write=True)
+            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source, background_write=False)  # V185：推薦紀錄需同步通過永久權威驗證後才算完成
             calibration_added = 0
             calibration_msgs: list[str] = []
             calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
@@ -14021,7 +14169,7 @@ def main():
             else:
                 calibration_msgs = ["校正研究樣本服務未載入。"]
             st.session_state[_k("auto_record_detail")] = [
-                f"正式/A-/雷達紀錄已處理/排程：{auto_added} 筆",
+                f"正式/A-/雷達紀錄永久權威已處理：{auto_added} 筆",
                 *[str(x) for x in (auto_msgs or [])],
                 f"校正研究樣本新增：{calibration_added} 筆｜近門檻 {calibration_summary.get('near', 0)}｜市場漏選強勢 {calibration_summary.get('missed', 0)}",
                 *[str(x) for x in (calibration_msgs or [])],
@@ -14030,10 +14178,10 @@ def main():
         except Exception as e:
             st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
 
-    # V184：頁首新鮮度是在掃描前先渲染；若本輪已完成並成功保存，
+    # V185：頁首新鮮度是在掃描前先渲染；本輪保存完成後重新選舉永久權威並只刷新一次。
     # 同一個 Streamlit run 會同時看到「舊7/9」與「本輪8/11」的矛盾文字。
     # 完成所有本機保存/背景排程後只 rerun 一次，刷新頁首，不會重跑掃描。
-    if submit_recommend or submit_refresh or resume_scan_btn:
+    if (submit_recommend or submit_refresh or resume_scan_btn) and bool(st.session_state.get(_k("latest_pack_permanent_ok"), False)):
         st.session_state[_k("v184_post_scan_ui_refresh")] = True
     if st.session_state.pop(_k("v184_post_scan_ui_refresh"), False):
         st.rerun()
@@ -14087,6 +14235,12 @@ def main():
     if saved_at:
         strategy_label = _safe_str(st.session_state.get('pick_strategy', '結合版'))
         st.caption(f"目前顯示的是已保存推薦結果｜保存時間：{saved_at}｜策略：{strategy_label}")
+        try:
+            latest_authority_v185, _authority_detail_v185 = _load_latest_recommendation_authority_v185()
+            if isinstance(latest_authority_v185, dict) and latest_authority_v185.get("full_snapshot_pending_or_older"):
+                st.warning("V185 已從永久推薦錨點恢復本輪日期與可操作名單；大型完整候選快照仍較舊或尚在遠端同步，但系統不會再回退顯示 2026-07-09。")
+        except Exception:
+            pass
 
     readiness_v171 = _load_recommendation_readiness_v171()
     readiness_status = _safe_str(readiness_v171.get("status"))

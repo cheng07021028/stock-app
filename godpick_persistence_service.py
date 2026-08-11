@@ -58,6 +58,7 @@ _RECORDS_LOCAL_LOCK = threading.RLock()
 NAMED_FIRESTORE_DOCS = {
     "godpick_recommend_list.json": "godpick_recommend_list",
     "godpick_latest_recommendations.json": "godpick_latest_recommendations",
+    "godpick_latest_run_anchor.json": "godpick_latest_run_anchor",
     "godpick_export_sync_settings.json": "godpick_export_sync_settings",
     "godpick_export_history.json": "godpick_export_history",
     "godpick_module_sync_state.json": "godpick_module_sync_state",
@@ -2031,6 +2032,48 @@ def _state_file_for(path_name: str) -> str:
     return f"{safe_stem}_sync_state.json"
 
 
+
+def _named_json_authority_key(
+    path_name: str,
+    source: str,
+    payload: Any,
+    state: Any,
+    fallback: datetime | None = None,
+) -> tuple[Any, ...]:
+    """Choose named JSON authority by business time for recommendation snapshots.
+
+    Repository files can be redeployed with an old recommendation payload.  Their
+    filesystem/state time may then look new even though the business snapshot is
+    weeks old.  For latest recommendation artifacts the saved/recommendation date
+    must therefore outrank technical file timestamps.
+    """
+    priority = {"local": 0, "github": 1, "firestore": 2}.get(source, 0)
+    base = Path(path_name).name
+    state_dict = state if isinstance(state, dict) else {}
+    activity = _state_epoch(state_dict, fallback)
+    try:
+        revision = int(state_dict.get("revision") or 0)
+    except Exception:
+        revision = 0
+    revision_epoch = (revision / 1_000_000_000.0) if revision > 10_000_000_000 else float(revision or 0)
+    activity = max(activity, revision_epoch)
+
+    if base in {"godpick_latest_recommendations.json", "godpick_latest_run_anchor.json"}:
+        data = payload if isinstance(payload, dict) else {}
+        business_date = _recommendation_date_text(
+            data.get("recommendation_date") or data.get("saved_at") or data.get("kline_date")
+        )
+        saved_at = _safe_str(data.get("saved_at")).replace("T", " ")[:26]
+        # Business date/time is authoritative. State/revision only breaks ties.
+        return (business_date, saved_at, activity, priority)
+
+    return (activity, revision, priority)
+
+
+def _named_json_nonempty(value: Any) -> bool:
+    return value not in (None, {}, [])
+
+
 def save_named_json_permanent(
     path_name: str,
     payload: Any,
@@ -2092,16 +2135,28 @@ def load_named_json_permanent(
         if _state_is_valid(data, state):
             valid.append((source, data, state, _state_epoch(state, fallback)))
     if valid:
-        source, chosen, chosen_state, _ = max(
+        source, chosen, chosen_state, chosen_fallback = max(
             valid,
-            key=lambda item: (item[3], int((item[2] or {}).get("revision") or 0), {"local": 0, "github": 1, "firestore": 2}.get(item[0], 0)),
+            key=lambda item: _named_json_authority_key(path_name, item[0], item[1], item[2], item[3]),
         )
     else:
-        source, chosen = next(
-            ((src, data) for src, data in [("firestore", fs_payload), ("github", gh_payload), ("local", local_payload)] if data not in (None, {}, [])),
-            ("default", copy.deepcopy(default)),
-        )
-        chosen_state = _new_state("named_json_durable_v2", chosen, path=path_name, migrated_from=source)
+        # Legacy installs may have payloads without state metadata.  Never use a
+        # hard-coded Firestore/GitHub/local priority for latest recommendation
+        # artifacts; compare the actual recommendation business timestamp.
+        legacy_candidates = [
+            ("local", local_payload, {}, local_mtime),
+            ("github", gh_payload, {}, datetime.min),
+            ("firestore", fs_payload, {}, fs_mtime),
+        ]
+        legacy_candidates = [x for x in legacy_candidates if _named_json_nonempty(x[1])]
+        if legacy_candidates:
+            source, chosen, _, _ = max(
+                legacy_candidates,
+                key=lambda item: _named_json_authority_key(path_name, item[0], item[1], item[2], item[3]),
+            )
+        else:
+            source, chosen = "default", copy.deepcopy(default)
+        chosen_state = _new_state("named_json_durable_v185", chosen, path=path_name, migrated_from=source)
 
     restored_state = dict(chosen_state or {})
     restored_state.update({

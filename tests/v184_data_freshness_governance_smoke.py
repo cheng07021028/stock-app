@@ -95,7 +95,7 @@ def test_page7_v184_wiring():
     assert '真正資料/分析失敗' in src
     assert '策略軟門檻提示' in src
     assert 'official_lag >= 2' in src
-    assert 'V184 latest recommendation authority' in src
+    assert any(x in src for x in ['V184 latest recommendation authority','V185 latest recommendation authority'])
     assert 'v184_post_scan_ui_refresh' in src
 
 
