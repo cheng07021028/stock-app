@@ -543,15 +543,23 @@ def run_official_factor_update_once(settings: dict[str, Any] | None = None, push
         )
         gh_msg = ""
         gh_ok = None
+        # V186 save_factor_cache itself performs verified runtime-data durability.
+        # page17 may still request an explicit push; the wrapper skips duplicate
+        # upload when the exact business-date version is already confirmed.
         if push_github:
             gh_ok, gh_msg = push_cache_to_github()
+        permanent_ok = bool(meta.get("permanent_ok"))
+        if gh_ok is True:
+            permanent_ok = True
         bounded_note = ""
         if meta.get("timed_out"):
             bounded_note = f"；已達 {meta.get('max_runtime_seconds', 75)} 秒上限，保留目前成果/舊有效快取"
+        persist_note = "；遠端永久化已確認" if permanent_ok else "；⚠️ 遠端永久化尚未確認，Reboot前不可視為完成"
         return {
-            "ok": True,
-            "message": f"完成官方因子更新：{len(df)} 筆，完整度>=60：{meta.get('complete_count', 0)}{bounded_note}",
+            "ok": bool(meta.get("ok", True) and (permanent_ok or not meta.get("saved"))),
+            "message": f"完成官方因子更新：{len(df)} 筆，完整度>=60：{meta.get('complete_count', 0)}{bounded_note}{persist_note}",
             "meta": meta, "github_ok": gh_ok, "github_msg": gh_msg,
+            "permanent_ok": permanent_ok,
         }
     except Exception as exc:
         return {"ok": False, "message": f"官方因子更新失敗：{type(exc).__name__}: {exc}", "meta": {}}

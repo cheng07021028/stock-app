@@ -2628,7 +2628,13 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     ) if isinstance(market_payload, dict) else None
     market_date = max([x for x in [market_date, row_market_date] if x is not None], default=None)
 
-    official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
+    # V186：冷啟動先透過 official_factor_service 做「業務日期權威選舉」。
+    # 不可直接讀部署包內的舊 JSON，否則 Streamlit Reboot 會把 runtime-data
+    # 的新官方因子重新退回 2026-07-11。
+    try:
+        official_payload = load_factor_cache() if callable(load_factor_cache) else _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
+    except Exception:
+        official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
     official_rows = official_payload.get("records", []) if isinstance(official_payload, dict) else []
     if not isinstance(official_rows, list):
         official_rows = []

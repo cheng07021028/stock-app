@@ -19,6 +19,7 @@ import math
 import os
 import re
 import time
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -46,10 +47,19 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v184_official_freshness_authority_20260811"
+CACHE_VERSION = "v186_official_factor_reboot_authority_20260811"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
+OFFICIAL_FACTOR_DURABLE_PATH = "official_factors_cache.json"
+OFFICIAL_FACTOR_AUTHORITY_STATE_FILE = BASE_DIR / "official_factors_authority_state.json"
+_AUTHORITY_RESTORE_LOCK = threading.Lock()
+_AUTHORITY_RESTORE_DONE = False
+_AUTHORITY_RESTORE_MESSAGE = "尚未執行永久權威恢復"
+_AUTHORITY_RESTORE_SOURCE = "local"
+_AUTHORITY_RESTORE_DATA_DATE = ""
+_LAST_PERSIST_OK = False
+_LAST_PERSIST_MESSAGE = "尚未執行V186永久化"
 
 class OfficialFactorBudgetExceeded(RuntimeError):
     """Raised when the bounded one-click update reaches its time/request budget."""
@@ -506,7 +516,7 @@ def _empty_factor_df() -> pd.DataFrame:
     return pd.DataFrame(columns=FACTOR_COLUMNS)
 
 
-def load_factor_cache() -> dict[str, Any]:
+def _read_local_factor_cache_raw() -> dict[str, Any]:
     if not CACHE_FILE.exists():
         return {
             "version": CACHE_VERSION,
@@ -515,7 +525,7 @@ def load_factor_cache() -> dict[str, Any]:
             "diagnostics": ["尚未建立官方因子快取。"],
         }
     try:
-        data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(CACHE_FILE.read_text(encoding="utf-8-sig"))
         if isinstance(data, list):
             return {"version": CACHE_VERSION, "updated_at": "", "records": data, "diagnostics": []}
         if isinstance(data, dict):
@@ -530,6 +540,120 @@ def load_factor_cache() -> dict[str, Any]:
             "diagnostics": [f"讀取 official_factors_cache.json 失敗：{exc}"],
         }
     return {"version": CACHE_VERSION, "updated_at": "", "records": [], "diagnostics": ["快取格式不明。"]}
+
+
+def _factor_payload_business_date(payload: Any) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    direct = _roc_or_iso_to_yyyymmdd(data.get("data_date"))
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    meta_date = _roc_or_iso_to_yyyymmdd(meta.get("data_date"))
+    dates = [x for x in (direct, meta_date) if x]
+    rows = data.get("records") if isinstance(data.get("records"), list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in (
+            "官方因子資料日期", "官方資料日期", "三大法人資料日期",
+            "法人資料日期", "估值資料日期", "FinMind資料日期",
+        ):
+            value = _roc_or_iso_to_yyyymmdd(row.get(field))
+            if value:
+                dates.append(value)
+                break
+    return max(dates) if dates else ""
+
+
+def _write_factor_authority_state(payload: dict[str, Any], *, permanent_ok: bool, message: str, source: str) -> None:
+    try:
+        import hashlib
+        compact = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        state = {
+            "version": "v186_official_factor_authority_state",
+            "updated_at": _now_text(),
+            "data_date": _factor_payload_business_date(payload),
+            "record_count": len(payload.get("records", [])) if isinstance(payload.get("records"), list) else 0,
+            "payload_hash": hashlib.sha256(compact.encode("utf-8")).hexdigest(),
+            "source": source,
+            "remote_permanent_confirmed": bool(permanent_ok),
+            "message": str(message or "")[:1500],
+        }
+        tmp = OFFICIAL_FACTOR_AUTHORITY_STATE_FILE.with_suffix(".json.tmp_v186")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(OFFICIAL_FACTOR_AUTHORITY_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _restore_official_factor_authority_once(*, force: bool = False) -> tuple[bool, str]:
+    """Restore the newest business-date factor cache after Streamlit reboot.
+
+    V184/V185 could recreate the repository's old packaged cache on every cold
+    boot.  This guard runs once per Python process (or when explicitly forced),
+    asks the durable persistence layer to elect Local/GitHub/Firestore by the
+    *data date*, and writes the winner back to the local authority file.
+    """
+    global _AUTHORITY_RESTORE_DONE, _AUTHORITY_RESTORE_MESSAGE
+    global _AUTHORITY_RESTORE_SOURCE, _AUTHORITY_RESTORE_DATA_DATE
+    if _AUTHORITY_RESTORE_DONE and not force:
+        return True, _AUTHORITY_RESTORE_MESSAGE
+    with _AUTHORITY_RESTORE_LOCK:
+        if _AUTHORITY_RESTORE_DONE and not force:
+            return True, _AUTHORITY_RESTORE_MESSAGE
+        before = _read_local_factor_cache_raw()
+        before_date = _factor_payload_business_date(before)
+        try:
+            from godpick_persistence_service import load_named_json_permanent
+            chosen, details = load_named_json_permanent(OFFICIAL_FACTOR_DURABLE_PATH, before)
+            chosen = chosen if isinstance(chosen, dict) else before
+            after_date = _factor_payload_business_date(chosen)
+            detail_text = "｜".join(str(x) for x in (details or []))
+            source = "local"
+            if "權威來源：github" in detail_text:
+                source = "github-runtime-data"
+            elif "權威來源：firestore" in detail_text:
+                source = "firestore"
+            _AUTHORITY_RESTORE_DONE = True
+            _AUTHORITY_RESTORE_SOURCE = source
+            _AUTHORITY_RESTORE_DATA_DATE = after_date
+            _AUTHORITY_RESTORE_MESSAGE = (
+                f"V186官方因子權威恢復：{source}｜{before_date or '未驗證'}→{after_date or '未驗證'}"
+            )
+            _write_factor_authority_state(chosen, permanent_ok=(source != "local"), message=_AUTHORITY_RESTORE_MESSAGE, source=source)
+            return True, _AUTHORITY_RESTORE_MESSAGE
+        except Exception as exc:
+            _AUTHORITY_RESTORE_DONE = True
+            _AUTHORITY_RESTORE_SOURCE = "local-fallback"
+            _AUTHORITY_RESTORE_DATA_DATE = before_date
+            _AUTHORITY_RESTORE_MESSAGE = f"V186永久權威讀取失敗，暫用本機：{type(exc).__name__}: {exc}"
+            return False, _AUTHORITY_RESTORE_MESSAGE
+
+
+def get_factor_authority_status() -> dict[str, Any]:
+    payload = _read_local_factor_cache_raw()
+    state: dict[str, Any] = {}
+    try:
+        if OFFICIAL_FACTOR_AUTHORITY_STATE_FILE.exists():
+            raw = json.loads(OFFICIAL_FACTOR_AUTHORITY_STATE_FILE.read_text(encoding="utf-8-sig"))
+            if isinstance(raw, dict):
+                state = raw
+    except Exception:
+        state = {}
+    return {
+        "version": CACHE_VERSION,
+        "data_date": _factor_payload_business_date(payload),
+        "record_count": len(payload.get("records", [])) if isinstance(payload.get("records"), list) else 0,
+        "restore_done": bool(_AUTHORITY_RESTORE_DONE),
+        "restore_source": _AUTHORITY_RESTORE_SOURCE,
+        "restore_message": _AUTHORITY_RESTORE_MESSAGE,
+        "last_persist_ok": bool(_LAST_PERSIST_OK),
+        "last_persist_message": _LAST_PERSIST_MESSAGE,
+        "state": state,
+    }
+
+
+def load_factor_cache(*, force_authority_restore: bool = False) -> dict[str, Any]:
+    _restore_official_factor_authority_once(force=bool(force_authority_restore))
+    return _read_local_factor_cache_raw()
 
 
 def _summarize_diagnostics(diagnostics: list[str] | None, max_items: int = 40) -> list[str]:
@@ -567,21 +691,63 @@ def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | No
     payload = {
         "version": CACHE_VERSION,
         "updated_at": _now_text(),
-        # V184：把「資料內容日期」提升為快取頂層欄位。頁面新鮮度判定
-        # 不得再拿檔案寫入時間冒充官方資料日期。
         "data_date": _safe_str((meta_safe or {}).get("data_date")),
         "record_count": len(records),
         "records": _json_safe(records),
         "diagnostics": _summarize_diagnostics(diagnostics or []),
         "meta": meta_safe,
     }
-    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # V186: this is critical business data.  Do not only queue an absolute-path
+    # background job: a Streamlit reboot can terminate that thread and the next
+    # process then falls back to the packaged July cache.  Persist the RELATIVE
+    # authority path synchronously so GitHub runtime-data (or another configured
+    # permanent layer) is confirmed before the update is reported complete.
+    permanent_ok = False
+    permanent_msg = ""
     try:
-        from godpick_durability_service import persist_json_async
-        persist_json_async(str(CACHE_FILE), payload, reason="V183 official factor cache")
-    except Exception:
-        pass
-    _append_log("success", len(records), _summarize_diagnostics(diagnostics or []))
+        from godpick_durability_service import persist_json_permanent
+        permanent_ok, permanent_msg = persist_json_permanent(
+            OFFICIAL_FACTOR_DURABLE_PATH, payload,
+            reason="V186 official factor business-date authority",
+        )
+    except Exception as exc:
+        permanent_msg = f"V186永久化服務例外：{type(exc).__name__}: {exc}"
+
+    if not CACHE_FILE.exists():
+        # Defensive local fallback if the persistence service was unavailable.
+        try:
+            tmp = CACHE_FILE.with_suffix(".json.tmp_v186")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(CACHE_FILE)
+        except Exception:
+            pass
+
+    _write_factor_authority_state(
+        payload, permanent_ok=permanent_ok, message=permanent_msg,
+        source="local+remote" if permanent_ok else "local-only",
+    )
+    persistence_note = (
+        "V186：官方因子已完成遠端永久化確認。"
+        if permanent_ok else
+        "V186：本機已保存，但遠端永久化尚未確認；Reboot 前請至第17頁重試永久化。"
+    )
+    _append_log(
+        "success" if permanent_ok else "local_only", len(records),
+        _summarize_diagnostics(list(payload.get("diagnostics", [])) + [persistence_note]),
+    )
+
+    global _AUTHORITY_RESTORE_DONE, _AUTHORITY_RESTORE_MESSAGE, _AUTHORITY_RESTORE_SOURCE, _AUTHORITY_RESTORE_DATA_DATE
+    global _LAST_PERSIST_OK, _LAST_PERSIST_MESSAGE
+    _LAST_PERSIST_OK = bool(permanent_ok)
+    _LAST_PERSIST_MESSAGE = str(permanent_msg or "")
+    _AUTHORITY_RESTORE_DONE = True
+    _AUTHORITY_RESTORE_SOURCE = "local+remote" if permanent_ok else "local-only"
+    _AUTHORITY_RESTORE_DATA_DATE = _factor_payload_business_date(payload)
+    _AUTHORITY_RESTORE_MESSAGE = (
+        f"V186官方因子保存：data_date={_AUTHORITY_RESTORE_DATA_DATE or '未驗證'}｜"
+        + ("遠端永久化已確認" if permanent_ok else "僅本機，遠端未確認")
+    )
     return payload
 
 
@@ -1968,7 +2134,13 @@ def build_official_factor_cache(
         }
         if save and should_save:
             save_factor_cache(out.to_dict(orient="records"), diagnostics=diagnostics, meta=meta)
+            authority_status = get_factor_authority_status()
+            meta["permanent_ok"] = bool(authority_status.get("last_persist_ok"))
+            meta["permanent_message"] = _safe_str(authority_status.get("last_persist_message"))
+            meta["authority_data_date"] = _safe_str(authority_status.get("data_date"))
         elif save and not should_save:
+            meta["permanent_ok"] = False
+            meta["permanent_message"] = "本輪品質保護未覆蓋既有快取，未建立新的永久版本。"
             _append_log("preserved_old_cache", int(len(out)), _summarize_diagnostics(diagnostics))
         return out, meta
     except Exception:
@@ -2046,13 +2218,13 @@ def export_cache_csv_bytes() -> bytes:
 
 def _github_cfg() -> dict[str, str]:
     if st is None:
-        return {"token": "", "owner": "", "repo": "", "branch": "main", "path": "official_factors_cache.json", "history_path": "official_factor_institutional_history.json"}
+        return {"token": "", "owner": "", "repo": "", "branch": os.getenv("GITHUB_RUNTIME_DATA_BRANCH") or os.getenv("GITHUB_REPO_BRANCH") or "runtime-data", "path": "official_factors_cache.json", "history_path": "official_factor_institutional_history.json"}
     secrets = getattr(st, "secrets", {})
     return {
         "token": _safe_str(secrets.get("GITHUB_TOKEN", "")),
         "owner": _safe_str(secrets.get("GITHUB_REPO_OWNER", "cheng07021028")) or "cheng07021028",
         "repo": _safe_str(secrets.get("GITHUB_REPO_NAME", "stock-app")) or "stock-app",
-        "branch": _safe_str(secrets.get("GITHUB_REPO_BRANCH", "main")) or "main",
+        "branch": (_safe_str(os.getenv("GITHUB_RUNTIME_DATA_BRANCH", "")) or _safe_str(secrets.get("GITHUB_RUNTIME_DATA_BRANCH", "")) or _safe_str(os.getenv("GITHUB_REPO_BRANCH", "")) or _safe_str(secrets.get("GITHUB_REPO_BRANCH", "runtime-data")) or "runtime-data"),
         "path": _safe_str(secrets.get("OFFICIAL_FACTORS_GITHUB_PATH", "official_factors_cache.json")) or "official_factors_cache.json",
         "history_path": _safe_str(secrets.get("OFFICIAL_FACTORS_HISTORY_GITHUB_PATH", "official_factor_institutional_history.json")) or "official_factor_institutional_history.json",
     }
@@ -2072,64 +2244,44 @@ def _github_url(owner: str, repo: str, path: str) -> str:
 
 
 def push_cache_to_github() -> tuple[bool, str]:
-    cfg = _github_cfg()
-    token = cfg.get("token", "")
-    if not token:
-        return False, "未設定 GITHUB_TOKEN，略過 GitHub 同步。"
-    if not CACHE_FILE.exists():
-        return False, "official_factors_cache.json 尚未建立。"
-    def push_one(local_path: Path, remote_path: str) -> tuple[bool, str]:
-        try:
-            url = _github_url(cfg["owner"], cfg["repo"], remote_path)
-            headers = _github_headers(token)
-            sha = ""
-            try:
-                r0 = requests.get(url, headers=headers, params={"ref": cfg["branch"]}, timeout=REQUEST_TIMEOUT)
-                if r0.status_code == 200:
-                    sha = r0.json().get("sha", "")
-            except Exception:
-                sha = ""
-            payload = {"message": f"Update official factors {CACHE_VERSION}",
-                       "content": base64.b64encode(local_path.read_bytes()).decode("ascii"), "branch": cfg["branch"]}
-            if sha:
-                payload["sha"] = sha
-            r = requests.put(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
-            return (r.status_code in (200, 201), f"{remote_path}: HTTP {r.status_code}")
-        except Exception as exc:
-            return False, f"{remote_path}: {_compact_error(exc)}"
-    ok_cache, msg_cache = push_one(CACHE_FILE, cfg["path"])
-    hist_msg = "history: 尚未建立"
-    ok_hist = True
-    if INSTITUTIONAL_HISTORY_FILE.exists():
-        ok_hist, hist_msg = push_one(INSTITUTIONAL_HISTORY_FILE, cfg["history_path"])
-    ok = bool(ok_cache and ok_hist)
-    return ok, ("GitHub 同步成功：" if ok else "GitHub 同步部分失敗：") + msg_cache + "｜" + hist_msg
+    """V186 verified durable sync; never write business data to the code branch."""
+    payload = _read_local_factor_cache_raw()
+    if not isinstance(payload, dict) or not isinstance(payload.get("records"), list) or not payload.get("records"):
+        return False, "official_factors_cache.json 尚未建立有效資料。"
+
+    # If the immediately preceding V186 save already confirmed the exact same
+    # payload, do not upload the multi-MB cache twice from page17.
+    try:
+        status = get_factor_authority_status()
+        state = status.get("state") if isinstance(status.get("state"), dict) else {}
+        if state.get("remote_permanent_confirmed") and state.get("data_date") == _factor_payload_business_date(payload):
+            return True, f"V186永久層已確認，無需重複上傳｜data_date={state.get('data_date') or '未驗證'}"
+    except Exception:
+        pass
+
+    try:
+        from godpick_durability_service import persist_json_permanent
+        ok, msg = persist_json_permanent(
+            OFFICIAL_FACTOR_DURABLE_PATH, payload, reason="V186 manual official-factor durable sync"
+        )
+        _write_factor_authority_state(
+            payload, permanent_ok=bool(ok), message=msg,
+            source="manual-local+remote" if ok else "manual-local-only",
+        )
+        return bool(ok), ("GitHub/runtime-data永久同步成功：" if ok else "永久同步未確認：") + str(msg)
+    except Exception as exc:
+        return False, f"永久同步例外：{type(exc).__name__}: {exc}"
+
 
 def read_cache_from_github() -> tuple[bool, str]:
-    cfg = _github_cfg()
-    token = cfg.get("token", "")
-    if not token:
-        return False, "未設定 GITHUB_TOKEN，無法從 GitHub 讀取。"
-    def pull_one(remote_path: str, local_path: Path, required: bool) -> tuple[bool, str]:
-        try:
-            url = _github_url(cfg["owner"], cfg["repo"], remote_path)
-            r = requests.get(url, headers=_github_headers(token), params={"ref": cfg["branch"]}, timeout=REQUEST_TIMEOUT)
-            if r.status_code == 404 and not required:
-                return True, f"{remote_path}: 尚未建立"
-            if r.status_code != 200:
-                return False, f"{remote_path}: HTTP {r.status_code}"
-            content = base64.b64decode(r.json().get("content", "")).decode("utf-8")
-            parsed = json.loads(content)
-            if required and (not isinstance(parsed, dict) or "records" not in parsed):
-                return False, f"{remote_path}: 格式不正確"
-            local_path.write_text(json.dumps(parsed, ensure_ascii=False, indent=2 if required else None), encoding="utf-8")
-            return True, f"{remote_path}: 已讀取"
-        except Exception as exc:
-            return False, f"{remote_path}: {_compact_error(exc)}"
-    ok_cache, msg_cache = pull_one(cfg["path"], CACHE_FILE, True)
-    if not ok_cache:
-        return False, "GitHub 讀取失敗：" + msg_cache
-    ok_hist, msg_hist = pull_one(cfg["history_path"], INSTITUTIONAL_HISTORY_FILE, False)
-    records = load_factor_cache().get("records", [])
-    return bool(ok_cache and ok_hist), f"已從 GitHub 讀取 official factors：{len(records) if isinstance(records, list) else 0} 筆｜{msg_hist}"
+    """Restore by business-date authority instead of blindly overwriting local."""
+    before = _factor_payload_business_date(_read_local_factor_cache_raw())
+    ok, msg = _restore_official_factor_authority_once(force=True)
+    after_payload = _read_local_factor_cache_raw()
+    after = _factor_payload_business_date(after_payload)
+    count = len(after_payload.get("records", [])) if isinstance(after_payload.get("records"), list) else 0
+    # Even if a remote call failed, keeping a newer local business date is the
+    # correct monotonic behavior.  Return warning in that case, but never regress.
+    return bool(ok), f"V186權威選舉完成：{before or '未驗證'}→{after or '未驗證'}｜{count}筆｜{msg}"
+
 

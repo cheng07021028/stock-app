@@ -24,6 +24,7 @@ from official_factor_service import (
     cache_status,
     export_cache_csv_bytes,
     finmind_config_status,
+    get_factor_authority_status,
     load_factor_frame,
     load_stock_universe,
     load_update_logs,
@@ -35,7 +36,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V182｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援｜法人 / 月營收 / PER / PBR / 殖利率快取中心｜供 07/08/10/14 讀取")
+st.caption("V186｜官方因子業務日期永久權威＋Reboot防回退｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援")
 
 
 def _fmt(v):
@@ -61,6 +62,16 @@ def _display_status() -> None:
     c4.metric("主要市場有效覆蓋率", f"{eligible_coverage:.1f}%")
     c5.metric("檔案大小 KB", s.get("size_kb", 0.0))
     c6.metric("更新時間", s.get("updated_at") or "未更新")
+    authority = get_factor_authority_status()
+    authority_state = authority.get("state") if isinstance(authority.get("state"), dict) else {}
+    data_date = authority.get("data_date") or "未驗證"
+    remote_ok = bool(authority_state.get("remote_permanent_confirmed"))
+    st.caption(
+        f"V186永久權威｜資料日期 {data_date}｜恢復來源 {authority.get('restore_source') or 'local'}｜"
+        f"遠端永久化 {'✅ 已確認' if remote_ok else '⚠️ 尚未確認'}"
+    )
+    if not remote_ok:
+        st.warning("目前官方因子尚未證實已寫入遠端永久層；若此時 Reboot，可能只能從較舊遠端版本恢復。請先執行更新或『同步快取到 GitHub』直到顯示已確認。")
     if eligible and eligible_complete == 0:
         st.warning("目前上市＋上櫃官方因子完整度>=60 為 0；代表主要市場來源仍未抓成功或資料不足，暫不建議接進 07 推薦分數。")
     elif eligible_complete > 0:
@@ -160,11 +171,15 @@ if do_update:
             st.warning(f"本次抓取完成 {len(df)} 筆，但完整度偏低，已保留舊有效快取。")
         else:
             suffix = "（已達安全上限並保存目前成果）" if meta.get("timed_out") else ""
-            st.success(
+            update_text = (
                 f"官方因子快取已更新：{len(df)} 筆；"
                 f"上市+上櫃完整>=60：{meta.get('eligible_complete_count', 0)}/{meta.get('eligible_count', 0)} "
                 f"（{float(meta.get('eligible_coverage', 0) or 0):.1f}%）。{suffix}"
             )
+            if meta.get("permanent_ok"):
+                st.success(update_text + "｜V186遠端永久化已確認")
+            else:
+                st.warning(update_text + "｜⚠️ 僅本機更新，遠端永久化尚未確認；請勿在完成同步前Reboot")
         st.caption(f"本輪耗時 {meta.get('elapsed_seconds', 0)} 秒｜網路請求 {meta.get('request_count', 0)}/{meta.get('request_budget', 0)}")
     else:
         st.error("官方因子快取更新失敗，請查看診斷訊息。")

@@ -638,6 +638,13 @@ def upsert_records_authority_fast(
         }
 
 def _secret(name: str, default: str = "") -> str:
+    # V186: runtime_branch_bootstrap writes the runtime-data branch to the
+    # environment before page modules load.  Prefer that process-level guard,
+    # then Streamlit Secrets.  This keeps durable business data off the code
+    # branch even if a page imports this service outside the home-page wrapper.
+    env_value = _safe_str(os.getenv(name, ""))
+    if env_value:
+        return env_value
     try:
         return _safe_str(st.secrets.get(name, default))
     except Exception:
@@ -645,11 +652,16 @@ def _secret(name: str, default: str = "") -> str:
 
 
 def github_config() -> dict[str, str]:
+    runtime_branch = (
+        _secret("GITHUB_RUNTIME_DATA_BRANCH", "")
+        or _secret("GITHUB_REPO_BRANCH", "runtime-data")
+        or "runtime-data"
+    )
     return {
         "token": _secret("GITHUB_TOKEN"),
         "owner": _secret("GITHUB_REPO_OWNER", "cheng07021028"),
         "repo": _secret("GITHUB_REPO_NAME", "stock-app"),
-        "branch": _secret("GITHUB_REPO_BRANCH", "main") or "main",
+        "branch": runtime_branch,
     }
 
 
@@ -2067,7 +2079,43 @@ def _named_json_authority_key(
         # Business date/time is authoritative. State/revision only breaks ties.
         return (business_date, saved_at, activity, priority)
 
+    if base == "official_factors_cache.json":
+        data = payload if isinstance(payload, dict) else {}
+        business_date = _official_factor_business_date(data)
+        updated_at = _safe_str(data.get("updated_at")).replace("T", " ")[:26]
+        # V186 monotonic authority: data_date first, never deployment mtime first.
+        return (business_date, updated_at, activity, priority)
+
     return (activity, revision, priority)
+
+
+def _official_factor_business_date(payload: Any) -> str:
+    """Return the newest real business-data date inside the factor cache.
+
+    File/redeploy time is never allowed to outrank this date.  This is the key
+    V186 reboot guard: a packaged 2026-07 cache cannot beat an 08-11 runtime
+    cache just because the old file was recreated during app startup.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    direct = _recommendation_date_text(data.get("data_date"))
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    meta_date = _recommendation_date_text(meta.get("data_date"))
+    candidates = [x for x in (direct, meta_date) if x]
+    rows = data.get("records") if isinstance(data.get("records"), list) else []
+    fields = (
+        "官方因子資料日期", "官方資料日期", "三大法人資料日期",
+        "法人資料日期", "估值資料日期", "FinMind資料日期",
+    )
+    # Sampling is not sufficient here: the cache may contain mixed dates.
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in fields:
+            value = _recommendation_date_text(row.get(field))
+            if value:
+                candidates.append(value)
+                break
+    return max(candidates) if candidates else ""
 
 
 def _named_json_nonempty(value: Any) -> bool:
@@ -2130,33 +2178,56 @@ def load_named_json_permanent(
         ("github", gh_payload, gh_state, datetime.min),
         ("firestore", fs_payload, fs_state, fs_mtime),
     ]
-    valid = []
-    for source, data, state, fallback in candidates:
-        if _state_is_valid(data, state):
-            valid.append((source, data, state, _state_epoch(state, fallback)))
-    if valid:
-        source, chosen, chosen_state, chosen_fallback = max(
-            valid,
-            key=lambda item: _named_json_authority_key(path_name, item[0], item[1], item[2], item[3]),
-        )
+    semantic_business_files = {
+        "godpick_latest_recommendations.json",
+        "godpick_latest_run_anchor.json",
+        "official_factors_cache.json",
+    }
+    base_name = Path(path_name).name
+
+    if base_name in semantic_business_files:
+        # V186: business-date artifacts must participate in authority election
+        # even when a legacy/new local payload does not yet have a sync-state
+        # sidecar.  Otherwise one old remote payload with a valid state can
+        # incorrectly suppress a newer local payload after reboot/rerun.
+        semantic_candidates = [x for x in candidates if _named_json_nonempty(x[1])]
+        if semantic_candidates:
+            source, chosen, chosen_state, chosen_fallback = max(
+                semantic_candidates,
+                key=lambda item: _named_json_authority_key(path_name, item[0], item[1], item[2], item[3]),
+            )
+            if not _state_is_valid(chosen, chosen_state):
+                chosen_state = _new_state(
+                    "named_json_durable_v186", chosen, path=path_name, migrated_from=source
+                )
+        else:
+            source, chosen = "default", copy.deepcopy(default)
+            chosen_state = _new_state("named_json_durable_v186", chosen, path=path_name, migrated_from=source)
     else:
-        # Legacy installs may have payloads without state metadata.  Never use a
-        # hard-coded Firestore/GitHub/local priority for latest recommendation
-        # artifacts; compare the actual recommendation business timestamp.
-        legacy_candidates = [
-            ("local", local_payload, {}, local_mtime),
-            ("github", gh_payload, {}, datetime.min),
-            ("firestore", fs_payload, {}, fs_mtime),
-        ]
-        legacy_candidates = [x for x in legacy_candidates if _named_json_nonempty(x[1])]
-        if legacy_candidates:
-            source, chosen, _, _ = max(
-                legacy_candidates,
+        valid = []
+        for source, data, state, fallback in candidates:
+            if _state_is_valid(data, state):
+                valid.append((source, data, state, _state_epoch(state, fallback)))
+        if valid:
+            source, chosen, chosen_state, chosen_fallback = max(
+                valid,
                 key=lambda item: _named_json_authority_key(path_name, item[0], item[1], item[2], item[3]),
             )
         else:
-            source, chosen = "default", copy.deepcopy(default)
-        chosen_state = _new_state("named_json_durable_v185", chosen, path=path_name, migrated_from=source)
+            legacy_candidates = [
+                ("local", local_payload, {}, local_mtime),
+                ("github", gh_payload, {}, datetime.min),
+                ("firestore", fs_payload, {}, fs_mtime),
+            ]
+            legacy_candidates = [x for x in legacy_candidates if _named_json_nonempty(x[1])]
+            if legacy_candidates:
+                source, chosen, _, _ = max(
+                    legacy_candidates,
+                    key=lambda item: _named_json_authority_key(path_name, item[0], item[1], item[2], item[3]),
+                )
+            else:
+                source, chosen = "default", copy.deepcopy(default)
+            chosen_state = _new_state("named_json_durable_v186", chosen, path=path_name, migrated_from=source)
 
     restored_state = dict(chosen_state or {})
     restored_state.update({
