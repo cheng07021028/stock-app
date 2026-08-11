@@ -18,7 +18,7 @@ import math
 import numpy as np
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "v184_verified_t1_governance_20260811"
+EXECUTION_GOVERNANCE_VERSION = "v187_source_trust_governance_20260811"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -270,6 +270,8 @@ def build_scan_quality_report(
     official_same_day_coverage = 0.0
     official_one_day_lag_coverage = 0.0
     official_missing_date_coverage = 0.0
+    official_source_trusted_coverage = 0.0
+    official_fresh_date_coverage = 0.0
     data_rows = 0
     if isinstance(candidate_frame, pd.DataFrame) and not candidate_frame.empty:
         frame = candidate_frame
@@ -292,7 +294,18 @@ def build_scan_quality_report(
         stock_date = _coalesce_date_series_v184(frame, [
             "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期",
         ])
-        source_trust = pd.to_numeric(frame.get("因子來源可信度", pd.Series([0] * len(frame), index=frame.index)), errors="coerce").fillna(0)
+        # V187: prefer the daily-domain provenance score derived from actual
+        # institution/valuation sources.  A single monthly/legacy fallback must
+        # not downgrade the whole row to 60 and falsely block verified T-1 data.
+        daily_trust = pd.to_numeric(
+            frame.get("每日因子來源可信度", pd.Series([float("nan")] * len(frame), index=frame.index)),
+            errors="coerce",
+        )
+        legacy_trust = pd.to_numeric(
+            frame.get("因子來源可信度", pd.Series([float("nan")] * len(frame), index=frame.index)),
+            errors="coerce",
+        )
+        source_trust = daily_trust.where(daily_trust.notna() & daily_trust.gt(0), legacy_trust).fillna(0)
         matched = official.notna() | official_status.ne("")
         effective = official.fillna(0).ge(45) | official_status.isin(["完整", "部分資料"])
         lag_days = pd.Series([999] * len(frame), index=frame.index, dtype="int64")
@@ -305,11 +318,17 @@ def build_scan_quality_report(
             lags = np.maximum(0, np.busday_count(older, newer)).astype(int)
             lag_days.loc[valid_dates] = lags
         fresh_enough = valid_dates & lag_days.le(1)
-        trusted_source = source_trust.ge(70) | source_trust.eq(0)
+        # V187: 0 now means unverified, not implicitly trusted.  Official-factor
+        # service migrates legacy caches from actual source evidence first.
+        trusted_source = source_trust.ge(70)
         trusted = effective & fresh_enough & trusted_source
+        source_trusted_effective = effective & trusted_source
+        fresh_effective = effective & fresh_enough
         official_match_coverage = float(matched.mean() * 100.0) if len(matched) else 0.0
         official_effective_coverage = float(effective.mean() * 100.0) if len(effective) else 0.0
         official_trusted_coverage = float(trusted.mean() * 100.0) if len(trusted) else 0.0
+        official_source_trusted_coverage = float(source_trusted_effective.mean() * 100.0) if len(source_trusted_effective) else 0.0
+        official_fresh_date_coverage = float(fresh_effective.mean() * 100.0) if len(fresh_effective) else 0.0
         official_same_day_coverage = float((effective & valid_dates & lag_days.eq(0)).mean() * 100.0) if len(effective) else 0.0
         official_one_day_lag_coverage = float((effective & valid_dates & lag_days.eq(1)).mean() * 100.0) if len(effective) else 0.0
         official_missing_date_coverage = float((effective & ~valid_dates).mean() * 100.0) if len(effective) else 0.0
@@ -328,6 +347,8 @@ def build_scan_quality_report(
         official_same_day_coverage = _safe_float(data.get("official_same_day_coverage_pct"), 0.0)
         official_one_day_lag_coverage = _safe_float(data.get("official_one_day_lag_coverage_pct"), 0.0)
         official_missing_date_coverage = _safe_float(data.get("official_missing_date_coverage_pct"), 0.0)
+        official_source_trusted_coverage = _safe_float(data.get("official_source_trusted_coverage_pct"), official_trusted_coverage)
+        official_fresh_date_coverage = _safe_float(data.get("official_fresh_date_coverage_pct"), official_trusted_coverage)
         data_rows = int(_safe_float(cached.get("rows"), 0))
 
     minimum_pool = max(100, min(300, int(expected * 0.15))) if expected > 0 else 100
@@ -364,11 +385,22 @@ def build_scan_quality_report(
         scope = f"有效因子覆蓋率僅{official_effective_coverage:.1f}%"
         reason = "法人、營收、估值等有效欄位未形成足夠覆蓋；技術面排名只能作研究雷達。"
     elif data_rows > 0 and official_trusted_coverage < 40.0:
-        # V183：『正式推薦暫停』不可同時輸出正式推薦可用=True。
-        # A- 僅保留為資料受限研究候選，由獨立欄位說明，不等於買進許可。
-        status, level, usable, factor = "官方因子日期/可信度不足｜正式推薦暫停", "warning", False, 0.0
-        scope = f"有效{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
-        reason = "官方因子有有效內容，但日期未驗證、落後超過1日或來源可信度不足；可保留資料受限A-研究候選，但正式推薦與新倉倉位均暫停。"
+        # V187: diagnose the actual blocker instead of combining date/source into
+        # one vague red warning.  This makes 83% valid + 83% verified T-1 + low
+        # stale trust flags immediately identifiable and auditable.
+        if official_fresh_date_coverage >= 70.0 and official_source_trusted_coverage < 40.0:
+            status = "官方因子來源可信度不足｜正式推薦暫停"
+            scope = f"有效{official_effective_coverage:.1f}%／日期T-1內{official_fresh_date_coverage:.1f}%／來源可信{official_source_trusted_coverage:.1f}%"
+            reason = "官方日期已達同日/T-1要求，但來源可信覆蓋不足70%；請重新校正來源證據或更新官方快取。資料受限A-可研究，正式新倉暫停。"
+        elif official_source_trusted_coverage >= 70.0 and official_fresh_date_coverage < 40.0:
+            status = "官方因子日期過舊/未驗證｜正式推薦暫停"
+            scope = f"有效{official_effective_coverage:.1f}%／來源可信{official_source_trusted_coverage:.1f}%／日期T-1內{official_fresh_date_coverage:.1f}%"
+            reason = "官方來源本身可信，但多數資料未達同日/T-1新鮮度；請更新官方快取。資料受限A-可研究，正式新倉暫停。"
+        else:
+            status = "官方因子日期/來源可信度不足｜正式推薦暫停"
+            scope = f"有效{official_effective_coverage:.1f}%／日期T-1內{official_fresh_date_coverage:.1f}%／來源可信{official_source_trusted_coverage:.1f}%"
+            reason = "官方因子的日期與來源可信度均未達正式門檻；可保留資料受限A-研究候選，但正式推薦與新倉倉位均暫停。"
+        level, usable, factor = "warning", False, 0.0
     elif data_rows > 0 and official_effective_coverage < 70.0:
         status, level, usable, factor = "官方因子有效覆蓋不足｜正式推薦暫停／A-研究", "warning", False, 0.0
         scope = f"有效因子覆蓋率{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
@@ -432,6 +464,8 @@ def build_scan_quality_report(
         "官方紀錄匹配率%": round(official_match_coverage, 2),
         "官方有效因子覆蓋率%": round(official_effective_coverage, 2),
         "官方最新可信覆蓋率%": round(official_trusted_coverage, 2),
+        "官方來源可信覆蓋率%": round(official_source_trusted_coverage, 2),
+        "官方日期T-1內覆蓋率%": round(official_fresh_date_coverage, 2),
         "官方同日對齊覆蓋率%": round(official_same_day_coverage, 2),
         "官方落後1日覆蓋率%": round(official_one_day_lag_coverage, 2),
         "官方日期未驗證覆蓋率%": round(official_missing_date_coverage, 2),
@@ -451,6 +485,7 @@ def apply_scan_quality_to_frame(df: pd.DataFrame | None, report: dict[str, Any] 
         "預計掃描數", "成功分析數", "掃描覆蓋率%", "有效K線資料率%",
         "歷史資料成功率%", "流動性資料覆蓋率%", "官方因子覆蓋率%",
         "官方紀錄匹配率%", "官方有效因子覆蓋率%", "官方最新可信覆蓋率%",
+        "官方來源可信覆蓋率%", "官方日期T-1內覆蓋率%",
         "官方同日對齊覆蓋率%", "官方落後1日覆蓋率%", "官方日期未驗證覆蓋率%", "掃描品質說明",
     ]:
         out[col] = data.get(col, "")

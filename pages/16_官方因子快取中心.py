@@ -25,9 +25,11 @@ from official_factor_service import (
     export_cache_csv_bytes,
     finmind_config_status,
     get_factor_authority_status,
+    load_factor_cache,
     load_factor_frame,
     load_stock_universe,
     load_update_logs,
+    save_factor_cache,
     push_cache_to_github,
     read_cache_from_github,
 )
@@ -36,7 +38,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V186｜官方因子業務日期永久權威＋Reboot防回退｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援")
+st.caption("V187｜官方因子來源可信度治理＋V186 Reboot永久權威｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援")
 
 
 def _fmt(v):
@@ -92,14 +94,21 @@ def _display_status() -> None:
         if "因子備援來源" in df.columns:
             fallback_rows = int(df["因子備援來源"].astype(str).str.strip().ne("").sum())
         official_only_rows = max(0, len(df) - fallback_rows)
-        a, b, c = st.columns(3)
+        a, b, c, d = st.columns(4)
         a.metric("純官方資料列", official_only_rows)
         b.metric("含備援/舊快取補值", fallback_rows)
-        if "因子來源可信度" in df.columns:
-            trust = pd.to_numeric(df["因子來源可信度"], errors="coerce").dropna()
-            c.metric("平均來源可信度", f"{trust.mean():.1f}" if not trust.empty else "-")
-        else:
-            c.metric("平均來源可信度", "-")
+        overall_trust = pd.to_numeric(df.get("因子來源可信度", pd.Series(dtype=float)), errors="coerce").dropna()
+        daily_trust = pd.to_numeric(df.get("每日因子來源可信度", pd.Series(dtype=float)), errors="coerce").dropna()
+        c.metric("平均來源可信度", f"{overall_trust.mean():.1f}" if not overall_trust.empty else "-")
+        d.metric("每日高可信覆蓋", f"{(daily_trust.ge(70).mean()*100):.1f}%" if not daily_trust.empty else "-")
+        if "來源可信度狀態" in df.columns:
+            trust_counts = df["來源可信度狀態"].astype(str).value_counts()
+            st.caption(
+                "V187來源證據：" + "｜".join(
+                    f"{label} {int(trust_counts.get(label, 0))}檔"
+                    for label in ["官方高可信", "可信備援", "低可信/舊快取", "來源未驗證"]
+                )
+            )
     with st.expander("快取狀態 / 診斷", expanded=False):
         st.write(f"路徑：`{s.get('path', '')}`")
         diagnostics = s.get("diagnostics", []) or []
@@ -111,7 +120,7 @@ def _display_status() -> None:
 
 
 with st.sidebar:
-    st.header("V182 更新設定")
+    st.header("V187 更新設定")
     market_filter = st.selectbox("更新市場", ["全部", "上市", "上櫃"], index=0)
     scan_limit = st.selectbox("測試/更新筆數", [0, 50, 200, 500, 1000, 1500, 2000], index=0, help="0 = 使用股票主檔全部股票。")
     include_institutional = st.checkbox("更新法人買賣超", value=True)
@@ -131,15 +140,16 @@ with st.sidebar:
     do_update = st.button("更新官方因子快取", type="primary", use_container_width=True)
     do_pull = st.button("從 GitHub 讀取快取", use_container_width=True)
     do_push = st.button("同步快取到 GitHub", use_container_width=True)
+    do_trust_migrate = st.button("V187 校正來源可信度並永久保存", use_container_width=True, help="不重新抓網路；依法人/營收/估值實際來源欄位重建可信度，修復舊版被單一備援欄位誤降為60/82分的資料。")
 
 st.info(
-    "V182 來源階梯：① TWSE current OpenAPI/T86 ＋ TPEx current OpenAPI；"
+    "V187 沿用V182來源階梯：① TWSE current OpenAPI/T86 ＋ TPEx current OpenAPI；"
     "② 已知 404 的舊 TPEx/MOPS 路徑預設停用，不再重複浪費請求；③ 完整增量模式才用 FinMind 對仍缺值股票逐檔補值；"
     "④ 最後保留前次有效快取。官方值永遠優先，來源、資料日期、可信度與補值欄位數都會保留。"
     "第 07 頁只讀快取，不會在推薦時即時大量呼叫外部 API。"
 )
 st.warning(
-    "安全修正：V182 已停止把 FINMIND_TOKEN 放在 URL query string，也會遮蔽診斷中的 token。"
+    "安全修正：V182起已停止把 FINMIND_TOKEN 放在 URL query string，也會遮蔽診斷中的 token。"
     "如果舊版錯誤畫面/截圖曾顯示完整 token，建議在 FinMind 重新產生 token，並只更新 Streamlit Secrets。"
 )
 if not finmind_config_status().get("token_configured"):
@@ -148,6 +158,24 @@ if not finmind_config_status().get("token_configured"):
 if do_pull:
     ok, msg = read_cache_from_github()
     (st.success if ok else st.warning)(msg)
+
+if do_trust_migrate:
+    with st.spinner("正在依實際來源證據重新校正可信度並永久保存..."):
+        current_cache = load_factor_cache()
+        current_df = load_factor_frame()  # load_factor_frame 已執行 V187 舊快取遷移
+        if current_df is None or current_df.empty:
+            st.warning("目前沒有可校正的官方因子快取。")
+        else:
+            meta = current_cache.get("meta") if isinstance(current_cache.get("meta"), dict) else {}
+            diagnostics = list(current_cache.get("diagnostics") or [])
+            diagnostics.append("V187：已依逐域來源證據重建因子來源可信度/每日因子來源可信度。")
+            saved = save_factor_cache(current_df.to_dict("records"), diagnostics=diagnostics, meta=meta)
+            authority = get_factor_authority_status()
+            state = authority.get("state") if isinstance(authority.get("state"), dict) else {}
+            remote_ok = bool(state.get("remote_permanent_confirmed"))
+            trusted = pd.to_numeric(current_df.get("每日因子來源可信度", pd.Series(dtype=float)), errors="coerce").fillna(0)
+            msg = f"已校正 {len(current_df)} 筆；每日來源可信>=70：{int(trusted.ge(70).sum())} 筆（{trusted.ge(70).mean()*100:.1f}%）。"
+            (st.success if remote_ok else st.warning)(msg + ("｜遠端永久化已確認" if remote_ok else "｜僅本機完成，遠端永久化尚未確認"))
 
 if do_update:
     limit = int(scan_limit) if int(scan_limit) > 0 else None
@@ -177,7 +205,7 @@ if do_update:
                 f"（{float(meta.get('eligible_coverage', 0) or 0):.1f}%）。{suffix}"
             )
             if meta.get("permanent_ok"):
-                st.success(update_text + "｜V186遠端永久化已確認")
+                st.success(update_text + "｜V187遠端永久化已確認")
             else:
                 st.warning(update_text + "｜⚠️ 僅本機更新，遠端永久化尚未確認；請勿在完成同步前Reboot")
         st.caption(f"本輪耗時 {meta.get('elapsed_seconds', 0)} 秒｜網路請求 {meta.get('request_count', 0)}/{meta.get('request_budget', 0)}")
@@ -217,7 +245,7 @@ else:
         "法人籌碼官方分數", "外資近5日買賣超", "投信近5日買賣超", "三大法人近5日合計", "法人連買天數",
         "營收成長官方分數", "月營收YoY%", "月營收MoM%", "累計營收YoY%", "營收年月",
         "官方估值風險分數", "PER本益比", "估算EPS", "PBR股價淨值比", "股利殖利率%",
-        "官方因子更新時間", "官方因子資料源",
+        "官方因子更新時間", "官方因子資料源", "因子來源可信度", "每日因子來源可信度", "來源可信度狀態", "來源可信度說明",
     ]
     cols = [c for c in priority_cols if c in show_df.columns] + [c for c in show_df.columns if c not in priority_cols]
     st.dataframe(show_df[cols].map(_fmt) if hasattr(show_df, "map") else show_df[cols].applymap(_fmt), use_container_width=True, hide_index=True)
@@ -236,9 +264,12 @@ if logs:
 else:
     st.caption("尚無更新紀錄。")
 
-with st.expander("V182 說明", expanded=False):
+with st.expander("V187／V182 說明", expanded=False):
     st.markdown(
         """
+- V187 修正來源可信度治理：單一 FinMind／前次快取補到一個欄位，不再把整列官方資料直接降成 82／60 分。可信度改由法人、估值、營收各自的實際來源證據重建。
+- `每日因子來源可信度` 專供第07頁交易日治理；法人／估值為官方 TWSE/TPEx 時可維持高可信，月營收或其他備援不會錯誤拖垮整列。
+- 舊快取在 `load_factor_frame()` 讀取時會即時遷移；若要把校正結果寫回 runtime-data，請按「V187 校正來源可信度並永久保存」。
 - 本頁是官方因子資料層，不會取代 07 股神推薦；07 只讀快取，不在推薦流程大量打外部 API。
 - V182 將上櫃估值改為 TPEx `tpex_mainboard_peratio_analysis`、上櫃法人改為 `tpex_3insti_daily_trading`、上櫃營收改為 `mopsfin_t187ap05_O` current OpenAPI。
 - 上市估值維持 TWSE `BWIBBU_ALL`；上市營收使用 TWSE OpenAPI；上市法人維持 T86。

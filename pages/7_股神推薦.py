@@ -11713,6 +11713,8 @@ def _phase80_build_recommendation_summary(
         "官方紀錄匹配率%": float(report.get("官方紀錄匹配率%", 0) or 0),
         "官方有效因子覆蓋率%": float(report.get("官方有效因子覆蓋率%", report.get("官方因子覆蓋率%", 0)) or 0),
         "官方最新可信覆蓋率%": float(report.get("官方最新可信覆蓋率%", 0) or 0),
+        "官方來源可信覆蓋率%": float(report.get("官方來源可信覆蓋率%", 0) or 0),
+        "官方日期T-1內覆蓋率%": float(report.get("官方日期T-1內覆蓋率%", 0) or 0),
         "官方同日對齊覆蓋率%": float(report.get("官方同日對齊覆蓋率%", 0) or 0),
         "官方落後1日覆蓋率%": float(report.get("官方落後1日覆蓋率%", 0) or 0),
         "推薦適用範圍": scope,
@@ -12362,7 +12364,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         {"label": "預計掃描", "value": str(int(row.get("預計掃描數", 0))), "delta": "檔"},
         {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('有效K線資料率%', 0)):.1f}%"},
         {"label": "流動性覆蓋", "value": f"{float(row.get('流動性資料覆蓋率%', 0)):.1f}%", "delta": _safe_str(row.get("推薦適用範圍"))},
-        {"label": "官方有效覆蓋", "value": f"{float(row.get('官方有效因子覆蓋率%', row.get('官方因子覆蓋率%', 0))):.1f}%", "delta": f"匹配 {float(row.get('官方紀錄匹配率%', 0)):.1f}%｜同日 {float(row.get('官方同日對齊覆蓋率%', 0)):.1f}%｜落後1日 {float(row.get('官方落後1日覆蓋率%', 0)):.1f}%"},
+        {"label": "官方有效覆蓋", "value": f"{float(row.get('官方有效因子覆蓋率%', row.get('官方因子覆蓋率%', 0))):.1f}%", "delta": f"最新可信 {float(row.get('官方最新可信覆蓋率%', 0)):.1f}%｜來源可信 {float(row.get('官方來源可信覆蓋率%', 0)):.1f}%｜T-1內 {float(row.get('官方日期T-1內覆蓋率%', 0)):.1f}%"},
         {"label": "正式推薦", "value": str(int(row.get("正式推薦檔數", 0))), "delta": "檔"},
         {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": f"可操作{int(row.get('A-可操作檔數', 0))}／封鎖{int(row.get('A-大盤封鎖檔數', 0))}"},
     ])
@@ -14292,13 +14294,21 @@ def main():
             {"label": "預計掃描", "value": int(scan_report_now.get("預計掃描數", len(universe_items)) or len(universe_items)), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "成功分析", "value": int(scan_report_now.get("成功分析數", candidate_count_now) or candidate_count_now), "delta": f"有效K線 {float(scan_report_now.get('有效K線資料率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
             {"label": "流動性覆蓋", "value": f"{float(scan_report_now.get('流動性資料覆蓋率%', 0) or 0):.1f}%", "delta": _safe_str(scan_report_now.get("推薦適用範圍")), "delta_class": "pro-kpi-delta-flat"},
-            {"label": "官方有效覆蓋", "value": f"{float(scan_report_now.get('官方有效因子覆蓋率%', scan_report_now.get('官方因子覆蓋率%', 0)) or 0):.1f}%", "delta": f"匹配 {float(scan_report_now.get('官方紀錄匹配率%', 0) or 0):.1f}%｜同日 {float(scan_report_now.get('官方同日對齊覆蓋率%', 0) or 0):.1f}%｜落後1日 {float(scan_report_now.get('官方落後1日覆蓋率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "官方有效覆蓋", "value": f"{float(scan_report_now.get('官方有效因子覆蓋率%', scan_report_now.get('官方因子覆蓋率%', 0)) or 0):.1f}%", "delta": f"最新可信 {float(scan_report_now.get('官方最新可信覆蓋率%', 0) or 0):.1f}%｜來源可信 {float(scan_report_now.get('官方來源可信覆蓋率%', 0) or 0):.1f}%｜T-1內 {float(scan_report_now.get('官方日期T-1內覆蓋率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
             {"label": "完整候選池", "value": candidate_count_now, "delta": "非買進清單", "delta_class": "pro-kpi-delta-flat"},
             {"label": "作戰候選", "value": len(rec_df), "delta": "完成最終分流", "delta_class": "pro-kpi-delta-flat"},
             {"label": "主流攻擊/突破", "value": attack_count + breakout_count, "delta": "仍需最終操作許可", "delta_class": "pro-kpi-delta-flat"},
             {"label": "排除/弱勢", "value": exclude_count + weak_count + cold_count, "delta": "不買/冷門隔離", "delta_class": "pro-kpi-delta-flat"},
         ]
     )
+    if isinstance(scan_report_now, dict) and scan_report_now:
+        st.caption(
+            "V187 官方因子治理｜"
+            f"有效 {float(scan_report_now.get('官方有效因子覆蓋率%', 0) or 0):.1f}%｜"
+            f"日期T-1內 {float(scan_report_now.get('官方日期T-1內覆蓋率%', 0) or 0):.1f}%｜"
+            f"來源可信 {float(scan_report_now.get('官方來源可信覆蓋率%', 0) or 0):.1f}%｜"
+            f"最終最新可信 {float(scan_report_now.get('官方最新可信覆蓋率%', 0) or 0):.1f}%"
+        )
     if isinstance(scan_report_now, dict) and scan_report_now and not bool(scan_report_now.get("正式推薦可用", False)):
         _quality_text = _safe_str(scan_report_now.get("掃描品質說明")) or "本輪掃描或資料品質不足；目前僅作條件式參考。"
         if _safe_str(scan_report_now.get("掃描品質等級")) == "legacy_cache":

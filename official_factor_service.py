@@ -47,7 +47,7 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v186_official_factor_reboot_authority_20260811"
+CACHE_VERSION = "v187_official_factor_trust_governance_20260811"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -162,6 +162,9 @@ FACTOR_COLUMNS = [
     "因子主要來源",
     "因子備援來源",
     "因子來源可信度",
+    "每日因子來源可信度",
+    "來源可信度狀態",
+    "來源可信度說明",
     "備援補值欄位數",
     "FinMind資料日期",
     "法人資料日期",
@@ -687,6 +690,15 @@ def _existing_complete_count() -> int:
 
 
 def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    # V187 permanent migration: every newly saved cache carries evidence-based
+    # source trust so Reboot/runtime-data restore cannot resurrect stale 60-point
+    # whole-row trust flags from V182-V186.
+    migrated_records: list[dict[str, Any]] = []
+    for raw in records or []:
+        item = dict(raw) if isinstance(raw, dict) else {}
+        item.update(_derive_source_trust_v187(item))
+        migrated_records.append(item)
+    records = migrated_records
     meta_safe = _json_safe(meta or {})
     payload = {
         "version": CACHE_VERSION,
@@ -785,6 +797,122 @@ def _row_daily_factor_date_v184(row: Any) -> str:
     return min(values) if values else ""
 
 
+def _source_score_v187(source: Any) -> int:
+    """Evidence-based trust score for one provenance string.
+
+    This never upgrades a row merely because a value exists.  Official exchange
+    and MOPS provenance is high trust, FinMind is a structured backup, and an
+    unnamed/previous cache alone remains below the formal 70-point threshold.
+    """
+    text = _safe_str(source).upper()
+    if not text:
+        return 0
+    if any(token in text for token in ["TWSE", "TPEX", "MOPS", "OPENAPI", "OFFICIAL_DAILY_HISTORY"]):
+        return 100
+    if "FINMIND" in text:
+        return 82
+    if any(token in text for token in ["前次有效快取", "PREVIOUS_CACHE", "LEGACY_CACHE", "CACHE"]):
+        return 60
+    return 50
+
+
+def _has_domain_value_v187(row: Any, columns: list[str]) -> bool:
+    getter = row.get if hasattr(row, "get") else (lambda _k, _d="": _d)
+    for col in columns:
+        value = getter(col, "")
+        if _safe_str(value):
+            number = _to_float(value, None)
+            if number is not None or _safe_str(value) not in {"", "--", "-", "N/A", "NA"}:
+                return True
+    return False
+
+
+def _derive_source_trust_v187(row: Any) -> dict[str, Any]:
+    """Rebuild trust from actual per-domain provenance instead of stale row flags.
+
+    Daily execution governance cares primarily about institution/valuation
+    provenance; monthly revenue is useful for the overall factor score but does
+    not define the trading-day freshness gate.  A previous-cache fill therefore
+    cannot downgrade an otherwise official daily row.
+    """
+    getter = row.get if hasattr(row, "get") else (lambda _k, _d="": _d)
+    generic_source = _safe_str(getter("官方因子資料源", "")) or _safe_str(getter("因子主要來源", ""))
+    fallback_source = _safe_str(getter("因子備援來源", ""))
+
+    domains = {
+        "法人": {
+            "source": _safe_str(getter("法人資料源", "")) or _safe_str(getter("FinMind法人資料源", "")),
+            "date": _roc_or_iso_to_yyyymmdd(getter("法人資料日期", "")) or _roc_or_iso_to_yyyymmdd(getter("FinMind資料日期", "")),
+            "has": _has_domain_value_v187(row, ["外資近1日買賣超", "投信近1日買賣超", "自營商近1日買賣超", "三大法人近1日合計", "法人籌碼官方分數"]),
+            "weight": 0.45,
+            "daily_weight": 0.60,
+        },
+        "估值": {
+            "source": _safe_str(getter("估值資料源", "")) or _safe_str(getter("FinMind估值資料源", "")),
+            "date": _roc_or_iso_to_yyyymmdd(getter("估值資料日期", "")) or _roc_or_iso_to_yyyymmdd(getter("FinMind資料日期", "")),
+            "has": _has_domain_value_v187(row, ["PER本益比", "PBR股價淨值比", "股利殖利率%", "估算EPS", "官方估值風險分數"]),
+            "weight": 0.30,
+            "daily_weight": 0.40,
+        },
+        "營收": {
+            "source": _safe_str(getter("營收資料源", "")) or _safe_str(getter("FinMind營收資料源", "")),
+            "date": _roc_or_iso_to_yyyymmdd(getter("營收資料日期", "")) or _roc_or_iso_to_yyyymmdd(getter("FinMind資料日期", "")),
+            "has": _has_domain_value_v187(row, ["當月營收", "月營收MoM%", "月營收YoY%", "累計營收YoY%", "營收成長官方分數"]),
+            "weight": 0.25,
+            "daily_weight": 0.0,
+        },
+    }
+
+    detail: list[str] = []
+    overall_num = overall_den = 0.0
+    daily_num = daily_den = 0.0
+    for name, info in domains.items():
+        source = info["source"]
+        if not source and (info["has"] or info["date"]):
+            source = generic_source
+        score = _source_score_v187(source)
+        if score <= 0 and fallback_source and (info["has"] or info["date"]):
+            score = _source_score_v187(fallback_source)
+            source = source or fallback_source
+        if info["has"] or info["date"] or source:
+            detail.append(f"{name}:{source or '來源未驗證'}={score}")
+            if score > 0:
+                overall_num += score * float(info["weight"])
+                overall_den += float(info["weight"])
+                if float(info["daily_weight"]) > 0 and (info["date"] or info["has"]):
+                    daily_num += score * float(info["daily_weight"])
+                    daily_den += float(info["daily_weight"])
+
+    generic_score = _source_score_v187(generic_source)
+    legacy_score = int(_to_float(getter("因子來源可信度", ""), 0) or 0)
+    overall = round(overall_num / overall_den) if overall_den > 0 else (generic_score or legacy_score)
+    daily = round(daily_num / daily_den) if daily_den > 0 else (generic_score or legacy_score)
+
+    # Never let an unrelated previous-cache field lower verified official daily
+    # provenance. Conversely, do not magically turn unknown legacy rows into 100.
+    overall = max(0, min(100, int(overall or 0)))
+    daily = max(0, min(100, int(daily or 0)))
+    status = "官方高可信" if daily >= 90 else "可信備援" if daily >= 70 else "低可信/舊快取" if daily > 0 else "來源未驗證"
+    return {
+        "因子來源可信度": overall,
+        "每日因子來源可信度": daily,
+        "來源可信度狀態": status,
+        "來源可信度說明": "｜".join(detail)[:360],
+    }
+
+
+def _apply_source_trust_migration_v187(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    derived = [_derive_source_trust_v187(row) for row in out.to_dict("records")]
+    if derived:
+        ddf = pd.DataFrame(derived, index=out.index)
+        for col in ["因子來源可信度", "每日因子來源可信度", "來源可信度狀態", "來源可信度說明"]:
+            out[col] = ddf[col]
+    return out
+
+
 def load_factor_frame() -> pd.DataFrame:
     cache = load_factor_cache()
     records = cache.get("records", [])
@@ -801,6 +929,10 @@ def load_factor_frame() -> pd.DataFrame:
     for col in ["官方資料日期", "官方因子資料日期"]:
         current = df[col].map(_roc_or_iso_to_yyyymmdd)
         df[col] = current.where(current.astype(str).str.len().eq(8), derived)
+    # V187 legacy/live-cache migration: recompute provenance from actual domain
+    # source fields every load.  This immediately repairs V182-V186 rows whose
+    # whole-row trust was downgraded to 60/82 by a single fallback-filled field.
+    df = _apply_source_trust_migration_v187(df)
     return df[FACTOR_COLUMNS + [c for c in df.columns if c not in FACTOR_COLUMNS]].copy()
 
 
@@ -1904,9 +2036,16 @@ def _coalesce_fallback(df: pd.DataFrame, fallback: pd.DataFrame, source_name: st
     if "因子備援來源" not in merged.columns:
         merged["因子備援來源"]=""
     merged.loc[touched,"因子備援來源"]=source_name
+    # V187: a single fallback-filled field must NOT downgrade the whole row.
+    # Example: TWSE/TPEX daily institution + valuation are official, while one
+    # monthly/optional field is restored from the previous cache.  V186 used to
+    # set the entire row to 60/82 here, which later caused 83% valid T-1 data to
+    # be misclassified as untrusted and blocked all formal recommendations.
     if "因子來源可信度" not in merged.columns:
-        merged["因子來源可信度"]=100
-    merged.loc[touched,"因子來源可信度"]=trust_score
+        merged["因子來源可信度"]=""
+    existing_trust=pd.to_numeric(merged["因子來源可信度"],errors="coerce")
+    only_missing=touched & (existing_trust.isna() | existing_trust.le(0))
+    merged.loc[only_missing,"因子來源可信度"]=trust_score
     if "FinMind資料日期" in temp:
         tc=temp["FinMind資料日期"]
         if "FinMind資料日期" not in merged.columns:
@@ -2080,8 +2219,10 @@ def build_official_factor_cache(
             item["官方因子更新時間"] = update_time
             item["官方因子資料源"] = ",".join(sources)
             item["因子主要來源"] = "TWSE/TPEx/MOPS"
-            if not _safe_str(item.get("因子來源可信度")):
-                item["因子來源可信度"] = 100
+            # V187: derive trust from each domain's actual source after all
+            # official/fallback merges.  Do not use a single fallback touch as
+            # the trust score for the entire row.
+            item.update(_derive_source_trust_v187(item))
             score_rows.append(item)
         out = pd.DataFrame(score_rows)
         for c in FACTOR_COLUMNS:
@@ -2244,10 +2385,21 @@ def _github_url(owner: str, repo: str, path: str) -> str:
 
 
 def push_cache_to_github() -> tuple[bool, str]:
-    """V186 verified durable sync; never write business data to the code branch."""
+    """V187 verified durable sync; migrate provenance before remote persistence."""
     payload = _read_local_factor_cache_raw()
     if not isinstance(payload, dict) or not isinstance(payload.get("records"), list) or not payload.get("records"):
         return False, "official_factors_cache.json 尚未建立有效資料。"
+
+    # V187: manual sync must not perpetuate the obsolete whole-row 60/82 trust
+    # flag. Rebuild provenance from the actual per-domain source fields first.
+    try:
+        migrated_df = _apply_source_trust_migration_v187(pd.DataFrame(payload.get("records", [])))
+        payload = dict(payload)
+        payload["version"] = CACHE_VERSION
+        payload["records"] = _json_safe(migrated_df.to_dict("records"))
+        payload["record_count"] = len(payload["records"])
+    except Exception as exc:
+        return False, f"V187來源可信度校正失敗，未同步舊可信度：{type(exc).__name__}: {exc}"
 
     # If the immediately preceding V186 save already confirmed the exact same
     # payload, do not upload the multi-MB cache twice from page17.
@@ -2255,14 +2407,14 @@ def push_cache_to_github() -> tuple[bool, str]:
         status = get_factor_authority_status()
         state = status.get("state") if isinstance(status.get("state"), dict) else {}
         if state.get("remote_permanent_confirmed") and state.get("data_date") == _factor_payload_business_date(payload):
-            return True, f"V186永久層已確認，無需重複上傳｜data_date={state.get('data_date') or '未驗證'}"
+            return True, f"V187永久層已確認，無需重複上傳｜data_date={state.get('data_date') or '未驗證'}"
     except Exception:
         pass
 
     try:
         from godpick_durability_service import persist_json_permanent
         ok, msg = persist_json_permanent(
-            OFFICIAL_FACTOR_DURABLE_PATH, payload, reason="V186 manual official-factor durable sync"
+            OFFICIAL_FACTOR_DURABLE_PATH, payload, reason="V187 manual official-factor durable sync"
         )
         _write_factor_authority_state(
             payload, permanent_ok=bool(ok), message=msg,
