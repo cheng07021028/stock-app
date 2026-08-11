@@ -1,12 +1,1 @@
-{
-  "version": "v117_global_font_size_home_control",
-  "updated_at": "2026-05-06 09:28:43",
-  "enabled": true,
-  "font_scale_pct": 110,
-  "table_font_scale_pct": 110,
-  "sidebar_font_scale_pct": 100,
-  "button_font_scale_pct": 105,
-  "input_font_scale_pct": 110,
-  "line_height_pct": 110,
-  "compact_table": false
-}
+{"version":"v117_global_font_size_home_control","updated_at":"2026-05-06 09:28:43","enabled":true,"font_scale_pct":110,"table_font_scale_pct":110,"sidebar_font_scale_pct":100,"button_font_scale_pct":105,"input_font_scale_pct":110,"line_height_pct":110,"compact_table":false}
