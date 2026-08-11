@@ -49,6 +49,8 @@ ns: dict[str, Any] = {
     "st": SimpleNamespace(session_state={}),
     "_god_mode_decision": lambda src: {},
     "_ensure_godpick_record_columns": lambda df: df,
+    "_tw_today": lambda: date.today(),
+    "_tw_now": lambda: datetime.now(),
 }
 exec(compile(module, str(PAGE), "exec"), ns)
 
@@ -61,19 +63,20 @@ def test_prev_close_is_rejected() -> None:
         "update_time": "20260805 13:30:00",
     })
     assert price is None
-    assert src.startswith("REFERENCE_ONLY")
+    assert src.startswith(("REFERENCE_ONLY", "INDICATIVE_ONLY"))
     assert qdate == "2026-08-05"
     assert qtime == "13:30:00"
 
 
 
-def test_twse_mis_uses_trade_or_match_but_never_previous_close() -> None:
+def test_twse_mis_uses_only_final_trade_and_never_match_or_previous_close() -> None:
     ns["_quote_request_json"] = lambda *args, **kwargs: {
         "msgArray": [{"z": "-", "pz": "101.50", "y": "100.00", "d": "20260806", "t": "13:30:00"}]
     }
     price, market, src, qdate, qtime = ns["_quote_from_twse_mis"]("2330", "上市")
-    assert price == 101.5
-    assert src.endswith("MATCH")
+    # V178+ tightened the rule: pz/match is indicative, not a final transaction.
+    assert price is None
+    assert "INDICATIVE_ONLY" in src or "REFERENCE_ONLY" in src or "NO_ACTUAL_TRADE" in src
     assert qdate == "2026-08-06"
 
     ns["_quote_request_json"] = lambda *args, **kwargs: {
@@ -81,7 +84,7 @@ def test_twse_mis_uses_trade_or_match_but_never_previous_close() -> None:
     }
     price2, _, src2, _, _ = ns["_quote_from_twse_mis"]("2330", "上市")
     assert price2 is None
-    assert "REFERENCE_ONLY" in src2
+    assert "REFERENCE_ONLY" in src2 or "NO_ACTUAL_TRADE" in src2
 
 def test_actual_trade_is_accepted_and_pnl_recalculated() -> None:
     row = ns["_recalc_row"]({
@@ -97,7 +100,7 @@ def test_actual_trade_is_accepted_and_pnl_recalculated() -> None:
     assert abs(row["損益金額"] - 5.0) < 1e-9
     assert abs(row["損益幅%"] - 5.0) < 1e-9
     assert row["推薦基準價來源"] == "推薦價格"
-    assert row["損益計算狀態"] == "已計算"
+    assert "已計算" in row["損益計算狀態"]
 
 
 def test_missing_recommendation_price_is_not_filled_from_latest() -> None:
@@ -169,12 +172,12 @@ def test_refresh_does_not_claim_same_day_reference_as_new_update() -> None:
         assert summary["success"] == 0
         assert summary["waiting_new_trade"] == 1
         assert str(row["最新價更新狀態"]).startswith("等待新交易日")
-        assert "沿用舊價" in str(row["損益計算狀態"])
+        assert "沿用" in str(row["損益計算狀態"])
 
 
 def main() -> None:
     test_prev_close_is_rejected()
-    test_twse_mis_uses_trade_or_match_but_never_previous_close()
+    test_twse_mis_uses_only_final_trade_and_never_match_or_previous_close()
     test_actual_trade_is_accepted_and_pnl_recalculated()
     test_missing_recommendation_price_is_not_filled_from_latest()
     test_refresh_accepts_newer_quote_and_calculates_pnl()

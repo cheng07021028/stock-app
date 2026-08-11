@@ -571,6 +571,11 @@ def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | No
         "meta": _json_safe(meta or {}),
     }
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        from godpick_durability_service import persist_json_async
+        persist_json_async(str(CACHE_FILE), payload, reason="V183 official factor cache")
+    except Exception:
+        pass
     _append_log("success", len(records), _summarize_diagnostics(diagnostics or []))
     return payload
 
@@ -1111,6 +1116,11 @@ def _save_institutional_daily_snapshot(market: str, date_text: str, rows: list[d
     payload["updated_at"] = _now_text()
     try:
         INSTITUTIONAL_HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(str(INSTITUTIONAL_HISTORY_FILE), payload, reason="V183 institutional history")
+        except Exception:
+            pass
     except Exception:
         pass
 

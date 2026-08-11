@@ -29,7 +29,7 @@ except Exception:
     apply_daily_learning_overlay = None
     apply_learning_admission = None
 
-FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_8_adaptive_admission_funnel_20260804"
+FORMAL_RECOMMENDATION_VERSION = "vnext_phase10_9_super_ai_perf_cache_v183_20260811"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -227,13 +227,35 @@ def _is_blank(v: Any) -> bool:
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
+    """Fast scalar numeric parser for the 1,500~2,000-row final scoring hot path.
+
+    ``pandas.to_numeric`` is excellent for vectors but is very expensive when called
+    millions of times for individual scalar cells.  V183 keeps exactly the same
+    fallback semantics while handling normal Python / numpy numbers and numeric
+    strings without constructing pandas objects.
+    """
     try:
         if v is None:
             return float(default)
-        x = pd.to_numeric(v, errors="coerce")
-        if pd.isna(x):
+        if isinstance(v, bool):
+            return float(v)
+        if isinstance(v, (int, float)):
+            x = float(v)
+            return x if x == x and x not in (float("inf"), float("-inf")) else float(default)
+        # numpy scalar and Decimal-like values usually support float() directly.
+        if not isinstance(v, str):
+            try:
+                x = float(v)
+                return x if x == x and x not in (float("inf"), float("-inf")) else float(default)
+            except Exception:
+                pass
+        text = str(v).strip().replace(",", "").replace("％", "%")
+        if not text or text.lower() in _BLANK_TEXTS:
             return float(default)
-        return float(x)
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        x = float(text)
+        return x if x == x and x not in (float("inf"), float("-inf")) else float(default)
     except Exception:
         return float(default)
 
@@ -244,16 +266,16 @@ def _num(row: pd.Series, col: str, default: float = 0.0) -> float:
 
 def _first_numeric_value(row: pd.Series, cols: list[str], default: float = 0.0, prefer_positive: bool = False) -> float:
     fallback = None
+    keys = row.index if hasattr(row, "index") else row.keys() if hasattr(row, "keys") else ()
     for col in cols:
-        if col not in row.index:
+        if col not in keys:
             continue
         raw = row.get(col)
-        try:
-            value = pd.to_numeric(raw, errors="coerce")
-            if pd.isna(value):
-                continue
-            value = float(value)
-        except Exception:
+        text = _safe_str(raw)
+        if not text:
+            continue
+        value = _safe_float(raw, float("nan"))
+        if value != value:  # NaN
             continue
         if fallback is None:
             fallback = value
@@ -3323,6 +3345,53 @@ def _fast_row_records(frame: pd.DataFrame) -> list[_FastRowMapping]:
     return [_FastRowMapping(row) for row in frame.to_dict(orient="records")]
 
 
+def _v183_memoized_profile(name: str, fn):
+    """Memoize repeated row-profile calculations inside one scoring pass.
+
+    The formal engine asks for market risk, entry readiness, momentum, trigger
+    quality and RR repeatedly through nested helpers.  A ``_FastRowMapping`` is
+    private to one row and one pass, so storing ephemeral values on it cannot
+    leak into the exported DataFrame.
+    """
+    cache_key = f"__v183_cache_{name}"
+    def wrapper(row, *args, **kwargs):
+        if isinstance(row, dict) and not args and not kwargs:
+            if cache_key in row:
+                return row[cache_key]
+            value = fn(row)
+            row[cache_key] = value
+            return value
+        return fn(row, *args, **kwargs)
+    wrapper.__name__ = getattr(fn, "__name__", name)
+    wrapper.__doc__ = getattr(fn, "__doc__", None)
+    return wrapper
+
+
+def _v183_install_row_profile_cache() -> None:
+    names = [
+        "_stop_distance_pct", "_upside_space_pct", "_risk_reward_ratio",
+        "_path_risk_reward_profile", "_liquidity_info",
+        "_official_factor_freshness_info", "_combined_data_freshness_info",
+        "_market_risk_info", "_mainstream_mainrise_profile",
+        "_red_market_trigger_fragility_profile", "_nextday_trigger_quality_profile",
+        "_data_quality_score", "_trigger_info", "_compute_operability_score",
+        "_exclusion_reasons", "_exhaustion_profile", "_momentum_profile",
+        "_prebreakout_profile", "_next_session_profile", "_history_freshness_info",
+        "_entry_readiness_profile", "_official_factor_limited", "_objective_metrics",
+        "_panic_rebound_leader_profile", "_prediction_calibration_profile",
+    ]
+    g = globals()
+    for fn_name in names:
+        fn = g.get(fn_name)
+        if callable(fn) and not getattr(fn, "_v183_cached", False):
+            wrapped = _v183_memoized_profile(fn_name, fn)
+            wrapped._v183_cached = True
+            g[fn_name] = wrapped
+
+
+# Installed after all row-profile functions are defined; see immediately before
+# ``apply_formal_recommendation_engine`` below.
+
 def _apply_unified_recommendation_ranking(out: pd.DataFrame) -> pd.DataFrame:
     """Attach the single score/rank users should use as their first view."""
     if out is None or not isinstance(out, pd.DataFrame) or out.empty:
@@ -3916,6 +3985,9 @@ def _apply_adaptive_admission_funnel(out: pd.DataFrame) -> pd.DataFrame:
     work.at[idx, "正式推薦排序分"] = max(_num(work.loc[idx], "正式推薦排序分", 0), score + 8.0)
     work.at[idx, "推薦可信度分"] = min(58.0, max(_num(work.loc[idx], "推薦可信度分", 0), score * 0.75))
     return work
+
+
+_v183_install_row_profile_cache()
 
 
 def apply_formal_recommendation_engine(df: pd.DataFrame | None) -> pd.DataFrame:

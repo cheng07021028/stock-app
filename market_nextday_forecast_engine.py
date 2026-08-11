@@ -17,7 +17,7 @@ import math
 
 import pandas as pd
 
-FORECAST_VERSION = "nextday_market_forecast_v2_1_post_crash_cooldown_20260730"
+FORECAST_VERSION = "nextday_market_forecast_v2_2_durable_v183_20260811"
 DEFAULT_RECORDS_FILE = "market_nextday_forecast_records.json"
 
 
@@ -128,8 +128,14 @@ def _read_records(path: str | Path = DEFAULT_RECORDS_FILE) -> list[dict[str, Any
 def _write_records(records: list[dict[str, Any]], path: str | Path = DEFAULT_RECORDS_FILE) -> None:
     p = Path(path)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(records[-500:], ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    payload = records[-500:]
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     tmp.replace(p)
+    try:
+        from godpick_durability_service import persist_json_async
+        persist_json_async(str(p), payload, reason="V183 nextday forecast history")
+    except Exception:
+        pass
 
 
 def _direction_from_return(value: float | None, flat_band: float = 0.25) -> str:

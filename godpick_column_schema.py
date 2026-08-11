@@ -125,8 +125,16 @@ LEARNING_AI_TRACE_COLUMNS = [
     "AI學習樣本數", "AI模型版本", "AI Challenger分", "AI Champion勝出",
     "AI升格來源", "AI升格限制",
 ]
+SUPER_AI_TRACE_COLUMNS = [
+    "SuperAI模型版本", "SuperAI進場狀態", "SuperAI進場信心%", "SuperAI建議進場區間下", "SuperAI建議進場區間上",
+    "SuperAI進場觸發說明", "SuperAI出場狀態", "SuperAI動態停損價", "SuperAI第一減碼價", "SuperAI第二目標價", "SuperAI出場說明",
+    "SuperAI開高走高%", "SuperAI開高走低%", "SuperAI開低走高%", "SuperAI開低走低%", "SuperAI平開震盪%",
+    "SuperAI隔日上漲機率%", "SuperAI隔日主情境", "SuperAI隔日情境信心%", "SuperAI本週進場適合度", "SuperAI本週進場等級",
+    "SuperAI融資影響分", "SuperAI融資影響", "SuperAI_ETF確認分", "SuperAI_ETF確認", "SuperAI期貨情境分", "SuperAI期貨情境",
+    "SuperAI市場情境分", "SuperAI資料覆蓋率%", "SuperAI最終決策分", "SuperAI最終決策理由", "SuperAI反對理由", "SuperAI取消條件",
+]
 UNIFIED_RECOMMEND_DISPLAY_COLUMNS = list(dict.fromkeys(
-    list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS) + GODPICK_RECORD_TRACE_COLUMNS + LEARNING_AI_TRACE_COLUMNS
+    list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS) + GODPICK_RECORD_TRACE_COLUMNS + LEARNING_AI_TRACE_COLUMNS + SUPER_AI_TRACE_COLUMNS
 ))
 UNIFIED_MANAGEMENT_COLUMNS = UNIFIED_RECOMMEND_DISPLAY_COLUMNS.copy()
 

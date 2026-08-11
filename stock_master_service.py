@@ -948,10 +948,24 @@ def _save_master_cache_to_repo(master_df: pd.DataFrame, *, sync_github: bool = T
     local_ok, local_msg = _write_json_to_local(cfg["master_path"], payload)
     if not local_ok:
         return False, local_msg
+    # V183：股票主檔屬正式權威資料。先本機原子落盤，再由共用 durability
+    # outbox 背景同步 GitHub runtime-data / Firestore；UI 不等待遠端往返。
+    try:
+        from godpick_durability_service import persist_json_async
+        dur_ok, dur_msg = persist_json_async(
+            cfg["master_path"], payload,
+            github_path=cfg["master_path"],
+            firestore_doc="stock_master_cache",
+            reason="V183 stock master authority",
+        )
+        if dur_ok:
+            return True, local_msg + "｜" + dur_msg
+    except Exception as _dur_exc:
+        dur_msg = f"durability排程失敗：{_dur_exc}"
     if not sync_github:
-        return True, local_msg + "｜GitHub 改由全域更新背景備份"
+        return True, local_msg + "｜遠端永久化待健康中心重試"
     remote_ok, remote_msg = _write_json_to_github(cfg["master_path"], payload, f"refresh stock master cache at {_now_text()}")
-    return bool(local_ok and remote_ok), local_msg + "｜" + remote_msg
+    return bool(local_ok and remote_ok), local_msg + "｜" + remote_msg + "｜" + str(dur_msg)
 
 
 def _save_category_override(code: str, name: str, market: str, category: str) -> tuple[bool, str]:
@@ -959,7 +973,19 @@ def _save_category_override(code: str, name: str, market: str, category: str) ->
     code = _normalize_code(code)
     if not code:
         return False, "股票代號不可空白"
-    payload, _ = _read_json_from_github(cfg["override_path"])
+    # V183：先讀永久層的最新有效版本；失敗才沿用舊 GitHub/local fallback。
+    payload = None
+    try:
+        from godpick_persistence_service import load_named_json_permanent
+        payload, _src, _msgs = load_named_json_permanent(
+            cfg["override_path"], {},
+            github_path=cfg["override_path"],
+            firestore_doc="stock_category_overrides",
+        )
+    except Exception:
+        payload = None
+    if not isinstance(payload, dict):
+        payload, _ = _read_json_from_github(cfg["override_path"])
     if not isinstance(payload, dict):
         payload = {}
     payload[code] = {
@@ -969,7 +995,23 @@ def _save_category_override(code: str, name: str, market: str, category: str) ->
         "category": _canonical_category(category) or _infer_category_from_record(name, category),
         "updated_at": _now_text(),
     }
-    ok, msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
+    local_ok, local_msg = _write_json_to_local(cfg["override_path"], payload)
+    ok, msg = local_ok, local_msg
+    try:
+        from godpick_durability_service import persist_json_async
+        dur_ok, dur_msg = persist_json_async(
+            cfg["override_path"], payload,
+            github_path=cfg["override_path"],
+            firestore_doc="stock_category_overrides",
+            reason=f"V183 category override {code}",
+        )
+        ok = bool(local_ok and dur_ok)
+        msg = local_msg + "｜" + dur_msg
+    except Exception as _dur_exc:
+        # 舊版 GitHub 路徑只作兼容備援；本機已安全時不讓 UI 編輯消失。
+        remote_ok, remote_msg = _write_json_to_github(cfg["override_path"], payload, f"update stock category override {code} at {_now_text()}")
+        ok = bool(local_ok and remote_ok)
+        msg = local_msg + "｜" + remote_msg + f"｜durability例外:{_dur_exc}"
     if ok:
         try:
             _load_stock_category_override_map.clear()

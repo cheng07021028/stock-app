@@ -333,17 +333,19 @@ def build_scan_quality_report(
         scope = f"有效因子覆蓋率僅{official_effective_coverage:.1f}%"
         reason = "法人、營收、估值等有效欄位未形成足夠覆蓋；技術面排名只能作研究雷達。"
     elif data_rows > 0 and official_trusted_coverage < 40.0:
-        status, level, usable, factor = "官方因子日期/可信度不足｜正式推薦暫停", "warning", True, 0.35
+        # V183：『正式推薦暫停』不可同時輸出正式推薦可用=True。
+        # A- 僅保留為資料受限研究候選，由獨立欄位說明，不等於買進許可。
+        status, level, usable, factor = "官方因子日期/可信度不足｜正式推薦暫停", "warning", False, 0.0
         scope = f"有效{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
-        reason = "官方因子有有效內容，但日期未驗證、落後超過1日或來源可信度不足；可保留資料受限A-安全閥，正式推薦暫停。"
+        reason = "官方因子有有效內容，但日期未驗證、落後超過1日或來源可信度不足；可保留資料受限A-研究候選，但正式推薦與新倉倉位均暫停。"
     elif data_rows > 0 and official_effective_coverage < 70.0:
-        status, level, usable, factor = "官方因子有效覆蓋不足｜限定A-", "warning", True, 0.5
+        status, level, usable, factor = "官方因子有效覆蓋不足｜正式推薦暫停／A-研究", "warning", False, 0.0
         scope = f"有效因子覆蓋率{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
-        reason = "有效官方因子未達70%；不得升格正式推薦，但可依資料受限A-安全閥做極小量條件評估。"
+        reason = "有效官方因子未達70%；不得升格正式推薦。A-只保留研究與盤中驗證用途，資料補齊前不產生正式新倉。"
     elif data_rows > 0 and official_effective_coverage >= 70.0 and official_same_day_coverage < 40.0 and official_one_day_lag_coverage >= 40.0:
-        status, level, usable, factor = "官方因子有效但落後1日｜正式暫停／A-可評估", "warning", True, 0.5
+        status, level, usable, factor = "官方因子有效但落後1日｜正式推薦暫停／A-研究", "warning", False, 0.0
         scope = f"有效{official_effective_coverage:.1f}%／同日{official_same_day_coverage:.1f}%／落後1日{official_one_day_lag_coverage:.1f}%"
-        reason = "官方因子並非缺失，而是多數落後最新K線1個交易日；研究雷達與資料受限A-可用，正式推薦待同日資料完成後再升格。"
+        reason = "官方因子並非缺失，而是多數落後最新K線1個交易日；研究雷達與A-研究候選可顯示，正式推薦待同日資料完成後再升格。"
     elif coverage >= 99.0 and usable_history >= 80.0 and (liquidity_coverage >= 90.0 or data_rows == 0):
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
@@ -365,10 +367,20 @@ def build_scan_quality_report(
         scope = "不可作為正式推薦"
         reason = "掃描雖可能完成，但有效K線或流動性資料未達操作標準。"
 
+    a_minus_research_ok = bool(
+        data_rows > 0
+        and coverage >= 95.0
+        and usable_history >= 60.0
+        and liquidity_coverage >= 80.0
+        and official_effective_coverage >= 30.0
+        and level == "warning"
+    )
+
     return {
         "掃描品質狀態": status,
         "掃描品質等級": level,
         "正式推薦可用": bool(usable),
+        "A-資料受限研究可用": bool(a_minus_research_ok),
         "推薦適用範圍": scope,
         "倉位折減係數": float(factor),
         "預計掃描數": expected,
@@ -400,7 +412,7 @@ def apply_scan_quality_to_frame(df: pd.DataFrame | None, report: dict[str, Any] 
         return out
     data = report if isinstance(report, dict) else {}
     for col in [
-        "掃描品質狀態", "掃描品質等級", "正式推薦可用", "推薦適用範圍", "倉位折減係數",
+        "掃描品質狀態", "掃描品質等級", "正式推薦可用", "A-資料受限研究可用", "推薦適用範圍", "倉位折減係數",
         "預計掃描數", "成功分析數", "掃描覆蓋率%", "有效K線資料率%",
         "歷史資料成功率%", "流動性資料覆蓋率%", "官方因子覆蓋率%",
         "官方紀錄匹配率%", "官方有效因子覆蓋率%", "官方最新可信覆蓋率%",

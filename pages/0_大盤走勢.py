@@ -1092,6 +1092,11 @@ def _write_macro_bridge(row: dict[str, Any]) -> tuple[bool, str]:
     payload = _build_macro_bridge_payload(row)
     try:
         Path(BRIDGE_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(BRIDGE_FILE, payload, reason="V183 macro bridge authority")
+        except Exception:
+            pass
         return True, f"已寫入 {BRIDGE_FILE}，股神推薦可讀取大盤穩定因子。"
     except Exception as e:
         return False, f"寫入 {BRIDGE_FILE} 失敗：{e}"
@@ -3029,6 +3034,11 @@ def _v294_write_bridge_with_quality(row: dict[str, Any]) -> tuple[bool, str]:
         data["version"] = "v29.5_macro_bridge_quality"
         data["updated_at"] = _tw_now().strftime("%Y-%m-%d %H:%M:%S")
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(BRIDGE_FILE, data, reason="V183 macro bridge quality authority")
+        except Exception:
+            pass
         return True, f"已寫入 {BRIDGE_FILE}，並加入資料源健康度與可信度。"
     except Exception as e:
         return False, f"橋接檔品質資訊寫入失敗：{e}"
@@ -3071,6 +3081,13 @@ def _v30_write_json_dict(path_text: str, data: dict[str, Any]) -> bool:
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         tmp.replace(p)
+        # V183：大盤/橋接/快取先本機原子保存，再排入遠端永久化。
+        try:
+            from godpick_durability_service import CORE_DURABLE_FILES, persist_json_async
+            if p.name in CORE_DURABLE_FILES:
+                persist_json_async(str(p), data, reason=f"V183 page0 persist {p.name}")
+        except Exception:
+            pass
         return True
     except Exception:
         return False
@@ -3569,6 +3586,11 @@ def _v32_append_record(snapshot: dict[str, Any]) -> None:
         records.insert(0, item)
         records = records[:300]
         Path(MARKET_TREND_RECORDS_FILE).write_text(json.dumps(records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(MARKET_TREND_RECORDS_FILE, records, reason="V183 market trend history")
+        except Exception:
+            pass
     except Exception:
         pass
 

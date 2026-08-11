@@ -38,17 +38,33 @@ from godpick_global_update_service import (
     save_global_update_settings,
 )
 
+try:
+    from godpick_durability_service import audit_core_durability, retry_failed_durability, queue_existing_critical_for_migration
+except Exception:
+    audit_core_durability = None
+    retry_failed_durability = None
+    queue_existing_critical_for_migration = None
+try:
+    from godpick_super_ai_market_context import refresh_super_ai_market_context, load_super_ai_market_context
+except Exception:
+    refresh_super_ai_market_context = None
+    load_super_ai_market_context = None
+
 st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V174｜內容日期驗證＋每日學習型AI：一鍵更新會重建績效回饋、AI經驗校準，並驗證 7/8 頁完整資料鏈。")
+st.caption("V183｜SuperAI情境＋永久化稽核＋最終結果效能：一鍵檢查資料新鮮度、遠端永久保存狀態與AI經驗鏈。")
 
 with st.sidebar:
     st.header("V171 操作")
     do_check = st.button("🔍 重新健康檢查", use_container_width=True, type="primary")
     do_repair = st.button("🛠 一鍵安全修復缺檔/缺欄", use_container_width=True)
     do_compile = st.button("🧪 執行編譯煙霧測試", use_container_width=True)
+    do_durability = st.button("🧾 稽核所有核心資料永久化", use_container_width=True)
+    do_migrate_durable = st.button("📦 將既有權威資料排入永久化", use_container_width=True, help="只排程尚未以相同Hash完成遠端確認的既有核心JSON；本機先保留，GitHub/Firestore背景同步。")
+    do_retry_durable = st.button("🔁 重試失敗/待同步永久化", use_container_width=True)
+    do_super_context = st.button("🧠 更新SuperAI融資/期貨/ETF情境", use_container_width=True)
     st.divider()
     st.subheader("官方因子自動更新排程")
     cfg = load_schedule_settings()
@@ -194,6 +210,45 @@ with st.sidebar:
             st.success("已解除逾時鎖定：" + "、".join(removed))
         else:
             st.info("目前沒有殘留更新鎖定。")
+
+# V183｜核心資料永久化與SuperAI市場情境。
+if 'do_super_context' in locals() and do_super_context:
+    if callable(refresh_super_ai_market_context):
+        with st.spinner("正在更新 TWSE/TPEx 融資券、TAIFEX 期貨/PCR 與 ETF 情境..."):
+            _ctx, _ctx_msgs = refresh_super_ai_market_context(fetch_etf=True)
+        st.success(f"SuperAI市場情境更新完成｜融資個股 {len((_ctx or {}).get('margin_by_stock', {}))} 筆")
+        for _m in (_ctx_msgs or [])[:12]: st.caption(str(_m))
+    else:
+        st.error("SuperAI市場情境服務未載入。")
+
+if 'do_migrate_durable' in locals() and do_migrate_durable:
+    if callable(queue_existing_critical_for_migration):
+        _mig_msgs = queue_existing_critical_for_migration(base_dir=Path(__file__).resolve().parents[1], critical_only=True)
+        _queued = sum('queued' in str(x) for x in _mig_msgs)
+        st.info(f"既有核心權威資料已排入永久化：{_queued} 項。遠端以Hash完成確認前仍標示待同步。")
+        for _m in _mig_msgs[:24]: st.caption(str(_m))
+    else:
+        st.error("永久化遷移服務未載入。")
+
+if 'do_retry_durable' in locals() and do_retry_durable:
+    if callable(retry_failed_durability):
+        _retry_msgs = retry_failed_durability(base_dir=Path(__file__).resolve().parents[1])
+        st.info(f"已重新排程 {len(_retry_msgs)} 個待同步/失敗項目。")
+        for _m in _retry_msgs[:20]: st.caption(_m)
+    else:
+        st.error("永久化服務未載入。")
+
+if callable(audit_core_durability):
+    _durability_audit = audit_core_durability(base_dir=Path(__file__).resolve().parents[1], write_audit=True)
+    with st.expander("V183｜核心資料永久保存稽核", expanded=bool('do_durability' in locals() and do_durability)):
+        _d1, _d2, _d3 = st.columns(3)
+        _d1.metric("核心資料本機存在", f"{_durability_audit.get('critical_local', 0)}/{_durability_audit.get('critical_total', 0)}")
+        _d2.metric("遠端Hash已確認", f"{_durability_audit.get('critical_remote_confirmed', 0)}/{_durability_audit.get('critical_total', 0)}")
+        _d3.metric("遠端確認率", f"{_durability_audit.get('critical_remote_confirmed_rate_pct', 0):.1f}%")
+        _audit_df = pd.DataFrame(_durability_audit.get('rows', []))
+        if not _audit_df.empty:
+            st.dataframe(_audit_df[[c for c in ['file','critical','purpose','status','remote_status','bytes'] if c in _audit_df.columns]], use_container_width=True, hide_index=True)
+        st.caption("只有本機 payload hash 與成功遠端同步 hash 一致才標示 REMOTE_CONFIRMED；不再把『檔案存在』冒充永久保存。")
 
 if 'run_global_update_now' in locals() and run_global_update_now:
     global_settings = {

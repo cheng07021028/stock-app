@@ -130,6 +130,11 @@ def _save_dashboard_table_settings(settings: dict) -> bool:
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(str(DASHBOARD_TABLE_SETTINGS_FILE), data, reason="V183 dashboard table settings")
+        except Exception:
+            pass
         return True
     except Exception as e:
         st.warning(f"儀表板表格設定儲存失敗：{e}")

@@ -212,6 +212,23 @@ except Exception:
     save_learning_run = None
 
 try:
+    from godpick_super_ai_engine import (
+        SUPER_AI_VERSION, SUPER_AI_COLUMNS, apply_super_ai_engine,
+    )
+    from godpick_super_ai_experience import (
+        save_super_ai_run, load_super_ai_experience_profile, refresh_super_ai_experience_profile,
+    )
+    from godpick_durability_service import audit_core_durability
+except Exception:
+    SUPER_AI_VERSION = "super_ai_unavailable"
+    SUPER_AI_COLUMNS = []
+    apply_super_ai_engine = None
+    save_super_ai_run = None
+    load_super_ai_experience_profile = None
+    refresh_super_ai_experience_profile = None
+    audit_core_durability = None
+
+try:
     from godpick_full_market_discovery import (
         FULL_MARKET_DISCOVERY_VERSION,
         SECTOR_SHRINKAGE_VERSION,
@@ -245,7 +262,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v181_single_pass_final_decision_20260809"
+PAGE07_SPEED_FIX_VERSION = "page07_v183_super_ai_durable_perf_20260811"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -10260,6 +10277,10 @@ def _build_recommend_df(
     else:
         debug_summary["v181_learning_overlay_fallback"] = False
 
+    # V183：SuperAI 必須等官方因子合併與掃描品質報告完成後才計算。
+    # 此處只記錄起點，避免在資料治理尚未完成時提前給出 READY。
+    _v183_super_started = 0.0
+
     base_score = pd.to_numeric(base_df.get("推薦總分", 0), errors="coerce").fillna(0)
     practical_score = pd.to_numeric(base_df.get("股神實戰總分", base_score), errors="coerce").fillna(base_score)
     main_mask = base_df.get("是否主要顯示", pd.Series(["否"] * len(base_df), index=base_df.index)).astype(str).eq("是")
@@ -10398,11 +10419,6 @@ def _build_recommend_df(
         # 後續才把 official_factors_cache 併入顯示名單，造成快取明明有 886 筆
         # 完整度>=60，掃描報告卻永遠看到預設 0。
         governed_candidate_df = _apply_official_factor_cache_v109(governed_candidate_df)
-        candidate_diagnosis_df = (
-            build_candidate_diagnosis(governed_candidate_df)
-            if callable(build_candidate_diagnosis)
-            else governed_candidate_df.copy()
-        )
         scan_report = (
             build_scan_quality_report(
                 debug_summary,
@@ -10414,9 +10430,33 @@ def _build_recommend_df(
             if callable(build_scan_quality_report)
             else {}
         )
+        # V183：先把掃描品質/正式推薦許可寫入完整母體，再由 SuperAI 評分。
+        # 因此 8/10 類似『最新可信0%＋正式推薦暫停』的情境只能輸出 WAIT-DATA，
+        # 不會出現掃描報告說暫停、SuperAI卻說READY的矛盾。
         if callable(apply_scan_quality_to_frame):
-            candidate_diagnosis_df = apply_scan_quality_to_frame(candidate_diagnosis_df, scan_report)
+            governed_candidate_df = apply_scan_quality_to_frame(governed_candidate_df, scan_report)
             final_df = apply_scan_quality_to_frame(final_df, scan_report)
+        _v183_super_started = time.time()
+        if callable(apply_super_ai_engine):
+            try:
+                governed_candidate_df = apply_super_ai_engine(governed_candidate_df)
+                debug_summary["v183_super_ai_rows"] = int(len(governed_candidate_df))
+                debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)
+                if isinstance(final_df, pd.DataFrame) and not final_df.empty and "股票代號" in final_df.columns:
+                    _super_cols = [c for c in getattr(__import__("godpick_super_ai_engine"), "SUPER_AI_COLUMNS", []) if c in governed_candidate_df.columns]
+                    if _super_cols:
+                        _super_map = governed_candidate_df[["股票代號", *_super_cols]].drop_duplicates("股票代號", keep="first")
+                        final_df = final_df.drop(columns=[c for c in _super_cols if c in final_df.columns], errors="ignore").merge(_super_map, on="股票代號", how="left")
+            except Exception as super_ai_error:
+                debug_summary["v183_super_ai_error"] = str(super_ai_error)
+                debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)
+        else:
+            debug_summary["v183_super_ai_error"] = "Super AI engine unavailable"
+        candidate_diagnosis_df = (
+            build_candidate_diagnosis(governed_candidate_df)
+            if callable(build_candidate_diagnosis)
+            else governed_candidate_df.copy()
+        )
         st.session_state[_k("candidate_diagnosis_store")] = candidate_diagnosis_df.copy()
         st.session_state[_k("scan_quality_report")] = dict(scan_report)
         debug_summary.update({
@@ -13880,6 +13920,27 @@ def main():
             except Exception as learning_save_error:
                 st.session_state[_k("learning_run_messages")] = [f"每日學習決策快照保存例外：{learning_save_error}"]
                 st.session_state[_k("learning_run_ok")] = False
+        # V183：保存「全候選特徵 + SuperAI情境/進出場決策」不可變經驗快照。
+        # 後續 Page8 推薦後績效成熟後，experience profile 只做小幅有界校準，
+        # 避免模型只學自己推薦過的股票造成 selection bias。
+        if callable(save_super_ai_run):
+            try:
+                super_source = st.session_state.get(_k("candidate_diagnosis_store"))
+                if not isinstance(super_source, pd.DataFrame) or super_source.empty:
+                    super_source = rec_df
+                super_ok, super_msg, super_meta = save_super_ai_run(
+                    super_source, rec_df,
+                    metadata={
+                        "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"))),
+                        "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"))),
+                        "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"))),
+                        "scan_quality": st.session_state.get(_k("scan_quality_report"), {}),
+                    },
+                )
+                st.session_state[_k("super_ai_run_message")] = super_msg
+                st.session_state[_k("super_ai_run_meta")] = super_meta
+            except Exception as super_save_error:
+                st.session_state[_k("super_ai_run_message")] = f"SuperAI經驗快照保存例外：{super_save_error}"
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
         rec_df, hot_pick_df, _postprocess_cache_hit_v164 = _postprocess_recommend_result_v164(
@@ -13924,6 +13985,9 @@ def main():
     _render_vnext_performance_feedback_panel()
     _learning_candidate_now = st.session_state.get(_k("candidate_diagnosis_store"))
     _render_phase105_learning_panel(_learning_candidate_now if isinstance(_learning_candidate_now, pd.DataFrame) else rec_df)
+    _super_msg = _safe_str(st.session_state.get(_k("super_ai_run_message")))
+    if _super_msg:
+        st.caption(f"SuperAI經驗永久化：{_super_msg}")
 
     render_pro_info_card(
         "股神交易決策升級",
@@ -13933,6 +13997,8 @@ def main():
             ("信心等級", "依總分、起漲、交易可行、類股熱度、過熱與假突破風險綜合分級。", ""),
             ("買點劇本", "自動整理現價、拉回買點、突破買點、停損、目標價。", ""),
             ("失效條件", "明確標示跌破何處或量價不延續時應降級。", ""),
+            ("SuperAI情境", "新增隔日開高走高/開高走低/開低走高/開低走低/震盪機率、本週進場適合度、條件式進場與動態出場。", ""),
+            ("經驗永久化", "全候選決策快照保存，後續以1/3/5/10/20日真實績效做有界校準，不只學已推薦股票。", ""),
             ("追蹤預留", "保留 3/5/10/20 日追蹤欄位，後續可做推薦勝率回測。", ""),
         ],
         chips=["交易決策", "風控", "回測預留"],

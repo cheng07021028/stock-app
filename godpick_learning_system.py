@@ -25,8 +25,8 @@ import re
 
 import pandas as pd
 
-LEARNING_SYSTEM_VERSION = "phase108_full_market_discovery_ai_v1_20260807"
-MODEL_VERSION = "champion_phase108_full_market_discovery_v1"
+LEARNING_SYSTEM_VERSION = "phase109_super_ai_experience_v183_20260811"
+MODEL_VERSION = "champion_phase109_super_ai_experience_v183"
 CHALLENGER_VERSION = "challenger_phase108_novelty_diversity_v1"
 LEARNING_STATE_FILE = "godpick_learning_state.json"
 LEARNING_ROOT = "data/godpick_learning"
@@ -821,7 +821,12 @@ def apply_daily_learning_overlay(df: pd.DataFrame | None, profile: dict[str, Any
                 out[col] = pd.Series(dtype="float64" if col in _NUMERIC_COLUMNS else "object")
         return out
     profile = profile or build_experience_profile(base_dir=base_dir)
-    scored = out.apply(lambda r: _score_row(r, profile), axis=1, result_type="expand")
+    # V183: the final-result stage can contain 1,700+ rows.  Pandas ``apply(axis=1)``
+    # constructs a Series object for every row and dominated the Phase108 runtime.
+    # ``_score_row`` only requires mapping semantics, so score plain dict records and
+    # rebuild one DataFrame.  Formulas and output columns are unchanged.
+    records = out.to_dict(orient="records")
+    scored = pd.DataFrame([_score_row(row, profile) for row in records], index=out.index)
     for col in LEARNING_COLUMNS:
         if col not in scored.columns:
             scored[col] = 0.0 if col in _NUMERIC_COLUMNS else ""

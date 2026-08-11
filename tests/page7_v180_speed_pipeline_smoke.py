@@ -57,7 +57,11 @@ def test_no_duplicate_full_history_retry():
 
 
 def test_page7_wires_nonblocking_persistence_and_checkpoint_reuse():
-    assert ('PAGE07_SPEED_FIX_VERSION = "page07_v180_nonblocking_full_market_pipeline_20260809"' in SRC or 'PAGE07_SPEED_FIX_VERSION = "page07_v181_single_pass_final_decision_20260809"' in SRC)
+    assert any(v in SRC for v in [
+        'PAGE07_SPEED_FIX_VERSION = "page07_v180_nonblocking_full_market_pipeline_20260809"',
+        'PAGE07_SPEED_FIX_VERSION = "page07_v181_single_pass_final_decision_20260809"',
+        'PAGE07_SPEED_FIX_VERSION = "page07_v183_super_ai_durable_perf_20260811"',
+    ])
     assert "reuse_finished_checkpoint=bool(submit_recommend and not submit_refresh and not resume_scan_btn)" in SRC
     assert "save_rotation_snapshot(rotation_source, background_remote=True)" in SRC
     assert "background_remote=True" in SRC and "pre_scored=True" in SRC

@@ -90,6 +90,11 @@ def _save_hk_chart_settings(settings: dict[str, Any]) -> tuple[bool, str]:
         payload["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with HK_CHART_SETTINGS_FILE.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(str(HK_CHART_SETTINGS_FILE), payload, reason="V183 history K chart settings")
+        except Exception:
+            pass
         return True, f"已寫入 {HK_CHART_SETTINGS_FILE.name}"
     except Exception as e:
         return False, str(e)
