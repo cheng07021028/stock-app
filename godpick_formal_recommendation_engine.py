@@ -535,7 +535,7 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     if not official_freshness.get("effective_ready"):
         near_reasons.append(f"官方因子無法有效驗證（{official_freshness.get('status', '日期未驗證')}）")
     elif official_freshness.get("one_day_lag"):
-        near_reasons.append("官方因子落後1交易日：正式推薦待同步，A-可條件評估")
+        near_reasons.append("官方因子為已驗證T-1：正式決策降級使用，倉位由治理層折減")
     near_reasons.extend(hard)
     if gap > 4.8:
         near_reasons.append(f"距可執行買點{gap:.1f}%")
@@ -702,16 +702,16 @@ def _official_factor_freshness_info(row: pd.Series) -> dict[str, Any]:
     status_blob = _text_blob(row, ["官方因子資料狀態", "官方資料狀態", "資料完整度"])
     explicit_stale = _contains_any(status_blob, ["過期", "嚴重落後", "待更新", "stale"])
     stale = bool(stale or explicit_stale)
-    # 法人/估值等官方資料通常在收盤後分批發布；落後 1 個交易日可視為
-    # 「有效但非最新」，不得誤標成缺失。正式推薦仍優先要求同日對齊，
-    # A-／資料受限安全閥可在其他條件完整時使用落後 1 日資料。
+    # V184：法人/估值等官方日資料是盤後分批產製。T-1 且來源/日期可驗證
+    # 屬「已知的資料時差」，不是資料錯誤；允許正式模型降級使用，最終
+    # 倉位由 execution governance 的 0.75 係數再收斂。lag>=2 仍硬阻擋。
     effective_ready = bool((aligned or one_day_lag) and not explicit_stale)
-    formal_ready = bool(aligned and not explicit_stale)
+    formal_ready = bool(effective_ready)
     a_minus_ready = bool(effective_ready)
     if aligned:
         status = "最新/對齊"
     elif one_day_lag:
-        status = "有效｜落後1交易日（正式待同步／A-可評估）"
+        status = "已驗證T-1｜降級可用"
     elif stale:
         status = f"過期｜落後{lag}交易日" if known else "過期｜日期未驗證"
     else:
@@ -748,16 +748,18 @@ def _combined_data_freshness_info(row: pd.Series) -> dict[str, Any]:
         )
     elif official.get("known") and official.get("one_day_lag"):
         warnings.append(
-            f"官方因子{official.get('official_date')}落後K線1交易日；正式推薦待同步，A-可條件評估"
+            f"官方因子{official.get('official_date')}為已驗證T-1；正式決策降級、倉位折減"
         )
     elif not official.get("known"):
         warnings.append("官方因子日期未驗證")
     formal_ready = bool(kline.get("fresh") and market.get("formal_ready") and official.get("formal_ready"))
     a_minus_ready = bool(kline.get("fresh") and market.get("formal_ready") and official.get("a_minus_ready"))
-    if formal_ready:
+    if formal_ready and official.get("aligned"):
         status = "READY｜K線/大盤/官方因子同交易日"
+    elif formal_ready and official.get("one_day_lag"):
+        status = "LIMITED-READY｜官方因子已驗證T-1，正式降級可用"
     elif a_minus_ready:
-        status = "LIMITED｜官方因子落後1日，正式暫停／A-可條件評估"
+        status = "LIMITED｜官方因子可用但需降級"
     else:
         status = "WARNING｜資料未完全對齊，禁止正式推薦"
     return {

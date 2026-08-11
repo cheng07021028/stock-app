@@ -46,7 +46,7 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v182_official_multisource_20260810"
+CACHE_VERSION = "v184_official_freshness_authority_20260811"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -117,6 +117,7 @@ FACTOR_COLUMNS = [
     "市場別",
     "正式產業別",
     "官方資料日期",
+    "官方因子資料日期",
     "外資近1日買賣超",
     "外資近3日買賣超",
     "外資近5日買賣超",
@@ -562,13 +563,17 @@ def _existing_complete_count() -> int:
 
 
 def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | None = None, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    meta_safe = _json_safe(meta or {})
     payload = {
         "version": CACHE_VERSION,
         "updated_at": _now_text(),
+        # V184：把「資料內容日期」提升為快取頂層欄位。頁面新鮮度判定
+        # 不得再拿檔案寫入時間冒充官方資料日期。
+        "data_date": _safe_str((meta_safe or {}).get("data_date")),
         "record_count": len(records),
         "records": _json_safe(records),
         "diagnostics": _summarize_diagnostics(diagnostics or []),
-        "meta": _json_safe(meta or {}),
+        "meta": meta_safe,
     }
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
@@ -597,6 +602,23 @@ def _append_log(status: str, row_count: int, diagnostics: list[str] | None = Non
         pass
 
 
+def _row_daily_factor_date_v184(row: Any) -> str:
+    """Return a conservative daily official-factor date for one stock.
+
+    Monthly revenue is intentionally excluded: comparing YYYYMM revenue with a
+    trading-day K-line is semantically wrong.  When both valuation and
+    institutional dates exist, use the OLDER daily date so one fresh domain
+    cannot hide another stale daily domain.
+    """
+    values: list[str] = []
+    getter = row.get if hasattr(row, "get") else (lambda _k, _d="": _d)
+    for key in ["官方因子資料日期", "官方資料日期", "法人資料日期", "估值資料日期", "FinMind資料日期"]:
+        d = _roc_or_iso_to_yyyymmdd(getter(key, ""))
+        if d:
+            values.append(d)
+    return min(values) if values else ""
+
+
 def load_factor_frame() -> pd.DataFrame:
     cache = load_factor_cache()
     records = cache.get("records", [])
@@ -606,6 +628,13 @@ def load_factor_frame() -> pd.DataFrame:
     for c in FACTOR_COLUMNS:
         if c not in df.columns:
             df[c] = ""
+    # V184 legacy migration: V182 already stored per-domain dates but many rows
+    # left the generic official date blank.  Governance then reported
+    # "有效83.8%／最新可信0%" even when the data was verifiable.
+    derived = df.apply(_row_daily_factor_date_v184, axis=1)
+    for col in ["官方資料日期", "官方因子資料日期"]:
+        current = df[col].map(_roc_or_iso_to_yyyymmdd)
+        df[col] = current.where(current.astype(str).str.len().eq(8), derived)
     return df[FACTOR_COLUMNS + [c for c in df.columns if c not in FACTOR_COLUMNS]].copy()
 
 
@@ -1876,6 +1905,12 @@ def build_official_factor_cache(
         for _, row in df.iterrows():
             item = {c: row.get(c, "") for c in df.columns}
             item.update(_calc_scores(item))
+            # V184：建立可被推薦治理層直接驗證的「逐股每日官方日期」。
+            # 月營收是月頻資料，不可拿來與每日 K 線做交易日差。
+            daily_factor_date = _row_daily_factor_date_v184(item)
+            if daily_factor_date:
+                item["官方資料日期"] = daily_factor_date
+                item["官方因子資料日期"] = daily_factor_date
             item["官方因子更新時間"] = update_time
             item["官方因子資料源"] = ",".join(sources)
             item["因子主要來源"] = "TWSE/TPEx/MOPS"
@@ -1903,9 +1938,18 @@ def build_official_factor_cache(
             should_save = False
             diagnostics.append(f"本次完整度>=60 僅 {complete_count} 筆，低於既有快取 {existing_complete} 筆，已保留舊有效快取，不覆蓋。")
 
+        # 快取層級日期取所有逐股「每日官方日期」的最新一日；這只用於
+        # 頁面總體狀態，逐股交易許可仍以每列日期為準。
+        daily_dates = [
+            _roc_or_iso_to_yyyymmdd(v)
+            for v in out.get("官方因子資料日期", pd.Series([], dtype=object)).tolist()
+        ] if not out.empty else []
+        daily_dates = [x for x in daily_dates if x]
+        data_date = max(daily_dates) if daily_dates else ""
+
         budget_status = _end_run_budget()
         meta = {
-            "ok": True, "updated_at": update_time, "record_count": int(len(out)),
+            "ok": True, "updated_at": update_time, "data_date": data_date, "record_count": int(len(out)),
             "complete_count": complete_count, "eligible_count": eligible_count,
             "eligible_complete_count": eligible_complete_count, "eligible_coverage": eligible_coverage,
             "existing_complete_count": existing_complete,

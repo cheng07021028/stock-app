@@ -262,7 +262,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v183_super_ai_durable_perf_20260811"
+PAGE07_SPEED_FIX_VERSION = "page07_v184_freshness_diagnostics_20260811"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -2063,6 +2063,8 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     payload = {
         "saved_at": saved_at_now,
         "recommendation_date": saved_at_now[:10],
+        "scan_run_id": _safe_str(st.session_state.get(_k("scan_run_id"))) or f"scan_{saved_at_now.replace(':','').replace(' ','_')}",
+        "expected_trade_date": _expected_latest_trade_date_v173().strftime("%Y-%m-%d"),
         "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
         "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
         "recommendations": recommendation_records,
@@ -2083,7 +2085,17 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     if local_ok and not verified:
         local_ok = False
         local_msg = f"快照寫入後回讀驗證失敗：{GODPICK_LATEST_FILE}"
-    github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
+    # V184：最新推薦已列入 V183 durability registry；不要再只靠單一路徑
+    # GitHub 背景寫入。先本機原子保存，再由 durability outbox 同步
+    # runtime-data + Firestore，重啟時才有可稽核的永久化證據。
+    try:
+        from godpick_durability_service import persist_json_async as _persist_json_async_v184
+        durable_ok, durable_msg = _persist_json_async_v184(
+            GODPICK_LATEST_FILE, payload, reason="V184 latest recommendation authority"
+        )
+        github_ok, github_msg = bool(durable_ok), str(durable_msg)
+    except Exception:
+        github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
 
     governed_list_df = _operational_recommendation_rows(action_df, refresh_decision=False)
     list_payload = _df_to_records_for_json(governed_list_df)
@@ -2107,7 +2119,13 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         list_payload = fixed_rows
 
     list_local_ok, list_local_msg = _safe_json_write_local(GODPICK_LIST_FILE, list_payload)
-    list_github_ok, list_github_msg = _write_json_to_github_path(GODPICK_LIST_FILE, list_payload)
+    try:
+        from godpick_durability_service import persist_json_async as _persist_list_async_v184
+        list_github_ok, list_github_msg = _persist_list_async_v184(
+            GODPICK_LIST_FILE, list_payload, reason="V184 operational recommendation list"
+        )
+    except Exception:
+        list_github_ok, list_github_msg = _write_json_to_github_path(GODPICK_LIST_FILE, list_payload)
 
     msgs = [
         local_msg,
@@ -2483,7 +2501,12 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     official_content_date = _max_row_date_v173(official_rows, [
         "官方資料日期", "官方因子資料日期", "三大法人資料日期", "法人資料日期"
     ])
-    official_top_date = _parse_date_v173(official_payload.get("data_date")) if isinstance(official_payload, dict) else None
+    official_meta = official_payload.get("meta", {}) if isinstance(official_payload, dict) else {}
+    if not isinstance(official_meta, dict):
+        official_meta = {}
+    official_top_date = _parse_date_v173(
+        official_payload.get("data_date") or official_meta.get("data_date")
+    ) if isinstance(official_payload, dict) else None
     official_date = max(
         [x for x in [official_content_date, official_top_date, row_official_date] if x is not None],
         default=None,
@@ -2497,6 +2520,7 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     scan_lag = _business_lag_v173(expected, saved_date) if saved_date is not None else 999
 
     issues: list[str] = []
+    warnings: list[str] = []
     if kline_date is None:
         if saved_date is not None and scan_lag > 0:
             issues.append("舊推薦快照未包含個股K線日期，需在本頁重新推薦")
@@ -2510,17 +2534,22 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
         issues.append(f"大盤資料停在{market_date:%Y-%m-%d}，落後K線{market_lag}交易日")
     if official_date is None:
         issues.append("官方因子日期未驗證")
-    elif official_lag > 0:
+    elif official_lag >= 2:
         issues.append(f"官方因子停在{official_date:%Y-%m-%d}，落後K線{official_lag}交易日")
+    elif official_lag == 1:
+        warnings.append(
+            f"官方因子為{official_date:%Y-%m-%d}（T-1已驗證）；盤後資料分批產製，系統採降級倉位而非視為錯誤"
+        )
     if saved_date is None:
         issues.append("推薦保存時間未驗證")
     elif scan_lag > 0:
         issues.append(f"最新推薦保存於{saved_date:%Y-%m-%d}，需重新推薦")
 
     hard_block = bool(
-        kline_lag > 0 or market_lag > 0 or official_lag > 0
+        kline_lag > 0 or market_lag > 0 or official_lag >= 2
         or market_date is None or official_date is None or kline_date is None
     )
+    all_messages = issues + warnings
     return {
         "expected_date": expected.strftime("%Y-%m-%d"),
         "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
@@ -2528,9 +2557,11 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
         "official_date": official_date.strftime("%Y-%m-%d") if official_date is not None else "",
         "saved_date": saved_date.strftime("%Y-%m-%d") if saved_date is not None else "",
         "kline_lag": kline_lag, "market_lag": market_lag, "official_lag": official_lag, "scan_lag": scan_lag,
-        "issues": issues,
+        "issues": all_messages,
+        "blocking_issues": issues,
+        "warnings": warnings,
         "hard_block": hard_block,
-        "ready": not issues,
+        "ready": not hard_block,
     }
 
 
@@ -2541,7 +2572,7 @@ def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
     source_data_ready = bool(
         snapshot.get("market_date") and snapshot.get("official_date")
         and int(snapshot.get("market_lag", 999)) <= 0
-        and int(snapshot.get("official_lag", 999)) <= 0
+        and int(snapshot.get("official_lag", 999)) <= 1
     )
     scan_stale = bool(
         int(snapshot.get("scan_lag", 999)) > 0
@@ -4966,17 +4997,40 @@ def _render_debug_scan_summary():
         else:
             st.error(msg + "｜本輪不可作為正式推薦依據，需重新掃描或修復資料來源。")
 
+    # V184：把「真正資料/程式失敗」與「模型正常淘汰」分開。
+    # signal/risk/prelaunch/trade filtered 是策略結果，不是程式錯誤。
+    actual_failure = sum(int(data.get(k, 0) or 0) for k in ["invalid_code", "no_history", "analysis_error"])
+    # V177 之後 signal/risk/prelaunch/trade 已改成 soft features；同一股票
+    # 可同時命中多個軟門檻，而且仍會進 Full-Market AI，不能相加叫「淘汰」。
+    soft_gate_count = int(data.get("soft_gate_survivors", 0) or 0)
+    if soft_gate_count <= 0:
+        soft_gate_count = max([int(data.get(k, 0) or 0) for k in [
+            "signal_filtered", "risk_filtered", "prelaunch_filtered", "trade_filtered"
+        ]] or [0])
+    total_scan = max(1, int(data.get("total_count", 0) or 0))
+    d1, d2 = st.columns(2)
+    with d1:
+        st.metric("真正資料/分析失敗", actual_failure, f"{actual_failure / total_scan * 100:.1f}%")
+    with d2:
+        st.metric("策略軟門檻提示", soft_gate_count, "仍進AI候選池；條件可重疊")
+    if actual_failure > 0:
+        st.info(
+            f"真正需要補處理的是 {actual_failure} 檔：K線抓取失敗 {int(data.get('no_history', 0) or 0)}、"
+            f"分析例外 {int(data.get('analysis_error', 0) or 0)}、代號無效 {int(data.get('invalid_code', 0) or 0)}。"
+            "可用『接續上次掃描』只補失敗股，不必把正常淘汰股重新當錯誤處理。"
+        )
+
     lines = []
     mapping = [
-        ("invalid_code", "代號無效"),
-        ("category_filtered", "類型篩選排除"),
-        ("no_history", "抓不到歷史資料"),
-        ("analysis_error", "指標/分析錯誤"),
-        ("signal_filtered", "訊號分數淘汰"),
-        ("risk_filtered", "風險過濾淘汰"),
-        ("prelaunch_filtered", "起漲前兆淘汰"),
-        ("trade_filtered", "交易可行淘汰"),
-        ("final_score_filtered", "推薦總分淘汰"),
+        ("invalid_code", "資料失敗｜代號無效"),
+        ("no_history", "資料失敗｜K線取得"),
+        ("analysis_error", "程式/指標失敗"),
+        ("category_filtered", "前置排除｜類型"),
+        ("signal_filtered", "軟門檻｜訊號不足"),
+        ("risk_filtered", "軟門檻｜風險偏高"),
+        ("prelaunch_filtered", "軟門檻｜起漲前兆不足"),
+        ("trade_filtered", "軟門檻｜交易可行不足"),
+        ("final_score_filtered", "最終分數排除"),
     ]
     for key, label in mapping:
         lines.append(f"{label}：{int(data.get(key, 0))} 檔")
@@ -12142,7 +12196,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     official_series = decision_source.get("官方因子新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
     data_limited_series = decision_source.get("資料受限A-", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
     funnel_fresh = int(fresh_series.str.contains("最新", na=False).sum())
-    funnel_official = int(official_series.str.contains("最新|對齊|READY", regex=True, na=False).sum())
+    funnel_official = int(official_series.str.contains("最新|對齊|READY|已驗證T-1|降級可用", regex=True, na=False).sum())
     funnel_a = int(funnel_bucket.eq("A-｜準主推薦小量試單").sum())
     funnel_formal = int(funnel_bucket.eq("正式下週主推薦").sum())
     funnel_dq = int(data_limited_series.eq("是").sum())
@@ -13975,6 +14029,14 @@ def main():
             ]
         except Exception as e:
             st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
+
+    # V184：頁首新鮮度是在掃描前先渲染；若本輪已完成並成功保存，
+    # 同一個 Streamlit run 會同時看到「舊7/9」與「本輪8/11」的矛盾文字。
+    # 完成所有本機保存/背景排程後只 rerun 一次，刷新頁首，不會重跑掃描。
+    if submit_recommend or submit_refresh or resume_scan_btn:
+        st.session_state[_k("v184_post_scan_ui_refresh")] = True
+    if st.session_state.pop(_k("v184_post_scan_ui_refresh"), False):
+        st.rerun()
 
     rotation_snapshot_message = _safe_str(st.session_state.get(_k("rotation_snapshot_message")))
     if rotation_snapshot_message and (submit_recommend or submit_refresh or resume_scan_btn):

@@ -15,9 +15,10 @@ from __future__ import annotations
 from typing import Any, Iterable
 import math
 
+import numpy as np
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "phase108_full_market_discovery_governance_20260807"
+EXECUTION_GOVERNANCE_VERSION = "v184_verified_t1_governance_20260811"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -177,6 +178,27 @@ def _parse_content_date(value: Any) -> pd.Timestamp | None:
         return None
 
 
+
+
+def _coalesce_date_series_v184(df: pd.DataFrame, columns: list[str]) -> pd.Series:
+    """First parseable date per row, instead of DataFrame.get(A, B).
+
+    ``DataFrame.get(A, B)`` never falls back to B when column A exists but is
+    blank.  Recommendation schemas pre-create many blank date columns, which was
+    the direct cause of official trusted coverage being reported as 0%.
+    """
+    result = pd.Series([None] * len(df), index=df.index, dtype="object")
+    missing = pd.Series([True] * len(df), index=df.index, dtype="bool")
+    for col in columns:
+        if col not in df.columns:
+            continue
+        parsed = df[col].map(_parse_content_date)
+        take = missing & parsed.notna()
+        if bool(take.any()):
+            result.loc[take] = parsed.loc[take]
+            missing.loc[take] = False
+    return result
+
 def _business_lag(newer: Any, older: Any) -> int:
     n = _parse_content_date(newer)
     o = _parse_content_date(older)
@@ -260,19 +282,28 @@ def build_scan_quality_report(
         liquidity_coverage = float(known.mean() * 100.0) if len(known) else 0.0
         official = pd.to_numeric(frame.get("官方資料完整度", pd.Series([float("nan")] * len(frame), index=frame.index)), errors="coerce")
         official_status = _series_text(frame, "官方因子資料狀態")
-        official_date_raw = frame.get("官方因子資料日期", frame.get("官方資料日期", pd.Series([None] * len(frame), index=frame.index)))
-        stock_date_raw = frame.get("本輪市場最新交易日", frame.get("K線最後交易日", pd.Series([None] * len(frame), index=frame.index)))
-        official_date = official_date_raw.map(_parse_content_date)
-        stock_date = stock_date_raw.map(_parse_content_date)
+        # V184：逐列找第一個「真的有日期」的欄位。舊寫法只要
+        # 官方因子資料日期欄存在（即使全空白）就永遠不會 fallback，
+        # 導致有效官方因子83%卻被算成最新可信0%。
+        official_date = _coalesce_date_series_v184(frame, [
+            "官方因子資料日期", "官方資料日期", "法人資料日期", "估值資料日期",
+            "三大法人資料日期", "FinMind資料日期",
+        ])
+        stock_date = _coalesce_date_series_v184(frame, [
+            "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期",
+        ])
         source_trust = pd.to_numeric(frame.get("因子來源可信度", pd.Series([0] * len(frame), index=frame.index)), errors="coerce").fillna(0)
         matched = official.notna() | official_status.ne("")
         effective = official.fillna(0).ge(45) | official_status.isin(["完整", "部分資料"])
         lag_days = pd.Series([999] * len(frame), index=frame.index, dtype="int64")
         valid_dates = official_date.notna() & stock_date.notna()
         if bool(valid_dates.any()):
-            lag_days.loc[valid_dates] = [
-                _business_lag(stock_date.loc[idx], official_date.loc[idx]) for idx in frame.index[valid_dates]
-            ]
+            # V184 performance: vectorized weekday lag.  The old per-row
+            # pd.bdate_range loop adds seconds on a 1,700-stock finalization.
+            older = pd.to_datetime(official_date.loc[valid_dates]).values.astype("datetime64[D]")
+            newer = pd.to_datetime(stock_date.loc[valid_dates]).values.astype("datetime64[D]")
+            lags = np.maximum(0, np.busday_count(older, newer)).astype(int)
+            lag_days.loc[valid_dates] = lags
         fresh_enough = valid_dates & lag_days.le(1)
         trusted_source = source_trust.ge(70) | source_trust.eq(0)
         trusted = effective & fresh_enough & trusted_source
@@ -342,10 +373,14 @@ def build_scan_quality_report(
         status, level, usable, factor = "官方因子有效覆蓋不足｜正式推薦暫停／A-研究", "warning", False, 0.0
         scope = f"有效因子覆蓋率{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%"
         reason = "有效官方因子未達70%；不得升格正式推薦。A-只保留研究與盤中驗證用途，資料補齊前不產生正式新倉。"
-    elif data_rows > 0 and official_effective_coverage >= 70.0 and official_same_day_coverage < 40.0 and official_one_day_lag_coverage >= 40.0:
-        status, level, usable, factor = "官方因子有效但落後1日｜正式推薦暫停／A-研究", "warning", False, 0.0
-        scope = f"有效{official_effective_coverage:.1f}%／同日{official_same_day_coverage:.1f}%／落後1日{official_one_day_lag_coverage:.1f}%"
-        reason = "官方因子並非缺失，而是多數落後最新K線1個交易日；研究雷達與A-研究候選可顯示，正式推薦待同日資料完成後再升格。"
+    elif data_rows > 0 and official_effective_coverage >= 70.0 and official_trusted_coverage >= 70.0 and official_same_day_coverage < 40.0 and official_one_day_lag_coverage >= 40.0:
+        # V184：T-1「已驗證官方資料」不等於資料錯誤。法人日資料本來就是
+        # 盤後產製；在同日資料尚未全部發布時，允許降級正式決策，但倉位
+        # 自動折減，且不得把它標成同日完整資料。lag>=2 仍會被上方可信度
+        # 閘門阻擋。
+        status, level, usable, factor = "官方因子T-1已驗證｜降級可用", "warning", True, 0.75
+        scope = f"有效{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%／落後1日{official_one_day_lag_coverage:.1f}%"
+        reason = "官方因子多數為已驗證T-1資料；可做正式決策但倉位上限自動乘0.75，待同日盤後官方資料完成後再恢復完整權限。"
     elif coverage >= 99.0 and usable_history >= 80.0 and (liquidity_coverage >= 90.0 or data_rows == 0):
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
