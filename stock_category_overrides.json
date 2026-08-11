@@ -1,10 +1,1 @@
-{
-  "3548": {
-    "code": "3548",
-    "name": "兆利",
-    "market": "上櫃",
-    "category": "光學鏡頭",
-    "updated_at": "2026-04-26",
-    "note": "儀表板市場別修正，避免被 watchlist 舊資料判成上市。"
-  }
-}
+{"3548":{"code":"3548","name":"兆利","market":"上櫃","category":"光學鏡頭","updated_at":"2026-04-26","note":"儀表板市場別修正，避免被 watchlist 舊資料判成上市。"}}
