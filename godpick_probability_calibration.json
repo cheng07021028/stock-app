@@ -1,0 +1,1 @@
+{"version":"godpick_t1_trade_truth_v188_20260812","updated_at":"2026-08-12 15:29:21","eligible_samples":0,"mean_predicted_up_pct":null,"actual_up_rate_pct":null,"brier_score":null,"executable_samples":0,"executable_win_rate_pct":null,"avg_executable_ret_pct":null,"bins":[],"policy":"T1 selection outcome calibrates probability; untriggered radar is never counted as a trade win"}
