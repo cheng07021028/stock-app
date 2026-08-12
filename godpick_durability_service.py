@@ -26,7 +26,7 @@ import hashlib
 import json
 import threading
 
-DURABILITY_VERSION = "godpick_durability_v188_20260812"
+DURABILITY_VERSION = "godpick_durability_v191_20260812"
 OUTBOX_FILE = "godpick_durability_outbox.json"
 AUDIT_FILE = "godpick_durability_audit.json"
 
@@ -64,6 +64,7 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
     "dashboard_table_settings.json": {"critical": True, "purpose": "儀表板排序/篩選設定", "managed_by": "V183 durability"},
     "hk_chart_settings.json": {"critical": True, "purpose": "歷史K線圖表設定", "managed_by": "V183 durability"},
     "data/config/official_factor_schedule_settings.json": {"critical": True, "purpose": "官方因子排程設定", "managed_by": "health service GitHub + durability migration"},
+    "data/config/godpick_auto_scheduler_settings.json": {"critical": True, "purpose": "V191中央自動排程設定", "managed_by": "V191 scheduler + durability"},
     # Sensitive authentication material is tracked by the inventory but MUST NOT
     # be copied through the generic Firestore layer. app_auth_core owns its GitHub
     # persistence and access controls.
@@ -71,6 +72,8 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
     # Operational logs/status are useful for diagnosis but are rebuildable.
     "official_factors_update_log.json": {"critical": False, "purpose": "官方因子更新履歷"},
     "godpick_global_update_status.json": {"critical": False, "purpose": "一鍵更新執行狀態"},
+    "godpick_auto_scheduler_status.json": {"critical": False, "purpose": "V191中央排程最後執行狀態"},
+    "godpick_auto_scheduler_history.json": {"critical": False, "purpose": "V191中央排程成功/失敗履歷"},
     "macro_startup_status.json": {"critical": False, "purpose": "大盤啟動更新狀態"},
     "last_query_state.json": {"critical": False, "purpose": "最近查詢狀態"},
     # Derived / rebuildable files: still useful to audit, but not business truth.
@@ -81,6 +84,9 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
     "macro_taifex_cache.json": {"critical": False, "purpose": "期貨快取"},
     "macro_us_market_cache.json": {"critical": False, "purpose": "美股快取"},
     "macro_otc_cache.json": {"critical": False, "purpose": "櫃買快取"},
+    "overnight_global_market_cache.json": {"critical": False, "purpose": "隔夜國際盤/美盤風控快取"},
+    "macro_news_event_cache.json": {"critical": False, "purpose": "大盤事件安全快取"},
+    "macro_v70_one_click_status.json": {"critical": False, "purpose": "大盤V70一鍵更新完成狀態"},
 }
 
 _BASE = Path(__file__).resolve().parent

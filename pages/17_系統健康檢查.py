@@ -39,6 +39,20 @@ from godpick_global_update_service import (
 )
 
 try:
+    from godpick_auto_scheduler import (
+        VERSION as AUTO_SCHEDULER_VERSION, JOB_LABELS as AUTO_JOB_LABELS, DEFAULT_SETTINGS as AUTO_DEFAULT_SETTINGS,
+        load_settings as load_auto_scheduler_settings, save_settings as save_auto_scheduler_settings,
+        load_status as load_auto_scheduler_status, load_history as load_auto_scheduler_history,
+        run_due_jobs as run_auto_due_jobs, next_run_rows as auto_next_run_rows, normalize_settings as normalize_auto_scheduler_settings,
+    )
+except Exception:
+    AUTO_SCHEDULER_VERSION = "V191 scheduler unavailable"
+    AUTO_JOB_LABELS = {}
+    AUTO_DEFAULT_SETTINGS = {}
+    load_auto_scheduler_settings = save_auto_scheduler_settings = load_auto_scheduler_status = load_auto_scheduler_history = None
+    run_auto_due_jobs = auto_next_run_rows = normalize_auto_scheduler_settings = None
+
+try:
     from godpick_durability_service import audit_core_durability, retry_failed_durability, queue_existing_critical_for_migration
 except Exception:
     audit_core_durability = None
@@ -54,10 +68,120 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V183｜SuperAI情境＋永久化稽核＋最終結果效能：一鍵檢查資料新鮮度、遠端永久保存狀態與AI經驗鏈。")
+st.caption("V191｜中央自動排程＋永久化監控：股票主檔→大盤→官方因子→SuperAI情境→股神推薦→最新價/績效→N日/命中→T+1學習，全鏈可設定台灣時間自動執行。")
+
+
+# ---------------------------------------------------------------------------
+# V191 Central Scheduler UI
+# ---------------------------------------------------------------------------
+if callable(load_auto_scheduler_settings):
+    _auto_cfg = load_auto_scheduler_settings()
+    _auto_status = load_auto_scheduler_status() if callable(load_auto_scheduler_status) else {}
+    with st.expander("⏰ V191｜中央自動排程中心（每日自動更新＋永久記錄＋自動股神推薦）", expanded=True):
+        st.info(
+            "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
+            "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
+        )
+        _m1, _m2, _m3, _m4 = st.columns(4)
+        _m1.metric("總開關", "啟用" if _auto_cfg.get("enabled") else "停用")
+        _m2.metric("已啟用工作", sum(1 for x in (_auto_cfg.get("jobs") or {}).values() if isinstance(x, dict) and x.get("enabled")))
+        _sum = (_auto_status.get("last_summary") or {}) if isinstance(_auto_status, dict) else {}
+        _m3.metric("最近成功/失敗", f"{_sum.get('success', 0)}/{_sum.get('failed', 0)}")
+        _m4.metric("最後喚醒", str((_auto_status or {}).get("last_wakeup_at") or "尚未執行"))
+
+        with st.form("v191_central_scheduler_form", clear_on_submit=False):
+            _enable_all = st.checkbox("啟用 V191 中央自動排程", value=bool(_auto_cfg.get("enabled", False)))
+            _weekdays = st.checkbox("僅交易日週一～週五執行", value=bool(_auto_cfg.get("weekdays_only", True)))
+            _rec_force_full = st.checkbox(
+                "自動股神推薦固定使用全市場完整掃描",
+                value=bool((((_auto_cfg.get("jobs") or {}).get("godpick_recommendation") or {}).get("options") or {}).get("force_full_market", False)),
+                help="未勾選時，沿用第7頁已永久保存的掃描範圍/群組/市場/門檻；勾選時只覆寫自動排程的掃描範圍為全市場，不修改第7頁人工設定。",
+            )
+            st.caption("每日時間可填一個或多個，例如 14:20,20:40。GitHub Actions 是喚醒器，真正是否到期由本設定判斷。")
+            _edited_jobs = {}
+            for _job, _label in AUTO_JOB_LABELS.items():
+                _jc = ((_auto_cfg.get("jobs") or {}).get(_job) or {})
+                _c1, _c2, _c3 = st.columns([0.7, 4.0, 2.2])
+                with _c1:
+                    _jen = st.checkbox("啟用", value=bool(_jc.get("enabled", False)), key=f"v191_en_{_job}")
+                with _c2:
+                    st.markdown(f"**{_label}**")
+                    if _job == "godpick_recommendation":
+                        st.caption("只有股票主檔、大盤、官方因子、SuperAI市場情境於今日前置成功，才允許自動推薦。")
+                with _c3:
+                    _jtimes = st.text_input("台灣時間", value=",".join(_jc.get("times") or []), key=f"v191_times_{_job}", label_visibility="collapsed")
+                _newj = dict(_jc)
+                _newj["enabled"] = bool(_jen)
+                _newj["times"] = [x.strip() for x in str(_jtimes).replace("，", ",").split(",") if x.strip()]
+                if _job == "godpick_recommendation":
+                    _opts = dict(_newj.get("options") or {})
+                    _opts["force_full_market"] = bool(_rec_force_full)
+                    _newj["options"] = _opts
+                _edited_jobs[_job] = _newj
+            _s1, _s2, _s3 = st.columns(3)
+            _grace = _s1.number_input("到期容許分鐘", min_value=10, max_value=120, value=int(_auto_cfg.get("grace_minutes", 35) or 35), step=5)
+            _retry = _s2.number_input("失敗重試次數", min_value=0, max_value=5, value=int(_auto_cfg.get("retry_count", 2) or 2), step=1)
+            _delay = _s3.number_input("重試間隔秒", min_value=5, max_value=180, value=int(_auto_cfg.get("retry_delay_seconds", 20) or 20), step=5)
+            _save_auto = st.form_submit_button("💾 永久保存 V191 自動排程設定", type="primary", use_container_width=True)
+        if _save_auto:
+            _new_cfg = dict(_auto_cfg)
+            _new_cfg.update({"enabled": bool(_enable_all), "weekdays_only": bool(_weekdays), "grace_minutes": int(_grace), "retry_count": int(_retry), "retry_delay_seconds": int(_delay), "jobs": _edited_jobs})
+            _ok, _msg = save_auto_scheduler_settings(_new_cfg)
+            if _ok:
+                st.success("V191 中央排程設定已永久保存；GitHub Actions 下一次喚醒後會依新時間執行。")
+                st.caption(_msg)
+            else:
+                st.error("V191 排程本機可能已寫入，但遠端永久化未確認；Reboot 前請先處理。")
+                st.caption(_msg)
+
+        _b1, _b2, _b3 = st.columns(3)
+        if _b1.button("🧭 模擬目前到期項目（不執行）", use_container_width=True):
+            _sim = run_auto_due_jobs(simulate=True)
+            if _sim.get("executed"):
+                st.dataframe(pd.DataFrame(_sim.get("executed", [])), use_container_width=True, hide_index=True)
+            else:
+                st.info(_sim.get("message"))
+        if _b2.button("▶ 執行目前已到期項目", use_container_width=True):
+            with st.spinner("V191 正在依排程執行到期項目；完成/失敗都會永久記錄..."):
+                _run = run_auto_due_jobs()
+            (st.success if _run.get("ok") else st.warning)(_run.get("message"))
+            if _run.get("executed"):
+                st.dataframe(pd.DataFrame(_run.get("executed", [])), use_container_width=True, hide_index=True)
+        _force_confirm = _b3.checkbox("允許本次強制跑全部已啟用工作", value=False, help="會包含全市場股神推薦，可能需要數分鐘；只用於部署驗證。")
+        if st.button("🧪 強制執行全部已啟用工作（部署驗證）", disabled=not _force_confirm, use_container_width=True):
+            with st.spinner("V191 強制驗證執行中..."):
+                _runall = run_auto_due_jobs(force_all_enabled=True)
+            (st.success if _runall.get("ok") else st.warning)(_runall.get("message"))
+            if _runall.get("executed"):
+                st.dataframe(pd.DataFrame(_runall.get("executed", [])), use_container_width=True, hide_index=True)
+
+        st.markdown("#### 排程狀態 / 成功失敗訊息")
+        _next_rows = auto_next_run_rows(_auto_cfg, _auto_status) if callable(auto_next_run_rows) else []
+        if _next_rows:
+            st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)
+        _hist = load_auto_scheduler_history() if callable(load_auto_scheduler_history) else []
+        with st.expander("最近自動更新履歷", expanded=False):
+            if _hist:
+                _hdf = pd.DataFrame(_hist[-120:][::-1])
+                _cols = [c for c in ["finished_at", "job_label", "status", "duration_seconds", "attempt", "message"] if c in _hdf.columns]
+                st.dataframe(_hdf[_cols], use_container_width=True, hide_index=True, height=420)
+            else:
+                st.caption("尚無 V191 自動執行履歷。")
+
+        st.markdown("#### 已納入自動化的完整盤點")
+        st.markdown(
+            "- **00 大盤走勢**：加權指數、櫃買、三大法人、外盤/美盤、台指期/期貨、隔夜國際盤、market_snapshot、macro_mode_bridge、macro_trend_records。\n"
+            "- **08 股神推薦紀錄**：最新價、推薦後績效、權威儲存同步；另納入 V188 T+1 實戰真相/機率校準。\n"
+            "- **09 股票主檔**：股票主檔智慧更新並永久保存。\n"
+            "- **10 推薦清單**：推薦後績效、正式 N 日績效、隔日命中追蹤及同步。\n"
+            "- **16 官方因子**：法人/營收/PER/PBR/EPS 多來源快取＋V187來源可信度＋V190盤後時序治理。\n"
+            "- **補充納入**：SuperAI 融資券/期貨/PCR/ETF情境、AI績效回饋/每日學習、永久化失敗重試。\n"
+            "- **07 股神推薦**：只在必要前置工作今日成功後自動執行；沿用你 Page7 永久保存的掃描範圍、門檻、模式與權重。"
+        )
+        st.caption("不自動化的按鈕：清除快取、清空紀錄、重置設定、強制修復/編譯測試等維護或破壞性操作，仍保留人工確認。")
 
 with st.sidebar:
-    st.header("V171 操作")
+    st.header("V191 操作")
     do_check = st.button("🔍 重新健康檢查", use_container_width=True, type="primary")
     do_repair = st.button("🛠 一鍵安全修復缺檔/缺欄", use_container_width=True)
     do_compile = st.button("🧪 執行編譯煙霧測試", use_container_width=True)
@@ -66,7 +190,8 @@ with st.sidebar:
     do_retry_durable = st.button("🔁 重試失敗/待同步永久化", use_container_width=True)
     do_super_context = st.button("🧠 更新SuperAI融資/期貨/ETF情境", use_container_width=True)
     st.divider()
-    st.subheader("官方因子自動更新排程")
+    st.subheader("舊版官方因子排程（V191相容設定）")
+    st.caption("V191中央排程啟用後，建議由上方中央排程統一控制；此區保留舊設定與手動更新功能，不再需要另一套獨立cron。")
     cfg = load_schedule_settings()
     schedule_options = ["21:00", "21:30", "22:00", "22:30", "23:00", "23:30"]
     limit_options = [0, 200, 500, 1000, 1500, 2000]
@@ -377,12 +502,13 @@ with st.expander("二、每個模組哪些資訊會由全域更新、哪些仍�
 with st.expander("三、每個模組參數永久保存檢查", expanded=True):
     st.dataframe(setting_status_df, use_container_width=True, hide_index=True)
 
-with st.expander("官方因子自動更新排程說明", expanded=False):
+with st.expander("V191 無人值守排程架構說明", expanded=False):
     st.markdown("""
-- Streamlit 頁面本身不會背景常駐執行排程，避免拖慢 07/10/8/14。
-- V112 已加入 GitHub Actions workflow：`.github/workflows/update_official_factors_v112.yml`。
-- 預設排程為台灣時間約 23:00；實際 cron 使用 UTC 15:00。
-- GitHub Actions 會執行 `tools/update_official_factors_scheduled.py`，更新 `official_factors_cache.json` 後自動 commit/push。
-- 若排程設定停用，workflow 仍會被觸發，但腳本會直接略過更新。
+- V191 使用 `.github/workflows/godpick_auto_scheduler_v191.yml` 每 10 分鐘喚醒一次中央 due-check；真正工作時間仍由本頁永久設定的 Asia/Taipei 時間決定。
+- 所有更新結果與成功/失敗訊息寫入 `godpick_auto_scheduler_status.json` / `godpick_auto_scheduler_history.json`，並同步 `runtime-data`。
+- 舊 `.github/workflows/update_official_factors_v112.yml` 已改為 **只保留手動 emergency dispatch**，避免和中央排程重複抓官方因子。
+- 自動股神推薦不是固定時間硬跑：只有股票主檔、大盤、官方因子、SuperAI 市場情境等前置工作於同日成功後才會執行。
+- 清除快取、刪除紀錄、恢復預設、編譯/修復等維護性或破壞性動作不會被自動排程。
 """)
-    st.code(json.dumps(load_schedule_settings(), ensure_ascii=False, indent=2), language="json")
+    if callable(load_auto_scheduler_settings):
+        st.code(json.dumps(load_auto_scheduler_settings(), ensure_ascii=False, indent=2), language="json")
