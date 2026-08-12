@@ -26,7 +26,7 @@ import hashlib
 import json
 import threading
 
-DURABILITY_VERSION = "godpick_durability_v183_20260811"
+DURABILITY_VERSION = "godpick_durability_v188_20260812"
 OUTBOX_FILE = "godpick_durability_outbox.json"
 AUDIT_FILE = "godpick_durability_audit.json"
 
@@ -50,6 +50,8 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
     "super_ai_market_context.json": {"critical": True, "purpose": "融資券/期貨/PCR/ETF市場情境"},
     "super_ai_experience_index.json": {"critical": True, "purpose": "SuperAI逐日經驗索引"},
     "super_ai_experience_profile.json": {"critical": True, "purpose": "SuperAI校準/績效摘要"},
+    "godpick_t1_trade_truth.json": {"critical": True, "purpose": "V188 T+1選股/進場/風控實戰真相"},
+    "godpick_probability_calibration.json": {"critical": True, "purpose": "V188隔日機率校準與Brier統計"},
     "stock_master_cache.json": {"critical": True, "purpose": "股票主檔"},
     "stock_category_overrides.json": {"critical": True, "purpose": "人工類股覆寫"},
     "watchlist.json": {"critical": True, "purpose": "自選股權威檔"},
@@ -83,7 +85,7 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
 
 _BASE = Path(__file__).resolve().parent
 _LOCK = threading.Lock()
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-durable-v183")
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-durable-v188")
 _PENDING: dict[str, dict[str, Any]] = {}
 _RUNNING = False
 
@@ -332,7 +334,7 @@ def queue_existing_critical_for_migration(
             continue
         ok, msg = persist_json_async(
             path_name, payload,
-            reason="V183 migrate existing authority to durable remote",
+            reason="V188 migrate existing authority to durable remote",
             base_dir=base,
         )
         messages.append(f"{path_name}: {'queued' if ok else 'failed'}｜{msg}")
@@ -351,7 +353,7 @@ def retry_failed_durability(*, base_dir: str | Path | None = None) -> list[str]:
         if payload is None:
             messages.append(f"{path_name}: local missing")
             continue
-        ok, msg = persist_json_async(path_name, payload, reason="V183 durability retry", base_dir=base_dir)
+        ok, msg = persist_json_async(path_name, payload, reason="V188 durability retry", base_dir=base_dir)
         messages.append(f"{path_name}: {'queued' if ok else 'failed'}｜{msg}")
     return messages
 

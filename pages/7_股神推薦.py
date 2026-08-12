@@ -218,6 +218,10 @@ try:
     from godpick_super_ai_experience import (
         save_super_ai_run, load_super_ai_experience_profile, refresh_super_ai_experience_profile,
     )
+    from godpick_t1_trade_truth import (
+        refresh_t1_trade_truth, refresh_t1_truth_async, load_t1_truth_rows,
+        load_t1_truth_summary, load_probability_calibration,
+    )
     from godpick_durability_service import audit_core_durability
 except Exception:
     SUPER_AI_VERSION = "super_ai_unavailable"
@@ -226,6 +230,11 @@ except Exception:
     save_super_ai_run = None
     load_super_ai_experience_profile = None
     refresh_super_ai_experience_profile = None
+    refresh_t1_trade_truth = None
+    refresh_t1_truth_async = None
+    load_t1_truth_rows = None
+    load_t1_truth_summary = None
+    load_probability_calibration = None
     audit_core_durability = None
 
 try:
@@ -10639,9 +10648,16 @@ def _build_recommend_df(
                 debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)
                 if isinstance(final_df, pd.DataFrame) and not final_df.empty and "股票代號" in final_df.columns:
                     _super_cols = [c for c in getattr(__import__("godpick_super_ai_engine"), "SUPER_AI_COLUMNS", []) if c in governed_candidate_df.columns]
-                    if _super_cols:
-                        _super_map = governed_candidate_df[["股票代號", *_super_cols]].drop_duplicates("股票代號", keep="first")
-                        final_df = final_df.drop(columns=[c for c in _super_cols if c in final_df.columns], errors="ignore").merge(_super_map, on="股票代號", how="left")
+                    # V188 trade-quality is demotion-only, but demotion must flow back
+                    # to the actual action list as well as the full candidate diagnosis.
+                    _v188_authority_cols = [c for c in [
+                        "正式推薦分區", "操作許可", "是否正式推薦", "正式推薦資格",
+                        "下週是否可直接買", "正式推薦動作",
+                    ] if c in governed_candidate_df.columns]
+                    _merge_cols = list(dict.fromkeys([*_super_cols, *_v188_authority_cols]))
+                    if _merge_cols:
+                        _super_map = governed_candidate_df[["股票代號", *_merge_cols]].drop_duplicates("股票代號", keep="first")
+                        final_df = final_df.drop(columns=[c for c in _merge_cols if c in final_df.columns], errors="ignore").merge(_super_map, on="股票代號", how="left")
             except Exception as super_ai_error:
                 debug_summary["v183_super_ai_error"] = str(super_ai_error)
                 debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)
@@ -12018,9 +12034,9 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     """建立唯一第一優先的「股神推薦總排名」。
 
     保留原本正式/A-/R1/R2/觀察分頁，但使用者不必在多張表間自行比較。
-    排名只採 ``股神推薦優先分``；此分數已同時納入候選強度、買點、風控、
-    強勢動能/前兆、主流主升、族群廣度、族群成交額、流動性與大盤新鮮度校正。
-    正式排除永不進榜；高熱主流股可以優先顯示，但操作許可仍維持禁止追價。
+    V188 起第一排序採 ``V188股神作戰優先分``（Alpha × Trade × RR × 資料證據 ×
+    追價治理 × 類股集中度）；舊 ``股神推薦優先分`` 保留作 Alpha/候選強度參考。
+    正式排除永不進榜；好股票如果現在不是好買點，Trade Grade 會明確降級。
     """
     if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty:
         return pd.DataFrame()
@@ -12039,7 +12055,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         return pd.DataFrame()
 
     bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    score = pd.to_numeric(work.get("股神推薦優先分", 0), errors="coerce").fillna(0.0)
+    _rank_score_col = "V188股神作戰優先分" if "V188股神作戰優先分" in work.columns else "股神推薦優先分"
+    score = pd.to_numeric(work.get(_rank_score_col, 0), errors="coerce").fillna(0.0)
     freshness = work.get("K線資料新鮮度", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     # 正式排除不進主排名；資料過期只留在診斷表，不應占用第一眼名單。
     keep = ~bucket.eq("正式排除清單")
@@ -12050,7 +12067,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         return pd.DataFrame()
 
     sort_cols = [
-        "股神推薦優先分", "今日訊號新鮮分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
+        "V188股神作戰優先分", "SuperAI Trade分", "SuperAI Alpha分", "股神推薦優先分", "今日訊號新鮮分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分", "強勢動能分",
         "強勢前兆分", "主流資金分", "族群攻擊強度", "流動性參考成交額百萬",
     ]
     for col in sort_cols:
@@ -12064,7 +12081,10 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     rank["股神推薦總排名"] = range(1, len(rank) + 1)
 
     cols = [
-        "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+        "股神推薦總排名", "V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
+        "V188交易許可", "V188正式推薦資格", "SuperAI執行風報比", "SuperAI風報比來源", "V188RR治理", "V188T+1追價治理",
+        "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分", "SuperAI校準後隔日上漲機率%",
+        "股神推薦優先分", "股神推薦等級", "股神推薦用途",
         "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
         "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化", "重複推薦說明",
         "主流主升優先分", "主流主升判定", "主流主升操作限制",
@@ -12090,7 +12110,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
-        {"優先序": 1, "活頁/表格": "股神推薦總排名", "真正用途": "唯一第一優先；依股神推薦優先分由高到低看最值得推薦與觀察的股票", "是否買進清單": "否，仍須看操作許可與觸發條件"},
+        {"優先序": 1, "活頁/表格": "股神推薦總排名", "真正用途": "唯一第一優先；V188 依 Alpha×Trade 交易品質排序，舊股神分數只保留作股票強度參考", "是否買進清單": "否，仍須看V188交易許可與觸發條件"},
         {"優先序": 2, "活頁/表格": "正式下週主推薦", "真正用途": "已通過買點、風控與風報比，可依條件分批操作", "是否買進清單": "是，仍須盤中確認"},
         {"優先序": 3, "活頁/表格": "A-準主推薦小量試單", "真正用途": "接近正式門檻，只能觸發且守價後小量試單", "是否買進清單": "條件式"},
         {"優先序": 4, "活頁/表格": "強勢動能核心雷達", "真正用途": "已發動強勢股；只等回測守住或再突破放量", "是否買進清單": "不是，禁止開盤盲追"},
@@ -12292,7 +12312,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
     render_pro_section("股神推薦總排名｜真正第一優先")
-    st.caption("只想知道哪一檔最值得看，先看這張表並依『股神推薦優先分』由高到低。V177 先讓所有K線有效股票進入全市場AI，再由硬風控把關；舊訊號/起漲/交易門檻只作特徵。排名另區分「新推薦事件」與「既有持續追蹤」，並對小樣本類股做收縮校正，避免同一批股票與1檔類股反覆自我強化。")
+    st.caption("V188 第一順位改看『V188股神作戰優先分』與 Alpha×Trade：好股票不等於現在是好買點。RR、T+1追價、逐股資料證據、大盤對齊與類股集中都會壓低 Trade Grade；舊『股神推薦優先分/等級』保留作股票強度參考，不能單獨當買進許可。")
     if callable(rotation_diagnostics):
         try:
             rotation_info = rotation_diagnostics(decision_source)
@@ -12313,13 +12333,17 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
         top_row = master_rank.iloc[0]
         render_pro_kpi_row([
-            {"label": "第一名", "value": f"{_safe_str(top_row.get('股票代號'))} {_safe_str(top_row.get('股票名稱'))}", "delta": _safe_str(top_row.get("股神推薦用途"))},
-            {"label": "股神推薦優先分", "value": format_number(top_row.get("股神推薦優先分"), 1), "delta": _safe_str(top_row.get("股神推薦等級"))},
-            {"label": "操作許可", "value": _safe_str(top_row.get("操作許可")) or _safe_str(top_row.get("下週是否可直接買")), "delta": "先看許可再看分數"},
-            {"label": "前20名", "value": str(len(master_rank)), "delta": "依分數排序"},
+            {"label": "第一名", "value": f"{_safe_str(top_row.get('股票代號'))} {_safe_str(top_row.get('股票名稱'))}", "delta": _safe_str(top_row.get("SuperAI最終作戰等級")) or _safe_str(top_row.get("股神推薦用途"))},
+            {"label": "V188作戰優先分", "value": format_number(top_row.get("V188股神作戰優先分", top_row.get("股神推薦優先分")), 1), "delta": _safe_str(top_row.get("V188交易許可"))},
+            {"label": "Alpha / Trade", "value": f"{_safe_str(top_row.get('SuperAI Alpha等級')) or '-'} / {_safe_str(top_row.get('SuperAI Trade等級')) or '-'}", "delta": f"RR {format_number(top_row.get('SuperAI執行風報比'),2)}"},
+            {"label": "操作許可", "value": _safe_str(top_row.get("V188交易許可")) or _safe_str(top_row.get("操作許可")) or _safe_str(top_row.get("下週是否可直接買")), "delta": "Prediction ≠ Permission"},
+            {"label": "前20名", "value": str(len(master_rank)), "delta": "依交易品質排序"},
         ])
         master_cols = [c for c in [
-            "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+            "股神推薦總排名", "V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
+            "V188交易許可", "V188正式推薦資格", "SuperAI執行風報比", "SuperAI風報比來源", "V188RR治理", "V188T+1追價治理",
+            "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "SuperAI校準後隔日上漲機率%",
+            "股神推薦優先分", "股神推薦等級", "股神推薦用途",
             "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
             "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化",
             "主流主升優先分", "主流主升判定", "主流主升操作限制",
@@ -12598,6 +12622,27 @@ def _build_excel_bytes(
     }])
     master_rank_df = _phase90_build_master_recommendation_rank(candidate_source, top_n=30)
     navigation_df = _phase90_navigation_table()
+    _v188_cols = [c for c in [
+        "股票代號", "股票名稱", "市場別", "類別", "V188股神作戰優先分",
+        "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
+        "SuperAI執行風報比", "SuperAI風報比來源", "V188交易許可", "V188正式推薦資格",
+        "V188RR治理", "V188T+1追價治理", "V188個股資料證據", "V188市場對齊治理",
+        "V188類股集中治理", "V188類股集中扣分", "SuperAI隔日上漲機率%", "SuperAI校準後隔日上漲機率%",
+        "主要進場路徑", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
+    ] if c in candidate_source.columns]
+    v188_trade_df = candidate_source[_v188_cols].copy() if _v188_cols else pd.DataFrame()
+    try:
+        v188_truth_df = pd.DataFrame(load_t1_truth_rows(limit=500) if callable(load_t1_truth_rows) else [])
+    except Exception:
+        v188_truth_df = pd.DataFrame()
+    try:
+        _v188_cal = load_probability_calibration() if callable(load_probability_calibration) else {}
+        v188_calibration_df = pd.DataFrame((_v188_cal or {}).get("bins") or [])
+        if isinstance(v188_calibration_df, pd.DataFrame) and not v188_calibration_df.empty:
+            v188_calibration_df.insert(0, "總樣本數", int((_v188_cal or {}).get("eligible_samples") or 0))
+            v188_calibration_df.insert(1, "全體Brier", (_v188_cal or {}).get("brier_score"))
+    except Exception:
+        v188_calibration_df = pd.DataFrame()
 
     # Compact ranking pages also use the full candidate pool whenever available.
     if (cat_export is None or not isinstance(cat_export, pd.DataFrame) or cat_export.empty) and isinstance(candidate_source, pd.DataFrame):
@@ -12608,6 +12653,9 @@ def _build_excel_bytes(
 
     sheets = [
         ("股神推薦總排名", master_rank_df, "目前沒有資料新鮮且達排名門檻的推薦/觀察候選。"),
+        ("V188交易品質治理", v188_trade_df, "尚無 V188 Alpha/Trade 交易品質治理資料。"),
+        ("T+1實戰真相", v188_truth_df, "尚無成熟 T+1 實戰真相；待下一交易日更新。"),
+        ("AI機率校準", v188_calibration_df, "尚無足夠成熟樣本建立機率校準。"),
         ("使用導航", navigation_df, "使用導航無資料。"),
         ("股神正式推薦摘要", summary_df, "本輪沒有摘要資料。"),
         ("掃描完整性", scan_df, "缺少掃描完整性資料；請重新掃描。"),
@@ -12898,7 +12946,7 @@ def _render_recommendation_scoring_guide():
                     </ul>
                 </div>
             </div>
-            <div class="gp-guide-foot">第一優先看「股神推薦優先分」與總排名；原推薦總分只代表候選強度。真正進場仍須看操作許可、盤中觸發與停損控管。</div>
+            <div class="gp-guide-foot">第一優先看「V188股神作戰優先分」與 Alpha×Trade；舊股神分數只代表股票/候選強度。真正進場仍須通過V188交易許可、盤中觸發與停損控管。</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -14151,6 +14199,14 @@ def main():
                 st.session_state[_k("super_ai_run_meta")] = super_meta
             except Exception as super_save_error:
                 st.session_state[_k("super_ai_run_message")] = f"SuperAI經驗快照保存例外：{super_save_error}"
+        # V188：主掃描完成後只排入「已成熟舊推薦」的 T+1 真相更新。
+        # 網路行情抓取不阻塞本輪 1,700+ 檔 AI 最終結果。
+        if callable(refresh_t1_truth_async):
+            try:
+                _truth_ok, _truth_msg = refresh_t1_truth_async(max_records=160, max_workers=8)
+                st.session_state[_k("v188_t1_truth_async_message")] = _truth_msg
+            except Exception as _truth_schedule_error:
+                st.session_state[_k("v188_t1_truth_async_message")] = f"V188 T+1真相背景排程失敗：{_truth_schedule_error}"
     else:
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
         rec_df, hot_pick_df, _postprocess_cache_hit_v164 = _postprocess_recommend_result_v164(
@@ -14206,6 +14262,53 @@ def main():
     _super_msg = _safe_str(st.session_state.get(_k("super_ai_run_message")))
     if _super_msg:
         st.caption(f"SuperAI經驗永久化：{_super_msg}")
+    _truth_async_msg = _safe_str(st.session_state.get(_k("v188_t1_truth_async_message")))
+    if _truth_async_msg:
+        st.caption(f"V188 T+1實戰真相：{_truth_async_msg}")
+
+    # V188：把「選股是否跑贏大盤」與「是否真的觸發交易」分開顯示。
+    # 未觸發雷達永遠不計交易勝負，避免把候選上漲冒充可執行績效。
+    if callable(load_t1_truth_summary):
+        try:
+            _truth_summary = load_t1_truth_summary() or {}
+        except Exception:
+            _truth_summary = {}
+        with st.expander("V188｜T+1實戰真相、Alpha/Trade分離與機率校準", expanded=False):
+            _matured = int(_truth_summary.get("matured_t1_samples") or 0)
+            _exec_n = int(_truth_summary.get("executable_samples") or 0)
+            _trigger = _truth_summary.get("trigger_rate_pct")
+            _win = _truth_summary.get("executable_win_rate_pct")
+            _alpha = _truth_summary.get("avg_selection_alpha_pct")
+            _brier = _truth_summary.get("brier_score")
+            render_pro_kpi_row([
+                {"label": "T+1成熟樣本", "value": _matured, "delta": "Selection Alpha樣本", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "真正觸發交易", "value": _exec_n, "delta": f"觸發率 {float(_trigger or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "可執行勝率", "value": f"{float(_win or 0):.1f}%" if _win is not None else "待累積", "delta": "未觸發不計勝負", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "平均Selection Alpha", "value": f"{float(_alpha or 0):+.2f}%" if _alpha is not None else "待累積", "delta": "個股隔日－市場基準", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "Brier Score", "value": f"{float(_brier):.4f}" if _brier is not None else "待累積", "delta": f"校準樣本 {int(_truth_summary.get('calibration_samples') or 0)}", "delta_class": "pro-kpi-delta-flat"},
+            ])
+            st.caption("V188 將 Alpha Grade（股票品質）與 Trade Grade（現在是否值得買）分離；RR<1 禁止正式新倉、RR 1.0~1.3只列雷達，前日大漲/過熱自動切換只准回測。")
+            if callable(refresh_t1_trade_truth) and st.button("更新 T+1 實戰真相與 AI 機率校準", key=_k("v188_refresh_t1_truth"), use_container_width=True):
+                with st.spinner("正在回放成熟推薦：判斷觸發、MFE/MAE、Selection Alpha、Entry/Risk Alpha..."):
+                    try:
+                        _truth_result = refresh_t1_trade_truth(max_records=200, max_workers=8, persist=True)
+                        if callable(refresh_super_ai_experience_profile):
+                            try:
+                                refresh_super_ai_experience_profile()
+                            except Exception:
+                                pass
+                        _truth_msg = (
+                            f"V188 T+1真相已更新：本輪 {_truth_result.get('processed_this_run',0)} 筆｜"
+                            f"成熟 {_truth_result.get('matured_t1_samples',0)}｜可執行 {_truth_result.get('executable_samples',0)}。"
+                        )
+                        if bool(_truth_result.get("persistence_ok", True)):
+                            st.success(_truth_msg + "｜T+1真相/機率校準已完成永久化確認。")
+                        else:
+                            st.warning(_truth_msg + "｜本輪計算完成，但永久化未確認；請至第17頁重試永久化後再Reboot。")
+                            for _pm in (_truth_result.get("persistence_messages") or [])[:4]:
+                                st.caption(str(_pm))
+                    except Exception as _truth_manual_error:
+                        st.error(f"V188 T+1真相更新失敗：{_truth_manual_error}")
 
     render_pro_info_card(
         "股神交易決策升級",

@@ -24,7 +24,7 @@ try:
 except Exception:
     persist_json_async = None
 
-EXPERIENCE_VERSION = "super_ai_experience_v183_20260811"
+EXPERIENCE_VERSION = "super_ai_experience_v188_20260812"
 INDEX_FILE = "super_ai_experience_index.json"
 PROFILE_FILE = "super_ai_experience_profile.json"
 RUN_DIR = "data/super_ai_runs"
@@ -44,6 +44,10 @@ SNAPSHOT_FIELDS = [
     "SuperAI開高走高%", "SuperAI開高走低%", "SuperAI開低走高%", "SuperAI開低走低%", "SuperAI平開震盪%",
     "SuperAI隔日上漲機率%", "SuperAI本週進場適合度", "SuperAI融資影響分", "SuperAI_ETF確認分",
     "SuperAI市場情境分", "SuperAI資料覆蓋率%", "SuperAI最終決策分", "SuperAI最終決策理由", "SuperAI模型版本",
+    "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
+    "SuperAI執行風報比", "SuperAI風報比來源", "SuperAI校準後隔日上漲機率%",
+    "V188股神作戰優先分", "V188交易許可", "V188正式推薦資格", "V188RR治理", "V188T+1追價治理",
+    "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分",
 ]
 
 
@@ -93,17 +97,47 @@ def _write_async(path: str, payload: Any, reason: str) -> None:
 
 
 def build_super_ai_experience_profile(records: Any | None = None) -> dict[str, Any]:
-    rows = _rows(records) if records is not None else _rows(_read("godpick_records.json", []))
+    # V188 prefers the T+1 truth table because it distinguishes selection from
+    # triggered trades.  Legacy recommendation records are only a fallback.
+    truth_rows=[]
+    calibration={}
+    if records is None:
+        try:
+            from godpick_t1_trade_truth import load_t1_truth_rows, load_probability_calibration
+            truth_rows=load_t1_truth_rows()
+            calibration=load_probability_calibration()
+        except Exception:
+            truth_rows=[]; calibration={}
     samples=[]
-    for r in rows:
-        if not str(r.get("SuperAI模型版本") or "").startswith("super_ai"):
-            continue
-        ret = r.get("推薦後1日%")
-        prob = r.get("SuperAI隔日上漲機率%")
-        try: ret=float(ret); prob=float(prob)
-        except Exception: continue
-        if not (math.isfinite(ret) and math.isfinite(prob)): continue
-        samples.append((prob, 1.0 if ret>0 else 0.0, ret, str(r.get("SuperAI進場狀態") or "")))
+    executable_returns=[]
+    if truth_rows:
+        for r in truth_rows:
+            if not bool(r.get("T1成熟")):
+                continue
+            prob=r.get("SuperAI原始上漲機率%")
+            ret=r.get("隔日候選漲跌%")
+            try: prob=float(prob); ret=float(ret)
+            except Exception: continue
+            if not (math.isfinite(ret) and math.isfinite(prob)): continue
+            state=str(r.get("V188交易許可") or r.get("推薦角色") or "")
+            samples.append((prob,1.0 if ret>0 else 0.0,ret,state))
+            if bool(r.get("是否納入可執行績效")):
+                er=r.get("可執行交易1日%")
+                if er is None: er=r.get("觸發當日收盤績效%")
+                try: er=float(er)
+                except Exception: er=None
+                if er is not None and math.isfinite(er): executable_returns.append(er)
+    else:
+        rows = _rows(records) if records is not None else _rows(_read("godpick_records.json", []))
+        for r in rows:
+            if not str(r.get("SuperAI模型版本") or "").startswith("super_ai"):
+                continue
+            ret = r.get("推薦後1日%")
+            prob = r.get("SuperAI隔日上漲機率%")
+            try: ret=float(ret); prob=float(prob)
+            except Exception: continue
+            if not (math.isfinite(ret) and math.isfinite(prob)): continue
+            samples.append((prob, 1.0 if ret>0 else 0.0, ret, str(r.get("SuperAI進場狀態") or "")))
     n=len(samples)
     if n:
         mean_prob=sum(x[0] for x in samples)/n
@@ -117,9 +151,11 @@ def build_super_ai_experience_profile(records: Any | None = None) -> dict[str, A
     for state in sorted({x[3] for x in samples if x[3]}):
         sub=[x for x in samples if x[3]==state]
         state_stats[state]={"n":len(sub),"win_rate_pct":round(sum(x[1] for x in sub)/len(sub)*100,1),"avg_ret1_pct":round(sum(x[2] for x in sub)/len(sub),3)}
+    bins = calibration.get("bins") if isinstance(calibration,dict) and isinstance(calibration.get("bins"),list) else []
     return {
         "version": EXPERIENCE_VERSION,
         "updated_at": _now(),
+        "experience_source": "V188 T+1 truth" if truth_rows else "legacy godpick_records fallback",
         "eligible_samples": n,
         "mean_predicted_up_pct": round(mean_prob,2),
         "actual_up_rate_pct": round(actual,2),
@@ -127,7 +163,11 @@ def build_super_ai_experience_profile(records: Any | None = None) -> dict[str, A
         "avg_ret1_pct": round(avg_ret,4) if n else None,
         "probability_bias_pp": round(bias,2),
         "state_stats": state_stats,
-        "calibration_policy": "sample<30不調整；30~99最多±3pp；100+最多±8pp",
+        "calibration_bins": bins,
+        "executable_samples": len(executable_returns),
+        "executable_win_rate_pct": round(sum(1 for x in executable_returns if x>0)/len(executable_returns)*100,2) if executable_returns else None,
+        "avg_executable_ret_pct": round(sum(executable_returns)/len(executable_returns),4) if executable_returns else None,
+        "calibration_policy": "sample<30不調整；30~99最多±3pp；100+最多±8pp；未觸發雷達不計交易勝負",
     }
 
 
@@ -137,7 +177,7 @@ def refresh_super_ai_experience_profile(records: Any | None = None) -> dict[str,
     raw=float(profile.get("probability_bias_pp") or 0)
     limit=0.0 if n<30 else 3.0 if n<100 else 8.0
     profile["applied_probability_bias_pp"]=round(max(-limit,min(limit,raw)),2)
-    _write_async(PROFILE_FILE, profile, "V183 SuperAI experience profile")
+    _write_async(PROFILE_FILE, profile, "V188 SuperAI experience profile")
     return profile
 
 
@@ -162,14 +202,14 @@ def save_super_ai_run(candidate_data: Any, recommendation_data: Any | None = Non
         "metadata":metadata or {},"candidates":compact,
     }
     path=f"{RUN_DIR}/{date}/{run_id}.json"
-    _write_async(path,payload,"V183 SuperAI immutable decision run")
+    _write_async(path,payload,"V188 SuperAI immutable decision run")
     index=_read(INDEX_FILE,{"version":EXPERIENCE_VERSION,"runs":[]})
     if not isinstance(index,dict): index={"version":EXPERIENCE_VERSION,"runs":[]}
     runs=[x for x in index.get("runs",[]) if isinstance(x,dict) and x.get("run_id")!=run_id]
     summary={"run_id":run_id,"created_at":now,"path":path,"candidate_count":len(compact),"recommendation_count":len(rec_rows),"data_date":str(rows[0].get("K線最後交易日") or ""),"model_version":str(rows[0].get("SuperAI模型版本") or "")}
     runs.append(summary); runs=runs[-500:]
     index={"version":EXPERIENCE_VERSION,"updated_at":now,"runs":runs}
-    _write_async(INDEX_FILE,index,"V183 SuperAI run index")
+    _write_async(INDEX_FILE,index,"V188 SuperAI run index")
     return True,f"saved SuperAI run {run_id} ({len(compact)} candidates)",summary
 
 

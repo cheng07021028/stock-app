@@ -132,6 +132,10 @@ SUPER_AI_TRACE_COLUMNS = [
     "SuperAI隔日上漲機率%", "SuperAI隔日主情境", "SuperAI隔日情境信心%", "SuperAI本週進場適合度", "SuperAI本週進場等級",
     "SuperAI融資影響分", "SuperAI融資影響", "SuperAI_ETF確認分", "SuperAI_ETF確認", "SuperAI期貨情境分", "SuperAI期貨情境",
     "SuperAI市場情境分", "SuperAI資料覆蓋率%", "SuperAI最終決策分", "SuperAI最終決策理由", "SuperAI反對理由", "SuperAI取消條件",
+    "V188版本", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
+    "SuperAI執行風報比", "SuperAI風報比來源", "SuperAI校準後隔日上漲機率%", "SuperAI機率校準樣本數", "SuperAI機率校準幅度pp",
+    "V188股神作戰優先分", "V188交易許可", "V188正式推薦資格", "V188RR治理", "V188T+1追價治理",
+    "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分", "V188治理原因",
 ]
 UNIFIED_RECOMMEND_DISPLAY_COLUMNS = list(dict.fromkeys(
     list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS) + GODPICK_RECORD_TRACE_COLUMNS + LEARNING_AI_TRACE_COLUMNS + SUPER_AI_TRACE_COLUMNS

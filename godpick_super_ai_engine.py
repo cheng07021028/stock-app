@@ -22,8 +22,17 @@ try:
 except Exception:
     load_super_ai_experience_profile = None
 
-SUPER_AI_VERSION = "super_ai_godpick_v183_20260811"
-SUPER_AI_COLUMNS = [
+try:
+    from godpick_super_ai_trade_quality import (
+        V188_COLUMNS, canonical_execution_rr, apply_trade_quality_governance,
+    )
+except Exception:
+    V188_COLUMNS = []
+    canonical_execution_rr = None
+    apply_trade_quality_governance = None
+
+SUPER_AI_VERSION = "super_ai_godpick_v188_20260812"
+_BASE_SUPER_AI_COLUMNS = [
     "SuperAI模型版本", "SuperAI進場狀態", "SuperAI進場信心%", "SuperAI建議進場區間下", "SuperAI建議進場區間上",
     "SuperAI進場觸發說明", "SuperAI出場狀態", "SuperAI動態停損價", "SuperAI第一減碼價", "SuperAI第二目標價", "SuperAI出場說明",
     "SuperAI開高走高%", "SuperAI開高走低%", "SuperAI開低走高%", "SuperAI開低走低%", "SuperAI平開震盪%",
@@ -31,6 +40,7 @@ SUPER_AI_COLUMNS = [
     "SuperAI融資影響分", "SuperAI融資影響", "SuperAI_ETF確認分", "SuperAI_ETF確認", "SuperAI期貨情境分", "SuperAI期貨情境",
     "SuperAI市場情境分", "SuperAI資料覆蓋率%", "SuperAI最終決策分", "SuperAI最終決策理由", "SuperAI反對理由", "SuperAI取消條件",
 ]
+SUPER_AI_COLUMNS = list(dict.fromkeys(_BASE_SUPER_AI_COLUMNS + list(V188_COLUMNS)))
 _NUMERIC = {c for c in SUPER_AI_COLUMNS if c.endswith("%") or c.endswith("分") or c.endswith("價") or c.endswith("度") or c in {"SuperAI建議進場區間下","SuperAI建議進場區間上"}}
 
 BLANK={"","nan","none","null","nat","--","-","<na>"}
@@ -192,7 +202,10 @@ def score_super_ai_row(row:dict[str,Any],context:dict[str,Any]|None=None,experie
     alpha=_first(row,["AI Alpha品質分","候選強度分","股神實戰總分"],50)
     cont=_first(row,["AI Continuation延續分","主流主升優先分","強勢動能分"],50)
     op=_first(row,["可操作分","實戰操作品質分"],50)
-    rr=_first(row,["AI戰術風報比","路徑風險報酬比","實戰風險報酬比","風險報酬比"],0,positive=True)
+    if callable(canonical_execution_rr):
+        rr,_rr_source=canonical_execution_rr(row)
+    else:
+        rr=_first(row,["路徑風險報酬比","實戰風險報酬比","風險報酬比","AI戰術風報比"],0,positive=True)
     chase=_first(row,["追價風險分","追高風險分數_決策"],55)
     exhaustion=_first(row,["隔日耗竭風險分"],chase)
     mainrise=_first(row,["主流主升優先分","主流資金分"],50)
@@ -317,7 +330,11 @@ def apply_super_ai_engine(data:Any,context:dict[str,Any]|None=None,experience:di
     if not is_df:
         return [{**r,**s} for r,s in zip(records,scored)]
     score_df=pd.DataFrame(scored,index=out.index)
+    base_cols=[c for c in _BASE_SUPER_AI_COLUMNS if c in score_df.columns]
     out=out.drop(columns=[c for c in SUPER_AI_COLUMNS if c in out.columns],errors="ignore")
-    return pd.concat([out,score_df.reindex(columns=SUPER_AI_COLUMNS)],axis=1)
+    out=pd.concat([out,score_df.reindex(columns=base_cols)],axis=1)
+    if callable(apply_trade_quality_governance):
+        out=apply_trade_quality_governance(out, experience or {})
+    return out
 
 __all__=["SUPER_AI_VERSION","SUPER_AI_COLUMNS","score_super_ai_row","apply_super_ai_engine"]

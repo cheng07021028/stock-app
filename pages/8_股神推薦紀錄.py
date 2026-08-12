@@ -128,6 +128,16 @@ try:
 except Exception:
     OFFICIAL_FACTOR_SERVICE_COLUMNS = []
     _load_official_factor_frame = None
+try:
+    from godpick_t1_trade_truth import (
+        refresh_t1_trade_truth as _v188_refresh_t1_truth,
+        load_t1_truth_summary as _v188_load_t1_truth_summary,
+        load_t1_truth_rows as _v188_load_t1_truth_rows,
+    )
+except Exception:
+    _v188_refresh_t1_truth = None
+    _v188_load_t1_truth_summary = None
+    _v188_load_t1_truth_rows = None
 
 try:
     import firebase_admin
@@ -6318,6 +6328,35 @@ def main():
             )
         except Exception:
             pass
+
+    # V188：績效頁直接呈現「選股Alpha」與「真正觸發交易」兩套真相。
+    if callable(_v188_load_t1_truth_summary):
+        try:
+            _v188_truth = _v188_load_t1_truth_summary() or {}
+        except Exception:
+            _v188_truth = {}
+        with st.expander("V188｜T+1實戰真相（Selection / Entry / Risk Alpha）", expanded=False):
+            render_pro_kpi_row([
+                {"label":"T+1成熟樣本","value":int(_v188_truth.get("matured_t1_samples") or 0),"delta":"選股真相"},
+                {"label":"真正觸發","value":int(_v188_truth.get("executable_samples") or 0),"delta":f"觸發率 {float(_v188_truth.get('trigger_rate_pct') or 0):.1f}%"},
+                {"label":"可執行勝率","value":f"{float(_v188_truth.get('executable_win_rate_pct') or 0):.1f}%" if _v188_truth.get("executable_win_rate_pct") is not None else "待累積","delta":"未觸發不計勝負"},
+                {"label":"Selection Alpha","value":f"{float(_v188_truth.get('avg_selection_alpha_pct') or 0):+.2f}%" if _v188_truth.get("avg_selection_alpha_pct") is not None else "待累積","delta":"相對大盤"},
+                {"label":"Brier","value":f"{float(_v188_truth.get('brier_score')):.4f}" if _v188_truth.get("brier_score") is not None else "待累積","delta":"機率校準"},
+            ])
+            st.caption("候選股上漲但未觸發，不得算成交易獲利；假突破雖不計交易勝負，仍會進入訊號品質與風控校準。")
+            if callable(_v188_refresh_t1_truth) and st.button("更新 V188 T+1實戰真相", key=_k("v188_truth_refresh_page8"), use_container_width=True):
+                with st.spinner("回放成熟推薦並更新MFE/MAE、Alpha與機率校準..."):
+                    try:
+                        _v188_res = _v188_refresh_t1_truth(max_records=240, max_workers=8, persist=True)
+                        _v188_done = f"V188真相更新完成：本輪 {_v188_res.get('processed_this_run',0)} 筆｜成熟 {_v188_res.get('matured_t1_samples',0)}｜真正觸發 {_v188_res.get('executable_samples',0)}。"
+                        if bool(_v188_res.get("persistence_ok", True)):
+                            st.success(_v188_done + "｜永久化已確認。")
+                        else:
+                            st.warning(_v188_done + "｜永久化未確認；請至第17頁重試後再Reboot。")
+                            for _pm in (_v188_res.get("persistence_messages") or [])[:4]:
+                                st.caption(str(_pm))
+                    except Exception as _v188_e:
+                        st.error(f"V188真相更新失敗：{_v188_e}")
 
     top_cols = st.columns([1.1, 1.1, 1.1, 1.1, 1.2, 1.4, 2.0])
     with top_cols[0]:
