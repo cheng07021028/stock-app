@@ -13,12 +13,18 @@ The functions are DataFrame-only and do not read/write JSON or call the network.
 from __future__ import annotations
 
 from typing import Any, Iterable
+from datetime import datetime
 import math
 
 import numpy as np
 import pandas as pd
 
-EXECUTION_GOVERNANCE_VERSION = "v187_source_trust_governance_20260811"
+try:
+    from godpick_official_release_timing import evaluate_twse_t86_release_timing
+except Exception:
+    evaluate_twse_t86_release_timing = None
+
+EXECUTION_GOVERNANCE_VERSION = "v190_postclose_release_timing_governance_20260812"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -223,6 +229,7 @@ def build_scan_quality_report(
     candidate_count: int = 0,
     final_count: int = 0,
     candidate_frame: pd.DataFrame | None = None,
+    now_taipei: datetime | None = None,
 ) -> dict[str, Any]:
     """Build an execution-grade scan/data quality report.
 
@@ -272,6 +279,9 @@ def build_scan_quality_report(
     official_missing_date_coverage = 0.0
     official_source_trusted_coverage = 0.0
     official_fresh_date_coverage = 0.0
+    representative_market_date = None
+    representative_official_date = None
+    official_release_timing: dict[str, Any] = {}
     data_rows = 0
     if isinstance(candidate_frame, pd.DataFrame) and not candidate_frame.empty:
         frame = candidate_frame
@@ -294,6 +304,12 @@ def build_scan_quality_report(
         stock_date = _coalesce_date_series_v184(frame, [
             "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期",
         ])
+        try:
+            representative_market_date = pd.to_datetime(stock_date, errors="coerce").max()
+            representative_official_date = pd.to_datetime(official_date, errors="coerce").max()
+        except Exception:
+            representative_market_date = None
+            representative_official_date = None
         # V187: prefer the daily-domain provenance score derived from actual
         # institution/valuation sources.  A single monthly/legacy fallback must
         # not downgrade the whole row to 60 and falsely block verified T-1 data.
@@ -350,6 +366,16 @@ def build_scan_quality_report(
         official_source_trusted_coverage = _safe_float(data.get("official_source_trusted_coverage_pct"), official_trusted_coverage)
         official_fresh_date_coverage = _safe_float(data.get("official_fresh_date_coverage_pct"), official_trusted_coverage)
         data_rows = int(_safe_float(cached.get("rows"), 0))
+
+    if callable(evaluate_twse_t86_release_timing) and representative_market_date is not None and representative_official_date is not None:
+        try:
+            official_release_timing = evaluate_twse_t86_release_timing(
+                market_date=representative_market_date,
+                official_date=representative_official_date,
+                now=now_taipei,
+            )
+        except Exception:
+            official_release_timing = {}
 
     minimum_pool = max(100, min(300, int(expected * 0.15))) if expected > 0 else 100
     if expected <= 0:
@@ -410,9 +436,15 @@ def build_scan_quality_report(
         # 盤後產製；在同日資料尚未全部發布時，允許降級正式決策，但倉位
         # 自動折減，且不得把它標成同日完整資料。lag>=2 仍會被上方可信度
         # 閘門阻擋。
-        status, level, usable, factor = "官方因子T-1已驗證｜降級可用", "warning", True, 0.75
+        timing_normal = bool(official_release_timing.get("t1_is_normal_now"))
+        if timing_normal:
+            status, level, usable, factor = "官方盤後T-1為當下正常最新完整基準｜降級可用", "warning", True, 0.75
+            reason = (str(official_release_timing.get("detail") or "").strip() or "官方因子多數為已驗證T-1資料，且同日完整盤後資料尚未到應產製時點。")
+            reason += " 正式決策可用，但倉位上限維持0.75；待同日官方資料完成並驗證後恢復完整權限。"
+        else:
+            status, level, usable, factor = "官方因子T-1已驗證｜降級可用", "warning", True, 0.75
+            reason = (str(official_release_timing.get("detail") or "").strip() or "官方因子多數為已驗證T-1資料；可做正式決策但倉位上限自動乘0.75。")
         scope = f"有效{official_effective_coverage:.1f}%／最新可信{official_trusted_coverage:.1f}%／落後1日{official_one_day_lag_coverage:.1f}%"
-        reason = "官方因子多數為已驗證T-1資料；可做正式決策但倉位上限自動乘0.75，待同日盤後官方資料完成後再恢復完整權限。"
     elif coverage >= 99.0 and usable_history >= 80.0 and (liquidity_coverage >= 90.0 or data_rows == 0):
         status, level, usable, factor = "完整", "complete", True, 1.0
         scope = "全掃描有效資料池"
@@ -469,6 +501,10 @@ def build_scan_quality_report(
         "官方同日對齊覆蓋率%": round(official_same_day_coverage, 2),
         "官方落後1日覆蓋率%": round(official_one_day_lag_coverage, 2),
         "官方日期未驗證覆蓋率%": round(official_missing_date_coverage, 2),
+        "官方盤後產製階段": str(official_release_timing.get("phase") or ""),
+        "官方盤後T-1是否正常": bool(official_release_timing.get("t1_is_normal_now", False)),
+        "官方盤後下一時點": str(official_release_timing.get("next_milestone") or ""),
+        "官方盤後時序說明": str(official_release_timing.get("detail") or ""),
         "作戰候選率%": round(result_ratio, 2),
         "掃描品質說明": reason,
         "版本": EXECUTION_GOVERNANCE_VERSION,

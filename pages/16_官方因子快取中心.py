@@ -11,6 +11,8 @@ except Exception as _auth_e:
 
 import pandas as pd
 import streamlit as st
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 try:
     from utils import inject_pro_theme
@@ -34,11 +36,16 @@ from official_factor_service import (
     read_cache_from_github,
 )
 
+try:
+    from godpick_official_release_timing import evaluate_twse_t86_release_timing
+except Exception:
+    evaluate_twse_t86_release_timing = None
+
 st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V187｜官方因子來源可信度治理＋V186 Reboot永久權威｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援")
+st.caption("V190｜盤後產製時序治理＋V187來源可信度＋V186 Reboot永久權威｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援")
 
 
 def _fmt(v):
@@ -72,6 +79,26 @@ def _display_status() -> None:
         f"V186永久權威｜資料日期 {data_date}｜恢復來源 {authority.get('restore_source') or 'local'}｜"
         f"遠端永久化 {'✅ 已確認' if remote_ok else '⚠️ 尚未確認'}"
     )
+    if callable(evaluate_twse_t86_release_timing):
+        try:
+            now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+            timing = evaluate_twse_t86_release_timing(
+                market_date=now_tw.date(), official_date=data_date, now=now_tw
+            )
+            if timing.get("level") == "success":
+                st.success(f"V190盤後時序｜{timing.get('headline')}｜{timing.get('detail')}")
+            elif timing.get("t1_is_normal_now"):
+                st.info(
+                    f"V190盤後時序｜{timing.get('headline')}｜{timing.get('detail')}"
+                    + (f"｜下一時點：{timing.get('next_milestone')}" if timing.get('next_milestone') else "")
+                )
+            elif timing.get("level") == "warning":
+                st.warning(f"V190盤後時序｜{timing.get('headline')}｜{timing.get('detail')}")
+            elif timing.get("level") == "error":
+                st.error(f"V190盤後時序｜{timing.get('headline')}｜{timing.get('detail')}")
+            st.caption("TWSE逐檔三大法人官方檔：18:00 TWT86UC（不含鉅額）／20:00 TWTAIUC（含鉅額）。這是官方檔案產製時間；公開網站/OpenAPI同步可能稍晚，V190另保留20分鐘系統同步緩衝。")
+        except Exception:
+            pass
     if not remote_ok:
         st.warning("目前官方因子尚未證實已寫入遠端永久層；若此時 Reboot，可能只能從較舊遠端版本恢復。請先執行更新或『同步快取到 GitHub』直到顯示已確認。")
     if eligible and eligible_complete == 0:

@@ -193,6 +193,11 @@ except Exception:
     report_allows_formal_action = None
 
 try:
+    from godpick_official_release_timing import evaluate_twse_t86_release_timing
+except Exception:
+    evaluate_twse_t86_release_timing = None
+
+try:
     from godpick_learning_system import (
         LEARNING_SYSTEM_VERSION,
         MODEL_VERSION as GODPICK_AI_MODEL_VERSION,
@@ -2682,6 +2687,15 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
 
     issues: list[str] = []
     warnings: list[str] = []
+    infos: list[str] = []
+    release_timing: dict[str, Any] = {}
+    if callable(evaluate_twse_t86_release_timing):
+        try:
+            release_timing = evaluate_twse_t86_release_timing(
+                market_date=market_ref, official_date=official_date
+            )
+        except Exception:
+            release_timing = {}
     if kline_date is None:
         if saved_date is not None and scan_lag > 0:
             issues.append("舊推薦快照未包含個股K線日期，需在本頁重新推薦")
@@ -2698,9 +2712,17 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     elif official_lag >= 2:
         issues.append(f"官方因子停在{official_date:%Y-%m-%d}，落後K線{official_lag}交易日")
     elif official_lag == 1:
-        warnings.append(
-            f"官方因子為{official_date:%Y-%m-%d}（T-1已驗證）；盤後資料分批產製，系統採降級倉位而非視為錯誤"
-        )
+        timing_detail = str(release_timing.get("detail") or "").strip()
+        timing_headline = str(release_timing.get("headline") or "").strip()
+        timing_msg = f"官方因子為{official_date:%Y-%m-%d}（T-1已驗證）"
+        if timing_headline:
+            timing_msg += f"｜{timing_headline}"
+        if timing_detail:
+            timing_msg += f"：{timing_detail}"
+        if bool(release_timing.get("t1_is_normal_now")):
+            infos.append(timing_msg)
+        else:
+            warnings.append(timing_msg)
     if saved_date is None:
         issues.append("推薦保存時間未驗證")
     elif scan_lag > 0:
@@ -2721,6 +2743,8 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
         "issues": all_messages,
         "blocking_issues": issues,
         "warnings": warnings,
+        "infos": infos,
+        "release_timing": release_timing,
         "hard_block": hard_block,
         "ready": not hard_block,
     }
@@ -2729,6 +2753,7 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
 def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
     snapshot = _project_data_freshness_snapshot_v173()
     issues = snapshot.get("issues", []) if isinstance(snapshot, dict) else []
+    infos = snapshot.get("infos", []) if isinstance(snapshot, dict) else []
     request_rescan = False
     source_data_ready = bool(
         snapshot.get("market_date") and snapshot.get("official_date")
@@ -2740,7 +2765,7 @@ def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
         or not snapshot.get("kline_date")
     )
     if issues:
-        message = "⚠️ 股神推薦資料不是最新：" + "；".join(str(x) for x in issues)
+        message = "⚠️ 股神推薦資料時序需注意：" + "；".join(str(x) for x in issues)
         if snapshot.get("hard_block"):
             st.error(message)
             if source_data_ready and scan_stale:
@@ -2770,6 +2795,21 @@ def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
                 use_container_width=True,
                 help="會使用目前已保存的推薦條件重新掃描，完成後覆蓋舊推薦快照。",
             )
+    elif infos:
+        st.info("ℹ️ 官方盤後資料時序正常：" + "；".join(str(x) for x in infos))
+        release = snapshot.get("release_timing") if isinstance(snapshot.get("release_timing"), dict) else {}
+        if release.get("next_milestone"):
+            st.caption(
+                f"TWSE逐檔三大法人：18:00產製不含鉅額首版、20:00產製含鉅額完整版｜"
+                f"下一時點：{release.get('next_milestone')}｜18:00/20:00為官方檔案產製時點，公開網站/OpenAPI同步可能稍晚。"
+            )
+        st.caption(
+            f"預期最新交易日：{snapshot.get('expected_date') or '未驗證'}｜"
+            f"K線：{snapshot.get('kline_date') or '待重新推薦驗證'}｜"
+            f"大盤：{snapshot.get('market_date') or '未驗證'}｜"
+            f"官方因子：{snapshot.get('official_date') or '未驗證'}｜"
+            f"目前推薦保存：{snapshot.get('saved_date') or '未驗證'}"
+        )
     else:
         st.success(
             f"資料新鮮度通過：K線、大盤與官方因子皆已更新至 {snapshot.get('expected_date')}。"
