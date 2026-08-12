@@ -238,6 +238,17 @@ except Exception:
     audit_core_durability = None
 
 try:
+    from godpick_v188_cache_guard import (
+        V189_CACHE_GUARD_VERSION,
+        inspect_v188_decision_frame,
+        repair_v188_decision_frame,
+    )
+except Exception:
+    V189_CACHE_GUARD_VERSION = "v189_cache_guard_unavailable"
+    inspect_v188_decision_frame = None
+    repair_v188_decision_frame = None
+
+try:
     from godpick_full_market_discovery import (
         FULL_MARKET_DISCOVERY_VERSION,
         SECTOR_SHRINKAGE_VERSION,
@@ -271,7 +282,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v185_durable_latest_authority_20260811"
+PAGE07_SPEED_FIX_VERSION = "page07_v189_v188_final_cache_guard_20260812"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -10611,14 +10622,10 @@ def _build_recommend_df(
             governed_candidate_df = base_df.copy()
             final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
 
-        # V181：保存本輪已完成正式決策的完整候選池。後續畫面、輪動快照、自動紀錄、
-        # Excel 共用此單一來源，禁止再次對 1000~2000 檔執行正式推薦引擎。
-        governed_candidate_df["V181最終決策已完成"] = "是"
-        governed_candidate_df["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
-        st.session_state[_k("decision_frame_store_v181")] = governed_candidate_df.copy()
-        st.session_state[_k("decision_frame_scan_signature_v181")] = scan_signature
-        debug_summary["v181_decision_cache_rows"] = int(len(governed_candidate_df))
-        progress_bar.progress(0.97, text="最終股神決策完成｜正在建立治理、診斷與作戰結果...")
+        # V189：禁止在 SuperAI/V188 交易品質治理完成前保存 decision frame。
+        # V188 的 Alpha/Trade/RR/作戰優先分尚未產生時，這裡只能是中間母體，
+        # 不得寫入供 UI/Excel/輪動共用的最終快取。
+        progress_bar.progress(0.97, text="正式決策完成｜正在套用官方因子、SuperAI與V188交易品質治理...")
         # Phase104：掃描品質必須在官方因子合併後計算。舊版先建立治理報告，
         # 後續才把 official_factors_cache 併入顯示名單，造成快取明明有 886 筆
         # 完整度>=60，掃描報告卻永遠看到預設 0。
@@ -10663,6 +10670,40 @@ def _build_recommend_df(
                 debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)
         else:
             debug_summary["v183_super_ai_error"] = "Super AI engine unavailable"
+
+        # V189：只有「官方因子 + 掃描治理 + SuperAI + V188交易品質」全部完成後，
+        # 才能建立真正的單次決策快取。這修正 V188 欄位在主排名全部變 0 / - / -- 的根因。
+        _v188_cache_diag = {}
+        if callable(inspect_v188_decision_frame):
+            try:
+                _v188_cache_diag = inspect_v188_decision_frame(governed_candidate_df)
+            except Exception as _v188_diag_err:
+                _v188_cache_diag = {"complete": False, "reason": f"V188快取檢查失敗：{_v188_diag_err}"}
+        else:
+            _v188_cache_diag = {
+                "complete": bool("V188股神作戰優先分" in governed_candidate_df.columns and "SuperAI Alpha分" in governed_candidate_df.columns and "SuperAI Trade分" in governed_candidate_df.columns),
+                "reason": "fallback-column-check",
+            }
+
+        if bool(_v188_cache_diag.get("complete")):
+            governed_candidate_df["V181最終決策已完成"] = "是"
+            governed_candidate_df["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
+            governed_candidate_df["V189_V188最終快取完整"] = "是"
+            governed_candidate_df["V189快取守門版本"] = V189_CACHE_GUARD_VERSION
+            st.session_state[_k("decision_frame_store_v181")] = governed_candidate_df.copy()
+            st.session_state[_k("decision_frame_scan_signature_v181")] = scan_signature
+            st.session_state[_k("v188_cache_integrity_v189")] = dict(_v188_cache_diag)
+            debug_summary["v181_decision_cache_rows"] = int(len(governed_candidate_df))
+            debug_summary["v189_v188_final_cache_complete"] = True
+            debug_summary["v189_v188_cache_reason"] = _safe_str(_v188_cache_diag.get("reason"))
+        else:
+            # 不讓本輪半成品冒充 V188 完成品；相同 scan signature 的舊快取也清除。
+            st.session_state.pop(_k("decision_frame_store_v181"), None)
+            st.session_state.pop(_k("decision_frame_scan_signature_v181"), None)
+            st.session_state[_k("v188_cache_integrity_v189")] = dict(_v188_cache_diag)
+            debug_summary["v189_v188_final_cache_complete"] = False
+            debug_summary["v189_v188_cache_reason"] = _safe_str(_v188_cache_diag.get("reason"))
+
         candidate_diagnosis_df = (
             build_candidate_diagnosis(governed_candidate_df)
             if callable(build_candidate_diagnosis)
@@ -10690,7 +10731,7 @@ def _build_recommend_df(
     progress_bar.progress(1.0, text=f"股神推薦完成｜{total_count} 檔掃描與最終決策均已完成")
     progress_text.caption(
         f"完成｜K線掃描 {_fmt_seconds(total_elapsed)}｜最終結果運算 {_fmt_seconds(_v181_postscan_sec)}｜"
-        f"總耗時 {_fmt_seconds(time.time() - start_ts)}｜V181 單次決策快取已建立"
+        f"總耗時 {_fmt_seconds(time.time() - start_ts)}｜V189 V188完整決策快取已建立"
     )
     return final_df, category_strength_df, hot_pick_df
 
@@ -12054,8 +12095,21 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     if work.empty or "股票代號" not in work.columns:
         return pd.DataFrame()
 
+    _v188_rank_diag = {}
+    if callable(inspect_v188_decision_frame):
+        try:
+            _v188_rank_diag = inspect_v188_decision_frame(work)
+        except Exception as _rank_diag_err:
+            _v188_rank_diag = {"complete": False, "reason": f"V188排名檢查失敗：{_rank_diag_err}"}
+    else:
+        _v188_rank_diag = {"complete": all(c in work.columns for c in ["V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Trade分", "V188交易許可"]), "reason": "fallback-column-check"}
+    if not bool(_v188_rank_diag.get("complete")):
+        st.session_state[_k("v188_rank_block_reason_v189")] = _safe_str(_v188_rank_diag.get("reason")) or "V188交易品質資料尚未完成"
+        return pd.DataFrame()
+    st.session_state[_k("v188_rank_block_reason_v189")] = ""
+
     bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    _rank_score_col = "V188股神作戰優先分" if "V188股神作戰優先分" in work.columns else "股神推薦優先分"
+    _rank_score_col = "V188股神作戰優先分"
     score = pd.to_numeric(work.get(_rank_score_col, 0), errors="coerce").fillna(0.0)
     freshness = work.get("K線資料新鮮度", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     # 正式排除不進主排名；資料過期只留在診斷表，不應占用第一眼名單。
@@ -12237,8 +12291,50 @@ def _phase93_single_source_decision_frame(
         and _cached_sig == _active_sig
         and "正式推薦分區" in _cached_decision.columns
     ):
-        st.session_state[_k("v181_decision_cache_hits")] = int(st.session_state.get(_k("v181_decision_cache_hits"), 0) or 0) + 1
-        return _cached_decision.copy().reset_index(drop=True)
+        _cache_ok = False
+        _cache_diag = {}
+        if callable(inspect_v188_decision_frame):
+            try:
+                _cache_diag = inspect_v188_decision_frame(_cached_decision)
+                _cache_ok = bool(_cache_diag.get("complete"))
+            except Exception as _cache_check_err:
+                _cache_diag = {"complete": False, "reason": f"V188快取檢查失敗：{_cache_check_err}"}
+        else:
+            _cache_ok = all(c in _cached_decision.columns for c in ["V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Trade分", "V188交易許可"])
+
+        if not _cache_ok and callable(repair_v188_decision_frame) and callable(apply_super_ai_engine):
+            try:
+                _repaired, _repair_diag = repair_v188_decision_frame(
+                    _cached_decision,
+                    super_ai_callable=apply_super_ai_engine,
+                    official_factor_callable=_apply_official_factor_cache_v109,
+                    scan_quality_callable=apply_scan_quality_to_frame if callable(apply_scan_quality_to_frame) else None,
+                    scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+                    canonicalize_callable=canonicalize_final_partition if callable(canonicalize_final_partition) else None,
+                )
+                if bool(_repair_diag.get("complete")):
+                    _repaired["V181最終決策已完成"] = "是"
+                    _repaired["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
+                    _repaired["V189_V188最終快取完整"] = "是"
+                    _repaired["V189快取守門版本"] = V189_CACHE_GUARD_VERSION
+                    st.session_state[_k("decision_frame_store_v181")] = _repaired.copy()
+                    st.session_state[_k("decision_frame_scan_signature_v181")] = _cached_sig
+                    st.session_state[_k("v188_cache_integrity_v189")] = dict(_repair_diag)
+                    st.session_state[_k("v189_v188_cache_repairs")] = int(st.session_state.get(_k("v189_v188_cache_repairs"), 0) or 0) + 1
+                    _cached_decision = _repaired
+                    _cache_ok = True
+                    _cache_diag = dict(_repair_diag)
+            except Exception as _repair_err:
+                _cache_diag = {"complete": False, "reason": f"V188快取自動補算失敗：{_repair_err}"}
+
+        if _cache_ok:
+            st.session_state[_k("v181_decision_cache_hits")] = int(st.session_state.get(_k("v181_decision_cache_hits"), 0) or 0) + 1
+            st.session_state[_k("v188_rank_block_reason_v189")] = ""
+            return _cached_decision.copy().reset_index(drop=True)
+
+        # V189：不能把半成品快取當 V188 完成品。讓流程走 fallback 重建；若仍失敗，
+        # 主排名會明確封鎖，不再用舊股神分數補 0 冒充 V188。
+        st.session_state[_k("v188_rank_block_reason_v189")] = _safe_str(_cache_diag.get("reason")) or "V188快取欄位不完整"
 
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
         source = candidate_df.copy()
@@ -12291,6 +12387,32 @@ def _phase93_single_source_decision_frame(
         source = canonicalize_final_partition(source) if callable(canonicalize_final_partition) else source
     except Exception:
         pass
+
+    # V189 fallback：舊 Session / Reboot 後若只有 pre-V188 候選，也必須先補齊
+    # 官方因子、掃描治理與 SuperAI/V188，再交給主排名。
+    if callable(repair_v188_decision_frame) and callable(apply_super_ai_engine):
+        try:
+            source, _fallback_diag = repair_v188_decision_frame(
+                source,
+                super_ai_callable=apply_super_ai_engine,
+                official_factor_callable=_apply_official_factor_cache_v109,
+                scan_quality_callable=apply_scan_quality_to_frame if callable(apply_scan_quality_to_frame) else None,
+                scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+                canonicalize_callable=canonicalize_final_partition if callable(canonicalize_final_partition) else None,
+            )
+            st.session_state[_k("v188_cache_integrity_v189")] = dict(_fallback_diag)
+            if bool(_fallback_diag.get("complete")) and _active_sig:
+                source["V181最終決策已完成"] = "是"
+                source["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
+                source["V189_V188最終快取完整"] = "是"
+                source["V189快取守門版本"] = V189_CACHE_GUARD_VERSION
+                st.session_state[_k("decision_frame_store_v181")] = source.copy()
+                st.session_state[_k("decision_frame_scan_signature_v181")] = _active_sig
+                st.session_state[_k("v188_rank_block_reason_v189")] = ""
+            elif not bool(_fallback_diag.get("complete")):
+                st.session_state[_k("v188_rank_block_reason_v189")] = _safe_str(_fallback_diag.get("reason")) or "V188 fallback補算未完成"
+        except Exception as _fallback_v188_err:
+            st.session_state[_k("v188_rank_block_reason_v189")] = f"V188 fallback補算失敗：{_fallback_v188_err}"
     return source.reset_index(drop=True)
 
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
@@ -12358,7 +12480,13 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         ] if c in master_rank.columns]
         st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
     else:
-        if isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
+        _v188_block_reason = _safe_str(st.session_state.get(_k("v188_rank_block_reason_v189")))
+        if _v188_block_reason:
+            st.error(
+                "V189 已封鎖不完整的 V188 排名：" + _v188_block_reason +
+                "。系統不會再以舊『股神推薦優先分』補 0 冒充 V188；請重新推薦，或讓本頁自動補算完成後再看排名。"
+            )
+        elif isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
             st.error(
                 f"不是完全沒有候選：模型找到 {len(stale_intraday)} 檔盤中雷達，但其個股K線不是最新交易日，"
                 "因此已封鎖排名與操作。請先更新個股K線後重新推薦；Excel 會列在『資料待更新雷達』。"
