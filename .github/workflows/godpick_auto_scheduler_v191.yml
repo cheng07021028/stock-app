@@ -1,0 +1,90 @@
+name: GodPick V191 Central Auto Scheduler
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Wake the due-checker every 10 minutes. Actual task times are stored in
+    # runtime-data and interpreted in Asia/Taipei; this cron does NOT hard-code
+    # the user's business schedule.
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: godpick-v191-central-auto-scheduler
+  cancel-in-progress: false
+
+jobs:
+  scheduler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPO_OWNER: ${{ github.repository_owner }}
+      GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+      GITHUB_REPO_BRANCH: runtime-data
+      GITHUB_RUNTIME_DATA_BRANCH: runtime-data
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      FINMIND_API_TOKEN: ${{ secrets.FINMIND_API_TOKEN }}
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+      FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+      FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+    steps:
+      - name: Checkout main program
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore runtime-data authority before running
+        shell: bash
+        run: |
+          git fetch origin runtime-data:refs/remotes/origin/runtime-data || true
+          python tools/restore_runtime_data_v191.py
+
+      - name: Run V191 due checker
+        run: python tools/run_godpick_auto_scheduler_v191.py
+
+      - name: Stage only allowlisted runtime artifacts
+        run: python tools/stage_runtime_data_v191.py /tmp/godpick-v191-runtime
+
+      - name: Commit runtime artifacts to runtime-data branch
+        shell: bash
+        run: |
+          git reset --hard HEAD
+          git fetch origin runtime-data:refs/remotes/origin/runtime-data || true
+          if git show-ref --verify --quiet refs/remotes/origin/runtime-data; then
+            git checkout -B runtime-data origin/runtime-data
+          else
+            git checkout --orphan runtime-data
+            git rm -rf . || true
+          fi
+          cp -a /tmp/godpick-v191-runtime/. .
+          git config user.name "godpick-v191-bot"
+          git config user.email "godpick-v191-bot@users.noreply.github.com"
+          python - <<'PYADD'
+          from pathlib import Path
+          import subprocess
+          src = Path("/tmp/godpick-v191-runtime")
+          paths = [str(p.relative_to(src)) for p in src.rglob("*") if p.is_file()]
+          if paths:
+              subprocess.run(["git", "add", "--", *paths], check=True)
+          print(f"runtime allowlist staged: {len(paths)}")
+          PYADD
+          if git diff --cached --quiet; then
+            echo "No runtime changes"
+          else
+            git commit -m "V191 central scheduler runtime update"
+            git push origin runtime-data
+          fi

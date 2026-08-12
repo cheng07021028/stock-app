@@ -1,13 +1,9 @@
 name: V141 Update Official Factors Cache
 
 on:
+  # V191: automatic timing moved to godpick_auto_scheduler_v191.yml to avoid
+  # duplicate official-factor updates. Keep this workflow for manual emergency use.
   workflow_dispatch:
-  schedule:
-    # Run every 30 minutes during Taiwan 21:00-23:30.
-    # Taiwan UTC+8 => UTC 13:00-15:30.
-    # The Python script reads data/config/official_factor_schedule_settings.json
-    # and only updates when the configured time matches.
-    - cron: "0,30 13-15 * * *"
 
 permissions:
   contents: write
@@ -32,14 +28,33 @@ jobs:
       - name: Update official factors cache
         run: python tools/update_official_factors_scheduled.py
 
-      - name: Commit official factors cache
+      - name: Persist official factors to runtime-data branch
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add official_factors_cache.json official_factors_update_log.json data/config/official_factor_schedule_settings.json || true
+
+          # V186: business data must not be committed to main, otherwise every
+          # scheduled data refresh redeploys Streamlit and can recreate stale
+          # packaged JSON. Generate with main-branch code, then persist only the
+          # resulting runtime artifacts to the dedicated runtime-data branch.
+          mkdir -p /tmp/official-factor-v186
+          cp official_factors_cache.json /tmp/official-factor-v186/official_factors_cache.json
+          if [ -f official_factors_update_log.json ]; then
+            cp official_factors_update_log.json /tmp/official-factor-v186/official_factors_update_log.json
+          fi
+
+          git reset --hard HEAD
+          git fetch origin runtime-data
+          git checkout -B runtime-data origin/runtime-data
+          cp /tmp/official-factor-v186/official_factors_cache.json official_factors_cache.json
+          if [ -f /tmp/official-factor-v186/official_factors_update_log.json ]; then
+            cp /tmp/official-factor-v186/official_factors_update_log.json official_factors_update_log.json
+          fi
+          git add official_factors_cache.json official_factors_update_log.json || true
           if git diff --cached --quiet; then
-            echo "No official factor cache changes to commit."
+            echo "No runtime official-factor changes to commit."
           else
-            git commit -m "V141 scheduled update official factors cache"
-            git push
+            git commit -m "V186 persist scheduled official factors to runtime-data"
+            git push origin runtime-data
           fi
