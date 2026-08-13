@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260813_hotfix3"
+VERSION = "godpick_auto_scheduler_v191_20260813_hotfix5"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -492,20 +492,40 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             if not simulate and job_had_slot:
                 active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
                 pending=active.get("pending_jobs") if isinstance(active.get("pending_jobs"),list) else []
-                active["pending_jobs"]=[x for x in pending if x != job]
-                if job not in active.get("completed_jobs",[]): active.setdefault("completed_jobs",[]).append(job)
+                _last_job_status = str((status.get("jobs",{}).get(job,{}) or {}).get("last_status") or "")
+                if _last_job_status in {"SUCCESS","WARNING"}:
+                    active["pending_jobs"]=[x for x in pending if x != job]
+                    if job not in active.get("completed_jobs",[]): active.setdefault("completed_jobs",[]).append(job)
+                else:
+                    # V191-H5: a failed/blocked force-all item is *not* finished.
+                    # Keep it pending so the next central wake-up resumes it after
+                    # downstream repair jobs (Page08 authority/durability) have run.
+                    active["pending_jobs"]=list(pending)
+                    active["resume_reason"]="存在FAILED/BLOCKED工作；保留待下一次中央喚醒自動續跑"
                 active["updated_at"]=now_text()
-                _checkpoint_runtime(status,history,cfg,f"job-finished-{job}")
+                _checkpoint_runtime(status,history,cfg,f"job-finished-{job}-{_last_job_status.lower() or 'unknown'}")
 
         history=history[-int(cfg.get("history_keep",400)):]
         summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
         status["updated_at"]=now_text(); status["last_summary"]=summary
         if not simulate:
-            active=status.pop("active_run",None)
-            if isinstance(active,dict):
-                active["finished_at"]=now_text(); active["summary"]=summary
-                status["last_completed_run"]=active
-            _checkpoint_runtime(status,history,cfg,"run-finished")
+            active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
+            remaining=[str(x) for x in (active.get("pending_jobs") or []) if str(x)] if isinstance(active,dict) else []
+            if force_all_enabled and remaining:
+                # V191-H5: do not erase the force batch when any job failed or
+                # was blocked.  A later scheduler wake will resume only these
+                # pending items (up to the existing 12-hour safety window).
+                active["paused_at"]=now_text(); active["summary"]=summary
+                active["resume_reason"]="本輪仍有未完成工作，等待下一次中央喚醒續跑"
+                status["active_run"]=active
+                status["last_incomplete_run"]={**active}
+                _checkpoint_runtime(status,history,cfg,"run-paused-pending-retry")
+            else:
+                active=status.pop("active_run",None)
+                if isinstance(active,dict):
+                    active["finished_at"]=now_text(); active["summary"]=summary
+                    status["last_completed_run"]=active
+                _checkpoint_runtime(status,history,cfg,"run-finished")
         resume_text="（續跑上次中斷的強制批次）" if resumed_force else ""
         return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count}
     finally:

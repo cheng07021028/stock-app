@@ -453,13 +453,35 @@ def _page7_auto_universe(ns: dict[str,Any], master_df: pd.DataFrame, watchlist_m
 
 
 def task_auto_recommendation(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Invoke Page7's canonical automation runner; scheduler owns no pick logic."""
+    """Invoke Page7's canonical automation runner; scheduler owns no pick logic.
+
+    V191-H5 adds a recommendation-history authority preflight.  A force-all run
+    previously reached Page07 before Page08's later jobs had a chance to finish
+    H4 history recovery, so Page07 could scan successfully yet fail its record
+    write with the integrity lock.  The same batch then repaired Page08, but the
+    already-failed Page07 status stayed FAILED.  Preflight makes the authority
+    safe *before* the expensive scan and exposes recovery diagnostics to Page07.
+    """
     t0=time.perf_counter(); cfg=cfg or {}
     try:
+        authority_rows, authority_msgs, authority_restored = _ensure_records_authority_safe()
+        if not authority_rows:
+            return _report(
+                False,
+                "07股神推薦前置未通過：08推薦歷史權威仍為0筆/未完成救援；已停止掃描，避免推薦完成後無法永久記錄。",
+                details={"authority_messages": authority_msgs[-40:], "authority_restored": authority_restored},
+                started=t0,
+            )
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/7_股神推薦.py",base_dir=BASE_DIR)
         _require_headless_callables(ns, "Page7", ["_run_page07_automation_v191_h2"])
-        result=ns["_run_page07_automation_v191_h2"](dict(cfg)) or {}
+        run_cfg=dict(cfg)
+        run_cfg["authority_preflight_count_v191_h5"]=len(authority_rows)
+        run_cfg["authority_preflight_restored_v191_h5"]=bool(authority_restored)
+        result=ns["_run_page07_automation_v191_h2"](run_cfg) or {}
+        result.setdefault("authority_preflight_count", len(authority_rows))
+        result.setdefault("authority_preflight_restored", bool(authority_restored))
+        result.setdefault("authority_preflight_messages", authority_msgs[-20:])
         ok=bool(result.get("ok"))
         msg=str(result.get("message") or ("07股神推薦模組自動執行完成" if ok else "07股神推薦模組自動執行失敗"))
         return _report(

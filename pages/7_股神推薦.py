@@ -13796,7 +13796,7 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
         "owner": "07_股神推薦",
         "trigger": "V191中央自動排程",
         "started_at": started_at,
-        "automation_version": "V191-H3",
+        "automation_version": "V191-H5",
     }
     st.session_state[_k("recommend_execution_context_v191")] = execution_context
     notes: list[str] = []
@@ -14502,7 +14502,7 @@ def main():
             "owner": "07_股神推薦",
             "trigger": "手動斷點續掃" if resume_scan_btn else ("手動重新推薦" if submit_refresh else "手動開始推薦"),
             "started_at": _now_text(),
-            "automation_version": "V191-H3",
+            "automation_version": "V191-H5",
         }
         previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
