@@ -2320,6 +2320,15 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     if not isinstance(payload, dict) or not payload:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), msg
 
+    # V191-H3: expose automated-run metadata to the interactive Page07 session.
+    # Headless scheduler runs in another namespace; without this bridge a user
+    # reopening Page07 could see "請先按開始推薦" even though automation just ran.
+    st.session_state[_k("loaded_snapshot_saved_at_v191_h3")] = _safe_str(payload.get("saved_at"))
+    st.session_state[_k("loaded_snapshot_execution_owner_v191_h3")] = _safe_str(payload.get("execution_owner"))
+    st.session_state[_k("loaded_snapshot_execution_trigger_v191_h3")] = _safe_str(payload.get("execution_trigger"))
+    st.session_state[_k("loaded_snapshot_recommendation_count_v191_h3")] = len(payload.get("recommendations") or []) if isinstance(payload.get("recommendations"), list) else 0
+    st.session_state[_k("loaded_snapshot_candidate_count_v191_h3")] = len(payload.get("candidate_diagnosis") or []) if isinstance(payload.get("candidate_diagnosis"), list) else int(payload.get("candidate_count") or 0)
+
     raw_rec_df = _ensure_v92_night_compat_df(
         _records_to_df_for_json(payload.get("recommendations", [])),
         source="latest_recommendations",
@@ -7458,9 +7467,13 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
             if report.permanent_ok:
                 return len(duplicated), [f"已依使用者確認新增重複紀錄 {len(duplicated)} 筆。", *details]
             return 0, ["重複紀錄未通過永久保存驗證。", *details]
-        ok_local, msg_local = _safe_json_write_local("godpick_records.json", merged_df.to_dict(orient="records"))
+        # V191-H3 data-integrity rule: never bypass the authority service with a
+        # direct full-file write.  A transient import/service failure must fail
+        # closed rather than risk replacing 1,800+ cumulative records with a
+        # partial/stale in-page DataFrame.
+        msg_local = "V191-H3防歸零：推薦紀錄永久服務未載入，已拒絕直接覆寫 godpick_records.json；請修復服務後再重試。"
         st.session_state[_k("last_record_write_detail")] = [msg_local]
-        return (len(duplicated), [msg_local]) if ok_local else (0, [msg_local])
+        return 0, [msg_local]
     except Exception as exc:
         st.session_state[_k("last_record_write_detail")] = [f"永久推薦紀錄例外：{exc}"]
         return 0, [f"寫入股神推薦紀錄失敗：{exc}"]
@@ -13783,7 +13796,7 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
         "owner": "07_股神推薦",
         "trigger": "V191中央自動排程",
         "started_at": started_at,
-        "automation_version": "V191-H2",
+        "automation_version": "V191-H3",
     }
     st.session_state[_k("recommend_execution_context_v191")] = execution_context
     notes: list[str] = []
@@ -13909,13 +13922,24 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
         scan_report = st.session_state.get(_k("scan_quality_report"), {}) or {}
         display_count = len(rec_df) if isinstance(rec_df, pd.DataFrame) else 0
         candidate_count = len(source_df) if isinstance(source_df, pd.DataFrame) else 0
-        ok = bool(save_ok and isinstance(rec_df, pd.DataFrame))
+        _record_text_v191_h3 = "｜".join(_safe_str(x) for x in (record_msgs or []) if _safe_str(x))
+        record_integrity_failure = any(token in _record_text_v191_h3 for token in [
+            "推薦紀錄未寫入權威檔", "歷史救援尚未完成", "防歸零",
+            "永久服務未載入", "權威增量保存：失敗", "本輪不得顯示保存成功",
+        ])
+        ok = bool(save_ok and isinstance(rec_df, pd.DataFrame) and not record_integrity_failure)
+        no_actionable = bool(ok and display_count <= 0)
         message = (
             f"07股神推薦模組自動執行{'完成' if ok else '未完整完成'}："
             f"掃描 {len(universe_items)}／候選 {candidate_count}／顯示 {display_count}／08永久紀錄 {record_added}"
         )
+        if record_integrity_failure:
+            message += "｜08推薦歷史完整性/永久化未通過，本輪不得標示SUCCESS；已保留07候選診斷供修復後重試"
+        elif no_actionable:
+            message += "｜本輪0檔通過可操作底線，候選診斷已保存；不硬塞弱股、不清空歷史紀錄"
         return {
             "ok": ok,
+            "warning": no_actionable,
             "message": message,
             "execution_context": execution_context,
             "execution_owner": "pages/7_股神推薦.py",
@@ -13925,6 +13949,7 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
             "candidate_count": candidate_count,
             "display_count": display_count,
             "record_added": int(record_added or 0),
+            "record_integrity_failure": bool(record_integrity_failure),
             "record_messages": list(record_msgs or [])[-20:],
             "calibration_added": int(calibration_added or 0),
             "calibration_summary": calibration_summary,
@@ -14424,11 +14449,26 @@ def main():
 
     if not st.session_state.get(_k("submitted_once"), False):
         saved_rec_df, saved_cat_df, saved_hot_df = _load_recommend_result_from_state()
+        loaded_candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+        loaded_saved_at = _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
+        loaded_trigger = _safe_str(st.session_state.get(_k("loaded_snapshot_execution_trigger_v191_h3")))
         if isinstance(saved_rec_df, pd.DataFrame) and not saved_rec_df.empty:
             st.session_state[_k("submitted_once")] = True
-            st.info("已載入上一次推薦結果；資料會保留到下一次按「開始推薦 / 重新推薦」才覆蓋。")
+            if "V191" in loaded_trigger:
+                st.success(f"已自動載入 V191 中央排程產生的 07 股神推薦結果｜{loaded_saved_at or '時間未取得'}。")
+            else:
+                st.info("已載入上一次推薦結果；資料會保留到下一次按「開始推薦 / 重新推薦」才覆蓋。")
+        elif isinstance(loaded_candidate_df, pd.DataFrame) and not loaded_candidate_df.empty and loaded_saved_at:
+            # Automation did run, but zero stocks crossed the actionable floor.
+            # Continue into the result area so the user sees the diagnosis instead
+            # of the misleading "請先按開始推薦" message.
+            st.session_state[_k("submitted_once")] = True
+            st.warning(
+                f"已載入 V191 自動推薦執行結果｜{loaded_saved_at}｜本輪可操作推薦 0 檔；"
+                f"完整候選診斷 {len(loaded_candidate_df)} 檔。系統不會為了湊名單硬塞弱股。"
+            )
         else:
-            st.info("請先設定條件，再按「開始推薦」。")
+            st.info("目前尚無可驗證的手動或V191自動推薦執行結果；請先設定條件，再按「開始推薦」。")
             return
 
     selected_categories = st.session_state.get(_k("selected_categories"), ["全部"])
@@ -14462,7 +14502,7 @@ def main():
             "owner": "07_股神推薦",
             "trigger": "手動斷點續掃" if resume_scan_btn else ("手動重新推薦" if submit_refresh else "手動開始推薦"),
             "started_at": _now_text(),
-            "automation_version": "V191-H2",
+            "automation_version": "V191-H3",
         }
         previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
@@ -14703,11 +14743,36 @@ def main():
         st.warning(fallback_notice)
 
     if rec_df.empty:
-        if submit_recommend or submit_refresh:
-            st.warning("本輪沒有任何股票通過資料、流動性、買點與風控的最低參考底線。系統不會硬塞弱股，也不會用 0 檔覆蓋上一輪結果。")
+        diagnosis_now = st.session_state.get(_k("candidate_diagnosis_store"))
+        auto_saved_at = _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3"))) or _safe_str(st.session_state.get(_k("result_saved_at")))
+        auto_trigger = _safe_str(st.session_state.get(_k("loaded_snapshot_execution_trigger_v191_h3")))
+        if isinstance(diagnosis_now, pd.DataFrame) and not diagnosis_now.empty:
+            st.warning(
+                f"07｜股神推薦已完成{'（V191中央自動排程）' if 'V191' in auto_trigger else ''}，"
+                f"但本輪 0 檔通過『資料完整＋流動性＋買點＋風控＋風報比』可操作底線。"
+                "這不是沒有執行；系統選擇不硬塞弱股。下表是本輪候選診斷，非買進清單。"
+            )
+            if auto_saved_at:
+                st.caption(f"本輪執行/保存時間：{auto_saved_at}｜候選診斷：{len(diagnosis_now)} 檔")
+            diag = diagnosis_now.copy()
+            sort_col = next((c for c in ["V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分", "股神實戰總分"] if c in diag.columns), None)
+            if sort_col:
+                diag[sort_col] = pd.to_numeric(diag[sort_col], errors="coerce")
+                diag = diag.sort_values(sort_col, ascending=False, na_position="last")
+            diag_cols = [c for c in [
+                "股票代號", "股票名稱", "市場別", "類別", "正式推薦分區", "盤中雷達優先級",
+                "V188股神作戰優先分", "股神推薦優先分", "股神實戰總分", "推薦總分",
+                "起漲前兆分數", "交易可行分數", "Risk風控安全分", "風險報酬比",
+                "V188交易許可", "正式推薦阻擋原因", "風險說明", "推薦理由摘要"
+            ] if c in diag.columns]
+            if diag_cols:
+                st.dataframe(_format_df(diag[diag_cols].head(30)), use_container_width=True, hide_index=True)
+            st.info("若要產生正式/A-/R1名單，應先改善官方因子、行情新鮮度與可操作買點，而不是單純調低推薦門檻。")
+        elif submit_recommend or submit_refresh:
+            st.warning("本輪沒有任何股票通過資料、流動性、買點與風控的最低參考底線。系統不會硬塞弱股，也不會用 0 檔覆蓋歷史推薦紀錄。")
             st.info("先看上方『推薦除錯摘要』：若抓不到歷史資料或分析錯誤很多，先修資料模組，不要只調低門檻。")
         else:
-            st.error("目前沒有已保存的推薦結果，請先按一次「開始推薦」。")
+            st.error("目前沒有已保存的推薦結果或候選診斷；請確認 V191 07工作是否實際執行成功。")
         return
 
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"), ""))

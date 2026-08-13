@@ -164,9 +164,37 @@ def _require_headless_callables(ns: dict[str, Any], page_name: str, names: list[
         )
 
 
+def _ensure_records_authority_safe() -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Resolve/repair Page08 history before any scheduled history-based job.
+
+    V191-H3 treats an accidental 0/4-row full replacement as a data-integrity
+    incident.  All scheduled consumers (latest price, performance, T+1 and AI
+    learning) must pass through the same authority recovery gate before reading
+    recommendation history, so a force-all run repairs history early instead of
+    propagating an empty dataset into downstream truth/learning files.
+    """
+    try:
+        from godpick_persistence_service import ensure_records_local_authority_current
+        rows, msgs, restored = ensure_records_local_authority_current()
+        return list(rows or []), list(msgs or []), bool(restored)
+    except ModuleNotFoundError as import_exc:
+        # The repository smoke environment may omit Streamlit; production does
+        # not take this fallback.  Keep the guard testable without claiming a
+        # remote recovery happened.
+        if "streamlit" not in str(import_exc).lower():
+            raise
+        try:
+            payload = json.loads((BASE_DIR / "godpick_records.json").read_text(encoding="utf-8-sig"))
+            rows = payload if isinstance(payload, list) else []
+        except Exception:
+            rows = []
+        return list(rows or []), ["headless smoke fallback：僅檢查本機 godpick_records.json"], False
+
+
 def _load_page8_records():
-    from godpick_persistence_service import load_records_permanent
-    rows, msgs = load_records_permanent()
+    rows, msgs, restored = _ensure_records_authority_safe()
+    if restored:
+        msgs = [*msgs, f"V191-H3：排程執行前已先恢復推薦歷史權威，共 {len(rows)} 筆。"]
     return pd.DataFrame(rows or []), msgs
 
 
@@ -189,6 +217,12 @@ def task_record_latest_price(cfg: dict[str, Any] | None = None) -> dict[str, Any
         ns = load_page_namespace("pages/8_股神推薦紀錄.py", base_dir=BASE_DIR)
         _require_headless_callables(ns, "Page8", ["_refresh_latest_prices", "_save_records_dual", "save_records_sync_fast"])
         df, load_msgs = _load_page8_records()
+        if df.empty:
+            return _report(
+                False,
+                "推薦紀錄最新價已安全暫停：股神推薦歷史目前為0筆；V191-H3拒絕把空資料再次保存成權威。",
+                details={"load_messages": load_msgs[-30:]}, started=t0,
+            )
         ensure = ns.get("_ensure_godpick_record_columns")
         if callable(ensure): df = ensure(df)
         st = ns["__headless_st__"]
@@ -208,7 +242,15 @@ def task_record_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]
     t0 = time.perf_counter(); cfg = cfg or {}
     try:
         from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
-        from godpick_persistence_service import load_records_permanent, save_records_sync_fast
+        from godpick_persistence_service import save_records_sync_fast
+        authority_rows, authority_msgs, authority_restored = _ensure_records_authority_safe()
+        if not authority_rows:
+            return _report(
+                False,
+                "推薦後績效已安全暫停：股神推薦歷史目前為0筆；V191-H3先阻止空資料擴散，請完成歷史權威救援。",
+                details={"authority_messages": authority_msgs[-30:], "authority_restored": authority_restored},
+                started=t0,
+            )
         result = update_recommendation_perf_fast_v77(
             json_files=["godpick_records.json", "godpick_calibration_samples.json", "godpick_latest_recommendations.json"],
             max_records=int(cfg.get("max_records", 2000) or 2000),
@@ -217,11 +259,11 @@ def task_record_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]
             stale_minutes=int(cfg.get("stale_minutes", 30) or 30),
             process_all=bool(cfg.get("process_all", True)),
         )
-        rows, load_msgs = load_records_permanent()
-        report = save_records_sync_fast(rows or [], reason="V191 scheduled Page8 performance + save sync")
+        rows, load_msgs, _ = _ensure_records_authority_safe()
+        report = save_records_sync_fast(rows or authority_rows, reason="V191-H3 scheduled Page8 performance + save sync")
         persist_ok = bool(getattr(report, "permanent_ok", False))
         ok = bool((result or {}).get("ok", True) and persist_ok)
-        return _report(ok, f"推薦後績效更新完成；推薦紀錄永久同步 {'成功' if persist_ok else '失敗'}", details={"performance": result, "load_messages": load_msgs[-10:], "persistence": getattr(report, "__dict__", str(report))}, changed_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json", "godpick_calibration_samples.json"], started=t0)
+        return _report(ok, f"推薦後績效更新完成；推薦紀錄永久同步 {'成功' if persist_ok else '失敗'}", details={"performance": result, "authority_messages": authority_msgs[-20:], "authority_restored": authority_restored, "load_messages": load_msgs[-10:], "persistence": getattr(report, "__dict__", str(report))}, changed_files=["godpick_records.json", "godpick_recommend_list.json", "godpick_latest_recommendations.json", "godpick_calibration_samples.json"], started=t0)
     except Exception as exc:
         return _report(False, f"推薦後績效/儲存同步失敗：{type(exc).__name__}: {exc}", started=t0)
 
@@ -247,10 +289,11 @@ def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[s
             max_workers=int(cfg.get("max_workers",12) or 12), stale_minutes=int(cfg.get("stale_minutes",30) or 30), process_all=bool(cfg.get("process_all",True)),
         )
         ns=load_page_namespace("pages/10_推薦清單.py",base_dir=BASE_DIR)
-        _require_headless_callables(ns, "Page10", ["_sync_records", "save_records_permanent", "save_named_json_permanent"])
+        _require_headless_callables(ns, "Page10", ["_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list(); sync_ok,sync_msgs=ns["_sync_records"](df)
         ok=bool((result or {}).get("ok",True) and sync_ok)
-        return _report(ok,f"推薦清單績效更新完成；永久同步 {'成功' if sync_ok else '失敗'}",details={"performance":result,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0)
+        no_data=bool(df.empty)
+        return _report(ok,f"推薦清單績效更新完成；{'0筆安全略過（未清空歷史）' if no_data else ('永久同步成功' if sync_ok else '永久同步失敗')}",details={"performance":result,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
     except Exception as exc:
         return _report(False,f"推薦清單績效更新失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -260,12 +303,13 @@ def task_recommend_list_n_day(cfg: dict[str, Any] | None = None) -> dict[str, An
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
-        _require_headless_callables(ns, "Page10", ["_update_formal_n_day_metrics_v98", "_sync_records", "save_records_permanent", "save_named_json_permanent"])
+        _require_headless_callables(ns, "Page10", ["_update_formal_n_day_metrics_v98", "_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
         out,summary=ns["_update_formal_n_day_metrics_v98"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
         ok_sync,sync_msgs=ns["_sync_records"](out)
         ok=bool(ok_sync and (int(summary.get("processed",0) or 0)>=0))
-        return _report(ok,f"正式N日績效回補：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／剩餘 {summary.get('remaining',0)}；同步 {'成功' if ok_sync else '失敗'}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0)
+        no_data=bool(df.empty)
+        return _report(ok,f"正式N日績效回補：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／剩餘 {summary.get('remaining',0)}；{'0筆安全略過（未清空歷史）' if no_data else ('同步成功' if ok_sync else '同步失敗')}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
     except Exception as exc:
         return _report(False,f"正式N日績效回補失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -275,11 +319,12 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
-        _require_headless_callables(ns, "Page10", ["_update_night_hit_tracking_v101", "_sync_records", "save_records_permanent", "save_named_json_permanent"])
+        _require_headless_callables(ns, "Page10", ["_update_night_hit_tracking_v101", "_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
         out,summary=ns["_update_night_hit_tracking_v101"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
         ok_sync,sync_msgs=ns["_sync_records"](out)
-        return _report(bool(ok_sync),f"隔日命中追蹤：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／失敗 {summary.get('fail',0)}；同步 {'成功' if ok_sync else '失敗'}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0)
+        no_data=bool(df.empty)
+        return _report(bool(ok_sync),f"隔日命中追蹤：處理 {summary.get('processed',0)}／成功 {summary.get('success',0)}／失敗 {summary.get('fail',0)}；{'0筆安全略過（未清空歷史）' if no_data else ('同步成功' if ok_sync else '同步失敗')}",details={"summary":summary,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok_sync))
     except Exception as exc:
         return _report(False,f"隔日命中追蹤失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -287,10 +332,18 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
 def task_t1_truth(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     t0=time.perf_counter(); cfg=cfg or {}
     try:
+        authority_rows, authority_msgs, authority_restored = _ensure_records_authority_safe()
+        if not authority_rows:
+            return _report(
+                False,
+                "T+1實戰真相已安全暫停：股神推薦歷史目前為0筆；V191-H3拒絕以空歷史重建真相/校準。",
+                details={"authority_messages": authority_msgs[-30:], "authority_restored": authority_restored},
+                started=t0,
+            )
         from godpick_t1_trade_truth import refresh_t1_trade_truth
         res=refresh_t1_trade_truth(max_records=int(cfg.get("max_records",500) or 500),max_workers=int(cfg.get("max_workers",8) or 8),persist=True)
         ok=bool(res.get("ok") and res.get("persistence_ok",True))
-        return _report(ok,f"T+1實戰真相：成熟 {res.get('matured_t1_samples',0)}／可執行 {res.get('executable_samples',0)}／永久化 {'成功' if res.get('persistence_ok',True) else '失敗'}",details=res,changed_files=["godpick_t1_trade_truth.json","godpick_probability_calibration.json"],started=t0)
+        return _report(ok,f"T+1實戰真相：成熟 {res.get('matured_t1_samples',0)}／可執行 {res.get('executable_samples',0)}／永久化 {'成功' if res.get('persistence_ok',True) else '失敗'}",details={"authority_count":len(authority_rows),"authority_restored":authority_restored,"authority_messages":authority_msgs[-20:],"truth":res},changed_files=["godpick_t1_trade_truth.json","godpick_probability_calibration.json"],started=t0)
     except Exception as exc:
         return _report(False,f"T+1實戰真相更新失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -298,12 +351,27 @@ def task_t1_truth(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
 def task_feedback_learning(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     t0=time.perf_counter()
     try:
+        # Never rebuild AI learning from an accidentally empty authority.  First
+        # run the same Page08 authority election/history-recovery gate used by
+        # every other scheduled history consumer.
+        rows, authority_msgs, restored = _ensure_records_authority_safe()
+        if not rows:
+            return _report(
+                False,
+                "AI學習已安全暫停：股神推薦歷史目前為0筆，V191-H3拒絕用空資料重建/覆蓋模型；請先完成推薦紀錄歷史救援。",
+                details={"authority_messages": authority_msgs[-30:], "restored": restored},
+                changed_files=[], started=t0,
+            )
         from godpick_global_update_service import step_feedback_profile, step_learning_profile
         a=step_feedback_profile(BASE_DIR); b=step_learning_profile(BASE_DIR)
         ok=bool(a.get("ok",True) and b.get("ok",True))
         warning=bool(ok and (a.get("warning") or b.get("warning") or not a.get("available", True)))
-        state_text = "完成（有警示）" if warning else ("完成" if ok else "部分失敗")
-        return _report(ok, f"AI績效回饋/每日學習重建 {state_text}", details={"feedback":a,"learning":b}, changed_files=["godpick_performance_profile.json","godpick_learning_state.json"], started=t0, warning=warning)
+        state_text = "完成（樣本/遠端仍有警示）" if warning else ("完成" if ok else "部分失敗")
+        return _report(
+            ok, f"AI績效回饋/每日學習重建 {state_text}｜權威紀錄 {len(rows)} 筆",
+            details={"authority_count":len(rows),"authority_restored":restored,"authority_messages":authority_msgs[-20:],"feedback":a,"learning":b},
+            changed_files=["godpick_performance_profile.json","godpick_learning_state.json"], started=t0, warning=warning
+        )
     except Exception as exc:
         return _report(False,f"AI績效回饋/每日學習重建失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -311,13 +379,62 @@ def task_feedback_learning(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
 def task_durability_retry(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     t0=time.perf_counter()
     try:
-        from godpick_durability_service import retry_failed_durability, audit_core_durability
-        msgs=retry_failed_durability(base_dir=BASE_DIR)
+        authority_rows, authority_msgs, authority_restored = _ensure_records_authority_safe()
+        from godpick_durability_service import (
+            retry_failed_durability, audit_core_durability, queue_existing_critical_for_migration,
+            load_durability_outbox, CORE_DURABLE_FILES,
+        )
+        retry_msgs=retry_failed_durability(base_dir=BASE_DIR)
+        # V191-H3: audit may show LOCAL_ONLY/UNKNOWN files that were never in the
+        # retry outbox.  Queue those too; otherwise UI says "重試0項、仍待16項"
+        # forever.  The durability service refuses an empty godpick_records upload.
+        migration_msgs=queue_existing_critical_for_migration(base_dir=BASE_DIR, critical_only=True)
+
+        # H3.1: give the background durability worker a short bounded settle
+        # window.  Previously Page17 audited immediately after queueing, so even
+        # successful retries almost always appeared as WARNING on the same click.
+        # Never wait indefinitely: slow GitHub/Firestore remains truthful WARNING
+        # and the next scheduler wake-up will continue it.
+        try:
+            settle_seconds = float((cfg or {}).get("settle_wait_seconds", 8) or 0)
+        except Exception:
+            settle_seconds = 8.0
+        settle_seconds = max(0.0, min(settle_seconds, 15.0))
+        settle_started = time.perf_counter()
+        settle_observations: list[dict[str, Any]] = []
+        critical_names = {k for k, v in CORE_DURABLE_FILES.items() if bool((v or {}).get("critical"))}
+        while settle_seconds > 0 and (time.perf_counter() - settle_started) < settle_seconds:
+            box = load_durability_outbox(base_dir=BASE_DIR)
+            inflight = [
+                name for name, item in (box or {}).items()
+                if name in critical_names and isinstance(item, dict)
+                and str(item.get("status") or "").lower() in {"pending", "running"}
+            ]
+            settle_observations.append({"elapsed": round(time.perf_counter()-settle_started,2), "inflight": len(inflight)})
+            if not inflight:
+                break
+            time.sleep(0.25)
+
         audit=audit_core_durability(base_dir=BASE_DIR,write_audit=True)
-        # Queueing is asynchronous; report current evidence, not a false permanent claim.
-        failed=int(audit.get("critical_total",0) or 0)-int(audit.get("critical_remote_confirmed",0) or 0)
-        pending=max(failed,0)
-        return _report(True,f"永久化待同步/失敗項目已重試排程 {len(msgs)} 項；目前尚待遠端Hash確認 {pending} 項",details={"messages":msgs[-30:],"audit":audit},changed_files=["godpick_durability_outbox.json","godpick_durability_audit.json"],started=t0,warning=bool(pending))
+        pending=max(int(audit.get("critical_total",0) or 0)-int(audit.get("critical_remote_confirmed",0) or 0),0)
+        hard_missing=[r for r in (audit.get("rows") or []) if isinstance(r,dict) and r.get("critical") and not r.get("exists")]
+        queued_count=sum(1 for m in [*retry_msgs,*migration_msgs] if "queued" in str(m).lower() or "排" in str(m))
+        history_incident = bool(not authority_rows and any("歷史救援" in str(x) or "意外" in str(x) or "縮水" in str(x) for x in authority_msgs))
+        ok=not bool(hard_missing) and not history_incident
+        if history_incident:
+            msg = "永久化修復未完成：推薦歷史仍為0筆且符合意外縮水/歷史救援情境；已停止把0筆當成正常遠端狀態。"
+        else:
+            msg=(
+                f"永久化修復：重試/補排 {queued_count} 項；"
+                f"目前遠端同Hash尚待確認 {pending} 項"
+                + ("（後台同步中，非執行失敗）" if pending and ok else "")
+                + (f"；推薦歷史權威 {'已救援' if authority_restored else '已確認'} {len(authority_rows)} 筆" if authority_rows else "")
+            )
+        return _report(
+            ok,msg,details={"authority_count":len(authority_rows),"authority_restored":authority_restored,"authority_messages":authority_msgs[-30:],"retry_messages":retry_msgs[-30:],"migration_messages":migration_msgs[-40:],"settle_wait_seconds":settle_seconds,"settle_observations":settle_observations[-20:],"audit":audit},
+            changed_files=["godpick_durability_outbox.json","godpick_durability_audit.json"],started=t0,
+            warning=bool(ok and pending)
+        )
     except Exception as exc:
         return _report(False,f"永久化重試失敗：{type(exc).__name__}: {exc}",started=t0)
 

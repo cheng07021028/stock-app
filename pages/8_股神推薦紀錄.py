@@ -4994,9 +4994,14 @@ def _reconcile_latest_snapshot_into_authority_v174(authority_df: pd.DataFrame) -
 
 
 def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[pd.DataFrame, list[str], bool]:
-    """Before any button callback, make page 8 use the newest authority revision."""
+    """Before any button callback, make page 8 use the newest authority revision.
+
+    The third return flag means *actual remote/history restoration only*.  Older
+    V174 code also set it on a normal local reload, which produced the misleading
+    green message "Reboot後已還原遠端0筆" even when no remote restore occurred.
+    """
     details: list[str] = []
-    restored = False
+    remote_restored_flag = False
     now_ts = time.time()
     last_remote_check = float(st.session_state.get(_k("authority_remote_check_ts_v174"), 0.0) or 0.0)
     remote_due = bool(force_remote_summary or last_remote_check <= 0 or now_ts - last_remote_check >= 60.0)
@@ -5010,7 +5015,7 @@ def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[
                 restored_df = _ensure_godpick_record_columns(pd.DataFrame(rows))
                 _save_state_df(restored_df)
                 _remove_normalized_record_cache_v165()
-                restored = True
+                remote_restored_flag = True
         except Exception as exc:
             details.append(f"權威遠端摘要檢查失敗：{exc}")
             st.session_state[_k("authority_remote_check_ts_v174")] = now_ts
@@ -5022,8 +5027,7 @@ def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[
         current_df = _load_records(force_remote=False)
         _save_state_df(current_df)
         st.session_state[_k("records_source_sig")] = current_sig
-        restored = True
-        details.append(f"第8頁已在按鈕執行前自動載入最新權威紀錄：{len(current_df)}筆。")
+        details.append(f"第8頁已在按鈕執行前重新載入本機最新權威紀錄：{len(current_df)}筆。")
 
     reconciled, reconcile_details = _reconcile_latest_snapshot_into_authority_v174(current_df)
     details.extend(reconcile_details)
@@ -5033,9 +5037,9 @@ def _sync_authority_before_actions(force_remote_summary: bool = False) -> tuple[
         current_df = _load_records(force_remote=False)
         _save_state_df(current_df)
         st.session_state[_k("records_source_sig")] = current_sig
-        restored = True
+        details.append("已由07最新推薦快照增量修復08權威；這不是Reboot遠端還原。")
 
-    return current_df, details, restored
+    return current_df, details, remote_restored_flag
 
 
 
@@ -6314,6 +6318,15 @@ def main():
                 _authority_latest_date_v174 = _dates_v174.max().strftime("%Y-%m-%d")
         _authority_path_v174 = project_path("godpick_records.json") if callable(project_path) else "godpick_records.json"
         st.caption(f"唯一權威檔：{_authority_path_v174}｜{len(_authority_df_v174)} 筆｜最新推薦日期：{_authority_latest_date_v174 or '未取得'}")
+        if len(_authority_df_v174) == 0:
+            st.error(
+                "V191-H3重大資料完整性保護：目前推薦歷史權威為0筆。系統已禁止任何0筆/子集合整檔回寫，"
+                "並已嘗試由GitHub runtime-data歷史版本救援；在成功找回歷史前，AI學習也會暫停，避免用空資料覆蓋模型。"
+            )
+            if _authority_details_v174:
+                with st.expander("V191-H3 推薦紀錄歷史救援明細", expanded=True):
+                    for _msg_h3 in _authority_details_v174[-40:]:
+                        st.write(f"- {_msg_h3}")
     except Exception:
         pass
 

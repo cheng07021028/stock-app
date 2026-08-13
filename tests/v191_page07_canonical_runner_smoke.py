@@ -49,3 +49,43 @@ ctx=st.session_state[k('recommend_execution_context_v191')]
 assert ctx['owner']=='07_股神推薦' and ctx['trigger']=='V191中央自動排程',ctx
 assert out['record_added']==1,out
 print('PASS Page07 canonical runner owns scheduled recommendation and persists once to Page08 authority')
+
+# V191-H3: a completed scan with zero actionable rows is a WARNING with candidate
+# diagnostics, not a fake recommendation and not a misleading "please press start".
+called_zero={'record':0,'save':0}
+zero_candidate=pd.DataFrame([
+    {'股票代號':'2454','股票名稱':'聯發科','正式推薦分區':'候選觀察','V188選股分':78.0,'V188交易品質分':42.0,'阻擋原因':'風險報酬未達正式買進門檻'}
+])
+def build_zero(**kwargs):
+    st.session_state[k('candidate_diagnosis_store')]=zero_candidate.copy()
+    st.session_state[k('scan_quality_report')]={'正式推薦可用':True,'success':30}
+    return pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
+ns['_build_recommend_df']=build_zero
+ns['_conditional_reference_rows']=lambda src,max_rows=8: pd.DataFrame()
+def save_zero(*a): called_zero['save']+=1; return True
+ns['_save_recommend_result_to_state']=save_zero
+def record_zero(src,background_write=False): called_zero['record']+=1; return 0,['沒有可操作推薦，未新增08歷史']
+ns['_v159_auto_record_actionable_recommendations']=record_zero
+out0=ns['_run_page07_automation_v191_h2']({'force_full_market':True})
+assert out0['ok'] and out0.get('warning'),out0
+assert int(out0.get('display_count',-1))==0,out0
+assert int(out0.get('candidate_count',0))>=1,out0
+assert called_zero=={'record':1,'save':1},called_zero
+assert ('0檔' in out0.get('message','') or '0 檔' in out0.get('message','')),out0
+print('PASS Page07 zero-actionable automation keeps diagnostics, records no weak fake pick, and returns WARNING')
+
+# V191-H3: if Page08 authority persistence is blocked by the history-integrity
+# lock, Page07 must not let the central scheduler report a false SUCCESS.
+called_fail={'record':0,'save':0}
+ns['_build_recommend_df']=build
+ns['_save_recommend_result_to_state']=lambda *a: (called_fail.__setitem__('save',called_fail['save']+1) or True)
+def record_fail(src,background_write=False):
+    called_fail['record']+=1
+    return 0,['V191-H3歷史救援尚未完成：目前權威僅 0 筆；推薦紀錄未寫入權威檔；本輪不得顯示保存成功。']
+ns['_v159_auto_record_actionable_recommendations']=record_fail
+out_fail=ns['_run_page07_automation_v191_h2']({'force_full_market':True})
+assert not out_fail['ok'],out_fail
+assert out_fail.get('record_integrity_failure'),out_fail
+assert '不得標示SUCCESS' in out_fail.get('message',''),out_fail
+assert called_fail=={'record':1,'save':1},called_fail
+print('PASS Page07 refuses scheduler SUCCESS when Page08 history integrity/persistence is blocked')

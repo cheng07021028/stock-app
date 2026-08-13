@@ -26,7 +26,7 @@ import hashlib
 import json
 import threading
 
-DURABILITY_VERSION = "godpick_durability_v191_20260812"
+DURABILITY_VERSION = "godpick_durability_v191_20260813_hotfix3"
 OUTBOX_FILE = "godpick_durability_outbox.json"
 AUDIT_FILE = "godpick_durability_audit.json"
 
@@ -40,7 +40,7 @@ CORE_DURABLE_FILES: dict[str, dict[str, Any]] = {
     "market_nextday_forecast_records.json": {"critical": True, "purpose": "大盤隔日預測與命中校準"},
     "official_factors_cache.json": {"critical": True, "purpose": "法人/營收/估值官方因子"},
     "official_factor_institutional_history.json": {"critical": True, "purpose": "法人逐日歷史/連買統計"},
-    "godpick_records.json": {"critical": True, "purpose": "推薦永久紀錄與績效"},
+    "godpick_records.json": {"critical": True, "purpose": "推薦永久紀錄與績效", "managed_by": "specialized record authority", "skip_generic_migration": True},
     "godpick_latest_recommendations.json": {"critical": True, "purpose": "最新正式推薦快照"},
     "godpick_latest_run_anchor.json": {"critical": True, "purpose": "V185最新推薦永久錨點／防部署回退"},
     "godpick_recommend_list.json": {"critical": True, "purpose": "推薦清單"},
@@ -249,6 +249,10 @@ def persist_json_async(
     """
     global _RUNNING
     safe = _json_safe(payload)
+    if Path(path_name).name == "godpick_records.json" and isinstance(safe, list) and not safe:
+        existing = _read_json(path_name, [], base_dir=base_dir)
+        if isinstance(existing, list) and existing:
+            return False, f"V191-H3防歸零：拒絕以0筆覆蓋既有推薦歷史 {len(existing)} 筆"
     local_ok, local_msg = _atomic_write(path_name, safe, base_dir=base_dir)
     if not local_ok:
         return False, local_msg
@@ -387,6 +391,27 @@ def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bo
         remote_status = str(ob.get("status") or "unknown") if isinstance(ob, dict) else "unknown"
         remote_hash = str(ob.get("payload_hash") or "") if isinstance(ob, dict) else ""
         remote_confirmed = bool(remote_status == "success" and payload_hash and remote_hash == payload_hash)
+        # Recommendation history uses a specialized collection + large-file
+        # GitHub sync, not the generic one-document durability worker.  Read its
+        # verified hashes so the audit does not stay WARNING forever or attempt
+        # an unsafe generic migration of a 20MB record file.
+        if path_name == "godpick_records.json" and payload_hash:
+            try:
+                from godpick_persistence_service import (
+                    load_records_github_sync_status, _read_records_firestore_summary
+                )
+                gh_status, _ = load_records_github_sync_status()
+                fs_summary, _ = _read_records_firestore_summary()
+                gh_ok = bool(isinstance(gh_status, dict) and str(gh_status.get("status") or "") == "success" and str(gh_status.get("payload_hash") or "") == payload_hash)
+                fs_ok = bool(isinstance(fs_summary, dict) and str(fs_summary.get("payload_hash") or "") == payload_hash and int(fs_summary.get("count") or -1) == len(payload if isinstance(payload, list) else []))
+                if gh_ok or fs_ok:
+                    remote_confirmed = True
+                    remote_status = "success-specialized"
+                    remote_hash = payload_hash
+                elif str(gh_status.get("status") or "") in {"pending", "running"}:
+                    remote_status = "pending-specialized"
+            except Exception:
+                pass
         if critical and exists:
             critical_local += 1
         if critical and remote_confirmed:

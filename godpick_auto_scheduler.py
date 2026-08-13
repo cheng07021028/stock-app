@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260813_hotfix2"
+VERSION = "godpick_auto_scheduler_v191_20260813_hotfix3"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"

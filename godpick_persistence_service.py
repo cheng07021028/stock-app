@@ -315,6 +315,52 @@ def _latest_record_recommendation_date(rows: Iterable[dict[str, Any]]) -> str:
     return max(dates) if dates else ""
 
 
+def _guard_records_full_replace(
+    incoming: Iterable[dict[str, Any]],
+    *,
+    allow_destructive_replace: bool = False,
+    reason: str = "",
+) -> tuple[bool, str, int, int]:
+    """V191-H3 hard guard against accidental history truncation.
+
+    Recommendation history is append/update authority.  Legitimate deletions use
+    ``save_records_mutation_fast`` with explicit deleted ids.  A generic full
+    snapshot writer must therefore never reduce the canonical row count unless
+    the caller explicitly opts into a destructive restore.  This blocks the
+    Page10 subset/empty-list bug that could turn ~1800 historical rows into 4/0.
+    """
+    new_rows = records_as_rows_exact(list(incoming or []))
+    current_payload, _, _ = read_local_json(RECORDS_FILE, [])
+    current_rows = records_as_rows_exact(current_payload)
+    before = len(current_rows)
+    after = len(new_rows)
+    if allow_destructive_replace or before <= 0 or after >= before:
+        return True, "", before, after
+    msg = (
+        f"V191-H3 防歸零/防縮水已阻止完整覆蓋：目前權威 {before} 筆，"
+        f"傳入僅 {after} 筆；reason={_safe_str(reason) or 'unspecified'}。"
+        "合法刪除必須走 mutation/deleted_ids，不得用子集合整檔覆蓋歷史。"
+    )
+    return False, msg, before, after
+
+
+def _records_state_looks_like_accidental_collapse(state: Any, row_count: int) -> bool:
+    """Detect the known full-replace failure shape without undoing user deletions."""
+    stt = state if isinstance(state, dict) else {}
+    version = _safe_str(stt.get("version")).lower()
+    reason = _safe_str(stt.get("mutation_reason")).lower()
+    # Explicit page8 deletion/clear actions are mutation states and must never be
+    # resurrected from history automatically.
+    if "mutation" in version or "刪除" in reason or "清空" in reason or "delete" in reason:
+        return False
+    # The incident was produced by v3 full replacement from Page10.  Empty/tiny
+    # full snapshots are also suspicious after a previously cumulative system.
+    return bool(
+        "godpick_records_durable_v3" in version
+        or (row_count <= 50 and any(token in version for token in ["fast_sync", "reboot_restore", "nochange", "durable_v5"]))
+    )
+
+
 def records_authority_signature() -> str:
     """Cheap high-resolution signature without parsing the 20+ MB authority JSON."""
     path = project_path(RECORDS_FILE)
@@ -444,6 +490,35 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 ):
                     candidates.append(("github", gh_state, None, None))
 
+        # V191-H3 emergency recovery: if the current authority has the exact
+        # accidental full-replace signature and no current replica clearly has
+        # a healthy larger count, inspect recent runtime-data Git history before
+        # accepting a 4/0-row authority as truth.  Explicit mutation/deletion
+        # states never enter this path.
+        try:
+            replica_counts = []
+            for _src, _state, _fallback, _rows in candidates:
+                _st = _state if isinstance(_state, dict) else {}
+                try:
+                    _cnt = int(_st.get("count") or (len(_rows) if _rows is not None else 0) or 0)
+                except Exception:
+                    _cnt = 0
+                replica_counts.append(_cnt)
+            _replica_max = max(replica_counts or [0])
+            if (
+                github_config().get("token")
+                and _records_state_looks_like_accidental_collapse(local_state, len(local_rows))
+                and _replica_max <= len(local_rows) + max(50, int(max(len(local_rows), 1) * 0.05))
+            ):
+                recovered_rows, recovery_details, recovered_ok = recover_records_from_github_history(
+                    local_rows, reason="V191-H3 automatic recovery before authority election"
+                )
+                details.extend(recovery_details)
+                if recovered_ok:
+                    return recovered_rows, details, True
+        except Exception as recovery_exc:
+            details.append(f"V191-H3歷史救援檢查例外：{recovery_exc}")
+
         source, newest_state, newest_fallback, newest_rows_hint = max(
             candidates,
             key=lambda item: _authority_freshness_key(
@@ -554,6 +629,23 @@ def upsert_records_authority_fast(
     with _RECORDS_LOCAL_LOCK:
         current_payload, _, _ = read_local_json(RECORDS_FILE, [])
         current = records_as_rows_exact(current_payload)
+        current_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
+        if _records_state_looks_like_accidental_collapse(current_state, len(current)):
+            # Critical: do not let a new Page07/Page10 upsert turn the known
+            # accidental 0/4-row full-replace state into a legitimate mutation
+            # state.  Doing so would hide the incident signature and could make
+            # the old cumulative history unrecoverable on the next retry.
+            blocked = PersistenceReport(
+                local_ok=False, firestore_ok=False, github_ok=False, permanent_ok=False,
+                local_message=(
+                    f"V191-H3歷史救援尚未完成：目前權威僅 {len(current)} 筆且狀態符合意外縮水特徵；"
+                    "已拒絕新增/更新推薦，避免用新4筆掩蓋舊1800+筆歷史。請先完成08權威歷史救援。"
+                ),
+                firestore_message="歷史完整性鎖定中，未寫入Firestore",
+                github_message="歷史完整性鎖定中，未寫入GitHub",
+                updated_at=_now_text(),
+            )
+            return blocked, {"before": len(current), "after": len(current), "added": 0, "updated": 0, "changed": 0}
         index_by_key: dict[str, int] = {}
         for idx, row in enumerate(current):
             key = _record_business_key_authority(row)
@@ -741,6 +833,181 @@ def read_github_json(path_name: str, default: Any) -> tuple[Any, str]:
             return copy.deepcopy(default), f"GitHub raw JSON 解析失敗：{path_name}｜{exc}"
     except Exception as exc:
         return copy.deepcopy(default), f"GitHub 讀取例外：{path_name}｜{exc}"
+
+
+def _read_github_json_at_ref(path_name: str, ref: str, default: Any) -> tuple[Any, str]:
+    """Read one runtime-data file at an explicit historical Git commit/ref."""
+    cfg = github_config()
+    if not cfg["token"]:
+        return copy.deepcopy(default), "未設定 GITHUB_TOKEN"
+    try:
+        response = requests.get(
+            _github_url(path_name),
+            headers=_github_headers(cfg["token"]),
+            params={"ref": _safe_str(ref)},
+            timeout=(15, 60),
+        )
+        if response.status_code != 200:
+            return copy.deepcopy(default), f"GitHub歷史讀取失敗：{path_name}@{ref[:10]}｜HTTP {response.status_code}"
+        meta = response.json() if response.content else {}
+        content = meta.get("content", "") if isinstance(meta, dict) else ""
+        if content:
+            return json.loads(base64.b64decode(content).decode("utf-8-sig")), f"已讀取GitHub歷史：{path_name}@{ref[:10]}"
+        # Large files need raw media mode with the same historical ref.
+        headers = _github_headers(cfg["token"])
+        headers["Accept"] = "application/vnd.github.raw+json"
+        raw = requests.get(
+            _github_url(path_name), headers=headers, params={"ref": _safe_str(ref)}, timeout=(15, 180)
+        )
+        if raw.status_code != 200:
+            return copy.deepcopy(default), f"GitHub歷史raw讀取失敗：{path_name}@{ref[:10]}｜HTTP {raw.status_code}"
+        return json.loads(raw.content.decode("utf-8-sig")), f"已使用GitHub raw讀取歷史：{path_name}@{ref[:10]}"
+    except Exception as exc:
+        return copy.deepcopy(default), f"GitHub歷史讀取例外：{path_name}@{ref[:10]}｜{exc}"
+
+
+def _github_commits_for_path(path_name: str, *, limit: int = 60) -> tuple[list[dict[str, Any]], str]:
+    cfg = github_config()
+    if not cfg["token"]:
+        return [], "未設定 GITHUB_TOKEN"
+    url = f"https://api.github.com/repos/{cfg['owner']}/{cfg['repo']}/commits"
+    try:
+        resp = requests.get(
+            url, headers=_github_headers(cfg["token"]),
+            params={"sha": cfg["branch"], "path": str(path_name).replace("\\", "/"), "per_page": max(1, min(int(limit), 100))},
+            timeout=(15, 45),
+        )
+        if resp.status_code != 200:
+            return [], f"GitHub歷史清單讀取失敗：HTTP {resp.status_code}｜{resp.text[:220]}"
+        rows = resp.json() if resp.content else []
+        return ([x for x in rows if isinstance(x, dict)] if isinstance(rows, list) else []), f"GitHub歷史清單 {len(rows) if isinstance(rows, list) else 0} 筆"
+    except Exception as exc:
+        return [], f"GitHub歷史清單例外：{exc}"
+
+
+def recover_records_from_github_history(
+    current_rows: Iterable[dict[str, Any]] | None = None,
+    *,
+    max_commits: int = 60,
+    reason: str = "V191-H3 emergency anti-zero recovery",
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Recover the last pre-collapse recommendation authority from Git history.
+
+    We inspect the *small* records state-file history first and download the big
+    JSON only once, at the first recent commit whose count is materially above
+    the damaged current count.  The recovered snapshot is merged with any newer
+    surviving rows, so a same-day recommendation cannot be lost during rescue.
+    """
+    current = records_as_rows_exact(list(current_rows or []))
+    current_count = len(current)
+    details: list[str] = [f"V191-H3歷史救援檢查：目前 {current_count} 筆"]
+    commits, commits_msg = _github_commits_for_path(RECORDS_STATE_FILE, limit=max_commits)
+    details.append(commits_msg)
+    if not commits:
+        return current, details, False
+
+    # H3.1: the known collapse can generate many tiny state commits in a short
+    # period.  Do not let those push the last healthy snapshot outside a small
+    # fixed window.  Fetch up to 60 state commits, but inspect high-signal
+    # cumulative writers (Page07 / Page08 performance) first so recovery usually
+    # needs only a handful of API calls rather than dozens.
+    def _history_priority(item: dict[str, Any]) -> tuple[int, int]:
+        try:
+            message = _safe_str(((item.get("commit") or {}).get("message"))).lower()
+        except Exception:
+            message = ""
+        if "07 股神推薦" in message or "godpick recommendation" in message:
+            pri = 0
+        elif "page8" in message or "scheduled page8" in message or "推薦後績效" in message:
+            pri = 1
+        elif "explicit save sync" in message:
+            pri = 2
+        else:
+            pri = 3
+        # Python sort is stable, so recent order returned by GitHub is preserved
+        # inside each priority bucket.
+        return (pri, 0)
+
+    commits = sorted(commits, key=_history_priority)
+    threshold = current_count + max(50, int(max(current_count, 1) * 0.05))
+    chosen_sha = ""
+    chosen_state: dict[str, Any] = {}
+    for item in commits:
+        sha = _safe_str(item.get("sha"))
+        if not sha:
+            continue
+        state_payload, state_msg = _read_github_json_at_ref(RECORDS_STATE_FILE, sha, {})
+        if not isinstance(state_payload, dict):
+            continue
+        try:
+            count = int(state_payload.get("count") or 0)
+        except Exception:
+            count = 0
+        details.append(f"歷史state {sha[:8]}：{count}筆｜{_safe_str(state_payload.get('latest_recommendation_date')) or '無日期'}")
+        if count >= threshold:
+            chosen_sha = sha
+            chosen_state = dict(state_payload)
+            break
+    if not chosen_sha:
+        details.append(f"未找到高於安全門檻 {threshold} 筆的近期歷史權威；不自動復活舊資料。")
+        return current, details, False
+
+    gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
+    historical_payload, hist_msg = _read_github_json_at_ref(gh_path, chosen_sha, [])
+    details.append(hist_msg)
+    historical = records_as_rows_exact(historical_payload)
+    if len(historical) < threshold:
+        details.append(f"歷史大檔回讀僅 {len(historical)} 筆，小於安全門檻；拒絕復原。")
+        return current, details, False
+
+    merged = _merge_record_sources_v178([historical, current])
+    if len(merged) <= current_count:
+        details.append("歷史快照合併後沒有增加資料；不覆蓋目前權威。")
+        return current, details, False
+
+    recovery_state = _new_state(
+        "godpick_records_durable_v191_h3_history_recovery", merged,
+        count=len(merged),
+        latest_recommendation_date=_latest_record_recommendation_date(merged),
+        recovered_from_commit=chosen_sha,
+        recovered_from_count=int(chosen_state.get("count") or len(historical)),
+        recovery_reason=_safe_str(reason),
+    )
+    ok1, msg1 = write_local_json_atomic(RECORDS_FILE, merged)
+    ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, recovery_state) if ok1 else (False, "records寫入失敗")
+    ok3, msg3 = write_local_json_atomic(RECORDS_MANIFEST_FILE, _records_manifest(merged, recovery_state["payload_hash"])) if ok1 and ok2 else (False, "state寫入失敗")
+    details.extend([msg1, msg2, msg3])
+    if not (ok1 and ok2 and ok3):
+        return current, details, False
+
+    # Rebuild remote replicas from the recovered FULL authority.  Do not use the
+    # incremental fast-sync here: after the local recovery state/manifest is
+    # written, a delta calculation can see zero local changes even though a
+    # damaged remote still contains 0/4 rows.  Rebuild Firestore documents
+    # synchronously (so reboot already has one complete remote authority), then
+    # queue the large GitHub JSON in the existing coalescing background worker
+    # to avoid blocking Page08 for a 20+ MB upload.
+    try:
+        if firebase_configured():
+            fs_ok, fs_msg = write_records_firestore(merged, recovery_state)
+            details.append(f"救援後Firestore完整重建｜{fs_msg}")
+        else:
+            fs_ok, fs_msg = False, "Firebase 未設定"
+            details.append(f"救援後Firestore完整重建｜{fs_msg}")
+        if github_config().get("token"):
+            gh_queued, gh_msg = schedule_records_github_sync(
+                merged, recovery_state, f"{reason} | V191-H3 GitHub full rebuild after history rescue"
+            )
+            details.append(f"救援後GitHub完整快照｜{gh_msg}")
+        else:
+            gh_queued, gh_msg = False, "GitHub 未設定"
+            details.append(f"救援後GitHub完整快照｜{gh_msg}")
+        if _configured_remote_exists() and not (fs_ok or gh_queued):
+            details.append("V191-H3警告：歷史已在本機救回，但遠端完整重建尚未接受；後續永久化重試將繼續處理。")
+    except Exception as exc:
+        details.append(f"救援已完成本機恢復，但遠端完整重建例外：{exc}")
+    details.append(f"V191-H3已由GitHub歷史版本救回 {len(merged)} 筆；來源commit {chosen_sha[:10]}。")
+    return merged, details, True
 
 
 def write_github_json(path_name: str, payload: Any, message: str = "update durable data") -> tuple[bool, str]:
@@ -1685,7 +1952,13 @@ def save_records_mutation_fast(
     return report
 
 
-def save_records_sync_fast(payload: Any, reason: str = "explicit record sync", expected_authority_signature: str = "") -> PersistenceReport:
+def save_records_sync_fast(
+    payload: Any,
+    reason: str = "explicit record sync",
+    expected_authority_signature: str = "",
+    *,
+    allow_destructive_replace: bool = False,
+) -> PersistenceReport:
     """Content-aware explicit sync for the large recommendation record file.
 
     The old ``儲存同步`` rewrote every Firestore document and synchronously
@@ -1702,7 +1975,23 @@ def save_records_sync_fast(payload: Any, reason: str = "explicit record sync", e
             report.updated_at = _now_text()
             return report
     records = normalize_records(payload)
-    state = _new_state("godpick_records_durable_v5_fast_sync", records, count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records), sync_reason=_safe_str(reason))
+    guard_ok, guard_msg, before_count, after_count = _guard_records_full_replace(
+        records, allow_destructive_replace=allow_destructive_replace, reason=reason
+    )
+    if not guard_ok:
+        report = PersistenceReport()
+        report.local_ok = False
+        report.local_message = guard_msg
+        report.firestore_message = "V191-H3防縮水啟動，未寫入Firestore"
+        report.github_message = "V191-H3防縮水啟動，未排入GitHub"
+        report.permanent_ok = False
+        report.updated_at = _now_text()
+        return report
+    state = _new_state(
+        "godpick_records_durable_v191_h3_fast_sync", records,
+        count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records),
+        sync_reason=_safe_str(reason), previous_count=before_count,
+    )
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
 
     old_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
@@ -1793,9 +2082,30 @@ def save_records_sync_fast(payload: Any, reason: str = "explicit record sync", e
     return report
 
 
-def save_records_permanent(payload: Any) -> PersistenceReport:
+def save_records_permanent(
+    payload: Any,
+    *,
+    reason: str = "full recommendation authority sync",
+    allow_destructive_replace: bool = False,
+) -> PersistenceReport:
     records = normalize_records(payload)
-    state = _new_state("godpick_records_durable_v3", records, count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records))
+    guard_ok, guard_msg, before_count, after_count = _guard_records_full_replace(
+        records, allow_destructive_replace=allow_destructive_replace, reason=reason
+    )
+    if not guard_ok:
+        report = PersistenceReport()
+        report.local_ok = False
+        report.local_message = guard_msg
+        report.firestore_message = "V191-H3防縮水啟動，未寫入Firestore"
+        report.github_message = "V191-H3防縮水啟動，未寫入GitHub"
+        report.permanent_ok = False
+        report.updated_at = _now_text()
+        return report
+    state = _new_state(
+        "godpick_records_durable_v191_h3_full_sync", records,
+        count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records),
+        sync_reason=_safe_str(reason), previous_count=before_count,
+    )
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
 
     ok1, msg1 = write_local_json_atomic(RECORDS_FILE, records)
@@ -1898,6 +2208,18 @@ def recover_records_authority() -> tuple[list[dict[str, Any]], list[str], bool]:
 
 
 def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
+    # V191-H3: all ordinary readers use the same monotonic authority resolver.
+    # This prevents the legacy loader from independently accepting a newer 0/4
+    # row replica and writing it back locally before the history-recovery guard
+    # gets a chance to inspect the collapse signature.
+    try:
+        rows, details, restored = ensure_records_local_authority_current()
+        if restored:
+            details = [*details, f"V191-H3：load_records_permanent 已恢復較完整權威，共 {len(rows)} 筆。"]
+        return rows, details
+    except Exception as authority_exc:
+        authority_fallback_msg = f"V191-H3權威解析例外，改走相容讀取：{authority_exc}"
+
     local_payload, local_msg, local_mtime = read_local_json(RECORDS_FILE, [])
     local_state, local_state_msg, _ = read_local_json(RECORDS_STATE_FILE, {})
 
@@ -1949,6 +2271,7 @@ def load_records_permanent() -> tuple[list[dict[str, Any]], list[str]]:
     write_local_json_atomic(RECORDS_FILE, chosen)
     write_local_json_atomic(RECORDS_STATE_FILE, restored_state)
     details = [
+        authority_fallback_msg,
         f"權威來源：{source}｜推薦紀錄 {len(chosen)} 筆",
         f"本機：{local_msg}｜{local_state_msg}",
         f"GitHub：{gh_msg}｜{gh_state_msg}",

@@ -81,10 +81,13 @@ if callable(load_auto_scheduler_settings):
         st.info(
             "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
             "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
-            "V191 2026-08-13 Hotfix2：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
+            "V191 2026-08-13 Hotfix3：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
             "強制全部批次若因 rerun/redeploy 中斷，12 小時內下一次中央喚醒會續跑未完成工作；失效 PID 鎖會自動回收。"
             "強制驗證使用獨立 FORCE 執行鍵，不會再吃掉當日晚間正式排程時段；官方因子只有『抓取/保存＋內容日期驗證』都通過才算 SUCCESS。"
             "07 自動推薦由第7頁自己的正式推薦流程執行，中央排程只負責觸發；結果仍永久寫入第8頁推薦紀錄。"
+            "Hotfix3 另加入推薦歷史防歸零：10推薦清單只能增量更新08既有紀錄，絕不可用本輪4/0筆整檔覆蓋歷史；"
+            "AI學習遇到08權威0筆會安全暫停，並先嘗試GitHub歷史版本救援；救援會掃描近期 state commit、挑選明顯較完整的歷史快照，合併當日存活資料後重建本機與遠端權威。"
+            "永久化重試補排後會短暫等待後台Hash確認；能在等待窗內完成就回SUCCESS，仍在同步才回WARNING。WARNING不是FAILED。"
         )
         _active_run = (_auto_status.get("active_run") or {}) if isinstance(_auto_status, dict) else {}
         if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
@@ -100,6 +103,7 @@ if callable(load_auto_scheduler_settings):
         _sum = (_auto_status.get("last_summary") or {}) if isinstance(_auto_status, dict) else {}
         _m3.metric("最近 成功/警示/失敗", f"{_sum.get('success', 0)}/{_sum.get('warning', 0)}/{_sum.get('failed', 0)}")
         _m4.metric("最後喚醒", str((_auto_status or {}).get("last_wakeup_at") or "尚未執行"))
+        st.caption("狀態定義：SUCCESS＝完整完成；WARNING＝工作已完成但有非致命待確認事項（不是失敗）；FAILED＝執行失敗；BLOCKED＝前置條件未通過。")
 
         with st.form("v191_central_scheduler_form", clear_on_submit=False):
             _enable_all = st.checkbox("啟用 V191 中央自動排程", value=bool(_auto_cfg.get("enabled", False)))
@@ -119,7 +123,7 @@ if callable(load_auto_scheduler_settings):
                 with _c2:
                     st.markdown(f"**{_label}**")
                     if _job == "godpick_recommendation":
-                        st.caption("只有股票主檔、大盤、官方因子『內容日期驗證』、SuperAI市場情境、自選股runtime於今日前置成功，才允許自動推薦；真正選股由第7頁模組執行。")
+                        st.caption("只有股票主檔、大盤、官方因子『內容日期驗證』、SuperAI市場情境、自選股runtime於今日前置成功，才允許自動推薦；真正選股由第7頁模組執行。若本輪0檔通過可操作底線，狀態會是WARNING並保存候選診斷，不會硬塞弱股。")
                 with _c3:
                     _jtimes = st.text_input("台灣時間", value=",".join(_jc.get("times") or []), key=f"v191_times_{_job}", label_visibility="collapsed")
                 _newj = dict(_jc)

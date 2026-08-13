@@ -27,14 +27,14 @@ try:
         load_named_json_permanent,
         load_records_permanent,
         save_named_json_permanent,
-        save_records_permanent,
+        upsert_records_authority_fast,
     )
 except Exception:
     load_module_sync_state = None
     load_named_json_permanent = None
     load_records_permanent = None
     save_named_json_permanent = None
-    save_records_permanent = None
+    upsert_records_authority_fast = None
 # <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
@@ -1820,20 +1820,42 @@ def _write_records_to_github(df: pd.DataFrame) -> tuple[bool, str]:
 
 
 def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
+    """V191-H3 safe Page10 sync.
+
+    Module 10 owns the *current recommendation list* and its tracking fields; it
+    does NOT own the full historical Page08 authority.  Therefore performance
+    updates are upserted into matching history rows and may never full-replace
+    ``godpick_records.json``.  An empty current list is a safe no-op, never an
+    instruction to erase history.
+    """
     work = _ensure_record_columns(df)
     messages: list[str] = []
-    if not callable(save_records_permanent) or not callable(save_named_json_permanent):
-        messages.append("永久保存服務未載入")
+    if not callable(save_named_json_permanent) or not callable(upsert_records_authority_fast):
+        messages.append("V191-H3安全永久保存服務未載入")
         st.session_state[_k("last_sync_msgs")] = messages
         return False, messages
 
-    rec_report = save_records_permanent(work)
-    messages.extend(["推薦紀錄｜" + x for x in rec_report.messages()])
+    if work.empty:
+        messages.append("V191-H3防歸零：本輪推薦清單為 0 筆；略過所有永久覆蓋，不清空08歷史、不清空10清單、不改寫最新推薦快照。")
+        st.session_state[_k("last_sync_msgs")] = messages
+        return True, messages
 
-    # 10 頁同時顯示歷史紀錄與本輪清單；永久回寫清單時不可把全部歷史紀錄灌入。
+    # Update only the matching current recommendation rows in Page08 authority.
+    rec_report, rec_stats = upsert_records_authority_fast(
+        work.to_dict(orient="records"),
+        reason="Page10 tracking metrics incremental upsert (V191-H3)",
+    )
+    messages.extend([
+        f"推薦紀錄增量｜before={rec_stats.get('before',0)} after={rec_stats.get('after',0)} "
+        f"added={rec_stats.get('added',0)} updated={rec_stats.get('updated',0)}",
+        *["推薦紀錄增量｜" + x for x in rec_report.messages()],
+    ])
+
+    # Page10 current list can be rewritten because this file is explicitly the
+    # current operational list, not cumulative history.
     list_df = work.copy()
     if "資料來源" in list_df.columns:
-        current_mask = list_df["資料來源"].astype(str).isin(["本輪推薦清單", "最新推薦快照"])
+        current_mask = list_df["資料來源"].astype(str).isin(["本輪推薦清單", "最新推薦快照", "godpick_recommend_list.json"])
         if current_mask.any():
             list_df = list_df[current_mask].copy()
     if not list_df.empty and "推薦日期" in list_df.columns:
@@ -1841,20 +1863,41 @@ def _sync_records(df: pd.DataFrame) -> tuple[bool, list[str]]:
         if date_s.notna().any():
             list_df = list_df[date_s.dt.date == date_s.max().date()].copy()
     list_rows = list_df.drop(columns=["資料來源"], errors="ignore").to_dict(orient="records")
+    if not list_rows:
+        messages.append("V191-H3防歸零：治理後清單為0筆，保留原10頁清單與最新推薦快照。")
+        st.session_state[_k("last_sync_msgs")] = messages
+        return bool(rec_report.local_ok), messages
 
     list_report = save_named_json_permanent("godpick_recommend_list.json", list_rows)
     messages.extend(["推薦清單｜" + x for x in list_report.messages()])
-    latest_payload, _ = load_named_json_permanent("godpick_latest_recommendations.json", {})
+
+    # Tracking is not a new recommendation run.  Preserve saved_at / execution
+    # context / candidate diagnosis.  Only merge metrics into recommendations
+    # when the list belongs to the same recommendation date.
+    latest_payload, latest_load_msgs = load_named_json_permanent("godpick_latest_recommendations.json", {})
+    messages.extend(["最新推薦讀取｜" + str(x) for x in (latest_load_msgs or [])[-4:]])
     latest_payload = dict(latest_payload) if isinstance(latest_payload, dict) else {}
-    latest_payload["saved_at"] = _now_text()
-    latest_payload["recommendations"] = list_rows
-    latest_report = save_named_json_permanent("godpick_latest_recommendations.json", latest_payload)
-    messages.extend(["最新推薦快照｜" + x for x in latest_report.messages()])
+    list_dates = pd.to_datetime(pd.Series([r.get("推薦日期") for r in list_rows]), errors="coerce").dropna()
+    list_date = list_dates.max().strftime("%Y-%m-%d") if not list_dates.empty else ""
+    snapshot_date = _safe_str(latest_payload.get("recommendation_date"))[:10] or _safe_str(latest_payload.get("saved_at"))[:10]
+    latest_report_ok = True
+    if latest_payload and list_date and snapshot_date == list_date:
+        latest_payload["recommendations"] = list_rows
+        latest_payload["performance_updated_at"] = _now_text()
+        latest_payload["performance_update_owner"] = "10_推薦清單"
+        latest_report = save_named_json_permanent("godpick_latest_recommendations.json", latest_payload)
+        latest_report_ok = bool(latest_report.permanent_ok)
+        messages.extend(["最新推薦績效增量｜" + x for x in latest_report.messages()])
+    else:
+        messages.append(
+            f"最新推薦快照未改寫：tracking清單日期={list_date or '未取得'}；"
+            f"推薦快照日期={snapshot_date or '未取得'}。避免把舊績效追蹤冒充新一輪推薦。"
+        )
+
     st.session_state[_k("last_sync_msgs")] = messages
-    return bool(rec_report.permanent_ok and list_report.permanent_ok and latest_report.permanent_ok), messages
-
-
-
+    # Local authority preservation is mandatory; remote list/snapshot failures
+    # are surfaced instead of silently declaring full success.
+    return bool(rec_report.local_ok and list_report.permanent_ok and latest_report_ok), messages
 
 def _recommend_sources_signature_v171() -> str:
     parts = []
