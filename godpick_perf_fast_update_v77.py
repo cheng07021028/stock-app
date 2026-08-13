@@ -35,8 +35,11 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 
-PERF_FAST_UPDATE_VERSION = "v171_container_safe_fair_batch_20260727"
+PERF_FAST_UPDATE_VERSION = "v191_h9_execution_truth_20260813"
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
+# H9 keeps the published retest-zone semantics but separates the theoretical
+# support reference from the OHLC-verifiable execution price.
+ENTRY_TOLERANCE_PCT = 1.5
 DEFAULT_JSON_FILES = [
     "godpick_records.json",
     "godpick_calibration_samples.json",
@@ -425,12 +428,96 @@ def _breakout_confirmation_meta(high: float, low: float, close: float, trigger: 
     return {"level": "H｜守價未失效待確認", "quality": 68.0 if retention >= 0.60 else 58.0 if retention >= 0.45 else 48.0, "retention": retention}
 
 
+def _tradable_buy_limit_fill(session: dict[str, Any], limit_price: float) -> tuple[float | None, str]:
+    """Return a fill that actually existed inside the published OHLC range.
+
+    H9 truth rule: a support/pullback reference is *not* a fill simply because
+    price came within 1.5%.  A buy-limit can fill only if the session traded at
+    or through the limit.  If the market gaps fully below the limit, the open is
+    a real observable price and is used as a conservative/verifiable fill.
+    """
+    low = _safe_float(session.get("最低價"))
+    high = _safe_float(session.get("最高價"))
+    open_px = _safe_float(session.get("開盤價"))
+    if low is None or high is None or limit_price <= 0:
+        return None, "OHLC不足，無法驗證成交"
+    limit_price = float(limit_price)
+    # Never touched the limit: no hypothetical fill below the day's low.
+    if low > limit_price + 1e-9:
+        return None, "參考價低於當日最低價，未實際成交"
+    # The printed limit was traded inside the day's range.
+    if high + 1e-9 >= limit_price:
+        return limit_price, "限價實際觸及"
+    # Whole session traded below the buy limit.  A resting buy-limit would fill
+    # at/near the opening auction; use the observable open, never a non-traded
+    # theoretical limit above the day's high.
+    if open_px is not None and low - 1e-9 <= open_px <= high + 1e-9 and open_px <= limit_price + 1e-9:
+        return float(open_px), "跳空低開，採實際開盤成交價"
+    return None, "參考價不在可驗證成交區間"
+
+
+def _tradable_buy_zone_fill(session: dict[str, Any], reference_price: float, tolerance_pct: float = ENTRY_TOLERANCE_PCT) -> tuple[float | None, str]:
+    """Resolve a tradable fill for a published pullback/support *zone*.
+
+    The legacy engine intentionally treated prices within 1.5% above a support
+    reference as a valid retest.  H9 keeps that strategy semantics, but the fill
+    must be a price the market actually crossed.  When price falls from above
+    into the zone, execution is the zone's upper boundary; when the session opens
+    already inside the zone, execution is the observable open.  The lower
+    theoretical support is never used if the market did not trade there.
+    """
+    low = _safe_float(session.get("最低價"))
+    high = _safe_float(session.get("最高價"))
+    open_px = _safe_float(session.get("開盤價"))
+    if low is None or high is None or reference_price <= 0:
+        return None, "OHLC不足，無法驗證回測帶成交"
+    ref = float(reference_price)
+    upper = ref * (1.0 + max(0.0, float(tolerance_pct or 0.0)) / 100.0)
+    if low > upper + 1e-9:
+        return None, "尚未進入回測容許帶"
+    # Open already in/below the zone: the opening auction is the first observable
+    # tradable price, so never back-fill a nicer theoretical support.
+    if open_px is not None and low - 1e-9 <= open_px <= high + 1e-9 and open_px <= upper + 1e-9:
+        return float(open_px), "開盤已進入回測容許帶，採實際開盤價"
+    # Price traded down from above and crossed the upper edge of the published
+    # zone.  That boundary is within the day's OHLC and is a conservative first
+    # executable price, unlike using the untouched lower support reference.
+    if low - 1e-9 <= upper <= high + 1e-9:
+        return float(upper), f"回測容許帶上緣{float(tolerance_pct):.1f}%實際觸及"
+    return None, "回測容許帶不在可驗證成交區間"
+
+
+def _tradable_buy_stop_fill(session: dict[str, Any], trigger_price: float) -> tuple[float | None, str]:
+    """Return observable buy-stop execution price after trigger touch.
+
+    If the market gaps above the stop, execution cannot be pretended at the old
+    trigger; use the actual open.  Otherwise the trigger itself traded in-range.
+    """
+    low = _safe_float(session.get("最低價"))
+    high = _safe_float(session.get("最高價"))
+    open_px = _safe_float(session.get("開盤價"))
+    if low is None or high is None or trigger_price <= 0 or high + 1e-9 < trigger_price:
+        return None, "突破價未觸及"
+    trigger_price = float(trigger_price)
+    if open_px is not None and open_px >= trigger_price - 1e-9:
+        if low - 1e-9 <= open_px <= high + 1e-9:
+            return float(open_px), "跳空越過觸發價，採實際開盤價"
+    if low - 1e-9 <= trigger_price <= high + 1e-9:
+        return trigger_price, "突破價實際觸及"
+    return None, "觸發價不在可驗證成交區間"
+
+
+def _event_date_key(event: dict[str, Any] | None) -> str:
+    return _safe_str((event or {}).get("date")) or "9999-12-31"
+
+
 def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], rec_date: str,
                             base_price: float, rec_factor: float) -> dict[str, Any]:
     after = _trading_rows_after(history, rec_date)
     result: dict[str, Any] = {
         "status": "未觸發｜不計交易勝負", "path": "等待條件", "date": "", "executable": False,
         "entry_price": None, "entry_adj": None, "quality": 50.0, "trigger_row": None,
+        "theoretical_entry_price": None, "fill_source": "", "fill_verified": False,
     }
     if not after:
         return result
@@ -472,22 +559,27 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
             # 守價回測只能發生在前一個交易日以前已完成突破後。
             # 當日同時碰到突破價與守價價時，OHLC 無法知道先後順序，必須交由
             # breakout_event 以突破價計算，禁止用較低守價價產生回看式漂亮績效。
-            if confirmed_before and low <= ref * 1.015:
-                if low >= ref * 0.975 and close >= ref:
+            if confirmed_before and low <= ref * (1.0 + ENTRY_TOLERANCE_PCT / 100.0) + 1e-9:
+                fill, fill_source = _tradable_buy_zone_fill(session, ref)
+                if low >= ref * 0.975 and close >= ref and fill is not None:
                     factor = _row_factor(session)
                     return {"status": "守價回測成立｜納入可執行績效", "path": "觸發守價回測", "date": session["日期"],
-                            "executable": True, "entry_price": ref, "entry_adj": ref * factor,
+                            "executable": True, "entry_price": fill, "entry_adj": fill * factor,
+                            "theoretical_entry_price": ref, "fill_source": fill_source, "fill_verified": True,
                             "quality": 91.0 if close >= ref * 1.01 else 84.0, "trigger_row": session,
                             "guard_price": ref, "breakout_price": trig}
                 if low < ref * 0.975 and close < ref:
                     return {"status": "守價回測跌破｜取消交易", "path": "觸發守價回測", "date": session["日期"],
-                            "executable": False, "entry_price": ref, "entry_adj": None,
+                            "executable": False, "entry_price": fill, "entry_adj": None,
+                            "theoretical_entry_price": ref, "fill_source": fill_source, "fill_verified": bool(fill is not None),
                             "quality": 24.0, "trigger_row": session,
                             "guard_price": ref, "breakout_price": trig}
             if breakout_attempt:
+                fill, fill_source = _tradable_buy_stop_fill(session, trig)
                 if close + 1e-9 < ref:
-                    return {"status": "假突破失守｜取消交易", "path": "突破確認", "date": session["日期"],
-                            "executable": False, "entry_price": trig, "entry_adj": None,
+                    return {"status": "觸發後失守｜假突破取消交易", "path": "突破確認", "date": session["日期"],
+                            "executable": False, "entry_price": fill, "entry_adj": None,
+                            "theoretical_entry_price": trig, "fill_source": fill_source, "fill_verified": bool(fill is not None),
                             "quality": 28.0, "trigger_row": session,
                             "guard_price": ref, "breakout_price": trig}
                 confirmed_before = True
@@ -504,15 +596,18 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
             guard = _level_for_row(hold if hold is not None else breakout * 0.985, rec_factor, session)
             if high + 1e-9 >= trig:
                 meta = _breakout_confirmation_meta(high, low, close, trig, guard)
-                if close + 1e-9 >= guard:
+                fill, fill_source = _tradable_buy_stop_fill(session, trig)
+                if close + 1e-9 >= guard and fill is not None:
                     factor = _row_factor(session)
                     return {"status": "觸發且守價｜納入可執行績效", "path": "突破確認", "date": session["日期"],
-                            "executable": True, "entry_price": trig, "entry_adj": trig * factor,
+                            "executable": True, "entry_price": fill, "entry_adj": fill * factor,
+                            "theoretical_entry_price": trig, "fill_source": fill_source, "fill_verified": True,
                             "quality": meta["quality"], "trigger_row": session,
                             "guard_price": guard, "breakout_price": trig,
                             "confirmation_level": meta["level"], "close_retention": meta["retention"]}
-                return {"status": "假突破失守｜取消交易", "path": "突破確認", "date": session["日期"],
-                        "executable": False, "entry_price": trig, "entry_adj": None,
+                return {"status": "觸發後失守｜假突破取消交易", "path": "突破確認", "date": session["日期"],
+                        "executable": False, "entry_price": fill, "entry_adj": None,
+                        "theoretical_entry_price": trig, "fill_source": fill_source, "fill_verified": bool(fill is not None),
                         "quality": meta["quality"], "trigger_row": session,
                         "guard_price": guard, "breakout_price": trig,
                         "confirmation_level": meta["level"], "close_retention": meta["retention"]}
@@ -525,15 +620,19 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
             low = _safe_float(session.get("最低價"), 0.0) or 0.0
             close = _safe_float(session.get("收盤價"), 0.0) or 0.0
             ref = _level_for_row(pullback, rec_factor, session)
-            # 觸碰參考價上方 1.5% 內，即進入承接檢查。
-            if low <= ref * 1.015:
-                if low >= ref * 0.975 and close >= ref:
+            # H9：保留既有 1.5% 回測容許帶，但成交價必須落在真實 OHLC
+            # 可驗證區間；不能再把尚未交易到的 ref 當成漂亮成交價。
+            if low <= ref * (1.0 + ENTRY_TOLERANCE_PCT / 100.0) + 1e-9:
+                fill, fill_source = _tradable_buy_zone_fill(session, ref)
+                if low >= ref * 0.975 and close >= ref and fill is not None:
                     factor = _row_factor(session)
                     return {"status": "回測承接成立｜納入可執行績效", "path": "回測承接", "date": session["日期"],
-                            "executable": True, "entry_price": ref, "entry_adj": ref * factor,
+                            "executable": True, "entry_price": fill, "entry_adj": fill * factor,
+                            "theoretical_entry_price": ref, "fill_source": fill_source, "fill_verified": True,
                             "quality": 88.0 if close >= ref * 1.01 else 80.0, "trigger_row": session}
                 return {"status": "回測跌破｜取消交易", "path": "回測承接", "date": session["日期"],
-                        "executable": False, "entry_price": ref, "entry_adj": None,
+                        "executable": False, "entry_price": fill, "entry_adj": None,
+                        "theoretical_entry_price": ref, "fill_source": fill_source, "fill_verified": bool(fill is not None),
                         "quality": 25.0, "trigger_row": session}
         return None
 
@@ -547,11 +646,17 @@ def _evaluate_entry_trigger(out: Dict[str, Any], history: list[dict[str, Any]], 
     primary = route_fns[0]()
     if primary:
         return primary
-    # 備用路徑只採用真正成立的交易；備用途徑失敗不應覆蓋尚未觸發的主策略。
+    # H9：主路徑尚未成立時，備用途徑若「真的碰價但失守」也是真實市場事件，
+    # 不能把它丟掉後寫成未觸發。收集所有備用事件並採最早發生者，避免
+    # 看過較早失敗後再用較晚成功回填成漂亮交易（look-ahead bias）。
+    alternates: list[dict[str, Any]] = []
     for fn in route_fns[1:]:
         alternate = fn()
-        if alternate and alternate.get("executable"):
-            return alternate
+        if alternate:
+            alternates.append(alternate)
+    if alternates:
+        alternates.sort(key=_event_date_key)
+        return alternates[0]
     return result
 
 
@@ -718,6 +823,9 @@ def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: L
     out["進場評估路徑"] = event.get("path")
     out["是否納入可執行績效"] = bool(event.get("executable"))
     out["執行基準價"] = round(float(event["entry_price"]), 4) if event.get("entry_price") else None
+    out["理論進場參考價"] = round(float(event["theoretical_entry_price"]), 4) if event.get("theoretical_entry_price") else None
+    out["執行價來源"] = _safe_str(event.get("fill_source"))
+    out["執行價可成交驗證"] = bool(event.get("fill_verified"))
     out["觸發訊號品質分"] = round(float(event.get("quality", 50.0)), 1)
     out.update(_execution_returns(history, event, track_days))
     out.update(_daily_execution_diagnostics(history, rec_date, base_adjusted, event))

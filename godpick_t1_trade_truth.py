@@ -28,7 +28,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v188_20260812"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h9_20260813"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -149,15 +149,55 @@ def _normalize_market(v: Any) -> str:
     return "上市"
 
 
+def _original_recommendation_date(row: dict[str, Any]) -> str:
+    return _date(row.get("原始推薦日期") or row.get("推薦日期") or row.get("建立日期") or row.get("建立時間") or row.get("K線最後交易日"))
+
+
+def _recommendation_date(row: dict[str, Any]) -> str:
+    """Return the daily decision cohort date, not merely first-seen date.
+
+    H9 rows use the explicit batch/run date.  For legacy Page07 rows created by
+    the old builder, ``推薦日期`` could accidentally retain the candidate's
+    first-seen date while ``建立時間`` still recorded the real scan/save date.
+    A tightly bounded (1-3 day) Page07-only repair lets historical T+1 truth
+    recover those daily cohorts without rewriting the record authority itself.
+    """
+    explicit = _date(row.get("推薦批次日期") or row.get("run_date"))
+    if explicit:
+        return explicit
+
+    legacy = _date(row.get("推薦日期"))
+    created = _date(row.get("建立時間") or row.get("建立日期"))
+    source = _s(row.get("紀錄來源") or row.get("推薦執行來源")).lower()
+    auto_flag = _s(row.get("自動記錄")).lower()
+    page07_like = ("07" in source) or ("股神推薦" in source) or auto_flag in {"是", "true", "1", "yes", "y"}
+    if legacy and created and page07_like:
+        try:
+            lag_days = (date.fromisoformat(created) - date.fromisoformat(legacy)).days
+        except Exception:
+            lag_days = 0
+        if 1 <= lag_days <= 3:
+            return created
+
+    return legacy or created or _date(row.get("K線最後交易日"))
+
+
+def _run_id(row: dict[str, Any]) -> str:
+    return _s(row.get("推薦執行ID") or row.get("run_id") or row.get("scan_run_id"))
+
+
 def _business_key(row: dict[str, Any]) -> str:
     code = "".join(ch for ch in _s(row.get("股票代號") or row.get("代號")) if ch.isdigit())[:4]
-    rec = _date(row.get("推薦日期") or row.get("建立日期") or row.get("建立時間") or row.get("K線最後交易日"))
+    rec = _recommendation_date(row)
     role = _s(row.get("正式推薦分區") or row.get("推薦角色") or row.get("盤中雷達優先級") or row.get("SuperAI進場狀態"))
     return f"{rec}|{code}|{role}"
 
 
-def _recommendation_date(row: dict[str, Any]) -> str:
-    return _date(row.get("推薦日期") or row.get("建立日期") or row.get("建立時間") or row.get("K線最後交易日"))
+def _cohort_key(row: dict[str, Any]) -> str:
+    # One truth sample per daily decision cohort/code/role.  run_id is preserved
+    # as provenance but deliberately not part of the sample key, so repeated
+    # manual reruns on the same day cannot inflate learning sample counts.
+    return _business_key(row)
 
 
 def _eligible_record(row: dict[str, Any], today: date, max_age_days: int) -> bool:
@@ -326,7 +366,14 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
     return {
         "version": TRUTH_VERSION,
         "business_key": _business_key(original),
+        "cohort_key": _cohort_key(original),
         "推薦日期": rec,
+        "推薦批次日期": rec,
+        "原始推薦日期": _original_recommendation_date(original),
+        "推薦執行ID": _run_id(original),
+        "推薦執行來源": _s(original.get("推薦執行來源") or original.get("execution_owner")),
+        "推薦觸發方式": _s(original.get("推薦觸發方式") or original.get("execution_trigger")),
+        "推薦執行版本": _s(original.get("推薦執行版本") or original.get("本輪推薦版本")),
         "股票代號": code,
         "股票名稱": _s(original.get("股票名稱") or original.get("名稱")),
         "市場別": _normalize_market(original.get("市場別") or original.get("市場")),
@@ -353,6 +400,9 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "進場觸發日期": _s(updated.get("進場觸發日期")),
         "是否納入可執行績效": bool(updated.get("是否納入可執行績效")),
         "執行基準價": _f(updated.get("執行基準價")),
+        "理論進場參考價": _f(updated.get("理論進場參考價")),
+        "執行價來源": _s(updated.get("執行價來源")),
+        "執行價可成交驗證": bool(updated.get("執行價可成交驗證")),
         "觸發訊號品質分": _f(updated.get("觸發訊號品質分")),
         "觸發當日最高報酬%": _f(updated.get("觸發當日最高報酬%")),
         "觸發當日最大回撤%": _f(updated.get("觸發當日最大回撤%")),
@@ -363,6 +413,7 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "Entry結果": _entry_result(updated),
         "Risk結果": _risk_result(updated),
         "是否假突破": bool("假突破" in _s(updated.get("進場觸發狀態"))),
+        "是否觸發後失守": bool("觸發後失守" in _s(updated.get("進場觸發狀態"))),
         "T1成熟": bool(_date(next_session.get("日期") or next_session.get("date"))),
         "績效行情日期": _s(updated.get("績效行情日期")),
         "績效資料來源": _s(updated.get("績效資料來源") or quote.get("source")),
@@ -418,7 +469,7 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
         "executable_win_rate_pct": round(sum(1 for x in executable if x > 0) / len(executable) * 100.0, 2) if executable else None,
         "avg_executable_ret_pct": round(sum(executable) / len(executable), 4) if executable else None,
         "bins": bins,
-        "policy": "T1 selection outcome calibrates probability; untriggered radar is never counted as a trade win",
+        "policy": "H9: selection calibrates probability; only OHLC-verifiable fills enter executable performance; touched-then-failed signals are failures, never untriggered wins",
     }
 
 
@@ -487,13 +538,15 @@ def refresh_t1_trade_truth(
             elif err:
                 failures.append(err)
 
-    # Merge by immutable business key.  Newer truth replaces the same event only;
-    # historical events are never deleted simply because this refresh was partial.
+    # H9 merges by daily cohort, not by first-seen identity or run invocation.
+    # Newer truth replaces the same date/code/role only; different dates remain
+    # separate learning samples, while repeated reruns on one date do not inflate
+    # sample counts.  Legacy rows without cohort metadata are mapped compatibly.
     old_payload = _read_json(TRUTH_FILE, {})
     old_rows = _rows(old_payload)
-    merged = {(_s(r.get("business_key")) or _business_key(r)): r for r in old_rows if isinstance(r, dict)}
+    merged = {(_s(r.get("cohort_key")) or _cohort_key(r)): r for r in old_rows if isinstance(r, dict)}
     for r in processed:
-        merged[_s(r.get("business_key")) or _business_key(r)] = r
+        merged[_s(r.get("cohort_key")) or _cohort_key(r)] = r
     truth_rows = list(merged.values())
     truth_rows.sort(key=lambda r: (_s(r.get("推薦日期")), _s(r.get("股票代號")), _s(r.get("推薦角色"))))
     _sector_alpha(truth_rows)

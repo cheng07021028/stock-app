@@ -602,6 +602,13 @@ GODPICK_RECORD_COLUMNS = [
     "賣出目標2",
     "推薦日期",
     "推薦時間",
+    "推薦批次日期",
+    "推薦批次時間",
+    "推薦執行ID",
+    "推薦執行來源",
+    "推薦觸發方式",
+    "推薦執行版本",
+    "原始推薦日期",
     "建立時間",
     "更新時間",
     "目前狀態",
@@ -618,6 +625,9 @@ GODPICK_RECORD_COLUMNS = [
     "是否達目標2",
     "持有天數",
     "模式績效標籤",
+    "理論進場參考價",
+    "執行價來源",
+    "執行價可成交驗證",
     "備註",
 ]
 
@@ -2229,21 +2239,44 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         scan_report = {}
 
     saved_at_now = _now_text()
+    execution_context = st.session_state.get(_k("recommend_execution_context_v191"), {})
+    if not isinstance(execution_context, dict):
+        execution_context = {}
+    _snapshot_run_id_h9 = _safe_str(execution_context.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id")))
+    if not _snapshot_run_id_h9:
+        _snapshot_run_id_h9 = f"gprun_{saved_at_now.replace(':','').replace(' ','_')}_{time.time_ns() % 100000000:08d}"
+    _snapshot_run_date_h9 = _safe_str(execution_context.get("run_date"))[:10] or saved_at_now[:10]
+    execution_context.update({"run_id": _snapshot_run_id_h9, "run_date": _snapshot_run_date_h9})
+    st.session_state[_k("recommend_execution_context_v191")] = execution_context
+    st.session_state[_k("scan_run_id")] = _snapshot_run_id_h9
+    # H9 stamps every snapshot row with the current daily decision cohort.  This
+    # prevents carry-forward candidates from being mistaken for their first-seen
+    # date when Module10/T+1 later reviews "yesterday's" exact batch.
+    for _frame_h9 in (candidate_df, action_df):
+        if isinstance(_frame_h9, pd.DataFrame) and not _frame_h9.empty:
+            if "原始推薦日期" not in _frame_h9.columns:
+                _frame_h9["原始推薦日期"] = _frame_h9.get("推薦日期", "")
+            _frame_h9["推薦批次日期"] = _snapshot_run_date_h9
+            _frame_h9["推薦批次時間"] = saved_at_now
+            _frame_h9["推薦執行ID"] = _snapshot_run_id_h9
+            _frame_h9["推薦執行來源"] = _safe_str(execution_context.get("owner")) or "07_股神推薦"
+            _frame_h9["推薦觸發方式"] = _safe_str(execution_context.get("trigger")) or "手動操作"
+            _frame_h9["推薦執行版本"] = _safe_str(execution_context.get("automation_version")) or "V191-H9"
+
     candidate_records = _df_to_records_for_json(candidate_df)
     recommendation_records = _df_to_records_for_json(action_df)
     kline_date = _max_row_date_v173(candidate_records + recommendation_records, [
         "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
     ])
-    execution_context = st.session_state.get(_k("recommend_execution_context_v191"), {})
-    if not isinstance(execution_context, dict):
-        execution_context = {}
     payload = {
         "saved_at": saved_at_now,
         "recommendation_date": saved_at_now[:10],
         "execution_context": dict(execution_context),
         "execution_owner": _safe_str(execution_context.get("owner")) or "07_股神推薦",
         "execution_trigger": _safe_str(execution_context.get("trigger")) or "手動操作",
-        "scan_run_id": _safe_str(st.session_state.get(_k("scan_run_id"))) or f"scan_{saved_at_now.replace(':','').replace(' ','_')}",
+        "scan_run_id": _safe_str(execution_context.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id"))) or f"scan_{saved_at_now.replace(':','').replace(' ','_')}",
+        "run_id": _safe_str(execution_context.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id"))),
+        "run_date": _safe_str(execution_context.get("run_date"))[:10] or saved_at_now[:10],
         "expected_trade_date": _expected_latest_trade_date_v173().strftime("%Y-%m-%d"),
         "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
         "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
@@ -2282,6 +2315,8 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         "execution_owner": payload.get("execution_owner", "07_股神推薦"),
         "execution_trigger": payload.get("execution_trigger", "手動操作"),
         "scan_run_id": payload.get("scan_run_id", ""),
+        "run_id": payload.get("run_id", payload.get("scan_run_id", "")),
+        "run_date": payload.get("run_date", payload.get("recommendation_date", "")),
         "expected_trade_date": payload.get("expected_trade_date", ""),
         "kline_date": payload.get("kline_date", ""),
         "weights": payload.get("weights", {}),
@@ -5398,12 +5433,12 @@ def _ensure_godpick_record_columns(df: pd.DataFrame) -> pd.DataFrame:
         "推薦總分", "技術結構分數", "起漲前兆分數", "起漲等級", "交易可行分數", "類股熱度分數",
         "強勢族群等級", "族群資金流分數", "族群輪動狀態", "同族群強勢比例", "族群策略建議",
         "同類股領先幅度", "推薦價格", "停損價", "賣出目標1", "賣出目標2",
-        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數", "大盤橋接分數"
+        "實際買進價", "實際賣出價", "實際報酬%", "最新價", "損益金額", "損益幅%", "持有天數", "大盤橋接分數", "理論進場參考價", "執行基準價"
     ]
     for c in numeric_cols:
         x[c] = pd.to_numeric(x[c], errors="coerce")
 
-    bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2"]
+    bool_cols = ["是否領先同類股", "是否已實際買進", "是否達停損", "是否達目標1", "是否達目標2", "執行價可成交驗證"]
     for c in bool_cols:
         x[c] = x[c].fillna(False).map(lambda v: str(v).strip().lower() in {"true", "1", "yes", "y", "是"})
 
@@ -12043,9 +12078,12 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     if not codes:
         return []
     work = rec_df[rec_df["股票代號"].astype(str).map(_normalize_code).isin(codes)].copy()
-    rec_date = _now_date_text()
-    rec_time = _now_time_text()
-    build_time = _now_text()
+    _ctx_h9 = st.session_state.get(_k("recommend_execution_context_v191"), {})
+    if not isinstance(_ctx_h9, dict):
+        _ctx_h9 = {}
+    build_time = _safe_str(_ctx_h9.get("started_at")) or _now_text()
+    rec_date = _safe_str(_ctx_h9.get("run_date"))[:10] or build_time[:10] or _now_date_text()
+    rec_time = build_time[11:19] if len(build_time) >= 19 else _now_time_text()
     rows: list[dict[str, Any]] = []
     for _, r in work.iterrows():
         raw = r.to_dict()
@@ -12055,6 +12093,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
         level = _v159_record_level_from_row(raw)
         latest = _safe_float(raw.get("最新價"), _safe_float(raw.get("推薦價格")))
         stop = _safe_float(raw.get("實戰停損參考"), _safe_float(raw.get("停損參考"), _safe_float(raw.get("停損價"))))
+        raw["原始推薦日期"] = _safe_str(raw.get("原始推薦日期")) or _safe_str(raw.get("推薦日期"))
         raw.update({
             "record_id": _create_record_id(code, rec_date, rec_time, _safe_str(raw.get("推薦模式")) or "股神推薦"),
             "股票代號": code,
@@ -12118,8 +12157,21 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     _exec_ctx_v191 = st.session_state.get(_k("recommend_execution_context_v191"), {})
     if not isinstance(_exec_ctx_v191, dict):
         _exec_ctx_v191 = {}
+    _run_started_v191_h9 = _safe_str(_exec_ctx_v191.get("started_at")) or _now_text()
+    _run_id_v191_h9 = _safe_str(_exec_ctx_v191.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id")))
+    if not _run_id_v191_h9:
+        _run_id_v191_h9 = f"gprun_{_run_started_v191_h9.replace(':','').replace(' ','_')}_{time.time_ns() % 100000000:08d}"
+    _run_date_v191_h9 = _safe_str(_exec_ctx_v191.get("run_date"))[:10] or _run_started_v191_h9[:10] or _now_date_text()
+    _exec_ctx_v191.update({"run_id": _run_id_v191_h9, "run_date": _run_date_v191_h9})
+    st.session_state[_k("recommend_execution_context_v191")] = _exec_ctx_v191
+    st.session_state[_k("scan_run_id")] = _run_id_v191_h9
+    action["原始推薦日期"] = action.get("原始推薦日期", action.get("推薦日期", ""))
+    action["推薦批次日期"] = _run_date_v191_h9
+    action["推薦批次時間"] = _run_started_v191_h9
+    action["推薦執行ID"] = _run_id_v191_h9
     action["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
     action["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
+    action["推薦執行版本"] = _safe_str(_exec_ctx_v191.get("automation_version")) or "V191-H9"
     action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
 
     def _sample_meta(row: pd.Series) -> pd.Series:
@@ -13836,8 +13888,11 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
         "owner": "07_股神推薦",
         "trigger": "V191中央自動排程",
         "started_at": started_at,
-        "automation_version": "V191-H5",
+        "run_date": started_at[:10],
+        "run_id": f"gprun_{started_at.replace(':','').replace(' ','_')}_{time.time_ns() % 100000000:08d}",
+        "automation_version": "V191-H9",
     }
+    st.session_state[_k("scan_run_id")] = execution_context["run_id"]
     st.session_state[_k("recommend_execution_context_v191")] = execution_context
     notes: list[str] = []
     try:
@@ -14538,12 +14593,17 @@ def main():
     hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh or resume_scan_btn:
+        _manual_started_v191_h9 = _now_text()
+        _manual_run_id_v191_h9 = f"gprun_{_manual_started_v191_h9.replace(':','').replace(' ','_')}_{time.time_ns() % 100000000:08d}"
         st.session_state[_k("recommend_execution_context_v191")] = {
             "owner": "07_股神推薦",
             "trigger": "手動斷點續掃" if resume_scan_btn else ("手動重新推薦" if submit_refresh else "手動開始推薦"),
-            "started_at": _now_text(),
-            "automation_version": "V191-H5",
+            "started_at": _manual_started_v191_h9,
+            "run_date": _manual_started_v191_h9[:10],
+            "run_id": _manual_run_id_v191_h9,
+            "automation_version": "V191-H9",
         }
+        st.session_state[_k("scan_run_id")] = _manual_run_id_v191_h9
         previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
             universe_items=universe_items,
