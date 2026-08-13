@@ -38,6 +38,7 @@ except Exception:
 # <<< APP_AUTH_GUARD_V84
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 import base64
 import io
@@ -564,7 +565,7 @@ def _normalize_code(v: Any) -> str:
 
 
 def _now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _github_config() -> dict[str, str]:

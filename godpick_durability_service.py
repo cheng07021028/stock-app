@@ -25,6 +25,7 @@ import copy
 import hashlib
 import json
 import threading
+import time
 
 DURABILITY_VERSION = "godpick_durability_v191_20260813_hotfix3"
 OUTBOX_FILE = "godpick_durability_outbox.json"
@@ -368,7 +369,114 @@ def retry_failed_durability(*, base_dir: str | Path | None = None) -> list[str]:
     return messages
 
 
-def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bool = True) -> dict[str, Any]:
+_REMOTE_STATE_PROBE_CACHE: dict[tuple[str, str], tuple[float, bool, str]] = {}
+
+def _probe_remote_state_hashes(rows: list[dict[str, Any]], *, ttl_seconds: float = 90.0) -> dict[str, tuple[bool, str]]:
+    """Verify remote durability from the small GitHub sync-state files.
+
+    Outbox state is process-local and may disappear on Streamlit rerun/redeploy.
+    H7 therefore treats a remote sync-state whose payload_hash equals the local
+    authority hash as durable proof.  The payload itself was written before its
+    state file by ``save_named_json_permanent``, so this avoids the old endless
+    "16 queued / 17 pending" loop without downloading every large payload.
+    """
+    candidates: list[tuple[str, str, str]] = []
+    result: dict[str, tuple[bool, str]] = {}
+    now_ts = time.time()
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("exists") or row.get("remote_confirmed"):
+            continue
+        path_name = str(row.get("file") or "")
+        payload_hash = str(row.get("payload_hash") or "")
+        if not path_name or not payload_hash:
+            continue
+        state_name = _state_file_for(path_name)
+        ck = (state_name, payload_hash)
+        cached = _REMOTE_STATE_PROBE_CACHE.get(ck)
+        if cached and now_ts - cached[0] <= ttl_seconds:
+            result[path_name] = (cached[1], cached[2])
+        else:
+            candidates.append((path_name, state_name, payload_hash))
+    if not candidates:
+        return result
+    def _one(item: tuple[str, str, str]):
+        path_name, state_name, payload_hash = item
+        ok = False; msg = ""
+        try:
+            from godpick_persistence_service import read_github_json
+            remote_state, rmsg = read_github_json(state_name, {})
+            remote_hash = str((remote_state or {}).get("payload_hash") or "") if isinstance(remote_state, dict) else ""
+            ok = bool(remote_hash and remote_hash == payload_hash)
+            msg = f"GitHub state {'same-hash' if ok else 'hash-mismatch/missing'}｜{rmsg}"
+        except Exception as exc:
+            msg = f"GitHub state probe exception:{exc}"
+        _REMOTE_STATE_PROBE_CACHE[(state_name, payload_hash)] = (time.time(), ok, msg)
+        return path_name, ok, msg
+    workers = max(1, min(6, len(candidates)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="godpick-durable-probe") as ex:
+        for path_name, ok, msg in ex.map(_one, candidates):
+            result[path_name] = (bool(ok), str(msg))
+    return result
+
+
+def sync_unconfirmed_critical_bounded(*, base_dir: str | Path | None = None, max_files: int = 6, time_budget_seconds: float = 35.0) -> dict[str, Any]:
+    """Synchronously converge a bounded number of unconfirmed critical files.
+
+    Unlike the old single-thread background queue, every successful item is
+    remote-confirmed before this function moves on.  A bounded batch keeps the
+    health job responsive and the next scheduler wake continues only remaining
+    files instead of re-queueing all of them forever.
+    """
+    base = Path(base_dir or _BASE)
+    max_files = max(1, min(int(max_files or 6), 12))
+    budget = max(5.0, min(float(time_budget_seconds or 35.0), 90.0))
+    before = audit_core_durability(base_dir=base, write_audit=False, verify_remote_states=True)
+    targets=[]
+    for row in before.get("rows", []) if isinstance(before, dict) else []:
+        if not isinstance(row, dict) or not row.get("critical") or not row.get("exists") or row.get("remote_confirmed"):
+            continue
+        path_name=str(row.get("file") or "")
+        meta=CORE_DURABLE_FILES.get(path_name,{})
+        if not path_name or bool(meta.get("skip_generic_migration")):
+            continue
+        targets.append(path_name)
+    attempted=0; confirmed=0; failed=0; messages=[]
+    started=time.perf_counter()
+    for path_name in targets:
+        if attempted >= max_files or time.perf_counter()-started >= budget:
+            break
+        payload=_read_json(path_name,None,base_dir=base)
+        if payload is None:
+            failed += 1; messages.append(f"{path_name}: local JSON讀取失敗"); continue
+        attempted += 1
+        try:
+            from godpick_persistence_service import save_named_json_permanent
+            report=save_named_json_permanent(path_name,payload)
+            ok=bool(getattr(report,"permanent_ok",False))
+            ph=_hash(payload)
+            _set_outbox(path_name,{
+                "status":"success" if ok else "failed", "payload_hash":ph,
+                "finished_at":_now(), "reason":"V191-H7 bounded durability convergence",
+                "message":"｜".join(str(x) for x in [getattr(report,"local_message",''),getattr(report,"github_message",''),getattr(report,"firestore_message",'')] if x)[:1500],
+            },base_dir=base)
+            if ok:
+                confirmed += 1; messages.append(f"{path_name}: remote confirmed")
+                # invalidate probe cache for the freshly-written state/hash
+                _REMOTE_STATE_PROBE_CACHE.pop((_state_file_for(path_name),ph),None)
+            else:
+                failed += 1; messages.append(f"{path_name}: permanent save incomplete")
+        except Exception as exc:
+            failed += 1; messages.append(f"{path_name}: sync exception:{exc}")
+    after=audit_core_durability(base_dir=base,write_audit=True,verify_remote_states=True)
+    remaining=max(int(after.get("critical_total",0) or 0)-int(after.get("critical_remote_confirmed",0) or 0),0)
+    return {
+        "attempted":attempted,"confirmed_this_run":confirmed,"failed_this_run":failed,
+        "remaining":remaining,"messages":messages,"audit":after,
+        "elapsed_seconds":round(time.perf_counter()-started,3),
+    }
+
+
+def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bool = True, verify_remote_states: bool = True) -> dict[str, Any]:
     base = Path(base_dir or _BASE)
     outbox = load_durability_outbox(base_dir=base)
     rows: list[dict[str, Any]] = []
@@ -439,6 +547,23 @@ def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bo
             "remote_confirmed": remote_confirmed,
             "status": status,
         })
+    # H7: process-local outbox is not durable proof across Streamlit reruns.
+    # Verify small remote sync-state hashes directly and promote confirmed rows.
+    if verify_remote_states:
+        probe = _probe_remote_state_hashes(rows)
+        for row in rows:
+            if not isinstance(row, dict) or row.get("remote_confirmed"):
+                continue
+            ok_probe, probe_msg = probe.get(str(row.get("file") or ""), (False, ""))
+            if ok_probe:
+                row["remote_confirmed"] = True
+                row["remote_status"] = "success-remote-state"
+                row["status"] = "REMOTE_CONFIRMED"
+                row["remote_probe"] = probe_msg
+            elif probe_msg:
+                row["remote_probe"] = probe_msg
+    critical_remote_confirmed = sum(1 for r in rows if isinstance(r,dict) and r.get("critical") and r.get("remote_confirmed"))
+
     audit = {
         "version": DURABILITY_VERSION,
         "generated_at": _now(),
@@ -458,5 +583,5 @@ def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bo
 __all__ = [
     "DURABILITY_VERSION", "CORE_DURABLE_FILES", "persist_json_async", "persist_json_permanent",
     "load_durability_outbox", "queue_existing_critical_for_migration",
-    "retry_failed_durability", "audit_core_durability",
+    "retry_failed_durability", "audit_core_durability", "sync_unconfirmed_critical_bounded",
 ]

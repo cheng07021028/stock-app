@@ -2098,6 +2098,67 @@ def _conditional_reference_rows(df: pd.DataFrame | None, *, max_rows: int = 8) -
     return candidates.drop(columns=["__conditional_reference_score"], errors="ignore").reset_index(drop=True)
 
 
+def _v191_actionable_tracking_frame(source_df: pd.DataFrame | None) -> tuple[pd.DataFrame, bool, list[str]]:
+    """Single-source actionable partition for snapshot/list/Page08 persistence.
+
+    H7 removes the previous split-brain behavior where Page08 selected R1 rows
+    from the full candidate diagnosis while the latest snapshot/Page10 list ran
+    the already-filtered display frame through governance a second time.  The
+    result could be ``08永久紀錄 2`` but ``recommendations=[]`` / Page10=0.
+    This helper is the one partition used by both outputs.
+    """
+    notes: list[str] = []
+    report = st.session_state.get(_k("scan_quality_report"), {})
+    formal_scan_ok = bool(isinstance(report, dict) and report.get("正式推薦可用", False))
+    work = source_df.copy() if isinstance(source_df, pd.DataFrame) else pd.DataFrame(source_df or [])
+    if work.empty or "股票代號" not in work.columns:
+        return pd.DataFrame(), formal_scan_ok, ["本輪候選為空，沒有可追蹤推薦。"]
+    try:
+        work = _phase93_single_source_decision_frame(work, work)
+    except Exception:
+        try:
+            work = canonicalize_final_partition(work) if callable(canonicalize_final_partition) else work.copy()
+        except Exception:
+            work = work.copy()
+    if "正式推薦分區" not in work.columns:
+        try:
+            work = apply_formal_recommendation_engine(work)
+        except Exception as exc:
+            return pd.DataFrame(), formal_scan_ok, [f"正式分區重算失敗：{exc}"]
+
+    bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+    radar_mask = bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
+    allowed = (formal_mask if formal_scan_ok else pd.Series([False] * len(work), index=work.index)) | radar_mask
+    action = work.loc[allowed].copy()
+    if action.empty:
+        if not formal_scan_ok:
+            notes.append("整體掃描未達正式可用；正式/A-不進追蹤清單，僅允許R1研究雷達。")
+        notes.append("本輪沒有正式/A-/R1可追蹤名單。")
+        return action, formal_scan_ok, notes
+
+    quality_keep: list[bool] = []
+    for _, row in action.iterrows():
+        if callable(assess_individual_sample_quality):
+            try:
+                eligible, _, _ = assess_individual_sample_quality(row)
+            except Exception:
+                eligible = True
+        else:
+            eligible = True
+        quality_keep.append(bool(eligible))
+    action = action.loc[pd.Series(quality_keep, index=action.index)].copy()
+    if action.empty:
+        notes.append("入選分區個股資料品質不足，沒有可追蹤名單。")
+        return action, formal_scan_ok, notes
+    action["股票代號"] = action["股票代號"].astype(str).map(_normalize_code)
+    action = action[action["股票代號"].astype(str).str.strip().ne("")].copy()
+    action = action.drop_duplicates(subset=["股票代號"], keep="first")
+    notes.append(f"H7單一行動分區：正式/A-/R1 共 {len(action)} 檔。")
+    return action.reset_index(drop=True), formal_scan_ok, notes
+
+
 def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decision: bool = False) -> pd.DataFrame:
     """Return a useful action/reference list without mixing in bad stocks.
 
@@ -2152,14 +2213,16 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     radar rows may enter module 10.  Observation and exclusion rows remain in the
     candidate diagnosis, not in the operational recommendation list.
     """
-    action_df = _operational_recommendation_rows(rec_df, refresh_decision=False)
-
     candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
     if not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         try:
-            candidate_df = build_candidate_diagnosis(action_df) if callable(build_candidate_diagnosis) else action_df.copy()
+            candidate_df = build_candidate_diagnosis(rec_df) if callable(build_candidate_diagnosis) else rec_df.copy()
         except Exception:
-            candidate_df = action_df.copy()
+            candidate_df = rec_df.copy() if isinstance(rec_df, pd.DataFrame) else pd.DataFrame()
+    # H7: latest snapshot + Page10 current list must use the exact same
+    # single-source formal/A-/R1 partition as Page08 auto-recording.
+    action_source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else rec_df
+    action_df, _formal_scan_ok_h7, _action_partition_notes_h7 = _v191_actionable_tracking_frame(action_source)
 
     scan_report = st.session_state.get(_k("scan_quality_report"), {})
     if not isinstance(scan_report, dict):
@@ -2260,7 +2323,9 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     except Exception:
         github_ok, github_msg = _write_json_to_github_path(GODPICK_LATEST_FILE, payload)
 
-    governed_list_df = _operational_recommendation_rows(action_df, refresh_decision=False)
+    # H7: do NOT govern ``action_df`` a second time.  Double-governance was the
+    # direct cause of Page08 recording R1 rows while Page10 was persisted as [].
+    governed_list_df = action_df.copy()
     list_payload = _df_to_records_for_json(governed_list_df)
     if isinstance(list_payload, list):
         fixed_rows = []
@@ -2297,6 +2362,7 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         f"候選診斷保存：{len(candidate_df) if isinstance(candidate_df, pd.DataFrame) else 0} 檔",
         f"本輪快照回讀驗證：{'成功' if verified else '失敗'}｜日期 {saved_at_now[:10]}｜K線 {payload.get('kline_date') or '未驗證'}",
         f"10推薦清單治理後：{len(list_payload) if isinstance(list_payload, list) else 0} 檔",
+        *[f"H7行動分區｜{x}" for x in (_action_partition_notes_h7 or [])],
         list_local_msg,
         list_github_msg,
     ]
@@ -5164,15 +5230,15 @@ def _fmt_seconds(sec: float) -> str:
 
 
 def _now_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _now_date_text() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
 
 
 def _now_time_text() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%H:%M:%S")
 
 
 def _create_record_id(code: str, rec_date: str, rec_time: str, mode: str) -> str:
@@ -12031,48 +12097,21 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
     K線、價格與成交資料完整即可保存，避免全域覆蓋率讓校正資料整批歸零。
     """
-    report = st.session_state.get(_k("scan_quality_report"), {})
-    formal_scan_ok = bool(isinstance(report, dict) and report.get("正式推薦可用", False))
-    if source_df is None or not isinstance(source_df, pd.DataFrame) or source_df.empty or "股票代號" not in source_df.columns:
-        return 0, ["本輪沒有可自動記錄的推薦資料。"]
-    try:
-        # 使用與畫面相同的唯一決策框架，確保重複推薦輪動校正、
-        # 資料新鮮度與正式分區全部先完成，再寫入權威紀錄。
-        work = _phase93_single_source_decision_frame(source_df, source_df)
-    except Exception:
-        try:
-            work = canonicalize_final_partition(source_df) if callable(canonicalize_final_partition) else source_df.copy()
-        except Exception:
-            work = source_df.copy()
-    if "正式推薦分區" not in work.columns:
-        try:
-            work = apply_formal_recommendation_engine(work)
-        except Exception as e:
-            return 0, [f"正式分區重算失敗，未自動記錄：{e}"]
-
-    bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
-    radar_mask = bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
-    allowed = (formal_mask if formal_scan_ok else pd.Series([False] * len(work), index=work.index)) | radar_mask
-    action = work.loc[allowed].copy()
+    action, formal_scan_ok, partition_notes = _v191_actionable_tracking_frame(source_df)
     if action.empty:
-        note = "；整體掃描未達正式可用，正式/A-不寫入" if not formal_scan_ok else ""
-        return 0, [f"本輪沒有正式、A-、R1、R1-M、R1-P 或 R1-RB 名單，不建立空白推薦紀錄{note}。"]
+        return 0, list(partition_notes or ["本輪沒有正式/A-/R1可自動記錄資料。"] )
 
-    quality_keep: list[bool] = []
     quality_notes: dict[str, tuple[str, str]] = {}
     for _, row in action.iterrows():
         code = _normalize_code(row.get("股票代號"))
         if callable(assess_individual_sample_quality):
-            eligible, reason, confidence = assess_individual_sample_quality(row)
+            try:
+                eligible, reason, confidence = assess_individual_sample_quality(row)
+            except Exception as exc:
+                eligible, reason, confidence = True, f"品質判定例外沿用：{exc}", "中"
         else:
             eligible, reason, confidence = True, "未載入個股品質服務，沿用既有判定", "中"
-        quality_keep.append(bool(eligible))
         quality_notes[code] = (reason, confidence)
-    action = action.loc[pd.Series(quality_keep, index=action.index)].copy()
-    if action.empty:
-        return 0, ["本輪入選分區的個股資料品質均不足，未寫入績效紀錄。"]
 
     action["紀錄來源"] = "07_股神推薦｜推薦完成自動記錄"
     action["自動記錄"] = "是"
@@ -12134,6 +12173,7 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     else:
         fallback_note = ""
     added, messages = _append_godpick_records(rows, force_duplicate=False)
+    messages = [*[f"H7行動分區｜{x}" for x in (partition_notes or [])], *messages]
     if fallback_note:
         messages = [fallback_note, *messages]
     if not formal_scan_ok:

@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260813_hotfix6_progress"
+VERSION = "godpick_auto_scheduler_v191_20260813_hotfix7_convergence"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -59,7 +59,7 @@ DEFAULT_JOB_OPTIONS = {
     "recommend_list_hits": {"max_rows": 300},
     "t1_truth": {"max_records": 500, "max_workers": 8},
     "feedback_learning": {},
-    "durability_retry": {},
+    "durability_retry": {"max_sync_per_run": 6, "time_budget_seconds": 35},
 }
 
 # Default is deliberately disabled until the user explicitly saves/enables it.
@@ -360,6 +360,34 @@ def _repair_failed_completed_keys(status: dict[str, Any]) -> int:
     return removed
 
 
+def _repair_future_completed_keys(status: dict[str, Any], now: datetime) -> int:
+    """Remove legacy non-FORCE completion keys that point to future slots.
+
+    H2 stopped creating these keys, but old bad keys can survive in runtime-data
+    and suppress tonight's real 20:25/20:55 jobs.  FORCE keys are diagnostic
+    history and are never touched.
+    """
+    completed=list(status.get("completed_run_keys",[]) or [])
+    if not completed:
+        return 0
+    repaired=[]; removed=0
+    for key in completed:
+        text=str(key or "")
+        if "|FORCE|" in text:
+            repaired.append(text); continue
+        try:
+            job, slot_text = text.split("|",1)
+            slot_dt=datetime.strptime(slot_text,"%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+        except Exception:
+            repaired.append(text); continue
+        if slot_dt > now + timedelta(minutes=1):
+            removed += 1
+            continue
+        repaired.append(text)
+    status["completed_run_keys"]=repaired[-1200:]
+    return removed
+
+
 def _checkpoint_runtime(status: dict[str, Any], history: list[dict[str, Any]], cfg: dict[str, Any], reason: str) -> None:
     """Persist after every job so a Streamlit rerun/process restart cannot erase progress."""
     history[:] = history[-int(cfg.get("history_keep",400)):]
@@ -409,6 +437,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
     now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()
     status.setdefault("version",VERSION); status.setdefault("jobs",{}); status.setdefault("completed_run_keys",[])
     repaired_count=_repair_failed_completed_keys(status)
+    repaired_future_count=_repair_future_completed_keys(status, now)
     status["version"]=VERSION; status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
 
     # If a user-triggered force-all batch was interrupted by a rerun/redeploy,
@@ -453,8 +482,13 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         else:
             status["active_run"]["resumed_at"]=now_text(now)
             status["active_run"]["pid"]=os.getpid(); status["active_run"]["host"]=socket.gethostname()
+        repair_msgs=[]
         if repaired_count:
-            status["last_repair_message"]=f"已清除 {repaired_count} 個舊版誤標的失敗完成鍵，恢復可重試。"
+            repair_msgs.append(f"清除 {repaired_count} 個舊版誤標失敗完成鍵")
+        if repaired_future_count:
+            repair_msgs.append(f"清除 {repaired_future_count} 個尚未到時卻誤標完成的未來正式slot")
+        if repair_msgs:
+            status["last_repair_message"]="；".join(repair_msgs)+"，恢復正確排程。"
         _checkpoint_runtime(status,history,cfg,"run-start")
 
     executed=[]; overall=True
@@ -575,7 +609,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             **{k:summary.get(k,0) for k in ("success","warning","failed","blocked")},
             "finished_at":now_text(now) if simulate else now_text(),
         })
-        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count}
+        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count,"repaired_future_run_keys":repaired_future_count}
     finally:
         if not simulate: _release_lock()
 

@@ -268,14 +268,134 @@ def task_record_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]
         return _report(False, f"推薦後績效/儲存同步失敗：{type(exc).__name__}: {exc}", started=t0)
 
 
-def _load_recommend_list() -> tuple[pd.DataFrame, list[str]]:
-    from godpick_persistence_service import load_named_json_permanent
-    payload, msgs = load_named_json_permanent("godpick_recommend_list.json", [])
+def _extract_named_rows_v191_h7(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [dict(x) for x in payload if isinstance(x, dict)]
     if isinstance(payload, dict):
-        rows = payload.get("records") or payload.get("data") or payload.get("rows") or []
+        for key in ("recommendations", "records", "data", "rows", "items"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [dict(x) for x in rows if isinstance(x, dict)]
+    return []
+
+
+def _recover_current_list_from_records_v191_h7(latest_payload: dict[str, Any], records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Recover only rows belonging to the same Page07 run as the latest snapshot.
+
+    This prevents an actually-empty new run from resurrecting an older list while
+    repairing the H6 split-brain case where Page08 got R1 rows but the latest
+    snapshot/Page10 list were persisted as empty by double governance.
+    """
+    if not isinstance(latest_payload, dict) or not records:
+        return []
+    saved_at = str(latest_payload.get("saved_at") or "").strip()
+    rec_date = str(latest_payload.get("recommendation_date") or saved_at[:10] or "").strip()[:10]
+    try:
+        snap_ts = pd.to_datetime(saved_at, errors="coerce")
+    except Exception:
+        snap_ts = pd.NaT
+    rdf = pd.DataFrame(records)
+    if rdf.empty or "股票代號" not in rdf.columns:
+        return []
+    if rec_date and "推薦日期" in rdf.columns:
+        rdf = rdf[rdf["推薦日期"].astype(str).str[:10].eq(rec_date)].copy()
+    if rdf.empty:
+        return []
+    src = pd.Series([False] * len(rdf), index=rdf.index)
+    if "推薦執行來源" in rdf.columns:
+        src = src | rdf["推薦執行來源"].fillna("").astype(str).str.contains("07_股神推薦", regex=False)
+    if "紀錄來源" in rdf.columns:
+        src = src | rdf["紀錄來源"].fillna("").astype(str).str.contains("07_股神推薦", regex=False)
+    if src.any():
+        rdf = rdf.loc[src].copy()
+    if rdf.empty:
+        return []
+    if "紀錄層級" in rdf.columns:
+        level = rdf["紀錄層級"].fillna("").astype(str)
+        allowed = level.str.startswith("正式") | level.str.startswith("A-") | level.str.startswith("R1")
+        if allowed.any():
+            rdf = rdf.loc[allowed].copy()
+    if rdf.empty:
+        return []
+
+    # Same-run guard: Page07 snapshot and Page08 rows are written within minutes.
+    # Prefer 建立時間; fallback to 推薦日期+推薦時間.
+    ts = pd.Series(pd.NaT, index=rdf.index, dtype="datetime64[ns]")
+    if "建立時間" in rdf.columns:
+        ts = pd.to_datetime(rdf["建立時間"], errors="coerce")
+    if "推薦時間" in rdf.columns:
+        fallback = pd.to_datetime(rdf.get("推薦日期", rec_date).astype(str).str[:10] + " " + rdf["推薦時間"].astype(str), errors="coerce") if isinstance(rdf.get("推薦日期"), pd.Series) else pd.to_datetime(rec_date + " " + rdf["推薦時間"].astype(str), errors="coerce")
+        ts = ts.fillna(fallback)
+    if pd.notna(snap_ts) and ts.notna().any():
+        delta = (ts - snap_ts).abs().dt.total_seconds()
+        same_run = delta.le(15 * 60)
+        if same_run.any():
+            rdf = rdf.loc[same_run].copy()
+        else:
+            return []
+    elif ts.notna().any():
+        max_ts = ts.max()
+        rdf = rdf.loc[(max_ts - ts).dt.total_seconds().between(0, 15 * 60)].copy()
     else:
-        rows = payload if isinstance(payload, list) else []
-    return pd.DataFrame(rows or []), msgs
+        return []
+    if "股票代號" in rdf.columns:
+        rdf = rdf.drop_duplicates(subset=["股票代號"], keep="last")
+    return rdf.to_dict(orient="records")
+
+
+def _load_recommend_list() -> tuple[pd.DataFrame, list[str]]:
+    """H7 current-list authority election and self-repair.
+
+    Priority: Page10 current list -> Page07 latest snapshot recommendations ->
+    same-run Page08 records.  An empty current-list file no longer hides a valid
+    Page07 run.  The Page08 fallback is guarded by latest-run timestamps.
+    """
+    from godpick_persistence_service import load_named_json_permanent, load_records_permanent, save_named_json_permanent
+    msgs: list[str] = []
+    payload, m0 = load_named_json_permanent("godpick_recommend_list.json", [])
+    msgs.extend(list(m0 or []))
+    rows = _extract_named_rows_v191_h7(payload)
+    if rows:
+        msgs.append(f"H7目前推薦清單權威：godpick_recommend_list.json {len(rows)}筆")
+        return pd.DataFrame(rows), msgs
+
+    latest, m1 = load_named_json_permanent("godpick_latest_recommendations.json", {})
+    msgs.extend(list(m1 or []))
+    latest = latest if isinstance(latest, dict) else {}
+    rows = _extract_named_rows_v191_h7(latest)
+    if rows:
+        try:
+            rep = save_named_json_permanent("godpick_recommend_list.json", rows)
+            msgs.append(f"H7由Page07最新快照修復Page10清單：{len(rows)}筆｜永久化={'成功' if rep.permanent_ok else '警示'}")
+        except Exception as exc:
+            msgs.append(f"H7最新快照可用，但Page10清單修復保存例外：{exc}")
+        return pd.DataFrame(rows), msgs
+
+    try:
+        records, m2 = load_records_permanent()
+        msgs.extend(list(m2 or []))
+    except Exception as exc:
+        records = []
+        msgs.append(f"H7 Page08同輪備援讀取失敗：{exc}")
+    recovered = _recover_current_list_from_records_v191_h7(latest, list(records or []))
+    if recovered:
+        try:
+            rep = save_named_json_permanent("godpick_recommend_list.json", recovered)
+            msgs.append(f"H7由Page08同輪紀錄修復Page10清單：{len(recovered)}筆｜永久化={'成功' if rep.permanent_ok else '警示'}")
+            # Repair the split-brain latest snapshot without changing run identity.
+            repaired_latest = dict(latest)
+            repaired_latest["recommendations"] = recovered
+            repaired_latest["recommendation_count"] = len(recovered)
+            repaired_latest["h7_current_list_repaired_at"] = _now()
+            repaired_latest["h7_current_list_repair_source"] = "Page08 same-run records"
+            rep2 = save_named_json_permanent("godpick_latest_recommendations.json", repaired_latest)
+            msgs.append(f"H7同步修復Page07最新快照 recommendations：{'成功' if rep2.permanent_ok else '警示'}")
+        except Exception as exc:
+            msgs.append(f"H7同輪紀錄已找到，但清單/快照修復保存例外：{exc}")
+        return pd.DataFrame(recovered), msgs
+
+    msgs.append("H7目前推薦清單為0：最新快照亦無recommendations，且Page08沒有同一推薦批次可安全回補；視為真0，不復活舊名單。")
+    return pd.DataFrame(), msgs
 
 
 def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -283,14 +403,19 @@ def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[s
     try:
         from godpick_perf_fast_update_v77 import update_recommendation_perf_fast_v77
         from godpick_headless_page_loader import load_page_namespace
+        ns=load_page_namespace("pages/10_推薦清單.py",base_dir=BASE_DIR)
+        _require_headless_callables(ns, "Page10", ["_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
+        df,msgs=_load_recommend_list()
         result=update_recommendation_perf_fast_v77(
             json_files=["godpick_recommend_list.json"],
             max_records=int(cfg.get("max_records",5000) or 5000), batch_limit=int(cfg.get("batch_limit",120) or 120),
             max_workers=int(cfg.get("max_workers",12) or 12), stale_minutes=int(cfg.get("stale_minutes",30) or 30), process_all=bool(cfg.get("process_all",True)),
         )
-        ns=load_page_namespace("pages/10_推薦清單.py",base_dir=BASE_DIR)
-        _require_headless_callables(ns, "Page10", ["_sync_records", "upsert_records_authority_fast", "save_named_json_permanent"])
-        df,msgs=_load_recommend_list(); sync_ok,sync_msgs=ns["_sync_records"](df)
+        df_after,msgs_after=_load_recommend_list()
+        if not df_after.empty:
+            df=df_after
+        msgs.extend(msgs_after[-8:])
+        sync_ok,sync_msgs=ns["_sync_records"](df)
         ok=bool((result or {}).get("ok",True) and sync_ok)
         no_data=bool(df.empty)
         return _report(ok,f"推薦清單績效更新完成；{'0筆安全略過（未清空歷史）' if no_data else ('永久同步成功' if sync_ok else '永久同步失敗')}",details={"performance":result,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0,warning=bool(no_data and ok))
@@ -377,61 +502,44 @@ def task_feedback_learning(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def task_durability_retry(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    t0=time.perf_counter()
+    """H7 bounded durability convergence.
+
+    The old task re-queued every unconfirmed file into one background thread and
+    audited after only 8 seconds, so Streamlit could show the same 16/17 pending
+    forever.  H7 first verifies remote sync-state hashes, then synchronously
+    confirms only a bounded remaining batch and checkpoints every file.
+    """
+    t0=time.perf_counter(); cfg=cfg or {}
     try:
         authority_rows, authority_msgs, authority_restored = _ensure_records_authority_safe()
-        from godpick_durability_service import (
-            retry_failed_durability, audit_core_durability, queue_existing_critical_for_migration,
-            load_durability_outbox, CORE_DURABLE_FILES,
+        from godpick_durability_service import sync_unconfirmed_critical_bounded
+        result=sync_unconfirmed_critical_bounded(
+            base_dir=BASE_DIR,
+            max_files=int(cfg.get("max_sync_per_run",6) or 6),
+            time_budget_seconds=float(cfg.get("time_budget_seconds",35) or 35),
         )
-        retry_msgs=retry_failed_durability(base_dir=BASE_DIR)
-        # V191-H3: audit may show LOCAL_ONLY/UNKNOWN files that were never in the
-        # retry outbox.  Queue those too; otherwise UI says "重試0項、仍待16項"
-        # forever.  The durability service refuses an empty godpick_records upload.
-        migration_msgs=queue_existing_critical_for_migration(base_dir=BASE_DIR, critical_only=True)
-
-        # H3.1: give the background durability worker a short bounded settle
-        # window.  Previously Page17 audited immediately after queueing, so even
-        # successful retries almost always appeared as WARNING on the same click.
-        # Never wait indefinitely: slow GitHub/Firestore remains truthful WARNING
-        # and the next scheduler wake-up will continue it.
-        try:
-            settle_seconds = float((cfg or {}).get("settle_wait_seconds", 8) or 0)
-        except Exception:
-            settle_seconds = 8.0
-        settle_seconds = max(0.0, min(settle_seconds, 15.0))
-        settle_started = time.perf_counter()
-        settle_observations: list[dict[str, Any]] = []
-        critical_names = {k for k, v in CORE_DURABLE_FILES.items() if bool((v or {}).get("critical"))}
-        while settle_seconds > 0 and (time.perf_counter() - settle_started) < settle_seconds:
-            box = load_durability_outbox(base_dir=BASE_DIR)
-            inflight = [
-                name for name, item in (box or {}).items()
-                if name in critical_names and isinstance(item, dict)
-                and str(item.get("status") or "").lower() in {"pending", "running"}
-            ]
-            settle_observations.append({"elapsed": round(time.perf_counter()-settle_started,2), "inflight": len(inflight)})
-            if not inflight:
-                break
-            time.sleep(0.25)
-
-        audit=audit_core_durability(base_dir=BASE_DIR,write_audit=True)
-        pending=max(int(audit.get("critical_total",0) or 0)-int(audit.get("critical_remote_confirmed",0) or 0),0)
-        hard_missing=[r for r in (audit.get("rows") or []) if isinstance(r,dict) and r.get("critical") and not r.get("exists")]
-        queued_count=sum(1 for m in [*retry_msgs,*migration_msgs] if "queued" in str(m).lower() or "排" in str(m))
+        audit=result.get("audit") if isinstance(result,dict) else {}
+        pending=int(result.get("remaining",0) or 0)
+        attempted=int(result.get("attempted",0) or 0)
+        confirmed=int(result.get("confirmed_this_run",0) or 0)
+        failed=int(result.get("failed_this_run",0) or 0)
         history_incident = bool(not authority_rows and any("歷史救援" in str(x) or "意外" in str(x) or "縮水" in str(x) for x in authority_msgs))
-        ok=not bool(hard_missing) and not history_incident
+        hard_missing=[r for r in (audit.get("rows") or []) if isinstance(r,dict) and r.get("critical") and not r.get("exists")] if isinstance(audit,dict) else []
+        ok=not bool(hard_missing) and not history_incident and failed==0
         if history_incident:
-            msg = "永久化修復未完成：推薦歷史仍為0筆且符合意外縮水/歷史救援情境；已停止把0筆當成正常遠端狀態。"
+            msg="永久化修復未完成：推薦歷史仍為0筆且符合意外縮水/歷史救援情境；已停止把0筆當成正常遠端狀態。"
         else:
             msg=(
-                f"永久化修復：重試/補排 {queued_count} 項；"
-                f"目前遠端同Hash尚待確認 {pending} 項"
-                + ("（後台同步中，非執行失敗）" if pending and ok else "")
+                f"永久化H7收斂：本輪同步 {attempted} 項／新增確認 {confirmed} 項／失敗 {failed} 項；"
+                f"剩餘遠端Hash未確認 {pending} 項"
+                + ("；已逐檔checkpoint，下次只續跑剩餘項目" if pending and ok else "")
                 + (f"；推薦歷史權威 {'已救援' if authority_restored else '已確認'} {len(authority_rows)} 筆" if authority_rows else "")
             )
         return _report(
-            ok,msg,details={"authority_count":len(authority_rows),"authority_restored":authority_restored,"authority_messages":authority_msgs[-30:],"retry_messages":retry_msgs[-30:],"migration_messages":migration_msgs[-40:],"settle_wait_seconds":settle_seconds,"settle_observations":settle_observations[-20:],"audit":audit},
+            ok,msg,details={
+                "authority_count":len(authority_rows),"authority_restored":authority_restored,"authority_messages":authority_msgs[-30:],
+                "convergence":result,"audit":audit,
+            },
             changed_files=["godpick_durability_outbox.json","godpick_durability_audit.json"],started=t0,
             warning=bool(ok and pending)
         )
