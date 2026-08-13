@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260813_hotfix1"
+VERSION = "godpick_auto_scheduler_v191_20260813_hotfix2"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -217,7 +217,11 @@ def _slot_datetime(day: datetime, hhmm: str) -> datetime:
     return day.replace(hour=hh,minute=mm,second=0,microsecond=0)
 
 
-def _run_key(job:str, slot_dt:datetime)->str:
+def _run_key(job:str, slot_dt:datetime, *, force:bool=False)->str:
+    if force:
+        # A manual force-all is deployment/diagnostic execution, not a scheduled
+        # slot.  Never consume a future production slot such as 20:25.
+        return f"{job}|FORCE|{slot_dt.strftime('%Y-%m-%d %H:%M')}"
     return f"{job}|{slot_dt.strftime('%Y-%m-%d %H:%M')}"
 
 
@@ -227,8 +231,9 @@ def _already_done(status:dict[str,Any],run_key:str)->bool:
 
 def _due_slots(job_cfg:dict[str,Any], now:datetime, grace_minutes:int, *, force:bool=False)->list[datetime]:
     if force:
-        times=_normalize_times(job_cfg.get("times"))
-        return [_slot_datetime(now,times[-1] if times else now.strftime("%H:%M"))]
+        # Use the actual force execution minute.  Previous V191 code used the
+        # day's last configured schedule and could mark a FUTURE slot complete.
+        return [now.replace(second=0,microsecond=0)]
     out=[]
     for t in _normalize_times(job_cfg.get("times")):
         slot=_slot_datetime(now,t)
@@ -342,7 +347,7 @@ def _repair_failed_completed_keys(status: dict[str, Any]) -> int:
     bad=set()
     jobs=status.get("jobs") if isinstance(status.get("jobs"),dict) else {}
     for job, row in jobs.items():
-        if not isinstance(row,dict) or row.get("last_status")=="SUCCESS":
+        if not isinstance(row,dict) or row.get("last_status") in {"SUCCESS","WARNING"}:
             continue
         slot=str(row.get("last_slot") or "").strip()
         if slot:
@@ -441,7 +446,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             due=_due_slots(job_cfg,now,int(cfg.get("grace_minutes",35)),force=force_all_enabled)
             job_had_slot=False
             for slot in due:
-                key=_run_key(job,slot)
+                key=_run_key(job,slot,force=force_all_enabled)
                 if _already_done(status,key) and not force_all_enabled: continue
                 job_had_slot=True
                 _touch_lock(job)
@@ -455,19 +460,24 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     result=_execute_one(job,job_cfg,cfg)
                 row={
                     "run_key":key,"job":job,"job_label":JOB_LABELS.get(job,job),"slot":slot.strftime("%Y-%m-%d %H:%M"),
-                    "started_at":started,"finished_at":result.get("finished_at") or now_text(),"status":"SUCCESS" if result.get("ok") else ("BLOCKED" if result.get("blocked") else "FAILED"),
+                    "started_at":started,"finished_at":result.get("finished_at") or now_text(),"status":("WARNING" if result.get("ok") and result.get("warning") else ("SUCCESS" if result.get("ok") else ("BLOCKED" if result.get("blocked") else "FAILED"))),
                     "message":str(result.get("message") or ""),"duration_seconds":result.get("duration_seconds"),"attempt":result.get("attempt"),"details":result.get("details",{}),
                 }
                 executed.append(row); history.append({k:v for k,v in row.items() if k != "details"})
                 js=status["jobs"].setdefault(job,{})
                 js.update({"label":JOB_LABELS.get(job,job),"last_status":row["status"],"last_run_at":row["finished_at"],"last_message":row["message"],"last_duration_seconds":row.get("duration_seconds"),"last_slot":row["slot"]})
                 completed=list(status.get("completed_run_keys",[]) or [])
-                if row["status"]=="SUCCESS":
-                    js["last_success_at"]=row["finished_at"]
+                if row["status"] in {"SUCCESS","WARNING"}:
+                    if row["status"]=="SUCCESS":
+                        js["last_success_at"]=row["finished_at"]
+                    else:
+                        js["last_warning_at"]=row["finished_at"]
+                    js["last_completed_at"]=row["finished_at"]
                     if key not in completed: completed.append(key)
                 else:
                     overall=False
-                    # Critical V191 fix: a failed/blocked slot is NOT complete.
+                    # Failed/blocked slots remain retryable; warnings are complete
+                    # degraded runs and must not loop forever.
                     completed=[x for x in completed if x != key]
                     js["last_failed_at"]=row["finished_at"]
                 status["completed_run_keys"]=completed[-1200:]
@@ -475,8 +485,9 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
                     if row["status"]=="FAILED" and job not in active.get("failed_jobs",[]): active.setdefault("failed_jobs",[]).append(job)
                     if row["status"]=="BLOCKED" and job not in active.get("blocked_jobs",[]): active.setdefault("blocked_jobs",[]).append(job)
+                    if row["status"]=="WARNING" and job not in active.get("warning_jobs",[]): active.setdefault("warning_jobs",[]).append(job)
                     active["last_job"]=job; active["last_status"]=row["status"]; active["updated_at"]=now_text()
-                    status["last_summary"]={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":True}
+                    status["last_summary"]={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":True}
                     _checkpoint_runtime(status,history,cfg,f"after-{job}-{row['status'].lower()}")
             if not simulate and job_had_slot:
                 active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
@@ -487,7 +498,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 _checkpoint_runtime(status,history,cfg,f"job-finished-{job}")
 
         history=history[-int(cfg.get("history_keep",400)):]
-        summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
+        summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
         status["updated_at"]=now_text(); status["last_summary"]=summary
         if not simulate:
             active=status.pop("active_run",None)
@@ -496,7 +507,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 status["last_completed_run"]=active
             _checkpoint_runtime(status,history,cfg,"run-finished")
         resume_text="（續跑上次中斷的強制批次）" if resumed_force else ""
-        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count}
+        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count}
     finally:
         if not simulate: _release_lock()
 

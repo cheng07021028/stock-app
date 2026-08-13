@@ -81,8 +81,10 @@ if callable(load_auto_scheduler_settings):
         st.info(
             "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
             "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
-            "V191 2026-08-13 Hotfix：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
+            "V191 2026-08-13 Hotfix2：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
             "強制全部批次若因 rerun/redeploy 中斷，12 小時內下一次中央喚醒會續跑未完成工作；失效 PID 鎖會自動回收。"
+            "強制驗證使用獨立 FORCE 執行鍵，不會再吃掉當日晚間正式排程時段；官方因子只有『抓取/保存＋內容日期驗證』都通過才算 SUCCESS。"
+            "07 自動推薦由第7頁自己的正式推薦流程執行，中央排程只負責觸發；結果仍永久寫入第8頁推薦紀錄。"
         )
         _active_run = (_auto_status.get("active_run") or {}) if isinstance(_auto_status, dict) else {}
         if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
@@ -96,7 +98,7 @@ if callable(load_auto_scheduler_settings):
         _m1.metric("總開關", "啟用" if _auto_cfg.get("enabled") else "停用")
         _m2.metric("已啟用工作", sum(1 for x in (_auto_cfg.get("jobs") or {}).values() if isinstance(x, dict) and x.get("enabled")))
         _sum = (_auto_status.get("last_summary") or {}) if isinstance(_auto_status, dict) else {}
-        _m3.metric("最近成功/失敗", f"{_sum.get('success', 0)}/{_sum.get('failed', 0)}")
+        _m3.metric("最近 成功/警示/失敗", f"{_sum.get('success', 0)}/{_sum.get('warning', 0)}/{_sum.get('failed', 0)}")
         _m4.metric("最後喚醒", str((_auto_status or {}).get("last_wakeup_at") or "尚未執行"))
 
         with st.form("v191_central_scheduler_form", clear_on_submit=False):
@@ -117,7 +119,7 @@ if callable(load_auto_scheduler_settings):
                 with _c2:
                     st.markdown(f"**{_label}**")
                     if _job == "godpick_recommendation":
-                        st.caption("只有股票主檔、大盤、官方因子、SuperAI市場情境於今日前置成功，才允許自動推薦。")
+                        st.caption("只有股票主檔、大盤、官方因子『內容日期驗證』、SuperAI市場情境、自選股runtime於今日前置成功，才允許自動推薦；真正選股由第7頁模組執行。")
                 with _c3:
                     _jtimes = st.text_input("台灣時間", value=",".join(_jc.get("times") or []), key=f"v191_times_{_job}", label_visibility="collapsed")
                 _newj = dict(_jc)
@@ -154,14 +156,16 @@ if callable(load_auto_scheduler_settings):
         if _b2.button("▶ 執行目前已到期項目", use_container_width=True):
             with st.spinner("V191 正在依排程執行到期項目；完成/失敗都會永久記錄..."):
                 _run = run_auto_due_jobs()
-            (st.success if _run.get("ok") else st.warning)(_run.get("message"))
+            _has_warning = any(str(x.get("status")) == "WARNING" for x in (_run.get("executed") or []) if isinstance(x, dict))
+            (st.warning if _has_warning or not _run.get("ok") else st.success)(_run.get("message"))
             if _run.get("executed"):
                 st.dataframe(pd.DataFrame(_run.get("executed", [])), use_container_width=True, hide_index=True)
-        _force_confirm = _b3.checkbox("允許本次強制跑全部已啟用工作", value=False, help="會包含全市場股神推薦，可能需要數分鐘；只用於部署驗證。")
+        _force_confirm = _b3.checkbox("允許本次強制跑全部已啟用工作", value=False, help="會包含第7頁股神推薦，可能需要數分鐘；只用於部署驗證。Hotfix2 使用獨立 FORCE 執行鍵，不會佔用今天尚未到時的正式排程時段。")
         if st.button("🧪 強制執行全部已啟用工作（部署驗證）", disabled=not _force_confirm, use_container_width=True):
             with st.spinner("V191 強制驗證執行中..."):
                 _runall = run_auto_due_jobs(force_all_enabled=True)
-            (st.success if _runall.get("ok") else st.warning)(_runall.get("message"))
+            _has_warning_all = any(str(x.get("status")) == "WARNING" for x in (_runall.get("executed") or []) if isinstance(x, dict))
+            (st.warning if _has_warning_all or not _runall.get("ok") else st.success)(_runall.get("message"))
             if _runall.get("executed"):
                 st.dataframe(pd.DataFrame(_runall.get("executed", [])), use_container_width=True, hide_index=True)
 
@@ -184,9 +188,9 @@ if callable(load_auto_scheduler_settings):
             "- **08 股神推薦紀錄**：最新價、推薦後績效、權威儲存同步；另納入 V188 T+1 實戰真相/機率校準。\n"
             "- **09 股票主檔**：股票主檔智慧更新並永久保存。\n"
             "- **10 推薦清單**：推薦後績效、正式 N 日績效、隔日命中追蹤及同步。\n"
-            "- **16 官方因子**：法人/營收/PER/PBR/EPS 多來源快取＋V187來源可信度＋V190盤後時序治理。\n"
+            "- **16 官方因子**：法人/營收/PER/PBR/EPS 多來源快取＋V187來源可信度＋V190盤後時序治理；Hotfix2 另驗證官方內容業務日期，抓取成功但日期沒前進會列 FAILED 而非假 SUCCESS。\n"
             "- **補充納入**：SuperAI 融資券/期貨/PCR/ETF情境、AI績效回饋/每日學習、永久化失敗重試。\n"
-            "- **07 股神推薦**：只在必要前置工作今日成功後自動執行；沿用你 Page7 永久保存的掃描範圍、門檻、模式與權重。"
+            "- **07 股神推薦**：只在必要前置工作今日成功後，由 Page7 自己的 canonical runner 自動執行；中央排程不再複製選股邏輯。沿用 Page7 永久保存的掃描範圍、門檻、模式與權重，完成後仍同步永久寫入 08 股神推薦紀錄。"
         )
         st.caption("不自動化的按鈕：清除快取、清空紀錄、重置設定、強制修復/編譯測試等維護或破壞性操作，仍保留人工確認。")
 

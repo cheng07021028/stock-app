@@ -546,24 +546,31 @@ def _read_local_factor_cache_raw() -> dict[str, Any]:
 
 
 def _factor_payload_business_date(payload: Any) -> str:
+    """Return the payload business date from raw daily-domain evidence.
+
+    V191 hotfix2 deliberately does *not* trust a previously derived
+    ``官方資料日期/官方因子資料日期`` when raw institutional/valuation dates are
+    present.  Otherwise a stale composite value restored from the previous
+    cache can become sticky forever even after both official domains advance.
+    """
     data = payload if isinstance(payload, dict) else {}
-    direct = _roc_or_iso_to_yyyymmdd(data.get("data_date"))
-    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-    meta_date = _roc_or_iso_to_yyyymmdd(meta.get("data_date"))
-    dates = [x for x in (direct, meta_date) if x]
     rows = data.get("records") if isinstance(data.get("records"), list) else []
+    row_dates: list[str] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        for field in (
-            "官方因子資料日期", "官方資料日期", "三大法人資料日期",
-            "法人資料日期", "估值資料日期", "FinMind資料日期",
-        ):
-            value = _roc_or_iso_to_yyyymmdd(row.get(field))
-            if value:
-                dates.append(value)
-                break
-    return max(dates) if dates else ""
+        value = _row_daily_factor_date_v184(row)
+        if value:
+            row_dates.append(value)
+    if row_dates:
+        return max(row_dates)
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    fallback = [
+        _roc_or_iso_to_yyyymmdd(data.get("data_date")),
+        _roc_or_iso_to_yyyymmdd(meta.get("data_date")),
+    ]
+    fallback = [x for x in fallback if x]
+    return max(fallback) if fallback else ""
 
 
 def _write_factor_authority_state(payload: dict[str, Any], *, permanent_ok: bool, message: str, source: str) -> None:
@@ -656,7 +663,7 @@ def get_factor_authority_status() -> dict[str, Any]:
 
 def load_factor_cache(*, force_authority_restore: bool = False) -> dict[str, Any]:
     _restore_official_factor_authority_once(force=bool(force_authority_restore))
-    return _read_local_factor_cache_raw()
+    return _repair_derived_daily_dates_v191(_read_local_factor_cache_raw())
 
 
 def _summarize_diagnostics(diagnostics: list[str] | None, max_items: int = 40) -> list[str]:
@@ -781,20 +788,83 @@ def _append_log(status: str, row_count: int, diagnostics: list[str] | None = Non
 
 
 def _row_daily_factor_date_v184(row: Any) -> str:
-    """Return a conservative daily official-factor date for one stock.
+    """Return the conservative *raw-domain* daily date for one stock.
 
-    Monthly revenue is intentionally excluded: comparing YYYYMM revenue with a
-    trading-day K-line is semantically wrong.  When both valuation and
-    institutional dates exist, use the OLDER daily date so one fresh domain
-    cannot hide another stale daily domain.
+    Monthly revenue is excluded.  Institutional and valuation dates are the
+    authoritative daily domains and the older one is used when both exist.
+    V191 hotfix2 fixes a sticky-date bug: the derived composite fields
+    ``官方資料日期`` / ``官方因子資料日期`` are no longer fed back into their own
+    derivation when raw domain dates exist.  A legacy composite is used only as
+    a last-resort fallback for old caches that truly have no raw daily dates.
     """
-    values: list[str] = []
     getter = row.get if hasattr(row, "get") else (lambda _k, _d="": _d)
-    for key in ["官方因子資料日期", "官方資料日期", "法人資料日期", "估值資料日期", "FinMind資料日期"]:
+    raw_values: list[str] = []
+    for key in ["法人資料日期", "三大法人資料日期", "估值資料日期"]:
         d = _roc_or_iso_to_yyyymmdd(getter(key, ""))
         if d:
-            values.append(d)
-    return min(values) if values else ""
+            raw_values.append(d)
+
+    # FinMind is allowed only as a daily-domain fallback when an explicit
+    # institution/valuation source indicates that it actually supplied that
+    # domain.  This prevents an unrelated FinMind monthly date from becoming a
+    # trading-day freshness signal.
+    if not raw_values:
+        finmind_date = _roc_or_iso_to_yyyymmdd(getter("FinMind資料日期", ""))
+        daily_sources = "|".join([
+            _safe_str(getter("FinMind法人資料源", "")),
+            _safe_str(getter("FinMind估值資料源", "")),
+            _safe_str(getter("法人資料源", "")),
+            _safe_str(getter("估值資料源", "")),
+        ]).upper()
+        if finmind_date and "FINMIND" in daily_sources:
+            raw_values.append(finmind_date)
+
+    if raw_values:
+        return min(raw_values)
+
+    legacy_values: list[str] = []
+    for key in ["官方因子資料日期", "官方資料日期"]:
+        d = _roc_or_iso_to_yyyymmdd(getter(key, ""))
+        if d:
+            legacy_values.append(d)
+    return min(legacy_values) if legacy_values else ""
+
+
+def _repair_derived_daily_dates_v191(payload: Any) -> dict[str, Any]:
+    """Repair stale derived dates in memory without fabricating raw data.
+
+    This makes an already-downloaded cache immediately usable after deployment;
+    the next legitimate save persists the repaired composites.  Raw domain
+    fields are never changed.
+    """
+    data = dict(payload) if isinstance(payload, dict) else {}
+    raw_rows = data.get("records") if isinstance(data.get("records"), list) else []
+    repaired_rows: list[dict[str, Any]] = []
+    changed = 0
+    derived_dates: list[str] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        derived = _row_daily_factor_date_v184(row)
+        if derived:
+            derived_dates.append(derived)
+            for col in ["官方資料日期", "官方因子資料日期"]:
+                before = _roc_or_iso_to_yyyymmdd(row.get(col))
+                if before != derived:
+                    row[col] = derived
+                    changed += 1
+        repaired_rows.append(row)
+    data["records"] = repaired_rows
+    if derived_dates:
+        data_date = max(derived_dates)
+        data["data_date"] = data_date
+        meta = dict(data.get("meta")) if isinstance(data.get("meta"), dict) else {}
+        meta["data_date"] = data_date
+        meta["derived_daily_date_repair_version"] = "v191_20260813_hotfix2"
+        meta["derived_daily_date_repair_count"] = int(changed)
+        data["meta"] = meta
+    return data
 
 
 def _source_score_v187(source: Any) -> int:
@@ -928,7 +998,9 @@ def load_factor_frame() -> pd.DataFrame:
     derived = df.apply(_row_daily_factor_date_v184, axis=1)
     for col in ["官方資料日期", "官方因子資料日期"]:
         current = df[col].map(_roc_or_iso_to_yyyymmdd)
-        df[col] = current.where(current.astype(str).str.len().eq(8), derived)
+        # Raw-domain derivation wins over an old composite value.  Legacy
+        # composite is retained only when no raw daily evidence is available.
+        df[col] = derived.where(derived.astype(str).str.len().eq(8), current)
     # V187 legacy/live-cache migration: recompute provenance from actual domain
     # source fields every load.  This immediately repairs V182-V186 rows whose
     # whole-row trust was downgraded to 60/82 by a single fallback-filled field.

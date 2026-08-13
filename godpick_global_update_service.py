@@ -915,8 +915,14 @@ def step_feedback_profile(base: Path) -> dict[str, Any]:
     baseline = profile.get("baseline", {}) if isinstance(profile, dict) else {}
     sample = int(quality.get("trusted_records", baseline.get("sample", 0)) or 0)
     win_rate = float(baseline.get("win_rate", 0) or 0) * 100.0
+    cache_ok = bool(cache_result[0]) if isinstance(cache_result, (tuple, list)) and cache_result else True
+    available = bool(profile.get("available")) if isinstance(profile, dict) else False
+    # Operation success and model readiness are different states.  A valid cache
+    # rebuild with too few trusted samples is a WARNING, not an execution failure.
     return {
-        "ok": bool(profile.get("available")) if isinstance(profile, dict) else False,
+        "ok": bool(isinstance(profile, dict) and cache_ok),
+        "available": available,
+        "warning": bool(isinstance(profile, dict) and cache_ok and not available),
         "message": f"績效回饋摘要完成：可信樣本 {sample} / 勝率 {win_rate:.1f}%｜{cache_result[1]}",
         "profile_summary": {"可信樣本": sample, "勝率%": round(win_rate, 2), "資料品質": quality},
     }
@@ -929,9 +935,14 @@ def step_learning_profile(base: Path) -> dict[str, Any]:
         state, messages = svc.refresh_learning_state_from_records(base_dir=base, persist_remote=True)
     profile = state.get("experience_profile", {}) if isinstance(state, dict) else {}
     samples = int(profile.get("eligible_samples", 0) or 0)
+    msg_list=[str(x) for x in (messages or [])]
+    joined="；".join(msg_list)
+    warning_tokens=("待同步","pending","僅本機","永久保存例外","遠端未確認","Hash確認")
+    warning=bool(isinstance(state, dict) and state and any(t.lower() in joined.lower() for t in warning_tokens))
     return {
         "ok": bool(isinstance(state, dict) and state),
-        "message": f"每日學習型AI經驗校準完成：可驗證樣本 {samples}｜" + "；".join(str(x) for x in (messages or [])),
+        "warning": warning,
+        "message": f"每日學習型AI經驗校準完成：可驗證樣本 {samples}｜" + joined,
         "learning_summary": {
             "可驗證樣本": samples,
             "模型版本": state.get("model_version", "") if isinstance(state, dict) else "",

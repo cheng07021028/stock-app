@@ -2171,9 +2171,15 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     kline_date = _max_row_date_v173(candidate_records + recommendation_records, [
         "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
     ])
+    execution_context = st.session_state.get(_k("recommend_execution_context_v191"), {})
+    if not isinstance(execution_context, dict):
+        execution_context = {}
     payload = {
         "saved_at": saved_at_now,
         "recommendation_date": saved_at_now[:10],
+        "execution_context": dict(execution_context),
+        "execution_owner": _safe_str(execution_context.get("owner")) or "07_股神推薦",
+        "execution_trigger": _safe_str(execution_context.get("trigger")) or "手動操作",
         "scan_run_id": _safe_str(st.session_state.get(_k("scan_run_id"))) or f"scan_{saved_at_now.replace(':','').replace(' ','_')}",
         "expected_trade_date": _expected_latest_trade_date_v173().strftime("%Y-%m-%d"),
         "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
@@ -2209,6 +2215,9 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     anchor_payload = {
         "saved_at": saved_at_now,
         "recommendation_date": saved_at_now[:10],
+        "execution_context": payload.get("execution_context", {}),
+        "execution_owner": payload.get("execution_owner", "07_股神推薦"),
+        "execution_trigger": payload.get("execution_trigger", "手動操作"),
         "scan_run_id": payload.get("scan_run_id", ""),
         "expected_trade_date": payload.get("expected_trade_date", ""),
         "kline_date": payload.get("kline_date", ""),
@@ -2733,9 +2742,13 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
         or market_date is None or official_date is None or kline_date is None
     )
     all_messages = issues + warnings
+    kline_text = kline_date.strftime("%Y-%m-%d") if kline_date is not None else ""
+    if kline_date is not None and kline_date > expected:
+        kline_text += "（盤中/當日行情）"
     return {
         "expected_date": expected.strftime("%Y-%m-%d"),
         "kline_date": kline_date.strftime("%Y-%m-%d") if kline_date is not None else "",
+        "kline_display": kline_text,
         "market_date": market_date.strftime("%Y-%m-%d") if market_date is not None else "",
         "official_date": official_date.strftime("%Y-%m-%d") if official_date is not None else "",
         "saved_date": saved_date.strftime("%Y-%m-%d") if saved_date is not None else "",
@@ -2775,14 +2788,14 @@ def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
                 )
             else:
                 st.warning(
-                    "正式推薦與 A- 準主推薦已暫停升格。請先確認第 17 頁一鍵更新各步驟均成功，"
-                    "再回本頁重新推薦。"
+                    "正式推薦與 A- 準主推薦已暫停升格。請先到第17頁確認『官方因子』不只是抓取成功，"
+                    "而是『內容日期驗證通過』；前置資料通過後，本頁可手動重新推薦，中央排程也會直接呼叫本頁推薦流程。"
                 )
         else:
             st.warning(message)
         st.caption(
-            f"預期最新交易日：{snapshot.get('expected_date') or '未驗證'}｜"
-            f"K線：{snapshot.get('kline_date') or '待重新推薦驗證'}｜"
+            f"最近完整收盤基準：{snapshot.get('expected_date') or '未驗證'}｜"
+            f"K線：{snapshot.get('kline_display') or snapshot.get('kline_date') or '待重新推薦驗證'}｜"
             f"大盤：{snapshot.get('market_date') or '未驗證'}｜"
             f"官方因子：{snapshot.get('official_date') or '未驗證'}｜"
             f"目前推薦保存：{snapshot.get('saved_date') or '未驗證'}"
@@ -2804,15 +2817,15 @@ def _render_project_data_freshness_warning_v173() -> dict[str, Any]:
                 f"下一時點：{release.get('next_milestone')}｜18:00/20:00為官方檔案產製時點，公開網站/OpenAPI同步可能稍晚。"
             )
         st.caption(
-            f"預期最新交易日：{snapshot.get('expected_date') or '未驗證'}｜"
-            f"K線：{snapshot.get('kline_date') or '待重新推薦驗證'}｜"
+            f"最近完整收盤基準：{snapshot.get('expected_date') or '未驗證'}｜"
+            f"K線：{snapshot.get('kline_display') or snapshot.get('kline_date') or '待重新推薦驗證'}｜"
             f"大盤：{snapshot.get('market_date') or '未驗證'}｜"
             f"官方因子：{snapshot.get('official_date') or '未驗證'}｜"
             f"目前推薦保存：{snapshot.get('saved_date') or '未驗證'}"
         )
     else:
         st.success(
-            f"資料新鮮度通過：K線、大盤與官方因子皆已更新至 {snapshot.get('expected_date')}。"
+            f"資料新鮮度通過：K線、大盤與官方因子符合最近完整收盤／盤中時序基準 {snapshot.get('expected_date')}。"
         )
     snapshot["request_rescan"] = bool(request_rescan)
     return snapshot
@@ -12050,6 +12063,11 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
 
     action["紀錄來源"] = "07_股神推薦｜推薦完成自動記錄"
     action["自動記錄"] = "是"
+    _exec_ctx_v191 = st.session_state.get(_k("recommend_execution_context_v191"), {})
+    if not isinstance(_exec_ctx_v191, dict):
+        _exec_ctx_v191 = {}
+    action["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
+    action["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
     action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
 
     def _sample_meta(row: pd.Series) -> pd.Series:
@@ -13751,6 +13769,182 @@ def _render_phase105_learning_panel(candidate_df: pd.DataFrame | None = None) ->
                 st.write(f"- {msg}")
 
 
+def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Canonical V191 automation entrypoint owned by Module 07.
+
+    The central scheduler only invokes this callable.  All recommendation
+    orchestration, snapshot saving, Page08 record persistence, rotation,
+    learning and SuperAI experience saving remain owned by Page07 so manual and
+    scheduled execution cannot drift into two different recommendation paths.
+    """
+    cfg = dict(cfg or {})
+    started_at = _now_text()
+    execution_context = {
+        "owner": "07_股神推薦",
+        "trigger": "V191中央自動排程",
+        "started_at": started_at,
+        "automation_version": "V191-H2",
+    }
+    st.session_state[_k("recommend_execution_context_v191")] = execution_context
+    notes: list[str] = []
+    try:
+        watchlist_map = _load_watchlist_map() or {}
+        master_df = _load_master_df()
+        if master_df is None or master_df.empty:
+            master_df = _load_master_df_fallback_only()
+        if master_df is None or master_df.empty:
+            return {"ok": False, "message": "07股神推薦模組執行失敗：股票主檔為空", "execution_context": execution_context}
+
+        category_options = ["全部"] + (_collect_all_categories(master_df, watchlist_map) or [])
+        settings = _load_persistent_recommend_scan_settings(watchlist_map, category_options)
+        if bool(cfg.get("force_full_market", False)):
+            settings["universe_mode"] = "全市場"
+            settings["scan_limit"] = "全部"
+        _apply_recommend_scan_settings_to_state(settings, sync_widgets=False)
+
+        persistent = _load_persistent_settings(local_first=True)
+        weights = _normalize_weight_map(persistent.get("applied_weights") or persistent.get("score_weights"))
+        macro_bridge = _read_macro_mode_bridge()
+        weights = _apply_macro_bridge_to_weights(weights, macro_bridge, enabled=True)
+        global GODPICK_ACTIVE_SCORE_WEIGHTS
+        GODPICK_ACTIVE_SCORE_WEIGHTS = weights.copy()
+
+        mode = _safe_str(settings.get("universe_mode")) or "全市場"
+        if mode == "自選群組":
+            universe_items = watchlist_map.get(_safe_str(settings.get("group")), [])
+        elif mode == "手動輸入":
+            universe_items = _parse_manual_codes(settings.get("manual_codes", ""), master_df)
+        else:
+            universe_items = _build_universe_from_market(
+                master_df=master_df,
+                market_mode=mode,
+                limit_count=settings.get("scan_limit", 1000),
+                selected_categories=settings.get("selected_categories") or ["全部"],
+            )
+        if not universe_items:
+            return {"ok": False, "message": "07股神推薦模組執行失敗：掃描池為空", "execution_context": execution_context, "settings": settings}
+
+        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+        start_dt = today - timedelta(days=int(settings.get("days", 120) or 120))
+        previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
+        rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
+            universe_items=universe_items,
+            master_df=master_df,
+            start_dt=start_dt,
+            end_dt=today,
+            min_total_score=float(settings.get("min_total_score", 55)),
+            min_signal_score=float(settings.get("min_signal_score", -2)),
+            selected_categories=settings.get("selected_categories") or ["全部"],
+            mode=_safe_str(settings.get("recommend_mode")) or "飆股模式",
+            risk_strictness=_safe_str(settings.get("risk_strictness")) or "標準",
+            min_prelaunch_score=float(settings.get("min_prelaunch_score", 45)),
+            min_trade_score=float(settings.get("min_trade_score", 45)),
+            resume_scan=False,
+            reuse_finished_checkpoint=False,
+        )
+        rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(rec_df, hot_pick_df, macro_bridge, True, force=True)
+
+        candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+        if rec_df is None or rec_df.empty:
+            conditional_df = _conditional_reference_rows(candidate_df, max_rows=8) if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
+            if not conditional_df.empty:
+                rec_df = conditional_df
+                notes.append("本輪無正式推薦，依Page07規則保存條件式參考名單。")
+            elif isinstance(previous_rec_df, pd.DataFrame) and not previous_rec_df.empty:
+                rec_df = previous_rec_df.copy()
+                category_strength_df = previous_category_df.copy() if isinstance(previous_category_df, pd.DataFrame) else pd.DataFrame()
+                hot_pick_df = previous_hot_df.copy() if isinstance(previous_hot_df, pd.DataFrame) else pd.DataFrame()
+                notes.append("本輪沒有可用新結果，依Page07安全網保留上一輪非空結果。")
+            else:
+                rec_df = pd.DataFrame()
+
+        save_ok = bool(_save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df))
+        source_df = st.session_state.get(_k("candidate_diagnosis_store"))
+        if not isinstance(source_df, pd.DataFrame) or source_df.empty:
+            source_df = rec_df
+
+        # Keep the user's existing contract: Page07 executes, Page08 authority
+        # continues to permanently store recommendation records.
+        record_added, record_msgs = _v159_auto_record_actionable_recommendations(source_df, background_write=False)
+
+        calibration_added = 0
+        calibration_msgs: list[str] = []
+        calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
+        if callable(save_calibration_samples):
+            try:
+                calibration_added, calibration_msgs, calibration_summary = save_calibration_samples(
+                    source_df, max_near=24, max_missed=20, background_remote=False
+                )
+            except Exception as exc:
+                calibration_msgs = [f"校正研究樣本保存例外：{exc}"]
+
+        if callable(save_rotation_snapshot):
+            try:
+                rotation_source = _phase93_single_source_decision_frame(rec_df, source_df)
+                rotation_ok, rotation_msg = save_rotation_snapshot(rotation_source, background_remote=False)
+                notes.append(f"推薦輪動快照：{'成功' if rotation_ok else '警示'}｜{rotation_msg}")
+            except Exception as exc:
+                notes.append(f"推薦輪動快照例外：{exc}")
+        if callable(save_learning_run):
+            try:
+                learning_ok, learning_msgs, _ = save_learning_run(
+                    source_df, rec_df,
+                    scan_report=st.session_state.get(_k("scan_quality_report"), {}),
+                    metadata={**settings, "automation": "V191中央自動排程", "execution_owner": "07_股神推薦"},
+                    persist_remote=True, background_remote=False, pre_scored=True,
+                )
+                notes.append(f"學習快照：{'成功' if learning_ok else '警示'}｜" + "；".join(str(x) for x in (learning_msgs or [])[-4:]))
+            except Exception as exc:
+                notes.append(f"學習快照例外：{exc}")
+        if callable(save_super_ai_run):
+            try:
+                super_ok, super_msg, _ = save_super_ai_run(
+                    source_df, rec_df,
+                    metadata={"automation": "V191中央自動排程", "execution_owner": "07_股神推薦", "scan_settings": settings},
+                )
+                notes.append(f"SuperAI經驗：{'成功' if super_ok else '警示'}｜{super_msg}")
+            except Exception as exc:
+                notes.append(f"SuperAI經驗例外：{exc}")
+
+        scan_report = st.session_state.get(_k("scan_quality_report"), {}) or {}
+        display_count = len(rec_df) if isinstance(rec_df, pd.DataFrame) else 0
+        candidate_count = len(source_df) if isinstance(source_df, pd.DataFrame) else 0
+        ok = bool(save_ok and isinstance(rec_df, pd.DataFrame))
+        message = (
+            f"07股神推薦模組自動執行{'完成' if ok else '未完整完成'}："
+            f"掃描 {len(universe_items)}／候選 {candidate_count}／顯示 {display_count}／08永久紀錄 {record_added}"
+        )
+        return {
+            "ok": ok,
+            "message": message,
+            "execution_context": execution_context,
+            "execution_owner": "pages/7_股神推薦.py",
+            "settings": settings,
+            "scan_report": scan_report,
+            "universe_count": len(universe_items),
+            "candidate_count": candidate_count,
+            "display_count": display_count,
+            "record_added": int(record_added or 0),
+            "record_messages": list(record_msgs or [])[-20:],
+            "calibration_added": int(calibration_added or 0),
+            "calibration_summary": calibration_summary,
+            "calibration_messages": list(calibration_msgs or [])[-10:],
+            "notes": notes[-20:],
+            "changed_files": [
+                "godpick_latest_recommendations.json", "godpick_latest_run_anchor.json", "godpick_records.json",
+                "godpick_recommend_list.json", "godpick_rotation_history.json", "godpick_learning_state.json",
+                "godpick_calibration_samples.json",
+            ],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": f"07股神推薦模組自動執行例外：{type(exc).__name__}: {exc}",
+            "execution_context": execution_context,
+            "execution_owner": "pages/7_股神推薦.py",
+        }
+
+
 def main():
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 
@@ -14264,6 +14458,12 @@ def main():
     hot_pick_df = pd.DataFrame()
 
     if submit_recommend or submit_refresh or resume_scan_btn:
+        st.session_state[_k("recommend_execution_context_v191")] = {
+            "owner": "07_股神推薦",
+            "trigger": "手動斷點續掃" if resume_scan_btn else ("手動重新推薦" if submit_refresh else "手動開始推薦"),
+            "started_at": _now_text(),
+            "automation_version": "V191-H2",
+        }
         previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
             universe_items=universe_items,

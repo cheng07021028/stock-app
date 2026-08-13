@@ -24,9 +24,10 @@ def _now() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _report(ok: bool, message: str, *, details: Any = None, changed_files: list[str] | None = None, started: float | None = None) -> dict[str, Any]:
+def _report(ok: bool, message: str, *, details: Any = None, changed_files: list[str] | None = None, started: float | None = None, warning: bool = False) -> dict[str, Any]:
     return {
         "ok": bool(ok),
+        "warning": bool(warning and ok),
         "message": str(message or ""),
         "details": details if details is not None else {},
         "changed_files": list(changed_files or []),
@@ -87,14 +88,56 @@ def task_macro_full(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def task_official_factors(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Refresh official factors and verify the *content* business date.
+
+    V191 hotfix2 prevents a successful HTTP/save operation from being reported
+    as scheduler SUCCESS when the official cache itself did not advance.
+    """
     t0 = time.perf_counter(); cfg = cfg or {}
     try:
         from godpick_system_health_service import load_schedule_settings, run_official_factor_update_once
+        from official_factor_service import load_factor_cache, _factor_payload_business_date
+        from godpick_official_release_timing import evaluate_twse_t86_release_timing
         official = dict(load_schedule_settings() or {})
         official.update(cfg.get("official_options", {}) if isinstance(cfg.get("official_options"), dict) else {})
         official["enabled"] = True
         result = run_official_factor_update_once(official, push_github=True)
-        return _report(bool(result.get("ok")), result.get("message") or "官方因子更新完成", details=result, changed_files=["official_factors_cache.json", "official_factors_update_log.json"], started=t0)
+
+        cache = load_factor_cache(force_authority_restore=False)
+        official_date = _factor_payload_business_date(cache)
+        market = {}
+        try:
+            market = json.loads((BASE_DIR / "market_snapshot.json").read_text(encoding="utf-8-sig"))
+            if not isinstance(market, dict): market = {}
+        except Exception:
+            market = {}
+        market_date = str(
+            market.get("market_date") or market.get("twse_data_date") or market.get("otc_data_date")
+            or market.get("data_date") or ""
+        ).strip()[:10]
+        timing = evaluate_twse_t86_release_timing(
+            market_date=market_date, official_date=official_date, now=datetime.now(TZ)
+        )
+        timing_ok = bool(
+            timing.get("phase") == "T0_READY" or timing.get("t1_is_normal_now")
+        )
+        fetch_ok = bool(result.get("ok"))
+        content_ok = bool(official_date and market_date and timing_ok)
+        ok = bool(fetch_ok and content_ok)
+        details = dict(result) if isinstance(result, dict) else {"raw_result": result}
+        details["business_date_validation"] = {
+            "market_date": market_date, "official_date": official_date, **timing
+        }
+        if ok:
+            msg = f"官方因子更新完成且內容日期驗證通過：官方 {official_date}／市場 {market_date}｜{timing.get('headline','')}"
+        elif fetch_ok:
+            msg = (
+                f"官方因子抓取/保存完成，但內容日期未通過新鮮度驗證：官方 {official_date or '未驗證'}／"
+                f"市場 {market_date or '未驗證'}｜{timing.get('headline') or timing.get('detail') or '內容日期未前進'}；不得列為SUCCESS"
+            )
+        else:
+            msg = str(result.get("message") or "官方因子更新失敗")
+        return _report(ok, msg, details=details, changed_files=["official_factors_cache.json", "official_factors_update_log.json"], started=t0)
     except Exception as exc:
         return _report(False, f"官方因子更新失敗：{type(exc).__name__}: {exc}", started=t0)
 
@@ -258,7 +301,9 @@ def task_feedback_learning(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         from godpick_global_update_service import step_feedback_profile, step_learning_profile
         a=step_feedback_profile(BASE_DIR); b=step_learning_profile(BASE_DIR)
         ok=bool(a.get("ok",True) and b.get("ok",True))
-        return _report(ok, f"AI績效回饋/每日學習重建 {'完成' if ok else '部分失敗'}", details={"feedback":a,"learning":b}, changed_files=["godpick_performance_profile.json","godpick_learning_state.json"], started=t0)
+        warning=bool(ok and (a.get("warning") or b.get("warning") or not a.get("available", True)))
+        state_text = "完成（有警示）" if warning else ("完成" if ok else "部分失敗")
+        return _report(ok, f"AI績效回饋/每日學習重建 {state_text}", details={"feedback":a,"learning":b}, changed_files=["godpick_performance_profile.json","godpick_learning_state.json"], started=t0, warning=warning)
     except Exception as exc:
         return _report(False,f"AI績效回饋/每日學習重建失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -271,7 +316,8 @@ def task_durability_retry(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         audit=audit_core_durability(base_dir=BASE_DIR,write_audit=True)
         # Queueing is asynchronous; report current evidence, not a false permanent claim.
         failed=int(audit.get("critical_total",0) or 0)-int(audit.get("critical_remote_confirmed",0) or 0)
-        return _report(True,f"永久化待同步/失敗項目已重試排程 {len(msgs)} 項；目前尚待遠端Hash確認 {max(failed,0)} 項",details={"messages":msgs[-30:],"audit":audit},changed_files=["godpick_durability_outbox.json","godpick_durability_audit.json"],started=t0)
+        pending=max(failed,0)
+        return _report(True,f"永久化待同步/失敗項目已重試排程 {len(msgs)} 項；目前尚待遠端Hash確認 {pending} 項",details={"messages":msgs[-30:],"audit":audit},changed_files=["godpick_durability_outbox.json","godpick_durability_audit.json"],started=t0,warning=bool(pending))
     except Exception as exc:
         return _report(False,f"永久化重試失敗：{type(exc).__name__}: {exc}",started=t0)
 
@@ -290,64 +336,24 @@ def _page7_auto_universe(ns: dict[str,Any], master_df: pd.DataFrame, watchlist_m
 
 
 def task_auto_recommendation(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Run Page7 recommendation headlessly with the user's saved scan settings."""
+    """Invoke Page7's canonical automation runner; scheduler owns no pick logic."""
     t0=time.perf_counter(); cfg=cfg or {}
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/7_股神推薦.py",base_dir=BASE_DIR)
-        _require_headless_callables(ns, "Page7", ["load_watchlist_permanent", "save_records_sync_fast", "_load_watchlist_map", "_build_recommend_df"])
-        st=ns["__headless_st__"]
-        watch=ns["_load_watchlist_map"]() or {}
-        master=ns["_load_master_df"]()
-        if master is None or master.empty:
-            master=ns["_load_master_df_fallback_only"]()
-        if master is None or master.empty:
-            return _report(False,"自動股神推薦失敗：股票主檔為空",started=t0)
-        cats=["全部"]+(ns["_collect_all_categories"](master,watch) or [])
-        settings=ns["_load_persistent_recommend_scan_settings"](watch,cats)
-        if bool(cfg.get("force_full_market",False)):
-            settings["universe_mode"]="全市場"; settings["scan_limit"]="全部"
-        ns["_apply_recommend_scan_settings_to_state"](settings,sync_widgets=False)
-        payload=ns["_load_persistent_settings"](local_first=True)
-        weights=ns["_normalize_weight_map"](payload.get("applied_weights") or payload.get("score_weights"))
-        bridge=ns["_read_macro_mode_bridge"]()
-        weights=ns["_apply_macro_bridge_to_weights"](weights,bridge,enabled=True)
-        ns["GODPICK_ACTIVE_SCORE_WEIGHTS"]=weights.copy()
-        universe=_page7_auto_universe(ns,master,watch,settings)
-        if not universe:
-            return _report(False,"自動股神推薦失敗：掃描池為空",started=t0)
-        today=datetime.now(TZ).date(); start=today-timedelta(days=int(settings.get("days",120) or 120))
-        rec,category,hot=ns["_build_recommend_df"](
-            universe_items=universe,master_df=master,start_dt=start,end_dt=today,
-            min_total_score=float(settings.get("min_total_score",55)),min_signal_score=float(settings.get("min_signal_score",-2)),
-            selected_categories=settings.get("selected_categories") or ["全部"],mode=str(settings.get("recommend_mode") or "飆股模式"),
-            risk_strictness=str(settings.get("risk_strictness") or "標準"),min_prelaunch_score=float(settings.get("min_prelaunch_score",45)),
-            min_trade_score=float(settings.get("min_trade_score",45)),resume_scan=False,reuse_finished_checkpoint=False,
+        _require_headless_callables(ns, "Page7", ["_run_page07_automation_v191_h2"])
+        result=ns["_run_page07_automation_v191_h2"](dict(cfg)) or {}
+        ok=bool(result.get("ok"))
+        msg=str(result.get("message") or ("07股神推薦模組自動執行完成" if ok else "07股神推薦模組自動執行失敗"))
+        return _report(
+            ok, msg, details=result,
+            changed_files=list(result.get("changed_files") or [
+                "godpick_latest_recommendations.json","godpick_latest_run_anchor.json","godpick_records.json",
+                "godpick_rotation_history.json","godpick_learning_state.json"
+            ]), started=t0, warning=bool(result.get("warning"))
         )
-        rec,hot,_=ns["_postprocess_recommend_result_v164"](rec,hot,bridge,True,force=True)
-        candidate=st.session_state.get(ns["_k"]("candidate_diagnosis_store"))
-        if rec is None or rec.empty:
-            cond=ns["_conditional_reference_rows"](candidate,max_rows=8) if isinstance(candidate,pd.DataFrame) else pd.DataFrame()
-            if not cond.empty: rec=cond
-        save_ok=bool(ns["_save_recommend_result_to_state"](rec,category,hot))
-        source=candidate if isinstance(candidate,pd.DataFrame) and not candidate.empty else rec
-        # Synchronous permanent record upsert: a scheduler must never call a run complete before history is durable.
-        added,msgs=ns["_v159_auto_record_actionable_recommendations"](source,background_write=False)
-        extra=[]
-        if callable(ns.get("save_rotation_snapshot")):
-            try: extra.append(str(ns["save_rotation_snapshot"](source,background_remote=False)))
-            except Exception as e: extra.append(f"rotation:{e}")
-        if callable(ns.get("save_learning_run")):
-            try: extra.append(str(ns["save_learning_run"](source,rec,scan_report=st.session_state.get(ns["_k"]("scan_quality_report"),{}),metadata={"automation":"V191","scan_settings":settings},persist_remote=True,background_remote=False,pre_scored=True)[:2]))
-            except Exception as e: extra.append(f"learning:{e}")
-        if callable(ns.get("save_super_ai_run")):
-            try: extra.append(str(ns["save_super_ai_run"](source,rec,metadata={"automation":"V191","scan_settings":settings})))
-            except Exception as e: extra.append(f"super_ai:{e}")
-        scan_report=st.session_state.get(ns["_k"]("scan_quality_report"),{}) or {}
-        ok=bool(save_ok and isinstance(rec,pd.DataFrame))
-        return _report(ok,f"自動股神推薦完成：掃描 {len(universe)}／候選 {len(source) if isinstance(source,pd.DataFrame) else 0}／顯示 {len(rec) if isinstance(rec,pd.DataFrame) else 0}／永久紀錄 {added}",details={"settings":settings,"scan_report":scan_report,"record_messages":msgs[-20:],"experience_messages":extra[-10:]},changed_files=["godpick_latest_recommendations.json","godpick_latest_run_anchor.json","godpick_records.json","godpick_rotation_history.json","godpick_learning_state.json"],started=t0)
     except Exception as exc:
-        return _report(False,f"自動股神推薦失敗：{type(exc).__name__}: {exc}",started=t0)
+        return _report(False,f"07股神推薦模組自動執行失敗：{type(exc).__name__}: {exc}",started=t0)
 
 
 TASK_HANDLERS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
