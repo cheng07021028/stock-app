@@ -6709,9 +6709,19 @@ def main():
                 bg_state = _safe_str(bg_status.get("status"))
                 bg_count = int(bg_status.get("count") or 0)
                 if bg_state == "running":
-                    st.info(f"GitHub 大型推薦紀錄正在背景同步：{bg_count} 筆。可繼續操作，不需停留等待。")
+                    st.info(f"GitHub 大型推薦紀錄正在背景同步：{bg_count} 筆。H8 會自動處理版本衝突，可繼續操作。")
+                elif bg_state == "retry_pending":
+                    st.warning(
+                        f"GitHub 大型推薦紀錄暫未確認完成：{bg_count} 筆。"
+                        f"H8 已啟用 CAS 自動重取最新 SHA／同Hash確認／較新版本退讓；不需要連續按『儲存同步』。"
+                        f"明細：{_safe_str(bg_status.get('message'))}"
+                    )
                 elif bg_state == "failed":
-                    st.error(f"GitHub 背景備份失敗：{_safe_str(bg_status.get('message'))}；請按上方『儲存同步』重試。")
+                    _bg_msg = _safe_str(bg_status.get('message'))
+                    if "版本衝突" in _bg_msg or "HTTP 409" in _bg_msg:
+                        st.warning(f"偵測到舊版 GitHub 409 狀態；H8 下一輪同步會自動 CAS 重試，不需手動反覆儲存。明細：{_bg_msg}")
+                    else:
+                        st.error(f"GitHub 背景備份失敗：{_bg_msg}；請檢查 GitHub token/網路後再執行同步。")
                 elif bg_state == "success":
                     st.caption(f"GitHub 背景備份已完成：{bg_count} 筆｜{_safe_str(bg_status.get('finished_at'))}")
         except Exception:

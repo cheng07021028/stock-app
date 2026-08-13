@@ -51,6 +51,12 @@ RECORDS_MANIFEST_FILE = "godpick_records_manifest.json"
 
 _RECORDS_GITHUB_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-records-github")
 _RECORDS_GITHUB_LOCK = threading.Lock()
+# H8: queue coordination and actual network upload are different locks.  The
+# queue lock must stay short-lived; the upload lock serializes every in-process
+# writer of the 20-30MB records snapshot + its state file.
+_RECORDS_GITHUB_UPLOAD_LOCK = threading.RLock()
+_GITHUB_PATH_LOCKS_GUARD = threading.Lock()
+_GITHUB_PATH_LOCKS: dict[str, threading.RLock] = {}
 _RECORDS_GITHUB_PENDING: tuple[list[dict[str, Any]], dict[str, Any], str] | None = None
 _RECORDS_GITHUB_RUNNING = False
 _RECORDS_LOCAL_LOCK = threading.RLock()
@@ -1206,64 +1212,129 @@ def recover_records_from_github_history(
     return merged, details, True
 
 
+def _github_path_write_lock(path_name: str) -> threading.RLock:
+    """Return a process-wide lock for one GitHub contents path.
+
+    Streamlit sessions share a process.  Without a per-path lock, Page7/Page8
+    and the durability worker can fetch the same SHA and race the following PUT.
+    GitHub correctly returns HTTP 409 in that case.  H8 serializes same-process
+    writers while CAS retries still protect cross-process/GitHub-Actions races.
+    """
+    key = str(path_name or "").replace("\\", "/")
+    with _GITHUB_PATH_LOCKS_GUARD:
+        lock = _GITHUB_PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _GITHUB_PATH_LOCKS[key] = lock
+        return lock
+
+
+def _github_meta_sha(path_name: str, cfg: dict[str, str]) -> tuple[str, int, str]:
+    try:
+        current = requests.get(
+            _github_url(path_name),
+            headers=_github_headers(cfg["token"]),
+            params={"ref": cfg["branch"], "_": int(time.time() * 1000)},
+            timeout=(15, 60),
+        )
+        if current.status_code == 404:
+            return "", 404, "not found"
+        if current.status_code != 200:
+            return "", int(current.status_code), f"取得 SHA 失敗 HTTP {current.status_code}｜{current.text[:250]}"
+        meta = current.json() if current.content else {}
+        return (_safe_str(meta.get("sha")) if isinstance(meta, dict) else ""), 200, "ok"
+    except Exception as exc:
+        return "", 0, f"取得 SHA 例外：{exc}"
+
+
 def write_github_json(path_name: str, payload: Any, message: str = "update durable data") -> tuple[bool, str]:
+    """Conflict-safe GitHub contents write.
+
+    H8 fixes the observed 29.4MB recommendation-history HTTP 409.  Each attempt
+    re-fetches the current blob SHA (CAS), same-process writers are serialized,
+    and a 409/422 is treated as a retryable version race rather than a terminal
+    data error.  Verification still compares the actual remote JSON hash.
+    """
     cfg = github_config()
     if not cfg["token"]:
         return False, "未設定 GITHUB_TOKEN"
 
     safe_payload = _json_safe_value(payload)
-    # Compact JSON substantially reduces the 20+ MB recommendation-record file
-    # and therefore upload time, without changing its data structure.
     raw = json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     encoded = base64.b64encode(raw).decode("ascii")
     size_mb = len(raw) / (1024 * 1024)
-    upload_timeout = max(90, min(300, int(75 + size_mb * 8)))
-    attempts = 2 if size_mb >= 5 else 3
-
+    upload_timeout = max(90, min(360, int(90 + size_mb * 9)))
+    # Large payload conflicts are expensive, but two retries were insufficient
+    # in production. Four CAS rounds handle concurrent Page8/scheduler writers
+    # without turning a permanent network outage into an unbounded wait.
+    attempts = 4 if size_mb >= 5 else 5
+    wanted_hash = _json_hash(safe_payload)
     last_error = ""
-    for attempt in range(attempts):
-        try:
-            current = requests.get(
-                _github_url(path_name),
-                headers=_github_headers(cfg["token"]),
-                params={"ref": cfg["branch"], "_": int(time.time() * 1000)},
-                timeout=(15, 60),
-            )
-            sha = ""
-            if current.status_code == 200:
-                meta = current.json() if current.content else {}
-                sha = _safe_str(meta.get("sha")) if isinstance(meta, dict) else ""
-            elif current.status_code != 404:
-                last_error = f"取得 SHA 失敗 HTTP {current.status_code}｜{current.text[:250]}"
-                time.sleep(0.6 * (attempt + 1))
-                continue
+    conflict_count = 0
 
-            body: dict[str, Any] = {
-                "message": f"{message} @ {_now_text()}",
-                "content": encoded,
-                "branch": cfg["branch"],
-            }
-            if sha:
-                body["sha"] = sha
-            response = requests.put(
-                _github_url(path_name),
-                headers=_github_headers(cfg["token"]),
-                json=body,
-                timeout=(20, upload_timeout),
-            )
-            if response.status_code in (200, 201):
-                verify, verify_msg = read_github_json(path_name, None)
-                if verify is not None and _json_hash(verify) == _json_hash(safe_payload):
-                    return True, f"GitHub 寫入並以 raw 模式回讀驗證：{path_name}｜{size_mb:.1f} MB"
-                last_error = f"GitHub 寫入成功但回讀不一致：{verify_msg}"
-            elif response.status_code in (409, 422):
-                last_error = f"GitHub 版本衝突 HTTP {response.status_code}｜{response.text[:220]}"
-            else:
-                last_error = f"GitHub 寫入失敗 HTTP {response.status_code}｜{response.text[:350]}"
-        except Exception as exc:
-            last_error = f"GitHub 寫入例外：{exc}"
-        time.sleep(0.8 * (attempt + 1))
-    return False, f"{path_name}｜{last_error or '未知錯誤'}｜資料大小 {size_mb:.1f} MB"
+    with _github_path_write_lock(path_name):
+        for attempt in range(attempts):
+            sha, meta_status, meta_msg = _github_meta_sha(path_name, cfg)
+            if meta_status not in (200, 404):
+                last_error = meta_msg
+                time.sleep(min(3.0, 0.7 * (attempt + 1)))
+                continue
+            try:
+                body: dict[str, Any] = {
+                    "message": f"{message} @ {_now_text()}",
+                    "content": encoded,
+                    "branch": cfg["branch"],
+                }
+                if sha:
+                    body["sha"] = sha
+                response = requests.put(
+                    _github_url(path_name),
+                    headers=_github_headers(cfg["token"]),
+                    json=body,
+                    timeout=(20, upload_timeout),
+                )
+                if response.status_code in (200, 201):
+                    # For large files, avoid immediately downloading another
+                    # 20-30MB just to verify the PUT.  The Contents response
+                    # returns the new blob SHA; re-read only metadata and confirm
+                    # that SHA is still current.  The records gateway then writes
+                    # and verifies the small payload-hash state file.
+                    resp_meta = response.json() if response.content else {}
+                    content_meta = resp_meta.get("content", {}) if isinstance(resp_meta, dict) else {}
+                    accepted_sha = _safe_str(content_meta.get("sha")) if isinstance(content_meta, dict) else ""
+                    if size_mb >= 5 and accepted_sha:
+                        current_sha, verify_status, verify_msg = _github_meta_sha(path_name, cfg)
+                        if verify_status == 200 and current_sha == accepted_sha:
+                            suffix = f"｜CAS衝突自動重試 {conflict_count} 次" if conflict_count else ""
+                            return True, f"GitHub 大型檔寫入完成並以blob SHA驗證：{path_name}｜{size_mb:.1f} MB{suffix}"
+                        last_error = f"GitHub 大型檔寫入後版本已被接續：accepted={accepted_sha[:12]} current={current_sha[:12]}｜{verify_msg}"
+                    else:
+                        verify, verify_msg = read_github_json(path_name, None)
+                        if verify is not None and _json_hash(verify) == wanted_hash:
+                            suffix = f"｜CAS衝突自動重試 {conflict_count} 次" if conflict_count else ""
+                            return True, f"GitHub 寫入並回讀驗證：{path_name}｜{size_mb:.1f} MB{suffix}"
+                        last_error = f"GitHub 寫入成功但回讀不一致：{verify_msg}"
+                elif response.status_code in (409, 422):
+                    conflict_count += 1
+                    last_error = f"GitHub 版本衝突 HTTP {response.status_code}｜{response.text[:220]}"
+                    # The competing writer may have written exactly our payload.
+                    # For small files this verification is cheap; for large files
+                    # the records-specific state check below avoids re-downloading
+                    # 30MB and this loop simply rebases to the newest SHA.
+                    if size_mb < 5:
+                        try:
+                            verify, _ = read_github_json(path_name, None)
+                            if verify is not None and _json_hash(verify) == wanted_hash:
+                                return True, f"GitHub 版本衝突後確認遠端已是同內容：{path_name}"
+                        except Exception:
+                            pass
+                else:
+                    last_error = f"GitHub 寫入失敗 HTTP {response.status_code}｜{response.text[:350]}"
+            except Exception as exc:
+                last_error = f"GitHub 寫入例外：{exc}"
+            # deterministic bounded backoff; no hidden infinite retry
+            time.sleep(min(5.0, 1.0 + attempt * 1.25))
+    return False, f"{path_name}｜{last_error or '未知錯誤'}｜資料大小 {size_mb:.1f} MB｜CAS重試 {conflict_count} 次"
 
 
 def _firebase_config() -> dict[str, str]:
@@ -1813,14 +1884,86 @@ def write_records_firestore(records: list[dict[str, Any]], state: dict[str, Any]
 
 
 
-def _records_github_sync_worker() -> None:
-    """Coalescing background uploader for the large records JSON.
+def _state_revision_v191_h8(state: Any) -> int:
+    try:
+        return int((state or {}).get("revision") or 0) if isinstance(state, dict) else 0
+    except Exception:
+        return 0
 
-    Streamlit reruns do not terminate the Python process, so the single worker
-    can finish the GitHub backup after the UI has returned.  New mutations
-    replace the pending snapshot; after the current upload completes, the
-    worker immediately uploads the newest snapshot instead of every
-    intermediate version.
+
+def _records_remote_state_relation_v191_h8(state: dict[str, Any]) -> tuple[str, str]:
+    """Return same/newer/older/unknown using the tiny remote state file."""
+    try:
+        remote, msg = read_github_json(RECORDS_STATE_FILE, {})
+    except Exception as exc:
+        return "unknown", f"讀取遠端records state例外：{exc}"
+    if not isinstance(remote, dict) or not remote:
+        return "unknown", msg
+    local_hash = _safe_str(state.get("payload_hash"))
+    remote_hash = _safe_str(remote.get("payload_hash"))
+    if local_hash and remote_hash == local_hash:
+        return "same", f"遠端state已同Hash｜{remote_hash[:12]}"
+    local_rev = _state_revision_v191_h8(state)
+    remote_rev = _state_revision_v191_h8(remote)
+    if remote_rev and local_rev and remote_rev > local_rev:
+        return "newer", f"遠端已有較新revision {remote_rev}>{local_rev}｜hash {remote_hash[:12]}"
+    if remote_rev and local_rev and remote_rev < local_rev:
+        return "older", f"遠端revision較舊 {remote_rev}<{local_rev}"
+    return "unknown", f"遠端state hash不同但revision無法判定｜{msg}"
+
+
+def _sync_records_github_snapshot_v191_h8(records: list[dict[str, Any]], state: dict[str, Any], reason: str) -> tuple[bool, str]:
+    """Single H8 gateway for the large records snapshot + state pair.
+
+    1) Same-process Page7/Page8/background writers are serialized.
+    2) Same-hash remote state means no 29MB re-upload.
+    3) A stale local snapshot yields to a newer remote revision instead of
+       overwriting it after a 409 race.
+    4) Contents writes still use CAS retry for cross-process races.
+    """
+    with _RECORDS_GITHUB_UPLOAD_LOCK:
+        relation, relation_msg = _records_remote_state_relation_v191_h8(state)
+        if relation == "same":
+            return True, f"GitHub records 已同Hash，略過大型重傳｜{relation_msg}"
+        if relation == "newer":
+            return True, f"GitHub records 本輪快照已被較新權威取代，安全略過舊寫入｜{relation_msg}"
+
+        gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
+        gh1, ghm1 = write_github_json(gh_path, records, f"{reason}: persist godpick records")
+        if not gh1:
+            # A competing writer may have completed while our CAS retries ran.
+            relation2, msg2 = _records_remote_state_relation_v191_h8(state)
+            if relation2 in {"same", "newer"}:
+                return True, f"{ghm1}｜衝突後已由遠端較新/同Hash權威收斂：{msg2}"
+            return False, f"{ghm1}｜records 未寫入，state不前推"
+
+        # Do not publish an older state over a newer writer that completed after
+        # our data PUT.  This keeps data/state monotonic under cross-process races.
+        relation3, msg3 = _records_remote_state_relation_v191_h8(state)
+        if relation3 == "newer":
+            return True, f"records已寫入；但較新遠端版本已接續，本輪舊state安全略過｜{msg3}"
+        if relation3 == "same":
+            return True, f"records寫入後遠端state已同Hash｜{msg3}"
+
+        gh2, ghm2 = write_github_json(RECORDS_STATE_FILE, state, f"{reason}: persist godpick records state")
+        if not gh2:
+            relation4, msg4 = _records_remote_state_relation_v191_h8(state)
+            if relation4 in {"same", "newer"}:
+                return True, f"{ghm1}｜state寫入衝突但遠端已收斂：{msg4}"
+            return False, f"{ghm1}｜{ghm2}"
+        relation5, msg5 = _records_remote_state_relation_v191_h8(state)
+        if relation5 in {"same", "newer"}:
+            return True, f"{ghm1}｜{ghm2}｜最終驗證：{msg5}"
+        return False, f"{ghm1}｜{ghm2}｜最終state驗證未收斂：{msg5}"
+
+
+def _records_github_sync_worker() -> None:
+    """Coalescing H8 uploader for the large records authority.
+
+    New snapshots replace pending old ones.  409/422 races are handled inside
+    the CAS gateway; a stale snapshot can also safely yield to a newer remote
+    revision.  The UI therefore no longer asks the user to manually press save
+    for a transient version conflict.
     """
     global _RECORDS_GITHUB_PENDING, _RECORDS_GITHUB_RUNNING
     while True:
@@ -1839,21 +1982,32 @@ def _records_github_sync_worker() -> None:
                 "count": len(records),
                 "payload_hash": state.get("payload_hash"),
                 "started_at": _now_text(),
+                "auto_retry": True,
+                "version": "V191-H8-CAS",
             },
         )
-        gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
-        gh1, ghm1 = write_github_json(gh_path, records, f"{reason}: persist godpick records")
-        gh2, ghm2 = write_github_json(RECORDS_STATE_FILE, state, f"{reason}: persist godpick records state") if gh1 else (False, "records 未寫入，略過狀態")
-        ok = bool(gh1 and gh2)
+        ok, msg = _sync_records_github_snapshot_v191_h8(records, state, reason)
+        retry_count = 0
+        # One bounded worker-level retry complements the per-PUT CAS loop.  It
+        # handles the case where another process completes an entire records+
+        # state transaction while this worker was uploading.  Never infinite.
+        if not ok and ("版本衝突" in msg or "state" in msg or "CAS" in msg):
+            retry_count = 1
+            time.sleep(1.5)
+            ok, retry_msg = _sync_records_github_snapshot_v191_h8(records, state, f"{reason} | H8 retry")
+            msg = f"{msg}｜H8自動重試：{retry_msg}"
         write_local_json_atomic(
             RECORDS_GITHUB_SYNC_STATUS_FILE,
             {
-                "status": "success" if ok else "failed",
+                "status": "success" if ok else "retry_pending",
                 "reason": reason,
                 "count": len(records),
                 "payload_hash": state.get("payload_hash"),
                 "finished_at": _now_text(),
-                "message": f"{ghm1}｜{ghm2}",
+                "message": msg,
+                "auto_retry": not ok,
+                "auto_retry_count": retry_count,
+                "version": "V191-H8-CAS",
             },
         )
 
@@ -2322,11 +2476,9 @@ def save_records_permanent(
     report.firestore_ok = fs_ok
     report.firestore_message = fs_msg
 
-    gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
-    gh1, ghm1 = write_github_json(gh_path, records, "persist godpick records")
-    gh2, ghm2 = write_github_json(RECORDS_STATE_FILE, state, "persist godpick records state") if gh1 else (False, "records 未寫入，略過狀態")
-    report.github_ok = bool(gh1 and gh2)
-    report.github_message = f"{ghm1}｜{ghm2}"
+    gh_ok, gh_msg = _sync_records_github_snapshot_v191_h8(records, state, reason)
+    report.github_ok = bool(gh_ok)
+    report.github_message = gh_msg
 
     if _configured_remote_exists():
         report.permanent_ok = bool(report.local_ok and (report.github_ok or report.firestore_ok))

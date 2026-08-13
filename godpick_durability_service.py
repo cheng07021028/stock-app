@@ -27,7 +27,7 @@ import json
 import threading
 import time
 
-DURABILITY_VERSION = "godpick_durability_v191_20260813_hotfix3"
+DURABILITY_VERSION = "godpick_durability_v191_20260813_hotfix8_records_cas"
 OUTBOX_FILE = "godpick_durability_outbox.json"
 AUDIT_FILE = "godpick_durability_audit.json"
 
@@ -516,7 +516,7 @@ def audit_core_durability(*, base_dir: str | Path | None = None, write_audit: bo
                     remote_confirmed = True
                     remote_status = "success-specialized"
                     remote_hash = payload_hash
-                elif str(gh_status.get("status") or "") in {"pending", "running"}:
+                elif str(gh_status.get("status") or "") in {"pending", "running", "retry_pending"}:
                     remote_status = "pending-specialized"
             except Exception:
                 pass

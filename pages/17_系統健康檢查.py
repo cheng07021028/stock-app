@@ -82,7 +82,7 @@ if callable(load_auto_scheduler_settings):
         st.info(
             "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
             "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
-            "V191 2026-08-13 Hotfix7：修正Page7→Page10清單分裂、永久化Hash永遠pending、舊未來slot誤標完成；Hotfix6：強制驗證與到期執行新增真實排程進度回報；可即時看到第幾項／總項數、目前工作、成功/警示/失敗/阻擋及最近完成項目。Hotfix5：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
+            "V191 2026-08-13 Hotfix8：修正股神推薦紀錄大型GitHub備份HTTP 409版本衝突，導入同檔序列化、CAS重取SHA、同Hash略過、較新權威退讓與有限自動重試；Hotfix7：修正Page7→Page10清單分裂、永久化Hash永遠pending、舊未來slot誤標完成；Hotfix6：強制驗證與到期執行新增真實排程進度回報；可即時看到第幾項／總項數、目前工作、成功/警示/失敗/阻擋及最近完成項目。Hotfix5：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
             "強制全部批次若因 rerun/redeploy 中斷，或其中工作 FAILED/BLOCKED，該工作會保留在 pending；12 小時內下一次中央喚醒只續跑未完成工作；失效 PID 鎖會自動回收。"
             "強制驗證使用獨立 FORCE 執行鍵，不會再吃掉當日晚間正式排程時段；官方因子只有『抓取/保存＋內容日期驗證』都通過才算 SUCCESS。"
             "07 自動推薦由第7頁自己的正式推薦流程執行；Hotfix5 會先確認/救援第8頁推薦歷史權威，再進行昂貴全市場掃描，避免掃完才因權威鎖失敗；結果仍永久寫入第8頁推薦紀錄。"
