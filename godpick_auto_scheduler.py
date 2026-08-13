@@ -16,10 +16,11 @@ from zoneinfo import ZoneInfo
 import copy
 import json
 import os
+import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260812"
+VERSION = "godpick_auto_scheduler_v191_20260813_hotfix1"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -247,21 +248,125 @@ def _dependency_check(job_cfg:dict[str,Any],status:dict[str,Any],now:datetime)->
     return True,""
 
 
+def _pid_alive(pid: Any, owner_host: str = "") -> bool | None:
+    """Return True/False for a same-host PID, None when another host owns it."""
+    try:
+        pid_i = int(pid or 0)
+    except Exception:
+        return False
+    if pid_i <= 0:
+        return False
+    current_host = socket.gethostname()
+    if owner_host and owner_host != current_host:
+        return None
+    if pid_i == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_i)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return None
+    try:
+        os.kill(pid_i, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return None
+
+
+def _read_lock_meta() -> dict[str, Any]:
+    try:
+        raw = json.loads(LOCK_FILE.read_text(encoding="utf-8-sig")) if LOCK_FILE.exists() else {}
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
 def _acquire_lock(max_age_minutes:int=240)->tuple[bool,str]:
+    """Acquire scheduler lock and immediately reclaim locks left by a dead PID."""
     try:
         if LOCK_FILE.exists():
-            age=time.time()-LOCK_FILE.stat().st_mtime
-            if age<max_age_minutes*60: return False,f"中央排程已有執行中鎖定（{age/60:.1f}分鐘）"
+            age=max(0.0, time.time()-LOCK_FILE.stat().st_mtime)
+            meta=_read_lock_meta()
+            alive=_pid_alive(meta.get("pid"), str(meta.get("host") or ""))
+            if alive is True:
+                return False,f"中央排程已有執行中鎖定（PID {meta.get('pid')}，{age/60:.1f}分鐘）"
+            if alive is None and age<max_age_minutes*60:
+                return False,f"中央排程可能由其他主機執行中（{age/60:.1f}分鐘）"
+            # Same-host dead PID or genuinely stale cross-host lock: reclaim now.
             LOCK_FILE.unlink(missing_ok=True)
-        LOCK_FILE.write_text(json.dumps({"pid":os.getpid(),"started_at":now_text()},ensure_ascii=False),encoding="utf-8")
+        payload={"pid":os.getpid(),"host":socket.gethostname(),"started_at":now_text(),"updated_at":now_text(),"current_job":""}
+        LOCK_FILE.write_text(json.dumps(payload,ensure_ascii=False),encoding="utf-8")
         return True,""
     except Exception as exc:
         return False,f"排程鎖建立失敗：{exc}"
 
 
+def _touch_lock(current_job: str = "") -> None:
+    try:
+        if not LOCK_FILE.exists():
+            return
+        meta=_read_lock_meta()
+        if int(meta.get("pid") or 0) != os.getpid():
+            return
+        meta["updated_at"]=now_text()
+        meta["current_job"]=str(current_job or "")
+        LOCK_FILE.write_text(json.dumps(meta,ensure_ascii=False),encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _release_lock():
-    try: LOCK_FILE.unlink(missing_ok=True)
-    except Exception: pass
+    try:
+        meta=_read_lock_meta()
+        if not meta or int(meta.get("pid") or 0)==os.getpid():
+            LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _repair_failed_completed_keys(status: dict[str, Any]) -> int:
+    """V191 hotfix: FAILED/BLOCKED slots must remain retryable within grace window."""
+    completed=list(status.get("completed_run_keys",[]) or [])
+    if not completed:
+        return 0
+    bad=set()
+    jobs=status.get("jobs") if isinstance(status.get("jobs"),dict) else {}
+    for job, row in jobs.items():
+        if not isinstance(row,dict) or row.get("last_status")=="SUCCESS":
+            continue
+        slot=str(row.get("last_slot") or "").strip()
+        if slot:
+            bad.add(f"{job}|{slot}")
+    if not bad:
+        return 0
+    repaired=[k for k in completed if k not in bad]
+    removed=len(completed)-len(repaired)
+    status["completed_run_keys"]=repaired[-1200:]
+    return removed
+
+
+def _checkpoint_runtime(status: dict[str, Any], history: list[dict[str, Any]], cfg: dict[str, Any], reason: str) -> None:
+    """Persist after every job so a Streamlit rerun/process restart cannot erase progress."""
+    history[:] = history[-int(cfg.get("history_keep",400)):]
+    status["updated_at"]=now_text()
+    try:
+        _persist_runtime(STATUS_FILE,status,f"V191 scheduler checkpoint｜{reason}")
+    except Exception:
+        pass
+    try:
+        _persist_runtime(HISTORY_FILE,{"version":VERSION,"updated_at":now_text(),"records":history},f"V191 scheduler history checkpoint｜{reason}")
+    except Exception:
+        pass
 
 
 def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> dict[str,Any]:
@@ -271,39 +376,81 @@ def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> di
     attempts=max(1,int(global_cfg.get("retry_count",2) or 0)+1); delay=int(global_cfg.get("retry_delay_seconds",20) or 20)
     last={}
     for n in range(1,attempts+1):
+        _touch_lock(job)
         try: last=handler(dict(job_cfg.get("options") or {})) or {}
         except Exception as exc: last={"ok":False,"message":f"{type(exc).__name__}: {exc}"}
         last["attempt"]=n; last["max_attempts"]=attempts
         if last.get("ok"): break
-        if n<attempts: time.sleep(delay)
+        if n<attempts:
+            _touch_lock(f"{job}｜等待重試 {n+1}/{attempts}")
+            time.sleep(delay)
+    _touch_lock(job)
     return last
 
 
 def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None) -> dict[str,Any]:
     now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()
     status.setdefault("version",VERSION); status.setdefault("jobs",{}); status.setdefault("completed_run_keys",[])
-    status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
+    repaired_count=_repair_failed_completed_keys(status)
+    status["version"]=VERSION; status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
+
+    # If a user-triggered force-all batch was interrupted by a rerun/redeploy,
+    # the next scheduler wakeup resumes only its unfinished jobs for up to 12h.
+    resumed_force=False
+    prior_active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
+    if not force_all_enabled and not selected_jobs and prior_active.get("mode")=="force_all":
+        pending=[str(x) for x in (prior_active.get("pending_jobs") or []) if str(x) in JOB_LABELS]
+        try:
+            started_dt=datetime.strptime(str(prior_active.get("started_at") or ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
+            age_hours=(now-started_dt).total_seconds()/3600
+        except Exception:
+            age_hours=999
+        if pending and 0 <= age_hours <= 12:
+            force_all_enabled=True; selected_jobs=pending; resumed_force=True
+        elif prior_active:
+            status["last_interrupted_run"]={**prior_active,"abandoned_at":now_text(now),"reason":"超過12小時，未自動續跑"}
+            status.pop("active_run",None)
+
     if not cfg.get("enabled") and not force_all_enabled:
         return {"ok":True,"skipped":True,"message":"V191中央自動排程目前未啟用；未執行任何工作。","executed":[],"settings":cfg,"status":status}
     if cfg.get("weekdays_only",True) and now.weekday()>=5 and not force_all_enabled:
         return {"ok":True,"skipped":True,"message":"今日為週末，依設定不執行自動交易資料工作。","executed":[],"settings":cfg,"status":status}
     lock_ok,lock_msg=(True,"") if simulate else _acquire_lock()
     if not lock_ok: return {"ok":False,"skipped":True,"message":lock_msg,"executed":[],"settings":cfg,"status":status}
+
+    enabled_order=[job for job,jc in cfg.get("jobs",{}).items() if bool(jc.get("enabled",False)) and (not selected_jobs or job in selected_jobs)]
+    if not simulate:
+        if not resumed_force:
+            status["active_run"]={
+                "mode":"force_all" if force_all_enabled else "scheduled",
+                "started_at":now_text(now),"updated_at":now_text(now),"pid":os.getpid(),"host":socket.gethostname(),
+                "pending_jobs":list(enabled_order),"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[],
+            }
+        else:
+            status["active_run"]["resumed_at"]=now_text(now)
+            status["active_run"]["pid"]=os.getpid(); status["active_run"]["host"]=socket.gethostname()
+        if repaired_count:
+            status["last_repair_message"]=f"已清除 {repaired_count} 個舊版誤標的失敗完成鍵，恢復可重試。"
+        _checkpoint_runtime(status,history,cfg,"run-start")
+
     executed=[]; overall=True
     try:
         for job,job_cfg in cfg.get("jobs",{}).items():
             if selected_jobs and job not in selected_jobs: continue
             if not bool(job_cfg.get("enabled",False)): continue
             due=_due_slots(job_cfg,now,int(cfg.get("grace_minutes",35)),force=force_all_enabled)
+            job_had_slot=False
             for slot in due:
                 key=_run_key(job,slot)
                 if _already_done(status,key) and not force_all_enabled: continue
+                job_had_slot=True
+                _touch_lock(job)
                 deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
-                started=now_text()
+                started=now_text(now) if simulate else now_text()
                 if not deps_ok:
-                    result={"ok":False,"blocked":True,"message":deps_msg,"finished_at":now_text()}
+                    result={"ok":False,"blocked":True,"message":deps_msg,"finished_at":now_text(now) if simulate else now_text()}
                 elif simulate:
-                    result={"ok":True,"simulated":True,"message":"模擬：到期且前置條件已通過，未實際執行。","finished_at":now_text()}
+                    result={"ok":True,"simulated":True,"message":"模擬：到期且前置條件已通過，未實際執行。","finished_at":now_text(now)}
                 else:
                     result=_execute_one(job,job_cfg,cfg)
                 row={
@@ -314,16 +461,42 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 executed.append(row); history.append({k:v for k,v in row.items() if k != "details"})
                 js=status["jobs"].setdefault(job,{})
                 js.update({"label":JOB_LABELS.get(job,job),"last_status":row["status"],"last_run_at":row["finished_at"],"last_message":row["message"],"last_duration_seconds":row.get("duration_seconds"),"last_slot":row["slot"]})
-                if row["status"]=="SUCCESS": js["last_success_at"]=row["finished_at"]
-                else: overall=False
+                completed=list(status.get("completed_run_keys",[]) or [])
+                if row["status"]=="SUCCESS":
+                    js["last_success_at"]=row["finished_at"]
+                    if key not in completed: completed.append(key)
+                else:
+                    overall=False
+                    # Critical V191 fix: a failed/blocked slot is NOT complete.
+                    completed=[x for x in completed if x != key]
+                    js["last_failed_at"]=row["finished_at"]
+                status["completed_run_keys"]=completed[-1200:]
                 if not simulate:
-                    status["completed_run_keys"]=(status.get("completed_run_keys",[])+[key])[-1200:]
+                    active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
+                    if row["status"]=="FAILED" and job not in active.get("failed_jobs",[]): active.setdefault("failed_jobs",[]).append(job)
+                    if row["status"]=="BLOCKED" and job not in active.get("blocked_jobs",[]): active.setdefault("blocked_jobs",[]).append(job)
+                    active["last_job"]=job; active["last_status"]=row["status"]; active["updated_at"]=now_text()
+                    status["last_summary"]={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":True}
+                    _checkpoint_runtime(status,history,cfg,f"after-{job}-{row['status'].lower()}")
+            if not simulate and job_had_slot:
+                active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
+                pending=active.get("pending_jobs") if isinstance(active.get("pending_jobs"),list) else []
+                active["pending_jobs"]=[x for x in pending if x != job]
+                if job not in active.get("completed_jobs",[]): active.setdefault("completed_jobs",[]).append(job)
+                active["updated_at"]=now_text()
+                _checkpoint_runtime(status,history,cfg,f"job-finished-{job}")
+
         history=history[-int(cfg.get("history_keep",400)):]
-        status["updated_at"]=now_text(); status["last_summary"]={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED")}
+        summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
+        status["updated_at"]=now_text(); status["last_summary"]=summary
         if not simulate:
-            _persist_runtime(STATUS_FILE,status,"V191 scheduler execution status")
-            _persist_runtime(HISTORY_FILE,{"version":VERSION,"updated_at":now_text(),"records":history},"V191 scheduler execution history")
-        return {"ok":overall,"message":f"V191排程本輪執行 {len(executed)} 項：成功 {sum(1 for x in executed if x['status']=='SUCCESS')}／失敗 {sum(1 for x in executed if x['status']=='FAILED')}／前置阻擋 {sum(1 for x in executed if x['status']=='BLOCKED')}","executed":executed,"settings":cfg,"status":status}
+            active=status.pop("active_run",None)
+            if isinstance(active,dict):
+                active["finished_at"]=now_text(); active["summary"]=summary
+                status["last_completed_run"]=active
+            _checkpoint_runtime(status,history,cfg,"run-finished")
+        resume_text="（續跑上次中斷的強制批次）" if resumed_force else ""
+        return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count}
     finally:
         if not simulate: _release_lock()
 

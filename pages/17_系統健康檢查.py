@@ -81,7 +81,17 @@ if callable(load_auto_scheduler_settings):
         st.info(
             "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
             "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
+            "V191 2026-08-13 Hotfix：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
+            "強制全部批次若因 rerun/redeploy 中斷，12 小時內下一次中央喚醒會續跑未完成工作；失效 PID 鎖會自動回收。"
         )
+        _active_run = (_auto_status.get("active_run") or {}) if isinstance(_auto_status, dict) else {}
+        if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
+            _pending_labels = [AUTO_JOB_LABELS.get(str(x), str(x)) for x in (_active_run.get("pending_jobs") or [])]
+            st.warning(
+                f"偵測到未完成排程批次：模式={_active_run.get('mode', 'unknown')}；"
+                f"目前/最後工作={AUTO_JOB_LABELS.get(str(_active_run.get('last_job') or ''), str(_active_run.get('last_job') or '尚未開始'))}；"
+                f"待續跑 {len(_pending_labels)} 項。下一次中央喚醒會依 Hotfix 規則續跑。"
+            )
         _m1, _m2, _m3, _m4 = st.columns(4)
         _m1.metric("總開關", "啟用" if _auto_cfg.get("enabled") else "停用")
         _m2.metric("已啟用工作", sum(1 for x in (_auto_cfg.get("jobs") or {}).values() if isinstance(x, dict) and x.get("enabled")))

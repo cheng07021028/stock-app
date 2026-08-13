@@ -66,9 +66,15 @@ page10=load_page_namespace("pages/10_推薦清單.py",base_dir=ROOT)
 page7=load_page_namespace("pages/7_股神推薦.py",base_dir=ROOT)
 assert callable(page0.get("_v70_run_one_click_update_and_write"))
 assert callable(page8.get("_refresh_latest_prices"))
+assert callable(page8.get("save_records_sync_fast"))
+assert callable(page8.get("save_records_permanent"))
 assert callable(page10.get("_update_formal_n_day_metrics_v98"))
 assert callable(page10.get("_update_night_hit_tracking_v101"))
+assert callable(page10.get("save_records_permanent"))
+assert callable(page10.get("save_named_json_permanent"))
 assert callable(page7.get("_build_recommend_df"))
+assert callable(page7.get("load_watchlist_permanent"))
+assert callable(page7.get("save_records_sync_fast"))
 
 # Page0 exact V70 one-click deterministic replay: all manual business substeps are included.
 page0["_fetch_market_with_fallback"]=lambda d,realtime=False:{"ok":True,"close":100,"used_date":str(d),"source":"mock"}

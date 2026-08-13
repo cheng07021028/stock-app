@@ -22,6 +22,7 @@ try:
         return cand.copy(),pd.DataFrame(),pd.DataFrame()
     ns={
         "__headless_st__":st,"_k":k,
+        "load_watchlist_permanent":lambda:({},[]),"save_records_sync_fast":lambda *a,**k:None,
         "_load_watchlist_map":lambda:{},"_load_master_df":lambda:master,"_load_master_df_fallback_only":lambda:master,
         "_collect_all_categories":lambda m,w:["電子"],
         "_load_persistent_recommend_scan_settings":lambda w,c:{"universe_mode":"全市場","group":"","days":120,"scan_limit":100,"selected_categories":["全部"],"min_total_score":55.0,"min_signal_score":-2.0,"min_prelaunch_score":45.0,"min_trade_score":45.0,"recommend_mode":"綜合模式","risk_strictness":"標準","pick_strategy":"結合版"},

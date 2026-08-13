@@ -112,6 +112,15 @@ def task_super_ai_context(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         return _report(False, f"SuperAI市場情境更新失敗：{type(exc).__name__}: {exc}", started=t0)
 
 
+def _require_headless_callables(ns: dict[str, Any], page_name: str, names: list[str]) -> None:
+    missing = [name for name in names if not callable(ns.get(name))]
+    if missing:
+        raise RuntimeError(
+            f"{page_name} headless載入不完整，缺少可呼叫函式：{', '.join(missing)}；"
+            "請檢查 APP_AUTH_GUARD_V84 與 headless loader 相容性"
+        )
+
+
 def _load_page8_records():
     from godpick_persistence_service import load_records_permanent
     rows, msgs = load_records_permanent()
@@ -135,6 +144,7 @@ def task_record_latest_price(cfg: dict[str, Any] | None = None) -> dict[str, Any
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns = load_page_namespace("pages/8_股神推薦紀錄.py", base_dir=BASE_DIR)
+        _require_headless_callables(ns, "Page8", ["_refresh_latest_prices", "_save_records_dual", "save_records_sync_fast"])
         df, load_msgs = _load_page8_records()
         ensure = ns.get("_ensure_godpick_record_columns")
         if callable(ensure): df = ensure(df)
@@ -194,6 +204,7 @@ def task_recommend_list_performance(cfg: dict[str, Any] | None = None) -> dict[s
             max_workers=int(cfg.get("max_workers",12) or 12), stale_minutes=int(cfg.get("stale_minutes",30) or 30), process_all=bool(cfg.get("process_all",True)),
         )
         ns=load_page_namespace("pages/10_推薦清單.py",base_dir=BASE_DIR)
+        _require_headless_callables(ns, "Page10", ["_sync_records", "save_records_permanent", "save_named_json_permanent"])
         df,msgs=_load_recommend_list(); sync_ok,sync_msgs=ns["_sync_records"](df)
         ok=bool((result or {}).get("ok",True) and sync_ok)
         return _report(ok,f"推薦清單績效更新完成；永久同步 {'成功' if sync_ok else '失敗'}",details={"performance":result,"load_messages":msgs[-10:],"sync_messages":sync_msgs[-20:]},changed_files=["godpick_recommend_list.json","godpick_records.json"],started=t0)
@@ -206,6 +217,7 @@ def task_recommend_list_n_day(cfg: dict[str, Any] | None = None) -> dict[str, An
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
+        _require_headless_callables(ns, "Page10", ["_update_formal_n_day_metrics_v98", "_sync_records", "save_records_permanent", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
         out,summary=ns["_update_formal_n_day_metrics_v98"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
         ok_sync,sync_msgs=ns["_sync_records"](out)
@@ -220,6 +232,7 @@ def task_recommend_list_hits(cfg: dict[str, Any] | None = None) -> dict[str, Any
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/10_推薦清單.py", base_dir=BASE_DIR)
+        _require_headless_callables(ns, "Page10", ["_update_night_hit_tracking_v101", "_sync_records", "save_records_permanent", "save_named_json_permanent"])
         df,msgs=_load_recommend_list()
         out,summary=ns["_update_night_hit_tracking_v101"](df,max_rows=int(cfg.get("max_rows",300) or 300),show_progress=False)
         ok_sync,sync_msgs=ns["_sync_records"](out)
@@ -282,6 +295,7 @@ def task_auto_recommendation(cfg: dict[str, Any] | None = None) -> dict[str, Any
     try:
         from godpick_headless_page_loader import load_page_namespace
         ns=load_page_namespace("pages/7_股神推薦.py",base_dir=BASE_DIR)
+        _require_headless_callables(ns, "Page7", ["load_watchlist_permanent", "save_records_sync_fast", "_load_watchlist_map", "_build_recommend_df"])
         st=ns["__headless_st__"]
         watch=ns["_load_watchlist_map"]() or {}
         master=ns["_load_master_df"]()

@@ -116,11 +116,53 @@ class HeadlessStreamlit:
 
 
 def _strip_auth_guard(source: str) -> str:
-    return re.sub(
-        r"(?ms)^\s*# >>> APP_AUTH_GUARD_V84.*?^\s*# <<< APP_AUTH_GUARD_V84\s*\n?",
-        "",
-        source,
-    )
+    """Remove only the interactive login check inside APP_AUTH_GUARD_V84.
+
+    V191 originally removed the *entire* marked block.  Pages 4/5/7/8/10 also
+    keep persistence-service imports in that block, so headless automation lost
+    symbols such as ``load_watchlist_permanent`` and ``save_records_permanent``.
+    Keep every non-auth line and strip only the ``require_login`` try/except.
+    """
+    lines = source.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    start_marker = "# >>> APP_AUTH_GUARD_V84"
+    end_marker = "# <<< APP_AUTH_GUARD_V84"
+    while i < len(lines):
+        if start_marker not in lines[i]:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        block: list[str] = []
+        i += 1
+        while i < len(lines) and end_marker not in lines[i]:
+            block.append(lines[i])
+            i += 1
+        if i < len(lines) and end_marker in lines[i]:
+            i += 1
+
+        auth_import = next((n for n, line in enumerate(block) if "from app_auth import require_login" in line), None)
+        if auth_import is None:
+            out.extend(block)
+            continue
+
+        auth_start = auth_import
+        while auth_start > 0 and block[auth_start - 1].strip() == "":
+            auth_start -= 1
+        if auth_start > 0 and block[auth_start - 1].lstrip().startswith("try:"):
+            auth_start -= 1
+
+        auth_end = next((n for n in range(auth_import, len(block)) if "st.stop()" in block[n]), None)
+        if auth_end is None:
+            # Fail safe: if the marker shape changes, keep the block rather than
+            # accidentally deleting business imports again.
+            out.extend(block)
+            continue
+
+        out.extend(block[:auth_start])
+        out.extend(block[auth_end + 1:])
+    return "".join(out)
 
 
 def load_page_namespace(page_path: str | Path, *, base_dir: str | Path | None = None, session_state: dict[str, Any] | None = None) -> dict[str, Any]:
