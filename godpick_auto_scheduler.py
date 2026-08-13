@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260813_hotfix5"
+VERSION = "godpick_auto_scheduler_v191_20260813_hotfix6_progress"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -393,7 +393,19 @@ def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> di
     return last
 
 
-def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None) -> dict[str,Any]:
+def _emit_progress(progress_callback, event: dict[str, Any]) -> None:
+    """Best-effort live progress callback; UI failures must never stop scheduler work."""
+    if not callable(progress_callback):
+        return
+    try:
+        progress_callback(dict(event or {}))
+    except Exception:
+        # Progress rendering is observational only.  Never let a Streamlit/UI
+        # callback failure change durable scheduler execution semantics.
+        return
+
+
+def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simulate:bool=False, selected_jobs:list[str]|None=None, progress_callback=None) -> dict[str,Any]:
     now=(now or now_tw()).astimezone(TZ); cfg=load_settings(); status=load_status(); history=load_history()
     status.setdefault("version",VERSION); status.setdefault("jobs",{}); status.setdefault("completed_run_keys",[])
     repaired_count=_repair_failed_completed_keys(status)
@@ -424,6 +436,13 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
     if not lock_ok: return {"ok":False,"skipped":True,"message":lock_msg,"executed":[],"settings":cfg,"status":status}
 
     enabled_order=[job for job,jc in cfg.get("jobs",{}).items() if bool(jc.get("enabled",False)) and (not selected_jobs or job in selected_jobs)]
+    _progress_total=len(enabled_order)
+    _progress_counts={"success":0,"warning":0,"failed":0,"blocked":0}
+    _emit_progress(progress_callback,{
+        "event":"run_start","force_all":bool(force_all_enabled),"simulate":bool(simulate),
+        "resumed_force_batch":bool(resumed_force),"total_jobs":_progress_total,"completed_jobs":0,
+        "pending_jobs":list(enabled_order),"started_at":now_text(now),**_progress_counts,
+    })
     if not simulate:
         if not resumed_force:
             status["active_run"]={
@@ -450,6 +469,16 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 if _already_done(status,key) and not force_all_enabled: continue
                 job_had_slot=True
                 _touch_lock(job)
+                try:
+                    _progress_index=enabled_order.index(job)+1
+                except Exception:
+                    _progress_index=len(executed)+1
+                _emit_progress(progress_callback,{
+                    "event":"job_start","job":job,"job_label":JOB_LABELS.get(job,job),
+                    "index":_progress_index,"total_jobs":_progress_total,"completed_jobs":len(executed),
+                    "slot":slot.strftime("%Y-%m-%d %H:%M"),"started_at":now_text(now) if simulate else now_text(),
+                    **_progress_counts,
+                })
                 deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
                 started=now_text(now) if simulate else now_text()
                 if not deps_ok:
@@ -489,6 +518,18 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     active["last_job"]=job; active["last_status"]=row["status"]; active["updated_at"]=now_text()
                     status["last_summary"]={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":True}
                     _checkpoint_runtime(status,history,cfg,f"after-{job}-{row['status'].lower()}")
+                _progress_counts={
+                    "success":sum(1 for x in executed if x["status"]=="SUCCESS"),
+                    "warning":sum(1 for x in executed if x["status"]=="WARNING"),
+                    "failed":sum(1 for x in executed if x["status"]=="FAILED"),
+                    "blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),
+                }
+                _emit_progress(progress_callback,{
+                    "event":"job_complete","job":job,"job_label":JOB_LABELS.get(job,job),
+                    "index":_progress_index,"total_jobs":_progress_total,"completed_jobs":len(executed),
+                    "status":row["status"],"message":row["message"],"finished_at":row["finished_at"],
+                    "duration_seconds":row.get("duration_seconds"),**_progress_counts,
+                })
             if not simulate and job_had_slot:
                 active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
                 pending=active.get("pending_jobs") if isinstance(active.get("pending_jobs"),list) else []
@@ -527,6 +568,13 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     status["last_completed_run"]=active
                 _checkpoint_runtime(status,history,cfg,"run-finished")
         resume_text="（續跑上次中斷的強制批次）" if resumed_force else ""
+        _emit_progress(progress_callback,{
+            "event":"run_complete","force_all":bool(force_all_enabled),"simulate":bool(simulate),
+            "resumed_force_batch":bool(resumed_force),"total_jobs":_progress_total,"completed_jobs":len(executed),
+            "pending_jobs":list(((status.get("active_run") or {}).get("pending_jobs") or [])) if isinstance(status,dict) else [],
+            **{k:summary.get(k,0) for k in ("success","warning","failed","blocked")},
+            "finished_at":now_text(now) if simulate else now_text(),
+        })
         return {"ok":overall,"message":f"V191排程{resume_text}本輪執行 {len(executed)} 項：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}","executed":executed,"settings":cfg,"status":status,"resumed_force_batch":resumed_force,"repaired_failed_run_keys":repaired_count}
     finally:
         if not simulate: _release_lock()

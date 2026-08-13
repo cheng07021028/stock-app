@@ -10,6 +10,7 @@ except Exception as _auth_e:
     st.stop()
 
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -81,7 +82,7 @@ if callable(load_auto_scheduler_settings):
         st.info(
             "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
             "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
-            "V191 2026-08-13 Hotfix5：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
+            "V191 2026-08-13 Hotfix6：強制驗證與到期執行新增真實排程進度回報；可即時看到第幾項／總項數、目前工作、成功/警示/失敗/阻擋及最近完成項目。Hotfix5：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
             "強制全部批次若因 rerun/redeploy 中斷，或其中工作 FAILED/BLOCKED，該工作會保留在 pending；12 小時內下一次中央喚醒只續跑未完成工作；失效 PID 鎖會自動回收。"
             "強制驗證使用獨立 FORCE 執行鍵，不會再吃掉當日晚間正式排程時段；官方因子只有『抓取/保存＋內容日期驗證』都通過才算 SUCCESS。"
             "07 自動推薦由第7頁自己的正式推薦流程執行；Hotfix5 會先確認/救援第8頁推薦歷史權威，再進行昂貴全市場掃描，避免掃完才因權威鎖失敗；結果仍永久寫入第8頁推薦紀錄。"
@@ -150,6 +151,69 @@ if callable(load_auto_scheduler_settings):
                 st.error("V191 排程本機可能已寫入，但遠端永久化未確認；Reboot 前請先處理。")
                 st.caption(_msg)
 
+        def _run_v191_with_live_progress(*, force_all: bool):
+            """Run scheduler with live, observational UI progress.
+
+            Scheduler remains the source of truth.  Rendering errors are isolated
+            inside scheduler callback handling and cannot alter job execution.
+            """
+            _progress = st.progress(0, text="準備 V191 排程工作...")
+            _live = st.empty()
+            _stats = st.empty()
+            _recent_box = st.empty()
+            _started_perf = time.perf_counter()
+            _recent_rows = []
+
+            def _fmt_elapsed() -> str:
+                _sec = max(0, int(time.perf_counter() - _started_perf))
+                return f"{_sec // 60:02d}:{_sec % 60:02d}"
+
+            def _on_progress(evt):
+                if not isinstance(evt, dict):
+                    return
+                _event = str(evt.get("event") or "")
+                _total = max(1, int(evt.get("total_jobs") or 1))
+                _completed = max(0, int(evt.get("completed_jobs") or 0))
+                _index = max(0, int(evt.get("index") or 0))
+                _success = int(evt.get("success") or 0)
+                _warning = int(evt.get("warning") or 0)
+                _failed = int(evt.get("failed") or 0)
+                _blocked = int(evt.get("blocked") or 0)
+                _job_label = str(evt.get("job_label") or "")
+
+                if _event == "run_start":
+                    _progress.progress(0, text=f"0/{_total}｜V191 已建立執行清單")
+                    _live.info(f"準備開始，共 {_total} 項已啟用工作｜累計耗時 {_fmt_elapsed()}")
+                elif _event == "job_start":
+                    _ratio = min(0.99, _completed / _total)
+                    _progress.progress(_ratio, text=f"{_completed}/{_total} 已完成｜目前第 {_index} 項：{_job_label}")
+                    _live.info(
+                        f"▶ **正在執行第 {_index}/{_total} 項**｜{_job_label}\n"
+                        f"已完成 {_completed} 項｜累計耗時 {_fmt_elapsed()}｜本項完成後會立即永久 checkpoint。"
+                    )
+                elif _event == "job_complete":
+                    _ratio = min(1.0, _completed / _total)
+                    _status = str(evt.get("status") or "")
+                    _progress.progress(_ratio, text=f"{_completed}/{_total} 已完成｜剛完成：{_job_label} [{_status}]")
+                    _recent_rows.append({
+                        "#": _index, "工作": _job_label, "狀態": _status,
+                        "訊息": str(evt.get("message") or "")[:160],
+                    })
+                    del _recent_rows[:-6]
+                    _live.info(f"✓ 剛完成第 {_index}/{_total} 項：**{_job_label}**｜{_status}｜累計耗時 {_fmt_elapsed()}")
+                elif _event == "run_complete":
+                    _progress.progress(1.0, text=f"本輪完成｜執行 {_completed} 項")
+                    _live.success(f"V191 本輪排程已結束｜累計耗時 {_fmt_elapsed()}")
+
+                _stats.markdown(
+                    f"**即時統計**｜成功 **{_success}**　警示 **{_warning}**　失敗 **{_failed}**　"
+                    f"前置阻擋 **{_blocked}**　｜　累計耗時 **{_fmt_elapsed()}**"
+                )
+                if _recent_rows:
+                    _recent_box.dataframe(pd.DataFrame(_recent_rows), use_container_width=True, hide_index=True)
+
+            return run_auto_due_jobs(force_all_enabled=force_all, progress_callback=_on_progress)
+
         _b1, _b2, _b3 = st.columns(3)
         if _b1.button("🧭 模擬目前到期項目（不執行）", use_container_width=True):
             _sim = run_auto_due_jobs(simulate=True)
@@ -158,16 +222,14 @@ if callable(load_auto_scheduler_settings):
             else:
                 st.info(_sim.get("message"))
         if _b2.button("▶ 執行目前已到期項目", use_container_width=True):
-            with st.spinner("V191 正在依排程執行到期項目；完成/失敗都會永久記錄..."):
-                _run = run_auto_due_jobs()
+            _run = _run_v191_with_live_progress(force_all=False)
             _has_warning = any(str(x.get("status")) == "WARNING" for x in (_run.get("executed") or []) if isinstance(x, dict))
             (st.warning if _has_warning or not _run.get("ok") else st.success)(_run.get("message"))
             if _run.get("executed"):
                 st.dataframe(pd.DataFrame(_run.get("executed", [])), use_container_width=True, hide_index=True)
         _force_confirm = _b3.checkbox("允許本次強制跑全部已啟用工作", value=False, help="會包含第7頁股神推薦，可能需要數分鐘；只用於部署驗證。Hotfix2 使用獨立 FORCE 執行鍵，不會佔用今天尚未到時的正式排程時段。")
         if st.button("🧪 強制執行全部已啟用工作（部署驗證）", disabled=not _force_confirm, use_container_width=True):
-            with st.spinner("V191 強制驗證執行中..."):
-                _runall = run_auto_due_jobs(force_all_enabled=True)
+            _runall = _run_v191_with_live_progress(force_all=True)
             _has_warning_all = any(str(x.get("status")) == "WARNING" for x in (_runall.get("executed") or []) if isinstance(x, dict))
             (st.warning if _has_warning_all or not _runall.get("ok") else st.success)(_runall.get("message"))
             if _runall.get("executed"):
