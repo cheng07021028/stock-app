@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory() as td:
         (tmp / gps.RECORDS_STATE_FILE).write_text(json.dumps(collapse_state, ensure_ascii=False), encoding="utf-8")
         blocked, stats = gps.upsert_records_authority_fast([rec(1, "2026-08-13")], reason="new Page07 after unresolved collapse")
         assert not blocked.local_ok, blocked.to_dict()
-        assert "歷史救援尚未完成" in blocked.local_message, blocked.local_message
+        assert "歷史完整性鎖" in blocked.local_message, blocked.local_message
         assert stats["after"] == 0
         state_after = json.loads((tmp / gps.RECORDS_STATE_FILE).read_text(encoding="utf-8"))
         assert state_after["version"] == "godpick_records_durable_v3", state_after
@@ -227,7 +227,7 @@ with tempfile.TemporaryDirectory() as td:
         local = json.loads((tmp / gps.RECORDS_FILE).read_text(encoding="utf-8"))
         assert len(local) == 121
         state = json.loads((tmp / gps.RECORDS_STATE_FILE).read_text(encoding="utf-8"))
-        assert state["version"] == "godpick_records_durable_v191_h3_history_recovery"
+        assert state["version"] == "godpick_records_durable_v191_h4_authority_gap_recovery"
         assert remote_calls == {"fs": 121, "gh": 121}, remote_calls
     finally:
         gps.BASE_DIR = old_base

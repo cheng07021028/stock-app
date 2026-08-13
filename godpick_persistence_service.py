@@ -55,6 +55,14 @@ _RECORDS_GITHUB_PENDING: tuple[list[dict[str, Any]], dict[str, Any], str] | None
 _RECORDS_GITHUB_RUNNING = False
 _RECORDS_LOCAL_LOCK = threading.RLock()
 
+# V191-H4: history-gap audit is intentionally bounded.  It is only used when
+# the current recommendation authority looks stale/suspicious, and the same
+# authority signature is not re-audited on every Streamlit rerun.
+_RECORDS_HISTORY_AUDIT_LOCK = threading.Lock()
+_RECORDS_HISTORY_LAST_SIGNATURE = ""
+_RECORDS_HISTORY_LAST_AT = 0.0
+_RECORDS_HISTORY_AUDIT_COOLDOWN_SECONDS = 300.0
+
 NAMED_FIRESTORE_DOCS = {
     "godpick_recommend_list.json": "godpick_recommend_list",
     "godpick_latest_recommendations.json": "godpick_latest_recommendations",
@@ -344,21 +352,93 @@ def _guard_records_full_replace(
     return False, msg, before, after
 
 
-def _records_state_looks_like_accidental_collapse(state: Any, row_count: int) -> bool:
-    """Detect the known full-replace failure shape without undoing user deletions."""
+def _records_state_is_destructive_mutation(state: Any) -> bool:
+    """Return True only for explicit user/data-removal mutations.
+
+    H3 treated every ``*_mutation`` state as destructive.  That was too broad:
+    Page07/Page08 algorithmic upserts also use the mutation writer, including
+    ``08 自動修復較新07推薦快照``.  Consequently a stale 1810-row/2026-07-09
+    repair state was incorrectly exempt from history-gap recovery.
+
+    H4 records mutation_deleted_count on new writes and keeps reason-token
+    compatibility for older states.  Explicit deletes/clears remain protected
+    from resurrection forever.
+    """
     stt = state if isinstance(state, dict) else {}
-    version = _safe_str(stt.get("version")).lower()
-    reason = _safe_str(stt.get("mutation_reason")).lower()
-    # Explicit page8 deletion/clear actions are mutation states and must never be
-    # resurrected from history automatically.
-    if "mutation" in version or "刪除" in reason or "清空" in reason or "delete" in reason:
+    try:
+        if int(stt.get("mutation_deleted_count") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    kind = _safe_str(stt.get("mutation_kind")).lower()
+    if kind in {"destructive", "delete", "clear"}:
+        return True
+    reason = _safe_str(stt.get("mutation_reason") or stt.get("sync_reason") or stt.get("recovery_reason")).lower()
+    destructive_tokens = (
+        "刪除", "清空", "使用者清除", "使用者刪", "delete", "deleted",
+        "clear filtered", "clear all", "remove record", "purge",
+    )
+    return any(token in reason for token in destructive_tokens)
+
+
+def _records_state_has_known_recovery_gap_risk(state: Any) -> bool:
+    """Identify H3/auto-repair states that must be audited before new upserts."""
+    stt = state if isinstance(state, dict) else {}
+    if _records_state_is_destructive_mutation(stt):
         return False
-    # The incident was produced by v3 full replacement from Page10.  Empty/tiny
-    # full snapshots are also suspicious after a previously cumulative system.
+    version = _safe_str(stt.get("version")).lower()
+    reason = _safe_str(stt.get("mutation_reason") or stt.get("recovery_reason") or stt.get("sync_reason")).lower()
+    return bool(
+        "h3_history_recovery" in version
+        or "h3 automatic recovery" in reason
+        or "自動修復較新07推薦快照" in reason
+        or "history rescue" in reason
+        or "歷史救援" in reason
+    )
+
+
+def _records_state_looks_like_accidental_collapse(state: Any, row_count: int) -> bool:
+    """Detect the known full-replace failure shape without undoing user deletes."""
+    stt = state if isinstance(state, dict) else {}
+    if _records_state_is_destructive_mutation(stt):
+        return False
+    version = _safe_str(stt.get("version")).lower()
+    # H3 originally rejected every mutation state here.  H4 only rejects actual
+    # destructive mutations; an algorithmic 0/4-row mutation is still unsafe.
     return bool(
         "godpick_records_durable_v3" in version
-        or (row_count <= 50 and any(token in version for token in ["fast_sync", "reboot_restore", "nochange", "durable_v5"]))
+        or (row_count <= 50 and any(token in version for token in [
+            "fast_sync", "reboot_restore", "nochange", "durable_v4_mutation",
+            "durable_v5", "h3_history_recovery",
+        ]))
     )
+
+
+def _records_history_gap_audit_needed(state: Any, rows: Iterable[dict[str, Any]] | None = None) -> tuple[bool, str]:
+    """Decide whether Git history should be checked for a missing date range.
+
+    This is deliberately conservative.  We always audit the known collapse /
+    H3 auto-repair signatures.  Otherwise a non-destructive authority that has
+    not advanced for 14 days is audited once, which catches a reboot rollback
+    without turning normal daily reruns into GitHub-history scans.
+    """
+    current = records_as_rows_exact(list(rows or []))
+    stt = state if isinstance(state, dict) else {}
+    if _records_state_is_destructive_mutation(stt):
+        return False, "明確刪除/清空 mutation，禁止歷史復活"
+    if _records_state_looks_like_accidental_collapse(stt, len(current)):
+        return True, "偵測到意外縮水特徵"
+    if _records_state_has_known_recovery_gap_risk(stt):
+        return True, "偵測到 H3/08 自動修復狀態，需驗證是否漏掉後續日期"
+    latest = _recommendation_date_text(stt.get("latest_recommendation_date")) or _latest_record_recommendation_date(current)
+    if latest:
+        try:
+            age_days = (datetime.now(ZoneInfo("Asia/Taipei")).date() - pd.Timestamp(latest).date()).days
+        except Exception:
+            age_days = 0
+        if age_days >= 14 and len(current) >= 50:
+            return True, f"權威最新推薦日已落後 {age_days} 天"
+    return False, "目前權威無需歷史缺口稽核"
 
 
 def records_authority_signature() -> str:
@@ -490,34 +570,56 @@ def ensure_records_local_authority_current() -> tuple[list[dict[str, Any]], list
                 ):
                     candidates.append(("github", gh_state, None, None))
 
-        # V191-H3 emergency recovery: if the current authority has the exact
-        # accidental full-replace signature and no current replica clearly has
-        # a healthy larger count, inspect recent runtime-data Git history before
-        # accepting a 4/0-row authority as truth.  Explicit mutation/deletion
-        # states never enter this path.
+        # V191-H4 authority-gap recovery.  H3 only reacted to 0/4-row collapse
+        # states and chose the first merely-large historical snapshot.  H4 also
+        # audits a stale large authority (e.g. 1810 rows ending 07/09) and selects
+        # the best verified Git-history state by newest business date.
         try:
-            replica_counts = []
-            for _src, _state, _fallback, _rows in candidates:
-                _st = _state if isinstance(_state, dict) else {}
-                try:
-                    _cnt = int(_st.get("count") or (len(_rows) if _rows is not None else 0) or 0)
-                except Exception:
-                    _cnt = 0
-                replica_counts.append(_cnt)
-            _replica_max = max(replica_counts or [0])
-            if (
-                github_config().get("token")
-                and _records_state_looks_like_accidental_collapse(local_state, len(local_rows))
-                and _replica_max <= len(local_rows) + max(50, int(max(len(local_rows), 1) * 0.05))
-            ):
-                recovered_rows, recovery_details, recovered_ok = recover_records_from_github_history(
-                    local_rows, reason="V191-H3 automatic recovery before authority election"
-                )
-                details.extend(recovery_details)
-                if recovered_ok:
-                    return recovered_rows, details, True
+            # If the *current remote authority* explicitly represents a user
+            # delete/clear, never run historical resurrection from a stale local
+            # reboot copy.  Let normal authority election restore that destructive
+            # remote state first.
+            remote_destructive = any(
+                _src != "local" and _records_state_is_destructive_mutation(_state)
+                for _src, _state, _fallback, _rows in candidates
+            )
+            if remote_destructive:
+                audit_needed, audit_reason = False, "目前遠端權威是明確刪除/清空 mutation，禁止歷史復活"
+                details.append(f"V191-H4歷史缺口稽核略過：{audit_reason}")
+            else:
+                audit_needed, audit_reason = _records_history_gap_audit_needed(local_state, local_rows)
+            if github_config().get("token") and audit_needed:
+                audit_signature = "|".join([
+                    _safe_str(local_state.get("payload_hash")),
+                    str(len(local_rows)),
+                    _safe_str(local_state.get("latest_recommendation_date")),
+                    _safe_str(local_state.get("mutation_reason")),
+                    _safe_str(local_state.get("version")),
+                ])
+                now_mono = time.monotonic()
+                run_audit = True
+                global _RECORDS_HISTORY_LAST_SIGNATURE, _RECORDS_HISTORY_LAST_AT
+                with _RECORDS_HISTORY_AUDIT_LOCK:
+                    if (
+                        audit_signature == _RECORDS_HISTORY_LAST_SIGNATURE
+                        and now_mono - _RECORDS_HISTORY_LAST_AT < _RECORDS_HISTORY_AUDIT_COOLDOWN_SECONDS
+                    ):
+                        run_audit = False
+                    else:
+                        _RECORDS_HISTORY_LAST_SIGNATURE = audit_signature
+                        _RECORDS_HISTORY_LAST_AT = now_mono
+                if run_audit:
+                    details.append(f"V191-H4歷史缺口稽核啟動：{audit_reason}")
+                    recovered_rows, recovery_details, recovered_ok = recover_records_from_github_history(
+                        local_rows, reason=f"V191-H4 automatic authority-gap recovery | {audit_reason}"
+                    )
+                    details.extend(recovery_details)
+                    if recovered_ok:
+                        return recovered_rows, details, True
+                else:
+                    details.append("V191-H4歷史缺口稽核正在冷卻期；避免每次rerun重掃Git歷史。")
         except Exception as recovery_exc:
-            details.append(f"V191-H3歷史救援檢查例外：{recovery_exc}")
+            details.append(f"V191-H4歷史缺口稽核例外：{recovery_exc}")
 
         source, newest_state, newest_fallback, newest_rows_hint = max(
             candidates,
@@ -630,16 +732,19 @@ def upsert_records_authority_fast(
         current_payload, _, _ = read_local_json(RECORDS_FILE, [])
         current = records_as_rows_exact(current_payload)
         current_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
-        if _records_state_looks_like_accidental_collapse(current_state, len(current)):
-            # Critical: do not let a new Page07/Page10 upsert turn the known
-            # accidental 0/4-row full-replace state into a legitimate mutation
-            # state.  Doing so would hide the incident signature and could make
-            # the old cumulative history unrecoverable on the next retry.
+        if (
+            _records_state_looks_like_accidental_collapse(current_state, len(current))
+            or _records_state_has_known_recovery_gap_risk(current_state)
+        ):
+            # Critical: do not let a new Page07/Page10 upsert normalize a known
+            # unresolved history-recovery state.  H4 includes the large-but-stale
+            # 1810/07-09 repair shape, not only the old 0/4-row collapse.
             blocked = PersistenceReport(
                 local_ok=False, firestore_ok=False, github_ok=False, permanent_ok=False,
                 local_message=(
-                    f"V191-H3歷史救援尚未完成：目前權威僅 {len(current)} 筆且狀態符合意外縮水特徵；"
-                    "已拒絕新增/更新推薦，避免用新4筆掩蓋舊1800+筆歷史。請先完成08權威歷史救援。"
+                    f"V191-H4歷史完整性鎖：目前權威 {len(current)} 筆／"
+                    f"最新{_latest_record_recommendation_date(current) or '未取得'}，仍需完成Git歷史缺口稽核；"
+                    "已暫停新增/更新，避免用新推薦掩蓋既有日期缺口。"
                 ),
                 firestore_message="歷史完整性鎖定中，未寫入Firestore",
                 github_message="歷史完整性鎖定中，未寫入GitHub",
@@ -889,89 +994,184 @@ def recover_records_from_github_history(
     current_rows: Iterable[dict[str, Any]] | None = None,
     *,
     max_commits: int = 60,
-    reason: str = "V191-H3 emergency anti-zero recovery",
+    reason: str = "V191-H4 authority gap recovery",
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
-    """Recover the last pre-collapse recommendation authority from Git history.
+    """Recover the *best* verified cumulative recommendation authority in Git history.
 
-    We inspect the *small* records state-file history first and download the big
-    JSON only once, at the first recent commit whose count is materially above
-    the damaged current count.  The recovered snapshot is merged with any newer
-    surviving rows, so a same-day recommendation cannot be lost during rescue.
+    H3 stopped at the first historical state that was merely "large enough".
+    Because high-priority Page07 commits were inspected before chronological
+    completeness, the live system could choose 1810 rows ending 2026-07-09 even
+    though later verified states contained 1870 rows through 2026-08-12 and
+    1874 rows through 2026-08-13.
+
+    H4 first scans only the small state files, ranks plausible candidates by
+    business-data freshness (latest recommendation date first, then row count),
+    and downloads the large records JSON only for the best-ranked candidates.
+    Explicit destructive mutations are never resurrected.
     """
     current = records_as_rows_exact(list(current_rows or []))
     current_count = len(current)
-    details: list[str] = [f"V191-H3歷史救援檢查：目前 {current_count} 筆"]
+    current_state, _, _ = read_local_json(RECORDS_STATE_FILE, {})
+    current_state = dict(current_state or {}) if isinstance(current_state, dict) else {}
+    current_latest = (
+        _recommendation_date_text(current_state.get("latest_recommendation_date"))
+        or _latest_record_recommendation_date(current)
+    )
+    details: list[str] = [
+        f"V191-H4權威缺口救援：目前 {current_count} 筆｜最新{current_latest or '未取得'}"
+    ]
+
+    if _records_state_is_destructive_mutation(current_state):
+        details.append("目前 state 是明確刪除/清空 mutation；依資料保護規則禁止從歷史復活已刪紀錄。")
+        return current, details, False
+
     commits, commits_msg = _github_commits_for_path(RECORDS_STATE_FILE, limit=max_commits)
     details.append(commits_msg)
     if not commits:
         return current, details, False
 
-    # H3.1: the known collapse can generate many tiny state commits in a short
-    # period.  Do not let those push the last healthy snapshot outside a small
-    # fixed window.  Fetch up to 60 state commits, but inspect high-signal
-    # cumulative writers (Page07 / Page08 performance) first so recovery usually
-    # needs only a handful of API calls rather than dozens.
-    def _history_priority(item: dict[str, Any]) -> tuple[int, int]:
-        try:
-            message = _safe_str(((item.get("commit") or {}).get("message"))).lower()
-        except Exception:
-            message = ""
-        if "07 股神推薦" in message or "godpick recommendation" in message:
-            pri = 0
-        elif "page8" in message or "scheduled page8" in message or "推薦後績效" in message:
-            pri = 1
-        elif "explicit save sync" in message:
-            pri = 2
-        else:
-            pri = 3
-        # Python sort is stable, so recent order returned by GitHub is preserved
-        # inside each priority bucket.
-        return (pri, 0)
+    collapse_mode = bool(
+        _records_state_looks_like_accidental_collapse(current_state, current_count)
+        or current_count <= 50
+    )
+    known_gap_mode = _records_state_has_known_recovery_gap_risk(current_state)
+    # Tiny 0/4-row incidents need a genuinely cumulative snapshot; a large stale
+    # authority may recover from a snapshot with roughly the same population as
+    # long as the business date is newer.  This filters the corrupted 4-row
+    # 2026-08-13 commits while admitting 1874/2026-08-13 over 1810/2026-07-09.
+    if current_count <= 50:
+        min_candidate_count = max(50, current_count + 1)
+    else:
+        min_candidate_count = max(50, int(math.floor(current_count * 0.80)))
 
-    commits = sorted(commits, key=_history_priority)
-    threshold = current_count + max(50, int(max(current_count, 1) * 0.05))
-    chosen_sha = ""
-    chosen_state: dict[str, Any] = {}
-    for item in commits:
+    def _message_priority(item: dict[str, Any]) -> int:
+        try:
+            msg = _safe_str(((item.get("commit") or {}).get("message"))).lower()
+        except Exception:
+            msg = ""
+        high = (
+            "07 股神推薦", "股神推薦完成", "page8 v18", "page8 performance",
+            "scheduled page8", "推薦後績效",
+        )
+        return 1 if any(token in msg for token in high) else 0
+
+    # Fetch state JSONs concurrently; they are tiny.  The large authority file is
+    # intentionally NOT downloaded here.
+    indexed = [(idx, item) for idx, item in enumerate(commits) if _safe_str(item.get("sha"))]
+
+    def _load_state(pair: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any], dict[str, Any], str]:
+        idx, item = pair
         sha = _safe_str(item.get("sha"))
-        if not sha:
-            continue
-        state_payload, state_msg = _read_github_json_at_ref(RECORDS_STATE_FILE, sha, {})
-        if not isinstance(state_payload, dict):
+        payload, msg = _read_github_json_at_ref(RECORDS_STATE_FILE, sha, {})
+        return idx, item, (dict(payload) if isinstance(payload, dict) else {}), msg
+
+    state_results: list[tuple[int, dict[str, Any], dict[str, Any], str]] = []
+    if indexed:
+        try:
+            with ThreadPoolExecutor(max_workers=min(8, len(indexed))) as pool:
+                state_results = list(pool.map(_load_state, indexed))
+        except Exception:
+            state_results = [_load_state(pair) for pair in indexed]
+
+    ranked: list[tuple[tuple[Any, ...], str, dict[str, Any], dict[str, Any]]] = []
+    for idx, item, state_payload, _state_msg in state_results:
+        if not state_payload:
             continue
         try:
             count = int(state_payload.get("count") or 0)
         except Exception:
             count = 0
-        details.append(f"歷史state {sha[:8]}：{count}筆｜{_safe_str(state_payload.get('latest_recommendation_date')) or '無日期'}")
-        if count >= threshold:
-            chosen_sha = sha
-            chosen_state = dict(state_payload)
-            break
-    if not chosen_sha:
-        details.append(f"未找到高於安全門檻 {threshold} 筆的近期歷史權威；不自動復活舊資料。")
+        latest = _recommendation_date_text(state_payload.get("latest_recommendation_date"))
+        sha = _safe_str(item.get("sha"))
+        if count < min_candidate_count:
+            continue
+        if _records_state_is_destructive_mutation(state_payload):
+            # A historical destructive state can be valid as an authority at its
+            # time, but it is not safe as an automatic resurrection source.
+            continue
+
+        if collapse_mode:
+            plausible = count >= max(50, current_count + max(10, int(max(current_count, 1) * 0.05)))
+        else:
+            plausible = bool(latest and (not current_latest or latest > current_latest))
+            if not plausible and known_gap_mode and latest == current_latest:
+                plausible = count > current_count
+        if not plausible:
+            continue
+
+        # Rank by business truth, not writer type: newest recommendation date is
+        # primary; row count is secondary.  Writer signal and commit recency only
+        # break ties.  This is the exact invariant H3 violated.
+        score = (latest, count, _message_priority(item), -idx)
+        ranked.append((score, sha, state_payload, item))
+
+    if not ranked:
+        details.append(
+            f"Git歷史中沒有安全候選可補足目前缺口｜最低候選筆數 {min_candidate_count}。"
+        )
         return current, details, False
 
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    details.append(
+        "候選排序前3：" + "；".join(
+            f"{sha[:8]}={int(stt.get('count') or 0)}筆/{_recommendation_date_text(stt.get('latest_recommendation_date')) or '無日期'}"
+            for _, sha, stt, _ in ranked[:3]
+        )
+    )
+
     gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
-    historical_payload, hist_msg = _read_github_json_at_ref(gh_path, chosen_sha, [])
-    details.append(hist_msg)
-    historical = records_as_rows_exact(historical_payload)
-    if len(historical) < threshold:
-        details.append(f"歷史大檔回讀僅 {len(historical)} 筆，小於安全門檻；拒絕復原。")
+    chosen_sha = ""
+    chosen_state: dict[str, Any] = {}
+    historical: list[dict[str, Any]] = []
+    # Normally only the first candidate is downloaded.  If its large file is
+    # missing/inconsistent, try the next ranked state rather than falling back to
+    # a known stale snapshot.
+    for _score, sha, state_payload, _item in ranked[:5]:
+        historical_payload, hist_msg = _read_github_json_at_ref(gh_path, sha, [])
+        details.append(hist_msg)
+        rows = records_as_rows_exact(historical_payload)
+        hist_latest = _latest_record_recommendation_date(rows)
+        try:
+            state_count = int(state_payload.get("count") or 0)
+        except Exception:
+            state_count = 0
+        state_latest = _recommendation_date_text(state_payload.get("latest_recommendation_date"))
+        if len(rows) < min_candidate_count:
+            details.append(f"候選 {sha[:8]} 大檔僅 {len(rows)} 筆，低於安全門檻，跳過。")
+            continue
+        # Require the full file to substantiate its state metadata.  Count may be
+        # slightly larger after legacy normalization, but it must not be a tiny
+        # subset and its newest business date cannot trail the advertised state.
+        if state_count and len(rows) < max(min_candidate_count, int(state_count * 0.95)):
+            details.append(f"候選 {sha[:8]} 大檔筆數與state不一致（{len(rows)}/{state_count}），跳過。")
+            continue
+        if state_latest and hist_latest and hist_latest < state_latest:
+            details.append(f"候選 {sha[:8]} 大檔最新日{hist_latest}落後state {state_latest}，跳過。")
+            continue
+        chosen_sha = sha
+        chosen_state = dict(state_payload)
+        historical = rows
+        break
+
+    if not chosen_sha or not historical:
+        details.append("所有高分歷史候選的大檔驗證皆未通過；保留目前權威，不做猜測式復原。")
         return current, details, False
 
     merged = _merge_record_sources_v178([historical, current])
-    if len(merged) <= current_count:
-        details.append("歷史快照合併後沒有增加資料；不覆蓋目前權威。")
+    merged_latest = _latest_record_recommendation_date(merged)
+    if len(merged) <= current_count and (not merged_latest or merged_latest <= current_latest):
+        details.append("最佳歷史快照合併後沒有增加筆數或日期；不覆蓋目前權威。")
         return current, details, False
 
     recovery_state = _new_state(
-        "godpick_records_durable_v191_h3_history_recovery", merged,
+        "godpick_records_durable_v191_h4_authority_gap_recovery", merged,
         count=len(merged),
-        latest_recommendation_date=_latest_record_recommendation_date(merged),
+        latest_recommendation_date=merged_latest,
         recovered_from_commit=chosen_sha,
         recovered_from_count=int(chosen_state.get("count") or len(historical)),
+        recovered_from_latest_recommendation_date=_recommendation_date_text(chosen_state.get("latest_recommendation_date")),
         recovery_reason=_safe_str(reason),
+        mutation_kind="recovery_non_destructive",
     )
     ok1, msg1 = write_local_json_atomic(RECORDS_FILE, merged)
     ok2, msg2 = write_local_json_atomic(RECORDS_STATE_FILE, recovery_state) if ok1 else (False, "records寫入失敗")
@@ -980,13 +1180,6 @@ def recover_records_from_github_history(
     if not (ok1 and ok2 and ok3):
         return current, details, False
 
-    # Rebuild remote replicas from the recovered FULL authority.  Do not use the
-    # incremental fast-sync here: after the local recovery state/manifest is
-    # written, a delta calculation can see zero local changes even though a
-    # damaged remote still contains 0/4 rows.  Rebuild Firestore documents
-    # synchronously (so reboot already has one complete remote authority), then
-    # queue the large GitHub JSON in the existing coalescing background worker
-    # to avoid blocking Page08 for a 20+ MB upload.
     try:
         if firebase_configured():
             fs_ok, fs_msg = write_records_firestore(merged, recovery_state)
@@ -996,17 +1189,20 @@ def recover_records_from_github_history(
             details.append(f"救援後Firestore完整重建｜{fs_msg}")
         if github_config().get("token"):
             gh_queued, gh_msg = schedule_records_github_sync(
-                merged, recovery_state, f"{reason} | V191-H3 GitHub full rebuild after history rescue"
+                merged, recovery_state, f"{reason} | V191-H4 GitHub full rebuild after authority-gap rescue"
             )
             details.append(f"救援後GitHub完整快照｜{gh_msg}")
         else:
             gh_queued, gh_msg = False, "GitHub 未設定"
             details.append(f"救援後GitHub完整快照｜{gh_msg}")
         if _configured_remote_exists() and not (fs_ok or gh_queued):
-            details.append("V191-H3警告：歷史已在本機救回，但遠端完整重建尚未接受；後續永久化重試將繼續處理。")
+            details.append("V191-H4警告：本機缺口已補回，但遠端完整重建尚未接受；永久化重試會繼續處理。")
     except Exception as exc:
         details.append(f"救援已完成本機恢復，但遠端完整重建例外：{exc}")
-    details.append(f"V191-H3已由GitHub歷史版本救回 {len(merged)} 筆；來源commit {chosen_sha[:10]}。")
+    details.append(
+        f"V191-H4已由最佳Git歷史權威補回缺口：{current_count} → {len(merged)} 筆｜"
+        f"最新{current_latest or '未取得'} → {merged_latest or '未取得'}｜來源 {chosen_sha[:10]}。"
+    )
     return merged, details, True
 
 
@@ -1879,13 +2075,19 @@ def save_records_mutation_fast(
             report.updated_at = _now_text()
             return report
     records = records_as_rows_exact(payload)
+    requested_deleted_ids = [_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)]
+    requested_upsert_rows = [dict(x) for x in (upsert_rows or []) if isinstance(x, dict)]
+    mutation_kind = "destructive" if requested_deleted_ids else "upsert"
     state = _new_state(
-        "godpick_records_durable_v4_mutation",
+        "godpick_records_durable_v191_h4_mutation",
         records,
         count=len(records),
         latest_recommendation_date=_latest_record_recommendation_date(records),
         github_pending=True,
         mutation_reason=_safe_str(reason),
+        mutation_kind=mutation_kind,
+        mutation_deleted_count=len(requested_deleted_ids),
+        mutation_upsert_count=len(requested_upsert_rows),
     )
     report = PersistenceReport(payload_hash=state["payload_hash"], updated_at=state["updated_at"])
 
@@ -1904,8 +2106,8 @@ def save_records_mutation_fast(
     # Firestore mutation self-contained. Delete collided legacy doc IDs and upsert
     # every surviving repaired row so a user can safely edit/delete before an
     # explicit full sync.
-    effective_deleted_ids = {_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)}
-    effective_upsert_rows = [dict(x) for x in (upsert_rows or []) if isinstance(x, dict)]
+    effective_deleted_ids = set(requested_deleted_ids)
+    effective_upsert_rows = list(requested_upsert_rows)
     repaired_rows = [row for row in records if _safe_str(row.get("record_id修復狀態"))]
     for row in repaired_rows:
         legacy_id = _safe_str(row.get("原始record_id"))
@@ -1982,8 +2184,8 @@ def save_records_sync_fast(
         report = PersistenceReport()
         report.local_ok = False
         report.local_message = guard_msg
-        report.firestore_message = "V191-H3防縮水啟動，未寫入Firestore"
-        report.github_message = "V191-H3防縮水啟動，未排入GitHub"
+        report.firestore_message = "V191-H4防縮水啟動，未寫入Firestore"
+        report.github_message = "V191-H4防縮水啟動，未排入GitHub"
         report.permanent_ok = False
         report.updated_at = _now_text()
         return report
@@ -2096,13 +2298,13 @@ def save_records_permanent(
         report = PersistenceReport()
         report.local_ok = False
         report.local_message = guard_msg
-        report.firestore_message = "V191-H3防縮水啟動，未寫入Firestore"
-        report.github_message = "V191-H3防縮水啟動，未寫入GitHub"
+        report.firestore_message = "V191-H4防縮水啟動，未寫入Firestore"
+        report.github_message = "V191-H4防縮水啟動，未寫入GitHub"
         report.permanent_ok = False
         report.updated_at = _now_text()
         return report
     state = _new_state(
-        "godpick_records_durable_v191_h3_full_sync", records,
+        "godpick_records_durable_v191_h4_full_sync", records,
         count=len(records), latest_recommendation_date=_latest_record_recommendation_date(records),
         sync_reason=_safe_str(reason), previous_count=before_count,
     )

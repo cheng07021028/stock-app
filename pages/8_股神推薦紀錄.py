@@ -4948,8 +4948,12 @@ def _reconcile_latest_snapshot_into_authority_v174(authority_df: pd.DataFrame) -
     details.append(f"最新推薦快照：{msg}")
     if not isinstance(payload, dict):
         return False, details
-    saved_at = _safe_str(payload.get("saved_at"))
-    snapshot_date = saved_at[:10] if len(saved_at) >= 10 else ""
+    saved_at = _safe_str(payload.get("saved_at") or payload.get("updated_at") or payload.get("generated_at"))
+    snapshot_date = _safe_str(
+        payload.get("recommendation_date") or payload.get("run_date") or payload.get("date")
+    )[:10]
+    if not snapshot_date and len(saved_at) >= 10:
+        snapshot_date = saved_at[:10]
     rows = payload.get("recommendations", [])
     if not snapshot_date or not isinstance(rows, list) or snapshot_date <= authority_latest:
         return False, details
@@ -4983,13 +4987,52 @@ def _reconcile_latest_snapshot_into_authority_v174(authority_df: pd.DataFrame) -
         details.append(f"快照日期 {snapshot_date} 較新，但沒有正式/A-/R1可修復紀錄。")
         return False, details
 
-    report, stats = upsert_records_authority_fast(actionable, reason="08 自動修復較新07推薦快照")
+    report, stats = upsert_records_authority_fast(
+        actionable, reason=f"08 自動修復較新07推薦快照｜來源日={snapshot_date}"
+    )
     details.extend(report.messages())
-    if report.permanent_ok and int(stats.get("changed", 0) or 0) > 0:
-        details.append(f"已自動補入權威檔：{snapshot_date}｜新增 {stats.get('added', 0)}｜更新 {stats.get('updated', 0)}。")
+
+    # V191-H4 post-condition: never brand a no-op/failed merge as a successful
+    # authority repair.  H3 could write the mutation reason even though the
+    # canonical latest date stayed at 07/09, which later made the stale 1810-row
+    # file look intentional.
+    after_latest = ""
+    after_count = 0
+    try:
+        if callable(records_authority_status):
+            after_status = records_authority_status()
+            after_latest = _safe_str(after_status.get("latest_recommendation_date"))[:10]
+            after_count = int(after_status.get("count") or 0)
+        if not after_latest:
+            after_payload, _, _ = read_local_json("godpick_records.json", [])
+            after_df = _ensure_godpick_record_columns(pd.DataFrame(after_payload if isinstance(after_payload, list) else []))
+            if not after_df.empty and "推薦日期" in after_df.columns:
+                _dates = pd.to_datetime(after_df["推薦日期"], errors="coerce").dropna()
+                if not _dates.empty:
+                    after_latest = _dates.max().strftime("%Y-%m-%d")
+            after_count = max(after_count, len(after_df))
+    except Exception as exc:
+        details.append(f"H4修復後驗證例外：{exc}")
+
+    changed = int(stats.get("changed", 0) or 0)
+    local_ok = bool(getattr(report, "local_ok", False))
+    if local_ok and changed > 0 and after_latest >= snapshot_date:
+        details.append(
+            f"已自動補入權威檔並驗證：{snapshot_date}｜新增 {stats.get('added', 0)}｜"
+            f"更新 {stats.get('updated', 0)}｜目前 {after_count} 筆／最新 {after_latest}。"
+        )
         return True, details
-    if not report.permanent_ok:
-        details.append("較新推薦快照存在，但自動修復權威檔失敗。")
+    if changed <= 0:
+        details.append(
+            f"快照 {snapshot_date} 沒有形成新的 authority mutation；不標記為修復成功。"
+        )
+    elif after_latest < snapshot_date:
+        details.append(
+            f"H4安全檢查未通過：快照為 {snapshot_date}，但權威最新仍是 {after_latest or '未取得'}；"
+            "將交由Git歷史缺口救援處理，不寫假成功狀態。"
+        )
+    elif not local_ok:
+        details.append("較新推薦快照存在，但本機權威原子寫入未成功。")
     return False, details
 
 
