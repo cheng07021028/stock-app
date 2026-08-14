@@ -108,7 +108,7 @@ if callable(load_auto_scheduler_settings):
             else:
                 st.warning(
                     f"中央排程 heartbeat 已約 {_wake_age_min:.0f} 分鐘未更新。"
-                    "若已安裝 H11 Windows 嚴格喚醒器，請檢查該工作排程或網路；未安裝時仍會由 GitHub 排程備援並於下一次喚醒補跑。"
+                    "若已安裝 Windows 嚴格10分鐘喚醒器，請檢查該工作排程或網路；未安裝時仍會由 GitHub 排程備援並於下一次喚醒補跑。"
                 )
         st.caption("狀態定義：SUCCESS＝完整完成；WARNING＝工作已完成但有非致命待確認事項（不是失敗）；FAILED＝執行失敗；BLOCKED＝前置條件未通過。")
 
@@ -125,7 +125,7 @@ if callable(load_auto_scheduler_settings):
                 value=bool((((_auto_cfg.get("jobs") or {}).get("godpick_recommendation") or {}).get("options") or {}).get("force_full_market", False)),
                 help="未勾選時，沿用第7頁已永久保存的掃描範圍/群組/市場/門檻；勾選時只覆寫自動排程的掃描範圍為全市場，不修改第7頁人工設定。",
             )
-            st.caption("每日時間可填一個或多個，例如 14:20,20:40。H11 支援 Windows 10分鐘嚴格喚醒＋GitHub 排程備援；真正是否到期仍由本設定判斷。")
+            st.caption("每日時間可填一個或多個，例如 14:20,20:40。Windows 10分鐘嚴格喚醒＋GitHub 排程備援；真正是否到期仍由本設定判斷。")
             _edited_jobs = {}
             for _job, _label in AUTO_JOB_LABELS.items():
                 _jc = ((_auto_cfg.get("jobs") or {}).get(_job) or {})
@@ -595,7 +595,7 @@ with st.expander("三、每個模組參數永久保存檢查", expanded=True):
 
 with st.expander("V191 無人值守排程架構說明", expanded=False):
     st.markdown("""
-- H11 建議正式模式採「Windows Task Scheduler 每10分鐘 workflow_dispatch」作主要喚醒；GitHub `schedule` 改為每10分鐘錯峰備援（02/12/22/32/42/52分）。中央 due-check 仍具同交易日漏點補跑。
+- 正式模式採「Windows Task Scheduler 每10分鐘 workflow_dispatch」作主要喚醒；GitHub `schedule` 每10分鐘錯峰備援（02/12/22/32/42/52分）。中央 due-check 仍具同交易日漏點補跑。
 - 所有更新結果與成功/失敗訊息寫入 `godpick_auto_scheduler_status.json` / `godpick_auto_scheduler_history.json`，並同步 `runtime-data`。
 - 舊 `.github/workflows/update_official_factors_v112.yml` 已改為 **只保留手動 emergency dispatch**，避免和中央排程重複抓官方因子。
 - 自動股神推薦不是固定時間硬跑：只有股票主檔、大盤、官方因子、SuperAI 市場情境等前置工作於同日成功後才會執行。

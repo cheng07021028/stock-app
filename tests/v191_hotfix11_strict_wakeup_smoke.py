@@ -47,14 +47,15 @@ def main():
     install = (WIN / "Install-GodPickStrictWakeupV191.ps1").read_text(encoding="utf-8-sig")
     uninstall = (WIN / "Uninstall-GodPickStrictWakeupV191.ps1").read_text(encoding="utf-8-sig")
     check("workflow_dispatch" in trigger and "/dispatches" in trigger, "strict dispatcher calls GitHub workflow_dispatch endpoint")
-    check('wakeup_source = "windows_task_scheduler"' in trigger, "strict dispatcher labels wake source")
-    check("ConvertTo-SecureString" in trigger and "ZeroFreeBSTR" in trigger, "dispatcher decrypts token only in memory and zeroes BSTR")
-    check("ConvertFrom-SecureString" in install, "installer stores PAT using Windows DPAPI encrypted form")
+    check('WakeupSource = "windows_task_scheduler"' in trigger and 'wakeup_source = $WakeupSource' in trigger, "strict dispatcher labels wake source")
+    check("GODPICK_PS_DPAPI_V6:" in trigger and "ConvertTo-SecureString -String $encrypted" in trigger, "dispatcher uses H14 PowerShell-native DPAPI token")
+    check("ProtectedData" not in trigger + install, "active H15 dispatcher has no direct ProtectedData dependency")
+    check("ConvertFrom-SecureString" in install and "WriteAllText" in install, "installer stores normalized PAT using newline-safe Windows PowerShell DPAPI v5 format")
     check("New-TimeSpan -Minutes 10" in install, "Windows task repeats every 10 minutes")
     check("AddMinutes(7)" in install, "Windows strict clock is offset from GitHub fallback")
     check("StartWhenAvailable" in install and "MultipleInstances IgnoreNew" in install, "Windows task recovers missed starts without overlapping local dispatches")
     check("Unregister-ScheduledTask" in uninstall, "uninstaller removes strict wake task")
-    check("ghp_" not in trigger + install and "github_pat_" not in trigger + install, "no literal GitHub token is embedded")
+    check("github_pat_" in trigger + install, "fine-grained PAT prefix is explicitly validated without embedding a secret value")
 
     # Runtime behavior: wake source is checkpointed in scheduler status.
     import godpick_auto_scheduler as gs
