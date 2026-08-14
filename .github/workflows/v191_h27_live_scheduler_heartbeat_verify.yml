@@ -1,0 +1,68 @@
+name: V191 H27 live scheduler heartbeat verify
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h27_live_scheduler_heartbeat_verify.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  live-heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPO_OWNER: ${{ github.repository_owner }}
+      GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+      GITHUB_REPO_BRANCH: runtime-data
+      GITHUB_RUNTIME_DATA_BRANCH: runtime-data
+      GODPICK_WAKEUP_EVENT: workflow_dispatch
+      GODPICK_WAKEUP_SOURCE: h27_live_verify
+      GODPICK_EXPECTED_WAKEUP_RUN_ID: ${{ github.run_id }}
+      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+      FINMIND_API_TOKEN: ${{ secrets.FINMIND_API_TOKEN }}
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+      FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+      FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Restore runtime authority
+        shell: bash
+        run: |
+          git fetch origin runtime-data:refs/remotes/origin/runtime-data || true
+          python tools/restore_runtime_data_v191.py
+      - name: Run scheduler wake with H27 source
+        run: python tools/run_godpick_auto_scheduler_v191.py
+      - name: Verify this exact run reached runtime-data
+        run: python tools/verify_godpick_scheduler_remote_v191.py
+      - name: Print persisted heartbeat
+        run: |
+          python - <<'PY'
+          import json
+          from godpick_persistence_service import read_github_json
+          p,_=read_github_json('godpick_auto_scheduler_status.json',{})
+          print(json.dumps({
+            'last_wakeup_at':p.get('last_wakeup_at'),
+            'last_wakeup_source':p.get('last_wakeup_source'),
+            'last_wakeup_run_id':p.get('last_wakeup_run_id'),
+            'last_wakeup_result':p.get('last_wakeup_result'),
+            'last_wakeup_message':p.get('last_wakeup_message'),
+          },ensure_ascii=False,indent=2))
+          expected='${{ github.run_id }}'
+          assert str(p.get('last_wakeup_run_id') or '')==expected, (expected,p)
+          assert str(p.get('last_wakeup_result') or '')=='SKIPPED_WEEKEND', p
+          PY
