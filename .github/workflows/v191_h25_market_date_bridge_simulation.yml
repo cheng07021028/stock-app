@@ -1,0 +1,99 @@
+name: V191 H25 market date bridge simulation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h25_market_date_bridge_simulation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -q pandas numpy
+      - name: Load runtime candidates and simulate market bridge only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin runtime-data:refs/remotes/origin/runtime-data
+          git show origin/runtime-data:godpick_latest_recommendations.json > /tmp/latest.json
+          git show origin/runtime-data:market_snapshot.json > /tmp/market.json
+          python - <<'PY' | tee /tmp/H25_MARKET_BRIDGE_SIMULATION.txt
+          import json
+          from collections import Counter
+          import pandas as pd
+          import godpick_formal_recommendation_engine as eng
+
+          p=json.load(open('/tmp/latest.json',encoding='utf-8'))
+          m=json.load(open('/tmp/market.json',encoding='utf-8'))
+          rows=p.get('candidate_diagnosis') or []
+          df=pd.DataFrame(rows)
+          market_date=str(m.get('twse_data_date') or m.get('market_date') or m.get('data_date') or '')[:10]
+          print('snapshot_saved_at',p.get('saved_at'))
+          print('market_authority_date',market_date)
+          print('candidate_rows',len(df))
+          print('before_market_date_nonblank',int(df.get('大盤資料日期',pd.Series(['']*len(df))).astype(str).str.strip().ne('').sum()) if len(df) else 0)
+          if not market_date: raise SystemExit('authoritative market date missing')
+          df['大盤資料日期']=market_date
+          df['大盤資料新鮮度']='最新/權威橋接'
+          if '大盤橋接分數' not in df.columns or pd.to_numeric(df.get('大盤橋接分數'),errors='coerce').fillna(0).le(0).all():
+              df['大盤橋接分數']=float(m.get('market_score') or 0)
+          if '大盤策略模式' not in df.columns:
+              df['大盤策略模式']=str(m.get('market_trend') or '')
+          risk_gate=str(m.get('risk_gate') or '').lower()
+          if '大盤風險燈號' not in df.columns:
+              df['大盤風險燈號']='紅燈' if risk_gate in {'lockdown','red','severe'} else '黃燈' if risk_gate in {'defensive','yellow'} else '綠燈'
+
+          counts=Counter(); buckets=Counter(); qualifying=[]
+          exclusion_func=getattr(eng,'_exclusion_reasons',None); op_func=getattr(eng,'_operability_score',None)
+          for _,r in df.iterrows():
+              s=pd.Series(r)
+              try: exclusion=list(exclusion_func(s)) if callable(exclusion_func) else []
+              except Exception: exclusion=[]
+              try: op=float(op_func(s)) if callable(op_func) else float(r.get('可操作分') or 0)
+              except Exception: op=float(r.get('可操作分') or 0)
+              hist=eng._history_freshness_info(s); market=eng._market_risk_info(s); official=eng._official_factor_freshness_info(s)
+              promo=eng._promotion_profile(s,op,exclusion)
+              counts['kline_fresh']+=bool(hist.get('fresh'))
+              counts['market_ready']+=bool(market.get('formal_ready'))
+              counts['official_ready']+=bool(official.get('a_minus_ready'))
+              counts['formal']+=bool(promo.get('formal'))
+              counts['a_minus']+=bool(promo.get('a_minus'))
+              counts['market_blocked']+=bool(promo.get('market_blocked'))
+              route=str(promo.get('route') or promo.get('path') or '未達')
+              buckets[route]+=1
+              if promo.get('formal') or promo.get('a_minus'):
+                  rr=eng._path_risk_reward_profile(s); ready=eng._entry_readiness_profile(s)
+                  qualifying.append({
+                    'code':str(r.get('股票代號','')),'name':str(r.get('股票名稱','')),
+                    'kline':str(r.get('K線最後交易日','')),'op':op,'route':route,
+                    'rr':rr.get('conservative'),'trend_rr':rr.get('trend'),'stop':rr.get('stop'),
+                    'entry_score':ready.get('score'),'entry_path':ready.get('path')
+                  })
+          print('COUNTS',dict(counts))
+          print('ROUTES',buckets.most_common(20))
+          print('QUALIFYING_COUNT',len(qualifying))
+          for x in qualifying[:60]: print('QUALIFY',x)
+
+          # Re-run the public engine over the bridge-stamped frame and show final buckets.
+          out=eng.apply_formal_recommendation_engine(df.copy())
+          print('FINAL_BUCKETS',Counter(out.get('正式推薦分區',pd.Series(dtype=object)).astype(str)).most_common(20))
+          print('FINAL_FORMAL',int((out.get('正式推薦分區',pd.Series(dtype=object))=='正式下週主推薦').sum()))
+          print('FINAL_A_MINUS',int((out.get('正式推薦分區',pd.Series(dtype=object))=='A-｜準主推薦小量試單').sum()))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: V191-H25-market-date-bridge-simulation
+          path: /tmp/H25_MARKET_BRIDGE_SIMULATION.txt
+          retention-days: 7
