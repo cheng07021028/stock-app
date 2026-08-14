@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260814_hotfix19_page17_autocatchup"
+VERSION = "godpick_auto_scheduler_v191_20260815_hotfix27_wakeup_heartbeat_truth"
 # Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
@@ -514,6 +514,12 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
     status["version"]=VERSION; status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
     _wake_source = str(os.environ.get("GODPICK_WAKEUP_SOURCE") or os.environ.get("GODPICK_WAKEUP_EVENT") or ("page17_force" if force_all_enabled else "interactive_due_check")).strip()
     status["last_wakeup_source"] = _wake_source[:80]
+    # H27: bind every persisted heartbeat to the concrete external wake.  GitHub
+    # exposes GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT automatically; Windows/manual wakes
+    # may leave them blank but still retain source/time.
+    status["last_wakeup_run_id"] = str(os.environ.get("GITHUB_RUN_ID") or os.environ.get("GODPICK_WAKEUP_RUN_ID") or "").strip()
+    status["last_wakeup_attempt"] = str(os.environ.get("GITHUB_RUN_ATTEMPT") or "").strip()
+    status["last_wakeup_event"] = str(os.environ.get("GODPICK_WAKEUP_EVENT") or "").strip()
 
     # H10: a manual force-all is deployment validation and must never hijack
     # unattended production slots.  Older H5 behavior converted the next cron
@@ -533,11 +539,29 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         status.pop("active_run",None)
 
     if not cfg.get("enabled") and not force_all_enabled:
-        return {"ok":True,"skipped":True,"message":"V191中央自動排程目前未啟用；未執行任何工作。","executed":[],"settings":cfg,"status":status}
+        _skip_msg="V191中央自動排程目前未啟用；未執行任何工作。"
+        status["last_wakeup_result"]="SKIPPED_DISABLED"
+        status["last_wakeup_message"]=_skip_msg
+        status["updated_at"]=now_text(now)
+        if not simulate:
+            _persist_runtime(STATUS_FILE,status,"V191-H27 wake heartbeat｜scheduler disabled")
+        return {"ok":True,"skipped":True,"message":_skip_msg,"executed":[],"settings":cfg,"status":status}
     if cfg.get("weekdays_only",True) and now.weekday()>=5 and not force_all_enabled:
-        return {"ok":True,"skipped":True,"message":"今日為週末，依設定不執行自動交易資料工作。","executed":[],"settings":cfg,"status":status}
+        _skip_msg="今日為週末，依設定不執行自動交易資料工作。"
+        status["last_wakeup_result"]="SKIPPED_WEEKEND"
+        status["last_wakeup_message"]=_skip_msg
+        status["updated_at"]=now_text(now)
+        if not simulate:
+            _persist_runtime(STATUS_FILE,status,"V191-H27 wake heartbeat｜weekend skip")
+        return {"ok":True,"skipped":True,"message":_skip_msg,"executed":[],"settings":cfg,"status":status}
     lock_ok,lock_msg=(True,"") if simulate else _acquire_lock()
-    if not lock_ok: return {"ok":False,"skipped":True,"message":lock_msg,"executed":[],"settings":cfg,"status":status}
+    if not lock_ok:
+        status["last_wakeup_result"]="SKIPPED_ACTIVE_LOCK"
+        status["last_wakeup_message"]=str(lock_msg or "中央排程已有執行中鎖定")
+        status["updated_at"]=now_text(now)
+        if not simulate:
+            _persist_runtime(STATUS_FILE,status,"V191-H27 wake heartbeat｜active lock")
+        return {"ok":False,"skipped":True,"message":lock_msg,"executed":[],"settings":cfg,"status":status}
 
     enabled_order=[job for job,jc in cfg.get("jobs",{}).items() if bool(jc.get("enabled",False)) and (not selected_jobs or job in selected_jobs)]
     planned_order=[]
@@ -575,6 +599,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             repair_msgs.append(f"清除 {repaired_future_count} 個尚未到時卻誤標完成的未來正式slot")
         if repair_msgs:
             status["last_repair_message"]="；".join(repair_msgs)+"，恢復正確排程。"
+        status["last_wakeup_result"]="RUNNING"
+        status["last_wakeup_message"]="中央排程已喚醒並進入到期工作檢查/執行。"
         _checkpoint_runtime(status,history,cfg,"run-start")
 
     executed=[]; overall=True
@@ -681,6 +707,10 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         history=history[-int(cfg.get("history_keep",400)):]
         summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
         status["updated_at"]=now_text(); status["last_progress_at"]=status["updated_at"]; status["last_summary"]=summary
+        status["last_wakeup_result"]="COMPLETED" if overall else "COMPLETED_WITH_FAILURE"
+        status["last_wakeup_message"]=(
+            f"本輪完成：成功 {summary['success']}／警示 {summary['warning']}／失敗 {summary['failed']}／前置阻擋 {summary['blocked']}"
+        )
         if not simulate:
             active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
             remaining=[str(x) for x in (active.get("pending_jobs") or []) if str(x)] if isinstance(active,dict) else []

@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import json
+import os
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,16 +97,30 @@ def verify_status() -> tuple[bool, str]:
     remote_wake = _clock(remote, "last_wakeup_at")
     local_updated = _clock(local, "updated_at", "last_wakeup_at")
     remote_updated = _clock(remote, "updated_at", "last_wakeup_at")
-    if isinstance(remote, dict) and remote and remote_wake >= local_wake and remote_updated >= local_updated:
-        return True, f"status remote confirmed｜wake={remote_wake}"
+    expected_run_id = str(os.environ.get("GODPICK_EXPECTED_WAKEUP_RUN_ID") or "").strip()
+    local_run_id = str(local.get("last_wakeup_run_id") or "").strip()
+    remote_run_id = str((remote or {}).get("last_wakeup_run_id") or "").strip() if isinstance(remote, dict) else ""
+    # H27b: only the central scheduler workflow opts into strict current-run verification;
+    # heartbeat, not merely accept an older remote status that happens to be >= an
+    # equally stale restored local file.
+    if expected_run_id and local_run_id != expected_run_id:
+        return False, f"local scheduler heartbeat is not current workflow｜expected_run={expected_run_id} local_run={local_run_id or '-'} wake={local_wake or '-'}"
+    if (
+        isinstance(remote, dict) and remote
+        and remote_wake >= local_wake and remote_updated >= local_updated
+        and (not expected_run_id or remote_run_id == expected_run_id)
+    ):
+        return True, f"status remote confirmed｜wake={remote_wake}｜run={remote_run_id or '-'}"
     report = _save_remote(STATUS_FILE, local)
     remote2, _ = _read_remote(STATUS_FILE, {})
+    remote2_run_id = str((remote2 or {}).get("last_wakeup_run_id") or "").strip() if isinstance(remote2, dict) else ""
     ok = bool(
         isinstance(remote2, dict)
         and _clock(remote2, "last_wakeup_at") >= local_wake
         and _clock(remote2, "updated_at", "last_wakeup_at") >= local_updated
+        and (not expected_run_id or remote2_run_id == expected_run_id)
     )
-    return ok, f"status repaired={ok}｜{getattr(report, 'github_message', '')}｜probe={msg}"
+    return ok, f"status repaired={ok}｜run={remote2_run_id or '-'}｜{getattr(report, 'github_message', '')}｜probe={msg}"
 
 
 def verify_history() -> tuple[bool, str]:

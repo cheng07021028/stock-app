@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H19｜中央自動排程＋永久化監控：H19 加入進頁自動補送喚醒、8秒即時狀態刷新與逐列執行中/排隊顯示；H18 長工作防重跑與永久同步確認完整保留。")
+st.caption("V191-H27｜中央自動排程＋永久化監控：每次外部喚醒皆永久記錄 heartbeat/run_id/result；週末正常喚醒會明確顯示為依設定跳過，不再誤報排程失效。H18/H19 長工作防重跑與自動補送喚醒完整保留。")
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +111,15 @@ if callable(load_auto_scheduler_settings):
         _last_wakeup_text = str((_auto_status or {}).get("last_wakeup_at") or "")
         _m4.metric("最後喚醒", _last_wakeup_text or "尚未執行")
         _m5.metric("喚醒來源", str((_auto_status or {}).get("last_wakeup_source") or "未標記"))
+        _last_wakeup_result = str((_auto_status or {}).get("last_wakeup_result") or "").strip()
+        _last_wakeup_message = str((_auto_status or {}).get("last_wakeup_message") or "").strip()
+        _last_wakeup_run_id = str((_auto_status or {}).get("last_wakeup_run_id") or "").strip()
+        if _last_wakeup_result:
+            st.caption(
+                f"最後喚醒結果：{_last_wakeup_result}"
+                + (f"｜{_last_wakeup_message}" if _last_wakeup_message else "")
+                + (f"｜run_id={_last_wakeup_run_id}" if _last_wakeup_run_id else "")
+            )
         try:
             from datetime import datetime as _dt
             from zoneinfo import ZoneInfo as _ZoneInfo
@@ -158,7 +167,14 @@ if callable(load_auto_scheduler_settings):
                 else:
                     st.info(f"中央排程已有執行中批次，目前工作「{_current_job_label}」；正在等待下一個可驗證進度點。")
             elif _wake_age_min is not None:
-                if _wake_age_min <= 35:
+                if _wake_age_min <= 35 and _last_wakeup_result == "SKIPPED_WEEKEND":
+                    st.success(
+                        f"GitHub/中央排程喚醒正常：最後可驗證喚醒約 {_wake_age_min:.0f} 分鐘前；"
+                        "今日為週末，依『僅交易日週一～週五執行』設定不執行交易資料工作。這不是排程故障。"
+                    )
+                elif _wake_age_min <= 35 and _last_wakeup_result == "SKIPPED_DISABLED":
+                    st.info(f"外部喚醒器正常：最後喚醒約 {_wake_age_min:.0f} 分鐘前，但中央自動排程總開關目前停用。")
+                elif _wake_age_min <= 35:
                     st.success(f"GitHub/中央排程 heartbeat 正常：最後可驗證喚醒約 {_wake_age_min:.0f} 分鐘前。")
                 else:
                     st.warning(
