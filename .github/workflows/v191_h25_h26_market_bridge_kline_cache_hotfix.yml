@@ -1,0 +1,153 @@
+name: V191 H25-H26 market bridge and Kline cache hotfix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h25_h26_market_bridge_kline_cache_hotfix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply H25 Page7 bridge and H26 cache policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          page=Path('pages/7_股神推薦.py')
+          src=page.read_text(encoding='utf-8-sig')
+          old='''    work = _apply_official_factor_cache_v109(work)\n    try:\n        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine\n'''
+          new='''    work = _apply_official_factor_cache_v109(work)\n    # V191-H25: formal/A- market alignment must use the same authoritative\n    # market_snapshot business date restored by H21/H22.  Never manufacture\n    # today's date and never relax stale-Kline governance.\n    try:\n        from godpick_market_candidate_bridge import apply_authoritative_market_context\n        work, _h25_market_report = apply_authoritative_market_context(work, base_dir=BASE_DIR)\n        try:\n            st.session_state[_k("v191_h25_market_bridge_report")] = dict(_h25_market_report)\n        except Exception:\n            pass\n    except Exception as _h25_market_exc:\n        try:\n            st.session_state[_k("v191_h25_market_bridge_report")] = {\n                "ok": False, "message": f"H25大盤權威橋接失敗：{_h25_market_exc}"\n            }\n        except Exception:\n            pass\n    try:\n        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine\n'''
+          if old not in src:
+              raise SystemExit('Page7 H20 insertion anchor not found exactly')
+          src=src.replace(old,new,1)
+          page.write_text(src,encoding='utf-8')
+
+          utils=Path('utils.py')
+          usrc=utils.read_text(encoding='utf-8-sig')
+          pattern=r'''def _history_cache_allowed_business_lag\(end_date\) -> int:\n.*?(?=\ndef _history_disk_cache_key)'''
+          replacement='''def _history_cache_allowed_business_lag(end_date, now_tw=None) -> int:\n    """V191-H26 completed-session cache policy.\n\n    A cache may lag one business day only while today's trading session is not\n    completed and the caller explicitly asks through today.  Once a market day\n    is completed, that completed day requires lag=0 even after midnight/weekend.\n    This prevents Friday T-1 cache from being accepted again on Saturday.\n    """\n    try:\n        target = pd.to_datetime(end_date, errors="coerce")\n        if pd.isna(target):\n            return 1\n        target = target.normalize()\n        if now_tw is None:\n            now_tw = datetime.now(ZoneInfo("Asia/Taipei"))\n        elif getattr(now_tw, "tzinfo", None) is None:\n            now_tw = now_tw.replace(tzinfo=ZoneInfo("Asia/Taipei"))\n        else:\n            now_tw = now_tw.astimezone(ZoneInfo("Asia/Taipei"))\n\n        today = pd.Timestamp(now_tw.date())\n        after_close = (now_tw.hour, now_tw.minute) >= (14, 15)\n\n        # Most recently completed weekday session. Exchange holidays are still\n        # validated by the actual returned K-line / Page07 market snapshot; this\n        # helper must never turn a known completed Friday into a permissive T-1.\n        if today.weekday() < 5 and after_close:\n            latest_completed = today\n        else:\n            latest_completed = today - pd.Timedelta(days=1)\n            while latest_completed.weekday() >= 5:\n                latest_completed -= pd.Timedelta(days=1)\n\n        if target == latest_completed:\n            return 0\n        if target == today and today.weekday() < 5:\n            return 0 if after_close else 1\n        # A weekend end_date has no session of its own; business-lag calculation\n        # already ignores Sat/Sun, so demanding lag=0 is safe.\n        if target > latest_completed and target.weekday() >= 5:\n            return 0\n        return 1\n    except Exception:\n        return 1\n\n'''
+          updated,n=re.subn(pattern,replacement,usrc,count=1,flags=re.S)
+          if n != 1:
+              raise SystemExit(f'utils cache-policy replacement count={n}')
+          utils.write_text(updated,encoding='utf-8')
+          print('H25/H26 source patch applied')
+          PY
+
+      - name: Add deterministic H25-H26 regression test
+        shell: bash
+        run: |
+          cat > tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py <<'PY'
+          # -*- coding: utf-8 -*-
+          from __future__ import annotations
+          from datetime import date, datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+          import sys
+          import pandas as pd
+
+          ROOT=Path(__file__).resolve().parents[1]
+          if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
+
+          import godpick_formal_recommendation_engine as formal
+          from godpick_market_candidate_bridge import apply_authoritative_market_context
+          import utils
+
+          def a_minus_row(kline='2026-08-14'):
+              lag=0 if kline=='2026-08-14' else 1
+              return {
+                '股票代號':'9999','股票名稱':'H25測試','市場別':'上市','類別':'半導體',
+                '最新價':100,'推薦買點_拉回':99,'實戰觸發價':102,'觸發後守價':100,
+                '實戰停損距離%':5.0,'實戰壓力空間%':6.0,'實戰風險報酬比':1.20,'風險報酬比':1.20,
+                '買進分數':68,'Entry進場買點分':75,'Risk風控安全分':68,'股神實戰總分':75,
+                '技術結構分數':75,'起漲前兆分數':72,'交易可行分數':70,'推薦總分':78,'候選強度分':78,
+                '主流資金分':65,'族群攻擊強度':60,'族群輪動分':60,'資金攻擊有效分':65,
+                '成交額百萬':400,'20日均成交額百萬':350,'最新成交量_張':1500,'20日均量_張':1400,
+                '追價風險分':45,'近5日漲幅%':1.0,'近20日漲幅%':8.0,'今日漲幅%':1.0,'當日量比':1.1,'當日收盤位置%':70,
+                '爆發雷達分':60,'隔日爆發分':60,'強勢動能分':60,'強勢前兆分':60,'推薦角色':'B｜等突破確認','族群廣度分':60,
+                'K線最後交易日':kline,'K線落後交易日':lag,'K線資料新鮮度':'最新' if lag==0 else '落後1個交易日',
+                '本輪市場最新交易日':'2026-08-14',
+                '官方資料完整度':100,'官方因子資料狀態':'完整','每日因子來源可信度':100,'因子來源可信度':100,
+                '來源可信度狀態':'官方高可信','官方資料日期':'2026-08-14','官方因子資料日期':'2026-08-14',
+                '法人資料日期':'2026-08-14','估值資料日期':'2026-08-14',
+              }
+
+          SNAP={'twse_data_date':'2026-08-14','market_score':73.1,'market_trend':'中性偏多','market_risk_level':'中低','risk_gate':'normal','twse_source':'TWSE 收盤紀錄'}
+
+          def test_h25_market_date_is_stamped_and_can_restore_existing_a_minus_path():
+              raw=pd.DataFrame([a_minus_row()])
+              assert '大盤資料日期' not in raw.columns
+              before=formal.apply_formal_recommendation_engine(raw.copy())
+              assert before.iloc[0]['正式推薦分區'] not in {'正式下週主推薦','A-｜準主推薦小量試單'}
+              bridged,report=apply_authoritative_market_context(raw,snapshot=SNAP)
+              assert report['ok'] is True and report['stamped_rows']==1
+              assert bridged.iloc[0]['大盤資料日期']=='2026-08-14'
+              assert formal._market_risk_info(bridged.iloc[0])['formal_ready'] is True
+              after=formal.apply_formal_recommendation_engine(bridged)
+              assert after.iloc[0]['正式推薦分區']=='A-｜準主推薦小量試單', after.iloc[0].to_dict()
+
+          def test_h25_does_not_make_t_minus_1_kline_tradable():
+              bridged,_=apply_authoritative_market_context(pd.DataFrame([a_minus_row('2026-08-13')]),snapshot=SNAP)
+              assert formal._market_risk_info(bridged.iloc[0])['formal_ready'] is True
+              out=formal.apply_formal_recommendation_engine(bridged)
+              assert out.iloc[0]['正式推薦分區'] not in {'正式下週主推薦','A-｜準主推薦小量試單'}, out.iloc[0].to_dict()
+
+          def test_h26_completed_friday_is_strict_after_midnight_and_weekend():
+              tz=ZoneInfo('Asia/Taipei')
+              assert utils._history_cache_allowed_business_lag(date(2026,8,14),datetime(2026,8,14,15,0,tzinfo=tz))==0
+              assert utils._history_cache_allowed_business_lag(date(2026,8,14),datetime(2026,8,15,0,45,tzinfo=tz))==0
+              assert utils._history_cache_allowed_business_lag(date(2026,8,14),datetime(2026,8,16,12,0,tzinfo=tz))==0
+              assert utils._history_cache_allowed_business_lag(date(2026,8,14),datetime(2026,8,14,10,0,tzinfo=tz))==1
+
+          def test_page7_orders_official_then_market_bridge_then_formal():
+              src=(ROOT/'pages'/'7_股神推薦.py').read_text(encoding='utf-8')
+              start=src.index('def _h20_rebuild_formal_partition_after_official_factors')
+              end=src.index('def _recalc_night_strategy_after_macro_v100',start)
+              block=src[start:end]
+              a=block.index('_apply_official_factor_cache_v109(work)')
+              b=block.index('apply_authoritative_market_context(work, base_dir=BASE_DIR)')
+              c=block.index('apply_formal_recommendation_engine(work)')
+              assert a < b < c
+
+          if __name__=='__main__':
+              test_h25_market_date_is_stamped_and_can_restore_existing_a_minus_path()
+              test_h25_does_not_make_t_minus_1_kline_tradable()
+              test_h26_completed_friday_is_strict_after_midnight_and_weekend()
+              test_page7_orders_official_then_market_bridge_then_formal()
+              print('PASS V191-H25/H26 market bridge + completed-session Kline cache')
+          PY
+
+      - name: Install test dependencies
+        run: python -m pip install -q pytest pandas numpy requests streamlit
+      - name: Compile and run H20-H26 focused tests
+        run: |
+          python -m compileall -q godpick_market_candidate_bridge.py utils.py pages/7_股神推薦.py godpick_formal_recommendation_engine.py
+          python -m pytest -q tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py tests/v191_hotfix23_duplicate_column_json_persistence_smoke.py tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py
+      - name: Commit production fixes only after tests pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pages/7_股神推薦.py utils.py godpick_market_candidate_bridge.py tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+          else
+            git commit -m 'V191-H25-H26 fix market-date bridge and stale Kline cache acceptance'
+            git push origin HEAD:main
+          fi
