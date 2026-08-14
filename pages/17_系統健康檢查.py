@@ -40,18 +40,24 @@ from godpick_global_update_service import (
 )
 
 try:
+    from godpick_scheduler_wakeup_service import dispatch_scheduler_wakeup as dispatch_auto_scheduler_wakeup
+except Exception:
+    dispatch_auto_scheduler_wakeup = None
+
+try:
     from godpick_auto_scheduler import (
         VERSION as AUTO_SCHEDULER_VERSION, JOB_LABELS as AUTO_JOB_LABELS, DEFAULT_SETTINGS as AUTO_DEFAULT_SETTINGS,
         load_settings as load_auto_scheduler_settings, save_settings as save_auto_scheduler_settings,
         load_status as load_auto_scheduler_status, load_history as load_auto_scheduler_history,
         run_due_jobs as run_auto_due_jobs, next_run_rows as auto_next_run_rows, normalize_settings as normalize_auto_scheduler_settings,
+        scheduler_wakeup_decision as auto_wakeup_decision,
     )
 except Exception:
     AUTO_SCHEDULER_VERSION = "V191 scheduler unavailable"
     AUTO_JOB_LABELS = {}
     AUTO_DEFAULT_SETTINGS = {}
     load_auto_scheduler_settings = save_auto_scheduler_settings = load_auto_scheduler_status = load_auto_scheduler_history = None
-    run_auto_due_jobs = auto_next_run_rows = normalize_auto_scheduler_settings = None
+    run_auto_due_jobs = auto_next_run_rows = normalize_auto_scheduler_settings = auto_wakeup_decision = None
 
 try:
     from godpick_durability_service import audit_core_durability, retry_failed_durability, queue_existing_critical_for_migration
@@ -69,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H18｜中央自動排程＋永久化監控：股票主檔→大盤→官方因子→SuperAI情境→股神推薦→最新價/績效→N日/命中→T+1學習；H18 加入長工作防重跑、同步確認與卡住診斷。")
+st.caption("V191-H19｜中央自動排程＋永久化監控：H19 加入進頁自動補送喚醒、8秒即時狀態刷新與逐列執行中/排隊顯示；H18 長工作防重跑與永久同步確認完整保留。")
 
 
 # ---------------------------------------------------------------------------
@@ -298,10 +304,102 @@ if callable(load_auto_scheduler_settings):
             if _runall.get("executed"):
                 st.dataframe(pd.DataFrame(_runall.get("executed", [])), use_container_width=True, hide_index=True)
 
-        st.markdown("#### 排程狀態 / 成功失敗訊息")
-        _next_rows = auto_next_run_rows(_auto_cfg, _auto_status) if callable(auto_next_run_rows) else []
-        if _next_rows:
-            st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)
+        def _dispatch_page17_autocatchup() -> tuple[bool, str]:
+            """Send one external wake; never run heavy 07/08 work in Streamlit UI thread."""
+            try:
+                _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+                _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
+                _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
+                _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
+            except Exception:
+                _token, _owner, _repo, _branch = "", "cheng07021028", "stock-app", "main"
+            if not callable(dispatch_auto_scheduler_wakeup):
+                return False, "H19 外部喚醒服務載入失敗；未在 Streamlit 內執行大型工作。"
+            return dispatch_auto_scheduler_wakeup(
+                token=_token, owner=_owner, repo=_repo, branch=_branch, wakeup_source="page17_auto_catchup"
+            )
+
+        def _h19_fragment_decorator(func):
+            _fragment = getattr(st, "fragment", None)
+            if callable(_fragment):
+                return _fragment(run_every="8s")(func)
+            return func
+
+        @_h19_fragment_decorator
+        def _render_v191_live_status() -> None:
+            _live_cfg = load_auto_scheduler_settings(refresh_remote=True)
+            _live_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
+            _decision = auto_wakeup_decision(_live_cfg, _live_status) if callable(auto_wakeup_decision) else {
+                "should_dispatch": False, "reason": "decision_unavailable", "due_jobs": [], "active_run": {},
+                "active_healthy": False, "active_progress_age_minutes": None, "last_wakeup_age_minutes": None,
+            }
+
+            # H19: page entry/live fragment may enqueue one catch-up wake when work is
+            # truly due and no healthy/recent worker is already responsible for it.
+            # Session cooldown prevents every Streamlit rerun from creating Actions runs.
+            if _decision.get("should_dispatch"):
+                _now_epoch = time.time()
+                _last_try = float(st.session_state.get("_v191_h19_autocatchup_try_epoch", 0.0) or 0.0)
+                if _now_epoch - _last_try >= 8 * 60:
+                    st.session_state["_v191_h19_autocatchup_try_epoch"] = _now_epoch
+                    _wake_ok, _wake_msg = _dispatch_page17_autocatchup()
+                    st.session_state["_v191_h19_autocatchup_last_message"] = _wake_msg
+                    st.session_state["_v191_h19_autocatchup_last_ok"] = bool(_wake_ok)
+                    (st.success if _wake_ok else st.warning)(_wake_msg)
+                else:
+                    _remain = max(0, int((8 * 60 - (_now_epoch - _last_try)) / 60) + 1)
+                    st.info(f"已在本頁送過補跑喚醒，等待 worker 接手；為避免重複排隊，約 {_remain} 分鐘內不再重送。")
+            elif st.session_state.get("_v191_h19_autocatchup_last_message") and str(_decision.get("reason")) in {"active_worker", "recent_wakeup"}:
+                st.caption(str(st.session_state.get("_v191_h19_autocatchup_last_message")))
+
+            _active = (_decision.get("active_run") or {}) if isinstance(_decision, dict) else {}
+            _due_jobs = [str(x) for x in (_decision.get("due_jobs") or [])]
+            _current_key = str(_active.get("current_job") or "") if isinstance(_active, dict) else ""
+            _last_key = str(_active.get("last_job") or "") if isinstance(_active, dict) else ""
+            _current_label = AUTO_JOB_LABELS.get(_current_key, _current_key) if _current_key else ""
+            _last_label = AUTO_JOB_LABELS.get(_last_key, _last_key) if _last_key else ""
+            _pending = [str(x) for x in (_active.get("pending_jobs") or [])] if isinstance(_active, dict) else []
+            _completed = [str(x) for x in (_active.get("completed_jobs") or [])] if isinstance(_active, dict) else []
+            _failed = [str(x) for x in (_active.get("failed_jobs") or [])] if isinstance(_active, dict) else []
+            _progress_age = _decision.get("active_progress_age_minutes")
+
+            st.markdown("#### 即時排程狀態 / 成功失敗訊息")
+            if _decision.get("active_healthy"):
+                if _current_key:
+                    st.info(
+                        f"▶ **目前執行：{_current_label}**　｜　本輪待處理 {len(_pending)} 項　｜　"
+                        f"已完成 {len(_completed)} 項　｜　失敗待下次補跑 {len(_failed)} 項"
+                        + (f"　｜　最後進度 {_progress_age:.0f} 分鐘前" if isinstance(_progress_age, (int, float)) else "")
+                    )
+                else:
+                    st.info(
+                        f"🟢 **中央 worker 已在執行**；目前正處於工作切換/舊版 worker 尚未回報 current_job。"
+                        + (f"最後已知項目：{_last_label}。" if _last_label else "")
+                        + f"本輪尚有 {len(_pending)} 項。H19 下一次喚醒開始會精確回報目前工作。"
+                    )
+            elif _due_jobs:
+                if _decision.get("recent_wakeup"):
+                    st.info(f"⏳ 已有近期中央喚醒，正在等待 worker 建立 active_run；目前仍有 {len(_due_jobs)} 項到期工作。")
+                elif _decision.get("should_dispatch"):
+                    st.warning(f"偵測到 {len(_due_jobs)} 項到期工作且沒有健康 worker；H19 正自動補送一次喚醒。")
+                else:
+                    st.warning(f"目前有 {len(_due_jobs)} 項到期/漏點工作，但尚未偵測到健康 worker。")
+            else:
+                st.success("目前沒有待補跑工作；中央排程等待下一個正式時段。")
+
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            _c1.metric("目前執行", _current_label or ("worker執行中" if _decision.get("active_healthy") else "—"))
+            _c2.metric("本輪待處理", len(_pending) if _decision.get("active_healthy") else len(_due_jobs))
+            _c3.metric("本輪已完成", len(_completed))
+            _c4.metric("需下次補跑", len(_failed))
+
+            _next_rows = auto_next_run_rows(_live_cfg, _live_status) if callable(auto_next_run_rows) else []
+            if _next_rows:
+                st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)
+            st.caption("H19：本區每 8 秒自動讀取 runtime-data；若工作到期而無健康 worker，進入/停留本頁會自動補送一次 GitHub 喚醒，但不會在 Streamlit UI 執行 07/08 大型任務。")
+
+        _render_v191_live_status()
+
         _hist = load_auto_scheduler_history(refresh_remote=True) if callable(load_auto_scheduler_history) else []
         with st.expander("最近自動更新履歷", expanded=False):
             if _hist:

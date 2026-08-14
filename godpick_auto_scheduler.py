@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260814_hotfix18_stall_recovery"
+VERSION = "godpick_auto_scheduler_v191_20260814_hotfix19_page17_autocatchup"
 # Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
@@ -562,7 +562,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             status["active_run"]={
                 "mode":"force_all" if force_all_enabled else "scheduled",
                 "started_at":now_text(now),"updated_at":now_text(now),"pid":os.getpid(),"host":socket.gethostname(),
-                "pending_jobs":list(planned_order),"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[],
+                "pending_jobs":list(planned_order),"planned_jobs":list(planned_order),"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[],
                 "current_job":"","current_job_started_at":"","last_progress_at":now_text(now),
             }
         else:
@@ -718,11 +718,99 @@ def job_status_rows(job_ids: list[str] | None = None) -> list[dict[str, Any]]:
     return [r for r in rows if not wanted or r.get("工作ID") in wanted]
 
 
+def _parse_status_datetime(value: Any) -> datetime | None:
+    text=str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text,fmt).replace(tzinfo=TZ)
+        except Exception:
+            continue
+    try:
+        dt=datetime.fromisoformat(text.replace("Z","+00:00"))
+        if dt.tzinfo is None:
+            dt=dt.replace(tzinfo=TZ)
+        return dt.astimezone(TZ)
+    except Exception:
+        return None
+
+
+def scheduler_wakeup_decision(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=None,now:datetime|None=None,*,active_grace_minutes:int=70,recent_wakeup_minutes:int=8)->dict[str,Any]:
+    """Pure H19 decision used by Page17 to decide whether an external wake is needed.
+
+    Entering Page17 must not run 07/08 inside the Streamlit request itself.  Instead
+    the page may enqueue one GitHub workflow_dispatch when work is due and there is
+    no healthy worker/recent wake already handling it.  This function contains no
+    Streamlit/GitHub side effects, so it is safe to regression-test.
+    """
+    cfg=normalize_settings(settings or load_settings())
+    status=status if isinstance(status,dict) else load_status()
+    now=(now or now_tw()).astimezone(TZ)
+    due_jobs=[]
+    completed=set(status.get("completed_run_keys",[]) or [])
+    if cfg.get("enabled") and (not cfg.get("weekdays_only",True) or now.weekday()<5):
+        for job,jc in cfg.get("jobs",{}).items():
+            if not bool((jc or {}).get("enabled",False)):
+                continue
+            slots=_due_slots(
+                jc or {}, now, int(cfg.get("grace_minutes",35) or 35),
+                force=False, catch_up_missed_same_day=bool(cfg.get("catch_up_missed_same_day",True)),
+            )
+            if any(_run_key(job,slot) not in completed for slot in slots):
+                due_jobs.append(job)
+
+    active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
+    pending=[str(x) for x in (active.get("pending_jobs") or []) if str(x)] if active else []
+    progress_text=(active.get("last_progress_at") or active.get("updated_at") or status.get("last_progress_at") or status.get("updated_at") or "") if active else ""
+    progress_dt=_parse_status_datetime(progress_text)
+    progress_age=None if progress_dt is None else max(0.0,(now-progress_dt).total_seconds()/60.0)
+    active_healthy=bool(pending) and (progress_age is None or progress_age<=max(10,int(active_grace_minutes)))
+
+    wake_dt=_parse_status_datetime(status.get("last_wakeup_at"))
+    wake_age=None if wake_dt is None else max(0.0,(now-wake_dt).total_seconds()/60.0)
+    recent_wakeup=bool(wake_age is not None and wake_age<=max(1,int(recent_wakeup_minutes)))
+
+    enabled=bool(cfg.get("enabled"))
+    weekday_ok=not cfg.get("weekdays_only",True) or now.weekday()<5
+    should_dispatch=bool(enabled and weekday_ok and due_jobs and not active_healthy and not recent_wakeup)
+    if not enabled:
+        reason="scheduler_disabled"
+    elif not weekday_ok:
+        reason="weekend_disabled"
+    elif not due_jobs:
+        reason="nothing_due"
+    elif active_healthy:
+        reason="active_worker"
+    elif recent_wakeup:
+        reason="recent_wakeup"
+    else:
+        reason="due_without_worker"
+    return {
+        "should_dispatch":should_dispatch,"reason":reason,"due_jobs":due_jobs,
+        "active_run":active,"active_pending_jobs":pending,"active_healthy":active_healthy,
+        "active_progress_age_minutes":progress_age,"last_wakeup_age_minutes":wake_age,
+        "recent_wakeup":recent_wakeup,"now":now_text(now),
+    }
+
+
 def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=None,now:datetime|None=None)->list[dict[str,Any]]:
     cfg=normalize_settings(settings or load_settings()); now=(now or now_tw()).astimezone(TZ); status=status or load_status(); rows=[]
     completed=set(status.get("completed_run_keys",[]) or []) if isinstance(status,dict) else set()
     catch_up=bool(cfg.get("catch_up_missed_same_day",True))
     grace=int(cfg.get("grace_minutes",35) or 35)
+    active=(status.get("active_run") or {}) if isinstance(status,dict) and isinstance(status.get("active_run"),dict) else {}
+    active_pending=[str(x) for x in (active.get("pending_jobs") or []) if str(x)]
+    active_planned=[str(x) for x in (active.get("planned_jobs") or active_pending) if str(x)]
+    active_completed=set(str(x) for x in (active.get("completed_jobs") or []) if str(x))
+    active_failed=set(str(x) for x in (active.get("failed_jobs") or []) if str(x))
+    active_blocked=set(str(x) for x in (active.get("blocked_jobs") or []) if str(x))
+    current_job=str(active.get("current_job") or "")
+    current_started=str(active.get("current_job_started_at") or "")
+    progress_dt=_parse_status_datetime(active.get("last_progress_at") or active.get("updated_at")) if active else None
+    active_age=None if progress_dt is None else max(0.0,(now-progress_dt).total_seconds()/60.0)
+    live_active=bool(active_pending) and (active_age is None or active_age<=70)
+
     for job,jc in cfg["jobs"].items():
         times=_normalize_times(jc.get("times"))
         today_slots=[_slot_datetime(now,t) for t in times]
@@ -745,9 +833,25 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
         js=(status.get("jobs",{}) or {}).get(job,{})
         next_text=now_text(overdue_slot)+"（到期待執行/補跑）" if overdue and overdue_slot else (now_text(nxt) if nxt else "—")
         due_state=("到期待執行" if overdue_slot and now<=overdue_slot+timedelta(minutes=grace) else "漏點待補跑") if overdue else "等待下次時段"
+        batch_order=""
+        if job in active_planned:
+            try: batch_order=f"{active_planned.index(job)+1}/{len(active_planned)}"
+            except Exception: batch_order=""
+        if live_active:
+            if current_job==job:
+                due_state="▶ 執行中"
+                next_text=(now_text(overdue_slot) if overdue_slot else (js.get("last_slot") or ""))+"（執行中）"
+            elif job in active_failed:
+                due_state="❌ 本輪失敗／待下次補跑"
+            elif job in active_blocked:
+                due_state="⛔ 前置阻擋／待下次補跑"
+            elif job in active_completed:
+                due_state="✓ 本輪完成"
+            elif job in active_pending:
+                due_state="⏳ 本輪排隊"
         rows.append({
             "工作ID":job,"自動更新項目":JOB_LABELS.get(job,job),"啟用":bool(jc.get("enabled")),
-            "每日時間":",".join(times),"到期狀態":due_state,"下次預計":next_text,
+            "每日時間":",".join(times),"到期狀態":due_state,"本輪順序":batch_order,"目前工作開始":current_started if current_job==job else "","下次預計":next_text,
             "最後狀態":js.get("last_status","尚未執行"),"最後成功":js.get("last_success_at",""),"最後訊息":js.get("last_message","")
         })
     return rows
