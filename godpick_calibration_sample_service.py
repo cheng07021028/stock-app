@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """股神推薦校正研究樣本服務。
 
 正式推薦紀錄維持嚴格；本服務另外保存近門檻與市場漏選強勢樣本，
@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover
     credentials = None
     firestore = None
 
-CALIBRATION_SAMPLE_VERSION = "godpick_calibration_samples_v1_20260715"
+CALIBRATION_SAMPLE_VERSION = "godpick_calibration_samples_v191_h17_shadow_first_20260814"
 DEFAULT_CALIBRATION_PATH = "godpick_calibration_samples.json"
 _CALIBRATION_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-calibration-remote")
 _CALIBRATION_SYNC_LOCK = threading.Lock()
@@ -263,9 +263,13 @@ def _build_sample_record(row: pd.Series | dict[str, Any], sample_type: str, conf
         weight = 0.0
         include_weight = "否"
     else:
-        purpose = "校正Entry/Risk/RR/動能等門檻是否過嚴，作近門檻對照"
-        weight = 0.45
-        include_weight = "是"
+        purpose = (
+            "影子校正Entry/Risk/RR/動能門檻是否過嚴；預設不直接調權。"
+            "只有成熟近門檻樣本達量、且報酬/勝率/尾部風險一致優於正式樣本時，"
+            "績效回饋層才允許最多15%低權重學習。"
+        )
+        weight = 0.0
+        include_weight = "否"
     key = f"{rec_date}|{code}|{sample_type}"
     record_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
     raw.update({

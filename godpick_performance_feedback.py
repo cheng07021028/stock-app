@@ -16,10 +16,20 @@ import math
 
 import pandas as pd
 
-PERFORMANCE_FEEDBACK_VERSION = "phase8_9_layered_calibration_feedback_20260715"
+PERFORMANCE_FEEDBACK_VERSION = "v191_h17_shadow_first_feedback_20260814"
 DEFAULT_RECORD_PATH = "godpick_records.json"
 DEFAULT_CALIBRATION_PATH = "godpick_calibration_samples.json"
 DEFAULT_PROFILE_CACHE_PATH = "godpick_performance_profile.json"
+
+# H17: 近門檻 C 樣本先做影子檢討，避免一兩天的候選漲跌直接把正式推薦門檻往下拉。
+# 只有達到成熟樣本量，且相對正式/A-/R1樣本同時展現更好的報酬、勝率與尾部風險，
+# 才允許極低權重（<=15%）進入績效校正；正式交易樣本仍是主權重。
+NEAR_THRESHOLD_SHADOW_MIN_MATURE = 30
+NEAR_THRESHOLD_SHADOW_MIN_CORE = 20
+NEAR_THRESHOLD_SHADOW_MAX_WEIGHT = 0.15
+NEAR_THRESHOLD_SHADOW_MIN_ALPHA_PCT = 0.35
+NEAR_THRESHOLD_SHADOW_MIN_WIN_EDGE = 0.03
+NEAR_THRESHOLD_SHADOW_MAX_LOSS5_EDGE = 0.02
 
 FEEDBACK_COLUMNS = [
     "股神實戰總分",
@@ -337,14 +347,15 @@ def _infer_feedback_sample_type(row: pd.Series | dict[str, Any]) -> str:
 
 
 def _infer_feedback_weight(row: pd.Series | dict[str, Any]) -> float:
+    sample_type = _infer_feedback_sample_type(row)
+    # H17: C/D 研究樣本一律先以影子權重 0 載入。C 是否可進入低權重學習，
+    # 由整體成熟樣本證據在 build_godpick_performance_profile() 內統一判斷，
+    # 避免舊檔中的 0.45 顯式權重繞過新的安全閥。
+    if sample_type.startswith("D") or sample_type.startswith("C"):
+        return 0.0
     explicit = _safe_float(row.get("校正樣本權重"), None)
     if explicit is not None:
         return max(0.0, min(1.0, float(explicit)))
-    sample_type = _infer_feedback_sample_type(row)
-    if sample_type.startswith("D"):
-        return 0.0
-    if sample_type.startswith("C"):
-        return 0.45
     if sample_type.startswith("A-"):
         return 0.90
     if sample_type.startswith("A"):
@@ -359,6 +370,83 @@ def _feedback_weight_eligible(row: pd.Series | dict[str, Any]) -> bool:
     if explicit:
         return _boolish(explicit)
     return _infer_feedback_weight(row) > 0
+
+
+def _near_threshold_shadow_stats(values: pd.Series) -> dict[str, float]:
+    ret = pd.to_numeric(values, errors="coerce").dropna().clip(lower=-25.0, upper=35.0)
+    if ret.empty:
+        return {"sample": 0, "avg_return": 0.0, "win_rate": 0.0, "loss5_rate": 0.0}
+    return {
+        "sample": int(len(ret)),
+        "avg_return": float(ret.mean()),
+        "win_rate": float((ret > 0).mean()),
+        "loss5_rate": float((ret <= -5).mean()),
+    }
+
+
+def _apply_near_threshold_shadow_policy(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """H17 shadow-first policy for C near-threshold samples.
+
+    C samples remain valuable for missed-opportunity audits, but they are not real executed trades.
+    They therefore start at zero weight.  Only a sufficiently large, mature cohort that beats
+    the core formal/A-/R1 sample set on return, hit-rate and left-tail risk may enter feedback,
+    capped at 15% per sample.  This changes calibration weighting only; it never promotes a row
+    into a formal recommendation by itself.
+    """
+    out = df.copy()
+    sample_type = out.get("_feedback_sample_type", pd.Series([""] * len(out), index=out.index)).astype(str)
+    returns = pd.to_numeric(out.get("_feedback_return_pct"), errors="coerce")
+    near_mask = sample_type.str.startswith("C", na=False)
+    core_mask = (
+        ~sample_type.str.startswith(("C", "D"), na=False)
+        & returns.notna()
+        & pd.to_numeric(out.get("_feedback_weight"), errors="coerce").fillna(0.0).gt(0)
+    )
+    mature_near = near_mask & returns.notna()
+    near_stats = _near_threshold_shadow_stats(returns.loc[mature_near])
+    core_stats = _near_threshold_shadow_stats(returns.loc[core_mask])
+
+    reasons: list[str] = []
+    if near_stats["sample"] < NEAR_THRESHOLD_SHADOW_MIN_MATURE:
+        reasons.append(f"近門檻成熟樣本{near_stats['sample']}<{NEAR_THRESHOLD_SHADOW_MIN_MATURE}")
+    if core_stats["sample"] < NEAR_THRESHOLD_SHADOW_MIN_CORE:
+        reasons.append(f"核心成熟樣本{core_stats['sample']}<{NEAR_THRESHOLD_SHADOW_MIN_CORE}")
+    if near_stats["sample"] and core_stats["sample"]:
+        if near_stats["avg_return"] < core_stats["avg_return"] + NEAR_THRESHOLD_SHADOW_MIN_ALPHA_PCT:
+            reasons.append("近門檻平均報酬未形成足夠優勢")
+        min_win = max(0.55, core_stats["win_rate"] + NEAR_THRESHOLD_SHADOW_MIN_WIN_EDGE)
+        if near_stats["win_rate"] < min_win:
+            reasons.append("近門檻勝率未形成足夠優勢")
+        if near_stats["loss5_rate"] > core_stats["loss5_rate"] + NEAR_THRESHOLD_SHADOW_MAX_LOSS5_EDGE:
+            reasons.append("近門檻-5%尾部風險偏高")
+
+    enabled = not reasons
+    if near_mask.any():
+        if enabled:
+            out.loc[near_mask, "_feedback_weight"] = NEAR_THRESHOLD_SHADOW_MAX_WEIGHT
+            out.loc[near_mask, "_feedback_weight_eligible"] = True
+        else:
+            out.loc[near_mask, "_feedback_weight"] = 0.0
+            out.loc[near_mask, "_feedback_weight_eligible"] = False
+
+    diagnostics = {
+        "policy": "SHADOW-FIRST｜成熟證據後最多15%低權重",
+        "auto_weight_enabled": bool(enabled and near_mask.any()),
+        "effective_weight_per_sample": NEAR_THRESHOLD_SHADOW_MAX_WEIGHT if enabled and near_mask.any() else 0.0,
+        "near_threshold": {k: round(v, 4) if isinstance(v, float) else v for k, v in near_stats.items()},
+        "core_formal_radar": {k: round(v, 4) if isinstance(v, float) else v for k, v in core_stats.items()},
+        "requirements": {
+            "near_mature_min": NEAR_THRESHOLD_SHADOW_MIN_MATURE,
+            "core_mature_min": NEAR_THRESHOLD_SHADOW_MIN_CORE,
+            "avg_return_edge_pct": NEAR_THRESHOLD_SHADOW_MIN_ALPHA_PCT,
+            "win_rate_edge": NEAR_THRESHOLD_SHADOW_MIN_WIN_EDGE,
+            "max_loss5_edge": NEAR_THRESHOLD_SHADOW_MAX_LOSS5_EDGE,
+            "max_weight": NEAR_THRESHOLD_SHADOW_MAX_WEIGHT,
+        },
+        "blocking_reasons": reasons,
+        "note": "C近門檻只做影子績效與誤殺檢討；未達成熟證據不得自動放寬正式推薦門檻。",
+    }
+    return out, diagnostics
 
 
 def _score_bucket(score: Any) -> str:
@@ -497,6 +585,7 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
     df["_feedback_sample_type"] = df.apply(_infer_feedback_sample_type, axis=1)
     df["_feedback_weight"] = df.apply(_infer_feedback_weight, axis=1)
     df["_feedback_weight_eligible"] = df.apply(_feedback_weight_eligible, axis=1)
+    df, near_threshold_shadow = _apply_near_threshold_shadow_policy(df)
     df["_score_bucket"] = df.get("推薦總分", pd.Series([0] * len(df), index=df.index)).map(_score_bucket)
     for _c in ["股神決策分數", "起漲前兆分數", "追價風險分", "Entry進場買點分", "Risk風控安全分", "可操作分"]:
         if _c in df.columns:
@@ -507,7 +596,9 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         & pd.to_numeric(df["_feedback_weight"], errors="coerce").fillna(0.0).gt(0)
     ].copy()
     if valid.empty:
-        return _empty_profile("股神推薦紀錄缺少可計算報酬欄位")
+        empty = _empty_profile("股神推薦紀錄缺少可計算報酬欄位")
+        empty["near_threshold_shadow_diagnostics"] = near_threshold_shadow
+        return empty
 
     ret = pd.to_numeric(valid["_feedback_return_pct"], errors="coerce")
     weights = pd.to_numeric(valid["_feedback_weight"], errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
@@ -572,6 +663,7 @@ def build_godpick_performance_profile(records: list[dict[str, Any]] | pd.DataFra
         }
     else:
         profile["missed_strong_diagnostics"] = {"sample": 0, "avg_return": 0.0, "median_return": 0.0, "positive_rate": 0.0, "note": "尚無成熟市場漏選樣本"}
+    profile["near_threshold_shadow_diagnostics"] = near_threshold_shadow
     profile["top_categories"] = _top_keys(profile["by_category"], positive=True)
     profile["weak_categories"] = _top_keys(profile["by_category"], positive=False)
     profile["top_recommend_types"] = _top_keys(profile["by_recommend_type"], positive=True)

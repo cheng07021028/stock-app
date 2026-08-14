@@ -14,8 +14,10 @@ $LegacyTaskNames = @(
     "GodPick V191 H11 Strict 10-Min Wakeup"
 )
 $SourceScriptPath = Join-Path $PSScriptRoot "Invoke-GodPickStrictWakeupV191.ps1"
+$SourceHiddenLauncherPath = Join-Path $PSScriptRoot "Invoke-GodPickStrictWakeupV191Hidden.vbs"
 $DataDir = Join-Path $env:LOCALAPPDATA "GodPickV191"
 $StableScriptPath = Join-Path $DataDir "Invoke-GodPickStrictWakeupV191.ps1"
+$StableHiddenLauncherPath = Join-Path $DataDir "Invoke-GodPickStrictWakeupV191Hidden.vbs"
 $TokenFile = Join-Path $DataDir "strict_wakeup_token_h16.dat"
 $LegacyTokenFiles = @(
     (Join-Path $DataDir "strict_wakeup_token_h15.dat"),
@@ -27,6 +29,9 @@ $MinimumPatLength = 40
 
 if (-not (Test-Path -LiteralPath $SourceScriptPath)) {
     throw "Strict wakeup dispatcher not found: $SourceScriptPath"
+}
+if (-not (Test-Path -LiteralPath $SourceHiddenLauncherPath)) {
+    throw "Strict wakeup hidden launcher not found: $SourceHiddenLauncherPath"
 }
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 
@@ -156,6 +161,7 @@ finally {
 }
 
 Copy-Item -LiteralPath $SourceScriptPath -Destination $StableScriptPath -Force
+Copy-Item -LiteralPath $SourceHiddenLauncherPath -Destination $StableHiddenLauncherPath -Force
 
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $StableScriptPath -Repository $Repository -Workflow $Workflow -Branch $Branch -TokenFile $TokenFile -WakeupSource "windows_install_test"
 if ($LASTEXITCODE -ne 0) {
@@ -174,8 +180,8 @@ try {
 catch {}
 
 $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-$actionArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Repository "{1}" -Workflow "{2}" -Branch "{3}" -TokenFile "{4}" -WakeupSource "windows_task_scheduler"' -f $StableScriptPath,$Repository,$Workflow,$Branch,$TokenFile
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $actionArgs
+$actionArgs = '//B //Nologo "{0}" "{1}" "{2}" "{3}" "{4}" "{5}" "windows_task_scheduler"' -f $StableHiddenLauncherPath,$StableScriptPath,$Repository,$Workflow,$Branch,$TokenFile
+$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument $actionArgs
 
 $now = Get-Date
 $start = $now.Date.AddMinutes(7)
@@ -197,6 +203,8 @@ foreach ($legacyTokenFile in $LegacyTokenFiles) {
 Write-Host "SUCCESS workflow_dispatch live test passed." -ForegroundColor Green
 Write-Host "Installed scheduled task: $TaskName" -ForegroundColor Green
 Write-Host ("Stable dispatcher: {0}" -f $StableScriptPath) -ForegroundColor DarkGray
+Write-Host ("Hidden launcher: {0}" -f $StableHiddenLauncherPath) -ForegroundColor DarkGray
+Write-Host "Recurring 10-minute wakeups run fully in the background via wscript.exe; no PowerShell console window will pop up." -ForegroundColor Green
 Write-Host ("First scheduled wakeup: {0}; repeats every 10 minutes while this Windows user is logged in." -f $start.ToString("yyyy-MM-dd HH:mm:ss"))
 Write-Host "GitHub schedule remains enabled as the staggered fallback wakeup source."
 Write-Host ("Wakeup log: {0}" -f (Join-Path $DataDir "strict_wakeup.log")) -ForegroundColor DarkGray
