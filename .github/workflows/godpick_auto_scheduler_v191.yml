@@ -56,35 +56,9 @@ jobs:
       - name: Run V191 due checker
         run: python tools/run_godpick_auto_scheduler_v191.py
 
-      - name: Stage only allowlisted runtime artifacts
-        run: python tools/stage_runtime_data_v191.py /tmp/godpick-v191-runtime
-
-      - name: Commit runtime artifacts to runtime-data branch
-        shell: bash
-        run: |
-          git reset --hard HEAD
-          git fetch origin runtime-data:refs/remotes/origin/runtime-data || true
-          if git show-ref --verify --quiet refs/remotes/origin/runtime-data; then
-            git checkout -B runtime-data origin/runtime-data
-          else
-            git checkout --orphan runtime-data
-            git rm -rf . || true
-          fi
-          cp -a /tmp/godpick-v191-runtime/. .
-          git config user.name "godpick-v191-bot"
-          git config user.email "godpick-v191-bot@users.noreply.github.com"
-          python - <<'PYADD'
-          from pathlib import Path
-          import subprocess
-          src = Path("/tmp/godpick-v191-runtime")
-          paths = [str(p.relative_to(src)) for p in src.rglob("*") if p.is_file()]
-          if paths:
-              subprocess.run(["git", "add", "--", *paths], check=True)
-          print(f"runtime allowlist staged: {len(paths)}")
-          PYADD
-          if git diff --cached --quiet; then
-            echo "No runtime changes"
-          else
-            git commit -m "V191 central scheduler runtime update"
-            git push origin runtime-data
-          fi
+      - name: Verify scheduler heartbeat/history reached runtime-data
+        # Every scheduled task already persists its authority through the same
+        # GitHub CAS / durability services used by Streamlit.  H10 deliberately
+        # removes the old second bulk git-branch publish because it could fail on
+        # untracked runtime files and could overwrite a newer concurrent authority.
+        run: python tools/verify_godpick_scheduler_remote_v191.py
