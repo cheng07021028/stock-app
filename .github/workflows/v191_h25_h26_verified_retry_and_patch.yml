@@ -1,0 +1,98 @@
+name: V191 H25-H26 verified retry and patch
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h25_h26_verified_retry_and_patch.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-patch-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply deterministic production patch
+        run: python tools/apply_v191_h25_h26_hotfix.py
+      - name: Install focused dependencies
+        run: python -m pip install -q pytest pandas numpy requests streamlit
+      - name: Compile patched production files
+        run: python -m compileall -q godpick_market_candidate_bridge.py utils.py pages/7_股神推薦.py godpick_formal_recommendation_engine.py
+      - name: H20 and H25-H26 regression
+        run: python -m pytest -q tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py
+      - name: Informational live Kline source probe
+        continue-on-error: true
+        shell: bash
+        run: |
+          python - <<'PY'
+          from datetime import date
+          import pandas as pd
+          import utils
+          for code,name,market in [('2458','義隆','上市'),('8050','廣積','上櫃')]:
+              try:
+                  df=utils.get_history_data(code,name,market,date(2026,5,1),date(2026,8,14))
+                  last=''
+                  src=''
+                  if isinstance(df,pd.DataFrame) and not df.empty:
+                      last=pd.to_datetime(df['日期'],errors='coerce').max().strftime('%Y-%m-%d')
+                      src=str(df.iloc[-1].get('資料源',''))
+                  print(code,market,'rows=',len(df) if isinstance(df,pd.DataFrame) else 0,'last=',last,'source=',src)
+              except Exception as exc:
+                  print(code,'probe_error',type(exc).__name__,str(exc)[:180])
+          PY
+      - name: Commit H25-H26 production fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pages/7_股神推薦.py utils.py godpick_market_candidate_bridge.py tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py tools/apply_v191_h25_h26_hotfix.py
+          if git diff --cached --quiet; then
+            echo 'No production diff'
+          else
+            git commit -m 'V191-H25-H26 fix formal market bridge and completed-session Kline cache'
+            git push origin HEAD:main
+          fi
+      - name: Prepare downloadable patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p patch/pages patch/tests patch/tools
+          cp 'pages/7_股神推薦.py' patch/pages/
+          cp utils.py patch/
+          cp godpick_market_candidate_bridge.py patch/
+          cp godpick_recommendation_market_preflight.py patch/ 2>/dev/null || true
+          cp macro_runtime_authority.py patch/ 2>/dev/null || true
+          cp app_auth.py patch/ 2>/dev/null || true
+          cp tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py patch/tests/ 2>/dev/null || true
+          cp tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py patch/tests/ 2>/dev/null || true
+          cp tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py patch/tests/
+          cp tools/apply_v191_h25_h26_hotfix.py patch/tools/
+          cat > patch/覆蓋說明.txt <<'TXT'
+          SPT Stock App V191-H26 patch
+          直接依 ZIP 內原路徑覆蓋。
+
+          H25：修正 Page7 候選未帶入大盤權威交易日，造成 market_ready 全市場 0。
+          H26：修正完成交易日後仍接受 T-1 歷史K線快取，造成 8/14 掃描大量停在 8/13。
+          H23：完整 Page7 已包含重複欄名 JSON 保存防護。
+          H22：附帶大盤 runtime-data 防回退權威檔。
+
+          不放寬 Entry/Risk/RR/流動性門檻；T-1 K線仍禁止正式/A-。
+          覆蓋後請等待 Streamlit 重新部署，重新執行股神推薦完整掃描。
+          TXT
+      - name: Upload downloadable V191-H26 patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-app-V191-H26-patch
+          path: patch/
+          if-no-files-found: error
+          retention-days: 7
