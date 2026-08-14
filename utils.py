@@ -1,4 +1,4 @@
-﻿import io
+import io
 import json
 import os
 import time
@@ -2068,27 +2068,41 @@ HISTORY_DISK_CACHE_DIR = Path("cache") / "history"
 HISTORY_DISK_CACHE_MAX_AGE_HOURS = 12
 
 
-def _history_cache_allowed_business_lag(end_date) -> int:
-    """依台灣收盤時間決定快取可容許落後交易日。
+def _history_cache_allowed_business_lag(end_date, now_tw=None) -> int:
+    """V191-H26 completed-session cache policy.
 
-    當日 14:15 後應已有收盤資料，不再接受前一交易日快取；盤中、週末或
-    查詢歷史日期則容許 1 個工作日，由推薦頁再以大盤資料日期交叉驗證。
+    T-1 cache is permitted only while today's session is still open. Once a
+    market day is completed, that completed day requires business lag=0 even
+    after midnight or across the weekend.
     """
     try:
         target = pd.to_datetime(end_date, errors="coerce")
         if pd.isna(target):
             return 1
         target = target.normalize()
-        now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
-        if (
-            target.date() == now_tw.date()
-            and target.weekday() < 5
-            and (now_tw.hour, now_tw.minute) >= (14, 15)
-        ):
+        if now_tw is None:
+            now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+        elif getattr(now_tw, "tzinfo", None) is None:
+            now_tw = now_tw.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+        else:
+            now_tw = now_tw.astimezone(ZoneInfo("Asia/Taipei"))
+        today = pd.Timestamp(now_tw.date())
+        after_close = (now_tw.hour, now_tw.minute) >= (14, 15)
+        if today.weekday() < 5 and after_close:
+            latest_completed = today
+        else:
+            latest_completed = today - pd.Timedelta(days=1)
+            while latest_completed.weekday() >= 5:
+                latest_completed -= pd.Timedelta(days=1)
+        if target == latest_completed:
             return 0
+        if target == today and today.weekday() < 5:
+            return 0 if after_close else 1
+        if target > latest_completed and target.weekday() >= 5:
+            return 0
+        return 1
     except Exception:
-        pass
-    return 1
+        return 1
 
 
 def _history_disk_cache_key(stock_no, market_type, start_date, end_date) -> str:

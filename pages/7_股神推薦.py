@@ -3908,6 +3908,23 @@ def _h20_rebuild_formal_partition_after_official_factors(
     if work.empty:
         return work
     work = _apply_official_factor_cache_v109(work)
+    # V191-H25: formal/A- market alignment must use the same authoritative
+    # market_snapshot business date restored by H21/H22. Never manufacture
+    # today's date and never relax stale-Kline governance.
+    try:
+        from godpick_market_candidate_bridge import apply_authoritative_market_context
+        work, _h25_market_report = apply_authoritative_market_context(work, base_dir=BASE_DIR)
+        try:
+            st.session_state[_k("v191_h25_market_bridge_report")] = dict(_h25_market_report)
+        except Exception:
+            pass
+    except Exception as _h25_market_exc:
+        try:
+            st.session_state[_k("v191_h25_market_bridge_report")] = {
+                "ok": False, "message": f"H25大盤權威橋接失敗：{_h25_market_exc}"
+            }
+        except Exception:
+            pass
     try:
         from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
         work = apply_formal_recommendation_engine(work)
