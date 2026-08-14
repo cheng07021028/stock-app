@@ -180,7 +180,7 @@ with tempfile.TemporaryDirectory() as td:
 
 # 7) New workflow must not perform the dangerous second branch publish.
 workflow = (ROOT / ".github/workflows/godpick_auto_scheduler_v191.yml").read_text(encoding="utf-8")
-ok("workflow still requests 10-minute wake", 'cron: "*/10 * * * *"' in workflow)
+ok("workflow keeps 10-minute off-peak fallback wake", 'cron: "2-52/10 * * * *"' in workflow)
 ok("workflow uses H10 heartbeat verifier", "verify_godpick_scheduler_remote_v191.py" in workflow)
 ok("workflow removed runtime-data checkout bulk publish", "git checkout -B runtime-data" not in workflow and "git push origin runtime-data" not in workflow)
 

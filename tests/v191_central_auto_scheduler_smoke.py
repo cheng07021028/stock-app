@@ -107,7 +107,7 @@ assert float(out8.iloc[0]["最新價"])==110.0
 # Static GitHub wiring: one central cron, old official cron manual-only.
 central=(ROOT/".github/workflows/godpick_auto_scheduler_v191.yml").read_text(encoding="utf-8")
 old=(ROOT/".github/workflows/update_official_factors_v112.yml").read_text(encoding="utf-8")
-assert 'cron: "*/10 * * * *"' in central
+assert 'cron: "2-52/10 * * * *"' in central
 assert "tools/run_godpick_auto_scheduler_v191.py" in central
 assert "schedule:" not in old
 

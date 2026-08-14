@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260814_hotfix10_unattended_reliability"
+VERSION = "godpick_auto_scheduler_v191_20260814_hotfix11_dual_wakeup"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -505,6 +505,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
     repaired_count=_repair_failed_completed_keys(status)
     repaired_future_count=_repair_future_completed_keys(status, now)
     status["version"]=VERSION; status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
+    _wake_source = str(os.environ.get("GODPICK_WAKEUP_SOURCE") or os.environ.get("GODPICK_WAKEUP_EVENT") or ("page17_force" if force_all_enabled else "interactive_due_check")).strip()
+    status["last_wakeup_source"] = _wake_source[:80]
 
     # H10: a manual force-all is deployment validation and must never hijack
     # unattended production slots.  Older H5 behavior converted the next cron
