@@ -1,0 +1,170 @@
+name: V191 H27 scheduler heartbeat truth hotfix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h27_scheduler_heartbeat_truth_hotfix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply H27 source patch
+        run: python tools/apply_v191_h27_scheduler_heartbeat_hotfix.py
+
+      - name: Add deterministic H27 regression
+        shell: bash
+        run: |
+          cat > tests/v191_hotfix27_scheduler_heartbeat_truth_smoke.py <<'PY'
+          # -*- coding: utf-8 -*-
+          from __future__ import annotations
+          from datetime import datetime
+          from pathlib import Path
+          import os
+          import sys
+
+          ROOT = Path(__file__).resolve().parents[1]
+          if str(ROOT) not in sys.path:
+              sys.path.insert(0, str(ROOT))
+
+          import godpick_auto_scheduler as scheduler
+          import tools.verify_godpick_scheduler_remote_v191 as verifier
+
+
+          def _enabled_cfg():
+              cfg = scheduler.normalize_settings(scheduler.DEFAULT_SETTINGS)
+              cfg["enabled"] = True
+              cfg["weekdays_only"] = True
+              return cfg
+
+
+          def test_weekend_wakeup_persists_current_run_heartbeat(monkeypatch):
+              calls = []
+              monkeypatch.setattr(scheduler, "load_settings", lambda: _enabled_cfg())
+              monkeypatch.setattr(scheduler, "load_status", lambda: {})
+              monkeypatch.setattr(scheduler, "load_history", lambda: [])
+              monkeypatch.setattr(
+                  scheduler,
+                  "_persist_runtime",
+                  lambda path, payload, reason: (calls.append((path, dict(payload), reason)) or (True, "ok")),
+              )
+              monkeypatch.setenv("GITHUB_RUN_ID", "31849842924")
+              monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+              monkeypatch.setenv("GODPICK_WAKEUP_EVENT", "schedule")
+              res = scheduler.run_due_jobs(now=datetime(2026, 8, 15, 7, 17, tzinfo=scheduler.TZ))
+              assert res["ok"] is True and res["skipped"] is True
+              assert "週末" in res["message"]
+              assert len(calls) == 1, calls
+              path, payload, reason = calls[0]
+              assert path == scheduler.STATUS_FILE
+              assert payload["last_wakeup_at"] == "2026-08-15 07:17:00"
+              assert payload["last_wakeup_source"] == "schedule"
+              assert payload["last_wakeup_run_id"] == "31849842924"
+              assert payload["last_wakeup_result"] == "SKIPPED_WEEKEND"
+              assert "weekend skip" in reason
+
+
+          def test_verifier_rejects_restored_old_heartbeat_for_current_workflow(monkeypatch):
+              stale = {
+                  "last_wakeup_at": "2026-08-14 23:26:59",
+                  "updated_at": "2026-08-14 23:26:59",
+                  "last_wakeup_run_id": "old-run",
+              }
+              monkeypatch.setenv("GITHUB_RUN_ID", "current-run")
+              monkeypatch.setattr(verifier, "_read_local", lambda rel, default: dict(stale))
+              monkeypatch.setattr(verifier, "_read_remote", lambda rel, default: (dict(stale), "ok"))
+              ok, msg = verifier.verify_status()
+              assert ok is False
+              assert "not current workflow" in msg
+
+
+          def test_verifier_accepts_remote_heartbeat_bound_to_current_run(monkeypatch):
+              current = {
+                  "last_wakeup_at": "2026-08-15 07:17:00",
+                  "updated_at": "2026-08-15 07:17:00",
+                  "last_wakeup_run_id": "current-run",
+              }
+              monkeypatch.setenv("GITHUB_RUN_ID", "current-run")
+              monkeypatch.setattr(verifier, "_read_local", lambda rel, default: dict(current))
+              monkeypatch.setattr(verifier, "_read_remote", lambda rel, default: (dict(current), "ok"))
+              ok, msg = verifier.verify_status()
+              assert ok is True
+              assert "run=current-run" in msg
+
+
+          def test_page17_distinguishes_weekend_skip_from_failure():
+              src = (ROOT / "pages" / "17_系統健康檢查.py").read_text(encoding="utf-8")
+              assert 'SKIPPED_WEEKEND' in src
+              assert '這不是排程故障' in src
+              assert 'last_wakeup_run_id' in src
+          PY
+
+      - name: Install focused dependencies
+        run: python -m pip install -q pytest pandas requests streamlit
+
+      - name: Compile patched scheduler control plane
+        run: |
+          python -m compileall -q godpick_auto_scheduler.py godpick_scheduler_wakeup_service.py tools/verify_godpick_scheduler_remote_v191.py pages/17_系統健康檢查.py tools/apply_v191_h27_scheduler_heartbeat_hotfix.py
+
+      - name: Run H10 H18 H19 H27 regressions
+        run: |
+          python -m pytest -q \
+            tests/v191_hotfix10_unattended_scheduler_smoke.py \
+            tests/v191_hotfix18_scheduler_stall_recovery_smoke.py \
+            tests/v191_hotfix19_page17_autocatchup_live_status_smoke.py \
+            tests/v191_hotfix27_scheduler_heartbeat_truth_smoke.py
+
+      - name: Commit production fix only after tests pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add godpick_auto_scheduler.py tools/verify_godpick_scheduler_remote_v191.py pages/17_系統健康檢查.py tests/v191_hotfix27_scheduler_heartbeat_truth_smoke.py tools/apply_v191_h27_scheduler_heartbeat_hotfix.py
+          if git diff --cached --quiet; then
+            echo 'No H27 production diff'
+          else
+            git commit -m 'V191-H27 persist every wake heartbeat and verify current workflow truth'
+            git push origin HEAD:main
+          fi
+
+      - name: Prepare downloadable H27 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p patch/pages patch/tools patch/tests
+          cp godpick_auto_scheduler.py patch/
+          cp godpick_scheduler_wakeup_service.py patch/
+          cp tools/verify_godpick_scheduler_remote_v191.py patch/tools/
+          cp tools/apply_v191_h27_scheduler_heartbeat_hotfix.py patch/tools/
+          cp 'pages/17_系統健康檢查.py' patch/pages/
+          cp tests/v191_hotfix27_scheduler_heartbeat_truth_smoke.py patch/tests/
+          cat > patch/覆蓋說明.txt <<'TXT'
+          Stock App V191-H27｜中央自動排程 heartbeat 真實性修正
+
+          1. 每次外部喚醒都保存 last_wakeup_at / source / run_id / result。
+          2. 週末 weekdays_only 跳過工作時仍保存 heartbeat，不再顯示數百分鐘失聯。
+          3. GitHub verifier 必須確認遠端 heartbeat 屬於本次 workflow run，舊 heartbeat 不再誤判成功。
+          4. Page17 對 SKIPPED_WEEKEND 顯示「喚醒正常、週末依設定跳過」，不是排程故障。
+          5. 不修改任何選股、推薦、風控或資料計算門檻。
+          TXT
+
+      - name: Upload H27 patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-app-V191-H27-scheduler-heartbeat-patch
+          path: patch/
+          retention-days: 7
