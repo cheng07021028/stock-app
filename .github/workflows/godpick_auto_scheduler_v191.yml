@@ -24,7 +24,8 @@ concurrency:
 jobs:
   scheduler:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # H18: long jobs no longer retry in the same wake; 60 min is a hard watchdog for true stalls.
+    timeout-minutes: 60
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPO_OWNER: ${{ github.repository_owner }}
