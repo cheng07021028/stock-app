@@ -1,0 +1,166 @@
+name: V191 H24 formal zero full funnel diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h24_formal_zero_full_funnel_diagnostic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main with history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install focused dependencies
+        run: python -m pip install -q pandas numpy
+
+      - name: Load current runtime recommendation snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin runtime-data:refs/remotes/origin/runtime-data
+          git show origin/runtime-data:godpick_latest_recommendations.json > /tmp/godpick_latest_recommendations.json
+          python - <<'PY'
+          import json
+          p=json.load(open('/tmp/godpick_latest_recommendations.json',encoding='utf-8'))
+          print('saved_at=',p.get('saved_at'),'candidates=',len(p.get('candidate_diagnosis') or []),'recommendations=',len(p.get('recommendations') or []))
+          PY
+
+      - name: Full 1723-row gate diagnosis
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/H24_FORMAL_ZERO_DIAGNOSTIC.txt
+          from __future__ import annotations
+          import json
+          from collections import Counter
+          import pandas as pd
+          import godpick_formal_recommendation_engine as eng
+
+          payload=json.load(open('/tmp/godpick_latest_recommendations.json',encoding='utf-8'))
+          rows=payload.get('candidate_diagnosis') or []
+          df=pd.DataFrame(rows)
+          print('=== V191-H24 FULL FUNNEL DIAGNOSTIC ===')
+          print('snapshot_saved_at', payload.get('saved_at'))
+          print('expected_trade_date', payload.get('expected_trade_date'))
+          print('kline_date', payload.get('kline_date'))
+          print('rows', len(df))
+          if df.empty:
+              raise SystemExit('empty candidate_diagnosis')
+
+          def num(row, name, default=0.0):
+              try:
+                  v=row.get(name, default)
+                  if v is None or str(v).strip()=='' or pd.isna(v): return float(default)
+                  return float(str(v).replace(',','').replace('%',''))
+              except Exception: return float(default)
+
+          kdates=Counter(str(x or '')[:10] for x in df.get('K線最後交易日', pd.Series(dtype=object)))
+          market_dates=Counter(str(x or '')[:10] for x in df.get('大盤資料日期', pd.Series(dtype=object)))
+          official_dates=Counter(str(x or '')[:10] for x in df.get('官方因子資料日期', pd.Series(dtype=object)))
+          print('KLINE_DATE_COUNTS', kdates.most_common(12))
+          print('MARKET_DATE_COUNTS', market_dates.most_common(12))
+          print('OFFICIAL_DATE_COUNTS', official_dates.most_common(12))
+
+          counters=Counter()
+          hard_reasons=Counter(); entry_reasons=Counter(); routes=Counter(); bucket_counter=Counter()
+          near=[]
+          exclusion_func=getattr(eng,'_exclusion_reasons',None)
+          operability_func=getattr(eng,'_operability_score',None)
+          for _,r in df.iterrows():
+              s=pd.Series(r)
+              try:
+                  exclusion=list(exclusion_func(s)) if callable(exclusion_func) else [x for x in str(r.get('正式推薦排除原因','')).split('、') if x]
+              except Exception:
+                  exclusion=[x for x in str(r.get('正式推薦排除原因','')).split('、') if x]
+              try:
+                  op=float(operability_func(s)) if callable(operability_func) else num(r,'可操作分',0)
+              except Exception:
+                  op=num(r,'可操作分',0)
+              hist=eng._history_freshness_info(s)
+              market=eng._market_risk_info(s)
+              official=eng._official_factor_freshness_info(s)
+              liq=eng._liquidity_info(s)
+              hard=eng._hard_veto_reasons(exclusion)
+              readiness=eng._entry_readiness_profile(s)
+              rr=eng._path_risk_reward_profile(s)
+              promo=eng._promotion_profile(s,op,exclusion)
+              momentum=eng._momentum_profile(s)
+              prebreak=eng._prebreakout_profile(s)
+              counters['kline_fresh'] += bool(hist.get('fresh'))
+              counters['market_ready'] += bool(market.get('formal_ready'))
+              counters['official_ready'] += bool(official.get('a_minus_ready'))
+              counters['liquidity_tradable'] += bool(liq.get('tradable'))
+              counters['no_hard_veto'] += not bool(hard)
+              base=bool(hist.get('fresh') and market.get('formal_ready') and official.get('a_minus_ready') and liq.get('tradable') and not hard)
+              counters['base_data_all'] += base
+              counters['entry_readiness_ready'] += bool(readiness.get('ready'))
+              counters['entry_score_ge62'] += float(readiness.get('score') or 0)>=62
+              counters['rr_conservative_ge105'] += float(rr.get('conservative') or 0)>=1.05
+              counters['rr_trend_ge115'] += float(rr.get('trend') or 0)>=1.15
+              counters['stop_valid_le82'] += 0<float(rr.get('stop') or 0)<=8.2
+              counters['stop_valid_le75'] += 0<float(rr.get('stop') or 0)<=7.5
+              counters['buy_ge55'] += num(r,'買進分數')>=55
+              counters['entry_ge62'] += num(r,'Entry進場買點分')>=62
+              counters['risk_ge55'] += num(r,'Risk風控安全分')>=55
+              counters['risk_ge58'] += num(r,'Risk風控安全分')>=58
+              counters['op_ge62'] += op>=62
+              counters['op_ge65'] += op>=65
+              counters['amount_ge150'] += eng._reference_turnover_m(s)>=150
+              counters['amount_ge300'] += eng._reference_turnover_m(s)>=300
+              counters['chase_le65'] += eng._chase_risk_score(s,55)<=65
+              counters['chase_le60'] += eng._chase_risk_score(s,55)<=60
+              counters['promotion_formal'] += bool(promo.get('formal'))
+              counters['promotion_a_minus'] += bool(promo.get('a_minus'))
+              counters['promotion_market_blocked'] += bool(promo.get('market_blocked'))
+              counters['momentum_radar_ready'] += bool(momentum.get('radar_ready'))
+              counters['prebreak_radar_ready'] += bool(prebreak.get('radar_ready'))
+              counters['practical_rr_zero'] += num(r,'實戰風險報酬比')<=0
+              counters['practical_stop_zero'] += num(r,'實戰停損距離%')<=0
+              counters['practical_upside_zero'] += num(r,'實戰壓力空間%')<=0
+              bucket_counter[str(r.get('正式推薦分區',''))]+=1
+              routes[str(promo.get('route') or promo.get('path') or '')]+=1
+              for h in hard: hard_reasons[h]+=1
+              reason=str(readiness.get('reasons') or '')
+              for part in [x for x in reason.replace('、','|').split('|') if x]: entry_reasons[part]+=1
+              score=sum([
+                  bool(hist.get('fresh')), bool(market.get('formal_ready')), bool(official.get('a_minus_ready')),
+                  bool(liq.get('tradable')), not bool(hard), float(rr.get('trend') or 0)>=1.15,
+                  0<float(rr.get('stop') or 0)<=8.2, num(r,'buy',num(r,'買進分數'))>=55,
+                  num(r,'Entry進場買點分')>=62, num(r,'Risk風控安全分')>=55,
+                  eng._reference_turnover_m(s)>=150, eng._chase_risk_score(s,55)<=65, op>=62
+              ])
+              if score>=10:
+                  near.append((score,str(r.get('股票代號','')),str(r.get('股票名稱','')),str(r.get('K線最後交易日','')),op,rr.get('conservative'),rr.get('trend'),rr.get('stop'),readiness.get('score'),readiness.get('path'),hard[:2]))
+
+          print('\nGATE_COUNTS')
+          for k,v in counters.most_common(): print(k,v, f'{v/len(df)*100:.1f}%')
+          print('\nBUCKET_COUNTS', bucket_counter.most_common())
+          print('\nPROMOTION_ROUTES', routes.most_common(20))
+          print('\nTOP_HARD_VETO', hard_reasons.most_common(20))
+          print('\nTOP_ENTRY_BLOCKERS', entry_reasons.most_common(25))
+          print('\nNEAR_PASS_TOP')
+          for x in sorted(near, reverse=True)[:40]: print(x)
+          PY
+
+      - name: Upload diagnostic report
+        uses: actions/upload-artifact@v4
+        with:
+          name: V191-H24-formal-zero-diagnostic
+          path: /tmp/H24_FORMAL_ZERO_DIAGNOSTIC.txt
+          if-no-files-found: error
+          retention-days: 7
