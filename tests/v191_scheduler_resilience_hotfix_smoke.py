@@ -53,15 +53,19 @@ try:
     assert third.get("repaired_failed_run_keys")==1, third
     assert third["executed"] and third["executed"][0]["status"]=="SUCCESS", third
 
-    # Interrupted force-all batch resumes unfinished jobs on the next wakeup.
+    # H10 correction: interrupted manual force-all remains diagnostic evidence,
+    # but the next unattended wake executes the real production slot instead of
+    # switching into FORCE retry-only mode.
     status.clear(); status.update({
         "version":sched.VERSION,"jobs":{},"completed_run_keys":[],
         "active_run":{"mode":"force_all","started_at":"2026-08-13 06:55:00","pending_jobs":["stock_master"],"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[]},
     })
     resumed=sched.run_due_jobs(now=datetime(2026,8,13,7,33,tzinfo=TZ))
-    assert resumed.get("resumed_force_batch") is True, resumed
+    assert resumed.get("resumed_force_batch") is False, resumed
     assert resumed["executed"] and resumed["executed"][0]["job"]=="stock_master", resumed
+    assert "|FORCE|" not in resumed["executed"][0]["run_key"], resumed
+    assert resumed.get("status",{}).get("last_force_pending_jobs")==["stock_master"], resumed
 
-    print("PASS V191 scheduler resilience hotfix | failed slot retryable | legacy bad key repaired | force batch resumable")
+    print("PASS V191 scheduler resilience H10 | failed slot retryable | legacy bad key repaired | force diagnostics cannot hijack production")
 finally:
     sched.load_settings,sched.load_status,sched.load_history,sched._execute_one,sched._checkpoint_runtime,sched._acquire_lock,sched._release_lock=orig

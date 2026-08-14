@@ -76,12 +76,14 @@ st.caption("V191｜中央自動排程＋永久化監控：股票主檔→大盤�
 # V191 Central Scheduler UI
 # ---------------------------------------------------------------------------
 if callable(load_auto_scheduler_settings):
-    _auto_cfg = load_auto_scheduler_settings()
-    _auto_status = load_auto_scheduler_status() if callable(load_auto_scheduler_status) else {}
+    _auto_cfg = load_auto_scheduler_settings(refresh_remote=True)
+    _auto_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
     with st.expander("⏰ V191｜中央自動排程中心（每日自動更新＋永久記錄＋自動股神推薦）", expanded=True):
         st.info(
-            "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions 每10分鐘喚醒一次。"
+            "中央排程只負責『到期檢查與依序執行』；正式無人值守由 GitHub Actions cron 嘗試每10分鐘喚醒。"
+            "GitHub 排程可能延遲或合併喚醒，H10 因此加入『同交易日漏點自動補跑』，不再讓超過容許分鐘的工作直接整天消失。"
             "所有時間均為 Asia/Taipei。預設不會自動啟用，必須由你勾選總開關並永久保存後才執行。"
+            "H10 另修正：Page17 每次進入會以小型GitHub控制檔刷新最後喚醒/狀態；未完成的手動強制驗證不再攔截正式無人值守排程；Actions 不再用整包git切branch回寫runtime-data，而改為驗證既有CAS永久化的scheduler heartbeat。"
             "V191 2026-08-13 Hotfix8：修正股神推薦紀錄大型GitHub備份HTTP 409版本衝突，導入同檔序列化、CAS重取SHA、同Hash略過、較新權威退讓與有限自動重試；Hotfix7：修正Page7→Page10清單分裂、永久化Hash永遠pending、舊未來slot誤標完成；Hotfix6：強制驗證與到期執行新增真實排程進度回報；可即時看到第幾項／總項數、目前工作、成功/警示/失敗/阻擋及最近完成項目。Hotfix5：FAILED/BLOCKED 不再誤標已完成；每一項工作完成後立即 checkpoint；"
             "強制全部批次若因 rerun/redeploy 中斷，或其中工作 FAILED/BLOCKED，該工作會保留在 pending；12 小時內下一次中央喚醒只續跑未完成工作；失效 PID 鎖會自動回收。"
             "強制驗證使用獨立 FORCE 執行鍵，不會再吃掉當日晚間正式排程時段；官方因子只有『抓取/保存＋內容日期驗證』都通過才算 SUCCESS。"
@@ -96,19 +98,40 @@ if callable(load_auto_scheduler_settings):
             st.warning(
                 f"偵測到未完成排程批次：模式={_active_run.get('mode', 'unknown')}；"
                 f"目前/最後工作={AUTO_JOB_LABELS.get(str(_active_run.get('last_job') or ''), str(_active_run.get('last_job') or '尚未開始'))}；"
-                f"待續跑 {len(_pending_labels)} 項。下一次中央喚醒會依 Hotfix 規則續跑。"
+                f"待處理 {len(_pending_labels)} 項。H10：若這是手動 force_all 驗證，正式無人值守排程不會再被它攔截；需要時可再次人工強制驗證。"
             )
         _m1, _m2, _m3, _m4 = st.columns(4)
         _m1.metric("總開關", "啟用" if _auto_cfg.get("enabled") else "停用")
         _m2.metric("已啟用工作", sum(1 for x in (_auto_cfg.get("jobs") or {}).values() if isinstance(x, dict) and x.get("enabled")))
         _sum = (_auto_status.get("last_summary") or {}) if isinstance(_auto_status, dict) else {}
         _m3.metric("最近 成功/警示/失敗", f"{_sum.get('success', 0)}/{_sum.get('warning', 0)}/{_sum.get('failed', 0)}")
-        _m4.metric("最後喚醒", str((_auto_status or {}).get("last_wakeup_at") or "尚未執行"))
+        _last_wakeup_text = str((_auto_status or {}).get("last_wakeup_at") or "")
+        _m4.metric("最後喚醒", _last_wakeup_text or "尚未執行")
+        try:
+            from datetime import datetime as _dt
+            from zoneinfo import ZoneInfo as _ZoneInfo
+            _wake_dt = _dt.strptime(_last_wakeup_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_ZoneInfo("Asia/Taipei"))
+            _wake_age_min = max(0.0, (_dt.now(_ZoneInfo("Asia/Taipei")) - _wake_dt).total_seconds() / 60.0)
+        except Exception:
+            _wake_age_min = None
+        if _auto_cfg.get("enabled") and _wake_age_min is not None:
+            if _wake_age_min <= 35:
+                st.success(f"GitHub/中央排程 heartbeat 正常：最後可驗證喚醒約 {_wake_age_min:.0f} 分鐘前。")
+            else:
+                st.warning(
+                    f"外部喚醒目前已約 {_wake_age_min:.0f} 分鐘未更新。GitHub cron 並非即時保證；"
+                    "H10 會在下一次成功喚醒時補跑同交易日尚未完成的最新時段，不會再因超過 grace 就永久漏跑。"
+                )
         st.caption("狀態定義：SUCCESS＝完整完成；WARNING＝工作已完成但有非致命待確認事項（不是失敗）；FAILED＝執行失敗；BLOCKED＝前置條件未通過。")
 
         with st.form("v191_central_scheduler_form", clear_on_submit=False):
             _enable_all = st.checkbox("啟用 V191 中央自動排程", value=bool(_auto_cfg.get("enabled", False)))
             _weekdays = st.checkbox("僅交易日週一～週五執行", value=bool(_auto_cfg.get("weekdays_only", True)))
+            _catch_up = st.checkbox(
+                "GitHub 喚醒延遲時，同交易日自動補跑漏掉的最新時段",
+                value=bool(_auto_cfg.get("catch_up_missed_same_day", True)),
+                help="建議保持啟用。GitHub Actions cron 可能延遲；啟用後即使超過到期容許分鐘，下一次喚醒仍會補跑今天尚未完成的最新排程時段。",
+            )
             _rec_force_full = st.checkbox(
                 "自動股神推薦固定使用全市場完整掃描",
                 value=bool((((_auto_cfg.get("jobs") or {}).get("godpick_recommendation") or {}).get("options") or {}).get("force_full_market", False)),
@@ -142,7 +165,7 @@ if callable(load_auto_scheduler_settings):
             _save_auto = st.form_submit_button("💾 永久保存 V191 自動排程設定", type="primary", use_container_width=True)
         if _save_auto:
             _new_cfg = dict(_auto_cfg)
-            _new_cfg.update({"enabled": bool(_enable_all), "weekdays_only": bool(_weekdays), "grace_minutes": int(_grace), "retry_count": int(_retry), "retry_delay_seconds": int(_delay), "jobs": _edited_jobs})
+            _new_cfg.update({"enabled": bool(_enable_all), "weekdays_only": bool(_weekdays), "catch_up_missed_same_day": bool(_catch_up), "grace_minutes": int(_grace), "retry_count": int(_retry), "retry_delay_seconds": int(_delay), "jobs": _edited_jobs})
             _ok, _msg = save_auto_scheduler_settings(_new_cfg)
             if _ok:
                 st.success("V191 中央排程設定已永久保存；GitHub Actions 下一次喚醒後會依新時間執行。")
@@ -239,7 +262,7 @@ if callable(load_auto_scheduler_settings):
         _next_rows = auto_next_run_rows(_auto_cfg, _auto_status) if callable(auto_next_run_rows) else []
         if _next_rows:
             st.dataframe(pd.DataFrame(_next_rows), use_container_width=True, hide_index=True, height=480)
-        _hist = load_auto_scheduler_history() if callable(load_auto_scheduler_history) else []
+        _hist = load_auto_scheduler_history(refresh_remote=True) if callable(load_auto_scheduler_history) else []
         with st.expander("最近自動更新履歷", expanded=False):
             if _hist:
                 _hdf = pd.DataFrame(_hist[-120:][::-1])
@@ -584,7 +607,7 @@ with st.expander("三、每個模組參數永久保存檢查", expanded=True):
 
 with st.expander("V191 無人值守排程架構說明", expanded=False):
     st.markdown("""
-- V191 使用 `.github/workflows/godpick_auto_scheduler_v191.yml` 每 10 分鐘喚醒一次中央 due-check；真正工作時間仍由本頁永久設定的 Asia/Taipei 時間決定。
+- V191 使用 `.github/workflows/godpick_auto_scheduler_v191.yml` 的 `*/10` cron 請求定期喚醒中央 due-check；GitHub 可能延遲/合併 scheduled run，因此 H10 以「同交易日漏點補跑」保證下一次喚醒不會漏掉最新未完成時段。
 - 所有更新結果與成功/失敗訊息寫入 `godpick_auto_scheduler_status.json` / `godpick_auto_scheduler_history.json`，並同步 `runtime-data`。
 - 舊 `.github/workflows/update_official_factors_v112.yml` 已改為 **只保留手動 emergency dispatch**，避免和中央排程重複抓官方因子。
 - 自動股神推薦不是固定時間硬跑：只有股票主檔、大盤、官方因子、SuperAI 市場情境等前置工作於同日成功後才會執行。

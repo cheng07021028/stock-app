@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260813_hotfix8_records_cas"
+VERSION = "godpick_auto_scheduler_v191_20260814_hotfix10_unattended_reliability"
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -70,6 +70,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "enabled": False,
     "weekdays_only": True,
     "grace_minutes": 35,
+    "catch_up_missed_same_day": True,
     "retry_count": 2,
     "retry_delay_seconds": 20,
     "history_keep": 400,
@@ -131,7 +132,7 @@ def _normalize_times(values: Any) -> list[str]:
 def normalize_settings(raw: Any) -> dict[str, Any]:
     out=copy.deepcopy(DEFAULT_SETTINGS)
     if isinstance(raw,dict):
-        for k in ["enabled","weekdays_only","grace_minutes","retry_count","retry_delay_seconds","history_keep","updated_at"]:
+        for k in ["enabled","weekdays_only","catch_up_missed_same_day","grace_minutes","retry_count","retry_delay_seconds","history_keep","updated_at"]:
             if k in raw: out[k]=raw[k]
         rjobs=raw.get("jobs") if isinstance(raw.get("jobs"),dict) else {}
         for key,default in out["jobs"].items():
@@ -146,6 +147,7 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 deps=merged.get("dependencies") if isinstance(merged.get("dependencies"),list) else default.get("dependencies",[])
                 merged["dependencies"]=[str(x) for x in deps if str(x) in JOB_LABELS and str(x)!=key]
             out["jobs"][key]=merged
+    out["catch_up_missed_same_day"]=bool(out.get("catch_up_missed_same_day", True))
     out["grace_minutes"]=max(5,min(int(out.get("grace_minutes",35) or 35),180))
     out["retry_count"]=max(0,min(int(out.get("retry_count",2) or 0),5))
     out["retry_delay_seconds"]=max(1,min(int(out.get("retry_delay_seconds",20) or 20),300))
@@ -154,11 +156,46 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     return out
 
 
-def load_settings() -> dict[str, Any]:
-    # Local-first after the first authority restore keeps Page17 fast.  V191
-    # delivery packages intentionally exclude this runtime file, so a cold
-    # reboot with no local copy falls through to runtime-data/Firestore once.
+def _payload_clock(payload: Any, *fields: str) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for field in fields:
+        value = str(payload.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _refresh_small_json_from_github(path_name: str, local_payload: Any, *, clock_fields: tuple[str, ...]) -> Any:
+    """Refresh small scheduler control files without a heavy full authority election.
+
+    Streamlit is a long-lived process while GitHub Actions is a separate process.
+    H10 therefore cannot trust a non-empty local scheduler status forever.  For
+    these small control files only, compare the remote business/update clock and
+    adopt the newer GitHub payload.  Network failure is fail-soft and keeps the
+    current local payload.
+    """
+    try:
+        from godpick_persistence_service import read_github_json, write_local_json_atomic
+        remote, _ = read_github_json(path_name, {})
+        if not isinstance(remote, dict) or not remote:
+            return local_payload
+        local_clock = _payload_clock(local_payload, *clock_fields)
+        remote_clock = _payload_clock(remote, *clock_fields)
+        if (not isinstance(local_payload, dict) or not local_payload) or (remote_clock and remote_clock > local_clock):
+            write_local_json_atomic(path_name, remote)
+            return remote
+    except Exception:
+        pass
+    return local_payload
+
+
+def load_settings(*, refresh_remote: bool = False) -> dict[str, Any]:
+    # Actions restores runtime-data before headless execution.  Page17 may stay
+    # alive for days, so an explicit remote refresh is available for the UI.
     local=_read_local(SETTINGS_FILE,{})
+    if refresh_remote:
+        local = _refresh_small_json_from_github(SETTINGS_FILE, local, clock_fields=("updated_at",))
     if isinstance(local,dict) and local:
         return normalize_settings(local)
     try:
@@ -178,8 +215,10 @@ def save_settings(settings: dict[str, Any]) -> tuple[bool,str]:
         return False,f"排程永久保存失敗：{exc}"
 
 
-def load_status() -> dict[str,Any]:
+def load_status(*, refresh_remote: bool = False) -> dict[str,Any]:
     raw=_read_local(STATUS_FILE,{})
+    if refresh_remote:
+        raw = _refresh_small_json_from_github(STATUS_FILE, raw, clock_fields=("updated_at", "last_wakeup_at"))
     if not (isinstance(raw,dict) and raw):
         try:
             from godpick_persistence_service import load_named_json_permanent
@@ -189,8 +228,23 @@ def load_status() -> dict[str,Any]:
     return raw if isinstance(raw,dict) else {}
 
 
-def load_history() -> list[dict[str,Any]]:
+def load_history(*, refresh_remote: bool = False) -> list[dict[str,Any]]:
     raw=_read_local(HISTORY_FILE,[])
+    if refresh_remote:
+        try:
+            from godpick_persistence_service import read_github_json, write_local_json_atomic
+            remote,_ = read_github_json(HISTORY_FILE,{})
+            local_records = raw.get("records",[]) if isinstance(raw,dict) else (raw if isinstance(raw,list) else [])
+            remote_records = remote.get("records",[]) if isinstance(remote,dict) else (remote if isinstance(remote,list) else [])
+            def _last_clock(rows):
+                if not isinstance(rows,list) or not rows: return ""
+                row=rows[-1] if isinstance(rows[-1],dict) else {}
+                return str(row.get("finished_at") or row.get("started_at") or "")
+            if isinstance(remote_records,list) and remote_records and (_last_clock(remote_records) > _last_clock(local_records) or len(remote_records) > len(local_records)):
+                raw=remote
+                write_local_json_atomic(HISTORY_FILE, remote)
+        except Exception:
+            pass
     empty = raw in (None, {}, [])
     if empty:
         try:
@@ -229,16 +283,28 @@ def _already_done(status:dict[str,Any],run_key:str)->bool:
     return run_key in set(status.get("completed_run_keys",[]) or [])
 
 
-def _due_slots(job_cfg:dict[str,Any], now:datetime, grace_minutes:int, *, force:bool=False)->list[datetime]:
+def _due_slots(job_cfg:dict[str,Any], now:datetime, grace_minutes:int, *, force:bool=False, catch_up_missed_same_day: bool = True)->list[datetime]:
     if force:
         # Use the actual force execution minute.  Previous V191 code used the
         # day's last configured schedule and could mark a FUTURE slot complete.
         return [now.replace(second=0,microsecond=0)]
-    out=[]
+    past=[]; within_grace=[]
     for t in _normalize_times(job_cfg.get("times")):
         slot=_slot_datetime(now,t)
-        if slot<=now<=slot+timedelta(minutes=grace_minutes): out.append(slot)
-    return out
+        if slot <= now:
+            past.append(slot)
+            if now <= slot + timedelta(minutes=grace_minutes):
+                within_grace.append(slot)
+    if within_grace:
+        # Only the latest due slot matters for refresh-style jobs; an older slot
+        # is superseded by a newer same-day refresh.
+        return [max(within_grace)]
+    if catch_up_missed_same_day and past:
+        # GitHub scheduled workflows are a wake-up hint, not a hard real-time
+        # clock.  H10 catches up the latest missed slot on the same trading day
+        # instead of silently losing the job after grace_minutes expires.
+        return [max(past)]
+    return []
 
 
 def _dependency_check(job_cfg:dict[str,Any],status:dict[str,Any],now:datetime)->tuple[bool,str]:
@@ -440,22 +506,22 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
     repaired_future_count=_repair_future_completed_keys(status, now)
     status["version"]=VERSION; status["last_wakeup_at"]=now_text(now); status["scheduler_enabled"]=bool(cfg.get("enabled"))
 
-    # If a user-triggered force-all batch was interrupted by a rerun/redeploy,
-    # the next scheduler wakeup resumes only its unfinished jobs for up to 12h.
+    # H10: a manual force-all is deployment validation and must never hijack
+    # unattended production slots.  Older H5 behavior converted the next cron
+    # wake into force-all retry-only mode; two stubborn failed jobs could then
+    # suppress every real due job for up to 12 hours.  Preserve the diagnostic
+    # evidence, but let the normal scheduled due-check proceed independently.
     resumed_force=False
     prior_active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
     if not force_all_enabled and not selected_jobs and prior_active.get("mode")=="force_all":
         pending=[str(x) for x in (prior_active.get("pending_jobs") or []) if str(x) in JOB_LABELS]
-        try:
-            started_dt=datetime.strptime(str(prior_active.get("started_at") or ""), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ)
-            age_hours=(now-started_dt).total_seconds()/3600
-        except Exception:
-            age_hours=999
-        if pending and 0 <= age_hours <= 12:
-            force_all_enabled=True; selected_jobs=pending; resumed_force=True
-        elif prior_active:
-            status["last_interrupted_run"]={**prior_active,"abandoned_at":now_text(now),"reason":"超過12小時，未自動續跑"}
-            status.pop("active_run",None)
+        if pending:
+            snapshot={**prior_active}
+            snapshot["deferred_at"]=now_text(now)
+            snapshot["reason"]="H10：未完成強制驗證不再攔截正式無人值守排程；正式時段優先，必要時可由Page17再次手動強制驗證。"
+            status["last_incomplete_run"]=snapshot
+            status["last_force_pending_jobs"]=pending
+        status.pop("active_run",None)
 
     if not cfg.get("enabled") and not force_all_enabled:
         return {"ok":True,"skipped":True,"message":"V191中央自動排程目前未啟用；未執行任何工作。","executed":[],"settings":cfg,"status":status}
@@ -496,7 +562,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
         for job,job_cfg in cfg.get("jobs",{}).items():
             if selected_jobs and job not in selected_jobs: continue
             if not bool(job_cfg.get("enabled",False)): continue
-            due=_due_slots(job_cfg,now,int(cfg.get("grace_minutes",35)),force=force_all_enabled)
+            due=_due_slots(job_cfg,now,int(cfg.get("grace_minutes",35)),force=force_all_enabled,catch_up_missed_same_day=bool(cfg.get("catch_up_missed_same_day",True)))
             job_had_slot=False
             for slot in due:
                 key=_run_key(job,slot,force=force_all_enabled)
@@ -572,11 +638,11 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     active["pending_jobs"]=[x for x in pending if x != job]
                     if job not in active.get("completed_jobs",[]): active.setdefault("completed_jobs",[]).append(job)
                 else:
-                    # V191-H5: a failed/blocked force-all item is *not* finished.
-                    # Keep it pending so the next central wake-up resumes it after
-                    # downstream repair jobs (Page08 authority/durability) have run.
+                    # Keep failed/blocked force-all evidence pending in this manual
+                    # validation batch.  H10 no longer lets an unattended cron wake
+                    # switch into force-only retry mode; production slots stay first.
                     active["pending_jobs"]=list(pending)
-                    active["resume_reason"]="存在FAILED/BLOCKED工作；保留待下一次中央喚醒自動續跑"
+                    active["resume_reason"]="存在FAILED/BLOCKED工作；H10保留診斷但不攔截正式排程"
                 active["updated_at"]=now_text()
                 _checkpoint_runtime(status,history,cfg,f"job-finished-{job}-{_last_job_status.lower() or 'unknown'}")
 
@@ -587,11 +653,11 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
             remaining=[str(x) for x in (active.get("pending_jobs") or []) if str(x)] if isinstance(active,dict) else []
             if force_all_enabled and remaining:
-                # V191-H5: do not erase the force batch when any job failed or
-                # was blocked.  A later scheduler wake will resume only these
-                # pending items (up to the existing 12-hour safety window).
+                # Do not erase manual force validation evidence when work failed,
+                # but H10 will not auto-convert the next production wake into this
+                # force batch.
                 active["paused_at"]=now_text(); active["summary"]=summary
-                active["resume_reason"]="本輪仍有未完成工作，等待下一次中央喚醒續跑"
+                active["resume_reason"]="本輪仍有未完成強制驗證工作；正式排程不受影響，可人工再次強制驗證"
                 status["active_run"]=active
                 status["last_incomplete_run"]={**active}
                 _checkpoint_runtime(status,history,cfg,"run-paused-pending-retry")
@@ -622,16 +688,36 @@ def job_status_rows(job_ids: list[str] | None = None) -> list[dict[str, Any]]:
 
 def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=None,now:datetime|None=None)->list[dict[str,Any]]:
     cfg=normalize_settings(settings or load_settings()); now=(now or now_tw()).astimezone(TZ); status=status or load_status(); rows=[]
+    completed=set(status.get("completed_run_keys",[]) or []) if isinstance(status,dict) else set()
+    catch_up=bool(cfg.get("catch_up_missed_same_day",True))
+    grace=int(cfg.get("grace_minutes",35) or 35)
     for job,jc in cfg["jobs"].items():
-        times=_normalize_times(jc.get("times")); candidates=[]
+        times=_normalize_times(jc.get("times"))
+        today_slots=[_slot_datetime(now,t) for t in times]
+        past=[dt for dt in today_slots if dt<=now]
+        latest_past=max(past) if past else None
+        overdue=False
+        overdue_slot=None
+        if bool(jc.get("enabled")) and latest_past is not None:
+            key=_run_key(job,latest_past)
+            if key not in completed and (catch_up or now<=latest_past+timedelta(minutes=grace)):
+                overdue=True; overdue_slot=latest_past
+        candidates=[]
         for add in range(0,8):
             day=now+timedelta(days=add)
             if cfg.get("weekdays_only",True) and day.weekday()>=5: continue
             for t in times:
                 dt=_slot_datetime(day,t)
                 if dt>now: candidates.append(dt)
-        nxt=min(candidates) if candidates else None; js=(status.get("jobs",{}) or {}).get(job,{})
-        rows.append({"工作ID":job,"自動更新項目":JOB_LABELS.get(job,job),"啟用":bool(jc.get("enabled")),"每日時間":",".join(times),"下次預計":now_text(nxt) if nxt else "—","最後狀態":js.get("last_status","尚未執行"),"最後成功":js.get("last_success_at",""),"最後訊息":js.get("last_message","")})
+        nxt=min(candidates) if candidates else None
+        js=(status.get("jobs",{}) or {}).get(job,{})
+        next_text=now_text(overdue_slot)+"（到期待執行/補跑）" if overdue and overdue_slot else (now_text(nxt) if nxt else "—")
+        due_state=("到期待執行" if overdue_slot and now<=overdue_slot+timedelta(minutes=grace) else "漏點待補跑") if overdue else "等待下次時段"
+        rows.append({
+            "工作ID":job,"自動更新項目":JOB_LABELS.get(job,job),"啟用":bool(jc.get("enabled")),
+            "每日時間":",".join(times),"到期狀態":due_state,"下次預計":next_text,
+            "最後狀態":js.get("last_status","尚未執行"),"最後成功":js.get("last_success_at",""),"最後訊息":js.get("last_message","")
+        })
     return rows
 
 

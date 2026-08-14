@@ -29,10 +29,16 @@ try:
     assert status.get('active_run',{}).get('pending_jobs')==['stock_master'],status
     assert status.get('active_run',{}).get('mode')=='force_all',status
 
+    # H10 correction: an unattended production wake must never be converted
+    # into force-only retry mode.  The same job can still recover via its latest
+    # missed production slot (same-day catch-up), while the failed force batch
+    # remains diagnostic evidence only.
     sched._execute_one=lambda *a,**k:{'ok':True,'message':'recovered','finished_at':'2026-08-13 14:01:01'}
     resumed=sched.run_due_jobs(now=datetime(2026,8,13,14,1,tzinfo=TZ))
-    assert resumed.get('resumed_force_batch') is True,resumed
+    assert resumed.get('resumed_force_batch') is False,resumed
     assert resumed['executed'][0]['status']=='SUCCESS',resumed
+    assert '|FORCE|' not in resumed['executed'][0]['run_key'],resumed
+    assert status.get('last_force_pending_jobs')==['stock_master'],status
     assert 'active_run' not in status,status
 finally:
     sched.load_settings,sched.load_status,sched.load_history,sched._execute_one,sched._checkpoint_runtime,sched._acquire_lock,sched._release_lock=orig_sched
@@ -64,4 +70,4 @@ finally:
     if 'old_mod' in locals() and old_mod is not None: sys.modules['godpick_headless_page_loader']=old_mod
     else: sys.modules.pop('godpick_headless_page_loader',None)
 
-print('PASS V191-H5 | force failed remains pending/resumes | Page07 authority preflight blocks unsafe scan and runs after recovery')
+print('PASS V191-H5/H10 | force failure preserved without hijacking production catch-up | Page07 authority preflight blocks unsafe scan and runs after recovery')

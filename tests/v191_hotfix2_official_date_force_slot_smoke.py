@@ -22,6 +22,13 @@ import godpick_auto_update_tasks as tasks
 orig_load_sched=health.load_schedule_settings
 orig_run=health.run_official_factor_update_once
 orig_load_cache=ofs.load_factor_cache
+orig_tasks_datetime=tasks.datetime
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        fixed=datetime(2026,8,13,17,0,tzinfo=TZ)
+        return fixed if tz is None else fixed.astimezone(tz)
+tasks.datetime=_FixedDateTime
 market_path=ROOT/'market_snapshot.json'
 market_backup=market_path.read_bytes() if market_path.exists() else None
 try:
@@ -41,6 +48,7 @@ finally:
     health.load_schedule_settings=orig_load_sched
     health.run_official_factor_update_once=orig_run
     ofs.load_factor_cache=orig_load_cache
+    tasks.datetime=orig_tasks_datetime
     if market_backup is None:
         market_path.unlink(missing_ok=True)
     else:
