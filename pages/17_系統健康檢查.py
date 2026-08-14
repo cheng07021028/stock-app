@@ -69,7 +69,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191｜中央自動排程＋永久化監控：股票主檔→大盤→官方因子→SuperAI情境→股神推薦→最新價/績效→N日/命中→T+1學習，全鏈可設定台灣時間自動執行。")
+st.caption("V191-H18｜中央自動排程＋永久化監控：股票主檔→大盤→官方因子→SuperAI情境→股神推薦→最新價/績效→N日/命中→T+1學習；H18 加入長工作防重跑、同步確認與卡住診斷。")
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +82,21 @@ if callable(load_auto_scheduler_settings):
         _active_run = (_auto_status.get("active_run") or {}) if isinstance(_auto_status, dict) else {}
         if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
             _pending_labels = [AUTO_JOB_LABELS.get(str(x), str(x)) for x in (_active_run.get("pending_jobs") or [])]
-            st.warning(
-                f"偵測到未完成排程批次：模式={_active_run.get('mode', 'unknown')}；"
-                f"目前/最後工作={AUTO_JOB_LABELS.get(str(_active_run.get('last_job') or ''), str(_active_run.get('last_job') or '尚未開始'))}；"
-                f"待處理 {len(_pending_labels)} 項。H10：若這是手動 force_all 驗證，正式無人值守排程不會再被它攔截；需要時可再次人工強制驗證。"
-            )
+            _current_job_key = str(_active_run.get("current_job") or _active_run.get("last_job") or "")
+            _current_job_label = AUTO_JOB_LABELS.get(_current_job_key, _current_job_key or "尚未開始")
+            _active_mode = str(_active_run.get("mode") or "unknown")
+            if _active_mode == "force_all":
+                st.warning(
+                    f"偵測到未完成手動強制驗證批次：目前/最後工作={_current_job_label}；"
+                    f"待處理 {len(_pending_labels)} 項。H18：手動 force_all 不會攔截正式無人值守排程；"
+                    "失敗工作改由下一次中央喚醒再試，避免同一輪反覆執行大型任務。"
+                )
+            else:
+                st.info(
+                    f"中央排程批次執行中：目前工作={_current_job_label}；"
+                    f"本輪實際待處理 {len(_pending_labels)} 項。H18 已只顯示真正到期工作，"
+                    "且 07 全市場推薦、08 最新價、09 股票主檔不會在同一次喚醒內反覆重跑；失敗時由下一次喚醒安全補跑。"
+                )
         _m1, _m2, _m3, _m4, _m5 = st.columns(5)
         _m1.metric("總開關", "啟用" if _auto_cfg.get("enabled") else "停用")
         _m2.metric("已啟用工作", sum(1 for x in (_auto_cfg.get("jobs") or {}).values() if isinstance(x, dict) and x.get("enabled")))
@@ -98,19 +108,61 @@ if callable(load_auto_scheduler_settings):
         try:
             from datetime import datetime as _dt
             from zoneinfo import ZoneInfo as _ZoneInfo
-            _wake_dt = _dt.strptime(_last_wakeup_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_ZoneInfo("Asia/Taipei"))
-            _wake_age_min = max(0.0, (_dt.now(_ZoneInfo("Asia/Taipei")) - _wake_dt).total_seconds() / 60.0)
+            _tz_tw = _ZoneInfo("Asia/Taipei")
+            _now_tw = _dt.now(_tz_tw)
+            _wake_dt = _dt.strptime(_last_wakeup_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_tz_tw)
+            _wake_age_min = max(0.0, (_now_tw - _wake_dt).total_seconds() / 60.0)
         except Exception:
             _wake_age_min = None
-        if _auto_cfg.get("enabled") and _wake_age_min is not None:
-            if _wake_age_min <= 35:
-                st.success(f"GitHub/中央排程 heartbeat 正常：最後可驗證喚醒約 {_wake_age_min:.0f} 分鐘前。")
-            else:
-                st.warning(
-                    f"中央排程 heartbeat 已約 {_wake_age_min:.0f} 分鐘未更新。"
-                    "若已安裝 Windows 嚴格10分鐘喚醒器，請檢查該工作排程或網路；未安裝時仍會由 GitHub 排程備援並於下一次喚醒補跑。"
-                )
-        st.caption("狀態定義：SUCCESS＝完整完成；WARNING＝工作已完成但有非致命待確認事項（不是失敗）；FAILED＝執行失敗；BLOCKED＝前置條件未通過。")
+            _now_tw = None
+            _tz_tw = None
+
+        _progress_text = ""
+        if isinstance(_active_run, dict) and _active_run:
+            _progress_text = str(
+                _active_run.get("last_progress_at")
+                or _active_run.get("updated_at")
+                or (_auto_status or {}).get("last_progress_at")
+                or (_auto_status or {}).get("updated_at")
+                or ""
+            )
+        _progress_age_min = None
+        if _progress_text and _now_tw is not None and _tz_tw is not None:
+            try:
+                _progress_dt = _dt.strptime(_progress_text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_tz_tw)
+                _progress_age_min = max(0.0, (_now_tw - _progress_dt).total_seconds() / 60.0)
+            except Exception:
+                _progress_age_min = None
+
+        if _auto_cfg.get("enabled"):
+            if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
+                _current_job_key = str(_active_run.get("current_job") or _active_run.get("last_job") or "")
+                _current_job_label = AUTO_JOB_LABELS.get(_current_job_key, _current_job_key or "尚未開始")
+                if _progress_age_min is not None and _progress_age_min <= 35:
+                    st.success(
+                        f"中央排程 worker 正在執行：目前工作「{_current_job_label}」，"
+                        f"最後進度約 {_progress_age_min:.0f} 分鐘前。最後喚醒時間可早於目前工作進度，這不代表 Windows 喚醒器失效。"
+                    )
+                elif _progress_age_min is not None:
+                    st.warning(
+                        f"中央排程工作可能真的卡住：目前工作「{_current_job_label}」已約 {_progress_age_min:.0f} 分鐘沒有進度。"
+                        "H18 會由 GitHub 60 分鐘硬逾時保護終止真正僵死的單輪，下一次 Windows/GitHub 喚醒再安全補跑；"
+                        "此狀態不再誤導成單純『Windows 10分鐘喚醒器故障』。"
+                    )
+                else:
+                    st.info(f"中央排程已有執行中批次，目前工作「{_current_job_label}」；正在等待下一個可驗證進度點。")
+            elif _wake_age_min is not None:
+                if _wake_age_min <= 35:
+                    st.success(f"GitHub/中央排程 heartbeat 正常：最後可驗證喚醒約 {_wake_age_min:.0f} 分鐘前。")
+                else:
+                    st.warning(
+                        f"目前沒有執行中批次，且中央排程 heartbeat 已約 {_wake_age_min:.0f} 分鐘未更新。"
+                        "此時才需要檢查 Windows 嚴格10分鐘工作排程、網路或 GitHub 備援喚醒。"
+                    )
+        st.caption(
+            "H18 執行規則：大型工作一次業務運算＋一次遠端永久化確認；失敗不在同一次喚醒內重做全市場/全紀錄，"
+            "而由下一次中央喚醒補跑。狀態定義：SUCCESS＝完整完成；WARNING＝非致命待確認；FAILED＝執行失敗；BLOCKED＝前置條件未通過。"
+        )
 
         with st.form("v191_central_scheduler_form", clear_on_submit=False):
             _enable_all = st.checkbox("啟用 V191 中央自動排程", value=bool(_auto_cfg.get("enabled", False)))

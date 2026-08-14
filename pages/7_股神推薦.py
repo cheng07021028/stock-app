@@ -7487,7 +7487,7 @@ def _show_import_result_notice(title: str, added_count: int, selected_count: int
 
 
 
-def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False) -> tuple[int, list[str]]:
+def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False, *, require_remote_confirm: bool = False) -> tuple[int, list[str]]:
     """將 07 股神推薦結果寫入唯一權威紀錄檔。
 
     V174：一般寫入採鎖定式增量 upsert，直接重讀當下最新
@@ -7505,10 +7505,18 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
             return 0, ["匯入資料正規化後沒有有效推薦紀錄。"]
 
         if not force_duplicate and callable(upsert_records_authority_fast):
-            report, stats = upsert_records_authority_fast(
-                new_df.to_dict(orient="records"),
-                reason="07 股神推薦完成自動紀錄／手動寫入",
-            )
+            if require_remote_confirm:
+                report, stats = upsert_records_authority_fast(
+                    new_df.to_dict(orient="records"),
+                    reason="07 股神推薦完成自動紀錄／手動寫入",
+                    require_remote_confirm=True,
+                )
+            else:
+                # Keep the historical callable contract for manual UI/test adapters.
+                report, stats = upsert_records_authority_fast(
+                    new_df.to_dict(orient="records"),
+                    reason="07 股神推薦完成自動紀錄／手動寫入",
+                )
             authority_detail = ""
             if callable(records_authority_status):
                 try:
@@ -12130,7 +12138,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     return rows
 
 
-def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, background_write: bool = False) -> tuple[int, list[str]]:
+def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, background_write: bool = False, require_remote_confirm: bool = False) -> tuple[int, list[str]]:
     """保存正式/A-/R1/R1-M/R1-P；整體掃描不足時仍保留個股資料合格的雷達樣本。
 
     正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
@@ -12224,7 +12232,10 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
             fallback_note = ""
     else:
         fallback_note = ""
-    added, messages = _append_godpick_records(rows, force_duplicate=False)
+    if require_remote_confirm:
+        added, messages = _append_godpick_records(rows, force_duplicate=False, require_remote_confirm=True)
+    else:
+        added, messages = _append_godpick_records(rows, force_duplicate=False)
     messages = [*[f"H7行動分區｜{x}" for x in (partition_notes or [])], *messages]
     if fallback_note:
         messages = [fallback_note, *messages]
@@ -13973,7 +13984,16 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
 
         # Keep the user's existing contract: Page07 executes, Page08 authority
         # continues to permanently store recommendation records.
-        record_added, record_msgs = _v159_auto_record_actionable_recommendations(source_df, background_write=False)
+        try:
+            record_added, record_msgs = _v159_auto_record_actionable_recommendations(
+                source_df, background_write=False, require_remote_confirm=True
+            )
+        except TypeError as _h18_record_type_error:
+            # Backward-compatible only for injected legacy test/adaptor callables.
+            # The real Page07 function in this file supports the H18 parameter.
+            if "require_remote_confirm" not in str(_h18_record_type_error):
+                raise
+            record_added, record_msgs = _v159_auto_record_actionable_recommendations(source_df, background_write=False)
 
         calibration_added = 0
         calibration_msgs: list[str] = []

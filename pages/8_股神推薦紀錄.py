@@ -2388,14 +2388,19 @@ def _write_records_to_firestore(df: pd.DataFrame) -> tuple[bool, str]:
         return False, f"Firestore 寫入失敗：{e}"
 
 
-def _save_records_dual(df: pd.DataFrame) -> bool:
+def _save_records_dual(df: pd.DataFrame, *, require_remote_confirm: bool = False) -> bool:
     clean_df = _ensure_godpick_record_columns(df)
     sync_func = save_records_sync_fast if callable(save_records_sync_fast) else save_records_permanent
     if not callable(sync_func):
         _set_status("永久紀錄服務未載入，為避免假成功，本次不寫入。", "error")
         return False
     started = time.perf_counter()
-    report = sync_func(clean_df, reason="page8 explicit save sync", expected_authority_signature=_safe_str(st.session_state.get(_k("records_source_sig"), ""))) if sync_func is save_records_sync_fast else sync_func(clean_df)
+    report = sync_func(
+        clean_df,
+        reason="page8 explicit save sync",
+        expected_authority_signature=_safe_str(st.session_state.get(_k("records_source_sig"), "")),
+        require_remote_confirm=require_remote_confirm,
+    ) if sync_func is save_records_sync_fast else sync_func(clean_df)
     elapsed = time.perf_counter() - started
     try:
         current_sig_v165 = _records_local_signature()

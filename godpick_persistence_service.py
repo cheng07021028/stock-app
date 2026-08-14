@@ -711,6 +711,7 @@ def upsert_records_authority_fast(
     upsert_rows: Iterable[dict[str, Any]],
     *,
     reason: str = "record authority upsert",
+    require_remote_confirm: bool = False,
 ) -> tuple[PersistenceReport, dict[str, int]]:
     """Atomically upsert recommendation rows into the current authority file.
 
@@ -812,14 +813,22 @@ def upsert_records_authority_fast(
                 and _safe_str(gh_status.get("payload_hash")) == state["payload_hash"]
             )
             remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else True
+            if require_remote_confirm and not fs_verified and github_config()["token"]:
+                gh_verified, gh_message = _sync_records_github_snapshot_v191_h8(
+                    current, state, f"{reason} | H18 no-change remote verify"
+                )
+            else:
+                gh_message = "GitHub已驗證一致" if gh_verified else "GitHub尚未完成同hash回讀驗證"
+            remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else True
             report = PersistenceReport(
                 local_ok=True,
                 firestore_ok=fs_verified,
-                github_ok=gh_verified,
+                github_ok=bool(gh_verified),
+                github_pending=False,
                 permanent_ok=remote_ok,
                 local_message=f"權威檔內容未變更；目前 {len(current)} 筆",
                 firestore_message=("Firestore已驗證一致" if fs_verified else fs_message),
-                github_message=("GitHub已驗證一致" if gh_verified else "GitHub尚未完成同hash回讀驗證"),
+                github_message=gh_message,
                 payload_hash=state["payload_hash"],
                 updated_at=state["updated_at"],
             )
@@ -831,6 +840,7 @@ def upsert_records_authority_fast(
             upsert_rows=changed_rows,
             previous_count=len(current) - added,
             reason=reason,
+            require_remote_confirm=require_remote_confirm,
         )
         return report, {
             "before": len(current) - added,
@@ -2212,6 +2222,7 @@ def save_records_mutation_fast(
     upsert_rows: Iterable[dict[str, Any]] | None = None,
     previous_count: int | None = None,
     reason: str = "record mutation",
+    require_remote_confirm: bool = False,
 ) -> PersistenceReport:
     """Fast durable save for delete/edit/add actions.
 
@@ -2287,10 +2298,16 @@ def save_records_mutation_fast(
 
     cfg = github_config()
     if cfg["token"]:
-        queued, queue_msg = schedule_records_github_sync(records, state, reason)
-        report.github_ok = False
-        report.github_pending = bool(queued)
-        report.github_message = queue_msg
+        if require_remote_confirm and not report.firestore_ok:
+            gh_ok, gh_msg = _sync_records_github_snapshot_v191_h8(records, state, f"{reason} | H18 blocking verify")
+            report.github_ok = bool(gh_ok)
+            report.github_pending = False
+            report.github_message = gh_msg
+        else:
+            queued, queue_msg = schedule_records_github_sync(records, state, reason)
+            report.github_ok = False
+            report.github_pending = bool(queued)
+            report.github_message = queue_msg
     else:
         report.github_ok = False
         report.github_pending = False
@@ -2314,6 +2331,7 @@ def save_records_sync_fast(
     expected_authority_signature: str = "",
     *,
     allow_destructive_replace: bool = False,
+    require_remote_confirm: bool = False,
 ) -> PersistenceReport:
     """Content-aware explicit sync for the large recommendation record file.
 
@@ -2420,10 +2438,16 @@ def save_records_sync_fast(
         report.github_pending = False
         report.github_message = "GitHub 背景備份內容已一致，略過重傳"
     elif github_config()["token"]:
-        queued, queue_msg = schedule_records_github_sync(records, state, reason)
-        report.github_ok = False
-        report.github_pending = bool(queued)
-        report.github_message = queue_msg
+        if require_remote_confirm and not report.firestore_ok:
+            gh_ok, gh_msg = _sync_records_github_snapshot_v191_h8(records, state, f"{reason} | H18 blocking verify")
+            report.github_ok = bool(gh_ok)
+            report.github_pending = False
+            report.github_message = gh_msg
+        else:
+            queued, queue_msg = schedule_records_github_sync(records, state, reason)
+            report.github_ok = False
+            report.github_pending = bool(queued)
+            report.github_message = queue_msg
     else:
         report.github_ok = False
         report.github_pending = False

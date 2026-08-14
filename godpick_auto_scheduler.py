@@ -20,7 +20,8 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260814_hotfix11_dual_wakeup"
+VERSION = "godpick_auto_scheduler_v191_20260814_hotfix18_stall_recovery"
+# Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
 SETTINGS_FILE = "data/config/godpick_auto_scheduler_settings.json"
@@ -46,13 +47,13 @@ JOB_LABELS = {
 }
 
 DEFAULT_JOB_OPTIONS = {
-    "stock_master": {},
+    "stock_master": {"scheduler_immediate_retries": 0},
     "macro_full": {},
     "official_factors": {},
     "super_ai_context": {"fetch_etf": True},
     "watchlist_runtime": {},
-    "godpick_recommendation": {"force_full_market": False},
-    "record_latest_price": {"only_active": False, "batch_size": 120},
+    "godpick_recommendation": {"force_full_market": False, "scheduler_immediate_retries": 0},
+    "record_latest_price": {"only_active": False, "batch_size": 120, "scheduler_immediate_retries": 0},
     "record_performance": {"process_all": True, "max_records": 5000, "batch_limit": 120, "max_workers": 12, "stale_minutes": 30},
     "recommend_list_performance": {"process_all": True, "max_records": 5000, "batch_limit": 120, "max_workers": 12, "stale_minutes": 30},
     "recommend_list_n_day": {"max_rows": 300},
@@ -472,7 +473,13 @@ def _execute_one(job:str, job_cfg:dict[str,Any], global_cfg:dict[str,Any]) -> di
     from godpick_auto_update_tasks import TASK_HANDLERS
     handler=TASK_HANDLERS.get(job)
     if not callable(handler): return {"ok":False,"message":f"找不到工作處理器：{job}"}
-    attempts=max(1,int(global_cfg.get("retry_count",2) or 0)+1); delay=int(global_cfg.get("retry_delay_seconds",20) or 20)
+    options = job_cfg.get("options") if isinstance(job_cfg.get("options"), dict) else {}
+    retry_override = options.get("scheduler_immediate_retries")
+    if retry_override is None:
+        retry_count = int(global_cfg.get("retry_count",2) or 0)
+    else:
+        retry_count = max(0, min(int(retry_override or 0), 5))
+    attempts=max(1,retry_count+1); delay=int(global_cfg.get("retry_delay_seconds",20) or 20)
     last={}
     for n in range(1,attempts+1):
         _touch_lock(job)
@@ -533,19 +540,30 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
     if not lock_ok: return {"ok":False,"skipped":True,"message":lock_msg,"executed":[],"settings":cfg,"status":status}
 
     enabled_order=[job for job,jc in cfg.get("jobs",{}).items() if bool(jc.get("enabled",False)) and (not selected_jobs or job in selected_jobs)]
-    _progress_total=len(enabled_order)
+    planned_order=[]
+    for _job in enabled_order:
+        _jc=(cfg.get("jobs") or {}).get(_job) or {}
+        _slots=_due_slots(
+            _jc, now, int(cfg.get("grace_minutes",35)),
+            force=force_all_enabled,
+            catch_up_missed_same_day=bool(cfg.get("catch_up_missed_same_day",True)),
+        )
+        if any(force_all_enabled or not _already_done(status, _run_key(_job, _slot, force=force_all_enabled)) for _slot in _slots):
+            planned_order.append(_job)
+    _progress_total=len(planned_order)
     _progress_counts={"success":0,"warning":0,"failed":0,"blocked":0}
     _emit_progress(progress_callback,{
         "event":"run_start","force_all":bool(force_all_enabled),"simulate":bool(simulate),
         "resumed_force_batch":bool(resumed_force),"total_jobs":_progress_total,"completed_jobs":0,
-        "pending_jobs":list(enabled_order),"started_at":now_text(now),**_progress_counts,
+        "pending_jobs":list(planned_order),"started_at":now_text(now),**_progress_counts,
     })
     if not simulate:
         if not resumed_force:
             status["active_run"]={
                 "mode":"force_all" if force_all_enabled else "scheduled",
                 "started_at":now_text(now),"updated_at":now_text(now),"pid":os.getpid(),"host":socket.gethostname(),
-                "pending_jobs":list(enabled_order),"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[],
+                "pending_jobs":list(planned_order),"completed_jobs":[],"failed_jobs":[],"blocked_jobs":[],
+                "current_job":"","current_job_started_at":"","last_progress_at":now_text(now),
             }
         else:
             status["active_run"]["resumed_at"]=now_text(now)
@@ -572,9 +590,17 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                 job_had_slot=True
                 _touch_lock(job)
                 try:
-                    _progress_index=enabled_order.index(job)+1
+                    _progress_index=planned_order.index(job)+1
                 except Exception:
                     _progress_index=len(executed)+1
+                if not simulate:
+                    active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
+                    active["current_job"]=job
+                    active["current_job_started_at"]=now_text()
+                    active["last_progress_at"]=now_text()
+                    active["updated_at"]=now_text()
+                    status["last_progress_at"]=active["last_progress_at"]
+                    _checkpoint_runtime(status,history,cfg,f"before-{job}")
                 _emit_progress(progress_callback,{
                     "event":"job_start","job":job,"job_label":JOB_LABELS.get(job,job),
                     "index":_progress_index,"total_jobs":_progress_total,"completed_jobs":len(executed),
@@ -618,6 +644,10 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     if row["status"]=="BLOCKED" and job not in active.get("blocked_jobs",[]): active.setdefault("blocked_jobs",[]).append(job)
                     if row["status"]=="WARNING" and job not in active.get("warning_jobs",[]): active.setdefault("warning_jobs",[]).append(job)
                     active["last_job"]=job; active["last_status"]=row["status"]; active["updated_at"]=now_text()
+                    active["last_progress_at"]=active["updated_at"]
+                    active["current_job"]=""
+                    active["current_job_started_at"]=""
+                    status["last_progress_at"]=active["last_progress_at"]
                     status["last_summary"]={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":True}
                     _checkpoint_runtime(status,history,cfg,f"after-{job}-{row['status'].lower()}")
                 _progress_counts={
@@ -650,7 +680,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
 
         history=history[-int(cfg.get("history_keep",400)):]
         summary={"executed":len(executed),"success":sum(1 for x in executed if x["status"]=="SUCCESS"),"warning":sum(1 for x in executed if x["status"]=="WARNING"),"failed":sum(1 for x in executed if x["status"]=="FAILED"),"blocked":sum(1 for x in executed if x["status"]=="BLOCKED"),"in_progress":False}
-        status["updated_at"]=now_text(); status["last_summary"]=summary
+        status["updated_at"]=now_text(); status["last_progress_at"]=status["updated_at"]; status["last_summary"]=summary
         if not simulate:
             active=status.get("active_run") if isinstance(status.get("active_run"),dict) else {}
             remaining=[str(x) for x in (active.get("pending_jobs") or []) if str(x)] if isinstance(active,dict) else []

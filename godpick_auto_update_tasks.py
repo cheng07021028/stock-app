@@ -229,7 +229,14 @@ def task_record_latest_price(cfg: dict[str, Any] | None = None) -> dict[str, Any
         st.session_state[ns.get("_k", lambda x:x)("latest_price_batch_size")] = int(cfg.get("batch_size", 100) or 100)
         updated = ns["_refresh_latest_prices"](df, only_active=bool(cfg.get("only_active", False)))
         summary = dict(getattr(updated, "attrs", {}).get("latest_refresh_summary", {}) or {})
-        save_ok = bool(ns["_save_records_dual"](updated))
+        try:
+            save_ok = bool(ns["_save_records_dual"](updated, require_remote_confirm=True))
+        except TypeError as _h18_save_type_error:
+            # Compatibility for injected legacy smoke adapters; the real Page08
+            # callable supports require_remote_confirm and must use it in production.
+            if "require_remote_confirm" not in str(_h18_save_type_error):
+                raise
+            save_ok = bool(ns["_save_records_dual"](updated))
         success = int(summary.get("success", 0) or 0)
         target = int(summary.get("target", len(updated)) or len(updated))
         ok = bool(save_ok and (success > 0 or target == 0 or int(summary.get("unchanged_price", 0) or 0) > 0))
