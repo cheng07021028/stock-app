@@ -70,4 +70,7 @@ jobs:
         # GitHub CAS / durability services used by Streamlit.  H10 deliberately
         # removes the old second bulk git-branch publish because it could fail on
         # untracked runtime files and could overwrite a newer concurrent authority.
+        # H27 explicitly requires the remote heartbeat to belong to THIS wake.
+        env:
+          GODPICK_EXPECTED_WAKEUP_RUN_ID: ${{ github.run_id }}
         run: python tools/verify_godpick_scheduler_remote_v191.py
