@@ -1,0 +1,101 @@
+name: V191 H23 Page7 JSON serializer hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/v191_h23_page7_json_serializer_hotfix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-page7:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply exact H23 serializer patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("pages/7_股神推薦.py")
+          text = path.read_text(encoding="utf-8-sig")
+          old = '''def _df_to_records_for_json(df: pd.DataFrame) -> list[dict[str, Any]]:\n    if df is None or df.empty:\n        return []\n    clean = df.copy()\n    for col in clean.columns:\n        if pd.api.types.is_datetime64_any_dtype(clean[col]):\n            clean[col] = clean[col].astype(str)\n    return json.loads(clean.to_json(orient="records", force_ascii=False, date_format="iso"))\n'''
+          new = '''def _v191_h23_missing_json_value_mask(series: pd.Series) -> pd.Series:\n    """H23: treat null/blank strings as missing when coalescing duplicate columns."""\n    try:\n        missing = series.isna()\n    except Exception:\n        missing = pd.Series([False] * len(series), index=series.index)\n    try:\n        text = series.astype("string")\n        missing = missing | text.fillna("").str.strip().eq("")\n    except Exception:\n        pass\n    return missing\n\n\ndef _v191_h23_unique_json_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:\n    """Make JSON-record columns unique without discarding newer duplicate values.\n\n    Page7 candidates pass through several enrichment/diagnosis layers.  A merge can\n    legitimately leave two columns with the same label. pandas ``to_json`` with\n    ``orient=records`` rejects that shape. H23 coalesces same-name columns row by\n    row: the right-most/newest nonblank value wins; older copies only fill blanks.\n    """\n    if df is None or not isinstance(df, pd.DataFrame):\n        return pd.DataFrame(), []\n    work = df.copy()\n    labels = [str(col) for col in work.columns]\n    work.columns = labels\n    if work.columns.is_unique:\n        return work, []\n\n    ordered_names: list[str] = []\n    positions: dict[str, list[int]] = {}\n    for idx, name in enumerate(labels):\n        if name not in positions:\n            ordered_names.append(name)\n            positions[name] = []\n        positions[name].append(idx)\n\n    duplicate_names = [name for name in ordered_names if len(positions[name]) > 1]\n    merged: dict[str, pd.Series] = {}\n    for name in ordered_names:\n        pos = positions[name]\n        if len(pos) == 1:\n            merged[name] = work.iloc[:, pos[0]].copy()\n            continue\n        chosen = work.iloc[:, pos[-1]].copy()\n        for earlier_pos in reversed(pos[:-1]):\n            earlier = work.iloc[:, earlier_pos]\n            mask = _v191_h23_missing_json_value_mask(chosen)\n            if bool(mask.any()):\n                chosen = chosen.where(~mask, earlier)\n        merged[name] = chosen\n\n    clean = pd.DataFrame(merged, index=work.index)\n    return clean, duplicate_names\n\n\ndef _df_to_records_for_json(df: pd.DataFrame) -> list[dict[str, Any]]:\n    if df is None or df.empty:\n        return []\n    clean, duplicate_names = _v191_h23_unique_json_frame(df)\n    # Keep a lightweight diagnostic so a future merge regression is visible, but\n    # never let duplicate display/diagnosis columns crash snapshot persistence.\n    if duplicate_names:\n        try:\n            st.session_state[_k("v191_h23_duplicate_json_columns")] = {\n                "count": len(duplicate_names),\n                "columns": duplicate_names[:80],\n                "updated_at": _now_text(),\n            }\n        except Exception:\n            pass\n    for col in clean.columns:\n        series = clean[col]\n        if pd.api.types.is_datetime64_any_dtype(series):\n            clean[col] = series.astype(str)\n    try:\n        return json.loads(clean.to_json(orient="records", force_ascii=False, date_format="iso"))\n    except ValueError as exc:\n        # Last-resort JSON-safe conversion.  At this point columns are guaranteed\n        # unique; this path protects object-extension dtypes without hiding errors.\n        try:\n            records = clean.to_dict(orient="records")\n            return json.loads(json.dumps(records, ensure_ascii=False, default=str))\n        except Exception:\n            raise ValueError(\n                f"V191-H23 recommendation JSON serialization failed after duplicate-column repair: {exc}"\n            ) from exc\n'''
+          if new in text:
+              print("H23 already applied")
+          elif old not in text:
+              raise SystemExit("Expected _df_to_records_for_json block not found; refusing unsafe patch")
+          else:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+              print("Applied H23 serializer patch")
+
+      - name: Add H23 regression test
+        shell: bash
+        run: |
+          cat > tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py <<'PY'
+          # -*- coding: utf-8 -*-
+          from pathlib import Path
+          import pandas as pd
+
+          ROOT = Path(__file__).resolve().parents[1]
+          PAGE = ROOT / "pages" / "7_股神推薦.py"
+
+          def _helper_source() -> str:
+              src = PAGE.read_text(encoding="utf-8")
+              start = src.index("def _v191_h23_missing_json_value_mask")
+              end = src.index("def _records_to_df_for_json", start)
+              return src[start:end]
+
+          def _load_helpers():
+              ns = {"pd": pd, "json": __import__("json"), "Any": object}
+              src = _helper_source()
+              # Strip only the session-state diagnostic block dependency by giving
+              # no-op stand-ins; serializer behavior itself is executed unchanged.
+              class _State(dict): pass
+              class _St: session_state = _State()
+              ns.update({"st": _St(), "_k": lambda x: x, "_now_text": lambda: "2026-08-15 00:00:00"})
+              exec(src, ns, ns)
+              return ns
+
+          def test_duplicate_columns_coalesce_rightmost_nonblank():
+              ns = _load_helpers()
+              df = pd.DataFrame([["oldA", "newA", 1], ["oldB", "", 2]], columns=["官方資料日期", "官方資料日期", "score"])
+              clean, dups = ns["_v191_h23_unique_json_frame"](df)
+              assert list(clean.columns) == ["官方資料日期", "score"]
+              assert dups == ["官方資料日期"]
+              assert clean["官方資料日期"].tolist() == ["newA", "oldB"]
+              rows = ns["_df_to_records_for_json"](df)
+              assert rows[0]["官方資料日期"] == "newA"
+              assert rows[1]["官方資料日期"] == "oldB"
+
+          def test_unique_columns_unchanged():
+              ns = _load_helpers()
+              df = pd.DataFrame([{"a": 1, "b": "x"}])
+              rows = ns["_df_to_records_for_json"](df)
+              assert rows == [{"a": 1, "b": "x"}]
+          PY
+
+      - name: Compile and run H23 test
+        run: |
+          python -m compileall -q pages/7_股神推薦.py tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py
+          python -m pip install -q pandas pytest
+          python -m pytest -q tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py
+
+      - name: Commit Page7 H23 fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pages/7_股神推薦.py tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "V191-H23 fix Page7 duplicate-column JSON save crash"
+            git push origin HEAD:main
+          fi
