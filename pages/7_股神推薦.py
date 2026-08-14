@@ -1895,14 +1895,94 @@ def _save_persistent_column_order(name: str, order: list[str]) -> tuple[bool, li
     return (shadow_ok or local_ok or github_ok), [shadow_msg, local_msg, github_msg]
 
 
+def _v191_h23_missing_json_value_mask(series: pd.Series) -> pd.Series:
+    """H23: treat null/blank strings as missing when coalescing duplicate columns."""
+    try:
+        missing = series.isna()
+    except Exception:
+        missing = pd.Series([False] * len(series), index=series.index)
+    try:
+        text = series.astype("string")
+        missing = missing | text.fillna("").str.strip().eq("")
+    except Exception:
+        pass
+    return missing
+
+
+def _v191_h23_unique_json_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Make JSON-record columns unique without discarding newer duplicate values.
+
+    Page7 candidates pass through several enrichment/diagnosis layers.  A merge can
+    legitimately leave two columns with the same label. pandas ``to_json`` with
+    ``orient=records`` rejects that shape. H23 coalesces same-name columns row by
+    row: the right-most/newest nonblank value wins; older copies only fill blanks.
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame(), []
+    work = df.copy()
+    labels = [str(col) for col in work.columns]
+    work.columns = labels
+    if work.columns.is_unique:
+        return work, []
+
+    ordered_names: list[str] = []
+    positions: dict[str, list[int]] = {}
+    for idx, name in enumerate(labels):
+        if name not in positions:
+            ordered_names.append(name)
+            positions[name] = []
+        positions[name].append(idx)
+
+    duplicate_names = [name for name in ordered_names if len(positions[name]) > 1]
+    merged: dict[str, pd.Series] = {}
+    for name in ordered_names:
+        pos = positions[name]
+        if len(pos) == 1:
+            merged[name] = work.iloc[:, pos[0]].copy()
+            continue
+        chosen = work.iloc[:, pos[-1]].copy()
+        for earlier_pos in reversed(pos[:-1]):
+            earlier = work.iloc[:, earlier_pos]
+            mask = _v191_h23_missing_json_value_mask(chosen)
+            if bool(mask.any()):
+                chosen = chosen.where(~mask, earlier)
+        merged[name] = chosen
+
+    clean = pd.DataFrame(merged, index=work.index)
+    return clean, duplicate_names
+
+
 def _df_to_records_for_json(df: pd.DataFrame) -> list[dict[str, Any]]:
     if df is None or df.empty:
         return []
-    clean = df.copy()
+    clean, duplicate_names = _v191_h23_unique_json_frame(df)
+    # Keep a lightweight diagnostic so a future merge regression is visible, but
+    # never let duplicate display/diagnosis columns crash snapshot persistence.
+    if duplicate_names:
+        try:
+            st.session_state[_k("v191_h23_duplicate_json_columns")] = {
+                "count": len(duplicate_names),
+                "columns": duplicate_names[:80],
+                "updated_at": _now_text(),
+            }
+        except Exception:
+            pass
     for col in clean.columns:
-        if pd.api.types.is_datetime64_any_dtype(clean[col]):
-            clean[col] = clean[col].astype(str)
-    return json.loads(clean.to_json(orient="records", force_ascii=False, date_format="iso"))
+        series = clean[col]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            clean[col] = series.astype(str)
+    try:
+        return json.loads(clean.to_json(orient="records", force_ascii=False, date_format="iso"))
+    except ValueError as exc:
+        # Last-resort JSON-safe conversion.  At this point columns are guaranteed
+        # unique; this path protects object-extension dtypes without hiding errors.
+        try:
+            records = clean.to_dict(orient="records")
+            return json.loads(json.dumps(records, ensure_ascii=False, default=str))
+        except Exception:
+            raise ValueError(
+                f"V191-H23 recommendation JSON serialization failed after duplicate-column repair: {exc}"
+            ) from exc
 
 
 def _records_to_df_for_json(records: list[dict[str, Any]]) -> pd.DataFrame:
