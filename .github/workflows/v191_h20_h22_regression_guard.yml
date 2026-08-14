@@ -1,0 +1,52 @@
+name: V191 H20-H22 recommendation regression guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "godpick_recommendation_market_preflight.py"
+      - "macro_runtime_authority.py"
+      - "godpick_headless_page_loader.py"
+      - "app_auth.py"
+      - "godpick_formal_recommendation_engine.py"
+      - "godpick_execution_governance.py"
+      - "godpick_v188_cache_guard.py"
+      - "pages/7_股神推薦.py"
+      - "tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py"
+      - "tests/v191_hotfix21_page07_market_snapshot_preflight_smoke.py"
+      - "tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py"
+      - ".github/workflows/v191_h20_h22_regression_guard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recommendation-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install focused test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pandas numpy requests
+
+      - name: Compile repository
+        run: python -m compileall -q .
+
+      - name: H20 official-before-formal alignment
+        run: python tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py
+
+      - name: H21 same-run Page07 market preflight
+        run: python tests/v191_hotfix21_page07_market_snapshot_preflight_smoke.py
+
+      - name: H22 no July macro rollback
+        run: python tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py
