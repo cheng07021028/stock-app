@@ -5,6 +5,11 @@ The scheduler must execute the *same* page services/formulas without opening a U
 This loader removes only the authentication guard and replaces Streamlit with a
 small no-op shim; page ``main()`` is never called because ``__name__`` is set to
 an internal module name.
+
+V191-H21 adds one Page07-only production safety preflight: a headless recommendation
+runner must hydrate a fresh local market snapshot in the same process before the
+formal/A- partition is evaluated.  This does not relax recommendation thresholds
+and does not commit runtime JSON to the deployment branch.
 """
 from __future__ import annotations
 
@@ -169,6 +174,17 @@ def load_page_namespace(page_path: str | Path, *, base_dir: str | Path | None = 
     path = Path(page_path)
     if not path.is_absolute():
         path = Path(base_dir or Path(__file__).resolve().parent) / path
+
+    # V191-H21: scheduler dependencies can succeed in an earlier GitHub Actions
+    # wake-up while their local runtime JSON disappears with that runner.  Page07
+    # therefore hydrates its market snapshot again in this exact process before
+    # the 800KB page module is executed.  If hydration fails, the helper raises
+    # and the scheduler reports FAILED instead of persisting a false formal=0/A-=0.
+    page07_market_preflight: dict[str, Any] | None = None
+    if path.name == "7_股神推薦.py":
+        from godpick_recommendation_market_preflight import ensure_page07_market_snapshot_current
+        page07_market_preflight = ensure_page07_market_snapshot_current(base_dir=path.parent.parent)
+
     source = path.read_text(encoding="utf-8-sig")
     source = _strip_auth_guard(source)
     source = re.sub(r"(?m)^\s*import streamlit as st\s*$", "st = __HEADLESS_ST__", source)
@@ -176,11 +192,14 @@ def load_page_namespace(page_path: str | Path, *, base_dir: str | Path | None = 
     st = HeadlessStreamlit()
     if session_state:
         st.session_state.update(session_state)
+    if page07_market_preflight is not None:
+        st.session_state["v191_h21_page07_market_preflight"] = dict(page07_market_preflight)
     ns: dict[str, Any] = {
         "__name__": f"_godpick_headless_{path.stem}",
         "__file__": str(path),
         "__package__": None,
         "__HEADLESS_ST__": st,
+        "__page07_market_preflight__": page07_market_preflight,
     }
     # Some imported business modules (for example utils.py) import streamlit
     # themselves.  Inject the same shim as a temporary module so the headless
