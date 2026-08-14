@@ -2,11 +2,17 @@ name: GodPick V191 Central Auto Scheduler
 
 on:
   workflow_dispatch:
+    inputs:
+      wakeup_source:
+        description: "Wakeup source label for scheduler diagnostics"
+        required: false
+        default: "manual_dispatch"
   schedule:
-    # Wake the due-checker every 10 minutes. Actual task times are stored in
-    # runtime-data and interpreted in Asia/Taipei; this cron does NOT hard-code
-    # the user's business schedule.
-    - cron: "*/10 * * * *"
+    # GitHub-hosted schedule is best-effort only. Keep it as an off-peak backup
+    # at 02/12/22/32/42/52 minutes to avoid the top-of-hour load hotspot.
+    # H11 strict production wakeups should use Windows Task Scheduler ->
+    # workflow_dispatch every 10 minutes.
+    - cron: "2-52/10 * * * *"
 
 permissions:
   contents: write
@@ -25,6 +31,8 @@ jobs:
       GITHUB_REPO_NAME: ${{ github.event.repository.name }}
       GITHUB_REPO_BRANCH: runtime-data
       GITHUB_RUNTIME_DATA_BRANCH: runtime-data
+      GODPICK_WAKEUP_EVENT: ${{ github.event_name }}
+      GODPICK_WAKEUP_SOURCE: ${{ github.event.inputs.wakeup_source }}
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       FINMIND_API_TOKEN: ${{ secrets.FINMIND_API_TOKEN }}
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
