@@ -119,14 +119,15 @@ def repair_v188_decision_frame(
     *,
     super_ai_callable: Callable[[pd.DataFrame], pd.DataFrame] | None,
     official_factor_callable: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
+    formal_recommendation_callable: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
     scan_quality_callable: Callable[[pd.DataFrame, dict[str, Any]], pd.DataFrame] | None = None,
     scan_report: dict[str, Any] | None = None,
     canonicalize_callable: Callable[[pd.DataFrame], pd.DataFrame] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Repair an intermediate/legacy frame into a V188-complete decision frame.
 
-    The order mirrors the Page 7 final pipeline: official factors -> scan quality
-    governance -> SuperAI/V188 -> canonical partition.  The function never
+    The order mirrors the Page 7 final pipeline: official factors -> Formal/A-
+    partition -> scan quality governance -> SuperAI/V188 -> canonical partition.  The function never
     invents V188 zeroes; if the engine fails or output remains incomplete, the
     returned report keeps ``complete=False`` so callers can block the ranking.
     """
@@ -136,7 +137,10 @@ def repair_v188_decision_frame(
         frame = data.copy()
 
     before = inspect_v188_decision_frame(frame)
-    if before.get("complete"):
+    # Existing V188 scores do not prove the Formal/A- partition used official
+    # evidence in the correct order.  H20 callers pass a formal rebuild callable
+    # specifically to hot-upgrade an otherwise V188-complete H19 cache once.
+    if before.get("complete") and not callable(formal_recommendation_callable):
         return frame.reset_index(drop=True), {**before, "repaired": False}
 
     errors: list[str] = []
@@ -145,6 +149,15 @@ def repair_v188_decision_frame(
             frame = official_factor_callable(frame)
         except Exception as exc:  # caller decides whether this is fatal
             errors.append(f"official-factor:{exc}")
+
+    # V191-H20: official evidence must be present before Formal/A- is rebuilt.
+    # The callable is optional for backward compatibility with existing tests and
+    # non-Page07 callers. It may itself re-merge official factors idempotently.
+    if callable(formal_recommendation_callable):
+        try:
+            frame = formal_recommendation_callable(frame)
+        except Exception as exc:
+            errors.append(f"formal-after-official:{exc}")
 
     if callable(scan_quality_callable) and isinstance(scan_report, dict) and scan_report:
         try:

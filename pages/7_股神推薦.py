@@ -2442,9 +2442,9 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
             full_rec_df = apply_godpick_decision_engine(full_rec_df, None)
         except Exception:
             pass
-    if callable(canonicalize_final_partition) and not full_rec_df.empty:
+    if not full_rec_df.empty:
         try:
-            full_rec_df = canonicalize_final_partition(full_rec_df)
+            full_rec_df = _h20_rebuild_formal_partition_after_official_factors(full_rec_df)
         except Exception:
             pass
     rec_df = _operational_recommendation_rows(full_rec_df, refresh_decision=False)
@@ -2458,8 +2458,7 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     elif callable(apply_godpick_decision_engine):
         try:
             candidate_df = apply_godpick_decision_engine(candidate_df, None)
-            if callable(canonicalize_final_partition):
-                candidate_df = canonicalize_final_partition(candidate_df)
+            candidate_df = _h20_rebuild_formal_partition_after_official_factors(candidate_df)
         except Exception:
             pass
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
@@ -3807,6 +3806,43 @@ def _apply_official_factor_cache_v109(df: pd.DataFrame | None) -> pd.DataFrame:
         except Exception:
             pass
     return out
+
+
+H20_FORMAL_ALIGNMENT_VERSION = "v191_h20_official_before_formal_20260814"
+
+
+def _h20_rebuild_formal_partition_after_official_factors(
+    df: pd.DataFrame | None,
+    *,
+    canonicalize: bool = True,
+) -> pd.DataFrame:
+    """H20 single-source formal partition: official evidence must exist before classification.
+
+    V191 previously classified Formal/A- first and merged official factors afterwards.
+    The formal engine therefore saw every stock as ``官方因子日期未驗證`` and
+    the stale partition survived later merges/reloads.  This helper makes the
+    ordering explicit and idempotent: official cache -> formal engine -> final
+    canonical partition.  It never relaxes Entry/Risk/RR/market thresholds.
+    """
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(df or [])
+    if work.empty:
+        return work
+    work = _apply_official_factor_cache_v109(work)
+    try:
+        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
+        work = apply_formal_recommendation_engine(work)
+        work["V191_H20正式分區官方對齊"] = "是"
+        work["V191_H20正式分區版本"] = H20_FORMAL_ALIGNMENT_VERSION
+    except Exception:
+        # Fail safe: keep data/evidence but never manufacture a formal permission.
+        work["V191_H20正式分區官方對齊"] = "否｜正式引擎未完成"
+        work["V191_H20正式分區版本"] = H20_FORMAL_ALIGNMENT_VERSION
+    if canonicalize and callable(canonicalize_final_partition):
+        try:
+            work = canonicalize_final_partition(work)
+        except Exception:
+            pass
+    return work.reset_index(drop=True)
 
 
 def _recalc_night_strategy_after_macro_v100(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -10782,20 +10818,17 @@ def _build_recommend_df(
 
     hot_pick_df = _build_hot_stock_candidates(base_df, final_df, min_total_score)
 
-    # Phase 8.2：完整候選診斷池與正式作戰名單分離。
-    # base_df 保留所有成功分析股票；final_df 只保留最終作戰候選。
+    # Phase 8.2 / V191-H20：完整候選診斷池與正式作戰名單分離。
+    # 重要順序：官方因子必須先併入逐股候選，再做 Formal/A- 分區。
+    # 舊版先 canonicalize(base_df) 才 merge official factors，導致 1700+ 檔
+    # 全部被正式引擎視為「官方日期未驗證」，A-/正式長期被共同壓成 0。
     try:
-        if callable(canonicalize_final_partition):
-            final_df = canonicalize_final_partition(final_df)
-            governed_candidate_df = canonicalize_final_partition(base_df)
-            # Build the primary action/reference list from the complete governed
-            # candidate pool.  The old score/Top-N display filter must not erase
-            # A/A-/R1 rows; when none exist, the helper returns a small, clearly
-            # labelled conditional-reference list instead of a blank page.
-            final_df = _operational_recommendation_rows(governed_candidate_df, refresh_decision=False)
-        else:
-            governed_candidate_df = base_df.copy()
-            final_df = _operational_recommendation_rows(final_df, refresh_decision=False)
+        governed_candidate_df = _h20_rebuild_formal_partition_after_official_factors(base_df)
+        # Build the primary action/reference list from the complete governed
+        # candidate pool.  The old score/Top-N display filter must not erase
+        # A/A-/R1 rows; when none exist, the helper returns a small, clearly
+        # labelled conditional-reference list instead of a blank page.
+        final_df = _operational_recommendation_rows(governed_candidate_df, refresh_decision=False)
 
         # V189：禁止在 SuperAI/V188 交易品質治理完成前保存 decision frame。
         # V188 的 Alpha/Trade/RR/作戰優先分尚未產生時，這裡只能是中間母體，
@@ -12476,17 +12509,36 @@ def _phase93_single_source_decision_frame(
         else:
             _cache_ok = all(c in _cached_decision.columns for c in ["V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Trade分", "V188交易許可"])
 
+        # V191-H20 hot-upgrade guard: V188 columns alone cannot prove that the
+        # Formal/A- partition was calculated *after* official-factor merge.
+        # Older H19 session caches must be rebuilt once, otherwise the universal
+        # 「官方因子對齊 0」partition survives until browser/session restart.
+        if _cache_ok:
+            _h20_mark = _cached_decision.get(
+                "V191_H20正式分區官方對齊",
+                pd.Series([""] * len(_cached_decision), index=_cached_decision.index),
+            ).fillna("").astype(str)
+            _cache_ok = bool(_h20_mark.eq("是").all())
+            if not _cache_ok:
+                _cache_diag = {"complete": False, "reason": "V191-H20正式分區尚未在官方因子合併後重建"}
+
         if not _cache_ok and callable(repair_v188_decision_frame) and callable(apply_super_ai_engine):
             try:
                 _repaired, _repair_diag = repair_v188_decision_frame(
                     _cached_decision,
                     super_ai_callable=apply_super_ai_engine,
                     official_factor_callable=_apply_official_factor_cache_v109,
+                    formal_recommendation_callable=_h20_rebuild_formal_partition_after_official_factors,
                     scan_quality_callable=apply_scan_quality_to_frame if callable(apply_scan_quality_to_frame) else None,
                     scan_report=st.session_state.get(_k("scan_quality_report"), {}),
                     canonicalize_callable=canonicalize_final_partition if callable(canonicalize_final_partition) else None,
                 )
-                if bool(_repair_diag.get("complete")):
+                _h20_repaired_mark = _repaired.get(
+                    "V191_H20正式分區官方對齊",
+                    pd.Series([""] * len(_repaired), index=_repaired.index),
+                ).fillna("").astype(str)
+                _h20_repaired_ok = bool(not _repaired.empty and _h20_repaired_mark.eq("是").all())
+                if bool(_repair_diag.get("complete")) and _h20_repaired_ok:
                     _repaired["V181最終決策已完成"] = "是"
                     _repaired["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
                     _repaired["V189_V188最終快取完整"] = "是"
@@ -12551,15 +12603,10 @@ def _phase93_single_source_decision_frame(
             pass
 
     try:
-        from godpick_formal_recommendation_engine import apply_formal_recommendation_engine
         st.session_state[_k("v181_decision_cache_misses")] = int(st.session_state.get(_k("v181_decision_cache_misses"), 0) or 0) + 1
-        source = apply_formal_recommendation_engine(source)
+        source = _h20_rebuild_formal_partition_after_official_factors(source)
     except Exception:
         # 若正式引擎暫時載入失敗，仍使用既有欄位，不讓整頁崩潰。
-        pass
-    try:
-        source = canonicalize_final_partition(source) if callable(canonicalize_final_partition) else source
-    except Exception:
         pass
 
     # V189 fallback：舊 Session / Reboot 後若只有 pre-V188 候選，也必須先補齊
@@ -12570,12 +12617,18 @@ def _phase93_single_source_decision_frame(
                 source,
                 super_ai_callable=apply_super_ai_engine,
                 official_factor_callable=_apply_official_factor_cache_v109,
+                formal_recommendation_callable=_h20_rebuild_formal_partition_after_official_factors,
                 scan_quality_callable=apply_scan_quality_to_frame if callable(apply_scan_quality_to_frame) else None,
                 scan_report=st.session_state.get(_k("scan_quality_report"), {}),
                 canonicalize_callable=canonicalize_final_partition if callable(canonicalize_final_partition) else None,
             )
             st.session_state[_k("v188_cache_integrity_v189")] = dict(_fallback_diag)
-            if bool(_fallback_diag.get("complete")) and _active_sig:
+            _h20_fallback_mark = source.get(
+                "V191_H20正式分區官方對齊",
+                pd.Series([""] * len(source), index=source.index),
+            ).fillna("").astype(str)
+            _h20_fallback_ok = bool(not source.empty and _h20_fallback_mark.eq("是").all())
+            if bool(_fallback_diag.get("complete")) and _h20_fallback_ok and _active_sig:
                 source["V181最終決策已完成"] = "是"
                 source["V181最終決策版本"] = PAGE07_SPEED_FIX_VERSION
                 source["V189_V188最終快取完整"] = "是"
@@ -12583,8 +12636,11 @@ def _phase93_single_source_decision_frame(
                 st.session_state[_k("decision_frame_store_v181")] = source.copy()
                 st.session_state[_k("decision_frame_scan_signature_v181")] = _active_sig
                 st.session_state[_k("v188_rank_block_reason_v189")] = ""
-            elif not bool(_fallback_diag.get("complete")):
-                st.session_state[_k("v188_rank_block_reason_v189")] = _safe_str(_fallback_diag.get("reason")) or "V188 fallback補算未完成"
+            elif not bool(_fallback_diag.get("complete")) or not _h20_fallback_ok:
+                _reason = _safe_str(_fallback_diag.get("reason")) or "V188 fallback補算未完成"
+                if not _h20_fallback_ok:
+                    _reason = (_reason + "｜V191-H20正式分區官方對齊未完成").strip("｜")
+                st.session_state[_k("v188_rank_block_reason_v189")] = _reason
         except Exception as _fallback_v188_err:
             st.session_state[_k("v188_rank_block_reason_v189")] = f"V188 fallback補算失敗：{_fallback_v188_err}"
     return source.reset_index(drop=True)
