@@ -1,0 +1,13 @@
+{
+  "20260814": {
+    "ok": true,
+    "date": "2026-08-14",
+    "tx_close": 39442.0,
+    "tx_change": 489.0,
+    "tx_pct": null,
+    "source": "TAIFEX OpenAPI 台指期｜H22由market_snapshot權威補建",
+    "updated_at": "2026-08-14 20:29:13",
+    "authority_rebuilt_from": "market_snapshot.json",
+    "authority_version": "v191_h22_macro_monotonic_authority_20260814"
+  }
+}
