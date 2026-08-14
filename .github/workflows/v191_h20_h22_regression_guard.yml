@@ -50,3 +50,27 @@ jobs:
 
       - name: H22 no July macro rollback
         run: python -m pytest -q tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py
+
+      - name: Prepare downloadable H22 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p patch/tests patch/.github/workflows
+          cp macro_runtime_authority.py patch/
+          cp app_auth.py patch/
+          cp godpick_recommendation_market_preflight.py patch/
+          cp tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py patch/tests/
+          cp .github/workflows/v191_h20_h22_regression_guard.yml patch/.github/workflows/
+          printf '%s\n' \
+            'SPT Stock App V191-H22 patch' \
+            '直接依原路徑覆蓋即可。' \
+            '核心修正：大盤 runtime-data 單調權威、防 2026-07-09 回退、Page7 同輪大盤預檢。' \
+            > patch/覆蓋說明.txt
+
+      - name: Upload downloadable H22 patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-app-V191-H22-patch
+          path: patch/
+          if-no-files-found: error
+          retention-days: 7
