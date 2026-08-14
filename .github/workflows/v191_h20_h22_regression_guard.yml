@@ -1,4 +1,4 @@
-name: V191 H20-H22 recommendation regression guard
+name: V191 H20-H23 recommendation regression guard
 
 on:
   push:
@@ -15,6 +15,7 @@ on:
       - "tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py"
       - "tests/v191_hotfix21_page07_market_snapshot_preflight_smoke.py"
       - "tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py"
+      - "tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py"
       - ".github/workflows/v191_h20_h22_regression_guard.yml"
   workflow_dispatch:
 
@@ -51,26 +52,36 @@ jobs:
       - name: H22 no July macro rollback
         run: python -m pytest -q tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py
 
-      - name: Prepare downloadable H22 patch
+      - name: H23 duplicate-column JSON persistence
+        run: python -m pytest -q tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py
+
+      - name: Prepare downloadable H23 patch
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p patch/tests patch/.github/workflows
+          mkdir -p patch/pages patch/tests patch/.github/workflows
+          cp pages/7_股神推薦.py patch/pages/
           cp macro_runtime_authority.py patch/
           cp app_auth.py patch/
           cp godpick_recommendation_market_preflight.py patch/
+          cp tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py patch/tests/
+          cp tests/v191_hotfix21_page07_market_snapshot_preflight_smoke.py patch/tests/
           cp tests/v191_hotfix22_macro_authority_no_july_rollback_smoke.py patch/tests/
+          cp tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py patch/tests/
           cp .github/workflows/v191_h20_h22_regression_guard.yml patch/.github/workflows/
           printf '%s\n' \
-            'SPT Stock App V191-H22 patch' \
+            'SPT Stock App V191-H23 patch' \
             '直接依原路徑覆蓋即可。' \
-            '核心修正：大盤 runtime-data 單調權威、防 2026-07-09 回退、Page7 同輪大盤預檢。' \
+            'H20：官方因子先合併再做正式/A-分區。' \
+            'H21：Page7 同輪大盤資料預檢，失敗時禁止保存假 0/0。' \
+            'H22：runtime-data 大盤單調權威，禁止重新部署回退 2026-07-09。' \
+            'H23：Page7 candidate_diagnosis 重複欄名逐列合併後再 JSON 序列化，修正 pandas ValueError。' \
             > patch/覆蓋說明.txt
 
-      - name: Upload downloadable H22 patch
+      - name: Upload downloadable H23 patch
         uses: actions/upload-artifact@v4
         with:
-          name: stock-app-V191-H22-patch
+          name: stock-app-V191-H23-patch
           path: patch/
           if-no-files-found: error
           retention-days: 7
