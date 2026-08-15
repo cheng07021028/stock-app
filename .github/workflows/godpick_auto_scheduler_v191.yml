@@ -1,12 +1,13 @@
 name: GodPick V191 Central Auto Scheduler
 
 on:
-  # V191-H33 notification/noise fix:
-  # Production wakeups are owned by Windows Task Scheduler -> workflow_dispatch.
-  # The old GitHub-hosted cron also woke this workflow every 10 minutes, so the
-  # same central scheduler was being started twice (schedule + workflow_dispatch).
-  # Removing schedule keeps automatic production operation through Windows while
-  # eliminating duplicate GitHub runs and the corresponding failure-email noise.
+  # V191-H33: keep BOTH wake paths.
+  # 1) GitHub-hosted fallback every 10 minutes (xx:02/12/22/32/42/52 UTC cadence)
+  # 2) Windows Task Scheduler strict wake -> workflow_dispatch (xx:07 local offset)
+  # The scheduler itself is idempotent/locked, so duplicate wake attempts do not
+  # duplicate a completed run key.
+  schedule:
+    - cron: "2-52/10 * * * *"
   workflow_dispatch:
     inputs:
       wakeup_source:
@@ -24,7 +25,7 @@ concurrency:
 jobs:
   scheduler:
     runs-on: ubuntu-latest
-    # H18: long jobs no longer retry in the same wake; 60 min is a hard watchdog for true stalls.
+    # Long jobs no longer retry in the same wake; 60 min is a hard watchdog.
     timeout-minutes: 60
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -33,44 +34,82 @@ jobs:
       GITHUB_REPO_BRANCH: runtime-data
       GITHUB_RUNTIME_DATA_BRANCH: runtime-data
       GODPICK_WAKEUP_EVENT: ${{ github.event_name }}
-      GODPICK_WAKEUP_SOURCE: ${{ github.event.inputs.wakeup_source }}
+      GODPICK_WAKEUP_SOURCE: ${{ github.event.inputs.wakeup_source || github.event_name }}
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       FINMIND_API_TOKEN: ${{ secrets.FINMIND_API_TOKEN }}
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
       FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
       FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
       FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+
     steps:
+      # H33 notification policy:
+      # Routine scheduler/market-source infrastructure misses must be visible in
+      # Page17/runtime-data, but should not turn this high-frequency wake workflow
+      # red and trigger GitHub Actions failure e-mail every 10 minutes.
       - name: Checkout main program
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
 
       - name: Setup Python
+        id: python
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
       - name: Install dependencies
+        id: deps
+        if: steps.checkout.outcome == 'success' && steps.python.outcome == 'success'
+        continue-on-error: true
         run: pip install -r requirements.txt
 
       - name: Restore runtime-data authority before running
+        id: restore
+        if: steps.checkout.outcome == 'success' && steps.python.outcome == 'success' && steps.deps.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           git fetch origin runtime-data:refs/remotes/origin/runtime-data || true
           python tools/restore_runtime_data_v191.py
 
       - name: Run V191 due checker
+        id: due
+        if: steps.checkout.outcome == 'success' && steps.python.outcome == 'success' && steps.deps.outcome == 'success'
+        continue-on-error: true
         run: python tools/run_godpick_auto_scheduler_v191.py
 
       - name: Verify scheduler heartbeat/history reached runtime-data
-        # Every scheduled task already persists its authority through the same
-        # GitHub CAS / durability services used by Streamlit. H10 deliberately
-        # removes the old second bulk git-branch publish because it could fail on
-        # untracked runtime files and could overwrite a newer concurrent authority.
-        # H27 explicitly requires the remote heartbeat to belong to THIS wake.
+        id: verify
+        if: steps.checkout.outcome == 'success' && steps.python.outcome == 'success' && steps.deps.outcome == 'success'
+        continue-on-error: true
         env:
           GODPICK_EXPECTED_WAKEUP_RUN_ID: ${{ github.run_id }}
         run: python tools/verify_godpick_scheduler_remote_v191.py
+
+      - name: H33 scheduler wake summary (mail-noise guard)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## V191-H33 Central Scheduler Wake"
+            echo "- event: ${{ github.event_name }}"
+            echo "- wake source: ${{ github.event.inputs.wakeup_source || github.event_name }}"
+            echo "- run id: ${{ github.run_id }}"
+            echo "- checkout: ${{ steps.checkout.outcome }}"
+            echo "- python: ${{ steps.python.outcome }}"
+            echo "- dependencies: ${{ steps.deps.outcome }}"
+            echo "- runtime restore: ${{ steps.restore.outcome }}"
+            echo "- due checker: ${{ steps.due.outcome }}"
+            echo "- remote verifier: ${{ steps.verify.outcome }}"
+            echo ""
+            echo "Routine failures are intentionally soft-failed here to avoid 10-minute GitHub failure e-mail noise."
+            echo "Operational truth remains in Page17 / runtime-data heartbeat and scheduler history."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "V191-H33 wake completed; operational failures remain diagnostic, workflow stays green to suppress routine Actions failure mail."
