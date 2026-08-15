@@ -1,0 +1,42 @@
+name: V191 H34 daily 1to3 safe selection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "godpick_daily_safe_selection.py"
+      - "app_auth.py"
+      - "tests/v191_hotfix34_daily_1to3_safe_selection_smoke.py"
+      - ".github/workflows/v191_h34_daily_1to3_safe_selection.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  h34:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install focused dependencies
+        run: python -m pip install pandas pytest
+      - name: Compile H34 production files
+        run: python -m py_compile godpick_daily_safe_selection.py app_auth.py godpick_formal_recommendation_engine.py
+      - name: Run H34 regression
+        run: python -m pytest -q tests/v191_hotfix34_daily_1to3_safe_selection_smoke.py
+      - name: Verify production wiring
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('app_auth.py').read_text(encoding='utf-8')
+          assert 'install_daily_safe_selection_guard' in text
+          print('H34 production wiring confirmed')
+          PY
