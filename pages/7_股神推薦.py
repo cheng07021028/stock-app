@@ -13110,10 +13110,12 @@ def _build_excel_bytes(
     # 這張表只做「閱讀優先級」，不改 Formal/A- 分區、不放寬 Entry/Risk/RR。
     try:
         from godpick_super_ai_excel_guide import build_super_ai_excel_guide
+        # V191-H31：精選攻略是「股神推薦總排名」的濃縮閱讀層，不得另從
+        # 1,700+ 候選診斷母體重新排名，否則會與正式總排名形成兩套互相矛盾的榜單。
         _guide_source = (
-            candidate_diagnosis_export
-            if isinstance(candidate_diagnosis_export, pd.DataFrame) and not candidate_diagnosis_export.empty
-            else master_rank_df
+            master_rank_df
+            if isinstance(master_rank_df, pd.DataFrame) and not master_rank_df.empty
+            else candidate_diagnosis_export
         )
         super_ai_guide_export = build_super_ai_excel_guide(_guide_source, max_rows=20)
     except Exception as _h30_guide_exc:
