@@ -1,0 +1,46 @@
+name: V191 H31 Excel guide rank alignment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "godpick_super_ai_excel_guide.py"
+      - "tools/apply_v191_h31_excel_guide_rank_alignment.py"
+      - "tests/v191_hotfix31_excel_guide_rank_alignment_smoke.py"
+      - ".github/workflows/v191_h31_excel_guide_rank_alignment.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install focused dependencies
+        run: python -m pip install -q pandas numpy
+      - name: Apply H31 Page07 patch
+        run: python tools/apply_v191_h31_excel_guide_rank_alignment.py
+      - name: Compile changed modules
+        run: python -m py_compile godpick_super_ai_excel_guide.py pages/7_股神推薦.py tests/v191_hotfix31_excel_guide_rank_alignment_smoke.py
+      - name: H31 regression smoke
+        run: python tests/v191_hotfix31_excel_guide_rank_alignment_smoke.py
+      - name: Commit Page07 if patch changed it
+        run: |
+          if git diff --quiet -- pages/7_股神推薦.py; then
+            echo "Page07 already aligned"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pages/7_股神推薦.py
+          git commit -m "V191-H31 align Page07 SuperAI guide source with official ranking"
+          git push origin HEAD:main
