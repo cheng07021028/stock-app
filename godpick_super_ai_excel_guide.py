@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""V191-H31 concise SuperAI guide for Page07 Excel exports.
+"""V191-H35 concise SuperAI guide for Page07 Excel exports.
 
-H31 fixes two H30 design errors:
+H35 keeps the H31 ranking alignment and adds forecast-integrity safeguards:
 1) the guide must refine the *official ranked universe* (股神推薦總排名), not start
    a second ranking from the 1,700+ candidate-diagnosis universe;
 2) prohibited / excluded / high-risk rows can never be relabeled as 條件候選.
@@ -12,9 +12,10 @@ engine.  Formal/A- authority always stays with the official partition + permit.
 from __future__ import annotations
 
 from typing import Any
+import math
 import pandas as pd
 
-VERSION = "v191_h31_super_ai_excel_guide_rank_alignment_20260815"
+VERSION = "v191_h35_super_ai_excel_forecast_integrity_20260815"
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
 _FORBIDDEN_KEYS = (
@@ -49,7 +50,9 @@ def _num_series(df: pd.DataFrame, names: list[str], default: float = 0.0) -> pd.
 
 
 def _text_series(df: pd.DataFrame, names: list[str], default: str = "") -> pd.Series:
-    out = pd.Series([default] * len(df), index=df.index, dtype="object")
+    # H35：先以空值收集真實欄位，再於最後套用 default。舊寫法若 default
+    # 非空（例如「未計算」），會因 out 已不是 blank 而永遠讀不到真實 H32 文字欄。
+    out = pd.Series([""] * len(df), index=df.index, dtype="object")
     for name in names:
         if name not in df.columns:
             continue
@@ -60,6 +63,9 @@ def _text_series(df: pd.DataFrame, names: list[str], default: str = "") -> pd.Se
             mask = out.map(_blank) & s.map(lambda x: not _blank(x))
             if mask.any():
                 out.loc[mask] = s.loc[mask]
+    if default:
+        missing = out.map(_blank)
+        out.loc[missing] = default
     return out
 
 
@@ -84,11 +90,85 @@ def _official_rank(df: pd.DataFrame) -> pd.Series:
     return rank
 
 
+def _forecast_value_missing(series: pd.Series) -> pd.Series:
+    """H35：辨識真正缺值；數值 0 是合法預測，不能當成缺值。"""
+    if series is None:
+        return pd.Series(dtype="bool")
+    text = series.fillna("").astype(str).str.strip().str.lower()
+    return series.isna() | text.isin(_BLANK)
+
+
+def ensure_h32_forecast_for_export(df: pd.DataFrame | None) -> pd.DataFrame:
+    """補齊舊快照缺少的 H32 預測，但永不覆寫推薦時計算值。
+
+    H35 的核心原則是避免兩種錯誤：
+    1. H32 欄位缺失時被 Excel guide 以 0.00% 冒充有效預測；
+    2. 匯出舊推薦時使用後來成熟的真相樣本重算，造成 look-ahead leakage。
+
+    因此只有在欄位真正缺失時，才以 ``truth_rows=[]`` 的結構先驗補算；
+    已存在的 H32 值完整保留。補算只服務本次匯出，不回寫歷史推薦。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    work = df.copy()
+    required = ["H32隔日預估漲跌幅%", "H32_10日預估報酬%"]
+    need = pd.Series(False, index=work.index)
+    for col in required:
+        if col not in work.columns:
+            need |= True
+        else:
+            need |= _forecast_value_missing(work[col])
+    if "H35預測資料來源" not in work.columns:
+        work["H35預測資料來源"] = "推薦時計算/既有H32"
+    else:
+        _h35_source = work["H35預測資料來源"].fillna("").astype(str).str.strip()
+        work.loc[_h35_source.eq(""), "H35預測資料來源"] = "推薦時計算/既有H32"
+    if not bool(need.any()):
+        return work
+    try:
+        from godpick_return_forecast_engine import apply_return_forecast, FORECAST_COLUMNS
+        fallback = apply_return_forecast(work.loc[need].copy(), truth_rows=[])
+        for col in FORECAST_COLUMNS:
+            if col not in fallback.columns:
+                continue
+            if col not in work.columns:
+                work[col] = pd.NA
+            current = work.loc[need, col]
+            missing = _forecast_value_missing(current)
+            if bool(missing.any()):
+                idx = current.index[missing]
+                work.loc[idx, col] = fallback.loc[idx, col]
+        work.loc[need, "H35預測資料來源"] = "匯出補算｜結構先驗｜不回寫歷史"
+    except Exception as exc:
+        work.loc[need, "H35預測資料來源"] = f"未計算｜H32補算失敗：{type(exc).__name__}"
+    return work
+
+
+def _fmt_forecast_pct(v: Any) -> str:
+    try:
+        x = float(v)
+        if math.isfinite(x):
+            return f"{x:+.2f}%"
+    except Exception:
+        pass
+    return "未計算"
+
+
+def _fmt_forecast_interval(lo: Any, hi: Any) -> str:
+    try:
+        a = float(lo); b = float(hi)
+        if math.isfinite(a) and math.isfinite(b):
+            return f"{min(a,b):+.2f}% ~ {max(a,b):+.2f}%"
+    except Exception:
+        pass
+    return "未計算"
+
+
 def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -> pd.DataFrame:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame({"狀態": ["本輪沒有可建立超級AI精選攻略的正式排名資料。"], "攻略版本": [VERSION]})
 
-    work = df.copy()
+    work = ensure_h32_forecast_for_export(df)
     code = _text_series(work, ["股票代號", "代號"])
     name = _text_series(work, ["股票名稱", "名稱"])
     market = _text_series(work, ["市場別"])
@@ -109,13 +189,16 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     trade = _num_series(work, ["SuperAI Trade分", "SuperAI交易分"])
     final_ai = _num_series(work, ["SuperAI 最終決策分", "SuperAI最終決策分", "V188股神作戰優先分"])
     next_up = _num_series(work, ["H32隔日上漲機率%", "SuperAI校準後隔日上漲機率%", "模型隔日上漲機率%", "隔日上漲機率%", "上漲機率%"], 50.0)
-    h32_t1 = _num_series(work, ["H32隔日預估漲跌幅%"], 0.0)
-    h32_t1_low = _num_series(work, ["H32隔日90%區間下緣%"], 0.0)
-    h32_t1_high = _num_series(work, ["H32隔日90%區間上緣%"], 0.0)
-    h32_swing = _num_series(work, ["H32後續波段預估漲幅%", "H32_10日預估報酬%"], 0.0)
-    h32_10_low = _num_series(work, ["H32_10日90%區間下緣%"], 0.0)
-    h32_10_high = _num_series(work, ["H32_10日90%區間上緣%"], 0.0)
-    h32_validation = _text_series(work, ["H32預測驗證狀態"], "未驗證｜不得宣稱90%準確")
+    h32_t1 = _num_series(work, ["H32隔日預估漲跌幅%"], float("nan"))
+    h32_t1_low = _num_series(work, ["H32隔日90%區間下緣%"], float("nan"))
+    h32_t1_high = _num_series(work, ["H32隔日90%區間上緣%"], float("nan"))
+    h32_swing = _num_series(work, ["H32_10日預估報酬%", "H32後續波段預估漲幅%"], float("nan"))
+    h32_10_low = _num_series(work, ["H32_10日90%區間下緣%"], float("nan"))
+    h32_10_high = _num_series(work, ["H32_10日90%區間上緣%"], float("nan"))
+    h32_validation = _text_series(work, ["H32預測驗證狀態"], "未計算｜缺少H32預測")
+    h32_t1_conf = _text_series(work, ["H32隔日預測可信度"], "未計算")
+    h32_wave_conf = _text_series(work, ["H32波段預測可信度"], "未計算")
+    h32_source = _text_series(work, ["H35預測資料來源"], "推薦時計算/既有H32")
     sector = _num_series(work, ["族群攻擊強度", "族群攻擊分", "族群輪動分", "類股熱度分數"])
     mainstream = _num_series(work, ["主流資金分"])
 
@@ -182,10 +265,14 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     selected["SuperAI決策"] = final_ai.round(1)
     selected["隔日上漲機率%"] = next_up.round(1)
     selected["隔日預估漲跌幅%"] = h32_t1.round(2)
-    selected["隔日90%區間"] = [f"{lo:+.2f}% ~ {hi:+.2f}%" for lo, hi in zip(h32_t1_low, h32_t1_high)]
-    selected["後續波段預估漲幅%"] = h32_swing.round(2)
-    selected["10日90%區間"] = [f"{lo:+.2f}% ~ {hi:+.2f}%" for lo, hi in zip(h32_10_low, h32_10_high)]
+    selected["隔日90%區間"] = [_fmt_forecast_interval(lo, hi) for lo, hi in zip(h32_t1_low, h32_t1_high)]
+    selected["隔日預測可信度"] = h32_t1_conf
+    selected["10日預估報酬%"] = h32_swing.round(2)
+    selected["10日90%區間"] = [_fmt_forecast_interval(lo, hi) for lo, hi in zip(h32_10_low, h32_10_high)]
+    selected["10日預測可信度"] = h32_wave_conf
     selected["報酬預測驗證"] = h32_validation
+    selected["預測資料來源"] = h32_source
+    selected["預測口徑"] = "隔日/10日皆為報酬率預測；不是目標價漲幅，也不是保證報酬"
     selected["族群攻擊"] = sector.round(1)
     selected["主流資金"] = mainstream.round(1)
     selected["K線/資料狀態"] = kline
@@ -211,4 +298,4 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     return eligible.drop(columns=["_tier", "_official_rank"]).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "build_super_ai_excel_guide"]
+__all__ = ["VERSION", "ensure_h32_forecast_for_export", "build_super_ai_excel_guide"]

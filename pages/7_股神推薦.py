@@ -12442,6 +12442,9 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         "股神推薦總排名", "V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
         "V188交易許可", "V188正式推薦資格", "SuperAI執行風報比", "SuperAI風報比來源", "V188RR治理", "V188T+1追價治理",
         "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分", "SuperAI校準後隔日上漲機率%",
+        "H32隔日預估漲跌幅%", "H32隔日90%區間下緣%", "H32隔日90%區間上緣%", "H32隔日預測可信度",
+        "H32_10日預估報酬%", "H32_10日90%區間下緣%", "H32_10日90%區間上緣%", "H32波段預測可信度",
+        "H32預測驗證狀態", "H32預測方法", "H32預測版本", "H35預測資料來源",
         "股神推薦優先分", "股神推薦等級", "股神推薦用途",
         "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
         "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化", "重複推薦說明",
@@ -13000,6 +13003,14 @@ def _build_excel_bytes(
     raw_candidate_source = candidate_diagnosis_export if isinstance(candidate_diagnosis_export, pd.DataFrame) and not candidate_diagnosis_export.empty else None
     governed = _phase93_single_source_decision_frame(rec_export, raw_candidate_source)
     candidate_source = governed.copy()
+    # V191-H35：舊 Session / 舊推薦快照可能沒有 H32 預測欄。Excel 匯出不得把
+    # 缺值默認成 0.00%。只在欄位真正缺失時做「結構先驗」補算，且不使用
+    # 後來成熟的 T+1 真相，避免匯出歷史結果時產生 look-ahead leakage。
+    try:
+        from godpick_super_ai_excel_guide import ensure_h32_forecast_for_export
+        candidate_source = ensure_h32_forecast_for_export(candidate_source)
+    except Exception:
+        pass
     report = scan_report if isinstance(scan_report, dict) else st.session_state.get(_k("scan_quality_report"), {})
     if not isinstance(report, dict):
         report = {}
@@ -13190,7 +13201,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H35-FORECAST-INTEGRITY")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
@@ -15903,7 +15914,7 @@ def main():
                 export_source_for_rank = export_source_for_rank.drop(columns=["勾選"], errors="ignore")
             export_sig_v164 = _result_export_signature_v164(
                 export_source_for_rank,
-                "full-table|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
+                "full-table|V191-H35-FORECAST-INTEGRITY|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
             )
             export_cache_key_v164 = _k("full_table_export_cache_v164")
             export_cache_v164 = st.session_state.get(export_cache_key_v164, {})
