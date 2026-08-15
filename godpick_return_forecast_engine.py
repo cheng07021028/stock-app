@@ -161,7 +161,12 @@ def _truth_probability(row: dict[str, Any]) -> float | None:
 
 def _truth_actual(row: dict[str, Any], horizon: int) -> float | None:
     if horizon == 1:
-        return _f(row.get("隔日候選漲跌%") or row.get("推薦後1日%"))
+        # H32-v3: 0.00% is a valid realized return, never a missing value.
+        # Using ``a or b`` silently discards zero and biases validation samples.
+        first = _f(row.get("隔日候選漲跌%"))
+        if first is not None:
+            return first
+        return _f(row.get("推薦後1日%"))
     for key in (
         f"推薦後{horizon}日%",
         f"可執行交易{horizon}日%",

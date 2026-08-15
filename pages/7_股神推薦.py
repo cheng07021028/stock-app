@@ -14836,6 +14836,28 @@ def main():
                 st.session_state[_k("result_fallback_notice")] = "本輪沒有正式推薦，顯示條件式參考名單；未觸發不可買，且建議倉位上限為 0%。"
             else:
                 st.session_state[_k("result_fallback_notice")] = ""
+        # V191-H32：在正式分區完成後加上「機率＋報酬區間」預測層。
+        # 此層只做預測/驗證，不得改 Formal/A-、Entry/Risk/RR 或交易許可。
+        try:
+            from godpick_return_forecast_engine import (
+                apply_return_forecast as _h32_apply_return_forecast,
+                forecast_validation_summary as _h32_forecast_validation_summary,
+                FORECAST_COLUMNS as _H32_FORECAST_COLUMNS,
+            )
+            rec_df = _h32_apply_return_forecast(rec_df)
+            _h32_candidate = st.session_state.get(_k("candidate_diagnosis_store"))
+            if isinstance(_h32_candidate, pd.DataFrame) and not _h32_candidate.empty:
+                _h32_candidate = _h32_apply_return_forecast(_h32_candidate)
+                st.session_state[_k("candidate_diagnosis_store")] = _h32_candidate
+            for _h32_col in _H32_FORECAST_COLUMNS:
+                if _h32_col not in GODPICK_RECORD_COLUMNS:
+                    GODPICK_RECORD_COLUMNS.append(_h32_col)
+            st.session_state[_k("h32_return_forecast_validation")] = _h32_forecast_validation_summary()
+        except Exception as _h32_forecast_exc:
+            st.session_state[_k("h32_return_forecast_validation")] = {
+                "status": f"H32報酬預測建立失敗：{type(_h32_forecast_exc).__name__}: {_h32_forecast_exc}",
+                "samples": 0,
+            }
         _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
         _latest_pack_error_v185 = _safe_str(st.session_state.get(_k("latest_pack_permanent_error")))
         if _latest_pack_error_v185:
@@ -14965,6 +14987,27 @@ def main():
     _truth_async_msg = _safe_str(st.session_state.get(_k("v188_t1_truth_async_message")))
     if _truth_async_msg:
         st.caption(f"V188 T+1實戰真相：{_truth_async_msg}")
+
+    # V191-H32：明確把「90%區間覆蓋」與「方向/點預測準確率」分開。
+    try:
+        from godpick_return_forecast_engine import forecast_validation_summary as _h32_summary_fn
+        _h32_summary = st.session_state.get(_k("h32_return_forecast_validation")) or _h32_summary_fn()
+    except Exception:
+        _h32_summary = {}
+    if isinstance(_h32_summary, dict):
+        with st.expander("H32｜隔日/波段報酬預測與90%校準驗證", expanded=False):
+            _h32_n = int(_h32_summary.get("interval_samples") or _h32_summary.get("samples") or 0)
+            _h32_cov = _h32_summary.get("interval_coverage_pct")
+            _h32_dir = _h32_summary.get("direction_hit_rate_pct")
+            _h32_mae = _h32_summary.get("mae_pct")
+            render_pro_kpi_row([
+                {"label": "成熟驗證樣本", "value": _h32_n, "delta": "走勢外真相樣本", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "90%區間覆蓋率", "value": f"{float(_h32_cov):.1f}%" if _h32_cov is not None else "待累積", "delta": "目標≥90%，不等於命中率", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "隔日方向命中率", "value": f"{float(_h32_dir):.1f}%" if _h32_dir is not None else "待累積", "delta": "獨立追蹤，不保證90%", "delta_class": "pro-kpi-delta-flat"},
+                {"label": "隔日MAE", "value": f"{float(_h32_mae):.2f}%" if _h32_mae is not None else "待累積", "delta": "點預測平均絕對誤差", "delta_class": "pro-kpi-delta-flat"},
+            ])
+            st.caption(str(_h32_summary.get("status") or "H32 尚無足夠成熟樣本，不得宣稱90%準確率。"))
+            st.caption("H32輸出：隔日預估漲跌幅＋90%區間、5/10/20日預估報酬區間；10日作為『後續波段』摘要。Formal/A-與買進許可仍由原正式風控引擎決定。")
 
     # V188：把「選股是否跑贏大盤」與「是否真的觸發交易」分開顯示。
     # 未觸發雷達永遠不計交易勝負，避免把候選上漲冒充可執行績效。

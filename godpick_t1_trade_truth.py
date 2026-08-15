@@ -363,6 +363,28 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
     raw_prob = _f(original.get("SuperAI隔日上漲機率%"))
     cal_prob = _f(original.get("SuperAI校準後隔日上漲機率%"), raw_prob)
     code = _s(original.get("股票代號") or original.get("代號"))
+
+    # V191-H32：把發布當下的報酬預測與後續真實績效放進同一筆不可變真相。
+    _h32_pred1 = _f(original.get("H32隔日預估漲跌幅%"))
+    _h32_low1 = _f(original.get("H32隔日90%區間下緣%"))
+    _h32_high1 = _f(original.get("H32隔日90%區間上緣%"))
+    _h32_actual = {
+        1: cand_ret,
+        5: _f(updated.get("推薦後5日%")),
+        10: _f(updated.get("推薦後10日%")),
+        20: _f(updated.get("推薦後20日%")),
+    }
+    def _h32_inside(actual, low, high):
+        if actual is None or low is None or high is None:
+            return None
+        return bool(min(float(low), float(high)) <= float(actual) <= max(float(low), float(high)))
+    def _h32_direction_hit(actual, pred):
+        if actual is None or pred is None:
+            return None
+        if abs(float(actual)) < 1e-12 and abs(float(pred)) < 0.15:
+            return True
+        return bool((float(actual) > 0) == (float(pred) > 0))
+
     return {
         "version": TRUTH_VERSION,
         "business_key": _business_key(original),
@@ -383,6 +405,27 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "SuperAI校準後上漲機率%": cal_prob,
         "SuperAI Alpha等級": _s(original.get("SuperAI Alpha等級")),
         "SuperAI Trade等級": _s(original.get("SuperAI Trade等級")),
+        "H32隔日預估漲跌幅%": _h32_pred1,
+        "H32隔日90%區間下緣%": _h32_low1,
+        "H32隔日90%區間上緣%": _h32_high1,
+        "H32隔日方向預測命中": _h32_direction_hit(_h32_actual[1], _h32_pred1),
+        "H32隔日90%區間命中": _h32_inside(_h32_actual[1], _h32_low1, _h32_high1),
+        "H32_5日預估報酬%": _f(original.get("H32_5日預估報酬%")),
+        "H32_5日90%區間下緣%": _f(original.get("H32_5日90%區間下緣%")),
+        "H32_5日90%區間上緣%": _f(original.get("H32_5日90%區間上緣%")),
+        "H32_10日預估報酬%": _f(original.get("H32_10日預估報酬%")),
+        "H32_10日90%區間下緣%": _f(original.get("H32_10日90%區間下緣%")),
+        "H32_10日90%區間上緣%": _f(original.get("H32_10日90%區間上緣%")),
+        "H32_20日預估報酬%": _f(original.get("H32_20日預估報酬%")),
+        "H32_20日90%區間下緣%": _f(original.get("H32_20日90%區間下緣%")),
+        "H32_20日90%區間上緣%": _f(original.get("H32_20日90%區間上緣%")),
+        "H32實際5日報酬%": _h32_actual[5],
+        "H32實際10日報酬%": _h32_actual[10],
+        "H32實際20日報酬%": _h32_actual[20],
+        "H32_5日90%區間命中": _h32_inside(_h32_actual[5], _f(original.get("H32_5日90%區間下緣%")), _f(original.get("H32_5日90%區間上緣%"))),
+        "H32_10日90%區間命中": _h32_inside(_h32_actual[10], _f(original.get("H32_10日90%區間下緣%")), _f(original.get("H32_10日90%區間上緣%"))),
+        "H32_20日90%區間命中": _h32_inside(_h32_actual[20], _f(original.get("H32_20日90%區間下緣%")), _f(original.get("H32_20日90%區間上緣%"))),
+        "H32預測版本": _s(original.get("H32預測版本")),
         "V188交易許可": _s(original.get("V188交易許可")),
         "V188執行RR": _f(original.get("SuperAI執行風報比") or original.get("路徑風險報酬比") or original.get("風險報酬比")),
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),

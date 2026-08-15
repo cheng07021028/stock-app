@@ -473,7 +473,9 @@ def task_t1_truth(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
                 started=t0,
             )
         from godpick_t1_trade_truth import refresh_t1_trade_truth
-        res=refresh_t1_trade_truth(max_records=int(cfg.get("max_records",500) or 500),max_workers=int(cfg.get("max_workers",8) or 8),persist=True)
+        # V191-H32：authority_rows 已經通過 Page08 權威選舉/歷史救援，必須直接
+        # 傳給 truth service；不得再讓它回頭讀 fresh runner 上的空 godpick_records.json。
+        res=refresh_t1_trade_truth(records=authority_rows,max_records=int(cfg.get("max_records",500) or 500),max_workers=int(cfg.get("max_workers",8) or 8),persist=True)
         ok=bool(res.get("ok") and res.get("persistence_ok",True))
         return _report(ok,f"T+1實戰真相：成熟 {res.get('matured_t1_samples',0)}／可執行 {res.get('executable_samples',0)}／永久化 {'成功' if res.get('persistence_ok',True) else '失敗'}",details={"authority_count":len(authority_rows),"authority_restored":authority_restored,"authority_messages":authority_msgs[-20:],"truth":res},changed_files=["godpick_t1_trade_truth.json","godpick_probability_calibration.json"],started=t0)
     except Exception as exc:
