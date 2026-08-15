@@ -5,8 +5,7 @@ on:
     branches: [main]
     paths:
       - "godpick_return_forecast_engine.py"
-      - "tools/apply_v191_h32_return_forecast_hotfix.py"
-      - "tools/apply_v191_h32_return_forecast_hotfix_v2.py"
+      - "tools/apply_v191_h32_return_forecast_hotfix_v3.py"
       - "tests/v191_hotfix32_return_forecast_smoke.py"
       - ".github/workflows/v191_h32_return_forecast.yml"
   workflow_dispatch:
@@ -36,7 +35,7 @@ jobs:
           python -m pip install pandas numpy pytest requests
 
       - name: Apply H32 integration patch
-        run: python tools/apply_v191_h32_return_forecast_hotfix_v2.py
+        run: python tools/apply_v191_h32_return_forecast_hotfix_v3.py
 
       - name: Compile H32 production files
         run: |
@@ -53,7 +52,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "pages/7_股神推薦.py" godpick_auto_update_tasks.py godpick_t1_trade_truth.py godpick_super_ai_excel_guide.py
+          git add "pages/7_股神推薦.py" godpick_auto_update_tasks.py godpick_t1_trade_truth.py godpick_super_ai_excel_guide.py godpick_return_forecast_engine.py
           git commit -m "V191-H32 integrate calibrated next-day and swing return forecasts"
           git push origin HEAD:main
 
@@ -65,7 +64,7 @@ jobs:
           cp godpick_t1_trade_truth.py h32_patch/
           cp godpick_super_ai_excel_guide.py h32_patch/
           cp "pages/7_股神推薦.py" h32_patch/pages/
-          cp tools/apply_v191_h32_return_forecast_hotfix_v2.py h32_patch/tools/
+          cp tools/apply_v191_h32_return_forecast_hotfix_v3.py h32_patch/tools/
           cp tests/v191_hotfix32_return_forecast_smoke.py h32_patch/tests/
           cat > h32_patch/覆蓋說明.txt <<'EOF'
           V191-H32 個股隔日/波段報酬預測
@@ -74,8 +73,9 @@ jobs:
           3. 10日預估作為後續波段摘要。
           4. 90%指的是「預測區間歷史覆蓋目標」；方向命中率與MAE另外計算。
           5. 成熟樣本不足時會明確顯示未驗證，禁止宣稱90%準確。
-          6. 修正T+1排程：將已救援的authority_rows直接傳入真相服務，避免校準永遠0樣本。
-          7. 不修改Formal/A-、Entry、Risk、RR、流動性與資料新鮮度硬門檻。
+          6. T+1排程直接使用已救援的authority_rows，避免校準長期0樣本。
+          7. 0.00%真實報酬是有效樣本，不再被當成缺值。
+          8. 不修改Formal/A-、Entry、Risk、RR、流動性與資料新鮮度硬門檻。
           EOF
 
       - name: Upload H32 patch
