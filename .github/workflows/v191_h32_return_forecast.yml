@@ -1,13 +1,9 @@
 name: V191 H32 return forecast
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "godpick_return_forecast_engine.py"
-      - "tools/apply_v191_h32_return_forecast_hotfix_v3.py"
-      - "tests/v191_hotfix32_return_forecast_smoke.py"
-      - ".github/workflows/v191_h32_return_forecast.yml"
+  # H32 production integration has passed and is already on main.
+  # Keep this workflow only as a manual regression/deployment tool so future
+  # normal code pushes do not repeatedly rerun H32 or generate Actions mail.
   workflow_dispatch:
 
 permissions:
