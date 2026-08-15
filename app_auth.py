@@ -14,24 +14,16 @@ from runtime_branch_bootstrap import install_runtime_branch_guard
 
 install_runtime_branch_guard()
 
-# H22 must run after runtime_branch_bootstrap so godpick_persistence_service reads
-# the dedicated runtime-data branch, never the deployment branch.  Failure is
-# non-fatal for login; Page0/Page7 still have their own refresh/data guards.
 try:
     from macro_runtime_authority import ensure_macro_runtime_authority_current
     ensure_macro_runtime_authority_current()
 except Exception:
     pass
 
-# H34 production wiring.  This intentionally wraps the existing formal engine
-# rather than replacing it: existing Formal/A- decisions remain first priority;
-# only an insufficient daily actionable list may receive safe near-miss backfill.
 try:
     from godpick_daily_safe_selection import install_daily_safe_selection_guard
     install_daily_safe_selection_guard()
 except Exception:
-    # Authentication/login must remain available even if the optional selection
-    # overlay cannot be imported; Page07 then falls back to the standard engine.
     pass
 
 import app_auth_core as _core

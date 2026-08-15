@@ -212,6 +212,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     if veto:
         return {"eligible": False, "formal": False, "score": score, "reason": "、".join(veto[:5]), "m": m}
 
+    # H34-F: safe near-miss allowed to become a formal recommendation.
     formal = bool(
         m["entry"] >= 66 and m["risk"] >= 63 and m["buy"] >= 58
         and m["op"] >= 66 and m["rr"] >= 1.50 and 0 < m["stop"] <= 6.5
@@ -219,6 +220,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
         and (m["mainstream"] >= 55 or m["sector"] >= 55)
         and m["prob"] >= 52 and score >= 69
     )
+    # H34-A: conditional small-position pick; still significantly above generic radar.
     a_minus = bool(
         m["entry"] >= 60 and m["risk"] >= 56 and m["buy"] >= 52
         and m["op"] >= 60 and m["rr"] >= 1.20 and 0 < m["stop"] <= 7.5
@@ -228,6 +230,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     )
     eligible = formal or a_minus
     if not eligible:
+        failed = []
         checks = [
             (m["entry"] >= 60, f"Entry {m['entry']:.1f}<60"),
             (m["risk"] >= 56, f"Risk {m['risk']:.1f}<56"),
@@ -270,6 +273,7 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
         out["H34阻擋原因"] = "大盤LOCKDOWN/極端風險：H34允許0檔，不為名額犧牲風控"
         return out
 
+    # Score everyone for auditability.
     gates: dict[Any, dict[str, Any]] = {}
     for idx, row in out.iterrows():
         gate = _gate(row, market)
@@ -281,10 +285,12 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
     existing.sort(key=lambda idx: gates[idx]["score"], reverse=True)
     selected: list[Any] = existing[:target]
 
+    # Backfill only when standard Formal/A- is short of the market-regime target.
     if len(selected) < target:
         pool = [idx for idx in out.index if idx not in existing and gates[idx]["eligible"]]
         pool.sort(key=lambda idx: gates[idx]["score"], reverse=True)
         for idx in pool[: max(0, target - len(selected))]:
+            row = out.loc[idx]
             gate = gates[idx]
             if gate["formal"]:
                 out.at[idx, "正式推薦分區"] = "正式下週主推薦"
@@ -312,6 +318,7 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
             out.at[idx, "推薦資格路徑"] = "H34｜標準Formal/A-不足時的安全近門檻補位"
             selected.append(idx)
 
+    # Mark selected daily list. Existing standard picks receive their original grade.
     selected = selected[:target]
     for rank, idx in enumerate(selected, start=1):
         out.at[idx, "H34每日精選"] = "是"

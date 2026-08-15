@@ -1,3 +1,5 @@
+import sys
+sys.path.insert(0, '/mnt/data')
 import pandas as pd
 from godpick_daily_safe_selection import apply_daily_safe_selection
 
