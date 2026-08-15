@@ -6,6 +6,7 @@ on:
     paths:
       - "godpick_return_forecast_engine.py"
       - "tools/apply_v191_h32_return_forecast_hotfix.py"
+      - "tools/apply_v191_h32_return_forecast_hotfix_v2.py"
       - "tests/v191_hotfix32_return_forecast_smoke.py"
       - ".github/workflows/v191_h32_return_forecast.yml"
   workflow_dispatch:
@@ -35,7 +36,7 @@ jobs:
           python -m pip install pandas numpy pytest requests
 
       - name: Apply H32 integration patch
-        run: python tools/apply_v191_h32_return_forecast_hotfix.py
+        run: python tools/apply_v191_h32_return_forecast_hotfix_v2.py
 
       - name: Compile H32 production files
         run: |
@@ -64,7 +65,7 @@ jobs:
           cp godpick_t1_trade_truth.py h32_patch/
           cp godpick_super_ai_excel_guide.py h32_patch/
           cp "pages/7_股神推薦.py" h32_patch/pages/
-          cp tools/apply_v191_h32_return_forecast_hotfix.py h32_patch/tools/
+          cp tools/apply_v191_h32_return_forecast_hotfix_v2.py h32_patch/tools/
           cp tests/v191_hotfix32_return_forecast_smoke.py h32_patch/tests/
           cat > h32_patch/覆蓋說明.txt <<'EOF'
           V191-H32 個股隔日/波段報酬預測
