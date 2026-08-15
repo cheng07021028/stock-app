@@ -1,5 +1,4 @@
 name: V191 H34 daily 1to3 safe selection
-
 on:
   push:
     branches: [main]
@@ -9,10 +8,8 @@ on:
       - "tests/v191_hotfix34_daily_1to3_safe_selection_smoke.py"
       - ".github/workflows/v191_h34_daily_1to3_safe_selection.yml"
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   h34:
     runs-on: ubuntu-latest
