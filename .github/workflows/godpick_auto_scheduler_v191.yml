@@ -1,18 +1,18 @@
 name: GodPick V191 Central Auto Scheduler
 
 on:
+  # V191-H33 notification/noise fix:
+  # Production wakeups are owned by Windows Task Scheduler -> workflow_dispatch.
+  # The old GitHub-hosted cron also woke this workflow every 10 minutes, so the
+  # same central scheduler was being started twice (schedule + workflow_dispatch).
+  # Removing schedule keeps automatic production operation through Windows while
+  # eliminating duplicate GitHub runs and the corresponding failure-email noise.
   workflow_dispatch:
     inputs:
       wakeup_source:
         description: "Wakeup source label for scheduler diagnostics"
         required: false
         default: "manual_dispatch"
-  schedule:
-    # GitHub-hosted schedule is best-effort only. Keep it as an off-peak backup
-    # at 02/12/22/32/42/52 minutes to avoid the top-of-hour load hotspot.
-    # H11 strict production wakeups should use Windows Task Scheduler ->
-    # workflow_dispatch every 10 minutes.
-    - cron: "2-52/10 * * * *"
 
 permissions:
   contents: write
@@ -67,7 +67,7 @@ jobs:
 
       - name: Verify scheduler heartbeat/history reached runtime-data
         # Every scheduled task already persists its authority through the same
-        # GitHub CAS / durability services used by Streamlit.  H10 deliberately
+        # GitHub CAS / durability services used by Streamlit. H10 deliberately
         # removes the old second bulk git-branch publish because it could fail on
         # untracked runtime files and could overwrite a newer concurrent authority.
         # H27 explicitly requires the remote heartbeat to belong to THIS wake.
