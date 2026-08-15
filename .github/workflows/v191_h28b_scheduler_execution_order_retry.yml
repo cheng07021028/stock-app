@@ -1,0 +1,166 @@
+name: V191 H28b scheduler execution order retry
+
+on:
+  push:
+    paths:
+      - '.github/workflows/v191_h28b_scheduler_execution_order_retry.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply H28 patch
+        run: python tools/apply_v191_h28_scheduler_execution_order_hotfix.py
+      - name: Scope legacy H10 order test to pre-H28 semantics
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tests/v191_hotfix10_unattended_scheduler_smoke.py')
+          s=p.read_text(encoding='utf-8-sig')
+          anchor='''        "enabled": True, "weekdays_only": True, "catch_up_missed_same_day": True, "grace_minutes": 60, "retry_count": 0,\n        "jobs": {\n            "stock_master": {"enabled": True, "times": ["04:00"]},'''
+          repl='''        "enabled": True, "weekdays_only": True, "catch_up_missed_same_day": True, "grace_minutes": 60, "retry_count": 0,\n        # H10 tests the historical catch-up contract, not H28's new final-decision mode.\n        # Pin the legacy order explicitly so H28 can safely change the production default.\n        "recommendation_run_last_after_all_enabled": False,\n        "execution_order": [\n            "stock_master", "macro_full", "official_factors", "super_ai_context", "watchlist_runtime",\n            "godpick_recommendation", "record_latest_price", "record_performance",\n            "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits",\n            "t1_truth", "feedback_learning", "durability_retry",\n        ],\n        "jobs": {\n            "stock_master": {"enabled": True, "times": ["04:00"]},'''
+          if anchor not in s:
+              raise SystemExit('H28b legacy H10 fixture anchor not found')
+          p.write_text(s.replace(anchor,repl,1),encoding='utf-8')
+          PY
+      - name: Add deterministic H28 regression
+        shell: bash
+        run: |
+          cat > tests/v191_hotfix28_scheduler_execution_order_smoke.py <<'PY'
+          # -*- coding: utf-8 -*-
+          from __future__ import annotations
+          from datetime import datetime
+          from pathlib import Path
+          import copy
+          import sys
+
+          ROOT = Path(__file__).resolve().parents[1]
+          if str(ROOT) not in sys.path:
+              sys.path.insert(0, str(ROOT))
+
+          import godpick_auto_scheduler as scheduler
+
+          def _base_cfg():
+              cfg = scheduler.normalize_settings(copy.deepcopy(scheduler.DEFAULT_SETTINGS))
+              cfg['enabled'] = True
+              cfg['weekdays_only'] = True
+              return cfg
+
+          def test_h28_default_recommendation_is_last():
+              cfg = scheduler.normalize_settings({})
+              assert cfg['execution_order'][-1] == 'godpick_recommendation'
+              assert cfg['recommendation_run_last_after_all_enabled'] is True
+              assert set(cfg['execution_order']) == set(scheduler.JOB_LABELS)
+
+          def test_h28_custom_order_persists_when_final_gate_disabled():
+              raw = copy.deepcopy(scheduler.DEFAULT_SETTINGS)
+              raw['recommendation_run_last_after_all_enabled'] = False
+              raw['execution_order'] = ['feedback_learning', 'godpick_recommendation', 'stock_master']
+              cfg = scheduler.normalize_settings(raw)
+              assert cfg['execution_order'][:3] == ['feedback_learning', 'godpick_recommendation', 'stock_master']
+
+          def test_h28_final_gate_waits_for_latest_daily_slot():
+              cfg = _base_cfg()
+              for key, jc in cfg['jobs'].items():
+                  jc['enabled'] = key in {'stock_master', 'feedback_learning', 'godpick_recommendation'}
+              cfg['execution_order'] = ['stock_master', 'feedback_learning', 'godpick_recommendation'] + [
+                  x for x in cfg['execution_order'] if x not in {'stock_master', 'feedback_learning', 'godpick_recommendation'}
+              ]
+              now = datetime(2026, 8, 17, 21, 36, tzinfo=scheduler.TZ)
+              stock_slot = scheduler._slot_datetime(now, max(scheduler._normalize_times(cfg['jobs']['stock_master']['times'])))
+              status = {'completed_run_keys': [scheduler._run_key('stock_master', stock_slot)], 'jobs': {}}
+              ok, msg = scheduler._recommendation_final_gate(cfg, status, now, 'godpick_recommendation')
+              assert not ok and 'AI｜績效回饋＋每日學習狀態重建' in msg
+              feedback_slot = scheduler._slot_datetime(now, max(scheduler._normalize_times(cfg['jobs']['feedback_learning']['times'])))
+              status['completed_run_keys'].append(scheduler._run_key('feedback_learning', feedback_slot))
+              ok2, msg2 = scheduler._recommendation_final_gate(cfg, status, now, 'godpick_recommendation')
+              assert ok2 and msg2 == ''
+
+          def test_h28_final_gate_blocks_before_future_predecessor_slot():
+              cfg = _base_cfg()
+              for key, jc in cfg['jobs'].items():
+                  jc['enabled'] = key in {'durability_retry', 'godpick_recommendation'}
+              cfg['execution_order'] = ['durability_retry', 'godpick_recommendation'] + [x for x in cfg['execution_order'] if x not in {'durability_retry','godpick_recommendation'}]
+              now = datetime(2026, 8, 17, 21, 0, tzinfo=scheduler.TZ)
+              ok, msg = scheduler._recommendation_final_gate(cfg, {'completed_run_keys': [], 'jobs': {}}, now, 'godpick_recommendation')
+              assert not ok and '21:40 尚未到' in msg
+
+          def test_h28_execution_loop_uses_saved_order(monkeypatch):
+              cfg = _base_cfg()
+              wanted = ['feedback_learning', 'stock_master', 'godpick_recommendation']
+              cfg['recommendation_run_last_after_all_enabled'] = False
+              cfg['execution_order'] = wanted + [x for x in cfg['execution_order'] if x not in wanted]
+              for key, jc in cfg['jobs'].items():
+                  jc['enabled'] = key in wanted
+              monkeypatch.setattr(scheduler, 'load_settings', lambda: copy.deepcopy(cfg))
+              monkeypatch.setattr(scheduler, 'load_status', lambda: {})
+              monkeypatch.setattr(scheduler, 'load_history', lambda: [])
+              res = scheduler.run_due_jobs(now=datetime(2026, 8, 17, 22, 0, tzinfo=scheduler.TZ), force_all_enabled=True, simulate=True)
+              assert [row['job'] for row in res['executed']] == wanted
+
+          def test_h28_page17_has_persistent_rank_controls():
+              src = (ROOT / 'pages' / '17_系統健康檢查.py').read_text(encoding='utf-8')
+              assert 'execution_order' in src
+              assert 'recommendation_run_last_after_all_enabled' in src
+              assert '當日最後時段完成' in src
+              assert 'v191_rank_' in src
+          PY
+      - name: Install focused dependencies
+        run: python -m pip install -q pytest pandas requests streamlit
+      - name: Compile H28 files
+        run: python -m compileall -q godpick_auto_scheduler.py pages/17_系統健康檢查.py tests/v191_hotfix10_unattended_scheduler_smoke.py tests/v191_hotfix28_scheduler_execution_order_smoke.py
+      - name: Run scheduler regression suite
+        run: |
+          python -m pytest -q \
+            tests/v191_hotfix10_unattended_scheduler_smoke.py \
+            tests/v191_hotfix18_scheduler_stall_recovery_smoke.py \
+            tests/v191_hotfix19_page17_autocatchup_live_status_smoke.py \
+            tests/v191_hotfix27_scheduler_heartbeat_truth_smoke.py \
+            tests/v191_hotfix28_scheduler_execution_order_smoke.py
+      - name: Commit production fix only after tests pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add godpick_auto_scheduler.py 'pages/17_系統健康檢查.py' tests/v191_hotfix10_unattended_scheduler_smoke.py tests/v191_hotfix28_scheduler_execution_order_smoke.py tools/apply_v191_h28_scheduler_execution_order_hotfix.py
+          if git diff --cached --quiet; then
+            echo 'No H28b production diff'
+          else
+            git commit -m 'V191-H28 add persistent scheduler order and final recommendation gate'
+            git push origin HEAD:main
+          fi
+      - name: Prepare H28 patch artifact
+        shell: bash
+        run: |
+          mkdir -p patch/pages patch/tools patch/tests
+          cp godpick_auto_scheduler.py patch/
+          cp 'pages/17_系統健康檢查.py' patch/pages/
+          cp tools/apply_v191_h28_scheduler_execution_order_hotfix.py patch/tools/
+          cp tests/v191_hotfix10_unattended_scheduler_smoke.py patch/tests/
+          cp tests/v191_hotfix28_scheduler_execution_order_smoke.py patch/tests/
+          cat > patch/覆蓋說明.txt <<'TXT'
+          Stock App V191-H28｜中央排程永久順位＋股神推薦最終閘門
+          - 每項工作可設定順位並永久保存。
+          - 預設 07 股神推薦最後執行。
+          - 07 會等待所有排在前面的已啟用工作之「當日最後排程時段」完成。
+          - 例如 07 原設 20:55，而 AI學習/永久化為 21:35/21:40，07 會等待，之後由下一次 10 分鐘喚醒補跑。
+          - 可取消最終閘門以支援進階自訂/盤中多批次。
+          - H10 舊補跑測試已明確鎖定舊模式，避免舊測試阻擋 H28 新正式預設。
+          TXT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stock-app-V191-H28-scheduler-order-patch
+          path: patch/
+          retention-days: 7
