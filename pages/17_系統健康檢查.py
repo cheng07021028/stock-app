@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H27｜中央自動排程＋永久化監控：每次外部喚醒皆永久記錄 heartbeat/run_id/result；週末正常喚醒會明確顯示為依設定跳過，不再誤報排程失效。H18/H19 長工作防重跑與自動補送喚醒完整保留。")
+st.caption("V191-H28｜中央自動排程＋永久化監控：新增可永久保存的工作執行順位；07 股神推薦可固定等待所有前置已啟用工作的當日最終時段完成後才執行。H27 heartbeat 真實性與 H18/H19 防重跑/補送喚醒完整保留。")
 
 
 # ---------------------------------------------------------------------------
@@ -199,18 +199,40 @@ if callable(load_auto_scheduler_settings):
                 value=bool((((_auto_cfg.get("jobs") or {}).get("godpick_recommendation") or {}).get("options") or {}).get("force_full_market", False)),
                 help="未勾選時，沿用第7頁已永久保存的掃描範圍/群組/市場/門檻；勾選時只覆寫自動排程的掃描範圍為全市場，不修改第7頁人工設定。",
             )
-            st.caption("每日時間可填一個或多個，例如 14:20,20:40。Windows 10分鐘嚴格喚醒＋GitHub 排程備援；真正是否到期仍由本設定判斷。")
+            _run_last = st.checkbox(
+                "07｜股神推薦固定等待所有排在前面的已啟用工作『當日最後時段完成』後才執行（建議）",
+                value=bool(_auto_cfg.get("recommendation_run_last_after_all_enabled", True)),
+                help="不是只改畫面順序。若前置工作今天還有較晚的排程時段、尚未完成或失敗，07 會保持待補跑，等下一次中央喚醒再判斷；避免用部分新、部分舊資料推薦。",
+            )
+            _auto_order_raw = _auto_cfg.get("execution_order") if isinstance(_auto_cfg.get("execution_order"), list) else []
+            _auto_order = []
+            for _key in [*_auto_order_raw, *AUTO_JOB_LABELS.keys()]:
+                _key = str(_key or "")
+                if _key in AUTO_JOB_LABELS and _key not in _auto_order:
+                    _auto_order.append(_key)
+            if _run_last and "godpick_recommendation" in _auto_order:
+                _auto_order = [x for x in _auto_order if x != "godpick_recommendation"] + ["godpick_recommendation"]
+            st.caption("每日時間可填一個或多個，例如 14:20,20:40。『順位』會永久保存；重複順位會依目前列順序穩定排序。若勾選推薦最終閘門，07 的順位會固定在最後，且會等待前面工作的當日最後時段真正完成。")
+            _h1, _h2, _h3, _h4 = st.columns([0.7, 0.8, 4.0, 2.2])
+            _h1.caption("啟用")
+            _h2.caption("順位")
+            _h3.caption("自動更新項目")
+            _h4.caption("台灣時間")
             _edited_jobs = {}
-            for _job, _label in AUTO_JOB_LABELS.items():
+            _edited_rank = {}
+            for _job in _auto_order:
+                _label = AUTO_JOB_LABELS.get(_job, _job)
                 _jc = ((_auto_cfg.get("jobs") or {}).get(_job) or {})
-                _c1, _c2, _c3 = st.columns([0.7, 4.0, 2.2])
+                _c1, _c2, _c3, _c4 = st.columns([0.7, 0.8, 4.0, 2.2])
                 with _c1:
-                    _jen = st.checkbox("啟用", value=bool(_jc.get("enabled", False)), key=f"v191_en_{_job}")
+                    _jen = st.checkbox("啟用", value=bool(_jc.get("enabled", False)), key=f"v191_en_{_job}", label_visibility="collapsed")
                 with _c2:
+                    _rank = st.number_input("順位", min_value=1, max_value=max(1, len(AUTO_JOB_LABELS)), value=_auto_order.index(_job)+1, step=1, key=f"v191_rank_{_job}", label_visibility="collapsed")
+                with _c3:
                     st.markdown(f"**{_label}**")
                     if _job == "godpick_recommendation":
-                        st.caption("只有股票主檔、大盤、官方因子『內容日期驗證』、SuperAI市場情境、自選股runtime於今日前置成功，才允許自動推薦；真正選股由第7頁模組執行。若本輪0檔通過可操作底線，狀態會是WARNING並保存候選診斷，不會硬塞弱股。")
-                with _c3:
+                        st.caption("H28：建議維持最後順位。除原有股票主檔/大盤/官方因子/SuperAI/自選股前置外，最終閘門還會等待排在 07 前面的績效、T+1 校準、AI 每日學習與永久化工作完成，才使用最新資訊推薦。")
+                with _c4:
                     _jtimes = st.text_input("台灣時間", value=",".join(_jc.get("times") or []), key=f"v191_times_{_job}", label_visibility="collapsed")
                 _newj = dict(_jc)
                 _newj["enabled"] = bool(_jen)
@@ -220,17 +242,27 @@ if callable(load_auto_scheduler_settings):
                     _opts["force_full_market"] = bool(_rec_force_full)
                     _newj["options"] = _opts
                 _edited_jobs[_job] = _newj
+                _edited_rank[_job] = int(_rank)
             _s1, _s2, _s3 = st.columns(3)
             _grace = _s1.number_input("到期容許分鐘", min_value=10, max_value=120, value=int(_auto_cfg.get("grace_minutes", 35) or 35), step=5)
             _retry = _s2.number_input("失敗重試次數", min_value=0, max_value=5, value=int(_auto_cfg.get("retry_count", 2) or 2), step=1)
             _delay = _s3.number_input("重試間隔秒", min_value=5, max_value=180, value=int(_auto_cfg.get("retry_delay_seconds", 20) or 20), step=5)
             _save_auto = st.form_submit_button("💾 永久保存 V191 自動排程設定", type="primary", use_container_width=True)
         if _save_auto:
+            _new_order = sorted(_edited_rank.keys(), key=lambda _j: (_edited_rank[_j], _auto_order.index(_j)))
+            if _run_last and "godpick_recommendation" in _new_order:
+                _new_order = [x for x in _new_order if x != "godpick_recommendation"] + ["godpick_recommendation"]
             _new_cfg = dict(_auto_cfg)
-            _new_cfg.update({"enabled": bool(_enable_all), "weekdays_only": bool(_weekdays), "catch_up_missed_same_day": bool(_catch_up), "grace_minutes": int(_grace), "retry_count": int(_retry), "retry_delay_seconds": int(_delay), "jobs": _edited_jobs})
+            _new_cfg.update({
+                "enabled": bool(_enable_all), "weekdays_only": bool(_weekdays),
+                "catch_up_missed_same_day": bool(_catch_up), "grace_minutes": int(_grace),
+                "retry_count": int(_retry), "retry_delay_seconds": int(_delay),
+                "jobs": _edited_jobs, "execution_order": _new_order,
+                "recommendation_run_last_after_all_enabled": bool(_run_last),
+            })
             _ok, _msg = save_auto_scheduler_settings(_new_cfg)
             if _ok:
-                st.success("V191 中央排程設定已永久保存；下一次中央喚醒後會依新時間執行。")
+                st.success("V191-H28 中央排程設定已永久保存；下一次中央喚醒會依新順位、時間與推薦最終閘門執行。")
                 st.caption(_msg)
             else:
                 st.error("V191 排程本機可能已寫入，但遠端永久化未確認；Reboot 前請先處理。")

@@ -93,6 +93,15 @@ orig = {name: getattr(sched, name) for name in ["load_settings", "load_status", 
 try:
     real_cfg = sched.normalize_settings({
         "enabled": True, "weekdays_only": True, "catch_up_missed_same_day": True, "grace_minutes": 60, "retry_count": 0,
+        # H10 tests the historical catch-up contract, not H28's new final-decision mode.
+        # Pin the legacy order explicitly so H28 can safely change the production default.
+        "recommendation_run_last_after_all_enabled": False,
+        "execution_order": [
+            "stock_master", "macro_full", "official_factors", "super_ai_context", "watchlist_runtime",
+            "godpick_recommendation", "record_latest_price", "record_performance",
+            "recommend_list_performance", "recommend_list_n_day", "recommend_list_hits",
+            "t1_truth", "feedback_learning", "durability_retry",
+        ],
         "jobs": {
             "stock_master": {"enabled": True, "times": ["04:00"]},
             "macro_full": {"enabled": True, "times": ["05:00", "20:00"]},

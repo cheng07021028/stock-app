@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260815_hotfix27_wakeup_heartbeat_truth"
+VERSION = "godpick_auto_scheduler_v191_20260815_hotfix28_persistent_execution_order"
 # Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
@@ -45,6 +45,27 @@ JOB_LABELS = {
     "feedback_learning": "AI｜績效回饋＋每日學習狀態重建",
     "durability_retry": "17｜永久化失敗/待同步重試",
 }
+
+# H28: canonical AI-first order.  Existing installations without an explicit
+# order are migrated to this sequence; Page17 can permanently customize it.
+# Recommendation is deliberately last by default so performance truth, T+1
+# calibration and daily learning are rebuilt before the next decision.
+DEFAULT_EXECUTION_ORDER = [
+    "stock_master",
+    "macro_full",
+    "official_factors",
+    "super_ai_context",
+    "watchlist_runtime",
+    "record_latest_price",
+    "record_performance",
+    "recommend_list_performance",
+    "recommend_list_n_day",
+    "recommend_list_hits",
+    "t1_truth",
+    "feedback_learning",
+    "durability_retry",
+    "godpick_recommendation",
+]
 
 DEFAULT_JOB_OPTIONS = {
     "stock_master": {"scheduler_immediate_retries": 0},
@@ -76,6 +97,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "retry_delay_seconds": 20,
     "history_keep": 400,
     "updated_at": "",
+    "execution_order": list(DEFAULT_EXECUTION_ORDER),
+    "recommendation_run_last_after_all_enabled": True,
     "jobs": {
         "stock_master": {"enabled": True, "times": ["07:30"], "options": DEFAULT_JOB_OPTIONS["stock_master"]},
         "macro_full": {"enabled": True, "times": ["14:20", "20:40"], "options": DEFAULT_JOB_OPTIONS["macro_full"]},
@@ -130,10 +153,33 @@ def _normalize_times(values: Any) -> list[str]:
     return sorted(out)
 
 
+def _normalize_execution_order(values: Any) -> list[str]:
+    raw = values if isinstance(values, list) else []
+    out: list[str] = []
+    for value in raw:
+        key = str(value or "").strip()
+        if key in JOB_LABELS and key not in out:
+            out.append(key)
+    for key in DEFAULT_EXECUTION_ORDER:
+        if key in JOB_LABELS and key not in out:
+            out.append(key)
+    for key in JOB_LABELS:
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _ordered_job_keys(cfg: dict[str, Any]) -> list[str]:
+    order = _normalize_execution_order((cfg or {}).get("execution_order"))
+    if bool((cfg or {}).get("recommendation_run_last_after_all_enabled", True)):
+        order = [x for x in order if x != "godpick_recommendation"] + ["godpick_recommendation"]
+    return order
+
+
 def normalize_settings(raw: Any) -> dict[str, Any]:
     out=copy.deepcopy(DEFAULT_SETTINGS)
     if isinstance(raw,dict):
-        for k in ["enabled","weekdays_only","catch_up_missed_same_day","grace_minutes","retry_count","retry_delay_seconds","history_keep","updated_at"]:
+        for k in ["enabled","weekdays_only","catch_up_missed_same_day","grace_minutes","retry_count","retry_delay_seconds","history_keep","updated_at","recommendation_run_last_after_all_enabled"]:
             if k in raw: out[k]=raw[k]
         rjobs=raw.get("jobs") if isinstance(raw.get("jobs"),dict) else {}
         for key,default in out["jobs"].items():
@@ -148,6 +194,11 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 deps=merged.get("dependencies") if isinstance(merged.get("dependencies"),list) else default.get("dependencies",[])
                 merged["dependencies"]=[str(x) for x in deps if str(x) in JOB_LABELS and str(x)!=key]
             out["jobs"][key]=merged
+    _raw_order = raw.get("execution_order") if isinstance(raw, dict) else None
+    out["execution_order"] = _normalize_execution_order(_raw_order or out.get("execution_order"))
+    out["recommendation_run_last_after_all_enabled"] = bool(out.get("recommendation_run_last_after_all_enabled", True))
+    if out["recommendation_run_last_after_all_enabled"]:
+        out["execution_order"] = [x for x in out["execution_order"] if x != "godpick_recommendation"] + ["godpick_recommendation"]
     out["catch_up_missed_same_day"]=bool(out.get("catch_up_missed_same_day", True))
     out["grace_minutes"]=max(5,min(int(out.get("grace_minutes",35) or 35),180))
     out["retry_count"]=max(0,min(int(out.get("retry_count",2) or 0),5))
@@ -318,6 +369,53 @@ def _dependency_check(job_cfg:dict[str,Any],status:dict[str,Any],now:datetime)->
             missing.append(JOB_LABELS.get(dep,dep))
     if missing: return False,"前置尚未於今日成功："+"、".join(missing)
     return True,""
+
+
+def _recommendation_final_gate(global_cfg: dict[str, Any], status: dict[str, Any], now: datetime, job: str, *, force: bool = False) -> tuple[bool, str]:
+    """H28: recommendation waits for every enabled predecessor's final daily slot.
+
+    Merely sorting the loop is insufficient when recommendation is scheduled at
+    20:55 but learning/performance jobs are configured for 21:05~21:40.  With
+    the guard enabled, Page07 stays retryable and the next external wake runs it
+    only after all earlier enabled jobs have completed their latest configured
+    slot for the same Taiwan date.  SUCCESS and WARNING both create completion
+    keys; FAILED/BLOCKED never do, so they naturally keep Page07 waiting.
+    """
+    if job != "godpick_recommendation" or force:
+        return True, ""
+    if not bool((global_cfg or {}).get("recommendation_run_last_after_all_enabled", True)):
+        return True, ""
+    order = _ordered_job_keys(global_cfg)
+    try:
+        rec_index = order.index("godpick_recommendation")
+    except ValueError:
+        return True, ""
+    waiting: list[str] = []
+    jobs_cfg = (global_cfg or {}).get("jobs") if isinstance((global_cfg or {}).get("jobs"), dict) else {}
+    status_jobs = status.get("jobs") if isinstance(status.get("jobs"), dict) else {}
+    for dep in order[:rec_index]:
+        dep_cfg = jobs_cfg.get(dep) if isinstance(jobs_cfg.get(dep), dict) else {}
+        if not bool(dep_cfg.get("enabled", False)):
+            continue
+        times = _normalize_times(dep_cfg.get("times"))
+        if not times:
+            continue
+        latest_slot = _slot_datetime(now, max(times))
+        label = JOB_LABELS.get(dep, dep)
+        if now < latest_slot:
+            waiting.append(f"{label}（最後時段 {latest_slot.strftime('%H:%M')} 尚未到）")
+            continue
+        key = _run_key(dep, latest_slot)
+        if _already_done(status, key):
+            continue
+        dep_state = status_jobs.get(dep) if isinstance(status_jobs.get(dep), dict) else {}
+        last_status = str(dep_state.get("last_status") or "尚未完成")
+        last_slot = str(dep_state.get("last_slot") or "")
+        suffix = f"{last_status} {last_slot}".strip()
+        waiting.append(f"{label}（{latest_slot.strftime('%H:%M')} 最終時段未完成；{suffix}）")
+    if waiting:
+        return False, "H28最終推薦閘門等待：" + "、".join(waiting)
+    return True, ""
 
 
 def _pid_alive(pid: Any, owner_host: str = "") -> bool | None:
@@ -563,7 +661,7 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
             _persist_runtime(STATUS_FILE,status,"V191-H27 wake heartbeat｜active lock")
         return {"ok":False,"skipped":True,"message":lock_msg,"executed":[],"settings":cfg,"status":status}
 
-    enabled_order=[job for job,jc in cfg.get("jobs",{}).items() if bool(jc.get("enabled",False)) and (not selected_jobs or job in selected_jobs)]
+    enabled_order=[job for job in _ordered_job_keys(cfg) if bool(((cfg.get("jobs") or {}).get(job) or {}).get("enabled",False)) and (not selected_jobs or job in selected_jobs)]
     planned_order=[]
     for _job in enabled_order:
         _jc=(cfg.get("jobs") or {}).get(_job) or {}
@@ -605,7 +703,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
 
     executed=[]; overall=True
     try:
-        for job,job_cfg in cfg.get("jobs",{}).items():
+        for job in _ordered_job_keys(cfg):
+            job_cfg=(cfg.get("jobs") or {}).get(job) or {}
             if selected_jobs and job not in selected_jobs: continue
             if not bool(job_cfg.get("enabled",False)): continue
             due=_due_slots(job_cfg,now,int(cfg.get("grace_minutes",35)),force=force_all_enabled,catch_up_missed_same_day=bool(cfg.get("catch_up_missed_same_day",True)))
@@ -634,6 +733,8 @@ def run_due_jobs(*, now:datetime|None=None, force_all_enabled:bool=False, simula
                     **_progress_counts,
                 })
                 deps_ok,deps_msg=_dependency_check(job_cfg,status,now)
+                if deps_ok:
+                    deps_ok,deps_msg=_recommendation_final_gate(cfg,status,now,job,force=force_all_enabled)
                 started=now_text(now) if simulate else now_text()
                 if not deps_ok:
                     result={"ok":False,"blocked":True,"message":deps_msg,"finished_at":now_text(now) if simulate else now_text()}
@@ -780,7 +881,8 @@ def scheduler_wakeup_decision(settings:dict[str,Any]|None=None,status:dict[str,A
     due_jobs=[]
     completed=set(status.get("completed_run_keys",[]) or [])
     if cfg.get("enabled") and (not cfg.get("weekdays_only",True) or now.weekday()<5):
-        for job,jc in cfg.get("jobs",{}).items():
+        for job in _ordered_job_keys(cfg):
+            jc=(cfg.get("jobs") or {}).get(job) or {}
             if not bool((jc or {}).get("enabled",False)):
                 continue
             slots=_due_slots(
@@ -840,8 +942,10 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
     progress_dt=_parse_status_datetime(active.get("last_progress_at") or active.get("updated_at")) if active else None
     active_age=None if progress_dt is None else max(0.0,(now-progress_dt).total_seconds()/60.0)
     live_active=bool(active_pending) and (active_age is None or active_age<=70)
+    configured_order=_ordered_job_keys(cfg)
 
-    for job,jc in cfg["jobs"].items():
+    for job in configured_order:
+        jc=(cfg.get("jobs") or {}).get(job) or {}
         times=_normalize_times(jc.get("times"))
         today_slots=[_slot_datetime(now,t) for t in times]
         past=[dt for dt in today_slots if dt<=now]
@@ -880,6 +984,7 @@ def next_run_rows(settings:dict[str,Any]|None=None,status:dict[str,Any]|None=Non
             elif job in active_pending:
                 due_state="⏳ 本輪排隊"
         rows.append({
+            "設定順位": configured_order.index(job)+1,
             "工作ID":job,"自動更新項目":JOB_LABELS.get(job,job),"啟用":bool(jc.get("enabled")),
             "每日時間":",".join(times),"到期狀態":due_state,"本輪順序":batch_order,"目前工作開始":current_started if current_job==job else "","下次預計":next_text,
             "最後狀態":js.get("last_status","尚未執行"),"最後成功":js.get("last_success_at",""),"最後訊息":js.get("last_message","")
