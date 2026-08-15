@@ -1,0 +1,71 @@
+name: V191 H29b market breadth semantics retry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tests/v191_hotfix29_market_breadth_semantics_smoke.py"
+      - ".github/workflows/v191_h29b_market_breadth_semantics_retry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply H29 patch
+        run: python tools/apply_v191_h29_market_breadth_semantics_hotfix.py
+      - name: Install focused dependencies
+        run: python -m pip install -q pytest pandas numpy requests
+      - name: Compile
+        run: python -m compileall -q godpick_formal_recommendation_engine.py market_regime_engine.py tools/apply_v191_h29_market_breadth_semantics_hotfix.py tests/v191_hotfix29_market_breadth_semantics_smoke.py
+      - name: Run H20 H25-H26 H29 regression
+        run: |
+          python -m pytest -q \
+            tests/v191_hotfix20_formal_a_minus_official_alignment_smoke.py \
+            tests/v191_hotfix25_26_market_bridge_kline_cache_smoke.py \
+            tests/v191_hotfix29_market_breadth_semantics_smoke.py
+      - name: Commit production fix only after tests pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add godpick_formal_recommendation_engine.py market_regime_engine.py \
+            tools/apply_v191_h29_market_breadth_semantics_hotfix.py tests/v191_hotfix29_market_breadth_semantics_smoke.py
+          if git diff --cached --quiet; then
+            echo 'No H29 production diff'
+          else
+            git commit -m 'V191-H29 separate breadth red from authoritative market severe risk'
+            git push origin HEAD:main
+          fi
+      - name: Prepare patch artifact
+        shell: bash
+        run: |
+          mkdir -p patch/tools patch/tests
+          cp godpick_formal_recommendation_engine.py patch/
+          cp market_regime_engine.py patch/
+          cp tools/apply_v191_h29_market_breadth_semantics_hotfix.py patch/tools/
+          cp tests/v191_hotfix29_market_breadth_semantics_smoke.py patch/tests/
+          cat > patch/覆蓋說明.txt <<'TXT'
+          Stock App V191-H29｜廣度紅燈與權威大盤風險語意修正
+          1. 廣度弱勢改標示「廣度紅燈｜防守」。
+          2. 權威大盤>=55且中性偏多/偏多/正常時，廣度紅燈只縮倉精選，不再全市場hard block。
+          3. 權威偏空、score<42、極端跌幅或LOCKDOWN仍維持severe。
+          4. Entry/Risk/RR/流動性/K線/官方因子門檻完全不放寬。
+          5. 部署後重新跑完整推薦，舊Excel不會自行重分區。
+          TXT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stock-app-V191-H29-market-breadth-semantics-patch
+          path: patch/
+          retention-days: 7
