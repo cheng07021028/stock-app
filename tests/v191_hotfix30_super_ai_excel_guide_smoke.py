@@ -33,15 +33,19 @@ def test_formal_and_a_minus_are_always_first():
     assert list(out["股票代號"][:2]) == ["1003","1002"], out.to_dict("records")
     assert list(out["超級AI定位"][:2]) == ["正式推薦","A-準主推薦"], out.to_dict("records")
 
-def test_conditional_candidate_requires_real_trade_structure():
+def test_conditional_candidate_follows_official_trade_permission():
+    # H31 superseded H30 metric-only promotion: the guide is descriptive and may
+    # call a row 條件候選 only when the official operation permit is executable.
     df = pd.DataFrame([
-        _row("2001","可執行",70,72,1.5,55,4,30,75,70,60,60),
-        _row("2002","RR太低",80,80,0.6,80,1,10,90,90,90,90),
+        _row("2001","可執行",70,72,1.5,55,4,30,75,70,60,60, permit="條件進場"),
+        _row("2002","結構佳但仍等待",80,80,2.0,80,1,10,90,90,90,90, permit="等待"),
+        _row("2003","RR太低",80,80,0.6,80,1,10,90,90,90,90, permit="等待"),
     ])
     out = build_super_ai_excel_guide(df)
     m = dict(zip(out["股票代號"], out["超級AI定位"]))
     assert m["2001"] == "條件候選", m
     assert m["2002"] == "觀察雷達", m
+    assert m["2003"] == "觀察雷達", m
 
 def test_total_rank_never_overrides_risk_rr():
     df = pd.DataFrame([{

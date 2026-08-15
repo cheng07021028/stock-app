@@ -1,5 +1,8 @@
+from pathlib import Path
 import sys
-sys.path.insert(0, '/mnt/data')
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 import pandas as pd
 from godpick_daily_safe_selection import apply_daily_safe_selection
 
@@ -90,3 +93,27 @@ def test_no_safe_stock_does_not_force_quota():
     df = pd.DataFrame([row('1', rr=0.5), row('2', stop=12), row('3', chase=80)])
     out = apply_daily_safe_selection(df)
     assert out['H34每日精選'].eq('是').sum() == 0
+
+
+def test_existing_formal_with_stale_kline_is_not_daily_selected():
+    df = pd.DataFrame([row('STALE', bucket='正式下週主推薦', klag=2), row('SAFE')])
+    out = apply_daily_safe_selection(df)
+    stale = out.loc[out['股票代號'].eq('STALE')].iloc[0]
+    assert stale['H34每日精選'] == '否'
+    assert 'K線' in stale['H34阻擋原因']
+
+
+def test_lockdown_in_any_row_blocks_whole_daily_selection():
+    normal = row('NORMAL', market=60)
+    lockdown = row('LOCK', market=60)
+    lockdown['大盤原始橋接狀態'] = 'LOCKDOWN｜全面禁買'
+    out = apply_daily_safe_selection(pd.DataFrame([normal, lockdown]))
+    assert int(out['H34每日目標檔數'].iloc[0]) == 0
+    assert int(out['H34每日精選'].eq('是').sum()) == 0
+
+
+def test_neutral_plus_market_keeps_two_stock_target():
+    df = pd.DataFrame([row('N1', market=60), row('N2', market=60), row('N3', market=60)])
+    out = apply_daily_safe_selection(df)
+    assert int(out['H34每日目標檔數'].iloc[0]) == 2
+    assert int(out['H34每日精選'].eq('是').sum()) <= 2

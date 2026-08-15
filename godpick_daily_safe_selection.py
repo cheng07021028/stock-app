@@ -23,7 +23,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h34_daily_1to3_safe_admission_20260815"
+VERSION = "v191_h34_1_daily_safe_selection_safety_fix_20260815"
 
 H34_COLUMNS = [
     "H34每日精選", "H34每日精選排名", "H34每日目標檔數", "H34安全精選分",
@@ -96,20 +96,43 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
 
 
 def _market_profile(frame: pd.DataFrame) -> dict[str, Any]:
+    """Build one conservative market profile from the whole candidate frame.
+
+    H34 originally trusted only ``frame.iloc[0]``.  A stale / partially populated
+    first row could therefore hide an explicit LOCKDOWN carried by later rows, or
+    turn a neutral market into a 3-stock quota.  Market state is global authority,
+    so explicit hard-risk text anywhere in the frame wins; the numeric score uses
+    the median of actually populated scores to avoid row-order dependence.
+    """
     if frame is None or frame.empty:
         return {"target": 0, "hard_block": True, "score": 0.0, "regime": "NO-DATA"}
-    row = frame.iloc[0]
-    text = _blob(row, [
+
+    market_text_columns = [
         "大盤原始橋接狀態", "大盤橋接狀態", "大盤橋接風控", "大盤風控層級",
         "極端市場LOCKDOWN", "大盤策略模式", "大盤風險濾網", "大盤風險燈號",
-    ])
-    score = _first_num(row, ["大盤橋接分數", "大盤可參考分數", "大盤多空分數", "市場環境分數"], 50.0)
+    ]
+    text_parts: list[str] = []
+    scores: list[float] = []
+    score_columns = ["大盤橋接分數", "大盤可參考分數", "大盤多空分數", "市場環境分數"]
+    for _, row in frame.iterrows():
+        blob = _blob(row, market_text_columns)
+        if blob:
+            text_parts.append(blob)
+        score = _first_num(row, score_columns, float("nan"))
+        if math.isfinite(score):
+            scores.append(float(score))
+
+    text = "｜".join(text_parts)
+    score = float(pd.Series(scores, dtype="float64").median()) if scores else 50.0
     hard = any(k in text for k in ["LOCKDOWN", "全面禁買", "極端風險", "崩跌後冷卻", "極端崩跌"])
     if score < 42:
         hard = True
     if hard:
         return {"target": 0, "hard_block": True, "score": score, "regime": "LOCKDOWN/極端風險"}
-    if score >= 65 or any(k in text for k in ["趨勢多頭", "中性偏多", "綠燈"]):
+
+    # Keep the documented 1/2/3 regime contract: only clearly bullish conditions
+    # get three slots.  ``中性偏多`` remains the neutral/selective two-stock mode.
+    if score >= 65 or any(k in text for k in ["趨勢多頭", "強勢多頭", "攻擊模式", "綠燈"]):
         target, regime = 3, "攻擊/偏多"
     elif score >= 50:
         target, regime = 2, "中性/精選"
@@ -210,7 +233,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     m = _metrics(row)
     score = _quality_score(m)
     if veto:
-        return {"eligible": False, "formal": False, "score": score, "reason": "、".join(veto[:5]), "m": m}
+        return {"eligible": False, "formal": False, "hard_veto": veto, "score": score, "reason": "、".join(veto[:5]), "m": m}
 
     # H34-F: safe near-miss allowed to become a formal recommendation.
     formal = bool(
@@ -245,7 +268,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
         reason = "、".join(failed[:5]) or "未達H34安全精選條件"
     else:
         reason = ""
-    return {"eligible": eligible, "formal": formal, "score": score, "reason": reason, "m": m}
+    return {"eligible": eligible, "formal": formal, "hard_veto": [], "score": score, "reason": reason, "m": m}
 
 
 def _existing_bucket(row: pd.Series) -> bool:
@@ -283,9 +306,15 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
 
     existing = [idx for idx, row in out.iterrows() if _existing_bucket(row)]
     existing.sort(key=lambda idx: gates[idx]["score"], reverse=True)
-    selected: list[Any] = existing[:target]
 
-    # Backfill only when standard Formal/A- is short of the market-regime target.
+    # Existing Formal/A- has priority only while it still passes the immutable
+    # H34 hard-risk/data vetoes.  The old code selected every existing bucket
+    # before checking its gate, so a stale K-line formal pick could be labelled
+    # ``H34每日精選=是`` and its blocking reason was subsequently cleared.
+    existing_safe = [idx for idx in existing if not gates[idx].get("hard_veto")]
+    selected: list[Any] = existing_safe[:target]
+
+    # Backfill only when standard *safe* Formal/A- is short of the regime target.
     if len(selected) < target:
         pool = [idx for idx in out.index if idx not in existing and gates[idx]["eligible"]]
         pool.sort(key=lambda idx: gates[idx]["score"], reverse=True)
