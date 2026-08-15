@@ -12,7 +12,7 @@ import pandas as pd
 
 from godpick_runtime_cache import cache_key, get_or_compute
 
-MARKET_REGIME_VERSION = "phase6_market_leader_replay_20260612"
+MARKET_REGIME_VERSION = "v191_h29_breadth_defensive_semantics_20260815"
 MARKET_REGIME_COLUMNS = [
     "大盤攻擊模式", "飆股適合度", "今日可追強度", "中小型股風險", "局部題材火種分", "市場火種狀態", "今日大盤結論", "大盤風險燈號", "大盤情境版本",
 ]
@@ -105,8 +105,8 @@ def _score_frame(df: pd.DataFrame) -> pd.DataFrame:
         light = "黃綠燈｜精選進攻"
     elif "偏空" in joined_macro or weak_ratio > strong_ratio * 1.25:
         mode = "防守盤"
-        conclusion = "不適合擴大倉位；以等突破與風控為主。"
-        light = "紅燈｜防守"
+        conclusion = "候選廣度偏弱，不適合擴大倉位；以等突破、縮倉與風控為主。"
+        light = "廣度紅燈｜防守"
     else:
         mode = "震盪盤"
         conclusion = "大盤未明確攻擊；只接受高勝率買點或盤中確認。"
