@@ -47,7 +47,7 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v187_official_factor_trust_governance_20260811"
+CACHE_VERSION = "v191_h36_official_factor_duplicate_column_guard_20260817"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -2361,6 +2361,34 @@ def build_official_factor_cache(
         raise
 
 
+def _coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Coalesce duplicate labels right-to-left instead of letting df[col] be a DataFrame.
+
+    Page07 is assembled by many overlays; duplicate labels can therefore exist
+    transiently.  Pandas then returns a DataFrame for ``df["資料完整度"]`` and
+    downstream ``.str`` access crashes.  The newest/right-most non-placeholder
+    value wins, while older values remain a fallback for blanks.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty or df.columns.is_unique:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    ordered = list(dict.fromkeys(str(c) for c in df.columns))
+    out = pd.DataFrame(index=df.index)
+    for name in ordered:
+        positions = [i for i, c in enumerate(df.columns) if str(c) == name]
+        if len(positions) == 1:
+            out[name] = df.iloc[:, positions[0]]
+            continue
+        block = df.iloc[:, positions]
+        result = block.iloc[:, -1].copy()
+        for pos in range(block.shape[1] - 2, -1, -1):
+            current = result
+            text = current.astype(str).str.strip().str.lower()
+            missing = current.isna() | text.isin({"", "nan", "none", "null", "nat", "--", "-", "<na>"})
+            result = result.where(~missing, block.iloc[:, pos])
+        out[name] = result
+    return out
+
+
 def _is_missing_factor_value(series: pd.Series, column: str) -> pd.Series:
     """Return rows whose existing factor value is only a placeholder.
 
@@ -2390,7 +2418,7 @@ def merge_official_factors(base_df: pd.DataFrame, factor_df: pd.DataFrame | None
     """
     if base_df is None or base_df.empty:
         return base_df.copy() if isinstance(base_df, pd.DataFrame) else pd.DataFrame()
-    df = base_df.copy()
+    df = _coalesce_duplicate_columns(base_df)
     code_col = "股票代號" if "股票代號" in df.columns else ("code" if "code" in df.columns else "")
     if not code_col:
         return df
@@ -2412,12 +2440,20 @@ def merge_official_factors(base_df: pd.DataFrame, factor_df: pd.DataFrame | None
             merged[column] = merged[temp_col]
         else:
             replace_mask = _is_missing_factor_value(merged[column], column)
+            # Preserve numeric precision when placeholder columns were created as
+            # integers (usually all zeros).  Newer pandas rejects assigning an
+            # authoritative float cache value into an int column.
+            if pd.api.types.is_numeric_dtype(merged[temp_col]):
+                try:
+                    merged[column] = pd.to_numeric(merged[column], errors="coerce").astype(float)
+                except Exception:
+                    pass
             merged.loc[replace_mask, column] = merged.loc[replace_mask, temp_col]
         merged = merged.drop(columns=[temp_col])
 
     if code_col != "股票代號" and "股票代號" in merged.columns:
         merged = merged.drop(columns=["股票代號"])
-    return merged
+    return _coalesce_duplicate_columns(merged)
 
 
 def export_cache_csv_bytes() -> bytes:

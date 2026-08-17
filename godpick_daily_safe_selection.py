@@ -23,11 +23,11 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h34_1_daily_safe_selection_safety_fix_20260815"
+VERSION = "v191_h36_daily_safe_selection_probability_alignment_20260817"
 
 H34_COLUMNS = [
     "H34每日精選", "H34每日精選排名", "H34每日目標檔數", "H34安全精選分",
-    "H34精選等級", "H34精選理由", "H34阻擋原因", "H34操作原則", "H34版本",
+    "H34精選等級", "H34精選理由", "H34阻擋原因", "H34操作原則", "H34機率來源", "H34版本",
 ]
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -141,11 +141,29 @@ def _market_profile(frame: pd.DataFrame) -> dict[str, Any]:
     return {"target": target, "hard_block": False, "score": score, "regime": regime}
 
 
+def _probability_with_source(row: pd.Series) -> tuple[float, str]:
+    # H34 is a decision layer, so it must prefer the probability that has already
+    # passed SuperAI/T+1 calibration.  H32 is a forecast/reporting layer and is
+    # only a fallback when it genuinely existed before this decision.
+    for col in [
+        "SuperAI校準後隔日上漲機率%", "H32隔日上漲機率%",
+        "SuperAI隔日上漲機率%", "模型隔日上漲機率%",
+    ]:
+        raw = row.get(col)
+        if not _s(raw):
+            continue
+        value = _f(raw, float("nan"))
+        if math.isfinite(value) and 0.0 <= value <= 100.0:
+            return float(value), col
+    return 50.0, "預設50%"
+
+
 def _metrics(row: pd.Series) -> dict[str, float]:
     rr = _first_num(row, ["路徑風險報酬比", "風險報酬比", "實戰風險報酬比", "保守風報比"], 0.0, positive=True)
     stop = _first_num(row, ["停損距離_隔日%", "隔日有效風控距離%", "實戰停損距離%", "停損距離%"], 0.0, positive=True)
     amount = _first_num(row, ["流動性參考成交額百萬", "成交額百萬", "20日均成交額百萬"], 0.0, positive=True)
     gap = _first_num(row, ["距最近可執行買點%", "觸發距離%"], 99.0)
+    prob, prob_source = _probability_with_source(row)
     return {
         "entry": _first_num(row, ["Entry進場買點分", "Entry進場分", "進場買點分", "買進分數"], 0.0),
         "risk": _first_num(row, ["Risk風控安全分", "Risk風控分", "風控安全分"], 0.0),
@@ -165,7 +183,8 @@ def _metrics(row: pd.Series) -> dict[str, float]:
         ),
         "priority": _first_num(row, ["股神推薦優先分", "正式推薦排序分", "AI綜合決策分"], 50.0),
         "ai": _first_num(row, ["AI綜合決策分", "SuperAI 最終決策分", "SuperAI最終決策分"], 50.0),
-        "prob": _first_num(row, ["H32隔日上漲機率%", "模型隔日上漲機率%", "SuperAI校準後上漲機率%"], 50.0),
+        "prob": prob,
+        "prob_source": prob_source,
         "t1": _first_num(row, ["H32隔日預估漲跌幅%", "模型預估超額報酬%"], 0.0),
         "swing": _first_num(row, ["H32後續波段預估漲幅%", "H32_10日預估報酬%"], 0.0),
     }
@@ -280,10 +299,20 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
     if frame is None:
         return pd.DataFrame(columns=H34_COLUMNS)
     out = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
+    # H36: these authority/audit columns are textual even when an imported Excel
+    # inferred a bool dtype.  Cast once before writing labels to avoid pandas
+    # future assignment failures (e.g. True/False -> "是/否").
+    for _text_col in [
+        "是否正式推薦", "正式推薦分區", "正式推薦資格", "正式推薦等級",
+        "準主推薦等級", "操作許可", "下週是否可直接買", "正式推薦判定來源",
+        "正式推薦排除原因", "正式推薦動作", "最終操作結論", "推薦資格路徑",
+    ]:
+        if _text_col in out.columns:
+            out[_text_col] = out[_text_col].astype(object)
     for col, default in {
         "H34每日精選": "否", "H34每日精選排名": 0, "H34每日目標檔數": 0,
         "H34安全精選分": 0.0, "H34精選等級": "", "H34精選理由": "",
-        "H34阻擋原因": "", "H34操作原則": "", "H34版本": VERSION,
+        "H34阻擋原因": "", "H34操作原則": "", "H34機率來源": "", "H34版本": VERSION,
     }.items():
         out[col] = default
     if out.empty:
@@ -303,6 +332,7 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
         gates[idx] = gate
         out.at[idx, "H34安全精選分"] = gate["score"]
         out.at[idx, "H34阻擋原因"] = gate["reason"]
+        out.at[idx, "H34機率來源"] = gate["m"].get("prob_source", "")
 
     existing = [idx for idx, row in out.iterrows() if _existing_bucket(row)]
     existing.sort(key=lambda idx: gates[idx]["score"], reverse=True)
@@ -359,7 +389,7 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
         out.at[idx, "H34精選理由"] = (
             f"安全分{gates[idx]['score']:.1f}｜Entry {m['entry']:.0f}｜Risk {m['risk']:.0f}｜"
             f"RR {m['rr']:.2f}｜可操作{m['op']:.0f}｜距買點{m['gap']:.1f}%｜"
-            f"追價{m['chase']:.0f}｜隔日機率{m['prob']:.1f}%"
+            f"追價{m['chase']:.0f}｜隔日機率{m['prob']:.1f}%({m.get('prob_source','')})"
         )
         out.at[idx, "H34操作原則"] = "只做觸發後守價；禁止開盤追價；停損失守立即取消；未觸發不交易。"
         out.at[idx, "H34阻擋原因"] = ""

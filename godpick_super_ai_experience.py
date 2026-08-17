@@ -24,7 +24,7 @@ try:
 except Exception:
     persist_json_async = None
 
-EXPERIENCE_VERSION = "super_ai_experience_v188_20260812"
+EXPERIENCE_VERSION = "super_ai_experience_v191_h36_20260817"
 INDEX_FILE = "super_ai_experience_index.json"
 PROFILE_FILE = "super_ai_experience_profile.json"
 RUN_DIR = "data/super_ai_runs"
@@ -103,8 +103,8 @@ def build_super_ai_experience_profile(records: Any | None = None) -> dict[str, A
     calibration={}
     if records is None:
         try:
-            from godpick_t1_trade_truth import load_t1_truth_rows, load_probability_calibration
-            truth_rows=load_t1_truth_rows()
+            from godpick_t1_trade_truth import load_t1_truth_rows, load_probability_calibration, dedupe_performance_truth_rows
+            truth_rows=dedupe_performance_truth_rows(load_t1_truth_rows())
             calibration=load_probability_calibration()
         except Exception:
             truth_rows=[]; calibration={}
@@ -167,7 +167,7 @@ def build_super_ai_experience_profile(records: Any | None = None) -> dict[str, A
         "executable_samples": len(executable_returns),
         "executable_win_rate_pct": round(sum(1 for x in executable_returns if x>0)/len(executable_returns)*100,2) if executable_returns else None,
         "avg_executable_ret_pct": round(sum(executable_returns)/len(executable_returns),4) if executable_returns else None,
-        "calibration_policy": "sample<30不調整；30~99最多±3pp；100+最多±8pp；未觸發雷達不計交易勝負",
+        "calibration_policy": "H36：同日同股只計一次績效；<30樣本只允許Beta(10,10)後驗的小幅保守校準；未觸發雷達不計交易勝負",
     }
 
 

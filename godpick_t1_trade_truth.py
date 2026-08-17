@@ -28,7 +28,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h9_20260813"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h36_20260817"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -194,10 +194,66 @@ def _business_key(row: dict[str, Any]) -> str:
 
 
 def _cohort_key(row: dict[str, Any]) -> str:
-    # One truth sample per daily decision cohort/code/role.  run_id is preserved
-    # as provenance but deliberately not part of the sample key, so repeated
-    # manual reruns on the same day cannot inflate learning sample counts.
+    # Audit identity keeps role/provenance, so the truth table can still show how
+    # the same stock was classified by different decision layers on the same day.
     return _business_key(row)
+
+
+def _performance_key(row: dict[str, Any]) -> str:
+    """One economic outcome per recommendation-date + stock.
+
+    A single stock/day can legitimately have multiple audit roles (A-, radar,
+    high-risk radar), but its next-session price path only happened once.  Using
+    role in the learning key double-counts the same realized outcome and can
+    materially inflate/deflate win rate and return statistics.
+    """
+    code = "".join(ch for ch in _s(row.get("股票代號") or row.get("代號")) if ch.isdigit())[:4]
+    rec = _recommendation_date(row)
+    return f"{rec}|{code}" if rec and code else ""
+
+
+def _performance_role_priority(row: dict[str, Any]) -> int:
+    role = "｜".join(_s(row.get(k)) for k in [
+        "正式推薦分區", "推薦角色", "盤中雷達優先級", "SuperAI進場狀態"
+    ] if _s(row.get(k))).lower()
+    if "正式下週主推薦" in role or ("正式" in role and "準主" not in role):
+        return 500
+    if "a-" in role or "準主" in role:
+        return 400
+    if "h34" in role:
+        return 350
+    if "盤中" in role or "核心雷達" in role:
+        return 300
+    if "高風險" in role:
+        return 100
+    return 200
+
+
+def dedupe_performance_truth_rows(data: Any) -> list[dict[str, Any]]:
+    """Return canonical rows for learning/summary without deleting audit rows."""
+    rows = _rows(data)
+    best: dict[str, dict[str, Any]] = {}
+    for pos, row in enumerate(rows):
+        key = _performance_key(row) or f"__unkeyed__{pos}"
+        current = best.get(key)
+        score = (
+            _performance_role_priority(row),
+            int(bool(row.get("是否納入可執行績效"))),
+            int(_f(row.get("SuperAI校準後上漲機率%")) is not None or _f(row.get("SuperAI原始上漲機率%")) is not None),
+            _s(row.get("updated_at")),
+        )
+        if current is None:
+            best[key] = row
+            continue
+        current_score = (
+            _performance_role_priority(current),
+            int(bool(current.get("是否納入可執行績效"))),
+            int(_f(current.get("SuperAI校準後上漲機率%")) is not None or _f(current.get("SuperAI原始上漲機率%")) is not None),
+            _s(current.get("updated_at")),
+        )
+        if score > current_score:
+            best[key] = row
+    return list(best.values())
 
 
 def _eligible_record(row: dict[str, Any], today: date, max_age_days: int) -> bool:
@@ -465,21 +521,27 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
 
 
 def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
-    rows = _rows(truth_rows)
+    audit_rows = _rows(truth_rows)
+    rows = dedupe_performance_truth_rows(audit_rows)
+    duplicate_rows_excluded = max(0, len(audit_rows) - len(rows))
     samples = []
     executable = []
     for r in rows:
         if not bool(r.get("T1成熟")):
             continue
+        # Executable performance is an independent truth metric.  It must not be
+        # filtered by whether this older row happened to carry a probability
+        # forecast; otherwise win-rate/sample-count silently shrink to the tiny
+        # calibration subset and can look much better than real execution.
+        if bool(r.get("是否納入可執行績效")):
+            er = _f(r.get("可執行交易1日%") if _s(r.get("可執行交易1日%")) else r.get("觸發當日收盤績效%"))
+            if er is not None:
+                executable.append(er)
         prob = _f(r.get("SuperAI校準後上漲機率%") if _s(r.get("SuperAI校準後上漲機率%")) else r.get("SuperAI原始上漲機率%"))
         ret = _f(r.get("隔日候選漲跌%"))
         if prob is None or ret is None:
             continue
         samples.append((prob, 1.0 if ret > 0 else 0.0, ret, _f(r.get("Selection Alpha%"))))
-        if bool(r.get("是否納入可執行績效")):
-            er = _f(r.get("可執行交易1日%") if _s(r.get("可執行交易1日%")) else r.get("觸發當日收盤績效%"))
-            if er is not None:
-                executable.append(er)
     bins = []
     for low in range(0, 100, 5):
         high = low + 5
@@ -487,13 +549,20 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
         if not sub:
             continue
         n = len(sub)
+        wins = sum(x[1] for x in sub)
         mean_p = sum(x[0] for x in sub) / n
-        actual = sum(x[1] for x in sub) / n * 100.0
+        actual = wins / n * 100.0
+        # H36: Beta(10,10) = 20 pseudo-samples centred at 50%.  This does not
+        # pretend a tiny bin is statistically mature; it only provides a stable
+        # conservative target for bounded early calibration.
+        posterior = (wins + 10.0) / (n + 20.0) * 100.0
         brier = sum(((x[0] / 100.0) - x[1]) ** 2 for x in sub) / n
         alpha_vals = [x[3] for x in sub if x[3] is not None]
         bins.append({
             "low": low, "high": high, "n": n,
             "mean_predicted_pct": round(mean_p, 2), "actual_up_rate_pct": round(actual, 2),
+            "posterior_up_rate_pct": round(posterior, 2),
+            "calibration_state": "EARLY" if n < 30 else "SUPPORTED" if n < 100 else "MATURE",
             "brier_score": round(brier, 5),
             "avg_selection_alpha_pct": round(sum(alpha_vals) / len(alpha_vals), 4) if alpha_vals else None,
         })
@@ -508,11 +577,16 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
         "mean_predicted_up_pct": round(mean_pred, 2) if mean_pred is not None else None,
         "actual_up_rate_pct": round(actual_rate, 2) if actual_rate is not None else None,
         "brier_score": round(global_brier, 5) if global_brier is not None else None,
+        "naive_50_brier_score": 0.25 if n else None,
+        "brier_skill_vs_50_pct": round((1.0 - global_brier / 0.25) * 100.0, 2) if global_brier is not None else None,
+        "audit_rows_seen": len(audit_rows),
+        "unique_performance_rows": len(rows),
+        "duplicate_performance_rows_excluded": duplicate_rows_excluded,
         "executable_samples": len(executable),
         "executable_win_rate_pct": round(sum(1 for x in executable if x > 0) / len(executable) * 100.0, 2) if executable else None,
         "avg_executable_ret_pct": round(sum(executable) / len(executable), 4) if executable else None,
         "bins": bins,
-        "policy": "H9: selection calibrates probability; only OHLC-verifiable fills enter executable performance; touched-then-failed signals are failures, never untriggered wins",
+        "policy": "H36: audit rows preserve roles, but performance/calibration counts one realized outcome per date+stock; small samples use Beta(10,10) posterior only as a bounded conservative calibration target; untriggered signals are never wins/losses",
     }
 
 
@@ -593,9 +667,20 @@ def refresh_t1_trade_truth(
     truth_rows = list(merged.values())
     truth_rows.sort(key=lambda r: (_s(r.get("推薦日期")), _s(r.get("股票代號")), _s(r.get("推薦角色"))))
     _sector_alpha(truth_rows)
-    calibration = build_probability_calibration(truth_rows)
 
-    matured = [r for r in truth_rows if bool(r.get("T1成熟"))]
+    # Preserve every audit role, but explicitly mark which row is allowed to
+    # contribute to economic performance/learning for each date+stock outcome.
+    canonical = {_performance_key(r): r for r in dedupe_performance_truth_rows(truth_rows)}
+    for r in truth_rows:
+        key = _performance_key(r)
+        chosen = canonical.get(key, r)
+        r["performance_key"] = key
+        r["績效主角色"] = _s(chosen.get("推薦角色") or chosen.get("正式推薦分區"))
+        r["績效唯一樣本"] = "是" if _business_key(r) == _business_key(chosen) else "否"
+
+    calibration = build_probability_calibration(truth_rows)
+    performance_rows = dedupe_performance_truth_rows(truth_rows)
+    matured = [r for r in performance_rows if bool(r.get("T1成熟"))]
     executable = [r for r in matured if bool(r.get("是否納入可執行績效"))]
     selection_alpha = [_f(r.get("Selection Alpha%")) for r in matured]
     selection_alpha = [x for x in selection_alpha if x is not None]
@@ -605,6 +690,8 @@ def refresh_t1_trade_truth(
         "records": truth_rows,
         "summary": {
             "total_truth_rows": len(truth_rows), "processed_this_run": len(processed), "failed_this_run": len(failures),
+            "unique_performance_rows": len(performance_rows),
+            "duplicate_performance_rows_excluded": max(0, len(truth_rows) - len(performance_rows)),
             "matured_t1_samples": len(matured), "executable_samples": len(executable),
             "trigger_rate_pct": round(len(executable) / len(matured) * 100.0, 2) if matured else None,
             "executable_win_rate_pct": calibration.get("executable_win_rate_pct"),
@@ -673,5 +760,5 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 __all__ = [
     "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
-    "build_probability_calibration", "load_probability_calibration",
+    "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]

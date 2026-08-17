@@ -3862,6 +3862,12 @@ def _apply_official_factor_cache_v109(df: pd.DataFrame | None) -> pd.DataFrame:
     try:
         if callable(merge_official_factors):
             out = merge_official_factors(out)
+            # H36: multi-overlay frames can contain duplicate labels.  Reuse the
+            # page's canonical coalescer before any Series-only .str operation.
+            try:
+                out, _h36_dup_cols = _v191_h23_unique_json_frame(out)
+            except Exception:
+                _h36_dup_cols = []
             if "官方資料完整度" in out.columns:
                 comp = pd.to_numeric(out["官方資料完整度"], errors="coerce").fillna(0)
                 usable = int((comp >= 60).sum())
@@ -3875,14 +3881,20 @@ def _apply_official_factor_cache_v109(df: pd.DataFrame | None) -> pd.DataFrame:
         if "資料完整度" not in out.columns:
             out["資料完整度"] = ""
         base = out["資料完整度"].astype(str)
-        mask = ~base.str.contains("官方因子快取", na=False)
+        # A previous failed overlay must not remain as a stale scary message once
+        # the authoritative cache merge succeeds on this run.
+        base = base.str.replace(r"(?:｜)?官方因子快取合併失敗：[^｜]*", "", regex=True).str.strip("｜ ")
+        out["資料完整度"] = base
+        mask = ~base.str.contains("官方因子快取已合併", na=False)
         out.loc[mask, "資料完整度"] = base[mask].map(lambda x: (x if x and x != "nan" else "夜間資料") + "｜" + tag)
     except Exception as e:
         if "資料完整度" not in out.columns:
             out["資料完整度"] = ""
         try:
             msg = f"官方因子快取合併失敗：{e}"
-            out["資料完整度"] = out["資料完整度"].astype(str).map(lambda x: (x if x and x != "nan" else "") + ("｜" if x and x != "nan" else "") + msg)
+            base = out["資料完整度"].astype(str)
+            mask = ~base.str.contains(msg, regex=False, na=False)
+            out.loc[mask, "資料完整度"] = base[mask].map(lambda x: (x if x and x != "nan" else "") + ("｜" if x and x != "nan" else "") + msg)
         except Exception:
             pass
     return out

@@ -14,7 +14,7 @@ import re
 
 import pandas as pd
 
-V188_VERSION = "super_ai_trade_quality_v188_20260812"
+V188_VERSION = "super_ai_trade_quality_v191_h36_20260817"
 
 V188_COLUMNS = [
     "V188版本",
@@ -195,12 +195,15 @@ def _probability_calibration(raw_prob: float, experience: dict[str, Any]) -> tup
     if not chosen:
         return round(_clip(raw_prob, 5, 95), 1), 0, 0.0
     n = int(_f(chosen.get("n"), 0))
-    actual = _f(chosen.get("actual_up_rate_pct"), raw_prob)
-    limit = 0.0 if n < 30 else 3.0 if n < 100 else 8.0
-    if limit <= 0:
-        return round(_clip(raw_prob, 5, 95), 1), n, 0.0
-    weight = min(0.65, n / 150.0)
-    delta = max(-limit, min(limit, (actual - raw_prob) * weight))
+    if n <= 0:
+        return round(_clip(raw_prob, 5, 95), 1), 0, 0.0
+    # H36: early samples are allowed to *nudge*, never dominate.  Prefer the
+    # Beta(10,10) posterior emitted by T+1 truth; fall back to raw empirical
+    # rate for backward compatibility with older calibration JSON.
+    target = _f(chosen.get("posterior_up_rate_pct"), _f(chosen.get("actual_up_rate_pct"), raw_prob))
+    limit = 1.0 if n < 5 else 2.0 if n < 15 else 3.0 if n < 30 else 4.0 if n < 100 else 8.0
+    weight = min(1.0, n / 20.0)
+    delta = max(-limit, min(limit, (target - raw_prob) * weight))
     return round(_clip(raw_prob + delta, 5, 95), 1), n, round(delta, 2)
 
 
