@@ -50,14 +50,14 @@ try:
         load_settings as load_auto_scheduler_settings, save_settings as save_auto_scheduler_settings,
         load_status as load_auto_scheduler_status, load_history as load_auto_scheduler_history,
         run_due_jobs as run_auto_due_jobs, next_run_rows as auto_next_run_rows, normalize_settings as normalize_auto_scheduler_settings,
-        scheduler_wakeup_decision as auto_wakeup_decision,
+        scheduler_wakeup_decision as auto_wakeup_decision, resolve_execution_rank_edits as resolve_auto_execution_rank_edits,
     )
 except Exception:
     AUTO_SCHEDULER_VERSION = "V191 scheduler unavailable"
     AUTO_JOB_LABELS = {}
     AUTO_DEFAULT_SETTINGS = {}
     load_auto_scheduler_settings = save_auto_scheduler_settings = load_auto_scheduler_status = load_auto_scheduler_history = None
-    run_auto_due_jobs = auto_next_run_rows = normalize_auto_scheduler_settings = auto_wakeup_decision = None
+    run_auto_due_jobs = auto_next_run_rows = normalize_auto_scheduler_settings = auto_wakeup_decision = resolve_auto_execution_rank_edits = None
 
 try:
     from godpick_durability_service import audit_core_durability, retry_failed_durability, queue_existing_critical_for_migration
@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H28｜中央自動排程＋永久化監控：新增可永久保存的工作執行順位；07 股神推薦可固定等待所有前置已啟用工作的當日最終時段完成後才執行。H27 heartbeat 真實性與 H18/H19 防重跑/補送喚醒完整保留。")
+st.caption("V191-H39｜中央自動排程順位修正：順位改為『指定目的位置』，保存後立即回讀驗證並同步畫面；07 最終閘門勾選時固定最後順位。H38/H28/H27 既有決策與防重跑機制完整保留。")
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,12 @@ if callable(load_auto_scheduler_settings):
     _auto_cfg = load_auto_scheduler_settings(refresh_remote=True)
     _auto_status = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
     with st.expander("⏰ V191｜中央自動排程中心（每日自動更新＋永久記錄＋自動股神推薦）", expanded=True):
+        _rank_flash = st.session_state.pop("_v191_rank_save_flash", None)
+        if isinstance(_rank_flash, dict):
+            if bool(_rank_flash.get("ok")):
+                st.success(str(_rank_flash.get("message") or "中央排程順位已永久保存並回讀驗證。"))
+            else:
+                st.error(str(_rank_flash.get("message") or "中央排程順位保存驗證失敗。"))
         _active_run = (_auto_status.get("active_run") or {}) if isinstance(_auto_status, dict) else {}
         if isinstance(_active_run, dict) and _active_run.get("pending_jobs"):
             _pending_labels = [AUTO_JOB_LABELS.get(str(x), str(x)) for x in (_active_run.get("pending_jobs") or [])]
@@ -212,7 +218,34 @@ if callable(load_auto_scheduler_settings):
                     _auto_order.append(_key)
             if _run_last and "godpick_recommendation" in _auto_order:
                 _auto_order = [x for x in _auto_order if x != "godpick_recommendation"] + ["godpick_recommendation"]
-            st.caption("每日時間可填一個或多個，例如 14:20,20:40。『順位』會永久保存；重複順位會依目前列順序穩定排序。若勾選推薦最終閘門，07 的順位會固定在最後，且會等待前面工作的當日最後時段真正完成。")
+
+            # H39: keyed Streamlit number_input values survive reruns.  Without
+            # an explicit sync, the widget can keep the old rank even though the
+            # permanent JSON has a new execution_order, making saved ranks appear
+            # to revert.  Sync only when the persisted config changed, or after a
+            # successful save requested a one-shot refresh.
+            _rank_force_order = st.session_state.pop("_v191_rank_force_order", None)
+            _rank_cfg_sig = json.dumps({
+                "order": _auto_order,
+                "updated_at": str(_auto_cfg.get("updated_at") or ""),
+                "run_last": bool(_run_last),
+            }, ensure_ascii=False, sort_keys=True)
+            _rank_prev_sig = st.session_state.get("_v191_rank_cfg_sig")
+            if isinstance(_rank_force_order, list) and _rank_force_order:
+                _sync_order = [str(x) for x in _rank_force_order if str(x) in AUTO_JOB_LABELS]
+                for _idx, _job_key in enumerate(_sync_order, start=1):
+                    st.session_state[f"v191_rank_{_job_key}"] = int(_idx)
+                st.session_state["_v191_rank_cfg_sig"] = _rank_cfg_sig
+            elif _rank_prev_sig != _rank_cfg_sig:
+                for _idx, _job_key in enumerate(_auto_order, start=1):
+                    st.session_state[f"v191_rank_{_job_key}"] = int(_idx)
+                st.session_state["_v191_rank_cfg_sig"] = _rank_cfg_sig
+
+            st.caption(
+                "每日時間可填一個或多個，例如 14:20,20:40。H39：只要把某一列順位改成想去的位置（例如 6→2），"
+                "保存後系統會自動把其他工作順移，不需要手動交換兩列；保存完成會立即從本機權威回讀驗證並重新載入畫面。"
+                "若勾選推薦最終閘門，07 的順位固定最後且欄位會鎖定。"
+            )
             _h1, _h2, _h3, _h4 = st.columns([0.7, 0.8, 4.0, 2.2])
             _h1.caption("啟用")
             _h2.caption("順位")
@@ -227,7 +260,13 @@ if callable(load_auto_scheduler_settings):
                 with _c1:
                     _jen = st.checkbox("啟用", value=bool(_jc.get("enabled", False)), key=f"v191_en_{_job}", label_visibility="collapsed")
                 with _c2:
-                    _rank = st.number_input("順位", min_value=1, max_value=max(1, len(AUTO_JOB_LABELS)), value=_auto_order.index(_job)+1, step=1, key=f"v191_rank_{_job}", label_visibility="collapsed")
+                    _rank = st.number_input(
+                        "順位", min_value=1, max_value=max(1, len(AUTO_JOB_LABELS)),
+                        value=_auto_order.index(_job)+1, step=1, key=f"v191_rank_{_job}",
+                        label_visibility="collapsed",
+                        disabled=bool(_run_last and _job == "godpick_recommendation"),
+                        help=("已啟用『07 最終閘門』，股神推薦固定最後順位；取消該勾選後即可自訂。" if _job == "godpick_recommendation" else "輸入目的順位；保存後其他列會自動順移。"),
+                    )
                 with _c3:
                     st.markdown(f"**{_label}**")
                     if _job == "godpick_recommendation":
@@ -249,9 +288,14 @@ if callable(load_auto_scheduler_settings):
             _delay = _s3.number_input("重試間隔秒", min_value=5, max_value=180, value=int(_auto_cfg.get("retry_delay_seconds", 20) or 20), step=5)
             _save_auto = st.form_submit_button("💾 永久保存 V191 自動排程設定", type="primary", use_container_width=True)
         if _save_auto:
-            _new_order = sorted(_edited_rank.keys(), key=lambda _j: (_edited_rank[_j], _auto_order.index(_j)))
-            if _run_last and "godpick_recommendation" in _new_order:
-                _new_order = [x for x in _new_order if x != "godpick_recommendation"] + ["godpick_recommendation"]
+            if callable(resolve_auto_execution_rank_edits):
+                _new_order = resolve_auto_execution_rank_edits(
+                    _auto_order, _edited_rank, pin_recommendation_last=bool(_run_last)
+                )
+            else:
+                _new_order = sorted(_edited_rank.keys(), key=lambda _j: (_edited_rank[_j], _auto_order.index(_j)))
+                if _run_last and "godpick_recommendation" in _new_order:
+                    _new_order = [x for x in _new_order if x != "godpick_recommendation"] + ["godpick_recommendation"]
             _new_cfg = dict(_auto_cfg)
             _new_cfg.update({
                 "enabled": bool(_enable_all), "weekdays_only": bool(_weekdays),
@@ -262,10 +306,28 @@ if callable(load_auto_scheduler_settings):
             })
             _ok, _msg = save_auto_scheduler_settings(_new_cfg)
             if _ok:
-                st.success("V191-H28 中央排程設定已永久保存；下一次中央喚醒會依新順位、時間與推薦最終閘門執行。")
-                st.caption(_msg)
+                # Do not mutate already-instantiated widget keys in this run.
+                # Carry the verified order across one rerun and sync before the
+                # rank widgets are created next time.
+                _verify_cfg = load_auto_scheduler_settings(refresh_remote=False)
+                _verify_order = list((_verify_cfg or {}).get("execution_order") or [])
+                _verified = _verify_order == list(_new_order)
+                if _verified:
+                    st.session_state["_v191_rank_force_order"] = list(_verify_order)
+                    st.session_state.pop("_v191_rank_cfg_sig", None)
+                    st.session_state["_v191_rank_save_flash"] = {
+                        "ok": True,
+                        "message": "V191-H39 中央排程設定已永久保存並回讀驗證；順位已重新載入。",
+                    }
+                    try:
+                        st.rerun()
+                    except AttributeError:
+                        st.experimental_rerun()
+                else:
+                    st.error("H39 順位保存後回讀不一致，已拒絕顯示成功。")
+                    st.caption(f"預期順位：{_new_order}｜回讀順位：{_verify_order}｜{_msg}")
             else:
-                st.error("V191 排程本機可能已寫入，但遠端永久化未確認；Reboot 前請先處理。")
+                st.error("V191-H39 排程永久保存未確認；本機/遠端任一權威失敗都不會假裝保存成功。")
                 st.caption(_msg)
 
         def _run_v191_with_live_progress(*, force_all: bool):

@@ -20,7 +20,7 @@ import socket
 import threading
 import time
 
-VERSION = "godpick_auto_scheduler_v191_20260815_hotfix28_persistent_execution_order"
+VERSION = "godpick_auto_scheduler_v191_20260817_hotfix39_rank_editor_persistence"
 # Compatibility lineage marker retained for H11 smoke/contracts: hotfix11_dual_wakeup
 BASE_DIR = Path(__file__).resolve().parent
 TZ = ZoneInfo("Asia/Taipei")
@@ -176,6 +176,75 @@ def _ordered_job_keys(cfg: dict[str, Any]) -> list[str]:
     return order
 
 
+def resolve_execution_rank_edits(
+    current_order: Any,
+    requested_ranks: Any,
+    *,
+    pin_recommendation_last: bool = False,
+) -> list[str]:
+    """Resolve Page17 rank edits as *exact destination positions*.
+
+    H28 previously sorted every row by the numeric rank that happened to be in
+    the form.  When one row was changed to an already occupied rank (the common
+    UI action, e.g. 6 -> 2), the unchanged occupant kept the same rank and the
+    edited job could land at 3 instead of 2.  On the next Streamlit rerun the
+    stale widget session value made this look as if rank editing was not saved.
+
+    H39 treats only values that differ from the persisted order as explicit
+    placement requests.  Explicit jobs claim their requested slots first; all
+    untouched jobs keep relative order and fill the remaining slots.  This makes
+    changing a single number sufficient to move a job to that exact position.
+    Duplicate explicit destinations are normalized deterministically to the
+    nearest free slot.
+    """
+    order = _normalize_execution_order(current_order)
+    n = len(order)
+    if n <= 1:
+        return order
+    ranks = requested_ranks if isinstance(requested_ranks, dict) else {}
+    pinned_job = "godpick_recommendation" if pin_recommendation_last and "godpick_recommendation" in order else ""
+    slots: list[str | None] = [None] * n
+    if pinned_job:
+        slots[-1] = pinned_job
+
+    def _rank_for(job: str, fallback: int) -> int:
+        try:
+            value = int(ranks.get(job, fallback))
+        except Exception:
+            value = fallback
+        return max(1, min(value, n))
+
+    changed: list[tuple[int, str, int]] = []
+    for idx, job in enumerate(order):
+        if job == pinned_job:
+            continue
+        desired = _rank_for(job, idx + 1)
+        if desired != idx + 1:
+            changed.append((idx, job, desired))
+
+    def _nearest_free(target_idx: int) -> int | None:
+        candidates = [idx for idx, value in enumerate(slots) if value is None]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda idx: (abs(idx - target_idx), idx))
+
+    # Original row order is the deterministic tie-breaker for simultaneous edits.
+    for _old_idx, job, desired in changed:
+        target_idx = desired - 1
+        free_idx = target_idx if slots[target_idx] is None else _nearest_free(target_idx)
+        if free_idx is not None:
+            slots[free_idx] = job
+
+    already = {x for x in slots if x}
+    untouched = [job for job in order if job not in already]
+    it = iter(untouched)
+    for idx, value in enumerate(slots):
+        if value is None:
+            slots[idx] = next(it, None)
+    resolved = [str(x) for x in slots if x]
+    return _normalize_execution_order(resolved)
+
+
 def normalize_settings(raw: Any) -> dict[str, Any]:
     out=copy.deepcopy(DEFAULT_SETTINGS)
     if isinstance(raw,dict):
@@ -262,7 +331,19 @@ def save_settings(settings: dict[str, Any]) -> tuple[bool,str]:
     payload=normalize_settings(settings); payload["updated_at"]=now_text()
     try:
         from godpick_durability_service import persist_json_permanent
-        return persist_json_permanent(SETTINGS_FILE,payload,reason="V191 central auto scheduler settings")
+        ok, msg = persist_json_permanent(SETTINGS_FILE,payload,reason="V191-H39 central auto scheduler settings/rank order")
+        # H39: local readback is mandatory.  A green UI must never be shown if
+        # the exact execution_order written by the form cannot be read back.
+        local = _read_local(SETTINGS_FILE, {})
+        local_cfg = normalize_settings(local) if isinstance(local, dict) else normalize_settings({})
+        expected_order = list(payload.get("execution_order") or [])
+        actual_order = list(local_cfg.get("execution_order") or [])
+        if actual_order != expected_order:
+            return False, (
+                f"排程順位回讀驗證失敗：預期={expected_order}｜實際={actual_order}｜{msg}"
+            )
+        order_text = ",".join(str(x) for x in actual_order)
+        return bool(ok), f"{msg}｜H39順位回讀驗證成功：{order_text}"
     except Exception as exc:
         return False,f"排程永久保存失敗：{exc}"
 
