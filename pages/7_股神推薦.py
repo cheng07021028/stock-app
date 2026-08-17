@@ -287,7 +287,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v189_v188_final_cache_guard_20260812"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h37_excel_column_layout_20260817"
+EXCEL_COLUMN_LAYOUT_VERSION = "V191-H37-EXCEL-COLUMN-LAYOUT-20260817"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -11312,6 +11313,173 @@ def _load_recommend_result_from_state() -> tuple[pd.DataFrame, pd.DataFrame, pd.
 # =========================================================
 @st.cache_data(ttl=300, show_spinner=False)
 
+def _get_super_ai_guide_default_cols() -> list[str]:
+    """H37：超級AI股神精選攻略的管理決策閱讀順序。
+
+    排名/身份固定在最前，接著依序是決策許可、交易品質、報酬預測、
+    價格/風控與資料稽核。只調整閱讀順序，不改推薦結果或任何分數。
+    """
+    return [
+        "攻略順位", "股票代號", "股票名稱", "超級AI定位", "原股神總排名", "市場別", "類別",
+        "正式推薦分區", "操作許可", "V188交易許可", "V188作戰優先分", "超級AI攻略分",
+        "Entry", "Risk", "RR", "進場可執行分", "距最近買點%", "追價風險", "SuperAI Trade", "SuperAI決策",
+        "隔日上漲機率%", "隔日預估漲跌幅%", "隔日90%區間", "隔日預測可信度",
+        "10日預估報酬%", "10日90%區間", "10日預測可信度",
+        "族群攻擊", "主流資金", "主要阻擋/近門檻", "操作原則",
+        "K線/資料狀態", "官方因子狀態", "大盤/V188狀態",
+        "報酬預測驗證", "預測資料來源", "預測口徑", "攻略版本",
+    ]
+
+
+def _get_master_rank_default_cols() -> list[str]:
+    """H37：股神推薦總排名的專業預設順序。
+
+    第一屏先回答「哪一檔、能不能做、怎麼做」，AI研究/資料治理欄位往後放；
+    未列於本清單的新欄位仍會完整保留在最後，不刪任何研究證據。
+    """
+    return [
+        "股神推薦總排名", "股票代號", "股票名稱", "類別", "市場別", "產業",
+        "V188股神作戰優先分", "SuperAI最終作戰等級", "V188交易許可", "V188正式推薦資格",
+        "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "正式推薦動作",
+        "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+        "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級",
+        "SuperAI執行風報比", "SuperAI風報比來源", "SuperAI校準後隔日上漲機率%",
+        "H32隔日預估漲跌幅%", "H32隔日90%區間下緣%", "H32隔日90%區間上緣%", "H32隔日預測可信度",
+        "H32_10日預估報酬%", "H32_10日90%區間下緣%", "H32_10日90%區間上緣%", "H32波段預測可信度",
+        "H32預測驗證狀態", "H35預測資料來源",
+        "Entry進場買點分", "Risk風控安全分", "進場可執行分", "實戰操作品質分", "買進分數",
+        "主要進場路徑", "最新價", "主要進場參考價", "預估進場點", "實戰觸發價", "觸發後守價",
+        "守價回測參考價", "守價回測距離%", "實戰停損參考", "第一壓力價", "建議倉位上限%",
+        "實戰風險報酬比", "風險報酬比", "路徑風險報酬比", "追價風險分",
+        "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分",
+        "今日訊號新鮮分", "今日新進榜", "推薦輪動狀態", "近5次入榜次數", "連續入榜次數",
+        "前次推薦排名", "本次分數變化", "重複推薦校正分", "重複推薦說明",
+        "主流主升優先分", "主流主升判定", "主流主升操作限制",
+        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
+        "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
+        "V188RR治理", "V188T+1追價治理", "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分",
+        "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度",
+        "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態",
+        "股神資料總新鮮度", "股神資料警示", "正式推薦排除原因", "失效條件", "股神推薦分數說明",
+        "H32預測方法", "H32預測版本",
+    ]
+
+
+def _apply_excel_export_column_order(df: pd.DataFrame, name: str, default_cols: list[str]) -> pd.DataFrame:
+    """H37：將永久保存的 Excel 欄位順序套用到指定分頁，所有欄位完整保留。"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    available = list(df.columns)
+    fixed = [c for c in _fixed_columns_for_order_manager(name) if c in available]
+    managed_available = [c for c in available if c not in fixed]
+    managed_default = [c for c in default_cols if c in managed_available]
+    saved = [c for c in _load_persistent_column_order(name) if c in managed_available]
+    order = _normalize_column_order(saved if saved else managed_default, managed_available, managed_default)
+    final = fixed + [c for c in order if c not in fixed]
+    return df[[c for c in final if c in df.columns]].copy()
+
+
+def _excel_column_layout_signature_v191_h37() -> str:
+    """H37：Excel 快取必須包含兩張主表欄位版型，避免改順序後仍下載舊快取。"""
+    payload = {
+        "version": EXCEL_COLUMN_LAYOUT_VERSION,
+        "super_ai_guide": _load_persistent_column_order("excel_super_ai_guide"),
+        "master_rank": _load_persistent_column_order("excel_master_rank"),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _column_order_presets_v191_h37(name: str, managed_default_cols: list[str], managed_available_cols: list[str]) -> dict[str, list[str]]:
+    """H37：依不同表格提供真正符合用途的欄位版型。"""
+    if name == "excel_super_ai_guide":
+        presets = {
+            "管理決策版": [
+                "超級AI定位", "原股神總排名", "正式推薦分區", "操作許可", "V188交易許可",
+                "V188作戰優先分", "超級AI攻略分", "Entry", "Risk", "RR", "進場可執行分",
+                "隔日上漲機率%", "隔日預估漲跌幅%", "10日預估報酬%", "主要阻擋/近門檻", "操作原則",
+                "距最近買點%", "追價風險", "族群攻擊", "主流資金",
+            ],
+            "交易執行版": [
+                "超級AI定位", "正式推薦分區", "操作許可", "V188交易許可", "Entry", "Risk", "RR",
+                "進場可執行分", "距最近買點%", "追價風險", "主要阻擋/近門檻", "操作原則",
+                "隔日上漲機率%", "隔日預估漲跌幅%", "10日預估報酬%",
+            ],
+            "AI預測版": [
+                "V188作戰優先分", "超級AI攻略分", "SuperAI Trade", "SuperAI決策", "隔日上漲機率%",
+                "隔日預估漲跌幅%", "隔日90%區間", "隔日預測可信度", "10日預估報酬%", "10日90%區間",
+                "10日預測可信度", "報酬預測驗證", "預測資料來源", "預測口徑", "族群攻擊", "主流資金",
+            ],
+            "風控稽核版": [
+                "超級AI定位", "操作許可", "V188交易許可", "Risk", "RR", "追價風險", "主要阻擋/近門檻",
+                "K線/資料狀態", "官方因子狀態", "大盤/V188狀態", "報酬預測驗證", "預測資料來源", "攻略版本",
+            ],
+            "完整研究版": managed_default_cols,
+        }
+    elif name == "excel_master_rank":
+        presets = {
+            "管理決策版": [
+                "類別", "市場別", "V188股神作戰優先分", "SuperAI最終作戰等級", "V188交易許可", "V188正式推薦資格",
+                "最終操作結論", "操作許可", "正式推薦分區", "正式推薦動作", "SuperAI Alpha分", "SuperAI Trade分",
+                "SuperAI執行風報比", "SuperAI校準後隔日上漲機率%", "H32隔日預估漲跌幅%", "H32_10日預估報酬%",
+                "Entry進場買點分", "Risk風控安全分", "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
+            ],
+            "交易執行版": [
+                "V188交易許可", "V188正式推薦資格", "最終操作結論", "正式推薦分區", "正式推薦動作",
+                "Entry進場買點分", "Risk風控安全分", "SuperAI執行風報比", "實戰風險報酬比", "追價風險分",
+                "最新價", "主要進場參考價", "預估進場點", "實戰觸發價", "觸發後守價", "守價回測參考價",
+                "實戰停損參考", "第一壓力價", "建議倉位上限%", "失效條件",
+            ],
+            "AI預測版": [
+                "V188股神作戰優先分", "SuperAI最終作戰等級", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級",
+                "SuperAI校準後隔日上漲機率%", "H32隔日預估漲跌幅%", "H32隔日90%區間下緣%", "H32隔日90%區間上緣%",
+                "H32隔日預測可信度", "H32_10日預估報酬%", "H32_10日90%區間下緣%", "H32_10日90%區間上緣%",
+                "H32波段預測可信度", "H32預測驗證狀態", "H35預測資料來源", "H32預測方法", "H32預測版本",
+            ],
+            "風控稽核版": [
+                "V188交易許可", "V188正式推薦資格", "V188RR治理", "V188T+1追價治理", "V188個股資料證據",
+                "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分", "Risk風控安全分", "追價風險分",
+                "官方因子資料日期", "官方因子新鮮度", "大盤資料日期", "大盤資料新鮮度", "大盤與K線對齊狀態",
+                "股神資料總新鮮度", "股神資料警示", "正式推薦排除原因", "失效條件",
+            ],
+            "完整研究版": managed_default_cols,
+        }
+    else:
+        presets = {
+            "夜間隔日股神版": [
+                "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分", "夜間股神總分",
+                "隔日實戰排序分", "隔日進場分數", "波段潛力分數", "進場型態_隔日", "隔日建議動作",
+                "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價", "觀察週期",
+                "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "估值風險分數", "PER本益比",
+                "外資近1日買賣超", "投信近1日買賣超", "三大法人近1日合計", "資料完整度",
+                "夜間股神建議", "夜間風險提醒",
+            ],
+            "股神推薦精簡版": [
+                "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分",
+                "上漲機率估計%", "買點狀態", "高分禁買旗標", "高分禁買原因", "實戰買點分數",
+                "最新價", "推薦理由摘要",
+            ],
+            "買點實戰版": [
+                "股票代號", "股票名稱", "推薦等級", "推薦總分", "買點狀態", "進場型態",
+                "實戰買點分數", "支撐距離%", "壓力空間%", "近5日漲幅%", "風險報酬比",
+                "停損距離%", "目標報酬%", "停損價", "賣出目標1", "賣出目標2", "實戰操作建議",
+            ],
+            "風控檢查版": [
+                "股票代號", "股票名稱", "推薦總分", "高分禁買旗標", "高分禁買原因", "追價風險分",
+                "追高風險等級", "長上影風險", "假突破風險", "過熱風險", "大盤橋接風控",
+                "大盤資料品質", "隔夜風險", "隔夜資料品質", "風險說明",
+            ],
+            "隔夜風控版": [
+                "股票代號", "股票名稱", "推薦總分", "上漲機率估計%", "大盤橋接分數",
+                "大盤橋接風控", "大盤交易時段", "隔夜分數", "隔夜風險", "隔夜偏向",
+                "隔夜解讀", "NASDAQ漲跌%", "費半漲跌%", "台指夜盤漲跌", "台指夜盤資料來源",
+                "台指夜盤備援說明",
+            ],
+            "完整除錯版": managed_default_cols,
+        }
+    return {k: [c for c in v if c in managed_available_cols] for k, v in presets.items()}
+
+
 def _get_full_table_default_cols() -> list[str]:
     return [
         "股票代號", "股票名稱", "市場別", "類別", "類股內排名", "類股前3強",
@@ -11717,12 +11885,78 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
     try:
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
+        h37_width_overrides = {}
+        if safe_name in {"超級AI股神精選攻略", "股神推薦總排名"}:
+            from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+            from openpyxl.formatting.rule import CellIsRule
+            ws.sheet_view.showGridLines = False
+            ws.sheet_view.zoomScale = 90
+            ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
+            ws.sheet_properties.tabColor = "2563EB" if safe_name == "超級AI股神精選攻略" else "00A6A6"
+            ws.row_dimensions[1].height = 34
+            thin = Side(style="thin", color="D1D5DB")
+
+            def _header_color(header: str) -> str:
+                h = str(header or "")
+                if any(k in h for k in ["排名", "順位", "股票代號", "股票名稱", "類別", "市場別"]):
+                    return "1E3A8A"
+                if any(k in h for k in ["操作", "許可", "正式推薦", "定位", "動作", "倉位", "結論"]):
+                    return "047857"
+                if any(k in h for k in ["預估", "預測", "機率", "Alpha", "Trade", "SuperAI", "攻略分", "作戰優先分"]):
+                    return "6D28D9"
+                if any(k in h for k in ["Entry", "RR", "風報", "進場", "買點", "觸發", "守價", "停損", "壓力", "最新價"]):
+                    return "B45309"
+                if any(k in h for k in ["Risk", "風險", "阻擋", "排除", "失效", "治理", "新鮮度", "資料狀態", "警示"]):
+                    return "B91C1C"
+                return "334155"
+
+            for cell in ws[1]:
+                cell.fill = PatternFill("solid", fgColor=_header_color(cell.value))
+                cell.font = Font(bold=True, color="FFFFFF", size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = Border(bottom=thin)
+            for row_cells in ws.iter_rows(min_row=2):
+                for cell in row_cells:
+                    cell.alignment = Alignment(vertical="top", wrap_text=False)
+                    cell.border = Border(bottom=Side(style="hair", color="E5E7EB"))
+
+            hmap = {str(cell.value): cell.column for cell in ws[1]}
+            _rank_header = "攻略順位" if safe_name == "超級AI股神精選攻略" else "股神推薦總排名"
+            _rank_idx = hmap.get(_rank_header)
+            if _rank_idx:
+                for row_idx in range(2, min(ws.max_row, 4) + 1):
+                    ws.cell(row=row_idx, column=_rank_idx).font = Font(bold=True, color="111827")
+                    ws.cell(row=row_idx, column=_rank_idx).fill = PatternFill("solid", fgColor=("FDE68A" if row_idx == 2 else "DBEAFE"))
+            for metric in ["隔日預估漲跌幅%", "10日預估報酬%", "H32隔日預估漲跌幅%", "H32_10日預估報酬%"]:
+                cidx = hmap.get(metric)
+                if cidx and ws.max_row >= 2:
+                    letter = ws.cell(row=1, column=cidx).column_letter
+                    rng = f"{letter}2:{letter}{ws.max_row}"
+                    ws.conditional_formatting.add(rng, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color="15803D", bold=True)))
+                    ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color="B91C1C", bold=True)))
+
+            for header, width in {
+                "攻略順位": 10, "股神推薦總排名": 12, "股票代號": 12, "股票名稱": 16,
+                "主要阻擋/近門檻": 34, "操作原則": 42, "最終操作結論": 28, "正式推薦動作": 32,
+                "股神資料警示": 34, "正式推薦排除原因": 36, "失效條件": 34,
+            }.items():
+                cidx = hmap.get(header)
+                if cidx:
+                    h37_width_overrides[ws.cell(row=1, column=cidx).column_letter] = width
+
+            for long_header in ["主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
+                cidx = hmap.get(long_header)
+                if cidx:
+                    for row_idx in range(2, ws.max_row + 1):
+                        ws.cell(row=row_idx, column=cidx).alignment = Alignment(vertical="top", wrap_text=True)
+                        ws.row_dimensions[row_idx].height = max(float(ws.row_dimensions[row_idx].height or 15), 30)
+
         if safe_name == "股神推薦總排名":
             from openpyxl.styles import PatternFill, Font
             from openpyxl.formatting.rule import ColorScaleRule
             ws.sheet_properties.tabColor = "00A6A6"
             header_map = {str(cell.value): cell.column for cell in ws[1]}
-            score_col = header_map.get("股神推薦優先分")
+            score_col = header_map.get("V188股神作戰優先分") or header_map.get("股神推薦優先分")
             rank_col = header_map.get("股神推薦總排名")
             if score_col and ws.max_row >= 2:
                 letter = ws.cell(row=1, column=score_col).column_letter
@@ -11741,6 +11975,8 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                 cell_val = "" if cell.value is None else str(cell.value)
                 max_len = max(max_len, len(cell_val))
             ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 42)
+        for col_letter, width in h37_width_overrides.items():
+            ws.column_dimensions[col_letter].width = width
     except Exception:
         pass
     return ws
@@ -12450,33 +12686,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     rank = rank.head(max(1, int(top_n or 30))).copy().reset_index(drop=True)
     rank["股神推薦總排名"] = range(1, len(rank) + 1)
 
-    cols = [
-        "股神推薦總排名", "V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
-        "V188交易許可", "V188正式推薦資格", "SuperAI執行風報比", "SuperAI風報比來源", "V188RR治理", "V188T+1追價治理",
-        "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "V188類股集中扣分", "SuperAI校準後隔日上漲機率%",
-        "H32隔日預估漲跌幅%", "H32隔日90%區間下緣%", "H32隔日90%區間上緣%", "H32隔日預測可信度",
-        "H32_10日預估報酬%", "H32_10日90%區間下緣%", "H32_10日90%區間上緣%", "H32波段預測可信度",
-        "H32預測驗證狀態", "H32預測方法", "H32預測版本", "H35預測資料來源",
-        "股神推薦優先分", "股神推薦等級", "股神推薦用途",
-        "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
-        "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化", "重複推薦說明",
-        "主流主升優先分", "主流主升判定", "主流主升操作限制",
-        "股票代號", "股票名稱", "市場別", "類別", "產業",
-        "最終操作結論", "操作許可", "是否正式推薦", "正式推薦分區", "盤中雷達優先級", "核心雷達品質檢查", "核心雷達降級原因",
-        "推薦總分", "候選強度分", "實戰操作品質分", "進場可執行分", "買進分數",
-        "Entry進場買點分", "Risk風控安全分", "實戰風險報酬比", "風險報酬比", "追價風險分",
-        "主要進場路徑", "主要進場參考價", "回測承接參考價", "突破確認參考價", "守價回測參考價", "守價回測距離%",
-        "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
-        "隔日耗竭風險分", "隔日耗竭風險等級", "隔日可執行優先分", "進場績效計算口徑",
-        "強勢動能分", "強勢動能判定", "強勢前兆分", "強勢前兆判定",
-        "紅燈逆勢反轉分", "紅燈逆勢反轉判定", "大盤風控層級", "大盤條件覆寫", "逆勢操作限制",
-        "官方因子資料日期", "官方因子落後交易日", "官方因子新鮮度", "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度", "大盤與K線對齊狀態", "股神資料總新鮮度", "股神資料警示", "紅燈反轉首觸禁買", "主流強勢替代進場", "大盤原始橋接狀態",
-        "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
-        "今日漲幅%", "當日量比", "當日收盤位置%",
-        "最新價", "預估進場點", "實戰觸發價", "觸發後守價", "守價回測參考價", "守價回測距離%", "實戰停損參考", "第一壓力價",
-        "建議倉位上限%", "正式推薦動作", "盤中觸發確認條件", "失效條件",
-        "股神推薦分數說明", "正式推薦排除原因",
-    ]
+    cols = _get_master_rank_default_cols()
     use = [c for c in cols if c in rank.columns]
     return rank[use + [c for c in rank.columns if c not in use]].copy()
 
@@ -13147,6 +13357,15 @@ def _build_excel_bytes(
             "說明": ["不影響其餘正式作戰表匯出；請檢查 H30 guide builder。"],
         })
 
+    # V191-H37：兩張最重要 Excel 分頁套用各自永久保存的欄位版型。
+    # 只重新排序欄位，所有欄位完整保留；固定排名/代號/名稱永遠在最前。
+    super_ai_guide_export = _apply_excel_export_column_order(
+        super_ai_guide_export, "excel_super_ai_guide", _get_super_ai_guide_default_cols()
+    )
+    master_rank_df = _apply_excel_export_column_order(
+        master_rank_df, "excel_master_rank", _get_master_rank_default_cols()
+    )
+
     sheets = [
         ("超級AI股神精選攻略", super_ai_guide_export, "本輪沒有可建立精選攻略的候選資料。"),
         ("股神推薦總排名", master_rank_df, "目前沒有資料新鮮且達排名門檻的推薦/觀察候選。"),
@@ -13213,7 +13432,39 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H35-FORECAST-INTEGRITY")
+    st.caption("H37：『超級AI股神精選攻略』與『股神推薦總排名』可各自永久保存欄位順序；排名、股票代號、股票名稱固定在最前，其他欄位可自由套版與微調。")
+
+    _guide_available = _get_super_ai_guide_default_cols()
+    _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
+    _master_available = list(dict.fromkeys(
+        _get_master_rank_default_cols()
+        + list(rec_df.columns)
+        + (list(_candidate_layout_df.columns) if isinstance(_candidate_layout_df, pd.DataFrame) else [])
+    ))
+    _show_excel_layout_manager = st.toggle(
+        "調整 Excel 主表欄位版型",
+        value=False,
+        key=_k("show_excel_layout_manager_h37"),
+        help="開啟後可分別調整『超級AI股神精選攻略』與『股神推薦總排名』；設定會永久保存。",
+    )
+    if _show_excel_layout_manager:
+        _render_column_order_manager(
+            "excel_super_ai_guide",
+            "Excel欄位版型｜超級AI股神精選攻略",
+            _guide_available,
+            _get_super_ai_guide_default_cols(),
+        )
+        _render_column_order_manager(
+            "excel_master_rank",
+            "Excel欄位版型｜股神推薦總排名",
+            _master_available,
+            _get_master_rank_default_cols(),
+        )
+    else:
+        st.caption("需要調整欄位時再開啟上方開關；平常關閉可避免在推薦頁建立大量欄位控制元件。")
+
+    _layout_sig = _excel_column_layout_signature_v191_h37()
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H37-EXCEL-LAYOUT|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
@@ -13252,7 +13503,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                 key=_k("main_excel_download_v164"),
             )
     with c2:
-        st.caption("V164：Excel 只在按『準備』時建立並快取；其他勾選、篩選、匯入、欄位按鈕不再重做整份活頁簿。推薦內容與所有分頁均完整保留。")
+        st.caption("H37：Excel 仍只在按『準備』時建立；欄位版型改動會自動使舊快取失效。兩張主表只調整閱讀順序，推薦內容、排名計算與所有研究欄位均完整保留。")
 
 
 def _render_selected_export_block():
@@ -13687,9 +13938,14 @@ def _normalize_column_order(saved_order, available_cols: list[str], default_cols
 
 
 def _fixed_columns_for_order_manager(name: str) -> list[str]:
-    # v72：勾選欄固定在最前，不參與欄位順序調整，避免 data_editor 位置錯亂。
+    # H37：兩張主 Excel 將排名/代號/名稱固定在最前，水平捲動時仍能辨識股票。
+    # 完整推薦表沿用 v72：勾選欄固定在最前。
     if name == "full_table":
         return ["勾選"]
+    if name == "excel_super_ai_guide":
+        return ["攻略順位", "股票代號", "股票名稱"]
+    if name == "excel_master_rank":
+        return ["股神推薦總排名", "股票代號", "股票名稱"]
     return []
 
 
@@ -13780,56 +14036,17 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
         index = max(0, min(int(index), len(remain)))
         return remain[:index] + selected_in_order + remain[index:]
 
+    preset_map = _column_order_presets_v191_h37(name, managed_default_cols, managed_available_cols)
+
     def _preset_columns(preset_name: str) -> list[str]:
-        presets = {
-            "VNext績效回饋校正版": [
-                "股票代號", "股票名稱", "市場別", "類別", "推薦角色", "新買點分級", "今日決策結論",
-                "候選強度分", "股神實戰總分", "Alpha選股潛力分", "Entry進場買點分", "Risk風控安全分", "Feedback績效校正分",
-                "選股潛力分", "進場買點分", "風控安全分", "績效校正分", "績效校正說明",
-                "建議動作", "建議倉位", "突破確認狀態", "突破確認條件", "等待突破原因", "假陰性檢討",
-                "加碼條件", "失效條件", "過熱原因", "真禁買原因", "硬否決原因", "決策版本",
-                "推薦總分", "推薦型態", "買點分級", "小量試單建議", "績效回饋建議",
-                "失效條件_績效回饋", "最新價", "近5日漲幅%", "追價風險分", "風險報酬比",
-            ],
-            "夜間隔日股神版": [
-                "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分", "夜間股神總分",
-                "隔日實戰排序分", "隔日進場分數", "波段潛力分數", "進場型態_隔日", "隔日建議動作",
-                "預估進場點", "回測承接價", "突破確認價_隔日", "停損價_隔日", "第一壓力價", "觀察週期",
-                "法人籌碼分數", "大戶鎖碼分數", "基本面成長分數", "估值風險分數", "PER本益比",
-                "外資近1日買賣超", "投信近1日買賣超", "三大法人近1日合計", "資料完整度",
-                "夜間股神建議", "夜間風險提醒",
-            ],
-            "股神推薦精簡版": [
-                "股票代號", "股票名稱", "市場別", "類別", "推薦等級", "推薦總分",
-                "上漲機率估計%", "買點狀態", "高分禁買旗標", "高分禁買原因", "實戰買點分數",
-                "最新價", "推薦理由摘要",
-            ],
-            "買點實戰版": [
-                "股票代號", "股票名稱", "推薦等級", "推薦總分", "買點狀態", "進場型態",
-                "實戰買點分數", "支撐距離%", "壓力空間%", "近5日漲幅%", "風險報酬比",
-                "停損距離%", "目標報酬%", "停損價", "賣出目標1", "賣出目標2", "實戰操作建議",
-            ],
-            "風控檢查版": [
-                "股票代號", "股票名稱", "推薦總分", "高分禁買旗標", "高分禁買原因", "追價風險分",
-                "追高風險等級", "長上影風險", "假突破風險", "過熱風險", "大盤橋接風控",
-                "大盤資料品質", "隔夜風險", "隔夜資料品質", "風險說明",
-            ],
-            "隔夜風控版": [
-                "股票代號", "股票名稱", "推薦總分", "上漲機率估計%", "大盤橋接分數",
-                "大盤橋接風控", "大盤交易時段", "隔夜分數", "隔夜風險", "隔夜偏向",
-                "隔夜解讀", "NASDAQ漲跌%", "費半漲跌%", "台指夜盤漲跌", "台指夜盤資料來源",
-                "台指夜盤備援說明",
-            ],
-            "完整除錯版": managed_default_cols,
-        }
-        cols = presets.get(preset_name, managed_default_cols)
-        return [c for c in cols if c in managed_available_cols]
+        return list(preset_map.get(preset_name, managed_default_cols))
 
     with st.expander(title, expanded=False):
         fixed_msg = "；固定欄位：" + "、".join(fixed_cols) if fixed_cols else ""
         st.caption(
             "欄位順序會永久記錄；固定欄位不參與排序" + fixed_msg + "。"
-            "v81：提供批次移動、指定位置與常用版面；不要只拖曳表格欄位，拖曳結果無法穩定永久保存。"
+            "H37：可套用管理決策／交易執行／AI預測／風控稽核版，再用單欄或批次移動微調；"
+            "只改 Excel 閱讀順序，不改推薦排名、分數或交易許可。"
         )
 
         last_msg = st.session_state.get(_k(f"column_order_last_message_{name}"), "")
@@ -13843,7 +14060,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
         with p1:
             preset = st.selectbox(
                 "快速套用常用欄位版面",
-                ["請選擇", "夜間隔日股神版", "股神推薦精簡版", "買點實戰版", "風控檢查版", "隔夜風控版", "完整除錯版"],
+                ["請選擇", *list(preset_map.keys())],
                 key=preset_key,
             )
         with p2:
@@ -13899,7 +14116,7 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 
         target_default = int(st.session_state.get(target_pos_key, 1) or 1)
         target_pos = st.number_input(
-            "指定目標位置（1 = 第一個非固定欄位；勾選固定在最前不受影響）",
+            "指定目標位置（1 = 第一個非固定欄位；固定欄位永遠保持在最前）",
             min_value=1,
             max_value=max(1, len(draft_order)),
             value=max(1, min(target_default, max(1, len(draft_order)))),
@@ -13918,9 +14135,10 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
                 selected_in_order = [c for c in draft_order if c in set(selected_cols)]
                 _commit_column_order(remain + selected_in_order, f"已將 {len(selected_cols)} 個欄位批次移到最後。")
         with q3:
-            if st.button("移到勾選後面", key=_k(f"batch_after_checkbox_{name}"), use_container_width=True, disabled=not selected_cols):
+            _after_fixed_label = "移到固定欄後面" if fixed_cols else "批次移到最前"
+            if st.button(_after_fixed_label, key=_k(f"batch_after_checkbox_{name}"), use_container_width=True, disabled=not selected_cols):
                 new_order = _insert_selected(draft_order, selected_cols, 0)
-                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到勾選後面。")
+                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到固定欄後面。" if fixed_cols else f"已將 {len(selected_cols)} 個欄位批次移到最前。")
         with q4:
             if st.button("移到指定位置", key=_k(f"batch_to_pos_{name}"), use_container_width=True, disabled=not selected_cols):
                 new_order = _insert_selected(draft_order, selected_cols, int(target_pos) - 1)
