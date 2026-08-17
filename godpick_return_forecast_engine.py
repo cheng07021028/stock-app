@@ -25,7 +25,7 @@ import math
 import pandas as pd
 
 
-VERSION = "v191_h32_probabilistic_return_forecast_20260815"
+VERSION = "v191_h38_probabilistic_return_forecast_truth_restore_20260817"
 BASE_DIR = Path(__file__).resolve().parent
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 
@@ -123,7 +123,13 @@ def _read_truth_rows(base_dir: Path | None = None) -> list[dict[str, Any]]:
     try:
         data = json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception:
-        return []
+        # H38: when a Streamlit redeploy has no local truth JSON, restore the
+        # permanent T+1 authority instead of silently recalibrating on zero rows.
+        try:
+            from godpick_t1_trade_truth import load_t1_truth_rows
+            return [dict(x) for x in load_t1_truth_rows() if isinstance(x, dict)]
+        except Exception:
+            return []
     if isinstance(data, list):
         rows = data
     elif isinstance(data, dict):

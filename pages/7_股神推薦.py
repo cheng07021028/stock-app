@@ -243,6 +243,11 @@ except Exception:
     audit_core_durability = None
 
 try:
+    from godpick_daily_safe_selection import apply_daily_safe_selection
+except Exception:
+    apply_daily_safe_selection = None
+
+try:
     from godpick_v188_cache_guard import (
         V189_CACHE_GUARD_VERSION,
         inspect_v188_decision_frame,
@@ -287,7 +292,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h37_excel_column_layout_20260817"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h38_post_v188_h34_truth_restore_20260817"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H37-EXCEL-COLUMN-LAYOUT-20260817"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -10969,20 +10974,21 @@ def _build_recommend_df(
         if callable(apply_super_ai_engine):
             try:
                 governed_candidate_df = apply_super_ai_engine(governed_candidate_df)
+                # H38：H34 必須在 SuperAI/V188 完成後才執行。舊流程在 Formal
+                # engine wrapper 階段提早執行，實際拿不到校準後機率，今晚 Excel
+                # 因此仍顯示 H34機率來源=模型隔日上漲機率%。
+                if callable(apply_daily_safe_selection):
+                    governed_candidate_df = apply_daily_safe_selection(governed_candidate_df)
+                    debug_summary["h38_h34_post_v188"] = True
+                else:
+                    debug_summary["h38_h34_post_v188"] = False
+                    debug_summary["h38_h34_error"] = "H34 post-V188 engine unavailable"
+
+                # H34 可能在 V188 之後新升格安全近門檻候選，因此不能只 merge
+                # 舊 final_df；必須從最終 governed mother frame 重新建立作戰名單。
+                final_df = _operational_recommendation_rows(governed_candidate_df, refresh_decision=False)
                 debug_summary["v183_super_ai_rows"] = int(len(governed_candidate_df))
                 debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)
-                if isinstance(final_df, pd.DataFrame) and not final_df.empty and "股票代號" in final_df.columns:
-                    _super_cols = [c for c in getattr(__import__("godpick_super_ai_engine"), "SUPER_AI_COLUMNS", []) if c in governed_candidate_df.columns]
-                    # V188 trade-quality is demotion-only, but demotion must flow back
-                    # to the actual action list as well as the full candidate diagnosis.
-                    _v188_authority_cols = [c for c in [
-                        "正式推薦分區", "操作許可", "是否正式推薦", "正式推薦資格",
-                        "下週是否可直接買", "正式推薦動作",
-                    ] if c in governed_candidate_df.columns]
-                    _merge_cols = list(dict.fromkeys([*_super_cols, *_v188_authority_cols]))
-                    if _merge_cols:
-                        _super_map = governed_candidate_df[["股票代號", *_merge_cols]].drop_duplicates("股票代號", keep="first")
-                        final_df = final_df.drop(columns=[c for c in _merge_cols if c in final_df.columns], errors="ignore").merge(_super_map, on="股票代號", how="left")
             except Exception as super_ai_error:
                 debug_summary["v183_super_ai_error"] = str(super_ai_error)
                 debug_summary["v183_super_ai_sec"] = round(time.time() - _v183_super_started, 3)

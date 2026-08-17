@@ -15,7 +15,7 @@ from typing import Any
 import math
 import pandas as pd
 
-VERSION = "v191_h35_super_ai_excel_forecast_integrity_20260815"
+VERSION = "v191_h38_super_ai_excel_action_integrity_20260817"
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
 _FORBIDDEN_KEYS = (
@@ -282,11 +282,14 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     selected["操作原則"] = action.where(action.ne(""), "未觸發前不買；只在正式操作許可成立後操作")
 
     selected = selected.loc[code.ne("")].copy()
-    # 精選攻略不應把正式禁止/排除股票放進前20；它們留在原始總排名/排除表查閱。
-    eligible = selected.loc[selected["超級AI定位"] != "禁止/排除"].copy()
+    # H38："超級AI股神精選攻略"只能展示真正具備操作資格的股票。
+    # WAIT-PULLBACK / 等待確認 / 一般雷達仍屬研究觀察，不得因正式/A-為0
+    # 就自動補滿攻略表，否則會把「空手等待」視覺上誤包裝成推薦名單。
+    actionable_roles = {"正式推薦", "A-準主推薦", "條件候選"}
+    eligible = selected.loc[selected["超級AI定位"].isin(actionable_roles)].copy()
     if eligible.empty:
         return pd.DataFrame({
-            "狀態": ["本輪正式排名內沒有可列入精選攻略的非禁止候選；請以正式分區/操作許可為準。"],
+            "狀態": ["今日無可執行精選｜空手等待。雷達/WAIT-PULLBACK 僅供觀察，不列入超級AI股神精選攻略。"],
             "攻略版本": [VERSION],
         })
 

@@ -17,6 +17,7 @@ from typing import Any, Callable
 import json
 import math
 import threading
+import time
 
 import pandas as pd
 
@@ -28,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h36_20260817"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h38_authority_restore_20260817"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -36,6 +37,51 @@ BASE_DIR = Path(__file__).resolve().parent
 _BG_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-t1-truth-v188")
 _BG_LOCK = threading.Lock()
 _BG_RUNNING = False
+
+_PERMANENT_RESTORE_LOCK = threading.Lock()
+_PERMANENT_RESTORE_LAST_ATTEMPT: dict[str, float] = {}
+_PERMANENT_RESTORE_CACHE: dict[str, Any] = {}
+_PERMANENT_RESTORE_COOLDOWN_SECONDS = 60.0
+
+
+def _payload_has_learning(path_name: str, payload: Any) -> bool:
+    if path_name == TRUTH_FILE:
+        return bool(_rows(payload))
+    if path_name == CALIBRATION_FILE and isinstance(payload, dict):
+        return bool(int(_f(payload.get("eligible_samples"), 0) or 0) > 0 or payload.get("bins"))
+    return bool(payload)
+
+
+def _read_json_authority(path_name: str, default: Any) -> Any:
+    """Read local learning authority and restore permanent copy when local is empty.
+
+    V188/H36 persisted truth remotely but only read the ephemeral local JSON. A
+    Streamlit redeploy could therefore reset AI learning to zero until another
+    expensive replay happened. H38 restores GitHub/Firestore/local elected
+    authority when the local learning payload is absent/empty, throttled to avoid
+    rerun-time network loops.
+    """
+    local = _read_json(path_name, default)
+    if _payload_has_learning(path_name, local):
+        return local
+    cached = _PERMANENT_RESTORE_CACHE.get(path_name)
+    if _payload_has_learning(path_name, cached):
+        return cached
+    now = time.monotonic()
+    with _PERMANENT_RESTORE_LOCK:
+        last = _PERMANENT_RESTORE_LAST_ATTEMPT.get(path_name, 0.0)
+        if now - last < _PERMANENT_RESTORE_COOLDOWN_SECONDS:
+            return local
+        _PERMANENT_RESTORE_LAST_ATTEMPT[path_name] = now
+    try:
+        from godpick_persistence_service import load_named_json_permanent
+        restored, _messages = load_named_json_permanent(path_name, default)
+        if _payload_has_learning(path_name, restored):
+            _PERMANENT_RESTORE_CACHE[path_name] = restored
+            return restored
+        return local
+    except Exception:
+        return local
 
 
 def _now() -> str:
@@ -715,15 +761,15 @@ def refresh_t1_trade_truth(
 
 
 def load_t1_truth_rows(limit: int | None = None) -> list[dict[str, Any]]:
-    rows = _rows(_read_json(TRUTH_FILE, {}))
+    rows = _rows(_read_json_authority(TRUTH_FILE, {}))
     rows.sort(key=lambda r: (_s(r.get("推薦日期")), _s(r.get("股票代號"))), reverse=True)
     return rows[: int(limit)] if limit else rows
 
 
 def load_t1_truth_summary() -> dict[str, Any]:
-    payload = _read_json(TRUTH_FILE, {})
+    payload = _read_json_authority(TRUTH_FILE, {})
     summary = payload.get("summary") if isinstance(payload, dict) else {}
-    calibration = _read_json(CALIBRATION_FILE, {})
+    calibration = _read_json_authority(CALIBRATION_FILE, {})
     return {
         **(summary if isinstance(summary, dict) else {}),
         "updated_at": _s(payload.get("updated_at") if isinstance(payload, dict) else ""),
@@ -734,7 +780,7 @@ def load_t1_truth_summary() -> dict[str, Any]:
 
 
 def load_probability_calibration() -> dict[str, Any]:
-    data = _read_json(CALIBRATION_FILE, {})
+    data = _read_json_authority(CALIBRATION_FILE, {})
     return data if isinstance(data, dict) else {}
 
 

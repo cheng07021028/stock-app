@@ -12,7 +12,7 @@ import math
 
 import pandas as pd
 
-V189_CACHE_GUARD_VERSION = "v189_v188_final_cache_guard_20260812"
+V189_CACHE_GUARD_VERSION = "v191_h38_v188_final_cache_post_h34_20260817"
 
 V188_REQUIRED_TEXT_COLUMNS = [
     "V188版本",
@@ -137,13 +137,23 @@ def repair_v188_decision_frame(
         frame = data.copy()
 
     before = inspect_v188_decision_frame(frame)
-    # Existing V188 scores do not prove the Formal/A- partition used official
-    # evidence in the correct order.  H20 callers pass a formal rebuild callable
-    # specifically to hot-upgrade an otherwise V188-complete H19 cache once.
-    if before.get("complete") and not callable(formal_recommendation_callable):
-        return frame.reset_index(drop=True), {**before, "repaired": False}
-
     errors: list[str] = []
+
+    def _apply_h34_post_v188(current: pd.DataFrame) -> pd.DataFrame:
+        try:
+            from godpick_daily_safe_selection import apply_daily_safe_selection
+            return apply_daily_safe_selection(current)
+        except Exception as exc:
+            errors.append(f"h34-post-v188:{exc}")
+            return current
+
+    # Existing V188 scores do not prove that H34 was generated *after* V188.
+    # Refresh H34 once even for an already-complete frame so old caches that used
+    # raw model probability cannot survive after H38.
+    if before.get("complete") and not callable(formal_recommendation_callable):
+        frame = _apply_h34_post_v188(frame)
+        report = inspect_v188_decision_frame(frame)
+        return frame.reset_index(drop=True), {**report, "repaired": False, "h34_post_v188": True, "repair_errors": errors}
     if callable(official_factor_callable):
         try:
             frame = official_factor_callable(frame)
@@ -179,7 +189,13 @@ def repair_v188_decision_frame(
         except Exception as exc:
             errors.append(f"canonicalize:{exc}")
 
+    # H38 final admission must be last: official -> formal -> scan -> SuperAI/V188
+    # -> canonical partition -> H34. This is the first point where calibrated
+    # probability and final trade-quality authority coexist.
+    frame = _apply_h34_post_v188(frame)
+
     after = inspect_v188_decision_frame(frame)
+    after["h34_post_v188"] = True
     after["repaired"] = bool(after.get("complete"))
     if errors:
         after["repair_errors"] = errors

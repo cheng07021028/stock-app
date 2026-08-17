@@ -24,7 +24,7 @@ try:
 except Exception:
     evaluate_twse_t86_release_timing = None
 
-EXECUTION_GOVERNANCE_VERSION = "v190_postclose_release_timing_governance_20260812"
+EXECUTION_GOVERNANCE_VERSION = "execution_governance_v191_h38_representative_official_date_20260817"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -311,12 +311,11 @@ def build_scan_quality_report(
         stock_date = _coalesce_date_series_v184(frame, [
             "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期",
         ])
-        try:
-            representative_market_date = pd.to_datetime(stock_date, errors="coerce").max()
-            representative_official_date = pd.to_datetime(official_date, errors="coerce").max()
-        except Exception:
-            representative_market_date = None
-            representative_official_date = None
+        # H38: representative official date must come from the dominant effective
+        # trusted rows, not simply max(). A small minority of same-day placeholder
+        # rows must not make an 82% T-1 universe claim "same-day aligned".
+        representative_market_date = None
+        representative_official_date = None
         # V187: prefer the daily-domain provenance score derived from actual
         # institution/valuation sources.  A single monthly/legacy fallback must
         # not downgrade the whole row to 60 and falsely block verified T-1 data.
@@ -356,6 +355,24 @@ def build_scan_quality_report(
         official_one_day_lag_coverage = float((effective & valid_dates & lag_days.eq(1)).mean() * 100.0) if len(effective) else 0.0
         official_missing_date_coverage = float((effective & ~valid_dates).mean() * 100.0) if len(effective) else 0.0
         official_coverage = official_effective_coverage
+
+        try:
+            trusted_effective_dates = effective & trusted_source & valid_dates
+            timing_market = pd.to_datetime(stock_date.loc[trusted_effective_dates], errors="coerce").dropna()
+            timing_official = pd.to_datetime(official_date.loc[trusted_effective_dates], errors="coerce").dropna()
+            if not timing_market.empty:
+                _mode_market = timing_market.mode()
+                representative_market_date = _mode_market.iloc[0] if not _mode_market.empty else timing_market.max()
+            else:
+                all_market = pd.to_datetime(stock_date, errors="coerce").dropna()
+                _mode_market = all_market.mode()
+                representative_market_date = _mode_market.iloc[0] if not _mode_market.empty else (all_market.max() if not all_market.empty else None)
+            if not timing_official.empty:
+                _mode_official = timing_official.mode()
+                representative_official_date = _mode_official.iloc[0] if not _mode_official.empty else timing_official.max()
+        except Exception:
+            representative_market_date = None
+            representative_official_date = None
     else:
         cached = _LAST_CANDIDATE_QUALITY if isinstance(_LAST_CANDIDATE_QUALITY, dict) else {}
         liquidity_coverage = _safe_float(

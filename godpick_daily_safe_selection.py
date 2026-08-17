@@ -23,7 +23,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h36_daily_safe_selection_probability_alignment_20260817"
+VERSION = "v191_h38_daily_safe_selection_post_v188_red_guard_20260817"
 
 H34_COLUMNS = [
     "H34每日精選", "H34每日精選排名", "H34每日目標檔數", "H34安全精選分",
@@ -125,10 +125,16 @@ def _market_profile(frame: pd.DataFrame) -> dict[str, Any]:
     text = "｜".join(text_parts)
     score = float(pd.Series(scores, dtype="float64").median()) if scores else 50.0
     hard = any(k in text for k in ["LOCKDOWN", "全面禁買", "極端風險", "崩跌後冷卻", "極端崩跌"])
+    red_light = any(k in text for k in ["紅燈", "僅准條件逆勢", "只准條件逆勢", "紅燈逆勢"])
     if score < 42:
         hard = True
     if hard:
-        return {"target": 0, "hard_block": True, "score": score, "regime": "LOCKDOWN/極端風險"}
+        return {"target": 0, "hard_block": True, "red_light": red_light, "score": score, "regime": "LOCKDOWN/極端風險"}
+
+    # H38：紅燈不是一般中性盤。正式引擎已定義 READY-R 的嚴格逆勢例外，
+    # 因此 H34 在紅燈最多只允許 1 檔，而且後續 gate 必須再次驗證 READY-R。
+    if red_light:
+        return {"target": 1, "hard_block": False, "red_light": True, "score": score, "regime": "紅燈/僅嚴格逆勢"}
 
     # Keep the documented 1/2/3 regime contract: only clearly bullish conditions
     # get three slots.  ``中性偏多`` remains the neutral/selective two-stock mode.
@@ -138,7 +144,7 @@ def _market_profile(frame: pd.DataFrame) -> dict[str, Any]:
         target, regime = 2, "中性/精選"
     else:
         target, regime = 1, "防守/只選最強"
-    return {"target": target, "hard_block": False, "score": score, "regime": regime}
+    return {"target": target, "hard_block": False, "red_light": False, "score": score, "regime": regime}
 
 
 def _probability_with_source(row: pd.Series) -> tuple[float, str]:
@@ -254,6 +260,18 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     if veto:
         return {"eligible": False, "formal": False, "hard_veto": veto, "score": score, "reason": "、".join(veto[:5]), "m": m}
 
+    # H38：紅燈市場不能用一般 Entry/Risk/RR 條件繞過正式引擎。
+    # 唯一可進 H34 的例外是正式紅燈逆勢模組已判定 READY-R；WATCH-R/R2
+    # 與 BLOCK-R 一律只保留雷達，不得被 H34 補位升格。
+    if bool(market.get("red_light")):
+        red_status = _first_text(row, ["紅燈逆勢反轉判定"])
+        if not red_status.startswith("READY-R"):
+            reason = red_status or "紅燈市場未取得 READY-R 逆勢反轉許可"
+            return {
+                "eligible": False, "formal": False, "hard_veto": [], "score": score,
+                "reason": f"紅燈限制：{reason}", "m": m,
+            }
+
     # H34-F: safe near-miss allowed to become a formal recommendation.
     formal = bool(
         m["entry"] >= 66 and m["risk"] >= 63 and m["buy"] >= 58
@@ -341,7 +359,11 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
     # H34 hard-risk/data vetoes.  The old code selected every existing bucket
     # before checking its gate, so a stale K-line formal pick could be labelled
     # ``H34每日精選=是`` and its blocking reason was subsequently cleared.
-    existing_safe = [idx for idx in existing if not gates[idx].get("hard_veto")]
+    existing_safe = [
+        idx for idx in existing
+        if not gates[idx].get("hard_veto")
+        and (not bool(market.get("red_light")) or bool(gates[idx].get("eligible")))
+    ]
     selected: list[Any] = existing_safe[:target]
 
     # Backfill only when standard *safe* Formal/A- is short of the regime target.
@@ -379,6 +401,11 @@ def apply_daily_safe_selection(frame: pd.DataFrame | None) -> pd.DataFrame:
 
     # Mark selected daily list. Existing standard picks receive their original grade.
     selected = selected[:target]
+    for idx, gate in gates.items():
+        if idx not in selected and gate.get("eligible") and not _s(out.at[idx, "H34阻擋原因"]):
+            out.at[idx, "H34阻擋原因"] = (
+                f"符合H34安全條件，但受{market.get('regime','市場')}目標{target}檔上限，依安全分排序未入選"
+            )
     for rank, idx in enumerate(selected, start=1):
         out.at[idx, "H34每日精選"] = "是"
         out.at[idx, "H34每日精選排名"] = rank
@@ -420,7 +447,14 @@ def install_daily_safe_selection_guard() -> bool:
 
     def wrapped(df):
         base = original(df)
-        return apply_daily_safe_selection(base)
+        # H38：正式引擎執行時 SuperAI/V188 尚未產生校準機率與交易品質分，
+        # 此時禁止提早套 H34。Page07 / V188 cache repair 會在 SuperAI 完成後
+        # 明確執行 H34，確保 H34機率來源與最終決策資料完全一致。
+        post_v188_ready = any(
+            col in base.columns
+            for col in ["V188股神作戰優先分", "SuperAI Trade分", "SuperAI校準後隔日上漲機率%"]
+        )
+        return apply_daily_safe_selection(base) if post_v188_ready else base
 
     wrapped.__name__ = getattr(original, "__name__", "apply_formal_recommendation_engine")
     wrapped.__doc__ = getattr(original, "__doc__", None)
