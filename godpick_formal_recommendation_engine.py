@@ -785,12 +785,15 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
     market_date = _date_value(row, ["大盤資料日期", "大盤行情日期", "加權資料日期", "大盤橋接資料日期"])
     stock_date = _date_value(row, ["本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"])
     lag = _business_day_lag(stock_date, market_date)
+    market_ahead_days = _business_day_lag(market_date, stock_date)
     freshness_text = _text_blob(row, ["大盤資料新鮮度", "大盤資料品質", "大盤資料診斷摘要"])
-    # 精準推薦必須使用與個股 K 線同一交易日的大盤/官方因子。
-    # 落後 1 個交易日仍可保留雷達，但不得標示「最新/可用」或升格正式/A-。
-    aligned = bool(market_date is not None and stock_date is not None and lag == 0)
-    one_day_lag = bool(lag == 1)
-    stale = bool(lag >= 2 or _contains_any(freshness_text, ["過期", "嚴重落後", "stale"]))
+    # V191-H40：lag==0 不等於同交易日。舊 _business_day_lag 在大盤日期比K線
+    # 還新時也回0，會把「K線尚未更新」誤判成 aligned。正式推薦只能接受
+    # market_date == stock_date；大盤較K線新也必須 WAIT，不能偷渡成PASS。
+    aligned = bool(market_date is not None and stock_date is not None and market_date.normalize() == stock_date.normalize())
+    one_day_lag = bool(market_date is not None and stock_date is not None and market_date < stock_date and lag == 1)
+    market_ahead = bool(market_date is not None and stock_date is not None and market_date > stock_date)
+    stale = bool((market_date is not None and stock_date is not None and market_date < stock_date and lag >= 2) or _contains_any(freshness_text, ["過期", "嚴重落後", "stale"]))
 
     # V191-H29：把「候選廣度風險」與「權威大盤 severe」分開。
     # market_regime_engine 的紅燈是由候選股廣度/強弱比推導，應用於縮倉、
@@ -877,10 +880,11 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         "formal_ready": aligned,
         "market_date": market_date.strftime("%Y-%m-%d") if market_date is not None else "",
         "stock_date": stock_date.strftime("%Y-%m-%d") if stock_date is not None else "",
-        "lag": lag,
+        "lag": (-market_ahead_days if market_ahead else lag),
         "freshness": (
             "過期｜不使用舊大盤硬封鎖" if stale
             else "落後1日｜正式推薦待同步" if one_day_lag
+            else f"大盤較K線新{market_ahead_days}交易日｜等待K線" if market_ahead
             else "最新/對齊" if aligned
             else "日期未驗證｜正式推薦待同步"
         ),

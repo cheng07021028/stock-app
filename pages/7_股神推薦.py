@@ -3038,10 +3038,18 @@ def _load_recommendation_readiness_v171() -> dict[str, Any]:
 
 
 def _read_market_snapshot_v33() -> dict[str, Any]:
-    """v33：優先讀 01_大盤趨勢 v32 產生的 market_snapshot.json。"""
+    """v33/H40：讀取大盤快照；本機缺少商業日期時從 runtime authority 恢復。"""
     snapshot = _read_project_json_file(MARKET_SNAPSHOT_FILE)
     if not isinstance(snapshot, dict):
-        return {}
+        snapshot = {}
+    try:
+        from godpick_market_candidate_bridge import market_business_date as _h40_market_business_date, load_authoritative_market_snapshot as _h40_load_market_snapshot
+        if not _h40_market_business_date(snapshot):
+            _h40_restored = _h40_load_market_snapshot()
+            if isinstance(_h40_restored, dict) and _h40_market_business_date(_h40_restored):
+                snapshot = _h40_restored
+    except Exception:
+        pass
     required = snapshot.get("required_by_godpick")
     if isinstance(required, dict):
         merged = snapshot.copy()
@@ -3147,7 +3155,12 @@ def _snapshot_to_macro_bridge_v33(snapshot: dict[str, Any]) -> dict[str, Any]:
         "trend_comment": _safe_str(snapshot.get("trend_comment")),
         "data_quality": _safe_str(snapshot.get("data_quality")),
         "freshness": snapshot.get("freshness"),
-        "market_date": _safe_str(snapshot.get("twse_data_date") or snapshot.get("otc_data_date") or snapshot.get("futures_data_date")),
+        "market_date": _safe_str(
+            snapshot.get("twse_data_date") or snapshot.get("market_date") or snapshot.get("data_date")
+            or snapshot.get("otc_data_date") or snapshot.get("futures_data_date")
+            or ((snapshot.get("required_by_godpick") or {}).get("market_date") if isinstance(snapshot.get("required_by_godpick"), dict) else "")
+            or ((snapshot.get("required_by_godpick") or {}).get("data_date") if isinstance(snapshot.get("required_by_godpick"), dict) else "")
+        ),
         "twse_change": snapshot.get("twse_change"),
         "twse_change_pct": snapshot.get("twse_change_pct"),
         "otc_change": snapshot.get("otc_change"),
@@ -6215,7 +6228,12 @@ def _load_latest_macro_reference() -> dict[str, Any]:
             "大盤操作風格": _safe_str(snapshot.get("position_hint") or snapshot.get("market_bias") or snapshot.get("trend_comment")) or "未判定",
             "大盤推薦權重": _safe_str(snapshot.get("godpick_weight_advice")) or _macro_weight_advice_from_snapshot_v33(snapshot),
             "大盤降權原因": _safe_str(snapshot.get("trend_comment")) or reason,
-            "大盤資料日期": _safe_str(snapshot.get("twse_data_date") or snapshot.get("otc_data_date") or snapshot.get("futures_data_date")),
+            "大盤資料日期": _safe_str(
+                snapshot.get("twse_data_date") or snapshot.get("market_date") or snapshot.get("data_date")
+                or snapshot.get("otc_data_date") or snapshot.get("futures_data_date")
+                or ((snapshot.get("required_by_godpick") or {}).get("market_date") if isinstance(snapshot.get("required_by_godpick"), dict) else "")
+                or ((snapshot.get("required_by_godpick") or {}).get("data_date") if isinstance(snapshot.get("required_by_godpick"), dict) else "")
+            ),
             "大盤市場廣度分數": _safe_float(snapshot.get("market_breadth_score")),
             "大盤量價確認分數": _safe_float(snapshot.get("volume_confirm_score")),
             "大盤權值支撐分數": _safe_float(snapshot.get("large_cap_support_score")),
@@ -10273,6 +10291,7 @@ def _build_recommend_df(
     min_trade_score: float,
     resume_scan: bool = False,
     reuse_finished_checkpoint: bool = False,
+    market_context_bridge: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     clean_categories = [_normalize_category(x) for x in selected_categories if _normalize_category(x) and x != "全部"]
     if not universe_items:
@@ -10641,6 +10660,19 @@ def _build_recommend_df(
     # 不再只是通過舊訊號/風控/起漲/交易門檻後的殘餘候選。
     # 正式評分前先以本輪市場共同最新日期驗證每檔行情，避免不同日期價格混算。
     base_df = _annotate_kline_freshness(base_df)
+    # V191-H40：市場日期必須在 Formal/V188/H34 之前進入候選母表。
+    # 舊流程直到 postprocess 才套 macro bridge，導致 K線=最新交易日但大盤日期空白，
+    # 全市場被誤降為 WAIT-MARKET / DATA-WAIT-R。H40 使用已載入的同一份
+    # macro authority，不從個股K線捏造大盤日期；權威缺失時仍 fail-closed。
+    try:
+        from godpick_market_candidate_bridge import apply_authoritative_market_context as _h40_apply_market_context
+        _h40_context = market_context_bridge if isinstance(market_context_bridge, dict) and market_context_bridge else _read_macro_mode_bridge()
+        base_df, _h40_market_diag = _h40_apply_market_context(base_df, snapshot=_h40_context)
+        debug_summary["h40_market_authority"] = dict(_h40_market_diag)
+        debug_summary["h40_market_aligned_rows"] = int(_h40_market_diag.get("aligned_rows", 0) or 0)
+        debug_summary["h40_market_date"] = _safe_str(_h40_market_diag.get("market_date"))
+    except Exception as _h40_market_exc:
+        debug_summary["h40_market_authority_error"] = f"{type(_h40_market_exc).__name__}: {_h40_market_exc}"
     try:
         debug_summary["market_latest_kline_date"] = _safe_str(base_df.get("本輪市場最新交易日", pd.Series([""])).iloc[0])
         debug_summary["stale_kline_count"] = int(pd.to_numeric(base_df.get("K線落後交易日", 999), errors="coerce").fillna(999).gt(0).sum())
@@ -12849,6 +12881,18 @@ def _phase93_single_source_decision_frame(
             _cache_ok = bool(_h20_mark.eq("是").all())
             if not _cache_ok:
                 _cache_diag = {"complete": False, "reason": "V191-H20正式分區尚未在官方因子合併後重建"}
+        if _cache_ok:
+            _h40_mark = _cached_decision.get(
+                "V191_H40大盤權威橋接",
+                pd.Series([""] * len(_cached_decision), index=_cached_decision.index),
+            ).fillna("").astype(str)
+            _h40_date = _cached_decision.get(
+                "大盤資料日期",
+                pd.Series([""] * len(_cached_decision), index=_cached_decision.index),
+            ).fillna("").astype(str).str.strip()
+            _cache_ok = bool(_h40_mark.eq("是").all() and _h40_date.ne("").all())
+            if not _cache_ok:
+                _cache_diag = {"complete": False, "reason": "V191-H40大盤權威日期尚未進入最終決策母表"}
 
         if not _cache_ok and callable(repair_v188_decision_frame) and callable(apply_super_ai_engine):
             try:
@@ -14379,6 +14423,7 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
             min_trade_score=float(settings.get("min_trade_score", 45)),
             resume_scan=False,
             reuse_finished_checkpoint=False,
+            market_context_bridge=macro_bridge,
         )
         rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(rec_df, hot_pick_df, macro_bridge, True, force=True)
 
@@ -15058,6 +15103,7 @@ def main():
             min_trade_score=float(st.session_state.get(_k("min_trade_score"), 45.0)),
             resume_scan=bool(resume_scan_btn),
             reuse_finished_checkpoint=bool(submit_recommend and not submit_refresh and not resume_scan_btn),
+            market_context_bridge=macro_bridge,
         )
         rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(
             rec_df, hot_pick_df, macro_bridge, macro_bridge_enabled, force=True
