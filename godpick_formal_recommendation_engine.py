@@ -29,7 +29,7 @@ except Exception:
     apply_daily_learning_overlay = None
     apply_learning_admission = None
 
-FORMAL_RECOMMENDATION_VERSION = "v191_h29_market_breadth_semantics_20260815"
+FORMAL_RECOMMENDATION_VERSION = "v191_h41_selective_market_semantics_20260818"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -482,12 +482,20 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     )
     a_minus_candidate = a_pullback or a_momentum or a_prebreak
 
-    # 一般紅燈不再一律把所有股票封鎖為 0%。只有嚴格的「洗盤後反轉」
-    # 路徑可取得 A-R 資格；極端風險仍全面禁買。其餘候選維持 A-MD。
-    formal = bool(formal_candidate and not market["severe"])
+    # H41：中性/震盪但廣度偏弱時，不應「全部封鎖」，也不應把正式候選
+    # 直接當一般盤正式買進。此時正式候選降為 A-S 條件精選，由 H34 最多
+    # 挑 1 檔，仍須盤中觸發＋守價。真正權威紅燈才走 READY-R 逆勢例外。
+    selective_defensive = bool(
+        market.get("breadth_defensive") and market.get("selective_authority") and not market.get("severe")
+    )
+    selective_downgrade = bool(formal_candidate and selective_defensive)
+    formal = bool(formal_candidate and not market["severe"] and not selective_defensive)
     red_override = bool(red_reversal["eligible"])
     market_blocked = bool(market["severe"] and (formal_candidate or a_minus_candidate) and not red_override)
-    a_minus = bool((a_minus_candidate and not market["severe"]) or red_override or market_blocked)
+    a_minus = bool(
+        ((a_minus_candidate or selective_downgrade) and not market["severe"])
+        or red_override or market_blocked
+    )
 
     if formal_pullback:
         base_route = "正式｜穩健回測承接"
@@ -516,6 +524,8 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
 
     if red_override:
         route = f"A-R｜紅燈逆勢反轉條件推薦｜{base_route}"
+    elif selective_downgrade:
+        route = f"A-S｜防守精選，正式候選降級條件進場｜{base_route}"
     elif market_blocked:
         route = (
             f"A-MD｜正式候選受大盤封鎖｜{base_route}"
@@ -528,6 +538,8 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
     near_reasons: list[str] = []
     if market["severe"]:
         near_reasons.append("大盤紅燈：一般候選封鎖；只有嚴格反轉路徑可極小量")
+    elif selective_defensive:
+        near_reasons.append("廣度偏弱但權威大盤中性/震盪：最多1檔條件精選，正式候選降A-")
     if not fresh:
         near_reasons.append("K線非最新交易日")
     if not market.get("formal_ready"):
@@ -560,6 +572,8 @@ def _promotion_profile(row: pd.Series, op_score: float, exclusion: list[str]) ->
         "formal_candidate": formal_candidate,
         "a_minus_candidate": a_minus_candidate,
         "market_blocked": market_blocked,
+        "selective_defensive": selective_defensive,
+        "selective_downgrade": selective_downgrade,
         "red_override": red_override,
         "red_reversal": red_reversal,
         "market_blocked_from": "正式候選" if formal_candidate and market_blocked else "A-候選" if market_blocked else "",
@@ -816,10 +830,21 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         and _contains_any(authority_blob, ["中性偏多", "偏多", "選股偏多", "正常", "偏多輪動", "輪動"])
         and not explicit_authority_hard
     )
+    # H41：候選廣度紅燈只能描述「市場廣度偏弱」，不能把 50 分附近的
+    # 權威震盪/中性盤直接升級成全面紅燈。過去 score=51.8 + 震盪選股
+    # 仍被 severe=True，導致 Formal A- -> A-MD -> V188/H34 全部清空。
+    # 只有明確空方權威、極端風險，或權威分數真的跌到偏空區(<48)時，
+    # 廣度紅燈才升為 severe。48~55 的中性/震盪盤改成「防守精選」。
+    selective_authority = bool(
+        score >= 48
+        and _contains_any(authority_blob, ["中性", "震盪", "盤整", "選股", "輪動", "正常"])
+        and not explicit_authority_hard
+    )
 
-    # 若只拿到舊版「紅燈｜防守」而沒有可佐證的權威分數/偏多橋接，仍維持保守 severe；
-    # 但像本輪 62.7 / 中性偏多 / 中低風險，廣度紅燈只能降為 defensive。
-    severe = bool(explicit_authority_hard or (breadth_defensive and not supportive_authority and score < 55))
+    severe = bool(
+        explicit_authority_hard
+        or (breadth_defensive and not supportive_authority and not selective_authority and (score <= 0 or score < 48))
+    )
     defensive = bool(
         severe or breadth_defensive
         or _contains_any(authority_blob, ["防守", "保守", "震盪控風險", "不宜全面追價"])
@@ -863,6 +888,8 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
             level = "紅燈｜權威風險佐證，僅准條件逆勢"
         elif defensive and breadth_defensive and supportive_authority:
             level = "黃燈｜廣度偏弱但權威大盤可選股，縮倉精選"
+        elif defensive and breadth_defensive and selective_authority:
+            level = "橘燈｜廣度偏弱但權威大盤為中性/震盪，僅准1檔條件精選"
         elif defensive:
             level = "防守｜縮小倉位"
         else:
@@ -896,12 +923,13 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         "raw_panic": raw_panic,
         "breadth_defensive": breadth_defensive,
         "supportive_authority": supportive_authority,
+        "selective_authority": selective_authority,
         "explicit_authority_hard": explicit_authority_hard,
-        "market_semantic_guard": "V191-H29｜廣度防守與權威大盤分離",
+        "market_semantic_guard": "V191-H41｜廣度弱勢不等於權威紅燈；中性震盪保留條件精選",
         "lockdown": bool(panic),
         "twse_change_pct": round(twse_pct, 2),
         "otc_change_pct": round(otc_pct, 2),
-        "new_position_cap_pct": 0 if panic else 5 if severe else 20 if defensive else 45,
+        "new_position_cap_pct": 0 if panic else 5 if severe else 10 if (breadth_defensive and selective_authority) else 20 if defensive else 45,
     }
 
 

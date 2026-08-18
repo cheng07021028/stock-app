@@ -12298,6 +12298,7 @@ def _phase80_build_recommendation_summary(
     exclude_df: pd.DataFrame,
     total_candidates: int,
     scan_report: dict[str, Any] | None = None,
+    decision_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     formal_n = len(formal_df) if isinstance(formal_df, pd.DataFrame) else 0
     a_minus_n = len(a_minus_df) if isinstance(a_minus_df, pd.DataFrame) else 0
@@ -12311,6 +12312,22 @@ def _phase80_build_recommendation_summary(
     intraday_n = len(intraday_core_df) if isinstance(intraday_core_df, pd.DataFrame) else 0
     risk_n = len(risk_df) if isinstance(risk_df, pd.DataFrame) else 0
     exclude_n = len(exclude_df) if isinstance(exclude_df, pd.DataFrame) else 0
+    _decision = decision_df if isinstance(decision_df, pd.DataFrame) else pd.DataFrame()
+    if not _decision.empty and "H34每日精選" in _decision.columns:
+        _daily_mask = _decision["H34每日精選"].fillna("").astype(str).eq("是")
+        daily_n = int(_daily_mask.sum())
+        if "H41每日條件精選" in _decision.columns:
+            conditional_daily_n = int((_daily_mask & _decision["H41每日條件精選"].fillna("").astype(str).eq("是")).sum())
+        else:
+            conditional_daily_n = 0
+        _daily_rows = _decision.loc[_daily_mask]
+        daily_mode = _safe_str(_daily_rows.get("H41推薦漏斗模式", pd.Series([""])).iloc[0]) if not _daily_rows.empty else ""
+        daily_health = _safe_str(_daily_rows.get("H41推薦漏斗健康", pd.Series([""])).iloc[0]) if not _daily_rows.empty else ""
+    else:
+        daily_n = 0
+        conditional_daily_n = 0
+        daily_mode = ""
+        daily_health = ""
     report = scan_report if isinstance(scan_report, dict) else {}
     quality = _safe_str(report.get("掃描品質狀態")) or "未知｜舊資料未記錄掃描完整性"
     usable = bool(report.get("正式推薦可用", False))
@@ -12340,6 +12357,12 @@ def _phase80_build_recommendation_summary(
                 f"{a_blocked_n} 檔受大盤風控封鎖。"
             )
             status = "限定資料池｜僅準主推薦" if limited else "無直接買進｜僅準主推薦"
+    elif daily_n > 0:
+        conclusion = (
+            f"{prefix}本輪有 {daily_n} 檔超級AI每日精選（其中 {conditional_daily_n} 檔為H41條件精選）。"
+            "條件精選不是開盤直接買；只依實戰觸發/回測承接＋守價確認執行，未成立即 NO-TRADE。"
+        )
+        status = "H41每日精選｜有條件推薦"
     elif intraday_n > 0:
         conclusion = f"{prefix}本輪沒有正式推薦；保留 {intraday_n} 檔盤中核心雷達，未觸發前不可買。"
         status = "限定資料池｜只看盤中雷達" if limited else "無正式推薦｜只看盤中雷達"
@@ -12372,6 +12395,10 @@ def _phase80_build_recommendation_summary(
         "A-準主推薦檔數": a_minus_n,
         "A-可操作檔數": a_actionable_n,
         "A-大盤封鎖檔數": a_blocked_n,
+        "H41每日精選檔數": daily_n,
+        "H41每日條件精選檔數": conditional_daily_n,
+        "H41推薦漏斗模式": daily_mode,
+        "H41推薦漏斗健康": daily_health,
         "盤中核心雷達檔數": intraday_n,
         "高風險觀察檔數": risk_n,
         "正式排除檔數": exclude_n,
@@ -13030,7 +13057,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     core, _, _, _ = _phase71_split_intraday_radar_layers(live_intraday)
     candidate_n = len(decision_source)
     summary = _phase80_build_recommendation_summary(
-        formal, a_minus, core, risk, excluded, candidate_n, scan_report=scan_report
+        formal, a_minus, core, risk, excluded, candidate_n, scan_report=scan_report, decision_df=decision_source
     )
 
     rank_source = decision_source
@@ -13107,10 +13134,11 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     funnel_a = int(funnel_bucket.eq("A-｜準主推薦小量試單").sum())
     funnel_formal = int(funnel_bucket.eq("正式下週主推薦").sum())
     funnel_dq = int(data_limited_series.eq("是").sum())
+    funnel_daily = int(decision_source.get("H34每日精選", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str).eq("是").sum())
     st.caption(
         f"推薦通過漏斗：候選 {len(decision_source)} → 最新K線 {funnel_fresh} → 官方因子對齊 {funnel_official} "
-        f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 正式推薦 {funnel_formal}。"
-        "資料受限A-每日最多1檔、單檔最多1%，不等同正式推薦。"
+        f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 正式推薦 {funnel_formal} → 超級AI每日精選 {funnel_daily}。"
+        "H41每日條件精選不改寫Formal/V188權威；只在觸發/回測＋守價成立後執行。"
     )
     row = summary.iloc[0]
     render_pro_kpi_row([
@@ -13121,7 +13149,23 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         {"label": "官方有效覆蓋", "value": f"{float(row.get('官方有效因子覆蓋率%', row.get('官方因子覆蓋率%', 0))):.1f}%", "delta": f"最新可信 {float(row.get('官方最新可信覆蓋率%', 0)):.1f}%｜來源可信 {float(row.get('官方來源可信覆蓋率%', 0)):.1f}%｜T-1內 {float(row.get('官方日期T-1內覆蓋率%', 0)):.1f}%"},
         {"label": "正式推薦", "value": str(int(row.get("正式推薦檔數", 0))), "delta": "檔"},
         {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": f"可操作{int(row.get('A-可操作檔數', 0))}／封鎖{int(row.get('A-大盤封鎖檔數', 0))}"},
+        {"label": "超級AI每日精選", "value": str(int(row.get("H41每日精選檔數", 0))), "delta": f"條件精選{int(row.get('H41每日條件精選檔數', 0))}"},
     ])
+
+    # H41：不再讓「Formal=0」等同畫面上什麼都沒有。每日精選是獨立決策層，
+    # 清楚展示條件與原始分區；它不是直接買進推薦，也不覆寫 Formal/V188。
+    _daily_pick = decision_source.loc[decision_source.get("H34每日精選", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str).eq("是")].copy()
+    if not _daily_pick.empty:
+        render_pro_section("超級AI每日精選｜有條件才執行")
+        _daily_cols = [c for c in [
+            "H34每日精選排名", "股票代號", "股票名稱", "正式推薦分區", "H34精選等級",
+            "H34安全精選分", "H41條件操作許可", "操作許可", "主要進場路徑",
+            "主要進場參考價", "回測承接參考價", "實戰觸發價", "觸發後守價", "實戰停損參考",
+            "H41最近可執行距離%", "H41實戰觸發距離%", "V188股神作戰優先分", "SuperAI Trade分",
+            "Entry進場買點分", "Risk風控安全分", "路徑風險報酬比", "H34精選理由", "H34操作原則",
+        ] if c in _daily_pick.columns]
+        st.dataframe(_format_df(_daily_pick[_daily_cols]), use_container_width=True, hide_index=True)
+        st.caption("每日精選≠開盤直接買；條件未成立就是 NO-TRADE。正式推薦分區維持原權威，方便後續績效分開學習。")
 
     scan_usable = bool(scan_report.get("正式推薦可用", False)) if isinstance(scan_report, dict) else False
     if isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
@@ -13178,6 +13222,8 @@ def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.Data
     common = [
         "分頁用途", "最終操作結論", "股票代號", "股票名稱", "市場別", "類別", "產業",
         "正式推薦分區", "是否正式推薦", "操作許可", "正式推薦等級", "正式推薦判定來源", "候選性質",
+        "H34每日精選", "H34每日精選排名", "H34精選等級", "H34安全精選分", "H34精選理由", "H34操作原則",
+        "H41每日條件精選", "H41條件操作許可", "H41推薦漏斗模式", "H41推薦漏斗健康", "H41最近可執行距離%", "H41實戰觸發距離%",
         "盤中雷達優先級", "盤中盯盤順序", "盤中雷達分層", "核心雷達品質檢查", "核心雷達降級原因",
         "股神推薦總排名", "股神推薦優先分", "股神推薦等級", "股神推薦用途", "股神推薦分數說明",
         "主流主升優先分", "主流主升判定", "主流主升操作限制",
@@ -13300,6 +13346,8 @@ def _build_excel_bytes(
             pass
 
     formal_compact = _phase82_compact_operational_view(formal_df if formal_usable else pd.DataFrame(), "正式主推薦｜可依進場條件分批操作")
+    _daily_mask_export = candidate_source.get("H34每日精選", pd.Series([""] * len(candidate_source), index=candidate_source.index)).fillna("").astype(str).eq("是")
+    daily_pick_compact = _phase82_compact_operational_view(candidate_source.loc[_daily_mask_export].copy(), "超級AI每日精選｜觸發/回測＋守價成立才執行")
     a_minus_compact = _phase82_compact_operational_view(a_minus_df if formal_usable else pd.DataFrame(), "A-準主推薦｜觸發且守價後小量試單")
     core_compact = _phase82_compact_operational_view(core_df, "R1盤中核心雷達｜未觸發前不可買")
     if not formal_usable:
@@ -13336,7 +13384,7 @@ def _build_excel_bytes(
     summary_df = _phase80_build_recommendation_summary(
         formal_df, a_minus_df, core_df, risk_df, exclude_df,
         len(candidate_diag) if isinstance(candidate_diag, pd.DataFrame) else len(governed),
-        scan_report=report,
+        scan_report=report, decision_df=candidate_source,
     )
     if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
         summary_df["最新K線研究雷達檔數"] = int(len(live_intraday_df))
@@ -13418,6 +13466,7 @@ def _build_excel_bytes(
 
     sheets = [
         ("超級AI股神精選攻略", super_ai_guide_export, "本輪沒有可建立精選攻略的候選資料。"),
+        ("超級AI每日條件精選", daily_pick_compact, "本輪沒有通過H41安全條件的每日精選；不為名額硬湊股票。"),
         ("股神推薦總排名", master_rank_df, "目前沒有資料新鮮且達排名門檻的推薦/觀察候選。"),
         ("V188交易品質治理", v188_trade_df, "尚無 V188 Alpha/Trade 交易品質治理資料。"),
         ("T+1實戰真相", v188_truth_df, "尚無成熟 T+1 實戰真相；待下一交易日更新。"),
@@ -13514,7 +13563,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         st.caption("需要調整欄位時再開啟上方開關；平常關閉可避免在推薦頁建立大量欄位控制元件。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H37-EXCEL-LAYOUT|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H37-EXCEL-LAYOUT|V191-H41-RECOMMENDATION-FUNNEL|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
@@ -16196,7 +16245,7 @@ def main():
                 export_source_for_rank = export_source_for_rank.drop(columns=["勾選"], errors="ignore")
             export_sig_v164 = _result_export_signature_v164(
                 export_source_for_rank,
-                "full-table|V191-H35-FORECAST-INTEGRITY|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
+                "full-table|V191-H35-FORECAST-INTEGRITY|V191-H41-RECOMMENDATION-FUNNEL|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
             )
             export_cache_key_v164 = _k("full_table_export_cache_v164")
             export_cache_v164 = st.session_state.get(export_cache_key_v164, {})

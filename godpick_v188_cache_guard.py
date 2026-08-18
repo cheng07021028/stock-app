@@ -12,7 +12,12 @@ import math
 
 import pandas as pd
 
-V189_CACHE_GUARD_VERSION = "v191_h38_v188_final_cache_post_h34_20260817"
+try:
+    from godpick_super_ai_trade_quality import V188_VERSION as EXPECTED_V188_VERSION
+except Exception:
+    EXPECTED_V188_VERSION = ""
+
+V189_CACHE_GUARD_VERSION = "v191_h41_v188_a_minus_cache_guard_20260818"
 
 V188_REQUIRED_TEXT_COLUMNS = [
     "V188版本",
@@ -83,6 +88,8 @@ def inspect_v188_decision_frame(data: Any, min_coverage: float = 0.95) -> dict[s
 
     text_cov = {c: _nonblank_ratio(data[c]) for c in V188_REQUIRED_TEXT_COLUMNS}
     numeric_info = {c: _numeric_ratio(data[c]) for c in V188_REQUIRED_NUMERIC_COLUMNS}
+    version_series = data["V188版本"].fillna("").astype(str).str.strip()
+    version_ok = bool(EXPECTED_V188_VERSION and version_series.eq(EXPECTED_V188_VERSION).all())
     numeric_cov = {c: v[0] for c, v in numeric_info.items()}
     positive_cov = {c: v[1] for c, v in numeric_info.items()}
 
@@ -93,7 +100,7 @@ def inspect_v188_decision_frame(data: Any, min_coverage: float = 0.95) -> dict[s
     # UI fallback while still allowing legitimately blocked stocks to be scored.
     no_positive = [c for c, ratio in positive_cov.items() if ratio <= 0.0]
 
-    complete = not low_text and not low_numeric and not no_positive
+    complete = not low_text and not low_numeric and not no_positive and version_ok
     reasons: list[str] = []
     if low_text:
         reasons.append("text-coverage-low:" + ",".join(low_text))
@@ -101,6 +108,8 @@ def inspect_v188_decision_frame(data: Any, min_coverage: float = 0.95) -> dict[s
         reasons.append("numeric-coverage-low:" + ",".join(low_numeric))
     if no_positive:
         reasons.append("all-zero-score:" + ",".join(no_positive))
+    if not version_ok:
+        reasons.append(f"stale-v188-version:expected={EXPECTED_V188_VERSION}")
 
     return {
         "complete": bool(complete),
@@ -110,6 +119,8 @@ def inspect_v188_decision_frame(data: Any, min_coverage: float = 0.95) -> dict[s
         "text_coverage": {k: round(v, 4) for k, v in text_cov.items()},
         "numeric_coverage": {k: round(v, 4) for k, v in numeric_cov.items()},
         "positive_coverage": {k: round(v, 4) for k, v in positive_cov.items()},
+        "v188_version_expected": EXPECTED_V188_VERSION,
+        "v188_version_ok": version_ok,
         "guard_version": V189_CACHE_GUARD_VERSION,
     }
 

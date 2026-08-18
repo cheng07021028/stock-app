@@ -15,11 +15,18 @@ from typing import Any
 import math
 import pandas as pd
 
-VERSION = "v191_h38_super_ai_excel_action_integrity_20260817"
+VERSION = "v191_h41_super_ai_excel_conditional_pick_v2_20260818"
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
 _FORBIDDEN_KEYS = (
     "禁止買進", "禁止新倉", "禁止碰", "不可直接買", "正式排除", "排除清單",
+    "高風險雷達", "禁止操作", "BLOCK", "LOCKDOWN",
+)
+# H41：H34每日條件精選已經重新通過完整資料/流動性/RR/停損/追價硬風控。
+# 因此舊 Formal/V188 的「不可直接買觀察」只能表示「不是直接買進」，不能
+# 再把 H34 條件精選從攻略表刪掉；真正 BLOCK/LOCKDOWN/禁止新倉仍不可繞過。
+_STRICT_FORBIDDEN_KEYS = (
+    "禁止買進", "禁止新倉", "禁止碰", "正式排除", "排除清單",
     "高風險雷達", "禁止操作", "BLOCK", "LOCKDOWN",
 )
 _WAIT_KEYS = ("WAIT", "待確認", "未對齊", "待同步", "只觀察", "觀察")
@@ -221,6 +228,7 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
 
     combined = (partition + "｜" + permit + "｜" + v188_permit + "｜" + is_formal_text).fillna("")
     forbidden = _contains_any(combined, _FORBIDDEN_KEYS)
+    strict_forbidden = _contains_any(combined, _STRICT_FORBIDDEN_KEYS)
     wait_only = _contains_any(combined, _WAIT_KEYS)
     formal = (~forbidden) & (
         partition.str.contains("正式下週主推薦", regex=False)
@@ -228,14 +236,21 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     )
     a_minus = (~forbidden) & (~formal) & partition.str.contains("A-", regex=False)
     executable_permit = (~forbidden) & (~wait_only) & permit.str.contains("可操作|條件進場|允許|小量試單", regex=True)
+    h34_selected = _text_series(work, ["H34每日精選"]).str.strip().isin(["是", "1", "True", "true"])
+    h41_permit = _text_series(work, ["H41條件操作許可"])
+    h41_conditional = _text_series(work, ["H41每日條件精選"]).str.strip().isin(["是", "1", "True", "true"])
 
-    # H31: role is descriptive only.  Forbidden rows can never become 條件候選.
+    # H41: H34 is the post-V188 admission authority.  If it explicitly selected a
+    # row, keep it visible as a conditional pick even when the underlying V188
+    # label remains RADAR/WAIT-PULLBACK.  This does not turn it into a formal buy:
+    # the H34 trigger/guard principle still governs execution.
     role = pd.Series("觀察雷達", index=work.index, dtype="object")
     role.loc[forbidden] = "禁止/排除"
+    role.loc[h34_selected & (~strict_forbidden)] = "條件候選"
     role.loc[executable_permit] = "條件候選"
     role.loc[a_minus] = "A-準主推薦"
     role.loc[formal] = "正式推薦"
-    role.loc[(~forbidden) & (~formal) & (~a_minus) & wait_only] = "等待確認/雷達"
+    role.loc[(~forbidden) & (~formal) & (~a_minus) & (~h34_selected) & wait_only] = "等待確認/雷達"
 
     role_order = {"正式推薦": 0, "A-準主推薦": 1, "條件候選": 2, "等待確認/雷達": 3, "觀察雷達": 4, "禁止/排除": 9}
     tier = role.map(role_order).fillna(8).astype(int)
@@ -253,7 +268,9 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     selected["市場別"] = market
     selected["類別"] = category
     selected["正式推薦分區"] = partition.where(partition.ne(""), "未升級")
-    selected["操作許可"] = permit.where(permit.ne(""), "等待條件")
+    display_permit = permit.where(permit.ne(""), "等待條件").copy()
+    display_permit.loc[h41_conditional & h41_permit.ne("")] = h41_permit.loc[h41_conditional & h41_permit.ne("")]
+    selected["操作許可"] = display_permit
     selected["V188交易許可"] = v188_permit.where(v188_permit.ne(""), "等待確認")
     selected["Entry"] = entry.round(1)
     selected["Risk"] = risk.round(1)
@@ -280,6 +297,14 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     selected["大盤/V188狀態"] = market_state.where(market_state.ne(""), v188_permit)
     selected["主要阻擋/近門檻"] = block.where(block.ne(""), "—")
     selected["操作原則"] = action.where(action.ne(""), "未觸發前不買；只在正式操作許可成立後操作")
+    selected["每日精選"] = _text_series(work, ["H34每日精選"], "否")
+    selected["每日條件精選"] = _text_series(work, ["H41每日條件精選"], "否")
+    selected["原始推薦分區"] = _text_series(work, ["H41原始正式分區", "正式推薦分區"], "未升級")
+    selected["最近可執行距離%"] = _num_series(work, ["H41最近可執行距離%", "距最近可執行買點%"], float("nan")).round(2)
+    selected["突破觸發距離%"] = _num_series(work, ["H41實戰觸發距離%", "觸發距離%"], float("nan")).round(2)
+    selected["每日精選等級"] = _text_series(work, ["H34精選等級"], "—")
+    selected["每日精選理由"] = _text_series(work, ["H34精選理由"], "—")
+    selected["推薦漏斗模式"] = _text_series(work, ["H41推薦漏斗模式"], "—")
 
     selected = selected.loc[code.ne("")].copy()
     # H38："超級AI股神精選攻略"只能展示真正具備操作資格的股票。
@@ -287,6 +312,11 @@ def build_super_ai_excel_guide(df: pd.DataFrame | None, *, max_rows: int = 20) -
     # 就自動補滿攻略表，否則會把「空手等待」視覺上誤包裝成推薦名單。
     actionable_roles = {"正式推薦", "A-準主推薦", "條件候選"}
     eligible = selected.loc[selected["超級AI定位"].isin(actionable_roles)].copy()
+    # H41：H34 是每日 1~3 檔最終名額治理。只要本輪已有 H34 精選，
+    # 攻略表就只展示該最終名單，避免「市場上限1檔」卻又把所有 A- 顯示成
+    # 多檔精選。若舊資料沒有 H34 欄位，才回退到既有 actionable roles。
+    if h34_selected.any():
+        eligible = eligible.loc[h34_selected.reindex(eligible.index).fillna(False)].copy()
     if eligible.empty:
         return pd.DataFrame({
             "狀態": ["今日無可執行精選｜空手等待。雷達/WAIT-PULLBACK 僅供觀察，不列入超級AI股神精選攻略。"],

@@ -14,7 +14,7 @@ import re
 
 import pandas as pd
 
-V188_VERSION = "super_ai_trade_quality_v191_h36_20260817"
+V188_VERSION = "super_ai_trade_quality_v191_h41_a_minus_authority_fix_20260818"
 
 V188_COLUMNS = [
     "V188版本",
@@ -208,11 +208,23 @@ def _probability_calibration(raw_prob: float, experience: dict[str, Any]) -> tup
 
 
 def _legacy_formal_allowed(row: dict[str, Any]) -> bool:
+    """Recognise the actual Formal/A- authority emitted by the formal engine.
+
+    H41 fixes a production mismatch: the formal engine emits
+    ``A-｜準主推薦小量試單`` (with a full-width separator), while the old V188
+    recogniser only searched for ``A-準主推薦``.  As a result every genuine A-
+    candidate was treated as legacy radar and demoted before H34 could use it.
+    Keep this recogniser tolerant of display separators without broadening it to
+    generic radar labels.
+    """
     raw = _s(row.get("是否正式推薦")).lower()
     if raw in {"true", "1", "是", "yes", "y"}:
         return True
     partition = _s(row.get("正式推薦分區"))
-    if _contains(partition, ["正式推薦", "a-準主推薦", "a-準主"]):
+    compact = re.sub(r"[\s｜|／/]+", "", partition).lower()
+    if "正式推薦" in compact:
+        return True
+    if compact.startswith("a-") and "準主推薦" in compact:
         return True
     return False
 
@@ -291,7 +303,7 @@ def score_trade_quality_row(row: dict[str, Any], experience: dict[str, Any] | No
     alpha_grade = _grade(alpha_score)
     trade_grade = _grade(trade_score)
     final_grade = f"Alpha {alpha_grade} × Trade {trade_grade}"
-    formal_text = "是｜舊硬門檻＋V188均通過" if formal_ok else "否｜V188為降級治理，不越權升格"
+    formal_text = "是｜Formal/A-權威＋V188均通過" if formal_ok else "否｜V188為降級治理，不越權升格"
     return {
         "V188版本": V188_VERSION,
         "SuperAI Alpha分": round(alpha_score, 1), "SuperAI Alpha等級": alpha_grade,
