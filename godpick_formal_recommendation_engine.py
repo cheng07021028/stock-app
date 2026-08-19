@@ -29,7 +29,7 @@ except Exception:
     apply_daily_learning_overlay = None
     apply_learning_admission = None
 
-FORMAL_RECOMMENDATION_VERSION = "v191_h41_selective_market_semantics_20260818"
+FORMAL_RECOMMENDATION_VERSION = "v191_h42_dual_route_market_consensus_20260819"
 
 FORMAL_RECOMMENDATION_COLUMNS = [
     "最終操作結論",
@@ -792,9 +792,27 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         "大盤風險燈號", "大盤橋接風控", "大盤策略模式", "大盤策略建議",
         "大盤風控建議", "今日大盤結論", "大盤橋接狀態",
     ])
-    raw_scores = [_num(row, "大盤橋接分數", 0), _num(row, "大盤多空分數", 0)]
-    positive_scores = [x for x in raw_scores if x > 0]
-    score = min(positive_scores) if positive_scores else 0.0
+    # H42：大盤判斷改採「多來源共識」而不是永遠取最低分。
+    # 8/18 實際作戰表同時存在 大盤橋接分數=30.9 與 市場環境分數=66.7，
+    # 舊版直接 min() 會把整輪誤升級成紅燈甚至接近 LOCKDOWN。單一低分只能
+    # 觸發防守，不得在其他權威訊號（黃燈/中性/非LOCKDOWN）明確矛盾時
+    # 直接封鎖所有推薦。真正極端風險仍由明確LOCKDOWN文字與指數跌幅硬封鎖。
+    raw_scores = [
+        _num(row, "大盤橋接分數", 0),
+        _num(row, "大盤多空分數", 0),
+        _num(row, "市場環境分數", 0),
+    ]
+    unique_scores: list[float] = []
+    for value in raw_scores:
+        if value > 0 and all(abs(value - seen) > 1e-6 for seen in unique_scores):
+            unique_scores.append(float(value))
+    if unique_scores:
+        ordered = sorted(unique_scores)
+        mid = len(ordered) // 2
+        score = float(ordered[mid]) if len(ordered) % 2 else float((ordered[mid - 1] + ordered[mid]) / 2.0)
+    else:
+        score = 0.0
+    low_score_votes = sum(1 for x in unique_scores if x < 42)
 
     market_date = _date_value(row, ["大盤資料日期", "大盤行情日期", "加權資料日期", "大盤橋接資料日期"])
     stock_date = _date_value(row, ["本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"])
@@ -858,10 +876,15 @@ def _market_risk_info(row: pd.Series) -> dict[str, Any]:
         severe = True
         defensive = True
         panic = True
-    if score > 0 and score < 42:
+    # H42：低分本身只代表防守；至少兩個獨立權威分數同時低於42，
+    # 才能把「分數證據」升級成 severe。這避免單一橋接分30.9把
+    # 市場環境66.7＋黃燈誤判為全面紅燈。
+    if score > 0 and score < 50:
+        defensive = True
+    if score > 0 and score < 42 and low_score_votes >= 2:
         severe = True
         defensive = True
-    if score > 0 and score < 25:
+    if score > 0 and score < 25 and low_score_votes >= 2:
         panic = True
     # LOCKDOWN/極端風險必然同時屬於 severe 與 defensive，
     # 避免後續紅燈觸發脆弱度函式因 severe=False 而跳過硬封鎖。

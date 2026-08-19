@@ -24,7 +24,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h41_daily_safe_selection_funnel_recall_20260818"
+VERSION = "v191_h42_daily_safe_selection_market_consensus_20260819"
 
 H34_COLUMNS = [
     "H34每日精選", "H34每日精選排名", "H34每日目標檔數", "H34安全精選分",
@@ -122,7 +122,7 @@ def _market_profile(frame: pd.DataFrame) -> dict[str, Any]:
     for _, row in frame.iterrows():
         level = _first_text(row, ["大盤風控層級", "大盤策略模式", "大盤橋接風控"])
         breadth = _first_text(row, ["大盤風險燈號", "今日大盤結論"])
-        bridge = _blob(row, ["大盤原始橋接狀態", "大盤橋接狀態", "大盤策略建議", "大盤風控建議"])
+        bridge = _blob(row, ["極端市場LOCKDOWN", "大盤原始橋接狀態", "大盤橋接狀態", "大盤策略建議", "大盤風控建議", "大盤橋接風控"])
         if level:
             authority_levels.append(level)
             text_parts.append(level)
@@ -132,18 +132,27 @@ def _market_profile(frame: pd.DataFrame) -> dict[str, Any]:
         if bridge:
             bridge_parts.append(bridge)
             text_parts.append(bridge)
-        score = _first_num(row, score_columns, float("nan"))
-        if math.isfinite(score):
-            scores.append(float(score))
+        # H42：同一列可能同時有「大盤橋接分」與「市場環境分」。
+        # 舊版 _first_num 只取第一個，8/18 因 30.9 蓋掉 66.7 而
+        # 全市場被錯判 LOCKDOWN。現在收集所有獨立有效分數做共識。
+        for score_col in score_columns:
+            if score_col not in row.index or not _s(row.get(score_col)):
+                continue
+            value = _f(row.get(score_col), float("nan"))
+            if math.isfinite(value) and all(abs(float(value) - seen) > 1e-6 for seen in scores):
+                scores.append(float(value))
 
     all_text = "｜".join(text_parts)
     level_text = "｜".join(authority_levels)
     breadth_text = "｜".join(breadth_parts)
     bridge_text = "｜".join(bridge_parts)
     score = float(pd.Series(scores, dtype="float64").median()) if scores else 50.0
+    low_score_votes = sum(1 for value in scores if value < 42)
 
     hard = any(k in all_text for k in ["LOCKDOWN", "全面禁買", "極端風險", "崩跌後冷卻", "極端崩跌", "禁止所有新倉", "全面停買"])
-    if score < 42:
+    # H42：單一低分不可再獨自製造 LOCKDOWN。只有至少兩個獨立權威
+    # 分數都低於42，才讓分數本身成為硬風險證據；明確LOCKDOWN文字仍優先。
+    if score < 42 and low_score_votes >= 2:
         hard = True
     if hard:
         return {"target": 0, "hard_block": True, "red_light": True, "defensive_selective": False, "score": score, "regime": "LOCKDOWN/極端風險"}
@@ -291,6 +300,15 @@ def _hard_veto(row: pd.Series, market: dict[str, Any]) -> list[str]:
         reasons.append(f"RR {m['rr']:.2f}<1.05")
     if m["chase"] > 68:
         reasons.append(f"追價風險{m['chase']:.0f}>68")
+
+    # H42：防守/震盪盤特別防「盤中沖高、收盤被打回低檔」的假強勢。
+    # 8/18 中美晶/台化都有極低收盤位置＋極長上影，舊H41只看Entry/RR
+    # 仍可能把它們排成每日精選第一名。這種結構可留研究雷達，但不能在
+    # 防守市場直接取得每日條件精選資格。
+    close_pos = _first_num(row, ["當日收盤位置%"], 50.0)
+    upper_shadow = _first_num(row, ["上影線比例%"], 20.0)
+    if bool(market.get("defensive_selective")) and close_pos < 20 and upper_shadow > 60:
+        reasons.append(f"防守盤沖高回落：收盤位置{close_pos:.0f}%／上影{upper_shadow:.0f}%")
     return list(dict.fromkeys(reasons))
 
 
