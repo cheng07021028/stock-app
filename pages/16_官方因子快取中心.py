@@ -45,7 +45,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V190｜盤後產製時序治理＋V187來源可信度＋V186 Reboot永久權威｜TWSE/TPEx current OpenAPI 優先＋FinMind 缺值備援")
+st.caption("V191-H43｜T86公開同步緩衝＋同站熔斷＋官方日快照備援｜V190盤後時序＋V187來源可信度＋V186 Reboot永久權威")
 
 
 def _fmt(v):
@@ -238,8 +238,13 @@ if do_update:
         st.caption(f"本輪耗時 {meta.get('elapsed_seconds', 0)} 秒｜網路請求 {meta.get('request_count', 0)}/{meta.get('request_budget', 0)}")
     else:
         st.error("官方因子快取更新失敗，請查看診斷訊息。")
-    for msg in meta.get("diagnostics", [])[-20:]:
-        st.write(f"- {msg}")
+    diag_items = meta.get("diagnostics", [])[-20:]
+    for msg in diag_items:
+        text = str(msg)
+        if "T86" in text and ("同步緩衝" in text or "同站熔斷" in text or "沿用上市官方日快照" in text):
+            st.info(text)
+        else:
+            st.write(f"- {text}")
 
 if do_push:
     ok, msg = push_cache_to_github()
@@ -294,6 +299,7 @@ else:
 with st.expander("V187／V182 說明", expanded=False):
     st.markdown(
         """
+- H43 修正 TWSE T86 timeout 洗版：18:00 首版後保留 20 分鐘公開同步緩衝；同一 TWSE host 一旦 timeout 即熔斷，不再重複打舊路徑與多個歷史日。成功 T86 會保存上市官方日快照；端點暫時失敗時優先沿用日快照／前次有效快取，不中斷整輪更新。
 - V187 修正來源可信度治理：單一 FinMind／前次快取補到一個欄位，不再把整列官方資料直接降成 82／60 分。可信度改由法人、估值、營收各自的實際來源證據重建。
 - `每日因子來源可信度` 專供第07頁交易日治理；法人／估值為官方 TWSE/TPEx 時可維持高可信，月營收或其他備援不會錯誤拖垮整列。
 - 舊快取在 `load_factor_frame()` 讀取時會即時遷移；若要把校正結果寫回 runtime-data，請按「V187 校正來源可信度並永久保存」。

@@ -47,7 +47,7 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v191_h36_official_factor_duplicate_column_guard_20260817"
+CACHE_VERSION = "v191_h43_twse_t86_timeout_history_guard_20260819"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -1347,8 +1347,7 @@ def fetch_monthly_revenue() -> tuple[pd.DataFrame, str]:
 def _recent_weekdays(days: int = 10) -> list[str]:
     now = _now_taipei()
     today = now.date()
-    # Before the exchange's post-close datasets are normally ready, start from
-    # the prior calendar day. This avoids guaranteed 404/no-data noise at 00:xx~15:xx.
+    # Generic post-close datasets: before 16:00 start from the prior calendar day.
     if now.hour < 16:
         today = today - dt.timedelta(days=1)
     out: list[str] = []
@@ -1360,31 +1359,92 @@ def _recent_weekdays(days: int = 10) -> list[str]:
         i += 1
     return out
 
-def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
-    """上市三大法人買賣超。
 
-    注意：T86 個股明細可能受官方資料政策、交易日、時間與格式影響。
-    若取得失敗，本服務只回傳空表與診斷，不阻斷頁面。
+def _recent_twse_t86_weekdays(days: int = 10, now: dt.datetime | None = None) -> tuple[list[str], str]:
+    """Return safe T86 trading-day candidates and a timing note.
+
+    TWSE documents TWT86UC at 18:00 and TWTAIUC at 20:00.  The public website
+    can lag the file-production clock, so H43 gives the first public T86 route a
+    20-minute grace window.  During that window we deliberately keep the prior
+    verified session instead of generating noisy same-day timeout/no-data errors.
     """
-    records_by_code: dict[str, list[dict[str, Any]]] = {}
+    now_tw = now.astimezone(TAIPEI_TZ) if isinstance(now, dt.datetime) and now.tzinfo else (now.replace(tzinfo=TAIPEI_TZ) if isinstance(now, dt.datetime) else _now_taipei())
+    start = now_tw.date()
+    timing_note = ""
+    if start.weekday() < 5:
+        first_public_try = dt.datetime.combine(start, dt.time(18, 20), tzinfo=TAIPEI_TZ)
+        if now_tw < first_public_try:
+            timing_note = f"{start.strftime('%Y%m%d')} T86 尚在18:00首版公開同步緩衝；本輪先沿用前一交易日權威資料。"
+            start = start - dt.timedelta(days=1)
+    out: list[str] = []
+    i = 0
+    while len(out) < days and i < days * 4 + 7:
+        d = start - dt.timedelta(days=i)
+        if d.weekday() < 5:
+            out.append(d.strftime("%Y%m%d"))
+        i += 1
+    return out, timing_note
+
+
+def _is_transient_t86_network_error(exc: Exception | str) -> bool:
+    text = _safe_str(exc).lower()
+    needles = (
+        "read timed out", "connect timeout", "connection timed out",
+        "connection aborted", "connection reset", "temporarily unavailable",
+        "name resolution", "502", "503", "504", "429",
+    )
+    return any(n in text for n in needles)
+
+def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
+    """上市三大法人買賣超，具時序緩衝、同站熔斷與官方日快照備援。
+
+    H43 rules:
+    - 18:00 首版後保留 20 分鐘公開同步緩衝，不在 18:00~18:19 反覆打當日 T86。
+    - current T86 若發生 timeout/connection 類錯誤，不再立刻打同 host 的 old route，
+      也不對其餘日期重複等待；直接使用已保存的 TWSE 官方日快照／前次有效快取。
+    - 每次成功 T86 會保存「上市」日快照，3/5 日滾動由真實交易日快照累積，
+      不用單日資料冒充多日。
+    """
     msgs: list[str] = []
-    for date_text in _recent_weekdays(max(days, 3)):
+    candidates, timing_note = _recent_twse_t86_weekdays(max(days, 3))
+    if timing_note:
+        msgs.append(timing_note)
+
+    successful_days = 0
+    transient_break = False
+    last_transient = ""
+
+    for date_text in candidates:
         try:
             _budget_guard("TWSE 法人更新")
             params = {"date": date_text, "selectType": "ALLBUT0999", "response": "json", "_": int(time.time() * 1000)}
             data = None
-            last_t86_error = ""
-            for endpoint in [TWSE_T86, TWSE_T86_OLD]:
+            endpoint_error = ""
+
+            # Current route first. The old route is only a format/no-data fallback;
+            # a network timeout on the same host triggers a circuit break instead.
+            for endpoint_no, endpoint in enumerate([TWSE_T86, TWSE_T86_OLD], start=1):
                 try:
                     data = _get_json(endpoint, params=params)
+                    endpoint_error = ""
                     break
                 except Exception as exc:
-                    last_t86_error = _compact_error(exc)
+                    endpoint_error = _compact_error(exc)
                     data = None
+                    if _is_transient_t86_network_error(exc):
+                        transient_break = True
+                        last_transient = endpoint_error
+                        break
+                    # For a non-network parse/format failure, allow one legacy-path try.
+                    if endpoint_no >= 2:
+                        break
+            if transient_break:
+                break
+
             fields = data.get("fields") if isinstance(data, dict) else None
             rows = data.get("data") if isinstance(data, dict) else None
             if not fields or not rows:
-                msgs.append(f"{date_text} T86 無資料或格式不可用。{last_t86_error}")
+                msgs.append(f"{date_text} T86 尚無可解析資料；保留既有官方日快照。")
                 continue
             field_map = {str(f).strip(): i for i, f in enumerate(fields)}
 
@@ -1394,7 +1454,7 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
                         return row[field_map[n]]
                 return None
 
-            cnt = 0
+            snapshot_rows: list[dict[str, Any]] = []
             for row in rows:
                 if not isinstance(row, list):
                     continue
@@ -1404,59 +1464,56 @@ def fetch_twse_institutional(days: int = 7) -> tuple[pd.DataFrame, str]:
                 foreign = _to_int(pick(row, ["外陸資買賣超股數(不含外資自營商)", "外資及陸資買賣超股數", "外資買賣超股數"]))
                 trust = _to_int(pick(row, ["投信買賣超股數"]))
                 dealer = _to_int(pick(row, ["自營商買賣超股數", "自營商買賣超股數(自行買賣)"]))
-                total = _to_int(pick(row, ["三大法人買賣超股數", "合計買賣超股數"]))
-                if total == 0:
+                total_raw = pick(row, ["三大法人買賣超股數", "合計買賣超股數"])
+                total = _to_int(total_raw)
+                if total_raw is None or _safe_str(total_raw) == "":
                     total = foreign + trust + dealer
-                records_by_code.setdefault(code, []).append({
-                    "date": date_text,
-                    "foreign": foreign,
-                    "trust": trust,
-                    "dealer": dealer,
-                    "total": total,
+                snapshot_rows.append({
+                    "股票代號": code, "foreign": foreign, "trust": trust,
+                    "dealer": dealer, "total": total,
                 })
-                cnt += 1
-            msgs.append(f"{date_text} T86 取得 {cnt} 筆。")
-            time.sleep(0.15)
+            if snapshot_rows:
+                _save_institutional_daily_snapshot("上市", date_text, snapshot_rows)
+                successful_days += 1
+                msgs.append(f"{date_text} T86 取得 {len(snapshot_rows)} 筆並保存官方日快照。")
+            else:
+                msgs.append(f"{date_text} T86 回傳內容無有效股票列；保留既有官方日快照。")
+            time.sleep(0.08)
         except OfficialFactorBudgetExceeded as exc:
             msgs.append(str(exc))
             break
         except Exception as exc:
-            msgs.append(f"{date_text} T86 取得失敗：{exc}")
-
-    out = []
-    for code, items in records_by_code.items():
-        items = sorted(items, key=lambda x: x.get("date", ""), reverse=True)
-        one = items[:1]
-        three = items[:3]
-        five = items[:5]
-        def s(key: str, arr: list[dict[str, Any]]) -> int:
-            return int(sum(_to_int(x.get(key)) for x in arr))
-        consecutive = 0
-        for item in items:
-            if _to_int(item.get("total")) > 0:
-                consecutive += 1
-            else:
+            compact = _compact_error(exc)
+            if _is_transient_t86_network_error(exc):
+                transient_break = True
+                last_transient = compact
                 break
-        out.append({
-            "股票代號": code,
-            "官方資料日期": items[0].get("date", "") if items else "",
-            "外資近1日買賣超": s("foreign", one),
-            "外資近3日買賣超": s("foreign", three),
-            "外資近5日買賣超": s("foreign", five),
-            "投信近1日買賣超": s("trust", one),
-            "投信近3日買賣超": s("trust", three),
-            "投信近5日買賣超": s("trust", five),
-            "自營商近1日買賣超": s("dealer", one),
-            "自營商近3日買賣超": s("dealer", three),
-            "自營商近5日買賣超": s("dealer", five),
-            "三大法人近1日合計": s("total", one),
-            "三大法人近3日合計": s("total", three),
-            "三大法人近5日合計": s("total", five),
-            "法人連買天數": consecutive,
-            "法人資料日期": items[0].get("date", "") if items else "",
-            "法人資料源": "TWSE_T86",
-        })
-    return pd.DataFrame(out), " / ".join(msgs)
+            msgs.append(f"{date_text} T86 解析失敗：{compact}")
+
+    # Always rebuild the rolling values from genuine daily snapshots.  This also
+    # provides an immediate fallback when the public TWSE host is temporarily slow.
+    agg = _aggregate_institutional_history("上市", days=days)
+    if not agg.empty:
+        agg["法人資料源"] = "TWSE_T86+DAILY_HISTORY"
+        latest = _safe_str(agg.get("法人資料日期", pd.Series(dtype=str)).astype(str).max()) if "法人資料日期" in agg.columns else ""
+        if transient_break:
+            msgs.append(
+                f"TWSE T86 公開端點暫時逾時，已啟用同站熔斷，不再重複等待；"
+                f"沿用上市官方日快照{('（最新 '+latest+'）') if latest else ''}。"
+            )
+            if last_transient:
+                _note_once("TWSE T86 transient timeout -> official daily history fallback")
+        elif successful_days:
+            msgs.append(f"TWSE T86 本輪成功 {successful_days} 個交易日；3/5日法人值由官方日快照滾動計算。")
+        else:
+            msgs.append("TWSE T86 本輪未取得新日資料；沿用既有上市官方日快照。")
+        return agg, " / ".join(msgs)
+
+    if transient_break:
+        msgs.append("TWSE T86 公開端點暫時逾時且尚無上市官方日快照；交由前次有效快取／FinMind缺值備援，不中斷本輪更新。")
+    else:
+        msgs.append("TWSE T86 尚無可用官方日快照；交由前次有效快取／FinMind缺值備援。")
+    return pd.DataFrame(), " / ".join(msgs)
 
 
 
