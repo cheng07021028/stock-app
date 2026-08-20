@@ -17,7 +17,7 @@ try:
 except Exception:
     EXPECTED_V188_VERSION = ""
 
-V189_CACHE_GUARD_VERSION = "v191_h41_v188_a_minus_cache_guard_20260818"
+V189_CACHE_GUARD_VERSION = "v191_h45_v188_mainstream_wave_cache_guard_20260820"
 
 V188_REQUIRED_TEXT_COLUMNS = [
     "V188版本",
@@ -151,6 +151,14 @@ def repair_v188_decision_frame(
     errors: list[str] = []
 
     def _apply_h34_post_v188(current: pd.DataFrame) -> pd.DataFrame:
+        # H45 final order: V188 -> mainstream/wave -> H34.  Old H38 repair called
+        # H34 directly, so a rebooted cache could bypass the new mainstream
+        # evidence and resurrect Trade/RR-first picks.
+        try:
+            from godpick_mainstream_wave_engine import apply_mainstream_wave_engine
+            current = apply_mainstream_wave_engine(current)
+        except Exception as exc:
+            errors.append(f"h45-mainstream-post-v188:{exc}")
         try:
             from godpick_daily_safe_selection import apply_daily_safe_selection
             return apply_daily_safe_selection(current)
@@ -200,9 +208,10 @@ def repair_v188_decision_frame(
         except Exception as exc:
             errors.append(f"canonicalize:{exc}")
 
-    # H38 final admission must be last: official -> formal -> scan -> SuperAI/V188
-    # -> canonical partition -> H34. This is the first point where calibrated
-    # probability and final trade-quality authority coexist.
+    # H45 final admission order: official -> formal -> scan -> SuperAI/V188
+    # -> canonical partition -> H45 mainstream/wave -> H34. This is the first
+    # point where calibrated probability, trade quality and current mainstream
+    # evidence coexist.
     frame = _apply_h34_post_v188(frame)
 
     after = inspect_v188_decision_frame(frame)

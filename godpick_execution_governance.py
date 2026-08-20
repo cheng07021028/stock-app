@@ -653,7 +653,14 @@ def build_candidate_diagnosis(df: pd.DataFrame | None, *, max_rows: int = 3000) 
         return out
     existing = [col for col in CANDIDATE_DIAGNOSIS_COLUMNS if col in out.columns]
     extra = [
-        col for col in ["掃描品質狀態", "正式推薦可用", "掃描覆蓋率%", "歷史資料成功率%"]
+        col for col in [
+            "掃描品質狀態", "正式推薦可用", "掃描覆蓋率%", "歷史資料成功率%",
+            # H45 主流/波段透明化：未來績效檢討可直接從候選診斷反查
+            # 「族群是否真主流、個股是否領先、是否只是單日反彈」。
+            "H45族群主流分", "H45族群主流排名", "H45族群主流百分位%", "H45族群狀態",
+            "H45個股領先分", "H45起漲結構分", "H45趨勢延續分", "H45量價啟動分",
+            "H45主流波段分", "H45主流波段狀態", "H45主流波段理由", "H45主流交易綜合分", "H45版本",
+        ]
         if col in out.columns and col not in existing
     ]
     out = out[existing + extra].copy()
@@ -689,6 +696,7 @@ def build_engine_diagnostic_table(df: pd.DataFrame | None) -> pd.DataFrame:
         "股票代號", "股票名稱", "類別", "正式推薦分區", "最終操作結論", "操作許可",
         "引擎輔助訊號", "訊號用途", "正式推薦排除原因", "候選強度分", "可操作分",
         "Entry進場買點分", "Risk風控安全分", "風險報酬比", "追價風險分", "成交額百萬",
+        "H45族群主流分", "H45族群主流排名", "H45族群狀態", "H45主流波段分", "H45主流波段狀態", "H45主流波段理由",
         "分區互斥檢查",
     ]
     return out[[col for col in cols if col in out.columns]].copy().reset_index(drop=True)

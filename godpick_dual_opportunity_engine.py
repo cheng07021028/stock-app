@@ -23,7 +23,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h42_dual_route_focus_20260819"
+VERSION = "v191_h45_mainstream_wave_dual_route_20260820"
 
 H42_COLUMNS = [
     "H42強勢分", "H42強勢狀態", "H42強勢操作許可", "H42強勢理由",
@@ -212,7 +212,54 @@ def _data_block(row: pd.Series) -> tuple[bool, str]:
 
 
 def _strong_profile(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
+    """H45 strong route: H45 mainstream/wave evidence first, execution second.
+
+    When H45 columns are present, this function MUST NOT recreate the old H42
+    heuristic where a one-day rebound or a high generic money score could be
+    labelled strong.  H45 already decided whether the stock is a true
+    mainstream wave, an early-breakout setup, or merely a watch candidate.
+    """
     m = _metrics(row)
+    h45_status = _first_text(row, ["H45主流波段狀態"])
+    h45_score = _first_num(row, ["H45主流波段分"], 0.0)
+    h45_sector = _first_num(row, ["H45族群主流分"], 0.0)
+    h45_onset = _first_num(row, ["H45起漲結構分"], 0.0)
+    h45_reason = _first_text(row, ["H45主流波段理由"])
+    h45_available = bool(h45_status or h45_score > 0)
+
+    data_block, data_reason = _data_block(row)
+    if h45_available:
+        # H45 READY still obeys market hard-block and final execution safety.
+        if h45_status.startswith("M-READY") and not data_block and not market.get("hard"):
+            status = "S-READY｜主流波段條件進場"
+            cap = 3.0 if market.get("defensive") else 5.0
+            if m["main_entry"] > 0:
+                permission = (
+                    f"主流強勢不追高：優先等 {m['main_entry']:.2f} 附近承接；"
+                    f"若走突破，需站上 {m['trigger']:.2f} 且守住 {m['guard']:.2f}。未成立=NO-TRADE。"
+                )
+            else:
+                permission = "主流波段條件成立後才小量；突破後必須守價，未成立=NO-TRADE。"
+        elif h45_status.startswith("M-PREP"):
+            status = "S-PREP｜主流起漲前兆，等量價確認"
+            cap = 0.0
+            permission = "主流/領先/起漲前兆已形成，但尚未取得交易許可；等量能、收盤結構與回測/突破守價確認後再升格。"
+        elif h45_status.startswith("M-WATCH") or (h45_status.startswith("M-READY") and market.get("hard")):
+            status = "S-WATCH｜主流/個股強勢觀察"
+            cap = 0.0
+            permission = "列入主流強勢觀察，不直接追價；等回測承接或突破＋守價後重新取得交易資格。"
+        else:
+            status = "S-NO｜非主流波段優先"
+            cap = 0.0
+            permission = "H45未通過主流族群＋領先股＋起漲結構，不列強勢路徑。"
+        reasons = [x for x in [h45_reason, data_reason if data_block else "", "極端市場只觀察" if market.get("hard") else ""] if x]
+        return {
+            "score": round(_clamp(h45_score), 2), "status": status, "permission": permission, "cap": cap,
+            "reason": "；".join(reasons) or f"H45主流波段{h45_score:.1f}／族群{h45_sector:.1f}／起漲{h45_onset:.1f}",
+            "m": m,
+        }
+
+    # Legacy fallback only for old frames/tests that have not yet passed H45.
     rr_score = _clamp(45.0 + 14.0 * max(0.0, m["rr"] - 1.0))
     recent_score = _clamp(50.0 + 5.0 * m["ret1"] + 1.5 * m["ret5"])
     score = (
@@ -221,8 +268,6 @@ def _strong_profile(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
         + 0.06 * _clamp(100.0 - m["chase"]) + 0.04 * rr_score + 0.04 * recent_score
     )
     score = round(_clamp(score), 2)
-
-    data_block, data_reason = _data_block(row)
     hard_safety = bool(
         m["trade"] >= 70 and m["risk"] >= 62 and m["rr"] >= 1.25 and 0 < m["stop"] <= 7.0 and m["chase"] <= 60
         and (m["amount"] <= 0 or m["amount"] >= 120)
@@ -233,38 +278,13 @@ def _strong_profile(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     ready_threshold = 68.0 if market.get("defensive") else 65.0
     ready = bool(not data_block and not market.get("hard") and hard_safety and structure and leadership and reachable and score >= ready_threshold)
     watch = bool(not data_block and hard_safety and score >= 60 and (leadership or structure))
-
     if ready:
-        status = "S-READY｜強勢條件進場"
-        cap = 3.0 if market.get("defensive") else 5.0
-        if m["main_entry"] > 0:
-            permission = f"強勢不追高：優先等 {m['main_entry']:.2f} 附近承接；若改走突破，需站上 {m['trigger']:.2f} 且守住 {m['guard']:.2f}。未成立=NO-TRADE。"
-        else:
-            permission = "強勢條件成立後才小量；突破後必須守價，未成立=NO-TRADE。"
+        status, cap, permission = "S-READY｜強勢條件進場", (3.0 if market.get("defensive") else 5.0), "強勢條件成立後才小量；未成立=NO-TRADE。"
     elif watch:
-        status = "S-WATCH｜強勢但等待更好買點"
-        cap = 0.0
-        permission = "列入強勢觀察，不直接追價；等回測承接或突破＋守價後重新取得交易資格。"
+        status, cap, permission = "S-WATCH｜強勢但等待更好買點", 0.0, "列入強勢觀察，不直接追價。"
     else:
-        status = "S-NO｜非強勢優先"
-        cap = 0.0
-        permission = "目前不列強勢路徑。"
-
-    reasons = []
-    if data_block:
-        reasons.append(data_reason)
-    if leadership:
-        reasons.append("主流/族群或當日強度成立")
-    if structure:
-        reasons.append("收盤結構可接受")
-    if not hard_safety:
-        reasons.append("Trade/Risk/RR/停損/追價至少一項不足")
-    if not reachable:
-        reasons.append(f"可執行距離{m['exec_distance']:.1f}%偏遠")
-    if market.get("hard"):
-        reasons.append("極端市場只觀察")
-    return {"score": score, "status": status, "permission": permission, "cap": cap, "reason": "；".join(reasons) or "強勢條件未形成", "m": m}
-
+        status, cap, permission = "S-NO｜非強勢優先", 0.0, "目前不列強勢路徑。"
+    return {"score": score, "status": status, "permission": permission, "cap": cap, "reason": "legacy fallback", "m": m}
 
 def _bargain_profile(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     m = _metrics(row)
@@ -386,7 +406,11 @@ def apply_dual_opportunity_engine(frame: pd.DataFrame) -> pd.DataFrame:
             route = "強勢延續"
             status = s_profile["status"]
             score = s_profile["score"]
-            decision = "可考慮條件進場" if status.startswith("S-READY") else "強勢等待買點"
+            decision = (
+                "可考慮條件進場" if status.startswith("S-READY")
+                else "主流起漲前兆｜等確認" if status.startswith("S-PREP")
+                else "強勢等待買點"
+            )
             cap = s_profile["cap"]
             reason = s_profile["reason"]
         elif b_active:
@@ -444,31 +468,51 @@ def build_focus_decision_table(frame: pd.DataFrame, strong_top: int = 2, bargain
     strong_status = work.get("H42強勢狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     bargain_status = work.get("H42價差狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
 
-    strong = work.loc[strong_status.str.match(r"^(S-READY|S-WATCH)")].copy()
+    strong = work.loc[strong_status.str.match(r"^(S-READY|S-PREP|S-WATCH)")].copy()
     bargain = work.loc[bargain_status.str.match(r"^(B-READY|B-WAIT)")].copy()
     for df, status_col, score_col in [
         (strong, "H42強勢狀態", "H42強勢分"), (bargain, "H42價差狀態", "H42價差分")
     ]:
         if not df.empty:
-            df["_ready"] = df[status_col].astype(str).str.contains("READY").astype(int)
+            _status_series = df[status_col].astype(str)
+            df["_status_priority"] = _status_series.map(
+                lambda x: 3 if "READY" in x else 2 if "PREP" in x else 1
+            )
             df["_score"] = pd.to_numeric(df.get(score_col), errors="coerce").fillna(0.0)
-            df["_v188"] = pd.to_numeric(df.get("V188股神作戰優先分", 0), errors="coerce").fillna(0.0)
+            _v188_raw = df["V188股神作戰優先分"] if "V188股神作戰優先分" in df.columns else pd.Series([0.0] * len(df), index=df.index)
+            df["_v188"] = pd.to_numeric(_v188_raw, errors="coerce").fillna(0.0)
+            _sector_raw = df["H45族群主流分"] if "H45族群主流分" in df.columns else pd.Series([0.0] * len(df), index=df.index)
+            df["_sector_score"] = pd.to_numeric(_sector_raw, errors="coerce").fillna(0.0)
             # Bargain WAIT should prefer a controllable structure over the largest
             # raw drawdown.  A falling knife may stay in the full diagnostic table
             # but must not crowd safer support/reclaim candidates off the first sheet.
             if status_col == "H42價差狀態":
                 df["_structure_safe"] = df.get("H42落刀風險", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).ne("高").astype(int)
-                df.sort_values(["_ready", "_structure_safe", "_score", "_v188"], ascending=[False, False, False, False], inplace=True, kind="mergesort")
+                df.sort_values(["_status_priority", "_structure_safe", "_score", "_v188"], ascending=[False, False, False, False], inplace=True, kind="mergesort")
             else:
-                df.sort_values(["_ready", "_score", "_v188"], ascending=[False, False, False], inplace=True, kind="mergesort")
+                df.sort_values(["_status_priority", "_sector_score", "_score", "_v188"], ascending=[False, False, False, False], inplace=True, kind="mergesort")
 
     selected: list[tuple[str, pd.Series]] = []
     used_codes: set[str] = set()
-    for _, row in strong.head(max(0, int(strong_top))).iterrows():
-        c = _s(row.get("股票代號"))
-        if c and c not in used_codes:
-            selected.append(("強勢延續", row))
-            used_codes.add(c)
+    # H45 第一張重點頁避免兩個強勢席位都被同一族群占滿。先各取一個
+    # 主流族群代表，再用剩餘名額補最強個股，讓使用者同時看到「主線」
+    # 與「領漲股」，而不是兩檔高度同質的股票。
+    strong_limit = max(0, int(strong_top))
+    used_sectors: set[str] = set()
+    for _, row in strong.iterrows():
+        if len([1 for route, _ in selected if route == "強勢延續"]) >= strong_limit:
+            break
+        c = _s(row.get("股票代號")); sector = _s(row.get("類別")) or _s(row.get("族群名稱"))
+        if c and c not in used_codes and (not sector or sector not in used_sectors):
+            selected.append(("強勢延續", row)); used_codes.add(c)
+            if sector: used_sectors.add(sector)
+    if len([1 for route, _ in selected if route == "強勢延續"]) < strong_limit:
+        for _, row in strong.iterrows():
+            if len([1 for route, _ in selected if route == "強勢延續"]) >= strong_limit:
+                break
+            c = _s(row.get("股票代號"))
+            if c and c not in used_codes:
+                selected.append(("強勢延續", row)); used_codes.add(c)
     for _, row in bargain.iterrows():
         if len([1 for route, _ in selected if route == "跌深價差"]) >= max(0, int(bargain_top)):
             break
@@ -502,6 +546,9 @@ def build_focus_decision_table(frame: pd.DataFrame, strong_top: int = 2, bargain
             "觸發後守價": _first_num(row, ["觸發後守價", "守價回測參考價"], 0.0, positive=True),
             "停損價": _first_num(row, ["實戰停損參考", "停損參考"], 0.0, positive=True),
             "路徑分": _first_num(row, ["H42強勢分" if route == "強勢延續" else "H42價差分"], 0.0),
+            "H45主流波段狀態": _s(row.get("H45主流波段狀態")),
+            "H45主流波段分": _first_num(row, ["H45主流波段分"], 0.0),
+            "H45族群主流分": _first_num(row, ["H45族群主流分"], 0.0),
             "V188/Trade/Risk": f"{_first_num(row, ['V188股神作戰優先分'], 0.0):.1f} / {_first_num(row, ['SuperAI Trade分'], 0.0):.1f} / {_first_num(row, ['Risk風控安全分'], 0.0):.1f}",
             "RR": _first_num(row, ["路徑風險報酬比", "SuperAI執行風報比"], 0.0),
             "隔日校準上漲機率%": _first_num(row, ["SuperAI校準後隔日上漲機率%", "H32隔日上漲機率%"], 0.0),
@@ -517,7 +564,7 @@ def build_focus_decision_table(frame: pd.DataFrame, strong_top: int = 2, bargain
     preferred = [
         "重點順位", "股票代號", "股票名稱", "機會類型", "狀態", "目前決策", "條件操作許可",
         "最新價", "進場/承接參考", "突破觸發價", "觸發後守價", "停損價",
-        "路徑分", "V188/Trade/Risk", "RR",
+        "路徑分", "H45主流波段狀態", "H45主流波段分", "H45族群主流分", "V188/Trade/Risk", "RR",
         "隔日校準上漲機率%", "10日預估報酬%", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
         "建議倉位上限%", "大盤情境", "重點理由",
     ]
