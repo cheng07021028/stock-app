@@ -320,8 +320,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h45_mainstream_wave_priority_20260820"
-EXCEL_COLUMN_LAYOUT_VERSION = "V191-H37-EXCEL-COLUMN-LAYOUT-20260817"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h46_excel_column_name_sorter_20260820"
+EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -13705,7 +13705,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H37：『超級AI股神精選攻略』與『股神推薦總排名』可各自永久保存欄位順序；排名、股票代號、股票名稱固定在最前，其他欄位可自由套版與微調。")
+    st.caption("H46：『超級AI股神精選攻略』與『股神推薦總排名』改用專業欄位名稱排序器；直接選來源欄位名稱與目標欄位名稱即可定位，並各自永久保存。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -13718,7 +13718,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         "調整 Excel 主表欄位版型",
         value=False,
         key=_k("show_excel_layout_manager_h37"),
-        help="開啟後可分別調整『超級AI股神精選攻略』與『股神推薦總排名』；設定會永久保存。",
+        help="開啟後可直接用欄位名稱調整兩張主表順序；不需要輸入順位或反覆左右移動，設定會永久保存。",
     )
     if _show_excel_layout_manager:
         _render_column_order_manager(
@@ -13734,10 +13734,10 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
             _get_master_rank_default_cols(),
         )
     else:
-        st.caption("需要調整欄位時再開啟上方開關；平常關閉可避免在推薦頁建立大量欄位控制元件。")
+        st.caption("需要調整欄位時再開啟上方開關；H46 使用欄位名稱定位與批次排序，平常可保持關閉以維持頁面速度。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H37-EXCEL-LAYOUT|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H45-MAINSTREAM-WAVE|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H45-MAINSTREAM-WAVE|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
@@ -14250,20 +14250,80 @@ def _clear_full_table_editor_widget_states():
             st.session_state.pop(key, None)
 
 
-def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
-    """v81：欄位順序快速管理器。
+def _move_columns_by_name_anchor(
+    order: list[str],
+    selected_cols: list[str],
+    anchor_col: str,
+    *,
+    place_after: bool = False,
+) -> list[str]:
+    """H46：用「欄位名稱」當錨點移動欄位，不再要求使用者計算第幾欄。"""
+    current = [str(c) for c in (order or [])]
+    selected = []
+    seen = set()
+    for c in selected_cols or []:
+        c = str(c)
+        if c in current and c != anchor_col and c not in seen:
+            selected.append(c)
+            seen.add(c)
+    if not selected or anchor_col not in current:
+        return current
+    remain = [c for c in current if c not in seen]
+    if anchor_col not in remain:
+        return current
+    idx = remain.index(anchor_col) + (1 if place_after else 0)
+    return remain[:idx] + selected + remain[idx:]
 
-    說明：Streamlit data_editor 的前端拖曳欄位順序不會穩定回寫 Python，
-    因此這裡提供不需額外套件的快速欄位管理：多選批次移動、指定位置、
-    常用版面套用；每次操作都會立即寫入 godpick_column_orders.json 並重建表格。
+
+def _prioritize_columns_by_name(order: list[str], priority_cols: list[str]) -> list[str]:
+    """H46：依使用者點選/貼上的欄位名稱順序排到最前，其餘欄位維持原相對順序。"""
+    current = [str(c) for c in (order or [])]
+    priority = []
+    seen = set()
+    for c in priority_cols or []:
+        c = str(c)
+        if c in current and c not in seen:
+            priority.append(c)
+            seen.add(c)
+    return priority + [c for c in current if c not in seen]
+
+
+def _parse_column_name_sequence(text: str, available_cols: list[str]) -> tuple[list[str], list[str]]:
+    """H46：支援每行、逗號、分號、｜分隔的欄位名稱；回傳有效欄位與找不到的名稱。"""
+    raw = str(text or "")
+    for sep in ["，", ",", "；", ";", "｜", "|"]:
+        raw = raw.replace(sep, "\n")
+    tokens = [line.strip() for line in raw.splitlines() if line.strip()]
+    available = {str(c): str(c) for c in available_cols}
+    valid: list[str] = []
+    missing: list[str] = []
+    seen = set()
+    for token in tokens:
+        if token in available:
+            if token not in seen:
+                valid.append(token)
+                seen.add(token)
+        elif token not in missing:
+            missing.append(token)
+    return valid, missing
+
+
+def _render_column_order_manager(name: str, title: str, available_cols: list[str], default_cols: list[str]) -> list[str]:
+    """H46：專業欄位名稱排序器。
+
+    核心操作全部改成「欄位名稱 → 目標欄位名稱」；不再要求輸入第幾欄，
+    也不再以左移/右移反覆操作。支援批次名稱定位、依選取順序建立優先欄位、
+    貼上欄位名稱順序、常用版面與永久保存。
     """
     state_key = _column_order_state_key(name)
     applied_key = _k(f"column_order_applied_{name}")
     draft_key = _k(f"column_order_draft_{name}")
-    pick_key = _k(f"column_pick_{name}")
-    multi_key = _k(f"column_multi_pick_{name}")
-    target_pos_key = _k(f"column_target_pos_{name}")
-    preset_key = _k(f"column_preset_{name}")
+    preset_key = _k(f"column_preset_h46_{name}")
+    source_key = _k(f"column_source_h46_{name}")
+    anchor_key = _k(f"column_anchor_h46_{name}")
+    relation_key = _k(f"column_relation_h46_{name}")
+    priority_key = _k(f"column_priority_h46_{name}")
+    paste_key = _k(f"column_paste_h46_{name}")
 
     fixed_cols = [c for c in _fixed_columns_for_order_manager(name) if c in available_cols]
     managed_available_cols = [c for c in available_cols if c not in fixed_cols]
@@ -14271,7 +14331,6 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
 
     persistent_order = [c for c in _load_persistent_column_order(name) if c in managed_available_cols]
     base_order = persistent_order if persistent_order else st.session_state.get(applied_key, st.session_state.get(state_key, managed_default_cols))
-
     applied_order = _normalize_column_order(base_order, managed_available_cols, managed_default_cols)
     draft_order = _normalize_column_order(st.session_state.get(draft_key, applied_order), managed_available_cols, managed_default_cols)
 
@@ -14299,27 +14358,14 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
         st.toast(st.session_state[_k(f"column_order_last_message_{name}")], icon="✅" if ok else "⚠️")
         st.rerun()
 
-    def _remove_selected(order: list[str], selected: list[str]) -> list[str]:
-        selected_set = set(selected)
-        return [c for c in order if c not in selected_set]
-
-    def _insert_selected(order: list[str], selected: list[str], index: int) -> list[str]:
-        selected_in_order = [c for c in order if c in set(selected)]
-        remain = _remove_selected(order, selected_in_order)
-        index = max(0, min(int(index), len(remain)))
-        return remain[:index] + selected_in_order + remain[index:]
-
     preset_map = _column_order_presets_v191_h37(name, managed_default_cols, managed_available_cols)
 
-    def _preset_columns(preset_name: str) -> list[str]:
-        return list(preset_map.get(preset_name, managed_default_cols))
-
     with st.expander(title, expanded=False):
-        fixed_msg = "；固定欄位：" + "、".join(fixed_cols) if fixed_cols else ""
+        fixed_msg = "、".join(fixed_cols) if fixed_cols else "無"
         st.caption(
-            "欄位順序會永久記錄；固定欄位不參與排序" + fixed_msg + "。"
-            "H37：可套用管理決策／交易執行／AI預測／風控稽核版，再用單欄或批次移動微調；"
-            "只改 Excel 閱讀順序，不改推薦排名、分數或交易許可。"
+            "H46｜欄位名稱排序工作台：直接選『要移動的欄位名稱』與『目標欄位名稱』，"
+            "即可插入前方/後方；不需要再計算順位或反覆左移右移。"
+            f"固定欄位：{fixed_msg}。所有未指定欄位都會保留，不會刪除。"
         )
 
         last_msg = st.session_state.get(_k(f"column_order_last_message_{name}"), "")
@@ -14332,102 +14378,168 @@ def _render_column_order_manager(name: str, title: str, available_cols: list[str
         p1, p2 = st.columns([2, 1])
         with p1:
             preset = st.selectbox(
-                "快速套用常用欄位版面",
+                "快速套用專業版型",
                 ["請選擇", *list(preset_map.keys())],
                 key=preset_key,
             )
         with p2:
-            if st.button("套用版面", key=_k(f"apply_preset_{name}"), use_container_width=True, type="primary"):
+            if st.button("套用版型", key=_k(f"apply_preset_h46_{name}"), use_container_width=True, type="primary"):
                 if preset and preset != "請選擇":
-                    _commit_column_order(_preset_columns(preset), f"已套用「{preset}」欄位版面。")
+                    preset_cols = list(preset_map.get(preset, managed_default_cols))
+                    _commit_column_order(preset_cols, f"已套用『{preset}』欄位版型。")
                 else:
-                    st.warning("請先選擇一個常用版面。")
+                    st.warning("請先選擇一個版型。")
 
-        if pick_key not in st.session_state or st.session_state[pick_key] not in draft_order:
-            st.session_state[pick_key] = draft_order[0] if draft_order else ""
-        picked = st.selectbox("單一欄位快速移動", draft_order, key=pick_key) if draft_order else ""
+        tab_anchor, tab_priority, tab_preview = st.tabs([
+            "欄位名稱定位",
+            "優先欄位排序",
+            "目前順序",
+        ])
 
-        b1, b2, b3, b4, b5 = st.columns(5)
-        if draft_order and picked:
-            idx = draft_order.index(picked)
-            with b1:
-                if st.button("左移", key=_k(f"move_left_{name}"), use_container_width=True) and idx > 0:
-                    new_order = draft_order.copy()
-                    new_order[idx - 1], new_order[idx] = new_order[idx], new_order[idx - 1]
-                    _commit_column_order(new_order, f"已將「{picked}」左移。")
-            with b2:
-                if st.button("右移", key=_k(f"move_right_{name}"), use_container_width=True) and idx < len(draft_order) - 1:
-                    new_order = draft_order.copy()
-                    new_order[idx + 1], new_order[idx] = new_order[idx], new_order[idx + 1]
-                    _commit_column_order(new_order, f"已將「{picked}」右移。")
-            with b3:
-                if st.button("移到最前", key=_k(f"move_front_{name}"), use_container_width=True):
-                    new_order = draft_order.copy()
-                    new_order.remove(picked)
-                    new_order.insert(0, picked)
-                    _commit_column_order(new_order, f"已將「{picked}」移到最前。")
-            with b4:
-                if st.button("移到最後", key=_k(f"move_last_{name}"), use_container_width=True):
-                    new_order = draft_order.copy()
-                    new_order.remove(picked)
-                    new_order.append(picked)
-                    _commit_column_order(new_order, f"已將「{picked}」移到最後。")
-            with b5:
-                if st.button("恢復原始設定", key=_k(f"move_restore_default_{name}"), use_container_width=True):
-                    _commit_column_order(managed_default_cols, "已恢復原始欄位順序。")
+        with tab_anchor:
+            st.markdown("**把欄位直接放到另一個欄位名稱的前面／後面**")
+            st.caption("可一次選多個來源欄位；來源欄位會依你點選的順序一起移動。")
+            selected_cols = st.multiselect(
+                "① 要移動的欄位名稱",
+                options=draft_order,
+                default=[c for c in st.session_state.get(source_key, []) if c in draft_order],
+                key=source_key,
+                placeholder="輸入欄位名稱即可搜尋，例如：H45主流波段狀態",
+            )
+            anchor_options = [c for c in draft_order if c not in set(selected_cols)]
+            if anchor_options:
+                if st.session_state.get(anchor_key) not in anchor_options:
+                    st.session_state[anchor_key] = anchor_options[0]
+                anchor_col = st.selectbox(
+                    "② 目標欄位名稱",
+                    options=anchor_options,
+                    key=anchor_key,
+                    help="選擇你希望來源欄位插入到哪一個欄位的前面或後面。",
+                )
+                relation = st.radio(
+                    "③ 插入位置",
+                    ["放在目標欄位前面", "放在目標欄位後面"],
+                    horizontal=True,
+                    key=relation_key,
+                )
+                a1, a2, a3 = st.columns([1.4, 1, 1])
+                with a1:
+                    if st.button(
+                        "套用欄位名稱定位",
+                        key=_k(f"apply_anchor_h46_{name}"),
+                        use_container_width=True,
+                        type="primary",
+                        disabled=not selected_cols,
+                    ):
+                        new_order = _move_columns_by_name_anchor(
+                            draft_order,
+                            selected_cols,
+                            anchor_col,
+                            place_after=(relation == "放在目標欄位後面"),
+                        )
+                        pos_text = "後面" if relation == "放在目標欄位後面" else "前面"
+                        _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到『{anchor_col}』{pos_text}。")
+                with a2:
+                    if st.button(
+                        "放到最前",
+                        key=_k(f"anchor_front_h46_{name}"),
+                        use_container_width=True,
+                        disabled=not selected_cols,
+                    ):
+                        new_order = _prioritize_columns_by_name(draft_order, selected_cols)
+                        _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位依名稱選取順序移到固定欄後方。")
+                with a3:
+                    if st.button(
+                        "放到最後",
+                        key=_k(f"anchor_last_h46_{name}"),
+                        use_container_width=True,
+                        disabled=not selected_cols,
+                    ):
+                        chosen = [c for c in selected_cols if c in draft_order]
+                        chosen_set = set(chosen)
+                        new_order = [c for c in draft_order if c not in chosen_set] + chosen
+                        _commit_column_order(new_order, f"已將 {len(chosen)} 個欄位移到最後。")
+            else:
+                st.info("目前沒有可作為目標的其他欄位。")
 
-        st.divider()
-        st.markdown("**v81 批次欄位快速管理**")
+        with tab_priority:
+            st.markdown("**直接用欄位名稱建立你最想先看的順序**")
+            st.caption(
+                "依序點選欄位名稱，第一個選的會排最前、第二個排第二……；"
+                "未選欄位會保持目前相對順序並自動接在後面。"
+            )
+            priority_cols = st.multiselect(
+                "優先欄位名稱（選取順序 = Excel 排列順序）",
+                options=managed_available_cols,
+                default=[c for c in st.session_state.get(priority_key, []) if c in managed_available_cols],
+                key=priority_key,
+                placeholder="依你想看的順序搜尋並點選欄位名稱",
+            )
+            if priority_cols:
+                st.caption("將套用：" + " → ".join(priority_cols[:12]) + (" → …" if len(priority_cols) > 12 else ""))
+            if st.button(
+                "依欄位名稱順序套用",
+                key=_k(f"apply_priority_h46_{name}"),
+                use_container_width=True,
+                type="primary",
+                disabled=not priority_cols,
+            ):
+                _commit_column_order(
+                    _prioritize_columns_by_name(draft_order, priority_cols),
+                    f"已依 {len(priority_cols)} 個欄位名稱的選取順序重新排列。",
+                )
 
-        selected_cols = st.multiselect(
-            "一次選多個欄位",
-            options=draft_order,
-            default=[c for c in st.session_state.get(multi_key, []) if c in draft_order],
-            key=multi_key,
-            help="可一次選多個欄位，批次移到最前、最後、勾選後面或指定位置。",
-        )
+            st.divider()
+            st.markdown("**批次貼上欄位名稱**")
+            st.caption("可從 Excel / 文件直接貼上；每行一個欄位名稱，也支援逗號、分號、｜分隔。貼上的先後順序就是排序。")
+            pasted_text = st.text_area(
+                "貼上欄位名稱",
+                key=paste_key,
+                height=150,
+                placeholder="例如：\nH45主流波段狀態\nH45主流交易綜合分\nV188股神作戰優先分\nSuperAI Trade分",
+            )
+            pasted_cols, missing_cols = _parse_column_name_sequence(pasted_text, managed_available_cols)
+            if pasted_text:
+                if pasted_cols:
+                    st.success(f"已辨識 {len(pasted_cols)} 個有效欄位。")
+                if missing_cols:
+                    st.warning("找不到欄位：" + "、".join(missing_cols[:12]) + ("…" if len(missing_cols) > 12 else ""))
+            if st.button(
+                "依貼上名稱順序套用",
+                key=_k(f"apply_paste_h46_{name}"),
+                use_container_width=True,
+                disabled=not pasted_cols or bool(missing_cols),
+            ):
+                _commit_column_order(
+                    _prioritize_columns_by_name(draft_order, pasted_cols),
+                    f"已依貼上的 {len(pasted_cols)} 個欄位名稱重新排列。",
+                )
 
-        target_default = int(st.session_state.get(target_pos_key, 1) or 1)
-        target_pos = st.number_input(
-            "指定目標位置（1 = 第一個非固定欄位；固定欄位永遠保持在最前）",
-            min_value=1,
-            max_value=max(1, len(draft_order)),
-            value=max(1, min(target_default, max(1, len(draft_order)))),
-            step=1,
-            key=target_pos_key,
-        )
-
-        q1, q2, q3, q4 = st.columns(4)
-        with q1:
-            if st.button("批次移到最前", key=_k(f"batch_front_{name}"), use_container_width=True, disabled=not selected_cols):
-                new_order = _insert_selected(draft_order, selected_cols, 0)
-                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位批次移到最前。")
-        with q2:
-            if st.button("批次移到最後", key=_k(f"batch_last_{name}"), use_container_width=True, disabled=not selected_cols):
-                remain = _remove_selected(draft_order, selected_cols)
-                selected_in_order = [c for c in draft_order if c in set(selected_cols)]
-                _commit_column_order(remain + selected_in_order, f"已將 {len(selected_cols)} 個欄位批次移到最後。")
-        with q3:
-            _after_fixed_label = "移到固定欄後面" if fixed_cols else "批次移到最前"
-            if st.button(_after_fixed_label, key=_k(f"batch_after_checkbox_{name}"), use_container_width=True, disabled=not selected_cols):
-                new_order = _insert_selected(draft_order, selected_cols, 0)
-                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到固定欄後面。" if fixed_cols else f"已將 {len(selected_cols)} 個欄位批次移到最前。")
-        with q4:
-            if st.button("移到指定位置", key=_k(f"batch_to_pos_{name}"), use_container_width=True, disabled=not selected_cols):
-                new_order = _insert_selected(draft_order, selected_cols, int(target_pos) - 1)
-                _commit_column_order(new_order, f"已將 {len(selected_cols)} 個欄位移到第 {int(target_pos)} 個位置。")
-
-        c1, c2 = st.columns([1.3, 3])
-        with c1:
-            if st.button("儲存目前順序", key=_k(f"apply_column_order_{name}"), use_container_width=True):
-                _commit_column_order(draft_order, "目前欄位順序已重新儲存。")
-        with c2:
-            st.caption("提示：表格本身的滑鼠拖曳欄位只會改前端視覺，不會穩定回寫；請用本管理器保存。")
-
-        preview_order = fixed_cols + st.session_state.get(applied_key, applied_order)
-        st.caption("目前已保存欄位順序：" + " ｜ ".join(preview_order[:24]) + (" ..." if len(preview_order) > 24 else ""))
+        with tab_preview:
+            preview_order = fixed_cols + st.session_state.get(applied_key, applied_order)
+            preview_df = pd.DataFrame({
+                "順位": list(range(1, len(preview_order) + 1)),
+                "欄位名稱": preview_order,
+                "固定": ["是" if c in fixed_cols else "" for c in preview_order],
+            })
+            st.dataframe(
+                preview_df,
+                use_container_width=True,
+                hide_index=True,
+                height=min(560, 42 + 35 * min(len(preview_df), 14)),
+            )
+            r1, r2 = st.columns(2)
+            with r1:
+                if st.button("恢復專業預設順序", key=_k(f"restore_default_h46_{name}"), use_container_width=True):
+                    _commit_column_order(managed_default_cols, "已恢復專業預設欄位順序。")
+            with r2:
+                if st.button("重新儲存目前順序", key=_k(f"resave_h46_{name}"), use_container_width=True):
+                    _commit_column_order(draft_order, "目前欄位順序已重新保存。")
+            st.caption(f"共 {len(preview_order)} 欄；固定欄位 {len(fixed_cols)} 欄，其餘 {len(preview_order)-len(fixed_cols)} 欄可用名稱自由排序。")
 
     return fixed_cols + st.session_state.get(applied_key, applied_order)
+
+
 def _postprocess_dependency_signature_v164(macro_bridge: dict[str, Any], enabled: bool) -> str:
     """只在真正依賴資料改變時重算推薦後處理，不因一般 widget rerun 重算。"""
     file_parts: list[str] = []
