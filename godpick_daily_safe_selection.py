@@ -24,7 +24,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h45_daily_safe_selection_mainstream_wave_20260820"
+VERSION = "v191_h47_daily_safe_selection_leader_stage_20260821"
 
 H34_COLUMNS = [
     "H34每日精選", "H34每日精選排名", "H34每日目標檔數", "H34安全精選分",
@@ -244,6 +244,10 @@ def _metrics(row: pd.Series) -> dict[str, float]:
         "sector_main": _first_num(row, ["H45族群主流分"], 0.0),
         "onset": _first_num(row, ["H45起漲結構分"], 0.0),
         "mainwave_status": _first_text(row, ["H45主流波段狀態"]),
+        "h47_status": _first_text(row, ["H47主流領先狀態", "H47波段階段"]),
+        "h47_trade_status": _first_text(row, ["H47交易候選狀態"]),
+        "h47_start": _first_num(row, ["H47起漲優先分"], 0.0),
+        "h47_rs": _first_num(row, ["H47個股相對強度分"], 0.0),
         "priority": priority,
         "trade": trade,
         "alpha": alpha,
@@ -321,34 +325,56 @@ def _quality_score(m: dict[str, float]) -> float:
     gap_score = 100.0 if m["gap"] <= 1.5 else 90.0 if m["gap"] <= 2.5 else 78.0 if m["gap"] <= 4 else 62.0 if m["gap"] <= 5.5 else 35.0
     forecast_score = _clamp(50.0 + m["t1"] * 8.0 + m["swing"] * 1.8)
     trigger_reach_score = 100.0 if m["execution_distance"] <= 1.5 else 90.0 if m["execution_distance"] <= 3.0 else 78.0 if m["execution_distance"] <= 4.5 else 62.0 if m["execution_distance"] <= 5.5 else 35.0 if m["execution_distance"] <= 7.0 else 10.0
-    # H45：安全精選不再讓 Trade/RR 完全壓過「是不是主流、是不是起漲」。
-    # H45 主流波段/族群/起漲合計19%，仍保留 Entry/Risk/RR 的執行安全。
-    # 舊資料沒有H45欄位時，三項以中性50回補，維持向下相容。
-    mainwave = m.get("mainwave", 0.0) or 50.0
-    sector_main = m.get("sector_main", 0.0) or 50.0
-    onset = m.get("onset", 0.0) or 50.0
-    score = (
-        m["priority"] * 0.12 + m["trade"] * 0.08 + m["ai"] * 0.04
-        + m["entry"] * 0.11 + m["risk"] * 0.12 + m["op"] * 0.07
-        + rr_score * 0.10 + (100.0 - m["chase"]) * 0.05
-        + m["mainstream"] * 0.03 + m["sector"] * 0.02 + m["prob"] * 0.03
-        + forecast_score * 0.01 + gap_score * 0.01 + trigger_reach_score * 0.02
-        + mainwave * 0.11 + sector_main * 0.05 + onset * 0.03
-    )
+    # H47: selection score must reward current leadership / early-stage fit, while
+    # execution safety remains a separate veto.  This prevents a safe but weak
+    # stock from outranking the real market leaders merely because Risk is high.
+    h47_available = bool(m.get("h47_status") or m.get("h47_start", 0) > 0 or m.get("h47_rs", 0) > 0)
+    if h47_available:
+        h47_start = m.get("h47_start", 0.0) or 50.0
+        h47_rs = m.get("h47_rs", 0.0) or 50.0
+        sector_main = m.get("sector_main", 0.0) or 50.0
+        score = (
+            h47_start * 0.17 + h47_rs * 0.13 + sector_main * 0.08
+            + m["priority"] * 0.10 + m["trade"] * 0.08 + m["entry"] * 0.09
+            + m["risk"] * 0.11 + m["op"] * 0.06 + rr_score * 0.08
+            + (100.0 - m["chase"]) * 0.04 + m["prob"] * 0.02
+            + trigger_reach_score * 0.02 + gap_score * 0.01 + forecast_score * 0.01
+        )
+    else:
+        mainwave = m.get("mainwave", 0.0) or 50.0
+        sector_main = m.get("sector_main", 0.0) or 50.0
+        onset = m.get("onset", 0.0) or 50.0
+        score = (
+            m["priority"] * 0.12 + m["trade"] * 0.08 + m["ai"] * 0.04
+            + m["entry"] * 0.11 + m["risk"] * 0.12 + m["op"] * 0.07
+            + rr_score * 0.10 + (100.0 - m["chase"]) * 0.05
+            + m["mainstream"] * 0.03 + m["sector"] * 0.02 + m["prob"] * 0.03
+            + forecast_score * 0.01 + gap_score * 0.01 + trigger_reach_score * 0.02
+            + mainwave * 0.11 + sector_main * 0.05 + onset * 0.03
+        )
     return round(_clamp(score), 2)
-
 
 def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
     veto = _hard_veto(row, market)
     m = _metrics(row)
     score = _quality_score(m)
+    h47_available = bool(m.get("h47_status") or m.get("h47_start", 0) > 0 or m.get("h47_rs", 0) > 0)
+    h47_status = str(m.get("h47_status") or "")
+    h47_trade = str(m.get("h47_trade_status") or "")
+    h47_market_ok = h47_status.startswith(("L-EARLY", "L-PULLBACK", "L-LEADER"))
+    h47_extended = h47_status.startswith("L-EXTENDED")
+    h47_trade_ready = h47_trade.startswith("T-READY")
     h45_available = bool(m.get("mainwave_status") or m.get("mainwave", 0) > 0)
     h45_ready = str(m.get("mainwave_status") or "").startswith("M-READY")
     h45_prep = str(m.get("mainwave_status") or "").startswith("M-PREP")
     h45_watch = str(m.get("mainwave_status") or "").startswith("M-WATCH")
     h45_mainline_ok = bool(h45_ready or h45_prep or (h45_watch and m.get("mainwave", 0) >= 63))
+    mainline_ok = h47_market_ok if h47_available else h45_mainline_ok
     if veto:
         return {"eligible": False, "formal": False, "hard_veto": veto, "score": score, "reason": "、".join(veto[:5]), "m": m}
+    if h47_available and h47_extended:
+        return {"eligible": False, "formal": False, "hard_veto": [], "score": score,
+                "reason": "H47主流領漲但已延伸｜禁止追價，只等回測重新取得T-READY", "m": m}
 
     # H38：紅燈市場不能用一般 Entry/Risk/RR 條件繞過正式引擎。
     # 唯一可進 H34 的例外是正式紅燈逆勢模組已判定 READY-R；WATCH-R/R2
@@ -370,9 +396,9 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
             score >= 65 and m["priority"] >= 62 and m["trade"] >= 62
             and m["risk"] >= 58 and m["rr"] >= 1.25 and m["chase"] <= 62
             and m["execution_distance"] <= 5.5
-            # H45存在時，防守盤每日安全精選必須是主流波段 READY/PREP。
-            # 跌深價差另由H42/H45雙路徑呈現，避免兩個策略互相污染。
-            and ((not h45_available) or h45_ready or h45_prep)
+            # H47存在時，防守盤每日安全精選只接受真正主流市場結構，
+            # 且必須已取得T-READY。領漲但過熱者可列主流核心，不可列每日買進精選。
+            and ((h47_market_ok and h47_trade_ready) if h47_available else ((not h45_available) or h45_ready or h45_prep))
         )
 
     # H34-F: safe near-miss allowed to become a formal recommendation.
@@ -380,7 +406,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
         m["entry"] >= 66 and m["risk"] >= 63 and m["buy"] >= 58
         and m["op"] >= 66 and m["rr"] >= 1.50 and 0 < m["stop"] <= 6.5
         and m["amount"] >= 250 and m["chase"] <= 52 and m["gap"] <= 5.0
-        and ((h45_mainline_ok and m.get("mainwave", 0) >= 62) if h45_available else (m["mainstream"] >= 55 or m["sector"] >= 55))
+        and ((h47_market_ok and m.get("h47_start",0) >= 60) if h47_available else ((h45_mainline_ok and m.get("mainwave", 0) >= 62) if h45_available else (m["mainstream"] >= 55 or m["sector"] >= 55)))
         and m["prob"] >= 52 and score >= 69
     )
     # H41-A：把「條件精選」從八個硬 AND 門檻改成「核心風控 + 品質柱」。
@@ -391,7 +417,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
         m["entry"] >= 58,
         m["buy"] >= 52,
         m["gap"] <= 6.5,
-        (h45_mainline_ok if h45_available else (m["mainstream"] >= 50 or m["sector"] >= 50)),
+        (h47_market_ok if h47_available else (h45_mainline_ok if h45_available else (m["mainstream"] >= 50 or m["sector"] >= 50))),
         m["prob"] >= 48,
         m["alpha"] >= 55,
     ]
@@ -415,7 +441,7 @@ def _gate(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
             (m["trade"] >= 60, f"SuperAI Trade {m['trade']:.1f}<60"),
             (m["execution_distance"] <= 6.0, f"最近可執行距離{m['execution_distance']:.1f}%>6.0"),
             (pillar_count >= 4, f"H45品質柱{pillar_count}/6<4"),
-            ((not h45_available) or h45_mainline_ok, f"H45非主流/非起漲｜{m.get('mainwave_status') or '無'}"),
+            ((h47_market_ok if h47_available else ((not h45_available) or h45_mainline_ok)), f"H47/H45非主流起漲｜{m.get('h47_status') or m.get('mainwave_status') or '無'}"),
             (score >= 62, f"H34安全精選分{score:.1f}<62"),
             (defensive_ok, f"防守精選品質不足｜V188 {m['priority']:.1f}/Trade {m['trade']:.1f}/Risk {m['risk']:.1f}/RR {m['rr']:.2f}/追價 {m['chase']:.0f}"),
         ]

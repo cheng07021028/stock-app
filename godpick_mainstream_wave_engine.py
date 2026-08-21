@@ -22,7 +22,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h45_mainstream_wave_engine_v2_20260820"
+VERSION = "v191_h47_mainstream_leader_stage_engine_20260821"
 
 H45_COLUMNS = [
     "H45族群主流分", "H45族群短線動能%", "H45族群5日上漲比例%", "H45族群20日上漲比例%",
@@ -30,6 +30,9 @@ H45_COLUMNS = [
     "H45個股領先分", "H45起漲結構分", "H45趨勢延續分", "H45量價啟動分",
     "H45主流波段分", "H45主流波段狀態", "H45主流波段理由", "H45主流交易綜合分",
     "H45版本",
+    "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%",
+    "H47波段階段", "H47主流領先狀態", "H47起漲優先分", "H47交易候選狀態",
+    "H47主流領先理由", "H47版本",
 ]
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -213,6 +216,39 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
     ]], how="left", left_on="_H45_sector_key", right_on="_sector_name")
     out.drop(columns=["_sector_name"], inplace=True, errors="ignore")
 
+    # H47：把「市場領先」與「能不能買」拆成兩個維度。H45 的最大問題是
+    # 真正領漲股會因 Risk/Trade 偏低被降成 WATCH，反而較安全但較弱的股票
+    # 變成 PREP，造成第一眼名單不像主流。H47 先用純市場資料重算族群內
+    # 相對強度，再於後段獨立套交易風控。
+    _r1 = _num_series(out, ["今日漲幅%", "當日漲幅%"], 0.0).clip(-12, 12)
+    _r5 = _num_series(out, ["近5日漲幅%", "5日績效%"], 0.0).clip(-25, 25)
+    _r20 = _num_series(out, ["近20日漲幅%", "20日績效%"], 0.0).clip(-40, 40)
+    _vr = _num_series(out, ["當日量比", "均量比"], 1.0).clip(0, 3)
+    _close = _num_series(out, ["當日收盤位置%"], 50.0).clip(0, 100)
+    _upper = _num_series(out, ["上影線比例%"], 20.0).clip(0, 100)
+    _dist20 = _num_series(out, ["突破20日高點%"], -15.0).clip(-30, 20)
+    _mainfund = _num_series(out, ["主流資金分"], 50.0).clip(0, 100)
+    _vol_score = (35.0 + _vr * 30.0).clip(35, 100)
+    _close_quality = (_close - (_upper - 35.0).clip(lower=0) * 0.7).clip(0, 100)
+    _breakout_prox = (100.0 + _dist20.clip(upper=0) * 4.0).clip(0, 100)
+    _ret1_score = (50.0 + _r1 * 4.0).clip(0, 100)
+    _ret5_score = (50.0 + _r5 * 2.8).clip(0, 100)
+    _ret20_score = (50.0 + _r20 * 1.4).clip(0, 100)
+    _rs_raw = (
+        _ret1_score * 0.10 + _ret5_score * 0.26 + _ret20_score * 0.22
+        + _vol_score * 0.14 + _close_quality * 0.10 + _breakout_prox * 0.08
+        + _mainfund * 0.10
+    ).clip(0, 100)
+    out["_H47_rs_raw"] = _rs_raw
+    _grp = out.groupby("_H45_sector_key", dropna=False)["_H47_rs_raw"]
+    _rank = _grp.rank(method="min", ascending=False)
+    _size = out.groupby("_H45_sector_key", dropna=False)["_H47_rs_raw"].transform("size").astype(float)
+    _pct_raw = _grp.rank(method="average", pct=True, ascending=True) * 100.0
+    _confidence = (_size / (_size + 3.0)).clip(0.20, 1.0)
+    out["H47個股相對強度分"] = (50.0 + (_rs_raw - 50.0) * _confidence).clip(0, 100).round(2)
+    out["H47族群內領先排名"] = _rank.fillna(999).astype(int)
+    out["H47族群內領先百分位%"] = (50.0 + (_pct_raw - 50.0) * _confidence).clip(0, 100).round(1)
+
     rows = []
     for _, row in out.iterrows():
         sector_score = _first_num(row, ["H45族群主流分"], 50.0)
@@ -275,6 +311,11 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
         data_blob = "｜".join(_first_text(row, [c]) for c in ["K線資料新鮮度", "正式推薦排除原因", "操作許可"])
         data_block = any(k in data_blob for k in ["過期", "待更新", "正式排除", "禁止新倉", "DATA-WAIT"])
 
+        # H47 純市場領先證據：不使用 Risk/Trade 決定「是不是主流股」。
+        h47_rs = _first_num(row, ["H47個股相對強度分"], 50.0)
+        h47_rank = _first_num(row, ["H47族群內領先排名"], 999.0)
+        h47_pct = _first_num(row, ["H47族群內領先百分位%"], 50.0)
+
         sector_state = _first_text(row, ["H45族群狀態"])
         sector_rank = _first_num(row, ["H45族群主流排名"], 999.0)
         sector_pct = _first_num(row, ["H45族群主流百分位%"], 0.0)
@@ -318,6 +359,79 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
         else:
             status = "M-NO｜非主流波段優先"
 
+        # H47 波段階段：先把「主流領漲」與「起漲候選」分開，避免真領漲股
+        # 因 Risk 低被藏起來，也避免已漲30~50%的股票被叫做起漲。
+        sector_ab47 = sector_state.startswith(("A｜", "B｜"))
+        extended47 = bool(ret5 >= 18 or ret20 >= 35 or (ret5 >= 12 and chase >= 70))
+        early_zone47 = bool(-1.5 <= ret5 <= 8.5 and -3 <= ret20 <= 20 and breakout_proximity >= 65)
+        leader47 = bool(
+            sector_ab47 and h47_pct >= 65 and h47_rs >= 58 and ret5 >= 3 and ret20 >= 5
+            and onset >= 60 and (vr >= 0.75 or close >= 65) and close >= 40 and upper <= 65
+        )
+        early47 = bool(
+            sector_ab47 and h47_pct >= 58 and h47_rs >= 56 and early_zone47 and onset >= 62
+            and vr >= 0.90 and close >= 55 and upper <= 45
+        )
+        pullback47 = bool(
+            sector_ab47 and h47_pct >= 58 and h47_rs >= 54 and 5 <= ret20 <= 30
+            and -6 <= ret5 <= 2.5 and breakout_proximity >= 55 and close >= 45 and upper <= 55
+        )
+        watch47 = bool(
+            sector_ab47 and h47_pct >= 50 and h47_rs >= 52 and ret20 >= -5 and onset >= 56
+        )
+        if leader47 and extended47:
+            h47_stage = "L-EXTENDED｜主流領漲但已延伸，禁止追價"
+        elif early47:
+            h47_stage = "L-EARLY｜主流波段起漲候選"
+        elif pullback47:
+            h47_stage = "L-PULLBACK｜主流回檔再攻候選"
+        elif leader47:
+            h47_stage = "L-LEADER｜主流領漲核心"
+        elif watch47:
+            h47_stage = "L-WATCH｜主流觀察"
+        else:
+            h47_stage = "L-NO｜非主流領先優先"
+
+        def _zone(v: float, lo: float, hi: float, slope: float) -> float:
+            if lo <= v <= hi:
+                return 100.0
+            gap = lo - v if v < lo else v - hi
+            return _clip(100.0 - gap * slope)
+        early_fit = _zone(ret5, 0.0, 8.0, 7.0) * 0.55 + _zone(ret20, 0.0, 18.0, 3.0) * 0.45
+        h47_start_score = _clip(
+            sector_score * 0.18 + h47_rs * 0.20 + onset * 0.22 + trend * 0.12
+            + volume_score * 0.10 + close_quality * 0.08 + breakout_proximity * 0.05 + early_fit * 0.05
+        )
+        rr47 = _first_num(row, ["路徑風險報酬比", "SuperAI執行風報比", "風險報酬比"], 0.0)
+        rr47_known = any(_s(row.get(c)) for c in ["路徑風險報酬比", "SuperAI執行風報比", "風險報酬比"] if c in row.index)
+        exec_safe47 = bool(
+            not data_block and risk >= 58 and trade >= 60 and (not rr47_known or rr47 >= 1.20)
+            and (stop <= 0 or stop <= 7.0) and chase <= 62 and (amount <= 0 or amount >= 150)
+        )
+        if h47_stage.startswith(("L-EARLY", "L-PULLBACK")) and exec_safe47:
+            h47_trade_status = "T-READY｜主流結構＋交易條件通過"
+        elif h47_stage.startswith("L-LEADER") and exec_safe47 and ret5 <= 12 and chase <= 55:
+            h47_trade_status = "T-READY｜主流領漲但只准條件進場"
+        elif h47_stage.startswith("L-EXTENDED"):
+            h47_trade_status = "T-NO-CHASE｜主流領漲但已延伸，只等回測"
+        elif h47_stage.startswith(("L-EARLY", "L-PULLBACK", "L-LEADER")):
+            h47_trade_status = "T-PREP｜市場結構成立，交易條件未完成"
+        elif h47_stage.startswith("L-WATCH"):
+            h47_trade_status = "T-WATCH｜主流觀察"
+        else:
+            h47_trade_status = "T-NO｜非主流優先"
+
+        h47_reasons = [
+            f"族群{sector_score:.1f}/{sector_state or '未分類'}",
+            f"族群內RS{h47_rs:.1f}｜排名{int(h47_rank) if h47_rank < 999 else '-'}｜百分位{h47_pct:.0f}",
+            f"5日{ret5:+.1f}%/20日{ret20:+.1f}%",
+            f"起漲{onset:.1f}｜量比{vr:.2f}｜收盤位置{close:.0f}%",
+        ]
+        if extended47:
+            h47_reasons.append("已進入延伸段，辨識為領漲但禁止追價")
+        if not exec_safe47:
+            h47_reasons.append(f"交易條件未完成｜Risk{risk:.1f}/Trade{trade:.1f}/RR{rr47:.2f}/追價{chase:.0f}")
+
         reasons = []
         if sector_state.startswith(("A｜", "B｜")):
             reasons.append(f"族群主流{sector_score:.1f}｜排名{int(sector_rank)}｜{sector_state.split('｜',1)[1]}")
@@ -343,8 +457,11 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
             reasons.append("交易風控尚未通過")
         if data_block:
             reasons.append("資料/權限封鎖")
-        combined = _clip(score * 0.58 + v188 * 0.27 + trade * 0.10 + entry * 0.05)
-        rows.append((round(leadership,2), round(onset,2), round(trend,2), round(volume_score,2), round(score,2), status, "；".join(reasons), round(combined,2)))
+        combined = _clip(score * 0.48 + h47_start_score * 0.22 + v188 * 0.18 + trade * 0.07 + entry * 0.05)
+        rows.append((
+            round(leadership,2), round(onset,2), round(trend,2), round(volume_score,2), round(score,2), status, "；".join(reasons), round(combined,2),
+            h47_stage, round(h47_start_score,2), h47_trade_status, "；".join(h47_reasons)
+        ))
 
     out["H45個股領先分"] = [x[0] for x in rows]
     out["H45起漲結構分"] = [x[1] for x in rows]
@@ -354,8 +471,14 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
     out["H45主流波段狀態"] = [x[5] for x in rows]
     out["H45主流波段理由"] = [x[6] for x in rows]
     out["H45主流交易綜合分"] = [x[7] for x in rows]
+    out["H47波段階段"] = [x[8] for x in rows]
+    out["H47主流領先狀態"] = out["H47波段階段"]
+    out["H47起漲優先分"] = [x[9] for x in rows]
+    out["H47交易候選狀態"] = [x[10] for x in rows]
+    out["H47主流領先理由"] = [x[11] for x in rows]
     out["H45版本"] = VERSION
-    out.drop(columns=["_H45_sector_key"], inplace=True, errors="ignore")
+    out["H47版本"] = VERSION
+    out.drop(columns=["_H45_sector_key", "_H47_rs_raw"], inplace=True, errors="ignore")
     return out
 
 
@@ -363,14 +486,14 @@ def build_mainstream_wave_table(frame: pd.DataFrame, top_n: int = 8) -> pd.DataF
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
         return pd.DataFrame()
     work = frame if ("H45版本" in frame.columns and frame["H45版本"].astype(str).eq(VERSION).all()) else apply_mainstream_wave_engine(frame)
-    status = work.get("H45主流波段狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    pick = work.loc[status.str.startswith(("M-READY", "M-PREP", "M-WATCH"))].copy()
+    status = work.get("H47主流領先狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    pick = work.loc[status.str.startswith(("L-EARLY", "L-LEADER", "L-PULLBACK", "L-EXTENDED", "L-WATCH"))].copy()
     if pick.empty:
         return pick
-    _status = pick["H45主流波段狀態"].astype(str)
-    pick["_status_priority"] = _status.map(lambda x: 3 if x.startswith("M-READY") else 2 if x.startswith("M-PREP") else 1)
-    for c in ["H45主流交易綜合分", "H45主流波段分", "H45族群主流分", "H45族群主流百分位%", "V188股神作戰優先分"]:
+    _status = pick["H47主流領先狀態"].astype(str)
+    pick["_status_priority"] = _status.map(lambda x: 5 if x.startswith("L-EARLY") else 4 if x.startswith("L-LEADER") else 3 if x.startswith("L-PULLBACK") else 2 if x.startswith("L-EXTENDED") else 1)
+    for c in ["H47起漲優先分", "H47個股相對強度分", "H47族群內領先百分位%", "H45主流交易綜合分", "H45主流波段分", "H45族群主流分", "H45族群主流百分位%", "V188股神作戰優先分"]:
         raw = pick[c] if c in pick.columns else pd.Series([0.0] * len(pick), index=pick.index)
         pick[c] = pd.to_numeric(raw, errors="coerce").fillna(0.0)
-    pick.sort_values(["_status_priority", "H45族群主流分", "H45主流交易綜合分", "H45主流波段分"], ascending=[False, False, False, False], inplace=True, kind="mergesort")
+    pick.sort_values(["_status_priority", "H45族群主流分", "H47個股相對強度分", "H47起漲優先分", "H45主流交易綜合分"], ascending=[False, False, False, False, False], inplace=True, kind="mergesort")
     return pick.head(max(1, int(top_n))).drop(columns=["_status_priority"], errors="ignore").reset_index(drop=True)
