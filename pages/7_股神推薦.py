@@ -320,7 +320,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h47_mainstream_leader_stage_20260821"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h48_arrow_duplicate_column_guard_20260821"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -11288,8 +11288,44 @@ def _format_percent_value(x: Any, digits: int = 2) -> str:
         return str(x)
 
 
+def _v191_h48_arrow_safe_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """H48: make Streamlit/PyArrow display frames column-name safe.
+
+    pandas permits duplicate column labels, but ``st.dataframe`` serializes via
+    PyArrow and raises ``ValueError`` when names are duplicated.  Page07 passes
+    through many overlays, so protect every formatted display at the last mile.
+    Same-name columns are coalesced with the existing H23 rule: newest/rightmost
+    nonblank value wins, older copies only fill blanks.
+    """
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    work = df.copy()
+    try:
+        work.columns = [" / ".join(map(str, c)) if isinstance(c, tuple) else str(c) for c in work.columns]
+    except Exception:
+        work.columns = [str(c) for c in work.columns]
+    duplicate_names: list[str] = []
+    if not work.columns.is_unique:
+        try:
+            work, duplicate_names = _v191_h23_unique_json_frame(work)
+        except Exception:
+            # Absolute last-resort display guard: keep the right-most/newest copy.
+            work = work.loc[:, ~pd.Index(work.columns).duplicated(keep="last")].copy()
+            duplicate_names = ["duplicate-column-fallback"]
+    if duplicate_names:
+        try:
+            st.session_state[_k("v191_h48_arrow_duplicate_columns")] = {
+                "count": len(duplicate_names),
+                "columns": duplicate_names[:80],
+                "updated_at": _now_text(),
+            }
+        except Exception:
+            pass
+    return work
+
+
 def _format_df(df: pd.DataFrame) -> pd.DataFrame:
-    show = df.copy()
+    show = _v191_h48_arrow_safe_frame(df)
     price_cols = ["最新價", "推薦買點_突破", "推薦買點_拉回", "近端支撐", "主要支撐", "近端壓力", "突破確認價", "突破確認價_隔日", "回測承接價", "停損參考", "停損價", "停損價_隔日", "第一壓力價", "賣出目標1", "賣出目標2", "PER本益比", "估算EPS"]
     pct_cols = ["區間漲跌幅%", "20日壓力距離%", "20日支撐距離%", "類股平均漲幅", "法人買超占量比%", "3日績效%", "5日績效%", "10日績效%", "20日績效%"]
     score_cols = [
@@ -12939,7 +12975,7 @@ def _phase92_render_zero_formal_diagnostics(source_df: pd.DataFrame) -> None:
         "下方會列出阻擋層與最接近升級候選，系統不會為了湊數把弱股包裝成正式推薦。"
     )
     with st.expander("為什麼正式／A- 都是 0？｜門檻阻擋與近門檻候選", expanded=True):
-        st.dataframe(blocker_df, use_container_width=True, hide_index=True)
+        st.dataframe(_v191_h48_arrow_safe_frame(blocker_df), use_container_width=True, hide_index=True)
 
         score_cols = [c for c in [
             "股神推薦優先分", "隔日可執行優先分", "實戰操作品質分", "進場可執行分",
@@ -13310,6 +13346,9 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度",
             "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
         ] if c in master_rank.columns]
+        # H48: the H47 list accidentally repeated 股票代號/股票名稱/類別.
+        # pandas accepts that shape, but Streamlit Cloud -> PyArrow rejects duplicate names.
+        master_cols = list(dict.fromkeys(master_cols))
         st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
     else:
         _v188_block_reason = _safe_str(st.session_state.get(_k("v188_rank_block_reason_v189")))
@@ -16759,7 +16798,7 @@ def main():
                     category_show[c] = category_show[c].apply(lambda x: _format_percent_value(x, 2))
                 else:
                     category_show[c] = category_show[c].apply(lambda x: format_number(x, 1) if pd.notna(x) else "")
-        st.dataframe(category_show, use_container_width=True, hide_index=True)
+        st.dataframe(_v191_h48_arrow_safe_frame(category_show), use_container_width=True, hide_index=True)
 
     if active_detail_section_v164 == "同類股領先榜":
         st.dataframe(
