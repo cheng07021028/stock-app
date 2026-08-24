@@ -23,7 +23,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h47_mainstream_leader_dual_route_20260821"
+VERSION = "v191_h49_upside_potential_execution_split_20260824"
 
 H42_COLUMNS = [
     "H42強勢分", "H42強勢狀態", "H42強勢操作許可", "H42強勢理由",
@@ -31,6 +31,9 @@ H42_COLUMNS = [
     "H42跌深旗標數", "H42止穩確認", "H42落刀風險", "H42市場情境",
     "H42市場共識分", "H42重點機會類型", "H42重點狀態", "H42重點分",
     "H42重點決策", "H42建議倉位上限%", "H42重點理由", "H42版本",
+    "H49上漲潛力分", "H49潛力等級", "H49潛力階段", "H49可執行分",
+    "H49交易決策", "H49交易許可", "H49波段位置分", "H49延伸風險扣分",
+    "H49上漲潛力理由", "H49版本",
 ]
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -196,6 +199,147 @@ def _metrics(row: pd.Series) -> dict[str, float]:
         "volume_ratio": volume_ratio, "exec_distance": exec_distance,
     }
 
+
+
+def _zone_score(value: float, lo: float, hi: float, slope: float) -> float:
+    """100 inside preferred swing zone, decays linearly outside it."""
+    if lo <= value <= hi:
+        return 100.0
+    gap = (lo - value) if value < lo else (value - hi)
+    return _clamp(100.0 - gap * slope)
+
+
+def _h49_potential_profile(row: pd.Series, market: dict[str, Any]) -> dict[str, Any]:
+    """H49 separates *upside potential* from *execution permission*.
+
+    H47 correctly found leaders, but the first sheet still mixed early setups with
+    already-extended leaders.  H49 asks a different question: among the current
+    information set, which names have the best 1~10 session *structural upside*
+    from their present swing position?  It deliberately rewards EARLY/PULLBACK
+    and penalizes EXTENDED/chase risk.  Trade/Risk/RR decide only whether that
+    potential may be acted on now.
+    """
+    m = _metrics(row)
+    start = _first_num(row, ["H47起漲優先分", "H45起漲結構分"], 50.0)
+    rs = _first_num(row, ["H47個股相對強度分", "H45個股領先分"], 50.0)
+    sector = _first_num(row, ["H45族群主流分"], 50.0)
+    trend = _first_num(row, ["H45趨勢延續分"], 50.0)
+    volume = _first_num(row, ["H45量價啟動分"], 50.0)
+    onset = _first_num(row, ["H45起漲結構分"], 50.0)
+    stage = _first_text(row, ["H47主流領先狀態", "H47波段階段"])
+    trade_state = _first_text(row, ["H47交易候選狀態"])
+    close_quality = _clamp(m["close"] - max(0.0, m["upper"] - 35.0) * 0.70)
+
+    # Preferred wave position: not a falling knife, not a 20~50% extended chase.
+    fit5 = _zone_score(m["ret5"], -1.0, 8.0, 7.0)
+    fit20 = _zone_score(m["ret20"], 0.0, 24.0, 3.2)
+    wave_position = _clamp(fit5 * 0.55 + fit20 * 0.45)
+
+    base = (
+        start * 0.24 + rs * 0.17 + sector * 0.15 + trend * 0.11
+        + volume * 0.09 + onset * 0.08 + wave_position * 0.11 + close_quality * 0.05
+    )
+
+    # Stage expresses upside *from here*, not historical strength.
+    stage_adj = 0.0
+    if stage.startswith("L-EARLY"):
+        stage_adj += 5.0
+    elif stage.startswith("L-PULLBACK"):
+        stage_adj += 4.0
+    elif stage.startswith("L-LEADER"):
+        stage_adj += 1.0
+    elif stage.startswith("L-EXTENDED"):
+        stage_adj -= 20.0
+    elif stage.startswith("L-WATCH"):
+        stage_adj -= 3.0
+    else:
+        stage_adj -= 7.0
+
+    extension_penalty = 0.0
+    if m["ret5"] > 20:
+        extension_penalty += 14.0
+    elif m["ret5"] > 12:
+        extension_penalty += 7.0
+    if m["ret20"] > 50:
+        extension_penalty += 12.0
+    elif m["ret20"] > 35:
+        extension_penalty += 6.0
+    if m["chase"] >= 90:
+        extension_penalty += 10.0
+    elif m["chase"] >= 75:
+        extension_penalty += 5.0
+    # A broken medium-term trend belongs in the bargain route until it stabilizes.
+    if m["ret20"] < -12:
+        extension_penalty += 12.0
+    elif m["ret20"] < -8:
+        extension_penalty += 6.0
+    if m["ret5"] < -6:
+        extension_penalty += 7.0
+
+    # Probability is not mature enough to dominate ranking.  It may only nudge
+    # structural evidence by at most +/-2.5 points.
+    prob = _first_num(row, ["SuperAI校準後隔日上漲機率%", "H32隔日上漲機率%", "SuperAI隔日上漲機率%"], 50.0)
+    prob_nudge = max(-2.5, min(2.5, (prob - 50.0) * 0.10))
+    potential = round(_clamp(base + stage_adj + prob_nudge - extension_penalty), 2)
+
+    if potential >= 72:
+        tier = "P1｜高上漲潛力"
+    elif potential >= 66:
+        tier = "P2｜中高上漲潛力"
+    elif potential >= 60:
+        tier = "P3｜觀察潛力"
+    else:
+        tier = "P4｜非優先"
+
+    data_block, data_reason = _data_block(row)
+    extended = stage.startswith("L-EXTENDED") or trade_state.startswith("T-NO-CHASE")
+    rr_known = m["rr"] > 0
+    exec_safety = bool(
+        not data_block and not market.get("hard")
+        and m["risk"] >= 58 and m["trade"] >= 60
+        and (not rr_known or m["rr"] >= 1.20)
+        and (m["stop"] <= 0 or m["stop"] <= 7.0)
+        and m["chase"] <= 62
+        and (m["amount"] <= 0 or m["amount"] >= 120)
+    )
+    high_potential = tier.startswith(("P1", "P2"))
+    if extended:
+        decision = "A-NO-CHASE｜高強度但已延伸，只等回測"
+        cap = 0.0
+    elif high_potential and trade_state.startswith("T-READY") and exec_safety:
+        decision = "A-READY｜高潛力＋交易條件完成"
+        cap = 3.0 if market.get("defensive") else 5.0
+    elif high_potential:
+        decision = "A-PREP｜高潛力，等待觸發/回測與守價"
+        cap = 0.0
+    elif tier.startswith("P3"):
+        decision = "A-WATCH｜有結構但不是第一優先"
+        cap = 0.0
+    else:
+        decision = "A-NO｜上漲潛力不足"
+        cap = 0.0
+
+    permission = (
+        f"回測承接約{m['main_entry']:.2f}或突破{m['trigger']:.2f}後守住{m['guard']:.2f}才執行；未成立=NO-TRADE。"
+        if decision.startswith("A-READY") and (m["main_entry"] > 0 or m["trigger"] > 0)
+        else "先觀察，不因潛力分直接買進；等待交易條件完成。"
+    )
+    if decision.startswith("A-NO-CHASE"):
+        permission = "主流地位保留，但位置已延伸；禁止追價，只等明顯回測後重新評分。"
+    reasons = [
+        f"起漲{start:.1f}", f"相對強度{rs:.1f}", f"族群{sector:.1f}",
+        f"趨勢{trend:.1f}", f"量價{volume:.1f}", f"波段位置{wave_position:.1f}",
+        f"5日{m['ret5']:+.1f}%/20日{m['ret20']:+.1f}%",
+    ]
+    if extension_penalty > 0:
+        reasons.append(f"延伸/破壞扣分-{extension_penalty:.1f}")
+    if data_reason:
+        reasons.append(data_reason)
+    return {
+        "potential": potential, "tier": tier, "stage": stage or "未分類", "exec_score": round(_clamp(m["trade"] * .35 + m["risk"] * .30 + m["entry"] * .20 + _clamp(50 + 15 * max(0, m["rr"] - 1)) * .15), 2),
+        "decision": decision, "permission": permission, "wave_position": round(wave_position, 2),
+        "extension_penalty": round(extension_penalty, 2), "cap": cap, "reason": "；".join(reasons), "m": m,
+    }
 
 def _data_block(row: pd.Series) -> tuple[bool, str]:
     text = _blob(row, [
@@ -405,6 +549,7 @@ def apply_dual_opportunity_engine(frame: pd.DataFrame) -> pd.DataFrame:
     market = _market_context(out)
     strong_profiles = [_strong_profile(row, market) for _, row in out.iterrows()]
     bargain_profiles = [_bargain_profile(row, market) for _, row in out.iterrows()]
+    h49_profiles = [_h49_potential_profile(row, market) for _, row in out.iterrows()]
 
     out["H42強勢分"] = [p["score"] for p in strong_profiles]
     out["H42強勢狀態"] = [p["status"] for p in strong_profiles]
@@ -419,6 +564,16 @@ def apply_dual_opportunity_engine(frame: pd.DataFrame) -> pd.DataFrame:
     out["H42落刀風險"] = ["高" if p["knife"] else "可控" for p in bargain_profiles]
     out["H42市場情境"] = market.get("regime")
     out["H42市場共識分"] = market.get("score")
+    out["H49上漲潛力分"] = [p["potential"] for p in h49_profiles]
+    out["H49潛力等級"] = [p["tier"] for p in h49_profiles]
+    out["H49潛力階段"] = [p["stage"] for p in h49_profiles]
+    out["H49可執行分"] = [p["exec_score"] for p in h49_profiles]
+    out["H49交易決策"] = [p["decision"] for p in h49_profiles]
+    out["H49交易許可"] = [p["permission"] for p in h49_profiles]
+    out["H49波段位置分"] = [p["wave_position"] for p in h49_profiles]
+    out["H49延伸風險扣分"] = [p["extension_penalty"] for p in h49_profiles]
+    out["H49上漲潛力理由"] = [p["reason"] for p in h49_profiles]
+    out["H49版本"] = VERSION
 
     focus_types: list[str] = []
     focus_status: list[str] = []
@@ -475,163 +630,87 @@ def _focus_permission(row: pd.Series, route: str) -> str:
 
 
 def build_focus_decision_table(frame: pd.DataFrame, strong_top: int = 3, bargain_top: int = 1) -> pd.DataFrame:
-    """Return the one sheet/page the user should read first.
+    """H49 first sheet: highest structural upside, execution shown separately.
 
-    It intentionally shows a small *reference* set, not every diagnostic column:
-    up to three strong-route names and one bargain-route name.  WAIT is visible so
-    a sell-off still produces useful watch targets, but WAIT never means buy.
+    Only P1/P2 are allowed.  We never fill seats with P3/P4 merely to make a
+    visually full sheet.  At most two names per sector avoid one crowded theme
+    masquerading as diversified conviction.  ``strong_top + bargain_top`` is kept
+    as a backwards-compatible row limit used by Page07.
     """
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
-        return pd.DataFrame({"狀態": ["目前沒有可建立重點決策的有效候選。"]})
+        return pd.DataFrame({"狀態": ["目前沒有可建立 H49 上漲潛力決策的有效候選。"]})
     work = frame.copy()
-    if "H42版本" not in work.columns or not work.get("H42版本", pd.Series([], dtype=str)).astype(str).eq(VERSION).all():
+    if "H49版本" not in work.columns or not work.get("H49版本", pd.Series([], dtype=str)).astype(str).eq(VERSION).all():
         work = apply_dual_opportunity_engine(work)
-
-    code = work.get("股票代號", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    work = work.loc[code.str.strip().ne("")].copy()
-    if work.empty:
-        return pd.DataFrame({"狀態": ["目前沒有可建立重點決策的有效候選。"]})
-
-    strong_status = work.get("H42強勢狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    bargain_status = work.get("H42價差狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-
-    strong = work.loc[strong_status.str.match(r"^(S-READY|S-PREP|S-LEADER|S-WATCH)")].copy()
-    bargain = work.loc[bargain_status.str.match(r"^(B-READY|B-WAIT)")].copy()
-    for df, status_col, score_col in [
-        (strong, "H42強勢狀態", "H42強勢分"), (bargain, "H42價差狀態", "H42價差分")
-    ]:
-        if not df.empty:
-            _status_series = df[status_col].astype(str)
-            df["_status_priority"] = _status_series.map(
-                lambda x: 5 if "READY" in x else 4 if "PREP" in x else 3 if "LEADER" in x else 1
-            )
-            df["_score"] = pd.to_numeric(df.get(score_col), errors="coerce").fillna(0.0)
-            _v188_raw = df["V188股神作戰優先分"] if "V188股神作戰優先分" in df.columns else pd.Series([0.0] * len(df), index=df.index)
-            df["_v188"] = pd.to_numeric(_v188_raw, errors="coerce").fillna(0.0)
-            _sector_raw = df["H45族群主流分"] if "H45族群主流分" in df.columns else pd.Series([0.0] * len(df), index=df.index)
-            df["_sector_score"] = pd.to_numeric(_sector_raw, errors="coerce").fillna(0.0)
-            # Bargain WAIT should prefer a controllable structure over the largest
-            # raw drawdown.  A falling knife may stay in the full diagnostic table
-            # but must not crowd safer support/reclaim candidates off the first sheet.
-            if status_col == "H42價差狀態":
-                df["_structure_safe"] = df.get("H42落刀風險", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str).ne("高").astype(int)
-                df.sort_values(["_status_priority", "_structure_safe", "_score", "_v188"], ascending=[False, False, False, False], inplace=True, kind="mergesort")
-            else:
-                df["_h47_start"] = pd.to_numeric(df.get("H47起漲優先分", 0), errors="coerce").fillna(0.0)
-                df["_h47_rs"] = pd.to_numeric(df.get("H47個股相對強度分", 0), errors="coerce").fillna(0.0)
-                df.sort_values(["_status_priority", "_sector_score", "_h47_rs", "_h47_start", "_score", "_v188"], ascending=[False]*6, inplace=True, kind="mergesort")
-
-    selected: list[tuple[str, pd.Series]] = []
-    used_codes: set[str] = set()
-    strong_limit = max(0, int(strong_top))
-    used_sectors: set[str] = set()
-
-    def _append_strong(row: pd.Series) -> bool:
-        if len([1 for route, _ in selected if route == "強勢延續"]) >= strong_limit:
-            return False
-        c = _s(row.get("股票代號")); sector = _s(row.get("類別")) or _s(row.get("族群名稱"))
-        if not c or c in used_codes:
-            return False
-        selected.append(("強勢延續", row)); used_codes.add(c)
-        if sector: used_sectors.add(sector)
-        return True
-
-    # H47 第一張不能再把真正的主流領漲股藏起來。固定先保留：
-    # 1) 一檔 READY/PREP（最接近可交易的主流起漲/回檔候選）；
-    # 2) 一檔 LEADER（真正市場領漲核心，即使目前 NO-CHASE）；
-    # 再以不同族群補足剩餘席位。這同時回答「誰可等買點」與「誰是真的主流」。
-    if strong_limit > 0:
-        actionable = strong.loc[strong["H42強勢狀態"].astype(str).str.match(r"^(S-READY|S-PREP)")]
-        if not actionable.empty:
-            _append_strong(actionable.iloc[0])
-    if strong_limit > 1:
-        leaders = strong.loc[strong["H42強勢狀態"].astype(str).str.startswith("S-LEADER")]
-        if not leaders.empty:
-            # 優先與第一檔不同族群；若所有領漲都在同一真正主線，仍保留最強者。
-            picked = None
-            for _, row in leaders.iterrows():
-                sector = _s(row.get("類別")) or _s(row.get("族群名稱"))
-                if not sector or sector not in used_sectors:
-                    picked = row; break
-            if picked is None:
-                picked = leaders.iloc[0]
-            _append_strong(picked)
-
-    # 補足名額：先族群分散，再純分數補滿。
-    for _, row in strong.iterrows():
-        if len([1 for route, _ in selected if route == "強勢延續"]) >= strong_limit:
-            break
-        c = _s(row.get("股票代號")); sector = _s(row.get("類別")) or _s(row.get("族群名稱"))
-        if c and c not in used_codes and (not sector or sector not in used_sectors):
-            _append_strong(row)
-    if len([1 for route, _ in selected if route == "強勢延續"]) < strong_limit:
-        for _, row in strong.iterrows():
-            if len([1 for route, _ in selected if route == "強勢延續"]) >= strong_limit:
-                break
-            _append_strong(row)
-
-    for _, row in bargain.iterrows():
-        if len([1 for route, _ in selected if route == "跌深價差"]) >= max(0, int(bargain_top)):
-            break
-        c = _s(row.get("股票代號"))
-        if c and c not in used_codes:
-            selected.append(("跌深價差", row))
-            used_codes.add(c)
-
-    if not selected:
+    code = work.get("股票代號", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.strip()
+    work = work.loc[code.ne("")].copy()
+    tier = work.get("H49潛力等級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    pick = work.loc[tier.str.startswith(("P1", "P2"))].copy()
+    if pick.empty:
         return pd.DataFrame({
-            "狀態": ["今天沒有通過 H42 基本安全條件的強勢/跌深價差候選。空手不是硬規定；代表連『值得等待』的標的都不足。"],
-            "操作原則": ["不要為了有推薦而買。先等資料、結構或守價條件改善。"],
+            "狀態": ["今日沒有 P1/P2 高潛力候選。"],
+            "操作原則": ["不為湊名額塞入P3/P4；可改看H47主流領漲雷達與完整排名。"],
         })
+    for c in ["H49上漲潛力分", "H49可執行分", "H47起漲優先分", "H47個股相對強度分", "H45族群主流分", "V188股神作戰優先分"]:
+        raw = pick[c] if c in pick.columns else pd.Series([0.0] * len(pick), index=pick.index)
+        pick[c] = pd.to_numeric(raw, errors="coerce").fillna(0.0)
+    pick["_tier"] = pick["H49潛力等級"].astype(str).map(lambda x: 2 if x.startswith("P1") else 1)
+    pick.sort_values(["_tier", "H49上漲潛力分", "H47起漲優先分", "H47個股相對強度分", "H45族群主流分", "V188股神作戰優先分"], ascending=[False]*6, inplace=True, kind="mergesort")
+
+    max_rows = max(1, int(strong_top) + max(0, int(bargain_top)))
+    selected = []
+    sector_count: dict[str, int] = {}
+    for _, row in pick.iterrows():
+        sector = _s(row.get("類別")) or _s(row.get("族群名稱")) or "未分類"
+        if sector_count.get(sector, 0) >= 2:
+            continue
+        selected.append(row)
+        sector_count[sector] = sector_count.get(sector, 0) + 1
+        if len(selected) >= max_rows:
+            break
+    if not selected:
+        return pd.DataFrame({"狀態": ["今日沒有通過族群集中限制的 P1/P2 候選。"]})
 
     rows: list[dict[str, Any]] = []
-    for idx, (route, row) in enumerate(selected, start=1):
-        status = _s(row.get("H42強勢狀態" if route == "強勢延續" else "H42價差狀態"))
-        is_ready = "READY" in status
-        entry = _first_num(row, ["主要進場參考價", "回測承接參考價", "預估進場點"], 0.0, positive=True)
+    for idx, row in enumerate(selected, 1):
+        decision = _s(row.get("H49交易決策"))
         rows.append({
             "重點順位": idx,
-            "機會類型": route,
-            "狀態": status,
             "股票代號": _s(row.get("股票代號")),
             "股票名稱": _s(row.get("股票名稱")),
-            "目前決策": ("條件成立可小量" if is_ready else "先等條件，不直接買"),
-            "條件操作許可": _focus_permission(row, route),
+            "類別": _s(row.get("類別")) or _s(row.get("族群名稱")),
+            "H49上漲潛力分": _first_num(row, ["H49上漲潛力分"], 0.0),
+            "H49潛力等級": _s(row.get("H49潛力等級")),
+            "H49潛力階段": _s(row.get("H49潛力階段")),
+            "H49交易決策": decision,
+            "目前決策": "條件成立可小量" if decision.startswith("A-READY") else "高潛力但先等交易條件",
+            "H49交易許可": _s(row.get("H49交易許可")),
             "最新價": _first_num(row, ["最新價"], 0.0, positive=True),
-            "進場/承接參考": entry,
+            "進場/承接參考": _first_num(row, ["主要進場參考價", "回測承接參考價", "預估進場點"], 0.0, positive=True),
             "突破觸發價": _first_num(row, ["實戰觸發價", "突破確認參考價"], 0.0, positive=True),
             "觸發後守價": _first_num(row, ["觸發後守價", "守價回測參考價"], 0.0, positive=True),
             "停損價": _first_num(row, ["實戰停損參考", "停損參考"], 0.0, positive=True),
-            "路徑分": _first_num(row, ["H42強勢分" if route == "強勢延續" else "H42價差分"], 0.0),
-            "主流定位": _s(row.get("H47主流領先狀態")),
+            "H49可執行分": _first_num(row, ["H49可執行分"], 0.0),
+            "H49波段位置分": _first_num(row, ["H49波段位置分"], 0.0),
+            "H49延伸風險扣分": _first_num(row, ["H49延伸風險扣分"], 0.0),
+            "H47主流領先狀態": _s(row.get("H47主流領先狀態")),
             "H47交易候選狀態": _s(row.get("H47交易候選狀態")),
             "H47起漲優先分": _first_num(row, ["H47起漲優先分"], 0.0),
             "H47個股相對強度分": _first_num(row, ["H47個股相對強度分"], 0.0),
-            "H47族群內領先排名": _first_num(row, ["H47族群內領先排名"], 999.0),
-            "H47族群內領先百分位%": _first_num(row, ["H47族群內領先百分位%"], 0.0),
-            "H45主流波段狀態": _s(row.get("H45主流波段狀態")),
-            "H45主流波段分": _first_num(row, ["H45主流波段分"], 0.0),
             "H45族群主流分": _first_num(row, ["H45族群主流分"], 0.0),
-            "V188/Trade/Risk": f"{_first_num(row, ['V188股神作戰優先分'], 0.0):.1f} / {_first_num(row, ['SuperAI Trade分'], 0.0):.1f} / {_first_num(row, ['Risk風控安全分'], 0.0):.1f}",
+            "V188股神作戰優先分": _first_num(row, ["V188股神作戰優先分"], 0.0),
+            "SuperAI Trade分": _first_num(row, ["SuperAI Trade分"], 0.0),
+            "Risk風控安全分": _first_num(row, ["Risk風控安全分"], 0.0),
             "RR": _first_num(row, ["路徑風險報酬比", "SuperAI執行風報比"], 0.0),
             "隔日校準上漲機率%": _first_num(row, ["SuperAI校準後隔日上漲機率%", "H32隔日上漲機率%"], 0.0),
             "10日預估報酬%": _first_num(row, ["H32_10日預估報酬%", "10日預估報酬%"], 0.0),
             "今日漲幅%": _first_num(row, ["今日漲幅%"], 0.0),
             "近5日漲幅%": _first_num(row, ["近5日漲幅%"], 0.0),
             "近20日漲幅%": _first_num(row, ["近20日漲幅%"], 0.0),
-            "建議倉位上限%": _first_num(row, ["H42建議倉位上限%"], 0.0),
             "大盤情境": _s(row.get("H42市場情境")) or _s(row.get("大盤風控層級")),
-            "重點理由": _s(row.get("H42強勢理由" if route == "強勢延續" else "H42價差理由")),
+            "AI上漲潛力理由": _s(row.get("H49上漲潛力理由")),
         })
-    result = pd.DataFrame(rows)
-    preferred = [
-        "重點順位", "股票代號", "股票名稱", "機會類型", "狀態", "目前決策", "條件操作許可",
-        "最新價", "進場/承接參考", "突破觸發價", "觸發後守價", "停損價",
-        "路徑分", "主流定位", "H47交易候選狀態", "H47起漲優先分", "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%", "H45主流波段狀態", "H45主流波段分", "H45族群主流分", "V188/Trade/Risk", "RR",
-        "隔日校準上漲機率%", "10日預估報酬%", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
-        "建議倉位上限%", "大盤情境", "重點理由",
-    ]
-    return result[[c for c in preferred if c in result.columns]]
+    return pd.DataFrame(rows)
 
 
 __all__ = ["VERSION", "H42_COLUMNS", "apply_dual_opportunity_engine", "build_focus_decision_table"]

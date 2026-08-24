@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h38_authority_restore_20260817"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h49_upside_potential_tracking_20260824"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -530,6 +530,12 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H32預測版本": _s(original.get("H32預測版本")),
         "V188交易許可": _s(original.get("V188交易許可")),
         "V188執行RR": _f(original.get("SuperAI執行風報比") or original.get("路徑風險報酬比") or original.get("風險報酬比")),
+        "H49上漲潛力分": _f(original.get("H49上漲潛力分")),
+        "H49潛力等級": _s(original.get("H49潛力等級")),
+        "H49潛力階段": _s(original.get("H49潛力階段")),
+        "H49可執行分": _f(original.get("H49可執行分")),
+        "H49交易決策": _s(original.get("H49交易決策")),
+        "H49版本": _s(original.get("H49版本")),
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -730,6 +736,11 @@ def refresh_t1_trade_truth(
     executable = [r for r in matured if bool(r.get("是否納入可執行績效"))]
     selection_alpha = [_f(r.get("Selection Alpha%")) for r in matured]
     selection_alpha = [x for x in selection_alpha if x is not None]
+    h49_high = [r for r in matured if _s(r.get("H49潛力等級")).startswith(("P1", "P2"))]
+    h49_rets = [_f(r.get("隔日候選漲跌%")) for r in h49_high]
+    h49_rets = [x for x in h49_rets if x is not None]
+    h49_alpha = [_f(r.get("Selection Alpha%")) for r in h49_high]
+    h49_alpha = [x for x in h49_alpha if x is not None]
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -742,6 +753,10 @@ def refresh_t1_trade_truth(
             "trigger_rate_pct": round(len(executable) / len(matured) * 100.0, 2) if matured else None,
             "executable_win_rate_pct": calibration.get("executable_win_rate_pct"),
             "avg_selection_alpha_pct": round(sum(selection_alpha) / len(selection_alpha), 4) if selection_alpha else None,
+            "H49高潛力成熟樣本": len(h49_high),
+            "H49高潛力正報酬率%": round(sum(1 for x in h49_rets if x > 0) / len(h49_rets) * 100.0, 2) if h49_rets else None,
+            "H49高潛力平均1日報酬%": round(sum(h49_rets) / len(h49_rets), 4) if h49_rets else None,
+            "H49高潛力平均SelectionAlpha%": round(sum(h49_alpha) / len(h49_alpha), 4) if h49_alpha else None,
             "brier_score": calibration.get("brier_score"),
         },
         "failures": failures[:80],
