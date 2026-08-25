@@ -17,7 +17,7 @@ try:
 except Exception:
     EXPECTED_V188_VERSION = ""
 
-V189_CACHE_GUARD_VERSION = "v191_h47_v188_mainstream_leader_cache_guard_20260821"
+V189_CACHE_GUARD_VERSION = "v191_h50_1_v188_fresh_mainstream_execution_rr_cache_guard_20260825"
 
 V188_REQUIRED_TEXT_COLUMNS = [
     "V188版本",
@@ -151,7 +151,7 @@ def repair_v188_decision_frame(
     errors: list[str] = []
 
     def _apply_h34_post_v188(current: pd.DataFrame) -> pd.DataFrame:
-        # H47 final order: V188 -> mainstream leader/stage -> H34.  Old H38 repair called
+        # H50 final order: V188 -> mainstream lifecycle/fresh setup -> H34.  Old H38 repair called
         # H34 directly, so a rebooted cache could bypass the new mainstream
         # evidence and resurrect Trade/RR-first picks.
         try:
@@ -208,7 +208,7 @@ def repair_v188_decision_frame(
         except Exception as exc:
             errors.append(f"canonicalize:{exc}")
 
-    # H47 final admission order: official -> formal -> scan -> SuperAI/V188
+    # H50 final admission order: official -> formal -> scan -> SuperAI/V188
     # -> canonical partition -> H47 mainstream leader/stage -> H34. This is the first
     # point where calibrated probability, trade quality and current mainstream
     # evidence coexist.

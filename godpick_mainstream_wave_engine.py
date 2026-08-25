@@ -22,7 +22,7 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h47_mainstream_leader_stage_engine_20260821"
+VERSION = "v191_h50_1_mainstream_rotation_lifecycle_execution_rr_20260825"
 
 H45_COLUMNS = [
     "H45族群主流分", "H45族群短線動能%", "H45族群5日上漲比例%", "H45族群20日上漲比例%",
@@ -33,6 +33,10 @@ H45_COLUMNS = [
     "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%",
     "H47波段階段", "H47主流領先狀態", "H47起漲優先分", "H47交易候選狀態",
     "H47主流領先理由", "H47版本",
+    "H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分",
+    "H50族群起漲候選比例%", "H50族群延伸過熱比例%", "H50族群重複壓力分",
+    "H50族群生命週期", "H50波段機會階段", "H50主流購買優先分", "H50主流購買狀態",
+    "H50重複推薦扣分", "H50主流購買理由", "H50主流版本", "H50版本",
 ]
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
@@ -191,6 +195,219 @@ def _build_sector_table(frame: pd.DataFrame) -> pd.DataFrame:
         return "D｜退潮/非主流"
     grp["H45族群狀態"] = grp.apply(status, axis=1)
     return grp
+
+
+def _h50_zone(value: pd.Series, lo: float, hi: float, slope: float) -> pd.Series:
+    below = (lo - value).clip(lower=0.0)
+    above = (value - hi).clip(lower=0.0)
+    gap = below + above
+    return (100.0 - gap * float(slope)).clip(0.0, 100.0)
+
+
+def _apply_h50_lifecycle(out: pd.DataFrame) -> pd.DataFrame:
+    """Second-stage mainstream lifecycle model.
+
+    H45 answers which sectors have *persisted strength*.  H50 adds a different
+    question: which sectors are fresh/buyable *now*.  A mature high-volume theme
+    with no EARLY/PULLBACK/LEADER setups remains recognized as mainstream, but it
+    is no longer allowed to monopolize the buy-priority list.
+    """
+    if out is None or out.empty:
+        return out
+    work = pd.DataFrame(index=out.index)
+    work["_sector"] = _sector_name_series(out)
+    work["_ret1"] = _num_series(out, ["今日漲幅%", "當日漲幅%"], 0.0).clip(-12, 12)
+    work["_ret5"] = _num_series(out, ["近5日漲幅%", "5日績效%"], 0.0).clip(-30, 30)
+    work["_ret20"] = _num_series(out, ["近20日漲幅%", "20日績效%"], 0.0).clip(-50, 60)
+    work["_mainfund"] = _num_series(out, ["主流資金分"], 50.0).clip(0, 100)
+    work["_reclaim"] = _num_series(out, ["主流領漲回補分"], 50.0).clip(0, 100)
+    work["_ai_miss"] = _num_series(out, ["AI漏選風險分"], 50.0).clip(0, 100)
+    work["_strong_miss"] = _num_series(out, ["強勢股漏選風險分"], 50.0).clip(0, 100)
+    work["_vr"] = _num_series(out, ["當日量比", "均量比"], 1.0).clip(0, 3)
+    work["_h45"] = _num_series(out, ["H45族群主流分"], 50.0).clip(0, 100)
+    stage = out.get("H47主流領先狀態", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    work["_early"] = stage.str.startswith(("L-EARLY", "L-PULLBACK", "L-LEADER")).astype(float) * 100.0
+    work["_pullback"] = stage.str.startswith("L-PULLBACK").astype(float) * 100.0
+    work["_extended"] = stage.str.startswith("L-EXTENDED").astype(float) * 100.0
+    repeats = _num_series(out, ["近5次入榜次數"], 0.0).clip(0, 5)
+    freshness = _num_series(out, ["今日訊號新鮮分"], 50.0).clip(0, 100)
+    consecutive = _num_series(out, ["連續入榜次數"], 0.0).clip(0, 10)
+    new_text = out.get("今日新進榜", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    work["_new"] = new_text.str.contains("是|TRUE|True|新", regex=True).astype(float) * 100.0
+    work["_fresh"] = freshness
+    work["_repeat_bad"] = (((repeats >= 3) & (freshness < 60)) | ((consecutive >= 3) & (freshness < 65))).astype(float) * 100.0
+
+    grp = work.groupby("_sector", dropna=False).agg(
+        _ret1=("_ret1", "mean"), _ret5=("_ret5", "mean"), _ret20=("_ret20", "mean"),
+        _mainfund=("_mainfund", "mean"), _reclaim=("_reclaim", "mean"),
+        _ai_miss=("_ai_miss", "mean"), _strong_miss=("_strong_miss", "mean"),
+        _vr=("_vr", "mean"), _h45=("_h45", "mean"),
+        _early=("_early", "mean"), _pullback=("_pullback", "mean"), _extended=("_extended", "mean"),
+        _fresh=("_fresh", "mean"), _new=("_new", "mean"), _repeat_bad=("_repeat_bad", "mean"),
+        _n=("_h45", "size"),
+    ).reset_index()
+    trend_fit = _h50_zone(grp["_ret20"], 6.0, 30.0, 3.0)
+    pullback_fit = _h50_zone(grp["_ret5"], -12.0, 3.0, 5.0)
+    vol_score = (35.0 + grp["_vr"] * 30.0).clip(35, 100)
+    reclaim_signal = (
+        grp["_mainfund"] * 0.30 + grp["_reclaim"] * 0.25 + grp["_ai_miss"] * 0.20
+        + grp["_strong_miss"] * 0.15 + vol_score * 0.10
+    ).clip(0, 100)
+    reclaim_score = (reclaim_signal * 0.55 + trend_fit * 0.25 + pullback_fit * 0.20).clip(0, 100)
+    fresh_score = (
+        reclaim_score * 0.35 + grp["_early"] * 0.25 + grp["_fresh"] * 0.18
+        + grp["_new"] * 0.08 + trend_fit * 0.14
+    ).clip(0, 100)
+    maturity_penalty = (grp["_extended"] * 0.10 + grp["_repeat_bad"] * 0.12).clip(0, 24)
+    maturity_penalty += ((grp["_early"] < 5) & (grp["_h45"] >= 58) & (reclaim_score < 68)).astype(float) * 9.0
+    maturity_penalty += (grp["_ret5"] > 10).astype(float) * 5.0
+    buyable = (
+        grp["_h45"] * 0.20 + reclaim_score * 0.27 + fresh_score * 0.23
+        + grp["_early"] * 0.15 + trend_fit * 0.15 - maturity_penalty
+    ).clip(0, 100)
+    # Small sectors are useful for discovery but must not dominate on one stock.
+    conf = (grp["_n"] / (grp["_n"] + 2.0)).clip(0.25, 1.0)
+    grp["H50族群可買主流分"] = (50.0 + (buyable - 50.0) * conf).clip(0, 100).round(2)
+    grp["H50族群新鮮度分"] = (50.0 + (fresh_score - 50.0) * conf).clip(0, 100).round(2)
+    grp["H50族群回檔再攻分"] = (50.0 + (reclaim_score - 50.0) * conf).clip(0, 100).round(2)
+    grp["H50族群起漲候選比例%"] = grp["_early"].round(1)
+    grp["H50族群延伸過熱比例%"] = grp["_extended"].round(1)
+    grp["H50族群重複壓力分"] = grp["_repeat_bad"].round(1)
+
+    def _life(r: pd.Series) -> str:
+        buy = _f(r.get("H50族群可買主流分"), 0)
+        fresh = _f(r.get("H50族群新鮮度分"), 0)
+        reclaim = _f(r.get("H50族群回檔再攻分"), 0)
+        early = _f(r.get("H50族群起漲候選比例%"), 0)
+        ext = _f(r.get("H50族群延伸過熱比例%"), 0)
+        repeat = _f(r.get("H50族群重複壓力分"), 0)
+        h45 = _f(r.get("_h45"), 0)
+        r5 = _f(r.get("_ret5"), 0)
+        r20 = _f(r.get("_ret20"), 0)
+        if buy >= 66 and fresh >= 64 and early >= 8 and ext < 45:
+            return "A0｜新主流點火"
+        if buy >= 63 and early >= 12 and r5 >= -1 and ext < 45:
+            return "A1｜主流加速"
+        if buy >= 54 and reclaim >= 65 and r20 >= 5 and -13 <= r5 <= 4:
+            return "B1｜主流回檔蓄勢"
+        if buy >= 56 and h45 >= 57 and early >= 5 and repeat < 55:
+            return "B2｜主流延續"
+        if h45 >= 58 or repeat >= 45 or ext >= 40:
+            return "C｜成熟/高檔輪動"
+        return "D｜退潮/非主流"
+    grp["H50族群生命週期"] = grp.apply(_life, axis=1)
+
+    keep = ["_sector", "H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分",
+            "H50族群起漲候選比例%", "H50族群延伸過熱比例%", "H50族群重複壓力分", "H50族群生命週期"]
+    merged = out.merge(grp[keep], how="left", left_on=_sector_name_series(out), right_on="_sector")
+    merged.drop(columns=["_sector"], inplace=True, errors="ignore")
+
+    stage = merged.get("H47主流領先狀態", pd.Series([""] * len(merged), index=merged.index)).fillna("").astype(str)
+    start = _num_series(merged, ["H47起漲優先分"], 50.0).clip(0, 100)
+    rs = _num_series(merged, ["H47個股相對強度分"], 50.0).clip(0, 100)
+    onset = _num_series(merged, ["H45起漲結構分"], 50.0).clip(0, 100)
+    trend = _num_series(merged, ["H45趨勢延續分"], 50.0).clip(0, 100)
+    sector_buy = _num_series(merged, ["H50族群可買主流分"], 50.0).clip(0, 100)
+    signal_fresh = _num_series(merged, ["今日訊號新鮮分"], 50.0).clip(0, 100)
+    repeats = _num_series(merged, ["近5次入榜次數"], 0.0).clip(0, 5)
+    consecutive = _num_series(merged, ["連續入榜次數"], 0.0).clip(0, 10)
+    repeat_penalty = (((repeats - 2).clip(lower=0) * 4.0) + ((consecutive - 2).clip(lower=0) * 2.0)).clip(0, 14)
+    repeat_penalty = repeat_penalty.where(signal_fresh < 65, repeat_penalty * 0.35)
+    stage_adj = pd.Series([-15.0] * len(merged), index=merged.index, dtype="float64")
+    stage_adj.loc[stage.str.startswith("L-EARLY")] = 8.0
+    stage_adj.loc[stage.str.startswith("L-PULLBACK")] = 7.0
+    stage_adj.loc[stage.str.startswith("L-LEADER")] = 3.0
+    stage_adj.loc[stage.str.startswith("L-WATCH")] = -9.0
+    stage_adj.loc[stage.str.startswith("L-EXTENDED")] = -20.0
+    priority = (sector_buy * 0.32 + start * 0.25 + rs * 0.18 + onset * 0.10 + trend * 0.10 + signal_fresh * 0.05 + stage_adj - repeat_penalty).clip(0, 100)
+    merged["H50主流購買優先分"] = priority.round(2)
+    merged["H50重複推薦扣分"] = repeat_penalty.round(2)
+
+    lifecycle = merged.get("H50族群生命週期", pd.Series([""] * len(merged), index=merged.index)).fillna("").astype(str)
+    r5s = _num_series(merged, ["近5日漲幅%", "5日績效%"], 0.0)
+    r20s = _num_series(merged, ["近20日漲幅%", "20日績效%"], 0.0)
+    closes = _num_series(merged, ["當日收盤位置%"], 50.0)
+    uppers = _num_series(merged, ["上影線比例%"], 20.0)
+    reclaim_stock = _num_series(merged, ["主流領漲回補分"], 50.0)
+    ai_miss_stock = _num_series(merged, ["AI漏選風險分"], 50.0)
+    stages50 = []
+    statuses = []
+    reasons = []
+    for i in merged.index:
+        stg = _s(stage.loc[i])
+        life = _s(lifecycle.loc[i])
+        score = _f(merged.loc[i, "H50主流購買優先分"], 0)
+        sb = _f(merged.loc[i, "H50族群可買主流分"], 0)
+        rep = _f(merged.loc[i, "H50重複推薦扣分"], 0)
+        r5 = _f(r5s.loc[i], 0); r20 = _f(r20s.loc[i], 0)
+        close = _f(closes.loc[i], 50); upper = _f(uppers.loc[i], 20)
+        reclaim = _f(reclaim_stock.loc[i], 50); ai_miss = _f(ai_miss_stock.loc[i], 50)
+        # H50 may discover a rotation/reclaim setup even when old H47 marked L-NO
+        # because H47 required the H45 sector to already be A/B.  This breaks the
+        # circular dependency and is crucial for a fresh theme returning after a
+        # controlled 5-day pullback inside a healthy 20-day trend.
+        reclaim_setup = bool(
+            life.startswith("B1") and 5 <= r20 <= 35 and -12 <= r5 <= 4
+            and (reclaim >= 60 or ai_miss >= 82) and close >= 35 and upper <= 60
+        )
+        fresh_ignition = bool(
+            life.startswith(("A0", "A1")) and -2 <= r5 <= 9 and -2 <= r20 <= 28
+            and (reclaim >= 58 or ai_miss >= 78) and close >= 45 and upper <= 55
+        )
+        if stg.startswith("L-EXTENDED"):
+            stage50 = "N-EXTENDED｜主流已延伸"
+        elif stg.startswith("L-EARLY") or fresh_ignition:
+            stage50 = "N-EARLY｜新主流起漲"
+        elif stg.startswith("L-PULLBACK") or reclaim_setup:
+            stage50 = "N-PULLBACK｜主流回檔再攻"
+        elif stg.startswith("L-LEADER"):
+            stage50 = "N-LEADER｜主流領漲"
+        elif life.startswith("C"):
+            stage50 = "N-MATURE｜成熟主流"
+        elif life.startswith(("A0", "A1", "B1", "B2")):
+            stage50 = "N-RADAR｜主流輪動觀察"
+        else:
+            stage50 = "N-NO｜非新鮮主流"
+
+        if stage50.startswith("N-EXTENDED"):
+            status = "F-NO-CHASE｜成熟主流已延伸"
+        elif stage50.startswith(("N-EARLY", "N-PULLBACK")) and score >= 58:
+            status = "F-SETUP｜新鮮主流起漲/再攻"
+        elif stage50.startswith("N-LEADER") and score >= 62:
+            status = "F-LEADER｜主流領漲待低風險買點"
+        elif stage50.startswith("N-RADAR") and score >= 55:
+            status = "F-RADAR｜新主流觀察，尚未成形"
+        elif stage50.startswith("N-MATURE"):
+            status = "F-MATURE｜成熟主流，降低重複推薦"
+        else:
+            status = "F-NO｜非新鮮主流購買優先"
+        # Re-score with the new H50 lifecycle stage instead of the old H47 gate.
+        # This is what lets a fresh rotation/reclaim setup escape an old L-NO
+        # that existed only because H45 had not yet promoted the sector to A/B.
+        stage50_adj = (8.0 if stage50.startswith("N-EARLY") else 7.0 if stage50.startswith("N-PULLBACK")
+                       else 3.0 if stage50.startswith("N-LEADER") else -5.0 if stage50.startswith("N-RADAR")
+                       else -12.0 if stage50.startswith("N-MATURE") else -20.0 if stage50.startswith("N-EXTENDED") else -15.0)
+        score50 = _clip(sb * 0.32 + _f(start.loc[i],50) * 0.25 + _f(rs.loc[i],50) * 0.18
+                        + _f(onset.loc[i],50) * 0.10 + _f(trend.loc[i],50) * 0.10
+                        + _f(signal_fresh.loc[i],50) * 0.05 + stage50_adj - rep)
+        merged.loc[i, "H50主流購買優先分"] = round(score50, 2)
+        if stage50.startswith(("N-EARLY", "N-PULLBACK")) and life.startswith(("A0", "A1", "B1", "B2")) and score50 >= 58:
+            status = "F-SETUP｜新鮮主流起漲/再攻"
+        elif stage50.startswith("N-LEADER") and score50 >= 62:
+            status = "F-LEADER｜主流領漲待低風險買點"
+        elif stage50.startswith("N-RADAR") and score50 >= 55:
+            status = "F-RADAR｜新主流觀察，尚未成形"
+        stages50.append(stage50)
+        statuses.append(status)
+        reasons.append(f"{life or '生命週期未知'}｜{stage50}｜族群可買{sb:.1f}｜H47={stg or 'NA'}｜5日{r5:+.1f}%/20日{r20:+.1f}%｜回補{reclaim:.1f}/漏選{ai_miss:.1f}｜重複扣分{rep:.1f}")
+    merged["H50波段機會階段"] = stages50
+    merged["H50主流購買狀態"] = statuses
+    merged["H50主流購買理由"] = reasons
+    merged["H50主流版本"] = VERSION
+    # H50版本 is kept only for backward compatibility.  The dual-route layer
+    # owns the final recommendation version and may overwrite it later.
+    merged["H50版本"] = VERSION
+    return merged
 
 
 def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
@@ -402,8 +619,8 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
             sector_score * 0.18 + h47_rs * 0.20 + onset * 0.22 + trend * 0.12
             + volume_score * 0.10 + close_quality * 0.08 + breakout_proximity * 0.05 + early_fit * 0.05
         )
-        rr47 = _first_num(row, ["路徑風險報酬比", "SuperAI執行風報比", "風險報酬比"], 0.0)
-        rr47_known = any(_s(row.get(c)) for c in ["路徑風險報酬比", "SuperAI執行風報比", "風險報酬比"] if c in row.index)
+        rr47 = _first_num(row, ["路徑風險報酬比", "SuperAI執行風報比", "風險報酬比", "實戰風險報酬比"], 0.0)
+        rr47_known = any(_s(row.get(c)) for c in ["路徑風險報酬比", "SuperAI執行風報比", "風險報酬比", "實戰風險報酬比"] if c in row.index)
         exec_safe47 = bool(
             not data_block and risk >= 58 and trade >= 60 and (not rr47_known or rr47 >= 1.20)
             and (stop <= 0 or stop <= 7.0) and chase <= 62 and (amount <= 0 or amount >= 150)
@@ -479,6 +696,7 @@ def apply_mainstream_wave_engine(frame: pd.DataFrame) -> pd.DataFrame:
     out["H45版本"] = VERSION
     out["H47版本"] = VERSION
     out.drop(columns=["_H45_sector_key", "_H47_rs_raw"], inplace=True, errors="ignore")
+    out = _apply_h50_lifecycle(out)
     return out
 
 
@@ -495,5 +713,34 @@ def build_mainstream_wave_table(frame: pd.DataFrame, top_n: int = 8) -> pd.DataF
     for c in ["H47起漲優先分", "H47個股相對強度分", "H47族群內領先百分位%", "H45主流交易綜合分", "H45主流波段分", "H45族群主流分", "H45族群主流百分位%", "V188股神作戰優先分"]:
         raw = pick[c] if c in pick.columns else pd.Series([0.0] * len(pick), index=pick.index)
         pick[c] = pd.to_numeric(raw, errors="coerce").fillna(0.0)
-    pick.sort_values(["_status_priority", "H45族群主流分", "H47個股相對強度分", "H47起漲優先分", "H45主流交易綜合分"], ascending=[False, False, False, False, False], inplace=True, kind="mergesort")
+    for c in ["H50主流購買優先分", "H50族群可買主流分", "H50族群新鮮度分"]:
+        if c not in pick.columns:
+            pick[c] = 0.0
+        pick[c] = pd.to_numeric(pick[c], errors="coerce").fillna(0.0)
+    pick.sort_values(["_status_priority", "H50主流購買優先分", "H50族群可買主流分", "H47個股相對強度分", "H47起漲優先分"], ascending=[False, False, False, False, False], inplace=True, kind="mergesort")
     return pick.head(max(1, int(top_n))).drop(columns=["_status_priority"], errors="ignore").reset_index(drop=True)
+
+
+def build_mainstream_sector_lifecycle_table(frame: pd.DataFrame, top_n: int = 15) -> pd.DataFrame:
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame()
+    work = frame if ("H50主流版本" in frame.columns and frame["H50主流版本"].astype(str).eq(VERSION).all()) else apply_mainstream_wave_engine(frame)
+    sector = _sector_name_series(work)
+    cols = [c for c in [
+        "H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分",
+        "H50族群起漲候選比例%", "H50族群延伸過熱比例%", "H50族群重複壓力分", "H50族群生命週期",
+        "H45族群主流分", "H45族群短線動能%", "H45族群5日上漲比例%", "H45族群20日上漲比例%",
+        "H45族群量能分", "H45族群樣本數", "H45族群主流排名", "H45族群狀態"
+    ] if c in work.columns]
+    table = work[cols].copy()
+    table.insert(0, "類別", sector.values)
+    table = table.drop_duplicates(subset=["類別"], keep="first")
+    for c in ["H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分", "H45族群主流分"]:
+        if c in table.columns:
+            table[c] = pd.to_numeric(table[c], errors="coerce").fillna(0.0)
+    table.sort_values([c for c in ["H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分", "H45族群主流分"] if c in table.columns], ascending=False, inplace=True, kind="mergesort")
+    table.insert(0, "H50可買主流排名", range(1, len(table) + 1))
+    return table.head(max(1, int(top_n))).reset_index(drop=True)
+
+
+__all__ = ["VERSION", "H45_COLUMNS", "apply_mainstream_wave_engine", "build_mainstream_wave_table", "build_mainstream_sector_lifecycle_table"]

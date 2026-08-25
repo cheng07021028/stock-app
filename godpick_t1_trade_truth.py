@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h49_upside_potential_tracking_20260824"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h50_1_fresh_mainstream_execution_rr_20260825"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -529,13 +529,24 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H32_20日90%區間命中": _h32_inside(_h32_actual[20], _f(original.get("H32_20日90%區間下緣%")), _f(original.get("H32_20日90%區間上緣%"))),
         "H32預測版本": _s(original.get("H32預測版本")),
         "V188交易許可": _s(original.get("V188交易許可")),
-        "V188執行RR": _f(original.get("SuperAI執行風報比") or original.get("路徑風險報酬比") or original.get("風險報酬比")),
+        "V188執行RR": _f(original.get("路徑風險報酬比") or original.get("SuperAI執行風報比") or original.get("風險報酬比") or original.get("實戰風險報酬比")),
         "H49上漲潛力分": _f(original.get("H49上漲潛力分")),
         "H49潛力等級": _s(original.get("H49潛力等級")),
         "H49潛力階段": _s(original.get("H49潛力階段")),
         "H49可執行分": _f(original.get("H49可執行分")),
         "H49交易決策": _s(original.get("H49交易決策")),
         "H49版本": _s(original.get("H49版本")),
+        "H50族群生命週期": _s(original.get("H50族群生命週期")),
+        "H50族群可買主流分": _f(original.get("H50族群可買主流分")),
+        "H50波段機會階段": _s(original.get("H50波段機會階段")),
+        "H50主流購買優先分": _f(original.get("H50主流購買優先分")),
+        "H50主流購買狀態": _s(original.get("H50主流購買狀態")),
+        "H50推薦優先分": _f(original.get("H50推薦優先分")),
+        "H50推薦等級": _s(original.get("H50推薦等級")),
+        "H50推薦決策": _s(original.get("H50推薦決策")),
+        "H50主流版本": _s(original.get("H50主流版本")),
+        "H50推薦版本": _s(original.get("H50推薦版本")),
+        "H50版本": _s(original.get("H50版本")),
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -741,6 +752,12 @@ def refresh_t1_trade_truth(
     h49_rets = [x for x in h49_rets if x is not None]
     h49_alpha = [_f(r.get("Selection Alpha%")) for r in h49_high]
     h49_alpha = [x for x in h49_alpha if x is not None]
+    h50_focus = [r for r in matured if _s(r.get("H50推薦決策")).startswith(("R-READY", "R-PREP"))]
+    h50_ready = [r for r in matured if _s(r.get("H50推薦決策")).startswith("R-READY")]
+    h50_rets = [_f(r.get("隔日候選漲跌%")) for r in h50_focus]
+    h50_rets = [x for x in h50_rets if x is not None]
+    h50_alpha = [_f(r.get("Selection Alpha%")) for r in h50_focus]
+    h50_alpha = [x for x in h50_alpha if x is not None]
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -757,6 +774,11 @@ def refresh_t1_trade_truth(
             "H49高潛力正報酬率%": round(sum(1 for x in h49_rets if x > 0) / len(h49_rets) * 100.0, 2) if h49_rets else None,
             "H49高潛力平均1日報酬%": round(sum(h49_rets) / len(h49_rets), 4) if h49_rets else None,
             "H49高潛力平均SelectionAlpha%": round(sum(h49_alpha) / len(h49_alpha), 4) if h49_alpha else None,
+            "H50主流推薦成熟樣本": len(h50_focus),
+            "H50_R_READY成熟樣本": len(h50_ready),
+            "H50主流推薦正報酬率%": round(sum(1 for x in h50_rets if x > 0) / len(h50_rets) * 100.0, 2) if h50_rets else None,
+            "H50主流推薦平均1日報酬%": round(sum(h50_rets) / len(h50_rets), 4) if h50_rets else None,
+            "H50主流推薦平均SelectionAlpha%": round(sum(h50_alpha) / len(h50_alpha), 4) if h50_alpha else None,
             "brier_score": calibration.get("brier_score"),
         },
         "failures": failures[:80],
