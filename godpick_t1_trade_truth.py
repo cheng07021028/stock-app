@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h50_1_fresh_mainstream_execution_rr_20260825"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h51_human_master_20260826"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -547,6 +547,16 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H50主流版本": _s(original.get("H50主流版本")),
         "H50推薦版本": _s(original.get("H50推薦版本")),
         "H50版本": _s(original.get("H50版本")),
+        "H51專業參考分": _f(original.get("H51專業參考分")),
+        "H51可執行分": _f(original.get("H51可執行分")),
+        "H51市場地位": _s(original.get("H51市場地位")),
+        "H51交易許可": _s(original.get("H51交易許可")),
+        "H51推薦等級": _s(original.get("H51推薦等級")),
+        "H51族群主線分": _f(original.get("H51族群主線分")),
+        "H51個股領漲品質分": _f(original.get("H51個股領漲品質分")),
+        "H51Pivot起漲分": _f(original.get("H51Pivot起漲分")),
+        "H51路徑RR": _f(original.get("H51路徑RR")),
+        "H51版本": _s(original.get("H51版本")),
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -758,6 +768,12 @@ def refresh_t1_trade_truth(
     h50_rets = [x for x in h50_rets if x is not None]
     h50_alpha = [_f(r.get("Selection Alpha%")) for r in h50_focus]
     h50_alpha = [x for x in h50_alpha if x is not None]
+    h51_focus = [r for r in matured if _s(r.get("H51交易許可")).startswith(("BUY-READY", "SETUP-PREP"))]
+    h51_ready = [r for r in matured if _s(r.get("H51交易許可")).startswith("BUY-READY")]
+    h51_rets = [_f(r.get("隔日候選漲跌%")) for r in h51_focus]
+    h51_rets = [x for x in h51_rets if x is not None]
+    h51_alpha = [_f(r.get("Selection Alpha%")) for r in h51_focus]
+    h51_alpha = [x for x in h51_alpha if x is not None]
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -779,6 +795,11 @@ def refresh_t1_trade_truth(
             "H50主流推薦正報酬率%": round(sum(1 for x in h50_rets if x > 0) / len(h50_rets) * 100.0, 2) if h50_rets else None,
             "H50主流推薦平均1日報酬%": round(sum(h50_rets) / len(h50_rets), 4) if h50_rets else None,
             "H50主流推薦平均SelectionAlpha%": round(sum(h50_alpha) / len(h50_alpha), 4) if h50_alpha else None,
+            "H51專業主線成熟樣本": len(h51_focus),
+            "H51_BUY_READY成熟樣本": len(h51_ready),
+            "H51專業主線正報酬率%": round(sum(1 for x in h51_rets if x > 0) / len(h51_rets) * 100.0, 2) if h51_rets else None,
+            "H51專業主線平均1日報酬%": round(sum(h51_rets) / len(h51_rets), 4) if h51_rets else None,
+            "H51專業主線平均SelectionAlpha%": round(sum(h51_alpha) / len(h51_alpha), 4) if h51_alpha else None,
             "brier_score": calibration.get("brier_score"),
         },
         "failures": failures[:80],

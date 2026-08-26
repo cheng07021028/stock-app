@@ -277,6 +277,24 @@ except Exception as _h42_import_exc:
     apply_dual_opportunity_engine = None
     build_focus_decision_table = None
 
+H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h51_human_master_leader_pivot_engine_20260826"
+H51_HUMAN_MASTER_IMPORT_ERROR = ""
+try:
+    from godpick_human_master_engine import (
+        VERSION as H51_HUMAN_MASTER_VERSION,
+        apply_human_master_engine,
+        build_h51_final_decision_table,
+        build_h51_mainstream_leader_table,
+        build_h51_sector_table,
+    )
+except Exception as _h51_import_exc:
+    H51_HUMAN_MASTER_VERSION = "h51_human_master_unavailable"
+    H51_HUMAN_MASTER_IMPORT_ERROR = f"{type(_h51_import_exc).__name__}: {_h51_import_exc}"
+    apply_human_master_engine = None
+    build_h51_final_decision_table = None
+    build_h51_mainstream_leader_table = None
+    build_h51_sector_table = None
+
 try:
     from godpick_v188_cache_guard import (
         V189_CACHE_GUARD_VERSION,
@@ -322,7 +340,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h50_1_fresh_mainstream_execution_rr_20260825"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h51_human_master_compact_excel_20260826"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -11071,6 +11089,15 @@ def _build_recommend_df(
                 else:
                     debug_summary["h42_dual_route_applied"] = False
 
+                # H51：真人高手式決策層。市場/族群 -> 真領漲 -> Pivot/回檔再攻 ->
+                # 量價/流動性 -> 實際進場RR。只新增H51市場地位/交易許可，不覆寫Formal/V188/H34。
+                if callable(apply_human_master_engine):
+                    governed_candidate_df = apply_human_master_engine(governed_candidate_df)
+                    debug_summary["h51_human_master_applied"] = True
+                else:
+                    debug_summary["h51_human_master_applied"] = False
+                    debug_summary["h51_human_master_error"] = H51_HUMAN_MASTER_IMPORT_ERROR or "H51 engine unavailable"
+
                 # H34 可能在 V188 之後新升格安全近門檻候選，因此不能只 merge
                 # 舊 final_df；必須從最終 governed mother frame 重新建立作戰名單。
                 final_df = _operational_recommendation_rows(governed_candidate_df, refresh_decision=False)
@@ -11468,6 +11495,9 @@ def _get_master_rank_default_cols() -> list[str]:
     """
     return [
         "股神推薦總排名", "股票代號", "股票名稱", "類別", "市場別", "產業",
+        "H51推薦等級", "H51市場地位", "H51交易許可", "H51專業參考分", "H51可執行分",
+        "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
+        "H51基本面資金分", "H51主線新鮮分", "H51路徑RR", "H51RR口徑", "H51推薦理由",
         "H47主流領先狀態", "H47交易候選狀態", "H47起漲優先分", "H47個股相對強度分",
         "H47族群內領先排名", "H47族群內領先百分位%", "H47主流領先理由",
         "H45主流波段狀態", "H45主流交易綜合分", "H45主流波段分", "H45族群主流分",
@@ -12079,13 +12109,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"超級AI重點決策", "超級AI股神精選攻略", "股神推薦總排名"}:
+        if safe_name in {"超級AI最終決策", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            ws.sheet_properties.tabColor = "7C3AED" if safe_name == "超級AI重點決策" else ("2563EB" if safe_name == "超級AI股神精選攻略" else "00A6A6")
+            ws.sheet_properties.tabColor = "7C3AED" if safe_name == "超級AI最終決策" else "00A6A6"
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
 
@@ -12114,7 +12144,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     cell.border = Border(bottom=Side(style="hair", color="E5E7EB"))
 
             hmap = {str(cell.value): cell.column for cell in ws[1]}
-            _rank_header = "重點順位" if safe_name == "超級AI重點決策" else ("攻略順位" if safe_name == "超級AI股神精選攻略" else "股神推薦總排名")
+            _rank_header = "決策順位" if safe_name == "超級AI最終決策" else "股神推薦總排名"
             _rank_idx = hmap.get(_rank_header)
             if _rank_idx:
                 for row_idx in range(2, min(ws.max_row, 4) + 1):
@@ -12129,7 +12159,8 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color="B91C1C", bold=True)))
 
             for header, width in {
-                "重點順位": 10, "攻略順位": 10, "股神推薦總排名": 12, "股票代號": 12, "股票名稱": 16,
+                "決策順位": 10, "重點順位": 10, "攻略順位": 10, "股神推薦總排名": 12, "股票代號": 12, "股票名稱": 16,
+                "H51推薦等級": 24, "H51市場地位": 30, "H51交易許可": 48, "H51推薦理由": 56,
                 "機會類型": 14, "狀態": 24, "目前決策": 18, "條件操作許可": 48, "重點理由": 42,
                 "主要阻擋/近門檻": 34, "操作原則": 42, "最終操作結論": 28, "正式推薦動作": 32,
                 "股神資料警示": 34, "正式推薦排除原因": 36, "失效條件": 34,
@@ -12138,7 +12169,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                 if cidx:
                     h37_width_overrides[ws.cell(row=1, column=cidx).column_letter] = width
 
-            for long_header in ["條件操作許可", "重點理由", "主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
+            for long_header in ["H51交易許可", "H51推薦理由", "條件操作許可", "重點理由", "主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
                 cidx = hmap.get(long_header)
                 if cidx:
                     for row_idx in range(2, ws.max_row + 1):
@@ -12906,12 +12937,21 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
                 work = apply_dual_opportunity_engine(work)
         except Exception:
             pass
+    if callable(apply_human_master_engine):
+        try:
+            _h51v = work.get("H51版本", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+            if not _h51v.eq(H51_HUMAN_MASTER_VERSION).all():
+                work = apply_human_master_engine(work)
+        except Exception:
+            pass
     _h50_research_status = work.get("H50主流購買狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     _h50_recommend = work.get("H50推薦決策", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     _h47_research_status = work.get("H47主流領先狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     _fresh_keep = _h50_research_status.str.startswith(("F-SETUP", "F-LEADER", "F-RADAR")) | _h50_recommend.str.startswith(("R-READY", "R-PREP", "R-RADAR"))
     _h47_research_keep = _h47_research_status.str.startswith(("L-EARLY", "L-LEADER", "L-PULLBACK", "L-EXTENDED"))
-    keep &= (score.ge(50.0) | _fresh_keep | _h47_research_keep)
+    _h51_market = work.get("H51市場地位", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    _h51_keep = _h51_market.str.startswith(("HM-EARLY", "HM-PULLBACK", "HM-LEADER", "HM-SETUP", "HM-EXTENDED", "HM-MATURE"))
+    keep &= (score.ge(50.0) | _fresh_keep | _h47_research_keep | _h51_keep)
     keep &= ~freshness.str.contains("過期|落後|待更新", regex=True, na=False)
     rank = work.loc[keep].copy()
     if rank.empty:
@@ -12933,7 +12973,12 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         return 0
     rank["_H50推薦優先"] = rank.get("H50推薦決策", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str).map(_h50_recommend_priority)
     rank["_H50新鮮主流優先"] = rank.get("H50主流購買狀態", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str).map(_h50_fresh_priority)
+    _h51_perm = rank.get("H51交易許可", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
+    rank["_H51交易優先"] = _h51_perm.map(lambda x: 10 if x.startswith("BUY-READY") else 8 if x.startswith("SETUP-PREP") else 6 if x.startswith("LEADER-WATCH") else 2 if x.startswith(("NO-CHASE", "WAIT-BASE")) else 0)
+    _h51_market_rank = rank.get("H51市場地位", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
+    rank["_H51市場優先"] = _h51_market_rank.map(lambda x: 8 if x.startswith("HM-EARLY") else 7 if x.startswith("HM-PULLBACK") else 6 if x.startswith("HM-LEADER") else 5 if x.startswith("HM-SETUP") else 2 if x.startswith(("HM-EXTENDED", "HM-MATURE")) else 0)
     sort_cols = [
+        "_H51交易優先", "_H51市場優先", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51可執行分",
         "_H50推薦優先", "_H50新鮮主流優先", "H50族群可買主流分", "H50主流購買優先分", "H50推薦優先分",
         "H47個股相對強度分", "H47起漲優先分", "V188股神作戰優先分", "SuperAI Trade分", "SuperAI Alpha分",
         "股神推薦優先分", "今日訊號新鮮分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分",
@@ -12973,7 +13018,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     if len(_rows) < _target:
         _add_with_cap(_target, 999)
     rank = pd.DataFrame(_rows).reset_index(drop=True) if _rows else rank.head(_target).copy().reset_index(drop=True)
-    rank.drop(columns=["_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
+    rank.drop(columns=["_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
     rank["股神推薦總排名"] = range(1, len(rank) + 1)
 
     cols = _get_master_rank_default_cols()
@@ -12983,15 +13028,13 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
-        {"優先序": 1, "活頁/表格": "超級AI重點決策", "真正用途": "唯一先看這張：H50只列真正新鮮主流且可買性達標的 R-READY / R-PREP；成熟主流、重複推薦與低風報比不得補位", "是否買進清單": "條件式；R-READY 才是可執行候選，R-PREP 等合理買點，R-RADAR/R-MATURE 只研究"},
-        {"優先序": 2, "活頁/表格": "H50主流輪動與可買族群", "真正用途": "先看資金正在轉去哪裡：主流生命週期、新鮮度、回檔再攻與成熟退潮，避免航運等成熟族群長期霸榜", "是否買進清單": "否，這是族群層權威"},
-        {"優先序": 3, "活頁/表格": "超級AI股神精選攻略", "真正用途": "H34/H41 每日安全精選的濃縮操作攻略；沒有可執行精選時會明確空手", "是否買進清單": "條件式"},
-        {"優先序": 4, "活頁/表格": "股神推薦總排名", "真正用途": "完整研究排名；H50先看主流生命週期/新鮮起漲/可買性，再看H47市場地位與V188/Trade；並限制類股集中", "是否買進清單": "否，仍須看H50推薦決策與交易許可"},
-        {"優先序": 5, "活頁/表格": "正式下週主推薦", "真正用途": "已通過買點、風控與風報比，可依條件分批操作", "是否買進清單": "是，仍須盤中確認"},
-        {"優先序": 6, "活頁/表格": "A-準主推薦小量試單", "真正用途": "接近正式門檻，只能觸發且守價後小量試單", "是否買進清單": "條件式"},
-        {"優先序": 7, "活頁/表格": "強勢動能核心雷達", "真正用途": "已發動強勢股；只等回測守住或再突破放量", "是否買進清單": "不是，禁止開盤盲追"},
-        {"優先序": 8, "活頁/表格": "資料待更新雷達", "真正用途": "模型找到候選，但個股K線不是最新；更新資料並重新推薦前不得操作", "是否買進清單": "禁止買進"},
-        {"優先序": 9, "活頁/表格": "候選診斷總表", "真正用途": "模型檢討、漏選原因與所有候選證據", "是否買進清單": "絕對不是"},
+        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H51主線→領漲→Pivot/再攻→量價/流動性→路徑RR", "是否買進清單": "BUY-READY才是可執行；SETUP-PREP等待；LEADER-WATCH不是買進推薦"},
+        {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "看資金真正集中與新鮮輪動方向", "是否買進清單": "否"},
+        {"優先序": 3, "活頁/表格": "主流領漲股", "真正用途": "找族群1~2名領漲、起漲/Pivot/回檔再攻", "是否買進清單": "需再看H51交易許可"},
+        {"優先序": 4, "活頁/表格": "股神推薦總排名", "真正用途": "完整研究證據；不必再看十幾張重複雷達", "是否買進清單": "否"},
+        {"優先序": 5, "活頁/表格": "AI績效驗證", "真正用途": "直接檢查Selection Alpha、可執行績效、Brier與H51績效", "是否買進清單": "否"},
+        {"優先序": 6, "活頁/表格": "T+1實戰真相", "真正用途": "逐筆稽核AI是否真的有價值", "是否買進清單": "否"},
+        {"優先序": 7, "活頁/表格": "系統健康與資料品質", "真正用途": "市場/K線/官方因子/版本權威狀態", "是否買進清單": "否"},
     ])
 
 def _phase92_render_zero_formal_diagnostics(source_df: pd.DataFrame) -> None:
@@ -13170,6 +13213,15 @@ def _phase93_single_source_decision_frame(
             if not _cache_ok:
                 _cache_diag = {"complete": False, "reason": "V191-H50主流可買推薦/雙路徑尚未重建"}
 
+        if _cache_ok:
+            _h51_mark = _cached_decision.get(
+                "H51版本",
+                pd.Series([""] * len(_cached_decision), index=_cached_decision.index),
+            ).fillna("").astype(str)
+            _cache_ok = bool(_h51_mark.eq(H51_HUMAN_MASTER_VERSION).all())
+            if not _cache_ok:
+                _cache_diag = {"complete": False, "reason": "V191-H51真人主線/Pivot/執行分離尚未重建"}
+
         if not _cache_ok and callable(repair_v188_decision_frame) and callable(apply_super_ai_engine):
             try:
                 _repaired, _repair_diag = repair_v188_decision_frame(
@@ -13185,6 +13237,8 @@ def _phase93_single_source_decision_frame(
                     _repaired = apply_mainstream_wave_engine(_repaired)
                 if callable(apply_dual_opportunity_engine):
                     _repaired = apply_dual_opportunity_engine(_repaired)
+                if callable(apply_human_master_engine):
+                    _repaired = apply_human_master_engine(_repaired)
                 _h20_repaired_mark = _repaired.get(
                     "V191_H20正式分區官方對齊",
                     pd.Series([""] * len(_repaired), index=_repaired.index),
@@ -13278,6 +13332,8 @@ def _phase93_single_source_decision_frame(
                 source = apply_mainstream_wave_engine(source)
             if callable(apply_dual_opportunity_engine):
                 source = apply_dual_opportunity_engine(source)
+            if callable(apply_human_master_engine):
+                source = apply_human_master_engine(source)
             st.session_state[_k("v188_cache_integrity_v189")] = dict(_fallback_diag)
             _h20_fallback_mark = source.get(
                 "V191_H20正式分區官方對齊",
@@ -13320,72 +13376,47 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
 
-    # V191-H50：第一張不再是「歷史上很強」排行榜，而是必須同時通過
-    # fresh-mainstream lifecycle、波段階段與合理交易條件的可參考清單。
-    render_pro_section("超級AI重點決策｜H50真正主流＋可買性")
-    st.caption("H50.1 第一張優先列 R-READY / R-PREP；若當天沒有可買股，最多補3檔「主流潛力觀察」R-RADAR並明確標示不是買進推薦。成熟航運、已延伸領漲與低執行RR仍不得補位。")
-    _h42_engine_ok = bool(
-        callable(apply_mainstream_wave_engine)
-        and H45_MAINSTREAM_VERSION == H45_MAINSTREAM_EXPECTED_VERSION
-        and callable(apply_dual_opportunity_engine)
-        and callable(build_focus_decision_table)
-        and H42_DUAL_ROUTE_VERSION == H42_DUAL_ROUTE_EXPECTED_VERSION
-    )
-    if not _h42_engine_ok:
-        st.error(
-            "H50 版本一致性檢查失敗：主流生命週期引擎／可買推薦引擎／Page07 未完整同步。"
-            f"主流引擎目前={H45_MAINSTREAM_VERSION}；預期={H45_MAINSTREAM_EXPECTED_VERSION}；"
-            f"推薦引擎目前={H42_DUAL_ROUTE_VERSION}；預期={H42_DUAL_ROUTE_EXPECTED_VERSION}。"
-            "請完整覆蓋 H50 修正檔後重新部署。"
-            + (f" 載入錯誤：{H42_DUAL_ROUTE_IMPORT_ERROR}" if H42_DUAL_ROUTE_IMPORT_ERROR else "")
-        )
+    # H51：第一屏只回答真人交易員真正會先問的三件事：
+    # 1) 今天最值得參考/等待/執行的是誰；2) 資金主線在哪；3) 領漲/Pivot股是誰。
+    render_pro_section("超級AI最終決策｜H51主線→領漲→Pivot→執行")
+    st.caption("H51不再把『以前很強』當成『現在值得買』。BUY-READY才是可執行候選；SETUP-PREP是高品質等待；LEADER-WATCH只保留主線研究價值，明確不是買進推薦。")
+    _h51_engine_ok = bool(callable(apply_human_master_engine) and callable(build_h51_final_decision_table) and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION)
+    if not _h51_engine_ok:
+        st.error(f"H51版本一致性失敗：目前={H51_HUMAN_MASTER_VERSION}；預期={H51_HUMAN_MASTER_EXPECTED_VERSION}。請重新覆蓋H51引擎與Page07。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))
     try:
-        _h42_focus = build_focus_decision_table(decision_source, strong_top=3, bargain_top=1) if _h42_engine_ok else pd.DataFrame({
-            "狀態": ["H50主流可買推薦未完整部署｜不是沒有候選，而是版本不一致。"],
-            "操作原則": ["先完成H50主流生命週期＋推薦引擎＋Page07覆蓋，再重新產生Excel。"],
-        })
-    except Exception as _h42_ui_exc:
-        _h42_focus = pd.DataFrame({"狀態": [f"H50重點決策暫時無法建立：{_h42_ui_exc}"]})
-    if isinstance(_h42_focus, pd.DataFrame) and not _h42_focus.empty:
-        _h50_decisions = _h42_focus.get("H50推薦決策", pd.Series([""] * len(_h42_focus))).fillna("").astype(str)
-        _ready_count = int(_h50_decisions.str.startswith("R-READY").sum())
-        _prep_count = int(_h50_decisions.str.startswith("R-PREP").sum())
-        _bargain_count = int(_h50_decisions.str.startswith("B-READY").sum())
+        _h51_source_ui = apply_human_master_engine(decision_source) if _h51_engine_ok else decision_source
+        _h51_focus = build_h51_final_decision_table(_h51_source_ui, max_rows=6) if _h51_engine_ok else pd.DataFrame({"狀態": ["H51未完整部署｜不是沒有推薦。"]})
+    except Exception as _h51_ui_exc:
+        _h51_source_ui = decision_source
+        _h51_focus = pd.DataFrame({"狀態": [f"H51最終決策暫時無法建立：{_h51_ui_exc}"]})
+    if isinstance(_h51_focus, pd.DataFrame) and not _h51_focus.empty:
+        _h51_perm_ui = _h51_focus.get("H51交易許可", pd.Series([""] * len(_h51_focus))).fillna("").astype(str)
         render_pro_kpi_row([
-            {"label": "R-READY", "value": str(_ready_count), "delta": "主流起漲＋交易條件完成"},
-            {"label": "R-PREP", "value": str(_prep_count), "delta": "主流高潛力，等合理買點"},
-            {"label": "B-READY", "value": str(_bargain_count), "delta": "跌深止穩價差路徑"},
-            {"label": "閱讀原則", "value": "主流≠可買", "delta": "雷達股不冒充推薦"},
+            {"label": "BUY-READY", "value": str(int(_h51_perm_ui.str.startswith("BUY-READY").sum())), "delta": "主線＋Pivot＋路徑RR完成"},
+            {"label": "SETUP-PREP", "value": str(int(_h51_perm_ui.str.startswith("SETUP-PREP").sum())), "delta": "值得盯，等合理買點"},
+            {"label": "LEADER-WATCH", "value": str(int(_h51_perm_ui.str.startswith("LEADER-WATCH").sum())), "delta": "主線研究，不是買進推薦"},
+            {"label": "核心順序", "value": "主線→領漲→Pivot", "delta": "最後才看RR/風控"},
         ])
-        st.dataframe(_format_df(_h42_focus), use_container_width=True, hide_index=True)
+        st.dataframe(_format_df(_h51_focus), use_container_width=True, hide_index=True)
 
-    render_pro_section("H50主流輪動與可買族群｜先看資金正在轉去哪裡")
-    st.caption("H50把『主流地位』與『主流新鮮度』分開：A0/A1是新主流點火/加速，B1是回檔蓄勢，C是成熟輪動。成熟高量族群可以仍是主流，但不再因歷史強度反覆霸榜。")
+    render_pro_section("主流族群｜H51資金主線與輪動")
     try:
-        _h50_sector_ui = build_mainstream_sector_lifecycle_table(decision_source, top_n=12) if callable(build_mainstream_sector_lifecycle_table) else pd.DataFrame()
-    except Exception as _h50_sector_exc:
-        _h50_sector_ui = pd.DataFrame({"狀態": [f"H50族群生命週期表暫時無法建立：{_h50_sector_exc}"]})
-    if isinstance(_h50_sector_ui, pd.DataFrame) and not _h50_sector_ui.empty:
-        st.dataframe(_format_df(_h50_sector_ui), use_container_width=True, hide_index=True)
+        _h51_sector_ui = build_h51_sector_table(_h51_source_ui, max_rows=12) if callable(build_h51_sector_table) else pd.DataFrame()
+    except Exception as _h51_sector_ui_exc:
+        _h51_sector_ui = pd.DataFrame({"狀態": [f"H51主流族群暫時無法建立：{_h51_sector_ui_exc}"]})
+    if isinstance(_h51_sector_ui, pd.DataFrame) and not _h51_sector_ui.empty:
+        st.dataframe(_format_df(_h51_sector_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("H47主流領漲與起漲雷達｜先辨識市場真正主線")
-    st.caption("這張表只回答『誰是現在的主流族群/領漲股/起漲股』，不把 Risk/Trade 低直接解讀成非主流。L-EXTENDED 仍是主流核心但禁止追價；真正買進仍看 H47交易候選狀態與條件價。")
+    render_pro_section("主流領漲股｜H51起漲/Pivot/回檔再攻")
     try:
-        _h47_leaders_ui = build_mainstream_wave_table(decision_source, top_n=12) if callable(build_mainstream_wave_table) else pd.DataFrame()
-    except Exception as _h47_ui_exc:
-        _h47_leaders_ui = pd.DataFrame({"狀態": [f"H47主流雷達暫時無法建立：{_h47_ui_exc}"]})
-    if isinstance(_h47_leaders_ui, pd.DataFrame) and not _h47_leaders_ui.empty:
-        _h47_ui_cols = [c for c in [
-            "股票代號", "股票名稱", "類別", "H47主流領先狀態", "H47交易候選狀態",
-            "H47起漲優先分", "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%",
-            "H45族群主流分", "H45族群狀態", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
-            "當日量比", "當日收盤位置%", "上影線比例%", "V188股神作戰優先分", "SuperAI Trade分", "Risk風控安全分",
-            "H47主流領先理由",
-        ] if c in _h47_leaders_ui.columns]
-        st.dataframe(_format_df(_h47_leaders_ui[_h47_ui_cols]), use_container_width=True, hide_index=True)
+        _h51_leader_ui = build_h51_mainstream_leader_table(_h51_source_ui, max_rows=15) if callable(build_h51_mainstream_leader_table) else pd.DataFrame()
+    except Exception as _h51_leader_ui_exc:
+        _h51_leader_ui = pd.DataFrame({"狀態": [f"H51領漲股暫時無法建立：{_h51_leader_ui_exc}"]})
+    if isinstance(_h51_leader_ui, pd.DataFrame) and not _h51_leader_ui.empty:
+        st.dataframe(_format_df(_h51_leader_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("股神推薦總排名｜H50新鮮主流研究排名")
-    st.caption("H50先看可買主流生命週期與新鮮起漲/回檔再攻，再看V188/Trade/RR；成熟高量族群仍可留研究，但透過重複推薦扣分與族群分散，不再讓同一族群長期霸榜。")
+    render_pro_section("股神推薦總排名｜H51完整研究排名")
+    st.caption("H51總排名先看主流族群、真領漲、Pivot/再攻與流動性，再看可執行RR/Trade/Risk；成熟延伸股保留研究價值，但不再壓過新鮮主線候選。")
     if callable(rotation_diagnostics):
         try:
             rotation_info = rotation_diagnostics(decision_source)
@@ -13736,6 +13767,8 @@ def _build_excel_bytes(
         summary_df["H50Page07版本"] = PAGE07_SPEED_FIX_VERSION
         summary_df["H50主流生命週期引擎版本"] = H45_MAINSTREAM_VERSION
         summary_df["H50主流可買推薦引擎版本"] = H42_DUAL_ROUTE_VERSION
+        summary_df["H51真人主線引擎版本"] = H51_HUMAN_MASTER_VERSION
+        summary_df["H51版本一致性"] = "PASS" if (callable(apply_human_master_engine) and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION) else "FAIL｜請覆蓋H51真人主線引擎＋Page07"
         summary_df["H50版本一致性"] = "PASS" if (
             callable(apply_mainstream_wave_engine)
             and H45_MAINSTREAM_VERSION == H45_MAINSTREAM_EXPECTED_VERSION
@@ -13753,137 +13786,84 @@ def _build_excel_bytes(
         "掃描品質說明": "請重新執行完整掃描後再判斷正式推薦。",
     }])
     master_rank_df = _phase90_build_master_recommendation_rank(candidate_source, top_n=30)
-    _h42_export_engine_ok = bool(
-        callable(apply_mainstream_wave_engine)
-        and H45_MAINSTREAM_VERSION == H45_MAINSTREAM_EXPECTED_VERSION
-        and callable(apply_dual_opportunity_engine)
-        and callable(build_focus_decision_table)
-        and H42_DUAL_ROUTE_VERSION == H42_DUAL_ROUTE_EXPECTED_VERSION
+    _h51_export_engine_ok = bool(
+        callable(apply_human_master_engine)
+        and callable(build_h51_final_decision_table)
+        and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION
     )
     try:
-        focus_decision_df = build_focus_decision_table(candidate_source, strong_top=3, bargain_top=1) if _h42_export_engine_ok else pd.DataFrame({
-            "狀態": ["H50主流生命週期/可買推薦未完整部署｜版本不一致，這不是『沒有推薦』。"],
+        h51_source = apply_human_master_engine(candidate_source) if _h51_export_engine_ok else candidate_source
+        final_decision_df = build_h51_final_decision_table(h51_source, max_rows=6) if _h51_export_engine_ok else pd.DataFrame({
+            "狀態": ["H51真人主線引擎未完整部署｜這不是『沒有推薦』。"],
             "目前Page07版本": [PAGE07_SPEED_FIX_VERSION],
-            "目前H50主流引擎版本": [H45_MAINSTREAM_VERSION],
-            "預期H50主流引擎版本": [H45_MAINSTREAM_EXPECTED_VERSION],
-            "目前H50推薦引擎版本": [H42_DUAL_ROUTE_VERSION],
-            "預期H50推薦引擎版本": [H42_DUAL_ROUTE_EXPECTED_VERSION],
-            "修正方式": ["同時覆蓋 H50 godpick_mainstream_wave_engine.py、godpick_dual_opportunity_engine.py 與 pages/7_股神推薦.py 後重新部署並重新匯出。"],
+            "目前H51版本": [H51_HUMAN_MASTER_VERSION],
+            "預期H51版本": [H51_HUMAN_MASTER_EXPECTED_VERSION],
+            "修正方式": ["同時覆蓋 godpick_human_master_engine.py 與 pages/7_股神推薦.py 後重新部署。"],
         })
-    except Exception as _h42_focus_exc:
-        focus_decision_df = pd.DataFrame({
-            "狀態": [f"H42重點決策建立失敗：{type(_h42_focus_exc).__name__}: {_h42_focus_exc}"],
-            "操作原則": ["不影響完整研究表；請先看股神推薦總排名並維持原風控。"],
-        })
+    except Exception as _h51_focus_exc:
+        h51_source = candidate_source
+        final_decision_df = pd.DataFrame({"狀態": [f"H51最終決策建立失敗：{type(_h51_focus_exc).__name__}: {_h51_focus_exc}"]})
     try:
-        mainstream_leader_df = build_mainstream_wave_table(candidate_source, top_n=20) if callable(build_mainstream_wave_table) else pd.DataFrame()
-        if isinstance(mainstream_leader_df, pd.DataFrame) and not mainstream_leader_df.empty:
-            _main_cols = [c for c in [
-                "股票代號", "股票名稱", "類別", "H50主流購買狀態", "H50波段機會階段", "H50主流購買優先分",
-                "H50族群生命週期", "H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分", "H50重複推薦扣分",
-                "H47主流領先狀態", "H47交易候選狀態", "H47起漲優先分", "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%",
-                "H45族群主流分", "H45族群主流排名", "H45族群狀態", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
-                "當日量比", "當日收盤位置%", "上影線比例%", "V188股神作戰優先分", "SuperAI Trade分", "Risk風控安全分",
-                "路徑風險報酬比", "H50主流購買理由", "H47主流領先理由",
-            ] if c in mainstream_leader_df.columns]
-            mainstream_leader_df = mainstream_leader_df[_main_cols].copy()
-    except Exception as _h47_table_exc:
-        mainstream_leader_df = pd.DataFrame({"狀態": [f"H50/H47主流領漲表建立失敗：{type(_h47_table_exc).__name__}: {_h47_table_exc}"]})
+        h51_leader_df = build_h51_mainstream_leader_table(h51_source, max_rows=20) if callable(build_h51_mainstream_leader_table) else pd.DataFrame()
+    except Exception as _h51_leader_exc:
+        h51_leader_df = pd.DataFrame({"狀態": [f"H51主流領漲表建立失敗：{type(_h51_leader_exc).__name__}: {_h51_leader_exc}"]})
     try:
-        mainstream_sector_df = build_mainstream_sector_lifecycle_table(candidate_source, top_n=20) if callable(build_mainstream_sector_lifecycle_table) else pd.DataFrame()
-    except Exception as _h50_sector_exc:
-        mainstream_sector_df = pd.DataFrame({"狀態": [f"H50主流輪動族群表建立失敗：{type(_h50_sector_exc).__name__}: {_h50_sector_exc}"]})
-    navigation_df = _phase90_navigation_table()
-    _v188_cols = [c for c in [
-        "股票代號", "股票名稱", "市場別", "類別", "V188股神作戰優先分",
-        "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
-        "SuperAI執行風報比", "SuperAI風報比來源", "V188交易許可", "V188正式推薦資格",
-        "V188RR治理", "V188T+1追價治理", "V188個股資料證據", "V188市場對齊治理",
-        "V188類股集中治理", "V188類股集中扣分", "SuperAI隔日上漲機率%", "SuperAI校準後隔日上漲機率%",
-        "主要進場路徑", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
-    ] if c in candidate_source.columns]
-    v188_trade_df = candidate_source[_v188_cols].copy() if _v188_cols else pd.DataFrame()
+        h51_sector_df = build_h51_sector_table(h51_source, max_rows=15) if callable(build_h51_sector_table) else pd.DataFrame()
+    except Exception as _h51_sector_exc:
+        h51_sector_df = pd.DataFrame({"狀態": [f"H51主流族群表建立失敗：{type(_h51_sector_exc).__name__}: {_h51_sector_exc}"]})
+
+    try:
+        # H51總排名必須以同一份H51母體重建，避免第一張與總排名是兩套邏輯。
+        master_rank_df = _phase90_build_master_recommendation_rank(h51_source, top_n=30)
+    except Exception:
+        pass
+    # H51：不再建立未匯出的舊 V188/導航中間表，降低完整 Excel 建立時間。
     try:
         v188_truth_df = pd.DataFrame(load_t1_truth_rows(limit=500) if callable(load_t1_truth_rows) else [])
     except Exception:
         v188_truth_df = pd.DataFrame()
     try:
-        _v188_cal = load_probability_calibration() if callable(load_probability_calibration) else {}
-        v188_calibration_df = pd.DataFrame((_v188_cal or {}).get("bins") or [])
-        if isinstance(v188_calibration_df, pd.DataFrame) and not v188_calibration_df.empty:
-            v188_calibration_df.insert(0, "總樣本數", int((_v188_cal or {}).get("eligible_samples") or 0))
-            v188_calibration_df.insert(1, "全體Brier", (_v188_cal or {}).get("brier_score"))
-    except Exception:
-        v188_calibration_df = pd.DataFrame()
+        _truth_sum = load_t1_truth_summary() if callable(load_t1_truth_summary) else {}
+        _perf_rows = []
+        if isinstance(_truth_sum, dict):
+            for _kpi in [
+                "matured_t1_samples", "executable_samples", "executable_win_rate_pct", "avg_selection_alpha_pct",
+                "H49高潛力成熟樣本", "H49高潛力正報酬率%", "H49高潛力平均1日報酬%", "H49高潛力平均SelectionAlpha%",
+                "H50主流推薦成熟樣本", "H50主流推薦正報酬率%", "H50主流推薦平均1日報酬%", "H50主流推薦平均SelectionAlpha%",
+                "H51專業主線成熟樣本", "H51專業主線正報酬率%", "H51專業主線平均1日報酬%", "H51專業主線平均SelectionAlpha%", "brier_score",
+            ]:
+                if _kpi in _truth_sum:
+                    _perf_rows.append({"績效指標": _kpi, "目前數值": _truth_sum.get(_kpi)})
+        ai_performance_df = pd.DataFrame(_perf_rows) if _perf_rows else pd.DataFrame({"狀態": ["績效真相尚未建立或永久權威尚未恢復。"]})
+    except Exception as _h51_perf_exc:
+        ai_performance_df = pd.DataFrame({"狀態": [f"AI績效摘要建立失敗：{type(_h51_perf_exc).__name__}: {_h51_perf_exc}"]})
 
-    # Compact ranking pages also use the full candidate pool whenever available.
-    if (cat_export is None or not isinstance(cat_export, pd.DataFrame) or cat_export.empty) and isinstance(candidate_source, pd.DataFrame):
-        try:
-            _, cat_export, leader_export, factor_export = _build_export_views(candidate_source, pd.DataFrame(), max(50, len(candidate_source)))
-        except Exception:
-            pass
-
-    # V191-H30：完整作戰表資訊很多，第一張表只留下真正的交易決策核心。
-    # 這張表只做「閱讀優先級」，不改 Formal/A- 分區、不放寬 Entry/Risk/RR。
-    try:
-        from godpick_super_ai_excel_guide import build_super_ai_excel_guide
-        # V191-H31：精選攻略是「股神推薦總排名」的濃縮閱讀層，不得另從
-        # 1,700+ 候選診斷母體重新排名，否則會與正式總排名形成兩套互相矛盾的榜單。
-        _guide_source = (
-            master_rank_df
-            if isinstance(master_rank_df, pd.DataFrame) and not master_rank_df.empty
-            else candidate_diagnosis_export
-        )
-        super_ai_guide_export = build_super_ai_excel_guide(_guide_source, max_rows=20)
-    except Exception as _h30_guide_exc:
-        super_ai_guide_export = pd.DataFrame({
-            "狀態": [f"超級AI精選攻略建立失敗：{type(_h30_guide_exc).__name__}: {_h30_guide_exc}"],
-            "說明": ["不影響其餘正式作戰表匯出；請檢查 H30 guide builder。"],
-        })
-
-    # V191-H37：兩張最重要 Excel 分頁套用各自永久保存的欄位版型。
-    # 只重新排序欄位，所有欄位完整保留；固定排名/代號/名稱永遠在最前。
-    super_ai_guide_export = _apply_excel_export_column_order(
-        super_ai_guide_export, "excel_super_ai_guide", _get_super_ai_guide_default_cols()
-    )
+    # H51：已取消未匯出的舊攻略/雷達中間表，只保留總排名欄位版型。
     master_rank_df = _apply_excel_export_column_order(
         master_rank_df, "excel_master_rank", _get_master_rank_default_cols()
     )
 
+    # H51：預設Excel只保留真正有決策價值的核心活頁。
+    # 其他雷達/診斷不再重複匯出；完整研究欄位仍保留於「股神推薦總排名」。
+    health_rows = []
+    try:
+        if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+            for c in summary_df.columns:
+                health_rows.append({"類型": "推薦摘要", "項目": c, "數值": summary_df.iloc[0].get(c)})
+        if isinstance(scan_df, pd.DataFrame) and not scan_df.empty:
+            for c in scan_df.columns:
+                health_rows.append({"類型": "資料健康", "項目": c, "數值": scan_df.iloc[0].get(c)})
+    except Exception:
+        pass
+    health_df = pd.DataFrame(health_rows) if health_rows else pd.DataFrame({"狀態": ["目前沒有資料健康摘要。"]})
     sheets = [
-        ("超級AI重點決策", focus_decision_df, "目前沒有 H50 R-READY / R-PREP 新鮮主流可買候選；成熟主流、低風報比與重複推薦不為湊名額補位。"),
-        ("H50主流輪動與可買族群", mainstream_sector_df, "目前沒有可建立H50主流生命週期/輪動族群資料。"),
-        ("H47主流領漲與起漲雷達", mainstream_leader_df, "目前沒有通過H50/H47主流領漲/起漲結構的候選。"),
-        ("超級AI股神精選攻略", super_ai_guide_export, "本輪沒有可建立精選攻略的候選資料。"),
-        ("超級AI每日條件精選", daily_pick_compact, "本輪沒有通過H41安全條件的每日精選；不為名額硬湊股票。"),
-        ("股神推薦總排名", master_rank_df, "目前沒有資料新鮮且達排名門檻的推薦/觀察候選。"),
-        ("V188交易品質治理", v188_trade_df, "尚無 V188 Alpha/Trade 交易品質治理資料。"),
+        ("超級AI最終決策", final_decision_df, "目前沒有H51可執行/高品質等待候選；不以成熟主流或低品質雷達補位。"),
+        ("主流族群", h51_sector_df, "目前沒有可建立H51主流族群決策的資料。"),
+        ("主流領漲股", h51_leader_df, "目前沒有通過H51主線/領漲/Pivot結構的候選。"),
+        ("股神推薦總排名", master_rank_df, "目前沒有可建立完整研究排名的候選。"),
+        ("AI績效驗證", ai_performance_df, "目前沒有成熟績效驗證資料。"),
         ("T+1實戰真相", v188_truth_df, "尚無成熟 T+1 實戰真相；待下一交易日更新。"),
-        ("AI機率校準", v188_calibration_df, "尚無足夠成熟樣本建立機率校準。"),
-        ("使用導航", navigation_df, "使用導航無資料。"),
-        ("股神正式推薦摘要", summary_df, "本輪沒有摘要資料。"),
-        ("掃描完整性", scan_df, "缺少掃描完整性資料；請重新掃描。"),
-        ("股神作戰總表", battle_df, "本輪沒有可操作推薦；若掃描不完整，請先重新掃描。"),
-        ("完整推薦表", battle_df, "完整推薦表只保留真正可操作名單；本輪沒有可操作推薦。"),
-        ("正式下週主推薦", formal_compact, "目前沒有正式主推薦。"),
-        ("A-準主推薦小量試單", a_minus_compact, "目前沒有 A- 準主推薦。"),
-        ("盤中核心雷達", core_compact, "目前沒有 R1 盤中核心雷達。"),
-        ("強勢動能核心雷達", momentum_core_compact, "本輪沒有 R1-M 強勢動能核心雷達。"),
-        ("強勢前兆核心雷達", prebreak_core_compact, "本輪沒有 R1-P 強勢前兆核心雷達。"),
-        ("強勢動能完整雷達", momentum_full_compact, "本輪沒有強勢動能條件雷達。"),
-        ("強勢前兆完整雷達", prebreak_full_compact, "本輪沒有強勢前兆條件雷達。"),
-        ("盤中備援雷達", backup_compact, "目前沒有 R2 備援雷達。"),
-        ("盤中低優先觀察", low_compact, "目前沒有 R3 低優先觀察。"),
-        ("盤中雷達完整名單", intraday_full_compact, "目前沒有使用最新K線的盤中雷達資料。"),
-        ("資料待更新雷達", stale_radar_compact, "目前沒有因K線落後而被封鎖的雷達候選。"),
-        ("高風險雷達觀察", risk_compact, "目前沒有高風險觀察。"),
-        ("不可直接買觀察", watch_compact, "目前沒有一般觀察候選。"),
-        ("正式排除清單", exclude_compact, "目前沒有正式排除候選。"),
-        ("候選診斷總表", candidate_diag, "沒有完整候選診斷資料；請重新完整掃描。"),
-        ("引擎訊號診斷", engine_diag, "沒有引擎訊號診斷資料。"),
-        ("類股強度榜", cat_export, "類股強度榜沒有資料。"),
-        ("同類股領先榜", leader_export, "同類股領先榜沒有資料。"),
-        ("自動因子榜", factor_export, "自動因子榜沒有資料。"),
+        ("系統健康與資料品質", health_df, "目前沒有系統健康/資料品質資料。"),
     ]
 
     diag_rows = []
@@ -13891,12 +13871,10 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("第一優先｜H50新鮮主流×可買性" if sheet_name == "超級AI重點決策" else "第二優先｜H50主流生命週期/輪動" if sheet_name == "H50主流輪動與可買族群" else "第三優先｜超級AI安全精選攻略" if sheet_name == "超級AI股神精選攻略" else "第四優先｜完整研究排名" if sheet_name == "股神推薦總排名" else "使用說明" if sheet_name == "使用導航" else "操作" if sheet_name in {"股神作戰總表", "完整推薦表", "正式下週主推薦", "A-準主推薦小量試單", "盤中核心雷達", "強勢動能核心雷達", "強勢前兆核心雷達", "強勢動能完整雷達", "強勢前兆完整雷達"} else "資料待更新/禁止操作" if sheet_name == "資料待更新雷達" else "診斷/管理"),
+            "用途": ("第一優先｜H51最終決策" if sheet_name == "超級AI最終決策" else "主線資金/輪動" if sheet_name == "主流族群" else "領漲/Pivot/再攻" if sheet_name == "主流領漲股" else "完整研究排名" if sheet_name == "股神推薦總排名" else "績效真相" if sheet_name in {"AI績效驗證", "T+1實戰真相"} else "資料健康/稽核"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
-    _write_df_to_ws(wb, "匯出診斷", pd.DataFrame(diag_rows), "匯出診斷無資料")
-
     wb.save(output)
     output.seek(0)
     return output.getvalue()
@@ -13920,7 +13898,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H46欄位名稱排序器保留；H50.1第一張先列新鮮主流可買R-READY/R-PREP；沒有可買股時最多列3檔R-RADAR作「非買進」參考，另有H50主流輪動族群頁與H47市場領漲雷達。")
+    st.caption("H51 Excel預設精簡為7個核心活頁：最終決策、主流族群、主流領漲股、總排名、AI績效、T+1真相、系統健康。第一張只回答真正值得參考/等待/執行的主線候選。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -13933,15 +13911,9 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         "調整 Excel 主表欄位版型",
         value=False,
         key=_k("show_excel_layout_manager_h37"),
-        help="開啟後可直接用欄位名稱調整兩張主表順序；不需要輸入順位或反覆左右移動，設定會永久保存。",
+        help="開啟後可直接用欄位名稱調整股神推薦總排名欄位順序；不需要輸入順位或反覆左右移動，設定會永久保存。",
     )
     if _show_excel_layout_manager:
-        _render_column_order_manager(
-            "excel_super_ai_guide",
-            "Excel欄位版型｜超級AI股神精選攻略",
-            _guide_available,
-            _get_super_ai_guide_default_cols(),
-        )
         _render_column_order_manager(
             "excel_master_rank",
             "Excel欄位版型｜股神推薦總排名",
@@ -13952,7 +13924,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         st.caption("需要調整欄位時再開啟上方開關；H46 使用欄位名稱定位與批次排序，平常可保持關閉以維持頁面速度。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H50.1-FRESH-MAINSTREAM-EXECUTION-RR|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H51-HUMAN-MASTER-COMPACT-EXCEL|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
@@ -13991,7 +13963,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                 key=_k("main_excel_download_v164"),
             )
     with c2:
-        st.caption("H37：Excel 仍只在按『準備』時建立；欄位版型改動會自動使舊快取失效。兩張主表只調整閱讀順序，推薦內容、排名計算與所有研究欄位均完整保留。")
+        st.caption("H37：Excel 仍只在按『準備』時建立；欄位版型改動會自動使舊快取失效。總排名欄位版型只調整閱讀順序；H51精簡活頁不刪除總排名內的研究欄位。")
 
 
 def _render_selected_export_block():
@@ -16746,7 +16718,7 @@ def main():
                 export_source_for_rank = export_source_for_rank.drop(columns=["勾選"], errors="ignore")
             export_sig_v164 = _result_export_signature_v164(
                 export_source_for_rank,
-                "full-table|V191-H35-FORECAST-INTEGRITY|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H50.1-FRESH-MAINSTREAM-EXECUTION-RR|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
+                "full-table|V191-H35-FORECAST-INTEGRITY|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H51-HUMAN-MASTER-COMPACT-EXCEL|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
             )
             export_cache_key_v164 = _k("full_table_export_cache_v164")
             export_cache_v164 = st.session_state.get(export_cache_key_v164, {})
