@@ -19,12 +19,13 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h51_human_master_leader_pivot_engine_20260826"
+VERSION = "v191_h52_mainstream_precision_ignition_truth_20260827"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
     "H51流動性分", "H51基本面資金分", "H51主線新鮮分", "H51重複推薦扣分",
-    "H51專業參考分", "H51可執行分", "H51市場地位", "H51交易許可", "H51推薦等級",
+    "H51發動潛力分", "H51專業參考分", "H51可執行分", "H51市場地位", "H51交易許可", "H51推薦等級",
+    "H51急跌收復狀態",
     "H51路徑RR", "H51RR口徑", "H51推薦理由", "H51版本",
 ]
 
@@ -167,6 +168,7 @@ def _profile(row: pd.Series) -> dict[str, Any]:
     trend = _first_num(row, ["H45趨勢延續分"], 50.0)
     leader = _clip(rs * 0.34 + pct * 0.20 + onset * 0.25 + trend * 0.13 + sector * 0.08)
 
+    ret1 = _first_num(row, ["今日漲幅%", "當日漲跌幅%", "當日報酬%"], 0.0)
     ret5 = _first_num(row, ["近5日漲幅%", "5日績效%"], 0.0)
     ret20 = _first_num(row, ["近20日漲幅%", "20日績效%"], 0.0)
     dist_high = abs(_first_num(row, ["距20日高點%"], 99.0))
@@ -203,13 +205,29 @@ def _profile(row: pd.Series) -> dict[str, Any]:
     if life.startswith("C"): extension_penalty += 5.0
     if life.startswith("D"): extension_penalty += 10.0
 
+    shock_down = bool(ret1 <= -7.0)
+    weak_breakdown = bool(ret1 <= -5.0 and close < 35.0)
+    shock_penalty = 26.0 if shock_down else 14.0 if weak_breakdown else 0.0
+
     pro = _clip(
         sector * 0.20 + leader * 0.21 + pivot * 0.22 + volume * 0.11 + liquidity * 0.10
-        + fundamental * 0.08 + fresh * 0.08 - repeat_penalty - extension_penalty
+        + fundamental * 0.08 + fresh * 0.08 - repeat_penalty - extension_penalty - shock_penalty
+    )
+    ignition = _clip(
+        sector * 0.19 + leader * 0.24 + pivot * 0.24 + volume * 0.10
+        + fresh * 0.13 + fundamental * 0.05 + liquidity * 0.05
+        - extension_penalty * 0.35 - shock_penalty
+    )
+    reclaim_status = (
+        "SHOCK-DOWN｜當日急跌/跌停，需先收復關鍵價與量價結構" if shock_down
+        else "WEAK-BREAKDOWN｜當日弱勢破壞，先等止跌收復" if weak_breakdown
+        else "NORMAL｜無急跌事件否決"
     )
 
-    # Pure market status: do not hide true leaders just because execution is not ready.
-    if extended:
+    # Pure market status: a fresh leader is valuable, but an event/limit-down break is not an ordinary pullback.
+    if shock_down or weak_breakdown:
+        market_status = "HM-RECLAIM｜急跌/事件後等待收復"
+    elif extended:
         market_status = "HM-EXTENDED｜主流領漲但已延伸"
     elif life.startswith("C"):
         market_status = "HM-MATURE｜成熟主流，等新一輪基底"
@@ -234,15 +252,20 @@ def _profile(row: pd.Series) -> dict[str, Any]:
 
     core_market = market_status.startswith(("HM-EARLY", "HM-PULLBACK", "HM-LEADER", "HM-SETUP"))
     ready = bool(
-        core_market and not blocked and pro >= 72 and pivot >= 68 and liquidity >= 74 and amount >= 300
+        core_market and not blocked and not shock_down and not weak_breakdown
+        and pro >= 72 and ignition >= 70 and pivot >= 68 and leader >= 56 and liquidity >= 74 and amount >= 300
         and rr >= 1.35 and trade >= 65 and risk >= 60 and entry >= 58
-        and (stop_dist <= 0 or stop_dist <= 7.0) and chase <= 60 and close >= 50 and upper <= 50
+        and ret1 > -5.0 and (stop_dist <= 0 or stop_dist <= 7.0) and chase <= 60 and close >= 50 and upper <= 50
     )
     prep = bool(
-        core_market and not blocked and pro >= 66 and sector >= 66 and pivot >= 62 and liquidity >= 62 and amount >= 150
-        and rr >= 0.70 and risk >= 50 and trade >= 52 and (stop_dist <= 0 or stop_dist <= 10.0) and chase <= 78
+        core_market and not blocked and not shock_down and not weak_breakdown
+        and pro >= 66 and ignition >= 64 and sector >= 66 and leader >= 52 and pivot >= 62 and liquidity >= 62 and amount >= 150
+        and rr >= 0.70 and risk >= 50 and trade >= 52 and ret1 > -6.0
+        and close >= 40 and upper <= 60 and (stop_dist <= 0 or stop_dist <= 10.0) and chase <= 78
     )
-    if ready:
+    if shock_down or weak_breakdown:
+        permission = "WAIT-RECLAIM｜急跌/跌停後先確認收復，不列高品質等待"
+    elif ready:
         permission = "BUY-READY｜主線/領漲/Pivot與執行條件完成"
     elif market_status.startswith("HM-EXTENDED"):
         permission = "NO-CHASE｜真正強股但已延伸，只等新基底/回測"
@@ -269,15 +292,15 @@ def _profile(row: pd.Series) -> dict[str, Any]:
     reason = (
         f"族群{sector:.1f}/{life or '生命週期未知'}；領漲{leader:.1f}；Pivot{pivot:.1f}；"
         f"量價{volume:.1f}；流動性{liquidity:.1f}(成交額{amount:.0f}百萬)；"
-        f"資金/基本面{fundamental:.1f}；5日{ret5:+.1f}%/20日{ret20:+.1f}%；"
+        f"資金/基本面{fundamental:.1f}；發動潛力{ignition:.1f}；今日{ret1:+.1f}%/5日{ret5:+.1f}%/20日{ret20:+.1f}%；"
         f"路徑RR{rr:.2f}({rr_basis})；Trade{trade:.1f}/Risk{risk:.1f}/Entry{entry:.1f}/追價{chase:.0f}；"
-        f"重複扣分{repeat_penalty:.1f}/延伸扣分{extension_penalty:.1f}"
+        f"重複扣分{repeat_penalty:.1f}/延伸扣分{extension_penalty:.1f}/急跌扣分{shock_penalty:.1f}"
     )
     return {
         "sector": round(sector, 2), "leader": round(leader, 2), "pivot": round(pivot, 2), "volume": round(volume, 2),
         "liquidity": round(liquidity, 2), "fundamental": round(fundamental, 2), "fresh": round(fresh, 2),
-        "repeat": round(repeat_penalty, 2), "pro": round(pro, 2), "exec": round(exec_score, 2),
-        "market_status": market_status, "permission": permission, "level": level,
+        "repeat": round(repeat_penalty, 2), "ignition": round(ignition, 2), "pro": round(pro, 2), "exec": round(exec_score, 2),
+        "market_status": market_status, "permission": permission, "level": level, "reclaim_status": reclaim_status,
         "rr": round(rr, 3), "rr_basis": rr_basis, "reason": reason,
     }
 
@@ -302,11 +325,13 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     work["H51基本面資金分"] = [p["fundamental"] for p in profiles]
     work["H51主線新鮮分"] = [p["fresh"] for p in profiles]
     work["H51重複推薦扣分"] = [p["repeat"] for p in profiles]
+    work["H51發動潛力分"] = [p["ignition"] for p in profiles]
     work["H51專業參考分"] = [p["pro"] for p in profiles]
     work["H51可執行分"] = [p["exec"] for p in profiles]
     work["H51市場地位"] = [p["market_status"] for p in profiles]
     work["H51交易許可"] = [p["permission"] for p in profiles]
     work["H51推薦等級"] = [p["level"] for p in profiles]
+    work["H51急跌收復狀態"] = [p["reclaim_status"] for p in profiles]
     work["H51路徑RR"] = [p["rr"] for p in profiles]
     work["H51RR口徑"] = [p["rr_basis"] for p in profiles]
     work["H51推薦理由"] = [p["reason"] for p in profiles]
@@ -321,37 +346,27 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     code = work.get("股票代號", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.strip()
     work = work.loc[code.ne("")].copy()
     perm = work.get("H51交易許可", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    # First sheet may show READY/PREP and at most two leader-watch references.
-    priority = perm.map(lambda x: 4 if x.startswith("BUY-READY") else 3 if x.startswith("SETUP-PREP") else 2 if x.startswith("LEADER-WATCH") else 0)
+    # First sheet is an action/preparation sheet only. Research-only LEADER-WATCH belongs in 主流領漲股.
+    priority = perm.map(lambda x: 4 if x.startswith("BUY-READY") else 3 if x.startswith("SETUP-PREP") else 0)
     work = work.loc[priority.gt(0)].copy()
     if work.empty:
         return pd.DataFrame({
             "狀態": ["今天沒有通過H51『主流族群→領漲股→Pivot/再攻→量價→流動性→路徑RR』的高品質候選。"],
             "操作原則": ["不以成熟主流或低品質雷達補位；請看『主流族群與領漲股』了解下一批等待名單。"],
         })
-    # LEADER-WATCH can appear only when its sector and professional score are truly top-tier;
-    # otherwise it belongs in the dedicated leader sheet, not the final-decision page.
-    _perm_all = work["H51交易許可"].astype(str)
-    _watch_ok = _perm_all.str.startswith("LEADER-WATCH") & pd.to_numeric(work.get("H51族群主線分", 0), errors="coerce").fillna(0).ge(68) & pd.to_numeric(work.get("H51專業參考分", 0), errors="coerce").fillna(0).ge(75)
-    work = work.loc[~_perm_all.str.startswith("LEADER-WATCH") | _watch_ok].copy()
-    work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3 if x.startswith("SETUP-PREP") else 2)
+    work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3)
     for c in ["H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
     work.sort_values(["_p", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分"], ascending=False, inplace=True, kind="mergesort")
     selected = []
     sector_count: dict[str, int] = {}
-    watch_count = 0
     for _, row in work.iterrows():
         sector = _first_text(row, ["類別", "族群名稱"], "未分類")
         permx = _s(row.get("H51交易許可"))
         if sector_count.get(sector, 0) >= 2:
             continue
-        if permx.startswith("LEADER-WATCH") and watch_count >= 2:
-            continue
         selected.append(row)
         sector_count[sector] = sector_count.get(sector, 0) + 1
-        if permx.startswith("LEADER-WATCH"):
-            watch_count += 1
         if len(selected) >= max(1, int(max_rows)):
             break
     rows = []
@@ -372,6 +387,7 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "H51市場地位": _s(row.get("H51市場地位")),
             "H51交易許可": permx,
             "目前決策": action,
+            "H51發動潛力分": _first_num(row, ["H51發動潛力分"]),
             "H51專業參考分": _first_num(row, ["H51專業參考分"]),
             "H51族群主線分": _first_num(row, ["H51族群主線分"]),
             "H51個股領漲品質分": _first_num(row, ["H51個股領漲品質分"]),
@@ -399,14 +415,14 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     pick = work.loc[~status.str.startswith("HM-NO")].copy()
     if pick.empty:
         return pick
-    for c in ["H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
-    pick.sort_values(["_stage", "H51專業參考分", "H51個股領漲品質分", "H51Pivot起漲分"], ascending=False, inplace=True, kind="mergesort")
+    pick.sort_values(["_stage", "H51發動潛力分", "H51專業參考分", "H51個股領漲品質分", "H51Pivot起漲分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H51專業參考分",
+        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
-        "H51基本面資金分", "H51主線新鮮分", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
+        "H51基本面資金分", "H51主線新鮮分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
         "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H51推薦理由"
     ] if c in pick.columns]
     return pick.head(max(1, int(max_rows)))[cols].reset_index(drop=True)

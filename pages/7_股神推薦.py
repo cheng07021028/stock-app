@@ -277,7 +277,7 @@ except Exception as _h42_import_exc:
     apply_dual_opportunity_engine = None
     build_focus_decision_table = None
 
-H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h51_human_master_leader_pivot_engine_20260826"
+H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h52_mainstream_precision_ignition_truth_20260827"
 H51_HUMAN_MASTER_IMPORT_ERROR = ""
 try:
     from godpick_human_master_engine import (
@@ -340,7 +340,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h51_human_master_compact_excel_20260826"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h52_mainstream_precision_20260827"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -5706,6 +5706,7 @@ def _append_records_dedup_by_business_key(base_df: pd.DataFrame, new_df: pd.Data
 CATEGORY_KEYWORD_RULES: list[tuple[str, list[str]]] = [
     ("晶圓代工", ["台積", "聯電", "力積電", "世界先進", "umc", "tsmc", "晶圓代工"]),
     ("IC設計", ["聯發科", "瑞昱", "聯詠", "群聯", "創意", "世芯", "智原", "敦泰", "原相", "晶心科", "矽力", "力旺", "天鈺", "義隆", "祥碩", "譜瑞", "聯陽", "瑞鼎", "義傳", "ic設計"]),
+    ("半導體測試介面", ["旺矽", "精測", "穎崴", "雍智科技", "測試介面", "探針卡", "probe card"]),
     ("封測", ["日月光", "矽品", "京元電", "頎邦", "欣銓", "矽格", "封測", "測試"]),
     ("記憶體", ["南亞科", "華邦電", "旺宏", "宇瞻", "十銓", "記憶體", "dram", "nand"]),
     ("矽晶圓", ["環球晶", "中美晶", "合晶", "嘉晶", "矽晶圓"]),
@@ -5718,10 +5719,10 @@ CATEGORY_KEYWORD_RULES: list[tuple[str, list[str]]] = [
     ("高速傳輸", ["高速", "傳輸", "祥碩", "譜瑞", "創惟", "威鋒", "usb4", "pcie"]),
     ("網通交換器", ["智邦", "明泰", "中磊", "智易", "啟碁", "網通", "交換器", "switch"]),
     ("光通訊", ["光通訊", "波若威", "華星光", "聯鈞", "上詮", "眾達", "聯亞", "光聖", "cpo"]),
-    ("PCB載板", ["欣興", "南電", "景碩", "金像電", "健鼎", "台燿", "華通", "載板", "pcb", "銅箔基板"]),
+    ("PCB載板", ["欣興", "南電", "景碩", "金像電", "健鼎", "台燿", "華通", "台虹", "亞電", "臻鼎", "聯茂", "載板", "pcb", "銅箔基板"]),
     ("EMS代工", ["鴻海", "和碩", "廣達", "仁寶", "英業達", "緯創", "組裝"]),
     ("面板", ["友達", "群創", "彩晶", "凌巨", "面板"]),
-    ("光學鏡頭", ["大立光", "玉晶光", "亞光", "今國光", "鏡頭", "光學"]),
+    ("光學鏡頭", ["大立光", "玉晶光", "亞光", "今國光", "佳能", "中揚光", "揚明光", "先進光", "保勝光學", "鏡頭", "光學"]),
     ("被動元件", ["國巨", "華新科", "禾伸堂", "凱美", "立隆電", "被動元件", "電容", "電阻"]),
     ("連接器", ["貿聯", "嘉澤", "信邦", "良維", "胡連", "連接器", "端子", "連接線"]),
     ("電池材料", ["康普", "美琪瑪", "立凱", "長園科", "電池", "材料", "鋰"]),
@@ -5792,15 +5793,27 @@ def _infer_category_from_name(name: str) -> str:
     return "其他"
 
 def _infer_category_from_record(name: str, raw_category: Any) -> str:
+    """Prefer precise theme inference from the stock name when the source only supplies a broad industry bucket.
+
+    H52 fix: the old implementation accidentally called `_infer_category_from_name(raw_cat)`,
+    so rows already labelled 半導體業/光電業/電子零組件業 never got refined into
+    記憶體/PCB載板/光通訊/光學鏡頭/半導體測試介面.
+    """
     raw_cat = _canonical_category(raw_category)
-    if raw_cat:
-        if raw_cat in {x[0] for x in CATEGORY_KEYWORD_RULES}:
-            return raw_cat
-        by_name = _infer_category_from_name(raw_cat)
-        if by_name != "其他":
-            return by_name
+    precise_categories = {x[0] for x in CATEGORY_KEYWORD_RULES}
+    if raw_cat in precise_categories:
         return raw_cat
-    return _infer_category_from_name(name)
+
+    by_stock_name = _infer_category_from_name(name)
+    if by_stock_name != "其他":
+        return by_stock_name
+
+    if raw_cat:
+        by_raw_text = _infer_category_from_name(raw_cat)
+        if by_raw_text != "其他":
+            return by_raw_text
+        return raw_cat
+    return "其他"
 
 
 # =========================================================
@@ -11497,7 +11510,7 @@ def _get_master_rank_default_cols() -> list[str]:
         "股神推薦總排名", "股票代號", "股票名稱", "類別", "市場別", "產業",
         "H51推薦等級", "H51市場地位", "H51交易許可", "H51專業參考分", "H51可執行分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
-        "H51基本面資金分", "H51主線新鮮分", "H51路徑RR", "H51RR口徑", "H51推薦理由",
+        "H51基本面資金分", "H51主線新鮮分", "H51發動潛力分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "H51推薦理由",
         "H47主流領先狀態", "H47交易候選狀態", "H47起漲優先分", "H47個股相對強度分",
         "H47族群內領先排名", "H47族群內領先百分位%", "H47主流領先理由",
         "H45主流波段狀態", "H45主流交易綜合分", "H45主流波段分", "H45族群主流分",
@@ -13028,7 +13041,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
-        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H51主線→領漲→Pivot/再攻→量價/流動性→路徑RR", "是否買進清單": "BUY-READY才是可執行；SETUP-PREP等待；LEADER-WATCH不是買進推薦"},
+        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H51主線→領漲→Pivot/再攻→量價/流動性→路徑RR", "是否買進清單": "只顯示BUY-READY與SETUP-PREP；LEADER-WATCH移至主流領漲股"},
         {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "看資金真正集中與新鮮輪動方向", "是否買進清單": "否"},
         {"優先序": 3, "活頁/表格": "主流領漲股", "真正用途": "找族群1~2名領漲、起漲/Pivot/回檔再攻", "是否買進清單": "需再看H51交易許可"},
         {"優先序": 4, "活頁/表格": "股神推薦總排名", "真正用途": "完整研究證據；不必再看十幾張重複雷達", "是否買進清單": "否"},
@@ -13379,7 +13392,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     # H51：第一屏只回答真人交易員真正會先問的三件事：
     # 1) 今天最值得參考/等待/執行的是誰；2) 資金主線在哪；3) 領漲/Pivot股是誰。
     render_pro_section("超級AI最終決策｜H51主線→領漲→Pivot→執行")
-    st.caption("H51不再把『以前很強』當成『現在值得買』。BUY-READY才是可執行候選；SETUP-PREP是高品質等待；LEADER-WATCH只保留主線研究價值，明確不是買進推薦。")
+    st.caption("H52主流精準修正：BUY-READY才是可執行；SETUP-PREP是高品質等待；LEADER-WATCH只放『主流領漲股』研究頁，不再混入最終決策；當日急跌/跌停一律先 WAIT-RECLAIM。")
     _h51_engine_ok = bool(callable(apply_human_master_engine) and callable(build_h51_final_decision_table) and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION)
     if not _h51_engine_ok:
         st.error(f"H51版本一致性失敗：目前={H51_HUMAN_MASTER_VERSION}；預期={H51_HUMAN_MASTER_EXPECTED_VERSION}。請重新覆蓋H51引擎與Page07。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))
