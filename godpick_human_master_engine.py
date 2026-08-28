@@ -19,7 +19,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h52_mainstream_precision_ignition_truth_20260827"
+VERSION = "v191_h53_sector_resonance_nextday_priority_20260828"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -28,6 +28,14 @@ H51_COLUMNS = [
     "H51急跌收復狀態",
     "H51路徑RR", "H51RR口徑", "H51推薦理由", "H51版本",
 ]
+
+H53_COLUMNS = [
+    "H53族群共振分", "H53領漲集群分", "H53隔日優先分", "H53參考層級",
+    "H53族群廣度分", "H53族群攻擊分", "H53族群量能分", "H53族群資金分",
+    "H53族群樣本可信度", "H53分類稀釋扣分", "H53版本",
+]
+
+_BROAD_PARENT_BUCKETS = {"半導體業", "電子零組件業", "光電業", "其他電子業", "電腦及週邊設備業"}
 
 _BLANK = {"", "none", "nan", "nat", "null", "--", "-", "<na>"}
 
@@ -149,6 +157,139 @@ def _is_blocked(row: pd.Series) -> bool:
     hard = ["LOCKDOWN", "禁止所有新倉", "全面禁買", "資料待更新", "K線落後", "WAIT-DATA"]
     return any(x in blob.upper() for x in hard)
 
+
+
+def _score100(v: Any, default: float = 50.0) -> float:
+    """Normalize common score/ratio fields to a conservative 0-100 scale."""
+    x = _f(v, default)
+    if 0.0 <= x <= 1.0:
+        x *= 100.0
+    return _clip(x)
+
+
+def _row_score100(row: pd.Series, names: Iterable[str], default: float = 50.0) -> float:
+    for c in names:
+        if c in row.index and _s(row.get(c)):
+            return _score100(row.get(c), default)
+    return float(default)
+
+
+def _h53_group_context(work: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Build cross-sectional sector breadth/attack/flow context.
+
+    H53 deliberately uses the whole candidate universe instead of judging a sector
+    only from the average quality of its top few stocks. Small groups are shrunk
+    toward neutral to avoid one-stock themes winning the ranking. Broad parent
+    industry buckets remain visible but receive a dilution penalty.
+    """
+    if work is None or work.empty:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    sector_series = work.get("類別", pd.Series(["未分類"] * len(work), index=work.index)).fillna("未分類").astype(str).str.strip()
+    for sector, idxs in sector_series.groupby(sector_series).groups.items():
+        g = work.loc[list(idxs)].copy()
+        n = max(1, len(g))
+        ret1 = pd.to_numeric(g.get("今日漲幅%", 0), errors="coerce").fillna(0.0)
+        vr = pd.to_numeric(g.get("當日量比", g.get("均量比", 1.0)), errors="coerce").fillna(1.0)
+        ignition = pd.to_numeric(g.get("H51發動潛力分", 50), errors="coerce").fillna(50.0)
+        leader = pd.to_numeric(g.get("H51個股領漲品質分", 50), errors="coerce").fillna(50.0)
+        h51sector = pd.to_numeric(g.get("H51族群主線分", 50), errors="coerce").fillna(50.0)
+        market = g.get("H51市場地位", pd.Series([""] * n, index=g.index)).fillna("").astype(str)
+
+        adv = float((ret1 > 0).mean() * 100.0)
+        strong = float((ret1 >= 2.0).mean() * 100.0)
+        volume_confirm = float((vr >= 1.15).mean() * 100.0)
+        setup_breadth = float((market.str.startswith(("HM-EARLY", "HM-PULLBACK", "HM-LEADER", "HM-SETUP")) & ignition.ge(64)).mean() * 100.0)
+
+        ext_breadth = float(pd.Series([_row_score100(r, ["族群廣度分", "同族群強勢比例", "H45族群5日上漲比例%"], 50.0) for _, r in g.iterrows()]).mean())
+        attack = float(pd.Series([_row_score100(r, ["族群攻擊強度", "族群資金流分數", "資金攻擊有效分"], 50.0) for _, r in g.iterrows()]).mean())
+        volume_score = float(pd.Series([_row_score100(r, ["族群成交額分", "同族群平均量能分"], 50.0) for _, r in g.iterrows()]).mean())
+        fund_flow = float(pd.Series([_row_score100(r, ["族群資金流分數", "主流資金分", "主流族群回饋分"], 50.0) for _, r in g.iterrows()]).mean())
+
+        raw_breadth = _clip(adv * 0.28 + strong * 0.24 + volume_confirm * 0.18 + setup_breadth * 0.15 + ext_breadth * 0.15)
+        sample_conf = _clip(35.0 + min(n, 8) * 8.125)  # n=1 ->43.1, n>=8 ->100
+        shrink = sample_conf / 100.0
+        breadth = _clip(50.0 + (raw_breadth - 50.0) * shrink)
+        attack_s = _clip(50.0 + (attack - 50.0) * shrink)
+        volume_s = _clip(50.0 + (volume_score - 50.0) * shrink)
+        fund_s = _clip(50.0 + (fund_flow - 50.0) * shrink)
+        top_ign = float(ignition.nlargest(min(3, n)).mean())
+        top_leader = float(leader.nlargest(min(3, n)).mean())
+        base_sector = float(h51sector.mean())
+        dilution_penalty = 7.0 if sector in _BROAD_PARENT_BUCKETS and n >= 5 else 3.0 if sector in _BROAD_PARENT_BUCKETS else 0.0
+        resonance = _clip(
+            base_sector * 0.20 + top_ign * 0.18 + top_leader * 0.12
+            + breadth * 0.20 + attack_s * 0.12 + volume_s * 0.08 + fund_s * 0.10
+            - dilution_penalty
+        )
+        out[sector or "未分類"] = {
+            "sample_n": float(n), "confidence": round(sample_conf, 2),
+            "breadth": round(breadth, 2), "attack": round(attack_s, 2),
+            "volume": round(volume_s, 2), "fund": round(fund_s, 2),
+            "top_ignition": round(top_ign, 2), "top_leader": round(top_leader, 2),
+            "resonance": round(resonance, 2), "dilution": round(dilution_penalty, 2),
+        }
+    return out
+
+
+def _apply_h53_resonance(work: pd.DataFrame) -> pd.DataFrame:
+    if work is None or work.empty:
+        return work
+    out = work.copy()
+    context = _h53_group_context(out)
+    resonance_vals = []
+    cohort_vals = []
+    nextday_vals = []
+    tier_vals = []
+    breadth_vals = []
+    attack_vals = []
+    volume_vals = []
+    fund_vals = []
+    conf_vals = []
+    dilution_vals = []
+    for _, row in out.iterrows():
+        sector = _first_text(row, ["類別", "族群名稱"], "未分類")
+        ctx = context.get(sector, {"resonance": 50.0, "breadth": 50.0, "attack": 50.0, "volume": 50.0, "fund": 50.0, "confidence": 35.0, "dilution": 0.0, "top_leader": 50.0})
+        resonance = float(ctx["resonance"])
+        leader = _first_num(row, ["H51個股領漲品質分"], 50.0)
+        ignition = _first_num(row, ["H51發動潛力分"], 50.0)
+        volume = _first_num(row, ["H51量價確認分"], 50.0)
+        pro = _first_num(row, ["H51專業參考分"], 50.0)
+        exec_score = _first_num(row, ["H51可執行分"], 50.0)
+        rr = _first_num(row, ["H51路徑RR"], 0.0)
+        chase = _first_num(row, ["追價風險分", "追價風險分數"], 55.0)
+        ret1 = _first_num(row, ["今日漲幅%", "當日漲跌幅%"], 0.0)
+        ret5 = _first_num(row, ["近5日漲幅%", "5日績效%"], 0.0)
+        cohort = _clip(leader * 0.34 + ignition * 0.24 + volume * 0.14 + float(ctx["breadth"]) * 0.14 + float(ctx["attack"]) * 0.09 + float(ctx["top_leader"]) * 0.05)
+        late_penalty = max(0.0, ret1 - 6.5) * 2.0 + max(0.0, ret5 - 14.0) * 0.8 + max(0.0, chase - 72.0) * 0.25
+        nextday = _clip(ignition * 0.30 + pro * 0.20 + resonance * 0.25 + cohort * 0.15 + exec_score * 0.10 - late_penalty)
+        perm = _s(row.get("H51交易許可"))
+        if perm.startswith("BUY-READY") and resonance >= 68 and nextday >= 72:
+            tier = "A1｜READY-CONFIRMED｜主流共振確認"
+        elif perm.startswith("BUY-READY"):
+            tier = "A2｜BUY-READY｜交易可執行但族群共振普通"
+        elif perm.startswith("SETUP-PREP") and nextday >= 72 and resonance >= 68 and cohort >= 66 and rr >= 1.0:
+            tier = "P1｜PRIME-PREP｜隔日優先等待"
+        elif perm.startswith("SETUP-PREP"):
+            tier = "P2｜SETUP-PREP｜一般高品質等待"
+        elif perm.startswith("LEADER-WATCH") and resonance >= 70 and cohort >= 70:
+            tier = "W1｜THEME-LEADER｜強主線領漲研究"
+        else:
+            tier = "W2｜RESEARCH｜一般研究"
+        resonance_vals.append(round(resonance, 2)); cohort_vals.append(round(cohort, 2)); nextday_vals.append(round(nextday, 2)); tier_vals.append(tier)
+        breadth_vals.append(float(ctx["breadth"])); attack_vals.append(float(ctx["attack"])); volume_vals.append(float(ctx["volume"])); fund_vals.append(float(ctx["fund"])); conf_vals.append(float(ctx["confidence"])); dilution_vals.append(float(ctx["dilution"]))
+    out["H53族群共振分"] = resonance_vals
+    out["H53領漲集群分"] = cohort_vals
+    out["H53隔日優先分"] = nextday_vals
+    out["H53參考層級"] = tier_vals
+    out["H53族群廣度分"] = breadth_vals
+    out["H53族群攻擊分"] = attack_vals
+    out["H53族群量能分"] = volume_vals
+    out["H53族群資金分"] = fund_vals
+    out["H53族群樣本可信度"] = conf_vals
+    out["H53分類稀釋扣分"] = dilution_vals
+    out["H53版本"] = VERSION
+    return out
 
 def _profile(row: pd.Series) -> dict[str, Any]:
     life = _first_text(row, ["H50族群生命週期"])
@@ -336,6 +477,7 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     work["H51RR口徑"] = [p["rr_basis"] for p in profiles]
     work["H51推薦理由"] = [p["reason"] for p in profiles]
     work["H51版本"] = VERSION
+    work = _apply_h53_resonance(work)
     return work
 
 
@@ -355,9 +497,9 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "操作原則": ["不以成熟主流或低品質雷達補位；請看『主流族群與領漲股』了解下一批等待名單。"],
         })
     work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3)
-    for c in ["H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
+    for c in ["H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
-    work.sort_values(["_p", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分"], ascending=False, inplace=True, kind="mergesort")
+    work.sort_values(["_p", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分"], ascending=False, inplace=True, kind="mergesort")
     selected = []
     sector_count: dict[str, int] = {}
     for _, row in work.iterrows():
@@ -387,6 +529,10 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "H51市場地位": _s(row.get("H51市場地位")),
             "H51交易許可": permx,
             "目前決策": action,
+            "H53參考層級": _s(row.get("H53參考層級")),
+            "H53隔日優先分": _first_num(row, ["H53隔日優先分"]),
+            "H53族群共振分": _first_num(row, ["H53族群共振分"]),
+            "H53領漲集群分": _first_num(row, ["H53領漲集群分"]),
             "H51發動潛力分": _first_num(row, ["H51發動潛力分"]),
             "H51專業參考分": _first_num(row, ["H51專業參考分"]),
             "H51族群主線分": _first_num(row, ["H51族群主線分"]),
@@ -415,12 +561,12 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     pick = work.loc[~status.str.startswith("HM-NO")].copy()
     if pick.empty:
         return pick
-    for c in ["H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
-    pick.sort_values(["_stage", "H51發動潛力分", "H51專業參考分", "H51個股領漲品質分", "H51Pivot起漲分"], ascending=False, inplace=True, kind="mergesort")
+    pick.sort_values(["_stage", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H51發動潛力分", "H51專業參考分",
+        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
         "H51基本面資金分", "H51主線新鮮分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
         "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H51推薦理由"
@@ -431,18 +577,42 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
 def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFrame:
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
         return pd.DataFrame()
-    work = frame if ("H51版本" in frame.columns and frame["H51版本"].astype(str).eq(VERSION).all()) else apply_human_master_engine(frame)
+    work = frame if ("H51版本" in frame.columns and frame["H51版本"].astype(str).eq(VERSION).all() and "H53版本" in frame.columns) else apply_human_master_engine(frame)
     sec = work.get("類別", pd.Series(["未分類"] * len(work), index=work.index)).fillna("未分類").astype(str)
-    tmp = pd.DataFrame({"類別": sec, "H51族群主線分": pd.to_numeric(work.get("H51族群主線分", 0), errors="coerce").fillna(0.0),
-                        "H51專業參考分": pd.to_numeric(work.get("H51專業參考分", 0), errors="coerce").fillna(0.0),
-                        "H51Pivot起漲分": pd.to_numeric(work.get("H51Pivot起漲分", 0), errors="coerce").fillna(0.0)})
-    market = work.get("H51市場地位", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    tmp["_fresh"] = market.str.startswith(("HM-EARLY", "HM-PULLBACK", "HM-LEADER", "HM-SETUP")).astype(float) * 100.0
-    grp = tmp.groupby("類別", dropna=False).agg(H51族群主線分=("H51族群主線分", "mean"), H51族群前三品質=("H51專業參考分", lambda s: s.nlargest(3).mean()), H51族群Pivot品質=("H51Pivot起漲分", lambda s: s.nlargest(3).mean()), H51新鮮主線比例=("_fresh", "mean"), H51族群樣本數=("_fresh", "size")).reset_index()
-    grp["H51族群決策分"] = (grp["H51族群主線分"] * 0.45 + grp["H51族群前三品質"] * 0.30 + grp["H51族群Pivot品質"] * 0.15 + grp["H51新鮮主線比例"] * 0.10).round(2)
-    grp.sort_values("H51族群決策分", ascending=False, inplace=True, kind="mergesort")
-    grp.insert(0, "H51族群排名", range(1, len(grp) + 1))
+    tmp = pd.DataFrame({
+        "類別": sec,
+        "H53族群共振分": pd.to_numeric(work.get("H53族群共振分", 50), errors="coerce").fillna(50.0),
+        "H53族群廣度分": pd.to_numeric(work.get("H53族群廣度分", 50), errors="coerce").fillna(50.0),
+        "H53族群攻擊分": pd.to_numeric(work.get("H53族群攻擊分", 50), errors="coerce").fillna(50.0),
+        "H53族群量能分": pd.to_numeric(work.get("H53族群量能分", 50), errors="coerce").fillna(50.0),
+        "H53族群資金分": pd.to_numeric(work.get("H53族群資金分", 50), errors="coerce").fillna(50.0),
+        "H53族群樣本可信度": pd.to_numeric(work.get("H53族群樣本可信度", 35), errors="coerce").fillna(35.0),
+        "H53分類稀釋扣分": pd.to_numeric(work.get("H53分類稀釋扣分", 0), errors="coerce").fillna(0.0),
+        "H53隔日優先分": pd.to_numeric(work.get("H53隔日優先分", 50), errors="coerce").fillna(50.0),
+        "H51專業參考分": pd.to_numeric(work.get("H51專業參考分", 50), errors="coerce").fillna(50.0),
+        "H51發動潛力分": pd.to_numeric(work.get("H51發動潛力分", 50), errors="coerce").fillna(50.0),
+    })
+    grp = tmp.groupby("類別", dropna=False).agg(
+        H53族群共振分=("H53族群共振分", "mean"),
+        H53族群廣度分=("H53族群廣度分", "mean"),
+        H53族群攻擊分=("H53族群攻擊分", "mean"),
+        H53族群量能分=("H53族群量能分", "mean"),
+        H53族群資金分=("H53族群資金分", "mean"),
+        H53族群前三隔日優先=("H53隔日優先分", lambda x: x.nlargest(3).mean()),
+        H53族群前三發動=("H51發動潛力分", lambda x: x.nlargest(3).mean()),
+        H53族群前三品質=("H51專業參考分", lambda x: x.nlargest(3).mean()),
+        H53族群樣本可信度=("H53族群樣本可信度", "mean"),
+        H53分類稀釋扣分=("H53分類稀釋扣分", "max"),
+        H53族群樣本數=("H53族群共振分", "size"),
+    ).reset_index()
+    grp["H53族群決策分"] = (
+        grp["H53族群共振分"] * 0.40 + grp["H53族群前三隔日優先"] * 0.25
+        + grp["H53族群前三發動"] * 0.15 + grp["H53族群前三品質"] * 0.10
+        + grp["H53族群樣本可信度"] * 0.10
+    ).round(2)
+    grp.sort_values(["H53族群決策分", "H53族群共振分", "H53族群前三隔日優先"], ascending=False, inplace=True, kind="mergesort")
+    grp.insert(0, "H53族群排名", range(1, len(grp) + 1))
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
