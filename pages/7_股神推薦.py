@@ -277,7 +277,7 @@ except Exception as _h42_import_exc:
     apply_dual_opportunity_engine = None
     build_focus_decision_table = None
 
-H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h53_sector_resonance_nextday_priority_20260828"
+H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h54_continuation_exhaustion_overnight_truth_20260831"
 H51_HUMAN_MASTER_IMPORT_ERROR = ""
 try:
     from godpick_human_master_engine import (
@@ -340,7 +340,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h53_sector_resonance_nextday_priority_20260828"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h54_continuation_exhaustion_overnight_truth_20260831"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -11508,7 +11508,9 @@ def _get_master_rank_default_cols() -> list[str]:
     """
     return [
         "股神推薦總排名", "股票代號", "股票名稱", "類別", "市場別", "產業",
-        "H51推薦等級", "H51市場地位", "H51交易許可", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分",
+        "H51推薦等級", "H51市場地位", "H51交易許可", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分",
+        "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H54證據品質分",
+        "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分",
         "H53族群廣度分", "H53族群攻擊分", "H53族群量能分", "H53族群資金分", "H53族群樣本可信度", "H51專業參考分", "H51可執行分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
         "H51基本面資金分", "H51主線新鮮分", "H51發動潛力分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "H51推薦理由",
@@ -12992,7 +12994,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     _h51_market_rank = rank.get("H51市場地位", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
     rank["_H51市場優先"] = _h51_market_rank.map(lambda x: 8 if x.startswith("HM-EARLY") else 7 if x.startswith("HM-PULLBACK") else 6 if x.startswith("HM-LEADER") else 5 if x.startswith("HM-SETUP") else 2 if x.startswith(("HM-EXTENDED", "HM-MATURE")) else 0)
     sort_cols = [
-        "_H51交易優先", "_H51市場優先", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51可執行分",
+        "_H51交易優先", "_H51市場優先", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51可執行分",
         "_H50推薦優先", "_H50新鮮主流優先", "H50族群可買主流分", "H50主流購買優先分", "H50推薦優先分",
         "H47個股相對強度分", "H47起漲優先分", "V188股神作戰優先分", "SuperAI Trade分", "SuperAI Alpha分",
         "股神推薦優先分", "今日訊號新鮮分", "主流主升優先分", "隔日可執行優先分", "實戰操作品質分",
@@ -13042,8 +13044,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
-        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H53主流共振→領漲集群→Pivot/再攻→量價/流動性→路徑RR", "是否買進清單": "只顯示BUY-READY與SETUP-PREP；LEADER-WATCH移至主流領漲股"},
-        {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "看精準題材的廣度、攻擊、量能、資金是否同步共振", "是否買進清單": "否"},
+        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H54主流延續→耗竭防追→隔夜/資訊空窗→可執行確認→路徑RR", "是否買進清單": "只顯示BUY-READY與SETUP-PREP；P3表示先降溫，非買進訊號"},
+        {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "看精準題材是否能延續；同時辨識耗竭與低擁擠輪動備援", "是否買進清單": "否"},
         {"優先序": 3, "活頁/表格": "主流領漲股", "真正用途": "找共振主線中的領漲集群、起漲/Pivot/回檔再攻", "是否買進清單": "需再看H51交易許可"},
         {"優先序": 4, "活頁/表格": "股神推薦總排名", "真正用途": "完整研究證據；不必再看十幾張重複雷達", "是否買進清單": "否"},
         {"優先序": 5, "活頁/表格": "AI績效驗證", "真正用途": "直接檢查Selection Alpha、可執行績效、Brier與H51績效", "是否買進清單": "否"},
@@ -13392,8 +13394,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     # H51：第一屏只回答真人交易員真正會先問的三件事：
     # 1) 今天最值得參考/等待/執行的是誰；2) 資金主線在哪；3) 領漲/Pivot股是誰。
-    render_pro_section("超級AI最終決策｜H53主流共振→領漲集群→Pivot→執行")
-    st.caption("H53主流共振升級：先看精準題材的族群廣度／攻擊／量能／資金是否同步，再看領漲集群與隔日優先；BUY-READY交易權威仍由H51/V188守門，P1 PRIME-PREP只是隔日優先等待，不等於買進訊號。")
+    render_pro_section("超級AI最終決策｜H54主流延續→耗竭防追→隔夜T+1→執行")
+    st.caption("H54隔日真相升級：主流成立不等於下一交易日仍可追。系統新增耗竭／擁擠、既有隔日可執行、觸發距離、隔夜大盤與週末資訊空窗治理，並提供低耗竭輪動備援。BUY-READY權威仍由H51/V188守門；P1仍是等待，P3代表先降溫。")
     _h51_engine_ok = bool(callable(apply_human_master_engine) and callable(build_h51_final_decision_table) and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION)
     if not _h51_engine_ok:
         st.error(f"H51版本一致性失敗：目前={H51_HUMAN_MASTER_VERSION}；預期={H51_HUMAN_MASTER_EXPECTED_VERSION}。請重新覆蓋H51引擎與Page07。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))
@@ -13413,7 +13415,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         ])
         st.dataframe(_format_df(_h51_focus), use_container_width=True, hide_index=True)
 
-    render_pro_section("主流族群｜H53廣度×攻擊×量能×資金共振")
+    render_pro_section("主流族群｜H54延續×耗竭×證據品質×輪動備援")
     try:
         _h51_sector_ui = build_h51_sector_table(_h51_source_ui, max_rows=12) if callable(build_h51_sector_table) else pd.DataFrame()
     except Exception as _h51_sector_ui_exc:
@@ -13421,7 +13423,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(_h51_sector_ui, pd.DataFrame) and not _h51_sector_ui.empty:
         st.dataframe(_format_df(_h51_sector_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("主流領漲股｜H53領漲集群×隔日發動優先")
+    render_pro_section("主流領漲股｜H54隔日真相×可執行確認×防追高")
     try:
         _h51_leader_ui = build_h51_mainstream_leader_table(_h51_source_ui, max_rows=15) if callable(build_h51_mainstream_leader_table) else pd.DataFrame()
     except Exception as _h51_leader_ui_exc:
@@ -13429,8 +13431,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(_h51_leader_ui, pd.DataFrame) and not _h51_leader_ui.empty:
         st.dataframe(_format_df(_h51_leader_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("股神推薦總排名｜H53主流共振完整研究排名")
-    st.caption("H53總排名在H51交易許可不變的前提下，優先以精準題材共振、領漲集群與隔日優先排序；避免單一強股或過大的產業桶假裝成真正主流。")
+    render_pro_section("股神推薦總排名｜H54主流延續與隔日真相完整研究")
+    st.caption("H54總排名保留H51交易許可不變，但不再把『昨天最強』直接等同『下一交易日最好』：優先考慮主流延續、可執行確認、耗竭、隔夜風險與資訊空窗；低擁擠且廣度轉強的次主流可列R1輪動備援研究。")
     if callable(rotation_diagnostics):
         try:
             rotation_info = rotation_diagnostics(decision_source)

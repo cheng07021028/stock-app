@@ -15,11 +15,12 @@ because it has been strong in the past.
 from __future__ import annotations
 
 from typing import Any, Iterable
+from datetime import date, datetime
 import math
 import re
 import pandas as pd
 
-VERSION = "v191_h53_sector_resonance_nextday_priority_20260828"
+VERSION = "v191_h54_continuation_exhaustion_overnight_truth_20260831"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -33,6 +34,12 @@ H53_COLUMNS = [
     "H53族群共振分", "H53領漲集群分", "H53隔日優先分", "H53參考層級",
     "H53族群廣度分", "H53族群攻擊分", "H53族群量能分", "H53族群資金分",
     "H53族群樣本可信度", "H53分類稀釋扣分", "H53版本",
+]
+
+H54_COLUMNS = [
+    "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分",
+    "H54資訊空窗風險", "H54證據品質分", "H54輪動備援分", "H54隔日真相分",
+    "H54決策層級", "H54決策理由", "H54版本",
 ]
 
 _BROAD_PARENT_BUCKETS = {"半導體業", "電子零組件業", "光電業", "其他電子業", "電腦及週邊設備業"}
@@ -231,6 +238,198 @@ def _h53_group_context(work: pd.DataFrame) -> dict[str, dict[str, float]]:
         }
     return out
 
+
+
+def _date_value(v: Any) -> date | None:
+    t = _s(v)
+    if not t:
+        return None
+    try:
+        return pd.to_datetime(t, errors="coerce").date()
+    except Exception:
+        return None
+
+
+def _h54_exhaustion(row: pd.Series) -> float:
+    """Estimate next-session exhaustion/crowding risk; higher is worse.
+
+    Prefer the existing next-day exhaustion signal when present.  Fallback uses
+    extension, chase, volume, upper-shadow and optional attention/day-trading
+    evidence.  It is deliberately a veto/haircut signal, never a buy signal.
+    """
+    existing = _first_num(row, ["隔日耗竭風險分", "耗竭風險分", "高檔耗竭風險分"], -1.0)
+    if existing >= 0:
+        base = _clip(existing)
+    else:
+        ret1 = _first_num(row, ["今日漲幅%", "當日漲跌幅%"], 0.0)
+        ret5 = _first_num(row, ["近5日漲幅%", "5日績效%"], 0.0)
+        ret20 = _first_num(row, ["近20日漲幅%", "20日績效%"], 0.0)
+        chase = _first_num(row, ["追價風險分", "追價風險分數"], 50.0)
+        vr = _first_num(row, ["當日量比", "均量比"], 1.0, positive=True)
+        upper = _first_num(row, ["上影線比例%"], 20.0)
+        base = 18.0
+        base += max(0.0, ret1 - 4.0) * 4.0
+        base += max(0.0, ret5 - 10.0) * 1.7
+        base += max(0.0, ret20 - 28.0) * 0.55
+        base += max(0.0, chase - 60.0) * 0.55
+        base += max(0.0, vr - 2.0) * 7.0
+        base += max(0.0, upper - 45.0) * 0.25
+        base = _clip(base)
+    daytrade = _first_num(row, ["當沖比率%", "當沖占比%", "當日沖銷比率%"], 0.0)
+    if daytrade >= 65:
+        base += min(16.0, (daytrade - 65.0) * 0.7 + 5.0)
+    attention = "｜".join(_s(row.get(c)) for c in ["注意股狀態", "處置股狀態", "交易異常註記"] if c in row.index)
+    if any(k in attention for k in ["注意", "處置", "異常"]):
+        base += 8.0
+    return _clip(base)
+
+
+def _h54_trigger_proximity(row: pd.Series) -> float:
+    direct = _first_num(row, ["隔日可執行優先分"], -1.0)
+    direct_score = _clip(direct) if direct >= 0 else 50.0
+    dist = _first_num(row, ["守價回測距離%", "距最近可執行買點%", "距買點%"], float("nan"))
+    proximity = 50.0
+    if math.isfinite(dist):
+        ad = abs(dist)
+        if ad <= 1.5: proximity = 94.0
+        elif ad <= 3.0: proximity = 84.0
+        elif ad <= 5.0: proximity = 68.0
+        elif ad <= 7.0: proximity = 48.0
+        else: proximity = 28.0
+        if dist < -3.0:  # already above the intended pullback/guard price: chase risk
+            proximity -= min(22.0, abs(dist + 3.0) * 3.0)
+    else:
+        spot = _first_num(row, ["最新價", "收盤價"], 0.0, positive=True)
+        trigger = _first_num(row, ["實戰觸發價", "主要進場參考價", "推薦買點_突破"], 0.0, positive=True)
+        if spot > 0 and trigger > 0:
+            delta = (spot / trigger - 1.0) * 100.0
+            ad = abs(delta)
+            proximity = 92.0 if ad <= 1.5 else 82.0 if ad <= 3.0 else 64.0 if ad <= 5.0 else 42.0 if ad <= 8.0 else 25.0
+            if delta > 4.0:
+                proximity -= min(20.0, (delta - 4.0) * 2.5)
+    return _clip(direct_score * 0.45 + proximity * 0.55)
+
+
+def _h54_overnight(row: pd.Series) -> tuple[float, float, str]:
+    """Return (risk penalty, information-window risk, explanation)."""
+    risk_score = _first_num(row, ["隔夜風控分數"], 50.0)
+    risk_level = _first_text(row, ["隔夜風險等級", "隔夜偏向"])
+    next_mkt = _first_num(row, ["隔日大盤分數"], 50.0)
+    down_prob = _first_num(row, ["隔日下跌機率%"], 50.0)
+    forecast_adj = _first_num(row, ["隔日大盤預測加減分"], 0.0)
+    nasdaq = _first_num(row, ["NASDAQ漲跌%", "Nasdaq漲跌%"], 0.0)
+    sp500 = _first_num(row, ["S&P500漲跌%"], 0.0)
+    sox = _first_num(row, ["費半漲跌%"], 0.0)
+    tx = _first_num(row, ["台指夜盤漲跌", "台指夜盤漲跌%"], 0.0)
+    penalty = max(0.0, 52.0 - risk_score) * 0.55 + max(0.0, 50.0 - next_mkt) * 0.35 + max(0.0, down_prob - 50.0) * 0.30
+    penalty += max(0.0, -forecast_adj) * 0.8
+    penalty += max(0.0, -nasdaq - 1.0) * 2.0 + max(0.0, -sp500 - 1.0) * 1.5 + max(0.0, -sox - 1.5) * 2.4
+    penalty += max(0.0, -tx - 1.0) * 1.8
+    level_upper = risk_level.upper()
+    if any(k in level_upper for k in ["高", "HIGH", "RISK-OFF", "偏空"]):
+        penalty += 8.0
+
+    kdate = None
+    for c in ["K線日期", "K線最新日期", "資料日期", "行情日期"]:
+        if c in row.index:
+            kdate = _date_value(row.get(c))
+            if kdate:
+                break
+    target = None
+    for c in ["隔日大盤預測日期", "下一交易日", "目標交易日", "推薦日期"]:
+        if c in row.index:
+            target = _date_value(row.get(c))
+            if target:
+                break
+    gap_days = (target - kdate).days if (target and kdate and target >= kdate) else 0
+    info_risk = 0.0
+    if gap_days >= 3: info_risk = 18.0
+    elif gap_days == 2: info_risk = 12.0
+    elif gap_days == 1: info_risk = 3.0
+    # A weekend-generated recommendation is not stale by itself, but it carries a real
+    # information window before the next tradable session and must be revalidated.
+    if target and target.weekday() >= 5:
+        info_risk = max(info_risk, 20.0)
+    # Friday -> Monday / holiday gap requires open-session reconfirmation even if the data itself is not stale.
+    if kdate and target and kdate.weekday() == 4 and target.weekday() == 0 and gap_days >= 3:
+        info_risk = max(info_risk, 20.0)
+    reason = f"隔夜風控{risk_score:.0f}/隔日大盤{next_mkt:.0f}/下跌機率{down_prob:.0f}%/資訊空窗{gap_days}天"
+    return _clip(penalty), _clip(info_risk), reason
+
+
+def _apply_h54_truth(work: pd.DataFrame) -> pd.DataFrame:
+    if work is None or work.empty:
+        return work
+    out = work.copy()
+    cols = {c: [] for c in H54_COLUMNS}
+    for _, row in out.iterrows():
+        resonance = _first_num(row, ["H53族群共振分"], 50.0)
+        cohort = _first_num(row, ["H53領漲集群分"], 50.0)
+        h53next = _first_num(row, ["H53隔日優先分"], 50.0)
+        ignition = _first_num(row, ["H51發動潛力分"], 50.0)
+        exec51 = _first_num(row, ["H51可執行分"], 50.0)
+        rr = _first_num(row, ["H51路徑RR"], 0.0)
+        liq = _first_num(row, ["H51流動性分"], 50.0)
+        breadth = _first_num(row, ["H53族群廣度分", "族群廣度分"], 50.0)
+        attack = _first_num(row, ["H53族群攻擊分", "族群攻擊強度"], 50.0)
+        vol = _first_num(row, ["H53族群量能分", "族群成交額分"], 50.0)
+        fund = _first_num(row, ["H53族群資金分", "族群資金流分數"], 50.0)
+        conf = _first_num(row, ["H53族群樣本可信度"], 35.0)
+        evidence = _clip(breadth * 0.28 + attack * 0.24 + vol * 0.16 + fund * 0.18 + conf * 0.14)
+        exhaustion = _h54_exhaustion(row)
+        trigger = _h54_trigger_proximity(row)
+        overnight, info_gap, overnight_reason = _h54_overnight(row)
+        legacy_next = _first_num(row, ["隔日可執行優先分"], trigger)
+        continuation = _clip(
+            resonance * 0.25 + cohort * 0.18 + ignition * 0.15 + evidence * 0.22 + _clip(legacy_next) * 0.20
+            - exhaustion * 0.22
+        )
+        executable = _clip(
+            exec51 * 0.32 + _clip(legacy_next) * 0.23 + trigger * 0.20
+            + min(rr, 2.2) / 2.2 * 100.0 * 0.15 + liq * 0.10
+        )
+        truth = _clip(
+            continuation * 0.34 + executable * 0.27 + h53next * 0.20 + evidence * 0.12
+            + _clip(100.0 - overnight) * 0.07 - exhaustion * 0.18 - overnight * 0.12 - info_gap * 0.18
+        )
+        # Rising secondary theme with real breadth and lower crowding: useful when yesterday's hottest theme is exhausted.
+        rotation = _clip(attack * 0.27 + breadth * 0.25 + fund * 0.17 + vol * 0.11 + evidence * 0.20 - exhaustion * 0.20)
+        perm = _s(row.get("H51交易許可"))
+        if perm.startswith("BUY-READY") and truth >= 72 and executable >= 68 and exhaustion <= 58 and overnight <= 35:
+            tier = "A1｜READY-CONFIRMED｜延續與隔夜條件確認"
+        elif perm.startswith("BUY-READY"):
+            tier = "A2｜BUY-READY｜交易權威成立但次日需再確認"
+        elif perm.startswith(("NO-CHASE", "WAIT-BASE")) and (exhaustion >= 55 or overnight >= 35 or info_gap >= 18):
+            tier = "X1｜WAIT-COOLDOWN｜主流強但延伸/空窗，禁止把昨日強勢當隔日優先"
+        elif perm.startswith("SETUP-PREP") and truth >= 72 and executable >= 65 and exhaustion <= 55 and overnight <= 32 and info_gap <= 12 and rr >= 1.25:
+            tier = "P1｜PRIME-PREP｜隔日真相優先等待"
+        elif perm.startswith("SETUP-PREP") and (exhaustion >= 65 or overnight >= 40 or info_gap >= 18):
+            tier = "P3｜WAIT-COOLDOWN｜耗竭/隔夜/空窗風險先降溫"
+        elif perm.startswith("SETUP-PREP"):
+            tier = "P2｜SETUP-PREP｜一般高品質等待"
+        elif rotation >= 68 and evidence >= 64 and exhaustion <= 52:
+            tier = "R1｜ROTATION-BACKUP｜次主流輪動備援研究"
+        elif perm.startswith("LEADER-WATCH") and continuation >= 68:
+            tier = "W1｜THEME-LEADER｜主線延續研究"
+        else:
+            tier = "W2｜RESEARCH｜一般研究"
+        reason = (
+            f"延續{continuation:.1f}/可執行{executable:.1f}/隔日真相{truth:.1f}；"
+            f"族群證據{evidence:.1f}/耗竭{exhaustion:.1f}/隔夜扣分{overnight:.1f}/空窗{info_gap:.1f}；"
+            f"RR{rr:.2f}/觸發接近{trigger:.1f}；{overnight_reason}"
+        )
+        vals = {
+            "H54主流延續分": round(continuation, 2), "H54可執行確認分": round(executable, 2),
+            "H54耗竭風險分": round(exhaustion, 2), "H54隔夜風險扣分": round(overnight, 2),
+            "H54資訊空窗風險": round(info_gap, 2), "H54證據品質分": round(evidence, 2),
+            "H54輪動備援分": round(rotation, 2), "H54隔日真相分": round(truth, 2),
+            "H54決策層級": tier, "H54決策理由": reason, "H54版本": VERSION,
+        }
+        for c in H54_COLUMNS:
+            cols[c].append(vals[c])
+    for c, vals in cols.items():
+        out[c] = vals
+    return out
 
 def _apply_h53_resonance(work: pd.DataFrame) -> pd.DataFrame:
     if work is None or work.empty:
@@ -478,6 +677,7 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     work["H51推薦理由"] = [p["reason"] for p in profiles]
     work["H51版本"] = VERSION
     work = _apply_h53_resonance(work)
+    work = _apply_h54_truth(work)
     return work
 
 
@@ -496,10 +696,23 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "狀態": ["今天沒有通過H51『主流族群→領漲股→Pivot/再攻→量價→流動性→路徑RR』的高品質候選。"],
             "操作原則": ["不以成熟主流或低品質雷達補位；請看『主流族群與領漲股』了解下一批等待名單。"],
         })
+    # H54 presentation guard: SETUP-PREP that has been downgraded by exhaustion,
+    # overnight risk or weekend information gap must not remain on the first
+    # action sheet as if it were a normal next-session priority.  This changes
+    # only the reference/presentation layer, never H51/V188/Formal authority.
+    h54tier = work.get("H54決策層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    cool_mask = work["H51交易許可"].astype(str).str.startswith("SETUP-PREP") & h54tier.str.startswith(("P3", "X1"))
+    cooled = work.loc[cool_mask].copy()
+    work = work.loc[~cool_mask].copy()
+    if work.empty and not cooled.empty:
+        return pd.DataFrame({
+            "狀態": ["H54判定：原有SETUP-PREP全數因耗竭／隔夜／週末資訊空窗降級，第一頁不列隔日優先。"],
+            "操作原則": ["改看『主流領漲股』與R1輪動備援；下一交易日開盤前／開盤後重新驗證量價、守價與大盤，再決定是否恢復P1/P2。"],
+        })
     work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3)
-    for c in ["H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
+    for c in ["H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
-    work.sort_values(["_p", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分"], ascending=False, inplace=True, kind="mergesort")
+    work.sort_values(["_p", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
     selected = []
     sector_count: dict[str, int] = {}
     for _, row in work.iterrows():
@@ -514,10 +727,15 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     rows = []
     for i, row in enumerate(selected, 1):
         permx = _s(row.get("H51交易許可"))
-        if permx.startswith("BUY-READY"):
-            action = "可執行候選｜仍依觸發/守價分批"
+        h54tier = _s(row.get("H54決策層級"))
+        if permx.startswith("BUY-READY") and h54tier.startswith("A1"):
+            action = "可執行候選｜延續/隔夜已確認，仍依觸發守價分批"
+        elif permx.startswith("BUY-READY"):
+            action = "交易權威成立｜但H54要求下一交易日再確認，不開盤追價"
+        elif permx.startswith("SETUP-PREP") and h54tier.startswith("P1"):
+            action = "隔日優先等待｜未觸發前不進場"
         elif permx.startswith("SETUP-PREP"):
-            action = "高品質等待｜未確認買點前不進場"
+            action = "一般高品質等待｜未確認買點前不進場"
         else:
             action = "主線領漲觀察｜不是買進推薦"
         rows.append({
@@ -529,6 +747,14 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "H51市場地位": _s(row.get("H51市場地位")),
             "H51交易許可": permx,
             "目前決策": action,
+            "H54決策層級": _s(row.get("H54決策層級")),
+            "H54隔日真相分": _first_num(row, ["H54隔日真相分"]),
+            "H54主流延續分": _first_num(row, ["H54主流延續分"]),
+            "H54可執行確認分": _first_num(row, ["H54可執行確認分"]),
+            "H54耗竭風險分": _first_num(row, ["H54耗竭風險分"]),
+            "H54隔夜風險扣分": _first_num(row, ["H54隔夜風險扣分"]),
+            "H54資訊空窗風險": _first_num(row, ["H54資訊空窗風險"]),
+            "H54輪動備援分": _first_num(row, ["H54輪動備援分"]),
             "H53參考層級": _s(row.get("H53參考層級")),
             "H53隔日優先分": _first_num(row, ["H53隔日優先分"]),
             "H53族群共振分": _first_num(row, ["H53族群共振分"]),
@@ -549,6 +775,7 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "停損參考": _first_num(row, ["實戰停損參考", "停損參考"], 0.0, positive=True),
             "今日/5日/20日": f"{_first_num(row,['今日漲幅%'],0):+.1f}% / {_first_num(row,['近5日漲幅%'],0):+.1f}% / {_first_num(row,['近20日漲幅%'],0):+.1f}%",
             "AI重點理由": _s(row.get("H51推薦理由")),
+            "H54隔日真相理由": _s(row.get("H54決策理由")),
         })
     return pd.DataFrame(rows)
 
@@ -561,12 +788,12 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     pick = work.loc[~status.str.startswith("HM-NO")].copy()
     if pick.empty:
         return pick
-    for c in ["H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
-    pick.sort_values(["_stage", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
+    pick.sort_values(["_stage", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H53隔日優先分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
+        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
         "H51基本面資金分", "H51主線新鮮分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
         "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H51推薦理由"
@@ -591,6 +818,11 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         "H53隔日優先分": pd.to_numeric(work.get("H53隔日優先分", 50), errors="coerce").fillna(50.0),
         "H51專業參考分": pd.to_numeric(work.get("H51專業參考分", 50), errors="coerce").fillna(50.0),
         "H51發動潛力分": pd.to_numeric(work.get("H51發動潛力分", 50), errors="coerce").fillna(50.0),
+        "H54主流延續分": pd.to_numeric(work.get("H54主流延續分", 50), errors="coerce").fillna(50.0),
+        "H54隔日真相分": pd.to_numeric(work.get("H54隔日真相分", 50), errors="coerce").fillna(50.0),
+        "H54耗竭風險分": pd.to_numeric(work.get("H54耗竭風險分", 50), errors="coerce").fillna(50.0),
+        "H54輪動備援分": pd.to_numeric(work.get("H54輪動備援分", 50), errors="coerce").fillna(50.0),
+        "H54證據品質分": pd.to_numeric(work.get("H54證據品質分", 50), errors="coerce").fillna(50.0),
     })
     grp = tmp.groupby("類別", dropna=False).agg(
         H53族群共振分=("H53族群共振分", "mean"),
@@ -604,15 +836,25 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         H53族群樣本可信度=("H53族群樣本可信度", "mean"),
         H53分類稀釋扣分=("H53分類稀釋扣分", "max"),
         H53族群樣本數=("H53族群共振分", "size"),
+        H54族群延續分=("H54主流延續分", lambda x: x.nlargest(3).mean()),
+        H54族群隔日真相分=("H54隔日真相分", lambda x: x.nlargest(3).mean()),
+        H54族群耗竭風險=("H54耗竭風險分", "mean"),
+        H54族群輪動備援=("H54輪動備援分", lambda x: x.nlargest(3).mean()),
+        H54族群證據品質=("H54證據品質分", "mean"),
     ).reset_index()
     grp["H53族群決策分"] = (
         grp["H53族群共振分"] * 0.40 + grp["H53族群前三隔日優先"] * 0.25
         + grp["H53族群前三發動"] * 0.15 + grp["H53族群前三品質"] * 0.10
         + grp["H53族群樣本可信度"] * 0.10
     ).round(2)
-    grp.sort_values(["H53族群決策分", "H53族群共振分", "H53族群前三隔日優先"], ascending=False, inplace=True, kind="mergesort")
-    grp.insert(0, "H53族群排名", range(1, len(grp) + 1))
+    grp["H54族群決策分"] = (
+        grp["H54族群延續分"] * 0.34 + grp["H54族群隔日真相分"] * 0.31
+        + grp["H54族群證據品質"] * 0.18 + grp["H54族群輪動備援"] * 0.17
+        - grp["H54族群耗竭風險"] * 0.15
+    ).clip(0, 100).round(2)
+    grp.sort_values(["H54族群決策分", "H54族群隔日真相分", "H54族群延續分", "H53族群共振分"], ascending=False, inplace=True, kind="mergesort")
+    grp.insert(0, "H54族群排名", range(1, len(grp) + 1))
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
