@@ -20,7 +20,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h54_continuation_exhaustion_overnight_truth_20260831"
+VERSION = "v191_h55_dual_path_reversal_catalyst_truth_20260901"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -40,6 +40,12 @@ H54_COLUMNS = [
     "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分",
     "H54資訊空窗風險", "H54證據品質分", "H54輪動備援分", "H54隔日真相分",
     "H54決策層級", "H54決策理由", "H54版本",
+]
+
+H55_COLUMNS = [
+    "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分",
+    "H55回補雷達分", "H55雙路徑隔日分", "H55機會型態", "H55參考層級",
+    "H55決策理由", "H55版本",
 ]
 
 _BROAD_PARENT_BUCKETS = {"半導體業", "電子零組件業", "光電業", "其他電子業", "電腦及週邊設備業"}
@@ -431,6 +437,181 @@ def _apply_h54_truth(work: pd.DataFrame) -> pd.DataFrame:
         out[c] = vals
     return out
 
+
+def _h55_role_bonus(row: pd.Series) -> float:
+    """Small evidence bonus from already-existing internal radar roles.
+
+    This is deliberately a proxy for catalyst/leader confirmation, not a live-news
+    feed.  H55 must remain reproducible from the scan payload and must never invent
+    an event that the upstream engines did not detect.
+    """
+    text = "｜".join([
+        _first_text(row, ["領漲回補角色", "Phase6領漲回補角色"]),
+        _first_text(row, ["飆股雷達角色", "爆發雷達角色"]),
+        _first_text(row, ["紅燈逆勢反轉判定"]),
+        _first_text(row, ["強勢前兆判定", "起漲前兆判定"]),
+    ]).upper()
+    bonus = 0.0
+    if "L+" in text: bonus += 8.0
+    elif "領漲回補" in text or "主流強勢回補" in text: bonus += 5.0
+    if "題材轉強" in text: bonus += 5.0
+    if "S+" in text: bonus += 5.0
+    elif "爆發" in text or "飆股" in text: bonus += 3.0
+    if "強" in text or "核心" in text: bonus += 3.0
+    return min(14.0, bonus)
+
+
+def _h55_blend(row: pd.Series, groups: list[tuple[list[str], float]], neutral: float = 50.0) -> float:
+    total = 0.0
+    weight = 0.0
+    for names, w in groups:
+        found = False
+        value = neutral
+        for c in names:
+            if c in row.index and _s(row.get(c)):
+                value = _f(row.get(c), neutral)
+                if math.isfinite(value):
+                    found = True
+                    break
+        # Missing signals are neutral rather than zero so H55 does not punish an
+        # older payload merely because an optional radar engine was unavailable.
+        total += _clip(value if found else neutral) * w
+        weight += w
+    return _clip(total / weight if weight > 0 else neutral)
+
+
+def _apply_h55_dual_path(work: pd.DataFrame) -> pd.DataFrame:
+    """Add a second, independent opportunity route for fresh reversal/catalyst setups.
+
+    H54 is intentionally conservative and excels at answering whether yesterday's
+    mainstream can continue.  Fast regime shifts need another question: did a stock
+    already show *pre-existing* reversal/precursor/theme/leader-replay evidence that
+    deserves research priority even if its old mainstream lifecycle is not mature?
+
+    H55 never changes H51/V188/Formal trade authority.  R1/R2/R3 are research/watch
+    tiers only.  BUY/SETUP remain gated by the existing execution truth.
+    """
+    if work is None or work.empty:
+        return work
+    out = work.copy()
+    cols = {c: [] for c in H55_COLUMNS}
+    for _, row in out.iterrows():
+        continuation54 = _first_num(row, ["H54隔日真相分"], 50.0)
+        mainstream54 = _first_num(row, ["H54主流延續分"], 50.0)
+        executable54 = _first_num(row, ["H54可執行確認分"], 50.0)
+        evidence54 = _first_num(row, ["H54證據品質分"], 50.0)
+        exhaustion = _first_num(row, ["H54耗竭風險分"], 50.0)
+        overnight = _first_num(row, ["H54隔夜風險扣分"], 0.0)
+        info_gap = _first_num(row, ["H54資訊空窗風險"], 0.0)
+        h53res = _first_num(row, ["H53族群共振分"], 50.0)
+        ignition = _first_num(row, ["H51發動潛力分"], 50.0)
+        rs = _first_num(row, ["H47個股相對強度分", "H45個股領先分"], 50.0)
+        close = _first_num(row, ["當日收盤位置%"], 50.0)
+        volume = _first_num(row, ["H51量價確認分", "強勢動能分"], 50.0)
+        freshness = _first_num(row, ["今日訊號新鮮分", "H51主線新鮮分"], 50.0)
+        risk = _first_num(row, ["Risk風控安全分", "SuperAI Risk分"], 50.0)
+
+        reversal = _h55_blend(row, [
+            (["紅燈逆勢反轉分", "逆勢反轉分", "回補潛力分"], 0.58),
+            (["主流領漲回補分", "市場領漲相似分", "漲停回放分"], 0.42),
+        ])
+        precursor = _h55_blend(row, [
+            (["強勢前兆分", "起漲前兆分數", "盤前強勢前兆分"], 0.62),
+            (["隔日爆發分", "爆發雷達分", "飆股攻擊分"], 0.38),
+        ])
+        burst = _h55_blend(row, [
+            (["隔日爆發分", "爆發雷達分", "飆股攻擊分"], 0.55),
+            (["強勢前兆分", "起漲前兆分數", "盤前強勢前兆分"], 0.45),
+        ])
+        theme = _h55_blend(row, [
+            (["局部題材火種分", "漲停族群相似度", "題材轉強分"], 0.60),
+            (["族群攻擊強度", "H53族群攻擊分"], 0.40),
+        ])
+        replay = _h55_blend(row, [
+            (["主流領漲回補分", "市場領漲相似分"], 0.55),
+            (["漲停回放分", "強勢股漏選風險分"], 0.45),
+        ])
+        role_bonus = _h55_role_bonus(row)
+
+        resilience = _clip(
+            rs * 0.28 + reversal * 0.25 + close * 0.12 + volume * 0.10
+            + freshness * 0.10 + risk * 0.15
+        )
+        catalyst = _clip(
+            burst * 0.30 + precursor * 0.23 + theme * 0.22 + replay * 0.25 + role_bonus
+        )
+        rebound = _clip(reversal * 0.35 + replay * 0.30 + catalyst * 0.20 + freshness * 0.15)
+        continuation_path = _clip(continuation54 * 0.60 + mainstream54 * 0.25 + executable54 * 0.15)
+        reversal_path = _clip(
+            resilience * 0.27 + catalyst * 0.30 + rebound * 0.18
+            + executable54 * 0.10 + h53res * 0.07 + ignition * 0.08
+            - exhaustion * 0.10 - overnight * 0.04 - info_gap * 0.04
+        )
+        dual = _clip(
+            max(continuation_path, reversal_path) * 0.74
+            + min(continuation_path, reversal_path) * 0.12
+            + executable54 * 0.08 + evidence54 * 0.06
+        )
+
+        if continuation_path >= 70 and reversal_path >= 70:
+            opportunity = "DUAL｜主線延續＋反轉點火雙確認"
+        elif reversal_path >= max(70.0, continuation_path + 5.0) and catalyst >= 66:
+            opportunity = "REVERSAL-CATALYST｜逆勢反轉／新題材點火"
+        elif continuation_path >= 68:
+            opportunity = "CONTINUATION｜主線延續"
+        elif _first_num(row, ["H54輪動備援分"], 50.0) >= 66 and catalyst >= 62:
+            opportunity = "ROTATION-IGNITION｜次主流輪動點火"
+        else:
+            opportunity = "RESEARCH｜一般研究"
+
+        perm = _s(row.get("H51交易許可"))
+        h54tier = _s(row.get("H54決策層級"))
+        market_status = _s(row.get("H51市場地位"))
+        if perm.startswith("BUY-READY") and dual >= 74 and executable54 >= 68 and exhaustion <= 62:
+            tier = "A1｜READY-DUAL-CONFIRMED｜交易權威＋雙路徑確認"
+        elif perm.startswith("BUY-READY"):
+            tier = "A2｜BUY-READY｜交易權威成立，H55僅調整參考順位"
+        elif perm.startswith("SETUP-PREP") and h54tier.startswith(("P3", "X1")):
+            tier = "P3｜WAIT-COOLDOWN｜保留H54耗竭/隔夜降級"
+        elif perm.startswith("SETUP-PREP") and dual >= 72 and executable54 >= 63 and exhaustion <= 62:
+            tier = "P1｜PRIME-DUAL-PREP｜雙路徑隔日優先等待"
+        elif perm.startswith("SETUP-PREP"):
+            tier = "P2｜SETUP-PREP｜一般高品質等待"
+        elif market_status.startswith("HM-RECLAIM") and reversal_path >= 72 and catalyst >= 66:
+            tier = "R3｜RECLAIM-WATCH｜急跌後只列收復觀察，不升交易權威"
+        elif reversal_path >= 72 and catalyst >= 68 and resilience >= 63 and exhaustion <= 70 and overnight <= 45:
+            tier = "R2｜FRESH-IGNITION｜新反轉/新題材點火研究"
+        elif h54tier.startswith("R1") and dual >= 64:
+            tier = "R1｜ROTATION-BACKUP｜次主流輪動備援研究"
+        elif perm.startswith("LEADER-WATCH") and dual >= 66:
+            tier = "W1｜THEME-LEADER｜主線/點火領漲研究"
+        else:
+            tier = "W2｜RESEARCH｜一般研究"
+
+        reason = (
+            f"主線路徑{continuation_path:.1f}/反轉點火{reversal_path:.1f}/雙路徑{dual:.1f}；"
+            f"逆風韌性{resilience:.1f}/催化代理{catalyst:.1f}/回補雷達{rebound:.1f}；"
+            f"耗竭{exhaustion:.1f}/隔夜{overnight:.1f}/空窗{info_gap:.1f}。"
+            "催化代理只使用系統既有前兆/爆發/題材/回放訊號，不代表已驗證新聞事件。"
+        )
+        vals = {
+            "H55主線延續路徑分": round(continuation_path, 2),
+            "H55反轉點火路徑分": round(reversal_path, 2),
+            "H55逆風韌性分": round(resilience, 2),
+            "H55催化代理分": round(catalyst, 2),
+            "H55回補雷達分": round(rebound, 2),
+            "H55雙路徑隔日分": round(dual, 2),
+            "H55機會型態": opportunity,
+            "H55參考層級": tier,
+            "H55決策理由": reason,
+            "H55版本": VERSION,
+        }
+        for c in H55_COLUMNS:
+            cols[c].append(vals[c])
+    for c, vals in cols.items():
+        out[c] = vals
+    return out
+
 def _apply_h53_resonance(work: pd.DataFrame) -> pd.DataFrame:
     if work is None or work.empty:
         return work
@@ -678,6 +859,7 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     work["H51版本"] = VERSION
     work = _apply_h53_resonance(work)
     work = _apply_h54_truth(work)
+    work = _apply_h55_dual_path(work)
     return work
 
 
@@ -688,10 +870,18 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     code = work.get("股票代號", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.strip()
     work = work.loc[code.ne("")].copy()
     perm = work.get("H51交易許可", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    # First sheet is an action/preparation sheet only. Research-only LEADER-WATCH belongs in 主流領漲股.
+    h55_all_tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    h55_fresh_count = int(h55_all_tier.str.startswith(("R1", "R2", "R3")).sum())
+    # First sheet is an action/preparation sheet only. Research-only R1/R2/R3 and LEADER-WATCH
+    # belong in 主流領漲股; surfacing research must never masquerade as a buy list.
     priority = perm.map(lambda x: 4 if x.startswith("BUY-READY") else 3 if x.startswith("SETUP-PREP") else 0)
     work = work.loc[priority.gt(0)].copy()
     if work.empty:
+        if h55_fresh_count > 0:
+            return pd.DataFrame({
+                "狀態": [f"今天沒有H51可執行/高品質等待，但H55找到{h55_fresh_count}檔R1/R2/R3新點火/輪動/收復研究候選。"],
+                "操作原則": ["第一頁不把研究雷達假裝成推薦；請看『主流領漲股』的H55參考層級，等H51/V188、觸發守價與路徑RR完成再升級。"],
+            })
         return pd.DataFrame({
             "狀態": ["今天沒有通過H51『主流族群→領漲股→Pivot/再攻→量價→流動性→路徑RR』的高品質候選。"],
             "操作原則": ["不以成熟主流或低品質雷達補位；請看『主流族群與領漲股』了解下一批等待名單。"],
@@ -701,18 +891,19 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     # action sheet as if it were a normal next-session priority.  This changes
     # only the reference/presentation layer, never H51/V188/Formal authority.
     h54tier = work.get("H54決策層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    cool_mask = work["H51交易許可"].astype(str).str.startswith("SETUP-PREP") & h54tier.str.startswith(("P3", "X1"))
+    h55tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    cool_mask = work["H51交易許可"].astype(str).str.startswith("SETUP-PREP") & (h54tier.str.startswith(("P3", "X1")) | h55tier.str.startswith(("P3", "X1")))
     cooled = work.loc[cool_mask].copy()
     work = work.loc[~cool_mask].copy()
     if work.empty and not cooled.empty:
         return pd.DataFrame({
-            "狀態": ["H54判定：原有SETUP-PREP全數因耗竭／隔夜／週末資訊空窗降級，第一頁不列隔日優先。"],
-            "操作原則": ["改看『主流領漲股』與R1輪動備援；下一交易日開盤前／開盤後重新驗證量價、守價與大盤，再決定是否恢復P1/P2。"],
+            "狀態": ["H55判定：原有SETUP-PREP全數因耗竭／隔夜／資訊空窗降級，第一頁不硬塞隔日優先。"],
+            "操作原則": ["改看『主流領漲股』中的R1/R2/R3研究雷達；下一交易日前重新驗證量價、守價、大盤與新點火證據，再決定是否恢復P1/P2。"],
         })
     work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3)
-    for c in ["H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
+    for c in ["H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
-    work.sort_values(["_p", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
+    work.sort_values(["_p", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H54隔日真相分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
     selected = []
     sector_count: dict[str, int] = {}
     for _, row in work.iterrows():
@@ -728,12 +919,13 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     for i, row in enumerate(selected, 1):
         permx = _s(row.get("H51交易許可"))
         h54tier = _s(row.get("H54決策層級"))
-        if permx.startswith("BUY-READY") and h54tier.startswith("A1"):
+        h55tier = _s(row.get("H55參考層級"))
+        if permx.startswith("BUY-READY") and h55tier.startswith("A1"):
             action = "可執行候選｜延續/隔夜已確認，仍依觸發守價分批"
         elif permx.startswith("BUY-READY"):
             action = "交易權威成立｜但H54要求下一交易日再確認，不開盤追價"
-        elif permx.startswith("SETUP-PREP") and h54tier.startswith("P1"):
-            action = "隔日優先等待｜未觸發前不進場"
+        elif permx.startswith("SETUP-PREP") and h55tier.startswith("P1"):
+            action = "雙路徑隔日優先等待｜未觸發前不進場"
         elif permx.startswith("SETUP-PREP"):
             action = "一般高品質等待｜未確認買點前不進場"
         else:
@@ -747,6 +939,14 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "H51市場地位": _s(row.get("H51市場地位")),
             "H51交易許可": permx,
             "目前決策": action,
+            "H55參考層級": _s(row.get("H55參考層級")),
+            "H55機會型態": _s(row.get("H55機會型態")),
+            "H55雙路徑隔日分": _first_num(row, ["H55雙路徑隔日分"]),
+            "H55主線延續路徑分": _first_num(row, ["H55主線延續路徑分"]),
+            "H55反轉點火路徑分": _first_num(row, ["H55反轉點火路徑分"]),
+            "H55逆風韌性分": _first_num(row, ["H55逆風韌性分"]),
+            "H55催化代理分": _first_num(row, ["H55催化代理分"]),
+            "H55回補雷達分": _first_num(row, ["H55回補雷達分"]),
             "H54決策層級": _s(row.get("H54決策層級")),
             "H54隔日真相分": _first_num(row, ["H54隔日真相分"]),
             "H54主流延續分": _first_num(row, ["H54主流延續分"]),
@@ -775,6 +975,7 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "停損參考": _first_num(row, ["實戰停損參考", "停損參考"], 0.0, positive=True),
             "今日/5日/20日": f"{_first_num(row,['今日漲幅%'],0):+.1f}% / {_first_num(row,['近5日漲幅%'],0):+.1f}% / {_first_num(row,['近20日漲幅%'],0):+.1f}%",
             "AI重點理由": _s(row.get("H51推薦理由")),
+            "H55雙路徑理由": _s(row.get("H55決策理由")),
             "H54隔日真相理由": _s(row.get("H54決策理由")),
         })
     return pd.DataFrame(rows)
@@ -785,18 +986,21 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
         return pd.DataFrame()
     work = frame if ("H51版本" in frame.columns and frame["H51版本"].astype(str).eq(VERSION).all()) else apply_human_master_engine(frame)
     status = work.get("H51市場地位", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    pick = work.loc[~status.str.startswith("HM-NO")].copy()
+    h55tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    h55_research = h55tier.str.startswith(("R1", "R2", "R3"))
+    pick = work.loc[(~status.str.startswith("HM-NO")) | h55_research].copy()
     if pick.empty:
         return pick
     for c in ["H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
-    pick.sort_values(["_stage", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H53隔日優先分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
+    pick["_h55route"] = pick.get("H55參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str).map(lambda x: 6 if x.startswith("A") else 5 if x.startswith("P1") else 4 if x.startswith("P2") else 3 if x.startswith(("R1", "R2", "R3")) else 2 if x.startswith("W1") else 1)
+    pick.sort_values(["_h55route", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
+        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
         "H51基本面資金分", "H51主線新鮮分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
-        "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H51推薦理由"
+        "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H55決策理由", "H51推薦理由"
     ] if c in pick.columns]
     return pick.head(max(1, int(max_rows)))[cols].reset_index(drop=True)
 
@@ -823,6 +1027,10 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         "H54耗竭風險分": pd.to_numeric(work.get("H54耗竭風險分", 50), errors="coerce").fillna(50.0),
         "H54輪動備援分": pd.to_numeric(work.get("H54輪動備援分", 50), errors="coerce").fillna(50.0),
         "H54證據品質分": pd.to_numeric(work.get("H54證據品質分", 50), errors="coerce").fillna(50.0),
+        "H55雙路徑隔日分": pd.to_numeric(work.get("H55雙路徑隔日分", 50), errors="coerce").fillna(50.0),
+        "H55反轉點火路徑分": pd.to_numeric(work.get("H55反轉點火路徑分", 50), errors="coerce").fillna(50.0),
+        "H55催化代理分": pd.to_numeric(work.get("H55催化代理分", 50), errors="coerce").fillna(50.0),
+        "H55逆風韌性分": pd.to_numeric(work.get("H55逆風韌性分", 50), errors="coerce").fillna(50.0),
     })
     grp = tmp.groupby("類別", dropna=False).agg(
         H53族群共振分=("H53族群共振分", "mean"),
@@ -841,6 +1049,10 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         H54族群耗竭風險=("H54耗竭風險分", "mean"),
         H54族群輪動備援=("H54輪動備援分", lambda x: x.nlargest(3).mean()),
         H54族群證據品質=("H54證據品質分", "mean"),
+        H55族群雙路徑分=("H55雙路徑隔日分", lambda x: x.nlargest(3).mean()),
+        H55族群反轉點火分=("H55反轉點火路徑分", lambda x: x.nlargest(3).mean()),
+        H55族群催化代理分=("H55催化代理分", lambda x: x.nlargest(3).mean()),
+        H55族群逆風韌性分=("H55逆風韌性分", lambda x: x.nlargest(3).mean()),
     ).reset_index()
     grp["H53族群決策分"] = (
         grp["H53族群共振分"] * 0.40 + grp["H53族群前三隔日優先"] * 0.25
@@ -852,9 +1064,14 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         + grp["H54族群證據品質"] * 0.18 + grp["H54族群輪動備援"] * 0.17
         - grp["H54族群耗竭風險"] * 0.15
     ).clip(0, 100).round(2)
-    grp.sort_values(["H54族群決策分", "H54族群隔日真相分", "H54族群延續分", "H53族群共振分"], ascending=False, inplace=True, kind="mergesort")
-    grp.insert(0, "H54族群排名", range(1, len(grp) + 1))
+    grp["H55族群機會分"] = (
+        grp["H54族群決策分"] * 0.45 + grp["H55族群雙路徑分"] * 0.28
+        + grp["H55族群反轉點火分"] * 0.15 + grp["H55族群催化代理分"] * 0.07
+        + grp["H55族群逆風韌性分"] * 0.05
+    ).clip(0, 100).round(2)
+    grp.sort_values(["H55族群機會分", "H55族群雙路徑分", "H54族群決策分", "H55族群反轉點火分"], ascending=False, inplace=True, kind="mergesort")
+    grp.insert(0, "H55族群排名", range(1, len(grp) + 1))
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
