@@ -103,7 +103,7 @@ def main():
     ]
     broad = [_row(f"90{i:02d}", f"寬類{i}", "電子零組件業", 0.4 if i % 2 else -0.5, False) for i in range(8)]
     scored = apply_human_master_engine(pd.DataFrame(passive + broad))
-    assert VERSION == "v191_h55_dual_path_reversal_catalyst_truth_20260901"
+    assert VERSION == "v191_h56_authority_preopen_two_stage_truth_20260902"
     assert {"H53族群共振分", "H53領漲集群分", "H53隔日優先分", "H53參考層級"}.issubset(scored.columns)
 
     p = scored[scored["類別"].eq("被動元件")]

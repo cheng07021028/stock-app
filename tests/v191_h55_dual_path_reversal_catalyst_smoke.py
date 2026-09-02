@@ -39,7 +39,7 @@ def base_row(code: str, name: str, sector: str) -> dict:
 
 
 def main():
-    assert VERSION == "v191_h55_dual_path_reversal_catalyst_truth_20260901"
+    assert VERSION == "v191_h56_authority_preopen_two_stage_truth_20260902"
 
     # A fresh-event/reversal candidate: old H50 mainstream is only ordinary,
     # but upstream radar engines already detected reversal/precursor/theme/leader replay.
@@ -104,9 +104,9 @@ def main():
     assert "H55族群反轉點火分" in sectors.columns
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h55_dual_path_reversal_catalyst_truth_20260901"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h55_dual_path_reversal_catalyst_truth_20260901"' in page
-    assert "H55雙路徑真相" in page
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h56_authority_preopen_two_stage_truth_20260902"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h56_authority_preopen_two_stage_truth_20260902"' in page
+    assert "H56權威＋盤前二階段真相" in page
 
     print("PASS v191_h55_dual_path_reversal_catalyst_smoke")
 

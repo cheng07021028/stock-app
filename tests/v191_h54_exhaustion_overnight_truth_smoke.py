@@ -34,7 +34,7 @@ def row(code: str, name: str, sector: str = "被動元件") -> dict:
 
 
 def main():
-    assert VERSION == "v191_h55_dual_path_reversal_catalyst_truth_20260901"
+    assert VERSION == "v191_h56_authority_preopen_two_stage_truth_20260902"
 
     good = row("1001", "健康延續")
     # Monday target after Friday is a real information window, so it should not be blindly P1.
@@ -43,7 +43,7 @@ def main():
     assert not str(weekend.iloc[0]["H54決策層級"]).startswith("P1")
     weekend_final = build_h51_final_decision_table(weekend, max_rows=6)
     assert "股票代號" not in weekend_final.columns, weekend_final.to_dict("records")
-    assert "H55判定" in str(weekend_final.iloc[0].get("狀態", ""))
+    assert "H56判定" in str(weekend_final.iloc[0].get("狀態", ""))
 
     normal = row("1002", "一般隔日")
     normal["K線日期"] = "2026-08-27"
@@ -75,9 +75,9 @@ def main():
         assert final.iloc[0]["H54隔日真相分"] >= final.iloc[1]["H54隔日真相分"]
 
     page_text = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h55_dual_path_reversal_catalyst_truth_20260901"' in page_text
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h55_dual_path_reversal_catalyst_truth_20260901"' in page_text
-    assert "H55雙路徑真相" in page_text
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h56_authority_preopen_two_stage_truth_20260902"' in page_text
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h56_authority_preopen_two_stage_truth_20260902"' in page_text
+    assert "H56權威＋盤前二階段真相" in page_text
 
     print("PASS v191_h54_exhaustion_overnight_truth_smoke")
 

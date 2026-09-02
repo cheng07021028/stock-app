@@ -277,7 +277,7 @@ except Exception as _h42_import_exc:
     apply_dual_opportunity_engine = None
     build_focus_decision_table = None
 
-H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h55_dual_path_reversal_catalyst_truth_20260901"
+H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h56_authority_preopen_two_stage_truth_20260902"
 H51_HUMAN_MASTER_IMPORT_ERROR = ""
 try:
     from godpick_human_master_engine import (
@@ -340,7 +340,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h55_dual_path_reversal_catalyst_truth_20260901"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h56_authority_preopen_two_stage_truth_20260902"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -3788,6 +3788,8 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
         x["隔夜風險等級"] = ""
         x["隔夜偏向"] = ""
         x["隔夜解讀"] = ""
+        x["隔夜資料品質"] = ""
+        x["隔夜更新時間"] = ""
         x["台指夜盤漲跌"] = ""
         x["NASDAQ漲跌%"] = ""
         x["S&P500漲跌%"] = ""
@@ -3859,6 +3861,7 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     x["隔夜偏向"] = overnight_info.get("bias")
     x["隔夜解讀"] = overnight_info.get("comment")
     x["隔夜資料品質"] = overnight_info.get("quality")
+    x["隔夜更新時間"] = overnight_info.get("updated_at")
     x["台指夜盤資料來源"] = overnight_info.get("night_source")
     x["台指夜盤備援說明"] = overnight_info.get("night_note")
     x["台指夜盤漲跌"] = overnight_info.get("night_tx")
@@ -13405,8 +13408,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     # H51：第一屏只回答真人交易員真正會先問的三件事：
     # 1) 今天最值得參考/等待/執行的是誰；2) 資金主線在哪；3) 領漲/Pivot股是誰。
-    render_pro_section("超級AI最終決策｜H55主線延續＋反轉點火雙路徑→H51執行")
-    st.caption("H55雙路徑真相：保留H54『主流延續／耗竭／隔夜』，再正式接入系統既有的逆勢反轉、強勢前兆、隔日爆發、題材火種與領漲回補訊號。R2/R3只提高研究召回，不會偷升BUY-READY；交易權威仍由H51/V188與路徑RR守門。")
+    render_pro_section("超級AI最終決策｜H56 Formal/V188權威＋T+1盤前二階段確認")
+    st.caption("H56權威＋盤前二階段真相：H51/H55只做研究與排序，不得越過Formal/V188建立正式新倉；收盤後的50/50/50中性隔夜值視為『尚未確認』，只有下一交易日前更新且時間晚於K線交易日的隔夜快照才可升為PREOPEN-CONFIRMED。H55雙路徑與H54耗竭/隔夜能力全部保留。")
     _h51_engine_ok = bool(callable(apply_human_master_engine) and callable(build_h51_final_decision_table) and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION)
     if not _h51_engine_ok:
         st.error(f"H51版本一致性失敗：目前={H51_HUMAN_MASTER_VERSION}；預期={H51_HUMAN_MASTER_EXPECTED_VERSION}。請重新覆蓋H51引擎與Page07。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))

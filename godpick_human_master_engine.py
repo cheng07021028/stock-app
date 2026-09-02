@@ -20,7 +20,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h55_dual_path_reversal_catalyst_truth_20260901"
+VERSION = "v191_h56_authority_preopen_two_stage_truth_20260902"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -46,6 +46,11 @@ H55_COLUMNS = [
     "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分",
     "H55回補雷達分", "H55雙路徑隔日分", "H55機會型態", "H55參考層級",
     "H55決策理由", "H55版本",
+]
+
+H56_COLUMNS = [
+    "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
+    "H56最終參考層級", "H56決策理由", "H56版本",
 ]
 
 _BROAD_PARENT_BUCKETS = {"半導體業", "電子零組件業", "光電業", "其他電子業", "電腦及週邊設備業"}
@@ -256,6 +261,140 @@ def _date_value(v: Any) -> date | None:
         return None
 
 
+def _datetime_value(v: Any) -> datetime | None:
+    t = _s(v)
+    if not t:
+        return None
+    try:
+        x = pd.to_datetime(t, errors="coerce")
+        if pd.isna(x):
+            return None
+        return x.to_pydatetime() if hasattr(x, "to_pydatetime") else x
+    except Exception:
+        return None
+
+
+def _truthy(v: Any) -> bool | None:
+    if isinstance(v, bool):
+        return v
+    t = _s(v).lower()
+    if t in {"true", "1", "yes", "y", "是", "正式", "通過"}:
+        return True
+    if t in {"false", "0", "no", "n", "否", "未通過"}:
+        return False
+    return None
+
+
+def _authority_state(row: pd.Series) -> tuple[str, str]:
+    """Read upstream Formal/V188 permission without allowing H51 to overrule it.
+
+    UNKNOWN preserves standalone/synthetic compatibility.  Once Page07 supplies
+    explicit authority fields, negative Formal/V188 evidence is a hard ceiling:
+    H51/H55 may rank/research the stock but may not manufacture BUY-READY.
+    """
+    names = [
+        "是否正式推薦", "正式推薦分區", "V188正式推薦資格", "V188交易許可",
+        "操作許可", "最終操作結論", "正式推薦動作", "推薦升級判定路徑",
+    ]
+    present = any(c in row.index and _s(row.get(c)) for c in names)
+    if not present:
+        return "UNKNOWN", "未提供Formal/V188權威欄位；保留原引擎相容性"
+
+    official = _truthy(row.get("是否正式推薦")) if "是否正式推薦" in row.index else None
+    zone = _first_text(row, ["正式推薦分區"])
+    qual = _first_text(row, ["V188正式推薦資格"])
+    permit = _first_text(row, ["V188交易許可", "操作許可"])
+    conclusion = _first_text(row, ["最終操作結論"])
+    action = _first_text(row, ["正式推薦動作"])
+    path = _first_text(row, ["推薦升級判定路徑"])
+    text = "｜".join([zone, qual, permit, conclusion, action, path]).upper()
+
+    explicit_formal = bool(
+        official is True
+        or zone.startswith(("正式主推薦", "正式推薦"))
+        or (qual and (qual.startswith(("是｜", "通過｜")) or "FORMAL-READY" in qual.upper()))
+        or permit.upper().startswith(("ALLOW", "FORMAL-READY"))
+    )
+    if explicit_formal:
+        return "FORMAL", "上游Formal/V188已明確授權正式推薦"
+
+    a_minus = ("A-" in conclusion.upper() or "準主推薦" in conclusion or "條件推薦" in conclusion or "A-" in path.upper())
+    hard_nonformal = (
+        official is False
+        or (qual and ("否" in qual or "不越權" in qual))
+        or any(k in permit.upper() for k in ["WAIT-", "RADAR", "TRACK-ONLY", "禁止", "不得"])
+        or any(k in zone for k in ["盤中雷達", "研究", "觀察"])
+        or any(k in action for k in ["不得建立正式新倉", "未通過交易品質", "不得正式推薦"])
+    )
+    if a_minus:
+        return "A-MINUS", "上游僅A-/準主推薦；H51/H55不得升格正式買進"
+    if hard_nonformal:
+        return "RADAR", "上游Formal/V188未授權正式新倉；僅可等待/雷達"
+    return "RESTRICTED", "存在上游權威欄位但未取得明確正式推薦授權"
+
+
+def _overnight_evidence_state(row: pd.Series) -> tuple[str, bool, bool, str]:
+    """Return (state, verified, adverse, explanation) for T+1 pre-open evidence.
+
+    Neutral fallback values (50/50/50 and zero changes) are *unknown*, not a
+    confirmation.  Evidence is verified only when the overnight snapshot has a
+    fresh timestamp after the K-line session and its quality is usable.
+    """
+    quality = _first_text(row, ["隔夜資料品質"])
+    updated = _datetime_value(row.get("隔夜更新時間")) if "隔夜更新時間" in row.index else None
+    kdate = None
+    for c in ["K線日期", "K線最新日期", "資料日期", "行情日期"]:
+        if c in row.index:
+            kdate = _date_value(row.get(c))
+            if kdate:
+                break
+    target = None
+    for c in ["隔日大盤預測日期", "下一交易日", "目標交易日", "推薦日期"]:
+        if c in row.index:
+            target = _date_value(row.get(c))
+            if target:
+                break
+
+    bad_quality = any(k in quality.upper() for k in ["不足", "缺", "過期", "STALE", "FAIL", "PENDING", "未更新"])
+    updated_date = updated.date() if updated else None
+    fresh_time = bool(updated_date and ((kdate and updated_date > kdate) or (target and updated_date >= target)))
+    neutral_triplet = (
+        abs(_first_num(row, ["隔夜風控分數"], 50.0) - 50.0) < 0.01
+        and abs(_first_num(row, ["隔日大盤分數"], 50.0) - 50.0) < 0.01
+        and abs(_first_num(row, ["隔日下跌機率%"], 50.0) - 50.0) < 0.01
+    )
+    moves = [
+        _first_num(row, ["NASDAQ漲跌%", "Nasdaq漲跌%"], 0.0),
+        _first_num(row, ["S&P500漲跌%"], 0.0),
+        _first_num(row, ["費半漲跌%"], 0.0),
+        _first_num(row, ["台指夜盤漲跌", "台指夜盤漲跌%"], 0.0),
+    ]
+    all_zero = all(abs(x) < 0.01 for x in moves)
+    rescan = _first_text(row, ["隔夜催化需求"])
+
+    if bad_quality:
+        return "INSUFFICIENT｜隔夜資料品質不足", False, False, f"品質={quality or '未標示'}"
+    if not fresh_time:
+        why = "缺隔夜更新時間" if updated is None else f"隔夜更新{updated_date}未晚於K線{kdate}"
+        if neutral_triplet and all_zero:
+            why += "；50/50/50與零漲跌屬中性預設，不是已確認"
+        if "重掃" in rescan:
+            why += "；上游亦標示盤前需重掃"
+        return "PENDING｜盤前隔夜尚未確認", False, False, why
+
+    penalty = _first_num(row, ["H54隔夜風險扣分"], 0.0)
+    score = _first_num(row, ["隔夜風控分數"], 50.0)
+    down_prob = _first_num(row, ["隔日下跌機率%"], 50.0)
+    nasdaq, sp500, sox, tx = moves
+    adverse = bool(
+        penalty >= 35 or score <= 38 or down_prob >= 62
+        or nasdaq <= -1.5 or sp500 <= -1.3 or sox <= -2.0 or tx <= -1.5
+    )
+    if adverse:
+        return "VERIFIED-RISK｜盤前隔夜已更新但偏空", True, True, f"更新={updated_date}；隔夜分{score:.0f}/下跌機率{down_prob:.0f}%/費半{sox:+.1f}%"
+    return "VERIFIED｜盤前隔夜證據已更新", True, False, f"更新={updated_date}；品質={quality or '可用'}"
+
+
 def _h54_exhaustion(row: pd.Series) -> float:
     """Estimate next-session exhaustion/crowding risk; higher is worse.
 
@@ -385,6 +524,7 @@ def _apply_h54_truth(work: pd.DataFrame) -> pd.DataFrame:
         exhaustion = _h54_exhaustion(row)
         trigger = _h54_trigger_proximity(row)
         overnight, info_gap, overnight_reason = _h54_overnight(row)
+        overnight_state, overnight_verified, overnight_adverse, overnight_evidence_reason = _overnight_evidence_state(row)
         legacy_next = _first_num(row, ["隔日可執行優先分"], trigger)
         continuation = _clip(
             resonance * 0.25 + cohort * 0.18 + ignition * 0.15 + evidence * 0.22 + _clip(legacy_next) * 0.20
@@ -401,15 +541,15 @@ def _apply_h54_truth(work: pd.DataFrame) -> pd.DataFrame:
         # Rising secondary theme with real breadth and lower crowding: useful when yesterday's hottest theme is exhausted.
         rotation = _clip(attack * 0.27 + breadth * 0.25 + fund * 0.17 + vol * 0.11 + evidence * 0.20 - exhaustion * 0.20)
         perm = _s(row.get("H51交易許可"))
-        if perm.startswith("BUY-READY") and truth >= 72 and executable >= 68 and exhaustion <= 58 and overnight <= 35:
-            tier = "A1｜READY-CONFIRMED｜延續與隔夜條件確認"
+        if perm.startswith("BUY-READY") and overnight_verified and not overnight_adverse and truth >= 72 and executable >= 68 and exhaustion <= 58 and overnight <= 35:
+            tier = "A1｜READY-CONFIRMED｜主線延續＋盤前隔夜證據確認"
         elif perm.startswith("BUY-READY"):
-            tier = "A2｜BUY-READY｜交易權威成立但次日需再確認"
+            tier = "A2｜BUY-READY｜收盤條件成立，但盤前隔夜尚未確認"
         elif perm.startswith(("NO-CHASE", "WAIT-BASE")) and (exhaustion >= 55 or overnight >= 35 or info_gap >= 18):
             tier = "X1｜WAIT-COOLDOWN｜主流強但延伸/空窗，禁止把昨日強勢當隔日優先"
-        elif perm.startswith("SETUP-PREP") and truth >= 72 and executable >= 65 and exhaustion <= 55 and overnight <= 32 and info_gap <= 12 and rr >= 1.25:
-            tier = "P1｜PRIME-PREP｜隔日真相優先等待"
-        elif perm.startswith("SETUP-PREP") and (exhaustion >= 65 or overnight >= 40 or info_gap >= 18):
+        elif perm.startswith("SETUP-PREP") and overnight_verified and not overnight_adverse and truth >= 72 and executable >= 65 and exhaustion <= 55 and overnight <= 32 and info_gap <= 12 and rr >= 1.25:
+            tier = "P1｜PRIME-PREP｜盤前隔夜確認後的優先等待"
+        elif perm.startswith("SETUP-PREP") and (exhaustion >= 65 or overnight >= 40 or info_gap >= 18 or overnight_adverse):
             tier = "P3｜WAIT-COOLDOWN｜耗竭/隔夜/空窗風險先降溫"
         elif perm.startswith("SETUP-PREP"):
             tier = "P2｜SETUP-PREP｜一般高品質等待"
@@ -422,7 +562,7 @@ def _apply_h54_truth(work: pd.DataFrame) -> pd.DataFrame:
         reason = (
             f"延續{continuation:.1f}/可執行{executable:.1f}/隔日真相{truth:.1f}；"
             f"族群證據{evidence:.1f}/耗竭{exhaustion:.1f}/隔夜扣分{overnight:.1f}/空窗{info_gap:.1f}；"
-            f"RR{rr:.2f}/觸發接近{trigger:.1f}；{overnight_reason}"
+            f"RR{rr:.2f}/觸發接近{trigger:.1f}；{overnight_reason}；隔夜證據={overnight_state}({overnight_evidence_reason})"
         )
         vals = {
             "H54主流延續分": round(continuation, 2), "H54可執行確認分": round(executable, 2),
@@ -612,6 +752,85 @@ def _apply_h55_dual_path(work: pd.DataFrame) -> pd.DataFrame:
         out[c] = vals
     return out
 
+
+def _apply_h56_truth(work: pd.DataFrame) -> pd.DataFrame:
+    """Final governance for authority ceiling + two-stage T+1 confirmation.
+
+    Stage 1 (post-close): rank candidates, but never call neutral/missing overnight
+    defaults "confirmed". Stage 2 (pre-open): only a fresh overnight snapshot may
+    confirm or suspend the candidate. Formal/V188 remains the upper authority.
+    """
+    if work is None or work.empty:
+        return work
+    out = work.copy()
+    cols = {c: [] for c in H56_COLUMNS}
+    for _, row in out.iterrows():
+        authority, authority_reason = _authority_state(row)
+        evidence_state, verified, adverse, evidence_reason = _overnight_evidence_state(row)
+        h51perm = _s(row.get("H51交易許可"))
+        h55 = _first_num(row, ["H55雙路徑隔日分"], 50.0)
+        h54 = _first_num(row, ["H54隔日真相分"], 50.0)
+        executable = _first_num(row, ["H54可執行確認分", "H51可執行分"], 50.0)
+        overnight_penalty = _first_num(row, ["H54隔夜風險扣分"], 0.0)
+        authority_score = {"FORMAL": 100.0, "UNKNOWN": 70.0, "A-MINUS": 45.0, "RADAR": 28.0, "RESTRICTED": 35.0}.get(authority, 40.0)
+        evidence_score = 100.0 if verified else 45.0 if evidence_state.startswith("PENDING") else 30.0
+        t1 = _clip(h55 * 0.38 + h54 * 0.24 + executable * 0.16 + authority_score * 0.12 + evidence_score * 0.10 - overnight_penalty * 0.12)
+
+        # Hard ceilings: research engines cannot create trade authority, and a
+        # post-close scan cannot certify an overnight session that has not happened.
+        if authority in {"A-MINUS", "RADAR", "RESTRICTED"}:
+            t1 = min(t1, 62.0)
+            tier = "P0｜AUTHORITY-CAPPED｜上游未正式授權，僅可等待/雷達"
+            recheck = "需要｜Formal/V188先通過；若要隔日執行，盤前仍需重掃隔夜資料"
+        elif adverse and verified:
+            t1 = min(t1, 45.0)
+            tier = "X2｜OVERNIGHT-RISK-HOLD｜盤前隔夜轉弱，暫停新倉"
+            recheck = "需要｜盤前風險偏空，等待開盤後重新確認市場/守價"
+        elif not verified and h51perm.startswith("BUY-READY"):
+            t1 = min(t1, 68.0)
+            tier = "A0｜PREOPEN-PENDING｜收盤候選成立，但隔夜尚未確認"
+            recheck = "需要｜下一交易日盤前更新美股/費半/台指夜盤後才能升A1"
+        elif not verified and h51perm.startswith("SETUP-PREP"):
+            t1 = min(t1, 66.0)
+            tier = "P0｜PREOPEN-PENDING｜高品質等待，但隔夜尚未確認"
+            recheck = "需要｜盤前重掃後才決定P1/P2或降級"
+        elif h51perm.startswith("BUY-READY") and verified and t1 >= 72:
+            tier = "A1｜PREOPEN-CONFIRMED｜Formal/執行/隔夜三層確認"
+            recheck = "已完成｜仍需依實戰觸發價與守價，不開盤追價"
+        elif h51perm.startswith("BUY-READY"):
+            tier = "A2｜BUY-READY｜權威成立但T+1確認不足"
+            recheck = "需要｜開盤前/後再確認市場與觸發"
+        elif h51perm.startswith("SETUP-PREP") and verified and t1 >= 70:
+            tier = "P1｜PREOPEN-PRIME-PREP｜盤前確認後的優先等待"
+            recheck = "已完成隔夜層｜仍須等Pivot/觸發守價"
+        elif h51perm.startswith("SETUP-PREP"):
+            tier = "P2｜SETUP-PREP｜一般等待，不視為隔日已確認"
+            recheck = "需要｜依盤前/開盤後資料重驗"
+        else:
+            old = _s(row.get("H55參考層級"))
+            tier = old if old else "W2｜RESEARCH｜一般研究"
+            recheck = "研究層｜不建立正式新倉"
+
+        reason = (
+            f"上游權威={authority}；隔夜證據={evidence_state}；H55雙路徑{h55:.1f}/H54真相{h54:.1f}/"
+            f"可執行{executable:.1f}/H56T1確認{t1:.1f}。{authority_reason}；{evidence_reason}"
+        )
+        vals = {
+            "H56上游權威層級": authority,
+            "H56隔夜證據狀態": evidence_state,
+            "H56盤前重驗需求": recheck,
+            "H56T1確認分": round(t1, 2),
+            "H56最終參考層級": tier,
+            "H56決策理由": reason,
+            "H56版本": VERSION,
+        }
+        for c in H56_COLUMNS:
+            cols[c].append(vals[c])
+    for c, vals in cols.items():
+        out[c] = vals
+    return out
+
+
 def _apply_h53_resonance(work: pd.DataFrame) -> pd.DataFrame:
     if work is None or work.empty:
         return work
@@ -784,8 +1003,12 @@ def _profile(row: pd.Series) -> dict[str, Any]:
         and rr >= 0.70 and risk >= 50 and trade >= 52 and ret1 > -6.0
         and close >= 40 and upper <= 60 and (stop_dist <= 0 or stop_dist <= 10.0) and chase <= 78
     )
+    authority, authority_reason = _authority_state(row)
+    authority_capped = bool(ready and authority in {"A-MINUS", "RADAR", "RESTRICTED"})
     if shock_down or weak_breakdown:
         permission = "WAIT-RECLAIM｜急跌/跌停後先確認收復，不列高品質等待"
+    elif authority_capped:
+        permission = "SETUP-PREP｜上游僅A-/雷達/未正式授權，H51不得越權升格"
     elif ready:
         permission = "BUY-READY｜主線/領漲/Pivot與執行條件完成"
     elif market_status.startswith("HM-EXTENDED"):
@@ -799,11 +1022,11 @@ def _profile(row: pd.Series) -> dict[str, Any]:
     else:
         permission = "NO-PRIORITY｜目前非專業主線優先"
 
-    if ready and pro >= 80:
+    if ready and not authority_capped and pro >= 80:
         level = "A+｜真人主線可執行"
-    elif ready:
+    elif ready and not authority_capped:
         level = "A｜真人主線可執行"
-    elif prep and pro >= 72:
+    elif (prep or authority_capped) and pro >= 72:
         level = "B+｜高品質主線等待買點"
     elif core_market:
         level = "B｜主線研究"
@@ -815,7 +1038,8 @@ def _profile(row: pd.Series) -> dict[str, Any]:
         f"量價{volume:.1f}；流動性{liquidity:.1f}(成交額{amount:.0f}百萬)；"
         f"資金/基本面{fundamental:.1f}；發動潛力{ignition:.1f}；今日{ret1:+.1f}%/5日{ret5:+.1f}%/20日{ret20:+.1f}%；"
         f"路徑RR{rr:.2f}({rr_basis})；Trade{trade:.1f}/Risk{risk:.1f}/Entry{entry:.1f}/追價{chase:.0f}；"
-        f"重複扣分{repeat_penalty:.1f}/延伸扣分{extension_penalty:.1f}/急跌扣分{shock_penalty:.1f}"
+        f"重複扣分{repeat_penalty:.1f}/延伸扣分{extension_penalty:.1f}/急跌扣分{shock_penalty:.1f}；"
+        f"上游權威{authority}({authority_reason})"
     )
     return {
         "sector": round(sector, 2), "leader": round(leader, 2), "pivot": round(pivot, 2), "volume": round(volume, 2),
@@ -860,6 +1084,7 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     work = _apply_h53_resonance(work)
     work = _apply_h54_truth(work)
     work = _apply_h55_dual_path(work)
+    work = _apply_h56_truth(work)
     return work
 
 
@@ -892,18 +1117,22 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     # only the reference/presentation layer, never H51/V188/Formal authority.
     h54tier = work.get("H54決策層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     h55tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-    cool_mask = work["H51交易許可"].astype(str).str.startswith("SETUP-PREP") & (h54tier.str.startswith(("P3", "X1")) | h55tier.str.startswith(("P3", "X1")))
+    h56tier = work.get("H56最終參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    cool_mask = (
+        (work["H51交易許可"].astype(str).str.startswith("SETUP-PREP") & (h54tier.str.startswith(("P3", "X1")) | h55tier.str.startswith(("P3", "X1"))))
+        | h56tier.str.startswith("X2")
+    )
     cooled = work.loc[cool_mask].copy()
     work = work.loc[~cool_mask].copy()
     if work.empty and not cooled.empty:
         return pd.DataFrame({
-            "狀態": ["H55判定：原有SETUP-PREP全數因耗竭／隔夜／資訊空窗降級，第一頁不硬塞隔日優先。"],
-            "操作原則": ["改看『主流領漲股』中的R1/R2/R3研究雷達；下一交易日前重新驗證量價、守價、大盤與新點火證據，再決定是否恢復P1/P2。"],
+            "狀態": ["H56判定：原有候選全數因耗竭／已驗證隔夜風險／資訊空窗降級，第一頁不硬塞隔日優先。"],
+            "操作原則": ["下一交易日前重新驗證Formal/V188權威、隔夜資料、量價、守價與大盤；研究候選仍保留在『主流領漲股』。"],
         })
     work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3)
-    for c in ["H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
+    for c in ["H56T1確認分", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
-    work.sort_values(["_p", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H54隔日真相分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
+    work.sort_values(["_p", "H56T1確認分", "H55雙路徑隔日分", "H54隔日真相分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
     selected = []
     sector_count: dict[str, int] = {}
     for _, row in work.iterrows():
@@ -920,12 +1149,19 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
         permx = _s(row.get("H51交易許可"))
         h54tier = _s(row.get("H54決策層級"))
         h55tier = _s(row.get("H55參考層級"))
-        if permx.startswith("BUY-READY") and h55tier.startswith("A1"):
-            action = "可執行候選｜延續/隔夜已確認，仍依觸發守價分批"
+        h56tier = _s(row.get("H56最終參考層級"))
+        if h56tier.startswith("A1"):
+            action = "盤前已確認可執行候選｜仍依Formal/V188、實戰觸發價與守價分批，不追開盤"
+        elif h56tier.startswith("A0"):
+            action = "收盤候選成立｜隔夜尚未發生/未更新，盤前重掃前不得稱已確認"
+        elif h56tier.startswith("P0") and "AUTHORITY-CAPPED" in h56tier:
+            action = "上游僅A-/雷達｜H51/H55不得越權升格；只可盤中等待確認，不是正式買進推薦"
+        elif h56tier.startswith("P0"):
+            action = "高品質等待｜隔夜尚未確認，盤前重掃後再決定是否恢復P1/P2"
         elif permx.startswith("BUY-READY"):
-            action = "交易權威成立｜但H54要求下一交易日再確認，不開盤追價"
-        elif permx.startswith("SETUP-PREP") and h55tier.startswith("P1"):
-            action = "雙路徑隔日優先等待｜未觸發前不進場"
+            action = "交易條件候選｜H56尚未完成T+1盤前確認，不開盤追價"
+        elif permx.startswith("SETUP-PREP") and h56tier.startswith("P1"):
+            action = "盤前確認後優先等待｜仍須等Pivot/實戰觸發守價"
         elif permx.startswith("SETUP-PREP"):
             action = "一般高品質等待｜未確認買點前不進場"
         else:
@@ -939,6 +1175,11 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "H51市場地位": _s(row.get("H51市場地位")),
             "H51交易許可": permx,
             "目前決策": action,
+            "H56最終參考層級": _s(row.get("H56最終參考層級")),
+            "H56上游權威層級": _s(row.get("H56上游權威層級")),
+            "H56隔夜證據狀態": _s(row.get("H56隔夜證據狀態")),
+            "H56盤前重驗需求": _s(row.get("H56盤前重驗需求")),
+            "H56T1確認分": _first_num(row, ["H56T1確認分"]),
             "H55參考層級": _s(row.get("H55參考層級")),
             "H55機會型態": _s(row.get("H55機會型態")),
             "H55雙路徑隔日分": _first_num(row, ["H55雙路徑隔日分"]),
@@ -975,6 +1216,7 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "停損參考": _first_num(row, ["實戰停損參考", "停損參考"], 0.0, positive=True),
             "今日/5日/20日": f"{_first_num(row,['今日漲幅%'],0):+.1f}% / {_first_num(row,['近5日漲幅%'],0):+.1f}% / {_first_num(row,['近20日漲幅%'],0):+.1f}%",
             "AI重點理由": _s(row.get("H51推薦理由")),
+            "H56T1決策理由": _s(row.get("H56決策理由")),
             "H55雙路徑理由": _s(row.get("H55決策理由")),
             "H54隔日真相理由": _s(row.get("H54決策理由")),
         })
@@ -991,16 +1233,16 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     pick = work.loc[(~status.str.startswith("HM-NO")) | h55_research].copy()
     if pick.empty:
         return pick
-    for c in ["H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H56T1確認分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
-    pick["_h55route"] = pick.get("H55參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str).map(lambda x: 6 if x.startswith("A") else 5 if x.startswith("P1") else 4 if x.startswith("P2") else 3 if x.startswith(("R1", "R2", "R3")) else 2 if x.startswith("W1") else 1)
-    pick.sort_values(["_h55route", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
+    pick["_h56route"] = pick.get("H56最終參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str).map(lambda x: 7 if x.startswith("A1") else 6 if x.startswith(("A0", "A2")) else 5 if x.startswith("P1") else 4 if x.startswith(("P0", "P2")) else 3 if x.startswith(("R1", "R2", "R3")) else 2 if x.startswith("W1") else 1)
+    pick.sort_values(["_h56route", "H56T1確認分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
+        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分", "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
         "H51基本面資金分", "H51主線新鮮分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
-        "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H55決策理由", "H51推薦理由"
+        "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H56決策理由", "H55決策理由", "H51推薦理由"
     ] if c in pick.columns]
     return pick.head(max(1, int(max_rows)))[cols].reset_index(drop=True)
 
