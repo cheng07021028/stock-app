@@ -20,7 +20,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h56_authority_preopen_two_stage_truth_20260902"
+VERSION = "v191_h57_pre_ignition_acceleration_engine_20260902"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -1085,6 +1085,15 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     work = _apply_h54_truth(work)
     work = _apply_h55_dual_path(work)
     work = _apply_h56_truth(work)
+    # H57: dedicated pre-ignition discovery layer.  It is intentionally applied
+    # after H56 so it can see the complete governance context, but it never
+    # rewrites Formal/V188/H51/H56 authority.
+    try:
+        from godpick_pre_ignition_engine import apply_pre_ignition_engine
+        work = apply_pre_ignition_engine(work)
+    except Exception:
+        # Discovery failure must not break the formal decision path.
+        pass
     return work
 
 
@@ -1097,15 +1106,17 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
     perm = work.get("H51交易許可", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     h55_all_tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     h55_fresh_count = int(h55_all_tier.str.startswith(("R1", "R2", "R3")).sum())
+    h57_phase_all = work.get("H57前兆階段", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    h57_prime_count = int(h57_phase_all.str.startswith(("PI3", "PI2", "IG1")).sum())
     # First sheet is an action/preparation sheet only. Research-only R1/R2/R3 and LEADER-WATCH
     # belong in 主流領漲股; surfacing research must never masquerade as a buy list.
     priority = perm.map(lambda x: 4 if x.startswith("BUY-READY") else 3 if x.startswith("SETUP-PREP") else 0)
     work = work.loc[priority.gt(0)].copy()
     if work.empty:
-        if h55_fresh_count > 0:
+        if h57_prime_count > 0 or h55_fresh_count > 0:
             return pd.DataFrame({
-                "狀態": [f"今天沒有H51可執行/高品質等待，但H55找到{h55_fresh_count}檔R1/R2/R3新點火/輪動/收復研究候選。"],
-                "操作原則": ["第一頁不把研究雷達假裝成推薦；請看『主流領漲股』的H55參考層級，等H51/V188、觸發守價與路徑RR完成再升級。"],
+                "狀態": [f"今天沒有H51可執行/高品質等待；H57找到{h57_prime_count}檔PI2/PI3/IG1發動前兆候選，H55另有{h55_fresh_count}檔R1/R2/R3研究候選。"],
+                "操作原則": ["第一頁不把前兆/研究雷達假裝成推薦；請看『主流領漲股』的H57前兆階段，等Formal/V188/H51/H56、觸發守價與路徑RR完成再升級。"],
             })
         return pd.DataFrame({
             "狀態": ["今天沒有通過H51『主流族群→領漲股→Pivot/再攻→量價→流動性→路徑RR』的高品質候選。"],
@@ -1130,9 +1141,9 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "操作原則": ["下一交易日前重新驗證Formal/V188權威、隔夜資料、量價、守價與大盤；研究候選仍保留在『主流領漲股』。"],
         })
     work["_p"] = work["H51交易許可"].astype(str).map(lambda x: 4 if x.startswith("BUY-READY") else 3)
-    for c in ["H56T1確認分", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
+    for c in ["H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57相對強度轉折分", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51可執行分", "H51Pivot起漲分", "H51個股領漲品質分", "H51族群主線分"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
-    work.sort_values(["_p", "H56T1確認分", "H55雙路徑隔日分", "H54隔日真相分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
+    work.sort_values(["_p", "H56T1確認分", "H57飆股發動前兆分", "H55雙路徑隔日分", "H54隔日真相分", "H53隔日優先分", "H51專業參考分"], ascending=False, inplace=True, kind="mergesort")
     selected = []
     sector_count: dict[str, int] = {}
     for _, row in work.iterrows():
@@ -1180,6 +1191,16 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "H56隔夜證據狀態": _s(row.get("H56隔夜證據狀態")),
             "H56盤前重驗需求": _s(row.get("H56盤前重驗需求")),
             "H56T1確認分": _first_num(row, ["H56T1確認分"]),
+            "H57前兆階段": _s(row.get("H57前兆階段")),
+            "H57研究優先層級": _s(row.get("H57研究優先層級")),
+            "H57飆股發動前兆分": _first_num(row, ["H57飆股發動前兆分"]),
+            "H57全市場前兆百分位%": _first_num(row, ["H57全市場前兆百分位%"]),
+            "H57精選雷達層級": _s(row.get("H57精選雷達層級")),
+            "H57資金加速度分": _first_num(row, ["H57資金加速度分"]),
+            "H57波動壓縮分": _first_num(row, ["H57波動壓縮分"]),
+            "H57壓縮轉擴張分": _first_num(row, ["H57壓縮轉擴張分"]),
+            "H57相對強度轉折分": _first_num(row, ["H57相對強度轉折分"]),
+            "H57主流形成前兆分": _first_num(row, ["H57主流形成前兆分"]),
             "H55參考層級": _s(row.get("H55參考層級")),
             "H55機會型態": _s(row.get("H55機會型態")),
             "H55雙路徑隔日分": _first_num(row, ["H55雙路徑隔日分"]),
@@ -1217,6 +1238,7 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
             "今日/5日/20日": f"{_first_num(row,['今日漲幅%'],0):+.1f}% / {_first_num(row,['近5日漲幅%'],0):+.1f}% / {_first_num(row,['近20日漲幅%'],0):+.1f}%",
             "AI重點理由": _s(row.get("H51推薦理由")),
             "H56T1決策理由": _s(row.get("H56決策理由")),
+            "H57前兆理由": _s(row.get("H57前兆理由")),
             "H55雙路徑理由": _s(row.get("H55決策理由")),
             "H54隔日真相理由": _s(row.get("H54決策理由")),
         })
@@ -1230,19 +1252,31 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     status = work.get("H51市場地位", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     h55tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     h55_research = h55tier.str.startswith(("R1", "R2", "R3"))
-    pick = work.loc[(~status.str.startswith("HM-NO")) | h55_research].copy()
+    h57phase = work.get("H57前兆階段", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    h57_research = h57phase.str.startswith(("PI1", "PI2", "PI3", "IG1"))
+    pick = work.loc[(~status.str.startswith("HM-NO")) | h55_research | h57_research].copy()
     if pick.empty:
         return pick
-    for c in ["H56T1確認分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
-    pick["_h56route"] = pick.get("H56最終參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str).map(lambda x: 7 if x.startswith("A1") else 6 if x.startswith(("A0", "A2")) else 5 if x.startswith("P1") else 4 if x.startswith(("P0", "P2")) else 3 if x.startswith(("R1", "R2", "R3")) else 2 if x.startswith("W1") else 1)
-    pick.sort_values(["_h56route", "H56T1確認分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
+    _h56text = pick.get("H56最終參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
+    _h57text = pick.get("H57前兆階段", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
+    pick["_h56route"] = [
+        8.0 if h.startswith("A1") else 7.0 if h.startswith(("A0", "A2")) else 6.0 if h.startswith("P1") else
+        5.0 if h.startswith(("P0", "P2")) else 4.6 if p.startswith("PI3") else 4.3 if p.startswith("IG1") else
+        4.0 if p.startswith("PI2") else 3.6 if h.startswith(("R1", "R2", "R3")) else 3.2 if p.startswith("PI1") else
+        2.0 if h.startswith("W1") else 1.0
+        for h, p in zip(_h56text.tolist(), _h57text.tolist())
+    ]
+    pick.sort_values(["_h56route", "H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分", "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
+        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
+        "H57前兆階段", "H57研究優先層級", "H57精選雷達層級", "H57飆股發動前兆分", "H57全市場前兆百分位%", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H57提前視窗分", "H57族群點火廣度分", "H57主流形成前兆分", "H57前兆證據完整度", "H57交易保護狀態",
+        "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
         "H51基本面資金分", "H51主線新鮮分", "H51急跌收復狀態", "H51路徑RR", "H51RR口徑", "今日漲幅%", "近5日漲幅%", "近20日漲幅%",
-        "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "H56決策理由", "H55決策理由", "H51推薦理由"
+        "當日量比", "當日收盤位置%", "上影線比例%", "成交額百萬", "成交額3日加速度%", "成交量3日加速度%", "波動壓縮比", "前5日波動壓縮比", "當日區間擴張倍數", "3日動能加速度百分點", "H56決策理由", "H57前兆理由", "H55決策理由", "H51推薦理由"
     ] if c in pick.columns]
     return pick.head(max(1, int(max_rows)))[cols].reset_index(drop=True)
 
@@ -1273,6 +1307,11 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         "H55反轉點火路徑分": pd.to_numeric(work.get("H55反轉點火路徑分", 50), errors="coerce").fillna(50.0),
         "H55催化代理分": pd.to_numeric(work.get("H55催化代理分", 50), errors="coerce").fillna(50.0),
         "H55逆風韌性分": pd.to_numeric(work.get("H55逆風韌性分", 50), errors="coerce").fillna(50.0),
+        "H57飆股發動前兆分": pd.to_numeric(work.get("H57飆股發動前兆分", 50), errors="coerce").fillna(50.0),
+        "H57資金加速度分": pd.to_numeric(work.get("H57資金加速度分", 50), errors="coerce").fillna(50.0),
+        "H57族群點火廣度分": pd.to_numeric(work.get("H57族群點火廣度分", 50), errors="coerce").fillna(50.0),
+        "H57主流形成前兆分": pd.to_numeric(work.get("H57主流形成前兆分", 50), errors="coerce").fillna(50.0),
+        "H57前兆證據完整度": pd.to_numeric(work.get("H57前兆證據完整度", 0), errors="coerce").fillna(0.0),
     })
     grp = tmp.groupby("類別", dropna=False).agg(
         H53族群共振分=("H53族群共振分", "mean"),
@@ -1295,6 +1334,11 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         H55族群反轉點火分=("H55反轉點火路徑分", lambda x: x.nlargest(3).mean()),
         H55族群催化代理分=("H55催化代理分", lambda x: x.nlargest(3).mean()),
         H55族群逆風韌性分=("H55逆風韌性分", lambda x: x.nlargest(3).mean()),
+        H57族群前三前兆=("H57飆股發動前兆分", lambda x: x.nlargest(3).mean()),
+        H57族群前三資金加速=("H57資金加速度分", lambda x: x.nlargest(3).mean()),
+        H57族群點火廣度分=("H57族群點火廣度分", "mean"),
+        H57族群主流形成前兆=("H57主流形成前兆分", lambda x: x.nlargest(3).mean()),
+        H57族群前兆證據完整度=("H57前兆證據完整度", "mean"),
     ).reset_index()
     grp["H53族群決策分"] = (
         grp["H53族群共振分"] * 0.40 + grp["H53族群前三隔日優先"] * 0.25
@@ -1311,8 +1355,13 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         + grp["H55族群反轉點火分"] * 0.15 + grp["H55族群催化代理分"] * 0.07
         + grp["H55族群逆風韌性分"] * 0.05
     ).clip(0, 100).round(2)
-    grp.sort_values(["H55族群機會分", "H55族群雙路徑分", "H54族群決策分", "H55族群反轉點火分"], ascending=False, inplace=True, kind="mergesort")
-    grp.insert(0, "H55族群排名", range(1, len(grp) + 1))
+    grp["H57族群前兆機會分"] = (
+        grp["H57族群前三前兆"] * 0.34 + grp["H57族群主流形成前兆"] * 0.26
+        + grp["H57族群點火廣度分"] * 0.18 + grp["H57族群前三資金加速"] * 0.14
+        + grp["H57族群前兆證據完整度"] * 0.08
+    ).clip(0, 100).round(2)
+    grp.sort_values(["H57族群前兆機會分", "H55族群機會分", "H57族群前三前兆", "H55族群雙路徑分"], ascending=False, inplace=True, kind="mergesort")
+    grp.insert(0, "H57族群排名", range(1, len(grp) + 1))
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 

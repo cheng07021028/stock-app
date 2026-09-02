@@ -277,7 +277,7 @@ except Exception as _h42_import_exc:
     apply_dual_opportunity_engine = None
     build_focus_decision_table = None
 
-H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h56_authority_preopen_two_stage_truth_20260902"
+H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h57_pre_ignition_acceleration_engine_20260902"
 H51_HUMAN_MASTER_IMPORT_ERROR = ""
 try:
     from godpick_human_master_engine import (
@@ -340,8 +340,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h56_authority_preopen_two_stage_truth_20260902"
-EXCEL_COLUMN_LAYOUT_VERSION = "V191-H46-EXCEL-COLUMN-NAME-SORTER-20260820"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h57_pre_ignition_acceleration_engine_20260902"
+EXCEL_COLUMN_LAYOUT_VERSION = "V191-H57-PRE-IGNITION-LAYOUT-20260902"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -8782,6 +8782,72 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
                     break
         strong_close_flag = bool(close_location_pct >= 75 and day_gain_pct >= 2.0 and upper_shadow_pct <= 35)
 
+        # H57 Pre-Ignition raw features.  These use only information available in
+        # the historical payload at scan time, so they are reproducible and do
+        # not depend on hindsight.  The goal is to detect acceleration +
+        # compression/expansion + momentum inflection 1-3 sessions before the
+        # obvious breakout.
+        def _pct_accel(series: pd.Series, recent_n: int) -> float:
+            vals = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+            if len(vals) < recent_n * 2:
+                return 0.0
+            recent = _safe_float(vals.iloc[-recent_n:].mean(), 0) or 0
+            prior = _safe_float(vals.iloc[-recent_n * 2:-recent_n].mean(), 0) or 0
+            if prior <= 0:
+                return 0.0
+            return (recent / prior - 1.0) * 100.0
+
+        amount_accel_3 = _pct_accel(positive_amount, 3) if not positive_amount.empty else 0.0
+        amount_accel_5 = _pct_accel(positive_amount, 5) if not positive_amount.empty else 0.0
+        volume_accel_3 = _pct_accel(positive_volume, 3) if not positive_volume.empty else 0.0
+        volume_accel_5 = _pct_accel(positive_volume, 5) if not positive_volume.empty else 0.0
+
+        ret_series = valid_close.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+        rv5 = (_safe_float(ret_series.tail(5).std(), 0) or 0) * 100.0 if len(ret_series) >= 3 else 0.0
+        rv20 = (_safe_float(ret_series.tail(20).std(), 0) or 0) * 100.0 if len(ret_series) >= 5 else 0.0
+        prior_ret_series = ret_series.iloc[:-1] if len(ret_series) >= 2 else ret_series.iloc[0:0]
+        prior_rv5 = (_safe_float(prior_ret_series.tail(5).std(), 0) or 0) * 100.0 if len(prior_ret_series) >= 3 else 0.0
+        prior_rv20 = (_safe_float(prior_ret_series.tail(20).std(), 0) or 0) * 100.0 if len(prior_ret_series) >= 5 else 0.0
+        volatility_compression_ratio = (rv5 / rv20) if rv20 > 0 else 1.0
+        prior_volatility_compression_ratio = (prior_rv5 / prior_rv20) if prior_rv20 > 0 else volatility_compression_ratio
+
+        momentum_accel_3pp = 0.0
+        if len(valid_close) >= 7:
+            p0 = _safe_float(valid_close.iloc[-1], 0) or 0
+            p3 = _safe_float(valid_close.iloc[-4], 0) or 0
+            p6 = _safe_float(valid_close.iloc[-7], 0) or 0
+            if p0 > 0 and p3 > 0 and p6 > 0:
+                recent3 = (p0 / p3 - 1.0) * 100.0
+                prior3 = (p3 / p6 - 1.0) * 100.0
+                momentum_accel_3pp = recent3 - prior3
+
+        close_location_3d_avg = close_location_pct
+        try:
+            _c = pd.to_numeric(hist_df.get("收盤價"), errors="coerce")
+            _h = pd.to_numeric(hist_df.get("最高價"), errors="coerce")
+            _l = pd.to_numeric(hist_df.get("最低價"), errors="coerce")
+            _range = (_h - _l).replace(0, np.nan)
+            _loc = ((_c - _l) / _range * 100.0).replace([np.inf, -np.inf], np.nan).dropna()
+            if not _loc.empty:
+                close_location_3d_avg = _safe_float(_loc.tail(3).mean(), close_location_pct) or close_location_pct
+        except Exception:
+            pass
+
+        range_expansion_ratio = 1.0
+        try:
+            _c = pd.to_numeric(hist_df.get("收盤價"), errors="coerce")
+            _h = pd.to_numeric(hist_df.get("最高價"), errors="coerce")
+            _l = pd.to_numeric(hist_df.get("最低價"), errors="coerce")
+            _prev_c = _c.shift(1).replace(0, np.nan)
+            _range_pct = ((_h - _l) / _prev_c * 100.0).replace([np.inf, -np.inf], np.nan).dropna()
+            if len(_range_pct) >= 2:
+                _today_range = _safe_float(_range_pct.iloc[-1], 0) or 0
+                _prior10 = _safe_float(_range_pct.iloc[:-1].tail(10).mean(), 0) or 0
+                if _prior10 > 0:
+                    range_expansion_ratio = _today_range / _prior10
+        except Exception:
+            pass
+
         res20 = _safe_float(sr_snapshot.get("res_20"))
         sup20 = _safe_float(sr_snapshot.get("sup_20"))
         pressure_dist = None
@@ -8851,6 +8917,17 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "consecutive_up_days": consecutive_up_days,
             "strong_close_flag": strong_close_flag,
             "prior20_high": prior20_high,
+            "amount_accel_3": amount_accel_3,
+            "amount_accel_5": amount_accel_5,
+            "volume_accel_3": volume_accel_3,
+            "volume_accel_5": volume_accel_5,
+            "rv5": rv5,
+            "rv20": rv20,
+            "volatility_compression_ratio": volatility_compression_ratio,
+            "prior_volatility_compression_ratio": prior_volatility_compression_ratio,
+            "range_expansion_ratio": range_expansion_ratio,
+            "momentum_accel_3pp": momentum_accel_3pp,
+            "close_location_3d_avg": close_location_3d_avg,
             "liquidity_status": liquidity_status,
             "liquidity_source": liquidity_source,
             "close_vs_ma20_pct": close_vs_ma20_pct,
@@ -9208,6 +9285,17 @@ def _analyze_one_stock_for_recommend(
             "上影線比例%": _safe_float(bundle.get("upper_shadow_pct"), 0) or 0,
             "連續上漲天數": int(_safe_float(bundle.get("consecutive_up_days"), 0) or 0),
             "強勢收盤旗標": "是" if bool(bundle.get("strong_close_flag")) else "否",
+            "成交額3日加速度%": round(_safe_float(bundle.get("amount_accel_3"), 0) or 0, 2),
+            "成交額5日加速度%": round(_safe_float(bundle.get("amount_accel_5"), 0) or 0, 2),
+            "成交量3日加速度%": round(_safe_float(bundle.get("volume_accel_3"), 0) or 0, 2),
+            "成交量5日加速度%": round(_safe_float(bundle.get("volume_accel_5"), 0) or 0, 2),
+            "5日波動率%": round(_safe_float(bundle.get("rv5"), 0) or 0, 3),
+            "20日波動率%": round(_safe_float(bundle.get("rv20"), 0) or 0, 3),
+            "波動壓縮比": round(_safe_float(bundle.get("volatility_compression_ratio"), 1) or 1, 3),
+            "前5日波動壓縮比": round(_safe_float(bundle.get("prior_volatility_compression_ratio"), 1) or 1, 3),
+            "當日區間擴張倍數": round(_safe_float(bundle.get("range_expansion_ratio"), 1) or 1, 3),
+            "3日動能加速度百分點": round(_safe_float(bundle.get("momentum_accel_3pp"), 0) or 0, 3),
+            "3日平均收盤位置%": round(_safe_float(bundle.get("close_location_3d_avg"), 50) or 50, 2),
             "盤後動能救援分": _safe_float(momentum_rescue.get("score"), 0) or 0,
             "盤前強勢前兆分": _safe_float(prebreak_rescue.get("score"), 0) or 0,
             "前置保留類型": (rescue_profile.get("kind", "") if rescued_stages else ("FULL-MARKET-AI" if soft_filter_stages else "")),
@@ -11511,7 +11599,11 @@ def _get_master_rank_default_cols() -> list[str]:
     """
     return [
         "股神推薦總排名", "股票代號", "股票名稱", "類別", "市場別", "產業",
-        "H51推薦等級", "H51市場地位", "H51交易許可", "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分",
+        "H51推薦等級", "H51市場地位", "H51交易許可",
+        "H57精選雷達層級", "H57前兆階段", "H57研究優先層級", "H57飆股發動前兆分", "H57全市場前兆百分位%",
+        "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H57提前視窗分",
+        "H57族群點火廣度分", "H57主流形成前兆分", "H57前兆證據完整度", "H57交易保護狀態",
+        "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分",
         "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分",
         "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H54證據品質分",
         "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分",
@@ -11603,7 +11695,8 @@ def _column_order_presets_v191_h37(name: str, managed_default_cols: list[str], m
     elif name == "excel_master_rank":
         presets = {
             "管理決策版": [
-                "類別", "市場別", "V188股神作戰優先分", "SuperAI最終作戰等級", "V188交易許可", "V188正式推薦資格",
+                "類別", "市場別", "H57精選雷達層級", "H57前兆階段", "H57飆股發動前兆分", "H57全市場前兆百分位%",
+                "H57資金加速度分", "H57主流形成前兆分", "V188股神作戰優先分", "SuperAI最終作戰等級", "V188交易許可", "V188正式推薦資格",
                 "最終操作結論", "操作許可", "正式推薦分區", "正式推薦動作", "SuperAI Alpha分", "SuperAI Trade分",
                 "SuperAI執行風報比", "SuperAI校準後隔日上漲機率%", "H32隔日預估漲跌幅%", "H32_10日預估報酬%",
                 "Entry進場買點分", "Risk風控安全分", "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "第一壓力價",
@@ -12973,7 +13066,9 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     _h51_keep = _h51_market.str.startswith(("HM-EARLY", "HM-PULLBACK", "HM-LEADER", "HM-SETUP", "HM-EXTENDED", "HM-MATURE"))
     _h55_tier = work.get("H55參考層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     _h55_fresh_keep = _h55_tier.str.startswith(("R1", "R2", "R3"))
-    keep &= (score.ge(50.0) | _fresh_keep | _h47_research_keep | _h51_keep | _h55_fresh_keep)
+    _h57_phase = work.get("H57前兆階段", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    _h57_fresh_keep = _h57_phase.str.startswith(("PI1", "PI2", "PI3", "IG1"))
+    keep &= (score.ge(50.0) | _fresh_keep | _h47_research_keep | _h51_keep | _h55_fresh_keep | _h57_fresh_keep)
     keep &= ~freshness.str.contains("過期|落後|待更新", regex=True, na=False)
     rank = work.loc[keep].copy()
     if rank.empty:
@@ -12998,16 +13093,18 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     _h51_perm = rank.get("H51交易許可", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
     rank["_H51交易優先"] = _h51_perm.map(lambda x: 10 if x.startswith("BUY-READY") else 8 if x.startswith("SETUP-PREP") else 6 if x.startswith("LEADER-WATCH") else 2 if x.startswith(("NO-CHASE", "WAIT-BASE")) else 0)
     _h55_tier_rank = rank.get("H55參考層級", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
-    rank["_H55總覽優先"] = [
-        10 if p.startswith("BUY-READY") else 8 if p.startswith("SETUP-PREP") else
-        7 if t.startswith("R2") else 6 if p.startswith("LEADER-WATCH") else
-        5 if t.startswith(("R1", "R3")) else 2 if p.startswith(("NO-CHASE", "WAIT-BASE")) else 0
-        for p, t in zip(_h51_perm.tolist(), _h55_tier_rank.tolist())
+    _h57_phase_rank = rank.get("H57前兆階段", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
+    rank["_H57總覽優先"] = [
+        12 if p.startswith("BUY-READY") else 10 if p.startswith("SETUP-PREP") else
+        9 if h.startswith("PI3") else 8 if h.startswith("IG1") else 7 if h.startswith("PI2") else
+        6 if t.startswith("R2") else 5 if h.startswith("PI1") else 4 if p.startswith("LEADER-WATCH") else
+        3 if t.startswith(("R1", "R3")) else 1 if p.startswith(("NO-CHASE", "WAIT-BASE")) else 0
+        for p, t, h in zip(_h51_perm.tolist(), _h55_tier_rank.tolist(), _h57_phase_rank.tolist())
     ]
     _h51_market_rank = rank.get("H51市場地位", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
     rank["_H51市場優先"] = _h51_market_rank.map(lambda x: 8 if x.startswith("HM-EARLY") else 7 if x.startswith("HM-PULLBACK") else 6 if x.startswith("HM-LEADER") else 5 if x.startswith("HM-SETUP") else 2 if x.startswith(("HM-EXTENDED", "HM-MATURE")) else 0)
     sort_cols = [
-        "_H55總覽優先", "_H51市場優先", "H55雙路徑隔日分", "H55反轉點火路徑分", "H55主線延續路徑分", "H55逆風韌性分", "H55催化代理分",
+        "_H57總覽優先", "_H51市場優先", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57相對強度轉折分", "H57提前視窗分", "H55雙路徑隔日分", "H55反轉點火路徑分", "H55主線延續路徑分", "H55逆風韌性分", "H55催化代理分",
         "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51可執行分",
         "_H50推薦優先", "_H50新鮮主流優先", "H50族群可買主流分", "H50主流購買優先分", "H50推薦優先分",
         "H47個股相對強度分", "H47起漲優先分", "V188股神作戰優先分", "SuperAI Trade分", "SuperAI Alpha分",
@@ -13048,7 +13145,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     if len(_rows) < _target:
         _add_with_cap(_target, 999)
     rank = pd.DataFrame(_rows).reset_index(drop=True) if _rows else rank.head(_target).copy().reset_index(drop=True)
-    rank.drop(columns=["_H55總覽優先", "_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
+    rank.drop(columns=["_H57總覽優先", "_H55總覽優先", "_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
     rank["股神推薦總排名"] = range(1, len(rank) + 1)
 
     cols = _get_master_rank_default_cols()
@@ -13058,9 +13155,9 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
-        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H55雙路徑＝主線延續＋反轉點火；最後仍由H51/V188執行與RR守門", "是否買進清單": "只顯示BUY-READY與SETUP-PREP；R1/R2/R3只是研究雷達"},
-        {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "同時看延續型主流與新反轉/新題材點火族群，不再只追昨天第一名", "是否買進清單": "否"},
-        {"優先序": 3, "活頁/表格": "主流領漲股", "真正用途": "找主線領漲＋R2新點火＋R3收復觀察；研究召回與交易權威分離", "是否買進清單": "需再看H51交易許可"},
+        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "唯一先看這張：H57前兆只做提早發現；最後仍由Formal/V188/H51/H56與RR守門", "是否買進清單": "只顯示BUY-READY與SETUP-PREP；PI/R1/R2/R3只是研究雷達"},
+        {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "優先看H57族群前兆機會：資金加速＋點火廣度，再對照H55/H54延續與輪動", "是否買進清單": "否"},
+        {"優先序": 3, "活頁/表格": "主流領漲股", "真正用途": "找PI3發動前兆、IG1已點火、主線領漲與R2新題材；研究召回與交易權威分離", "是否買進清單": "需再看H51/H56交易許可"},
         {"優先序": 4, "活頁/表格": "股神推薦總排名", "真正用途": "完整研究證據；不必再看十幾張重複雷達", "是否買進清單": "否"},
         {"優先序": 5, "活頁/表格": "AI績效驗證", "真正用途": "直接檢查Selection Alpha、可執行績效、Brier與H51績效", "是否買進清單": "否"},
         {"優先序": 6, "活頁/表格": "T+1實戰真相", "真正用途": "逐筆稽核AI是否真的有價值", "是否買進清單": "否"},
@@ -13408,8 +13505,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     # H51：第一屏只回答真人交易員真正會先問的三件事：
     # 1) 今天最值得參考/等待/執行的是誰；2) 資金主線在哪；3) 領漲/Pivot股是誰。
-    render_pro_section("超級AI最終決策｜H56 Formal/V188權威＋T+1盤前二階段確認")
-    st.caption("H56權威＋盤前二階段真相：H51/H55只做研究與排序，不得越過Formal/V188建立正式新倉；收盤後的50/50/50中性隔夜值視為『尚未確認』，只有下一交易日前更新且時間晚於K線交易日的隔夜快照才可升為PREOPEN-CONFIRMED。H55雙路徑與H54耗竭/隔夜能力全部保留。")
+    render_pro_section("超級AI最終決策｜H57前兆發現＋H56 Formal/V188權威＋T+1盤前確認")
+    st.caption("H57把『成交額/量能加速度＋波動壓縮→擴張＋相對強度轉折＋族群點火廣度＋距Pivot提前視窗』整合成Pre-Ignition研究層；它只負責提早1-3日發現，不建立買進權限。Formal/V188/H51/H56仍是交易天花板，且隔夜未發生不得視為已確認。")
     _h51_engine_ok = bool(callable(apply_human_master_engine) and callable(build_h51_final_decision_table) and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION)
     if not _h51_engine_ok:
         st.error(f"H51版本一致性失敗：目前={H51_HUMAN_MASTER_VERSION}；預期={H51_HUMAN_MASTER_EXPECTED_VERSION}。請重新覆蓋H51引擎與Page07。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))
@@ -13421,16 +13518,17 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         _h51_focus = pd.DataFrame({"狀態": [f"H51最終決策暫時無法建立：{_h51_ui_exc}"]})
     if isinstance(_h51_focus, pd.DataFrame) and not _h51_focus.empty:
         _h51_perm_ui = _h51_focus.get("H51交易許可", pd.Series([""] * len(_h51_focus))).fillna("").astype(str)
-        _h55_tier_all_ui = _h51_source_ui.get("H55參考層級", pd.Series([""] * len(_h51_source_ui))).fillna("").astype(str) if isinstance(_h51_source_ui, pd.DataFrame) else pd.Series(dtype=str)
+        _h57_phase_all_ui = _h51_source_ui.get("H57前兆階段", pd.Series([""] * len(_h51_source_ui))).fillna("").astype(str) if isinstance(_h51_source_ui, pd.DataFrame) else pd.Series(dtype=str)
+        _h57_elite_all_ui = _h51_source_ui.get("H57精選雷達層級", pd.Series([""] * len(_h51_source_ui))).fillna("").astype(str) if isinstance(_h51_source_ui, pd.DataFrame) else pd.Series(dtype=str)
         render_pro_kpi_row([
-            {"label": "BUY-READY", "value": str(int(_h51_perm_ui.str.startswith("BUY-READY").sum())), "delta": "H51/V188＋路徑RR完成"},
+            {"label": "BUY-READY", "value": str(int(_h51_perm_ui.str.startswith("BUY-READY").sum())), "delta": "Formal/V188＋路徑RR完成"},
             {"label": "SETUP-PREP", "value": str(int(_h51_perm_ui.str.startswith("SETUP-PREP").sum())), "delta": "值得盯，等合理買點"},
-            {"label": "R2新點火", "value": str(int(_h55_tier_all_ui.str.startswith("R2").sum())), "delta": "高召回研究，不是買進許可"},
-            {"label": "核心順序", "value": "延續＋反轉雙路徑", "delta": "最後仍由執行/RR守門"},
+            {"label": "E1頂級前兆", "value": str(int(_h57_elite_all_ui.str.startswith("E1").sum())), "delta": "全市場前1.5%級研究，不是買進許可"},
+            {"label": "核心順序", "value": "前兆→權威→盤前", "delta": "提早發現，嚴格執行"},
         ])
         st.dataframe(_format_df(_h51_focus), use_container_width=True, hide_index=True)
 
-    render_pro_section("主流族群｜H55延續主線×新反轉點火×輪動機會")
+    render_pro_section("主流族群｜H57資金加速×族群點火廣度×H55/H54雙路徑")
     try:
         _h51_sector_ui = build_h51_sector_table(_h51_source_ui, max_rows=12) if callable(build_h51_sector_table) else pd.DataFrame()
     except Exception as _h51_sector_ui_exc:
@@ -13438,7 +13536,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(_h51_sector_ui, pd.DataFrame) and not _h51_sector_ui.empty:
         st.dataframe(_format_df(_h51_sector_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("主流領漲股｜H55雙路徑×逆風韌性×催化代理")
+    render_pro_section("主流領漲股｜H57 Pre-Ignition×資金加速×壓縮轉擴張")
     try:
         _h51_leader_ui = build_h51_mainstream_leader_table(_h51_source_ui, max_rows=15) if callable(build_h51_mainstream_leader_table) else pd.DataFrame()
     except Exception as _h51_leader_ui_exc:
@@ -13446,8 +13544,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(_h51_leader_ui, pd.DataFrame) and not _h51_leader_ui.empty:
         st.dataframe(_format_df(_h51_leader_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("股神推薦總排名｜H55雙路徑隔日真相完整研究")
-    st.caption("H55總排名保留H51交易許可不變：一條路看H54主流是否延續，另一條路看既有反轉／前兆／爆發／題材／回補訊號是否形成新點火。R2/R3是高召回研究層，不是買進許可；可執行仍看H51/V188、觸發守價與路徑RR。")
+    render_pro_section("股神推薦總排名｜H57飆股發動前兆＋H56交易真相完整研究")
+    st.caption("H57總排名把『還沒噴、但正在異常變強』的PI3/PI2候選提前浮出：資金加速度、壓縮轉擴張、RS轉折、族群點火與距Pivot位置共同評分。H57不改Formal/V188/H51交易許可；可執行仍須H56盤前確認、觸發守價與路徑RR。")
     if callable(rotation_diagnostics):
         try:
             rotation_info = rotation_diagnostics(decision_source)
