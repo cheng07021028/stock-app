@@ -36,7 +36,7 @@ def strong_row(code="3711"):
 
 
 def main():
-    assert VERSION == "v191_h57_pre_ignition_acceleration_engine_20260902"
+    assert VERSION == "v191_h58_single_decision_truth_console_20260902"
 
     # 1) Explicit V188/Formal rejection is a hard authority ceiling.
     capped = strong_row("1001")
@@ -98,10 +98,10 @@ def main():
     assert "股票代號" not in final.columns, final.to_dict("records")
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h57_pre_ignition_acceleration_engine_20260902"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h57_pre_ignition_acceleration_engine_20260902"' in page
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h58_single_decision_truth_console_20260902"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h58_single_decision_truth_console_20260902"' in page
     assert 'x["隔夜更新時間"] = overnight_info.get("updated_at")' in page
-    assert "H57前兆發現＋H56 Formal/V188權威＋T+1盤前確認" in page
+    assert "超級AI唯一決策｜H58 單一真相控制台" in page
 
     print("PASS v191_h56_authority_preopen_truth_smoke")
 

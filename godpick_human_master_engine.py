@@ -20,7 +20,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h57_pre_ignition_acceleration_engine_20260902"
+VERSION = "v191_h58_single_decision_truth_console_20260902"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -1244,6 +1244,127 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
         })
     return pd.DataFrame(rows)
 
+
+
+def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
+    """H58 single source of truth for human reading and Excel export.
+
+    This table intentionally merges only the decisions a human needs to act on:
+    A1 executable, A0 pre-open pending, P1/P0 setup/wait, and E1 elite pre-ignition.
+    Research tables remain available elsewhere, but they may never override this table.
+    """
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame({
+            "唯一決策": ["NONE｜目前沒有可建立決策的候選"],
+            "現在該做什麼": ["先更新資料並重新掃描；不要從舊版雷達硬選股票。"],
+        })
+
+    work = frame if ("H51版本" in frame.columns and frame["H51版本"].astype(str).eq(VERSION).all()) else apply_human_master_engine(frame)
+    work = work.copy()
+    code = work.get("股票代號", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.strip()
+    work = work.loc[code.ne("")].copy()
+    if work.empty:
+        return pd.DataFrame({
+            "唯一決策": ["NONE｜目前沒有有效股票代號"],
+            "現在該做什麼": ["先修復資料來源，不要降低推薦門檻。"],
+        })
+
+    def _truth(row: pd.Series) -> dict:
+        perm = _s(row.get("H51交易許可"))
+        h56 = _s(row.get("H56最終參考層級"))
+        auth = _s(row.get("H56上游權威層級"))
+        elite = _s(row.get("H57精選雷達層級"))
+        phase = _s(row.get("H57前兆階段"))
+        protect = _s(row.get("H57交易保護狀態"))
+        rr = _first_num(row, ["H51路徑RR", "路徑風險報酬比", "SuperAI執行風報比"], 0.0)
+
+        blocked = (
+            h56.startswith("X2")
+            or phase.startswith(("BX", "EX1"))
+            or "BLOCK" in protect.upper()
+            or "NO-CHASE" in perm
+            or "WAIT-RECLAIM" in perm
+            or auth == "RESTRICTED"
+        )
+        if blocked:
+            return {"rank": 0, "tier": "X｜禁止/降溫", "buy": "否", "action": "不建立新倉；等待資料、收復或降溫後重新評估。"}
+
+        if perm.startswith("BUY-READY") and h56.startswith("A1") and auth == "FORMAL":
+            return {"rank": 60, "tier": "A1｜可執行", "buy": "是｜僅依觸發", "action": "盤前權威與隔夜已確認；只依觸發價/守價小量分批，未觸發不買。"}
+        if perm.startswith("BUY-READY"):
+            if h56.startswith("A0"):
+                return {"rank": 50, "tier": "A0｜盤前待確認", "buy": "否｜尚未確認", "action": "收盤候選成立，但隔夜尚未完成；下一交易日盤前重驗後才能升A1。"}
+            return {"rank": 48, "tier": "A0｜交易候選待確認", "buy": "否｜尚未確認", "action": "交易條件接近完成，但H56尚未形成A1；等待盤前/權威/觸發確認。"}
+
+        if perm.startswith("SETUP-PREP"):
+            if h56.startswith("P1"):
+                return {"rank": 42, "tier": "P1｜第一優先等待", "buy": "否", "action": "高品質Setup；等Pivot、量價、RR與實戰觸發，不提前卡位。"}
+            if h56.startswith("P0") and "AUTHORITY-CAPPED" in h56:
+                return {"rank": 38, "tier": "P0｜權威限制等待", "buy": "否", "action": "模型看好但Formal/V188未授權；只觀察，不得把研究分數當買進許可。"}
+            return {"rank": 36, "tier": "P2｜高品質等待", "buy": "否", "action": "值得盯，但目前不是買點；等待Pivot/量價/路徑RR補齊。"}
+
+        if elite.startswith("E1"):
+            return {"rank": 30, "tier": "E1｜頂級發動前兆", "buy": "否｜研究", "action": "全市場頂級Pre-Ignition；下一交易日優先重驗，Formal/V188/H56未通過前不可買。"}
+        if phase.startswith("PI3"):
+            return {"rank": 20, "tier": "PI3｜高品質前兆", "buy": "否｜研究", "action": "1–3日發動前兆研究；等待成為E1/Setup或正式交易候選。"}
+        return {"rank": 0, "tier": "", "buy": "否", "action": ""}
+
+    truth = [_truth(row) for _, row in work.iterrows()]
+    work["_H58rank"] = [x["rank"] for x in truth]
+    work["H58唯一決策"] = [x["tier"] for x in truth]
+    work["H58是否可買"] = [x["buy"] for x in truth]
+    work["H58現在該做什麼"] = [x["action"] for x in truth]
+    work = work.loc[work["_H58rank"].gt(0)].copy()
+
+    if work.empty:
+        return pd.DataFrame({
+            "唯一決策": ["NONE｜今天沒有A1/A0/P1/P2/E1高價值候選"],
+            "現在該做什麼": ["空手也是正式決策；研究層可看主流族群/領漲股，但不要從舊雷達補位。"],
+        })
+
+    for c in ["H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H51專業參考分", "H51路徑RR"]:
+        work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
+    work.sort_values(
+        ["_H58rank", "H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H51專業參考分"],
+        ascending=False, inplace=True, kind="mergesort",
+    )
+
+    # Keep the single truth console concise while avoiding one-sector domination.
+    selected = []
+    sector_count: dict[str, int] = {}
+    for _, row in work.iterrows():
+        sector = _first_text(row, ["類別", "族群名稱"], "未分類")
+        if sector_count.get(sector, 0) >= 3:
+            continue
+        selected.append(row)
+        sector_count[sector] = sector_count.get(sector, 0) + 1
+        if len(selected) >= max(1, int(max_rows)):
+            break
+
+    rows = []
+    for i, row in enumerate(selected, 1):
+        rows.append({
+            "唯一順位": i,
+            "股票代號": _s(row.get("股票代號")),
+            "股票名稱": _s(row.get("股票名稱")),
+            "類別": _first_text(row, ["類別", "族群名稱"]),
+            "H58唯一決策": _s(row.get("H58唯一決策")),
+            "H58是否可買": _s(row.get("H58是否可買")),
+            "現在該做什麼": _s(row.get("H58現在該做什麼")),
+            "H56盤前狀態": _s(row.get("H56最終參考層級")),
+            "H56上游權威": _s(row.get("H56上游權威層級")),
+            "H57頂級前兆": _s(row.get("H57精選雷達層級")) or _s(row.get("H57前兆階段")),
+            "H57前兆分": _first_num(row, ["H57飆股發動前兆分"]),
+            "H57全市場百分位%": _first_num(row, ["H57全市場前兆百分位%"]),
+            "H56T1確認分": _first_num(row, ["H56T1確認分"]),
+            "路徑RR": _first_num(row, ["H51路徑RR", "路徑風險報酬比", "SuperAI執行風報比"]),
+            "最新價": _first_num(row, ["最新價"], 0.0, positive=True),
+            "實戰觸發價": _first_num(row, ["實戰觸發價"], 0.0, positive=True),
+            "觸發後守價": _first_num(row, ["觸發後守價"], 0.0, positive=True),
+            "停損參考": _first_num(row, ["實戰停損參考", "停損參考", "停損價_隔日", "停損價"], 0.0, positive=True),
+            "決策理由": _s(row.get("H56決策理由")) or _s(row.get("H51推薦理由")) or _s(row.get("H57前兆理由")),
+        })
+    return pd.DataFrame(rows)
 
 def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -> pd.DataFrame:
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
