@@ -20,7 +20,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h58_single_decision_truth_console_20260902"
+VERSION = "v191_h59_formal_recall_learning_truth_20260903"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -776,9 +776,27 @@ def _apply_h56_truth(work: pd.DataFrame) -> pd.DataFrame:
         evidence_score = 100.0 if verified else 45.0 if evidence_state.startswith("PENDING") else 30.0
         t1 = _clip(h55 * 0.38 + h54 * 0.24 + executable * 0.16 + authority_score * 0.12 + evidence_score * 0.10 - overnight_penalty * 0.12)
 
-        # Hard ceilings: research engines cannot create trade authority, and a
-        # post-close scan cannot certify an overnight session that has not happened.
-        if authority in {"A-MINUS", "RADAR", "RESTRICTED"}:
+        # H59 authority-first truth:
+        # Formal/V188 is the upstream trade authority. H51/H55/H57 are research
+        # layers and may neither manufacture *nor suppress* a Formal candidate.
+        # H56 only adds the next-session overnight gate: pending -> A0, fresh
+        # non-adverse -> A1, fresh adverse -> X2 hold.
+        if authority == "FORMAL":
+            if adverse and verified:
+                t1 = min(t1, 45.0)
+                tier = "X2｜OVERNIGHT-RISK-HOLD｜正式候選盤前隔夜轉弱，暫停新倉"
+                recheck = "需要｜Formal資格保留，但盤前風險偏空；等待市場/守價重新確認"
+            elif not verified:
+                t1 = min(max(t1, 64.0), 68.0)
+                tier = "A0｜PREOPEN-PENDING｜Formal候選成立，但隔夜尚未確認"
+                recheck = "需要｜下一交易日盤前更新美股/費半/台指夜盤後才能升A1"
+            else:
+                # Fresh, non-adverse overnight evidence confirms the upstream
+                # Formal candidate. Research scores remain explanatory only.
+                t1 = max(t1, 72.0)
+                tier = "A1｜PREOPEN-CONFIRMED｜Formal/執行/隔夜三層確認"
+                recheck = "已完成｜仍需依實戰觸發價與守價，不開盤追價"
+        elif authority in {"A-MINUS", "RADAR", "RESTRICTED"}:
             t1 = min(t1, 62.0)
             tier = "P0｜AUTHORITY-CAPPED｜上游未正式授權，僅可等待/雷達"
             recheck = "需要｜Formal/V188先通過；若要隔日執行，盤前仍需重掃隔夜資料"
@@ -795,11 +813,11 @@ def _apply_h56_truth(work: pd.DataFrame) -> pd.DataFrame:
             tier = "P0｜PREOPEN-PENDING｜高品質等待，但隔夜尚未確認"
             recheck = "需要｜盤前重掃後才決定P1/P2或降級"
         elif h51perm.startswith("BUY-READY") and verified and t1 >= 72:
-            tier = "A1｜PREOPEN-CONFIRMED｜Formal/執行/隔夜三層確認"
+            tier = "A1｜PREOPEN-CONFIRMED｜交易候選/隔夜確認"
             recheck = "已完成｜仍需依實戰觸發價與守價，不開盤追價"
         elif h51perm.startswith("BUY-READY"):
-            tier = "A2｜BUY-READY｜權威成立但T+1確認不足"
-            recheck = "需要｜開盤前/後再確認市場與觸發"
+            tier = "A2｜BUY-READY｜研究交易條件成立但非Formal權威"
+            recheck = "需要｜Formal/V188與開盤前/後市場/觸發再確認"
         elif h51perm.startswith("SETUP-PREP") and verified and t1 >= 70:
             tier = "P1｜PREOPEN-PRIME-PREP｜盤前確認後的優先等待"
             recheck = "已完成隔夜層｜仍須等Pivot/觸發守價"
@@ -1246,8 +1264,8 @@ def build_h51_final_decision_table(frame: pd.DataFrame, max_rows: int = 6) -> pd
 
 
 
-def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
-    """H58 single source of truth for human reading and Excel export.
+def build_h59_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
+    """H59 single source of truth for human reading and Excel export.
 
     This table intentionally merges only the decisions a human needs to act on:
     A1 executable, A0 pre-open pending, P1/P0 setup/wait, and E1 elite pre-ignition.
@@ -1255,7 +1273,7 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
     """
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
         return pd.DataFrame({
-            "唯一決策": ["NONE｜目前沒有可建立決策的候選"],
+            "H59唯一決策": ["NONE｜目前沒有可建立決策的候選"],
             "現在該做什麼": ["先更新資料並重新掃描；不要從舊版雷達硬選股票。"],
         })
 
@@ -1265,7 +1283,7 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
     work = work.loc[code.ne("")].copy()
     if work.empty:
         return pd.DataFrame({
-            "唯一決策": ["NONE｜目前沒有有效股票代號"],
+            "H59唯一決策": ["NONE｜目前沒有有效股票代號"],
             "現在該做什麼": ["先修復資料來源，不要降低推薦門檻。"],
         })
 
@@ -1278,6 +1296,16 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
         protect = _s(row.get("H57交易保護狀態"))
         rr = _first_num(row, ["H51路徑RR", "路徑風險報酬比", "SuperAI執行風報比"], 0.0)
 
+        # Formal rows are the authority source and must never disappear because
+        # a downstream research layer says NO-PRIORITY/EX1/NO-CHASE. H56 may
+        # still suspend them on *fresh adverse overnight evidence*.
+        if auth == "FORMAL":
+            if h56.startswith("X2"):
+                return {"rank": 95, "tier": "X1｜正式候選暫停", "buy": "否｜隔夜風險", "action": "Formal資格仍在，但盤前隔夜已轉弱；暫停新倉，等待市場與守價重新確認。"}
+            if h56.startswith("A1"):
+                return {"rank": 100, "tier": "A1｜可執行", "buy": "是｜僅依觸發", "action": "Formal/V188與盤前隔夜已確認；只依觸發價/守價小量分批，未觸發不買。"}
+            return {"rank": 90, "tier": "A0｜Formal盤前待確認", "buy": "否｜尚未確認", "action": "上游Formal已成立；隔夜/盤前尚未完成前不可執行，H51/H57研究分數不得讓它消失。"}
+
         blocked = (
             h56.startswith("X2")
             or phase.startswith(("BX", "EX1"))
@@ -1289,12 +1317,10 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
         if blocked:
             return {"rank": 0, "tier": "X｜禁止/降溫", "buy": "否", "action": "不建立新倉；等待資料、收復或降溫後重新評估。"}
 
-        if perm.startswith("BUY-READY") and h56.startswith("A1") and auth == "FORMAL":
-            return {"rank": 60, "tier": "A1｜可執行", "buy": "是｜僅依觸發", "action": "盤前權威與隔夜已確認；只依觸發價/守價小量分批，未觸發不買。"}
         if perm.startswith("BUY-READY"):
             if h56.startswith("A0"):
                 return {"rank": 50, "tier": "A0｜盤前待確認", "buy": "否｜尚未確認", "action": "收盤候選成立，但隔夜尚未完成；下一交易日盤前重驗後才能升A1。"}
-            return {"rank": 48, "tier": "A0｜交易候選待確認", "buy": "否｜尚未確認", "action": "交易條件接近完成，但H56尚未形成A1；等待盤前/權威/觸發確認。"}
+            return {"rank": 48, "tier": "A0｜交易候選待確認", "buy": "否｜尚未確認", "action": "研究交易條件接近完成，但Formal/V188尚未形成A1；等待盤前/權威/觸發確認。"}
 
         if perm.startswith("SETUP-PREP"):
             if h56.startswith("P1"):
@@ -1310,35 +1336,42 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
         return {"rank": 0, "tier": "", "buy": "否", "action": ""}
 
     truth = [_truth(row) for _, row in work.iterrows()]
-    work["_H58rank"] = [x["rank"] for x in truth]
-    work["H58唯一決策"] = [x["tier"] for x in truth]
-    work["H58是否可買"] = [x["buy"] for x in truth]
-    work["H58現在該做什麼"] = [x["action"] for x in truth]
-    work = work.loc[work["_H58rank"].gt(0)].copy()
+    work["_H59rank"] = [x["rank"] for x in truth]
+    work["H59唯一決策"] = [x["tier"] for x in truth]
+    work["H59是否可買"] = [x["buy"] for x in truth]
+    work["H59現在該做什麼"] = [x["action"] for x in truth]
+    work = work.loc[work["_H59rank"].gt(0)].copy()
 
     if work.empty:
         return pd.DataFrame({
-            "唯一決策": ["NONE｜今天沒有A1/A0/P1/P2/E1高價值候選"],
+            "H59唯一決策": ["NONE｜今天沒有A1/A0/P1/P2/E1高價值候選"],
             "現在該做什麼": ["空手也是正式決策；研究層可看主流族群/領漲股，但不要從舊雷達補位。"],
         })
 
     for c in ["H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H51專業參考分", "H51路徑RR"]:
         work[c] = pd.to_numeric(work.get(c, 0), errors="coerce").fillna(0.0)
     work.sort_values(
-        ["_H58rank", "H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H51專業參考分"],
+        ["_H59rank", "H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H51專業參考分"],
         ascending=False, inplace=True, kind="mergesort",
     )
 
-    # Keep the single truth console concise while avoiding one-sector domination.
+    # H59 Formal recall guard: every upstream Formal row must be present in the
+    # unique truth console. Sector diversification is research-only and may not
+    # hide official recommendations. If Formal count exceeds max_rows, expand.
     selected = []
+    formal_work = work.loc[work.get("H56上游權威層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).eq("FORMAL")]
+    research_work = work.loc[~work.index.isin(formal_work.index)]
+    for _, row in formal_work.iterrows():
+        selected.append(row)
+    target_rows = max(max(1, int(max_rows)), len(selected))
     sector_count: dict[str, int] = {}
-    for _, row in work.iterrows():
+    for _, row in research_work.iterrows():
         sector = _first_text(row, ["類別", "族群名稱"], "未分類")
         if sector_count.get(sector, 0) >= 3:
             continue
         selected.append(row)
         sector_count[sector] = sector_count.get(sector, 0) + 1
-        if len(selected) >= max(1, int(max_rows)):
+        if len(selected) >= target_rows:
             break
 
     rows = []
@@ -1348,9 +1381,9 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
             "股票代號": _s(row.get("股票代號")),
             "股票名稱": _s(row.get("股票名稱")),
             "類別": _first_text(row, ["類別", "族群名稱"]),
-            "H58唯一決策": _s(row.get("H58唯一決策")),
-            "H58是否可買": _s(row.get("H58是否可買")),
-            "現在該做什麼": _s(row.get("H58現在該做什麼")),
+            "H59唯一決策": _s(row.get("H59唯一決策")),
+            "H59是否可買": _s(row.get("H59是否可買")),
+            "現在該做什麼": _s(row.get("H59現在該做什麼")),
             "H56盤前狀態": _s(row.get("H56最終參考層級")),
             "H56上游權威": _s(row.get("H56上游權威層級")),
             "H57頂級前兆": _s(row.get("H57精選雷達層級")) or _s(row.get("H57前兆階段")),
@@ -1365,6 +1398,11 @@ def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
             "決策理由": _s(row.get("H56決策理由")) or _s(row.get("H51推薦理由")) or _s(row.get("H57前兆理由")),
         })
     return pd.DataFrame(rows)
+
+
+def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
+    """Backward-compatible alias; H59 is the current single-truth builder."""
+    return build_h59_single_decision_truth_table(frame, max_rows=max_rows)
 
 def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -> pd.DataFrame:
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -1486,4 +1524,4 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]

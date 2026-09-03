@@ -34,7 +34,7 @@ def row(code: str, name: str, sector: str = "被動元件") -> dict:
 
 
 def main():
-    assert VERSION == "v191_h58_single_decision_truth_console_20260902"
+    assert VERSION == "v191_h59_formal_recall_learning_truth_20260903"
 
     good = row("1001", "健康延續")
     # Monday target after Friday is a real information window, so it should not be blindly P1.
@@ -75,9 +75,9 @@ def main():
         assert final.iloc[0]["H54隔日真相分"] >= final.iloc[1]["H54隔日真相分"]
 
     page_text = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h58_single_decision_truth_console_20260902"' in page_text
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h58_single_decision_truth_console_20260902"' in page_text
-    assert "超級AI唯一決策｜H58 單一真相控制台" in page_text
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h59_formal_recall_learning_truth_20260903"' in page_text
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h59_formal_recall_learning_truth_20260903"' in page_text
+    assert "超級AI唯一決策｜H59 Formal權威召回＋單一真相" in page_text
 
     print("PASS v191_h54_exhaustion_overnight_truth_smoke")
 

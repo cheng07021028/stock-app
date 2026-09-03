@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h51_human_master_20260826"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h59_preignition_single_truth_20260903"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -456,6 +456,67 @@ def _risk_result(updated: dict[str, Any]) -> str:
     return "C｜回撤偏大，需檢討停損/買點"
 
 
+def _h59_tier_from_original(original: dict[str, Any]) -> str:
+    """Best-effort immutable decision cohort for T+1 learning.
+
+    New H59 records should persist H59唯一決策 directly. Older H57/H58 records
+    are mapped from the immutable H56/H57 snapshot without changing trade truth.
+    """
+    direct = _s(original.get("H59唯一決策") or original.get("H58唯一決策"))
+    if direct:
+        return direct
+    auth = _s(original.get("H56上游權威層級") or original.get("H56上游權威"))
+    h56 = _s(original.get("H56最終參考層級") or original.get("H56盤前狀態"))
+    elite = _s(original.get("H57精選雷達層級") or original.get("H57頂級前兆"))
+    phase = _s(original.get("H57前兆階段"))
+    if auth == "FORMAL":
+        if h56.startswith("X2"):
+            return "X1｜正式候選暫停"
+        if h56.startswith("A1"):
+            return "A1｜可執行"
+        return "A0｜Formal盤前待確認"
+    if elite.startswith("E1"):
+        return "E1｜頂級發動前兆"
+    if phase.startswith("PI3"):
+        return "PI3｜高品質前兆"
+    if h56.startswith("P0") and "AUTHORITY-CAPPED" in h56:
+        return "P0｜權威限制等待"
+    if h56.startswith("P1"):
+        return "P1｜第一優先等待"
+    if h56.startswith(("P0", "P2")):
+        return "P2｜高品質等待"
+    return ""
+
+
+def _selection_cohort_metrics(rows: list[dict[str, Any]], predicate: Callable[[dict[str, Any]], bool], prefix: str) -> dict[str, Any]:
+    cohort = [r for r in rows if predicate(r)]
+    rets = [_f(r.get("隔日候選漲跌%")) for r in cohort]
+    rets = [x for x in rets if x is not None]
+    alpha = [_f(r.get("Selection Alpha%")) for r in cohort]
+    alpha = [x for x in alpha if x is not None]
+    return {
+        f"{prefix}成熟樣本": len(cohort),
+        f"{prefix}正報酬率%": round(sum(1 for x in rets if x > 0) / len(rets) * 100.0, 2) if rets else None,
+        f"{prefix}平均1日報酬%": round(sum(rets) / len(rets), 4) if rets else None,
+        f"{prefix}平均SelectionAlpha%": round(sum(alpha) / len(alpha), 4) if alpha else None,
+    }
+
+
+def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
+    """Selection-quality telemetry for Pre-Ignition and H59 cohorts.
+
+    These are *selection* metrics only. Entry/Risk performance continues to use
+    是否納入可執行績效 and is never inferred from E1/PI3 research signals.
+    """
+    items = [r for r in _rows(rows) if isinstance(r, dict) and bool(r.get("T1成熟"))]
+    out: dict[str, Any] = {}
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H57精選雷達層級")).startswith("E1"), "H57_E1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H57前兆階段")).startswith("PI3"), "H57_PI3"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H59唯一決策")).startswith("A1"), "H59_A1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H59唯一決策")).startswith("A0"), "H59_A0"))
+    return out
+
+
 def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote: dict[str, Any], benchmark_ret: float | None) -> dict[str, Any]:
     rec = _recommendation_date(original)
     hist = quote.get("history") or []
@@ -557,6 +618,20 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H51Pivot起漲分": _f(original.get("H51Pivot起漲分")),
         "H51路徑RR": _f(original.get("H51路徑RR")),
         "H51版本": _s(original.get("H51版本")),
+        "H56上游權威層級": _s(original.get("H56上游權威層級") or original.get("H56上游權威")),
+        "H56隔夜證據狀態": _s(original.get("H56隔夜證據狀態")),
+        "H56最終參考層級": _s(original.get("H56最終參考層級") or original.get("H56盤前狀態")),
+        "H56T1確認分": _f(original.get("H56T1確認分")),
+        "H57精選雷達層級": _s(original.get("H57精選雷達層級") or original.get("H57頂級前兆")),
+        "H57前兆階段": _s(original.get("H57前兆階段")),
+        "H57飆股發動前兆分": _f(original.get("H57飆股發動前兆分") or original.get("H57前兆分")),
+        "H57全市場前兆百分位%": _f(original.get("H57全市場前兆百分位%") or original.get("H57全市場百分位%")),
+        "H57資金加速度分": _f(original.get("H57資金加速度分")),
+        "H57主流形成前兆分": _f(original.get("H57主流形成前兆分")),
+        "H58唯一決策": _s(original.get("H58唯一決策")),
+        "H59唯一決策": _h59_tier_from_original(original),
+        "H59是否可買": _s(original.get("H59是否可買") or original.get("H58是否可買")),
+        "H59版本": _s(original.get("H59版本")) or "v191_h59_formal_recall_learning_truth_20260903",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -774,6 +849,7 @@ def refresh_t1_trade_truth(
     h51_rets = [x for x in h51_rets if x is not None]
     h51_alpha = [_f(r.get("Selection Alpha%")) for r in h51_focus]
     h51_alpha = [x for x in h51_alpha if x is not None]
+    h57_h59_learning = build_h57_h59_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -800,6 +876,7 @@ def refresh_t1_trade_truth(
             "H51專業主線正報酬率%": round(sum(1 for x in h51_rets if x > 0) / len(h51_rets) * 100.0, 2) if h51_rets else None,
             "H51專業主線平均1日報酬%": round(sum(h51_rets) / len(h51_rets), 4) if h51_rets else None,
             "H51專業主線平均SelectionAlpha%": round(sum(h51_alpha) / len(h51_alpha), 4) if h51_alpha else None,
+            **h57_h59_learning,
             "brier_score": calibration.get("brier_score"),
         },
         "failures": failures[:80],
@@ -862,7 +939,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h59_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]

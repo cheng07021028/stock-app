@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
 from godpick_human_master_engine import (
     VERSION,
     apply_human_master_engine,
-    build_h58_single_decision_truth_table,
+    build_h59_single_decision_truth_table,
 )
 
 
@@ -45,7 +45,7 @@ def base_row(code: str, name: str) -> dict:
 
 
 def main():
-    assert VERSION == "v191_h58_single_decision_truth_console_20260902"
+    assert VERSION == "v191_h59_formal_recall_learning_truth_20260903"
 
     # A1: Formal + fresh verified overnight evidence.
     a1 = base_row("1001", "A1測試")
@@ -93,28 +93,28 @@ def main():
     e1["H51版本"] = VERSION
 
     combined = pd.concat([governed, e1], ignore_index=True)
-    out = build_h58_single_decision_truth_table(combined, max_rows=10)
+    out = build_h59_single_decision_truth_table(combined, max_rows=10)
     assert not out.empty, out
-    tiers = out["H58唯一決策"].astype(str).tolist()
+    tiers = out["H59唯一決策"].astype(str).tolist()
     assert tiers[0].startswith("A1｜可執行"), tiers
     assert any(x.startswith("A0") for x in tiers), tiers
     assert any(x.startswith("P0") for x in tiers), tiers
     assert any(x.startswith("E1") for x in tiers), tiers
 
     e1_row = out.loc[out["股票代號"].astype(str).eq("1004")].iloc[0]
-    assert e1_row["H58是否可買"] == "否｜研究"
+    assert e1_row["H59是否可買"] == "否｜研究"
     assert "Formal/V188/H56" in e1_row["現在該做什麼"]
     a1_row = out.loc[out["股票代號"].astype(str).eq("1001")].iloc[0]
-    assert a1_row["H58是否可買"].startswith("是｜")
+    assert a1_row["H59是否可買"].startswith("是｜")
     assert float(a1_row["實戰觸發價"]) > 0
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h58_single_decision_truth_console_20260902"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h58_single_decision_truth_console_20260902"' in page
-    assert "超級AI唯一決策｜H58 單一真相控制台" in page
-    assert "build_h58_single_decision_truth_table(h51_source, max_rows=10)" in page
-    assert "_h58_focus = build_h58_single_decision_truth_table(_h51_source_ui, max_rows=10)" in page
-    assert "本輪舊版作戰名單（非H58決策來源）" in page
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h59_formal_recall_learning_truth_20260903"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h59_formal_recall_learning_truth_20260903"' in page
+    assert "超級AI唯一決策｜H59 Formal權威召回＋單一真相" in page
+    assert "build_h59_single_decision_truth_table(h51_source, max_rows=10)" in page
+    assert "_h58_focus = build_h59_single_decision_truth_table(_h51_source_ui, max_rows=10)" in page
+    assert "本輪舊版作戰名單（非H59決策來源）" in page
     assert "舊版飆股補抓｜僅研究" in page
     assert "權威底層稽核｜Formal／A-／核心雷達（非主要決策）" in page
 
