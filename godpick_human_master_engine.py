@@ -20,7 +20,7 @@ import math
 import re
 import pandas as pd
 
-VERSION = "v191_h59_formal_recall_learning_truth_20260903"
+VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"
 
 H51_COLUMNS = [
     "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分",
@@ -309,6 +309,23 @@ def _authority_state(row: pd.Series) -> tuple[str, str]:
     path = _first_text(row, ["推薦升級判定路徑"])
     text = "｜".join([zone, qual, permit, conclusion, action, path]).upper()
 
+    # H60 authority parser fix: explicit A-/準主推薦 evidence must be resolved
+    # *before* generic strings that happen to contain the word FORMAL.  In H59
+    # a qualifier like "Formal/A-權威＋V188均通過" could incorrectly override
+    # 是否正式推薦=否｜準主推薦 and manufacture FORMAL authority.
+    a_minus = (
+        official is False and (
+            "A-" in zone.upper() or "準主推薦" in zone or "條件推薦" in zone
+            or "A-" in conclusion.upper() or "準主推薦" in conclusion or "條件推薦" in conclusion
+            or "A-" in path.upper() or "A-" in qual.upper()
+        )
+    ) or (
+        "A-" in conclusion.upper() or "準主推薦" in conclusion or "條件推薦" in conclusion
+        or "A-" in zone.upper() or "準主推薦" in zone or "條件推薦" in zone or "A-" in path.upper()
+    )
+    if a_minus:
+        return "A-MINUS", "上游僅A-/準主推薦；H51/H55/H60不得升格正式買進"
+
     explicit_formal = bool(
         official is True
         or zone.startswith(("正式主推薦", "正式推薦"))
@@ -318,7 +335,6 @@ def _authority_state(row: pd.Series) -> tuple[str, str]:
     if explicit_formal:
         return "FORMAL", "上游Formal/V188已明確授權正式推薦"
 
-    a_minus = ("A-" in conclusion.upper() or "準主推薦" in conclusion or "條件推薦" in conclusion or "A-" in path.upper())
     hard_nonformal = (
         official is False
         or (qual and ("否" in qual or "不越權" in qual))
@@ -326,8 +342,6 @@ def _authority_state(row: pd.Series) -> tuple[str, str]:
         or any(k in zone for k in ["盤中雷達", "研究", "觀察"])
         or any(k in action for k in ["不得建立正式新倉", "未通過交易品質", "不得正式推薦"])
     )
-    if a_minus:
-        return "A-MINUS", "上游僅A-/準主推薦；H51/H55不得升格正式買進"
     if hard_nonformal:
         return "RADAR", "上游Formal/V188未授權正式新倉；僅可等待/雷達"
     return "RESTRICTED", "存在上游權威欄位但未取得明確正式推薦授權"
@@ -1112,6 +1126,14 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         # Discovery failure must not break the formal decision path.
         pass
+    # H60: main-rise / holder-lock / snowball research layer.  It consumes
+    # official TDCC fields when Page07 has them, otherwise labels holder locking
+    # as PROXY.  It never changes Formal/V188/H56 authority.
+    try:
+        from godpick_h60_compound_engine import apply_h60_compound_engine
+        work = apply_h60_compound_engine(work)
+    except Exception:
+        pass
     return work
 
 
@@ -1400,9 +1422,48 @@ def build_h59_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
     return pd.DataFrame(rows)
 
 
+def build_h60_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
+    """H60 single truth: H59 authority decision + H60 research context.
+
+    The trade decision remains authority-first.  H60 columns explain whether the
+    same row also has main-rise, actual/proxy holder locking and snowball
+    compounding characteristics; they can never turn P/E1 into A1.
+    """
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return build_h59_single_decision_truth_table(frame, max_rows=max_rows)
+    work = frame
+    if "H60版本" not in work.columns or not work.get("H60版本", pd.Series([], dtype=str)).astype(str).eq("v191_h60_mainrise_holder_snowball_truth_20260904").all():
+        work = apply_human_master_engine(frame)
+    base = build_h59_single_decision_truth_table(work, max_rows=max_rows)
+    if base is None or not isinstance(base, pd.DataFrame) or base.empty or "股票代號" not in base.columns:
+        return base
+    lookup = work.copy()
+    lookup["_H60code"] = lookup.get("股票代號", pd.Series([""] * len(lookup), index=lookup.index)).fillna("").astype(str).str.strip()
+    lookup = lookup.loc[lookup["_H60code"].ne("")].drop_duplicates("_H60code", keep="first").set_index("_H60code")
+    out = base.copy()
+    h60_cols = [
+        "H60主升階段", "H60主升段分", "H60大戶鎖碼層級", "H60鎖碼來源", "H60大戶資料日期",
+        "H60千張大戶持股比%", "H60千張大戶週變化pp", "H60大戶鎖碼真相分",
+        "H60雪球股層級", "H60雪球複利分", "H60三因子層級", "H60三因子共振分", "H60研究結論", "H60版本",
+    ]
+    for c in h60_cols:
+        out[c] = [lookup.at[str(code).strip(), c] if str(code).strip() in lookup.index and c in lookup.columns else None for code in out["股票代號"]]
+    out["H60唯一決策"] = out.get("H59唯一決策", pd.Series([""] * len(out), index=out.index))
+    out["H60是否可買"] = out.get("H59是否可買", pd.Series([""] * len(out), index=out.index))
+    # Put the human answer first, followed by H60 strategy evidence.
+    front = [c for c in [
+        "唯一順位", "股票代號", "股票名稱", "類別", "H60唯一決策", "H60是否可買", "現在該做什麼",
+        "H60三因子層級", "H60三因子共振分", "H60主升階段", "H60主升段分",
+        "H60大戶鎖碼層級", "H60鎖碼來源", "H60千張大戶持股比%", "H60千張大戶週變化pp",
+        "H60雪球股層級", "H60雪球複利分",
+    ] if c in out.columns]
+    rest = [c for c in out.columns if c not in front]
+    return out.loc[:, front + rest]
+
+
 def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
-    """Backward-compatible alias; H59 is the current single-truth builder."""
-    return build_h59_single_decision_truth_table(frame, max_rows=max_rows)
+    """Backward-compatible alias; H60/H59 share the same authority truth."""
+    return build_h60_single_decision_truth_table(frame, max_rows=max_rows)
 
 def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -> pd.DataFrame:
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -1416,7 +1477,7 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     pick = work.loc[(~status.str.startswith("HM-NO")) | h55_research | h57_research].copy()
     if pick.empty:
         return pick
-    for c in ["H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H56T1確認分", "H60三因子共振分", "H60主升段分", "H60大戶鎖碼真相分", "H60雪球複利分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
     _h56text = pick.get("H56最終參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
@@ -1428,9 +1489,10 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
         2.0 if h.startswith("W1") else 1.0
         for h, p in zip(_h56text.tolist(), _h57text.tolist())
     ]
-    pick.sort_values(["_h56route", "H56T1確認分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
+    pick.sort_values(["_h56route", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
         "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
+        "H60三因子層級", "H60三因子共振分", "H60主升階段", "H60主升段分", "H60大戶鎖碼層級", "H60鎖碼來源", "H60大戶資料日期", "H60千張大戶持股比%", "H60千張大戶週變化pp", "H60大戶鎖碼真相分", "H60雪球股層級", "H60雪球複利分",
         "H57前兆階段", "H57研究優先層級", "H57精選雷達層級", "H57飆股發動前兆分", "H57全市場前兆百分位%", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H57提前視窗分", "H57族群點火廣度分", "H57主流形成前兆分", "H57前兆證據完整度", "H57交易保護狀態",
         "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
         "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51量價確認分", "H51流動性分",
@@ -1471,6 +1533,11 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         "H57族群點火廣度分": pd.to_numeric(work.get("H57族群點火廣度分", 50), errors="coerce").fillna(50.0),
         "H57主流形成前兆分": pd.to_numeric(work.get("H57主流形成前兆分", 50), errors="coerce").fillna(50.0),
         "H57前兆證據完整度": pd.to_numeric(work.get("H57前兆證據完整度", 0), errors="coerce").fillna(0.0),
+        "H60主升段分": pd.to_numeric(work.get("H60主升段分", 50), errors="coerce").fillna(50.0),
+        "H60大戶鎖碼真相分": pd.to_numeric(work.get("H60大戶鎖碼真相分", 50), errors="coerce").fillna(50.0),
+        "H60雪球複利分": pd.to_numeric(work.get("H60雪球複利分", 50), errors="coerce").fillna(50.0),
+        "H60三因子共振分": pd.to_numeric(work.get("H60三因子共振分", 50), errors="coerce").fillna(50.0),
+        "H60實際鎖碼旗標": work.get("H60鎖碼來源", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.startswith("ACTUAL").astype(float),
     })
     grp = tmp.groupby("類別", dropna=False).agg(
         H53族群共振分=("H53族群共振分", "mean"),
@@ -1498,6 +1565,11 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         H57族群點火廣度分=("H57族群點火廣度分", "mean"),
         H57族群主流形成前兆=("H57主流形成前兆分", lambda x: x.nlargest(3).mean()),
         H57族群前兆證據完整度=("H57前兆證據完整度", "mean"),
+        H60族群主升分=("H60主升段分", lambda x: x.nlargest(3).mean()),
+        H60族群鎖碼分=("H60大戶鎖碼真相分", lambda x: x.nlargest(3).mean()),
+        H60族群雪球分=("H60雪球複利分", lambda x: x.nlargest(3).mean()),
+        H60族群三因子分=("H60三因子共振分", lambda x: x.nlargest(3).mean()),
+        H60族群真實鎖碼覆蓋率=("H60實際鎖碼旗標", "mean"),
     ).reset_index()
     grp["H53族群決策分"] = (
         grp["H53族群共振分"] * 0.40 + grp["H53族群前三隔日優先"] * 0.25
@@ -1519,9 +1591,14 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
         + grp["H57族群點火廣度分"] * 0.18 + grp["H57族群前三資金加速"] * 0.14
         + grp["H57族群前兆證據完整度"] * 0.08
     ).clip(0, 100).round(2)
-    grp.sort_values(["H57族群前兆機會分", "H55族群機會分", "H57族群前三前兆", "H55族群雙路徑分"], ascending=False, inplace=True, kind="mergesort")
-    grp.insert(0, "H57族群排名", range(1, len(grp) + 1))
+    grp["H60族群複利機會分"] = (
+        grp["H60族群主升分"] * 0.32 + grp["H60族群雪球分"] * 0.28 + grp["H60族群鎖碼分"] * 0.20
+        + grp["H60族群三因子分"] * 0.20
+    ).clip(0, 100).round(2)
+    grp["H60族群真實鎖碼覆蓋率%"] = (grp.pop("H60族群真實鎖碼覆蓋率") * 100.0).round(2)
+    grp.sort_values(["H60族群複利機會分", "H57族群前兆機會分", "H55族群機會分", "H60族群三因子分"], ascending=False, inplace=True, kind="mergesort")
+    grp.insert(0, "H60族群排名", range(1, len(grp) + 1))
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h60_single_decision_truth_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]

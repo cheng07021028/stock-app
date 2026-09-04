@@ -108,7 +108,7 @@ def main():
     final = build_h51_final_decision_table(scored, max_rows=6)
     if "H51交易許可" in final.columns:
         assert not final["H51交易許可"].astype(str).str.startswith("LEADER-WATCH").any()
-    assert VERSION in {"v191_h52_mainstream_precision_ignition_truth_20260827", "v191_h53_sector_resonance_nextday_priority_20260828", "v191_h54_continuation_exhaustion_overnight_truth_20260831", "v191_h59_formal_recall_learning_truth_20260903"}
+    assert VERSION in {"v191_h52_mainstream_precision_ignition_truth_20260827", "v191_h53_sector_resonance_nextday_priority_20260828", "v191_h54_continuation_exhaustion_overnight_truth_20260831", "v191_h60_mainrise_holder_snowball_truth_20260904"}
     print("PASS v191_h52_mainstream_precision_smoke")
 
 

@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h59_preignition_single_truth_20260903"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h60_mainrise_holder_snowball_truth_20260904"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -462,7 +462,7 @@ def _h59_tier_from_original(original: dict[str, Any]) -> str:
     New H59 records should persist H59唯一決策 directly. Older H57/H58 records
     are mapped from the immutable H56/H57 snapshot without changing trade truth.
     """
-    direct = _s(original.get("H59唯一決策") or original.get("H58唯一決策"))
+    direct = _s(original.get("H60唯一決策") or original.get("H59唯一決策") or original.get("H58唯一決策"))
     if direct:
         return direct
     auth = _s(original.get("H56上游權威層級") or original.get("H56上游權威"))
@@ -502,19 +502,28 @@ def _selection_cohort_metrics(rows: list[dict[str, Any]], predicate: Callable[[d
     }
 
 
-def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
-    """Selection-quality telemetry for Pre-Ignition and H59 cohorts.
+def build_h57_h60_learning_summary(rows: Any) -> dict[str, Any]:
+    """Selection-quality telemetry for H57/H59/H60 research cohorts.
 
-    These are *selection* metrics only. Entry/Risk performance continues to use
-    是否納入可執行績效 and is never inferred from E1/PI3 research signals.
+    H60 Main-rise/Snowball/T3 metrics are *selection* metrics only. A research
+    label never creates an executable trade; Entry/Risk truth remains governed
+    by 是否納入可執行績效.
     """
     items = [r for r in _rows(rows) if isinstance(r, dict) and bool(r.get("T1成熟"))]
     out: dict[str, Any] = {}
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H57精選雷達層級")).startswith("E1"), "H57_E1"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H57前兆階段")).startswith("PI3"), "H57_PI3"))
-    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H59唯一決策")).startswith("A1"), "H59_A1"))
-    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H59唯一決策")).startswith("A0"), "H59_A0"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H59唯一決策") or r.get("H60唯一決策")).startswith("A1"), "H59_A1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H59唯一決策") or r.get("H60唯一決策")).startswith("A0"), "H59_A0"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H60主升階段")).startswith("MR1"), "H60_MR1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H60雪球股層級")).startswith("SB1"), "H60_SB1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H60三因子層級")).startswith("T3"), "H60_T3"))
     return out
+
+
+def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
+    """Backward-compatible alias for H60 telemetry."""
+    return build_h57_h60_learning_summary(rows)
 
 
 def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote: dict[str, Any], benchmark_ret: float | None) -> dict[str, Any]:
@@ -632,6 +641,20 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H59唯一決策": _h59_tier_from_original(original),
         "H59是否可買": _s(original.get("H59是否可買") or original.get("H58是否可買")),
         "H59版本": _s(original.get("H59版本")) or "v191_h59_formal_recall_learning_truth_20260903",
+        "H60唯一決策": _s(original.get("H60唯一決策") or original.get("H59唯一決策") or original.get("H58唯一決策")),
+        "H60主升段分": _f(original.get("H60主升段分")),
+        "H60主升階段": _s(original.get("H60主升階段")),
+        "H60鎖碼來源": _s(original.get("H60鎖碼來源")),
+        "H60大戶資料日期": _s(original.get("H60大戶資料日期")),
+        "H60千張大戶持股比%": _f(original.get("H60千張大戶持股比%")),
+        "H60千張大戶週變化pp": _f(original.get("H60千張大戶週變化pp")),
+        "H60大戶鎖碼真相分": _f(original.get("H60大戶鎖碼真相分")),
+        "H60大戶鎖碼層級": _s(original.get("H60大戶鎖碼層級")),
+        "H60雪球複利分": _f(original.get("H60雪球複利分")),
+        "H60雪球股層級": _s(original.get("H60雪球股層級")),
+        "H60三因子共振分": _f(original.get("H60三因子共振分")),
+        "H60三因子層級": _s(original.get("H60三因子層級")),
+        "H60版本": _s(original.get("H60版本")) or "v191_h60_mainrise_holder_snowball_truth_20260904",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -849,7 +872,7 @@ def refresh_t1_trade_truth(
     h51_rets = [x for x in h51_rets if x is not None]
     h51_alpha = [_f(r.get("Selection Alpha%")) for r in h51_focus]
     h51_alpha = [x for x in h51_alpha if x is not None]
-    h57_h59_learning = build_h57_h59_learning_summary(matured)
+    h57_h59_learning = build_h57_h60_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -939,7 +962,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h59_learning_summary",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]

@@ -45,7 +45,7 @@ def base_row(code: str, name: str, sector: str) -> dict:
 
 
 def main():
-    assert VERSION == "v191_h59_formal_recall_learning_truth_20260903"
+    assert VERSION == "v191_h60_mainrise_holder_snowball_truth_20260904"
     assert H57_VERSION == "v191_h57_pre_ignition_acceleration_engine_20260902"
 
     # Three same-sector stocks quietly accelerating together: the engine should
@@ -91,11 +91,11 @@ def main():
     assert sectors.iloc[0]["H57族群前兆機會分"] >= 50
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h59_formal_recall_learning_truth_20260903"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h59_formal_recall_learning_truth_20260903"' in page
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h60_mainrise_holder_snowball_truth_20260904"' in page
     for col in ["成交額3日加速度%", "成交量3日加速度%", "波動壓縮比", "前5日波動壓縮比", "當日區間擴張倍數", "3日動能加速度百分點"]:
         assert col in page
-    assert "超級AI唯一決策｜H59 Formal權威召回＋單一真相" in page
+    assert "超級AI唯一決策｜H60 主升×大戶鎖碼真相×雪球複利＋Formal單一真相" in page
     assert "H57 E1/PI3" in page or "H57精選雷達層級" in page
 
     print("PASS v191_h57_pre_ignition_engine_smoke")

@@ -45,7 +45,7 @@ def base_row(code: str, name: str) -> dict:
 
 
 def main():
-    assert VERSION == "v191_h59_formal_recall_learning_truth_20260903"
+    assert VERSION == "v191_h60_mainrise_holder_snowball_truth_20260904"
 
     # A1: Formal + fresh verified overnight evidence.
     a1 = base_row("1001", "A1測試")
@@ -109,12 +109,12 @@ def main():
     assert float(a1_row["實戰觸發價"]) > 0
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h59_formal_recall_learning_truth_20260903"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h59_formal_recall_learning_truth_20260903"' in page
-    assert "超級AI唯一決策｜H59 Formal權威召回＋單一真相" in page
-    assert "build_h59_single_decision_truth_table(h51_source, max_rows=10)" in page
-    assert "_h58_focus = build_h59_single_decision_truth_table(_h51_source_ui, max_rows=10)" in page
-    assert "本輪舊版作戰名單（非H59決策來源）" in page
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert "超級AI唯一決策｜H60 主升×大戶鎖碼真相×雪球複利＋Formal單一真相" in page
+    assert "build_h60_single_decision_truth_table(h51_source, max_rows=10)" in page
+    assert "_h58_focus = build_h60_single_decision_truth_table(_h51_source_ui, max_rows=10)" in page
+    assert "本輪舊版作戰名單（非H60決策來源）" in page
     assert "舊版飆股補抓｜僅研究" in page
     assert "權威底層稽核｜Formal／A-／核心雷達（非主要決策）" in page
 

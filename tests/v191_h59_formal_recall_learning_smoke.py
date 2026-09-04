@@ -54,8 +54,8 @@ def weak_formal(code: str, name: str, fresh: bool = False) -> dict:
 
 
 def main():
-    assert VERSION == "v191_h59_formal_recall_learning_truth_20260903"
-    assert TRUTH_VERSION == "godpick_t1_trade_truth_v191_h59_preignition_single_truth_20260903"
+    assert VERSION == "v191_h60_mainrise_holder_snowball_truth_20260904"
+    assert TRUTH_VERSION == "godpick_t1_trade_truth_v191_h60_mainrise_holder_snowball_truth_20260904"
 
     # A) Formal must become A0 even if H51 says NO-PRIORITY / research-only.
     pending = apply_human_master_engine(pd.DataFrame([weak_formal("9001", "Formal待盤前", fresh=False)]))
@@ -107,12 +107,12 @@ def main():
     assert learning["H59_A1成熟樣本"] == 1
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h59_formal_recall_learning_truth_20260903"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h59_formal_recall_learning_truth_20260903"' in page
-    assert "超級AI唯一決策｜H59 Formal權威召回＋單一真相" in page
-    assert "H59唯一決策Formal召回" in page
+    assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert "超級AI唯一決策｜H60 主升×大戶鎖碼真相×雪球複利＋Formal單一真相" in page
+    assert "H60唯一決策Formal召回" in page
     assert "H57_E1平均SelectionAlpha%" in page
-    assert "build_h59_single_decision_truth_table(h51_source, max_rows=10)" in page
+    assert "build_h60_single_decision_truth_table(h51_source, max_rows=10)" in page
 
     print("PASS v191_h59_formal_recall_learning_smoke")
 
