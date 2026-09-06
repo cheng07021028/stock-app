@@ -119,7 +119,7 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h61_opportunity_cost_repeat_alpha_truth_20260906"' in page
     assert "build_h60_single_decision_truth_table" in page
     assert "enrich_tdcc_holder_truth" in page
     assert "H60千張大戶持股比%" in page

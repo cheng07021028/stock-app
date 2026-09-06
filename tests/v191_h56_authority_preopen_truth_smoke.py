@@ -99,9 +99,9 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h60_mainrise_holder_snowball_truth_20260904"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h61_opportunity_cost_repeat_alpha_truth_20260906"' in page
     assert 'x["隔夜更新時間"] = overnight_info.get("updated_at")' in page
-    assert "超級AI唯一決策｜H60 主升×大戶鎖碼真相×雪球複利＋Formal單一真相" in page
+    assert "超級AI唯一決策｜H61 機會成本×重複慣性×近期Alpha真相" in page
 
     print("PASS v191_h56_authority_preopen_truth_smoke")
 

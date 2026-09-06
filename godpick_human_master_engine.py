@@ -1134,6 +1134,13 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
         work = apply_h60_compound_engine(work)
     except Exception:
         pass
+    # H61: opportunity-cost / repeated-favorite truth.  This is a research
+    # ranking guard only and must never overwrite Formal/V188/H56 authority.
+    try:
+        from godpick_h61_opportunity_cost_engine import apply_h61_opportunity_cost_engine
+        work = apply_h61_opportunity_cost_engine(work)
+    except Exception:
+        pass
     return work
 
 
@@ -1461,9 +1468,79 @@ def build_h60_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
     return out.loc[:, front + rest]
 
 
+def build_h61_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
+    """H61 human console: keep authority truth, spend attention on better opportunities.
+
+    Formal rows are always retained. Research/A- rows marked by H61 as low
+    opportunity do not consume the scarce first-screen slots merely because they
+    are familiar liquid leaders. The table is allowed to return fewer rows when
+    no better opportunity exists; H61 never fills with weaker names just to hit
+    a quota.
+    """
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return build_h60_single_decision_truth_table(frame, max_rows=max_rows)
+    work = frame
+    try:
+        from godpick_h61_opportunity_cost_engine import VERSION as H61_VERSION, apply_h61_opportunity_cost_engine
+        if "H61版本" not in work.columns or not work.get("H61版本", pd.Series([], dtype=str)).astype(str).eq(H61_VERSION).all():
+            work = apply_h61_opportunity_cost_engine(work)
+    except Exception:
+        H61_VERSION = ""
+    # Pull a wider authority-safe candidate pool first; H61 then performs the
+    # opportunity-cost compression.
+    base = build_h60_single_decision_truth_table(work, max_rows=max(len(work), 30, int(max_rows) * 3))
+    if base is None or not isinstance(base, pd.DataFrame) or base.empty or "股票代號" not in base.columns:
+        return base
+    lookup = work.copy()
+    lookup["_H61code"] = lookup.get("股票代號", pd.Series([""] * len(lookup), index=lookup.index)).fillna("").astype(str).str.strip()
+    lookup = lookup.loc[lookup["_H61code"].ne("")].drop_duplicates("_H61code", keep="first").set_index("_H61code")
+    out = base.copy()
+    h61_cols = [
+        "H61近期成熟樣本", "H61近期SelectionAlpha%", "H61近期正Alpha率%", "H61歷史成熟樣本",
+        "H61上漲空間分", "H61近期Alpha分", "H61RR品質分", "H61新鮮機會分",
+        "H61重複慣性扣分", "H61機會成本扣分", "H61機會價值分",
+        "H61機會層級", "H61前排資格", "H61決策理由", "H61版本",
+    ]
+    for c in h61_cols:
+        out[c] = [lookup.at[str(code).strip(), c] if str(code).strip() in lookup.index and c in lookup.columns else None for code in out["股票代號"]]
+    auth = out.get("H56上游權威", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    formal = auth.eq("FORMAL")
+    front = out.get("H61前排資格", pd.Series(["是"] * len(out), index=out.index)).fillna("是").astype(str)
+    # Formal cannot be filtered. Non-formal repeated/low-upside rows can stay in
+    # master research but no longer monopolize the unique first screen.
+    keep = formal | ~front.str.startswith("否")
+    out = out.loc[keep].copy()
+    if out.empty:
+        return pd.DataFrame({
+            "H60唯一決策": ["NONE｜沒有高機會價值候選"],
+            "現在該做什麼": ["H61判定目前前排候選的近期Alpha/上漲空間/機會成本不足；不為推薦而推薦，等待新機會。"],
+            "H61機會層級": ["NONE｜等待新機會"],
+        })
+    decision = out.get("H60唯一決策", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    out["_H61decision_rank"] = decision.map(lambda x: 100 if x.startswith("A1") else 90 if x.startswith("A0") else 55 if x.startswith("P1") else 50 if x.startswith("P0") else 45 if x.startswith("P2") else 35 if x.startswith("E1") else 20)
+    out["_H61formal"] = formal.loc[out.index].astype(int)
+    out["H61機會價值分"] = pd.to_numeric(out.get("H61機會價值分", 0), errors="coerce").fillna(0.0)
+    # Formal authority first; for research/A- rows, opportunity value outranks
+    # yesterday's familiar-leader score.
+    out.sort_values(["_H61formal", "_H61decision_rank", "H61機會價值分", "H57全市場百分位%"], ascending=[False, False, False, False], inplace=True, kind="mergesort")
+    formal_n = int(out["_H61formal"].sum())
+    target = max(int(max_rows), formal_n)
+    out = out.head(max(1, target)).copy()
+    out["唯一順位"] = range(1, len(out) + 1)
+    out.drop(columns=["_H61decision_rank", "_H61formal"], inplace=True, errors="ignore")
+    front_cols = [c for c in [
+        "唯一順位", "股票代號", "股票名稱", "類別", "H60唯一決策", "H60是否可買", "現在該做什麼",
+        "H61機會層級", "H61前排資格", "H61機會價值分", "H61近期SelectionAlpha%", "H61近期成熟樣本",
+        "H61上漲空間分", "H61RR品質分", "H61重複慣性扣分", "H61機會成本扣分",
+        "H60三因子層級", "H60主升階段", "H60大戶鎖碼層級", "H60雪球股層級",
+    ] if c in out.columns]
+    rest = [c for c in out.columns if c not in front_cols]
+    return out.loc[:, front_cols + rest]
+
+
 def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
-    """Backward-compatible alias; H60/H59 share the same authority truth."""
-    return build_h60_single_decision_truth_table(frame, max_rows=max_rows)
+    """Backward-compatible alias; latest console is H61 authority + opportunity truth."""
+    return build_h61_single_decision_truth_table(frame, max_rows=max_rows)
 
 def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -> pd.DataFrame:
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -1601,4 +1678,4 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h60_single_decision_truth_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h61_single_decision_truth_table", "build_h60_single_decision_truth_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
