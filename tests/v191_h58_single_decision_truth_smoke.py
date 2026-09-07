@@ -110,13 +110,13 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h62_incremental_opportunity_effective_formal_truth_20260907"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h63_formal_execution_identity_truth_20260907"' in page
     assert "超級AI唯一決策｜H62 有效Formal×全市場增量機會×熟面孔淘汰" in page
     assert "build_h62_single_decision_truth_table(h51_source, max_rows=10)" in page
     assert "_h58_focus = build_h62_single_decision_truth_table(_h51_source_ui, max_rows=10)" in page
     assert "本輪舊版作戰名單（非H60決策來源）" in page
     assert "舊版飆股補抓｜僅研究" in page
-    assert "權威底層稽核｜Formal／A-／核心雷達（非主要決策）" in page
+    assert "權威底層稽核｜Formal／A-／Radar（非第二份推薦清單）" in page
 
     print("PASS v191_h58_single_decision_truth_smoke")
 

@@ -105,7 +105,7 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h62_incremental_opportunity_effective_formal_truth_20260907"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h63_formal_execution_identity_truth_20260907"' in page
     assert "超級AI唯一決策｜H62 有效Formal×全市場增量機會×熟面孔淘汰" in page
 
     print("PASS v191_h55_dual_path_reversal_catalyst_smoke")
