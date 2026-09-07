@@ -108,11 +108,11 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h61_opportunity_cost_repeat_alpha_truth_20260906"' in page
-    assert "超級AI唯一決策｜H61 機會成本×重複慣性×近期Alpha真相" in page
-    assert "H61唯一決策Formal召回" in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h62_incremental_opportunity_effective_formal_truth_20260907"' in page
+    assert "超級AI唯一決策｜H62 有效Formal×全市場增量機會×熟面孔淘汰" in page
+    assert "H62有效Formal完整性" in page
     assert "H57_E1平均SelectionAlpha%" in page
-    assert "build_h61_single_decision_truth_table(h51_source, max_rows=10)" in page
+    assert "build_h62_single_decision_truth_table(h51_source, max_rows=10)" in page
 
     print("PASS v191_h59_formal_recall_learning_smoke")
 

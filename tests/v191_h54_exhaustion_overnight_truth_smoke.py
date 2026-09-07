@@ -76,8 +76,8 @@ def main():
 
     page_text = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page_text
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h61_opportunity_cost_repeat_alpha_truth_20260906"' in page_text
-    assert "超級AI唯一決策｜H61 機會成本×重複慣性×近期Alpha真相" in page_text
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h62_incremental_opportunity_effective_formal_truth_20260907"' in page_text
+    assert "超級AI唯一決策｜H62 有效Formal×全市場增量機會×熟面孔淘汰" in page_text
 
     print("PASS v191_h54_exhaustion_overnight_truth_smoke")
 

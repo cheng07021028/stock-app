@@ -1141,6 +1141,15 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
         work = apply_h61_opportunity_cost_engine(work)
     except Exception:
         pass
+    # H62: current-run incremental opportunity / effective-formal truth. Raw
+    # Formal evidence is never deleted, but a familiar raw Formal may be placed
+    # on FORMAL-HOLD when recent mature alpha and remaining opportunity no longer
+    # justify a scarce front-page/action slot. N1/N2 are research only.
+    try:
+        from godpick_h62_incremental_opportunity_engine import apply_h62_incremental_opportunity_engine
+        work = apply_h62_incremental_opportunity_engine(work)
+    except Exception:
+        pass
     return work
 
 
@@ -1538,9 +1547,111 @@ def build_h61_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 1
     return out.loc[:, front_cols + rest]
 
 
+
+def build_h62_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
+    """H62 unique console: effective Formal first, then scarce new opportunities.
+
+    Raw Formal stays in the full research/audit frame, but FORMAL-HOLD does not
+    masquerade as today's recommendation.  Non-formal N1/N2 rows are research
+    opportunities only and can never become BUY by this builder.
+    """
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return build_h61_single_decision_truth_table(frame, max_rows=max_rows)
+    work = frame
+    try:
+        from godpick_h62_incremental_opportunity_engine import VERSION as H62_VERSION, apply_h62_incremental_opportunity_engine
+        if "H62版本" not in work.columns or not work.get("H62版本", pd.Series([], dtype=str)).astype(str).eq(H62_VERSION).all():
+            work = apply_h62_incremental_opportunity_engine(work)
+    except Exception:
+        H62_VERSION = ""
+
+    # Start from the authority-safe H60 table with a wide pool, then attach H61/H62.
+    base = build_h60_single_decision_truth_table(work, max_rows=max(len(work), 40, int(max_rows) * 4))
+    if base is None or not isinstance(base, pd.DataFrame) or base.empty or "股票代號" not in base.columns:
+        return base
+    lookup = work.copy()
+    lookup["_H62code"] = lookup.get("股票代號", pd.Series([""] * len(lookup), index=lookup.index)).fillna("").astype(str).str.strip()
+    lookup = lookup.loc[lookup["_H62code"].ne("")].drop_duplicates("_H62code", keep="first").set_index("_H62code")
+    out = base.copy()
+    merge_cols = [c for c in [
+        "H61機會層級", "H61前排資格", "H61機會價值分", "H61近期SelectionAlpha%", "H61近期成熟樣本",
+        "H61近期正Alpha率%", "H61上漲空間分", "H61RR品質分", "H61重複慣性扣分", "H61機會成本扣分",
+        "H62原始權威", "H62有效權威", "H62近期證明分", "H62增量上漲空間分", "H62新領漲分",
+        "H62熟面孔衰退扣分", "H62增量機會分", "H62全市場機會百分位%", "H62機會層級",
+        "H62前排資格", "H62正式作戰資格", "H62決策理由", "H62版本",
+    ] if c in lookup.columns]
+    for c in merge_cols:
+        out[c] = [lookup.at[str(code).strip(), c] if str(code).strip() in lookup.index else None for code in out["股票代號"]]
+
+    eff = out.get("H62有效權威", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    front = out.get("H62前排資格", pd.Series(["否"] * len(out), index=out.index)).fillna("否").astype(str)
+    effective_formal = eff.eq("EFFECTIVE-FORMAL")
+    # FORMAL-HOLD remains in the full master ranking/audit, not in the scarce
+    # first screen. Research rows must earn an H62 front slot.
+    keep = effective_formal | (~front.str.startswith("否") & ~eff.eq("FORMAL-HOLD"))
+    out = out.loc[keep].copy()
+    if out.empty:
+        return pd.DataFrame({
+            "H62唯一決策": ["NONE｜沒有有效Formal或高增量新機會"],
+            "H62是否可買": ["否"],
+            "現在該做什麼": ["目前熟面孔的近期Alpha/剩餘上漲空間/增量機會不足；不為推薦而推薦，等待全市場新領漲機會。"],
+            "H62機會層級": ["NONE｜等待新機會"],
+        })
+
+    base_dec = out.get("H60唯一決策", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    h62_tier = out.get("H62機會層級", pd.Series([""] * len(out), index=out.index)).fillna("").astype(str)
+    decisions=[]; buys=[]; actions=[]; dranks=[]
+    for idx, dec in zip(out.index, base_dec.tolist()):
+        is_eff = bool(effective_formal.loc[idx]) if idx in effective_formal.index else False
+        tier = str(out.at[idx, "H62機會層級"]) if "H62機會層級" in out.columns else ""
+        if is_eff:
+            decisions.append(dec or "A0｜有效Formal待確認")
+            buy = str(out.at[idx, "H60是否可買"]) if "H60是否可買" in out.columns else "否"
+            buys.append(buy)
+            actions.append(str(out.at[idx, "現在該做什麼"]) if "現在該做什麼" in out.columns else "有效Formal仍須H56/觸發/守價/RR確認。")
+            dranks.append(100 if str(dec).startswith("A1") else 90)
+        elif tier.startswith("N1"):
+            decisions.append("N1｜全市場新領漲機會")
+            buys.append("否｜研究")
+            actions.append("全市場高增量新領漲研究；優先重驗Formal/V188/H56與觸發價，未授權前不可買。")
+            dranks.append(70)
+        elif tier.startswith("N2"):
+            decisions.append("N2｜高增量新機會")
+            buys.append("否｜研究")
+            actions.append("高增量新機會研究；等待主流/權威/盤前/觸發完成，不把研究分數當買進許可。")
+            dranks.append(60)
+        else:
+            decisions.append("W1｜一般增量研究")
+            buys.append("否｜研究")
+            actions.append("一般增量研究；若沒有更強新機會可直接等待，不為湊數升格。")
+            dranks.append(40)
+    out["H62唯一決策"] = decisions
+    out["H62是否可買"] = buys
+    out["現在該做什麼"] = actions
+    out["_H62decision_rank"] = dranks
+    out["_H62formal"] = effective_formal.loc[out.index].astype(int)
+    for c in ["H62增量機會分", "H62全市場機會百分位%", "H61機會價值分", "H57全市場百分位%"]:
+        out[c] = pd.to_numeric(out.get(c, 0), errors="coerce").fillna(0.0)
+    out.sort_values(["_H62formal", "_H62decision_rank", "H62增量機會分", "H62全市場機會百分位%", "H61機會價值分", "H57全市場百分位%"], ascending=False, inplace=True, kind="mergesort")
+    formal_n = int(out["_H62formal"].sum())
+    target = max(int(max_rows), formal_n)
+    out = out.head(max(1, target)).copy()
+    out["唯一順位"] = range(1, len(out) + 1)
+    out.drop(columns=["_H62decision_rank", "_H62formal"], inplace=True, errors="ignore")
+    front_cols = [c for c in [
+        "唯一順位", "股票代號", "股票名稱", "類別", "H62唯一決策", "H62是否可買", "現在該做什麼",
+        "H62機會層級", "H62有效權威", "H62增量機會分", "H62全市場機會百分位%", "H62近期證明分",
+        "H62增量上漲空間分", "H62新領漲分", "H62熟面孔衰退扣分", "H61近期SelectionAlpha%",
+        "H61近期成熟樣本", "H61上漲空間分", "H61RR品質分", "H57前兆階段", "H57全市場前兆百分位%",
+        "H60主升階段", "H60三因子層級", "H56盤前狀態", "H56上游權威",
+    ] if c in out.columns]
+    rest = [c for c in out.columns if c not in front_cols]
+    return out.loc[:, front_cols + rest]
+
+
 def build_h58_single_decision_truth_table(frame: pd.DataFrame, max_rows: int = 10) -> pd.DataFrame:
-    """Backward-compatible alias; latest console is H61 authority + opportunity truth."""
-    return build_h61_single_decision_truth_table(frame, max_rows=max_rows)
+    """Backward-compatible alias; latest console is H62 incremental opportunity truth."""
+    return build_h62_single_decision_truth_table(frame, max_rows=max_rows)
 
 def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -> pd.DataFrame:
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
@@ -1552,9 +1663,16 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
     h57phase = work.get("H57前兆階段", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     h57_research = h57phase.str.startswith(("PI1", "PI2", "PI3", "IG1"))
     pick = work.loc[(~status.str.startswith("HM-NO")) | h55_research | h57_research].copy()
+    # H62 research governance: familiar/low-incremental rows should not keep
+    # resurfacing in the leader page merely because they have strong historical
+    # leader scores. Effective Formal and H62 front-qualified research remain.
+    if "H62前排資格" in pick.columns:
+        _h62front = pick.get("H62前排資格", pd.Series(["否"] * len(pick), index=pick.index)).fillna("否").astype(str)
+        _h62eff = pick.get("H62有效權威", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
+        pick = pick.loc[_h62eff.eq("EFFECTIVE-FORMAL") | (~_h62front.str.startswith("否") & ~_h62eff.eq("FORMAL-HOLD"))].copy()
     if pick.empty:
         return pick
-    for c in ["H56T1確認分", "H60三因子共振分", "H60主升段分", "H60大戶鎖碼真相分", "H60雪球複利分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H60大戶鎖碼真相分", "H60雪球複利分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
     _h56text = pick.get("H56最終參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
@@ -1566,9 +1684,9 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
         2.0 if h.startswith("W1") else 1.0
         for h, p in zip(_h56text.tolist(), _h57text.tolist())
     ]
-    pick.sort_values(["_h56route", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
+    pick.sort_values(["_h56route", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
+        "股票代號", "股票名稱", "類別", "H62機會層級", "H62有效權威", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H62熟面孔衰退扣分", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
         "H60三因子層級", "H60三因子共振分", "H60主升階段", "H60主升段分", "H60大戶鎖碼層級", "H60鎖碼來源", "H60大戶資料日期", "H60千張大戶持股比%", "H60千張大戶週變化pp", "H60大戶鎖碼真相分", "H60雪球股層級", "H60雪球複利分",
         "H57前兆階段", "H57研究優先層級", "H57精選雷達層級", "H57飆股發動前兆分", "H57全市場前兆百分位%", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H57提前視窗分", "H57族群點火廣度分", "H57主流形成前兆分", "H57前兆證據完整度", "H57交易保護狀態",
         "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",
@@ -1678,4 +1796,4 @@ def build_h51_sector_table(frame: pd.DataFrame, max_rows: int = 15) -> pd.DataFr
     return grp.head(max(1, int(max_rows))).reset_index(drop=True)
 
 
-__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h61_single_decision_truth_table", "build_h60_single_decision_truth_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]
+__all__ = ["VERSION", "H51_COLUMNS", "H53_COLUMNS", "H54_COLUMNS", "H55_COLUMNS", "apply_human_master_engine", "build_h51_final_decision_table", "build_h62_single_decision_truth_table", "build_h61_single_decision_truth_table", "build_h60_single_decision_truth_table", "build_h59_single_decision_truth_table", "build_h58_single_decision_truth_table", "build_h51_mainstream_leader_table", "build_h51_sector_table"]

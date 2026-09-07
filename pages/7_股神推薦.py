@@ -284,6 +284,7 @@ try:
         VERSION as H51_HUMAN_MASTER_VERSION,
         apply_human_master_engine,
         build_h51_final_decision_table,
+        build_h62_single_decision_truth_table,
         build_h61_single_decision_truth_table,
         build_h60_single_decision_truth_table,
         build_h59_single_decision_truth_table,
@@ -296,6 +297,7 @@ except Exception as _h51_import_exc:
     H51_HUMAN_MASTER_IMPORT_ERROR = f"{type(_h51_import_exc).__name__}: {_h51_import_exc}"
     apply_human_master_engine = None
     build_h51_final_decision_table = None
+    build_h62_single_decision_truth_table = None
     build_h61_single_decision_truth_table = None
     build_h60_single_decision_truth_table = None
     build_h59_single_decision_truth_table = None
@@ -317,6 +319,13 @@ try:
     from godpick_h61_opportunity_cost_engine import VERSION as H61_OPPORTUNITY_VERSION
 except Exception:
     H61_OPPORTUNITY_VERSION = "h61_opportunity_unavailable"
+
+H62_OPPORTUNITY_EXPECTED_VERSION = "v191_h62_incremental_opportunity_effective_formal_truth_20260907"
+try:
+    from godpick_h62_incremental_opportunity_engine import VERSION as H62_OPPORTUNITY_VERSION, apply_h62_incremental_opportunity_engine
+except Exception:
+    H62_OPPORTUNITY_VERSION = "h62_opportunity_unavailable"
+    apply_h62_incremental_opportunity_engine = None
 
 try:
     from godpick_v188_cache_guard import (
@@ -363,8 +372,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h61_opportunity_cost_repeat_alpha_truth_20260906"
-EXCEL_COLUMN_LAYOUT_VERSION = "V191-H61-OPPORTUNITY-COST-REPEAT-ALPHA-TRUTH-20260906"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h62_incremental_opportunity_effective_formal_truth_20260907"
+EXCEL_COLUMN_LAYOUT_VERSION = "V191-H62-INCREMENTAL-OPPORTUNITY-EFFECTIVE-FORMAL-TRUTH-20260907"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -2292,10 +2301,29 @@ def _v191_actionable_tracking_frame(source_df: pd.DataFrame | None) -> tuple[pd.
             work = apply_formal_recommendation_engine(work)
         except Exception as exc:
             return pd.DataFrame(), formal_scan_ok, [f"正式分區重算失敗：{exc}"]
+    # H62 action/persistence truth: raw Formal remains in the diagnostic frame,
+    # but FORMAL-HOLD must not be written to Page08/Page10 as this-run Formal.
+    # A future run can restore EFFECTIVE-FORMAL automatically.
+    try:
+        if callable(apply_human_master_engine):
+            _h62v = work.get("H62版本", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+            if not _h62v.eq(H62_OPPORTUNITY_VERSION).all():
+                work = apply_human_master_engine(work)
+        elif callable(apply_h62_incremental_opportunity_engine):
+            work = apply_h62_incremental_opportunity_engine(work)
+    except Exception as _h62_action_exc:
+        notes.append(f"H62有效Formal治理暫時無法套用：{_h62_action_exc}")
 
     bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"])
+    if "H62有效權威" in work.columns:
+        _h62_eff_action = work["H62有效權威"].fillna("").astype(str)
+        _raw_formal_bucket = bucket.eq("正式下週主推薦")
+        _held_formal = _raw_formal_bucket & _h62_eff_action.eq("FORMAL-HOLD")
+        if bool(_held_formal.any()):
+            notes.append(f"H62有效Formal治理：{int(_held_formal.sum())} 檔原始Formal因近期Alpha/增量機會不足改為FORMAL-HOLD，本輪不寫入正式作戰路徑。")
+        formal_mask = formal_mask & ~_held_formal
     radar_mask = bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
     allowed = (formal_mask if formal_scan_ok else pd.Series([False] * len(work), index=work.index)) | radar_mask
     action = work.loc[allowed].copy()
@@ -2360,6 +2388,17 @@ def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decisio
         governed = work.loc[allowed].copy()
     if governed.empty:
         governed = _conditional_reference_rows(work, max_rows=8)
+    if governed.empty:
+        return governed
+    try:
+        if callable(apply_h62_incremental_opportunity_engine):
+            governed = apply_h62_incremental_opportunity_engine(governed)
+            if "H62有效權威" in governed.columns and "正式推薦分區" in governed.columns:
+                _gbucket = governed["正式推薦分區"].fillna("").astype(str)
+                _geff = governed["H62有效權威"].fillna("").astype(str)
+                governed = governed.loc[~(_gbucket.eq("正式下週主推薦") & _geff.eq("FORMAL-HOLD"))].copy()
+    except Exception:
+        pass
     if governed.empty:
         return governed
     if "股票代號" in governed.columns:
@@ -13092,7 +13131,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
         try:
             _h51v = work.get("H51版本", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
             _h61v = work.get("H61版本", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
-            if (not _h51v.eq(H51_HUMAN_MASTER_VERSION).all()) or (not _h61v.eq(H61_OPPORTUNITY_VERSION).all()):
+            _h62v = work.get("H62版本", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+            if (not _h51v.eq(H51_HUMAN_MASTER_VERSION).all()) or (not _h61v.eq(H61_OPPORTUNITY_VERSION).all()) or (not _h62v.eq(H62_OPPORTUNITY_VERSION).all()):
                 work = apply_human_master_engine(work)
         except Exception:
             pass
@@ -13142,11 +13182,18 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     ]
     _h51_market_rank = rank.get("H51市場地位", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
     rank["_H51市場優先"] = _h51_market_rank.map(lambda x: 8 if x.startswith("HM-EARLY") else 7 if x.startswith("HM-PULLBACK") else 6 if x.startswith("HM-LEADER") else 5 if x.startswith("HM-SETUP") else 2 if x.startswith(("HM-EXTENDED", "HM-MATURE")) else 0)
-    # H61: scarce first-page attention must be earned by *incremental* opportunity,
-    # not by familiarity alone. Formal authority remains outside this research sort.
+    # H62: every stock competes for scarce attention against today's market.
+    # Raw Formal on FORMAL-HOLD remains auditable but is not allowed to dominate
+    # the research ranking merely because it was Formal yesterday.
+    _h62_front = rank.get("H62前排資格", pd.Series(["否"] * len(rank), index=rank.index)).fillna("否").astype(str)
+    _h62_eff = rank.get("H62有效權威", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
+    rank["_H62有效Formal優先"] = _h62_eff.eq("EFFECTIVE-FORMAL").astype(int)
+    rank["_H62前排優先"] = (~_h62_front.str.startswith("否") & ~_h62_eff.eq("FORMAL-HOLD")).astype(int)
+    # H61 remains supporting evidence under H62.
     _h61_front = rank.get("H61前排資格", pd.Series(["是"] * len(rank), index=rank.index)).fillna("是").astype(str)
     rank["_H61前排優先"] = (~_h61_front.str.startswith("否")).astype(int)
     sort_cols = [
+        "_H62有效Formal優先", "_H62前排優先", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H62增量上漲空間分", "H62近期證明分",
         "_H57總覽優先", "_H61前排優先", "H61機會價值分", "H61近期Alpha分", "H61上漲空間分", "H61RR品質分", "_H51市場優先",
         "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57相對強度轉折分", "H57提前視窗分", "H55雙路徑隔日分", "H55反轉點火路徑分", "H55主線延續路徑分", "H55逆風韌性分", "H55催化代理分",
         "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51可執行分",
@@ -13189,7 +13236,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     if len(_rows) < _target:
         _add_with_cap(_target, 999)
     rank = pd.DataFrame(_rows).reset_index(drop=True) if _rows else rank.head(_target).copy().reset_index(drop=True)
-    rank.drop(columns=["_H61前排優先", "_H57總覽優先", "_H55總覽優先", "_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
+    rank.drop(columns=["_H62有效Formal優先", "_H62前排優先", "_H61前排優先", "_H57總覽優先", "_H55總覽優先", "_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
     rank["股神推薦總排名"] = range(1, len(rank) + 1)
 
     cols = _get_master_rank_default_cols()
@@ -13199,7 +13246,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
-        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "H59唯一決策真相：A1可執行、A0盤前待確認、P等待、E1頂級前兆研究；網頁與Excel同一張表", "是否買進清單": "只有A1且實戰觸發成立才可執行；A0/P/E1都不是買進"},
+        {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "H62唯一決策真相：有效Formal＋N1/N2全市場增量新機會；熟面孔Formal可HOLD；網頁與Excel同一張表", "是否買進清單": "只有A1且實戰觸發成立才可執行；A0/P/E1都不是買進"},
         {"優先序": 2, "活頁/表格": "主流族群", "真正用途": "優先看H57族群前兆機會：資金加速＋點火廣度，再對照H55/H54延續與輪動", "是否買進清單": "否"},
         {"優先序": 3, "活頁/表格": "主流領漲股", "真正用途": "找PI3發動前兆、IG1已點火、主線領漲與R2新題材；研究召回與交易權威分離", "是否買進清單": "需再看H51/H56交易許可"},
         {"優先序": 4, "活頁/表格": "股神推薦總排名", "真正用途": "完整研究證據；不必再看十幾張重複雷達", "是否買進清單": "否"},
@@ -13547,19 +13594,20 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
 
-    # H61：Formal權威不動，但研究前排加入機會成本與近期Alpha守門。
-    # 同一批熟面孔若近期沒有Alpha/上漲空間不足，不再因流動性與歷史強勢長期霸榜。
-    render_pro_section("超級AI唯一決策｜H61 機會成本×重複慣性×近期Alpha真相")
-    st.caption("真正交易權威仍是Formal/V188/H56；H61只決定『今天最值得把注意力花在哪裡』。A1/A0/Formal永遠保留；P/E1研究候選若近期Alpha衰退、10日空間小或RR差，可退出第一屏。不為湊數補弱股。")
+    # H62：原始Formal保留稽核，但本輪有效Formal也必須重新證明增量價值。
+    # 熟面孔不能因歷史權威/流動性長期霸榜；新領漲機會用全市場競爭浮出。
+    render_pro_section("超級AI唯一決策｜H62 有效Formal×全市場增量機會×熟面孔淘汰")
+    st.caption("H62把『原始Formal』與『本輪有效Formal』分開：近期Selection Alpha/剩餘上漲空間/增量機會明顯衰退的熟面孔可FORMAL-HOLD，不再霸占第一屏或本輪正式作戰路徑。新N1/N2只供研究，仍不得越過Formal/V188/H56/Entry/RR。")
     _h51_engine_ok = bool(
         callable(apply_human_master_engine)
         and callable(build_h51_final_decision_table)
-        and callable(build_h61_single_decision_truth_table)
+        and callable(build_h62_single_decision_truth_table)
         and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION
         and H61_OPPORTUNITY_VERSION == H61_OPPORTUNITY_EXPECTED_VERSION
+        and H62_OPPORTUNITY_VERSION == H62_OPPORTUNITY_EXPECTED_VERSION
     )
     if not _h51_engine_ok:
-        st.error(f"H61版本一致性失敗：Human={H51_HUMAN_MASTER_VERSION}/{H51_HUMAN_MASTER_EXPECTED_VERSION}；H61={H61_OPPORTUNITY_VERSION}/{H61_OPPORTUNITY_EXPECTED_VERSION}。請重新覆蓋H61修正檔。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))
+        st.error(f"H62版本一致性失敗：Human={H51_HUMAN_MASTER_VERSION}/{H51_HUMAN_MASTER_EXPECTED_VERSION}；H61={H61_OPPORTUNITY_VERSION}/{H61_OPPORTUNITY_EXPECTED_VERSION}；H62={H62_OPPORTUNITY_VERSION}/{H62_OPPORTUNITY_EXPECTED_VERSION}。請重新覆蓋H62修正檔。" + (f" 載入錯誤：{H51_HUMAN_MASTER_IMPORT_ERROR}" if H51_HUMAN_MASTER_IMPORT_ERROR else ""))
     try:
         _h60_ui_source = decision_source
         if callable(enrich_tdcc_holder_truth):
@@ -13568,12 +13616,12 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             except Exception:
                 _h60_ui_source = decision_source
         _h51_source_ui = apply_human_master_engine(_h60_ui_source) if _h51_engine_ok else _h60_ui_source
-        _h58_focus = build_h61_single_decision_truth_table(_h51_source_ui, max_rows=10) if _h51_engine_ok else pd.DataFrame({"H59唯一決策": ["H61未完整部署｜不是沒有推薦。"]})
+        _h58_focus = build_h62_single_decision_truth_table(_h51_source_ui, max_rows=10) if _h51_engine_ok else pd.DataFrame({"H62唯一決策": ["H62未完整部署｜不是沒有推薦。"]})
     except Exception as _h58_ui_exc:
         _h51_source_ui = decision_source
-        _h58_focus = pd.DataFrame({"H59唯一決策": [f"H61唯一決策暫時無法建立：{_h58_ui_exc}"]})
+        _h58_focus = pd.DataFrame({"H62唯一決策": [f"H62唯一決策暫時無法建立：{_h58_ui_exc}"]})
     if isinstance(_h58_focus, pd.DataFrame) and not _h58_focus.empty:
-        _h58_tier_ui = _h58_focus.get("H60唯一決策", _h58_focus.get("H59唯一決策", _h58_focus.get("唯一決策", pd.Series([""] * len(_h58_focus))))).fillna("").astype(str)
+        _h58_tier_ui = _h58_focus.get("H62唯一決策", _h58_focus.get("H60唯一決策", _h58_focus.get("H59唯一決策", pd.Series([""] * len(_h58_focus))))).fillna("").astype(str)
         render_pro_kpi_row([
             {"label": "A1可執行", "value": str(int(_h58_tier_ui.str.startswith("A1").sum())), "delta": "Formal/V188＋盤前＋觸發才可做"},
             {"label": "A0盤前待確認", "value": str(int(_h58_tier_ui.str.startswith("A0").sum())), "delta": "收盤候選，隔夜未完成"},
@@ -13581,13 +13629,15 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             {"label": "E1頂級前兆", "value": str(int(_h58_tier_ui.str.startswith("E1").sum())), "delta": "全市場前1.5%研究，不能直接買"},
         ])
         st.dataframe(_format_df(_h58_focus), use_container_width=True, hide_index=True)
-        _h59_upstream_formal_ui = int(_h51_source_ui.get("H56上游權威層級", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str).eq("FORMAL").sum())
-        _h59_shown_formal_ui = int(_h58_focus.get("H56上游權威", pd.Series([""] * len(_h58_focus), index=_h58_focus.index)).fillna("").astype(str).eq("FORMAL").sum())
-        if _h59_upstream_formal_ui == _h59_shown_formal_ui:
-            st.success(f"H61決策完整性 PASS｜上游Formal {_h59_upstream_formal_ui} / {_h59_upstream_formal_ui} 已完整進入唯一決策。")
+        _h62_raw_formal_ui = int(_h51_source_ui.get("H62原始權威", _h51_source_ui.get("H56上游權威層級", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index))).fillna("").astype(str).eq("FORMAL").sum())
+        _h62_effective_formal_ui = int(_h51_source_ui.get("H62有效權威", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str).eq("EFFECTIVE-FORMAL").sum())
+        _h62_hold_ui = int(_h51_source_ui.get("H62有效權威", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str).eq("FORMAL-HOLD").sum())
+        _h62_shown_effective_ui = int(_h58_focus.get("H62有效權威", pd.Series([""] * len(_h58_focus), index=_h58_focus.index)).fillna("").astype(str).eq("EFFECTIVE-FORMAL").sum())
+        if _h62_effective_formal_ui == _h62_shown_effective_ui:
+            st.success(f"H62有效Formal完整性 PASS｜原始Formal {_h62_raw_formal_ui}；有效Formal {_h62_shown_effective_ui}/{_h62_effective_formal_ui}；FORMAL-HOLD {_h62_hold_ui}。")
         else:
-            st.error(f"H61決策完整性 FAIL｜上游Formal {_h59_upstream_formal_ui} 檔，但唯一決策只顯示 {_h59_shown_formal_ui} 檔；禁止依本表執行。")
-    st.info("閱讀順序固定：①H61唯一決策（先看機會成本/近期Alpha）→ ②主流族群/領漲股確認原因 → ③股神總排名做完整研究。H61允許第一屏少於10檔；沒有更好機會就等待，不為推薦而推薦。")
+            st.error(f"H62有效Formal完整性 FAIL｜有效Formal {_h62_effective_formal_ui} 檔，但唯一決策只顯示 {_h62_shown_effective_ui} 檔；禁止依本表執行。")
+    st.info("閱讀順序固定：①H62唯一決策（有效Formal/新領漲增量機會）→ ②主流族群/領漲股確認原因 → ③總排名稽核原始Formal與完整研究。沒有高增量機會就等待，不補熟面孔。")
 
     render_pro_section("研究層｜主流族群｜H57資金加速×族群點火廣度×H55/H54雙路徑")
     try:
@@ -13605,8 +13655,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     if isinstance(_h51_leader_ui, pd.DataFrame) and not _h51_leader_ui.empty:
         st.dataframe(_format_df(_h51_leader_ui), use_container_width=True, hide_index=True)
 
-    render_pro_section("研究層｜股神推薦總排名｜H61機會成本＋H57前兆＋H56交易真相")
-    st.caption("H61會把近期反覆入榜卻沒有Selection Alpha、10日預估空間偏小或RR偏差的熟面孔往後移；若近期Alpha重新轉正且上漲空間改善，可再回前排。完整研究仍保留，不是硬封鎖大型權值股。")
+    render_pro_section("研究層｜股神推薦總排名｜H62全市場增量機會＋H61近期Alpha＋H56交易真相")
+    st.caption("H62要求所有股票重新競爭今天的稀缺注意力：原始Formal若近期Alpha/增量價值衰退可FORMAL-HOLD；非Formal的新N1/N2可浮上研究前排。完整總排名仍保留原始Formal稽核，沒有任何股票名稱黑名單。")
     if callable(rotation_diagnostics):
         try:
             rotation_info = rotation_diagnostics(decision_source)
@@ -13984,9 +14034,10 @@ def _build_excel_bytes(
     _h51_export_engine_ok = bool(
         callable(apply_human_master_engine)
         and callable(build_h51_final_decision_table)
-        and callable(build_h61_single_decision_truth_table)
+        and callable(build_h62_single_decision_truth_table)
         and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION
         and H61_OPPORTUNITY_VERSION == H61_OPPORTUNITY_EXPECTED_VERSION
+        and H62_OPPORTUNITY_VERSION == H62_OPPORTUNITY_EXPECTED_VERSION
     )
     try:
         _h60_export_source = candidate_source
@@ -13996,8 +14047,8 @@ def _build_excel_bytes(
             except Exception:
                 _h60_export_source = candidate_source
         h51_source = apply_human_master_engine(_h60_export_source) if _h51_export_engine_ok else _h60_export_source
-        final_decision_df = build_h61_single_decision_truth_table(h51_source, max_rows=10) if _h51_export_engine_ok else pd.DataFrame({
-            "狀態": ["H61單一真相引擎未完整部署｜這不是『沒有推薦』。"],
+        final_decision_df = build_h62_single_decision_truth_table(h51_source, max_rows=10) if _h51_export_engine_ok else pd.DataFrame({
+            "狀態": ["H62單一真相引擎未完整部署｜這不是『沒有推薦』。"],
             "目前Page07版本": [PAGE07_SPEED_FIX_VERSION],
             "目前H51版本": [H51_HUMAN_MASTER_VERSION],
             "預期H51版本": [H51_HUMAN_MASTER_EXPECTED_VERSION],
@@ -14007,16 +14058,21 @@ def _build_excel_bytes(
         h51_source = candidate_source
         final_decision_df = pd.DataFrame({"狀態": [f"H51最終決策建立失敗：{type(_h51_focus_exc).__name__}: {_h51_focus_exc}"]})
 
-    _h59_upstream_formal_export = int(h51_source.get("H56上游權威層級", pd.Series([""] * len(h51_source), index=h51_source.index)).fillna("").astype(str).eq("FORMAL").sum()) if isinstance(h51_source, pd.DataFrame) else 0
-    _h59_shown_formal_export = int(final_decision_df.get("H56上游權威", pd.Series([""] * len(final_decision_df), index=final_decision_df.index)).fillna("").astype(str).eq("FORMAL").sum()) if isinstance(final_decision_df, pd.DataFrame) else 0
-    _h59_integrity_export = "PASS" if _h59_upstream_formal_export == _h59_shown_formal_export else "FAIL"
+    _h62_raw_formal_export = int(h51_source.get("H62原始權威", h51_source.get("H56上游權威層級", pd.Series([""] * len(h51_source), index=h51_source.index))).fillna("").astype(str).eq("FORMAL").sum()) if isinstance(h51_source, pd.DataFrame) else 0
+    _h62_effective_formal_export = int(h51_source.get("H62有效權威", pd.Series([""] * len(h51_source), index=h51_source.index)).fillna("").astype(str).eq("EFFECTIVE-FORMAL").sum()) if isinstance(h51_source, pd.DataFrame) else 0
+    _h62_hold_export = int(h51_source.get("H62有效權威", pd.Series([""] * len(h51_source), index=h51_source.index)).fillna("").astype(str).eq("FORMAL-HOLD").sum()) if isinstance(h51_source, pd.DataFrame) else 0
+    _h62_shown_effective_export = int(final_decision_df.get("H62有效權威", pd.Series([""] * len(final_decision_df), index=final_decision_df.index)).fillna("").astype(str).eq("EFFECTIVE-FORMAL").sum()) if isinstance(final_decision_df, pd.DataFrame) else 0
+    _h62_integrity_export = "PASS" if _h62_effective_formal_export == _h62_shown_effective_export else "FAIL"
     if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
-        summary_df["H60上游Formal檔數"] = _h59_upstream_formal_export
-        summary_df["H61唯一決策Formal顯示檔數"] = _h59_shown_formal_export
-        summary_df["H61唯一決策Formal召回"] = f"{_h59_integrity_export}｜Formal {_h59_shown_formal_export}/{_h59_upstream_formal_export}"
+        summary_df["H62原始Formal檔數"] = _h62_raw_formal_export
+        summary_df["H62有效Formal檔數"] = _h62_effective_formal_export
+        summary_df["H62FormalHold檔數"] = _h62_hold_export
+        summary_df["H62唯一決策有效Formal顯示檔數"] = _h62_shown_effective_export
+        summary_df["H62有效Formal完整性"] = f"{_h62_integrity_export}｜EffectiveFormal {_h62_shown_effective_export}/{_h62_effective_formal_export}"
         summary_df["H60單一真相版本"] = PAGE07_SPEED_FIX_VERSION
         summary_df["H61機會成本版本"] = H61_OPPORTUNITY_VERSION
-        summary_df["H61單一真相版本"] = PAGE07_SPEED_FIX_VERSION
+        summary_df["H62增量機會版本"] = H62_OPPORTUNITY_VERSION
+        summary_df["H62單一真相版本"] = PAGE07_SPEED_FIX_VERSION
         summary_df["H60_TDCC服務版本"] = H60_TDCC_VERSION
         if isinstance(h51_source, pd.DataFrame) and "H60鎖碼來源" in h51_source.columns:
             _h60_actual = int(h51_source["H60鎖碼來源"].fillna("").astype(str).str.startswith("ACTUAL").sum())
@@ -15196,8 +15252,8 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
         if not isinstance(source_df, pd.DataFrame) or source_df.empty:
             source_df = rec_df
 
-        # Keep the user's existing contract: Page07 executes, Page08 authority
-        # continues to permanently store recommendation records.
+        # H62: Page07 executes, but only this-run EFFECTIVE-FORMAL may enter the
+        # formal persistence path. Raw Formal / FORMAL-HOLD remains audit data.
         try:
             record_added, record_msgs = _v159_auto_record_actionable_recommendations(
                 source_df, background_write=False, require_remote_confirm=True
@@ -16485,7 +16541,7 @@ def main():
 
     render_pro_section("勾選/同步工具｜本輪舊版作戰名單（非H60決策來源）")
 
-    st.warning("這張表保留是為了勾選、自選股與推薦紀錄同步；它仍含舊版B+/A-/雷達角色，不能拿來取代上方H61唯一決策。")
+    st.warning("這張表保留是為了勾選、自選股與推薦紀錄同步；它仍含舊版B+/A-/雷達角色，不能拿來取代上方H62唯一決策。")
 
     top_selected_codes = st.session_state.pop(_k("top_pick_codes_next"), None)
     if top_selected_codes is None:
@@ -16605,7 +16661,7 @@ def main():
         )
         st.session_state[_k("top_table_selected_codes")] = picked_codes_from_top
         st.session_state[_k("top_pick_codes_next")] = picked_codes_from_top
-        st.success(f"已套用舊版作戰名單勾選：{len(picked_codes_from_top)} 檔；此動作只做同步/紀錄，不改變H61唯一決策。")
+        st.success(f"已套用舊版作戰名單勾選：{len(picked_codes_from_top)} 檔；此動作只做同步/紀錄，不改變H62唯一決策。")
     else:
         picked_codes_from_top = [
             _normalize_code(x)
@@ -16731,7 +16787,7 @@ def main():
 
     if _safe_str(st.session_state.get(_k("pick_strategy"), "結合版")) == "結合版" and isinstance(hot_pick_df, pd.DataFrame) and not hot_pick_df.empty:
         render_pro_section("舊版飆股補抓｜僅研究（H57 E1/PI3優先）")
-        st.caption("這是H57之前的舊版補抓研究表，不是H60決策來源；真正提前發現請優先看H57 E1/PI3與H61唯一決策。")
+        st.caption("這是H57之前的舊版補抓研究表，不是H60決策來源；真正提前發現請優先看H57 E1/PI3與H62唯一決策。")
         hot_show_cols = [
             "股票代號", "股票名稱", "市場別", "類別", "推薦模式", "推薦總分", "上漲機率估計%", "上漲機率等級",
             "市場環境分數", "型態名稱", "型態突破分數", "爆發等級", "爆發力分數",
