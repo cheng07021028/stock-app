@@ -96,8 +96,11 @@ def main():
         assert not str(r_fresh["H51交易許可"]).startswith("BUY-READY")
 
     leaders = build_h51_mainstream_leader_table(scored, max_rows=10)
-    assert "2454" in leaders["股票代號"].astype(str).tolist(), leaders.to_dict("records")
-    assert "H55反轉點火路徑分" in leaders.columns
+    # H55 may correctly discover a fresh ignition, but H64 is now the final
+    # research-quality ceiling. Without current strong/mainstream + verified
+    # holder lock, the row must not be resurrected on the leader front page.
+    assert str(r_fresh.get("H64研究層級", "")).startswith("D0")
+    assert "2454" not in leaders.get("股票代號", pd.Series([], dtype=str)).astype(str).tolist(), leaders.to_dict("records")
 
     sectors = build_h51_sector_table(scored, max_rows=10)
     assert "H55族群機會分" in sectors.columns
@@ -105,8 +108,8 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h63_formal_execution_identity_truth_20260907"' in page
-    assert "超級AI唯一決策｜H62 有效Formal×全市場增量機會×熟面孔淘汰" in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h64_strong_mainstream_holder_core_truth_20260908"' in page
+    assert "超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相" in page
 
     print("PASS v191_h55_dual_path_reversal_catalyst_smoke")
 

@@ -95,9 +95,9 @@ print('PASS Page07 refuses scheduler SUCCESS when Page08 history integrity/persi
 # remain eligible when the scan is formally usable.
 st.session_state[k('scan_quality_report')]={'正式推薦可用':True,'success':30}
 h62_action_df=pd.DataFrame([
-    {'股票代號':'1111','股票名稱':'熟面孔Formal','正式推薦分區':'正式下週主推薦','盤中雷達優先級':'','H62版本':ns['H62_OPPORTUNITY_VERSION'],'H62有效權威':'FORMAL-HOLD'},
-    {'股票代號':'2222','股票名稱':'健康Formal','正式推薦分區':'正式下週主推薦','盤中雷達優先級':'','H62版本':ns['H62_OPPORTUNITY_VERSION'],'H62有效權威':'EFFECTIVE-FORMAL'},
-    {'股票代號':'3333','股票名稱':'Aminus','正式推薦分區':'A-｜準主推薦小量試單','盤中雷達優先級':'','H62版本':ns['H62_OPPORTUNITY_VERSION'],'H62有效權威':'A-MINUS'},
+    {'股票代號':'1111','股票名稱':'熟面孔Formal','正式推薦分區':'正式下週主推薦','盤中雷達優先級':'','H62版本':ns['H62_OPPORTUNITY_VERSION'],'H62有效權威':'FORMAL-HOLD','H64版本':ns['H64_CORE_VERSION'],'H64有效權威':'FORMAL-HOLD'},
+    {'股票代號':'2222','股票名稱':'健康Formal','正式推薦分區':'正式下週主推薦','盤中雷達優先級':'','H62版本':ns['H62_OPPORTUNITY_VERSION'],'H62有效權威':'EFFECTIVE-FORMAL','H64版本':ns['H64_CORE_VERSION'],'H64有效權威':'EFFECTIVE-FORMAL'},
+    {'股票代號':'3333','股票名稱':'Aminus','正式推薦分區':'A-｜準主推薦小量試單','盤中雷達優先級':'','H62版本':ns['H62_OPPORTUNITY_VERSION'],'H62有效權威':'A-MINUS','H64版本':ns['H64_CORE_VERSION'],'H64有效權威':'A-MINUS'},
 ])
 ns['_phase93_single_source_decision_frame']=lambda rec,src: rec.copy()
 ns['assess_individual_sample_quality']=None
@@ -105,4 +105,4 @@ h62_action, h62_formal_ok, h62_notes = ns['_v191_actionable_tracking_frame'](h62
 assert h62_formal_ok, h62_notes
 assert h62_action['股票代號'].astype(str).tolist()==['2222','3333'], (h62_action.to_dict('records'),h62_notes)
 assert any('FORMAL-HOLD' in str(x) for x in h62_notes), h62_notes
-print('PASS H62 persistence guard excludes FORMAL-HOLD from Page08/Page10 current action path')
+print('PASS H62/H64 persistence guard excludes held Formal from Page08/Page10 current action path')

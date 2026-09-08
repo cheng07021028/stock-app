@@ -106,26 +106,35 @@ def _holder_lock_score(row: pd.Series) -> tuple[str, str, float | None, float | 
     delta = _f(row.get("TDCC千張大戶週變化pp"))
     data_date = _s(row.get("TDCC大戶資料日期"))
     if actual_status == "ACTUAL" and ratio is not None:
-        score = 48.0 + (ratio - 40.0) * 0.75
-        if delta is not None:
-            score += delta * 10.0
-            if delta < -1.5:
-                score -= abs(delta + 1.5) * 5.0
-        score = _clip(score)
+        # H64 truth correction: absolute TDCC ownership is not the same thing as
+        # *locking*.  A locking claim needs at least two snapshots so the weekly
+        # change is known.  The first ACTUAL snapshot therefore remains useful
+        # ownership context but is capped and explicitly marked unconfirmed.
+        score = 48.0 + (ratio - 40.0) * 0.55
         source = "ACTUAL｜TDCC千張大戶真實持股"
+        if delta is None:
+            score = min(_clip(score), 64.0)
+            level = "LKU｜真實持股已知，鎖碼趨勢未確認"
+            return source, data_date, ratio, delta, score, level
+        score += delta * 14.0
+        if delta <= -0.50:
+            score -= min(22.0, abs(delta) * 8.0)
+        score = _clip(score)
     else:
         proxy = _avg_available(row, [
             "大戶鎖碼分數", "大戶鎖碼代理分數", "大戶承接分", "投信鎖碼分", "籌碼續航分", "籌碼續航", "法人籌碼分數",
         ], 50.0)
-        score = _clip(proxy)
+        score = min(_clip(proxy), 62.0)
         source = "PROXY｜量價/法人/承接代理，非千張大戶真實持股"
         ratio = None
         delta = None
         data_date = ""
-    if score >= 78 and source.startswith("ACTUAL") and (delta is None or delta >= 0):
-        level = "LK1｜真實鎖碼強"
-    elif score >= 70:
-        level = "LK2｜鎖碼偏強"
+    if source.startswith("ACTUAL") and delta is not None and delta >= 0.20 and (ratio or 0) >= 50 and score >= 72:
+        level = "LK1｜TDCC千張大戶增持鎖碼確認"
+    elif source.startswith("ACTUAL") and delta is not None and -0.20 <= delta < 0.20 and (ratio or 0) >= 65 and score >= 68:
+        level = "LK2｜TDCC高持股穩定鎖碼"
+    elif source.startswith("ACTUAL") and delta is not None and delta <= -0.50:
+        level = "LKD｜TDCC千張大戶減碼"
     elif score >= 58:
         level = "LK3｜鎖碼觀察"
     else:
