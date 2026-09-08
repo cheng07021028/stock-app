@@ -39,7 +39,10 @@ def apply_h63_execution_truth(frame: pd.DataFrame) -> pd.DataFrame:
         return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
     out = frame.copy()
 
-    eff = _series(out, "H62有效權威")
+    # H64 is the final quality overlay when present. It may tighten an H62
+    # EFFECTIVE-FORMAL into FORMAL-QUALITY-HOLD, but never manufacture Formal.
+    h64_eff = _series(out, "H64有效權威")
+    eff = h64_eff.where(h64_eff.ne(""), _series(out, "H62有效權威"))
     raw = _series(out, "H62原始權威")
     if not raw.ne("").any():
         raw = _series(out, "H56上游權威層級")
@@ -61,12 +64,12 @@ def apply_h63_execution_truth(frame: pd.DataFrame) -> pd.DataFrame:
             formal = True
             role = "F1｜正式推薦＋每日精選" if d else "F0｜正式推薦"
             usage = "本輪真正正式推薦；仍須依盤前、觸發、守價、停損與RR執行。"
-            reason = "H62有效權威=EFFECTIVE-FORMAL"
-        elif e == "FORMAL-HOLD":
+            reason = "H64/H62有效權威=EFFECTIVE-FORMAL"
+        elif e in {"FORMAL-HOLD", "FORMAL-QUALITY-HOLD"}:
             formal = False
-            role = "FH｜原始Formal暫停"
+            role = "FH｜原始Formal暫停" if e == "FORMAL-HOLD" else "FQ｜Formal品質暫停"
             usage = "保留原始Formal稽核，但本輪不列正式作戰推薦。"
-            reason = "H62有效權威=FORMAL-HOLD"
+            reason = f"H64/H62有效權威={e}"
         elif e in {"A-MINUS", "RADAR", "RESTRICTED", "UNKNOWN"}:
             formal = False
             if e == "A-MINUS" or "A-" in b or "準主推薦" in b:
@@ -81,7 +84,7 @@ def apply_h63_execution_truth(frame: pd.DataFrame) -> pd.DataFrame:
             else:
                 role = "W｜一般研究"
                 usage = "非正式推薦；只供研究。"
-            reason = f"H62有效權威={e or 'UNKNOWN'}"
+            reason = f"H64/H62有效權威={e or 'UNKNOWN'}"
         else:
             # Legacy compatibility only when H62 evidence genuinely does not exist.
             legacy_formal = (r == "FORMAL") or b == "正式下週主推薦" or ex.startswith(("是", "true", "1"))
@@ -129,7 +132,14 @@ def build_h63_formal_execution_table(frame: pd.DataFrame, max_rows: int = 30) ->
             "H63是否可直接買": ["否"],
             "現在該做什麼": ["等待新機會；A-/Radar不冒充正式推薦。"],
         })
-    work = apply_h63_execution_truth(frame)
+    work = frame.copy()
+    try:
+        from godpick_h64_core_truth_engine import apply_h64_core_truth
+        if "H64版本" not in work.columns:
+            work = apply_h64_core_truth(work)
+    except Exception:
+        pass
+    work = apply_h63_execution_truth(work)
     mask = work["H63正式作戰資格"].astype(str).str.startswith("是")
     out = work.loc[mask].copy()
     if out.empty:
@@ -166,7 +176,14 @@ def build_h63_authority_audit_table(frame: pd.DataFrame, max_rows: int = 50) -> 
     """Human-facing audit table; explicitly not a recommendation list."""
     if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
         return pd.DataFrame()
-    work = apply_h63_execution_truth(frame)
+    work = frame.copy()
+    try:
+        from godpick_h64_core_truth_engine import apply_h64_core_truth
+        if "H64版本" not in work.columns:
+            work = apply_h64_core_truth(work)
+    except Exception:
+        pass
+    work = apply_h63_execution_truth(work)
     role = work["H63角色"].fillna("").astype(str)
     order = role.map(lambda x: 10 if x.startswith("F1") else 11 if x.startswith("F0") else 20 if x.startswith("FH") else 30 if x.startswith("A-") else 40 if x.startswith("R") else 50 if x.startswith("X") else 60)
     work["_H63role_order"] = order

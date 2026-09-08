@@ -1150,6 +1150,14 @@ def apply_human_master_engine(frame: pd.DataFrame) -> pd.DataFrame:
         work = apply_h62_incremental_opportunity_engine(work)
     except Exception:
         pass
+    # H64: final research/execution quality alignment.  It requires current
+    # strength + current/fresh mainstream + verifiable holder-lock trend before
+    # an H62 effective Formal may remain an executable core Formal.
+    try:
+        from godpick_h64_core_truth_engine import apply_h64_core_truth
+        work = apply_h64_core_truth(work)
+    except Exception:
+        pass
     return work
 
 
@@ -1670,9 +1678,17 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
         _h62front = pick.get("H62前排資格", pd.Series(["否"] * len(pick), index=pick.index)).fillna("否").astype(str)
         _h62eff = pick.get("H62有效權威", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
         pick = pick.loc[_h62eff.eq("EFFECTIVE-FORMAL") | (~_h62front.str.startswith("否") & ~_h62eff.eq("FORMAL-HOLD"))].copy()
+    # H64 quality truth: leader page must not resurrect rows that H42/H47 say
+    # are not current strong/mainstream simply because H62 incremental scores are
+    # high. Keep only H64 core / wait-lock / new-mainstream research plus valid
+    # effective Formal.
+    if "H64前排資格" in pick.columns:
+        _h64front = pick.get("H64前排資格", pd.Series(["否"] * len(pick), index=pick.index)).fillna("否").astype(str)
+        _h64eff = pick.get("H64有效權威", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
+        pick = pick.loc[_h64eff.eq("EFFECTIVE-FORMAL") | (~_h64front.str.startswith("否") & ~_h64eff.isin(["FORMAL-HOLD", "FORMAL-QUALITY-HOLD"]))].copy()
     if pick.empty:
         return pick
-    for c in ["H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H60大戶鎖碼真相分", "H60雪球複利分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
+    for c in ["H64核心共振分", "H64全市場核心百分位%", "H64真強勢分", "H64主流真相分", "H64鎖碼確認分", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H60大戶鎖碼真相分", "H60雪球複利分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54輪動備援分", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分", "H51族群主線分", "H51個股領漲品質分", "H51Pivot起漲分", "H51流動性分", "H51路徑RR"]:
         pick[c] = pd.to_numeric(pick.get(c, 0), errors="coerce").fillna(0.0)
     pick["_stage"] = pick["H51市場地位"].astype(str).map(lambda x: 5 if x.startswith("HM-EARLY") else 4 if x.startswith("HM-PULLBACK") else 3 if x.startswith("HM-LEADER") else 2 if x.startswith("HM-SETUP") else 1)
     _h56text = pick.get("H56最終參考層級", pd.Series([""] * len(pick), index=pick.index)).fillna("").astype(str)
@@ -1684,9 +1700,9 @@ def build_h51_mainstream_leader_table(frame: pd.DataFrame, max_rows: int = 20) -
         2.0 if h.startswith("W1") else 1.0
         for h, p in zip(_h56text.tolist(), _h57text.tolist())
     ]
-    pick.sort_values(["_h56route", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
+    pick.sort_values(["_h56route", "H64核心共振分", "H64全市場核心百分位%", "H64真強勢分", "H64主流真相分", "H64鎖碼確認分", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H56T1確認分", "H60三因子共振分", "H60主升段分", "H57全市場前兆百分位%", "H57飆股發動前兆分", "H57主流形成前兆分", "H55雙路徑隔日分", "H55反轉點火路徑分", "_stage", "H54隔日真相分", "H51發動潛力分"], ascending=False, inplace=True, kind="mergesort")
     cols = [c for c in [
-        "股票代號", "股票名稱", "類別", "H62機會層級", "H62有效權威", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H62熟面孔衰退扣分", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
+        "股票代號", "股票名稱", "類別", "H64研究層級", "H64品質閘門", "H64有效權威", "H64核心共振分", "H64全市場核心百分位%", "H64真強勢狀態", "H64主流真相狀態", "H64鎖碼趨勢狀態", "H62機會層級", "H62有效權威", "H62增量機會分", "H62全市場機會百分位%", "H62新領漲分", "H62熟面孔衰退扣分", "H51市場地位", "H51交易許可", "H51推薦等級", "H56最終參考層級", "H56上游權威層級", "H56隔夜證據狀態", "H56盤前重驗需求", "H56T1確認分",
         "H60三因子層級", "H60三因子共振分", "H60主升階段", "H60主升段分", "H60大戶鎖碼層級", "H60鎖碼來源", "H60大戶資料日期", "H60千張大戶持股比%", "H60千張大戶週變化pp", "H60大戶鎖碼真相分", "H60雪球股層級", "H60雪球複利分",
         "H57前兆階段", "H57研究優先層級", "H57精選雷達層級", "H57飆股發動前兆分", "H57全市場前兆百分位%", "H57資金加速度分", "H57波動壓縮分", "H57壓縮轉擴張分", "H57相對強度轉折分", "H57提前視窗分", "H57族群點火廣度分", "H57主流形成前兆分", "H57前兆證據完整度", "H57交易保護狀態",
         "H55參考層級", "H55機會型態", "H55雙路徑隔日分", "H55主線延續路徑分", "H55反轉點火路徑分", "H55逆風韌性分", "H55催化代理分", "H55回補雷達分", "H54決策層級", "H54隔日真相分", "H54主流延續分", "H54可執行確認分", "H54耗竭風險分", "H54隔夜風險扣分", "H54資訊空窗風險", "H54輪動備援分", "H53參考層級", "H53隔日優先分", "H53族群共振分", "H53領漲集群分", "H51發動潛力分", "H51專業參考分",

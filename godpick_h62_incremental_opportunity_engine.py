@@ -132,6 +132,26 @@ def apply_h62_incremental_opportunity_engine(frame: pd.DataFrame) -> pd.DataFram
         near5 = int(round(_num(row, ["近5次入榜次數"], 0)))
         consecutive = int(round(_num(row, ["連續入榜次數"], 0)))
         h61tier = _txt(row, ["H61機會層級"], "")
+        # H64-aligned truth guard: incremental opportunity cannot by itself turn
+        # a non-mainstream / non-strong familiar stock into an N1/N2 front-row
+        # candidate.  Current strength and current/fresh mainstream evidence must
+        # already exist, or H57 must show a genuine early-formation pattern.
+        h42_status = _txt(row, ["H42強勢狀態"], "")
+        h42_score = _num(row, ["H42強勢分"], 50.0)
+        h47rs = _num(row, ["H47個股相對強度分"], 50.0)
+        h51sector = _num(row, ["H51族群主線分"], 50.0)
+        h51leader = _num(row, ["H51個股領漲品質分"], 50.0)
+        h57phase = _txt(row, ["H57前兆階段"], "")
+        h57premain = _num(row, ["H57主流形成前兆分"], 50.0)
+        h57close = _num(row, ["當日收盤位置%"], 50.0)
+        current_strong = (
+            (bool(h42_status) and not h42_status.startswith("S-NO") and h42_score >= 58 and h47rs >= 58 and h51leader >= 55)
+            or (h57phase.startswith(("PI2", "PI3", "IG1")) and h57cash >= 65 and h57rs >= 60 and h51leader >= 52 and h57close >= 58)
+        )
+        current_mainstream = (
+            (h51sector >= 60 and h53 >= 58)
+            or (h57premain >= 65 and h53 >= 56)
+        )
 
         # Recent proof deliberately gives neutral credit when there are too few
         # mature samples; H62 is not allowed to punish a genuinely new stock for
@@ -199,18 +219,20 @@ def apply_h62_incremental_opportunity_engine(frame: pd.DataFrame) -> pd.DataFram
         elif effective == "EFFECTIVE-FORMAL":
             tier = "F1｜有效Formal"
             front = "是｜有效Formal保留"
-        elif incremental >= 75 and h57pct >= 90 and familiar_pen < 12:
+        elif incremental >= 75 and h57pct >= 90 and familiar_pen < 12 and current_strong and current_mainstream:
             tier = "N1｜全市場新領漲機會"
             front = "是｜新機會研究"
-        elif incremental >= 66 and h57pct >= 80:
+        elif incremental >= 66 and h57pct >= 80 and current_strong and current_mainstream:
             tier = "N2｜高增量新機會"
             front = "是｜新機會研究"
-        elif (_txt(row, ["H55參考層級"], "").startswith("R2") or _txt(row, ["H57前兆階段"], "").startswith(("PI2", "PI3", "IG1"))) and new_leader >= 68.0 and familiar_pen < 12.0:
-            # Preserve genuinely fresh H55/H57 discovery recall even when H61
-            # lacks mature headroom/alpha history. H62 is a scarce-attention
-            # guard, not a reason to hide new ignition/pre-ignition candidates.
+        elif (_txt(row, ["H55參考層級"], "").startswith("R2") or h57phase.startswith(("PI2", "PI3", "IG1"))) and new_leader >= 68.0 and familiar_pen < 12.0 and current_strong and current_mainstream:
+            # Preserve genuine fresh discovery, but only when the current tape
+            # also confirms strength + mainstream formation.
             tier = "N2｜高增量新機會"
             front = "是｜新機會研究"
+        elif not current_strong or not current_mainstream:
+            tier = "D0｜非強勢/非主流增量降權"
+            front = "否｜不占前排"
         elif h61tier.startswith(("R0", "L0")) or (recent_n >= 2 and recent_alpha <= -0.5 and incremental < 58):
             tier = "D0｜熟面孔/低增量降權"
             front = "否｜不占前排"
@@ -224,7 +246,7 @@ def apply_h62_incremental_opportunity_engine(frame: pd.DataFrame) -> pd.DataFram
         reason = (
             f"原始權威={auth}/有效權威={effective}；近期成熟{recent_n}筆、Alpha{recent_alpha:+.2f}pp/正Alpha{pos_alpha:.0f}%；"
             f"10日預估{expected10:+.2f}%/增量上漲空間{incremental_upside:.1f}；RR品質{rrq:.1f}；"
-            f"新領漲{new_leader:.1f}/H57百分位{h57pct:.1f}；近5次{near5}/連續{consecutive}；"
+            f"新領漲{new_leader:.1f}/H57百分位{h57pct:.1f}；當前強勢={current_strong}/主流={current_mainstream}；近5次{near5}/連續{consecutive}；"
             f"熟面孔衰退扣{familiar_pen:.1f}；增量機會{incremental:.1f}。"
         )
         rows.append({
@@ -263,7 +285,7 @@ def apply_h62_incremental_opportunity_engine(frame: pd.DataFrame) -> pd.DataFram
         inc = _f(addon.at[idx, "H62增量機會分"])
         pen = _f(addon.at[idx, "H62熟面孔衰退扣分"])
         if eff not in {"EFFECTIVE-FORMAL", "FORMAL-HOLD"}:
-            if pctv >= 97.0 and inc >= 68.0 and pen < 14.0:
+            if pctv >= 97.0 and inc >= 68.0 and pen < 14.0 and not tier.startswith("D0"):
                 addon.at[idx, "H62機會層級"] = "N1｜全市場新領漲機會"
                 addon.at[idx, "H62前排資格"] = "是｜新機會研究"
             elif pctv >= 90.0 and inc >= 62.0 and not tier.startswith("D0"):
