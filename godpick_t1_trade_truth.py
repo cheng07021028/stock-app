@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h60_mainrise_holder_snowball_truth_20260904"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h65_multifactor_observation_learning_20260909"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -503,11 +503,11 @@ def _selection_cohort_metrics(rows: list[dict[str, Any]], predicate: Callable[[d
 
 
 def build_h57_h60_learning_summary(rows: Any) -> dict[str, Any]:
-    """Selection-quality telemetry for H57/H59/H60 research cohorts.
+    """Selection-quality telemetry for H57/H59/H60/H65 research cohorts.
 
-    H60 Main-rise/Snowball/T3 metrics are *selection* metrics only. A research
-    label never creates an executable trade; Entry/Risk truth remains governed
-    by 是否納入可執行績效.
+    H65 W1/W2/W3, like H60 Main-rise/Snowball/T3, are *selection* metrics only.
+    A research label never creates an executable trade; Entry/Risk truth remains
+    governed by 是否納入可執行績效.
     """
     items = [r for r in _rows(rows) if isinstance(r, dict) and bool(r.get("T1成熟"))]
     out: dict[str, Any] = {}
@@ -518,6 +518,9 @@ def build_h57_h60_learning_summary(rows: Any) -> dict[str, Any]:
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H60主升階段")).startswith("MR1"), "H60_MR1"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H60雪球股層級")).startswith("SB1"), "H60_SB1"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H60三因子層級")).startswith("T3"), "H60_T3"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H65觀察層級")).startswith("W1"), "H65_W1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H65觀察層級")).startswith("W2"), "H65_W2"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H65觀察層級")).startswith("W3"), "H65_W3"))
     return out
 
 
@@ -655,6 +658,13 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H60三因子共振分": _f(original.get("H60三因子共振分")),
         "H60三因子層級": _s(original.get("H60三因子層級")),
         "H60版本": _s(original.get("H60版本")) or "v191_h60_mainrise_holder_snowball_truth_20260904",
+        "H65觀察層級": _s(original.get("H65觀察層級")),
+        "H65觀察推薦": _s(original.get("H65觀察推薦")),
+        "H65多因子觀察分": _f(original.get("H65多因子觀察分")),
+        "H65全市場觀察百分位%": _f(original.get("H65全市場觀察百分位%")),
+        "H65資料覆蓋%": _f(original.get("H65資料覆蓋%")),
+        "H65風險扣分": _f(original.get("H65風險扣分")),
+        "H65版本": _s(original.get("H65版本")) or "v191_h65_multifactor_observation_radar_20260909",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),

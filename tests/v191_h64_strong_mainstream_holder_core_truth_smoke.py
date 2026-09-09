@@ -112,8 +112,8 @@ def main():
     assert "9001" not in set(core.get("股票代號", pd.Series([], dtype=str)).astype(str))
 
     page=(ROOT/"pages"/"7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h64_strong_mainstream_holder_core_truth_20260908"' in page
-    assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H64-STRONG-MAINSTREAM-HOLDER-CORE-TRUTH-20260908"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h65_multifactor_observation_radar_20260909"' in page
+    assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H65-MULTIFACTOR-OBSERVATION-RADAR-20260909"' in page
     assert "build_h64_single_decision_truth_table" in page
     assert "H64 強勢×主流×大戶鎖碼真相" in page
     print("PASS H64 strong-mainstream-holder core truth smoke")
