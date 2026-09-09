@@ -1,0 +1,50 @@
+V191-H66 測試報告｜2026-09-09
+
+1. Python compileall
+   - 完整 7/22 專案基準 + H52～H66 累積 overlay：PASS
+
+2. 累積 smoke / regression
+   - H52～H66：19 PASS / 0 FAIL
+   - v191_page07_canonical_runner_smoke.py：SKIP
+     原因：歷史測試專用 godpick_headless_page_loader.py 不存在於可取得的完整 7/22 基準與 H51～H65 修正鏈。
+     此為測試基礎設施缺件，不列為產品 FAIL；其餘 Page07 靜態整合、H64/H65/H66 權威與 T1 學習回歸均 PASS。
+
+3. H66 新增核心測試
+   - v191_h66_adaptive_timing_engine_smoke.py：PASS
+     驗證正常強勢股、矛盾股、Sell-the-News、波段股、Formal 不被 H66 改寫。
+   - v191_h66_page_excel_static_smoke.py：PASS
+     驗證 Page07 import/version/sort/UI/Excel/H66 sheets 與績效欄位。
+   - v191_h66_t1_rank_learning_smoke.py：PASS
+     驗證 RankIC、NDCG@10、Top1/3/5/10、T+2 cohort 與 base-rate Brier。
+
+4. 1,700 檔全市場效能 + 缺值 Fuzz
+   - 股票數：1,700
+   - 模擬輸入缺值：約 12%
+   - H66 排序耗時：1.2193 秒
+   - 吞吐：約 1,394 rows/sec
+   - H66T1自適應排序分：全部 0～100
+   - 全市場順位：1,700 個唯一順位
+   - 結果：PASS
+
+5. 2026-09-07 真實作戰表 Replay
+   - 僅使用 9/7 作戰表當時已有欄位，不帶入 9/8、9/9 未來漲跌。
+   - Top10：
+     #1 世界 5347 79.71 A1
+     #2 中砂 1560 75.64 A1
+     #3 欣興 3037 68.08 A2
+     #4 台光電 2383 67.82 A2
+     #5 世紀鋼 9958 66.76 A2
+     #6 嘉基 6715 62.85 B1
+     #7 鈺創 5351 62.74 B1
+     #8 臺慶科 3357 61.91 B1
+     #9 藥華藥 6446 60.79 B1
+     #10 天二科技 6834 58.61 B1
+   - 威強電 3022：#30，7.04，R0；收盤品質 29.89、法人加速度 33.61、矛盾扣分 28、利多不漲扣分 10。
+   - 結果：PASS，已能辨識「高增量分但收盤/法人/點火訊號矛盾」的錯誤前排案例。
+
+6. 交付原則
+   - 不降低 H64 Formal 門檻。
+   - 不把 H65/H66 研究層寫成正式推薦。
+   - 不使用未來資料做當日排序。
+   - 不用 head()/隱性限筆數假裝效能提升。
+   - 自適應學習需 >=30 成熟樣本才啟動，單支柱最大 ±15%。

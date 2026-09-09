@@ -1,0 +1,41 @@
+V191-H63｜正式推薦身分真相＋網頁/Excel正式作戰單一來源｜2026-09-07
+
+【為什麼修】
+Page07 目前同時顯示：H34每日精選、Formal、A-準主推薦、B+盤中雷達與H62唯一決策。使用者容易把整張「分區作戰明細」或任何H34每日精選都當成正式推薦。
+H62 又新增 FORMAL-HOLD：上游原始Formal仍保留稽核，但本輪可能已不是有效Formal。因此「正式推薦分區=正式下週主推薦」本身已不足以代表本輪真正作戰推薦。
+
+【H63唯一身分】
+F1｜正式推薦＋每日精選：H62有效權威=EFFECTIVE-FORMAL，且H34每日精選=是。
+F0｜正式推薦：H62有效權威=EFFECTIVE-FORMAL，但未列H34每日精選；仍是正式推薦，只是非每日精選優先。
+FH｜原始Formal暫停：H62有效權威=FORMAL-HOLD；保留稽核，本輪不得當正式作戰推薦。
+A-｜準主推薦條件候選：非正式推薦；只可在條件觸發且守價後小量試單。
+R｜盤中雷達研究：非正式推薦；只供盤中研究。
+X/W：限制/一般研究，均非正式推薦。
+
+【網頁】
+1. KPI 將「正式推薦」拆成「原始Formal」與「有效正式推薦」。
+2. 新增「本輪真正正式推薦｜H63 唯一作戰清單」，只顯示 H62 EFFECTIVE-FORMAL。
+3. H34每日精選若不是有效Formal，移入預設收合的「A-/Radar 每日條件候選｜非正式推薦」。
+4. 原大型 Formal/A-/Radar 表改為「權威底層稽核｜非第二份推薦清單」，預設收合。
+5. 正式推薦仍不是開盤直接買：必須遵守盤前、觸發、守價、停損、RR。
+
+【Excel】
+H63 改為8個核心活頁：
+1. 超級AI最終決策：H62有效Formal＋N1/N2增量機會唯一決策。
+2. 正式推薦作戰：新增，只由同一 build_h63_formal_execution_table() 產生，只收 H62 EFFECTIVE-FORMAL。
+3. 主流族群（研究）
+4. 主流領漲股（研究）
+5. 股神推薦總排名（完整研究/稽核）
+6. AI績效驗證
+7. T+1實戰真相
+8. 系統健康與資料品質
+A-/Radar 不會混進「正式推薦作戰」，但完整資料仍保留於總排名。
+
+【實際回放】
+以 2026-09-06 Excel 前30名重新套 H62/H63：技嘉 raw FORMAL 被 H62 判 FORMAL-HOLD，因此 H63 正式推薦作戰為 NONE；不會再因上游曾是Formal而冒充本輪真正推薦。
+以使用者截圖的台積電情境做合成：若 H62有效權威=EFFECTIVE-FORMAL 且H34每日精選=是，H63=>F1｜正式推薦＋每日精選；仍顯示「不可直接買，需盤前/觸發/守價/RR」。
+
+【版本】
+godpick_h63_execution_truth_engine.py = v191_h63_formal_execution_identity_truth_20260907
+Page07 = page07_v191_h63_formal_execution_identity_truth_20260907
+Excel = V191-H63-FORMAL-EXECUTION-IDENTITY-TRUTH-20260907

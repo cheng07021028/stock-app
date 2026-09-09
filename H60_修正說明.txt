@@ -1,0 +1,73 @@
+V191-H60｜主升 × 大戶鎖碼真相 × 雪球複利
+日期：2026-09-04
+
+【正式定位】
+H60 是研究/選股強化層，不是新的買進權威。完整順序仍為：
+H57 提前發現 → H60 主升/鎖碼/雪球研究 → Formal/V188 → H56盤前隔夜確認 → Entry/守價/Stop/RR。
+H60 不得反向覆寫 Formal/V188/H51/H56，也不因三因子高分直接建立新倉。
+
+【本次正式修正】
+1. 修正 A- 準主推薦被誤判 FORMAL：
+   - 舊 H59 authority parser 可能先讀到「Formal/A-權威＋V188均通過」字樣，
+     而忽略「是否正式推薦=否｜準主推薦」與 A- 分區。
+   - H60 改為 A-/準主推薦顯式證據優先，再判 FORMAL。
+   - A- 永遠只能 P0/A- 等待，不得自行升成 A1 Formal。
+
+2. 新增 H60 主升段：
+   - H60主升段分、H60主升階段（MR1/MR2/MR3/MR0）。
+   - 綜合既有主流主升、H51發動、H53共振、H55延續、H57主流形成，
+     並扣除 H54耗竭及短中期過度延伸。
+
+3. 新增 TDCC 大戶鎖碼真相服務：
+   - 官方來源：TDCC 開放資料「集保戶股權分散表」CSV。
+   - 只把持股分級15（1,000,001股以上）視為千張以上大戶真實持股。
+   - 輸出千張大戶持股比%、資料日期、前期日期、週變化pp。
+   - 新資料日期出現時保留前一期快照，供週變化計算。
+   - ACTUAL = 官方TDCC；PROXY = 原有量價/法人/承接代理。
+   - PROXY 絕不冒充真實千張大戶。
+   - TDCC 網路逾時/失敗不阻斷推薦，安全回退 PROXY。
+
+4. 新增 H60 雪球複利：
+   - H60雪球複利分、H60雪球股層級（SB1/SB2/SB3/SB0）。
+   - 綜合基本面/營收/EPS成長、受控趨勢、籌碼續航、大戶鎖碼與H51品質，
+     再扣耗竭、追價與過度延伸。
+
+5. 新增 H60 三因子共振：
+   - T3-A：MR1主升＋ACTUAL真實鎖碼＋SB1雪球核心。
+   - T3-P：主升＋PROXY鎖碼＋SB1雪球核心。
+   - T2/T1/T0：較低等級研究共振。
+   - T3 仍不是 BUY，Formal/V188/H56 未通過前不可執行。
+
+6. 網頁/Excel 單一真相：
+   - 新增 build_h60_single_decision_truth_table()。
+   - 第一張仍以 H59 authority-first 決策為權威，但前移顯示 H60 主升、鎖碼、雪球與三因子。
+   - 股神推薦總排名新增 H60 研究欄位。
+   - 主流領漲股與主流族群加入 H60 複利/鎖碼研究資訊。
+   - 系統健康顯示 ACTUAL/PROXY 覆蓋，讓使用者一眼知道是否為真實TDCC資料。
+
+7. T+1 學習：
+   - T+1不可變快照新增 H60 主升/鎖碼/雪球/三因子欄位。
+   - AI績效驗證新增 H60_MR1、H60_SB1、H60_T3 成熟樣本、正報酬率、平均1日報酬、平均Selection Alpha。
+   - 這些皆是 Selection 指標；未授權/未觸發仍不得計成交易盈虧。
+
+【驗證】
+- 從 2026-08-26 原始完整 ZIP 乾淨解壓，依序套 H52→H53→H54→H55→H56→H57→H58→H59→H60。
+- python -m compileall -q . PASS。
+- H52～H60 九項 smoke 全 PASS。
+- Page07 canonical runner 3項 PASS。
+- V188 trade-quality PASS。
+- Page07 duplicate-columns JSON exit 0。
+- H34 daily safe-selection exit 0。
+- V188 T+1 calibration PASS。
+- H9 T+1 execution truth 6項 PASS。
+- 1,710檔合成市場：H60全流程約7.2秒（本容器CPU，非現場總耗時），無重複欄位；A- 156檔均維持 A-MINUS，未被誤升 FORMAL。
+- TDCC 官方 CSV parser、ACTUAL/PROXY 分流、前後期快照與週變化 fixture 模擬 PASS。
+
+【TDCC現場注意】
+本次執行容器無法解析 opendata.tdcc.com.tw DNS，因此未能在容器內完成真實 HTTP 下載；
+但官方資料網址與欄位結構已核對，程式的 parser/cache/fallback 已用 fixture 模擬通過。
+現場可連外時會優先抓 ACTUAL；若連外失敗會清楚顯示 PROXY，不會中斷股神推薦或假造官方持股。
+
+【安裝】
+將 ZIP 完整解壓後，以相同相對路徑覆蓋目前 H59 基準即可。
+不要用 H50～H59 舊修正包反向覆蓋 H60。

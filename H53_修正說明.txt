@@ -1,0 +1,39 @@
+股票爬蟲／Streamlit 股神版系統
+V191-H53｜主流共振＋領漲集群＋隔日優先真相
+日期：2026-08-28
+
+一、績效檢討核心
+1. 2026-08-27「超級AI最終決策」六檔皆為 SETUP-PREP，正式 BUY-READY 仍為 0；今日上漲只能視為等待清單有效性驗證，不能冒充正式可執行交易績效。
+2. 蜜望實、立隆電、臺慶科實際屬同一波被動元件／電容資金鏈，但 H52 中蜜望實、臺慶科仍可能落在「電子零組件業」，造成同一主線被拆散；被動元件在主流族群表被低估。
+3. H52 主流族群表仍主要使用 H51族群主線平均＋前三品質＋Pivot＋新鮮比例，沒有把既有的族群廣度、攻擊強度、量能、資金流與當日同步上漲比例充分納入。
+
+二、H53 正式修正
+1. 擴充精準被動元件分類：蜜望實、臺慶科/台慶科、鈺邦、信昌電、金山電、日電貿、艾華、立敦、佳邦、千如、興勤等，避免被塞回「電子零組件業」。
+2. 新增 H53族群共振分：以整個候選母體計算族群上漲廣度、強勢比例、量比確認、H51高品質Setup比例，再融合既有族群廣度／攻擊／成交額／資金流；小樣本會向50分收縮，避免單一股票題材假主流。
+3. 對「半導體業／電子零組件業／光電業／其他電子業／電腦及週邊設備業」等父層大分類加入分類稀釋扣分；不刪除資料，只降低它們在『主流題材』排序中的誤導性。
+4. 新增 H53領漲集群分：領漲品質＋H51發動潛力＋量價＋族群廣度/攻擊＋族群前三領漲共同確認，避免只因單一強股就認定整個族群是主線。
+5. 新增 H53隔日優先分：發動潛力、專業參考、族群共振、領漲集群、可執行分共同排序，另對當日過度噴出、5日延伸與高追價風險扣分，避免事後追高。
+6. 新增 H53參考層級：
+   - A1 READY-CONFIRMED：原本就是 BUY-READY，且主流共振/隔日優先再確認。
+   - A2 BUY-READY：交易權威可執行，但族群共振普通。
+   - P1 PRIME-PREP：仍是 SETUP-PREP，但屬隔日最優先等待。
+   - P2 SETUP-PREP：一般高品質等待。
+   - W1 THEME-LEADER／W2 RESEARCH：研究層。
+   H53參考層級不得反向覆寫 H51/V188/Formal 交易許可。
+7. 「超級AI最終決策」「主流領漲股」「股神推薦總排名」排序均加入 H53 隔日優先／族群共振／領漲集群；BUY-READY 與 SETUP-PREP 的交易層級仍優先於研究分數。
+8. 主流族群頁升級為 H53 廣度×攻擊×量能×資金共振，提供族群樣本可信度與分類稀釋扣分，讓使用者看得出『多檔一起動』與『只有一檔強』的差異。
+
+三、版本
+- Page07：page07_v191_h53_sector_resonance_nextday_priority_20260828
+- Human Master：v191_h53_sector_resonance_nextday_priority_20260828
+
+四、驗證
+- python -m compileall -q .：PASS
+- tests/v191_h53_sector_resonance_smoke.py：PASS
+- tests/v191_h52_mainstream_precision_smoke.py：PASS（已允許新 H53 版本保留 H52 行為）
+- tests/v191_hotfix23_page7_duplicate_columns_json_smoke.py：PASS
+- tests/v191_page07_canonical_runner_smoke.py：PASS
+- tests/v188_trade_quality_governance_smoke.py：PASS
+- tests/v191_hotfix34_daily_1to3_safe_selection_smoke.py：PASS
+
+注意：以上為此次相關針對性回歸，不宣稱所有歷史 legacy tests 全數通過。H53 不因今日上漲而放寬 Formal/V188/H51 買進門檻，避免事後擬合。

@@ -1,0 +1,46 @@
+股票爬蟲／Streamlit 股神版系統
+V191-H62｜有效 Formal × 全市場增量機會 × 熟面孔淘汰
+日期：2026-09-07
+
+【修正目的】
+針對技嘉、鴻海、信邦、微星等熟面孔反覆出現在高注意力位置，但近期 Selection Alpha、剩餘上漲空間與實際增量價值未同步證明的問題。
+H62 不以股票名稱黑名單處理，也不刪除原始 Formal/A-/研究證據；改用「本輪有效 Formal」與「全市場增量機會競爭」重新決定稀缺前排席位。
+
+【H62 核心】
+1. 原始 Formal 與本輪有效 Formal 分離：
+   - EFFECTIVE-FORMAL：原始 Formal 且近期 Alpha / 剩餘空間 / RR / 新鮮機會仍可證明本輪價值。
+   - FORMAL-HOLD：原始 Formal 保留稽核，但近期成熟 Selection Alpha 與增量機會明顯衰退，本輪暫停前排與正式作戰 persistence。
+   - FORMAL-HOLD 不是永久封鎖；後續 Alpha、上漲空間、RR、新鮮度改善可自動恢復。
+2. 新增 H62 全市場增量機會：近期證明、增量上漲空間、RR、新領漲/資金加速/RS轉折/Pre-Ignition、主升/族群，扣除熟面孔衰退與反覆曝光。
+3. N1/N2 新領漲研究只提高召回與前排研究價值，永遠不建立 BUY 權限。
+4. H55 R2 與 H57 PI2/PI3/IG1 真正新點火候選保留研究召回，不因缺少成熟歷史被 H62 誤殺。
+5. 主流領漲股頁接受 H62 守門：D0/W0/FORMAL-HOLD 不再因舊 Leader/流動性反覆霸榜；完整證據仍保留在股神推薦總排名。
+6. 股神推薦總排名同一交易層級內改以 H62 有效Formal、前排資格、增量機會、全市場百分位、新領漲優先，再看 H61/H57/H51。
+7. Page08 / Page10 / 最新 action persistence 使用 H62 有效 Formal：原始 Formal 若為 FORMAL-HOLD，本輪不寫成正式作戰推薦；原始權威仍保留於診斷/總排名。
+8. 網頁與 Excel 第一張統一改用 build_h62_single_decision_truth_table()。
+
+【2026-09-06 實際 Excel 回放】
+以使用者上傳「股神正式推薦作戰表_全部_20260906_153050.xlsx」總排名前30實際欄位套 H62：
+- 技嘉：原始 FORMAL，H61近期Alpha約 -0.7929pp、H61機會價值46.69、10日預估約+2.61% → FORMAL-HOLD / D0，不占第一屏。
+- 鴻海：A-，近期Alpha約 -1.2229pp → D0，不占第一屏。
+- 信邦：A-，近期Alpha約 -0.8549pp、10日預估約+1.14%、RR品質低 → D0，不占第一屏。
+- 實際前30回放只有 3022 威強電達 H62 N2 高增量新機會研究前排；N2 仍不可直接買。
+因此不是「把技嘉拿掉就硬補另一支熟面孔」，而是允許只剩少量真正增量研究候選。
+
+【驗證】
+從 2026-08-26 完整原始 ZIP 乾淨解壓，依序套 H52→H53→H54→H55→H56→H57→H58→H59→H60→H61→H62：
+- python -m compileall -q .：PASS
+- H52～H62 相關 smoke：PASS
+- Page07 canonical runner：PASS（三項原流程 + H62 FORMAL-HOLD persistence guard）
+- V188 trade-quality governance：PASS
+- Page07 duplicate-columns JSON：exit 0
+- H34 daily safe-selection：exit 0
+- V188 T+1 calibration：PASS
+- H9 T+1 execution truth：6項 PASS
+- 1,710 檔 H62-only 合成壓力：約 0.222 秒，本容器 CPU；duplicate columns=0。
+
+【重要治理】
+- H62 不改寫原始 Formal/V188 歷史欄位；只建立「本輪有效 Formal」作戰層。
+- N1/N2 不等於 BUY；仍須 Formal/V188 → H56盤前 → Entry/守價 → RR。
+- 不使用技嘉、鴻海、微星、信邦等名稱 hard-code；任何股票都必須用相同規則重新證明自己。
+- 沒有高增量候選時允許少推薦或 0 檔，不為湊數補位。

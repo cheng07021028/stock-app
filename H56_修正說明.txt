@@ -1,0 +1,71 @@
+股票爬蟲／Streamlit 股神版系統
+V191-H56｜Formal/V188 權威對齊＋T+1 盤前二階段確認
+日期：2026-09-02
+
+【本次 2026-09-01 推薦 → 2026-09-02 T+1 檢討】
+9/1「超級AI最終決策」6 檔：日月光投控、景碩、技嘉、鴻海、國巨*、漢唐。
+依 9/2 公開收盤：589、847、358、251、540、1025；相對 9/1 Excel 基準價 610、874、359、256、568、1100，約為 -3.44%、-3.09%、-0.28%、-1.95%、-4.93%、-6.82%。
+等權平均約 -3.42%；9/2 加權指數約 -1.67%，等權 Selection Alpha 約 -1.75 個百分點。
+前三檔原 H51 BUY-READY 平均約 -2.27%；後三檔 SETUP-PREP 平均約 -4.57%。
+
+【證實的兩個結構性根因】
+1. H51/H55 越過上游 Formal/V188 權威：
+   9/1 Excel 的「股神推薦總排名」明確顯示前六檔是否正式推薦=false、正式推薦分區=盤中雷達追蹤，V188正式推薦資格亦為「否｜不越權升格」，操作許可為 WAIT-PULLBACK/RADAR；但第一頁仍將前三檔升為 H51 BUY-READY，違反既定權威規則。
+2. 「隔夜已確認」的時間語意錯誤：
+   9/1 14:33 匯出時，H54隔夜理由仍是「隔夜風控50／隔日大盤50／下跌機率50%」，美股/費半/台指夜盤亦未有 9/2 盤前新快照，但 H54/H55 卻把候選標成 READY-CONFIRMED／延續與隔夜條件確認。50/50/50 是未知/中性預設，不是盤前已確認。
+
+【H56 正式修正】
+A. Formal/V188 權威天花板
+- 新增上游權威解析：FORMAL / A-MINUS / RADAR / RESTRICTED / UNKNOWN。
+- 當 Page07 已提供明確權威欄位時，若 V188/Formal 未授權正式新倉，H51 即使模型 ready，也只能 SETUP-PREP，不得創造 BUY-READY。
+- UNKNOWN 僅供舊資料/獨立單元測試相容，不會假造正式權威。
+
+B. T+1 二階段確認
+- Stage 1｜收盤掃描：只建立候選與排序，不宣稱隔夜已確認。
+- Stage 2｜下一交易日盤前：必須取得時間晚於 K 線交易日的隔夜更新時間，且隔夜資料品質可用，才可升級 PREOPEN-CONFIRMED。
+- 50/50/50、NASDAQ/S&P/費半/夜盤全 0、缺隔夜更新時間，正式判定為 PENDING，而非 CONFIRMED。
+- 已更新但海外/費半/夜盤明顯偏空，正式降為 X2｜OVERNIGHT-RISK-HOLD，暫停新倉。
+
+C. H54 語意修正
+- H54 A1 也必須有新鮮盤前隔夜證據；未更新只能 A2，不再寫「隔夜條件確認」。
+- H54 P1 優先等待同樣要求盤前隔夜證據可用。
+
+D. H56 新欄位
+- H56上游權威層級
+- H56隔夜證據狀態
+- H56盤前重驗需求
+- H56T1確認分
+- H56最終參考層級
+- H56決策理由
+- H56版本
+
+E. H56 層級
+- A1｜PREOPEN-CONFIRMED：Formal/執行/隔夜三層確認；仍須觸發守價，禁止開盤追價。
+- A0｜PREOPEN-PENDING：收盤交易候選，但隔夜尚未發生/未更新。
+- P0｜AUTHORITY-CAPPED：上游只允許 A-/雷達，H51/H55 不得越權。
+- P0｜PREOPEN-PENDING：高品質等待，但盤前尚未重驗。
+- X2｜OVERNIGHT-RISK-HOLD：盤前隔夜已更新且明顯轉弱，暫停新倉。
+
+【實際 9/1 Excel 回放】
+將 9/1 第一頁 H51/H54/H55 結果與總排名的 V188/Formal 權威欄位合併後套 H56：
+日月光、景碩、技嘉、鴻海、國巨*、漢唐六檔皆不再顯示「隔夜已確認的正式可執行候選」；因上游正式推薦資格均未通過，H56 均被限制為 P0｜AUTHORITY-CAPPED，H56T1確認分上限 62。
+
+【版本】
+Human Master Engine：v191_h56_authority_preopen_two_stage_truth_20260902
+Page07：page07_v191_h56_authority_preopen_two_stage_truth_20260902
+
+【驗證】
+- python -m compileall -q .：PASS
+- v191_h52_mainstream_precision_smoke.py：PASS
+- v191_h53_sector_resonance_smoke.py：PASS
+- v191_h54_exhaustion_overnight_truth_smoke.py：PASS
+- v191_h55_dual_path_reversal_catalyst_smoke.py：PASS
+- v191_h56_authority_preopen_truth_smoke.py：PASS
+- Page07 duplicate-columns JSON smoke：PASS（exit 0）
+- Page07 canonical runner：PASS
+- V188 trade-quality governance：PASS
+- H34 daily safe selection smoke：PASS（exit 0）
+注意：以上為本次相關回歸，不宣稱全專案所有 legacy tests 全數 PASS。
+
+【安裝】
+以目前 H55 正式基準為前提，完整解壓本 ZIP 後將同名檔覆蓋至專案根目錄；不要只抽單一函式、不要用 H50/H51/H52/H53/H54 舊 patch 反向覆蓋。

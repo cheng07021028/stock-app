@@ -114,8 +114,8 @@ def main():
     assert fuzz_radar["股票代號"].nunique() == 30
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h65_multifactor_observation_radar_20260909"' in page
-    assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H65-MULTIFACTOR-OBSERVATION-RADAR-20260909"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in page
+    assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-20260909"' in page
     assert "H65 全市場多因子觀察雷達" in page
     assert '"多因子觀察雷達"' in page and '"多因子指標覆蓋"' in page
     assert "W1/W2/W3" in page

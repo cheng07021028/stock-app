@@ -1,0 +1,31 @@
+股票爬蟲／Streamlit 股神版系統
+V191-H52 主流精準起漲真相修正｜2026-08-27
+
+基準：2026-08-26 完整實檔 96bdde00-e22d-4435-8094-59c24bd3ca37.zip
+原始基準 SHA-256：2dea4425424f370cf5b400ec3b8a213cc18f01dd97fcd08f5771b03872470114
+
+正式修正檔：
+1. godpick_human_master_engine.py
+2. pages/7_股神推薦.py
+
+新增回歸測試：
+3. tests/v191_h52_mainstream_precision_smoke.py
+
+本次修正：
+A. 類別精準化：來源若只有半導體業／光電業／電子零組件業等大類，改以股票名稱重新辨識記憶體、PCB載板、光通訊、光學鏡頭、半導體測試介面等細主流，不再用 raw category 自己反推自己。
+B. 新增半導體測試介面分類，並補強 PCB 載板、光學鏡頭代表股。
+C. H51 新增「發動潛力分」，主流領漲頁排序納入主線、領漲、Pivot、量價、新鮮度與流動性，不再只靠專業總分。
+D. 當日跌幅 <= -7% 視為 SHOCK-DOWN；弱勢破壞亦需先收復。交易許可改 WAIT-RECLAIM，不得列 SETUP-PREP。
+E. BUY-READY／SETUP-PREP 門檻加入發動潛力、領漲品質、當日跌幅、收盤位置與上影線限制。
+F. 「超級AI最終決策」只顯示 BUY-READY 與 SETUP-PREP。LEADER-WATCH 全部留在「主流領漲股」，避免研究股被誤認為正式推薦。
+
+驗證：
+- 乾淨重新解壓 2026-08-26 完整 ZIP 後覆蓋本次檔案。
+- python -m compileall -q .：PASS
+- v191_h52_mainstream_precision_smoke.py：PASS
+- v191_hotfix23_page7_duplicate_columns_json_smoke.py：PASS
+- v191_page07_canonical_runner_smoke.py：PASS
+- v188_trade_quality_governance_smoke.py：PASS
+- v191_hotfix34_daily_1to3_safe_selection_smoke.py：PASS
+
+注意：本包是必要修正檔 overlay，不是完整專案。請只覆蓋同名路徑，不要用舊 H50/H51 patch 或舊 ZIP 回蓋。

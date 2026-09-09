@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h65_multifactor_observation_learning_20260909"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h66_adaptive_alpha_timing_learning_20260909"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -503,9 +503,9 @@ def _selection_cohort_metrics(rows: list[dict[str, Any]], predicate: Callable[[d
 
 
 def build_h57_h60_learning_summary(rows: Any) -> dict[str, Any]:
-    """Selection-quality telemetry for H57/H59/H60/H65 research cohorts.
+    """Selection-quality telemetry for H57/H59/H60/H65/H66 research cohorts.
 
-    H65 W1/W2/W3, like H60 Main-rise/Snowball/T3, are *selection* metrics only.
+    H65 W1/W2/W3 and H66 A1/A2/B1, like H60 Main-rise/Snowball/T3, are *selection* metrics only.
     A research label never creates an executable trade; Entry/Risk truth remains
     governed by 是否納入可執行績效.
     """
@@ -521,8 +521,98 @@ def build_h57_h60_learning_summary(rows: Any) -> dict[str, Any]:
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H65觀察層級")).startswith("W1"), "H65_W1"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H65觀察層級")).startswith("W2"), "H65_W2"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H65觀察層級")).startswith("W3"), "H65_W3"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H66T1層級")).startswith("A1"), "H66_A1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H66T1層級")).startswith("A2"), "H66_A2"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H66T1層級")).startswith("B1"), "H66_B1"))
     return out
 
+
+
+def _h66_ndcg(relevances: list[float], k: int = 10) -> float | None:
+    if not relevances:
+        return None
+    rel = [max(0.0, min(1.0, float(x))) for x in relevances[:k]]
+    def dcg(xs):
+        return sum(v / math.log2(i + 2.0) for i, v in enumerate(xs))
+    ideal = sorted(rel, reverse=True)
+    den = dcg(ideal)
+    return (dcg(rel) / den) if den > 0 else None
+
+
+def build_h66_rank_learning_summary(rows: Any) -> dict[str, Any]:
+    """Measure whether H66's order itself has predictive value.
+
+    Unlike cohort win-rate, this evaluates Top-K precision, Selection Alpha,
+    Spearman Rank IC and NDCG by recommendation date. A model can therefore no
+    longer look healthy merely because some names rose while rank #1 repeatedly
+    loses to rank #10.
+    """
+    items = [r for r in _rows(rows) if isinstance(r, dict) and bool(r.get("T1成熟"))]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in items:
+        d = _s(r.get("推薦日期") or r.get("推薦批次日期"))
+        rank = _f(r.get("H66T1全市場順位"), None)
+        score = _f(r.get("H66T1自適應排序分"), None)
+        alpha = _f(r.get("Selection Alpha%"), None)
+        ret = _f(r.get("隔日候選漲跌%"), None)
+        if not d or rank is None or score is None or alpha is None or ret is None:
+            continue
+        groups.setdefault(d, []).append(r)
+
+    rank_ics: list[float] = []
+    ndcgs: list[float] = []
+    top: dict[int, list[dict[str, Any]]] = {3: [], 5: [], 10: []}
+    top1: list[dict[str, Any]] = []
+    for _d, g in groups.items():
+        g = sorted(g, key=lambda r: (_f(r.get("H66T1全市場順位"), 999999) or 999999, -(_f(r.get("H66T1自適應排序分"), 0) or 0)))
+        if g:
+            top1.append(g[0])
+        for k in top:
+            top[k].extend(g[:k])
+        if len(g) >= 3:
+            sdf = pd.DataFrame({
+                "score": [_f(r.get("H66T1自適應排序分"), 0.0) or 0.0 for r in g],
+                "alpha": [_f(r.get("Selection Alpha%"), 0.0) or 0.0 for r in g],
+            })
+            corr = sdf["score"].rank(pct=True).corr(sdf["alpha"].rank(pct=True))
+            if corr is not None and math.isfinite(float(corr)):
+                rank_ics.append(float(corr))
+            # Realised-alpha percentile becomes non-negative relevance for NDCG.
+            rel = sdf["alpha"].rank(pct=True).tolist()
+            nval = _h66_ndcg(rel, 10)
+            if nval is not None:
+                ndcgs.append(nval)
+
+    out: dict[str, Any] = {
+        "H66排名成熟交易日": len(groups),
+        "H66平均RankIC": round(sum(rank_ics) / len(rank_ics), 4) if rank_ics else None,
+        "H66平均NDCG@10": round(sum(ndcgs) / len(ndcgs), 4) if ndcgs else None,
+    }
+    for k, arr in top.items():
+        rets = [_f(r.get("隔日候選漲跌%"), None) for r in arr]
+        rets = [x for x in rets if x is not None]
+        alphas = [_f(r.get("Selection Alpha%"), None) for r in arr]
+        alphas = [x for x in alphas if x is not None]
+        out[f"H66_Top{k}樣本"] = len(arr)
+        out[f"H66_Top{k}正報酬率%"] = round(sum(1 for x in rets if x > 0) / len(rets) * 100.0, 2) if rets else None
+        out[f"H66_Top{k}平均SelectionAlpha%"] = round(sum(alphas) / len(alphas), 4) if alphas else None
+    t1rets = [_f(r.get("隔日候選漲跌%"), None) for r in top1]
+    t1rets = [x for x in t1rets if x is not None]
+    t1alpha = [_f(r.get("Selection Alpha%"), None) for r in top1]
+    t1alpha = [x for x in t1alpha if x is not None]
+    out["H66_Top1樣本"] = len(top1)
+    out["H66_Top1正報酬率%"] = round(sum(1 for x in t1rets if x > 0) / len(t1rets) * 100.0, 2) if t1rets else None
+    out["H66_Top1平均SelectionAlpha%"] = round(sum(t1alpha) / len(t1alpha), 4) if t1alpha else None
+
+    # T+2 is kept separate and only uses rows for which the second-session
+    # outcome has matured; it never backfills missing T+2 with T+1.
+    for prefix in ("A1", "A2", "B1"):
+        cohort = [r for r in items if _s(r.get("H66T1層級")).startswith(prefix)]
+        r2 = [_f(r.get("推薦後2日%"), None) for r in cohort]
+        r2 = [x for x in r2 if x is not None]
+        out[f"H66_{prefix}T2成熟樣本"] = len(r2)
+        out[f"H66_{prefix}平均2日報酬%"] = round(sum(r2) / len(r2), 4) if r2 else None
+    return out
 
 def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
     """Backward-compatible alias for H60 telemetry."""
@@ -665,12 +755,32 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H65資料覆蓋%": _f(original.get("H65資料覆蓋%")),
         "H65風險扣分": _f(original.get("H65風險扣分")),
         "H65版本": _s(original.get("H65版本")) or "v191_h65_multifactor_observation_radar_20260909",
+        "H66結構品質分": _f(original.get("H66結構品質分")),
+        "H66T5波段品質分": _f(original.get("H66T5波段品質分")),
+        "H66收盤品質分": _f(original.get("H66收盤品質分")),
+        "H66法人加速度分": _f(original.get("H66法人加速度分")),
+        "H66主流點火分": _f(original.get("H66主流點火分")),
+        "H66技術買點分": _f(original.get("H66技術買點分")),
+        "H66量能流動性分": _f(original.get("H66量能流動性分")),
+        "H66短線動能分": _f(original.get("H66短線動能分")),
+        "H66矛盾訊號扣分": _f(original.get("H66矛盾訊號扣分")),
+        "H66利多不漲扣分": _f(original.get("H66利多不漲扣分")),
+        "H66市場廣度調整": _f(original.get("H66市場廣度調整")),
+        "H66歷史學習調整": _f(original.get("H66歷史學習調整")),
+        "H66T1自適應排序分": _f(original.get("H66T1自適應排序分")),
+        "H66T1全市場百分位%": _f(original.get("H66T1全市場百分位%")),
+        "H66T1全市場順位": _f(original.get("H66T1全市場順位")),
+        "H66T1層級": _s(original.get("H66T1層級")),
+        "H66T1觀察推薦": _s(original.get("H66T1觀察推薦")),
+        "H66適合週期": _s(original.get("H66適合週期")),
+        "H66版本": _s(original.get("H66版本")) or "v191_h66_adaptive_alpha_t1_timing_truth_20260909",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
         "隔日最低": _f(next_session.get("最低價") if "最低價" in next_session else next_session.get("low")),
         "隔日收盤": _f(next_session.get("收盤價") if "收盤價" in next_session else next_session.get("close")),
         "隔日候選漲跌%": cand_ret,
+        "推薦後2日%": _f(updated.get("推薦後2日%")),
         "市場基準隔日%": benchmark_ret,
         "Selection Alpha%": selection_alpha,
         "類股平均隔日%": None,
@@ -760,6 +870,8 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
         "brier_score": round(global_brier, 5) if global_brier is not None else None,
         "naive_50_brier_score": 0.25 if n else None,
         "brier_skill_vs_50_pct": round((1.0 - global_brier / 0.25) * 100.0, 2) if global_brier is not None else None,
+        "naive_base_rate_brier_score": round((actual_rate / 100.0) * (1.0 - actual_rate / 100.0), 5) if actual_rate is not None else None,
+        "brier_skill_vs_base_rate_pct": round((1.0 - global_brier / ((actual_rate / 100.0) * (1.0 - actual_rate / 100.0))) * 100.0, 2) if global_brier is not None and actual_rate not in (None, 0.0, 100.0) else None,
         "audit_rows_seen": len(audit_rows),
         "unique_performance_rows": len(rows),
         "duplicate_performance_rows_excluded": duplicate_rows_excluded,
@@ -818,7 +930,7 @@ def refresh_t1_trade_truth(
         quote = provider(row)
         if not isinstance(quote, dict) or not quote.get("ok"):
             return None, f"{_s(row.get('股票代號'))}:{_s((quote or {}).get('error')) or 'history failed'}"
-        updated = update_record_perf(row, quote, track_days=[1, 3, 5, 10, 20])
+        updated = update_record_perf(row, quote, track_days=[1, 2, 3, 5, 10, 20])
         market = _normalize_market(row.get("市場別") or row.get("市場"))
         bench_ret = _benchmark_return(benchmarks.get("otc" if market == "上櫃" else "twse", []), _recommendation_date(row))
         return _truth_from_updated(row, updated, quote, bench_ret), ""
@@ -883,6 +995,7 @@ def refresh_t1_trade_truth(
     h51_alpha = [_f(r.get("Selection Alpha%")) for r in h51_focus]
     h51_alpha = [x for x in h51_alpha if x is not None]
     h57_h59_learning = build_h57_h60_learning_summary(matured)
+    h66_rank_learning = build_h66_rank_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -910,7 +1023,9 @@ def refresh_t1_trade_truth(
             "H51專業主線平均1日報酬%": round(sum(h51_rets) / len(h51_rets), 4) if h51_rets else None,
             "H51專業主線平均SelectionAlpha%": round(sum(h51_alpha) / len(h51_alpha), 4) if h51_alpha else None,
             **h57_h59_learning,
+            **h66_rank_learning,
             "brier_score": calibration.get("brier_score"),
+            "brier_skill_vs_base_rate_pct": calibration.get("brier_skill_vs_base_rate_pct"),
         },
         "failures": failures[:80],
     }
@@ -972,7 +1087,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]

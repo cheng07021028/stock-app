@@ -1,0 +1,47 @@
+V191-H64｜當前強勢 × 當前主流 × TDCC鎖碼趨勢真相
+日期：2026-09-08
+
+一、為什麼需要 H64
+2026-09-07 實際 Excel 顯示：股神總排名前段多檔股票雖有 H61/H62 增量分，
+但同一列的 H42/H47 已明確標示「非主流領先優先」，H51 亦多為非主線；
+另外 TDCC 只有本期千張大戶持股比例、缺少前一期差異時，H60 舊邏輯仍可能標 LK1/LK2，
+把「持股很高」誤稱為「正在鎖碼」。這會讓研究排名離「真正強勢股／主流股／大戶鎖碼」愈來愈遠。
+
+二、H64 核心修正
+1. 新增 godpick_h64_core_truth_engine.py。
+2. 真強勢：H42 當前強勢 + H47 相對強度 + H51 領漲品質；或 H57 PI2/PI3/IG1 的新強勢形成證據。
+3. 真主流：H51 族群主線 + H53 共振/廣度/攻擊 + H57 主流形成 + H60 主升。
+4. 真鎖碼：TDCC ACTUAL 必須有前後期千張大戶持股變化；只有單一期高持股不能稱鎖碼。
+5. H62 N1/N2 加入當前強勢與當前主流硬門檻；cross-section percentile 不得再把 D0 非強勢/非主流股票重新升格。
+6. H62 EFFECTIVE-FORMAL 若未通過 H64 強勢×主流×鎖碼×RR，改為 FORMAL-QUALITY-HOLD；保留稽核，但本輪不進 Page08/Page10 正式作戰路徑。
+7. H64 第一屏只顯：
+   F1 核心正式、C2 核心強勢主流研究、C3 強勢主流待鎖碼、E1 新主流形成研究。
+   沒有合格者可以直接 NONE，不補弱股。
+8. Page07、Excel 第一張、正式推薦作戰、主流領漲研究、總排名都接受 H64 品質守門。
+
+三、H60 大戶鎖碼真相修正
+- ACTUAL + delta 缺失：LKU/LU「真實持股已知，但鎖碼趨勢未確認」。
+- delta >= +0.20pp 且千張大戶持股 >= 50%：增持鎖碼確認。
+- 持股 >= 65% 且 delta 在 -0.20~+0.20pp：高持股穩定鎖碼。
+- delta <= -0.50pp：大戶減碼。
+- PROXY 永遠不能冒充 TDCC 真鎖碼。
+
+四、2026-09-07 Excel 實際回放
+- 原總排名第一名 3022 威強電：H42=S-NO、H51=HM-NO、H60=MR0，H64 直接 D0 非核心。
+- 實際前30名 TDCC千張大戶週變化全部缺前期，H64 全部標「持股已知、鎖碼趨勢未確認」，不再稱真鎖碼。
+- 30檔套 H64 後 29檔退出核心前排；只剩 1560 中砂為 E1 新主流形成研究，且仍不可買。
+- 這不是指定股票黑名單，而是所有股票使用同一強勢/主流/鎖碼品質門檻。
+
+五、驗證
+從 2026-08-26 完整原始 ZIP 乾淨解壓，依序套 H52→H63→H64：
+- python -m compileall -q .：PASS
+- H52～H64 smoke：PASS
+- Page07 canonical runner：PASS
+- H62/H64 Page08/Page10 persistence guard：PASS
+- V188 trade-quality：PASS
+- Page07 duplicate-columns JSON：exit 0
+- H34 daily safe-selection：exit 0
+- V188 T+1 calibration：PASS
+- H9 T+1 execution truth：6項 PASS
+
+注意：以上是 H64 與核心正式流程回歸範圍，不宣稱所有歷史 legacy tests 全數執行/全數 PASS。

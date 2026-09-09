@@ -1,0 +1,40 @@
+V191-H65 測試報告｜2026-09-09
+
+測試範圍：目前可取得的 H51→H64 累積實檔 overlay + H65 修改。
+
+PASS：python -m compileall -q .
+PASS：v191_h52_mainstream_precision_smoke.py
+PASS：v191_h53_sector_resonance_smoke.py
+PASS：v191_h54_exhaustion_overnight_truth_smoke.py
+PASS：v191_h55_dual_path_reversal_catalyst_smoke.py
+PASS：v191_h56_authority_preopen_truth_smoke.py
+PASS：v191_h57_pre_ignition_engine_smoke.py
+PASS：v191_h58_single_decision_truth_smoke.py
+PASS：v191_h59_formal_recall_learning_smoke.py
+PASS：v191_h60_mainrise_holder_snowball_smoke.py
+PASS：v191_h61_opportunity_cost_repeat_alpha_smoke.py
+PASS：v191_h62_incremental_opportunity_effective_formal_smoke.py
+PASS：v191_h63_formal_execution_identity_truth_smoke.py
+PASS：v191_h64_strong_mainstream_holder_core_truth_smoke.py
+PASS：v191_h65_multifactor_observation_radar_smoke.py
+PASS：v191_h65_page_excel_static_smoke.py
+PASS：v191_h65_t1_observation_learning_smoke.py
+
+H65 專屬模擬：
+- 權重總和=100。
+- F1 正式身份不被 H65 改寫。
+- Formal=0 時仍可輸出多族群觀察雷達，不靠降低 Formal 門檻。
+- stale / hard-block / 資料覆蓋不足不可被升成 W1。
+- 15 類指標覆蓋表可產生。
+- 1,000 檔 fuzz：隨機製造約 35% 欄位缺值，分數維持 0~100、風險扣分維持 0~22、排名股票代號不重複。
+- Page07 AST/static integration 檢查通過：H65 import/version/rank/Excel sheets/正式推薦邊界均存在。
+- T+1 H65 W1/W2/W3 cohort learning 檢查通過。
+
+測試環境限制（重要）：
+1. Library 可辨識完整基準 96bdde00-e22d-4435-8094-59c24bd3ca37.zip，但本次 raw materialize 回傳 403 Forbidden，故無法在此 sandbox 還原完整專案再跑 base-only canonical page loader。
+2. 累積 overlay 中 H59/H60 測試引用的 godpick_perf_fast_update_v77.py 屬完整 base-only 模組；隔離測試以只含必要介面的 test-only stub 解除 import dependency，stub 未打包進正式 ZIP。
+3. 2026-09-08 最新作戰 Excel raw materialize 同樣回傳 403，因此未宣稱已用該 Excel 做實檔 replay；H65 以合成情境、缺值 fuzz、H52~H64 regression、Page/Excel 靜態整合測試驗證。
+
+結論：
+H65 新增程式及目前可取得的累積邏輯測試均通過；未發現 H65 造成的 Formal 身份回退、分數越界、空雷達、資料缺值誤升級或 Excel 正式推薦污染。
+「無錯誤」只代表上述測試範圍未發現錯誤，不代表任何軟體在所有外部資料/網路/部署條件下可保證永不出錯。

@@ -110,7 +110,7 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h65_multifactor_observation_radar_20260909"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in page
     assert "超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相" in page
     assert "build_h64_single_decision_truth_table(h51_source, max_rows=10)" in page
     assert "_h64_focus = build_h64_single_decision_truth_table(_h51_source_ui, max_rows=10)" in page
