@@ -7,14 +7,15 @@ PAGE=ROOT/'pages'/'7_股神推薦.py'
 text=PAGE.read_text(encoding='utf-8')
 ast.parse(text)
 
-assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in text
-assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-20260909"' in text
+assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in text
+assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"' in text
 assert 'from godpick_h65_multifactor_observation_engine import (' in text
 assert 'apply_h65_multifactor_observation' in text
 assert 'build_h65_observation_radar_table' in text
 assert 'build_h65_indicator_coverage_table' in text
 assert '"_H65觀察優先", "H65多因子觀察分"' in text
-assert '"_H64有效Formal優先", "_H66T1優先"' in text
+assert '"_H64有效Formal優先", "_H67研究優先"' in text
+assert '"_H66T1優先"' in text
 assert '"多因子觀察雷達", h65_observation_df' in text
 assert '"多因子指標覆蓋", h65_coverage_df' in text
 assert '("多因子觀察雷達", h65_observation_df' in text

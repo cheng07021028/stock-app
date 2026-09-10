@@ -6,7 +6,7 @@ if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 
 from godpick_t1_trade_truth import TRUTH_VERSION, build_h57_h60_learning_summary, _truth_from_updated
 
-EXPECTED_TRUTH="godpick_t1_trade_truth_v191_h66_adaptive_alpha_timing_learning_20260909"
+EXPECTED_TRUTH="godpick_t1_trade_truth_v191_h67_regime_consensus_learning_20260910"
 
 
 def main():

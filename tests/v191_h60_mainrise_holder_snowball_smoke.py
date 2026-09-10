@@ -55,7 +55,7 @@ def base_row(code="9999"):
 def main():
     assert VERSION == EXPECTED
     assert H60_ENGINE_VERSION == EXPECTED
-    assert TRUTH_VERSION == "godpick_t1_trade_truth_v191_h66_adaptive_alpha_timing_learning_20260909"
+    assert TRUTH_VERSION == "godpick_t1_trade_truth_v191_h67_regime_consensus_learning_20260910"
 
     # A) TDCC official class-15 parser.
     fixture = ("資料日期,證券代號,持股分級,人數,股數,占集保庫存數比例%\n"
@@ -119,7 +119,7 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in page
     assert "build_h60_single_decision_truth_table" in page
     assert "enrich_tdcc_holder_truth" in page
     assert "H60千張大戶持股比%" in page

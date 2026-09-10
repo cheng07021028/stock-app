@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h66_adaptive_alpha_timing_learning_20260909"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h67_regime_consensus_learning_20260910"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -614,6 +614,49 @@ def build_h66_rank_learning_summary(rows: Any) -> dict[str, Any]:
         out[f"H66_{prefix}平均2日報酬%"] = round(sum(r2) / len(r2), 4) if r2 else None
     return out
 
+def build_h67_rank_learning_summary(rows: Any) -> dict[str, Any]:
+    """Evaluate H67 research ordering separately from Formal performance."""
+    items = [r for r in _rows(rows) if isinstance(r, dict) and bool(r.get("T1成熟"))]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in items:
+        d = _s(r.get("推薦日期") or r.get("推薦批次日期"))
+        rank = _f(r.get("H67全市場順位"), None)
+        score = _f(r.get("H67T1治理分"), None)
+        alpha = _f(r.get("Selection Alpha%"), None)
+        ret = _f(r.get("隔日候選漲跌%"), None)
+        if d and rank is not None and score is not None and alpha is not None and ret is not None:
+            groups.setdefault(d, []).append(r)
+    rank_ics=[]; ndcgs=[]; top={3:[],5:[],10:[]}; top1=[]
+    for _, g in groups.items():
+        g=sorted(g,key=lambda r: (_f(r.get("H67全市場順位"),999999) or 999999, -(_f(r.get("H67T1治理分"),0) or 0)))
+        if g: top1.append(g[0])
+        for k in top: top[k].extend(g[:k])
+        if len(g)>=3:
+            sdf=pd.DataFrame({"score":[_f(r.get("H67T1治理分"),0.0) or 0.0 for r in g],"alpha":[_f(r.get("Selection Alpha%"),0.0) or 0.0 for r in g]})
+            corr=sdf["score"].rank(pct=True).corr(sdf["alpha"].rank(pct=True))
+            if corr is not None and math.isfinite(float(corr)): rank_ics.append(float(corr))
+            nval=_h66_ndcg(sdf["alpha"].rank(pct=True).tolist(),10)
+            if nval is not None: ndcgs.append(nval)
+    out={"H67排名成熟交易日":len(groups),"H67平均RankIC":round(sum(rank_ics)/len(rank_ics),4) if rank_ics else None,"H67平均NDCG@10":round(sum(ndcgs)/len(ndcgs),4) if ndcgs else None}
+    for k, arr in top.items():
+        rets=[_f(r.get("隔日候選漲跌%"),None) for r in arr]; rets=[x for x in rets if x is not None]
+        alphas=[_f(r.get("Selection Alpha%"),None) for r in arr]; alphas=[x for x in alphas if x is not None]
+        out[f"H67_Top{k}樣本"]=len(arr)
+        out[f"H67_Top{k}正報酬率%"] = round(sum(1 for x in rets if x>0)/len(rets)*100.0,2) if rets else None
+        out[f"H67_Top{k}平均SelectionAlpha%"] = round(sum(alphas)/len(alphas),4) if alphas else None
+    t1rets=[_f(r.get("隔日候選漲跌%"),None) for r in top1]; t1rets=[x for x in t1rets if x is not None]
+    t1alpha=[_f(r.get("Selection Alpha%"),None) for r in top1]; t1alpha=[x for x in t1alpha if x is not None]
+    out["H67_Top1樣本"] = len(top1)
+    out["H67_Top1正報酬率%"] = round(sum(1 for x in t1rets if x>0)/len(t1rets)*100.0,2) if t1rets else None
+    out["H67_Top1平均SelectionAlpha%"] = round(sum(t1alpha)/len(t1alpha),4) if t1alpha else None
+    for prefix in ("P1","P2","C1"):
+        cohort=[r for r in items if _s(r.get("H67研究優先層級")).startswith(prefix)]
+        vals=[_f(r.get("Selection Alpha%"),None) for r in cohort]; vals=[x for x in vals if x is not None]
+        out[f"H67_{prefix}成熟樣本"]=len(vals)
+        out[f"H67_{prefix}平均SelectionAlpha%"] = round(sum(vals)/len(vals),4) if vals else None
+    return out
+
+
 def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
     """Backward-compatible alias for H60 telemetry."""
     return build_h57_h60_learning_summary(rows)
@@ -774,6 +817,19 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H66T1觀察推薦": _s(original.get("H66T1觀察推薦")),
         "H66適合週期": _s(original.get("H66適合週期")),
         "H66版本": _s(original.get("H66版本")) or "v191_h66_adaptive_alpha_t1_timing_truth_20260909",
+        "H67市場Regime分": _f(original.get("H67市場Regime分")),
+        "H67市場Regime調整": _f(original.get("H67市場Regime調整")),
+        "H67族群資金分": _f(original.get("H67族群資金分")),
+        "H67族群資金調整": _f(original.get("H67族群資金調整")),
+        "H67關鍵訊號一致性分": _f(original.get("H67關鍵訊號一致性分")),
+        "H67追價耗竭扣分": _f(original.get("H67追價耗竭扣分")),
+        "H67盤前再確認狀態": _s(original.get("H67盤前再確認狀態")),
+        "H67T1治理分": _f(original.get("H67T1治理分")),
+        "H67全市場百分位%": _f(original.get("H67全市場百分位%")),
+        "H67全市場順位": _f(original.get("H67全市場順位")),
+        "H67研究優先層級": _s(original.get("H67研究優先層級")),
+        "H67研究建議": _s(original.get("H67研究建議")),
+        "H67版本": _s(original.get("H67版本")) or "v191_h67_regime_sector_consensus_preopen_truth_20260910",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -996,6 +1052,7 @@ def refresh_t1_trade_truth(
     h51_alpha = [x for x in h51_alpha if x is not None]
     h57_h59_learning = build_h57_h60_learning_summary(matured)
     h66_rank_learning = build_h66_rank_learning_summary(matured)
+    h67_rank_learning = build_h67_rank_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -1024,6 +1081,7 @@ def refresh_t1_trade_truth(
             "H51專業主線平均SelectionAlpha%": round(sum(h51_alpha) / len(h51_alpha), 4) if h51_alpha else None,
             **h57_h59_learning,
             **h66_rank_learning,
+            **h67_rank_learning,
             "brier_score": calibration.get("brier_score"),
             "brier_skill_vs_base_rate_pct": calibration.get("brier_skill_vs_base_rate_pct"),
         },
@@ -1087,7 +1145,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]

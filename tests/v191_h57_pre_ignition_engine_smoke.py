@@ -92,7 +92,7 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in page
     for col in ["成交額3日加速度%", "成交量3日加速度%", "波動壓縮比", "前5日波動壓縮比", "當日區間擴張倍數", "3日動能加速度百分點"]:
         assert col in page
     assert "超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相" in page

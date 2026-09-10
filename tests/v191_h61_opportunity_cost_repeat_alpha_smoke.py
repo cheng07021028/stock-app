@@ -63,8 +63,8 @@ def main():
     assert "2376" not in codes, console.to_dict("records")  # Repeated low-alpha favorite leaves scarce front screen.
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in page
-    assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-20260909"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in page
+    assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"' in page
     assert "build_h61_single_decision_truth_table" in page
     assert "H61機會價值分" in page
     print("PASS v191_h61_opportunity_cost_repeat_alpha_smoke")

@@ -26,5 +26,5 @@ assert summary['H66_Top3平均SelectionAlpha%'] > summary['H66_Top10平均Select
 assert summary['H66_A1T2成熟樣本']==9
 cal=build_probability_calibration(rows)
 assert 'naive_base_rate_brier_score' in cal and 'brier_skill_vs_base_rate_pct' in cal
-assert 'h66' in TRUTH_VERSION.lower()
+assert 'h67' in TRUTH_VERSION.lower()
 print('PASS H66 T1 rank learning', summary)

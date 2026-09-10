@@ -55,7 +55,7 @@ def weak_formal(code: str, name: str, fresh: bool = False) -> dict:
 
 def main():
     assert VERSION == "v191_h60_mainrise_holder_snowball_truth_20260904"
-    assert TRUTH_VERSION == "godpick_t1_trade_truth_v191_h66_adaptive_alpha_timing_learning_20260909"
+    assert TRUTH_VERSION == "godpick_t1_trade_truth_v191_h67_regime_consensus_learning_20260910"
 
     # A) Formal must become A0 even if H51 says NO-PRIORITY / research-only.
     pending = apply_human_master_engine(pd.DataFrame([weak_formal("9001", "Formal待盤前", fresh=False)]))
@@ -108,7 +108,7 @@ def main():
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h66_adaptive_alpha_t1_timing_truth_20260909"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in page
     assert "超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相" in page
     assert "H62有效Formal完整性" in page
     assert "H57_E1平均SelectionAlpha%" in page
