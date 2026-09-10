@@ -13805,7 +13805,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         _h67score_ui = pd.to_numeric(_h67_ui.get("H67T1治理分", pd.Series([], dtype=float)), errors="coerce")
         _h67market_ui = pd.to_numeric(_h67_ui.get("H67市場Regime調整", pd.Series([], dtype=float)), errors="coerce")
         _h67sector_ui = pd.to_numeric(_h67_ui.get("H67族群資金調整", pd.Series([], dtype=float)), errors="coerce")
-        render_pro_kpis([
+        render_pro_kpi_row([
             {"label": "P1 次日優先", "value": str(int(_h67tier_ui.str.startswith("P1").sum())), "delta": "研究優先，非Formal"},
             {"label": "P2 次優先", "value": str(int(_h67tier_ui.str.startswith("P2").sum())), "delta": "需盤前再確認"},
             {"label": "市場Regime調整", "value": (f"{float(_h67market_ui.median()):+.1f}" if not _h67market_ui.dropna().empty else "-"), "delta": "弱市會降級"},

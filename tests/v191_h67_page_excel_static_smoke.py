@@ -13,6 +13,9 @@ def main():
     ]
     for k in required: assert k in s, k
     assert 'H64正式推薦門檻不降低' in s
+    # H67.1 regression guard: Page07 must use the shared KPI helper exported by utils.
+    assert 'render_pro_kpis(' not in s, 'undefined render_pro_kpis regression'
+    assert 'render_pro_kpi_row([' in s, 'shared render_pro_kpi_row call missing'
     print('PASS v191_h67_page_excel_static_smoke')
 
 if __name__=='__main__': main()
