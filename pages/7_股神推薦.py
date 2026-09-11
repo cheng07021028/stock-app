@@ -397,6 +397,20 @@ except Exception:
     build_h67_priority_table = None
     build_h67_governance_table = None
 
+H68_EXECUTION_EXPECTED_VERSION = "v191_h68_execution_learning_authority_20260911"
+try:
+    from godpick_h68_execution_learning_truth import (
+        VERSION as H68_EXECUTION_VERSION,
+        apply_h68_execution_learning_truth,
+        reconcile_h68_formal_summary,
+        build_h68_execution_learning_table,
+    )
+except Exception:
+    H68_EXECUTION_VERSION = "h68_execution_learning_unavailable"
+    apply_h68_execution_learning_truth = None
+    reconcile_h68_formal_summary = None
+    build_h68_execution_learning_table = None
+
 try:
     from godpick_v188_cache_guard import (
         V189_CACHE_GUARD_VERSION,
@@ -442,7 +456,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h68_execution_learning_authority_20260911"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2366,6 +2380,15 @@ def _v191_actionable_tracking_frame(source_df: pd.DataFrame | None) -> tuple[pd.
             work = canonicalize_final_partition(work) if callable(canonicalize_final_partition) else work.copy()
         except Exception:
             work = work.copy()
+    # H68 persistence guard: Phase93 may legitimately reuse an older cached decision
+    # frame that predates H65/H66/H67/H68 columns. Re-apply H68 *after* the
+    # single-source decision frame is resolved so the immutable learning snapshot
+    # cannot be silently discarded by cache reuse.
+    if callable(apply_h68_execution_learning_truth):
+        try:
+            work = apply_h68_execution_learning_truth(work)
+        except Exception as _h68_track_exc:
+            notes.append(f"H68學習快照治理暫時無法套用：{_h68_track_exc}")
     if "正式推薦分區" not in work.columns:
         try:
             work = apply_formal_recommendation_engine(work)
@@ -13007,7 +13030,16 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     codes = {_normalize_code(x) for x in (selected_codes or []) if _normalize_code(x)}
     if not codes:
         return []
-    work = rec_df[rec_df["股票代號"].astype(str).map(_normalize_code).isin(codes)].copy()
+    # H68: persist the immutable H65/H66/H67 cross-sectional snapshot at decision time.
+    # Enrich the *full* frame before filtering so rank/percentile are not recalculated
+    # inside a tiny selected subset (which would corrupt adaptive learning).
+    _record_source = rec_df.copy()
+    if callable(apply_h68_execution_learning_truth):
+        try:
+            _record_source = apply_h68_execution_learning_truth(_record_source)
+        except Exception:
+            _record_source = rec_df.copy()
+    work = _record_source[_record_source["股票代號"].astype(str).map(_normalize_code).isin(codes)].copy()
     _ctx_h9 = st.session_state.get(_k("recommend_execution_context_v191"), {})
     if not isinstance(_ctx_h9, dict):
         _ctx_h9 = {}
@@ -13040,6 +13072,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
             "自動記錄": _safe_str(raw.get("自動記錄")) or "否",
             "紀錄層級": level,
             "本輪推薦版本": _safe_str(raw.get("正式推薦版本")) or _safe_str(raw.get("決策版本")) or "V159",
+            "H68學習快照建立時間": _safe_str(raw.get("H68學習快照建立時間")) or build_time,
             "目前狀態": "雷達觀察" if level.startswith("R1") else "新推薦",
             "推薦價格": latest,
             "推薦日價格": latest,
@@ -13066,7 +13099,13 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
     K線、價格與成交資料完整即可保存，避免全域覆蓋率讓校正資料整批歸零。
     """
-    action, formal_scan_ok, partition_notes = _v191_actionable_tracking_frame(source_df)
+    _h68_source = source_df
+    if callable(apply_h68_execution_learning_truth) and isinstance(source_df, pd.DataFrame) and not source_df.empty:
+        try:
+            _h68_source = apply_h68_execution_learning_truth(source_df)
+        except Exception:
+            _h68_source = source_df
+    action, formal_scan_ok, partition_notes = _v191_actionable_tracking_frame(_h68_source)
     if action.empty:
         return 0, list(partition_notes or ["本輪沒有正式/A-/R1可自動記錄資料。"] )
 
@@ -13102,6 +13141,7 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     action["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
     action["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
     action["推薦執行版本"] = _safe_str(_exec_ctx_v191.get("automation_version")) or "V191-H9"
+    action["H68學習快照建立時間"] = _run_started_v191_h9
     action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
 
     def _sample_meta(row: pd.Series) -> pd.Series:
@@ -13820,6 +13860,33 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         except Exception as _h67_gov_exc:
             st.caption(f"H67治理摘要暫時無法建立：{_h67_gov_exc}")
 
+    # H68：把收盤後研究順位與隔日執行權限徹底分開，並顯示學習快照是否真的可用。
+    render_pro_section("超級AI執行真相｜H68 Execution × Learning Authority")
+    st.caption("H68不建立Formal。它修正兩件事：① P1/P2/C1不能跨夜直接變成執行許可，隔日需重驗市場/盤前衝擊/資料新鮮度；② H65/H66/H67排名快照必須隨推薦紀錄永久保存，否則Adaptive Learning永遠只有0個成熟cohort。")
+    _h68_engine_ok = bool(
+        callable(apply_h68_execution_learning_truth) and callable(build_h68_execution_learning_table)
+        and callable(reconcile_h68_formal_summary)
+        and H68_EXECUTION_VERSION == H68_EXECUTION_EXPECTED_VERSION
+    )
+    try:
+        if _h68_engine_ok:
+            _h51_source_ui = apply_h68_execution_learning_truth(_h51_source_ui)
+            _h68_ui = build_h68_execution_learning_table(_h51_source_ui, max_rows=20)
+        else:
+            _h68_ui = pd.DataFrame({"狀態": [f"H68執行學習引擎未完整部署：{H68_EXECUTION_VERSION}/{H68_EXECUTION_EXPECTED_VERSION}"]})
+    except Exception as _h68_ui_exc:
+        _h68_ui = pd.DataFrame({"狀態": [f"H68執行學習治理建立失敗：{type(_h68_ui_exc).__name__}: {_h68_ui_exc}"]})
+    if isinstance(_h68_ui, pd.DataFrame) and not _h68_ui.empty and "H68次日執行狀態" in _h68_ui.columns:
+        _h68_exec_ui = _h68_ui["H68次日執行狀態"].fillna("").astype(str)
+        _h68_snap_ui = _h68_ui.get("H68學習快照狀態", pd.Series([""] * len(_h68_ui))).fillna("").astype(str)
+        render_pro_kpi_row([
+            {"label": "H68正式可執行", "value": str(int(_h68_exec_ui.str.startswith("READY-COND").sum())), "delta": "仍須Entry/守價/RR"},
+            {"label": "盤前重驗", "value": str(int(_h68_exec_ui.str.startswith("RECHECK").sum())), "delta": "跨夜不可直接沿用"},
+            {"label": "非Formal研究", "value": str(int(_h68_exec_ui.str.startswith("NO-FORMAL").sum())), "delta": "禁止冒充買進清單"},
+            {"label": "學習快照完整", "value": str(int(_h68_snap_ui.str.startswith("SNAPSHOT-READY").sum())), "delta": "新紀錄將可真正學習"},
+        ])
+        st.dataframe(_format_df(_h68_ui), use_container_width=True, hide_index=True)
+
     # H66：品質與T+1時機拆開。高H62/H65分若遇到低檔收盤、法人倒貨、
     # 主升未確認或利多不漲，會被矛盾訊號治理降階，而不是霸佔第一名。
     render_pro_section("超級AI T+1時機｜H66 Adaptive Alpha Ranking")
@@ -14004,7 +14071,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     funnel_daily = int(decision_source.get("H34每日精選", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str).eq("是").sum())
     st.caption(
         f"推薦通過漏斗：候選 {len(decision_source)} → 最新K線 {funnel_fresh} → 官方因子對齊 {funnel_official} "
-        f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 正式推薦 {funnel_formal} → 超級AI每日精選 {funnel_daily}。"
+        f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 上游Formal {funnel_formal} → 超級AI每日精選 {funnel_daily}。"
         "H41每日條件精選不改寫Formal/V188權威；只在觸發/回測＋守價成立後執行。"
     )
     row = summary.iloc[0]
@@ -14013,13 +14080,19 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     except Exception as _h63_formal_ui_exc:
         _h63_formal_ui = pd.DataFrame({"H63正式推薦": [f"H63正式推薦表建立失敗：{type(_h63_formal_ui_exc).__name__}: {_h63_formal_ui_exc}"]})
     _h63_effective_n_ui = int(len(_h63_formal_ui)) if isinstance(_h63_formal_ui, pd.DataFrame) and "H63正式推薦順位" in _h63_formal_ui.columns else 0
+    if callable(reconcile_h68_formal_summary):
+        try:
+            summary = reconcile_h68_formal_summary(summary, _h51_source_ui, scan_report, _h63_formal_ui)
+        except Exception:
+            pass
+    row = summary.iloc[0]
     render_pro_kpi_row([
         {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
         {"label": "預計掃描", "value": str(int(row.get("預計掃描數", 0))), "delta": "檔"},
         {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('有效K線資料率%', 0)):.1f}%"},
         {"label": "流動性覆蓋", "value": f"{float(row.get('流動性資料覆蓋率%', 0)):.1f}%", "delta": _safe_str(row.get("推薦適用範圍"))},
         {"label": "官方有效覆蓋", "value": f"{float(row.get('官方有效因子覆蓋率%', row.get('官方因子覆蓋率%', 0))):.1f}%", "delta": f"最新可信 {float(row.get('官方最新可信覆蓋率%', 0)):.1f}%｜來源可信 {float(row.get('官方來源可信覆蓋率%', 0)):.1f}%｜T-1內 {float(row.get('官方日期T-1內覆蓋率%', 0)):.1f}%"},
-        {"label": "原始Formal", "value": str(int(row.get("正式推薦檔數", 0))), "delta": "上游權威檔"},
+        {"label": "上游Formal", "value": str(int(row.get("上游Formal檔數", row.get("正式推薦檔數", 0)))), "delta": "H64覆核前"},
         {"label": "有效正式推薦", "value": str(_h63_effective_n_ui), "delta": "H64核心有效Formal／H63作戰身分"},
         {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": f"可操作{int(row.get('A-可操作檔數', 0))}／封鎖{int(row.get('A-大盤封鎖檔數', 0))}"},
         {"label": "超級AI每日精選", "value": str(int(row.get("H41每日精選檔數", 0))), "delta": f"條件精選{int(row.get('H41每日條件精選檔數', 0))}"},
@@ -14064,11 +14137,11 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         if _safe_str(row.get("掃描品質說明")):
             st.caption(_safe_str(row.get("掃描品質說明")))
     else:
-        if len(formal) > 0:
+        if _h63_effective_n_ui > 0:
             st.success(_safe_str(row.get("操作說明")))
         else:
             st.warning(_safe_str(row.get("操作說明")))
-    if scan_usable and len(formal) == 0 and len(a_minus) == 0:
+    if scan_usable and _h63_effective_n_ui == 0 and len(a_minus) == 0:
         _phase92_render_zero_formal_diagnostics(rank_source)
     battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
     if callable(build_action_table):
@@ -14338,6 +14411,11 @@ def _build_excel_bytes(
         and callable(build_h67_governance_table)
         and H67_GOVERNANCE_VERSION == H67_GOVERNANCE_EXPECTED_VERSION
     )
+    _h68_export_engine_ok = bool(
+        callable(apply_h68_execution_learning_truth) and callable(build_h68_execution_learning_table)
+        and callable(reconcile_h68_formal_summary)
+        and H68_EXECUTION_VERSION == H68_EXECUTION_EXPECTED_VERSION
+    )
     try:
         _h60_export_source = candidate_source
         if callable(enrich_tdcc_holder_truth):
@@ -14356,6 +14434,8 @@ def _build_excel_bytes(
             h51_source = apply_h66_adaptive_timing(h51_source)
         if _h67_export_engine_ok:
             h51_source = apply_h67_regime_consensus(h51_source)
+        if _h68_export_engine_ok:
+            h51_source = apply_h68_execution_learning_truth(h51_source)
         final_decision_df = build_h64_single_decision_truth_table(h51_source, max_rows=10) if _h51_export_engine_ok else pd.DataFrame({
             "狀態": ["H64核心真相引擎未完整部署｜這不是『沒有推薦』。"],
             "目前Page07版本": [PAGE07_SPEED_FIX_VERSION],
@@ -14393,6 +14473,17 @@ def _build_excel_bytes(
     except Exception as _h67_excel_exc:
         h67_priority_df = pd.DataFrame({"狀態": [f"H67次日治理建立失敗：{type(_h67_excel_exc).__name__}: {_h67_excel_exc}"]})
         h67_governance_df = pd.DataFrame({"狀態": [f"H67治理摘要建立失敗：{type(_h67_excel_exc).__name__}: {_h67_excel_exc}"]})
+
+    try:
+        h68_execution_df = build_h68_execution_learning_table(h51_source, max_rows=30) if _h68_export_engine_ok else pd.DataFrame({"狀態": [f"H68執行學習治理未完整部署：{H68_EXECUTION_VERSION}/{H68_EXECUTION_EXPECTED_VERSION}"]})
+    except Exception as _h68_excel_exc:
+        h68_execution_df = pd.DataFrame({"狀態": [f"H68執行學習治理建立失敗：{type(_h68_excel_exc).__name__}: {_h68_excel_exc}"]})
+
+    if callable(reconcile_h68_formal_summary) and isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+        try:
+            summary_df = reconcile_h68_formal_summary(summary_df, h51_source, report, formal_execution_df)
+        except Exception:
+            pass
 
     _h62_raw_formal_export = int(h51_source.get("H62原始權威", h51_source.get("H56上游權威層級", pd.Series([""] * len(h51_source), index=h51_source.index))).fillna("").astype(str).eq("FORMAL").sum()) if isinstance(h51_source, pd.DataFrame) else 0
     _h62_effective_formal_export = int(h51_source.get("H62有效權威", pd.Series([""] * len(h51_source), index=h51_source.index)).fillna("").astype(str).eq("EFFECTIVE-FORMAL").sum()) if isinstance(h51_source, pd.DataFrame) else 0
@@ -14455,6 +14546,15 @@ def _build_excel_bytes(
             summary_df["H67市場Regime中位調整"] = round(float(_h67mkt_export.median()), 2) if not _h67mkt_export.dropna().empty else None
             summary_df["H67族群資金中位調整"] = round(float(_h67sec_export.median()), 2) if not _h67sec_export.dropna().empty else None
             summary_df["H67權威邊界"] = "P1/P2/C1只做研究優先治理；不得建立Formal，次日仍須H56/Entry/RR。"
+        summary_df["H68執行學習版本"] = H68_EXECUTION_VERSION
+        if isinstance(h51_source, pd.DataFrame) and "H68學習快照狀態" in h51_source.columns:
+            _h68snap_export = h51_source["H68學習快照狀態"].fillna("").astype(str)
+            _h68exec_export = h51_source.get("H68次日執行狀態", pd.Series([""] * len(h51_source), index=h51_source.index)).fillna("").astype(str)
+            summary_df["H68學習快照完整檔數"] = int(_h68snap_export.str.startswith("SNAPSHOT-READY").sum())
+            summary_df["H68次日正式可執行檔數"] = int(_h68exec_export.str.startswith("READY-COND").sum())
+            summary_df["H68盤前重驗檔數"] = int(_h68exec_export.str.startswith("RECHECK").sum())
+            summary_df["H68非Formal研究檔數"] = int(_h68exec_export.str.startswith("NO-FORMAL").sum())
+            summary_df["H68權威邊界"] = "H68不建立Formal；只修正跨夜執行資格與學習快照，正式推薦仍以H64/H63為唯一權威。"
         summary_df["H60_TDCC服務版本"] = H60_TDCC_VERSION
         if isinstance(h51_source, pd.DataFrame) and "H60鎖碼來源" in h51_source.columns:
             _h60_actual = int(h51_source["H60鎖碼來源"].fillna("").astype(str).str.startswith("ACTUAL").sum())
@@ -14509,6 +14609,16 @@ def _build_excel_bytes(
                 "H66_Top5樣本", "H66_Top5正報酬率%", "H66_Top5平均SelectionAlpha%",
                 "H66_Top10樣本", "H66_Top10正報酬率%", "H66_Top10平均SelectionAlpha%",
                 "H66_A1T2成熟樣本", "H66_A1平均2日報酬%", "H66_A2T2成熟樣本", "H66_A2平均2日報酬%",
+                "H67排名成熟交易日", "H67平均RankIC", "H67平均NDCG@10",
+                "H67_Top1樣本", "H67_Top1正報酬率%", "H67_Top1平均SelectionAlpha%",
+                "H67_Top3樣本", "H67_Top3正報酬率%", "H67_Top3平均SelectionAlpha%",
+                "H67_Top5樣本", "H67_Top5正報酬率%", "H67_Top5平均SelectionAlpha%",
+                "H67_Top10樣本", "H67_Top10正報酬率%", "H67_Top10平均SelectionAlpha%",
+                "H67_P1成熟樣本", "H67_P1平均SelectionAlpha%", "H67_P2成熟樣本", "H67_P2平均SelectionAlpha%", "H67_C1成熟樣本", "H67_C1平均SelectionAlpha%",
+                "H68學習快照成熟樣本", "H68舊樣本無完整快照排除數", "H68學習啟用狀態",
+                "H68_H67_P1成熟樣本", "H68_H67_P1正報酬率%", "H68_H67_P1平均SelectionAlpha%",
+                "H68_H67_P2成熟樣本", "H68_H67_P2正報酬率%", "H68_H67_P2平均SelectionAlpha%",
+                "H68_H67_C1成熟樣本", "H68_H67_C1正報酬率%", "H68_H67_C1平均SelectionAlpha%",
                 "brier_score", "brier_skill_vs_base_rate_pct",
             ]:
                 if _kpi in _truth_sum:
@@ -14540,6 +14650,7 @@ def _build_excel_bytes(
         ("正式推薦作戰", formal_execution_df, "本輪沒有H64核心有效Formal；A-/Radar/FORMAL-QUALITY-HOLD不冒充正式推薦。"),
         ("H67次日優先治理", h67_priority_df, "H67用大盤Regime、族群資金、一致性與追價耗竭治理H66排序；P1/P2/C1均非Formal。"),
         ("H67治理摘要", h67_governance_df, "H67只治理研究順位與盤前重驗，不改Formal權威。"),
+        ("H68執行學習治理", h68_execution_df, "H68把收盤研究順位與次日執行權限分離，並永久保存H65/H66/H67學習快照。"),
         ("T+1時機雷達", h66_t1_df, "H66將品質與T+1時機拆開；A1/A2/B1仍非正式推薦。"),
         ("H66學習治理", h66_learning_df, "H66成熟樣本<30不自調權；成熟後單因子調幅仍限制±15%。"),
         ("多因子觀察雷達", h65_observation_df, "本輪沒有W1/W2/W3時仍顯示相對R0研究順位；R0不可冒充觀察推薦。"),
@@ -14557,7 +14668,7 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("第一優先｜H64強勢主流鎖碼真相" if sheet_name == "超級AI最終決策" else "真正Formal作戰｜只有有效正式推薦" if sheet_name == "正式推薦作戰" else "H67弱市/退潮/一致性/追價治理｜非正式推薦" if sheet_name == "H67次日優先治理" else "H67治理摘要/權威邊界" if sheet_name == "H67治理摘要" else "H66 T+1自適應時機排序｜非正式推薦" if sheet_name == "T+1時機雷達" else "H66學習權重/樣本治理" if sheet_name == "H66學習治理" else "H65全市場10支柱觀察排序｜非正式推薦" if sheet_name == "多因子觀察雷達" else "H65指標接入/缺口自我稽核" if sheet_name == "多因子指標覆蓋" else "主線資金/輪動" if sheet_name == "主流族群" else "領漲/Pivot/再攻" if sheet_name == "主流領漲股" else "完整研究排名" if sheet_name == "股神推薦總排名" else "績效真相" if sheet_name in {"AI績效驗證", "T+1實戰真相"} else "資料健康/稽核"),
+            "用途": ("第一優先｜H64強勢主流鎖碼真相" if sheet_name == "超級AI最終決策" else "真正Formal作戰｜只有有效正式推薦" if sheet_name == "正式推薦作戰" else "H67弱市/退潮/一致性/追價治理｜非正式推薦" if sheet_name == "H67次日優先治理" else "H67治理摘要/權威邊界" if sheet_name == "H67治理摘要" else "H68次日執行真相＋學習快照權威" if sheet_name == "H68執行學習治理" else "H66 T+1自適應時機排序｜非正式推薦" if sheet_name == "T+1時機雷達" else "H66學習權重/樣本治理" if sheet_name == "H66學習治理" else "H65全市場10支柱觀察排序｜非正式推薦" if sheet_name == "多因子觀察雷達" else "H65指標接入/缺口自我稽核" if sheet_name == "多因子指標覆蓋" else "主線資金/輪動" if sheet_name == "主流族群" else "領漲/Pivot/再攻" if sheet_name == "主流領漲股" else "完整研究排名" if sheet_name == "股神推薦總排名" else "績效真相" if sheet_name in {"AI績效驗證", "T+1實戰真相"} else "資料健康/稽核"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
@@ -14584,7 +14695,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H67 Excel在H66基礎上新增『H67次日優先治理』『H67治理摘要』；H64正式決策/正式作戰仍維持嚴格權威。H67 P1/P2/C1、H66 A1/A2/B1、H65 W1/W2/W3全部只是研究觀察，不會混入正式作戰。")
+    st.caption("H68 Excel新增『H68執行學習治理』，並把H64/H63最終Formal單一真相寫回健康摘要；H67 P1/P2/C1、H66 A1/A2/B1、H65 W1/W2/W3仍全部只是研究觀察。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -14610,7 +14721,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         st.caption("需要調整欄位時再開啟上方開關；H46 使用欄位名稱定位與批次排序，平常可保持關閉以維持頁面速度。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))

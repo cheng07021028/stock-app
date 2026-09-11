@@ -112,7 +112,7 @@ def main():
     assert "9001" not in set(core.get("股票代號", pd.Series([], dtype=str)).astype(str))
 
     page=(ROOT/"pages"/"7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h68_execution_learning_authority_20260911"' in page
     assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"' in page
     assert "build_h64_single_decision_truth_table" in page
     assert "H64 強勢×主流×大戶鎖碼真相" in page

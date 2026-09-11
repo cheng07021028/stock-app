@@ -61,7 +61,7 @@ def main():
     assert audit.set_index("股票代號").at["2363", "H63是否正式推薦"].startswith("否")
 
     page = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in page
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h68_execution_learning_authority_20260911"' in page
     assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"' in page
     assert "本輪真正正式推薦｜H63 唯一作戰清單" in page
     assert "A-/Radar 每日條件候選｜非正式推薦" in page

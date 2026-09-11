@@ -7,7 +7,7 @@ PAGE=ROOT/'pages'/'7_股神推薦.py'
 text=PAGE.read_text(encoding='utf-8')
 ast.parse(text)
 
-assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h67_regime_sector_consensus_preopen_truth_20260910"' in text
+assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h68_execution_learning_authority_20260911"' in text
 assert 'EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"' in text
 assert 'from godpick_h65_multifactor_observation_engine import (' in text
 assert 'apply_h65_multifactor_observation' in text
