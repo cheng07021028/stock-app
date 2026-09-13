@@ -47,7 +47,7 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v191_h43_twse_t86_timeout_history_guard_20260819"
+CACHE_VERSION = "v191_h69_authoritative_factor_refresh_single_truth_20260913"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -2466,12 +2466,18 @@ def _is_missing_factor_value(series: pd.Series, column: str) -> pd.Series:
 
 
 def merge_official_factors(base_df: pd.DataFrame, factor_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Merge official factors and coalesce real cache values over placeholders.
+    """Merge the latest official-factor cache as the authoritative snapshot.
 
-    All cache columns are renamed to collision-proof temporary names before merge.
-    This prevents recommendation frames that already contain ``*_官方`` helper
-    columns from producing duplicate labels. Existing non-empty values are kept;
-    blank/zero placeholders are replaced by the cache's authoritative values.
+    V191-H69 fixes a critical stale-overlay bug: recommendation frames often carry
+    non-empty *old* official values (for example completeness=20/40/60, an older
+    business date, or legacy trust=60).  The previous merge treated any non-empty
+    value as newer than the cache, so a freshly rebuilt 98% cache could still be
+    reported as ~60% on Page 07.
+
+    The cache is already protected by the official-factor service's durable/fallback
+    policy, therefore for a matched stock every non-blank cache value is authoritative
+    and must replace an older candidate-frame value.  Existing values are preserved
+    only when the cache itself has no value for that field.
     """
     if base_df is None or base_df.empty:
         return base_df.copy() if isinstance(base_df, pd.DataFrame) else pd.DataFrame()
@@ -2489,24 +2495,38 @@ def merge_official_factors(base_df: pd.DataFrame, factor_df: pd.DataFrame | None
     value_cols = [c for c in FACTOR_COLUMNS if c in fdf.columns and c not in {"股票代號", "股票名稱", "市場別", "正式產業別"}]
     temp_map = {c: f"__official_factor__{i}" for i, c in enumerate(value_cols)}
     right = fdf[["股票代號"] + value_cols].rename(columns=temp_map)
+    right["__official_cache_match_h69__"] = "是"
     merged = df.merge(right, left_on=code_col, right_on="股票代號", how="left")
+
+    def _cache_value_present(series: pd.Series) -> pd.Series:
+        text = series.astype(str).str.strip().str.lower()
+        return series.notna() & ~text.isin({"", "nan", "none", "null", "nat", "--", "-", "<na>"})
 
     for column in value_cols:
         temp_col = temp_map[column]
+        cache_value = merged[temp_col]
+        cache_present = _cache_value_present(cache_value)
         if column not in merged.columns:
-            merged[column] = merged[temp_col]
+            merged[column] = cache_value
         else:
-            replace_mask = _is_missing_factor_value(merged[column], column)
-            # Preserve numeric precision when placeholder columns were created as
-            # integers (usually all zeros).  Newer pandas rejects assigning an
-            # authoritative float cache value into an int column.
-            if pd.api.types.is_numeric_dtype(merged[temp_col]):
+            # H69: cache wins whenever it actually contains a value.  Zero is a
+            # legitimate institutional/ratio value and therefore is not treated
+            # as missing here.  The cache builder itself already decides whether
+            # a row should retain an older valid fallback snapshot.
+            if pd.api.types.is_numeric_dtype(cache_value):
                 try:
                     merged[column] = pd.to_numeric(merged[column], errors="coerce").astype(float)
                 except Exception:
                     pass
-            merged.loc[replace_mask, column] = merged.loc[replace_mask, temp_col]
+            merged.loc[cache_present, column] = cache_value.loc[cache_present]
         merged = merged.drop(columns=[temp_col])
+
+    matched = merged.pop("__official_cache_match_h69__").fillna("").astype(str).eq("是")
+    merged["官方因子快取匹配"] = matched.map({True: "是", False: "否"})
+    merged["官方因子權威同步版本"] = matched.map({
+        True: "V191-H69｜最新官方快取覆蓋舊候選欄位",
+        False: "V191-H69｜快取無此代號",
+    })
 
     if code_col != "股票代號" and "股票代號" in merged.columns:
         merged = merged.drop(columns=["股票代號"])

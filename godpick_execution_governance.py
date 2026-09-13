@@ -24,7 +24,7 @@ try:
 except Exception:
     evaluate_twse_t86_release_timing = None
 
-EXECUTION_GOVERNANCE_VERSION = "execution_governance_v191_h38_representative_official_date_20260817"
+EXECUTION_GOVERNANCE_VERSION = "execution_governance_v191_h69_official_single_truth_20260913"
 _LAST_CANDIDATE_QUALITY: dict[str, float] = {}
 
 FINAL_BUCKET_ORDER = {
@@ -287,6 +287,9 @@ def build_scan_quality_report(
     official_missing_date_coverage = 0.0
     official_source_trusted_coverage = 0.0
     official_fresh_date_coverage = 0.0
+    official_governance_scope = "候選全集"
+    official_governance_rows = 0
+    official_governance_excluded_rows = 0
     representative_market_date = None
     representative_official_date = None
     official_release_timing: dict[str, Any] = {}
@@ -329,8 +332,26 @@ def build_scan_quality_report(
             errors="coerce",
         )
         source_trust = daily_trust.where(daily_trust.notna() & daily_trust.gt(0), legacy_trust).fillna(0)
+        # H69 single truth: Page 16 defines the official-factor health denominator
+        # as listed + OTC common-market rows.  Page 07 previously divided by every
+        # analysed row (including non-applicable/extension rows), so the same cache
+        # could show 98.9% on Page 16 but ~61% here.  Reuse the same market scope.
+        market_text = _series_text(frame, "市場別").str.upper()
+        major_market = market_text.str.contains(r"上市|上櫃|TWSE|TPEX|OTC", regex=True, na=False)
+        if bool(major_market.any()):
+            official_scope_mask = major_market
+            official_governance_scope = "上市＋上櫃"
+        else:
+            official_scope_mask = pd.Series([True] * len(frame), index=frame.index, dtype="bool")
+            official_governance_scope = "候選全集（市場別缺失）"
+        official_governance_rows = int(official_scope_mask.sum())
+        official_governance_excluded_rows = int(len(frame) - official_governance_rows)
+
         matched = official.notna() | official_status.ne("")
-        effective = official.fillna(0).ge(45) | official_status.isin(["完整", "部分資料"])
+        # Align the validity threshold with Page 16/cache_status: completeness >=60.
+        # A generic '部分資料' label below 60 is still useful for research, but it
+        # must not count as an execution-grade official factor row.
+        effective = official.fillna(0).ge(60) | official_status.eq("完整")
         lag_days = pd.Series([999] * len(frame), index=frame.index, dtype="int64")
         valid_dates = official_date.notna() & stock_date.notna()
         if bool(valid_dates.any()):
@@ -347,18 +368,22 @@ def build_scan_quality_report(
         trusted = effective & fresh_enough & trusted_source
         source_trusted_effective = effective & trusted_source
         fresh_effective = effective & fresh_enough
-        official_match_coverage = float(matched.mean() * 100.0) if len(matched) else 0.0
-        official_effective_coverage = float(effective.mean() * 100.0) if len(effective) else 0.0
-        official_trusted_coverage = float(trusted.mean() * 100.0) if len(trusted) else 0.0
-        official_source_trusted_coverage = float(source_trusted_effective.mean() * 100.0) if len(source_trusted_effective) else 0.0
-        official_fresh_date_coverage = float(fresh_effective.mean() * 100.0) if len(fresh_effective) else 0.0
-        official_same_day_coverage = float((effective & valid_dates & lag_days.eq(0)).mean() * 100.0) if len(effective) else 0.0
-        official_one_day_lag_coverage = float((effective & valid_dates & lag_days.eq(1)).mean() * 100.0) if len(effective) else 0.0
-        official_missing_date_coverage = float((effective & ~valid_dates).mean() * 100.0) if len(effective) else 0.0
+        def _scope_pct(mask: pd.Series) -> float:
+            scoped = mask.loc[official_scope_mask]
+            return float(scoped.mean() * 100.0) if len(scoped) else 0.0
+
+        official_match_coverage = _scope_pct(matched)
+        official_effective_coverage = _scope_pct(effective)
+        official_trusted_coverage = _scope_pct(trusted)
+        official_source_trusted_coverage = _scope_pct(source_trusted_effective)
+        official_fresh_date_coverage = _scope_pct(fresh_effective)
+        official_same_day_coverage = _scope_pct(effective & valid_dates & lag_days.eq(0))
+        official_one_day_lag_coverage = _scope_pct(effective & valid_dates & lag_days.eq(1))
+        official_missing_date_coverage = _scope_pct(effective & ~valid_dates)
         official_coverage = official_effective_coverage
 
         try:
-            trusted_effective_dates = effective & trusted_source & valid_dates
+            trusted_effective_dates = effective & trusted_source & valid_dates & official_scope_mask
             timing_market = pd.to_datetime(stock_date.loc[trusted_effective_dates], errors="coerce").dropna()
             timing_official = pd.to_datetime(official_date.loc[trusted_effective_dates], errors="coerce").dropna()
             if not timing_market.empty:
@@ -391,6 +416,9 @@ def build_scan_quality_report(
         official_source_trusted_coverage = _safe_float(data.get("official_source_trusted_coverage_pct"), official_trusted_coverage)
         official_fresh_date_coverage = _safe_float(data.get("official_fresh_date_coverage_pct"), official_trusted_coverage)
         data_rows = int(_safe_float(cached.get("rows"), 0))
+        official_governance_rows = int(_safe_float(data.get("official_governance_rows"), data_rows))
+        official_governance_excluded_rows = int(_safe_float(data.get("official_governance_excluded_rows"), 0))
+        official_governance_scope = _safe_str(data.get("official_governance_scope")) or "候選全集"
 
     if callable(evaluate_twse_t86_release_timing) and representative_market_date is not None and representative_official_date is not None:
         try:
@@ -518,6 +546,9 @@ def build_scan_quality_report(
         "歷史資料成功率%": round(usable_history, 2),
         "流動性資料覆蓋率%": round(liquidity_coverage, 2),
         "官方因子覆蓋率%": round(official_effective_coverage, 2),
+        "官方治理口徑": official_governance_scope,
+        "官方治理母體數": int(official_governance_rows),
+        "官方治理排除非適用數": int(official_governance_excluded_rows),
         "官方紀錄匹配率%": round(official_match_coverage, 2),
         "官方有效因子覆蓋率%": round(official_effective_coverage, 2),
         "官方最新可信覆蓋率%": round(official_trusted_coverage, 2),
@@ -545,6 +576,7 @@ def apply_scan_quality_to_frame(df: pd.DataFrame | None, report: dict[str, Any] 
         "掃描品質狀態", "掃描品質等級", "正式推薦可用", "A-資料受限研究可用", "推薦適用範圍", "倉位折減係數",
         "預計掃描數", "成功分析數", "掃描覆蓋率%", "有效K線資料率%",
         "歷史資料成功率%", "流動性資料覆蓋率%", "官方因子覆蓋率%",
+        "官方治理口徑", "官方治理母體數", "官方治理排除非適用數",
         "官方紀錄匹配率%", "官方有效因子覆蓋率%", "官方最新可信覆蓋率%",
         "官方來源可信覆蓋率%", "官方日期T-1內覆蓋率%",
         "官方同日對齊覆蓋率%", "官方落後1日覆蓋率%", "官方日期未驗證覆蓋率%", "掃描品質說明",

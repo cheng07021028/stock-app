@@ -5706,9 +5706,16 @@ def _render_debug_scan_summary():
         st.metric("歷史成功率", f"{float(data.get('history_success_rate_pct', 0) or 0):.1f}%")
 
     quality = _safe_str(data.get("scan_quality_status"))
+    scan_quality_version = _safe_str(data.get("scan_quality_version"))
+    h69_current_scan = "h69" in scan_quality_version.lower()
     if quality:
         msg = f"掃描品質：{quality}｜覆蓋率 {float(data.get('scan_coverage_pct', 0) or 0):.1f}%"
-        if bool(data.get("formal_recommendation_usable", False)):
+        if not h69_current_scan:
+            st.warning(
+                msg + "｜這是 H69 前的舊掃描品質快照；舊版可能保留非空但已過期的官方因子欄位。"
+                "部署 H69 後請按『重新推薦』，才會用最新官方快取重新建立正式推薦權威。"
+            )
+        elif bool(data.get("formal_recommendation_usable", False)):
             st.success(msg)
         else:
             st.error(msg + "｜本輪不可作為正式推薦依據，需重新掃描或修復資料來源。")
@@ -11444,6 +11451,7 @@ def _build_recommend_df(
             "candidate_diagnosis_count": len(candidate_diagnosis_df),
             "action_candidate_count": len(final_df),
             "scan_quality_status": scan_report.get("掃描品質狀態", ""),
+            "scan_quality_version": scan_report.get("版本", ""),
             "scan_coverage_pct": scan_report.get("掃描覆蓋率%", 0),
             "history_success_rate_pct": scan_report.get("歷史資料成功率%", debug_summary.get("history_success_rate_pct", 0)),
             "formal_recommendation_usable": scan_report.get("正式推薦可用", False),
@@ -16777,7 +16785,7 @@ def main():
             {"label": "預計掃描", "value": int(scan_report_now.get("預計掃描數", len(universe_items)) or len(universe_items)), "delta": universe_mode, "delta_class": "pro-kpi-delta-flat"},
             {"label": "成功分析", "value": int(scan_report_now.get("成功分析數", candidate_count_now) or candidate_count_now), "delta": f"有效K線 {float(scan_report_now.get('有效K線資料率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
             {"label": "流動性覆蓋", "value": f"{float(scan_report_now.get('流動性資料覆蓋率%', 0) or 0):.1f}%", "delta": _safe_str(scan_report_now.get("推薦適用範圍")), "delta_class": "pro-kpi-delta-flat"},
-            {"label": "官方有效覆蓋", "value": f"{float(scan_report_now.get('官方有效因子覆蓋率%', scan_report_now.get('官方因子覆蓋率%', 0)) or 0):.1f}%", "delta": f"最新可信 {float(scan_report_now.get('官方最新可信覆蓋率%', 0) or 0):.1f}%｜來源可信 {float(scan_report_now.get('官方來源可信覆蓋率%', 0) or 0):.1f}%｜T-1內 {float(scan_report_now.get('官方日期T-1內覆蓋率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
+            {"label": "官方有效覆蓋", "value": f"{float(scan_report_now.get('官方有效因子覆蓋率%', scan_report_now.get('官方因子覆蓋率%', 0)) or 0):.1f}%", "delta": f"{_safe_str(scan_report_now.get('官方治理口徑')) or '上市＋上櫃'} {int(scan_report_now.get('官方治理母體數', 0) or 0)}檔｜最新可信 {float(scan_report_now.get('官方最新可信覆蓋率%', 0) or 0):.1f}%｜來源可信 {float(scan_report_now.get('官方來源可信覆蓋率%', 0) or 0):.1f}%｜T-1內 {float(scan_report_now.get('官方日期T-1內覆蓋率%', 0) or 0):.1f}%", "delta_class": "pro-kpi-delta-flat"},
             {"label": "完整候選池", "value": candidate_count_now, "delta": "非買進清單", "delta_class": "pro-kpi-delta-flat"},
             {"label": "作戰候選", "value": len(rec_df), "delta": "完成最終分流", "delta_class": "pro-kpi-delta-flat"},
             {"label": "主流攻擊/突破", "value": attack_count + breakout_count, "delta": "仍需最終操作許可", "delta_class": "pro-kpi-delta-flat"},
@@ -16786,13 +16794,21 @@ def main():
     )
     if isinstance(scan_report_now, dict) and scan_report_now:
         st.caption(
-            "V187 官方因子治理｜"
+            "V191-H69 官方因子單一真相｜"
+            f"口徑 {_safe_str(scan_report_now.get('官方治理口徑')) or '上市＋上櫃'} {int(scan_report_now.get('官方治理母體數', 0) or 0)}檔｜"
             f"有效 {float(scan_report_now.get('官方有效因子覆蓋率%', 0) or 0):.1f}%｜"
             f"日期T-1內 {float(scan_report_now.get('官方日期T-1內覆蓋率%', 0) or 0):.1f}%｜"
             f"來源可信 {float(scan_report_now.get('官方來源可信覆蓋率%', 0) or 0):.1f}%｜"
             f"最終最新可信 {float(scan_report_now.get('官方最新可信覆蓋率%', 0) or 0):.1f}%"
         )
-    if isinstance(scan_report_now, dict) and scan_report_now and not bool(scan_report_now.get("正式推薦可用", False)):
+    _h69_scan_snapshot_current = "h69" in _safe_str(scan_report_now.get("版本")).lower() if isinstance(scan_report_now, dict) else False
+    if isinstance(scan_report_now, dict) and scan_report_now and not _h69_scan_snapshot_current:
+        st.warning(
+            "目前顯示的是 H69 前保存的掃描品質快照；其中官方有效覆蓋／來源可信／T-1 比例是歷史值，"
+            "不能拿來否定目前第16頁的最新官方快取。請部署 H69 後執行一次『重新推薦』，"
+            "系統才會以最新快取的上市＋上櫃單一口徑重建正式推薦治理。"
+        )
+    elif isinstance(scan_report_now, dict) and scan_report_now and not bool(scan_report_now.get("正式推薦可用", False)):
         _quality_text = _safe_str(scan_report_now.get("掃描品質說明")) or "本輪掃描或資料品質不足；目前僅作條件式參考。"
         if _safe_str(scan_report_now.get("掃描品質等級")) == "legacy_cache":
             st.warning(_quality_text)

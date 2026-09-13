@@ -45,7 +45,7 @@ st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V191-H43｜T86公開同步緩衝＋同站熔斷＋官方日快照備援｜V190盤後時序＋V187來源可信度＋V186 Reboot永久權威")
+st.caption("V191-H69｜官方因子權威同步＋第07/16頁覆蓋率單一真相｜H43 T86備援＋V190盤後時序＋V187來源可信度＋V186 Reboot永久權威")
 
 
 def _fmt(v):
@@ -117,17 +117,20 @@ def _display_status() -> None:
     df = load_factor_frame()
     if df is not None and not df.empty:
         fallback_rows = 0
-        official_only_rows = 0
         if "因子備援來源" in df.columns:
             fallback_rows = int(df["因子備援來源"].astype(str).str.strip().ne("").sum())
-        official_only_rows = max(0, len(df) - fallback_rows)
-        a, b, c, d = st.columns(4)
-        a.metric("純官方資料列", official_only_rows)
-        b.metric("含備援/舊快取補值", fallback_rows)
         overall_trust = pd.to_numeric(df.get("因子來源可信度", pd.Series(dtype=float)), errors="coerce").dropna()
         daily_trust = pd.to_numeric(df.get("每日因子來源可信度", pd.Series(dtype=float)), errors="coerce").dropna()
+        daily_official_high = int(daily_trust.ge(90).sum()) if not daily_trust.empty else 0
+        a, b, c, d = st.columns(4)
+        a.metric("每日官方高可信列", daily_official_high)
+        b.metric("曾使用備援補值", fallback_rows)
         c.metric("平均來源可信度", f"{overall_trust.mean():.1f}" if not overall_trust.empty else "-")
         d.metric("每日高可信覆蓋", f"{(daily_trust.ge(70).mean()*100):.1f}%" if not daily_trust.empty else "-")
+        st.caption(
+            "H69口徑：『曾使用備援補值』只代表某個欄位曾由備援/前次有效快取補值，"
+            "不代表整列不是官方高可信。交易日治理以法人＋估值的實際來源證據與每日來源可信度判定。"
+        )
         if "來源可信度狀態" in df.columns:
             trust_counts = df["來源可信度狀態"].astype(str).value_counts()
             st.caption(
