@@ -411,6 +411,20 @@ except Exception:
     reconcile_h68_formal_summary = None
     build_h68_execution_learning_table = None
 
+H70_COUNTER_REGIME_EXPECTED_VERSION = "v191_h70_counter_regime_alpha_session_truth_20260914"
+try:
+    from godpick_h70_counter_regime_session_truth import (
+        VERSION as H70_COUNTER_REGIME_VERSION,
+        apply_h70_counter_regime_session_truth,
+        build_h70_counter_regime_table,
+        build_h70_governance_summary,
+    )
+except Exception:
+    H70_COUNTER_REGIME_VERSION = "h70_counter_regime_unavailable"
+    apply_h70_counter_regime_session_truth = None
+    build_h70_counter_regime_table = None
+    build_h70_governance_summary = None
+
 try:
     from godpick_v188_cache_guard import (
         V189_CACHE_GUARD_VERSION,
@@ -456,7 +470,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h68_execution_learning_authority_20260911"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h70_counter_regime_session_truth_20260914"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-20260910"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -12427,13 +12441,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"超級AI最終決策", "正式推薦作戰", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
+        if safe_name in {"超級AI最終決策", "正式推薦作戰", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            _tab_colors = {"超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
+            _tab_colors = {"超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
             ws.sheet_properties.tabColor = _tab_colors.get(safe_name, "00A6A6")
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
@@ -13047,6 +13061,11 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
             _record_source = apply_h68_execution_learning_truth(_record_source)
         except Exception:
             _record_source = rec_df.copy()
+    if callable(apply_h70_counter_regime_session_truth):
+        try:
+            _record_source = apply_h70_counter_regime_session_truth(_record_source)
+        except Exception:
+            pass
     work = _record_source[_record_source["股票代號"].astype(str).map(_normalize_code).isin(codes)].copy()
     _ctx_h9 = st.session_state.get(_k("recommend_execution_context_v191"), {})
     if not isinstance(_ctx_h9, dict):
@@ -13829,7 +13848,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         _h64_quality_hold_ui = int(_h64_eff_all.eq("FORMAL-QUALITY-HOLD").sum())
         _h64_lock_pending_ui = int(_h51_source_ui.get("H64鎖碼趨勢狀態", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str).str.startswith("LU").sum())
         st.info(f"H64權威摘要｜原始Formal {_h64_raw_formal_ui}；核心有效Formal {_h64_effective_formal_ui}；品質暫停 {_h64_quality_hold_ui}；TDCC缺前期鎖碼待確認 {_h64_lock_pending_ui}。")
-    st.info("H64正式推薦門檻不降低；H65負責廣泛召回、H66負責T+1時機，H67再用大盤Regime、族群資金、關鍵訊號一致性與追價耗竭治理研究優先序。閱讀順序：①H64正式推薦真相 → ②H67次日優先治理 → ③H66 T+1時機 → ④H65多因子結構 → ⑤總排名稽核。")
+    st.info("H64正式推薦門檻不降低；H65廣泛召回、H66判斷T+1時機、H67治理弱市/退潮，H68負責隔日執行否決，H70再補『弱市中的個股逆勢Alpha』研究召回與非交易日時序真相。閱讀順序：①H64正式推薦真相 → ②H68執行真相 → ③H70逆勢Alpha → ④H67/H66/H65研究分層。")
 
     # H67：H66後的研究優先治理。弱大盤＋族群退潮或低一致性時，
     # 不允許A1大量膨脹；P1/P2/C1均非Formal，次日仍須H56/Entry/RR重驗。
@@ -13894,6 +13913,41 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
             {"label": "學習快照完整", "value": str(int(_h68_snap_ui.str.startswith("SNAPSHOT-READY").sum())), "delta": "新紀錄將可真正學習"},
         ])
         st.dataframe(_format_df(_h68_ui), use_container_width=True, hide_index=True)
+
+    # H70：弱市不放寬Formal，但保留極少數個股逆勢Alpha研究召回，並標明週末/非交易日快照時序。
+    render_pro_section("超級AI逆勢Alpha｜H70 Counter-Regime Survivor × Session Truth")
+    st.caption("H70不建立Formal、不解除H68執行否決。它只修正H67弱市降權可能把真正個股獨立發動一起壓掉的漏召回，並明確標示報告產生日與市場資料錨定日。")
+    _h70_engine_ok = bool(
+        callable(apply_h70_counter_regime_session_truth) and callable(build_h70_counter_regime_table)
+        and callable(build_h70_governance_summary)
+        and H70_COUNTER_REGIME_VERSION == H70_COUNTER_REGIME_EXPECTED_VERSION
+    )
+    try:
+        if _h70_engine_ok:
+            _h51_source_ui = apply_h70_counter_regime_session_truth(_h51_source_ui)
+            _h70_ui = build_h70_counter_regime_table(_h51_source_ui, max_rows=20)
+        else:
+            _h70_ui = pd.DataFrame({"狀態": [f"H70逆勢Alpha引擎未完整部署：{H70_COUNTER_REGIME_VERSION}/{H70_COUNTER_REGIME_EXPECTED_VERSION}"]})
+    except Exception as _h70_ui_exc:
+        _h70_ui = pd.DataFrame({"狀態": [f"H70逆勢Alpha治理建立失敗：{type(_h70_ui_exc).__name__}: {_h70_ui_exc}"]})
+    if isinstance(_h70_ui, pd.DataFrame) and not _h70_ui.empty and "H70逆勢研究層級" in _h70_ui.columns:
+        _h70tier_ui = _h70_ui["H70逆勢研究層級"].fillna("").astype(str)
+        _h70anchor = _safe_str(_h70_ui.iloc[0].get("H70市場資料錨定日"))
+        _h70gen = _safe_str(_h70_ui.iloc[0].get("H70報告產生日"))
+        render_pro_kpi_row([
+            {"label": "X1逆勢Alpha", "value": str(int(_h70tier_ui.str.startswith("X1").sum())), "delta": "研究召回，非Formal"},
+            {"label": "X2逆勢韌性", "value": str(int(_h70tier_ui.str.startswith("X2").sum())), "delta": "等待盤前確認"},
+            {"label": "市場資料錨定日", "value": _h70anchor or "-", "delta": "實際行情基準"},
+            {"label": "報告產生日", "value": _h70gen or "-", "delta": "週末不冒充交易日"},
+        ])
+        st.dataframe(_format_df(_h70_ui), use_container_width=True, hide_index=True)
+    with st.expander("H70治理摘要｜逆勢召回與時序真相", expanded=False):
+        try:
+            _h70_gov_ui = build_h70_governance_summary(_h51_source_ui) if _h70_engine_ok else pd.DataFrame()
+            if isinstance(_h70_gov_ui, pd.DataFrame) and not _h70_gov_ui.empty:
+                st.dataframe(_format_df(_h70_gov_ui), use_container_width=True, hide_index=True)
+        except Exception as _h70_gov_exc:
+            st.caption(f"H70治理摘要暫時無法建立：{_h70_gov_exc}")
 
     # H66：品質與T+1時機拆開。高H62/H65分若遇到低檔收盤、法人倒貨、
     # 主升未確認或利多不漲，會被矛盾訊號治理降階，而不是霸佔第一名。
@@ -14424,6 +14478,11 @@ def _build_excel_bytes(
         and callable(reconcile_h68_formal_summary)
         and H68_EXECUTION_VERSION == H68_EXECUTION_EXPECTED_VERSION
     )
+    _h70_export_engine_ok = bool(
+        callable(apply_h70_counter_regime_session_truth) and callable(build_h70_counter_regime_table)
+        and callable(build_h70_governance_summary)
+        and H70_COUNTER_REGIME_VERSION == H70_COUNTER_REGIME_EXPECTED_VERSION
+    )
     try:
         _h60_export_source = candidate_source
         if callable(enrich_tdcc_holder_truth):
@@ -14444,6 +14503,8 @@ def _build_excel_bytes(
             h51_source = apply_h67_regime_consensus(h51_source)
         if _h68_export_engine_ok:
             h51_source = apply_h68_execution_learning_truth(h51_source)
+        if _h70_export_engine_ok:
+            h51_source = apply_h70_counter_regime_session_truth(h51_source)
         final_decision_df = build_h64_single_decision_truth_table(h51_source, max_rows=10) if _h51_export_engine_ok else pd.DataFrame({
             "狀態": ["H64核心真相引擎未完整部署｜這不是『沒有推薦』。"],
             "目前Page07版本": [PAGE07_SPEED_FIX_VERSION],
@@ -14486,6 +14547,13 @@ def _build_excel_bytes(
         h68_execution_df = build_h68_execution_learning_table(h51_source, max_rows=30) if _h68_export_engine_ok else pd.DataFrame({"狀態": [f"H68執行學習治理未完整部署：{H68_EXECUTION_VERSION}/{H68_EXECUTION_EXPECTED_VERSION}"]})
     except Exception as _h68_excel_exc:
         h68_execution_df = pd.DataFrame({"狀態": [f"H68執行學習治理建立失敗：{type(_h68_excel_exc).__name__}: {_h68_excel_exc}"]})
+
+    try:
+        h70_counter_df = build_h70_counter_regime_table(h51_source, max_rows=30) if _h70_export_engine_ok else pd.DataFrame({"狀態": [f"H70逆勢Alpha治理未完整部署：{H70_COUNTER_REGIME_VERSION}/{H70_COUNTER_REGIME_EXPECTED_VERSION}"]})
+        h70_governance_df = build_h70_governance_summary(h51_source) if _h70_export_engine_ok else pd.DataFrame({"狀態": ["H70治理摘要暫時無法建立。"]})
+    except Exception as _h70_excel_exc:
+        h70_counter_df = pd.DataFrame({"狀態": [f"H70逆勢Alpha治理建立失敗：{type(_h70_excel_exc).__name__}: {_h70_excel_exc}"]})
+        h70_governance_df = pd.DataFrame({"狀態": [f"H70治理摘要建立失敗：{type(_h70_excel_exc).__name__}: {_h70_excel_exc}"]})
 
     if callable(reconcile_h68_formal_summary) and isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
         try:
@@ -14563,6 +14631,15 @@ def _build_excel_bytes(
             summary_df["H68盤前重驗檔數"] = int(_h68exec_export.str.startswith("RECHECK").sum())
             summary_df["H68非Formal研究檔數"] = int(_h68exec_export.str.startswith("NO-FORMAL").sum())
             summary_df["H68權威邊界"] = "H68不建立Formal；只修正跨夜執行資格與學習快照，正式推薦仍以H64/H63為唯一權威。"
+        summary_df["H70逆勢Alpha版本"] = H70_COUNTER_REGIME_VERSION
+        if isinstance(h51_source, pd.DataFrame) and "H70逆勢研究層級" in h51_source.columns:
+            _h70tier_export = h51_source["H70逆勢研究層級"].fillna("").astype(str)
+            summary_df["H70_X1逆勢Alpha檔數"] = int(_h70tier_export.str.startswith("X1").sum())
+            summary_df["H70_X2逆勢韌性檔數"] = int(_h70tier_export.str.startswith("X2").sum())
+            summary_df["H70市場資料錨定日"] = _safe_str(h51_source.iloc[0].get("H70市場資料錨定日"))
+            summary_df["H70報告產生日"] = _safe_str(h51_source.iloc[0].get("H70報告產生日"))
+            summary_df["H70快照時序狀態"] = _safe_str(h51_source.iloc[0].get("H70快照時序狀態"))
+            summary_df["H70權威邊界"] = "X1/X2只做弱市研究召回；不得建立Formal，也不得解除H68執行否決。"
         summary_df["H60_TDCC服務版本"] = H60_TDCC_VERSION
         if isinstance(h51_source, pd.DataFrame) and "H60鎖碼來源" in h51_source.columns:
             _h60_actual = int(h51_source["H60鎖碼來源"].fillna("").astype(str).str.startswith("ACTUAL").sum())
@@ -14627,6 +14704,9 @@ def _build_excel_bytes(
                 "H68_H67_P1成熟樣本", "H68_H67_P1正報酬率%", "H68_H67_P1平均SelectionAlpha%",
                 "H68_H67_P2成熟樣本", "H68_H67_P2正報酬率%", "H68_H67_P2平均SelectionAlpha%",
                 "H68_H67_C1成熟樣本", "H68_H67_C1正報酬率%", "H68_H67_C1平均SelectionAlpha%",
+                "H70學習快照成熟樣本", "H70學習啟用狀態",
+                "H70_X1成熟樣本", "H70_X1正報酬率%", "H70_X1平均1日報酬%", "H70_X1平均SelectionAlpha%",
+                "H70_X2成熟樣本", "H70_X2正報酬率%", "H70_X2平均1日報酬%", "H70_X2平均SelectionAlpha%",
                 "brier_score", "brier_skill_vs_base_rate_pct",
             ]:
                 if _kpi in _truth_sum:
@@ -14656,6 +14736,8 @@ def _build_excel_bytes(
     sheets = [
         ("超級AI最終決策", final_decision_df, "目前沒有同時通過強勢、主流與鎖碼真相的核心候選；不為推薦而推薦。"),
         ("正式推薦作戰", formal_execution_df, "本輪沒有H64核心有效Formal；A-/Radar/FORMAL-QUALITY-HOLD不冒充正式推薦。"),
+        ("H70逆勢Alpha觀察", h70_counter_df, "H70在弱市只召回極少數個股獨立發動候選；X1/X2均非Formal。"),
+        ("H70治理摘要", h70_governance_df, "H70標示市場資料錨定日與報告產生日，週末快照不冒充交易日。"),
         ("H67次日優先治理", h67_priority_df, "H67用大盤Regime、族群資金、一致性與追價耗竭治理H66排序；P1/P2/C1均非Formal。"),
         ("H67治理摘要", h67_governance_df, "H67只治理研究順位與盤前重驗，不改Formal權威。"),
         ("H68執行學習治理", h68_execution_df, "H68把收盤研究順位與次日執行權限分離，並永久保存H65/H66/H67學習快照。"),
@@ -14703,7 +14785,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H68 Excel新增『H68執行學習治理』，並把H64/H63最終Formal單一真相寫回健康摘要；H67 P1/P2/C1、H66 A1/A2/B1、H65 W1/W2/W3仍全部只是研究觀察。")
+    st.caption("H70 Excel新增『H70逆勢Alpha觀察／治理摘要』與非交易日時序真相；X1/X2、H67 P1/P2/C1、H66 A1/A2/B1、H65 W1/W2/W3仍全部只是研究觀察，Formal/Execution權威不變。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -14729,7 +14811,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         st.caption("需要調整欄位時再開啟上方開關；H46 使用欄位名稱定位與批次排序，平常可保持關閉以維持頁面速度。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))

@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h68_execution_learning_authority_20260911"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h70_counter_regime_session_truth_20260914"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -524,6 +524,8 @@ def build_h57_h60_learning_summary(rows: Any) -> dict[str, Any]:
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H66T1層級")).startswith("A1"), "H66_A1"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H66T1層級")).startswith("A2"), "H66_A2"))
     out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H66T1層級")).startswith("B1"), "H66_B1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H70逆勢研究層級")).startswith("X1"), "H70_X1"))
+    out.update(_selection_cohort_metrics(items, lambda r: _s(r.get("H70逆勢研究層級")).startswith("X2"), "H70_X2"))
     return out
 
 
@@ -683,6 +685,32 @@ def build_h68_learning_summary(rows: Any) -> dict[str, Any]:
         out[f"H68_H67_{prefix}平均SelectionAlpha%"] = round(sum(alpha) / len(alpha), 4) if alpha else None
     return out
 
+
+
+def build_h70_learning_summary(rows: Any) -> dict[str, Any]:
+    """Track post-H70 counter-regime research separately from Formal performance.
+
+    Only immutable H70 SNAPSHOT-READY rows are counted.  X1/X2 are research labels;
+    they never enter executable win-rate unless the independent H64/H68 authority path
+    also permitted execution.
+    """
+    items = [r for r in _rows(rows) if isinstance(r, dict) and bool(r.get("T1成熟"))]
+    ready = [r for r in items if _s(r.get("H70學習快照狀態")).startswith("SNAPSHOT-READY")]
+    out: dict[str, Any] = {
+        "H70學習快照成熟樣本": len(ready),
+        "H70學習啟用狀態": "ACTIVE" if len(ready) >= 30 else "WARMUP｜等待H70逆勢快照成熟",
+    }
+    for prefix in ("X1", "X2"):
+        cohort = [r for r in ready if _s(r.get("H70逆勢研究層級")).startswith(prefix)]
+        rets = [_f(r.get("隔日候選漲跌%"), None) for r in cohort]
+        rets = [x for x in rets if x is not None]
+        alpha = [_f(r.get("Selection Alpha%"), None) for r in cohort]
+        alpha = [x for x in alpha if x is not None]
+        out[f"H70_{prefix}成熟樣本"] = len(cohort)
+        out[f"H70_{prefix}正報酬率%"] = round(sum(1 for x in rets if x > 0) / len(rets) * 100.0, 2) if rets else None
+        out[f"H70_{prefix}平均1日報酬%"] = round(sum(rets) / len(rets), 4) if rets else None
+        out[f"H70_{prefix}平均SelectionAlpha%"] = round(sum(alpha) / len(alpha), 4) if alpha else None
+    return out
 
 def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
     """Backward-compatible alias for H60 telemetry."""
@@ -866,6 +894,17 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H68執行否決原因": _s(original.get("H68執行否決原因")),
         "H68學習快照建立時間": _s(original.get("H68學習快照建立時間")),
         "H68版本": _s(original.get("H68版本")) or "v191_h68_execution_learning_authority_20260911",
+        "H70逆勢Alpha分": _f(original.get("H70逆勢Alpha分")),
+        "H70逆勢研究層級": _s(original.get("H70逆勢研究層級")),
+        "H70逆勢研究建議": _s(original.get("H70逆勢研究建議")),
+        "H70逆勢成立條件": _s(original.get("H70逆勢成立條件")),
+        "H70逆勢阻擋原因": _s(original.get("H70逆勢阻擋原因")),
+        "H70市場資料錨定日": _s(original.get("H70市場資料錨定日")),
+        "H70報告產生日": _s(original.get("H70報告產生日")),
+        "H70快照時序狀態": _s(original.get("H70快照時序狀態")),
+        "H70預期T1交易日": _s(original.get("H70預期T1交易日")),
+        "H70學習快照狀態": _s(original.get("H70學習快照狀態")),
+        "H70版本": _s(original.get("H70版本")) or "v191_h70_counter_regime_alpha_session_truth_20260914",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -1090,6 +1129,7 @@ def refresh_t1_trade_truth(
     h66_rank_learning = build_h66_rank_learning_summary(matured)
     h67_rank_learning = build_h67_rank_learning_summary(matured)
     h68_learning = build_h68_learning_summary(matured)
+    h70_learning = build_h70_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -1120,6 +1160,7 @@ def refresh_t1_trade_truth(
             **h66_rank_learning,
             **h67_rank_learning,
             **h68_learning,
+            **h70_learning,
             "brier_score": calibration.get("brier_score"),
             "brier_skill_vs_base_rate_pct": calibration.get("brier_skill_vs_base_rate_pct"),
         },
@@ -1183,7 +1224,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary", "build_h68_learning_summary",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary", "build_h68_learning_summary", "build_h70_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]
