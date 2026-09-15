@@ -41,11 +41,21 @@ try:
 except Exception:
     evaluate_twse_t86_release_timing = None
 
+try:
+    from godpick_auto_scheduler import load_settings as load_auto_scheduler_settings, load_status as load_auto_scheduler_status
+except Exception:
+    load_auto_scheduler_settings = load_auto_scheduler_status = None
+
+try:
+    from godpick_scheduler_wakeup_service import dispatch_scheduler_wakeup as dispatch_auto_scheduler_wakeup
+except Exception:
+    dispatch_auto_scheduler_wakeup = None
+
 st.set_page_config(page_title="16_官方因子快取中心", layout="wide")
 inject_pro_theme()
 
 st.title("16_官方因子快取中心")
-st.caption("V191-H69｜官方因子權威同步＋第07/16頁覆蓋率單一真相｜H43 T86備援＋V190盤後時序＋V187來源可信度＋V186 Reboot永久權威")
+st.caption("V191-H71｜官方因子中央 worker＋runtime-data 單一權威｜H69 第07/16頁覆蓋率單一真相＋H43/V190/V187/V186")
 
 
 def _fmt(v):
@@ -79,6 +89,19 @@ def _display_status() -> None:
         f"V186永久權威｜資料日期 {data_date}｜恢復來源 {authority.get('restore_source') or 'local'}｜"
         f"遠端永久化 {'✅ 已確認' if remote_ok else '⚠️ 尚未確認'}"
     )
+    if callable(load_auto_scheduler_settings) and callable(load_auto_scheduler_status):
+        try:
+            _central_cfg = load_auto_scheduler_settings(refresh_remote=True)
+            _central_status = load_auto_scheduler_status(refresh_remote=True)
+            _job_cfg = (((_central_cfg or {}).get("jobs") or {}).get("official_factors") or {})
+            _job_status = (((_central_status or {}).get("jobs") or {}).get("official_factors") or {})
+            _times = "/".join(str(x) for x in (_job_cfg.get("times") or [])) or "未設定"
+            _last = str(_job_status.get("last_run_at") or "尚未執行")
+            _status = str(_job_status.get("last_status") or "尚未執行")
+            _msg = str(_job_status.get("last_message") or "")
+            st.info(f"H71中央官方因子工作｜排程 {_times}｜最近 {_status} @ {_last}" + (f"｜{_msg}" if _msg else ""))
+        except Exception:
+            pass
     if callable(evaluate_twse_t86_release_timing):
         try:
             now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
@@ -167,8 +190,9 @@ with st.sidebar:
     )
     st.caption("FinMind Token：" + ("已設定" if fm_status.get("token_configured") else "未設定（請在 Streamlit Secrets 加入 FINMIND_TOKEN）"))
     st.divider()
-    do_update = st.button("更新官方因子快取", type="primary", use_container_width=True)
-    do_pull = st.button("從 GitHub 讀取快取", use_container_width=True)
+    do_central_update = st.button("⚡ 由中央 worker 立即更新官方因子", type="primary", use_container_width=True)
+    do_update = st.button("本頁直接更新（診斷/備援）", use_container_width=True, help="H71正式建議使用中央worker；此按鈕保留本頁直接抓取供診斷。")
+    do_pull = st.button("從 GitHub/runtime-data 重新讀取快取", use_container_width=True)
     do_push = st.button("同步快取到 GitHub", use_container_width=True)
     do_trust_migrate = st.button("V187 校正來源可信度並永久保存", use_container_width=True, help="不重新抓網路；依法人/營收/估值實際來源欄位重建可信度，修復舊版被單一備援欄位誤降為60/82分的資料。")
 
@@ -184,6 +208,25 @@ st.warning(
 )
 if not finmind_config_status().get("token_configured"):
     st.warning('FinMind 備援尚未啟用。請在 Streamlit Cloud → App settings → Secrets 加入 `FINMIND_TOKEN = \"你的token\"`，重新啟動後再更新。不要把 token 寫進程式或 GitHub。')
+
+if do_central_update:
+    try:
+        _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+        _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
+        _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
+        _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
+    except Exception:
+        _token, _owner, _repo, _branch = "", "cheng07021028", "stock-app", "main"
+    if callable(dispatch_auto_scheduler_wakeup):
+        _ok, _msg = dispatch_auto_scheduler_wakeup(
+            token=_token, owner=_owner, repo=_repo, branch=_branch,
+            wakeup_source="page16_h71_manual_official_factors", manual_job="official_factors",
+        )
+        (st.success if _ok else st.error)(_msg)
+        if _ok:
+            st.info("H71 已交給 GitHub 中央 worker 執行；完成結果會寫入 runtime-data。重新整理本頁即可看到最新資料日期與中央狀態。")
+    else:
+        st.error("中央 workflow_dispatch 服務載入失敗；未在 Streamlit UI thread 執行大型更新。")
 
 if do_pull:
     ok, msg = read_cache_from_github()
@@ -252,6 +295,13 @@ if do_update:
 if do_push:
     ok, msg = push_cache_to_github()
     (st.success if ok else st.warning)(msg)
+
+# H71: a long-lived Streamlit process may still hold the pre-central-run local
+# cache.  Elect runtime-data authority before rendering status/preview.
+try:
+    load_factor_cache(force_authority_restore=True)
+except Exception:
+    pass
 
 _display_status()
 

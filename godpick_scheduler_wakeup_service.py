@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Callable
 import requests
 
-VERSION = "godpick_scheduler_wakeup_service_v191_h19_20260814"
+VERSION = "godpick_scheduler_wakeup_service_v191_hotfix19_page17_autocatchup_h71_20260915"
 WORKFLOW_FILE = "godpick_auto_scheduler_v191.yml"
 
 
@@ -22,6 +22,7 @@ def dispatch_scheduler_wakeup(
     branch: str = "main",
     wakeup_source: str = "page17_auto_catchup",
     timeout_seconds: int = 12,
+    manual_job: str = "",
     http_post: Callable[..., Any] | None = None,
 ) -> tuple[bool, str]:
     """Submit one workflow_dispatch without exposing the token in URL/log text."""
@@ -30,6 +31,7 @@ def dispatch_scheduler_wakeup(
     repo = str(repo or "").strip()
     branch = str(branch or "main").strip() or "main"
     wakeup_source = str(wakeup_source or "page17_auto_catchup").strip()[:80] or "page17_auto_catchup"
+    manual_job = str(manual_job or "").strip()[:80]
     if not token:
         return False, "未設定 GITHUB_TOKEN，無法由 Page17 自動補送 GitHub workflow_dispatch；Windows/GitHub 原排程仍會繼續喚醒。"
     if not owner or not repo:
@@ -47,11 +49,13 @@ def dispatch_scheduler_wakeup(
         response = post(
             url,
             headers=headers,
-            json={"ref": branch, "inputs": {"wakeup_source": wakeup_source}},
+            json={"ref": branch, "inputs": {"wakeup_source": wakeup_source, "manual_job": manual_job}},
             timeout=max(3, min(int(timeout_seconds or 12), 30)),
         )
         code = int(getattr(response, "status_code", 0) or 0)
         if code == 204:
+            if manual_job:
+                return True, f"已送出中央 worker 手動工作：{manual_job}；GitHub worker 啟動後，runtime-data 狀態會更新真正執行結果。"
             return True, "已送出 Page17 自動補跑喚醒；GitHub worker 啟動後，即時狀態區會自動更新目前執行項目。"
         return False, f"Page17 自動補跑喚醒未送出：GitHub HTTP {code or 'unknown'}。不會在 Streamlit 內重跑大型工作，避免重複執行。"
     except Exception as exc:

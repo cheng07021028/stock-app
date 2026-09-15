@@ -3100,7 +3100,7 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     # 不可直接讀部署包內的舊 JSON，否則 Streamlit Reboot 會把 runtime-data
     # 的新官方因子重新退回 2026-07-11。
     try:
-        official_payload = load_factor_cache() if callable(load_factor_cache) else _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
+        official_payload = load_factor_cache(force_authority_restore=True) if callable(load_factor_cache) else _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
     except Exception:
         official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
     official_rows = official_payload.get("records", []) if isinstance(official_payload, dict) else []
@@ -4107,6 +4107,38 @@ def _apply_macro_bridge_columns(df: pd.DataFrame, bridge: dict[str, Any], enable
     return x
 
 
+_H71_OFFICIAL_AUTH_LAST_REFRESH_MONO = 0.0
+_H71_OFFICIAL_AUTH_LAST_MESSAGE = ""
+
+def _refresh_official_authority_h71(*, force: bool = False, min_interval_seconds: float = 30.0) -> tuple[bool, str]:
+    """Refresh runtime-data official-factor authority before recommendation merge.
+
+    H69 made the newest cache authoritative *after it was loaded*, but a long-lived
+    Streamlit process could keep the pre-20:10 local cache because V186 authority
+    restore is normally one-shot per process.  H71 forces a remote authority election
+    at most once per short interval so Page07 cannot keep reporting 52% while the
+    central worker has already persisted a newer 98% runtime-data snapshot.
+    """
+    global _H71_OFFICIAL_AUTH_LAST_REFRESH_MONO, _H71_OFFICIAL_AUTH_LAST_MESSAGE
+    if not callable(load_factor_cache):
+        return False, "official_factor_service unavailable"
+    now_mono = time.monotonic()
+    if (not force) and _H71_OFFICIAL_AUTH_LAST_REFRESH_MONO and (now_mono - _H71_OFFICIAL_AUTH_LAST_REFRESH_MONO) < float(min_interval_seconds):
+        return True, _H71_OFFICIAL_AUTH_LAST_MESSAGE or "H71 authority refresh throttled"
+    try:
+        payload = load_factor_cache(force_authority_restore=True)
+        data_date = ""
+        if isinstance(payload, dict):
+            data_date = str(payload.get("data_date") or ((payload.get("meta") or {}).get("data_date") if isinstance(payload.get("meta"), dict) else "") or "")
+        _H71_OFFICIAL_AUTH_LAST_REFRESH_MONO = now_mono
+        _H71_OFFICIAL_AUTH_LAST_MESSAGE = f"H71 runtime-data authority refreshed{('｜data='+data_date) if data_date else ''}"
+        return True, _H71_OFFICIAL_AUTH_LAST_MESSAGE
+    except Exception as exc:
+        _H71_OFFICIAL_AUTH_LAST_REFRESH_MONO = now_mono
+        _H71_OFFICIAL_AUTH_LAST_MESSAGE = f"H71 authority refresh failed: {type(exc).__name__}: {exc}"
+        return False, _H71_OFFICIAL_AUTH_LAST_MESSAGE
+
+
 def _apply_official_factor_cache_v109(df: pd.DataFrame | None) -> pd.DataFrame:
     """V109：只讀 official_factors_cache.json，把官方法人/營收/EPS/PER 因子併入推薦結果。
 
@@ -4121,6 +4153,9 @@ def _apply_official_factor_cache_v109(df: pd.DataFrame | None) -> pd.DataFrame:
         return df.copy()
     out = df.copy()
     try:
+        # H71: first merge in a recommendation pass refreshes runtime-data authority.
+        # Repeated internal enrichments inside the same pass are throttled for speed.
+        _refresh_official_authority_h71(force=False, min_interval_seconds=30.0)
         if callable(merge_official_factors):
             out = merge_official_factors(out)
             # H36: multi-overlay frames can contain duplicate labels.  Reuse the
@@ -16876,7 +16911,7 @@ def main():
     )
     if isinstance(scan_report_now, dict) and scan_report_now:
         st.caption(
-            "V191-H69 官方因子單一真相｜"
+            "V191-H71 中央權威｜V191-H69 官方因子單一真相｜"
             f"口徑 {_safe_str(scan_report_now.get('官方治理口徑')) or '上市＋上櫃'} {int(scan_report_now.get('官方治理母體數', 0) or 0)}檔｜"
             f"有效 {float(scan_report_now.get('官方有效因子覆蓋率%', 0) or 0):.1f}%｜"
             f"日期T-1內 {float(scan_report_now.get('官方日期T-1內覆蓋率%', 0) or 0):.1f}%｜"

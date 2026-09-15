@@ -75,7 +75,7 @@ st.set_page_config(page_title="17_系統健康檢查", layout="wide")
 inject_pro_theme()
 
 st.title("17_系統健康檢查 / 全模組一鍵更新中心")
-st.caption("V191-H39｜中央自動排程順位修正：順位改為『指定目的位置』，保存後立即回讀驗證並同步畫面；07 最終閘門勾選時固定最後順位。H38/H28/H27 既有決策與防重跑機制完整保留。")
+st.caption("V191-H71｜官方因子中央權威：排程/手動更新/執行狀態統一由 V191 GitHub worker＋runtime-data 控制；舊版21:00排程降為唯讀相容資訊。H70/H69/H39既有治理完整保留。")
 
 
 # ---------------------------------------------------------------------------
@@ -541,87 +541,54 @@ with st.sidebar:
     do_retry_durable = st.button("🔁 重試失敗/待同步永久化", use_container_width=True)
     do_super_context = st.button("🧠 更新SuperAI融資/期貨/ETF情境", use_container_width=True)
     st.divider()
-    st.subheader("舊版官方因子排程（V191相容設定）")
-    st.caption("V191中央排程啟用後，建議由上方中央排程統一控制；此區保留舊設定與手動更新功能，不再需要另一套獨立cron。")
-    cfg = load_schedule_settings()
-    schedule_options = ["21:00", "21:30", "22:00", "22:30", "23:00", "23:30"]
-    limit_options = [0, 200, 500, 1000, 1500, 2000]
-    market_options = ["全部", "上市", "上櫃"]
+    st.subheader("官方因子排程｜V191 中央權威")
+    st.caption("H71：這裡不再維護第二套 21:00 cron。正式排程時間、最後成功/警示/失敗與手動更新都以 V191 中央排程 runtime-data 為唯一真相。")
 
-    def _first_valid_time(value):
+    _central_cfg_sidebar = load_auto_scheduler_settings(refresh_remote=True) if callable(load_auto_scheduler_settings) else {}
+    _central_status_sidebar = load_auto_scheduler_status(refresh_remote=True) if callable(load_auto_scheduler_status) else {}
+    _official_job_cfg = (((_central_cfg_sidebar or {}).get("jobs") or {}).get("official_factors") or {}) if isinstance(_central_cfg_sidebar, dict) else {}
+    _official_job_status = (((_central_status_sidebar or {}).get("jobs") or {}).get("official_factors") or {}) if isinstance(_central_status_sidebar, dict) else {}
+    _official_times = [str(x) for x in (_official_job_cfg.get("times") or []) if str(x).strip()]
+    _official_enabled = bool(_official_job_cfg.get("enabled", False)) and bool((_central_cfg_sidebar or {}).get("enabled", False))
+    _official_last_status = str(_official_job_status.get("last_status") or "尚未執行")
+    _official_last_run = str(_official_job_status.get("last_run_at") or "尚未執行")
+    _official_last_msg = str(_official_job_status.get("last_message") or "")
+    st.metric("中央官方因子工作", "啟用" if _official_enabled else "停用", delta=" / ".join(_official_times) if _official_times else "尚未設定時段")
+    st.caption(f"最近狀態：{_official_last_status}｜最後執行：{_official_last_run}")
+    if _official_last_msg:
+        st.caption(f"中央回報：{_official_last_msg}")
+
+    def _dispatch_h71_official_factor_worker() -> tuple[bool, str]:
         try:
-            t = (value or ["23:00"])[0]
+            _token = str(st.secrets.get("GITHUB_TOKEN", "") or "").strip()
+            _owner = str(st.secrets.get("GITHUB_REPO_OWNER", "cheng07021028") or "cheng07021028").strip()
+            _repo = str(st.secrets.get("GITHUB_REPO_NAME", "stock-app") or "stock-app").strip()
+            _branch = str(st.secrets.get("GITHUB_CODE_BRANCH", "main") or "main").strip()
         except Exception:
-            t = "23:00"
-        return t if t in schedule_options else "23:00"
+            _token, _owner, _repo, _branch = "", "cheng07021028", "stock-app", "main"
+        if not callable(dispatch_auto_scheduler_wakeup):
+            return False, "中央 workflow_dispatch 服務載入失敗；H71 不會退回 Streamlit UI 執行大型官方因子更新。"
+        return dispatch_auto_scheduler_wakeup(
+            token=_token, owner=_owner, repo=_repo, branch=_branch,
+            wakeup_source="page17_h71_manual_official_factors", manual_job="official_factors",
+        )
 
-    def _valid_limit(value):
-        try:
-            v = int(value or 0)
-        except Exception:
-            v = 0
-        return v if v in limit_options else 0
+    if st.button("⚡ 立即由中央 worker 更新官方因子", use_container_width=True, type="primary"):
+        _ok_h71, _msg_h71 = _dispatch_h71_official_factor_worker()
+        (st.success if _ok_h71 else st.error)(_msg_h71)
+        if _ok_h71:
+            st.info("已送出工作，不在 Streamlit 頁面內等待 40~240 秒。請看上方中央排程即時狀態；完成後 Page16/Page07 會從 runtime-data 權威同步。")
 
-    def _valid_market(value):
-        v = str(value or "全部")
-        return v if v in market_options else "全部"
-
-    widget_defaults = {
-        "official_schedule_enabled": bool(cfg.get("enabled", True)),
-        "official_schedule_time": _first_valid_time(cfg.get("times")),
-        "official_schedule_weekdays_only": bool(cfg.get("weekdays_only", True)),
-        "official_schedule_market_filter": _valid_market(cfg.get("market_filter", "全部")),
-        "official_schedule_limit": _valid_limit(cfg.get("limit", 0)),
-        "official_schedule_include_institutional": bool(cfg.get("include_institutional", True)),
-        "official_schedule_include_revenue": bool(cfg.get("include_revenue", True)),
-        "official_schedule_include_valuation": bool(cfg.get("include_valuation", True)),
-    }
-    for _k, _v in widget_defaults.items():
-        if _k not in st.session_state:
-            st.session_state[_k] = _v
-
-    enabled = st.checkbox("啟用官方因子自動更新", key="official_schedule_enabled")
-    schedule_time = st.selectbox("預計更新時間（台灣）", schedule_options, key="official_schedule_time")
-    weekdays_only = st.checkbox("僅週一至週五", key="official_schedule_weekdays_only")
-    market_filter = st.selectbox("更新市場", market_options, key="official_schedule_market_filter")
-    limit = st.selectbox("更新筆數限制", limit_options, key="official_schedule_limit", help="0 = 全部股票")
-    include_institutional = st.checkbox("更新法人", key="official_schedule_include_institutional")
-    include_revenue = st.checkbox("更新營收", key="official_schedule_include_revenue")
-    include_valuation = st.checkbox("更新 PER / PBR / EPS", key="official_schedule_include_valuation")
-
-    saved_time = (cfg.get("last_saved_at") or cfg.get("updated_at") or "尚未保存")
-    st.caption(f"目前讀取設定：{_first_valid_time(cfg.get('times'))}｜最後保存：{saved_time}")
-
-    if st.button("💾 套用官方因子排程設定（本機 + GitHub 永久保存）", use_container_width=True):
-        new_cfg = dict(DEFAULT_SCHEDULE_SETTINGS)
-        new_cfg.update({
-            "enabled": bool(st.session_state["official_schedule_enabled"]),
-            "times": [str(st.session_state["official_schedule_time"])],
-            "weekdays_only": bool(st.session_state["official_schedule_weekdays_only"]),
-            "market_filter": str(st.session_state["official_schedule_market_filter"]),
-            "limit": int(st.session_state["official_schedule_limit"]),
-            "include_institutional": bool(st.session_state["official_schedule_include_institutional"]),
-            "include_revenue": bool(st.session_state["official_schedule_include_revenue"]),
-            "include_valuation": bool(st.session_state["official_schedule_include_valuation"]),
+    with st.expander("舊版官方因子排程（唯讀相容資訊）", expanded=False):
+        _legacy_cfg = load_schedule_settings()
+        _legacy_times = _legacy_cfg.get("times") if isinstance(_legacy_cfg.get("times"), list) else []
+        st.warning("此設定不再是正式自動更新權威。若此處顯示 21:00，但中央排程是 05:10/14:10/20:10，應以中央排程為準。")
+        st.write({
+            "舊版啟用": bool(_legacy_cfg.get("enabled", True)),
+            "舊版時間": _legacy_times,
+            "舊版最後保存": _legacy_cfg.get("last_saved_at") or _legacy_cfg.get("updated_at") or "尚未保存",
+            "用途": "只供舊版相容/診斷，不再驅動獨立 cron",
         })
-        ok, msg = save_schedule_settings(new_cfg)
-        if ok:
-            st.success("已保存官方因子排程設定。")
-            if "未設定 GITHUB_TOKEN" in msg or "GitHub" in msg:
-                st.info(msg)
-        else:
-            st.error(msg)
-    if st.button("⚡ 立即手動更新官方因子快取", use_container_width=True):
-        with st.spinner("正在更新官方因子快取..."):
-            _manual_cfg = dict(load_schedule_settings() or {})
-            _manual_cfg["enabled"] = True
-            result = run_official_factor_update_once(_manual_cfg, push_github=True)
-        if result.get("ok"):
-            st.success(result.get("message"))
-            if result.get("github_msg"):
-                st.info(result.get("github_msg"))
-        else:
-            st.error(result.get("message"))
 
 
     st.divider()
