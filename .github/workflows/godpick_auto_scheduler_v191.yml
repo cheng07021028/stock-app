@@ -14,6 +14,10 @@ on:
         description: "Wakeup source label for scheduler diagnostics"
         required: false
         default: "manual_dispatch"
+      manual_job:
+        description: "Optional single central job to force-run (H71 manual authority)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -35,6 +39,7 @@ jobs:
       GITHUB_RUNTIME_DATA_BRANCH: runtime-data
       GODPICK_WAKEUP_EVENT: ${{ github.event_name }}
       GODPICK_WAKEUP_SOURCE: ${{ github.event.inputs.wakeup_source || github.event_name }}
+      GODPICK_MANUAL_JOB: ${{ github.event.inputs.manual_job || '' }}
       FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
       FINMIND_API_TOKEN: ${{ secrets.FINMIND_API_TOKEN }}
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
