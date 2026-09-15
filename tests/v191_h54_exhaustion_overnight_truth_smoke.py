@@ -76,7 +76,7 @@ def main():
 
     page_text = (ROOT / "pages" / "7_股神推薦.py").read_text(encoding="utf-8")
     assert 'H51_HUMAN_MASTER_EXPECTED_VERSION = "v191_h60_mainrise_holder_snowball_truth_20260904"' in page_text
-    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h70_counter_regime_session_truth_20260914"' in page_text
+    assert 'PAGE07_SPEED_FIX_VERSION = "page07_v191_h72_multi_model_alpha_ensemble_20260915"' in page_text
     assert "超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相" in page_text
 
     print("PASS v191_h54_exhaustion_overnight_truth_smoke")

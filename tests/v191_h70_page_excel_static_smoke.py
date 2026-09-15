@@ -9,7 +9,7 @@ def main():
         'V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL',
     ]:
         assert token in s, token
-    assert 'page07_v191_h70_counter_regime_session_truth_20260914' in s
+    assert 'page07_v191_h72_multi_model_alpha_ensemble_20260915' in s
     print('PASS H70 Page07/Excel static')
 
 if __name__ == '__main__': main()
