@@ -23,7 +23,8 @@ def main():
     assert "H64/H63 remain Formal truth" in e and "H68 remains next-session execution truth" in e
     # Export and immutable record paths must apply H72 after prior stages, not only render it.
     assert p.count("apply_h72_multi_model_alpha_ensemble") >= 4
-    assert '"_H64有效Formal優先", "_H72研究優先"' in p
+    assert '"_H64有效Formal優先", "_H73研究優先", "H73研究排序分"' in p
+    assert p.index('"_H73研究優先"') < p.index('"_H72研究優先"')
     print("PASS H72 Page07/Excel/static authority")
 
 if __name__ == "__main__":

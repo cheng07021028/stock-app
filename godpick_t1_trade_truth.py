@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h72_multi_model_alpha_ensemble_20260915"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h73_leadership_breadth_distribution_truth_20260916"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -761,6 +761,36 @@ def build_h72_learning_summary(rows: Any) -> dict[str, Any]:
     return out
 
 
+def build_h73_learning_summary(rows: Any) -> dict[str, Any]:
+    """Forward-only H73 leadership ranking learning; no historical rank backfill."""
+    items=[r for r in _rows(rows) if isinstance(r,dict) and bool(r.get("T1成熟")) and _s(r.get("H73學習快照狀態")).startswith("SNAPSHOT-READY")]
+    out={"H73學習快照成熟樣本":len(items),"H73學習啟用狀態":"ACTIVE" if len(items)>=30 else "WARMUP｜等待H73領先快照成熟"}
+    for prefix in ("L1","L2","L3"):
+        cohort=[r for r in items if _s(r.get("H73研究層級")).startswith(prefix)]
+        rets=[_f(r.get("隔日候選漲跌%"),None) for r in cohort]; rets=[x for x in rets if x is not None]
+        alpha=[_f(r.get("Selection Alpha%"),None) for r in cohort]; alpha=[x for x in alpha if x is not None]
+        out[f"H73_{prefix}成熟樣本"]=len(cohort)
+        out[f"H73_{prefix}正報酬率%"] = round(sum(1 for x in rets if x>0)/len(rets)*100,2) if rets else None
+        out[f"H73_{prefix}平均1日報酬%"] = round(sum(rets)/len(rets),4) if rets else None
+        out[f"H73_{prefix}平均SelectionAlpha%"] = round(sum(alpha)/len(alpha),4) if alpha else None
+    groups={}
+    for r in items:
+        d=_s(r.get("推薦日期") or r.get("推薦批次日期")); score=_f(r.get("H73研究排序分"),None); alpha=_f(r.get("Selection Alpha%"),None)
+        if d and score is not None and alpha is not None: groups.setdefault(d,[]).append(r)
+    ics=[]; nd=[]
+    for g in groups.values():
+        if len(g)<3: continue
+        df=pd.DataFrame({"score":[_f(r.get("H73研究排序分"),0) or 0 for r in g],"alpha":[_f(r.get("Selection Alpha%"),0) or 0 for r in g]})
+        c=df.score.rank(pct=True).corr(df.alpha.rank(pct=True))
+        if c is not None and math.isfinite(float(c)): ics.append(float(c))
+        n=_h66_ndcg(df.alpha.rank(pct=True).tolist(),10)
+        if n is not None: nd.append(n)
+    out["H73排名成熟交易日"]=len(groups)
+    out["H73平均RankIC"]=round(sum(ics)/len(ics),4) if ics else None
+    out["H73平均NDCG@10"]=round(sum(nd)/len(nd),4) if nd else None
+    return out
+
+
 def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
     """Backward-compatible alias for H60 telemetry."""
     return build_h57_h60_learning_summary(rows)
@@ -976,6 +1006,25 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H72主要缺口": _s(original.get("H72主要缺口")),
         "H72學習快照狀態": _s(original.get("H72學習快照狀態")),
         "H72版本": _s(original.get("H72版本")) or "v191_h72_multi_model_alpha_ensemble_20260915",
+        "H73族群廣度分": _f(original.get("H73族群廣度分")),
+        "H73領先加速分": _f(original.get("H73領先加速分")),
+        "H73Regime轉折分": _f(original.get("H73Regime轉折分")),
+        "H73模型一致性分": _f(original.get("H73模型一致性分")),
+        "H73分布矛盾扣分": _f(original.get("H73分布矛盾扣分")),
+        "H73覆蓋調整分": _f(original.get("H73覆蓋調整分")),
+        "H73研究排序分": _f(original.get("H73研究排序分")),
+        "H73全市場百分位%": _f(original.get("H73全市場百分位%")),
+        "H73全市場順位": _f(original.get("H73全市場順位")),
+        "H73族群內百分位%": _f(original.get("H73族群內百分位%")),
+        "H73族群內順位": _f(original.get("H73族群內順位")),
+        "H73研究層級": _s(original.get("H73研究層級")),
+        "H73Regime轉折狀態": _s(original.get("H73Regime轉折狀態")),
+        "H73相對H72順位變化": _f(original.get("H73相對H72順位變化")),
+        "H73主要優勢": _s(original.get("H73主要優勢")),
+        "H73主要警示": _s(original.get("H73主要警示")),
+        "H73研究建議": _s(original.get("H73研究建議")),
+        "H73學習快照狀態": _s(original.get("H73學習快照狀態")),
+        "H73版本": _s(original.get("H73版本")) or "v191_h73_leadership_breadth_distribution_truth_20260916",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -1202,6 +1251,7 @@ def refresh_t1_trade_truth(
     h68_learning = build_h68_learning_summary(matured)
     h70_learning = build_h70_learning_summary(matured)
     h72_learning = build_h72_learning_summary(matured)
+    h73_learning = build_h73_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -1234,6 +1284,7 @@ def refresh_t1_trade_truth(
             **h68_learning,
             **h70_learning,
             **h72_learning,
+            **h73_learning,
             "brier_score": calibration.get("brier_score"),
             "brier_skill_vs_base_rate_pct": calibration.get("brier_skill_vs_base_rate_pct"),
         },
@@ -1297,7 +1348,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary", "build_h68_learning_summary", "build_h70_learning_summary", "build_h72_learning_summary",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary", "build_h68_learning_summary", "build_h70_learning_summary", "build_h72_learning_summary", "build_h73_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]

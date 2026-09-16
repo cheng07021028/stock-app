@@ -439,6 +439,20 @@ except Exception:
     build_h72_ensemble_table = None
     build_h72_governance_summary = None
 
+H73_LEADERSHIP_EXPECTED_VERSION = "v191_h73_leadership_breadth_distribution_truth_20260916"
+try:
+    from godpick_h73_leadership_breadth_engine import (
+        VERSION as H73_LEADERSHIP_VERSION,
+        apply_h73_leadership_breadth,
+        build_h73_leadership_table,
+        build_h73_governance_summary,
+    )
+except Exception:
+    H73_LEADERSHIP_VERSION = "h73_leadership_unavailable"
+    apply_h73_leadership_breadth = None
+    build_h73_leadership_table = None
+    build_h73_governance_summary = None
+
 try:
     from godpick_v188_cache_guard import (
         V189_CACHE_GUARD_VERSION,
@@ -484,8 +498,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h72_multi_model_alpha_ensemble_20260915"
-EXCEL_COLUMN_LAYOUT_VERSION = "V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-20260915"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h73_leadership_breadth_distribution_truth_20260916"
+EXCEL_COLUMN_LAYOUT_VERSION = "V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-20260916"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -12492,13 +12506,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"超級AI最終決策", "正式推薦作戰", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
+        if safe_name in {"超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            _tab_colors = {"超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
+            _tab_colors = {"超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
             ws.sheet_properties.tabColor = _tab_colors.get(safe_name, "00A6A6")
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
@@ -13122,6 +13136,11 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
             _record_source = apply_h72_multi_model_alpha_ensemble(_record_source)
         except Exception:
             pass
+    if callable(apply_h73_leadership_breadth):
+        try:
+            _record_source = apply_h73_leadership_breadth(_record_source)
+        except Exception:
+            pass
     work = _record_source[_record_source["股票代號"].astype(str).map(_normalize_code).isin(codes)].copy()
     _ctx_h9 = st.session_state.get(_k("recommend_execution_context_v191"), {})
     if not isinstance(_ctx_h9, dict):
@@ -13406,6 +13425,13 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
                 work = apply_h72_multi_model_alpha_ensemble(work)
         except Exception:
             pass
+    if callable(apply_h73_leadership_breadth):
+        try:
+            _h73v = work.get("H73版本", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+            if not _h73v.eq(H73_LEADERSHIP_VERSION).all():
+                work = apply_h73_leadership_breadth(work)
+        except Exception:
+            pass
     _h50_research_status = work.get("H50主流購買狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     _h50_recommend = work.get("H50推薦決策", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
     _h47_research_status = work.get("H47主流領先狀態", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
@@ -13421,7 +13447,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     _h66_tier_keep = work.get("H66T1層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.startswith(("A1", "A2", "B1"))
     _h67_tier_keep = work.get("H67研究優先層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.startswith(("P1", "P2", "C1"))
     _h72_tier_keep = work.get("H72研究層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.startswith(("E1", "E2", "E3"))
-    keep &= (score.ge(50.0) | _fresh_keep | _h47_research_keep | _h51_keep | _h55_fresh_keep | _h57_fresh_keep | _h65_tier_keep | _h66_tier_keep | _h67_tier_keep | _h72_tier_keep)
+    _h73_tier_keep = work.get("H73研究層級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.startswith(("L1", "L2", "L3"))
+    keep &= (score.ge(50.0) | _fresh_keep | _h47_research_keep | _h51_keep | _h55_fresh_keep | _h57_fresh_keep | _h65_tier_keep | _h66_tier_keep | _h67_tier_keep | _h72_tier_keep | _h73_tier_keep)
     keep &= ~freshness.str.contains("過期|落後|待更新", regex=True, na=False)
     rank = work.loc[keep].copy()
     if rank.empty:
@@ -13456,8 +13483,11 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     ]
     _h51_market_rank = rank.get("H51市場地位", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
     rank["_H51市場優先"] = _h51_market_rank.map(lambda x: 8 if x.startswith("HM-EARLY") else 7 if x.startswith("HM-PULLBACK") else 6 if x.startswith("HM-LEADER") else 5 if x.startswith("HM-SETUP") else 2 if x.startswith(("HM-EXTENDED", "HM-MATURE")) else 0)
-    # H72: eight-model ensemble is the first non-Formal research rank.  E1/E2/E3
-    # can move attention upward, but never outrank an H64 EFFECTIVE-FORMAL identity.
+    # H73: bounded leadership/breadth overlay becomes the first non-Formal research rank.
+    # It improves T+1 ordering but never outranks H64 EFFECTIVE-FORMAL authority.
+    _h73_tier_rank = rank.get("H73研究層級", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
+    rank["_H73研究優先"] = _h73_tier_rank.map(lambda x: 70 if x.startswith("L1") else 55 if x.startswith("L2") else 35 if x.startswith("L3") else 10 if x.startswith("R0") else 0)
+    # H72 remains the structural multi-model base under H73.
     _h72_tier_rank = rank.get("H72研究層級", pd.Series([""] * len(rank), index=rank.index)).fillna("").astype(str)
     rank["_H72研究優先"] = _h72_tier_rank.map(lambda x: 60 if x.startswith("E1") else 50 if x.startswith("E2") else 35 if x.startswith("E3") else 10 if x.startswith("R0") else 0)
     # H67: final research-priority governance. Weak market/sector flow and low
@@ -13489,7 +13519,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     _h61_front = rank.get("H61前排資格", pd.Series(["是"] * len(rank), index=rank.index)).fillna("是").astype(str)
     rank["_H61前排優先"] = (~_h61_front.str.startswith("否")).astype(int)
     sort_cols = [
-        "_H64有效Formal優先", "_H72研究優先", "H72風險調整分", "H72全市場百分位%", "H72共振模型數", "H72模型覆蓋%",
+        "_H64有效Formal優先", "_H73研究優先", "H73研究排序分", "H73全市場百分位%", "H73領先加速分", "H73族群廣度分", "H73模型一致性分",
+        "_H72研究優先", "H72風險調整分", "H72全市場百分位%", "H72共振模型數", "H72模型覆蓋%",
         "_H67研究優先", "H67T1治理分", "H67全市場百分位%", "H67關鍵訊號一致性分",
         "_H66T1優先", "H66T1自適應排序分", "H66T1全市場百分位%", "H66收盤品質分", "H66法人加速度分",
         "_H65觀察優先", "H65多因子觀察分", "H65全市場觀察百分位%", "H65資料覆蓋%",
@@ -13537,7 +13568,7 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
     if len(_rows) < _target:
         _add_with_cap(_target, 999)
     rank = pd.DataFrame(_rows).reset_index(drop=True) if _rows else rank.head(_target).copy().reset_index(drop=True)
-    rank.drop(columns=["_H64有效Formal優先", "_H72研究優先", "_H67研究優先", "_H66T1優先", "_H65觀察優先", "_H64前排優先", "_H62有效Formal優先", "_H62前排優先", "_H61前排優先", "_H57總覽優先", "_H55總覽優先", "_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
+    rank.drop(columns=["_H64有效Formal優先", "_H73研究優先", "_H72研究優先", "_H67研究優先", "_H66T1優先", "_H65觀察優先", "_H64前排優先", "_H62有效Formal優先", "_H62前排優先", "_H61前排優先", "_H57總覽優先", "_H55總覽優先", "_H51交易優先", "_H51市場優先", "_H50推薦優先", "_H50新鮮主流優先", "_H47市場地位優先"], inplace=True, errors="ignore")
     rank["股神推薦總排名"] = range(1, len(rank) + 1)
 
     cols = _get_master_rank_default_cols()
@@ -13548,7 +13579,8 @@ def _phase90_build_master_recommendation_rank(source_df: pd.DataFrame, top_n: in
 def _phase90_navigation_table() -> pd.DataFrame:
     return pd.DataFrame([
         {"優先序": 1, "活頁/表格": "超級AI最終決策", "真正用途": "H64正式推薦真相：當前強勢×當前主流×TDCC鎖碼趨勢", "是否買進清單": "只有H64有效Formal且H56/Entry/RR完成才可執行"},
-        {"優先序": 2, "活頁/表格": "H72多模型Alpha", "真正用途": "八模型共識＋Regime動態權重：成長、品質、法人、大戶、估值、動能、突破、風險", "是否買進清單": "否｜E1/E2/E3均為研究層，不建立Formal"},
+        {"優先序": 2, "活頁/表格": "H73領先共振", "真正用途": "H72之上的橫截面領先排序：族群廣度、加速、Regime轉折與分布矛盾", "是否買進清單": "否｜L1/L2/L3均為研究層，不建立Formal"},
+        {"優先序": 3, "活頁/表格": "H72多模型Alpha", "真正用途": "八模型共識＋Regime動態權重：成長、品質、法人、大戶、估值、動能、突破、風險", "是否買進清單": "否｜E1/E2/E3均為研究層，不建立Formal"},
         {"優先序": 3, "活頁/表格": "H70逆勢Alpha觀察", "真正用途": "弱市辨識真正逆勢Alpha生存者，避免大盤風控誤殺個股", "是否買進清單": "否｜仍需H64/H68獨立確認"},
         {"優先序": 4, "活頁/表格": "H67次日優先治理", "真正用途": "大盤Regime×族群資金×訊號一致性×追價耗竭", "是否買進清單": "否"},
         {"優先序": 5, "活頁/表格": "多因子觀察雷達", "真正用途": "H65全市場10支柱觀察排序與資料覆蓋", "是否買進清單": "否｜W1/W2/W3均為研究觀察"},
@@ -14033,6 +14065,28 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
                 st.dataframe(_format_df(_h70_gov_ui), use_container_width=True, hide_index=True)
         except Exception as _h70_gov_exc:
             st.caption(f"H70治理摘要暫時無法建立：{_h70_gov_exc}")
+
+    # H73：補足H72「選得到、但強股不一定排前」的橫截面排序問題。
+    render_pro_section("超級AI領先共振｜H73 Leadership Breadth")
+    st.caption("H73只做研究排序：族群廣度、領先加速、Regime轉折、模型一致性與分布矛盾。高動能但法人/大戶未確認會降序；族群共振且低分歧的領先股會上移。Formal仍由H64/H63，執行仍由H68決定。")
+    _h73_engine_ok = bool(callable(apply_h73_leadership_breadth) and callable(build_h73_leadership_table) and callable(build_h73_governance_summary) and H73_LEADERSHIP_VERSION == H73_LEADERSHIP_EXPECTED_VERSION)
+    try:
+        if _h73_engine_ok:
+            _h51_source_ui = apply_h73_leadership_breadth(_h51_source_ui)
+            _h73_ui = build_h73_leadership_table(_h51_source_ui, max_rows=20, max_per_sector=3)
+        else:
+            _h73_ui = pd.DataFrame({"狀態":[f"H73領先共振未完整部署：{H73_LEADERSHIP_VERSION}/{H73_LEADERSHIP_EXPECTED_VERSION}"]})
+    except Exception as _h73_ui_exc:
+        _h73_ui = pd.DataFrame({"狀態":[f"H73領先共振建立失敗：{type(_h73_ui_exc).__name__}: {_h73_ui_exc}"]})
+    if isinstance(_h73_ui,pd.DataFrame) and not _h73_ui.empty:
+        st.dataframe(_format_df(_h73_ui), use_container_width=True, hide_index=True)
+    with st.expander("H73治理摘要｜領先加速與分布矛盾", expanded=False):
+        try:
+            _h73_gov_ui = build_h73_governance_summary(_h51_source_ui) if _h73_engine_ok else pd.DataFrame()
+            if isinstance(_h73_gov_ui,pd.DataFrame) and not _h73_gov_ui.empty:
+                st.dataframe(_format_df(_h73_gov_ui), use_container_width=True, hide_index=True)
+        except Exception as _h73_gov_exc:
+            st.caption(f"H73治理摘要暫時無法建立：{_h73_gov_exc}")
 
     # H72：把國內外成熟選股概念拆成8個可解釋模型，依市場Regime動態配權。
     render_pro_section("超級AI多模型Alpha｜H72 Multi-Model Alpha Ensemble")
@@ -14608,6 +14662,11 @@ def _build_excel_bytes(
         and callable(build_h72_governance_summary)
         and H72_ENSEMBLE_VERSION == H72_ENSEMBLE_EXPECTED_VERSION
     )
+    _h73_export_engine_ok = bool(
+        callable(apply_h73_leadership_breadth) and callable(build_h73_leadership_table)
+        and callable(build_h73_governance_summary)
+        and H73_LEADERSHIP_VERSION == H73_LEADERSHIP_EXPECTED_VERSION
+    )
     try:
         _h60_export_source = candidate_source
         if callable(enrich_tdcc_holder_truth):
@@ -14632,6 +14691,8 @@ def _build_excel_bytes(
             h51_source = apply_h70_counter_regime_session_truth(h51_source)
         if _h72_export_engine_ok:
             h51_source = apply_h72_multi_model_alpha_ensemble(h51_source)
+        if _h73_export_engine_ok:
+            h51_source = apply_h73_leadership_breadth(h51_source)
         final_decision_df = build_h64_single_decision_truth_table(h51_source, max_rows=10) if _h51_export_engine_ok else pd.DataFrame({
             "狀態": ["H64核心真相引擎未完整部署｜這不是『沒有推薦』。"],
             "目前Page07版本": [PAGE07_SPEED_FIX_VERSION],
@@ -14688,6 +14749,13 @@ def _build_excel_bytes(
     except Exception as _h72_excel_exc:
         h72_ensemble_df = pd.DataFrame({"狀態": [f"H72多模型Alpha建立失敗：{type(_h72_excel_exc).__name__}: {_h72_excel_exc}"]})
         h72_governance_df = pd.DataFrame({"狀態": [f"H72治理摘要建立失敗：{type(_h72_excel_exc).__name__}: {_h72_excel_exc}"]})
+
+    try:
+        h73_leadership_df = build_h73_leadership_table(h51_source, max_rows=30, max_per_sector=3) if _h73_export_engine_ok else pd.DataFrame({"狀態": [f"H73領先共振未完整部署：{H73_LEADERSHIP_VERSION}/{H73_LEADERSHIP_EXPECTED_VERSION}"]})
+        h73_governance_df = build_h73_governance_summary(h51_source) if _h73_export_engine_ok else pd.DataFrame({"狀態": ["H73治理摘要暫時無法建立。"]})
+    except Exception as _h73_excel_exc:
+        h73_leadership_df = pd.DataFrame({"狀態": [f"H73領先共振建立失敗：{type(_h73_excel_exc).__name__}: {_h73_excel_exc}"]})
+        h73_governance_df = pd.DataFrame({"狀態": [f"H73治理摘要建立失敗：{type(_h73_excel_exc).__name__}: {_h73_excel_exc}"]})
 
     if callable(reconcile_h68_formal_summary) and isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
         try:
@@ -14786,6 +14854,15 @@ def _build_excel_bytes(
             summary_df["H72模型分歧中位數"] = round(float(_h72div_export.median()), 2) if not _h72div_export.dropna().empty else None
             summary_df["H72目前市場模式"] = _safe_str(h51_source.iloc[0].get("H72市場模式"))
             summary_df["H72權威邊界"] = "E1/E2/E3皆為研究排序；不得建立Formal，也不得解除H68執行否決。"
+        summary_df["H73領先共振版本"] = H73_LEADERSHIP_VERSION
+        if isinstance(h51_source, pd.DataFrame) and "H73研究層級" in h51_source.columns:
+            _h73tier_export = h51_source["H73研究層級"].fillna("").astype(str)
+            summary_df["H73_L1領先共振檔數"] = int(_h73tier_export.str.startswith("L1").sum())
+            summary_df["H73_L2領先觀察檔數"] = int(_h73tier_export.str.startswith("L2").sum())
+            summary_df["H73_L3候選追蹤檔數"] = int(_h73tier_export.str.startswith("L3").sum())
+            summary_df["H73Regime轉折狀態"] = _safe_str(h51_source.iloc[0].get("H73Regime轉折狀態"))
+            summary_df["H73分布矛盾中位扣分"] = round(float(pd.to_numeric(h51_source.get("H73分布矛盾扣分", pd.Series([],dtype=float)),errors="coerce").median()),2) if not pd.to_numeric(h51_source.get("H73分布矛盾扣分", pd.Series([],dtype=float)),errors="coerce").dropna().empty else None
+            summary_df["H73權威邊界"] = "L1/L2/L3皆為研究排序；不得建立Formal，也不得解除H68執行否決。"
         summary_df["H60_TDCC服務版本"] = H60_TDCC_VERSION
         if isinstance(h51_source, pd.DataFrame) and "H60鎖碼來源" in h51_source.columns:
             _h60_actual = int(h51_source["H60鎖碼來源"].fillna("").astype(str).str.startswith("ACTUAL").sum())
@@ -14858,6 +14935,11 @@ def _build_excel_bytes(
                 "H72_E2成熟樣本", "H72_E2正報酬率%", "H72_E2平均1日報酬%", "H72_E2平均SelectionAlpha%",
                 "H72_E3成熟樣本", "H72_E3正報酬率%", "H72_E3平均1日報酬%", "H72_E3平均SelectionAlpha%",
                 "H72排名成熟交易日", "H72平均RankIC", "H72平均NDCG@10",
+                "H73學習快照成熟樣本", "H73學習啟用狀態",
+                "H73_L1成熟樣本", "H73_L1正報酬率%", "H73_L1平均1日報酬%", "H73_L1平均SelectionAlpha%",
+                "H73_L2成熟樣本", "H73_L2正報酬率%", "H73_L2平均1日報酬%", "H73_L2平均SelectionAlpha%",
+                "H73_L3成熟樣本", "H73_L3正報酬率%", "H73_L3平均1日報酬%", "H73_L3平均SelectionAlpha%",
+                "H73排名成熟交易日", "H73平均RankIC", "H73平均NDCG@10",
                 "brier_score", "brier_skill_vs_base_rate_pct",
             ]:
                 if _kpi in _truth_sum:
@@ -14887,6 +14969,8 @@ def _build_excel_bytes(
     sheets = [
         ("超級AI最終決策", final_decision_df, "目前沒有同時通過強勢、主流與鎖碼真相的核心候選；不為推薦而推薦。"),
         ("正式推薦作戰", formal_execution_df, "本輪沒有H64核心有效Formal；A-/Radar/FORMAL-QUALITY-HOLD不冒充正式推薦。"),
+        ("H73領先共振", h73_leadership_df, "H73用族群廣度/領先加速/Regime轉折/分布矛盾改善研究排序；L1/L2/L3均非Formal。"),
+        ("H73治理摘要", h73_governance_df, "H73領先排序與分布矛盾治理摘要。"),
         ("H72多模型Alpha", h72_ensemble_df, "H72用8個獨立模型做Regime動態加權；E1/E2/E3均非Formal。"),
         ("H72治理摘要", h72_governance_df, "H72模型共識、覆蓋、分歧與動態權重治理。"),
         ("H70逆勢Alpha觀察", h70_counter_df, "H70在弱市只召回極少數個股獨立發動候選；X1/X2均非Formal。"),
@@ -14938,7 +15022,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H72 Excel新增『H72多模型Alpha／治理摘要』，把成長、品質、法人、大戶、估值、動能、突破、Regime分開評分；E1/E2/E3仍只是研究觀察。H70/H67/H66/H65與Formal/Execution權威維持不變。")
+    st.caption("H73 Excel新增『H73領先共振／治理摘要』；H72保留『H72多模型Alpha／治理摘要』，把成長、品質、法人、大戶、估值、動能、突破、Regime分開評分；E1/E2/E3仍只是研究觀察。H70/H67/H66/H65與Formal/Execution權威維持不變。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -14964,7 +15048,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         st.caption("需要調整欄位時再開啟上方開關；H46 使用欄位名稱定位與批次排序，平常可保持關閉以維持頁面速度。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-EXCEL|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-EXCEL|V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-EXCEL|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
