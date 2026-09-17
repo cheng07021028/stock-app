@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h73_leadership_breadth_distribution_truth_20260916"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h74_fresh_mainstream_capital_rotation_truth_20260917"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -791,6 +791,40 @@ def build_h73_learning_summary(rows: Any) -> dict[str, Any]:
     return out
 
 
+def build_h74_learning_summary(rows: Any) -> dict[str, Any]:
+    """Forward-only H74 fresh-mainstream/capital ranking learning.
+
+    Never backfills historical H74 fields. Only immutable snapshots created at recommendation
+    time and later matured T+1 outcomes are eligible.
+    """
+    items=[r for r in _rows(rows) if isinstance(r,dict) and bool(r.get("T1成熟")) and _s(r.get("H74學習快照狀態")).startswith("SNAPSHOT-READY")]
+    out={"H74學習快照成熟樣本":len(items),"H74學習啟用狀態":"ACTIVE" if len(items)>=30 else "WARMUP｜等待H74新鮮主流資金快照成熟"}
+    for prefix in ("F1","F2","F3"):
+        cohort=[r for r in items if _s(r.get("H74研究層級")).startswith(prefix)]
+        rets=[_f(r.get("隔日候選漲跌%"),None) for r in cohort]; rets=[x for x in rets if x is not None]
+        alpha=[_f(r.get("Selection Alpha%"),None) for r in cohort]; alpha=[x for x in alpha if x is not None]
+        out[f"H74_{prefix}成熟樣本"]=len(cohort)
+        out[f"H74_{prefix}正報酬率%"] = round(sum(1 for x in rets if x>0)/len(rets)*100,2) if rets else None
+        out[f"H74_{prefix}平均1日報酬%"] = round(sum(rets)/len(rets),4) if rets else None
+        out[f"H74_{prefix}平均SelectionAlpha%"] = round(sum(alpha)/len(alpha),4) if alpha else None
+    groups={}
+    for r in items:
+        d=_s(r.get("推薦日期") or r.get("推薦批次日期")); score=_f(r.get("H74決策總分"),None); alpha=_f(r.get("Selection Alpha%"),None)
+        if d and score is not None and alpha is not None: groups.setdefault(d,[]).append(r)
+    ics=[]; nd=[]
+    for g in groups.values():
+        if len(g)<3: continue
+        df=pd.DataFrame({"score":[_f(r.get("H74決策總分"),0) or 0 for r in g],"alpha":[_f(r.get("Selection Alpha%"),0) or 0 for r in g]})
+        c=df.score.rank(pct=True).corr(df.alpha.rank(pct=True))
+        if c is not None and math.isfinite(float(c)): ics.append(float(c))
+        n=_h66_ndcg(df.alpha.rank(pct=True).tolist(),10)
+        if n is not None: nd.append(n)
+    out["H74排名成熟交易日"]=len(groups)
+    out["H74平均RankIC"]=round(sum(ics)/len(ics),4) if ics else None
+    out["H74平均NDCG@10"]=round(sum(nd)/len(nd),4) if nd else None
+    return out
+
+
 def build_h57_h59_learning_summary(rows: Any) -> dict[str, Any]:
     """Backward-compatible alias for H60 telemetry."""
     return build_h57_h60_learning_summary(rows)
@@ -1025,6 +1059,26 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H73研究建議": _s(original.get("H73研究建議")),
         "H73學習快照狀態": _s(original.get("H73學習快照狀態")),
         "H73版本": _s(original.get("H73版本")) or "v191_h73_leadership_breadth_distribution_truth_20260916",
+        "H74強勢加速度分": _f(original.get("H74強勢加速度分")),
+        "H74主流新鮮度分": _f(original.get("H74主流新鮮度分")),
+        "H74法人資金加速度分": _f(original.get("H74法人資金加速度分")),
+        "H74成交資金加速度分": _f(original.get("H74成交資金加速度分")),
+        "H74大戶鎖碼真相分": _f(original.get("H74大戶鎖碼真相分")),
+        "H74大戶鎖碼狀態": _s(original.get("H74大戶鎖碼狀態")),
+        "H74訊號新鮮分": _f(original.get("H74訊號新鮮分")),
+        "H74熟面孔慣性扣分": _f(original.get("H74熟面孔慣性扣分")),
+        "H74陳舊品質扣分": _f(original.get("H74陳舊品質扣分")),
+        "H74資金共振加分": _f(original.get("H74資金共振加分")),
+        "H74決策總分": _f(original.get("H74決策總分")),
+        "H74全市場百分位%": _f(original.get("H74全市場百分位%")),
+        "H74全市場順位": _f(original.get("H74全市場順位")),
+        "H74研究層級": _s(original.get("H74研究層級")),
+        "H74相對H73順位變化": _f(original.get("H74相對H73順位變化")),
+        "H74主要優勢": _s(original.get("H74主要優勢")),
+        "H74主要警示": _s(original.get("H74主要警示")),
+        "H74研究建議": _s(original.get("H74研究建議")),
+        "H74學習快照狀態": _s(original.get("H74學習快照狀態")),
+        "H74版本": _s(original.get("H74版本")) or "v191_h74_fresh_mainstream_capital_rotation_truth_20260917",
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
@@ -1252,6 +1306,7 @@ def refresh_t1_trade_truth(
     h70_learning = build_h70_learning_summary(matured)
     h72_learning = build_h72_learning_summary(matured)
     h73_learning = build_h73_learning_summary(matured)
+    h74_learning = build_h74_learning_summary(matured)
     payload = {
         "version": TRUTH_VERSION,
         "updated_at": _now(),
@@ -1285,6 +1340,7 @@ def refresh_t1_trade_truth(
             **h70_learning,
             **h72_learning,
             **h73_learning,
+            **h74_learning,
             "brier_score": calibration.get("brier_score"),
             "brier_skill_vs_base_rate_pct": calibration.get("brier_skill_vs_base_rate_pct"),
         },
@@ -1348,7 +1404,7 @@ def refresh_t1_truth_async(*, max_records: int = 160, max_workers: int = 8) -> t
 
 
 __all__ = [
-    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary", "build_h68_learning_summary", "build_h70_learning_summary", "build_h72_learning_summary", "build_h73_learning_summary",
+    "TRUTH_VERSION", "TRUTH_FILE", "CALIBRATION_FILE", "build_h57_h60_learning_summary", "build_h57_h59_learning_summary", "build_h66_rank_learning_summary", "build_h67_rank_learning_summary", "build_h68_learning_summary", "build_h70_learning_summary", "build_h72_learning_summary", "build_h73_learning_summary", "build_h74_learning_summary",
     "refresh_t1_trade_truth", "refresh_t1_truth_async", "load_t1_truth_rows", "load_t1_truth_summary",
     "build_probability_calibration", "load_probability_calibration", "dedupe_performance_truth_rows",
 ]
