@@ -471,6 +471,26 @@ except Exception:
     build_h74_excel_guide = None
     build_h74_governance_summary = None
 
+H75_EXECUTIVE_EXPECTED_VERSION = "v191_h75_executive_decision_export_20260917"
+try:
+    from godpick_h75_executive_decision_export import (
+        VERSION as H75_EXECUTIVE_VERSION,
+        apply_h75_executive_decision,
+        build_h75_today_ai_table,
+        build_h75_sector_summary,
+        build_h75_evidence_table,
+        build_h75_performance_summary,
+        build_h75_health_summary,
+    )
+except Exception:
+    H75_EXECUTIVE_VERSION = "h75_executive_unavailable"
+    apply_h75_executive_decision = None
+    build_h75_today_ai_table = None
+    build_h75_sector_summary = None
+    build_h75_evidence_table = None
+    build_h75_performance_summary = None
+    build_h75_health_summary = None
+
 try:
     from godpick_v188_cache_guard import (
         V189_CACHE_GUARD_VERSION,
@@ -516,8 +536,8 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h74_fresh_mainstream_capital_rotation_truth_20260917"
-EXCEL_COLUMN_LAYOUT_VERSION = "V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-20260916"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h75_executive_decision_export_20260917"
+EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
 OVERNIGHT_GLOBAL_BRIDGE_VERSION = "overnight_global_bridge_v74_taifex_fallback_20260430"
@@ -12524,13 +12544,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
+        if safe_name in {"01_今日AI推薦", "02_今日主流資金", "03_推薦證據", "04_推薦績效", "05_系統健康", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            _tab_colors = {"AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
+            _tab_colors = {"01_今日AI推薦":"111827","02_今日主流資金":"0F766E","03_推薦證據":"1D4ED8","04_推薦績效":"7C3AED","05_系統健康":"B45309","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
             ws.sheet_properties.tabColor = _tab_colors.get(safe_name, "00A6A6")
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
@@ -12560,7 +12580,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     cell.border = Border(bottom=Side(style="hair", color="E5E7EB"))
 
             hmap = {str(cell.value): cell.column for cell in ws[1]}
-            _rank_headers = {"AI決策總覽":"AI決策順位","H74新鮮主流資金":"H74全市場順位","超級AI最終決策":"決策順位","正式推薦作戰":"H63正式推薦順位","H67次日優先治理":"H67研究順位","T+1時機雷達":"H66T1觀察順位","多因子觀察雷達":"H65觀察順位"}
+            _rank_headers = {"01_今日AI推薦":"今日順位","03_推薦證據":"證據順位","AI決策總覽":"AI決策順位","H74新鮮主流資金":"H74全市場順位","超級AI最終決策":"決策順位","正式推薦作戰":"H63正式推薦順位","H67次日優先治理":"H67研究順位","T+1時機雷達":"H66T1觀察順位","多因子觀察雷達":"H65觀察順位"}
             _rank_header = _rank_headers.get(safe_name, "股神推薦總排名")
             _rank_idx = hmap.get(_rank_header)
             if _rank_idx:
@@ -12576,7 +12596,8 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color="B91C1C", bold=True)))
 
             for header, width in {
-                "AI決策順位": 10, "H74全市場順位": 12, "決策順位": 10, "H63正式推薦順位": 12, "H67研究順位": 12, "H66T1觀察順位": 12, "H65觀察順位": 12, "重點順位": 10, "攻略順位": 10, "股神推薦總排名": 12, "股票代號": 12, "股票名稱": 16,
+                "今日順位": 10, "證據順位": 10, "AI決策順位": 10, "H74全市場順位": 12, "決策順位": 10, "H63正式推薦順位": 12, "H67研究順位": 12, "H66T1觀察順位": 12, "H65觀察順位": 12, "重點順位": 10, "攻略順位": 10, "股神推薦總排名": 12, "股票代號": 12, "股票名稱": 16,
+                "H75主管決策層級": 24, "H75今日結論": 42, "H75Formal接近度": 16, "H75Formal主要缺口": 54, "H75主管一句話": 72, "今日族群解讀": 34, "主管解讀": 42,
                 "H74研究層級": 24, "H74大戶鎖碼狀態": 36, "H74主要優勢": 52, "H74主要警示": 52, "H74研究建議": 54, "是否正式推薦": 24,
                 "H66T1層級": 22, "H66T1觀察推薦": 32, "H66適合週期": 28, "H66T1升級缺口": 48, "H66T1理由": 70,
                 "H65觀察層級": 22, "H65觀察推薦": 30, "H65升級缺口": 46, "H65觀察理由": 64,
@@ -12590,7 +12611,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                 if cidx:
                     h37_width_overrides[ws.cell(row=1, column=cidx).column_letter] = width
 
-            for long_header in ["H51交易許可", "H51推薦理由", "條件操作許可", "重點理由", "主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
+            for long_header in ["H75今日結論", "H75Formal主要缺口", "H75主管一句話", "今日族群解讀", "主管解讀", "H51交易許可", "H51推薦理由", "條件操作許可", "重點理由", "主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
                 cidx = hmap.get(long_header)
                 if cidx:
                     for row_idx in range(2, ws.max_row + 1):
@@ -14730,6 +14751,12 @@ def _build_excel_bytes(
         and callable(build_h74_governance_summary)
         and H74_FRESH_CAPITAL_VERSION == H74_FRESH_CAPITAL_EXPECTED_VERSION
     )
+    _h75_export_engine_ok = bool(
+        callable(apply_h75_executive_decision) and callable(build_h75_today_ai_table)
+        and callable(build_h75_sector_summary) and callable(build_h75_evidence_table)
+        and callable(build_h75_performance_summary) and callable(build_h75_health_summary)
+        and H75_EXECUTIVE_VERSION == H75_EXECUTIVE_EXPECTED_VERSION
+    )
     try:
         _h60_export_source = candidate_source
         if callable(enrich_tdcc_holder_truth):
@@ -14758,6 +14785,8 @@ def _build_excel_bytes(
             h51_source = apply_h73_leadership_breadth(h51_source)
         if _h74_export_engine_ok:
             h51_source = apply_h74_fresh_mainstream_capital(h51_source)
+        if _h75_export_engine_ok:
+            h51_source = apply_h75_executive_decision(h51_source)
         final_decision_df = build_h64_single_decision_truth_table(h51_source, max_rows=10) if _h51_export_engine_ok else pd.DataFrame({
             "狀態": ["H64核心真相引擎未完整部署｜這不是『沒有推薦』。"],
             "目前Page07版本": [PAGE07_SPEED_FIX_VERSION],
@@ -14932,6 +14961,7 @@ def _build_excel_bytes(
             summary_df["H72權威邊界"] = "E1/E2/E3皆為研究排序；不得建立Formal，也不得解除H68執行否決。"
         summary_df["H73領先共振版本"] = H73_LEADERSHIP_VERSION
         summary_df["H74新鮮主流資金版本"] = H74_FRESH_CAPITAL_VERSION
+        summary_df["H75主管決策輸出版本"] = H75_EXECUTIVE_VERSION
         if isinstance(h74_governance_df, pd.DataFrame) and not h74_governance_df.empty:
             _h74_unconfirmed = h74_governance_df.loc[h74_governance_df["治理項目"].eq("TDCC缺前期比較"), "目前狀態"]
             if not _h74_unconfirmed.empty:
@@ -15052,7 +15082,28 @@ def _build_excel_bytes(
     except Exception:
         pass
     health_df = pd.DataFrame(health_rows) if health_rows else pd.DataFrame({"狀態": ["目前沒有資料健康摘要。"]})
+
+    # H75：主管日常只需要前五張；其餘完整模型/診斷頁保留但預設隱藏。
+    try:
+        h75_today_df = build_h75_today_ai_table(h51_source, max_rows=12, max_per_sector=3) if _h75_export_engine_ok else h74_overview_df.copy()
+        h75_sector_df = build_h75_sector_summary(h51_sector_df, max_rows=10) if _h75_export_engine_ok else h51_sector_df.copy()
+        h75_evidence_df = build_h75_evidence_table(h51_source, max_rows=20) if _h75_export_engine_ok else h74_research_df.copy()
+        h75_perf_df = build_h75_performance_summary(ai_performance_df) if _h75_export_engine_ok else ai_performance_df.copy()
+        h75_health_df = build_h75_health_summary(health_df, max_rows=30) if _h75_export_engine_ok else health_df.copy()
+    except Exception as _h75_excel_exc:
+        _h75_msg = f"H75主管決策表建立失敗：{type(_h75_excel_exc).__name__}: {_h75_excel_exc}"
+        h75_today_df = pd.DataFrame({"狀態": [_h75_msg]})
+        h75_sector_df = h51_sector_df.copy() if isinstance(h51_sector_df, pd.DataFrame) else pd.DataFrame({"狀態": [_h75_msg]})
+        h75_evidence_df = h74_research_df.copy() if isinstance(h74_research_df, pd.DataFrame) else pd.DataFrame({"狀態": [_h75_msg]})
+        h75_perf_df = ai_performance_df.copy() if isinstance(ai_performance_df, pd.DataFrame) else pd.DataFrame({"狀態": [_h75_msg]})
+        h75_health_df = health_df.copy() if isinstance(health_df, pd.DataFrame) else pd.DataFrame({"狀態": [_h75_msg]})
+
     sheets = [
+        ("01_今日AI推薦", h75_today_df, "今日沒有Formal；下方若有W1/W2/W3仍只是觀察/研究，不為推薦而推薦。"),
+        ("02_今日主流資金", h75_sector_df, "目前沒有可用主流族群資料。"),
+        ("03_推薦證據", h75_evidence_df, "目前沒有足夠推薦證據。"),
+        ("04_推薦績效", h75_perf_df, "目前沒有成熟績效資料；樣本不足時不自動調權。"),
+        ("05_系統健康", h75_health_df, "目前沒有系統健康/資料品質資料。"),
         ("AI決策總覽", h74_overview_df, "H74目前沒有足夠新鮮主流/資金共振候選；不為推薦而推薦。"),
         ("Excel閱讀指南", h74_guide_df, "請先看AI決策總覽，再依需求查看Formal/主流族群/資料健康。"),
         ("正式推薦作戰", formal_execution_df, "本輪沒有H64核心有效Formal；A-/Radar/FORMAL-QUALITY-HOLD不冒充正式推薦。"),
@@ -15085,10 +15136,21 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("第一優先｜每天先看：H74新鮮主流×法人/成交資金×TDCC真相×重複慣性" if sheet_name == "AI決策總覽" else "先看這張了解各活頁用途" if sheet_name == "Excel閱讀指南" else "真正Formal作戰｜只有有效正式推薦" if sheet_name == "正式推薦作戰" else "H74完整Top30證據｜非Formal" if sheet_name == "H74新鮮主流資金" else "H74治理/資料真相" if sheet_name == "H74治理摘要" else "H64強勢主流鎖碼Formal真相佐證" if sheet_name == "超級AI最終決策" else "H72八模型Regime動態共識｜非正式推薦" if sheet_name == "H72多模型Alpha" else "H72模型治理摘要/權威邊界" if sheet_name == "H72治理摘要" else "H67弱市/退潮/一致性/追價治理｜非正式推薦" if sheet_name == "H67次日優先治理" else "H67治理摘要/權威邊界" if sheet_name == "H67治理摘要" else "H68次日執行真相＋學習快照權威" if sheet_name == "H68執行學習治理" else "H66 T+1自適應時機排序｜非正式推薦" if sheet_name == "T+1時機雷達" else "H66學習權重/樣本治理" if sheet_name == "H66學習治理" else "H65全市場10支柱觀察排序｜非正式推薦" if sheet_name == "多因子觀察雷達" else "H65指標接入/缺口自我稽核" if sheet_name == "多因子指標覆蓋" else "主線資金/輪動" if sheet_name == "主流族群" else "領漲/Pivot/再攻" if sheet_name == "主流領漲股" else "完整研究排名" if sheet_name == "股神推薦總排名" else "績效真相" if sheet_name in {"AI績效驗證", "T+1實戰真相"} else "資料健康/稽核"),
+            "用途": ("日常第一張｜今日Formal＋觀察優先＋Formal缺口" if sheet_name == "01_今日AI推薦" else "日常第二張｜主流族群與資金輪動" if sheet_name == "02_今日主流資金" else "日常第三張｜推薦證據與風險/缺口" if sheet_name == "03_推薦證據" else "日常第四張｜滾動績效與樣本成熟度" if sheet_name == "04_推薦績效" else "日常第五張｜資料/版本/覆蓋健康" if sheet_name == "05_系統健康" else "技術診斷｜預設隱藏"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
+
+    _h75_visible_sheets = {"01_今日AI推薦", "02_今日主流資金", "03_推薦證據", "04_推薦績效", "05_系統健康"}
+    for _ws in wb.worksheets:
+        if _ws.title not in _h75_visible_sheets:
+            _ws.sheet_state = "hidden"
+        else:
+            _ws.sheet_state = "visible"
+    try:
+        wb.active = wb.sheetnames.index("01_今日AI推薦")
+    except Exception:
+        pass
     wb.save(output)
     output.seek(0)
     return output.getvalue()
@@ -15112,7 +15174,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H74 Excel第一張改為『AI決策總覽』，第二張是『Excel閱讀指南』：先看每日真正強勢/主流/法人與成交資金/TDCC週變化/熟面孔治理，再往下看Formal與模型佐證。H74只重排研究注意力；H64/H63/H68 Formal/Execution權威維持不變。")
+    st.caption("H75 Excel主管版：開啟後只顯示 01今日AI推薦、02今日主流資金、03推薦證據、04推薦績效、05系統健康。H65～H74/T+1/完整總排名等技術頁仍保留但預設隱藏；H75不降低Formal門檻、不把觀察股冒充正式推薦。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -15138,7 +15200,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         st.caption("需要調整欄位時再開啟上方開關；H46 使用欄位名稱定位與批次排序，平常可保持關閉以維持頁面速度。")
 
     _layout_sig = _excel_column_layout_signature_v191_h37()
-    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-EXCEL|V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-EXCEL|V191-H74-FRESH-MAINSTREAM-CAPITAL-ROTATION-TRUTH-EXCEL|{_layout_sig}")
+    sig = _result_export_signature_v164(rec_df, f"main|{top_n}|V191-H46-EXCEL-NAME-SORTER|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H66-ADAPTIVE-ALPHA-T1-TIMING-TRUTH-EXCEL|V191-H67-REGIME-SECTOR-CONSENSUS-PREOPEN-TRUTH-EXCEL|V191-H68-EXECUTION-LEARNING-AUTHORITY-EXCEL|V191-H70-COUNTER-REGIME-SESSION-TRUTH-EXCEL|V191-H72-MULTI-MODEL-ALPHA-ENSEMBLE-EXCEL|V191-H73-LEADERSHIP-BREADTH-DISTRIBUTION-TRUTH-EXCEL|V191-H74-FRESH-MAINSTREAM-CAPITAL-ROTATION-TRUTH-EXCEL|V191-H75-EXECUTIVE-DECISION-EXPORT|{_layout_sig}")
     cache_key = _k("main_export_cache_v164")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
