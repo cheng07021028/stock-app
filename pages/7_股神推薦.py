@@ -511,12 +511,17 @@ except Exception:
     build_h76_performance_health_summary = None
     build_h76_governance_summary = None
 
-# H79 keeps the H78 module path for copy-over compatibility. Import errors are visible.
+# H79.1 uses a version/schema bridge because Streamlit may retain the old H78
+# module object after users copy files over a running process.
 try:
-    from godpick_h78_decision_engine import build_tables as build_h78_tables
+    from godpick_h79_runtime_bridge import (
+        VERSION as H79_RUNTIME_BRIDGE_VERSION,
+        build_tables_guarded as build_h79_tables_guarded,
+    )
     H78_IMPORT_ERROR = ""
 except Exception as _h78_import_exc:
-    build_h78_tables = None
+    H79_RUNTIME_BRIDGE_VERSION = "h79_runtime_bridge_unavailable"
+    build_h79_tables_guarded = None
     H78_IMPORT_ERROR = str(_h78_import_exc)
 
 H77_VERIFIED_DELTA_EXPECTED_VERSION = "v191_h77_verified_delta_chase_entry_performance_brake_20260918"
@@ -584,7 +589,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h79_market_session_universe_adaptive_truth_20260920"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h79_1_runtime_persistence_guard_20260920"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2655,6 +2660,26 @@ def _operational_recommendation_rows(df: pd.DataFrame | None, *, refresh_decisio
     governed = governed.sort_values(sort_cols, ascending=ascending, kind="mergesort")
     return governed.drop(columns=["__action_order"], errors="ignore").reset_index(drop=True)
 
+def _h791_persistence_outcome(
+    local_snapshot_ok: bool,
+    snapshot_verified: bool,
+    local_anchor_ok: bool,
+    anchor_verified: bool,
+    remote_configured: bool,
+    remote_ok: bool,
+) -> tuple[bool, str]:
+    """Keep local durability truth separate from optional remote backup truth."""
+    local_ok = bool(local_snapshot_ok and snapshot_verified and local_anchor_ok and anchor_verified)
+    if not local_ok or remote_ok:
+        return local_ok, ""
+    if remote_configured:
+        return local_ok, "本輪推薦已完成本機原子保存與回讀驗證；遠端備援尚未完成，請查看保存明細後重試。"
+    return local_ok, (
+        "本輪推薦已完成本機原子保存與回讀驗證；目前未設定 GitHub/Firebase 遠端備援；"
+        "不影響本機使用，但換機或磁碟損壞時無法由遠端還原。"
+    )
+
+
 def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, hot_pick_df: pd.DataFrame) -> tuple[bool, list[str]]:
     """Persist action results, compact full-candidate diagnosis and scan quality.
 
@@ -2768,22 +2793,40 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         "full_snapshot_payload_hash": full_payload_hash,
         "snapshot_version": "V185_durable_run_anchor",
     }
+    # H79.1：本機保存與遠端備援是兩個獨立狀態。先把小型錨點原子寫入
+    # 專案根目錄並回讀；沒有設定 GitHub/Firebase 不得把已完成的本機保存
+    # 誤報為紅色失敗，也不得反過來宣稱遠端已完成。
+    anchor_local_ok, anchor_local_msg = _safe_json_write_local(GODPICK_LATEST_ANCHOR_FILE, anchor_payload)
+    anchor_local_verify = _read_project_json_file(GODPICK_LATEST_ANCHOR_FILE) if anchor_local_ok else {}
+    anchor_local_verified = bool(
+        isinstance(anchor_local_verify, dict)
+        and _safe_str(anchor_local_verify.get("saved_at")) == saved_at_now
+        and _safe_str(anchor_local_verify.get("run_id")) == _safe_str(anchor_payload.get("run_id"))
+    )
+    if anchor_local_ok and not anchor_local_verified:
+        anchor_local_ok = False
+        anchor_local_msg = f"本機錨點寫入後回讀驗證失敗：{GODPICK_LATEST_ANCHOR_FILE}"
+
+    anchor_remote_configured = False
+    anchor_remote_ok = False
+    anchor_remote_msg = "尚未檢查遠端備援"
     try:
-        from godpick_durability_service import persist_json_permanent as _persist_anchor_v185
         from godpick_persistence_service import github_config as _anchor_gh_cfg_v185, firebase_configured as _anchor_fs_cfg_v185
-        _anchor_remote_configured_v185 = bool(
+        anchor_remote_configured = bool(
             _safe_str((_anchor_gh_cfg_v185() or {}).get("token")) or bool(_anchor_fs_cfg_v185())
         )
-        anchor_ok, anchor_msg = _persist_anchor_v185(
-            GODPICK_LATEST_ANCHOR_FILE, anchor_payload,
-            firestore_doc="godpick_latest_run_anchor",
-            reason="V185 synchronous recommendation run anchor",
-        )
-        if not _anchor_remote_configured_v185:
-            anchor_ok = False
-            anchor_msg = f"{anchor_msg}｜未設定 GitHub/Firebase 遠端永久層；僅本機寫入不得宣稱永久保存"
+        if anchor_remote_configured:
+            from godpick_durability_service import persist_json_permanent as _persist_anchor_v185
+            anchor_remote_ok, anchor_remote_msg = _persist_anchor_v185(
+                GODPICK_LATEST_ANCHOR_FILE, anchor_payload,
+                firestore_doc="godpick_latest_run_anchor",
+                reason="H79.1 synchronous recommendation remote anchor",
+            )
+        else:
+            anchor_remote_msg = "未設定 GitHub/Firebase；本機錨點已獨立保存，尚無跨主機遠端備援"
     except Exception as anchor_exc:
-        anchor_ok, anchor_msg = False, f"V185永久錨點保存例外：{anchor_exc}"
+        anchor_remote_ok = False
+        anchor_remote_msg = f"遠端錨點備援例外：{type(anchor_exc).__name__}: {anchor_exc}"
 
     # V184：最新推薦已列入 V183 durability registry；不要再只靠單一路徑
     # GitHub 背景寫入。先本機原子保存，再由 durability outbox 同步
@@ -2831,7 +2874,8 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
 
     msgs = [
         local_msg,
-        f"V185本輪永久錨點：{'成功' if anchor_ok else '失敗'}｜{anchor_msg}",
+        f"H79.1本機錨點：{'成功' if anchor_local_ok and anchor_local_verified else '失敗'}｜{anchor_local_msg}",
+        f"H79.1遠端備援：{'成功' if anchor_remote_ok else ('尚未設定' if not anchor_remote_configured else '未完成')}｜{anchor_remote_msg}",
         github_msg,
         f"候選診斷保存：{len(candidate_df) if isinstance(candidate_df, pd.DataFrame) else 0} 檔",
         f"本輪快照回讀驗證：{'成功' if verified else '失敗'}｜日期 {saved_at_now[:10]}｜K線 {payload.get('kline_date') or '未驗證'}",
@@ -2841,6 +2885,19 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         list_github_msg,
     ]
     st.session_state[_k("latest_recommendation_sync_msgs")] = msgs
+    local_durable_ok, remote_warning = _h791_persistence_outcome(
+        local_ok,
+        verified,
+        anchor_local_ok,
+        anchor_local_verified,
+        anchor_remote_configured,
+        anchor_remote_ok,
+    )
+    st.session_state[_k("latest_pack_local_ok")] = local_durable_ok
+    st.session_state[_k("latest_pack_remote_configured")] = bool(anchor_remote_configured)
+    st.session_state[_k("latest_pack_remote_ok")] = bool(anchor_remote_ok)
+    st.session_state[_k("latest_pack_remote_message")] = anchor_remote_msg
+    st.session_state[_k("latest_pack_remote_warning")] = remote_warning
     try:
         _project_data_freshness_snapshot_v173.clear()
     except Exception:
@@ -2849,9 +2906,9 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         _load_latest_recommendation_authority_v185.clear()
     except Exception:
         pass
-    # 本輪保存成功的最低標準改為：本機完整快照 + 永久錨點。
-    # 遠端大型完整快照可繼續背景同步，但不得把 pending 冒充永久完成。
-    return bool(local_ok and anchor_ok), msgs
+    # 本機可持續使用的最低標準：完整快照與小型錨點均完成原子寫入及回讀。
+    # 遠端狀態另列，不再混成同一個紅色成功/失敗布林值。
+    return local_durable_ok, msgs
 
 
 def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
@@ -11874,7 +11931,7 @@ def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: 
             save_ok, save_msgs = _save_latest_recommendation_pack(pd.DataFrame(), category_strength_df, hot_pick_df)
             st.session_state[_k("latest_pack_permanent_ok")] = bool(save_ok)
             if not save_ok:
-                st.session_state[_k("latest_pack_permanent_error")] = "本輪候選已在本機完成，但最新推薦永久錨點未通過遠端驗證；系統不會把它宣稱為永久保存成功。"
+                st.session_state[_k("latest_pack_permanent_error")] = "本輪候選的本機完整快照或錨點寫入／回讀失敗；請查看『本輪推薦保存明細』。"
             else:
                 st.session_state[_k("latest_pack_permanent_error")] = ""
             return bool(save_ok)
@@ -11890,7 +11947,7 @@ def _save_recommend_result_to_state(rec_df: pd.DataFrame, category_strength_df: 
     save_ok, save_msgs = _save_latest_recommendation_pack(rec_df, category_strength_df, hot_pick_df)
     st.session_state[_k("latest_pack_permanent_ok")] = bool(save_ok)
     if not save_ok:
-        st.session_state[_k("latest_pack_permanent_error")] = "本輪推薦已在本機完成，但最新推薦永久錨點未通過遠端驗證；請查看『本輪推薦永久保存明細』。"
+        st.session_state[_k("latest_pack_permanent_error")] = "本輪推薦的本機完整快照或錨點寫入／回讀失敗；請查看『本輪推薦保存明細』。"
     else:
         st.session_state[_k("latest_pack_permanent_error")] = ""
     return bool(save_ok)
@@ -14043,9 +14100,9 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     render_pro_section("超級AI股神｜H79 正式交易與研究推薦")
     st.caption("上市櫃採絕對品質＋橫截面自適應排名；興櫃隔離。正式可執行、研究推薦、等待與資料修復分開呈現，研究股不冒充買進。")
     try:
-        if not callable(build_h78_tables):
+        if not callable(build_h79_tables_guarded):
             raise RuntimeError(H78_IMPORT_ERROR or "H79引擎未部署")
-        _h78_tables = build_h78_tables(decision_source)
+        _h78_tables = build_h79_tables_guarded(decision_source)
         st.markdown("#### 正式可執行")
         st.dataframe(_format_df(_h78_tables["actionable"]), use_container_width=True, hide_index=True)
         st.markdown("#### 研究推薦（非買進許可）")
@@ -15244,11 +15301,11 @@ def _build_excel_bytes(
         h77_perf_health_df = pd.DataFrame({"狀態": [_h77_msg]})
 
     try:
-        if not callable(build_h78_tables):
+        if not callable(build_h79_tables_guarded):
             raise RuntimeError(H78_IMPORT_ERROR or "H79引擎未部署")
         # H79 single truth: use the same fully enriched H51-H77 frame that owns
         # the legacy Formal identity, not the pre-enrichment candidate frame.
-        _h78_export = build_h78_tables(h51_source)
+        _h78_export = build_h79_tables_guarded(h51_source)
     except Exception as _h78_error:
         _h78_failure = pd.DataFrame({"狀態":[f"H79決策失敗，非沒有推薦：{_h78_error}"]})
         _h78_export = {k:_h78_failure for k in ["actionable","research","recommendations","waiting","emerging_watch","data_repairs","audit","health"]}
@@ -17316,8 +17373,12 @@ def main():
         chips=["交易決策", "風控", "回測預留"],
     )
 
+    _latest_pack_remote_warning_h791 = _safe_str(st.session_state.get(_k("latest_pack_remote_warning")))
+    if _latest_pack_remote_warning_h791:
+        st.warning(_latest_pack_remote_warning_h791)
+
     if st.session_state.get(_k("latest_recommendation_sync_msgs")):
-        with st.expander("本輪推薦永久保存明細", expanded=False):
+        with st.expander("本輪推薦保存明細（本機／遠端分列）", expanded=False):
             for msg in st.session_state.get(_k("latest_recommendation_sync_msgs"), []):
                 st.write(f"- {msg}")
 
