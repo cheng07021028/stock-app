@@ -511,6 +511,14 @@ except Exception:
     build_h76_performance_health_summary = None
     build_h76_governance_summary = None
 
+# H78 is the primary opportunity board; import errors are visible, never hidden.
+try:
+    from godpick_h78_decision_engine import build_tables as build_h78_tables
+    H78_IMPORT_ERROR = ""
+except Exception as _h78_import_exc:
+    build_h78_tables = None
+    H78_IMPORT_ERROR = str(_h78_import_exc)
+
 H77_VERIFIED_DELTA_EXPECTED_VERSION = "v191_h77_verified_delta_chase_entry_performance_brake_20260918"
 try:
     from godpick_h77_verified_delta_execution_gate import (
@@ -576,7 +584,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h77_verified_delta_chase_entry_performance_brake_20260918"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h78_evidence_contract_decision_rebuild_20260920"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -9129,28 +9137,28 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
         def _pct_accel(series: pd.Series, recent_n: int) -> float:
             vals = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
             if len(vals) < recent_n * 2:
-                return 0.0
+                return float("nan")
             recent = _safe_float(vals.iloc[-recent_n:].mean(), 0) or 0
             prior = _safe_float(vals.iloc[-recent_n * 2:-recent_n].mean(), 0) or 0
             if prior <= 0:
-                return 0.0
+                return float("nan")
             return (recent / prior - 1.0) * 100.0
 
-        amount_accel_3 = _pct_accel(positive_amount, 3) if not positive_amount.empty else 0.0
-        amount_accel_5 = _pct_accel(positive_amount, 5) if not positive_amount.empty else 0.0
-        volume_accel_3 = _pct_accel(positive_volume, 3) if not positive_volume.empty else 0.0
-        volume_accel_5 = _pct_accel(positive_volume, 5) if not positive_volume.empty else 0.0
+        amount_accel_3 = _pct_accel(positive_amount, 3) if not positive_amount.empty else float("nan")
+        amount_accel_5 = _pct_accel(positive_amount, 5) if not positive_amount.empty else float("nan")
+        volume_accel_3 = _pct_accel(positive_volume, 3) if not positive_volume.empty else float("nan")
+        volume_accel_5 = _pct_accel(positive_volume, 5) if not positive_volume.empty else float("nan")
 
         ret_series = valid_close.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
-        rv5 = (_safe_float(ret_series.tail(5).std(), 0) or 0) * 100.0 if len(ret_series) >= 3 else 0.0
-        rv20 = (_safe_float(ret_series.tail(20).std(), 0) or 0) * 100.0 if len(ret_series) >= 5 else 0.0
+        rv5 = (_safe_float(ret_series.tail(5).std(), 0) or 0) * 100.0 if len(ret_series) >= 3 else float("nan")
+        rv20 = (_safe_float(ret_series.tail(20).std(), 0) or 0) * 100.0 if len(ret_series) >= 5 else float("nan")
         prior_ret_series = ret_series.iloc[:-1] if len(ret_series) >= 2 else ret_series.iloc[0:0]
-        prior_rv5 = (_safe_float(prior_ret_series.tail(5).std(), 0) or 0) * 100.0 if len(prior_ret_series) >= 3 else 0.0
-        prior_rv20 = (_safe_float(prior_ret_series.tail(20).std(), 0) or 0) * 100.0 if len(prior_ret_series) >= 5 else 0.0
+        prior_rv5 = (_safe_float(prior_ret_series.tail(5).std(), 0) or 0) * 100.0 if len(prior_ret_series) >= 3 else float("nan")
+        prior_rv20 = (_safe_float(prior_ret_series.tail(20).std(), 0) or 0) * 100.0 if len(prior_ret_series) >= 5 else float("nan")
         volatility_compression_ratio = (rv5 / rv20) if rv20 > 0 else 1.0
         prior_volatility_compression_ratio = (prior_rv5 / prior_rv20) if prior_rv20 > 0 else volatility_compression_ratio
 
-        momentum_accel_3pp = 0.0
+        momentum_accel_3pp = float("nan")
         if len(valid_close) >= 7:
             p0 = _safe_float(valid_close.iloc[-1], 0) or 0
             p3 = _safe_float(valid_close.iloc[-4], 0) or 0
@@ -9624,16 +9632,16 @@ def _analyze_one_stock_for_recommend(
             "上影線比例%": _safe_float(bundle.get("upper_shadow_pct"), 0) or 0,
             "連續上漲天數": int(_safe_float(bundle.get("consecutive_up_days"), 0) or 0),
             "強勢收盤旗標": "是" if bool(bundle.get("strong_close_flag")) else "否",
-            "成交額3日加速度%": round(_safe_float(bundle.get("amount_accel_3"), 0) or 0, 2),
-            "成交額5日加速度%": round(_safe_float(bundle.get("amount_accel_5"), 0) or 0, 2),
-            "成交量3日加速度%": round(_safe_float(bundle.get("volume_accel_3"), 0) or 0, 2),
-            "成交量5日加速度%": round(_safe_float(bundle.get("volume_accel_5"), 0) or 0, 2),
+            "成交額3日加速度%": round(_safe_float(bundle.get("amount_accel_3"), float("nan")), 2),
+            "成交額5日加速度%": round(_safe_float(bundle.get("amount_accel_5"), float("nan")), 2),
+            "成交量3日加速度%": round(_safe_float(bundle.get("volume_accel_3"), float("nan")), 2),
+            "成交量5日加速度%": round(_safe_float(bundle.get("volume_accel_5"), float("nan")), 2),
             "5日波動率%": round(_safe_float(bundle.get("rv5"), 0) or 0, 3),
             "20日波動率%": round(_safe_float(bundle.get("rv20"), 0) or 0, 3),
             "波動壓縮比": round(_safe_float(bundle.get("volatility_compression_ratio"), 1) or 1, 3),
             "前5日波動壓縮比": round(_safe_float(bundle.get("prior_volatility_compression_ratio"), 1) or 1, 3),
             "當日區間擴張倍數": round(_safe_float(bundle.get("range_expansion_ratio"), 1) or 1, 3),
-            "3日動能加速度百分點": round(_safe_float(bundle.get("momentum_accel_3pp"), 0) or 0, 3),
+            "3日動能加速度百分點": round(_safe_float(bundle.get("momentum_accel_3pp"), float("nan")), 3),
             "3日平均收盤位置%": round(_safe_float(bundle.get("close_location_3d_avg"), 50) or 50, 2),
             "盤後動能救援分": _safe_float(momentum_rescue.get("score"), 0) or 0,
             "盤前強勢前兆分": _safe_float(prebreak_rescue.get("score"), 0) or 0,
@@ -11601,6 +11609,14 @@ def _build_recommend_df(
             else governed_candidate_df.copy()
         )
         st.session_state[_k("candidate_diagnosis_store")] = candidate_diagnosis_df.copy()
+        # H78: once per completed scan, retain true decision-time evidence.
+        try:
+            from godpick_h78_snapshot_store import capture_snapshot
+            debug_summary["h78_research_snapshot"] = capture_snapshot(governed_candidate_df)
+        except Exception as _h78_save_error:
+            debug_summary["h78_research_snapshot_error"] = str(_h78_save_error)
+            st.warning(f"H78學習快照保存失敗：{_h78_save_error}")
+
         st.session_state[_k("scan_quality_report")] = dict(scan_report)
         debug_summary.update({
             "candidate_diagnosis_count": len(candidate_diagnosis_df),
@@ -12584,13 +12600,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"01_今日驗證Alpha", "02_等待與核心監控", "03_今日主流資金", "04_驗證與風險證據", "05_績效煞車與健康", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
+        if safe_name in {"01_今日推薦與計畫", "02_等待與核心監控", "03_今日主流資金", "04_驗證與風險證據", "05_績效煞車與健康", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            _tab_colors = {"01_今日驗證Alpha":"111827","02_等待與核心監控":"B45309","03_今日主流資金":"0F766E","04_驗證與風險證據":"1D4ED8","05_績效煞車與健康":"7C3AED","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
+            _tab_colors = {"01_今日推薦與計畫":"111827","02_等待與核心監控":"B45309","03_今日主流資金":"0F766E","04_驗證與風險證據":"1D4ED8","05_績效煞車與健康":"7C3AED","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
             ws.sheet_properties.tabColor = _tab_colors.get(safe_name, "00A6A6")
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
@@ -12620,7 +12636,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     cell.border = Border(bottom=Side(style="hair", color="E5E7EB"))
 
             hmap = {str(cell.value): cell.column for cell in ws[1]}
-            _rank_headers = {"01_今日驗證Alpha":"今日驗證Alpha順位","02_等待與核心監控":"等待監控順位","04_驗證與風險證據":"證據順位","AI決策總覽":"AI決策順位","H74新鮮主流資金":"H74全市場順位","超級AI最終決策":"決策順位","正式推薦作戰":"H63正式推薦順位","H67次日優先治理":"H67研究順位","T+1時機雷達":"H66T1觀察順位","多因子觀察雷達":"H65觀察順位"}
+            _rank_headers = {"01_今日推薦與計畫":"今日驗證Alpha順位","02_等待與核心監控":"等待監控順位","04_驗證與風險證據":"證據順位","AI決策總覽":"AI決策順位","H74新鮮主流資金":"H74全市場順位","超級AI最終決策":"決策順位","正式推薦作戰":"H63正式推薦順位","H67次日優先治理":"H67研究順位","T+1時機雷達":"H66T1觀察順位","多因子觀察雷達":"H65觀察順位"}
             _rank_header = _rank_headers.get(safe_name, "股神推薦總排名")
             _rank_idx = hmap.get(_rank_header)
             if _rank_idx:
@@ -14023,538 +14039,552 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     rank_source = decision_source
     master_rank = _phase90_build_master_recommendation_rank(rank_source, top_n=20)
 
-    # H64：真正第一屏只回答「當前強勢、當前主流、鎖碼趨勢是否同時成立」。
-    # 高分、熟面孔、單點TDCC持股都不能再冒充核心候選。
-    render_pro_section("超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相")
-    st.caption("H64把H42/H47當前強勢、H51/H53/H57主流形成、TDCC前後期千張大戶變化與RR放到同一硬閘門。高持股但沒有前期差異只能叫『持股已知』，不是鎖碼；非強勢/非主流即使H62增量高也不能霸榜。")
-    _h64_engine_ok = bool(
-        callable(apply_human_master_engine)
-        and callable(build_h64_single_decision_truth_table)
-        and callable(apply_h64_core_truth)
-        and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION
-        and H61_OPPORTUNITY_VERSION == H61_OPPORTUNITY_EXPECTED_VERSION
-        and H62_OPPORTUNITY_VERSION == H62_OPPORTUNITY_EXPECTED_VERSION
-        and H64_CORE_VERSION == H64_CORE_EXPECTED_VERSION
-    )
+    render_pro_section("超級AI股神｜H78 推薦與交易計畫")
+    st.caption("依當期相對強度、族群共振、廣度、量能與法人方向選出值得研究的股票；推薦研究與可執行交易分開計數。固定初始政策尚未經外樣本驗證。")
     try:
-        _h51_source_ui = apply_human_master_engine(decision_source) if _h64_engine_ok else decision_source
-        if _h64_engine_ok:
-            _h51_source_ui = apply_h64_core_truth(_h51_source_ui)
-        _h64_focus = build_h64_single_decision_truth_table(_h51_source_ui, max_rows=10) if _h64_engine_ok else pd.DataFrame({"H64唯一決策": ["H64未完整部署｜不是沒有推薦。"]})
-    except Exception as _h64_ui_exc:
-        _h51_source_ui = decision_source
-        _h64_focus = pd.DataFrame({"H64唯一決策": [f"H64唯一決策暫時無法建立：{_h64_ui_exc}"]})
-    if isinstance(_h64_focus, pd.DataFrame) and not _h64_focus.empty:
-        _h64_tier_ui = _h64_focus.get("H64唯一決策", pd.Series([""] * len(_h64_focus))).fillna("").astype(str)
-        render_pro_kpi_row([
-            {"label": "F1核心正式", "value": str(int(_h64_tier_ui.str.startswith("F1").sum())), "delta": "強勢×主流×鎖碼＋Formal"},
-            {"label": "C2核心研究", "value": str(int(_h64_tier_ui.str.startswith("C2").sum())), "delta": "三真相對齊但未正式授權"},
-            {"label": "C3待鎖碼", "value": str(int(_h64_tier_ui.str.startswith("C3").sum())), "delta": "強勢主流成立，等TDCC趨勢"},
-            {"label": "E1新主流", "value": str(int(_h64_tier_ui.str.startswith("E1").sum())), "delta": "形成中研究，不可直接買"},
-        ])
-        st.dataframe(_format_df(_h64_focus), use_container_width=True, hide_index=True)
-        _h64_eff_all = _h51_source_ui.get("H64有效權威", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str)
-        _h64_raw_formal_ui = int(_h51_source_ui.get("H62原始權威", _h51_source_ui.get("H56上游權威層級", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index))).fillna("").astype(str).eq("FORMAL").sum())
-        _h64_effective_formal_ui = int(_h64_eff_all.eq("EFFECTIVE-FORMAL").sum())
-        _h64_quality_hold_ui = int(_h64_eff_all.eq("FORMAL-QUALITY-HOLD").sum())
-        _h64_lock_pending_ui = int(_h51_source_ui.get("H64鎖碼趨勢狀態", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str).str.startswith("LU").sum())
-        st.info(f"H64權威摘要｜原始Formal {_h64_raw_formal_ui}；核心有效Formal {_h64_effective_formal_ui}；品質暫停 {_h64_quality_hold_ui}；TDCC缺前期鎖碼待確認 {_h64_lock_pending_ui}。")
-    st.info("H64正式推薦門檻不降低；H65廣泛召回、H66判斷T+1時機、H67治理弱市/退潮，H68負責隔日執行否決，H70再補『弱市中的個股逆勢Alpha』研究召回與非交易日時序真相。閱讀順序：①H64正式推薦真相 → ②H68執行真相 → ③H70逆勢Alpha → ④H67/H66/H65研究分層。")
-
-    # H67：H66後的研究優先治理。弱大盤＋族群退潮或低一致性時，
-    # 不允許A1大量膨脹；P1/P2/C1均非Formal，次日仍須H56/Entry/RR重驗。
-    render_pro_section("超級AI次日治理｜H67 Regime × Sector × Consensus")
-    st.caption("H67不增加Formal。它專門修正H66在弱市場/族群退潮時A1過寬的問題，並把追價耗竭與次日盤前重驗變成明確治理。")
-    _h67_engine_ok = bool(
-        callable(apply_h67_regime_consensus) and callable(build_h67_priority_table)
-        and callable(build_h67_governance_table)
-        and H67_GOVERNANCE_VERSION == H67_GOVERNANCE_EXPECTED_VERSION
-    )
-    try:
-        if _h67_engine_ok:
-            _h51_source_ui = apply_h67_regime_consensus(_h51_source_ui)
-            _h67_ui = build_h67_priority_table(_h51_source_ui, max_rows=20, max_per_sector=2)
-        else:
-            _h67_ui = pd.DataFrame({"狀態": [f"H67治理引擎未完整部署：{H67_GOVERNANCE_VERSION}/{H67_GOVERNANCE_EXPECTED_VERSION}"]})
-    except Exception as _h67_ui_exc:
-        _h67_ui = pd.DataFrame({"狀態": [f"H67治理雷達建立失敗：{type(_h67_ui_exc).__name__}: {_h67_ui_exc}"]})
-    if isinstance(_h67_ui, pd.DataFrame) and not _h67_ui.empty:
-        _h67tier_ui = _h67_ui.get("H67研究優先層級", pd.Series([""] * len(_h67_ui))).fillna("").astype(str)
-        _h67score_ui = pd.to_numeric(_h67_ui.get("H67T1治理分", pd.Series([], dtype=float)), errors="coerce")
-        _h67market_ui = pd.to_numeric(_h67_ui.get("H67市場Regime調整", pd.Series([], dtype=float)), errors="coerce")
-        _h67sector_ui = pd.to_numeric(_h67_ui.get("H67族群資金調整", pd.Series([], dtype=float)), errors="coerce")
-        render_pro_kpi_row([
-            {"label": "P1 次日優先", "value": str(int(_h67tier_ui.str.startswith("P1").sum())), "delta": "研究優先，非Formal"},
-            {"label": "P2 次優先", "value": str(int(_h67tier_ui.str.startswith("P2").sum())), "delta": "需盤前再確認"},
-            {"label": "市場Regime調整", "value": (f"{float(_h67market_ui.median()):+.1f}" if not _h67market_ui.dropna().empty else "-"), "delta": "弱市會降級"},
-            {"label": "族群資金調整", "value": (f"{float(_h67sector_ui.median()):+.1f}" if not _h67sector_ui.dropna().empty else "-"), "delta": "退潮會降級"},
-        ])
-        st.dataframe(_format_df(_h67_ui), use_container_width=True, hide_index=True)
-    with st.expander("H67治理規則｜為何A1不再大量膨脹", expanded=False):
-        try:
-            _h67_gov_ui = build_h67_governance_table(_h51_source_ui) if _h67_engine_ok else pd.DataFrame()
-            if isinstance(_h67_gov_ui, pd.DataFrame) and not _h67_gov_ui.empty:
-                st.dataframe(_format_df(_h67_gov_ui), use_container_width=True, hide_index=True)
-        except Exception as _h67_gov_exc:
-            st.caption(f"H67治理摘要暫時無法建立：{_h67_gov_exc}")
-
-    # H68：把收盤後研究順位與隔日執行權限徹底分開，並顯示學習快照是否真的可用。
-    render_pro_section("超級AI執行真相｜H68 Execution × Learning Authority")
-    st.caption("H68不建立Formal。它修正兩件事：① P1/P2/C1不能跨夜直接變成執行許可，隔日需重驗市場/盤前衝擊/資料新鮮度；② H65/H66/H67排名快照必須隨推薦紀錄永久保存，否則Adaptive Learning永遠只有0個成熟cohort。")
-    _h68_engine_ok = bool(
-        callable(apply_h68_execution_learning_truth) and callable(build_h68_execution_learning_table)
-        and callable(reconcile_h68_formal_summary)
-        and H68_EXECUTION_VERSION == H68_EXECUTION_EXPECTED_VERSION
-    )
-    try:
-        if _h68_engine_ok:
-            _h51_source_ui = apply_h68_execution_learning_truth(_h51_source_ui)
-            _h68_ui = build_h68_execution_learning_table(_h51_source_ui, max_rows=20)
-        else:
-            _h68_ui = pd.DataFrame({"狀態": [f"H68執行學習引擎未完整部署：{H68_EXECUTION_VERSION}/{H68_EXECUTION_EXPECTED_VERSION}"]})
-    except Exception as _h68_ui_exc:
-        _h68_ui = pd.DataFrame({"狀態": [f"H68執行學習治理建立失敗：{type(_h68_ui_exc).__name__}: {_h68_ui_exc}"]})
-    if isinstance(_h68_ui, pd.DataFrame) and not _h68_ui.empty and "H68次日執行狀態" in _h68_ui.columns:
-        _h68_exec_ui = _h68_ui["H68次日執行狀態"].fillna("").astype(str)
-        _h68_snap_ui = _h68_ui.get("H68學習快照狀態", pd.Series([""] * len(_h68_ui))).fillna("").astype(str)
-        render_pro_kpi_row([
-            {"label": "H68正式可執行", "value": str(int(_h68_exec_ui.str.startswith("READY-COND").sum())), "delta": "仍須Entry/守價/RR"},
-            {"label": "盤前重驗", "value": str(int(_h68_exec_ui.str.startswith("RECHECK").sum())), "delta": "跨夜不可直接沿用"},
-            {"label": "非Formal研究", "value": str(int(_h68_exec_ui.str.startswith("NO-FORMAL").sum())), "delta": "禁止冒充買進清單"},
-            {"label": "學習快照完整", "value": str(int(_h68_snap_ui.str.startswith("SNAPSHOT-READY").sum())), "delta": "新紀錄將可真正學習"},
-        ])
-        st.dataframe(_format_df(_h68_ui), use_container_width=True, hide_index=True)
-
-    # H70：弱市不放寬Formal，但保留極少數個股逆勢Alpha研究召回，並標明週末/非交易日快照時序。
-    render_pro_section("超級AI逆勢Alpha｜H70 Counter-Regime Survivor × Session Truth")
-    st.caption("H70不建立Formal、不解除H68執行否決。它只修正H67弱市降權可能把真正個股獨立發動一起壓掉的漏召回，並明確標示報告產生日與市場資料錨定日。")
-    _h70_engine_ok = bool(
-        callable(apply_h70_counter_regime_session_truth) and callable(build_h70_counter_regime_table)
-        and callable(build_h70_governance_summary)
-        and H70_COUNTER_REGIME_VERSION == H70_COUNTER_REGIME_EXPECTED_VERSION
-    )
-    try:
-        if _h70_engine_ok:
-            _h51_source_ui = apply_h70_counter_regime_session_truth(_h51_source_ui)
-            _h70_ui = build_h70_counter_regime_table(_h51_source_ui, max_rows=20)
-        else:
-            _h70_ui = pd.DataFrame({"狀態": [f"H70逆勢Alpha引擎未完整部署：{H70_COUNTER_REGIME_VERSION}/{H70_COUNTER_REGIME_EXPECTED_VERSION}"]})
-    except Exception as _h70_ui_exc:
-        _h70_ui = pd.DataFrame({"狀態": [f"H70逆勢Alpha治理建立失敗：{type(_h70_ui_exc).__name__}: {_h70_ui_exc}"]})
-    if isinstance(_h70_ui, pd.DataFrame) and not _h70_ui.empty and "H70逆勢研究層級" in _h70_ui.columns:
-        _h70tier_ui = _h70_ui["H70逆勢研究層級"].fillna("").astype(str)
-        _h70anchor = _safe_str(_h70_ui.iloc[0].get("H70市場資料錨定日"))
-        _h70gen = _safe_str(_h70_ui.iloc[0].get("H70報告產生日"))
-        render_pro_kpi_row([
-            {"label": "X1逆勢Alpha", "value": str(int(_h70tier_ui.str.startswith("X1").sum())), "delta": "研究召回，非Formal"},
-            {"label": "X2逆勢韌性", "value": str(int(_h70tier_ui.str.startswith("X2").sum())), "delta": "等待盤前確認"},
-            {"label": "市場資料錨定日", "value": _h70anchor or "-", "delta": "實際行情基準"},
-            {"label": "報告產生日", "value": _h70gen or "-", "delta": "週末不冒充交易日"},
-        ])
-        st.dataframe(_format_df(_h70_ui), use_container_width=True, hide_index=True)
-    with st.expander("H70治理摘要｜逆勢召回與時序真相", expanded=False):
-        try:
-            _h70_gov_ui = build_h70_governance_summary(_h51_source_ui) if _h70_engine_ok else pd.DataFrame()
-            if isinstance(_h70_gov_ui, pd.DataFrame) and not _h70_gov_ui.empty:
-                st.dataframe(_format_df(_h70_gov_ui), use_container_width=True, hide_index=True)
-        except Exception as _h70_gov_exc:
-            st.caption(f"H70治理摘要暫時無法建立：{_h70_gov_exc}")
-
-    # H77：只有可驗證的原始增量證據才算「新」，並對追價與低進場品質主動煞車。
-    render_pro_section("今日驗證Alpha｜H77 增量證據 × 追價煞車 × 進場品質")
-    st.caption("H77不把絕對高分直接當成新證據。至少檢查動能增量、量能增量、法人流速增量與TDCC真增持；接近漲停、短線過度延伸或進場品質不足時，降到等待區。所有A1/A2仍只是研究排序，Formal仍由H64/H63，執行仍由H68決定。")
-    _h77_engine_ok = bool(
-        callable(apply_h77_verified_delta_execution_gate) and callable(build_h77_verified_alpha_table)
-        and callable(build_h77_wait_core_table) and callable(build_h77_evidence_table)
-        and callable(build_h77_governance_summary)
-        and H77_VERIFIED_DELTA_VERSION == H77_VERIFIED_DELTA_EXPECTED_VERSION
-    )
-    try:
-        if _h77_engine_ok:
-            _h51_source_ui = apply_h77_verified_delta_execution_gate(_h51_source_ui)
-            _h77_daily_ui = build_h77_verified_alpha_table(_h51_source_ui, max_rows=8, max_per_sector=2)
-            _h77_wait_ui = build_h77_wait_core_table(_h51_source_ui, max_rows=15)
-        else:
-            _h77_daily_ui = pd.DataFrame({"狀態":[f"H77驗證增量引擎未完整部署：{H77_VERIFIED_DELTA_VERSION}/{H77_VERIFIED_DELTA_EXPECTED_VERSION}"]})
-            _h77_wait_ui = pd.DataFrame()
-    except Exception as _h77_ui_exc:
-        _h77_daily_ui = pd.DataFrame({"狀態":[f"H77驗證增量建立失敗：{type(_h77_ui_exc).__name__}: {_h77_ui_exc}"]})
-        _h77_wait_ui = pd.DataFrame()
-    if isinstance(_h77_daily_ui, pd.DataFrame) and not _h77_daily_ui.empty:
-        st.markdown("**驗證增量研究優先｜已排除明顯追價與低進場品質**")
-        st.dataframe(_format_df(_h77_daily_ui), use_container_width=True, hide_index=True)
-    with st.expander("追價/證據等待＋結構核心｜不是今日可執行推薦", expanded=False):
-        if isinstance(_h77_wait_ui, pd.DataFrame) and not _h77_wait_ui.empty:
-            st.dataframe(_format_df(_h77_wait_ui), use_container_width=True, hide_index=True)
-    with st.expander("H77治理摘要｜真增量、追價煞車與權威邊界", expanded=False):
-        try:
-            _h77_gov_ui = build_h77_governance_summary(_h51_source_ui) if _h77_engine_ok else pd.DataFrame()
-            if isinstance(_h77_gov_ui, pd.DataFrame) and not _h77_gov_ui.empty:
-                st.dataframe(_format_df(_h77_gov_ui), use_container_width=True, hide_index=True)
-        except Exception as _h77_gov_exc:
-            st.caption(f"H77治理摘要暫時無法建立：{_h77_gov_exc}")
-
-    # H74：技術證據層。每天重新檢查當下主流與資金，不讓歷史品質/熟面孔長期霸榜。
-    render_pro_section("技術診斷｜H74 新鮮主流 × 資金加速（非每日推薦榜）")
-    st.caption("H74每天以全市場橫截面重排：真強勢加速、主流新鮮度、法人/成交資金加速度、TDCC週變化真相、訊號新鮮度與熟面孔慣性。只有當期TDCC持股、缺前期比較時一律標示『鎖碼未確認』。H74不建立Formal，H64/H63/H68權威不變。")
-    _h74_engine_ok = bool(
-        callable(apply_h74_fresh_mainstream_capital) and callable(build_h74_research_table)
-        and callable(build_h74_decision_overview) and callable(build_h74_governance_summary)
-        and H74_FRESH_CAPITAL_VERSION == H74_FRESH_CAPITAL_EXPECTED_VERSION
-    )
-    try:
-        if _h74_engine_ok:
-            _h51_source_ui = apply_h74_fresh_mainstream_capital(_h51_source_ui)
-            _h74_ui = build_h74_decision_overview(_h51_source_ui, max_rows=15)
-        else:
-            _h74_ui = pd.DataFrame({"狀態":[f"H74新鮮主流資金未完整部署：{H74_FRESH_CAPITAL_VERSION}/{H74_FRESH_CAPITAL_EXPECTED_VERSION}"]})
-    except Exception as _h74_ui_exc:
-        _h74_ui = pd.DataFrame({"狀態":[f"H74決策總覽建立失敗：{type(_h74_ui_exc).__name__}: {_h74_ui_exc}"]})
-    if isinstance(_h74_ui,pd.DataFrame) and not _h74_ui.empty:
-        st.dataframe(_format_df(_h74_ui), use_container_width=True, hide_index=True)
-    with st.expander("H74治理摘要｜主流輪動、TDCC真相與熟面孔治理", expanded=False):
-        try:
-            _h74_gov_ui = build_h74_governance_summary(_h51_source_ui) if _h74_engine_ok else pd.DataFrame()
-            if isinstance(_h74_gov_ui,pd.DataFrame) and not _h74_gov_ui.empty:
-                st.dataframe(_format_df(_h74_gov_ui), use_container_width=True, hide_index=True)
-        except Exception as _h74_gov_exc:
-            st.caption(f"H74治理摘要暫時無法建立：{_h74_gov_exc}")
-
-    # H73：補足H72「選得到、但強股不一定排前」的橫截面排序問題。
-    render_pro_section("技術診斷｜H73 Leadership Breadth（非每日推薦榜）")
-    st.caption("H73只做研究排序：族群廣度、領先加速、Regime轉折、模型一致性與分布矛盾。高動能但法人/大戶未確認會降序；族群共振且低分歧的領先股會上移。Formal仍由H64/H63，執行仍由H68決定。")
-    _h73_engine_ok = bool(callable(apply_h73_leadership_breadth) and callable(build_h73_leadership_table) and callable(build_h73_governance_summary) and H73_LEADERSHIP_VERSION == H73_LEADERSHIP_EXPECTED_VERSION)
-    try:
-        if _h73_engine_ok:
-            _h51_source_ui = apply_h73_leadership_breadth(_h51_source_ui)
-            _h73_ui = build_h73_leadership_table(_h51_source_ui, max_rows=20, max_per_sector=3)
-        else:
-            _h73_ui = pd.DataFrame({"狀態":[f"H73領先共振未完整部署：{H73_LEADERSHIP_VERSION}/{H73_LEADERSHIP_EXPECTED_VERSION}"]})
-    except Exception as _h73_ui_exc:
-        _h73_ui = pd.DataFrame({"狀態":[f"H73領先共振建立失敗：{type(_h73_ui_exc).__name__}: {_h73_ui_exc}"]})
-    if isinstance(_h73_ui,pd.DataFrame) and not _h73_ui.empty:
-        st.dataframe(_format_df(_h73_ui), use_container_width=True, hide_index=True)
-    with st.expander("H73治理摘要｜領先加速與分布矛盾", expanded=False):
-        try:
-            _h73_gov_ui = build_h73_governance_summary(_h51_source_ui) if _h73_engine_ok else pd.DataFrame()
-            if isinstance(_h73_gov_ui,pd.DataFrame) and not _h73_gov_ui.empty:
-                st.dataframe(_format_df(_h73_gov_ui), use_container_width=True, hide_index=True)
-        except Exception as _h73_gov_exc:
-            st.caption(f"H73治理摘要暫時無法建立：{_h73_gov_exc}")
-
-    # H72：把國內外成熟選股概念拆成8個可解釋模型，依市場Regime動態配權。
-    render_pro_section("技術診斷｜H72 Multi-Model Alpha Ensemble（非每日推薦榜）")
-    st.caption("H72吸收成長/盈餘、品質、法人需求、TDCC大戶、估值效率、相對強度動能、突破時機與市場Regime八條獨立模型。弱市提高品質/估值/風險權重，攻擊盤提高動能/突破權重；E1/E2/E3都仍是研究層，不建立Formal、不解除H68執行否決。")
-    _h72_engine_ok = bool(
-        callable(apply_h72_multi_model_alpha_ensemble) and callable(build_h72_ensemble_table)
-        and callable(build_h72_governance_summary)
-        and H72_ENSEMBLE_VERSION == H72_ENSEMBLE_EXPECTED_VERSION
-    )
-    try:
-        if _h72_engine_ok:
-            _h51_source_ui = apply_h72_multi_model_alpha_ensemble(_h51_source_ui)
-            _h72_ui = build_h72_ensemble_table(_h51_source_ui, max_rows=20, max_per_sector=3)
-        else:
-            _h72_ui = pd.DataFrame({"狀態": [f"H72多模型Alpha未完整部署：{H72_ENSEMBLE_VERSION}/{H72_ENSEMBLE_EXPECTED_VERSION}"]})
-    except Exception as _h72_ui_exc:
-        _h72_ui = pd.DataFrame({"狀態": [f"H72多模型Alpha建立失敗：{type(_h72_ui_exc).__name__}: {_h72_ui_exc}"]})
-    if isinstance(_h72_ui, pd.DataFrame) and not _h72_ui.empty and "H72研究層級" in _h72_ui.columns:
-        _h72tier_ui = _h72_ui["H72研究層級"].fillna("").astype(str)
-        _h72cov_ui = pd.to_numeric(_h72_ui.get("H72模型覆蓋%", pd.Series([], dtype=float)), errors="coerce")
-        _h72div_ui = pd.to_numeric(_h72_ui.get("H72模型分歧度", pd.Series([], dtype=float)), errors="coerce")
-        render_pro_kpi_row([
-            {"label": "E1多模型共振", "value": str(int(_h72tier_ui.str.startswith("E1").sum())), "delta": "高共識研究核心，仍非Formal"},
-            {"label": "E2優先觀察", "value": str(int(_h72tier_ui.str.startswith("E2").sum())), "delta": "至少5/8模型共振"},
-            {"label": "模型覆蓋中位", "value": (f"{float(_h72cov_ui.median()):.0f}%" if not _h72cov_ui.dropna().empty else "-"), "delta": "缺資料不當成強訊號"},
-            {"label": "模型分歧中位", "value": (f"{float(_h72div_ui.median()):.1f}" if not _h72div_ui.dropna().empty else "-"), "delta": "越低代表共識越高"},
-        ])
-        st.dataframe(_format_df(_h72_ui), use_container_width=True, hide_index=True)
-    with st.expander("H72治理摘要｜八模型動態權重與權威邊界", expanded=False):
-        try:
-            _h72_gov_ui = build_h72_governance_summary(_h51_source_ui) if _h72_engine_ok else pd.DataFrame()
-            if isinstance(_h72_gov_ui, pd.DataFrame) and not _h72_gov_ui.empty:
-                st.dataframe(_format_df(_h72_gov_ui), use_container_width=True, hide_index=True)
-        except Exception as _h72_gov_exc:
-            st.caption(f"H72治理摘要暫時無法建立：{_h72_gov_exc}")
-
-    # H66：品質與T+1時機拆開。高H62/H65分若遇到低檔收盤、法人倒貨、
-    # 主升未確認或利多不漲，會被矛盾訊號治理降階，而不是霸佔第一名。
-    render_pro_section("超級AI T+1時機｜H66 Adaptive Alpha Ranking")
-    st.caption("H66不降低Formal門檻。T+1重點看收盤品質、法人1/3/5日加速度、主流點火、技術買點、量能與矛盾訊號；營收/EPS/PER主要保留在波段品質，不再直接主導隔日排序。")
-    _h66_engine_ok = bool(
-        callable(apply_h66_adaptive_timing) and callable(build_h66_t1_timing_table)
-        and callable(build_h66_learning_governance_table)
-        and H66_TIMING_VERSION == H66_TIMING_EXPECTED_VERSION
-    )
-    try:
-        if _h66_engine_ok:
-            _h51_source_ui = apply_h66_adaptive_timing(_h51_source_ui)
-            _h66_t1_ui = build_h66_t1_timing_table(_h51_source_ui, max_rows=20, max_per_sector=3)
-        else:
-            _h66_t1_ui = pd.DataFrame({"狀態": [f"H66時機引擎未完整部署：{H66_TIMING_VERSION}/{H66_TIMING_EXPECTED_VERSION}"]})
-    except Exception as _h66_ui_exc:
-        _h66_t1_ui = pd.DataFrame({"狀態": [f"H66時機雷達建立失敗：{type(_h66_ui_exc).__name__}: {_h66_ui_exc}"]})
-    if isinstance(_h66_t1_ui, pd.DataFrame) and not _h66_t1_ui.empty:
-        _h66tier_ui = _h66_t1_ui.get("H66T1層級", pd.Series([""] * len(_h66_t1_ui))).fillna("").astype(str)
-        _h66score_ui = pd.to_numeric(_h66_t1_ui.get("H66T1自適應排序分", pd.Series([], dtype=float)), errors="coerce")
-        _h66contra_ui = pd.to_numeric(_h66_t1_ui.get("H66矛盾訊號扣分", pd.Series([], dtype=float)), errors="coerce")
-        render_pro_kpi_row([
-            {"label": "A1 T+1優先", "value": str(int(_h66tier_ui.str.startswith("A1").sum())), "delta": "時機共振，不等於Formal"},
-            {"label": "A2 次優先", "value": str(int(_h66tier_ui.str.startswith("A2").sum())), "delta": "等待收盤/法人確認"},
-            {"label": "B1 等待確認", "value": str(int(_h66tier_ui.str.startswith("B1").sum())), "delta": "矛盾未解除，不追價"},
-            {"label": "前20矛盾扣分均值", "value": (f"{float(_h66contra_ui.mean()):.1f}" if not _h66contra_ui.dropna().empty else "-"), "delta": "越低越一致"},
-        ])
-        st.dataframe(_format_df(_h66_t1_ui), use_container_width=True, hide_index=True)
-    with st.expander("H66自適應學習治理｜權重何時會自己調整", expanded=False):
-        try:
-            _h66_truth_ui = load_t1_truth_rows(limit=600) if callable(load_t1_truth_rows) else []
-            _h66_learn_ui = build_h66_learning_governance_table(_h66_truth_ui) if callable(build_h66_learning_governance_table) else pd.DataFrame()
-            if isinstance(_h66_learn_ui, pd.DataFrame) and not _h66_learn_ui.empty:
-                st.dataframe(_format_df(_h66_learn_ui), use_container_width=True, hide_index=True)
-        except Exception as _h66_learn_ui_exc:
-            st.caption(f"H66學習治理暫時無法讀取：{_h66_learn_ui_exc}")
-        st.caption("H66成熟樣本少於30筆時不自行改權重；成熟後以Selection Alpha的Spearman關係做保守調整，每個因子最多±15%，避免少量勝敗造成權重劇烈震盪。")
-
-    # H65：即使H64本輪合法為0，系統仍要從全市場用多因子找出最值得
-    # 研究的相對機會。W1/W2/W3只是觀察層，不會被寫成正式推薦。
-    render_pro_section("超級AI觀察推薦｜H65 全市場多因子觀察雷達")
-    st.caption("10大支柱：主流、趨勢、法人/外資/投信、大戶TDCC、營收、獲利/EPS、估值、技術買點、量能流動性、催化加速度；另計風險扣分與資料覆蓋率。Formal=0不再等於系統沒有研究價值。")
-    _h65_engine_ok = bool(
-        callable(apply_h65_multifactor_observation)
-        and callable(build_h65_observation_radar_table)
-        and callable(build_h65_indicator_coverage_table)
-        and H65_OBSERVATION_VERSION == H65_OBSERVATION_EXPECTED_VERSION
-    )
-    try:
-        if _h65_engine_ok:
-            _h51_source_ui = apply_h65_multifactor_observation(_h51_source_ui)
-            _h65_radar_ui = build_h65_observation_radar_table(_h51_source_ui, max_rows=20, max_per_sector=3)
-            _h65_coverage_ui = build_h65_indicator_coverage_table(_h51_source_ui)
-        else:
-            _h65_radar_ui = pd.DataFrame({"狀態": [f"H65觀察雷達未完整部署：{H65_OBSERVATION_VERSION}/{H65_OBSERVATION_EXPECTED_VERSION}"]})
-            _h65_coverage_ui = pd.DataFrame()
-    except Exception as _h65_ui_exc:
-        _h65_radar_ui = pd.DataFrame({"狀態": [f"H65觀察雷達建立失敗：{type(_h65_ui_exc).__name__}: {_h65_ui_exc}"]})
-        _h65_coverage_ui = pd.DataFrame()
-    if isinstance(_h65_radar_ui, pd.DataFrame) and not _h65_radar_ui.empty:
-        _h65_tier_ui = _h65_radar_ui.get("H65觀察層級", pd.Series([""] * len(_h65_radar_ui))).fillna("").astype(str)
-        _h65_cov_series = pd.to_numeric(_h65_radar_ui.get("H65資料覆蓋%", pd.Series([], dtype=float)), errors="coerce")
-        render_pro_kpi_row([
-            {"label": "W1重點觀察", "value": str(int(_h65_tier_ui.str.startswith("W1").sum())), "delta": "多因子高共振，仍非Formal"},
-            {"label": "W2提前卡位", "value": str(int(_h65_tier_ui.str.startswith("W2").sum())), "delta": "相對優勢形成中"},
-            {"label": "W3候選追蹤", "value": str(int(_h65_tier_ui.str.startswith("W3").sum())), "delta": "等待弱支柱改善"},
-            {"label": "資料覆蓋中位", "value": (f"{float(_h65_cov_series.median()):.0f}%" if not _h65_cov_series.dropna().empty else "-"), "delta": "低覆蓋會自動降權"},
-        ])
-        st.dataframe(_format_df(_h65_radar_ui), use_container_width=True, hide_index=True)
-    with st.expander("H65完整指標地圖與目前資料覆蓋｜查看還可以再接哪些指標", expanded=False):
-        if isinstance(_h65_coverage_ui, pd.DataFrame) and not _h65_coverage_ui.empty:
-            st.dataframe(_format_df(_h65_coverage_ui), use_container_width=True, hide_index=True)
-        st.caption("H65會優先使用系統已有欄位；未接入的融資融券/借券、完整財務體質、更多事件催化等會列為擴充觀察層，不用缺值假裝高分。")
-
-    render_pro_section("研究層｜主流族群｜H57資金加速×族群點火廣度×H55/H54雙路徑")
-    try:
-        _h51_sector_ui = build_h51_sector_table(_h51_source_ui, max_rows=12) if callable(build_h51_sector_table) else pd.DataFrame()
-    except Exception as _h51_sector_ui_exc:
-        _h51_sector_ui = pd.DataFrame({"狀態": [f"H51主流族群暫時無法建立：{_h51_sector_ui_exc}"]})
-    if isinstance(_h51_sector_ui, pd.DataFrame) and not _h51_sector_ui.empty:
-        st.dataframe(_format_df(_h51_sector_ui), use_container_width=True, hide_index=True)
-
-    render_pro_section("研究層｜H64核心候選｜真強勢×真主流×鎖碼趨勢")
-    try:
-        _h64_core_ui = build_h64_core_research_table(_h51_source_ui, max_rows=20) if callable(build_h64_core_research_table) else pd.DataFrame()
-    except Exception as _h64_core_exc:
-        _h64_core_ui = pd.DataFrame({"狀態": [f"H64核心候選暫時無法建立：{_h64_core_exc}"]})
-    if isinstance(_h64_core_ui, pd.DataFrame) and not _h64_core_ui.empty:
-        st.dataframe(_format_df(_h64_core_ui), use_container_width=True, hide_index=True)
-    else:
-        st.info("本輪沒有通過H64核心強勢/主流品質的候選；不拿舊Leader或熟面孔補位。")
-    with st.expander("展開完整主流領漲研究證據（H51/H57，非第二份推薦清單）", expanded=False):
-        try:
-            _h51_leader_ui = build_h51_mainstream_leader_table(_h51_source_ui, max_rows=20) if callable(build_h51_mainstream_leader_table) else pd.DataFrame()
-        except Exception as _h51_leader_ui_exc:
-            _h51_leader_ui = pd.DataFrame({"狀態": [f"H51領漲股暫時無法建立：{_h51_leader_ui_exc}"]})
-        if isinstance(_h51_leader_ui, pd.DataFrame) and not _h51_leader_ui.empty:
-            st.dataframe(_format_df(_h51_leader_ui), use_container_width=True, hide_index=True)
-
-    render_pro_section("研究層｜股神推薦總排名｜H65多因子觀察＋H64核心真相＋H62/H61")
-    st.caption("正式推薦仍由H64治理；非Formal研究排序則先看H65多因子觀察分與全市場百分位，再回看H64/H62/H61證據。這能提高新機會召回，同時避免把研究候選冒充買進清單。")
-    if callable(rotation_diagnostics):
-        try:
-            rotation_info = rotation_diagnostics(decision_source)
-        except Exception:
-            rotation_info = {"available": False}
-        if rotation_info.get("available"):
-            if rotation_info.get("warning"):
-                st.warning(
-                    f"推薦黏著警示：前10名有 {rotation_info.get('top10_repeat3_count', 0)} 檔近5次至少入榜3次，"
-                    f"其中 {rotation_info.get('top10_sticky_without_signal', 0)} 檔缺少今日新訊號。"
-                    "系統已套用輪動校正；請優先看『推薦輪動狀態』與『今日訊號新鮮分』。"
-                )
-            else:
-                st.info(
-                    f"推薦輪動檢查：前10名新進榜 {rotation_info.get('top10_new_count', 0)} 檔，"
-                    f"平均今日訊號新鮮分 {rotation_info.get('top10_average_signal_freshness', 0):.1f}。"
-                )
-    if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
-        top_row = master_rank.iloc[0]
-        render_pro_kpi_row([
-            {"label": "第一名", "value": f"{_safe_str(top_row.get('股票代號'))} {_safe_str(top_row.get('股票名稱'))}", "delta": _safe_str(top_row.get("SuperAI最終作戰等級")) or _safe_str(top_row.get("股神推薦用途"))},
-            {"label": "H50主流可買", "value": format_number(top_row.get("H50推薦優先分"), 1), "delta": _safe_str(top_row.get("H50推薦決策")) or _safe_str(top_row.get("H50主流購買狀態"))},
-            {"label": "Alpha / Trade", "value": f"{_safe_str(top_row.get('SuperAI Alpha等級')) or '-'} / {_safe_str(top_row.get('SuperAI Trade等級')) or '-'}", "delta": f"RR {format_number(top_row.get('SuperAI執行風報比'),2)}"},
-            {"label": "操作許可", "value": _safe_str(top_row.get("V188交易許可")) or _safe_str(top_row.get("操作許可")) or _safe_str(top_row.get("下週是否可直接買")), "delta": "Prediction ≠ Permission"},
-            {"label": "前20名", "value": str(len(master_rank)), "delta": "H50新鮮主流×交易品質×族群分散"},
-        ])
-        master_cols = [c for c in [
-            "股神推薦總排名", "股票代號", "股票名稱", "類別",
-            "H50推薦優先分", "H50推薦等級", "H50推薦決策", "H50推薦許可", "H50推薦重複扣分", "H50推薦理由",
-            "H50族群生命週期", "H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分", "H50波段機會階段",
-            "H50主流購買優先分", "H50主流購買狀態", "H50重複推薦扣分", "H50主流購買理由",
-            "H49上漲潛力分", "H49潛力等級", "H49潛力階段", "H49交易決策", "H49可執行分", "H49波段位置分", "H49延伸風險扣分", "H49上漲潛力理由",
-            "H47主流領先狀態", "H47交易候選狀態", "H47起漲優先分", "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%", "H47主流領先理由",
-            "H45族群主流分", "H45族群狀態", "V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
-            "V188交易許可", "V188正式推薦資格", "SuperAI執行風報比", "SuperAI風報比來源", "V188RR治理", "V188T+1追價治理",
-            "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "SuperAI校準後隔日上漲機率%",
-            "股神推薦優先分", "股神推薦等級", "股神推薦用途",
-            "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
-            "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化",
-            "主流主升優先分", "主流主升判定", "主流主升操作限制",
-            "推薦資格路徑", "資料受限A-", "A-建議單檔上限%", "推薦漏斗階段",
-            "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
-            "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
-            "主要進場路徑", "主要進場參考價", "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
-            "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分",
-            "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
-            "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度",
-            "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
-        ] if c in master_rank.columns]
-        # H48: the H47 list accidentally repeated 股票代號/股票名稱/類別.
-        # pandas accepts that shape, but Streamlit Cloud -> PyArrow rejects duplicate names.
-        master_cols = list(dict.fromkeys(master_cols))
-        st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
-    else:
-        _v188_block_reason = _safe_str(st.session_state.get(_k("v188_rank_block_reason_v189")))
-        if _v188_block_reason:
-            st.error(
-                "V189 已封鎖不完整的 V188 排名：" + _v188_block_reason +
-                "。系統不會再以舊『股神推薦優先分』補 0 冒充 V188；請重新推薦，或讓本頁自動補算完成後再看排名。"
-            )
-        elif isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
-            st.error(
-                f"不是完全沒有候選：模型找到 {len(stale_intraday)} 檔盤中雷達，但其個股K線不是最新交易日，"
-                "因此已封鎖排名與操作。請先更新個股K線後重新推薦；Excel 會列在『資料待更新雷達』。"
-            )
-        else:
-            st.info("目前沒有資料新鮮且分數達 50 分的推薦/觀察候選；請先完成最新行情掃描。")
-
-    render_pro_section("推薦漏斗與權威摘要｜先看有效正式推薦，再看條件候選")
-    st.caption("這裡只說明候選如何通過資料、A-、Formal與每日精選漏斗；真正推薦身分以H63正式推薦作戰表為準。")
-    # 推薦漏斗：明確分辨「市場沒有合格股票」與「資料來源把資格鎖死」。
-    funnel_bucket = decision_source.get("正式推薦分區", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
-    fresh_series = decision_source.get("K線資料新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
-    official_series = decision_source.get("官方因子新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
-    data_limited_series = decision_source.get("資料受限A-", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
-    funnel_fresh = int(fresh_series.str.contains("最新", na=False).sum())
-    funnel_official = int(official_series.str.contains("最新|對齊|READY|已驗證T-1|降級可用", regex=True, na=False).sum())
-    funnel_a = int(funnel_bucket.eq("A-｜準主推薦小量試單").sum())
-    funnel_formal = int(funnel_bucket.eq("正式下週主推薦").sum())
-    funnel_dq = int(data_limited_series.eq("是").sum())
-    funnel_daily = int(decision_source.get("H34每日精選", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str).eq("是").sum())
-    st.caption(
-        f"推薦通過漏斗：候選 {len(decision_source)} → 最新K線 {funnel_fresh} → 官方因子對齊 {funnel_official} "
-        f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 上游Formal {funnel_formal} → 超級AI每日精選 {funnel_daily}。"
-        "H41每日條件精選不改寫Formal/V188權威；只在觸發/回測＋守價成立後執行。"
-    )
-    row = summary.iloc[0]
-    try:
-        _h63_formal_ui = build_h63_formal_execution_table(_h51_source_ui, max_rows=30) if _h63_engine_ok else pd.DataFrame()
-    except Exception as _h63_formal_ui_exc:
-        _h63_formal_ui = pd.DataFrame({"H63正式推薦": [f"H63正式推薦表建立失敗：{type(_h63_formal_ui_exc).__name__}: {_h63_formal_ui_exc}"]})
-    _h63_effective_n_ui = int(len(_h63_formal_ui)) if isinstance(_h63_formal_ui, pd.DataFrame) and "H63正式推薦順位" in _h63_formal_ui.columns else 0
-    if callable(reconcile_h68_formal_summary):
-        try:
-            summary = reconcile_h68_formal_summary(summary, _h51_source_ui, scan_report, _h63_formal_ui)
-        except Exception:
-            pass
-    row = summary.iloc[0]
-    render_pro_kpi_row([
-        {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
-        {"label": "預計掃描", "value": str(int(row.get("預計掃描數", 0))), "delta": "檔"},
-        {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('有效K線資料率%', 0)):.1f}%"},
-        {"label": "流動性覆蓋", "value": f"{float(row.get('流動性資料覆蓋率%', 0)):.1f}%", "delta": _safe_str(row.get("推薦適用範圍"))},
-        {"label": "官方有效覆蓋", "value": f"{float(row.get('官方有效因子覆蓋率%', row.get('官方因子覆蓋率%', 0))):.1f}%", "delta": f"最新可信 {float(row.get('官方最新可信覆蓋率%', 0)):.1f}%｜來源可信 {float(row.get('官方來源可信覆蓋率%', 0)):.1f}%｜T-1內 {float(row.get('官方日期T-1內覆蓋率%', 0)):.1f}%"},
-        {"label": "上游Formal", "value": str(int(row.get("上游Formal檔數", row.get("正式推薦檔數", 0)))), "delta": "H64覆核前"},
-        {"label": "有效正式推薦", "value": str(_h63_effective_n_ui), "delta": "H64核心有效Formal／H63作戰身分"},
-        {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": f"可操作{int(row.get('A-可操作檔數', 0))}／封鎖{int(row.get('A-大盤封鎖檔數', 0))}"},
-        {"label": "超級AI每日精選", "value": str(int(row.get("H41每日精選檔數", 0))), "delta": f"條件精選{int(row.get('H41每日條件精選檔數', 0))}"},
-    ])
-
-    # H63：正式推薦身分真相。只有 EFFECTIVE-FORMAL 能稱為真正推薦；
-    # H34每日精選若屬 A-/Radar，只能是條件候選，不能與 Formal 混在同一張表。
-    render_pro_section("本輪真正正式推薦｜H63 唯一作戰清單")
-    st.caption("只有H64品質覆核後仍為 EFFECTIVE-FORMAL 才是本輪真正正式推薦；即使列為正式推薦，也不是開盤市價直接買，仍須盤前、觸發、守價、停損與路徑RR成立。")
-    if isinstance(_h63_formal_ui, pd.DataFrame) and "H63正式推薦順位" in _h63_formal_ui.columns and not _h63_formal_ui.empty:
-        _h63_formal_cols = [c for c in [
-            "H63正式推薦順位", "股票代號", "股票名稱", "類別", "H63正式推薦", "H63是否今日精選",
-            "H63是否可直接買", "現在該做什麼", "H56盤前狀態", "H62有效權威", "正式推薦分區",
-            "操作許可", "主要進場路徑", "主要進場參考價", "回測承接參考價", "實戰觸發價",
-            "觸發後守價", "實戰停損參考", "路徑風險報酬比", "H34安全精選分", "H62增量機會分",
-        ] if c in _h63_formal_ui.columns]
-        st.dataframe(_format_df(_h63_formal_ui[_h63_formal_cols]), use_container_width=True, hide_index=True)
-    else:
-        st.info("本輪沒有 H64 核心有效Formal；A-/Radar/前兆/FORMAL-QUALITY-HOLD都不是本輪正式推薦。空手或等待是有效決策。")
-
-    _h63_daily_source = _h51_source_ui if isinstance(_h51_source_ui, pd.DataFrame) else decision_source
-    _daily_mask_h63 = _h63_daily_source.get("H34每日精選", pd.Series([""] * len(_h63_daily_source), index=_h63_daily_source.index)).fillna("").astype(str).eq("是")
-    _daily_nonformal = _h63_daily_source.loc[_daily_mask_h63 & ~_h63_daily_source.get("H63是否正式推薦", pd.Series([""] * len(_h63_daily_source), index=_h63_daily_source.index)).fillna("").astype(str).str.startswith("是")].copy()
-    if not _daily_nonformal.empty:
-        with st.expander(f"A-/Radar 每日條件候選｜非正式推薦（{len(_daily_nonformal)}檔）", expanded=False):
-            st.warning("這些股票可能通過 H34/H41 每日條件精選，但上游不是有效 Formal；只能作 A-/Radar 條件候選，不能解讀成股神正式推薦。")
-            _daily_cols = [c for c in [
-                "H63角色", "H63是否正式推薦", "H34每日精選排名", "股票代號", "股票名稱", "正式推薦分區",
-                "H34精選等級", "H34安全精選分", "H41條件操作許可", "操作許可", "主要進場路徑",
-                "主要進場參考價", "回測承接參考價", "實戰觸發價", "觸發後守價", "路徑風險報酬比",
-            ] if c in _daily_nonformal.columns]
-            st.dataframe(_format_df(_daily_nonformal[_daily_cols]), use_container_width=True, hide_index=True)
-
-    scan_usable = bool(scan_report.get("正式推薦可用", False)) if isinstance(scan_report, dict) else False
-    if isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
-        st.error(
-            f"資料新鮮度封鎖：{len(stale_intraday)} 檔雷達候選使用落後K線，已禁止列入當日作戰表。"
-            "這些股票不是消失，而是被移到『資料待更新雷達』等待重掃。"
+        if not callable(build_h78_tables):
+            raise RuntimeError(H78_IMPORT_ERROR or "H78引擎未部署")
+        _h78_tables = build_h78_tables(decision_source)
+        st.dataframe(_format_df(_h78_tables["recommendations"]), use_container_width=True, hide_index=True)
+        st.dataframe(_format_df(_h78_tables["health"]), use_container_width=True, hide_index=True)
+        with st.expander("完整候選淘汰原因與價格計畫", expanded=False):
+            st.dataframe(_format_df(_h78_tables["audit"]), use_container_width=True, hide_index=True)
+        st.caption("升級後請重新推薦一次，補回舊診斷快照已遺失的原始增量欄位。舊Excel無法還原不存在的K線增量。")
+    except Exception as _h78_error:
+        st.error(f"H78決策建立失敗（不是沒有機會）：{type(_h78_error).__name__}: {_h78_error}")
+    with st.expander("舊版決策與交易授權診斷", expanded=False):
+        # H64：真正第一屏只回答「當前強勢、當前主流、鎖碼趨勢是否同時成立」。
+        # 高分、熟面孔、單點TDCC持股都不能再冒充核心候選。
+        render_pro_section("超級AI唯一決策｜H64 強勢×主流×大戶鎖碼真相")
+        st.caption("H64把H42/H47當前強勢、H51/H53/H57主流形成、TDCC前後期千張大戶變化與RR放到同一硬閘門。高持股但沒有前期差異只能叫『持股已知』，不是鎖碼；非強勢/非主流即使H62增量高也不能霸榜。")
+        _h64_engine_ok = bool(
+            callable(apply_human_master_engine)
+            and callable(build_h64_single_decision_truth_table)
+            and callable(apply_h64_core_truth)
+            and H51_HUMAN_MASTER_VERSION == H51_HUMAN_MASTER_EXPECTED_VERSION
+            and H61_OPPORTUNITY_VERSION == H61_OPPORTUNITY_EXPECTED_VERSION
+            and H62_OPPORTUNITY_VERSION == H62_OPPORTUNITY_EXPECTED_VERSION
+            and H64_CORE_VERSION == H64_CORE_EXPECTED_VERSION
         )
-    if not scan_usable:
-        st.warning(_safe_str(row.get("操作說明")) or "目前為條件式參考清單；下單前請更新最新價並重新推薦。")
-        if _safe_str(row.get("掃描品質說明")):
-            st.caption(_safe_str(row.get("掃描品質說明")))
-    else:
-        if _h63_effective_n_ui > 0:
-            st.success(_safe_str(row.get("操作說明")))
-        else:
-            st.warning(_safe_str(row.get("操作說明")))
-    if scan_usable and _h63_effective_n_ui == 0 and len(a_minus) == 0:
-        _phase92_render_zero_formal_diagnostics(rank_source)
-    battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
-    if callable(build_action_table):
         try:
-            battle = build_action_table(battle, include_intraday=True)
-        except Exception:
-            pass
-    st.caption(_safe_str(row.get("核心紀律")))
+            _h51_source_ui = apply_human_master_engine(decision_source) if _h64_engine_ok else decision_source
+            if _h64_engine_ok:
+                _h51_source_ui = apply_h64_core_truth(_h51_source_ui)
+            _h64_focus = build_h64_single_decision_truth_table(_h51_source_ui, max_rows=10) if _h64_engine_ok else pd.DataFrame({"H64唯一決策": ["H64未完整部署｜不是沒有推薦。"]})
+        except Exception as _h64_ui_exc:
+            _h51_source_ui = decision_source
+            _h64_focus = pd.DataFrame({"H64唯一決策": [f"H64唯一決策暫時無法建立：{_h64_ui_exc}"]})
+        if isinstance(_h64_focus, pd.DataFrame) and not _h64_focus.empty:
+            _h64_tier_ui = _h64_focus.get("H64唯一決策", pd.Series([""] * len(_h64_focus))).fillna("").astype(str)
+            render_pro_kpi_row([
+                {"label": "F1核心正式", "value": str(int(_h64_tier_ui.str.startswith("F1").sum())), "delta": "強勢×主流×鎖碼＋Formal"},
+                {"label": "C2核心研究", "value": str(int(_h64_tier_ui.str.startswith("C2").sum())), "delta": "三真相對齊但未正式授權"},
+                {"label": "C3待鎖碼", "value": str(int(_h64_tier_ui.str.startswith("C3").sum())), "delta": "強勢主流成立，等TDCC趨勢"},
+                {"label": "E1新主流", "value": str(int(_h64_tier_ui.str.startswith("E1").sum())), "delta": "形成中研究，不可直接買"},
+            ])
+            st.dataframe(_format_df(_h64_focus), use_container_width=True, hide_index=True)
+            _h64_eff_all = _h51_source_ui.get("H64有效權威", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str)
+            _h64_raw_formal_ui = int(_h51_source_ui.get("H62原始權威", _h51_source_ui.get("H56上游權威層級", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index))).fillna("").astype(str).eq("FORMAL").sum())
+            _h64_effective_formal_ui = int(_h64_eff_all.eq("EFFECTIVE-FORMAL").sum())
+            _h64_quality_hold_ui = int(_h64_eff_all.eq("FORMAL-QUALITY-HOLD").sum())
+            _h64_lock_pending_ui = int(_h51_source_ui.get("H64鎖碼趨勢狀態", pd.Series([""] * len(_h51_source_ui), index=_h51_source_ui.index)).fillna("").astype(str).str.startswith("LU").sum())
+            st.info(f"H64權威摘要｜原始Formal {_h64_raw_formal_ui}；核心有效Formal {_h64_effective_formal_ui}；品質暫停 {_h64_quality_hold_ui}；TDCC缺前期鎖碼待確認 {_h64_lock_pending_ui}。")
+        st.info("H64正式推薦門檻不降低；H65廣泛召回、H66判斷T+1時機、H67治理弱市/退潮，H68負責隔日執行否決，H70再補『弱市中的個股逆勢Alpha』研究召回與非交易日時序真相。閱讀順序：①H64正式推薦真相 → ②H68執行真相 → ③H70逆勢Alpha → ④H67/H66/H65研究分層。")
 
-    if isinstance(battle, pd.DataFrame) and not battle.empty:
-        render_pro_section("權威底層稽核｜Formal／A-／Radar（非第二份推薦清單）")
-        st.caption("這裡是權威/條件/雷達的完整稽核，不是另一份推薦清單。只有 H63角色=F1/F0 且 H64有效權威=EFFECTIVE-FORMAL 才算正式推薦；A-、B+、Radar 都不是正式推薦。")
+        # H67：H66後的研究優先治理。弱大盤＋族群退潮或低一致性時，
+        # 不允許A1大量膨脹；P1/P2/C1均非Formal，次日仍須H56/Entry/RR重驗。
+        render_pro_section("超級AI次日治理｜H67 Regime × Sector × Consensus")
+        st.caption("H67不增加Formal。它專門修正H66在弱市場/族群退潮時A1過寬的問題，並把追價耗竭與次日盤前重驗變成明確治理。")
+        _h67_engine_ok = bool(
+            callable(apply_h67_regime_consensus) and callable(build_h67_priority_table)
+            and callable(build_h67_governance_table)
+            and H67_GOVERNANCE_VERSION == H67_GOVERNANCE_EXPECTED_VERSION
+        )
         try:
-            _h63_audit = build_h63_authority_audit_table(_h51_source_ui, max_rows=60) if _h63_engine_ok else pd.DataFrame()
-        except Exception:
-            _h63_audit = pd.DataFrame()
-        with st.expander(f"展開權威稽核明細（{len(_h63_audit) if isinstance(_h63_audit, pd.DataFrame) else 0}檔）", expanded=False):
-            if isinstance(_h63_audit, pd.DataFrame) and not _h63_audit.empty:
-                st.dataframe(_format_df(_h63_audit), use_container_width=True, hide_index=True)
+            if _h67_engine_ok:
+                _h51_source_ui = apply_h67_regime_consensus(_h51_source_ui)
+                _h67_ui = build_h67_priority_table(_h51_source_ui, max_rows=20, max_per_sector=2)
             else:
-                st.info("目前沒有可顯示的權威稽核資料。")
-    elif scan_usable:
-        st.info("完整掃描已完成，但本輪沒有有效正式推薦、A-準主推薦或盤中核心雷達；空手也是正式決策。")
+                _h67_ui = pd.DataFrame({"狀態": [f"H67治理引擎未完整部署：{H67_GOVERNANCE_VERSION}/{H67_GOVERNANCE_EXPECTED_VERSION}"]})
+        except Exception as _h67_ui_exc:
+            _h67_ui = pd.DataFrame({"狀態": [f"H67治理雷達建立失敗：{type(_h67_ui_exc).__name__}: {_h67_ui_exc}"]})
+        if isinstance(_h67_ui, pd.DataFrame) and not _h67_ui.empty:
+            _h67tier_ui = _h67_ui.get("H67研究優先層級", pd.Series([""] * len(_h67_ui))).fillna("").astype(str)
+            _h67score_ui = pd.to_numeric(_h67_ui.get("H67T1治理分", pd.Series([], dtype=float)), errors="coerce")
+            _h67market_ui = pd.to_numeric(_h67_ui.get("H67市場Regime調整", pd.Series([], dtype=float)), errors="coerce")
+            _h67sector_ui = pd.to_numeric(_h67_ui.get("H67族群資金調整", pd.Series([], dtype=float)), errors="coerce")
+            render_pro_kpi_row([
+                {"label": "P1 次日優先", "value": str(int(_h67tier_ui.str.startswith("P1").sum())), "delta": "研究優先，非Formal"},
+                {"label": "P2 次優先", "value": str(int(_h67tier_ui.str.startswith("P2").sum())), "delta": "需盤前再確認"},
+                {"label": "市場Regime調整", "value": (f"{float(_h67market_ui.median()):+.1f}" if not _h67market_ui.dropna().empty else "-"), "delta": "弱市會降級"},
+                {"label": "族群資金調整", "value": (f"{float(_h67sector_ui.median()):+.1f}" if not _h67sector_ui.dropna().empty else "-"), "delta": "退潮會降級"},
+            ])
+            st.dataframe(_format_df(_h67_ui), use_container_width=True, hide_index=True)
+        with st.expander("H67治理規則｜為何A1不再大量膨脹", expanded=False):
+            try:
+                _h67_gov_ui = build_h67_governance_table(_h51_source_ui) if _h67_engine_ok else pd.DataFrame()
+                if isinstance(_h67_gov_ui, pd.DataFrame) and not _h67_gov_ui.empty:
+                    st.dataframe(_format_df(_h67_gov_ui), use_container_width=True, hide_index=True)
+            except Exception as _h67_gov_exc:
+                st.caption(f"H67治理摘要暫時無法建立：{_h67_gov_exc}")
+
+        # H68：把收盤後研究順位與隔日執行權限徹底分開，並顯示學習快照是否真的可用。
+        render_pro_section("超級AI執行真相｜H68 Execution × Learning Authority")
+        st.caption("H68不建立Formal。它修正兩件事：① P1/P2/C1不能跨夜直接變成執行許可，隔日需重驗市場/盤前衝擊/資料新鮮度；② H65/H66/H67排名快照必須隨推薦紀錄永久保存，否則Adaptive Learning永遠只有0個成熟cohort。")
+        _h68_engine_ok = bool(
+            callable(apply_h68_execution_learning_truth) and callable(build_h68_execution_learning_table)
+            and callable(reconcile_h68_formal_summary)
+            and H68_EXECUTION_VERSION == H68_EXECUTION_EXPECTED_VERSION
+        )
+        try:
+            if _h68_engine_ok:
+                _h51_source_ui = apply_h68_execution_learning_truth(_h51_source_ui)
+                _h68_ui = build_h68_execution_learning_table(_h51_source_ui, max_rows=20)
+            else:
+                _h68_ui = pd.DataFrame({"狀態": [f"H68執行學習引擎未完整部署：{H68_EXECUTION_VERSION}/{H68_EXECUTION_EXPECTED_VERSION}"]})
+        except Exception as _h68_ui_exc:
+            _h68_ui = pd.DataFrame({"狀態": [f"H68執行學習治理建立失敗：{type(_h68_ui_exc).__name__}: {_h68_ui_exc}"]})
+        if isinstance(_h68_ui, pd.DataFrame) and not _h68_ui.empty and "H68次日執行狀態" in _h68_ui.columns:
+            _h68_exec_ui = _h68_ui["H68次日執行狀態"].fillna("").astype(str)
+            _h68_snap_ui = _h68_ui.get("H68學習快照狀態", pd.Series([""] * len(_h68_ui))).fillna("").astype(str)
+            render_pro_kpi_row([
+                {"label": "H68正式可執行", "value": str(int(_h68_exec_ui.str.startswith("READY-COND").sum())), "delta": "仍須Entry/守價/RR"},
+                {"label": "盤前重驗", "value": str(int(_h68_exec_ui.str.startswith("RECHECK").sum())), "delta": "跨夜不可直接沿用"},
+                {"label": "非Formal研究", "value": str(int(_h68_exec_ui.str.startswith("NO-FORMAL").sum())), "delta": "禁止冒充買進清單"},
+                {"label": "學習快照完整", "value": str(int(_h68_snap_ui.str.startswith("SNAPSHOT-READY").sum())), "delta": "新紀錄將可真正學習"},
+            ])
+            st.dataframe(_format_df(_h68_ui), use_container_width=True, hide_index=True)
+
+        # H70：弱市不放寬Formal，但保留極少數個股逆勢Alpha研究召回，並標明週末/非交易日快照時序。
+        render_pro_section("超級AI逆勢Alpha｜H70 Counter-Regime Survivor × Session Truth")
+        st.caption("H70不建立Formal、不解除H68執行否決。它只修正H67弱市降權可能把真正個股獨立發動一起壓掉的漏召回，並明確標示報告產生日與市場資料錨定日。")
+        _h70_engine_ok = bool(
+            callable(apply_h70_counter_regime_session_truth) and callable(build_h70_counter_regime_table)
+            and callable(build_h70_governance_summary)
+            and H70_COUNTER_REGIME_VERSION == H70_COUNTER_REGIME_EXPECTED_VERSION
+        )
+        try:
+            if _h70_engine_ok:
+                _h51_source_ui = apply_h70_counter_regime_session_truth(_h51_source_ui)
+                _h70_ui = build_h70_counter_regime_table(_h51_source_ui, max_rows=20)
+            else:
+                _h70_ui = pd.DataFrame({"狀態": [f"H70逆勢Alpha引擎未完整部署：{H70_COUNTER_REGIME_VERSION}/{H70_COUNTER_REGIME_EXPECTED_VERSION}"]})
+        except Exception as _h70_ui_exc:
+            _h70_ui = pd.DataFrame({"狀態": [f"H70逆勢Alpha治理建立失敗：{type(_h70_ui_exc).__name__}: {_h70_ui_exc}"]})
+        if isinstance(_h70_ui, pd.DataFrame) and not _h70_ui.empty and "H70逆勢研究層級" in _h70_ui.columns:
+            _h70tier_ui = _h70_ui["H70逆勢研究層級"].fillna("").astype(str)
+            _h70anchor = _safe_str(_h70_ui.iloc[0].get("H70市場資料錨定日"))
+            _h70gen = _safe_str(_h70_ui.iloc[0].get("H70報告產生日"))
+            render_pro_kpi_row([
+                {"label": "X1逆勢Alpha", "value": str(int(_h70tier_ui.str.startswith("X1").sum())), "delta": "研究召回，非Formal"},
+                {"label": "X2逆勢韌性", "value": str(int(_h70tier_ui.str.startswith("X2").sum())), "delta": "等待盤前確認"},
+                {"label": "市場資料錨定日", "value": _h70anchor or "-", "delta": "實際行情基準"},
+                {"label": "報告產生日", "value": _h70gen or "-", "delta": "週末不冒充交易日"},
+            ])
+            st.dataframe(_format_df(_h70_ui), use_container_width=True, hide_index=True)
+        with st.expander("H70治理摘要｜逆勢召回與時序真相", expanded=False):
+            try:
+                _h70_gov_ui = build_h70_governance_summary(_h51_source_ui) if _h70_engine_ok else pd.DataFrame()
+                if isinstance(_h70_gov_ui, pd.DataFrame) and not _h70_gov_ui.empty:
+                    st.dataframe(_format_df(_h70_gov_ui), use_container_width=True, hide_index=True)
+            except Exception as _h70_gov_exc:
+                st.caption(f"H70治理摘要暫時無法建立：{_h70_gov_exc}")
+
+        # H77：只有可驗證的原始增量證據才算「新」，並對追價與低進場品質主動煞車。
+        render_pro_section("今日驗證Alpha｜H77 增量證據 × 追價煞車 × 進場品質")
+        st.caption("H77不把絕對高分直接當成新證據。至少檢查動能增量、量能增量、法人流速增量與TDCC真增持；接近漲停、短線過度延伸或進場品質不足時，降到等待區。所有A1/A2仍只是研究排序，Formal仍由H64/H63，執行仍由H68決定。")
+        _h77_engine_ok = bool(
+            callable(apply_h77_verified_delta_execution_gate) and callable(build_h77_verified_alpha_table)
+            and callable(build_h77_wait_core_table) and callable(build_h77_evidence_table)
+            and callable(build_h77_governance_summary)
+            and H77_VERIFIED_DELTA_VERSION == H77_VERIFIED_DELTA_EXPECTED_VERSION
+        )
+        try:
+            if _h77_engine_ok:
+                _h51_source_ui = apply_h77_verified_delta_execution_gate(_h51_source_ui)
+                _h77_daily_ui = build_h77_verified_alpha_table(_h51_source_ui, max_rows=8, max_per_sector=2)
+                _h77_wait_ui = build_h77_wait_core_table(_h51_source_ui, max_rows=15)
+            else:
+                _h77_daily_ui = pd.DataFrame({"狀態":[f"H77驗證增量引擎未完整部署：{H77_VERIFIED_DELTA_VERSION}/{H77_VERIFIED_DELTA_EXPECTED_VERSION}"]})
+                _h77_wait_ui = pd.DataFrame()
+        except Exception as _h77_ui_exc:
+            _h77_daily_ui = pd.DataFrame({"狀態":[f"H77驗證增量建立失敗：{type(_h77_ui_exc).__name__}: {_h77_ui_exc}"]})
+            _h77_wait_ui = pd.DataFrame()
+        if isinstance(_h77_daily_ui, pd.DataFrame) and not _h77_daily_ui.empty:
+            st.markdown("**驗證增量研究優先｜已排除明顯追價與低進場品質**")
+            st.dataframe(_format_df(_h77_daily_ui), use_container_width=True, hide_index=True)
+        with st.expander("追價/證據等待＋結構核心｜不是今日可執行推薦", expanded=False):
+            if isinstance(_h77_wait_ui, pd.DataFrame) and not _h77_wait_ui.empty:
+                st.dataframe(_format_df(_h77_wait_ui), use_container_width=True, hide_index=True)
+        with st.expander("H77治理摘要｜真增量、追價煞車與權威邊界", expanded=False):
+            try:
+                _h77_gov_ui = build_h77_governance_summary(_h51_source_ui) if _h77_engine_ok else pd.DataFrame()
+                if isinstance(_h77_gov_ui, pd.DataFrame) and not _h77_gov_ui.empty:
+                    st.dataframe(_format_df(_h77_gov_ui), use_container_width=True, hide_index=True)
+            except Exception as _h77_gov_exc:
+                st.caption(f"H77治理摘要暫時無法建立：{_h77_gov_exc}")
+
+        # H74：技術證據層。每天重新檢查當下主流與資金，不讓歷史品質/熟面孔長期霸榜。
+        render_pro_section("技術診斷｜H74 新鮮主流 × 資金加速（非每日推薦榜）")
+        st.caption("H74每天以全市場橫截面重排：真強勢加速、主流新鮮度、法人/成交資金加速度、TDCC週變化真相、訊號新鮮度與熟面孔慣性。只有當期TDCC持股、缺前期比較時一律標示『鎖碼未確認』。H74不建立Formal，H64/H63/H68權威不變。")
+        _h74_engine_ok = bool(
+            callable(apply_h74_fresh_mainstream_capital) and callable(build_h74_research_table)
+            and callable(build_h74_decision_overview) and callable(build_h74_governance_summary)
+            and H74_FRESH_CAPITAL_VERSION == H74_FRESH_CAPITAL_EXPECTED_VERSION
+        )
+        try:
+            if _h74_engine_ok:
+                _h51_source_ui = apply_h74_fresh_mainstream_capital(_h51_source_ui)
+                _h74_ui = build_h74_decision_overview(_h51_source_ui, max_rows=15)
+            else:
+                _h74_ui = pd.DataFrame({"狀態":[f"H74新鮮主流資金未完整部署：{H74_FRESH_CAPITAL_VERSION}/{H74_FRESH_CAPITAL_EXPECTED_VERSION}"]})
+        except Exception as _h74_ui_exc:
+            _h74_ui = pd.DataFrame({"狀態":[f"H74決策總覽建立失敗：{type(_h74_ui_exc).__name__}: {_h74_ui_exc}"]})
+        if isinstance(_h74_ui,pd.DataFrame) and not _h74_ui.empty:
+            st.dataframe(_format_df(_h74_ui), use_container_width=True, hide_index=True)
+        with st.expander("H74治理摘要｜主流輪動、TDCC真相與熟面孔治理", expanded=False):
+            try:
+                _h74_gov_ui = build_h74_governance_summary(_h51_source_ui) if _h74_engine_ok else pd.DataFrame()
+                if isinstance(_h74_gov_ui,pd.DataFrame) and not _h74_gov_ui.empty:
+                    st.dataframe(_format_df(_h74_gov_ui), use_container_width=True, hide_index=True)
+            except Exception as _h74_gov_exc:
+                st.caption(f"H74治理摘要暫時無法建立：{_h74_gov_exc}")
+
+        # H73：補足H72「選得到、但強股不一定排前」的橫截面排序問題。
+        render_pro_section("技術診斷｜H73 Leadership Breadth（非每日推薦榜）")
+        st.caption("H73只做研究排序：族群廣度、領先加速、Regime轉折、模型一致性與分布矛盾。高動能但法人/大戶未確認會降序；族群共振且低分歧的領先股會上移。Formal仍由H64/H63，執行仍由H68決定。")
+        _h73_engine_ok = bool(callable(apply_h73_leadership_breadth) and callable(build_h73_leadership_table) and callable(build_h73_governance_summary) and H73_LEADERSHIP_VERSION == H73_LEADERSHIP_EXPECTED_VERSION)
+        try:
+            if _h73_engine_ok:
+                _h51_source_ui = apply_h73_leadership_breadth(_h51_source_ui)
+                _h73_ui = build_h73_leadership_table(_h51_source_ui, max_rows=20, max_per_sector=3)
+            else:
+                _h73_ui = pd.DataFrame({"狀態":[f"H73領先共振未完整部署：{H73_LEADERSHIP_VERSION}/{H73_LEADERSHIP_EXPECTED_VERSION}"]})
+        except Exception as _h73_ui_exc:
+            _h73_ui = pd.DataFrame({"狀態":[f"H73領先共振建立失敗：{type(_h73_ui_exc).__name__}: {_h73_ui_exc}"]})
+        if isinstance(_h73_ui,pd.DataFrame) and not _h73_ui.empty:
+            st.dataframe(_format_df(_h73_ui), use_container_width=True, hide_index=True)
+        with st.expander("H73治理摘要｜領先加速與分布矛盾", expanded=False):
+            try:
+                _h73_gov_ui = build_h73_governance_summary(_h51_source_ui) if _h73_engine_ok else pd.DataFrame()
+                if isinstance(_h73_gov_ui,pd.DataFrame) and not _h73_gov_ui.empty:
+                    st.dataframe(_format_df(_h73_gov_ui), use_container_width=True, hide_index=True)
+            except Exception as _h73_gov_exc:
+                st.caption(f"H73治理摘要暫時無法建立：{_h73_gov_exc}")
+
+        # H72：把國內外成熟選股概念拆成8個可解釋模型，依市場Regime動態配權。
+        render_pro_section("技術診斷｜H72 Multi-Model Alpha Ensemble（非每日推薦榜）")
+        st.caption("H72吸收成長/盈餘、品質、法人需求、TDCC大戶、估值效率、相對強度動能、突破時機與市場Regime八條獨立模型。弱市提高品質/估值/風險權重，攻擊盤提高動能/突破權重；E1/E2/E3都仍是研究層，不建立Formal、不解除H68執行否決。")
+        _h72_engine_ok = bool(
+            callable(apply_h72_multi_model_alpha_ensemble) and callable(build_h72_ensemble_table)
+            and callable(build_h72_governance_summary)
+            and H72_ENSEMBLE_VERSION == H72_ENSEMBLE_EXPECTED_VERSION
+        )
+        try:
+            if _h72_engine_ok:
+                _h51_source_ui = apply_h72_multi_model_alpha_ensemble(_h51_source_ui)
+                _h72_ui = build_h72_ensemble_table(_h51_source_ui, max_rows=20, max_per_sector=3)
+            else:
+                _h72_ui = pd.DataFrame({"狀態": [f"H72多模型Alpha未完整部署：{H72_ENSEMBLE_VERSION}/{H72_ENSEMBLE_EXPECTED_VERSION}"]})
+        except Exception as _h72_ui_exc:
+            _h72_ui = pd.DataFrame({"狀態": [f"H72多模型Alpha建立失敗：{type(_h72_ui_exc).__name__}: {_h72_ui_exc}"]})
+        if isinstance(_h72_ui, pd.DataFrame) and not _h72_ui.empty and "H72研究層級" in _h72_ui.columns:
+            _h72tier_ui = _h72_ui["H72研究層級"].fillna("").astype(str)
+            _h72cov_ui = pd.to_numeric(_h72_ui.get("H72模型覆蓋%", pd.Series([], dtype=float)), errors="coerce")
+            _h72div_ui = pd.to_numeric(_h72_ui.get("H72模型分歧度", pd.Series([], dtype=float)), errors="coerce")
+            render_pro_kpi_row([
+                {"label": "E1多模型共振", "value": str(int(_h72tier_ui.str.startswith("E1").sum())), "delta": "高共識研究核心，仍非Formal"},
+                {"label": "E2優先觀察", "value": str(int(_h72tier_ui.str.startswith("E2").sum())), "delta": "至少5/8模型共振"},
+                {"label": "模型覆蓋中位", "value": (f"{float(_h72cov_ui.median()):.0f}%" if not _h72cov_ui.dropna().empty else "-"), "delta": "缺資料不當成強訊號"},
+                {"label": "模型分歧中位", "value": (f"{float(_h72div_ui.median()):.1f}" if not _h72div_ui.dropna().empty else "-"), "delta": "越低代表共識越高"},
+            ])
+            st.dataframe(_format_df(_h72_ui), use_container_width=True, hide_index=True)
+        with st.expander("H72治理摘要｜八模型動態權重與權威邊界", expanded=False):
+            try:
+                _h72_gov_ui = build_h72_governance_summary(_h51_source_ui) if _h72_engine_ok else pd.DataFrame()
+                if isinstance(_h72_gov_ui, pd.DataFrame) and not _h72_gov_ui.empty:
+                    st.dataframe(_format_df(_h72_gov_ui), use_container_width=True, hide_index=True)
+            except Exception as _h72_gov_exc:
+                st.caption(f"H72治理摘要暫時無法建立：{_h72_gov_exc}")
+
+        # H66：品質與T+1時機拆開。高H62/H65分若遇到低檔收盤、法人倒貨、
+        # 主升未確認或利多不漲，會被矛盾訊號治理降階，而不是霸佔第一名。
+        render_pro_section("超級AI T+1時機｜H66 Adaptive Alpha Ranking")
+        st.caption("H66不降低Formal門檻。T+1重點看收盤品質、法人1/3/5日加速度、主流點火、技術買點、量能與矛盾訊號；營收/EPS/PER主要保留在波段品質，不再直接主導隔日排序。")
+        _h66_engine_ok = bool(
+            callable(apply_h66_adaptive_timing) and callable(build_h66_t1_timing_table)
+            and callable(build_h66_learning_governance_table)
+            and H66_TIMING_VERSION == H66_TIMING_EXPECTED_VERSION
+        )
+        try:
+            if _h66_engine_ok:
+                _h51_source_ui = apply_h66_adaptive_timing(_h51_source_ui)
+                _h66_t1_ui = build_h66_t1_timing_table(_h51_source_ui, max_rows=20, max_per_sector=3)
+            else:
+                _h66_t1_ui = pd.DataFrame({"狀態": [f"H66時機引擎未完整部署：{H66_TIMING_VERSION}/{H66_TIMING_EXPECTED_VERSION}"]})
+        except Exception as _h66_ui_exc:
+            _h66_t1_ui = pd.DataFrame({"狀態": [f"H66時機雷達建立失敗：{type(_h66_ui_exc).__name__}: {_h66_ui_exc}"]})
+        if isinstance(_h66_t1_ui, pd.DataFrame) and not _h66_t1_ui.empty:
+            _h66tier_ui = _h66_t1_ui.get("H66T1層級", pd.Series([""] * len(_h66_t1_ui))).fillna("").astype(str)
+            _h66score_ui = pd.to_numeric(_h66_t1_ui.get("H66T1自適應排序分", pd.Series([], dtype=float)), errors="coerce")
+            _h66contra_ui = pd.to_numeric(_h66_t1_ui.get("H66矛盾訊號扣分", pd.Series([], dtype=float)), errors="coerce")
+            render_pro_kpi_row([
+                {"label": "A1 T+1優先", "value": str(int(_h66tier_ui.str.startswith("A1").sum())), "delta": "時機共振，不等於Formal"},
+                {"label": "A2 次優先", "value": str(int(_h66tier_ui.str.startswith("A2").sum())), "delta": "等待收盤/法人確認"},
+                {"label": "B1 等待確認", "value": str(int(_h66tier_ui.str.startswith("B1").sum())), "delta": "矛盾未解除，不追價"},
+                {"label": "前20矛盾扣分均值", "value": (f"{float(_h66contra_ui.mean()):.1f}" if not _h66contra_ui.dropna().empty else "-"), "delta": "越低越一致"},
+            ])
+            st.dataframe(_format_df(_h66_t1_ui), use_container_width=True, hide_index=True)
+        with st.expander("H66自適應學習治理｜權重何時會自己調整", expanded=False):
+            try:
+                _h66_truth_ui = load_t1_truth_rows(limit=600) if callable(load_t1_truth_rows) else []
+                _h66_learn_ui = build_h66_learning_governance_table(_h66_truth_ui) if callable(build_h66_learning_governance_table) else pd.DataFrame()
+                if isinstance(_h66_learn_ui, pd.DataFrame) and not _h66_learn_ui.empty:
+                    st.dataframe(_format_df(_h66_learn_ui), use_container_width=True, hide_index=True)
+            except Exception as _h66_learn_ui_exc:
+                st.caption(f"H66學習治理暫時無法讀取：{_h66_learn_ui_exc}")
+            st.caption("H66成熟樣本少於30筆時不自行改權重；成熟後以Selection Alpha的Spearman關係做保守調整，每個因子最多±15%，避免少量勝敗造成權重劇烈震盪。")
+
+        # H65：即使H64本輪合法為0，系統仍要從全市場用多因子找出最值得
+        # 研究的相對機會。W1/W2/W3只是觀察層，不會被寫成正式推薦。
+        render_pro_section("超級AI觀察推薦｜H65 全市場多因子觀察雷達")
+        st.caption("10大支柱：主流、趨勢、法人/外資/投信、大戶TDCC、營收、獲利/EPS、估值、技術買點、量能流動性、催化加速度；另計風險扣分與資料覆蓋率。Formal=0不再等於系統沒有研究價值。")
+        _h65_engine_ok = bool(
+            callable(apply_h65_multifactor_observation)
+            and callable(build_h65_observation_radar_table)
+            and callable(build_h65_indicator_coverage_table)
+            and H65_OBSERVATION_VERSION == H65_OBSERVATION_EXPECTED_VERSION
+        )
+        try:
+            if _h65_engine_ok:
+                _h51_source_ui = apply_h65_multifactor_observation(_h51_source_ui)
+                _h65_radar_ui = build_h65_observation_radar_table(_h51_source_ui, max_rows=20, max_per_sector=3)
+                _h65_coverage_ui = build_h65_indicator_coverage_table(_h51_source_ui)
+            else:
+                _h65_radar_ui = pd.DataFrame({"狀態": [f"H65觀察雷達未完整部署：{H65_OBSERVATION_VERSION}/{H65_OBSERVATION_EXPECTED_VERSION}"]})
+                _h65_coverage_ui = pd.DataFrame()
+        except Exception as _h65_ui_exc:
+            _h65_radar_ui = pd.DataFrame({"狀態": [f"H65觀察雷達建立失敗：{type(_h65_ui_exc).__name__}: {_h65_ui_exc}"]})
+            _h65_coverage_ui = pd.DataFrame()
+        if isinstance(_h65_radar_ui, pd.DataFrame) and not _h65_radar_ui.empty:
+            _h65_tier_ui = _h65_radar_ui.get("H65觀察層級", pd.Series([""] * len(_h65_radar_ui))).fillna("").astype(str)
+            _h65_cov_series = pd.to_numeric(_h65_radar_ui.get("H65資料覆蓋%", pd.Series([], dtype=float)), errors="coerce")
+            render_pro_kpi_row([
+                {"label": "W1重點觀察", "value": str(int(_h65_tier_ui.str.startswith("W1").sum())), "delta": "多因子高共振，仍非Formal"},
+                {"label": "W2提前卡位", "value": str(int(_h65_tier_ui.str.startswith("W2").sum())), "delta": "相對優勢形成中"},
+                {"label": "W3候選追蹤", "value": str(int(_h65_tier_ui.str.startswith("W3").sum())), "delta": "等待弱支柱改善"},
+                {"label": "資料覆蓋中位", "value": (f"{float(_h65_cov_series.median()):.0f}%" if not _h65_cov_series.dropna().empty else "-"), "delta": "低覆蓋會自動降權"},
+            ])
+            st.dataframe(_format_df(_h65_radar_ui), use_container_width=True, hide_index=True)
+        with st.expander("H65完整指標地圖與目前資料覆蓋｜查看還可以再接哪些指標", expanded=False):
+            if isinstance(_h65_coverage_ui, pd.DataFrame) and not _h65_coverage_ui.empty:
+                st.dataframe(_format_df(_h65_coverage_ui), use_container_width=True, hide_index=True)
+            st.caption("H65會優先使用系統已有欄位；未接入的融資融券/借券、完整財務體質、更多事件催化等會列為擴充觀察層，不用缺值假裝高分。")
+
+        render_pro_section("研究層｜主流族群｜H57資金加速×族群點火廣度×H55/H54雙路徑")
+        try:
+            _h51_sector_ui = build_h51_sector_table(_h51_source_ui, max_rows=12) if callable(build_h51_sector_table) else pd.DataFrame()
+        except Exception as _h51_sector_ui_exc:
+            _h51_sector_ui = pd.DataFrame({"狀態": [f"H51主流族群暫時無法建立：{_h51_sector_ui_exc}"]})
+        if isinstance(_h51_sector_ui, pd.DataFrame) and not _h51_sector_ui.empty:
+            st.dataframe(_format_df(_h51_sector_ui), use_container_width=True, hide_index=True)
+
+        render_pro_section("研究層｜H64核心候選｜真強勢×真主流×鎖碼趨勢")
+        try:
+            _h64_core_ui = build_h64_core_research_table(_h51_source_ui, max_rows=20) if callable(build_h64_core_research_table) else pd.DataFrame()
+        except Exception as _h64_core_exc:
+            _h64_core_ui = pd.DataFrame({"狀態": [f"H64核心候選暫時無法建立：{_h64_core_exc}"]})
+        if isinstance(_h64_core_ui, pd.DataFrame) and not _h64_core_ui.empty:
+            st.dataframe(_format_df(_h64_core_ui), use_container_width=True, hide_index=True)
+        else:
+            st.info("本輪沒有通過H64核心強勢/主流品質的候選；不拿舊Leader或熟面孔補位。")
+        with st.expander("展開完整主流領漲研究證據（H51/H57，非第二份推薦清單）", expanded=False):
+            try:
+                _h51_leader_ui = build_h51_mainstream_leader_table(_h51_source_ui, max_rows=20) if callable(build_h51_mainstream_leader_table) else pd.DataFrame()
+            except Exception as _h51_leader_ui_exc:
+                _h51_leader_ui = pd.DataFrame({"狀態": [f"H51領漲股暫時無法建立：{_h51_leader_ui_exc}"]})
+            if isinstance(_h51_leader_ui, pd.DataFrame) and not _h51_leader_ui.empty:
+                st.dataframe(_format_df(_h51_leader_ui), use_container_width=True, hide_index=True)
+
+        render_pro_section("研究層｜股神推薦總排名｜H65多因子觀察＋H64核心真相＋H62/H61")
+        st.caption("正式推薦仍由H64治理；非Formal研究排序則先看H65多因子觀察分與全市場百分位，再回看H64/H62/H61證據。這能提高新機會召回，同時避免把研究候選冒充買進清單。")
+        if callable(rotation_diagnostics):
+            try:
+                rotation_info = rotation_diagnostics(decision_source)
+            except Exception:
+                rotation_info = {"available": False}
+            if rotation_info.get("available"):
+                if rotation_info.get("warning"):
+                    st.warning(
+                        f"推薦黏著警示：前10名有 {rotation_info.get('top10_repeat3_count', 0)} 檔近5次至少入榜3次，"
+                        f"其中 {rotation_info.get('top10_sticky_without_signal', 0)} 檔缺少今日新訊號。"
+                        "系統已套用輪動校正；請優先看『推薦輪動狀態』與『今日訊號新鮮分』。"
+                    )
+                else:
+                    st.info(
+                        f"推薦輪動檢查：前10名新進榜 {rotation_info.get('top10_new_count', 0)} 檔，"
+                        f"平均今日訊號新鮮分 {rotation_info.get('top10_average_signal_freshness', 0):.1f}。"
+                    )
+        if isinstance(master_rank, pd.DataFrame) and not master_rank.empty:
+            top_row = master_rank.iloc[0]
+            render_pro_kpi_row([
+                {"label": "第一名", "value": f"{_safe_str(top_row.get('股票代號'))} {_safe_str(top_row.get('股票名稱'))}", "delta": _safe_str(top_row.get("SuperAI最終作戰等級")) or _safe_str(top_row.get("股神推薦用途"))},
+                {"label": "H50主流可買", "value": format_number(top_row.get("H50推薦優先分"), 1), "delta": _safe_str(top_row.get("H50推薦決策")) or _safe_str(top_row.get("H50主流購買狀態"))},
+                {"label": "Alpha / Trade", "value": f"{_safe_str(top_row.get('SuperAI Alpha等級')) or '-'} / {_safe_str(top_row.get('SuperAI Trade等級')) or '-'}", "delta": f"RR {format_number(top_row.get('SuperAI執行風報比'),2)}"},
+                {"label": "操作許可", "value": _safe_str(top_row.get("V188交易許可")) or _safe_str(top_row.get("操作許可")) or _safe_str(top_row.get("下週是否可直接買")), "delta": "Prediction ≠ Permission"},
+                {"label": "前20名", "value": str(len(master_rank)), "delta": "H50新鮮主流×交易品質×族群分散"},
+            ])
+            master_cols = [c for c in [
+                "股神推薦總排名", "股票代號", "股票名稱", "類別",
+                "H50推薦優先分", "H50推薦等級", "H50推薦決策", "H50推薦許可", "H50推薦重複扣分", "H50推薦理由",
+                "H50族群生命週期", "H50族群可買主流分", "H50族群新鮮度分", "H50族群回檔再攻分", "H50波段機會階段",
+                "H50主流購買優先分", "H50主流購買狀態", "H50重複推薦扣分", "H50主流購買理由",
+                "H49上漲潛力分", "H49潛力等級", "H49潛力階段", "H49交易決策", "H49可執行分", "H49波段位置分", "H49延伸風險扣分", "H49上漲潛力理由",
+                "H47主流領先狀態", "H47交易候選狀態", "H47起漲優先分", "H47個股相對強度分", "H47族群內領先排名", "H47族群內領先百分位%", "H47主流領先理由",
+                "H45族群主流分", "H45族群狀態", "V188股神作戰優先分", "SuperAI Alpha分", "SuperAI Alpha等級", "SuperAI Trade分", "SuperAI Trade等級", "SuperAI最終作戰等級",
+                "V188交易許可", "V188正式推薦資格", "SuperAI執行風報比", "SuperAI風報比來源", "V188RR治理", "V188T+1追價治理",
+                "V188個股資料證據", "V188市場對齊治理", "V188類股集中治理", "SuperAI校準後隔日上漲機率%",
+                "股神推薦優先分", "股神推薦等級", "股神推薦用途",
+                "今日訊號新鮮分", "近5次入榜次數", "連續入榜次數", "重複推薦校正分",
+                "推薦輪動狀態", "今日新進榜", "前次推薦排名", "本次分數變化",
+                "主流主升優先分", "主流主升判定", "主流主升操作限制",
+                "推薦資格路徑", "資料受限A-", "A-建議單檔上限%", "推薦漏斗階段",
+                "股票代號", "股票名稱", "類別", "最終操作結論", "操作許可",
+                "推薦總分", "隔日可執行優先分", "實戰操作品質分", "Entry進場買點分", "Risk風控安全分",
+                "主要進場路徑", "主要進場參考價", "推薦升級判定路徑", "路徑風險報酬比", "風報比計算口徑", "正式與A近門檻說明",
+                "隔日耗竭風險分", "隔日耗竭風險等級", "強勢動能分", "強勢前兆分",
+                "主流資金分", "族群輪動分", "族群攻擊強度", "族群廣度分", "族群成交額分", "族群主升確認",
+                "大盤資料日期", "大盤資料落後交易日", "大盤資料新鮮度",
+                "最新價", "實戰觸發價", "觸發後守價", "實戰停損參考", "正式推薦動作",
+            ] if c in master_rank.columns]
+            # H48: the H47 list accidentally repeated 股票代號/股票名稱/類別.
+            # pandas accepts that shape, but Streamlit Cloud -> PyArrow rejects duplicate names.
+            master_cols = list(dict.fromkeys(master_cols))
+            st.dataframe(_format_df(master_rank[master_cols]), use_container_width=True, hide_index=True)
+        else:
+            _v188_block_reason = _safe_str(st.session_state.get(_k("v188_rank_block_reason_v189")))
+            if _v188_block_reason:
+                st.error(
+                    "V189 已封鎖不完整的 V188 排名：" + _v188_block_reason +
+                    "。系統不會再以舊『股神推薦優先分』補 0 冒充 V188；請重新推薦，或讓本頁自動補算完成後再看排名。"
+                )
+            elif isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
+                st.error(
+                    f"不是完全沒有候選：模型找到 {len(stale_intraday)} 檔盤中雷達，但其個股K線不是最新交易日，"
+                    "因此已封鎖排名與操作。請先更新個股K線後重新推薦；Excel 會列在『資料待更新雷達』。"
+                )
+            else:
+                st.info("目前沒有資料新鮮且分數達 50 分的推薦/觀察候選；請先完成最新行情掃描。")
+
+        render_pro_section("推薦漏斗與權威摘要｜先看有效正式推薦，再看條件候選")
+        st.caption("這裡只說明候選如何通過資料、A-、Formal與每日精選漏斗；真正推薦身分以H63正式推薦作戰表為準。")
+        # 推薦漏斗：明確分辨「市場沒有合格股票」與「資料來源把資格鎖死」。
+        funnel_bucket = decision_source.get("正式推薦分區", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+        fresh_series = decision_source.get("K線資料新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+        official_series = decision_source.get("官方因子新鮮度", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+        data_limited_series = decision_source.get("資料受限A-", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str)
+        funnel_fresh = int(fresh_series.str.contains("最新", na=False).sum())
+        funnel_official = int(official_series.str.contains("最新|對齊|READY|已驗證T-1|降級可用", regex=True, na=False).sum())
+        funnel_a = int(funnel_bucket.eq("A-｜準主推薦小量試單").sum())
+        funnel_formal = int(funnel_bucket.eq("正式下週主推薦").sum())
+        funnel_dq = int(data_limited_series.eq("是").sum())
+        funnel_daily = int(decision_source.get("H34每日精選", pd.Series([""] * len(decision_source), index=decision_source.index)).fillna("").astype(str).eq("是").sum())
+        st.caption(
+            f"推薦通過漏斗：候選 {len(decision_source)} → 最新K線 {funnel_fresh} → 官方因子對齊 {funnel_official} "
+            f"→ A- {funnel_a}（其中資料受限 {funnel_dq}）→ 上游Formal {funnel_formal} → 超級AI每日精選 {funnel_daily}。"
+            "H41每日條件精選不改寫Formal/V188權威；只在觸發/回測＋守價成立後執行。"
+        )
+        row = summary.iloc[0]
+        try:
+            _h63_formal_ui = build_h63_formal_execution_table(_h51_source_ui, max_rows=30) if _h63_engine_ok else pd.DataFrame()
+        except Exception as _h63_formal_ui_exc:
+            _h63_formal_ui = pd.DataFrame({"H63正式推薦": [f"H63正式推薦表建立失敗：{type(_h63_formal_ui_exc).__name__}: {_h63_formal_ui_exc}"]})
+        _h63_effective_n_ui = int(len(_h63_formal_ui)) if isinstance(_h63_formal_ui, pd.DataFrame) and "H63正式推薦順位" in _h63_formal_ui.columns else 0
+        if callable(reconcile_h68_formal_summary):
+            try:
+                summary = reconcile_h68_formal_summary(summary, _h51_source_ui, scan_report, _h63_formal_ui)
+            except Exception:
+                pass
+        row = summary.iloc[0]
+        render_pro_kpi_row([
+            {"label": "本輪結論", "value": _safe_str(row.get("本輪結論")), "delta": ""},
+            {"label": "預計掃描", "value": str(int(row.get("預計掃描數", 0))), "delta": "檔"},
+            {"label": "成功分析", "value": str(int(row.get("成功分析數", 0))), "delta": f"{float(row.get('有效K線資料率%', 0)):.1f}%"},
+            {"label": "流動性覆蓋", "value": f"{float(row.get('流動性資料覆蓋率%', 0)):.1f}%", "delta": _safe_str(row.get("推薦適用範圍"))},
+            {"label": "官方有效覆蓋", "value": f"{float(row.get('官方有效因子覆蓋率%', row.get('官方因子覆蓋率%', 0))):.1f}%", "delta": f"最新可信 {float(row.get('官方最新可信覆蓋率%', 0)):.1f}%｜來源可信 {float(row.get('官方來源可信覆蓋率%', 0)):.1f}%｜T-1內 {float(row.get('官方日期T-1內覆蓋率%', 0)):.1f}%"},
+            {"label": "上游Formal", "value": str(int(row.get("上游Formal檔數", row.get("正式推薦檔數", 0)))), "delta": "H64覆核前"},
+            {"label": "有效正式推薦", "value": str(_h63_effective_n_ui), "delta": "H64核心有效Formal／H63作戰身分"},
+            {"label": "A-準主推薦", "value": str(int(row.get("A-準主推薦檔數", 0))), "delta": f"可操作{int(row.get('A-可操作檔數', 0))}／封鎖{int(row.get('A-大盤封鎖檔數', 0))}"},
+            {"label": "超級AI每日精選", "value": str(int(row.get("H41每日精選檔數", 0))), "delta": f"條件精選{int(row.get('H41每日條件精選檔數', 0))}"},
+        ])
+
+        # H63：正式推薦身分真相。只有 EFFECTIVE-FORMAL 能稱為真正推薦；
+        # H34每日精選若屬 A-/Radar，只能是條件候選，不能與 Formal 混在同一張表。
+        render_pro_section("本輪真正正式推薦｜H63 唯一作戰清單")
+        st.caption("只有H64品質覆核後仍為 EFFECTIVE-FORMAL 才是本輪真正正式推薦；即使列為正式推薦，也不是開盤市價直接買，仍須盤前、觸發、守價、停損與路徑RR成立。")
+        if isinstance(_h63_formal_ui, pd.DataFrame) and "H63正式推薦順位" in _h63_formal_ui.columns and not _h63_formal_ui.empty:
+            _h63_formal_cols = [c for c in [
+                "H63正式推薦順位", "股票代號", "股票名稱", "類別", "H63正式推薦", "H63是否今日精選",
+                "H63是否可直接買", "現在該做什麼", "H56盤前狀態", "H62有效權威", "正式推薦分區",
+                "操作許可", "主要進場路徑", "主要進場參考價", "回測承接參考價", "實戰觸發價",
+                "觸發後守價", "實戰停損參考", "路徑風險報酬比", "H34安全精選分", "H62增量機會分",
+            ] if c in _h63_formal_ui.columns]
+            st.dataframe(_format_df(_h63_formal_ui[_h63_formal_cols]), use_container_width=True, hide_index=True)
+        else:
+            st.info("本輪沒有 H64 核心有效Formal；A-/Radar/前兆/FORMAL-QUALITY-HOLD都不是本輪正式推薦。空手或等待是有效決策。")
+
+        _h63_daily_source = _h51_source_ui if isinstance(_h51_source_ui, pd.DataFrame) else decision_source
+        _daily_mask_h63 = _h63_daily_source.get("H34每日精選", pd.Series([""] * len(_h63_daily_source), index=_h63_daily_source.index)).fillna("").astype(str).eq("是")
+        _daily_nonformal = _h63_daily_source.loc[_daily_mask_h63 & ~_h63_daily_source.get("H63是否正式推薦", pd.Series([""] * len(_h63_daily_source), index=_h63_daily_source.index)).fillna("").astype(str).str.startswith("是")].copy()
+        if not _daily_nonformal.empty:
+            with st.expander(f"A-/Radar 每日條件候選｜非正式推薦（{len(_daily_nonformal)}檔）", expanded=False):
+                st.warning("這些股票可能通過 H34/H41 每日條件精選，但上游不是有效 Formal；只能作 A-/Radar 條件候選，不能解讀成股神正式推薦。")
+                _daily_cols = [c for c in [
+                    "H63角色", "H63是否正式推薦", "H34每日精選排名", "股票代號", "股票名稱", "正式推薦分區",
+                    "H34精選等級", "H34安全精選分", "H41條件操作許可", "操作許可", "主要進場路徑",
+                    "主要進場參考價", "回測承接參考價", "實戰觸發價", "觸發後守價", "路徑風險報酬比",
+                ] if c in _daily_nonformal.columns]
+                st.dataframe(_format_df(_daily_nonformal[_daily_cols]), use_container_width=True, hide_index=True)
+
+        scan_usable = bool(scan_report.get("正式推薦可用", False)) if isinstance(scan_report, dict) else False
+        if isinstance(stale_intraday, pd.DataFrame) and not stale_intraday.empty:
+            st.error(
+                f"資料新鮮度封鎖：{len(stale_intraday)} 檔雷達候選使用落後K線，已禁止列入當日作戰表。"
+                "這些股票不是消失，而是被移到『資料待更新雷達』等待重掃。"
+            )
+        if not scan_usable:
+            st.warning(_safe_str(row.get("操作說明")) or "目前為條件式參考清單；下單前請更新最新價並重新推薦。")
+            if _safe_str(row.get("掃描品質說明")):
+                st.caption(_safe_str(row.get("掃描品質說明")))
+        else:
+            if _h63_effective_n_ui > 0:
+                st.success(_safe_str(row.get("操作說明")))
+            else:
+                st.warning(_safe_str(row.get("操作說明")))
+        if scan_usable and _h63_effective_n_ui == 0 and len(a_minus) == 0:
+            _phase92_render_zero_formal_diagnostics(rank_source)
+        battle = _phase70_build_battle_dashboard(formal, a_minus, core, risk, excluded)
+        if callable(build_action_table):
+            try:
+                battle = build_action_table(battle, include_intraday=True)
+            except Exception:
+                pass
+        st.caption(_safe_str(row.get("核心紀律")))
+
+        if isinstance(battle, pd.DataFrame) and not battle.empty:
+            render_pro_section("權威底層稽核｜Formal／A-／Radar（非第二份推薦清單）")
+            st.caption("這裡是權威/條件/雷達的完整稽核，不是另一份推薦清單。只有 H63角色=F1/F0 且 H64有效權威=EFFECTIVE-FORMAL 才算正式推薦；A-、B+、Radar 都不是正式推薦。")
+            try:
+                _h63_audit = build_h63_authority_audit_table(_h51_source_ui, max_rows=60) if _h63_engine_ok else pd.DataFrame()
+            except Exception:
+                _h63_audit = pd.DataFrame()
+            with st.expander(f"展開權威稽核明細（{len(_h63_audit) if isinstance(_h63_audit, pd.DataFrame) else 0}檔）", expanded=False):
+                if isinstance(_h63_audit, pd.DataFrame) and not _h63_audit.empty:
+                    st.dataframe(_format_df(_h63_audit), use_container_width=True, hide_index=True)
+                else:
+                    st.info("目前沒有可顯示的權威稽核資料。")
+        elif scan_usable:
+            st.info("完整掃描已完成，但本輪沒有有效正式推薦、A-準主推薦或盤中核心雷達；空手也是正式決策。")
 
 
 def _phase82_compact_operational_view(df: pd.DataFrame, purpose: str) -> pd.DataFrame:
@@ -15205,12 +15235,20 @@ def _build_excel_bytes(
         h77_evidence_df = h75_evidence_df.copy() if isinstance(h75_evidence_df, pd.DataFrame) else pd.DataFrame({"狀態": [_h77_msg]})
         h77_perf_health_df = pd.DataFrame({"狀態": [_h77_msg]})
 
+    try:
+        if not callable(build_h78_tables):
+            raise RuntimeError(H78_IMPORT_ERROR or "H78引擎未部署")
+        _h78_export = build_h78_tables(candidate_source)
+    except Exception as _h78_error:
+        _h78_failure = pd.DataFrame({"狀態":[f"H78決策失敗，非沒有推薦：{_h78_error}"]})
+        _h78_export = {k:_h78_failure for k in ["recommendations","waiting","audit","health"]}
+
     sheets = [
-        ("01_今日驗證Alpha", h77_daily_df, "今天沒有通過H77驗證增量、追價與進場品質門檻的股票；不為推薦而推薦。"),
-        ("02_等待與核心監控", h77_wait_df, "目前沒有追價/證據等待或結構核心監控股。"),
+        ("01_今日推薦與計畫", _h78_export["recommendations"], "H78沒有符合選股政策的候選；請查完整原因與資料健康。"),
+        ("02_等待與核心監控", _h78_export["waiting"], "目前沒有追價/證據等待或結構核心監控股。"),
         ("03_今日主流資金", h75_sector_df, "目前沒有可用主流族群資料。"),
-        ("04_驗證與風險證據", h77_evidence_df, "目前沒有足夠的驗證增量/風險證據。"),
-        ("05_績效煞車與健康", h77_perf_health_df, "目前沒有成熟績效/系統健康資料。"),
+        ("04_驗證與風險證據", _h78_export["audit"], "目前沒有足夠的驗證增量/風險證據。"),
+        ("05_績效煞車與健康", pd.concat([_h78_export["health"], h77_perf_health_df], ignore_index=True), "目前沒有成熟績效/系統健康資料。"),
         ("AI決策總覽", h74_overview_df, "H74目前沒有足夠新鮮主流/資金共振候選；不為推薦而推薦。"),
         ("Excel閱讀指南", h74_guide_df, "請先看AI決策總覽，再依需求查看Formal/主流族群/資料健康。"),
         ("正式推薦作戰", formal_execution_df, "本輪沒有H64核心有效Formal；A-/Radar/FORMAL-QUALITY-HOLD不冒充正式推薦。"),
@@ -15243,19 +15281,19 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("日常第一張｜驗證增量研究優先/正式權威" if sheet_name == "01_今日驗證Alpha" else "日常第二張｜追價/證據等待與結構核心" if sheet_name == "02_等待與核心監控" else "日常第三張｜主流族群與資金輪動" if sheet_name == "03_今日主流資金" else "日常第四張｜增量覆蓋/追價/進場風險" if sheet_name == "04_驗證與風險證據" else "日常第五張｜績效煞車＋資料健康" if sheet_name == "05_績效煞車與健康" else "技術診斷｜預設隱藏"),
+            "用途": ("日常第一張｜驗證增量研究優先/正式權威" if sheet_name == "01_今日推薦與計畫" else "日常第二張｜追價/證據等待與結構核心" if sheet_name == "02_等待與核心監控" else "日常第三張｜主流族群與資金輪動" if sheet_name == "03_今日主流資金" else "日常第四張｜增量覆蓋/追價/進場風險" if sheet_name == "04_驗證與風險證據" else "日常第五張｜績效煞車＋資料健康" if sheet_name == "05_績效煞車與健康" else "技術診斷｜預設隱藏"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
 
-    _h77_visible_sheets = {"01_今日驗證Alpha", "02_等待與核心監控", "03_今日主流資金", "04_驗證與風險證據", "05_績效煞車與健康"}
+    _h77_visible_sheets = {"01_今日推薦與計畫", "02_等待與核心監控", "03_今日主流資金", "04_驗證與風險證據", "05_績效煞車與健康"}
     for _ws in wb.worksheets:
         if _ws.title not in _h77_visible_sheets:
             _ws.sheet_state = "hidden"
         else:
             _ws.sheet_state = "visible"
     try:
-        wb.active = wb.sheetnames.index("01_今日驗證Alpha")
+        wb.active = wb.sheetnames.index("01_今日推薦與計畫")
     except Exception:
         pass
     wb.save(output)

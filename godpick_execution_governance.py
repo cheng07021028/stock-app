@@ -702,7 +702,10 @@ def build_candidate_diagnosis(df: pd.DataFrame | None, *, max_rows: int = 3000) 
         ]
         if col in out.columns and col not in existing
     ]
-    out = out[existing + extra].copy()
+    # H78: diagnostics also persist the decision snapshot. Never project away
+    # raw features needed by downstream engines or time-ordered evaluation.
+    remaining = [col for col in out.columns if col not in existing + extra]
+    out = out[existing + extra + remaining].copy()
     sort_cols = [col for col in ["最終分區優先序", "可操作分", "推薦可信度分", "候選強度分"] if col in out.columns]
     if sort_cols:
         ascending = [True if col == "最終分區優先序" else False for col in sort_cols]
