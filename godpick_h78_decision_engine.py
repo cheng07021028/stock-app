@@ -25,7 +25,7 @@ import re
 import pandas as pd
 
 
-VERSION = "v191_h83_autonomous_freshness_governance_20260921"
+VERSION = "v191_h84_fast_ui_research_recovery_20260921"
 
 
 @dataclass(frozen=True)
@@ -352,8 +352,18 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         if official is None or official_lag is None or official_lag < 0 or official_lag > policy.max_official_lag_sessions:
             hard_issues.append("官方日期缺失、過期或未來")
         freshness = text(raw.get("股神資料總新鮮度"))
+        h83_marker_present = ("H83正式資料可用" in raw) or bool(text(raw.get("H83資料治理摘要")))
+        # H84: H83 is now the freshness truth for recommendation governance.
+        # The legacy `股神資料總新鮮度` flag may remain stale inside an older
+        # candidate snapshot even after H83 has revalidated the business dates.
+        # It must not wipe out the research pool. H83 readiness controls Formal
+        # permission separately below; per-stock K-line/official-date checks above
+        # still remain hard data-integrity gates.
         if not freshness.startswith("READY"):
-            hard_issues.append("上游資料新鮮度未READY")
+            if h83_marker_present:
+                reasons.append("舊上游新鮮度旗標未READY；H83重新驗證後僅作警示")
+            else:
+                hard_issues.append("上游資料新鮮度未READY")
         price = first(raw, "最新價")
         if price is None or price <= 0:
             hard_issues.append("缺有效現價")
@@ -674,7 +684,7 @@ def build_tables(frame, *, as_of=None, policy=Policy()):
         {"項目": "H81專業研究", "數值": "市場定價/技術/新聞/回測/投組風險/交易日誌/每日計畫；設定由永久權威檔管理"},
         {"項目": "H82自適應學習", "數值": "成熟樣本＋市場Regime＋產業＋決策狀態＋H81分桶；時間衰減/收縮/信心門檻/錯誤治理；無成熟證據即0分"},
         {"項目": "排名口徑", "數值": "上市櫃絕對品質55%＋橫截面45%；有H72/H74/H77時改為45%＋40%＋確認15%"},
-        {"項目": "缺資料處理", "數值": "TDCC為選配證據；缺TDCC不觸發資料待修復，必要日期/價格/流動性缺失才修復"},
+        {"項目": "缺資料處理", "數值": "H84：H83為新鮮度治理真相；舊上游READY旗標只作警示。必要日期/價格/流動性仍是硬閘門；TDCC為選配證據。"},
         {"項目": "市場分流", "數值": "上市/上櫃可進主推薦；興櫃只進隔離研究，不占主榜"},
         {"項目": "成本假設", "數值": f"單邊手續費{policy.commission:.4%}、賣出稅{policy.sell_tax:.2%}、單邊滑價{policy.slippage:.2%}"},
         {"項目": "執行規則", "數值": "研究推薦不等於買進；正式可執行仍須H64/H68及成本後價格計畫"},

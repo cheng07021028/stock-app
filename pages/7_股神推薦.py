@@ -620,7 +620,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h83_autonomous_freshness_truth_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h84_fast_entry_fast_excel_research_recovery_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -1948,16 +1948,39 @@ def _payload_authority_stamp_v185(payload: Any) -> tuple[str, str]:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _load_latest_recommendation_authority_v185() -> tuple[dict[str, Any], list[str]]:
-    """Load the newest recommendation authority without GitHub-first rollback.
+    """H84 local-first recommendation authority for fast page entry.
 
-    V184 and earlier could read the repository's bundled 2026-07-09 JSON before a
-    newer local/Firestore copy.  V185 uses a small durable run anchor first, then
-    restores the full snapshot only when needed.  The actual recommendation
-    business timestamp, not deployment/file time, decides which payload is newer.
+    Runtime-data bootstrap/H83 scheduled preflight is responsible for bringing
+    durable data local. Merely opening Page07 must not synchronously wait for
+    GitHub/Firestore. Remote authority election is used only when both local
+    snapshot and local anchor are absent.
     """
     local_full = _safe_json_read_local(GODPICK_LATEST_FILE, {})
+    local_anchor = _safe_json_read_local(GODPICK_LATEST_ANCHOR_FILE, {})
     details: list[str] = []
-    anchor: dict[str, Any] = {}
+    full_payload = local_full if isinstance(local_full, dict) else {}
+    anchor = local_anchor if isinstance(local_anchor, dict) else {}
+    local_stamp = _payload_authority_stamp_v185(full_payload)
+    anchor_stamp = _payload_authority_stamp_v185(anchor)
+
+    if anchor_stamp > local_stamp and anchor:
+        recovered = dict(anchor)
+        recovered.setdefault("recommendations", [])
+        recovered.setdefault("candidate_diagnosis", [])
+        recovered.setdefault("category_strength", [])
+        recovered.setdefault("hot_pick", [])
+        recovered["authority_recovery"] = "H84 local durable run anchor"
+        recovered["full_snapshot_pending_or_older"] = True
+        details.append(f"H84快速權威：本機錨點較新（{anchor_stamp[1] or anchor_stamp[0]}）。")
+        return recovered, details
+    if full_payload:
+        details.append(f"H84快速權威：本機完整推薦快照（{local_stamp[1] or local_stamp[0] or '日期未驗證'}）。")
+        return full_payload, details
+    if anchor:
+        details.append("H84快速權威：僅有本機推薦錨點。")
+        return anchor, details
+
+    # Cold/recovery fallback only. This path is intentionally rare.
     try:
         from godpick_persistence_service import load_named_json_permanent
         anchor_raw, anchor_details = load_named_json_permanent(
@@ -1965,51 +1988,34 @@ def _load_latest_recommendation_authority_v185() -> tuple[dict[str, Any], list[s
         )
         if isinstance(anchor_raw, dict):
             anchor = anchor_raw
-        details.extend([f"錨點｜{x}" for x in (anchor_details or [])])
+        details.extend([f"遠端錨點｜{x}" for x in (anchor_details or [])])
     except Exception as exc:
-        details.append(f"錨點永久層讀取例外：{exc}")
-
-    local_stamp = _payload_authority_stamp_v185(local_full)
-    anchor_stamp = _payload_authority_stamp_v185(anchor)
-    full_payload = local_full if isinstance(local_full, dict) else {}
-
-    # If no V185 anchor exists yet, or the anchor proves the repo/local full pack
-    # is older, restore the large full snapshot from the durable authority layer.
-    if not anchor_stamp[0] or anchor_stamp > local_stamp:
-        try:
-            from godpick_persistence_service import load_named_json_permanent
-            remote_full, full_details = load_named_json_permanent(
-                GODPICK_LATEST_FILE, {}, firestore_doc="godpick_latest_recommendations"
-            )
-            if isinstance(remote_full, dict) and remote_full:
-                full_payload = remote_full
-            details.extend([f"完整快照｜{x}" for x in (full_details or [])])
-        except Exception as exc:
-            details.append(f"完整快照永久層讀取例外：{exc}")
+        details.append(f"遠端錨點讀取例外：{exc}")
+    try:
+        from godpick_persistence_service import load_named_json_permanent
+        remote_full, full_details = load_named_json_permanent(
+            GODPICK_LATEST_FILE, {}, firestore_doc="godpick_latest_recommendations"
+        )
+        if isinstance(remote_full, dict) and remote_full:
+            full_payload = remote_full
+        details.extend([f"遠端完整快照｜{x}" for x in (full_details or [])])
+    except Exception as exc:
+        details.append(f"遠端完整快照讀取例外：{exc}")
 
     full_stamp = _payload_authority_stamp_v185(full_payload)
-    # A successfully persisted anchor is intentionally sufficient to prevent the
-    # UI from lying that the latest run is still 7/9 while the large candidate
-    # pack is still syncing.  It contains the actionable recommendation rows and
-    # enough scan metadata to reconstruct the latest page safely.
-    if anchor_stamp > full_stamp:
+    anchor_stamp = _payload_authority_stamp_v185(anchor)
+    if anchor_stamp > full_stamp and anchor:
         recovered = dict(anchor)
         recovered.setdefault("recommendations", [])
         recovered.setdefault("candidate_diagnosis", [])
         recovered.setdefault("category_strength", [])
         recovered.setdefault("hot_pick", [])
-        recovered["authority_recovery"] = "V185 durable run anchor"
+        recovered["authority_recovery"] = "H84 remote recovery anchor"
         recovered["full_snapshot_pending_or_older"] = True
-        details.insert(0, f"V185權威：永久錨點較新（{anchor_stamp[1] or anchor_stamp[0]}），禁止回退舊完整快照。")
         return recovered, details
-
-    if isinstance(full_payload, dict) and full_payload:
-        details.insert(0, f"V185權威：完整推薦快照（{full_stamp[1] or full_stamp[0] or '日期未驗證'}）。")
+    if full_payload:
         return full_payload, details
-    if isinstance(anchor, dict) and anchor:
-        details.insert(0, "V185權威：僅有永久錨點。")
-        return anchor, details
-    return {}, details
+    return anchor if isinstance(anchor, dict) else {}, details
 
 
 
@@ -3309,10 +3315,10 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     # V186：冷啟動先透過 official_factor_service 做「業務日期權威選舉」。
     # 不可直接讀部署包內的舊 JSON，否則 Streamlit Reboot 會把 runtime-data
     # 的新官方因子重新退回 2026-07-11。
-    try:
-        official_payload = load_factor_cache(force_authority_restore=True) if callable(load_factor_cache) else _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
-    except Exception:
-        official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
+    # H84: page-header diagnostics are local-only. Opening Page07 must not
+    # trigger a remote official-factor authority election. H83 performs the
+    # authoritative refresh before an actual recommendation run.
+    official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
     official_rows = official_payload.get("records", []) if isinstance(official_payload, dict) else []
     if not isinstance(official_rows, list):
         official_rows = []
@@ -7492,13 +7498,57 @@ def _apply_twse_isin_fill(master_df: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
+def _load_local_stock_master_h84() -> pd.DataFrame:
+    """Read the restored local stock master without any network call."""
+    cols = ["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"]
+    payload = _safe_json_read_local("stock_master_cache.json", [])
+    if not isinstance(payload, list) or not payload:
+        return pd.DataFrame(columns=cols)
+    try:
+        df = pd.DataFrame(payload)
+        for c in cols:
+            if c not in df.columns:
+                df[c] = ""
+        df["code"] = df["code"].map(_normalize_code)
+        df["name"] = df["name"].map(_safe_str)
+        df["market"] = df["market"].map(_safe_str).replace("", "上市")
+        if "official_industry" in df.columns:
+            df["official_industry"] = df["official_industry"].map(_official_industry_name)
+        df["theme_category"] = df.apply(lambda r: _theme_from_official(r.get("official_industry"), r.get("name")), axis=1)
+        existing_cat = df.get("category", pd.Series([""] * len(df), index=df.index)).fillna("").astype(str)
+        df["category"] = existing_cat.where(existing_cat.str.strip().ne(""), df["theme_category"])
+        return df[df["code"] != ""].drop_duplicates(subset=["code"], keep="first")[cols].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+
+def _load_local_category_override_map_h84() -> dict[str, dict[str, str]]:
+    payload = _safe_json_read_local("stock_category_overrides.json", {})
+    if not isinstance(payload, dict):
+        return {}
+    out = {}
+    for code, item in payload.items():
+        norm = _normalize_code(code)
+        if not norm:
+            continue
+        item = item if isinstance(item, dict) else {"category": item}
+        out[norm] = {
+            "name": _safe_str(item.get("name")),
+            "market": _safe_str(item.get("market")),
+            "category": _canonical_category(item.get("category")),
+        }
+    return out
+
+
 def _apply_master_overrides(master_df: pd.DataFrame) -> pd.DataFrame:
     if master_df is None or master_df.empty:
         master_df = pd.DataFrame(columns=["code","name","market","official_industry_raw","official_industry_raw_col","official_industry","theme_category","category","source","source_api","source_rank","待修原因"])
     work = master_df.copy()
-    repo_df = _load_stock_master_cache_from_repo()
-    work = _merge_master_sources(work, repo_df)
-    override_map = _load_stock_category_override_map()
+    # H84: never block page entry on GitHub. runtime-data/H83 already restores
+    # business authority locally; remote refresh is an explicit update action.
+    local_repo_df = _load_local_stock_master_h84()
+    work = _merge_master_sources(work, local_repo_df)
+    override_map = _load_local_category_override_map_h84()
     if override_map:
         for code, item in override_map.items():
             matched = work["code"].astype(str) == str(code)
@@ -7658,7 +7708,12 @@ def _load_master_df() -> pd.DataFrame:
 def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
     raw = st.session_state.get("watchlist_data")
     if not isinstance(raw, dict) or not raw:
-        if callable(load_watchlist_permanent):
+        # H84: local restored authority first; opening the page must not wait for
+        # GitHub/Firestore. Remote durable load is only a recovery fallback.
+        raw = _safe_json_read_local("watchlist.json", {})
+        if not isinstance(raw, dict) or not raw:
+            raw = _safe_json_read_local("watchlist_normalized.json", {})
+        if (not isinstance(raw, dict) or not raw) and callable(load_watchlist_permanent):
             try:
                 raw, details = load_watchlist_permanent()
                 st.session_state[_k("watchlist_load_detail")] = details
@@ -7704,46 +7759,21 @@ def _load_watchlist_map() -> dict[str, list[dict[str, str]]]:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_master_df_fallback_only() -> pd.DataFrame:
-    try:
-        repo_df = load_stock_master() if callable(load_stock_master) else pd.DataFrame()
-    except Exception:
-        repo_df = pd.DataFrame()
-
-    if repo_df is None or repo_df.empty:
-        repo_df = _load_stock_master_cache_from_repo()
-
+    """H84 fast local master loader. No network on ordinary page entry."""
+    repo_df = _load_local_stock_master_h84()
     if repo_df is None or repo_df.empty:
         return pd.DataFrame(columns=["code", "name", "market", "category"])
-
     work = repo_df.copy()
-
-    if "code" not in work.columns:
-        work["code"] = ""
-    if "name" not in work.columns:
-        work["name"] = ""
-    if "market" not in work.columns:
-        work["market"] = "上市"
-    if "category" not in work.columns:
-        if "theme_category" in work.columns:
-            work["category"] = work["theme_category"]
-        else:
-            work["category"] = ""
-
+    for col, default in (("code", ""), ("name", ""), ("market", "上市"), ("category", "")):
+        if col not in work.columns:
+            work[col] = default
     work["code"] = work["code"].map(_normalize_code)
     work["name"] = work["name"].map(_safe_str)
     work["market"] = work["market"].map(_safe_str).replace("", "上市")
-    work["category"] = work.apply(
-        lambda r: _infer_category_from_record(r.get("name"), r.get("category")),
-        axis=1,
-    )
-
+    work["category"] = work.apply(lambda r: _infer_category_from_record(r.get("name"), r.get("category")), axis=1)
     work = _apply_master_overrides(work)
+    return work[work["code"] != ""].drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
 
-    return (
-        work[work["code"] != ""]
-        .drop_duplicates(subset=["code"], keep="first")
-        .reset_index(drop=True)
-    )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -15487,13 +15517,141 @@ def _result_export_signature_v164(rec_df: pd.DataFrame, extra: str = "") -> str:
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
+    """H84 fast workbook writer: core sheets only, bounded styling."""
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+    safe_name = str(sheet_name)[:31]
+    ws = wb.create_sheet(title=safe_name)
+    work = _excel_safe_df(df, fallback_title=fallback_title)
+    headers = [str(c) for c in work.columns]
+    ws.append(headers)
+    for row in work.itertuples(index=False, name=None):
+        ws.append([_excel_safe_value(v) for v in row])
+    ws.freeze_panes = "D2" if len(headers) >= 3 else "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    tab = {
+        "01_正式推薦與交易計畫":"166534", "02_研究推薦":"1D4ED8", "03_上市櫃等待":"B45309",
+        "04_今日主流資金":"0F766E", "05_驗證與風險證據":"334155", "06_績效煞車與健康":"7C3AED",
+        "07_興櫃隔離研究":"64748B",
+    }.get(safe_name, "334155")
+    ws.sheet_properties.tabColor = tab
+    for cell in ws[1]:
+        cell.fill = PatternFill("solid", fgColor=tab)
+        cell.font = Font(bold=True, color="FFFFFF", size=10)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 30
+    # Widths are header-driven and bounded. We deliberately do not scan every
+    # cell/column or draw per-cell borders; that was the main Excel latency sink.
+    long_tokens = ("理由","摘要","風險","缺口","狀態","結論","說明","策略","檢討","關注","未入選")
+    for idx, header in enumerate(headers, start=1):
+        width = 18
+        if header in {"股票代號","排名","順位"}: width = 12
+        elif header in {"股票名稱","市場別","類別"}: width = 16
+        elif any(t in header for t in long_tokens): width = 38
+        elif any(t in header for t in ("分數","%","RR","價格","停損","目標","進場")): width = 16
+        ws.column_dimensions[get_column_letter(idx)].width = width
+    # Only wrap genuinely narrative columns.
+    narr_idx = [i+1 for i,h in enumerate(headers) if any(t in h for t in long_tokens)]
+    if narr_idx and ws.max_row > 1:
+        for col_idx in narr_idx:
+            for row_idx in range(2, min(ws.max_row, 61) + 1):
+                ws.cell(row=row_idx, column=col_idx).alignment = Alignment(vertical="top", wrap_text=True)
+    return ws
+
+
+def _build_excel_bytes_fast_h84(
+    rec_export: pd.DataFrame,
+    cat_export: pd.DataFrame,
+    leader_export: pd.DataFrame,
+    factor_export: pd.DataFrame,
+    candidate_diagnosis_export: pd.DataFrame | None = None,
+    scan_report: dict[str, Any] | None = None,
+) -> bytes:
+    """H84 manager workbook: seven decision sheets only.
+
+    It reuses the canonical H51->H77->H79 decision chain but does not build the
+    20+ hidden technical tabs. This preserves decision truth while removing the
+    largest export-time cost.
+    """
+    from openpyxl import Workbook
+    output = io.BytesIO()
+    wb = Workbook()
+    try:
+        wb.remove(wb.active)
+    except Exception:
+        pass
+    raw_candidate = candidate_diagnosis_export if isinstance(candidate_diagnosis_export, pd.DataFrame) and not candidate_diagnosis_export.empty else rec_export
+    candidate_source = _phase93_single_source_decision_frame(rec_export, raw_candidate)
+    h51_source = candidate_source.copy()
+    try:
+        if callable(enrich_tdcc_holder_truth):
+            h51_source = enrich_tdcc_holder_truth(h51_source, allow_network=False, timeout=0.5)
+    except Exception:
+        pass
+    try:
+        if callable(apply_human_master_engine): h51_source = apply_human_master_engine(h51_source)
+        if callable(apply_h63_execution_truth): h51_source = apply_h63_execution_truth(h51_source)
+        if callable(apply_h64_core_truth): h51_source = apply_h64_core_truth(h51_source)
+        if callable(apply_h65_multifactor_observation): h51_source = apply_h65_multifactor_observation(h51_source)
+        if callable(apply_h66_adaptive_timing): h51_source = apply_h66_adaptive_timing(h51_source)
+        if callable(apply_h67_regime_consensus): h51_source = apply_h67_regime_consensus(h51_source)
+        if callable(apply_h68_execution_learning_truth): h51_source = apply_h68_execution_learning_truth(h51_source)
+        if callable(apply_h70_counter_regime_session_truth): h51_source = apply_h70_counter_regime_session_truth(h51_source)
+        if callable(apply_h72_multi_model_alpha_ensemble): h51_source = apply_h72_multi_model_alpha_ensemble(h51_source)
+        if callable(apply_h73_leadership_breadth): h51_source = apply_h73_leadership_breadth(h51_source)
+        if callable(apply_h74_fresh_mainstream_capital): h51_source = apply_h74_fresh_mainstream_capital(h51_source)
+        if callable(apply_h75_executive_decision): h51_source = apply_h75_executive_decision(h51_source)
+        if callable(apply_h76_daily_alpha_core_split): h51_source = apply_h76_daily_alpha_core_split(h51_source)
+        if callable(apply_h77_verified_delta_execution_gate): h51_source = apply_h77_verified_delta_execution_gate(h51_source)
+    except Exception:
+        # H79 can still audit the best available frame; do not fail the download.
+        pass
+    try:
+        h79 = build_h79_tables_guarded(h51_source) if callable(build_h79_tables_guarded) else {}
+    except Exception as exc:
+        fail = pd.DataFrame({"狀態":[f"H79決策建立失敗：{type(exc).__name__}: {exc}"]})
+        h79 = {k:fail.copy() for k in ["actionable","research","waiting","emerging_watch","audit","health"]}
+    try:
+        sector = build_h51_sector_table(h51_source, max_rows=12) if callable(build_h51_sector_table) else cat_export
+        if callable(build_h75_sector_summary):
+            sector = build_h75_sector_summary(sector, max_rows=10)
+    except Exception:
+        sector = cat_export if isinstance(cat_export, pd.DataFrame) else pd.DataFrame()
+    health = h79.get("health", pd.DataFrame())
+    report = scan_report if isinstance(scan_report, dict) else {}
+    if report:
+        extra = pd.DataFrame([{"項目":str(k), "數值":_excel_safe_value(v)} for k,v in report.items() if not isinstance(v,(dict,list,tuple,set))])
+        health = pd.concat([health, extra], ignore_index=True, sort=False)
+    sheets = [
+        ("01_正式推薦與交易計畫", h79.get("actionable", pd.DataFrame()), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
+        ("02_研究推薦", h79.get("research", pd.DataFrame()), "本輪沒有上市櫃研究推薦。"),
+        ("03_上市櫃等待", h79.get("waiting", pd.DataFrame()), "本輪沒有上市櫃等待候選。"),
+        ("04_今日主流資金", sector, "目前沒有可用主流族群資料。"),
+        ("05_驗證與風險證據", h79.get("audit", pd.DataFrame()), "目前沒有足夠的驗證增量/風險證據。"),
+        ("06_績效煞車與健康", health, "目前沒有成熟績效/系統健康資料。"),
+        ("07_興櫃隔離研究", h79.get("emerging_watch", pd.DataFrame()), "本輪沒有興櫃隔離研究股。"),
+    ]
+    for name, frame, fallback in sheets:
+        _write_df_to_ws_fast_h84(wb, name, frame, fallback)
+    try:
+        wb.active = 0
+    except Exception:
+        pass
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
     """V164：Excel 改為按需產生；一般按鈕 rerun 不再重建 20+ 工作表。"""
     if rec_df is None or rec_df.empty:
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H79 Excel主管版：正式可執行、研究推薦、上市櫃等待、主流資金、完整證據、績效健康與興櫃隔離分頁顯示。研究推薦不等於買進。")
+    st.caption("H84 Excel快速主管版：預設只建立7張決策核心分頁；不再先生成20+張隱藏技術頁。研究推薦不等於買進。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -15536,7 +15694,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                     rec_export_for_excel = _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export
                     candidate_export = st.session_state.get(_k("candidate_diagnosis_store"))
                     scan_report = st.session_state.get(_k("scan_quality_report"), {})
-                    excel_bytes = _build_excel_bytes(
+                    excel_bytes = _build_excel_bytes_fast_h84(
                         rec_export_for_excel, cat_export, leader_export, factor_export,
                         candidate_diagnosis_export=candidate_export if isinstance(candidate_export, pd.DataFrame) else None,
                         scan_report=scan_report if isinstance(scan_report, dict) else None,
@@ -15558,7 +15716,31 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                 key=_k("main_excel_download_v164"),
             )
     with c2:
-        st.caption("H37：Excel 仍只在按『準備』時建立；欄位版型改動會自動使舊快取失效。總排名欄位版型只調整閱讀順序；H51精簡活頁不刪除總排名內的研究欄位。")
+        st.caption("H84：一般匯出只建立7張主管核心分頁並快取；大量技術診斷不再混入日常Excel，因此準備與下載時間大幅縮短。")
+
+    with st.expander("進階：建立完整技術診斷 Excel（較慢）", expanded=False):
+        st.caption("只有需要稽核H51~H74等技術分頁時才使用；日常決策請用上方快速主管版。")
+        full_sig = _result_export_signature_v164(rec_df, f"full-diagnostic|{top_n}|{_layout_sig}")
+        full_key = _k("main_export_full_diag_cache_h84")
+        full_cache = st.session_state.get(full_key, {})
+        full_ready = isinstance(full_cache, dict) and full_cache.get("sig") == full_sig and isinstance(full_cache.get("bytes"), (bytes, bytearray))
+        if not full_ready and st.button("準備完整技術診斷 Excel", use_container_width=True, key=_k("prepare_full_diag_excel_h84")):
+            with st.spinner("正在建立完整技術診斷分頁；此模式刻意保留較完整模型證據，因此會比主管快速版久..."):
+                full_order = _get_full_table_order_for_export(rec_df)
+                rec_export, cat_export, leader_export, factor_export = _build_export_views(rec_df, category_strength_df, top_n, full_order=full_order)
+                candidate_export = st.session_state.get(_k("candidate_diagnosis_store"))
+                scan_report = st.session_state.get(_k("scan_quality_report"), {})
+                full_bytes = _build_excel_bytes(
+                    _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export,
+                    cat_export, leader_export, factor_export,
+                    candidate_diagnosis_export=candidate_export if isinstance(candidate_export, pd.DataFrame) else None,
+                    scan_report=scan_report if isinstance(scan_report, dict) else None,
+                )
+                full_cache = {"sig":full_sig, "bytes":full_bytes, "name":f"股神推薦_完整技術診斷_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"}
+                st.session_state[full_key] = full_cache
+                full_ready = True
+        if full_ready:
+            st.download_button("下載完整技術診斷 Excel", data=full_cache["bytes"], file_name=full_cache["name"], mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, key=_k("full_diag_excel_download_h84"))
 
 
 def _render_selected_export_block():
@@ -16498,9 +16680,11 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
             h83_preflight = {"formal_ready": False, "research_only": True, "message": f"H83前置自動更新例外：{_h83_pre_exc}"}
             notes.append(h83_preflight["message"])
         watchlist_map = _load_watchlist_map() or {}
-        master_df = _load_master_df()
+        master_df = _load_master_df_fallback_only()
+        # H83 has already attempted freshness repair. Only if the restored local
+        # authority is still empty do we fall back to a live master rebuild.
         if master_df is None or master_df.empty:
-            master_df = _load_master_df_fallback_only()
+            master_df = _load_master_df()
         if master_df is None or master_df.empty:
             return {"ok": False, "message": "07股神推薦模組執行失敗：股票主檔為空", "execution_context": execution_context}
 
@@ -16697,9 +16881,11 @@ def main():
     # <<< GODPICK_BI_V135_REAL_CHART_STYLE
 
     watchlist_map = _load_watchlist_map()
-    master_df = _load_master_df()
+    master_df = _load_master_df_fallback_only()
+    # H84: normal page entry is strictly local-first. The live master rebuild is
+    # only used if the local restored authority is genuinely unavailable.
     if master_df is None or master_df.empty:
-        master_df = _load_master_df_fallback_only()
+        master_df = _load_master_df()
     today = date.today()
 
     defaults = {
@@ -16797,7 +16983,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜本機優先、GitHub背景同步、Excel按需產生、單功能區運算")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H84本機快照優先、推薦前才驗證遠端、Excel七頁快速主管版、研究名單不再被舊新鮮度旗標誤清空")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
