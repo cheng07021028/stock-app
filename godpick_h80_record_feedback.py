@@ -11,7 +11,7 @@ from typing import Iterable, Mapping, Any
 
 import pandas as pd
 
-VERSION = "v191_h81_record_feedback_professional_evidence_20260921"
+VERSION = "v191_h82_record_feedback_adaptive_evidence_20260921"
 RESEARCH_MODE = "股神校正研究"
 RESEARCH_LEVEL = "H79研究推薦"
 RESEARCH_SAMPLE_TYPE = "B｜H79研究推薦校正研究樣本"
@@ -36,6 +36,10 @@ H80_RECORD_FEEDBACK_COLUMNS = [
     "H81專業研究總分", "H81資料覆蓋%", "H81排名加減分", "H81研究排序分", "H81三大利多催化",
     "H81三大風險", "H81下一步關注", "H81多頭情境", "H81中性情境", "H81空頭情境",
     "H81研究摘要", "H81盤前檢查", "H81開盤策略", "H81盤中調整", "H81收盤檢討", "H81設定版本",
+    "H82版本", "H82市場環境", "H82成熟樣本數", "H82有效樣本權重", "H82學習信心%",
+    "H82市場環境加減分", "H82產業加減分", "H82決策狀態加減分", "H82H81分桶加減分",
+    "H82錯誤治理加減分", "H82影子建議加減分", "H82自適應加減分", "H82自適應研究排序分",
+    "H82主要學習依據", "H82主要錯誤風險", "H82學習摘要", "H82學習狀態", "H82設定版本",
 ]
 
 
@@ -132,7 +136,7 @@ def build_research_tracking_frame(
             raw["賣出目標1"] = raw.get("H79第一目標")
 
         note = _text(raw.get("備註"))
-        governance_note = "H81研究學習樣本：保留H79/H80/H81證據，只做績效/排序校正，不代表正式買進許可。"
+        governance_note = "H82研究學習樣本：保留H79/H80/H81/H82證據，只做成熟績效/排序校正，不代表正式買進許可。"
         raw["備註"] = f"{note}；{governance_note}" if note and governance_note not in note else (note or governance_note)
         rows.append(raw)
 
@@ -163,7 +167,7 @@ def mark_research_record_rows(rows: Iterable[Mapping[str, Any]] | None) -> list[
         raw["樣本可信度"] = _text(raw.get("樣本可信度")) or "中"
         raw["校正樣本建立版本"] = VERSION
         note = _text(raw.get("備註"))
-        governance_note = "H81研究學習樣本：保留H79/H80/H81證據，只做績效/排序校正，不代表正式買進許可。"
+        governance_note = "H82研究學習樣本：保留H79/H80/H81/H82證據，只做成熟績效/排序校正，不代表正式買進許可。"
         raw["備註"] = f"{note}；{governance_note}" if note and governance_note not in note else (note or governance_note)
         result.append(raw)
     return result

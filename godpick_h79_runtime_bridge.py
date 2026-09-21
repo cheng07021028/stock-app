@@ -1,4 +1,4 @@
-"""H81 runtime bridge for Streamlit hot-reload and professional research compatibility.
+"""H82 runtime bridge for Streamlit hot-reload and adaptive-learning compatibility.
 
 Streamlit can keep the already-imported H78 module in ``sys.modules`` after a
 copy-over deployment.  The H79 page then calls the old ``build_tables`` and
@@ -17,8 +17,8 @@ from typing import Any
 import pandas as pd
 
 
-VERSION = "v191_h81_runtime_professional_contract_guard_20260921"
-EXPECTED_ENGINE_VERSION = "v191_h81_professional_research_governance_20260921"
+VERSION = "v191_h82_runtime_adaptive_contract_guard_20260921"
+EXPECTED_ENGINE_VERSION = "v191_h82_adaptive_learning_governance_20260921"
 REQUIRED_TABLES = (
     "actionable",
     "research",
@@ -52,7 +52,7 @@ def _normalise(value: dict[str, Any]) -> dict[str, pd.DataFrame]:
             try:
                 result[key] = pd.DataFrame(table)
             except Exception:
-                result[key] = pd.DataFrame({"狀態": [f"H81 無法解析 {key} 表格。"]})
+                result[key] = pd.DataFrame({"狀態": [f"H82 無法解析 {key} 表格。"]})
     return result
 
 
@@ -75,11 +75,11 @@ def build_tables_guarded(frame: pd.DataFrame, *, engine_module: ModuleType | Non
     try:
         module = _load_engine(engine_module)
     except Exception as exc:
-        return _failure_tables(f"H81 引擎載入失敗：{type(exc).__name__}: {exc}")
+        return _failure_tables(f"H82 引擎載入失敗：{type(exc).__name__}: {exc}")
 
     if getattr(module, "VERSION", "") != EXPECTED_ENGINE_VERSION:
         return _failure_tables(
-            "H81 已阻止舊版決策引擎：磁碟上的 godpick_h78_decision_engine.py "
+            "H82 已阻止舊版決策引擎：磁碟上的 godpick_h78_decision_engine.py "
             f"版本為 {getattr(module, 'VERSION', '未知')}，請用本修正版 ZIP 完整覆蓋後重新啟動。"
         )
 
@@ -87,7 +87,7 @@ def build_tables_guarded(frame: pd.DataFrame, *, engine_module: ModuleType | Non
         builder = getattr(module, "build_tables")
         tables = builder(frame, **kwargs)
     except Exception as exc:
-        return _failure_tables(f"H81 決策建立失敗：{type(exc).__name__}: {exc}")
+        return _failure_tables(f"H82 決策建立失敗：{type(exc).__name__}: {exc}")
 
     if not _contract_ok(tables):
         # The version constant and function object can be out of sync during a
@@ -96,12 +96,12 @@ def build_tables_guarded(frame: pd.DataFrame, *, engine_module: ModuleType | Non
             module = _load_engine(module, force_reload=True)
             tables = getattr(module, "build_tables")(frame, **kwargs)
         except Exception as exc:
-            return _failure_tables(f"H81 引擎重新載入失敗：{type(exc).__name__}: {exc}")
+            return _failure_tables(f"H82 引擎重新載入失敗：{type(exc).__name__}: {exc}")
 
     if not _contract_ok(tables):
         missing = [key for key in REQUIRED_TABLES if not isinstance(tables, dict) or key not in tables]
         return _failure_tables(
-            "H81 已攔截舊版表格契約；缺少：" + "、".join(missing) + "。請完整覆蓋 ZIP 後重新啟動。"
+            "H82 已攔截舊版表格契約；缺少：" + "、".join(missing) + "。請完整覆蓋 ZIP 後重新啟動。"
         )
     return _normalise(tables)
 

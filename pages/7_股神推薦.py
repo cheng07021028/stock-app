@@ -539,6 +539,16 @@ except Exception as _h80_feedback_exc:
     mark_h80_research_record_rows = None
     H80_RECORD_FEEDBACK_IMPORT_ERROR = str(_h80_feedback_exc)
 
+# H82: formal/A-/R1 rows also retain H81/H82 research evidence at signal time.
+try:
+    from godpick_h81_professional_ai import apply_professional_research_overlay as apply_h81_professional_research_overlay
+except Exception:
+    apply_h81_professional_research_overlay = None
+try:
+    from godpick_h82_adaptive_learning import apply_adaptive_learning_overlay as apply_h82_adaptive_learning_overlay
+except Exception:
+    apply_h82_adaptive_learning_overlay = None
+
 H77_VERIFIED_DELTA_EXPECTED_VERSION = "v191_h77_verified_delta_chase_entry_performance_brake_20260918"
 try:
     from godpick_h77_verified_delta_execution_gate import (
@@ -604,7 +614,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h80_record_performance_feedback_loop_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h82_adaptive_learning_closed_loop_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -13385,7 +13395,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
 
 
 def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, background_write: bool = False, require_remote_confirm: bool = False) -> tuple[int, list[str]]:
-    """H80 closed loop: persist actionable records *and* H79 research-learning samples.
+    """H82 closed loop: persist actionable records *and* H79/H81/H82 learning evidence.
 
     Formal/A- authority is unchanged.  H79 research rows use a distinct
     ``H79研究推薦`` business mode, are explicitly excluded from Formal performance,
@@ -13420,6 +13430,16 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     st.session_state[_k("scan_run_id")] = _run_id_v191_h9
 
     if not action.empty:
+        # H82: snapshot the same H81/H82 evidence used for research ranking into
+        # Formal/A-/R1 history as well.  These overlays never grant Formal
+        # authority; they only make later error attribution reproducible.
+        try:
+            if callable(apply_h81_professional_research_overlay):
+                action = apply_h81_professional_research_overlay(action)
+            if callable(apply_h82_adaptive_learning_overlay):
+                action = apply_h82_adaptive_learning_overlay(action)
+        except Exception:
+            pass
         quality_notes: dict[str, tuple[str, str]] = {}
         for _, row in action.iterrows():
             code = _normalize_code(row.get("股票代號"))
@@ -13440,7 +13460,7 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
         action["推薦執行ID"] = _run_id_v191_h9
         action["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
         action["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
-        action["推薦執行版本"] = _safe_str(_exec_ctx_v191.get("automation_version")) or "V191-H80"
+        action["推薦執行版本"] = _safe_str(_exec_ctx_v191.get("automation_version")) or "V191-H82"
         action["H68學習快照建立時間"] = _run_started_v191_h9
         action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
 
@@ -13493,18 +13513,18 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
                 research_track["推薦執行ID"] = _run_id_v191_h9
                 research_track["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
                 research_track["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
-                research_track["推薦執行版本"] = "V191-H80"
+                research_track["推薦執行版本"] = "V191-H82"
                 research_codes = research_track["股票代號"].astype(str).map(_normalize_code).tolist()
                 research_rows = _build_record_rows_from_rec_df(research_track, research_codes)
                 if callable(mark_h80_research_record_rows):
                     research_rows = mark_h80_research_record_rows(research_rows)
-                h80_notes.append(f"H80研究績效閉環：H79研究推薦 {len(research_rows)} 筆已準備同步第8頁；不計入正式交易勝率。")
+                h80_notes.append(f"H82研究績效閉環：H79研究推薦 {len(research_rows)} 筆已準備同步第8頁；不計入正式交易勝率。")
             else:
-                h80_notes.append("H80研究績效閉環：本輪H79沒有研究推薦可同步。")
+                h80_notes.append("H82研究績效閉環：本輪H79沒有研究推薦可同步。")
         except Exception as exc:
-            h80_notes.append(f"H80研究績效閉環暫時無法建立：{exc}")
+            h80_notes.append(f"H82研究績效閉環暫時無法建立：{exc}")
     else:
-        h80_notes.append(f"H80研究績效閉環模組未載入：{H80_RECORD_FEEDBACK_VERSION}")
+        h80_notes.append(f"H82研究績效閉環模組未載入：{H80_RECORD_FEEDBACK_VERSION}")
 
     rows = [*action_rows, *research_rows]
     if not rows:
