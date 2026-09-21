@@ -620,7 +620,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h86_postscan_nonblocking_always_excel_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h88_true_postscan_cutoff_background_persist_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -1988,6 +1988,328 @@ def _h86_schedule_postscan(candidate_df: pd.DataFrame, rec_df: pd.DataFrame, sca
         return True, "H86：輪動/學習/SuperAI/校正/T+1 已轉入背景收尾；頁面不等待。"
     except Exception as exc:
         return False, f"H86背景收尾排程失敗：{type(exc).__name__}: {exc}"
+
+
+
+H88_POSTSCAN_STATUS_FILE = "godpick_page07_h88_postscan_status.json"
+
+
+def _h88_df_records_no_streamlit(df: pd.DataFrame | None) -> list[dict[str, Any]]:
+    """Thread-safe dataframe -> JSON records without touching Streamlit state."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    work = df.copy(deep=False)
+    try:
+        work.columns = [" / ".join(map(str, c)) if isinstance(c, tuple) else str(c) for c in work.columns]
+    except Exception:
+        work.columns = [str(c) for c in work.columns]
+    if not work.columns.is_unique:
+        try:
+            work, _dups = _v191_h23_unique_json_frame(work)
+        except Exception:
+            work = work.loc[:, ~pd.Index(work.columns).duplicated(keep="last")].copy()
+    for col in work.columns:
+        try:
+            if pd.api.types.is_datetime64_any_dtype(work[col]):
+                work[col] = work[col].astype(str)
+        except Exception:
+            pass
+    try:
+        return json.loads(work.to_json(orient="records", force_ascii=False, date_format="iso"))
+    except Exception:
+        return json.loads(json.dumps(work.to_dict(orient="records"), ensure_ascii=False, default=str))
+
+
+def _h88_action_frame_from_result(rec_df: pd.DataFrame | None, formal_ready: bool) -> pd.DataFrame:
+    """Cheap persistence filter; never re-runs H51~H79 after scan completion."""
+    if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
+        return pd.DataFrame()
+    work = rec_df.copy(deep=False)
+    bucket = work.get("正式推薦分區", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    radar = work.get("盤中雷達優先級", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str)
+    formal_mask = bucket.isin(["正式下週主推薦", "A-｜準主推薦小量試單"]) if formal_ready else pd.Series([False] * len(work), index=work.index)
+    radar_mask = bucket.eq("盤中雷達追蹤") & radar.str.startswith("R1")
+    out = work.loc[formal_mask | radar_mask].copy()
+    if "股票代號" in out.columns and not out.empty:
+        out["股票代號"] = out["股票代號"].astype(str).map(_normalize_code)
+        out = out[out["股票代號"].astype(str).str.strip().ne("")].drop_duplicates(subset=["股票代號"], keep="first")
+    return out.reset_index(drop=True)
+
+
+def _h88_write_small_anchor_now(
+    rec_df: pd.DataFrame,
+    category_strength_df: pd.DataFrame,
+    hot_pick_df: pd.DataFrame,
+    candidate_count: int,
+    scan_report: dict[str, Any],
+    execution_context: dict[str, Any],
+) -> tuple[bool, str, dict[str, Any]]:
+    """Persist only a tiny durable run anchor on the render thread.
+
+    Full candidate serialization can be many MB and is intentionally excluded.
+    This anchor is sufficient to prove the run happened and prevents the page
+    from falling back to an old recommendation date while background persistence
+    is still running.
+    """
+    saved_at = _now_text()
+    ctx = dict(execution_context or {})
+    run_id = _safe_str(ctx.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id"))) or f"gprun_{time.time_ns()}"
+    run_date = _safe_str(ctx.get("run_date"))[:10] or saved_at[:10]
+    ctx.update({"run_id": run_id, "run_date": run_date})
+    formal_ready = bool((scan_report or {}).get("正式推薦可用", False))
+    action_df = _h88_action_frame_from_result(rec_df, formal_ready)
+    anchor = {
+        "saved_at": saved_at,
+        "recommendation_date": saved_at[:10],
+        "execution_context": ctx,
+        "execution_owner": _safe_str(ctx.get("owner")) or "07_股神推薦",
+        "execution_trigger": _safe_str(ctx.get("trigger")) or "手動操作",
+        "scan_run_id": run_id,
+        "run_id": run_id,
+        "run_date": run_date,
+        "expected_trade_date": _expected_latest_trade_date_v173().strftime("%Y-%m-%d"),
+        "kline_date": "",
+        "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
+        "recommendations": _h88_df_records_no_streamlit(action_df.head(80)),
+        "category_strength": _h88_df_records_no_streamlit(category_strength_df.head(80) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()),
+        "hot_pick": _h88_df_records_no_streamlit(hot_pick_df.head(80) if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()),
+        "scan_quality": dict(scan_report or {}),
+        "h85_h79_core_tables": {},
+        "candidate_count": int(candidate_count or 0),
+        "recommendation_count": int(len(action_df)),
+        "full_snapshot_pending": True,
+        "snapshot_version": "V191-H88_immediate_compact_anchor",
+    }
+    ok, msg = _safe_json_write_local(GODPICK_LATEST_ANCHOR_FILE, anchor)
+    if ok:
+        try:
+            from godpick_durability_service import persist_json_async
+            pok, pmsg = persist_json_async(
+                GODPICK_LATEST_ANCHOR_FILE, anchor,
+                firestore_doc="godpick_latest_run_anchor",
+                reason="H88 immediate compact recommendation anchor",
+            )
+            msg = str(msg) + "｜遠端背景排程：" + str(pmsg)
+        except Exception as exc:
+            msg = str(msg) + f"｜遠端背景排程例外：{type(exc).__name__}: {exc}"
+    return bool(ok), str(msg), anchor
+
+
+def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
+    if not callable(build_h79_tables_guarded) or candidate_df is None or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
+        return {}
+    source = candidate_df
+    if len(source) > 240:
+        try:
+            source = _safe_sort_export_df(
+                source,
+                ["H79研究推薦分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
+                [False, False, False, False, False],
+            ).head(240).copy()
+        except Exception:
+            source = source.head(240).copy()
+    try:
+        tables = build_h79_tables_guarded(source)
+    except Exception:
+        return {}
+    if not isinstance(tables, dict):
+        return {}
+    payload: dict[str, Any] = {
+        "version": "H88-background-core",
+        "source": "h88-background-full-persist",
+        "created_at": _now_text(),
+    }
+    for name in ["actionable", "research", "wait_core", "mainstream", "evidence", "health", "governance"]:
+        df = tables.get(name)
+        payload[name] = _h88_df_records_no_streamlit(df.head(120) if isinstance(df, pd.DataFrame) else pd.DataFrame())
+    return payload
+
+
+def _h88_background_full_persist(
+    candidate_df: pd.DataFrame,
+    rec_df: pd.DataFrame,
+    category_strength_df: pd.DataFrame,
+    hot_pick_df: pd.DataFrame,
+    scan_report: dict[str, Any],
+    execution_context: dict[str, Any],
+    anchor_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Serialize the multi-MB full snapshot and Page08 learning records off-thread."""
+    status: dict[str, Any] = {"version": PAGE07_SPEED_FIX_VERSION, "status": "RUNNING", "started_at": _now_text(), "steps": {}}
+    _safe_json_write_local(H88_POSTSCAN_STATUS_FILE, status)
+    try:
+        candidate = candidate_df.copy(deep=False) if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
+        rec = rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame()
+        cat = category_strength_df.copy(deep=False) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
+        hot = hot_pick_df.copy(deep=False) if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()
+        scan = dict(scan_report or {})
+        ctx = dict(execution_context or {})
+        saved_at = _safe_str(anchor_payload.get("saved_at")) or _now_text()
+        run_id = _safe_str(anchor_payload.get("run_id")) or f"gprun_{time.time_ns()}"
+        run_date = _safe_str(anchor_payload.get("run_date"))[:10] or saved_at[:10]
+        formal_ready = bool(scan.get("正式推薦可用", False))
+        action_df = _h88_action_frame_from_result(rec, formal_ready)
+
+        core = _h88_build_core_no_streamlit(candidate)
+        candidate_records = _h88_df_records_no_streamlit(candidate)
+        recommendation_records = _h88_df_records_no_streamlit(action_df)
+        cat_records = _h88_df_records_no_streamlit(cat)
+        hot_records = _h88_df_records_no_streamlit(hot)
+        payload = {
+            **dict(anchor_payload or {}),
+            "saved_at": saved_at,
+            "recommendation_date": saved_at[:10],
+            "execution_context": ctx,
+            "run_id": run_id,
+            "run_date": run_date,
+            "recommendations": recommendation_records,
+            "candidate_diagnosis": candidate_records,
+            "candidate_count": len(candidate_records),
+            "recommendation_count": len(recommendation_records),
+            "category_strength": cat_records,
+            "hot_pick": hot_records,
+            "scan_quality": scan,
+            "h85_h79_core_tables": core,
+            "full_snapshot_pending": False,
+            "snapshot_version": "V191-H88_background_full_snapshot",
+        }
+        ok_full, msg_full = _safe_json_write_local(GODPICK_LATEST_FILE, payload)
+        status["steps"]["full_snapshot"] = {"ok": bool(ok_full), "message": str(msg_full), "candidate_count": len(candidate_records)}
+        if ok_full:
+            try:
+                from godpick_durability_service import persist_json_async
+                pok, pmsg = persist_json_async(GODPICK_LATEST_FILE, payload, reason="H88 background full recommendation snapshot")
+                status["steps"]["full_remote"] = {"ok": bool(pok), "message": str(pmsg)}
+            except Exception as exc:
+                status["steps"]["full_remote"] = {"ok": False, "message": str(exc)}
+
+        list_payload = recommendation_records
+        ok_list, msg_list = _safe_json_write_local(GODPICK_LIST_FILE, list_payload)
+        status["steps"]["page10_list"] = {"ok": bool(ok_list), "message": str(msg_list), "count": len(list_payload)}
+        if ok_list:
+            try:
+                from godpick_durability_service import persist_json_async
+                pok, pmsg = persist_json_async(GODPICK_LIST_FILE, list_payload, reason="H88 background operational recommendation list")
+                status["steps"]["page10_remote"] = {"ok": bool(pok), "message": str(pmsg)}
+            except Exception as exc:
+                status["steps"]["page10_remote"] = {"ok": False, "message": str(exc)}
+
+        # Page08 closed loop. Build only after the UI has been released.
+        rows: list[dict[str, Any]] = []
+        if not action_df.empty and "股票代號" in action_df.columns:
+            action_codes = action_df["股票代號"].astype(str).map(_normalize_code).tolist()
+            action_rows = _build_record_rows_from_rec_df(action_df, action_codes)
+            for row in action_rows:
+                row["紀錄來源"] = "07_股神推薦｜H88背景自動記錄"
+                row["自動記錄"] = "是"
+                row["推薦批次日期"] = run_date
+                row["推薦批次時間"] = saved_at
+                row["推薦執行ID"] = run_id
+                row["推薦執行來源"] = _safe_str(ctx.get("owner")) or "07_股神推薦"
+                row["推薦觸發方式"] = _safe_str(ctx.get("trigger")) or "手動操作"
+                row["推薦執行版本"] = "V191-H88"
+            rows.extend(action_rows)
+        research_df = pd.DataFrame(core.get("research", [])) if isinstance(core, dict) else pd.DataFrame()
+        if callable(build_h80_research_tracking_frame) and not research_df.empty and not candidate.empty:
+            try:
+                excluded = [str(x.get("股票代號") or "") for x in rows]
+                research_track = build_h80_research_tracking_frame(candidate, research_df, excluded_codes=excluded)
+                if isinstance(research_track, pd.DataFrame) and not research_track.empty:
+                    research_codes = research_track["股票代號"].astype(str).map(_normalize_code).tolist()
+                    research_rows = _build_record_rows_from_rec_df(research_track, research_codes)
+                    if callable(mark_h80_research_record_rows):
+                        research_rows = mark_h80_research_record_rows(research_rows)
+                    for row in research_rows:
+                        row["推薦批次日期"] = run_date
+                        row["推薦批次時間"] = saved_at
+                        row["推薦執行ID"] = run_id
+                        row["推薦執行來源"] = _safe_str(ctx.get("owner")) or "07_股神推薦"
+                        row["推薦觸發方式"] = _safe_str(ctx.get("trigger")) or "手動操作"
+                        row["推薦執行版本"] = "V191-H88"
+                    rows.extend(research_rows)
+            except Exception as exc:
+                status["steps"]["research_record_build"] = {"ok": False, "message": str(exc)}
+        if rows:
+            status["steps"]["page08_upsert"] = _v181_background_record_upsert(rows)
+        else:
+            status["steps"]["page08_upsert"] = {"ok": True, "message": "本輪沒有正式/A-/R1/H79研究紀錄可寫入", "count": 0}
+
+        # Refresh the small anchor after the full snapshot is safely on disk.
+        final_anchor = dict(anchor_payload or {})
+        final_anchor.update({
+            "saved_at": saved_at,
+            "candidate_count": len(candidate_records),
+            "recommendation_count": len(recommendation_records),
+            "recommendations": recommendation_records,
+            "category_strength": cat_records,
+            "hot_pick": hot_records,
+            "h85_h79_core_tables": core,
+            "full_snapshot_pending": False,
+            "snapshot_version": "V191-H88_background_complete_anchor",
+        })
+        _safe_json_write_local(GODPICK_LATEST_ANCHOR_FILE, final_anchor)
+        try:
+            from godpick_durability_service import persist_json_async
+            persist_json_async(GODPICK_LATEST_ANCHOR_FILE, final_anchor, firestore_doc="godpick_latest_run_anchor", reason="H88 background completed anchor")
+        except Exception:
+            pass
+        status["status"] = "DONE"
+    except Exception as exc:
+        status["status"] = "FAILED"
+        status["error"] = f"{type(exc).__name__}: {exc}"
+    status["finished_at"] = _now_text()
+    _safe_json_write_local(H88_POSTSCAN_STATUS_FILE, status)
+    return status
+
+
+def _h88_publish_result_nonblocking(
+    rec_df: pd.DataFrame,
+    category_strength_df: pd.DataFrame,
+    hot_pick_df: pd.DataFrame,
+) -> tuple[bool, str]:
+    """Make result/UI available first; queue all large persistence work."""
+    candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+    if not isinstance(candidate_df, pd.DataFrame):
+        candidate_df = pd.DataFrame()
+    scan_report = st.session_state.get(_k("scan_quality_report"), {}) or {}
+    if not isinstance(scan_report, dict):
+        scan_report = {}
+    execution_context = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
+    if not isinstance(execution_context, dict):
+        execution_context = {}
+
+    st.session_state[_k("rec_df_store")] = rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame()
+    st.session_state[_k("category_strength_store")] = category_strength_df.copy(deep=False) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()
+    st.session_state[_k("hot_pick_store")] = hot_pick_df.copy(deep=False) if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()
+    st.session_state[_k("result_saved_at")] = _now_text()
+    st.session_state[_k("empty_scan_preserved_previous")] = False
+
+    anchor_ok, anchor_msg, anchor = _h88_write_small_anchor_now(
+        rec_df if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
+        category_strength_df if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
+        hot_pick_df if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame(),
+        len(candidate_df),
+        scan_report,
+        execution_context,
+    )
+    st.session_state[_k("latest_pack_permanent_ok")] = bool(anchor_ok)
+    st.session_state[_k("latest_pack_permanent_error")] = "" if anchor_ok else anchor_msg
+    try:
+        _page07_postscan_executor_h86().submit(
+            _h88_background_full_persist,
+            candidate_df.copy(deep=False),
+            rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
+            category_strength_df.copy(deep=False) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
+            hot_pick_df.copy(deep=False) if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame(),
+            dict(scan_report),
+            dict(execution_context),
+            dict(anchor),
+        )
+        msg = "H88：畫面結果已發布；完整候選快照、Page10、Page08與遠端永久化正在背景收尾。"
+    except Exception as exc:
+        msg = f"H88背景保存排程失敗：{type(exc).__name__}: {exc}"
+    st.session_state[_k("h88_publish_message")] = msg
+    return bool(anchor_ok), msg
 
 
 def _v181_background_record_upsert(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -14433,31 +14755,12 @@ def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.Dat
     # Compatibility for the first opening after H85 deployment.  Do NOT rebuild
     # the whole market merely to render the page.  A new real scan will persist
     # the full compact H79 block for subsequent reruns/reboots.
+    # H88: never start a compatibility H79 model build while rendering Page07.
+    # A completed scan writes the compact H79 block in the background snapshot.
+    # Until then the page stays responsive and shows a clear pending state.
     candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
-    # Prefer the candidate pool because H79 research rows may intentionally not
-    # be present in the operational Formal/A-/R1 list.  Still cap it below.
-    source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else rec_df
-    if not isinstance(source, pd.DataFrame) or source.empty or not callable(build_h79_tables_guarded):
-        return {}, "no-snapshot", False
-    bounded = len(source) > 120
-    work = source.copy()
-    if bounded:
-        try:
-            work = _safe_sort_export_df(
-                work,
-                ["H79研究推薦分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
-                [False, False, False, False, False],
-            ).head(120)
-        except Exception:
-            work = work.head(120).copy()
-    try:
-        built = build_h79_tables_guarded(work)
-        compact = _h85_encode_h79_core_tables(built, source="bounded-entry-compat")
-        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
-        return _h85_decode_h79_core_tables(compact), "bounded-entry-compat", bounded
-    except Exception as exc:
-        st.session_state[_k("h85_h79_render_error")] = f"{type(exc).__name__}: {exc}"
-        return {}, "render-error", bounded
+    bounded = bool(isinstance(candidate_df, pd.DataFrame) and len(candidate_df) > 120)
+    return {}, "h88-background-pending", bounded
 
 
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
@@ -14474,7 +14777,10 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         st.warning("目前是 H84 舊快照相容模式：只用前120檔建立畫面摘要，避免開頁重算全市場。請下一次正常執行『重新推薦』後，H85會永久保存完整精簡摘要。")
     if not tables:
         err = _safe_str(st.session_state.get(_k("h85_h79_render_error"))) or _safe_str(st.session_state.get(_k("h85_h79_snapshot_error")))
-        st.info("目前沒有可直接顯示的 H79 精簡快照。" + (f"｜{err}" if err else ""))
+        if source_label == "h88-background-pending":
+            st.info("H88：推薦結果已先顯示；H79研究精簡快照正在背景建立。稍後重新整理/互動一次即可讀取，不阻塞本頁。")
+        else:
+            st.info("目前沒有可直接顯示的 H79 精簡快照。" + (f"｜{err}" if err else ""))
     else:
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())
@@ -16035,17 +16341,27 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
+    build_clicked = False
     if not ready:
+        st.success("H88：掃描結果已可操作；Excel 不在頁面主執行緒自動建立。按下方按鈕才序列化7張主管表，不重跑模型。")
+        build_clicked = st.button(
+            "📊 建立主管 Excel（7張核心表）",
+            use_container_width=True,
+            type="primary",
+            key=_k("h88_build_manager_excel"),
+        )
+    if build_clicked:
         t0 = time.perf_counter()
         try:
-            data = _build_excel_bytes_fast_h85(
-                rec_export=rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
-                cat_export=category_strength_df.copy(deep=False) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
-                leader_export=pd.DataFrame(),
-                factor_export=pd.DataFrame(),
-                candidate_diagnosis_export=candidate_df,
-                scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
-            )
+            with st.spinner("H88：正在序列化已完成的推薦快照，不重新掃描股票..."):
+                data = _build_excel_bytes_fast_h85(
+                    rec_export=rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
+                    cat_export=category_strength_df.copy(deep=False) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
+                    leader_export=pd.DataFrame(),
+                    factor_export=pd.DataFrame(),
+                    candidate_diagnosis_export=candidate_df,
+                    scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+                )
             cache = {
                 "sig": sig,
                 "bytes": data,
@@ -16053,6 +16369,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
+            st.session_state[_k("h88_excel_built_this_run")] = True
             ready = True
         except Exception as exc:
             st.session_state[_k("h86_excel_error")] = f"{type(exc).__name__}: {exc}"
@@ -16067,12 +16384,9 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             type="primary",
             key=_k("h86_always_excel_download"),
         )
-        st.caption(f"H86：Excel 已就緒｜建立 {cache.get('seconds','—')} 秒｜不重跑模型。01正式、02研究、03等待、04主流資金、05風險證據、06健康、07興櫃研究。")
-    else:
+        st.caption(f"H88：Excel 已就緒｜建立 {cache.get('seconds','—')} 秒｜不重跑模型。01正式、02研究、03等待、04主流資金、05風險證據、06健康、07興櫃研究。")
+    elif _safe_str(st.session_state.get(_k("h86_excel_error"))):
         st.error("主管Excel建立失敗：" + _safe_str(st.session_state.get(_k("h86_excel_error"))))
-        if st.button("重新建立主管 Excel", use_container_width=True, key=_k("h86_excel_retry")):
-            st.session_state.pop(cache_key, None)
-            st.rerun()
 
 
 def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
@@ -17414,7 +17728,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H86掃描完成即釋放主執行緒、遠端/學習背景收尾、Excel直接可下載、診斷真正按需載入")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H88掃描100%後立即顯示結果；完整候選序列化/永久化/第8頁紀錄改背景，Excel按鈕先出現，不再卡在完成畫面")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
@@ -17895,27 +18209,26 @@ def main():
                 FORECAST_COLUMNS as _H32_FORECAST_COLUMNS,
             )
             rec_df = _h32_apply_return_forecast(rec_df)
-            _h32_candidate = st.session_state.get(_k("candidate_diagnosis_store"))
-            if isinstance(_h32_candidate, pd.DataFrame) and not _h32_candidate.empty:
-                _h32_candidate = _h32_apply_return_forecast(_h32_candidate)
-                st.session_state[_k("candidate_diagnosis_store")] = _h32_candidate
+            # H88: after scan 100%, never run forecast over the full 1k~2k candidate
+            # diagnosis nor rebuild historical validation on the render thread.
+            # The visible result is small and can be forecast immediately; full
+            # candidate persistence/learning is handled by background workers.
             for _h32_col in _H32_FORECAST_COLUMNS:
                 if _h32_col not in GODPICK_RECORD_COLUMNS:
                     GODPICK_RECORD_COLUMNS.append(_h32_col)
-            st.session_state[_k("h32_return_forecast_validation")] = _h32_forecast_validation_summary()
+            st.session_state[_k("h32_return_forecast_validation")] = {}
         except Exception as _h32_forecast_exc:
             st.session_state[_k("h32_return_forecast_validation")] = {
                 "status": f"H32報酬預測建立失敗：{type(_h32_forecast_exc).__name__}: {_h32_forecast_exc}",
                 "samples": 0,
             }
-        _save_recommend_result_to_state(rec_df, category_strength_df, hot_pick_df)
-        _latest_pack_error_v185 = _safe_str(st.session_state.get(_k("latest_pack_permanent_error")))
-        if _latest_pack_error_v185:
-            st.error(_latest_pack_error_v185)
-        # H86: once the scan/result snapshot is locally durable, all secondary
-        # learning/rotation/calibration work must leave the Streamlit render
-        # thread.  This is the key fix for the browser staying on “Stop” after
-        # the scan progress already says completed.
+        # H88 true cutoff: the multi-MB full snapshot used to be serialized here
+        # *after* the progress bar already showed 100%, which is exactly the
+        # endless "Stop" state observed in production. Publish session + tiny
+        # durable anchor now, then move full persistence/records off-thread.
+        _h88_anchor_ok, _h88_publish_msg = _h88_publish_result_nonblocking(
+            rec_df, category_strength_df, hot_pick_df
+        )
         _h86_candidate = st.session_state.get(_k("candidate_diagnosis_store"))
         if not isinstance(_h86_candidate, pd.DataFrame):
             _h86_candidate = pd.DataFrame()
@@ -17931,7 +18244,7 @@ def main():
                 "run_id": _safe_str(st.session_state.get(_k("scan_run_id"))),
             },
         )
-        st.session_state[_k("h86_postscan_schedule_message")] = _h86_bg_msg
+        st.session_state[_k("h86_postscan_schedule_message")] = _h88_publish_msg + "｜" + _h86_bg_msg
     else:
         # H86: after the one-time post-scan rerun, immediately reload the saved
         # result from session.  Without this branch rec_df became empty on the
@@ -17944,31 +18257,20 @@ def main():
         if _postprocess_cache_hit_v164:
             st.session_state[_k("postprocess_cache_last_hit_v164")] = _now_text()
 
-    # V159：只有按下開始/重新推薦/斷點續掃完成的新結果才自動記錄；
-    # 一般換頁 rerun 不重寫。使用同日 business key，因此重跑只更新同一筆，不會重複膨脹。
+    # H88: Page08 auto-record is built/upserted by the background full-persist
+    # worker.  Do not rebuild H68/H79 record rows on the render thread after 100%.
     if submit_recommend or submit_refresh or resume_scan_btn:
-        try:
-            auto_source = st.session_state.get(_k("candidate_diagnosis_store"))
-            if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
-                auto_source = rec_df
-            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(
-                auto_source, background_write=True, require_remote_confirm=False
-            )
-            st.session_state[_k("auto_record_detail")] = [
-                f"H86：正式/A-/雷達/H79研究紀錄已排程背景權威 upsert：{auto_added} 筆候選紀錄。",
-                *[str(x) for x in (auto_msgs or [])],
-                "校正研究樣本、每日學習、SuperAI經驗與T+1真相已交由H86背景收尾，不阻塞Excel與頁面完成。",
-            ]
-        except Exception as e:
-            st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
+        st.session_state[_k("auto_record_detail")] = [
+            "H88：正式/A-/R1/H79研究紀錄已交由背景完整保存工作建立並 upsert，第7頁不等待。"
+        ]
 
     # V185：頁首新鮮度是在掃描前先渲染；本輪保存完成後重新選舉永久權威並只刷新一次。
     # 同一個 Streamlit run 會同時看到「舊7/9」與「本輪8/11」的矛盾文字。
     # 完成所有本機保存/背景排程後只 rerun 一次，刷新頁首，不會重跑掃描。
-    if (submit_recommend or submit_refresh or resume_scan_btn) and bool(st.session_state.get(_k("latest_pack_permanent_ok"), False)):
-        st.session_state[_k("v184_post_scan_ui_refresh")] = True
-    if st.session_state.pop(_k("v184_post_scan_ui_refresh"), False):
-        st.rerun()
+    # H88: never force an immediate rerun after a completed scan.  The old rerun
+    # delayed the Excel/result surface and could start another expensive render.
+    if submit_recommend or submit_refresh or resume_scan_btn:
+        st.session_state.pop(_k("v184_post_scan_ui_refresh"), None)
 
     # H86: put the download surface before any optional performance/diagnostic
     # rendering.  The user can download immediately after the one-time post-scan
@@ -17977,6 +18279,26 @@ def main():
     _h86_bg_msg_now = _safe_str(st.session_state.get(_k("h86_postscan_schedule_message")))
     if _h86_bg_msg_now:
         st.caption(_h86_bg_msg_now)
+    try:
+        _h88_bg_status = _safe_json_read_local(H88_POSTSCAN_STATUS_FILE, {})
+        if isinstance(_h88_bg_status, dict) and _h88_bg_status:
+            _h88_state = _safe_str(_h88_bg_status.get("status"))
+            if _h88_state == "RUNNING":
+                st.caption("H88 背景保存中｜完整候選快照 / Page08 / Page10 / 遠端備援不阻塞目前頁面。")
+            elif _h88_state == "DONE":
+                st.caption("H88 背景保存完成｜完整候選快照與推薦紀錄已完成本機收斂，遠端同步依 durability 狀態續跑。")
+            elif _h88_state == "FAILED":
+                st.warning("H88 背景保存失敗：" + _safe_str(_h88_bg_status.get("error")))
+    except Exception:
+        pass
+
+    # H88 hard UI cutoff: after a real scan (or after building the manager Excel),
+    # finish this Streamlit run right here.  Optional diagnostics below are not
+    # allowed to keep the browser on Stop once the essential result surface exists.
+    _h88_stop_after_excel = bool(st.session_state.pop(_k("h88_excel_built_this_run"), False))
+    if submit_recommend or submit_refresh or resume_scan_btn or _h88_stop_after_excel:
+        st.success("H88：本輪主要工作已完成，頁面主執行緒已釋放。完整保存/學習在背景執行，不需要繼續等待。")
+        st.stop()
 
     rotation_snapshot_message = _safe_str(st.session_state.get(_k("rotation_snapshot_message")))
     if rotation_snapshot_message and (submit_recommend or submit_refresh or resume_scan_btn):
