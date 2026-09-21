@@ -1,0 +1,26 @@
+{
+  "version": "v191_h82_adaptive_godpick_learning_core_20260921",
+  "available": false,
+  "frozen": true,
+  "freeze_reasons": [
+    "沒有成熟可學習樣本"
+  ],
+  "generated_at": "2026-09-21 16:35:08",
+  "source_signature": "b6202cd7bbb1c15382b19da93fc5749152fe87e434b3e5de444b66401f3645d7",
+  "settings_fingerprint": "5c31d8458558ffb81b17",
+  "baseline": {
+    "sample": 0,
+    "effective_sample": 0.0,
+    "avg_return": 0.0,
+    "win_rate": 0.0,
+    "loss5_rate": 0.0
+  },
+  "segments": {},
+  "error_summary": {},
+  "directives": [
+    "等待成熟樣本後再啟用自適應。"
+  ],
+  "data_quality": {
+    "mature_samples": 0
+  }
+}

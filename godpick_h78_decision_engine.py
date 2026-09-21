@@ -1,4 +1,4 @@
-"""H82: H79 governance + H80 performance + H81 professional research + adaptive learning.
+"""H83: H79 governance + H80 performance + H81/H82 learning + autonomous data truth.
 
 The module name remains ``godpick_h78_decision_engine`` so an H78 installation
 can be upgraded by copying files in-place. H79 fixes four production defects:
@@ -25,7 +25,7 @@ import re
 import pandas as pd
 
 
-VERSION = "v191_h82_adaptive_learning_governance_20260921"
+VERSION = "v191_h83_autonomous_freshness_governance_20260921"
 
 
 @dataclass(frozen=True)
@@ -187,10 +187,15 @@ def price_plan(row, policy=Policy()):
 
 
 def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
+    try:
+        from godpick_h83_autofresh import apply_h83_freshness_overlay
+        prepared = apply_h83_freshness_overlay(frame)
+    except Exception:
+        prepared = frame.copy(deep=True)
     # H81 professional research layer is deterministic and bounded.
     try:
         from godpick_h81_professional_ai import apply_professional_research_overlay
-        prepared = apply_professional_research_overlay(frame)
+        prepared = apply_professional_research_overlay(prepared)
     except Exception:
         prepared = frame.copy(deep=True)
 
@@ -460,7 +465,11 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         plan = price_plan(raw, policy)
         legacy = (text(raw.get("H64有效權威")) == "EFFECTIVE-FORMAL"
                   and text(raw.get("H68次日執行狀態")).startswith("READY-COND"))
-        executable = selected and legacy and plan["H79計畫狀態"] == "PASS" and not hot and gap is not None
+        h83_formal_ready = text(raw.get("H83正式資料可用")) != "否"
+        h83_summary = text(raw.get("H83資料治理摘要"))
+        if not h83_formal_ready:
+            reasons.append("H83前置資料未就緒，Formal降為研究模式")
+        executable = selected and legacy and h83_formal_ready and plan["H79計畫狀態"] == "PASS" and not hot and gap is not None
 
         if hard_issues:
             tier = "資料待修復"
@@ -492,6 +501,9 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
             elif not legacy:
                 status = "研究推薦｜等待正式授權"
                 execution = "研究推薦：未取得H64/H68正式授權"
+            elif not h83_formal_ready:
+                status = "研究推薦｜等待最新資料"
+                execution = "研究推薦：H83前置資料未就緒，禁止升格Formal"
             else:
                 status = "研究推薦｜條件追蹤"
                 execution = "研究推薦：盤前重新驗證"
@@ -523,6 +535,12 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
             "H82學習信心%": round(h82_confidence, 2) if h82_confidence is not None else None,
             "H82自適應加減分": round(h82_adj, 2),
             "H82自適應研究排序分": round(h82_rank_score, 2),
+            "H83正式資料可用": "是" if h83_formal_ready else "否",
+            "H83市場資料日期": text(raw.get("H83市場資料日期")),
+            "H83官方因子日期": text(raw.get("H83官方因子日期")),
+            "H83官方落後交易日": raw.get("H83官方落後交易日"),
+            "H83資料異常隔離": text(raw.get("H83資料異常隔離")),
+            "H83資料治理摘要": h83_summary,
             "H79強度百分位%": round(strength_pct, 2) if strength_pct is not None else None,
             "H79族群百分位%": round(sector_pct, 2) if sector_pct is not None else None,
             "H79核心覆蓋%": round(coverage * 100, 2),
@@ -580,6 +598,7 @@ DISPLAY = [
     "H82市場環境加減分", "H82產業加減分", "H82決策狀態加減分", "H82H81分桶加減分",
     "H82錯誤治理加減分", "H82影子建議加減分", "H82自適應加減分", "H82自適應研究排序分",
     "H82主要學習依據", "H82主要錯誤風險", "H82學習摘要", "H82學習狀態",
+    "H83正式資料可用", "H83市場資料日期", "H83官方因子日期", "H83官方落後交易日", "H83資料異常隔離", "H83資料治理摘要",
     "H79強度百分位%", "H79族群百分位%", "H79推薦理由", "H79交易狀態",
     "H79計畫進場", "H79結構停損", "H79第一目標", "H79成本後RR", "H79停損距離%",
     "H79價格上限試算", "H79有效增量", "H79缺資料", "H79未入選原因",

@@ -251,6 +251,17 @@ def _score_news(row: dict[str, Any]) -> tuple[float, float, list[str], list[str]
         if s:
             texts.append(s)
     joined = "｜".join(texts)
+    h83_news_source = ""
+    if not joined:
+        try:
+            from godpick_h83_autofresh import get_news_context
+            items = get_news_context(row, max_items=8)
+            titles = [_text(x.get("title")) for x in items if isinstance(x, dict) and _text(x.get("title"))]
+            if titles:
+                joined = "｜".join(titles)
+                h83_news_source = "H83自動新聞快取"
+        except Exception:
+            pass
     pos = [kw for kw in POSITIVE_NEWS if kw in joined]
     neg = [kw for kw in NEGATIVE_NEWS if kw in joined]
     if score_col is not None:
@@ -265,6 +276,8 @@ def _score_news(row: dict[str, Any]) -> tuple[float, float, list[str], list[str]
     catalysts = ([f"新聞正向關鍵詞：{','.join(pos[:3])}"] if pos else [])
     risks = ([f"新聞負向關鍵詞：{','.join(neg[:3])}"] if neg else [])
     watch = [] if joined else ["本輪沒有可驗證個股新聞欄位；未知新聞不自行猜測"]
+    if h83_news_source:
+        watch.append("新聞來源：H83自動更新RSS快取；僅作研究事件因子，不單獨形成Formal權限")
     return score, coverage, catalysts, risks, watch
 
 

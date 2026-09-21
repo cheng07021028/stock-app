@@ -17,8 +17,8 @@ from typing import Any
 import pandas as pd
 
 
-VERSION = "v191_h82_runtime_adaptive_contract_guard_20260921"
-EXPECTED_ENGINE_VERSION = "v191_h82_adaptive_learning_governance_20260921"
+VERSION = "v191_h83_runtime_freshness_contract_guard_20260921"
+EXPECTED_ENGINE_VERSION = "v191_h83_autonomous_freshness_governance_20260921"
 REQUIRED_TABLES = (
     "actionable",
     "research",

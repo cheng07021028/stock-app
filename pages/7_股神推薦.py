@@ -548,6 +548,12 @@ try:
     from godpick_h82_adaptive_learning import apply_adaptive_learning_overlay as apply_h82_adaptive_learning_overlay
 except Exception:
     apply_h82_adaptive_learning_overlay = None
+try:
+    from godpick_h83_autofresh import run_autofresh_preflight as run_h83_autofresh_preflight
+    from godpick_h83_autofresh_settings import load_settings_safe as load_h83_autofresh_settings
+except Exception:
+    run_h83_autofresh_preflight = None
+    load_h83_autofresh_settings = None
 
 H77_VERIFIED_DELTA_EXPECTED_VERSION = "v191_h77_verified_delta_chase_entry_performance_brake_20260918"
 try:
@@ -614,7 +620,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h82_adaptive_learning_closed_loop_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h83_autonomous_freshness_truth_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -16480,7 +16486,17 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
     st.session_state[_k("scan_run_id")] = execution_context["run_id"]
     st.session_state[_k("recommend_execution_context_v191")] = execution_context
     notes: list[str] = []
+    h83_preflight: dict[str, Any] = {}
     try:
+        try:
+            _h83_cfg = load_h83_autofresh_settings() if callable(load_h83_autofresh_settings) else {}
+            if callable(run_h83_autofresh_preflight) and bool((_h83_cfg or {}).get("auto_refresh_before_scheduled_recommendation", True)):
+                h83_preflight = run_h83_autofresh_preflight(reason="page07_scheduled_before_recommendation", force=False)
+                notes.append(_safe_str(h83_preflight.get("message")))
+                st.session_state[_k("h83_preflight_status")] = h83_preflight
+        except Exception as _h83_pre_exc:
+            h83_preflight = {"formal_ready": False, "research_only": True, "message": f"H83前置自動更新例外：{_h83_pre_exc}"}
+            notes.append(h83_preflight["message"])
         watchlist_map = _load_watchlist_map() or {}
         master_df = _load_master_df()
         if master_df is None or master_df.empty:
@@ -16537,7 +16553,8 @@ def _run_page07_automation_v191_h2(cfg: dict[str, Any] | None = None) -> dict[st
             market_context_bridge=macro_bridge,
         )
         rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(rec_df, hot_pick_df, macro_bridge, True, force=True)
-
+        if h83_preflight.get("research_only"):
+            _sr = dict(st.session_state.get(_k("scan_quality_report"), {}) or {}); _sr["正式推薦可用"] = False; _sr["H83資料治理"] = h83_preflight.get("message", ""); st.session_state[_k("scan_quality_report")] = _sr
         candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
         if rec_df is None or rec_df.empty:
             conditional_df = _conditional_reference_rows(candidate_df, max_rows=8) if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame()
@@ -17200,6 +17217,16 @@ def main():
         }
         st.session_state[_k("scan_run_id")] = _manual_run_id_v191_h9
         previous_rec_df, previous_category_df, previous_hot_df = _load_recommend_result_from_state()
+        _h83_manual_preflight: dict[str, Any] = {}
+        try:
+            _h83_cfg = load_h83_autofresh_settings() if callable(load_h83_autofresh_settings) else {}
+            if callable(run_h83_autofresh_preflight) and bool((_h83_cfg or {}).get("auto_refresh_before_manual_recommendation", True)):
+                with st.spinner("H83 正在自動檢查並補齊最新必要資料；已新鮮項目會略過..."):
+                    _h83_manual_preflight = run_h83_autofresh_preflight(reason="page07_manual_before_recommendation", force=False)
+                st.session_state[_k("h83_preflight_status")] = _h83_manual_preflight
+                (st.success if _h83_manual_preflight.get("formal_ready") else st.warning)(_safe_str(_h83_manual_preflight.get("message")))
+        except Exception as _h83_manual_exc:
+            _h83_manual_preflight = {"formal_ready": False, "research_only": True, "message": f"H83前置自動更新例外：{_h83_manual_exc}"}; st.warning(_h83_manual_preflight["message"])
         rec_df, category_strength_df, hot_pick_df = _build_recommend_df(
             universe_items=universe_items,
             master_df=master_df,
@@ -17219,6 +17246,8 @@ def main():
         rec_df, hot_pick_df, _ = _postprocess_recommend_result_v164(
             rec_df, hot_pick_df, macro_bridge, macro_bridge_enabled, force=True
         )
+        if _h83_manual_preflight.get("research_only"):
+            _sr = dict(st.session_state.get(_k("scan_quality_report"), {}) or {}); _sr["正式推薦可用"] = False; _sr["H83資料治理"] = _h83_manual_preflight.get("message", ""); st.session_state[_k("scan_quality_report")] = _sr
 
         # Final safety net: first try the complete candidate diagnosis, then keep
         # the previous non-empty result.  Never replace a useful list with 0 rows.
