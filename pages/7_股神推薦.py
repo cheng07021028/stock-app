@@ -524,6 +524,21 @@ except Exception as _h78_import_exc:
     build_h79_tables_guarded = None
     H78_IMPORT_ERROR = str(_h78_import_exc)
 
+# H80: close the loop between H79 research recommendations and Page08 performance learning.
+try:
+    from godpick_h80_record_feedback import (
+        VERSION as H80_RECORD_FEEDBACK_VERSION,
+        H80_RECORD_FEEDBACK_COLUMNS,
+        build_research_tracking_frame as build_h80_research_tracking_frame,
+        mark_research_record_rows as mark_h80_research_record_rows,
+    )
+except Exception as _h80_feedback_exc:
+    H80_RECORD_FEEDBACK_VERSION = "h80_record_feedback_unavailable"
+    H80_RECORD_FEEDBACK_COLUMNS = []
+    build_h80_research_tracking_frame = None
+    mark_h80_research_record_rows = None
+    H80_RECORD_FEEDBACK_IMPORT_ERROR = str(_h80_feedback_exc)
+
 H77_VERIFIED_DELTA_EXPECTED_VERSION = "v191_h77_verified_delta_chase_entry_performance_brake_20260918"
 try:
     from godpick_h77_verified_delta_execution_gate import (
@@ -589,7 +604,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h79_1_runtime_persistence_guard_20260920"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h80_record_performance_feedback_loop_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -945,6 +960,14 @@ except Exception:
 try:
     GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
         list(GODPICK_RECORD_COLUMNS) + list(UNIFIED_RECOMMEND_DISPLAY_COLUMNS or [])
+    ))
+except Exception:
+    pass
+
+# H80: Page08 authority must retain research-learning metadata and H79 evidence.
+try:
+    GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
+        list(GODPICK_RECORD_COLUMNS) + list(H80_RECORD_FEEDBACK_COLUMNS or [])
     ))
 except Exception:
     pass
@@ -8124,6 +8147,15 @@ def _show_import_result_notice(title: str, added_count: int, selected_count: int
 
 
 
+def _h80_invalidate_performance_feedback_cache() -> None:
+    """Force the next decision pass to consume the newly written Page08 authority."""
+    try:
+        st.session_state.pop(_k("performance_feedback_profile_cache"), None)
+        st.session_state[_k("h80_feedback_cache_invalidated_at")] = _now_text()
+    except Exception:
+        pass
+
+
 def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: bool = False, *, require_remote_confirm: bool = False) -> tuple[int, list[str]]:
     """將 07 股神推薦結果寫入唯一權威紀錄檔。
 
@@ -8176,6 +8208,7 @@ def _append_godpick_records(record_rows: list[dict[str, Any]], force_duplicate: 
             if bool(report.permanent_ok):
                 if changed_count == 0:
                     return 0, ["相同日期、股票與推薦模式已存在；權威資料未重複新增。", authority_detail, *save_details]
+                _h80_invalidate_performance_feedback_cache()
                 return changed_count, [
                     f"已直接寫入唯一權威檔：新增 {stats.get('added', 0)} 筆、更新 {stats.get('updated', 0)} 筆。",
                     authority_detail,
@@ -13352,10 +13385,13 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
 
 
 def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, background_write: bool = False, require_remote_confirm: bool = False) -> tuple[int, list[str]]:
-    """保存正式/A-/R1/R1-M/R1-P；整體掃描不足時仍保留個股資料合格的雷達樣本。
+    """H80 closed loop: persist actionable records *and* H79 research-learning samples.
 
-    正式/A- 仍需整體掃描達正式可用；R1/R1-M 是研究型雷達，只要該檔個股
-    K線、價格與成交資料完整即可保存，避免全域覆蓋率讓校正資料整批歸零。
+    Formal/A- authority is unchanged.  H79 research rows use a distinct
+    ``H79研究推薦`` business mode, are explicitly excluded from Formal performance,
+    and are allowed only as bounded calibration samples.  This prevents the old
+    failure mode where the UI exported research candidates every day but Page08
+    learned nothing whenever Formal/A-/R1 happened to be empty.
     """
     _h68_source = source_df
     if callable(apply_h68_execution_learning_truth) and isinstance(source_df, pd.DataFrame) and not source_df.empty:
@@ -13363,24 +13399,14 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
             _h68_source = apply_h68_execution_learning_truth(source_df)
         except Exception:
             _h68_source = source_df
+
     action, formal_scan_ok, partition_notes = _v191_actionable_tracking_frame(_h68_source)
-    if action.empty:
-        return 0, list(partition_notes or ["本輪沒有正式/A-/R1可自動記錄資料。"] )
+    action = action.copy() if isinstance(action, pd.DataFrame) else pd.DataFrame()
+    action_rows: list[dict[str, Any]] = []
+    research_rows: list[dict[str, Any]] = []
+    h80_notes: list[str] = []
 
-    quality_notes: dict[str, tuple[str, str]] = {}
-    for _, row in action.iterrows():
-        code = _normalize_code(row.get("股票代號"))
-        if callable(assess_individual_sample_quality):
-            try:
-                eligible, reason, confidence = assess_individual_sample_quality(row)
-            except Exception as exc:
-                eligible, reason, confidence = True, f"品質判定例外沿用：{exc}", "中"
-        else:
-            eligible, reason, confidence = True, "未載入個股品質服務，沿用既有判定", "中"
-        quality_notes[code] = (reason, confidence)
-
-    action["紀錄來源"] = "07_股神推薦｜推薦完成自動記錄"
-    action["自動記錄"] = "是"
+    # One execution context for all records produced by this scan.
     _exec_ctx_v191 = st.session_state.get(_k("recommend_execution_context_v191"), {})
     if not isinstance(_exec_ctx_v191, dict):
         _exec_ctx_v191 = {}
@@ -13392,75 +13418,128 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     _exec_ctx_v191.update({"run_id": _run_id_v191_h9, "run_date": _run_date_v191_h9})
     st.session_state[_k("recommend_execution_context_v191")] = _exec_ctx_v191
     st.session_state[_k("scan_run_id")] = _run_id_v191_h9
-    action["原始推薦日期"] = action.get("原始推薦日期", action.get("推薦日期", ""))
-    action["推薦批次日期"] = _run_date_v191_h9
-    action["推薦批次時間"] = _run_started_v191_h9
-    action["推薦執行ID"] = _run_id_v191_h9
-    action["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
-    action["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
-    action["推薦執行版本"] = _safe_str(_exec_ctx_v191.get("automation_version")) or "V191-H9"
-    action["H68學習快照建立時間"] = _run_started_v191_h9
-    action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
 
-    def _sample_meta(row: pd.Series) -> pd.Series:
-        level = _safe_str(row.get("紀錄層級"))
-        code = _normalize_code(row.get("股票代號"))
-        _, confidence = quality_notes.get(code, ("", "中"))
-        if level == "正式主推薦":
-            sample_type, weight, formal_perf = "A｜正式交易樣本", 1.00, "是"
-        elif level == "A-準主推薦":
-            sample_type, weight, formal_perf = "A-｜準主推薦樣本", 0.90, "是"
-        elif level.startswith("R1-RB"):
-            sample_type, weight, formal_perf = "B｜R1-RB恐慌反彈領漲雷達", 0.72, "否"
-        elif level.startswith("R1-M"):
-            sample_type, weight, formal_perf = "B｜R1-M強勢動能雷達", 0.75, "否"
-        elif level.startswith("R1-P"):
-            sample_type, weight, formal_perf = "B｜R1-P強勢前兆雷達", 0.70, "否"
-        else:
-            sample_type, weight, formal_perf = "B｜R1核心雷達", 0.75, "否"
-        return pd.Series({
-            "校正樣本類型": sample_type,
-            "校正樣本用途": "正式推薦績效與權重校正" if formal_perf == "是" else "雷達觸發、動能延續與失效條件校正",
-            "校正樣本權重": weight,
-            "是否納入正式推薦績效": formal_perf,
-            "是否納入權重校正": "是",
-            "個股資料品質": "可追蹤",
-            "樣本可信度": confidence,
-            "校正樣本建立版本": CALIBRATION_SAMPLE_VERSION,
-        })
+    if not action.empty:
+        quality_notes: dict[str, tuple[str, str]] = {}
+        for _, row in action.iterrows():
+            code = _normalize_code(row.get("股票代號"))
+            if callable(assess_individual_sample_quality):
+                try:
+                    eligible, reason, confidence = assess_individual_sample_quality(row)
+                except Exception as exc:
+                    eligible, reason, confidence = True, f"品質判定例外沿用：{exc}", "中"
+            else:
+                eligible, reason, confidence = True, "未載入個股品質服務，沿用既有判定", "中"
+            quality_notes[code] = (reason, confidence)
 
-    meta_df = action.apply(_sample_meta, axis=1)
-    for col in meta_df.columns:
-        action[col] = meta_df[col]
-    codes = action["股票代號"].astype(str).map(_normalize_code).tolist()
-    rows = _build_record_rows_from_rec_df(action, codes)
-    if background_write and rows and callable(upsert_records_authority_fast):
+        action["紀錄來源"] = "07_股神推薦｜推薦完成自動記錄"
+        action["自動記錄"] = "是"
+        action["原始推薦日期"] = action.get("原始推薦日期", action.get("推薦日期", ""))
+        action["推薦批次日期"] = _run_date_v191_h9
+        action["推薦批次時間"] = _run_started_v191_h9
+        action["推薦執行ID"] = _run_id_v191_h9
+        action["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
+        action["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
+        action["推薦執行版本"] = _safe_str(_exec_ctx_v191.get("automation_version")) or "V191-H80"
+        action["H68學習快照建立時間"] = _run_started_v191_h9
+        action["紀錄層級"] = action.apply(_v159_record_level_from_row, axis=1)
+
+        def _sample_meta(row: pd.Series) -> pd.Series:
+            level = _safe_str(row.get("紀錄層級"))
+            code = _normalize_code(row.get("股票代號"))
+            _, confidence = quality_notes.get(code, ("", "中"))
+            if level == "正式主推薦":
+                sample_type, weight, formal_perf = "A｜正式交易樣本", 1.00, "是"
+            elif level == "A-準主推薦":
+                sample_type, weight, formal_perf = "A-｜準主推薦樣本", 0.90, "是"
+            elif level.startswith("R1-RB"):
+                sample_type, weight, formal_perf = "B｜R1-RB恐慌反彈領漲雷達", 0.72, "否"
+            elif level.startswith("R1-M"):
+                sample_type, weight, formal_perf = "B｜R1-M強勢動能雷達", 0.75, "否"
+            elif level.startswith("R1-P"):
+                sample_type, weight, formal_perf = "B｜R1-P強勢前兆雷達", 0.70, "否"
+            else:
+                sample_type, weight, formal_perf = "B｜R1核心雷達", 0.75, "否"
+            return pd.Series({
+                "校正樣本類型": sample_type,
+                "校正樣本用途": "正式推薦績效與權重校正" if formal_perf == "是" else "雷達觸發、動能延續與失效條件校正",
+                "校正樣本權重": weight,
+                "是否納入正式推薦績效": formal_perf,
+                "是否納入權重校正": "是",
+                "個股資料品質": "可追蹤",
+                "樣本可信度": confidence,
+                "校正樣本建立版本": CALIBRATION_SAMPLE_VERSION,
+            })
+
+        meta_df = action.apply(_sample_meta, axis=1)
+        for col in meta_df.columns:
+            action[col] = meta_df[col]
+        action_codes = action["股票代號"].astype(str).map(_normalize_code).tolist()
+        action_rows = _build_record_rows_from_rec_df(action, action_codes)
+    else:
+        action_codes = []
+
+    # H80: H79 research recommendations are *learning samples*, not buy permits.
+    # Build from the compact H79 table but overlay onto full source rows so Page08
+    # can later calculate performance from the original decision-time evidence.
+    if callable(build_h79_tables_guarded) and callable(build_h80_research_tracking_frame):
+        try:
+            h79_tables = build_h79_tables_guarded(_h68_source)
+            h79_research = h79_tables.get("research", pd.DataFrame()) if isinstance(h79_tables, dict) else pd.DataFrame()
+            research_track = build_h80_research_tracking_frame(_h68_source, h79_research, excluded_codes=action_codes)
+            if isinstance(research_track, pd.DataFrame) and not research_track.empty:
+                research_track["推薦批次日期"] = _run_date_v191_h9
+                research_track["推薦批次時間"] = _run_started_v191_h9
+                research_track["推薦執行ID"] = _run_id_v191_h9
+                research_track["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
+                research_track["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
+                research_track["推薦執行版本"] = "V191-H80"
+                research_codes = research_track["股票代號"].astype(str).map(_normalize_code).tolist()
+                research_rows = _build_record_rows_from_rec_df(research_track, research_codes)
+                if callable(mark_h80_research_record_rows):
+                    research_rows = mark_h80_research_record_rows(research_rows)
+                h80_notes.append(f"H80研究績效閉環：H79研究推薦 {len(research_rows)} 筆已準備同步第8頁；不計入正式交易勝率。")
+            else:
+                h80_notes.append("H80研究績效閉環：本輪H79沒有研究推薦可同步。")
+        except Exception as exc:
+            h80_notes.append(f"H80研究績效閉環暫時無法建立：{exc}")
+    else:
+        h80_notes.append(f"H80研究績效閉環模組未載入：{H80_RECORD_FEEDBACK_VERSION}")
+
+    rows = [*action_rows, *research_rows]
+    if not rows:
+        return 0, [*[f"H7行動分區｜{x}" for x in (partition_notes or [])], *h80_notes, "本輪沒有可寫入第8頁的正式/A-/R1/H79研究推薦紀錄。"]
+
+    # Background writes cannot prove deployed remote persistence synchronously.
+    # When caller requires remote confirmation, always use the authority path now.
+    if background_write and rows and callable(upsert_records_authority_fast) and not require_remote_confirm:
         try:
             _page07_record_authority_executor_v181().submit(_v181_background_record_upsert, copy.deepcopy(rows))
             st.session_state[_k("v181_record_authority_scheduled_at")] = _now_text()
             messages = [
-                f"V181：{len(rows)} 筆正式/A-/R1紀錄已排程背景權威寫入；畫面不再等待 GitHub/Firestore 權威恢復。",
-                "寫入仍使用 code＋推薦日期＋推薦模式 business key 防重；背景完成後第8頁會自動讀取最新 authority。",
+                f"V181：{len(rows)} 筆推薦/研究紀錄已排程背景權威寫入。",
+                "寫入使用 code＋推薦日期＋推薦模式 business key 防重。",
+                *h80_notes,
             ]
             if not formal_scan_ok:
-                messages.insert(0, "整體掃描未達正式可用：本輪僅保存個股資料合格的R1/R1-M研究雷達，不宣稱正式推薦。")
+                messages.insert(0, "整體掃描未達正式可用：研究/R1樣本只做校正，不宣稱正式推薦。")
             return len(rows), messages
         except Exception as exc:
-            # 排程失敗才退回同步，不能因此遺失正式推薦紀錄。
             fallback_note = f"V181背景排程失敗，改同步權威寫入：{exc}"
         else:
             fallback_note = ""
     else:
         fallback_note = ""
+
     if require_remote_confirm:
         added, messages = _append_godpick_records(rows, force_duplicate=False, require_remote_confirm=True)
     else:
         added, messages = _append_godpick_records(rows, force_duplicate=False)
-    messages = [*[f"H7行動分區｜{x}" for x in (partition_notes or [])], *messages]
+    messages = [*[f"H7行動分區｜{x}" for x in (partition_notes or [])], *h80_notes, *messages]
     if fallback_note:
         messages = [fallback_note, *messages]
     if not formal_scan_ok:
-        messages = ["整體掃描未達正式可用：本輪僅保存個股資料合格的R1/R1-M研究雷達，不宣稱正式推薦。", *messages]
+        messages = ["整體掃描未達正式可用：本輪研究/R1樣本只做績效校正，不宣稱正式推薦。", *messages]
     return added, messages
 
 
@@ -17249,7 +17328,7 @@ def main():
             auto_source = st.session_state.get(_k("candidate_diagnosis_store"))
             if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
                 auto_source = rec_df
-            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source, background_write=False)  # V185：推薦紀錄需同步通過永久權威驗證後才算完成
+            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source, background_write=False, require_remote_confirm=True)  # H80：第8頁永久權威與遠端確認成功後才算完成
             calibration_added = 0
             calibration_msgs: list[str] = []
             calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
@@ -17260,7 +17339,7 @@ def main():
             else:
                 calibration_msgs = ["校正研究樣本服務未載入。"]
             st.session_state[_k("auto_record_detail")] = [
-                f"正式/A-/雷達紀錄永久權威已處理：{auto_added} 筆",
+                f"正式/A-/雷達/H79研究紀錄永久權威已處理：{auto_added} 筆",
                 *[str(x) for x in (auto_msgs or [])],
                 f"校正研究樣本新增：{calibration_added} 筆｜近門檻 {calibration_summary.get('near', 0)}｜市場漏選強勢 {calibration_summary.get('missed', 0)}",
                 *[str(x) for x in (calibration_msgs or [])],

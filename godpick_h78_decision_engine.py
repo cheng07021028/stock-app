@@ -1,4 +1,4 @@
-"""H79: Taiwan-stock opportunity ranking and executable-plan governance.
+"""H80: H79 opportunity governance + bounded Page08 performance feedback.
 
 The module name remains ``godpick_h78_decision_engine`` so an H78 installation
 can be upgraded by copying files in-place. H79 fixes four production defects:
@@ -25,7 +25,7 @@ import re
 import pandas as pd
 
 
-VERSION = "v191_h79_market_session_universe_adaptive_truth_20260920"
+VERSION = "v191_h80_record_performance_feedback_loop_20260921"
 
 
 @dataclass(frozen=True)
@@ -248,6 +248,20 @@ def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
         + prepared.loc[has_confirmation, "__relative"] * .40
         + prepared.loc[has_confirmation, "__confirmation"] * .15
     )
+
+    # H80: Page08 matured performance may refine the *research ranking* only.
+    # It never creates H64/H68 authority and cannot bypass price-plan, heat,
+    # liquidity, freshness or risk gates.  Require a meaningful segment sample
+    # size and cap the contribution to +/-2 points to avoid overfitting.
+    feedback_corr = series_or_nan("績效校正分")
+    feedback_corr = feedback_corr.where(feedback_corr.notna(), series_or_nan("Feedback績效校正分"))
+    feedback_samples = series_or_nan("績效樣本數").fillna(0)
+    feedback_adj = feedback_corr.fillna(0).clip(-8, 8).mul(0.25)
+    feedback_adj = feedback_adj.where(feedback_samples.ge(8), 0.0).clip(-2.0, 2.0)
+    prepared["__feedback_corr"] = feedback_corr
+    prepared["__feedback_samples"] = feedback_samples
+    prepared["__feedback_adj"] = feedback_adj
+    prepared["__score"] = (prepared["__score"] + feedback_adj).clip(0, 100)
     return prepared
 
 
@@ -320,6 +334,11 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         relative = num(prepared_row.get("__relative")) or 0.
         coverage = num(prepared_row.get("__coverage")) or 0.
         confirmation = num(prepared_row.get("__confirmation"))
+        feedback_corr = num(prepared_row.get("__feedback_corr"))
+        feedback_samples = num(prepared_row.get("__feedback_samples")) or 0.
+        feedback_adj = num(prepared_row.get("__feedback_adj")) or 0.
+        if feedback_samples >= 8 and abs(feedback_adj) >= .01:
+            evidence.append(f"歷史績效校正{feedback_adj:+.2f}")
 
         momentum = first(raw, "3日動能加速度百分點")
         acceleration = first(raw, "成交額3日加速度%", "成交量3日加速度%")
@@ -442,6 +461,9 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
             "H79絕對品質分": round(absolute, 2),
             "H79橫截面排名分": round(relative, 2),
             "H79確認模型分": round(confirmation, 2) if confirmation is not None else None,
+            "H80績效樣本數": int(feedback_samples),
+            "H80績效校正原始分": round(feedback_corr, 2) if feedback_corr is not None else None,
+            "H80績效校正加減分": round(feedback_adj, 2),
             "H79強度百分位%": round(strength_pct, 2) if strength_pct is not None else None,
             "H79族群百分位%": round(sector_pct, 2) if sector_pct is not None else None,
             "H79核心覆蓋%": round(coverage * 100, 2),
@@ -489,6 +511,7 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
 DISPLAY = [
     "股票代號", "股票名稱", "市場別", "類別", "H79決策層級", "H79推薦狀態",
     "H79自適應機會分", "H79絕對品質分", "H79橫截面排名分", "H79確認模型分",
+    "H80績效樣本數", "H80績效校正原始分", "H80績效校正加減分",
     "H79強度百分位%", "H79族群百分位%", "H79推薦理由", "H79交易狀態",
     "H79計畫進場", "H79結構停損", "H79第一目標", "H79成本後RR", "H79停損距離%",
     "H79價格上限試算", "H79有效增量", "H79缺資料", "H79未入選原因",
