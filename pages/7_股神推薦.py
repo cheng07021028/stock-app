@@ -620,7 +620,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h84_fast_entry_fast_excel_research_recovery_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h85_no_endless_rerun_lazy_render_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2743,6 +2743,11 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     action_source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else rec_df
     action_df, _formal_scan_ok_h7, _action_partition_notes_h7 = _v191_actionable_tracking_frame(action_source)
 
+    # H85: build the compact H79 display tables ONCE while a real scan is being
+    # saved.  Normal page entry/rerun must never rebuild the full candidate
+    # decision chain just to paint the screen.
+    h85_h79_core_tables = _h85_build_h79_core_for_snapshot(candidate_df, action_df)
+
     scan_report = st.session_state.get(_k("scan_quality_report"), {})
     if not isinstance(scan_report, dict):
         scan_report = {}
@@ -2794,6 +2799,7 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         "scan_quality": scan_report,
         "category_strength": _df_to_records_for_json(category_strength_df),
         "hot_pick": _df_to_records_for_json(hot_pick_df),
+        "h85_h79_core_tables": h85_h79_core_tables,
         "execution_governance_version": EXECUTION_GOVERNANCE_VERSION,
         "snapshot_version": "phase104_verified_even_when_zero_formal",
     }
@@ -2833,6 +2839,10 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         "category_strength": payload.get("category_strength", []),
         "hot_pick": payload.get("hot_pick", []),
         "scan_quality": scan_report,
+        "h85_h79_core_tables": ({
+            k: v for k, v in (h85_h79_core_tables or {}).items()
+            if k in {"version", "source", "created_at", "actionable", "research", "health"}
+        }),
         "candidate_count": len(candidate_records),
         "recommendation_count": len(recommendation_records),
         "full_snapshot_payload_hash": full_payload_hash,
@@ -2975,40 +2985,25 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
         _records_to_df_for_json(payload.get("recommendations", [])),
         source="latest_recommendations",
     )
-    # Re-evaluate old caches locally (no network) so practical stop/RR and the
-    # final partition are immediately available after this patch is installed.
-    full_rec_df = raw_rec_df.copy()
-    if callable(apply_godpick_decision_engine) and not full_rec_df.empty:
-        try:
-            full_rec_df = apply_godpick_decision_engine(full_rec_df, None)
-        except Exception:
-            pass
-    if not full_rec_df.empty:
-        try:
-            full_rec_df = _h20_rebuild_formal_partition_after_official_factors(full_rec_df)
-        except Exception:
-            pass
-    rec_df = _operational_recommendation_rows(full_rec_df, refresh_decision=False)
+    # H85: the persisted snapshot is already the result of the real recommendation
+    # run.  Opening Page07 must not re-run the full decision engine on that snapshot.
+    # Re-evaluation belongs to an explicit new scan/update action.
+    rec_df = _operational_recommendation_rows(raw_rec_df, refresh_decision=False)
 
     cat_df = _records_to_df_for_json(payload.get("category_strength", []))
     hot_df = _ensure_v92_night_compat_df(_records_to_df_for_json(payload.get("hot_pick", [])), source="latest_hot_pick")
 
     candidate_df = _records_to_df_for_json(payload.get("candidate_diagnosis", []))
     if candidate_df.empty:
-        candidate_df = full_rec_df.copy()
-    elif callable(apply_godpick_decision_engine):
-        try:
-            candidate_df = apply_godpick_decision_engine(candidate_df, None)
-            candidate_df = _h20_rebuild_formal_partition_after_official_factors(candidate_df)
-        except Exception:
-            pass
+        candidate_df = raw_rec_df.copy()
     if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
-        try:
-            st.session_state[_k("candidate_diagnosis_store")] = (
-                build_candidate_diagnosis(candidate_df) if callable(build_candidate_diagnosis) else candidate_df.copy()
-            )
-        except Exception:
-            st.session_state[_k("candidate_diagnosis_store")] = candidate_df.copy()
+        # Keep the exact saved diagnosis.  build_candidate_diagnosis/apply engine
+        # across 1k~2k rows on every cold entry was one of the endless-spinner roots.
+        st.session_state[_k("candidate_diagnosis_store")] = candidate_df.copy()
+
+    h85_core = payload.get("h85_h79_core_tables", {})
+    if isinstance(h85_core, dict) and h85_core:
+        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = h85_core
 
     scan_report = payload.get("scan_quality", {})
     if not isinstance(scan_report, dict) or not scan_report:
@@ -14213,7 +14208,170 @@ def _phase93_single_source_decision_frame(
             st.session_state[_k("v188_rank_block_reason_v189")] = f"V188 fallback補算失敗：{_fallback_v188_err}"
     return source.reset_index(drop=True)
 
+
+# =========================================================
+# H85 Page07 render governor
+# - Streamlit executes Python inside a collapsed expander.  Therefore merely
+#   placing the legacy H64~H77 chain in ``expanded=False`` does NOT make it
+#   lazy.  H85 puts the expensive chain behind an explicit boolean gate.
+# - Page entry reads the compact H79 tables persisted by the last real scan.
+#   Old H84 snapshots without that compact block get only a bounded <=120-row
+#   compatibility rebuild; they never trigger a full-market rebuild on entry.
+# =========================================================
+H85_H79_CORE_SESSION_KEY = "h85_h79_core_tables"
+H85_H79_CORE_LIMITS = {
+    "actionable": 60,
+    "research": 80,
+    "waiting": 80,
+    "emerging_watch": 60,
+    "data_repairs": 100,
+    "audit": 120,
+    "health": 120,
+}
+
+
+def _h85_decode_h79_core_tables(raw: Any) -> dict[str, pd.DataFrame]:
+    out: dict[str, pd.DataFrame] = {}
+    if not isinstance(raw, dict):
+        return out
+    for name in H85_H79_CORE_LIMITS:
+        value = raw.get(name, [])
+        if isinstance(value, pd.DataFrame):
+            out[name] = value.copy()
+        elif isinstance(value, list):
+            try:
+                out[name] = _records_to_df_for_json(value)
+            except Exception:
+                out[name] = pd.DataFrame(value)
+        else:
+            out[name] = pd.DataFrame()
+    return out
+
+
+def _h85_encode_h79_core_tables(tables: Any, *, source: str = "scan") -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "version": "v191_h85_compact_h79_snapshot_20260921",
+        "source": source,
+        "created_at": _now_text(),
+    }
+    if not isinstance(tables, dict):
+        tables = {}
+    for name, limit in H85_H79_CORE_LIMITS.items():
+        df = tables.get(name)
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame()
+        payload[name] = _df_to_records_for_json(df.head(int(limit)).copy())
+    return payload
+
+
+def _h85_build_h79_core_for_snapshot(candidate_df: pd.DataFrame, action_df: pd.DataFrame) -> dict[str, Any]:
+    """Build H79 compact tables once, only while a real recommendation run is saved."""
+    if not callable(build_h79_tables_guarded):
+        return {}
+    source = st.session_state.get(_k("decision_frame_store_v181"))
+    if not isinstance(source, pd.DataFrame) or source.empty:
+        source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else action_df
+    if not isinstance(source, pd.DataFrame) or source.empty:
+        return {}
+    try:
+        tables = build_h79_tables_guarded(source)
+        compact = _h85_encode_h79_core_tables(tables, source="recommendation-save")
+        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
+        return compact
+    except Exception as exc:
+        st.session_state[_k("h85_h79_snapshot_error")] = f"{type(exc).__name__}: {exc}"
+        return {}
+
+
+def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str, bool]:
+    raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+    tables = _h85_decode_h79_core_tables(raw)
+    if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+        return tables, _safe_str(raw.get("source")) if isinstance(raw, dict) else "snapshot", False
+
+    # Compatibility for the first opening after H85 deployment.  Do NOT rebuild
+    # the whole market merely to render the page.  A new real scan will persist
+    # the full compact H79 block for subsequent reruns/reboots.
+    candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+    # Prefer the candidate pool because H79 research rows may intentionally not
+    # be present in the operational Formal/A-/R1 list.  Still cap it below.
+    source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else rec_df
+    if not isinstance(source, pd.DataFrame) or source.empty or not callable(build_h79_tables_guarded):
+        return {}, "no-snapshot", False
+    bounded = len(source) > 120
+    work = source.copy()
+    if bounded:
+        try:
+            work = _safe_sort_export_df(
+                work,
+                ["H79研究推薦分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
+                [False, False, False, False, False],
+            ).head(120)
+        except Exception:
+            work = work.head(120).copy()
+    try:
+        built = build_h79_tables_guarded(work)
+        compact = _h85_encode_h79_core_tables(built, source="bounded-entry-compat")
+        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
+        return _h85_decode_h79_core_tables(compact), "bounded-entry-compat", bounded
+    except Exception as exc:
+        st.session_state[_k("h85_h79_render_error")] = f"{type(exc).__name__}: {exc}"
+        return {}, "render-error", bounded
+
+
 def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
+    candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+    if (rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty) and (
+        not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty
+    ):
+        return
+
+    tables, source_label, bounded = _h85_get_h79_core_for_render(rec_df if isinstance(rec_df, pd.DataFrame) else pd.DataFrame())
+    render_pro_section("超級AI股神｜H79 正式交易與研究推薦")
+    st.caption("H85：進頁只讀上次推薦已保存的精簡決策快照；H64～H77完整技術診斷只有你明確展開時才運算，避免頁面永久轉圈。")
+    if bounded:
+        st.warning("目前是 H84 舊快照相容模式：只用前120檔建立畫面摘要，避免開頁重算全市場。請下一次正常執行『重新推薦』後，H85會永久保存完整精簡摘要。")
+    if not tables:
+        err = _safe_str(st.session_state.get(_k("h85_h79_render_error"))) or _safe_str(st.session_state.get(_k("h85_h79_snapshot_error")))
+        st.info("目前沒有可直接顯示的 H79 精簡快照。" + (f"｜{err}" if err else ""))
+    else:
+        st.markdown("#### 正式可執行")
+        actionable = tables.get("actionable", pd.DataFrame())
+        st.dataframe(_format_df(actionable), use_container_width=True, hide_index=True)
+        st.markdown("#### 研究推薦（非買進許可）")
+        research = tables.get("research", pd.DataFrame())
+        st.dataframe(_format_df(research), use_container_width=True, hide_index=True)
+        health = tables.get("health", pd.DataFrame())
+        if isinstance(health, pd.DataFrame) and not health.empty:
+            st.dataframe(_format_df(health), use_container_width=True, hide_index=True)
+        st.caption(f"H85精簡快照來源：{source_label or 'snapshot'}｜研究股不會因此取得 Formal 買進授權。")
+
+        show_more = st.toggle(
+            "載入 H79 等待／淘汰／資料修復明細",
+            value=False,
+            key=_k("h85_show_h79_secondary_tables"),
+        )
+        if show_more:
+            with st.expander("上市櫃等待與完整淘汰原因", expanded=True):
+                st.dataframe(_format_df(tables.get("waiting", pd.DataFrame())), use_container_width=True, hide_index=True)
+                st.dataframe(_format_df(tables.get("audit", pd.DataFrame())), use_container_width=True, hide_index=True)
+            with st.expander("興櫃隔離研究與必要資料修復", expanded=False):
+                st.dataframe(_format_df(tables.get("emerging_watch", pd.DataFrame())), use_container_width=True, hide_index=True)
+                st.dataframe(_format_df(tables.get("data_repairs", pd.DataFrame())), use_container_width=True, hide_index=True)
+
+    show_legacy = st.toggle(
+        "載入 H64～H77 完整舊版技術診斷（較慢）",
+        value=False,
+        key=_k("h85_show_legacy_decision_diagnostics"),
+        help="只有除錯/稽核時才開啟。Streamlit 的 collapsed expander 仍會執行 Python，所以 H85 改成真正的運算開關。",
+    )
+    if show_legacy:
+        legacy_source = rec_df if isinstance(rec_df, pd.DataFrame) and not rec_df.empty else candidate_df
+        if isinstance(legacy_source, pd.DataFrame) and not legacy_source.empty:
+            _phase80_render_actionable_panel_legacy_h85(legacy_source)
+
+
+def _phase80_render_actionable_panel_legacy_h85(rec_df: pd.DataFrame) -> None:
     if rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty:
         return
     scan_report = st.session_state.get(_k("scan_quality_report"), {})
@@ -15645,13 +15803,83 @@ def _build_excel_bytes_fast_h84(
     return output.getvalue()
 
 
+
+
+def _build_excel_bytes_fast_h85(
+    rec_export: pd.DataFrame,
+    cat_export: pd.DataFrame,
+    leader_export: pd.DataFrame,
+    factor_export: pd.DataFrame,
+    candidate_diagnosis_export: pd.DataFrame | None = None,
+    scan_report: dict[str, Any] | None = None,
+) -> bytes:
+    """H85 zero-recompute manager workbook.
+
+    H84 reduced the workbook to seven sheets but still recomputed the entire
+    H51->H77 chain when the download button was pressed.  H85 exports the H79
+    compact snapshot already produced by the real recommendation run, so Excel
+    generation is serialization work instead of a second recommendation run.
+    """
+    from openpyxl import Workbook
+    output = io.BytesIO()
+    wb = Workbook()
+    try:
+        wb.remove(wb.active)
+    except Exception:
+        pass
+
+    tables, _, _ = _h85_get_h79_core_for_render(rec_export if isinstance(rec_export, pd.DataFrame) else pd.DataFrame())
+    sector = cat_export if isinstance(cat_export, pd.DataFrame) else pd.DataFrame()
+    health = tables.get("health", pd.DataFrame()).copy() if tables else pd.DataFrame()
+    report = scan_report if isinstance(scan_report, dict) else {}
+    if report:
+        extra = pd.DataFrame([
+            {"項目": str(k), "數值": _excel_safe_value(v)}
+            for k, v in report.items() if not isinstance(v, (dict, list, tuple, set))
+        ])
+        health = pd.concat([health, extra], ignore_index=True, sort=False)
+    sheets = [
+        ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
+        ("02_研究推薦", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
+        ("03_上市櫃等待", tables.get("waiting", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃等待候選。"),
+        ("04_今日主流資金", sector, "目前沒有可用主流族群資料。"),
+        ("05_驗證與風險證據", tables.get("audit", pd.DataFrame()) if tables else pd.DataFrame(), "目前沒有足夠的驗證增量/風險證據。"),
+        ("06_績效煞車與健康", health, "目前沒有成熟績效/系統健康資料。"),
+        ("07_興櫃隔離研究", tables.get("emerging_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有興櫃隔離研究股。"),
+    ]
+    for name, frame, fallback in sheets:
+        _write_df_to_ws_fast_h84(wb, name, frame, fallback)
+    try:
+        wb.active = 0
+    except Exception:
+        pass
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def _build_selected_excel_bytes_h85(export_df: pd.DataFrame, sheet_name: str = "勾選結果") -> bytes:
+    """One-sheet export for manually selected rows; no model rebuild."""
+    from openpyxl import Workbook
+    output = io.BytesIO()
+    wb = Workbook()
+    try:
+        wb.remove(wb.active)
+    except Exception:
+        pass
+    _write_df_to_ws_fast_h84(wb, sheet_name[:31], export_df if isinstance(export_df, pd.DataFrame) else pd.DataFrame(), "目前沒有勾選資料。")
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
     """V164：Excel 改為按需產生；一般按鈕 rerun 不再重建 20+ 工作表。"""
     if rec_df is None or rec_df.empty:
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H84 Excel快速主管版：預設只建立7張決策核心分頁；不再先生成20+張隱藏技術頁。研究推薦不等於買進。")
+    st.caption("H85 Excel零模型重算版：預設直接匯出已保存的7張主管決策快照；不再為下載重新跑H51~H79。研究推薦不等於買進。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -15686,16 +15914,14 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
     with c1:
         if not ready:
             if st.button("準備推薦結果 Excel", use_container_width=True, key=_k("prepare_main_excel_v164")):
-                with st.spinner("只在這次需要下載時建立 Excel..."):
-                    full_order = _get_full_table_order_for_export(rec_df)
-                    rec_export, cat_export, leader_export, factor_export = _build_export_views(
-                        rec_df, category_strength_df, top_n, full_order=full_order
-                    )
-                    rec_export_for_excel = _format_df(rec_export.copy()) if isinstance(rec_export, pd.DataFrame) and not rec_export.empty else rec_export
+                with st.spinner("H85：直接序列化已保存的7張主管決策快照，不重新跑模型..."):
                     candidate_export = st.session_state.get(_k("candidate_diagnosis_store"))
                     scan_report = st.session_state.get(_k("scan_quality_report"), {})
-                    excel_bytes = _build_excel_bytes_fast_h84(
-                        rec_export_for_excel, cat_export, leader_export, factor_export,
+                    excel_bytes = _build_excel_bytes_fast_h85(
+                        rec_df.copy(),
+                        category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
+                        pd.DataFrame(),
+                        pd.DataFrame(),
                         candidate_diagnosis_export=candidate_export if isinstance(candidate_export, pd.DataFrame) else None,
                         scan_report=scan_report if isinstance(scan_report, dict) else None,
                     )
@@ -15716,7 +15942,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                 key=_k("main_excel_download_v164"),
             )
     with c2:
-        st.caption("H84：一般匯出只建立7張主管核心分頁並快取；大量技術診斷不再混入日常Excel，因此準備與下載時間大幅縮短。")
+        st.caption("H85：一般匯出直接序列化7張已保存主管快照並快取；不重新執行推薦模型。完整技術診斷仍保留於下方進階模式。")
 
     with st.expander("進階：建立完整技術診斷 Excel（較慢）", expanded=False):
         st.caption("只有需要稽核H51~H74等技術分頁時才使用；日常決策請用上方快速主管版。")
@@ -15766,10 +15992,7 @@ def _render_selected_export_block():
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
     if not ready and st.button("準備勾選推薦股 Excel", use_container_width=True, key=_k("prepare_selected_excel_v164")):
         with st.spinner("建立勾選股票 Excel..."):
-            selected_bytes = _build_excel_bytes(
-                rec_export=export_df, cat_export=pd.DataFrame(), leader_export=pd.DataFrame(), factor_export=pd.DataFrame(),
-                candidate_diagnosis_export=export_df, scan_report=st.session_state.get(_k("scan_quality_report"), {}),
-            )
+            selected_bytes = _build_selected_excel_bytes_h85(export_df, sheet_name="勾選推薦股")
             cache = {"sig": sig, "bytes": selected_bytes, "name": f"股神推薦_勾選結果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"}
             st.session_state[cache_key] = cache
             ready = True
@@ -16512,8 +16735,10 @@ def _postprocess_dependency_signature_v164(macro_bridge: dict[str, Any], enabled
         MACRO_MODE_BRIDGE_FILE,
         MARKET_SNAPSHOT_FILE,
         OFFICIAL_FACTORS_CACHE_FILE,
-        "godpick_records.json",
-        "godpick_calibration_samples.json",
+        # H85: Page08 performance/calibration files update frequently in the
+        # background.  They are not display-time dependencies of the current
+        # recommendation snapshot and must not invalidate a ~20s postprocess
+        # cache on ordinary Page07 reruns.
     ]:
         try:
             path = Path(name)
@@ -16601,9 +16826,13 @@ def _render_phase105_learning_panel(candidate_df: pd.DataFrame | None = None) ->
         except Exception:
             state = {}
     summary = state.get("last_run_summary", {}) if isinstance(state, dict) else {}
-    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty and callable(build_learning_summary):
+    # H85: prefer the persisted learning summary.  Rebuilding the learning
+    # summary across the full candidate universe on every widget rerun adds
+    # needless CPU cost and can keep Streamlit's spinner active.  Only use a
+    # bounded compatibility rebuild when no persisted summary exists yet.
+    if (not summary) and isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty and callable(build_learning_summary):
         try:
-            summary = build_learning_summary(candidate_df)
+            summary = build_learning_summary(candidate_df.head(120).copy())
         except Exception:
             pass
     if not summary:
@@ -16983,7 +17212,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H84本機快照優先、推薦前才驗證遠端、Excel七頁快速主管版、研究名單不再被舊新鮮度旗標誤清空")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H85進頁零全市場重算、舊診斷真正懶載入、候選表快速總覽、Excel零模型重算")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
@@ -17712,6 +17941,9 @@ def main():
             )
             if auto_saved_at:
                 st.caption(f"本輪執行/保存時間：{auto_saved_at}｜候選診斷：{len(diagnosis_now)} 檔")
+            # H85: even when Formal/A-/R1 operational list is zero, the H79
+            # research layer still has decision value and must remain visible.
+            _phase80_render_actionable_panel(pd.DataFrame())
             diag = diagnosis_now.copy()
             sort_col = next((c for c in ["V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分", "股神實戰總分"] if c in diag.columns), None)
             if sort_col:
@@ -18328,8 +18560,10 @@ def main():
         ]
         st.dataframe(_format_df(hot_pick_df[[c for c in hot_show_cols if c in hot_pick_df.columns]].head(max(top_n, 20))), use_container_width=True, hide_index=True)
 
-    leader_df = rec_df.sort_values(["是否領先同類股", "推薦總分", "類股熱度分數"], ascending=[False, False, False]).reset_index(drop=True)
-    factor_rank = rec_df.sort_values(["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數"], ascending=[False, False, False, False]).reset_index(drop=True)
+    # H85: ranking tables are lazy.  Do not sort hundreds/thousands of candidate
+    # rows on every widget rerun unless that specific ranking section is open.
+    leader_df = pd.DataFrame()
+    factor_rank = pd.DataFrame()
 
     _phase80_render_actionable_panel(rec_df)
 
@@ -18340,26 +18574,25 @@ def main():
         except Exception:
             diagnosis_df = rec_df.copy()
     diagnosis_df = diagnosis_df.reset_index(drop=True)
-    # 排行榜以完整候選診斷池計算，不再只看最終少量作戰名單。
-    leader_df = _safe_sort_export_df(
-        diagnosis_df,
-        ["是否領先同類股", "候選強度分", "類股熱度分數", "同類股領先幅度"],
-        [False, False, False, False],
-    )
-    factor_rank = _safe_sort_export_df(
-        diagnosis_df,
-        ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "候選強度分"],
-        [False, False, False, False, False],
-    )
 
-    detail_sections_v164 = ["候選診斷總表（非買進清單）", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"]
+    detail_sections_v164 = ["快速總覽", "候選診斷總表（非買進清單）", "類股強度榜", "同類股領先榜", "自動因子榜", "飆股補抓", "操作說明"]
     active_detail_section_v164 = st.radio(
-        "推薦結果功能區｜V164 單區運算",
+        "推薦結果功能區｜H85 單區懶載入",
         detail_sections_v164,
         horizontal=True,
-        key=_k("active_detail_section_v164"),
+        key=_k("active_detail_section_h85"),
     )
-    st.caption("V164：只執行目前選取的功能區，不再讓 st.tabs 在每次 rerun 同時建立六個區塊。")
+    st.caption("H85：預設快速總覽；完整 data_editor、排行榜排序與 Excel 準備只有選到該功能區才執行。")
+
+    if active_detail_section_v164 == "快速總覽":
+        quick_cols = [c for c in [
+            "股票代號", "股票名稱", "市場別", "類別", "正式推薦分區", "H79研究推薦層級",
+            "H79研究推薦分", "股神推薦優先分", "候選強度分", "推薦總分",
+            "風險報酬比", "最新價", "正式推薦阻擋原因", "推薦理由摘要"
+        ] if c in diagnosis_df.columns]
+        quick_df = diagnosis_df[quick_cols].head(30).copy() if quick_cols else diagnosis_df.head(30).copy()
+        st.dataframe(_format_df(quick_df), use_container_width=True, hide_index=True)
+        st.caption(f"快速總覽僅渲染前 {min(len(diagnosis_df),30)} / {len(diagnosis_df)} 筆；需要勾選、完整欄位或同步時再切到『候選診斷總表』。")
 
     if active_detail_section_v164 == "候選診斷總表（非買進清單）":
         # v26 欄位統一：完整推薦表使用與 8_股神推薦紀錄 / 10_推薦清單 / 12_股神管理中心一致的標準欄位順序。
@@ -18512,77 +18745,47 @@ def main():
                 key=_k("full_table_sync_all"),
             )
         with full_b2:
-            # v25.7：完整推薦表直接匯出 Excel。
-            export_target_df = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else diagnosis_df.copy()
-            export_target_cols = ["勾選"] + [c for c in full_show_cols if c != "勾選"]
-            if "勾選" not in export_target_df.columns:
-                if "股票代號" in export_target_df.columns:
-                    export_target_df.insert(0, "勾選", export_target_df["股票代號"].astype(str).map(lambda x: _normalize_code(x) in set(full_picked_codes)))
-                else:
-                    export_target_df.insert(0, "勾選", False)
-            export_target_df = export_target_df[[c for c in export_target_cols if c in export_target_df.columns]].copy()
-            export_target_for_excel = _format_df(export_target_df.copy()) if isinstance(export_target_df, pd.DataFrame) and not export_target_df.empty else export_target_df
-            # v72：若欄位管理狀態異常導致只剩「勾選」或空表，直接回退用完整 diagnosis_df，避免 Excel 完整推薦表空白。
-            try:
-                _real_export_cols = [c for c in export_target_for_excel.columns if str(c) != "勾選"] if isinstance(export_target_for_excel, pd.DataFrame) else []
-                if (not isinstance(export_target_for_excel, pd.DataFrame)) or export_target_for_excel.empty or len(_real_export_cols) == 0:
-                    export_target_for_excel = _format_df((selected_snapshot_full.copy() if len(full_picked_codes) > 0 else diagnosis_df.copy()))
-            except Exception:
-                export_target_for_excel = _format_df((selected_snapshot_full.copy() if len(full_picked_codes) > 0 else diagnosis_df.copy()))
-
-            # V164：完整/勾選 Excel 改為按需建立並依結果與勾選指紋快取。
-            export_source_for_rank = selected_snapshot_full.copy() if len(full_picked_codes) > 0 else diagnosis_df.copy()
-            if isinstance(export_source_for_rank, pd.DataFrame) and "勾選" in export_source_for_rank.columns:
-                export_source_for_rank = export_source_for_rank.drop(columns=["勾選"], errors="ignore")
+            # H85: zero pre-compute.  Until the user clicks the button we do not
+            # copy/format the full candidate frame and do not rebuild any model.
+            export_label = "匯出勾選 Excel" if len(full_picked_codes) > 0 else "匯出主管 Excel"
+            export_source_for_rank = selected_snapshot_full if len(full_picked_codes) > 0 else diagnosis_df
             export_sig_v164 = _result_export_signature_v164(
                 export_source_for_rank,
-                "full-table|V191-H35-FORECAST-INTEGRITY|V191-H41-RECOMMENDATION-FUNNEL|V191-H42-DUAL-ROUTE-FOCUS|V191-H47-MAINSTREAM-LEADER-STAGE|V191-H51-HUMAN-MASTER-COMPACT-EXCEL|" + ",".join(sorted(full_picked_codes)) + "|" + _column_order_fingerprint(full_show_cols),
+                "h85-lazy-candidate-export|" + ",".join(sorted(full_picked_codes)),
             )
-            export_cache_key_v164 = _k("full_table_export_cache_v164")
+            export_cache_key_v164 = _k("full_table_export_cache_h85")
             export_cache_v164 = st.session_state.get(export_cache_key_v164, {})
             export_ready_v164 = (
                 isinstance(export_cache_v164, dict)
                 and export_cache_v164.get("sig") == export_sig_v164
                 and isinstance(export_cache_v164.get("bytes"), (bytes, bytearray))
             )
-            export_label = "匯出勾選 Excel" if len(full_picked_codes) > 0 else "匯出完整 Excel"
-            if not export_ready_v164:
-                if st.button(
-                    f"準備{export_label}",
-                    use_container_width=True,
-                    key=_k("prepare_full_table_excel_v164"),
-                ):
-                    with st.spinner("只在需要下載時建立完整 Excel 分頁..."):
-                        try:
-                            full_export_order = [c for c in export_target_for_excel.columns if c != "勾選"] if isinstance(export_target_for_excel, pd.DataFrame) else None
-                            _, cat_export_full, leader_export_full, factor_export_full = _build_export_views(
-                                export_source_for_rank,
-                                category_strength_df if len(full_picked_codes) == 0 else pd.DataFrame(),
-                                top_n=max(int(top_n or 200), len(export_source_for_rank) if isinstance(export_source_for_rank, pd.DataFrame) else 200),
-                                full_order=full_export_order,
-                            )
-                        except Exception:
-                            cat_export_full, leader_export_full, factor_export_full = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-                        candidate_store_for_export = st.session_state.get(_k("candidate_diagnosis_store"))
-                        if len(full_picked_codes) > 0 and isinstance(candidate_store_for_export, pd.DataFrame) and "股票代號" in candidate_store_for_export.columns:
-                            candidate_store_for_export = candidate_store_for_export[
-                                candidate_store_for_export["股票代號"].astype(str).map(_normalize_code).isin(set(full_picked_codes))
-                            ].copy()
-                        export_bytes_full_table = _build_excel_bytes(
-                            rec_export=(selected_snapshot_full.copy() if len(full_picked_codes) > 0 else rec_df.copy()),
-                            cat_export=cat_export_full,
-                            leader_export=leader_export_full,
-                            factor_export=factor_export_full,
-                            candidate_diagnosis_export=(candidate_store_for_export if isinstance(candidate_store_for_export, pd.DataFrame) else export_target_for_excel),
+            if not export_ready_v164 and st.button(
+                f"準備{export_label}",
+                use_container_width=True,
+                key=_k("prepare_full_table_excel_h85"),
+            ):
+                with st.spinner("H85 按需建立 Excel；畫面一般 rerun 不再預先格式化全候選資料..."):
+                    if len(full_picked_codes) > 0:
+                        export_bytes_full_table = _build_selected_excel_bytes_h85(
+                            selected_snapshot_full.copy(), sheet_name="勾選候選"
+                        )
+                    else:
+                        export_bytes_full_table = _build_excel_bytes_fast_h85(
+                            rec_export=rec_df.copy(),
+                            cat_export=category_strength_df.copy() if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
+                            leader_export=pd.DataFrame(),
+                            factor_export=pd.DataFrame(),
+                            candidate_diagnosis_export=diagnosis_df,
                             scan_report=st.session_state.get(_k("scan_quality_report"), {}),
                         )
-                        export_cache_v164 = {
-                            "sig": export_sig_v164,
-                            "bytes": export_bytes_full_table,
-                            "name": f"股神正式推薦作戰表_{'勾選' if len(full_picked_codes) > 0 else '全部'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        }
-                        st.session_state[export_cache_key_v164] = export_cache_v164
-                        export_ready_v164 = True
+                    export_cache_v164 = {
+                        "sig": export_sig_v164,
+                        "bytes": export_bytes_full_table,
+                        "name": f"股神正式推薦作戰表_{'勾選' if len(full_picked_codes) > 0 else '主管版'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    }
+                    st.session_state[export_cache_key_v164] = export_cache_v164
+                    export_ready_v164 = True
             if export_ready_v164:
                 st.download_button(
                     export_label,
@@ -18590,7 +18793,7 @@ def main():
                     file_name=export_cache_v164["name"],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    key=_k("full_table_excel_download_v164"),
+                    key=_k("full_table_excel_download_h85"),
                 )
         with full_b3:
             st.caption("Phase 8：候選診斷表可加入 05 自選股；09/10 會自動攔截正式排除與高風險觀察，避免把非推薦股寫成正式推薦。")
@@ -18690,6 +18893,11 @@ def main():
         st.dataframe(_v191_h48_arrow_safe_frame(category_show), use_container_width=True, hide_index=True)
 
     if active_detail_section_v164 == "同類股領先榜":
+        leader_df = _safe_sort_export_df(
+            diagnosis_df,
+            ["是否領先同類股", "候選強度分", "類股熱度分數", "同類股領先幅度"],
+            [False, False, False, False],
+        )
         st.dataframe(
             _format_df(
                 leader_df[[c for c in [
@@ -18703,6 +18911,11 @@ def main():
         )
 
     if active_detail_section_v164 == "自動因子榜":
+        factor_rank = _safe_sort_export_df(
+            diagnosis_df,
+            ["自動因子總分", "EPS代理分數", "營收動能代理分數", "獲利代理分數", "候選強度分"],
+            [False, False, False, False, False],
+        )
         st.dataframe(
             _format_df(
                 factor_rank[[c for c in [
