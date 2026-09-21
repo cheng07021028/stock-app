@@ -1,4 +1,4 @@
-"""H80: H79 opportunity governance + bounded Page08 performance feedback.
+"""H81: H79 opportunity governance + H80 performance + professional research overlay.
 
 The module name remains ``godpick_h78_decision_engine`` so an H78 installation
 can be upgraded by copying files in-place. H79 fixes four production defects:
@@ -25,7 +25,7 @@ import re
 import pandas as pd
 
 
-VERSION = "v191_h80_record_performance_feedback_loop_20260921"
+VERSION = "v191_h81_professional_research_governance_20260921"
 
 
 @dataclass(frozen=True)
@@ -187,7 +187,14 @@ def price_plan(row, policy=Policy()):
 
 
 def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
-    prepared = frame.copy(deep=True)
+    # H81 professional research layer is deterministic and bounded.  It may
+    # refine research order only; all Formal authority and execution gates
+    # remain below in evaluate()/price_plan().
+    try:
+        from godpick_h81_professional_ai import apply_professional_research_overlay
+        prepared = apply_professional_research_overlay(frame)
+    except Exception:
+        prepared = frame.copy(deep=True)
     prepared["__code"] = prepared.get("股票代號", pd.Series("", index=prepared.index)).map(text).str.replace(r"\.0$", "", regex=True)
     market_raw = prepared.get("市場別", prepared.get("market", pd.Series("", index=prepared.index)))
     prepared["__market"] = market_raw.map(_market_bucket)
@@ -262,6 +269,19 @@ def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
     prepared["__feedback_samples"] = feedback_samples
     prepared["__feedback_adj"] = feedback_adj
     prepared["__score"] = (prepared["__score"] + feedback_adj).clip(0, 100)
+
+    # H81: professional overlay is already capped by the persisted H81 settings
+    # (default +/-2.5).  We use the precomputed adjustment only when the H81
+    # layer was able to load/derive enough evidence.  This adjustment cannot
+    # change the Formal authority check, liquidity, heat or price-plan gates.
+    h81_adj = series_or_nan("H81排名加減分").fillna(0.0).clip(-5.0, 5.0)
+    h81_score = series_or_nan("H81專業研究總分")
+    h81_coverage = series_or_nan("H81資料覆蓋%")
+    prepared["__h81_score"] = h81_score
+    prepared["__h81_coverage"] = h81_coverage
+    prepared["__h81_adj"] = h81_adj
+    # Keep eligibility score untouched. H81 changes order only.
+    prepared["__h81_rank_score"] = (prepared["__score"] + h81_adj).clip(0, 100)
     return prepared
 
 
@@ -330,6 +350,9 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         strength_pct = num(prepared_row.get("__strength_pct"))
         sector_pct = num(prepared_row.get("__sector_pct"))
         score = num(prepared_row.get("__score")) or 0.
+        h81_rank_score = num(prepared_row.get("__h81_rank_score"))
+        if h81_rank_score is None:
+            h81_rank_score = score
         absolute = num(prepared_row.get("__absolute")) or 0.
         relative = num(prepared_row.get("__relative")) or 0.
         coverage = num(prepared_row.get("__coverage")) or 0.
@@ -337,8 +360,13 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         feedback_corr = num(prepared_row.get("__feedback_corr"))
         feedback_samples = num(prepared_row.get("__feedback_samples")) or 0.
         feedback_adj = num(prepared_row.get("__feedback_adj")) or 0.
+        h81_score = num(prepared_row.get("__h81_score"))
+        h81_coverage = num(prepared_row.get("__h81_coverage"))
+        h81_adj = num(prepared_row.get("__h81_adj")) or 0.
         if feedback_samples >= 8 and abs(feedback_adj) >= .01:
             evidence.append(f"歷史績效校正{feedback_adj:+.2f}")
+        if h81_score is not None and h81_coverage is not None and abs(h81_adj) >= .01:
+            evidence.append(f"H81專業研究{h81_adj:+.2f}")
 
         momentum = first(raw, "3日動能加速度百分點")
         acceleration = first(raw, "成交額3日加速度%", "成交量3日加速度%")
@@ -464,6 +492,10 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
             "H80績效樣本數": int(feedback_samples),
             "H80績效校正原始分": round(feedback_corr, 2) if feedback_corr is not None else None,
             "H80績效校正加減分": round(feedback_adj, 2),
+            "H81專業研究總分": round(h81_score, 2) if h81_score is not None else None,
+            "H81資料覆蓋%": round(h81_coverage, 2) if h81_coverage is not None else None,
+            "H81排名加減分": round(h81_adj, 2),
+            "H81研究排序分": round(h81_rank_score, 2),
             "H79強度百分位%": round(strength_pct, 2) if strength_pct is not None else None,
             "H79族群百分位%": round(sector_pct, 2) if sector_pct is not None else None,
             "H79核心覆蓋%": round(coverage * 100, 2),
@@ -512,6 +544,11 @@ DISPLAY = [
     "股票代號", "股票名稱", "市場別", "類別", "H79決策層級", "H79推薦狀態",
     "H79自適應機會分", "H79絕對品質分", "H79橫截面排名分", "H79確認模型分",
     "H80績效樣本數", "H80績效校正原始分", "H80績效校正加減分",
+    "H81專業研究總分", "H81資料覆蓋%", "H81排名加減分", "H81研究排序分",
+    "H81市場定價理解分", "H81技術多週期分", "H81新聞事件影響分",
+    "H81歷史回測可信分", "H81風險管理分", "H81交易日誌回饋分", "H81交易計畫完整分",
+    "H81三大利多催化", "H81三大風險", "H81下一步關注", "H81研究摘要",
+    "H81盤前檢查", "H81開盤策略", "H81盤中調整", "H81收盤檢討",
     "H79強度百分位%", "H79族群百分位%", "H79推薦理由", "H79交易狀態",
     "H79計畫進場", "H79結構停損", "H79第一目標", "H79成本後RR", "H79停損距離%",
     "H79價格上限試算", "H79有效增量", "H79缺資料", "H79未入選原因",
@@ -535,8 +572,8 @@ def build_tables(frame, *, as_of=None, policy=Policy()):
     work = work.copy()
     work["__executable"] = work["H79交易狀態"].str.startswith("條件可執行", na=False)
     ranked = work.sort_values(
-        ["__executable", "H79自適應機會分", "股票代號"],
-        ascending=[False, False, True], kind="mergesort",
+        ["__executable", "H81研究排序分", "H79自適應機會分", "股票代號"],
+        ascending=[False, False, False, True], kind="mergesort",
     )
     pool = ranked[ranked["H79決策層級"].isin(["正式條件可執行", "研究推薦"])]
     chosen, sector_counts = [], {}
@@ -583,7 +620,8 @@ def build_tables(frame, *, as_of=None, policy=Policy()):
         {"項目": "正式條件可執行", "數值": chosen_executable_count},
         {"項目": "必要資料待修復", "數值": int(work["H79決策層級"].eq("資料待修復").sum())},
         {"項目": "週末日期正規化", "數值": int(work["H79日期正規化"].ne("無").sum())},
-        {"項目": "學習狀態", "數值": "固定H79政策；需逐日全市場快照及成熟標籤做外樣本驗證"},
+        {"項目": "學習狀態", "數值": "H79固定正式治理＋H80成熟績效回饋＋H81專業研究；H81只調研究排序，不放寬Formal"},
+        {"項目": "H81專業研究", "數值": "市場定價/技術/新聞/回測/投組風險/交易日誌/每日計畫；設定由永久權威檔管理"},
         {"項目": "排名口徑", "數值": "上市櫃絕對品質55%＋橫截面45%；有H72/H74/H77時改為45%＋40%＋確認15%"},
         {"項目": "缺資料處理", "數值": "TDCC為選配證據；缺TDCC不觸發資料待修復，必要日期/價格/流動性缺失才修復"},
         {"項目": "市場分流", "數值": "上市/上櫃可進主推薦；興櫃只進隔離研究，不占主榜"},
