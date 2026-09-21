@@ -620,7 +620,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h85_no_endless_rerun_lazy_render_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h86_postscan_nonblocking_always_excel_20260921"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -1895,6 +1895,101 @@ def _page07_record_authority_executor_v181():
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-page07-records")
 
 
+H86_POSTSCAN_STATUS_FILE = "godpick_page07_postscan_status.json"
+
+
+@st.cache_resource(show_spinner=False)
+def _page07_postscan_executor_h86():
+    # H86 separates user-facing scan completion from rotation/learning/calibration
+    # persistence.  The main Streamlit script must become idle so Excel/buttons
+    # render immediately after the scan progress reaches 100%.
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="godpick-page07-postscan")
+
+
+def _h86_write_postscan_status(payload: dict[str, Any]) -> None:
+    try:
+        _safe_json_write_local(H86_POSTSCAN_STATUS_FILE, payload)
+    except Exception:
+        pass
+
+
+def _h86_postscan_worker(
+    candidate_df: pd.DataFrame,
+    rec_df: pd.DataFrame,
+    scan_report: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    started = _now_text()
+    status: dict[str, Any] = {
+        "version": PAGE07_SPEED_FIX_VERSION,
+        "status": "RUNNING",
+        "started_at": started,
+        "finished_at": "",
+        "steps": {},
+    }
+    _h86_write_postscan_status(status)
+    source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else rec_df
+    try:
+        if callable(save_rotation_snapshot) and isinstance(source, pd.DataFrame) and not source.empty:
+            try:
+                ok, msg = save_rotation_snapshot(source, background_remote=True)
+                status["steps"]["rotation"] = {"ok": bool(ok), "message": str(msg)}
+            except Exception as exc:
+                status["steps"]["rotation"] = {"ok": False, "message": str(exc)}
+        if callable(save_learning_run) and isinstance(source, pd.DataFrame) and not source.empty:
+            try:
+                ok, msgs, state = save_learning_run(
+                    source, rec_df,
+                    scan_report=scan_report or {},
+                    metadata=metadata or {},
+                    persist_remote=True,
+                    background_remote=True,
+                    pre_scored=True,
+                )
+                status["steps"]["learning"] = {"ok": bool(ok), "messages": [str(x) for x in (msgs or [])][-8:]}
+            except Exception as exc:
+                status["steps"]["learning"] = {"ok": False, "message": str(exc)}
+        if callable(save_super_ai_run) and isinstance(source, pd.DataFrame) and not source.empty:
+            try:
+                ok, msg, meta = save_super_ai_run(source, rec_df, metadata={**(metadata or {}), "scan_quality": scan_report or {}})
+                status["steps"]["super_ai"] = {"ok": bool(ok), "message": str(msg)}
+            except Exception as exc:
+                status["steps"]["super_ai"] = {"ok": False, "message": str(exc)}
+        if callable(save_calibration_samples) and isinstance(source, pd.DataFrame) and not source.empty:
+            try:
+                added, msgs, summary = save_calibration_samples(source, max_near=24, max_missed=20, background_remote=True)
+                status["steps"]["calibration"] = {"ok": True, "added": int(added or 0), "summary": summary or {}, "messages": [str(x) for x in (msgs or [])][-6:]}
+            except Exception as exc:
+                status["steps"]["calibration"] = {"ok": False, "message": str(exc)}
+        if callable(refresh_t1_truth_async):
+            try:
+                ok, msg = refresh_t1_truth_async(max_records=160, max_workers=8)
+                status["steps"]["t1_truth"] = {"ok": bool(ok), "message": str(msg)}
+            except Exception as exc:
+                status["steps"]["t1_truth"] = {"ok": False, "message": str(exc)}
+        status["status"] = "DONE"
+    except Exception as exc:
+        status["status"] = "FAILED"
+        status["error"] = f"{type(exc).__name__}: {exc}"
+    status["finished_at"] = _now_text()
+    _h86_write_postscan_status(status)
+    return status
+
+
+def _h86_schedule_postscan(candidate_df: pd.DataFrame, rec_df: pd.DataFrame, scan_report: dict[str, Any], metadata: dict[str, Any]) -> tuple[bool, str]:
+    try:
+        _page07_postscan_executor_h86().submit(
+            _h86_postscan_worker,
+            candidate_df.copy(deep=False) if isinstance(candidate_df, pd.DataFrame) else pd.DataFrame(),
+            rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
+            dict(scan_report or {}),
+            dict(metadata or {}),
+        )
+        return True, "H86：輪動/學習/SuperAI/校正/T+1 已轉入背景收尾；頁面不等待。"
+    except Exception as exc:
+        return False, f"H86背景收尾排程失敗：{type(exc).__name__}: {exc}"
+
+
 def _v181_background_record_upsert(rows: list[dict[str, Any]]) -> dict[str, Any]:
     try:
         if not callable(upsert_records_authority_fast):
@@ -2742,11 +2837,37 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
     # single-source formal/A-/R1 partition as Page08 auto-recording.
     action_source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else rec_df
     action_df, _formal_scan_ok_h7, _action_partition_notes_h7 = _v191_actionable_tracking_frame(action_source)
+    # H86: retain the exact action partition from the scan-save path so Page08
+    # auto-recording does not re-run H68/action governance across 1k~2k rows.
+    try:
+        st.session_state[_k("h86_action_frame_for_record")] = action_df.copy(deep=False)
+    except Exception:
+        pass
 
-    # H85: build the compact H79 display tables ONCE while a real scan is being
-    # saved.  Normal page entry/rerun must never rebuild the full candidate
-    # decision chain just to paint the screen.
-    h85_h79_core_tables = _h85_build_h79_core_for_snapshot(candidate_df, action_df)
+    # H86: do NOT rebuild H79 across the whole 1k~2k universe after the progress
+    # bar already reached 100%.  That hidden second model pass was a major reason
+    # the browser remained on Stop after the scan said completed.  Reuse an
+    # existing compact block when available; otherwise build only from the top
+    # 240 research candidates.  Full-market truth already lives in candidate_df.
+    _h86_existing_core = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+    if isinstance(_h86_existing_core, dict) and _h86_existing_core.get("created_at"):
+        h85_h79_core_tables = dict(_h86_existing_core)
+    else:
+        _h86_h79_source = candidate_df
+        if isinstance(_h86_h79_source, pd.DataFrame) and len(_h86_h79_source) > 240:
+            try:
+                _h86_h79_source = _safe_sort_export_df(
+                    _h86_h79_source,
+                    ["H79研究推薦分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
+                    [False, False, False, False, False],
+                ).head(240).copy()
+            except Exception:
+                _h86_h79_source = _h86_h79_source.head(240).copy()
+        h85_h79_core_tables = _h85_build_h79_core_for_snapshot(_h86_h79_source, action_df)
+        if isinstance(h85_h79_core_tables, dict):
+            h85_h79_core_tables["source"] = "h86-bounded-save"
+            h85_h79_core_tables["full_candidate_count"] = int(len(candidate_df)) if isinstance(candidate_df, pd.DataFrame) else 0
+            h85_h79_core_tables["model_input_count"] = int(len(_h86_h79_source)) if isinstance(_h86_h79_source, pd.DataFrame) else 0
 
     scan_report = st.session_state.get(_k("scan_quality_report"), {})
     if not isinstance(scan_report, dict):
@@ -2871,17 +2992,23 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
             _safe_str((_anchor_gh_cfg_v185() or {}).get("token")) or bool(_anchor_fs_cfg_v185())
         )
         if anchor_remote_configured:
-            from godpick_durability_service import persist_json_permanent as _persist_anchor_v185
-            anchor_remote_ok, anchor_remote_msg = _persist_anchor_v185(
+            # H86: never block the Streamlit render thread waiting for GitHub /
+            # Firestore confirmation after a 1k~2k stock scan.  The local anchor
+            # has already been atomically written + read back above.  Queue the
+            # remote copy through the durability outbox and let Page17/scheduler
+            # converge it in the background.
+            from godpick_durability_service import persist_json_async as _persist_anchor_h86
+            anchor_remote_ok, anchor_remote_msg = _persist_anchor_h86(
                 GODPICK_LATEST_ANCHOR_FILE, anchor_payload,
                 firestore_doc="godpick_latest_run_anchor",
-                reason="H79.1 synchronous recommendation remote anchor",
+                reason="H86 nonblocking recommendation remote anchor",
             )
+            anchor_remote_msg = "H86背景永久化已排程｜" + str(anchor_remote_msg or "")
         else:
             anchor_remote_msg = "未設定 GitHub/Firebase；本機錨點已獨立保存，尚無跨主機遠端備援"
     except Exception as anchor_exc:
         anchor_remote_ok = False
-        anchor_remote_msg = f"遠端錨點備援例外：{type(anchor_exc).__name__}: {anchor_exc}"
+        anchor_remote_msg = f"H86遠端錨點背景排程例外：{type(anchor_exc).__name__}: {anchor_exc}"
 
     # V184：最新推薦已列入 V183 durability registry；不要再只靠單一路徑
     # GitHub 背景寫入。先本機原子保存，再由 durability outbox 同步
@@ -13435,13 +13562,20 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     learned nothing whenever Formal/A-/R1 happened to be empty.
     """
     _h68_source = source_df
-    if callable(apply_h68_execution_learning_truth) and isinstance(source_df, pd.DataFrame) and not source_df.empty:
-        try:
-            _h68_source = apply_h68_execution_learning_truth(source_df)
-        except Exception:
-            _h68_source = source_df
-
-    action, formal_scan_ok, partition_notes = _v191_actionable_tracking_frame(_h68_source)
+    _h86_prebuilt_action = st.session_state.get(_k("h86_action_frame_for_record"))
+    if isinstance(_h86_prebuilt_action, pd.DataFrame):
+        # Exact frame already produced by _save_latest_recommendation_pack().
+        # Do not run the expensive execution-learning/action partition twice.
+        action = _h86_prebuilt_action.copy(deep=False)
+        formal_scan_ok = bool((st.session_state.get(_k("scan_quality_report"), {}) or {}).get("正式推薦可用", False))
+        partition_notes = ["H86：沿用本輪已保存 action frame，未重跑 H68/action governance。"]
+    else:
+        if callable(apply_h68_execution_learning_truth) and isinstance(source_df, pd.DataFrame) and not source_df.empty:
+            try:
+                _h68_source = apply_h68_execution_learning_truth(source_df)
+            except Exception:
+                _h68_source = source_df
+        action, formal_scan_ok, partition_notes = _v191_actionable_tracking_frame(_h68_source)
     action = action.copy() if isinstance(action, pd.DataFrame) else pd.DataFrame()
     action_rows: list[dict[str, Any]] = []
     research_rows: list[dict[str, Any]] = []
@@ -13533,10 +13667,17 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     # H80: H79 research recommendations are *learning samples*, not buy permits.
     # Build from the compact H79 table but overlay onto full source rows so Page08
     # can later calculate performance from the original decision-time evidence.
-    if callable(build_h79_tables_guarded) and callable(build_h80_research_tracking_frame):
+    if callable(build_h80_research_tracking_frame):
         try:
-            h79_tables = build_h79_tables_guarded(_h68_source)
-            h79_research = h79_tables.get("research", pd.DataFrame()) if isinstance(h79_tables, dict) else pd.DataFrame()
+            # H86: H85 already persisted the H79 compact research table while the
+            # scan was saved.  Reuse it; only fall back to a fresh H79 build when
+            # an old/non-H85 snapshot truly has no compact table.
+            _h86_core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+            _h86_core = _h85_decode_h79_core_tables(_h86_core_raw)
+            h79_research = _h86_core.get("research", pd.DataFrame()) if isinstance(_h86_core, dict) else pd.DataFrame()
+            if (not isinstance(h79_research, pd.DataFrame) or h79_research.empty) and callable(build_h79_tables_guarded):
+                h79_tables = build_h79_tables_guarded(_h68_source.head(160).copy() if len(_h68_source) > 160 else _h68_source)
+                h79_research = h79_tables.get("research", pd.DataFrame()) if isinstance(h79_tables, dict) else pd.DataFrame()
             research_track = build_h80_research_tracking_frame(_h68_source, h79_research, excluded_codes=action_codes)
             if isinstance(research_track, pd.DataFrame) and not research_track.empty:
                 research_track["推薦批次日期"] = _run_date_v191_h9
@@ -15873,6 +16014,67 @@ def _build_selected_excel_bytes_h85(export_df: pd.DataFrame, sheet_name: str = "
     return output.getvalue()
 
 
+def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame) -> None:
+    """H86: always expose the manager workbook near the top of results.
+
+    The 7-sheet workbook is generated from the already persisted H79 compact
+    snapshot, never from a second model run.  One result signature -> one build.
+    This removes the old two-step “prepare then maybe find download lower down”.
+    """
+    candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+    if not isinstance(candidate_df, pd.DataFrame):
+        candidate_df = pd.DataFrame()
+    if (rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty) and candidate_df.empty:
+        return
+    render_pro_section("Excel｜主管7頁快速下載")
+    saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
+    core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+    core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
+    sig_raw = f"H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}"
+    sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
+    cache_key = _k("h86_always_excel_cache")
+    cache = st.session_state.get(cache_key, {})
+    ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
+    if not ready:
+        t0 = time.perf_counter()
+        try:
+            data = _build_excel_bytes_fast_h85(
+                rec_export=rec_df.copy(deep=False) if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
+                cat_export=category_strength_df.copy(deep=False) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
+                leader_export=pd.DataFrame(),
+                factor_export=pd.DataFrame(),
+                candidate_diagnosis_export=candidate_df,
+                scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+            )
+            cache = {
+                "sig": sig,
+                "bytes": data,
+                "name": f"股神正式推薦作戰表_主管7頁_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "seconds": round(time.perf_counter()-t0, 3),
+            }
+            st.session_state[cache_key] = cache
+            ready = True
+        except Exception as exc:
+            st.session_state[_k("h86_excel_error")] = f"{type(exc).__name__}: {exc}"
+            ready = False
+    if ready:
+        st.download_button(
+            "⬇️ 下載股神推薦 Excel（7張主管核心表）",
+            data=cache["bytes"],
+            file_name=cache["name"],
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary",
+            key=_k("h86_always_excel_download"),
+        )
+        st.caption(f"H86：Excel 已就緒｜建立 {cache.get('seconds','—')} 秒｜不重跑模型。01正式、02研究、03等待、04主流資金、05風險證據、06健康、07興櫃研究。")
+    else:
+        st.error("主管Excel建立失敗：" + _safe_str(st.session_state.get(_k("h86_excel_error"))))
+        if st.button("重新建立主管 Excel", use_container_width=True, key=_k("h86_excel_retry")):
+            st.session_state.pop(cache_key, None)
+            st.rerun()
+
+
 def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame, top_n: int):
     """V164：Excel 改為按需產生；一般按鈕 rerun 不再重建 20+ 工作表。"""
     if rec_df is None or rec_df.empty:
@@ -17212,7 +17414,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H85進頁零全市場重算、舊診斷真正懶載入、候選表快速總覽、Excel零模型重算")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H86掃描完成即釋放主執行緒、遠端/學習背景收尾、Excel直接可下載、診斷真正按需載入")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
@@ -17710,74 +17912,31 @@ def main():
         _latest_pack_error_v185 = _safe_str(st.session_state.get(_k("latest_pack_permanent_error")))
         if _latest_pack_error_v185:
             st.error(_latest_pack_error_v185)
-        # 每個交易日只保存一份輕量排名快照，供下一輪辨識真正續強與
-        # 「結構分數黏著、但今日沒有新訊號」的重複推薦。此檔不是績效權威檔。
-        if callable(save_rotation_snapshot):
-            try:
-                rotation_source = st.session_state.get(_k("candidate_diagnosis_store"))
-                if not isinstance(rotation_source, pd.DataFrame) or rotation_source.empty:
-                    rotation_source = rec_df
-                rotation_source = _phase93_single_source_decision_frame(rec_df, rotation_source)
-                rotation_ok, rotation_msg = save_rotation_snapshot(rotation_source, background_remote=True)
-                st.session_state[_k("rotation_snapshot_message")] = rotation_msg
-            except Exception as rotation_error:
-                st.session_state[_k("rotation_snapshot_message")] = f"推薦輪動快照未保存：{rotation_error}"
-        # Phase105：每次完整掃描保存不可變決策快照。正式/A-為0也照樣保存，供日後漏選與模型校準。
-        if callable(save_learning_run):
-            try:
-                learning_source = st.session_state.get(_k("candidate_diagnosis_store"))
-                if not isinstance(learning_source, pd.DataFrame) or learning_source.empty:
-                    learning_source = rec_df
-                learning_ok, learning_msgs, learning_state = save_learning_run(
-                    learning_source,
-                    rec_df,
-                    scan_report=st.session_state.get(_k("scan_quality_report"), {}),
-                    metadata={
-                        "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"))),
-                        "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"))),
-                        "pick_strategy": _safe_str(st.session_state.get(_k("pick_strategy"))),
-                        "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"))),
-                    },
-                    persist_remote=True,
-                    background_remote=True,
-                    pre_scored=True,
-                )
-                st.session_state[_k("learning_run_messages")] = learning_msgs
-                st.session_state[_k("learning_state")] = learning_state
-                st.session_state[_k("learning_run_ok")] = bool(learning_ok)
-            except Exception as learning_save_error:
-                st.session_state[_k("learning_run_messages")] = [f"每日學習決策快照保存例外：{learning_save_error}"]
-                st.session_state[_k("learning_run_ok")] = False
-        # V183：保存「全候選特徵 + SuperAI情境/進出場決策」不可變經驗快照。
-        # 後續 Page8 推薦後績效成熟後，experience profile 只做小幅有界校準，
-        # 避免模型只學自己推薦過的股票造成 selection bias。
-        if callable(save_super_ai_run):
-            try:
-                super_source = st.session_state.get(_k("candidate_diagnosis_store"))
-                if not isinstance(super_source, pd.DataFrame) or super_source.empty:
-                    super_source = rec_df
-                super_ok, super_msg, super_meta = save_super_ai_run(
-                    super_source, rec_df,
-                    metadata={
-                        "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"))),
-                        "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"))),
-                        "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"))),
-                        "scan_quality": st.session_state.get(_k("scan_quality_report"), {}),
-                    },
-                )
-                st.session_state[_k("super_ai_run_message")] = super_msg
-                st.session_state[_k("super_ai_run_meta")] = super_meta
-            except Exception as super_save_error:
-                st.session_state[_k("super_ai_run_message")] = f"SuperAI經驗快照保存例外：{super_save_error}"
-        # V188：主掃描完成後只排入「已成熟舊推薦」的 T+1 真相更新。
-        # 網路行情抓取不阻塞本輪 1,700+ 檔 AI 最終結果。
-        if callable(refresh_t1_truth_async):
-            try:
-                _truth_ok, _truth_msg = refresh_t1_truth_async(max_records=160, max_workers=8)
-                st.session_state[_k("v188_t1_truth_async_message")] = _truth_msg
-            except Exception as _truth_schedule_error:
-                st.session_state[_k("v188_t1_truth_async_message")] = f"V188 T+1真相背景排程失敗：{_truth_schedule_error}"
+        # H86: once the scan/result snapshot is locally durable, all secondary
+        # learning/rotation/calibration work must leave the Streamlit render
+        # thread.  This is the key fix for the browser staying on “Stop” after
+        # the scan progress already says completed.
+        _h86_candidate = st.session_state.get(_k("candidate_diagnosis_store"))
+        if not isinstance(_h86_candidate, pd.DataFrame):
+            _h86_candidate = pd.DataFrame()
+        _h86_bg_ok, _h86_bg_msg = _h86_schedule_postscan(
+            _h86_candidate,
+            rec_df,
+            st.session_state.get(_k("scan_quality_report"), {}) or {},
+            {
+                "recommend_mode": _safe_str(st.session_state.get(_k("recommend_mode"))),
+                "risk_strictness": _safe_str(st.session_state.get(_k("risk_strictness"))),
+                "pick_strategy": _safe_str(st.session_state.get(_k("pick_strategy"))),
+                "universe_mode": _safe_str(st.session_state.get(_k("universe_mode"))),
+                "run_id": _safe_str(st.session_state.get(_k("scan_run_id"))),
+            },
+        )
+        st.session_state[_k("h86_postscan_schedule_message")] = _h86_bg_msg
     else:
+        # H86: after the one-time post-scan rerun, immediately reload the saved
+        # result from session.  Without this branch rec_df became empty on the
+        # second render, which could hide the Excel/result controls even though
+        # the scan had completed successfully.
         rec_df, category_strength_df, hot_pick_df = _load_recommend_result_from_state()
         rec_df, hot_pick_df, _postprocess_cache_hit_v164 = _postprocess_recommend_result_v164(
             rec_df, hot_pick_df, macro_bridge, macro_bridge_enabled, force=False
@@ -17792,22 +17951,13 @@ def main():
             auto_source = st.session_state.get(_k("candidate_diagnosis_store"))
             if not isinstance(auto_source, pd.DataFrame) or auto_source.empty:
                 auto_source = rec_df
-            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(auto_source, background_write=False, require_remote_confirm=True)  # H80：第8頁永久權威與遠端確認成功後才算完成
-            calibration_added = 0
-            calibration_msgs: list[str] = []
-            calibration_summary: dict[str, int] = {"near": 0, "missed": 0, "total": 0}
-            if callable(save_calibration_samples):
-                calibration_added, calibration_msgs, calibration_summary = save_calibration_samples(
-                    auto_source, max_near=24, max_missed=20, background_remote=True
-                )
-            else:
-                calibration_msgs = ["校正研究樣本服務未載入。"]
+            auto_added, auto_msgs = _v159_auto_record_actionable_recommendations(
+                auto_source, background_write=True, require_remote_confirm=False
+            )
             st.session_state[_k("auto_record_detail")] = [
-                f"正式/A-/雷達/H79研究紀錄永久權威已處理：{auto_added} 筆",
+                f"H86：正式/A-/雷達/H79研究紀錄已排程背景權威 upsert：{auto_added} 筆候選紀錄。",
                 *[str(x) for x in (auto_msgs or [])],
-                f"校正研究樣本新增：{calibration_added} 筆｜近門檻 {calibration_summary.get('near', 0)}｜市場漏選強勢 {calibration_summary.get('missed', 0)}",
-                *[str(x) for x in (calibration_msgs or [])],
-                "正式推薦績效與校正研究樣本分檔保存，不會把觀察股冒充正式推薦。",
+                "校正研究樣本、每日學習、SuperAI經驗與T+1真相已交由H86背景收尾，不阻塞Excel與頁面完成。",
             ]
         except Exception as e:
             st.session_state[_k("auto_record_detail")] = [f"推薦紀錄自動寫入例外：{e}"]
@@ -17819,6 +17969,14 @@ def main():
         st.session_state[_k("v184_post_scan_ui_refresh")] = True
     if st.session_state.pop(_k("v184_post_scan_ui_refresh"), False):
         st.rerun()
+
+    # H86: put the download surface before any optional performance/diagnostic
+    # rendering.  The user can download immediately after the one-time post-scan
+    # rerun; no need to scroll to the candidate editor or wait for diagnostics.
+    _render_h86_always_ready_excel(rec_df, category_strength_df)
+    _h86_bg_msg_now = _safe_str(st.session_state.get(_k("h86_postscan_schedule_message")))
+    if _h86_bg_msg_now:
+        st.caption(_h86_bg_msg_now)
 
     rotation_snapshot_message = _safe_str(st.session_state.get(_k("rotation_snapshot_message")))
     if rotation_snapshot_message and (submit_recommend or submit_refresh or resume_scan_btn):
@@ -17837,13 +17995,17 @@ def main():
         st.caption(f"V188 T+1實戰真相：{_truth_async_msg}")
 
     # V191-H32：明確把「90%區間覆蓋」與「方向/點預測準確率」分開。
-    try:
-        from godpick_return_forecast_engine import forecast_validation_summary as _h32_summary_fn
-        _h32_summary = st.session_state.get(_k("h32_return_forecast_validation")) or _h32_summary_fn()
-    except Exception:
-        _h32_summary = {}
-    if isinstance(_h32_summary, dict):
-        with st.expander("H32｜隔日/波段報酬預測與90%校準驗證", expanded=False):
+    _h32_summary = st.session_state.get(_k("h32_return_forecast_validation")) or {}
+    _h32_open_h86 = st.toggle("載入 H32 報酬預測校準摘要", value=False, key=_k("h86_load_h32_summary"))
+    if _h32_open_h86 and not _h32_summary:
+        try:
+            from godpick_return_forecast_engine import forecast_validation_summary as _h32_summary_fn
+            _h32_summary = _h32_summary_fn() or {}
+            st.session_state[_k("h32_return_forecast_validation")] = _h32_summary
+        except Exception:
+            _h32_summary = {}
+    if _h32_open_h86 and isinstance(_h32_summary, dict):
+        with st.expander("H32｜隔日/波段報酬預測與90%校準驗證", expanded=True):
             _h32_n = int(_h32_summary.get("interval_samples") or _h32_summary.get("samples") or 0)
             _h32_cov = _h32_summary.get("interval_coverage_pct")
             _h32_dir = _h32_summary.get("direction_hit_rate_pct")
@@ -17859,12 +18021,13 @@ def main():
 
     # V188：把「選股是否跑贏大盤」與「是否真的觸發交易」分開顯示。
     # 未觸發雷達永遠不計交易勝負，避免把候選上漲冒充可執行績效。
-    if callable(load_t1_truth_summary):
+    _h86_show_t1 = st.toggle("載入 V188 T+1 實戰真相摘要", value=False, key=_k("h86_load_t1_summary"))
+    if _h86_show_t1 and callable(load_t1_truth_summary):
         try:
             _truth_summary = load_t1_truth_summary() or {}
         except Exception:
             _truth_summary = {}
-        with st.expander("V188｜T+1實戰真相、Alpha/Trade分離與機率校準", expanded=False):
+        with st.expander("V188｜T+1實戰真相、Alpha/Trade分離與機率校準", expanded=True):
             _matured = int(_truth_summary.get("matured_t1_samples") or 0)
             _exec_n = int(_truth_summary.get("executable_samples") or 0)
             _trigger = _truth_summary.get("trigger_rate_pct")
@@ -18580,7 +18743,7 @@ def main():
         "推薦結果功能區｜H85 單區懶載入",
         detail_sections_v164,
         horizontal=True,
-        key=_k("active_detail_section_h85"),
+        key=_k("active_detail_section_h86"),
     )
     st.caption("H85：預設快速總覽；完整 data_editor、排行榜排序與 Excel 準備只有選到該功能區才執行。")
 
