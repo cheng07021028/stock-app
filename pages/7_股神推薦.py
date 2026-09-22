@@ -624,7 +624,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h90_core_snapshot_contract_recovery_20260922"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h91_duplicate_column_truth_recovery_20260922"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2102,7 +2102,7 @@ def _h88_write_small_anchor_now(
 def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
     if not callable(build_h79_tables_guarded) or candidate_df is None or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         return {}
-    source = candidate_df
+    source = _h91_unique_decision_frame(candidate_df, stage="h88_background_core")
     if len(source) > 240:
         try:
             source = _safe_sort_export_df(
@@ -14765,6 +14765,7 @@ def _h85_build_h79_core_for_snapshot(candidate_df: pd.DataFrame, action_df: pd.D
         source = candidate_df if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty else action_df
     if not isinstance(source, pd.DataFrame) or source.empty:
         return {}
+    source = _h91_unique_decision_frame(source, stage="h85_snapshot")
     try:
         tables = build_h79_tables_guarded(source)
         compact = _h85_encode_h79_core_tables(tables, source="recommendation-save")
@@ -14773,6 +14774,43 @@ def _h85_build_h79_core_for_snapshot(candidate_df: pd.DataFrame, action_df: pd.D
     except Exception as exc:
         st.session_state[_k("h85_h79_snapshot_error")] = f"{type(exc).__name__}: {exc}"
         return {}
+
+
+def _h91_core_failure_message(tables: dict[str, pd.DataFrame] | None) -> str:
+    """Return a real engine failure message; normal zero-result messages are not failures."""
+    if not isinstance(tables, dict):
+        return ""
+    tokens = ("決策建立失敗", "duplicate input columns", "引擎載入失敗", "引擎重新載入失敗", "舊版表格契約")
+    for name in ("actionable", "research", "audit", "health"):
+        df = tables.get(name)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        try:
+            blob = "｜".join(df.astype(str).fillna("").head(5).stack().tolist())
+        except Exception:
+            blob = str(df.head(5))
+        if any(t in blob for t in tokens):
+            return blob[:800]
+    return ""
+
+
+def _h91_unique_decision_frame(frame: pd.DataFrame | None, *, stage: str = "") -> pd.DataFrame:
+    """Coalesce duplicate labels before any H79/H89 decision call.
+
+    Uses the existing H23 right-most/newest-nonblank single-truth rule so JSON
+    persistence and live decision evaluation cannot disagree.
+    """
+    if frame is None or not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame()
+    clean, duplicates = _v191_h23_unique_json_frame(frame)
+    if duplicates:
+        try:
+            st.session_state[_k("h91_duplicate_decision_columns")] = {
+                "stage": stage, "count": len(duplicates), "columns": duplicates[:80], "updated_at": _now_text()
+            }
+        except Exception:
+            pass
+    return clean
 
 
 def _h90_normalize_core_snapshot(raw: Any) -> dict[str, Any]:
@@ -14805,6 +14843,8 @@ def _h90_load_core_from_local_snapshot() -> tuple[dict[str, Any], str]:
             continue
         raw = _h90_normalize_core_snapshot(payload.get("h85_h79_core_tables", {}))
         decoded = _h85_decode_h79_core_tables(raw)
+        if _h91_core_failure_message(decoded):
+            continue
         if decoded and any(isinstance(v, pd.DataFrame) and not v.empty for v in decoded.values()):
             try:
                 st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = raw
@@ -14818,7 +14858,7 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
     """Build at most 240 rows only when an explicit Excel export lacks a saved core."""
     if not callable(build_h79_tables_guarded) or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         return {}, ""
-    source = candidate_df
+    source = _h91_unique_decision_frame(candidate_df, stage="h90_bounded_export")
     if len(source) > 240:
         try:
             source = _safe_sort_export_df(
@@ -14830,12 +14870,15 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
             source = source.head(240).copy()
     try:
         built = build_h79_tables_guarded(source)
-        compact = _h85_encode_h79_core_tables(built, source="h90-explicit-export-bounded-recovery")
-        compact["version"] = "v191_h90_compact_h79_snapshot_20260922"
+        failure = _h91_core_failure_message(built)
+        if failure:
+            raise RuntimeError(f"H91決策核心仍失敗：{failure}")
+        compact = _h85_encode_h79_core_tables(built, source="h91-explicit-export-bounded-recovery")
+        compact["version"] = "v191_h91_compact_h79_snapshot_20260922"
         compact["full_candidate_count"] = int(len(candidate_df))
         compact["model_input_count"] = int(len(source))
         st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
-        return _h85_decode_h79_core_tables(compact), "h90-bounded-export-recovery"
+        return _h85_decode_h79_core_tables(compact), "h91-bounded-export-recovery"
     except Exception as exc:
         st.session_state[_k("h90_core_export_error")] = f"{type(exc).__name__}: {exc}"
         return {}, ""
@@ -14844,7 +14887,7 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
 def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
     """Resolve core tables for Excel; never silently turn a valid scan into blank sheets."""
     tables, source_label, _ = _h85_get_h79_core_for_render(rec_df)
-    if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+    if tables and not _h91_core_failure_message(tables) and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
         return tables, source_label or "session-core"
     raw, label = _h90_load_core_from_local_snapshot()
     if raw:
@@ -14857,7 +14900,7 @@ def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFram
 def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str, bool]:
     raw = _h90_normalize_core_snapshot(st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
     tables = _h85_decode_h79_core_tables(raw)
-    if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+    if tables and not _h91_core_failure_message(tables) and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
         return tables, _safe_str(raw.get("source")) if isinstance(raw, dict) else "snapshot", False
 
     # H90: H88/H89 background threads cannot safely mutate Streamlit session_state.
@@ -16407,11 +16450,13 @@ def _build_excel_bytes_fast_h85(
         ])
         health = pd.concat([health, extra], ignore_index=True, sort=False)
     core_diag = pd.DataFrame([
-        {"項目": "H90決策表來源", "數值": core_source or "UNAVAILABLE"},
-        {"項目": "H90候選輸入數", "數值": int(len(candidate_for_core))},
-        {"項目": "H90研究推薦輸出列", "數值": int(len(tables.get("research", pd.DataFrame()))) if tables else 0},
-        {"項目": "H90等待輸出列", "數值": int(len(tables.get("waiting", pd.DataFrame()))) if tables else 0},
-        {"項目": "H90稽核輸出列", "數值": int(len(tables.get("audit", pd.DataFrame()))) if tables else 0},
+        {"項目": "H91決策表來源", "數值": core_source or "UNAVAILABLE"},
+        {"項目": "H91候選輸入數", "數值": int(len(candidate_for_core))},
+        {"項目": "H91候選重複欄位數", "數值": int(len(candidate_for_core.columns) - len(set(map(str, candidate_for_core.columns)))) if isinstance(candidate_for_core, pd.DataFrame) else 0},
+        {"項目": "H91核心錯誤", "數值": _safe_str(st.session_state.get(_k("h90_core_export_error")))},
+        {"項目": "H91研究推薦輸出列", "數值": int(len(tables.get("research", pd.DataFrame()))) if tables else 0},
+        {"項目": "H91等待輸出列", "數值": int(len(tables.get("waiting", pd.DataFrame()))) if tables else 0},
+        {"項目": "H91稽核輸出列", "數值": int(len(tables.get("audit", pd.DataFrame()))) if tables else 0},
     ])
     health = pd.concat([health, core_diag], ignore_index=True, sort=False)
     sheets = [
@@ -17857,7 +17902,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H90修正H88背景核心表契約與session/local快照回讀；主管Excel不再把有效候選誤匯出成空白01/02/03/05")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H91修正H89重複輸入欄造成決策核心失敗；右側最新非空值單一真相合併，失敗快照不再被Excel當有效結果。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()

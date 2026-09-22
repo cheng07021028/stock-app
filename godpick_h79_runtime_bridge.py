@@ -17,8 +17,8 @@ from typing import Any
 import pandas as pd
 
 
-VERSION = "v191_h89_selection_execution_contract_guard_20260922"
-EXPECTED_ENGINE_VERSION = "v191_h89_selection_execution_dual_learning_20260922"
+VERSION = "v191_h91_duplicate_column_contract_guard_20260922"
+EXPECTED_ENGINE_VERSION = "v191_h91_duplicate_column_truth_recovery_20260922"
 REQUIRED_TABLES = (
     "actionable",
     "research",
@@ -65,6 +65,37 @@ def _load_engine(module: ModuleType | None = None, *, force_reload: bool = False
     return module
 
 
+def _coalesce_duplicate_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Bridge-level defense: use the same newest-nonblank truth for duplicate labels."""
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame() if frame is None else frame
+    work = frame.copy(deep=True)
+    labels = [str(c) for c in work.columns]
+    work.columns = labels
+    if work.columns.is_unique:
+        return work
+    ordered: list[str] = []
+    pos: dict[str, list[int]] = {}
+    for i, name in enumerate(labels):
+        if name not in pos:
+            ordered.append(name); pos[name] = []
+        pos[name].append(i)
+    clean = pd.DataFrame(index=work.index)
+    for name in ordered:
+        picks = pos[name]
+        chosen = work.iloc[:, picks[-1]].copy()
+        for j in reversed(picks[:-1]):
+            earlier = work.iloc[:, j]
+            try:
+                mask = chosen.isna() | chosen.astype("string").fillna("").str.strip().eq("")
+            except Exception:
+                mask = chosen.isna()
+            if bool(mask.any()):
+                chosen = chosen.where(~mask, earlier)
+        clean[name] = chosen
+    return clean
+
+
 def build_tables_guarded(frame: pd.DataFrame, *, engine_module: ModuleType | None = None, **kwargs: Any) -> dict[str, pd.DataFrame]:
     """Build H79 tables after validating both code version and output schema.
 
@@ -85,6 +116,7 @@ def build_tables_guarded(frame: pd.DataFrame, *, engine_module: ModuleType | Non
 
     try:
         builder = getattr(module, "build_tables")
+        frame = _coalesce_duplicate_columns(frame)
         tables = builder(frame, **kwargs)
     except Exception as exc:
         return _failure_tables(f"H89 決策建立失敗：{type(exc).__name__}: {exc}")

@@ -25,7 +25,7 @@ import re
 import pandas as pd
 
 
-VERSION = "v191_h89_selection_execution_dual_learning_20260922"
+VERSION = "v191_h91_duplicate_column_truth_recovery_20260922"
 
 
 @dataclass(frozen=True)
@@ -85,6 +85,59 @@ def text(value):
     if value is None or str(value).lower() in {"nan", "none", "<na>", "nat"}:
         return ""
     return str(value).strip()
+
+
+def _missing_duplicate_value_mask(series: pd.Series) -> pd.Series:
+    """Treat null/blank values as missing while coalescing duplicate labels."""
+    try:
+        missing = series.isna()
+    except Exception:
+        missing = pd.Series([False] * len(series), index=series.index)
+    try:
+        as_text = series.astype("string")
+        missing = missing | as_text.fillna("").str.strip().eq("")
+    except Exception:
+        pass
+    return missing
+
+
+def _coalesce_duplicate_input_columns(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """H91 single-truth repair for duplicate column labels.
+
+    Page07 passes a candidate through many enrichment layers. pandas permits
+    duplicate labels, but H79 requires a deterministic single value per field.
+    The right-most/newest nonblank value wins; older copies only fill blanks.
+    This mirrors Page07 H23 JSON persistence semantics, so the decision engine
+    and the saved snapshot use the same field truth instead of disagreeing.
+    """
+    if frame is None or not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame(), []
+    work = frame.copy(deep=True)
+    labels = [str(c) for c in work.columns]
+    work.columns = labels
+    if work.columns.is_unique:
+        return work, []
+
+    ordered: list[str] = []
+    positions: dict[str, list[int]] = {}
+    for pos, name in enumerate(labels):
+        if name not in positions:
+            ordered.append(name)
+            positions[name] = []
+        positions[name].append(pos)
+
+    duplicate_names = [name for name in ordered if len(positions[name]) > 1]
+    clean = pd.DataFrame(index=work.index)
+    for name in ordered:
+        pos = positions[name]
+        chosen = work.iloc[:, pos[-1]].copy()
+        for earlier_pos in reversed(pos[:-1]):
+            earlier = work.iloc[:, earlier_pos]
+            mask = _missing_duplicate_value_mask(chosen)
+            if bool(mask.any()):
+                chosen = chosen.where(~mask, earlier)
+        clean[name] = chosen
+    return clean, duplicate_names
 
 
 def day(value):
@@ -336,8 +389,9 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
     """Evaluate the complete supplied universe before any top-N selection."""
     if frame is None or frame.empty:
         return pd.DataFrame()
-    if frame.columns.duplicated().any():
-        raise ValueError("duplicate input columns")
+    frame, h91_duplicate_columns = _coalesce_duplicate_input_columns(frame)
+    if frame.empty:
+        return pd.DataFrame()
     now = day(as_of) if as_of is not None else datetime.now(timezone(timedelta(hours=8))).date()
     if now is None:
         raise ValueError("invalid as_of")
@@ -562,6 +616,9 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
             "股票代號": code,
             "市場別": market,
             "H79版本": VERSION,
+            "H91重複輸入欄修復": "是" if h91_duplicate_columns else "否",
+            "H91重複欄位數": len(h91_duplicate_columns),
+            "H91重複欄位": "、".join(h91_duplicate_columns[:40]),
             "H79決策層級": tier,
             "H79推薦狀態": status,
             "H79自適應機會分": round(score, 2),
@@ -632,7 +689,7 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
 
 
 DISPLAY = [
-    "股票代號", "股票名稱", "市場別", "類別", "H79決策層級", "H79推薦狀態",
+    "股票代號", "股票名稱", "市場別", "類別", "H91重複輸入欄修復", "H91重複欄位數", "H91重複欄位", "H79決策層級", "H79推薦狀態",
     "H79自適應機會分", "H79絕對品質分", "H79橫截面排名分", "H79確認模型分",
     "H80績效樣本數", "H80績效校正原始分", "H80績效校正加減分",
     "H81專業研究總分", "H81資料覆蓋%", "H81排名加減分", "H81研究排序分",
@@ -715,6 +772,8 @@ def build_tables(frame, *, as_of=None, policy=Policy()):
     chosen_executable_count = int(work.loc[chosen, "__executable"].sum()) if chosen else 0
     health_rows = [
         {"項目": "輸入候選數", "數值": len(work)},
+        {"項目": "H91重複輸入欄修復", "數值": "是" if ("H91重複輸入欄修復" in work.columns and work["H91重複輸入欄修復"].astype(str).eq("是").any()) else "否"},
+        {"項目": "H91重複欄位", "數值": (work["H91重複欄位"].astype(str).replace("nan", "").iloc[0] if "H91重複欄位" in work.columns and len(work) else "")},
         {"項目": "上市櫃主市場數", "數值": int(work["市場別"].isin(["上市", "上櫃"]).sum())},
         {"項目": "興櫃隔離數", "數值": int(work["H79決策層級"].eq("興櫃隔離").sum())},
         {"項目": "通過研究政策", "數值": len(pool)},
