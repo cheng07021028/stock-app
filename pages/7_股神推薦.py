@@ -624,7 +624,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h88_true_postscan_cutoff_background_persist_20260921"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h90_core_snapshot_contract_recovery_20260922"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2118,14 +2118,32 @@ def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
         return {}
     if not isinstance(tables, dict):
         return {}
-    payload: dict[str, Any] = {
-        "version": "H88-background-core",
-        "source": "h88-background-full-persist",
-        "created_at": _now_text(),
-    }
-    for name in ["actionable", "research", "wait_core", "mainstream", "evidence", "health", "governance"]:
-        df = tables.get(name)
-        payload[name] = _h88_df_records_no_streamlit(df.head(120) if isinstance(df, pd.DataFrame) else pd.DataFrame())
+    # H90: keep the compact snapshot contract identical to H79/H85.  H88 used
+    # legacy names (wait_core/evidence/...) while the renderer/exporter reads
+    # waiting/audit/emerging_watch/data_repairs.  That schema split made the
+    # manager workbook silently export empty 02/03/05 sheets even after a
+    # successful 1k+ stock scan.
+    try:
+        payload = _h85_encode_h79_core_tables(tables, source="h90-background-full-persist")
+    except Exception:
+        payload = {
+            "version": "v191_h90_compact_h79_snapshot_20260922",
+            "source": "h90-background-full-persist",
+            "created_at": _now_text(),
+        }
+        limits = {
+            "actionable": 60, "research": 80, "waiting": 80,
+            "emerging_watch": 60, "data_repairs": 100,
+            "audit": 120, "health": 120,
+        }
+        for name, limit in limits.items():
+            df = tables.get(name)
+            payload[name] = _h88_df_records_no_streamlit(
+                df.head(int(limit)) if isinstance(df, pd.DataFrame) else pd.DataFrame()
+            )
+    payload["version"] = "v191_h90_compact_h79_snapshot_20260922"
+    payload["full_candidate_count"] = int(len(candidate_df))
+    payload["model_input_count"] = int(len(source))
     return payload
 
 
@@ -14757,11 +14775,99 @@ def _h85_build_h79_core_for_snapshot(candidate_df: pd.DataFrame, action_df: pd.D
         return {}
 
 
+def _h90_normalize_core_snapshot(raw: Any) -> dict[str, Any]:
+    """Normalize H85/H88/H89 compact-core schemas to the canonical H79 contract."""
+    if not isinstance(raw, dict):
+        return {}
+    out = dict(raw)
+    # H88 accidentally persisted these pre-H79 names.  Preserve old snapshots
+    # without lying: only map semantically equivalent tables.
+    aliases = {"wait_core": "waiting", "evidence": "audit"}
+    for legacy, canonical in aliases.items():
+        if canonical not in out and isinstance(out.get(legacy), list):
+            out[canonical] = out.get(legacy, [])
+    for name in H85_H79_CORE_LIMITS:
+        out.setdefault(name, [])
+    return out
+
+
+def _h90_load_core_from_local_snapshot() -> tuple[dict[str, Any], str]:
+    """Recover the completed background core from local authority without network I/O."""
+    for path_name, label in (
+        (GODPICK_LATEST_FILE, "latest-full-snapshot"),
+        (GODPICK_LATEST_ANCHOR_FILE, "latest-run-anchor"),
+    ):
+        try:
+            payload = _read_project_json_file(path_name)
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            continue
+        raw = _h90_normalize_core_snapshot(payload.get("h85_h79_core_tables", {}))
+        decoded = _h85_decode_h79_core_tables(raw)
+        if decoded and any(isinstance(v, pd.DataFrame) and not v.empty for v in decoded.values()):
+            try:
+                st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = raw
+            except Exception:
+                pass
+            return raw, label
+    return {}, ""
+
+
+def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
+    """Build at most 240 rows only when an explicit Excel export lacks a saved core."""
+    if not callable(build_h79_tables_guarded) or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
+        return {}, ""
+    source = candidate_df
+    if len(source) > 240:
+        try:
+            source = _safe_sort_export_df(
+                source,
+                ["H79研究推薦分", "H89雙軌研究排序分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
+                [False, False, False, False, False, False],
+            ).head(240).copy()
+        except Exception:
+            source = source.head(240).copy()
+    try:
+        built = build_h79_tables_guarded(source)
+        compact = _h85_encode_h79_core_tables(built, source="h90-explicit-export-bounded-recovery")
+        compact["version"] = "v191_h90_compact_h79_snapshot_20260922"
+        compact["full_candidate_count"] = int(len(candidate_df))
+        compact["model_input_count"] = int(len(source))
+        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
+        return _h85_decode_h79_core_tables(compact), "h90-bounded-export-recovery"
+    except Exception as exc:
+        st.session_state[_k("h90_core_export_error")] = f"{type(exc).__name__}: {exc}"
+        return {}, ""
+
+
+def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
+    """Resolve core tables for Excel; never silently turn a valid scan into blank sheets."""
+    tables, source_label, _ = _h85_get_h79_core_for_render(rec_df)
+    if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+        return tables, source_label or "session-core"
+    raw, label = _h90_load_core_from_local_snapshot()
+    if raw:
+        tables = _h85_decode_h79_core_tables(raw)
+        if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+            return tables, label
+    return _h90_build_bounded_core_for_export(candidate_df)
+
+
 def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str, bool]:
-    raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+    raw = _h90_normalize_core_snapshot(st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
     tables = _h85_decode_h79_core_tables(raw)
     if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
         return tables, _safe_str(raw.get("source")) if isinstance(raw, dict) else "snapshot", False
+
+    # H90: H88/H89 background threads cannot safely mutate Streamlit session_state.
+    # Recover the completed compact block from the local snapshot/anchor before
+    # declaring it unavailable.  This is local-only and does not re-run models.
+    local_raw, local_source = _h90_load_core_from_local_snapshot()
+    if local_raw:
+        tables = _h85_decode_h79_core_tables(local_raw)
+        if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+            return tables, local_source or "local-snapshot", False
 
     # Compatibility for the first opening after H85 deployment.  Do NOT rebuild
     # the whole market merely to render the page.  A new real scan will persist
@@ -16286,7 +16392,11 @@ def _build_excel_bytes_fast_h85(
     except Exception:
         pass
 
-    tables, _, _ = _h85_get_h79_core_for_render(rec_export if isinstance(rec_export, pd.DataFrame) else pd.DataFrame())
+    candidate_for_core = candidate_diagnosis_export if isinstance(candidate_diagnosis_export, pd.DataFrame) else pd.DataFrame()
+    tables, core_source = _h90_get_h79_core_for_export(
+        candidate_for_core,
+        rec_export if isinstance(rec_export, pd.DataFrame) else pd.DataFrame(),
+    )
     sector = cat_export if isinstance(cat_export, pd.DataFrame) else pd.DataFrame()
     health = tables.get("health", pd.DataFrame()).copy() if tables else pd.DataFrame()
     report = scan_report if isinstance(scan_report, dict) else {}
@@ -16296,6 +16406,14 @@ def _build_excel_bytes_fast_h85(
             for k, v in report.items() if not isinstance(v, (dict, list, tuple, set))
         ])
         health = pd.concat([health, extra], ignore_index=True, sort=False)
+    core_diag = pd.DataFrame([
+        {"項目": "H90決策表來源", "數值": core_source or "UNAVAILABLE"},
+        {"項目": "H90候選輸入數", "數值": int(len(candidate_for_core))},
+        {"項目": "H90研究推薦輸出列", "數值": int(len(tables.get("research", pd.DataFrame()))) if tables else 0},
+        {"項目": "H90等待輸出列", "數值": int(len(tables.get("waiting", pd.DataFrame()))) if tables else 0},
+        {"項目": "H90稽核輸出列", "數值": int(len(tables.get("audit", pd.DataFrame()))) if tables else 0},
+    ])
+    health = pd.concat([health, core_diag], ignore_index=True, sort=False)
     sheets = [
         ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
@@ -17739,7 +17857,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H88掃描100%後立即顯示結果；完整候選序列化/永久化/第8頁紀錄改背景，Excel按鈕先出現，不再卡在完成畫面")
+    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H90修正H88背景核心表契約與session/local快照回讀；主管Excel不再把有效候選誤匯出成空白01/02/03/05")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
