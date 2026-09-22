@@ -11,7 +11,7 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
-VERSION = "v191_h82_adaptive_learning_settings_20260921"
+VERSION = "v191_h89_h82_clean_sample_quality_settings_20260922"
 SETTINGS_FILE = "godpick_adaptive_learning_settings.json"
 FIRESTORE_DOC = "godpick_adaptive_learning_settings"
 
@@ -48,6 +48,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_refresh_from_records": True,
         "auto_persist_learning_state": True,
         "freeze_on_data_quality": True,
+        "exclude_suspicious_proxy_instead_of_freeze": True,
     },
     "error_thresholds": {
         "success_return_pct": 3.0,

@@ -25,7 +25,7 @@ import re
 import pandas as pd
 
 
-VERSION = "v191_h84_fast_ui_research_recovery_20260921"
+VERSION = "v191_h89_selection_execution_dual_learning_20260922"
 
 
 @dataclass(frozen=True)
@@ -192,6 +192,16 @@ def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
         prepared = apply_h83_freshness_overlay(frame)
     except Exception:
         prepared = frame.copy(deep=True)
+
+    # H89 first fixes/labels the execution plan before H81 scores risk/RR.
+    # It may derive a pullback entry from a real structural target, but it never
+    # moves the stop merely to force RR and model targets remain research-only.
+    try:
+        from godpick_h89_selection_execution_core import apply_execution_plan_overlay
+        prepared = apply_execution_plan_overlay(prepared)
+    except Exception:
+        pass
+
     # H81 professional research layer is deterministic and bounded.
     try:
         from godpick_h81_professional_ai import apply_professional_research_overlay
@@ -205,6 +215,15 @@ def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
     try:
         from godpick_h82_adaptive_learning import apply_adaptive_learning_overlay
         prepared = apply_adaptive_learning_overlay(prepared)
+    except Exception:
+        pass
+
+    # H89 second pass separates historical selection quality from execution
+    # quality. Only bounded research ordering is affected; Formal authority is
+    # still owned by H64/H68 plus the price/freshness/liquidity gates below.
+    try:
+        from godpick_h89_selection_execution_core import apply_learning_overlay
+        prepared = apply_learning_overlay(prepared)
     except Exception:
         pass
     prepared["__code"] = prepared.get("股票代號", pd.Series("", index=prepared.index)).map(text).str.replace(r"\.0$", "", regex=True)
@@ -304,6 +323,12 @@ def _prepare(frame: pd.DataFrame, policy: Policy) -> pd.DataFrame:
     prepared["__h82_confidence"] = h82_conf
     prepared["__h82_samples"] = h82_samples
     prepared["__h82_rank_score"] = (prepared["__h81_rank_score"] + h82_adj).clip(0, 100)
+
+    h89_adj = series_or_nan("H89研究排序加減分").fillna(0.0).clip(-3.0, 3.0)
+    h89_rank = series_or_nan("H89雙軌研究排序分")
+    h89_rank = h89_rank.where(h89_rank.notna(), prepared["__h82_rank_score"] + h89_adj).clip(0, 100)
+    prepared["__h89_adj"] = h89_adj
+    prepared["__h89_rank_score"] = h89_rank
     return prepared
 
 
@@ -399,12 +424,16 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         h82_confidence = num(prepared_row.get("__h82_confidence"))
         h82_samples = num(prepared_row.get("__h82_samples")) or 0.
         h82_rank_score = num(prepared_row.get("__h82_rank_score")) or h81_rank_score
+        h89_adj = num(prepared_row.get("__h89_adj")) or 0.
+        h89_rank_score = num(prepared_row.get("__h89_rank_score")) or h82_rank_score
         if feedback_samples >= 8 and abs(feedback_adj) >= .01:
             evidence.append(f"歷史績效校正{feedback_adj:+.2f}")
         if h81_score is not None and h81_coverage is not None and abs(h81_adj) >= .01:
             evidence.append(f"H81專業研究{h81_adj:+.2f}")
         if h82_samples > 0 and abs(h82_adj) >= .01:
             evidence.append(f"H82成熟績效學習{h82_adj:+.2f}")
+        if abs(h89_adj) >= .01:
+            evidence.append(f"H89選股/執行雙軌學習{h89_adj:+.2f}")
 
         momentum = first(raw, "3日動能加速度百分點")
         acceleration = first(raw, "成交額3日加速度%", "成交量3日加速度%")
@@ -479,7 +508,12 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
         h83_summary = text(raw.get("H83資料治理摘要"))
         if not h83_formal_ready:
             reasons.append("H83前置資料未就緒，Formal降為研究模式")
-        executable = selected and legacy and h83_formal_ready and plan["H79計畫狀態"] == "PASS" and not hot and gap is not None
+        h89_formal_plan_ok = text(raw.get("H89Formal價格計畫合格")) not in {"否", "NO", "FALSE"}
+        h89_model_target_only = text(raw.get("H89模型目標僅研究")) in {"是", "YES", "TRUE"}
+        executable = (selected and legacy and h83_formal_ready and plan["H79計畫狀態"] == "PASS"
+                      and h89_formal_plan_ok and not h89_model_target_only and not hot and gap is not None)
+        if selected and legacy and plan["H79計畫狀態"] == "PASS" and not h89_formal_plan_ok:
+            reasons.append("H89價格計畫僅研究/缺結構目標，不可升格Formal")
 
         if hard_issues:
             tier = "資料待修復"
@@ -545,6 +579,8 @@ def evaluate(frame, *, as_of=None, policy=Policy()):
             "H82學習信心%": round(h82_confidence, 2) if h82_confidence is not None else None,
             "H82自適應加減分": round(h82_adj, 2),
             "H82自適應研究排序分": round(h82_rank_score, 2),
+            "H89研究排序加減分": round(h89_adj, 2),
+            "H89雙軌研究排序分": round(h89_rank_score, 2),
             "H83正式資料可用": "是" if h83_formal_ready else "否",
             "H83市場資料日期": text(raw.get("H83市場資料日期")),
             "H83官方因子日期": text(raw.get("H83官方因子日期")),
@@ -608,6 +644,12 @@ DISPLAY = [
     "H82市場環境加減分", "H82產業加減分", "H82決策狀態加減分", "H82H81分桶加減分",
     "H82錯誤治理加減分", "H82影子建議加減分", "H82自適應加減分", "H82自適應研究排序分",
     "H82主要學習依據", "H82主要錯誤風險", "H82學習摘要", "H82學習狀態",
+    "H89選股方向分", "H89執行品質分", "H89研究排序加減分", "H89雙軌研究排序分",
+    "H89交易型態", "H89進場區下緣", "H89進場區上緣", "H89主進場", "H89防守停損",
+    "H89第一目標", "H89第二目標", "H89成本後RR1", "H89成本後RR2", "H89停損距離%",
+    "H89價格計畫來源", "H89Formal價格計畫合格", "H89模型目標僅研究", "H89所需拉回%",
+    "H89機會成本監控", "H89學習乾淨樣本", "H89錯失機會率%", "H89追價失敗率%",
+    "H89進場積極度調整%", "H89選股與執行摘要",
     "H83正式資料可用", "H83市場資料日期", "H83官方因子日期", "H83官方落後交易日", "H83資料異常隔離", "H83資料治理摘要",
     "H79強度百分位%", "H79族群百分位%", "H79推薦理由", "H79交易狀態",
     "H79計畫進場", "H79結構停損", "H79第一目標", "H79成本後RR", "H79停損距離%",
@@ -632,8 +674,8 @@ def build_tables(frame, *, as_of=None, policy=Policy()):
     work = work.copy()
     work["__executable"] = work["H79交易狀態"].str.startswith("條件可執行", na=False)
     ranked = work.sort_values(
-        ["__executable", "H82自適應研究排序分", "H81研究排序分", "H79自適應機會分", "股票代號"],
-        ascending=[False, False, False, False, True], kind="mergesort",
+        ["__executable", "H89雙軌研究排序分", "H82自適應研究排序分", "H81研究排序分", "H79自適應機會分", "股票代號"],
+        ascending=[False, False, False, False, False, True], kind="mergesort",
     )
     pool = ranked[ranked["H79決策層級"].isin(["正式條件可執行", "研究推薦"])]
     chosen, sector_counts = [], {}
@@ -680,9 +722,10 @@ def build_tables(frame, *, as_of=None, policy=Policy()):
         {"項目": "正式條件可執行", "數值": chosen_executable_count},
         {"項目": "必要資料待修復", "數值": int(work["H79決策層級"].eq("資料待修復").sum())},
         {"項目": "週末日期正規化", "數值": int(work["H79日期正規化"].ne("無").sum())},
-        {"項目": "學習狀態", "數值": "H79固定正式治理＋H80績效閉環＋H81專業研究＋H82成熟樣本自適應；H82只調研究排序，不放寬Formal"},
+        {"項目": "學習狀態", "數值": "H79固定正式治理＋H80績效閉環＋H81專業研究＋H82成熟樣本自適應＋H89選股/執行雙軌學習；H89只調研究排序與研究價格計畫，不放寬Formal"},
         {"項目": "H81專業研究", "數值": "市場定價/技術/新聞/回測/投組風險/交易日誌/每日計畫；設定由永久權威檔管理"},
         {"項目": "H82自適應學習", "數值": "成熟樣本＋市場Regime＋產業＋決策狀態＋H81分桶；時間衰減/收縮/信心門檻/錯誤治理；無成熟證據即0分"},
+        {"項目": "H89選股/執行雙軌", "數值": "選股方向與進場執行分開學習；可疑代理直接排除；RR反推不得移動停損；模型目標僅研究且不能建立Formal"},
         {"項目": "排名口徑", "數值": "上市櫃絕對品質55%＋橫截面45%；有H72/H74/H77時改為45%＋40%＋確認15%"},
         {"項目": "缺資料處理", "數值": "H84：H83為新鮮度治理真相；舊上游READY旗標只作警示。必要日期/價格/流動性仍是硬閘門；TDCC為選配證據。"},
         {"項目": "市場分流", "數值": "上市/上櫃可進主推薦；興櫃只進隔離研究，不占主榜"},

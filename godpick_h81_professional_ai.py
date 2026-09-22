@@ -24,7 +24,7 @@ import re
 
 import pandas as pd
 
-VERSION = "v191_h81_professional_research_governance_20260921"
+VERSION = "v191_h89_entity_aware_professional_research_20260922"
 
 POSITIVE_NEWS = (
     "上修", "成長", "優於預期", "超預期", "新訂單", "得標", "擴產", "量產", "認證",
@@ -244,6 +244,14 @@ def _score_technical(row: dict[str, Any]) -> tuple[float, float, list[str], list
 
 
 def _score_news(row: dict[str, Any]) -> tuple[float, float, list[str], list[str], list[str]]:
+    """Entity-aware news scoring.
+
+    H89 fixes the prior failure mode where H83 returned generic market RSS
+    headlines when a stock had no direct news match. Only sufficiently relevant
+    stock/entity headlines can affect an individual stock's H81 score.
+    Category/market news remains contextual evidence, not company-specific
+    positive/negative sentiment.
+    """
     score_col = _first_num(row, ["新聞情緒分數", "事件影響分數", "新聞影響分數", "催化分數"])
     texts = []
     for key in ["最新新聞", "重大新聞", "新聞摘要", "催化因素", "事件摘要", "重大事件"]:
@@ -252,14 +260,33 @@ def _score_news(row: dict[str, Any]) -> tuple[float, float, list[str], list[str]
             texts.append(s)
     joined = "｜".join(texts)
     h83_news_source = ""
+    h83_context_note = ""
     if not joined:
         try:
             from godpick_h83_autofresh import get_news_context
             items = get_news_context(row, max_items=8)
-            titles = [_text(x.get("title")) for x in items if isinstance(x, dict) and _text(x.get("title"))]
-            if titles:
-                joined = "｜".join(titles)
-                h83_news_source = "H83自動新聞快取"
+            min_rel = .75
+            try:
+                from godpick_h89_execution_settings import load_settings_safe as _h89_load_settings
+                min_rel = float((_h89_load_settings().get("news") or {}).get("minimum_stock_score_relevance", .75) or .75)
+            except Exception:
+                pass
+            eligible_titles = []
+            low_relevance = 0
+            for x in items:
+                if not isinstance(x, dict):
+                    continue
+                rel = _num(x.get("relevance_score"), 0.0) or 0.0
+                title = _text(x.get("title"))
+                if title and rel >= min_rel:
+                    eligible_titles.append(title)
+                elif title:
+                    low_relevance += 1
+            if eligible_titles:
+                joined = "｜".join(eligible_titles)
+                h83_news_source = "H83/H89個股實體新聞快取"
+            elif low_relevance:
+                h83_context_note = f"H89攔截{low_relevance}則僅族群/市場層級新聞，未拿來當個股正負面因子"
         except Exception:
             pass
     pos = [kw for kw in POSITIVE_NEWS if kw in joined]
@@ -275,9 +302,11 @@ def _score_news(row: dict[str, Any]) -> tuple[float, float, list[str], list[str]
         coverage = 0.0
     catalysts = ([f"新聞正向關鍵詞：{','.join(pos[:3])}"] if pos else [])
     risks = ([f"新聞負向關鍵詞：{','.join(neg[:3])}"] if neg else [])
-    watch = [] if joined else ["本輪沒有可驗證個股新聞欄位；未知新聞不自行猜測"]
+    watch = [] if joined else ["本輪沒有可驗證個股實體新聞；未知新聞維持中性，不自行猜測"]
     if h83_news_source:
-        watch.append("新聞來源：H83自動更新RSS快取；僅作研究事件因子，不單獨形成Formal權限")
+        watch.append("新聞來源：H83/H89實體關聯RSS快取；僅作研究事件因子，不單獨形成Formal權限")
+    if h83_context_note:
+        watch.append(h83_context_note)
     return score, coverage, catalysts, risks, watch
 
 

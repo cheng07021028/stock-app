@@ -27,7 +27,7 @@ import os
 
 import pandas as pd
 
-VERSION = "v191_h82_adaptive_godpick_learning_core_20260921"
+VERSION = "v191_h89_h82_clean_sample_quality_core_20260922"
 STATE_FILE = "godpick_adaptive_learning_state.json"
 STATE_FIRESTORE_DOC = "godpick_adaptive_learning_state"
 RECORDS_FILE = "godpick_records.json"
@@ -486,8 +486,14 @@ def build_learning_state(records: pd.DataFrame | list[dict[str, Any]] | None, se
     freeze_reasons: list[str] = []
     if len(samples) < int(cfg["minimum_global_mature_samples"]):
         freeze_reasons.append(f"成熟樣本{len(samples)}<{int(cfg['minimum_global_mature_samples'])}")
+    quality_warnings: list[str] = []
     if bool(cfg["features"].get("freeze_on_data_quality", True)) and suspicious_ratio > float(cfg["max_suspicious_proxy_ratio"]):
-        freeze_reasons.append(f"可疑代理比例{suspicious_ratio:.1%}>{float(cfg['max_suspicious_proxy_ratio']):.1%}")
+        if bool(cfg["features"].get("exclude_suspicious_proxy_instead_of_freeze", True)):
+            quality_warnings.append(
+                f"可疑代理比例{suspicious_ratio:.1%}>{float(cfg['max_suspicious_proxy_ratio']):.1%}；已排除可疑代理，只以{len(samples)}筆乾淨成熟樣本學習"
+            )
+        else:
+            freeze_reasons.append(f"可疑代理比例{suspicious_ratio:.1%}>{float(cfg['max_suspicious_proxy_ratio']):.1%}")
     if cfg["mode"] == "frozen" or not bool(cfg.get("enabled", True)):
         freeze_reasons.append("H82設定為凍結/停用")
     frozen = bool(freeze_reasons)
@@ -512,6 +518,7 @@ def build_learning_state(records: pd.DataFrame | list[dict[str, Any]] | None, se
         "segments": segments,
         "error_summary": errors,
         "directives": _learning_directives(errors),
+        "quality_warnings": quality_warnings,
         "data_quality": {
             "mature_samples": int(len(samples)),
             "suspicious_proxy_samples": suspicious,

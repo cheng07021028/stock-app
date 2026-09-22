@@ -352,19 +352,41 @@ def refresh_news_cache(
 
 
 def get_news_context(row: dict[str, Any] | None = None, max_items: int = 8) -> list[dict[str, Any]]:
+    """Return entity-relevant news for a stock; never spray generic headlines onto every stock.
+
+    H83/H87 previously returned the whole market-news cache whenever an individual
+    stock had zero direct matches. That made generic headlines containing words
+    such as '違約' appear as if they were company-specific negative news. H89
+    removes that fallback. Market-wide callers can still pass ``row=None``.
+    """
     items = (_read(NEWS_FILE, {}) or {}).get("items", [])
+    if not isinstance(items, list):
+        return []
     raw = dict(row or {})
-    tokens = [
-        _txt(raw.get(k))
-        for k in ["股票代號", "股票名稱", "類別", "產業", "族群名稱"]
+    if not raw:
+        return [dict(x, match_type="market", relevance_score=0.35) for x in items if isinstance(x, dict)][:max_items]
+
+    code = _txt(raw.get("股票代號"))
+    name = _txt(raw.get("股票名稱"))
+    category_tokens = [
+        _txt(raw.get(k)) for k in ["類別", "產業", "族群名稱", "正式產業別", "主題類別"]
         if len(_txt(raw.get(k))) >= 2
     ]
-    matched = [
-        x
-        for x in items
-        if isinstance(x, dict) and any(t in _txt(x.get("title")) for t in tokens)
-    ]
-    return (matched or items)[:max_items]
+    exact_tokens = [t for t in [code, name] if len(t) >= 2]
+    exact: list[dict[str, Any]] = []
+    category: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = _txt(item.get("title"))
+        if exact_tokens and any(t in title for t in exact_tokens):
+            exact.append(dict(item, match_type="entity", relevance_score=1.0))
+        elif category_tokens and any(t in title for t in category_tokens):
+            category.append(dict(item, match_type="category", relevance_score=0.55))
+    # Individual-stock scoring uses exact entity matches first. Category news is
+    # only a lower-confidence fallback and will be filtered by H81's relevance
+    # threshold for stock-specific sentiment unless settings explicitly allow it.
+    return (exact + category)[:max_items]
 
 
 def _snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -790,8 +812,18 @@ def run_autofresh_preflight(
             from godpick_h82_adaptive_learning import refresh_learning_state
 
             state, _ = refresh_learning_state(persist_remote=True)
-            ok = isinstance(state, dict)
-            msg = "H82成熟學習已重建" if ok else "H82成熟學習重建未取得有效狀態"
+            h89_ok = True
+            h89_note = ""
+            try:
+                from godpick_h89_selection_execution_core import refresh_learning_state as refresh_h89_learning_state
+                h89_state, _h89_msgs = refresh_h89_learning_state(persist_remote=True)
+                h89_ok = isinstance(h89_state, dict)
+                h89_note = f"；H89雙軌學習乾淨樣本 {int((h89_state or {}).get('clean_samples', 0) or 0)}"
+            except Exception as _h89_exc:
+                h89_ok = False
+                h89_note = f"；H89學習更新失敗:{type(_h89_exc).__name__}"
+            ok = isinstance(state, dict) and h89_ok
+            msg = ("H82成熟學習＋H89選股/執行雙軌學習已重建" if ok else "H82/H89學習重建部分未取得有效狀態") + h89_note
             stage_done("h82_adaptive_learning", 10, t0, msg, ok=ok)
         except Exception as e:
             stage_done("h82_adaptive_learning", 10, t0, f"{type(e).__name__}: {e}", ok=False)

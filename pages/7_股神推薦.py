@@ -549,6 +549,10 @@ try:
 except Exception:
     apply_h82_adaptive_learning_overlay = None
 try:
+    from godpick_h89_selection_execution_core import apply_record_snapshot as apply_h89_record_snapshot
+except Exception:
+    apply_h89_record_snapshot = None
+try:
     from godpick_h83_autofresh import run_autofresh_preflight as run_h83_autofresh_preflight
     from godpick_h83_autofresh_settings import load_settings_safe as load_h83_autofresh_settings
 except Exception:
@@ -2149,6 +2153,11 @@ def _h88_background_full_persist(
         run_date = _safe_str(anchor_payload.get("run_date"))[:10] or saved_at[:10]
         formal_ready = bool(scan.get("正式推薦可用", False))
         action_df = _h88_action_frame_from_result(rec, formal_ready)
+        if callable(apply_h89_record_snapshot) and isinstance(action_df, pd.DataFrame) and not action_df.empty:
+            try:
+                action_df = apply_h89_record_snapshot(action_df)
+            except Exception:
+                pass
 
         core = _h88_build_core_no_streamlit(candidate)
         candidate_records = _h88_df_records_no_streamlit(candidate)
@@ -13925,6 +13934,8 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
                 action = apply_h81_professional_research_overlay(action)
             if callable(apply_h82_adaptive_learning_overlay):
                 action = apply_h82_adaptive_learning_overlay(action)
+            if callable(apply_h89_record_snapshot):
+                action = apply_h89_record_snapshot(action)
         except Exception:
             pass
         quality_notes: dict[str, tuple[str, str]] = {}
