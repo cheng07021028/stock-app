@@ -285,7 +285,9 @@
       "電池材料",
       "電源供應",
       "面板",
-      "高速傳輸"
+      "高速傳輸",
+      "化學工業",
+      "半導體測試介面"
     ],
     "min_total_score": 85.0,
     "min_signal_score": -2.0,
@@ -295,7 +297,7 @@
     "risk_strictness": "標準",
     "pick_strategy": "結合版"
   },
-  "updated_at": "2026-09-22 22:38:42",
+  "updated_at": "2026-09-22 22:51:48",
   "weight_settings_updated_at": "2026-07-11 15:21:43",
   "weight_update_seq": 80,
   "weight_source": "14_股神權重校正",
