@@ -624,7 +624,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h91_duplicate_column_truth_recovery_20260922"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h92_reboot_durable_authority_20260922"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2040,6 +2040,22 @@ def _h88_action_frame_from_result(rec_df: pd.DataFrame | None, formal_ready: boo
     return out.reset_index(drop=True)
 
 
+def _h92_frame_business_date(candidate_df: pd.DataFrame | None) -> str:
+    """Read the newest verified trading date without serialising the full scan."""
+    if candidate_df is None or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
+        return ""
+    for col in ["本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"]:
+        if col not in candidate_df.columns:
+            continue
+        try:
+            values = pd.to_datetime(candidate_df[col], errors="coerce")
+            if values.notna().any():
+                return pd.Timestamp(values.max()).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return ""
+
+
 def _h88_write_small_anchor_now(
     rec_df: pd.DataFrame,
     category_strength_df: pd.DataFrame,
@@ -2047,13 +2063,18 @@ def _h88_write_small_anchor_now(
     candidate_count: int,
     scan_report: dict[str, Any],
     execution_context: dict[str, Any],
+    *,
+    h79_core_tables: dict[str, Any] | None = None,
+    candidate_df: pd.DataFrame | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Persist only a tiny durable run anchor on the render thread.
+    """H92 reboot-safe authority checkpoint.
 
-    Full candidate serialization can be many MB and is intentionally excluded.
-    This anchor is sufficient to prove the run happened and prevents the page
-    from falling back to an old recommendation date while background persistence
-    is still running.
+    The old H88 anchor was only queued to an in-process background worker.  A
+    Streamlit reboot could terminate that worker and the next process then saw
+    the packaged 2026-07 snapshot.  H92 keeps the checkpoint small but includes
+    the compact H79 decision tables and *blocks only for this small authority*
+    until GitHub runtime-data/Firestore confirms durability.  The multi-MB full
+    candidate snapshot still remains background work.
     """
     saved_at = _now_text()
     ctx = dict(execution_context or {})
@@ -2062,6 +2083,12 @@ def _h88_write_small_anchor_now(
     ctx.update({"run_id": run_id, "run_date": run_date})
     formal_ready = bool((scan_report or {}).get("正式推薦可用", False))
     action_df = _h88_action_frame_from_result(rec_df, formal_ready)
+    core = dict(h79_core_tables or {})
+    if not core:
+        cached = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+        if isinstance(cached, dict):
+            core = dict(cached)
+    kline_date = _h92_frame_business_date(candidate_df)
     anchor = {
         "saved_at": saved_at,
         "recommendation_date": saved_at[:10],
@@ -2072,31 +2099,49 @@ def _h88_write_small_anchor_now(
         "run_id": run_id,
         "run_date": run_date,
         "expected_trade_date": _expected_latest_trade_date_v173().strftime("%Y-%m-%d"),
-        "kline_date": "",
+        "kline_date": kline_date,
         "weights": _normalize_weight_map(st.session_state.get(_k("score_weights"), GODPICK_DEFAULT_SCORE_WEIGHTS)),
         "recommendations": _h88_df_records_no_streamlit(action_df.head(80)),
         "category_strength": _h88_df_records_no_streamlit(category_strength_df.head(80) if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame()),
         "hot_pick": _h88_df_records_no_streamlit(hot_pick_df.head(80) if isinstance(hot_pick_df, pd.DataFrame) else pd.DataFrame()),
         "scan_quality": dict(scan_report or {}),
-        "h85_h79_core_tables": {},
+        "h85_h79_core_tables": core,
         "candidate_count": int(candidate_count or 0),
         "recommendation_count": int(len(action_df)),
         "full_snapshot_pending": True,
-        "snapshot_version": "V191-H88_immediate_compact_anchor",
+        "snapshot_version": "V191-H92_reboot_durable_compact_anchor",
     }
-    ok, msg = _safe_json_write_local(GODPICK_LATEST_ANCHOR_FILE, anchor)
-    if ok:
+    local_ok, local_msg = _safe_json_write_local(GODPICK_LATEST_ANCHOR_FILE, anchor)
+    if not local_ok:
+        return False, str(local_msg), anchor
+
+    permanent_ok = False
+    permanent_msg = ""
+    try:
+        from godpick_durability_service import persist_json_permanent
+        permanent_ok, permanent_msg = persist_json_permanent(
+            GODPICK_LATEST_ANCHOR_FILE, anchor,
+            firestore_doc="godpick_latest_run_anchor",
+            reason="H92 reboot-safe compact recommendation authority",
+        )
+    except Exception as exc:
+        permanent_msg = f"H92永久化服務例外：{type(exc).__name__}: {exc}"
+
+    if not permanent_ok:
+        # Keep the outbox retry as a safety net, but never call this reboot-safe
+        # until the synchronous small checkpoint is actually confirmed.
         try:
             from godpick_durability_service import persist_json_async
-            pok, pmsg = persist_json_async(
+            _qok, _qmsg = persist_json_async(
                 GODPICK_LATEST_ANCHOR_FILE, anchor,
                 firestore_doc="godpick_latest_run_anchor",
-                reason="H88 immediate compact recommendation anchor",
+                reason="H92 compact authority retry",
             )
-            msg = str(msg) + "｜遠端背景排程：" + str(pmsg)
+            permanent_msg = str(permanent_msg) + "｜背景重試：" + str(_qmsg)
         except Exception as exc:
-            msg = str(msg) + f"｜遠端背景排程例外：{type(exc).__name__}: {exc}"
-    return bool(ok), str(msg), anchor
+            permanent_msg = str(permanent_msg) + f"｜背景重試例外：{type(exc).__name__}: {exc}"
+    msg = f"{local_msg}｜H92遠端永久權威：{'已確認' if permanent_ok else '未確認'}｜{permanent_msg}"
+    return bool(permanent_ok), msg, anchor
 
 
 def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
@@ -2276,10 +2321,15 @@ def _h88_background_full_persist(
         })
         _safe_json_write_local(GODPICK_LATEST_ANCHOR_FILE, final_anchor)
         try:
-            from godpick_durability_service import persist_json_async
-            persist_json_async(GODPICK_LATEST_ANCHOR_FILE, final_anchor, firestore_doc="godpick_latest_run_anchor", reason="H88 background completed anchor")
-        except Exception:
-            pass
+            from godpick_durability_service import persist_json_permanent
+            _fa_ok, _fa_msg = persist_json_permanent(
+                GODPICK_LATEST_ANCHOR_FILE, final_anchor,
+                firestore_doc="godpick_latest_run_anchor",
+                reason="H92 background completed anchor",
+            )
+            status["steps"]["final_anchor_permanent"] = {"ok": bool(_fa_ok), "message": str(_fa_msg)}
+        except Exception as exc:
+            status["steps"]["final_anchor_permanent"] = {"ok": False, "message": str(exc)}
         status["status"] = "DONE"
     except Exception as exc:
         status["status"] = "FAILED"
@@ -2311,6 +2361,17 @@ def _h88_publish_result_nonblocking(
     st.session_state[_k("result_saved_at")] = _now_text()
     st.session_state[_k("empty_scan_preserved_previous")] = False
 
+    # H92: build the compact H79 decision truth once before declaring the run
+    # reboot-safe.  This is bounded to <=240 candidates; the 1k~2k full snapshot
+    # still stays in the background.  The compact block is what lets 01/02/03/05
+    # and the manager Excel survive an immediate Streamlit reboot.
+    h92_core = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
+    if not isinstance(h92_core, dict) or not h92_core.get("created_at"):
+        h92_core = _h88_build_core_no_streamlit(candidate_df)
+        if isinstance(h92_core, dict) and h92_core:
+            h92_core["source"] = "h92-reboot-durable-prepublish"
+            st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = dict(h92_core)
+
     anchor_ok, anchor_msg, anchor = _h88_write_small_anchor_now(
         rec_df if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
         category_strength_df if isinstance(category_strength_df, pd.DataFrame) else pd.DataFrame(),
@@ -2318,6 +2379,8 @@ def _h88_publish_result_nonblocking(
         len(candidate_df),
         scan_report,
         execution_context,
+        h79_core_tables=h92_core if isinstance(h92_core, dict) else {},
+        candidate_df=candidate_df,
     )
     st.session_state[_k("latest_pack_permanent_ok")] = bool(anchor_ok)
     st.session_state[_k("latest_pack_permanent_error")] = "" if anchor_ok else anchor_msg
@@ -2332,7 +2395,9 @@ def _h88_publish_result_nonblocking(
             dict(execution_context),
             dict(anchor),
         )
-        msg = "H88：畫面結果已發布；完整候選快照、Page10、Page08與遠端永久化正在背景收尾。"
+        msg = ("H92：推薦小型權威快照已永久確認；Reboot 可直接恢復。完整候選快照、Page10、Page08仍在背景收尾。"
+               if anchor_ok else
+               "H92：結果已建立，但小型權威快照尚未遠端確認；已排程背景重試，完成前 Reboot 仍有回退風險。")
     except Exception as exc:
         msg = f"H88背景保存排程失敗：{type(exc).__name__}: {exc}"
     st.session_state[_k("h88_publish_message")] = msg
@@ -2390,77 +2455,118 @@ def _payload_authority_stamp_v185(payload: Any) -> tuple[str, str]:
     return date_key, saved_key
 
 
+
+
+def _h92_has_decision_core(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    core = payload.get("h85_h79_core_tables")
+    if not isinstance(core, dict):
+        return False
+    for key in ("actionable", "research", "waiting", "audit", "health"):
+        value = core.get(key)
+        if isinstance(value, list) and value:
+            return True
+        if isinstance(value, pd.DataFrame) and not value.empty:
+            return True
+    return False
+
+
+def _h92_authority_key(payload: Any, *, source_priority: int = 0) -> tuple[str, str, int, int]:
+    date_key, saved_key = _payload_authority_stamp_v185(payload)
+    return (date_key, saved_key, 1 if _h92_has_decision_core(payload) else 0, int(source_priority))
+
+
+def _h92_choose_recommendation_authority(
+    local_full: Any, local_anchor: Any, remote_anchor: Any = None
+) -> tuple[dict[str, Any], str]:
+    """Business-date monotonic authority election across reboot boundaries."""
+    candidates: list[tuple[str, dict[str, Any], int]] = []
+    if isinstance(local_full, dict) and local_full:
+        candidates.append(("local-full", local_full, 1))
+    if isinstance(local_anchor, dict) and local_anchor:
+        candidates.append(("local-anchor", local_anchor, 2))
+    if isinstance(remote_anchor, dict) and remote_anchor:
+        candidates.append(("remote-anchor", remote_anchor, 3))
+    if not candidates:
+        return {}, "none"
+    source, payload, _prio = max(
+        candidates, key=lambda item: _h92_authority_key(item[1], source_priority=item[2])
+    )
+    return dict(payload), source
+
+
+def _h92_prepare_anchor_recovery(payload: dict[str, Any], source: str) -> dict[str, Any]:
+    recovered = dict(payload or {})
+    recovered.setdefault("recommendations", [])
+    recovered.setdefault("candidate_diagnosis", [])
+    recovered.setdefault("category_strength", [])
+    recovered.setdefault("hot_pick", [])
+    recovered["authority_recovery"] = f"H92 {source}"
+    recovered["full_snapshot_pending_or_older"] = bool(recovered.get("full_snapshot_pending", True))
+    return recovered
+
 @st.cache_data(show_spinner=False, ttl=30)
 def _load_latest_recommendation_authority_v185() -> tuple[dict[str, Any], list[str]]:
-    """H84 local-first recommendation authority for fast page entry.
+    """H92 reboot-safe latest recommendation authority.
 
-    Runtime-data bootstrap/H83 scheduled preflight is responsible for bringing
-    durable data local. Merely opening Page07 must not synchronously wait for
-    GitHub/Firestore. Remote authority election is used only when both local
-    snapshot and local anchor are absent.
+    A deployed code bundle can contain an old July JSON.  File existence is not
+    authority.  When the local business date is older than the current expected
+    trade date, the small runtime-data/Firestore run anchor is always probed and
+    compared by recommendation business date + saved time.  This avoids a full
+    remote candidate download and avoids re-running 1,600 stocks after Reboot.
     """
     local_full = _safe_json_read_local(GODPICK_LATEST_FILE, {})
     local_anchor = _safe_json_read_local(GODPICK_LATEST_ANCHOR_FILE, {})
-    details: list[str] = []
     full_payload = local_full if isinstance(local_full, dict) else {}
     anchor = local_anchor if isinstance(local_anchor, dict) else {}
-    local_stamp = _payload_authority_stamp_v185(full_payload)
-    anchor_stamp = _payload_authority_stamp_v185(anchor)
+    details: list[str] = []
 
-    if anchor_stamp > local_stamp and anchor:
-        recovered = dict(anchor)
-        recovered.setdefault("recommendations", [])
-        recovered.setdefault("candidate_diagnosis", [])
-        recovered.setdefault("category_strength", [])
-        recovered.setdefault("hot_pick", [])
-        recovered["authority_recovery"] = "H84 local durable run anchor"
-        recovered["full_snapshot_pending_or_older"] = True
-        details.append(f"H84快速權威：本機錨點較新（{anchor_stamp[1] or anchor_stamp[0]}）。")
-        return recovered, details
-    if full_payload:
-        details.append(f"H84快速權威：本機完整推薦快照（{local_stamp[1] or local_stamp[0] or '日期未驗證'}）。")
-        return full_payload, details
-    if anchor:
-        details.append("H84快速權威：僅有本機推薦錨點。")
-        return anchor, details
+    local_best, local_source = _h92_choose_recommendation_authority(full_payload, anchor)
+    local_date, _local_saved = _payload_authority_stamp_v185(local_best)
+    expected_date = _expected_latest_trade_date_v173().strftime("%Y-%m-%d")
+    need_remote_anchor = bool(
+        not local_best
+        or not anchor
+        or not local_date
+        or local_date < expected_date
+        or not _h92_has_decision_core(local_best)
+    )
 
-    # Cold/recovery fallback only. This path is intentionally rare.
-    try:
-        from godpick_persistence_service import load_named_json_permanent
-        anchor_raw, anchor_details = load_named_json_permanent(
-            GODPICK_LATEST_ANCHOR_FILE, {}, firestore_doc="godpick_latest_run_anchor"
-        )
-        if isinstance(anchor_raw, dict):
-            anchor = anchor_raw
-        details.extend([f"遠端錨點｜{x}" for x in (anchor_details or [])])
-    except Exception as exc:
-        details.append(f"遠端錨點讀取例外：{exc}")
+    remote_anchor: dict[str, Any] = {}
+    if need_remote_anchor:
+        try:
+            from godpick_persistence_service import load_named_json_permanent
+            remote_raw, remote_details = load_named_json_permanent(
+                GODPICK_LATEST_ANCHOR_FILE, {}, firestore_doc="godpick_latest_run_anchor"
+            )
+            if isinstance(remote_raw, dict):
+                remote_anchor = remote_raw
+            details.extend([f"H92永久錨點｜{x}" for x in (remote_details or [])])
+        except Exception as exc:
+            details.append(f"H92永久錨點讀取例外：{type(exc).__name__}: {exc}")
+
+    chosen, source = _h92_choose_recommendation_authority(full_payload, anchor, remote_anchor)
+    if chosen:
+        if "anchor" in source:
+            chosen = _h92_prepare_anchor_recovery(chosen, source)
+        stamp = _payload_authority_stamp_v185(chosen)
+        details.insert(0, f"H92推薦權威：{source}｜{stamp[1] or stamp[0] or '日期未驗證'}")
+        return chosen, details
+
+    # Only when every small authority is missing do we pay the cost of restoring
+    # the full remote recommendation snapshot.
     try:
         from godpick_persistence_service import load_named_json_permanent
         remote_full, full_details = load_named_json_permanent(
             GODPICK_LATEST_FILE, {}, firestore_doc="godpick_latest_recommendations"
         )
+        details.extend([f"H92遠端完整快照｜{x}" for x in (full_details or [])])
         if isinstance(remote_full, dict) and remote_full:
-            full_payload = remote_full
-        details.extend([f"遠端完整快照｜{x}" for x in (full_details or [])])
+            return remote_full, details
     except Exception as exc:
-        details.append(f"遠端完整快照讀取例外：{exc}")
-
-    full_stamp = _payload_authority_stamp_v185(full_payload)
-    anchor_stamp = _payload_authority_stamp_v185(anchor)
-    if anchor_stamp > full_stamp and anchor:
-        recovered = dict(anchor)
-        recovered.setdefault("recommendations", [])
-        recovered.setdefault("candidate_diagnosis", [])
-        recovered.setdefault("category_strength", [])
-        recovered.setdefault("hot_pick", [])
-        recovered["authority_recovery"] = "H84 remote recovery anchor"
-        recovered["full_snapshot_pending_or_older"] = True
-        return recovered, details
-    if full_payload:
-        return full_payload, details
-    return anchor if isinstance(anchor, dict) else {}, details
-
+        details.append(f"H92遠端完整快照讀取例外：{type(exc).__name__}: {exc}")
+    return {}, details
 
 
 def _settings_ts_value(payload: dict[str, Any]) -> datetime:
@@ -3470,16 +3576,25 @@ def _load_latest_recommendation_pack() -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     hot_df = _ensure_v92_night_compat_df(_records_to_df_for_json(payload.get("hot_pick", [])), source="latest_hot_pick")
 
     candidate_df = _records_to_df_for_json(payload.get("candidate_diagnosis", []))
-    if candidate_df.empty:
-        candidate_df = raw_rec_df.copy()
-    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
-        # Keep the exact saved diagnosis.  build_candidate_diagnosis/apply engine
-        # across 1k~2k rows on every cold entry was one of the endless-spinner roots.
-        st.session_state[_k("candidate_diagnosis_store")] = candidate_df.copy()
-
     h85_core = payload.get("h85_h79_core_tables", {})
     if isinstance(h85_core, dict) and h85_core:
         st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = h85_core
+    if candidate_df.empty:
+        candidate_df = raw_rec_df.copy()
+    if candidate_df.empty and isinstance(h85_core, dict):
+        # H92 reboot path: the compact permanent anchor intentionally excludes
+        # the 1k~2k full candidate payload.  Reconstruct a small diagnosis view
+        # from the saved H79 audit/research/waiting tables so the page and Excel
+        # retain decision value without re-running the market scan.
+        for _name in ("audit", "research", "waiting"):
+            _rows = h85_core.get(_name, [])
+            _tmp = _records_to_df_for_json(_rows) if isinstance(_rows, list) else pd.DataFrame()
+            if isinstance(_tmp, pd.DataFrame) and not _tmp.empty:
+                candidate_df = _tmp.copy()
+                break
+    if isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+        # Keep the exact saved/compact diagnosis. Never rebuild 1k~2k rows on reboot.
+        st.session_state[_k("candidate_diagnosis_store")] = candidate_df.copy()
 
     scan_report = payload.get("scan_quality", {})
     if not isinstance(scan_report, dict) or not scan_report:
@@ -3790,6 +3905,22 @@ def _project_data_freshness_snapshot_v173() -> dict[str, Any]:
     # trigger a remote official-factor authority election. H83 performs the
     # authoritative refresh before an actual recommendation run.
     official_payload = _read_project_json_file(OFFICIAL_FACTORS_CACHE_FILE)
+    # H92 reboot restore: an app redeploy can recreate the packaged July cache.
+    # If its business date is stale, restore the already-persisted runtime-data
+    # authority instead of forcing the user to run the entire stock scan again.
+    try:
+        _official_meta0 = official_payload.get("meta", {}) if isinstance(official_payload, dict) else {}
+        _official_local_date0 = _parse_date_v173(
+            (official_payload.get("data_date") if isinstance(official_payload, dict) else "")
+            or (_official_meta0.get("data_date") if isinstance(_official_meta0, dict) else "")
+        )
+        _official_local_lag0 = _business_lag_v173(expected, _official_local_date0) if _official_local_date0 is not None else 999
+        if _official_local_lag0 >= 2 and callable(load_factor_cache):
+            _restored_official = load_factor_cache(force_authority_restore=True)
+            if isinstance(_restored_official, dict) and _restored_official:
+                official_payload = _restored_official
+    except Exception:
+        pass
     official_rows = official_payload.get("records", []) if isinstance(official_payload, dict) else []
     if not isinstance(official_rows, list):
         official_rows = []
@@ -18471,7 +18602,10 @@ def main():
     # allowed to keep the browser on Stop once the essential result surface exists.
     _h88_stop_after_excel = bool(st.session_state.pop(_k("h88_excel_built_this_run"), False))
     if submit_recommend or submit_refresh or resume_scan_btn or _h88_stop_after_excel:
-        st.success("H88：本輪主要工作已完成，頁面主執行緒已釋放。完整保存/學習在背景執行，不需要繼續等待。")
+        if bool(st.session_state.get(_k("latest_pack_permanent_ok"), False)):
+            st.success("H92：本輪推薦已完成，而且小型權威快照已同步永久保存；現在 Reboot 也會直接恢復，不需要重跑全市場。")
+        else:
+            st.warning("H92：本輪推薦已完成，但遠端永久權威尚未確認；背景會自動重試。此狀態下立即 Reboot 仍可能回退，請先確認保存狀態。")
         st.stop()
 
     rotation_snapshot_message = _safe_str(st.session_state.get(_k("rotation_snapshot_message")))
