@@ -553,6 +553,23 @@ try:
 except Exception:
     apply_h89_record_snapshot = None
 try:
+    from godpick_h93_evolution_engine import (
+        VERSION as H93_EVOLUTION_VERSION,
+        apply_seven_direction_overlay as apply_h93_seven_direction_overlay,
+        decorate_decision_tables as decorate_h93_decision_tables,
+        refresh_evolution_state as refresh_h93_evolution_state,
+        export_contract_summary as h93_export_contract_summary,
+        H93_COLUMNS as H93_EVOLUTION_COLUMNS,
+    )
+except Exception as _h93_import_exc:
+    H93_EVOLUTION_VERSION = "h93_evolution_unavailable"
+    apply_h93_seven_direction_overlay = None
+    decorate_h93_decision_tables = None
+    refresh_h93_evolution_state = None
+    h93_export_contract_summary = None
+    H93_EVOLUTION_COLUMNS = []
+    H93_EVOLUTION_IMPORT_ERROR = str(_h93_import_exc)
+try:
     from godpick_h83_autofresh import run_autofresh_preflight as run_h83_autofresh_preflight
     from godpick_h83_autofresh_settings import load_settings_safe as load_h83_autofresh_settings
 except Exception:
@@ -624,7 +641,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h92_reboot_durable_authority_20260922"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h93_seven_direction_evolution_20260923"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -988,6 +1005,15 @@ except Exception:
 try:
     GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
         list(GODPICK_RECORD_COLUMNS) + list(H80_RECORD_FEEDBACK_COLUMNS or [])
+    ))
+except Exception:
+    pass
+
+# H93: retain the seven-direction decision evidence at signal time so the
+# learning plan can review what the system actually knew when it ranked the row.
+try:
+    GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
+        list(GODPICK_RECORD_COLUMNS) + list(H93_EVOLUTION_COLUMNS or [])
     ))
 except Exception:
     pass
@@ -2163,6 +2189,13 @@ def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
         return {}
     if not isinstance(tables, dict):
         return {}
+    # H93: apply the seven-direction evolution layer only to the bounded H79
+    # decision tables. This keeps the 1k~2k scan fast and cannot create Formal.
+    if callable(decorate_h93_decision_tables):
+        try:
+            tables = decorate_h93_decision_tables(tables, candidate_df=source, scan_report={})
+        except Exception:
+            pass
     # H90: keep the compact snapshot contract identical to H79/H85.  H88 used
     # legacy names (wait_core/evidence/...) while the renderer/exporter reads
     # waiting/audit/emerging_watch/data_repairs.  That schema split made the
@@ -2305,6 +2338,19 @@ def _h88_background_full_persist(
             status["steps"]["page08_upsert"] = _v181_background_record_upsert(rows)
         else:
             status["steps"]["page08_upsert"] = {"ok": True, "message": "本輪沒有正式/A-/R1/H79研究紀錄可寫入", "count": 0}
+
+        # H93 learning plan: rebuild only in this background stage after Page08
+        # persistence work. The render thread never waits for history analysis.
+        if callable(refresh_h93_evolution_state):
+            try:
+                _h93_state = refresh_h93_evolution_state(persist=True)
+                status["steps"]["h93_evolution_state"] = {
+                    "ok": True,
+                    "mature_samples": int((_h93_state or {}).get("mature_samples", 0) or 0),
+                    "learning_status": _safe_str((_h93_state or {}).get("learning_status")),
+                }
+            except Exception as exc:
+                status["steps"]["h93_evolution_state"] = {"ok": False, "message": str(exc)}
 
         # Refresh the small anchor after the full snapshot is safely on disk.
         final_anchor = dict(anchor_payload or {})
@@ -15004,8 +15050,16 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
         failure = _h91_core_failure_message(built)
         if failure:
             raise RuntimeError(f"H91決策核心仍失敗：{failure}")
-        compact = _h85_encode_h79_core_tables(built, source="h91-explicit-export-bounded-recovery")
-        compact["version"] = "v191_h91_compact_h79_snapshot_20260922"
+        if callable(decorate_h93_decision_tables):
+            try:
+                built = decorate_h93_decision_tables(
+                    built, candidate_df=source,
+                    scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+                )
+            except Exception:
+                pass
+        compact = _h85_encode_h79_core_tables(built, source="h93-explicit-export-bounded-recovery")
+        compact["version"] = "v191_h93_compact_h79_snapshot_20260923"
         compact["full_candidate_count"] = int(len(candidate_df))
         compact["model_input_count"] = int(len(source))
         st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
@@ -15032,6 +15086,15 @@ def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.Dat
     raw = _h90_normalize_core_snapshot(st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
     tables = _h85_decode_h79_core_tables(raw)
     if tables and not _h91_core_failure_message(tables) and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+        if callable(decorate_h93_decision_tables):
+            try:
+                tables = decorate_h93_decision_tables(
+                    tables,
+                    candidate_df=st.session_state.get(_k("candidate_diagnosis_store")),
+                    scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+                )
+            except Exception:
+                pass
         return tables, _safe_str(raw.get("source")) if isinstance(raw, dict) else "snapshot", False
 
     # H90: H88/H89 background threads cannot safely mutate Streamlit session_state.
@@ -15041,6 +15104,15 @@ def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.Dat
     if local_raw:
         tables = _h85_decode_h79_core_tables(local_raw)
         if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+            if callable(decorate_h93_decision_tables):
+                try:
+                    tables = decorate_h93_decision_tables(
+                        tables,
+                        candidate_df=st.session_state.get(_k("candidate_diagnosis_store")),
+                        scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+                    )
+                except Exception:
+                    pass
             return tables, local_source or "local-snapshot", False
 
     # Compatibility for the first opening after H85 deployment.  Do NOT rebuild
@@ -15063,7 +15135,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
 
     tables, source_label, bounded = _h85_get_h79_core_for_render(rec_df if isinstance(rec_df, pd.DataFrame) else pd.DataFrame())
     render_pro_section("超級AI股神｜H79 正式交易與研究推薦")
-    st.caption("H85：進頁只讀上次推薦已保存的精簡決策快照；H64～H77完整技術診斷只有你明確展開時才運算，避免頁面永久轉圈。")
+    st.caption("H93：以已保存H79決策快照加上七維進化顧問層（深入研究/學習/顧問/系統優化/成長/持續優化/效率）；只調研究順位，不建立Formal。")
     if bounded:
         st.warning("目前是 H84 舊快照相容模式：只用前120檔建立畫面摘要，避免開頁重算全市場。請下一次正常執行『重新推薦』後，H85會永久保存完整精簡摘要。")
     if not tables:
@@ -15082,7 +15154,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         health = tables.get("health", pd.DataFrame())
         if isinstance(health, pd.DataFrame) and not health.empty:
             st.dataframe(_format_df(health), use_container_width=True, hide_index=True)
-        st.caption(f"H85精簡快照來源：{source_label or 'snapshot'}｜研究股不會因此取得 Formal 買進授權。")
+        st.caption(f"H93精簡快照來源：{source_label or 'snapshot'}｜H93七維研究只提供條件式顧問與研究排序，不取得 Formal 買進授權。")
 
         show_more = st.toggle(
             "載入 H79 等待／淘汰／資料修復明細",
@@ -16571,16 +16643,28 @@ def _build_excel_bytes_fast_h85(
         candidate_for_core,
         rec_export if isinstance(rec_export, pd.DataFrame) else pd.DataFrame(),
     )
+    report = scan_report if isinstance(scan_report, dict) else {}
+    if callable(decorate_h93_decision_tables):
+        try:
+            tables = decorate_h93_decision_tables(
+                tables, candidate_df=candidate_for_core, scan_report=report
+            )
+        except Exception as _h93_excel_exc:
+            st.session_state[_k("h93_excel_contract_error")] = f"{type(_h93_excel_exc).__name__}: {_h93_excel_exc}"
     sector = cat_export if isinstance(cat_export, pd.DataFrame) else pd.DataFrame()
     health = tables.get("health", pd.DataFrame()).copy() if tables else pd.DataFrame()
-    report = scan_report if isinstance(scan_report, dict) else {}
     if report:
         extra = pd.DataFrame([
             {"項目": str(k), "數值": _excel_safe_value(v)}
             for k, v in report.items() if not isinstance(v, (dict, list, tuple, set))
         ])
         health = pd.concat([health, extra], ignore_index=True, sort=False)
+    h93_contract = h93_export_contract_summary(tables) if callable(h93_export_contract_summary) else {}
     core_diag = pd.DataFrame([
+        {"項目": "H93決策表來源", "數值": core_source or "UNAVAILABLE"},
+        {"項目": "H93七維進化版本", "數值": H93_EVOLUTION_VERSION},
+        {"項目": "H93Excel契約", "數值": "PASS" if isinstance(h93_contract, dict) and h93_contract.get("ok") else "CHECK"},
+        {"項目": "H93Excel契約明細", "數值": json.dumps(h93_contract.get("sheets", {}), ensure_ascii=False, default=str)[:1200] if isinstance(h93_contract, dict) else ""},
         {"項目": "H91決策表來源", "數值": core_source or "UNAVAILABLE"},
         {"項目": "H91候選輸入數", "數值": int(len(candidate_for_core))},
         {"項目": "H91候選重複欄位數", "數值": int(len(candidate_for_core.columns) - len(set(map(str, candidate_for_core.columns)))) if isinstance(candidate_for_core, pd.DataFrame) else 0},
@@ -16700,7 +16784,7 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
         return
 
     render_pro_section("Excel 匯出")
-    st.caption("H85 Excel零模型重算版：預設直接匯出已保存的7張主管決策快照；不再為下載重新跑H51~H79。研究推薦不等於買進。")
+    st.caption("H93 Excel七維進化版：直接匯出已保存的7張主管決策快照，加入深入研究、學習計畫、顧問模式、系統優化、成長機會、持續優化、效率證據；不重新掃描全市場。")
 
     _guide_available = _get_super_ai_guide_default_cols()
     _candidate_layout_df = st.session_state.get(_k("candidate_diagnosis_store"))
@@ -18033,7 +18117,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"頁面加速修正版：{PAGE07_SPEED_FIX_VERSION}｜H91修正H89重複輸入欄造成決策核心失敗；右側最新非空值單一真相合併，失敗快照不再被Excel當有效結果。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H92永久權威＋H93七維進化顧問層；七大方向只強化研究/學習/顧問/效率，不放寬Formal治理。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
