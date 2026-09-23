@@ -327,6 +327,23 @@ def decorate_decision_tables(tables: dict[str,Any] | None, *, candidate_df: pd.D
         {"項目":"H94Formal權限","數值":"LOCKED"},
     ]
     out["health"]=pd.concat([health,pd.DataFrame(rows)],ignore_index=True,sort=False)
+
+    # H96: high-conviction discovery expands the research universe from the old
+    # Research+Waiting survivors to the bounded 120-row audit pool.  This is
+    # intentionally downstream of H94 so H94 evidence remains visible, while
+    # sheet 02 becomes a high-reference list instead of a quota-filled list.
+    try:
+        from godpick_h96_high_conviction_engine import apply_h96_decision_tables
+        out = apply_h96_decision_tables(
+            out, sector_df=sector_df, candidate_df=candidate_df, settings=None
+        )
+    except Exception as _h96_exc:
+        _health = out.get("health", pd.DataFrame()).copy()
+        _health = pd.concat([_health, pd.DataFrame([
+            {"項目":"H96核心研究引擎","數值":f"ERROR｜{type(_h96_exc).__name__}: {_h96_exc}"},
+            {"項目":"H96Formal權限","數值":"LOCKED｜H96失敗不影響既有Formal治理"},
+        ])], ignore_index=True, sort=False)
+        out["health"] = _health
     return out
 
 
