@@ -344,6 +344,21 @@ def decorate_decision_tables(tables: dict[str,Any] | None, *, candidate_df: pd.D
             {"項目":"H96Formal權限","數值":"LOCKED｜H96失敗不影響既有Formal治理"},
         ])], ignore_index=True, sort=False)
         out["health"] = _health
+
+    # H99: reconcile execution truth after H96 has finished selecting the
+    # manager-facing pools.  This is intentionally last-mile and idempotent so
+    # restored compact snapshots/Excel exports cannot re-introduce an old H81
+    # RR narrative that conflicts with the newer H89 price plan.
+    try:
+        from godpick_h99_execution_truth import decorate_decision_tables as decorate_h99_execution_truth
+        out = decorate_h99_execution_truth(out)
+    except Exception as _h99_exc:
+        _health = out.get("health", pd.DataFrame()).copy()
+        _health = pd.concat([_health, pd.DataFrame([
+            {"項目":"H99執行真相引擎","數值":f"ERROR｜{type(_h99_exc).__name__}: {_h99_exc}"},
+            {"項目":"H99Formal權限","數值":"LOCKED｜H99失敗不影響既有Formal治理"},
+        ])], ignore_index=True, sort=False)
+        out["health"] = _health
     return out
 
 

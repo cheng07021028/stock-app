@@ -40,6 +40,14 @@ H80_RECORD_FEEDBACK_COLUMNS = [
     "H82市場環境加減分", "H82產業加減分", "H82決策狀態加減分", "H82H81分桶加減分",
     "H82錯誤治理加減分", "H82影子建議加減分", "H82自適應加減分", "H82自適應研究排序分",
     "H82主要學習依據", "H82主要錯誤風險", "H82學習摘要", "H82學習狀態", "H82設定版本",
+    "H89版本", "H89選股方向分", "H89執行品質分", "H89交易型態", "H89主進場",
+    "H89防守停損", "H89第一目標", "H89第二目標", "H89成本後RR1", "H89成本後RR2",
+    "H89停損距離%", "H89價格計畫來源", "H89Formal價格計畫合格", "H89模型目標僅研究",
+    "H89所需拉回%", "H89選股與執行摘要",
+    "H99版本", "H99執行真相來源", "H99主進場", "H99防守停損", "H99第一目標",
+    "H99成本後RR", "H99RR重算值", "H99RR一致性", "H99舊RR差異", "H99價格計畫狀態",
+    "H99市場資料日", "H99目標交易日", "H99資訊空窗日數", "H99盤前重驗", "H99執行狀態",
+    "H99Formal權限", "H99決策摘要",
 ]
 
 
@@ -142,6 +150,14 @@ def build_research_tracking_frame(
 
     out = pd.DataFrame(rows)
     if not out.empty:
+        # H99 persists the same execution truth used by UI/Excel into Page08
+        # research records.  This prevents later performance learning from
+        # evaluating an obsolete H79 RR when H89 had already rebuilt the plan.
+        try:
+            from godpick_h99_execution_truth import apply_execution_truth_overlay
+            out = apply_execution_truth_overlay(out)
+        except Exception:
+            pass
         out["__h80_order"] = out["股票代號"].map({c: i for i, c in enumerate(research["股票代號"].tolist())})
         out = out.sort_values("__h80_order", kind="stable").drop(columns=["__h80_order"], errors="ignore")
     return out.reset_index(drop=True)

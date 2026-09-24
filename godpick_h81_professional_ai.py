@@ -24,7 +24,7 @@ import re
 
 import pandas as pd
 
-VERSION = "v191_h89_entity_aware_professional_research_20260922"
+VERSION = "v191_h99_execution_truth_reconciled_professional_research_20260924"
 
 POSITIVE_NEWS = (
     "上修", "成長", "優於預期", "超預期", "新訂單", "得標", "擴產", "量產", "認證",
@@ -87,6 +87,26 @@ def _first_text(row: dict[str, Any], names: Iterable[str]) -> str:
         if s:
             return s
     return ""
+
+
+def _execution_truth(row: dict[str, Any]) -> dict[str, Any]:
+    """Return the newest coherent price-plan truth.
+
+    H89 runs before H81 in the decision pipeline.  H81 must therefore score and
+    describe the H89 plan when it exists; falling back to H79 avoids the old
+    split-brain workbook where H89 said RR=1.50 but H81 still quoted H79 RR=0.73.
+    """
+    try:
+        from godpick_h99_execution_truth import resolve_execution_truth
+        return resolve_execution_truth(row)
+    except Exception:
+        entry = _first_num(row, ["H89主進場", "H79計畫進場", "主要進場參考價", "實戰觸發價"])
+        stop = _first_num(row, ["H89防守停損", "H79結構停損", "停損參考", "SuperAI動態停損價"])
+        target = _first_num(row, ["H89第一目標", "H79第一目標", "第一壓力價", "SuperAI第一減碼價"])
+        rr = _first_num(row, ["H89成本後RR1", "H79成本後RR", "風險報酬比_決策", "風險報酬比"])
+        return {"entry": entry, "stop": stop, "target": target, "rr": rr,
+                "source": "H89/H79 fallback", "target_day": None, "gap_days": None,
+                "preopen": "下一交易日盤前重驗"}
 
 
 def _score_from_growth(value: float | None, neutral: float = 50.0) -> float:
@@ -332,8 +352,9 @@ def _score_backtest(row: dict[str, Any], minimum_trades: int = 20) -> tuple[floa
 
 
 def _score_risk(row: dict[str, Any]) -> tuple[float, float, list[str], list[str], list[str]]:
-    rr = _first_num(row, ["H79成本後RR", "風險報酬比_決策", "風險報酬比"])
-    stop = _first_num(row, ["H79停損距離%", "停損距離%"])
+    truth = _execution_truth(row)
+    rr = _num(truth.get("rr"), None)
+    stop = _first_num(row, ["H89停損距離%", "H79停損距離%", "停損距離%"])
     chase = _first_num(row, ["追價風險分", "追高風險分數_決策"])
     vol = _first_num(row, ["20日波動率%", "波動率%"])
     parts: list[tuple[float, float]] = []
@@ -378,14 +399,15 @@ def _score_journal(row: dict[str, Any], minimum_sample: int = 10) -> tuple[float
 
 
 def _score_execution(row: dict[str, Any]) -> tuple[float, float, list[str], list[str], list[str]]:
-    entry = _first_num(row, ["H79計畫進場", "主要進場參考價", "實戰觸發價"])
-    stop = _first_num(row, ["H79結構停損", "停損參考", "SuperAI動態停損價"])
-    target = _first_num(row, ["H79第一目標", "第一壓力價", "SuperAI第一減碼價"])
-    rr = _first_num(row, ["H79成本後RR", "風險報酬比_決策", "風險報酬比"])
-    status = _first_text(row, ["H79計畫狀態", "H68次日執行狀態", "隔日建議動作"])
+    truth = _execution_truth(row)
+    entry = _num(truth.get("entry"), None)
+    stop = _num(truth.get("stop"), None)
+    target = _num(truth.get("target"), None)
+    rr = _num(truth.get("rr"), None)
+    status = _first_text(row, ["H89Formal價格計畫合格", "H79計畫狀態", "H68次日執行狀態", "隔日建議動作"])
     complete = sum(v is not None and v > 0 for v in [entry, stop, target])
     score = 35 + complete * 15 + (_score_from_rr(rr) - 50) * .35
-    if status.startswith("PASS") or status.startswith("READY"):
+    if status.startswith("PASS") or status.startswith("READY") or status == "是":
         score += 8
     pos = []
     neg = []
@@ -1093,18 +1115,23 @@ def build_daily_trading_plan(candidate: dict[str, Any] | pd.Series, settings: di
     cfg = _settings_or_default(settings).get("daily_plan", {})
     code = _first_text(raw, ["股票代號", "代號"])
     name = _first_text(raw, ["股票名稱", "名稱"])
-    entry = _first_num(raw, ["H79計畫進場", "主要進場參考價", "實戰觸發價"])
-    stop = _first_num(raw, ["H79結構停損", "停損參考", "SuperAI動態停損價"])
-    target = _first_num(raw, ["H79第一目標", "第一壓力價", "SuperAI第一減碼價"])
-    rr = _first_num(raw, ["H79成本後RR", "風險報酬比_決策", "風險報酬比"])
+    truth = _execution_truth(raw)
+    entry = _num(truth.get("entry"), None)
+    stop = _num(truth.get("stop"), None)
+    target = _num(truth.get("target"), None)
+    rr = _num(truth.get("rr"), None)
+    truth_source = _text(truth.get("source")) or "H89/H79"
+    target_day = truth.get("target_day")
+    target_day_text = target_day.isoformat() if hasattr(target_day, "isoformat") else "下一交易日"
+    preopen_truth = _text(truth.get("preopen"))
     regime = _first_text(raw, ["大盤情境", "大盤狀態", "大盤模式"]) or "待確認"
     rows = []
     if cfg.get("preopen_enabled", True):
-        rows.append({"階段": "盤前", "時間": "08:30~08:55", "檢查": f"確認大盤情境={regime}；K線/官方因子新鮮度；是否有重大新事件。", "成立才做": "只保留資料READY且研究/正式條件沒有失效的標的。"})
+        rows.append({"階段": "盤前", "時間": "08:30~08:55", "檢查": f"{target_day_text}盤前重驗；確認大盤情境={regime}；K線/官方因子新鮮度；重大新事件。{(' '+preopen_truth) if preopen_truth else ''}", "成立才做": "只保留資料READY且研究/正式條件沒有失效的標的；跨休市資訊空窗不得直接沿用前一收盤買進判斷。"})
     if cfg.get("open_enabled", True):
-        rows.append({"階段": "開盤", "時間": "09:00~09:30", "檢查": f"觀察是否接近計畫進場 {entry if entry else '未建立'}，避免跳空追價。", "成立才做": "價格/量能符合原計畫，且未觸發過熱或失效條件。"})
+        rows.append({"階段": "開盤", "時間": "09:00~09:30", "檢查": f"執行真相={truth_source}；觀察是否接近計畫進場 {entry if entry else '未建立'}，避免跳空追價。", "成立才做": "價格/量能符合原計畫，且未觸發過熱或失效條件。"})
     if cfg.get("intraday_enabled", True):
-        rows.append({"階段": "盤中", "時間": "09:30~13:20", "檢查": f"停損 {stop if stop else '未建立'}、第一目標 {target if target else '未建立'}、成本後RR {rr if rr is not None else '未建立'}。", "成立才做": "只有原始風險報酬仍成立才維持；失效即取消，不移動停損硬湊RR。"})
+        rows.append({"階段": "盤中", "時間": "09:30~13:20", "檢查": f"{truth_source}；停損 {stop if stop else '未建立'}、第一目標 {target if target else '未建立'}、成本後RR {f'{rr:.2f}' if rr is not None else '未建立'}。", "成立才做": "只有同一執行真相的風險報酬仍成立才維持；失效即取消，不移動停損硬湊RR。"})
     if cfg.get("close_enabled", True):
         rows.append({"階段": "收盤", "時間": "13:30後", "檢查": "記錄實際觸發、最高/最低、收盤、量能、是否達停損/目標及市場情境。", "成立才做": "同步第8頁推薦紀錄，供T+1/T+3/T+5績效與H81檢討。"})
     out = pd.DataFrame(rows)
