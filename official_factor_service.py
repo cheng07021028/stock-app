@@ -47,7 +47,7 @@ CACHE_FILE = BASE_DIR / "official_factors_cache.json"
 LOG_FILE = BASE_DIR / "official_factors_update_log.json"
 INSTITUTIONAL_HISTORY_FILE = BASE_DIR / "official_factor_institutional_history.json"
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-CACHE_VERSION = "v191_h69_authoritative_factor_refresh_single_truth_20260913"
+CACHE_VERSION = "v191_h98_h69_reboot_safe_official_factor_authority_20260924"
 REQUEST_TIMEOUT = 5
 DEFAULT_RUN_TIMEOUT_SECONDS = 75
 DEFAULT_RUN_REQUEST_BUDGET = 48
@@ -728,28 +728,31 @@ def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | No
         from godpick_durability_service import persist_json_permanent
         permanent_ok, permanent_msg = persist_json_permanent(
             OFFICIAL_FACTOR_DURABLE_PATH, payload,
-            reason="V186 official factor business-date authority",
+            firestore_doc="official_factors_cache",
+            reason="H98 official factor reboot-safe business-date authority",
+            require_remote=True,
         )
     except Exception as exc:
         permanent_msg = f"V186永久化服務例外：{type(exc).__name__}: {exc}"
 
-    if not CACHE_FILE.exists():
-        # Defensive local fallback if the persistence service was unavailable.
-        try:
-            tmp = CACHE_FILE.with_suffix(".json.tmp_v186")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(CACHE_FILE)
-        except Exception:
-            pass
+    # H98: always keep the local cache aligned with the just-fetched payload.
+    # The previous fallback wrote only when the file did not exist, so a failed
+    # remote service call could leave an older packaged July cache in place.
+    try:
+        tmp = CACHE_FILE.with_suffix(".json.tmp_h98")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(CACHE_FILE)
+    except Exception:
+        pass
 
     _write_factor_authority_state(
         payload, permanent_ok=permanent_ok, message=permanent_msg,
         source="local+remote" if permanent_ok else "local-only",
     )
     persistence_note = (
-        "V186：官方因子已完成遠端永久化確認。"
+        "H98：官方因子已完成GitHub runtime-data/Firestore永久化與回讀確認。"
         if permanent_ok else
-        "V186：本機已保存，但遠端永久化尚未確認；Reboot 前請至第17頁重試永久化。"
+        "H98：本機已保存，但遠端永久權威尚未回讀確認；目前不可Reboot，請至第17頁重試永久化。"
     )
     _append_log(
         "success" if permanent_ok else "local_only", len(records),
@@ -764,7 +767,7 @@ def save_factor_cache(records: list[dict[str, Any]], diagnostics: list[str] | No
     _AUTHORITY_RESTORE_SOURCE = "local+remote" if permanent_ok else "local-only"
     _AUTHORITY_RESTORE_DATA_DATE = _factor_payload_business_date(payload)
     _AUTHORITY_RESTORE_MESSAGE = (
-        f"V186官方因子保存：data_date={_AUTHORITY_RESTORE_DATA_DATE or '未驗證'}｜"
+        f"H98官方因子保存：data_date={_AUTHORITY_RESTORE_DATA_DATE or '未驗證'}｜"
         + ("遠端永久化已確認" if permanent_ok else "僅本機，遠端未確認")
     )
     return payload

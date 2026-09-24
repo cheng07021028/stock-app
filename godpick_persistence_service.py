@@ -73,6 +73,7 @@ NAMED_FIRESTORE_DOCS = {
     "godpick_recommend_list.json": "godpick_recommend_list",
     "godpick_latest_recommendations.json": "godpick_latest_recommendations",
     "godpick_latest_run_anchor.json": "godpick_latest_run_anchor",
+    "official_factors_cache.json": "official_factors_cache",
     "godpick_export_sync_settings.json": "godpick_export_sync_settings",
     "godpick_export_history.json": "godpick_export_history",
     "godpick_module_sync_state.json": "godpick_module_sync_state",
@@ -2829,6 +2830,7 @@ def save_named_json_permanent(
     *,
     github_path: str | None = None,
     firestore_doc: str | None = None,
+    require_remote: bool = False,
 ) -> PersistenceReport:
     state = _new_state("named_json_durable_v2", payload, path=path_name)
     state_file = _state_file_for(path_name)
@@ -2849,8 +2851,17 @@ def save_named_json_permanent(
     report.firestore_ok = fs_ok
     report.firestore_message = fs_msg
 
-    if _configured_remote_exists():
-        report.permanent_ok = bool(report.local_ok and (report.github_ok or report.firestore_ok))
+    remote_ok = bool(report.github_ok or report.firestore_ok)
+    if require_remote:
+        # H98: APP/Streamlit reboot safety requires an authority outside the
+        # ephemeral application filesystem. Local-only success must never be
+        # reported as permanent for critical business-date artifacts.
+        report.permanent_ok = bool(report.local_ok and remote_ok)
+        if report.local_ok and not remote_ok:
+            suffix = "H98嚴格永久化：本機已保存，但GitHub runtime-data/Firestore皆未回讀確認；不可視為Reboot-safe。"
+            report.local_message = f"{report.local_message}｜{suffix}"
+    elif _configured_remote_exists():
+        report.permanent_ok = bool(report.local_ok and remote_ok)
     else:
         report.permanent_ok = report.local_ok
     return report

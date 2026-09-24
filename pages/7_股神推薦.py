@@ -676,7 +676,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h97_audit_authority_recovery_20260924"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h98_reboot_persistence_authority_20260924"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2192,7 +2192,8 @@ def _h88_write_small_anchor_now(
         permanent_ok, permanent_msg = persist_json_permanent(
             GODPICK_LATEST_ANCHOR_FILE, anchor,
             firestore_doc="godpick_latest_run_anchor",
-            reason="H92 reboot-safe compact recommendation authority",
+            reason="H98 reboot-safe compact recommendation authority",
+            require_remote=True,
         )
     except Exception as exc:
         permanent_msg = f"H92永久化服務例外：{type(exc).__name__}: {exc}"
@@ -3649,20 +3650,23 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
             _safe_str((_anchor_gh_cfg_v185() or {}).get("token")) or bool(_anchor_fs_cfg_v185())
         )
         if anchor_remote_configured:
-            # H86: never block the Streamlit render thread waiting for GitHub /
-            # Firestore confirmation after a 1k~2k stock scan.  The local anchor
-            # has already been atomically written + read back above.  Queue the
-            # remote copy through the durability outbox and let Page17/scheduler
-            # converge it in the background.
-            from godpick_durability_service import persist_json_async as _persist_anchor_h86
-            anchor_remote_ok, anchor_remote_msg = _persist_anchor_h86(
+            # H98: headless/central-scheduler runs must obey the same reboot-safe
+            # contract as interactive H92. A background thread can be terminated
+            # by an APP reboot before it reaches runtime-data, which was the
+            # observed reason recommendation dates fell back to the packaged July
+            # snapshot. The compact anchor is small, so persist it synchronously
+            # and require a verified remote authority before reporting success.
+            from godpick_durability_service import persist_json_permanent as _persist_anchor_h98
+            anchor_remote_ok, anchor_remote_msg = _persist_anchor_h98(
                 GODPICK_LATEST_ANCHOR_FILE, anchor_payload,
                 firestore_doc="godpick_latest_run_anchor",
-                reason="H86 nonblocking recommendation remote anchor",
+                reason="H98 headless reboot-safe recommendation anchor",
+                require_remote=True,
             )
-            anchor_remote_msg = "H86背景永久化已排程｜" + str(anchor_remote_msg or "")
+            anchor_remote_msg = "H98同步永久化｜" + str(anchor_remote_msg or "")
         else:
-            anchor_remote_msg = "未設定 GitHub/Firebase；本機錨點已獨立保存，尚無跨主機遠端備援"
+            anchor_remote_ok = False
+            anchor_remote_msg = "H98未設定GitHub/Firebase遠端權威；本機雖已保存，但不可宣稱APP Reboot-safe"
     except Exception as anchor_exc:
         anchor_remote_ok = False
         anchor_remote_msg = f"H86遠端錨點背景排程例外：{type(anchor_exc).__name__}: {anchor_exc}"
@@ -3732,6 +3736,13 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         anchor_remote_configured,
         anchor_remote_ok,
     )
+    # H98: in a deployment that has a remote authority configured, the headless
+    # save result must not be TRUE until the compact anchor is remotely verified.
+    # Otherwise the scheduler can report success and the next APP reboot still
+    # falls back to the packaged July snapshot.
+    if anchor_remote_configured and not anchor_remote_ok:
+        local_durable_ok = False
+        remote_warning = remote_warning or "H98：遠端推薦權威未確認，本輪不可視為Reboot-safe。"
     st.session_state[_k("latest_pack_local_ok")] = local_durable_ok
     st.session_state[_k("latest_pack_remote_configured")] = bool(anchor_remote_configured)
     st.session_state[_k("latest_pack_remote_ok")] = bool(anchor_remote_ok)
@@ -18307,7 +18318,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H92永久權威＋H93七維進化＋H94 Research Selection Intelligence；研究池會真正降級過熱/低風控/族群衝突候選，但Formal治理完全不放寬。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H98 Reboot永久權威＋H97 Audit權威＋H94/H96研究選股；官方因子與推薦小型權威需遠端回讀確認後才標示可Reboot，Formal治理完全不放寬。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()

@@ -287,6 +287,7 @@ def persist_json_permanent(
     github_path: str | None = None,
     firestore_doc: str | None = None,
     reason: str = "",
+    require_remote: bool = False,
 ) -> tuple[bool, str]:
     """Blocking durability for small critical metadata/checkpoints.
 
@@ -295,7 +296,10 @@ def persist_json_permanent(
     """
     try:
         from godpick_persistence_service import save_named_json_permanent
-        report = save_named_json_permanent(path_name, _json_safe(payload), github_path=github_path, firestore_doc=firestore_doc)
+        report = save_named_json_permanent(
+            path_name, _json_safe(payload), github_path=github_path,
+            firestore_doc=firestore_doc, require_remote=bool(require_remote),
+        )
         ok = bool(getattr(report, "permanent_ok", False))
         msg = "｜".join(x for x in [
             getattr(report, "local_message", ""), getattr(report, "github_message", ""), getattr(report, "firestore_message", "")
