@@ -585,6 +585,25 @@ except Exception as _h94_import_exc:
     h94_export_contract_summary = None
     H94_RESEARCH_SELECTION_COLUMNS = []
     H94_RESEARCH_SELECTION_IMPORT_ERROR = str(_h94_import_exc)
+
+# H97: bind the compact H79/H94/H96 authority to the *current* scan run.
+# This prevents a previous session core (including an empty Audit table) from
+# being reused after a new 1k+ stock scan merely because it has created_at.
+try:
+    from godpick_h97_audit_authority_guard import (
+        VERSION as H97_AUDIT_AUTHORITY_VERSION,
+        audit_row_count as h97_audit_row_count,
+        health_rows as build_h97_health_rows,
+        stamp_core as stamp_h97_core,
+        validate_core_for_scan as validate_h97_core_for_scan,
+    )
+except Exception as _h97_import_exc:
+    H97_AUDIT_AUTHORITY_VERSION = "h97_audit_authority_unavailable"
+    h97_audit_row_count = None
+    build_h97_health_rows = None
+    stamp_h97_core = None
+    validate_h97_core_for_scan = None
+    H97_AUDIT_AUTHORITY_IMPORT_ERROR = str(_h97_import_exc)
 try:
     from godpick_h83_autofresh import run_autofresh_preflight as run_h83_autofresh_preflight
     from godpick_h83_autofresh_settings import load_settings_safe as load_h83_autofresh_settings
@@ -657,7 +676,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h94_research_selection_intelligence_20260923"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h97_audit_authority_recovery_20260924"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2195,16 +2214,28 @@ def _h88_write_small_anchor_now(
     return bool(permanent_ok), msg, anchor
 
 
-def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
+def _h88_build_core_no_streamlit(
+    candidate_df: pd.DataFrame,
+    *,
+    run_id: str = "",
+    run_date: str = "",
+    authority_source: str = "h97-current-scan-core",
+) -> dict[str, Any]:
+    """Build the bounded H79/H94/H96 core and bind it to this scan run.
+
+    H97 invariant: a newly completed scan must never inherit a compact core from
+    another run.  The bounded core is cheap enough to rebuild once per real
+    scan, while the multi-MB full candidate snapshot remains background work.
+    """
     if not callable(build_h79_tables_guarded) or candidate_df is None or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         return {}
-    source = _h91_unique_decision_frame(candidate_df, stage="h88_background_core")
+    source = _h91_unique_decision_frame(candidate_df, stage="h97_current_scan_core")
     if len(source) > 240:
         try:
             source = _safe_sort_export_df(
                 source,
-                ["H79研究推薦分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
-                [False, False, False, False, False],
+                ["H79研究推薦分", "H89雙軌研究排序分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
+                [False, False, False, False, False, False],
             ).head(240).copy()
         except Exception:
             source = source.head(240).copy()
@@ -2214,24 +2245,49 @@ def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
         return {}
     if not isinstance(tables, dict):
         return {}
-    # H93: apply the seven-direction evolution layer only to the bounded H79
-    # decision tables. This keeps the 1k~2k scan fast and cannot create Formal.
+
+    # Keep an undecorated bounded audit authority.  H94/H96 are allowed to
+    # re-rank/decorate it, but no downstream layer is allowed to accidentally
+    # erase the discovery universe from the compact snapshot.
+    base_audit = tables.get("audit")
+    if not isinstance(base_audit, pd.DataFrame):
+        base_audit = pd.DataFrame()
+    else:
+        base_audit = base_audit.copy(deep=False)
+
+    audit_recovered = False
     if callable(decorate_h94_decision_tables):
         try:
             tables = decorate_h94_decision_tables(tables, candidate_df=source, scan_report={})
         except Exception:
             pass
-    # H90: keep the compact snapshot contract identical to H79/H85.  H88 used
-    # legacy names (wait_core/evidence/...) while the renderer/exporter reads
-    # waiting/audit/emerging_watch/data_repairs.  That schema split made the
-    # manager workbook silently export empty 02/03/05 sheets even after a
-    # successful 1k+ stock scan.
+
+    # H97 fail-closed audit preservation.  The 2026-09-23 workbook showed a
+    # current H79 health block (240 rows) but an empty persisted Audit table.
+    # When that impossible split is seen, restore the bounded H79 audit before
+    # serialisation.  The render/export pass will re-apply H94/H96 idempotently.
+    decorated_audit = tables.get("audit") if isinstance(tables, dict) else None
+    decorated_audit_valid = False
+    if isinstance(decorated_audit, pd.DataFrame) and not decorated_audit.empty:
+        if "股票代號" in decorated_audit.columns:
+            try:
+                decorated_audit_valid = bool(decorated_audit["股票代號"].astype(str).str.strip().ne("").any())
+            except Exception:
+                decorated_audit_valid = True
+        else:
+            decorated_audit_valid = False
+    if (not decorated_audit_valid) and isinstance(base_audit, pd.DataFrame) and not base_audit.empty:
+        tables["audit"] = base_audit.copy(deep=False)
+        audit_recovered = True
+
+    # Keep the compact snapshot contract identical to H79/H85, but stamp H97
+    # authority metadata so a later scan cannot reuse this core by accident.
     try:
-        payload = _h85_encode_h79_core_tables(tables, source="h90-background-full-persist")
+        payload = _h85_encode_h79_core_tables(tables, source=authority_source)
     except Exception:
         payload = {
-            "version": "v191_h90_compact_h79_snapshot_20260922",
-            "source": "h90-background-full-persist",
+            "version": "v191_h97_compact_h79_snapshot_20260924",
+            "source": authority_source,
             "created_at": _now_text(),
         }
         limits = {
@@ -2244,9 +2300,46 @@ def _h88_build_core_no_streamlit(candidate_df: pd.DataFrame) -> dict[str, Any]:
             payload[name] = _h88_df_records_no_streamlit(
                 df.head(int(limit)) if isinstance(df, pd.DataFrame) else pd.DataFrame()
             )
-    payload["version"] = "v191_h90_compact_h79_snapshot_20260922"
+
+    # A second guard is deliberately applied after JSON serialisation.  If a
+    # future serializer regression drops only Audit while keeping health rows,
+    # preserve the bounded audit truth instead of exporting a false zero-pool.
+    if callable(h97_audit_row_count) and h97_audit_row_count(payload) <= 0 and isinstance(base_audit, pd.DataFrame) and not base_audit.empty:
+        payload["audit"] = _h88_df_records_no_streamlit(base_audit.head(120))
+        audit_recovered = True
+
+    payload["version"] = "v191_h97_compact_h79_snapshot_20260924"
     payload["full_candidate_count"] = int(len(candidate_df))
     payload["model_input_count"] = int(len(source))
+    payload["h97_audit_recovered"] = bool(audit_recovered)
+
+    if callable(stamp_h97_core):
+        try:
+            payload = stamp_h97_core(
+                payload,
+                candidate_df,
+                run_id=run_id,
+                run_date=run_date,
+                source=authority_source,
+            )
+        except Exception:
+            pass
+
+    if callable(build_h97_health_rows):
+        try:
+            diag = build_h97_health_rows(
+                payload,
+                decision="REBUILT_CURRENT_SCAN",
+                reason="AUDIT_RECOVERED" if audit_recovered else "CURRENT_SCAN_BOUND",
+            )
+            old_health = _records_to_df_for_json(payload.get("health", []))
+            if not old_health.empty and "項目" in old_health.columns:
+                old_health = old_health.loc[~old_health["項目"].astype(str).str.startswith("H97")].copy()
+            payload["health"] = _h88_df_records_no_streamlit(
+                pd.concat([old_health, diag], ignore_index=True, sort=False).head(120)
+            )
+        except Exception:
+            pass
     return payload
 
 
@@ -2280,7 +2373,10 @@ def _h88_background_full_persist(
             except Exception:
                 pass
 
-        core = _h88_build_core_no_streamlit(candidate)
+        core = _h88_build_core_no_streamlit(
+            candidate, run_id=run_id, run_date=run_date,
+            authority_source="h97-background-full-persist",
+        )
         candidate_records = _h88_df_records_no_streamlit(candidate)
         recommendation_records = _h88_df_records_no_streamlit(action_df)
         cat_records = _h88_df_records_no_streamlit(cat)
@@ -2432,16 +2528,51 @@ def _h88_publish_result_nonblocking(
     st.session_state[_k("result_saved_at")] = _now_text()
     st.session_state[_k("empty_scan_preserved_previous")] = False
 
-    # H92: build the compact H79 decision truth once before declaring the run
-    # reboot-safe.  This is bounded to <=240 candidates; the 1k~2k full snapshot
-    # still stays in the background.  The compact block is what lets 01/02/03/05
-    # and the manager Excel survive an immediate Streamlit reboot.
+    # H97: bind compact authority to the current scan run before H92 declares
+    # reboot safety.  H92 previously reused any session core with created_at,
+    # which allowed a prior empty-Audit snapshot to survive a new 1k+ scan.
+    # The bounded <=240-row core is therefore rebuilt whenever run-id,
+    # candidate signature, or Audit integrity does not match this scan.
+    current_run_id = (
+        _safe_str(execution_context.get("run_id"))
+        or _safe_str(st.session_state.get(_k("scan_run_id")))
+        or f"gprun_{time.time_ns()}"
+    )
+    current_run_date = _safe_str(execution_context.get("run_date"))[:10] or _now_text()[:10]
+    execution_context["run_id"] = current_run_id
+    execution_context["run_date"] = current_run_date
+    st.session_state[_k("recommend_execution_context_v191")] = dict(execution_context)
+
     h92_core = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
-    if not isinstance(h92_core, dict) or not h92_core.get("created_at"):
-        h92_core = _h88_build_core_no_streamlit(candidate_df)
+    h97_core_ok = False
+    h97_core_reason = "H97_UNAVAILABLE"
+    if callable(validate_h97_core_for_scan):
+        try:
+            h97_core_ok, h97_core_reason = validate_h97_core_for_scan(
+                h92_core if isinstance(h92_core, dict) else {},
+                candidate_df,
+                run_id=current_run_id,
+                require_audit=True,
+            )
+        except Exception as exc:
+            h97_core_ok = False
+            h97_core_reason = f"VALIDATION_ERROR:{type(exc).__name__}"
+    else:
+        h97_core_ok = bool(isinstance(h92_core, dict) and h92_core.get("created_at"))
+
+    if not h97_core_ok:
+        h92_core = _h88_build_core_no_streamlit(
+            candidate_df,
+            run_id=current_run_id,
+            run_date=current_run_date,
+            authority_source="h97-h92-reboot-durable-prepublish",
+        )
         if isinstance(h92_core, dict) and h92_core:
-            h92_core["source"] = "h92-reboot-durable-prepublish"
+            h92_core["source"] = "h97-h92-reboot-durable-prepublish"
             st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = dict(h92_core)
+            st.session_state[_k("h97_core_rebuild_reason")] = h97_core_reason
+    else:
+        st.session_state[_k("h97_core_rebuild_reason")] = "REUSE_CURRENT_SCAN_MATCH"
 
     anchor_ok, anchor_msg, anchor = _h88_write_small_anchor_now(
         rec_df if isinstance(rec_df, pd.DataFrame) else pd.DataFrame(),
@@ -15031,8 +15162,8 @@ def _h90_normalize_core_snapshot(raw: Any) -> dict[str, Any]:
     return out
 
 
-def _h90_load_core_from_local_snapshot() -> tuple[dict[str, Any], str]:
-    """Recover the completed background core from local authority without network I/O."""
+def _h90_load_core_from_local_snapshot(candidate_df: pd.DataFrame | None = None, run_id: str = "") -> tuple[dict[str, Any], str]:
+    """Recover a local core only when it matches the current scan authority."""
     for path_name, label in (
         (GODPICK_LATEST_FILE, "latest-full-snapshot"),
         (GODPICK_LATEST_ANCHOR_FILE, "latest-run-anchor"),
@@ -15044,6 +15175,21 @@ def _h90_load_core_from_local_snapshot() -> tuple[dict[str, Any], str]:
         if not isinstance(payload, dict):
             continue
         raw = _h90_normalize_core_snapshot(payload.get("h85_h79_core_tables", {}))
+        if callable(validate_h97_core_for_scan) and (
+            _safe_str(run_id) or (isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty)
+        ):
+            try:
+                _h97_ok, _h97_reason = validate_h97_core_for_scan(
+                    raw, candidate_df, run_id=run_id, require_audit=True
+                )
+                if not _h97_ok:
+                    try:
+                        st.session_state[_k("h97_local_core_reject_reason")] = _h97_reason
+                    except Exception:
+                        pass
+                    continue
+            except Exception:
+                continue
         decoded = _h85_decode_h79_core_tables(raw)
         if _h91_core_failure_message(decoded):
             continue
@@ -15057,49 +15203,43 @@ def _h90_load_core_from_local_snapshot() -> tuple[dict[str, Any], str]:
 
 
 def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
-    """Build at most 240 rows only when an explicit Excel export lacks a saved core."""
-    if not callable(build_h79_tables_guarded) or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
+    """Explicit Excel recovery: rebuild a current-run bounded H97 core once."""
+    if not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         return {}, ""
-    source = _h91_unique_decision_frame(candidate_df, stage="h90_bounded_export")
-    if len(source) > 240:
-        try:
-            source = _safe_sort_export_df(
-                source,
-                ["H79研究推薦分", "H89雙軌研究排序分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
-                [False, False, False, False, False, False],
-            ).head(240).copy()
-        except Exception:
-            source = source.head(240).copy()
     try:
-        built = build_h79_tables_guarded(source)
-        failure = _h91_core_failure_message(built)
-        if failure:
-            raise RuntimeError(f"H91決策核心仍失敗：{failure}")
-        if callable(decorate_h94_decision_tables):
-            try:
-                built = decorate_h94_decision_tables(
-                    built, candidate_df=source,
-                    scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
-                )
-            except Exception:
-                pass
-        compact = _h85_encode_h79_core_tables(built, source="h93-explicit-export-bounded-recovery")
-        compact["version"] = "v191_h93_compact_h79_snapshot_20260923"
-        compact["full_candidate_count"] = int(len(candidate_df))
-        compact["model_input_count"] = int(len(source))
-        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = compact
-        return _h85_decode_h79_core_tables(compact), "h91-bounded-export-recovery"
+        ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        run_id = _safe_str(ctx.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id")))
+        run_date = _safe_str(ctx.get("run_date"))[:10] or _now_text()[:10]
+        compact = _h88_build_core_no_streamlit(
+            candidate_df,
+            run_id=run_id,
+            run_date=run_date,
+            authority_source="h97-explicit-export-bounded-recovery",
+        )
+        if not isinstance(compact, dict) or not compact:
+            return {}, ""
+        st.session_state[_k(H85_H79_CORE_SESSION_KEY)] = dict(compact)
+        tables = _h85_decode_h79_core_tables(compact)
+        if _h91_core_failure_message(tables):
+            raise RuntimeError(f"H97決策核心仍失敗：{_h91_core_failure_message(tables)}")
+        return tables, "h97-bounded-export-recovery"
     except Exception as exc:
         st.session_state[_k("h90_core_export_error")] = f"{type(exc).__name__}: {exc}"
         return {}, ""
 
 
 def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
-    """Resolve core tables for Excel; never silently turn a valid scan into blank sheets."""
+    """Resolve current-scan core tables for Excel; stale Audit truth is rejected."""
     tables, source_label, _ = _h85_get_h79_core_for_render(rec_df)
     if tables and not _h91_core_failure_message(tables) and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
         return tables, source_label or "session-core"
-    raw, label = _h90_load_core_from_local_snapshot()
+    ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
+    if not isinstance(ctx, dict):
+        ctx = {}
+    current_run_id = _safe_str(ctx.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id")))
+    raw, label = _h90_load_core_from_local_snapshot(candidate_df=candidate_df, run_id=current_run_id)
     if raw:
         tables = _h85_decode_h79_core_tables(raw)
         if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
@@ -15108,24 +15248,44 @@ def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFram
 
 
 def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str, bool]:
+    candidate_current = st.session_state.get(_k("candidate_diagnosis_store"))
+    if not isinstance(candidate_current, pd.DataFrame):
+        candidate_current = pd.DataFrame()
+    ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
+    if not isinstance(ctx, dict):
+        ctx = {}
+    current_run_id = _safe_str(ctx.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id")))
+
     raw = _h90_normalize_core_snapshot(st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
-    tables = _h85_decode_h79_core_tables(raw)
+    core_allowed = True
+    if callable(validate_h97_core_for_scan) and (current_run_id or not candidate_current.empty):
+        try:
+            core_allowed, _h97_reason = validate_h97_core_for_scan(
+                raw, candidate_current, run_id=current_run_id, require_audit=True
+            )
+            if not core_allowed:
+                st.session_state[_k("h97_session_core_reject_reason")] = _h97_reason
+        except Exception as exc:
+            core_allowed = False
+            st.session_state[_k("h97_session_core_reject_reason")] = f"VALIDATION_ERROR:{type(exc).__name__}"
+    tables = _h85_decode_h79_core_tables(raw) if core_allowed else {}
     if tables and not _h91_core_failure_message(tables) and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
         if callable(decorate_h94_decision_tables):
             try:
                 tables = decorate_h94_decision_tables(
                     tables,
-                    candidate_df=st.session_state.get(_k("candidate_diagnosis_store")),
+                    candidate_df=candidate_current,
                     scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
                 )
             except Exception:
                 pass
         return tables, _safe_str(raw.get("source")) if isinstance(raw, dict) else "snapshot", False
 
-    # H90: H88/H89 background threads cannot safely mutate Streamlit session_state.
+    # H90/H97: background threads cannot mutate Streamlit session_state and a
+    # prior-run core must not be treated as current merely because it exists.
     # Recover the completed compact block from the local snapshot/anchor before
     # declaring it unavailable.  This is local-only and does not re-run models.
-    local_raw, local_source = _h90_load_core_from_local_snapshot()
+    local_raw, local_source = _h90_load_core_from_local_snapshot(candidate_df=candidate_current, run_id=current_run_id)
     if local_raw:
         tables = _h85_decode_h79_core_tables(local_raw)
         if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
@@ -15146,7 +15306,7 @@ def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.Dat
     # H88: never start a compatibility H79 model build while rendering Page07.
     # A completed scan writes the compact H79 block in the background snapshot.
     # Until then the page stays responsive and shows a clear pending state.
-    candidate_df = st.session_state.get(_k("candidate_diagnosis_store"))
+    candidate_df = candidate_current
     bounded = bool(isinstance(candidate_df, pd.DataFrame) and len(candidate_df) > 120)
     return {}, "h88-background-pending", bounded
 
