@@ -684,7 +684,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h99_execution_truth_reconciliation_20260924"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h100_holiday_aware_scan_acceleration_20260925"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -18328,7 +18328,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H99單一執行真相＋下一交易日盤前重驗＋H98 Reboot永久權威＋H97 Audit權威＋H94/H96研究選股；H89/H81/UI/Excel統一Entry/Stop/Target/成本後RR，跨休市資訊空窗不得直接當買進指令，Formal治理完全不放寬。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H100休市日感知高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威＋H94/H96研究選股；休市日不再把最近交易日K線誤判落後而逐檔進入慢速fallback，Formal治理完全不放寬。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()

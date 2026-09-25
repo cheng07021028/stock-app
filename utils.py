@@ -2067,13 +2067,109 @@ def render_realtime_table(df, height=520):
 HISTORY_DISK_CACHE_DIR = Path("cache") / "history"
 HISTORY_DISK_CACHE_MAX_AGE_HOURS = 12
 
+# V191-H100：TWSE 休市日感知。
+# 2026-09-25（中秋節）/ 09-28（教師節）等平日休市，不能用 pandas 的
+# bdate_range 當成有交易日，否則 09-24 K 線會被誤判「落後 1 日」，
+# 全市場 1,600+ 檔會逐檔進入 Yahoo timeout -> 官方月資料 fallback，
+# 造成推薦看似卡在 1/1661、每檔約 15 秒。
+# 可另外用 godpick_twse_holidays.json 增補，格式為 ["YYYY-MM-DD", ...]
+# 或 {"closed_dates": [...]}。
+_TWSE_CLOSED_2026 = {
+    "2026-01-01",
+    "2026-02-12", "2026-02-13", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20",
+    "2026-02-27",
+    "2026-04-03", "2026-04-06",
+    "2026-05-01",
+    "2026-06-19",
+    "2026-09-25", "2026-09-28",
+    "2026-10-09", "2026-10-26",
+    "2026-12-25",
+}
+
+
+def _twse_closed_dates() -> set[str]:
+    out = set(_TWSE_CLOSED_2026)
+    try:
+        cfg = Path("godpick_twse_holidays.json")
+        if cfg.exists():
+            raw = json.loads(cfg.read_text(encoding="utf-8-sig"))
+            vals = raw.get("closed_dates", []) if isinstance(raw, dict) else raw
+            if isinstance(vals, list):
+                for v in vals:
+                    text = str(v or "").strip()[:10]
+                    if len(text) == 10:
+                        out.add(text)
+    except Exception:
+        pass
+    return out
+
+
+def _is_twse_trading_day(day_like) -> bool:
+    try:
+        d = pd.to_datetime(day_like, errors="coerce")
+        if pd.isna(d):
+            return False
+        d = d.normalize()
+        return d.weekday() < 5 and d.strftime("%Y-%m-%d") not in _twse_closed_dates()
+    except Exception:
+        return False
+
+
+def _twse_trading_day_lag(last_day, target_day) -> int:
+    """Count actual TWSE sessions after last_day through target_day.
+
+    Weekends and configured exchange holidays count as zero.  This is the
+    correct freshness metric for market data; pandas bdate_range only knows
+    Mon-Fri and was the H100 slowdown root cause on 2026-09-25/09-28.
+    """
+    try:
+        last_ts = pd.to_datetime(last_day, errors="coerce")
+        target_ts = pd.to_datetime(target_day, errors="coerce")
+        if pd.isna(last_ts) or pd.isna(target_ts):
+            return 999
+        last_ts = last_ts.normalize()
+        target_ts = target_ts.normalize()
+        if last_ts >= target_ts:
+            return 0
+        count = 0
+        cur = last_ts + pd.Timedelta(days=1)
+        while cur <= target_ts:
+            if _is_twse_trading_day(cur):
+                count += 1
+            cur += pd.Timedelta(days=1)
+        return count
+    except Exception:
+        return 999
+
+
+def _latest_completed_twse_session(now_tw=None) -> pd.Timestamp:
+    try:
+        if now_tw is None:
+            now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+        elif getattr(now_tw, "tzinfo", None) is None:
+            now_tw = now_tw.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+        else:
+            now_tw = now_tw.astimezone(ZoneInfo("Asia/Taipei"))
+        today = pd.Timestamp(now_tw.date())
+        after_close = (now_tw.hour, now_tw.minute) >= (14, 15)
+        candidate = today if after_close and _is_twse_trading_day(today) else today - pd.Timedelta(days=1)
+        while not _is_twse_trading_day(candidate):
+            candidate -= pd.Timedelta(days=1)
+        return candidate.normalize()
+    except Exception:
+        today = pd.Timestamp(date.today())
+        candidate = today - pd.Timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate -= pd.Timedelta(days=1)
+        return candidate.normalize()
+
 
 def _history_cache_allowed_business_lag(end_date, now_tw=None) -> int:
-    """V191-H26 completed-session cache policy.
+    """H100 completed-session cache policy using actual TWSE sessions.
 
-    T-1 cache is permitted only while today's session is still open. Once a
-    market day is completed, that completed day requires business lag=0 even
-    after midnight or across the weekend.
+    A weekday exchange holiday is not a missing trading day.  Before a live
+    session closes, one-session lag is allowed; after a real trading session
+    closes the current session must be present.
     """
     try:
         target = pd.to_datetime(end_date, errors="coerce")
@@ -2087,18 +2183,15 @@ def _history_cache_allowed_business_lag(end_date, now_tw=None) -> int:
         else:
             now_tw = now_tw.astimezone(ZoneInfo("Asia/Taipei"))
         today = pd.Timestamp(now_tw.date())
-        after_close = (now_tw.hour, now_tw.minute) >= (14, 15)
-        if today.weekday() < 5 and after_close:
-            latest_completed = today
-        else:
-            latest_completed = today - pd.Timedelta(days=1)
-            while latest_completed.weekday() >= 5:
-                latest_completed -= pd.Timedelta(days=1)
-        if target == latest_completed:
+        latest_completed = _latest_completed_twse_session(now_tw)
+        if target <= latest_completed:
             return 0
-        if target == today and today.weekday() < 5:
-            return 0 if after_close else 1
-        if target > latest_completed and target.weekday() >= 5:
+        # Today is a real market session but is not completed yet.
+        if target == today and _is_twse_trading_day(today):
+            return 1
+        # Weekend / exchange holiday after the latest completed session: no
+        # additional K-line should exist, so prior session is fully current.
+        if target >= latest_completed and not _is_twse_trading_day(target):
             return 0
         return 1
     except Exception:
@@ -2150,7 +2243,7 @@ def _load_history_disk_cache(stock_no, market_type, start_date, end_date) -> pd.
                         if temp.empty:
                             continue
                         last_day = temp["日期"].max().normalize()
-                    business_lag = max(len(pd.bdate_range(last_day + pd.Timedelta(days=1), target_day)), 0)
+                    business_lag = _twse_trading_day_lag(last_day, target_day)
                     if business_lag <= _history_cache_allowed_business_lag(end_date):
                         return temp.reset_index(drop=True)
                 except Exception:
@@ -2177,7 +2270,7 @@ def _load_history_disk_cache(stock_no, market_type, start_date, end_date) -> pd.
                 if temp.empty:
                     return pd.DataFrame()
                 last_day = temp["日期"].max().normalize()
-                business_lag = max(len(pd.bdate_range(last_day + pd.Timedelta(days=1), target_day)), 0)
+                business_lag = _twse_trading_day_lag(last_day, target_day)
                 # 精確 key 也不能無限信任；最多容許一個工作日，最終是否可進場
                 # 仍由推薦頁依全市場共同最新交易日再次驗證。
                 if business_lag > _history_cache_allowed_business_lag(end_date):
@@ -2563,7 +2656,7 @@ def _history_frame_business_lag(df: pd.DataFrame, end_date) -> int:
         target_day = target_day.normalize()
         if last_day >= target_day:
             return 0
-        return max(len(pd.bdate_range(last_day + pd.Timedelta(days=1), target_day)), 0)
+        return _twse_trading_day_lag(last_day, target_day)
     except Exception:
         return 999
 
