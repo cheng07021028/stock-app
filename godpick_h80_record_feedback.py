@@ -11,7 +11,7 @@ from typing import Iterable, Mapping, Any
 
 import pandas as pd
 
-VERSION = "v191_h82_record_feedback_adaptive_evidence_20260921"
+VERSION = "v191_h101_record_feedback_priority_snapshot_20260925"
 RESEARCH_MODE = "股神校正研究"
 RESEARCH_LEVEL = "H79研究推薦"
 RESEARCH_SAMPLE_TYPE = "B｜H79研究推薦校正研究樣本"
@@ -48,6 +48,9 @@ H80_RECORD_FEEDBACK_COLUMNS = [
     "H99成本後RR", "H99RR重算值", "H99RR一致性", "H99舊RR差異", "H99價格計畫狀態",
     "H99市場資料日", "H99目標交易日", "H99資訊空窗日數", "H99盤前重驗", "H99執行狀態",
     "H99Formal權限", "H99決策摘要",
+    "H101版本", "H101同層順位", "H101推薦優先分", "H101優先層級", "H101推薦層別",
+    "H101排名信心", "H101建議動作", "H101主要加分", "H101主要扣分", "H101排名依據",
+    "H101Formal權限", "H101決策摘要",
 ]
 
 
@@ -156,6 +159,14 @@ def build_research_tracking_frame(
         try:
             from godpick_h99_execution_truth import apply_execution_truth_overlay
             out = apply_execution_truth_overlay(out)
+        except Exception:
+            pass
+        # Persist the same H101 research priority that the manager sees in UI/Excel.
+        # This allows later Page08 performance review to verify whether rank #1/#2
+        # really outperformed lower-priority research without changing Formal results.
+        try:
+            from godpick_h101_priority_ranking import apply_priority_overlay
+            out = apply_priority_overlay(out, pool="research")
         except Exception:
             pass
         out["__h80_order"] = out["股票代號"].map({c: i for i, c in enumerate(research["股票代號"].tolist())})

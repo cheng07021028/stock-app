@@ -359,6 +359,21 @@ def decorate_decision_tables(tables: dict[str,Any] | None, *, candidate_df: pd.D
             {"項目":"H99Formal權限","數值":"LOCKED｜H99失敗不影響既有Formal治理"},
         ])], ignore_index=True, sort=False)
         out["health"] = _health
+
+    # H101: manager-facing recommendation priority ranking.  It runs after H99
+    # so priority uses the final execution truth (Entry/Stop/Target/NetRR), and
+    # creates a concise 00 overview for UI/Excel.  Formal and Research are
+    # ranked separately; this layer cannot manufacture buy authority.
+    try:
+        from godpick_h101_priority_ranking import decorate_decision_tables as decorate_h101_priority
+        out = decorate_h101_priority(out)
+    except Exception as _h101_exc:
+        _health = out.get("health", pd.DataFrame()).copy()
+        _health = pd.concat([_health, pd.DataFrame([
+            {"項目":"H101推薦優先排名","數值":f"ERROR｜{type(_h101_exc).__name__}: {_h101_exc}"},
+            {"項目":"H101Formal權限","數值":"LOCKED｜H101失敗不影響既有Formal治理"},
+        ])], ignore_index=True, sort=False)
+        out["health"] = _health
     return out
 
 

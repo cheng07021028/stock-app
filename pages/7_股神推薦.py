@@ -594,6 +594,17 @@ except Exception as _h94_import_exc:
     H94_RESEARCH_SELECTION_COLUMNS = []
     H94_RESEARCH_SELECTION_IMPORT_ERROR = str(_h94_import_exc)
 
+# H101: manager-facing ranking only. Formal/Research remain separate authorities.
+try:
+    from godpick_h101_priority_ranking import (
+        VERSION as H101_PRIORITY_RANKING_VERSION,
+        export_contract_summary as h101_export_contract_summary,
+    )
+except Exception as _h101_import_exc:
+    H101_PRIORITY_RANKING_VERSION = "h101_priority_ranking_unavailable"
+    h101_export_contract_summary = None
+    H101_PRIORITY_RANKING_IMPORT_ERROR = str(_h101_import_exc)
+
 # H97: bind the compact H79/H94/H96 authority to the *current* scan run.
 # This prevents a previous session core (including an empty Audit table) from
 # being reused after a new 1k+ stock scan merely because it has created_at.
@@ -684,7 +695,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h100_holiday_aware_scan_acceleration_20260925"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h101_priority_ranking_excel_sync_20260925"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2300,9 +2311,10 @@ def _h88_build_core_no_streamlit(
             "created_at": _now_text(),
         }
         limits = {
+            "priority_overview": 40,
             "actionable": 60, "research": 80, "waiting": 80,
             "emerging_watch": 60, "data_repairs": 100,
-            "audit": 120, "health": 120,
+            "audit": 120, "health": 140,
         }
         for name, limit in limits.items():
             df = tables.get(name)
@@ -13559,13 +13571,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"01_正式推薦與交易計畫", "02_研究推薦", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
+        if safe_name in {"00_推薦優先總覽", "01_正式推薦與交易計畫", "02_研究推薦", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            _tab_colors = {"01_正式推薦與交易計畫":"166534","02_研究推薦":"1D4ED8","03_上市櫃等待":"B45309","04_今日主流資金":"0F766E","05_驗證與風險證據":"334155","06_績效煞車與健康":"7C3AED","07_興櫃隔離研究":"64748B","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
+            _tab_colors = {"00_推薦優先總覽":"7C3AED","01_正式推薦與交易計畫":"166534","02_研究推薦":"1D4ED8","03_上市櫃等待":"B45309","04_今日主流資金":"0F766E","05_驗證與風險證據":"334155","06_績效煞車與健康":"7C3AED","07_興櫃隔離研究":"64748B","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
             ws.sheet_properties.tabColor = _tab_colors.get(safe_name, "00A6A6")
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
@@ -13595,7 +13607,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     cell.border = Border(bottom=Side(style="hair", color="E5E7EB"))
 
             hmap = {str(cell.value): cell.column for cell in ws[1]}
-            _rank_headers = {"AI決策總覽":"AI決策順位","H74新鮮主流資金":"H74全市場順位","超級AI最終決策":"決策順位","正式推薦作戰":"H63正式推薦順位","H67次日優先治理":"H67研究順位","T+1時機雷達":"H66T1觀察順位","多因子觀察雷達":"H65觀察順位"}
+            _rank_headers = {"00_推薦優先總覽":"H101閱讀順位","AI決策總覽":"AI決策順位","H74新鮮主流資金":"H74全市場順位","超級AI最終決策":"決策順位","正式推薦作戰":"H63正式推薦順位","H67次日優先治理":"H67研究順位","T+1時機雷達":"H66T1觀察順位","多因子觀察雷達":"H65觀察順位"}
             _rank_header = _rank_headers.get(safe_name, "股神推薦總排名")
             _rank_idx = hmap.get(_rank_header)
             if _rank_idx:
@@ -13611,6 +13623,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                     ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color="B91C1C", bold=True)))
 
             for header, width in {
+                "H101閱讀順位": 12, "H101同層順位": 12, "H101推薦優先分": 16, "H101優先層級": 22, "H101推薦層別": 28, "H101排名信心": 14, "H101建議動作": 58, "H101主要加分": 42, "H101主要扣分": 42, "H101排名依據": 70, "H101Formal權限": 64, "H101決策摘要": 66,
                 "今日順位": 10, "今日新Alpha順位": 14, "核心監控順位": 12, "證據順位": 10, "AI決策順位": 10, "H74全市場順位": 12, "決策順位": 10, "H63正式推薦順位": 12, "H67研究順位": 12, "H66T1觀察順位": 12, "H65觀察順位": 12, "重點順位": 10, "攻略順位": 10, "股神推薦總排名": 12, "股票代號": 12, "股票名稱": 16,
                 "H79決策層級": 20, "H79推薦狀態": 28, "H79推薦理由": 66, "H79交易狀態": 44, "H79有效增量": 38, "H79缺資料": 38, "H79未入選原因": 72, "H79日期正規化": 56, "H79決策指紋": 24,
                 "H76分流層級": 34, "H76每日新Alpha分": 16, "H76結構核心分": 16, "H76熟面孔狀態": 34, "H76新證據摘要": 56, "H76重複推薦門檻": 48, "H76每日榜資格": 36, "H76主管結論": 76,
@@ -13629,7 +13642,7 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
                 if cidx:
                     h37_width_overrides[ws.cell(row=1, column=cidx).column_letter] = width
 
-            for long_header in ["H77增量證據摘要", "H77增量欄位覆蓋", "H77追價風險", "H77主管結論", "H76新證據摘要", "H76重複推薦門檻", "H76主管結論", "H75今日結論", "H75Formal主要缺口", "H75主管一句話", "今日族群解讀", "主管解讀", "H51交易許可", "H51推薦理由", "條件操作許可", "重點理由", "主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
+            for long_header in ["H101建議動作", "H101主要加分", "H101主要扣分", "H101排名依據", "H101Formal權限", "H101決策摘要", "H77增量證據摘要", "H77增量欄位覆蓋", "H77追價風險", "H77主管結論", "H76新證據摘要", "H76重複推薦門檻", "H76主管結論", "H75今日結論", "H75Formal主要缺口", "H75主管一句話", "今日族群解讀", "主管解讀", "H51交易許可", "H51推薦理由", "條件操作許可", "重點理由", "主要阻擋/近門檻", "操作原則", "最終操作結論", "正式推薦動作", "股神資料警示", "正式推薦排除原因", "失效條件"]:
                 cidx = hmap.get(long_header)
                 if cidx:
                     for row_idx in range(2, ws.max_row + 1):
@@ -15066,13 +15079,14 @@ def _phase93_single_source_decision_frame(
 # =========================================================
 H85_H79_CORE_SESSION_KEY = "h85_h79_core_tables"
 H85_H79_CORE_LIMITS = {
+    "priority_overview": 40,
     "actionable": 60,
     "research": 80,
     "waiting": 80,
     "emerging_watch": 60,
     "data_repairs": 100,
     "audit": 120,
-    "health": 120,
+    "health": 140,
 }
 
 
@@ -15351,6 +15365,11 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         else:
             st.info("目前沒有可直接顯示的 H79 精簡快照。" + (f"｜{err}" if err else ""))
     else:
+        priority_overview = tables.get("priority_overview", pd.DataFrame())
+        if isinstance(priority_overview, pd.DataFrame) and not priority_overview.empty:
+            st.markdown("#### 🏆 H101 推薦優先順序")
+            st.caption("先看閱讀順位；Formal與Research分開授權。Research排名高只代表優先研究，不代表可直接買進。")
+            st.dataframe(_format_df(priority_overview), use_container_width=True, hide_index=True)
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())
         st.dataframe(_format_df(actionable), use_container_width=True, hide_index=True)
@@ -16618,8 +16637,14 @@ def _build_excel_bytes(
     except Exception as _h78_error:
         _h78_failure = pd.DataFrame({"狀態":[f"H79決策失敗，非沒有推薦：{_h78_error}"]})
         _h78_export = {k:_h78_failure for k in ["actionable","research","recommendations","waiting","emerging_watch","data_repairs","audit","health"]}
+    if callable(decorate_h94_decision_tables):
+        try:
+            _h78_export = decorate_h94_decision_tables(_h78_export, candidate_df=h51_source, scan_report={})
+        except Exception:
+            pass
 
     sheets = [
+        ("00_推薦優先總覽", _h78_export.get("priority_overview", pd.DataFrame()), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
         ("01_正式推薦與交易計畫", _h78_export["actionable"], "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", _h78_export["research"], "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", _h78_export["waiting"], "本輪沒有上市櫃等待候選。"),
@@ -16659,19 +16684,19 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("正式可執行與交易計畫" if sheet_name == "01_正式推薦與交易計畫" else "上市櫃研究推薦（非買進）" if sheet_name == "02_研究推薦" else "上市櫃等待與未入選" if sheet_name == "03_上市櫃等待" else "主流族群與資金輪動" if sheet_name == "04_今日主流資金" else "完整驗證、風險與淘汰原因" if sheet_name == "05_驗證與風險證據" else "績效煞車與資料健康" if sheet_name == "06_績效煞車與健康" else "興櫃隔離研究（不占主榜）" if sheet_name == "07_興櫃隔離研究" else "技術診斷｜預設隱藏"),
+            "用途": ("推薦優先順序｜Formal優先、Research次之且不冒充買進" if sheet_name == "00_推薦優先總覽" else "正式可執行與交易計畫" if sheet_name == "01_正式推薦與交易計畫" else "上市櫃研究推薦（非買進）" if sheet_name == "02_研究推薦" else "上市櫃等待與未入選" if sheet_name == "03_上市櫃等待" else "主流族群與資金輪動" if sheet_name == "04_今日主流資金" else "完整驗證、風險與淘汰原因" if sheet_name == "05_驗證與風險證據" else "績效煞車與資料健康" if sheet_name == "06_績效煞車與健康" else "興櫃隔離研究（不占主榜）" if sheet_name == "07_興櫃隔離研究" else "技術診斷｜預設隱藏"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
 
-    _h77_visible_sheets = {"01_正式推薦與交易計畫", "02_研究推薦", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究"}
+    _h77_visible_sheets = {"00_推薦優先總覽", "01_正式推薦與交易計畫", "02_研究推薦", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究"}
     for _ws in wb.worksheets:
         if _ws.title not in _h77_visible_sheets:
             _ws.sheet_state = "hidden"
         else:
             _ws.sheet_state = "visible"
     try:
-        wb.active = wb.sheetnames.index("01_正式推薦與交易計畫")
+        wb.active = wb.sheetnames.index("00_推薦優先總覽")
     except Exception:
         pass
     wb.save(output)
@@ -16707,7 +16732,7 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     tab = {
-        "01_正式推薦與交易計畫":"166534", "02_研究推薦":"1D4ED8", "03_上市櫃等待":"B45309",
+        "00_推薦優先總覽":"7C3AED", "01_正式推薦與交易計畫":"166534", "02_研究推薦":"1D4ED8", "03_上市櫃等待":"B45309",
         "04_今日主流資金":"0F766E", "05_驗證與風險證據":"334155", "06_績效煞車與健康":"7C3AED",
         "07_興櫃隔離研究":"64748B",
     }.get(safe_name, "334155")
@@ -16719,10 +16744,10 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
     ws.row_dimensions[1].height = 30
     # Widths are header-driven and bounded. We deliberately do not scan every
     # cell/column or draw per-cell borders; that was the main Excel latency sink.
-    long_tokens = ("理由","摘要","風險","缺口","狀態","結論","說明","策略","檢討","關注","未入選")
+    long_tokens = ("理由","摘要","風險","缺口","狀態","結論","說明","策略","檢討","關注","未入選","動作","加分","扣分","排名依據","權限")
     for idx, header in enumerate(headers, start=1):
         width = 18
-        if header in {"股票代號","排名","順位"}: width = 12
+        if header in {"股票代號","排名","順位","H101閱讀順位","H101同層順位"}: width = 12
         elif header in {"股票名稱","市場別","類別"}: width = 16
         elif any(t in header for t in long_tokens): width = 38
         elif any(t in header for t in ("分數","%","RR","價格","停損","目標","進場")): width = 16
@@ -16733,6 +16758,18 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
         for col_idx in narr_idx:
             for row_idx in range(2, min(ws.max_row, 61) + 1):
                 ws.cell(row=row_idx, column=col_idx).alignment = Alignment(vertical="top", wrap_text=True)
+    if safe_name == "00_推薦優先總覽" and ws.max_row > 1:
+        hmap = {str(cell.value): cell.column for cell in ws[1]}
+        rank_idx = hmap.get("H101閱讀順位")
+        score_idx = hmap.get("H101推薦優先分")
+        for row_idx in range(2, min(ws.max_row, 4) + 1):
+            fill = "FDE68A" if row_idx == 2 else "DBEAFE"
+            if rank_idx:
+                ws.cell(row=row_idx, column=rank_idx).fill = PatternFill("solid", fgColor=fill)
+                ws.cell(row=row_idx, column=rank_idx).font = Font(bold=True)
+            if score_idx:
+                ws.cell(row=row_idx, column=score_idx).fill = PatternFill("solid", fgColor=fill)
+                ws.cell(row=row_idx, column=score_idx).font = Font(bold=True)
     return ws
 
 
@@ -16744,7 +16781,7 @@ def _build_excel_bytes_fast_h84(
     candidate_diagnosis_export: pd.DataFrame | None = None,
     scan_report: dict[str, Any] | None = None,
 ) -> bytes:
-    """H84 manager workbook: seven decision sheets only.
+    """H84 manager workbook: core decision sheets only.
 
     It reuses the canonical H51->H77->H79 decision chain but does not build the
     20+ hidden technical tabs. This preserves decision truth while removing the
@@ -16788,6 +16825,11 @@ def _build_excel_bytes_fast_h84(
     except Exception as exc:
         fail = pd.DataFrame({"狀態":[f"H79決策建立失敗：{type(exc).__name__}: {exc}"]})
         h79 = {k:fail.copy() for k in ["actionable","research","waiting","emerging_watch","audit","health"]}
+    if callable(decorate_h94_decision_tables):
+        try:
+            h79 = decorate_h94_decision_tables(h79, candidate_df=h51_source, scan_report={})
+        except Exception:
+            pass
     try:
         sector = build_h51_sector_table(h51_source, max_rows=12) if callable(build_h51_sector_table) else cat_export
         if callable(build_h75_sector_summary):
@@ -16800,6 +16842,7 @@ def _build_excel_bytes_fast_h84(
         extra = pd.DataFrame([{"項目":str(k), "數值":_excel_safe_value(v)} for k,v in report.items() if not isinstance(v,(dict,list,tuple,set))])
         health = pd.concat([health, extra], ignore_index=True, sort=False)
     sheets = [
+        ("00_推薦優先總覽", h79.get("priority_overview", pd.DataFrame()), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
         ("01_正式推薦與交易計畫", h79.get("actionable", pd.DataFrame()), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", h79.get("research", pd.DataFrame()), "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", h79.get("waiting", pd.DataFrame()), "本輪沒有上市櫃等待候選。"),
@@ -16831,7 +16874,7 @@ def _build_excel_bytes_fast_h85(
 ) -> bytes:
     """H85 zero-recompute manager workbook.
 
-    H84 reduced the workbook to seven sheets but still recomputed the entire
+    H84 reduced the workbook to core sheets but still recomputed the entire
     H51->H77 chain when the download button was pressed.  H85 exports the H79
     compact snapshot already produced by the real recommendation run, so Excel
     generation is serialization work instead of a second recommendation run.
@@ -16867,7 +16910,12 @@ def _build_excel_bytes_fast_h85(
         health = pd.concat([health, extra], ignore_index=True, sort=False)
     h93_contract = h93_export_contract_summary(tables) if callable(h93_export_contract_summary) else {}
     h94_contract = h94_export_contract_summary(tables) if callable(h94_export_contract_summary) else {}
+    h101_contract = h101_export_contract_summary(tables) if callable(h101_export_contract_summary) else {}
     core_diag = pd.DataFrame([
+        {"項目": "H101決策表來源", "數值": core_source or "UNAVAILABLE"},
+        {"項目": "H101推薦優先排名版本", "數值": H101_PRIORITY_RANKING_VERSION},
+        {"項目": "H101Excel契約", "數值": "PASS" if isinstance(h101_contract, dict) and h101_contract.get("ok") else "CHECK"},
+        {"項目": "H101優先總覽列", "數值": int(h101_contract.get("overview_rows", 0)) if isinstance(h101_contract, dict) else 0},
         {"項目": "H94決策表來源", "數值": core_source or "UNAVAILABLE"},
         {"項目": "H94Research Selection版本", "數值": H94_RESEARCH_SELECTION_VERSION},
         {"項目": "H94Excel契約", "數值": "PASS" if isinstance(h94_contract, dict) and h94_contract.get("ok") else "CHECK"},
@@ -16886,6 +16934,7 @@ def _build_excel_bytes_fast_h85(
     ])
     health = pd.concat([health, core_diag], ignore_index=True, sort=False)
     sheets = [
+        ("00_推薦優先總覽", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
         ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", tables.get("waiting", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃等待候選。"),
@@ -16923,7 +16972,7 @@ def _build_selected_excel_bytes_h85(export_df: pd.DataFrame, sheet_name: str = "
 def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: pd.DataFrame) -> None:
     """H86: always expose the manager workbook near the top of results.
 
-    The 7-sheet workbook is generated from the already persisted H79 compact
+    The manager workbook (including H101 priority overview) is generated from the already persisted H79 compact
     snapshot, never from a second model run.  One result signature -> one build.
     This removes the old two-step “prepare then maybe find download lower down”.
     """
@@ -16932,7 +16981,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
         candidate_df = pd.DataFrame()
     if (rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty) and candidate_df.empty:
         return
-    render_pro_section("Excel｜主管7頁快速下載")
+    render_pro_section("Excel｜主管核心報表（含H101推薦優先總覽）")
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
@@ -16943,9 +16992,9 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
     build_clicked = False
     if not ready:
-        st.success("H88：掃描結果已可操作；Excel 不在頁面主執行緒自動建立。按下方按鈕才序列化7張主管表，不重跑模型。")
+        st.success("H88：掃描結果已可操作；Excel 不在頁面主執行緒自動建立。按下方按鈕才序列化主管核心表（含H101推薦優先總覽），不重跑模型。")
         build_clicked = st.button(
-            "📊 建立主管 Excel（7張核心表）",
+            "📊 建立主管 Excel（含推薦優先總覽）",
             use_container_width=True,
             type="primary",
             key=_k("h88_build_manager_excel"),
@@ -18328,7 +18377,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H100休市日感知高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威＋H94/H96研究選股；休市日不再把最近交易日K線誤判落後而逐檔進入慢速fallback，Formal治理完全不放寬。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H101推薦優先排名＋Excel總覽同步＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威＋H94/H96研究選股；排名只決定閱讀/研究優先，Formal治理完全不放寬。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
