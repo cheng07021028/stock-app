@@ -288,6 +288,15 @@ def apply_priority_overlay(frame: pd.DataFrame | None, *, pool: str) -> pd.DataF
     for c in H101_COLUMNS:
         if c not in out.columns:
             out[c] = None
+        else:
+            # H102 may re-run H101 after dynamically moving a Waiting row into
+            # Research.  Excel-restored rank columns can be int64; cast the
+            # governance columns to object before writing nullable/text values
+            # so pandas does not raise future incompatible-dtype errors.
+            try:
+                out[c] = out[c].astype("object")
+            except Exception:
+                pass
 
     valid = out.loc[valid_mask].copy()
     if not valid.empty:

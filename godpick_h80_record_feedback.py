@@ -11,7 +11,7 @@ from typing import Iterable, Mapping, Any
 
 import pandas as pd
 
-VERSION = "v191_h101_record_feedback_priority_snapshot_20260925"
+VERSION = "v191_h102_record_feedback_rotation_t1_snapshot_20261001"
 RESEARCH_MODE = "股神校正研究"
 RESEARCH_LEVEL = "H79研究推薦"
 RESEARCH_SAMPLE_TYPE = "B｜H79研究推薦校正研究樣本"
@@ -51,6 +51,10 @@ H80_RECORD_FEEDBACK_COLUMNS = [
     "H101版本", "H101同層順位", "H101推薦優先分", "H101優先層級", "H101推薦層別",
     "H101排名信心", "H101建議動作", "H101主要加分", "H101主要扣分", "H101排名依據",
     "H101Formal權限", "H101決策摘要",
+    "H102版本", "H102同層順位", "H102動態優先分", "H102動態層級", "H102來源層別",
+    "H102族群衝擊分", "H102族群動態狀態", "H102Catalyst分", "H102研究升級", "H102研究升級理由",
+    "H102Pullback Entry A", "H102Momentum Entry B", "H102Momentum重驗", "H102T1學習調整",
+    "H102建議動作", "H102Formal權限", "H102決策摘要",
 ]
 
 
@@ -90,7 +94,15 @@ def build_research_tracking_frame(
     research["股票代號"] = research["股票代號"].map(_code)
     research = research[research["股票代號"].ne("")].copy()
     if "H79決策層級" in research.columns:
-        research = research[research["H79決策層級"].fillna("").astype(str).eq("研究推薦")].copy()
+        _base_research = research["H79決策層級"].fillna("").astype(str).eq("研究推薦")
+        _h102_promoted = (
+            research.get("H102研究升級", pd.Series([""] * len(research), index=research.index))
+            .fillna("").astype(str).eq("是")
+        )
+        # H102 may legitimately promote a Waiting row into dynamic Research for
+        # manager attention.  Keep it as a non-buy learning sample even though
+        # its original H79 layer was not "研究推薦".
+        research = research[_base_research | _h102_promoted].copy()
     if research.empty:
         return pd.DataFrame()
 
@@ -118,17 +130,18 @@ def build_research_tracking_frame(
 
         # Page08 research samples have their own mode/business-key and never
         # masquerade as Formal/A- executable recommendations.
-        raw["推薦模式"] = RESEARCH_MODE
-        raw["推薦用途"] = "H79研究推薦績效追蹤（非買進許可）"
-        raw["紀錄來源"] = "07_股神推薦｜H79研究推薦自動同步"
+        _h102_promoted = _text(raw.get("H102研究升級")) == "是"
+        raw["推薦模式"] = "H102動態Research" if _h102_promoted else RESEARCH_MODE
+        raw["推薦用途"] = ("H102族群輪動動態研究績效追蹤（非買進許可）" if _h102_promoted else "H79研究推薦績效追蹤（非買進許可）")
+        raw["紀錄來源"] = ("07_股神推薦｜H102動態Research自動同步" if _h102_promoted else "07_股神推薦｜H79研究推薦自動同步")
         raw["自動記錄"] = "是"
-        raw["紀錄層級"] = RESEARCH_LEVEL
-        raw["目前狀態"] = "研究推薦追蹤"
+        raw["紀錄層級"] = "H102動態Research" if _h102_promoted else RESEARCH_LEVEL
+        raw["目前狀態"] = "H102動態研究追蹤" if _h102_promoted else "研究推薦追蹤"
         raw["是否可直接買進"] = "否"
-        raw["建議動作"] = "研究追蹤；等待H79交易狀態改善後重算，不視為買進許可。"
-        raw["校正樣本類型"] = RESEARCH_SAMPLE_TYPE
-        raw["校正樣本用途"] = "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
-        raw["校正樣本權重"] = RESEARCH_SAMPLE_WEIGHT
+        raw["建議動作"] = ("H102動態研究追蹤；優先盤前/盤中重驗，未取得原Formal授權不可直接買進。" if _h102_promoted else "研究追蹤；等待H79交易狀態改善後重算，不視為買進許可。")
+        raw["校正樣本類型"] = "B｜H102動態Research校正樣本" if _h102_promoted else RESEARCH_SAMPLE_TYPE
+        raw["校正樣本用途"] = "H102族群輪動升級、T+1 Entry/MFE/MAE與排名校正；不得計入正式交易勝率" if _h102_promoted else "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
+        raw["校正樣本權重"] = 0.50 if _h102_promoted else RESEARCH_SAMPLE_WEIGHT
         raw["是否納入正式推薦績效"] = "否"
         raw["是否納入權重校正"] = "是"
         raw["個股資料品質"] = _text(raw.get("個股資料品質")) or "可追蹤"
@@ -179,15 +192,16 @@ def mark_research_record_rows(rows: Iterable[Mapping[str, Any]] | None) -> list[
     result: list[dict[str, Any]] = []
     for row in rows or []:
         raw = dict(row)
-        raw["推薦模式"] = RESEARCH_MODE
-        raw["紀錄來源"] = "07_股神推薦｜H79研究推薦自動同步"
+        _h102_promoted = _text(raw.get("H102研究升級")) == "是"
+        raw["推薦模式"] = "H102動態Research" if _h102_promoted else RESEARCH_MODE
+        raw["紀錄來源"] = ("07_股神推薦｜H102動態Research自動同步" if _h102_promoted else "07_股神推薦｜H79研究推薦自動同步")
         raw["自動記錄"] = "是"
-        raw["紀錄層級"] = RESEARCH_LEVEL
-        raw["目前狀態"] = "研究推薦追蹤"
+        raw["紀錄層級"] = "H102動態Research" if _h102_promoted else RESEARCH_LEVEL
+        raw["目前狀態"] = "H102動態研究追蹤" if _h102_promoted else "研究推薦追蹤"
         raw["是否可直接買進"] = "否"
-        raw["校正樣本類型"] = RESEARCH_SAMPLE_TYPE
-        raw["校正樣本用途"] = "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
-        raw["校正樣本權重"] = RESEARCH_SAMPLE_WEIGHT
+        raw["校正樣本類型"] = "B｜H102動態Research校正樣本" if _h102_promoted else RESEARCH_SAMPLE_TYPE
+        raw["校正樣本用途"] = "H102族群輪動升級、T+1 Entry/MFE/MAE與排名校正；不得計入正式交易勝率" if _h102_promoted else "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
+        raw["校正樣本權重"] = 0.50 if _h102_promoted else RESEARCH_SAMPLE_WEIGHT
         raw["是否納入正式推薦績效"] = "否"
         raw["是否納入權重校正"] = "是"
         raw["個股資料品質"] = _text(raw.get("個股資料品質")) or "可追蹤"

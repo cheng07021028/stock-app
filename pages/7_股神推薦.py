@@ -605,6 +605,26 @@ except Exception as _h101_import_exc:
     h101_export_contract_summary = None
     H101_PRIORITY_RANKING_IMPORT_ERROR = str(_h101_import_exc)
 
+# H102: sector-rotation shock + dynamic Research + T+1 closed loop.
+# Ranking/research layer only; Formal/A-/R1 authority remains locked.
+try:
+    from godpick_h102_sector_rotation_closed_loop import (
+        VERSION as H102_ROTATION_CLOSED_LOOP_VERSION,
+        H102_COLUMNS as H102_ROTATION_COLUMNS,
+        build_shadow_tracking_frame as build_h102_shadow_tracking_frame,
+        mark_shadow_record_rows as mark_h102_shadow_record_rows,
+        build_t1_review_table_local as build_h102_t1_review_table_local,
+        export_contract_summary as h102_export_contract_summary,
+    )
+except Exception as _h102_import_exc:
+    H102_ROTATION_CLOSED_LOOP_VERSION = "h102_rotation_closed_loop_unavailable"
+    H102_ROTATION_COLUMNS = []
+    build_h102_shadow_tracking_frame = None
+    mark_h102_shadow_record_rows = None
+    build_h102_t1_review_table_local = None
+    h102_export_contract_summary = None
+    H102_ROTATION_CLOSED_LOOP_IMPORT_ERROR = str(_h102_import_exc)
+
 # H97: bind the compact H79/H94/H96 authority to the *current* scan run.
 # This prevents a previous session core (including an empty Audit table) from
 # being reused after a new 1k+ stock scan merely because it has created_at.
@@ -695,7 +715,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h101_priority_ranking_excel_sync_20260925"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h102_sector_rotation_t1_closed_loop_20261001"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -1077,6 +1097,15 @@ except Exception:
 try:
     GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
         list(GODPICK_RECORD_COLUMNS) + list(H94_RESEARCH_SELECTION_COLUMNS or [])
+    ))
+except Exception:
+    pass
+
+# H102: persist dynamic rotation/ranking evidence at signal time so T+1 can
+# distinguish selection quality, executable entry quality and missed opportunities.
+try:
+    GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
+        list(GODPICK_RECORD_COLUMNS) + list(H102_ROTATION_COLUMNS or [])
     ))
 except Exception:
     pass
@@ -2240,6 +2269,7 @@ def _h88_build_core_no_streamlit(
     run_id: str = "",
     run_date: str = "",
     authority_source: str = "h97-current-scan-core",
+    sector_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Build the bounded H79/H94/H96 core and bind it to this scan run.
 
@@ -2278,7 +2308,7 @@ def _h88_build_core_no_streamlit(
     audit_recovered = False
     if callable(decorate_h94_decision_tables):
         try:
-            tables = decorate_h94_decision_tables(tables, candidate_df=source, scan_report={})
+            tables = decorate_h94_decision_tables(tables, candidate_df=source, scan_report={}, sector_df=sector_df)
         except Exception:
             pass
 
@@ -2397,6 +2427,7 @@ def _h88_background_full_persist(
         core = _h88_build_core_no_streamlit(
             candidate, run_id=run_id, run_date=run_date,
             authority_source="h97-background-full-persist",
+            sector_df=cat,
         )
         candidate_records = _h88_df_records_no_streamlit(candidate)
         recommendation_records = _h88_df_records_no_streamlit(action_df)
@@ -2476,6 +2507,31 @@ def _h88_background_full_persist(
                     rows.extend(research_rows)
             except Exception as exc:
                 status["steps"]["research_record_build"] = {"ok": False, "message": str(exc)}
+
+        # H102: persist a bounded shadow sample of the strongest dynamic Waiting
+        # names so T+1 can learn from executable opportunities that the old
+        # Research layer may still have missed.  These rows are never Formal.
+        waiting_df = pd.DataFrame(core.get("waiting", [])) if isinstance(core, dict) else pd.DataFrame()
+        if callable(build_h102_shadow_tracking_frame) and not waiting_df.empty and not candidate.empty:
+            try:
+                excluded = [str(x.get("股票代號") or "") for x in rows]
+                shadow_track = build_h102_shadow_tracking_frame(candidate, waiting_df, excluded_codes=excluded, max_rows=6)
+                if isinstance(shadow_track, pd.DataFrame) and not shadow_track.empty:
+                    shadow_codes = shadow_track["股票代號"].astype(str).map(_normalize_code).tolist()
+                    shadow_rows = _build_record_rows_from_rec_df(shadow_track, shadow_codes)
+                    if callable(mark_h102_shadow_record_rows):
+                        shadow_rows = mark_h102_shadow_record_rows(shadow_rows)
+                    for row in shadow_rows:
+                        row["推薦批次日期"] = run_date
+                        row["推薦批次時間"] = saved_at
+                        row["推薦執行ID"] = run_id
+                        row["推薦執行來源"] = _safe_str(ctx.get("owner")) or "07_股神推薦"
+                        row["推薦觸發方式"] = _safe_str(ctx.get("trigger")) or "手動操作"
+                        row["推薦執行版本"] = "V191-H102"
+                    rows.extend(shadow_rows)
+                    status["steps"]["h102_shadow_records"] = {"ok": True, "count": len(shadow_rows)}
+            except Exception as exc:
+                status["steps"]["h102_shadow_records"] = {"ok": False, "message": str(exc)}
         if rows:
             status["steps"]["page08_upsert"] = _v181_background_record_upsert(rows)
         else:
@@ -2587,6 +2643,7 @@ def _h88_publish_result_nonblocking(
             run_id=current_run_id,
             run_date=current_run_date,
             authority_source="h97-h92-reboot-durable-prepublish",
+            sector_df=category_strength_df,
         )
         if isinstance(h92_core, dict) and h92_core:
             h92_core["source"] = "h97-h92-reboot-durable-prepublish"
@@ -14382,6 +14439,9 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     else:
         action_codes = []
 
+    shadow_rows = []
+    _h86_core = {}
+
     # H80: H79 research recommendations are *learning samples*, not buy permits.
     # Build from the compact H79 table but overlay onto full source rows so Page08
     # can later calculate performance from the original decision-time evidence.
@@ -14416,7 +14476,29 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     else:
         h80_notes.append(f"H82研究績效閉環模組未載入：{H80_RECORD_FEEDBACK_VERSION}")
 
-    rows = [*action_rows, *research_rows]
+    # H102 bounded Waiting shadow tracking for T+1 missed-opportunity learning.
+    if callable(build_h102_shadow_tracking_frame):
+        try:
+            _h102_waiting = _h86_core.get("waiting", pd.DataFrame()) if isinstance(_h86_core, dict) else pd.DataFrame()
+            _h102_excluded = [*action_codes, *[str(x.get("股票代號") or "") for x in research_rows]]
+            _h102_shadow = build_h102_shadow_tracking_frame(_h68_source, _h102_waiting, excluded_codes=_h102_excluded, max_rows=6)
+            if isinstance(_h102_shadow, pd.DataFrame) and not _h102_shadow.empty:
+                _h102_codes = _h102_shadow["股票代號"].astype(str).map(_normalize_code).tolist()
+                shadow_rows = _build_record_rows_from_rec_df(_h102_shadow, _h102_codes)
+                if callable(mark_h102_shadow_record_rows):
+                    shadow_rows = mark_h102_shadow_record_rows(shadow_rows)
+                for row in shadow_rows:
+                    row["推薦批次日期"] = _run_date_v191_h9
+                    row["推薦批次時間"] = _run_started_v191_h9
+                    row["推薦執行ID"] = _run_id_v191_h9
+                    row["推薦執行來源"] = _safe_str(_exec_ctx_v191.get("owner")) or "07_股神推薦"
+                    row["推薦觸發方式"] = _safe_str(_exec_ctx_v191.get("trigger")) or "手動操作"
+                    row["推薦執行版本"] = "V191-H102"
+                h80_notes.append(f"H102 T+1影子閉環：Waiting前段 {len(shadow_rows)} 筆已準備追蹤；不計入正式交易勝率。")
+        except Exception as exc:
+            h80_notes.append(f"H102 Waiting影子追蹤暫時無法建立：{exc}")
+
+    rows = [*action_rows, *research_rows, *shadow_rows]
     if not rows:
         return 0, [*[f"H7行動分區｜{x}" for x in (partition_notes or [])], *h80_notes, "本輪沒有可寫入第8頁的正式/A-/R1/H79研究推薦紀錄。"]
 
@@ -15252,6 +15334,7 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
             run_id=run_id,
             run_date=run_date,
             authority_source="h97-explicit-export-bounded-recovery",
+            sector_df=st.session_state.get(_k("category_strength_store")),
         )
         if not isinstance(compact, dict) or not compact:
             return {}, ""
@@ -15311,6 +15394,7 @@ def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.Dat
                     tables,
                     candidate_df=candidate_current,
                     scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+                    sector_df=st.session_state.get(_k("category_strength_store")),
                 )
             except Exception:
                 pass
@@ -15330,6 +15414,7 @@ def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.Dat
                         tables,
                         candidate_df=st.session_state.get(_k("candidate_diagnosis_store")),
                         scan_report=st.session_state.get(_k("scan_quality_report"), {}) or {},
+                        sector_df=st.session_state.get(_k("category_strength_store")),
                     )
                 except Exception:
                     pass
@@ -15367,8 +15452,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     else:
         priority_overview = tables.get("priority_overview", pd.DataFrame())
         if isinstance(priority_overview, pd.DataFrame) and not priority_overview.empty:
-            st.markdown("#### 🏆 H101 推薦優先順序")
-            st.caption("先看閱讀順位；Formal與Research分開授權。Research排名高只代表優先研究，不代表可直接買進。")
+            st.markdown("#### 🏆 H102 動態推薦優先順序")
+            st.caption("H101保留穩定基準排名；H102再看族群突發點火與T+1成熟回饋。H102可把Waiting升為動態Research，但永遠不能自行建立Formal買進權限。")
             st.dataframe(_format_df(priority_overview), use_container_width=True, hide_index=True)
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())
@@ -15379,7 +15464,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         health = tables.get("health", pd.DataFrame())
         if isinstance(health, pd.DataFrame) and not health.empty:
             st.dataframe(_format_df(health), use_container_width=True, hide_index=True)
-        st.caption(f"H94精簡快照來源：{source_label or 'snapshot'}｜H94會把多模型一致警告的候選降到Waiting；正式買進授權仍完全由既有Formal治理決定。")
+        st.caption(f"H102精簡快照來源：{source_label or 'snapshot'}｜H102會偵測族群IGNITION並重排Research/Waiting；正式買進授權仍完全由既有Formal治理決定。")
 
         show_more = st.toggle(
             "載入 H79 等待／淘汰／資料修復明細",
@@ -16734,7 +16819,7 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
     tab = {
         "00_推薦優先總覽":"7C3AED", "01_正式推薦與交易計畫":"166534", "02_研究推薦":"1D4ED8", "03_上市櫃等待":"B45309",
         "04_今日主流資金":"0F766E", "05_驗證與風險證據":"334155", "06_績效煞車與健康":"7C3AED",
-        "07_興櫃隔離研究":"64748B",
+        "07_興櫃隔離研究":"64748B", "08_T+1推薦檢討":"C2410C",
     }.get(safe_name, "334155")
     ws.sheet_properties.tabColor = tab
     for cell in ws[1]:
@@ -16747,7 +16832,7 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
     long_tokens = ("理由","摘要","風險","缺口","狀態","結論","說明","策略","檢討","關注","未入選","動作","加分","扣分","排名依據","權限")
     for idx, header in enumerate(headers, start=1):
         width = 18
-        if header in {"股票代號","排名","順位","H101閱讀順位","H101同層順位"}: width = 12
+        if header in {"股票代號","排名","順位","H101閱讀順位","H101同層順位","H102閱讀順位","H102同層順位"}: width = 12
         elif header in {"股票名稱","市場別","類別"}: width = 16
         elif any(t in header for t in long_tokens): width = 38
         elif any(t in header for t in ("分數","%","RR","價格","停損","目標","進場")): width = 16
@@ -16760,8 +16845,8 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
                 ws.cell(row=row_idx, column=col_idx).alignment = Alignment(vertical="top", wrap_text=True)
     if safe_name == "00_推薦優先總覽" and ws.max_row > 1:
         hmap = {str(cell.value): cell.column for cell in ws[1]}
-        rank_idx = hmap.get("H101閱讀順位")
-        score_idx = hmap.get("H101推薦優先分")
+        rank_idx = hmap.get("H102閱讀順位") or hmap.get("H101閱讀順位")
+        score_idx = hmap.get("H102動態優先分") or hmap.get("H101推薦優先分")
         for row_idx in range(2, min(ws.max_row, 4) + 1):
             fill = "FDE68A" if row_idx == 2 else "DBEAFE"
             if rank_idx:
@@ -16911,7 +16996,16 @@ def _build_excel_bytes_fast_h85(
     h93_contract = h93_export_contract_summary(tables) if callable(h93_export_contract_summary) else {}
     h94_contract = h94_export_contract_summary(tables) if callable(h94_export_contract_summary) else {}
     h101_contract = h101_export_contract_summary(tables) if callable(h101_export_contract_summary) else {}
+    h102_contract = h102_export_contract_summary(tables) if callable(h102_export_contract_summary) else {}
+    try:
+        h102_t1_review = build_h102_t1_review_table_local(limit=80) if callable(build_h102_t1_review_table_local) else pd.DataFrame()
+    except Exception as _h102_t1_excel_exc:
+        h102_t1_review = pd.DataFrame({"狀態":[f"H102 T+1檢討建立失敗：{type(_h102_t1_excel_exc).__name__}: {_h102_t1_excel_exc}"]})
     core_diag = pd.DataFrame([
+        {"項目": "H102版本", "數值": H102_ROTATION_CLOSED_LOOP_VERSION},
+        {"項目": "H102Excel契約", "數值": "PASS" if isinstance(h102_contract, dict) and h102_contract.get("ok") else "CHECK"},
+        {"項目": "H102動態Research升級", "數值": int(h102_contract.get("dynamic_promotions", 0)) if isinstance(h102_contract, dict) else 0},
+        {"項目": "H102T1檢討列", "數值": int(len(h102_t1_review)) if isinstance(h102_t1_review, pd.DataFrame) else 0},
         {"項目": "H101決策表來源", "數值": core_source or "UNAVAILABLE"},
         {"項目": "H101推薦優先排名版本", "數值": H101_PRIORITY_RANKING_VERSION},
         {"項目": "H101Excel契約", "數值": "PASS" if isinstance(h101_contract, dict) and h101_contract.get("ok") else "CHECK"},
@@ -16942,6 +17036,7 @@ def _build_excel_bytes_fast_h85(
         ("05_驗證與風險證據", tables.get("audit", pd.DataFrame()) if tables else pd.DataFrame(), "目前沒有足夠的驗證增量/風險證據。"),
         ("06_績效煞車與健康", health, "目前沒有成熟績效/系統健康資料。"),
         ("07_興櫃隔離研究", tables.get("emerging_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有興櫃隔離研究股。"),
+        ("08_T+1推薦檢討", h102_t1_review, "目前沒有成熟T+1推薦檢討資料。"),
     ]
     for name, frame, fallback in sheets:
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
@@ -16981,7 +17076,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
         candidate_df = pd.DataFrame()
     if (rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty) and candidate_df.empty:
         return
-    render_pro_section("Excel｜主管核心報表（含H101推薦優先總覽）")
+    render_pro_section("Excel｜主管核心報表（含H102動態優先＋T+1檢討）")
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
@@ -16992,7 +17087,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
     build_clicked = False
     if not ready:
-        st.success("H88：掃描結果已可操作；Excel 不在頁面主執行緒自動建立。按下方按鈕才序列化主管核心表（含H101推薦優先總覽），不重跑模型。")
+        st.success("H102：掃描結果已可操作；Excel 不在頁面主執行緒重跑模型。按下方按鈕只序列化主管核心表（含H102動態優先與T+1推薦檢討）。")
         build_clicked = st.button(
             "📊 建立主管 Excel（含推薦優先總覽）",
             use_container_width=True,
@@ -17014,7 +17109,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"股神正式推薦作戰表_主管7頁_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"股神正式推薦作戰表_主管9頁_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
@@ -17025,7 +17120,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             ready = False
     if ready:
         st.download_button(
-            "⬇️ 下載股神推薦 Excel（7張主管核心表）",
+            "⬇️ 下載股神推薦 Excel（9張主管核心表）",
             data=cache["bytes"],
             file_name=cache["name"],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -18377,7 +18472,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H101推薦優先排名＋Excel總覽同步＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威＋H94/H96研究選股；排名只決定閱讀/研究優先，Formal治理完全不放寬。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H102族群突發轉強＋動態Research＋T+1漏選閉環＋H101穩定排名＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威；Formal治理完全不放寬。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()

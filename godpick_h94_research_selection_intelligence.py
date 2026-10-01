@@ -374,6 +374,21 @@ def decorate_decision_tables(tables: dict[str,Any] | None, *, candidate_df: pd.D
             {"項目":"H101Formal權限","數值":"LOCKED｜H101失敗不影響既有Formal治理"},
         ])], ignore_index=True, sort=False)
         out["health"] = _health
+
+    # H102: detect sector rotation shocks after the stable H101 baseline ranking.
+    # It may elevate a tightly governed Waiting name into dynamic Research only;
+    # Formal/A-/R1 authority remains permanently locked.  No network access is
+    # performed here, so this layer cannot slow the 1,600+ stock scan.
+    try:
+        from godpick_h102_sector_rotation_closed_loop import decorate_decision_tables as decorate_h102_rotation
+        out = decorate_h102_rotation(out, sector_df=sector_df)
+    except Exception as _h102_exc:
+        _health = out.get("health", pd.DataFrame()).copy()
+        _health = pd.concat([_health, pd.DataFrame([
+            {"項目":"H102族群輪動閉環","數值":f"ERROR｜{type(_h102_exc).__name__}: {_h102_exc}"},
+            {"項目":"H102Formal權限","數值":"LOCKED｜H102失敗不影響既有Formal治理"},
+        ])], ignore_index=True, sort=False)
+        out["health"] = _health
     return out
 
 

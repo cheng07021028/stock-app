@@ -29,7 +29,7 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h74_fresh_mainstream_capital_rotation_truth_20260917"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h102_rank_closed_loop_20261001"
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -316,7 +316,9 @@ def _eligible_record(row: dict[str, Any], today: date, max_age_days: int) -> boo
     # learning only from formal winners while not downloading the entire archive.
     model = _s(row.get("SuperAI模型版本"))
     role = "｜".join(_s(row.get(k)) for k in ["正式推薦分區", "推薦角色", "盤中雷達優先級", "SuperAI進場狀態"] if _s(row.get(k)))
-    return model.startswith("super_ai") or bool(role)
+    learning_role = "｜".join([_s(row.get("紀錄層級")), _s(row.get("推薦模式")), _s(row.get("紀錄來源"))])
+    h102_learning = any(tag in learning_role for tag in ["H79研究推薦", "H102動態Research", "H102等待候選影子追蹤", "H102動態輪動影子研究"])
+    return model.startswith("super_ai") or bool(role) or h102_learning
 
 
 def _history_to_quote(df: pd.DataFrame, source: str = "V188 multi-source history") -> dict[str, Any]:
@@ -1079,6 +1081,23 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         "H74研究建議": _s(original.get("H74研究建議")),
         "H74學習快照狀態": _s(original.get("H74學習快照狀態")),
         "H74版本": _s(original.get("H74版本")) or "v191_h74_fresh_mainstream_capital_rotation_truth_20260917",
+        # H101/H102 signal-time ranking evidence.  These are copied verbatim
+        # from the recommendation record so T+1 review never reconstructs a
+        # historical rank with future data.
+        "H101版本": _s(original.get("H101版本")),
+        "H101同層順位": _f(original.get("H101同層順位")),
+        "H101推薦優先分": _f(original.get("H101推薦優先分")),
+        "H101優先層級": _s(original.get("H101優先層級")),
+        "H101推薦層別": _s(original.get("H101推薦層別")),
+        "H102版本": _s(original.get("H102版本")),
+        "H102同層順位": _f(original.get("H102同層順位")),
+        "H102動態優先分": _f(original.get("H102動態優先分")),
+        "H102動態層級": _s(original.get("H102動態層級")),
+        "H102來源層別": _s(original.get("H102來源層別")),
+        "H102族群衝擊分": _f(original.get("H102族群衝擊分")),
+        "H102族群動態狀態": _s(original.get("H102族群動態狀態")),
+        "H102研究升級": _s(original.get("H102研究升級")),
+        "H102Momentum重驗": _s(original.get("H102Momentum重驗")),
         "隔日日期": _date(next_session.get("日期") or next_session.get("date")),
         "隔日開盤": _f(next_session.get("開盤價") if "開盤價" in next_session else next_session.get("open")),
         "隔日最高": _f(next_session.get("最高價") if "最高價" in next_session else next_session.get("high")),
