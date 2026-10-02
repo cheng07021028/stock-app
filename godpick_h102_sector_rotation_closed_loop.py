@@ -31,7 +31,8 @@ import math
 
 import pandas as pd
 
-VERSION = "v191_h102_sector_rotation_shock_t1_closed_loop_20261001"
+VERSION = "v191_h103_rotation_decision_integrity_20261002"
+from godpick_h103_decision_integrity import flag, COLUMNS as H103_COLUMNS, decision_evidence, snapshot_id
 BASE_DIR = Path(__file__).resolve().parent
 _T1_CACHE: dict[str, Any] = {"mtime_ns": None, "stats": {}}
 
@@ -55,6 +56,8 @@ H102_COLUMNS = [
     "H102決策摘要",
 ]
 
+H102_COLUMNS += H103_COLUMNS
+
 OVERVIEW_COLUMNS = [
     "H102閱讀順位", "H102推薦層別", "H102同層順位", "股票代號", "股票名稱", "類別",
     "H102動態優先分", "H102動態層級", "H102族群衝擊分", "H102族群動態狀態",
@@ -62,6 +65,7 @@ OVERVIEW_COLUMNS = [
     "H99主進場", "H99防守停損", "H99第一目標", "H99成本後RR", "H99目標交易日",
     "H102Momentum Entry B", "H102建議動作", "H102研究升級理由",
 ]
+OVERVIEW_COLUMNS += H103_COLUMNS
 
 
 def _text(v: Any) -> str:
@@ -209,13 +213,13 @@ def _catalyst_score(row: dict[str, Any]) -> float:
     return round(_clip(score), 2)
 
 
-def _local_t1_category_stats() -> dict[str, dict[str, Any]]:
+def _local_t1_category_stats(as_of: str = "") -> dict[str, dict[str, Any]]:
     """Load/aggregate local T+1 authority at most once per file version."""
     path = BASE_DIR / "godpick_t1_trade_truth.json"
     if not path.exists():
         return {}
     try:
-        mtime_ns = path.stat().st_mtime_ns
+        mtime_ns = (str(path), path.stat().st_mtime_ns, as_of)
     except Exception:
         mtime_ns = None
     if _T1_CACHE.get("mtime_ns") == mtime_ns and isinstance(_T1_CACHE.get("stats"), dict):
@@ -224,17 +228,26 @@ def _local_t1_category_stats() -> dict[str, dict[str, Any]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
         rows = payload.get("records", []) if isinstance(payload, dict) else payload if isinstance(payload, list) else []
+        seen=set()
+        rows=sorted((r for r in rows if isinstance(r,dict)),key=lambda r:(_text(r.get("推薦日期")),_text(r.get("updated_at"))), reverse=True)
         for r in rows:
-            if not isinstance(r, dict) or not bool(r.get("T1成熟")):
+            if not isinstance(r, dict) or not flag(r.get("T1成熟")):
                 continue
+            if _text(r.get('績效唯一樣本')) == '否':continue
+            rec_day=_text(r.get('推薦日期'))[:10]
+            matured_day=_text(r.get('隔日日期'))[:10]
+            if not as_of or not rec_day or not matured_day or matured_day>as_of or rec_day>=as_of:continue
+            key=(rec_day,_code(r.get('股票代號')))
+            if not key[1] or key in seen:continue
+            seen.add(key)
             cat = _text(r.get("類別"))
             if not cat:
                 continue
             alpha = _num(r.get("Selection Alpha%"), None)
             ret = _num(r.get("隔日候選漲跌%"), None)
-            if alpha is None and ret is None:
+            if alpha is None:
                 continue
-            stats.setdefault(cat, []).append(alpha if alpha is not None else ret)
+            stats.setdefault(cat, []).append(alpha)
     except Exception:
         stats = {}
     compact: dict[str, dict[str, Any]] = {}
@@ -251,7 +264,7 @@ def _local_t1_learning_adjustment(row: dict[str, Any]) -> tuple[float, str]:
     cat = _text(row.get("類別"))
     if not cat:
         return 0.0, "無類別"
-    stat = _local_t1_category_stats().get(cat)
+    stat = _local_t1_category_stats(_first_text(row,["H99市場資料日","H83市場資料日期","H79資料基準日"])[:10]).get(cat)
     if not stat:
         return 0.0, f"{cat}尚無成熟T+1樣本"
     n = int(stat.get("n", 0) or 0)
@@ -259,7 +272,7 @@ def _local_t1_learning_adjustment(row: dict[str, Any]) -> tuple[float, str]:
     if n < 5:
         return 0.0, f"{cat}成熟樣本{n}<5，不調權"
     adj = max(-2.5, min(2.5, mean * 0.35))
-    return round(adj, 2), f"{cat}成熟樣本{n}｜平均Alpha/報酬{mean:+.2f}%｜調整{adj:+.2f}"
+    return round(adj, 2), f"{cat}成熟樣本{n}｜平均Selection Alpha{mean:+.2f}%｜調整{adj:+.2f}"
 
 
 def analyze_candidate(row: dict[str, Any] | pd.Series, *, pool: str, sector_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -311,7 +324,13 @@ def analyze_candidate(row: dict[str, Any] | pd.Series, *, pool: str, sector_map:
         and exhaust not in {"HIGH", "BLOCK"}
         and not h99_exec.startswith("BLOCK")
     )
-    if promotable:
+    if pool == "actionable":
+        dynamic_tier = "F｜正式池動態排序"
+        action = "原正式池授權，仍須價格與盤前重驗。"
+    elif pool == "research":
+        dynamic_tier = "R｜核心研究"
+        action = "維持Research；族群輪動分僅供研究排序，仍非買進許可。"
+    elif promotable:
         dynamic_tier = "D1｜輪動核心研究"
         action = "動態升級為Research；優先盤前/盤中重驗。仍非Formal，未重新取得正式授權不可直接買進。"
     elif sector_state.startswith("IGNITION") and score >= 62:
@@ -379,10 +398,11 @@ def _apply_overlay(frame: pd.DataFrame | None, *, pool: str, sector_map: dict[st
         add = pd.DataFrame([analyze_candidate(r, pool=pool, sector_map=sector_map) for r in out.loc[valid].to_dict("records")], index=out.index[valid])
         for c in H102_COLUMNS:
             if c in add.columns:
+                out[c] = out[c].astype(object)
                 out.loc[add.index, c] = add[c]
         rank_df = out.loc[valid].copy()
         rank_df["__h102_score"] = pd.to_numeric(rank_df["H102動態優先分"], errors="coerce")
-        order = rank_df.sort_values(["__h102_score", "H101推薦優先分"], ascending=[False, False], na_position="last").index.tolist()
+        order = rank_df.sort_values(["__h102_score", "股票代號"], ascending=[False, True], na_position="last", kind="stable").index.tolist()
         for rank, idx in enumerate(order, start=1):
             out.at[idx, "H102同層順位"] = rank
         ranked = out.loc[order].copy()
@@ -430,50 +450,81 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
         for k, v in src.items()
     }
     smap = _sector_map(sector_df)
+    for frame in out.values():
+        if "H103未通過原因" in frame:frame["H103未通過原因"]=""
 
-    # First pass: discover dynamic promotion candidates in Waiting.
-    waiting = _apply_overlay(out.get("waiting", pd.DataFrame()), pool="waiting", sector_map=smap)
-    research = _apply_overlay(out.get("research", pd.DataFrame()), pool="research", sector_map=smap)
+    from godpick_h101_priority_ranking import apply_priority_overlay
+    from godpick_h99_execution_truth import apply_execution_truth_overlay
+    # Normalize back to source pools so reruns cannot consume another promotion slot.
+    research = out.get('research', pd.DataFrame()).copy()
+    waiting = out.get('waiting', pd.DataFrame()).copy()
+    if not research.empty:
+        provenance = research.get('H102來源層別', pd.Series('',index=research.index)).fillna('').astype(str)
+        old_promotions = provenance.eq('WAITING→RESEARCH')
+        waiting = pd.concat([waiting,research.loc[old_promotions]],ignore_index=True,sort=False)
+        research = research.loc[~old_promotions].copy()
+    actionable = apply_execution_truth_overlay(out.get('actionable',pd.DataFrame()))
+    if '股票代號' in actionable and 'H99執行狀態' in actionable:
+        blocked = actionable['H99執行狀態'].fillna('').astype(str).str.startswith('BLOCK')
+        waiting = pd.concat([waiting,actionable.loc[blocked]],ignore_index=True,sort=False)
+        actionable = actionable.loc[~blocked].copy()
+    for name,frame in [('waiting',waiting),('research',research)]:
+        if '股票代號' in frame:
+            frame['股票代號'] = frame['股票代號'].map(_code)
+            frame = frame[frame['股票代號'].ne('')].drop_duplicates('股票代號').reset_index(drop=True)
+        frame = apply_priority_overlay(apply_execution_truth_overlay(frame),pool=name)
+        out[name] = _apply_overlay(frame,pool=name,sector_map=smap)
+    waiting,research = out['waiting'],out['research']
     promotions = pd.DataFrame()
-    if not waiting.empty and "H102研究升級" in waiting.columns:
-        cand = waiting[waiting["H102研究升級"].astype(str).eq("是")].copy()
+    if not waiting.empty:
+        cand = waiting.loc[waiting['H102研究升級'].eq('是')].copy()
         if not cand.empty:
-            # Diversification: max three promotions, max one per sector.
-            cand["__score"] = pd.to_numeric(cand["H102動態優先分"], errors="coerce")
-            cand = cand.sort_values("__score", ascending=False, na_position="last")
-            cand = cand.drop_duplicates(subset=["類別"], keep="first") if "類別" in cand.columns else cand
-            promotions = cand.head(3).drop(columns=["__score"], errors="ignore").copy()
-            if not promotions.empty:
-                promotions["H102來源層別"] = "WAITING→RESEARCH"
-                promo_codes = set(promotions["股票代號"].map(_code))
-                waiting = waiting[~waiting["股票代號"].map(_code).isin(promo_codes)].copy()
-                research = pd.concat([research, promotions], ignore_index=True, sort=False)
-                if "股票代號" in research.columns:
-                    research = research.drop_duplicates(subset=["股票代號"], keep="first")
-
-    # Re-align H101 pool semantics after H102's research-only promotion.
-    try:
-        from godpick_h101_priority_ranking import apply_priority_overlay
-        research = apply_priority_overlay(research, pool="research")
-        waiting = apply_priority_overlay(waiting, pool="waiting")
-    except Exception:
-        pass
-    research = _apply_overlay(research, pool="research", sector_map=smap)
-    waiting = _apply_overlay(waiting, pool="waiting", sector_map=smap)
-    # Preserve the promotion provenance after the second overlay.
-    if not promotions.empty and "股票代號" in research.columns:
-        promo_codes = set(promotions["股票代號"].map(_code))
-        mask = research["股票代號"].map(_code).isin(promo_codes)
-        research.loc[mask, "H102來源層別"] = "WAITING→RESEARCH"
-        research.loc[mask, "H102研究升級"] = "是"
-        research.loc[mask, "H102動態層級"] = "D1｜輪動核心研究"
-        research.loc[mask, "H102建議動作"] = "H102由Waiting動態升級Research；優先盤前/盤中重驗，但仍非Formal。"
-
-    out["research"] = research
-    out["waiting"] = waiting
-    for name in ("actionable", "audit", "emerging_watch"):
-        out[name] = _apply_overlay(out.get(name, pd.DataFrame()), pool=name, sector_map=smap)
-    out["priority_overview"] = _build_overview(out)
+            cand = cand.sort_values(['H102動態優先分','股票代號'],ascending=[False,True],kind='stable')
+            promotions = cand.drop_duplicates('類別').head(3).copy() if '類別' in cand else cand.head(3).copy()
+            chosen = set(promotions['股票代號'])
+            blocked = waiting['H102研究升級'].eq('是') & ~waiting['股票代號'].isin(chosen)
+            waiting.loc[blocked,'H102研究升級']='否'
+            waiting.loc[blocked,'H102動態層級']='D2｜輪動優先觀察'
+            waiting.loc[blocked,'H102建議動作']='符合動態研究初篩；因每族群最多一檔新增升級或本輪名額限制，保留Waiting。'
+            waiting.loc[blocked,'H103未通過原因']='研究升級受分散規則限制；不代表正式授權'
+            promotions['H102來源層別']='WAITING→RESEARCH'
+            research=pd.concat([research,promotions],ignore_index=True,sort=False)
+            waiting=waiting.loc[~waiting['股票代號'].isin(chosen)].copy()
+    out['actionable']=_apply_overlay(actionable,pool='actionable',sector_map=smap)
+    out['research'],out['waiting']=research,waiting
+    out['emerging_watch']=_apply_overlay(out.get('emerging_watch'),pool='emerging_watch',sector_map=smap)
+    canonical={}
+    for pool in ('actionable','research','waiting','emerging_watch'):
+        frame=out[pool]
+        if frame.empty or '股票代號' not in frame:continue
+        frame=frame.loc[frame['股票代號'].map(_code).ne('')].copy()
+        frame=frame.sort_values(['H102動態優先分','股票代號'],ascending=[False,True],kind='stable').reset_index(drop=True)
+        records=[]
+        for rank,row in enumerate(frame.to_dict('records'),1):
+            row['H102同層順位']=rank
+            row.update(decision_evidence(row,pool))
+            row['H103決策快照']=snapshot_id(row)
+            row['H102決策摘要']=f"最終層別{pool.upper()}｜{row['H102動態層級']}｜順位{rank}；正式授權不放寬。"
+            records.append(row)
+            canonical[_code(row['股票代號'])]=row
+        out[pool]=pd.DataFrame(records)
+    audit=_apply_overlay(out.get('audit'),pool='audit',sector_map=smap)
+    if not audit.empty and '股票代號' in audit:
+        records=[]
+        for row in audit.to_dict('records'):
+            final=canonical.get(_code(row['股票代號']))
+            if final:
+                # Audit is a view of the final decision, never a second decision.
+                for k,v in final.items():
+                    if k.startswith(('H99','H101','H102','H103')):row[k]=v
+            else:
+                row.update(decision_evidence(row,'audit'))
+                row['H103決策快照']=snapshot_id(row)
+                row['H102研究升級']='否'
+            records.append(row)
+        audit=pd.DataFrame(records)
+    out['audit']=audit
+    out['priority_overview']=_build_overview(out)
 
     health = out.get("health", pd.DataFrame()).copy()
     if not health.empty and "項目" in health.columns:
@@ -486,6 +537,20 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
         {"項目": "H102T1閉環", "數值": "可執行觸發/MFE/MAE/Selection Alpha寫入檢討；只用成熟歷史樣本做±2.5分內調整"},
         {"項目": "H102Formal權限", "數值": "LOCKED"},
     ]
+    if '項目' in health:
+        health=health.loc[~health['項目'].fillna('').astype(str).str.startswith('H103')].copy()
+    for pool,label in [('actionable','正式'),('research','研究'),('waiting','等待')]:
+        rows.append({'項目':'H103最終'+label+'檔數','數值':len(out[pool])})
+    reasons=out['waiting'].get('H103未通過原因',pd.Series(dtype=object)).fillna('未提供原因').value_counts()
+    for reason,count in reasons.items():
+        rows.append({'項目':'H103等待原因｜'+str(reason),'數值':int(count)})
+    rows.extend([
+        {'項目':'H103版本','數值':VERSION},
+        {'項目':'H103決策一致性','數值':'PASS' if export_contract_summary(out)['ok'] else 'CHECK'},
+        {'項目':'H103零推薦說明','數值':'逐檔顯示現有拒絕原因；上游未提供H64/H68逐關數值者明列缺漏，不虛構淘汰統計'},
+        {'項目':'H103TDCC缺漏檔數（最終研究池）','數值':sum(str(x).startswith('MISSING') for x in out['research'].get('H103TDCC證據',[]))},
+        {'項目':'H103新紀錄績效','數值':'固定目標日A計畫成本後回放；日K路徑歧義停用執行學習；歷史缺漏不回填'},
+    ])
     out["health"] = pd.concat([health, pd.DataFrame(rows)], ignore_index=True, sort=False)
     return out
 
@@ -500,12 +565,12 @@ def build_t1_review_table_local(limit: int = 80) -> pd.DataFrame:
         rows = payload.get("records", []) if isinstance(payload, dict) else payload if isinstance(payload, list) else []
     except Exception as exc:
         return pd.DataFrame({"狀態": [f"T+1本機真相讀取失敗：{type(exc).__name__}: {exc}"]})
-    rows = [dict(r) for r in rows if isinstance(r, dict) and bool(r.get("T1成熟"))]
+    rows = [dict(r) for r in rows if isinstance(r, dict) and flag(r.get("T1成熟"))]
     # One economic outcome per recommendation date + stock.
     best: dict[str, dict[str, Any]] = {}
     for r in rows:
         key = f"{_text(r.get('推薦日期'))}|{_code(r.get('股票代號'))}"
-        if not key.strip("|"):
+        if not _text(r.get("推薦日期")) or not _code(r.get("股票代號")):
             continue
         cur = best.get(key)
         if cur is None or _text(r.get("updated_at")) > _text(cur.get("updated_at")):
@@ -519,10 +584,18 @@ def build_t1_review_table_local(limit: int = 80) -> pd.DataFrame:
         alpha = _num(r.get("Selection Alpha%"), None)
         trig = _text(r.get("進場觸發狀態"))
         entry_result = _text(r.get("Entry結果"))
-        executable = bool(r.get("是否納入可執行績效"))
+        executable = flag(r.get("是否納入可執行績效"))
         rank = _first_num(r, ["H102同層順位", "H101同層順位"], None)
-        if executable and mfe is not None and mfe >= 5:
-            review = "EXECUTABLE-WIN｜Entry已觸發且MFE>=5%"
+        if _text(r.get("H103績效版本")) and entry_result in ("WIN", "LOSS", "FLAT"):
+            review = "SIMULATED-" + entry_result + "｜日K條件成交模擬；非實際成交驗證"
+        elif entry_result == "AMBIGUOUS":
+            review = "AMBIGUOUS｜日K路徑順序不明，禁止執行學習"
+        elif executable and entry_result == "LOSS":
+            review = "EXECUTABLE-LOSS｜依交易結果；MFE不代表已實現獲利"
+        elif executable and entry_result == "FLAT":
+            review = "EXECUTABLE-FLAT｜依交易結果；MFE不代表已實現獲利"
+        elif executable and entry_result == "WIN":
+            review = "EXECUTABLE-WIN｜依已記錄交易結果；歷史毛報酬不等同成本後獲利"
         elif (not executable or "未觸發" in trig or "NO-TRADE" in entry_result) and ret is not None and ret >= 5:
             review = "SELECTION-RIGHT-NO-ENTRY｜方向正確但未成交"
         elif executable and mae is not None and mae <= -3:
@@ -531,12 +604,16 @@ def build_t1_review_table_local(limit: int = 80) -> pd.DataFrame:
             review = "SELECTION-REVIEW｜相對市場落後"
         else:
             review = "NORMAL｜持續累積"
-        if rank is not None and rank >= 3 and ((mfe is not None and mfe >= 5) or (ret is not None and ret >= 5)):
+        if rank is None:
+            rank_review = "UNAVAILABLE｜未保存當時排名，禁止以目前排名回填"
+        elif rank >= 3 and alpha is not None and alpha >= 2:
             rank_review = "RANK-UNDERRATED｜後順位卻出現強T+1，納入H102檢討"
-        elif rank is not None and rank == 1 and ret is not None and ret < 0:
+        elif rank == 1 and alpha is not None and alpha < 0:
             rank_review = "RANK1-REVIEW｜第一順位T+1為負，需檢討權重"
+        elif alpha is None:
+            rank_review = "UNAVAILABLE｜缺少同日市場基準Alpha"
         else:
-            rank_review = "RANK-OK/WAIT"
+            rank_review = "RANK-OBSERVED｜單筆觀察，不代表排名有效"
         out_rows.append({
             "推薦日期": _text(r.get("推薦日期")),
             "隔日日期": _text(r.get("隔日日期")),
@@ -553,6 +630,10 @@ def build_t1_review_table_local(limit: int = 80) -> pd.DataFrame:
             "隔日候選漲跌%": ret,
             "Selection Alpha%": alpha,
             "是否納入可執行績效": "是" if executable else "否",
+            "H103T1成本後報酬%": _num(r.get('H103T1成本後報酬%')),
+            "H103績效口徑": _text(r.get('H103績效口徑')) or 'LEGACY｜舊紀錄未經H103固定計畫回放',
+            "H103執行學習可用": '是' if flag(r.get('H103執行學習可用')) else '否｜缺少固定計畫或路徑證據',
+            "H103路徑歧義": '是' if flag(r.get('H103路徑歧義')) else '否',
             "H102T1檢討": review,
             "H102排名檢討": rank_review,
         })
@@ -658,9 +739,28 @@ def export_contract_summary(tables: dict[str, pd.DataFrame] | None) -> dict[str,
     if isinstance(research, pd.DataFrame) and "H102研究升級" in research.columns:
         promoted = int(research["H102研究升級"].astype(str).eq("是").sum())
     ok = all(isinstance(x, pd.DataFrame) for x in [overview, research, waiting])
+    errors=[]
+    canonical={}
+    for pool in ('actionable','research','waiting','emerging_watch'):
+        frame=t.get(pool,pd.DataFrame())
+        if not isinstance(frame,pd.DataFrame):continue
+        for row in frame.to_dict('records'):
+            code=_code(row.get('股票代號'))
+            if not code:continue
+            if code in canonical:errors.append('DUPLICATE_POOL:'+code)
+            canonical[code]=row
+            if pool=='waiting' and row.get('H102研究升級')=='是':errors.append('FALSE_PROMOTION:'+code)
+    expected={c for c,r in canonical.items() if r.get('H103最終層別') in ('ACTIONABLE','RESEARCH')}
+    actual=set(overview['股票代號'].map(_code)) if isinstance(overview,pd.DataFrame) and '股票代號' in overview else set()
+    if expected!=actual or (not expected and not research.empty):errors.append('OVERVIEW_MISMATCH')
+    for row in t.get('audit',pd.DataFrame()).to_dict('records'):
+        c=_code(row.get('股票代號')); final=canonical.get(c)
+        if final and any(_text(row.get(k))!=_text(final.get(k)) for k in ('H102動態層級','H102研究升級','H103決策快照')):
+            errors.append('AUDIT_MISMATCH:'+c)
     return {
         "version": VERSION,
-        "ok": bool(ok),
+        "ok": bool(ok and not errors),
+        "errors":errors,
         "overview_rows": int(len(overview)) if isinstance(overview, pd.DataFrame) else 0,
         "research_rows": int(len(research)) if isinstance(research, pd.DataFrame) else 0,
         "waiting_rows": int(len(waiting)) if isinstance(waiting, pd.DataFrame) else 0,

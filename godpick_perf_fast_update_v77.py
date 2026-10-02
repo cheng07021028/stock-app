@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 
-PERF_FAST_UPDATE_VERSION = "v191_h9_execution_truth_20260813"
+PERF_FAST_UPDATE_VERSION = "v191_h103_frozen_t1_plan_20261002"
 DEFAULT_TRACK_DAYS = [1, 3, 5, 10, 20]
 # H9 keeps the published retest-zone semantics but separates the theoretical
 # support reference from the OHLC-verifiable execution price.
@@ -829,6 +829,20 @@ def update_record_perf(row: Dict[str, Any], quote: Dict[str, Any], track_days: L
     out["觸發訊號品質分"] = round(float(event.get("quality", 50.0)), 1)
     out.update(_execution_returns(history, event, track_days))
     out.update(_daily_execution_diagnostics(history, rec_date, base_adjusted, event))
+    if _safe_str(out.get('H103決策快照')):
+        from godpick_h103_decision_integrity import replay_t1_plan
+        replay = replay_t1_plan(out, history)
+        # Clear legacy unbounded event metrics: their horizon began on whichever
+        # later day happened to trigger and included pre-entry daily extremes.
+        for key in list(out):
+            if key.startswith('可執行交易') or key in ('觸發當日收盤績效%','觸發後收盤績效%'):
+                out[key]=None
+        out.update(replay)
+        out['績效計算口徑']='H103｜發布A限價計畫；目標交易日限定；成本後回放；非實際成交'
+        out['隔日執行命中結果']=replay['H103T1結果']
+        # Simulation stays in H103T1成本後報酬%; never populate verified-fill metrics.
+        if replay.get('H103路徑歧義') or replay['H103T1結果'] in ('INVALID','REVALIDATE'):
+            out['是否納入權重校正']='否'
     return out
 
 def update_recommendation_perf_fast_v77(

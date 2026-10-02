@@ -29,7 +29,8 @@ except Exception:
     persist_json_async = None
     persist_json_permanent = None
 
-TRUTH_VERSION = "godpick_t1_trade_truth_v191_h102_rank_closed_loop_20261001"
+TRUTH_VERSION = "godpick_t1_trade_truth_v191_h103_frozen_cost_return_20261002"
+from godpick_h103_decision_integrity import flag
 TRUTH_FILE = "godpick_t1_trade_truth.json"
 CALIBRATION_FILE = "godpick_probability_calibration.json"
 BASE_DIR = Path(__file__).resolve().parent
@@ -428,6 +429,8 @@ def _selection_result(alpha: float | None, ret: float | None) -> str:
 
 
 def _entry_result(updated: dict[str, Any]) -> str:
+    if _s(updated.get("H103績效版本")):
+        return _s(updated.get("H103T1結果")) or "PENDING"
     executable = bool(updated.get("是否納入可執行績效"))
     status = _s(updated.get("進場觸發狀態"))
     if not executable:
@@ -443,6 +446,8 @@ def _entry_result(updated: dict[str, Any]) -> str:
 
 
 def _risk_result(updated: dict[str, Any]) -> str:
+    if _s(updated.get("H103績效版本")):
+        return "REVIEW｜日K路徑歧義，禁止學習" if flag(updated.get("H103路徑歧義")) else _s(updated.get("H103出場原因")) or "N/A｜未建立交易"
     status = _s(updated.get("進場觸發狀態"))
     mae = _f(updated.get("可執行交易最大回撤%"))
     if "假突破" in status or "跌破" in status:
@@ -864,6 +869,8 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         return bool((float(actual) > 0) == (float(pred) > 0))
 
     return {
+        **{k:v for k,v in original.items() if k.startswith("H103")},
+        **{k:v for k,v in updated.items() if k.startswith("H103")},
         "version": TRUTH_VERSION,
         "business_key": _business_key(original),
         "cohort_key": _cohort_key(original),
@@ -1141,6 +1148,7 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
     duplicate_rows_excluded = max(0, len(audit_rows) - len(rows))
     samples = []
     executable = []
+    simulated = []
     for r in rows:
         if not bool(r.get("T1成熟")):
             continue
@@ -1148,7 +1156,10 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
         # filtered by whether this older row happened to carry a probability
         # forecast; otherwise win-rate/sample-count silently shrink to the tiny
         # calibration subset and can look much better than real execution.
-        if bool(r.get("是否納入可執行績效")):
+        if flag(r.get("H103執行學習可用")):
+            sr = _f(r.get("H103T1成本後報酬%"))
+            if sr is not None: simulated.append(sr)
+        if flag(r.get("是否納入可執行績效")) and flag(r.get("執行價可成交驗證")) and bool(_s(r.get("成交回報識別碼"))) and not _s(r.get("H103績效版本")):
             er = _f(r.get("可執行交易1日%") if _s(r.get("可執行交易1日%")) else r.get("觸發當日收盤績效%"))
             if er is not None:
                 executable.append(er)
@@ -1200,9 +1211,13 @@ def build_probability_calibration(truth_rows: Any) -> dict[str, Any]:
         "unique_performance_rows": len(rows),
         "duplicate_performance_rows_excluded": duplicate_rows_excluded,
         "executable_samples": len(executable),
+        "simulation_samples": len(simulated),
+        "simulation_win_rate_pct": round(sum(x>0 for x in simulated)/len(simulated)*100,2) if simulated else None,
+        "simulation_basis": "H103日K條件成交模擬，非實際成交",
         "executable_win_rate_pct": round(sum(1 for x in executable if x > 0) / len(executable) * 100.0, 2) if executable else None,
         "avg_executable_ret_pct": round(sum(executable) / len(executable), 4) if executable else None,
         "bins": bins,
+        "legacy_execution_policy": "H103: 未驗證舊執行樣本與路徑歧義不納入執行校準；選股報酬仍分開保留",
         "policy": "H36: audit rows preserve roles, but performance/calibration counts one realized outcome per date+stock; small samples use Beta(10,10) posterior only as a bounded conservative calibration target; untriggered signals are never wins/losses",
     }
 
@@ -1298,7 +1313,7 @@ def refresh_t1_trade_truth(
     calibration = build_probability_calibration(truth_rows)
     performance_rows = dedupe_performance_truth_rows(truth_rows)
     matured = [r for r in performance_rows if bool(r.get("T1成熟"))]
-    executable = [r for r in matured if bool(r.get("是否納入可執行績效"))]
+    executable = [r for r in matured if flag(r.get("是否納入可執行績效")) and flag(r.get("執行價可成交驗證")) and bool(_s(r.get("成交回報識別碼"))) and not _s(r.get("H103績效版本"))]
     selection_alpha = [_f(r.get("Selection Alpha%")) for r in matured]
     selection_alpha = [x for x in selection_alpha if x is not None]
     h49_high = [r for r in matured if _s(r.get("H49潛力等級")).startswith(("P1", "P2"))]
@@ -1337,6 +1352,8 @@ def refresh_t1_trade_truth(
             "matured_t1_samples": len(matured), "executable_samples": len(executable),
             "trigger_rate_pct": round(len(executable) / len(matured) * 100.0, 2) if matured else None,
             "executable_win_rate_pct": calibration.get("executable_win_rate_pct"),
+            "simulation_samples": calibration.get("simulation_samples"),
+            "simulation_win_rate_pct": calibration.get("simulation_win_rate_pct"),
             "avg_selection_alpha_pct": round(sum(selection_alpha) / len(selection_alpha), 4) if selection_alpha else None,
             "H49高潛力成熟樣本": len(h49_high),
             "H49高潛力正報酬率%": round(sum(1 for x in h49_rets if x > 0) / len(h49_rets) * 100.0, 2) if h49_rets else None,

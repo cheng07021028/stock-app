@@ -25,7 +25,7 @@ import math
 
 import pandas as pd
 
-VERSION = "v191_h99_execution_truth_reconciliation_20260924"
+VERSION = "v191_h103_legal_price_execution_truth_20261002"
 
 # Official TWSE market closure dates for 2026.  Weekends are handled
 # independently.  An optional godpick_twse_holidays.json may add/override
@@ -209,11 +209,14 @@ def resolve_execution_truth(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
         price_plan_ok = "否"
         model_only = _first_text(raw, ["H89模型目標僅研究"])
 
+    # H103 publishes legal order prices, retaining raw H89/H79 evidence.
+    from godpick_h103_decision_integrity import tick_price
+    if _first_text(raw, ['市場別']) != '興櫃':
+        entry, stop, target = tick_price(entry), tick_price(stop), tick_price(target)
     rr_calc = _net_rr(entry, stop, target)
-    # Prefer the plan-native H89/H79 RR if available; the recalculation is an
-    # independent consistency guard using the shared default cost assumptions.
-    rr_truth = rr if rr is not None else rr_calc
-    rr_native_ok = rr_truth is None or rr_calc is None or abs(rr_truth - rr_calc) <= 0.03
+    # Legal prices determine RR; native RR remains an audit comparison.
+    rr_truth = rr_calc
+    rr_native_ok = rr is None or rr_calc is None or abs(rr - rr_calc) <= 0.03
     cross_delta = None
     if h89_rr is not None and h79_rr is not None:
         cross_delta = h89_rr - h79_rr
@@ -240,6 +243,9 @@ def resolve_execution_truth(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
 
     if not h89_complete and not h79_complete:
         exec_state = "BLOCK｜價格計畫不完整"
+    elif rr_calc is None or rr_calc < 1.5 - 1e-9:
+        exec_state = 'BLOCK｜合法價格重算後成本RR不足1.50或結構無效'
+        price_plan_ok = '否'
     elif research_only:
         exec_state = "WAIT-PREOPEN｜研究候選，盤前重驗後仍須原Formal治理"
     elif long_gap:
@@ -251,7 +257,7 @@ def resolve_execution_truth(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     if not cross_ok:
         rr_state_parts.append(f"H79 {h79_rr:.2f} → H89 {h89_rr:.2f}，已以H89最新價格計畫統一")
     if not rr_native_ok and rr_truth is not None and rr_calc is not None:
-        rr_state_parts.append(f"計畫RR {rr_truth:.2f}／重算 {rr_calc:.2f} 不一致")
+        rr_state_parts.append(f"原計畫RR {rr:.2f}／重算 {rr_calc:.2f} 不一致")
     rr_consistency = "PASS｜單一執行真相" if not rr_state_parts else "RECONCILED｜" + "；".join(rr_state_parts)
 
     return {

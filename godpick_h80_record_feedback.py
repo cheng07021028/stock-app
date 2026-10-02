@@ -65,6 +65,10 @@ def _code(value: Any) -> str:
     return text.zfill(4) if text.isdigit() and len(text) < 4 else text
 
 
+from godpick_h103_decision_integrity import COLUMNS as H103_COLUMNS
+H80_RECORD_FEEDBACK_COLUMNS += H103_COLUMNS
+
+
 def _text(value: Any) -> str:
     if value is None:
         return ""
@@ -165,7 +169,8 @@ def build_research_tracking_frame(
         rows.append(raw)
 
     out = pd.DataFrame(rows)
-    if not out.empty:
+    frozen = {str(r.get("股票代號")): r for r in rows if _text(r.get("H103決策快照"))}
+    if not out.empty and not ("H103決策快照" in out and out["H103決策快照"].fillna("").astype(str).ne("").all()):
         # H99 persists the same execution truth used by UI/Excel into Page08
         # research records.  This prevents later performance learning from
         # evaluating an obsolete H79 RR when H89 had already rebuilt the plan.
@@ -184,6 +189,8 @@ def build_research_tracking_frame(
             pass
         out["__h80_order"] = out["股票代號"].map({c: i for i, c in enumerate(research["股票代號"].tolist())})
         out = out.sort_values("__h80_order", kind="stable").drop(columns=["__h80_order"], errors="ignore")
+    if frozen:
+        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103"))}} for r in out.to_dict("records")])
     return out.reset_index(drop=True)
 
 

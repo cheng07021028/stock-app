@@ -715,7 +715,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h102_sector_rotation_t1_closed_loop_20261001"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h103_decision_integrity_cost_t1_20261002"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2429,6 +2429,8 @@ def _h88_background_full_persist(
             authority_source="h97-background-full-persist",
             sector_df=cat,
         )
+        from godpick_h103_decision_integrity import merge_final_actionable_frame
+        action_df = merge_final_actionable_frame(action_df, core)
         candidate_records = _h88_df_records_no_streamlit(candidate)
         recommendation_records = _h88_df_records_no_streamlit(action_df)
         cat_records = _h88_df_records_no_streamlit(cat)
@@ -3634,6 +3636,9 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
             _frame_h9["推薦執行版本"] = _safe_str(execution_context.get("automation_version")) or "V191-H9"
 
     candidate_records = _df_to_records_for_json(candidate_df)
+    from godpick_h103_decision_integrity import merge_final_actionable_frame
+    action_df = merge_final_actionable_frame(action_df, h85_h79_core_tables)
+    st.session_state[_k("h86_action_frame_for_record")] = action_df.copy()
     recommendation_records = _df_to_records_for_json(action_df)
     kline_date = _max_row_date_v173(candidate_records + recommendation_records, [
         "本輪市場最新交易日", "K線最後交易日", "行情資料日期", "價格資料日期"
@@ -14279,6 +14284,10 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
     rows: list[dict[str, Any]] = []
     for _, r in work.iterrows():
         raw = r.to_dict()
+        if _safe_str(raw.get('H103決策快照')):
+            frozen=rec_df.loc[rec_df['股票代號'].astype(str).map(_normalize_code).eq(_normalize_code(raw.get('股票代號')))]
+            if not frozen.empty:
+                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103'))})
         code = _normalize_code(raw.get("股票代號"))
         if not code:
             continue
@@ -14365,6 +14374,9 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
     st.session_state[_k("recommend_execution_context_v191")] = _exec_ctx_v191
     st.session_state[_k("scan_run_id")] = _run_id_v191_h9
 
+    from godpick_h103_decision_integrity import merge_final_actionable_frame
+    action = merge_final_actionable_frame(action, st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
+
     if not action.empty:
         # H82: snapshot the same H81/H82 evidence used for research ranking into
         # Formal/A-/R1 history as well.  These overlays never grant Formal
@@ -14380,6 +14392,8 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
                 action = apply_h99_execution_truth_overlay(action)
         except Exception:
             pass
+        from godpick_h103_decision_integrity import merge_final_actionable_frame
+        action = merge_final_actionable_frame(action, st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
         quality_notes: dict[str, tuple[str, str]] = {}
         for _, row in action.iterrows():
             code = _normalize_code(row.get("股票代號"))
@@ -15452,8 +15466,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     else:
         priority_overview = tables.get("priority_overview", pd.DataFrame())
         if isinstance(priority_overview, pd.DataFrame) and not priority_overview.empty:
-            st.markdown("#### 🏆 H102 動態推薦優先順序")
-            st.caption("H101保留穩定基準排名；H102再看族群突發點火與T+1成熟回饋。H102可把Waiting升為動態Research，但永遠不能自行建立Formal買進權限。")
+            st.markdown("#### 🏆 H103 推薦優先順序與交易條件")
+            st.caption("H103統一總覽、研究、等待與稽核決策；顯示合法價格、缺漏證據及未通過原因。研究分數不是上漲機率，仍須取得正式授權。")
             st.dataframe(_format_df(priority_overview), use_container_width=True, hide_index=True)
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())
@@ -18472,7 +18486,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H102族群突發轉強＋動態Research＋T+1漏選閉環＋H101穩定排名＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威；Formal治理完全不放寬。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H103決策一致＋合法價格＋固定T1成本後回放｜H102族群突發轉強＋動態Research＋T+1漏選閉環＋H101穩定排名＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威；Formal治理完全不放寬。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()

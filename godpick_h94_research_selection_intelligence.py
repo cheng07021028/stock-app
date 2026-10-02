@@ -345,6 +345,24 @@ def decorate_decision_tables(tables: dict[str,Any] | None, *, candidate_df: pd.D
         ])], ignore_index=True, sort=False)
         out["health"] = _health
 
+    # Preserve actual source evidence before compact overlays. Do not fill a
+    # missing official observation with a score or a textual proxy.
+    if isinstance(candidate_df, pd.DataFrame) and '股票代號' in candidate_df:
+        evidence_cols=['最新價','突破確認參考價','突破確認價','突破後守價','觸發後守價',
+                       '突破第一目標','第一壓力價','TDCC千張大戶週變化pp',
+                       'TDCC大戶資料日期','TDCC大戶前期日期','TDCC大戶資料狀態','TDCC大戶資料說明']
+        evidence={str(r.get('股票代號')).removesuffix('.0'):r for r in candidate_df.to_dict('records')}
+        for name in ('actionable','research','waiting','audit','emerging_watch'):
+            frame=out.get(name,pd.DataFrame())
+            if frame.empty or '股票代號' not in frame:continue
+            rows=[]
+            for row in frame.to_dict('records'):
+                source=evidence.get(str(row.get('股票代號')).removesuffix('.0'),{})
+                for key in evidence_cols:
+                    if key in source and (key not in row or pd.isna(row.get(key))):row[key]=source[key]
+                rows.append(row)
+            out[name]=pd.DataFrame(rows)
+
     # H99: reconcile execution truth after H96 has finished selecting the
     # manager-facing pools.  This is intentionally last-mile and idempotent so
     # restored compact snapshots/Excel exports cannot re-introduce an old H81

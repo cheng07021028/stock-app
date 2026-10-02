@@ -18,7 +18,8 @@ import json
 import os
 import time
 
-VERSION = "v191_h60_tdcc_holder_truth_20260904"
+VERSION = "v191_h103_tdcc_two_period_durability_20261002"
+DURABLE_FILE = 'godpick_tdcc_holder_snapshots.json'
 SOURCE_URL = os.environ.get("GODPICK_TDCC_HOLDER_CSV_URL", "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5")
 CACHE_DIR = Path(os.environ.get("GODPICK_TDCC_CACHE_DIR", Path(__file__).resolve().parent / "data" / "cache" / "tdcc_holder_truth"))
 LATEST_FILE = CACHE_DIR / "latest.json"
@@ -27,6 +28,31 @@ FETCH_META_FILE = CACHE_DIR / "fetch_meta.json"
 _MIN_FETCH_INTERVAL_SECONDS = 6 * 60 * 60
 _MEM_CACHE: dict[str, Any] | None = None
 _MEM_CACHE_AT: float = 0.0
+_RESTORE_ATTEMPT_AT: float = 0.0
+
+def _restore_durable_snapshots():
+    """Called only by the explicitly network-enabled refresh path."""
+    try:
+        from godpick_persistence_service import load_named_json_permanent
+        payload,_ = load_named_json_permanent(DURABLE_FILE,{},firestore_doc='godpick_tdcc_holder_snapshots')
+        for key,path in [('latest',LATEST_FILE),('previous',PREVIOUS_FILE)]:
+            remote=payload.get(key,{}) if isinstance(payload,dict) else {}
+            local=_read_json(path,{})
+            if isinstance(remote,dict) and remote.get('rows') and _s(remote.get('data_date'))>_s(local.get('data_date')):
+                _write_json(path,remote)
+        return 'TDCC持股兩期快照已檢查'
+    except Exception as exc:
+        return f'TDCC兩期快照還原未完成：{type(exc).__name__}'
+
+def _persist_durable_snapshots():
+    try:
+        from godpick_durability_service import persist_json_async
+        payload={'version':VERSION,'latest':_read_json(LATEST_FILE,{}),'previous':_read_json(PREVIOUS_FILE,{})}
+        ok,msg=persist_json_async(DURABLE_FILE,payload,firestore_doc='godpick_tdcc_holder_snapshots',
+                                 reason='H103 TDCC two-period snapshots',base_dir=Path(__file__).resolve().parent)
+        return ('QUEUED｜' if ok else 'FAILED｜')+str(msg)
+    except Exception as exc:
+        return f'FAILED｜TDCC永久保存未完成：{type(exc).__name__}'
 
 
 def _now() -> str:
@@ -135,11 +161,17 @@ def _fetch_csv(timeout: float = 4.0) -> bytes:
 
 
 def refresh_tdcc_holder_cache(*, force: bool = False, timeout: float = 4.0) -> tuple[bool, str, dict[str, Any]]:
-    global _MEM_CACHE, _MEM_CACHE_AT
+    global _MEM_CACHE, _MEM_CACHE_AT, _RESTORE_ATTEMPT_AT
     latest = _read_json(LATEST_FILE, {})
+    if (not latest or not PREVIOUS_FILE.exists()) and time.time()-_RESTORE_ATTEMPT_AT>_MIN_FETCH_INTERVAL_SECONDS:
+        _RESTORE_ATTEMPT_AT=time.time()
+        _restore_durable_snapshots()
+        latest=_read_json(LATEST_FILE,{})
     meta = _read_json(FETCH_META_FILE, {})
     last_attempt = _f(meta.get("last_attempt_epoch"), 0.0) or 0.0
     now_epoch = time.time()
+    if not force and not latest and now_epoch-last_attempt<_MIN_FETCH_INTERVAL_SECONDS:
+        return False, 'TDCC前次抓取失敗；冷卻期間不重複連線，資料仍標記Missing', {}
     if not force and latest and now_epoch - last_attempt < _MIN_FETCH_INTERVAL_SECONDS:
         _MEM_CACHE = latest
         _MEM_CACHE_AT = now_epoch
@@ -150,13 +182,16 @@ def refresh_tdcc_holder_cache(*, force: bool = False, timeout: float = 4.0) -> t
         fresh = parse_tdcc_csv_bytes(raw)
         old_date = _s(latest.get("data_date")) if isinstance(latest, dict) else ""
         new_date = _s(fresh.get("data_date"))
-        if latest and old_date and new_date and new_date != old_date:
+        if latest and old_date and new_date and new_date > old_date:
             _write_json(PREVIOUS_FILE, latest)
+        if old_date and new_date and new_date < old_date:
+            raise ValueError("TDCC date regressed; preserve latest and previous snapshots")
         _write_json(LATEST_FILE, fresh)
-        _write_json(FETCH_META_FILE, {"last_attempt_epoch": now_epoch, "last_ok_at": _now(), "status": "OK", "data_date": new_date})
+        durability=_persist_durable_snapshots()
+        _write_json(FETCH_META_FILE, {"last_attempt_epoch": now_epoch, "last_ok_at": _now(), "status": "OK", "data_date": new_date,'durability':durability})
         _MEM_CACHE = fresh
         _MEM_CACHE_AT = now_epoch
-        return True, f"TDCC official holder cache updated: {new_date or 'date unknown'}", fresh
+        return True, f"TDCC official holder cache updated: {new_date or 'date unknown'}｜{durability}", fresh
     except Exception as exc:
         _write_json(FETCH_META_FILE, {"last_attempt_epoch": now_epoch, "last_error_at": _now(), "status": "FAILED", "error": f"{type(exc).__name__}: {exc}"})
         if latest:
@@ -215,9 +250,9 @@ def enrich_tdcc_holder_truth(frame: Any, *, allow_network: bool = False, timeout
         old_ratio = _f((old or {}).get("占集保庫存數比例%")) if isinstance(old, dict) else None
         statuses.append("ACTUAL" if ratio is not None else "MISSING")
         ratios.append(ratio)
-        deltas.append(round(ratio - old_ratio, 4) if ratio is not None and old_ratio is not None else None)
+        deltas.append(round(ratio - old_ratio, 4) if ratio is not None and old_ratio is not None and prev_date and data_date and prev_date < data_date else None)
         dates.append(data_date if ratio is not None else "")
-        prev_dates.append(prev_date if ratio is not None and old_ratio is not None else "")
+        prev_dates.append(prev_date if ratio is not None and old_ratio is not None and prev_date and data_date and prev_date < data_date else "")
         messages.append(msg if ratio is not None else "TDCC未取得此代號class-15官方值；不得冒充真實大戶持股")
     out["TDCC大戶資料狀態"] = statuses
     out["TDCC千張大戶持股比%"] = ratios
