@@ -715,7 +715,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h103_decision_integrity_cost_t1_20261002"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h104_daily_discovery_continuity_20261003"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2280,15 +2280,8 @@ def _h88_build_core_no_streamlit(
     if not callable(build_h79_tables_guarded) or candidate_df is None or not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         return {}
     source = _h91_unique_decision_frame(candidate_df, stage="h97_current_scan_core")
-    if len(source) > 240:
-        try:
-            source = _safe_sort_export_df(
-                source,
-                ["H79研究推薦分", "H89雙軌研究排序分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
-                [False, False, False, False, False, False],
-            ).head(240).copy()
-        except Exception:
-            source = source.head(240).copy()
+    from godpick_h104_daily_discovery import select_discovery_input
+    source = select_discovery_input(source)
     try:
         tables = build_h79_tables_guarded(source)
     except Exception:
@@ -3591,15 +3584,8 @@ def _save_latest_recommendation_pack(rec_df: pd.DataFrame, category_strength_df:
         h85_h79_core_tables = dict(_h86_existing_core)
     else:
         _h86_h79_source = candidate_df
-        if isinstance(_h86_h79_source, pd.DataFrame) and len(_h86_h79_source) > 240:
-            try:
-                _h86_h79_source = _safe_sort_export_df(
-                    _h86_h79_source,
-                    ["H79研究推薦分", "V188股神作戰優先分", "股神推薦優先分", "候選強度分", "推薦總分"],
-                    [False, False, False, False, False],
-                ).head(240).copy()
-            except Exception:
-                _h86_h79_source = _h86_h79_source.head(240).copy()
+        from godpick_h104_daily_discovery import select_discovery_input
+        _h86_h79_source = select_discovery_input(_h86_h79_source)
         h85_h79_core_tables = _h85_build_h79_core_for_snapshot(_h86_h79_source, action_df)
         if isinstance(h85_h79_core_tables, dict):
             h85_h79_core_tables["source"] = "h86-bounded-save"
@@ -14287,7 +14273,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
         if _safe_str(raw.get('H103決策快照')):
             frozen=rec_df.loc[rec_df['股票代號'].astype(str).map(_normalize_code).eq(_normalize_code(raw.get('股票代號')))]
             if not frozen.empty:
-                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103'))})
+                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103','H104'))})
         code = _normalize_code(raw.get("股票代號"))
         if not code:
             continue
@@ -15466,8 +15452,8 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
     else:
         priority_overview = tables.get("priority_overview", pd.DataFrame())
         if isinstance(priority_overview, pd.DataFrame) and not priority_overview.empty:
-            st.markdown("#### 🏆 H103 推薦優先順序與交易條件")
-            st.caption("H103統一總覽、研究、等待與稽核決策；顯示合法價格、缺漏證據及未通過原因。研究分數不是上漲機率，仍須取得正式授權。")
+            st.markdown("#### 🏆 H104 每日機會與延續追蹤")
+            st.caption("H104區分已知歷史未見與延續追蹤；完整比較本輪候選，保留合法價格與缺漏證據。研究分數不是上漲機率，仍須取得正式授權。")
             st.dataframe(_format_df(priority_overview), use_container_width=True, hide_index=True)
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())

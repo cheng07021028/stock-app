@@ -1,0 +1,46 @@
+test_candidate_after_120_can_qualify (__main__.Tests.test_candidate_after_120_can_qualify) ... ok
+test_discovered_research_enters_history (__main__.Tests.test_discovered_research_enters_history) ... ok
+test_diverse_budget (__main__.Tests.test_diverse_budget) ... ok
+test_new_is_window_scoped (__main__.Tests.test_new_is_window_scoped) ... ok
+test_repeat_dates_not_runs_and_no_future (__main__.Tests.test_repeat_dates_not_runs_and_no_future) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.083s
+
+OK
+
+H103回歸（含環境阻擋）：
+test_contract_checks_values_not_only_dataframe_types (__main__.Regression.test_contract_checks_values_not_only_dataframe_types) ... ok
+test_expired_plan_does_not_fill_on_a_later_day (__main__.Regression.test_expired_plan_does_not_fill_on_a_later_day) ... ok
+test_false_strings_are_not_executable (__main__.Regression.test_false_strings_are_not_executable) ... ok
+test_filled_failure_is_not_cancelled_after_close (__main__.Regression.test_filled_failure_is_not_cancelled_after_close) ... ok
+test_final_action_records_match_published_pool (__main__.Regression.test_final_action_records_match_published_pool) ... ok
+test_final_pools_and_audit_have_one_decision (__main__.Regression.test_final_pools_and_audit_have_one_decision) ... ok
+test_h80_preserves_published_rank_and_plan (__main__.Regression.test_h80_preserves_published_rank_and_plan) ... ok
+test_invalid_or_low_rr_cannot_be_price_ready (__main__.Regression.test_invalid_or_low_rr_cannot_be_price_ready) ... ok
+test_mfe_is_not_a_trade_win_FLAT (__main__.Regression.test_mfe_is_not_a_trade_win_FLAT) ... ok
+test_mfe_is_not_a_trade_win_LOSS (__main__.Regression.test_mfe_is_not_a_trade_win_LOSS) ... ok
+test_perf_update_and_truth_use_frozen_t1_cost_result (__main__.Regression.test_perf_update_and_truth_use_frozen_t1_cost_result) ... ok
+test_repeated_decoration_does_not_promote_another_stock (__main__.Regression.test_repeated_decoration_does_not_promote_another_stock) ... ok
+test_t1_learning_excludes_future_and_duplicate_roles (__main__.Regression.test_t1_learning_excludes_future_and_duplicate_roles) ... ok
+test_t1_path_ambiguity_is_excluded_from_learning (__main__.Regression.test_t1_path_ambiguity_is_excluded_from_learning) ... ok
+test_tdcc_reboot_restores_two_distinct_periods (__main__.Regression.test_tdcc_reboot_restores_two_distinct_periods) ... ERROR
+test_tdcc_same_date_is_not_a_weekly_delta (__main__.Regression.test_tdcc_same_date_is_not_a_weekly_delta) ... ok
+test_tick_price_and_cost_rr_are_recomputed (__main__.Regression.test_tick_price_and_cost_rr_are_recomputed) ... ok
+
+======================================================================
+ERROR: test_tdcc_reboot_restores_two_distinct_periods (__main__.Regression.test_tdcc_reboot_restores_two_distinct_periods)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "work/tests/test_h103_regression.py", line 215, in run
+    fn(**{k:params[k] for k in inspect.signature(fn).parameters})
+  File "work/tests/test_h103_regression.py", line 169, in test_tdcc_reboot_restores_two_distinct_periods
+    import godpick_persistence_service as persistence
+  File "/workspace/scratch/f28a1d6aff87/work/godpick_persistence_service.py", line 30, in <module>
+    import streamlit as st
+ModuleNotFoundError: No module named 'streamlit'
+
+----------------------------------------------------------------------
+Ran 17 tests in 8.212s
+
+FAILED (errors=1)

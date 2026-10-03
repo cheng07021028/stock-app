@@ -56,7 +56,8 @@ H102_COLUMNS = [
     "H102決策摘要",
 ]
 
-H102_COLUMNS += H103_COLUMNS
+from godpick_h104_daily_discovery import COLUMNS as H104_COLUMNS, continuity, load_history
+H102_COLUMNS += H103_COLUMNS + H104_COLUMNS
 
 OVERVIEW_COLUMNS = [
     "H102閱讀順位", "H102推薦層別", "H102同層順位", "股票代號", "股票名稱", "類別",
@@ -65,7 +66,7 @@ OVERVIEW_COLUMNS = [
     "H99主進場", "H99防守停損", "H99第一目標", "H99成本後RR", "H99目標交易日",
     "H102Momentum Entry B", "H102建議動作", "H102研究升級理由",
 ]
-OVERVIEW_COLUMNS += H103_COLUMNS
+OVERVIEW_COLUMNS += H103_COLUMNS + H104_COLUMNS
 
 
 def _text(v: Any) -> str:
@@ -493,6 +494,7 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
     out['actionable']=_apply_overlay(actionable,pool='actionable',sector_map=smap)
     out['research'],out['waiting']=research,waiting
     out['emerging_watch']=_apply_overlay(out.get('emerging_watch'),pool='emerging_watch',sector_map=smap)
+    history=load_history(BASE_DIR)
     canonical={}
     for pool in ('actionable','research','waiting','emerging_watch'):
         frame=out[pool]
@@ -503,6 +505,7 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
         for rank,row in enumerate(frame.to_dict('records'),1):
             row['H102同層順位']=rank
             row.update(decision_evidence(row,pool))
+            row.update(continuity(row,history))
             row['H103決策快照']=snapshot_id(row)
             row['H102決策摘要']=f"最終層別{pool.upper()}｜{row['H102動態層級']}｜順位{rank}；正式授權不放寬。"
             records.append(row)
@@ -516,7 +519,7 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
             if final:
                 # Audit is a view of the final decision, never a second decision.
                 for k,v in final.items():
-                    if k.startswith(('H99','H101','H102','H103')):row[k]=v
+                    if k.startswith(('H99','H101','H102','H103','H104')):row[k]=v
             else:
                 row.update(decision_evidence(row,'audit'))
                 row['H103決策快照']=snapshot_id(row)
@@ -529,7 +532,12 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
     health = out.get("health", pd.DataFrame()).copy()
     if not health.empty and "項目" in health.columns:
         health = health.loc[~health["項目"].astype(str).str.startswith("H102")].copy()
+    if "項目" in health:
+        health=health.loc[~health["項目"].fillna("").astype(str).str.startswith("H104")].copy()
     rows = [
+        {"項目":"H104版本","數值":"v191_h104_daily_discovery_20261003"},
+        {"項目":"H104候選規則","數值":"最多240檔：75%既有排序＋25%族群輪詢補充；核心比較不再截成120檔；不保證每日更換"},
+        {"項目":"H104延續口徑","數值":"僅前14日已保存推薦；按資料日去重，缺歷史不聲稱全新；不因此變更買進權限"},
         {"項目": "H102版本", "數值": VERSION},
         {"項目": "H102動態Research升級", "數值": int(len(promotions))},
         {"項目": "H102族群衝擊治理", "數值": "熱度排名＋均漲＋加速度＋資金＋強勢廣度＋量能；舊『退潮』標籤可被新IGNITION證據覆寫於研究排序層"},
@@ -540,7 +548,7 @@ def decorate_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Dat
     if '項目' in health:
         health=health.loc[~health['項目'].fillna('').astype(str).str.startswith('H103')].copy()
     for pool,label in [('actionable','正式'),('research','研究'),('waiting','等待')]:
-        rows.append({'項目':'H103最終'+label+'檔數','數值':len(out[pool])})
+        rows.append({'項目':'H103最終'+label+'檔數','數值':int(out[pool].get('股票代號',pd.Series(dtype=str)).map(_code).ne('').sum())})
     reasons=out['waiting'].get('H103未通過原因',pd.Series(dtype=object)).fillna('未提供原因').value_counts()
     for reason,count in reasons.items():
         rows.append({'項目':'H103等待原因｜'+str(reason),'數值':int(count)})

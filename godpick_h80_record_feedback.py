@@ -66,7 +66,8 @@ def _code(value: Any) -> str:
 
 
 from godpick_h103_decision_integrity import COLUMNS as H103_COLUMNS
-H80_RECORD_FEEDBACK_COLUMNS += H103_COLUMNS
+from godpick_h104_daily_discovery import COLUMNS as H104_COLUMNS
+H80_RECORD_FEEDBACK_COLUMNS += H103_COLUMNS + H104_COLUMNS
 
 
 def _text(value: Any) -> str:
@@ -106,7 +107,8 @@ def build_research_tracking_frame(
         # H102 may legitimately promote a Waiting row into dynamic Research for
         # manager attention.  Keep it as a non-buy learning sample even though
         # its original H79 layer was not "研究推薦".
-        research = research[_base_research | _h102_promoted].copy()
+        _final_research = research.get("H103最終層別", pd.Series("", index=research.index)).fillna("").astype(str).eq("RESEARCH")
+        research = research[_base_research | _h102_promoted | _final_research].copy()
     if research.empty:
         return pd.DataFrame()
 
@@ -190,7 +192,7 @@ def build_research_tracking_frame(
         out["__h80_order"] = out["股票代號"].map({c: i for i, c in enumerate(research["股票代號"].tolist())})
         out = out.sort_values("__h80_order", kind="stable").drop(columns=["__h80_order"], errors="ignore")
     if frozen:
-        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103"))}} for r in out.to_dict("records")])
+        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103", "H104"))}} for r in out.to_dict("records")])
     return out.reset_index(drop=True)
 
 

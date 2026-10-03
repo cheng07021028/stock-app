@@ -22,7 +22,7 @@ import math
 import warnings
 import pandas as pd
 
-VERSION = "v191_h96_high_conviction_opportunity_discovery_20260923"
+VERSION = "v191_h104_complete_bounded_discovery_20261003"
 
 H96_COLUMNS = [
     "H96版本","H96核心機會分","H96核心研究等級","H96參考價值","H96核心資格",
@@ -233,6 +233,9 @@ def analyze_candidate(row: dict[str, Any] | pd.Series, *, sector_lookup: dict[st
         leader_exception and score >= float(d["leader_score_min"])
     )
     eligible = standard_core or leader_core
+    if _text(raw.get("市場別")) == "興櫃" or _text(raw.get("H79決策層級")) in ("資料待修復", "興櫃隔離"):
+        eligible = False
+        excludes.append("必要資料/市場隔離未通過，禁止核心升級")
 
     extended = h94_exhaust in {"HIGH","BLOCK"} or formal_plan != "是"
     if eligible and leader_core and extended:
@@ -326,13 +329,13 @@ def apply_h96_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Da
 
     # Decorate the broad audit pool first.  This is the critical H96 fix: we do not
     # restrict discovery to yesterday's Research+Waiting survivors.
-    audit=apply_overlay(out.get("audit",pd.DataFrame()),sector_df=sector_df,settings=cfg,source="AUDIT-120")
+    # H104: audit_pool_limit is now display-only; do not truncate computed evidence.
+    audit=apply_overlay(out.get("audit",pd.DataFrame()),sector_df=sector_df,settings=cfg,source="AUDIT-CURRENT-BOUNDED")
     old_r=apply_overlay(out.get("research",pd.DataFrame()),sector_df=sector_df,settings=cfg,source="H94-RESEARCH")
     old_w=apply_overlay(out.get("waiting",pd.DataFrame()),sector_df=sector_df,settings=cfg,source="H94-WAITING")
     out["audit"]=audit
 
-    limit=int(cfg["discovery"]["audit_pool_limit"])
-    pool=_dedupe([audit.head(limit),old_r,old_w])
+    pool=_dedupe([audit,old_r,old_w])  # H104: evaluate every already-computed audit row.
     if not pool.empty:
         pool["H96核心機會分"]=pd.to_numeric(pool.get("H96核心機會分"),errors="coerce")
         pool=pool.sort_values(["H96核心機會分","H94Alpha品質分"],ascending=False,na_position="last").reset_index(drop=True)
@@ -398,7 +401,7 @@ def apply_h96_decision_tables(tables: dict[str, Any] | None, *, sector_df: pd.Da
         {"項目":"H96主管閱讀順序","數值":"01 Formal有資料先看01；Formal=0時，02只保留High-Conviction核心研究；04看市場/族群；05看完整證據。"},
         {"項目":"H96正式可執行檔數","數值":int(formal_count)},
         {"項目":"H96核心研究輸出列","數值":int(len(research))},
-        {"項目":"H96Audit廣域發現池","數值":int(min(len(audit),limit))},
+        {"項目":"H96Audit廣域發現池","數值":int(len(audit))},
         {"項目":"H96由Audit新發現升級","數值":int(audit_promoted)},
         {"項目":"H96舊Research降級","數值":int(old_research_demoted)},
         {"項目":"H96集中度擋下","數值":int(concentration_blocked)},
