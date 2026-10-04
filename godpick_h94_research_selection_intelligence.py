@@ -407,6 +407,21 @@ def decorate_decision_tables(tables: dict[str,Any] | None, *, candidate_df: pd.D
             {"項目":"H102Formal權限","數值":"LOCKED｜H102失敗不影響既有Formal治理"},
         ])], ignore_index=True, sort=False)
         out["health"] = _health
+
+    # H105: future-blackhorse objective.  Unlike H101/H102, this layer does not
+    # reward a stock merely because it is strongest today; it ranks pre-ignition
+    # evidence for the next 1~5 sessions and explicitly removes already-fired
+    # / overheated names from the dedicated blackhorse overview.
+    try:
+        from godpick_h105_future_blackhorse_engine import decorate_decision_tables as decorate_h105_blackhorse
+        out = decorate_h105_blackhorse(out, candidate_df=candidate_df, sector_df=sector_df)
+    except Exception as _h105_exc:
+        _health = out.get("health", pd.DataFrame()).copy()
+        _health = pd.concat([_health, pd.DataFrame([
+            {"項目":"H105未來黑馬引擎","數值":f"ERROR｜{type(_h105_exc).__name__}: {_h105_exc}"},
+            {"項目":"H105Formal權限","數值":"LOCKED｜H105失敗不影響既有Formal治理"},
+        ])], ignore_index=True, sort=False)
+        out["health"] = _health
     return out
 
 

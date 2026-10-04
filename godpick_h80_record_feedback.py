@@ -11,7 +11,7 @@ from typing import Iterable, Mapping, Any
 
 import pandas as pd
 
-VERSION = "v191_h102_record_feedback_rotation_t1_snapshot_20261001"
+VERSION = "v191_h105_record_feedback_future_blackhorse_20261004"
 RESEARCH_MODE = "股神校正研究"
 RESEARCH_LEVEL = "H79研究推薦"
 RESEARCH_SAMPLE_TYPE = "B｜H79研究推薦校正研究樣本"
@@ -67,7 +67,8 @@ def _code(value: Any) -> str:
 
 from godpick_h103_decision_integrity import COLUMNS as H103_COLUMNS
 from godpick_h104_daily_discovery import COLUMNS as H104_COLUMNS
-H80_RECORD_FEEDBACK_COLUMNS += H103_COLUMNS + H104_COLUMNS
+from godpick_h105_future_blackhorse_engine import H105_COLUMNS
+H80_RECORD_FEEDBACK_COLUMNS += H103_COLUMNS + H104_COLUMNS + H105_COLUMNS
 
 
 def _text(value: Any) -> str:
@@ -79,6 +80,20 @@ def _text(value: Any) -> str:
     except Exception:
         pass
     return str(value).strip()
+
+
+def _num(value: Any, default: float | None = None) -> float | None:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").replace("％", "%").replace("%", "").replace("+", "").strip()
+            if not value:
+                return default
+        x = float(value)
+        return x if pd.notna(x) else default
+    except Exception:
+        return default
 
 
 def build_research_tracking_frame(
@@ -137,17 +152,30 @@ def build_research_tracking_frame(
         # Page08 research samples have their own mode/business-key and never
         # masquerade as Formal/A- executable recommendations.
         _h102_promoted = _text(raw.get("H102研究升級")) == "是"
-        raw["推薦模式"] = "H102動態Research" if _h102_promoted else RESEARCH_MODE
-        raw["推薦用途"] = ("H102族群輪動動態研究績效追蹤（非買進許可）" if _h102_promoted else "H79研究推薦績效追蹤（非買進許可）")
-        raw["紀錄來源"] = ("07_股神推薦｜H102動態Research自動同步" if _h102_promoted else "07_股神推薦｜H79研究推薦自動同步")
+        _h105_score = _num(raw.get("H105黑馬預發動分"), 0.0) or 0.0
+        _h105_blackhorse = _h105_score >= 60.0 and _text(raw.get("H105今日強勢排除")) != "是"
+        if _h105_blackhorse:
+            raw["推薦模式"] = "H105未來黑馬Research"
+            raw["推薦用途"] = "H105未來1～5交易日黑馬預發動績效追蹤（非買進許可）"
+            raw["紀錄來源"] = "07_股神推薦｜H105未來黑馬Research自動同步"
+            raw["紀錄層級"] = "H105未來黑馬Research"
+            raw["目前狀態"] = "H105黑馬預發動追蹤"
+            raw["建議動作"] = "H105黑馬研究追蹤；等待盤前/盤中Entry與既有Formal風控重驗，黑馬分數本身不是買進許可。"
+            raw["校正樣本類型"] = "B+｜H105未來黑馬校正樣本"
+            raw["校正樣本用途"] = "H105未來1～5日預發動、T+1/T+3/T+5、MFE/MAE與過熱排除校正；不得計入正式交易勝率"
+            raw["校正樣本權重"] = 0.65
+        else:
+            raw["推薦模式"] = "H102動態Research" if _h102_promoted else RESEARCH_MODE
+            raw["推薦用途"] = ("H102族群輪動動態研究績效追蹤（非買進許可）" if _h102_promoted else "H79研究推薦績效追蹤（非買進許可）")
+            raw["紀錄來源"] = ("07_股神推薦｜H102動態Research自動同步" if _h102_promoted else "07_股神推薦｜H79研究推薦自動同步")
+            raw["紀錄層級"] = "H102動態Research" if _h102_promoted else RESEARCH_LEVEL
+            raw["目前狀態"] = "H102動態研究追蹤" if _h102_promoted else "研究推薦追蹤"
+            raw["建議動作"] = ("H102動態研究追蹤；優先盤前/盤中重驗，未取得原Formal授權不可直接買進。" if _h102_promoted else "研究追蹤；等待H79交易狀態改善後重算，不視為買進許可。")
+            raw["校正樣本類型"] = "B｜H102動態Research校正樣本" if _h102_promoted else RESEARCH_SAMPLE_TYPE
+            raw["校正樣本用途"] = "H102族群輪動升級、T+1 Entry/MFE/MAE與排名校正；不得計入正式交易勝率" if _h102_promoted else "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
+            raw["校正樣本權重"] = 0.50 if _h102_promoted else RESEARCH_SAMPLE_WEIGHT
         raw["自動記錄"] = "是"
-        raw["紀錄層級"] = "H102動態Research" if _h102_promoted else RESEARCH_LEVEL
-        raw["目前狀態"] = "H102動態研究追蹤" if _h102_promoted else "研究推薦追蹤"
         raw["是否可直接買進"] = "否"
-        raw["建議動作"] = ("H102動態研究追蹤；優先盤前/盤中重驗，未取得原Formal授權不可直接買進。" if _h102_promoted else "研究追蹤；等待H79交易狀態改善後重算，不視為買進許可。")
-        raw["校正樣本類型"] = "B｜H102動態Research校正樣本" if _h102_promoted else RESEARCH_SAMPLE_TYPE
-        raw["校正樣本用途"] = "H102族群輪動升級、T+1 Entry/MFE/MAE與排名校正；不得計入正式交易勝率" if _h102_promoted else "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
-        raw["校正樣本權重"] = 0.50 if _h102_promoted else RESEARCH_SAMPLE_WEIGHT
         raw["是否納入正式推薦績效"] = "否"
         raw["是否納入權重校正"] = "是"
         raw["個股資料品質"] = _text(raw.get("個股資料品質")) or "可追蹤"
@@ -192,7 +220,7 @@ def build_research_tracking_frame(
         out["__h80_order"] = out["股票代號"].map({c: i for i, c in enumerate(research["股票代號"].tolist())})
         out = out.sort_values("__h80_order", kind="stable").drop(columns=["__h80_order"], errors="ignore")
     if frozen:
-        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103", "H104"))}} for r in out.to_dict("records")])
+        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103", "H104", "H105"))}} for r in out.to_dict("records")])
     return out.reset_index(drop=True)
 
 
@@ -202,15 +230,26 @@ def mark_research_record_rows(rows: Iterable[Mapping[str, Any]] | None) -> list[
     for row in rows or []:
         raw = dict(row)
         _h102_promoted = _text(raw.get("H102研究升級")) == "是"
-        raw["推薦模式"] = "H102動態Research" if _h102_promoted else RESEARCH_MODE
-        raw["紀錄來源"] = ("07_股神推薦｜H102動態Research自動同步" if _h102_promoted else "07_股神推薦｜H79研究推薦自動同步")
+        _h105_score = _num(raw.get("H105黑馬預發動分"), 0.0) or 0.0
+        _h105_blackhorse = _h105_score >= 60.0 and _text(raw.get("H105今日強勢排除")) != "是"
+        if _h105_blackhorse:
+            raw["推薦模式"] = "H105未來黑馬Research"
+            raw["紀錄來源"] = "07_股神推薦｜H105未來黑馬Research自動同步"
+            raw["紀錄層級"] = "H105未來黑馬Research"
+            raw["目前狀態"] = "H105黑馬預發動追蹤"
+            raw["校正樣本類型"] = "B+｜H105未來黑馬校正樣本"
+            raw["校正樣本用途"] = "H105未來1～5日預發動、T+1/T+3/T+5、MFE/MAE與過熱排除校正；不得計入正式交易勝率"
+            raw["校正樣本權重"] = 0.65
+        else:
+            raw["推薦模式"] = "H102動態Research" if _h102_promoted else RESEARCH_MODE
+            raw["紀錄來源"] = ("07_股神推薦｜H102動態Research自動同步" if _h102_promoted else "07_股神推薦｜H79研究推薦自動同步")
+            raw["紀錄層級"] = "H102動態Research" if _h102_promoted else RESEARCH_LEVEL
+            raw["目前狀態"] = "H102動態研究追蹤" if _h102_promoted else "研究推薦追蹤"
+            raw["校正樣本類型"] = "B｜H102動態Research校正樣本" if _h102_promoted else RESEARCH_SAMPLE_TYPE
+            raw["校正樣本用途"] = "H102族群輪動升級、T+1 Entry/MFE/MAE與排名校正；不得計入正式交易勝率" if _h102_promoted else "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
+            raw["校正樣本權重"] = 0.50 if _h102_promoted else RESEARCH_SAMPLE_WEIGHT
         raw["自動記錄"] = "是"
-        raw["紀錄層級"] = "H102動態Research" if _h102_promoted else RESEARCH_LEVEL
-        raw["目前狀態"] = "H102動態研究追蹤" if _h102_promoted else "研究推薦追蹤"
         raw["是否可直接買進"] = "否"
-        raw["校正樣本類型"] = "B｜H102動態Research校正樣本" if _h102_promoted else RESEARCH_SAMPLE_TYPE
-        raw["校正樣本用途"] = "H102族群輪動升級、T+1 Entry/MFE/MAE與排名校正；不得計入正式交易勝率" if _h102_promoted else "研究排序、T+1/T+3/T+5績效與失效條件校正；不得計入正式交易勝率"
-        raw["校正樣本權重"] = 0.50 if _h102_promoted else RESEARCH_SAMPLE_WEIGHT
         raw["是否納入正式推薦績效"] = "否"
         raw["是否納入權重校正"] = "是"
         raw["個股資料品質"] = _text(raw.get("個股資料品質")) or "可追蹤"

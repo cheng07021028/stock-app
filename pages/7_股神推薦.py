@@ -625,6 +625,20 @@ except Exception as _h102_import_exc:
     h102_export_contract_summary = None
     H102_ROTATION_CLOSED_LOOP_IMPORT_ERROR = str(_h102_import_exc)
 
+# H105: future 1~5 session blackhorse / pre-ignition ranking.
+# Research/discovery only; it never grants Formal buy authority.
+try:
+    from godpick_h105_future_blackhorse_engine import (
+        VERSION as H105_FUTURE_BLACKHORSE_VERSION,
+        H105_COLUMNS as H105_FUTURE_BLACKHORSE_COLUMNS,
+        export_contract_summary as h105_export_contract_summary,
+    )
+except Exception as _h105_import_exc:
+    H105_FUTURE_BLACKHORSE_VERSION = "h105_future_blackhorse_unavailable"
+    H105_FUTURE_BLACKHORSE_COLUMNS = []
+    h105_export_contract_summary = None
+    H105_FUTURE_BLACKHORSE_IMPORT_ERROR = str(_h105_import_exc)
+
 # H97: bind the compact H79/H94/H96 authority to the *current* scan run.
 # This prevents a previous session core (including an empty Audit table) from
 # being reused after a new 1k+ stock scan merely because it has created_at.
@@ -715,7 +729,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h104_daily_discovery_continuity_20261003"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h105_future_blackhorse_20261004"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -1106,6 +1120,14 @@ except Exception:
 try:
     GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
         list(GODPICK_RECORD_COLUMNS) + list(H102_ROTATION_COLUMNS or [])
+    ))
+except Exception:
+    pass
+
+# H105: persist signal-time future-blackhorse evidence for later T+1/T+3/T+5 review.
+try:
+    GODPICK_RECORD_COLUMNS = list(dict.fromkeys(
+        list(GODPICK_RECORD_COLUMNS) + list(H105_FUTURE_BLACKHORSE_COLUMNS or [])
     ))
 except Exception:
     pass
@@ -2334,6 +2356,7 @@ def _h88_build_core_no_streamlit(
             "created_at": _now_text(),
         }
         limits = {
+            "blackhorse_overview": 40,
             "priority_overview": 40,
             "actionable": 60, "research": 80, "waiting": 80,
             "emerging_watch": 60, "data_repairs": 100,
@@ -14273,7 +14296,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
         if _safe_str(raw.get('H103決策快照')):
             frozen=rec_df.loc[rec_df['股票代號'].astype(str).map(_normalize_code).eq(_normalize_code(raw.get('股票代號')))]
             if not frozen.empty:
-                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103','H104'))})
+                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103','H104','H105'))})
         code = _normalize_code(raw.get("股票代號"))
         if not code:
             continue
@@ -15161,6 +15184,7 @@ def _phase93_single_source_decision_frame(
 # =========================================================
 H85_H79_CORE_SESSION_KEY = "h85_h79_core_tables"
 H85_H79_CORE_LIMITS = {
+    "blackhorse_overview": 40,
     "priority_overview": 40,
     "actionable": 60,
     "research": 80,
@@ -15450,10 +15474,15 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         else:
             st.info("目前沒有可直接顯示的 H79 精簡快照。" + (f"｜{err}" if err else ""))
     else:
+        blackhorse_overview = tables.get("blackhorse_overview", pd.DataFrame())
+        if isinstance(blackhorse_overview, pd.DataFrame) and not blackhorse_overview.empty:
+            st.markdown("#### 🔮 H105 未來黑馬預發動榜｜1～5 個交易日")
+            st.caption("主排序改為未來預發動：法人轉折＋資金潛伏＋籌碼收斂＋技術蓄勢＋下一波族群＋催化尚未反映；今日已明顯發動或過熱者會降權/移出主榜。此榜為研究雷達，不是買進許可。")
+            st.dataframe(_format_df(blackhorse_overview), use_container_width=True, hide_index=True)
         priority_overview = tables.get("priority_overview", pd.DataFrame())
         if isinstance(priority_overview, pd.DataFrame) and not priority_overview.empty:
-            st.markdown("#### 🏆 H104 每日機會與延續追蹤")
-            st.caption("H104區分已知歷史未見與延續追蹤；完整比較本輪候選，保留合法價格與缺漏證據。研究分數不是上漲機率，仍須取得正式授權。")
+            st.markdown("#### 🏆 H104/H102 既有推薦與延續追蹤｜輔助")
+            st.caption("此表保留既有H101/H102/H104順位作為執行與延續參考；未來黑馬的主管主排序以上方H105為準。")
             st.dataframe(_format_df(priority_overview), use_container_width=True, hide_index=True)
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())
@@ -15464,7 +15493,7 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         health = tables.get("health", pd.DataFrame())
         if isinstance(health, pd.DataFrame) and not health.empty:
             st.dataframe(_format_df(health), use_container_width=True, hide_index=True)
-        st.caption(f"H102精簡快照來源：{source_label or 'snapshot'}｜H102會偵測族群IGNITION並重排Research/Waiting；正式買進授權仍完全由既有Formal治理決定。")
+        st.caption(f"H105/H102精簡快照來源：{source_label or 'snapshot'}｜H105主抓未來1～5日預發動，H102保留族群IGNITION與Research閉環；正式買進授權仍完全由既有Formal治理決定。")
 
         show_more = st.toggle(
             "載入 H79 等待／淘汰／資料修復明細",
@@ -16729,6 +16758,7 @@ def _build_excel_bytes(
             pass
 
     sheets = [
+        ("00_H105未來黑馬", _h78_export.get("blackhorse_overview", pd.DataFrame()), "本輪沒有符合H105未來1～5日預發動條件的黑馬候選；今日已強勢股不會冒充未來黑馬。"),
         ("00_推薦優先總覽", _h78_export.get("priority_overview", pd.DataFrame()), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
         ("01_正式推薦與交易計畫", _h78_export["actionable"], "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", _h78_export["research"], "本輪沒有上市櫃研究推薦。"),
@@ -16927,6 +16957,7 @@ def _build_excel_bytes_fast_h84(
         extra = pd.DataFrame([{"項目":str(k), "數值":_excel_safe_value(v)} for k,v in report.items() if not isinstance(v,(dict,list,tuple,set))])
         health = pd.concat([health, extra], ignore_index=True, sort=False)
     sheets = [
+        ("00_H105未來黑馬", h79.get("blackhorse_overview", pd.DataFrame()), "本輪沒有符合H105未來1～5日預發動條件的黑馬候選；今日已強勢股不會冒充未來黑馬。"),
         ("00_推薦優先總覽", h79.get("priority_overview", pd.DataFrame()), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
         ("01_正式推薦與交易計畫", h79.get("actionable", pd.DataFrame()), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", h79.get("research", pd.DataFrame()), "本輪沒有上市櫃研究推薦。"),
@@ -16997,11 +17028,16 @@ def _build_excel_bytes_fast_h85(
     h94_contract = h94_export_contract_summary(tables) if callable(h94_export_contract_summary) else {}
     h101_contract = h101_export_contract_summary(tables) if callable(h101_export_contract_summary) else {}
     h102_contract = h102_export_contract_summary(tables) if callable(h102_export_contract_summary) else {}
+    h105_contract = h105_export_contract_summary(tables) if callable(h105_export_contract_summary) else {}
     try:
         h102_t1_review = build_h102_t1_review_table_local(limit=80) if callable(build_h102_t1_review_table_local) else pd.DataFrame()
     except Exception as _h102_t1_excel_exc:
         h102_t1_review = pd.DataFrame({"狀態":[f"H102 T+1檢討建立失敗：{type(_h102_t1_excel_exc).__name__}: {_h102_t1_excel_exc}"]})
     core_diag = pd.DataFrame([
+        {"項目": "H105版本", "數值": H105_FUTURE_BLACKHORSE_VERSION},
+        {"項目": "H105Excel契約", "數值": "PASS" if isinstance(h105_contract, dict) and h105_contract.get("ok") else "CHECK"},
+        {"項目": "H105未來黑馬主榜列", "數值": int(h105_contract.get("blackhorse_rows", 0)) if isinstance(h105_contract, dict) else 0},
+        {"項目": "H105目標", "數值": "未來1～5交易日預發動；今日已明顯強勢/過熱降權，不以今日漲幅作為主要推薦理由"},
         {"項目": "H102版本", "數值": H102_ROTATION_CLOSED_LOOP_VERSION},
         {"項目": "H102Excel契約", "數值": "PASS" if isinstance(h102_contract, dict) and h102_contract.get("ok") else "CHECK"},
         {"項目": "H102動態Research升級", "數值": int(h102_contract.get("dynamic_promotions", 0)) if isinstance(h102_contract, dict) else 0},
@@ -17028,6 +17064,7 @@ def _build_excel_bytes_fast_h85(
     ])
     health = pd.concat([health, core_diag], ignore_index=True, sort=False)
     sheets = [
+        ("00_H105未來黑馬", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有符合H105未來1～5日預發動條件的黑馬候選；今日已強勢股不會冒充未來黑馬。"),
         ("00_推薦優先總覽", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
         ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_研究推薦", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
@@ -17076,7 +17113,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
         candidate_df = pd.DataFrame()
     if (rec_df is None or not isinstance(rec_df, pd.DataFrame) or rec_df.empty) and candidate_df.empty:
         return
-    render_pro_section("Excel｜主管核心報表（含H102動態優先＋T+1檢討）")
+    render_pro_section("Excel｜主管核心報表（H105未來黑馬＋H102動態優先＋T+1檢討）")
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
@@ -17087,7 +17124,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
     build_clicked = False
     if not ready:
-        st.success("H102：掃描結果已可操作；Excel 不在頁面主執行緒重跑模型。按下方按鈕只序列化主管核心表（含H102動態優先與T+1推薦檢討）。")
+        st.success("H105：掃描結果已可操作；Excel 不在頁面主執行緒重跑模型。第一張工作表為未來1～5日黑馬預發動榜，並保留H102動態優先與T+1推薦檢討。")
         build_clicked = st.button(
             "📊 建立主管 Excel（含推薦優先總覽）",
             use_container_width=True,
@@ -18472,7 +18509,7 @@ def main():
     st.caption(f"推薦設定Widget修正版：{SCAN_SETTINGS_WIDGET_FIX_VERSION}")
     st.caption(f"推薦設定自動保存版：{SCAN_SETTINGS_AUTOSAVE_VERSION}")
     st.caption(f"權重狀態修正版：{WEIGHT_STATE_FIX_VERSION}")
-    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H103決策一致＋合法價格＋固定T1成本後回放｜H102族群突發轉強＋動態Research＋T+1漏選閉環＋H101穩定排名＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威；Formal治理完全不放寬。")
+    st.caption(f"股神進化版本：{PAGE07_SPEED_FIX_VERSION}｜H105未來1～5日黑馬預發動＋今日強勢降權｜H104每日發現｜H103決策一致＋固定T1成本後回放｜H102族群突發轉強＋動態Research＋T+1漏選閉環＋H101穩定排名＋H100休市日高速掃描＋H99單一執行真相＋H98 Reboot永久權威＋H97 Audit權威；Formal治理完全不放寬。")
     st.caption(f"每日學習型AI：{LEARNING_SYSTEM_VERSION}｜Champion {GODPICK_AI_MODEL_VERSION}｜多路召回＋四引擎＋不可變決策快照")
 
     data_freshness_snapshot = _render_project_data_freshness_warning_v173()
