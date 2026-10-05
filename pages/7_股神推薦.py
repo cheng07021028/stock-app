@@ -729,7 +729,7 @@ GOD_DECISION_ENGINE_VERSION = "god_decision_engine_v5_20260427"
 SCAN_SETTINGS_PERSIST_VERSION = "scan_settings_apply_reset_v1_20260427"
 SCAN_SETTINGS_WIDGET_FIX_VERSION = "scan_settings_widget_state_fix_v1_20260427"
 SCAN_SETTINGS_AUTOSAVE_VERSION = "scan_settings_autosave_reload_fix_v1_20260427"
-PAGE07_SPEED_FIX_VERSION = "page07_v191_h105_future_blackhorse_20261004"
+PAGE07_SPEED_FIX_VERSION = "page07_v191_h106_blackhorse_evidence_routing_20261005"
 EXCEL_COLUMN_LAYOUT_VERSION = "V191-H75-EXECUTIVE-DECISION-EXPORT-20260917"
 OPPORTUNITY_MODE_VERSION = "low_pullback_retest_v1_20260428"
 SECTOR_FLOW_VERSION = "sector_flow_rotation_v1_20260428"
@@ -2357,6 +2357,7 @@ def _h88_build_core_no_streamlit(
         }
         limits = {
             "blackhorse_overview": 40,
+    "blackhorse_radar": 80, "ignited_watch": 80, "legacy_priority_overview":40,
             "priority_overview": 40,
             "actionable": 60, "research": 80, "waiting": 80,
             "emerging_watch": 60, "data_repairs": 100,
@@ -2506,6 +2507,9 @@ def _h88_background_full_persist(
                 row["推薦執行版本"] = "V191-H88"
             rows.extend(action_rows)
         research_df = pd.DataFrame(core.get("research", [])) if isinstance(core, dict) else pd.DataFrame()
+        _core_waiting=pd.DataFrame(core.get("waiting",[]))
+        if "H106主榜資格" in _core_waiting:
+            research_df=pd.concat([research_df,_core_waiting.loc[_core_waiting["H106主榜資格"].eq("是")]],ignore_index=True,sort=False)
         if callable(build_h80_research_tracking_frame) and not research_df.empty and not candidate.empty:
             try:
                 excluded = [str(x.get("股票代號") or "") for x in rows]
@@ -13642,13 +13646,13 @@ def _write_df_to_ws(wb, sheet_name: str, df: pd.DataFrame, fallback_title: str):
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         h37_width_overrides = {}
-        if safe_name in {"00_推薦優先總覽", "01_正式推薦與交易計畫", "02_研究推薦", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
+        if safe_name in {"00_推薦優先總覽", "01_正式推薦與交易計畫", "02_既有研究追蹤", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究", "AI決策總覽", "Excel閱讀指南", "H74新鮮主流資金", "H74治理摘要", "超級AI最終決策", "正式推薦作戰", "H73領先共振", "H73治理摘要", "H72多模型Alpha", "H72治理摘要", "H70逆勢Alpha觀察", "H70治理摘要", "H67次日優先治理", "H67治理摘要", "T+1時機雷達", "H66學習治理", "多因子觀察雷達", "股神推薦總排名"}:
             from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
             from openpyxl.formatting.rule import CellIsRule
             ws.sheet_view.showGridLines = False
             ws.sheet_view.zoomScale = 90
             ws.freeze_panes = "D2"  # H37：固定排名/代號/名稱三欄，水平捲動仍能辨識股票
-            _tab_colors = {"00_推薦優先總覽":"7C3AED","01_正式推薦與交易計畫":"166534","02_研究推薦":"1D4ED8","03_上市櫃等待":"B45309","04_今日主流資金":"0F766E","05_驗證與風險證據":"334155","06_績效煞車與健康":"7C3AED","07_興櫃隔離研究":"64748B","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
+            _tab_colors = {"00_推薦優先總覽":"7C3AED","01_正式推薦與交易計畫":"166534","02_既有研究追蹤":"1D4ED8","03_上市櫃等待":"B45309","04_今日主流資金":"0F766E","05_驗證與風險證據":"334155","06_績效煞車與健康":"7C3AED","07_興櫃隔離研究":"64748B","AI決策總覽":"111827","Excel閱讀指南":"64748B","H74新鮮主流資金":"0891B2","H74治理摘要":"0E7490","超級AI最終決策":"7C3AED","正式推薦作戰":"16A34A","H73領先共振":"0EA5E9","H73治理摘要":"0284C7","H72多模型Alpha":"2563EB","H72治理摘要":"1D4ED8","H70逆勢Alpha觀察":"0F766E","H70治理摘要":"0E7490","H67次日優先治理":"DC2626","H67治理摘要":"9333EA","T+1時機雷達":"F59E0B","H66學習治理":"8B5CF6","多因子觀察雷達":"2563EB"}
             ws.sheet_properties.tabColor = _tab_colors.get(safe_name, "00A6A6")
             ws.row_dimensions[1].height = 34
             thin = Side(style="thin", color="D1D5DB")
@@ -14296,7 +14300,7 @@ def _build_record_rows_from_rec_df(rec_df: pd.DataFrame, selected_codes: list[st
         if _safe_str(raw.get('H103決策快照')):
             frozen=rec_df.loc[rec_df['股票代號'].astype(str).map(_normalize_code).eq(_normalize_code(raw.get('股票代號')))]
             if not frozen.empty:
-                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103','H104','H105'))})
+                raw.update({k:v for k,v in frozen.iloc[0].to_dict().items() if k.startswith(('H99','H101','H102','H103','H104','H105','H106'))})
         code = _normalize_code(raw.get("股票代號"))
         if not code:
             continue
@@ -14479,6 +14483,9 @@ def _v159_auto_record_actionable_recommendations(source_df: pd.DataFrame, *, bac
             if (not isinstance(h79_research, pd.DataFrame) or h79_research.empty) and callable(build_h79_tables_guarded):
                 h79_tables = build_h79_tables_guarded(_h68_source.head(160).copy() if len(_h68_source) > 160 else _h68_source)
                 h79_research = h79_tables.get("research", pd.DataFrame()) if isinstance(h79_tables, dict) else pd.DataFrame()
+            _core_waiting=_h86_core.get("waiting",pd.DataFrame())
+            if isinstance(_core_waiting,pd.DataFrame) and "H106主榜資格" in _core_waiting:
+                h79_research=pd.concat([h79_research,_core_waiting.loc[_core_waiting["H106主榜資格"].eq("是")]],ignore_index=True,sort=False)
             research_track = build_h80_research_tracking_frame(_h68_source, h79_research, excluded_codes=action_codes)
             if isinstance(research_track, pd.DataFrame) and not research_track.empty:
                 research_track["推薦批次日期"] = _run_date_v191_h9
@@ -15185,6 +15192,7 @@ def _phase93_single_source_decision_frame(
 H85_H79_CORE_SESSION_KEY = "h85_h79_core_tables"
 H85_H79_CORE_LIMITS = {
     "blackhorse_overview": 40,
+    "blackhorse_radar": 80, "ignited_watch": 80, "legacy_priority_overview":40,
     "priority_overview": 40,
     "actionable": 60,
     "research": 80,
@@ -15474,20 +15482,22 @@ def _phase80_render_actionable_panel(rec_df: pd.DataFrame) -> None:
         else:
             st.info("目前沒有可直接顯示的 H79 精簡快照。" + (f"｜{err}" if err else ""))
     else:
-        blackhorse_overview = tables.get("blackhorse_overview", pd.DataFrame())
-        if isinstance(blackhorse_overview, pd.DataFrame) and not blackhorse_overview.empty:
-            st.markdown("#### 🔮 H105 未來黑馬預發動榜｜1～5 個交易日")
-            st.caption("主排序改為未來預發動：法人轉折＋資金潛伏＋籌碼收斂＋技術蓄勢＋下一波族群＋催化尚未反映；今日已明顯發動或過熱者會降權/移出主榜。此榜為研究雷達，不是買進許可。")
-            st.dataframe(_format_df(blackhorse_overview), use_container_width=True, hide_index=True)
-        priority_overview = tables.get("priority_overview", pd.DataFrame())
-        if isinstance(priority_overview, pd.DataFrame) and not priority_overview.empty:
-            st.markdown("#### 🏆 H104/H102 既有推薦與延續追蹤｜輔助")
-            st.caption("此表保留既有H101/H102/H104順位作為執行與延續參考；未來黑馬的主管主排序以上方H105為準。")
-            st.dataframe(_format_df(priority_overview), use_container_width=True, hide_index=True)
+        st.markdown("#### 🔮 H106 重點預發動研究主榜")
+        st.caption("須同時通過階段、原始法人/TDCC日期、技術、族群及行情檢查；觀察窗未校準，不預測發動日期，研究不等於買進。")
+        blackhorse_overview=tables.get('blackhorse_overview',pd.DataFrame())
+        if blackhorse_overview.empty:
+            st.info("本輪沒有通過全部研究主榜條件的候選；請查看早期雷達與未通過原因。")
+        else:
+            st.dataframe(_format_df(blackhorse_overview),use_container_width=True,hide_index=True)
+        for key,title in [('blackhorse_radar','早期雷達｜未通過主榜條件'),('ignited_watch','已發動觀察｜等待新結構')]:
+            frame=tables.get(key,pd.DataFrame())
+            if isinstance(frame,pd.DataFrame) and not frame.empty:
+                st.markdown('#### '+title)
+                st.dataframe(_format_df(frame),use_container_width=True,hide_index=True)
         st.markdown("#### 正式可執行")
         actionable = tables.get("actionable", pd.DataFrame())
         st.dataframe(_format_df(actionable), use_container_width=True, hide_index=True)
-        st.markdown("#### 研究推薦（非買進許可）")
+        st.markdown("#### 既有研究追蹤（含已發動；非黑馬主榜）")
         research = tables.get("research", pd.DataFrame())
         st.dataframe(_format_df(research), use_container_width=True, hide_index=True)
         health = tables.get("health", pd.DataFrame())
@@ -15547,7 +15557,7 @@ def _phase80_render_actionable_panel_legacy_h85(rec_df: pd.DataFrame) -> None:
         _h78_tables = build_h79_tables_guarded(decision_source)
         st.markdown("#### 正式可執行")
         st.dataframe(_format_df(_h78_tables["actionable"]), use_container_width=True, hide_index=True)
-        st.markdown("#### 研究推薦（非買進許可）")
+        st.markdown("#### 既有研究追蹤（含已發動；非黑馬主榜）")
         st.dataframe(_format_df(_h78_tables["research"]), use_container_width=True, hide_index=True)
         st.dataframe(_format_df(_h78_tables["health"]), use_container_width=True, hide_index=True)
         with st.expander("上市櫃等待與完整淘汰原因", expanded=False):
@@ -16758,10 +16768,12 @@ def _build_excel_bytes(
             pass
 
     sheets = [
-        ("00_H105未來黑馬", _h78_export.get("blackhorse_overview", pd.DataFrame()), "本輪沒有符合H105未來1～5日預發動條件的黑馬候選；今日已強勢股不會冒充未來黑馬。"),
-        ("00_推薦優先總覽", _h78_export.get("priority_overview", pd.DataFrame()), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
+        ("00_H106重點預發動", _h78_export.get("blackhorse_overview", pd.DataFrame()), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
+        ("00B_早期雷達", _h78_export.get("blackhorse_radar", pd.DataFrame()), "本輪沒有早期觀察候選。"),
+        ("00C_已發動觀察", _h78_export.get("ignited_watch", pd.DataFrame()), "本輪沒有已發動觀察股。"),
+        ("00_推薦優先總覽", _h78_export.get("priority_overview", pd.DataFrame()), "本輪重點預發動研究主榜沒有合格候選。"),
         ("01_正式推薦與交易計畫", _h78_export["actionable"], "本輪沒有正式可執行股票；研究股不得冒充買進。"),
-        ("02_研究推薦", _h78_export["research"], "本輪沒有上市櫃研究推薦。"),
+        ("02_既有研究追蹤", _h78_export["research"], "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", _h78_export["waiting"], "本輪沒有上市櫃等待候選。"),
         ("04_今日主流資金", h75_sector_df, "目前沒有可用主流族群資料。"),
         ("05_驗證與風險證據", _h78_export["audit"], "目前沒有足夠的驗證增量/風險證據。"),
@@ -16799,19 +16811,19 @@ def _build_excel_bytes(
         _write_df_to_ws(wb, sheet_name, frame, empty_message)
         diag_rows.append({
             "分頁": sheet_name,
-            "用途": ("推薦優先順序｜Formal優先、Research次之且不冒充買進" if sheet_name == "00_推薦優先總覽" else "正式可執行與交易計畫" if sheet_name == "01_正式推薦與交易計畫" else "上市櫃研究推薦（非買進）" if sheet_name == "02_研究推薦" else "上市櫃等待與未入選" if sheet_name == "03_上市櫃等待" else "主流族群與資金輪動" if sheet_name == "04_今日主流資金" else "完整驗證、風險與淘汰原因" if sheet_name == "05_驗證與風險證據" else "績效煞車與資料健康" if sheet_name == "06_績效煞車與健康" else "興櫃隔離研究（不占主榜）" if sheet_name == "07_興櫃隔離研究" else "技術診斷｜預設隱藏"),
+            "用途": ("H106重點預發動主榜｜與第一張主榜相同研究口徑" if sheet_name == "00_推薦優先總覽" else "正式可執行與交易計畫" if sheet_name == "01_正式推薦與交易計畫" else "上市櫃研究推薦（非買進）" if sheet_name == "02_既有研究追蹤" else "上市櫃等待與未入選" if sheet_name == "03_上市櫃等待" else "主流族群與資金輪動" if sheet_name == "04_今日主流資金" else "完整驗證、風險與淘汰原因" if sheet_name == "05_驗證與風險證據" else "績效煞車與資料健康" if sheet_name == "06_績效煞車與健康" else "興櫃隔離研究（不占主榜）" if sheet_name == "07_興櫃隔離研究" else "技術診斷｜預設隱藏"),
             "列數": len(frame) if isinstance(frame, pd.DataFrame) else 0,
             "欄數": len(frame.columns) if isinstance(frame, pd.DataFrame) else 0,
         })
 
-    _h77_visible_sheets = {"00_推薦優先總覽", "01_正式推薦與交易計畫", "02_研究推薦", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究"}
+    _h77_visible_sheets = {"00_H106重點預發動", "00B_早期雷達", "00C_已發動觀察", "00_推薦優先總覽", "01_正式推薦與交易計畫", "02_既有研究追蹤", "03_上市櫃等待", "04_今日主流資金", "05_驗證與風險證據", "06_績效煞車與健康", "07_興櫃隔離研究"}
     for _ws in wb.worksheets:
         if _ws.title not in _h77_visible_sheets:
             _ws.sheet_state = "hidden"
         else:
             _ws.sheet_state = "visible"
     try:
-        wb.active = wb.sheetnames.index("00_推薦優先總覽")
+        wb.active = wb.sheetnames.index("00_H106重點預發動")
     except Exception:
         pass
     wb.save(output)
@@ -16847,7 +16859,7 @@ def _write_df_to_ws_fast_h84(wb, sheet_name: str, df: pd.DataFrame, fallback_tit
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
     tab = {
-        "00_推薦優先總覽":"7C3AED", "01_正式推薦與交易計畫":"166534", "02_研究推薦":"1D4ED8", "03_上市櫃等待":"B45309",
+        "00_推薦優先總覽":"7C3AED", "01_正式推薦與交易計畫":"166534", "02_既有研究追蹤":"1D4ED8", "03_上市櫃等待":"B45309",
         "04_今日主流資金":"0F766E", "05_驗證與風險證據":"334155", "06_績效煞車與健康":"7C3AED",
         "07_興櫃隔離研究":"64748B", "08_T+1推薦檢討":"C2410C",
     }.get(safe_name, "334155")
@@ -16957,10 +16969,12 @@ def _build_excel_bytes_fast_h84(
         extra = pd.DataFrame([{"項目":str(k), "數值":_excel_safe_value(v)} for k,v in report.items() if not isinstance(v,(dict,list,tuple,set))])
         health = pd.concat([health, extra], ignore_index=True, sort=False)
     sheets = [
-        ("00_H105未來黑馬", h79.get("blackhorse_overview", pd.DataFrame()), "本輪沒有符合H105未來1～5日預發動條件的黑馬候選；今日已強勢股不會冒充未來黑馬。"),
-        ("00_推薦優先總覽", h79.get("priority_overview", pd.DataFrame()), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
+        ("00_H106重點預發動", h79.get("blackhorse_overview", pd.DataFrame()), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
+        ("00B_早期雷達", h79.get("blackhorse_radar", pd.DataFrame()), "本輪沒有早期觀察候選。"),
+        ("00C_已發動觀察", h79.get("ignited_watch", pd.DataFrame()), "本輪沒有已發動觀察股。"),
+        ("00_推薦優先總覽", h79.get("priority_overview", pd.DataFrame()), "本輪重點預發動研究主榜沒有合格候選。"),
         ("01_正式推薦與交易計畫", h79.get("actionable", pd.DataFrame()), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
-        ("02_研究推薦", h79.get("research", pd.DataFrame()), "本輪沒有上市櫃研究推薦。"),
+        ("02_既有研究追蹤", h79.get("research", pd.DataFrame()), "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", h79.get("waiting", pd.DataFrame()), "本輪沒有上市櫃等待候選。"),
         ("04_今日主流資金", sector, "目前沒有可用主流族群資料。"),
         ("05_驗證與風險證據", h79.get("audit", pd.DataFrame()), "目前沒有足夠的驗證增量/風險證據。"),
@@ -17026,8 +17040,9 @@ def _build_excel_bytes_fast_h85(
         health = pd.concat([health, extra], ignore_index=True, sort=False)
     h93_contract = h93_export_contract_summary(tables) if callable(h93_export_contract_summary) else {}
     h94_contract = h94_export_contract_summary(tables) if callable(h94_export_contract_summary) else {}
-    h101_contract = h101_export_contract_summary(tables) if callable(h101_export_contract_summary) else {}
-    h102_contract = h102_export_contract_summary(tables) if callable(h102_export_contract_summary) else {}
+    legacy_contract_tables={**tables,"priority_overview":tables.get("legacy_priority_overview",tables.get("priority_overview",pd.DataFrame()))}
+    h101_contract = h101_export_contract_summary(legacy_contract_tables) if callable(h101_export_contract_summary) else {}
+    h102_contract = h102_export_contract_summary(legacy_contract_tables) if callable(h102_export_contract_summary) else {}
     h105_contract = h105_export_contract_summary(tables) if callable(h105_export_contract_summary) else {}
     try:
         h102_t1_review = build_h102_t1_review_table_local(limit=80) if callable(build_h102_t1_review_table_local) else pd.DataFrame()
@@ -17064,10 +17079,12 @@ def _build_excel_bytes_fast_h85(
     ])
     health = pd.concat([health, core_diag], ignore_index=True, sort=False)
     sheets = [
-        ("00_H105未來黑馬", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有符合H105未來1～5日預發動條件的黑馬候選；今日已強勢股不會冒充未來黑馬。"),
-        ("00_推薦優先總覽", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有Formal或核心Research可建立推薦優先總覽。"),
+        ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
+        ("00B_早期雷達", tables.get("blackhorse_radar", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有早期觀察候選。"),
+        ("00C_已發動觀察", tables.get("ignited_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有已發動觀察股。"),
+        ("00_推薦優先總覽", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪重點預發動研究主榜沒有合格候選。"),
         ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
-        ("02_研究推薦", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
+        ("02_既有研究追蹤", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", tables.get("waiting", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃等待候選。"),
         ("04_今日主流資金", sector, "目前沒有可用主流族群資料。"),
         ("05_驗證與風險證據", tables.get("audit", pd.DataFrame()) if tables else pd.DataFrame(), "目前沒有足夠的驗證增量/風險證據。"),

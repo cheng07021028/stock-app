@@ -869,8 +869,8 @@ def _truth_from_updated(original: dict[str, Any], updated: dict[str, Any], quote
         return bool((float(actual) > 0) == (float(pred) > 0))
 
     return {
-        **{k:v for k,v in original.items() if k.startswith(("H103", "H105"))},
-        **{k:v for k,v in updated.items() if k.startswith(("H103", "H105"))},
+        **{k:v for k,v in original.items() if k.startswith(("H103", "H105", "H106"))},
+        **{k:v for k,v in updated.items() if k.startswith(("H103", "H105", "H106"))},
         "version": TRUTH_VERSION,
         "business_key": _business_key(original),
         "cohort_key": _cohort_key(original),

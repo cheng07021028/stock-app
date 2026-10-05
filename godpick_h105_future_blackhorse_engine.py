@@ -25,9 +25,10 @@ from typing import Any, Iterable
 import math
 import pandas as pd
 
-VERSION = "v191_h105_future_blackhorse_pre_ignition_20261004"
+VERSION = "v191_h106_blackhorse_evidence_routing_20261005"
 
 H105_COLUMNS = [
+    "H106主榜資格", "H106未通過原因", "H106新聞狀態", "H106資料日", "H105黑馬順位",
     "H105版本",
     "H105黑馬預發動分",
     "H105黑馬同層順位",
@@ -54,6 +55,7 @@ H105_COLUMNS = [
 ]
 
 BLACKHORSE_OVERVIEW_COLUMNS = [
+    "H106主榜資格", "H106未通過原因", "H106新聞狀態", "H106資料日",
     "H105黑馬順位", "股票代號", "股票名稱", "類別", "市場別",
     "H105黑馬預發動分", "H105未來發動窗口", "H105黑馬層級", "H105發動階段",
     "H105資金潛伏分", "H105法人轉折分", "H105籌碼收斂分", "H105技術蓄勢分",
@@ -332,7 +334,7 @@ def _catalyst_unpriced_score(row: dict[str, Any]) -> tuple[float, list[str], boo
     news_state = _first_text(row, ["H103新聞證據", "H94新聞證據狀態"])
     ret1 = _first_num(row, ["今日漲幅%", "當日漲跌幅%", "今日漲跌幅%", "單日漲跌幅%"], 0.0) or 0.0
     ret5 = _first_num(row, ["近5日漲幅%", "5日漲幅%"], 0.0) or 0.0
-    evidence = catalyst is not None or yoy is not None or mom is not None or (news_state and not news_state.startswith("MISSING"))
+    evidence = yoy is not None or mom is not None or news_state.upper().startswith(("VERIFIED", "AVAILABLE"))
     if not evidence:
         return 50.0, ["可驗證催化/營收資料不足"], False
     base = _clip(catalyst, default=50.0)
@@ -409,6 +411,29 @@ def _capital_stealth(row: dict[str, Any], inst: float, holder: float) -> float:
     return _clip(inst * 0.32 + holder * 0.22 + volume_s * 0.18 + acc * 0.16 + _clip(main_money, default=50) * 0.12)
 
 
+
+def _evidence_integrity(row, inst_ok, holder_ok, tech_ok, sector_ok, broker_ok):
+    from datetime import datetime
+    def day(value):
+        v=_text(value).replace('.0','').replace('-','')[:8]
+        try:return datetime.strptime(v,'%Y%m%d').date()
+        except ValueError:return None
+    asof=day(row.get('H99市場資料日')) or day(row.get('H83市場資料日期'))
+    inst_date=day(row.get('法人資料日期'))
+    actual_inst=sum(_first_num(row,[k+'_官方',k]) is not None for k in ('三大法人近1日合計','三大法人近3日合計','三大法人近5日合計'))>=2
+    inst_verified=bool(inst_ok and actual_inst and asof and inst_date and 0<=(asof-inst_date).days<=4)
+    delta=_first_num(row,['TDCC千張大戶週變化pp'])
+    current=day(row.get('TDCC大戶資料日期')); previous=day(row.get('TDCC大戶前期日期'))
+    holder_verified=bool(holder_ok and delta is not None and asof and current and previous and previous<current<=asof and (asof-current).days<=14)
+    news=_first_text(row,['H103新聞證據','H94新聞證據狀態'])
+    news_ok=news.upper().startswith(('VERIFIED','AVAILABLE'))
+    fundamental=_first_num(row,['月營收YoY%_官方','月營收YoY%','月營收MoM%_官方','月營收MoM%']) is not None
+    flags=[inst_verified,holder_verified,tech_ok,sector_ok,broker_ok,fundamental,news_ok]
+    labels=['法人原始趨勢/日期','TDCC兩期/日期','技術蓄勢','族群輪動','券商分點','營收原始數值','新聞']
+    missing=[label for label,ok in zip(labels,flags) if not ok]
+    price_ok=all(_first_num(row,[k]) is not None for k in ('今日漲幅%','近5日漲幅%','近20日漲幅%')) and asof is not None
+    return flags,missing,inst_verified,holder_verified,price_ok,news_ok,asof
+
 def analyze_candidate(row: dict[str, Any] | pd.Series, *, sector_row: dict[str, Any] | None = None, pool: str = "") -> dict[str, Any]:
     raw = row.to_dict() if isinstance(row, pd.Series) else dict(row or {})
     inst, inst_notes, inst_ok = _institution_turn_score(raw)
@@ -421,15 +446,9 @@ def analyze_candidate(row: dict[str, Any] | pd.Series, *, sector_row: dict[str, 
     overheat, started, heat_notes = _overheat_and_started(raw)
     capital = _capital_stealth(raw, inst, holder)
 
-    evidence_flags = [inst_ok, holder_ok, tech_ok, sector_ok, broker_ok, catalyst_ok]
+    evidence_flags,missing,inst_verified,holder_verified,price_ok,news_ok,asof = _evidence_integrity(raw,inst_ok,holder_ok,tech_ok,sector_ok,broker_ok)
     completeness = round(sum(bool(x) for x in evidence_flags) / len(evidence_flags) * 100.0, 2)
-    missing = []
-    if not inst_ok: missing.append("法人")
-    if not holder_ok: missing.append("TDCC/大戶")
-    if not tech_ok: missing.append("技術蓄勢")
-    if not sector_ok: missing.append("族群輪動")
-    if not broker_ok: missing.append("券商分點")
-    if not catalyst_ok: missing.append("催化/營收/新聞")
+    if not price_ok:missing.append('行情期間/資料日')
 
     # Future score deliberately makes current-day strength a *negative* once the
     # move is visibly underway.  This is the central behavioral change in H105.
@@ -477,23 +496,41 @@ def analyze_candidate(row: dict[str, Any] | pd.Series, *, sector_row: dict[str, 
     elif score >= 82 and overheat < 45 and tech >= 70 and capital >= 64:
         stage = "BH3｜PRE-IGNITION-PRIME｜高品質預發動"
         level = "S0｜BLACKHORSE-PRIME"
-        window = "1～3個交易日"
+        window = "觀察窗1～3交易日｜未校準"
         action = "列最高優先黑馬雷達；次一交易日前重驗法人、量價、族群與失效條件。"
     elif score >= 74 and overheat < 58:
         stage = "BH2｜PRESSURE-BUILDING｜蓄勢接近發動"
         level = "S1｜BLACKHORSE-SETUP"
-        window = "1～5個交易日"
+        window = "觀察窗1～5交易日｜未校準"
         action = "列重點預發動觀察；未確認前不因分數直接買進。"
     elif score >= 65:
         stage = "BH1｜EARLY-BUILD｜早期資金/結構異常"
         level = "S2｜EARLY-BLACKHORSE"
-        window = "2～5個交易日"
+        window = "觀察窗2～5交易日｜未校準"
         action = "保留黑馬雷達；等待法人/量價/族群至少一項再確認。"
     else:
         stage = "BH0｜WATCH｜尚未形成足夠未來發動共振"
         level = "W｜RESEARCH"
-        window = "未定"
+        window = "未定｜未校準"
         action = "一般研究；不因今日強勢或單一因子提高買進順位。"
+
+    core_reasons=[]
+    if already_strong:core_reasons.append('已發動/過熱')
+    if not stage.startswith(('BH2','BH3')):core_reasons.append('尚未達重點預發動階段')
+    if not inst_verified:core_reasons.append('法人原始趨勢或日期不足')
+    if not holder_verified:core_reasons.append('TDCC兩期或日期不足')
+    if not tech_ok or tech<66:core_reasons.append('技術蓄勢未確認')
+    if not sector_ok or sector<50:core_reasons.append('族群共振不足')
+    if capital<60:core_reasons.append('資金潛伏不足')
+    if not price_ok:core_reasons.append('行情期間或資料日不足')
+    tdcc=_first_num(raw,['TDCC千張大戶週變化pp'])
+    if tdcc is not None and tdcc<=-1:core_reasons.append('大戶持股明顯下降，不能宣稱鎖碼')
+    if (_first_num(raw,['近20日漲幅%'],0) or 0)>=15:core_reasons.append('近20日已漲至少15%，移出純預發動核心')
+    if _first_text(raw,['市場別'])=='興櫃' or _first_text(raw,['H79決策層級'])=='資料待修復':core_reasons.append('市場隔離/必要資料未通過')
+    core=not core_reasons
+    if not core and not already_strong:
+        nature='早期雷達｜主榜條件尚未通過'
+        action='保留觀察；逐項補足H106未通過原因後再評估主榜資格。'
 
     reasons = []
     reasons.extend(inst_notes[:2]); reasons.extend(holder_notes[:1]); reasons.extend(tech_notes[:2]); reasons.extend(sector_notes[:2]); reasons.extend(broker_notes[:1]); reasons.extend(catalyst_notes[:1])
@@ -503,6 +540,10 @@ def analyze_candidate(row: dict[str, Any] | pd.Series, *, sector_row: dict[str, 
         reasons.append("多因子尚未形成明確前置共振")
 
     return {
+        "H106主榜資格":"是" if core else "否",
+        "H106未通過原因":"；".join(core_reasons) or "通過研究主榜条件；仍非買進許可",
+        "H106新聞狀態":"來源狀態可用｜尚未獨立核驗" if news_ok else "MISSING｜新聞缺漏",
+        "H106資料日":asof.isoformat() if asof else "未提供",
         "H105版本": VERSION,
         "H105黑馬預發動分": round(score, 2),
         "H105黑馬同層順位": None,
@@ -607,13 +648,9 @@ def _build_blackhorse_overview(tables: dict[str, pd.DataFrame], max_rows: int = 
     heat = pd.to_numeric(all_rows.get("H105過熱追高風險分"), errors="coerce")
     complete = pd.to_numeric(all_rows.get("H105證據完整度%"), errors="coerce")
     exclude = all_rows.get("H105今日強勢排除", pd.Series("", index=all_rows.index)).fillna("").astype(str).eq("是")
-    # Main blackhorse sheet intentionally excludes today's already-fired names.
-    keep = score.ge(60) & heat.lt(72) & complete.ge(40) & ~exclude
+    # H106 never fills the core list with WATCH/unknown-stage rows.
+    keep = all_rows.get('H106主榜資格',pd.Series('',index=all_rows.index)).eq('是') & ~exclude
     out = all_rows.loc[keep].copy()
-    if out.empty:
-        # Fail transparent: show best research candidates but keep their stage and
-        # exclusion evidence visible instead of returning a misleading blank.
-        out = all_rows.loc[~exclude].copy()
     out["__score"] = pd.to_numeric(out.get("H105黑馬預發動分"), errors="coerce")
     out["__heat"] = pd.to_numeric(out.get("H105過熱追高風險分"), errors="coerce")
     out = out.sort_values(["__score", "__heat", "__pool", "股票代號"], ascending=[False, True, True, True], na_position="last", kind="stable").head(max(1, int(max_rows))).reset_index(drop=True)
@@ -640,9 +677,26 @@ def decorate_decision_tables(
     for name in ("actionable", "research", "waiting", "audit", "emerging_watch"):
         out[name] = _enrich_frame(out.get(name), pool=name, source_map=source_map, sector_map=sector_map)
 
-    # Keep H102/H101 priority overview unchanged for backward compatibility;
-    # H105 gets a dedicated manager-first table with a different objective.
-    out["blackhorse_overview"] = _build_blackhorse_overview(out)
+    # Manager main views share one authoritative research objective; execution
+    # pools remain frozen and are explicitly displayed as continuing research.
+    out['legacy_priority_overview']=out.get('priority_overview',pd.DataFrame()).copy()
+    out['blackhorse_overview'] = _build_blackhorse_overview(out)
+    out['priority_overview']=out['blackhorse_overview'].copy()
+    main_ranks=dict(zip(out['blackhorse_overview']['股票代號'],out['blackhorse_overview']['H105黑馬順位']))
+    for name in ('research','waiting','actionable','audit'):
+        if '股票代號' in out[name]:out[name]['H105黑馬順位']=out[name]['股票代號'].map(_code).map(main_ranks)
+    frames=[out[n] for n in ('research','waiting','actionable') if '股票代號' in out[n] and not out[n].empty]
+    combined=pd.concat(frames,ignore_index=True,sort=False) if frames else pd.DataFrame()
+    if not combined.empty:
+        combined=combined.loc[combined['股票代號'].map(_code).ne('')].drop_duplicates('股票代號')
+        combined=combined.sort_values(['H105黑馬預發動分','股票代號'],ascending=[False,True],kind='stable')
+        out['ignited_watch']=combined.loc[combined['H105今日強勢排除'].eq('是')].copy()
+        out['blackhorse_radar']=combined.loc[combined['H105今日強勢排除'].ne('是') & combined['H106主榜資格'].ne('是')].copy()
+    else:
+        out['ignited_watch']=pd.DataFrame(columns=BLACKHORSE_OVERVIEW_COLUMNS)
+        out['blackhorse_radar']=pd.DataFrame(columns=BLACKHORSE_OVERVIEW_COLUMNS)
+    for key in ('ignited_watch','blackhorse_radar'):
+        out[key]=out[key].reindex(columns=BLACKHORSE_OVERVIEW_COLUMNS).reset_index(drop=True)
 
     health = out.get("health", pd.DataFrame()).copy()
     if not health.empty and "項目" in health.columns:
@@ -655,7 +709,7 @@ def decorate_decision_tables(
             already += int(df["H105今日強勢排除"].fillna("").astype(str).eq("是").sum())
     rows = pd.DataFrame([
         {"項目": "H105版本", "數值": VERSION},
-        {"項目": "H105核心目標", "數值": "未來1～5交易日預發動 > 今日已強；今日明顯強勢/過熱會降權並移出黑馬主榜"},
+        {"項目": "H105核心目標", "數值": "研究主榜/早期雷達/已發動分流；觀察期間未校準，不預測確切發動日"},
         {"項目": "H105黑馬主榜列數", "數值": int(len(black)) if isinstance(black, pd.DataFrame) else 0},
         {"項目": "H105今日已發動排除列數", "數值": already},
         {"項目": "H105資料治理", "數值": "法人/TDCC/技術/族群/催化缺漏分開標示；Missing不當成正面證據"},
@@ -673,7 +727,9 @@ def export_contract_summary(tables: dict[str, pd.DataFrame] | None) -> dict[str,
     missing = []
     if ok and not overview.empty:
         missing = sorted(required - set(overview.columns))
-        ok = not missing
+        ok = not missing and overview.get("H106主榜資格",pd.Series("",index=overview.index)).eq("是").all() and overview.get("H105今日強勢排除",pd.Series("",index=overview.index)).ne("是").all()
+    if isinstance(t.get("priority_overview"),pd.DataFrame):
+        ok = ok and t["priority_overview"].get("股票代號",pd.Series(dtype=str)).tolist()==overview.get("股票代號",pd.Series(dtype=str)).tolist()
     return {
         "version": VERSION,
         "ok": bool(ok),

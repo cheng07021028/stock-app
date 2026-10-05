@@ -123,7 +123,8 @@ def build_research_tracking_frame(
         # manager attention.  Keep it as a non-buy learning sample even though
         # its original H79 layer was not "研究推薦".
         _final_research = research.get("H103最終層別", pd.Series("", index=research.index)).fillna("").astype(str).eq("RESEARCH")
-        research = research[_base_research | _h102_promoted | _final_research].copy()
+        _h106_core = research.get("H106主榜資格",pd.Series("",index=research.index)).fillna("").astype(str).eq("是")
+        research = research[_base_research | _h102_promoted | _final_research | _h106_core].copy()
     if research.empty:
         return pd.DataFrame()
 
@@ -153,7 +154,7 @@ def build_research_tracking_frame(
         # masquerade as Formal/A- executable recommendations.
         _h102_promoted = _text(raw.get("H102研究升級")) == "是"
         _h105_score = _num(raw.get("H105黑馬預發動分"), 0.0) or 0.0
-        _h105_blackhorse = _h105_score >= 60.0 and _text(raw.get("H105今日強勢排除")) != "是"
+        _h105_blackhorse = _text(raw.get("H106主榜資格")) == "是"
         if _h105_blackhorse:
             raw["推薦模式"] = "H105未來黑馬Research"
             raw["推薦用途"] = "H105未來1～5交易日黑馬預發動績效追蹤（非買進許可）"
@@ -220,7 +221,7 @@ def build_research_tracking_frame(
         out["__h80_order"] = out["股票代號"].map({c: i for i, c in enumerate(research["股票代號"].tolist())})
         out = out.sort_values("__h80_order", kind="stable").drop(columns=["__h80_order"], errors="ignore")
     if frozen:
-        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103", "H104", "H105"))}} for r in out.to_dict("records")])
+        out = pd.DataFrame([{**r, **{k:v for k,v in frozen.get(str(r.get("股票代號")), {}).items() if k.startswith(("H99", "H101", "H102", "H103", "H104", "H105", "H106"))}} for r in out.to_dict("records")])
     return out.reset_index(drop=True)
 
 
@@ -231,7 +232,7 @@ def mark_research_record_rows(rows: Iterable[Mapping[str, Any]] | None) -> list[
         raw = dict(row)
         _h102_promoted = _text(raw.get("H102研究升級")) == "是"
         _h105_score = _num(raw.get("H105黑馬預發動分"), 0.0) or 0.0
-        _h105_blackhorse = _h105_score >= 60.0 and _text(raw.get("H105今日強勢排除")) != "是"
+        _h105_blackhorse = _text(raw.get("H106主榜資格")) == "是"
         if _h105_blackhorse:
             raw["推薦模式"] = "H105未來黑馬Research"
             raw["紀錄來源"] = "07_股神推薦｜H105未來黑馬Research自動同步"
