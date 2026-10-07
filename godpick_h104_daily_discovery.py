@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Bounded candidate discovery and persistent recommendation continuity.
 
-H107 update
+H108 update
 -----------
 The original H104 continuity logic depended almost entirely on ``godpick_records.json``.
 When recent recommendation rows were not persisted there, every run became
@@ -9,8 +9,9 @@ When recent recommendation rows were not persisted there, every run became
 same sector had already been shown repeatedly.
 
 This revision keeps the original interfaces but adds a small, independent,
-append-only daily discovery authority: ``godpick_discovery_history.json``.
-It is created at runtime and is never shipped inside the patch ZIP.
+append-only daily discovery authority: ``godpick_discovery_history.json`` plus
+``godpick_sector_rotation_history.json`` for sector life-cycle continuity. Both are
+created at runtime and are never shipped inside the patch ZIP.
 
 The history is research governance only.  It never creates buy authority.
 """
@@ -24,8 +25,9 @@ import os
 import tempfile
 import pandas as pd
 
-VERSION = "v191_h107_persistent_discovery_continuity_20261006"
+VERSION = "v191_h108_sector_lifecycle_continuity_20261007"
 DISCOVERY_HISTORY_FILE = "godpick_discovery_history.json"
+SECTOR_HISTORY_FILE = "godpick_sector_rotation_history.json"
 MAX_HISTORY_ROWS = 12000
 KEEP_HISTORY_DAYS = 120
 
@@ -262,6 +264,10 @@ def _snapshot_rows(tables: dict[str, Any], market_day: str) -> list[dict[str, An
                 "H105推薦性質": text(r.get("H105推薦性質")),
                 "H105發動階段": text(r.get("H105發動階段")),
                 "H105今日強勢排除": text(r.get("H105今日強勢排除")),
+                "H108研究優先分": number(r.get("H108研究優先分")),
+                "H108族群確認分": number(r.get("H108族群確認分")),
+                "H108族群生命週期": text(r.get("H108族群生命週期")),
+                "H108個股族群角色": text(r.get("H108個股族群角色")),
             }
             rows.append(row)
     return rows
@@ -331,7 +337,115 @@ def save_discovery_snapshot(base_dir, tables: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "written": len(new_rows), "rows": len(final_rows), "market_day": market_day, "path": str(path)}
 
 
+SECTOR_HISTORY_METRICS = [
+    "類股熱度排名", "類股熱度分數", "類股加速度", "族群資金流分數",
+    "同族群強勢比例", "同族群平均量能分", "類股平均漲幅", "族群樣本可信度",
+    "H102族群衝擊分",
+]
+
+
+def _sector_day(row: dict[str, Any], fallback: str = "") -> str:
+    for key in ("資料日", "H99市場資料日", "市場資料日期", "最新K線日期", "推薦日期", "market_date"):
+        s = text(row.get(key))[:10]
+        try:
+            return date.fromisoformat(s).isoformat()
+        except ValueError:
+            pass
+    try:
+        return date.fromisoformat(fallback[:10]).isoformat()
+    except (ValueError, TypeError):
+        return ""
+
+
+def load_sector_history(base_dir) -> list[dict[str, Any]]:
+    """Load H108 sector snapshots used only for day-over-day rotation confirmation."""
+    return _read_json_rows(Path(base_dir) / SECTOR_HISTORY_FILE)
+
+
+def sector_continuity(sector_row: dict[str, Any], history: list[dict[str, Any]], market_day: str) -> dict[str, Any]:
+    """Attach previous-sector metrics without inventing history.
+
+    Positive ``H108族群排名改善`` means the category moved closer to rank #1.
+    """
+    cat = text(sector_row.get("類別"))
+    day = _sector_day(sector_row, market_day) or market_day
+    past = [r for r in history if text(r.get("類別")) == cat and _sector_day(r) and _sector_day(r) < day]
+    past.sort(key=lambda r: _sector_day(r), reverse=True)
+    prev = past[0] if past else {}
+    cur_rank = number(sector_row.get("類股熱度排名"))
+    prev_rank = number(prev.get("類股熱度排名"))
+    cur_flow = number(sector_row.get("族群資金流分數"))
+    prev_flow = number(prev.get("族群資金流分數"))
+    cur_breadth = number(sector_row.get("同族群強勢比例"))
+    prev_breadth = number(prev.get("同族群強勢比例"))
+    cur_heat = number(sector_row.get("類股熱度分數"))
+    prev_heat = number(prev.get("類股熱度分數"))
+    cur_acc = number(sector_row.get("類股加速度"))
+    prev_acc = number(prev.get("類股加速度"))
+    return {
+        "H108族群前次資料日": _sector_day(prev),
+        "H108族群前次排名": prev_rank,
+        "H108族群排名改善": round(prev_rank - cur_rank, 2) if prev_rank is not None and cur_rank is not None else None,
+        "H108族群資金流變化": round(cur_flow - prev_flow, 2) if cur_flow is not None and prev_flow is not None else None,
+        "H108族群廣度變化": round(cur_breadth - prev_breadth, 2) if cur_breadth is not None and prev_breadth is not None else None,
+        "H108族群熱度變化": round(cur_heat - prev_heat, 2) if cur_heat is not None and prev_heat is not None else None,
+        "H108族群加速度變化": round(cur_acc - prev_acc, 2) if cur_acc is not None and prev_acc is not None else None,
+        "H108族群歷史狀態": "AVAILABLE" if prev else "BASELINE",
+    }
+
+
+def save_sector_snapshot(base_dir, sector_df: pd.DataFrame | None, market_day: str) -> dict[str, Any]:
+    """Persist bounded sector-rotation history atomically.
+
+    The file is runtime data and is intentionally never included in patch ZIPs.
+    """
+    base = Path(base_dir)
+    path = base / SECTOR_HISTORY_FILE
+    if not isinstance(sector_df, pd.DataFrame) or sector_df.empty or "類別" not in sector_df.columns:
+        return {"ok": True, "written": 0, "rows": len(_read_json_rows(path)), "market_day": market_day, "path": str(path)}
+    rows: list[dict[str, Any]] = []
+    for raw in sector_df.to_dict("records"):
+        cat = text(raw.get("類別"))
+        if not cat:
+            continue
+        row = {"H108歷史來源": "SECTOR_SNAPSHOT", "類別": cat, "資料日": market_day}
+        for key in SECTOR_HISTORY_METRICS:
+            if key in raw:
+                row[key] = number(raw.get(key)) if key not in ("H102族群動態狀態",) else text(raw.get(key))
+        row["族群輪動狀態"] = text(raw.get("族群輪動狀態"))
+        row["強勢族群等級"] = text(raw.get("強勢族群等級"))
+        rows.append(row)
+    existing = _read_json_rows(path)
+    merged = existing + rows
+    try:
+        cutoff = (date.fromisoformat(market_day) - timedelta(days=KEEP_HISTORY_DAYS)).isoformat()
+        merged = [r for r in merged if not _sector_day(r) or _sector_day(r) >= cutoff]
+    except ValueError:
+        pass
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in merged:
+        d = _sector_day(r)
+        cat = text(r.get("類別"))
+        if d and cat:
+            dedup[(d, cat)] = r
+    final_rows = sorted(dedup.values(), key=lambda r: (_sector_day(r), text(r.get("類別"))))[-4000:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(final_rows, f, ensure_ascii=False, indent=2)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            if os.path.exists(tmp_name): os.unlink(tmp_name)
+        except OSError:
+            pass
+    return {"ok": True, "written": len(rows), "rows": len(final_rows), "market_day": market_day, "path": str(path)}
+
+
 __all__ = [
-    "VERSION", "COLUMNS", "DISCOVERY_HISTORY_FILE", "select_discovery_input", "continuity",
-    "load_history", "save_discovery_snapshot", "text", "number",
+    "VERSION", "COLUMNS", "DISCOVERY_HISTORY_FILE", "SECTOR_HISTORY_FILE",
+    "select_discovery_input", "continuity", "load_history", "save_discovery_snapshot",
+    "load_sector_history", "sector_continuity", "save_sector_snapshot", "text", "number",
 ]
