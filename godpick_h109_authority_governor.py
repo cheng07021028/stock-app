@@ -133,7 +133,10 @@ def official_snapshot(base_dir: Path, asof: dt.date | None) -> dict[str, dict]:
             if not code or not period: continue
             # Never accept a report period after its as-of date.
             if _month_gap((asof.year, asof.month), period) < 0: continue
+            out_day = _roc_day(rec.get("出表日期"))
+            if out_day and out_day > asof: continue
             stocks[code] = {"H109營收資料年月": f"{period[0]}{period[1]:02d}",
+                            "H109營收出表日期": str(out_day) if out_day else "",
                             "H109官方營收YoY%": f(rec.get("營業收入-去年同月增減(%)")),
                             "H109官方營收MoM%": f(rec.get("營業收入-上月比較增減(%)")),
                             "H109營收來源": REVENUE_URL}
@@ -211,14 +214,22 @@ def official_announcements(base_dir: Path, asof: dt.date | None) -> dict[str,dic
     return data_map
 
 def join_official(row: dict, official: dict | None) -> dict:
+    """Merge only same/newer-period official facts, preserving publication evidence.
+
+    A same-month value with no original provenance must be verified too; the
+    former strict `new > old` rule quietly left it marked as missing.
+    """
     r = dict(row)
     if not official: return r
     old = parse_month(label(r,("營收資料日期", "營收資料年月", "H109營收資料年月")))
     new = parse_month(official.get("H109營收資料年月"))
-    if new and (old is None or _month_gap(new,old)>0):
-        r.update(official)
-        if official.get("H109官方營收YoY%") is not None: r["月營收YoY%_官方"] = official["H109官方營收YoY%"]
-        if official.get("H109官方營收MoM%") is not None: r["月營收MoM%_官方"] = official["H109官方營收MoM%"]
+    if new and (old is None or _month_gap(new,old)>=0):
+        for k, value in official.items():
+            if value is not None: r[k] = value
+        yoy=f(official.get("H109官方營收YoY%"))
+        mom=f(official.get("H109官方營收MoM%"))
+        if yoy is not None: r["月營收YoY%_官方"] = yoy
+        if mom is not None: r["月營收MoM%_官方"] = mom
     return r
 
 

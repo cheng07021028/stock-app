@@ -25,6 +25,7 @@ from typing import Any, Iterable
 from pathlib import Path
 import math
 import pandas as pd
+from godpick_h110_evidence_integrity import audit as h110_audit, research_asof as h110_research_asof, VERSION as H110_VERSION
 from godpick_h109_authority_governor import govern as h109_govern, parse_day as h109_parse_day, official_snapshot as h109_official_snapshot, official_announcements as h109_official_announcements, apply_quarantine_continuity as h109_apply_quarantine_continuity, join_official as h109_join_official, VERSION as H109_VERSION
 
 try:
@@ -37,7 +38,7 @@ except Exception:  # compatibility if H104/H108 continuity is not yet deployed
     sector_continuity = None
     save_sector_snapshot = None
 
-VERSION = "v191_h109_cross_layer_governor_20261008"
+VERSION = "v191_h110_future_alpha_evidence_integrity_20261012"
 
 H105_COLUMNS = [
     "H105版本",
@@ -77,6 +78,10 @@ H105_COLUMNS = [
     "H109版本", "H109決策權威", "H109否決原因", "H109官方營收新鮮度",
     "H109營收資料年月", "H109催化方向", "H109重大訊息狀態", "H109重大訊息標題", "H109重大訊息發布日", "H109重大訊息來源", "H109最終研究優先分",
     "H109時機窗口", "H109跨層衝突", "H109正式買進權限", "H109隔離觀察日數",
+    "H110版本", "H110行情交易日", "H110研究資訊截止日", "H110研究模式",
+    "H110證據狀態", "H110營收來源驗證", "H110營收資料年月",
+    "H110官方營收新鮮度", "H110法人方向驗證", "H110證據扣分",
+    "H110最終研究優先分", "H110主榜准入", "H110證據說明",
     "H105發動階段",
     "H105黑馬層級",
     "H105推薦性質",
@@ -89,6 +94,7 @@ H105_COLUMNS = [
 
 BLACKHORSE_OVERVIEW_COLUMNS = [
     "H105黑馬順位", "股票代號", "股票名稱", "類別", "市場別",
+    "H110最終研究優先分", "H110證據狀態", "H110營收資料年月", "H110官方營收新鮮度", "H110法人方向驗證", "H110主榜准入", "H110證據說明",
     "H105黑馬預發動分", "H105未來發動窗口", "H105黑馬層級", "H105發動階段",
     "H105資金潛伏分", "H105法人轉折分", "H105籌碼收斂分", "H105技術蓄勢分",
     "H105下一波族群分", "H105券商分點分", "H105催化未反映分", "H105進場成熟分",
@@ -852,7 +858,7 @@ def _source_lookup(candidate_df: pd.DataFrame | None) -> dict[str, dict[str, Any
     return result
 
 
-def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str, dict[str, Any]], sector_map: dict[str, dict[str, Any]], official_map: dict[str, dict[str, Any]] | None = None, announcements_map: dict[str, dict[str, Any]] | None = None, market_day: str = "") -> pd.DataFrame:
+def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str, dict[str, Any]], sector_map: dict[str, dict[str, Any]], official_map: dict[str, dict[str, Any]] | None = None, announcements_map: dict[str, dict[str, Any]] | None = None, market_day: str = "", info_asof: str = "", asof_mode: str = "HISTORICAL_SAFE", source_status: str = "") -> pd.DataFrame:
     out = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame or [])
     for c in H105_COLUMNS:
         if c not in out.columns:
@@ -870,10 +876,13 @@ def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str
             merged.update((announcements_map or {})[code])
         sector_row = sector_map.get(_text(merged.get("類別")), {})
         merged.update(analyze_candidate(merged, sector_row=sector_row, pool=pool))
-        merged.update(h109_govern(merged, asof=h109_parse_day(market_day)))
+        merged.update(h109_govern(merged, asof=h109_parse_day(info_asof or market_day)))
+        merged.update(h110_audit(merged, market_day=h109_parse_day(market_day),
+                                 info_asof=h109_parse_day(info_asof or market_day),
+                                 asof_mode=asof_mode, source_status=source_status))
         records.append(merged)
     out = pd.DataFrame(records)
-    score = pd.to_numeric(out.get("H109最終研究優先分"), errors="coerce")
+    score = pd.to_numeric(out.get("H110最終研究優先分"), errors="coerce")
     fallback = pd.to_numeric(out["H105黑馬預發動分"], errors="coerce")
     score = score.where(score.notna(), fallback)
     order = out.assign(__h108=score).sort_values(["__h108", "股票代號"], ascending=[False, True], na_position="last", kind="stable").index.tolist()
@@ -890,6 +899,7 @@ def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str
         "H105下一波族群分", "H105券商分點分", "H105催化未反映分", "H105進場成熟分", "H105證據完整度%",
         "H105核心證據完整度%", "H105選配證據完整度%", "H107新鮮機會分", "H107近期入選日數",
         "H107近期族群入選日數", "H107重複推薦懲罰", "H107新發現狀態", "H107研究池調整",
+        "H110最終研究優先分", "H110證據狀態", "H110官方營收新鮮度", "H110研究資訊截止日", "H110證據說明",
         "H109最終研究優先分", "H109決策權威", "H109否決原因", "H109催化方向", "H109官方營收新鮮度", "H109時機窗口",
         "H108研究優先分", "H108族群確認分", "H108族群生命週期", "H108個股族群角色",
         "H108族群波段加分", "H108族群懲罰減免", "H108族群前次資料日", "H108族群前次排名",
@@ -938,15 +948,12 @@ def _diversified_pick(frame: pd.DataFrame, limit: int) -> pd.DataFrame:
             sector_counts[cat] = sector_counts.get(cat, 0) + 1
 
     pass_dynamic(min(limit, 5), 5)
-    pass_dynamic(min(limit, 10), 10)
-    pass_dynamic(limit, max(11, limit))
-    if len(selected) < limit:
-        for i, r in work.iterrows():
-            if len(selected) >= limit:
-                break
-            code = _code(r.get("股票代號"))
-            if code and code not in used_codes:
-                selected.append(i); used_codes.add(code)
+    if limit > 5 and len(selected) >= 5:
+        pass_dynamic(min(limit, 10), 10)
+    if limit > 10 and len(selected) >= 10:
+        pass_dynamic(limit, max(11, limit))
+    # H110: Never silently bypass the sector cap to fill a cosmetically fixed
+    # number of slots. A short research list is preferable to fake diversity.
     return work.loc[selected].copy().reset_index(drop=True)
 
 
@@ -971,10 +978,11 @@ def _rebalance_future_research(tables: dict[str, pd.DataFrame]) -> None:
     started = pool.get("H105今日強勢排除", pd.Series("", index=pool.index)).fillna("").astype(str).eq("是")
     authority = pool.get("H109決策權威", pd.Series("RESEARCH_ELIGIBLE", index=pool.index)).fillna("").astype(str)
     vetoed = authority.isin({"SHOCK_QUARANTINE", "COOLDOWN_QUARANTINE", "FADE_VETO", "FAST_SHOCK_RECHECK", "FUTURE_DATA_VETO"})
-    eligible = pool.loc[~started & ~vetoed].copy()
+    conflicted = pool.get("H110證據狀態", pd.Series("", index=pool.index)).fillna("").astype(str).str.startswith("CONFLICT")
+    eligible = pool.loc[~started & ~vetoed & ~conflicted].copy()
     eligible["__fresh"] = pd.to_numeric(eligible.get("H107新鮮機會分"), errors="coerce")
     eligible["__h105"] = pd.to_numeric(eligible.get("H105黑馬預發動分"), errors="coerce")
-    eligible["__h108"] = pd.to_numeric(eligible.get("H109最終研究優先分"), errors="coerce")
+    eligible["__h108"] = pd.to_numeric(eligible.get("H110最終研究優先分"), errors="coerce")
     eligible["__h108"] = eligible["__h108"].where(eligible["__h108"].notna(), eligible["__fresh"])
     eligible["__confirm"] = pd.to_numeric(eligible.get("H108族群確認分"), errors="coerce")
     eligible["__heat"] = pd.to_numeric(eligible.get("H105過熱追高風險分"), errors="coerce")
@@ -1028,6 +1036,15 @@ def _rebalance_future_research(tables: dict[str, pd.DataFrame]) -> None:
             ["__h108", "__fresh", "__confirm", "__repeat", "__heat", "股票代號"],
             ascending=[False, False, False, True, True, True], kind="stable", na_position="last"
         ).head(target).reset_index(drop=True)
+    # H110 sector cap is the final Research authority too. H108 anchors may
+    # otherwise be added to a fill that independently reached its sector cap.
+    # Re-consider remaining eligible sectors instead of backfilling same-sector.
+    if not picked.empty and target > 1:
+        pool_tail = eligible.loc[~eligible["股票代號"].isin(set(picked["股票代號"]))]
+        diverse_source = pd.concat([picked, pool_tail], ignore_index=True, sort=False)
+        picked = _diversified_pick(diverse_source, target)
+        picked = picked.sort_values(["__h108", "__fresh", "__confirm", "__repeat", "__heat", "股票代號"],
+                                    ascending=[False, False, False, True, True, True], kind="stable", na_position="last").reset_index(drop=True)
     picked_codes = set(picked["股票代號"].map(_code)) if not picked.empty else set()
 
     if not picked.empty:
@@ -1044,6 +1061,8 @@ def _rebalance_future_research(tables: dict[str, pd.DataFrame]) -> None:
     if not rest.empty:
         def reason(r: pd.Series) -> str:
             auth = _text(r.get("H109決策權威"))
+            if _text(r.get("H110證據狀態")).startswith("CONFLICT"):
+                return "H110 RESEARCH→WAITING｜證據方向矛盾，待資料核對"
             if auth in {"SHOCK_QUARANTINE", "COOLDOWN_QUARANTINE", "FADE_VETO", "FAST_SHOCK_RECHECK", "FUTURE_DATA_VETO"}:
                 return "H109 RESEARCH→WAITING｜" + auth + "｜" + _text(r.get("H109否決原因"))
             if _text(r.get("H105今日強勢排除")) == "是":
@@ -1076,18 +1095,19 @@ def _build_blackhorse_overview(tables: dict[str, pd.DataFrame], max_rows: int = 
     all_rows = all_rows[all_rows["股票代號"].ne("")].drop_duplicates("股票代號", keep="first")
     score = pd.to_numeric(all_rows.get("H105黑馬預發動分"), errors="coerce")
     fresh = pd.to_numeric(all_rows.get("H107新鮮機會分"), errors="coerce")
-    priority = pd.to_numeric(all_rows.get("H109最終研究優先分"), errors="coerce")
+    priority = pd.to_numeric(all_rows.get("H110最終研究優先分"), errors="coerce")
     priority = priority.where(priority.notna(), fresh.where(fresh.notna(), score))
     heat = pd.to_numeric(all_rows.get("H105過熱追高風險分"), errors="coerce")
     core_complete = pd.to_numeric(all_rows.get("H105核心證據完整度%"), errors="coerce")
     exclude = all_rows.get("H105今日強勢排除", pd.Series("", index=all_rows.index)).fillna("").astype(str).eq("是")
     # Research-grade blackhorse requires core evidence; broker/news remain optional.
     authority = all_rows.get("H109決策權威", pd.Series("", index=all_rows.index)).fillna("").astype(str)
-    keep = priority.ge(60) & heat.lt(72) & core_complete.ge(50) & ~exclude & authority.eq("RESEARCH_ELIGIBLE")
+    evidence = all_rows.get("H110證據狀態", pd.Series("", index=all_rows.index)).fillna("").astype(str)
+    keep = priority.ge(60) & heat.lt(72) & core_complete.ge(50) & ~exclude & authority.eq("RESEARCH_ELIGIBLE") & ~evidence.str.startswith("CONFLICT")
     out = all_rows.loc[keep].copy()
     out["__fresh"] = pd.to_numeric(out.get("H107新鮮機會分"), errors="coerce")
     out["__score"] = pd.to_numeric(out.get("H105黑馬預發動分"), errors="coerce")
-    out["__h108"] = pd.to_numeric(out.get("H109最終研究優先分"), errors="coerce")
+    out["__h108"] = pd.to_numeric(out.get("H110最終研究優先分"), errors="coerce")
     out["__h108"] = out["__h108"].where(out["__h108"].notna(), out["__fresh"].where(out["__fresh"].notna(), out["__score"]))
     out["__confirm"] = pd.to_numeric(out.get("H108族群確認分"), errors="coerce")
     out["__heat"] = pd.to_numeric(out.get("H105過熱追高風險分"), errors="coerce")
@@ -1122,12 +1142,17 @@ def decorate_decision_tables(
             sector_history = []
     source_map = _source_lookup(candidate_df)
     sector_map = _sector_lookup(sector_df, sector_history=sector_history, market_day=market_day)
-    official_map = h109_official_snapshot(base_dir, h109_parse_day(market_day))
-    announcements_map = h109_official_announcements(base_dir, h109_parse_day(market_day))
+    research_day, scan_mode, live_source = h110_research_asof(market_day, [candidate_df] + [out.get(k) for k in ("research", "waiting")])
+    info_asof = str(research_day) if research_day else market_day
+    official_map = h109_official_snapshot(base_dir, research_day) if live_source else {}
+    announcements_map = h109_official_announcements(base_dir, research_day) if live_source else {}
+    # Market price date always stays separate from the research information date.
+    source_status = "LIVE_OK" if official_map else "FAILED_OR_NOT_ENABLED" if live_source else "SAFE_REPLAY_NO_FETCH"
     for name in ("actionable", "research", "waiting", "audit", "emerging_watch"):
         out[name] = _enrich_frame(out.get(name), pool=name, source_map=source_map,
                                   sector_map=sector_map, official_map=official_map,
-                                  announcements_map=announcements_map, market_day=market_day)
+                                  announcements_map=announcements_map, market_day=market_day,
+                                  info_asof=info_asof, asof_mode=scan_mode, source_status=source_status)
 
     # H107 fixes the old routing leak: an H105 "already ignited / do not chase" row
     # may not continue occupying one of the limited future-research slots.
@@ -1141,7 +1166,7 @@ def decorate_decision_tables(
     health = out.get("health", pd.DataFrame()).copy()
     if not health.empty and "項目" in health.columns:
         item_s = health["項目"].fillna("").astype(str)
-        health = health.loc[~item_s.str.startswith(("H105", "H107", "H108", "H109"))].copy()
+        health = health.loc[~item_s.str.startswith(("H105", "H107", "H108", "H109", "H110"))].copy()
     black = out.get("blackhorse_overview", pd.DataFrame())
     already = 0
     for name in ("research", "waiting", "actionable"):
@@ -1167,6 +1192,12 @@ def decorate_decision_tables(
         {"項目": "H108第二梯隊治理", "數值": "族群已點火時，已噴出的個股仍排除；優先尋找未發動SECOND-WAVE/EARLY-FOLLOWER"},
         {"項目": "H108動態族群分散", "數值": "一般Top5每族群1檔；確認IGNITION/EXPANSION可最多2檔；MATURE/FADE維持嚴格上限"},
         {"項目": "H108研究池保留", "數值": "研究名額有限時，最多保留少量確認點火族群代表股，再以新鮮黑馬補足，避免過度分散漏掉真主流"},
+        {"項目": "H110版本", "數值": H110_VERSION},
+        {"項目": "H110交易日/資訊截止日", "數值": f"市場={market_day or 'UNKNOWN'}；資訊={info_asof or 'UNKNOWN'}；模式={scan_mode}"},
+        {"項目": "H110官方資料取得狀態", "數值": source_status},
+        {"項目": "H110核對證據矛盾檔數", "數值": sum(int(out.get(p, pd.DataFrame()).get("H110證據狀態", pd.Series(dtype=str)).fillna("").astype(str).str.startswith("CONFLICT").sum()) for p in ("research", "waiting"))},
+        {"項目": "H110資料完整與新鮮", "數值": "完整度、資料年月、公告截止日、官方來源及法人淨額分開顯示；缺資料不能當成已驗證"},
+        {"項目": "H110族群分散", "數值": "嚴守H108動態配額，不再因主榜名額不足而無條件放寬同族群上限"},
         {"項目": "H109版本", "數值": H109_VERSION},
         {"項目": "H109急跌延續隔離", "數值": f"當日急跌{risk_snapshot.get('fresh_shock',0)}；延續冷卻{risk_snapshot.get('cooldown',0)}；歷史觀察{risk_snapshot.get('history',0)}"},
         {"項目": "H109跨層權威", "數值": "SHOCK_QUARANTINE/FADE_VETO/FastShock待確認不可由新鮮度補位覆寫；仍不產生買進授權"},
