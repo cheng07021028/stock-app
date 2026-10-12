@@ -26,6 +26,7 @@ from pathlib import Path
 import math
 import pandas as pd
 from godpick_h110_evidence_integrity import audit as h110_audit, research_asof as h110_research_asof, VERSION as H110_VERSION
+from godpick_h112_sector_balance import (VERSION as H112_VERSION, safe_audit_discovery as h112_audit_candidates, balance_research as h112_balance_research, balance_blackhorse as h112_balance_blackhorse)
 from godpick_h109_authority_governor import govern as h109_govern, parse_day as h109_parse_day, official_snapshot as h109_official_snapshot, official_announcements as h109_official_announcements, apply_quarantine_continuity as h109_apply_quarantine_continuity, join_official as h109_join_official, VERSION as H109_VERSION
 
 try:
@@ -38,7 +39,7 @@ except Exception:  # compatibility if H104/H108 continuity is not yet deployed
     sector_continuity = None
     save_sector_snapshot = None
 
-VERSION = "v191_h110_future_alpha_evidence_integrity_20261012"
+VERSION = "v191_h112_future_blackhorse_sector_balance_20261012"
 
 H105_COLUMNS = [
     "H105版本",
@@ -93,7 +94,7 @@ H105_COLUMNS = [
 ]
 
 BLACKHORSE_OVERVIEW_COLUMNS = [
-    "H105黑馬順位", "股票代號", "股票名稱", "類別", "市場別",
+    "H105黑馬順位", "H112最終跨族群優先分", "H112族群曝險扣分", "H112候選來源", "H112研究權限", "H112族群分散狀態", "股票代號", "股票名稱", "類別", "市場別",
     "H110最終研究優先分", "H110證據狀態", "H110營收資料年月", "H110官方營收新鮮度", "H110法人方向驗證", "H110主榜准入", "H110證據說明",
     "H105黑馬預發動分", "H105未來發動窗口", "H105黑馬層級", "H105發動階段",
     "H105資金潛伏分", "H105法人轉折分", "H105籌碼收斂分", "H105技術蓄勢分",
@@ -1045,6 +1046,8 @@ def _rebalance_future_research(tables: dict[str, pd.DataFrame]) -> None:
         picked = _diversified_pick(diverse_source, target)
         picked = picked.sort_values(["__h108", "__fresh", "__confirm", "__repeat", "__heat", "股票代號"],
                                     ascending=[False, False, False, True, True, True], kind="stable", na_position="last").reset_index(drop=True)
+    if not picked.empty:
+        picked = h112_balance_research(picked, eligible, target)
     picked_codes = set(picked["股票代號"].map(_code)) if not picked.empty else set()
 
     if not picked.empty:
@@ -1083,7 +1086,7 @@ def _rebalance_future_research(tables: dict[str, pd.DataFrame]) -> None:
 
 def _build_blackhorse_overview(tables: dict[str, pd.DataFrame], max_rows: int = 30) -> pd.DataFrame:
     frames = []
-    for pool_order, name in enumerate(("research", "waiting", "actionable")):
+    for pool_order, name in enumerate(("research", "waiting", "actionable", "h112_audit_radar")):
         df = tables.get(name, pd.DataFrame())
         if not isinstance(df, pd.DataFrame) or df.empty or "股票代號" not in df.columns:
             continue
@@ -1093,27 +1096,27 @@ def _build_blackhorse_overview(tables: dict[str, pd.DataFrame], max_rows: int = 
     all_rows = pd.concat(frames, ignore_index=True, sort=False)
     all_rows["股票代號"] = all_rows["股票代號"].map(_code)
     all_rows = all_rows[all_rows["股票代號"].ne("")].drop_duplicates("股票代號", keep="first")
-    score = pd.to_numeric(all_rows.get("H105黑馬預發動分"), errors="coerce")
-    fresh = pd.to_numeric(all_rows.get("H107新鮮機會分"), errors="coerce")
-    priority = pd.to_numeric(all_rows.get("H110最終研究優先分"), errors="coerce")
+    score = pd.to_numeric(all_rows.get("H105黑馬預發動分", pd.Series(index=all_rows.index, dtype=float)), errors="coerce")
+    fresh = pd.to_numeric(all_rows.get("H107新鮮機會分", pd.Series(index=all_rows.index, dtype=float)), errors="coerce")
+    priority = pd.to_numeric(all_rows.get("H110最終研究優先分", pd.Series(index=all_rows.index, dtype=float)), errors="coerce")
     priority = priority.where(priority.notna(), fresh.where(fresh.notna(), score))
-    heat = pd.to_numeric(all_rows.get("H105過熱追高風險分"), errors="coerce")
-    core_complete = pd.to_numeric(all_rows.get("H105核心證據完整度%"), errors="coerce")
+    heat = pd.to_numeric(all_rows.get("H105過熱追高風險分", pd.Series(index=all_rows.index, dtype=float)), errors="coerce")
+    core_complete = pd.to_numeric(all_rows.get("H105核心證據完整度%", pd.Series(index=all_rows.index, dtype=float)), errors="coerce")
     exclude = all_rows.get("H105今日強勢排除", pd.Series("", index=all_rows.index)).fillna("").astype(str).eq("是")
     # Research-grade blackhorse requires core evidence; broker/news remain optional.
     authority = all_rows.get("H109決策權威", pd.Series("", index=all_rows.index)).fillna("").astype(str)
     evidence = all_rows.get("H110證據狀態", pd.Series("", index=all_rows.index)).fillna("").astype(str)
     keep = priority.ge(60) & heat.lt(72) & core_complete.ge(50) & ~exclude & authority.eq("RESEARCH_ELIGIBLE") & ~evidence.str.startswith("CONFLICT")
     out = all_rows.loc[keep].copy()
-    out["__fresh"] = pd.to_numeric(out.get("H107新鮮機會分"), errors="coerce")
-    out["__score"] = pd.to_numeric(out.get("H105黑馬預發動分"), errors="coerce")
-    out["__h108"] = pd.to_numeric(out.get("H110最終研究優先分"), errors="coerce")
+    out["__fresh"] = pd.to_numeric(out.get("H107新鮮機會分", pd.Series(index=out.index, dtype=float)), errors="coerce")
+    out["__score"] = pd.to_numeric(out.get("H105黑馬預發動分", pd.Series(index=out.index, dtype=float)), errors="coerce")
+    out["__h108"] = pd.to_numeric(out.get("H110最終研究優先分", pd.Series(index=out.index, dtype=float)), errors="coerce")
     out["__h108"] = out["__h108"].where(out["__h108"].notna(), out["__fresh"].where(out["__fresh"].notna(), out["__score"]))
-    out["__confirm"] = pd.to_numeric(out.get("H108族群確認分"), errors="coerce")
-    out["__heat"] = pd.to_numeric(out.get("H105過熱追高風險分"), errors="coerce")
-    out["__repeat"] = pd.to_numeric(out.get("H107近期入選日數"), errors="coerce").fillna(0)
+    out["__confirm"] = pd.to_numeric(out.get("H108族群確認分", pd.Series(index=out.index, dtype=float)), errors="coerce")
+    out["__heat"] = pd.to_numeric(out.get("H105過熱追高風險分", pd.Series(index=out.index, dtype=float)), errors="coerce")
+    out["__repeat"] = pd.to_numeric(out.get("H107近期入選日數", pd.Series(index=out.index, dtype=float)), errors="coerce").fillna(0)
     out = out.sort_values(["__h108", "__fresh", "__confirm", "__score", "__repeat", "__heat", "__pool", "股票代號"], ascending=[False, False, False, False, True, True, True, True], na_position="last", kind="stable")
-    out = _diversified_pick(out, max(1, int(max_rows)))
+    out = h112_balance_blackhorse(out, max(1, int(max_rows)))
     out["H105黑馬順位"] = range(1, len(out) + 1)
     for c in BLACKHORSE_OVERVIEW_COLUMNS:
         if c not in out.columns:
@@ -1158,15 +1161,18 @@ def decorate_decision_tables(
     # may not continue occupying one of the limited future-research slots.
     risk_snapshot = h109_apply_quarantine_continuity(out, base_dir, h109_parse_day(market_day))
     _rebalance_future_research(out)
+    out["h112_audit_radar"] = h112_audit_candidates(out.get("audit"))
 
     # Keep Formal authority unchanged. Only research discovery + blackhorse ranking
     # are rebalanced for repeat control and sector diversity.
     out["blackhorse_overview"] = _build_blackhorse_overview(out)
+    # Secondary cross-sector discoveries are WATCH_ONLY, never promoted into Research or Formal.
+    # They enter the existing exported blackhorse overview with source authority visible.
 
     health = out.get("health", pd.DataFrame()).copy()
     if not health.empty and "項目" in health.columns:
         item_s = health["項目"].fillna("").astype(str)
-        health = health.loc[~item_s.str.startswith(("H105", "H107", "H108", "H109", "H110"))].copy()
+        health = health.loc[~item_s.str.startswith(("H105", "H107", "H108", "H109", "H110", "H112"))].copy()
     black = out.get("blackhorse_overview", pd.DataFrame())
     already = 0
     for name in ("research", "waiting", "actionable"):
@@ -1182,6 +1188,11 @@ def decorate_decision_tables(
     confirmed_text = "、".join(f"{c}({sc:.0f})" for c, sc, _ in confirmed_sectors[:6]) or "無"
     rows = pd.DataFrame([
         {"項目": "H105版本", "數值": VERSION},
+        {"項目": "H112版本", "數值": H112_VERSION},
+        {"項目": "H112全市場稽核雷達可觀察數", "數值": len(out.get("h112_audit_radar", pd.DataFrame()))},
+        {"項目": "H112黑馬榜實際族群數", "數值": int(black["類別"].nunique()) if isinstance(black, pd.DataFrame) and not black.empty and "類別" in black.columns else 0},
+        {"項目": "H112黑馬榜最大族群集中率", "數值": f"{black["類別"].value_counts(normalize=True).max():.0%}" if isinstance(black, pd.DataFrame) and not black.empty and "類別" in black.columns else "無合格候選"},
+        {"項目": "H112決策治理", "數值": "優先跨族群研究；無獨立合格族群就縮短榜單；稽核池只可WATCH_ONLY且維持H109否決"},
         {"項目": "H105核心目標", "數值": "未來1～5交易日預發動 > 今日已強；今日明顯強勢/過熱會降權並移出黑馬主榜"},
         {"項目": "H105黑馬主榜列數", "數值": int(len(black)) if isinstance(black, pd.DataFrame) else 0},
         {"項目": "H105今日已發動排除列數", "數值": already},
