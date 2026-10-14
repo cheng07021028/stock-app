@@ -1,0 +1,51 @@
+{
+  "auto_trade": false,
+  "auto_weight_change": false,
+  "issues": [
+    {
+      "code": "NO_THREE_SOURCE_DAY",
+      "message": "缺少上市、上櫃與大盤同日完整行情",
+      "severity": "PENDING"
+    },
+    {
+      "code": "TODAY_OFFICIAL_EOD_NOT_VERIFIED",
+      "message": "今天收盤資料尚未三市場一致；可能為休市／官方延遲，未經交易日曆驗證不得推定已完成",
+      "severity": "PENDING"
+    },
+    {
+      "code": "NO_IMMUTABLE_DECISIONS",
+      "message": "缺少真實掃描快照，不能產出推薦歷史績效",
+      "severity": "PENDING"
+    },
+    {
+      "code": "NO_H116_PERFORMANCE_MANIFEST",
+      "message": "尚未產生可追溯績效來源清單",
+      "severity": "PENDING"
+    }
+  ],
+  "market": {
+    "complete_session_count": 0,
+    "decision_rows": 0,
+    "decision_snapshot_count": 0,
+    "h116_manifest": "MISSING",
+    "incomplete_recent_dates": [],
+    "incomplete_session_count": 0,
+    "last_complete_session": null,
+    "last_day_by_source": {
+      "TAIEX": null,
+      "TPEX": null,
+      "TWSE": null
+    },
+    "market_days_by_source": {
+      "TAIEX": 0,
+      "TPEX": 0,
+      "TWSE": 0
+    },
+    "verified_evidence_rows": 0
+  },
+  "policy": "RESEARCH_ONLY_FAIL_CLOSED;LOCAL_STATE_NOT_REMOTE_PROOF",
+  "remote_commit_verified": false,
+  "state_sha256": "41009a9d2e9f83c57c1980807ef06537027758e8d47274941ab3129b55faecca",
+  "status": "PENDING_VALIDATION",
+  "version": "V191-H121.1-OPERATIONS-PROVENANCE"
+}
