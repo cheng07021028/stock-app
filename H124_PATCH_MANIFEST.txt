@@ -1,0 +1,27 @@
+StockApp V191-H124.1 / H123-COMPAT SAFE PATCH
+
+PRODUCTION NEW (2):
+  godpick_h124_ownership_flow.py
+  godpick_h124_runtime_bridge.py
+
+DEPLOY SUPPORT (3):
+  tools/h124_official_ownership_cli.py
+  tools/apply_h124_fullmarket_hook.py
+  .github/workflows/h124_tpex_tdcc_weekly_provenance.yml
+
+TEST (1):
+  tests/h124_fullmarket_evidence_regression.py
+
+DOCUMENTS (3):
+  H124_README_UTF8.txt
+  H124_PATCH_MANIFEST.txt
+  SHA256SUMS.txt
+
+No existing pages, settings, JSON or user data included.
+PATCHED AT DESTINATION AFTER --check-only:
+  godpick_h105_future_blackhorse_engine.py
+  godpick_h116_daily_feedback.py
+  BOTH BACKED UP first and modified only when known H123 anchors match.
+
+Requirements: pre-installed cumulative H123 modules + H113 gate + H116 snapshots;
+requires live official archives for verified signals. No return or live API claim.
