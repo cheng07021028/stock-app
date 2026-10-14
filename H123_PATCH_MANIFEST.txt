@@ -1,0 +1,11 @@
+StockApp V191-H123.1 delta over H122
+ADD godpick_h123_flow_provenance.py
+ADD godpick_h123_runtime_bridge.py
+ADD godpick_h123_strategy_attribution.py
+ADD tools/h123_official_flow_cli.py
+ADD tools/h123_quality_review_cli.py
+ADD tools/apply_h123_evidence_hook.py
+ADD .github/workflows/h123_official_institutional_daily.yml
+ADD tests/h123_evidence_regression.py
+DOC H123_README_UTF8.txt
+No Pages/7 or Pages/8. No user JSON, secrets or API keys. H105/H116 modified in-place only by guarded installation tool after backup. Remote GitHub persistence not established until successful deployment and remote HEAD verified.
