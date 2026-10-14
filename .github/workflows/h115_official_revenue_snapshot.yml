@@ -1,0 +1,42 @@
+name: H115 official evidence snapshot (Taiwan evening)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 13:15 = Asia/Taipei 21:15, weekday after market close.
+    - cron: '15 13 * * 1-5'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: h115-revenue-ledger-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Capture official revenue only at first observation time
+        run: python tools/h115_pit_cli.py fetch-twse-current
+      - name: Commit changed monthly evidence; no runtime records touched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f data/h115/revenue.jsonl
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(H115): verified TWSE first-observed revenue ledger'
+            git push
+          else
+            echo 'No new or revised official facts.'
+          fi
