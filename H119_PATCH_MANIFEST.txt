@@ -1,0 +1,12 @@
+H119.1 必要正式程式：
+godpick_h115_walkforward.py
+godpick_h116_daily_feedback.py
+godpick_h119_total_return.py
+godpick_h119_official_source.py
+tools/h116_closed_loop_cli.py
+tools/h119_corporate_action_cli.py
+.github/workflows/h117_official_ohlcv_feedback.yml
+
+其他：兩項 H119 offline regression、欄位模板、README、SHA256 清單。
+不含 pages、JSON user data、secrets、installers 或原始大包。
+H115/H116 帶入新增 H119 參數時，預設 OFF；無正式核對資料不會宣稱已驗證含息績效。

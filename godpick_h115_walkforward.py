@@ -56,6 +56,8 @@ def evaluate_snapshots(
     h118_policy: str = "LEGACY",
     h118_actions: Iterable[Mapping[str, Any]] | None = None,
     h118_coverage: Iterable[Mapping[str, Any]] | None = None,
+    h119_policy: str = "OFF",
+    h119_adjustments: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str,Any]:
     """Buy next trading session OPEN and exit on horizon's CLOSE.
 
@@ -66,6 +68,15 @@ def evaluate_snapshots(
     _cost_rate(buy_commission_bps,sell_commission_bps,sell_tax_bps,slippage_bps)
     if h118_policy not in ("LEGACY", "STRICT"):
         raise ValueError("H118風險政策不合法")
+    if h119_policy not in ("OFF", "ENTITLEMENT"):
+        raise ValueError("H119調整策略非法")
+    if h119_policy=="ENTITLEMENT" and h118_policy!="STRICT":
+        raise ValueError("H119權益計算必須搭配H118嚴格來源驗證")
+    adjusted_guard=None;adjustment_rows=[]
+    if h119_policy=="ENTITLEMENT":
+        from godpick_h119_total_return import assess_entitlement_window, load_adjustments
+        adjustment_rows=load_adjustments(h119_adjustments or [])
+        adjusted_guard=assess_entitlement_window
     guard=None
     if h118_policy=="STRICT":
         from godpick_h118_performance_authority import assess_window, load_actions, load_coverage
@@ -87,7 +98,10 @@ def evaluate_snapshots(
         seen.add(event_id)
         base={"event_id":event_id,"code":code,"strategy":strategy,"tier":tier,"decision_date":decision.date().isoformat() if decision else "",
               "data_status":"","entry_date":"","exit_date":"","horizon":None,"gross_return_pct":None,"net_return_pct":None,
-              "benchmark_net_pct":None,"alpha_pp":None,"mfe_pct":None,"mae_pct":None,"score":_num(s.get("score") or s.get("H114研究優先分"))}
+              "benchmark_net_pct":None,"alpha_pp":None,"mfe_pct":None,"mae_pct":None,"score":_num(s.get("score") or s.get("H114研究優先分")),
+              "return_basis":"PRICE_ONLY","cash_entitlement_per_initial_share":None,
+              "theoretical_share_count":None,"indicative_total_return_pct":None,
+              "indicative_net_return_pct":None}
         evidence=_datetime(s.get("latest_evidence_at") or s.get("最晚證據可用時間"))
         # Strictly require proof of the issuance cutoff when assessing
         # a NEW walk-forward claim; legacy snapshots are marked as unverified.
@@ -117,34 +131,60 @@ def evaluate_snapshots(
             if (date.fromisoformat(first["date"])-decision.date()).days>8:
                 r["data_status"]="LATE_NEXT_TRADE"
                 rows.append(r);continue
+            quality={"status":"CERTIFIED_UNADJUSTED_PRICE_WINDOW","reason":"LEGACY UNVERIFIED"}
             if guard is not None:
-                # Fail-closed: do not evaluate windows touching confirmed company
-                # actions, large unexplained gaps, or unaudited action calendars.
                 prior=[x for x in hist if x["date"]<first["date"]]
                 prior_close=prior[-1]["close"] if prior else None
-                if bm:
-                    market_window=[x["date"] for x in bm if first["date"]<=x["date"]<=last["date"]]
-                else:
-                    market_window=[]
-                quality=guard(code=code,
+                market_window=[x["date"] for x in bm if first["date"]<=x["date"]<=last["date"]] if bm else []
+                params=dict(code=code,
                     market=next((x.get("exchange") or "" for x in nexts[:n] if x.get("exchange")),""),
                     entry_day=first["date"],exit_day=last["date"],market_days=market_window,
                     stock_bars=nexts[:n],previous_close=prior_close,
                     action_events=action_rows,coverage=coverage_rows)
+                if adjusted_guard is not None:
+                    quality=adjusted_guard(**params,adjustments=adjustment_rows)
+                    r["h119_quality_status"]=quality["status"]
+                    r["h119_quality_reason"]=quality["reason"]
+                else:
+                    quality=guard(**params)
                 r["h118_quality_status"]=quality["status"]
                 r["h118_quality_reason"]=quality["reason"]
-                if quality["status"]!="CERTIFIED_UNADJUSTED_PRICE_WINDOW":
+                allowed=('CERTIFIED_UNADJUSTED_PRICE_WINDOW','CASH_ENTITLEMENT_VALUED','STOCK_RIGHTS_DELIVERY_UNVERIFIED') if adjusted_guard else ('CERTIFIED_UNADJUSTED_PRICE_WINDOW',)
+                if quality["status"] not in allowed:
                     r["data_status"]=quality["status"]
                     rows.append(r)
                     continue
             entry_price=first["open"]*(1+(slippage_bps+buy_commission_bps)/10000)
             exit_price=last["close"]*(1-(slippage_bps+sell_commission_bps+sell_tax_bps)/10000)
-            gross=(last["close"]/first["open"]-1)*100
-            net=(exit_price/entry_price-1)*100
-            r.update(data_status="OK",entry_date=first["date"],exit_date=last["date"],
-                     gross_return_pct=round(gross,4),net_return_pct=round(net,4),
+            cash=float(quality.get('cash_entitlement_per_initial_share') or 0)
+            shares=float(quality.get('theoretical_share_count') or 1)
+            gross=((shares*last["close"]+cash)/first["open"]-1)*100
+            net=((shares*exit_price+cash)/entry_price-1)*100
+            r.update(entry_date=first["date"],exit_date=last["date"],
+                     cash_entitlement_per_initial_share=round(cash,8),
+                     theoretical_share_count=round(shares,8),
                      mfe_pct=round((max(x["high"] for x in nexts[:n])/first["open"]-1)*100,4),
                      mae_pct=round((min(x["low"] for x in nexts[:n])/first["open"]-1)*100,4))
+            if quality['status']=='STOCK_RIGHTS_DELIVERY_UNVERIFIED':
+                r.update(data_status='STOCK_RIGHTS_DELIVERY_UNVERIFIED',
+                         return_basis='THEORETICAL_UNSETTLED_SHARE_RIGHTS',
+                         indicative_total_return_pct=round(gross,4),
+                         indicative_net_return_pct=round(net,4))
+                rows.append(r)
+                continue
+            if quality['status']=='CASH_ENTITLEMENT_VALUED':
+                # Cash dividend is an entitlement, not immediately settled cash;
+                # comparison with TAIEX price-only benchmark is NOT like-for-like.
+                r.update(data_status='OK_CASH_ENTITLEMENT_ESTIMATE',
+                         return_basis='CASH_RECEIVABLE_NOT_YET_SETTLED',
+                         gross_return_pct=round(gross,4),net_return_pct=round(net,4),
+                         indicative_total_return_pct=round(gross,4),
+                         indicative_net_return_pct=round(net,4),
+                         benchmark_comparability='REQUIRES_MATCHED_TOTAL_RETURN_INDEX')
+                rows.append(r)
+                continue
+            r.update(data_status="OK",return_basis='PRICE_ONLY_NO_ACTION',
+                     gross_return_pct=round(gross,4),net_return_pct=round(net,4))
             if bm:
                 bi=bm_by_day.get(first["date"]);bx=bm_by_day.get(last["date"])
                 if bi and bx:
@@ -171,10 +211,16 @@ def evaluate_snapshots(
     failures=defaultdict(int)
     for r in rows:
         if r["data_status"]!="OK":failures[r["data_status"]]+=1
+    cash_estimates=[r for r in rows if r['data_status']=='OK_CASH_ENTITLEMENT_ESTIMATE']
+    stock_provisional=[r for r in rows if r['data_status']=='STOCK_RIGHTS_DELIVERY_UNVERIFIED']
     return {"version":VERSION,"price_basis":"NEXT_SESSION_OPEN_TO_Tn_CLOSE",
             "cost_bps":{"buy_commission":buy_commission_bps,"sell_commission":sell_commission_bps,
                         "sell_tax":sell_tax_bps,"slippage_each_side":slippage_bps},
             "data_policy":"PIT_IMMUTABLE_SNAPSHOTS_ONLY_NO_FUTURE_DATA",
             "h118_policy":h118_policy,
+            "h119_policy":h119_policy,
+            "h119_cash_entitlement_estimates":len(cash_estimates),
+            "h119_stock_rights_valuations_unsettled":len(stock_provisional),
+            "h119_statement":"現金應收股利與尚未交付之股票權益不是已入帳／可即時賣出的交易損益；不得用價格指數比較含息alpha",
             "details":rows,"summary":summary,"failures":dict(failures),"verified_events":len({r['event_id'] for r in rows if r['data_status']=='OK'}),
             "disclaimer":"策略樣本績效非因果證明／非獲利保證；需要樣本外滾動評估及資料權威核查"}

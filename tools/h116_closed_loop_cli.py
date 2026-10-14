@@ -22,6 +22,9 @@ from godpick_h118_performance_authority import (
     read_csv as read_quality_csv,load_actions,load_coverage,manifest as quality_manifest,
     CSV_ACTION_COLUMNS,CSV_COVERAGE_COLUMNS,
 )
+from godpick_h119_total_return import (
+    ADJUSTMENT_COLUMNS,load_adjustments,fingerprint as h119_fingerprint,
+)
 
 
 def csv_rows(path:Path):
@@ -58,6 +61,9 @@ def main():
         help='Require audited official company-action coverage; do not claim unaudited outcomes')
     rev.add_argument('--h118-actions',type=Path,default=ROOT/'data'/'h118'/'corporate_actions.csv')
     rev.add_argument('--h118-coverage',type=Path,default=ROOT/'data'/'h118'/'daily_coverage.csv')
+    rev.add_argument('--h119-entitlement',action='store_true',
+        help='Enable H119 theoretical cash/stock entitlement review (strict H118 required)')
+    rev.add_argument('--h119-adjustments',type=Path,default=ROOT/'data'/'h119'/'reviewed'/'official_adjustments.csv')
     args=ap.parse_args()
     snaps=load_snapshot_files(args.decisions)
     if args.command=='inspect':
@@ -71,12 +77,17 @@ def main():
     if not snaps:
         print('H116 NO_SNAPSHOTS：缺少真實當晚的不可變快照；拒絕偽造歷史績效')
         return
+    if args.h119_entitlement and not args.h118_strict:
+        raise ValueError('--h119-entitlement 必須一起使用 --h118-strict')
+    adj=load_adjustments(read_quality_csv(args.h119_adjustments,ADJUSTMENT_COLUMNS)) if args.h119_entitlement else []
     acts=load_actions(read_quality_csv(args.h118_actions,CSV_ACTION_COLUMNS)) if args.h118_strict else []
     cov=load_coverage(read_quality_csv(args.h118_coverage,CSV_COVERAGE_COLUMNS)) if args.h118_strict else []
     check=quality_manifest(acts,cov)
     result=review_strategies(snaps,csv_rows(args.prices),benchmark=csv_rows(args.benchmark) if args.benchmark else None,
                              h118_policy='STRICT' if args.h118_strict else 'LEGACY',
                              h118_actions=acts,h118_coverage=cov,
+                             h119_policy='ENTITLEMENT' if args.h119_entitlement else 'OFF',
+                             h119_adjustments=adj,
                              buy_commission_bps=args.buy_bps,sell_commission_bps=args.sell_bps,
                              sell_tax_bps=args.tax_bps,slippage_bps=args.slippage_bps)
     out=args.out
@@ -88,7 +99,10 @@ def main():
               'data_status':'INSUFFICIENT' if not result['summary'] else 'PARTIAL_REVIEW_ONLY',
               'h118_quality_policy':result['h118_quality_policy'],
               'h118_corporate_evidence_sha256':check['sha256'],
-              'h118_action_rows':len(acts),'h118_coverage_rows':len(cov)}
+              'h118_action_rows':len(acts),'h118_coverage_rows':len(cov),
+              'h119_policy':'ENTITLEMENT' if args.h119_entitlement else 'OFF',
+              'h119_adjustments_sha256':h119_fingerprint(adj) if args.h119_entitlement else None,
+              'h119_methods':'PAPER_ONLY_RECEIVABLES_NOT_SETTLED;NO_AUTO_TRADE'}
     previous=out/'H116_source_manifest.json'
     if previous.exists():
         try:
@@ -103,12 +117,18 @@ def main():
     csv_write(out/'H116_T1_T3_T5_details.csv',result['details'])
     csv_write(out/'H116_strategy_comparison.csv',result['summary'])
     csv_write(out/'H116_approval_required.csv',result['recommendations'])
+    if args.h119_entitlement:
+        csv_write(out/'H119_cash_receivable_research_only.csv',result['h119_cash_research_only'])
+        csv_write(out/'H119_stock_rights_unsettled_research_only.csv',result['h119_unsettled_stock_research_only'])
     print(json.dumps({'status':'REVIEW_FINISHED_WITH_LIMITATIONS','snapshot_runs':len(snaps),
                       'input_events':result['source_events'],
                       'duplicates_removed':result['same_stock_day_strategy_duplicate_rows'],
                       'data_failures':result['data_failures'],
                       'comparison_groups':len(result['summary']),
                       'h118_quality_policy':result['h118_quality_policy'],
+                      'h119_policy':result['h119_policy'],
+                      'h119_cash_research_rows':len(result['h119_cash_research_only']),
+                      'h119_stock_rights_unsettled_rows':len(result['h119_unsettled_stock_research_only']),
                       'auto_apply':False,'out':str(out)},ensure_ascii=False,indent=2))
 
 if __name__=='__main__':main()

@@ -227,6 +227,8 @@ def review_strategies(snapshots: Iterable[Mapping[str,Any]], prices: Iterable[Ma
                       min_exposure_days: int=60, h118_policy: str="LEGACY",
                       h118_actions: Iterable[Mapping[str,Any]]|None=None,
                       h118_coverage: Iterable[Mapping[str,Any]]|None=None,
+                      h119_policy: str="OFF",
+                      h119_adjustments: Iterable[Mapping[str,Any]]|None=None,
                       **costs:Any) -> dict[str,Any]:
     """Compute observed outcomes, block repeated same-day symbol/strategy vote stacking.
 
@@ -236,7 +238,8 @@ def review_strategies(snapshots: Iterable[Mapping[str,Any]], prices: Iterable[Ma
     events=_snapshots_to_events(snapshots)
     raw=evaluate_snapshots(events,prices,benchmark=benchmark,
                             h118_policy=h118_policy,h118_actions=h118_actions,
-                            h118_coverage=h118_coverage,**costs)
+                            h118_coverage=h118_coverage,
+                            h119_policy=h119_policy,h119_adjustments=h119_adjustments,**costs)
     dedup={};repeated=0
     for r in raw['details']:
         key=(r['decision_date'],r['code'],r['strategy'],r['source_table'] if 'source_table' in r else '',r['horizon'])
@@ -276,6 +279,17 @@ def review_strategies(snapshots: Iterable[Mapping[str,Any]], prices: Iterable[Ma
                           'proposal':decision})
         proposals.append({'strategy':strategy,'horizon':horizon,'proposal':decision,
                           'requires_human_approval':True,'auto_apply':False})
+    # Cash receivable and unsettled stock entitlements are RESEARCH ONLY,
+    # not eligible to upgrade strategy weights or vote in price-index alpha.
+    cash_diagnostics=[dict(strategy=x['strategy'],horizon=x['horizon'],code=x['code'],
+                           return_basis=x['return_basis'],
+                           cash_receivable_per_share=x['cash_entitlement_per_initial_share'],
+                           indicative_net_pct=x['indicative_net_return_pct'])
+                      for x in clean if x['data_status']=='OK_CASH_ENTITLEMENT_ESTIMATE']
+    unsettled_diagnostics=[dict(strategy=x['strategy'],horizon=x['horizon'],code=x['code'],
+                            return_basis=x['return_basis'],
+                            indicative_total_return_pct=x['indicative_total_return_pct'])
+                           for x in clean if x['data_status']=='STOCK_RIGHTS_DELIVERY_UNVERIFIED']
     failure_counts=defaultdict(int)
     for row in clean:
         if row['data_status']!='OK':failure_counts[row['data_status']]+=1
@@ -285,6 +299,8 @@ def review_strategies(snapshots: Iterable[Mapping[str,Any]], prices: Iterable[Ma
             'evaluation_horizons':list(HORIZONS),
             'metric_policy':'EQUAL_DAY_WEIGHTED;NO_LIVE_WEIGHT_AUTOMATION',
             'h118_quality_policy':h118_policy,
+            'h119_policy':h119_policy,'h119_cash_research_only':cash_diagnostics,
+            'h119_unsettled_stock_research_only':unsettled_diagnostics,
             'details':clean,'summary':summaries,'recommendations':proposals,
             'data_failures':dict(failure_counts),
             'guardrails':{'min_stock_day_samples':min_samples,'min_distinct_days':min_distinct_days,
