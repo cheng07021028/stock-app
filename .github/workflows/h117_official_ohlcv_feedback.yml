@@ -23,6 +23,12 @@ jobs:
         run: python -m pip install 'requests>=2.31,<3'
       - name: Official close only - stop if ANY source is unavailable
         run: python tools/h117_official_eod_cli.py collect
+      - name: Capture official corporate action raw evidence (not auto-certified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h119_corporate_action_cli.py collect
+          python tools/h119_corporate_action_cli.py inspect
       - name: Review immutable predictions only with verified official bars
         shell: bash
         run: |
@@ -33,7 +39,8 @@ jobs:
               --prices data/h116/verified_ohlc.csv \
               --benchmark data/h116/benchmark_ohlc.csv \
               --out reports/h116 \
-              --h118-strict
+              --h118-strict \
+              --h119-entitlement
           else
             echo 'NO_VALID_PREDICTIONS_YET: reports are not forged.'
           fi
@@ -44,6 +51,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if [[ -d data/h117/daily ]]; then git add data/h117/daily; fi
+          if [[ -d data/h119/raw ]]; then git add data/h119/raw; fi
           if [[ -f data/h116/verified_ohlc.csv ]]; then
             git add data/h116/verified_ohlc.csv data/h116/benchmark_ohlc.csv
           fi
@@ -53,9 +61,13 @@ jobs:
               reports/h116/H116_T1_T3_T5_details.csv \
               reports/h116/H116_approval_required.csv \
               reports/h116/H116_source_manifest.json
+            if [[ -f reports/h116/H119_cash_receivable_research_only.csv ]]; then
+              git add reports/h116/H119_cash_receivable_research_only.csv \
+                reports/h116/H119_stock_rights_unsettled_research_only.csv
+            fi
           fi
           if ! git diff --cached --quiet; then
-            git commit -m 'H117: official verified EOD bars and research feedback (no trades)'
+            git commit -m 'H119: official EOD, raw action evidence and conservative entitlement review'
             git pull --rebase origin "${GITHUB_REF_NAME}"  # preserve other writers' commits
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
