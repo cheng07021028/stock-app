@@ -1,12 +1,13 @@
-name: H121 EOD Verified Data and Provenance Check
+name: H122 EOD Incident Response and Verified Provenance
 on:
   workflow_dispatch:
   schedule:
     - cron: '45 10,12 * * 1-5' # Asia/Taipei 18:45 and 20:45; official dates must match
 permissions:
   contents: write
+  issues: write # optional admin notification; disabled unless repo variable enables
 concurrency:
-  group: stockapp-h121-eod-main
+  group: stockapp-h122-eod-main
   cancel-in-progress: false
 jobs:
   operations:
@@ -27,13 +28,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports/h121
-          python tools/h117_official_eod_cli.py collect 2>&1 | tee reports/h121/H121_collect_run.log
+          python tools/h122_incident_cli.py collect-safe market_eod 2>&1 | tee reports/h121/H121_collect_run.log
       - name: Capture raw official corporate actions (not proof of completeness)
         id: corporate
         shell: bash
         run: |
           set -euo pipefail
-          python tools/h119_corporate_action_cli.py collect 2>&1 | tee reports/h121/H121_action_run.log
+          python tools/h122_incident_cli.py collect-safe corporate_raw 2>&1 | tee reports/h121/H121_action_run.log
           python tools/h119_corporate_action_cli.py inspect
           python tools/h120_validate_cli.py audit || echo 'H120_ATTESTATION_REQUIRED: not a certified full-market event calendar'
       - name: Evaluate immutable prior recommendations only
@@ -61,60 +62,84 @@ jobs:
           python tools/h121_operations_cli.py inspect \
             --collect-outcome '${{ steps.collect.outcome }}' \
             --review-outcome '${{ steps.review.outcome }}'
-      - name: Commit only permitted source snapshots and changed derived reports
-        if: success()
+      - name: Build H122 stable dashboard and incident classification
+        if: always()
+        id: dashboard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h122_incident_cli.py dashboard --corporate-outcome "${{ steps.corporate.outcome }}"
+      - name: Commit approved immutable data, or health state only on failed runs
+        if: always()
         id: commit
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [[ -d data/h117/daily ]]; then git add data/h117/daily; fi
-          if [[ -d data/h119/raw ]]; then git add data/h119/raw; fi
-          if [[ -f data/h116/verified_ohlc.csv ]]; then
-            git add data/h116/verified_ohlc.csv data/h116/benchmark_ohlc.csv
-          fi
-          if [[ -f reports/h116/H116_strategy_summary.json ]]; then
-            git add reports/h116/H116_strategy_summary.json \
-              reports/h116/H116_strategy_comparison.csv \
-              reports/h116/H116_T1_T3_T5_details.csv \
-              reports/h116/H116_approval_required.csv \
-              reports/h116/H116_source_manifest.json
-            if [[ -f reports/h116/H120_evidence_audit.json ]]; then git add reports/h116/H120_evidence_audit.json; fi
-            if [[ -f reports/h120/H120_strategy_comparison.json ]]; then git add reports/h120/H120_strategy_comparison.json; fi
-            if [[ -f reports/h116/H119_cash_receivable_research_only.csv ]]; then
-              git add reports/h116/H119_cash_receivable_research_only.csv \
-                reports/h116/H119_stock_rights_unsettled_research_only.csv
+          # Never push partial/unverified market or strategy artifacts if any step failed.
+          if [[ '${{ steps.collect.outcome }}' == 'success' && '${{ steps.corporate.outcome }}' == 'success' && '${{ steps.review.outcome }}' == 'success' ]]; then
+            if [[ -d data/h117/daily ]]; then git add data/h117/daily; fi
+            if [[ -d data/h119/raw ]]; then git add data/h119/raw; fi
+            if [[ -f data/h116/verified_ohlc.csv ]]; then
+              git add data/h116/verified_ohlc.csv data/h116/benchmark_ohlc.csv
             fi
+            if [[ -f reports/h116/H116_strategy_summary.json ]]; then
+              git add reports/h116/H116_strategy_summary.json \
+                reports/h116/H116_strategy_comparison.csv \
+                reports/h116/H116_T1_T3_T5_details.csv \
+                reports/h116/H116_approval_required.csv \
+                reports/h116/H116_source_manifest.json
+              if [[ -f reports/h116/H120_evidence_audit.json ]]; then git add reports/h116/H120_evidence_audit.json; fi
+              if [[ -f reports/h120/H120_strategy_comparison.json ]]; then git add reports/h120/H120_strategy_comparison.json; fi
+              if [[ -f reports/h116/H119_cash_receivable_research_only.csv ]]; then
+                git add reports/h116/H119_cash_receivable_research_only.csv \
+                  reports/h116/H119_stock_rights_unsettled_research_only.csv
+              fi
+            fi
+          else
+            echo 'H122: partial or failed run: commit health metadata only; NO source promotion.'
           fi
           # Stable state is committed only when underlying evidence/state changes,
           # never per-run timestamps or logs. (If ignored, explicitly allow this one file.)
           git add -f reports/h121/H121_operational_state.json
+          git add -f reports/h122/H122_dashboard_state.json reports/h122/H122_dashboard.md
           if ! git diff --cached --quiet; then
-            git commit -m 'H121: audited official EOD evidence and operations state'
+            git commit -m 'H122: approved official data or audited incident health'
             git pull --rebase origin "${GITHUB_REF_NAME}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
             echo 'NO_CHANGE: no unnecessary commit or Streamlit reboot'
           fi
       - name: Verify server branch points to the exact final HEAD
-        if: success()
+        if: steps.commit.outcome == 'success' 
         id: remote
         shell: bash
         run: |
           set -euo pipefail
           python tools/h121_operations_cli.py verify-remote --branch "${GITHUB_REF_NAME}"
+      - name: Notify administrator via GitHub incident issue (opt-in, deduplicated)
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          H122_NOTIFY_GITHUB_ISSUE: ${{ vars.H122_NOTIFY_GITHUB_ISSUE }}
+        run: |
+          python tools/h122_notify_issue.py
       - name: Publish run receipts and troubleshooting logs (not persisted app data)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: h121-run-${{ github.run_id }}-${{ github.run_attempt }}
+          name: h122-run-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             reports/h121/H121_run_receipt.json
             reports/h121/H121_remote_receipt.json
             reports/h121/H121_collect_run.log
             reports/h121/H121_action_run.log
             reports/h121/H121_review_run.log
+            reports/h122/H122_dashboard_state.json
+            reports/h122/H122_dashboard.md
+            reports/h122/H122_dashboard.html
           if-no-files-found: warn
           retention-days: 14
       - name: Summarize blockers and remote permanence
@@ -123,5 +148,5 @@ jobs:
         run: |
           python tools/h121_operations_cli.py summary
           if [[ '${{ steps.collect.outcome }}' == 'failure' || '${{ steps.corporate.outcome }}' == 'failure' || '${{ steps.review.outcome }}' == 'failure' || '${{ steps.commit.outcome }}' == 'failure' || '${{ steps.remote.outcome }}' == 'failure' ]]; then
-            echo '::error::H121 nightly pipeline failed. Inspect attached run receipt and logs; no remote durability claim.'
+            echo '::error::H122 nightly pipeline failed. Inspect dashboard and run receipt; no data completeness claim.'
           fi
