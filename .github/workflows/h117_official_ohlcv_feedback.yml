@@ -29,6 +29,8 @@ jobs:
           set -euo pipefail
           python tools/h119_corporate_action_cli.py collect
           python tools/h119_corporate_action_cli.py inspect
+          # H120 audit is diagnostic: lack of human attestation does not fake coverage.
+          python tools/h120_validate_cli.py audit || echo 'H120_REVIEW_REQUIRED: official event coverage not yet attested'
       - name: Review immutable predictions only with verified official bars
         shell: bash
         run: |
@@ -40,7 +42,9 @@ jobs:
               --benchmark data/h116/benchmark_ohlc.csv \
               --out reports/h116 \
               --h118-strict \
-              --h119-entitlement
+              --h119-entitlement \
+              --h120-proof-enforced
+            python tools/h120_validate_cli.py compare || echo 'H120_COMPARISON_NOT_READY: wait for certified matched samples'
           else
             echo 'NO_VALID_PREDICTIONS_YET: reports are not forged.'
           fi
@@ -61,6 +65,12 @@ jobs:
               reports/h116/H116_T1_T3_T5_details.csv \
               reports/h116/H116_approval_required.csv \
               reports/h116/H116_source_manifest.json
+            if [[ -f reports/h116/H120_evidence_audit.json ]]; then
+              git add reports/h116/H120_evidence_audit.json
+            fi
+            if [[ -f reports/h120/H120_strategy_comparison.json ]]; then
+              git add reports/h120/H120_strategy_comparison.json
+            fi
             if [[ -f reports/h116/H119_cash_receivable_research_only.csv ]]; then
               git add reports/h116/H119_cash_receivable_research_only.csv \
                 reports/h116/H119_stock_rights_unsettled_research_only.csv
