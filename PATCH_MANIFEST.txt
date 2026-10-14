@@ -1,0 +1,13 @@
+V191-H116 PATCH MANIFEST
+Based on: StockApp V191-H115.3 + H111 Page7 Settings; append-only overlay.
+No original Page7 included; only the hook installer patches currently deployed source.
+No JSON user history, credentials or secrets included.
+
+godpick_h116_daily_feedback.py (16085 bytes)
+tools/apply_h116_snapshot_hook.py (5494 bytes)
+tools/h116_closed_loop_cli.py (5148 bytes)
+.github/workflows/h116_nightly_strategy_review.yml (1921 bytes)
+tests/h116_closed_loop_regression.py (6916 bytes)
+templates/H116_verified_ohlc_columns.csv (33 bytes)
+templates/H116_snapshot_summary_columns.csv (64 bytes)
+H116_README_UTF8.txt (6931 bytes)
