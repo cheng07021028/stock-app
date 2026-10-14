@@ -1,0 +1,47 @@
+name: H123 Official TWSE Institutional Daily Evidence (Read-only Research)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 13 * * 1-5' # Taiwan 21:45, after H122 20:45 EOD workflow
+permissions:
+  contents: write
+concurrency:
+  group: stockapp-h123-official-flow-main
+  cancel-in-progress: false
+jobs:
+  institution-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install HTTP dependency
+        run: python -m pip install 'requests>=2.31,<3'
+      - name: Capture latest fully verified H117 session's TWSE T86 only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h123_official_flow_cli.py collect-latest
+      - name: Save official original evidence to repository (no config or PII)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ -d data/h123/twse_t86 ]]; then git add data/h123/twse_t86; fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'H123: immutable TWSE T86 daily official flow capture'
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo 'H123_UNCHANGED: nothing to write'
+          fi
+      - name: Verify remote HEAD for permanent record
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h121_operations_cli.py verify-remote --branch "${GITHUB_REF_NAME}"
