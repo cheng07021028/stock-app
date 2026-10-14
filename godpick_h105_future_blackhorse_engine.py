@@ -27,6 +27,11 @@ import math
 import pandas as pd
 from godpick_h110_evidence_integrity import audit as h110_audit, research_asof as h110_research_asof, VERSION as H110_VERSION
 from godpick_h113_quality_gate import audit as h113_audit, VERSION as H113_VERSION
+from godpick_h114_parallel_alpha import (
+    VERSION as H114_VERSION, evaluate as h114_evaluate,
+    build_parallel_watch as h114_build_parallel_watch,
+    load_verified_evidence as h114_load_verified_evidence,
+)
 from godpick_h112_sector_balance import (VERSION as H112_VERSION, safe_audit_discovery as h112_audit_candidates, balance_research as h112_balance_research, balance_blackhorse as h112_balance_blackhorse)
 from godpick_h109_authority_governor import govern as h109_govern, parse_day as h109_parse_day, official_snapshot as h109_official_snapshot, official_announcements as h109_official_announcements, apply_quarantine_continuity as h109_apply_quarantine_continuity, join_official as h109_join_official, VERSION as H109_VERSION
 
@@ -40,7 +45,7 @@ except Exception:  # compatibility if H104/H108 continuity is not yet deployed
     sector_continuity = None
     save_sector_snapshot = None
 
-VERSION = "v191_h113_strict_future_blackhorse_evidence_gate_20261013"
+VERSION = "v191_h114_parallel_alpha_h113_compat_20261014"
 
 H105_COLUMNS = [
     "H113版本", "H113入榜資格", "H113流動性合格", "H113大戶鎖碼合格", "H113法人逐日來源驗證",
@@ -97,6 +102,11 @@ H105_COLUMNS = [
 ]
 
 BLACKHORSE_OVERVIEW_COLUMNS = [
+    "H114版本", "H114入榜身分", "H114研究優先分", "H114主導策略",
+    "H114成長低估分", "H114量縮蓄勢分", "H114K線反轉分", "H114法人資金分",
+    "H114營收資料狀態", "H114營收創高", "H114營收年增率%",
+    "H114估值資料狀態", "H114相對本益比折價%", "H114K線資料狀態",
+    "H114紅K吞噬", "H114量縮墊高", "H114缺失證據", "H114交易權限",
     "H105黑馬順位", "H112最終跨族群優先分", "H112族群曝險扣分", "H112候選來源", "H112研究權限", "H112族群分散狀態", "股票代號", "股票名稱", "類別", "市場別",
     "H113入榜資格", "H113流動性合格", "H113當日成交額百萬", "H113二十日均成交額百萬", "H113當日成交量張",
     "H113千張大戶週變化pp", "H113大戶鎖碼合格", "H113法人逐日來源驗證", "H113外資連買日數", "H113投信連買日數",
@@ -865,7 +875,7 @@ def _source_lookup(candidate_df: pd.DataFrame | None) -> dict[str, dict[str, Any
     return result
 
 
-def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str, dict[str, Any]], sector_map: dict[str, dict[str, Any]], official_map: dict[str, dict[str, Any]] | None = None, announcements_map: dict[str, dict[str, Any]] | None = None, market_day: str = "", info_asof: str = "", asof_mode: str = "HISTORICAL_SAFE", source_status: str = "") -> pd.DataFrame:
+def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str, dict[str, Any]], sector_map: dict[str, dict[str, Any]], official_map: dict[str, dict[str, Any]] | None = None, announcements_map: dict[str, dict[str, Any]] | None = None, market_day: str = "", info_asof: str = "", asof_mode: str = "HISTORICAL_SAFE", source_status: str = "", fundamental_map: dict[str, dict[str, Any]] | None = None) -> pd.DataFrame:
     out = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame or [])
     for c in H105_COLUMNS:
         if c not in out.columns:
@@ -877,6 +887,11 @@ def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str
         code = _code(row.get("股票代號"))
         merged = dict(source_map.get(code, {}))
         merged.update(row)
+        # H114 handoff only fills absent evidence. Never replaces scan observations
+        # or a newer verified runtime input with a stored history snapshot.
+        for _k114, _v114 in (fundamental_map or {}).get(code, {}).items():
+            if _k114 not in merged or merged[_k114] is None or (isinstance(merged[_k114], str) and not merged[_k114].strip()):
+                merged[_k114] = _v114
         merged["股票代號"] = code
         merged = h109_join_official(merged, (official_map or {}).get(code))
         if (announcements_map or {}).get(code):
@@ -888,6 +903,8 @@ def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str
                                  info_asof=h109_parse_day(info_asof or market_day),
                                  asof_mode=asof_mode, source_status=source_status))
         merged.update(h113_audit(merged, info_asof=info_asof or market_day))
+        # H114 is a parallel research lens: no mutation of H113 / Formal authority.
+        merged.update(h114_evaluate(merged, info_asof=info_asof or market_day))
         records.append(merged)
     out = pd.DataFrame(records)
     score = pd.to_numeric(out.get("H110最終研究優先分"), errors="coerce")
@@ -1156,6 +1173,7 @@ def decorate_decision_tables(
         except Exception:
             sector_history = []
     source_map = _source_lookup(candidate_df)
+    fundamental_map = h114_load_verified_evidence(base_dir)
     sector_map = _sector_lookup(sector_df, sector_history=sector_history, market_day=market_day)
     research_day, scan_mode, live_source = h110_research_asof(market_day, [candidate_df] + [out.get(k) for k in ("research", "waiting")])
     info_asof = str(research_day) if research_day else market_day
@@ -1167,7 +1185,8 @@ def decorate_decision_tables(
         out[name] = _enrich_frame(out.get(name), pool=name, source_map=source_map,
                                   sector_map=sector_map, official_map=official_map,
                                   announcements_map=announcements_map, market_day=market_day,
-                                  info_asof=info_asof, asof_mode=scan_mode, source_status=source_status)
+                                  info_asof=info_asof, asof_mode=scan_mode, source_status=source_status,
+                                  fundamental_map=fundamental_map)
 
     # H107 fixes the old routing leak: an H105 "already ignited / do not chase" row
     # may not continue occupying one of the limited future-research slots.
@@ -1179,6 +1198,9 @@ def decorate_decision_tables(
     if not out["h112_audit_radar"].empty:
         out["h112_audit_radar"] = out["h112_audit_radar"].loc[out["h112_audit_radar"]["H113入榜資格"].eq("QUALIFIED")].copy()
 
+    # H114 independent multi-strategy watch. No promotion into original Research/Formal.
+    # AUDIT watch-only candidates never inherit execution permission.
+    out["h114_parallel_watch"] = h114_build_parallel_watch(out)
     # Keep Formal authority unchanged. Only research discovery + blackhorse ranking
     # are rebalanced for repeat control and sector diversity.
     out["blackhorse_overview"] = _build_blackhorse_overview(out)
@@ -1205,6 +1227,10 @@ def decorate_decision_tables(
     rows = pd.DataFrame([
         {"項目": "H105版本", "數值": VERSION},
         {"項目": "H112版本", "數值": H112_VERSION},
+        {"項目": "H114版本", "數值": H114_VERSION},
+        {"項目": "H114平行策略研究候選", "數值": len(out.get("h114_parallel_watch", pd.DataFrame()))},
+        {"項目": "H114策略准入治理", "數值": "成長低估/量縮蓄勢/K線反轉/法人資金各自驗證；僅研究，不動Formal；缺OHLC/營收/PE證據不得假通過"},
+        {"項目": "H114千張與流動性標準", "數值": "當日及20日均量≥1000張且成交額各≥1.5億元；H113原500張底線不改"},
         {"項目": "H113版本", "數值": H113_VERSION},
         {"項目": "H113黑馬硬門檻", "數值": "當日及20日平均成交額≥1.5億元、成交量≥500張；TDCC週增≥+0.05pp；官方外資/投信至少連買2日＋近3/5日淨買；主升前兆BH1/BH2；缺證據不補位"},
         {"項目": "H113正式研究合格數", "數值": sum(int(out.get(p,pd.DataFrame()).get("H113入榜資格",pd.Series(dtype=str)).eq("QUALIFIED").sum()) for p in ("research","waiting"))},
