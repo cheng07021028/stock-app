@@ -1,0 +1,64 @@
+name: H124 TDCC Weekly and TPEx Official Provenance (Research Only)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 15 * * 1-5'  # Taiwan 23:15, weekly TDCC snapshots are retained only when released
+permissions:
+  contents: write
+concurrency:
+  group: stockapp-h124-provenance-main
+  cancel-in-progress: false
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install HTTP client
+        run: python -m pip install 'requests>=2.31,<3'
+      - name: Official TDCC 1-5 fetch (no fallback to third-party sources)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h124_official_ownership_cli.py collect-tdcc
+      - name: TPEx official dataset optional (requires schema and date in official rows)
+        if: ${{ vars.H124_TPEX_OFFICIAL_DAILY_URL != '' }}
+        shell: bash
+        env:
+          TPEX_URL: ${{ vars.H124_TPEX_OFFICIAL_DAILY_URL }}
+        run: |
+          set -euo pipefail
+          DAY=$(python - <<'PY'
+          from godpick_h123_runtime_bridge import load_context
+          from pathlib import Path
+          ctx=load_context(Path('.'))
+          if ctx['status']!='OFFICIAL_SESSIONS_AND_ARCHIVE_LOADED':
+              raise SystemExit('H117_INCOMPLETE: refusing TPEx date guess')
+          print(ctx['calendar'][-1])
+          PY
+          )
+          python tools/h124_official_ownership_cli.py collect-tpex-url --url "$TPEX_URL" --day "$DAY"
+      - name: Commit only official H124 evidence (never recommender settings)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ -d data/h124 ]]; then git add data/h124; fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'H124: immutable weekly ownership and official TPEx evidence'
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo 'H124_UNCHANGED; no source evidence changed'
+          fi
+      - name: Verify remote HEAD before declaring permanent
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h121_operations_cli.py verify-remote --branch "${GITHUB_REF_NAME}"
