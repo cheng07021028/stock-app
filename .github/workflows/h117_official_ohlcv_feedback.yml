@@ -1,0 +1,62 @@
+name: H117 Official EOD OHLCV and H116 Scorecard
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 10,12 * * 1-5'  # 18:45 and 20:45 Taiwan; delay tolerates slow official EOD updates
+permissions:
+  contents: write
+concurrency:
+  group: stockapp-h117-official-close-main
+  cancel-in-progress: false
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install HTTP dependency
+        run: python -m pip install 'requests>=2.31,<3'
+      - name: Official close only - stop if ANY source is unavailable
+        run: python tools/h117_official_eod_cli.py collect
+      - name: Review immutable predictions only with verified official bars
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d data/h116/decisions && -s data/h116/verified_ohlc.csv && -s data/h116/benchmark_ohlc.csv ]]; then
+            python tools/h116_closed_loop_cli.py review \
+              --decisions data/h116/decisions \
+              --prices data/h116/verified_ohlc.csv \
+              --benchmark data/h116/benchmark_ohlc.csv \
+              --out reports/h116
+          else
+            echo 'NO_VALID_PREDICTIONS_YET: reports are not forged.'
+          fi
+      - name: Commit verified immutable bars and derived review only on actual changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ -d data/h117/daily ]]; then git add data/h117/daily; fi
+          if [[ -f data/h116/verified_ohlc.csv ]]; then
+            git add data/h116/verified_ohlc.csv data/h116/benchmark_ohlc.csv
+          fi
+          if [[ -f reports/h116/H116_strategy_summary.json ]]; then
+            git add reports/h116/H116_strategy_summary.json \
+              reports/h116/H116_strategy_comparison.csv \
+              reports/h116/H116_T1_T3_T5_details.csv \
+              reports/h116/H116_approval_required.csv \
+              reports/h116/H116_source_manifest.json
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'H117: official verified EOD bars and research feedback (no trades)'
+            git pull --rebase origin "${GITHUB_REF_NAME}"  # preserve other writers' commits
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo 'NO_CHANGE: no needless reboot/commit'
+          fi
