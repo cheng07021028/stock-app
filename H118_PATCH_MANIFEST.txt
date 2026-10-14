@@ -1,0 +1,22 @@
+V191-H118.1 SAFE DIRECT COPY | 2026-10-14
+Source baseline: H117 applied on H116/H115/H114/H113/H112/H111 existing project
+PRODUCTION CHANGED: H115/H116/H117 evaluator, H116 CLI, H117 H116 workflows
+PRODUCTION ADDED: H118 corporate-action quality governor, H118 audit CLI
+NOT INCLUDED: pages/7, pages/8, user JSON, secrets, installer, live market samples.
+SUCCESS: H112/H113/H114/H115/H116/H117/H118 regression, 342 Python compileall, end-to-end CLI.
+IMPORTANT: no official automated company-action completeness feed in this version.
+STRICT reports fail closed until official action coverage files are documented.
+
+FILE SHA256
+0daa8302a9352662398e7475f4894879b1829e2585292c2d00b987748153e680  .github/workflows/h116_nightly_strategy_review.yml
+0cf80fd625f2e9f00928361650688617286e1151184f0ea98f0424cf7a4ce954  .github/workflows/h117_official_ohlcv_feedback.yml
+43f9ea58d07f10b1e721d97c2af853e0aad62edd3bcc9fd43f0dddf5ffe609f7  H118_README_UTF8.txt
+591d6346fa13301f9d5e6659184b23f399da87f145b9589efc7a11950e1d3c1c  godpick_h115_walkforward.py
+caa4c5ba86e1ca690ef5776c44b399e5a3506ae2cb467014fdab221fe220edc5  godpick_h116_daily_feedback.py
+d38587cfea9d6bf8524b5a0fb16bc6badc81a87729276ba784e15875c71076d9  godpick_h117_official_market_closure.py
+b7253f4a44f0a700dd1905b5b6f9de3df89e6434769d573d35897c7ab93b1792  godpick_h118_performance_authority.py
+0fda7a72bfcab5da68fc979997cfcc4c3b6d85da39d564e9d2655f515f679968  templates/H118_official_action_coverage_columns.csv
+7a5b75aa62e55459fb66ee14b2b7d35174736946eb6f5e1ea7291451f45ceee1  templates/H118_official_company_actions_columns.csv
+c5c8e99831a16997823cec6c4fe005a9a35ace6d456d5b3cdbf35ec1f6ad779d  tests/h118_performance_authority_regression.py
+a5e67c1f6339b52c30493e1789a21237c96ea816a9ae1376f1ff7f623fc20c6e  tools/h116_closed_loop_cli.py
+4e894fece285d1d44ea46492b95e2f8d7ba9de1e4ed49bb7c65d0d66926806d5  tools/h118_quality_cli.py

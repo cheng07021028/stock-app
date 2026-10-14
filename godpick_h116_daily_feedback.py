@@ -224,14 +224,19 @@ def _snapshots_to_events(snapshots: Iterable[Mapping[str,Any]]) -> list[dict[str
 def review_strategies(snapshots: Iterable[Mapping[str,Any]], prices: Iterable[Mapping[str,Any]],
                       *, benchmark: Iterable[Mapping[str,Any]] | None = None,
                       min_samples: int=30,min_distinct_days: int=20,
-                      min_exposure_days: int=60, **costs:Any) -> dict[str,Any]:
+                      min_exposure_days: int=60, h118_policy: str="LEGACY",
+                      h118_actions: Iterable[Mapping[str,Any]]|None=None,
+                      h118_coverage: Iterable[Mapping[str,Any]]|None=None,
+                      **costs:Any) -> dict[str,Any]:
     """Compute observed outcomes, block repeated same-day symbol/strategy vote stacking.
 
     Proposal-only; cannot mutate production weights, Formal privileges, scores,
     gate thresholds or live recommendation records.
     """
     events=_snapshots_to_events(snapshots)
-    raw=evaluate_snapshots(events,prices,benchmark=benchmark,**costs)
+    raw=evaluate_snapshots(events,prices,benchmark=benchmark,
+                            h118_policy=h118_policy,h118_actions=h118_actions,
+                            h118_coverage=h118_coverage,**costs)
     dedup={};repeated=0
     for r in raw['details']:
         key=(r['decision_date'],r['code'],r['strategy'],r['source_table'] if 'source_table' in r else '',r['horizon'])
@@ -279,6 +284,7 @@ def review_strategies(snapshots: Iterable[Mapping[str,Any]], prices: Iterable[Ma
             'same_stock_day_strategy_duplicate_rows':repeated,
             'evaluation_horizons':list(HORIZONS),
             'metric_policy':'EQUAL_DAY_WEIGHTED;NO_LIVE_WEIGHT_AUTOMATION',
+            'h118_quality_policy':h118_policy,
             'details':clean,'summary':summaries,'recommendations':proposals,
             'data_failures':dict(failure_counts),
             'guardrails':{'min_stock_day_samples':min_samples,'min_distinct_days':min_distinct_days,

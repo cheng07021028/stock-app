@@ -28,7 +28,7 @@ MARKET_URLS = {
     'TPEX': 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes',
     'TAIEX': 'https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST',
 }
-CSV_COLUMNS = ('code', 'date', 'open', 'high', 'low', 'close')
+CSV_COLUMNS = ('code', 'date', 'open', 'high', 'low', 'close', 'exchange')
 MIN_COUNTS = {'TWSE': 100, 'TPEX': 100, 'TAIEX': 1}
 
 
@@ -300,6 +300,7 @@ def export_verified_h116_csv(root:Path,decisions_root:Path,outdir:Path)->dict[st
             'session_days':len(bm),'tracked_codes':len(codes),'stock_bars':len(tracked),
             'missing_partial_market_days':missing,'immutable_snapshots':len(snapshots),
             'benchmark':'TAIEX_PRICE_INDEX_TRUE_OFFICIAL_OHLC',
+            'corporate_action_status':'NOT_RECONCILED_BY_H117;H118_REVIEW_REQUIRED',
             'note':'無快照、缺少盤後官方行情或尚未完成T+n時不計入績效'}
     # Deterministic output. Do not rewrite if unchanged, avoiding endless deployments.
     for name,rows in [('verified_ohlc.csv',tracked),('benchmark_ohlc.csv',bm)]:

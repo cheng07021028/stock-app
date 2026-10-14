@@ -34,7 +34,7 @@ def _to_price(raw: Iterable[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]
         if not code or not day or any(v is None or v<=0 for v in (o,h,l,c)) or h < max(o,l,c) or l > min(o,h,c):
             continue
         if day in buf[code]:raise ValueError(f"重複行情日：{code} {day}，拒絕自動覆蓋")
-        buf[code][day] = {"date":day,"open":o,"high":h,"low":l,"close":c}
+        buf[code][day] = {"date":day,"open":o,"high":h,"low":l,"close":c,"exchange":str(x.get("exchange") or "").upper()}
     return {k:sorted(v.values(),key=lambda x:x["date"]) for k,v in buf.items()}
 
 
@@ -53,6 +53,9 @@ def evaluate_snapshots(
     sell_tax_bps: float = 30.0,
     slippage_bps: float = 5.0,
     min_confident_samples: int = 30,
+    h118_policy: str = "LEGACY",
+    h118_actions: Iterable[Mapping[str, Any]] | None = None,
+    h118_coverage: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str,Any]:
     """Buy next trading session OPEN and exit on horizon's CLOSE.
 
@@ -61,6 +64,14 @@ def evaluate_snapshots(
     Missing future candles => UNEVALUABLE, never fabricated return 0.
     """
     _cost_rate(buy_commission_bps,sell_commission_bps,sell_tax_bps,slippage_bps)
+    if h118_policy not in ("LEGACY", "STRICT"):
+        raise ValueError("H118風險政策不合法")
+    guard=None
+    if h118_policy=="STRICT":
+        from godpick_h118_performance_authority import assess_window, load_actions, load_coverage
+        action_rows=load_actions(h118_actions or [])
+        coverage_rows=load_coverage(h118_coverage or [])
+        guard=assess_window
     pb = _to_price(prices)
     benchmark_prices=_to_price(benchmark or [])
     bm = benchmark_prices.get("BENCHMARK", [])
@@ -106,6 +117,26 @@ def evaluate_snapshots(
             if (date.fromisoformat(first["date"])-decision.date()).days>8:
                 r["data_status"]="LATE_NEXT_TRADE"
                 rows.append(r);continue
+            if guard is not None:
+                # Fail-closed: do not evaluate windows touching confirmed company
+                # actions, large unexplained gaps, or unaudited action calendars.
+                prior=[x for x in hist if x["date"]<first["date"]]
+                prior_close=prior[-1]["close"] if prior else None
+                if bm:
+                    market_window=[x["date"] for x in bm if first["date"]<=x["date"]<=last["date"]]
+                else:
+                    market_window=[]
+                quality=guard(code=code,
+                    market=next((x.get("exchange") or "" for x in nexts[:n] if x.get("exchange")),""),
+                    entry_day=first["date"],exit_day=last["date"],market_days=market_window,
+                    stock_bars=nexts[:n],previous_close=prior_close,
+                    action_events=action_rows,coverage=coverage_rows)
+                r["h118_quality_status"]=quality["status"]
+                r["h118_quality_reason"]=quality["reason"]
+                if quality["status"]!="CERTIFIED_UNADJUSTED_PRICE_WINDOW":
+                    r["data_status"]=quality["status"]
+                    rows.append(r)
+                    continue
             entry_price=first["open"]*(1+(slippage_bps+buy_commission_bps)/10000)
             exit_price=last["close"]*(1-(slippage_bps+sell_commission_bps+sell_tax_bps)/10000)
             gross=(last["close"]/first["open"]-1)*100
@@ -144,5 +175,6 @@ def evaluate_snapshots(
             "cost_bps":{"buy_commission":buy_commission_bps,"sell_commission":sell_commission_bps,
                         "sell_tax":sell_tax_bps,"slippage_each_side":slippage_bps},
             "data_policy":"PIT_IMMUTABLE_SNAPSHOTS_ONLY_NO_FUTURE_DATA",
+            "h118_policy":h118_policy,
             "details":rows,"summary":summary,"failures":dict(failures),"verified_events":len({r['event_id'] for r in rows if r['data_status']=='OK'}),
             "disclaimer":"策略樣本績效非因果證明／非獲利保證；需要樣本外滾動評估及資料權威核查"}
