@@ -1,17 +1,17 @@
-name: H117 Official EOD OHLCV and H116 Scorecard
+name: H121 EOD Verified Data and Provenance Check
 on:
   workflow_dispatch:
   schedule:
-    - cron: '45 10,12 * * 1-5'  # 18:45 and 20:45 Taiwan; delay tolerates slow official EOD updates
+    - cron: '45 10,12 * * 1-5' # Asia/Taipei 18:45 and 20:45; official dates must match
 permissions:
   contents: write
 concurrency:
-  group: stockapp-h117-official-close-main
+  group: stockapp-h121-eod-main
   cancel-in-progress: false
 jobs:
-  close:
+  operations:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,19 +19,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Install HTTP dependency
+      - name: Install HTTP dependencies
         run: python -m pip install 'requests>=2.31,<3'
-      - name: Official close only - stop if ANY source is unavailable
-        run: python tools/h117_official_eod_cli.py collect
-      - name: Capture official corporate action raw evidence (not auto-certified)
+      - name: Collect official TWSE TPEx and TAIEX EOD (no fabricated dates)
+        id: collect
         shell: bash
         run: |
           set -euo pipefail
-          python tools/h119_corporate_action_cli.py collect
+          mkdir -p reports/h121
+          python tools/h117_official_eod_cli.py collect 2>&1 | tee reports/h121/H121_collect_run.log
+      - name: Capture raw official corporate actions (not proof of completeness)
+        id: corporate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h119_corporate_action_cli.py collect 2>&1 | tee reports/h121/H121_action_run.log
           python tools/h119_corporate_action_cli.py inspect
-          # H120 audit is diagnostic: lack of human attestation does not fake coverage.
-          python tools/h120_validate_cli.py audit || echo 'H120_REVIEW_REQUIRED: official event coverage not yet attested'
-      - name: Review immutable predictions only with verified official bars
+          python tools/h120_validate_cli.py audit || echo 'H120_ATTESTATION_REQUIRED: not a certified full-market event calendar'
+      - name: Evaluate immutable prior recommendations only
+        id: review
         shell: bash
         run: |
           set -euo pipefail
@@ -41,14 +47,23 @@ jobs:
               --prices data/h116/verified_ohlc.csv \
               --benchmark data/h116/benchmark_ohlc.csv \
               --out reports/h116 \
-              --h118-strict \
-              --h119-entitlement \
-              --h120-proof-enforced
-            python tools/h120_validate_cli.py compare || echo 'H120_COMPARISON_NOT_READY: wait for certified matched samples'
+              --h118-strict --h119-entitlement --h120-proof-enforced 2>&1 | tee reports/h121/H121_review_run.log
+            python tools/h120_validate_cli.py compare || echo 'H120_COMPARISON_NOT_READY: not an approval'
           else
-            echo 'NO_VALID_PREDICTIONS_YET: reports are not forged.'
+            echo 'NO_REAL_PREDICTIONS_OR_PRICES: no manufactured outcomes' | tee reports/h121/H121_review_run.log
           fi
-      - name: Commit verified immutable bars and derived review only on actual changes
+      - name: Create stable operations state and a per-run receipt
+        if: always()
+        id: health
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h121_operations_cli.py inspect \
+            --collect-outcome '${{ steps.collect.outcome }}' \
+            --review-outcome '${{ steps.review.outcome }}'
+      - name: Commit only permitted source snapshots and changed derived reports
+        if: success()
+        id: commit
         shell: bash
         run: |
           set -euo pipefail
@@ -65,21 +80,48 @@ jobs:
               reports/h116/H116_T1_T3_T5_details.csv \
               reports/h116/H116_approval_required.csv \
               reports/h116/H116_source_manifest.json
-            if [[ -f reports/h116/H120_evidence_audit.json ]]; then
-              git add reports/h116/H120_evidence_audit.json
-            fi
-            if [[ -f reports/h120/H120_strategy_comparison.json ]]; then
-              git add reports/h120/H120_strategy_comparison.json
-            fi
+            if [[ -f reports/h116/H120_evidence_audit.json ]]; then git add reports/h116/H120_evidence_audit.json; fi
+            if [[ -f reports/h120/H120_strategy_comparison.json ]]; then git add reports/h120/H120_strategy_comparison.json; fi
             if [[ -f reports/h116/H119_cash_receivable_research_only.csv ]]; then
               git add reports/h116/H119_cash_receivable_research_only.csv \
                 reports/h116/H119_stock_rights_unsettled_research_only.csv
             fi
           fi
+          # Stable state is committed only when underlying evidence/state changes,
+          # never per-run timestamps or logs. (If ignored, explicitly allow this one file.)
+          git add -f reports/h121/H121_operational_state.json
           if ! git diff --cached --quiet; then
-            git commit -m 'H119: official EOD, raw action evidence and conservative entitlement review'
-            git pull --rebase origin "${GITHUB_REF_NAME}"  # preserve other writers' commits
+            git commit -m 'H121: audited official EOD evidence and operations state'
+            git pull --rebase origin "${GITHUB_REF_NAME}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           else
-            echo 'NO_CHANGE: no needless reboot/commit'
+            echo 'NO_CHANGE: no unnecessary commit or Streamlit reboot'
+          fi
+      - name: Verify server branch points to the exact final HEAD
+        if: success()
+        id: remote
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/h121_operations_cli.py verify-remote --branch "${GITHUB_REF_NAME}"
+      - name: Publish run receipts and troubleshooting logs (not persisted app data)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h121-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reports/h121/H121_run_receipt.json
+            reports/h121/H121_remote_receipt.json
+            reports/h121/H121_collect_run.log
+            reports/h121/H121_action_run.log
+            reports/h121/H121_review_run.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Summarize blockers and remote permanence
+        if: always()
+        shell: bash
+        run: |
+          python tools/h121_operations_cli.py summary
+          if [[ '${{ steps.collect.outcome }}' == 'failure' || '${{ steps.corporate.outcome }}' == 'failure' || '${{ steps.review.outcome }}' == 'failure' || '${{ steps.commit.outcome }}' == 'failure' || '${{ steps.remote.outcome }}' == 'failure' ]]; then
+            echo '::error::H121 nightly pipeline failed. Inspect attached run receipt and logs; no remote durability claim.'
           fi
