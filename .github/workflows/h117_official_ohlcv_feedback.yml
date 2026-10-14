@@ -32,7 +32,8 @@ jobs:
               --decisions data/h116/decisions \
               --prices data/h116/verified_ohlc.csv \
               --benchmark data/h116/benchmark_ohlc.csv \
-              --out reports/h116
+              --out reports/h116 \
+              --h118-strict
           else
             echo 'NO_VALID_PREDICTIONS_YET: reports are not forged.'
           fi
