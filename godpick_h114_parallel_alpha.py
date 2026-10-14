@@ -346,10 +346,13 @@ def evaluate(row: Mapping[str, Any], *, info_asof: Any = None) -> dict[str, Any]
         "H114K線資料狀態":status,
         "H114缺失證據":"；".join(missing) if missing else "四策略證據已足，仍不代表可買進",
         "H114交易權限":"LOCKED｜不影響Formal，所有H114僅研究/觀察",
+        "H115同業有效樣本數":x.get("H115同業有效樣本數"),
+        "H115同業資料日期":x.get("H115同業資料日期"),
+        "H115同業估值依據":x.get("H115同業估值依據"),
     }
 
 
-def load_verified_evidence(root: Path) -> dict[str, dict[str, Any]]:
+def load_verified_evidence(root: Path, asof: Any = None) -> dict[str, dict[str, Any]]:
     """Optional read-only external evidence handoff; never writes a JSON file.
 
     Contract: data/h114_verified_fundamentals.json ::
@@ -359,23 +362,40 @@ def load_verified_evidence(root: Path) -> dict[str, dict[str, Any]]:
     This file is NOT bundled, and must not be backfilled with today's snapshots.
     """
     p=Path(root)/"data"/"h114_verified_fundamentals.json"
-    if not p.is_file() or p.stat().st_size>25_000_000:
-        return {}
-    try:
-        payload=json.loads(p.read_text(encoding="utf-8-sig"))
-        if payload.get("schema_version")!=1 or not isinstance(payload.get("stocks"),dict):
+    legacy: dict[str, dict[str, Any]] = {}
+    if p.is_file() and p.stat().st_size<=25_000_000:
+        try:
+            payload=json.loads(p.read_text(encoding="utf-8-sig"))
+            if payload.get("schema_version")==1 and isinstance(payload.get("stocks"),dict):
+                allow={"H114月營收歷史","H114營收歷史_官方","H114本益比實值",
+                       "H114同業本益比中位數_官方","H114近四季EPS實值",
+                       "H114估值資料來源","H114估值資料日期"}
+                for code,row in payload["stocks"].items():
+                    c=_t(code).replace(".0", "")
+                    if c and isinstance(row,dict):
+                        legacy[c]={k:v for k,v in row.items() if k in allow}
+        except (OSError, ValueError, TypeError):
+            legacy={}
+    # H115 offers verified as-of history; if no ledger exists, H114 remains
+    # backward-compatible with the original (date-checked) evidence file.
+    if asof is not None:
+        try:
+            from godpick_h115_pit_evidence import build_h114_evidence
+            pit = build_h114_evidence(root, asof)
+            for code, row in pit.items():
+                existing=legacy.setdefault(code,{})
+                # A registered H115 cohort explicitly without enough peers is
+                # not allowed to borrow a legacy, potentially stale peer median.
+                if "H115同業有效樣本數" in row and row["H115同業有效樣本數"] < 5:
+                    for key in ("H114本益比實值","H114同業本益比中位數_官方",
+                                "H114近四季EPS實值","H114估值資料來源","H114估值資料日期"):
+                        existing.pop(key,None)
+                existing.update(row)
+        except (OSError, ValueError, TypeError):
+            # Fail closed: a corrupt PIT store should never silently fall back
+            # to possibly future-contaminated legacy values.
             return {}
-        out={}
-        allow={"H114月營收歷史","H114營收歷史_官方","H114本益比實值",
-               "H114同業本益比中位數_官方","H114近四季EPS實值",
-               "H114估值資料來源","H114估值資料日期"}
-        for code,row in payload["stocks"].items():
-            c=_t(code).replace(".0", "")
-            if not c or not isinstance(row,dict):continue
-            out[c]={k:v for k,v in row.items() if k in allow}
-        return out
-    except (OSError, ValueError, TypeError):
-        return {}
+    return legacy
 
 
 def build_parallel_watch(tables: dict[str, pd.DataFrame], limit: int = 30) -> pd.DataFrame:
@@ -412,7 +432,7 @@ def build_parallel_watch(tables: dict[str, pd.DataFrame], limit: int = 30) -> pd
     cols=[c for c in ["H114顯示順位","股票代號","股票名稱","類別","市場別","H114候選來源","H114入榜身分",
           "H114研究優先分","H114主導策略","H114成長低估分","H114量縮蓄勢分","H114K線反轉分","H114法人資金分",
           "H114營收創高","H114營收年增率%","H114估值資料狀態","H114相對本益比折價%",
-          "H114紅K吞噬","H114量縮墊高","H114K線資料狀態","H114流動性通過","H114缺失證據","H114研究聲明"] if c in result]
+          "H114紅K吞噬","H114量縮墊高","H114K線資料狀態","H114流動性通過","H115同業有效樣本數","H115同業資料日期","H114缺失證據","H114研究聲明"] if c in result]
     return result[cols]
 
 

@@ -107,6 +107,7 @@ BLACKHORSE_OVERVIEW_COLUMNS = [
     "H114營收資料狀態", "H114營收創高", "H114營收年增率%",
     "H114估值資料狀態", "H114相對本益比折價%", "H114K線資料狀態",
     "H114紅K吞噬", "H114量縮墊高", "H114缺失證據", "H114交易權限",
+    "H115同業有效樣本數", "H115同業資料日期", "H115同業估值依據",
     "H105黑馬順位", "H112最終跨族群優先分", "H112族群曝險扣分", "H112候選來源", "H112研究權限", "H112族群分散狀態", "股票代號", "股票名稱", "類別", "市場別",
     "H113入榜資格", "H113流動性合格", "H113當日成交額百萬", "H113二十日均成交額百萬", "H113當日成交量張",
     "H113千張大戶週變化pp", "H113大戶鎖碼合格", "H113法人逐日來源驗證", "H113外資連買日數", "H113投信連買日數",
@@ -1173,10 +1174,10 @@ def decorate_decision_tables(
         except Exception:
             sector_history = []
     source_map = _source_lookup(candidate_df)
-    fundamental_map = h114_load_verified_evidence(base_dir)
     sector_map = _sector_lookup(sector_df, sector_history=sector_history, market_day=market_day)
     research_day, scan_mode, live_source = h110_research_asof(market_day, [candidate_df] + [out.get(k) for k in ("research", "waiting")])
     info_asof = str(research_day) if research_day else market_day
+    fundamental_map = h114_load_verified_evidence(base_dir, asof=info_asof)
     official_map = h109_official_snapshot(base_dir, research_day) if live_source else {}
     announcements_map = h109_official_announcements(base_dir, research_day) if live_source else {}
     # Market price date always stays separate from the research information date.
