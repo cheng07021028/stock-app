@@ -1,0 +1,21 @@
+H120.1 only modified/new production files:
+  godpick_h120_evidence_reconciliation.py [NEW]
+  godpick_h120_strategy_validation.py [NEW]
+  tools/h116_closed_loop_cli.py [UPDATED vs H119]
+  tools/h120_validate_cli.py [NEW]
+  .github/workflows/h117_official_ohlcv_feedback.yml [UPDATED vs H119]
+
+Tests:
+  tests/h120_evidence_reconciliation_regression.py
+  tests/h120_strategy_validation_regression.py
+  tests/h120_cli_closed_loop_regression.py
+
+Docs/template:
+  templates/H120_day_proofs_COLUMNS_ONLY.csv
+  H120_README_UTF8.txt
+  H120_PATCH_MANIFEST.txt
+  SHA256SUMS.txt
+
+Not included: pages/7, pages/8, any secrets, daily recommendations or user JSON,
+real historical prices, authoritative company-action evidence or populated proofs.
+Requires H119 compatible stock-app, follow README before deploying.
