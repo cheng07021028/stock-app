@@ -1,0 +1,9 @@
+V191-H121.1｜必要修正檔案清單
+ADD godpick_h121_operations.py
+ADD tools/h121_operations_cli.py
+UPDATE .github/workflows/h117_official_ohlcv_feedback.yml
+ADD tests/h121_operations_regression.py
+ADD H121_README_UTF8.txt
+ADD H121_PATCH_MANIFEST.txt
+ADD SHA256SUMS.txt
+禁止覆蓋pages/7_股神推薦.py、pages/8_*.py、歷史JSON、settings JSON、正式買進權限與secret。
