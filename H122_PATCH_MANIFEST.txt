@@ -1,0 +1,21 @@
+V191-H122.1 // H121 compatible incremental direct-copy patch
+2026-10-14
+
+NEW godpick_h122_incident_center.py
+NEW tools/h122_incident_cli.py
+NEW tools/h122_notify_issue.py
+NEW pages/98_股神營運健康戰情.py
+UPDATED .github/workflows/h117_official_ohlcv_feedback.yml
+NEW tests/h122_incident_regression.py
+NEW H122_README_UTF8.txt
+NEW H122_PATCH_MANIFEST.txt
+NEW SHA256SUMS.txt
+
+Production changes: 5 files (one workflow updated; four new Python files)
+Test and docs: 4 files.
+Never bundled: pages/7_股神推薦.py, pages/8_股神推薦紀錄.py,
+user JSON, personal trading history, Secrets, environment credentials.
+Persistent ops files reports/h121 and reports/h122 are created at runtime;
+not included in the ZIP and not falsely marked as already in GitHub.
+No change to H113 qualification, H114 strategies, Formal privileges,
+H115-H120 PIT/corporate-action/strategy certification.
