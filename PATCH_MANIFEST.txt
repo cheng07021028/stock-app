@@ -1,9 +1,10 @@
-V191-H117.1 — direct overlay after H116
-Production: godpick_h117_official_market_closure.py
-CLI: tools/h117_official_eod_cli.py
-Nightly schedule: .github/workflows/h117_official_ohlcv_feedback.yml
-H116 old schedule switched manual-only: .github/workflows/h116_nightly_strategy_review.yml
-Regression: tests/h117_official_close_regression.py
-No pages/7_股神推薦.py, no pages/8_績效.py, no stock pick weight changes, no state/settings JSON, no secrets.
-Requires godpick_h116_daily_feedback.py and tools/h116_closed_loop_cli.py from H116,
-and godpick_h115_walkforward.py, godpick_h115_pit_evidence.py from H115.
+V191-H127 | SAFE PRECISION PATCH
+ADDED production: godpick_h127_sharded_records.py
+ADDED tool: tools/apply_h127_large_records_fix.py
+ADDED tool: tools/h127_records_check.py
+ADDED test: tests/test_h127_sharded_records.py
+PATCHED AT INSTALL, NOT IN ZIP: godpick_persistence_service.py
+DO NOT INCLUDE: pages/7 or pages/8, user JSON, user keys, databases, old copies of H113-H126 modules.
+SIZE FIX: H8 422 validation error no longer mistaken for CAS conflict; immutable compressed shards; commit remote authority state last.
+CONCURRENT WRITERS: revision monotonic check before each state PUT; state hash identity verification.
+ROLLBACK: restore the automatically generated .H127_backup... only after protecting any H127 newer sharded data; never roll back remote authority data without reconstruction.
