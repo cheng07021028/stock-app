@@ -1069,3 +1069,4 @@
 {"availability_basis": "FIRST_OBSERVED", "available_at": "2026-10-15T01:58:35+08:00", "code": "9946", "revenue_twd": 3828000, "source": "TWSE", "source_url": "https://openapi.twse.com.tw/v1/opendata/t187ap05_L", "year_month": "202609"}
 {"availability_basis": "FIRST_OBSERVED", "available_at": "2026-10-15T01:58:35+08:00", "code": "9955", "revenue_twd": 146568000, "source": "TWSE", "source_url": "https://openapi.twse.com.tw/v1/opendata/t187ap05_L", "year_month": "202609"}
 {"availability_basis": "FIRST_OBSERVED", "available_at": "2026-10-15T01:58:35+08:00", "code": "9958", "revenue_twd": 1958954000, "source": "TWSE", "source_url": "https://openapi.twse.com.tw/v1/opendata/t187ap05_L", "year_month": "202609"}
+{"availability_basis": "FIRST_OBSERVED", "available_at": "2026-10-16T01:45:06+08:00", "code": "2832", "revenue_twd": 868102000, "source": "TWSE", "source_url": "https://openapi.twse.com.tw/v1/opendata/t187ap05_L", "year_month": "202609"}
