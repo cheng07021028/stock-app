@@ -64,8 +64,9 @@ class H115Tests(unittest.TestCase):
         self.assertEqual(load_verified_evidence(self.root,asof='2026-10-13')['2300']['H114本益比實值'],10)
         # One older peer: fewer than 5 same-date peers, no computed median.
         vals2=[{'code':'9999','sector':'光學','market':'上市','asof_date':'2026-10-13',
-                'available_at':datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds'),'pe':8,'eps_ttm':5,
-                'source':'TWSE','availability_basis':'FIRST_OBSERVED'}]
+                'available_at':'2026-10-13T19:00:00+08:00','pe':8,'eps_ttm':5,
+                'source':'TWSE','availability_basis':'PUBLISHED_VERIFIED',
+                'source_url':'https://www.twse.com.tw/example-synthetic'}]
         append_valuations(self.store,vals2)
         self.assertNotIn('H114同業本益比中位數_官方', build_h114_evidence(self.root,'2026-10-14')['9999'])
 

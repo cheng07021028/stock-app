@@ -193,6 +193,32 @@ def evaluate_snapshots(
                     bm_net=(bexit/bentry-1)*100
                     r["benchmark_net_pct"]=round(bm_net,4)
                     r["alpha_pp"]=round(net-bm_net,4)
+            # H128: an extreme price/index observation is an evidence problem,
+            # not an extraordinarily profitable strategy.  Keep the event for
+            # human review, but exclude it from ALL performance learning.
+            # No clipping or post-hoc corporate-action guesses are permitted.
+            h128_bad = (
+                any(not math.isfinite(float(r[k])) or abs(float(r[k])) > 100.0
+                    for k in ('gross_return_pct', 'net_return_pct', 'alpha_pp')
+                    if r.get(k) is not None)
+                or (r.get('benchmark_net_pct') is not None
+                    and (not math.isfinite(float(r['benchmark_net_pct']))
+                         or abs(float(r['benchmark_net_pct'])) > 35.0))
+                or any(r.get(k) is not None and (not math.isfinite(float(r[k]))
+                       or abs(float(r[k])) > 150.0)
+                    for k in ('mfe_pct', 'mae_pct'))
+            )
+            if h128_bad:
+                r['h128_quarantine_reason'] = 'EXTREME_PRICE_OR_BENCHMARK_RETURN_REQUIRES_OFFICIAL_ACTION_AUDIT'
+                r['h128_suspect_returns'] = {
+                    k: r.get(k) for k in (
+                        'gross_return_pct','net_return_pct','benchmark_net_pct',
+                        'alpha_pp','mfe_pct','mae_pct')
+                }
+                r['data_status'] = 'H128_ANOMALOUS_RETURN_QUARANTINE'
+                for _h128_key in ('gross_return_pct','net_return_pct',
+                                  'benchmark_net_pct','alpha_pp','mfe_pct','mae_pct'):
+                    r[_h128_key] = None
             rows.append(r)
     summary=[]
     groups=defaultdict(list)

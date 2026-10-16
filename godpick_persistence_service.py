@@ -924,6 +924,19 @@ def read_github_json(path_name: str, default: Any) -> tuple[Any, str]:
     cfg = github_config()
     if not cfg["token"]:
         return copy.deepcopy(default), "未設定 GITHUB_TOKEN"
+    # >>> V191_H127_RECORDS_SHARD_AUTHORITY
+    # The remote state is the publication pointer; a failed/incomplete shard
+    # set must not be replaced with an older legacy JSON as if it were current.
+    if (Path(path_name).name == RECORDS_FILE
+            or path_name == (_secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE)):
+        state_h127, _state_msg_h127 = read_github_json(RECORDS_STATE_FILE, {})
+        if isinstance(state_h127, dict) and state_h127.get("storage_mode") == "h127-gzip-shards-v1":
+            from godpick_h127_sharded_records import load_snapshot
+            rows_h127, msg_h127 = load_snapshot(
+                state_h127, get_json=read_github_json, record_hash_func=_json_hash
+            )
+            return (rows_h127 if rows_h127 is not None else copy.deepcopy(default)), msg_h127
+    # <<< V191_H127_RECORDS_SHARD_AUTHORITY
     try:
         response = requests.get(
             _github_url(path_name),
@@ -1291,6 +1304,18 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
                 time.sleep(min(3.0, 0.7 * (attempt + 1)))
                 continue
             try:
+                if path_name == RECORDS_STATE_FILE:
+                    existing_state, _ = read_github_json(RECORDS_STATE_FILE, {})
+                    if isinstance(existing_state, dict) and isinstance(safe_payload, dict):
+                        try:
+                            remote_rev = int(existing_state.get("revision") or 0)
+                            incoming_rev = int(safe_payload.get("revision") or 0)
+                        except Exception:
+                            remote_rev = incoming_rev = 0
+                        if remote_rev and incoming_rev and remote_rev > incoming_rev:
+                            return False, (
+                                "GitHub records state 已有較新revision；拒絕舊快照覆寫"
+                            )
                 body: dict[str, Any] = {
                     "message": f"{message} @ {_now_text()}",
                     "content": encoded,
@@ -1325,6 +1350,16 @@ def write_github_json(path_name: str, payload: Any, message: str = "update durab
                             suffix = f"｜CAS衝突自動重試 {conflict_count} 次" if conflict_count else ""
                             return True, f"GitHub 寫入並回讀驗證：{path_name}｜{size_mb:.1f} MB{suffix}"
                         last_error = f"GitHub 寫入成功但回讀不一致：{verify_msg}"
+                elif response.status_code == 422 and any(
+                    phrase in response.text.lower() for phrase in
+                    ("too large", "file is too large", "too big", "exceeds the size")
+                ):
+                    # H127: validation error is NOT a CAS conflict. Retrying
+                    # the identical 54MB body cannot succeed.
+                    return False, (
+                        f"GitHub 文件過大 HTTP 422：{path_name}｜{size_mb:.1f} MB｜"
+                        "需使用 H127 壓縮分片，不再做無效 CAS 重傳"
+                    )
                 elif response.status_code in (409, 422):
                     conflict_count += 1
                     last_error = f"GitHub 版本衝突 HTTP {response.status_code}｜{response.text[:220]}"
@@ -1937,34 +1972,58 @@ def _sync_records_github_snapshot_v191_h8(records: list[dict[str, Any]], state: 
         if relation == "same":
             return True, f"GitHub records 已同Hash，略過大型重傳｜{relation_msg}"
         if relation == "newer":
-            return True, f"GitHub records 本輪快照已被較新權威取代，安全略過舊寫入｜{relation_msg}"
+            # H128: remote newer is NOT proof that THIS snapshot was persisted.
+            return False, f"GitHub 拒絕舊版本寫入：遠端已有較新權威，需重新載入｜{relation_msg}"
 
         gh_path = _secret("GODPICK_RECORDS_GITHUB_PATH", RECORDS_FILE) or RECORDS_FILE
-        gh1, ghm1 = write_github_json(gh_path, records, f"{reason}: persist godpick records")
+        from godpick_h127_sharded_records import write_snapshot
+        h127_publication, ghm1 = write_snapshot(
+            records, state,
+            get_json=read_github_json,
+            put_json=lambda p, obj: write_github_json(
+                p, obj, f"{reason}: H127 immutable compressed shard"
+            ),
+            json_safe=_json_safe_value,
+            record_hash_func=_json_hash,
+        )
+        gh1 = h127_publication is not None
         if not gh1:
             # A competing writer may have completed while our CAS retries ran.
             relation2, msg2 = _records_remote_state_relation_v191_h8(state)
-            if relation2 in {"same", "newer"}:
-                return True, f"{ghm1}｜衝突後已由遠端較新/同Hash權威收斂：{msg2}"
+            if relation2 == "same":
+                return True, f"{ghm1}｜衝突後遠端同Hash確認：{msg2}"
+            if relation2 == "newer":
+                return False, f"{ghm1}｜遠端為更新版本，本輪未保存：{msg2}"
             return False, f"{ghm1}｜records 未寫入，state不前推"
 
         # Do not publish an older state over a newer writer that completed after
         # our data PUT.  This keeps data/state monotonic under cross-process races.
         relation3, msg3 = _records_remote_state_relation_v191_h8(state)
         if relation3 == "newer":
-            return True, f"records已寫入；但較新遠端版本已接續，本輪舊state安全略過｜{msg3}"
+            return False, f"分片已寫入但遠端state較新；本輪快照未取得永久保存資格｜{msg3}"
         if relation3 == "same":
             return True, f"records寫入後遠端state已同Hash｜{msg3}"
 
-        gh2, ghm2 = write_github_json(RECORDS_STATE_FILE, state, f"{reason}: persist godpick records state")
+        # Commit the state pointer only after the complete immutable chunk
+        # collection and manifest have been verified by remote readback.
+        h127_published_state = dict(state)
+        h127_published_state.update(h127_publication)
+        gh2, ghm2 = write_github_json(
+            RECORDS_STATE_FILE, h127_published_state,
+            f"{reason}: publish H127 sharded records authority state",
+        )
         if not gh2:
             relation4, msg4 = _records_remote_state_relation_v191_h8(state)
-            if relation4 in {"same", "newer"}:
-                return True, f"{ghm1}｜state寫入衝突但遠端已收斂：{msg4}"
+            if relation4 == "same":
+                return True, f"{ghm1}｜state寫入衝突但遠端同Hash：{msg4}"
+            if relation4 == "newer":
+                return False, f"{ghm1}｜state寫入衝突且遠端較新，沒有證實本輪保存：{msg4}"
             return False, f"{ghm1}｜{ghm2}"
         relation5, msg5 = _records_remote_state_relation_v191_h8(state)
-        if relation5 in {"same", "newer"}:
-            return True, f"{ghm1}｜{ghm2}｜最終驗證：{msg5}"
+        if relation5 == "same":
+            return True, f"{ghm1}｜{ghm2}｜最終同Hash驗證：{msg5}"
+        if relation5 == "newer":
+            return False, f"{ghm1}｜{ghm2}｜遠端較新，本輪快照未驗證：{msg5}"
         return False, f"{ghm1}｜{ghm2}｜最終state驗證未收斂：{msg5}"
 
 

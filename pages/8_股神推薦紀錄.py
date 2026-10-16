@@ -2543,8 +2543,12 @@ def _save_records_mutation_fast_ui(
             upsert_rows=upsert_rows or [],
             previous_count=previous_count,
             reason=action_name,
+            require_remote_confirm=bool(deleted_ids),  # H128: deletion cannot rely on an ephemeral upload queue
         )
         _apply_persistence_report(report, action_name=action_name, github_deferred_ok=True)
+        # H128: local UI visibility is not the same as remote durability.
+        # The status explicitly records permanent_ok, and destructive updates
+        # require synchronous GitHub confirmation if Firestore is unavailable.
         # V162：表格 mutation 以本機原子寫入是否成功決定畫面是否切換。
         # 遠端 Firestore/GitHub 失敗或排隊中會在同步明細顯示，但不再讓刪除按鈕無限等待、也不讓已刪資料留在畫面。
         local_ok = bool(getattr(report, "local_ok", False))
@@ -7214,8 +7218,9 @@ def main():
                     import_ids=keep_import_ids,
                 )
                 st.session_state[_k("last_delete_msg")] = (
-                    f"已刪除 {deleted_n} 筆並完成本機原子保存；"
-                    "Firestore / GitHub 同步結果請查看『同步明細』，不會再卡住畫面。"
+                    (f"已刪除 {deleted_n} 筆並經遠端確認，Reboot 保存條件已通過。"
+                     if st.session_state.get(_k("last_mutation_permanent_ok"), False)
+                     else f"本機暫時移除 {deleted_n} 筆，但遠端權威未確認！Reboot 仍可能恢復；請立即檢查同步明細並重試。")
                 )
             else:
                 st.session_state[_k("last_delete_msg")] = "本機保存失敗，為避免畫面與檔案不一致，本次未切換資料。"

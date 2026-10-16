@@ -27,6 +27,7 @@ import math
 import pandas as pd
 from godpick_h110_evidence_integrity import audit as h110_audit, research_asof as h110_research_asof, VERSION as H110_VERSION
 from godpick_h113_quality_gate import audit as h113_audit, VERSION as H113_VERSION
+from godpick_h124_runtime_bridge import (load_context as h123_load_context, review as h123_review, official_fields_if_proven as h123_official_fields, apply_strict_h113 as h123_strict)
 from godpick_h114_parallel_alpha import (
     VERSION as H114_VERSION, evaluate as h114_evaluate,
     build_parallel_watch as h114_build_parallel_watch,
@@ -876,7 +877,7 @@ def _source_lookup(candidate_df: pd.DataFrame | None) -> dict[str, dict[str, Any
     return result
 
 
-def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str, dict[str, Any]], sector_map: dict[str, dict[str, Any]], official_map: dict[str, dict[str, Any]] | None = None, announcements_map: dict[str, dict[str, Any]] | None = None, market_day: str = "", info_asof: str = "", asof_mode: str = "HISTORICAL_SAFE", source_status: str = "", fundamental_map: dict[str, dict[str, Any]] | None = None) -> pd.DataFrame:
+def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str, dict[str, Any]], sector_map: dict[str, dict[str, Any]], official_map: dict[str, dict[str, Any]] | None = None, announcements_map: dict[str, dict[str, Any]] | None = None, market_day: str = "", info_asof: str = "", asof_mode: str = "HISTORICAL_SAFE", source_status: str = "", fundamental_map: dict[str, dict[str, Any]] | None = None, h123_context: dict[str, Any] | None = None, h123_live: bool = False) -> pd.DataFrame:
     out = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame or [])
     for c in H105_COLUMNS:
         if c not in out.columns:
@@ -903,7 +904,14 @@ def _enrich_frame(frame: pd.DataFrame | None, *, pool: str, source_map: dict[str
         merged.update(h110_audit(merged, market_day=h109_parse_day(market_day),
                                  info_asof=h109_parse_day(info_asof or market_day),
                                  asof_mode=asof_mode, source_status=source_status))
+        # H123_SAFE_PROVENANCE_BRIDGE_V1; OFF/MONITOR/STRICT never grants a Formal trade.
+        _h123_result = h123_review(merged, context=h123_context or {},
+              live_source=h123_live, info_asof=info_asof, market_day=market_day)
+        merged.update(_h123_result)
+        if not str(merged.get("H110證據狀態") or "").startswith("CONFLICT"):
+            merged.update(h123_official_fields(_h123_result))
         merged.update(h113_audit(merged, info_asof=info_asof or market_day))
+        h123_strict(merged, _h123_result, mode=(h123_context or {}).get("mode", "OFF"))
         # H114 is a parallel research lens: no mutation of H113 / Formal authority.
         merged.update(h114_evaluate(merged, info_asof=info_asof or market_day))
         records.append(merged)
@@ -1151,7 +1159,7 @@ def _build_blackhorse_overview(tables: dict[str, pd.DataFrame], max_rows: int = 
     for c in BLACKHORSE_OVERVIEW_COLUMNS:
         if c not in out.columns:
             out[c] = None
-    return out.loc[:, BLACKHORSE_OVERVIEW_COLUMNS].copy()
+    return out.loc[:, BLACKHORSE_OVERVIEW_COLUMNS + [c for c in out.columns if c.startswith("H123") and c not in BLACKHORSE_OVERVIEW_COLUMNS]].copy()
 
 
 def decorate_decision_tables(
@@ -1178,6 +1186,7 @@ def decorate_decision_tables(
     research_day, scan_mode, live_source = h110_research_asof(market_day, [candidate_df] + [out.get(k) for k in ("research", "waiting")])
     info_asof = str(research_day) if research_day else market_day
     fundamental_map = h114_load_verified_evidence(base_dir, asof=info_asof)
+    h123_context = h123_load_context(base_dir)
     official_map = h109_official_snapshot(base_dir, research_day) if live_source else {}
     announcements_map = h109_official_announcements(base_dir, research_day) if live_source else {}
     # Market price date always stays separate from the research information date.
@@ -1187,7 +1196,7 @@ def decorate_decision_tables(
                                   sector_map=sector_map, official_map=official_map,
                                   announcements_map=announcements_map, market_day=market_day,
                                   info_asof=info_asof, asof_mode=scan_mode, source_status=source_status,
-                                  fundamental_map=fundamental_map)
+                                  fundamental_map=fundamental_map, h123_context=h123_context, h123_live=live_source)
 
     # H107 fixes the old routing leak: an H105 "already ignited / do not chase" row
     # may not continue occupying one of the limited future-research slots.
@@ -1290,6 +1299,8 @@ def decorate_decision_tables(
             out["health"] = pd.concat([out["health"], pd.DataFrame([{
                 "項目": "H108每日族群歷史保存", "數值": f"WARN｜{type(exc).__name__}: {exc}"
             }])], ignore_index=True, sort=False)
+    from godpick_h126_authority_report import attach_authority as _h126_attach_authority
+    out = _h126_attach_authority(out)
     return out
 
 

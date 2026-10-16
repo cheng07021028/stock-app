@@ -22,7 +22,7 @@ from godpick_h115_pit_evidence import TZ_TW, _datetime, _num, _code
 from godpick_h115_walkforward import evaluate_snapshots, HORIZONS
 
 VERSION = 'v191_h116_closed_loop_20261014'
-FIELDS = ('H114主導策略','H114研究優先分','H114入榜身分','H113入榜資格',
+FIELDS = ('H124大戶實證狀態','H124大戶變化pp','H124大戶來源雜湊','H124大戶原因','H124主榜決策','H123法人實證狀態','H123來源雜湊','H123法人逐日有效天數','H123法人實證原因','H114主導策略','H114研究優先分','H114入榜身分','H113入榜資格',
           'H110研究資訊截止日','H110行情交易日','H109決策權威','H109否決原因',
           'H114營收資料狀態','H114估值資料狀態','H114K線資料狀態',
           'H113法人逐日來源驗證','H113大戶鎖碼合格','H113流動性合格')

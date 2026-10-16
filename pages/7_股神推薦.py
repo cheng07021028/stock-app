@@ -17078,11 +17078,17 @@ def _build_excel_bytes_fast_h85(
         {"項目": "H91稽核輸出列", "數值": int(len(tables.get("audit", pd.DataFrame()))) if tables else 0},
     ])
     health = pd.concat([health, core_diag], ignore_index=True, sort=False)
+    # H126_AUTHORITY_EXPORT_HOOK_V1: single source for manager's decision; H102 is historical only.
+    from godpick_h126_authority_report import attach_authority as _h126_attach_authority
+    tables = _h126_attach_authority(tables)
+    health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
     sheets = [
+        ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
+        ("00A_H126資料缺口", tables['h126_health'], "H126 尚無有效權威來源資料。"),
         ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
         ("00B_早期雷達", tables.get("blackhorse_radar", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有早期觀察候選。"),
         ("00C_已發動觀察", tables.get("ignited_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有已發動觀察股。"),
-        ("00_推薦優先總覽", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪重點預發動研究主榜沒有合格候選。"),
+        ("09_H102舊排序_非買進", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪重點預發動研究主榜沒有合格候選。"),
         ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_既有研究追蹤", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", tables.get("waiting", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃等待候選。"),
@@ -17092,6 +17098,30 @@ def _build_excel_bytes_fast_h85(
         ("07_興櫃隔離研究", tables.get("emerging_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有興櫃隔離研究股。"),
         ("08_T+1推薦檢討", h102_t1_review, "目前沒有成熟T+1推薦檢討資料。"),
     ]
+    _h126_manager_tabs = {
+        '00_H126主管決策', '00A_H126資料缺口',
+        '01_正式推薦與交易計畫', '02_研究推薦', '02_既有研究追蹤',
+        '04_今日主流資金', '05_驗證與風險證據',
+        '06_績效煞車與健康', '08_T+1推薦檢討',
+        '09_H102舊排序_非買進',
+    }
+    sheets = [item for item in sheets if item[0] in _h126_manager_tabs]
+    # 05 sheet is a concise audit, not 1,281 columns of internal engine state.
+    _h126_audit_keep = (
+        '股票代號','股票名稱','市場別','類別',
+        'H113入榜資格','H113流動性合格','H113大戶鎖碼合格',
+        'H113法人逐日來源驗證','H113法人連買合格','H113主升起漲合格',
+        'H113缺失原因','H123法人實證狀態','H123來源雜湊',
+        'H123研究實際時間','H124大戶實證狀態',
+        'H124大戶變化pp','H124大戶來源雜湊',
+        'H109決策權威','H109否決原因','H110證據狀態',
+        'H110研究資訊截止日','H105發動階段',
+        'H105今日強勢排除','H110最終研究優先分',
+    )
+    sheets = [(name, frame.loc[:, [c for c in _h126_audit_keep if c in frame.columns]]
+               if name == '05_驗證與風險證據' and isinstance(frame, pd.DataFrame) and not frame.empty
+               and any(c in frame.columns for c in _h126_audit_keep) else frame, fallback)
+              for name, frame, fallback in sheets]
     for name, frame, fallback in sheets:
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
     try:
@@ -17612,11 +17642,11 @@ def _normalize_recommend_scan_settings(raw: Any, watchlist_map=None, category_op
     if base["pick_strategy"] not in pick_options:
         base["pick_strategy"] = "結合版"
 
-    category_options = category_options or ["全部"]
-    cats = base.get("selected_categories", ["全部"])
-    if not isinstance(cats, list):
-        cats = ["全部"]
-    cats = [x for x in cats if x in category_options] or ["全部"]
+    # H125_SELECTED_CATEGORIES_AUTHORITY: never prune saved categories on an incomplete market master.
+    from godpick_h125_multiselect_authority import preserve_selected_categories
+    cats, _available_for_widget = preserve_selected_categories(
+        base.get("selected_categories", ["全部"]), category_options
+    )
     base["selected_categories"] = cats
 
     for k in ["min_total_score", "min_signal_score", "min_prelaunch_score", "min_trade_score"]:
@@ -17629,24 +17659,44 @@ def _normalize_recommend_scan_settings(raw: Any, watchlist_map=None, category_op
 
 
 def _load_persistent_recommend_scan_settings(watchlist_map=None, category_options=None) -> dict[str, Any]:
-    payload = _load_persistent_settings()
-    raw = payload.get("scan_settings", {}) if isinstance(payload, dict) else {}
-    return _normalize_recommend_scan_settings(raw, watchlist_map, category_options)
+    # H111_VERIFIED_SCAN_SETTINGS_AUTHORITY: remote first, never baked-in local JSON first.
+    from godpick_h111_scan_settings_authority import load_scan_settings
+    _legacy = _load_persistent_settings(local_first=True)
+    _legacy_scan = _legacy.get("scan_settings", {}) if isinstance(_legacy, dict) else {}
+    _h111_result = load_scan_settings(
+        project_root=Path(__file__).resolve().parent.parent,
+        legacy_settings=_legacy_scan,
+    )
+    st.session_state[_k("h111_scan_settings_load_status")] = {
+        "ok": bool(_h111_result.ok),
+        "verified": bool(_h111_result.durable_verified),
+        "source": _h111_result.source,
+        "revision": _h111_result.revision,
+        "message": _h111_result.message,
+    }
+    # Preserve all saved selected sectors in the multi-select even if today's
+    # master category set temporarily lacks some historical categories.
+    if isinstance(category_options, list):
+        for _cat in _h111_result.settings.get("selected_categories", []):
+            if isinstance(_cat, str) and _cat and _cat not in category_options:
+                category_options.append(_cat)
+    return _normalize_recommend_scan_settings(_h111_result.settings, watchlist_map, category_options)
 
 
 def _save_persistent_recommend_scan_settings(settings: dict[str, Any]) -> tuple[bool, list[str]]:
-    payload = _load_persistent_settings()
-    if not isinstance(payload, dict):
-        payload = {}
-    payload["scan_settings"] = copy.deepcopy(settings)
-    payload["applied_weights"] = _normalize_weight_map(payload.get("applied_weights", GODPICK_DEFAULT_SCORE_WEIGHTS))
-    payload["original_default_weights"] = GODPICK_DEFAULT_SCORE_WEIGHTS.copy()
-    payload["column_orders"] = payload.get("column_orders", {}) if isinstance(payload.get("column_orders", {}), dict) else {}
-    payload["updated_at"] = _now_text()
-    payload["version"] = "godpick_v5_persistent_settings"
-    local_ok, local_msg = _safe_json_write_local(GODPICK_SETTINGS_FILE, payload)
-    github_ok, github_msg = _write_json_to_github_path(GODPICK_SETTINGS_FILE, payload)
-    return (local_ok or github_ok), [local_msg, github_msg]
+    # H111_VERIFIED_SCAN_SETTINGS_AUTHORITY: remote write + readback must both pass.
+    from godpick_h111_scan_settings_authority import save_scan_settings
+    _h111_result = save_scan_settings(
+        copy.deepcopy(settings), project_root=Path(__file__).resolve().parent.parent,
+    )
+    st.session_state[_k("h111_scan_settings_save_status")] = {
+        "ok": bool(_h111_result.ok),
+        "verified": bool(_h111_result.durable_verified),
+        "source": _h111_result.source,
+        "revision": _h111_result.revision,
+        "message": _h111_result.message,
+    }
+    return bool(_h111_result.durable_verified), [_h111_result.message]
 
 
 def _apply_recommend_scan_settings_to_state(settings: dict[str, Any], sync_widgets: bool = True):
@@ -18577,8 +18627,10 @@ def main():
     all_categories = _collect_all_categories(master_df, watchlist_map)
     category_options = ["全部"] + all_categories if all_categories else ["全部"]
 
-    saved_categories = st.session_state.get(_k("selected_categories"), ["全部"])
-    saved_categories = [x for x in saved_categories if x in category_options] or ["全部"]
+    from godpick_h125_multiselect_authority import preserve_selected_categories
+    saved_categories, category_options = preserve_selected_categories(
+        st.session_state.get(_k("selected_categories"), ["全部"]), category_options
+    )
 
     # 推薦設定永久記錄：第一次進頁面先載入；按恢復原始/套用後才改變。
     if st.session_state.pop(_k("scan_settings_reset_pending"), False):
@@ -18591,10 +18643,41 @@ def main():
         _apply_recommend_scan_settings_to_state(_persistent_scan_settings, sync_widgets=True)
         st.session_state[_k("scan_settings_loaded_once")] = True
 
+    # H125: reconcile *after* remote H111 load and before multiselect widget creation.
+    _h125_saved = st.session_state.get(
+        _ui_pref_key("selected_categories"), st.session_state.get(_k("selected_categories"), ["全部"])
+    )
+    _h125_saved, category_options = preserve_selected_categories(_h125_saved, category_options)
+    st.session_state[_ui_pref_key("selected_categories")] = copy.deepcopy(_h125_saved)
+
     render_pro_section("掃描設定")
     st.caption("本頁條件會固定保留；只有按「套用設定」或「恢復原始設定」才會永久變更。推薦結果也會保留，除非你重新推薦。")
     if st.session_state.get(_k("scan_settings_msg")):
-        st.success(st.session_state.pop(_k("scan_settings_msg")))
+        _h111_save_message = st.session_state.pop(_k("scan_settings_msg"))
+        if "失敗" in _h111_save_message or "未驗證" in _h111_save_message:
+            st.error(_h111_save_message)
+        else:
+            st.success(_h111_save_message)
+
+    # H111: Status is observed at cold boot, and does not expose secrets.
+    _h111_load_health = st.session_state.get(_k("h111_scan_settings_load_status"), {})
+    if _h111_load_health:
+        if _h111_load_health.get("verified"):
+            st.caption("🔒 H111 設定已從 GitHub 永久權威載入並確認；Reboot 會重新讀取。")
+        else:
+            st.warning("⚠️ H111 推薦設定尚未確認永久保存：" + str(_h111_load_health.get("message", "")))
+
+    # H125: visible selected-categories count; never mislabel an unverified cache as durable.
+    # A just-submitted save result takes precedence over the older cold-load health.
+    # A failed save must NOT be masked by a previously successful load.
+    _h125_saved_health = st.session_state.get(_k("h111_scan_settings_save_status"), {})
+    _h125_health = (_h125_saved_health if isinstance(_h125_saved_health, dict) and _h125_saved_health
+                    else st.session_state.get(_k("h111_scan_settings_load_status"), {}))
+    _h125_count = len(st.session_state.get(_ui_pref_key("selected_categories"), []))
+    if _h125_health.get("verified"):
+        st.caption(f"🔒 H125：已從 GitHub 永久權威載入 {_h125_count} 個產業選擇；按套用後會同步驗證全部欄位。")
+    else:
+        st.warning(f"H125：目前選擇 {_h125_count} 個產業，但遠端永久權威尚未驗證；Reboot 可能無法保留，請檢查保存明細。")
 
     applied_weights = _render_score_weight_panel()
     macro_bridge, macro_adjusted_weights, macro_bridge_enabled = _render_macro_bridge_panel(applied_weights)
@@ -18690,7 +18773,9 @@ def main():
                 help="精準版=只看主名單；結合版=主名單外另顯示飆股補抓名單，不混入主名單排序。",
             )
 
-        valid_saved_categories = [x for x in st.session_state.get(_ui_pref_key("selected_categories"), saved_categories) if x in category_options] or ["全部"]
+        valid_saved_categories, category_options = preserve_selected_categories(
+            st.session_state.get(_ui_pref_key("selected_categories"), saved_categories), category_options
+        )
         st.session_state[_ui_pref_key("selected_categories")] = valid_saved_categories
         form_selected_categories = st.multiselect(
             "選擇類型（可多選）",

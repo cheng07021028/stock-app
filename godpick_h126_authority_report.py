@@ -195,6 +195,14 @@ def build_authority(tables:dict[str,Any], *,watch_limit:int=18)->dict[str,pd.Dat
         count_actionable=sum(bool(_code(v)) for v in actionable['股票代號'])
     missing_flow=sum(not _t(entry['values'].get('H123法人實證狀態')) for entry in data.values())
     missing_tdcc=sum(not _t(entry['values'].get('H124大戶實證狀態')) for entry in data.values())
+    # H128: visibly disclose how old the underlying decision evidence is.
+    # An export timestamp must never be mistaken for the market-data date.
+    evidence_days=sorted({_t(e['values'].get('H110行情交易日'))[:10] for e in data.values()
+                          if _t(e['values'].get('H110行情交易日'))})
+    research_days=sorted({_t(e['values'].get('H110研究資訊截止日'))[:10] for e in data.values()
+                          if _t(e['values'].get('H110研究資訊截止日'))})
+    replay_modes=sorted({_t(e['values'].get('H110研究模式')) for e in data.values()
+                         if _t(e['values'].get('H110研究模式'))})
     details=[
         ('H126版本',VERSION),('原候選去重數',len(data)),
         ('A認證黑馬研究',len(promoted)),('B待驗證觀察',counts['B｜待驗證觀察（非買進）']),
@@ -206,6 +214,12 @@ def build_authority(tables:dict[str,Any], *,watch_limit:int=18)->dict[str,pd.Dat
         ('H102舊總覽說明','僅歷史族群／研究排序；與H126認證不一致時一律以H126風險資格為準'),
         ('認證原則','H113 QUALIFIED ＋ H123 PROVEN_FLOW ＋ H124 VERIFIED_RISING ＋ H109 RESEARCH_ELIGIBLE；且無過熱／證據衝突'),
         ('官方資料缺失規則','法人／TDCC日期或原始封存缺口一律 PENDING，不補分、不回填歷史、不冒充交易權限'),
+        ('H128市場資料交易日（非匯出時間）',
+         ', '.join(evidence_days[-5:]) if evidence_days else 'UNKNOWN｜未能驗證資料交易日'),
+        ('H128研究資訊截止日（非匯出時間）',
+         ', '.join(research_days[-5:]) if research_days else 'UNKNOWN｜未能驗證研究時點'),
+        ('H128回放／研究模式', ', '.join(replay_modes) if replay_modes else 'UNKNOWN｜不得視為LIVE'),
+        ('H128資料新鮮度規則','任何SAFE_REPLAY、UNKNOWN或缺官方封存資料，只能當歷史研究；需現行行情重驗才能採用交易計畫'),
     ]
     health=pd.DataFrame([{'項目':k,'數值':v} for k,v in details])
     return {'h126_authority':frame,'h126_health':health,
