@@ -238,15 +238,26 @@ def _local_t1_category_stats(as_of: str = "") -> dict[str, dict[str, Any]]:
             rec_day=_text(r.get('推薦日期'))[:10]
             matured_day=_text(r.get('隔日日期'))[:10]
             if not as_of or not rec_day or not matured_day or matured_day>as_of or rec_day>=as_of:continue
+            # H129: H102's local legacy category learner must not re-import
+            # extreme alpha, weekend records, or H103-unverified PAPER results.
+            from datetime import date as _h129_date
+            try:
+                rec_date=_h129_date.fromisoformat(rec_day)
+                t1_date=_h129_date.fromisoformat(matured_day)
+            except ValueError:
+                continue
+            if rec_date.weekday()>=5 or t1_date.weekday()>=5 or t1_date<=rec_date:continue
+            if _text(r.get('H103執行學習可用')) != '是':continue
+            if _text(r.get('H103路徑歧義')) == '是':continue
+            if _text(r.get('H103績效口徑')).startswith('LEGACY'):continue
+            alpha = _num(r.get('Selection Alpha%'), None)
+            ret = _num(r.get('隔日候選漲跌%'), None)
+            if alpha is None or abs(alpha)>35 or (ret is not None and abs(ret)>35):continue
             key=(rec_day,_code(r.get('股票代號')))
             if not key[1] or key in seen:continue
             seen.add(key)
             cat = _text(r.get("類別"))
             if not cat:
-                continue
-            alpha = _num(r.get("Selection Alpha%"), None)
-            ret = _num(r.get("隔日候選漲跌%"), None)
-            if alpha is None:
                 continue
             stats.setdefault(cat, []).append(alpha)
     except Exception:

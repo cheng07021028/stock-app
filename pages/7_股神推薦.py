@@ -17048,6 +17048,10 @@ def _build_excel_bytes_fast_h85(
         h102_t1_review = build_h102_t1_review_table_local(limit=80) if callable(build_h102_t1_review_table_local) else pd.DataFrame()
     except Exception as _h102_t1_excel_exc:
         h102_t1_review = pd.DataFrame({"狀態":[f"H102 T+1檢討建立失敗：{type(_h102_t1_excel_exc).__name__}: {_h102_t1_excel_exc}"]})
+    # H129: quarantine implausible/legacy T+1 evidence before manager export.
+    from godpick_h129_wallstreet_audit import audit_t1_history as _h129_audit_t1
+    from godpick_h129_wallstreet_audit import audit_risk_watch as _h129_risk_watch
+    h102_t1_review, h129_t1_health = _h129_audit_t1(h102_t1_review)
     core_diag = pd.DataFrame([
         {"項目": "H105版本", "數值": H105_FUTURE_BLACKHORSE_VERSION},
         {"項目": "H105Excel契約", "數值": "PASS" if isinstance(h105_contract, dict) and h105_contract.get("ok") else "CHECK"},
@@ -17082,9 +17086,12 @@ def _build_excel_bytes_fast_h85(
     from godpick_h126_authority_report import attach_authority as _h126_attach_authority
     tables = _h126_attach_authority(tables)
     health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
+    h129_risk_watch = _h129_risk_watch(tables)
+    health = pd.concat([health, h129_t1_health], ignore_index=True, sort=False)
     sheets = [
         ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
         ("00A_H126資料缺口", tables['h126_health'], "H126 尚無有效權威來源資料。"),
+        ("00B_H129風控複核", h129_risk_watch, "風控否決與證據缺口逐筆分類；禁止當成推薦買進。"),
         ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
         ("00B_早期雷達", tables.get("blackhorse_radar", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有早期觀察候選。"),
         ("00C_已發動觀察", tables.get("ignited_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有已發動觀察股。"),
@@ -17097,9 +17104,10 @@ def _build_excel_bytes_fast_h85(
         ("06_績效煞車與健康", health, "目前沒有成熟績效/系統健康資料。"),
         ("07_興櫃隔離研究", tables.get("emerging_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有興櫃隔離研究股。"),
         ("08_T+1推薦檢討", h102_t1_review, "目前沒有成熟T+1推薦檢討資料。"),
+        ("08A_H129績效品質", h129_t1_health, "本輪沒有績效品質資訊。"),
     ]
     _h126_manager_tabs = {
-        '00_H126主管決策', '00A_H126資料缺口',
+        '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '08A_H129績效品質',
         '01_正式推薦與交易計畫', '02_研究推薦', '02_既有研究追蹤',
         '04_今日主流資金', '05_驗證與風險證據',
         '06_績效煞車與健康', '08_T+1推薦檢討',

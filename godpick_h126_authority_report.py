@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 import pandas as pd
 
-VERSION = 'V191-H126.1'
+VERSION = 'V191-H126.2-H129'
 GATED_COLUMNS = ['H126順位','股票代號','股票名稱','市場別','類別','H126權威層別',
     'H126能否買進','H126認證資格','H126最後研究分','H126策略來源',
     'H113流動性合格','H113大戶鎖碼合格','H113法人連買合格',
@@ -54,7 +54,8 @@ def _has_veto(r: dict)->tuple[bool,str]:
     if auth in BLOCKED_AUTH:return True, 'H109風險否決：'+auth
     if _t(r.get('H110證據狀態')).startswith('CONFLICT'):return True,'H110來源證據衝突'
     if _t(r.get('H105今日強勢排除'))=='是':return True,'H105已發動／過熱排除'
-    if _t(r.get('H113入榜資格'))=='BLOCKED':return True,'H113未通過硬門檻'
+    # H129: H113 BLOCKED may only mean missing evidence; never grant PASS,
+    # but also do not mislabel absence of evidence as a hard risk veto.
     if _t(r.get('市場別')) not in ('上市','上櫃'):return True,'非上市櫃，僅得隔離觀察'
     return False,''
 
