@@ -8,11 +8,6 @@
       "severity": "PENDING"
     },
     {
-      "code": "TODAY_OFFICIAL_EOD_NOT_VERIFIED",
-      "message": "今天收盤資料尚未三市場一致；可能為休市／官方延遲，未經交易日曆驗證不得推定已完成",
-      "severity": "PENDING"
-    },
-    {
       "code": "NO_IMMUTABLE_DECISIONS",
       "message": "缺少真實掃描快照，不能產出推薦歷史績效",
       "severity": "PENDING"
@@ -45,7 +40,7 @@
   },
   "policy": "RESEARCH_ONLY_FAIL_CLOSED;LOCAL_STATE_NOT_REMOTE_PROOF",
   "remote_commit_verified": false,
-  "state_sha256": "41009a9d2e9f83c57c1980807ef06537027758e8d47274941ab3129b55faecca",
+  "state_sha256": "171e440f32ff5fef7c7a7cf423e4263474adf1118b848269b2cf9b47e05938ba",
   "status": "PENDING_VALIDATION",
   "version": "V191-H121.1-OPERATIONS-PROVENANCE"
 }
