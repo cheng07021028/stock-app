@@ -18581,7 +18581,7 @@ def main():
 
     # H130: research workbench is a separate on-demand page; do not trigger
     # market scans, news scraping, backtests, or cloud writes on Page7 rerun.
-    st.page_link("pages/24_六引擎交易研究.py", label="H130｜六引擎交易研究中心（研究／回測／組合／日誌）", icon="📊")
+    st.page_link("pages/24_六引擎交易研究.py", label="H131｜六引擎 × 批次行情 × 官方證據稽核 × T+研究閉環", icon="📊")
 
     st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
     st.caption("勾選欄位穩定版：v44 data_editor callback fix")
