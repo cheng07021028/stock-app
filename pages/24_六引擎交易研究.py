@@ -41,6 +41,8 @@ from godpick_h133_blackhorse_validation import (
 st.set_page_config(page_title="六引擎交易研究中心｜H133", layout="wide")
 st.title("六引擎交易研究中心｜" + H133_VERSION)
 st.caption("以證據為基礎的研究工作台｜不送出委託、不變更權威推薦／設定／持股／交易紀錄；不保證獲利。")
+st.page_link("pages/25_主管智慧決策戰情.py", label="開啟 H134｜主管智慧決策戰情與遠端封存", icon="📊")
+st.page_link("pages/26_訊號生命週期與策略審查.py", label="開啟 H135｜訊號生命週期與策略驗證", icon="📈")
 taipei_today = datetime.now(ZoneInfo("Asia/Taipei")).date()
 asof = st.date_input("研究資料截止日（如盤中尚無正式收盤，必須看H117核驗情況）", value=taipei_today, max_value=taipei_today, key="h130_asof")
 

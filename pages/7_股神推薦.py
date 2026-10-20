@@ -17089,6 +17089,8 @@ def _build_excel_bytes_fast_h85(
     # six-engine page within this Streamlit session (no GitHub/Firestore writes).
     # Copy every manager export; never substitute a legacy score for H126 status.
     st.session_state["h130_h126_current_authority"] = tables["h126_authority"].copy(deep=True)
+    # H134: use the existing H126 health table as read-only dashboard context.
+    st.session_state["h134_h126_health"] = tables["h126_health"].copy(deep=True)
     st.session_state["h130_h126_manager_built_at"] = datetime.now().isoformat(timespec="seconds")
     health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
     h129_risk_watch = _h129_risk_watch(tables)
