@@ -90,3 +90,50 @@ if brief.get('decision_summary'):
 if brief.get('findings'):
     st.write('待處理：' + '；'.join(map(str, brief['findings'][:20])))
 st.info('GitHub內部SHA與建立時間不等於獨立PIT存證；真正交易績效仍須由成交與除權息資料核對。')
+
+st.divider()
+st.subheader('H139｜自動同步復原 × T+績效結算 × 研究策略漂移')
+st.caption('H139不取得券商成交，也不自動改選股權重。只結算經H136/H137當期核對的收盤價研究觀測；缺少資料即封鎖統計。')
+from godpick_h139_settlement import read_remote_settlement, read_remote_recovery
+if st.button('重新讀取 H139 研究績效結算', key='h139_refresh'):
+    st.session_state.pop('h139_latest_settlement', None)
+if 'h139_latest_settlement' not in st.session_state:
+    st.session_state['h139_latest_settlement'] = read_remote_settlement(
+        asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+settled = st.session_state['h139_latest_settlement']
+if settled.get('status') == 'RESEARCH_MATURED_OBSERVATIONS':
+    st.success('H139 最近結算：有完成觀測的研究交易日（非實際成交獲利）')
+elif settled.get('status') == 'RESEARCH_SETTLED_NO_NEW_MATURITY':
+    st.info('H139：資料已通過內部驗證，但目前沒有新的成熟研究訊號')
+elif settled.get('status') == 'BLOCKED_NO_VERIFIED_RESEARCH_DATA':
+    st.warning('H139：結算已封鎖；缺少當期通過驗證的決策、行情或夜間稽核')
+else:
+    st.warning('H139 尚未取得有效遠端結算：' + str(settled.get('status', 'UNKNOWN')))
+if st.button('重新讀取 H139 重試狀態', key='h139_repair_refresh'):
+    st.session_state.pop('h139_latest_recovery', None)
+if 'h139_latest_recovery' not in st.session_state:
+    st.session_state['h139_latest_recovery'] = read_remote_recovery(
+        asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+repair = st.session_state['h139_latest_recovery']
+if repair.get('status') == 'RECOVERED_INTERNAL_SHA_EOD_CURRENT':
+    st.success('H139 重試：暫存重建及當日資料驗證通過')
+elif repair.get('status') == 'ALREADY_READY_NO_RETRY':
+    st.info('H139 重試：資料原本就緒，因此未執行重建')
+else:
+    st.warning('H139 重試狀態：' + str(repair.get('status','尚無資料')))
+st.caption('重試次數：' + str(repair.get('attempts', '未知')) +
+           '｜未完成原因：' + str(repair.get('remaining_blocker', repair.get('initial_blocker','無'))))
+st.caption('研究結算日：' + str(settled.get('asof_tw', settled.get('last_day', '尚無'))) +
+           '｜狀態說明：' + str(settled.get('reason', '尚無資料')))
+for tag, policy in settled.get('strategies', {}).items():
+    with st.expander('H139｜' + tag + ' 研究政策（非交易訊號）'):
+        table = [{'期間': h, '成熟完整研究日': v.get('full_cohort_days'),
+                  '缺漏研究日': v.get('partial_or_missing_days'),
+                  '覆蓋率%': v.get('coverage_pct'),
+                  '歷史研究平均超額pp': v.get('mean_research_alpha_pp'),
+                  '今日成熟研究日': v.get('newly_settled_research_days'),
+                  '策略漂移警示': v.get('drift_advice')}
+                 for h, v in policy.get('horizons', {}).items()]
+        if table:
+            st.dataframe(table, use_container_width=True, hide_index=True)
+st.info('提醒：歷史訊號尚未有獨立不可變PIT認證，也未完成企業行動、含息報酬、費稅與實際成交驗證。任何統計結果都不能自動授權買進。')
