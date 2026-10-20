@@ -62,7 +62,8 @@ if not frame.empty and {'股票代號', 'H126權威層別'}.issubset(frame.colum
                      hide_index=True, use_container_width=True)
 
 st.divider()
-st.subheader('H134｜研究決策遠端封存（必須手動確認）')
+st.subheader('H134｜研究決策遠端封存（手動補救／複核）')
+st.caption('H137 已於管理員新建立第7頁主管Excel時嘗試自動只新增封存；本頁手動功能供遠端失敗或研究補登時使用。')
 st.caption('每一份封存以 H126 研究日、來源類型與實際欄位內容計算固定 SHA-256。遠端以 GitHub runtime-data 分支建立新檔；若同名已存在，只驗證、永不覆寫。')
 st.caption('單純將Excel匯入、或事後補登都只能記錄為補登，不會提升為原始研究日的 PIT 已驗證證據。')
 research_day = st.date_input('研究日（非匯出時間；請與當日H126研究資料核對）',

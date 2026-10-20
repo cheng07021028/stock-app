@@ -43,3 +43,26 @@ else:
         with st.expander(name + '｜預覽前 15 筆'):
             st.dataframe(frames[key].head(15), use_container_width=True, hide_index=True)
 st.caption('如果盤後封存未建立、GitHub Actions 無權限或H117官方資料缺漏，H136不會替代人工創造訊號；個人持股與實際成交需要另外授權。')
+
+
+st.divider()
+st.subheader('H137｜決策封存 × 夜間同步異常告警')
+st.caption('GitHub Actions 每個工作日台灣時間23:00做盤後檢查；僅為內部稽核，並非獨立PIT認證或真正不可修改的存證。')
+from godpick_h137_auto_seal import read_remote_audit
+if st.button('重新檢查 H137 決策封存與同步稽核', key='h137_audit_refresh'):
+    st.session_state.pop('h137_latest_audit', None)
+if 'h137_latest_audit' not in st.session_state:
+    st.session_state['h137_latest_audit'] = read_remote_audit(
+        asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+audit = st.session_state['h137_latest_audit']
+if audit.get('status') == 'INTERNAL_CHECK_PASS_NOT_PIT':
+    st.success('H137 最近稽核：內部檢查通過（不代表獨立時間存證）')
+elif audit.get('status') == 'BLOCKED_REQUIRES_ATTENTION':
+    st.error('H137 最近稽核：決策封存或自動同步有缺漏，需查明原因')
+else:
+    st.warning('H137 稽核尚未取得最新有效資訊：' + str(audit.get('status')))
+st.caption('稽核資料日：' + str(audit.get('asof_tw', audit.get('last_day', 'UNKNOWN')))
+           + '｜當日有效主管決策封存：' + str(audit.get('same_day_live_h126_archives', 'UNKNOWN')))
+if audit.get('findings'):
+    st.write('需處理：' + '；'.join(audit['findings']))
+st.caption('若當天沒有人在第7頁建立主管Excel，系統不會憑空製造H126決策；H137將呈現未封存警示。')

@@ -17291,7 +17291,27 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                     }
                     st.session_state[cache_key] = cache
                     ready = True
+                    # H137: this is a NEW manager workbook build (not a cached download).
+                    # Only the authenticated admin may create an H134 H126 archive.
+                    # Failure is visible but must not prevent exporting the Excel.
+                    try:
+                        from app_auth import current_role as _h137_role
+                        from godpick_h137_auto_seal import seal_new_manager_report as _h137_seal
+                        from zoneinfo import ZoneInfo as _h137_zone
+                        _h137_now = datetime.now(_h137_zone('Asia/Taipei'))
+                        _h137_h126 = st.session_state.get('h130_h126_current_authority')
+                        st.session_state['h137_last_auto_archive'] = _h137_seal(
+                            _h137_h126, role=_h137_role(), generated_at=_h137_now, now=_h137_now)
+                    except Exception:
+                        st.session_state['h137_last_auto_archive'] = {
+                            'status': 'ARCHIVE_NOT_CONFIRMED', 'confirmed': False}
         if ready:
+            _h137_receipt = st.session_state.get('h137_last_auto_archive')
+            if isinstance(_h137_receipt, dict):
+                if _h137_receipt.get('confirmed'):
+                    st.caption('H137｜主管決策已遠端回讀確認；仍非獨立PIT：' + str(_h137_receipt.get('status')))
+                else:
+                    st.warning('H137｜主管報表可匯出，但H134遠端封存未確認：' + str(_h137_receipt.get('status')))
             st.download_button(
                 label="匯出推薦結果 Excel",
                 data=cache["bytes"],
@@ -17324,6 +17344,18 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                 full_cache = {"sig":full_sig, "bytes":full_bytes, "name":f"股神推薦_完整技術診斷_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"}
                 st.session_state[full_key] = full_cache
                 full_ready = True
+                # H137: the extended diagnostic build also produces a fresh H126.
+                try:
+                    from app_auth import current_role as _h137_role
+                    from godpick_h137_auto_seal import seal_new_manager_report as _h137_seal
+                    from zoneinfo import ZoneInfo as _h137_zone
+                    _h137_now = datetime.now(_h137_zone('Asia/Taipei'))
+                    st.session_state['h137_last_auto_archive'] = _h137_seal(
+                        st.session_state.get('h130_h126_current_authority'),
+                        role=_h137_role(), generated_at=_h137_now, now=_h137_now)
+                except Exception:
+                    st.session_state['h137_last_auto_archive'] = {
+                        'status': 'ARCHIVE_NOT_CONFIRMED', 'confirmed': False}
         if full_ready:
             st.download_button("下載完整技術診斷 Excel", data=full_cache["bytes"], file_name=full_cache["name"], mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, key=_k("full_diag_excel_download_h84"))
 
