@@ -13,6 +13,7 @@ import streamlit as st
 from app_auth import require_login
 require_login()
 from godpick_h134_decision_vault import list_recent, read_archive
+from godpick_h136_auto_hub import remote_cache
 from godpick_h135_signal_governance import (
     VERSION, lifecycle_report, fixed_challenger_comparison,
     MAX_ARCHIVES,
@@ -24,6 +25,7 @@ st.caption(f'{VERSION}｜H134封存核對 × H133樣本外研究 × Top3/Top5固
 st.warning('本頁是研究與資料稽核，不是買進／賣出／自動調整模型權重。GitHub SHA驗證不等於獨立PIT時點證明。')
 st.page_link('pages/25_主管智慧決策戰情.py', label='返回 H134｜主管決策封存', icon='📊')
 st.page_link('pages/24_六引擎交易研究.py', label='返回 H133｜六引擎研究', icon='🔬')
+st.page_link('pages/27_AI自動資料中樞.py', label='H136｜AI自動資料中樞／更新狀態', icon='🔄')
 
 asof = st.date_input('研究截止日（台北時間；不使用截止日之後的訊號或價格）',
                      value=datetime.now(ZoneInfo('Asia/Taipei')).date(),
@@ -113,18 +115,38 @@ with strategy_tab:
     st.subheader('H135｜固定研究政策：H126 Top3 vs Top5')
     st.caption('兩種預先固定候選數上限，不能在看到樣本外成績後擇優宣稱已驗證。需要多個歷史交易日的事前訊號、個股與大盤價格。')
     st.warning('H134最近12份與上傳舊報表仍不足以證明真實PIT；本頁不使用樣本外結果自動優化選股門檻。')
-    signals_up = st.file_uploader('跨日期研究訊號 CSV／Excel', type=['csv', 'xlsx'], key='h135_signals')
-    stock_up = st.file_uploader('個股歷史日K（股票代號、日期、收盤價）', type=['csv', 'xlsx'], key='h135_stocks')
-    benchmark_up = st.file_uploader('同期大盤日K（日期、收盤價）', type=['csv', 'xlsx'], key='h135_benchmark')
+    st.markdown('**H136｜自動載入已核對遠端研究資料（優先，不需上傳三份檔案）**')
+    use_auto = st.checkbox('優先使用 H136 自動同步資料；缺資料才改為手動上傳', value=True, key='h136_use_remote')
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _h136_cached_data():
+        return remote_cache(asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+    auto_frames, auto_health = _h136_cached_data() if use_auto else ({}, {'status': 'DISABLED'})
+    if use_auto:
+        st.caption('遠端同步狀態：' + str(auto_health.get('status', 'UNKNOWN')) + '｜資料日：' +
+                   str(auto_health.get('asof', auto_health.get('last_run_day', '無'))))
+        if auto_frames:
+            st.info('已自動取得 H134 歷史訊號、H117 衍生個股行情及大盤資料；仍不是獨立PIT／含息還原績效證明。')
+        else:
+            st.warning('自動資料未就緒。可保留手動匯入；不會自動以舊資料冒充今日結果。')
+    if st.button('重新檢查 H136 雲端資料', key='h136_clear_cache'):
+        _h136_cached_data.clear()
+        st.rerun()
+    with st.expander('H136 無資料時才需要｜手動上傳備援', expanded=not bool(auto_frames)):
+        signals_up = st.file_uploader('跨日期研究訊號 CSV／Excel', type=['csv', 'xlsx'], key='h135_signals')
+        stock_up = st.file_uploader('個股歷史日K（股票代號、日期、收盤價）', type=['csv', 'xlsx'], key='h135_stocks')
+        benchmark_up = st.file_uploader('同期大盤日K（日期、收盤價）', type=['csv', 'xlsx'], key='h135_benchmark')
     use_lifecycle = st.checkbox('使用上方H134已核對封存生成的訊號草稿（仍非獨立PIT）', key='h135_use_snapshots')
-    signals = read_sheet(signals_up)
+    signals = auto_frames.get('signals', pd.DataFrame()) if auto_frames else read_sheet(signals_up)
     if use_lifecycle:
         found = st.session_state.get('h135_lifecycle_result')
         if isinstance(found, dict) and st.session_state.get('h135_lifecycle_day') == asof:
             signals = found.get('歷史研究訊號', pd.DataFrame())
-    stocks = read_sheet(stock_up)
-    benchmark = read_sheet(benchmark_up)
-    adjusted = st.checkbox('我已核對個股價格已處理拆併股／除權息調整（仍非來源獨立稽核）', key='h135_adjusted')
+    stocks = auto_frames.get('stock', pd.DataFrame()) if auto_frames else read_sheet(stock_up)
+    benchmark = auto_frames.get('benchmark', pd.DataFrame()) if auto_frames else read_sheet(benchmark_up)
+    adjusted = st.checkbox('我已核對個股價格已處理拆併股／除權息調整（仍非來源獨立稽核）', key='h135_adjusted',
+                           disabled=bool(auto_frames))
+    if auto_frames:
+        adjusted = False  # H117 EOD衍生檔不含已核對除權息證明，嚴禁自行勾成真。
     min_days = st.number_input('樣本外最低有效研究交易日', min_value=10, max_value=120, value=20, step=5, key='h135_min_oos')
     if st.button('執行 H135 雙政策樣本外審查（不調權）', key='h135_compare'):
         if signals.empty or stocks.empty or benchmark.empty:

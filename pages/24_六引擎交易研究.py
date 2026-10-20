@@ -34,6 +34,7 @@ from godpick_h130_six_engine import (
     portfolio_risk, journal_review, make_template,
 )
 
+from godpick_h136_auto_hub import remote_cache
 from godpick_h133_blackhorse_validation import (
     VERSION as H133_VERSION, evaluate_blackhorse,
 )
@@ -43,6 +44,7 @@ st.title("六引擎交易研究中心｜" + H133_VERSION)
 st.caption("以證據為基礎的研究工作台｜不送出委託、不變更權威推薦／設定／持股／交易紀錄；不保證獲利。")
 st.page_link("pages/25_主管智慧決策戰情.py", label="開啟 H134｜主管智慧決策戰情與遠端封存", icon="📊")
 st.page_link("pages/26_訊號生命週期與策略審查.py", label="開啟 H135｜訊號生命週期與策略驗證", icon="📈")
+st.page_link("pages/27_AI自動資料中樞.py", label="開啟 H136｜自動資料中樞", icon="🔄")
 taipei_today = datetime.now(ZoneInfo("Asia/Taipei")).date()
 asof = st.date_input("研究資料截止日（如盤中尚無正式收盤，必須看H117核驗情況）", value=taipei_today, max_value=taipei_today, key="h130_asof")
 
@@ -274,20 +276,36 @@ with seven:
     st.markdown("#### H133｜黑馬因子樣本外研究驗證（研究用途）")
     st.warning("歷史訊號 Excel 即使有日期，也不能證明當時真的產生該分數；本模組無法獨立核驗不可變PIT封存。研究收盤報酬不是可成交績效，不更新正式推薦或策略權重。")
     st.caption("至少提供**多個不同交易日**的 H126 A/B 研究訊號（非舊H102排行榜）、對應個股調整後日K、同期大盤指數日收盤。所有日期均依研究截止日限制。")
-    left, right = st.columns(2)
-    with left:
-        signals_upload = st.file_uploader("歷史研究訊號CSV／Excel：股票代號、訊號研究日、H126權威層別、H126最後研究分、H109決策權威", type=["csv", "xlsx"], key="h133_signals")
-        price_upload = st.file_uploader("個股歷史日K CSV／Excel：股票代號、日期、收盤價", type=["csv", "xlsx"], key="h133_stock_bars")
-        use_existing = st.checkbox("若未單獨上傳個股歷史K線，沿用本頁上方已讀取的日K", value=False, key="h133_use_common_bars")
-    with right:
-        benchmark_upload = st.file_uploader("大盤指數歷史日收盤 CSV／Excel：日期、收盤價", type=["csv", "xlsx"], key="h133_index_bars")
-        adjusted = st.checkbox("我已核對個股行情的除權息／拆併股調整口徑與歷史來源（需另行獨立審核）", value=False, key="h133_adjust_confirm")
-        k_choice = st.slider("每日研究標的 Top N（僅採當時H126分數）", min_value=1, max_value=10, value=5, key="h133_topk")
-        min_days = st.slider("最少有效樣本外研究交易日", min_value=20, max_value=60, value=20, step=5, key="h133_min_oos")
+    use_h136 = st.checkbox("H136｜優先自動載入已同步研究訊號、個股與大盤資料（不必上傳）", value=True, key="h133_h136_auto")
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _h136_auto_history():
+        return remote_cache(asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+    h136_frames, h136_quality = _h136_auto_history() if use_h136 else ({}, {'status': 'DISABLED'})
+    if use_h136:
+        st.caption("H136雲端資料：" + str(h136_quality.get('status', 'UNKNOWN')) + "｜資料截止：" + str(h136_quality.get('asof', '-')))
+        if h136_frames:
+            st.info("已取得自動研究資料；H117衍生行情未獨立認證除權息及歷史PIT，僅用於研究。")
+        else:
+            st.warning("雲端資料未就緒，仍可展開人工匯入備援。不會用舊H102排行榜填補。")
+    with st.expander("手動匯入備援（僅 H136 未就緒時使用）", expanded=not bool(h136_frames)):
+        left, right = st.columns(2)
+        with left:
+            signals_upload = st.file_uploader("歷史研究訊號CSV／Excel：股票代號、訊號研究日、H126權威層別、H126最後研究分、H109決策權威", type=["csv", "xlsx"], key="h133_signals")
+            price_upload = st.file_uploader("個股歷史日K CSV／Excel：股票代號、日期、收盤價", type=["csv", "xlsx"], key="h133_stock_bars")
+            use_existing = st.checkbox("若未單獨上傳個股歷史K線，沿用本頁上方已讀取的日K", value=False, key="h133_use_common_bars")
+        with right:
+            benchmark_upload = st.file_uploader("大盤指數歷史日收盤 CSV／Excel：日期、收盤價", type=["csv", "xlsx"], key="h133_index_bars")
+    adjusted = st.checkbox("我已核對個股行情的除權息／拆併股調整口徑與歷史來源（需另行獨立審核）", value=False, key="h133_adjust_confirm", disabled=bool(h136_frames))
+    if h136_frames:
+        adjusted = False
+    k_choice = st.slider("每日研究標的 Top N（僅採當時H126分數）", min_value=1, max_value=10, value=5, key="h133_topk")
+    min_days = st.slider("最少有效樣本外研究交易日", min_value=20, max_value=60, value=20, step=5, key="h133_min_oos")
     st.download_button("下載 H133 歷史研究訊號欄位範本", data="股票代號,訊號研究日,H126權威層別,H126最後研究分,H109決策權威,H123法人實證狀態,H124大戶實證狀態,訊號產生時間\n".encode("utf-8-sig"), file_name="H133_Signals_Template.csv", mime="text/csv", key="h133_template")
     st.caption("時間切分：前70%／後30%；T+5 市場交易日禁運；以每個研究日為樣本單位；缺少任何Top N個股報價的日子不列為有效績效。Bootstrap 為研究誤差範圍，並非未來報酬保證。")
     def h133_fingerprint():
-        digest = hashlib.sha256(str((asof, adjusted, k_choice, min_days, use_existing)).encode())
+        digest = hashlib.sha256(str((asof, adjusted, k_choice, min_days, use_existing, bool(h136_frames))).encode())
+        if h136_frames:
+            digest.update(str(h136_quality.get('files', {})).encode())
         for upload in (signals_upload, price_upload, benchmark_upload):
             digest.update(upload.getvalue() if upload else b"NO_UPLOAD")
         if use_existing and price_upload is None and not all_prices.empty:
@@ -295,14 +313,14 @@ with seven:
         return digest.hexdigest()
     fingerprint = h133_fingerprint()
     if st.button("H133｜執行黑馬歷史樣本外研究（不寫入正式系統）", key="h133_run"):
-        if signals_upload is None or benchmark_upload is None or (price_upload is None and not use_existing):
+        if not h136_frames and (signals_upload is None or benchmark_upload is None or (price_upload is None and not use_existing)):
             st.error("缺少歷史訊號、大盤日K或個股日K；無法計算有效樣本外比較。")
             st.session_state.pop("h133_audit_report", None)
         else:
             with st.spinner("正在逐日查核研究資格、行情對齊與績效完整性…"):
-                sig = load_uploaded(signals_upload)
-                historical_stock = load_uploaded(price_upload) if price_upload is not None else all_prices
-                index_bars = load_uploaded(benchmark_upload)
+                sig = h136_frames['signals'] if h136_frames else load_uploaded(signals_upload)
+                historical_stock = h136_frames['stock'] if h136_frames else (load_uploaded(price_upload) if price_upload is not None else all_prices)
+                index_bars = h136_frames['benchmark'] if h136_frames else load_uploaded(benchmark_upload)
                 result = evaluate_blackhorse(sig, historical_stock, index_bars, asof=asof,
                                              adjusted_confirmed=adjusted, top_k=k_choice,
                                              min_oos_days=min_days)

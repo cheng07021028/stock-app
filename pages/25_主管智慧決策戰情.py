@@ -18,6 +18,7 @@ from godpick_h134_decision_vault import (
 st.set_page_config(page_title='H134｜主管智慧決策戰情', layout='wide')
 st.title('25｜主管智慧決策戰情中心')
 st.page_link('pages/26_訊號生命週期與策略審查.py', label='前往 H135｜訊號生命週期與策略優勝劣汰', icon='📈')
+st.page_link('pages/27_AI自動資料中樞.py', label='H136｜自動資料中樞同步狀態', icon='🔄')
 st.caption(f'{VERSION}｜研究權威只讀看板 × 遠端只新增封存 × 回讀驗證｜不改正式買進資格／不下單')
 st.warning('H126「A級」是認證研究、不是買進許可。GitHub 只新增＋雜湊回讀能偵測改動，但不能防止有權限的管理員刪除、改寫歷史或變更 GitHub 時間。尚非獨立驗證的 PIT 證據。')
 now_tw = datetime.now(ZoneInfo('Asia/Taipei'))
