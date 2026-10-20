@@ -31,6 +31,12 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3'
+      - name: H139 one-shot repair for missing or stale research cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Retry only from preexisting verified archives, never invented prices.
+          python source/tools/h139_ops.py --stage recovery --source-root source --runtime-root runtime
       - name: Verify today's event-driven H126 archive and derived cache
         id: verify
         continue-on-error: true
@@ -46,6 +52,12 @@ jobs:
         run: |
           set -euo pipefail
           python source/tools/h138_brief_cli.py --runtime-root runtime
+      - name: H139 T+1 T+3 T+5 research settlement and drift advisory
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python source/tools/h139_ops.py --stage settlement --runtime-root runtime
       - name: Commit H137 audit receipt (no source or recommendation rewrites)
         if: always()
         shell: bash
@@ -54,13 +66,26 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [[ -f data/h137/H137_audit.json || -f data/h138/H138_manager_brief.json ]]; then
+          if [[ -f data/h137/H137_audit.json || -f data/h138/H138_manager_brief.json || -f data/h139/H139_recovery.json || -f data/h139/H139_settlement.json ]]; then
             if [[ -f data/h137/H137_audit.json ]]; then git add -f data/h137/H137_audit.json; fi
           if [[ -f data/h138/H138_manager_brief.json ]]; then
             git add -f data/h138/H138_manager_brief.json
           fi
+          # When retry actually repaired the cache, include only H136 derived files.
+          if [[ -f data/h139/H139_recovery.json ]]; then
+            git add -f data/h139/H139_recovery.json
+          fi
+          if [[ -f data/h139/H139_settlement.json ]]; then
+            git add -f data/h139/H139_settlement.json
+          fi
+          if [[ -f data/h136/H136_health.json ]]; then
+            git add -f data/h136/H136_health.json
+          fi
+          if [[ -f data/h136/H136_manifest.json ]]; then
+            git add -f data/h136/H136_manifest.json data/h136/H136_signals.csv data/h136/H136_stock.csv data/h136/H136_benchmark.csv
+          fi
             if ! git diff --cached --quiet; then
-              git commit -m 'H137: audit H126 decision and H136 cache status'
+              git commit -m 'H139: bounded recovery, EOD audit, and research settlement receipts'
               git pull --rebase origin runtime-data
               git push origin HEAD:runtime-data
             fi
