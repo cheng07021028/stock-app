@@ -40,6 +40,12 @@ jobs:
           FLAGS=()
           if [[ '${{ inputs.market_closed }}' == 'true' ]]; then FLAGS+=(--market-closed); fi
           python source/tools/h137_ops_audit.py --runtime-root runtime "${FLAGS[@]}"
+      - name: Generate H138 manager research readiness brief
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python source/tools/h138_brief_cli.py --runtime-root runtime
       - name: Commit H137 audit receipt (no source or recommendation rewrites)
         if: always()
         shell: bash
@@ -48,8 +54,11 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [[ -f data/h137/H137_audit.json ]]; then
-            git add -f data/h137/H137_audit.json
+          if [[ -f data/h137/H137_audit.json || -f data/h138/H138_manager_brief.json ]]; then
+            if [[ -f data/h137/H137_audit.json ]]; then git add -f data/h137/H137_audit.json; fi
+          if [[ -f data/h138/H138_manager_brief.json ]]; then
+            git add -f data/h138/H138_manager_brief.json
+          fi
             if ! git diff --cached --quiet; then
               git commit -m 'H137: audit H126 decision and H136 cache status'
               git pull --rebase origin runtime-data
