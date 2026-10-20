@@ -1,0 +1,69 @@
+name: H136 nightly read-only research data bridge
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 14 * * 1-5'  # 22:30 Asia/Taipei; after scheduled EOD processing
+permissions:
+  contents: write
+concurrency:
+  group: h136-runtime-data-sync
+  cancel-in-progress: false
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Code checkout (deployed default branch)
+        uses: actions/checkout@v4
+        with:
+          path: source
+          persist-credentials: false
+      - name: Historical data checkout (runtime-data only)
+        uses: actions/checkout@v4
+        with:
+          ref: runtime-data
+          path: runtime
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned data dependencies
+        run: python -m pip install 'pandas==2.3.3' 'numpy>=1.26,<3' 'requests>=2.31,<3'
+      - name: Rebuild from preexisting research archives and genuine H117 EOD
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Existing H117 scheduler may write to default branch or runtime-data.
+          # Prefer default-branch H117 files when BOTH EOD files exist; otherwise
+          # use the runtime-data branch. Never forge gaps by using week-day guesses.
+          MARKET_ROOT="$PWD/source"
+          if [[ ! -d source/data/h117/daily/TWSE && ! -s source/data/h116/verified_ohlc.csv ]]; then
+            MARKET_ROOT="$PWD/runtime"
+          fi
+          python source/tools/h136_nightly_sync.py \
+            --vault-root "$PWD/runtime" --market-root "$MARKET_ROOT" --output-root "$PWD/runtime"
+      - name: Commit only H136-derived research cache and status
+        shell: bash
+        working-directory: runtime
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f data/h136/H136_health.json
+          if [[ -e data/h136/H136_manifest.json ]]; then
+            git add -f data/h136/H136_manifest.json data/h136/H136_signals.csv \
+              data/h136/H136_stock.csv data/h136/H136_benchmark.csv
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'H136: refresh research cache from H134 and H117 (no trades)'
+            git pull --rebase origin runtime-data
+            git push origin HEAD:runtime-data
+          fi
+      - name: Upload nonprivate diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h136-health-${{ github.run_id }}
+          path: runtime/data/h136/H136_health.json
+          if-no-files-found: warn
+          retention-days: 14
