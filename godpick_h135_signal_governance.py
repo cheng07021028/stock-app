@@ -74,7 +74,7 @@ def _archive_integrity(payload: Any) -> tuple[date | None, str, dict[str, dict] 
             return day, 'CAPTURE_BEFORE_RESEARCH_DAY', None
         # Backfilled archives can be displayed, but must never be promoted to PIT.
         typ = str(payload.get('source_type') or '')
-        if typ not in ('LIVE_SESSION_H126', 'UPLOADED_H126_UNVERIFIED'):
+        if typ not in ('LIVE_SESSION_H126', 'UPLOADED_H126_UNVERIFIED', 'SCHEDULED_PAGE07_H126'):
             return day, 'INVALID_SOURCE_TYPE', None
         seen = {}
         for item in rows:

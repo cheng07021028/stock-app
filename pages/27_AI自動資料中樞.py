@@ -65,4 +65,28 @@ st.caption('稽核資料日：' + str(audit.get('asof_tw', audit.get('last_day',
            + '｜當日有效主管決策封存：' + str(audit.get('same_day_live_h126_archives', 'UNKNOWN')))
 if audit.get('findings'):
     st.write('需處理：' + '；'.join(audit['findings']))
-st.caption('若當天沒有人在第7頁建立主管Excel，系統不會憑空製造H126決策；H137將呈現未封存警示。')
+st.caption('H138可封存既有排程Page07本輪通過驗證的H126決策；若手動/排程皆未成功，H137仍會警告缺失。')
+
+
+st.divider()
+st.subheader('H138｜背景選股封存與主管晨報')
+st.caption('背景選股沿用 V191 中央排程的 Page07 正式演算法；H138 只橋接當期 H126 決策。晨報不含實際交易損益或買進授權。')
+from godpick_h138_daily_brief import read_remote_brief
+if st.button('重新讀取 H138 主管晨報', key='h138_refresh'):
+    st.session_state.pop('h138_latest_brief', None)
+if 'h138_latest_brief' not in st.session_state:
+    st.session_state['h138_latest_brief'] = read_remote_brief(asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+brief = st.session_state['h138_latest_brief']
+if brief.get('status') == 'READY_FOR_MANUAL_RESEARCH_NOT_TRADES':
+    st.success(brief.get('headline', '可檢閱當日研究封存（非買進）'))
+elif brief.get('status') == 'REVIEW_REQUIRED':
+    st.warning(brief.get('headline', '需人工複核'))
+else:
+    st.error('H138晨報尚未驗證：' + str(brief.get('status', 'UNKNOWN')))
+st.caption('晨報資料日：' + str(brief.get('asof_tw', brief.get('last_day', '尚無'))) +
+           '｜背景封存數：' + str(brief.get('today_confirmed_archives', '未知')))
+if brief.get('decision_summary'):
+    st.json(brief['decision_summary'])
+if brief.get('findings'):
+    st.write('待處理：' + '；'.join(map(str, brief['findings'][:20])))
+st.info('GitHub內部SHA與建立時間不等於獨立PIT存證；真正交易績效仍須由成交與除權息資料核對。')

@@ -599,14 +599,26 @@ def task_auto_recommendation(cfg: dict[str, Any] | None = None) -> dict[str, Any
         result.setdefault("authority_preflight_count", len(authority_rows))
         result.setdefault("authority_preflight_restored", bool(authority_restored))
         result.setdefault("authority_preflight_messages", authority_msgs[-20:])
+        # H138: scheduled Page07 already runs headlessly. Archive only *its*
+        # H97-validated same-run H126 decision after verified H117 market close.
+        # The scan's own success MUST NOT imply H134 remote durability.
+        try:
+            from godpick_h138_unattended_bridge import seal_scheduled_decision
+            result["h138_auto_seal"] = seal_scheduled_decision(result, ns, root=BASE_DIR)
+        except Exception as _h138_exc:
+            result["h138_auto_seal"] = {"status": "H138_BRIDGE_EXCEPTION", "confirmed": False,
+                                          "error_type": type(_h138_exc).__name__}
         ok=bool(result.get("ok"))
         msg=str(result.get("message") or ("07股神推薦模組自動執行完成" if ok else "07股神推薦模組自動執行失敗"))
+        if ok and not result["h138_auto_seal"].get("confirmed"):
+            msg += "｜H138主管決策遠端封存尚未確認（與Page07掃描成功分開）"
+
         return _report(
             ok, msg, details=result,
             changed_files=list(result.get("changed_files") or [
                 "godpick_latest_recommendations.json","godpick_latest_run_anchor.json","godpick_records.json",
                 "godpick_rotation_history.json","godpick_learning_state.json"
-            ]), started=t0, warning=bool(result.get("warning"))
+            ]), started=t0, warning=bool(result.get("warning") or (ok and not result["h138_auto_seal"].get("confirmed")))
         )
     except Exception as exc:
         return _report(False,f"07股神推薦模組自動執行失敗：{type(exc).__name__}: {exc}",started=t0)

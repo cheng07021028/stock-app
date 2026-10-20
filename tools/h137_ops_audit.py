@@ -31,7 +31,7 @@ def audit(*, root: Path, asof: date, market_closed: bool = False) -> dict:
     """
     paths = root / 'data' / 'h136'
     snapshots, diagnostic = collect_local_archives(root, asof=asof)
-    live = [s for s in snapshots if s.get('source_type') == 'LIVE_SESSION_H126'
+    live = [s for s in snapshots if s.get('source_type') in ('LIVE_SESSION_H126', 'SCHEDULED_PAGE07_H126')
             and s.get('research_day') == asof.isoformat()]
     statuses = []
     if not market_closed and not live:
@@ -76,6 +76,7 @@ def audit(*, root: Path, asof: date, market_closed: bool = False) -> dict:
             'audit_time_tw': datetime.now(TW).isoformat(timespec='seconds'),
             'status': 'BLOCKED_REQUIRES_ATTENTION' if statuses else 'INTERNAL_CHECK_PASS_NOT_PIT',
             'findings': statuses, 'same_day_live_h126_archives': len(live),
+            'same_day_unattended_archives': sum(s.get('source_type') == 'SCHEDULED_PAGE07_H126' for s in live),
             'archive_valid': diagnostic['archive_valid'], 'archive_rejected': diagnostic['archive_rejected'],
             'PIT': 'NOT_INDEPENDENTLY_VERIFIED',
             'note': 'Internal only. Holiday scheduling may require manual market_closed flag; cannot auto-authorize trades.'}

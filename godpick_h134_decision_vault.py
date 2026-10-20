@@ -92,7 +92,7 @@ def build_snapshot(frame: pd.DataFrame, *, research_day: date, source: str,
         raise ValueError('INVALID_RESEARCH_DAY')
     if len(frame) > MAX_ROWS:
         raise ValueError('TOO_MANY_ROWS')
-    if source not in ('LIVE_SESSION_H126', 'UPLOADED_H126_UNVERIFIED'):
+    if source not in ('LIVE_SESSION_H126', 'UPLOADED_H126_UNVERIFIED', 'SCHEDULED_PAGE07_H126'):
         raise ValueError('UNKNOWN_SOURCE')
     now = captured_at or datetime.now(ZoneInfo('Asia/Taipei'))
     if now.tzinfo is None:
@@ -138,8 +138,9 @@ def build_snapshot(frame: pd.DataFrame, *, research_day: date, source: str,
               'source_type': source, 'rows': rows, 'summary': summary, 'freshness': freshness}
     fingerprint = _sha(_json_bytes(stable))
     path = f'{REMOTE_DIRECTORY}/H134_{research_day:%Y%m%d}_{fingerprint[:32]}.json'
-    pit_status = ('USER_BACKFILL_NOT_PIT' if source != 'LIVE_SESSION_H126'
+    pit_status = ('USER_BACKFILL_NOT_PIT' if source == 'UPLOADED_H126_UNVERIFIED'
                   else 'BACKDATED_SESSION_NOT_PIT' if research_day != now_tw.date()
+                  else 'SCHEDULED_SCAN_NOT_INDEPENDENTLY_TIMESTAMPED' if source == 'SCHEDULED_PAGE07_H126'
                   else 'SAME_DAY_SESSION_NOT_INDEPENDENTLY_TIMESTAMPED')
     if research_day.weekday() >= 5:
         pit_status = 'NON_TRADING_DAY_NOT_PIT'
