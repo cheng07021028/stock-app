@@ -17085,6 +17085,11 @@ def _build_excel_bytes_fast_h85(
     # H126_AUTHORITY_EXPORT_HOOK_V1: single source for manager's decision; H102 is historical only.
     from godpick_h126_authority_report import attach_authority as _h126_attach_authority
     tables = _h126_attach_authority(tables)
+    # H130: transfer ONLY the already-audited H126 research decision to the
+    # six-engine page within this Streamlit session (no GitHub/Firestore writes).
+    # Copy every manager export; never substitute a legacy score for H126 status.
+    st.session_state["h130_h126_current_authority"] = tables["h126_authority"].copy(deep=True)
+    st.session_state["h130_h126_manager_built_at"] = datetime.now().isoformat(timespec="seconds")
     health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
     h129_risk_watch = _h129_risk_watch(tables)
     health = pd.concat([health, h129_t1_health], ignore_index=True, sort=False)
@@ -18573,6 +18578,10 @@ def main():
         title="股神推薦｜V4 加速記憶版",
         subtitle="保留舊版完整功能 + 加速顯示 + 條件記憶 + 欄位順序可調整並保留。",
     )
+
+    # H130: research workbench is a separate on-demand page; do not trigger
+    # market scans, news scraping, backtests, or cloud writes on Page7 rerun.
+    st.page_link("pages/24_六引擎交易研究.py", label="H130｜六引擎交易研究中心（研究／回測／組合／日誌）", icon="📊")
 
     st.caption(f"目前7頁修正版：{STATE_FIX_VERSION}")
     st.caption("勾選欄位穩定版：v44 data_editor callback fix")
