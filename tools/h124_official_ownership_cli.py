@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """H124 official source capture CLI. Fail closed, no guessed dates/units."""
 from __future__ import annotations
-import argparse,json,sys
+import argparse,json,sys,hashlib
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,9 +31,32 @@ def main(argv=None):
         import requests
         if args.cmd=='collect-tdcc':
             url=TDCC_URL
-            response=requests.get(url,headers={'User-Agent':'SPT-StockApp-H124/1.0','Accept':'text/csv,application/json'},timeout=65)
+            response=requests.get(url,headers={'User-Agent':'SPT-StockApp-H124/1.1','Accept':'text/csv,application/json'},
+                                  timeout=65,allow_redirects=False)
+            if response.is_redirect:
+                raise ValueError('TDCC官方來源重新導向，不自動跟隨非預期URL')
             response.raise_for_status()
-            ev=build_tdcc(response.content,collected_at=now,source_url=response.url)
+            # Preserve raw response for sealed evidence; expose only safe schema metadata on failure.
+            try:
+                ev=build_tdcc(response.content,collected_at=now,source_url=response.url)
+            except (ValueError,UnicodeError,json.JSONDecodeError) as exc:
+                from godpick_h124_ownership_flow import _parse_tdcc_bytes, _safe_header_list
+                try:
+                    parsed=_parse_tdcc_bytes(response.content)
+                    observed=_safe_header_list(list(parsed[0]))
+                except (ValueError, UnicodeError, json.JSONDecodeError) as parse_exc:
+                    observed='UNREADABLE_SCHEMA:'+type(parse_exc).__name__
+                print(json.dumps({
+                    'status':'TDCC_SCHEMA_REJECTED_NO_EVIDENCE_WRITTEN',
+                    'error':str(exc)[:420],
+                    'observed_header_names_only':observed,
+                    'http_status':response.status_code,
+                    'content_type':response.headers.get('Content-Type','').split(';')[0][:80],
+                    'response_bytes':len(response.content),
+                    'raw_sha256_for_operator':hashlib.sha256(response.content).hexdigest(),
+                    'next':'核對官方API欄位，不准用本次失敗資料提升H124認證',
+                },ensure_ascii=False))
+                return 2
         else:
             url=args.url
             # Only official TPEx URL may be requested: block SSRF and redirects.

@@ -6,7 +6,7 @@ particular large investor accumulating; it is only holder-bracket concentration.
 No network request is executed while scanning stocks.
 """
 from __future__ import annotations
-import csv, gzip, hashlib, io, json, re
+import csv, gzip, hashlib, io, json, re, unicodedata
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,14 +24,47 @@ TPEX_FIELDS={
  'day':('資料日期','交易日期','報表日期','Date'),
 }
 TDCC_FIELDS={
- 'day':('資料日期',), 'code':('證券代號',), 'level':('持股分級',),
+ 'day':('資料日期','Date'), 'code':('證券代號',), 'level':('持股分級',),
  'shares':('股數',), 'ratio':('占集保庫存數比例%','佔集保庫存數比例%'),
 }
 
 
+def _clean_header(value: Any) -> str:
+    """Remove transport/Unicode presentation noise, never guess field semantics."""
+    if not isinstance(value, str):
+        raise ValueError('H124_TDCC_COLUMN_NAME_NOT_TEXT')
+    return unicodedata.normalize('NFKC', value).strip().lstrip('\ufeff').strip()
+
+
+def _safe_header_list(names: Sequence[Any]) -> str:
+    # Diagnostics show field NAMES only; never emit personal data, row values or URL tokens.
+    out = []
+    for v in list(names)[:16]:
+        title = _clean_header(v) if isinstance(v, str) else '<non-text-field>'
+        title = ''.join(c for c in title if c.isprintable())[:46]
+        out.append(title)
+    return '、'.join(out) or '<empty>'
+
+
+def _normalize_tdcc_rows(rows: list[dict]) -> list[dict]:
+    if not rows: raise ValueError('TDCC_EMPTY_ROWS')
+    headers = list(rows[0])
+    clean = [_clean_header(h) for h in headers]
+    if not all(clean) or len(set(clean)) != len(clean):
+        raise ValueError('TDCC_DUPLICATE_OR_EMPTY_HEADERS:' + _safe_header_list(headers))
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or list(row) != headers:
+            raise ValueError('TDCC_INCONSISTENT_ROW_COLUMNS')
+        out.append({n: row[original] for n, original in zip(clean, headers)})
+    return out
+
+
 def _field(headers:Sequence[str],names:Sequence[str])->str:
     available=[x for x in names if x in headers]
-    if len(available)!=1:raise ValueError('官方欄位缺失或重複，禁止猜測：'+ '/'.join(names))
+    if len(available)!=1:
+        raise ValueError('官方欄位缺失或重複，禁止猜測：'+ '/'.join(names) +
+                         '；TDCC實際欄名：' + _safe_header_list(headers))
     return available[0]
 
 
@@ -118,15 +151,26 @@ def build_tpex(raw:Sequence[Mapping[str,Any]], *, trade_day:str, collected_at:st
 
 
 def _parse_tdcc_bytes(raw:bytes)->list[dict]:
-    if len(raw)>15_000_000:raise ValueError('TDCC資料過大')
+    if not isinstance(raw, bytes) or len(raw)>15_000_000:
+        raise ValueError('TDCC資料過大或類型錯誤')
     text=raw.decode('utf-8-sig')
     if text.lstrip().startswith('['):
         rows=json.loads(text)
-        if not isinstance(rows,list) or not all(isinstance(x,dict) for x in rows):raise ValueError('TDCC JSON非物件清單')
-        return rows
-    if text.lstrip().startswith('<'):raise ValueError('TDCC服務回傳HTML，不是官方資料')
-    parsed=list(csv.DictReader(io.StringIO(text)))
-    if not parsed:raise ValueError('TDCC CSV沒有資料')
+        if not isinstance(rows,list) or not rows or not all(isinstance(x,dict) for x in rows):
+            raise ValueError('TDCC JSON非有效物件清單')
+        return _normalize_tdcc_rows(rows)
+    if text.lstrip().startswith(('<','{')):
+        raise ValueError('TDCC服務回傳HTML或非清單物件，非官方1-5資料')
+    reader=csv.DictReader(io.StringIO(text, newline=''))
+    if not reader.fieldnames: raise ValueError('TDCC CSV缺少表頭')
+    cols = [_clean_header(x) for x in reader.fieldnames]
+    if not all(cols) or len(set(cols))!=len(cols):
+        raise ValueError('TDCC CSV重複或空白表頭：' + _safe_header_list(reader.fieldnames))
+    reader.fieldnames = cols
+    parsed=list(reader)
+    if not parsed: raise ValueError('TDCC CSV沒有資料')
+    if any(None in row or any(value is None for value in row.values()) for row in parsed):
+        raise ValueError('TDCC CSV列長與表頭不符')
     return parsed
 
 
