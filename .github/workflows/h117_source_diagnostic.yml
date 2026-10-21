@@ -1,0 +1,26 @@
+name: H117 Official Source Diagnostic (Read Only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect-official-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install requests
+        run: python -m pip install 'requests>=2.31,<3'
+      - name: Probe TWSE TPEx TAIEX without writing repository data
+        run: python tools/h117_source_probe.py
+      - name: Preserve minimal safe diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h117-source-diagnostic
+          path: h117_source_diag.json
+          if-no-files-found: warn
+          retention-days: 7
