@@ -6377,6 +6377,14 @@ def main():
         else:
             st.info(status_msg)
 
+    # H141: an old repository snapshot is never represented as verified remote data.
+    try:
+        from godpick_persistence_service import github_config, firebase_configured
+        if not github_config().get("token") and not firebase_configured():
+            st.error("H141 重大資料保護：目前未連上 GitHub／Firestore 權威。畫面可能是 2026/07/09 舊紀錄，禁止把它保存、批次刪除或當成最新績效。請先在 Streamlit Secrets 設定 GITHUB_TOKEN，指定 runtime-data，然後重新載入。")
+    except Exception:
+        st.error("H141 重大資料保護：未能確認推薦紀錄的遠端來源，請勿儲存或刪除。")
+
     # V174：任何按鈕執行前，先同步唯一權威檔。舊畫面不得回寫覆蓋新紀錄。
     _authority_df_v174, _authority_details_v174, _authority_restored_v174 = _sync_authority_before_actions()
     if _authority_restored_v174:

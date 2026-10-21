@@ -137,3 +137,32 @@ for tag, policy in settled.get('strategies', {}).items():
         if table:
             st.dataframe(table, use_container_width=True, hide_index=True)
 st.info('提醒：歷史訊號尚未有獨立不可變PIT認證，也未完成企業行動、含息報酬、費稅與實際成交驗證。任何統計結果都不能自動授權買進。')
+
+
+st.divider()
+st.subheader('H140｜雲端排程端到端健康檢查')
+st.caption('依 H136～H139 遠端回執核對五個階段；只有當日回執狀態一致才列為內部就緒，不能獨立證明GitHub Actions是否執行。')
+from godpick_h140_observability import read_remote_monitor
+if st.button('重新檢查 H140 遠端五階段監控', key='h140_refresh'):
+    st.session_state.pop('h140_latest_monitor', None)
+if 'h140_latest_monitor' not in st.session_state:
+    st.session_state['h140_latest_monitor'] = read_remote_monitor(
+        asof=datetime.now(ZoneInfo('Asia/Taipei')).date())
+h140 = st.session_state['h140_latest_monitor']
+if h140.get('status') == 'INTERNAL_PIPELINE_READY_NOT_LIVE_ATTESTED':
+    st.success('H140：五階段遠端回執當日一致（內部檢查；仍需查看Actions執行紀錄）')
+elif h140.get('status') == 'MARKET_CLOSED_MANUAL_OVERRIDE_NOT_ATTESTED':
+    st.info('H140：人工宣告休市，未驗證正式交易所日曆；不宣稱排程成功')
+else:
+    st.error('H140：未達當日驗收條件：' + str(h140.get('status', 'UNKNOWN')))
+st.caption('稽核資料日：' + str(h140.get('asof_tw', h140.get('last_day','未知'))) +
+           '｜完成階段：' + str(h140.get('pipeline_stages_ok','?')) + '/' +
+           str(h140.get('pipeline_stages_total','5')))
+for stage, obj in h140.get('stages',{}).items():
+    with st.expander(stage + '｜' + str(obj.get('state','UNKNOWN'))):
+        st.write('回執狀態：' + str(obj.get('reported_status','未取得')))
+        if obj.get('recommended_action'):
+            st.warning(obj['recommended_action'])
+if h140.get('findings'):
+    st.caption('缺失代碼：' + '；'.join(map(str,h140['findings'][:12])))
+st.info('仍需人工核對正式Actions執行記錄、通知、部署分支與Streamlit重啟；此頁不會自動交易或變更正式推薦。')

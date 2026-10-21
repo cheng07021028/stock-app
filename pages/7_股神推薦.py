@@ -17095,14 +17095,24 @@ def _build_excel_bytes_fast_h85(
     health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
     h129_risk_watch = _h129_risk_watch(tables)
     health = pd.concat([health, h129_t1_health], ignore_index=True, sort=False)
+    # H141: refuse to distribute old executable-looking H99 prices when no
+    # H126 formal authority exists. Show an explicit manager quality verdict.
+    from godpick_h141_integrity_guard import manager_quality_gate as _h141_manager_quality_gate
+    h141_quality, h141_safe_legacy = _h141_manager_quality_gate(
+        tables.get('h126_authority', pd.DataFrame()),
+        tables.get('audit', pd.DataFrame()),
+        h129_risk_watch,
+        tables.get('priority_overview', pd.DataFrame()),
+    )
     sheets = [
         ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
+        ("00C_H141輸出品質", h141_quality, "本輪風險與證據品質未通過；不得視為交易推薦。"),
         ("00A_H126資料缺口", tables['h126_health'], "H126 尚無有效權威來源資料。"),
         ("00B_H129風控複核", h129_risk_watch, "風控否決與證據缺口逐筆分類；禁止當成推薦買進。"),
         ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
         ("00B_早期雷達", tables.get("blackhorse_radar", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有早期觀察候選。"),
         ("00C_已發動觀察", tables.get("ignited_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有已發動觀察股。"),
-        ("09_H102舊排序_非買進", tables.get("priority_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪重點預發動研究主榜沒有合格候選。"),
+        ("09_H102舊排序_非買進", h141_safe_legacy, "歷史研究排名，已移除舊進場、停損、目標與RR；禁止買進。"),
         ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
         ("02_既有研究追蹤", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
         ("03_上市櫃等待", tables.get("waiting", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃等待候選。"),
@@ -17114,7 +17124,7 @@ def _build_excel_bytes_fast_h85(
         ("08A_H129績效品質", h129_t1_health, "本輪沒有績效品質資訊。"),
     ]
     _h126_manager_tabs = {
-        '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '08A_H129績效品質',
+        '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '00C_H141輸出品質', '08A_H129績效品質',
         '01_正式推薦與交易計畫', '02_研究推薦', '02_既有研究追蹤',
         '04_今日主流資金', '05_驗證與風險證據',
         '06_績效煞車與健康', '08_T+1推薦檢討',
@@ -17208,7 +17218,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"股神正式推薦作戰表_主管9頁_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H141_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache

@@ -813,14 +813,14 @@ def upsert_records_authority_fast(
                 and _safe_str(gh_status.get("status")) == "success"
                 and _safe_str(gh_status.get("payload_hash")) == state["payload_hash"]
             )
-            remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else True
+            remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else False
             if require_remote_confirm and not fs_verified and github_config()["token"]:
                 gh_verified, gh_message = _sync_records_github_snapshot_v191_h8(
                     current, state, f"{reason} | H18 no-change remote verify"
                 )
             else:
                 gh_message = "GitHub已驗證一致" if gh_verified else "GitHub尚未完成同hash回讀驗證"
-            remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else True
+            remote_ok = bool(fs_verified or gh_verified) if _configured_remote_exists() else False
             report = PersistenceReport(
                 local_ok=True,
                 firestore_ok=fs_verified,
@@ -1635,7 +1635,7 @@ def save_watchlist_permanent(payload: Any) -> PersistenceReport:
     if _configured_remote_exists():
         report.permanent_ok = bool(report.local_ok and (report.github_ok or report.firestore_ok))
     else:
-        report.permanent_ok = report.local_ok
+        report.permanent_ok = False  # H141: ephemeral local file is NEVER Reboot-safe.
     return report
 
 
@@ -2274,6 +2274,47 @@ def write_records_firestore_mutation(
         return False, f"Firestore records 增量寫入失敗：{exc}"
 
 
+def _h141_prevent_remote_rollback(records: list[dict[str, Any]], *, deleted_ids: Iterable[str] | None = None) -> tuple[bool, str]:
+    """H141: before any mutation, verify against surviving remote authority.
+
+    A rebooted local checkout must never publish a smaller July snapshot over
+    a verified October one. Fail CLOSED if no remote is available.
+    """
+    from godpick_h141_integrity_guard import record_snapshot_guard
+    cfg = github_config()
+    has_firestore = firebase_configured()
+    if not cfg.get("token") and not has_firestore:
+        return False, (
+            "H141保護：未設定 GITHUB_TOKEN/Firestore，只有暫存本機歷史。"
+            "已阻止正式紀錄修改及遠端回寫；請先設 Streamlit Secrets，恢復遠端權威。"
+        )
+    states: list[tuple[str, dict[str, Any]]] = []
+    if cfg.get("token"):
+        gh_state, gh_msg = read_github_json(RECORDS_STATE_FILE, {})
+        if isinstance(gh_state, dict) and gh_state.get('payload_hash'):
+            states.append(("GitHub runtime-data", gh_state))
+        elif not has_firestore:
+            return False, f"H141保護：GitHub 尚未提供可驗證推薦歷史摘要（{gh_msg}）；禁止用本機快照覆蓋。"
+    if has_firestore:
+        fs_state, fs_msg = _read_records_firestore_summary()
+        if isinstance(fs_state, dict) and fs_state.get('payload_hash'):
+            states.append(("Firestore", fs_state))
+        elif not states:
+            return False, f"H141保護：Firestore 無法驗證推薦摘要（{fs_msg}）；禁止寫入。"
+    deleted = {str(x).strip() for x in (deleted_ids or []) if str(x).strip()}
+    for source, state in states:
+        good, why = record_snapshot_guard(records, state, destructive=bool(deleted))
+        if not good:
+            return False, f"{source}｜{why}"
+        if deleted:
+            count = int(state.get('count') or 0)
+            # If the displayed pre-delete snapshot was already partial, do not
+            # allow the user to delete against it and republish the subset.
+            if count and len(records) + len(deleted) < count:
+                return False, f"H141保護：{source} 存有 {count} 筆，本次刪除前畫面最多 {len(records)+len(deleted)} 筆；請先回讀完整遠端紀錄。"
+    return True, "已核對遠端權威，禁止較舊資料回寫"
+
+
 def save_records_mutation_fast(
     payload: Any,
     *,
@@ -2300,6 +2341,9 @@ def save_records_mutation_fast(
             report.updated_at = _now_text()
             return report
     records = records_as_rows_exact(payload)
+    _h141_ok, _h141_reason = _h141_prevent_remote_rollback(records, deleted_ids=deleted_ids)
+    if not _h141_ok:
+        return PersistenceReport(local_ok=False, permanent_ok=False, local_message=_h141_reason, github_message=_h141_reason, firestore_message=_h141_reason, updated_at=_now_text())
     requested_deleted_ids = [_safe_str(x) for x in (deleted_ids or []) if _safe_str(x)]
     requested_upsert_rows = [dict(x) for x in (upsert_rows or []) if isinstance(x, dict)]
     mutation_kind = "destructive" if requested_deleted_ids else "upsert"
@@ -2381,7 +2425,7 @@ def save_records_mutation_fast(
         # success is reported only after Firestore or GitHub has confirmed it.
         report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok))
     else:
-        report.permanent_ok = report.local_ok
+        report.permanent_ok = False  # H141: ephemeral local file is NEVER Reboot-safe.
     return report
 
 
@@ -2409,6 +2453,9 @@ def save_records_sync_fast(
             report.updated_at = _now_text()
             return report
     records = normalize_records(payload)
+    _h141_ok, _h141_reason = _h141_prevent_remote_rollback(records)
+    if not _h141_ok:
+        return PersistenceReport(local_ok=False, permanent_ok=False, local_message=_h141_reason, github_message=_h141_reason, firestore_message=_h141_reason, updated_at=_now_text())
     guard_ok, guard_msg, before_count, after_count = _guard_records_full_replace(
         records, allow_destructive_replace=allow_destructive_replace, reason=reason
     )
@@ -2518,7 +2565,7 @@ def save_records_sync_fast(
         # success is reported only after Firestore or GitHub has confirmed it.
         report.permanent_ok = bool(report.local_ok and (report.firestore_ok or report.github_ok))
     else:
-        report.permanent_ok = report.local_ok
+        report.permanent_ok = False  # H141: ephemeral local file is NEVER Reboot-safe.
     return report
 
 
@@ -2529,6 +2576,9 @@ def save_records_permanent(
     allow_destructive_replace: bool = False,
 ) -> PersistenceReport:
     records = normalize_records(payload)
+    _h141_ok, _h141_reason = _h141_prevent_remote_rollback(records)
+    if not _h141_ok:
+        return PersistenceReport(local_ok=False, permanent_ok=False, local_message=_h141_reason, github_message=_h141_reason, firestore_message=_h141_reason, updated_at=_now_text())
     guard_ok, guard_msg, before_count, after_count = _guard_records_full_replace(
         records, allow_destructive_replace=allow_destructive_replace, reason=reason
     )
@@ -2567,7 +2617,7 @@ def save_records_permanent(
     if _configured_remote_exists():
         report.permanent_ok = bool(report.local_ok and (report.github_ok or report.firestore_ok))
     else:
-        report.permanent_ok = report.local_ok
+        report.permanent_ok = False  # H141: ephemeral local file is NEVER Reboot-safe.
     return report
 
 
@@ -2922,7 +2972,7 @@ def save_named_json_permanent(
     elif _configured_remote_exists():
         report.permanent_ok = bool(report.local_ok and remote_ok)
     else:
-        report.permanent_ok = report.local_ok
+        report.permanent_ok = False  # H141: ephemeral local file is NEVER Reboot-safe.
     return report
 
 

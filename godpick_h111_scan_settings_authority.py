@@ -52,7 +52,7 @@ def _config(provided_secrets: Mapping[str, Any] | None = None) -> dict[str, str]
         "token": get("GITHUB_TOKEN"),
         "owner": get("GITHUB_REPO_OWNER", "cheng07021028"),
         "repo": get("GITHUB_REPO_NAME", "stock-app"),
-        "branch": get("GITHUB_REPO_BRANCH", "main"),
+        "branch": get("GITHUB_RUNTIME_DATA_BRANCH") or get("GITHUB_REPO_BRANCH", "runtime-data"),
     }
 
 
