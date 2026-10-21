@@ -58,6 +58,14 @@ jobs:
         run: |
           set -euo pipefail
           python source/tools/h139_ops.py --stage settlement --runtime-root runtime
+      - name: H140 strict pipeline reconciliation and incident receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          if [[ '${{ inputs.market_closed }}' == 'true' ]]; then FLAGS+=(--market-closed); fi
+          python source/tools/h140_ops.py --runtime-root runtime "${FLAGS[@]}"
       - name: Commit H137 audit receipt (no source or recommendation rewrites)
         if: always()
         shell: bash
@@ -66,7 +74,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if [[ -f data/h137/H137_audit.json || -f data/h138/H138_manager_brief.json || -f data/h139/H139_recovery.json || -f data/h139/H139_settlement.json ]]; then
+          if [[ -f data/h137/H137_audit.json || -f data/h138/H138_manager_brief.json || -f data/h139/H139_recovery.json || -f data/h139/H139_settlement.json || -f data/h140/H140_monitor.json ]]; then
             if [[ -f data/h137/H137_audit.json ]]; then git add -f data/h137/H137_audit.json; fi
           if [[ -f data/h138/H138_manager_brief.json ]]; then
             git add -f data/h138/H138_manager_brief.json
@@ -78,6 +86,9 @@ jobs:
           if [[ -f data/h139/H139_settlement.json ]]; then
             git add -f data/h139/H139_settlement.json
           fi
+          if [[ -f data/h140/H140_monitor.json ]]; then
+            git add -f data/h140/H140_monitor.json
+          fi
           if [[ -f data/h136/H136_health.json ]]; then
             git add -f data/h136/H136_health.json
           fi
@@ -85,7 +96,7 @@ jobs:
             git add -f data/h136/H136_manifest.json data/h136/H136_signals.csv data/h136/H136_stock.csv data/h136/H136_benchmark.csv
           fi
             if ! git diff --cached --quiet; then
-              git commit -m 'H139: bounded recovery, EOD audit, and research settlement receipts'
+              git commit -m 'H140: stage health, H139 settlement and action receipts'
               git pull --rebase origin runtime-data
               git push origin HEAD:runtime-data
             fi
@@ -96,3 +107,26 @@ jobs:
         run: |
           echo 'H137 audit requires attention: check runtime/data/h137/H137_audit.json and H136 workflow.' >> "$GITHUB_STEP_SUMMARY"
           exit 1
+      - name: Surface H140 blocked stages as workflow failure
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('runtime/data/h140/H140_monitor.json')
+          if not p.is_file():
+              raise SystemExit('H140 monitor receipt missing; cloud verification incomplete')
+          report = json.loads(p.read_bytes())
+          status = report.get('status', 'UNKNOWN')
+          with open(__import__('os').environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write('H140 pipeline state: ' + str(status) + '\n')
+              if report.get('findings'):
+                  f.write('Blocked checks: ' + ', '.join(report['findings'][:10]) + '\n')
+          if status == 'BLOCKED_NEEDS_OPERATOR':
+              raise SystemExit('H140 blocked: examine data/h140/H140_monitor.json')
+          if status not in ('INTERNAL_PIPELINE_READY_NOT_LIVE_ATTESTED',
+                            'MARKET_CLOSED_MANUAL_OVERRIDE_NOT_ATTESTED'):
+              raise SystemExit('Unexpected H140 status')
+          PY
