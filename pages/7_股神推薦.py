@@ -17094,13 +17094,9 @@ def _build_excel_bytes_fast_h85(
     st.session_state["h130_h126_manager_built_at"] = datetime.now().isoformat(timespec="seconds")
     health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
     h129_risk_watch = _h129_risk_watch(tables)
-    # H142: explain the origin/strength of mass FADE vetoes, without clearing any veto.
-    from godpick_h142_evidence_review import build_h142_review as _h142_build_review
-    h142_summary, h142_evidence, h142_sector = _h142_build_review(tables)
-    h141_quality = pd.concat([h141_quality, h142_summary], ignore_index=True, sort=False)
     health = pd.concat([health, h129_t1_health], ignore_index=True, sort=False)
-    # H141: refuse to distribute old executable-looking H99 prices when no
-    # H126 formal authority exists. Show an explicit manager quality verdict.
+    # H141: initialize the quality result BEFORE H142 appends its audit summary.
+    # Do not clear H109/H126 restrictions or reintroduce legacy H102 trade prices.
     from godpick_h141_integrity_guard import manager_quality_gate as _h141_manager_quality_gate
     h141_quality, h141_safe_legacy = _h141_manager_quality_gate(
         tables.get('h126_authority', pd.DataFrame()),
@@ -17108,6 +17104,10 @@ def _build_excel_bytes_fast_h85(
         h129_risk_watch,
         tables.get('priority_overview', pd.DataFrame()),
     )
+    # H142: audit mass FADE veto provenance; append only after H141 initialization.
+    from godpick_h142_evidence_review import build_h142_review as _h142_build_review
+    h142_summary, h142_evidence, h142_sector = _h142_build_review(tables)
+    h141_quality = pd.concat([h141_quality, h142_summary], ignore_index=True, sort=False)
     sheets = [
         ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
         ("00C_H141輸出品質", h141_quality, "本輪風險與證據品質未通過；不得視為交易推薦。"),
