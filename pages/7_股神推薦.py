@@ -17094,6 +17094,10 @@ def _build_excel_bytes_fast_h85(
     st.session_state["h130_h126_manager_built_at"] = datetime.now().isoformat(timespec="seconds")
     health = pd.concat([health, tables['h126_health']], ignore_index=True, sort=False)
     h129_risk_watch = _h129_risk_watch(tables)
+    # H142: explain the origin/strength of mass FADE vetoes, without clearing any veto.
+    from godpick_h142_evidence_review import build_h142_review as _h142_build_review
+    h142_summary, h142_evidence, h142_sector = _h142_build_review(tables)
+    h141_quality = pd.concat([h141_quality, h142_summary], ignore_index=True, sort=False)
     health = pd.concat([health, h129_t1_health], ignore_index=True, sort=False)
     # H141: refuse to distribute old executable-looking H99 prices when no
     # H126 formal authority exists. Show an explicit manager quality verdict.
@@ -17107,6 +17111,7 @@ def _build_excel_bytes_fast_h85(
     sheets = [
         ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
         ("00C_H141輸出品質", h141_quality, "本輪風險與證據品質未通過；不得視為交易推薦。"),
+        ("00D_H142風控來源稽核", h142_evidence, "逐檔顯示H108跨期資金/廣度證據，僅供風控稽核。"),
         ("00A_H126資料缺口", tables['h126_health'], "H126 尚無有效權威來源資料。"),
         ("00B_H129風控複核", h129_risk_watch, "風控否決與證據缺口逐筆分類；禁止當成推薦買進。"),
         ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
@@ -17124,7 +17129,8 @@ def _build_excel_bytes_fast_h85(
         ("08A_H129績效品質", h129_t1_health, "本輪沒有績效品質資訊。"),
     ]
     _h126_manager_tabs = {
-        '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '00C_H141輸出品質', '08A_H129績效品質',
+        '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '00C_H141輸出品質',
+        '00D_H142風控來源稽核', '08A_H129績效品質',
         '01_正式推薦與交易計畫', '02_研究推薦', '02_既有研究追蹤',
         '04_今日主流資金', '05_驗證與風險證據',
         '06_績效煞車與健康', '08_T+1推薦檢討',
@@ -17139,7 +17145,9 @@ def _build_excel_bytes_fast_h85(
         'H113缺失原因','H123法人實證狀態','H123來源雜湊',
         'H123研究實際時間','H124大戶實證狀態',
         'H124大戶變化pp','H124大戶來源雜湊',
-        'H109決策權威','H109否決原因','H110證據狀態',
+        'H109決策權威','H109否決原因','H108族群生命週期','H108族群確認分',
+        'H108族群前次資料日','H108族群資金流變化','H108族群廣度變化','H108內部樣本可信度',
+        'H108觀測狀態','H110證據狀態',
         'H110研究資訊截止日','H105發動階段',
         'H105今日強勢排除','H110最終研究優先分',
     )
