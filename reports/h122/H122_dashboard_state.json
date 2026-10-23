@@ -18,12 +18,12 @@
     "last_three_source_day": null,
     "partial_day_count": 0
   },
-  "fingerprint_sha256": "5ca3de96306c621e3345833ab4dea90108529011ebe44de00b22c4eabb7d77d3",
+  "fingerprint_sha256": "983b8110261ea805565aadb6f8c7e0ed5ab9fb0c413da665d967fa4551fd903d",
   "h120_attested_days": null,
   "persistence": "REMOTE_UNVERIFIED",
   "pipeline_steps": {
-    "collect_step": "failure",
-    "corporate_step": "skipped",
+    "collect_step": "success",
+    "corporate_step": "failure",
     "review_step": "skipped"
   },
   "recommendation_snapshots": 0,
