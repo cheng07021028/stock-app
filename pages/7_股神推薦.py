@@ -17108,10 +17108,24 @@ def _build_excel_bytes_fast_h85(
     from godpick_h142_evidence_review import build_h142_review as _h142_build_review
     h142_summary, h142_evidence, h142_sector = _h142_build_review(tables)
     h141_quality = pd.concat([h141_quality, h142_summary], ignore_index=True, sort=False)
+    # H143: pure, adversarial manager view; do not re-run the model or modify
+    # H126/H109 gates. All four sheets are produced from this SAME export.
+    from godpick_h143_clarity import audit_h143 as _h143_audit_clarity
+    h143_summary, h143_blind, h143_pool, h143_challenge = _h143_audit_clarity({
+        'h126_health': tables.get('h126_health', pd.DataFrame()),
+        'h126_authority': tables.get('h126_authority', pd.DataFrame()),
+        'audit': tables.get('audit', pd.DataFrame()),
+        'h142_evidence': h142_evidence,
+        'h129_t1_health': h129_t1_health,
+    })
     sheets = [
         ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
         ("00C_H141輸出品質", h141_quality, "本輪風險與證據品質未通過；不得視為交易推薦。"),
         ("00D_H142風控來源稽核", h142_evidence, "逐檔顯示H108跨期資金/廣度證據，僅供風控稽核。"),
+        ("00E_H143主管重點", h143_summary, "讀取H126/H113母體、時點與證據缺口；研究不是下單授權。"),
+        ("00F_H143盲點清單", h143_blind, "逐項標出盲點與反面解釋；不因缺證據解除風控。"),
+        ("00G_H143股票池精要", h143_pool, "依資料補證順序整理，並非股價預測排行。"),
+        ("00H_H143自我反證", h143_challenge, "列出需要推翻的假設及需要的新證據。"),
         ("00A_H126資料缺口", tables['h126_health'], "H126 尚無有效權威來源資料。"),
         ("00B_H129風控複核", h129_risk_watch, "風控否決與證據缺口逐筆分類；禁止當成推薦買進。"),
         ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
@@ -17130,7 +17144,8 @@ def _build_excel_bytes_fast_h85(
     ]
     _h126_manager_tabs = {
         '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '00C_H141輸出品質',
-        '00D_H142風控來源稽核', '08A_H129績效品質',
+        '00D_H142風控來源稽核', '00E_H143主管重點', '00F_H143盲點清單',
+        '00G_H143股票池精要', '00H_H143自我反證', '08A_H129績效品質',
         '01_正式推薦與交易計畫', '02_研究推薦', '02_既有研究追蹤',
         '04_今日主流資金', '05_驗證與風險證據',
         '06_績效煞車與健康', '08_T+1推薦檢討',
