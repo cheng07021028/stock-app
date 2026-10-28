@@ -2292,6 +2292,7 @@ def _h88_build_core_no_streamlit(
     run_date: str = "",
     authority_source: str = "h97-current-scan-core",
     sector_df: pd.DataFrame | None = None,
+    priority_final: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Build the bounded H79/H94/H96 core and bind it to this scan run.
 
@@ -2303,7 +2304,13 @@ def _h88_build_core_no_streamlit(
         return {}
     source = _h91_unique_decision_frame(candidate_df, stage="h97_current_scan_core")
     from godpick_h104_daily_discovery import select_discovery_input
-    source = select_discovery_input(source)
+    if isinstance(priority_final, pd.DataFrame) and not priority_final.empty:
+        from godpick_h145_core_bridge import bounded_with_final_coverage as _h145_bound_final
+        source, _h145_selection = _h145_bound_final(
+            source, priority_final, selector=select_discovery_input, limit=240)
+    else:
+        source = select_discovery_input(source)
+        _h145_selection = None
     try:
         tables = build_h79_tables_guarded(source)
     except Exception:
@@ -2380,6 +2387,8 @@ def _h88_build_core_no_streamlit(
     payload["full_candidate_count"] = int(len(candidate_df))
     payload["model_input_count"] = int(len(source))
     payload["h97_audit_recovered"] = bool(audit_recovered)
+    if _h145_selection is not None:
+        payload["h145_final_candidate_input"] = _h145_selection
 
     if callable(stamp_h97_core):
         try:
@@ -15351,7 +15360,8 @@ def _h90_load_core_from_local_snapshot(candidate_df: pd.DataFrame | None = None,
     return {}, ""
 
 
-def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
+def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame,
+                                       final_candidates: pd.DataFrame | None = None) -> tuple[dict[str, pd.DataFrame], str]:
     """Explicit Excel recovery: rebuild a current-run bounded H97 core once."""
     if not isinstance(candidate_df, pd.DataFrame) or candidate_df.empty:
         return {}, ""
@@ -15365,8 +15375,9 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
             candidate_df,
             run_id=run_id,
             run_date=run_date,
-            authority_source="h97-explicit-export-bounded-recovery",
+            authority_source="h145-explicit-export-bounded-recovery",
             sector_df=st.session_state.get(_k("category_strength_store")),
+            priority_final=final_candidates,
         )
         if not isinstance(compact, dict) or not compact:
             return {}, ""
@@ -15383,8 +15394,26 @@ def _h90_build_bounded_core_for_export(candidate_df: pd.DataFrame) -> tuple[dict
 def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str]:
     """Resolve current-scan core tables for Excel; stale Audit truth is rejected."""
     tables, source_label, _ = _h85_get_h79_core_for_render(rec_df)
+    ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
+    if not isinstance(ctx, dict):
+        ctx = {}
+    run_id = _safe_str(ctx.get("run_id")) or _safe_str(st.session_state.get(_k("scan_run_id")))
+    # H145: a cached core validated against a one-row *session* table is NOT
+    # proof for a recovered 1,665-row export pool. Validate against the exact
+    # full export source before using it as a manager decision authority.
+    compact_raw = _h90_normalize_core_snapshot(st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {}))
+    if callable(validate_h97_core_for_scan) and isinstance(candidate_df, pd.DataFrame) and not candidate_df.empty:
+        _h145_valid, _h145_reason = validate_h97_core_for_scan(
+            compact_raw, candidate_df, run_id=run_id, require_audit=True)
+        if not _h145_valid:
+            tables = {}
+            st.session_state[_k("h145_rejected_core_reason")] = _h145_reason
     if tables and not _h91_core_failure_message(tables) and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
-        return tables, source_label or "session-core"
+        from godpick_h145_core_bridge import audit_final_coverage as _h145_audit_coverage
+        _h145_coverage = _h145_audit_coverage(tables.get("audit"), rec_df)
+        if _h145_coverage["complete"]:
+            return tables, source_label or "session-core"
+        st.session_state[_k("h145_coverage_before_recovery")] = _h145_coverage
     ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
     if not isinstance(ctx, dict):
         ctx = {}
@@ -15392,9 +15421,11 @@ def _h90_get_h79_core_for_export(candidate_df: pd.DataFrame, rec_df: pd.DataFram
     raw, label = _h90_load_core_from_local_snapshot(candidate_df=candidate_df, run_id=current_run_id)
     if raw:
         tables = _h85_decode_h79_core_tables(raw)
-        if tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values()):
+        from godpick_h145_core_bridge import audit_final_coverage as _h145_local_coverage
+        if (tables and any(isinstance(v, pd.DataFrame) and not v.empty for v in tables.values())
+                and _h145_local_coverage(tables.get('audit'), rec_df)['complete']):
             return tables, label
-    return _h90_build_bounded_core_for_export(candidate_df)
+    return _h90_build_bounded_core_for_export(candidate_df, rec_df)
 
 
 def _h85_get_h79_core_for_render(rec_df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], str, bool]:
@@ -17018,7 +17049,24 @@ def _build_excel_bytes_fast_h85(
     except Exception:
         pass
 
-    candidate_for_core = candidate_diagnosis_export if isinstance(candidate_diagnosis_export, pd.DataFrame) else pd.DataFrame()
+    # H145: preferentially repair a one-row export only from the exact same
+    # scan's complete decision cache. Old snapshots, H102 scores and arbitrary
+    # rec-list stocks cannot be promoted into a current-run authority.
+    from godpick_h145_core_bridge import restore_export_pool as _h145_restore_pool
+    _h145_ctx = st.session_state.get(_k("recommend_execution_context_v191"), {}) or {}
+    if not isinstance(_h145_ctx, dict):
+        _h145_ctx = {}
+    candidate_for_core, h145_bridge = _h145_restore_pool(
+        candidate_diagnosis_export,
+        st.session_state.get(_k("decision_frame_store_v181")),
+        rec_export,
+        scan_report=scan_report,
+        context_run_id=_safe_str(_h145_ctx.get("run_id")),
+        scan_run_id=_safe_str(st.session_state.get(_k("scan_run_id"))),
+        decision_signature=_safe_str(st.session_state.get(_k("decision_frame_scan_signature_v181"))),
+        active_signature=_safe_str(st.session_state.get(_k("active_scan_signature_v181"))),
+    )
+    st.session_state[_k("h145_candidate_bridge")] = dict(h145_bridge)
     tables, core_source = _h90_get_h79_core_for_export(
         candidate_for_core,
         rec_export if isinstance(rec_export, pd.DataFrame) else pd.DataFrame(),
@@ -17132,8 +17180,23 @@ def _build_excel_bytes_fast_h85(
         research_day=str(next((r.get('數值') for r in tables.get('h126_health',pd.DataFrame()).to_dict('records')
                                if r.get('項目') == 'H128市場資料交易日（非匯出時間）'), '')),
     )
+    # H145: source-repair success is not enough if the scanner reports eight
+    # final candidates but only one survives in the actual result list.
+    from godpick_h145_core_bridge import audit_final_coverage as _h145_audit_final
+    # Older isolated export tests execute this block without a live scan.  In
+    # production h145_bridge was always supplied by the exporter above.
+    _h145_bridge = locals().get('h145_bridge')
+    if not isinstance(_h145_bridge, dict):
+        _h145_bridge = {'candidate_complete': True, 'status': 'NO_SCAN_CONTEXT'}
+    h145_coverage = _h145_audit_final(tables.get('audit'), locals().get('rec_export', pd.DataFrame()))
+    _h145_bridge['audit_final_coverage'] = h145_coverage
+    if not _h145_bridge['candidate_complete'] or not h145_coverage['complete']:
+        h144_state['scope_incomplete'] = True
+        h144_state['status'] = 'EXPORT_SCOPE_INCOMPLETE'
+    h144_state['h145_bridge_status'] = _h145_bridge['status']
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h144_scope_audit')] = dict(h144_state)
+        st.session_state[_k('h145_candidate_bridge')] = dict(_h145_bridge)
     if h144_state['scope_incomplete']:
         h141_quality = pd.concat([h141_quality, pd.DataFrame([
             {'項目':'H144主管候選母體完整性','數值':'EXPORT_SCOPE_INCOMPLETE｜不可外推全市場無機會'},
@@ -17167,7 +17230,7 @@ def _build_excel_bytes_fast_h85(
             labels = [
                 ("H144.1｜主管最值得觀察（僅同輪已取得名單）", "研究名單，不是下單建議"),
                 ("掃描漏斗", f"{h144_focus_meta['scanned']} 掃描 → {h144_focus_meta['diagnosed']} 診斷 → {h144_focus_meta['final']} 作戰 → {h144_focus_meta['received']} 送主管"),
-                ("母體狀態", h144_focus_meta['scope_status']),
+                ("母體狀態", h144_focus_meta['scope_status'] + '｜H145:' + _h145_bridge['status']),
                 ("最高優先風險提醒", h144_focus_meta['warning']),
                 ("分數口徑", h144_focus_meta['score_basis'] + f"；可比較股票 {h144_focus_meta['ranked']} 檔；正式可買進 {h144_focus_meta['h126_buyable']} 檔"),
             ]
@@ -17218,7 +17281,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
-    sig_raw = f"H144|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}"
+    sig_raw = f"H145|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -17247,7 +17310,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H144_Focus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H145_Focus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
