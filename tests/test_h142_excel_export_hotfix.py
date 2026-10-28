@@ -115,14 +115,14 @@ class H142ManagerExcelHotfix(unittest.TestCase):
     def test_manager_workbook_sheets_are_writable_and_readable(self):
         res = _export_block(self._base(self._audit()))
         workbook = _read_workbook(res['sheets'])
-        self.assertIn('00_H126主管決策', workbook.sheetnames)
-        self.assertIn('00C_H141輸出品質', workbook.sheetnames)
-        self.assertIn('00D_H142風控來源稽核', workbook.sheetnames)
-        self.assertIn('09_H102舊排序_非買進', workbook.sheetnames)
-        sheet = workbook['00C_H141輸出品質']
-        self.assertGreater(sheet.max_row, 10)
-        audit = workbook['00D_H142風控來源稽核']
-        self.assertEqual(audit.max_row, 121)
+        self.assertEqual(workbook.sheetnames, ['00_主管重點觀察榜', '00_H126主管決策'])
+        focus = workbook['00_主管重點觀察榜']
+        # The synthetic old H142 test input has no H110 scores; no invented ranks.
+        self.assertEqual(focus['A1'].value, '狀態')
+        self.assertIn('H110', str(focus['A2'].value))
+        # Detailed H141/H142 evidence remains computed but no longer overwhelms the manager.
+        self.assertIn('H109 FADE_VETO檔數', res['h141_quality']['項目'].astype(str).tolist())
+        self.assertEqual(len(res['h142_evidence']), 120)
         workbook.close()
 
     def test_empty_candidates_still_export_without_local_variable_error(self):
@@ -130,8 +130,7 @@ class H142ManagerExcelHotfix(unittest.TestCase):
         frames['h126_authority'] = pd.DataFrame()
         res = _export_block(frames)
         book = _read_workbook(res['sheets'])
-        self.assertIn('00C_H141輸出品質', book.sheetnames)
-        self.assertIn('00D_H142風控來源稽核', book.sheetnames)
+        self.assertEqual(book.sheetnames, ['00_主管重點觀察榜', '00_H126主管決策'])
         book.close()
 
 if __name__ == '__main__':

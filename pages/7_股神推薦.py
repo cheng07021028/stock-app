@@ -16983,6 +16983,7 @@ def _build_excel_bytes_fast_h84(
     ]
     for name, frame, fallback in sheets:
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
+
     try:
         wb.active = 0
     except Exception:
@@ -17118,60 +17119,65 @@ def _build_excel_bytes_fast_h85(
         'h142_evidence': h142_evidence,
         'h129_t1_health': h129_t1_health,
     })
+    # H144: verify scan->H97->H126 mother populations, without any model rerun.
+    # A one-row export after a 1,000+ stock scan is an incomplete report, NOT a
+    # defensible conclusion that the market had zero opportunities.
+    from godpick_h144_scope_challenge import audit_h144 as _h144_audit
+    h144_state, h144_funnel, h144_shadow, h144_blind, h144_counter = _h144_audit(
+        scan_report=locals().get('report', {}),
+        candidate_frame=locals().get('candidate_for_core', pd.DataFrame()),
+        result_frame=locals().get('rec_export', pd.DataFrame()),
+        sector_frame=sector, tables=tables,
+        core_source=locals().get('core_source', ''),
+        research_day=str(next((r.get('數值') for r in tables.get('h126_health',pd.DataFrame()).to_dict('records')
+                               if r.get('項目') == 'H128市場資料交易日（非匯出時間）'), '')),
+    )
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h144_scope_audit')] = dict(h144_state)
+    if h144_state['scope_incomplete']:
+        h141_quality = pd.concat([h141_quality, pd.DataFrame([
+            {'項目':'H144主管候選母體完整性','數值':'EXPORT_SCOPE_INCOMPLETE｜不可外推全市場無機會'},
+            {'項目':'H144匯出核心輸入檔數','數值':h144_state['export_count']},
+            {'項目':'H144掃描診斷有效檔數','數值':h144_state['diagnosis_count']},
+        ])],ignore_index=True,sort=False)
+    # Legacy H129 audit tabs '00B_H129風控複核' and '08A_H129績效品質'
+    # remain internally calculated; manager-facing Excel omits them.
+    # H144.1: user-facing manager Excel is intentionally ONLY TWO sheets.
+    # 00_focus is the only ranked observation board; 00_H126 is retained as
+    # the machine-readable authoritative decision sheet for H131/H134 tooling.
+    from godpick_h144_focus_board import build_focus_board as _h144_make_focus
+    h144_focus, h144_focus_meta = _h144_make_focus(tables, h144_state)
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h144_focus_data')] = h144_focus.copy(deep=True)
     sheets = [
-        ("00_H126主管決策", tables['h126_authority'], "本輪未能認證黑馬；不可依舊版研究分數買進。"),
-        ("00C_H141輸出品質", h141_quality, "本輪風險與證據品質未通過；不得視為交易推薦。"),
-        ("00D_H142風控來源稽核", h142_evidence, "逐檔顯示H108跨期資金/廣度證據，僅供風控稽核。"),
-        ("00E_H143主管重點", h143_summary, "讀取H126/H113母體、時點與證據缺口；研究不是下單授權。"),
-        ("00F_H143盲點清單", h143_blind, "逐項標出盲點與反面解釋；不因缺證據解除風控。"),
-        ("00G_H143股票池精要", h143_pool, "依資料補證順序整理，並非股價預測排行。"),
-        ("00H_H143自我反證", h143_challenge, "列出需要推翻的假設及需要的新證據。"),
-        ("00A_H126資料缺口", tables['h126_health'], "H126 尚無有效權威來源資料。"),
-        ("00B_H129風控複核", h129_risk_watch, "風控否決與證據缺口逐筆分類；禁止當成推薦買進。"),
-        ("00_H106重點預發動", tables.get("blackhorse_overview", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有通過H106完整證據研究條件的候選；請查看早期雷達與未通過原因。"),
-        ("00B_早期雷達", tables.get("blackhorse_radar", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有早期觀察候選。"),
-        ("00C_已發動觀察", tables.get("ignited_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有已發動觀察股。"),
-        ("09_H102舊排序_非買進", h141_safe_legacy, "歷史研究排名，已移除舊進場、停損、目標與RR；禁止買進。"),
-        ("01_正式推薦與交易計畫", tables.get("actionable", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有正式可執行股票；研究股不得冒充買進。"),
-        ("02_既有研究追蹤", tables.get("research", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃研究推薦。"),
-        ("03_上市櫃等待", tables.get("waiting", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有上市櫃等待候選。"),
-        ("04_今日主流資金", sector, "目前沒有可用主流族群資料。"),
-        ("05_驗證與風險證據", tables.get("audit", pd.DataFrame()) if tables else pd.DataFrame(), "目前沒有足夠的驗證增量/風險證據。"),
-        ("06_績效煞車與健康", health, "目前沒有成熟績效/系統健康資料。"),
-        ("07_興櫃隔離研究", tables.get("emerging_watch", pd.DataFrame()) if tables else pd.DataFrame(), "本輪沒有興櫃隔離研究股。"),
-        ("08_T+1推薦檢討", h102_t1_review, "目前沒有成熟T+1推薦檢討資料。"),
-        ("08A_H129績效品質", h129_t1_health, "本輪沒有績效品質資訊。"),
+        ("00_主管重點觀察榜", h144_focus,
+         "沒有可比較的當輪H110研究股票；不可用舊H102湊榜。"),
+        ("00_H126主管決策", tables['h126_authority'],
+         "本輪沒有完成官方資格認證的買進股票；H126保留供權威讀取。"),
     ]
     _h126_manager_tabs = {
-        '00_H126主管決策', '00A_H126資料缺口', '00B_H129風控複核', '00C_H141輸出品質',
-        '00D_H142風控來源稽核', '00E_H143主管重點', '00F_H143盲點清單',
-        '00G_H143股票池精要', '00H_H143自我反證', '08A_H129績效品質',
-        '01_正式推薦與交易計畫', '02_研究推薦', '02_既有研究追蹤',
-        '04_今日主流資金', '05_驗證與風險證據',
-        '06_績效煞車與健康', '08_T+1推薦檢討',
-        '09_H102舊排序_非買進',
+        '00_主管重點觀察榜', '00_H126主管決策',
     }
-    sheets = [item for item in sheets if item[0] in _h126_manager_tabs]
-    # 05 sheet is a concise audit, not 1,281 columns of internal engine state.
-    _h126_audit_keep = (
-        '股票代號','股票名稱','市場別','類別',
-        'H113入榜資格','H113流動性合格','H113大戶鎖碼合格',
-        'H113法人逐日來源驗證','H113法人連買合格','H113主升起漲合格',
-        'H113缺失原因','H123法人實證狀態','H123來源雜湊',
-        'H123研究實際時間','H124大戶實證狀態',
-        'H124大戶變化pp','H124大戶來源雜湊',
-        'H109決策權威','H109否決原因','H108族群生命週期','H108族群確認分',
-        'H108族群前次資料日','H108族群資金流變化','H108族群廣度變化','H108內部樣本可信度',
-        'H108觀測狀態','H110證據狀態',
-        'H110研究資訊截止日','H105發動階段',
-        'H105今日強勢排除','H110最終研究優先分',
-    )
-    sheets = [(name, frame.loc[:, [c for c in _h126_audit_keep if c in frame.columns]]
-               if name == '05_驗證與風險證據' and isinstance(frame, pd.DataFrame) and not frame.empty
-               and any(c in frame.columns for c in _h126_audit_keep) else frame, fallback)
-              for name, frame, fallback in sheets]
     for name, frame, fallback in sheets:
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
+        if name == "00_主管重點觀察榜":
+            ws = wb[name]
+            # One glance: why the list can be sparse, before seeing any stock.
+            ws.insert_rows(1, amount=5)
+            labels = [
+                ("H144.1｜主管最值得觀察（僅同輪已取得名單）", "研究名單，不是下單建議"),
+                ("掃描漏斗", f"{h144_focus_meta['scanned']} 掃描 → {h144_focus_meta['diagnosed']} 診斷 → {h144_focus_meta['final']} 作戰 → {h144_focus_meta['received']} 送主管"),
+                ("母體狀態", h144_focus_meta['scope_status']),
+                ("最高優先風險提醒", h144_focus_meta['warning']),
+                ("分數口徑", h144_focus_meta['score_basis'] + f"；可比較股票 {h144_focus_meta['ranked']} 檔；正式可買進 {h144_focus_meta['h126_buyable']} 檔"),
+            ]
+            for ri,(label,value) in enumerate(labels,1):
+                ws.cell(ri,1,label);ws.cell(ri,2,value)
+            ws.freeze_panes = 'D7'
+            ws.row_dimensions[1].height = 28
+            ws.column_dimensions['A'].width = 34
+            ws.column_dimensions['B'].width = 42
+
     try:
         wb.active = 0
     except Exception:
@@ -17212,16 +17218,16 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
-    sig_raw = f"H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}"
+    sig_raw = f"H144|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
     build_clicked = False
     if not ready:
-        st.success("H105：掃描結果已可操作；Excel 不在頁面主執行緒重跑模型。第一張工作表為未來1～5日黑馬預發動榜，並保留H102動態優先與T+1推薦檢討。")
+        st.success("H144.1：本次只輸出主管觀察榜與H126權威決策。若掃描母體不完整，只列已取得股票，不以舊H102湊推薦。")
         build_clicked = st.button(
-            "📊 建立主管 Excel（含推薦優先總覽）",
+            "📊 建立主管精簡 Excel（優先觀察排名）",
             use_container_width=True,
             type="primary",
             key=_k("h88_build_manager_excel"),
@@ -17241,18 +17247,25 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H141_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H144_Focus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
             st.session_state[_k("h88_excel_built_this_run")] = True
+            _h144_display = st.session_state.get(_k('h144_scope_audit'), {})
+            if isinstance(_h144_display, dict) and _h144_display.get('scope_incomplete'):
+                st.warning('H144｜本輪主管匯出核心母體不完整。Excel僅供資料修復與研究稽核，不能宣稱全市場零機會或據以買進。')
             ready = True
         except Exception as exc:
             st.session_state[_k("h86_excel_error")] = f"{type(exc).__name__}: {exc}"
             ready = False
     if ready:
+        _focus_visible = st.session_state.get(_k('h144_focus_data'))
+        if isinstance(_focus_visible, pd.DataFrame) and not _focus_visible.empty:
+            st.caption('H144.1｜僅按同輪H110研究分排序；遇到候選母體縮水，這不是全市場Top名次。')
+            st.dataframe(_focus_visible.head(12), use_container_width=True, hide_index=True)
         st.download_button(
-            "⬇️ 下載股神推薦 Excel（9張主管核心表）",
+            "⬇️ 下載主管精簡觀察榜（僅2張）",
             data=cache["bytes"],
             file_name=cache["name"],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -17260,7 +17273,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             type="primary",
             key=_k("h86_always_excel_download"),
         )
-        st.caption(f"H88：Excel 已就緒｜建立 {cache.get('seconds','—')} 秒｜不重跑模型。01正式、02研究、03等待、04主流資金、05風險證據、06健康、07興櫃研究。")
+        st.caption(f"H144.1：精簡Excel已就緒｜建立 {cache.get('seconds','—')} 秒｜2張工作表，不重跑模型、不補造買進榜。")
     elif _safe_str(st.session_state.get(_k("h86_excel_error"))):
         st.error("主管Excel建立失敗：" + _safe_str(st.session_state.get(_k("h86_excel_error"))))
 
@@ -17328,6 +17341,11 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                     # Only the authenticated admin may create an H134 H126 archive.
                     # Failure is visible but must not prevent exporting the Excel.
                     try:
+                        _h144_export_health = st.session_state.get(_k('h144_scope_audit'), {})
+                        if isinstance(_h144_export_health, dict) and _h144_export_health.get('scope_incomplete'):
+                            st.session_state['h137_last_auto_archive'] = {
+                                'status': 'H144_EXPORT_SCOPE_INCOMPLETE', 'confirmed': False}
+                            raise RuntimeError('H144_EXPORT_SCOPE_INCOMPLETE')
                         from app_auth import current_role as _h137_role
                         from godpick_h137_auto_seal import seal_new_manager_report as _h137_seal
                         from zoneinfo import ZoneInfo as _h137_zone
@@ -17335,9 +17353,9 @@ def _render_export_block(rec_df: pd.DataFrame, category_strength_df: pd.DataFram
                         _h137_h126 = st.session_state.get('h130_h126_current_authority')
                         st.session_state['h137_last_auto_archive'] = _h137_seal(
                             _h137_h126, role=_h137_role(), generated_at=_h137_now, now=_h137_now)
-                    except Exception:
+                    except Exception as _h137_error:
                         st.session_state['h137_last_auto_archive'] = {
-                            'status': 'ARCHIVE_NOT_CONFIRMED', 'confirmed': False}
+                            'status': 'H144_EXPORT_SCOPE_INCOMPLETE' if str(_h137_error) == 'H144_EXPORT_SCOPE_INCOMPLETE' else 'ARCHIVE_NOT_CONFIRMED', 'confirmed': False}
         if ready:
             _h137_receipt = st.session_state.get('h137_last_auto_archive')
             if isinstance(_h137_receipt, dict):
