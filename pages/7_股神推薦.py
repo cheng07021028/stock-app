@@ -17210,8 +17210,10 @@ def _build_excel_bytes_fast_h85(
     # the machine-readable authoritative decision sheet for H131/H134 tooling.
     from godpick_h144_focus_board import build_focus_board as _h144_make_focus
     h144_focus, h144_focus_meta = _h144_make_focus(tables, h144_state)
+    # H146: keep the data-quality reason with the display, not only the rows.
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h144_focus_data')] = h144_focus.copy(deep=True)
+        st.session_state[_k('h146_focus_quality')] = dict(h144_focus_meta)
     sheets = [
         ("00_主管重點觀察榜", h144_focus,
          "沒有可比較的當輪H110研究股票；不可用舊H102湊榜。"),
@@ -17225,21 +17227,39 @@ def _build_excel_bytes_fast_h85(
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
         if name == "00_主管重點觀察榜":
             ws = wb[name]
-            # One glance: why the list can be sparse, before seeing any stock.
-            ws.insert_rows(1, amount=5)
+            # H146: distinguish research display, actual authority and score utility.
+            # A 0→0→8→1667 funnel or twelve identical scores is NOT a top-12 list.
+            ws.insert_rows(1, amount=6)
+            _h146_tie = h144_focus_meta['all_scores_tied']
+            _h146_funnel = '不通過｜' + '；'.join(h144_focus_meta['scope_issues'][:3]) if h144_focus_meta['scope_issues'] else '初步一致（仍須驗證同輪與來源）'
+            _h146_rank = ('不可區分個股優先序：全部有效分數相同' if _h146_tie else
+                           ('可作局部研究比較，但母體未完整核實' if h144_focus_meta['scope_issues'] else
+                            '可作同輪研究相對比較，非交易建議'))
             labels = [
-                ("H144.1｜主管最值得觀察（僅同輪已取得名單）", "研究名單，不是下單建議"),
-                ("掃描漏斗", f"{h144_focus_meta['scanned']} 掃描 → {h144_focus_meta['diagnosed']} 診斷 → {h144_focus_meta['final']} 作戰 → {h144_focus_meta['received']} 送主管"),
-                ("母體狀態", h144_focus_meta['scope_status'] + '｜H145:' + _h145_bridge['status']),
-                ("最高優先風險提醒", h144_focus_meta['warning']),
-                ("分數口徑", h144_focus_meta['score_basis'] + f"；可比較股票 {h144_focus_meta['ranked']} 檔；正式可買進 {h144_focus_meta['h126_buyable']} 檔"),
+                ("H146｜主管研究與反證觀察（非買進榜）", "同分並列；不得把資料缺口當成強勢推薦"),
+                ("股票母體與漏斗", f"{h144_focus_meta['scanned']} 掃描 → {h144_focus_meta['diagnosed']} 診斷 → {h144_focus_meta['final']} 作戰 → {h144_focus_meta['received']} 主管；稽核 {h144_focus_meta['audit_count']}，H126個股 {h144_focus_meta['authority_count']}"),
+                ("母體品質結論", _h146_funnel + '｜H145:' + _h145_bridge['status']),
+                ("分數排序品質", f"{_h146_rank}；有效分數 {h144_focus_meta['valid_score_rows']} 筆、不同值 {h144_focus_meta['score_distinct']} 種"),
+                ("正式交易資格", f"H126實際個股授權 {h144_focus_meta['h126_buyable']} 檔；這張表一律不得直接下單"),
+                ("當輪需先修正事項", h144_focus_meta['warning']),
             ]
+            from openpyxl.utils import get_column_letter as _h146_col_letter
+            from openpyxl.styles import Alignment as _H146Alignment, Font as _H146Font, PatternFill as _H146Fill
             for ri,(label,value) in enumerate(labels,1):
                 ws.cell(ri,1,label);ws.cell(ri,2,value)
-            ws.freeze_panes = 'D7'
-            ws.row_dimensions[1].height = 28
-            ws.column_dimensions['A'].width = 34
-            ws.column_dimensions['B'].width = 42
+                ws.merge_cells(start_row=ri,start_column=2,end_row=ri,end_column=min(12,ws.max_column))
+                ws.cell(ri,1).font = _H146Font(bold=True,color='243447')
+                ws.cell(ri,2).alignment = _H146Alignment(vertical='center',wrap_text=True)
+                ws.row_dimensions[ri].height = 40 if len(str(value)) >= 72 else 28
+                if ri in (3,4,5) and h144_focus_meta['scope_issues']:
+                    ws.cell(ri,1).fill = _H146Fill('solid',fgColor='FFF4E5')
+            ws.freeze_panes = 'D8'
+            # Six new summary rows shift the genuine column header to row 7.
+            # Retarget filter and header styling; never filter the summary rows.
+            ws.auto_filter.ref = f'A7:{_h146_col_letter(ws.max_column)}{ws.max_row}'
+            ws.row_dimensions[7].height = 30
+            ws.column_dimensions['A'].width = 30
+            ws.column_dimensions['B'].width = 16
 
     try:
         wb.active = 0
@@ -17281,16 +17301,16 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
-    sig_raw = f"H145|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}"
+    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
     ready = isinstance(cache, dict) and cache.get("sig") == sig and isinstance(cache.get("bytes"), (bytes, bytearray))
     build_clicked = False
     if not ready:
-        st.success("H144.1：本次只輸出主管觀察榜與H126權威決策。若掃描母體不完整，只列已取得股票，不以舊H102湊推薦。")
+        st.success("H146：只輸出主管研究觀察與H126正式決策；同分不強排順位。若掃描母體不完整，只列已取得股票，不以舊H102湊推薦。")
         build_clicked = st.button(
-            "📊 建立主管精簡 Excel（優先觀察排名）",
+            "📊 建立主管研究 Excel（含排名可信度）",
             use_container_width=True,
             type="primary",
             key=_k("h88_build_manager_excel"),
@@ -17310,7 +17330,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H145_Focus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H146_QualityFocus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
@@ -17324,8 +17344,11 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             ready = False
     if ready:
         _focus_visible = st.session_state.get(_k('h144_focus_data'))
+        _focus_quality = st.session_state.get(_k('h146_focus_quality'), {})
         if isinstance(_focus_visible, pd.DataFrame) and not _focus_visible.empty:
-            st.caption('H144.1｜僅按同輪H110研究分排序；遇到候選母體縮水，這不是全市場Top名次。')
+            if isinstance(_focus_quality, dict) and (_focus_quality.get('all_scores_tied') or _focus_quality.get('scope_issues')):
+                st.warning('H146｜' + str(_focus_quality.get('warning','研究排序資料需核實')))
+            st.caption('H146｜數字同分時直接標示並列，不依股票代號硬排1～12名；主管觀察榜不是下單榜。')
             st.dataframe(_focus_visible.head(12), use_container_width=True, hide_index=True)
         st.download_button(
             "⬇️ 下載主管精簡觀察榜（僅2張）",
@@ -17336,7 +17359,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             type="primary",
             key=_k("h86_always_excel_download"),
         )
-        st.caption(f"H144.1：精簡Excel已就緒｜建立 {cache.get('seconds','—')} 秒｜2張工作表，不重跑模型、不補造買進榜。")
+        st.caption(f"H146：精簡Excel已就緒｜建立 {cache.get('seconds','—')} 秒｜2張工作表，不重跑模型、不補造買進榜。")
     elif _safe_str(st.session_state.get(_k("h86_excel_error"))):
         st.error("主管Excel建立失敗：" + _safe_str(st.session_state.get(_k("h86_excel_error"))))
 

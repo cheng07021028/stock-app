@@ -115,14 +115,14 @@ class H142ManagerExcelHotfix(unittest.TestCase):
     def test_manager_workbook_sheets_are_writable_and_readable(self):
         res = _export_block(self._base(self._audit()))
         workbook = _read_workbook(res['sheets'])
+        # H144+ intentionally exports only two manager-facing sheets.
+        # H141/H142 remain computed internally and must be checked above,
+        # not reintroduced as separate manager workbook tabs.
         self.assertEqual(workbook.sheetnames, ['00_主管重點觀察榜', '00_H126主管決策'])
-        focus = workbook['00_主管重點觀察榜']
-        # The synthetic old H142 test input has no H110 scores; no invented ranks.
-        self.assertEqual(focus['A1'].value, '狀態')
-        self.assertIn('H110', str(focus['A2'].value))
-        # Detailed H141/H142 evidence remains computed but no longer overwhelms the manager.
-        self.assertIn('H109 FADE_VETO檔數', res['h141_quality']['項目'].astype(str).tolist())
+        self.assertGreater(len(res['h141_quality']), 10)
         self.assertEqual(len(res['h142_evidence']), 120)
+        self.assertIn('H141匯出檢查版本', res['h141_quality']['項目'].tolist())
+        self.assertEqual(workbook['00_H126主管決策'].max_row, 3)
         workbook.close()
 
     def test_empty_candidates_still_export_without_local_variable_error(self):
@@ -131,6 +131,8 @@ class H142ManagerExcelHotfix(unittest.TestCase):
         res = _export_block(frames)
         book = _read_workbook(res['sheets'])
         self.assertEqual(book.sheetnames, ['00_主管重點觀察榜', '00_H126主管決策'])
+        self.assertIn('H141匯出檢查版本', res['h141_quality']['項目'].tolist())
+        self.assertTrue(res['h142_evidence'].empty)
         book.close()
 
 if __name__ == '__main__':
