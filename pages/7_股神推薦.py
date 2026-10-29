@@ -17225,6 +17225,25 @@ def _build_excel_bytes_fast_h85(
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h147_five_gate_data')] = h147_five_gates.copy(deep=True)
         st.session_state[_k('h147_five_gate_meta')] = dict(h147_five_meta)
+    # H148: trace the actual current-run H145 diagnosis -> H113 audit -> H126
+    # sources. A limited export must NEVER be labelled an entire market scan.
+    # Read-only observations: H109 and H126 decisions remain identical.
+    from godpick_h148_strength_provenance import build_strength_trace as _h148_trace
+    _h148_research_day = next((r.get('數值') for r in tables.get('h126_health', pd.DataFrame()).to_dict('records')
+                               if r.get('項目') == 'H128市場資料交易日（非匯出時間）'), None)
+    h148_trace, h148_sectors, h148_meta = _h148_trace(
+        candidate_frame=locals().get('candidate_for_core', pd.DataFrame()),
+        audit_frame=tables.get('audit', pd.DataFrame()),
+        result_frame=locals().get('rec_export', pd.DataFrame()),
+        authority_frame=tables['h126_authority'],
+        scan_report=locals().get('scan_report', {}),
+        h145_bridge=locals().get('_h145_bridge', {}),
+        research_day=_h148_research_day,
+    )
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h148_strength_trace')] = h148_trace.copy(deep=True)
+        st.session_state[_k('h148_sector_trace')] = h148_sectors.copy(deep=True)
+        st.session_state[_k('h148_meta')] = dict(h148_meta)
     # H146: keep the data-quality reason with the display, not only the rows.
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h144_focus_data')] = h144_focus.copy(deep=True)
@@ -17237,6 +17256,8 @@ def _build_excel_bytes_fast_h85(
     ]
     _h147_export_meta = locals().get('h147_five_meta', {'reviewed':0, 'data_gaps':0, 'already_ignited':0})
     _h147_scan_export_diag = locals().get('_h147_scan_diag', {'status':'NO_SCAN_SCHEMA_CONTEXT'})
+    _h148_export_meta = locals().get('h148_meta', {'review_unique':0,'scope_status':'未驗證',
+        'zero_formal_diagnosis':'尚無H148輸入','counts':{}})
     _h126_manager_tabs = {
         '00_主管重點觀察榜', '00_H126主管決策',
     }
@@ -17272,6 +17293,13 @@ def _build_excel_bytes_fast_h85(
                 ws.row_dimensions[ri].height = 40 if len(str(value)) >= 72 else 28
                 if ri in (3,4,5) and h144_focus_meta['scope_issues']:
                     ws.cell(ri,1).fill = _H146Fill('solid',fgColor='FFF4E5')
+            # H148 manager headline: summary of the actual CURRENT RUN only.
+            _h148_summary = locals().get('_h148_export_meta', {'review_unique':0,
+                'scope_status':'本輪資料未載入','zero_formal_diagnosis':'尚無H148證據'})
+            ws.cell(6,2, str(ws.cell(6,2).value or '') +
+                f"｜H148查核{_h148_summary['review_unique']}檔，{_h148_summary['scope_status']}；" +
+                str(_h148_summary['zero_formal_diagnosis']))
+            ws.row_dimensions[6].height = 65
             ws.freeze_panes = 'D8'
             # Six new summary rows shift the genuine column header to row 7.
             # Retarget filter and header styling; never filter the summary rows.
@@ -17307,6 +17335,29 @@ def _build_excel_bytes_fast_h85(
                         _h147_cell.alignment = _H146Alignment(vertical='center',wrap_text=True)
                         if '待' in str(_h147_cell.value) or '風險' in str(_h147_cell.value):
                             _h147_cell.fill = _H146Fill('solid',fgColor='FFF4E5')
+
+            # H148: annotate SAME TWO-SHEET workbook. The first A:Q / H147 R:X
+            # columns, ordering and formal H126 second tab remain unchanged.
+            _h148_rows_for_excel = locals().get('h148_trace', pd.DataFrame())
+            if isinstance(_h148_rows_for_excel, pd.DataFrame):
+                _h148_lookup = {str(r['股票代號']):r for r in _h148_rows_for_excel.to_dict('records')}
+                _h148_cols = ['H148研究分類','H148漏網位置','H148量價狀態','H148突破階段',
+                              'H148族群證據','H148法人證據','H148大戶週證','H148補證優先']
+                for _h148_ci, _h148_col in enumerate(_h148_cols, 25):
+                    _h148_cell=ws.cell(7,_h148_ci,_h148_col)
+                    _h148_cell.font=_H146Font(bold=True,color='FFFFFF')
+                    _h148_cell.fill=_H146Fill('solid',fgColor='36516D')
+                    _h148_cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
+                    ws.column_dimensions[_h146_col_letter(_h148_ci)].width=26 if _h148_ci!=32 else 53
+                for _h148_ri in range(8,ws.max_row+1):
+                    _h148_code=str(ws.cell(_h148_ri,2).value or '').removesuffix('.0')
+                    _h148_match=_h148_lookup.get(_h148_code)
+                    if not _h148_match: continue
+                    for _h148_ci, _h148_col in enumerate(_h148_cols,25):
+                        _h148_cell=ws.cell(_h148_ri,_h148_ci,_h148_match.get(_h148_col,''))
+                        _h148_cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
+                        if any(term in str(_h148_cell.value) for term in ('未核','待補','衝突','否決','隔離')):
+                            _h148_cell.fill=_H146Fill('solid',fgColor='FFF4E5')
 
     try:
         wb.active = 0
@@ -17348,7 +17399,8 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
-    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147"
+    # Legacy export prefix: StockPick_H146_QualityFocus_ (H148 now distinct).
+    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -17377,7 +17429,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H146_QualityFocus_H147FiveGate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H148_StrengthTrace_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
@@ -17413,6 +17465,29 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             st.caption('以上為現有稽核樣本的五關補證優先序，非全市場漲勢前12名，亦非正式交易資格。')
             if isinstance(_h147_meta, dict):
                 st.caption(f"H147｜本輪審查{_h147_meta.get('reviewed',0)}檔、待補證{_h147_meta.get('data_gaps',0)}檔、已發動{_h147_meta.get('already_ignited',0)}檔。這是現有稽核池，不代表全市場。")
+        # H148: no new workbook tabs or paid/official evidence claims.
+        _h148_view = st.session_state.get(_k('h148_strength_trace'))
+        _h148_group_view = st.session_state.get(_k('h148_sector_trace'))
+        _h148_view_meta = st.session_state.get(_k('h148_meta'), {})
+        if isinstance(_h148_view_meta, dict) and _h148_view_meta:
+            st.caption('H148｜同輪股票池交叉追查：H145診斷→H113稽核→H126授權；不重新跑選股。')
+            _h148_conclusion = str(_h148_view_meta.get('zero_formal_diagnosis',''))
+            if not _h148_view_meta.get('proven_diagnosis_pool'):
+                st.warning('H148｜'+_h148_conclusion)
+            else:
+                st.info('H148｜'+_h148_conclusion)
+            _h148_counts = _h148_view_meta.get('counts',{}) or {}
+            st.caption(f"H148本輪樣本{_h148_view_meta.get('review_unique',0)}檔｜突破研究{_h148_counts.get('已核實研究突破',0)}"
+                       f"｜續攻研究{_h148_counts.get('健康續攻研究',0)}｜FADE否決{_h148_counts.get('FADE否決',0)}"
+                       f"｜法人待補{_h148_counts.get('法人待補',0)}｜大戶待補{_h148_counts.get('大戶待補',0)}。"
+                       " 以上為研究盤內部證據，非證交所全市場強勢股統計或正式買進建議。")
+        if isinstance(_h148_view,pd.DataFrame) and not _h148_view.empty:
+            _h148_display_cols = [c for c in ('股票代號','股票名稱','產業類別','H148研究分類','H148漏網位置',
+                'H148族群證據','H148法人證據','H148大戶週證','H148補證優先') if c in _h148_view]
+            st.dataframe(_h148_view[_h148_display_cols].head(30),use_container_width=True,hide_index=True)
+        if isinstance(_h148_group_view,pd.DataFrame) and not _h148_group_view.empty:
+            with st.expander('H148｜候選池內族群共振（非全市場族群排名）',expanded=False):
+                st.dataframe(_h148_group_view.head(15),use_container_width=True,hide_index=True)
         st.download_button(
             "⬇️ 下載主管精簡觀察榜（僅2張）",
             data=cache["bytes"],
