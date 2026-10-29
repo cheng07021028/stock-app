@@ -17049,6 +17049,13 @@ def _build_excel_bytes_fast_h85(
     except Exception:
         pass
 
+    # H147: normalize REAL scan-quality keys before H145 and H144 use them.
+    # build_scan_quality_report emits Chinese names; H145/H144 expected English
+    # debug keys, which silently produced zero scan/zero diagnosis in H146.
+    # Counts never prove run-ID/signature, so H145's original strict guards stay.
+    from godpick_h147_scan_bridge import normalize_scan_report as _h147_normalize_scan
+    scan_report, _h147_scan_diag = _h147_normalize_scan(scan_report)
+    st.session_state[_k('h147_scan_schema_diagnostic')] = dict(_h147_scan_diag)
     # H145: preferentially repair a one-row export only from the exact same
     # scan's complete decision cache. Old snapshots, H102 scores and arbitrary
     # rec-list stocks cannot be promoted into a current-run authority.
@@ -17210,6 +17217,14 @@ def _build_excel_bytes_fast_h85(
     # the machine-readable authoritative decision sheet for H131/H134 tooling.
     from godpick_h144_focus_board import build_focus_board as _h144_make_focus
     h144_focus, h144_focus_meta = _h144_make_focus(tables, h144_state)
+    # H147: independent five-gate challenge of the actual H113/H109 evidence.
+    # This is a parallel RESEARCH diagnostic only: zero change to H126 eligibility,
+    # official-data source, rank/score, or the fixed TWO-sheet Excel contract.
+    from godpick_h147_five_gate_review import build_five_gate_review as _h147_review
+    h147_five_gates, h147_five_meta = _h147_review(tables.get('audit', pd.DataFrame()))
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h147_five_gate_data')] = h147_five_gates.copy(deep=True)
+        st.session_state[_k('h147_five_gate_meta')] = dict(h147_five_meta)
     # H146: keep the data-quality reason with the display, not only the rows.
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h144_focus_data')] = h144_focus.copy(deep=True)
@@ -17220,6 +17235,8 @@ def _build_excel_bytes_fast_h85(
         ("00_H126主管決策", tables['h126_authority'],
          "本輪沒有完成官方資格認證的買進股票；H126保留供權威讀取。"),
     ]
+    _h147_export_meta = locals().get('h147_five_meta', {'reviewed':0, 'data_gaps':0, 'already_ignited':0})
+    _h147_scan_export_diag = locals().get('_h147_scan_diag', {'status':'NO_SCAN_SCHEMA_CONTEXT'})
     _h126_manager_tabs = {
         '00_主管重點觀察榜', '00_H126主管決策',
     }
@@ -17237,11 +17254,13 @@ def _build_excel_bytes_fast_h85(
                             '可作同輪研究相對比較，非交易建議'))
             labels = [
                 ("H146｜主管研究與反證觀察（非買進榜）", "同分並列；不得把資料缺口當成強勢推薦"),
-                ("股票母體與漏斗", f"{h144_focus_meta['scanned']} 掃描 → {h144_focus_meta['diagnosed']} 診斷 → {h144_focus_meta['final']} 作戰 → {h144_focus_meta['received']} 主管；稽核 {h144_focus_meta['audit_count']}，H126個股 {h144_focus_meta['authority_count']}"),
+                ("股票母體與漏斗", f"{h144_focus_meta['scanned']} 掃描 → {h144_focus_meta['diagnosed']} 診斷 → {h144_focus_meta['final']} 作戰 → {h144_focus_meta['received']} 主管；稽核 {h144_focus_meta['audit_count']}，H126個股 {h144_focus_meta['authority_count']}｜H147掃描欄位：{_h147_scan_export_diag['status']}"),
                 ("母體品質結論", _h146_funnel + '｜H145:' + _h145_bridge['status']),
                 ("分數排序品質", f"{_h146_rank}；有效分數 {h144_focus_meta['valid_score_rows']} 筆、不同值 {h144_focus_meta['score_distinct']} 種"),
                 ("正式交易資格", f"H126實際個股授權 {h144_focus_meta['h126_buyable']} 檔；這張表一律不得直接下單"),
-                ("當輪需先修正事項", h144_focus_meta['warning']),
+                ("當輪需先修正事項", h144_focus_meta['warning']+
+                 f"｜H147已查{_h147_export_meta['reviewed']}檔，含資料待補{_h147_export_meta['data_gaps']}檔、"
+                 f"已發動{_h147_export_meta['already_ignited']}檔；五關只供研究、H126無授權不得買進。"),
             ]
             from openpyxl.utils import get_column_letter as _h146_col_letter
             from openpyxl.styles import Alignment as _H146Alignment, Font as _H146Font, PatternFill as _H146Fill
@@ -17260,6 +17279,34 @@ def _build_excel_bytes_fast_h85(
             ws.row_dimensions[7].height = 30
             ws.column_dimensions['A'].width = 30
             ws.column_dimensions['B'].width = 16
+            # H147: five factors are visible in the EXISTING column O; no
+            # extra tabs or a misleading second buy-ranking table.
+            ws.column_dimensions['O'].width = 72
+            for _h147_row in range(8, ws.max_row + 1):
+                ws.cell(_h147_row, 15).alignment = _H146Alignment(vertical='center', wrap_text=True)
+                ws.row_dimensions[_h147_row].height = max(ws.row_dimensions[_h147_row].height or 24, 65)
+            # H147 supplemental evidence at R:X, SAME worksheet. The H146
+            # A:Q authority/rank contract and filter range are unchanged.
+            _h147_rows_for_excel = locals().get('h147_five_gates', pd.DataFrame())
+            if isinstance(_h147_rows_for_excel, pd.DataFrame) and not _h147_rows_for_excel.empty:
+                _h147_lookup = {str(r['股票代號']):r for r in _h147_rows_for_excel.to_dict('records')}
+                _h147_extra_cols = ['成交量能','起漲位置','強勢族群','大戶鎖碼',
+                                    '技術結構','研究分類','行情日期']
+                for _h147_ci,_h147_label in enumerate(_h147_extra_cols,18):
+                    _h147_cell = ws.cell(7,_h147_ci,'H147｜'+_h147_label)
+                    _h147_cell.font = _H146Font(bold=True,color='FFFFFF')
+                    _h147_cell.fill = _H146Fill('solid',fgColor='155E75')
+                    _h147_cell.alignment = _H146Alignment(vertical='center',wrap_text=True)
+                    ws.column_dimensions[_h146_col_letter(_h147_ci)].width = 20 if _h147_ci < 23 else 27
+                for _h147_ri in range(8,ws.max_row+1):
+                    _h147_code = str(ws.cell(_h147_ri,2).value or '').removesuffix('.0')
+                    _h147_match = _h147_lookup.get(_h147_code)
+                    if not _h147_match: continue
+                    for _h147_ci,_h147_label in enumerate(_h147_extra_cols,18):
+                        _h147_cell = ws.cell(_h147_ri,_h147_ci,_h147_match.get(_h147_label,''))
+                        _h147_cell.alignment = _H146Alignment(vertical='center',wrap_text=True)
+                        if '待' in str(_h147_cell.value) or '風險' in str(_h147_cell.value):
+                            _h147_cell.fill = _H146Fill('solid',fgColor='FFF4E5')
 
     try:
         wb.active = 0
@@ -17301,7 +17348,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     saved_at = _safe_str(st.session_state.get(_k("result_saved_at"))) or _safe_str(st.session_state.get(_k("loaded_snapshot_saved_at_v191_h3")))
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
-    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}"
+    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -17330,11 +17377,14 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H146_QualityFocus_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H146_QualityFocus_H147FiveGate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
             st.session_state[_k("h88_excel_built_this_run")] = True
+            _h147_scan_display = st.session_state.get(_k('h147_scan_schema_diagnostic'), {})
+            if isinstance(_h147_scan_display, dict) and _h147_scan_display.get('issues'):
+                st.warning('H147｜掃描欄位契約仍有缺漏或矛盾：'+ '；'.join(_h147_scan_display['issues'][:4]) + '。請重新執行正式掃描確認同輪母體。')
             _h144_display = st.session_state.get(_k('h144_scope_audit'), {})
             if isinstance(_h144_display, dict) and _h144_display.get('scope_incomplete'):
                 st.warning('H144｜本輪主管匯出核心母體不完整。Excel僅供資料修復與研究稽核，不能宣稱全市場零機會或據以買進。')
@@ -17350,6 +17400,19 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
                 st.warning('H146｜' + str(_focus_quality.get('warning','研究排序資料需核實')))
             st.caption('H146｜數字同分時直接標示並列，不依股票代號硬排1～12名；主管觀察榜不是下單榜。')
             st.dataframe(_focus_visible.head(12), use_container_width=True, hide_index=True)
+        # Show the same run's research factors, not a fresh or historical scan.
+        _h147_rows = st.session_state.get(_k('h147_five_gate_data'))
+        _h147_meta = st.session_state.get(_k('h147_five_gate_meta'), {})
+        if isinstance(_h147_rows, pd.DataFrame) and not _h147_rows.empty:
+            st.caption('H147｜五關交易員反證：量能／起漲／族群／大戶／技術；缺來源標示待補證，不代表不強，也不代表可買。')
+            _h147_view_cols = [c for c in ('股票代號','研究分類','成交量能','起漲位置',
+                '強勢族群','大戶鎖碼','技術結構','優先查核') if c in _h147_rows.columns]
+            # Do not limit five-gate triage to H110's top 12: already-ignited
+            # strong stocks can exist elsewhere in the SAME audit sample.
+            st.dataframe(_h147_rows[_h147_view_cols].head(12), use_container_width=True, hide_index=True)
+            st.caption('以上為現有稽核樣本的五關補證優先序，非全市場漲勢前12名，亦非正式交易資格。')
+            if isinstance(_h147_meta, dict):
+                st.caption(f"H147｜本輪審查{_h147_meta.get('reviewed',0)}檔、待補證{_h147_meta.get('data_gaps',0)}檔、已發動{_h147_meta.get('already_ignited',0)}檔。這是現有稽核池，不代表全市場。")
         st.download_button(
             "⬇️ 下載主管精簡觀察榜（僅2張）",
             data=cache["bytes"],

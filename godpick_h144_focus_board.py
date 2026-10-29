@@ -11,6 +11,7 @@ import re
 from collections import Counter
 from typing import Any, Mapping
 import pandas as pd
+from godpick_h147_five_gate_review import evaluate_five_gates
 
 VERSION = 'V191-H146.0-RANKING-RELIABILITY'
 COLS = [
@@ -122,13 +123,19 @@ def _one_row(raw:dict, authority:dict | None, *, scoped:bool) ->dict:
     if holdings!='VERIFIED_RISING':tasks.append('查H124不同週次與截止日')
     if _s(raw.get('H113流動性合格'))!='是':tasks.append('核對成交金額／量價')
     if day=='未載明':tasks.append('核對真實研究資料日')
+    # H147: five orthogonal observations. They NEVER override the original
+    # research score, H109 risk or H126 trading authority. Explicit '待補證'
+    # is vital: a missing TDCC source is not proof that institutions sold.
+    five = evaluate_five_gates(raw, research_day=day if day != '未載明' else None)
+    labels = {'成交量能':'量', '起漲位置':'起', '強勢族群':'群', '大戶鎖碼':'戶', '技術結構':'技'}
+    five_short = '｜'.join(f'{abbr}:{five[full]}' for full,abbr in labels.items())
     return {
         '股票代號':c, '股票名稱':_s(raw.get('股票名稱')),
         '產業':_s(raw.get('類別')), 'H110研究分':score,
         '排序可信度':'待判斷', '分數依據':'H110當輪數值（未認證交易優勢）' if score is not None else '無有效H110分數',
         '研究型態':kind,'H110證據狀態':h110,'H109風控':risk,
         'H123法人':institution,'H124大戶':holdings,'H126正式資格':layer,
-        '研究資料日':day,'下一個必查條件':'；'.join(tasks[:3]) or '核對當輪來源與風控',
+        '研究資料日':day,'下一個必查條件':'五關｜'+five_short+'；查核：'+('；'.join(tasks[:2]) or five['優先查核']),
         '買進資格':'禁止依本榜買進',
         '榜單可信度':'局部／不完整母體' if scoped else '官方資格尚須核對',
     }
