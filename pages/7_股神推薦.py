@@ -17216,7 +17216,8 @@ def _build_excel_bytes_fast_h85(
     # 00_focus is the only ranked observation board; 00_H126 is retained as
     # the machine-readable authoritative decision sheet for H131/H134 tooling.
     from godpick_h144_focus_board import build_focus_board as _h144_make_focus
-    h144_focus, h144_focus_meta = _h144_make_focus(tables, h144_state)
+    h144_focus_all, h144_focus_meta = _h144_make_focus(tables, h144_state, all_rows=True)
+    h144_focus = h144_focus_all.head(12).copy(deep=True)
     # H147: independent five-gate challenge of the actual H113/H109 evidence.
     # This is a parallel RESEARCH diagnostic only: zero change to H126 eligibility,
     # official-data source, rank/score, or the fixed TWO-sheet Excel contract.
@@ -17244,6 +17245,20 @@ def _build_excel_bytes_fast_h85(
         st.session_state[_k('h148_strength_trace')] = h148_trace.copy(deep=True)
         st.session_state[_k('h148_sector_trace')] = h148_sectors.copy(deep=True)
         st.session_state[_k('h148_meta')] = dict(h148_meta)
+    # H148.1: actual pre-ranking gate; no score-only cold/stale top 12.
+    # All excluded candidates remain in the separate audit view, with reasons.
+    from godpick_h1481_focus_gate import curate_focus_board as _h1481_curate
+    h144_focus, h1481_quarantine, h1481_meta = _h1481_curate(
+        h144_focus_all, tables.get('audit', pd.DataFrame()), h148_trace,
+        research_day=_h148_research_day, trace_meta=h148_meta, limit=12)
+    h144_focus_meta['ranked'] = len(h144_focus)
+    h144_focus_meta['h1481_eligible'] = h1481_meta['eligible']
+    h144_focus_meta['h1481_quarantined'] = h1481_meta['quarantine']
+    h144_focus_meta['ranking_usable'] = False  # Evidence tiers are not H110 score ranks.
+    h144_focus_meta['warning'] += '｜H148.1：' + h1481_meta['warning']
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h1481_quality_meta')] = dict(h1481_meta)
+        st.session_state[_k('h1481_quarantine')] = h1481_quarantine.copy(deep=True)
     # H146: keep the data-quality reason with the display, not only the rows.
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h144_focus_data')] = h144_focus.copy(deep=True)
@@ -17264,6 +17279,8 @@ def _build_excel_bytes_fast_h85(
     for name, frame, fallback in sheets:
         _write_df_to_ws_fast_h84(wb, name, frame, fallback)
         if name == "00_主管重點觀察榜":
+            h1481_meta=locals().get('h1481_meta') or {'eligible':0,'quarantine':0,
+                'h113_missed_strong_research_count':0}
             ws = wb[name]
             # H146: distinguish research display, actual authority and score utility.
             # A 0→0→8→1667 funnel or twelve identical scores is NOT a top-12 list.
@@ -17299,7 +17316,12 @@ def _build_excel_bytes_fast_h85(
             ws.cell(6,2, str(ws.cell(6,2).value or '') +
                 f"｜H148查核{_h148_summary['review_unique']}檔，{_h148_summary['scope_status']}；" +
                 str(_h148_summary['zero_formal_diagnosis']))
-            ws.row_dimensions[6].height = 65
+            # H148.1 summary: transparent numbers instead of filling a false top12.
+            ws.cell(6,2,str(ws.cell(6,2).value or '') +
+                f"｜H148.1強勢研究入榜{h1481_meta['eligible']}檔、隔離{h1481_meta['quarantine']}檔、H113漏接研究線索{h1481_meta['h113_missed_strong_research_count']}檔。")
+            ws.cell(1,1,'H148.1｜量價主流優先研究榜（非交易推薦）')
+            ws.cell(1,2,'入榜需同日完整K線、量能、內部族群跨期雙指標及無H109否決；不以H110同分或代號補滿12檔。')
+            ws.row_dimensions[6].height = 75
             ws.freeze_panes = 'D8'
             # Six new summary rows shift the genuine column header to row 7.
             # Retarget filter and header styling; never filter the summary rows.
@@ -17359,6 +17381,25 @@ def _build_excel_bytes_fast_h85(
                         if any(term in str(_h148_cell.value) for term in ('未核','待補','衝突','否決','隔離')):
                             _h148_cell.fill=_H146Fill('solid',fgColor='FFF4E5')
 
+
+            # H148.1: AG:AJ appended within the same first worksheet.
+            from godpick_h1481_focus_gate import EXTRA_COLS as _h1481_cols
+            for _ci,_name in enumerate(_h1481_cols,33):
+                _cell=ws.cell(7,_ci,_name)
+                _cell.font=_H146Font(bold=True,color='FFFFFF')
+                _cell.fill=_H146Fill('solid',fgColor='21674A')
+                _cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
+                ws.column_dimensions[_h146_col_letter(_ci)].width=48 if _ci==36 else 31
+            for _ri in range(8,ws.max_row+1):
+                _row_idx=_ri-8
+                if _row_idx >= len(h144_focus):continue
+                _source=h144_focus.iloc[_row_idx]
+                for _ci,_name in enumerate(_h1481_cols,33):
+                    _cell=ws.cell(_ri,_ci,_source.get(_name,''))
+                    _cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
+                    if any(_x in str(_cell.value) for _x in ('待補','未核','隔離')):
+                        _cell.fill=_H146Fill('solid',fgColor='FFF4E5')
+            # Preserve H146 verified A:Q filtering contract; appended evidence remains readable.
     try:
         wb.active = 0
     except Exception:
@@ -17400,7 +17441,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
     # Legacy export prefix: StockPick_H146_QualityFocus_ (H148 now distinct).
-    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148"
+    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -17429,7 +17470,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H148_StrengthTrace_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H1481_StrongQuality_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
@@ -17452,6 +17493,21 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
                 st.warning('H146｜' + str(_focus_quality.get('warning','研究排序資料需核實')))
             st.caption('H146｜數字同分時直接標示並列，不依股票代號硬排1～12名；主管觀察榜不是下單榜。')
             st.dataframe(_focus_visible.head(12), use_container_width=True, hide_index=True)
+        # H148.1: missing/FADE-vetoed stocks never fill the main watch board.
+        _h1481_screen=st.session_state.get(_k('h1481_quality_meta'), {})
+        _h1481_hold=st.session_state.get(_k('h1481_quarantine'))
+        if isinstance(_h1481_screen,dict):
+            st.caption(f"H148.1｜當輪強勢研究入榜 {_h1481_screen.get('eligible',0)} 檔｜"
+                       f"不合格隔離 {_h1481_screen.get('quarantine',0)} 檔｜"
+                       f"H113漏接研究線索 {_h1481_screen.get('h113_missed_strong_research_count',0)} 檔，非H126買進授權。")
+            if not isinstance(_focus_visible,pd.DataFrame) or _focus_visible.empty:
+                st.warning('H148.1｜本輪沒有符合已驗同日量價＋內部主流條件的研究股；不以冷門或資料缺口補滿12檔。')
+            if not _h1481_screen.get('scope_proven'):
+                st.warning('H148.1｜本輪診斷母體未核全，不能宣稱全市場沒有強勢股；須補全掃描與行情來源。')
+        if isinstance(_h1481_hold,pd.DataFrame) and not _h1481_hold.empty:
+            with st.expander('H148.1｜隔離候選與排除原因（非強勢推薦）',expanded=False):
+                _hold_cols=[x for x in ('股票代號','股票名稱','H109風控','H1481研究分層','H1481入榜／隔離依據') if x in _h1481_hold]
+                st.dataframe(_h1481_hold[_hold_cols].head(100),use_container_width=True,hide_index=True)
         # Show the same run's research factors, not a fresh or historical scan.
         _h147_rows = st.session_state.get(_k('h147_five_gate_data'))
         _h147_meta = st.session_state.get(_k('h147_five_gate_meta'), {})
@@ -17461,8 +17517,9 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
                 '強勢族群','大戶鎖碼','技術結構','優先查核') if c in _h147_rows.columns]
             # Do not limit five-gate triage to H110's top 12: already-ignited
             # strong stocks can exist elsewhere in the SAME audit sample.
-            st.dataframe(_h147_rows[_h147_view_cols].head(12), use_container_width=True, hide_index=True)
-            st.caption('以上為現有稽核樣本的五關補證優先序，非全市場漲勢前12名，亦非正式交易資格。')
+            with st.expander('H147｜原始五關稽核樣本（非主管強勢主榜）', expanded=False):
+                st.dataframe(_h147_rows[_h147_view_cols].head(100), use_container_width=True, hide_index=True)
+                st.caption('此為全部原稽核樣本，可能含冷門或否決股票；不代表強勢推薦及正式買進資格。')
             if isinstance(_h147_meta, dict):
                 st.caption(f"H147｜本輪審查{_h147_meta.get('reviewed',0)}檔、待補證{_h147_meta.get('data_gaps',0)}檔、已發動{_h147_meta.get('already_ignited',0)}檔。這是現有稽核池，不代表全市場。")
         # H148: no new workbook tabs or paid/official evidence claims.
@@ -17484,7 +17541,9 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
         if isinstance(_h148_view,pd.DataFrame) and not _h148_view.empty:
             _h148_display_cols = [c for c in ('股票代號','股票名稱','產業類別','H148研究分類','H148漏網位置',
                 'H148族群證據','H148法人證據','H148大戶週證','H148補證優先') if c in _h148_view]
-            st.dataframe(_h148_view[_h148_display_cols].head(30),use_container_width=True,hide_index=True)
+            with st.expander('H148｜跨池追蹤完整明細（非買進榜）', expanded=False):
+                st.dataframe(_h148_view[_h148_display_cols].head(200),use_container_width=True,hide_index=True)
+                st.caption('此表用來稽核漏網與資料來源，不表示每檔都有量價證據。')
         if isinstance(_h148_group_view,pd.DataFrame) and not _h148_group_view.empty:
             with st.expander('H148｜候選池內族群共振（非全市場族群排名）',expanded=False):
                 st.dataframe(_h148_group_view.head(15),use_container_width=True,hide_index=True)

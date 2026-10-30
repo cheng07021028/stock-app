@@ -141,7 +141,7 @@ def _one_row(raw:dict, authority:dict | None, *, scoped:bool) ->dict:
     }
 
 
-def build_focus_board(tables:Mapping[str,Any],state:Mapping[str,Any],*,limit:int=12):
+def build_focus_board(tables:Mapping[str,Any],state:Mapping[str,Any],*,limit:int=12,all_rows:bool=False):
     """A research-only display; no false ordinal rank when all scores tie.
 
     Ranks use competition ranking 1,1,3 when distinguishable.  A sole score
@@ -208,7 +208,7 @@ def build_focus_board(tables:Mapping[str,Any],state:Mapping[str,Any],*,limit:int
     h126_health_count=_metric(health,'H126授權進場檔數')
     if h126_health_count is not None and _count(h126_health_count)!=buyable:
         issues.append('H126摘要數與實際合格個股不一致')
-    displayed=candidates[:max(1,min(20,_count(limit) or 12))]
+    displayed=(candidates if all_rows else candidates[:max(1,min(20,_count(limit) or 12))])
     info={
         'scope_status':_s(state.get('status')) or 'SCOPE_NOT_PROVEN',
         'scanned':_count(state.get('scan_count')),
