@@ -10057,6 +10057,14 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
                 "history_debug": history_debug,
             }
 
+        # H148.2: feed existing dated OHLCV into the already-shipped H114 analyzer.
+        # Do not fetch another quote, infer volume units, or override H126.
+        try:
+            from godpick_h114_parallel_alpha import analyze_history as _h1482_ohlcv
+            h1482_h114 = _h1482_ohlcv(hist_df, asof=end_dt)
+        except Exception as _h1482_error:
+            h1482_h114 = {"H114K線資料狀態": "ADAPTER_ERROR:" + type(_h1482_error).__name__,
+                          "H114K線證據日": "", "H114K線有效根數": 0}
         signal_snapshot = compute_signal_snapshot(hist_df)
         sr_snapshot = compute_support_resistance_snapshot(hist_df)
         radar = _ensure_radar_dict(compute_radar_scores(hist_df))
@@ -10293,6 +10301,7 @@ def _analyze_stock_bundle(stock_no: str, stock_name: str, market_type: str, star
             "trade_feasibility": trade_feasibility,
             "entry_decision": entry_decision,
             "close_now": close_now,
+            "h1482_h114": h1482_h114,
             "history_last_date": last_kline_date,
             "period_pct": period_pct,
             "ret5": ret5_now,
@@ -10596,6 +10605,7 @@ def _analyze_one_stock_for_recommend(
             "市場別": bundle["used_market"],
             "類別": category or _infer_category_from_record(stock_name, category),
             "最新價": bundle["close_now"],
+            **bundle.get("h1482_h114", {}),
             "K線最後交易日": _safe_str(bundle.get("history_last_date")),
             "K線落後交易日": 999,
             "K線資料新鮮度": "待全市場比對",
@@ -17251,6 +17261,33 @@ def _build_excel_bytes_fast_h85(
     h144_focus, h1481_quarantine, h1481_meta = _h1481_curate(
         h144_focus_all, tables.get('audit', pd.DataFrame()), h148_trace,
         research_day=_h148_research_day, trace_meta=h148_meta, limit=12)
+    # H148.2: trace WHY the same-run evidence is unavailable. This reads only
+    # the supplied H145/H113/H148 frames; it does not turn quarantined rows into trades.
+    from godpick_h1482_source_audit import build_source_audit as _h1482_audit
+    h1482_repair, h1482_details, h1482_meta = _h1482_audit(
+        candidate_frame=locals().get('candidate_for_core', pd.DataFrame()),
+        audit_frame=tables.get('audit', pd.DataFrame()),
+        trace_frame=h148_trace, quarantine_frame=h1481_quarantine,
+        research_day=_h148_research_day, trace_meta=h148_meta)
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h1482_repair_summary')] = h1482_repair.copy(deep=True)
+        st.session_state[_k('h1482_repair_details')] = h1482_details.copy(deep=True)
+        st.session_state[_k('h1482_repair_meta')] = dict(h1482_meta)
+    # H148.3: independent, clearly labelled research RECALL from the entire
+    # diagnosis frame supplied by this export. H113's 120-row audit is a limited
+    # sample, never the whole market. H145/H126 formal restrictions remain.
+    from godpick_h1483_research_recall import build_research_recall as _h1483_recall
+    _h1483_input = locals().get('candidate_diagnosis_export')
+    _h1483_source = _h1483_input if isinstance(_h1483_input, pd.DataFrame) else pd.DataFrame()
+    h1483_research, h1483_summary, h1483_meta = _h1483_recall(
+        diagnosis_frame=_h1483_source,
+        audit_frame=tables.get('audit', pd.DataFrame()),
+        research_day=_h148_research_day, h145_bridge=_h145_bridge,
+        limit=12)
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h1483_named_research')] = h1483_research.copy(deep=True)
+        st.session_state[_k('h1483_research_summary')] = h1483_summary.copy(deep=True)
+        st.session_state[_k('h1483_research_meta')] = dict(h1483_meta)
     h144_focus_meta['ranked'] = len(h144_focus)
     h144_focus_meta['h1481_eligible'] = h1481_meta['eligible']
     h144_focus_meta['h1481_quarantined'] = h1481_meta['quarantine']
@@ -17399,6 +17436,28 @@ def _build_excel_bytes_fast_h85(
                     _cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
                     if any(_x in str(_cell.value) for _x in ('待補','未核','隔離')):
                         _cell.fill=_H146Fill('solid',fgColor='FFF4E5')
+            # H148.3: first show named, evidence-based RESEARCH leads from the
+            # actual diagnostic pool, not only H113's 120-row sampled audit.
+            # These lines have no H126 trade authority and never fill the strict
+            # H148.1 headline board or expand its auto-filter.
+            from godpick_h1483_research_recall import append_research_to_sheet as _h1483_append
+            if isinstance(locals().get('h1483_meta'),dict):
+                _h1483_append(ws, locals().get('h1483_research',pd.DataFrame()),
+                             locals().get('h1483_summary',pd.DataFrame()))
+                ws.cell(6,2,str(ws.cell(6,2).value or '')+
+                        f"｜H148.3本輪診斷{h1483_meta['diagnosis_rows']}列、具名研究線索"
+                        f"{h1483_meta['found']}檔，詳細清單在本表下方；不代表正式交易資格。")
+            # H148.2: same FIRST worksheet, below the strong research table.
+            # Quarantined stocks NEVER re-enter the main table; this lower block
+            # has an explicit NON-RECOMMENDATION label and preserves sheet #2.
+            from godpick_h1482_source_audit import append_source_audit_to_sheet as _h1482_append
+            _h1482_rep=locals().get('h1482_repair',pd.DataFrame())
+            _h1482_det=locals().get('h1482_details',pd.DataFrame())
+            if (isinstance(_h1482_rep,pd.DataFrame) and not _h1482_rep.empty) or (isinstance(_h1482_det,pd.DataFrame) and not _h1482_det.empty):
+                _h1482_append(ws, _h1482_rep, _h1482_det)
+                ws.cell(1,1,'H148.2／H148.3｜強勢研究召回與來源稽核（非交易推薦）')
+                ws.cell(6,2,str(ws.cell(6,2).value or '') +
+                        f"｜H148.2同日有效K線{(locals().get('h1482_meta') or {}).get('same_day_h114',0)}檔；缺H113候選{(locals().get('h1482_meta') or {}).get('candidate_not_h113',0)}檔。詳見本表下方非推薦稽核區。")
             # Preserve H146 verified A:Q filtering contract; appended evidence remains readable.
     try:
         wb.active = 0
@@ -17441,7 +17500,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
     # Legacy export prefix: StockPick_H146_QualityFocus_ (H148 now distinct).
-    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481"
+    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481|H1482|H1483"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -17470,7 +17529,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H1481_StrongQuality_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H1483_ResearchRecall_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
@@ -17508,6 +17567,37 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             with st.expander('H148.1｜隔離候選與排除原因（非強勢推薦）',expanded=False):
                 _hold_cols=[x for x in ('股票代號','股票名稱','H109風控','H1481研究分層','H1481入榜／隔離依據') if x in _h1481_hold]
                 st.dataframe(_h1481_hold[_hold_cols].head(100),use_container_width=True,hide_index=True)
+        # H148.3 named research recall: explicit source quality and no H126 grants.
+        _h1483_named=st.session_state.get(_k('h1483_named_research'))
+        _h1483_status=st.session_state.get(_k('h1483_research_meta'),{})
+        if isinstance(_h1483_status,dict) and _h1483_status:
+            st.caption(f"H148.3｜診斷池 {_h1483_status.get('diagnosis_rows',0)} 筆；"
+                       f"量價研究線索 {_h1483_status.get('found',0)} 檔，"
+                       f"具名顯示 {_h1483_status.get('displayed',0)} 檔。"
+                       "不同於H126交易清單，行情未核者不算當日強勢。")
+            if not _h1483_status.get('scope_proven'):
+                st.warning('H148.3｜同輪診斷母體仍待證：研究線索不可稱全市場排名。')
+        if isinstance(_h1483_named,pd.DataFrame) and not _h1483_named.empty:
+            st.dataframe(_h1483_named, use_container_width=True, hide_index=True)
+        # H148.2: make the entire H113 evidence gap visible in the app.
+        _h1482_summary=st.session_state.get(_k('h1482_repair_summary'))
+        _h1482_detail=st.session_state.get(_k('h1482_repair_details'))
+        _h1482_stats=st.session_state.get(_k('h1482_repair_meta'),{})
+        if isinstance(_h1482_stats,dict) and _h1482_stats:
+            st.caption(f"H148.2｜本輪診斷 {_h1482_stats.get('candidate_rows',0)} 列／"
+                       f"有效代號 {_h1482_stats.get('candidate_unique',0)} 檔；"
+                       f"H113稽核 {_h1482_stats.get('audit_unique',0)} 檔，"
+                       f"同日有效H114 {_h1482_stats.get('same_day_h114',0)} 檔。"
+                       '缺行情不等於股票不強，未驗證也不等於可交易。')
+            if _h1482_stats.get('candidate_invalid') or _h1482_stats.get('untraced_candidate_count'):
+                st.warning('H148.2｜診斷輸入存在無效代號或跨池追蹤缺口；請查閱稽核附錄。')
+        if isinstance(_h1482_summary,pd.DataFrame) and not _h1482_summary.empty:
+            with st.expander('H148.2｜上游行情完整率、H113漏網原因與逐股補證（非買進）',expanded=False):
+                st.dataframe(_h1482_summary,use_container_width=True,hide_index=True)
+                if isinstance(_h1482_detail,pd.DataFrame) and not _h1482_detail.empty:
+                    _cols=[c for c in ('股票代號','股票名稱','H114證據日','H114資料狀態','H114有效根數',
+                            'H114量比','H109風控','完整隔離原因','最優先修復項') if c in _h1482_detail]
+                    st.dataframe(_h1482_detail[_cols].head(500),use_container_width=True,hide_index=True)
         # Show the same run's research factors, not a fresh or historical scan.
         _h147_rows = st.session_state.get(_k('h147_five_gate_data'))
         _h147_meta = st.session_state.get(_k('h147_five_gate_meta'), {})
