@@ -107,7 +107,7 @@ def curate_focus_board(full_board: pd.DataFrame, audit: pd.DataFrame, trace: pd.
             '｜法人五日已核' if flow else '｜法人待補') + ('｜TDCC週增已核' if tdcc else '｜TDCC待補')
         if why:
             rec['H1481研究分層'] = '隔離查核／不得占據強勢主榜'
-            rec['H1481入榜／隔離依據'] = '；'.join(why[:5])
+            rec['H1481入榜／隔離依據'] = '；'.join(why)
             blocked_rows.append(rec)
             reasons.update(set(why))
         else:
