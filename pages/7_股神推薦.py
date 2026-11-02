@@ -17417,6 +17417,12 @@ def _build_excel_bytes_fast_h85(
         wb.active = 0
     except Exception:
         pass
+    # H151.2 Excel-native repair: previous D2 -> D8 / D2 -> A2 freeze
+    # assignments leave stale <selection> records in OOXML.  openpyxl
+    # can read these back, but Microsoft Excel may offer to repair them.
+    # Rebuild sheet views ONCE from each sheet's final freeze coordinates.
+    from godpick_h1512_excel_integrity import normalize_frozen_sheet_views as _h1512_normalize_views
+    _h1512_normalize_views(wb)
     wb.save(output)
     output.seek(0)
     return output.getvalue()
