@@ -33,8 +33,25 @@ def verify(root: Path) -> tuple[bool,list[str]]:
     if notes:
         return False,notes
     source=page.read_text('utf-8')
-    for token in ('build_six_pillar_review','append_six_pillar_to_sheet',
-                  'StockPick_H149_TradeResearch_','godpick_h1482_source_audit'):
+    # H151 changes ONLY the manager Excel layout contract: H149 six-pillar
+    # evidence remains computed, but its block is no longer appended inside
+    # the first worksheet. Accept both the legacy H149 single-sheet appendix
+    # and the explicitly versioned H151 per-category workbook contract.
+    split_layout = 'from godpick_h151_workbook_sections import add_research_section_sheets' in source
+    tokens = ('build_six_pillar_review', 'godpick_h1482_source_audit')
+    if split_layout:
+        tokens += ('_h151_section_sheets(', 'StockPick_H151_SplitSheets_')
+        split_file = root/'godpick_h151_workbook_sections.py'
+        if not split_file.is_file():
+            notes.append('MISSING: godpick_h151_workbook_sections.py')
+        else:
+            try:
+                ast.parse(split_file.read_text('utf-8'),filename=str(split_file))
+            except (OSError,SyntaxError,UnicodeError) as exc:
+                notes.append(f'INVALID: {split_file.name}: {type(exc).__name__}')
+    else:
+        tokens += ('append_six_pillar_to_sheet', 'StockPick_H149_TradeResearch_')
+    for token in tokens:
         if token not in source:
             notes.append('MISSING HOOK: '+token)
     if notes:return False,notes

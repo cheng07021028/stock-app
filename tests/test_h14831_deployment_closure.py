@@ -34,4 +34,4 @@ def test_checker_catches_exact_h1482_runtime_missing_module():
 def test_page07_h1482_excel_append_import_present():
     code = (ROOT / 'pages' / '7_股神推薦.py').read_text(encoding='utf-8')
     assert 'from godpick_h1482_source_audit import build_source_audit' in code
-    assert 'from godpick_h1482_source_audit import append_source_audit_to_sheet' in code
+    assert 'from godpick_h151_workbook_sections import add_research_section_sheets' in code

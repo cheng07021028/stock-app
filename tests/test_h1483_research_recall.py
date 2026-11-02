@@ -151,6 +151,6 @@ def test_page07_integrates_diagnosis_not_limited_audit_and_ui():
     assert 'diagnosis_frame=_h1483_source' in source
     assert 'audit_frame=tables.get(\'audit\', pd.DataFrame())' in source
     assert "h1483_named_research" in source
-    assert 'append_research_to_sheet as _h1483_append' in source
+    assert 'add_research_section_sheets as _h151_section_sheets' in source
     assert 'StockPick_H1483_ResearchRecall_' in source
     compile(source,'pages/7_股神推薦.py','exec')

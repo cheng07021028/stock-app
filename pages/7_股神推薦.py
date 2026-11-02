@@ -17389,104 +17389,30 @@ def _build_excel_bytes_fast_h85(
             for _h147_row in range(8, ws.max_row + 1):
                 ws.cell(_h147_row, 15).alignment = _H146Alignment(vertical='center', wrap_text=True)
                 ws.row_dimensions[_h147_row].height = max(ws.row_dimensions[_h147_row].height or 24, 65)
-            # H147 supplemental evidence at R:X, SAME worksheet. The H146
-            # A:Q authority/rank contract and filter range are unchanged.
-            _h147_rows_for_excel = locals().get('h147_five_gates', pd.DataFrame())
-            if isinstance(_h147_rows_for_excel, pd.DataFrame) and not _h147_rows_for_excel.empty:
-                _h147_lookup = {str(r['股票代號']):r for r in _h147_rows_for_excel.to_dict('records')}
-                _h147_extra_cols = ['成交量能','起漲位置','強勢族群','大戶鎖碼',
-                                    '技術結構','研究分類','行情日期']
-                for _h147_ci,_h147_label in enumerate(_h147_extra_cols,18):
-                    _h147_cell = ws.cell(7,_h147_ci,'H147｜'+_h147_label)
-                    _h147_cell.font = _H146Font(bold=True,color='FFFFFF')
-                    _h147_cell.fill = _H146Fill('solid',fgColor='155E75')
-                    _h147_cell.alignment = _H146Alignment(vertical='center',wrap_text=True)
-                    ws.column_dimensions[_h146_col_letter(_h147_ci)].width = 20 if _h147_ci < 23 else 27
-                for _h147_ri in range(8,ws.max_row+1):
-                    _h147_code = str(ws.cell(_h147_ri,2).value or '').removesuffix('.0')
-                    _h147_match = _h147_lookup.get(_h147_code)
-                    if not _h147_match: continue
-                    for _h147_ci,_h147_label in enumerate(_h147_extra_cols,18):
-                        _h147_cell = ws.cell(_h147_ri,_h147_ci,_h147_match.get(_h147_label,''))
-                        _h147_cell.alignment = _H146Alignment(vertical='center',wrap_text=True)
-                        if '待' in str(_h147_cell.value) or '風險' in str(_h147_cell.value):
-                            _h147_cell.fill = _H146Fill('solid',fgColor='FFF4E5')
-
-            # H148: annotate SAME TWO-SHEET workbook. The first A:Q / H147 R:X
-            # columns, ordering and formal H126 second tab remain unchanged.
-            _h148_rows_for_excel = locals().get('h148_trace', pd.DataFrame())
-            if isinstance(_h148_rows_for_excel, pd.DataFrame):
-                _h148_lookup = {str(r['股票代號']):r for r in _h148_rows_for_excel.to_dict('records')}
-                _h148_cols = ['H148研究分類','H148漏網位置','H148量價狀態','H148突破階段',
-                              'H148族群證據','H148法人證據','H148大戶週證','H148補證優先']
-                for _h148_ci, _h148_col in enumerate(_h148_cols, 25):
-                    _h148_cell=ws.cell(7,_h148_ci,_h148_col)
-                    _h148_cell.font=_H146Font(bold=True,color='FFFFFF')
-                    _h148_cell.fill=_H146Fill('solid',fgColor='36516D')
-                    _h148_cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
-                    ws.column_dimensions[_h146_col_letter(_h148_ci)].width=26 if _h148_ci!=32 else 53
-                for _h148_ri in range(8,ws.max_row+1):
-                    _h148_code=str(ws.cell(_h148_ri,2).value or '').removesuffix('.0')
-                    _h148_match=_h148_lookup.get(_h148_code)
-                    if not _h148_match: continue
-                    for _h148_ci, _h148_col in enumerate(_h148_cols,25):
-                        _h148_cell=ws.cell(_h148_ri,_h148_ci,_h148_match.get(_h148_col,''))
-                        _h148_cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
-                        if any(term in str(_h148_cell.value) for term in ('未核','待補','衝突','否決','隔離')):
-                            _h148_cell.fill=_H146Fill('solid',fgColor='FFF4E5')
-
-
-            # H148.1: AG:AJ appended within the same first worksheet.
-            from godpick_h1481_focus_gate import EXTRA_COLS as _h1481_cols
-            for _ci,_name in enumerate(_h1481_cols,33):
-                _cell=ws.cell(7,_ci,_name)
-                _cell.font=_H146Font(bold=True,color='FFFFFF')
-                _cell.fill=_H146Fill('solid',fgColor='21674A')
-                _cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
-                ws.column_dimensions[_h146_col_letter(_ci)].width=48 if _ci==36 else 31
-            for _ri in range(8,ws.max_row+1):
-                _row_idx=_ri-8
-                if _row_idx >= len(h144_focus):continue
-                _source=h144_focus.iloc[_row_idx]
-                for _ci,_name in enumerate(_h1481_cols,33):
-                    _cell=ws.cell(_ri,_ci,_source.get(_name,''))
-                    _cell.alignment=_H146Alignment(vertical='center',wrap_text=True)
-                    if any(_x in str(_cell.value) for _x in ('待補','未核','隔離')):
-                        _cell.fill=_H146Fill('solid',fgColor='FFF4E5')
-            # H148.3: first show named, evidence-based RESEARCH leads from the
-            # actual diagnostic pool, not only H113's 120-row sampled audit.
-            # These lines have no H126 trade authority and never fill the strict
-            # H148.1 headline board or expand its auto-filter.
-            from godpick_h1483_research_recall import append_research_to_sheet as _h1483_append
-            if isinstance(locals().get('h1483_meta'),dict):
-                _h1483_append(ws, locals().get('h1483_research',pd.DataFrame()),
-                             locals().get('h1483_summary',pd.DataFrame()))
-                ws.cell(6,2,str(ws.cell(6,2).value or '')+
-                        f"｜H148.3本輪診斷{h1483_meta['diagnosis_rows']}列、具名研究線索"
-                        f"{h1483_meta['found']}檔，詳細清單在本表下方；不代表正式交易資格。")
-            # H149: actionable research blind spots and explicit data limits,
-            # still on tab #1; NO changes to H126 authority on tab #2.
-            from godpick_h149_trade_intelligence import append_six_pillar_to_sheet as _h149_append
-            _h149_work = locals().get('h149_opportunities', pd.DataFrame())
-            _h149_summary = locals().get('h149_summary', pd.DataFrame())
-            _h149_meta = locals().get('h149_meta', {'reviewable':0,'displayed':0})
-            if isinstance(_h149_summary,pd.DataFrame) and not _h149_summary.empty:
-                _h149_append(ws, _h149_work, _h149_summary, limit=5)
-                ws.cell(6,2,str(ws.cell(6,2).value or '')+
-                        f"｜H149六維研究{_h149_meta['reviewable']}檔、優先顯示{_h149_meta['displayed']}檔；"+
-                        '缺新聞／實際持倉／交易日誌不提供虛構勝率或目標價。')
-            # H148.2: same FIRST worksheet, below the strong research table.
-            # Quarantined stocks NEVER re-enter the main table; this lower block
-            # has an explicit NON-RECOMMENDATION label and preserves sheet #2.
-            from godpick_h1482_source_audit import append_source_audit_to_sheet as _h1482_append
-            _h1482_rep=locals().get('h1482_repair',pd.DataFrame())
-            _h1482_det=locals().get('h1482_details',pd.DataFrame())
-            if (isinstance(_h1482_rep,pd.DataFrame) and not _h1482_rep.empty) or (isinstance(_h1482_det,pd.DataFrame) and not _h1482_det.empty):
-                _h1482_append(ws, _h1482_rep, _h1482_det)
-                ws.cell(1,1,'H148.2／H148.3｜強勢研究召回與來源稽核（非交易推薦）')
-                ws.cell(6,2,str(ws.cell(6,2).value or '') +
-                        f"｜H148.2同日有效K線{(locals().get('h1482_meta') or {}).get('same_day_h114',0)}檔；缺H113候選{(locals().get('h1482_meta') or {}).get('candidate_not_h113',0)}檔。詳見本表下方非推薦稽核區。")
+            # H151: keep the first worksheet as a single continuous manager board.
+            # H147/H148/H148.1, H148.2, H148.3 and H149 are now written into
+            # their OWN worksheets after this loop, not vertically appended here.
+            # The existing H146 summary/header/filter and H126 formal authority
+            # remain unchanged. No research evidence is deleted.
+            ws.sheet_properties.tabColor = '185C70'
             # Preserve H146 verified A:Q filtering contract; appended evidence remains readable.
+    # H151 category-separated manager workbook: each evidence category has
+    # one header row, one AutoFilter and its own freeze pane. Keep H126 as
+    # worksheet #2 for legacy readers that rely on its stable position.
+    from godpick_h151_workbook_sections import add_research_section_sheets as _h151_section_sheets
+    _h151_section_sheets(
+        wb, writer=_write_df_to_ws_fast_h84,
+        five_gate=locals().get('h147_five_gates'),
+        trace=locals().get('h148_trace'),
+        sectors=locals().get('h148_sectors'),
+        quarantine=locals().get('h1481_quarantine'),
+        research=locals().get('h1483_research'),
+        research_summary=locals().get('h1483_summary'),
+        opportunities=locals().get('h149_opportunities'),
+        six_pillar_summary=locals().get('h149_summary'),
+        source_summary=locals().get('h1482_repair'),
+        source_detail=locals().get('h1482_details'),
+    )
     try:
         wb.active = 0
     except Exception:
@@ -17558,7 +17484,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H149_TradeResearch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H151_SplitSheets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache

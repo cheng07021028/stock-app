@@ -46,13 +46,14 @@ def test_actual_page07_exports_named_non_trade_research_even_with_no_h1481_stric
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),str(src_path),'exec'),env,env)
     exec(compile(block,str(src_path),'exec'),env,env)
     wb=load_workbook(io.BytesIO(env['export_page']()))
-    assert wb.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
-    ws,formal=wb.worksheets
+    assert wb.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策'] and len(wb.sheetnames)==12
+    ws,formal=wb.worksheets[:2]
     assert ws['B8'].value is None  # strict H148.1 board not falsified
     assert ws.auto_filter.ref.startswith('A7:')
-    assert 'H148.3' in ws['A1'].value
-    assert any(ws.cell(r,1).value and 'H148.3｜具名' in str(ws.cell(r,1).value)
-               for r in range(8,ws.max_row+1))
-    assert any(ws.cell(r,2).value=='3035' for r in range(8,ws.max_row+1))
+    assert 'H148.1' in ws['A1'].value
+    research=wb['01_具名強勢研究']
+    assert research['B1'].value=='股票代號'
+    assert any(research.cell(r,2).value=='3035' for r in range(2,research.max_row+1))
+    assert research.freeze_panes=='A2'
     assert formal['B2'].value=='否'
     wb.close()

@@ -119,9 +119,9 @@ def test_excel_append_is_non_trading_and_escapes_formula_injection():
 def test_page07_has_all_pipeline_hooks_and_cache_version():
     code=(Path(__file__).resolve().parents[1]/'pages'/'7_股神推薦.py').read_text('utf-8')
     assert 'build_six_pillar_review' in code
-    assert 'append_six_pillar_to_sheet' in code
+    assert 'add_research_section_sheets' in code
     assert 'H1482|H1483|H149' in code
-    assert 'StockPick_H149_TradeResearch_' in code
+    assert 'StockPick_H151_SplitSheets_' in code
 
 
 def test_h129_replay_evidence_kept_separate_from_real_trades():

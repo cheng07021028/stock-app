@@ -63,16 +63,14 @@ def test_h148_real_two_sheet_excel_contains_h147_and_h148_without_trade_override
         authority_frame=authority,scan_report={'total_count':10,'candidate_diagnosis_count':1,'final_candidate_count':1},
         h145_bridge={'candidate_complete':True,'same_run_proven':True},research_day='2026-10-28')
     book=load_workbook(io.BytesIO(_render()(board,quality,authority,five,trace,meta)))
-    assert book.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
-    first,formal=book.worksheets
-    assert first['R7'].value=='H147｜成交量能'
-    assert first['X7'].value=='H147｜行情日期'
-    assert first['Y7'].value=='H148研究分類'
-    assert first['AF7'].value=='H148補證優先'
-    assert first['Y8'].value=='突破確認研究／非買點'
-    assert '診斷候選' in first['Z8'].value or '最終作戰' in first['Z8'].value
-    assert first['AB8'].value=='突破'
-    assert 'H148查核1檔' in first['B6'].value
+    assert book.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策'] and len(book.sheetnames)==12
+    first,formal=book.worksheets[:2]
+    five_ws=book['05_五關量價審查']
+    trace_ws=book['06_強勢股漏網追蹤']
+    assert five_ws['A1'].value=='股票代號' and five_ws['A2'].value=='2317'
+    assert trace_ws['A1'].value=='股票代號' and trace_ws['A2'].value=='2317'
+    assert 'H148研究分類' in [cell.value for cell in trace_ws[1]]
+    assert trace_ws.freeze_panes=='A2'
     assert first['P8'].value=='禁止依本榜買進'
     assert first.freeze_panes=='D8'
     assert formal['G2'].value in (None,'') or first['P8'].value=='禁止依本榜買進'

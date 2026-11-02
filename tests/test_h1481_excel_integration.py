@@ -23,17 +23,14 @@ def test_h1481_real_excel_strong_primary_and_H126_untouched():
           'valid_score_rows':2,'score_distinct':1,'h126_buyable':0,'warning':'研究觀察資料'}
     out=_render()(focus,meta,authority,five,trace,report)
     wb=load_workbook(io.BytesIO(out),read_only=False)
-    assert wb.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
-    ws,formal=wb.worksheets
+    assert wb.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策'] and len(wb.sheetnames)==12
+    ws,formal=wb.worksheets[:2]
     assert ws['B8'].value=='3035'
     assert ws['P8'].value=='禁止依本榜買進'
-    assert ws['R7'].value=='H147｜成交量能'
-    assert ws['Y7'].value=='H148研究分類'
-    assert ws['AG7'].value=='H1481研究分層'
-    assert ws['AJ7'].value=='H1481入榜／隔離依據'
-    assert '同日K線60根以上' in ws['AH8'].value
-    assert 'H108' in ws['AI8'].value
-    assert '突破' in ws['AJ8'].value
+    assert wb['05_五關量價審查']['A1'].value=='股票代號'
+    assert wb['06_強勢股漏網追蹤']['A1'].value=='股票代號'
+    assert wb['08_未入榜候選隔離']['A2'].value is not None  # synthetic legacy wrapper omits quarantine frame
+    assert wb['08_未入榜候選隔離']['A1'].value == '狀態'  # fixture does not pass quarantine
     assert ws['B9'].value is None
     assert ws.freeze_panes=='D8'
     assert list(formal.values)[1][0] is not None
@@ -52,8 +49,8 @@ def test_h1481_empty_board_never_refills_score_ties_in_actual_xlsx():
     report={'review_unique':1,'scope_status':'局部快照','zero_formal_diagnosis':'缺完整證據'}
     blob=_render()(board,meta,auth,pd.DataFrame(),trace,report)
     wb=load_workbook(io.BytesIO(blob));ws=wb.worksheets[0]
-    assert wb.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
+    assert wb.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策'] and len(wb.sheetnames)==12
     assert 'H148.1' in ws['A1'].value
     assert ws['B8'].value not in ('2344',2344)
-    assert 'H1481' in ws['AG7'].value
+    assert wb['08_未入榜候選隔離']['A2'].value is not None  # synthetic legacy wrapper omits quarantine frame
     wb.close()

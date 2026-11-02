@@ -51,7 +51,8 @@ def test_verbatim_page07_writer_round_trip_twelve_ties():
     blob=_actual_writer()(board,meta,authority,'BLOCKED_PARTIAL_EXPORT_NO_TRUSTED_RECOVERY')
     assert len(blob)>1500
     book=load_workbook(io.BytesIO(blob),read_only=False)
-    assert book.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
+    assert book.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策']
+    assert len(book.sheetnames)==12  # H151 category-split requirement
     ws=book.worksheets[0]
     assert ws.freeze_panes=='D8'
     assert ws.auto_filter.ref==f'A7:Q{ws.max_row}'

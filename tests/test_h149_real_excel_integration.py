@@ -41,12 +41,13 @@ def test_actual_export_has_six_pillars_and_unchanged_h126_sheet():
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),str(path),'exec'),env,env)
     exec(compile(block,str(path),'exec'),env,env)
     wb=load_workbook(io.BytesIO(env['export_page']()))
-    assert wb.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
-    ws,formal=wb.worksheets
-    values=[str(ws.cell(r,1).value or '') for r in range(1,ws.max_row+1)]
-    assert any('H149｜六維交易研究' in val for val in values)
-    assert any('1｜交易機會' in val for val in values)
-    assert any(ws.cell(r,2).value=='2352' for r in range(8,ws.max_row+1))
+    assert wb.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策'] and len(wb.sheetnames)==12
+    ws,formal=wb.worksheets[:2]
+    summary=wb['04_六維研究摘要']
+    leads=wb['03_五檔研究計畫']
+    assert any('1｜交易機會' in str(summary.cell(r,1).value or '') for r in range(2,summary.max_row+1))
+    assert any(leads.cell(r,2).value=='2352' for r in range(2,leads.max_row+1))
+    assert summary.freeze_panes=='A2' and leads.freeze_panes=='A2'
     assert formal['B2'].value=='否'
     assert ws.auto_filter.ref.startswith('A7:')
     wb.close()

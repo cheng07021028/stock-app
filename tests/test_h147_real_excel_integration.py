@@ -56,17 +56,14 @@ def test_h147_actual_two_sheet_xlsx_has_five_factors_and_no_false_authority():
     diag,_=build_five_gate_review(audit)
     blob=_writer()(board,meta,authority,diag)
     wb=load_workbook(io.BytesIO(blob))
-    assert wb.sheetnames==['00_主管重點觀察榜','00_H126主管決策']
+    assert wb.sheetnames[:2]==['00_主管重點觀察榜','00_H126主管決策'] and len(wb.sheetnames)==12
     ws=wb.worksheets[0]
-    assert ws['R7'].value=='H147｜成交量能'
-    assert ws['S7'].value=='H147｜起漲位置'
-    assert ws['T7'].value=='H147｜強勢族群'
-    assert ws['U7'].value=='H147｜大戶鎖碼'
-    assert ws['V7'].value=='H147｜技術結構'
-    assert ws['R8'].value=='量能支持'
-    assert ws['S8'].value=='已發動／防追高'
-    assert ws['T8'].value=='退潮否決／待查來源'
-    assert ws['U8'].value=='待補證'
+    review_ws=wb['05_五關量價審查']
+    assert review_ws['A1'].value=='股票代號'
+    assert review_ws['A2'].value=='2317'
+    assert review_ws.freeze_panes=='A2'
+    assert review_ws.auto_filter.ref.startswith('A1:')
+    assert any('量能支持' in str(v) for row in review_ws.values for v in row)
     assert ws['M8'].value=='未列入H126合格決策'
     assert ws['P8'].value=='禁止依本榜買進'
     assert ws['B2'].value.endswith('SCHEMA_RECONCILED')

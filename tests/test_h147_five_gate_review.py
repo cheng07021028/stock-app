@@ -120,5 +120,5 @@ def test_no_network_no_persistent_writes_no_h126_patch():
     assert not any(s in text for s in ('requests.get(', 'urlopen(', 'to_csv(', 'to_json(', 'st.session_state', 'os.replace('))
     page=(ROOT/'pages/7_股神推薦.py').read_text('utf-8')
     assert "h147_five_gate_data" in page
-    assert "_h147_extra_cols" in page
+    assert "_h151_section_sheets(" in page
     assert page.count('("00_H126主管決策", tables') == 1
