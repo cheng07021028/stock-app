@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from openpyxl import Workbook, load_workbook
 from godpick_h151_workbook_sections import (
-    CATEGORY_TABS, CORE_TABS, add_research_section_sheets,
+    CATEGORY_TABS, CORE_TABS, TABS_COLOR, PRIMARY_TAB_COLORS, SECONDARY_TAB_COLOR, add_research_section_sheets,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,3 +100,31 @@ def test_no_trading_authority_modification_in_section_adapter():
     src=(ROOT/'godpick_h151_workbook_sections.py').read_text('utf-8')
     for forbidden in ('requests.', 'streamlit', 'subprocess', 'st.session_state', 'GITHUB_TOKEN'):
         assert forbidden not in src
+
+
+def test_h1511_four_priority_tab_colors_roundtrip_without_value_changes():
+    wb = _book()
+    original_values = [wb[name]['A1'].value for name in CORE_TABS]
+    add_research_section_sheets(wb, writer=_writer,
+        research=pd.DataFrame([{'股票代號':'2330','研究資格':'僅研究'}]),
+        opportunities=pd.DataFrame([{'股票代號':'2330','H126授權':'禁止買進'}]))
+    assert len(PRIMARY_TAB_COLORS) == 4
+    assert len(set(PRIMARY_TAB_COLORS.values())) == 4
+    assert [wb[name]['A1'].value for name in CORE_TABS] == original_values
+    for name in wb.sheetnames:
+        color = wb[name].sheet_properties.tabColor
+        assert color is not None
+        assert color.rgb[-6:].upper() == TABS_COLOR[name]
+        if name not in PRIMARY_TAB_COLORS:
+            assert color.rgb[-6:].upper() == SECONDARY_TAB_COLOR
+    data = io.BytesIO()
+    wb.save(data)
+    restored = load_workbook(io.BytesIO(data.getvalue()))
+    assert restored.sheetnames == list(CORE_TABS) + [n for n, _, _ in CATEGORY_TABS]
+    for name, expected in PRIMARY_TAB_COLORS.items():
+        assert restored[name].sheet_properties.tabColor.rgb[-6:].upper() == expected
+    assert restored['00_H126主管決策']['A1'].value == 'H126權威'
+    assert restored['01_具名強勢研究']['A2'].value == '2330'
+    assert restored['03_五檔研究計畫']['B2'].value == '禁止買進'
+    assert restored['00_主管重點觀察榜'].freeze_panes is None  # simplified test book
+    assert restored['01_具名強勢研究'].freeze_panes == 'A2'

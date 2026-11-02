@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 import pandas as pd
 
-VERSION = "V191-H151-WORKBOOK-CATEGORY-SPLIT"
+VERSION = "V191-H151.1-MANAGER-PRIMARY-TABS"
 
 # Keep core manager observation and authority tabs first and unchanged.
 CORE_TABS = ("00_主管重點觀察榜", "00_H126主管決策")
@@ -27,14 +27,26 @@ CATEGORY_TABS = (
     ("10_逐股排除明細", "source_detail", "本輪沒有逐股排除原因；不代表全市場均可交易。"),
 )
 
-# Excel tabs display cues, not formal decision upgrades.
-TABS_COLOR = {
-    "01_具名強勢研究": "155E75", "02_研究召回統計": "64748B",
-    "03_五檔研究計畫": "0F766E", "04_六維研究摘要": "334155",
-    "05_五關量價審查": "2563EB", "06_強勢股漏網追蹤": "B45309",
-    "07_族群證據分析": "0F766E", "08_未入榜候選隔離": "B91C1C",
-    "09_資料來源品質": "475569", "10_逐股排除明細": "9A3412",
+# V191-H151.1: Four daily-priority worksheets get distinct, vivid tab colors.
+# Colors are visual navigation hints ONLY. They never imply H126 buy permission.
+# Keep the existing worksheet order, freeze panes, filters and exact data.
+PRIMARY_TAB_COLORS = {
+    "00_主管重點觀察榜": "F59E0B",  # amber  - daily summary
+    "00_H126主管決策": "7C3AED",    # purple - formal trading authority
+    "01_具名強勢研究": "16A34A",   # green  - first research priority
+    "03_五檔研究計畫": "2563EB",   # blue   - evidence-backed plan
 }
+SECONDARY_TAB_COLOR = "94A3B8"   # muted slate for other eight sheets
+TABS_COLOR = {
+    name: PRIMARY_TAB_COLORS.get(name, SECONDARY_TAB_COLOR)
+    for name in CORE_TABS + tuple(tab[0] for tab in CATEGORY_TABS)
+}
+
+
+def color_manager_tabs(wb: Any) -> None:
+    """Highlight the four priority tabs without touching values or trading decisions."""
+    for name in CORE_TABS:
+        wb[name].sheet_properties.tabColor = TABS_COLOR[name]
 
 
 def _safe_cell(v: Any) -> Any:
@@ -63,6 +75,7 @@ def add_research_section_sheets(wb: Any, *, writer: Callable, **frames: Any) -> 
     deletion of rows or synthetic formal buy lists. H126 remains worksheet #2.
     """
     assert tuple(wb.sheetnames[:2]) == CORE_TABS, "H126 authority must remain worksheet #2"
+    color_manager_tabs(wb)
     summary = {}
     for name, key, fallback in CATEGORY_TABS:
         frame = _safe_frame(frames.get(key))
@@ -76,4 +89,4 @@ def add_research_section_sheets(wb: Any, *, writer: Callable, **frames: Any) -> 
     return summary
 
 
-__all__ = ["VERSION", "CORE_TABS", "CATEGORY_TABS", "add_research_section_sheets"]
+__all__ = ["VERSION", "CORE_TABS", "CATEGORY_TABS", "add_research_section_sheets", "PRIMARY_TAB_COLORS", "SECONDARY_TAB_COLOR", "TABS_COLOR", "color_manager_tabs"]
