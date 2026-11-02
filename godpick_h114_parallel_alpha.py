@@ -96,6 +96,7 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H114波動收斂": "未驗證", "H114突破前蓄勢分": None,
         "H114K線證據日": "", "H114K線量比": None,
         "H114當日成交量張": None, "H11420日平均量張": None,
+        "H114當日收盤價": None,  # H149: only dated, valid OHLCV quote; no API call
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
         return base
@@ -151,6 +152,10 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     base["H114多頭吞噬需確認"] = "是" if engulf else "否"
     base["H114前段5日漲跌幅%"] = round(trend5, 2)
     base["H114K線資料狀態"] = "VALID_OHLCV" if volume_col else "VALID_OHLC_ONLY_VOLUME_UNIT_UNKNOWN"
+    # Explicit same-stock, dated OHLCV close for research price plans.  Never
+    # use latest displayed quote or stale recommendation records as a proxy.
+    if volume_col and last["lots"] > 0:
+        base["H114當日收盤價"] = round(float(last["close"]), 3)
     if volume_col and last["lots"] > 0:
         avg20 = df["lots"].iloc[-21:-1].mean()
         ratio = last["lots"] / avg20 if avg20 > 0 else None

@@ -17288,6 +17288,23 @@ def _build_excel_bytes_fast_h85(
         st.session_state[_k('h1483_named_research')] = h1483_research.copy(deep=True)
         st.session_state[_k('h1483_research_summary')] = h1483_summary.copy(deep=True)
         st.session_state[_k('h1483_research_meta')] = dict(h1483_meta)
+    # H149: integrate six read-only research pillars from the actual H148.3
+    # diagnosis-pool candidates. This never grants H126 permission, invents
+    # price targets, assumes user holdings or promotes old recommendation logs.
+    from godpick_h149_trade_intelligence import build_six_pillar_review as _h149_review
+    h149_opportunities, h149_summary, h149_meta = _h149_review(
+        diagnosis_frame=_h1483_source,
+        research_frame=h1483_research,
+        authority_frame=tables.get('h126_authority', pd.DataFrame()),
+        research_day=_h148_research_day,
+        h145_bridge=_h145_bridge,
+        feedback_health=h129_t1_health,
+        limit=5,
+    )
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h149_trade_research')] = h149_opportunities.copy(deep=True)
+        st.session_state[_k('h149_trade_summary')] = h149_summary.copy(deep=True)
+        st.session_state[_k('h149_trade_meta')] = dict(h149_meta)
     h144_focus_meta['ranked'] = len(h144_focus)
     h144_focus_meta['h1481_eligible'] = h1481_meta['eligible']
     h144_focus_meta['h1481_quarantined'] = h1481_meta['quarantine']
@@ -17447,6 +17464,17 @@ def _build_excel_bytes_fast_h85(
                 ws.cell(6,2,str(ws.cell(6,2).value or '')+
                         f"｜H148.3本輪診斷{h1483_meta['diagnosis_rows']}列、具名研究線索"
                         f"{h1483_meta['found']}檔，詳細清單在本表下方；不代表正式交易資格。")
+            # H149: actionable research blind spots and explicit data limits,
+            # still on tab #1; NO changes to H126 authority on tab #2.
+            from godpick_h149_trade_intelligence import append_six_pillar_to_sheet as _h149_append
+            _h149_work = locals().get('h149_opportunities', pd.DataFrame())
+            _h149_summary = locals().get('h149_summary', pd.DataFrame())
+            _h149_meta = locals().get('h149_meta', {'reviewable':0,'displayed':0})
+            if isinstance(_h149_summary,pd.DataFrame) and not _h149_summary.empty:
+                _h149_append(ws, _h149_work, _h149_summary, limit=5)
+                ws.cell(6,2,str(ws.cell(6,2).value or '')+
+                        f"｜H149六維研究{_h149_meta['reviewable']}檔、優先顯示{_h149_meta['displayed']}檔；"+
+                        '缺新聞／實際持倉／交易日誌不提供虛構勝率或目標價。')
             # H148.2: same FIRST worksheet, below the strong research table.
             # Quarantined stocks NEVER re-enter the main table; this lower block
             # has an explicit NON-RECOMMENDATION label and preserves sheet #2.
@@ -17500,7 +17528,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
     # Legacy export prefix: StockPick_H146_QualityFocus_ (H148 now distinct).
-    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481|H1482|H1483"
+    sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481|H1482|H1483|H149"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")
     cache = st.session_state.get(cache_key, {})
@@ -17529,7 +17557,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H1483_ResearchRecall_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H149_TradeResearch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
@@ -17579,6 +17607,24 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
                 st.warning('H148.3｜同輪診斷母體仍待證：研究線索不可稱全市場排名。')
         if isinstance(_h1483_named,pd.DataFrame) and not _h1483_named.empty:
             st.dataframe(_h1483_named, use_container_width=True, hide_index=True)
+        # H149: executive signal, adversarial thesis and risk evidence.
+        # Display research-only results and never change the existing H126 page.
+        _h149_m = st.session_state.get(_k('h149_trade_meta'), {})
+        _h149_l = st.session_state.get(_k('h149_trade_research'))
+        _h149_s = st.session_state.get(_k('h149_trade_summary'))
+        if isinstance(_h149_m,dict) and _h149_m:
+            st.caption(f"H149｜六維交易研究：可核對線索 {_h149_m.get('reviewable',0)} 檔，"
+                       f"優先顯示 {_h149_m.get('displayed',0)} 檔；"
+                       f"價位證據 {_h149_m.get('same_day_quote',0)} 檔、完整風險報酬 {_h149_m.get('calculated_rr',0)} 檔。"
+                       '非H126買進授權。')
+            if not _h149_m.get('scope_proven'):
+                st.warning('H149｜本輪母體同輪性未證，研究排序僅限已取得樣本，不能稱全市場Top 5。')
+        if isinstance(_h149_s,pd.DataFrame) and not _h149_s.empty:
+            with st.expander('H149｜六維盲點、自我反證與交易研究重點',expanded=True):
+                st.dataframe(_h149_s,use_container_width=True,hide_index=True)
+        if isinstance(_h149_l,pd.DataFrame) and not _h149_l.empty:
+            with st.expander('H149｜具名五檔研究計畫、價位證據與失效條件（非買進）',expanded=True):
+                st.dataframe(_h149_l,use_container_width=True,hide_index=True)
         # H148.2: make the entire H113 evidence gap visible in the app.
         _h1482_summary=st.session_state.get(_k('h1482_repair_summary'))
         _h1482_detail=st.session_state.get(_k('h1482_repair_details'))
