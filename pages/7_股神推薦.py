@@ -17528,6 +17528,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
     core_raw = st.session_state.get(_k(H85_H79_CORE_SESSION_KEY), {})
     core_stamp = _safe_str(core_raw.get("created_at")) if isinstance(core_raw, dict) else ""
     # Legacy export prefix: StockPick_H146_QualityFocus_ (H148 now distinct).
+    # Historical H148.3 research workbook name: StockPick_H1483_ResearchRecall_ (now H149_TradeResearch_).
     sig_raw = f"H146|H86|{saved_at}|{core_stamp}|{len(rec_df) if isinstance(rec_df,pd.DataFrame) else 0}|{len(candidate_df)}|{len(category_strength_df) if isinstance(category_strength_df,pd.DataFrame) else 0}|{_safe_str(st.session_state.get(_k('scan_run_id')))}|H147|H148|H1481|H1482|H1483|H149"
     sig = hashlib.sha256(sig_raw.encode("utf-8")).hexdigest()[:20]
     cache_key = _k("h86_always_excel_cache")

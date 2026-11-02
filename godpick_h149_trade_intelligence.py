@@ -179,6 +179,14 @@ def build_six_pillar_review(*, diagnosis_frame: Any, research_frame: Any,
         news=(f'事件待核：{note[:48]}（{news_date.isoformat()}；有來源連結）'
               if note and news_date and news_source and day and news_date<=day
               else '未有可查證同輪新聞證據；不以題材代替量價')
+        if news.startswith('未有可查證'):
+            # H150 only reads prior H83 entity-matched cache. It never fetches
+            # news during Excel generation or asserts a news/return causal link.
+            try:
+                from godpick_h150_news_evidence import match_existing_news
+                news = match_existing_news(raw, day) or news
+            except (ImportError, ValueError, TypeError, KeyError):
+                pass
         reasons=[]
         if not scope_proven:reasons.append('完整診斷母體／同輪簽章未確認')
         if not tier.startswith('A｜'):reasons.append('同日技術或長期量能尚有缺口')

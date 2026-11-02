@@ -342,11 +342,48 @@ def _ensure_macro_startup_update_v109() -> None:
             pass
 
 
+def _ensure_h150_auto_data_after_login():
+    """H150 once-per-session nonblocking GitHub Actions kick-off.
+
+    Does not perform expensive full-market downloads in a login/rerun request.
+    """
+    try:
+        from godpick_h150_login_sync import streamlit_login_hook
+        result = streamlit_login_hook(st)
+        if isinstance(result, dict):
+            with st.sidebar:
+                st.caption("自動資料中心：" + str(result.get('message', '尚無狀態')))
+                st.caption("雲端工作已啟動 ≠ 官方資料已更新，H126 交易限制不變")
+                if st.button("查核盤後資料來源", key="h150_check_official_sources"):
+                    try:
+                        from godpick_h140_observability import read_remote_monitor
+                        cfg = {
+                            'token': str(st.secrets.get('GITHUB_TOKEN', '') or ''),
+                            'owner': str(st.secrets.get('GITHUB_REPO_OWNER', 'cheng07021028')),
+                            'repo': str(st.secrets.get('GITHUB_REPO_NAME', 'stock-app')),
+                            'branch': str(st.secrets.get('GITHUB_RUNTIME_DATA_BRANCH', 'runtime-data')),
+                        }
+                        report = read_remote_monitor(config=cfg)
+                        st.session_state['h150_source_report'] = report
+                    except Exception:
+                        st.session_state['h150_source_report'] = {'status': 'SOURCE_CHECK_FAILED'}
+                report = st.session_state.get('h150_source_report')
+                if isinstance(report, dict):
+                    st.caption('來源驗收：' + str(report.get('status', 'UNKNOWN')))
+                    stages = report.get('stages')
+                    if isinstance(stages, dict):
+                        st.caption('｜'.join(str(k)+':'+str(v.get('state', '未知')) for k, v in stages.items() if isinstance(v, dict)))
+    except Exception:
+        # A failure in the optional data centre must never lock out users.
+        pass
+
+
 def require_login() -> bool:
     cfg = _load_auth_config()
     _apply_global_font_size_v117()
     if str(cfg.get("auth_enabled", True)).lower() in ("false", "0", "no", "off"):
         _ensure_macro_startup_update_v109()
+        _ensure_h150_auto_data_after_login()
         _install_v105_table_manager()
         return True
 
@@ -367,6 +404,7 @@ def require_login() -> bool:
         except Exception:
             pass
         _ensure_macro_startup_update_v109()
+        _ensure_h150_auto_data_after_login()
         _install_v105_table_manager()
         return True
 
