@@ -97,6 +97,8 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H114K線證據日": "", "H114K線量比": None,
         "H114當日成交量張": None, "H11420日平均量張": None,
         "H114當日收盤價": None,  # H149: only dated, valid OHLCV quote; no API call
+        "H114前日收盤價": None, "H114前次交易日": "", "H114當日漲跌幅%": None,
+        "H114同型歷史樣本數": 0, "H114同型樣本隔日上漲率%": None,
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
         return base
@@ -156,6 +158,10 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
     # use latest displayed quote or stale recommendation records as a proxy.
     if volume_col and last["lots"] > 0:
         base["H114當日收盤價"] = round(float(last["close"]), 3)
+        if float(prior["close"]) > 0:
+            base["H114前日收盤價"] = round(float(prior["close"]), 3)
+            base["H114前次交易日"] = str(prior["day"])
+            base["H114當日漲跌幅%"] = round((float(last["close"]) / float(prior["close"]) - 1) * 100, 3)
     if volume_col and last["lots"] > 0:
         avg20 = df["lots"].iloc[-21:-1].mean()
         ratio = last["lots"] / avg20 if avg20 > 0 else None
@@ -168,6 +174,30 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
             rising = recent5.iloc[-1] > recent5.iloc[0] and last["close"] >= df["close"].iloc[-20:].mean()
             enough = last["lots"] >= MIN_LOTS and avg20 >= MIN_LOTS
             base["H114量縮墊高"] = "是" if .60 <= ratio <= .90 and rising_lows and rising and enough else "否"
+    # H152: historical analogues use only PRIOR feature dates and their already
+    # observed next-session close. These are descriptive, not a forecast
+    # probability and not a backtested trading strategy.
+    if volume_col and last["lots"] > 0 and len(df) >= 61:
+        current_return = base.get("H114當日漲跌幅%")
+        current_volratio = base.get("H114K線量比")
+        if current_return is not None and current_volratio is not None and current_volratio > 0:
+            hist_ret = df["close"].pct_change() * 100
+            hist_ratio = df["lots"] / df["lots"].rolling(20, min_periods=20).mean().shift(1)
+            matched = []
+            for j in range(max(20, len(df) - 251), len(df) - 1):
+                old_return = hist_ret.iloc[j]
+                old_ratio = hist_ratio.iloc[j]
+                next_close = df["close"].iloc[j + 1]
+                prev_close = df["close"].iloc[j]
+                if (pd.notna(old_return) and pd.notna(old_ratio) and
+                    old_ratio > 0 and prev_close > 0 and next_close > 0 and
+                    abs(float(old_return) - current_return) <= 1.5 and
+                    0.60 <= float(old_ratio) / current_volratio <= 1.60):
+                    matched.append(next_close > prev_close)
+            base["H114同型歷史樣本數"] = len(matched)
+            if len(matched) >= 30:
+                base["H114同型樣本隔日上漲率%"] = round(100 * sum(matched) / len(matched), 2)
+
     # Volatility compression is independently useful even when raw volume missing.
     ranges = (df["high"]-df["low"])/df["close"].shift(1)
     r5 = ranges.iloc[-5:].mean()

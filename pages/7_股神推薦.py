@@ -17305,6 +17305,42 @@ def _build_excel_bytes_fast_h85(
         st.session_state[_k('h149_trade_research')] = h149_opportunities.copy(deep=True)
         st.session_state[_k('h149_trade_summary')] = h149_summary.copy(deep=True)
         st.session_state[_k('h149_trade_meta')] = dict(h149_meta)
+    # Historical export naming contract: StockPick_H151_SplitSheets_*.xlsx.
+    # H152: evidence-gated anti-fall resilience and next-session SCENARIOS.
+    # All joins are current-run + same-stock.  A stale macro snapshot cannot
+    # become a valid benchmark; H109/H126/holdings/trade logs are never changed.
+    from godpick_h152_resilience_forecast import build_resilience_research as _h152_research
+    _h152_reader = globals().get('_read_market_snapshot_v33')
+    _h152_snapshot = _h152_reader() if callable(_h152_reader) else {}
+    # Local immutable H117 TAIEX is an optional authenticated fallback when
+    # Page01's global market snapshot is old. Never infer OTC index from TAIEX.
+    from pathlib import Path as _h152_Path
+    from godpick_h152_resilience_forecast import supplement_with_verified_h117 as _h152_official_index
+    _h152_page_path = globals().get('__file__')
+    _h152_root = (_h152_Path(_h152_page_path).resolve().parents[1]
+                  if _h152_page_path else _h152_Path.cwd())
+    _h152_snapshot = _h152_official_index(_h152_snapshot, research_day=_h148_research_day,
+        root=_h152_root/'data'/'h117'/'daily')
+    h152_resilience, h152_named_research, h152_summary, h152_meta = _h152_research(
+        diagnosis_frame=_h1483_source,
+        research_frame=h1483_research,
+        research_day=_h148_research_day,
+        market_snapshot=_h152_snapshot,
+        authority_frame=tables.get('h126_authority', pd.DataFrame()),
+        limit=12,
+    )
+    _h152_result_by_code = {str(x.get('股票代號')): x for x in h152_named_research.to_dict('records')}
+    h152_opportunities = h149_opportunities.copy(deep=True)
+    if isinstance(h152_opportunities, pd.DataFrame):
+        h152_opportunities['H152隔日情境'] = h152_opportunities['股票代號'].astype(str).map(
+            lambda x: _h152_result_by_code.get(x, {}).get('隔日方向情境', '缺同日大盤／個股實證，暫不預測'))
+        h152_opportunities['H152相對抗跌pp'] = h152_opportunities['股票代號'].astype(str).map(
+            lambda x: _h152_result_by_code.get(x, {}).get('相對強度pp'))
+        h152_opportunities['H152樣本校準'] = '僅歷史相似樣本描述；尚無獨立樣本外校準，非上漲機率'
+    h152_research_summary = pd.concat([h1483_summary, h152_summary], ignore_index=True)
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h152_resilience_observations')] = h152_resilience.copy(deep=True)
+        st.session_state[_k('h152_resilience_meta')] = dict(h152_meta)
     h144_focus_meta['ranked'] = len(h144_focus)
     h144_focus_meta['h1481_eligible'] = h1481_meta['eligible']
     h144_focus_meta['h1481_quarantined'] = h1481_meta['quarantine']
@@ -17406,9 +17442,9 @@ def _build_excel_bytes_fast_h85(
         trace=locals().get('h148_trace'),
         sectors=locals().get('h148_sectors'),
         quarantine=locals().get('h1481_quarantine'),
-        research=locals().get('h1483_research'),
-        research_summary=locals().get('h1483_summary'),
-        opportunities=locals().get('h149_opportunities'),
+        research=locals().get('h152_named_research', locals().get('h1483_research')),
+        research_summary=locals().get('h152_research_summary', locals().get('h1483_summary')),
+        opportunities=locals().get('h152_opportunities', locals().get('h149_opportunities')),
         six_pillar_summary=locals().get('h149_summary'),
         source_summary=locals().get('h1482_repair'),
         source_detail=locals().get('h1482_details'),
@@ -17490,7 +17526,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H151_SplitSheets_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H152_Research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
