@@ -155,13 +155,14 @@ def build_six_pillar_review(*, diagnosis_frame: Any, research_frame: Any,
         seen.add(code)
         raw=source[code]
         tier=_s(row.get('研究層級'))
-        if not tier.startswith(('A｜','B｜','C｜')):
+        if not tier.startswith(('P1｜','P2｜','A｜','B｜','C｜')):
             exclusions['研究層級不明']+=1
             continue
         amount=_pick(raw,'H113當日成交額百萬','成交額百萬')
         lots=_pick(raw,'H114當日成交量張','H113當日成交量張','最新成交量_張')
         ratio=_pick(raw,'H114K線量比')
-        if not (amount is not None and amount>=150 and lots is not None and lots>=500 and ratio is not None and ratio>=1.2):
+        if not (amount is not None and amount>=150 and lots is not None and lots>=500 and ratio is not None and
+                ratio >= (0.55 if tier.startswith(('P1｜','P2｜')) else 1.2)):
             exclusions['量價證據不足']+=1
             continue
         quote, support, resistance, rr, price_note=_valid_close_levels(raw,day)
@@ -189,7 +190,8 @@ def build_six_pillar_review(*, diagnosis_frame: Any, research_frame: Any,
                 pass
         reasons=[]
         if not scope_proven:reasons.append('完整診斷母體／同輪簽章未確認')
-        if not tier.startswith('A｜'):reasons.append('同日技術或長期量能尚有缺口')
+        if tier.startswith(('B｜','C｜')):reasons.append('同日技術或長期量能尚有缺口')
+        if tier.startswith(('P1｜','P2｜')):reasons.append('蓄勢尚未確認突破與放量；非已發動買點')
         if risk not in {'ALLOW','PASS','NONE','RESEARCH_ELIGIBLE'}:
             reasons.append('H109否決或待核：'+risk)
         if inst!='PROVEN_FLOW':reasons.append('法人連買未認證')
@@ -198,8 +200,8 @@ def build_six_pillar_review(*, diagnosis_frame: Any, research_frame: Any,
         reasons.append('若放量失效、突破跌回或資料更新推翻證據，停止觀察／重審')
         opportunities.append({
            '_research_sector':sector,
-           '_evidence_order':(0 if tier.startswith('A｜') else 1 if tier.startswith('B｜') else 2,
-               0 if risk in {'ALLOW','PASS','NONE','RESEARCH_ELIGIBLE'} else 1,
+           '_evidence_order':(0 if risk in {'ALLOW','PASS','NONE','RESEARCH_ELIGIBLE'} else 1,
+               0 if tier.startswith(('P1｜','P2｜')) else 1 if tier.startswith('A｜') else 2 if tier.startswith('B｜') else 3,
                0 if inst=='PROVEN_FLOW' else 1, 0 if tdcc=='VERIFIED_RISING' else 1,
                0 if rr is not None else 1, -(ratio or 0), -(amount or 0), code),
            '研究優先序':'研究候選｜非買進排名', '股票代號':code,

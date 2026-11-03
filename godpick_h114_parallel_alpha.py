@@ -98,6 +98,7 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         "H114當日成交量張": None, "H11420日平均量張": None,
         "H114當日收盤價": None,  # H149: only dated, valid OHLCV quote; no API call
         "H114前日收盤價": None, "H114前次交易日": "", "H114當日漲跌幅%": None,
+        "H114當前5日漲跌幅%": None,
         "H114同型歷史樣本數": 0, "H114同型樣本隔日上漲率%": None,
     }
     if not isinstance(hist, pd.DataFrame) or hist.empty:
@@ -161,6 +162,8 @@ def analyze_history(hist: pd.DataFrame | None, *, asof: Any = None) -> dict[str,
         if float(prior["close"]) > 0:
             base["H114前日收盤價"] = round(float(prior["close"]), 3)
             base["H114前次交易日"] = str(prior["day"])
+            if float(df["close"].iloc[-6]) > 0:
+                base["H114當前5日漲跌幅%"] = round((float(last["close"])/float(df["close"].iloc[-6])-1)*100,3)
             base["H114當日漲跌幅%"] = round((float(last["close"]) / float(prior["close"]) - 1) * 100, 3)
     if volume_col and last["lots"] > 0:
         avg20 = df["lots"].iloc[-21:-1].mean()

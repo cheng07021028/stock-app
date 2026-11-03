@@ -17329,15 +17329,46 @@ def _build_excel_bytes_fast_h85(
         authority_frame=tables.get('h126_authority', pd.DataFrame()),
         limit=12,
     )
+    # H152.1: user needs POTENTIAL BEFORE a stock has already surged.
+    # Reuse the same-session full diagnostic pool: compression + rising-base +
+    # near-breakout with strict H114/liquidity gates. Never modify H126.
+    from godpick_h1521_early_potential import build_early_potential as _h1521_early
+    h1521_potential, h152_named_research, h1521_summary, h1521_meta = _h1521_early(
+        diagnosis_frame=_h1483_source,
+        research_frame=h152_named_research,
+        research_day=_h148_research_day, limit=12,
+    )
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h1521_potential_research')] = h1521_potential.copy(deep=True)
+        st.session_state[_k('h1521_potential_meta')] = dict(h1521_meta)
+    # Rebuild only RESEARCH plans so the five ideas can include the pre-breakout
+    # watchlist; previous H149 stages and original H126 table remain available.
+    h1521_opportunities, h1521_six_summary, h1521_six_meta = _h149_review(
+        diagnosis_frame=_h1483_source,
+        research_frame=h152_named_research,
+        authority_frame=tables.get('h126_authority', pd.DataFrame()),
+        research_day=_h148_research_day,
+        h145_bridge=_h145_bridge, feedback_health=h129_t1_health, limit=5,
+    )
+    h149_summary = h1521_six_summary
+    h149_meta = h1521_six_meta
+    if 'st' in globals() and '_k' in globals():
+        st.session_state[_k('h149_trade_research')] = h1521_opportunities.copy(deep=True)
+        st.session_state[_k('h149_trade_summary')] = h149_summary.copy(deep=True)
     _h152_result_by_code = {str(x.get('股票代號')): x for x in h152_named_research.to_dict('records')}
-    h152_opportunities = h149_opportunities.copy(deep=True)
+    h152_opportunities = h1521_opportunities.copy(deep=True)
     if isinstance(h152_opportunities, pd.DataFrame):
         h152_opportunities['H152隔日情境'] = h152_opportunities['股票代號'].astype(str).map(
             lambda x: _h152_result_by_code.get(x, {}).get('隔日方向情境', '缺同日大盤／個股實證，暫不預測'))
         h152_opportunities['H152相對抗跌pp'] = h152_opportunities['股票代號'].astype(str).map(
             lambda x: _h152_result_by_code.get(x, {}).get('相對強度pp'))
         h152_opportunities['H152樣本校準'] = '僅歷史相似樣本描述；尚無獨立樣本外校準，非上漲機率'
-    h152_research_summary = pd.concat([h1483_summary, h152_summary], ignore_index=True)
+        _h1521_by_code = {str(x.get('股票代號')): x for x in h1521_potential.to_dict('records')}
+        h152_opportunities['H152.1潛力型態'] = h152_opportunities['股票代號'].astype(str).map(
+            lambda x: _h1521_by_code.get(x, {}).get('潛力型態', '非已驗證預發動潛力'))
+        h152_opportunities['H152.1預發動反證'] = h152_opportunities['股票代號'].astype(str).map(
+            lambda x: _h1521_by_code.get(x, {}).get('預發動風險反證', '無符合預發動條件的同日證據'))
+    h152_research_summary = pd.concat([h1483_summary, h152_summary, h1521_summary], ignore_index=True)
     if 'st' in globals() and '_k' in globals():
         st.session_state[_k('h152_resilience_observations')] = h152_resilience.copy(deep=True)
         st.session_state[_k('h152_resilience_meta')] = dict(h152_meta)
@@ -17526,7 +17557,7 @@ def _render_h86_always_ready_excel(rec_df: pd.DataFrame, category_strength_df: p
             cache = {
                 "sig": sig,
                 "bytes": data,
-                "name": f"StockPick_H152_Research_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                "name": f"StockPick_H1521_Potential_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "seconds": round(time.perf_counter()-t0, 3),
             }
             st.session_state[cache_key] = cache
